@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 项目文档
+    url: https://github.com/Veblin/claude-invest-A/blob/main/README.md
+    about: 提交 Issue 前请先阅读 README 和 CONFIGURATION.md，确认是 Skill 本身的 Bug 而非配置/使用问题
+  - name: 💬 提问与讨论
+    url: https://github.com/Veblin/claude-invest-A/discussions
+    about: 使用疑问、配置帮助、功能讨论请发起 Discussion
+  - name: 🔒 安全漏洞报告
+    url: https://github.com/Veblin/claude-invest-A/security/policy
+    about: 发现安全漏洞请通过 Security Advisory 而非 Issue 报告
