@@ -1,0 +1,177 @@
+# ============================================================
+# 分析维度基准权重配置
+# ============================================================
+# 版本: v0 (初始默认值)
+# 用途: quality_scorer.py 计算各维度置信度时读取
+#
+# 设计约定:
+# - stars 是用户面向报告维度标题后展示的 ★ 数量
+# - min_viable_sources 定义该维度「最低可用」标准
+# - 数值随采集遥测迭代，不动架构
+# ============================================================
+
+dimensions:
+  # ---- 一、官方基本信息 ----
+  basic_info:
+    display_name: 官方基本信息
+    index: 1
+    baseline_stars: 4       # 基准4★，实际按数据可用情况浮动
+    internal_weight: 15     # 在综合质量分中的权重(%)
+    min_viable_sources:
+      min_tier_s_or_a: 1    # 至少1个S/A级数据源成功
+    data_modules:
+      - a_share_data.get_stock_info
+      - hk_share_data.get_hk_stock_info
+    strategy_yaml: basic_info.yaml
+
+  # ---- 二、财务报告 ----
+  fundamental:
+    display_name: 财务报告
+    index: 2
+    baseline_stars: 5       # 最高基准★——核心维度
+    internal_weight: 25
+    min_viable_sources:
+      min_tier_s_or_a: 1
+      min_recent_years: 2   # 至少近2年数据
+    data_modules:
+      - a_share_data.get_financials
+      - hk_share_data.get_hk_financials
+    strategy_yaml: fundamental.yaml
+
+  # ---- 三、行业产业链 ----
+  industry:
+    display_name: 行业产业链
+    index: 3
+    baseline_stars: 3
+    internal_weight: 12
+    min_viable_sources:
+      min_any_source: 1     # 至少获得行业分类
+    data_modules:
+      - industry_chain.get_industry_context
+      - industry_chain.search_supply_chain
+    strategy_yaml: industry.yaml
+
+  # ---- 四、估值 ----
+  valuation:
+    display_name: 估值
+    index: 4
+    baseline_stars: 4
+    internal_weight: 15
+    min_viable_sources:
+      min_any_source: 1     # 至少有PE/PB当前值
+    data_modules:
+      - a_share_data.get_daily_kline
+      - realtime_quote.get_realtime_quote
+    strategy_yaml: valuation.yaml
+
+  # ---- 四(b)、市场状态（技术分析） ----
+  technical:
+    display_name: 市场状态
+    index: 4.5             # 子维度
+    baseline_stars: 3
+    internal_weight: 10
+    min_viable_sources:
+      min_any_source: 1     # 至少获得MA数据
+    data_modules:
+      - a_share_data.get_daily_kline
+      - hk_share_data.get_hk_daily_kline
+    strategy_yaml: technical.yaml
+
+  # ---- 五、机构分析师 ----
+  institutional:
+    display_name: 机构分析师
+    index: 5
+    baseline_stars: 3
+    internal_weight: 8
+    min_viable_sources:
+      min_any_source: 1
+    data_modules:
+      - a_share_data.get_institutional_research
+      - fund_flow.get_northbound_flow
+    strategy_yaml: institutional.yaml
+
+  # ---- 六、情绪舆情 ----
+  sentiment:
+    display_name: 情绪舆情
+    index: 6
+    baseline_stars: 2       # 最低基准★——噪声大
+    internal_weight: 5
+    min_viable_sources:
+      min_any_source: 1
+    data_modules:
+      - sentiment_data.get_eastmoney_sentiment
+      - news_search.search_stock_news
+    strategy_yaml: sentiment.yaml
+
+  # ---- 七、宏观政策 ----
+  macro:
+    display_name: 宏观政策
+    index: 7
+    baseline_stars: 4
+    internal_weight: 10
+    min_viable_sources:
+      min_any_source: 1
+    data_modules:
+      - global_macro.get_macro_snapshot
+      - global_macro.get_china_macro_snapshot
+    strategy_yaml: macro.yaml
+
+  # ---- ETF 专项（Phase 6 启用） ----
+  etf_analysis:
+    display_name: ETF 专项分析
+    index: 8
+    baseline_stars: 3
+    internal_weight: 0      # MVP中权重为0
+    enabled: false
+    min_viable_sources:
+      min_any_source: 1
+    data_modules:
+      - etf_data.get_etf_stub
+    strategy_yaml: etf_analysis.yaml
+
+# 整体报告质量等级映射（quality_scorer 输出）
+quality_tiers:
+  excellent:
+    min_internal_score: 85
+    display: 综合数据质量: 优
+    description: 多源交叉验证，核心维度数据完整
+  good:
+    min_internal_score: 70
+    display: 综合数据质量: 良
+    description: 主要维度数据可得，部分依赖单一来源
+  fair:
+    min_internal_score: 50
+    display: 综合数据质量: 中
+    description: 部分维度数据不可得或降级
+  limited:
+    min_internal_score: 30
+    display: 综合数据质量: 有限
+    description: 多数数据源不可用，分析仅供参考
+  none:
+    min_internal_score: 0
+    display: 综合数据质量: 不可用
+    description: 所有数据源不可用，仅展示知识库框架
+
+# 分阶段启用规则
+rollout_phases:
+  mvp:
+    description: "MVP — 基础采集 + _meta 四字段 + 单一来源标注 + Layer降级提示"
+    features:
+      - _meta_four_fields
+      - single_source_label
+      - layer_degradation_hints
+  v0_2:
+    description: "v0.2 — 维度★展示 + 时效性标注"
+    features:
+      - dimension_stars_display
+      - timeliness_labels
+  v0_3:
+    description: "v0.3 — 交叉验证加分 + 分歧告警"
+    features:
+      - cross_validation_bonus
+      - divergence_alert
+  v1_0:
+    description: "v1.0 — 与 DSA 式 0-100 内部分打通"
+    features:
+      - dsa_internal_score_bridge
+      - prompt_guardrail_driven

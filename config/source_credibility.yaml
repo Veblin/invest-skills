@@ -1,0 +1,258 @@
+# ============================================================
+# 数据源可信度评分配置
+# ============================================================
+# 版本: v0 (初始默认值)
+# 文档: code/docs/数据源对比与权重设定方案.md
+#
+# 设计约定:
+# - 此文件仅供 quality_scorer.py 读取，不写死在 Python 源码
+# - 星级 (1-5) 用于用户面向报告展示
+# - internal_score (0-100) 用于 prompt 护栏内部计算
+# - source_group 用于交叉验证时的独立源判定
+# - 数值随采集遥测数据迭代，不动架构
+# ============================================================
+
+# 数据源分组定义（同组数据源视为非独立，不触发交叉验证加分）
+source_groups:
+  eastmoney:      # 东方财富系
+    - efinance
+    - akshare_em
+    - akshare  # akshare 内部大量调用东财接口
+  sina:
+    - akshare_sina
+    - tencent_finance
+  official:       # 官方/一级数据源
+    - fred
+    - tushare     # Tushare 部分接口来自官方披露
+  academic:
+    - baostock
+  global:
+    - yfinance
+    - finnhub
+    - alphavantage
+  search_ai:
+    - tavily
+    - bocha
+    - websearch_claude
+  sentiment:
+    - eastmoney_guba
+    - pytrends
+  commercial:
+    - longbridge
+    - tickflow
+
+# 数据源可信度评分表
+sources:
+  # ---- S 级: 免费、无需Token、商业级可靠性 ----
+  efinance:
+    display_name: 东方财富 (efinance)
+    tier: S
+    stars: 4
+    internal_score: 80
+    source_group: eastmoney
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "国内最大财经数据平台，DSA生产验证最稳定，但非官方一级源"
+
+  baostock:
+    display_name: Baostock
+    tier: S
+    stars: 4
+    internal_score: 78
+    source_group: academic
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "学术用途，数据质量高，更新滞后T+1"
+
+  # ---- A 级: 免费无需Token，偶有维护窗口 ----
+  akshare:
+    display_name: AkShare
+    tier: A
+    stars: 3
+    internal_score: 65
+    source_group: eastmoney
+    free: true
+    requires_token: false
+    markets: [cn, hk]
+    notes: "开源社区维护，多源聚合，偶有接口变更"
+
+  yfinance:
+    display_name: Yahoo Finance
+    tier: A
+    stars: 3
+    internal_score: 62
+    source_group: global
+    free: true
+    requires_token: false
+    markets: [cn, hk, us]
+    notes: "全球覆盖，A股数据质量一般，港股尚可"
+
+  # ---- B 级: 免费但需Token ----
+  tushare:
+    display_name: Tushare Pro
+    tier: B
+    stars: 4
+    internal_score: 75
+    source_group: official
+    free: true
+    requires_token: true
+    token_ease: easy  # 注册即得
+    markets: [cn, hk]
+    notes: "高级接口质量好，但免费层限制多，积分不足时不稳定"
+
+  fred:
+    display_name: FRED (美联储)
+    tier: B
+    stars: 5
+    internal_score: 98
+    source_group: official
+    free: true
+    requires_token: true
+    token_ease: easy
+    markets: [global]
+    notes: "官方一级数据源，权威性无可争议"
+
+  # ---- C 级: 免费但需Token+信用卡/特殊条件 ----
+  tavily:
+    display_name: Tavily Search
+    tier: C
+    stars: 3
+    internal_score: 55
+    source_group: search_ai
+    free: true
+    requires_token: true
+    token_ease: moderate  # 需注册，免费层500次/月
+    markets: [global]
+    notes: "AI优化搜索API，结果质量高，有配额限制"
+
+  bocha:
+    display_name: Bocha 中文搜索
+    tier: C
+    stars: 3
+    internal_score: 58
+    source_group: search_ai
+    free: true
+    requires_token: true
+    token_ease: easy
+    markets: [cn]
+    notes: "中文搜索优化，国内财经信息覆盖好"
+
+  websearch_claude:
+    display_name: WebSearch (Claude内置)
+    tier: C
+    stars: 3
+    internal_score: 50
+    source_group: search_ai
+    free: true
+    requires_token: false
+    markets: [global]
+    notes: "无需额外配置，结果质量依赖搜索引擎"
+
+  # ---- 实时行情数据源 ----
+  tencent_finance:
+    display_name: 腾讯财经
+    tier: S
+    stars: 4
+    internal_score: 78
+    source_group: sina
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "大厂API，单股查询稳定，DSA推荐首选实时行情源"
+
+  akshare_sina:
+    display_name: 新浪财经
+    tier: A
+    stars: 3
+    internal_score: 62
+    source_group: sina
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "老牌接口，稳定性尚可"
+
+  akshare_em:
+    display_name: 东方财富 (akshare接口)
+    tier: A
+    stars: 3
+    internal_score: 60
+    source_group: eastmoney
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "数据最全但全量拉取易被封"
+
+  # ---- 情绪/舆情 ----
+  eastmoney_guba:
+    display_name: 东方财富股吧
+    tier: D
+    stars: 2
+    internal_score: 35
+    source_group: sentiment
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "散户情绪指标，噪声大，仅作参考"
+
+  # ---- 扩展数据源（Phase 6+） ----
+  longbridge:
+    display_name: Longbridge 长桥
+    tier: C
+    stars: 4
+    internal_score: 72
+    source_group: commercial
+    free: true
+    requires_token: true
+    token_ease: moderate  # 需 OAuth
+    markets: [hk, us]
+    notes: "港股/美股兜底，需OAuth配置"
+
+  pytdx:
+    display_name: 通达信 (Pytdx)
+    tier: A
+    stars: 3
+    internal_score: 60
+    source_group: commercial
+    free: true
+    requires_token: false
+    markets: [cn]
+    notes: "可自建服务器，DSA验证稳定"
+
+  finnhub:
+    display_name: Finnhub
+    tier: C
+    stars: 3
+    internal_score: 55
+    source_group: global
+    free: true
+    requires_token: true
+    token_ease: easy
+    markets: [us]
+    notes: "美股数据，免费tier 60 calls/min"
+
+  alphavantage:
+    display_name: AlphaVantage
+    tier: C
+    stars: 3
+    internal_score: 52
+    source_group: global
+    free: true
+    requires_token: true
+    token_ease: easy
+    markets: [us]
+    notes: "美股数据，免费tier 25 calls/day"
+
+# 三类信息源的分组规则（用于交叉验证判定）
+cross_validation_groups:
+  independent:
+    description: "以下组之间互为独立数据源，组内视为同一来源"
+    groups:
+      - [eastmoney, sina]          # 东财系 vs 新浪系 互验
+      - [eastmoney, official]      # 东财系 vs 官方 互验
+      - [eastmoney, academic]      # 东财系 vs 学术 互验
+      - [sina, official]
+      - [sina, academic]
+      - [official, academic]
+      - [global, eastmoney]
