@@ -1,0 +1,48 @@
+# 宏观政策分析策略
+# 对应框架维度七
+
+name: macro
+display_name: 宏观政策分析
+description: 全球宏观 + 中国宏观 + 汇率 + 大宗商品 + 行业政策联动
+category: macro
+dimensions: [7]
+data_modules:
+  - global_macro.get_macro_snapshot
+  - global_macro.get_china_macro_snapshot
+  - global_macro.get_fx_rates
+  - commodity_data.get_gold_price
+  - commodity_data.get_crude_price
+instructions: |
+  根据以下宏观数据进行分析（{data}）：
+
+  1. **全球宏观环境**：
+     - 美债 10Y/2Y → 全球资产定价锚
+     - 美元指数 → 资金流动方向
+     - VIX → 风险偏好
+     - 联邦基金利率 + FedWatch 预期 → 利率路径
+     - 10Y TIPS 实际利率 → 黄金/商品的定价锚
+
+  2. **中国经济**：
+     - GDP 增速 / CPI / PMI → 经济基本面
+     - 货币政策信号（LPR、M2 增速）
+
+  3. **汇率**：
+     - USD/CNY、USD/HKD
+     - 汇率走势对北向/南向资金的影响
+
+  4. **大宗商品**：
+     - 黄金：避险需求 + 实际利率
+     - 原油：通胀预期 + 全球经济活动
+     - 对公司成本/利润的影响（行业相关时展开）
+
+  5. **行业政策联动**：
+     - 结合公司的行业，分析宏观环境对该行业的具体影响
+     - 美债收益率上升 → 公司 DCF 估值压力 → PE 中枢
+
+  6. 每个数字标注 [来源: {接口名} / {日期}]
+  7. ⚠️ 宏观分析不预测短期市场走势
+
+verification_checklist: |
+  - [ ] FRED 数据标注序列 ID
+  - [ ] 宏观判断有数据支撑或标注为推测
+  - [ ] 宏观数据标注时效性（FRED 月数据有滞后）

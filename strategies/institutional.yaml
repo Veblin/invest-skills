@@ -1,0 +1,42 @@
+# 机构分析师分析策略
+# 对应框架维度五
+
+name: institutional
+display_name: 机构分析师动向
+description: 机构持仓、北向/南向资金、机构调研、一致预期（仅数据呈现，不作建议）
+category: institutional
+dimensions: [5]
+data_modules:
+  - a_share_data.get_shareholders
+  - a_share_data.get_institutional_research
+  - fund_flow.get_northbound_flow
+  - fund_flow.get_southbound_flow
+instructions: |
+  根据以下机构数据进行分析（{data}）：
+
+  1. **机构持仓**：
+     - 十大股东中机构持仓变化
+     - 机构增减持趋势（近 3 期报告）
+     - 仅陈述事实，不做"跟随机构买卖"建议
+
+  2. **北向/南向资金**：
+     - 北向资金近 20 日净流向
+     - 南向资金（港股）近 20 日净流向
+     - 标注 T+1 延迟
+
+  3. **机构调研**：
+     - 近 3 个月机构调研次数和参与机构数
+     - 调研日期和机构类型分布
+
+  4. **一致预期**（如数据可得）：
+     - 一致预期净利润/EPS（可得则展示，不作建议）
+     - 评级分布（买入/增持/中性/减持/卖出 数量）
+     - 仅呈现数据，不做"市场看好"等结论性判断
+
+  5. ⚠️ 一致预期不是未来真实结果
+  6. 每个数字标注 [来源: {接口名} / {日期}]
+
+verification_checklist: |
+  - [ ] 北向资金数据标注 T+1 延迟
+  - [ ] 一致预期数据不作为投资结论的依据
+  - [ ] 无"跟随机构""聪明钱"等诱导性表述

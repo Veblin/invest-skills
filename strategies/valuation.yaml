@@ -1,0 +1,38 @@
+# 估值分析策略
+# 对应框架维度四
+
+name: valuation
+display_name: 估值分析
+description: PE/PB/PS 分位教学、行业横向对比、DCF 敏感性分析（教学目的）
+category: valuation
+dimensions: [4]
+data_modules:
+  - a_share_data.get_daily_kline
+  - realtime_quote.get_realtime_quote
+instructions: |
+  根据以下估值数据进行分析（{data}）：
+
+  1. **当前估值水位**：
+     - PE(TTM)、PB、PS(TTM)
+     - 当前值 vs 近 5 年均值 vs 近 5 年分位数
+     - 每个数字标注 [来源: {接口名} / {日期}]
+
+  2. **行业横向对比**：
+     - 同行业可比公司的 PE/PB 水平
+     - 公司的估值溢价/折价是否合理（结合 ROE、增速判断）
+
+  3. **DCF 敏感性分析（教学目的）**：
+     - 展示不同 WACC/永续增长率下估值范围
+     - 明确标注："此表展示的是 DCF 方法论的教学演示，不是价格预测"
+     - 标注：永续增长率每变动 1%，估值变动约 15-20%
+
+  4. **股息率**：
+     - 当前股息率及近 5 年分位
+     - 股息支付率是否可持续
+
+  5. ⚠️ 不做：目标价预测、买卖建议、投资价值评分
+  6. 每个数字标注 [来源: {接口名} / {日期}]
+verification_checklist: |
+  - [ ] 在东方财富/同花顺核对 PE/PB 当前值
+  - [ ] 查阅券商一致预期的增长假设，对比自己的 DCF 假设
+  - [ ] 思考：估值中枢是否可能因行业变化而下移？

@@ -1,0 +1,40 @@
+# 情绪舆情分析策略
+# 对应框架维度六
+
+name: sentiment
+display_name: 情绪舆情分析
+description: 股吧热度、搜索趋势、新闻负面信号、市场情绪温度
+category: sentiment
+dimensions: [6]
+data_modules:
+  - sentiment_data.get_eastmoney_sentiment
+  - sentiment_data.get_search_trends
+  - news_search.search_stock_news
+instructions: |
+  根据以下情绪数据进行分析（{data}）：
+
+  1. **股吧热度**：
+     - 东方财富股吧热度排名/帖子数
+     - 热度异常升高 → 可能伴随重大消息或异常波动
+     - 标注：⚠️ 股吧情绪噪声大，散户情绪指标仅作参考
+
+  2. **搜索趋势**（如数据可得）：
+     - 近 12 个月搜索热度变化
+     - 近期是否出现搜索量异常飙升
+
+  3. **新闻舆情**：
+     - 近 30 天公司相关新闻数量和情绪倾向
+     - 是否有负面新闻（监管处罚、产品质量、管理层负面）
+     - 标注新闻来源 URL
+
+  4. **情绪综合判断**：
+     - 描述当前市场对公司的关注度和情绪倾向
+     - 不是预测涨跌，而是理解"市场为什么这么想"
+
+  5. 不做：雪球爬虫（ToS 风险，代码中已排除）
+  6. 每个数字标注 [来源: {接口名} / {日期}]
+
+verification_checklist: |
+  - [ ] 股吧数据标注"噪声大，仅作参考"
+  - [ ] 新闻来源有 URL 可追溯
+  - [ ] 无雪球/Reddit 等未经授权的数据源
