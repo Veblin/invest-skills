@@ -1,0 +1,37 @@
+{
+  "name": "invest-A-skill",
+  "version": "0.2.0",
+  "description": "A股/港股个股调研学习工具 — 七维度分析框架，带数据引用的 Markdown 学习报告。学习工具，非决策工具。",
+  "settings": [
+    {
+      "name": "Extension Directory",
+      "description": "Extension installation directory (auto-set by Gemini CLI)",
+      "envVar": "GEMINI_EXTENSION_DIR",
+      "sensitive": false
+    },
+    {
+      "name": "Tushare Token",
+      "description": "Tushare Pro API Token（可选，注册即得 120 积分）— https://tushare.pro",
+      "envVar": "TUSHARE_TOKEN",
+      "sensitive": true
+    },
+    {
+      "name": "FRED API Key",
+      "description": "FRED 美联储宏观经济数据 API Key（可选，免费注册）— https://fred.stlouisfed.org/docs/api/api_key.html",
+      "envVar": "FRED_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Tavily Search API Key",
+      "description": "Tavily AI 搜索 API Key（可选，免费 1000次/月）— https://tavily.com",
+      "envVar": "TAVILY_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Bocha Search API Key",
+      "description": "Bocha 中文搜索 API Key（可选，免费试用）— https://open.bocha.cn",
+      "envVar": "BOCHA_API_KEY",
+      "sensitive": true
+    }
+  ]
+}

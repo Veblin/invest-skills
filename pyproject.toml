@@ -1,0 +1,37 @@
+[project]
+name = "investment-learning-skill"
+version = "0.2.0"
+description = "A股/港股个股调研的 AI 技能 — 七维度数据采集覆盖，带数据引用的 Markdown 学习报告"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+  "akshare>=1.15",
+  "efinance>=0.5",
+  "yfinance>=1.4",
+  "pandas>=2.0",
+  "requests>=2.31",
+  "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+  "pytest-cov>=6,<8",
+]
+
+# Optional: token-based data sources
+# Tushare Pro: pip install tushare (requires TUSHARE_TOKEN env var)
+# FRED:        pip install fredapi (requires FRED_API_KEY env var)
+# Tavily:      pip install tavily-python (requires TAVILY_API_KEY env var)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["-q", "--tb=short"]
+
+[tool.coverage.run]
+source = ["scripts"]
+
+[tool.coverage.report]
+skip_empty = true

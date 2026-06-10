@@ -1,0 +1,25 @@
+# Python virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Evidence / cache data
+evidence/*.json
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage

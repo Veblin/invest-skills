@@ -1,0 +1,30 @@
+name: Feature Request
+description: 建议新功能或改进
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢提交功能建议！
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决什么问题？
+      description: 描述你遇到的具体场景或痛点
+  - type: textarea
+    id: solution
+    attributes:
+      label: 建议的解决方案
+      description: 你希望 Skill 如何改进？
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影响范围
+      options:
+        - 单个维度（如估值分析）
+        - 数据采集管道
+        - 报告格式
+        - 知识库/教学
+        - 多平台分发
+        - 新市场支持（美股等）
+        - 其他

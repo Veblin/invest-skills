@@ -119,6 +119,40 @@ Tavily → Bocha → WebSearch（Claude 内置）
 
 ---
 
+## 发布与分发包维护
+
+本 Skill 按 [Agent Skills](https://agentskills.io) 开放格式构建，面向多平台分发。
+
+### 发布前检查清单
+
+- [ ] `skills/invest-A/SKILL.md` 为最新 canonical 版本（所有 LAWs、工作流、反模式完整）
+- [ ] `.claude-plugin/plugin.json` 版本号与 SKILL.md 一致
+- [ ] `.claude-plugin/marketplace.json` 描述准确
+- [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 版本同步
+- [ ] `gemini-extension.json` env vars 与 `.env.example` 一致
+- [ ] `CHANGELOG.md` 已更新
+- [ ] `uv run pytest` 通过
+- [ ] `uv run python -m skills.invest-A.scripts.lib.env_check` 输出正常
+- [ ] 无 API Key 或敏感信息泄露（security.yml CI 已验证）
+
+### 版本号规范
+
+- `SKILL.md` YAML frontmatter `version`
+- `.claude-plugin/plugin.json` `version`
+- `gemini-extension.json` `version`
+- `pyproject.toml` `version`
+
+以上四处版本号必须一致。
+
+### 跨 Harness 兼容
+
+- 不硬编码任何特定 harness 的路径（如 `~/.claude/`）
+- `SKILL.md` 中不假定用户使用特定运行时
+- 配置文档（`CONFIGURATION.md`）应列出各 harness 的安装方式
+- 引擎脚本仅依赖标准库和 `pyproject.toml` 中声明的依赖
+
+---
+
 ## 项目结构
 
 ```

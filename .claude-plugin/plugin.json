@@ -1,0 +1,27 @@
+{
+  "name": "invest-A",
+  "version": "0.2.0",
+  "description": "A股/港股个股调研学习工具。覆盖七大维度（基本信息/财务报告/行业产业链/估值/机构分析师/情绪舆情/宏观政策），每条数据引用来源，不做买卖建议。",
+  "author": {
+    "name": "invest-A",
+    "url": "https://github.com/veblin/invest-A"
+  },
+  "homepage": "https://github.com/veblin/invest-A",
+  "repository": "https://github.com/veblin/invest-A",
+  "license": "MIT",
+  "keywords": [
+    "investment",
+    "stock-analysis",
+    "a-share",
+    "hk-stock",
+    "financial-research",
+    "equity-research",
+    "china-stock",
+    "learning-tool",
+    "fundamental-analysis"
+  ],
+  "category": "finance",
+  "requires": {
+    "python": ">=3.12"
+  }
+}

@@ -10,20 +10,47 @@ A 股数据采集模块。
 - get_institutional_research: 机构调研记录
 
 Fallback 链（Tushare 与 efinance 并列，先到先用）：
-  有 Token: Tushare ∥ efinance → akshare → baostock → yfinance → 标注不可得
-  无 Token: efinance → akshare → baostock → yfinance → 标注不可得
+  有 Token: Tushare ∥ efinance → akshare → baostock → yfinance → curl → 标注不可得
+  无 Token: efinance → akshare → baostock → yfinance → curl → 标注不可得
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# 模块级代理绕过
+# 因 akshare/efinance 底层继承系统代理，优先清除代理环境变量
+# ------------------------------------------------------------------
+
+def _scrub_proxy() -> None:
+    """在模块加载时清除代理环境变量，避免 EastMoney API 被阻断。"""
+    proxy_keys = [
+        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+        "ALL_PROXY", "all_proxy", "FTP_PROXY", "ftp_proxy",
+    ]
+    for k in proxy_keys:
+        os.environ.pop(k, None)
+
+_scrub_proxy()
+
+# 确保 requests.Session 默认不信任环境代理
+_original_session_init = requests.Session.__init__
+
+def _patched_init(self):
+    _original_session_init(self)
+    self.trust_env = False
+
+requests.Session.__init__ = _patched_init
 
 # 默认尝试次数
 MAX_RETRIES = 3

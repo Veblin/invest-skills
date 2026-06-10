@@ -1,0 +1,51 @@
+name: Bug Report
+description: 报告 Skill 的 Bug（数据错误、报告格式问题、LAWs 违规等）
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告 Bug！请尽量提供以下信息，帮助定位问题。
+  - type: input
+    id: code
+    attributes:
+      label: 触发的股票代码
+      description: 输入了哪个股票代码？
+      placeholder: "600519"
+  - type: input
+    id: flags
+    attributes:
+      label: CLI 参数
+      description: 使用了哪些参数？(如 --deep, --compare)
+      placeholder: "/invest-A 600519 --with-macro"
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 应该输出什么？
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际输出了什么？请附上关键片段。
+  - type: dropdown
+    id: law
+    attributes:
+      label: 涉及哪条 LAW？
+      options:
+        - LAW 1（来源引用缺失）
+        - LAW 2（结构模板错误）
+        - LAW 3（未区分事实/判断）
+        - LAW 4（风险声明缺失）
+        - LAW 5（单一来源未标注）
+        - LAW 6（疑似买卖建议）
+        - LAW 7（时间戳缺失）
+        - LAW 8（待验证项缺失）
+        - LAW 9（无数据源填充）
+        - 其他
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境信息
+      description: 运行 `uv run python -m skills.invest-A.scripts.lib.env_check --json` 的输出
+      render: json

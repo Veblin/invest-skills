@@ -1,0 +1,20 @@
+{
+  "name": "invest-A-skill",
+  "interface": {
+    "displayName": "invest-A 投资学习"
+  },
+  "plugins": [
+    {
+      "name": "invest-A",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Finance"
+    }
+  ]
+}

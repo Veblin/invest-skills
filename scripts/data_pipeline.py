@@ -88,7 +88,8 @@ def sanitize_meta(meta: dict[str, Any]) -> dict[str, Any]:
 # 查询计划
 # ------------------------------------------------------------------
 
-# 七维度定义（与 config/dimension_baselines.yaml 对齐）
+# 七+1维度定义（与 config/dimension_baselines.yaml 对齐）
+# web_research 为 v0.2 新增维度，覆盖行业/舆情/机构的 Web 搜索补充
 DIMENSION_MAP = {
     "basic_info": {
         "index": 1,
@@ -125,6 +126,12 @@ DIMENSION_MAP = {
         "display": "情绪舆情",
         "module": "sentiment_data.get_eastmoney_sentiment + news_search.search_stock_news",
     },
+    "web_research": {
+        "index": 6.5,
+        "display": "Web 搜索（产业链/舆情/机构/催化剂）",
+        "module": "web_research.collect_web_research",
+        "source_type": "web",  # api | web | analyst — 区分数据源类型
+    },
     "macro": {
         "index": 7,
         "display": "宏观政策",
@@ -132,7 +139,7 @@ DIMENSION_MAP = {
     },
 }
 
-# 默认采集维度（MVP 全部七个）
+# 默认采集维度（含 web_research）
 DEFAULT_DIMS = [
     "basic_info",
     "fundamental",
@@ -140,10 +147,12 @@ DEFAULT_DIMS = [
     "valuation",
     "institutional",
     "sentiment",
+    "web_research",
     "macro",
 ]
 
 # 采集优先级（框架建议顺序）
+# web_research 优先级在 sentiment 之后——它为舆情和产业链提供补充信息
 COLLECTION_PRIORITY = [
     "fundamental",     # ★★★★★ 核心
     "basic_info",      # ★★★☆☆ 基础
@@ -152,6 +161,7 @@ COLLECTION_PRIORITY = [
     "technical",       # ★★★☆☆ 技术
     "institutional",   # ★★★★☆ 机构
     "sentiment",       # ★★★☆☆ 情绪
+    "web_research",    # ★★★☆☆ Web搜索（补充产业链/舆情/机构）
     "macro",           # ★★★☆☆ 宏观
 ]
 
@@ -160,6 +170,7 @@ def build_collection_plan(
     symbol: str,
     asset_type: str | None = None,
     dims: list[str] | None = None,
+    name: str = "",
 ) -> dict[str, Any]:
     """生成采集计划（Step 0 输出）。
 
@@ -167,6 +178,7 @@ def build_collection_plan(
         symbol: 股票/ETF 代码
         asset_type: "stock" | "hk" | "etf"（None 则自动识别）
         dims: 指定维度列表（None 则全部七个）
+        name: 公司名（用于 Web 搜索查询构建）
 
     Returns:
         dict: {
@@ -391,6 +403,27 @@ def _collect_stock_dimension(dim: str, symbol: str) -> dict[str, Any]:
             "_meta": sent.get("_meta", news.get("_meta", {})),
         }
 
+    elif dim == "web_research":
+        from scripts.lib.web_research import collect_web_research
+
+        # 传入公司名（从 basic_info 或 context 中取）
+        company_name = context.get("name", "")
+        user_topic = context.get("topic", None)
+
+        result = collect_web_research(
+            symbol,
+            name=company_name,
+            topic=user_topic,
+            dimensions=["industry", "sentiment", "institutional", "catalysts"],
+        )
+        # Web 搜索维度返回查询模板 + 可信度分级框架
+        # 实际搜索调用在 LLM 分析阶段（Step 2）由 Skill 的 WebSearch tool 执行
+        return {
+            "data": result.get("data", {}),
+            "_meta": result.get("_meta", {}),
+            "status": result.get("status", "available"),
+        }
+
     elif dim == "macro":
         from scripts.lib.global_macro import get_macro_snapshot, get_china_macro_snapshot, get_fx_rates
         from scripts.lib.commodity_data import get_gold_price, get_crude_price
@@ -557,14 +590,20 @@ def collect_all(
     *,
     dims: list[str] | None = None,
     with_macro: bool = False,
+    name: str = "",
+    topic: str | None = None,
+    use_cache: bool = False,
     max_workers: int = 8,
 ) -> dict[str, Any]:
     """七维度并行采集主编排。
 
     Args:
         symbol: 股票代码
-        dims: 维度列表（None 则全七维）
+        dims: 维度列表（None 则全七维+web）
         with_macro: 是否强制包含宏观
+        name: 公司名（用于 Web 搜索查询构建）
+        topic: 用户额外指定的研究主题
+        use_cache: 是否尝试从 evidence/ 加载缓存
         max_workers: 并行线程数
 
     Returns:
@@ -574,12 +613,20 @@ def collect_all(
             collection_summary: {total, available, degraded, missing}
         }
     """
+    from scripts.lib.data_utils import load_cached, normalize_code
     from scripts.lib.etf_data import is_etf
 
-    symbol = str(symbol).strip()
+    symbol = normalize_code(symbol)
     asset_type = "etf" if is_etf(symbol) else (
         "hk" if (len(symbol) <= 5 and not symbol.startswith(("6","0","3","5"))) else "stock"
     )
+
+    # 尝试缓存
+    if use_cache:
+        cached = load_cached(symbol)
+        if cached:
+            logger.info("从缓存加载 %s", symbol)
+            return cached
 
     # 确定维度
     if dims is None:
@@ -590,13 +637,18 @@ def collect_all(
     if asset_type == "etf":
         dims = ["basic_info"]
     elif asset_type == "hk":
-        dims = [d for d in dims if d != "institutional"]
+        dims = [d for d in dims if d not in ("institutional", "web_research")]
 
     # 按优先级排序
     priority_order = {d: i for i, d in enumerate(COLLECTION_PRIORITY)}
     dims = sorted(dims, key=lambda d: priority_order.get(d, 99))
 
-    context = {"asset_type": asset_type, "symbol": symbol}
+    context = {
+        "asset_type": asset_type,
+        "symbol": symbol,
+        "name": name,
+        "topic": topic,
+    }
     start = datetime.now(timezone.utc)
 
     # 并行采集
@@ -640,7 +692,7 @@ def collect_all(
 
     latency = (datetime.now(timezone.utc) - start).total_seconds()
 
-    return {
+    final_result = {
         "symbol": symbol,
         "asset_type": asset_type,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -653,6 +705,16 @@ def collect_all(
             "latency_seconds": round(latency, 1),
         },
     }
+
+    # 保存缓存
+    if use_cache:
+        try:
+            from scripts.lib.data_utils import save_cache
+            save_cache(final_result, symbol)
+        except Exception:
+            pass
+
+    return final_result
 
 
 # ------------------------------------------------------------------
