@@ -24,13 +24,21 @@ jobs:
             skills/invest-A/ \
             .claude-plugin/ \
             .agents/ \
+            hooks/ \
             gemini-extension.json \
             pyproject.toml \
             README.md \
+            AGENTS.md \
+            CONFIGURATION.md \
+            CHANGELOG.md \
+            CONTRIBUTORS.md \
+            .env.example \
             LICENSE \
             --exclude='__pycache__' \
             --exclude='*.pyc' \
-            --exclude='.venv'
+            --exclude='*.pyo' \
+            --exclude='.venv' \
+            --exclude='.DS_Store'
           echo "Archive created: dist/invest-A-${{ github.ref_name }}.tar.gz"
 
       - name: Create GitHub release

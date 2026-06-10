@@ -12,6 +12,7 @@ dependencies = [
   "pandas>=2.0",
   "requests>=2.31",
   "pyyaml>=6.0",
+  "fredapi>=0.5.2",
 ]
 
 [dependency-groups]

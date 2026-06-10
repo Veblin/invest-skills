@@ -13,15 +13,59 @@ Tushare HTTP 轻量客户端。
 from __future__ import annotations
 
 import os
+import re
 import time
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# .env 自动加载（无外部依赖）
+# 在模块导入时自动加载项目根目录的 .env 文件到 os.environ
+# ------------------------------------------------------------------
+
+def _load_dotenv() -> None:
+    """从项目根目录加载 .env 文件到环境变量。"""
+    # 查找 .env：优先当前工作目录，再搜索父目录
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent.parent.parent / ".env",  # scripts/../.env
+    ]
+    env_path = None
+    for p in candidates:
+        if p.exists():
+            env_path = p
+            break
+
+    if env_path is None:
+        return
+
+    try:
+        content = env_path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            line = line.strip()
+            # 跳过空行和注释
+            if not line or line.startswith("#"):
+                continue
+            # 只处理 KEY=VALUE 格式
+            match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', line)
+            if match:
+                key = match.group(1)
+                value = match.group(2).strip().strip('"').strip("'")
+                # 不覆盖已存在的环境变量（允许用户手动 export 覆盖）
+                if key not in os.environ:
+                    os.environ[key] = value
+        logger.debug("已加载 .env: %s", env_path)
+    except Exception as e:
+        logger.debug("加载 .env 失败: %s", e)
+
+_load_dotenv()
 
 TUSHARE_API_URL = "http://api.tushare.pro"
 
@@ -119,11 +163,15 @@ class TushareClient:
 
             self._record_call()
 
-            items = data.get("data", {})
+            data_obj = data.get("data", {})
+            if not data_obj:
+                return pd.DataFrame()
+
+            items = data_obj.get("items", [])
             if not items:
                 return pd.DataFrame()
 
-            fields_list = data.get("fields", [])
+            fields_list = data_obj.get("fields", [])
             if not fields_list:
                 # 从请求中推断
                 if fields:

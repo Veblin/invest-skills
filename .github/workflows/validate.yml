@@ -26,7 +26,7 @@ jobs:
         run: uv sync
 
       - name: Run environment check
-        run: uv run python -m skills.invest-A.scripts.lib.env_check
+        run: PYTHONPATH=. uv run python -m scripts.lib.env_check
 
       - name: Run test suite
         run: uv run pytest

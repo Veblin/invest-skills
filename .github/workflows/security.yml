@@ -22,4 +22,4 @@ jobs:
       - name: Check for leaked secrets
         run: |
           echo "Scanning for common secret patterns..."
-          ! grep -rE "(TUSHARE_TOKEN|FRED_API_KEY|TAVILY_API_KEY)=[A-Za-z0-9]" . --include="*.py" --include="*.md" --include="*.yaml" --include="*.json" --exclude-dir=.venv --exclude-dir=.git --exclude=.env.example 2>/dev/null
+          ! grep -rE "(TUSHARE_TOKEN|FRED_API_KEY|TAVILY_API_KEY|BOCHA_API_KEY)=[A-Za-z0-9_\-]{4,}" . --include="*.py" --include="*.md" --include="*.yaml" --include="*.json" --exclude-dir=.venv --exclude-dir=.git --exclude=.env.example 2>/dev/null
