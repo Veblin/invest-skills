@@ -19,17 +19,12 @@ jobs:
 
       - name: Create release archive
         run: |
-          mkdir -p dist
-          tar -czf dist/invest-A-${{ github.ref_name }}.tar.gz \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='*.pyo' \
-            --exclude='.venv' \
-            --exclude='.DS_Store' \
-            .claude-plugin/ \
-            .agents/ \
-            hooks/ \
-            skills/invest-A/ \
+          mkdir -p dist/pkg
+          cp -r \
+            .claude-plugin \
+            .agents \
+            hooks \
+            skills/invest-A \
             gemini-extension.json \
             pyproject.toml \
             README.md \
@@ -40,7 +35,13 @@ jobs:
             CODE_OF_CONDUCT.md \
             SECURITY.md \
             .env.example \
-            LICENSE
+            LICENSE \
+            dist/pkg/
+          # Clean build artifacts from copy
+          rm -rf dist/pkg/skills/invest-A/__pycache__ dist/pkg/.venv
+          find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete
+          cd dist && tar -czf invest-A-${{ github.ref_name }}.tar.gz -C pkg .
+          rm -rf dist/pkg
           echo "Archive created: dist/invest-A-${{ github.ref_name }}.tar.gz"
 
       - name: Create GitHub release
