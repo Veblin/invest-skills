@@ -47,5 +47,5 @@ body:
     id: env
     attributes:
       label: 环境信息
-      description: 运行 `uv run python -m skills.invest-A.scripts.lib.env_check --json` 的输出
+      description: 运行 `uv run python skills/invest-A/scripts/invest.py diagnose --json` 的输出
       render: json

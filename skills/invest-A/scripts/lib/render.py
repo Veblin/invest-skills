@@ -59,5 +59,13 @@ def render_json(collection: dict[str, Any]) -> str:
 
 
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact") -> str:
-    if fmt == "json": return render_json(collection)
+    """统一渲染入口。支持 compact / json / md 格式。
+
+    compact  — 紧凑文本报告，适合终端直接阅读
+    json     — 结构化 JSON，适合程序消费
+    md       — 同 compact（compact 本身就是 Markdown 格式，可由 Claude 进一步分析）
+    """
+    if fmt == "json":
+        return render_json(collection)
+    # compact 和 md/markdown 目前共用同一种 Markdown 输出
     return render_compact(collection, symbol)

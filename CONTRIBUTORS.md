@@ -18,7 +18,7 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 
 ### Before submitting
 
-- Run `uv run python -m skills.invest-A.scripts.lib.env_check` to verify environment
+- Run `uv run python skills/invest-A/scripts/invest.py diagnose` to verify environment
 - Run `uv run pytest` to verify tests pass
 - Ensure no API keys or secrets are committed
 

@@ -1,19 +1,24 @@
 # 数据源快速参考
 
-## A 股免费数据源优先级
+## A 股数据源优先级
 
 ```
-efinance → akshare (新浪源) → akshare (东财源) → baostock → yfinance → curl fallback → 标注不可得
+有 Token: Tushare ∥ akshare → 腾讯行情 → 标注不可得
+无 Token: akshare → 腾讯行情 → 标注不可得
 ```
 
-| 数据源 | 接口 | 稳定性 | 需要Token | 代理绕过 |
-|--------|------|--------|-----------|----------|
-| efinance | `stock.get_base_info` / `stock.get_quote_history` | ★★★★ | 否 | 自动 `trust_env=False` |
-| akshare (新浪) | `stock_financial_abstract` | ★★★★ | 否 | 自动 `trust_env=False` |
-| akshare (东财) | `stock_individual_info_em` / `stock_zh_a_hist` | ★★★ | 否 | 需 curl fallback |
-| baostock | `query_history_k_data_plus` | ★★★ | 否 | 否 |
-| yfinance | `Ticker.history()` | ★★ | 否 | 否 |
-| curl 回退 | `push2.eastmoney.com` 直接 HTTP | ★★★★ | 否 | 天然绕过代理 |
+| 数据源 | 接口 | 稳定性 | 需要Token | 说明 |
+|--------|------|--------|-----------|------|
+| Tushare Pro | `stock_basic` / `daily` / `fina_indicator` / `top10_floatholders` / `moneyflow` | ★★★★ | 是 | 主数据源（2000 积分解锁主要接口） |
+| akshare | `stock_zh_a_hist` / `stock_individual_info_em` / `stock_financial_abstract_ths` | ★★★ | 否 | Tushare 不可用时的首选兜底 |
+| 腾讯行情 | `qt.gtimg.cn` HTTP | ★★★★ | 否 | 实时报价兜底（仅价格/成交量/PE/市值） |
+
+## 待接入数据源
+
+以下数据源已规划但尚未接入，详见 `docs/TODO.md`：
+- **efinance** — 免费 A 股数据，稳定性 ★★★★
+- **baostock** — 免费 A 股 K 线，稳定性 ★★★
+- **yfinance** — 美股/港股数据，稳定性 ★★
 
 ## Web 搜索可信度分级
 
@@ -28,6 +33,7 @@ efinance → akshare (新浪源) → akshare (东财源) → baostock → yfinan
 
 | 场景 | 表现 | 应对 |
 |------|------|------|
-| 代理阻断东财API | `requests` 报 `ConnectionError` | 自动 `trust_env=False` → curl fallback |
-| efinance 版本不兼容 | 函数不存在 | 自动降级至 akshare / baostock |
-| 新浪API不可用 | 返回空数据 | 降级至东财API → baostock |
+| Tushare Token 未配置或无效 | `is_tushare_available()` 返回 False | 静默跳过，降级至 akshare |
+| Tushare 配额耗尽 | API 返回 code=-2001 | 降级至 akshare |
+| akshare 网络不通 | `requests.ConnectionError` | 降级至腾讯行情（仅行情维度） |
+| 腾讯行情不可用 | 请求超时 | 标注"行情数据不可得" |

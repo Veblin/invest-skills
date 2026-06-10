@@ -1,8 +1,8 @@
 ---
 name: invest-A
-version: "0.3.0"
+version: "0.1.0"
 description: "A股个股调研 AI 学习技能 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 学习报告。这是一个学习工具，不是决策工具。"
-argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --compare 000858"
+argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --deep | /invest-A 600176 --compare 000858"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
 metadata:
@@ -26,7 +26,8 @@ metadata:
 - **Tushare Pro** ✅ — 基础信息、日线、财务指标、十大股东、资金流向
 - **FRED** ✅ — US 10Y/2Y/VIX/CPI/美元指数 全部可用
 - **腾讯行情** ✅ — 实时报价兜底
-- **akshare/efinance** ✅ — 已安装，EastMoney API 当前不可用
+- **akshare** ✅ — 免费数据源，Tushare 不可用时的兜底
+- **efinance / baostock / yfinance** 🔜 — 计划在未来版本接入（详见 `docs/TODO.md`）
 
 ## CLI 命令（核心交互入口）
 
@@ -42,6 +43,10 @@ python3 skills/invest-A/scripts/invest.py report 600176 --emit=json
 # 生成 Markdown 分析报告
 python3 skills/invest-A/scripts/invest.py report 600176 --emit=md
 
+# 深度模式（扩大K线范围 + 行业/舆情分析）
+python3 skills/invest-A/scripts/invest.py collect 600176 --deep
+python3 skills/invest-A/scripts/invest.py report 600176 --deep
+
 # 对比双标的财务数据
 python3 skills/invest-A/scripts/invest.py compare 600176 000858
 
@@ -55,7 +60,7 @@ python3 skills/invest-A/scripts/invest.py store list
 python3 skills/invest-A/scripts/invest.py collect 600176 --store
 ```
 
-> **注意**：`inest.py` 在 `code/skills/invest-A/scripts/` 下。运行前确保在 `code/` 目录。
+> **注意**：`invest.py` 在 `skills/invest-A/scripts/` 下。运行前确保终端在 `code/` 目录。
 > 所有子命令支持 `--help` 查看参数详情。
 
 ## 采集顺序

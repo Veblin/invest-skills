@@ -45,10 +45,10 @@ class TestEnv:
 
     def test_fred_key_detection(self):
         from lib.env import is_fred_available
-        # Valid 32-char lowercase
+        # Valid 32-char alphanumeric
         assert is_fred_available({"FRED_API_KEY": "a" * 32})
-        # Has uppercase
-        assert not is_fred_available({"FRED_API_KEY": "A" + "a" * 31})
+        # Uppercase is also valid
+        assert is_fred_available({"FRED_API_KEY": "A" + "a" * 31})
         # Empty
         assert not is_fred_available({"FRED_API_KEY": ""})
 

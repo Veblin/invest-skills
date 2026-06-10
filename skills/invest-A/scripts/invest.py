@@ -5,7 +5,7 @@ investment-learning CLI。
 用法:
   python3 invest.py collect 600176              # 采集数据
   python3 invest.py report 600176               # 报告（compact）
-  python3 invest.py report 600176 --emit=mjson  # JSON 报告
+  python3 invest.py report 600176 --emit=json   # JSON 报告
   python3 invest.py compare 600176 000858        # 对比
   python3 invest.py diagnose                     # 检查数据源
   python3 invest.py store list                   # 查看存储
@@ -16,23 +16,30 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-# 确保从本项目目录导入
+# 确保从本项目的 lib/ 导入，排除旧归档路径
 _SCRIPT_DIR = Path(__file__).parent.resolve()
-sys.path = [str(_SCRIPT_DIR)] + [p for p in sys.path if p and "scripts/lib" not in p]
-os.chdir(_SCRIPT_DIR.parent.parent.parent)  # 切到 code/ 目录
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+# 查找项目根目录（向上遍历直到找到 pyproject.toml）
+_project_root = _SCRIPT_DIR
+while _project_root != _project_root.parent:
+    if (_project_root / "pyproject.toml").exists():
+        break
+    _project_root = _project_root.parent
 
 from lib import collector, env, render
 
 try:
     from lib import store as store_mod
     _HAS_STORE = True
-except ImportError:
+except ImportError as e:
     store_mod = None
     _HAS_STORE = False
+    import logging
+    logging.getLogger(__name__).warning("store 模块导入失败（功能降级）: %s", e)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,11 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("symbol")
     pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound")
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
+    pc.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
+    pc.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--emit", default="compact", choices=["compact", "json"])
+    pr.add_argument("--emit", default="compact", choices=["compact", "json", "md"])
     pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound")
+    pr.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
+    pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
 
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
@@ -62,8 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def cmd_collect(args) -> int:
+def cmd_collect(args: argparse.Namespace) -> int:
     dims = [d.strip() for d in args.dims.split(",")]
+    if args.with_macro and "kline" not in dims:
+        dims.append("kline")
+    if args.deep:
+        if "kline" not in dims:
+            dims.append("kline")
+        print("🔬 深度模式已启用（扩大K线范围 + 行业/舆情分析）")
+    if args.with_macro:
+        print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     result = collector.collect_all(args.symbol, dims)
     print(render.render(result, args.symbol, "compact"))
     if result["summary"]["available"] == 0:
@@ -75,14 +94,22 @@ def cmd_collect(args) -> int:
     return 0
 
 
-def cmd_report(args) -> int:
+def cmd_report(args: argparse.Namespace) -> int:
     dims = [d.strip() for d in args.dims.split(",")]
+    if args.with_macro and "kline" not in dims:
+        dims.append("kline")
+    if args.deep:
+        if "kline" not in dims:
+            dims.append("kline")
+        print("🔬 深度模式已启用（扩大K线范围 + 行业/舆情分析）")
+    if args.with_macro:
+        print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     result = collector.collect_all(args.symbol, dims)
     print(render.render(result, args.symbol, args.emit))
     return 0 if result["summary"]["available"] > 0 else 1
 
 
-def cmd_compare(args) -> int:
+def cmd_compare(args: argparse.Namespace) -> int:
     ra = collector.collect_all(args.symbol_a)
     rb = collector.collect_all(args.symbol_b)
     da = {d["dimension"]: d for d in ra["dimensions"]}
@@ -101,7 +128,7 @@ def cmd_compare(args) -> int:
     return 0
 
 
-def cmd_diagnose(args) -> int:
+def cmd_diagnose(args: argparse.Namespace) -> int:
     d = env.diagnose()
     if args.json:
         print(json.dumps(d, ensure_ascii=False, indent=2))
@@ -113,7 +140,7 @@ def cmd_diagnose(args) -> int:
     return 0 if d["available_count"] > 0 else 1
 
 
-def cmd_store(args) -> int:
+def cmd_store(args: argparse.Namespace) -> int:
     if not _HAS_STORE:
         print("⚠️ store 模块不可用")
         return 1
@@ -135,8 +162,17 @@ def cmd_store(args) -> int:
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
-    return {"collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
-            "diagnose": cmd_diagnose, "store": cmd_store}[args.command](args)
+    if args.command == "collect":
+        return cmd_collect(args)
+    elif args.command == "report":
+        return cmd_report(args)
+    elif args.command == "compare":
+        return cmd_compare(args)
+    elif args.command == "diagnose":
+        return cmd_diagnose(args)
+    elif args.command == "store":
+        return cmd_store(args)
+    return 1
 
 
 if __name__ == "__main__":

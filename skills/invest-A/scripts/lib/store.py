@@ -29,14 +29,14 @@ def _conn() -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(p))
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    c.execute("PRAGMA synchronous=NORMAL")
     return c
 
 
 def init_db() -> None:
     c = _conn()
     try:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
         c.executescript("""
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')));
@@ -77,8 +77,14 @@ def save_collection(result: dict[str, Any]) -> int:
         cid = cur.lastrowid
         for d in dims:
             data = d.get("data")
-            summary = json.dumps(data, ensure_ascii=False, default=str)[:200] if isinstance(data, dict) else \
-                      f"{len(data)} 条" if isinstance(data, list) else ""
+            if isinstance(data, dict):
+                # 字典截取安全：只保留前 5 个 key 的值
+                small = {k: data[k] for k in list(data.keys())[:5]}
+                summary = json.dumps(small, ensure_ascii=False, default=str)
+            elif isinstance(data, list):
+                summary = f"{len(data)} 条记录"
+            else:
+                summary = ""
             m = d.get("_meta", {})
             c.execute("INSERT INTO findings (collection_id,symbol,dimension,source,confidence,summary) VALUES (?,?,?,?,?,?)",
                       (cid, symbol, d.get("dimension", ""), m.get("source", ""), m.get("confidence", ""), summary))
@@ -119,6 +125,9 @@ def clear_all() -> None:
     init_db()
     c = _conn()
     try:
-        c.execute("DELETE FROM findings"); c.execute("DELETE FROM collections"); c.commit()
+        c.execute("BEGIN")
+        c.execute("DELETE FROM findings")
+        c.execute("DELETE FROM collections")
+        c.commit()
     finally:
         c.close()

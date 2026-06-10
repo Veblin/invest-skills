@@ -76,24 +76,29 @@ MA5/MA10/MA20/MA60 和 MACD（DIF/DEA）等指标**仅用于理解市场状态**
 ### A 股数据源（优先级）
 
 ```
-有 Token: Tushare ∥ efinance → akshare → baostock → yfinance → 标注不可得
-无 Token: efinance → akshare → baostock → yfinance → 标注不可得
+有 Token: Tushare ∥ akshare → 腾讯行情 → 标注不可得
+无 Token: akshare → 腾讯行情 → 标注不可得
 ```
 
-- Tushare 与 efinance 并列并行（先到先用），非前置拦截器
+- Tushare 与 akshare 并列并行（先到先用），非前置拦截器
 - Tushare Token 无效时静默跳过，不影响主 fallback 链
+- efinance / baostock / yfinance 计划在未来版本接入（详见 `docs/TODO.md`）
 
 ### 港股数据源（优先级）
 
 ```
-akshare（东方财富港股频道）→ yfinance（.HK 后缀）→ 标注不可得
+akshare（东方财富港股频道）→ 标注不可得
 ```
+
+> yfinance（.HK 后缀）计划在未来版本接入。
 
 ### 全球宏观数据源
 
 ```
-FRED API（有 Key）→ yfinance → akshare → 标注不可得
+FRED API（有 Key）→ akshare → 标注不可得
 ```
+
+> yfinance 计划在未来版本接入。
 
 ### 搜索/新闻源
 
@@ -132,7 +137,7 @@ Tavily → Bocha → WebSearch（Claude 内置）
 - [ ] `gemini-extension.json` env vars 与 `.env.example` 一致
 - [ ] `CHANGELOG.md` 已更新
 - [ ] `uv run pytest` 通过
-- [ ] `uv run python -m skills.invest-A.scripts.lib.env_check` 输出正常
+- [ ] `uv run python skills/invest-A/scripts/invest.py diagnose` 输出正常
 - [ ] 无 API Key 或敏感信息泄露（security.yml CI 已验证）
 
 ### 版本号规范
@@ -157,15 +162,27 @@ Tavily → Bocha → WebSearch（Claude 内置）
 
 ```
 code/
-  SKILL.md              ← 运行时规格（LAWs + 工作流 + 专业知识）
-  AGENTS.md             ← 本文件（AI 协作规则）
-  README.md             ← 用户文档
-  .env.example          ← 环境变量模板
-  config/               ← 配置文件（数据源可信度、维度基准、交叉验证规则）
-  strategies/           ← 分析方法库（YAML 自然语言策略）
-  knowledge/            ← 投资知识库（Markdown 教学文档）
-  scripts/              ← 数据采集引擎
-    data_pipeline.py    ← 主编排引擎
-    lib/                ← 采集模块
-  docs/                 ← 设计文档
+  AGENTS.md                     ← 本文件（AI 协作规则）
+  README.md                     ← 用户文档
+  CHANGELOG.md                  ← 版本变更记录
+  CONFIGURATION.md              ← 配置指南
+  CONTRIBUTORS.md               ← 贡献指南
+  .env.example                  ← 环境变量模板
+  pyproject.toml                ← uv 依赖管理
+  skills/invest-A/              ← Agent Skills 标准目录
+    SKILL.md                    ← 运行时规格（LAWs + 工作流 + 专业知识）
+    scripts/
+      invest.py                 ← CLI 单入口
+      lib/
+        collector.py            ← 多维度数据采集
+        render.py               ← 报告渲染（compact/json/md）
+        store.py                ← SQLite 持久化存储
+        tushare_client.py       ← Tushare HTTP 轻量客户端
+        env.py                  ← 集中配置管理
+    tests/                      ← pytest 测试
+    references/                 ← 数据源参考文档
+  .claude-plugin/               ← Claude Code 插件注册
+  .agents/                      ← Agent Skills 通用注册
+  .github/                      ← CI/workflows/issue templates
+  hooks/                        ← SessionStart 钩子脚本
 ```

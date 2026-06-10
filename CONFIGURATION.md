@@ -1,96 +1,61 @@
 # invest-A Configuration Guide
 
-Configuration layers (highest priority first):
+配置优先级（高→低）：
 
-1. **Per-run flags** — CLI arguments passed to `/invest-A`
-2. **Environment variables** — set in `.env` or shell environment
-3. **Config YAML files** — `skills/invest-A/config/*.yaml`
-4. **Defaults** — hardcoded in `data_pipeline.py`
-
----
-
-## Per-run Flags
-
-| Flag | Description | Example |
-|------|-------------|---------|
-| `{code}` | Stock/ETF code (required) | `600519`, `00700`, `510300` |
-| `--compare {code}` | Side-by-side comparison | `--compare 000858` |
-| `--with-macro` | Include macro analysis | `--with-macro` |
-| `--dim {list}` | Limit dimensions | `--dim=finance,valuation` |
-| `--deep` | Extended verification | `--deep` |
+1. **os.environ** — 进程环境变量
+2. **项目 `.env`** — 项目根目录 `.env` 文件
+3. **全局 `~/.config/investment/.env`** — 用户级配置
 
 ---
 
 ## Environment Variables
 
-Copy `.env.example` to `.env` and fill in values:
+```bash
+cp .env.example .env
+```
 
 | Variable | Required | Purpose | Registration |
 |----------|----------|---------|--------------|
-| `TUSHARE_TOKEN` | No | Tushare Pro API (A/HK stock data) | [tushare.pro](https://tushare.pro) |
-| `FRED_API_KEY` | No | FRED macro data (recommended) | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
-| `TAVILY_API_KEY` | No | Tavily AI search (1000 free/month) | [tavily.com](https://tavily.com) |
-| `BOCHA_API_KEY` | No | Bocha Chinese search | [open.bocha.cn](https://open.bocha.cn) |
+| `TUSHARE_TOKEN` | 推荐 | Tushare Pro API（A股数据主力源） | [tushare.pro](https://tushare.pro) |
+| `FRED_API_KEY` | 可选 | FRED 美国宏观数据 | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 
-**All environment variables are optional.** When not configured, the skill falls back to free data sources (akshare/efinance/yfinance/WebSearch) and reports the degradation.
-
----
-
-## Config YAML Files
-
-Located at `skills/invest-A/config/`:
-
-| File | Purpose |
-|------|---------|
-| `source_credibility.yaml` | Data source trust scores (★1-5), source groups for cross-validation |
-| `dimension_baselines.yaml` | Dimension weights, minimum viable sources per dimension |
-| `cross_validation_rules.yaml` | Agreement/divergence thresholds, timeliness penalty rules |
+**不配置 Tushare 时**：实时行情可通过腾讯免费接口获取，但财务指标、股东、资金流向等维度将不可用。
+**不配置 FRED 时**：宏观维度需要通过 WebSearch 补充。
 
 ---
 
-## Per-Harness Install Patterns
+## CLI Flags
 
-### Claude Code (CLI)
+所有命令支持 `--help` 查看参数详情：
 
 ```bash
-# Install via npx
-npx skills add . -g -y
+# 采集维度裁剪（从 code/ 目录运行）
+python3 skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote
 
-# Or symlink for live development
+# 扩展日期范围
+python3 skills/invest-A/scripts/invest.py collect 600176  # 默认范围已自动计算
+```
+
+---
+
+## Per-Harness Install
+
+### Claude Code
+
+```bash
+npx skills add . -g -y
+# 或 symlink 开发模式：
 ln -sfn "$PWD/skills/invest-A" ~/.agents/skills/invest-A
 ```
-
-### Claude Code (Desktop/Web)
-
-Use the Claude Code plugin marketplace to install `invest-A`.
-
-### Gemini CLI
-
-```bash
-gemini extensions install ./gemini-extension.json
-```
-
-### Codex / Cursor / GitHub Copilot
-
-Install from the [Agent Skills](https://agentskills.io) marketplace or via `npx skills add`.
 
 ---
 
 ## Dependency Management
 
-invest-A uses `uv` for isolated dependency management:
+使用 `uv` 隔离依赖：
 
 ```bash
-# Install uv (one-time)
-brew install uv        # macOS
-# or: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create isolated virtual environment
-uv sync
-
-# All Python commands use the venv
-uv run python -m skills.invest-A.scripts.lib.env_check
-uv run pytest
+uv sync              # 安装所有依赖
+uv run pytest        # 运行测试
+uv run python skills/invest-A/scripts/invest.py diagnose
 ```
-
-The `.venv/` directory is git-ignored. Each developer runs `uv sync` once to create their own isolated environment. System Python stays clean.

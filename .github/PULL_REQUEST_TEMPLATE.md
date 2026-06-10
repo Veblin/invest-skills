@@ -26,8 +26,8 @@
 
 ```bash
 # e.g.
-uv run python -m skills.invest-A.scripts.lib.env_check
-uv run python -m skills.invest-A.scripts.data_pipeline --test 600519
+uv run python skills/invest-A/scripts/invest.py diagnose --json
+uv run pytest
 ```
 
 ## Checklist

@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _find_project_root() -> Path:
@@ -45,8 +47,8 @@ def load_env_file(path: Path) -> dict[str, str]:
                 value = m.group(2).strip().strip('"').strip("'")
                 if key and value:
                     env[key] = value
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("加载 %s 失败: %s", path, e)
     return env
 
 
@@ -56,8 +58,7 @@ def get_config() -> dict[str, Any]:
     merged = {**global_env, **project_env}
 
     config: dict[str, Any] = {}
-    for key in ["TUSHARE_TOKEN", "FRED_API_KEY", "TAVILY_API_KEY", "BOCHA_API_KEY",
-                 "FINNHUB_API_KEY", "ALPHAVANTAGE_API_KEY"]:
+    for key in ["TUSHARE_TOKEN", "FRED_API_KEY"]:
         config[key] = os.environ.get(key) or merged.get(key)
 
     config["_CONFIG_SOURCE"] = (
@@ -65,7 +66,6 @@ def get_config() -> dict[str, Any]:
         else f"global:{GLOBAL_CONFIG_FILE}" if GLOBAL_CONFIG_FILE.exists()
         else "env_only"
     )
-    config["_DATA_SOURCES"] = {}
     return config
 
 
@@ -76,7 +76,16 @@ def is_tushare_available(config: dict[str, Any]) -> bool:
 
 def is_fred_available(config: dict[str, Any]) -> bool:
     key = config.get("FRED_API_KEY", "")
-    return bool(key and re.match(r'^[a-z0-9]{32}$', key))
+    return bool(key and re.match(r'^[a-zA-Z0-9]{32}$', key))
+
+
+def is_akshare_available() -> bool:
+    """检测 akshare 是否可用（导入成功即为可用）。"""
+    try:
+        import akshare  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def is_tencent_available() -> bool:
@@ -95,6 +104,7 @@ def diagnose(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "tushare": is_tushare_available(config),
         "fred": is_fred_available(config),
         "tencent": is_tencent_available(),
+        "akshare": is_akshare_available(),
     }
     return {
         "config_source": config.get("_CONFIG_SOURCE", "unknown"),

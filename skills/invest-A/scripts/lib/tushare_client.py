@@ -2,22 +2,19 @@
 Tushare HTTP 轻量客户端。
 
 不依赖官方 tushare SDK，直接通过 HTTP JSON 调用 Tushare Pro API。
-借鉴 daily_stock_analysis 的 _TushareHttpClient 设计。
+.env 加载由 lib/env.py 统一处理（本模块不重复加载）。
 
 设计原则：
 - Token 无效 → is_available() 返回 False，不抛异常
-- Token 有效但配额耗尽 → 静默降级，在 _meta 中标注
-- 与 efinance 并列并行（先到先用），不作为前置拦截器
+- Token 有效但配额耗尽 → 静默降级
+- Tushare 作为主数据源，与腾讯行情（兜底）配合使用
 """
 
 from __future__ import annotations
 
 import os
-import re
 import time
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -25,51 +22,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# .env 自动加载（无外部依赖）
-# 在模块导入时自动加载项目根目录的 .env 文件到 os.environ
-# ------------------------------------------------------------------
-
-def _load_dotenv() -> None:
-    """从项目根目录加载 .env 文件到环境变量。"""
-    # 查找 .env：优先当前工作目录，再搜索父目录
-    candidates = [
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parent.parent.parent / ".env",  # scripts/../.env
-    ]
-    env_path = None
-    for p in candidates:
-        if p.exists():
-            env_path = p
-            break
-
-    if env_path is None:
-        return
-
-    try:
-        content = env_path.read_text(encoding="utf-8")
-        for line in content.splitlines():
-            line = line.strip()
-            # 跳过空行和注释
-            if not line or line.startswith("#"):
-                continue
-            # 只处理 KEY=VALUE 格式
-            match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', line)
-            if match:
-                key = match.group(1)
-                value = match.group(2).strip().strip('"').strip("'")
-                # 不覆盖已存在的环境变量（允许用户手动 export 覆盖）
-                if key not in os.environ:
-                    os.environ[key] = value
-        logger.debug("已加载 .env: %s", env_path)
-    except Exception as e:
-        logger.debug("加载 .env 失败: %s", e)
-
-_load_dotenv()
-
 TUSHARE_API_URL = "http://api.tushare.pro"
 
-# Tushare 接口配额限制（免费用户）
+# Tushare 接口配额限制
 DAILY_CALL_LIMIT = 500
 RATE_LIMIT_PER_MINUTE = 80
 
@@ -87,7 +42,10 @@ class TushareClient:
         self._session = requests.Session()
         self._call_timestamps: list[float] = []
         self._daily_calls = 0
-        self._daily_reset_at = time.time() + 86400 * 7  # far future until first call
+        # 当日结束时重置计数器
+        now = time.time()
+        midnight = now - (now % 86400)
+        self._daily_reset_at = midnight + 86400
 
     # ------------------------------------------------------------------
     # 公共方法
@@ -153,12 +111,18 @@ class TushareClient:
             data = resp.json()
 
             if data.get("code") != 0:
-                logger.warning(
-                    "Tushare: %s 返回错误 code=%s msg=%s",
-                    api_name,
-                    data.get("code"),
-                    data.get("msg", ""),
-                )
+                code = data.get("code", -1)
+                msg = data.get("msg", "")
+                # 区分错误类型便于排查
+                if code == -2002:
+                    logger.error("Tushare: Token 无效 (%s)", api_name)
+                elif code == -2001:
+                    logger.warning("Tushare: 配额已用完 (%s)", api_name)
+                else:
+                    logger.warning(
+                        "Tushare: %s 返回错误 code=%s msg=%s",
+                        api_name, code, msg,
+                    )
                 return pd.DataFrame()
 
             self._record_call()
@@ -236,12 +200,22 @@ class TushareClient:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import datetime, sys
+    from pathlib import Path
+    _d = Path(__file__).parent.parent
+    sys.path.insert(0, str(_d))
+    from lib.env import ensure_env_loaded
+    ensure_env_loaded()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     client = TushareClient()
     available = client.is_available()
     print(f"Tushare available: {available}")
     if available:
-        df = client.query("daily", ts_code="600519.SH", limit=5)
+        end = datetime.date.today().strftime("%Y%m%d")
+        start = (datetime.date.today() - datetime.timedelta(days=5)).strftime("%Y%m%d")
+        df = client.query("daily", ts_code="600519.SH",
+                          start_date=start, end_date=end,
+                          fields="trade_date,open,high,low,close")
         print(df)
         print(f"今日剩余配额: {client.remaining_calls_today()}")
     else:

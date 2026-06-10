@@ -1,33 +1,23 @@
 # Changelog
 
-## v0.2.0 (2026-06-10)
+## v0.1.0 (2026-06-10)
 
-### 新增
-- **环境诊断模块** (`env_check.py`)：代理检测、API 端点连通性、Python 依赖功能级检测
-- **基础设施模块** (`data_utils.py`)：proxy bypass、code normalize、extract_metric 宽表提取、curl fallback、衍生指标计算
-- **Web 搜索正式维度** (`web_research.py`)：查询模板 + 可信度分级标签 (🔵官方/🟡分析师/🔴传闻)
-- **虚拟环境隔离**：引入 `uv` + `pyproject.toml` + `.venv/`，不再污染系统 Python
-- 数据管道支持缓存 (`use_cache=True`) 和公司名/主题传递
+### 初始版本
 
-### 改进
-- `a_share_data.py` 模块级代理绕过（`trust_env=False`），解决 EastMoney API 被系统代理阻断
-- `data_pipeline.py` 新增 `web_research` 维度（index 6.5）+ 8 维默认采集
-- `collect_all()` 支持 `name` / `topic` / `use_cache` 参数
+- **单入口 CLI** (`invest.py`)：collect / report / compare / diagnose / store 五子命令
+- **集中配置** (`lib/env.py`)：多层 .env 加载，Tushare/FRED/Tencent 可用性检测
+- **数据采集** (`lib/collector.py`)：基本信息、财务指标、实时行情、十大股东、北向资金、日K线
+- **Tushare Pro** 为主力数据源（HTTP 直连，不依赖官方 SDK）
+- **FRED 宏观数据**（US 10Y/2Y/VIX/CPI/美元指数）
+- **腾讯行情**实时行情兜底
+- **SQLite 持久化** (`lib/store.py`)：采集记录存储，WAL 模式并发
+- **报告渲染** (`lib/render.py`)：compact / json / md 格式输出
+- **7 条 pytest 测试**（env + store）
+- **薄 SKILL.md**（~115 行），遵循 last30days-skill 架构模式
 
-### 文档
-- SKILL.md 更新快速开始为 `uv sync` + `uv run python`
-- 执行计划-实施明细.md 新增 Phase 0.5（虚拟环境隔离）
-- 新增 `.gitignore`（排除 `.venv/`、`.env`、`evidence/`）
+### 数据源状态
 
----
-
-## v0.1.0 (2026-06-09)
-
-### 初始骨架
-- **SKILL.md**：9 条 LAWs 输出契约、7 条反模式、引用格式规范、工作流四步描述
-- **AGENTS.md**：五条硬约束、目标用户画像、设计哲学、数据源分层
-- **README.md**：项目定位、快速开始、架构图
-- **配置层**：`source_credibility.yaml` / `dimension_baselines.yaml` / `cross_validation_rules.yaml`
-- **策略层**：9 个 `strategies/*.yaml`（七维度 + ETF）
-- **知识库**：7 篇 `knowledge/*.md`
-- **数据管道骨架**：`data_pipeline.py` (collect_all 框架) + 15 个 lib 模块骨架
+- ✅ Tushare Pro（2000 积分，三大报表 + 低频行情 + 宏观经济）
+- ✅ FRED（免费注册）
+- ✅ 腾讯行情（免费，实时兜底）
+- ❌ EastMoney（akshare/efinance 底层，当前 API 502 不可用）
