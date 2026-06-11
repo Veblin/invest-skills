@@ -98,10 +98,16 @@ def is_baostock_available() -> bool:
 
 
 def is_tencent_available() -> bool:
-    import requests
+    """检测腾讯行情是否可达（用于 diagnose 报告）。
+
+    探针行为与 collector._q_tencent_quote 一致：强制直连（no_proxy_session）。
+    """
+    from .proxy import no_proxy_session
+
     try:
-        r = requests.get("http://qt.gtimg.cn/q=sh600519", timeout=3)
-        return r.status_code == 200 and "~" in r.text
+        with no_proxy_session() as sess:
+            r = sess.get("http://qt.gtimg.cn/q=sh600519", timeout=3)
+            return r.status_code == 200 and "~" in r.text
     except Exception:
         return False
 
@@ -109,6 +115,7 @@ def is_tencent_available() -> bool:
 def is_eastmoney_api_reachable() -> dict[str, Any]:
     """检测东方财富 API 是否可达（用于 diagnose 报告）。
 
+    探针行为与 akshare 东方财富采集一致：走系统代理（trust_env 默认）。
     使用动态日期范围并放宽响应校验：HTTP 200 + 有效 JSON data 即算可达，
     避免因特定日期区间无 K 线数据而误报"不可达"。
     """

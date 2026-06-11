@@ -21,11 +21,11 @@ DIMENSIONS = {
 def source_confidence(source: str, dimension: str) -> str:
     """按维度与渠道返回置信度，用于主源选择。"""
     if dimension == "quote":
-        if source == "tencent_finance":
-            return "high"
         if source.startswith("tushare."):
-            return "low"
-        return "medium"
+            return "high"
+        if source == "tencent_finance":
+            return "medium"
+        return "low"
     if source.startswith("tushare."):
         return "high"
     if source == "baostock.kline":

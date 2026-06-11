@@ -411,8 +411,10 @@ def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
         window = closes[-n:]
         max_val = max(window)
         min_val = min(window)
-        max_idx = closes[-n:].index(max_val)
-        min_idx = closes[-n:].index(min_val)
+        # 取最右侧（最新）的索引，而非首次出现
+        reversed_window = list(reversed(window))
+        max_idx = len(window) - 1 - reversed_window.index(max_val)
+        min_idx = len(window) - 1 - reversed_window.index(min_val)
         max_date_idx = len(closes) - n + max_idx
         min_date_idx = len(closes) - n + min_idx
         is_high_today = closes[-1] >= max_val

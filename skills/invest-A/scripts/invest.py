@@ -150,7 +150,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdfile = htmlpath.with_suffix(".md")
         mdfile.write_text(md_v2, encoding="utf-8")
 
-        print(render.render_compact(result, args.symbol))
+        print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}")
         print(f"📝 Markdown 报告: {mdfile.resolve()}")
         return 0
@@ -161,6 +161,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
+    warn_if_proxy_detected()
     ra = collector.collect_all(args.symbol_a)
     rb = collector.collect_all(args.symbol_b)
     da = {d["dimension"]: d for d in ra["dimensions"]}
@@ -180,6 +181,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
+    warn_if_proxy_detected()
     d = env.diagnose()
     if args.json:
         print(json.dumps(d, ensure_ascii=False, indent=2))

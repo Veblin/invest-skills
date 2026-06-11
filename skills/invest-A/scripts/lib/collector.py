@@ -38,7 +38,12 @@ def _days_ago(n: int) -> str:
 
 
 def _latest_quarter_end() -> str:
-    """返回最近一个已完整的季度末日期（0331/0630/0930/1231）。"""
+    """返回最近一个已完整的季度末日期（0331/0630/0930/1231）。
+
+    确保季度末日期的完整日已经过去（不提前返回当天）。
+    """
+    from datetime import date
+    today = date.today()
     now = datetime.now()
     quarter_ends = [
         (now.year, "0331"),
@@ -48,29 +53,44 @@ def _latest_quarter_end() -> str:
     ]
     for y, md in reversed(quarter_ends):
         d = datetime.strptime(f"{y}{md}", "%Y%m%d")
-        if now > d:
+        # 用 date 比较确保季度末整日已过（如 6/30 15:00 不视作 Q2 已完成）
+        if today > d.date():
             return f"{y}{md}"
     return f"{now.year - 1}1231"
 
 
-def _ts_code(symbol: str) -> str:
-    """转为 Tushare 格式：600176 → 600176.SH, 000858 → 000858.SZ。
+# ---- 交易所代码转换（共享函数，三种格式统一调度） ----
 
-    交易所判断：
-      上海: 6xxx, 9xxx → .SH
-      北京: 8xxx, 4xxx → .BJ
-      深圳: 0xxx, 2xxx, 3xxx → .SZ
+def _exchange_code(symbol: str) -> dict[str, str]:
+    """根据股票代码前缀返回各 API 格式的交易所代码。
+
+    返回 dict:
+      tushare: "600176.SH"
+      baostock: "sh.600176"
+      akshare: "sh600176"
+
+    上海: 6xxx, 9xxx
+    北京: 4xxx, 8xxx
+    深圳: 0xxx, 2xxx, 3xxx
     """
     s = symbol.strip().zfill(6)
     if s.startswith(("6", "9")):
-        return f"{s}.SH"
+        return {"tushare": f"{s}.SH", "baostock": f"sh.{s}", "akshare": f"sh{s}"}
     if s.startswith(("4", "8")):
-        return f"{s}.BJ"
-    return f"{s}.SZ"
+        return {"tushare": f"{s}.BJ", "baostock": f"bj.{s}", "akshare": f"bj{s}"}
+    return {"tushare": f"{s}.SZ", "baostock": f"sz.{s}", "akshare": f"sz{s}"}
+
+
+def _ts_code(symbol: str) -> str:
+    """转为 Tushare 格式：600176 → 600176.SH（委托 _exchange_code）。"""
+    return _exchange_code(symbol)["tushare"]
 
 
 # 向后兼容：测试与外部调用仍可从 collector 导入 _proxy_bypass
 _proxy_bypass = proxy_bypass
+
+# Baostock 全局 socket 非线程安全，需串行化访问
+_BAOSTOCK_LOCK = threading.Lock()
 
 # 东方财富 API 连接失败时的可操作提示
 _EASTMONEY_BLOCKED_MSG = (
@@ -103,13 +123,8 @@ def _reraise_eastmoney_api_error(exc: Exception) -> None:
 
 
 def _baostock_code(symbol: str) -> str:
-    """Baostock 证券代码：深市 sz. / 沪市 sh. / 北交所 bj."""
-    s = symbol.strip().zfill(6)
-    if s.startswith(("0", "2", "3")):
-        return f"sz.{s}"
-    if s.startswith(("4", "8")):
-        return f"bj.{s}"
-    return f"sh.{s}"
+    """Baostock 证券代码：sz. / sh. / bj. 前缀（委托 _exchange_code）。"""
+    return _exchange_code(symbol)["baostock"]
 
 
 # ---- 并行执行辅助 ----
@@ -375,13 +390,8 @@ def _map_akshare_northbound_keys(r: dict) -> dict:
 # ---- akshare 股东信息 ----
 
 def _akshare_top10_code(symbol: str) -> str:
-    """akshare 股东接口需要的代码格式：sh600519 / sz000858。"""
-    s = symbol.strip().zfill(6)
-    if s.startswith(("6", "9")):
-        return f"sh{s}"
-    if s.startswith(("4", "8")):
-        return f"bj{s}"
-    return f"sz{s}"
+    """akshare 股东接口需要的代码格式：sh600519 / sz000858（委托 _exchange_code）。"""
+    return _exchange_code(symbol)["akshare"]
 
 
 def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
@@ -434,55 +444,60 @@ def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list
 
 
 def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """Baostock K 线来源（免费、稳定，适合历史日K线）。"""
-    with _proxy_bypass():
-        import baostock as bs
-        logged_in = False
-        try:
-            lg = bs.login()
-            if lg.error_code != "0":
-                logger.warning("baostock login failed: %s", lg.error_msg)
+    """Baostock K 线来源（免费、稳定，适合历史日K线）。
+
+    使用 _BAOSTOCK_LOCK 串行化访问：Baostock 内部使用全局单例 socket，
+    多线程并行调用会导致连接竞态。
+    """
+    with _BAOSTOCK_LOCK:
+        with _proxy_bypass():
+            import baostock as bs
+            logged_in = False
+            try:
+                lg = bs.login()
+                if lg.error_code != "0":
+                    logger.warning("baostock login failed: %s", lg.error_msg)
+                    return None
+                logged_in = True
+
+                sd = start_date or _days_ago(365)
+                ed = end_date or _today()
+                sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
+                ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+
+                bs_code = _baostock_code(symbol)
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,open,high,low,close,volume,amount",
+                    start_date=sd_fmt, end_date=ed_fmt,
+                    frequency="d", adjustflag="3",
+                )
+                if rs.error_code != "0":
+                    logger.warning("baostock query failed: %s", rs.error_msg)
+                    return None
+
+                rows = []
+                while rs.next():
+                    row = rs.get_row_data()
+                    rows.append({
+                        "trade_date": row[0].replace("-", ""),
+                        "open": float(row[1]) if row[1] else None,
+                        "high": float(row[2]) if row[2] else None,
+                        "low": float(row[3]) if row[3] else None,
+                        "close": float(row[4]) if row[4] else None,
+                        "vol": float(row[5]) if row[5] else 0,
+                        "amount": float(row[6]) if row[6] else 0,
+                    })
+                return rows if rows else None
+            except Exception as e:
+                logger.warning("baostock query failed: %s", e)
                 return None
-            logged_in = True
-
-            sd = start_date or _days_ago(365)
-            ed = end_date or _today()
-            sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
-            ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
-
-            bs_code = _baostock_code(symbol)
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount",
-                start_date=sd_fmt, end_date=ed_fmt,
-                frequency="d", adjustflag="3",
-            )
-            if rs.error_code != "0":
-                logger.warning("baostock query failed: %s", rs.error_msg)
-                return None
-
-            rows = []
-            while rs.next():
-                row = rs.get_row_data()
-                rows.append({
-                    "trade_date": row[0].replace("-", ""),
-                    "open": float(row[1]) if row[1] else 0,
-                    "high": float(row[2]) if row[2] else 0,
-                    "low": float(row[3]) if row[3] else 0,
-                    "close": float(row[4]) if row[4] else 0,
-                    "vol": float(row[5]) if row[5] else 0,
-                    "amount": float(row[6]) if row[6] else 0,
-                })
-            return rows if rows else None
-        except Exception as e:
-            logger.warning("baostock query failed: %s", e)
-            return None
-        finally:
-            if logged_in:
-                try:
-                    bs.logout()
-                except Exception:
-                    pass
+            finally:
+                if logged_in:
+                    try:
+                        bs.logout()
+                    except Exception:
+                        pass
 
 
 def _q_tencent_quote(symbol: str) -> dict | None:
@@ -547,9 +562,9 @@ def _qp_baostock(symbol: str, start_date: str, end_date: str) -> str:
 
 def collect_basic_info(symbol: str) -> dict:
     """基本信息。并行：Tushare + akshare。"""
-    tasks: list[tuple[str, Callable]] = [
-        ("tushare.stock_basic", lambda: _q_tushare_basic(symbol)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.stock_basic", lambda: _q_tushare_basic(symbol)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_individual_info_em",
                       lambda: _q_akshare_basic(symbol)))
@@ -567,9 +582,9 @@ def collect_basic_info(symbol: str) -> dict:
 
 def collect_financials(symbol: str) -> dict:
     """财务报告。并行：Tushare + akshare。"""
-    tasks: list[tuple[str, Callable]] = [
-        ("tushare.fina_indicator", lambda: _q_tushare_financials(symbol)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.fina_indicator", lambda: _q_tushare_financials(symbol)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_financial_abstract_ths",
                       lambda: _q_akshare_financials(symbol)))
@@ -589,9 +604,9 @@ def collect_financials(symbol: str) -> dict:
 
 def collect_shareholders(symbol: str) -> dict:
     """十大股东。并行：Tushare + akshare。"""
-    tasks: list[tuple[str, Callable]] = [
-        ("tushare.top10_floatholders", lambda: _q_tushare_shareholders(symbol)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.top10_floatholders", lambda: _q_tushare_shareholders(symbol)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_gdfx_top_10_em",
                       lambda: _q_akshare_shareholders(symbol)))
@@ -611,10 +626,10 @@ def collect_shareholders(symbol: str) -> dict:
 
 def collect_quote(symbol: str) -> dict:
     """实时行情。并行：Tushare + akshare + 腾讯。"""
-    tasks: list[tuple[str, Callable]] = [
-        ("tushare.daily", lambda: _q_tushare_daily(symbol,
-                                                    start_date=_days_ago(10), end_date=_today())),
-    ]
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol,
+                      start_date=_days_ago(10), end_date=_today())))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
@@ -638,9 +653,9 @@ def collect_quote(symbol: str) -> dict:
 
 def collect_northbound(symbol: str) -> dict:
     """北向资金。并行：Tushare + akshare。"""
-    tasks: list[tuple[str, Callable]] = [
-        ("tushare.moneyflow", lambda: _q_tushare_moneyflow(symbol)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.moneyflow", lambda: _q_tushare_moneyflow(symbol)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
@@ -666,9 +681,9 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
     sd = start_date or _days_ago(400)
     ed = end_date or _today()
 
-    tasks: list[tuple[str, Callable]] = [
-        ("tushare.daily", lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed)))
@@ -733,9 +748,9 @@ def _q_tencent_valuation_snapshot(symbol: str) -> dict | None:
     if quote is None:
         return None
     result: dict[str, Any] = {}
-    if quote.get("pe_ratio"):
+    if quote.get("pe_ratio") is not None:
         result["pe_ttm"] = quote["pe_ratio"]
-    if quote.get("total_mv"):
+    if quote.get("total_mv") is not None:
         result["total_mv"] = quote["total_mv"]
     result["history_available"] = False  # 腾讯仅为快照，无历史序列
     return result if result else None
@@ -813,6 +828,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         future_map = {}
         for dim in dims:
             if dim not in COLLECTORS:
+                logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
                 continue
             if dim == "kline" and kline_kwargs:
                 _, fn = COLLECTORS[dim]

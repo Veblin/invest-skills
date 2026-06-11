@@ -1358,14 +1358,16 @@ def _extract_valuation_data(dims: dict) -> dict:
         result["pe_val"] = f"{pe['current']:.2f}x"
         result["pe_pct"] = f"{pe['pct']:.1f}" if pe.get("pct") is not None else None
         result["pe_median"] = f"{pe['median']:.2f}" if pe.get("median") is not None else None
-        result["pe_above_median"] = (pe.get("current") or 0) > (pe.get("median") or float("inf"))
+        result["pe_above_median"] = (pe.get("current") is not None and pe.get("median") is not None
+                                      and pe["current"] > pe["median"])
 
     pb = summary.get("pb", {})
     if pb.get("current") is not None:
         result["pb_val"] = f"{pb['current']:.2f}x"
         result["pb_pct"] = f"{pb['pct']:.1f}" if pb.get("pct") is not None else None
         result["pb_median"] = f"{pb['median']:.2f}" if pb.get("median") is not None else None
-        result["pb_above_median"] = (pb.get("current") or 0) > (pb.get("median") or float("inf"))
+        result["pb_above_median"] = (pb.get("current") is not None and pb.get("median") is not None
+                                      and pb["current"] > pb["median"])
 
     ps = summary.get("ps", {})
     if ps.get("current") is not None:

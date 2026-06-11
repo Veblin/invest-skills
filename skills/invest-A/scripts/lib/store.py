@@ -299,14 +299,12 @@ def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
                         "new_dates": sorted(new_dates)[-5:],
                     })
             else:
-                # 无法对齐，直接对比最新一条
-                sub = _diff_data(f"{dimension}[latest]",
-                                old_data[-1], new_data[-1])
-                changes.extend(sub)
+                # 无法按日期对齐（缺少 trade_date/end_date 字段），
+                # 跳过按位置对比，避免将不相关时期误报为差异
                 if len(new_data) != len(old_data):
                     changes.append({
                         "path": f"{dimension}",
-                        "description": f"记录数变化: {len(old_data)} -> {len(new_data)}",
+                        "description": f"记录数变化: {len(old_data)} -> {len(new_data)}（无法按日期对齐）",
                     })
 
     return changes

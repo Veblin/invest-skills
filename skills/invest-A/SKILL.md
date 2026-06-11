@@ -43,6 +43,24 @@ metadata:
 - **baostock** ✅ — 免费交易所 K 线数据，无需 token
 - **efinance / yfinance** 🔜 — 计划在未来版本接入（详见 `docs/TODO.md`）
 
+## 代理 / VPN（Clash 等）
+
+v0.1.2 起**不再自动清除** `HTTP_PROXY` 等环境变量。大陆用户若开启 VPN/代理，国内金融数据源应**直连**；`collect` / `report` 启动时若检测到代理，会提示将以下域名加入 Clash **DIRECT** 规则：
+
+```yaml
+rules:
+  - DOMAIN-SUFFIX,eastmoney.com,DIRECT
+  - DOMAIN-SUFFIX,gtimg.cn,DIRECT
+  - DOMAIN-SUFFIX,baostock.com,DIRECT
+  - MATCH,PROXY
+```
+
+- **诊断**：`invest.py diagnose` 输出 `proxy_detected` 与 `clash_rules_hint`
+- **例外**：腾讯行情采集与 diagnose 探针均强制直连（`no_proxy_session`）；Tushare 客户端在初始化时捕获代理配置，与 akshare 并行互不干扰
+- **TUN 模式**：需在网卡层配置上述规则，或采集时暂时关闭 TUN / 全局代理
+
+详见 `references/source-guide.md` §代理 / VPN 问题。
+
 ## CLI 命令（核心交互入口）
 
 所有数据采集和分析通过 `invest.py` 完成。Claude 根据用户意图构建对应命令：

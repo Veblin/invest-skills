@@ -83,7 +83,20 @@ def no_proxy_session() -> Iterator[requests.Session]:
 
 @contextmanager
 def proxy_bypass() -> Iterator[None]:
-    """向后兼容空操作（v0.1.2 起不再强制绕过代理）。"""
+    """向后兼容空操作（v0.1.2 起不再强制绕过代理）。
+
+    注意：此 context manager 当前为空操作，不会修改代理环境变量。
+    akshare/baostock 等库会读取系统代理设置。如果采集国内数据源
+    （eastmoney、baostock 等）时遇到连接失败，请检查 Clash/VPN 规则，
+    确保将以下域名加入 DIRECT：
+
+      - DOMAIN-SUFFIX,eastmoney.com,DIRECT
+      - DOMAIN-SUFFIX,gtimg.cn,DIRECT
+      - DOMAIN-SUFFIX,baostock.com,DIRECT
+
+    或在采集前暂时关闭全局代理。
+    运行 ``invest.py diagnose`` 可查看当前代理状态与各数据源连通性。
+    """
     yield
 
 

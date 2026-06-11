@@ -11,16 +11,16 @@ class TestSourceConfidence:
         from lib.schema import source_confidence
 
         assert source_confidence("tushare.stock_basic", "basic_info") == "high"
-        assert source_confidence("tushare.daily", "quote") == "low"
+        assert source_confidence("tushare.daily", "quote") == "high"
 
-    def test_tencent_high_for_quote(self):
+    def test_tencent_medium_for_quote(self):
         from lib.schema import source_confidence
 
-        assert source_confidence("tencent_finance", "quote") == "high"
+        assert source_confidence("tencent_finance", "quote") == "medium"
 
 
 class TestDimensionResult:
-    def test_quote_prefers_tencent_over_tushare(self):
+    def test_quote_prefers_tushare_over_tencent(self):
         from lib.schema import DimensionResult, SourceResult
 
         sources = [
@@ -28,8 +28,8 @@ class TestDimensionResult:
             SourceResult("tencent_finance", {"price": 10.5}, "quote"),
         ]
         dim = DimensionResult("quote", sources)
-        assert dim.primary_source == "tencent_finance"
-        assert dim.primary_data == {"price": 10.5}
+        assert dim.primary_source == "tushare.daily"
+        assert dim.primary_data == [{"close": 10}]
 
     def test_basic_info_prefers_tushare(self):
         from lib.schema import DimensionResult, SourceResult

@@ -154,6 +154,14 @@ def valuation_summary(
     if not result["sufficient"]:
         result["warnings"].append("样本不足30个交易日，分位计算结果仅供参考")
 
+    # 检查亏损期（负 PE/PB）是否被过滤
+    pe_total = len([v for v in pe_ttm_seq if v is not None])
+    pe_pos = len(pe_seq_clean)
+    if pe_total > pe_pos:
+        result["warnings"].append(
+            f"PE 历史序列中有 {pe_total - pe_pos} 个交易日为亏损期（负值），"
+            f"已从历史样本中排除，分位计算可能偏高")
+
     # 摘要文本（渲染用）
     result["summary_text"] = _build_summary_text(result)
 
