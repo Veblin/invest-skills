@@ -51,13 +51,18 @@ metadata:
 # 采集并展示
 uv run python skills/invest-A/scripts/invest.py collect 600176
 
-# 生成 JSON 格式报告
-uv run python skills/invest-A/scripts/invest.py report 600176 --emit=json
+# 生成研究报告（默认 HTML，自动保存到当前目录）
+# 文件名格式: YYYY-MM-DD-hh-mm-ss-股票代码-股票名称.html
+uv run python skills/invest-A/scripts/invest.py report 600176
 
-# 生成 Markdown 分析报告
+# 指定输出目录
+uv run python skills/invest-A/scripts/invest.py report 600176 --outdir=./reports/
+
+# 生成 JSON / Markdown 格式（stdout）
+uv run python skills/invest-A/scripts/invest.py report 600176 --emit=json
 uv run python skills/invest-A/scripts/invest.py report 600176 --emit=md
 
-# 深度模式（扩大K线范围 + 行业/舆情分析）
+# 深度模式（扩大K线范围至730日 + 行业/舆情分析）
 uv run python skills/invest-A/scripts/invest.py collect 600176 --deep
 uv run python skills/invest-A/scripts/invest.py report 600176 --deep
 

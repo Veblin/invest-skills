@@ -10,9 +10,12 @@
 - **快照 Diff** (`invest.py diff`)：对比同股票两次采集变化，支持 `--from/--to` 指定快照或自动取最近两次
 - **报告模板 v2** (`render_report_v2()`)：八段结构（公司画像→经营质量→估值位置→资金与筹码→技术结构→事件催化→核心矛盾）
 - **K 线窗口扩大**：默认 400 自然日（覆盖 MA250），`--deep` 扩大到 730 自然日
+- **HTML 研究报告** (`render_html()`)：单文件自包含 HTML（内嵌 CSS ~230 行）、专业研报样式、响应式设计、打印友好、自动保存为 `YYYY-MM-DD-hh-mm-ss-股票代码-股票名称.html`
 
 ### ⚠️ Breaking Changes
 
+- **默认输出格式从 `compact` 改为 `html`**：`invest.py report <symbol>` 默认生成 HTML 文件并保存到当前目录，stdout 输出紧凑摘要 + 文件路径
+- 新增依赖 `markdown>=3.10.2`（Markdown → HTML 转换）
 - 默认采集维度从 5 个增加到 7 个（新增 `valuation` + `kline`），Tushare 配额消耗略增
 - `--emit=md` / `--emit=compact` 输出格式从旧七维度改为新八段模板
 

@@ -4,8 +4,9 @@ investment-learning CLI。
 
 用法:
   python3 invest.py collect 600176              # 采集数据
-  python3 invest.py report 600176               # 报告（compact）
-  python3 invest.py report 600176 --emit=json   # JSON 报告
+  python3 invest.py report 600176               # 报告（默认 HTML，自动保存）
+  python3 invest.py report 600176 --emit=json   # JSON 报告（stdout）
+  python3 invest.py report 600176 --emit=md     # Markdown（stdout）
   python3 invest.py compare 600176 000858        # 对比
   python3 invest.py diagnose                     # 检查数据源
   python3 invest.py store list                   # 查看存储
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -55,10 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--emit", default="compact", choices=["compact", "json", "md"])
+    pr.add_argument("--emit", default="html", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pr.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
+    pr.add_argument("--outdir", default="", help="HTML 输出目录（默认当前目录）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
@@ -111,8 +114,42 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     result = collector.collect_all(args.symbol, dims, deep=args.deep)
-    print(render.render(result, args.symbol, args.emit))
-    return 0 if result["summary"]["available"] > 0 else 1
+    if result["summary"]["available"] == 0:
+        print("⚠️ 所有维度均不可用，无法生成报告")
+        return 1
+
+    fmt = args.emit
+
+    # HTML 为默认输出格式：自动保存文件 + 终端输出紧凑摘要
+    if fmt == "html":
+        output = render.render(result, args.symbol, "html")
+        from datetime import datetime
+        now = datetime.now()
+        ts = now.strftime("%Y-%m-%d-%H-%M-%S")
+
+        # 提取股票名称
+        name = ""
+        for dim in result.get("dimensions", []):
+            if dim.get("dimension") == "basic_info":
+                data = dim.get("data", {})
+                if isinstance(data, dict):
+                    name = data.get("name", "") or data.get("股票简称", "")
+                break
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", name) if name else ""
+        filename = f"{ts}-{args.symbol}-{safe_name}.html" if safe_name else f"{ts}-{args.symbol}.html"
+        outdir = Path(args.outdir).resolve() if args.outdir else Path.cwd()
+        outdir.mkdir(parents=True, exist_ok=True)
+        outpath = outdir / filename
+        outpath.write_text(output, encoding="utf-8")
+
+        # stdout 输出紧凑摘要 + 路径
+        print(render.render(result, args.symbol, "compact"))
+        print(f"📄 HTML 研究报告已保存: {outpath.resolve()}")
+        return 0
+
+    # 其他格式保持原有行为
+    print(render.render(result, args.symbol, fmt))
+    return 0
 
 
 def cmd_compare(args: argparse.Namespace) -> int:

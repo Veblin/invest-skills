@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -159,14 +160,17 @@ def render_json(collection: dict[str, Any]) -> str:
 
 
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact") -> str:
-    """统一渲染入口。支持 compact / json / md 格式。
+    """统一渲染入口。支持 compact / json / md / html 格式。
 
     compact  — 紧凑文本报告，适合终端直接阅读（v0.1.2 起使用 v2 模板）
     json     — 结构化 JSON，适合程序消费
     md       — Markdown 分析报告（v0.1.2 起使用 v2 模板）
+    html     — HTML 研究报告（v0.1.2+ 新增）
     """
     if fmt == "json":
         return render_json(collection)
+    if fmt == "html":
+        return render_html(collection, symbol)
     return render_report_v2(collection, symbol)
 
 
@@ -719,4 +723,301 @@ def _fmt_v2(v: Any, unit: str = "") -> str:
             return f"{v / 1e4:.2f}万"
         return f"{v:.2f}{unit}" if unit else f"{v:.2f}"
     return str(v)
+
+
+# ---- HTML 报告渲染 ----
+
+_HTML_CSS = """\
+:root {
+  --color-bg: #ffffff;
+  --color-text: #1a1a2e;
+  --color-muted: #6b7280;
+  --color-accent: #2563eb;
+  --color-border: #e5e7eb;
+  --color-header-bg: #f8fafc;
+  --color-table-header: #f1f5f9;
+  --color-table-stripe: #f8fafc;
+  --color-warning-bg: #fef3c7;
+  --color-warning-border: #f59e0b;
+  --color-danger: #ef4444;
+  --color-success: #22c55e;
+  --color-code-bg: #f1f5f9;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Noto Sans Mono", monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: var(--color-bg);
+  line-height: 1.8;
+  font-size: 15px;
+  padding: 0;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 40px 32px;
+}
+
+/* ---- Header ---- */
+.report-header {
+  margin-bottom: 40px;
+  padding-bottom: 24px;
+  border-bottom: 2px solid var(--color-border);
+}
+.report-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+.report-header .meta {
+  color: var(--color-muted);
+  font-size: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.report-header .meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---- Risk Banner ---- */
+.risk-banner {
+  background: var(--color-warning-bg);
+  border-left: 4px solid var(--color-warning-border);
+  padding: 14px 18px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #92400e;
+  margin-bottom: 32px;
+}
+.risk-banner strong { font-weight: 600; }
+
+/* ---- Section ---- */
+.section {
+  margin-bottom: 40px;
+}
+.section h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-accent);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 20px 0 10px;
+  color: var(--color-text);
+}
+.section p {
+  margin-bottom: 10px;
+}
+
+/* ---- Table ---- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 16px;
+  font-size: 14px;
+}
+thead th {
+  background: var(--color-table-header);
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid var(--color-border);
+  white-space: nowrap;
+}
+tbody td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+tbody tr:nth-child(even) {
+  background: var(--color-table-stripe);
+}
+tbody tr:hover {
+  background: #eff6ff;
+}
+
+/* ---- Blockquote / Warning ---- */
+blockquote {
+  background: var(--color-code-bg);
+  border-left: 4px solid var(--color-accent);
+  padding: 12px 16px;
+  margin: 12px 0;
+  border-radius: 0 6px 6px 0;
+  font-size: 14px;
+  color: #374151;
+}
+blockquote p { margin-bottom: 0; }
+
+/* ---- Code ---- */
+code {
+  font-family: var(--font-mono);
+  background: var(--color-code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #be123c;
+}
+pre {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 12px 0;
+}
+pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+}
+
+/* ---- List ---- */
+ul, ol {
+  padding-left: 20px;
+  margin-bottom: 12px;
+}
+li { margin-bottom: 4px; }
+
+/* ---- Verify Notice ---- */
+.verify-notice {
+  background: #f0fdf4;
+  border-left: 4px solid var(--color-success);
+  padding: 12px 16px;
+  border-radius: 0 6px 6px 0;
+  margin: 12px 0;
+  font-size: 13px;
+  color: #166534;
+}
+
+/* ---- References Table ---- */
+.refs-table {
+  font-size: 13px;
+}
+.refs-table code {
+  font-size: 12px;
+  word-break: break-all;
+}
+.status-ok { color: var(--color-success); font-weight: 600; }
+.status-err { color: var(--color-danger); }
+.status-ok::before { content: "✅ "; }
+.status-err::before { content: "❌ "; }
+
+/* ---- Footer ---- */
+.report-footer {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 2px solid var(--color-border);
+  font-size: 13px;
+  color: var(--color-muted);
+}
+.report-footer .disclaimer {
+  background: var(--color-warning-bg);
+  border-left: 4px solid var(--color-warning-border);
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  color: #92400e;
+}
+
+/* ---- Print ---- */
+@media print {
+  body { font-size: 13px; }
+  .container { padding: 20px; }
+  .section { page-break-inside: avoid; }
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 640px) {
+  .container { padding: 16px; }
+  .report-header h1 { font-size: 22px; }
+  table { font-size: 13px; }
+  thead th, tbody td { padding: 6px 8px; }
+}
+"""
+
+
+def _md_to_html(md_text: str) -> str:
+    """将 Markdown 转为 HTML 片段。"""
+    import markdown as _md
+
+    # 预处理：将 Markdown 图片链接换行处理
+    # 直接使用 markdown 库的标准扩展
+    extensions = [
+        "markdown.extensions.extra",       # tables, fenced_code, etc.
+        "markdown.extensions.codehilite",  # 代码高亮
+        "markdown.extensions.toc",         # 目录（预留）
+        "markdown.extensions.nl2br",       # 换行保留
+    ]
+    html = _md.markdown(md_text, extensions=extensions)
+    return html
+
+
+def _build_html_document(title: str, body_html: str) -> str:
+    """包装完整 HTML 文档。"""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title}</title>
+<style>
+{_HTML_CSS}
+</style>
+</head>
+<body>
+<div class="container">
+{body_html}
+</div>
+</body>
+</html>"""
+
+
+def render_html(collection: dict[str, Any], symbol: str) -> str:
+    """HTML 研究报告。
+
+    复用 render_report_v2() 的 Markdown 输出，转换为结构化 HTML。
+    """
+    md_text = render_report_v2(collection, symbol)
+
+    # 提取报告标题
+    name = ""
+    dims = _index_dims(collection)
+    basic = _get_dim_data(dims, "basic_info")
+    if isinstance(basic, dict):
+        name = basic.get("name", "") or basic.get("股票简称", "")
+    title = f"{symbol} {name}".strip()
+
+    # 分割 Markdown 的各部分
+    body_html = _md_to_html(md_text)
+
+    # 对 HTML 做后处理：给引用块中的关键段落加额外样式
+    # 将 "🔍 待独立验证" 段落包装为 verify-notice
+    body_html = body_html.replace(
+        '<p>🔍 <strong>待独立验证</strong></p>',
+        '<div class="verify-notice">🔍 <strong>待独立验证</strong></div>',
+    )
+    body_html = body_html.replace(
+        '🔍 <strong>待独立验证:</strong>',
+        '<span class="verify-label">🔍 <strong>待独立验证:</strong></span>',
+    )
+
+    return _build_html_document(title, body_html)
 
