@@ -367,15 +367,46 @@ def _map_akshare_kline_keys(r: dict) -> dict:
     }
 
 
+def _parse_akshare_num(v, unit: str = "") -> float | None:
+    """将 akshare 返回的字符串数值转为 float，兼容 '%' / '亿' / '万' 后缀。
+
+    例如 "8.37%" → 8.37, "17.88亿" → 1788000000.0, "2,456.78万" → 24567800.0
+    """
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if not isinstance(v, str):
+        return None
+    s = v.strip().replace(",", "").replace(" ", "")
+    multiplier = 1.0
+    if "亿" in s:
+        multiplier = 1e8
+        s = s.replace("亿", "")
+    elif "万" in s:
+        multiplier = 1e4
+        s = s.replace("万", "")
+    if "%" in s:
+        s = s.replace("%", "")
+    try:
+        return float(s) * multiplier
+    except (ValueError, TypeError):
+        return None
+
+
 def _map_akshare_financial_keys(r: dict) -> dict:
-    """akshare stock_financial_abstract_ths 列名映射。"""
+    """akshare stock_financial_abstract_ths 列名映射。
+
+    注意：akshare 返回的数值带中文单位（如 "17.88亿"、"8.37%"),
+    _parse_akshare_num 将其转换为与 Tushare 一致的纯 float 格式。
+    """
     return {
         "end_date": str(r.get("报告期", "")),
-        "roe": r.get("净资产收益率"),
-        "eps": r.get("基本每股收益"),
-        "profit_dedt": r.get("扣非净利润"),
-        "revenue": r.get("营业总收入"),
-        "net_profit": r.get("净利润"),
+        "roe": _parse_akshare_num(r.get("净资产收益率")),
+        "eps": _parse_akshare_num(r.get("基本每股收益")),
+        "profit_dedt": _parse_akshare_num(r.get("扣非净利润")),
+        "revenue": _parse_akshare_num(r.get("营业总收入")),
+        "net_profit": _parse_akshare_num(r.get("净利润")),
     }
 
 
