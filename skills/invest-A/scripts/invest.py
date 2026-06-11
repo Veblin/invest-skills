@@ -122,7 +122,9 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     # HTML 为默认输出格式：自动保存文件 + 终端输出紧凑摘要
     if fmt == "html":
-        output = render.render(result, args.symbol, "html")
+        # 渲染一次 Markdown，复用给 HTML 和终端摘要（避免 compute() 重复计算）
+        md_v2 = render.render_report_v2(result, args.symbol)
+        output = render.render_html(result, args.symbol, md_text=md_v2)
         from datetime import datetime
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -142,8 +144,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         outpath = outdir / filename
         outpath.write_text(output, encoding="utf-8")
 
-        # stdout 输出紧凑摘要 + 路径
-        print(render.render(result, args.symbol, "compact"))
+        # stdout 输出完整 Markdown 报告 + 保存路径
+        print(md_v2)
         print(f"📄 HTML 研究报告已保存: {outpath.resolve()}")
         return 0
 
@@ -178,7 +180,16 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         return 0
     print(f"=== 数据源诊断 ===\n配置: {d['config_source']}\n可用: {d['available_count']}/{d['total_count']}\n")
     for s, a in d["sources"].items():
-        print(f"  {'✅' if a else '❌'} {s}")
+        if isinstance(a, dict):
+            em = a
+            icon = "✅" if em.get("reachable") else "❌"
+            detail = f" (HTTP {em.get('http_status') or 'N/A'})" if em.get("error") else ""
+            print(f"  {icon} {s}{detail}")
+            if em.get("error"):
+                from lib.render import sanitize_error
+                print(f"      ↳ {sanitize_error(em['error'], 80)}")
+        else:
+            print(f"  {'✅' if a else '❌'} {s}")
     print()
     return 0 if d["available_count"] > 0 else 1
 

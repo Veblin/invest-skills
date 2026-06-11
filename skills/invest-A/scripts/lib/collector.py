@@ -16,11 +16,12 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 from . import env
+from .proxy import no_proxy_session, proxy_bypass
+from .proxy import EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS
 from .schema import SourceResult, DimensionResult
 
 logger = logging.getLogger(__name__)
@@ -68,38 +69,19 @@ def _ts_code(symbol: str) -> str:
     return f"{s}.SZ"
 
 
-# ---- 代理绕过辅助 ----
+# 向后兼容：测试与外部调用仍可从 collector 导入 _proxy_bypass
+_proxy_bypass = proxy_bypass
 
-_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
-_proxy_lock = threading.Lock()
+# 东方财富 East Money API 常见连接失败关键标识（共享自 proxy.py）
+_EASTMONEY_BLOCKED_MSG = (
+    "东方财富(East Money)主动拒绝连接：该服务器对境外 IP 或非浏览器请求执行了封锁。"
+    "建议使用 Tushare / Baostock 替代，或通过 VPN(国内节点)访问。"
+)
 
 
-_bypass_depth = 0
-_bypass_saved: dict[str, str | None] | None = None
-
-
-@contextmanager
-def _proxy_bypass() -> Iterator[None]:
-    """清除代理环境变量以绕过代理。引用计数支持嵌套/并行 bypass。"""
-    global _bypass_depth, _bypass_saved
-    with _proxy_lock:
-        if _bypass_depth == 0:
-            _bypass_saved = {k: os.environ.get(k) for k in _PROXY_KEYS}
-            for k in _PROXY_KEYS:
-                os.environ.pop(k, None)
-        _bypass_depth += 1
-    try:
-        yield
-    finally:
-        with _proxy_lock:
-            _bypass_depth -= 1
-            if _bypass_depth == 0 and _bypass_saved is not None:
-                for k, v in _bypass_saved.items():
-                    if v is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = v
-                _bypass_saved = None
+def _is_eastmoney_blocked_error(error: str) -> bool:
+    """检测异常是否由东方财富主动封锁导致。"""
+    return any(kw in str(error) for kw in _EASTMONEY_BLOCKED_KEYWORDS)
 
 
 def _baostock_code(symbol: str) -> str:
@@ -251,19 +233,25 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
 
 
 def _q_akshare_basic(symbol: str) -> dict | None:
-    """akshare 基本信息来源。"""
+    """akshare 基本信息来源（东方财富 API）。"""
     with _proxy_bypass():
         import akshare as ak
-        result = ak.stock_individual_info_em(symbol=symbol.strip().zfill(6))
-        if result is not None:
-            if hasattr(result, "to_dict"):
-                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                # stock_individual_info_em 返回 [{"item":..., "value":...}, ...]
-                if isinstance(records, list) and records:
-                    return {str(r.get("item", "")): r.get("value", "") for r in records}
-            if isinstance(result, dict):
-                return result
-        return None
+        try:
+            result = ak.stock_individual_info_em(symbol=symbol.strip().zfill(6),
+                                                  timeout=8)
+            if result is not None:
+                if hasattr(result, "to_dict"):
+                    records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+                    # stock_individual_info_em 返回 [{"item":..., "value":...}, ...]
+                    if isinstance(records, list) and records:
+                        return {str(r.get("item", "")): r.get("value", "") for r in records}
+                if isinstance(result, dict):
+                    return result
+            return None
+        except Exception as e:
+            if _is_eastmoney_blocked_error(str(e)):
+                raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
+            raise
 
 
 def _q_akshare_financials(symbol: str) -> list[dict] | None:
@@ -280,35 +268,46 @@ def _q_akshare_financials(symbol: str) -> list[dict] | None:
 
 
 def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
+    """akshare K线来源（东方财富 API）。"""
     with _proxy_bypass():
         import akshare as ak
         sd = start_date or _days_ago(365)
         ed = end_date or _today()
         sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
         ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
-        result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                    period="daily",
-                                    start_date=sd_fmt,
-                                    end_date=ed_fmt,
-                                    adjust="")
-        if result is not None and hasattr(result, "to_dict"):
-            records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-            if records:
-                # 中文列名 → 英文键名映射
-                return [_map_akshare_kline_keys(r) for r in records]
-        return None
+        try:
+            result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
+                                        period="daily",
+                                        start_date=sd_fmt,
+                                        end_date=ed_fmt,
+                                        adjust="",
+                                        timeout=10)
+            if result is not None and hasattr(result, "to_dict"):
+                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+                if records:
+                    return [_map_akshare_kline_keys(r) for r in records]
+            return None
+        except Exception as e:
+            if _is_eastmoney_blocked_error(str(e)):
+                raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
+            raise
 
 
 def _q_akshare_northbound(symbol: str) -> list[dict] | None:
     with _proxy_bypass():
         import akshare as ak
-        result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
-        if result is not None and hasattr(result, "to_dict"):
-            records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-            if records:
-                # 中文列名 → 英文键名映射
-                return [_map_akshare_northbound_keys(r) for r in records]
-        return None
+        try:
+            result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
+            if result is not None and hasattr(result, "to_dict"):
+                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+                if records:
+                    # 中文列名 → 英文键名映射
+                    return [_map_akshare_northbound_keys(r) for r in records]
+            return None
+        except Exception as e:
+            if _is_eastmoney_blocked_error(str(e)):
+                raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
+            raise
 
 
 # ---- akshare 中文列名 → 英文键名映射 ----
@@ -377,7 +376,9 @@ def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
                                  "hold_amount": r.get("持股数"),
                                  "hold_ratio": r.get("占总股本持股比例")}
                                 for r in records[:10]]
-            except Exception:
+            except Exception as e:
+                if _is_eastmoney_blocked_error(str(e)):
+                    raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
                 continue
         return None
 
@@ -458,30 +459,34 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
 
 def _q_tencent_quote(symbol: str) -> dict | None:
     """腾讯行情。"""
-    with _proxy_bypass():
-        import requests
+    _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
+
+    def _safe_float(val: str | None) -> float | None:
+        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分）。"""
+        if val is None or val in _UNAVAILABLE_MARKERS:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+    with no_proxy_session() as sess:
         market = "sh" if symbol.startswith(("6", "9")) else "sz"
-        r = requests.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
+        r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
         if r.status_code == 200 and "~" in r.text:
             p = r.text.split("~")
             if len(p) > 45:
-                q = {}
-                # 逐字段安全解析：腾讯行情字段可能为 "--" / "N/A" 等非数字
-                def _safe_float(val: str, default: float = 0) -> float:
-                    try:
-                        return float(val) if val else default
-                    except (ValueError, TypeError):
-                        return default
-
-                q["price"] = _safe_float(p[3])
-                q["change_pct"] = _safe_float(p[32])
-                q["high"] = _safe_float(p[33])
-                q["low"] = _safe_float(p[34])
-                q["volume"] = _safe_float(p[6])
-                q["turnover_rate"] = _safe_float(p[38])
-                q["pe_ratio"] = _safe_float(p[39])
-                q["total_mv"] = _safe_float(p[45]) / 10000 if p[45] and p[45] not in ("--", "N/A") else 0
-                return q
+                mv = _safe_float(p[45])
+                return {
+                    "price": _safe_float(p[3]),
+                    "change_pct": _safe_float(p[32]),
+                    "high": _safe_float(p[33]),
+                    "low": _safe_float(p[34]),
+                    "volume": _safe_float(p[6]),
+                    "turnover_rate": _safe_float(p[38]),
+                    "pe_ratio": _safe_float(p[39]),
+                    "total_mv": mv / 10000 if mv is not None else None,
+                }
         return None
 
 

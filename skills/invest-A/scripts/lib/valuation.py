@@ -15,10 +15,13 @@ from typing import Any
 
 
 def percentile_rank(seq: list[float], current: float) -> float | None:
-    """计算 current 在 seq 中的百分位（低于 current 的比例 × 100）。
+    """计算 current 在 seq 中的百分位（严格低于 current 的比例 × 100）。
 
-    percentile = (count_below / total) × 100
+    percentile = count_(v < current) / total × 100
     即：值越低，百分位越小 → "低于历史 X% 的时间"
+
+    使用严格小于（不包含等于），避免当前值等于历史极值时
+    分位被推向极端（最小值→0%，最大值→100%），使 zone 判断更稳健。
 
     Args:
         seq: 历史估值序列（正数）

@@ -150,9 +150,31 @@ class DimensionResult:
             "display": self.display,
             "data": self.primary_data,
             "status": self.status,
-            "error": None if self.primary_data is not None else "所有数据源均不可得",
+            "error": None if self.primary_data is not None else self._best_error_message(),
             "_meta": primary_meta,
         }
+
+    def _best_error_message(self) -> str:
+        """从所有失败源的错误中提取最可操作的消息（而非泛化提示）。
+
+        优先选取已知的阻断消息（如东方财富封锁、连接拒绝等），
+        其次选取第一个非空错误。"""
+        # 注意：不包含 ProxyError — 本地代理配置错误也可能产生 ProxyError，
+        # 不应自动归因于东方财富封锁。
+        actionable_keywords = (
+            "东方财富", "East Money", "eastmoney",
+            "拒绝连接", "主动拒绝", "Connection aborted",
+            "ConnectionError",
+        )
+        # 第一轮：找包含可操作关键词的错误
+        for s in self.all_sources:
+            if s.error and any(kw in s.error for kw in actionable_keywords):
+                return s.error
+        # 第二轮：取第一个有意义的错误
+        for s in self.all_sources:
+            if s.error:
+                return s.error
+        return "所有数据源均不可得"
 
     def _best_meta(self) -> dict:
         primary = self._primary

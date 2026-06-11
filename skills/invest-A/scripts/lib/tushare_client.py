@@ -40,6 +40,7 @@ class TushareClient:
         self._token = token or os.environ.get("TUSHARE_TOKEN")
         self._timeout = timeout
         self._session = requests.Session()
+        self._session.trust_env = False
         self._call_timestamps: list[float] = []
         self._daily_calls = 0
         # 当日结束时重置计数器

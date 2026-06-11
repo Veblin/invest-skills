@@ -9,9 +9,37 @@
 
 from __future__ import annotations
 
+import html as _html_mod
 import json
 import re
 from typing import Any
+
+from .proxy import EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS
+
+_EASTMONEY_BLOCKED_SHORT = "东方财富(East Money)主动拒绝连接"
+_RAW_CONNECTION_REFUSED_SHORT = "服务器拒绝连接"
+
+
+def sanitize_error(error: str, max_len: int = 60) -> str:
+    """将原始 Python 异常转为可读的简短说明，截断到 max_len。
+
+    优先检测东方财富封锁、DNS/代理等常见网络问题。
+    """
+    if not error:
+        return "未知错误"
+    if any(kw in error for kw in _EASTMONEY_BLOCKED_KEYWORDS):
+        return _EASTMONEY_BLOCKED_SHORT
+    # 通用 ConnectionError / Max retries exceeded（无论长度均替换为可读标签）
+    if "ConnectionError" in error or "Max retries exceeded" in error:
+        return _RAW_CONNECTION_REFUSED_SHORT
+    # 其他：取最后一段有意义的内容
+    cleaned = re.sub(r"\s+", " ", error).strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 3] + "..."
+    return cleaned
+
+
+_sanitize_error = sanitize_error  # 模块内向后兼容
 
 
 def _fmt(v: Any, unit: str = "") -> str:
@@ -70,7 +98,7 @@ def _source_status_block(all_sources: list[dict] | None) -> str:
         error = s.get("error") or ""
         qp = s.get("query_params", "")
         icon = "✅" if avail else ("❌" if error else "⏭️")
-        status = "成功" if avail else (f"失败: {error[:80]}" if error else "未尝试")
+        status = "成功" if avail else (f"失败: {_sanitize_error(error, 80)}" if error else "未尝试")
         qp_str = f" `{qp}`" if qp else ""
         rows.append(f"  - **{source}** {icon} — {status}{qp_str}")
     return "\n".join(rows)
@@ -111,7 +139,7 @@ def render_compact(collection: dict[str, Any], symbol: str) -> str:
             error = dim.get("error", "无可用数据源")
             lines.append("")
             lines.append(f"> **未获取到任何有效数据，无法判断。**")
-            lines.append(f"> 原因：{error}")
+            lines.append(f"> 原因：{_sanitize_error(error, 80)}")
             xv = _source_status_block(all_src)
             if xv:
                 lines.append("")
@@ -148,7 +176,7 @@ def render_compact(collection: dict[str, Any], symbol: str) -> str:
             if avail:
                 lines.append(f"| {dim_label} | {src_name} | `{qp}` | ✅ 有数据 |")
             elif error:
-                lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {error[:60]} |")
+                lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {_sanitize_error(error, 55)} |")
             else:
                 lines.append(f"| {dim_label} | {src_name} | — | ⏭️ 未尝试 |")
 
@@ -322,7 +350,7 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
         # 无数据 → 标注
         meta = _get_dim_meta(dims, "valuation")
         error = dims.get("valuation", {}).get("error", "估值维度无数据")
-        lines.append(f"> **估值数据不可得。** 原因: {error}")
+        lines.append(f"> **估值数据不可得。** 原因: {_sanitize_error(error, 80)}")
         lines.append("")
         lines.append("🔍 **待独立验证:** 确认 Tushare Token 配置后重试，或手动查询 PE/PB 当前值。")
         return "\n".join(lines)
@@ -481,7 +509,7 @@ def render_technical_section(dims: dict[str, dict], collection: dict = None) -> 
     tech = compute(kline_data)
 
     if "error" in tech:
-        lines.append(f"> 技术指标计算失败: {tech.get('message', '未知错误')}")
+        lines.append(f"> 技术指标计算失败: {sanitize_error(tech.get('message', '未知错误'), 80)}")
         return "\n".join(lines)
 
     # --- 趋势 ---
@@ -688,7 +716,7 @@ def _references_appendix(collection: dict[str, Any]) -> str:
             if avail:
                 lines.append(f"| {dim_label} | {src_name} | `{qp}` | ✅ 有数据 |")
             elif error:
-                lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {error[:60]} |")
+                lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {_sanitize_error(error, 55)} |")
             else:
                 lines.append(f"| {dim_label} | {src_name} | — | ⏭️ 未尝试 |")
 
@@ -990,12 +1018,14 @@ def _build_html_document(title: str, body_html: str) -> str:
 </html>"""
 
 
-def render_html(collection: dict[str, Any], symbol: str) -> str:
+def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = None) -> str:
     """HTML 研究报告。
 
     复用 render_report_v2() 的 Markdown 输出，转换为结构化 HTML。
+    可传入预计算的 md_text 以避免重复渲染（cmd_report HTML 模式下复用）。
     """
-    md_text = render_report_v2(collection, symbol)
+    if md_text is None:
+        md_text = render_report_v2(collection, symbol)
 
     # 提取报告标题
     name = ""
@@ -1003,20 +1033,17 @@ def render_html(collection: dict[str, Any], symbol: str) -> str:
     basic = _get_dim_data(dims, "basic_info")
     if isinstance(basic, dict):
         name = basic.get("name", "") or basic.get("股票简称", "")
-    title = f"{symbol} {name}".strip()
+    title = _html_mod.escape(f"{symbol} {name}".strip())
 
     # 分割 Markdown 的各部分
     body_html = _md_to_html(md_text)
 
-    # 对 HTML 做后处理：给引用块中的关键段落加额外样式
-    # 将 "🔍 待独立验证" 段落包装为 verify-notice
-    body_html = body_html.replace(
-        '<p>🔍 <strong>待独立验证</strong></p>',
-        '<div class="verify-notice">🔍 <strong>待独立验证</strong></div>',
-    )
-    body_html = body_html.replace(
-        '🔍 <strong>待独立验证:</strong>',
-        '<span class="verify-label">🔍 <strong>待独立验证:</strong></span>',
+    # 对 HTML 做后处理：给 "🔍 待独立验证" 段落包装 verify-notice 样式
+    # 匹配 <p>🔍 <strong>待独立验证:</strong> ...</p> 并替换为 styled div
+    body_html = re.sub(
+        r'<p>🔍 <strong>待独立验证:?</strong>([^<]*)</p>',
+        r'<div class="verify-notice">🔍 <strong>待独立验证:</strong>\1</div>',
+        body_html,
     )
 
     return _build_html_document(title, body_html)
