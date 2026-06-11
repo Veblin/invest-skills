@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.1.2 (2026-06-11)
+
+### 基础分析骨架 — 从"数据摘要"升级为"基础研究报告"
+
+- **技术分析模块** (`lib/technical.py`)：MA/SMA、MACD、RSI(6/12/24)、KDJ、BOLL、ATR、量比、N日极值、回撤 — 纯计算无副作用
+- **估值分析模块** (`lib/valuation.py`)：PE/PB/PS 历史分位计算、估值区间标签（30/70分位法）、次新股标注
+- **估值采集** (`collect_valuation()`)：Tushare `daily_basic` 5年历史序列 + 腾讯快照降级（无 Token 时标注"历史分位不可得"）
+- **快照 Diff** (`invest.py diff`)：对比同股票两次采集变化，支持 `--from/--to` 指定快照或自动取最近两次
+- **报告模板 v2** (`render_report_v2()`)：八段结构（公司画像→经营质量→估值位置→资金与筹码→技术结构→事件催化→核心矛盾）
+- **K 线窗口扩大**：默认 400 自然日（覆盖 MA250），`--deep` 扩大到 730 自然日
+
+### ⚠️ Breaking Changes
+
+- 默认采集维度从 5 个增加到 7 个（新增 `valuation` + `kline`），Tushare 配额消耗略增
+- `--emit=md` / `--emit=compact` 输出格式从旧七维度改为新八段模板
+
+### 合规
+
+- 技术指标输出使用"DIF 上穿 DEA"等描述性语言，不含"金叉/死叉/买入/卖出"等交易信号词汇
+- 所有维度末尾附"🔍 待独立验证项"
+
+## v0.1.1 (2026-06-11)
+### Changes
+- feat: update version to 0.1.1, add baostock dependency, and enhance data collection strategy
+
 ## v0.1.0 (2026-06-10)
 
 ### 初始版本

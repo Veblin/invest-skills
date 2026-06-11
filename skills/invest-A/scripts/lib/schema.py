@@ -14,6 +14,7 @@ DIMENSIONS = {
     "shareholders": "十大股东",
     "northbound": "北向资金",
     "kline": "日K线",
+    "valuation": "估值分析",
 }
 
 

@@ -56,12 +56,12 @@ def _ts_code(symbol: str) -> str:
     """转为 Tushare 格式：600176 → 600176.SH, 000858 → 000858.SZ。
 
     交易所判断：
-      上海: 6xxx → .SH
+      上海: 6xxx, 9xxx → .SH
       北京: 8xxx, 4xxx → .BJ
       深圳: 0xxx, 2xxx, 3xxx → .SZ
     """
     s = symbol.strip().zfill(6)
-    if s.startswith("6"):
+    if s.startswith(("6", "9")):
         return f"{s}.SH"
     if s.startswith(("4", "8")):
         return f"{s}.BJ"
@@ -74,23 +74,32 @@ _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PR
 _proxy_lock = threading.Lock()
 
 
+_bypass_depth = 0
+_bypass_saved: dict[str, str | None] | None = None
+
+
 @contextmanager
 def _proxy_bypass() -> Iterator[None]:
-    """清除代理环境变量以绕过代理。锁仅保护 os.environ 读写，不覆盖网络 I/O。"""
-    saved: dict[str, str | None] = {}
+    """清除代理环境变量以绕过代理。引用计数支持嵌套/并行 bypass。"""
+    global _bypass_depth, _bypass_saved
     with _proxy_lock:
-        saved = {k: os.environ.get(k) for k in _PROXY_KEYS}
-        for k in _PROXY_KEYS:
-            os.environ.pop(k, None)
+        if _bypass_depth == 0:
+            _bypass_saved = {k: os.environ.get(k) for k in _PROXY_KEYS}
+            for k in _PROXY_KEYS:
+                os.environ.pop(k, None)
+        _bypass_depth += 1
     try:
         yield
     finally:
         with _proxy_lock:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+            _bypass_depth -= 1
+            if _bypass_depth == 0 and _bypass_saved is not None:
+                for k, v in _bypass_saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                _bypass_saved = None
 
 
 def _baostock_code(symbol: str) -> str:
@@ -341,7 +350,7 @@ def _map_akshare_northbound_keys(r: dict) -> dict:
 def _akshare_top10_code(symbol: str) -> str:
     """akshare 股东接口需要的代码格式：sh600519 / sz000858。"""
     s = symbol.strip().zfill(6)
-    if s.startswith("6"):
+    if s.startswith(("6", "9")):
         return f"sh{s}"
     if s.startswith(("4", "8")):
         return f"bj{s}"
@@ -373,18 +382,25 @@ def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
         return None
 
 
-def _latest_quarter_dates() -> list[str]:
-    """返回最近 4 个季末日期（YYYYMMDD），用于 akshare 股东查询。"""
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    dates = []
-    for months_ago in range(0, 12, 3):
-        d = now - timedelta(days=90 * (months_ago // 3))
-        q_month = ((d.month - 1) // 3) * 3 + 3
-        q_end = datetime(d.year, q_month, 1) - timedelta(days=1)
-        if q_end > now:
-            q_end = datetime(d.year - 1, 12, 31)
-        dates.append(q_end.strftime("%Y%m%d"))
+def _latest_quarter_dates(as_of: datetime | None = None) -> list[str]:
+    """返回最近 4 个已结束季末日期（YYYYMMDD），用于 akshare 股东查询。"""
+    import calendar
+    from datetime import datetime
+
+    now = as_of or datetime.now()
+    dates: list[str] = []
+    year, quarter = now.year, (now.month - 1) // 3 + 1
+
+    while len(dates) < 4:
+        end_month = quarter * 3
+        last_day = calendar.monthrange(year, end_month)[1]
+        q_end = datetime(year, end_month, last_day)
+        if q_end <= now:
+            dates.append(q_end.strftime("%Y%m%d"))
+        quarter -= 1
+        if quarter < 1:
+            quarter = 4
+            year -= 1
     return dates
 
 
@@ -450,14 +466,21 @@ def _q_tencent_quote(symbol: str) -> dict | None:
             p = r.text.split("~")
             if len(p) > 45:
                 q = {}
-                q["price"] = float(p[3]) if p[3] else 0
-                q["change_pct"] = float(p[32]) if p[32] else 0
-                q["high"] = float(p[33]) if p[33] else 0
-                q["low"] = float(p[34]) if p[34] else 0
-                q["volume"] = float(p[6]) if p[6] else 0
-                q["turnover_rate"] = float(p[38]) if p[38] else 0
-                q["pe_ratio"] = float(p[39]) if p[39] else 0
-                q["total_mv"] = float(p[45]) / 10000 if p[45] else 0
+                # 逐字段安全解析：腾讯行情字段可能为 "--" / "N/A" 等非数字
+                def _safe_float(val: str, default: float = 0) -> float:
+                    try:
+                        return float(val) if val else default
+                    except (ValueError, TypeError):
+                        return default
+
+                q["price"] = _safe_float(p[3])
+                q["change_pct"] = _safe_float(p[32])
+                q["high"] = _safe_float(p[33])
+                q["low"] = _safe_float(p[34])
+                q["volume"] = _safe_float(p[6])
+                q["turnover_rate"] = _safe_float(p[38])
+                q["pe_ratio"] = _safe_float(p[39])
+                q["total_mv"] = _safe_float(p[45]) / 10000 if p[45] and p[45] not in ("--", "N/A") else 0
                 return q
         return None
 
@@ -602,8 +625,12 @@ def collect_northbound(symbol: str) -> dict:
 
 
 def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
-    """日K线。并行：Tushare + akshare + baostock。"""
-    sd = start_date or _days_ago(365)
+    """日K线。并行：Tushare + akshare + baostock。
+
+    默认窗口 400 自然日，覆盖 MA250（需 ≥250 个交易日缓冲）。
+    --deep 模式通过 invest.py 传入 start_date=_days_ago(730)。
+    """
+    sd = start_date or _days_ago(400)
     ed = end_date or _today()
 
     tasks: list[tuple[str, Callable]] = [
@@ -646,6 +673,72 @@ def _tushare_client(config: dict) -> Any:
     return _tc_local.instance
 
 
+# ---- 估值维度 ----
+
+def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
+    """Tushare daily_basic 接口：获取每日 PE/PB/PS 历史序列。
+
+    API: pro.daily_basic(ts_code, start_date, end_date, fields=...)
+    配额: 每股 1 次调用。
+    """
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("daily_basic", ts_code=_ts_code(symbol),
+                  fields="trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv",
+                  start_date=_days_ago(1825), end_date=_today())
+    if df is not None and not df.empty:
+        return df.to_dict("records")
+    return None
+
+
+def _q_tencent_valuation_snapshot(symbol: str) -> dict | None:
+    """腾讯行情估值快照：当前 PE。作为 Tushare 不可用时的降级源。"""
+    quote = _q_tencent_quote(symbol)
+    if quote is None:
+        return None
+    result: dict[str, Any] = {}
+    if quote.get("pe_ratio"):
+        result["pe_ttm"] = quote["pe_ratio"]
+    if quote.get("total_mv"):
+        result["total_mv"] = quote["total_mv"]
+    result["history_available"] = False  # 腾讯仅为快照，无历史序列
+    return result if result else None
+
+
+def _qp_tushare_daily_basic(symbol: str) -> str:
+    return _qp_tushare("daily_basic", symbol,
+                       start_date=_days_ago(1825), end_date=_today(),
+                       fields="trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv")
+
+
+def collect_valuation(symbol: str) -> dict:
+    """估值分析。并行：Tushare daily_basic（历史序列） + 腾讯快照。
+
+    有 Tushare Token: 获取 5 年历史序列 + 分位
+    无 Tushare Token: 仅腾讯当前 PE 快照，标注"历史分位不可得"
+    """
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.daily_basic", lambda: _q_tushare_daily_basic(symbol)))
+    tasks.append(("tencent_finance", lambda: _q_tencent_valuation_snapshot(symbol)))
+
+    results = _run_sources_parallel(tasks, "valuation")
+    result_map = {r.source: r for r in results}
+
+    qp_map: dict[str, str] = {
+        "tencent_finance": _qp_tencent(symbol),
+    }
+    if "tushare.daily_basic" in result_map:
+        qp_map["tushare.daily_basic"] = _qp_tushare_daily_basic(symbol)
+    _annotate_query_params(result_map, qp_map)
+
+    dim = DimensionResult("valuation", results)
+    return dim.to_legacy_dict()
+
+
 # ---- 全维度采集 ----
 
 COLLECTORS = {
@@ -655,19 +748,32 @@ COLLECTORS = {
     "shareholders": ("十大股东", collect_shareholders),
     "northbound": ("北向资金", collect_northbound),
     "kline": ("日K线", collect_kline),
+    "valuation": ("估值分析", collect_valuation),
 }
 
 
-def collect_all(symbol: str, dims: list[str] | None = None) -> dict[str, Any]:
+def collect_all(symbol: str, dims: list[str] | None = None,
+                deep: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
     每个维度内部已在 collect_* 中并行查源。
+
+    Args:
+        symbol: 股票代码
+        dims: 维度列表，None 使用默认（含 valuation + kline）
+        deep: 深度模式，kline 扩大到 730 自然日
     """
     if dims is None:
-        dims = ["basic_info", "financials", "quote", "shareholders", "northbound"]
+        dims = ["basic_info", "financials", "quote", "shareholders",
+                "northbound", "valuation", "kline"]
 
     dim_results: dict[str, dict] = {}
+
+    # 深度模式：kline 用更长窗口
+    kline_kwargs = {}
+    if deep:
+        kline_kwargs["start_date"] = _days_ago(730)
 
     # 跨维度并行
     with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
@@ -675,8 +781,12 @@ def collect_all(symbol: str, dims: list[str] | None = None) -> dict[str, Any]:
         for dim in dims:
             if dim not in COLLECTORS:
                 continue
-            _, fn = COLLECTORS[dim]
-            future_map[executor.submit(fn, symbol)] = dim
+            if dim == "kline" and kline_kwargs:
+                _, fn = COLLECTORS[dim]
+                future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
+            else:
+                _, fn = COLLECTORS[dim]
+                future_map[executor.submit(fn, symbol)] = dim
 
         for future in as_completed(future_map):
             dim = future_map[future]

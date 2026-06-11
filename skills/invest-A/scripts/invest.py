@@ -48,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pc = sub.add_parser("collect", help="采集多维度数据")
     pc.add_argument("symbol")
-    pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound")
+    pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     pc.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
     pr.add_argument("--emit", default="compact", choices=["compact", "json", "md"])
-    pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound")
+    pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pr.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
 
@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     pcomp.add_argument("symbol_a")
     pcomp.add_argument("symbol_b")
     pcomp.add_argument("--emit", default="compact", choices=["compact", "json"])
+
+    pdiff = sub.add_parser("diff", help="对比两次快照变化")
+    pdiff.add_argument("symbol")
+    pdiff.add_argument("--from", dest="from_id", type=int, help="指定旧快照 ID")
+    pdiff.add_argument("--to", dest="to_id", type=int, help="指定新快照 ID")
+    pdiff.add_argument("--emit", default="compact", choices=["compact", "json"])
 
     pd = sub.add_parser("diagnose", help="检查数据源")
     pd.add_argument("--json", action="store_true")
@@ -80,10 +86,10 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.deep:
         if "kline" not in dims:
             dims.append("kline")
-        print("🔬 深度模式已启用（扩大K线范围 + 行业/舆情分析）")
+        print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    result = collector.collect_all(args.symbol, dims)
+    result = collector.collect_all(args.symbol, dims, deep=args.deep)
     print(render.render(result, args.symbol, "compact"))
     if result["summary"]["available"] == 0:
         print("⚠️ 所有维度均不可用。请运行 diagnose。")
@@ -101,10 +107,10 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.deep:
         if "kline" not in dims:
             dims.append("kline")
-        print("🔬 深度模式已启用（扩大K线范围 + 行业/舆情分析）")
+        print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    result = collector.collect_all(args.symbol, dims)
+    result = collector.collect_all(args.symbol, dims, deep=args.deep)
     print(render.render(result, args.symbol, args.emit))
     return 0 if result["summary"]["available"] > 0 else 1
 
@@ -159,6 +165,121 @@ def cmd_store(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    """对比同一股票两次快照的变化。"""
+    if not _HAS_STORE:
+        print("⚠️ store 模块不可用，diff 功能无法执行")
+        return 1
+
+    # 参数校验
+    partial_ids = (args.from_id is not None) != (args.to_id is not None)
+    if partial_ids:
+        print("❌ --from 和 --to 必须同时指定，或都不指定（使用自动最近两次）",
+              file=sys.stderr)
+        return 1
+
+    if args.from_id is not None and args.to_id is not None:
+        old = store_mod.get_collection(args.from_id)
+        new = store_mod.get_collection(args.to_id)
+        if old is None:
+            print(f"❌ 快照 #{args.from_id} 不存在", file=sys.stderr)
+            return 1
+        if new is None:
+            print(f"❌ 快照 #{args.to_id} 不存在", file=sys.stderr)
+            return 1
+        # 校验 symbol 一致性
+        old_sym = (old.get("raw_json") or old).get("symbol", "")
+        new_sym = (new.get("raw_json") or new).get("symbol", "")
+        if old_sym != args.symbol or new_sym != args.symbol:
+            print(f"⚠️ 快照 symbol 不匹配: #{args.from_id}={old_sym}, #{args.to_id}={new_sym}, CLI={args.symbol}",
+                  file=sys.stderr)
+        # 确保 old 早于 new
+        if (old.get("fetched_at", "") > new.get("fetched_at", "")):
+            old, new = new, old
+            print(f"ⓘ 已自动交换顺序（#{args.to_id} → #{args.from_id}）")
+    else:
+        pair = store_mod.get_latest_two(args.symbol)
+        if pair is None:
+            print(f"❌ {args.symbol} 至少需要 2 次 --store 采集才能 diff（当前不足）", file=sys.stderr)
+            return 1
+        old, new = pair
+
+    diff_result = store_mod.diff_collections(old, new)
+
+    if args.emit == "json":
+        print(json.dumps(diff_result, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    # compact 输出
+    _print_diff_compact(diff_result)
+    return 0
+
+
+def _print_diff_compact(diff: dict) -> None:
+    """compact 格式 diff 输出。"""
+    from datetime import datetime
+
+    old_at = diff.get("old_at", "")[:19]
+    new_at = diff.get("new_at", "")[:19]
+
+    # 计算间隔天数
+    try:
+        old_dt = datetime.fromisoformat(old_at.replace("Z", "+00:00"))
+        new_dt = datetime.fromisoformat(new_at.replace("Z", "+00:00"))
+        days = (new_dt - old_dt).days
+        interval = f" ({days}天)"
+    except (ValueError, TypeError):
+        interval = ""
+
+    print(f"# {diff['symbol']} 变化摘要")
+    print(f"采集间隔: {old_at} → {new_at}{interval}")
+    print()
+
+    changed = diff.get("changed", [])
+    if changed:
+        print("## 发生变化的关键字段")
+        print()
+        # 按维度分组
+        by_dim: dict[str, list[dict]] = {}
+        for c in changed:
+            dim = c["path"].split(".")[0]
+            by_dim.setdefault(dim, []).append(c)
+
+        for dim, items in sorted(by_dim.items()):
+            display = dim
+            print(f"### {display}")
+            for item in items:
+                field = item["path"].split(".", 1)[1] if "." in item["path"] else item["path"]
+                old_v = item.get("old")
+                new_v = item.get("new")
+                if old_v is None and new_v is None:
+                    # 描述型变更（如新增记录数）
+                    desc = item.get("description", "")
+                    if desc:
+                        print(f"- {field}: {desc}")
+                    continue
+                pct = item.get("pct")
+                pct_str = f" ({pct:+.1f}%)" if pct is not None else ""
+                print(f"- {field}: {old_v} → {new_v}{pct_str}")
+            print()
+
+    unchanged = diff.get("unchanged", [])
+    if unchanged:
+        print("## 未变化")
+        for dim in unchanged[:10]:
+            print(f"- {dim}")
+        if len(unchanged) > 10:
+            print(f"  ... 共 {len(unchanged)} 个维度")
+        print()
+
+    skipped = diff.get("skipped", [])
+    if skipped:
+        print("## 跳过")
+        for s in skipped:
+            print(f"- {s.get('dimension', '?')}: {s.get('reason', '?')}")
+        print()
+
+
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
@@ -168,6 +289,8 @@ def main() -> int:
         return cmd_report(args)
     elif args.command == "compare":
         return cmd_compare(args)
+    elif args.command == "diff":
+        return cmd_diff(args)
     elif args.command == "diagnose":
         return cmd_diagnose(args)
     elif args.command == "store":

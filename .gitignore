@@ -22,7 +22,10 @@ evidence/*.json
 # Test artifacts
 .pytest_cache/
 htmlcov/
+host-docs/
 .coverage
+*_review.md
 
 # Build / release artifacts
 dist/
+

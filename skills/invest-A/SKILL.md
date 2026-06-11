@@ -1,13 +1,13 @@
 ---
 name: invest-A
-version: "0.1.0"
+version: "0.1.2"
 description: "A股个股调研 AI 学习技能 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 学习报告。这是一个学习工具，不是决策工具。"
 argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --deep | /invest-A 600176 --compare 000858"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
 metadata:
   requires:
-    bins: [python3]
+    bins: [uv, python3]
   optionalEnv:
     - TUSHARE_TOKEN
     - FRED_API_KEY
@@ -49,33 +49,38 @@ metadata:
 
 ```bash
 # 采集并展示
-python3 skills/invest-A/scripts/invest.py collect 600176
+uv run python skills/invest-A/scripts/invest.py collect 600176
 
 # 生成 JSON 格式报告
-python3 skills/invest-A/scripts/invest.py report 600176 --emit=json
+uv run python skills/invest-A/scripts/invest.py report 600176 --emit=json
 
 # 生成 Markdown 分析报告
-python3 skills/invest-A/scripts/invest.py report 600176 --emit=md
+uv run python skills/invest-A/scripts/invest.py report 600176 --emit=md
 
 # 深度模式（扩大K线范围 + 行业/舆情分析）
-python3 skills/invest-A/scripts/invest.py collect 600176 --deep
-python3 skills/invest-A/scripts/invest.py report 600176 --deep
+uv run python skills/invest-A/scripts/invest.py collect 600176 --deep
+uv run python skills/invest-A/scripts/invest.py report 600176 --deep
 
 # 对比双标的财务数据
-python3 skills/invest-A/scripts/invest.py compare 600176 000858
+uv run python skills/invest-A/scripts/invest.py compare 600176 000858
 
 # 检查各数据源可用性
-python3 skills/invest-A/scripts/invest.py diagnose
+uv run python skills/invest-A/scripts/invest.py diagnose
+
+# 对比两次快照变化（需先 --store 至少两次）
+uv run python skills/invest-A/scripts/invest.py diff 600176
+uv run python skills/invest-A/scripts/invest.py diff 600176 --emit=json
 
 # 查看历史采集记录
-python3 skills/invest-A/scripts/invest.py store list
+uv run python skills/invest-A/scripts/invest.py store list
 
 # 保存本次采集到持久化存储
-python3 skills/invest-A/scripts/invest.py collect 600176 --store
+uv run python skills/invest-A/scripts/invest.py collect 600176 --store
 ```
 
 > **注意**：`invest.py` 在 `skills/invest-A/scripts/` 下。运行前确保终端在 `code/` 目录。
 > 所有子命令支持 `--help` 查看参数详情。
+> **⚠️ 必须使用 `uv run python` 替代裸 `python3`**，确保依赖从 `.venv` 加载而非全局环境。
 
 ## 采集顺序
 
@@ -91,7 +96,7 @@ python3 skills/invest-A/scripts/invest.py collect 600176 --store
 以下法则约束所有输出。违反即为 Bug。
 
 **LAW 1** — 每条分析论述必须引用数据来源。
-**LAW 2** — 报告使用统一七维度结构：基本信息 → 财务报告 → 行业 → 估值/市场 → 机构 → 情绪 → 宏观。
+**LAW 2** — 报告使用统一研究流程结构：公司画像 → 经营质量 → 估值位置 → 资金与筹码 → 技术结构 → 事件催化 → 核心矛盾；每节末尾附待验证项。
 **LAW 3** — 区分"事实陈述"与"分析判断"。
 **LAW 4** — 风险提示出现首部和尾部。
 **LAW 5** — **并行取证，汇总为证。** 采集器对所有可用源并行查询（非串行降级），各渠道独立记录。如果所有渠道均无法获取某一维度的有效数据，报告必须在该维度明确标注 **"未获取到任何有效数据，无法判断"**，而非默认跳过或让读者自行推断。多源均有数据时，标注各渠道内容摘要及以哪个为主。
@@ -155,19 +160,19 @@ python3 skills/invest-A/scripts/invest.py collect 600176 --store
 
 ---
 
-## 七维度指引（分析阶段使用）
+## 八段研究结构（v0.1.2 起）
 
-| 维度 | 分析要点 | 数据来源 |
-|------|---------|---------|
-| 基本信息 | 公司概况、股权结构、治理信号 | collect.basic_info |
-| 财务报告 | ROE趋势、毛利率、现金流、成长性 | collect.financials |
-| 行业产业链 | 竞争格局、壁垒、上下游 | Claude 分析（WebSearch 补充） |
-| 估值/市场 | PE/PB水位、历史分位、融资余额 | collect.quote + collect.kline |
-| 机构分析师 | 股东结构、北向资金、机构评级 | collect.shareholders + collect.northbound |
-| 情绪舆情 | 近期事件、媒体报道 | Claude 分析（WebSearch 补充） |
-| 宏观政策 | 利率、汇率、行业政策 | `--with-macro` 时 Claude 分析 |
+| 章节 | 分析要点 | 数据来源 | 引擎渲染 |
+|------|---------|---------|---------|
+| 公司画像 | 公司概况、行业分类、上市时长 | collect.basic_info | ✅ 事实罗列 |
+| 经营质量 | ROE趋势、EPS、扣非净利润 | collect.financials | ✅ 表格 + 趋势句 |
+| 估值位置 | PE/PB历史分位、股息率 | collect.valuation + lib/valuation.py | ✅ 完整渲染 |
+| 资金与筹码 | 股东结构、北向资金、行情 | collect.shareholders + northbound + quote | ✅ 事实罗列 |
+| 技术结构 | 趋势/动量/波动/成交量/结构 | collect.kline → lib/technical.py | ✅ 完整渲染 |
+| 事件催化 | 公告、新闻、行业动态 | Claude 分析（WebSearch 补充） | 占位 |
+| 核心矛盾 | 当前最值得跟踪的问题 | Claude 根据数据卡片撰写 | 占位 + 数据卡片 |
 
-> ⚠️ "行业产业链"和"情绪舆情"两个维度无稳定 API 支撑，依赖 WebSearch 和 Claude 分析，须标注数据来源并提示不确定性。
+> ⚠️ "事件催化"和"核心矛盾"两个章节无稳定 API 支撑，依赖 WebSearch 和 Claude 分析，须标注数据来源并提示不确定性。
 >
 > **⚠️ 项目根目录的 `archive/` 是旧代码归档（v0.2 遗留），不被 Skill 引用。**
 > **不要从 `archive/` 中导入任何 Python 模块或引用配置。** 该目录仅保留用于历史追溯。

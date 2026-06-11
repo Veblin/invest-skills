@@ -131,3 +131,15 @@ class TestAkshareKeyMapping:
     def test_akshare_top10_code_bj(self):
         from lib.collector import _akshare_top10_code
         assert _akshare_top10_code("430047") == "bj430047"
+
+    def test_akshare_top10_code_bshare(self):
+        from lib.collector import _akshare_top10_code
+        assert _akshare_top10_code("900901") == "sh900901"
+
+    def test_ts_code_bshare(self):
+        from lib.collector import _ts_code
+        assert _ts_code("900901") == "900901.SH"
+
+    def test_baostock_code_bshare(self):
+        from lib.collector import _baostock_code
+        assert _baostock_code("900901") == "sh.900901"
