@@ -144,6 +144,17 @@ uv run python skills/invest-A/scripts/invest.py collect 600176 --store
 
 所有子命令支持 `--help` 查看参数详情。
 
+### 本地数据存储
+
+| 输出类型 | 默认路径 | 说明 |
+|---------|---------|------|
+| **SQLite 数据库** | `~/.local/share/investment/research.db` | `collect --store` 持久化采集结果；`store list/stats/clear` 管理 |
+| **HTML 报告** | 当前工作目录 `{cwd}/` | `report --emit=html`（默认格式），文件名 `{时间戳}-{股票代码}-{股票名称}.html` |
+| **HTML 输出目录** | `--outdir` 参数可指定 | 如 `report 600176 --outdir=./reports/` |
+
+> SQLite 数据库遵循 [XDG Base Directory](https://specifications.freedesktop.org/basedir-spec/latest/) 规范（`$XDG_DATA_HOME` 默认 = `~/.local/share`）。
+> 所有数据仅存本地，不追踪、不上报、无遥测。
+
 ### 在 Claude Code 中使用
 
 ```bash
@@ -228,9 +239,14 @@ invest-A/
       lib/
         env.py                  ← 配置管理器（多层 .env 加载）
         collector.py            ← 多维度数据采集
-        render.py               ← 报告渲染（compact/json/md）
+        render.py               ← 报告渲染（compact/json/md/html）
         tushare_client.py       ← Tushare HTTP 轻量客户端
         store.py                ← SQLite 持久化存储
+        proxy.py                ← HTTP 代理检测与 Clash 规则提示
+        schema.py               ← 数据结构定义
+        technical.py            ← 技术指标计算
+        valuation.py            ← 估值分位计算
+        assets/                 ← 离线资源（Chart.js 等）
     tests/                      ← pytest 测试
     references/
       source-guide.md           ← 数据源参考

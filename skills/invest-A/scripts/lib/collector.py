@@ -72,16 +72,34 @@ def _ts_code(symbol: str) -> str:
 # 向后兼容：测试与外部调用仍可从 collector 导入 _proxy_bypass
 _proxy_bypass = proxy_bypass
 
-# 东方财富 East Money API 常见连接失败关键标识（共享自 proxy.py）
+# 东方财富 API 连接失败时的可操作提示
 _EASTMONEY_BLOCKED_MSG = (
-    "东方财富(East Money)主动拒绝连接：该服务器对境外 IP 或非浏览器请求执行了封锁。"
-    "建议使用 Tushare / Baostock 替代，或通过 VPN(国内节点)访问。"
+    "东方财富(East Money) API 连接失败。"
+    "若使用 Clash/VPN，请在规则中将 DOMAIN-SUFFIX,eastmoney.com,DIRECT；"
+    "TUN 模式需在网卡层配置规则，或暂时关闭 VPN 后重试。"
+    "可改用 Tushare / Baostock 作为替代数据源。"
 )
 
 
 def _is_eastmoney_blocked_error(error: str) -> bool:
-    """检测异常是否由东方财富主动封锁导致。"""
+    """检测异常消息是否明确指向东方财富。"""
     return any(kw in str(error) for kw in _EASTMONEY_BLOCKED_KEYWORDS)
+
+
+def _reraise_eastmoney_api_error(exc: Exception) -> None:
+    """在东方财富 akshare 接口内，将连接失败转为可操作的 VPN/TUN 提示。
+
+    仅在已知调用东方财富 API 的函数中使用，避免误伤同花顺等其他源。
+    """
+    if _is_eastmoney_blocked_error(str(exc)):
+        raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from exc
+    err = str(exc)
+    if any(kw in err for kw in (
+        "Connection", "Remote end closed", "RemoteDisconnected", "ProxyError",
+        "Max retries exceeded",
+    )):
+        raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from exc
+    raise exc
 
 
 def _baostock_code(symbol: str) -> str:
@@ -191,6 +209,7 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
 
 
 def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
+    """Tushare 十大股东（最新报告期）。"""
     from . import env as _env
     config = _env.get_config()
     if not _env.is_tushare_available(config):
@@ -218,6 +237,21 @@ def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
     return None
 
 
+def _normalize_northbound_records(records: list[dict], source: str) -> list[dict]:
+    """统一 net_mf_vol 为「元」。Tushare moneyflow 字段单位为万元，akshare 为元。"""
+    if not records:
+        return records
+    scale = 10000.0 if source.startswith("tushare") else 1.0
+    out: list[dict] = []
+    for r in records:
+        row = dict(r)
+        v = row.get("net_mf_vol")
+        if v is not None and scale != 1.0:
+            row["net_mf_vol"] = float(v) * scale
+        out.append(row)
+    return out
+
+
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
     from . import env as _env
     config = _env.get_config()
@@ -228,7 +262,7 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
                   fields="ts_code,trade_date,buy_sm_vol,sell_sm_vol,net_mf_vol",
                   start_date=_days_ago(10), end_date=_today())
     if df is not None and not df.empty:
-        return df.to_dict("records")
+        return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
     return None
 
 
@@ -249,9 +283,7 @@ def _q_akshare_basic(symbol: str) -> dict | None:
                     return result
             return None
         except Exception as e:
-            if _is_eastmoney_blocked_error(str(e)):
-                raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
-            raise
+            _reraise_eastmoney_api_error(e)
 
 
 def _q_akshare_financials(symbol: str) -> list[dict] | None:
@@ -288,9 +320,7 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
                     return [_map_akshare_kline_keys(r) for r in records]
             return None
         except Exception as e:
-            if _is_eastmoney_blocked_error(str(e)):
-                raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
-            raise
+            _reraise_eastmoney_api_error(e)
 
 
 def _q_akshare_northbound(symbol: str) -> list[dict] | None:
@@ -301,13 +331,11 @@ def _q_akshare_northbound(symbol: str) -> list[dict] | None:
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:
-                    # 中文列名 → 英文键名映射
-                    return [_map_akshare_northbound_keys(r) for r in records]
+                    mapped = [_map_akshare_northbound_keys(r) for r in records]
+                    return _normalize_northbound_records(mapped, "akshare.northbound")
             return None
         except Exception as e:
-            if _is_eastmoney_blocked_error(str(e)):
-                raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
-            raise
+            _reraise_eastmoney_api_error(e)
 
 
 # ---- akshare 中文列名 → 英文键名映射 ----
@@ -378,13 +406,13 @@ def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
                                 for r in records[:10]]
             except Exception as e:
                 if _is_eastmoney_blocked_error(str(e)):
-                    raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from e
+                    _reraise_eastmoney_api_error(e)
                 continue
         return None
 
 
-def _latest_quarter_dates(as_of: datetime | None = None) -> list[str]:
-    """返回最近 4 个已结束季末日期（YYYYMMDD），用于 akshare 股东查询。"""
+def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list[str]:
+    """返回最近 count 个已结束季末日期（YYYYMMDD），用于股东多期查询。"""
     import calendar
     from datetime import datetime
 
@@ -392,7 +420,7 @@ def _latest_quarter_dates(as_of: datetime | None = None) -> list[str]:
     dates: list[str] = []
     year, quarter = now.year, (now.month - 1) // 3 + 1
 
-    while len(dates) < 4:
+    while len(dates) < count:
         end_month = quarter * 3
         last_day = calendar.monthrange(year, end_month)[1]
         q_end = datetime(year, end_month, last_day)

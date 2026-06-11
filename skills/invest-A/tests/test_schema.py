@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import threading
-
 import pytest
 
 
@@ -62,30 +60,6 @@ class TestBaostockCode:
 
         assert _baostock_code("430047") == "bj.430047"
         assert _baostock_code("835185") == "bj.835185"
-
-
-class TestProxyBypass:
-    def test_proxy_bypass_serializes_threads(self):
-        from lib.collector import _proxy_bypass
-
-        os.environ["HTTP_PROXY"] = "http://proxy.test:8080"
-        try:
-            seen: list[str | None] = []
-
-            def worker():
-                with _proxy_bypass():
-                    seen.append(os.environ.get("HTTP_PROXY"))
-
-            threads = [threading.Thread(target=worker) for _ in range(4)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-
-            assert all(v is None for v in seen)
-            assert os.environ.get("HTTP_PROXY") == "http://proxy.test:8080"
-        finally:
-            os.environ.pop("HTTP_PROXY", None)
 
 
 class TestAkshareKeyMapping:

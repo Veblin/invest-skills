@@ -47,7 +47,7 @@ class TushareClient:
         now = time.time()
         midnight = now - (now % 86400)
         self._daily_reset_at = midnight + 86400
-        # 在初始化时捕获代理设置，避免后续 os.environ 被 _proxy_bypass 清除
+        # 在初始化时捕获代理设置，供显式传入 Session（trust_env=False）
         self._proxies: dict[str, str] = {}
         for key in ("http", "https"):
             val = os.environ.get(f"{key}_proxy") or os.environ.get(f"{key.upper()}_PROXY")

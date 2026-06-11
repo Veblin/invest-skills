@@ -33,6 +33,7 @@ while _project_root != _project_root.parent:
     _project_root = _project_root.parent
 
 from lib import collector, env, render
+from lib.proxy import warn_if_proxy_detected
 
 try:
     from lib import store as store_mod
@@ -92,6 +93,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
+    warn_if_proxy_detected()
     result = collector.collect_all(args.symbol, dims, deep=args.deep)
     print(render.render(result, args.symbol, "compact"))
     if result["summary"]["available"] == 0:
@@ -113,6 +115,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
+    warn_if_proxy_detected()
     result = collector.collect_all(args.symbol, dims, deep=args.deep)
     if result["summary"]["available"] == 0:
         print("⚠️ 所有维度均不可用，无法生成报告")
@@ -122,9 +125,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     # HTML 为默认输出格式：自动保存文件 + 终端输出紧凑摘要
     if fmt == "html":
-        # 渲染一次 Markdown，复用给 HTML 和终端摘要（避免 compute() 重复计算）
         md_v2 = render.render_report_v2(result, args.symbol)
-        output = render.render_html(result, args.symbol, md_text=md_v2)
+        output = render.render_html(result, args.symbol)
         from datetime import datetime
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -141,12 +143,16 @@ def cmd_report(args: argparse.Namespace) -> int:
         filename = f"{ts}-{args.symbol}-{safe_name}.html" if safe_name else f"{ts}-{args.symbol}.html"
         outdir = Path(args.outdir).resolve() if args.outdir else Path.cwd()
         outdir.mkdir(parents=True, exist_ok=True)
-        outpath = outdir / filename
-        outpath.write_text(output, encoding="utf-8")
+        htmlpath = outdir / filename
+        htmlpath.write_text(output, encoding="utf-8")
 
-        # stdout 输出完整 Markdown 报告 + 保存路径
-        print(md_v2)
-        print(f"📄 HTML 研究报告已保存: {outpath.resolve()}")
+        # 同时保存 Markdown 版本
+        mdfile = htmlpath.with_suffix(".md")
+        mdfile.write_text(md_v2, encoding="utf-8")
+
+        print(render.render_compact(result, args.symbol))
+        print(f"📄 HTML 报告: {htmlpath.resolve()}")
+        print(f"📝 Markdown 报告: {mdfile.resolve()}")
         return 0
 
     # 其他格式保持原有行为
@@ -178,7 +184,12 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(d, ensure_ascii=False, indent=2))
         return 0
-    print(f"=== 数据源诊断 ===\n配置: {d['config_source']}\n可用: {d['available_count']}/{d['total_count']}\n")
+    proxy_hint = ""
+    if d.get("proxy_detected"):
+        proxy_hint = "代理环境: 已检测 — 国内数据源应直连，请配置 Clash DIRECT 规则\n"
+        if d.get("clash_rules_hint"):
+            proxy_hint += f"\n{d['clash_rules_hint']}\n"
+    print(f"=== 数据源诊断 ===\n配置: {d['config_source']}\n{proxy_hint}可用: {d['available_count']}/{d['total_count']}\n")
     for s, a in d["sources"].items():
         if isinstance(a, dict):
             em = a

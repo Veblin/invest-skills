@@ -98,11 +98,10 @@ def is_baostock_available() -> bool:
 
 
 def is_tencent_available() -> bool:
-    from .proxy import no_proxy_session
+    import requests
     try:
-        with no_proxy_session() as sess:
-            r = sess.get("http://qt.gtimg.cn/q=sh600519", timeout=3)
-            return r.status_code == 200 and "~" in r.text
+        r = requests.get("http://qt.gtimg.cn/q=sh600519", timeout=3)
+        return r.status_code == 200 and "~" in r.text
     except Exception:
         return False
 
@@ -114,39 +113,38 @@ def is_eastmoney_api_reachable() -> dict[str, Any]:
     避免因特定日期区间无 K 线数据而误报"不可达"。
     """
     from datetime import datetime, timedelta
-    from .proxy import no_proxy_session
+    import requests
 
     result: dict[str, Any] = {"reachable": False, "http_status": None, "error": None}
     try:
         now = datetime.now()
         beg = (now - timedelta(days=10)).strftime("%Y%m%d")
         end = now.strftime("%Y%m%d")
-        with no_proxy_session() as sess:
-            sess.headers.update({
+        r = requests.get(
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+            params={"fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+                    "ut": "7eea3edcaed734bea9cbfc24409ed989",
+                    "klt": "101", "fqt": "0",
+                    "secid": "0.300750",
+                    "beg": beg, "end": end},
+            headers={
                 "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                                "AppleWebKit/537.36 (KHTML, like Gecko) "
                                "Chrome/120.0.0.0 Safari/537.36"),
                 "Referer": "https://quote.eastmoney.com/",
-            })
-            r = sess.get(
-                "https://push2his.eastmoney.com/api/qt/stock/kline/get",
-                params={"fields1": "f1,f2,f3,f4,f5,f6",
-                        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
-                        "ut": "7eea3edcaed734bea9cbfc24409ed989",
-                        "klt": "101", "fqt": "0",
-                        "secid": "0.300750",
-                        "beg": beg, "end": end},
-                timeout=8,
-            )
-            result["http_status"] = r.status_code
-            if r.status_code == 200:
-                data = r.json()
-                if data.get("data") is not None:
-                    result["reachable"] = True
-                else:
-                    result["error"] = "HTTP 200: 响应不包含 data 字段"
+            },
+            timeout=8,
+        )
+        result["http_status"] = r.status_code
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("data") is not None:
+                result["reachable"] = True
             else:
-                result["error"] = f"HTTP {r.status_code}: 请求失败"
+                result["error"] = "HTTP 200: 响应不包含 data 字段"
+        else:
+            result["error"] = f"HTTP {r.status_code}: 请求失败"
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
     return result
@@ -155,6 +153,9 @@ def is_eastmoney_api_reachable() -> dict[str, Any]:
 def diagnose(config: dict[str, Any] | None = None) -> dict[str, Any]:
     if config is None:
         config = get_config()
+    from .proxy import clash_rules_yaml, detect_proxy, requests_use_proxy
+
+    proxy = detect_proxy()
     eastmoney = is_eastmoney_api_reachable()
     sources = {
         "tushare": is_tushare_available(config),
@@ -169,6 +170,11 @@ def diagnose(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "project_root": str(PROJECT_ROOT),
         "store_db": str(STORE_DB),
         "store_exists": STORE_DB.exists(),
+        "proxy_detected": proxy["detected"],
+        "proxy_env_keys": proxy["env_keys"],
+        "proxy_system": proxy["system_proxies"],
+        "proxy_requests_active": requests_use_proxy(),
+        "clash_rules_hint": clash_rules_yaml() if proxy["detected"] else None,
         "sources": sources,
         "available_count": sum(
             1 for v in sources.values()

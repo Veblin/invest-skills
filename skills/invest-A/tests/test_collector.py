@@ -46,64 +46,59 @@ class TestLatestQuarterDates:
         dates = _latest_quarter_dates(as_of=datetime(2024, 2, 29))
         assert dates[0] == "20231231"
 
-    def test_returns_exactly_four_dates(self):
-        """始终返回恰好 4 个季末日期。"""
+    def test_returns_five_dates_by_default(self):
+        """默认返回 5 个季末日期（股东查询日期重试）。"""
         from datetime import datetime
         from lib.collector import _latest_quarter_dates
 
         for month in range(1, 13):
             dates = _latest_quarter_dates(as_of=datetime(2025, month, 15))
-            assert len(dates) == 4, f"month={month} 返回 {len(dates)} 条"
+            assert len(dates) == 5, f"month={month} 返回 {len(dates)} 条"
             for d in dates:
                 assert d[4:] in ("0331", "0630", "0930", "1231"), f"非季末: {d}"
 
+    def test_count_override(self):
+        from datetime import datetime
+        from lib.collector import _latest_quarter_dates
+
+        dates = _latest_quarter_dates(as_of=datetime(2026, 6, 11), count=4)
+        assert len(dates) == 4
+
+
+class TestAkshareShareholdersRetry:
+    def test_connection_error_retries_next_quarter(self, monkeypatch):
+        """临时 Connection 错误应继续尝试下一报告期，而非整函数失败。"""
+        calls: list[str] = []
+
+        class _Result:
+            def to_dict(self, orient: str = "records"):
+                return [{"股东名称": "甲", "持股数": 100, "占总股本持股比例": 10.0}]
+
+        def _fake_em(symbol: str, date: str):
+            calls.append(date)
+            if len(calls) < 3:
+                raise ConnectionError("Connection refused")
+            return _Result()
+
+        import akshare as ak
+
+        monkeypatch.setattr(ak, "stock_gdfx_top_10_em", _fake_em)
+        from lib.collector import _q_akshare_shareholders
+
+        result = _q_akshare_shareholders("600519")
+        assert result is not None
+        assert len(calls) == 3
+        assert result[0]["holder_name"] == "甲"
+
 
 class TestProxyBypass:
-    def test_restore_after_single_use(self):
+    def test_collector_proxy_bypass_is_noop(self):
+        """collector 仍导出 _proxy_bypass，但不再修改环境变量。"""
         from lib.collector import _proxy_bypass
 
         os.environ["HTTP_PROXY"] = "http://test-proxy:8080"
         try:
             with _proxy_bypass():
-                assert "HTTP_PROXY" not in os.environ
-            assert os.environ.get("HTTP_PROXY") == "http://test-proxy:8080"
+                assert os.environ.get("HTTP_PROXY") == "http://test-proxy:8080"
         finally:
             os.environ.pop("HTTP_PROXY", None)
-
-    def test_nested_bypass_restores_once(self):
-        """嵌套 bypass 结束后恢复进入前的代理（引用计数）。"""
-        from lib.collector import _proxy_bypass
-
-        os.environ["HTTP_PROXY"] = "http://nested:1"
-        try:
-            with _proxy_bypass():
-                assert "HTTP_PROXY" not in os.environ
-                with _proxy_bypass():
-                    assert "HTTP_PROXY" not in os.environ
-                assert "HTTP_PROXY" not in os.environ
-            assert os.environ.get("HTTP_PROXY") == "http://nested:1"
-        finally:
-            os.environ.pop("HTTP_PROXY", None)
-
-    def test_parallel_bypass_both_complete(self):
-        """两线程并发 bypass：均应完成且不抛异常（引用计数防竞争）。"""
-        from lib.collector import _proxy_bypass
-
-        import threading
-
-        errors: list[Exception] = []
-        barrier = threading.Barrier(2, timeout=5)
-
-        def worker() -> None:
-            try:
-                barrier.wait()  # 两线程同时进入 bypass
-                with _proxy_bypass():
-                    assert "HTTP_PROXY" not in os.environ or True
-            except Exception as e:
-                errors.append(e)
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(worker) for _ in range(2)]
-            for f in futures:
-                f.result()
-        assert not errors

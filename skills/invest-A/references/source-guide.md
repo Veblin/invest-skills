@@ -14,11 +14,29 @@
 | **腾讯行情** | `qt.gtimg.cn` HTTP | ★★★★ | 否 | 实时报价（价格/成交量/PE/市值） |
 | **baostock** | `query_history_k_data_plus` | ★★★★ | 否 | K 线历史数据，免费稳定，需网络直连 |
 
-## 代理问题
+## 代理 / VPN 问题（Clash、V2Ray 等）
 
-如果系统配置了 HTTP_PROXY/HTTPS_PROXY（如 Clash/V2Ray 等 VPN 代理），akshare 基于 `requests` 的接口会走代理失败，表现为 `ProxyError`。
+大陆用户常开 VPN，国内数据源（东方财富、腾讯行情、baostock）应**直连**，走代理会失败或被识别为境外 IP。
 
-**自动处理**：`collector.py` 通过 `_proxy_bypass()` 在调用 akshare、baostock、腾讯行情前清除代理环境变量（锁仅保护 `os.environ` 读写，不阻塞网络 I/O），完成后恢复。Tushare 客户端在初始化时已捕获代理配置并显式传入 `requests.Session`，不受 env 清除影响。用户无需手动干预。
+### 检测与提示（不强制绕过）
+
+`lib/proxy.py` 检测 env 代理与 macOS 系统代理。`collect` / `report` 启动时若检测到代理，会提示将以下域名加入 Clash **DIRECT** 规则：
+
+```yaml
+rules:
+  - DOMAIN-SUFFIX,eastmoney.com,DIRECT
+  - DOMAIN-SUFFIX,gtimg.cn,DIRECT
+  - DOMAIN-SUFFIX,baostock.com,DIRECT
+  - MATCH,PROXY
+```
+
+运行 `invest.py diagnose` 可查看 `proxy_detected` 与 `clash_rules_hint`。
+
+Tushare 客户端使用 `trust_env=False` 并显式传入代理配置，与 akshare 并行采集互不干扰。
+
+### Clash TUN 模式
+
+TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为 **DIRECT**，或采集时暂时关闭 TUN / 使用「规则模式」而非「全局模式」。
 
 ## 待接入数据源
 
