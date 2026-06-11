@@ -1,6 +1,6 @@
 [project]
 name = "investment-learning-skill"
-version = "0.1.0"
+version = "0.1.1"
 description = "A股个股调研 AI 学习技能 — Tushare + FRED 数据采集，产出带来源追溯的 Markdown 学习报告"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,6 +10,7 @@ dependencies = [
   "requests>=2.31",
   "fredapi>=0.5.2",
   "akshare>=1.18.64",
+  "baostock>=0.8.9",
 ]
 
 [dependency-groups]

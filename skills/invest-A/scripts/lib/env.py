@@ -88,6 +88,15 @@ def is_akshare_available() -> bool:
         return False
 
 
+def is_baostock_available() -> bool:
+    """检测 baostock 是否可用（导入成功即为可用）。"""
+    try:
+        import baostock  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def is_tencent_available() -> bool:
     import requests
     try:
@@ -105,6 +114,7 @@ def diagnose(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "fred": is_fred_available(config),
         "tencent": is_tencent_available(),
         "akshare": is_akshare_available(),
+        "baostock": is_baostock_available(),
     }
     return {
         "config_source": config.get("_CONFIG_SOURCE", "unknown"),

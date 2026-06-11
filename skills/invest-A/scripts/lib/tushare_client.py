@@ -46,6 +46,12 @@ class TushareClient:
         now = time.time()
         midnight = now - (now % 86400)
         self._daily_reset_at = midnight + 86400
+        # 在初始化时捕获代理设置，避免后续 os.environ 被 _proxy_bypass 清除
+        self._proxies: dict[str, str] = {}
+        for key in ("http", "https"):
+            val = os.environ.get(f"{key}_proxy") or os.environ.get(f"{key.upper()}_PROXY")
+            if val:
+                self._proxies[key] = val
 
     # ------------------------------------------------------------------
     # 公共方法
@@ -106,6 +112,7 @@ class TushareClient:
                 TUSHARE_API_URL,
                 json=payload,
                 timeout=self._timeout,
+                proxies=self._proxies if self._proxies else None,
             )
             resp.raise_for_status()
             data = resp.json()

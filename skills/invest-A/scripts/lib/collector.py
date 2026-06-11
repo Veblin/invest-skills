@@ -1,18 +1,27 @@
 """数据采集模块。封装各数据源，依赖 env.py 做可用性检测。
 
-数据源策略（按优先级）：
-  有 Token: Tushare ∥ akshare → 腾讯行情 → 标注不可得
-  无 Token: akshare → 腾讯行情 → 标注不可得
+设计模式（参考 last30days-skill 的 parallel fan-out）：
+  每个维度下，对所有可用源并行查询 → SourceResult 归一化 → DimensionResult 合并。
+  失败不阻塞，选取最优源为主数据。
+
+数据源策略（v0.3+ 并行取证）：
+  有 Token: Tushare ∥ akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
+  无 Token: akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import env
+from .schema import SourceResult, DimensionResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +49,6 @@ def _latest_quarter_end() -> str:
         d = datetime.strptime(f"{y}{md}", "%Y%m%d")
         if now > d:
             return f"{y}{md}"
-    # 极端情况：当前日期在 1 月 1 日-3 月 31 日间回到上一年
     return f"{now.year - 1}1231"
 
 
@@ -60,341 +68,582 @@ def _ts_code(symbol: str) -> str:
     return f"{s}.SZ"
 
 
-# ---- 类型别名 ----
+# ---- 代理绕过辅助 ----
 
-CollectResult = dict[str, Any]
-
-
-# ---- 结果构建辅助 ----
-
-def _result(data: Any, source: str, source_group: str = "",
-            confidence: str = "medium", fallback_chain: list[str] | None = None,
-            latency_ms: float = 0) -> CollectResult:
-    return {
-        "data": data,
-        "_meta": {
-            "source": source, "source_group": source_group,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "fallback_chain": fallback_chain or [],
-            "confidence": confidence, "latency_ms": round(latency_ms, 1),
-            "success": data is not None,
-        },
-    }
+_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
+_proxy_lock = threading.Lock()
 
 
-def _error(message: str, attempted: list[str]) -> CollectResult:
-    return {
-        "data": None, "error": message,
-        "_meta": {"source": "none", "source_group": "unknown",
-                   "fetched_at": datetime.now(timezone.utc).isoformat(),
-                   "fallback_chain": attempted, "confidence": "low",
-                   "latency_ms": 0, "success": False, "error_type": "empty",
-                   "attempted_sources": attempted},
-    }
-
-
-# ---- 通用 Tushare 查询辅助 ----
-
-def _tushare_query(
-    api_name: str,
-    symbol: str,
-    fields: str,
-    result_source: str,
-    confidence: str = "high",
-    **kwargs: Any,
-) -> CollectResult:
-    """执行 Tushare 查询，减少重复模板代码。"""
-    config = env.get_config()
-    start = time.time()
-    if not env.is_tushare_available(config):
-        return _error(f"{result_source}不可得（需 TUSHARE_TOKEN）", ["tushare"])
+@contextmanager
+def _proxy_bypass() -> Iterator[None]:
+    """清除代理环境变量以绕过代理。锁仅保护 os.environ 读写，不覆盖网络 I/O。"""
+    saved: dict[str, str | None] = {}
+    with _proxy_lock:
+        saved = {k: os.environ.get(k) for k in _PROXY_KEYS}
+        for k in _PROXY_KEYS:
+            os.environ.pop(k, None)
     try:
-        tc = _tushare_client(config)
-        df = tc.query(api_name, ts_code=_ts_code(symbol), fields=fields, **kwargs)
-        if df is not None and not df.empty:
-            data = df.iloc[0].to_dict() if len(df) == 1 else df.to_dict("records")
-            return _result(data, result_source, "tushare", confidence,
-                           latency_ms=(time.time() - start) * 1000)
-    except Exception as e:
-        logger.warning("Tushare %s 失败: %s", api_name, e)
-    return _error(f"{result_source}不可得", ["tushare"])
+        yield
+    finally:
+        with _proxy_lock:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
-# ---- 通用 akshare 查询辅助 ----
+def _baostock_code(symbol: str) -> str:
+    """Baostock 证券代码：深市 sz. / 沪市 sh. / 北交所 bj."""
+    s = symbol.strip().zfill(6)
+    if s.startswith(("0", "2", "3")):
+        return f"sz.{s}"
+    if s.startswith(("4", "8")):
+        return f"bj.{s}"
+    return f"sh.{s}"
 
-def _akshare_query(
-    fn: Callable[[], Any],
-    result_source: str,
-    confidence: str = "medium",
-    fallback_chain: list[str] | None = None,
-) -> CollectResult:
-    """执行 akshare 查询，自动处理异常和计时。"""
+
+# ---- 并行执行辅助 ----
+
+def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
+                          dimension: str) -> list[SourceResult]:
+    """并行执行多个源查询任务，返回 SourceResult 列表。
+
+    last30days 的 ThreadPoolExecutor fan-out 模式：
+    - 每个任务独立提交
+    - 失败不阻塞其他任务
+    - 返回所有结果（含失败）供合并
+
+    Args:
+        tasks: [(source_name, callable), ...]
+        dimension: 维度标识
+    """
+    if not tasks:
+        return []
+
+    sources: list[SourceResult | None] = []
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
+        futures = {
+            executor.submit(_run_one_source, name, fn, dimension): i
+            for i, (name, fn) in enumerate(tasks)
+        }
+        results: dict[int, SourceResult] = {}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                results[idx] = future.result()
+            except Exception as exc:
+                results[idx] = SourceResult(
+                    source=f"__internal__",
+                    data=None,
+                    dimension=dimension,
+                    error=f"Executor failure: {exc}",
+                )
+        sources = [results.get(i) for i in range(len(tasks))]
+
+    return [s for s in sources if s is not None]
+
+
+def _annotate_query_params(result_map: dict[str, SourceResult],
+                           params: dict[str, str]) -> None:
+    """为 result_map 中的 SourceResult 设置 query_params（无论成功/失败）。"""
+    for name, qp in params.items():
+        if name in result_map:
+            result_map[name].query_params = qp
+
+
+def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceResult:
+    """包装单个源查询为 SourceResult。"""
     start = time.time()
     try:
         data = fn()
+        elapsed = (time.time() - start) * 1000
         if data is not None:
-            # akshare 通常返回 DataFrame
-            import pandas as pd
-            if isinstance(data, pd.DataFrame) and not data.empty:
-                records = data.to_dict("records")
-                return _result(records, result_source, "akshare", confidence,
-                               fallback_chain=fallback_chain,
-                               latency_ms=(time.time() - start) * 1000)
-            if isinstance(data, dict) and data:
-                return _result(data, result_source, "akshare", confidence,
-                               fallback_chain=fallback_chain,
-                               latency_ms=(time.time() - start) * 1000)
-            if isinstance(data, pd.Series) and not data.empty:
-                return _result(data.to_dict(), result_source, "akshare", confidence,
-                               fallback_chain=fallback_chain,
-                               latency_ms=(time.time() - start) * 1000)
+            return SourceResult(name, data, dimension, latency_ms=elapsed)
+        return SourceResult(name, None, dimension, error="No data returned",
+                           latency_ms=elapsed)
     except Exception as e:
-        logger.warning("akshare %s 失败: %s", result_source, e)
-    return _error(f"{result_source}不可得（akshare）", (fallback_chain or []) + ["akshare"])
+        elapsed = (time.time() - start) * 1000
+        logger.warning("Source %s failed: %s", name, e)
+        return SourceResult(name, None, dimension, error=str(e),
+                           latency_ms=elapsed)
 
 
-# ---- 各维度采集 ----
+# ---- 单个源查询函数 ----
 
-def collect_basic_info(symbol: str) -> CollectResult:
-    """采集基本信息。Tushare → akshare → 不可得。"""
-    # 主路径: Tushare
-    result = _tushare_query(
-        "stock_basic", symbol,
-        fields="ts_code,name,area,industry,market,list_date",
-        result_source="tushare.stock_basic",
-    )
-    if result["data"] is not None:
-        return result
+def _q_tushare_basic(symbol: str) -> dict | None:
+    """Tushare 基本信息来源。"""
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("stock_basic", ts_code=_ts_code(symbol),
+                  fields="ts_code,name,area,industry,market,list_date")
+    if df is not None and not df.empty:
+        return df.iloc[0].to_dict()
+    return None
 
-    # 兜底: akshare stock_individual_info_em
-    if env.is_akshare_available():
+
+def _q_tushare_financials(symbol: str) -> list[dict] | None:
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("fina_indicator", ts_code=_ts_code(symbol),
+                  fields="ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit",
+                  start_date=_days_ago(730), end_date=_today())
+    if df is not None and not df.empty:
+        return df.to_dict("records")
+    return None
+
+
+def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("top10_floatholders", ts_code=_ts_code(symbol),
+                  fields="ts_code,end_date,holder_name,hold_amount,hold_ratio",
+                  period=_latest_quarter_end())
+    if df is not None and not df.empty:
+        return df.to_dict("records")
+    return None
+
+
+def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("daily", ts_code=_ts_code(symbol),
+                  fields="trade_date,open,high,low,close,vol,amount",
+                  **kwargs)
+    if df is not None and not df.empty:
+        return df.to_dict("records")
+    return None
+
+
+def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("moneyflow", ts_code=_ts_code(symbol),
+                  fields="ts_code,trade_date,buy_sm_vol,sell_sm_vol,net_mf_vol",
+                  start_date=_days_ago(10), end_date=_today())
+    if df is not None and not df.empty:
+        return df.to_dict("records")
+    return None
+
+
+def _q_akshare_basic(symbol: str) -> dict | None:
+    """akshare 基本信息来源。"""
+    with _proxy_bypass():
         import akshare as ak
-        akshare_result = _akshare_query(
-            lambda: ak.stock_individual_info_em(symbol=symbol.strip().zfill(6)),
-            result_source="akshare.stock_individual_info_em",
-            fallback_chain=["tushare"],
-        )
-        if akshare_result["data"] is not None:
-            return akshare_result
+        result = ak.stock_individual_info_em(symbol=symbol.strip().zfill(6))
+        if result is not None:
+            if hasattr(result, "to_dict"):
+                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+                # stock_individual_info_em 返回 [{"item":..., "value":...}, ...]
+                if isinstance(records, list) and records:
+                    return {str(r.get("item", "")): r.get("value", "") for r in records}
+            if isinstance(result, dict):
+                return result
+        return None
 
-    return _error("基本信息不可得", ["tushare", "akshare"])
+
+def _q_akshare_financials(symbol: str) -> list[dict] | None:
+    with _proxy_bypass():
+        import akshare as ak
+        result = ak.stock_financial_abstract_ths(symbol=symbol.strip().zfill(6),
+                                                 indicator="按报告期")
+        if result is not None and hasattr(result, "to_dict"):
+            records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+            if records:
+                # 中文列名 → 英文键名映射
+                return [_map_akshare_financial_keys(r) for r in records]
+        return None
 
 
-def collect_financials(symbol: str) -> CollectResult:
-    """采集财务指标。Tushare → akshare → 不可得。"""
-    # 主路径: Tushare fina_indicator
-    result = _tushare_query(
-        "fina_indicator", symbol,
-        fields="ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit",
-        result_source="tushare.fina_indicator",
-        start_date=_days_ago(730), end_date=_today(),
-    )
-    if result["data"] is not None:
-        return result
+def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
+    with _proxy_bypass():
+        import akshare as ak
+        sd = start_date or _days_ago(365)
+        ed = end_date or _today()
+        sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
+        ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+        result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
+                                    period="daily",
+                                    start_date=sd_fmt,
+                                    end_date=ed_fmt,
+                                    adjust="")
+        if result is not None and hasattr(result, "to_dict"):
+            records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+            if records:
+                # 中文列名 → 英文键名映射
+                return [_map_akshare_kline_keys(r) for r in records]
+        return None
 
-    # 兜底: akshare financial abstract
-    if env.is_akshare_available():
+
+def _q_akshare_northbound(symbol: str) -> list[dict] | None:
+    with _proxy_bypass():
+        import akshare as ak
+        result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
+        if result is not None and hasattr(result, "to_dict"):
+            records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+            if records:
+                # 中文列名 → 英文键名映射
+                return [_map_akshare_northbound_keys(r) for r in records]
+        return None
+
+
+# ---- akshare 中文列名 → 英文键名映射 ----
+
+def _map_akshare_kline_keys(r: dict) -> dict:
+    """akshare stock_zh_a_hist 列名映射。"""
+    return {
+        "trade_date": str(r.get("日期", "")),
+        "open": r.get("开盘"),
+        "high": r.get("最高"),
+        "low": r.get("最低"),
+        "close": r.get("收盘"),
+        "vol": r.get("成交量"),
+    }
+
+
+def _map_akshare_financial_keys(r: dict) -> dict:
+    """akshare stock_financial_abstract_ths 列名映射。"""
+    return {
+        "end_date": str(r.get("报告期", "")),
+        "roe": r.get("净资产收益率"),
+        "eps": r.get("基本每股收益"),
+        "profit_dedt": r.get("扣非净利润"),
+        "revenue": r.get("营业总收入"),
+        "net_profit": r.get("净利润"),
+    }
+
+
+def _map_akshare_northbound_keys(r: dict) -> dict:
+    """akshare stock_hsgt_individual_em 列名映射。"""
+    return {
+        "trade_date": str(r.get("持股日期", "")),
+        "net_mf_vol": r.get("今日增持资金"),
+    }
+
+
+# ---- akshare 股东信息 ----
+
+def _akshare_top10_code(symbol: str) -> str:
+    """akshare 股东接口需要的代码格式：sh600519 / sz000858。"""
+    s = symbol.strip().zfill(6)
+    if s.startswith("6"):
+        return f"sh{s}"
+    if s.startswith(("4", "8")):
+        return f"bj{s}"
+    return f"sz{s}"
+
+
+def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
+    """akshare 前十大股东来源（东方财富）。"""
+    with _proxy_bypass():
+        import akshare as ak
+        from datetime import datetime
+        # 使用最新两次报告期的数据
+        now = datetime.now()
+        # 尝试当前季度末日期
+        dates_to_try = _latest_quarter_dates()
+        for date_str in dates_to_try:
+            try:
+                code = _akshare_top10_code(symbol)
+                result = ak.stock_gdfx_top_10_em(symbol=code, date=date_str)
+                if result is not None and hasattr(result, "to_dict"):
+                    records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+                    if records:
+                        return [{"holder_name": str(r.get("股东名称", "")),
+                                 "hold_amount": r.get("持股数"),
+                                 "hold_ratio": r.get("占总股本持股比例")}
+                                for r in records[:10]]
+            except Exception:
+                continue
+        return None
+
+
+def _latest_quarter_dates() -> list[str]:
+    """返回最近 4 个季末日期（YYYYMMDD），用于 akshare 股东查询。"""
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    dates = []
+    for months_ago in range(0, 12, 3):
+        d = now - timedelta(days=90 * (months_ago // 3))
+        q_month = ((d.month - 1) // 3) * 3 + 3
+        q_end = datetime(d.year, q_month, 1) - timedelta(days=1)
+        if q_end > now:
+            q_end = datetime(d.year - 1, 12, 31)
+        dates.append(q_end.strftime("%Y%m%d"))
+    return dates
+
+
+def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
+    """Baostock K 线来源（免费、稳定，适合历史日K线）。"""
+    with _proxy_bypass():
+        import baostock as bs
+        logged_in = False
         try:
-            import akshare as ak
-            akshare_result = _akshare_query(
-                lambda: ak.stock_financial_abstract_ths(symbol=symbol.strip().zfill(6),
-                                                        indicator="按报告期"),
-                result_source="akshare.stock_financial_abstract_ths",
-                fallback_chain=["tushare"],
+            lg = bs.login()
+            if lg.error_code != "0":
+                logger.warning("baostock login failed: %s", lg.error_msg)
+                return None
+            logged_in = True
+
+            sd = start_date or _days_ago(365)
+            ed = end_date or _today()
+            sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
+            ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+
+            bs_code = _baostock_code(symbol)
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,open,high,low,close,volume,amount",
+                start_date=sd_fmt, end_date=ed_fmt,
+                frequency="d", adjustflag="3",
             )
-            if akshare_result["data"] is not None:
-                return akshare_result
-        except Exception:
-            pass
+            if rs.error_code != "0":
+                logger.warning("baostock query failed: %s", rs.error_msg)
+                return None
 
-    return _error("财务数据不可得", ["tushare", "akshare"])
-
-
-def collect_shareholders(symbol: str) -> CollectResult:
-    """采集十大股东。Tushare → akshare → 不可得。"""
-    # 主路径: Tushare top10_floatholders（动态计算最近季度）
-    result = _tushare_query(
-        "top10_floatholders", symbol,
-        fields="ts_code,end_date,holder_name,hold_amount,hold_ratio",
-        result_source="tushare.top10_floatholders",
-        period=_latest_quarter_end(),
-    )
-    if result["data"] is not None:
-        return result
-
-    # 兜底: akshare stock_individual_info_em 中的股东信息
-    if env.is_akshare_available():
-        try:
-            import akshare as ak
-            akshare_result = _akshare_query(
-                lambda: ak.stock_individual_info_em(symbol=symbol.strip().zfill(6)),
-                result_source="akshare.stock_individual_info_em",
-                fallback_chain=["tushare"],
-            )
-            if akshare_result["data"] is not None:
-                # 从基本信息中提取股东相关字段
-                data = akshare_result["data"]
-                if isinstance(data, dict):
-                    holders = {k: v for k, v in data.items()
-                               if any(w in str(k) for w in ["holder", "股东", "持股"])}
-                    if holders:
-                        akshare_result["data"] = holders
-                return akshare_result
-        except Exception:
-            pass
-
-    return _error("股东数据不可得", ["tushare", "akshare"])
+            rows = []
+            while rs.next():
+                row = rs.get_row_data()
+                rows.append({
+                    "trade_date": row[0].replace("-", ""),
+                    "open": float(row[1]) if row[1] else 0,
+                    "high": float(row[2]) if row[2] else 0,
+                    "low": float(row[3]) if row[3] else 0,
+                    "close": float(row[4]) if row[4] else 0,
+                    "vol": float(row[5]) if row[5] else 0,
+                    "amount": float(row[6]) if row[6] else 0,
+                })
+            return rows if rows else None
+        except Exception as e:
+            logger.warning("baostock query failed: %s", e)
+            return None
+        finally:
+            if logged_in:
+                try:
+                    bs.logout()
+                except Exception:
+                    pass
 
 
-def collect_quote(symbol: str) -> CollectResult:
-    """采集实时行情。Tushare → akshare → 腾讯行情 → 不可得。"""
-    # 方案1: Tushare 最新日线
-    result = _tushare_query(
-        "daily", symbol,
-        fields="trade_date,open,high,low,close,vol,amount",
-        result_source="tushare.daily",
-        start_date=_days_ago(10), end_date=_today(),
-    )
-    if result["data"] is not None:
-        return result
-
-    # 方案2: akshare 日K线
-    if env.is_akshare_available():
-        try:
-            import akshare as ak
-
-            def _to_ak_date(d: str) -> str:
-                """20260101 → 2026-01-01"""
-                return f"{d[:4]}-{d[4:6]}-{d[6:]}"
-
-            start_ak = _to_ak_date(_days_ago(10))
-            end_ak = _to_ak_date(_today())
-            akshare_result = _akshare_query(
-                lambda: ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                           period="daily",
-                                           start_date=start_ak,
-                                           end_date=end_ak,
-                                           adjust=""),
-                result_source="akshare.stock_zh_a_hist",
-                fallback_chain=["tushare"],
-            )
-            if akshare_result["data"] is not None:
-                return akshare_result
-        except Exception:
-            pass
-
-    # 方案3: 腾讯行情兜底
-    try:
+def _q_tencent_quote(symbol: str) -> dict | None:
+    """腾讯行情。"""
+    with _proxy_bypass():
         import requests
         market = "sh" if symbol.startswith(("6", "9")) else "sz"
         r = requests.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
         if r.status_code == 200 and "~" in r.text:
             p = r.text.split("~")
             if len(p) > 45:
-                try:
-                    q = {}
-                    q["price"] = float(p[3]) if p[3] else 0
-                    q["change_pct"] = float(p[32]) if p[32] else 0
-                    q["high"] = float(p[33]) if p[33] else 0
-                    q["low"] = float(p[34]) if p[34] else 0
-                    q["volume"] = float(p[6]) if p[6] else 0
-                    q["turnover_rate"] = float(p[38]) if p[38] else 0
-                    q["pe_ratio"] = float(p[39]) if p[39] else 0
-                    q["total_mv"] = float(p[45]) / 10000 if p[45] else 0
-                    return _result(q, "tencent_finance", "tencent", "medium")
-                except (ValueError, IndexError) as e:
-                    logger.warning("腾讯行情解析失败（字段格式异常）: %s", e)
-    except Exception as e:
-        logger.warning("腾讯行情请求失败: %s", e)
-
-    return _error("行情数据不可得", ["tushare", "akshare", "tencent"])
+                q = {}
+                q["price"] = float(p[3]) if p[3] else 0
+                q["change_pct"] = float(p[32]) if p[32] else 0
+                q["high"] = float(p[33]) if p[33] else 0
+                q["low"] = float(p[34]) if p[34] else 0
+                q["volume"] = float(p[6]) if p[6] else 0
+                q["turnover_rate"] = float(p[38]) if p[38] else 0
+                q["pe_ratio"] = float(p[39]) if p[39] else 0
+                q["total_mv"] = float(p[45]) / 10000 if p[45] else 0
+                return q
+        return None
 
 
-def collect_northbound(symbol: str) -> CollectResult:
-    """采集北向资金。Tushare moneyflow → akshare → 不可得。"""
-    result = _tushare_query(
-        "moneyflow", symbol,
-        fields="ts_code,trade_date,buy_sm_vol,sell_sm_vol,net_mf_vol",
-        result_source="tushare.moneyflow", confidence="medium",
-        start_date=_days_ago(10), end_date=_today(),
+# ---- 查询参数字符串生成 ----
+
+def _qp_tushare(api: str, symbol: str, **kw) -> str:
+    pairs = [f"{k}='{v}'" for k, v in sorted(kw.items()) if v]
+    return f"pro.{api}(ts_code='{_ts_code(symbol)}'{', ' + ', '.join(pairs) if pairs else ''})"
+
+
+def _qp_akshare(name: str, symbol: str, **kw) -> str:
+    pairs = [f"{k}='{v}'" for k, v in sorted(kw.items()) if v]
+    return f"ak.{name}(symbol='{symbol.strip().zfill(6)}'{', ' + ', '.join(pairs) if pairs else ''})"
+
+
+def _qp_tencent(symbol: str) -> str:
+    market = "sh" if symbol.startswith(("6", "9")) else "sz"
+    return f"qt.gtimg.cn/q={market}{symbol}"
+
+
+def _qp_baostock(symbol: str, start_date: str, end_date: str) -> str:
+    code = _baostock_code(symbol)
+    return (
+        f"bs.query_history_k_data_plus(code='{code}', "
+        f"start='{start_date}', end='{end_date}', frequency='d')"
     )
-    if result["data"] is not None:
-        return result
 
-    # 兜底: akshare 沪深港通个股资金流向
+
+# ---- 各维度采集（并行 fan-out）----
+
+def collect_basic_info(symbol: str) -> dict:
+    """基本信息。并行：Tushare + akshare。"""
+    tasks: list[tuple[str, Callable]] = [
+        ("tushare.stock_basic", lambda: _q_tushare_basic(symbol)),
+    ]
     if env.is_akshare_available():
-        try:
-            import akshare as ak
-            akshare_result = _akshare_query(
-                lambda: ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6)),
-                result_source="akshare.stock_hsgt_individual_em",
-                fallback_chain=["tushare"],
-            )
-            if akshare_result["data"] is not None:
-                return akshare_result
-        except Exception:
-            pass
+        tasks.append(("akshare.stock_individual_info_em",
+                      lambda: _q_akshare_basic(symbol)))
 
-    return _error("北向资金数据不可得", ["tushare", "akshare"])
+    results = _run_sources_parallel(tasks, "basic_info")
+    result_map = {r.source: r for r in results}
+    _annotate_query_params(result_map, {
+        "tushare.stock_basic": _qp_tushare("stock_basic", symbol),
+        "akshare.stock_individual_info_em": _qp_akshare("stock_individual_info_em", symbol),
+    })
+
+    dim = DimensionResult("basic_info", results)
+    return dim.to_legacy_dict()
 
 
-def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> CollectResult:
-    """采集日K线。Tushare → akshare → 不可得。"""
-    kwargs: dict[str, Any] = {}
-    if start_date:
-        kwargs["start_date"] = start_date
-    if end_date:
-        kwargs["end_date"] = end_date
-
-    # 主路径: Tushare
-    result = _tushare_query(
-        "daily", symbol,
-        fields="trade_date,open,high,low,close,vol,amount",
-        result_source="tushare.daily",
-        **kwargs,
-    )
-    if result["data"] is not None:
-        return result
-
-    # 兜底: akshare
+def collect_financials(symbol: str) -> dict:
+    """财务报告。并行：Tushare + akshare。"""
+    tasks: list[tuple[str, Callable]] = [
+        ("tushare.fina_indicator", lambda: _q_tushare_financials(symbol)),
+    ]
     if env.is_akshare_available():
-        try:
-            import akshare as ak
-            sd = start_date if start_date else _days_ago(365)
-            ed = end_date if end_date else _today()
+        tasks.append(("akshare.stock_financial_abstract_ths",
+                      lambda: _q_akshare_financials(symbol)))
 
-            def _to_ak_date(d: str) -> str:
-                """20260101 → 2026-01-01"""
-                return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    results = _run_sources_parallel(tasks, "financials")
+    result_map = {r.source: r for r in results}
+    _annotate_query_params(result_map, {
+        "tushare.fina_indicator": _qp_tushare("fina_indicator", symbol,
+                                              start_date=_days_ago(730), end_date=_today()),
+        "akshare.stock_financial_abstract_ths": _qp_akshare(
+            "stock_financial_abstract_ths", symbol, indicator="按报告期"),
+    })
 
-            akshare_result = _akshare_query(
-                lambda: ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                           period="daily",
-                                           start_date=_to_ak_date(sd),
-                                           end_date=_to_ak_date(ed),
-                                           adjust=""),
-                result_source="akshare.stock_zh_a_hist",
-                fallback_chain=["tushare"],
-            )
-            if akshare_result["data"] is not None:
-                return akshare_result
-        except Exception:
-            pass
+    dim = DimensionResult("financials", results)
+    return dim.to_legacy_dict()
 
-    return _error("K线数据不可得", ["tushare", "akshare"])
+
+def collect_shareholders(symbol: str) -> dict:
+    """十大股东。并行：Tushare + akshare。"""
+    tasks: list[tuple[str, Callable]] = [
+        ("tushare.top10_floatholders", lambda: _q_tushare_shareholders(symbol)),
+    ]
+    if env.is_akshare_available():
+        tasks.append(("akshare.stock_gdfx_top_10_em",
+                      lambda: _q_akshare_shareholders(symbol)))
+
+    results = _run_sources_parallel(tasks, "shareholders")
+    result_map = {r.source: r for r in results}
+
+    _annotate_query_params(result_map, {
+        "tushare.top10_floatholders": _qp_tushare("top10_floatholders", symbol,
+                                                  period=_latest_quarter_end()),
+        "akshare.stock_gdfx_top_10_em": _qp_akshare("stock_gdfx_top_10_em", symbol),
+    })
+
+    dim = DimensionResult("shareholders", results)
+    return dim.to_legacy_dict()
+
+
+def collect_quote(symbol: str) -> dict:
+    """实时行情。并行：Tushare + akshare + 腾讯。"""
+    tasks: list[tuple[str, Callable]] = [
+        ("tushare.daily", lambda: _q_tushare_daily(symbol,
+                                                    start_date=_days_ago(10), end_date=_today())),
+    ]
+    if env.is_akshare_available():
+        tasks.append(("akshare.stock_zh_a_hist",
+                      lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
+    tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
+
+    results = _run_sources_parallel(tasks, "quote")
+    result_map = {r.source: r for r in results}
+    _annotate_query_params(result_map, {
+        "tushare.daily": _qp_tushare("daily", symbol,
+                                     start_date=_days_ago(10), end_date=_today()),
+        "akshare.stock_zh_a_hist": _qp_akshare("stock_zh_a_hist", symbol,
+                                               period="daily",
+                                               start_date=_days_ago(10),
+                                               end_date=_today()),
+        "tencent_finance": _qp_tencent(symbol),
+    })
+
+    dim = DimensionResult("quote", results)
+    return dim.to_legacy_dict()
+
+
+def collect_northbound(symbol: str) -> dict:
+    """北向资金。并行：Tushare + akshare。"""
+    tasks: list[tuple[str, Callable]] = [
+        ("tushare.moneyflow", lambda: _q_tushare_moneyflow(symbol)),
+    ]
+    if env.is_akshare_available():
+        tasks.append(("akshare.stock_hsgt_individual_em",
+                      lambda: _q_akshare_northbound(symbol)))
+
+    results = _run_sources_parallel(tasks, "northbound")
+    result_map = {r.source: r for r in results}
+    _annotate_query_params(result_map, {
+        "tushare.moneyflow": _qp_tushare("moneyflow", symbol,
+                                         start_date=_days_ago(10), end_date=_today()),
+        "akshare.stock_hsgt_individual_em": _qp_akshare("stock_hsgt_individual_em", symbol),
+    })
+
+    dim = DimensionResult("northbound", results)
+    return dim.to_legacy_dict()
+
+
+def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
+    """日K线。并行：Tushare + akshare + baostock。"""
+    sd = start_date or _days_ago(365)
+    ed = end_date or _today()
+
+    tasks: list[tuple[str, Callable]] = [
+        ("tushare.daily", lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed)),
+    ]
+    if env.is_akshare_available():
+        tasks.append(("akshare.stock_zh_a_hist",
+                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed)))
+    if env.is_baostock_available():
+        tasks.append(("baostock.kline",
+                      lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed)))
+
+    results = _run_sources_parallel(tasks, "kline")
+    result_map = {r.source: r for r in results}
+    qp_map: dict[str, str] = {
+        "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed),
+        "akshare.stock_zh_a_hist": _qp_akshare("stock_zh_a_hist", symbol,
+                                               period="daily", start_date=sd, end_date=ed),
+    }
+    if env.is_baostock_available():
+        qp_map["baostock.kline"] = _qp_baostock(symbol, sd, ed)
+    _annotate_query_params(result_map, qp_map)
+
+    dim = DimensionResult("kline", results)
+    return dim.to_legacy_dict()
 
 
 # ---- Tushare 客户端惰性加载 ----
+# 使用 threading.local() 避免多线程共享同一个 requests.Session
+# （requests.Session 不是线程安全的，且 TushareClient 内部维护配额计数无锁保护）
 
-_tc_instance = None
+_tc_local = threading.local()
 
 
 def _tushare_client(config: dict) -> Any:
-    global _tc_instance
-    if _tc_instance is None:
+    """按线程惰性加载 TushareClient，避免跨线程共享 Session 和配额状态。"""
+    if not hasattr(_tc_local, "instance"):
         from lib.tushare_client import TushareClient
-        _tc_instance = TushareClient(token=config.get("TUSHARE_TOKEN"))
-    return _tc_instance
+        _tc_local.instance = TushareClient(token=config.get("TUSHARE_TOKEN"))
+    return _tc_local.instance
 
 
 # ---- 全维度采集 ----
@@ -410,28 +659,56 @@ COLLECTORS = {
 
 
 def collect_all(symbol: str, dims: list[str] | None = None) -> dict[str, Any]:
+    """全维度采集。
+
+    last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
+    每个维度内部已在 collect_* 中并行查源。
+    """
     if dims is None:
         dims = ["basic_info", "financials", "quote", "shareholders", "northbound"]
 
-    dimensions = []
-    for dim in dims:
-        if dim not in COLLECTORS:
-            continue
-        display, fn = COLLECTORS[dim]
-        result = fn(symbol)
-        status = "available" if result.get("data") is not None else ("degraded" if result.get("error") else "missing")
-        dimensions.append({
-            "dimension": dim, "display": display,
-            "data": result.get("data"), "error": result.get("error"),
-            "_meta": result.get("_meta", {}), "status": status,
-        })
+    dim_results: dict[str, dict] = {}
 
-    avail = sum(1 for d in dimensions if d["status"] == "available")
+    # 跨维度并行
+    with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
+        future_map = {}
+        for dim in dims:
+            if dim not in COLLECTORS:
+                continue
+            _, fn = COLLECTORS[dim]
+            future_map[executor.submit(fn, symbol)] = dim
+
+        for future in as_completed(future_map):
+            dim = future_map[future]
+            try:
+                dim_results[dim] = future.result()
+            except Exception as exc:
+                dim_results[dim] = {
+                    "dimension": dim,
+                    "display": COLLECTORS[dim][0] if dim in COLLECTORS else dim,
+                    "data": None,
+                    "status": "missing",
+                    "error": f"维度采集失败: {exc}",
+                    "_meta": {"source": "none", "success": False,
+                              "all_sources": [], "multi_source": False,
+                              "source_count": 0, "error": str(exc)},
+                }
+
+    # 按输入顺序排列
+    dimensions = [dim_results.get(d) for d in dims if d in COLLECTORS]
+
+    has_data = sum(1 for d in dimensions if d and d.get("data") is not None and d.get("status") != "partial")
+    partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
+    missing = sum(1 for d in dimensions if d and (d.get("data") is None and d.get("status") != "partial"))
+
     return {
         "symbol": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "dimensions": dimensions,
-        "summary": {"total": len(dimensions), "available": avail,
-                     "degraded": sum(1 for d in dimensions if d["status"] == "degraded"),
-                     "missing": sum(1 for d in dimensions if d["status"] == "missing")},
+        "dimensions": dimensions or [],
+        "summary": {
+            "total": len(dimensions),
+            "available": has_data,
+            "degraded": partial,
+            "missing": missing,
+        },
     }

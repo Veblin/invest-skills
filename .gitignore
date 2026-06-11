@@ -23,3 +23,6 @@ evidence/*.json
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Build / release artifacts
+dist/

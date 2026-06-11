@@ -47,6 +47,18 @@ wheels = [
 ]
 
 [[package]]
+name = "baostock"
+version = "0.9.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pandas" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fa/2e/32f7c36a6d021b7cb8bf3bd75b4de8d74e2405e21a5ba1bf1e3706b2d34b/baostock-0.9.2.tar.gz", hash = "sha256:7a3fbba3417b308f774e84a62fc10909a70e81384051b3d693cbe54213686544", size = 25513, upload-time = "2026-06-06T12:20:20.783Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/28/b8/ccba7fa0dd4d1809a6244c04e58173b648fbb64d7cb158387b70d6695e7f/baostock-0.9.2-py3-none-any.whl", hash = "sha256:f7aaca22eb010db268a2b8bc3ed1a8743cc6f1989902477c65c1c3c022d2ecbf", size = 47940, upload-time = "2026-06-06T12:20:19.626Z" },
+]
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -387,10 +399,11 @@ wheels = [
 
 [[package]]
 name = "investment-learning-skill"
-version = "0.1.0"
+version = "0.1.1"
 source = { virtual = "." }
 dependencies = [
     { name = "akshare" },
+    { name = "baostock" },
     { name = "fredapi" },
     { name = "pandas" },
     { name = "requests" },
@@ -405,6 +418,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "akshare", specifier = ">=1.18.64" },
+    { name = "baostock", specifier = ">=0.8.9" },
     { name = "fredapi", specifier = ">=0.5.2" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "requests", specifier = ">=2.31" },
