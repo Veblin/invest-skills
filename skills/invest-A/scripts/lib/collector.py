@@ -367,7 +367,7 @@ def _map_akshare_kline_keys(r: dict) -> dict:
     }
 
 
-def _parse_akshare_num(v, unit: str = "") -> float | None:
+def _parse_akshare_num(v) -> float | None:
     """将 akshare 返回的字符串数值转为 float，兼容 '%' / '亿' / '万' 后缀。
 
     例如 "8.37%" → 8.37, "17.88亿" → 1788000000.0, "2,456.78万" → 24567800.0
