@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GitHub Actions: AI pull-request review via Anthropic Messages API (stdlib only)."""
+"""GitHub Actions: AI pull-request review (stdlib only, multi-provider)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import textwrap
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DIFF_PATH = ROOT / "pr.diff"
@@ -19,7 +20,41 @@ VERDICT_PATH = ROOT / "review_verdict.txt"
 
 MAX_DIFF_CHARS = 80_000
 MAX_CONTEXT_CHARS = 24_000
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+# provider -> (default_model, env var names tried in order)
+PROVIDERS: dict[str, dict[str, Any]] = {
+    "deepseek": {
+        "default_model": "deepseek-chat",
+        "key_envs": ("DEEPSEEK_API_KEY", "AI_REVIEW_API_KEY"),
+        "kind": "openai",
+        "base_url": "https://api.deepseek.com/chat/completions",
+    },
+    "gemini": {
+        "default_model": "gemini-2.0-flash",
+        "key_envs": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "AI_REVIEW_API_KEY"),
+        "kind": "gemini",
+    },
+    "openai": {
+        "default_model": "gpt-4o-mini",
+        "key_envs": ("OPENAI_API_KEY", "AI_REVIEW_API_KEY"),
+        "kind": "openai",
+        "base_url": "https://api.openai.com/v1/chat/completions",
+    },
+    "openrouter": {
+        "default_model": "deepseek/deepseek-chat",
+        "key_envs": ("OPENROUTER_API_KEY", "AI_REVIEW_API_KEY"),
+        "kind": "openai",
+        "base_url": "https://openrouter.ai/api/v1/chat/completions",
+        "extra_headers": {"HTTP-Referer": "https://github.com/Veblin/claude-invest-A"},
+    },
+    "anthropic": {
+        "default_model": "claude-sonnet-4-20250514",
+        "key_envs": ("ANTHROPIC_API_KEY", "AI_REVIEW_API_KEY"),
+        "kind": "anthropic",
+    },
+}
+
+DEFAULT_PROVIDER = "deepseek"
 
 SYSTEM_PROMPT = """\
 你是 invest-A 仓库的 PR 代码审查助手。invest-A 是 A 股个股**学习工具**（非投资决策工具）。
@@ -101,6 +136,89 @@ def _strip_verdict_line(body: str) -> str:
     return re.sub(r"^VERDICT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\s*$", "", body, flags=re.MULTILINE).strip()
 
 
+def _resolve_api_key(key_envs: tuple[str, ...]) -> str:
+    for name in key_envs:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _http_json(
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: int = 120,
+) -> dict[str, Any]:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={**headers, "content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"API HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"API request failed: {exc}") from exc
+
+
+def _call_openai_compatible(
+    *,
+    api_key: str,
+    model: str,
+    user_prompt: str,
+    base_url: str,
+    extra_headers: dict[str, str] | None = None,
+) -> str:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        **(extra_headers or {}),
+    }
+    payload = {
+        "model": model,
+        "max_tokens": 4096,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    data = _http_json(url=base_url, payload=payload, headers=headers)
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"API returned no choices: {json.dumps(data)[:500]}")
+    message = choices[0].get("message") or {}
+    text = (message.get("content") or "").strip()
+    if not text:
+        raise RuntimeError(f"API returned empty content: {json.dumps(data)[:500]}")
+    return text
+
+
+def _call_gemini(*, api_key: str, model: str, user_prompt: str) -> str:
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent?key={api_key}"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {"maxOutputTokens": 4096},
+    }
+    data = _http_json(url=url, payload=payload, headers={})
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"Gemini returned no candidates: {json.dumps(data)[:500]}")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    text_parts = [p.get("text", "") for p in parts if p.get("text")]
+    if not text_parts:
+        raise RuntimeError(f"Gemini returned no text: {json.dumps(data)[:500]}")
+    return "\n".join(text_parts).strip()
+
+
 def _call_anthropic(*, api_key: str, model: str, user_prompt: str) -> str:
     payload = {
         "model": model,
@@ -108,42 +226,56 @@ def _call_anthropic(*, api_key: str, model: str, user_prompt: str) -> str:
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_prompt}],
     }
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=json.dumps(payload).encode("utf-8"),
+    data = _http_json(
+        url="https://api.anthropic.com/v1/messages",
+        payload=payload,
         headers={
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
         },
-        method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Anthropic API HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Anthropic API request failed: {exc}") from exc
-
     blocks = data.get("content") or []
     text_parts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
     if not text_parts:
-        raise RuntimeError(f"Anthropic API returned no text: {json.dumps(data)[:500]}")
+        raise RuntimeError(f"Anthropic returned no text: {json.dumps(data)[:500]}")
     return "\n".join(text_parts).strip()
 
 
-def main() -> int:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        print("ANTHROPIC_API_KEY not set — skipping AI review.")
-        REVIEW_PATH.write_text(
-            "## AI Code Review\n\n_Skipped: `ANTHROPIC_API_KEY` secret not configured._\n",
-            encoding="utf-8",
+def _call_provider(*, provider: str, api_key: str, model: str, user_prompt: str) -> str:
+    cfg = PROVIDERS[provider]
+    kind = cfg["kind"]
+    if kind == "openai":
+        return _call_openai_compatible(
+            api_key=api_key,
+            model=model,
+            user_prompt=user_prompt,
+            base_url=cfg["base_url"],
+            extra_headers=cfg.get("extra_headers"),
         )
-        VERDICT_PATH.write_text("COMMENT", encoding="utf-8")
-        return 0
+    if kind == "gemini":
+        return _call_gemini(api_key=api_key, model=model, user_prompt=user_prompt)
+    if kind == "anthropic":
+        return _call_anthropic(api_key=api_key, model=model, user_prompt=user_prompt)
+    raise RuntimeError(f"Unsupported provider kind: {kind}")
+
+
+def _skip_review(message: str) -> int:
+    REVIEW_PATH.write_text(f"## AI Code Review\n\n_{message}_\n", encoding="utf-8")
+    VERDICT_PATH.write_text("COMMENT", encoding="utf-8")
+    return 0
+
+
+def main() -> int:
+    provider = os.environ.get("AI_REVIEW_PROVIDER", DEFAULT_PROVIDER).strip().lower()
+    if provider not in PROVIDERS:
+        print(f"Unknown AI_REVIEW_PROVIDER={provider!r}", file=sys.stderr)
+        return 1
+
+    cfg = PROVIDERS[provider]
+    api_key = _resolve_api_key(cfg["key_envs"])
+    if not api_key:
+        key_names = " / ".join(f"`{n}`" for n in cfg["key_envs"])
+        return _skip_review(f"Skipped: no API key configured ({key_names}).")
 
     if not DIFF_PATH.is_file():
         print(f"Missing {DIFF_PATH}", file=sys.stderr)
@@ -151,10 +283,7 @@ def main() -> int:
 
     diff = DIFF_PATH.read_text(encoding="utf-8", errors="replace")
     if not diff.strip():
-        print("Empty diff — skipping AI review.")
-        REVIEW_PATH.write_text("## AI Code Review\n\n_No file changes to review._\n", encoding="utf-8")
-        VERDICT_PATH.write_text("COMMENT", encoding="utf-8")
-        return 0
+        return _skip_review("No file changes to review.")
 
     agents = _read_limited(ROOT / "AGENTS.md", MAX_CONTEXT_CHARS)
     skill = _read_limited(ROOT / "skills/invest-A/SKILL.md", MAX_CONTEXT_CHARS)
@@ -165,7 +294,7 @@ def main() -> int:
     pr_number = os.environ.get("PR_NUMBER", "")
     base_ref = os.environ.get("BASE_REF", "main")
     head_ref = os.environ.get("HEAD_REF", "")
-    model = os.environ.get("AI_REVIEW_MODEL", DEFAULT_MODEL)
+    model = os.environ.get("AI_REVIEW_MODEL", cfg["default_model"])
 
     user_prompt = textwrap.dedent(f"""\
         Review this pull request for repository invest-A.
@@ -185,14 +314,14 @@ def main() -> int:
         ```
     """)
 
-    print(f"Calling Anthropic model={model} ...")
-    raw_review = _call_anthropic(api_key=api_key, model=model, user_prompt=user_prompt)
+    print(f"Calling provider={provider} model={model} ...")
+    raw_review = _call_provider(provider=provider, api_key=api_key, model=model, user_prompt=user_prompt)
     verdict = _parse_verdict(raw_review)
     review_body = _strip_verdict_line(raw_review)
 
     header = (
         "## 🤖 AI Code Review\n\n"
-        f"> Model: `{model}` | Verdict: **{verdict}**\n\n"
+        f"> Provider: `{provider}` | Model: `{model}` | Verdict: **{verdict}**\n\n"
         "_Advisory only — merge still requires human judgment and green CI._\n\n"
     )
     REVIEW_PATH.write_text(header + review_body + "\n", encoding="utf-8")
