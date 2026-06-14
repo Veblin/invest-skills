@@ -4,9 +4,10 @@ investment-learning CLI。
 
 用法:
   python3 invest.py collect 600176              # 采集数据
-  python3 invest.py report 600176               # 报告（默认 HTML，自动保存）
+  python3 invest.py report 600176               # Markdown 报告（默认 stdout）
+  python3 invest.py report 600176 --outdir ./out # Markdown 写入目录
+  python3 invest.py report 600176 --emit=html    # HTML 报告（v0.1.2 旧版，须显式指定）
   python3 invest.py report 600176 --emit=json   # JSON 报告（stdout）
-  python3 invest.py report 600176 --emit=md     # Markdown（stdout）
   python3 invest.py compare 600176 000858        # 对比
   python3 invest.py diagnose                     # 检查数据源
   python3 invest.py store list                   # 查看存储
@@ -58,11 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--emit", default="html", choices=["compact", "json", "md", "html"])
+    pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pr.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
-    pr.add_argument("--outdir", default="", help="HTML 输出目录（默认当前目录）")
+    pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
@@ -105,6 +106,19 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_basename(result: dict, symbol: str, ts: str) -> str:
+    """生成报告文件名前缀：{ts}-{symbol}-{name}。"""
+    name = ""
+    for dim in result.get("dimensions", []):
+        if dim.get("dimension") == "basic_info":
+            data = dim.get("data", {})
+            if isinstance(data, dict):
+                name = data.get("name", "") or data.get("股票简称", "")
+            break
+    safe_name = re.sub(r'[\\/:*?"<>|]', "_", name) if name else ""
+    return f"{ts}-{symbol}-{safe_name}" if safe_name else f"{ts}-{symbol}"
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     dims = [d.strip() for d in args.dims.split(",")]
     if args.with_macro and "kline" not in dims:
@@ -123,31 +137,24 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     fmt = args.emit
 
-    # HTML 为默认输出格式：自动保存文件 + 终端输出紧凑摘要
     if fmt == "html":
+        print(
+            "⚠️ HTML 为 v0.1.2 旧版模板，迭代期请使用默认 Markdown 输出（省略 --emit 或 --emit md）",
+            file=sys.stderr,
+        )
         md_v2 = render.render_report_v2(result, args.symbol)
         output = render.render_html(result, args.symbol)
         from datetime import datetime
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
 
-        # 提取股票名称
-        name = ""
-        for dim in result.get("dimensions", []):
-            if dim.get("dimension") == "basic_info":
-                data = dim.get("data", {})
-                if isinstance(data, dict):
-                    name = data.get("name", "") or data.get("股票简称", "")
-                break
-        safe_name = re.sub(r'[\\/:*?"<>|]', "_", name) if name else ""
-        filename = f"{ts}-{args.symbol}-{safe_name}.html" if safe_name else f"{ts}-{args.symbol}.html"
+        basename = _report_basename(result, args.symbol, ts)
         outdir = Path(args.outdir).resolve() if args.outdir else Path.cwd()
         outdir.mkdir(parents=True, exist_ok=True)
-        htmlpath = outdir / filename
+        htmlpath = outdir / f"{basename}.html"
         htmlpath.write_text(output, encoding="utf-8")
 
-        # 同时保存 Markdown 版本
-        mdfile = htmlpath.with_suffix(".md")
+        mdfile = outdir / f"{basename}.md"
         mdfile.write_text(md_v2, encoding="utf-8")
 
         print(render.render(result, args.symbol, "compact"))
@@ -155,8 +162,20 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"📝 Markdown 报告: {mdfile.resolve()}")
         return 0
 
-    # 其他格式保持原有行为
-    print(render.render(result, args.symbol, fmt))
+    output = render.render(result, args.symbol, fmt)
+
+    if fmt == "md" and args.outdir:
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        basename = _report_basename(result, args.symbol, ts)
+        outdir = Path(args.outdir).resolve()
+        outdir.mkdir(parents=True, exist_ok=True)
+        mdpath = outdir / f"{basename}.md"
+        mdpath.write_text(output, encoding="utf-8")
+        print(f"📝 Markdown 报告: {mdpath.resolve()}")
+        return 0
+
+    print(output)
     return 0
 
 
