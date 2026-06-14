@@ -368,29 +368,33 @@ def _map_akshare_kline_keys(r: dict) -> dict:
 
 
 def _parse_akshare_num(v) -> float | None:
-    """将 akshare 返回的字符串数值转为 float，兼容 '%' / '亿' / '万' 后缀。
+    """将 akshare 返回的字符串数值转为 float，兼容 '%' / '万亿' / '亿' / '万' 后缀。
 
-    例如 "8.37%" → 8.37, "17.88亿" → 1788000000.0, "2,456.78万" → 24567800.0
+    例如 "8.37%" → 8.37, "17.88亿" → 1788000000.0, "2.35万亿" → 2.35e12
     """
     if v is None:
         return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    if not isinstance(v, str):
-        return None
-    s = v.strip().replace(",", "").replace(" ", "")
-    multiplier = 1.0
-    if "亿" in s:
-        multiplier = 1e8
-        s = s.replace("亿", "")
-    elif "万" in s:
-        multiplier = 1e4
-        s = s.replace("万", "")
-    if "%" in s:
-        s = s.replace("%", "")
+    if isinstance(v, str):
+        s = v.strip().replace(",", "").replace(" ", "")
+        multiplier = 1.0
+        if "万亿" in s:
+            multiplier = 1e12
+            s = s.replace("万亿", "")
+        elif "亿" in s:
+            multiplier = 1e8
+            s = s.replace("亿", "")
+        elif "万" in s:
+            multiplier = 1e4
+            s = s.replace("万", "")
+        if "%" in s:
+            s = s.replace("%", "")
+        try:
+            return float(s) * multiplier
+        except (ValueError, TypeError):
+            return None
     try:
-        return float(s) * multiplier
-    except (ValueError, TypeError):
+        return float(v)
+    except (TypeError, ValueError):
         return None
 
 

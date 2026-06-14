@@ -87,13 +87,16 @@ class TestAkshareKeyMapping:
         assert en["profit_dedt"] == 500000000
 
     def test_parse_akshare_num_string_formats(self):
+        import numpy as np
         from lib.collector import _map_akshare_financial_keys, _parse_akshare_num
 
         assert _parse_akshare_num("8.37%") == 8.37
         assert _parse_akshare_num("17.88亿") == 1.788e9
+        assert _parse_akshare_num("2.35万亿") == pytest.approx(2.35e12)
         assert _parse_akshare_num("2,456.78万") == pytest.approx(24567800.0)
         assert _parse_akshare_num(None) is None
         assert _parse_akshare_num("n/a") is None
+        assert _parse_akshare_num(np.int64(500000000)) == 500000000.0
 
         cn = {"报告期": "2025-12-31", "净资产收益率": "8.37%",
               "基本每股收益": "1.23", "扣非净利润": "17.88亿",
@@ -102,6 +105,13 @@ class TestAkshareKeyMapping:
         assert en["roe"] == 8.37
         assert en["eps"] == 1.23
         assert en["profit_dedt"] == 1.788e9
+
+        cn_numpy = {"报告期": "2025-12-31", "净资产收益率": np.float64(15.5),
+                    "基本每股收益": 3.2, "扣非净利润": np.int64(500000000),
+                    "营业总收入": "2.35万亿", "净利润": np.int64(480000000)}
+        en_numpy = _map_akshare_financial_keys(cn_numpy)
+        assert en_numpy["profit_dedt"] == 500000000.0
+        assert en_numpy["revenue"] == pytest.approx(2.35e12)
 
     def test_northbound_key_mapping(self):
         from lib.collector import _map_akshare_northbound_keys
