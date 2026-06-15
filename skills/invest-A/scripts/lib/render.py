@@ -1272,13 +1272,48 @@ def _section_research_question(
         "为什么这是好问题：将可验证数据与未决不确定性分离，避免把相关性误读为因果。",
         "```",
     ])
-    lines.append("")
+    lines.extend([
+        "", "### 九模块研究框架", "",
+        _research_framework_mermaid(), "",
+    ])
     lines.append("🔍 **待独立验证:** 触发源依赖采集数据完整性；公告/政策类触发需 WebSearch 补充。")
     return "\n".join(lines)
 
 
+def _load_report_key_diff(symbol: str, collection: dict) -> dict | None:
+    """若 store 有历史快照，返回当前采集相对上次的关键字段 diff。"""
+    try:
+        from lib.store import load_key_diff_vs_stored
+        return load_key_diff_vs_stored(symbol, collection)
+    except Exception:
+        return None
+
+
+def _snapshot_diff_block(key_diff: dict) -> str:
+    from lib.store import format_key_diff_markdown_lines
+
+    old_at = key_diff.get("old_at", "")[:19]
+    new_at = key_diff.get("new_at", "")[:19]
+    lines = ["", "### 相对上次调研变化", ""]
+    if old_at and new_at:
+        lines.append(f"对比区间：{old_at} → {new_at}（本次采集）")
+        lines.append("")
+    lines.extend(format_key_diff_markdown_lines(key_diff))
+    lines.append("")
+    lines.append(
+        "🔍 **待独立验证:** 跨时点变化基于 store 快照字段提取，"
+        "应与 `invest.py diff` 输出交叉核对。"
+    )
+    return "\n".join(lines)
+
+
 def _section_snapshot(
-    collection: dict, symbol: str, dims: dict[str, dict], *, val_cache: dict | None = None,
+    collection: dict,
+    symbol: str,
+    dims: dict[str, dict],
+    *,
+    val_cache: dict | None = None,
+    key_diff: dict | None = None,
 ) -> str:
     lines = ["## 1. 当前状态快照", ""]
     quote = _get_dim_data(dims, "quote")
@@ -1344,6 +1379,11 @@ def _section_snapshot(
         "### 多源一致性",
         f"{ms_icon} **并行取证状态** — {ms_detail}",
     ])
+
+    if key_diff is None:
+        key_diff = _load_report_key_diff(symbol, collection)
+    if key_diff and key_diff.get("categories"):
+        lines.append(_snapshot_diff_block(key_diff))
 
     lines.append("")
     lines.append(_evidence_conclusion_block(
@@ -3091,8 +3131,14 @@ def _section_left_right_probability(
     return "\n".join(lines)
 
 
-def _section_technical_brief(dims: dict[str, dict]) -> str:
-    lines = ["## 8. 附录", "", "### 技术分析精简", ""]
+def _section_technical_brief(
+    dims: dict[str, dict], *, val_cache: dict | None = None,
+) -> str:
+    lines = ["## 8. 附录", ""]
+    pe_table = _pe_band_markdown_table(dims, val_cache)
+    if pe_table:
+        lines.extend([pe_table, ""])
+    lines.extend(["### 技术分析精简", ""])
     kline = _get_dim_data(dims, "kline")
     if not kline or not isinstance(kline, list):
         lines.append("- 趋势：K 线不可得")
@@ -3117,6 +3163,83 @@ def _section_technical_brief(dims: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+def _wrap_details(summary: str, content: str) -> str:
+    if not content:
+        return content
+    return f"<details>\n<summary>{summary}</summary>\n\n{content}\n\n</details>"
+
+
+def _report_toc() -> str:
+    entries = [
+        ("研究问题卡", "0-研究问题卡"),
+        ("当前状态快照", "1-当前状态快照"),
+        ("动态驱动", "2-动态驱动分析"),
+        ("市场结构", "3-市场结构分析"),
+        ("静态基本面（12题）", "4-静态基本面分析"),
+        ("Bull/Bear 情景", "5-市场分歧"),
+        ("左/右概率", "6-左侧右侧概率判断"),
+        ("风险与不确定性", "7-风险与不确定性"),
+        ("技术简报", "8-附录"),
+        ("PE Band（5年轨道）", "pe-band5年轨道"),
+        ("引用来源", "引用来源references"),
+    ]
+    lines = ["## 目录", ""]
+    lines.extend(f"- [{label}](#{anchor})" for label, anchor in entries)
+    return "\n".join(lines)
+
+
+def _research_framework_mermaid() -> str:
+    return """```mermaid
+flowchart TD
+  Q0[研究问题卡] --> S1[当前状态快照]
+  S1 --> D2[动态驱动]
+  D2 --> M3[市场结构]
+  M3 --> F4[静态基本面]
+  F4 --> B5[Bull/Bear 情景]
+  B5 --> P6[左/右概率]
+  P6 --> R7[风险与不确定性]
+  R7 --> T8[技术简报]
+  T8 --> A9[引用来源]
+```"""
+
+
+def _pe_band_markdown_table(
+    dims: dict[str, dict], val_cache: dict | None = None,
+) -> str:
+    if val_cache is not None and "pe_band" in val_cache:
+        band = val_cache["pe_band"]
+    else:
+        val_data = _get_dim_data(dims, "valuation")
+        if not val_data or not isinstance(val_data, list):
+            return ""
+        from lib.valuation import pe_band_series
+        band = pe_band_series(val_data)
+        if val_cache is not None:
+            val_cache["pe_band"] = band
+    if not band.get("n_samples"):
+        return ""
+    years = band.get("years", 5)
+
+    def _cell(v: Any) -> str:
+        return str(v) if v is not None else "—"
+
+    lines = [
+        f"### PE Band（{years}年轨道）",
+        "",
+        "| 指标 | 数值 |",
+        "|------|------|",
+        f"| 样本数 | {_cell(band.get('n_samples'))} |",
+        f"| 均值 (μ) | {_cell(band.get('mean'))} |",
+        f"| +1σ | {_cell(band.get('upper_1σ'))} |",
+        f"| -1σ | {_cell(band.get('lower_1σ'))} |",
+        f"| +2σ | {_cell(band.get('upper_2σ'))} |",
+        f"| -2σ | {_cell(band.get('lower_2σ'))} |",
+        f"| 当前 PE | {_cell(band.get('current_pe'))} |",
+        f"| 当前位置 | {_cell(band.get('current_position'))} |",
+    ]
+    return "\n".join(lines)
+
+
 def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
     """v0.1.3 九模块研究备忘录。"""
     dims = _index_dims(collection)
@@ -3128,6 +3251,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
 
     parts: list[str] = [
         _header_v2(collection, symbol),
+        _report_toc(),
         _section_research_question(collection, symbol, val_cache=val_cache),
         _section_snapshot(collection, symbol, dims, val_cache=val_cache),
         _section_dynamic_drivers(
@@ -3136,15 +3260,21 @@ def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
         _section_market_structure(
             collection, symbol, market_structure, val_cache=val_cache,
         ),
-        _section_static_fundamentals(dims, collection, val_cache=val_cache),
+        _wrap_details(
+            "展开：静态基本面（12题）",
+            _section_static_fundamentals(dims, collection, val_cache=val_cache),
+        ),
         _section_bull_bear(
             collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
         ),
         _section_left_right_probability(
             collection, symbol, dims, market_structure, val_cache=val_cache,
         ),
-        _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
-        _section_technical_brief(dims),
+        _wrap_details(
+            "展开：风险与不确定性",
+            _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
+        ),
+        _section_technical_brief(dims, val_cache=val_cache),
         _references_appendix(collection),
         _risk_footer(),
     ]

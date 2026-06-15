@@ -255,6 +255,216 @@ def _index_dims(raw: dict) -> dict[str, dict]:
     return {d.get("dimension", ""): d for d in dims}
 
 
+def _dim_data(raw: dict, name: str) -> Any:
+    d = _index_dims(raw).get(name)
+    return d.get("data") if d else None
+
+
+def _yoy_from_fina_rows(rows: list[dict], field: str) -> float | None:
+    if not rows:
+        return None
+    sorted_rows = sorted(rows, key=lambda r: str(r.get("end_date", "")))
+    latest = sorted_rows[-1]
+    cur = latest.get(field)
+    if cur is None:
+        return None
+    try:
+        cur_f = float(cur)
+    except (TypeError, ValueError):
+        return None
+    if cur_f <= 0:
+        return None
+    ed = str(latest.get("end_date", ""))
+    if len(ed) < 8 or not ed[:4].isdigit():
+        return None
+    prev_ed = f"{int(ed[:4]) - 1}{ed[4:8]}"
+    prev_v = None
+    for r in reversed(sorted_rows[:-1]):
+        if str(r.get("end_date", "")) == prev_ed:
+            try:
+                prev_v = float(r.get(field))
+            except (TypeError, ValueError):
+                pass
+            break
+    if prev_v is None or prev_v <= 0:
+        return None
+    return round((cur_f - prev_v) / prev_v * 100, 2)
+
+
+def extract_key_snapshot(raw: dict) -> dict:
+    """从采集 raw_json 提取高信号关键字段快照（on-the-fly，不落库）。"""
+    body = raw.get("raw_json", raw) if isinstance(raw, dict) else {}
+    snap: dict[str, Any] = {
+        "symbol": body.get("symbol", "?"),
+        "fetched_at": body.get("fetched_at", ""),
+        "valuation": {},
+        "financials": {},
+        "capital_flow": {},
+        "technical": {},
+        "risk": {},
+    }
+
+    val_data = _dim_data(body, "valuation")
+    if isinstance(val_data, dict):
+        for k in ("pe_pct", "pb_pct", "pe_ttm", "pb"):
+            if val_data.get(k) is not None:
+                snap["valuation"][k] = val_data[k]
+    elif isinstance(val_data, list) and val_data:
+        from lib.technical import sort_kline_asc
+        from lib.valuation import valuation_summary, valuation_window_label
+        vs = sort_kline_asc(val_data)
+        summary = valuation_summary(
+            [r.get("pe_ttm") for r in vs], [r.get("pb") for r in vs],
+            window_label=valuation_window_label(len(vs)),
+        )
+        pe, pb = summary.get("pe", {}), summary.get("pb", {})
+        if pe.get("pct") is not None:
+            snap["valuation"]["pe_pct"] = pe["pct"]
+        if pb.get("pct") is not None:
+            snap["valuation"]["pb_pct"] = pb["pct"]
+        if pe.get("current") is not None:
+            snap["valuation"]["pe_ttm"] = pe["current"]
+        if pb.get("current") is not None:
+            snap["valuation"]["pb"] = pb["current"]
+
+    fin = _dim_data(body, "financials")
+    if isinstance(fin, list) and fin:
+        latest = sorted(fin, key=lambda r: str(r.get("end_date", "")))[-1]
+        if latest.get("roe") is not None:
+            snap["financials"]["roe"] = latest["roe"]
+        ry = _yoy_from_fina_rows(fin, "revenue")
+        if ry is not None:
+            snap["financials"]["revenue_yoy"] = ry
+        npy = _yoy_from_fina_rows(fin, "net_profit")
+        if npy is not None:
+            snap["financials"]["net_profit_yoy"] = npy
+
+    ms = body.get("market_structure") or {}
+    nb = ms.get("northbound")
+    if not isinstance(nb, dict):
+        nb = _dim_data(body, "northbound")
+    if isinstance(nb, dict) and nb.get("net_sum_10d") is not None:
+        snap["capital_flow"]["northbound_net"] = nb["net_sum_10d"]
+
+    margin = ms.get("margin")
+    if not isinstance(margin, dict):
+        margin = _dim_data(body, "margin")
+    if isinstance(margin, dict):
+        recs = margin.get("records")
+        if isinstance(recs, list) and recs:
+            bal = recs[-1].get("rzye")
+            if bal is not None:
+                snap["capital_flow"]["margin_balance"] = bal
+
+    kline = _dim_data(body, "kline")
+    if isinstance(kline, list) and kline:
+        from lib.technical import compute
+        tech = compute(kline)
+        trend = tech.get("trend") or {}
+        if trend.get("alignment", {}).get("trend_label"):
+            snap["technical"]["ma_alignment"] = trend["alignment"]["trend_label"]
+        rsi_map = (tech.get("overbought_oversold") or {}).get("rsi") or {}
+        for period in ("6", "12", "24"):
+            rv = rsi_map.get(period, {}).get("value")
+            if rv is not None:
+                snap["technical"]["rsi"] = rv
+                break
+
+    risk = body.get("risk_scan") or body.get("risk_data")
+    if isinstance(risk, dict):
+        snap["risk"]["triggered_count"] = risk.get("triggered_count", 0)
+        triggered = [s.get("id") for s in risk.get("signals", []) if s.get("triggered")]
+        snap["risk"]["triggered_signals"] = triggered
+
+    return snap
+
+
+_KEY_DIFF_ALWAYS = frozenset({
+    "pe_pct", "pb_pct", "ma_alignment", "triggered_count", "triggered_signals",
+})
+_KEY_DIFF_THRESHOLD_PCT = 1.0
+
+CATEGORY_LABELS = {
+    "valuation": "估值",
+    "financials": "财务",
+    "capital_flow": "资金",
+    "technical": "技术",
+    "risk": "风险",
+}
+
+
+def format_key_diff_markdown_lines(key_diff: dict) -> list[str]:
+    """将 diff_key_snapshots 结果格式化为 Markdown 列表行。"""
+    categories = key_diff.get("categories") or {}
+    if not categories:
+        return ["- 关键字段无显著变化"]
+    lines: list[str] = []
+    for cat, items in categories.items():
+        label = CATEGORY_LABELS.get(cat, cat)
+        for item in items:
+            field = item.get("field", "?")
+            old_v, new_v = item.get("old"), item.get("new")
+            pct = item.get("pct")
+            pct_str = f" ({pct:+.1f}%)" if pct is not None else ""
+            lines.append(f"- **{label}** {field}: {old_v} → {new_v}{pct_str}")
+    return lines
+
+
+def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
+    """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。"""
+    rows = list_collections(limit=1, symbol=symbol)
+    if not rows:
+        return None
+    prev = get_collection(rows[0]["id"])
+    if not prev:
+        return None
+    return diff_key_snapshots(prev, current)
+
+
+def _key_field_changed(field: str, old: Any, new: Any) -> bool:
+    if old == new:
+        return False
+    if field in _KEY_DIFF_ALWAYS:
+        return True
+    if isinstance(old, (int, float)) and isinstance(new, (int, float)):
+        if old == 0:
+            return new != 0
+        return abs((new - old) / abs(old) * 100) >= _KEY_DIFF_THRESHOLD_PCT
+    return True
+
+
+def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
+    """对比两次采集的关键字段快照，按类别输出变化。"""
+    old_snap = extract_key_snapshot(old_raw)
+    new_snap = extract_key_snapshot(new_raw)
+    categories: dict[str, list[dict]] = {}
+    unchanged: list[str] = []
+
+    for cat in ("valuation", "financials", "capital_flow", "technical", "risk"):
+        o_cat, n_cat = old_snap.get(cat, {}), new_snap.get(cat, {})
+        all_fields = sorted(set(list(o_cat.keys()) + list(n_cat.keys())))
+        cat_changes: list[dict] = []
+        for field in all_fields:
+            ov, nv = o_cat.get(field), n_cat.get(field)
+            if not _key_field_changed(field, ov, nv):
+                unchanged.append(f"{cat}.{field}")
+                continue
+            change: dict[str, Any] = {"field": field, "old": ov, "new": nv}
+            if isinstance(ov, (int, float)) and isinstance(nv, (int, float)) and ov != 0:
+                change["pct"] = round((nv - ov) / abs(ov) * 100, 2)
+            cat_changes.append(change)
+        if cat_changes:
+            categories[cat] = cat_changes
+
+    return {
+        "symbol": new_snap.get("symbol", old_snap.get("symbol", "?")),
+        "old_at": old_snap.get("fetched_at", ""),
+        "new_at": new_snap.get("fetched_at", ""),
+        "categories": categories,
+        "unchanged": unchanged,
+    }
+
+
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
     """递归对比两个维度的 data，返回变化列表。"""
     changes: list[dict] = []
