@@ -246,10 +246,14 @@ def _merge_balancesheet_into_financials(
         merged = dict(row)
         bs = bs_by_date.get(str(row.get("end_date", "")))
         if bs:
-            ar = bs.get("accounts_rece") or bs.get("accounts_receiv")
+            ar = bs.get("accounts_rece")
+            if ar is None:
+                ar = bs.get("accounts_receiv")
             if ar is not None:
                 merged["accounts_receiv"] = ar
-            inv = bs.get("inventories") or bs.get("inventory")
+            inv = bs.get("inventories")
+            if inv is None:
+                inv = bs.get("inventory")
             if inv is not None:
                 merged["inventory"] = inv
         out.append(merged)
@@ -280,21 +284,30 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
     for rec in records:
         em = rec.get("eqt_to_debt")
         if em is not None and safe_float(em) not in (None, 0):
-            rec["equity_multiplier"] = 1.0 / float(em)
+            rec["equity_multiplier"] = 1.0 + 1.0 / float(em)
         elif rec.get("debt_to_assets") is not None:
             da = safe_float(rec.get("debt_to_assets"))
-            if da is not None and da < 100:
-                rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
+            if da is not None and 0 <= da < 100:
+                # debt_to_assets 预期为百分比（0-100），如 42.5 表示 42.5%
+                # 若值 < 1.0，视为已转为小数比率，直接使用
+                if da < 1.0:
+                    rec["equity_multiplier"] = 1.0 / max(0.01, 1.0 - da)
+                else:
+                    rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
     cf_df = tc.query("cashflow", ts_code=ts,
                      fields="ts_code,end_date,n_cashflow_act",
                      start_date=lookback, end_date=end)
     if cf_df is not None and not cf_df.empty:
         records = _merge_cashflow_into_financials(records, cf_df.to_dict("records"))
+    elif cf_df is None or cf_df.empty:
+        logger.warning("Tushare cashflow query returned empty for %s; n_cashflow_act field will be missing from records", ts)
     bs_df = tc.query("balancesheet", ts_code=ts,
                      fields="ts_code,end_date,accounts_rece,inventories",
                      start_date=lookback, end_date=end)
     if bs_df is not None and not bs_df.empty:
         records = _merge_balancesheet_into_financials(records, bs_df.to_dict("records"))
+    elif bs_df is None or bs_df.empty:
+        logger.warning("Tushare balancesheet query returned empty for %s; accounts_receiv/inventory fields will be missing from records", ts)
     return records
 
 
@@ -337,7 +350,7 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
     if not records:
         return records
     # 仅 moneyflow 为万元；hsgt_top10.net_amount 已是元
-    scale = 10000.0 if source == "tushare.moneyflow" else 1.0
+    scale = 10000.0 if source.startswith("tushare.moneyflow") else 1.0
     out: list[dict] = []
     for r in records:
         row = dict(r)
@@ -352,9 +365,12 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
     return out
 
 
-def _flow_amount_yuan(record: dict) -> float:
-    """从归一化后的资金流记录读取净额（元）。"""
-    return float(record.get("net_mf_amount") or record.get("net_mf_vol") or 0)
+def _flow_amount_yuan(record: dict) -> float | None:
+    """从归一化后的资金流记录读取净额（元），缺失时返回 None。"""
+    val = record.get("net_mf_amount") or record.get("net_mf_vol")
+    if val is None:
+        return None
+    return float(val)
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
@@ -871,10 +887,12 @@ _tc_local = threading.local()
 
 
 def _tushare_client(config: dict) -> Any:
-    """按线程惰性加载 TushareClient，避免跨线程共享 Session 和配额状态。"""
-    if not hasattr(_tc_local, "instance"):
+    """按线程惰性加载 TushareClient，配置变化时重建实例。"""
+    token = config.get("TUSHARE_TOKEN")
+    if not hasattr(_tc_local, "instance") or getattr(_tc_local, "_tc_token", None) != token:
         from lib.tushare_client import TushareClient
-        _tc_local.instance = TushareClient(token=config.get("TUSHARE_TOKEN"))
+        _tc_local.instance = TushareClient(token=token)
+        _tc_local._tc_token = token
     return _tc_local.instance
 
 
@@ -1124,7 +1142,13 @@ def _ms_fetch_pmi() -> dict[str, Any] | None:
         if df is None or df.empty:
             return None
         row = df.iloc[-1]
-        month = str(row.get("月份", row.iloc[0] if len(row) else ""))
+        raw_month = row.get("月份")
+        if raw_month is not None:
+            month = str(raw_month)
+        elif hasattr(row, "name") and row.name is not None:
+            month = str(row.name)
+        else:
+            month = ""
         pmi = safe_float(row.get("制造业-指数", row.get("制造业", None)))
         if pmi is None and len(row) > 1:
             pmi = safe_float(row.iloc[-1])
@@ -1206,7 +1230,7 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
         records = _q_tushare_hsgt_top10(symbol)
         if records:
             recent = _recent_flow_records(records, limit=10)
-            net_sum = sum(_flow_amount_yuan(r) for r in recent)
+            net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
             return {
                 "records": recent,
                 "net_sum_10d": net_sum,
@@ -1220,7 +1244,7 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     if not records:
         return None
     recent = _recent_flow_records(records, limit=10)
-    net_sum = sum(_flow_amount_yuan(r) for r in recent)
+    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
     return {
         "records": recent,
         "net_sum_10d": net_sum,
@@ -1280,7 +1304,7 @@ def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
     if not records:
         return None
     recent = _recent_flow_records(records, limit=10)
-    net_sum = sum(_flow_amount_yuan(r) for r in recent[:5])
+    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent[:5]) if v is not None)
     return {
         "records": recent,
         "net_sum_5d": net_sum,

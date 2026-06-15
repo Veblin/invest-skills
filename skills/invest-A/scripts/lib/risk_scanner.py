@@ -347,7 +347,12 @@ def scan_market_risks(
                                  auto=True, status="insufficient_data"))
 
     br_trig, br_detail = _technical_breakdown(technical)
-    br_status = "clear" if technical and not technical.get("error") else "insufficient_data"
+    if not technical or technical.get("error"):
+        br_status = "insufficient_data"
+    elif br_detail and ("数据不足" in br_detail or "不可用" in br_detail):
+        br_status = "insufficient_data"
+    else:
+        br_status = "clear"
     signals.append(_signal("technical_breakdown", "技术面破位", "market",
                              triggered=br_trig, severity="低", detail=br_detail, auto=True,
                              status="triggered" if br_trig else br_status))
@@ -390,7 +395,7 @@ def risk_report(
         sorted_k = sort_kline_asc(kline)
         technical = compute(sorted_k)
         if technical and "error" not in technical:
-            closes = [safe_float(r.get("close")) or 0.0 for r in sorted_k]
+            closes = [v for v in (safe_float(r.get("close")) for r in sorted_k) if v is not None]
             technical = {**technical, "rsi14": rsi_series(closes, 14)}
 
     fin_signals = scan_financial_risks(financials, industry_median_debt=industry_median_debt)
