@@ -1462,6 +1462,278 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
     }
 
 
+_50ETF_UNDERLYING = "510050.SH"
+_ETF_300_CODE = "510300.SH"
+_NEW_HIGH_SAMPLE = 30
+_PCR_HISTORY_5Y_CAL_DAYS = 1825
+_PCR_HISTORY_60D = 60
+_PCR_MIN_5Y_TRADING_DAYS = 252
+# 5 年 PCR 历史分位：均匀降采样上限，避免逐日 opt_daily 风暴
+_PCR_MAX_DAILY_QUERIES = 80
+
+
+def _ms_50etf_option_codes(tc: Any) -> tuple[list[str], list[str]]:
+    """SSE 50ETF 期权合约代码（认沽/认购）。"""
+    df = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
+    if df is None or df.empty:
+        return [], []
+    puts, calls = [], []
+    for _, row in df.iterrows():
+        name = str(row.get("name") or "")
+        if "50ETF" not in name and "510050" not in name:
+            continue
+        code = str(row.get("ts_code") or "").strip()
+        cp = str(row.get("call_put") or "").upper()
+        if not code:
+            continue
+        if cp == "P":
+            puts.append(code)
+        elif cp == "C":
+            calls.append(code)
+    return puts, calls
+
+
+def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
+    """均匀降采样交易日列表，始终保留最后一日。"""
+    if len(dates) <= max_points:
+        return dates
+    step = max(1, len(dates) // max_points)
+    sampled = list(dates[::step])
+    if dates[-1] not in sampled:
+        sampled.append(dates[-1])
+    return sorted(set(sampled))
+
+
+def _ms_pcr_on_date(
+    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
+) -> float | None:
+    df = tc.query("opt_daily", trade_date=trade_date, exchange="SSE")
+    if df is None or df.empty:
+        return None
+    put_vol = call_vol = 0.0
+    for _, row in df.iterrows():
+        code = str(row.get("ts_code") or "")
+        try:
+            vol = float(row.get("vol") or 0)
+        except (TypeError, ValueError):
+            continue
+        if code in put_codes:
+            put_vol += vol
+        elif code in call_codes:
+            call_vol += vol
+    if call_vol <= 0:
+        return None
+    return put_vol / call_vol
+
+
+def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
+    """50ETF 认沽认购比（opt_daily，需 2000 积分）。"""
+    from lib.valuation import percentile_rank
+
+    puts, calls = _ms_50etf_option_codes(tc)
+    if not puts or not calls:
+        return None
+    put_set, call_set = set(puts), set(calls)
+    cal = tc.query(
+        "trade_cal", exchange="SSE",
+        start_date=_days_ago(_PCR_HISTORY_5Y_CAL_DAYS + 5), end_date=_today(), is_open="1",
+    )
+    if cal is None or cal.empty:
+        return None
+    dates = sorted(str(d) for d in cal["cal_date"].tolist())
+    raw_days = len(dates)
+    dates = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+    ratios: list[float] = []
+    for td in dates:
+        r = _ms_pcr_on_date(tc, td, put_set, call_set)
+        if r is not None:
+            ratios.append(r)
+    if not ratios:
+        return None
+    current = ratios[-1]
+    pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
+    ratios_60d = ratios[-_PCR_HISTORY_60D:]
+    pct_60d = (
+        percentile_rank(ratios_60d, current)
+        if len(ratios_60d) >= 5 else None
+    )
+    return {
+        "ratio": round(current, 3),
+        "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
+        "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
+        "history_days": len(ratios),
+        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS or raw_days > len(dates),
+        "sampled": raw_days > len(dates),
+        "sample_points": len(dates),
+        "calendar_days": raw_days,
+        "underlying": _50ETF_UNDERLYING,
+        "source": "tushare.opt_daily",
+    }
+
+
+def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
+    """融券余额增速（交易所 margin 优先，个股 margin_detail 回退）。"""
+    from lib.valuation import percentile_rank
+
+    df = tc.query("margin", start_date=_days_ago(1825), end_date=_today())
+    if df is not None and not df.empty:
+        by_date: dict[str, float] = {}
+        for _, row in df.iterrows():
+            td = str(row.get("trade_date") or "")
+            rqye = row.get("rqye")
+            if not td or rqye is None:
+                continue
+            by_date[td] = by_date.get(td, 0.0) + float(rqye)
+        dates = sorted(by_date)
+        if len(dates) >= 11:
+            growths: list[float] = []
+            for i in range(10, len(dates)):
+                base, cur = by_date[dates[i - 10]], by_date[dates[i]]
+                if base > 0:
+                    growths.append((cur - base) / base * 100)
+            if growths:
+                current_g = growths[-1]
+                pct = percentile_rank(growths, current_g) if len(growths) >= 5 else None
+                return {
+                    "growth_pct": round(current_g, 2),
+                    "percentile_5y": round(pct, 1) if pct is not None else None,
+                    "scope": "exchange",
+                    "source": "tushare.margin",
+                }
+    margin = _ms_fetch_margin(tc, symbol)
+    if margin and margin.get("rqye_change_pct") is not None:
+        return {
+            "growth_pct": margin["rqye_change_pct"],
+            "scope": "stock",
+            "source": margin.get("source", "tushare.margin_detail"),
+        }
+    return None
+
+
+def _ms_new_high_ratio_from_panel(panel: dict[str, list[dict]]) -> float | None:
+    if not panel:
+        return None
+    n_high = n_valid = 0
+    for rows in panel.values():
+        if len(rows) < 2:
+            continue
+        closes = [safe_float(r.get("close")) for r in rows]
+        highs = [safe_float(r.get("high")) for r in rows]
+        closes = [c for c in closes if c is not None]
+        highs = [h for h in highs if h is not None]
+        if not closes or len(highs) < 2:
+            continue
+        n_valid += 1
+        if closes[-1] >= max(highs[:-1]):
+            n_high += 1
+    if n_valid == 0:
+        return None
+    return n_high / n_valid * 100
+
+
+def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
+    """创新高个股占比（采样 daily，partial 标注）。"""
+    from lib.valuation import percentile_rank
+
+    basic = tc.query("stock_basic", list_status="L", fields="ts_code")
+    if basic is None or basic.empty:
+        return None
+    codes = [
+        str(c) for c in basic["ts_code"].tolist()
+        if c is not None
+    ][:_NEW_HIGH_SAMPLE]
+    if not codes:
+        return None
+    def _fetch_daily_panel_row(ts_code: str) -> tuple[str, list[dict] | None]:
+        df = tc.query(
+            "daily", ts_code=ts_code,
+            start_date=_days_ago(70), end_date=_today(),
+            fields="trade_date,close,high",
+        )
+        if df is None or df.empty:
+            return ts_code, None
+        return ts_code, df.sort_values("trade_date").to_dict("records")
+
+    panel: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as executor:
+        futures = {executor.submit(_fetch_daily_panel_row, c): c for c in codes}
+        for fut in as_completed(futures):
+            ts_code, records = fut.result()
+            if records:
+                panel[ts_code] = records
+    current = _ms_new_high_ratio_from_panel(panel)
+    if current is None:
+        return None
+    hist: list[float] = []
+    if panel:
+        min_len = min(len(v) for v in panel.values())
+        # 排除全样本切片，避免 current 计入自身分位
+        hist_end = min_len - 1 if min_len > 1 else 0
+        for offset in range(max(0, min_len - 60), hist_end):
+            slice_panel = {
+                k: v[: offset + 1] for k, v in panel.items() if len(v) > offset
+            }
+            r = _ms_new_high_ratio_from_panel(slice_panel)
+            if r is not None:
+                hist.append(r)
+    pct = percentile_rank(hist, current) if len(hist) >= 5 else None
+    return {
+        "ratio_pct": round(current, 2),
+        "percentile_60d": round(pct, 1) if pct is not None else None,
+        "sample_size": len(panel),
+        "sample_requested": len(codes),
+        "partial": len(panel) < _NEW_HIGH_SAMPLE,
+        "source": "tushare.daily",
+    }
+
+
+def _ms_fetch_etf_flow(tc: Any) -> dict | None:
+    """宽基 ETF（510300）份额变动估算资金流向。"""
+    ts_code = _ETF_300_CODE
+    df_share = tc.query(
+        "fund_share", ts_code=ts_code,
+        start_date=_days_ago(30), end_date=_today(),
+    )
+    df_price = tc.query(
+        "fund_daily", ts_code=ts_code,
+        start_date=_days_ago(30), end_date=_today(),
+        fields="trade_date,close",
+    )
+    if df_share is None or df_share.empty:
+        return None
+    shares = df_share.sort_values("trade_date").to_dict("records")
+    prices = {}
+    if df_price is not None and not df_price.empty:
+        for r in df_price.sort_values("trade_date").to_dict("records"):
+            prices[str(r.get("trade_date", ""))] = safe_float(r.get("close"))
+
+    def _net_flow(days: int) -> float | None:
+        if len(shares) < days + 1:
+            return None
+        first, last = shares[-(days + 1)], shares[-1]
+        d_shares = float(last.get("fd_share") or 0) - float(first.get("fd_share") or 0)
+        px = prices.get(str(last.get("trade_date", "")))
+        if px is None or px <= 0:
+            return None
+        return d_shares * 10000 * px  # fd_share 单位：万份
+
+    flow_5d = _net_flow(5)
+    flow_10d = _net_flow(10)
+    if flow_5d is None and flow_10d is None:
+        return None
+    out: dict[str, Any] = {
+        "ts_code": ts_code,
+        "source": "tushare.fund_share+fund_daily",
+    }
+    if not prices:
+        out["price_incomplete"] = True
+    if flow_5d is not None:
+        out["net_flow_5d"] = round(flow_5d, 0)
+    if flow_10d is not None:
+        out["net_flow_10d"] = round(flow_10d, 0)
+    return out
+
+
 def extract_industry_from_basic_info(data: dict | None) -> str | None:
     """从 basic_info 主数据提取行业名（兼容 Tushare / akshare 字段）。"""
     if not data or not isinstance(data, dict):
@@ -1517,7 +1789,8 @@ def attach_pe_band(collection: dict, *, years: int = 5) -> dict[str, Any] | None
 def attach_phase2_extras(collection: dict, symbol: str) -> None:
     """挂载 Phase 2 扩展数据（同行、PE Band）。"""
     errors: list[str] = []
-    if not collection.get("industry_peers"):
+    peers_existing = collection.get("industry_peers")
+    if not peers_existing or peers_existing.get("error"):
         try:
             attach_industry_peers(collection, symbol)
         except Exception as exc:
@@ -1541,6 +1814,28 @@ def attach_phase2_extras(collection: dict, symbol: str) -> None:
         logger.warning("attach_phase2_extras partial failure for %s: %s", symbol, errors)
 
 
+def _ms_try_fetch(
+    result: dict[str, Any],
+    key: str,
+    fetch_fn: Callable[[], Any],
+    *,
+    unavailable_msg: str,
+    on_success: Callable[[Any], str] | None = None,
+) -> None:
+    """采集单个子源并写入 result / availability（统一 try/except 模式）。"""
+    try:
+        value = fetch_fn()
+        result[key] = value
+        if value is None:
+            _ms_set_unavailable(result["availability"], key, unavailable_msg)
+        elif on_success is not None:
+            result["availability"][key] = on_success(value)
+        else:
+            result["availability"][key] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], key, str(exc))
+
+
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:
     """采集市场结构因子（行业情绪/资金/ERP/换手）。各子源独立降级。"""
     result: dict[str, Any] = {
@@ -1551,92 +1846,95 @@ def collect_market_structure(symbol: str, *, industry: str | None = None) -> dic
         "turnover": None,
         "erp": None,
         "pmi": None,
+        "put_call_ratio": None,
+        "short_margin": None,
+        "new_high_ratio": None,
+        "etf_flow": None,
         "availability": {},
     }
     config = env.get_config()
+    _ms_keys = (
+        "sw_index", "northbound", "margin", "moneyflow", "turnover", "erp",
+        "put_call_ratio", "short_margin", "new_high_ratio", "etf_flow",
+    )
     if not env.is_tushare_available(config):
-        for key in ("sw_index", "northbound", "margin", "moneyflow", "turnover", "erp"):
+        for key in _ms_keys:
             _ms_set_unavailable(result["availability"], key, "TUSHARE_TOKEN not configured")
         return result
 
     tc = _tushare_client(config)
 
-    try:
-        result["sw_index"] = _ms_fetch_sw_index(tc, symbol, industry)
-        if result["sw_index"] is None:
-            _ms_set_unavailable(result["availability"], "sw_index", "no sw industry match or empty data")
-        else:
-            result["availability"]["sw_index"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "sw_index", str(exc))
-
-    try:
-        result["northbound"] = _ms_fetch_northbound_stock(tc, symbol)
-        if result["northbound"] is None:
-            _ms_set_unavailable(
-                result["availability"], "northbound",
-                "hsgt_top10 empty (not in top10) or akshare northbound unavailable",
-            )
-        else:
-            result["availability"]["northbound"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "northbound", str(exc))
-
-    try:
-        result["margin"] = _ms_fetch_margin(tc, symbol)
-        if result["margin"] is None:
-            _ms_set_unavailable(
-                result["availability"], "margin",
-                "margin_detail empty, insufficient history, or permission denied",
-            )
-        else:
-            result["availability"]["margin"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "margin", str(exc))
-
-    try:
-        result["moneyflow"] = _ms_fetch_moneyflow(tc, symbol)
-        if result["moneyflow"] is None:
-            _ms_set_unavailable(result["availability"], "moneyflow", "moneyflow empty or permission denied")
-        else:
-            result["availability"]["moneyflow"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "moneyflow", str(exc))
-
-    try:
-        result["turnover"] = _ms_fetch_turnover(tc, symbol)
-        if result["turnover"] is None:
-            _ms_set_unavailable(result["availability"], "turnover", "daily_basic turnover empty")
-        else:
-            result["availability"]["turnover"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "turnover", str(exc))
-
-    try:
-        result["erp"] = _ms_fetch_erp(tc, config)
-        if result["erp"] is None:
-            _ms_set_unavailable(
-                result["availability"], "erp",
-                "index_dailybasic or 10Y yield (FRED DGS10 / akshare CN10Y) unavailable",
-            )
-        elif result["erp"].get("partial"):
-            days = result["erp"].get("erp_days", 0)
-            result["availability"]["erp"] = (
-                f"partial: {days} aligned days (min {_ERP_MIN_ALIGNED_DAYS})"
-            )
-        else:
-            result["availability"]["erp"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "erp", str(exc))
-
-    try:
-        result["pmi"] = _ms_fetch_pmi()
-        if result["pmi"] is None:
-            _ms_set_unavailable(result["availability"], "pmi", "akshare macro_china_pmi unavailable")
-        else:
-            result["availability"]["pmi"] = "available"
-    except Exception as exc:
-        _ms_set_unavailable(result["availability"], "pmi", str(exc))
+    _ms_try_fetch(
+        result, "sw_index",
+        lambda: _ms_fetch_sw_index(tc, symbol, industry),
+        unavailable_msg="no sw industry match or empty data",
+    )
+    _ms_try_fetch(
+        result, "northbound",
+        lambda: _ms_fetch_northbound_stock(tc, symbol),
+        unavailable_msg="hsgt_top10 empty (not in top10) or akshare northbound unavailable",
+    )
+    _ms_try_fetch(
+        result, "margin",
+        lambda: _ms_fetch_margin(tc, symbol),
+        unavailable_msg="margin_detail empty, insufficient history, or permission denied",
+    )
+    _ms_try_fetch(
+        result, "moneyflow",
+        lambda: _ms_fetch_moneyflow(tc, symbol),
+        unavailable_msg="moneyflow empty or permission denied",
+    )
+    _ms_try_fetch(
+        result, "turnover",
+        lambda: _ms_fetch_turnover(tc, symbol),
+        unavailable_msg="daily_basic turnover empty",
+    )
+    _ms_try_fetch(
+        result, "erp",
+        lambda: _ms_fetch_erp(tc, config),
+        unavailable_msg="index_dailybasic or 10Y yield (FRED DGS10 / akshare CN10Y) unavailable",
+        on_success=lambda v: (
+            f"partial: {v.get('erp_days', 0)} aligned days (min {_ERP_MIN_ALIGNED_DAYS})"
+            if v.get("partial") else "available"
+        ),
+    )
+    _ms_try_fetch(
+        result, "pmi",
+        _ms_fetch_pmi,
+        unavailable_msg="akshare macro_china_pmi unavailable",
+    )
+    _ms_try_fetch(
+        result, "put_call_ratio",
+        lambda: _ms_fetch_put_call_ratio(tc),
+        unavailable_msg="opt_daily empty, no 50ETF options, or permission denied (2000 pts)",
+        on_success=lambda v: (
+            f"partial: {v.get('history_days', 0)} days"
+            if v.get("partial") else "available"
+        ),
+    )
+    _ms_try_fetch(
+        result, "short_margin",
+        lambda: _ms_fetch_short_margin_growth(tc, symbol),
+        unavailable_msg="margin / margin_detail rqye empty or permission denied",
+    )
+    _ms_try_fetch(
+        result, "new_high_ratio",
+        lambda: _ms_fetch_new_high_ratio(tc),
+        unavailable_msg="daily sample empty or insufficient",
+        on_success=lambda v: (
+            f"partial: sample {v.get('sample_size', 0)}/{_NEW_HIGH_SAMPLE}"
+            if v.get("partial") else "available"
+        ),
+    )
+    _ms_try_fetch(
+        result, "etf_flow",
+        lambda: _ms_fetch_etf_flow(tc),
+        unavailable_msg="fund_share / fund_daily empty or permission denied",
+        on_success=lambda v: (
+            "partial: fund_daily close missing for flow estimate"
+            if v.get("price_incomplete") else "available"
+        ),
+    )
 
     return result
 
@@ -1677,12 +1975,52 @@ def _revenue_yoy_from_fina_rows(rows: list[dict]) -> float | None:
     return round((rev_cur - rev_prev) / rev_prev * 100, 2)
 
 
+def _gross_margin_trend_from_rows(fin_rows: list[dict]) -> str | None:
+    """近 2 个会计年度毛利率方向（供竞争加剧信号）。"""
+    by_year: dict[str, float] = {}
+    for r in fin_rows:
+        y = str(r.get("end_date", ""))[:4]
+        gm = safe_float(r.get("grossprofit_margin"))
+        if y and gm is not None:
+            by_year[y] = gm
+    annual = sorted(by_year.items())
+    if len(annual) < 2:
+        return None
+    (_, m0), (_, m1) = annual[-2], annual[-1]
+    if m1 < m0 - 0.5:
+        return "down"
+    if m1 > m0 + 0.5:
+        return "up"
+    return "flat"
+
+
+def _peer_metrics_from_fina(
+    fin_rows: list[dict], fin_row: dict | None,
+) -> dict[str, Any]:
+    """从 fina_indicator 行提取同行对比 / 风险扫描字段。"""
+    out: dict[str, Any] = {}
+    if fin_row:
+        out["roe"] = safe_float(fin_row.get("roe"))
+        out["revenue_yoy"] = _revenue_yoy_from_fina_rows(fin_rows)
+        gm = safe_float(fin_row.get("grossprofit_margin"))
+        if gm is not None:
+            out["grossprofit_margin"] = gm
+            out["gross_margin"] = gm
+        debt = safe_float(fin_row.get("debt_to_assets"))
+        if debt is not None:
+            out["debt_to_assets"] = debt
+    trend = _gross_margin_trend_from_rows(fin_rows)
+    if trend is not None:
+        out["gross_margin_trend"] = trend
+    return out
+
+
 def _fetch_peer_fina_rows(tc: Any, code: str) -> list[dict]:
-    """拉取近 2.5 年 fina_indicator，供 ROE / 同期营收 YoY 使用。"""
+    """拉取近 2.5 年 fina_indicator，供 ROE / 毛利率 / 负债率等使用。"""
     fin_df = tc.query(
         "fina_indicator",
         ts_code=code,
-        fields="ts_code,end_date,roe,revenue",
+        fields="ts_code,end_date,roe,revenue,grossprofit_margin,debt_to_assets",
         start_date=_days_ago(950),
         end_date=_today(),
     )
@@ -1803,8 +2141,7 @@ def collect_industry_peers(
                 "total_mv": None,
             }
             if fin_row:
-                peer_entry["roe"] = safe_float(fin_row.get("roe"))
-                peer_entry["revenue_yoy"] = _revenue_yoy_from_fina_rows(fin_rows)
+                peer_entry.update(_peer_metrics_from_fina(fin_rows, fin_row))
             if val_row:
                 pe_v = safe_float(val_row.get("pe_ttm"))
                 if pe_v is not None and pe_v > 0:

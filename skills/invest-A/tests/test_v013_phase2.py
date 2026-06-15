@@ -363,15 +363,21 @@ class TestRenderFundamentals:
         mod4 = text.split("## 4.")[1].split("## 5.")[0]
         assert "CAGR" in mod4
 
-    def test_placeholder_modules_still_placeholders(self):
-        """模块 5/7 仍为占位（Phase 2 不变）。"""
+    def test_modules_5_7_have_real_content(self):
+        """模块 5/7 已实现多空分歧与风险扫描（Phase 3）。"""
         from lib.render import render_report_v3
 
         text = render_report_v3(_collection_phase2(), "600176")
         mod5 = text.split("## 5.")[1].split("## 6.")[0]
         mod7 = text.split("## 7.")[1].split("## 8.")[0]
-        assert "Phase 3" in mod5
-        assert "Phase 3" in mod7
+        assert "Phase 3" not in mod5
+        assert "Phase 3" not in mod7
+        assert "多头逻辑链" in mod5
+        assert "空头逻辑链" in mod5
+        assert "关键分歧点" in mod5
+        assert "预期差" in mod5
+        assert "三层风险信号" in mod7
+        assert "Known Unknowns" in mod7
 
     def test_nine_modules_all_present(self):
         from lib.render import render_report_v3
@@ -549,3 +555,35 @@ class TestCollectorPeerHelpers:
         mod4 = text.split("## 4.")[1].split("## 5.")[0]
         assert "非申万 L3" in mod4
         assert "同行可比公司" not in mod4
+
+    def test_peer_metrics_from_fina_fields(self):
+        from lib.collector import _peer_metrics_from_fina
+
+        rows = [
+            {"end_date": "20221231", "grossprofit_margin": 35.0, "debt_to_assets": 40.0},
+            {"end_date": "20231231", "grossprofit_margin": 30.0, "debt_to_assets": 45.0},
+        ]
+        metrics = _peer_metrics_from_fina(rows, rows[-1])
+        assert metrics["gross_margin"] == 30.0
+        assert metrics["debt_to_assets"] == 45.0
+        assert metrics["gross_margin_trend"] == "down"
+
+    def test_pcr_subsample_caps_api_calls(self):
+        from lib.collector import _ms_subsample_trade_dates, _PCR_MAX_DAILY_QUERIES
+
+        dates = [f"2020{i:02d}{j:02d}" for i in range(1, 13) for j in (1, 15)]
+        sampled = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+        assert len(sampled) <= _PCR_MAX_DAILY_QUERIES
+        assert sampled[-1] == dates[-1]
+
+    def test_valuation_percentiles_uses_local_cache_not_collection(self):
+        from lib.render import _index_dims, _v3_valuation_percentiles
+
+        c = _collection_phase2()
+        dims = _index_dims(c)
+        cache: dict = {}
+        r1 = _v3_valuation_percentiles(dims, cache)
+        r2 = _v3_valuation_percentiles(dims, cache)
+        assert r1 == r2
+        assert "_v3_val_pct" not in c
+        assert cache["result"] == r1

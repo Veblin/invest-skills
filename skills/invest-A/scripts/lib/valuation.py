@@ -37,13 +37,23 @@ def percentile_rank(seq: list[float], current: float) -> float | None:
     return (below / len(valid)) * 100
 
 
-def zone_label(pct: float, low_threshold: float = 30.0,
-               high_threshold: float = 70.0) -> str:
+# 与 CV-7 / 左-右概率分位边界一致（严格小于/大于，不含端点）
+ZONE_LOW_THRESHOLD = 30.0
+ZONE_HIGH_THRESHOLD = 70.0
+
+
+def zone_label(
+    pct: float,
+    low_threshold: float = ZONE_LOW_THRESHOLD,
+    high_threshold: float = ZONE_HIGH_THRESHOLD,
+) -> str:
     """根据百分位返回估值区间标签。
 
     pct < 30  → "偏低"（当前值低于历史 70% 的时间）
     pct 30-70 → "适中"
     pct > 70  → "偏高"（当前值高于历史 70% 的时间）
+
+    阈值与 render._v3_cv7_assessment 保持一致。
     """
     if pct < low_threshold:
         return "偏低"
