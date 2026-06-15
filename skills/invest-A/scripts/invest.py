@@ -96,10 +96,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
     warn_if_proxy_detected()
     result = collector.collect_all(args.symbol, dims, deep=args.deep)
-    print(render.render(result, args.symbol, "compact"))
     if result["summary"]["available"] == 0:
+        print(render.render(result, args.symbol, "compact"))
         print("⚠️ 所有维度均不可用。请运行 diagnose。")
         return 1
+    print(render.render(result, args.symbol, "compact"))
     if args.store and _HAS_STORE:
         store_mod.save_collection(result)
         print("💾 已存入持久化存储")

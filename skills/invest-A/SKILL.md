@@ -1,7 +1,7 @@
 ---
 name: invest-A
-version: "0.1.2"
-description: "A股个股调研 AI 学习技能 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 学习报告。这是一个学习工具，不是决策工具。"
+version: "0.1.3"
+description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
 argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --deep | /invest-A 600176 --compare 000858"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
@@ -14,11 +14,19 @@ metadata:
     - TAVILY_API_KEY
 ---
 
-# 投资学习 Skill
+# invest-A 投研助手
+
+## Skill 身份声明
+
+本 Skill 是一个**多因子交叉验证的结构化投研助手**。
+
+**它做的：** 采集多渠道数据并交叉验证 / 归因分析当前涨跌的驱动因子 / 多维度市场状态扫描 / 呈现左侧/右侧概率结构及走势转变触发条件 / 所有结论标注来源和证据强度。
+
+**它不做的：** 不输出个股买卖建议 / 不给目标价 / 不给仓位建议 / 不承诺收益。所有输出限定于「信息整理、结构化分析、多因子交叉验证和归因讨论」。
 
 ## 核心定位
 
-**这是一个学习工具，不是决策工具。** 不提供买卖建议、目标价或仓位建议。
+**这是一个研究工具，不是决策工具。** 不提供买卖建议、目标价或仓位建议。
 
 ### 数据采集哲学：不是"兜底"，是"并行取证"
 
@@ -69,16 +77,18 @@ rules:
 # 采集并展示
 uv run python skills/invest-A/scripts/invest.py collect 600176
 
-# 生成研究报告（默认 HTML，自动保存到当前目录）
-# 文件名格式: YYYY-MM-DD-hh-mm-ss-股票代码-股票名称.html
+# 生成研究报告（默认 Markdown 九模块，stdout）
 uv run python skills/invest-A/scripts/invest.py report 600176
 
-# 指定输出目录
+# 指定输出目录（写 .md 文件）
 uv run python skills/invest-A/scripts/invest.py report 600176 --outdir=./reports/
 
-# 生成 JSON / Markdown 格式（stdout）
+# HTML 报告（v0.1.2 冻结旧版，须显式指定）
+uv run python skills/invest-A/scripts/invest.py report 600176 --emit=html
+
+# 生成 JSON / compact 格式（stdout）
 uv run python skills/invest-A/scripts/invest.py report 600176 --emit=json
-uv run python skills/invest-A/scripts/invest.py report 600176 --emit=md
+uv run python skills/invest-A/scripts/invest.py report 600176 --emit=compact
 
 # 深度模式（扩大K线范围至730日 + 行业/舆情分析）
 uv run python skills/invest-A/scripts/invest.py collect 600176 --deep
@@ -127,6 +137,36 @@ uv run python skills/invest-A/scripts/invest.py collect 600176 --store
 **LAW 7** — 每个数字标注可审查的追溯路径（函数调用、查询语句、公告链接）。**最终数据来源清单表必须包含检索关键字/API 调用参数列**——仅写来源名称不满足 LAW 7。
 **LAW 8** — 每个维度末尾要求"🔍 待独立验证项"。
 **LAW 9** — 无数据源支撑的分析不输出。
+
+**LAW 10–16** — 见下文「LAW 10–16 方法论」章节（完整版：`docs/invest-A-SKILL-LAW10-16.md`）。
+
+## LAW 10–16 方法论
+
+> v0.1.3 引擎 `render_report_v3()` 与 Claude 分析输出均须遵守以下法则。违反即为 Bug。
+
+**LAW 10 — 分析提示必须具体**  
+每节「分析提示」须含：① 该维度在定价中的传导路径；② 引用**本次报告具体数据**的常见误区；③ 1–3 个可执行的交叉验证动作。禁止无数据支撑的通用知识。
+
+**LAW 11 — 研究问题卡来自结构化触发**  
+四类触发源驱动问题树，不得凭空总结：  
+- **A 变化驱动**：近 20 日涨跌超 ±10%、核心指标环比 ±5pp、重大公告  
+- **B 估值位置**：PE/PB 历史分位 ≥80% 或 ≤20%  
+- **C 行业结构**：申万板块相对大盘超 ±5%、行业政策  
+- **D 趋势结构**：52 周高低区间极端、MA60 附近盘整  
+问题树格式：核心问题（含不确定性）→ 子问题 ①②③ →「为什么这是好问题」。
+
+**LAW 12 — 证据-结论映射强度一致**  
+每个分析性结论附带证据块：✅ 强 / ⚠️ 中 / ❓ 弱。引擎函数 `_evidence_conclusion_block()` 与 `_cross_validation_block()` 为模板参考。
+
+**LAW 13 — 动态驱动须列候选解释并声明主导因子**  
+模块 2 须输出最多 **5 条**候选解释（假说，非因果定论），并从多因子矩阵中**声明主导因子**（方向 + 可持续性待观察）。
+
+**LAW 14 — 静态基本面 12 道核心题 + 分层激活**（Phase 2 完整落地；当前模块 4 占位）
+
+**LAW 15 — 市场分歧 Bull vs Bear**（Phase 3 落地；当前模块 5 占位）
+
+**LAW 16 — 左/右概率结构，禁止单一结论**  
+永远不输出「当前是左侧」或「当前是右侧」。须并列呈现：左侧支撑依据、右侧支撑依据、走势转变触发条件、下一观察节点。阶段描述用**并列对照**，不得勾选单一趋势结论。
 
 ### 数据源策略（v0.2 → v0.3 变更）
 
@@ -183,7 +223,23 @@ uv run python skills/invest-A/scripts/invest.py collect 600176 --store
 
 ---
 
-## 八段研究结构（v0.1.2 起）
+## 九模块研究结构（v0.1.3 起）
+
+| # | 模块 | 引擎渲染（v0.1.3-alpha） | 说明 |
+|---|------|--------------------------|------|
+| 0 | 研究问题卡 | ✅ | LAW 11 四类触发源 + 问题树 |
+| 1 | 当前状态快照 | ✅ | 价格/估值/财务 + 多源一致性 |
+| 2 | 动态驱动分析 | ✅ | 候选解释 + 8 因子矩阵 + 主导因子 |
+| 3 | 市场结构分析 | ✅ | 行业情绪 + 资金态度 + ERP/换手 |
+| 4 | 静态基本面 | ⏸ 占位 | Phase 2 分层激活 12 题 |
+| 5 | 市场分歧 | ⏸ 占位 | Phase 3 Bull/Bear |
+| 6 | 左侧/右侧概率 | ✅ | LAW 16 概率结构 + 触发条件 |
+| 7 | 风险与不确定性 | ⏸ 占位 | Phase 3 17 信号扫描 |
+| 8 | 附录 | ✅ | 技术精简 + 引用来源 |
+
+> v0.1.3-alpha 使用 `render_report_v3()`；v0.1.2 八段模板保留为 `render_report_v2()` legacy。
+
+## 八段研究结构（v0.1.2 legacy）
 
 | 章节 | 分析要点 | 数据来源 | 引擎渲染 |
 |------|---------|---------|---------|

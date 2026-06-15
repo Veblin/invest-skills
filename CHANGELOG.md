@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.1.3-alpha (2026-06-14)
+
+### 动态投研内核（Phase 1）
+
+- **九模块 Markdown 报告** (`render_report_v3()`)：研究问题卡 → 状态快照 → 动态驱动 → 市场结构 → 静态基本面（占位）→ 市场分歧（占位）→ 左/右概率 → 风险（占位）→ 附录
+- **市场结构采集** (`collect_market_structure()`)：申万行业、北向、融资融券、主力资金、换手率、ERP；权限不足时标注 `[数据源不可用，该因子跳过]`
+- **LAW 10–16** 方法论规范（见 `docs/invest-A-SKILL-LAW10-16.md`）
+- **数据结构** (`schema.py`)：`DriverFactor`、`CrossValidation`、`ProbabilityStructure` dataclass
+- **默认输出** `--emit md`（Markdown 九模块到 stdout 或 `--outdir`）；`--emit html` 仍为 v0.1.2 冻结模板并打印弃用提示
+
+### 合规
+
+- LAW 16：左/右章节仅呈现概率结构，禁止「当前是左侧/右侧」确定性结论
+- 免责声明语气：「研究备忘录」替代「学习研究」
+
 ## v0.1.2 (2026-06-12)
 
 ### 基础分析骨架 — 从"数据摘要"升级为"基础研究报告"

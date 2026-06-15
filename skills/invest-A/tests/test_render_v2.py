@@ -40,6 +40,13 @@ class TestRenderReportV2Structure:
         assert "免责声明" in text
         assert "不构成任何投资建议" in text
 
+    def test_render_md_routes_to_v3(self):
+        from lib.render import render
+
+        text = render(collection_v2_minimal(), "600176", "md")
+        assert "## 0. 研究问题卡" in text
+        assert "## 6. 左侧/右侧概率判断" in text
+
     def test_render_compact_routes_to_v2(self):
         from lib.render import render
 
@@ -47,11 +54,11 @@ class TestRenderReportV2Structure:
         assert "## 一、公司画像" in text
         assert "# 600176" in text
 
-    def test_render_md_same_as_compact(self):
+    def test_render_md_differs_from_compact(self):
         from lib.render import render
 
         c = collection_v2_minimal()
-        assert render(c, "600176", "md") == render(c, "600176", "compact")
+        assert render(c, "600176", "md") != render(c, "600176", "compact")
 
     def test_financials_roe_trend_uses_latest_periods(self):
         """升序 financials：趋势句应基于最近两期（非最旧两期）。"""

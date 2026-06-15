@@ -37,6 +37,14 @@ def _days_ago(n: int) -> str:
     return (datetime.now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
+def _fred_date(yyyymmdd: str) -> str:
+    """Tushare 风格 YYYYMMDD → FRED API 要求的 YYYY-MM-DD。"""
+    s = yyyymmdd.strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s
+
+
 def _latest_quarter_end() -> str:
     """返回最近一个已完整的季度末日期（0331/0630/0930/1231）。
 
@@ -209,6 +217,24 @@ def _q_tushare_basic(symbol: str) -> dict | None:
     return None
 
 
+def _merge_cashflow_into_financials(
+    financials: list[dict], cashflow: list[dict],
+) -> list[dict]:
+    """按 end_date 合并经营现金流，供 CV-1 交叉验证。"""
+    cf_by_date = {str(r.get("end_date", "")): r for r in cashflow}
+    out: list[dict] = []
+    for row in financials:
+        merged = dict(row)
+        cf = cf_by_date.get(str(row.get("end_date", "")))
+        if cf:
+            ncf = cf.get("n_cashflow_act")
+            if ncf is not None:
+                merged["n_cashflow_act"] = ncf
+                merged["ocf"] = ncf
+        out.append(merged)
+    return out
+
+
 def _q_tushare_financials(symbol: str) -> list[dict] | None:
     from . import env as _env
     config = _env.get_config()
@@ -218,9 +244,15 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
     df = tc.query("fina_indicator", ts_code=_ts_code(symbol),
                   fields="ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit",
                   start_date=_days_ago(730), end_date=_today())
-    if df is not None and not df.empty:
-        return df.to_dict("records")
-    return None
+    if df is None or df.empty:
+        return None
+    records = df.to_dict("records")
+    cf_df = tc.query("cashflow", ts_code=_ts_code(symbol),
+                     fields="ts_code,end_date,n_cashflow_act",
+                     start_date=_days_ago(730), end_date=_today())
+    if cf_df is not None and not cf_df.empty:
+        records = _merge_cashflow_into_financials(records, cf_df.to_dict("records"))
+    return records
 
 
 def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
@@ -253,18 +285,33 @@ def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
 
 
 def _normalize_northbound_records(records: list[dict], source: str) -> list[dict]:
-    """统一 net_mf_vol 为「元」。Tushare moneyflow 字段单位为万元，akshare 为元。"""
+    """统一主力资金/北向净额为「元」。
+
+    Tushare moneyflow: ``net_mf_amount`` 单位为万元。
+    akshare 北向: ``今日增持资金`` 映射为 ``net_mf_vol``，单位已是元。
+    输出同时写入 ``net_mf_amount`` 与 ``net_mf_vol``（后者为兼容别名）。
+    """
     if not records:
         return records
-    scale = 10000.0 if source.startswith("tushare") else 1.0
+    # 仅 moneyflow 为万元；hsgt_top10.net_amount 已是元
+    scale = 10000.0 if source == "tushare.moneyflow" else 1.0
     out: list[dict] = []
     for r in records:
         row = dict(r)
-        v = row.get("net_mf_vol")
-        if v is not None and scale != 1.0:
-            row["net_mf_vol"] = float(v) * scale
+        raw = row.get("net_mf_amount")
+        if raw is None:
+            raw = row.get("net_mf_vol")
+        if raw is not None:
+            yuan = float(raw) * scale
+            row["net_mf_amount"] = yuan
+            row["net_mf_vol"] = yuan
         out.append(row)
     return out
+
+
+def _flow_amount_yuan(record: dict) -> float:
+    """从归一化后的资金流记录读取净额（元）。"""
+    return float(record.get("net_mf_amount") or record.get("net_mf_vol") or 0)
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
@@ -274,11 +321,33 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
         raise RuntimeError("TUSHARE_TOKEN not configured")
     tc = _tushare_client(config)
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,buy_sm_vol,sell_sm_vol,net_mf_vol",
+                  fields="ts_code,trade_date,net_mf_amount",
                   start_date=_days_ago(10), end_date=_today())
     if df is not None and not df.empty:
         return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
     return None
+
+
+def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
+    """个股沪/深股通成交（仅上榜日有数据）。net_amount 单位：元。"""
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("hsgt_top10", ts_code=_ts_code(symbol),
+                  fields="ts_code,trade_date,net_amount",
+                  start_date=_days_ago(30), end_date=_today())
+    if df is None or df.empty:
+        return None
+    rows = [
+        {"trade_date": r.get("trade_date"), "net_mf_amount": r.get("net_amount")}
+        for r in df.to_dict("records")
+        if r.get("net_amount") is not None
+    ]
+    if not rows:
+        return None
+    return _normalize_northbound_records(rows, "tushare.hsgt_top10")
 
 
 def _q_akshare_basic(symbol: str) -> dict | None:
@@ -687,10 +756,10 @@ def collect_quote(symbol: str) -> dict:
 
 
 def collect_northbound(symbol: str) -> dict:
-    """北向资金。并行：Tushare + akshare。"""
+    """北向资金。并行：Tushare hsgt_top10 + akshare 个股持股变动。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.moneyflow", lambda: _q_tushare_moneyflow(symbol)))
+        tasks.append(("tushare.hsgt_top10", lambda: _q_tushare_hsgt_top10(symbol)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
@@ -698,8 +767,8 @@ def collect_northbound(symbol: str) -> dict:
     results = _run_sources_parallel(tasks, "northbound")
     result_map = {r.source: r for r in results}
     _annotate_query_params(result_map, {
-        "tushare.moneyflow": _qp_tushare("moneyflow", symbol,
-                                         start_date=_days_ago(10), end_date=_today()),
+        "tushare.hsgt_top10": _qp_tushare("hsgt_top10", symbol,
+                                          start_date=_days_ago(30), end_date=_today()),
         "akshare.stock_hsgt_individual_em": _qp_akshare("stock_hsgt_individual_em", symbol),
     })
 
@@ -906,3 +975,480 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             "missing": missing,
         },
     }
+
+
+# ---- 市场结构采集（v0.1.3 Phase 1） ----
+
+_HS300_CODE = "000300.SH"
+_ERP_MIN_ALIGNED_DAYS = 60
+_ERP_DGS10_LOOKBACK_DAYS = 5
+
+
+def _ms_set_unavailable(availability: dict[str, str], key: str, reason: str) -> None:
+    availability[key] = f"unavailable: {reason}"
+
+
+def _ms_lookup_sw_index_code_at_level(
+    tc: Any, industry: str, level: str,
+) -> str | None:
+    """在指定申万层级（L1/L2）中按行业名精确匹配申万指数代码。"""
+    df = tc.query("index_classify", level=level, src="SW2021")
+    if df is None or df.empty:
+        return None
+    name = industry.strip()
+    for _, row in df.iterrows():
+        idx_name = str(row.get("industry_name") or row.get("name") or "").strip()
+        if not idx_name:
+            continue
+        code = str(row.get("index_code", "")).strip()
+        if name == idx_name and code:
+            return code
+    return None
+
+
+def _ms_lookup_sw_index_code(tc: Any, industry: str | None) -> str | None:
+    """按申万行业名称匹配指数代码（L2 优先，L1 回退）。"""
+    if not industry:
+        return None
+    for level in ("L2", "L1"):
+        code = _ms_lookup_sw_index_code_at_level(tc, industry, level)
+        if code:
+            return code
+    return None
+
+
+def _ms_return_pct(closes: list[float]) -> float | None:
+    if len(closes) < 2:
+        return None
+    start, end = closes[0], closes[-1]
+    if not start:
+        return None
+    return (end - start) / start * 100
+
+
+def _ms_fetch_sw_index(tc: Any, symbol: str, industry: str | None) -> dict | None:
+    index_code = _ms_lookup_sw_index_code(tc, industry)
+    if not index_code:
+        return None
+    df_sw = tc.query("sw_daily", ts_code=index_code,
+                     start_date=_days_ago(70), end_date=_today())
+    df_hs = tc.query("index_daily", ts_code=_HS300_CODE,
+                     start_date=_days_ago(70), end_date=_today())
+    if df_sw is None or df_sw.empty:
+        return None
+    sw = df_sw.sort_values("trade_date")
+    sw_closes = [float(v) for v in sw["close"].tolist() if v is not None]
+    ret_20 = _ms_return_pct(sw_closes[-21:]) if len(sw_closes) >= 2 else None
+    bench_ret = None
+    if df_hs is not None and not df_hs.empty:
+        hs = df_hs.sort_values("trade_date")
+        hs_closes = [float(v) for v in hs["close"].tolist() if v is not None]
+        bench_ret = _ms_return_pct(hs_closes[-21:]) if len(hs_closes) >= 2 else None
+    stock_ret = None
+    df_stk = tc.query("daily", ts_code=_ts_code(symbol),
+                      start_date=_days_ago(70), end_date=_today(),
+                      fields="trade_date,close")
+    if df_stk is not None and not df_stk.empty:
+        stk = df_stk.sort_values("trade_date")
+        stk_closes = [float(v) for v in stk["close"].tolist() if v is not None]
+        stock_ret = _ms_return_pct(stk_closes[-21:]) if len(stk_closes) >= 2 else None
+    rel_vs_bench = (ret_20 - bench_ret) if ret_20 is not None and bench_ret is not None else None
+    rel_stock_vs_ind = (stock_ret - ret_20) if stock_ret is not None and ret_20 is not None else None
+    return {
+        "index_code": index_code,
+        "industry": industry,
+        "return_20d_pct": round(ret_20, 2) if ret_20 is not None else None,
+        "benchmark_return_20d_pct": round(bench_ret, 2) if bench_ret is not None else None,
+        "stock_return_20d_pct": round(stock_ret, 2) if stock_ret is not None else None,
+        "relative_vs_benchmark_pct": round(rel_vs_bench, 2) if rel_vs_bench is not None else None,
+        "stock_vs_industry_pct": round(rel_stock_vs_ind, 2) if rel_stock_vs_ind is not None else None,
+        "source": "tushare.sw_daily",
+    }
+
+
+def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
+    return sorted(
+        records, key=lambda r: str(r.get("trade_date", "")), reverse=True,
+    )[:limit]
+
+
+def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
+    """个股北向近 10 个交易日净额（元）。
+
+    Tushare hsgt_top10（仅上榜日有 net_amount）→ akshare 个股持股变动回退。
+    不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
+    """
+    try:
+        records = _q_tushare_hsgt_top10(symbol)
+        if records:
+            recent = _recent_flow_records(records, limit=10)
+            net_sum = sum(_flow_amount_yuan(r) for r in recent)
+            return {
+                "records": recent,
+                "net_sum_10d": net_sum,
+                "days": len(recent),
+                "source": "tushare.hsgt_top10",
+            }
+    except Exception as exc:
+        logger.debug("tushare hsgt_top10 failed for %s: %s", symbol, exc)
+
+    records = _q_akshare_northbound(symbol)
+    if not records:
+        return None
+    recent = _recent_flow_records(records, limit=10)
+    net_sum = sum(_flow_amount_yuan(r) for r in recent)
+    return {
+        "records": recent,
+        "net_sum_10d": net_sum,
+        "days": len(recent),
+        "source": "akshare.stock_hsgt_individual_em",
+    }
+
+
+def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
+    """个股融资余额变化（margin_detail，非交易所汇总 margin）。
+
+    按 LAW 16 分离三类余额变化：
+      - change_pct: 融资余额（rzye）增速
+      - rqye_change_pct: 融券余额增速
+      - rzrqye_change_pct: 融资融券合计余额增速（如有）
+    """
+    df = tc.query("margin_detail", ts_code=_ts_code(symbol),
+                  start_date=_days_ago(15), end_date=_today())
+    if df is None or df.empty:
+        return None
+    records = df.sort_values("trade_date").to_dict("records")
+    if len(records) < 2:
+        return None
+
+    first, last = records[0], records[-1]
+
+    def _pct_chg(key: str) -> float | None:
+        fv = first.get(key)
+        lv = last.get(key)
+        if fv is None or lv is None:
+            return None
+        f = float(fv)
+        l = float(lv)
+        if f == 0:
+            return None
+        return (l - f) / f * 100
+
+    change_pct = _pct_chg("rzye")
+    rqye_change_pct = _pct_chg("rqye")
+    rzrqye_change_pct = _pct_chg("rzrqye")
+
+    result: dict[str, Any] = {
+        "records": records[-10:],
+        "source": "tushare.margin_detail",
+    }
+    if change_pct is not None:
+        result["change_pct"] = round(change_pct, 2)
+    if rqye_change_pct is not None:
+        result["rqye_change_pct"] = round(rqye_change_pct, 2)
+    if rzrqye_change_pct is not None:
+        result["rzrqye_change_pct"] = round(rzrqye_change_pct, 2)
+    return result if result.get("change_pct") is not None else None
+
+
+def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
+    records = _q_tushare_moneyflow(symbol)
+    if not records:
+        return None
+    recent = _recent_flow_records(records, limit=10)
+    net_sum = sum(_flow_amount_yuan(r) for r in recent[:5])
+    return {
+        "records": recent,
+        "net_sum_5d": net_sum,
+        "source": "tushare.moneyflow",
+    }
+
+
+def _ms_fetch_turnover(tc: Any, symbol: str) -> dict | None:
+    from lib.valuation import percentile_rank
+
+    df = tc.query("daily_basic", ts_code=_ts_code(symbol),
+                  fields="trade_date,turnover_rate",
+                  start_date=_days_ago(90), end_date=_today())
+    if df is None or df.empty:
+        return None
+    rows = df.sort_values("trade_date")
+    rates = [float(v) for v in rows["turnover_rate"].tolist()
+             if v is not None and float(v) > 0]
+    if not rates:
+        return None
+    avg_5 = sum(rates[-5:]) / min(5, len(rates[-5:]))
+    avg_60 = sum(rates[-60:]) / min(60, len(rates[-60:]))
+    current = rates[-1]
+    pct = percentile_rank(rates[-60:], current) if len(rates) >= 5 else None
+    return {
+        "avg_5d": round(avg_5, 4),
+        "avg_60d": round(avg_60, 4),
+        "current": round(current, 4),
+        "ratio_5_60": round(avg_5 / avg_60, 3) if avg_60 else None,
+        "percentile_60d": round(pct, 1) if pct is not None else None,
+        "source": "tushare.daily_basic",
+    }
+
+
+def _akshare_date_to_iso(value: Any) -> str:
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    s = str(value).strip().replace("/", "-")
+    return s[:10] if len(s) >= 10 else s
+
+
+def _ms_fetch_akshare_cn10y_series() -> list[tuple[str, float]]:
+    """中国 10Y 国债收益率日序列（date, yield%）。FRED 不可用时的 ERP 回退。"""
+    if not env.is_akshare_available():
+        return []
+    with _proxy_bypass():
+        import akshare as ak
+        try:
+            df = ak.bond_zh_us_rate(start_date=_days_ago(1825))
+        except Exception as exc:
+            logger.warning("akshare bond_zh_us_rate failed: %s", exc)
+            return []
+    if df is None or getattr(df, "empty", True):
+        return []
+    col = "中国国债收益率10年"
+    if col not in df.columns:
+        return []
+    out: list[tuple[str, float]] = []
+    for _, row in df.iterrows():
+        dt = _akshare_date_to_iso(row.get("日期"))
+        val = row.get(col)
+        if not dt or val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            continue
+        if fval != fval:  # NaN
+            continue
+        out.append((dt, fval))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _ms_fetch_y10_series(config: dict) -> tuple[list[tuple[str, float]], str]:
+    """10Y 国债收益率序列：FRED DGS10 优先，akshare 中国 10Y 回退。"""
+    fred = _ms_fetch_fred_dgs10_series(config)
+    if fred:
+        return fred, "FRED.DGS10"
+    cn = _ms_fetch_akshare_cn10y_series()
+    if cn:
+        return cn, "akshare.bond_zh_us_rate"
+    return [], ""
+
+
+def _ms_fetch_fred_dgs10_series(config: dict) -> list[tuple[str, float]]:
+    """FRED DGS10 日序列（date, yield%）。"""
+    if not env.is_fred_available(config):
+        return []
+    import json
+    import urllib.parse
+    import urllib.request
+
+    key = config.get("FRED_API_KEY", "")
+    params = urllib.parse.urlencode({
+        "series_id": "DGS10",
+        "api_key": key,
+        "file_type": "json",
+        "observation_start": _fred_date(_days_ago(1825)),
+        "observation_end": _fred_date(_today()),
+    })
+    url = f"https://api.stlouisfed.org/fred/series/observations?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.warning("FRED DGS10 fetch failed: %s", exc)
+        return []
+    out: list[tuple[str, float]] = []
+    for obs in payload.get("observations", []):
+        val = obs.get("value")
+        if val is None or val == ".":
+            continue
+        try:
+            out.append((obs.get("date", ""), float(val)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _dgs10_for_trade_date(
+    dgs10_by_date: dict[str, float],
+    trade_date_fmt: str,
+    *,
+    lookback_days: int = _ERP_DGS10_LOOKBACK_DAYS,
+) -> float | None:
+    """取交易日对应 DGS10；若当日无数据则向前最多 lookback_days 个自然日。"""
+    try:
+        d = datetime.strptime(trade_date_fmt, "%Y-%m-%d")
+    except ValueError:
+        return dgs10_by_date.get(trade_date_fmt)
+    for i in range(lookback_days + 1):
+        key = (d - timedelta(days=i)).strftime("%Y-%m-%d")
+        if key in dgs10_by_date:
+            return dgs10_by_date[key]
+    return None
+
+
+def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
+    from lib.valuation import percentile_rank
+
+    df = tc.query("index_dailybasic", ts_code=_HS300_CODE,
+                  fields="trade_date,pe_ttm",
+                  start_date=_days_ago(1825), end_date=_today())
+    if df is None or df.empty:
+        return None
+    dgs10_series, y10_source = _ms_fetch_y10_series(config)
+    dgs10_by_date = {d: v for d, v in dgs10_series}
+    latest_dgs10 = dgs10_series[-1][1] if dgs10_series else None
+
+    rows = df.sort_values("trade_date").to_dict("records")
+    erp_hist: list[float] = []
+    for r in rows:
+        pe = r.get("pe_ttm")
+        if pe is None or float(pe) <= 0:
+            continue
+        td = str(r.get("trade_date", ""))
+        d_fmt = f"{td[:4]}-{td[4:6]}-{td[6:8]}" if len(td) == 8 else td
+        y10 = _dgs10_for_trade_date(dgs10_by_date, d_fmt)
+        if y10 is None:
+            continue
+        ep = 100.0 / float(pe)
+        erp_hist.append(ep - y10)
+
+    if not erp_hist:
+        return None
+    current = erp_hist[-1]
+    pct_5y = percentile_rank(erp_hist, current)
+    erp_days = len(erp_hist)
+    partial = erp_days < _ERP_MIN_ALIGNED_DAYS
+    return {
+        "raw": round(current, 3),
+        "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
+        "dgs10": round(latest_dgs10, 3) if latest_dgs10 is not None else None,
+        "erp_days": erp_days,
+        "partial": partial,
+        "index": _HS300_CODE,
+        "source": f"tushare.index_dailybasic+{y10_source}" if y10_source else "tushare.index_dailybasic",
+    }
+
+
+def extract_industry_from_basic_info(data: dict | None) -> str | None:
+    """从 basic_info 主数据提取行业名（兼容 Tushare / akshare 字段）。"""
+    if not data or not isinstance(data, dict):
+        return None
+    for key in ("industry", "行业", "所属行业"):
+        v = data.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def extract_industry_from_collection(collection: dict) -> str | None:
+    """从 collection 维度列表提取行业名。"""
+    for dim in collection.get("dimensions", []):
+        if dim.get("dimension") == "basic_info":
+            return extract_industry_from_basic_info(dim.get("data"))
+    return None
+
+
+def attach_market_structure(collection: dict, symbol: str) -> dict:
+    """采集市场结构并写入 collection['market_structure']。"""
+    industry = extract_industry_from_collection(collection)
+    collection["market_structure"] = collect_market_structure(symbol, industry=industry)
+    return collection["market_structure"]
+
+
+def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:
+    """采集市场结构因子（行业情绪/资金/ERP/换手）。各子源独立降级。"""
+    result: dict[str, Any] = {
+        "sw_index": None,
+        "northbound": None,
+        "margin": None,
+        "moneyflow": None,
+        "turnover": None,
+        "erp": None,
+        "availability": {},
+    }
+    config = env.get_config()
+    if not env.is_tushare_available(config):
+        for key in ("sw_index", "northbound", "margin", "moneyflow", "turnover", "erp"):
+            _ms_set_unavailable(result["availability"], key, "TUSHARE_TOKEN not configured")
+        return result
+
+    tc = _tushare_client(config)
+
+    try:
+        result["sw_index"] = _ms_fetch_sw_index(tc, symbol, industry)
+        if result["sw_index"] is None:
+            _ms_set_unavailable(result["availability"], "sw_index", "no sw industry match or empty data")
+        else:
+            result["availability"]["sw_index"] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], "sw_index", str(exc))
+
+    try:
+        result["northbound"] = _ms_fetch_northbound_stock(tc, symbol)
+        if result["northbound"] is None:
+            _ms_set_unavailable(
+                result["availability"], "northbound",
+                "hsgt_top10 empty (not in top10) or akshare northbound unavailable",
+            )
+        else:
+            result["availability"]["northbound"] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], "northbound", str(exc))
+
+    try:
+        result["margin"] = _ms_fetch_margin(tc, symbol)
+        if result["margin"] is None:
+            _ms_set_unavailable(
+                result["availability"], "margin",
+                "margin_detail empty, insufficient history, or permission denied",
+            )
+        else:
+            result["availability"]["margin"] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], "margin", str(exc))
+
+    try:
+        result["moneyflow"] = _ms_fetch_moneyflow(tc, symbol)
+        if result["moneyflow"] is None:
+            _ms_set_unavailable(result["availability"], "moneyflow", "moneyflow empty or permission denied")
+        else:
+            result["availability"]["moneyflow"] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], "moneyflow", str(exc))
+
+    try:
+        result["turnover"] = _ms_fetch_turnover(tc, symbol)
+        if result["turnover"] is None:
+            _ms_set_unavailable(result["availability"], "turnover", "daily_basic turnover empty")
+        else:
+            result["availability"]["turnover"] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], "turnover", str(exc))
+
+    try:
+        result["erp"] = _ms_fetch_erp(tc, config)
+        if result["erp"] is None:
+            _ms_set_unavailable(
+                result["availability"], "erp",
+                "index_dailybasic or 10Y yield (FRED DGS10 / akshare CN10Y) unavailable",
+            )
+        elif result["erp"].get("partial"):
+            days = result["erp"].get("erp_days", 0)
+            result["availability"]["erp"] = (
+                f"partial: {days} aligned days (min {_ERP_MIN_ALIGNED_DAYS})"
+            )
+        else:
+            result["availability"]["erp"] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], "erp", str(exc))
+
+    return result

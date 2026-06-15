@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from .proxy import EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS
+from .schema import CrossValidation, DriverFactor, ProbabilityStructure
 
-ENGINE_VERSION = "0.1.2"
+ENGINE_VERSION = "0.1.3"
 
 _EASTMONEY_BLOCKED_SHORT = "东方财富(East Money)主动拒绝连接"
 _RAW_CONNECTION_REFUSED_SHORT = "服务器拒绝连接"
@@ -197,15 +198,20 @@ def render_json(collection: dict[str, Any]) -> str:
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact") -> str:
     """统一渲染入口。支持 compact / json / md / html 格式。
 
-    compact  — 紧凑文本报告，适合终端直接阅读（v0.1.2 起使用 v2 模板）
+    compact  — 紧凑文本报告（v0.1.2 八段 v2 模板）
     json     — 结构化 JSON，适合程序消费
-    md       — Markdown 分析报告（v0.1.2 起使用 v2 模板）
-    html     — HTML 研究报告（v0.1.2+ 新增）
+    md       — Markdown 九模块研究备忘录（v0.1.3 render_report_v3）
+    html     — HTML 研究报告（v0.1.2 冻结模板）
     """
     if fmt == "json":
         return render_json(collection)
     if fmt == "html":
         return render_html(collection, symbol)
+    if fmt == "md":
+        if not collection.get("market_structure"):
+            from lib import collector
+            collector.attach_market_structure(collection, symbol)
+        return render_report_v3(collection, symbol)
     return render_report_v2(collection, symbol)
 
 
@@ -264,7 +270,7 @@ def _header_v2(collection: dict, symbol: str) -> str:
         f"维度: {collection['summary']['available']}/{collection['summary']['total']} 有数据"
         + (f"（{collection['summary']['degraded']} 降级）" if collection['summary'].get('degraded') else ""),
         "",
-        "> ⚠️ **风险提示:** 本报告由自动化引擎生成，仅供学习研究参考，不构成任何投资建议、买卖指令或目标价预测。",
+        "> ⚠️ **风险提示:** 本报告由自动化引擎生成，仅供研究备忘录参考，不构成任何投资建议、买卖指令或目标价预测。",
         "",
     ]
     return "\n".join(lines)
@@ -777,7 +783,7 @@ def _references_appendix(collection: dict[str, Any]) -> str:
 def _risk_footer() -> str:
     return f"""---
 
-> ⚠️ **免责声明:** 本报告由 invest-A v{ENGINE_VERSION} 自动化引擎生成，仅供学习研究参考。
+> ⚠️ **免责声明:** 本报告由 invest-A v{ENGINE_VERSION} 自动化引擎生成，仅供研究备忘录与多因子分析参考。
 > 不构成任何投资建议、买卖指令或目标价预测。所有技术指标均为市场状态描述，非交易信号。
 > 数据来源见上文 References 表，可能与实际公告存在差异，请以公司公告和交易所数据为准。"""
 
@@ -802,6 +808,915 @@ def _fmt_v2(v: Any, unit: str = "") -> str:
             return f"{v / 1e4:.2f}万"
         return f"{v:.2f}{unit}" if unit else f"{v:.2f}"
     return str(v)
+
+
+# ---- v3 报告模板（v0.1.3 Phase 1） ----
+
+_CV_ICONS = {"convergence": "🟢", "divergence": "🟡", "gap": "🔴"}
+
+
+def _cross_validation_block(cv: CrossValidation) -> str:
+    return cv.to_markdown()
+
+
+def _cv(
+    status: str, code: str, data_pair: str, detail: str, reliability: str,
+) -> str:
+    return CrossValidation(status, code, data_pair, detail, reliability).to_markdown()
+
+
+def _v3_northbound_signal_label(nb: dict) -> str:
+    """北向净额标签：hsgt_top10 为上榜日累计，akshare 为连续交易日。"""
+    days = int(nb.get("days") or 0)
+    amount = _fmt_v2(nb.get("net_sum_10d"))
+    src = str(nb.get("source") or "")
+    if "hsgt_top10" in src:
+        return f"上榜日累计净额 {amount}（{days} 个上榜日）"
+    if days:
+        return f"近 {days} 日净额 {amount}"
+    return f"净额 {amount}"
+
+
+def _v3_law11_trigger_d(dims: dict[str, dict]) -> bool:
+    """LAW 11 触发源 D：52 周高低区间极端，或价格贴近 MA60 盘整。"""
+    kline = _get_dim_data(dims, "kline")
+    if not kline or not isinstance(kline, list):
+        return False
+    from lib.technical import sort_kline_asc, compute
+
+    rows = sort_kline_asc(kline)
+    closes = [float(r["close"]) for r in rows if r.get("close") is not None]
+    if len(closes) < 60:
+        return False
+
+    n52 = min(len(closes), 250)
+    window = closes[-n52:]
+    hi, lo = max(window), min(window)
+    cur = closes[-1]
+    if hi > lo:
+        pos = (cur - lo) / (hi - lo)
+        if pos >= 0.85 or pos <= 0.15:
+            return True
+
+    tech = compute(rows)
+    if "error" in tech:
+        return False
+    ma60_vals = tech["trend"]["ma"].get("60") or []
+    ma60 = ma60_vals[-1] if ma60_vals else None
+    if ma60 is not None and float(ma60) > 0:
+        if abs(cur - float(ma60)) / float(ma60) <= 0.03:
+            return True
+    return False
+
+
+def _strip_section_heading(text: str) -> str:
+    lines = text.splitlines()
+    if lines and lines[0].startswith("##"):
+        return "\n".join(lines[1:]).lstrip("\n")
+    return text
+
+
+def _evidence_conclusion_block(conclusion: str, evidences: list[tuple[str, str]]) -> str:
+    """LAW 12 证据-结论映射块。evidences: [(强度符号, 描述), ...]"""
+    lines = [f"**结论：{conclusion}**", "", "支持证据："]
+    for sym, desc in evidences:
+        lines.append(f"  {sym} {desc}")
+    strong = sum(1 for s, _ in evidences if s == "✅")
+    weak = sum(1 for s, _ in evidences if s == "❓")
+    if strong >= 2:
+        strength = "强"
+        note = "多条直接数据支撑，主要竞争性解释已排除。"
+    elif weak >= len(evidences) // 2 + 1:
+        strength = "弱"
+        note = "证据以相关性或单一来源为主，结论可信度受限。"
+    else:
+        strength = "中"
+        note = "数据方向支持结论，但存在其他合理解释或来源单一。"
+    lines.extend(["", f"综合证据强度：{strength}", f"  {note}"])
+    return "\n".join(lines)
+
+
+def _v3_multi_source_consistency(dims: dict[str, dict]) -> tuple[str, str]:
+    """模块 1 多源一致性：🟢 多源并行 / 🟡 部分降级 / 🔴 单源或不可得。"""
+    checks: list[str] = []
+    for key in ("quote", "valuation", "kline", "financials"):
+        meta = _get_dim_meta(dims, key)
+        all_src = meta.get("all_sources") or []
+        if not all_src:
+            if _get_dim_data(dims, key) is not None:
+                checks.append("single")
+            else:
+                checks.append("gap")
+            continue
+        avail = [s for s in all_src if s.get("data_available")]
+        tried = [s for s in all_src if s.get("data_available") or s.get("error")]
+        if len(avail) >= 2:
+            checks.append("multi")
+        elif len(avail) == 1 and len(tried) >= 2:
+            checks.append("degraded")
+        elif avail:
+            checks.append("single")
+        else:
+            checks.append("gap")
+    if not checks:
+        return "🔴", "核心维度无可比对的并行取证记录"
+    multi_n = sum(1 for c in checks if c == "multi")
+    degraded_n = sum(1 for c in checks if c == "degraded")
+    gap_n = sum(1 for c in checks if c in ("gap", "single"))
+    if multi_n >= 2 and gap_n == 0:
+        return "🟢", f"{multi_n} 个核心维度具备多源并行取证且均有数据"
+    if multi_n >= 1 or degraded_n >= 1:
+        return "🟡", (
+            f"多源 {multi_n} / 降级 {degraded_n} / 单源或缺口 {gap_n}；"
+            "极端值需对照 primary 源与附录追溯表"
+        )
+    return "🔴", "核心维度以单源或不可得为主，交叉验证能力受限"
+
+
+def _v3_cv7_assessment(
+    pe_pct: float | None, mf_out: float | int | None,
+) -> tuple[str, str] | None:
+    """CV-7：PE 分位 vs 主力资金方向。"""
+    if pe_pct is None or mf_out is None:
+        return None
+    mf_f = float(mf_out)
+    if pe_pct <= 30 and mf_f < 0:
+        return "convergence", f"PE 低位（{pe_pct:.1f}%）且主力资金净流出"
+    if pe_pct >= 70 and mf_f > 0:
+        return "divergence", f"PE 高位（{pe_pct:.1f}%）但主力资金净流入"
+    return "gap", "估值与资金流向未呈现典型背离/共振"
+
+
+def _v3_cv7_block(pe_pct: float | None, mf_out: float | int | None) -> str | None:
+    assessed = _v3_cv7_assessment(pe_pct, mf_out)
+    if assessed is None:
+        return None
+    status, detail = assessed
+    return _cv(status, "CV-7", "PE 分位 vs 资金流出", detail, "中")
+
+
+def _v3_build_candidate_explanations(
+    *,
+    chg: float | None,
+    window_label: str,
+    chg_s: str,
+    dims: dict[str, dict],
+    market_structure: dict,
+) -> list[tuple[str, str, str, str]]:
+    """LAW 13 候选解释，最多 5 条。返回 (标签, 文本, 证据, 强度)。"""
+    explanations: list[tuple[str, str, str, str]] = []
+    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims)
+    sw = market_structure.get("sw_index") or {}
+    mf = market_structure.get("moneyflow") or {}
+    nb = market_structure.get("northbound") or {}
+
+    if chg is not None:
+        explanations.append((
+            "A",
+            f"价格{window_label}变动 {chg_s} 可能与估值/资金因子共振",
+            "见下方多因子矩阵",
+            "⚠️",
+        ))
+    else:
+        explanations.append((
+            "A",
+            "K 线不足，价格变化幅度不可得",
+            "kline 维度",
+            "❓",
+        ))
+
+    if pe_pct is not None and (pe_pct >= 80 or pe_pct <= 20):
+        zone = "偏高" if pe_pct >= 80 else "偏低"
+        explanations.append((
+            "B",
+            f"估值历史分位{zone}（PE {pe_pct:.1f}%）驱动定价预期重估",
+            "valuation 历史分位",
+            "⚠️",
+        ))
+    elif pb_pct is not None and (pb_pct >= 80 or pb_pct <= 20):
+        zone = "偏高" if pb_pct >= 80 else "偏低"
+        explanations.append((
+            "B",
+            f"PB 历史分位{zone}（{pb_pct:.1f}%）或反映资产定价差异",
+            "valuation 历史分位",
+            "⚠️",
+        ))
+
+    rel = sw.get("relative_vs_benchmark_pct")
+    svi = sw.get("stock_vs_industry_pct")
+    if rel is not None and abs(rel) >= 3:
+        explanations.append((
+            "C",
+            f"行业板块相对沪深300 {rel:+.2f}%，行业景气或拖累/支撑个股",
+            sw.get("source", "sw_daily"),
+            "⚠️",
+        ))
+    elif svi is not None and abs(svi) >= 3:
+        explanations.append((
+            "C",
+            f"个股相对行业 {svi:+.2f}%，个股特异性因素可能主导",
+            sw.get("source", "sw_daily"),
+            "⚠️",
+        ))
+
+    kline = _get_dim_data(dims, "kline")
+    if kline and isinstance(kline, list):
+        from lib.technical import sort_kline_asc, compute
+        tech = compute(sort_kline_asc(kline))
+        if "error" not in tech:
+            label = tech["trend"]["alignment"].get("trend_label", "")
+            if label:
+                explanations.append((
+                    "D",
+                    f"技术趋势结构（{label}）与价格动量方向一致或背离",
+                    "technical.py MA 排列",
+                    "⚠️",
+                ))
+
+    mf_v = mf.get("net_sum_5d")
+    nb_v = nb.get("net_sum_10d")
+    if chg is not None and mf_v is not None:
+        price_up = chg > 0
+        flow_in = float(mf_v) > 0
+        if price_up != flow_in:
+            explanations.append((
+                "E",
+                f"价格{window_label}{chg_s} 与主力近 5 日净额方向不一致，或存在博弈/滞后",
+                mf.get("source", "moneyflow"),
+                "❓",
+            ))
+    elif nb_v is not None and mf_v is not None:
+        if float(nb_v) * float(mf_v) < 0:
+            explanations.append((
+                "E",
+                "北向与主力资金方向相反，资金归因存在分歧",
+                f"{nb.get('source', '')} vs {mf.get('source', '')}",
+                "❓",
+            ))
+
+    return explanations[:5]
+
+
+def _v3_pick_dominant_factor(rows: list[str]) -> str:
+    """从矩阵行中选取方向明确且强度最高的因子。"""
+    scored: list[tuple[int, str, str, str]] = []
+    for row in rows:
+        if "跳过" in row or "---" in row:
+            continue
+        parts = [p.strip() for p in row.split("|")]
+        if len(parts) < 5:
+            continue
+        cat, signal, direction, strength = parts[1], parts[2], parts[3], parts[4]
+        if direction in ("—", "→中性"):
+            continue
+        weight = 2 if "⚠️" in strength else (1 if "❓" in strength else 0)
+        if weight:
+            scored.append((weight, cat, direction, signal))
+    if not scored:
+        return "数据不足，暂无法声明主导因子；可持续性：待观察"
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    _, cat, direction, signal = scored[0]
+    return f"{cat}（{signal}，{direction}）；可持续性：待观察"
+
+
+def _v3_trend_stage_hints(label: str) -> str:
+    """LAW 16：并列阶段对照，不勾选单一结论。"""
+    base = "□ 上升趋势  □ 筑底区间  □ 高位震荡  □ 下降趋势  □ 不明确"
+    if not label:
+        return base
+    if "多头" in label:
+        hint = "数据更接近「上升趋势」描述，但不排除震荡或反转"
+    elif "空头" in label:
+        hint = "数据更接近「下降趋势」描述，但不排除筑底或反弹"
+    else:
+        hint = "数据更接近「高位震荡/整理」描述，方向待确认"
+    return f"{base}\n  - 对照说明（非结论）: {hint}"
+
+
+def _v3_price_change(dims: dict[str, dict]) -> tuple[float | None, int | None]:
+    """返回 (涨跌幅%, 实际跨度交易日数)。不足 20 日时仍计算但 window < 20。"""
+    kline = _get_dim_data(dims, "kline")
+    if not kline or not isinstance(kline, list) or len(kline) < 2:
+        return None, None
+    from lib.technical import sort_kline_asc
+    rows = sort_kline_asc(kline)
+    if len(rows) >= 21:
+        recent = rows[-21:]
+    else:
+        recent = rows
+    c0 = recent[0].get("close")
+    c1 = recent[-1].get("close")
+    if c0 is None or c1 is None:
+        return None, None
+    if float(c0) == 0:
+        return None, None  # zero close, cannot compute percentage
+    window = len(recent) - 1
+    pct = (float(c1) - float(c0)) / float(c0) * 100
+    return pct, window
+
+
+def _v3_price_window_label(window: int | None) -> str:
+    if window is None:
+        return "涨跌幅"
+    if window >= 20:
+        return "近 20 个交易日"
+    return f"近 {window} 个交易日（K 线不足 20 日）"
+
+
+def _v3_price_change_pct(dims: dict[str, dict]) -> float | None:
+    pct, _ = _v3_price_change(dims)
+    return pct
+
+
+def _v3_valuation_percentiles(dims: dict[str, dict]) -> tuple[float | None, float | None, str | None]:
+    val_data = _get_dim_data(dims, "valuation")
+    if not val_data or not isinstance(val_data, list):
+        return None, None, None
+    from lib.technical import sort_kline_asc
+    from lib.valuation import valuation_summary
+    val_sorted = sort_kline_asc(val_data)
+    pe_seq = [r.get("pe_ttm") for r in val_sorted]
+    pb_seq = [r.get("pb") for r in val_sorted]
+    summary = valuation_summary(pe_seq, pb_seq)
+    pe_pct = summary["pe"].get("pct")
+    pb_pct = summary["pb"].get("pct")
+    zone = summary["pe"].get("zone")
+    return pe_pct, pb_pct, zone
+
+
+def _section_research_question(collection: dict, symbol: str) -> str:
+    dims = _index_dims(collection)
+    lines = ["## 0. 研究问题卡", ""]
+    triggers: list[str] = []
+
+    chg, window = _v3_price_change(dims)
+    if chg is not None and window is not None and window >= 20 and abs(chg) >= 10:
+        triggers.append("A")
+
+    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims)
+    if (pe_pct is not None and (pe_pct >= 80 or pe_pct <= 20)) or (
+        pb_pct is not None and (pb_pct >= 80 or pb_pct <= 20)
+    ):
+        triggers.append("B")
+
+    ms = collection.get("market_structure") or {}
+    sw = ms.get("sw_index") or {}
+    rel = sw.get("relative_vs_benchmark_pct")
+    if rel is not None and abs(rel) >= 5:
+        triggers.append("C")
+
+    if _v3_law11_trigger_d(dims):
+        triggers.append("D")
+
+    trigger_labels = {
+        "A": "变化驱动（价格/财报/公告异动）",
+        "B": "估值位置驱动（历史分位极端）",
+        "C": "行业结构驱动（板块相对强弱）",
+        "D": "趋势结构驱动（价格区间/均线结构）",
+    }
+    if triggers:
+        lines.append("**激活的触发源:** " + "、".join(f"{t} {trigger_labels[t]}" for t in triggers))
+    else:
+        lines.append("**激活的触发源:** 暂无明确触发（以事实快照为主构建问题）")
+
+    lines.extend([
+        "", "```",
+        f"核心问题：{symbol} 当前价格与基本面/市场结构之间，哪些驱动力尚不确定？",
+        "└── 子问题 ① 近 20 日价格变化能否被财务与估值数据解释？",
+        "└── 子问题 ② 资金与行业情绪信号是否指向相反方向？",
+        "└── 子问题 ③ 若主导解释成立，对估值定价的传导路径是什么？",
+        "",
+        "为什么这是好问题：将可验证数据与未决不确定性分离，避免把相关性误读为因果。",
+        "```",
+    ])
+    lines.append("")
+    lines.append("🔍 **待独立验证:** 触发源依赖采集数据完整性；公告/政策类触发需 WebSearch 补充。")
+    return "\n".join(lines)
+
+
+def _section_snapshot(collection: dict, symbol: str, dims: dict[str, dict]) -> str:
+    lines = ["## 1. 当前状态快照", ""]
+    quote = _get_dim_data(dims, "quote")
+    if isinstance(quote, dict):
+        price = quote.get("close") or quote.get("price")
+        chg = quote.get("change_pct")
+        if price is not None:
+            chg_s = f"（{chg:+.2f}%）" if chg is not None else ""
+            lines.append(f"- **最新价:** {price}{chg_s}")
+
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims)
+    if pe_pct is not None:
+        lines.append(f"- **PE(TTM) 历史分位:** {pe_pct:.1f}%（{pe_zone or '—'}）")
+    if pb_pct is not None:
+        lines.append(f"- **PB 历史分位:** {pb_pct:.1f}%")
+
+    fin = _get_dim_data(dims, "financials")
+    if fin and isinstance(fin, list):
+        from lib.technical import sort_kline_asc
+        fin = sort_kline_asc(fin)
+        latest = fin[-1]
+        lines.append(
+            f"- **最近财报:** {latest.get('end_date', '?')} "
+            f"ROE={latest.get('roe', '-')}%, 净利润={_fmt_v2(latest.get('net_profit'))}"
+        )
+        np_v = latest.get("net_profit")
+        ocf = latest.get("ocf") or latest.get("n_cashflow_act")
+        if np_v is not None and ocf is not None:
+            np_f, ocf_f = float(np_v), float(ocf)
+            if np_f > 0 and ocf_f > 0:
+                ratio = ocf_f / np_f
+                cv_status = "convergence" if ratio >= 0.5 else "divergence"
+            elif np_f < 0 and ocf_f < 0:
+                cv_status = "divergence"
+            elif np_f == 0 or ocf_f == 0:
+                cv_status = "gap"
+            else:
+                cv_status = "divergence"
+            cv_detail = f"净利润 {_fmt_v2(np_v)} vs 经营现金流 {_fmt_v2(ocf)}"
+            lines.append("")
+            lines.append(_cv(cv_status, "CV-1", "净利润 vs 经营现金流", cv_detail, "中（单期财报）"))
+        else:
+            lines.append("")
+            lines.append(_cv(
+                "gap", "CV-1", "净利润 vs 经营现金流",
+                "经营现金流字段不可得，无法交叉验证利润质量", "低",
+            ))
+
+    if pe_pct is not None and pb_pct is not None:
+        if (pe_pct >= 70 and pb_pct >= 70) or (pe_pct <= 30 and pb_pct <= 30):
+            cv3 = "convergence"
+            cv3d = f"PE 分位 {pe_pct:.1f}% 与 PB 分位 {pb_pct:.1f}% 同向"
+        else:
+            cv3 = "divergence"
+            cv3d = f"PE 分位 {pe_pct:.1f}% 与 PB 分位 {pb_pct:.1f}% 方向不一致"
+        lines.append("")
+        lines.append(_cv(cv3, "CV-3", "PE 分位 vs PB 分位", cv3d, "中"))
+
+    ms_icon, ms_detail = _v3_multi_source_consistency(dims)
+    ms_strength = {"🟢": "✅", "🟡": "⚠️", "🔴": "❓"}.get(ms_icon, "⚠️")
+    lines.extend([
+        "",
+        "### 多源一致性",
+        f"{ms_icon} **并行取证状态** — {ms_detail}",
+    ])
+
+    lines.append("")
+    lines.append(_evidence_conclusion_block(
+        "当前快照呈现价格、估值与最近财报的并列事实",
+        [
+            ("✅", "行情与估值数据来自采集维度 primary 源"),
+            (ms_strength, f"多源一致性：{ms_detail}"),
+        ],
+    ))
+    lines.append("")
+    lines.append("🔍 **待独立验证:** 快照数字应与财报 PDF / 交易所行情交叉核对。")
+    return "\n".join(lines)
+
+
+def _v3_matrix_row(factor: DriverFactor) -> str:
+    return factor.to_matrix_row()
+
+
+def _v3_driver_unavailable(category: str) -> DriverFactor:
+    return DriverFactor(category, "[数据源不可用，该因子跳过]", "—", "—", "—")
+
+
+def _section_dynamic_drivers(
+    collection: dict, symbol: str, dims: dict[str, dict], market_structure: dict,
+) -> str:
+    lines = ["## 2. 动态驱动分析", ""]
+    chg, window = _v3_price_change(dims)
+    window_label = _v3_price_window_label(window)
+    chg_s = f"{chg:+.2f}%" if chg is not None else "不可得"
+    lines.append(f"{window_label}涨跌幅：**{chg_s}**（采集: {collection.get('fetched_at', '')[:10]}）")
+    lines.append("")
+    lines.append("### 候选解释（LAW 13，上限 5 条）")
+    lines.append("")
+    candidates = _v3_build_candidate_explanations(
+        chg=chg,
+        window_label=window_label,
+        chg_s=chg_s,
+        dims=dims,
+        market_structure=market_structure,
+    )
+    for label, text, evidence, strength in candidates:
+        lines.append(f"→ 解释 {label}：{text}")
+        lines.append(f"   证据：{evidence}")
+        lines.append(f"   强度：{strength}")
+        lines.append("")
+    if len(candidates) < 5:
+        lines.append("⚠️ **尚无候选解释的部分：** 公告/政策类事件需 WebSearch 或 anns 数据补充。")
+        lines.append("")
+    lines.append("### 多因子驱动矩阵")
+    lines.append("")
+    lines.append("| 因子类别 | 具体信号 | 方向 | 强度 | 数据来源 |")
+    lines.append("|---------|---------|------|------|---------|")
+
+    factors: list[DriverFactor] = []
+    fin = _get_dim_data(dims, "financials")
+    np_now, np_prev = None, None
+    if fin and isinstance(fin, list) and len(fin) >= 2:
+        from lib.technical import sort_kline_asc
+        fin = sort_kline_asc(fin)
+        np_now = fin[-1].get("net_profit")
+        np_prev = fin[-2].get("net_profit")
+        if np_now is not None and np_prev is not None:
+            d = "↑正向" if float(np_now) > float(np_prev) else ("↓负向" if float(np_now) < float(np_prev) else "→中性")
+            factors.append(DriverFactor("基本面", "净利润环比", d, "⚠️", "financials"))
+        else:
+            factors.append(DriverFactor("基本面", "净利润", "→中性", "❓", "financials"))
+    else:
+        factors.append(_v3_driver_unavailable("基本面"))
+
+    sw = market_structure.get("sw_index")
+    if sw and sw.get("return_20d_pct") is not None:
+        r = sw["return_20d_pct"]
+        d = "↑正向" if r > 0 else ("↓负向" if r < 0 else "→中性")
+        factors.append(DriverFactor(
+            "行业景气", f"申万板块 20 日 {r:+.2f}%", d, "⚠️", sw.get("source", "sw_daily"),
+        ))
+    else:
+        factors.append(_v3_driver_unavailable("行业景气"))
+
+    nb = market_structure.get("northbound")
+    if nb and nb.get("net_sum_10d") is not None:
+        v = nb["net_sum_10d"]
+        d = "↑正向" if v > 0 else ("↓负向" if v < 0 else "→中性")
+        factors.append(DriverFactor(
+            "资金（北向）", _v3_northbound_signal_label(nb), d, "⚠️", nb.get("source", ""),
+        ))
+    else:
+        factors.append(_v3_driver_unavailable("资金（北向）"))
+
+    mf = market_structure.get("moneyflow")
+    if mf and mf.get("net_sum_5d") is not None:
+        v = mf["net_sum_5d"]
+        d = "↑正向" if v > 0 else ("↓负向" if v < 0 else "→中性")
+        factors.append(DriverFactor(
+            "资金（主力）", f"近 5 日主力净额 {_fmt_v2(v)}", d, "⚠️", mf.get("source", ""),
+        ))
+    else:
+        factors.append(_v3_driver_unavailable("资金（主力）"))
+
+    mg = market_structure.get("margin")
+    if mg and mg.get("change_pct") is not None:
+        v = mg["change_pct"]
+        d = "↑正向" if v > 0 else ("↓负向" if v < 0 else "→中性")
+        factors.append(DriverFactor(
+            "情绪（融资）", f"融资余额变化 {v:+.2f}%", d, "⚠️", mg.get("source", ""),
+        ))
+    else:
+        factors.append(_v3_driver_unavailable("情绪（融资）"))
+
+    to = market_structure.get("turnover")
+    if to and to.get("ratio_5_60") is not None:
+        r = to["ratio_5_60"]
+        d = "↑正向" if r > 1.1 else ("↓负向" if r < 0.9 else "→中性")
+        factors.append(DriverFactor(
+            "情绪（换手）", f"5日/60日换手比 {r:.2f}", d, "⚠️", to.get("source", ""),
+        ))
+    else:
+        factors.append(_v3_driver_unavailable("情绪（换手）"))
+
+    kline = _get_dim_data(dims, "kline")
+    ma_dir = "→中性"
+    ma_strength = "❓"
+    fin_dir = "→中性"
+    if kline and isinstance(kline, list):
+        from lib.technical import sort_kline_asc, compute
+        tech = compute(sort_kline_asc(kline))
+        if "error" not in tech:
+            label = tech["trend"]["alignment"].get("trend_label", "")
+            if "多头" in label:
+                ma_dir, ma_strength = "↑正向", "⚠️"
+            elif "空头" in label:
+                ma_dir, ma_strength = "↓负向", "⚠️"
+            factors.append(DriverFactor(
+                "技术趋势", label or "MA 排列", ma_dir, ma_strength, "technical.py",
+            ))
+        else:
+            factors.append(_v3_driver_unavailable("技术趋势"))
+    else:
+        factors.append(_v3_driver_unavailable("技术趋势"))
+
+    if np_now is not None and np_prev is not None:
+        fin_dir = "↑正向" if float(np_now) > float(np_prev) else (
+            "↓负向" if float(np_now) < float(np_prev) else "→中性")
+
+    factors.append(DriverFactor("事件催化", "[数据源不可用，该因子跳过]", "—", "—", "Phase 3"))
+    rows = [f.to_matrix_row() for f in factors]
+    lines.extend(rows)
+
+    pos = sum(1 for r in rows if "↑正向" in r)
+    neg = sum(1 for r in rows if "↓负向" in r)
+    neu = len(rows) - pos - neg
+    lines.extend([
+        "",
+        f"因子方向一致性：{pos} 正向 / {neg} 负向 / {neu} 中性或跳过",
+        "",
+        "### 因子交叉验证结论",
+    ])
+    if ma_dir == fin_dir and ma_dir != "→中性" and fin_dir != "→中性":
+        lines.append(_cv(
+            "convergence", "CV-6", "MA 趋势 vs 近期业绩方向",
+            f"技术趋势 {ma_dir} 与净利润环比方向 {fin_dir} 一致", "中",
+        ))
+    elif ma_dir != "→中性" and fin_dir != "→中性" and ma_dir != fin_dir:
+        lines.append(_cv(
+            "divergence", "CV-6", "MA 趋势 vs 近期业绩方向",
+            f"技术趋势 {ma_dir} 与净利润环比方向 {fin_dir} 不一致", "中",
+        ))
+    else:
+        lines.append(_cv(
+            "gap", "CV-6", "MA 趋势 vs 近期业绩方向",
+            "技术或业绩方向数据不足", "低",
+        ))
+
+    lines.append("")
+    dominant = _v3_pick_dominant_factor(rows)
+    lines.append(f"→ **主导因子（声明）:** {dominant}")
+    lines.append("")
+    lines.append("🔍 **待独立验证:** 候选解释仅为假说列表，非因果归因。")
+    return "\n".join(lines)
+
+
+def _section_market_structure(collection: dict, symbol: str, market_structure: dict) -> str:
+    lines = ["## 3. 市场结构分析", ""]
+    sw = market_structure.get("sw_index")
+    if sw:
+        ret = sw.get("return_20d_pct")
+        ret_s = f"{ret}%" if ret is not None else "-"
+        lines.append(f"- **申万行业指数:** {sw.get('index_code', '?')} 20日涨跌 {ret_s}")
+        svi = sw.get("stock_vs_industry_pct")
+        if svi is not None:
+            lines.append(f"- **个股 vs 行业:** {svi:+.2f}%")
+        stock_ret = sw.get("stock_return_20d_pct")
+        ind_ret = sw.get("return_20d_pct")
+        if stock_ret is not None and ind_ret is not None:
+            svi_s = f"{svi:+.2f}%" if svi is not None else "-"
+            if stock_ret * ind_ret > 0 or (stock_ret == 0 and ind_ret == 0):
+                cv5 = "convergence"
+                cv5d = (
+                    f"个股 20 日 {stock_ret:+.2f}% 与行业 {ind_ret:+.2f}% 同向"
+                    f"（个股相对板块 {svi_s}）"
+                )
+            elif stock_ret != 0 and ind_ret != 0:
+                cv5 = "divergence"
+                cv5d = (
+                    f"个股 20 日 {stock_ret:+.2f}% 与行业 {ind_ret:+.2f}% 反向"
+                    f"（个股相对板块 {svi_s}）"
+                )
+            else:
+                cv5 = "gap"
+                cv5d = f"个股或行业 20 日涨跌有一方为零（个股相对板块 {svi_s}）"
+            lines.append("")
+            lines.append(_cv(cv5, "CV-5", "申万板块 vs 个股相对强弱", cv5d, "中"))
+        rel = sw.get("relative_vs_benchmark_pct")
+        if rel is not None:
+            lines.append(f"- **板块相对沪深300:** {rel:+.2f}%")
+    else:
+        lines.append("> 申万行业指数不可得。")
+
+    nb = market_structure.get("northbound")
+    mf = market_structure.get("moneyflow")
+    if nb or mf:
+        lines.append("")
+        lines.append("### 资金态度")
+        if nb:
+            nb_src = nb.get("source", "northbound")
+            lines.append(
+                f"- 北向个股资金流（{nb_src}）{_v3_northbound_signal_label(nb)}"
+            )
+        if mf:
+            lines.append(f"- 主力（moneyflow）近 5 日净额: {_fmt_v2(mf.get('net_sum_5d'))}")
+        if nb and mf:
+            n_v = float(nb.get("net_sum_10d") or 0)
+            m_v = float(mf.get("net_sum_5d") or 0)
+            if n_v * m_v > 0:
+                cv4 = "convergence"
+                cv4d = "北向与主力净流入方向一致"
+            elif n_v == 0 or m_v == 0:
+                cv4 = "gap"
+                cv4d = "资金数据不完整"
+            else:
+                cv4 = "divergence"
+                cv4d = "北向与主力净流入方向相反"
+            lines.append("")
+            lines.append(_cv(cv4, "CV-4", "北向 vs 主力大单", cv4d, "中"))
+
+    to = market_structure.get("turnover")
+    erp = market_structure.get("erp")
+    if to or erp:
+        lines.append("")
+        lines.append("### ERP / 换手")
+        if to:
+            lines.append(
+                f"- 换手率: 5日均 {to.get('avg_5d', '-')}%，60日均 {to.get('avg_60d', '-')}%，"
+                f"分位 {to.get('percentile_60d', '-')}%"
+            )
+        if erp:
+            partial_note = "（样本日不足，分位仅供参考）" if erp.get("partial") else ""
+            y10_src = erp.get("source", "")
+            if "+" in y10_src:
+                _, bond_src = y10_src.split("+", 1)
+                y10_note = f"；10Y 国债来源: {bond_src}"
+            else:
+                y10_note = ""
+            lines.append(
+                f"- ERP（沪深300）: {erp.get('raw', '-')}%，5年分位 {erp.get('percentile_5y', '-')}%"
+                f"{partial_note}{y10_note} [对齐样本 {erp.get('erp_days', '-')} 日]"
+            )
+
+    pe_pct, _, _ = _v3_valuation_percentiles(_index_dims(collection))
+    mf_out = (mf or {}).get("net_sum_5d")
+    cv7 = _v3_cv7_block(pe_pct, mf_out)
+    if cv7:
+        lines.append("")
+        lines.append(cv7)
+
+    ms_evidences: list[tuple[str, str]] = []
+    if sw:
+        ms_evidences.append((
+            "⚠️",
+            f"申万行业 20 日涨跌 {sw.get('return_20d_pct', '-')}%"
+            f"（{sw.get('index_code', '?')}）",
+        ))
+    else:
+        ms_evidences.append(("❓", "申万行业指数不可得"))
+    if nb or mf:
+        parts = []
+        if nb:
+            parts.append(f"北向 {_v3_northbound_signal_label(nb)}")
+        if mf:
+            parts.append(f"主力近5日 {_fmt_v2(mf.get('net_sum_5d'))}")
+        ms_evidences.append(("⚠️", "；".join(parts)))
+    else:
+        ms_evidences.append(("❓", "北向/主力资金数据不完整"))
+    if erp:
+        erp_desc = f"ERP {erp.get('raw', '-')}%（5年分位 {erp.get('percentile_5y', '-')}%）"
+        if erp.get("partial"):
+            erp_desc += "，样本日不足"
+        ms_evidences.append(("⚠️", erp_desc))
+    elif to:
+        ms_evidences.append(("❓", "ERP 不可得，仅换手数据可参考"))
+    lines.append("")
+    lines.append(_evidence_conclusion_block(
+        "市场结构呈现行业相对强弱、资金态度与 ERP/换手并列事实",
+        ms_evidences,
+    ))
+
+    lines.append("")
+    lines.append("🔍 **待独立验证:** 2000 积分接口不可得时见 availability 标注。")
+    return "\n".join(lines)
+
+
+def _section_static_fundamentals(dims: dict[str, dict], collection: dict) -> str:
+    lines = [
+        "## 4. 静态基本面分析", "",
+        "> ⏸ Phase 2 将落地完整 12 题框架；本节沿用 v0.1.2 财务与估值摘要。", "",
+    ]
+    lines.append(_strip_section_heading(_section_quality(dims)))
+    lines.append("")
+    lines.append(_strip_section_heading(render_valuation_section(dims, collection)))
+    return "\n".join(lines)
+
+
+def _section_bull_bear_placeholder() -> str:
+    return "## 5. 市场分歧\n\n> 模块 5 将于 Phase 3 实现（Bull vs Bear 结构化分歧分析）。"
+
+
+def _section_left_right_probability(
+    collection: dict, symbol: str, dims: dict[str, dict], market_structure: dict,
+) -> str:
+    lines = ["## 6. 左侧/右侧概率判断", ""]
+    lines.append("### 当前趋势位置（描述性参考，非单一结论）")
+    kline = _get_dim_data(dims, "kline")
+    trend_label = ""
+    if kline and isinstance(kline, list):
+        from lib.technical import sort_kline_asc, compute
+        tech = compute(sort_kline_asc(kline))
+        if "error" not in tech:
+            trend_label = tech["trend"]["alignment"].get("trend_label", "")
+            lines.append(f"- **技术结构:** {trend_label}")
+    lines.append("- **阶段对照（均未选定，仅供概率权重参考）:**")
+    lines.append(f"  {_v3_trend_stage_hints(trend_label)}")
+    lines.append("")
+    lines.append("### 左侧概率的主要支撑依据")
+    left_items: list[str] = []
+    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims)
+    if pe_pct is not None and pe_pct <= 30:
+        left_items.append(f"① PE 历史分位偏低（{pe_pct:.1f}%），证据强度：⚠️")
+    erp = market_structure.get("erp")
+    if erp and erp.get("percentile_5y") is not None and erp["percentile_5y"] >= 70:
+        left_items.append(f"② ERP 5年分位偏高（{erp['percentile_5y']}%），证据强度：⚠️")
+    if not left_items:
+        left_items.append("① 左侧参考指标数据不足或未达到阈值，证据强度：❓")
+    lines.append("")
+    lines.append("### 右侧概率的主要支撑依据")
+    right_items: list[str] = []
+    if kline and isinstance(kline, list):
+        from lib.technical import sort_kline_asc, compute
+        tech = compute(sort_kline_asc(kline))
+        if "error" not in tech:
+            label = tech["trend"]["alignment"].get("trend_label", "")
+            if "多头" in label:
+                right_items.append(f"① MA 多头排列（{label}），证据强度：⚠️")
+            macd = tech["momentum"]["macd"]
+            if macd.get("available"):
+                right_items.append(f"② MACD DIF={macd.get('dif')} DEA={macd.get('dea')}，证据强度：❓")
+    sw = market_structure.get("sw_index")
+    if sw and sw.get("stock_vs_industry_pct") is not None and sw["stock_vs_industry_pct"] > 0:
+        right_items.append(f"③ 个股跑赢行业（{sw['stock_vs_industry_pct']:+.2f}%），证据强度：⚠️")
+    if not right_items:
+        right_items.append("① 右侧参考指标数据不足，证据强度：❓")
+
+    prob = ProbabilityStructure(
+        left_items=left_items,
+        right_items=right_items,
+        trigger_conditions=[
+            "| 下季财报核心指标方向变化 | 催化剂 | 1-3 个月 | 基本面叙事可能重构 |",
+            "| 行业政策/竞争格局事件 | 风险事件 | 不确定 | 行业相对强弱或改变 |",
+            "| 均线/MACD 结构破坏 | 技术 | 短期 | 趋势描述需更新 |",
+        ],
+        watch_nodes=[
+            "| 下季度财报期 | 业绩公布 | 净利润同比、经营现金流 |",
+        ],
+    )
+    lines.extend(prob.left_items)
+    lines.append("")
+    lines.extend(prob.right_items)
+    lines.append("")
+    lines.append("### 走势转变的触发条件")
+    lines.append("| 触发条件 | 类型 | 时间窗口 | 影响 |")
+    lines.append("|---------|------|---------|------|")
+    lines.extend(prob.trigger_conditions)
+    lines.append("")
+    lines.append("### 下一个重要观察节点")
+    lines.append("| 时间 | 事件 | 关注指标 |")
+    lines.append("|------|------|---------|")
+    lines.extend(prob.watch_nodes)
+    mf = market_structure.get("moneyflow") or {}
+    pe_pct_lr, _, _ = _v3_valuation_percentiles(dims)
+    cv7_lr = _v3_cv7_block(pe_pct_lr, mf.get("net_sum_5d"))
+    if cv7_lr:
+        lines.append("")
+        lines.append("### 估值-资金交叉验证（左/右权重参考）")
+        lines.append(cv7_lr)
+    lines.append("")
+    lines.append("🔍 **待独立验证:** 本节呈现概率结构与支持依据，不构成位置判断。")
+    return "\n".join(lines)
+
+
+def _section_risk_scanner_placeholder() -> str:
+    return "## 7. 风险与不确定性\n\n> 模块 7 将于 Phase 3 实现（17 信号风险扫描）。"
+
+
+def _section_technical_brief(dims: dict[str, dict]) -> str:
+    lines = ["## 8. 附录", "", "### 技术分析精简", ""]
+    kline = _get_dim_data(dims, "kline")
+    if not kline or not isinstance(kline, list):
+        lines.append("- 趋势：K 线不可得")
+        lines.append("- 量：—")
+        lines.append("- 支撑阻力：—")
+        return "\n".join(lines)
+    from lib.technical import sort_kline_asc, compute
+    tech = compute(sort_kline_asc(kline))
+    if "error" in tech:
+        lines.append(f"- 趋势：{tech.get('message', '计算失败')}")
+        lines.append("- 量：—")
+        lines.append("- 支撑阻力：—")
+        return "\n".join(lines)
+    trend = tech["trend"]["alignment"].get("trend_label", "—")
+    sentences = tech["trend"].get("summary_sentences", [])
+    vol_s = sentences[1] if len(sentences) > 1 else "量价关系见完整 K 线"
+    sup = tech.get("support_resistance", {})
+    sr = sup.get("summary", "—") if isinstance(sup, dict) else "—"
+    lines.append(f"- **趋势:** {trend}")
+    lines.append(f"- **量:** {vol_s}")
+    lines.append(f"- **支撑阻力:** {sr}")
+    return "\n".join(lines)
+
+
+def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
+    """v0.1.3 九模块研究备忘录。"""
+    dims = _index_dims(collection)
+    market_structure = collection.get("market_structure") or {}
+
+    parts: list[str] = [
+        _header_v2(collection, symbol),
+        _section_research_question(collection, symbol),
+        _section_snapshot(collection, symbol, dims),
+        _section_dynamic_drivers(collection, symbol, dims, market_structure),
+        _section_market_structure(collection, symbol, market_structure),
+        _section_static_fundamentals(dims, collection),
+        _section_bull_bear_placeholder(),
+        _section_left_right_probability(collection, symbol, dims, market_structure),
+        _section_risk_scanner_placeholder(),
+        _section_technical_brief(dims),
+        _references_appendix(collection),
+        _risk_footer(),
+    ]
+    return "\n\n".join(p for p in parts if p)
 
 
 # ---- HTML 报告渲染 ----
