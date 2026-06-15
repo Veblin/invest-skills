@@ -7,10 +7,13 @@ WAL 模式安全并发。轻量 Schema 迁移。
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from . import env
 
@@ -284,8 +287,9 @@ def _yoy_from_fina_rows(rows: list[dict], field: str) -> float | None:
             try:
                 prev_v = float(r.get(field))
             except (TypeError, ValueError):
-                pass
-            break
+                logger.debug("unparseable %s=%s for %s, trying next record", field, r.get(field), r.get("end_date", ""))
+                continue
+            break  # Found a valid value
     if prev_v is None or prev_v <= 0:
         return None
     return round((cur_f - prev_v) / prev_v * 100, 2)

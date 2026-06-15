@@ -33,6 +33,9 @@ def sanitize_error(error: str, max_len: int = 60) -> str:
     """
     if not error:
         return "未知错误"
+    # Coerce non-string types (e.g., Exception objects, int error codes)
+    if not isinstance(error, str):
+        error = str(error)
     if any(kw in error for kw in _EASTMONEY_BLOCKED_KEYWORDS):
         return _EASTMONEY_BLOCKED_SHORT
     if "Clash/VPN" in error or "Clash TUN" in error:
