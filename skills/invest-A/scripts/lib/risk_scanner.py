@@ -172,7 +172,10 @@ def scan_financial_risks(
 
     # 7 利息保障弱
     ebit = safe_float(latest.get("ebit"))
-    int_exp = safe_float(latest.get("int_exp") or latest.get("interest_expense"))
+    _raw_int = latest.get("int_exp")
+    if _raw_int is None:
+        _raw_int = latest.get("interest_expense")
+    int_exp = safe_float(_raw_int)
     if ebit is not None and int_exp is not None and int_exp > 0:
         cov = ebit / int_exp
         int_trig = cov < 2
@@ -197,12 +200,9 @@ def scan_business_risks(
     signals: list[dict] = []
 
     # 8 毛利率下降
-    margins = [(str(r.get("end_date", ""))[:4], _gross_margin(r)) for r in rows]
-    margins = [(y, m) for y, m in margins if y and m is not None]
-    seen: dict[str, float] = {}
-    for y, m in margins:
-        seen[y] = m
-    annual = sorted(seen.items())
+    from lib.financials import gross_margin_annual_series
+
+    annual = gross_margin_annual_series(rows)
     gm_trig = False
     if len(annual) >= 2:
         (_, m0), (_, m1) = annual[-2], annual[-1]

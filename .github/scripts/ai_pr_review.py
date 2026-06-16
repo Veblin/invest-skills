@@ -24,7 +24,7 @@ MAX_CONTEXT_CHARS = 24_000
 # provider -> (default_model, env var names tried in order)
 PROVIDERS: dict[str, dict[str, Any]] = {
     "deepseek": {
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-v4-flash",
         "key_envs": ("DEEPSEEK_API_KEY", "AI_REVIEW_API_KEY"),
         "kind": "openai",
         "base_url": "https://api.deepseek.com/chat/completions",
@@ -41,7 +41,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.openai.com/v1/chat/completions",
     },
     "openrouter": {
-        "default_model": "deepseek/deepseek-chat",
+        "default_model": "deepseek/deepseek-v4-flash",
         "key_envs": ("OPENROUTER_API_KEY", "AI_REVIEW_API_KEY"),
         "kind": "openai",
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
@@ -265,8 +265,14 @@ def _skip_review(message: str) -> int:
     return 0
 
 
+def _env_or_default(name: str, default: str) -> str:
+    """Read env var; treat missing or blank as default (GitHub vars expand to '')."""
+    value = os.environ.get(name, "").strip()
+    return value or default
+
+
 def main() -> int:
-    provider = os.environ.get("AI_REVIEW_PROVIDER", DEFAULT_PROVIDER).strip().lower()
+    provider = _env_or_default("AI_REVIEW_PROVIDER", DEFAULT_PROVIDER).lower()
     if provider not in PROVIDERS:
         print(f"Unknown AI_REVIEW_PROVIDER={provider!r}", file=sys.stderr)
         return 1
@@ -294,7 +300,7 @@ def main() -> int:
     pr_number = os.environ.get("PR_NUMBER", "")
     base_ref = os.environ.get("BASE_REF", "main")
     head_ref = os.environ.get("HEAD_REF", "")
-    model = os.environ.get("AI_REVIEW_MODEL", cfg["default_model"])
+    model = _env_or_default("AI_REVIEW_MODEL", cfg["default_model"])
 
     user_prompt = textwrap.dedent(f"""\
         Review this pull request for repository invest-A.

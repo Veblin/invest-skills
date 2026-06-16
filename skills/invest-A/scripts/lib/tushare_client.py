@@ -28,6 +28,38 @@ TUSHARE_API_URL = "http://api.tushare.pro"
 DAILY_CALL_LIMIT = 500
 RATE_LIMIT_PER_MINUTE = 80
 
+# 官方最低积分（以各接口文档为准；用于降级提示）
+# sw_daily: https://tushare.pro/document/2?doc_id=327
+TUSHARE_API_MIN_POINTS: dict[str, int] = {
+    "stock_basic": 120,
+    "daily": 120,
+    "fina_indicator": 2000,
+    "top10_floatholders": 2000,
+    "daily_basic": 2000,
+    "moneyflow": 2000,
+    "margin_detail": 2000,
+    "hsgt_top10": 2000,
+    "index_classify": 2000,
+    "index_daily": 2000,
+    "index_dailybasic": 4000,
+    "sw_daily": 5000,
+    "opt_daily": 5000,
+}
+
+
+def api_min_points(api_name: str) -> int | None:
+    """返回接口文档标注的最低积分，未知则 None。"""
+    return TUSHARE_API_MIN_POINTS.get(api_name)
+
+# 积分/权限不足（预期降级，非异常）
+_PERMISSION_DENIED_CODES = frozenset({40203})
+
+
+def _is_permission_denied(code: int, msg: str) -> bool:
+    if code in _PERMISSION_DENIED_CODES:
+        return True
+    return "访问权限" in msg or "没有接口" in msg
+
 
 class TushareClient:
     """Tushare Pro HTTP 轻量客户端。
@@ -47,6 +79,7 @@ class TushareClient:
         now = time.time()
         midnight = now - (now % 86400)
         self._daily_reset_at = midnight + 86400
+        self._permission_denied_apis: set[str] = set()
         # 在初始化时捕获代理设置，供显式传入 Session（trust_env=False）
         self._proxies: dict[str, str] = {}
         for key in ("http", "https"):
@@ -97,6 +130,10 @@ class TushareClient:
             logger.debug("Tushare: 无 Token，跳过 query(%s)", api_name)
             return pd.DataFrame()
 
+        if api_name in self._permission_denied_apis:
+            logger.debug("Tushare: 跳过 %s（本会话已确认无接口权限）", api_name)
+            return pd.DataFrame()
+
         self._reset_daily_counter_if_needed()
         self._wait_for_rate_limit()
 
@@ -120,12 +157,24 @@ class TushareClient:
 
             if data.get("code") != 0:
                 code = data.get("code", -1)
-                msg = data.get("msg", "")
-                # 区分错误类型便于排查
+                msg = str(data.get("msg", ""))
                 if code == -2002:
                     logger.error("Tushare: Token 无效 (%s)", api_name)
                 elif code == -2001:
                     logger.warning("Tushare: 配额已用完 (%s)", api_name)
+                elif _is_permission_denied(code, msg):
+                    self._permission_denied_apis.add(api_name)
+                    min_pts = api_min_points(api_name)
+                    if min_pts:
+                        logger.debug(
+                            "Tushare: %s 无接口权限 code=%s（文档最低 %s 积分，已降级）",
+                            api_name, code, min_pts,
+                        )
+                    else:
+                        logger.debug(
+                            "Tushare: %s 无接口权限 code=%s（已降级）",
+                            api_name, code,
+                        )
                 else:
                     logger.warning(
                         "Tushare: %s 返回错误 code=%s msg=%s",

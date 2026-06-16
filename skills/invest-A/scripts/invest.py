@@ -102,7 +102,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    warn_if_proxy_detected()
+    warn_if_proxy_detected(probe=True)
     result = collector.collect_all(args.symbol, dims, deep=args.deep)
     if result["summary"]["available"] == 0:
         print(render.render(result, args.symbol, "compact"))
@@ -138,7 +138,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    warn_if_proxy_detected()
+    warn_if_proxy_detected(probe=True)
     result = collector.collect_all(args.symbol, dims, deep=args.deep)
     if result["summary"]["available"] == 0:
         print("⚠️ 所有维度均不可用，无法生成报告")
@@ -184,12 +184,24 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"📝 Markdown 报告: {mdpath.resolve()}")
         return 0
 
+    if fmt == "md":
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        basename = _report_basename(result, args.symbol, ts)
+        htmlpath = Path.cwd() / f"{basename}.html"
+        try:
+            html_out = render.render_html(result, args.symbol)
+            htmlpath.write_text(html_out, encoding="utf-8")
+            print(f"📄 HTML 报告（兼容输出）: {htmlpath.resolve()}", file=sys.stderr)
+        except Exception as exc:
+            print(f"⚠️ HTML 兼容输出失败: {exc}", file=sys.stderr)
+
     print(output)
     return 0
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    warn_if_proxy_detected()
+    warn_if_proxy_detected(probe=True)
     ra = collector.collect_all(args.symbol_a)
     rb = collector.collect_all(args.symbol_b)
     da = {d["dimension"]: d for d in ra["dimensions"]}
@@ -209,16 +221,26 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
-    warn_if_proxy_detected()
+    warn_if_proxy_detected(probe=True)
     d = env.diagnose()
     if args.json:
         print(json.dumps(d, ensure_ascii=False, indent=2))
         return 0
     proxy_hint = ""
     if d.get("proxy_detected"):
-        proxy_hint = "代理环境: 已检测 — 国内数据源应直连，请配置 Clash DIRECT 规则\n"
-        if d.get("clash_rules_hint"):
-            proxy_hint += f"\n{d['clash_rules_hint']}\n"
+        if d.get("proxy_bypass_effective") and not d.get("proxy_user_action_needed"):
+            proxy_hint = "代理环境: 已检测 — 采集器已自动绕过 HTTP 代理\n"
+        elif d.get("proxy_hint_kind") == "tun_or_cdn":
+            proxy_hint = (
+                "代理环境: 已检测 — 已自动绕过 HTTP 代理，但东方财富 push2 接口不可达"
+                "（可能为 TUN 劫持或 CDN 限制）\n"
+            )
+        elif d.get("proxy_user_action_needed"):
+            proxy_hint = "代理环境: 已检测 — 无法自动绕过，请配置 Clash DIRECT 规则\n"
+            if d.get("clash_rules_hint"):
+                proxy_hint += f"\n{d['clash_rules_hint']}\n"
+        else:
+            proxy_hint = "代理环境: 已检测\n"
     print(f"=== 数据源诊断 ===\n配置: {d['config_source']}\n{proxy_hint}可用: {d['available_count']}/{d['total_count']}\n")
     for s, a in d["sources"].items():
         if isinstance(a, dict):
@@ -534,7 +556,7 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
     if len(symbols) < 2:
         print("❌ watchlist 至少需要 2 只标的（逗号分隔）", file=sys.stderr)
         return 1
-    warn_if_proxy_detected()
+    warn_if_proxy_detected(probe=True)
     from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     body: list[str] = [f"# 观察列表摘要 — {today}", "", f"> 共 {len(symbols)} 只标的"]

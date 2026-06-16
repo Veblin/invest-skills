@@ -22,6 +22,22 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 - Run `uv run pytest` to verify tests pass
 - Ensure no API keys or secrets are committed
 
+### Cutting a release
+
+1. 在 `CHANGELOG.md` 写好 `## vX.Y.Z` 章节（Release 正文从此提取）
+2. 同步四处版本号：`SKILL.md`、`pyproject.toml`、`.claude-plugin/plugin.json`、`gemini-extension.json`
+3. **合并到 `main`** → [Release Draft Notes](.github/workflows/release-draft.yml) 自动根据 `pyproject.toml` 版本创建/更新 **Draft Release**（正文来自 CHANGELOG）
+4. 确认 Draft 内容后打 tag：`git tag vX.Y.Z && git push origin vX.Y.Z`
+5. [Release workflow](.github/workflows/release.yml) 打包 tarball 并**正式发布**（`draft: false`）
+
+本地预览 Release 正文：
+
+```bash
+python3 .github/scripts/extract_release_notes.py vX.Y.Z
+# 或读取 pyproject.toml 当前版本
+python3 .github/scripts/extract_release_notes.py --from-pyproject
+```
+
 ### Design constraints
 
 - **No buy/sell advice** — this is an absolute constraint (LAW 6)

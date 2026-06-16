@@ -1,0 +1,70 @@
+name: Release Draft Notes
+
+# PR 合并到 main 后：按 pyproject.toml 版本从 CHANGELOG 生成 Draft Release 正文。
+# 正式发布仍由 push tag 触发 release.yml（打包 + 发布）。
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  sync-draft-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version tag
+        id: ver
+        run: |
+          TAG=$(python3 .github/scripts/extract_release_notes.py --from-pyproject --print-tag)
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Target tag: ${TAG}"
+
+      - name: Skip if CHANGELOG section missing
+        id: changelog
+        run: |
+          if python3 .github/scripts/extract_release_notes.py --from-pyproject --strict > release-notes.md; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No CHANGELOG section for ${{ steps.ver.outputs.tag }} — skip draft release"
+          fi
+
+      - name: Skip if release already published
+        id: published
+        if: steps.changelog.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft -q .isDraft)
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Updating existing draft for ${TAG}"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Published release ${TAG} exists — skip"
+          fi
+
+      - name: Create or update draft release
+        if: steps.changelog.outputs.ready == 'true' && steps.published.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: release-notes.md
+          target_commitish: ${{ github.sha }}
+          draft: true
+          prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
+          generate_release_notes: false
