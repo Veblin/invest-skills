@@ -29,7 +29,6 @@ host-docs/
 # Build / release artifacts
 dist/
 
-# invest.py report 命令生成的 HTML 研究报告（YYYY-MM-DD-hh-mm-ss-代码[-名称].html）
-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.html
-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md
+# invest.py report 
+reports/
 
