@@ -87,8 +87,9 @@ class TestNorthboundNormalization:
     def test_tushare_wan_to_yuan(self):
         from lib.collector import _normalize_northbound_records
 
-        rows = [{"trade_date": "20260101", "net_mf_vol": 1500.0}]
+        rows = [{"trade_date": "20260101", "net_mf_amount": 1500.0}]
         out = _normalize_northbound_records(rows, "tushare.moneyflow")
+        assert out[0]["net_mf_amount"] == 15_000_000.0
         assert out[0]["net_mf_vol"] == 15_000_000.0
 
     def test_akshare_unchanged(self):

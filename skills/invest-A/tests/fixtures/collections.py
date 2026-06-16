@@ -43,9 +43,11 @@ def _make_financials(descending: bool = False) -> list[dict]:
     """生成升序（默认）或降序财务报告序列（模拟 Tushare fina_indicator）。"""
     rows = [
         {"end_date": "20240331", "roe": 18.5, "eps": 2.1,
-         "profit_dedt": 1e8, "revenue": 5e9, "net_profit": 1.2e8},
+         "profit_dedt": 1e8, "revenue": 5e9, "net_profit": 1.2e8,
+         "n_cashflow_act": 1.5e8, "ocf": 1.5e8},
         {"end_date": "20241231", "roe": 20.2, "eps": 2.4,
-         "profit_dedt": 1.1e8, "revenue": 5.5e9, "net_profit": 1.3e8},
+         "profit_dedt": 1.1e8, "revenue": 5.5e9, "net_profit": 1.3e8,
+         "n_cashflow_act": 1.0e8, "ocf": 1.0e8},
     ]
     if descending:
         rows.reverse()

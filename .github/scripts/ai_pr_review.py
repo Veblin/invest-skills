@@ -45,7 +45,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "key_envs": ("OPENROUTER_API_KEY", "AI_REVIEW_API_KEY"),
         "kind": "openai",
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
-        "extra_headers": {"HTTP-Referer": "https://github.com/Veblin/claude-invest-A"},
+        "extra_headers": {"HTTP-Referer": "https://github.com/Veblin/invest-A-skill"},
     },
     "anthropic": {
         "default_model": "claude-sonnet-4-20250514",

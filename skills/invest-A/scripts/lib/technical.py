@@ -278,6 +278,11 @@ def _rsi(closes: list[float], n: int) -> list[float | None]:
     return out
 
 
+def rsi_series(closes: list[float], period: int) -> list[float | None]:
+    """Wilder RSI 序列（公开 API，与 compute() 内 RSI 计算一致）。"""
+    return _rsi(closes, period)
+
+
 def _kdj(highs: list[float], lows: list[float], closes: list[float],
          n: int = 9, m1: int = 3, m2: int = 3) -> dict[str, list[float | None]]:
     """KDJ 随机指标。
