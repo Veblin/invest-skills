@@ -24,7 +24,7 @@ MAX_CONTEXT_CHARS = 24_000
 # provider -> (default_model, env var names tried in order)
 PROVIDERS: dict[str, dict[str, Any]] = {
     "deepseek": {
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-v4-flash",
         "key_envs": ("DEEPSEEK_API_KEY", "AI_REVIEW_API_KEY"),
         "kind": "openai",
         "base_url": "https://api.deepseek.com/chat/completions",
@@ -41,7 +41,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.openai.com/v1/chat/completions",
     },
     "openrouter": {
-        "default_model": "deepseek/deepseek-chat",
+        "default_model": "deepseek/deepseek-v4-flash",
         "key_envs": ("OPENROUTER_API_KEY", "AI_REVIEW_API_KEY"),
         "kind": "openai",
         "base_url": "https://openrouter.ai/api/v1/chat/completions",
