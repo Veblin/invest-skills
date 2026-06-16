@@ -59,6 +59,12 @@ def _collection_v3() -> dict:
 
 
 class TestCollectMarketStructure:
+    # collect_market_structure 中走 Tushare tc.query 的子源（pmi 为 akshare 独立源）
+    _TUSHARE_MS_KEYS = (
+        "sw_index", "northbound", "margin", "moneyflow", "turnover", "erp",
+        "put_call_ratio", "short_margin", "new_high_ratio", "etf_flow",
+    )
+
     def test_collect_market_structure_degrades_gracefully(self):
         from lib import collector
 
@@ -75,8 +81,8 @@ class TestCollectMarketStructure:
         assert result["sw_index"] is None
         assert result["northbound"] is None
         assert all(
-            v.startswith("unavailable")
-            for v in result["availability"].values()
+            result["availability"][k].startswith("unavailable")
+            for k in self._TUSHARE_MS_KEYS
         )
 
     def test_collect_market_structure_no_token(self):
