@@ -214,3 +214,15 @@ class TestRenderCompliance:
         # 允许描述性用语，不应出现信号词
         if "DIF" in text:
             assert "上穿" in text or "下穿" in text or "位于" in text
+
+
+class TestSanitizeError:
+    def test_distinguishes_tun_from_proxy_failure(self):
+        from lib.collector import _EASTMONEY_PROXY_MSG, _EASTMONEY_TUN_OR_CDN_MSG
+        from lib.render import sanitize_error
+
+        tun = sanitize_error(_EASTMONEY_TUN_OR_CDN_MSG)
+        proxy = sanitize_error(_EASTMONEY_PROXY_MSG)
+        assert "TUN" in tun or "push2" in tun
+        assert tun != proxy
+        assert "Clash DIRECT" in proxy or "HTTP 代理" in proxy

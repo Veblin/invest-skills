@@ -30,3 +30,6 @@ jobs:
 
       - name: Run test suite
         run: uv run pytest
+
+      - name: Verify release notes extractor
+        run: uv run pytest .github/scripts/test_extract_release_notes.py -q

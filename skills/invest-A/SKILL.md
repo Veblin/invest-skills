@@ -49,11 +49,11 @@ metadata:
 - **腾讯行情** ✅ — 实时报价兜底
 - **akshare** ✅ — 免费数据源，Tushare 不可用时的兜底（部分接口因东方财富反爬不可用）
 - **baostock** ✅ — 免费交易所 K 线数据，无需 token
-- **efinance / yfinance** 🔜 — 计划在未来版本接入（详见 `docs/TODO.md`）
+- **efinance / yfinance** 🔜 — 计划在未来版本接入（详见 `docs/roadmap.md`）
 
 ## 代理 / VPN（Clash 等）
 
-v0.1.2 起**不再自动清除** `HTTP_PROXY` 等环境变量。大陆用户若开启 VPN/代理，国内金融数据源应**直连**；`collect` / `report` 启动时若检测到代理，会提示将以下域名加入 Clash **DIRECT** 规则：
+采集器在 akshare 东方财富 / baostock 调用时**自动绕过 HTTP 代理**（`proxy_bypass` / `akshare_direct_session`）；检测到代理且东方财富不可达时才提示用户。
 
 ```yaml
 rules:
@@ -63,9 +63,9 @@ rules:
   - MATCH,PROXY
 ```
 
-- **诊断**：`invest.py diagnose` 输出 `proxy_detected` 与 `clash_rules_hint`
-- **例外**：腾讯行情采集与 diagnose 探针均强制直连（`no_proxy_session`）；Tushare 客户端在初始化时捕获代理配置，与 akshare 并行互不干扰
-- **TUN 模式**：需在网卡层配置上述规则，或采集时暂时关闭 TUN / 全局代理
+- **诊断**：`invest.py diagnose` 输出 `proxy_detected`、`proxy_bypass_effective` 与 `akshare_eastmoney_api` 探针详情
+- **例外**：腾讯行情采集强制直连（`no_proxy_session`）；Tushare 与 akshare 并行互不干扰
+- **TUN 模式**：HTTP 绕过无效时需关闭 TUN 或网卡层配置 DIRECT 规则
 
 详见 `references/source-guide.md` §代理 / VPN 问题。
 
@@ -138,7 +138,7 @@ uv run python skills/invest-A/scripts/invest.py collect 600176 --store
 **LAW 8** — 每个维度末尾要求"🔍 待独立验证项"。
 **LAW 9** — 无数据源支撑的分析不输出。
 
-**LAW 10–16** — 见下文「LAW 10–16 方法论」章节（完整版：`docs/invest-A-SKILL-LAW10-16.md`）。
+**LAW 10–16** — 见下文「LAW 10–16 方法论」章节（本文件为 canonical 版本）。
 
 ## LAW 10–16 方法论
 
@@ -220,6 +220,38 @@ uv run python skills/invest-A/scripts/invest.py collect 600176 --store
 ## 技术指标规则
 
 均线（MA）和 MACD 仅用于**描述市场状态**，不生成交易信号。
+
+---
+
+## 输出格式规则（层叠输出）
+
+每次 invest-A 执行结束后，输出**必须分两层**展示，不可混为一谈：
+
+### 第一层：Claude 内简报（高价值信息摘要）
+
+Claude 对话中输出的内容须精简为**可一目扫完**的简报，核心内容包括：
+1. **归因先行** — 当前股价波动的**主要归因**（多因子交叉验证的结论前置）
+2. **核心矛盾** — 最值得跟踪的 1-2 个问题
+3. **关键速览** — 估值分位极端值、最新财务摘要、技术结构极端信号
+4. **主导因子 + 下一观察节点** — 列明短期/中期主导因子及待验证的后续事件节点
+
+**禁止**在 Claude 内展开全部九模块内容、完整表格、流程描述。
+
+### 第二层：.md 详细文档（完整研究备忘录）
+
+详细分析内容须写入 `code/reports/{symbol}-{name}-{date}.md` 文件。
+- 包含完整九模块（或八段 legacy）全部内容
+- 包含引用来源表（References，见本文件附录规范）
+- 包含完整技术指标计算表
+- 文件路径须在简报中引用告知用户
+
+### 合规检查项（每次输出前自查）
+
+- [ ] Claude 内是否已压缩至 3-5 段简报（不做全文展开）？
+- [ ] 详细报告是否已写入 `code/reports/` 目录？
+- [ ] 简报中是否引用了详细报告的文件路径？
+
+违反即为 Bug。
 
 ---
 

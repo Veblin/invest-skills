@@ -192,18 +192,37 @@ class TestCollectorHelpers:
         from lib import collector
 
         mock_records = [
-            {"trade_date": "20260610", "net_mf_amount": 100.0},
-            {"trade_date": "20260609", "net_mf_amount": 50.0},
+            {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(100 - i * 10)}
+            for i in range(6)
         ]
 
-        with patch("lib.collector._q_tushare_hsgt_top10") as mock_q:
+        with patch("lib.collector._q_tushare_hsgt_top10") as mock_q, patch(
+            "lib.collector._q_akshare_northbound", return_value=None
+        ):
             mock_q.return_value = mock_records
             result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
 
         assert result is not None
         assert result["source"] == "tushare.hsgt_top10"
-        assert result["net_sum_10d"] == 150.0
+        assert result["net_sum_10d"] == sum(100 - i * 10 for i in range(6))
         mock_q.assert_called_once_with("600176")
+
+    def test_ms_fetch_northbound_sparse_hsgt_falls_back_to_akshare(self):
+        from lib import collector
+
+        sparse = [{"trade_date": "20260610", "net_mf_amount": 100.0}]
+        akshare_records = [
+            {"trade_date": f"202606{10 - i:02d}", "net_mf_vol": float(50 + i)}
+            for i in range(6)
+        ]
+
+        with patch("lib.collector._q_tushare_hsgt_top10", return_value=sparse), patch(
+            "lib.collector._q_akshare_northbound", return_value=akshare_records
+        ):
+            result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
+
+        assert result is not None
+        assert result["source"] == "akshare.stock_hsgt_individual_em"
 
     def test_northbound_and_moneyflow_sources_distinct(self):
         from lib import collector
@@ -213,7 +232,10 @@ class TestCollectorHelpers:
         ) as mock_mf, patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
         ), patch.object(collector, "_tushare_client", return_value=MagicMock()):
-            mock_nb.return_value = [{"trade_date": "20260610", "net_mf_amount": 1.0}]
+            mock_nb.return_value = [
+                {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(i + 1)}
+                for i in range(6)
+            ]
             mock_mf.return_value = [{"trade_date": "20260610", "net_mf_amount": 10000.0}]
             result = collector.collect_market_structure("600176", industry="电气设备")
 
