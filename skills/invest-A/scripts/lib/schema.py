@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 
 # ---- 维度标识 ----
@@ -199,3 +200,59 @@ class DimensionResult:
             "source_group": "unknown",
             "fallback_chain": [],
         }
+
+
+# ---- v0.1.3 动态投研内核数据结构 ----
+
+CVStatus = Literal["convergence", "divergence", "gap"]
+
+_CV_ICONS: dict[str, str] = {"convergence": "🟢", "divergence": "🟡", "gap": "🔴"}
+_CV_LABELS: dict[str, str] = {"convergence": "印证", "divergence": "分歧", "gap": "缺口"}
+
+
+@dataclass
+class DriverFactor:
+    """多因子驱动矩阵单行（模块 2）。"""
+    category: str
+    signal: str
+    direction: str
+    strength: str
+    source: str
+
+    def to_matrix_row(self) -> str:
+        return (
+            f"| {self.category} | {self.signal} | {self.direction} | "
+            f"{self.strength} | {self.source} |"
+        )
+
+
+@dataclass
+class CrossValidation:
+    """交叉验证块（CV-1 … CV-7）。"""
+    status: CVStatus
+    code: str
+    data_pair: str
+    detail: str
+    reliability: str
+
+    def title(self) -> str:
+        if self.code and self.data_pair:
+            return f"{self.code} {self.data_pair}"
+        return self.code or self.data_pair
+
+    def to_markdown(self) -> str:
+        icon = _CV_ICONS.get(self.status, "🔴")
+        label = _CV_LABELS.get(self.status, self.status)
+        return (
+            f"{icon} **{label}（{self.title()}）** — {self.detail}\n"
+            f"  可靠性: {self.reliability}"
+        )
+
+
+@dataclass
+class ProbabilityStructure:
+    """左/右概率结构（模块 6，LAW 16）。"""
+    left_items: list[str] = field(default_factory=list)
+    right_items: list[str] = field(default_factory=list)
+    trigger_conditions: list[str] = field(default_factory=list)
+    watch_nodes: list[str] = field(default_factory=list)

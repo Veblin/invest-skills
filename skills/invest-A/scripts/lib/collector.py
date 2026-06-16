@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 from . import env
+from .nums import safe_float
 from .proxy import no_proxy_session, proxy_bypass
 from .proxy import EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS
 from .schema import SourceResult, DimensionResult
@@ -35,6 +36,14 @@ def _today() -> str:
 
 def _days_ago(n: int) -> str:
     return (datetime.now() - timedelta(days=n)).strftime("%Y%m%d")
+
+
+def _fred_date(yyyymmdd: str) -> str:
+    """Tushare 风格 YYYYMMDD → FRED API 要求的 YYYY-MM-DD。"""
+    s = yyyymmdd.strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    return s
 
 
 def _latest_quarter_end() -> str:
@@ -209,18 +218,97 @@ def _q_tushare_basic(symbol: str) -> dict | None:
     return None
 
 
+def _merge_cashflow_into_financials(
+    financials: list[dict], cashflow: list[dict],
+) -> list[dict]:
+    """按 end_date 合并经营现金流，供 CV-1 交叉验证。"""
+    cf_by_date = {str(r.get("end_date", "")): r for r in cashflow}
+    out: list[dict] = []
+    for row in financials:
+        merged = dict(row)
+        cf = cf_by_date.get(str(row.get("end_date", "")))
+        if cf:
+            ncf = cf.get("n_cashflow_act")
+            if ncf is not None:
+                merged["n_cashflow_act"] = ncf
+                merged["ocf"] = ncf
+        out.append(merged)
+    return out
+
+
+def _merge_balancesheet_into_financials(
+    financials: list[dict], balancesheet: list[dict],
+) -> list[dict]:
+    """按 end_date 合并应收/存货，供 CV-2 交叉验证。"""
+    bs_by_date = {str(r.get("end_date", "")): r for r in balancesheet}
+    out: list[dict] = []
+    for row in financials:
+        merged = dict(row)
+        bs = bs_by_date.get(str(row.get("end_date", "")))
+        if bs:
+            ar = bs.get("accounts_rece")
+            if ar is None:
+                ar = bs.get("accounts_receiv")
+            if ar is not None:
+                merged["accounts_receiv"] = ar
+            inv = bs.get("inventories")
+            if inv is None:
+                inv = bs.get("inventory")
+            if inv is not None:
+                merged["inventory"] = inv
+        out.append(merged)
+    return out
+
+
 def _q_tushare_financials(symbol: str) -> list[dict] | None:
     from . import env as _env
     config = _env.get_config()
     if not _env.is_tushare_available(config):
         raise RuntimeError("TUSHARE_TOKEN not configured")
     tc = _tushare_client(config)
-    df = tc.query("fina_indicator", ts_code=_ts_code(symbol),
-                  fields="ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit",
-                  start_date=_days_ago(730), end_date=_today())
-    if df is not None and not df.empty:
-        return df.to_dict("records")
-    return None
+    ts = _ts_code(symbol)
+    lookback = _days_ago(730)
+    end = _today()
+    df = tc.query(
+        "fina_indicator", ts_code=ts,
+        fields=(
+            "ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit,"
+            "grossprofit_margin,netprofit_margin,assets_turn,eqt_to_debt,"
+            "debt_to_assets"
+        ),
+        start_date=lookback, end_date=end,
+    )
+    if df is None or df.empty:
+        return None
+    records = df.to_dict("records")
+    for rec in records:
+        em = rec.get("eqt_to_debt")
+        if em is not None and safe_float(em) not in (None, 0):
+            rec["equity_multiplier"] = 1.0 + 1.0 / float(em)
+        elif rec.get("debt_to_assets") is not None:
+            da = safe_float(rec.get("debt_to_assets"))
+            if da is not None and 0 <= da < 100:
+                # debt_to_assets 预期为百分比（0-100），如 42.5 表示 42.5%
+                # 若值 < 1.0，视为已转为小数比率，直接使用
+                if da < 1.0:
+                    rec["equity_multiplier"] = 1.0 / max(0.01, 1.0 - da)
+                else:
+                    rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
+    cf_df = tc.query("cashflow", ts_code=ts,
+                     fields="ts_code,end_date,n_cashflow_act",
+                     start_date=lookback, end_date=end)
+    if cf_df is not None and not cf_df.empty:
+        records = _merge_cashflow_into_financials(records, cf_df.to_dict("records"))
+    elif cf_df is None or cf_df.empty:
+        logger.warning("Tushare cashflow query returned empty for %s; n_cashflow_act field will be missing from records", ts)
+    bs_df = tc.query("balancesheet", ts_code=ts,
+                     fields="ts_code,end_date,accounts_rece,inventories",
+                     start_date=lookback, end_date=end)
+    if bs_df is not None and not bs_df.empty:
+        records = _merge_balancesheet_into_financials(records, bs_df.to_dict("records"))
+    elif bs_df is None or bs_df.empty:
+        logger.warning("Tushare balancesheet query returned empty for %s; accounts_receiv/inventory fields will be missing from records", ts)
+    return records
 
 
 def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
@@ -253,18 +341,36 @@ def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
 
 
 def _normalize_northbound_records(records: list[dict], source: str) -> list[dict]:
-    """统一 net_mf_vol 为「元」。Tushare moneyflow 字段单位为万元，akshare 为元。"""
+    """统一主力资金/北向净额为「元」。
+
+    Tushare moneyflow: ``net_mf_amount`` 单位为万元。
+    akshare 北向: ``今日增持资金`` 映射为 ``net_mf_vol``，单位已是元。
+    输出同时写入 ``net_mf_amount`` 与 ``net_mf_vol``（后者为兼容别名）。
+    """
     if not records:
         return records
-    scale = 10000.0 if source.startswith("tushare") else 1.0
+    # 仅 moneyflow 为万元；hsgt_top10.net_amount 已是元
+    scale = 10000.0 if source.startswith("tushare.moneyflow") else 1.0
     out: list[dict] = []
     for r in records:
         row = dict(r)
-        v = row.get("net_mf_vol")
-        if v is not None and scale != 1.0:
-            row["net_mf_vol"] = float(v) * scale
+        raw = row.get("net_mf_amount")
+        if raw is None:
+            raw = row.get("net_mf_vol")
+        if raw is not None:
+            yuan = float(raw) * scale
+            row["net_mf_amount"] = yuan
+            row["net_mf_vol"] = yuan
         out.append(row)
     return out
+
+
+def _flow_amount_yuan(record: dict) -> float | None:
+    """从归一化后的资金流记录读取净额（元），缺失时返回 None。"""
+    val = record.get("net_mf_amount") or record.get("net_mf_vol")
+    if val is None:
+        return None
+    return float(val)
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
@@ -274,11 +380,33 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
         raise RuntimeError("TUSHARE_TOKEN not configured")
     tc = _tushare_client(config)
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,buy_sm_vol,sell_sm_vol,net_mf_vol",
+                  fields="ts_code,trade_date,net_mf_amount",
                   start_date=_days_ago(10), end_date=_today())
     if df is not None and not df.empty:
         return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
     return None
+
+
+def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
+    """个股沪/深股通成交（仅上榜日有数据）。net_amount 单位：元。"""
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    df = tc.query("hsgt_top10", ts_code=_ts_code(symbol),
+                  fields="ts_code,trade_date,net_amount",
+                  start_date=_days_ago(30), end_date=_today())
+    if df is None or df.empty:
+        return None
+    rows = [
+        {"trade_date": r.get("trade_date"), "net_mf_amount": r.get("net_amount")}
+        for r in df.to_dict("records")
+        if r.get("net_amount") is not None
+    ]
+    if not rows:
+        return None
+    return _normalize_northbound_records(rows, "tushare.hsgt_top10")
 
 
 def _q_akshare_basic(symbol: str) -> dict | None:
@@ -404,7 +532,7 @@ def _map_akshare_financial_keys(r: dict) -> dict:
     注意：akshare 返回的数值带中文单位（如 "17.88亿"、"8.37%"),
     _parse_akshare_num 将其转换为与 Tushare 一致的纯 float 格式。
     """
-    return {
+    out = {
         "end_date": str(r.get("报告期", "")),
         "roe": _parse_akshare_num(r.get("净资产收益率")),
         "eps": _parse_akshare_num(r.get("基本每股收益")),
@@ -412,6 +540,16 @@ def _map_akshare_financial_keys(r: dict) -> dict:
         "revenue": _parse_akshare_num(r.get("营业总收入")),
         "net_profit": _parse_akshare_num(r.get("净利润")),
     }
+    gm = _parse_akshare_num(r.get("销售毛利率") or r.get("毛利率"))
+    if gm is not None:
+        out["grossprofit_margin"] = gm
+    ar = _parse_akshare_num(r.get("应收账款"))
+    if ar is not None:
+        out["accounts_receiv"] = ar
+    inv = _parse_akshare_num(r.get("存货"))
+    if inv is not None:
+        out["inventory"] = inv
+    return out
 
 
 def _map_akshare_northbound_keys(r: dict) -> dict:
@@ -687,10 +825,10 @@ def collect_quote(symbol: str) -> dict:
 
 
 def collect_northbound(symbol: str) -> dict:
-    """北向资金。并行：Tushare + akshare。"""
+    """北向资金。并行：Tushare hsgt_top10 + akshare 个股持股变动。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.moneyflow", lambda: _q_tushare_moneyflow(symbol)))
+        tasks.append(("tushare.hsgt_top10", lambda: _q_tushare_hsgt_top10(symbol)))
     if env.is_akshare_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
@@ -698,8 +836,8 @@ def collect_northbound(symbol: str) -> dict:
     results = _run_sources_parallel(tasks, "northbound")
     result_map = {r.source: r for r in results}
     _annotate_query_params(result_map, {
-        "tushare.moneyflow": _qp_tushare("moneyflow", symbol,
-                                         start_date=_days_ago(10), end_date=_today()),
+        "tushare.hsgt_top10": _qp_tushare("hsgt_top10", symbol,
+                                          start_date=_days_ago(30), end_date=_today()),
         "akshare.stock_hsgt_individual_em": _qp_akshare("stock_hsgt_individual_em", symbol),
     })
 
@@ -749,10 +887,12 @@ _tc_local = threading.local()
 
 
 def _tushare_client(config: dict) -> Any:
-    """按线程惰性加载 TushareClient，避免跨线程共享 Session 和配额状态。"""
-    if not hasattr(_tc_local, "instance"):
+    """按线程惰性加载 TushareClient，配置变化时重建实例。"""
+    token = config.get("TUSHARE_TOKEN")
+    if not hasattr(_tc_local, "instance") or getattr(_tc_local, "_tc_token", None) != token:
         from lib.tushare_client import TushareClient
-        _tc_local.instance = TushareClient(token=config.get("TUSHARE_TOKEN"))
+        _tc_local.instance = TushareClient(token=token)
+        _tc_local._tc_token = token
     return _tc_local.instance
 
 
@@ -895,7 +1035,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
     missing = sum(1 for d in dimensions if d and (d.get("data") is None and d.get("status") != "partial"))
 
-    return {
+    result: dict[str, Any] = {
         "symbol": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "dimensions": dimensions or [],
@@ -906,3 +1046,1177 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             "missing": missing,
         },
     }
+    try:
+        attach_phase2_extras(result, symbol)
+    except Exception as exc:
+        logger.warning("attach_phase2_extras failed for %s: %s", symbol, exc)
+        result.setdefault("phase2_extras_errors", []).append(str(exc))
+        if not result.get("industry_peers"):
+            result["industry_peers"] = {
+                "peers": [],
+                "target": None,
+                "rankings": {},
+                "industry_name": None,
+                "sufficient": False,
+                "error": f"Phase 2 同行采集异常: {exc}",
+            }
+    return result
+
+
+# ---- 市场结构采集（v0.1.3 Phase 1） ----
+
+_HS300_CODE = "000300.SH"
+_ERP_MIN_ALIGNED_DAYS = 60
+_ERP_DGS10_LOOKBACK_DAYS = 5
+
+
+def _ms_set_unavailable(availability: dict[str, str], key: str, reason: str) -> None:
+    availability[key] = f"unavailable: {reason}"
+
+
+def _ms_lookup_sw_index_code_at_level(
+    tc: Any, industry: str, level: str,
+) -> str | None:
+    """在指定申万层级（L1/L2）中按行业名精确匹配申万指数代码。"""
+    df = tc.query("index_classify", level=level, src="SW2021")
+    if df is None or df.empty:
+        return None
+    name = industry.strip()
+    for _, row in df.iterrows():
+        idx_name = str(row.get("industry_name") or row.get("name") or "").strip()
+        if not idx_name:
+            continue
+        code = str(row.get("index_code", "")).strip()
+        if name == idx_name and code:
+            return code
+    return None
+
+
+def _ms_lookup_sw_index_code(tc: Any, industry: str | None) -> str | None:
+    """按申万行业名称匹配指数代码（L3 → L2 → L1）。"""
+    if not industry:
+        return None
+    for level in ("L3", "L2", "L1"):
+        code = _ms_lookup_sw_index_code_at_level(tc, industry, level)
+        if code:
+            return code
+    return None
+
+
+def _resolve_sw_industry_name(
+    tc: Any, symbol: str, industry_hint: str | None = None,
+) -> str | None:
+    """解析申万行业名：优先 collection 提示，再 stock_basic，再申万分类模糊匹配。"""
+    candidates: list[str] = []
+    if industry_hint and industry_hint.strip():
+        candidates.append(industry_hint.strip())
+    basic_df = tc.query("stock_basic", ts_code=_ts_code(symbol),
+                        fields="ts_code,name,industry")
+    if basic_df is not None and not basic_df.empty:
+        bi = str(basic_df.iloc[0].get("industry", "")).strip()
+        if bi and bi not in candidates:
+            candidates.append(bi)
+    for name in candidates:
+        if _ms_lookup_sw_index_code(tc, name):
+            return name
+    for name in candidates:
+        for level in ("L3", "L2", "L1"):
+            df = tc.query("index_classify", level=level, src="SW2021")
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                idx_name = str(row.get("industry_name") or row.get("name") or "").strip()
+                if idx_name and (name in idx_name or idx_name in name):
+                    return idx_name
+    return candidates[0] if candidates else None
+
+
+def _ms_fetch_pmi() -> dict[str, Any] | None:
+    """中国制造业 PMI（akshare），供 A-① 行业景气度补充。"""
+    if not env.is_akshare_available():
+        return None
+    try:
+        with _proxy_bypass():
+            import akshare as ak
+            df = ak.macro_china_pmi()
+        if df is None or df.empty:
+            return None
+        row = df.iloc[-1]
+        raw_month = row.get("月份")
+        if raw_month is not None:
+            month = str(raw_month)
+        elif hasattr(row, "name") and row.name is not None:
+            month = str(row.name)
+        else:
+            month = ""
+        pmi = safe_float(row.get("制造业-指数", row.get("制造业", None)))
+        if pmi is None and len(row) > 1:
+            pmi = safe_float(row.iloc[-1])
+        if pmi is None:
+            return None
+        return {
+            "month": month,
+            "manufacturing_pmi": round(pmi, 2),
+            "signal": "扩张" if pmi >= 50 else "收缩",
+            "source": "akshare.macro_china_pmi",
+        }
+    except Exception as exc:
+        logger.debug("PMI fetch failed: %s", exc)
+        return None
+
+
+def _ms_return_pct(closes: list[float]) -> float | None:
+    if len(closes) < 2:
+        return None
+    start, end = closes[0], closes[-1]
+    if not start:
+        return None
+    return (end - start) / start * 100
+
+
+def _ms_fetch_sw_index(tc: Any, symbol: str, industry: str | None) -> dict | None:
+    index_code = _ms_lookup_sw_index_code(tc, industry)
+    if not index_code:
+        return None
+    df_sw = tc.query("sw_daily", ts_code=index_code,
+                     start_date=_days_ago(70), end_date=_today())
+    df_hs = tc.query("index_daily", ts_code=_HS300_CODE,
+                     start_date=_days_ago(70), end_date=_today())
+    if df_sw is None or df_sw.empty:
+        return None
+    sw = df_sw.sort_values("trade_date")
+    sw_closes = [float(v) for v in sw["close"].tolist() if v is not None]
+    ret_20 = _ms_return_pct(sw_closes[-21:]) if len(sw_closes) >= 2 else None
+    bench_ret = None
+    if df_hs is not None and not df_hs.empty:
+        hs = df_hs.sort_values("trade_date")
+        hs_closes = [float(v) for v in hs["close"].tolist() if v is not None]
+        bench_ret = _ms_return_pct(hs_closes[-21:]) if len(hs_closes) >= 2 else None
+    stock_ret = None
+    df_stk = tc.query("daily", ts_code=_ts_code(symbol),
+                      start_date=_days_ago(70), end_date=_today(),
+                      fields="trade_date,close")
+    if df_stk is not None and not df_stk.empty:
+        stk = df_stk.sort_values("trade_date")
+        stk_closes = [float(v) for v in stk["close"].tolist() if v is not None]
+        stock_ret = _ms_return_pct(stk_closes[-21:]) if len(stk_closes) >= 2 else None
+    rel_vs_bench = (ret_20 - bench_ret) if ret_20 is not None and bench_ret is not None else None
+    rel_stock_vs_ind = (stock_ret - ret_20) if stock_ret is not None and ret_20 is not None else None
+    return {
+        "index_code": index_code,
+        "industry": industry,
+        "return_20d_pct": round(ret_20, 2) if ret_20 is not None else None,
+        "benchmark_return_20d_pct": round(bench_ret, 2) if bench_ret is not None else None,
+        "stock_return_20d_pct": round(stock_ret, 2) if stock_ret is not None else None,
+        "relative_vs_benchmark_pct": round(rel_vs_bench, 2) if rel_vs_bench is not None else None,
+        "stock_vs_industry_pct": round(rel_stock_vs_ind, 2) if rel_stock_vs_ind is not None else None,
+        "source": "tushare.sw_daily",
+    }
+
+
+def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
+    return sorted(
+        records, key=lambda r: str(r.get("trade_date", "")), reverse=True,
+    )[:limit]
+
+
+def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
+    """个股北向近 10 个交易日净额（元）。
+
+    Tushare hsgt_top10（仅上榜日有 net_amount）→ akshare 个股持股变动回退。
+    不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
+    """
+    try:
+        records = _q_tushare_hsgt_top10(symbol)
+        if records:
+            recent = _recent_flow_records(records, limit=10)
+            net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+            return {
+                "records": recent,
+                "net_sum_10d": net_sum,
+                "days": len(recent),
+                "source": "tushare.hsgt_top10",
+            }
+    except Exception as exc:
+        logger.debug("tushare hsgt_top10 failed for %s: %s", symbol, exc)
+
+    records = _q_akshare_northbound(symbol)
+    if not records:
+        return None
+    recent = _recent_flow_records(records, limit=10)
+    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+    return {
+        "records": recent,
+        "net_sum_10d": net_sum,
+        "days": len(recent),
+        "source": "akshare.stock_hsgt_individual_em",
+    }
+
+
+def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
+    """个股融资余额变化（margin_detail，非交易所汇总 margin）。
+
+    按 LAW 16 分离三类余额变化：
+      - change_pct: 融资余额（rzye）增速
+      - rqye_change_pct: 融券余额增速
+      - rzrqye_change_pct: 融资融券合计余额增速（如有）
+    """
+    df = tc.query("margin_detail", ts_code=_ts_code(symbol),
+                  start_date=_days_ago(15), end_date=_today())
+    if df is None or df.empty:
+        return None
+    records = df.sort_values("trade_date").to_dict("records")
+    if len(records) < 2:
+        return None
+
+    first, last = records[0], records[-1]
+
+    def _pct_chg(key: str) -> float | None:
+        fv = first.get(key)
+        lv = last.get(key)
+        if fv is None or lv is None:
+            return None
+        f = float(fv)
+        l = float(lv)
+        if f == 0:
+            return None
+        return (l - f) / f * 100
+
+    change_pct = _pct_chg("rzye")
+    rqye_change_pct = _pct_chg("rqye")
+    rzrqye_change_pct = _pct_chg("rzrqye")
+
+    result: dict[str, Any] = {
+        "records": records[-10:],
+        "source": "tushare.margin_detail",
+    }
+    if change_pct is not None:
+        result["change_pct"] = round(change_pct, 2)
+    if rqye_change_pct is not None:
+        result["rqye_change_pct"] = round(rqye_change_pct, 2)
+    if rzrqye_change_pct is not None:
+        result["rzrqye_change_pct"] = round(rzrqye_change_pct, 2)
+    return result if result.get("change_pct") is not None else None
+
+
+def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
+    records = _q_tushare_moneyflow(symbol)
+    if not records:
+        return None
+    recent = _recent_flow_records(records, limit=10)
+    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent[:5]) if v is not None)
+    return {
+        "records": recent,
+        "net_sum_5d": net_sum,
+        "source": "tushare.moneyflow",
+    }
+
+
+def _ms_fetch_turnover(tc: Any, symbol: str) -> dict | None:
+    from lib.valuation import percentile_rank
+
+    df = tc.query("daily_basic", ts_code=_ts_code(symbol),
+                  fields="trade_date,turnover_rate",
+                  start_date=_days_ago(90), end_date=_today())
+    if df is None or df.empty:
+        return None
+    rows = df.sort_values("trade_date")
+    rates = [float(v) for v in rows["turnover_rate"].tolist()
+             if v is not None and float(v) > 0]
+    if not rates:
+        return None
+    avg_5 = sum(rates[-5:]) / min(5, len(rates[-5:]))
+    avg_60 = sum(rates[-60:]) / min(60, len(rates[-60:]))
+    current = rates[-1]
+    pct = percentile_rank(rates[-60:], current) if len(rates) >= 5 else None
+    return {
+        "avg_5d": round(avg_5, 4),
+        "avg_60d": round(avg_60, 4),
+        "current": round(current, 4),
+        "ratio_5_60": round(avg_5 / avg_60, 3) if avg_60 else None,
+        "percentile_60d": round(pct, 1) if pct is not None else None,
+        "source": "tushare.daily_basic",
+    }
+
+
+def _akshare_date_to_iso(value: Any) -> str:
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    s = str(value).strip().replace("/", "-")
+    return s[:10] if len(s) >= 10 else s
+
+
+def _ms_fetch_akshare_cn10y_series() -> list[tuple[str, float]]:
+    """中国 10Y 国债收益率日序列（date, yield%）。FRED 不可用时的 ERP 回退。"""
+    if not env.is_akshare_available():
+        return []
+    with _proxy_bypass():
+        import akshare as ak
+        try:
+            df = ak.bond_zh_us_rate(start_date=_days_ago(1825))
+        except Exception as exc:
+            logger.warning("akshare bond_zh_us_rate failed: %s", exc)
+            return []
+    if df is None or getattr(df, "empty", True):
+        return []
+    col = "中国国债收益率10年"
+    if col not in df.columns:
+        return []
+    out: list[tuple[str, float]] = []
+    for _, row in df.iterrows():
+        dt = _akshare_date_to_iso(row.get("日期"))
+        val = row.get(col)
+        if not dt or val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            continue
+        if fval != fval:  # NaN
+            continue
+        out.append((dt, fval))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _ms_fetch_y10_series(config: dict) -> tuple[list[tuple[str, float]], str]:
+    """10Y 国债收益率序列：FRED DGS10 优先，akshare 中国 10Y 回退。"""
+    fred = _ms_fetch_fred_dgs10_series(config)
+    if fred:
+        return fred, "FRED.DGS10"
+    cn = _ms_fetch_akshare_cn10y_series()
+    if cn:
+        return cn, "akshare.bond_zh_us_rate"
+    return [], ""
+
+
+def _ms_fetch_fred_dgs10_series(config: dict) -> list[tuple[str, float]]:
+    """FRED DGS10 日序列（date, yield%）。"""
+    if not env.is_fred_available(config):
+        return []
+    import json
+    import urllib.parse
+    import urllib.request
+
+    key = config.get("FRED_API_KEY", "")
+    params = urllib.parse.urlencode({
+        "series_id": "DGS10",
+        "api_key": key,
+        "file_type": "json",
+        "observation_start": _fred_date(_days_ago(1825)),
+        "observation_end": _fred_date(_today()),
+    })
+    url = f"https://api.stlouisfed.org/fred/series/observations?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.warning("FRED DGS10 fetch failed: %s", exc)
+        return []
+    out: list[tuple[str, float]] = []
+    for obs in payload.get("observations", []):
+        val = obs.get("value")
+        if val is None or val == ".":
+            continue
+        try:
+            out.append((obs.get("date", ""), float(val)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _dgs10_for_trade_date(
+    dgs10_by_date: dict[str, float],
+    trade_date_fmt: str,
+    *,
+    lookback_days: int = _ERP_DGS10_LOOKBACK_DAYS,
+) -> float | None:
+    """取交易日对应 DGS10；若当日无数据则向前最多 lookback_days 个自然日。"""
+    try:
+        d = datetime.strptime(trade_date_fmt, "%Y-%m-%d")
+    except ValueError:
+        return dgs10_by_date.get(trade_date_fmt)
+    for i in range(lookback_days + 1):
+        key = (d - timedelta(days=i)).strftime("%Y-%m-%d")
+        if key in dgs10_by_date:
+            return dgs10_by_date[key]
+    return None
+
+
+def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
+    from lib.valuation import percentile_rank
+
+    df = tc.query("index_dailybasic", ts_code=_HS300_CODE,
+                  fields="trade_date,pe_ttm",
+                  start_date=_days_ago(1825), end_date=_today())
+    if df is None or df.empty:
+        return None
+    dgs10_series, y10_source = _ms_fetch_y10_series(config)
+    dgs10_by_date = {d: v for d, v in dgs10_series}
+    latest_dgs10 = dgs10_series[-1][1] if dgs10_series else None
+
+    rows = df.sort_values("trade_date").to_dict("records")
+    erp_hist: list[float] = []
+    for r in rows:
+        pe = r.get("pe_ttm")
+        if pe is None or float(pe) <= 0:
+            continue
+        td = str(r.get("trade_date", ""))
+        d_fmt = f"{td[:4]}-{td[4:6]}-{td[6:8]}" if len(td) == 8 else td
+        y10 = _dgs10_for_trade_date(dgs10_by_date, d_fmt)
+        if y10 is None:
+            continue
+        ep = 100.0 / float(pe)
+        erp_hist.append(ep - y10)
+
+    if not erp_hist:
+        return None
+    current = erp_hist[-1]
+    pct_5y = percentile_rank(erp_hist, current)
+    erp_days = len(erp_hist)
+    partial = erp_days < _ERP_MIN_ALIGNED_DAYS
+    return {
+        "raw": round(current, 3),
+        "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
+        "dgs10": round(latest_dgs10, 3) if latest_dgs10 is not None else None,
+        "erp_days": erp_days,
+        "partial": partial,
+        "index": _HS300_CODE,
+        "source": f"tushare.index_dailybasic+{y10_source}" if y10_source else "tushare.index_dailybasic",
+    }
+
+
+_50ETF_UNDERLYING = "510050.SH"
+_ETF_300_CODE = "510300.SH"
+_NEW_HIGH_SAMPLE = 30
+_PCR_HISTORY_5Y_CAL_DAYS = 1825
+_PCR_HISTORY_60D = 60
+_PCR_MIN_5Y_TRADING_DAYS = 252
+# 5 年 PCR 历史分位：均匀降采样上限，避免逐日 opt_daily 风暴
+_PCR_MAX_DAILY_QUERIES = 80
+
+
+def _ms_50etf_option_codes(tc: Any) -> tuple[list[str], list[str]]:
+    """SSE 50ETF 期权合约代码（认沽/认购）。"""
+    df = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
+    if df is None or df.empty:
+        return [], []
+    puts, calls = [], []
+    for _, row in df.iterrows():
+        name = str(row.get("name") or "")
+        if "50ETF" not in name and "510050" not in name:
+            continue
+        code = str(row.get("ts_code") or "").strip()
+        cp = str(row.get("call_put") or "").upper()
+        if not code:
+            continue
+        if cp == "P":
+            puts.append(code)
+        elif cp == "C":
+            calls.append(code)
+    return puts, calls
+
+
+def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
+    """均匀降采样交易日列表，始终保留最后一日。"""
+    if len(dates) <= max_points:
+        return dates
+    step = max(1, len(dates) // max_points)
+    sampled = list(dates[::step])
+    if dates[-1] not in sampled:
+        sampled.append(dates[-1])
+    return sorted(set(sampled))
+
+
+def _ms_pcr_on_date(
+    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
+) -> float | None:
+    df = tc.query("opt_daily", trade_date=trade_date, exchange="SSE")
+    if df is None or df.empty:
+        return None
+    put_vol = call_vol = 0.0
+    for _, row in df.iterrows():
+        code = str(row.get("ts_code") or "")
+        try:
+            vol = float(row.get("vol") or 0)
+        except (TypeError, ValueError):
+            continue
+        if code in put_codes:
+            put_vol += vol
+        elif code in call_codes:
+            call_vol += vol
+    if call_vol <= 0:
+        return None
+    return put_vol / call_vol
+
+
+def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
+    """50ETF 认沽认购比（opt_daily，需 2000 积分）。"""
+    from lib.valuation import percentile_rank
+
+    puts, calls = _ms_50etf_option_codes(tc)
+    if not puts or not calls:
+        return None
+    put_set, call_set = set(puts), set(calls)
+    cal = tc.query(
+        "trade_cal", exchange="SSE",
+        start_date=_days_ago(_PCR_HISTORY_5Y_CAL_DAYS + 5), end_date=_today(), is_open="1",
+    )
+    if cal is None or cal.empty:
+        return None
+    dates = sorted(str(d) for d in cal["cal_date"].tolist())
+    raw_days = len(dates)
+    dates = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+    ratios: list[float] = []
+    for td in dates:
+        r = _ms_pcr_on_date(tc, td, put_set, call_set)
+        if r is not None:
+            ratios.append(r)
+    if not ratios:
+        return None
+    current = ratios[-1]
+    pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
+    ratios_60d = ratios[-_PCR_HISTORY_60D:]
+    pct_60d = (
+        percentile_rank(ratios_60d, current)
+        if len(ratios_60d) >= 5 else None
+    )
+    return {
+        "ratio": round(current, 3),
+        "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
+        "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
+        "history_days": len(ratios),
+        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS or raw_days > len(dates),
+        "sampled": raw_days > len(dates),
+        "sample_points": len(dates),
+        "calendar_days": raw_days,
+        "underlying": _50ETF_UNDERLYING,
+        "source": "tushare.opt_daily",
+    }
+
+
+def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
+    """融券余额增速（交易所 margin 优先，个股 margin_detail 回退）。"""
+    from lib.valuation import percentile_rank
+
+    df = tc.query("margin", start_date=_days_ago(1825), end_date=_today())
+    if df is not None and not df.empty:
+        by_date: dict[str, float] = {}
+        for _, row in df.iterrows():
+            td = str(row.get("trade_date") or "")
+            rqye = row.get("rqye")
+            if not td or rqye is None:
+                continue
+            by_date[td] = by_date.get(td, 0.0) + float(rqye)
+        dates = sorted(by_date)
+        if len(dates) >= 11:
+            growths: list[float] = []
+            for i in range(10, len(dates)):
+                base, cur = by_date[dates[i - 10]], by_date[dates[i]]
+                if base > 0:
+                    growths.append((cur - base) / base * 100)
+            if growths:
+                current_g = growths[-1]
+                pct = percentile_rank(growths, current_g) if len(growths) >= 5 else None
+                return {
+                    "growth_pct": round(current_g, 2),
+                    "percentile_5y": round(pct, 1) if pct is not None else None,
+                    "scope": "exchange",
+                    "source": "tushare.margin",
+                }
+    margin = _ms_fetch_margin(tc, symbol)
+    if margin and margin.get("rqye_change_pct") is not None:
+        return {
+            "growth_pct": margin["rqye_change_pct"],
+            "scope": "stock",
+            "source": margin.get("source", "tushare.margin_detail"),
+        }
+    return None
+
+
+def _ms_new_high_ratio_from_panel(panel: dict[str, list[dict]]) -> float | None:
+    if not panel:
+        return None
+    n_high = n_valid = 0
+    for rows in panel.values():
+        if len(rows) < 2:
+            continue
+        closes = [safe_float(r.get("close")) for r in rows]
+        highs = [safe_float(r.get("high")) for r in rows]
+        closes = [c for c in closes if c is not None]
+        highs = [h for h in highs if h is not None]
+        if not closes or len(highs) < 2:
+            continue
+        n_valid += 1
+        if closes[-1] >= max(highs[:-1]):
+            n_high += 1
+    if n_valid == 0:
+        return None
+    return n_high / n_valid * 100
+
+
+def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
+    """创新高个股占比（采样 daily，partial 标注）。"""
+    from lib.valuation import percentile_rank
+
+    basic = tc.query("stock_basic", list_status="L", fields="ts_code")
+    if basic is None or basic.empty:
+        return None
+    codes = [
+        str(c) for c in basic["ts_code"].tolist()
+        if c is not None
+    ][:_NEW_HIGH_SAMPLE]
+    if not codes:
+        return None
+    def _fetch_daily_panel_row(ts_code: str) -> tuple[str, list[dict] | None]:
+        df = tc.query(
+            "daily", ts_code=ts_code,
+            start_date=_days_ago(70), end_date=_today(),
+            fields="trade_date,close,high",
+        )
+        if df is None or df.empty:
+            return ts_code, None
+        return ts_code, df.sort_values("trade_date").to_dict("records")
+
+    panel: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as executor:
+        futures = {executor.submit(_fetch_daily_panel_row, c): c for c in codes}
+        for fut in as_completed(futures):
+            ts_code, records = fut.result()
+            if records:
+                panel[ts_code] = records
+    current = _ms_new_high_ratio_from_panel(panel)
+    if current is None:
+        return None
+    hist: list[float] = []
+    if panel:
+        min_len = min(len(v) for v in panel.values())
+        # 排除全样本切片，避免 current 计入自身分位
+        hist_end = min_len - 1 if min_len > 1 else 0
+        for offset in range(max(0, min_len - 60), hist_end):
+            slice_panel = {
+                k: v[: offset + 1] for k, v in panel.items() if len(v) > offset
+            }
+            r = _ms_new_high_ratio_from_panel(slice_panel)
+            if r is not None:
+                hist.append(r)
+    pct = percentile_rank(hist, current) if len(hist) >= 5 else None
+    return {
+        "ratio_pct": round(current, 2),
+        "percentile_60d": round(pct, 1) if pct is not None else None,
+        "sample_size": len(panel),
+        "sample_requested": len(codes),
+        "partial": len(panel) < _NEW_HIGH_SAMPLE,
+        "source": "tushare.daily",
+    }
+
+
+def _ms_fetch_etf_flow(tc: Any) -> dict | None:
+    """宽基 ETF（510300）份额变动估算资金流向。"""
+    ts_code = _ETF_300_CODE
+    df_share = tc.query(
+        "fund_share", ts_code=ts_code,
+        start_date=_days_ago(30), end_date=_today(),
+    )
+    df_price = tc.query(
+        "fund_daily", ts_code=ts_code,
+        start_date=_days_ago(30), end_date=_today(),
+        fields="trade_date,close",
+    )
+    if df_share is None or df_share.empty:
+        return None
+    shares = df_share.sort_values("trade_date").to_dict("records")
+    prices = {}
+    if df_price is not None and not df_price.empty:
+        for r in df_price.sort_values("trade_date").to_dict("records"):
+            prices[str(r.get("trade_date", ""))] = safe_float(r.get("close"))
+
+    def _net_flow(days: int) -> float | None:
+        if len(shares) < days + 1:
+            return None
+        first, last = shares[-(days + 1)], shares[-1]
+        d_shares = float(last.get("fd_share") or 0) - float(first.get("fd_share") or 0)
+        px = prices.get(str(last.get("trade_date", "")))
+        if px is None or px <= 0:
+            return None
+        return d_shares * 10000 * px  # fd_share 单位：万份
+
+    flow_5d = _net_flow(5)
+    flow_10d = _net_flow(10)
+    if flow_5d is None and flow_10d is None:
+        return None
+    out: dict[str, Any] = {
+        "ts_code": ts_code,
+        "source": "tushare.fund_share+fund_daily",
+    }
+    if not prices:
+        out["price_incomplete"] = True
+    if flow_5d is not None:
+        out["net_flow_5d"] = round(flow_5d, 0)
+    if flow_10d is not None:
+        out["net_flow_10d"] = round(flow_10d, 0)
+    return out
+
+
+def extract_industry_from_basic_info(data: dict | None) -> str | None:
+    """从 basic_info 主数据提取行业名（兼容 Tushare / akshare 字段）。"""
+    if not data or not isinstance(data, dict):
+        return None
+    for key in ("industry", "行业", "所属行业"):
+        v = data.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def extract_industry_from_collection(collection: dict) -> str | None:
+    """从 collection 维度列表提取行业名。"""
+    for dim in collection.get("dimensions", []):
+        if dim.get("dimension") == "basic_info":
+            return extract_industry_from_basic_info(dim.get("data"))
+    return None
+
+
+def attach_market_structure(collection: dict, symbol: str) -> dict:
+    """采集市场结构并写入 collection['market_structure']。"""
+    industry = extract_industry_from_collection(collection)
+    collection["market_structure"] = collect_market_structure(symbol, industry=industry)
+    return collection["market_structure"]
+
+
+def attach_industry_peers(collection: dict, symbol: str) -> dict[str, Any]:
+    """采集同行可比数据并写入 collection['industry_peers']。"""
+    industry = extract_industry_from_collection(collection)
+    collection["industry_peers"] = collect_industry_peers(symbol, industry=industry)
+    return collection["industry_peers"]
+
+
+def attach_pe_band(collection: dict, *, years: int = 5) -> dict[str, Any] | None:
+    """计算 PE Band 数据层并写入 collection['pe_band']（供 Phase 4 消费）。"""
+    from lib.valuation import pe_band_series
+
+    val_rows: list[dict] = []
+    for dim in collection.get("dimensions", []):
+        if dim.get("dimension") == "valuation":
+            data = dim.get("data")
+            if isinstance(data, list):
+                val_rows = data
+            break
+    if not val_rows:
+        collection["pe_band"] = None
+        return None
+    band = pe_band_series(val_rows, years=years)
+    collection["pe_band"] = band
+    return band
+
+
+def attach_phase2_extras(collection: dict, symbol: str) -> None:
+    """挂载 Phase 2 扩展数据（同行、PE Band）。"""
+    errors: list[str] = []
+    peers_existing = collection.get("industry_peers")
+    if not peers_existing or peers_existing.get("error"):
+        try:
+            attach_industry_peers(collection, symbol)
+        except Exception as exc:
+            errors.append(f"industry_peers: {exc}")
+            collection["industry_peers"] = {
+                "peers": [],
+                "target": None,
+                "rankings": {},
+                "industry_name": None,
+                "sufficient": False,
+                "error": f"同行采集异常: {exc}",
+            }
+    if collection.get("pe_band") is None:
+        try:
+            attach_pe_band(collection)
+        except Exception as exc:
+            errors.append(f"pe_band: {exc}")
+            collection["pe_band"] = None
+    if errors:
+        collection.setdefault("phase2_extras_errors", []).extend(errors)
+        logger.warning("attach_phase2_extras partial failure for %s: %s", symbol, errors)
+
+
+def _ms_try_fetch(
+    result: dict[str, Any],
+    key: str,
+    fetch_fn: Callable[[], Any],
+    *,
+    unavailable_msg: str,
+    on_success: Callable[[Any], str] | None = None,
+) -> None:
+    """采集单个子源并写入 result / availability（统一 try/except 模式）。"""
+    try:
+        value = fetch_fn()
+        result[key] = value
+        if value is None:
+            _ms_set_unavailable(result["availability"], key, unavailable_msg)
+        elif on_success is not None:
+            result["availability"][key] = on_success(value)
+        else:
+            result["availability"][key] = "available"
+    except Exception as exc:
+        _ms_set_unavailable(result["availability"], key, str(exc))
+
+
+def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:
+    """采集市场结构因子（行业情绪/资金/ERP/换手）。各子源独立降级。"""
+    result: dict[str, Any] = {
+        "sw_index": None,
+        "northbound": None,
+        "margin": None,
+        "moneyflow": None,
+        "turnover": None,
+        "erp": None,
+        "pmi": None,
+        "put_call_ratio": None,
+        "short_margin": None,
+        "new_high_ratio": None,
+        "etf_flow": None,
+        "availability": {},
+    }
+    config = env.get_config()
+    _ms_keys = (
+        "sw_index", "northbound", "margin", "moneyflow", "turnover", "erp",
+        "put_call_ratio", "short_margin", "new_high_ratio", "etf_flow",
+    )
+    if not env.is_tushare_available(config):
+        for key in _ms_keys:
+            _ms_set_unavailable(result["availability"], key, "TUSHARE_TOKEN not configured")
+        return result
+
+    tc = _tushare_client(config)
+
+    _ms_try_fetch(
+        result, "sw_index",
+        lambda: _ms_fetch_sw_index(tc, symbol, industry),
+        unavailable_msg="no sw industry match or empty data",
+    )
+    _ms_try_fetch(
+        result, "northbound",
+        lambda: _ms_fetch_northbound_stock(tc, symbol),
+        unavailable_msg="hsgt_top10 empty (not in top10) or akshare northbound unavailable",
+    )
+    _ms_try_fetch(
+        result, "margin",
+        lambda: _ms_fetch_margin(tc, symbol),
+        unavailable_msg="margin_detail empty, insufficient history, or permission denied",
+    )
+    _ms_try_fetch(
+        result, "moneyflow",
+        lambda: _ms_fetch_moneyflow(tc, symbol),
+        unavailable_msg="moneyflow empty or permission denied",
+    )
+    _ms_try_fetch(
+        result, "turnover",
+        lambda: _ms_fetch_turnover(tc, symbol),
+        unavailable_msg="daily_basic turnover empty",
+    )
+    _ms_try_fetch(
+        result, "erp",
+        lambda: _ms_fetch_erp(tc, config),
+        unavailable_msg="index_dailybasic or 10Y yield (FRED DGS10 / akshare CN10Y) unavailable",
+        on_success=lambda v: (
+            f"partial: {v.get('erp_days', 0)} aligned days (min {_ERP_MIN_ALIGNED_DAYS})"
+            if v.get("partial") else "available"
+        ),
+    )
+    _ms_try_fetch(
+        result, "pmi",
+        _ms_fetch_pmi,
+        unavailable_msg="akshare macro_china_pmi unavailable",
+    )
+    _ms_try_fetch(
+        result, "put_call_ratio",
+        lambda: _ms_fetch_put_call_ratio(tc),
+        unavailable_msg="opt_daily empty, no 50ETF options, or permission denied (2000 pts)",
+        on_success=lambda v: (
+            f"partial: {v.get('history_days', 0)} days"
+            if v.get("partial") else "available"
+        ),
+    )
+    _ms_try_fetch(
+        result, "short_margin",
+        lambda: _ms_fetch_short_margin_growth(tc, symbol),
+        unavailable_msg="margin / margin_detail rqye empty or permission denied",
+    )
+    _ms_try_fetch(
+        result, "new_high_ratio",
+        lambda: _ms_fetch_new_high_ratio(tc),
+        unavailable_msg="daily sample empty or insufficient",
+        on_success=lambda v: (
+            f"partial: sample {v.get('sample_size', 0)}/{_NEW_HIGH_SAMPLE}"
+            if v.get("partial") else "available"
+        ),
+    )
+    _ms_try_fetch(
+        result, "etf_flow",
+        lambda: _ms_fetch_etf_flow(tc),
+        unavailable_msg="fund_share / fund_daily empty or permission denied",
+        on_success=lambda v: (
+            "partial: fund_daily close missing for flow estimate"
+            if v.get("price_incomplete") else "available"
+        ),
+    )
+
+    return result
+
+
+# ---- 行业同行采集（v0.1.3 Phase 2） ----
+
+# 同行分位：数值越高越好的指标（rank=1 表示最高）
+_PEER_HIGHER_IS_BETTER = frozenset({"revenue_yoy", "roe"})
+
+
+def _prior_year_end_date(end_date: str) -> str:
+    """报告期 YYYYMMDD → 去年同期（同月同日）。"""
+    s = str(end_date).strip()
+    if len(s) < 8 or not s[:4].isdigit():
+        return ""
+    return f"{int(s[:4]) - 1}{s[4:8]}"
+
+
+def _revenue_yoy_from_fina_rows(rows: list[dict]) -> float | None:
+    """按 end_date 对齐去年同期营收，计算同比增速（%）。"""
+    if not rows:
+        return None
+    sorted_rows = sorted(rows, key=lambda r: str(r.get("end_date", "")))
+    latest = sorted_rows[-1]
+    rev_cur = safe_float(latest.get("revenue"))
+    if rev_cur is None or rev_cur <= 0:
+        return None
+    prev_ed = _prior_year_end_date(str(latest.get("end_date", "")))
+    if not prev_ed:
+        return None
+    rev_prev = None
+    for r in reversed(sorted_rows[:-1]):
+        if str(r.get("end_date", "")) == prev_ed:
+            rev_prev = safe_float(r.get("revenue"))
+            break
+    if rev_prev is None or rev_prev <= 0:
+        return None
+    return round((rev_cur - rev_prev) / rev_prev * 100, 2)
+
+
+def _gross_margin_trend_from_rows(fin_rows: list[dict]) -> str | None:
+    """近 2 个会计年度毛利率方向（供竞争加剧信号）。"""
+    by_year: dict[str, float] = {}
+    for r in fin_rows:
+        y = str(r.get("end_date", ""))[:4]
+        gm = safe_float(r.get("grossprofit_margin"))
+        if y and gm is not None:
+            by_year[y] = gm
+    annual = sorted(by_year.items())
+    if len(annual) < 2:
+        return None
+    (_, m0), (_, m1) = annual[-2], annual[-1]
+    if m1 < m0 - 0.5:
+        return "down"
+    if m1 > m0 + 0.5:
+        return "up"
+    return "flat"
+
+
+def _peer_metrics_from_fina(
+    fin_rows: list[dict], fin_row: dict | None,
+) -> dict[str, Any]:
+    """从 fina_indicator 行提取同行对比 / 风险扫描字段。"""
+    out: dict[str, Any] = {}
+    if fin_row:
+        out["roe"] = safe_float(fin_row.get("roe"))
+        out["revenue_yoy"] = _revenue_yoy_from_fina_rows(fin_rows)
+        gm = safe_float(fin_row.get("grossprofit_margin"))
+        if gm is not None:
+            out["grossprofit_margin"] = gm
+            out["gross_margin"] = gm
+        debt = safe_float(fin_row.get("debt_to_assets"))
+        if debt is not None:
+            out["debt_to_assets"] = debt
+    trend = _gross_margin_trend_from_rows(fin_rows)
+    if trend is not None:
+        out["gross_margin_trend"] = trend
+    return out
+
+
+def _fetch_peer_fina_rows(tc: Any, code: str) -> list[dict]:
+    """拉取近 2.5 年 fina_indicator，供 ROE / 毛利率 / 负债率等使用。"""
+    fin_df = tc.query(
+        "fina_indicator",
+        ts_code=code,
+        fields="ts_code,end_date,roe,revenue,grossprofit_margin,debt_to_assets",
+        start_date=_days_ago(950),
+        end_date=_today(),
+    )
+    if fin_df is None or fin_df.empty:
+        return []
+    return fin_df.sort_values("end_date").to_dict("records")
+
+
+def collect_industry_peers(
+    symbol: str,
+    *,
+    industry: str | None = None,
+    max_peers: int = 10,
+) -> dict[str, Any]:
+    """申万行业同行池，PE/PB/ROE/营收增速分位排名。
+
+    1. 查申万行业成分股（L3→L2→L1）
+    2. 获取每只成分股的 PE(TTM)、PB、ROE、近一年营收增速
+    3. 计算 target 在同行中的分位排名
+    4. 返回可比公司表（上限 max_peers 家）
+    """
+    result: dict[str, Any] = {
+        "peers": [],
+        "target": None,
+        "rankings": {},
+        "industry_name": None,
+        "peer_source": None,
+        "sufficient": False,
+    }
+
+    config = env.get_config()
+    if not env.is_tushare_available(config):
+        result["error"] = "Tushare Token 不可用，无法采集同行数据"
+        return result
+
+    tc = _tushare_client(config)
+    target_sym = _ts_code(symbol)
+
+    industry = _resolve_sw_industry_name(tc, symbol, industry)
+    if not industry:
+        result["error"] = "无法确定行业分类"
+        return result
+
+    result["industry_name"] = industry
+
+    index_code = _ms_lookup_sw_index_code(tc, industry)
+    members: list[dict] = []
+    name_by_code: dict[str, str] = {}
+    peer_source: str | None = None
+
+    if index_code:
+        try:
+            member_df = tc.query("index_member", index_code=index_code)
+            if member_df is not None and not member_df.empty:
+                members = member_df.to_dict("records")
+                peer_source = "sw_index_member"
+                for m in members:
+                    code = str(m.get("ts_code", "")).strip()
+                    if code:
+                        name_by_code[code] = str(m.get("name", "")).strip()
+        except Exception as exc:
+            logger.debug("index_member failed for %s: %s", index_code, exc)
+
+    if not members:
+        basic_all = tc.query("stock_basic", fields="ts_code,name,industry")
+        if basic_all is not None and not basic_all.empty:
+            for _, row in basic_all.iterrows():
+                if str(row.get("industry", "")).strip() == industry:
+                    rec = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+                    members.append(rec)
+                    code = str(rec.get("ts_code", "")).strip()
+                    if code:
+                        name_by_code[code] = str(rec.get("name", "")).strip()
+        if members:
+            peer_source = "stock_basic_fallback"
+            result["warning"] = (
+                "同行池来自 Tushare stock_basic.industry 粗分类，非申万 L3 成分股；"
+                "分位排名与可比公司表已降级，仅供参考。"
+            )
+
+    if not members:
+        result["error"] = f"未找到「{industry}」行业成分股"
+        return result
+
+    result["peer_source"] = peer_source
+
+    all_codes = sorted({str(m.get("ts_code", "")).strip() for m in members if m.get("ts_code")})
+    if target_sym not in all_codes:
+        all_codes.append(target_sym)
+        basic_one = tc.query("stock_basic", ts_code=target_sym, fields="ts_code,name")
+        if basic_one is not None and not basic_one.empty:
+            name_by_code[target_sym] = str(basic_one.iloc[0].get("name", "")).strip()
+
+    other_codes = sorted(c for c in all_codes if c != target_sym)[:max_peers]
+    peer_codes = [target_sym, *other_codes]
+
+    target_metrics: dict[str, Any] | None = None
+    peers_metrics: list[dict[str, Any]] = []
+
+    for code in peer_codes:
+        try:
+            fin_rows = _fetch_peer_fina_rows(tc, code)
+            fin_row = fin_rows[-1] if fin_rows else None
+            val_df = tc.query("daily_basic", ts_code=code,
+                              fields="ts_code,pe_ttm,pb,total_mv",
+                              start_date=_days_ago(30), end_date=_today(),
+                              limit=1)
+
+            val_row = val_df.iloc[-1].to_dict() if val_df is not None and not val_df.empty else None
+
+            peer_entry: dict[str, Any] = {
+                "symbol": code.split(".")[0] if "." in code else code,
+                "name": name_by_code.get(code, ""),
+                "pe_ttm": None,
+                "pb": None,
+                "roe": None,
+                "revenue_yoy": None,
+                "total_mv": None,
+            }
+            if fin_row:
+                peer_entry.update(_peer_metrics_from_fina(fin_rows, fin_row))
+            if val_row:
+                pe_v = safe_float(val_row.get("pe_ttm"))
+                if pe_v is not None and pe_v > 0:
+                    peer_entry["pe_ttm"] = pe_v
+                peer_entry["pb"] = safe_float(val_row.get("pb"))
+                peer_entry["total_mv"] = safe_float(val_row.get("total_mv"))
+
+            if code == target_sym:
+                target_metrics = peer_entry
+            else:
+                peers_metrics.append(peer_entry)
+
+        except Exception as exc:
+            logger.debug("collect_industry_peers: skip %s: %s", code, exc)
+            continue
+
+    peers_metrics.sort(
+        key=lambda p: (p.get("total_mv") is None, -(p.get("total_mv") or 0)),
+    )
+
+    if target_metrics:
+        result["target"] = target_metrics
+
+    result["peers"] = peers_metrics
+    result["sufficient"] = (
+        peer_source == "sw_index_member" and len(peers_metrics) >= 3
+    )
+
+    if target_metrics and len(peers_metrics) >= 1:
+        rankings: dict[str, Any] = {}
+        for metric in ("pe_ttm", "pb", "roe", "revenue_yoy"):
+            tv = target_metrics.get(metric)
+            pv = [p.get(metric) for p in peers_metrics if p.get(metric) is not None]
+            if tv is not None and pv:
+                below = sum(1 for v in pv if v < tv)
+                above = sum(1 for v in pv if v > tv)
+                pct = round(below / len(pv) * 100, 1)
+                rankings[f"{metric}_pct"] = pct
+                if metric in _PEER_HIGHER_IS_BETTER:
+                    rankings[f"{metric}_rank"] = above + 1
+                else:
+                    rankings[f"{metric}_rank"] = below + 1
+                rankings[f"{metric}_total"] = len(pv) + 1
+            else:
+                rankings[f"{metric}_pct"] = None
+                rankings[f"{metric}_rank"] = None
+                rankings[f"{metric}_total"] = None
+        result["rankings"] = rankings
+
+    return result
+
+
+# 测试与旧代码兼容别名
+_safe_float_val = safe_float

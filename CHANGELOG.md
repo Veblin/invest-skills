@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.1.3 (2026-06-15)
+
+v0.1.3 将投研报告从「数据摘要」升级为「九模块动态研究备忘录」，分四阶段交付。
+
+### Phase 1 — 动态投研内核
+
+- **九模块 Markdown 报告** (`render_report_v3()`)：研究问题卡 → 状态快照 → 动态驱动 → 市场结构 → 静态基本面 → 市场分歧 → 左/右概率 → 风险 → 附录
+- **市场结构采集** (`collect_market_structure()`)：申万行业、北向、融资融券、主力资金、换手率、ERP；权限不足时标注 `[数据源不可用，该因子跳过]`
+- **LAW 10–16** 方法论规范（见 `docs/invest-A-SKILL-LAW10-16.md`）
+- **数据结构** (`schema.py`)：`DriverFactor`、`CrossValidation`、`ProbabilityStructure` dataclass
+
+### Phase 2 — 基本面与估值
+
+- **12 道核心必答题** (`_section_fundamentals_layered()`)：行业位置 / 商业质量 / 财务质量 / 估值与预期；数据不足标注 `数据不足：[缺少什么]`（LAW 14）
+- **隐性预期差** (`implied_growth()`)：戈登反推 `g_implied ≈ r - 1/PE`（LAW 15）
+- **PE Band 序列** (`pe_band_series()`)：5 年 PE 分位带数据层
+- **同行对比** (`collect_industry_peers()`)：行业 PE/PB 分位排名
+- **交叉验证 CV-2**：营收增长 vs 应收账款增长
+
+### Phase 3 — 风险与分歧闭环
+
+- **风险扫描器** (`risk_scanner.py`)：17 个定量触发信号（报表 7 / 商业 4 / 市场 6），Known Unknowns 列表
+- **多空分歧** (`_section_bull_bear()`)：多头/空头逻辑链、关键分歧点、预期差
+- **情绪增强**：50ETF 认沽认购比、融券余额增速、创新高占比分位
+- **左/右概率结构**：ERP + 情绪指标交叉验证（CV-8）；LAW 16 禁止确定性「左侧/右侧」结论
+- 九模块报告无占位节，功能完整
+
+### Phase 4 — 跨时点与阅读体验
+
+- **快照 diff 增强** (`store.py` + `invest.py diff`)：对比估值/财务/资金/技术/风险关键字段变化，支持 `--emit md`
+- **`watchlist` 命令**：多标的批量摘要，单只失败不阻断其余
+- **报告 UX**：顶部 TOC 锚点目录、`<details>` 长节折叠、Mermaid 研究框架图、PE Band 文本表
+
+### ⚠️ Breaking Changes
+
+- **默认输出格式从 `html` 改为 `md`**：`report` 命令默认生成九模块 Markdown（stdout 或 `--outdir`）；HTML 须显式 `--emit html`（v0.1.2 模板，迭代期冻结）
+
+### 合规
+
+- LAW 16：左/右章节仅呈现概率结构，禁止「当前是左侧/右侧」确定性结论
+- 免责声明语气：「研究备忘录」替代「学习研究」
+
+## v0.1.3-alpha (2026-06-14)
+
+> 预发布里程碑（Phase 1 only），内容已并入上方 v0.1.3。
+
 ## v0.1.2 (2026-06-12)
 
 ### 基础分析骨架 — 从"数据摘要"升级为"基础研究报告"
