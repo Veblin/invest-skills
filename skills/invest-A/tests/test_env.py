@@ -65,39 +65,37 @@ class TestEnv:
 
         result = diagnose({"TUSHARE_TOKEN": "a" * 32, "FRED_API_KEY": ""})
         assert "proxy_detected" in result
+        assert "proxy_bypass_effective" in result
+        assert "proxy_user_action_needed" in result
         assert "clash_rules_hint" in result
         assert isinstance(result["proxy_detected"], bool)
 
     def test_tencent_available_uses_no_proxy_session(self, monkeypatch):
-        """diagnose 腾讯探针应与 collector 一致，经 no_proxy_session 发起请求。"""
-        used_no_proxy = False
+        """diagnose 腾讯探针与 collector 一致，强制直连。"""
+        from contextlib import contextmanager
 
-        class _FakeResp:
-            status_code = 200
-            text = "x~y"
+        calls: list[bool] = []
 
-        class _FakeSession:
+        class _FakeSess:
             def get(self, url, timeout=3):
-                return _FakeResp()
+                calls.append(True)
+                class _R:
+                    status_code = 200
+                    text = "x~y"
+                return _R()
 
             def close(self):
                 pass
 
-        from contextlib import contextmanager
-
         @contextmanager
-        def _fake_no_proxy_session():
-            nonlocal used_no_proxy
-            used_no_proxy = True
-            yield _FakeSession()
+        def _fake_no_proxy():
+            yield _FakeSess()
 
-        import lib.proxy as proxy_mod
-
-        monkeypatch.setattr(proxy_mod, "no_proxy_session", _fake_no_proxy_session)
+        monkeypatch.setattr("lib.proxy.no_proxy_session", _fake_no_proxy)
         from lib.env import is_tencent_available
 
         assert is_tencent_available() is True
-        assert used_no_proxy is True
+        assert calls
 
 
 class TestStore:

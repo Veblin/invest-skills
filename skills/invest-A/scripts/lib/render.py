@@ -17,7 +17,11 @@ from typing import Any
 
 from lib.nums import safe_float as _safe_num
 
-from .proxy import EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS
+from .proxy import (
+    EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
+    EASTMONEY_FAILURE_PROXY_MARKER,
+    EASTMONEY_FAILURE_TUN_MARKER,
+)
 from .schema import CrossValidation, DriverFactor, ProbabilityStructure
 
 ENGINE_VERSION = "0.1.3"
@@ -36,13 +40,16 @@ def sanitize_error(error: str, max_len: int = 60) -> str:
     # Coerce non-string types (e.g., Exception objects, int error codes)
     if not isinstance(error, str):
         error = str(error)
+    if EASTMONEY_FAILURE_TUN_MARKER in error:
+        return "push2 不可达（TUN/CDN），已用 Tushare/Baostock 替代"
+    if EASTMONEY_FAILURE_PROXY_MARKER in error:
+        return "HTTP 代理未绕过，请配置 Clash DIRECT 或关闭代理"
     if any(kw in error for kw in _EASTMONEY_BLOCKED_KEYWORDS):
         return _EASTMONEY_BLOCKED_SHORT
-    if "Clash/VPN" in error or "Clash TUN" in error:
-        return _EASTMONEY_BLOCKED_SHORT
-    # 通用 ConnectionError / Max retries exceeded（无论长度均替换为可读标签）
+    if "Clash" in error or "VPN" in error:
+        return "可能与 Clash / VPN 有关，关闭代理后重试"
     if "ProxyError" in error or "Max retries exceeded" in error:
-        return "本机代理/VPN 拦截（请检查 Clash 规则或关闭 TUN）"
+        return "可能与 Clash / VPN 有关，关闭代理后重试"
     if "ConnectionError" in error or "Connection aborted" in error:
         return _RAW_CONNECTION_REFUSED_SHORT
     # 其他：取最后一段有意义的内容
@@ -208,15 +215,16 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact") -> str
     md       — Markdown 九模块研究备忘录（v0.1.3 render_report_v3）
     html     — HTML 研究报告（v0.1.2 冻结模板）
     """
+    from lib import collector
+    if not collection.get("market_structure"):
+        collector.attach_market_structure(collection, symbol)
+    collector.attach_phase2_extras(collection, symbol)
+
     if fmt == "json":
         return render_json(collection)
     if fmt == "html":
         return render_html(collection, symbol)
     if fmt == "md":
-        from lib import collector
-        if not collection.get("market_structure"):
-            collector.attach_market_structure(collection, symbol)
-        collector.attach_phase2_extras(collection, symbol)
         return render_report_v3(collection, symbol)
     return render_report_v2(collection, symbol)
 
@@ -1078,14 +1086,14 @@ def _v3_build_candidate_explanations(
 
     rel = sw.get("relative_vs_benchmark_pct")
     svi = sw.get("stock_vs_industry_pct")
-    if rel is not None and abs(rel) >= 3:
+    if rel is not None and abs(rel) >= 5:
         explanations.append((
             "C",
             f"行业板块相对沪深300 {rel:+.2f}%，行业景气或拖累/支撑个股",
             sw.get("source", "sw_daily"),
             "⚠️",
         ))
-    elif svi is not None and abs(svi) >= 3:
+    elif svi is not None and abs(svi) >= 5:
         explanations.append((
             "C",
             f"个股相对行业 {svi:+.2f}%，个股特异性因素可能主导",
@@ -1782,7 +1790,7 @@ def _section_market_structure(
     ))
 
     lines.append("")
-    lines.append("🔍 **待独立验证:** 2000 积分接口不可得时见 availability 标注。")
+    lines.append("🔍 **待独立验证:** Tushare 积分不足时见 availability 标注（sw_daily 需 5000 分，2000 分档走 akshare 回退）。")
     return "\n".join(lines)
 
 
@@ -2596,17 +2604,18 @@ def _section_fundamentals_layered(
     else:
         lines.append("数据不足：[PE 非正或不可得，无法计算隐含增长率]")
     lines.append("")
+    g_implied = ig.get("g_implied")
     d3_pitfall = (
-        f"本次 PE {current_pe:.2f}x → g_implied 约 {ig['g_implied'] * 100:.2f}%，"
+        f"本次 PE {current_pe:.2f}x → g_implied 约 {g_implied * 100:.2f}%，"
         f"营收 CAGR {cagr:+.2f}%"
         + (f"、净利润 CAGR {np_cagr:+.2f}%" if np_cagr is not None else "")
         + "；若把两者差距直接等同于「高估/低估」，"
         "可能忽略 ERP 假设（6%）与永续增长简化模型的局限。"
-        if current_pe and ig.get("g_implied") is not None and cagr is not None else
+        if current_pe and g_implied is not None and cagr is not None else
         (
-            f"本次 g_implied 约 {ig['g_implied'] * 100:.2f}%，但缺少可比 CAGR，"
+            f"本次 g_implied 约 {g_implied * 100:.2f}%，但缺少可比 CAGR，"
             "不宜单独用隐含增长率做方向性结论。"
-            if current_pe and ig.get("g_implied") is not None else
+            if current_pe and g_implied is not None else
             "本次 PE 或 g_implied 不可得，戈登反推不适用。"
         )
     )
@@ -3575,12 +3584,12 @@ def _html_valuation(
     <div style="font-size:var(--text-sm);color:var(--tx-f)">估值维度无数据，请配置 Tushare Token 获取历史估值序列。</div>
   </div>
 </section>'''
-    pe_pct_s = pe_pct or "0"
-    pb_pct_s = pb_pct or "0"
-    ps_pct_s = ps_pct or "0"
-    pe_v = pe_val or "0"
-    pb_v = pb_val or "0"
-    ps_v = ps_val or "0"
+    pe_pct_s = "0" if pe_pct is None else str(pe_pct)
+    pb_pct_s = "0" if pb_pct is None else str(pb_pct)
+    ps_pct_s = "0" if ps_pct is None else str(ps_pct)
+    pe_v = "0" if pe_val is None else str(pe_val)
+    pb_v = "0" if pb_val is None else str(pb_val)
+    ps_v = "0" if ps_val is None else str(ps_val)
 
     pe_med_str = f"{pe_median}x" if pe_median and pe_median != "--" else "--"
     pb_med_str = f"{pb_median}x" if pb_median and pb_median != "--" else "--"
@@ -3794,7 +3803,7 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
       <tbody>{rows_html}</tbody>
     </table>'''
 
-    note = "营收/净利润字段为空（akshare接口降级）。" if not any(r.get("revenue") for r in recent) else "财务数据来自第三方数据源，应与公司年报/季报交叉核对。"
+    note = "营收/净利润字段为空（akshare接口降级）。" if not any(r.get("revenue") is not None for r in recent) else "财务数据来自第三方数据源，应与公司年报/季报交叉核对。"
     return labels, roe_data, eps_data, profit_data, table_html, note
 
 

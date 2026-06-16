@@ -526,6 +526,7 @@ class TestCollectorPeerHelpers:
 
         assert _prior_year_end_date("20240331") == "20230331"
         assert _prior_year_end_date("20231231") == "20221231"
+        assert _prior_year_end_date("2023-12-31") == "20221231"
 
     def test_revenue_yoy_aligned_same_period(self):
         from lib.collector import _revenue_yoy_from_fina_rows

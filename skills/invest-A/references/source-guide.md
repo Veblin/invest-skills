@@ -9,7 +9,7 @@
 
 | 数据源 | 接口 | 稳定性 | 需要Token | 说明 |
 |--------|------|--------|-----------|------|
-| **Tushare Pro** | `stock_basic` / `daily` / `fina_indicator` / `top10_floatholders` / `moneyflow` | ★★★★ | 是 | **主数据源**（2000 积分解锁主要接口） |
+| **Tushare Pro** | `stock_basic` / `daily` / `fina_indicator` / `top10_floatholders` / `moneyflow` / `sw_daily` | ★★★★ | 是 | **主数据源**；2000 分解锁财务/资金/普通指数；**`sw_daily` 申万行业日线需 5000 分**（[文档](https://tushare.pro/document/2?doc_id=327)），不足时回退 akshare `index_hist_sw` |
 | **akshare** | `stock_financial_abstract_ths` / `stock_hsgt_individual_em` / `stock_zh_a_hist` / `stock_individual_info_em` | ★★ | 否 | 多源验证用。⚠️ `stock_zh_a_hist` 和 `stock_individual_info_em` 因东方财富反爬在多数环境下不可用 |
 | **腾讯行情** | `qt.gtimg.cn` HTTP | ★★★★ | 否 | 实时报价（价格/成交量/PE/市值） |
 | **baostock** | `query_history_k_data_plus` | ★★★★ | 否 | K 线历史数据，免费稳定，需网络直连 |
@@ -40,7 +40,7 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 
 ## 待接入数据源
 
-以下数据源已规划但尚未接入，详见 `docs/TODO.md`：
+以下数据源已规划但尚未接入，详见 `docs/roadmap.md`：
 - **efinance** — 免费 A 股数据，稳定性 ★★★★
 - **yfinance** — 美股/港股数据，稳定性 ★★
 
@@ -59,5 +59,19 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 |------|------|------|
 | Tushare Token 未配置或无效 | `is_tushare_available()` 返回 False | 静默跳过，降级至 akshare |
 | Tushare 配额耗尽 | API 返回 code=-2001 | 降级至 akshare |
+| Tushare 接口权限不足（如 `sw_daily` 40203） | 2000 分无法调 5000 分接口 | 申万行业指数回退 **akshare `index_hist_sw`**；其他因子标注跳过 |
 | akshare 网络不通 | `requests.ConnectionError` | 降级至腾讯行情（仅行情维度） |
 | 腾讯行情不可用 | 请求超时 | 标注"行情数据不可得" |
+
+## Tushare 积分要点（invest-A 常用）
+
+| 接口 | 最低积分 | 说明 |
+|------|---------|------|
+| `daily` / `stock_basic` | 120 | 行情、基本信息 |
+| `fina_indicator` / `moneyflow` / `margin_detail` / `index_daily` | 2000 | 财务、资金、普通指数 |
+| `index_classify` | 2000 | 申万分类（**不含**行业日线） |
+| **`sw_daily`** | **5000** | 申万行业日线；不足时用 akshare |
+| `index_dailybasic` | 4000 | 沪深300 PE（ERP） |
+| `opt_daily` | 5000 | 50ETF 期权（认沽认购比） |
+
+完整对照见项目根目录 [CONFIGURATION.md](../../../CONFIGURATION.md)。
