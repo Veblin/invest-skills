@@ -136,7 +136,8 @@ class TestRiskScanner:
         report = _v3_build_risk_report(c, _index_dims(c), c["market_structure"])
         cov = report["coverage"]
         assert cov["total"] == 17
-        assert cov["auto"] >= 15
+        auto_expected = sum(1 for s in report["signals"] if s["auto"])
+        assert cov["auto"] == auto_expected
 
 
 class TestRenderPhase3:

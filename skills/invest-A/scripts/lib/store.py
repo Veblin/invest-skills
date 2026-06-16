@@ -264,6 +264,8 @@ def _dim_data(raw: dict, name: str) -> Any:
 
 
 def _yoy_from_fina_rows(rows: list[dict], field: str) -> float | None:
+    from lib.financials import normalize_end_date, prior_year_end_date
+
     if not rows:
         return None
     sorted_rows = sorted(rows, key=lambda r: str(r.get("end_date", "")))
@@ -278,12 +280,13 @@ def _yoy_from_fina_rows(rows: list[dict], field: str) -> float | None:
     if cur_f <= 0:
         return None
     ed = str(latest.get("end_date", ""))
-    if len(ed) < 8 or not ed[:4].isdigit():
+    norm_ed = normalize_end_date(ed)
+    if len(norm_ed) < 8:
         return None
-    prev_ed = f"{int(ed[:4]) - 1}{ed[4:8]}"
+    prev_ed = prior_year_end_date(norm_ed)
     prev_v = None
     for r in reversed(sorted_rows[:-1]):
-        if str(r.get("end_date", "")) == prev_ed:
+        if normalize_end_date(str(r.get("end_date", ""))) == prev_ed:
             try:
                 prev_v = float(r.get(field))
             except (TypeError, ValueError):

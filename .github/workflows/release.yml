@@ -44,10 +44,20 @@ jobs:
           rm -rf dist/pkg
           echo "Archive created: dist/invest-A-${{ github.ref_name }}.tar.gz"
 
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          python3 .github/scripts/extract_release_notes.py "${{ github.ref_name }}" > release-notes.md
+          echo "-----"
+          head -20 release-notes.md
+          echo "-----"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/invest-A-${{ github.ref_name }}.tar.gz
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: true

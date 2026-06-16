@@ -92,13 +92,20 @@ class TestAkshareShareholdersRetry:
 
 
 class TestProxyBypass:
-    def test_collector_proxy_bypass_is_noop(self):
-        """collector 仍导出 _proxy_bypass，但不再修改环境变量。"""
+    def test_collector_proxy_bypass_clears_http_proxy(self):
+        """collector 导出 _proxy_bypass，在 context 内清除 HTTP 代理变量。"""
         from lib.collector import _proxy_bypass
 
+        old_http = os.environ.get("HTTP_PROXY")
         os.environ["HTTP_PROXY"] = "http://test-proxy:8080"
         try:
             with _proxy_bypass():
-                assert os.environ.get("HTTP_PROXY") == "http://test-proxy:8080"
+                assert os.environ.get("HTTP_PROXY") is None
+                assert ".eastmoney.com" in os.environ.get("no_proxy", "")
         finally:
-            os.environ.pop("HTTP_PROXY", None)
+            if old_http is None:
+                os.environ.pop("HTTP_PROXY", None)
+            else:
+                os.environ["HTTP_PROXY"] = old_http
+            os.environ.pop("no_proxy", None)
+

@@ -21,8 +21,15 @@ from typing import Any, Callable
 
 from . import env
 from .nums import safe_float
-from .proxy import no_proxy_session, proxy_bypass
-from .proxy import EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS
+from .proxy import (
+    EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
+    EASTMONEY_FAILURE_PROXY_MARKER,
+    EASTMONEY_FAILURE_TUN_MARKER,
+    akshare_direct_session,
+    akshare_push2_available,
+    no_proxy_session,
+    proxy_bypass,
+)
 from .schema import SourceResult, DimensionResult
 
 logger = logging.getLogger(__name__)
@@ -101,12 +108,15 @@ _proxy_bypass = proxy_bypass
 # Baostock 全局 socket 非线程安全，需串行化访问
 _BAOSTOCK_LOCK = threading.Lock()
 
-# 东方财富 API 连接失败时的可操作提示
-_EASTMONEY_BLOCKED_MSG = (
+_EASTMONEY_PROXY_MSG = (
     "东方财富(East Money) API 连接失败。"
-    "若使用 Clash/VPN，请在规则中将 DOMAIN-SUFFIX,eastmoney.com,DIRECT；"
-    "TUN 模式需在网卡层配置规则，或暂时关闭 VPN 后重试。"
+    f"{EASTMONEY_FAILURE_PROXY_MARKER}，请在 Clash 规则中将 DOMAIN-SUFFIX,eastmoney.com,DIRECT；"
+    "或暂时关闭全局代理后重试。"
     "可改用 Tushare / Baostock 作为替代数据源。"
+)
+_EASTMONEY_TUN_OR_CDN_MSG = (
+    f"东方财富 {EASTMONEY_FAILURE_TUN_MARKER}（非 HTTP 代理问题，可能为 TUN 劫持或 CDN 限制）。"
+    "已使用 Tushare / Baostock 替代。"
 )
 
 
@@ -115,19 +125,29 @@ def _is_eastmoney_blocked_error(error: str) -> bool:
     return any(kw in str(error) for kw in _EASTMONEY_BLOCKED_KEYWORDS)
 
 
+def _eastmoney_failure_message() -> str:
+    from .proxy import proxy_status
+
+    status = proxy_status(probe=False)
+    if status.get("bypass_effective"):
+        return _EASTMONEY_TUN_OR_CDN_MSG
+    return _EASTMONEY_PROXY_MSG
+
+
 def _reraise_eastmoney_api_error(exc: Exception) -> None:
-    """在东方财富 akshare 接口内，将连接失败转为可操作的 VPN/TUN 提示。
+    """在东方财富 akshare 接口内，将连接失败转为可操作提示。
 
     仅在已知调用东方财富 API 的函数中使用，避免误伤同花顺等其他源。
     """
+    msg = _eastmoney_failure_message()
     if _is_eastmoney_blocked_error(str(exc)):
-        raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from exc
+        raise RuntimeError(msg) from exc
     err = str(exc)
     if any(kw in err for kw in (
         "Connection", "Remote end closed", "RemoteDisconnected", "ProxyError",
         "Max retries exceeded",
     )):
-        raise RuntimeError(_EASTMONEY_BLOCKED_MSG) from exc
+        raise RuntimeError(msg) from exc
     raise exc
 
 
@@ -287,13 +307,9 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
             rec["equity_multiplier"] = 1.0 + 1.0 / float(em)
         elif rec.get("debt_to_assets") is not None:
             da = safe_float(rec.get("debt_to_assets"))
-            if da is not None and 0 <= da < 100:
-                # debt_to_assets 预期为百分比（0-100），如 42.5 表示 42.5%
-                # 若值 < 1.0，视为已转为小数比率，直接使用
-                if da < 1.0:
-                    rec["equity_multiplier"] = 1.0 / max(0.01, 1.0 - da)
-                else:
-                    rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
+            if da is not None and 0 <= da <= 100:
+                # Tushare debt_to_assets 为百分比（0-100），如 0.8 表示 0.8%
+                rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
     cf_df = tc.query("cashflow", ts_code=ts,
                      fields="ts_code,end_date,n_cashflow_act",
                      start_date=lookback, end_date=end)
@@ -367,7 +383,9 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
 
 def _flow_amount_yuan(record: dict) -> float | None:
     """从归一化后的资金流记录读取净额（元），缺失时返回 None。"""
-    val = record.get("net_mf_amount") or record.get("net_mf_vol")
+    val = record.get("net_mf_amount")
+    if val is None:
+        val = record.get("net_mf_vol")
     if val is None:
         return None
     return float(val)
@@ -380,7 +398,7 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
         raise RuntimeError("TUSHARE_TOKEN not configured")
     tc = _tushare_client(config)
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,net_mf_amount",
+                  fields="ts_code,trade_date,net_mf_amount,buy_sm_vol,sell_sm_vol,net_mf_vol",
                   start_date=_days_ago(10), end_date=_today())
     if df is not None and not df.empty:
         return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
@@ -410,8 +428,8 @@ def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
 
 
 def _q_akshare_basic(symbol: str) -> dict | None:
-    """akshare 基本信息来源（东方财富 API）。"""
-    with _proxy_bypass():
+    """akshare 基本信息来源（东方财富 push2 API）。"""
+    with akshare_direct_session():
         import akshare as ak
         try:
             result = ak.stock_individual_info_em(symbol=symbol.strip().zfill(6),
@@ -419,7 +437,6 @@ def _q_akshare_basic(symbol: str) -> dict | None:
             if result is not None:
                 if hasattr(result, "to_dict"):
                     records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                    # stock_individual_info_em 返回 [{"item":..., "value":...}, ...]
                     if isinstance(records, list) and records:
                         return {str(r.get("item", "")): r.get("value", "") for r in records}
                 if isinstance(result, dict):
@@ -437,14 +454,13 @@ def _q_akshare_financials(symbol: str) -> list[dict] | None:
         if result is not None and hasattr(result, "to_dict"):
             records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
             if records:
-                # 中文列名 → 英文键名映射
                 return [_map_akshare_financial_keys(r) for r in records]
         return None
 
 
 def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """akshare K线来源（东方财富 API）。"""
-    with _proxy_bypass():
+    """akshare K线来源（东方财富 push2 API）。"""
+    with akshare_direct_session():
         import akshare as ak
         sd = start_date or _days_ago(365)
         ed = end_date or _today()
@@ -467,7 +483,7 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
 
 
 def _q_akshare_northbound(symbol: str) -> list[dict] | None:
-    with _proxy_bypass():
+    with akshare_direct_session():
         import akshare as ak
         try:
             result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
@@ -568,13 +584,9 @@ def _akshare_top10_code(symbol: str) -> str:
 
 
 def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
-    """akshare 前十大股东来源（东方财富）。"""
-    with _proxy_bypass():
+    """akshare 前十大股东来源（东方财富 datacenter API）。"""
+    with akshare_direct_session():
         import akshare as ak
-        from datetime import datetime
-        # 使用最新两次报告期的数据
-        now = datetime.now()
-        # 尝试当前季度末日期
         dates_to_try = _latest_quarter_dates()
         for date_str in dates_to_try:
             try:
@@ -622,55 +634,54 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     使用 _BAOSTOCK_LOCK 串行化访问：Baostock 内部使用全局单例 socket，
     多线程并行调用会导致连接竞态。
     """
-    with _BAOSTOCK_LOCK:
-        with _proxy_bypass():
-            import baostock as bs
-            logged_in = False
-            try:
-                lg = bs.login()
-                if lg.error_code != "0":
-                    logger.warning("baostock login failed: %s", lg.error_msg)
-                    return None
-                logged_in = True
-
-                sd = start_date or _days_ago(365)
-                ed = end_date or _today()
-                sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
-                ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
-
-                bs_code = _baostock_code(symbol)
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "date,open,high,low,close,volume,amount",
-                    start_date=sd_fmt, end_date=ed_fmt,
-                    frequency="d", adjustflag="3",
-                )
-                if rs.error_code != "0":
-                    logger.warning("baostock query failed: %s", rs.error_msg)
-                    return None
-
-                rows = []
-                while rs.next():
-                    row = rs.get_row_data()
-                    rows.append({
-                        "trade_date": row[0].replace("-", ""),
-                        "open": float(row[1]) if row[1] else None,
-                        "high": float(row[2]) if row[2] else None,
-                        "low": float(row[3]) if row[3] else None,
-                        "close": float(row[4]) if row[4] else None,
-                        "vol": float(row[5]) if row[5] else 0,
-                        "amount": float(row[6]) if row[6] else 0,
-                    })
-                return rows if rows else None
-            except Exception as e:
-                logger.warning("baostock query failed: %s", e)
+    with _BAOSTOCK_LOCK, _proxy_bypass():
+        import baostock as bs
+        logged_in = False
+        try:
+            lg = bs.login()
+            if lg.error_code != "0":
+                logger.warning("baostock login failed: %s", lg.error_msg)
                 return None
-            finally:
-                if logged_in:
-                    try:
-                        bs.logout()
-                    except Exception:
-                        pass
+            logged_in = True
+
+            sd = start_date or _days_ago(365)
+            ed = end_date or _today()
+            sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
+            ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+
+            bs_code = _baostock_code(symbol)
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,open,high,low,close,volume,amount",
+                start_date=sd_fmt, end_date=ed_fmt,
+                frequency="d", adjustflag="3",
+            )
+            if rs.error_code != "0":
+                logger.warning("baostock query failed: %s", rs.error_msg)
+                return None
+
+            rows = []
+            while rs.next():
+                row = rs.get_row_data()
+                rows.append({
+                    "trade_date": row[0].replace("-", ""),
+                    "open": float(row[1]) if row[1] else None,
+                    "high": float(row[2]) if row[2] else None,
+                    "low": float(row[3]) if row[3] else None,
+                    "close": float(row[4]) if row[4] else None,
+                    "vol": float(row[5]) if row[5] else 0,
+                    "amount": float(row[6]) if row[6] else 0,
+                })
+            return rows if rows else None
+        except Exception as e:
+            logger.warning("baostock query failed: %s", e)
+            return None
+        finally:
+            if logged_in:
+                try:
+                    bs.logout()
+                except Exception:
+                    pass
 
 
 def _q_tencent_quote(symbol: str) -> dict | None:
@@ -686,24 +697,24 @@ def _q_tencent_quote(symbol: str) -> dict | None:
         except (ValueError, TypeError):
             return None
 
+    market = "sh" if symbol.startswith(("6", "9")) else "sz"
     with no_proxy_session() as sess:
-        market = "sh" if symbol.startswith(("6", "9")) else "sz"
         r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
-        if r.status_code == 200 and "~" in r.text:
-            p = r.text.split("~")
-            if len(p) > 45:
-                mv = _safe_float(p[45])
-                return {
-                    "price": _safe_float(p[3]),
-                    "change_pct": _safe_float(p[32]),
-                    "high": _safe_float(p[33]),
-                    "low": _safe_float(p[34]),
-                    "volume": _safe_float(p[6]),
-                    "turnover_rate": _safe_float(p[38]),
-                    "pe_ratio": _safe_float(p[39]),
-                    "total_mv": mv / 10000 if mv is not None else None,
-                }
-        return None
+    if r.status_code == 200 and "~" in r.text:
+        p = r.text.split("~")
+        if len(p) > 45:
+            mv = _safe_float(p[45])
+            return {
+                "price": _safe_float(p[3]),
+                "change_pct": _safe_float(p[32]),
+                "high": _safe_float(p[33]),
+                "low": _safe_float(p[34]),
+                "volume": _safe_float(p[6]),
+                "turnover_rate": _safe_float(p[38]),
+                "pe_ratio": _safe_float(p[39]),
+                "total_mv": mv / 10000 if mv is not None else None,
+            }
+    return None
 
 
 # ---- 查询参数字符串生成 ----
@@ -738,7 +749,7 @@ def collect_basic_info(symbol: str) -> dict:
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.stock_basic", lambda: _q_tushare_basic(symbol)))
-    if env.is_akshare_available():
+    if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_individual_info_em",
                       lambda: _q_akshare_basic(symbol)))
 
@@ -780,7 +791,7 @@ def collect_shareholders(symbol: str) -> dict:
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.top10_floatholders", lambda: _q_tushare_shareholders(symbol)))
-    if env.is_akshare_available():
+    if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_gdfx_top_10_em",
                       lambda: _q_akshare_shareholders(symbol)))
 
@@ -803,7 +814,7 @@ def collect_quote(symbol: str) -> dict:
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol,
                       start_date=_days_ago(10), end_date=_today())))
-    if env.is_akshare_available():
+    if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
     tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
@@ -829,7 +840,7 @@ def collect_northbound(symbol: str) -> dict:
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.hsgt_top10", lambda: _q_tushare_hsgt_top10(symbol)))
-    if env.is_akshare_available():
+    if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
 
@@ -857,7 +868,7 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed)))
-    if env.is_akshare_available():
+    if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed)))
     if env.is_baostock_available():
@@ -1136,7 +1147,7 @@ def _ms_fetch_pmi() -> dict[str, Any] | None:
     if not env.is_akshare_available():
         return None
     try:
-        with _proxy_bypass():
+        with akshare_direct_session():
             import akshare as ak
             df = ak.macro_china_pmi()
         if df is None or df.empty:
@@ -1174,34 +1185,104 @@ def _ms_return_pct(closes: list[float]) -> float | None:
     return (end - start) / start * 100
 
 
-def _ms_fetch_sw_index(tc: Any, symbol: str, industry: str | None) -> dict | None:
-    index_code = _ms_lookup_sw_index_code(tc, industry)
-    if not index_code:
+def _ms_sw_numeric_code(index_code: str) -> str:
+    """851024.SI → 851024（akshare index_hist_sw 格式）。"""
+    return index_code.split(".")[0]
+
+
+def _ms_lookup_akshare_sw_code(industry: str) -> str | None:
+    """按申万行业名在 akshare 行业列表中匹配指数代码（L3→L2→L1）。"""
+    if not env.is_akshare_available():
         return None
-    df_sw = tc.query("sw_daily", ts_code=index_code,
-                     start_date=_days_ago(70), end_date=_today())
-    df_hs = tc.query("index_daily", ts_code=_HS300_CODE,
-                     start_date=_days_ago(70), end_date=_today())
-    if df_sw is None or df_sw.empty:
+    name = industry.strip()
+    if not name:
         return None
-    sw = df_sw.sort_values("trade_date")
-    sw_closes = [float(v) for v in sw["close"].tolist() if v is not None]
+    try:
+        import akshare as ak
+        loaders = (ak.sw_index_third_info, ak.sw_index_second_info, ak.sw_index_first_info)
+        with akshare_direct_session():
+            for loader in loaders:
+                df = loader()
+                if df is None or df.empty:
+                    continue
+                for _, row in df.iterrows():
+                    idx_name = str(row.get("行业名称", "")).strip()
+                    code = str(row.get("行业代码", "")).strip()
+                    if name == idx_name and code:
+                        return code
+        with akshare_direct_session():
+            for loader in loaders:
+                df = loader()
+                if df is None or df.empty:
+                    continue
+                for _, row in df.iterrows():
+                    idx_name = str(row.get("行业名称", "")).strip()
+                    code = str(row.get("行业代码", "")).strip()
+                    if idx_name and code and (name in idx_name or idx_name in name):
+                        return code
+    except Exception as exc:
+        logger.debug("akshare sw index lookup failed: %s", exc)
+    return None
+
+
+def _akshare_closes_from_hist_sw(index_code: str, *, days: int = 70) -> list[float]:
+    """akshare 申万指数日线收盘价序列（升序）。"""
+    import akshare as ak
+
+    sym = _ms_sw_numeric_code(index_code)
+    with akshare_direct_session():
+        df = ak.index_hist_sw(symbol=sym, period="day")
+    if df is None or df.empty:
+        return []
+    col = "收盘" if "收盘" in df.columns else "close"
+    tail = df.sort_values("日期" if "日期" in df.columns else "trade_date").tail(days + 5)
+    return [float(v) for v in tail[col].tolist() if v is not None]
+
+
+def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
+    """沪深300 日线收盘价（akshare / 东方财富）。"""
+    import akshare as ak
+
+    sd = _days_ago(days + 10)
+    ed = _today()
+    sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
+    ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+    with akshare_direct_session():
+        df = ak.stock_zh_index_daily_em(
+            symbol="sh000300", start_date=sd_fmt, end_date=ed_fmt,
+        )
+    if df is None or df.empty:
+        return []
+    col = "收盘" if "收盘" in df.columns else "close"
+    date_col = "日期" if "日期" in df.columns else "date"
+    sorted_df = df.sort_values(date_col)
+    return [float(v) for v in sorted_df[col].tolist() if v is not None]
+
+
+def _ms_build_sw_index_result(
+    *,
+    index_code: str,
+    industry: str | None,
+    sw_closes: list[float],
+    bench_closes: list[float] | None,
+    stock_closes: list[float] | None,
+    source: str,
+) -> dict | None:
+    if len(sw_closes) < 2:
+        return None
     ret_20 = _ms_return_pct(sw_closes[-21:]) if len(sw_closes) >= 2 else None
-    bench_ret = None
-    if df_hs is not None and not df_hs.empty:
-        hs = df_hs.sort_values("trade_date")
-        hs_closes = [float(v) for v in hs["close"].tolist() if v is not None]
-        bench_ret = _ms_return_pct(hs_closes[-21:]) if len(hs_closes) >= 2 else None
-    stock_ret = None
-    df_stk = tc.query("daily", ts_code=_ts_code(symbol),
-                      start_date=_days_ago(70), end_date=_today(),
-                      fields="trade_date,close")
-    if df_stk is not None and not df_stk.empty:
-        stk = df_stk.sort_values("trade_date")
-        stk_closes = [float(v) for v in stk["close"].tolist() if v is not None]
-        stock_ret = _ms_return_pct(stk_closes[-21:]) if len(stk_closes) >= 2 else None
+    bench_ret = (
+        _ms_return_pct(bench_closes[-21:])
+        if bench_closes and len(bench_closes) >= 2 else None
+    )
+    stock_ret = (
+        _ms_return_pct(stock_closes[-21:])
+        if stock_closes and len(stock_closes) >= 2 else None
+    )
     rel_vs_bench = (ret_20 - bench_ret) if ret_20 is not None and bench_ret is not None else None
-    rel_stock_vs_ind = (stock_ret - ret_20) if stock_ret is not None and ret_20 is not None else None
+    rel_stock_vs_ind = (
+        (stock_ret - ret_20) if stock_ret is not None and ret_20 is not None else None
+    )
     return {
         "index_code": index_code,
         "industry": industry,
@@ -1210,8 +1291,121 @@ def _ms_fetch_sw_index(tc: Any, symbol: str, industry: str | None) -> dict | Non
         "stock_return_20d_pct": round(stock_ret, 2) if stock_ret is not None else None,
         "relative_vs_benchmark_pct": round(rel_vs_bench, 2) if rel_vs_bench is not None else None,
         "stock_vs_industry_pct": round(rel_stock_vs_ind, 2) if rel_stock_vs_ind is not None else None,
-        "source": "tushare.sw_daily",
+        "source": source,
     }
+
+
+def _ms_fetch_sw_index_akshare(
+    symbol: str,
+    industry: str | None,
+    index_code: str | None = None,
+    tc: Any | None = None,
+) -> dict | None:
+    """Tushare sw_daily 不可用时的 akshare 申万指数回退。"""
+    if not env.is_akshare_available():
+        return None
+    code: str | None = None
+    if industry:
+        code = _ms_lookup_akshare_sw_code(industry)
+    if not code and index_code:
+        code = _ms_sw_numeric_code(index_code)
+    if not code:
+        return None
+    try:
+        sw_closes = _akshare_closes_from_hist_sw(code)
+    except Exception as exc:
+        logger.debug("akshare index_hist_sw failed: %s", exc)
+        return None
+    if len(sw_closes) < 2:
+        return None
+
+    bench_closes: list[float] | None = None
+    if tc is not None:
+        df_hs = tc.query("index_daily", ts_code=_HS300_CODE,
+                         start_date=_days_ago(70), end_date=_today())
+        if df_hs is not None and not df_hs.empty:
+            hs = df_hs.sort_values("trade_date")
+            bench_closes = [float(v) for v in hs["close"].tolist() if v is not None]
+    if not bench_closes:
+        try:
+            bench_closes = _akshare_hs300_closes()
+        except Exception as exc:
+            logger.debug("akshare HS300 for sw_index failed: %s", exc)
+            bench_closes = None
+
+    stock_closes: list[float] | None = None
+    if tc is not None:
+        df_stk = tc.query("daily", ts_code=_ts_code(symbol),
+                          start_date=_days_ago(70), end_date=_today(),
+                          fields="trade_date,close")
+        if df_stk is not None and not df_stk.empty:
+            stk = df_stk.sort_values("trade_date")
+            stock_closes = [float(v) for v in stk["close"].tolist() if v is not None]
+    if not stock_closes:
+        try:
+            rows = _q_akshare_kline(symbol, start_date=_days_ago(70), end_date=_today())
+            if rows:
+                ordered = sorted(rows, key=lambda r: str(r.get("trade_date", "")))
+                stock_closes = [
+                    float(r["close"]) for r in ordered
+                    if r.get("close") is not None
+                ]
+        except Exception as exc:
+            logger.debug("akshare stock kline for sw_index failed: %s", exc)
+
+    return _ms_build_sw_index_result(
+        index_code=code,
+        industry=industry,
+        sw_closes=sw_closes,
+        bench_closes=bench_closes,
+        stock_closes=stock_closes,
+        source="akshare.index_hist_sw",
+    )
+
+
+def _ms_sw_index_availability_label(value: dict) -> str:
+    """sw_index 可用性标注（区分 Tushare 原生 vs akshare 回退）。"""
+    if value.get("source") == "akshare.index_hist_sw":
+        return (
+            "available (akshare fallback; Tushare sw_daily 需 5000 积分，见 "
+            "https://tushare.pro/document/2?doc_id=327)"
+        )
+    return "available"
+
+
+def _ms_fetch_sw_index(tc: Any, symbol: str, industry: str | None) -> dict | None:
+    resolved = industry or _resolve_sw_industry_name(tc, symbol, industry)
+    index_code = _ms_lookup_sw_index_code(tc, resolved) if resolved else None
+    if index_code:
+        df_sw = tc.query("sw_daily", ts_code=index_code,
+                         start_date=_days_ago(70), end_date=_today())
+        if df_sw is not None and not df_sw.empty:
+            sw = df_sw.sort_values("trade_date")
+            sw_closes = [float(v) for v in sw["close"].tolist() if v is not None]
+            df_hs = tc.query("index_daily", ts_code=_HS300_CODE,
+                             start_date=_days_ago(70), end_date=_today())
+            bench_closes: list[float] | None = None
+            if df_hs is not None and not df_hs.empty:
+                hs = df_hs.sort_values("trade_date")
+                bench_closes = [float(v) for v in hs["close"].tolist() if v is not None]
+            stock_closes: list[float] | None = None
+            df_stk = tc.query("daily", ts_code=_ts_code(symbol),
+                              start_date=_days_ago(70), end_date=_today(),
+                              fields="trade_date,close")
+            if df_stk is not None and not df_stk.empty:
+                stk = df_stk.sort_values("trade_date")
+                stock_closes = [float(v) for v in stk["close"].tolist() if v is not None]
+            built = _ms_build_sw_index_result(
+                index_code=index_code,
+                industry=resolved,
+                sw_closes=sw_closes,
+                bench_closes=bench_closes,
+                stock_closes=stock_closes,
+                source="tushare.sw_daily",
+            )
+            if built is not None:
+                return built
+    return _ms_fetch_sw_index_akshare(symbol, resolved, index_code, tc=tc)
 
 
 def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
@@ -1220,23 +1414,28 @@ def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
     )[:limit]
 
 
+_MIN_NORTHBOUND_DAYS = 5
+
+
 def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     """个股北向近 10 个交易日净额（元）。
 
     Tushare hsgt_top10（仅上榜日有 net_amount）→ akshare 个股持股变动回退。
+    hsgt_top10 上榜日过少时回退 akshare，避免稀疏序列误导汇总。
     不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
     """
     try:
         records = _q_tushare_hsgt_top10(symbol)
         if records:
             recent = _recent_flow_records(records, limit=10)
-            net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
-            return {
-                "records": recent,
-                "net_sum_10d": net_sum,
-                "days": len(recent),
-                "source": "tushare.hsgt_top10",
-            }
+            if len(recent) >= _MIN_NORTHBOUND_DAYS:
+                net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+                return {
+                    "records": recent,
+                    "net_sum_10d": net_sum,
+                    "days": len(recent),
+                    "source": "tushare.hsgt_top10",
+                }
     except Exception as exc:
         logger.debug("tushare hsgt_top10 failed for %s: %s", symbol, exc)
 
@@ -1350,13 +1549,13 @@ def _ms_fetch_akshare_cn10y_series() -> list[tuple[str, float]]:
     """中国 10Y 国债收益率日序列（date, yield%）。FRED 不可用时的 ERP 回退。"""
     if not env.is_akshare_available():
         return []
-    with _proxy_bypass():
-        import akshare as ak
-        try:
+    import akshare as ak
+    try:
+        with _proxy_bypass():
             df = ak.bond_zh_us_rate(start_date=_days_ago(1825))
-        except Exception as exc:
-            logger.warning("akshare bond_zh_us_rate failed: %s", exc)
-            return []
+    except Exception as exc:
+        logger.warning("akshare bond_zh_us_rate failed: %s", exc)
+        return []
     if df is None or getattr(df, "empty", True):
         return []
     col = "中国国债收益率10年"
@@ -1551,7 +1750,7 @@ def _ms_pcr_on_date(
 
 
 def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
-    """50ETF 认沽认购比（opt_daily，需 2000 积分）。"""
+    """50ETF 认沽认购比（opt_daily，需 5000 积分）。"""
     from lib.valuation import percentile_rank
 
     puts, calls = _ms_50etf_option_codes(tc)
@@ -1891,7 +2090,12 @@ def collect_market_structure(symbol: str, *, industry: str | None = None) -> dic
     _ms_try_fetch(
         result, "sw_index",
         lambda: _ms_fetch_sw_index(tc, symbol, industry),
-        unavailable_msg="no sw industry match or empty data",
+        unavailable_msg=(
+            "申万行业指数不可得；Tushare sw_daily 需 5000 积分"
+            "（https://tushare.pro/document/2?doc_id=327），"
+            "2000 分档已尝试 akshare 回退"
+        ),
+        on_success=_ms_sw_index_availability_label,
     )
     _ms_try_fetch(
         result, "northbound",
@@ -1930,7 +2134,7 @@ def collect_market_structure(symbol: str, *, industry: str | None = None) -> dic
     _ms_try_fetch(
         result, "put_call_ratio",
         lambda: _ms_fetch_put_call_ratio(tc),
-        unavailable_msg="opt_daily empty, no 50ETF options, or permission denied (2000 pts)",
+        unavailable_msg="opt_daily empty, no 50ETF options, or permission denied (5000 pts)",
         on_success=lambda v: (
             f"partial: {v.get('history_days', 0)} days"
             if v.get("partial") else "available"
@@ -1970,11 +2174,9 @@ _PEER_HIGHER_IS_BETTER = frozenset({"revenue_yoy", "roe"})
 
 
 def _prior_year_end_date(end_date: str) -> str:
-    """报告期 YYYYMMDD → 去年同期（同月同日）。"""
-    s = str(end_date).strip()
-    if len(s) < 8 or not s[:4].isdigit():
-        return ""
-    return f"{int(s[:4]) - 1}{s[4:8]}"
+    """报告期 → 去年同期（同月同日，YYYYMMDD）。"""
+    from lib.financials import prior_year_end_date
+    return prior_year_end_date(end_date)
 
 
 def _revenue_yoy_from_fina_rows(rows: list[dict]) -> float | None:
@@ -1989,9 +2191,10 @@ def _revenue_yoy_from_fina_rows(rows: list[dict]) -> float | None:
     prev_ed = _prior_year_end_date(str(latest.get("end_date", "")))
     if not prev_ed:
         return None
+    from lib.financials import normalize_end_date
     rev_prev = None
     for r in reversed(sorted_rows[:-1]):
-        if str(r.get("end_date", "")) == prev_ed:
+        if normalize_end_date(str(r.get("end_date", ""))) == prev_ed:
             rev_prev = safe_float(r.get("revenue"))
             break
     if rev_prev is None or rev_prev <= 0:
@@ -2001,21 +2204,8 @@ def _revenue_yoy_from_fina_rows(rows: list[dict]) -> float | None:
 
 def _gross_margin_trend_from_rows(fin_rows: list[dict]) -> str | None:
     """近 2 个会计年度毛利率方向（供竞争加剧信号）。"""
-    by_year: dict[str, float] = {}
-    for r in fin_rows:
-        y = str(r.get("end_date", ""))[:4]
-        gm = safe_float(r.get("grossprofit_margin"))
-        if y and gm is not None:
-            by_year[y] = gm
-    annual = sorted(by_year.items())
-    if len(annual) < 2:
-        return None
-    (_, m0), (_, m1) = annual[-2], annual[-1]
-    if m1 < m0 - 0.5:
-        return "down"
-    if m1 > m0 + 0.5:
-        return "up"
-    return "flat"
+    from lib.financials import gross_margin_trend_from_rows
+    return gross_margin_trend_from_rows(fin_rows)
 
 
 def _peer_metrics_from_fina(
