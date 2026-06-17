@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## v0.1.4 (2026-06-17)
+
+v0.1.4 将模块 4/5/7 从占位升级为 70 分可用模板，并加固 SKILL 架构与发布门禁。
+
+### 报告模板（P0）
+
+- **模块 4**（`_section_fundamentals_layered`）：核心判断摘要（盈利/现金流/负债）、业绩全景表（含 EPS）、12 题回答状态表
+- **模块 5**（`_section_bull_bear`）：假设→传导→数字链条；5c 关键分歧点按 PE 历史区间位置分支；PE 中位数场景化取自 valuation 维度
+- **模块 7**（`_section_risk_uncertainty`）：三层分组风险表 + Known Unknowns 标准槽位
+- **核心矛盾小结**（`_section_core_tension`）：模块 4–5 之间可选段落
+- **模块 6**：右侧趋势延续信号组合（P1d）
+
+### 架构与工具（P0-7/8/9）
+
+- **SKILL.md**：OUTPUT CONTRACT 前置；九模块表与 LAW 14/15 更新；P2c 措辞自查项
+- **CLAUDE.md**：措辞规范、分位规则、[事实]/[分析] 标记规范
+- **check-version.sh** / **check_report.sh**；CI 版本检查；`.pre-commit-config.yaml`
+- **版本四件套**同步至 0.1.4（SKILL / CLAUDE / pyproject / plugin）
+
+### 数据层
+
+- **`research` 维度**：`collect_research()` 按积分顺序降级；LAW 6 合规表述；`schema.RESEARCH_SUMMARY_KEYS`
+- collector：卖方价位区间反转修正；业绩预告无同比区间时的文案兜底
+
 ### Fixed / Docs
 
 - **`research` 维度（机构研报）**：`collect_research()` 按 Tushare 积分顺序降级（`report_rc` → `forecast` → akshare）；高阶成功跳过低阶 API；报告以「卖方预期价位」等 LAW 6 合规表述展示第三方一致预期；需 `--dims=...,research` 显式启用

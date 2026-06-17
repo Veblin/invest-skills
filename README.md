@@ -5,7 +5,7 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-A-skill/actions/workflows/security.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-A-skill/security.yml?label=security" alt="Security Scan" /></a>
   <a href="https://github.com/Veblin/invest-A-skill/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-A-skill/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-A-skill/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-A-skill?include_prereleases&label=v0.1.3" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-A-skill/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-A-skill?include_prereleases&label=v0.1.4" alt="Release" /></a>
 </p>
 
 > **学习工具，非决策工具。** 多源采集 A 股数据 → 结构化研究备忘录 → 你独立判断。
@@ -86,7 +86,7 @@ uv run python skills/invest-A/scripts/invest.py store list        # 历史记录
 | — | 市场结构 | 行业指数、资金流向、ERP | Tushare + FRED |
 | — | 宏观/行业 | 美债、行业舆情（`--deep`） | FRED + WebSearch |
 
-> v0.1.3 起默认产出九模块研究备忘录。数据源均可选，未配置时自动降级并标注。
+> v0.1.4 起默认产出九模块研究备忘录。数据源均可选，未配置时自动降级并标注。
 
 [//]: # (插图2: 报告截图 — 展示九模块报告的实际渲染效果。建议截取模块1（现状快照）和模块2（动态驱动分析）两段，体现 [事实]/[分析] 标记、来源追溯、估值分位等特征。尺寸 700×500。)
 
