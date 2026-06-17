@@ -973,6 +973,374 @@ def collect_valuation(symbol: str) -> dict:
     return dim.to_legacy_dict()
 
 
+# ---- 机构研报与盈利预测采集 ----
+
+def _q_tushare_report_rc(symbol: str) -> list[dict] | None:
+    """Tushare report_rc：机构研报盈利预测（含评级/目标价）。
+
+    权限：特色大数据，需 10000+积分 或单独购买券商研报库（500元/年）。
+    120 积分可试用（日 10 次）。
+    字段：rating, max_price, min_price, eps, pe, np, org_name, report_date
+
+    Returns:
+        list[dict] | None — 研报记录列表，权限不足或失败返回 None
+    """
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    ts = _ts_code(symbol)
+    try:
+        df = tc.query("report_rc", ts_code=ts,
+                      start_date=_days_ago(180), end_date=_today(),
+                      fields="ts_code,name,report_date,report_title,"
+                             "org_name,rating,max_price,min_price,"
+                             "eps,pe,np,op_rt,roe,classify,quarter")
+        if df is not None and not df.empty:
+            out = df.to_dict("records")
+            logger.info("report_rc: %d records for %s", len(out), ts)
+            return out
+        return None
+    except Exception as exc:
+        err = str(exc)
+        if "权限" in err or "40203" in err or "无权限" in err:
+            logger.info("report_rc 权限不足（需 10000+积分），降级: %s", err)
+            return None
+        logger.warning("report_rc query failed for %s: %s", ts, err)
+        return None
+
+
+def _q_tushare_forecast(symbol: str) -> list[dict] | None:
+    """Tushare forecast：业绩预告（上市公司自行披露的盈利预测）。
+
+    权限：2000 积分可用。
+    字段：end_date, type, p_change_min, p_change_max, profit_min, profit_max
+
+    Returns:
+        list[dict] | None — 业绩预告记录，权限不足或无数据返回 None
+    """
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    ts = _ts_code(symbol)
+    try:
+        df = tc.query("forecast", ts_code=ts,
+                      start_date=_days_ago(365), end_date=_today(),
+                      fields="ts_code,end_date,type,p_change_min,p_change_max,"
+                             "profit_min,profit_max,last_parent_net")
+        if df is not None and not df.empty:
+            out = df.to_dict("records")
+            logger.info("forecast: %d records for %s", len(out), ts)
+            return out
+        return None
+    except Exception as exc:
+        err = str(exc)
+        if "权限" in err or "40203" in err or "无权限" in err:
+            logger.info("forecast 权限不足（需 2000+积分），降级: %s", err)
+            return None
+        logger.warning("forecast query failed for %s: %s", ts, err)
+        return None
+
+
+def _q_akshare_research(symbol: str) -> list[dict] | None:
+    """akshare：东方财富个股研报（免注册，但依赖东方财富接口）。
+
+    注意：当前代理环境可能阻断东方财富 push2 接口。
+    当 akshare_push2_available() 为 False 时跳过。
+    """
+    if not env.is_akshare_available():
+        return None
+    if not akshare_push2_available():
+        logger.info("akshare_research: 东方财富 push2 不可达，跳过")
+        return None
+    try:
+        import akshare as ak
+        # stock_research_report_em 接口仅支持 symbol 参数
+        df = ak.stock_research_report_em(symbol=symbol)
+        if df is not None and not df.empty:
+            out = df.to_dict("records")
+            logger.info("akshare_research: %d records for %s", len(out), symbol)
+            return out
+        return None
+    except Exception as exc:
+        logger.warning("akshare_research failed for %s: %s", symbol, exc)
+        return None
+
+
+def _aggregate_sellside_price_range(
+    prices: list[tuple[Any, Any]],
+) -> dict[str, float] | None:
+    """聚合卖方预期价位；单侧仅有 max 或 min 时也输出区间。"""
+    valid_max: list[float] = []
+    valid_min: list[float] = []
+    for mx, mn in prices:
+        fm = safe_float(mx)
+        fn = safe_float(mn)
+        if fm is not None:
+            valid_max.append(fm)
+        if fn is not None:
+            valid_min.append(fn)
+    if not valid_max and not valid_min:
+        return None
+    low = min(valid_min) if valid_min else min(valid_max)
+    high = max(valid_max) if valid_max else max(valid_min)
+    out: dict[str, float] = {
+        "min": round(low, 2),
+        "max": round(high, 2),
+    }
+    if valid_max:
+        out["avg_upper"] = round(sum(valid_max) / len(valid_max), 2)
+    if valid_min:
+        out["avg_lower"] = round(sum(valid_min) / len(valid_min), 2)
+    return out
+
+
+def _summarize_research(tushare_rc: list[dict] | None,
+                        tushare_fc: list[dict] | None,
+                        akshare_rc: list[dict] | None) -> dict:
+    """将多源研报数据汇总为统一结构。
+
+    优先使用 Tushare report_rc（含评级和目标价），
+    其次使用 Tushare forecast（仅业绩预告），
+    最后使用 akshare。
+    """
+    summary = {
+        "latest_ratings": [],       # 最新卖方评级
+        "target_price_range": None, # {min, max} 目标价区间
+        "eps_forecasts": [],        # EPS预测列表
+        "profit_forecasts": [],     # 净利润预测
+        "company_guidance": None,   # 公司自身业绩预告
+        "source": None,
+        "status": "no_data",
+        "summary_text": "",
+    }
+
+    # Tier 1: Tushare report_rc (含评级+目标价)
+    if tushare_rc:
+        # 取最新（按 report_date 排序）
+        latest = sorted(tushare_rc, key=lambda r: r.get("report_date", ""), reverse=True)
+        # 提取评级
+        ratings = [
+            {"org": r.get("org_name"), "rating": r.get("rating"),
+             "report_date": r.get("report_date")}
+            for r in latest if r.get("rating")
+        ]
+        summary["latest_ratings"] = ratings[:10]  # 取前10条
+
+        # 提取卖方预期价位
+        prices = [
+            (r.get("max_price"), r.get("min_price"))
+            for r in latest
+            if r.get("max_price") is not None or r.get("min_price") is not None
+        ]
+        if prices:
+            summary["target_price_range"] = _aggregate_sellside_price_range(prices)
+
+        # 提取 EPS 预测（按报告期聚合）
+        eps_by_quarter = {}
+        for r in latest:
+            q = r.get("quarter") or r.get("report_type", "") or "unknown"
+            eps = r.get("eps")
+            if eps is not None:
+                if q not in eps_by_quarter:
+                    eps_by_quarter[q] = []
+                eps_by_quarter[q].append(eps)
+        summary["eps_forecasts"] = [
+            {"quarter": q, "avg_eps": round(sum(vs) / len(vs), 4),
+             "n_analysts": len(vs)}
+            for q, vs in sorted(eps_by_quarter.items())
+        ]
+
+        # 提取净利润预测（NP 字段，万元→亿元）
+        np_by_quarter = {}
+        for r in latest:
+            q = r.get("quarter") or "unknown"
+            np_val = r.get("np")
+            if np_val is not None:
+                if q not in np_by_quarter:
+                    np_by_quarter[q] = []
+                np_by_quarter[q].append(np_val)
+        summary["profit_forecasts"] = [
+            {"quarter": q, "avg_np_100m": round(sum(vs) / len(vs) / 10000, 2),
+             "n_analysts": len(vs)}
+            for q, vs in sorted(np_by_quarter.items())
+        ]
+
+        summary["source"] = "tushare.report_rc"
+        summary["status"] = "ok"
+
+        # 生成摘要文本（LAW 6：禁「买入」「目标价」字面）
+        n_ratings = len(ratings)
+        bullish = sum(
+            1 for r in ratings
+            if "买" in str(r.get("rating", "")) and "卖" not in str(r.get("rating", ""))
+        )
+        if summary["target_price_range"]:
+            tp = summary["target_price_range"]
+            summary["summary_text"] = (
+                f"近半年 {n_ratings} 条机构评级（{bullish} 条偏多），"
+                f"卖方预期价位 {tp['min']}–{tp['max']} 元"
+            )
+        else:
+            summary["summary_text"] = (
+                f"近半年 {n_ratings} 条机构评级（{bullish} 条偏多），无公开价位预期"
+            )
+        return summary
+
+    # Tier 2: Tushare forecast (业绩预告)
+    if tushare_fc:
+        latest_fc = sorted(tushare_fc, key=lambda r: r.get("end_date", ""), reverse=True)
+        if latest_fc:
+            rec = latest_fc[0]
+            p_min = safe_float(rec.get("p_change_min"))
+            p_max = safe_float(rec.get("p_change_max"))
+            last_net = safe_float(rec.get("last_parent_net"))  # 上年同期归母净利（万元）
+            profit_min = safe_float(rec.get("profit_min"))
+            profit_max = safe_float(rec.get("profit_max"))
+            guidance = {
+                "end_date": rec.get("end_date"),
+                "type": rec.get("type"),
+                "pct_change_min": p_min,
+                "pct_change_max": p_max,
+            }
+            if profit_min is not None and profit_max is not None:
+                guidance["profit_min_100m"] = round(profit_min / 10000, 2)
+                guidance["profit_max_100m"] = round(profit_max / 10000, 2)
+            elif last_net is not None and p_min is not None and p_max is not None:
+                guidance["profit_min_100m"] = round(last_net * (1 + p_min / 100) / 10000, 2)
+                guidance["profit_max_100m"] = round(last_net * (1 + p_max / 100) / 10000, 2)
+                guidance["last_parent_net_100m"] = round(last_net / 10000, 2)
+            summary["company_guidance"] = guidance
+            summary["source"] = "tushare.forecast"
+            summary["status"] = "ok_guidance_only"
+            if guidance.get("profit_min_100m") is not None:
+                summary["summary_text"] = (
+                    f"公司业绩预告（{rec.get('type', '')}）：净利润 "
+                    f"{guidance['profit_min_100m']}–{guidance['profit_max_100m']} 亿元 "
+                    f"（同比 {p_min}%–{p_max}%）"
+                )
+            else:
+                summary["summary_text"] = (
+                    f"公司业绩预告（{rec.get('type', '')}）：同比 {p_min}%–{p_max}%"
+                )
+        return summary
+
+    # Tier 3: akshare
+    if akshare_rc:
+        summary["source"] = "akshare.research"
+        summary["status"] = "ok_limited"
+        n_records = len(akshare_rc)
+        summary["summary_text"] = f"东方财富 {n_records} 条研报记录（无结构化评级摘要）"
+        summary["raw_records"] = akshare_rc[:10]
+        return summary
+
+    # 全部失败
+    summary["status"] = "no_data"
+    summary["summary_text"] = "未获取到机构研报/评级数据"
+    return summary
+
+
+def collect_research(symbol: str) -> dict:
+    """采集机构研报、评级与盈利预测数据。
+
+    三层降级策略（按 Tushare 积分体系）：
+      1️⃣ Tushare report_rc（10000+积分/特色大数据）→ 含评级+目标价+盈利预测
+      2️⃣ Tushare forecast（2000+积分）→ 仅公司业绩预告
+      3️⃣ akshare 东方财富个股研报（免注册，可能被代理阻断）
+      4️⃣ 全部失败 → 标注不可得
+
+    Returns:
+        dict: 标准 DimensionResult 格式
+    """
+    results: list[SourceResult] = []
+    dim_val = "research"
+    ts = _ts_code(symbol)
+
+    # Tier 1 → 2 → 3 顺序降级；高阶成功则跳过低阶 API 调用
+    rc_data: list[dict] | None = None
+    try:
+        rc_data = _q_tushare_report_rc(symbol)
+    except RuntimeError:
+        pass
+    except Exception as exc:
+        logger.warning("collect_research/report_rc: %s", exc)
+    if rc_data:
+        results.append(SourceResult(
+            source="tushare.report_rc",
+            data=rc_data,
+            dimension=dim_val,
+            query_params=f"pro.report_rc(ts_code='{ts}', start_date='{_days_ago(180)}')",
+        ))
+    else:
+        results.append(SourceResult(
+            source="tushare.report_rc",
+            data=None,
+            dimension=dim_val,
+            error="权限不足或无数据返回（需 Tushare 10000+积分）",
+            query_params=f"pro.report_rc(ts_code='{ts}')",
+        ))
+
+    fc_data: list[dict] | None = None
+    if not rc_data:
+        try:
+            fc_data = _q_tushare_forecast(symbol)
+        except RuntimeError:
+            pass
+        except Exception as exc:
+            logger.warning("collect_research/forecast: %s", exc)
+        if fc_data:
+            results.append(SourceResult(
+                source="tushare.forecast",
+                data=fc_data,
+                dimension=dim_val,
+                query_params=f"pro.forecast(ts_code='{ts}')",
+            ))
+        else:
+            results.append(SourceResult(
+                source="tushare.forecast",
+                data=None,
+                dimension=dim_val,
+                error="权限不足或无数据（需 Tushare 2000+积分）",
+                query_params=f"pro.forecast(ts_code='{ts}')",
+            ))
+
+    ak_data: list[dict] | None = None
+    if not rc_data and not fc_data:
+        try:
+            ak_data = _q_akshare_research(symbol)
+        except Exception as exc:
+            logger.warning("collect_research/akshare: %s", exc)
+        if ak_data:
+            results.append(SourceResult(
+                source="akshare.research",
+                data=ak_data,
+                dimension=dim_val,
+                query_params=f"ak.stock_research_report_em(symbol='{symbol}')",
+            ))
+        else:
+            results.append(SourceResult(
+                source="akshare.research",
+                data=None,
+                dimension=dim_val,
+                error="东方财富 push2 不可达或接口异常",
+                query_params=f"ak.stock_research_report_em(symbol='{symbol}')",
+            ))
+
+    # 汇总
+    tushare_rc = next((r.data for r in results if r.source == "tushare.report_rc" and r.success), None)
+    tushare_fc = next((r.data for r in results if r.source == "tushare.forecast" and r.success), None)
+    akshare_rc = next((r.data for r in results if r.source == "akshare.research" and r.success), None)
+    summary = _summarize_research(tushare_rc, tushare_fc, akshare_rc)
+
+    dim = DimensionResult("research", results)
+    dim_dict = dim.to_legacy_dict()
+    dim_dict["research_summary"] = summary
+    return dim_dict
+
+
 # ---- 全维度采集 ----
 
 COLLECTORS = {
@@ -983,7 +1351,11 @@ COLLECTORS = {
     "northbound": ("北向资金", collect_northbound),
     "kline": ("日K线", collect_kline),
     "valuation": ("估值分析", collect_valuation),
+    "research": ("机构研报", collect_research),
 }
+
+_DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
+                 "northbound", "valuation", "kline"]
 
 
 def collect_all(symbol: str, dims: list[str] | None = None,
@@ -999,8 +1371,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         deep: 深度模式，kline 扩大到 730 自然日
     """
     if dims is None:
-        dims = ["basic_info", "financials", "quote", "shareholders",
-                "northbound", "valuation", "kline"]
+        dims = list(_DEFAULT_DIMS)
 
     dim_results: dict[str, dict] = {}
 

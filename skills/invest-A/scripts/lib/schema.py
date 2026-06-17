@@ -16,6 +16,7 @@ DIMENSIONS = {
     "northbound": "北向资金",
     "kline": "日K线",
     "valuation": "估值分析",
+    "research": "机构研报",
 }
 
 
