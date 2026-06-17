@@ -67,10 +67,16 @@ jobs:
               ? verdict
               : 'COMMENT';
 
+            const pullNumber = context.payload.pull_request?.number;
+            if (!pullNumber) {
+              core.setFailed('Missing pull_request.number in workflow context');
+              return;
+            }
+
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_request_number: context.issue.number,
+              pull_number: pullNumber,
               event,
               body,
             });
