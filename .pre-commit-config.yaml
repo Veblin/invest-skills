@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: invest-a-check-version
+        name: invest-A version consistency
+        entry: bash skills/invest-A/scripts/check-version.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: invest-a-check-report
+        name: invest-A report wording (latest report)
+        entry: bash skills/invest-A/scripts/check_report.sh
+        language: system
+        pass_filenames: false
+        files: ^reports/.*\.md$

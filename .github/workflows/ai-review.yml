@@ -50,12 +50,19 @@ jobs:
         run: python3 .github/scripts/ai_pr_review.py
 
       - name: Post PR review
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('review.md', 'utf8');
-            const verdict = fs.readFileSync('review_verdict.txt', 'utf8').trim();
+            let body, verdict;
+            try {
+              body = fs.readFileSync('review.md', 'utf8');
+              verdict = fs.readFileSync('review_verdict.txt', 'utf8').trim();
+            } catch {
+              body = '## 🤖 AI Code Review\n\n_Review step failed before generating output._';
+              verdict = 'COMMENT';
+            }
             const event = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'].includes(verdict)
               ? verdict
               : 'COMMENT';
@@ -63,7 +70,7 @@ jobs:
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_request_number: context.payload.pull_request.number,
+              pull_request_number: context.issue.number,
               event,
               body,
             });

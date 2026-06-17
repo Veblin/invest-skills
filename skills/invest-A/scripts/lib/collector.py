@@ -1091,6 +1091,8 @@ def _aggregate_sellside_price_range(
         "min": round(low, 2),
         "max": round(high, 2),
     }
+    if out["min"] > out["max"]:
+        out["min"], out["max"] = out["max"], out["min"]
     if valid_max:
         out["avg_upper"] = round(sum(valid_max) / len(valid_max), 2)
     if valid_min:
@@ -1222,9 +1224,17 @@ def _summarize_research(tushare_rc: list[dict] | None,
                     f"{guidance['profit_min_100m']}–{guidance['profit_max_100m']} 亿元 "
                     f"（同比 {p_min}%–{p_max}%）"
                 )
-            else:
+            elif p_min is not None and p_max is not None:
                 summary["summary_text"] = (
                     f"公司业绩预告（{rec.get('type', '')}）：同比 {p_min}%–{p_max}%"
+                )
+            elif p_min is not None:
+                summary["summary_text"] = (
+                    f"公司业绩预告（{rec.get('type', '')}）：同比变动约 {p_min}% 起"
+                )
+            else:
+                summary["summary_text"] = (
+                    f"公司业绩预告（{rec.get('type', '')}）：变动区间数据不足"
                 )
         return summary
 

@@ -76,6 +76,6 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 | `opt_daily` | 5000 | 50ETF 期权（认沽认购比） | 因子跳过 |
 | **`report_rc`** | **10000**（特色大数据） | **研报评级+目标价+盈利预测** | 降级至 forecast → akshare → 跳过 |
 
-> v0.1.3 起 `collect_research()` 按此表顺序降级（高阶成功则跳过低阶 API）：`report_rc(10000) → forecast(2000) → akshare → 跳过`。
+> v0.1.4 起 `collect_research()` 按此表顺序降级（高阶成功则跳过低阶 API）：`report_rc(10000) → forecast(2000) → akshare → 跳过`。
 > 默认 `collect`/`report` **不**包含 `research` 维度；需显式 `--dims=...,research`。
 > 完整对照见项目根目录 [CONFIGURATION.md](../../../CONFIGURATION.md)。
