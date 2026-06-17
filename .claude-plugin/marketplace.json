@@ -11,7 +11,7 @@
     {
       "name": "invest-A",
       "description": "A股个股调研学习工具。覆盖基本信息、财务报告、行业产业链、估值/市场状态、机构分析师、情绪舆情、宏观政策七大维度，每条分析论述引用数据来源，区分事实陈述与分析判断。学习工具，非决策工具。",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "author": {
         "name": "Veblin",
         "url": "https://github.com/Veblin"

@@ -65,13 +65,17 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 
 ## Tushare 积分要点（invest-A 常用）
 
-| 接口 | 最低积分 | 说明 |
-|------|---------|------|
-| `daily` / `stock_basic` | 120 | 行情、基本信息 |
-| `fina_indicator` / `moneyflow` / `margin_detail` / `index_daily` | 2000 | 财务、资金、普通指数 |
-| `index_classify` | 2000 | 申万分类（**不含**行业日线） |
-| **`sw_daily`** | **5000** | 申万行业日线；不足时用 akshare |
-| `index_dailybasic` | 4000 | 沪深300 PE（ERP） |
-| `opt_daily` | 5000 | 50ETF 期权（认沽认购比） |
+| 接口 | 最低积分 | 说明 | 积分不足时 |
+|------|---------|------|-----------|
+| `daily` / `stock_basic` | 120 | 行情、基本信息 | — |
+| `fina_indicator` / `moneyflow` / `margin_detail` / `index_daily` | 2000 | 财务、资金、普通指数 | 因子跳过 |
+| `index_classify` | 2000 | 申万分类（**不含**行业日线） | 因子跳过 |
+| **`forecast`** | **2000** | **业绩预告（公司自披露）** | 降级至 akshare → 跳过 |
+| `index_dailybasic` | 4000 | 沪深300 PE（ERP） | 部分可得/标注 partial |
+| **`sw_daily`** | **5000** | 申万行业日线 | 降级至 akshare `index_hist_sw` |
+| `opt_daily` | 5000 | 50ETF 期权（认沽认购比） | 因子跳过 |
+| **`report_rc`** | **10000**（特色大数据） | **研报评级+目标价+盈利预测** | 降级至 forecast → akshare → 跳过 |
 
-完整对照见项目根目录 [CONFIGURATION.md](../../../CONFIGURATION.md)。
+> v0.1.4 起 `collect_research()` 按此表顺序降级（高阶成功则跳过低阶 API）：`report_rc(10000) → forecast(2000) → akshare → 跳过`。
+> 默认 `collect`/`report` **不**包含 `research` 维度；需显式 `--dims=...,research`。
+> 完整对照见项目根目录 [CONFIGURATION.md](../../../CONFIGURATION.md)。
