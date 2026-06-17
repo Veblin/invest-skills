@@ -44,8 +44,9 @@ cp .env.example .env
 |------|---------|------------------|
 | **无 Token** | 不配置 | 腾讯行情、baostock K 线；财务/资金/市场结构高分接口标注跳过 |
 | **≥ 120** | 注册 + 完善资料 | `stock_basic`、`daily`（基本信息、行情、K 线） |
-| **≥ 2000** | 社区捐助约 200 元/年 | 财务指标、股东、估值历史、资金流向、北向、申万**分类**（`index_classify`）、沪深300 等 `index_daily` |
+| **≥ 2000** | 社区捐助约 200 元/年 | 财务指标、股东、估值历史、资金流向、北向、申万**分类**（`index_classify`）、沪深300 等 `index_daily`、**业绩预告（`forecast`）** |
 | **≥ 5000** | 更高捐助档位 | **`sw_daily` 申万行业日线**、**`opt_daily` 期权日线**（50ETF 认沽认购比） |
+| **≥ 10000** | 高捐助档位 / 特色数据包 | **`report_rc` 研报盈利预测**（含评级+目标价）、**特色大数据集** |
 
 ### 按功能模块（市场结构 / v0.1.3）
 
@@ -60,6 +61,8 @@ cp .env.example .env
 | 换手率 | `daily_basic` | 2000 | 因子跳过 |
 | ERP（沪深300 PE） | `index_dailybasic` | **4000** | 部分可得 / 标注 partial |
 | 50ETF 认沽认购比 | `opt_daily` | **5000** | 因子跳过 |
+| 机构研报评级+目标价 | `report_rc` | **10000**（特色大数据）| 降级至 forecast（业绩预告）→ akshare → 跳过 |
+| 业绩预告（公司披露） | `forecast` | **2000** | 降级至 akshare → 跳过 |
 
 说明：
 
@@ -76,6 +79,9 @@ cp .env.example .env
 ```bash
 # 采集维度裁剪（从 code/ 目录运行）
 python3 skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote
+
+# 机构研报维度（非默认，显式启用）
+python3 skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote,research
 
 # 扩展日期范围
 python3 skills/invest-A/scripts/invest.py collect 600176  # 默认范围已自动计算

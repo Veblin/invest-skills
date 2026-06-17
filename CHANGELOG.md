@@ -4,6 +4,7 @@
 
 ### Fixed / Docs
 
+- **`research` 维度（机构研报）**：`collect_research()` 按 Tushare 积分顺序降级（`report_rc` → `forecast` → akshare）；高阶成功跳过低阶 API；报告以「卖方预期价位」等 LAW 6 合规表述展示第三方一致预期；需 `--dims=...,research` 显式启用
 - **Tushare `sw_daily` 积分门槛更正为 5000**（[官方文档](https://tushare.pro/document/2?doc_id=327)）；2000 分档自动回退 akshare `index_hist_sw`，`availability` 标注回退原因
 - **CONFIGURATION.md** 补充 Tushare 积分与功能对照表
 - **`opt_daily`** 文档与提示同步为 5000 积分

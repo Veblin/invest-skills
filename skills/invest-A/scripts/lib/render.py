@@ -246,6 +246,7 @@ def render_report_v2(collection: dict[str, Any], symbol: str) -> str:
         render_valuation_section(dims, collection),
         _section_flow(dims, collection),
         render_technical_section(dims, collection),
+        _section_research_summary(collection, symbol, dims),
         _section_events_placeholder(),
         _section_thesis_placeholder(dims),
         _references_appendix(collection),
@@ -3252,6 +3253,122 @@ def _pe_band_markdown_table(
     return "\n".join(lines)
 
 
+def _classify_sellside_rating(rating: str) -> str:
+    """卖方评级归类（LAW 6：输出侧避免「买入」「目标价」字面）。"""
+    s = str(rating)
+    if "卖" in s or "减持" in s:
+        return "看空"
+    if "中性" in s:
+        return "中性"
+    if "增持" in s or "持有" in s:
+        return "温和看多"
+    if "买" in s:
+        return "偏多"
+    return "其他"
+
+
+def _section_research_summary(
+    collection: dict[str, Any], symbol: str, dims: dict,
+) -> str:
+    """机构研报与盈利预测展示段。
+
+    数据来自 collect_research() → dims["research"] → research_summary。
+    三层权限降级展示：
+      1️⃣ 有评级+卖方预期价位（Tushare 10000+积分 / report_rc）
+      2️⃣ 仅业绩预告（Tushare 2000+积分 / forecast）
+      3️⃣ 全部不可得 → 无展示
+    """
+    del collection, symbol  # 签名与 v3 其他 section 一致
+    research_dim = dims.get("research", {})
+    summary = research_dim.get("research_summary") or {}
+    status = summary.get("status", "no_data")
+
+    if status == "no_data":
+        return ""
+
+    lines: list[str] = []
+    body: list[str] = []
+
+    if status == "ok":
+        ratings = summary.get("latest_ratings") or []
+        if ratings:
+            buckets: dict[str, int] = {}
+            for r in ratings:
+                label = _classify_sellside_rating(r.get("rating", ""))
+                buckets[label] = buckets.get(label, 0) + 1
+            parts = [f"{k} {v}" for k, v in buckets.items() if v]
+            body.append(
+                f"- **机构覆盖:** 近半年 {len(ratings)} 条评级（{' / '.join(parts)}）"
+            )
+
+        tp = summary.get("target_price_range")
+        if tp:
+            upper_note = ""
+            if tp.get("avg_upper") is not None:
+                upper_note = f"（卖方上限均值 {tp['avg_upper']} 元）"
+            body.append(
+                f"- **卖方预期价位:** {tp['min']} – {tp['max']} 元{upper_note}"
+            )
+
+        eps_forecasts = summary.get("eps_forecasts", [])
+        if eps_forecasts:
+            eps_rows = " | ".join(
+                f"{e['quarter']}: {e['avg_eps']}（{e['n_analysts']}家）"
+                for e in eps_forecasts[:4]
+            )
+            body.append(f"- **EPS预测（均值）:** {eps_rows}")
+
+        if not body:
+            return ""
+
+    elif status == "ok_guidance_only" and summary.get("company_guidance"):
+        g = summary["company_guidance"]
+        pct_min = g.get("pct_change_min")
+        pct_max = g.get("pct_change_max")
+        profit_min = g.get("profit_min_100m")
+        profit_max = g.get("profit_max_100m")
+        guide_type = g.get("type", "")
+
+        body.append(f"- **公司业绩预告:** {guide_type}")
+        _pct_min = f"{pct_min}" if pct_min is not None else "?"
+        _pct_max = f"{pct_max}" if pct_max is not None else "?"
+        if profit_min is not None:
+            body.append(
+                f"  - 预计归母净利 **{profit_min}–{profit_max} 亿元**"
+                f"（同比 {_pct_min}%–{_pct_max}%）"
+            )
+        else:
+            body.append(
+                f"  - 同比变动 {_pct_min}%–{_pct_max}%（利润率变动未披露）"
+            )
+
+    elif status == "ok_limited":
+        body.append(f"- {summary.get('summary_text', '东方财富研报记录（无结构化评级摘要）')}")
+
+    else:
+        return ""
+
+    lines.append("## 机构观点与盈利预测\n")
+    lines.extend(body)
+
+    from datetime import datetime
+    source_label = {
+        "ok": "Tushare report_rc（10000+积分/特色大数据）",
+        "ok_guidance_only": "Tushare forecast（2000+积分）",
+        "ok_limited": "akshare（东方财富研报摘要，免注册）",
+    }.get(status, "")
+    if source_label:
+        lines.append(
+            f"\n> **数据来源:** {source_label} | 获取日期: {datetime.now().strftime('%Y-%m-%d')}"
+        )
+
+    lines.append(
+        "\n🔍 **待独立验证:** 机构评级存在利益冲突，卖方预期价位不代表股价必然到达。"
+        "业绩预告为公司单方披露，未经审计。"
+    )
+    return "\n".join(lines)
+
+
 def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
     """v0.1.3 九模块研究备忘录。"""
     dims = _index_dims(collection)
@@ -3272,6 +3389,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
         _section_market_structure(
             collection, symbol, market_structure, val_cache=val_cache,
         ),
+        _section_research_summary(collection, symbol, dims),
         _wrap_details(
             "展开：静态基本面（12题）",
             _section_static_fundamentals(dims, collection, val_cache=val_cache),
@@ -3685,6 +3803,46 @@ def _html_holders(holders_html: str) -> str:
     <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">持股比例</div>
     {holders_html}
     <div class="vnote" style="margin-top:var(--space-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>报告期数据约有1季度滞后，以公司公告为准。</div>
+  </div>
+</section>'''
+
+
+def _html_research(research_md: str) -> str:
+    """机构观点 HTML 段；无数据时返回空字符串。"""
+    if not research_md:
+        return ""
+    import html as _html_mod
+    body_lines: list[str] = []
+    for line in research_md.splitlines():
+        if line.startswith("## "):
+            continue
+        if line.startswith("> "):
+            body_lines.append(
+                f'<div class="vnote" style="margin-top:var(--space-3)">'
+                f'{_html_mod.escape(line[2:])}</div>'
+            )
+        elif line.startswith("- "):
+            body_lines.append(
+                f'<div style="font-size:var(--text-sm);margin-bottom:var(--space-2)">'
+                f'{_html_mod.escape(line[2:])}</div>'
+            )
+        elif line.startswith("  - "):
+            body_lines.append(
+                f'<div style="font-size:var(--text-sm);margin-left:var(--space-4);'
+                f'margin-bottom:var(--space-1);color:var(--tx-s)">'
+                f'{_html_mod.escape(line[4:])}</div>'
+            )
+        elif line.strip():
+            body_lines.append(
+                f'<div style="font-size:var(--text-sm);color:var(--tx-s)">'
+                f'{_html_mod.escape(line)}</div>'
+            )
+    if not body_lines:
+        return ""
+    return f'''<section id="research">
+  <div class="sh"><span class="st">机构观点与盈利预测</span><div class="sd"></div><span class="ss">卖方一致预期 · 公司业绩预告</span></div>
+  <div class="card">
+    {"".join(body_lines)}
   </div>
 </section>'''
 
@@ -4372,6 +4530,8 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     northbound = _html_northbound(nb_html)
     holders_sec = _html_holders(holders_html)
 
+    research_md = _section_research_summary(collection, symbol, dims)
+    research_sec = _html_research(research_md)
     events_sec = _html_events()
     refs_sec = _html_refs(ref_rows)
     risk_banner = _html_risk_banner()
@@ -4420,6 +4580,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 {technicals}
 {northbound}
 {holders_sec}
+{research_sec}
 {events_sec}
 {refs_sec}
 {disclaimer}
