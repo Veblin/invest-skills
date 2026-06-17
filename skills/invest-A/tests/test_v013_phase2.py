@@ -376,7 +376,7 @@ class TestRenderFundamentals:
         assert "空头逻辑链" in mod5
         assert "关键分歧点" in mod5
         assert "预期差" in mod5
-        assert "三层风险信号" in mod7
+        assert "报表风险（Financial Statement）" in mod7
         assert "Known Unknowns" in mod7
 
     def test_nine_modules_all_present(self):

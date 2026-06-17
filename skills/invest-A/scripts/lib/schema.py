@@ -16,7 +16,14 @@ DIMENSIONS = {
     "northbound": "北向资金",
     "kline": "日K线",
     "valuation": "估值分析",
+    "research": "机构研报",
 }
+
+# research 维度在 to_legacy_dict 之外附加的汇总字段（collect_research）
+RESEARCH_SUMMARY_KEYS = (
+    "status", "source", "summary_text", "latest_ratings",
+    "target_price_range", "eps_forecasts", "profit_forecasts", "company_guidance",
+)
 
 
 def source_confidence(source: str, dimension: str) -> str:

@@ -28,6 +28,9 @@ jobs:
       - name: Run environment check
         run: uv run python skills/invest-A/scripts/invest.py diagnose --json
 
+      - name: Verify version consistency
+        run: bash skills/invest-A/scripts/check-version.sh
+
       - name: Run test suite
         run: uv run pytest
 
