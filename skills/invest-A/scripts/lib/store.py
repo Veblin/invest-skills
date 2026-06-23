@@ -16,6 +16,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from . import env
+from .json_util import dumps_json, json_default
 
 DB_PATH = env.STORE_DB
 SCHEMA_VERSION = 1
@@ -55,6 +56,13 @@ def init_db() -> None:
                 symbol TEXT NOT NULL, dimension TEXT NOT NULL, source TEXT,
                 confidence TEXT, summary TEXT, created_at TEXT DEFAULT (datetime('now')));
             CREATE INDEX IF NOT EXISTS idx_f_sym ON findings(symbol);
+            CREATE TABLE IF NOT EXISTS pipeline_states (
+                symbol TEXT NOT NULL,
+                step TEXT NOT NULL,
+                state_json TEXT,
+                completed_at TEXT,
+                PRIMARY KEY (symbol, step)
+            );
         """)
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
@@ -76,14 +84,14 @@ def save_collection(result: dict[str, Any]) -> int:
         cur = c.execute(
             "INSERT INTO collections (symbol,name,fetched_at,dimensions_total,dimensions_ok,raw_json) VALUES (?,?,?,?,?,?)",
             (symbol, name, result.get("fetched_at", ""), sm.get("total", 0), sm.get("available", 0),
-             json.dumps(result, ensure_ascii=False, default=str)))
+             dumps_json(result)))
         cid = cur.lastrowid
         for d in dims:
             data = d.get("data")
             if isinstance(data, dict):
                 # 字典截取安全：只保留前 5 个 key 的值
                 small = {k: data[k] for k in list(data.keys())[:5]}
-                summary = json.dumps(small, ensure_ascii=False, default=str)
+                summary = json.dumps(small, ensure_ascii=False, default=json_default)
             elif isinstance(data, list):
                 summary = f"{len(data)} 条记录"
             else:
@@ -131,6 +139,76 @@ def clear_all() -> None:
         c.execute("BEGIN")
         c.execute("DELETE FROM findings")
         c.execute("DELETE FROM collections")
+        c.execute("DELETE FROM pipeline_states")
+        c.commit()
+    finally:
+        c.close()
+
+
+# ---- Pipeline 断点续跑状态 ----
+
+def save_pipeline_step(symbol: str, step: str, state: dict | None = None) -> None:
+    """保存流水线步骤状态。"""
+    init_db()
+    c = _conn()
+    try:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        state_json = (
+            json.dumps(state, ensure_ascii=False, default=json_default) if state else None
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO pipeline_states (symbol, step, state_json, completed_at) VALUES (?, ?, ?, ?)",
+            (symbol, step, state_json, now),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+
+def load_pipeline_step(symbol: str, step: str) -> dict | None:
+    """加载流水线步骤状态。返回 state dict 或 None。"""
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT state_json, completed_at FROM pipeline_states WHERE symbol = ? AND step = ?",
+            (symbol, step),
+        ).fetchone()
+        if row is None:
+            return None
+        result: dict = {"completed_at": row["completed_at"]}
+        if row["state_json"]:
+            try:
+                result["state"] = json.loads(row["state_json"])
+            except (json.JSONDecodeError, TypeError):
+                result["state"] = {}
+        else:
+            result["state"] = {}
+        return result
+    finally:
+        c.close()
+
+
+def get_pipeline_progress(symbol: str) -> dict[str, bool]:
+    """获取某 symbol 的流水线进度。返回 {step: completed}。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT step, completed_at FROM pipeline_states WHERE symbol = ?",
+            (symbol,),
+        ).fetchall()
+        return {row["step"]: row["completed_at"] is not None for row in rows}
+    finally:
+        c.close()
+
+
+def clear_pipeline_state(symbol: str) -> None:
+    """清除某 symbol 的全部流水线状态。"""
+    init_db()
+    c = _conn()
+    try:
+        c.execute("DELETE FROM pipeline_states WHERE symbol = ?", (symbol,))
         c.commit()
     finally:
         c.close()

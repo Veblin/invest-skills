@@ -1,6 +1,6 @@
 {
   "name": "invest-A",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A股多因子交叉验证投研助手。九模块研究备忘录（动态驱动/市场结构/左右侧概率），每条数据引用来源，不做买卖建议。",
   "author": {
     "name": "Veblin",

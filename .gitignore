@@ -21,6 +21,8 @@ evidence/*.json
 
 # Test artifacts
 .pytest_cache/
+.baoyu-skills/
+cover-image/
 htmlcov/
 host-docs/
 .coverage
@@ -28,6 +30,7 @@ host-docs/
 
 # Build / release artifacts
 dist/
+diagram/
 
 # invest.py report 
 reports/

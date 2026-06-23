@@ -606,6 +606,139 @@ def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
         return None
 
 
+# ---- akshare 行业数据查询辅助 ----
+
+
+def _q_akshare_industry_board(symbol: str, industry_name: str = "") -> dict | None:
+    """获取个股所属行业板块的近期行情（akshare 东方财富）。
+
+    Returns:
+        dict with keys: industry_name, board_code, recent_return_pct
+        或 None（采集失败时）
+    """
+    if not env.is_akshare_available() or not akshare_push2_available():
+        return None
+    try:
+        with akshare_direct_session():
+            import akshare as ak
+            # 获取行业板块列表
+            df = ak.stock_board_industry_name_em()
+            if df is None or df.empty:
+                return None
+
+            # 获取个股所属行业（优先使用预取，避免重复 API）
+            if not industry_name:
+                info = _q_akshare_basic(symbol)
+                if not info:
+                    return None
+                industry_name = info.get("行业") or info.get("industry", "")
+            if not industry_name:
+                return None
+
+            # 在板块列表中匹配行业
+            matched = df[df["板块名称"].str.contains(industry_name, na=False)]
+            if matched.empty:
+                # 模糊匹配
+                for _, row in df.iterrows():
+                    name = str(row.get("板块名称", ""))
+                    if industry_name in name or name in industry_name:
+                        matched = df[df["板块名称"] == name]
+                        break
+
+            if matched.empty:
+                return {"industry_name": industry_name, "board_code": None,
+                        "note": "未在板块列表中找到匹配"}
+
+            board_name = str(matched.iloc[0]["板块名称"])
+            board_code = str(matched.iloc[0]["板块代码"])
+
+            # 获取板块历史行情（近30日）
+            try:
+                hist = ak.stock_board_industry_hist_em(
+                    symbol=board_name,
+                    period="日k",
+                    start_date=_days_ago(30)[:4] + "-" + _days_ago(30)[4:6] + "-" + _days_ago(30)[6:],
+                    end_date=_today()[:4] + "-" + _today()[4:6] + "-" + _today()[6:],
+                    adjust="",
+                )
+                if hist is not None and not hist.empty:
+                    closes = [float(v) for v in hist["收盘"].tolist() if v is not None]
+                    recent_ret = None
+                    if len(closes) >= 2 and closes[0] != 0:
+                        recent_ret = (closes[-1] - closes[0]) / closes[0] * 100
+                    return {
+                        "industry_name": industry_name,
+                        "board_name": board_name,
+                        "board_code": board_code,
+                        "recent_return_pct": round(recent_ret, 2) if recent_ret is not None else None,
+                        "trading_days_in_window": len(closes),
+                        "source": "akshare.stock_board_industry_hist_em",
+                    }
+            except Exception as exc:
+                logger.debug("akshare board hist failed for %s: %s", board_name, exc)
+
+            return {
+                "industry_name": industry_name,
+                "board_name": board_name,
+                "board_code": board_code,
+                "source": "akshare.stock_board_industry_name_em",
+            }
+    except Exception as exc:
+        logger.debug("akshare industry board failed for %s: %s", symbol, exc)
+        return None
+
+
+def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
+    """获取行业PE中位数（akshare/巨潮资讯）。
+
+    Returns:
+        dict with: industry_pe_median, industry_pe_avg, company_pe, relative_position
+        或 None
+    """
+    if not env.is_akshare_available() or not akshare_push2_available():
+        return None
+    try:
+        with akshare_direct_session():
+            import akshare as ak
+            df = ak.stock_board_industry_pe_ratio_cninfo()
+            if df is None or df.empty:
+                return None
+
+            # 获取个股行业（优先使用预取）
+            if not industry_name:
+                info = _q_akshare_basic(symbol)
+                if not info:
+                    return None
+                industry_name = info.get("行业") or info.get("industry", "")
+
+            # 匹配行业PE
+            matched = df[df["行业名称"].str.contains(industry_name, na=False)]
+            if matched.empty:
+                for _, row in df.iterrows():
+                    name = str(row.get("行业名称", ""))
+                    if industry_name in name or name in industry_name:
+                        matched = df[df["行业名称"] == name]
+                        break
+
+            if matched.empty:
+                return {"industry_name": industry_name, "note": "未匹配到行业PE数据"}
+
+            row = matched.iloc[0]
+            pe_median = safe_float(row.get("市盈率中位数") or row.get("市盈率"))
+            pe_avg = safe_float(row.get("市盈率平均值"))
+
+            return {
+                "industry_name": str(row.get("行业名称", "")),
+                "industry_pe_median": pe_median,
+                "industry_pe_avg": pe_avg,
+                "stock_count": safe_float(row.get("公司数量")),
+                "source": "akshare.stock_board_industry_pe_ratio_cninfo",
+            }
+    except Exception as exc:
+        logger.debug("akshare industry PE failed for %s: %s", symbol, exc)
+        return None
+
+
 def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list[str]:
     """返回最近 count 个已结束季末日期（YYYYMMDD），用于股东多期查询。"""
     import calendar
@@ -1351,6 +1484,59 @@ def collect_research(symbol: str) -> dict:
     return dim_dict
 
 
+def collect_industry(symbol: str) -> dict:
+    """行业级数据采集：行业指数、行业PE、行业资金流向。
+
+    依赖 akshare 东方财富接口。akshare 不可用时返回 missing。
+    """
+    dim_val = "industry"
+    tasks: list[tuple[str, Callable]] = []
+
+    industry_name = ""
+    if env.is_akshare_available() and akshare_push2_available():
+        info = _q_akshare_basic(symbol)
+        if info:
+            industry_name = info.get("行业") or info.get("industry", "") or ""
+
+    # 行业板块历史行情（个股所属行业指数）
+    if env.is_akshare_available() and akshare_push2_available():
+        ind = industry_name
+        tasks.append(("akshare.stock_board_industry_hist_em",
+                      lambda i=ind: _q_akshare_industry_board(symbol, industry_name=i)))
+        tasks.append(("akshare.stock_board_industry_pe_ratio_cninfo",
+                      lambda i=ind: _q_akshare_industry_pe(symbol, industry_name=i)))
+
+    if not tasks:
+        return {
+            "dimension": dim_val,
+            "display": "行业数据",
+            "data": None,
+            "status": "missing",
+            "error": "无可用行业数据源（需 akshare + 东方财富 push2 可用）",
+            "_meta": {"source": "none", "success": False,
+                      "all_sources": [], "multi_source": False,
+                      "source_count": 0},
+        }
+
+    results = _run_sources_parallel(tasks, dim_val)
+    dim = DimensionResult(dim_val, results)
+    dim_dict = dim.to_legacy_dict()
+    merged: dict = {}
+    sources_ok: list[str] = []
+    for r in results:
+        if r.data and isinstance(r.data, dict):
+            merged.update(r.data)
+            sources_ok.append(r.source)
+    if merged:
+        dim_dict["data"] = merged
+        if len(sources_ok) > 1:
+            meta = dim_dict.setdefault("_meta", {})
+            meta["source"] = "merged:" + "+".join(sources_ok)
+            meta["merged_sources"] = sources_ok
+            meta["multi_source"] = True
+    return dim_dict
+
+
 # ---- 全维度采集 ----
 
 COLLECTORS = {
@@ -1362,6 +1548,7 @@ COLLECTORS = {
     "kline": ("日K线", collect_kline),
     "valuation": ("估值分析", collect_valuation),
     "research": ("机构研报", collect_research),
+    "industry": ("行业数据", collect_industry),  # R-11: NEW
 }
 
 _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
@@ -1369,7 +1556,9 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
 
 
 def collect_all(symbol: str, dims: list[str] | None = None,
-                deep: bool = False) -> dict[str, Any]:
+                deep: bool = False,
+                with_macro: bool = False,
+                with_chain: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
@@ -1379,6 +1568,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         symbol: 股票代码
         dims: 维度列表，None 使用默认（含 valuation + kline）
         deep: 深度模式，kline 扩大到 730 自然日
+        with_macro: 采集中国宏观指标（PMI/CPI/PPI/LPR）
+        with_chain: 采集产业链上下文（复用已采集的 basic_info）
     """
     if dims is None:
         dims = list(_DEFAULT_DIMS)
@@ -1423,7 +1614,68 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # 按输入顺序排列
     dimensions = [dim_results.get(d) for d in dims if d in COLLECTORS]
 
-    has_data = sum(1 for d in dimensions if d and d.get("data") is not None and d.get("status") != "partial")
+    # R-08: RRF 多源融合
+    fusion_results: dict[str, Any] = {}
+    try:
+        from .fusion import (
+            dimension_results_from_legacy,
+            fuse_from_legacy_dicts,
+            fuse_from_source_results,
+            fusion_results_to_dict,
+        )
+        dim_result_map = dimension_results_from_legacy(dimensions)
+        if dim_result_map:
+            fusion_raw = fuse_from_source_results(dim_result_map)
+        else:
+            fusion_raw = fuse_from_legacy_dicts(dimensions)
+        fusion_results = fusion_results_to_dict(fusion_raw)
+        if fusion_results:
+            logger.info(
+                "fusion: %d dimensions fused for %s",
+                len(fusion_results), symbol,
+            )
+    except Exception as exc:
+        logger.warning("fusion failed for %s: %s", symbol, exc)
+
+    # R-09: 证据可信度评分
+    credibility_scores: dict[str, float] = {}
+    try:
+        from .rerank import score_all_dimensions
+        credibility_scores = score_all_dimensions(dimensions)
+    except Exception as exc:
+        logger.warning("rerank scoring failed for %s: %s", symbol, exc)
+
+    # R-12: 宏观数据采集（层5，opt-in）
+    macro_context: dict[str, Any] = {}
+    if with_macro:
+        try:
+            from .macro import collect_macro_context
+            macro_context = collect_macro_context(symbol)
+        except Exception as exc:
+            logger.warning("macro context collection failed for %s: %s", symbol, exc)
+            macro_context = {"status": "error", "error": str(exc)}
+
+    # R-12: 产业链数据（层3+4，opt-in）
+    chain_context: dict[str, Any] = {}
+    if with_chain:
+        try:
+            from .chain import collect_chain_context
+            basic_dim = dim_results.get("basic_info") or {}
+            basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
+            industry = ""
+            if isinstance(basic_data, dict):
+                industry = basic_data.get("industry", "") or basic_data.get("行业", "")
+            chain_context = collect_chain_context(
+                symbol, industry=industry, basic_data=basic_data,
+            )
+        except Exception as exc:
+            logger.warning("chain context collection failed for %s: %s", symbol, exc)
+            chain_context = {"status": "error", "error": str(exc)}
+
+    has_data = sum(
+        1 for d in dimensions
+        if d and d.get("data") is not None and d.get("status") in ("available", "partial")
+    )
     partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
     missing = sum(1 for d in dimensions if d and (d.get("data") is None and d.get("status") != "partial"))
 
@@ -1431,11 +1683,18 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         "symbol": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "dimensions": dimensions or [],
+        "fusion": fusion_results,  # R-08: RRF 多源融合
+        "credibility": credibility_scores,  # R-09: 证据可信度评分
+        "macro_context": macro_context,  # R-12
+        "chain_context": chain_context,  # R-12
         "summary": {
             "total": len(dimensions),
             "available": has_data,
             "degraded": partial,
             "missing": missing,
+            "all_partial": (
+                has_data > 0 and partial == has_data and missing == 0
+            ),
         },
     }
     try:
