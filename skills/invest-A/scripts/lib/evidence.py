@@ -42,12 +42,15 @@ def _format_value(data) -> str:
     return "有数据"
 
 
-def _format_source_value(source_entry: dict, fallback_data) -> str:
-    """按渠道格式化值摘要（优先 scalar_value）。"""
+def _format_source_value(source_entry: dict) -> str:
+    """按渠道格式化值摘要（仅用该源自身数据，不回退到维度主源）。"""
     sv = source_entry.get("scalar_value")
     if sv is not None:
         return f"scalar={float(sv):.4g}"
-    return _format_value(fallback_data)
+    src_data = source_entry.get("data")
+    if src_data is not None:
+        return _format_value(src_data)
+    return "无标量摘要"
 
 
 def _confidence_label(confidence: str) -> str:
@@ -85,7 +88,7 @@ def build_evidence_table(dimensions: list[dict]) -> list[EvidenceRow]:
                     rows.append(EvidenceRow(
                         dimension=display,
                         channel=src_name,
-                        value_summary=_format_source_value(s, dim.get("data")),
+                        value_summary=_format_source_value(s),
                         confidence=_confidence_label(confidence),
                         source_count=len(all_src),
                         cross_validation=cv_label,

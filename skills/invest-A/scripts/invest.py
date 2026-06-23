@@ -68,6 +68,23 @@ except ImportError:
     _HAS_ARCHIVER = False
 
 
+def _plan_sort_key(module: dict) -> int:
+    """计划模块 priority；null/非法值视为最低优先级。"""
+    p = module.get("priority")
+    if isinstance(p, bool):
+        return 99
+    if isinstance(p, int):
+        return p
+    if isinstance(p, float) and p == int(p):
+        return int(p)
+    return 99
+
+
+def _collection_dimensions(cached: dict) -> list[dict]:
+    dims = cached.get("dimensions")
+    return dims if isinstance(dims, list) else []
+
+
 def _dims_from_args(args: argparse.Namespace) -> list[str]:
     """从 --plan 文件或 --dims 解析维度列表。"""
     plan_path = getattr(args, "plan", "") or ""
@@ -79,9 +96,9 @@ def _dims_from_args(args: argparse.Namespace) -> list[str]:
             if modules:
                 return [
                     m["module_id"]
-                    for m in sorted(modules, key=lambda x: x.get("priority", 99))
+                    for m in sorted(modules, key=_plan_sort_key)
                 ]
-        except (OSError, json.JSONDecodeError, KeyError) as exc:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
             print(f"⚠️ 无法读取计划文件 {plan_path}: {exc}", file=sys.stderr)
     return [d.strip() for d in args.dims.split(",") if d.strip()]
 
@@ -125,7 +142,13 @@ def _apply_deep_dims(dims: list[str], deep: bool) -> list[str]:
 def _normalize_collection_for_render(payload: dict) -> dict:
     """统一 credibility / credibility_scores 别名，供 render 消费。"""
     out = dict(payload)
-    cred = out.get("credibility") or out.get("credibility_scores") or {}
+    cred_a = out.get("credibility")
+    cred_b = out.get("credibility_scores")
+    if not isinstance(cred_a, dict):
+        cred_a = {}
+    if not isinstance(cred_b, dict):
+        cred_b = {}
+    cred = {**cred_b, **cred_a}
     out["credibility"] = cred
     out["credibility_scores"] = cred
     return out
@@ -154,7 +177,11 @@ def _resume_cache_compatible(
             issues.append("--with-macro 已启用但快照无宏观数据")
 
     if getattr(args, "deep", False):
-        dim_names = {d.get("dimension") for d in cached.get("dimensions", []) if d}
+        dim_names = {
+            d.get("dimension")
+            for d in _collection_dimensions(cached)
+            if d and d.get("dimension")
+        }
         if "industry" not in dim_names:
             issues.append("--deep 已启用但快照无 industry 维度")
 
@@ -301,9 +328,6 @@ def cmd_collect(args: argparse.Namespace) -> int:
             result = cached
             _warn_degraded_collection(result)
             print(render.render(result, args.symbol, "compact"))
-            if args.store:
-                store_mod.save_collection(result)
-                print("💾 已存入持久化存储")
             if getattr(args, "save_raw", False):
                 try:
                     from lib.archiver import archive_collection

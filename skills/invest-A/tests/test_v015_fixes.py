@@ -71,6 +71,16 @@ class TestNormalizeCollection:
         assert out["credibility"] == {"quote": 80.0}
         assert out["credibility_scores"] == {"quote": 80.0}
 
+    def test_merges_both_credibility_keys(self):
+        import invest
+
+        out = invest._normalize_collection_for_render({
+            "credibility": {"dim1": 80.0},
+            "credibility_scores": {"dim1": 60.0, "dim2": 90.0},
+        })
+        assert out["credibility"]["dim1"] == 80.0
+        assert out["credibility"]["dim2"] == 90.0
+
 
 class TestRenderAttachExtras:
     def test_offline_skips_market_structure_fetch(self):
@@ -428,3 +438,143 @@ class TestExecutiveSummary:
         # Should still produce valid output even without basic_info
         assert "执行摘要" in output
         assert "核心矛盾" in output
+
+
+class TestCodeReviewFixes:
+    """Regression tests for code-review items #1–#10."""
+
+    def test_dims_from_args_null_priority(self, tmp_path):
+        import argparse
+        import invest
+
+        plan = tmp_path / "plan.json"
+        plan.write_text(json.dumps({
+            "modules": [
+                {"module_id": "quote", "priority": None},
+                {"module_id": "basic_info", "priority": 1},
+            ],
+        }), encoding="utf-8")
+        args = argparse.Namespace(
+            plan=str(plan),
+            dims="financials",
+        )
+        assert invest._dims_from_args(args) == ["basic_info", "quote"]
+
+    def test_resume_compatible_null_dimensions(self, isolated_store):
+        import argparse
+        import invest
+
+        args = argparse.Namespace(symbol="600176", with_macro=False, deep=False)
+        cached = {"symbol": "600176", "dimensions": None}
+        assert invest._resume_cache_compatible(args, ["quote"], cached) is True
+
+    def test_diff_collections_null_raw_json(self):
+        from lib.store import diff_collections
+
+        old = {"id": 1, "raw_json": None, "fetched_at": "2026-01-01"}
+        new = {
+            "id": 2,
+            "raw_json": {
+                "symbol": "600176",
+                "dimensions": [
+                    {"dimension": "quote", "data": {"close": 10.0}, "display": "行情"},
+                ],
+            },
+            "fetched_at": "2026-01-02",
+        }
+        result = diff_collections(old, new)
+        assert result["symbol"] == "600176"
+        assert any(s["reason"] == "旧快照不含此维度" for s in result["skipped"])
+
+    def test_evidence_per_source_no_primary_fallback(self):
+        from lib.evidence import build_evidence_table
+
+        dims = [{
+            "dimension": "basic_info",
+            "display": "基本信息",
+            "data": {"name": "主源名称"},
+            "_meta": {
+                "all_sources": [
+                    {
+                        "source": "tushare.stock_basic",
+                        "data_available": True,
+                        "confidence": "high",
+                        "data": {"name": "源A"},
+                    },
+                    {
+                        "source": "akshare.stock_individual_info_em",
+                        "data_available": True,
+                        "confidence": "medium",
+                        "data": {"name": "源B"},
+                    },
+                ],
+            },
+        }]
+        rows = build_evidence_table(dims)
+        summaries = {r.channel: r.value_summary for r in rows}
+        assert "源A" in summaries["tushare.stock_basic"]
+        assert "源B" in summaries["akshare.stock_individual_info_em"]
+        assert "主源名称" not in summaries["akshare.stock_individual_info_em"]
+
+    def test_extract_scalar_northbound_list_net_mf_vol(self):
+        from lib.schema import _extract_scalar
+
+        data = [{"trade_date": "20260101", "net_mf_vol": 5e7}]
+        assert _extract_scalar(data) == 5e7
+
+    def test_extract_scalar_zero_net_mf_vol(self):
+        from lib.schema import _extract_scalar
+
+        assert _extract_scalar({"net_mf_vol": 0.0}) == 0.0
+        assert _extract_scalar([{"net_mf_vol": 0.0}]) == 0.0
+
+    def test_fuse_legacy_skips_invalid_scalar(self):
+        from lib.fusion import fuse_from_legacy_dicts
+
+        dimensions = [{
+            "dimension": "quote",
+            "_meta": {
+                "all_sources": [
+                    {"source": "a", "scalar_value": 10.0},
+                    {"source": "b", "scalar_value": "N/A"},
+                    {"source": "c", "scalar_value": 10.5},
+                ],
+            },
+        }]
+        fused = fuse_from_legacy_dicts(dimensions)
+        assert "quote" in fused
+        assert set(fused["quote"].source_values.keys()) == {"a", "c"}
+
+    def test_collect_resume_store_no_duplicate(self, isolated_store, monkeypatch):
+        import argparse
+        import invest
+
+        payload = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-22T00:00:00+00:00",
+            "dimensions": [{"dimension": "quote", "data": {"close": 1.0}, "status": "available", "_meta": {}}],
+            "summary": {"available": 1, "total": 1},
+        }
+        isolated_store.save_collection(payload)
+        isolated_store.save_pipeline_step("600176", "collect", {
+            "dims": ["quote"], "with_macro": False, "deep": False,
+        })
+
+        args = argparse.Namespace(
+            symbol="600176",
+            resume=True,
+            store=True,
+            deep=False,
+            with_macro=False,
+            dims="quote",
+            plan="",
+            save_raw=False,
+        )
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(invest, "store_mod", isolated_store)
+        monkeypatch.setattr(invest, "_try_resume_collection", lambda _s: payload)
+        monkeypatch.setattr(invest.render, "render", lambda *a, **k: "ok")
+
+        assert invest.cmd_collect(args) == 0
+        rows = isolated_store.list_collections(symbol="600176")
+        assert len(rows) == 1

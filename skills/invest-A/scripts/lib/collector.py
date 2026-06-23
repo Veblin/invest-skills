@@ -662,15 +662,22 @@ def _q_akshare_industry_board(symbol: str, industry_name: str = "") -> dict | No
                     adjust="",
                 )
                 if hist is not None and not hist.empty:
-                    closes = [float(v) for v in hist["收盘"].tolist() if v is not None]
+                    closes = [
+                        f for v in hist["收盘"].tolist()
+                        if (f := safe_float(v)) is not None
+                    ]
                     recent_ret = None
                     if len(closes) >= 2 and closes[0] != 0:
-                        recent_ret = (closes[-1] - closes[0]) / closes[0] * 100
+                        recent_ret = safe_float(
+                            (closes[-1] - closes[0]) / closes[0] * 100,
+                        )
                     return {
                         "industry_name": industry_name,
                         "board_name": board_name,
                         "board_code": board_code,
-                        "recent_return_pct": round(recent_ret, 2) if recent_ret is not None else None,
+                        "recent_return_pct": (
+                            round(recent_ret, 2) if recent_ret is not None else None
+                        ),
                         "trading_days_in_window": len(closes),
                         "source": "akshare.stock_board_industry_hist_em",
                     }

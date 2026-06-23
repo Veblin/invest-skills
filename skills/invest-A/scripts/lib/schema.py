@@ -50,25 +50,46 @@ def source_confidence(source: str, dimension: str) -> str:
     return "medium"
 
 
+_SCALAR_KEYS = (
+    "value", "close", "price", "pe", "pe_ttm", "pb", "roe", "eps",
+    "net_mf_vol", "change_pct",
+)
+# 财务/资金流字段可为合法零值；close/price/pe 为 0 通常表示缺失
+_ZERO_OK_KEYS = frozenset({"change_pct", "roe", "eps", "net_mf_vol"})
+
+
+def _numeric_scalar(v: Any) -> float | None:
+    """将 int/float 转为 float，排除 bool（bool 是 int 子类）。"""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    return None
+
+
+def _scalar_key_usable(key: str, v: float) -> bool:
+    return v != 0.0 or key in _ZERO_OK_KEYS
+
+
 def _extract_scalar(data: Any) -> float | None:
     """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。"""
-    if isinstance(data, (int, float)):
-        return float(data)
+    num = _numeric_scalar(data)
+    if num is not None:
+        return num
     if isinstance(data, dict):
-        for key in ("value", "close", "price", "pe", "pe_ttm", "pb", "roe", "eps",
-                    "net_mf_vol", "change_pct"):
-            v = data.get(key)
-            if isinstance(v, (int, float)) and (v != 0.0 or key in ("change_pct",)):
-                return float(v)
+        for key in _SCALAR_KEYS:
+            v = _numeric_scalar(data.get(key))
+            if v is not None and _scalar_key_usable(key, v):
+                return v
     if isinstance(data, (list, tuple)) and len(data) == 1:
         return _extract_scalar(data[0])
     if isinstance(data, list) and data:
         last = data[-1]
         if isinstance(last, dict):
-            for key in ("close", "value", "pe_ttm", "pb", "roe", "eps"):
-                v = last.get(key)
-                if isinstance(v, (int, float)) and v != 0.0:
-                    return float(v)
+            for key in _SCALAR_KEYS:
+                v = _numeric_scalar(last.get(key))
+                if v is not None and _scalar_key_usable(key, v):
+                    return v
     return None
 
 
@@ -127,6 +148,7 @@ class SourceResult:
             "fetched_at": self.fetched_at,
             "data_available": self.data is not None,
             "scalar_value": _extract_scalar(self.data),
+            "data": self.data,
             "error": self.error,
             "latency_ms": self.latency_ms,
         }
