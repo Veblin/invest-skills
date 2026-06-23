@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# 跨源差异阈值（交叉验证与融合共用）
+CROSS_SOURCE_DIFF_THRESHOLD = 0.01
+_SCALAR_EPSILON = 1e-9
+
 
 # ---- 维度标识 ----
 
@@ -17,6 +21,7 @@ DIMENSIONS = {
     "kline": "日K线",
     "valuation": "估值分析",
     "research": "机构研报",
+    "industry": "行业数据",
 }
 
 # research 维度在 to_legacy_dict 之外附加的汇总字段（collect_research）
@@ -43,6 +48,35 @@ def source_confidence(source: str, dimension: str) -> str:
     if source == "tencent_finance":
         return "medium"
     return "medium"
+
+
+def _extract_scalar(data: Any) -> float | None:
+    """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。"""
+    if isinstance(data, (int, float)):
+        return float(data)
+    if isinstance(data, dict):
+        for key in ("value", "close", "price", "pe", "pe_ttm", "pb", "roe", "eps",
+                    "net_mf_vol", "change_pct"):
+            v = data.get(key)
+            if isinstance(v, (int, float)) and (v != 0.0 or key in ("change_pct",)):
+                return float(v)
+    if isinstance(data, (list, tuple)) and len(data) == 1:
+        return _extract_scalar(data[0])
+    if isinstance(data, list) and data:
+        last = data[-1]
+        if isinstance(last, dict):
+            for key in ("close", "value", "pe_ttm", "pb", "roe", "eps"):
+                v = last.get(key)
+                if isinstance(v, (int, float)) and v != 0.0:
+                    return float(v)
+    return None
+
+
+def relative_diff_pct(max_v: float, min_v: float, avg: float) -> float | None:
+    """相对差异比例 |max-min|/|avg|；avg 近零时返回 None。"""
+    if abs(avg) < _SCALAR_EPSILON:
+        return None
+    return abs(max_v - min_v) / abs(avg)
 
 
 # ---- 源结果（单个源的原始输出包装） ----
@@ -92,6 +126,7 @@ class SourceResult:
             "success": self.success,
             "fetched_at": self.fetched_at,
             "data_available": self.data is not None,
+            "scalar_value": _extract_scalar(self.data),
             "error": self.error,
             "latency_ms": self.latency_ms,
         }
@@ -111,6 +146,7 @@ class DimensionResult:
         "multi_source",  # bool: 是否有多个源成功
         "status",        # str: "available" | "partial" | "missing"
         "_primary",      # SourceResult | None
+        "cross_validation",  # CrossValidation | None
     )
 
     @staticmethod
@@ -146,6 +182,10 @@ class DimensionResult:
             self.multi_source = False
             self.status = "missing"
 
+        self.cross_validation = None
+        if self.multi_source and len(self.all_sources) >= 2:
+            self.cross_validation = _auto_cross_validate(self.dimension, self.all_sources)
+
     def to_legacy_dict(self) -> dict:
         """转为 collector.py 的旧版 dict 格式（兼容 render.py）。"""
         primary_meta = self._best_meta()
@@ -153,6 +193,10 @@ class DimensionResult:
         primary_meta["all_sources"] = all_src_dicts
         primary_meta["multi_source"] = self.multi_source
         primary_meta["source_count"] = sum(1 for s in self.all_sources if s.data is not None)
+        primary_meta["cross_validation"] = self.cross_validation.status if self.cross_validation else None
+        primary_meta["cross_validation_detail"] = (
+            self.cross_validation.detail if self.cross_validation else None
+        )
         return {
             "dimension": self.dimension,
             "display": self.display,
@@ -207,6 +251,46 @@ class DimensionResult:
             "source_group": "unknown",
             "fallback_chain": [],
         }
+
+
+# ---- R-01: 自动交叉验证 ----
+
+def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossValidation | None:
+    """自动检测多源数据差异。 >1% 差异 → divergence，否则 → convergence。
+
+    只对数值型维度做检测。返回 None 表示不适合交叉验证（如非数值维度）。
+    """
+    values = []
+    for s in sources:
+        if s.data is None:
+            continue
+        v = _extract_scalar(s.data)
+        if v is not None:
+            values.append((s.source, v))
+    if len(values) < 2:
+        return None
+
+    max_v, min_v = max(v for _, v in values), min(v for _, v in values)
+    avg = sum(v for _, v in values) / len(values)
+    diff_pct = relative_diff_pct(max_v, min_v, avg)
+    if diff_pct is None:
+        return None
+
+    if diff_pct > CROSS_SOURCE_DIFF_THRESHOLD:
+        return CrossValidation(
+            status="divergence",
+            code=f"{dimension}_diff",
+            data_pair=f"{min_v:.2f} vs {max_v:.2f}",
+            detail=f"跨源差异 {diff_pct * 100:.1f}%",
+            reliability="引擎自动检测",
+        )
+    return CrossValidation(
+        status="convergence",
+        code=f"{dimension}_agree",
+        data_pair=f"{avg:.2f}",
+        detail=f"N={len(values)} 源一致",
+        reliability="引擎自动检测",
+    )
 
 
 # ---- v0.1.3 动态投研内核数据结构 ----

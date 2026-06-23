@@ -46,24 +46,193 @@ except ImportError as e:
     import logging
     logging.getLogger(__name__).warning("store 模块导入失败（功能降级）: %s", e)
 
+try:
+    from lib import planner as planner_mod
+    _HAS_PLANNER = True
+except ImportError:
+    planner_mod = None
+    _HAS_PLANNER = False
+
+try:
+    from lib import evidence as evidence_mod
+    _HAS_EVIDENCE = True
+except ImportError:
+    evidence_mod = None
+    _HAS_EVIDENCE = False
+
+try:
+    from lib import archiver as archiver_mod
+    _HAS_ARCHIVER = True
+except ImportError:
+    archiver_mod = None
+    _HAS_ARCHIVER = False
+
+
+def _dims_from_args(args: argparse.Namespace) -> list[str]:
+    """从 --plan 文件或 --dims 解析维度列表。"""
+    plan_path = getattr(args, "plan", "") or ""
+    if plan_path:
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                pdata = json.load(f)
+            modules = pdata.get("modules", [])
+            if modules:
+                return [
+                    m["module_id"]
+                    for m in sorted(modules, key=lambda x: x.get("priority", 99))
+                ]
+        except (OSError, json.JSONDecodeError, KeyError) as exc:
+            print(f"⚠️ 无法读取计划文件 {plan_path}: {exc}", file=sys.stderr)
+    return [d.strip() for d in args.dims.split(",") if d.strip()]
+
+
+def _collect_kwargs(args: argparse.Namespace) -> dict:
+    deep = getattr(args, "deep", False)
+    with_macro = getattr(args, "with_macro", False)
+    return {
+        "deep": deep,
+        "with_macro": with_macro,
+        "with_chain": with_macro or deep,
+    }
+
+
+def _try_resume_collection(symbol: str) -> dict | None:
+    """--resume 时从 store 加载最近一次采集结果。"""
+    if not _HAS_STORE:
+        return None
+    progress = store_mod.get_pipeline_progress(symbol)
+    if not progress.get("collect"):
+        return None
+    rows = store_mod.list_collections(limit=1, symbol=symbol)
+    if not rows:
+        return None
+    rec = store_mod.get_collection(rows[0]["id"])
+    if rec and rec.get("raw_json"):
+        return rec["raw_json"]
+    return None
+
+
+def _apply_deep_dims(dims: list[str], deep: bool) -> list[str]:
+    out = list(dims)
+    if deep:
+        if "kline" not in out:
+            out.append("kline")
+        if "industry" not in out:
+            out.append("industry")
+    return out
+
+
+def _normalize_collection_for_render(payload: dict) -> dict:
+    """统一 credibility / credibility_scores 别名，供 render 消费。"""
+    out = dict(payload)
+    cred = out.get("credibility") or out.get("credibility_scores") or {}
+    out["credibility"] = cred
+    out["credibility_scores"] = cred
+    return out
+
+
+def _ensure_render_ready(collection: dict, symbol: str) -> None:
+    """补齐报告渲染所需字段（market_structure / phase2），写入 collection。"""
+    if not collection.get("market_structure"):
+        collector.attach_market_structure(collection, symbol)
+    collector.attach_phase2_extras(collection, symbol)
+
+
+def _resume_cache_compatible(
+    args: argparse.Namespace,
+    dims: list[str],
+    cached: dict,
+) -> bool:
+    """检查 store 快照是否与当前 CLI 标志兼容；不兼容时打印警告并返回 False。"""
+    issues: list[str] = []
+    symbol = getattr(args, "symbol", cached.get("symbol", ""))
+
+    if getattr(args, "with_macro", False):
+        macro = cached.get("macro_context") or {}
+        indicators = macro.get("indicators") or {}
+        if not any(indicators.values()):
+            issues.append("--with-macro 已启用但快照无宏观数据")
+
+    if getattr(args, "deep", False):
+        dim_names = {d.get("dimension") for d in cached.get("dimensions", []) if d}
+        if "industry" not in dim_names:
+            issues.append("--deep 已启用但快照无 industry 维度")
+
+    if _HAS_STORE:
+        step = store_mod.load_pipeline_step(symbol, "collect")
+        if step:
+            st = step.get("state") or {}
+            stored_dims = st.get("dims")
+            if stored_dims and set(stored_dims) != set(dims):
+                issues.append(
+                    f"维度与上次 collect 不一致（快照: {stored_dims}，当前: {dims}）"
+                )
+            if not st.get("with_macro") and getattr(args, "with_macro", False):
+                issues.append("--with-macro 已启用但上次 collect 未开启宏观")
+            if not st.get("deep") and getattr(args, "deep", False):
+                issues.append("--deep 已启用但上次 collect 未开启深度模式")
+
+    for msg in issues:
+        print(f"⚠️ --resume: {msg}，将重新采集", file=sys.stderr)
+    return not issues
+
+
+def _collect_pipeline_state(args: argparse.Namespace, dims: list[str]) -> dict:
+    return {
+        "dims": dims,
+        "with_macro": bool(getattr(args, "with_macro", False)),
+        "deep": bool(getattr(args, "deep", False)),
+    }
+
+
+def _warn_degraded_collection(result: dict) -> None:
+    """partial 维度有数据时提示降级，避免静默使用不可靠结果。"""
+    sm = result.get("summary") or {}
+    degraded = sm.get("degraded", 0)
+    total = sm.get("total", 0)
+    if degraded > 0:
+        print(
+            f"⚠️ {degraded}/{total} 个维度为降级（partial）状态，部分数据源失败",
+            file=sys.stderr,
+        )
+    if sm.get("all_partial"):
+        print("⚠️ 全部有数据维度均为 partial，交叉验证与融合可靠性受限", file=sys.stderr)
+
+
+def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--with-macro", action="store_true",
+        help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）",
+    )
+    parser.add_argument(
+        "--deep", action="store_true",
+        help="深度模式：扩大K线范围，增加行业/产业链分析",
+    )
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="A股个股调研数据采集与分析")
+    p.add_argument("--plan", default="", help="JSON 采集计划文件路径")
+    p.add_argument("--mode", default="full", choices=["brief", "full"],
+                   help="报告模式: brief(简报) / full(完整九模块)")
+    p.add_argument("--resume", action="store_true", help="从上次中断的步骤继续")
+    p.add_argument("--save-raw", action="store_true",
+                   help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
     sub = p.add_subparsers(dest="command", required=True)
 
     pc = sub.add_parser("collect", help="采集多维度数据")
     pc.add_argument("symbol")
     pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
-    pc.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    pc.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
+    pc.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
+    pc.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/产业链分析")
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
-    pr.add_argument("--with-macro", action="store_true", help="包含宏观数据（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/舆情分析")
+    pr.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
+    pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/产业链分析")
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
@@ -89,21 +258,75 @@ def build_parser() -> argparse.ArgumentParser:
 
     ps = sub.add_parser("store", help="管理存储")
     ps.add_argument("action", nargs="?", default="list", choices=["list", "stats", "clear"])
+
+    ppl = sub.add_parser("plan", help="生成采集计划")
+    ppl.add_argument("symbol")
+    ppl.add_argument("--intent", default="deep_analysis",
+                     choices=["deep_analysis", "quick_check", "catalyst_monitor", "compare"])
+    ppl.add_argument("--emit", default="json", choices=["json"])
+
+    pe = sub.add_parser("evidence", help="生成结构化证据表")
+    pe.add_argument("symbol")
+    pe.add_argument("--emit", default="md", choices=["md", "json"])
+    pe.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
+    _add_collect_flags(pe)
+
+    pa = sub.add_parser("analyze", help="分析采集结果（输出中间分析 JSON）")
+    pa.add_argument("symbol")
+    pa.add_argument("--input", default="", help="采集结果 JSON 文件路径（留空则现场采集）")
+    pa.add_argument("--emit", default="json", choices=["json", "md"])
+    _add_collect_flags(pa)
+
+    psyn = sub.add_parser("synthesize", help="合成最终研究报告")
+    psyn.add_argument("symbol")
+    psyn.add_argument("--input", default="", help="分析结果 JSON 文件路径")
+    psyn.add_argument("--emit", default="md", choices=["md", "json"])
+    psyn.add_argument("--mode", default="full", choices=["brief", "full"])
+    psyn.add_argument("--outdir", default="", help="报告输出目录")
+    _add_collect_flags(psyn)
+
     return p
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
-    dims = [d.strip() for d in args.dims.split(",")]
+    dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    if args.resume and _HAS_STORE:
+        progress = store_mod.get_pipeline_progress(args.symbol)
+        completed_steps = [s for s, done in progress.items() if done]
+        if completed_steps:
+            print(f"📋 已完成步骤: {', '.join(completed_steps)}")
+        cached = _try_resume_collection(args.symbol)
+        if cached and _resume_cache_compatible(args, dims, cached):
+            print("♻️ 从 store 恢复上次采集结果（--resume）")
+            result = cached
+            _warn_degraded_collection(result)
+            print(render.render(result, args.symbol, "compact"))
+            if args.store:
+                store_mod.save_collection(result)
+                print("💾 已存入持久化存储")
+            if getattr(args, "save_raw", False):
+                try:
+                    from lib.archiver import archive_collection
+                    filepath = archive_collection(args.symbol, result)
+                    if filepath:
+                        print(f"📦 原始数据已存档: {filepath}")
+                except Exception as exc:
+                    print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
+            return 0
+        if progress.get("collect"):
+            print(
+                "⚠️ --resume: 无 store 快照可恢复（需先 `collect SYMBOL --store`）",
+                file=sys.stderr,
+            )
     if args.with_macro and "kline" not in dims:
         dims.append("kline")
     if args.deep:
-        if "kline" not in dims:
-            dims.append("kline")
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
-        print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
+        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
     warn_if_proxy_detected(probe=True)
-    result = collector.collect_all(args.symbol, dims, deep=args.deep)
+    result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    _warn_degraded_collection(result)
     if result["summary"]["available"] == 0:
         print(render.render(result, args.symbol, "compact"))
         print("⚠️ 所有维度均不可用。请运行 diagnose。")
@@ -112,6 +335,18 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.store and _HAS_STORE:
         store_mod.save_collection(result)
         print("💾 已存入持久化存储")
+    if _HAS_STORE:
+        store_mod.save_pipeline_step(
+            args.symbol, "collect", _collect_pipeline_state(args, dims),
+        )
+    if getattr(args, 'save_raw', False):
+        try:
+            from lib.archiver import archive_collection
+            filepath = archive_collection(args.symbol, result)
+            if filepath:
+                print(f"📦 原始数据已存档: {filepath}")
+        except Exception as exc:
+            print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
     return 0
 
 
@@ -129,20 +364,38 @@ def _report_basename(result: dict, symbol: str, ts: str) -> str:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    dims = [d.strip() for d in args.dims.split(",")]
+    dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    result = None
+    if args.resume and _HAS_STORE:
+        progress = store_mod.get_pipeline_progress(args.symbol)
+        completed_steps = [s for s, done in progress.items() if done]
+        if completed_steps:
+            print(f"📋 已完成步骤: {', '.join(completed_steps)}")
+        result = _try_resume_collection(args.symbol)
+        if result and _resume_cache_compatible(args, dims, result):
+            print("♻️ 从 store 恢复上次采集结果（--resume）", file=sys.stderr)
+        elif result:
+            result = None
+        elif progress.get("collect"):
+            print(
+                "⚠️ --resume: 无 store 快照可恢复（需先 `collect SYMBOL --store`）",
+                file=sys.stderr,
+            )
     if args.with_macro and "kline" not in dims:
         dims.append("kline")
     if args.deep:
-        if "kline" not in dims:
-            dims.append("kline")
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
-        print("🌐 宏观数据模式已启用（FRED US 10Y/2Y/VIX/CPI/美元指数）")
-    warn_if_proxy_detected(probe=True)
-    result = collector.collect_all(args.symbol, dims, deep=args.deep)
+        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
+    if result is None:
+        warn_if_proxy_detected(probe=True)
+        result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    _warn_degraded_collection(result)
     if result["summary"]["available"] == 0:
         print("⚠️ 所有维度均不可用，无法生成报告")
         return 1
+    if _HAS_STORE:
+        store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
 
@@ -171,7 +424,16 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"📝 Markdown 报告: {mdfile.resolve()}")
         return 0
 
-    output = render.render(result, args.symbol, fmt)
+    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'))
+
+    if getattr(args, 'save_raw', False):
+        try:
+            from lib.archiver import archive_collection
+            filepath = archive_collection(args.symbol, result)
+            if filepath:
+                print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
+        except Exception as exc:
+            print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
 
     if fmt == "md" and args.outdir:
         from datetime import datetime
@@ -276,6 +538,196 @@ def cmd_store(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan(args: argparse.Namespace) -> int:
+    """生成采集计划并输出 JSON。"""
+    if not _HAS_PLANNER:
+        print("⚠️ planner 模块不可用")
+        return 1
+    plan = planner_mod.generate_plan(args.symbol, args.intent)
+    if args.emit == "json":
+        import json as _json
+        print(_json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        if _HAS_STORE:
+            store_mod.save_pipeline_step(args.symbol, "plan", plan.to_dict())
+        return 0
+    return 1
+
+
+def cmd_evidence(args: argparse.Namespace) -> int:
+    """生成结构化证据表。"""
+    if not _HAS_EVIDENCE:
+        print("⚠️ evidence 模块不可用")
+        return 1
+    dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    _warn_degraded_collection(result)
+    if result["summary"]["available"] == 0:
+        print("⚠️ 所有维度均不可用，无法生成证据表")
+        return 1
+    rows = evidence_mod.build_evidence_table(result["dimensions"])
+    output = evidence_mod.render_evidence_table(rows, args.emit)
+    print(output)
+    if _HAS_STORE:
+        store_mod.save_pipeline_step(args.symbol, "evidence", {"dims": dims})
+    return 0
+
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """中间分析步骤。采集数据并输出结构化分析 JSON。
+
+    v0.1.5 中为占位实现：输出采集 + 证据表 + 可信度评分的综合 JSON。
+    完整分析由 Claude 在 Skill 调用时完成。
+    """
+    import json as _json
+
+    # 采集或加载
+    if args.input:
+        try:
+            with open(args.input, "r", encoding="utf-8") as f:
+                result = _json.load(f)
+        except (FileNotFoundError, _json.JSONDecodeError) as exc:
+            print(f"❌ 无法读取输入文件: {exc}", file=sys.stderr)
+            return 1
+    else:
+        dims = _apply_deep_dims([
+            "basic_info", "financials", "quote", "shareholders",
+            "northbound", "valuation", "kline",
+        ], getattr(args, "deep", False))
+        result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+
+    if result.get("summary", {}).get("available", 0) == 0:
+        print("⚠️ 所有维度均不可用", file=sys.stderr)
+        return 1
+
+    _warn_degraded_collection(result)
+    _ensure_render_ready(result, args.symbol)
+
+    cred = result.get("credibility", {})
+    # 构建分析输出（保留 dimensions + 渲染快照供 synthesize --input 离线使用）
+    analysis = {
+        "symbol": args.symbol,
+        "analyzed_at": result.get("fetched_at", ""),
+        "fetched_at": result.get("fetched_at", ""),
+        "dimensions": result.get("dimensions", []),
+        "summary": result.get("summary", {}),
+        "evidence_table": None,
+        "credibility": cred,
+        "credibility_scores": cred,
+        "fusion": result.get("fusion", {}),
+        "macro_context": result.get("macro_context", {}),
+        "chain_context": result.get("chain_context", {}),
+        "market_structure": result.get("market_structure"),
+        "industry_peers": result.get("industry_peers"),
+        "pe_band": result.get("pe_band"),
+    }
+    if result.get("phase2_extras_errors"):
+        analysis["phase2_extras_errors"] = result["phase2_extras_errors"]
+
+    # 证据表
+    if _HAS_EVIDENCE:
+        try:
+            rows = evidence_mod.build_evidence_table(result["dimensions"])
+            analysis["evidence_table"] = [
+                {"dimension": r.dimension, "channel": r.channel,
+                 "value": r.value_summary, "confidence": r.confidence,
+                 "cross_validation": r.cross_validation}
+                for r in rows
+            ]
+        except Exception as exc:
+            print(f"⚠️ 证据表构建失败: {exc}", file=sys.stderr)
+
+    # Fusion 结果（collect_all 已序列化为 dict）
+    if result.get("fusion"):
+        analysis["fusion"] = result["fusion"]
+
+    if args.emit == "md" and _HAS_EVIDENCE and analysis.get("evidence_table"):
+        print(evidence_mod.render_evidence_table(
+            evidence_mod.build_evidence_table(result["dimensions"]), "md",
+        ))
+        if _HAS_STORE:
+            store_mod.save_pipeline_step(args.symbol, "analyze", {"emit": "md"})
+        return 0
+
+    from lib.json_util import dumps_json
+    print(dumps_json(analysis))
+    if _HAS_STORE:
+        store_mod.save_pipeline_step(args.symbol, "analyze", {"emit": args.emit})
+    return 0
+
+
+def cmd_synthesize(args: argparse.Namespace) -> int:
+    """合成最终研究报告。
+
+    若提供 --input（analyze 输出 JSON），从中恢复采集结果并渲染报告。
+  否则等同于 report（现场采集+渲染）。
+    """
+    import json as _json
+
+    if args.input:
+        try:
+            with open(args.input, "r", encoding="utf-8") as f:
+                analysis = _json.load(f)
+        except (OSError, _json.JSONDecodeError) as exc:
+            print(f"❌ 无法读取分析文件: {exc}", file=sys.stderr)
+            return 1
+        # analyze 输出不含完整 dimensions 时回退现场采集
+        if analysis.get("dimensions"):
+            result = _normalize_collection_for_render(analysis)
+            attach_extras = not result.get("market_structure")
+        else:
+            print(
+                "ⓘ analyze 输出缺少 dimensions，将补充现场采集",
+                file=sys.stderr,
+            )
+            dims = _apply_deep_dims([
+                "basic_info", "financials", "quote", "shareholders",
+                "northbound", "valuation", "kline",
+            ], getattr(args, "deep", False))
+            result = collector.collect_all(
+                args.symbol, dims, **_collect_kwargs(args),
+            )
+            result = _normalize_collection_for_render({
+                **result,
+                "credibility": analysis.get(
+                    "credibility_scores", result.get("credibility", {}),
+                ),
+                "fusion": analysis.get("fusion", result.get("fusion", {})),
+                "macro_context": analysis.get("macro_context", {}),
+                "chain_context": analysis.get("chain_context", {}),
+            })
+            attach_extras = True
+
+        fmt = args.emit if args.emit != "json" else "md"
+        output = render.render(
+            result, args.symbol, fmt,
+            mode=getattr(args, "mode", "full"),
+            attach_extras=attach_extras,
+        )
+        if fmt == "md" and args.outdir:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+            basename = _report_basename(result, args.symbol, ts)
+            outdir = Path(args.outdir).resolve()
+            outdir.mkdir(parents=True, exist_ok=True)
+            mdpath = outdir / f"{basename}.md"
+            mdpath.write_text(output, encoding="utf-8")
+            print(f"📝 Markdown 报告: {mdpath.resolve()}")
+            return 0
+        print(output)
+        return 0
+
+    # 设置 cmd_report 所需的缺省属性
+    if not hasattr(args, 'dims'):
+        args.dims = "basic_info,financials,quote,shareholders,northbound,valuation,kline"
+    if not hasattr(args, 'with_macro'):
+        args.with_macro = False
+    if not hasattr(args, 'deep'):
+        args.deep = False
+
+    # 委托给 cmd_report 逻辑
+    return cmd_report(args)
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     """对比同一股票两次快照的变化。"""
     if not _HAS_STORE:
@@ -320,7 +772,8 @@ def cmd_diff(args: argparse.Namespace) -> int:
     diff_result["key_changes"] = key_diff
 
     if args.emit == "json":
-        print(json.dumps(diff_result, ensure_ascii=False, indent=2, default=str))
+        from lib.json_util import dumps_json
+        print(dumps_json(diff_result))
         return 0
 
     if args.emit == "md":
@@ -604,6 +1057,14 @@ def main() -> int:
         return cmd_diagnose(args)
     elif args.command == "store":
         return cmd_store(args)
+    elif args.command == "plan":
+        return cmd_plan(args)
+    elif args.command == "evidence":
+        return cmd_evidence(args)
+    elif args.command == "analyze":
+        return cmd_analyze(args)
+    elif args.command == "synthesize":
+        return cmd_synthesize(args)
     return 1
 
 

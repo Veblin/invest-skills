@@ -24,7 +24,60 @@ from .proxy import (
 )
 from .schema import CrossValidation, DriverFactor, ProbabilityStructure
 
-ENGINE_VERSION = "0.1.4"
+ENGINE_VERSION = "0.1.5"
+
+
+def _cross_validation_marker(cv: CrossValidation | None) -> str:
+    """生成交叉验证状态标记。"""
+    if cv is None:
+        return ""
+    if cv.status == "convergence":
+        return f"🟢 **印证** — {cv.detail}"
+    return f"🟡 **分歧** — {cv.detail}"
+
+
+def _meta_cv_line(meta: dict) -> str:
+    """从 legacy _meta 生成交叉验证行。"""
+    cv_status = meta.get("cross_validation")
+    if not cv_status:
+        return ""
+    detail = meta.get("cross_validation_detail") or ""
+    if cv_status == "convergence":
+        return f"🟢 **印证** — {detail or '多源数据一致'}"
+    return f"🟡 **分歧** — {detail or '多源数据存在差异'}"
+
+
+def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
+    """渲染引擎层产出：宏观、融合、可信度、产业链。"""
+    lines: list[str] = []
+
+    macro = collection.get("macro_context") or {}
+    if macro.get("status") == "ok":
+        from .macro import macro_signal_label
+        lines.append(f"**[宏观情景]** {macro_signal_label(macro)}")
+
+    chain = collection.get("chain_context") or {}
+    if chain.get("status") == "ok" and chain.get("industry"):
+        pos = chain.get("chain_position") or "—"
+        lines.append(f"**[产业链]** {chain['industry']} · {pos}")
+
+    fusion = collection.get("fusion") or {}
+    if fusion:
+        lines.append("**[多源融合]**")
+        for dim, fp in sorted(fusion.items()):
+            if isinstance(fp, dict):
+                fv = fp.get("fused_value")
+                consensus = fp.get("consensus", "?")
+                diff = fp.get("max_diff_pct", 0)
+                lines.append(f"  - {dim}: 融合值={fv} · {consensus} · 最大差异={diff}%")
+
+    cred = collection.get("credibility") or {}
+    if cred:
+        top = sorted(cred.items(), key=lambda x: -x[1])[:5]
+        cred_s = ", ".join(f"{k}={v:.0f}" for k, v in top)
+        lines.append(f"**[证据可信度]** {cred_s}")
+
+    return lines
 
 _EASTMONEY_BLOCKED_SHORT = "东方财富(East Money)主动拒绝连接"
 _RAW_CONNECTION_REFUSED_SHORT = "服务器拒绝连接"
@@ -135,6 +188,10 @@ def render_compact(collection: dict[str, Any], symbol: str) -> str:
         f"状态: {collection['summary']['available']}/{collection['summary']['total']} 维度有数据",
         "",
     ]
+    extras = _render_engine_extras(collection)
+    if extras:
+        lines.extend(extras)
+        lines.append("")
 
     for dim in collection.get("dimensions", []):
         dn, display = dim["dimension"], dim["display"]
@@ -152,6 +209,10 @@ def render_compact(collection: dict[str, Any], symbol: str) -> str:
                 lines.append("")
                 lines.append("**各渠道取证状态：**")
                 lines.append(xv)
+                lines.append("")
+            cv_line = _meta_cv_line(meta)
+            if cv_line:
+                lines.append(cv_line)
                 lines.append("")
             _render_dimension_data(dn, data, lines)
         else:
@@ -204,28 +265,34 @@ def render_compact(collection: dict[str, Any], symbol: str) -> str:
 
 
 def render_json(collection: dict[str, Any]) -> str:
-    return json.dumps(collection, ensure_ascii=False, indent=2, default=str)
+    from .json_util import dumps_json
+    return dumps_json(collection)
 
 
-def render(collection: dict[str, Any], symbol: str, fmt: str = "compact") -> str:
+def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
+           mode: str = "full", *, attach_extras: bool = True) -> str:
     """统一渲染入口。支持 compact / json / md / html 格式。
 
     compact  — 紧凑文本报告（v0.1.2 八段 v2 模板）
     json     — 结构化 JSON，适合程序消费
     md       — Markdown 九模块研究备忘录（v0.1.3 render_report_v3）
     html     — HTML 研究报告（v0.1.2 冻结模板）
+
+    mode     — "full"（完整九模块）或 "brief"（精简简报）
+    attach_extras — False 时跳过 market_structure / phase2 补采（离线 synthesize）
     """
-    from lib import collector
-    if not collection.get("market_structure"):
-        collector.attach_market_structure(collection, symbol)
-    collector.attach_phase2_extras(collection, symbol)
+    if attach_extras:
+        from lib import collector
+        if not collection.get("market_structure"):
+            collector.attach_market_structure(collection, symbol)
+        collector.attach_phase2_extras(collection, symbol)
 
     if fmt == "json":
         return render_json(collection)
     if fmt == "html":
         return render_html(collection, symbol)
     if fmt == "md":
-        return render_report_v3(collection, symbol)
+        return render_report_v3(collection, symbol, mode=mode)
     return render_report_v2(collection, symbol)
 
 
@@ -1251,6 +1318,125 @@ def _v3_valuation_percentiles(
     pe = summary.get("pe") or {}
     pb = summary.get("pb") or {}
     return (pe.get("pct"), pb.get("pct"), pe.get("zone"))
+
+
+def _executive_core_contradictions(
+    collection: dict,
+    dims: dict[str, dict],
+    val_cache: dict | None = None,
+) -> list[str]:
+    """从已有数据卡片提炼两条核心矛盾（数据驱动，非占位）。"""
+    items: list[str] = []
+    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
+
+    roe = eps = None
+    fin = dims.get("financials", {}).get("data")
+    if isinstance(fin, list) and fin:
+        latest = fin[-1]
+        roe = latest.get("roe")
+        eps = latest.get("eps")
+
+    if pe_pct is not None and roe is not None:
+        try:
+            roe_f = float(roe)
+            if pe_pct >= 70 and roe_f < 10:
+                items.append(
+                    f"估值历史位置偏高（PE {pe_pct:.0f}%）vs 盈利质量偏弱"
+                    f"（ROE {roe_f:.1f}%）[来源: valuation+financials]"
+                )
+            elif pe_pct <= 30 and roe_f >= 12:
+                items.append(
+                    f"估值历史位置偏低（PE {pe_pct:.0f}%）vs 盈利质量尚可"
+                    f"（ROE {roe_f:.1f}%）[来源: valuation+financials]"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    ms = collection.get("market_structure") or {}
+    nb = ms.get("northbound") or dims.get("northbound", {}).get("data") or {}
+    net10 = nb.get("net_sum_10d") if isinstance(nb, dict) else None
+    quote = dims.get("quote", {}).get("data") or {}
+    chg = quote.get("change_pct") if isinstance(quote, dict) else None
+    if net10 is not None and chg is not None:
+        try:
+            net_f, chg_f = float(net10), float(chg)
+            if net_f > 0 and chg_f < -2:
+                items.append(
+                    f"北向近10日净流入 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
+                    f"[来源: northbound+quote]"
+                )
+            elif net_f < 0 and chg_f > 2:
+                items.append(
+                    f"北向近10日净流出 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
+                    f"[来源: northbound+quote]"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    cred = collection.get("credibility") or {}
+    if cred:
+        low = [k for k, v in cred.items() if v < 50]
+        if low:
+            items.append(
+                f"可信度偏低维度: {', '.join(low[:3])}"
+                f"{'…' if len(low) > 3 else ''} [来源: rerank]"
+            )
+
+    while len(items) < 2:
+        items.append("独立维度交叉验证不足，需补充外部信源 [推测，待验证]")
+    return items[:2]
+
+
+def _section_executive_summary(collection, symbol, dims, val_cache=None):
+    """生成一屏内可读的执行摘要：一行话定位 + 两条矛盾 + 三个观察点。"""
+    lines = ["## 执行摘要", ""]
+
+    basic = dims.get("basic_info", {}).get("data", {})
+    name = ""
+    industry = ""
+    if isinstance(basic, dict):
+        name = basic.get("name", "") or basic.get("股票简称", "")
+        industry = basic.get("industry", "")
+
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+
+    name_str = f"{symbol} {name}".strip()
+    industry_str = f"（{industry}）" if industry else ""
+    summary = _v3_load_valuation_summary(dims, val_cache)
+    pe_median = (summary.get("pe") or {}).get("median") if summary else None
+    if pe_pct is not None:
+        median_part = f"（中位数 {pe_median:.2f}x）" if pe_median is not None else ""
+        pe_str = f"PE 历史位置 {pe_pct:.1f}%{median_part}"
+    else:
+        pe_str = "PE 不可得"
+    lines.append(f"**{name_str}**{industry_str} — {pe_str}")
+    lines.append("")
+
+    lines.append("**核心矛盾：**")
+    for i, item in enumerate(_executive_core_contradictions(collection, dims, val_cache), 1):
+        lines.append(f"{i}. {item}")
+    lines.append("")
+
+    lines.append("**关键观察点：**")
+    fin = dims.get("financials", {}).get("data")
+    if fin and isinstance(fin, list) and fin:
+        latest = fin[-1]
+        rot = latest.get('roe', '?')
+        eps = latest.get('eps', '?')
+        lines.append(f"- 财务: 最近报告期 ROE={rot}%, EPS={eps}")
+    else:
+        lines.append("- 财务: 数据不可得")
+
+    quote = dims.get("quote", {}).get("data", {})
+    if isinstance(quote, dict):
+        price = quote.get("close") or quote.get("price")
+        if price:
+            lines.append(f"- 行情: 最新价 {price}")
+
+    ms_icon, ms_detail = _v3_multi_source_consistency(dims)
+    lines.append(f"- 数据质量: {ms_icon} {ms_detail}")
+
+    return "\n".join(lines)
 
 
 def _section_research_question(
@@ -4252,8 +4438,8 @@ def _section_core_tension(
     return "\n".join(lines)
 
 
-def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
-    """v0.1.3 九模块研究备忘录。"""
+def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full") -> str:
+    """v0.1.3 九模块研究备忘录。mode="brief" 仅输出精简简报。"""
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
     val_cache: dict = {}
@@ -4261,39 +4447,69 @@ def render_report_v3(collection: dict[str, Any], symbol: str) -> str:
         collection, dims, market_structure, val_cache=val_cache,
     )
 
-    parts: list[str] = [
-        _header_v2(collection, symbol),
-        _report_toc(),
-        _section_research_question(collection, symbol, val_cache=val_cache),
-        _section_snapshot(collection, symbol, dims, val_cache=val_cache),
-        _section_dynamic_drivers(
-            collection, symbol, dims, market_structure, val_cache=val_cache,
-        ),
-        _section_market_structure(
-            collection, symbol, market_structure, val_cache=val_cache,
-        ),
-        _section_research_summary(collection, symbol, dims),
-        _wrap_details(
-            "展开：静态基本面（12题）",
-            _section_static_fundamentals(dims, collection, val_cache=val_cache),
-        ),
-        _section_core_tension(
-            collection, symbol, dims, market_structure, val_cache=val_cache,
-        ),
-        _section_bull_bear(
-            collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
-        ),
-        _section_left_right_probability(
-            collection, symbol, dims, market_structure, val_cache=val_cache,
-        ),
-        _wrap_details(
-            "展开：风险与不确定性",
-            _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
-        ),
-        _section_technical_brief(dims, val_cache=val_cache),
-        _references_appendix(collection),
-        _risk_footer(),
-    ]
+    if mode == "brief":
+        parts: list[str] = [
+            _header_v2(collection, symbol),
+        ]
+        extras = _render_engine_extras(collection)
+        if extras:
+            parts.append("\n".join(extras))
+        parts.extend([
+            _section_executive_summary(collection, symbol, dims, val_cache=val_cache),
+            _section_research_question(collection, symbol, val_cache=val_cache),
+            _section_snapshot(collection, symbol, dims, val_cache=val_cache),
+            _section_dynamic_drivers(
+                collection, symbol, dims, market_structure, val_cache=val_cache,
+            ),
+            _section_bull_bear(
+                collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
+            ),
+            _wrap_details(
+                "展开：风险与不确定性",
+                _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
+            ),
+            _references_appendix(collection),
+            _risk_footer(),
+        ])
+    else:
+        parts: list[str] = [
+            _header_v2(collection, symbol),
+        ]
+        extras = _render_engine_extras(collection)
+        if extras:
+            parts.append("\n".join(extras))
+        parts.extend([
+            _report_toc(),
+            _section_research_question(collection, symbol, val_cache=val_cache),
+            _section_snapshot(collection, symbol, dims, val_cache=val_cache),
+            _section_dynamic_drivers(
+                collection, symbol, dims, market_structure, val_cache=val_cache,
+            ),
+            _section_market_structure(
+                collection, symbol, market_structure, val_cache=val_cache,
+            ),
+            _section_research_summary(collection, symbol, dims),
+            _wrap_details(
+                "展开：静态基本面（12题）",
+                _section_static_fundamentals(dims, collection, val_cache=val_cache),
+            ),
+            _section_core_tension(
+                collection, symbol, dims, market_structure, val_cache=val_cache,
+            ),
+            _section_bull_bear(
+                collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
+            ),
+            _section_left_right_probability(
+                collection, symbol, dims, market_structure, val_cache=val_cache,
+            ),
+            _wrap_details(
+                "展开：风险与不确定性",
+                _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
+            ),
+            _section_technical_brief(dims, val_cache=val_cache),
+            _references_appendix(collection),
+            _risk_footer(),
+        ])
     return "\n\n".join(p for p in parts if p)
 
 
