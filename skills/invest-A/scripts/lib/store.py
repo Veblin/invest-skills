@@ -75,7 +75,9 @@ def init_db() -> None:
 def save_collection(result: dict[str, Any]) -> int:
     init_db()
     symbol = result.get("symbol", "?")
-    dims = result.get("dimensions", [])
+    dims = result.get("dimensions")
+    if not isinstance(dims, list):
+        dims = []
     sm = result.get("summary", {})
     name = next((d["data"].get("name", "") for d in dims
                  if d.get("dimension") == "basic_info" and d.get("data")), "")
@@ -267,8 +269,8 @@ def diff_collections(old: dict, new: dict) -> dict:
     Returns:
         dict 含 changed, unchanged, skipped 列表。
     """
-    old_raw = old.get("raw_json", old) if isinstance(old, dict) else {}
-    new_raw = new.get("raw_json", new) if isinstance(new, dict) else {}
+    old_raw = _unwrap_raw_json(old)
+    new_raw = _unwrap_raw_json(new)
 
     old_dims = _index_dims(old_raw)
     new_dims = _index_dims(new_raw)
@@ -330,10 +332,30 @@ def diff_collections(old: dict, new: dict) -> dict:
     }
 
 
+def _unwrap_raw_json(record: dict) -> dict:
+    """从 collection 行或裸 raw_json dict 提取可 diff 的 payload。"""
+    if not isinstance(record, dict):
+        return {}
+    raw = record.get("raw_json")
+    if isinstance(raw, dict):
+        return raw
+    if "dimensions" in record:
+        return record
+    return {}
+
+
 def _index_dims(raw: dict) -> dict[str, dict]:
     """将 raw_json 中的 dimensions 列表转为 dict。"""
-    dims = raw.get("dimensions", [])
-    return {d.get("dimension", ""): d for d in dims}
+    if not isinstance(raw, dict):
+        return {}
+    dims = raw.get("dimensions")
+    if not isinstance(dims, list):
+        return {}
+    return {
+        d.get("dimension", ""): d
+        for d in dims
+        if isinstance(d, dict) and d.get("dimension")
+    }
 
 
 def _dim_data(raw: dict, name: str) -> Any:

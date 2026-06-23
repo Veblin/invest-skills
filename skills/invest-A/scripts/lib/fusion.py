@@ -188,8 +188,12 @@ def fuse_from_legacy_dicts(dimensions: list[dict]) -> dict[str, FusedDataPoint]:
         for s in all_src:
             src_name = s.get("source", "")
             sv = s.get("scalar_value")
-            if sv is not None:
+            if sv is None:
+                continue
+            try:
                 sources[src_name] = float(sv)
+            except (TypeError, ValueError):
+                continue
         if sources:
             fp = weighted_rrf_for_dimension(dim_name, sources)
             if fp:
