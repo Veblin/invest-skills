@@ -419,11 +419,21 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
     # ---- EPS forecasts ----
     eps_forecasts = summary.get("eps_forecasts", [])
     eps_mean: Optional[float] = None
+    eps_high: Optional[float] = None
+    eps_low: Optional[float] = None
     eps_count = 0
     if eps_forecasts:
         first = eps_forecasts[0]
         eps_mean = first.get("avg_eps")
         eps_count = first.get("n_analysts", 0)
+        eps_high = first.get("max_eps") or first.get("high")
+        eps_low = first.get("min_eps") or first.get("low")
+    # Fallback: extract from target_price_range if forecasts not available
+    if eps_high is None and eps_low is None:
+        target_range = summary.get("target_price_range", {})
+        if target_range and isinstance(target_range, dict):
+            eps_high = target_range.get("max")
+            eps_low = target_range.get("min")
 
     # ---- Latest summary text ----
     summary_text = summary.get("summary_text", "")
@@ -448,8 +458,8 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
         research_count=len(ratings),
         rating_distribution=rating_dist,
         eps_forecast_mean=eps_mean,
-        eps_forecast_high=None,
-        eps_forecast_low=None,
+        eps_forecast_high=eps_high,
+        eps_forecast_low=eps_low,
         eps_forecast_count=eps_count,
         latest_summary=(summary_text[:200] if summary_text else ""),
         sentiment_slot="[待 Claude 标注语气信号]",
