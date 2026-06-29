@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .version import get_package_version
+
 logger = logging.getLogger(__name__)
 
 # 常见日期字段名列表（遍历 data 时用于提取日期范围）
@@ -23,21 +25,7 @@ _DATE_FIELD_CANDIDATES = (
 
 def _get_version() -> str:
     """从 pyproject.toml 获取当前 invest-A 版本。"""
-    try:
-        # 向上查找 pyproject.toml（与 collect_all 中 Symbol 查找路径一致）
-        root = Path(__file__).resolve().parent  # lib/
-        # lib/ -> scripts/ -> 可能根目录
-        for parent in [root, *root.parents]:
-            pp = parent / "pyproject.toml"
-            if pp.exists():
-                for line in pp.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("version") and "=" in line:
-                        raw = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        return raw
-    except Exception as exc:
-        logger.debug("读取 version 失败: %s", exc)
-    return "unknown"
+    return get_package_version()
 
 
 def _classify_status(dim: dict) -> str:

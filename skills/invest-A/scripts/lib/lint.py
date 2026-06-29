@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -43,6 +43,10 @@ class LintFinding:
 _RULES_CACHE: Optional[list[dict]] = None
 
 
+class RulesLoadError(RuntimeError):
+    """合规规则无法加载（缺失依赖、文件或解析失败）。"""
+
+
 def _rules_path() -> Path:
     """返回 compliance_rules.yaml 的绝对路径。"""
     return (
@@ -64,14 +68,10 @@ def load_rules() -> list[dict]:
 
     path = _rules_path()
     if not path.exists():
-        print(f"❌ 规则文件不存在: {path}", file=sys.stderr)
-        _RULES_CACHE = []
-        return _RULES_CACHE
+        raise RulesLoadError(f"规则文件不存在: {path}")
 
     if yaml is None:
-        print("❌ pyyaml 未安装，无法加载规则", file=sys.stderr)
-        _RULES_CACHE = []
-        return _RULES_CACHE
+        raise RulesLoadError("pyyaml 未安装，无法加载合规规则（请运行 uv sync）")
 
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -79,9 +79,7 @@ def load_rules() -> list[dict]:
         _RULES_CACHE = data.get("rules", [])
         return _RULES_CACHE
     except Exception as exc:
-        print(f"❌ 规则文件解析失败: {exc}", file=sys.stderr)
-        _RULES_CACHE = []
-        return _RULES_CACHE
+        raise RulesLoadError(f"规则文件解析失败: {exc}") from exc
 
 
 # ── 规则过滤 ──────────────────────────────────────────────────────────────
@@ -305,7 +303,7 @@ def lint_file(filepath: Path, profile: str = "claude") -> list[LintFinding]:
         print(f"❌ 无法读取文件 {filepath}: {exc}", file=sys.stderr)
         return []
 
-    lines = text.split("\n")
+    lines = text.splitlines()
     findings: list[LintFinding] = []
     rules = load_rules()
 

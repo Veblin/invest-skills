@@ -25,9 +25,11 @@ from .proxy import (
 )
 from .schema import CrossValidation, DriverFactor, ProbabilityStructure
 
+from .version import get_package_version
+
 logger = logging.getLogger(__name__)
 
-ENGINE_VERSION = "0.1.5"
+ENGINE_VERSION = get_package_version()
 
 
 def _cross_validation_marker(cv: CrossValidation | None) -> str:
@@ -290,19 +292,27 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
             collector.attach_market_structure(collection, symbol)
         collector.attach_phase2_extras(collection, symbol)
 
-        # Attach events (not a default dim, always runs)
+        # Events: only backfill when missing (synthesize/offline path).
+        # Standard collect→report already has events from collect_all.
+        events_attached = False
         try:
-            from lib.events import attach_events
-            deep_mode = collection.get("_meta", {}).get("deep", False)
-            event_days = 90 if deep_mode else 30
-            attach_events(collection, symbol, days=event_days)
+            if collection.get("events") is None:
+                from lib.events import attach_events
+                deep_mode = collection.get("_meta", {}).get("deep", False)
+                event_days = 90 if deep_mode else 30
+                attach_events(collection, symbol, days=event_days)
+                events_attached = True
         except Exception as e:
             logger.warning("attach_events failed (non-fatal): %s", e)
 
-        # Build analysis cards (Template A/B/C)
+        # Build analysis cards when missing or events were just attached.
         try:
-            from lib.analysis_templates import build_analysis_cards
-            build_analysis_cards(collection)
+            meta = collection.setdefault("_meta", {})
+            if events_attached:
+                meta.pop("analysis_cards", None)
+            if events_attached or "analysis_cards" not in meta:
+                from lib.analysis_templates import build_analysis_cards
+                build_analysis_cards(collection)
         except Exception as e:
             logger.warning("build_analysis_cards failed (non-fatal): %s", e)
 
@@ -2817,7 +2827,7 @@ def _section_fundamentals_layered(
         lines.append("数据不足：[缺少 ROE 数据，无法评估护城河]")
     lines.append("")
     lines.append(_law10_hint(
-        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度往往快于预期。",
+        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度可能快于预期（待补案例）。",
         (
             f"本次 ROE {roe_now:.2f}%"
             + (f"（{roe_first:.2f}% → {roe_now:.2f}%）" if roe_first is not None else "")
@@ -2922,7 +2932,7 @@ def _section_fundamentals_layered(
     lines.append("")
     lines.append(_law10_hint(
         "现金流是利润的「含金量」检验——利润好看但现金流持续弱于利润，"
-        "通常意味着应收膨胀、存货积压或收入确认激进。",
+        "可能意味着应收膨胀、存货积压或收入确认激进（待补案例）。",
         (
             f"本次经营现金流/净利润 = {cf_ratio:.2f}，若仅看单期就认定利润质量差，"
             "可能忽略季节性备货——应对比连续 4 期趋势。"
@@ -3136,8 +3146,8 @@ def _section_fundamentals_layered(
     lines.append("### 4d. 估值与预期")
     lines.append("")
 
-    # D-① PE/PB 5 年历史分位
-    lines.append("#### D-① PE/PB 历史分位")
+    # D-① PE/PB 5 年历史位置
+    lines.append("#### D-① PE/PB 历史位置")
     if pe_seq and current_pe is not None:
         from lib.valuation import valuation_summary
 
@@ -3149,17 +3159,17 @@ def _section_fundamentals_layered(
         pb_info = vs["pb"]
         ps_info = vs.get("ps", {})
         if pe_info.get("current") is not None:
-            pct_str = f"，{vs.get('window_label', val_window_label)} {pe_info['pct']:.1f}% 分位" if pe_info.get("pct") is not None else ""
+            pct_str = f"，{vs.get('window_label', val_window_label)} {pe_info['pct']:.1f}% 历史位置" if pe_info.get("pct") is not None else ""
             lines.append(f"- PE(TTM)：**{pe_info['current']:.2f}x**{pct_str}，处于历史**{pe_info.get('zone', '未知')}**区间。")
         else:
             lines.append(f"- PE(TTM)：{pe_info.get('reason', '不可得')}")
         if pb_info.get("current") is not None:
-            pct_str = f"，{vs.get('window_label', val_window_label)} {pb_info['pct']:.1f}% 分位" if pb_info.get("pct") is not None else ""
+            pct_str = f"，{vs.get('window_label', val_window_label)} {pb_info['pct']:.1f}% 历史位置" if pb_info.get("pct") is not None else ""
             lines.append(f"- PB：**{pb_info['current']:.2f}x**{pct_str}，处于历史**{pb_info.get('zone', '未知')}**区间。")
         else:
             lines.append(f"- PB：{pb_info.get('reason', '不可得')}")
         if ps_info.get("current") is not None:
-            pct_str = f"，{val_window_label} {ps_info['pct']:.1f}% 分位" if ps_info.get("pct") is not None else ""
+            pct_str = f"，{val_window_label} {ps_info['pct']:.1f}% 历史位置" if ps_info.get("pct") is not None else ""
             lines.append(f"- PS(TTM)：**{ps_info['current']:.2f}x**{pct_str}。")
         else:
             lines.append("数据不足：[估值序列无 ps/ps_ttm 字段]")
@@ -4245,10 +4255,10 @@ def _section_left_right_probability(
     pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
     from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
     if pe_pct is not None and pe_pct < ZONE_LOW_THRESHOLD:
-        left_items.append(f"① PE 历史分位偏低（{pe_pct:.1f}%），证据强度：⚠️")
+        left_items.append(f"① PE 历史位置偏低（{pe_pct:.1f}%），证据强度：⚠️")
     erp = market_structure.get("erp")
     if erp and erp.get("percentile_5y") is not None and erp["percentile_5y"] >= 70:
-        left_items.append(f"② ERP 5年分位偏高（{erp['percentile_5y']}%），证据强度：⚠️")
+        left_items.append(f"② ERP 5年区间位置偏高（{erp['percentile_5y']}%），证据强度：⚠️")
     if not left_items:
         left_items.append("① 左侧参考指标数据不足或未达到阈值，证据强度：❓")
     lines.append("")

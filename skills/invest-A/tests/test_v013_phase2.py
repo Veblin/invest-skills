@@ -189,7 +189,7 @@ class TestRenderFundamentals:
             "C-② 杜邦拆解 ROE",
             "C-③ 现金流覆盖",
             "C-④ 扣非/净利润",
-            "D-① PE/PB 历史分位",
+            "D-① PE/PB 历史位置",
             "D-② PE vs 行业中位数",
             "D-③ 隐性预期差（LAW 15）",
         ]

@@ -877,24 +877,14 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
         if td:
             td = td.replace("-", "")  # YYYY-MM-DD → YYYYMMDD
 
-        def _fv(val, default=None):
-            """Safe float conversion; NaN/None → default."""
-            if val is None:
-                return default
-            try:
-                f = float(val)
-                return f if not math.isnan(f) else default
-            except (ValueError, TypeError):
-                return default
-
         rows.append({
             "trade_date": td,
-            "open": _fv(row.get("open")),
-            "high": _fv(row.get("high")),
-            "low": _fv(row.get("low")),
-            "close": _fv(row.get("close")),
-            "vol": _fv(row.get("volume"), 0),
-            "amount": _fv(row.get("amount"), 0),
+            "open": safe_float(row.get("open")),
+            "high": safe_float(row.get("high")),
+            "low": safe_float(row.get("low")),
+            "close": safe_float(row.get("close")),
+            "vol": safe_float(row.get("volume")) or 0,
+            "amount": safe_float(row.get("amount")) or 0,
         })
 
     return rows if rows else None
@@ -1812,8 +1802,9 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # Attach events (not a default dim, always runs)
     try:
         from lib.events import attach_events
-        deep_mode = result.get("_meta", {}).get("deep", False)
-        event_days = 90 if deep_mode else 30
+        meta = result.setdefault("_meta", {})
+        meta["deep"] = deep
+        event_days = 90 if deep else 30
         attach_events(result, symbol, days=event_days)
     except Exception as e:
         logger.warning("attach_events failed (non-fatal): %s", e)
@@ -1828,12 +1819,10 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # Generate collection manifest (Task 9, P1)
     try:
         from lib.manifest import generate_manifest
-        result.setdefault("_meta", {})
-        result["_meta"]["manifest"] = generate_manifest(result)
+        meta["manifest"] = generate_manifest(result)
     except Exception as e:
         logger.warning("manifest generation failed (non-fatal): %s", e)
-        result.setdefault("_meta", {})
-        result["_meta"]["manifest"] = None
+        meta["manifest"] = None
 
     return result
 

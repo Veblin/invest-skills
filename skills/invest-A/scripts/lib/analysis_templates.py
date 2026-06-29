@@ -428,12 +428,7 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
         eps_count = first.get("n_analysts", 0)
         eps_high = first.get("max_eps") or first.get("high")
         eps_low = first.get("min_eps") or first.get("low")
-    # Fallback: extract from target_price_range if forecasts not available
-    if eps_high is None and eps_low is None:
-        target_range = summary.get("target_price_range", {})
-        if target_range and isinstance(target_range, dict):
-            eps_high = target_range.get("max")
-            eps_low = target_range.get("min")
+    # Do not fallback target_price_range (CNY) into EPS fields — different units.
 
     # ---- Latest summary text ----
     summary_text = summary.get("summary_text", "")
