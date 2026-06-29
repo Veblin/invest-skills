@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -824,6 +825,81 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
                     pass
 
 
+def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
+    """TickFlow K 线来源（独立数据管道，非东方财富，免费免注册）。
+
+    TickFlow 提供独立的行情数据源（非东方财富爬虫），与现有
+    akshare（东方财富）、baostock、Tushare 形成第4条验证链路。
+    免费 tier 无需注册，提供完整日K历史数据。
+    如 free tier 升级提示输出到 stdout（不影响数据采集），
+    建议调用方将 stdout 重定向到 stderr 或丢弃。
+
+    API: TickFlow.free().klines.get(symbol, start=ms, end=ms, adjust="forward")
+    Symbol 格式: "600176.SH" (SH/SZ/BJ, 与 Tushare 格式一致)
+    """
+    try:
+        import tickflow as tf
+    except ImportError:
+        raise Exception("tickflow 未安装，请运行: uv sync")
+
+    sd = start_date or _days_ago(400)
+    ed = end_date or _today()
+
+    # TickFlow 使用毫秒级 Unix 时间戳
+    from datetime import datetime, timezone
+    start_ms = int(datetime.strptime(sd, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    end_ms = int(datetime.strptime(ed, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+    # TickFlow 使用 Tushare 风格代码格式：600176.SH
+    tf_symbol = _exchange_code(symbol)["tushare"]
+
+    try:
+        client = tf.TickFlow.free()
+        df = client.klines.get(
+            tf_symbol,
+            period="1d",
+            start_time=start_ms,
+            end_time=end_ms,
+            adjust="forward",
+            as_dataframe=True,
+        )
+    except Exception:
+        logger.warning("tickflow query failed for %s", symbol)
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    # 标准化列名：trade_date (YYYYMMDD), open, high, low, close, vol, amount
+    rows = []
+    for _, row in df.iterrows():
+        td = str(row.get("trade_date", ""))
+        if td:
+            td = td.replace("-", "")  # YYYY-MM-DD → YYYYMMDD
+
+        def _fv(val, default=None):
+            """Safe float conversion; NaN/None → default."""
+            if val is None:
+                return default
+            try:
+                f = float(val)
+                return f if not math.isnan(f) else default
+            except (ValueError, TypeError):
+                return default
+
+        rows.append({
+            "trade_date": td,
+            "open": _fv(row.get("open")),
+            "high": _fv(row.get("high")),
+            "low": _fv(row.get("low")),
+            "close": _fv(row.get("close")),
+            "vol": _fv(row.get("volume"), 0),
+            "amount": _fv(row.get("amount"), 0),
+        })
+
+    return rows if rows else None
+
+
 def _q_tencent_quote(symbol: str) -> dict | None:
     """腾讯行情。"""
     _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
@@ -879,6 +955,15 @@ def _qp_baostock(symbol: str, start_date: str, end_date: str) -> str:
     return (
         f"bs.query_history_k_data_plus(code='{code}', "
         f"start='{start_date}', end='{end_date}', frequency='d')"
+    )
+
+
+def _qp_tickflow(symbol: str, start_date: str, end_date: str) -> str:
+    """TickFlow K-line 查询参数字符串。"""
+    code = _exchange_code(symbol)["tushare"]
+    return (
+        f"tf.TickFlow.free().klines.get(symbol='{code}', "
+        f"start={start_date}, end={end_date}, adjust='forward')"
     )
 
 
@@ -1014,6 +1099,9 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
     if env.is_baostock_available():
         tasks.append(("baostock.kline",
                       lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed)))
+    if env.is_tickflow_available():
+        tasks.append(("tickflow.kline",
+                      lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed)))
 
     results = _run_sources_parallel(tasks, "kline")
     result_map = {r.source: r for r in results}
@@ -1024,6 +1112,8 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
     }
     if env.is_baostock_available():
         qp_map["baostock.kline"] = _qp_baostock(symbol, sd, ed)
+    if env.is_tickflow_available():
+        qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
     _annotate_query_params(result_map, qp_map)
 
     dim = DimensionResult("kline", results)
@@ -1734,6 +1824,16 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         build_analysis_cards(result)
     except Exception as e:
         logger.warning("build_analysis_cards failed (non-fatal): %s", e)
+
+    # Generate collection manifest (Task 9, P1)
+    try:
+        from lib.manifest import generate_manifest
+        result.setdefault("_meta", {})
+        result["_meta"]["manifest"] = generate_manifest(result)
+    except Exception as e:
+        logger.warning("manifest generation failed (non-fatal): %s", e)
+        result.setdefault("_meta", {})
+        result["_meta"]["manifest"] = None
 
     return result
 
@@ -3070,6 +3170,233 @@ def collect_industry_peers(
         result["rankings"] = rankings
 
     return result
+
+
+# ---- 行业横向对比（v0.1.6 CLI peer 命令） ----
+
+_SORT_FIELD_MAP = {
+    "market_cap": "total_mv",
+    "revenue": "revenue_yoy",
+    "roe": "roe",
+}
+
+_SOURCE_LABEL_MAP: dict[str, str] = {
+    "sw_index_member": "tushare_5000",
+    "stock_basic_fallback": "tushare_2000",
+}
+
+
+def _safe_peer_num(v) -> float | None:
+    """Convert to float, filtering NaN and infinity."""
+    if v is None:
+        return None
+    try:
+        fv = float(v)
+        if math.isnan(fv) or math.isinf(fv):
+            return None
+        return fv
+    except (ValueError, TypeError):
+        return None
+
+
+def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
+    """akshare 回退方案：使用东方财富行业板块成分股进行行业横向对比。"""
+    import akshare as ak  # noqa: F811
+    from .proxy import akshare_direct_session
+
+    # 1. 获取基本信息和行业分类
+    info = _q_akshare_basic(symbol)
+    if not info:
+        raise RuntimeError("无法获取股票基本信息（akshare）")
+
+    industry_name = (info.get("行业") or info.get("industry") or "").strip()
+    if not industry_name:
+        raise RuntimeError("无法确定行业分类（akshare）")
+
+    # 2. 匹配东方财富行业板块名称
+    with akshare_direct_session():
+        try:
+            boards = ak.stock_board_industry_name_em()
+        except Exception as exc:
+            raise RuntimeError(f"获取行业板块列表失败: {exc}") from exc
+
+    if boards is None or boards.empty:
+        raise RuntimeError("东方财富行业板块列表为空")
+
+    matched_board: str | None = None
+    for _, row in boards.iterrows():
+        name = str(row.get("板块名称", ""))
+        if name and (industry_name in name or name in industry_name):
+            matched_board = name
+            break
+
+    if not matched_board:
+        raise RuntimeError(
+            f"未在东方财富板块列表中找到匹配行业: {industry_name}")
+
+    # 3. 获取板块成分股列表
+    with akshare_direct_session():
+        try:
+            cons = ak.stock_board_industry_cons_em(symbol=matched_board)
+        except Exception as exc:
+            raise RuntimeError(
+                f"获取行业板块成分股失败 '{matched_board}': {exc}") from exc
+
+    if cons is None or cons.empty:
+        raise RuntimeError(f"行业板块无成分股: {matched_board}")
+
+    industry_codes = set(cons["代码"].astype(str).str.zfill(6).tolist())
+
+    # 4. 获取全市场实时快照数据
+    with akshare_direct_session():
+        try:
+            spot = ak.stock_zh_a_spot_em()
+        except Exception as exc:
+            raise RuntimeError(f"获取实时行情快照失败: {exc}") from exc
+
+    if spot is None or spot.empty:
+        raise RuntimeError("实时行情快照为空")
+
+    # 5. 按行业过滤，构建同行列表
+    target_code = symbol.zfill(6)
+    peers: list[dict] = []
+    target_entry: dict | None = None
+
+    for _, row in spot.iterrows():
+        code = str(row.get("代码", "")).zfill(6)
+        if code not in industry_codes:
+            continue
+
+        pe = _safe_peer_num(row.get("市盈率-动态"))
+        if pe is not None and pe <= 0:
+            pe = None  # 负 PE 无意义
+
+        entry = {
+            "symbol": code,
+            "name": str(row.get("名称", "")),
+            "pe_ttm": pe,
+            "pb": _safe_peer_num(row.get("市净率")),
+            "total_mv": _safe_peer_num(row.get("总市值")),
+            "revenue_yoy": _safe_peer_num(row.get("营业收入同比增长率")),
+            "roe": None,  # 快照数据不含 ROE
+        }
+
+        # Normalize total_mv: akshare spot data returns 元 → 亿元
+        mv_raw = entry.get("total_mv")
+        if mv_raw is not None:
+            entry["total_mv"] = mv_raw / 1e8
+
+        if code == target_code:
+            target_entry = entry
+        else:
+            peers.append(entry)
+
+    if not target_entry:
+        raise RuntimeError(
+            f"标的 {symbol} 未在东方财富行业板块成分股中")
+
+    # 6. 按指定字段排序并截取 top N
+    sf = _SORT_FIELD_MAP.get(sort_by, "total_mv")
+    peers.sort(key=lambda p: (p.get(sf) is None, -(p.get(sf) or 0)))
+    peers = peers[:top_n]
+
+    return {
+        "peers": peers,
+        "target": target_entry,
+        "rankings": {},
+        "industry_name": industry_name,
+        "peer_source": "akshare_fallback",
+        "sufficient": len(peers) >= 3,
+    }
+
+
+def collect_peer_comparison(
+    symbol: str,
+    top_n: int = 10,
+    sort_by: str = "market_cap",
+) -> dict:
+    """行业横向对比：采集同行公司估值与财务对比数据。
+
+    优先使用 Tushare 申万行业成分股（collect_industry_peers，需 2000+ 积分），
+    失败时降级至 akshare 东方财富行业板块成分股。
+
+    Args:
+        symbol: 股票代码（如 "600176"）
+        top_n: 目标对比公司数量（默认 10，不含标的自身）
+        sort_by: 排序依据，可选 market_cap | revenue | roe
+
+    Returns:
+        dict with keys:
+          - peers: list[dict] 同行公司数据
+          - target: dict | None 标的自身数据
+          - peer_source: str 数据源等级标签
+          - industry_name: str | None
+          - sort_by: str
+          - top_n: int
+          - error: str (仅完全失败时)
+    """
+    config = env.get_config()
+
+    # 优先 Tushare 申万路径
+    if env.is_tushare_available(config):
+        try:
+            ts_result = collect_industry_peers(symbol, max_peers=top_n + 1)
+            if not ts_result.get("error"):
+                peers = list(ts_result.get("peers", []))
+                target = ts_result.get("target")
+
+                src = ts_result.get("peer_source", "")
+                source_label = _SOURCE_LABEL_MAP.get(src, src)
+
+                sf = _SORT_FIELD_MAP.get(sort_by, "total_mv")
+                peers.sort(key=lambda p: (
+                    p.get(sf) is None, -(p.get(sf) or 0)))
+                peers = peers[:top_n]
+
+                # Normalize total_mv: Tushare daily_basic returns 万元 → 亿元
+                for entry in ([target] if target else []) + peers:
+                    mv = entry.get("total_mv")
+                    if mv is not None:
+                        entry["total_mv"] = mv / 10000.0
+
+                return {
+                    "symbol": symbol,
+                    "peers": peers,
+                    "target": target,
+                    "rankings": ts_result.get("rankings", {}),
+                    "peer_source": source_label,
+                    "sort_by": sort_by,
+                    "top_n": top_n,
+                    "industry_name": ts_result.get("industry_name"),
+                    "sufficient": ts_result.get("sufficient", False),
+                }
+        except Exception as exc:
+            logger.debug("collect_peer_comparison tushare failed: %s", exc)
+
+    # akshare 回退
+    try:
+        result = _collect_peers_akshare(symbol, top_n, sort_by)
+        result["symbol"] = symbol
+        result["sort_by"] = sort_by
+        result["top_n"] = top_n
+        return result
+    except Exception as exc:
+        logger.debug("collect_peer_comparison akshare failed: %s", exc)
+
+    return {
+        "symbol": symbol,
+        "peers": [],
+        "target": None,
+        "rankings": {},
+        "peer_source": "",
+        "sort_by": sort_by,
+        "top_n": top_n,
+        "industry_name": None,
+        "error": (
+            "Tushare 与 akshare 均无法获取行业同行数据。"
+            "请运行 `invest.py diagnose` 检查数据源可用性。"
+        ),
+    }
 
 
 # 测试与旧代码兼容别名
