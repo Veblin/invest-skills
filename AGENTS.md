@@ -82,7 +82,7 @@ MA5/MA10/MA20/MA60 和 MACD（DIF/DEA）等指标**仅用于理解市场状态**
 
 - Tushare 与 akshare 并列并行（先到先用），非前置拦截器
 - Tushare Token 无效时静默跳过，不影响主 fallback 链
-- efinance / yfinance 计划在未来版本接入（详见 `docs/roadmap.md`）
+- TickFlow ✅ 已接入（v0.1.6）— 免费免注册独立 K 线数据源，提供第四源交叉验证
 
 ### 港股数据源（优先级）
 

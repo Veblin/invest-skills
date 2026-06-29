@@ -1,6 +1,6 @@
 # CLAUDE.md — invest-A 投研助手
 
-> 当前版本：v0.1.5 | 分支：feat/v0.1.5
+> 当前版本：v0.1.6 | 分支：feat/v0.1.6
 
 ## 版本规则
 
@@ -42,8 +42,10 @@ store list   # 历史采集记录
 | Tushare Pro | ✅ | 需 TOKEN |
 | akshare | ✅ | 东方财富接口可能被代理拦截 |
 | Baostock | ✅ | 免注册 |
+| TickFlow | ✅ | 免注册，独立数据管道 |
 | 腾讯行情 | ✅ | 免注册 |
 | FRED | ✅ | 美宏观数据 |
+| 公告事件 | ✅ | akshare stock_individual_notice_report |
 
 **代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
 
