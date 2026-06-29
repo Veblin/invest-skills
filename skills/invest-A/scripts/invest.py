@@ -136,6 +136,9 @@ def _apply_deep_dims(dims: list[str], deep: bool) -> list[str]:
             out.append("kline")
         if "industry" not in out:
             out.append("industry")
+        # Add research dim for Template C (architecture decision #4)
+        if "research" not in out:
+            out.append("research")
     return out
 
 
@@ -184,6 +187,8 @@ def _resume_cache_compatible(
         }
         if "industry" not in dim_names:
             issues.append("--deep 已启用但快照无 industry 维度")
+        if "research" not in dim_names:
+            issues.append("--deep 已启用但快照无 research 维度")
 
     if _HAS_STORE:
         step = store_mod.load_pipeline_step(symbol, "collect")
@@ -233,7 +238,7 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--deep", action="store_true",
-        help="深度模式：扩大K线范围，增加行业/产业链分析",
+        help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
 
 
@@ -252,14 +257,14 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
-    pc.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/产业链分析")
+    pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pr.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
-    pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/产业链分析")
+    pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
@@ -856,6 +861,32 @@ def _print_key_changes(key_diff: dict) -> bool:
     return True
 
 
+def _print_diff_events(key_diff: dict) -> None:
+    """输出事件变化摘要。"""
+    events_diff = key_diff.get("events")
+    if not events_diff:
+        return
+    count_change = events_diff.get("count_change", 0)
+    new_types = events_diff.get("new_types", [])
+    removed_types = events_diff.get("removed_types", [])
+
+    parts: list[str] = []
+    if count_change != 0:
+        sign = "+" if count_change > 0 else ""
+        parts.append(f"事件数量变化: {sign}{count_change}")
+    if new_types:
+        parts.append(f"新增类型: {', '.join(new_types)}")
+    if removed_types:
+        parts.append(f"消失类型: {', '.join(removed_types)}")
+
+    if parts:
+        print("## 事件变化")
+        print()
+        for p in parts:
+            print(f"- {p}")
+        print()
+
+
 def _print_diff_md(key_diff: dict, diff: dict) -> None:
     """Markdown 格式 diff 输出（按类别分组）。"""
     old_at = key_diff.get("old_at", diff.get("old_at", ""))[:19]
@@ -870,6 +901,8 @@ def _print_diff_md(key_diff: dict, diff: dict) -> None:
     if not _print_key_changes(key_diff):
         print("关键字段无显著变化。")
         print()
+
+    _print_diff_events(key_diff)
 
     _print_diff_dimension_supplement(diff)
 
@@ -888,6 +921,8 @@ def _print_diff_compact(key_diff: dict, diff: dict) -> None:
     if not _print_key_changes(key_diff):
         print("关键字段无显著变化。")
         print()
+
+    _print_diff_events(key_diff)
 
     _print_diff_dimension_supplement(diff)
 

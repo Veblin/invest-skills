@@ -1718,6 +1718,23 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 "sufficient": False,
                 "error": f"Phase 2 同行采集异常: {exc}",
             }
+
+    # Attach events (not a default dim, always runs)
+    try:
+        from lib.events import attach_events
+        deep_mode = result.get("_meta", {}).get("deep", False)
+        event_days = 90 if deep_mode else 30
+        attach_events(result, symbol, days=event_days)
+    except Exception as e:
+        logger.warning("attach_events failed (non-fatal): %s", e)
+
+    # Build analysis cards (Template A/B/C)
+    try:
+        from lib.analysis_templates import build_analysis_cards
+        build_analysis_cards(result)
+    except Exception as e:
+        logger.warning("build_analysis_cards failed (non-fatal): %s", e)
+
     return result
 
 

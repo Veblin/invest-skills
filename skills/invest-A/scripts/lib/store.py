@@ -483,6 +483,15 @@ def extract_key_snapshot(raw: dict) -> dict:
         triggered = [s.get("id") for s in risk.get("signals", []) if s.get("triggered")]
         snap["risk"]["triggered_signals"] = triggered
 
+    # Events
+    events_summary = body.get("_meta", {}).get("events_summary", {})
+    if events_summary:
+        snap["events"] = {
+            "count_30d": events_summary.get("count_30d", 0),
+            "latest_date": events_summary.get("latest_date"),
+            "top_types": events_summary.get("top_types", []),
+        }
+
     return snap
 
 
@@ -563,12 +572,34 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
         if cat_changes:
             categories[cat] = cat_changes
 
+    # Events comparison
+    old_events = old_snap.get("events") or {}
+    new_events = new_snap.get("events") or {}
+    events_diff: dict[str, Any] | None = None
+    if old_events or new_events:
+        old_count = old_events.get("count_30d", 0)
+        new_count = new_events.get("count_30d", 0)
+        count_change = new_count - old_count
+
+        old_types = {t.get("type", "") for t in old_events.get("top_types", []) if t.get("type")}
+        new_types = {t.get("type", "") for t in new_events.get("top_types", []) if t.get("type")}
+        added_types = sorted(new_types - old_types)
+        removed_types = sorted(old_types - new_types)
+
+        if count_change != 0 or added_types or removed_types:
+            events_diff = {
+                "count_change": count_change,
+                "new_types": added_types,
+                "removed_types": removed_types,
+            }
+
     return {
         "symbol": new_snap.get("symbol", old_snap.get("symbol", "?")),
         "old_at": old_snap.get("fetched_at", ""),
         "new_at": new_snap.get("fetched_at", ""),
         "categories": categories,
         "unchanged": unchanged,
+        "events": events_diff,
     }
 
 
