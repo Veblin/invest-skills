@@ -1,0 +1,72 @@
+schema_version: "0.1"
+event_types:
+  earnings_report:
+    label: "定期报告"
+    impact_dimension: "收入"
+    default_duration_hint: "短期扰动"
+    description: "年报/半年报/季报发布"
+  earnings_guidance:
+    label: "业绩预告"
+    impact_dimension: "收入"
+    default_duration_hint: "短期扰动"
+    description: "业绩预告/修正公告"
+  earnings_preview:
+    label: "业绩快报"
+    impact_dimension: "收入"
+    default_duration_hint: "短期扰动"
+    description: "业绩快报"
+  buyback:
+    label: "回购"
+    impact_dimension: "估值"
+    default_duration_hint: "中长期变量"
+    description: "股份回购计划/实施"
+  equity_incentive:
+    label: "股权激励"
+    impact_dimension: "估值"
+    default_duration_hint: "中长期变量"
+    description: "限制性股票/股票期权激励计划"
+  private_placement:
+    label: "增发"
+    impact_dimension: "现金流"
+    default_duration_hint: "中长期变量"
+    description: "非公开发行/定向增发/募集资金"
+  mna:
+    label: "并购重组"
+    impact_dimension: "收入"
+    default_duration_hint: "结构性质变"
+    description: "并购/重组/收购/资产注入"
+  dividend:
+    label: "分红"
+    impact_dimension: "现金流"
+    default_duration_hint: "短期扰动"
+    description: "利润分配/分红方案/送转"
+  holder_decrease:
+    label: "减持"
+    impact_dimension: "估值"
+    default_duration_hint: "短期扰动"
+    description: "股东/高管减持计划"
+  holder_increase:
+    label: "增持"
+    impact_dimension: "估值"
+    default_duration_hint: "短期扰动"
+    description: "股东/高管增持"
+  major_contract:
+    label: "重大合同"
+    impact_dimension: "收入"
+    default_duration_hint: "中长期变量"
+    description: "重大合同/中标"
+  litigation:
+    label: "诉讼仲裁"
+    impact_dimension: "治理"
+    default_duration_hint: "中长期变量"
+    description: "诉讼/仲裁公告"
+  st_risk:
+    label: "ST/退市风险"
+    impact_dimension: "治理"
+    default_duration_hint: "结构性质变"
+    description: "ST警示/退市风险提示"
+  other:
+    label: "其他公告"
+    impact_dimension: "治理"
+    default_duration_hint: "短期扰动"
+    description: "其他/未分类公告"
