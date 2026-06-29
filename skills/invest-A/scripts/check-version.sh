@@ -141,6 +141,6 @@ else
     for line in "${REPORT_LINES[@]}"; do
         echo "  $line"
     done
-    echo "❌ 请运行 git pull 或手动更新版本号"
+    echo "❌ 修复方法：bash scripts/bump-version.sh ${V_SKILL}  # 统一更新三个文件的版本号"
     exit 1
 fi

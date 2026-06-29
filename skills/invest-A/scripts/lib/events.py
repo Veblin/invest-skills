@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, date
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ _CLASSIFICATION_RULES: list[tuple[re.Pattern, str, str, str]] = [
     (re.compile(r"分红|派息|送股|转增|利润分配"), "dividend", "估值", "短期扰动"),
     (re.compile(r"减持"), "holder_decrease", "估值", "短期扰动"),
     (re.compile(r"增持"), "holder_increase", "估值", "短期扰动"),
-    (re.compile(r"合同|中标|协议"), "major_contract", "收入", "中长期变量"),
+    (re.compile(r"合同|中标"), "major_contract", "收入", "中长期变量"),
     (re.compile(r"诉讼|仲裁"), "litigation", "治理", "短期扰动"),
     (re.compile(r"ST|退市|风险警示"), "st_risk", "治理", "结构性质变"),
     (re.compile(r"年报|年度报告|annual report", re.IGNORECASE),
@@ -70,15 +69,6 @@ _LOGIC_RELATION_MAP: dict[str, str] = {
     "earnings_preview": "不改变",
 }
 
-# 分红数据的事件类型映射
-_DIVIDEND_TYPE_MAP: dict[str, str] = {
-    "dividend": "dividend",
-    "分红": "dividend",
-    "bonus": "dividend",
-    "送转": "dividend",
-    "配送": "dividend",
-}
-
 # 股东变动事件类型映射
 _SHAREHOLDER_CHANGE_MAP: dict[str, str] = {
     "增加": "holder_increase",
@@ -102,6 +92,11 @@ def attach_events(collection: dict, symbol: str, days: int = 30) -> dict:
     Returns:
         修改后的 collection。
     """
+    # Priority: collection._meta.events_window_days over days parameter
+    meta_days = collection.get("_meta", {}).get("events_window_days")
+    if meta_days is not None:
+        days = meta_days
+
     all_events: list[dict] = []
 
     # 1. 公告通知（主要来源）
@@ -170,7 +165,7 @@ def _fetch_notice_events(symbol: str) -> list[dict]:
     try:
         df = ak.stock_individual_notice_report(security=symbol)
     except Exception as exc:
-        logger.warning("events: stock_individual_notice_report failed for %s: %s", symbol, exc)
+        logger.debug("events: stock_individual_notice_report failed for %s: %s", symbol, exc)
         return []
 
     if df is None or df.empty:
