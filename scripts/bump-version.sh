@@ -5,10 +5,11 @@
 # 用法:
 #   bash scripts/bump-version.sh 0.1.6
 #
-# 作用: 一次性更新以下三个文件的版本号，保证一致性：
+# 作用: 一次性更新以下文件的版本号，保证一致性：
 #   - skills/invest-A/SKILL.md  (frontmatter version:)
 #   - CLAUDE.md                 (当前版本：vX.Y.Z)
 #   - pyproject.toml            (version = "X.Y.Z")
+#   - render.py 从 pyproject.toml 动态读取，无需手动更新
 # ============================================================
 set -euo pipefail
 
@@ -42,7 +43,7 @@ if [[ -f "$SKILL_FILE" ]]; then
     sed -i.bak -E 's/^(version[[:space:]]*:[[:space:]]*"?)[0-9]+\.[0-9]+\.[0-9]+("?)/\1'"$NEW_VER"'\2/' "$SKILL_FILE"
     rm -f "$SKILL_FILE.bak"
     echo "  ✅ SKILL.md"
-    ((UPDATED++))
+    UPDATED=$((UPDATED + 1))
 else
     echo "  ⏭️ SKILL.md 不存在"
 fi
@@ -55,7 +56,7 @@ if [[ -f "$CLAUDE_FILE" ]]; then
       "$CLAUDE_FILE"
     rm -f "$CLAUDE_FILE.bak"
     echo "  ✅ CLAUDE.md (版本+分支)"
-    ((UPDATED++))
+    UPDATED=$((UPDATED + 1))
 else
     echo "  ⏭️ CLAUDE.md 不存在"
 fi
@@ -65,7 +66,7 @@ if [[ -f "$PYPROJECT_FILE" ]]; then
     sed -i.bak -E 's/^(version[[:space:]]*=[[:space:]]*")[0-9]+\.[0-9]+\.[0-9]+(")/\1'"$NEW_VER"'\2/' "$PYPROJECT_FILE"
     rm -f "$PYPROJECT_FILE.bak"
     echo "  ✅ pyproject.toml"
-    ((UPDATED++))
+    UPDATED=$((UPDATED + 1))
 else
     echo "  ⏭️ pyproject.toml 不存在"
 fi

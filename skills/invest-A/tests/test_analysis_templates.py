@@ -353,10 +353,17 @@ class TestSentimentCard:
         assert card.rating_distribution == {"买入": 2, "增持": 1, "中性": 1, "减持": 0}
         assert card.eps_forecast_mean == 1.25
         assert card.eps_forecast_count == 3
-        assert card.eps_forecast_high == 50.0  # from target_price_range fallback
-        assert card.eps_forecast_low == 42.0   # from target_price_range fallback
+        assert card.eps_forecast_high is None
+        assert card.eps_forecast_low is None
         assert "近半年" in card.latest_summary
         assert "Tushare report_rc" in card.data_source_note
+
+    def test_target_price_range_not_used_as_eps_fallback(self, research_collection):
+        card = _build_sentiment_card(research_collection)
+        assert card is not None
+        # Fixture has target_price_range 42-50 but no max_eps/min_eps — must stay None
+        assert card.eps_forecast_high is None
+        assert card.eps_forecast_low is None
 
     def test_sentiment_slot(self, research_collection):
         card = _build_sentiment_card(research_collection)

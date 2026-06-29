@@ -41,7 +41,7 @@ _CLASSIFICATION_RULES: list[tuple[re.Pattern, str, str, str]] = [
     (re.compile(r"增持"), "holder_increase", "估值", "短期扰动"),
     (re.compile(r"合同|中标"), "major_contract", "收入", "中长期变量"),
     (re.compile(r"诉讼|仲裁"), "litigation", "治理", "短期扰动"),
-    (re.compile(r"ST|退市|风险警示"), "st_risk", "治理", "结构性质变"),
+    (re.compile(r"(?<![A-Za-z])ST(?![A-Za-z])|退市|风险警示"), "st_risk", "治理", "结构性质变"),
     (re.compile(r"年报|年度报告|annual report", re.IGNORECASE),
      "earnings_report", "收入", "短期扰动"),
     (re.compile(r"半年报|半年度报告|semi-annual", re.IGNORECASE),

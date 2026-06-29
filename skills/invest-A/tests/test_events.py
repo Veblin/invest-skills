@@ -85,6 +85,18 @@ class TestClassifyEvent:
         result = _classify_event({"title": "关于公司股票被实施退市风险警示的公告", "raw_type": ""})
         assert result["event_type"] == "st_risk"
 
+    def test_st_risk_true_positive_standalone_st(self):
+        result = _classify_event({"title": "关于公司股票被实施ST的公告", "raw_type": ""})
+        assert result["event_type"] == "st_risk"
+
+    def test_st_risk_false_positive_star(self):
+        result = _classify_event({"title": "投资STAR科创板的公告", "raw_type": ""})
+        assert result["event_type"] == "other"
+
+    def test_st_risk_false_positive_request(self):
+        result = _classify_event({"title": "关于公司REQUEST的说明", "raw_type": ""})
+        assert result["event_type"] == "other"
+
     def test_annual_report(self):
         result = _classify_event({"title": "2025年年度报告", "raw_type": ""})
         assert result["event_type"] == "earnings_report"
@@ -619,3 +631,41 @@ class TestFetchShareholderEvents:
         mock_shareholder.side_effect = RuntimeError("API error")
         events = _fetch_shareholder_events("600176")
         assert events == []
+
+
+class TestCollectAllDeepEvents:
+    @patch("lib.events.attach_events")
+    def test_deep_mode_sets_meta_and_90_day_window(self, mock_attach_events):
+        from lib import collector
+
+        def _fake_basic(_symbol: str) -> dict:
+            return {"dimension": "basic_info", "data": {}, "status": "available"}
+
+        with patch.object(
+            collector, "COLLECTORS", {"basic_info": ("基本信息", _fake_basic)},
+        ), patch.object(collector, "attach_phase2_extras"), patch(
+            "lib.manifest.generate_manifest", return_value={},
+        ), patch("lib.analysis_templates.build_analysis_cards"):
+            result = collector.collect_all("600176", dims=["basic_info"], deep=True)
+
+        assert result["_meta"]["deep"] is True
+        mock_attach_events.assert_called_once()
+        _, kwargs = mock_attach_events.call_args
+        assert kwargs["days"] == 90
+
+    @patch("lib.events.attach_events")
+    def test_normal_mode_uses_30_day_window(self, mock_attach_events):
+        from lib import collector
+
+        def _fake_basic(_symbol: str) -> dict:
+            return {"dimension": "basic_info", "data": {}, "status": "available"}
+
+        with patch.object(
+            collector, "COLLECTORS", {"basic_info": ("基本信息", _fake_basic)},
+        ), patch.object(collector, "attach_phase2_extras"), patch(
+            "lib.manifest.generate_manifest", return_value={},
+        ), patch("lib.analysis_templates.build_analysis_cards"):
+            collector.collect_all("600176", dims=["basic_info"], deep=False)
+
+        _, kwargs = mock_attach_events.call_args
+        assert kwargs["days"] == 30

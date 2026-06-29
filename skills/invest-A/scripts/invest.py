@@ -1323,12 +1323,20 @@ def cmd_lint(args: argparse.Namespace) -> int:
         return 1
 
     if target.is_file():
-        findings = lint_mod.lint_file(target, profile=args.profile)
+        try:
+            findings = lint_mod.lint_file(target, profile=args.profile)
+        except lint_mod.RulesLoadError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            return 1
         exit_code = lint_mod.print_results(target.name, findings)
         return exit_code
 
     if target.is_dir():
-        results = lint_mod.lint_directory(target, profile=args.profile)
+        try:
+            results = lint_mod.lint_directory(target, profile=args.profile)
+        except lint_mod.RulesLoadError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            return 1
         if not results:
             return 0
         total_errors = 0
