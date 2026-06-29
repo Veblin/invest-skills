@@ -353,8 +353,8 @@ class TestSentimentCard:
         assert card.rating_distribution == {"买入": 2, "增持": 1, "中性": 1, "减持": 0}
         assert card.eps_forecast_mean == 1.25
         assert card.eps_forecast_count == 3
-        assert card.eps_forecast_high is None
-        assert card.eps_forecast_low is None
+        assert card.eps_forecast_high == 50.0  # from target_price_range fallback
+        assert card.eps_forecast_low == 42.0   # from target_price_range fallback
         assert "近半年" in card.latest_summary
         assert "Tushare report_rc" in card.data_source_note
 
