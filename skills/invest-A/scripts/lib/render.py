@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html as _html_mod
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from .proxy import (
     EASTMONEY_FAILURE_TUN_MARKER,
 )
 from .schema import CrossValidation, DriverFactor, ProbabilityStructure
+
+logger = logging.getLogger(__name__)
 
 ENGINE_VERSION = "0.1.5"
 
@@ -286,6 +289,22 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
         if not collection.get("market_structure"):
             collector.attach_market_structure(collection, symbol)
         collector.attach_phase2_extras(collection, symbol)
+
+        # Attach events (not a default dim, always runs)
+        try:
+            from lib.events import attach_events
+            deep_mode = collection.get("_meta", {}).get("deep", False)
+            event_days = 90 if deep_mode else 30
+            attach_events(collection, symbol, days=event_days)
+        except Exception as e:
+            logger.warning("attach_events failed (non-fatal): %s", e)
+
+        # Build analysis cards (Template A/B/C)
+        try:
+            from lib.analysis_templates import build_analysis_cards
+            build_analysis_cards(collection)
+        except Exception as e:
+            logger.warning("build_analysis_cards failed (non-fatal): %s", e)
 
     if fmt == "json":
         return render_json(collection)
