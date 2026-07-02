@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## v0.1.6 (2026-07-02)
+
+v0.1.6 引入事件驱动引擎、Peer 对标 CLI、合规 Lint 引擎、TickFlow K-line 数据源及 Manifest 指纹系统。
+
+### 核心新增（P1）
+
+- **事件驱动引擎** (`lib/events.py`)：事件总线架构，支持事件发布/订阅、条件触发、优先级排序
+- **Peer CLI**：对标/同行比较命令行工具，支持多标的对比
+- **TickFlow K-Line 数据源**：免注册的独立数据管道
+- **合规 Lint 引擎** (`lib/lint.py`)：基于 `compliance_rules.yaml` 的报告自动审查
+- **Manifest 指纹模块** (`lib/manifest.py`)：报告元数据生成与指纹校验
+- **分析模板库**：结构化分析模板 + 事件分类体系 (`event_type_taxonomy.yaml`)
+
+### 集成与优化
+
+- 事件引擎双路径集成到 collector + invest + store 流程
+- Render 引擎 v3 挂载点新增事件与模板支持
+- EPS 预测范围回退至 `target_price_range`（Template C）
+- 代码审查反馈修复
+
+### 测试覆盖
+
+- 新增 8 个测试文件，覆盖事件引擎、模板、Lint、Manifest、Peer CLI 等核心模块
+- 总计新增 ~5,200 行变更，30 文件
+
+### 版本同步
+
+- `SKILL.md` / `CLAUDE.md` / `pyproject.toml` 统一更新至 v0.1.6
+
 ## v0.1.4 (2026-06-17)
 
 v0.1.4 将模块 4/5/7 从占位升级为 70 分可用模板，并加固 SKILL 架构与发布门禁。
