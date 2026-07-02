@@ -40,7 +40,7 @@ def test_extract_from_pyproject():
         text=True,
         cwd=ROOT,
     )
-    assert "## v0.1.4" in out
+    assert "## v0.1.6" in out
 
 
 def test_strict_fails_without_section():
@@ -59,7 +59,7 @@ def test_print_tag_from_pyproject():
         text=True,
         cwd=ROOT,
     ).strip()
-    assert out == "v0.1.4"
+    assert out == "v0.1.6"
 
 
 def test_build_release_notes_includes_compare_when_previous_tag_known():

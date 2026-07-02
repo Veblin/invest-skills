@@ -398,6 +398,16 @@ def _yoy_from_fina_rows(rows: list[dict], field: str) -> float | None:
     return round((cur_f - prev_v) / prev_v * 100, 2)
 
 
+def _events_count_from_summary(summary: dict) -> int:
+    """从 events_summary 或快照 events 块读取窗口内事件数。"""
+    if not summary:
+        return 0
+    if "event_count" in summary:
+        return int(summary["event_count"])
+    days = summary.get("window_days", 30)
+    return int(summary.get(f"count_{days}d", summary.get("count_30d", 0)))
+
+
 def extract_key_snapshot(raw: dict) -> dict:
     """从采集 raw_json 提取高信号关键字段快照（on-the-fly，不落库）。"""
     body = raw.get("raw_json", raw) if isinstance(raw, dict) else {}
@@ -483,6 +493,16 @@ def extract_key_snapshot(raw: dict) -> dict:
         triggered = [s.get("id") for s in risk.get("signals", []) if s.get("triggered")]
         snap["risk"]["triggered_signals"] = triggered
 
+    # Events
+    events_summary = body.get("_meta", {}).get("events_summary", {})
+    if events_summary:
+        snap["events"] = {
+            "event_count": _events_count_from_summary(events_summary),
+            "window_days": events_summary.get("window_days", 30),
+            "latest_date": events_summary.get("latest_date"),
+            "top_types": events_summary.get("top_types", []),
+        }
+
     return snap
 
 
@@ -563,12 +583,44 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
         if cat_changes:
             categories[cat] = cat_changes
 
+    # Events comparison
+    old_events = old_snap.get("events") or {}
+    new_events = new_snap.get("events") or {}
+    events_diff: dict[str, Any] | None = None
+    if old_events or new_events:
+        old_window = old_events.get("window_days", 30)
+        new_window = new_events.get("window_days", 30)
+        count_change = 0
+        if old_window == new_window:
+            old_count = _events_count_from_summary(old_events)
+            new_count = _events_count_from_summary(new_events)
+            count_change = new_count - old_count
+
+        window_days_changed: dict[str, int] | None = None
+        if old_window != new_window:
+            window_days_changed = {"old": old_window, "new": new_window}
+
+        old_types = {t.get("type", "") for t in old_events.get("top_types", []) if t.get("type")}
+        new_types = {t.get("type", "") for t in new_events.get("top_types", []) if t.get("type")}
+        added_types = sorted(new_types - old_types)
+        removed_types = sorted(old_types - new_types)
+
+        if count_change != 0 or added_types or removed_types or window_days_changed:
+            events_diff = {
+                "count_change": count_change,
+                "new_types": added_types,
+                "removed_types": removed_types,
+            }
+            if window_days_changed:
+                events_diff["window_days_changed"] = window_days_changed
+
     return {
         "symbol": new_snap.get("symbol", old_snap.get("symbol", "?")),
         "old_at": old_snap.get("fetched_at", ""),
         "new_at": new_snap.get("fetched_at", ""),
         "categories": categories,
         "unchanged": unchanged,
+        "events": events_diff,
     }
 
 

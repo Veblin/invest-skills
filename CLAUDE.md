@@ -1,6 +1,6 @@
 # CLAUDE.md — invest-A 投研助手
 
-> 当前版本：v0.1.4 | 分支：feat/v0.1.4
+> 当前版本：v0.1.6 | 分支：feat/v0.1.6
 
 ## 版本规则
 
@@ -8,6 +8,17 @@
 - 小幅迭代递增末位：`v0.1.3 → v0.1.4 → ...`
 - 同版本内多次修订用日期区分，不自创四位版本号
 - Git 分支：`feat/v{version}`
+
+### 版本号同步（统一修改）
+
+版本号涉及三个文件：`SKILL.md`（frontmatter）、`CLAUDE.md`（正文）、`pyproject.toml`（项目配置）。**禁止逐个手动修改**，请使用统一的 bump 脚本：
+
+```bash
+# 全部三个文件同步更新
+bash scripts/bump-version.sh 0.1.6
+```
+
+脚本会自动完成全部替换，并提示 git commit / tag 的下一步命令。运行后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
 
 ## 运行命令
 
@@ -31,10 +42,27 @@ store list   # 历史采集记录
 | Tushare Pro | ✅ | 需 TOKEN |
 | akshare | ✅ | 东方财富接口可能被代理拦截 |
 | Baostock | ✅ | 免注册 |
+| TickFlow | ✅ | 免注册，独立数据管道 |
 | 腾讯行情 | ✅ | 免注册 |
 | FRED | ✅ | 美宏观数据 |
+| 公告事件 | ✅ | akshare stock_individual_notice_report |
 
 **代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
+
+### akshare 进度条过滤
+
+akshare 调用时 tqdm 进度条输出到 stderr，不要用复杂 grep 过滤：
+
+```bash
+# ❌ 错误模式（ugrep/GNU grep 下 \|\| 解析为交替操作符，报 "empty subexpression"）
+uv run python -c "..." 2>&1 | grep -v '^\d+%\|\|'
+
+# ✅ 正确：直接丢弃 stderr（进度条在 stderr，数据在 stdout）
+uv run python -c "..." 2>/dev/null
+
+# ✅ 如果同时需要看错误信息：用 -E 扩展正则
+uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
+```
 
 ## 宏观情景
 

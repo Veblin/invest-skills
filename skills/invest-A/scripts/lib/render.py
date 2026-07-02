@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import html as _html_mod
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,11 @@ from .proxy import (
 )
 from .schema import CrossValidation, DriverFactor, ProbabilityStructure
 
-ENGINE_VERSION = "0.1.5"
+from .version import get_package_version
+
+logger = logging.getLogger(__name__)
+
+ENGINE_VERSION = get_package_version()
 
 
 def _cross_validation_marker(cv: CrossValidation | None) -> str:
@@ -287,6 +292,30 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
             collector.attach_market_structure(collection, symbol)
         collector.attach_phase2_extras(collection, symbol)
 
+        # Events: backfill when never attached, or [] without events_summary (failed path).
+        # Standard collect→report with events_summary already ran attach_events.
+        events_attached = False
+        try:
+            from lib.events import attach_events, needs_events_backfill
+            if needs_events_backfill(collection):
+                deep_mode = collection.get("_meta", {}).get("deep", False)
+                event_days = 90 if deep_mode else 30
+                attach_events(collection, symbol, days=event_days)
+                events_attached = True
+        except Exception as e:
+            logger.warning("attach_events failed (non-fatal): %s", e)
+
+        # Build analysis cards when missing or events were just attached.
+        try:
+            meta = collection.setdefault("_meta", {})
+            if events_attached:
+                meta.pop("analysis_cards", None)
+            if events_attached or "analysis_cards" not in meta:
+                from lib.analysis_templates import build_analysis_cards
+                build_analysis_cards(collection)
+        except Exception as e:
+            logger.warning("build_analysis_cards failed (non-fatal): %s", e)
+
     if fmt == "json":
         return render_json(collection)
     if fmt == "html":
@@ -338,6 +367,11 @@ def _get_dim_meta(dims: dict[str, dict], key: str) -> dict:
     """获取维度 meta。"""
     d = dims.get(key, {})
     return d.get("_meta", {})
+
+
+def _get_analysis_cards(collection: dict) -> dict:
+    """Safe accessor for analysis_cards from collection._meta."""
+    return (collection.get("_meta") or {}).get("analysis_cards") or {}
 
 
 def _header_v2(collection: dict, symbol: str) -> str:
@@ -1744,7 +1778,25 @@ def _section_dynamic_drivers(
         fin_dir = "↑正向" if float(np_now) > float(np_prev) else (
             "↓负向" if float(np_now) < float(np_prev) else "→中性")
 
-    factors.append(DriverFactor("事件催化", "[数据源不可用，该因子跳过]", "—", "—", "Phase 3"))
+    # 事件催化因子 — from collection["events"]
+    events_list = collection.get("events") or []
+    if events_list and isinstance(events_list, list) and len(events_list) > 0:
+        event_count = len(events_list)
+        summary = (collection.get("_meta") or {}).get("events_summary") or {}
+        top_types = summary.get("top_types", [])
+        top_types_str = "、".join(
+            f"{t['type']}({t['count']})" for t in top_types[:3]
+        ) if top_types else f"{event_count}条"
+        event_label = f"近{summary.get('window_days', 30)}日 {event_count}条事件（{top_types_str}）"
+        factors.append(DriverFactor(
+            "事件催化", event_label, "→中性", "⚠️",
+            "akshare stock_individual_notice_report",
+        ))
+    else:
+        factors.append(DriverFactor(
+            "事件催化", "事件数据暂不可用（akshare 公告接口未返回数据）", "—", "—",
+            "akshare stock_individual_notice_report",
+        ))
     rows = [f.to_matrix_row() for f in factors]
     lines.extend(rows)
 
@@ -1994,6 +2046,83 @@ def _section_market_structure(
 
     lines.append("")
     lines.append("🔍 **待独立验证:** Tushare 积分不足时见 availability 标注（sw_daily 需 5000 分，2000 分档走 akshare 回退）。")
+    return "\n".join(lines)
+
+
+def _section_events_timeline(collection: dict) -> str:
+    """事件时间线（模块 3-3b 过渡段）。
+
+    渲染 events 列表为时间降序表格，并附加 Template B 事件分类摘要。
+    """
+    events_all = collection.get("events") or []
+    if not events_all or not isinstance(events_all, list) or len(events_all) == 0:
+        return ""
+
+    lines = ["## 3a. 事件时间线", ""]
+
+    # 按 date 降序排列
+    sorted_events = sorted(
+        events_all,
+        key=lambda e: str(e.get("date", "")),
+        reverse=True,
+    )
+    shown = sorted_events[:15]
+
+    lines.append("| 日期 | 类型 | 公告标题 | 影响维度 | 持续性质 |")
+    lines.append("|------|------|---------|---------|---------|")
+    for ev in shown:
+        date = str(ev.get("date", ""))
+        etype = str(ev.get("type", "other"))
+        title = str(ev.get("title", ""))
+        impact = str(ev.get("impact_dimension", ""))
+        duration = str(ev.get("duration", ""))
+        # Trim long titles for table display
+        if len(title) > 50:
+            title = title[:47] + "..."
+        # Escape pipe chars
+        title = title.replace("|", "/")
+        lines.append(f"| {date} | {etype} | {title} | {impact} | {duration} |")
+
+    hide_count = max(0, len(sorted_events) - 15)
+    if hide_count > 0:
+        lines.append(f"| ... | ... | （另有 {hide_count} 条事件未展示） | ... | ... |")
+
+    lines.append("")
+    lines.append(f"[来源: akshare stock_individual_notice_report / {len(sorted_events)} 条事件]")
+    lines.append("")
+
+    # ---- Template B classification cards ----
+    cards = _get_analysis_cards(collection)
+    event_classifications = cards.get("event_classifications") or []
+    if event_classifications and isinstance(event_classifications, list):
+        lines.append("**事件分类摘要**（规则推断，待 Claude 验证）:")
+        lines.append("")
+        for ec in event_classifications:
+            ev_type = ec.get("event_label", ec.get("event_type", "其他"))
+            ev_count = len(ec.get("events", []))
+            direction_hint = ec.get("direction_hint", "")
+            duration = ec.get("default_duration_hint", "")
+            direction_note = ec.get("direction_note", "")
+            summary_parts = [f"**{ev_type}** ({ev_count}条)"]
+            if direction_hint:
+                summary_parts.append(f"方向: {direction_hint}")
+                if direction_note:
+                    summary_parts.append(f"{direction_note}")
+            else:
+                summary_parts.append("[参考: 事件类型分类规则，不构成投资建议]")
+            lines.append("  - " + " ".join(summary_parts))
+        lines.append("")
+
+    # Industry / market event placeholders
+    ind_note = collection.get("_meta", {}).get("industry_events_note")
+    mkt_note = collection.get("_meta", {}).get("market_events_note")
+    if ind_note:
+        lines.append(f"⏭️ **行业事件**: {ind_note}")
+    if mkt_note:
+        lines.append(f"⏭️ **市场事件**: {mkt_note}")
+    if ind_note or mkt_note:
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -2263,6 +2392,42 @@ def _section_fundamentals_layered(
     P0-3 升级：新增「核心判断摘要」与「12题回答状态表」。
     """
     lines = ["## 4. 静态基本面分析", ""]
+
+    # ---- Template A: MD&A 快速扫描 ----
+    cards = _get_analysis_cards(collection)
+    mda_card = cards.get("mda_narrative")
+    if mda_card and isinstance(mda_card, dict):
+        gen_at = mda_card.get("generated_at", "")[:10] if mda_card.get("generated_at") else ""
+        lines.append("> **MD&A 快速扫描** (自动计算) | 生成时间: " + gen_at)
+        rg = mda_card.get("revenue_growth_yoy")
+        pg = mda_card.get("profit_growth_yoy")
+        gm = mda_card.get("gross_margin")
+        gmc = mda_card.get("gross_margin_change")
+        nm = mda_card.get("net_margin")
+        nmc = mda_card.get("net_margin_change")
+        ocf = mda_card.get("operating_cashflow")
+        np = mda_card.get("net_profit")
+        cq = mda_card.get("cashflow_quality_hint", "")
+        ratio_str = ""
+        if ocf is not None and np is not None and abs(np) > 1e-9:
+            ratio_str = f"{ocf/np:.2f}"
+        roe = mda_card.get("roe")
+        dr = mda_card.get("debt_ratio")
+        _fmt_pct = lambda v: f"{v:.2f}%" if v is not None else "—"
+        _fmt_pp = lambda v: f"{v:+.1f}pp" if v is not None else "—"
+        rg_s = f"{rg:.2f}%" if rg is not None else "—"
+        pg_s = f"{pg:.2f}%" if pg is not None else "—"
+        lines.append(f"> - 营收增速: {rg_s} | 净利润增速: {pg_s}")
+        lines.append(f"> - 毛利率: {_fmt_pct(gm)} ({_fmt_pp(gmc)}) | 净利率: {_fmt_pct(nm)} ({_fmt_pp(nmc)})")
+        if ratio_str:
+            lines.append(f"> - 经营现金流/净利润: {ratio_str} → 利润含金量: {cq}")
+        if roe is not None:
+            dr_label = f"{dr:.2f}%" if dr is not None else "—"
+            lines.append(f"> - ROE: {roe:.2f}% | 负债率: {dr_label}")
+        ns = mda_card.get("narrative_slot", "")
+        if ns:
+            lines.append(f"> - 叙事解读: {ns}")
+        lines.append("")
 
     fin = _get_dim_data(dims, "financials")
     fin_list: list[dict] = []
@@ -2662,7 +2827,7 @@ def _section_fundamentals_layered(
         lines.append("数据不足：[缺少 ROE 数据，无法评估护城河]")
     lines.append("")
     lines.append(_law10_hint(
-        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度往往快于预期。",
+        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度可能快于预期（待补案例）。",
         (
             f"本次 ROE {roe_now:.2f}%"
             + (f"（{roe_first:.2f}% → {roe_now:.2f}%）" if roe_first is not None else "")
@@ -2767,7 +2932,7 @@ def _section_fundamentals_layered(
     lines.append("")
     lines.append(_law10_hint(
         "现金流是利润的「含金量」检验——利润好看但现金流持续弱于利润，"
-        "通常意味着应收膨胀、存货积压或收入确认激进。",
+        "可能意味着应收膨胀、存货积压或收入确认激进（待补案例）。",
         (
             f"本次经营现金流/净利润 = {cf_ratio:.2f}，若仅看单期就认定利润质量差，"
             "可能忽略季节性备货——应对比连续 4 期趋势。"
@@ -2981,8 +3146,8 @@ def _section_fundamentals_layered(
     lines.append("### 4d. 估值与预期")
     lines.append("")
 
-    # D-① PE/PB 5 年历史分位
-    lines.append("#### D-① PE/PB 历史分位")
+    # D-① PE/PB 5 年历史位置
+    lines.append("#### D-① PE/PB 历史位置")
     if pe_seq and current_pe is not None:
         from lib.valuation import valuation_summary
 
@@ -2994,17 +3159,17 @@ def _section_fundamentals_layered(
         pb_info = vs["pb"]
         ps_info = vs.get("ps", {})
         if pe_info.get("current") is not None:
-            pct_str = f"，{vs.get('window_label', val_window_label)} {pe_info['pct']:.1f}% 分位" if pe_info.get("pct") is not None else ""
+            pct_str = f"，{vs.get('window_label', val_window_label)} {pe_info['pct']:.1f}% 历史位置" if pe_info.get("pct") is not None else ""
             lines.append(f"- PE(TTM)：**{pe_info['current']:.2f}x**{pct_str}，处于历史**{pe_info.get('zone', '未知')}**区间。")
         else:
             lines.append(f"- PE(TTM)：{pe_info.get('reason', '不可得')}")
         if pb_info.get("current") is not None:
-            pct_str = f"，{vs.get('window_label', val_window_label)} {pb_info['pct']:.1f}% 分位" if pb_info.get("pct") is not None else ""
+            pct_str = f"，{vs.get('window_label', val_window_label)} {pb_info['pct']:.1f}% 历史位置" if pb_info.get("pct") is not None else ""
             lines.append(f"- PB：**{pb_info['current']:.2f}x**{pct_str}，处于历史**{pb_info.get('zone', '未知')}**区间。")
         else:
             lines.append(f"- PB：{pb_info.get('reason', '不可得')}")
         if ps_info.get("current") is not None:
-            pct_str = f"，{val_window_label} {ps_info['pct']:.1f}% 分位" if ps_info.get("pct") is not None else ""
+            pct_str = f"，{val_window_label} {ps_info['pct']:.1f}% 历史位置" if ps_info.get("pct") is not None else ""
             lines.append(f"- PS(TTM)：**{ps_info['current']:.2f}x**{pct_str}。")
         else:
             lines.append("数据不足：[估值序列无 ps/ps_ttm 字段]")
@@ -3379,7 +3544,7 @@ def _periods_per_year(fin_list: list[dict]) -> int:
     """估算每年报告期数（4=季报，2=半年报，1=年报）。"""
     if len(fin_list) < 2:
         return 4
-    dates = sorted(set(str(r.get("end_date", ""))[:6] for r in fin_list if r.get("end_date")))
+    dates = sorted(set(str(r.get("end_date", "")).replace("-", "")[:6] for r in fin_list if r.get("end_date")))
     if len(dates) <= 1:
         return 4
     return min(4, len(dates))
@@ -4024,6 +4189,26 @@ def _section_risk_uncertainty(
     scanner_unknowns = risk_data.get("known_unknowns") or []
     if scanner_unknowns:
         lines.append(f"4. **扫描器补充：** " + "；".join(scanner_unknowns[:3]))
+
+    # Governance events cross-reference
+    events_all = collection.get("events") or []
+    if events_all and isinstance(events_all, list):
+        gov_types = {"litigation", "st_risk"}
+        gov_events = [
+            e for e in events_all
+            if str(e.get("type", "")).lower() in gov_types
+        ]
+        if gov_events:
+            gov_lines = []
+            for ge in gov_events[:5]:
+                gdate = str(ge.get("date", ""))
+                gtitle = str(ge.get("title", ""))
+                if len(gtitle) > 60:
+                    gtitle = gtitle[:57] + "..."
+                gov_lines.append(f"{gdate} {gtitle}")
+            if gov_lines:
+                lines.append(f"5. **近期治理事件:** {'；'.join(gov_lines)}")
+
     lines.append("")
     lines.append(
         _evidence_conclusion_block(
@@ -4070,10 +4255,10 @@ def _section_left_right_probability(
     pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
     from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
     if pe_pct is not None and pe_pct < ZONE_LOW_THRESHOLD:
-        left_items.append(f"① PE 历史分位偏低（{pe_pct:.1f}%），证据强度：⚠️")
+        left_items.append(f"① PE 历史位置偏低（{pe_pct:.1f}%），证据强度：⚠️")
     erp = market_structure.get("erp")
     if erp and erp.get("percentile_5y") is not None and erp["percentile_5y"] >= 70:
-        left_items.append(f"② ERP 5年分位偏高（{erp['percentile_5y']}%），证据强度：⚠️")
+        left_items.append(f"② ERP 5年区间位置偏高（{erp['percentile_5y']}%），证据强度：⚠️")
     if not left_items:
         left_items.append("① 左侧参考指标数据不足或未达到阈值，证据强度：❓")
     lines.append("")
@@ -4304,7 +4489,7 @@ def _section_research_summary(
       2️⃣ 仅业绩预告（Tushare 2000+积分 / forecast）
       3️⃣ 全部不可得 → 无展示
     """
-    del collection, symbol  # 签名与 v3 其他 section 一致
+    # collection, symbol unused in v2 legacy; kept for signature consistency with v3 sections
     research_dim = dims.get("research", {})
     summary = research_dim.get("research_summary") or {}
     status = summary.get("status", "no_data")
@@ -4376,6 +4561,24 @@ def _section_research_summary(
 
     lines.append("## 机构观点与盈利预测\n")
     lines.extend(body)
+
+    # Template C: SentimentCard note
+    sentiment_card = _get_analysis_cards(collection).get("sentiment")
+    if sentiment_card and isinstance(sentiment_card, dict):
+        eps_mean = sentiment_card.get("eps_forecast_mean")
+        eps_high = sentiment_card.get("eps_forecast_high")
+        eps_low = sentiment_card.get("eps_forecast_low")
+        eps_count = sentiment_card.get("eps_forecast_count", 0)
+        if eps_mean is not None:
+            eps_range = ""
+            if eps_low is not None and eps_high is not None:
+                eps_range = f", range [{eps_low}-{eps_high}]"
+            lines.append(
+                f"\n> **研报情绪:** EPS一致预期 {eps_mean} (n={eps_count}){eps_range}"
+            )
+        slot_text = sentiment_card.get("sentiment_slot", "")
+        if slot_text:
+            lines.append(f"> *{slot_text}*")
 
     from datetime import datetime
     source_label = {
@@ -4488,6 +4691,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_market_structure(
                 collection, symbol, market_structure, val_cache=val_cache,
             ),
+            _section_events_timeline(collection),
             _section_research_summary(collection, symbol, dims),
             _wrap_details(
                 "展开：静态基本面（12题）",

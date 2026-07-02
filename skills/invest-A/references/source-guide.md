@@ -13,6 +13,38 @@
 | **akshare** | `stock_financial_abstract_ths` / `stock_hsgt_individual_em` / `stock_zh_a_hist` / `stock_individual_info_em` | ★★ | 否 | 多源验证用。⚠️ `stock_zh_a_hist` 和 `stock_individual_info_em` 因东方财富反爬在多数环境下不可用 |
 | **腾讯行情** | `qt.gtimg.cn` HTTP | ★★★★ | 否 | 实时报价（价格/成交量/PE/市值） |
 | **baostock** | `query_history_k_data_plus` | ★★★★ | 否 | K 线历史数据，免费稳定，需网络直连 |
+| **TickFlow** | `TickFlow.free().klines.get` | ★★★★ | 否 | 第四 K 线源，独立数据管道（非东方财富），`TickFlow.free()` 零配置
+
+## TickFlow 使用说明
+
+**TickFlow** ([GitHub 3.4k stars](https://github.com/weilinxie/tickflow)) 是由 efinance 作者开发的免费 A 股行情库，提供独立数据管道（非东方财富爬虫），用于 K 线交叉验证。
+
+### 用法
+
+```python
+import tickflow as tf
+client = tf.TickFlow.free()                          # 零配置，无需注册
+df = client.klines.get("600519.SH",                   # 代码格式: Tushare 风格
+    period="1d",
+    start_time=start_ms, end_time=end_ms,             # 毫秒时间戳
+    adjust="forward",                                 # 前复权（默认）
+    as_dataframe=True)
+```
+
+### Baostock 对比
+
+| 特性 | Baostock | TickFlow |
+|------|----------|----------|
+| 注册 | 无需 | 无需（free tier） |
+| 数据管道 | baostock.com 直连 | tickflow.org API |
+| 代码格式 | `sh.600176` / `sz.000001` | `600176.SH` / `000001.SZ` |
+| 时间参数 | `YYYY-MM-DD` 字符串 | 毫秒级 Unix 时间戳 |
+| 复权支持 | 前/后/不复权（adjustflag=3） | forward/backward/none |
+| 并发安全 | 需 `_BAOSTOCK_LOCK` 串行化 | 线程安全 |
+
+### 交叉验证价值
+
+因 TickFlow 使用独立数据管道，与 akshare（东方财富）不同源，两者 K 线数据出现系统性偏差的概率极低。若 TickFlow 与 akshare/baostock 同时返回一致数据，可视为高可信度信号。
 
 ## 代理 / VPN 问题（Clash、V2Ray 等）
 
@@ -27,6 +59,7 @@ rules:
   - DOMAIN-SUFFIX,eastmoney.com,DIRECT
   - DOMAIN-SUFFIX,gtimg.cn,DIRECT
   - DOMAIN-SUFFIX,baostock.com,DIRECT
+  - DOMAIN-SUFFIX,tickflow.org,DIRECT
   - MATCH,PROXY
 ```
 
@@ -41,7 +74,6 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 ## 待接入数据源
 
 以下数据源已规划但尚未接入，详见 `docs/roadmap.md`：
-- **efinance** — 免费 A 股数据，稳定性 ★★★★
 - **yfinance** — 美股/港股数据，稳定性 ★★
 
 ## Web 搜索可信度分级

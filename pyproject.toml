@@ -1,6 +1,6 @@
 [project]
 name = "investment-learning-skill"
-version = "0.1.5"
+version = "0.1.6"
 description = "A股个股调研多因子投研助手 — Tushare + FRED 数据采集，产出带来源追溯的 Markdown 研究备忘录"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -11,6 +11,8 @@ dependencies = [
   "fredapi>=0.5.2",
   "akshare>=1.18.64",
   "baostock>=0.8.9",
+  "tickflow>=0.1.0",
+  "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
