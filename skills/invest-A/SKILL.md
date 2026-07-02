@@ -1,6 +1,6 @@
 ---
 name: invest-A
-version: "0.1.6"
+version: "0.1.7"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
 argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --deep | /invest-A 600176 --compare 000858"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
