@@ -1,6 +1,6 @@
 # CLAUDE.md — invest-A 投研助手
 
-> 当前版本：v0.1.6 | 分支：feat/v0.1.6
+> 当前版本：v0.1.7 | 分支：feat/v0.1.7
 
 ## 版本规则
 
@@ -15,7 +15,7 @@
 
 ```bash
 # 全部三个文件同步更新
-bash scripts/bump-version.sh 0.1.6
+bash scripts/bump-version.sh 0.1.7
 ```
 
 脚本会自动完成全部替换，并提示 git commit / tag 的下一步命令。运行后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
