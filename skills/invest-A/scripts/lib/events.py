@@ -126,11 +126,11 @@ def attach_events(collection: dict, symbol: str, days: int = 30) -> dict:
     except Exception as exc:
         logger.warning("events: shareholder change failed for %s: %s", symbol, exc)
 
-    # 4. 去重
-    all_events = _dedup_events(all_events)
-
-    # 5. 时间窗口过滤
+    # 4. 时间窗口过滤（先过滤减少去重计算量）
     all_events = _filter_by_days(all_events, days)
+
+    # 5. 去重
+    all_events = _dedup_events(all_events)
 
     # 6. 按日期降序排列
     all_events.sort(key=lambda e: str(e.get("date", "")), reverse=True)
@@ -160,10 +160,12 @@ def _fetch_notice_events(symbol: str) -> list[dict]:
 
     API 返回列: 代码/名称/公告标题/公告类型/公告日期/网址
     """
-    import akshare as ak
+    from .proxy import akshare_direct_session
 
     try:
-        df = ak.stock_individual_notice_report(security=symbol)
+        with akshare_direct_session():
+            import akshare as ak
+            df = ak.stock_individual_notice_report(security=symbol)
     except Exception as exc:
         logger.debug("events: stock_individual_notice_report failed for %s: %s", symbol, exc)
         return []
@@ -212,13 +214,15 @@ def _fetch_dividend_events(symbol: str) -> list[dict]:
 
     优先使用 stock_history_dividend_detail；若失败则回退到 stock_dividend_cninfo。
     """
-    import akshare as ak
+    from .proxy import akshare_direct_session
 
     events: list[dict] = []
 
     # 主源
     try:
-        df = ak.stock_history_dividend_detail(symbol=symbol, indicator="分红")
+        with akshare_direct_session():
+            import akshare as ak
+            df = ak.stock_history_dividend_detail(symbol=symbol, indicator="分红")
         if df is not None and not df.empty:
             records = df.to_dict("records") if hasattr(df, "to_dict") else []
             for rec in records:
@@ -244,7 +248,9 @@ def _fetch_dividend_events(symbol: str) -> list[dict]:
 
     # 回退源
     try:
-        df = ak.stock_dividend_cninfo(symbol=symbol)
+        with akshare_direct_session():
+            import akshare as ak
+            df = ak.stock_dividend_cninfo(symbol=symbol)
         if df is not None and not df.empty:
             records = df.to_dict("records") if hasattr(df, "to_dict") else []
             for rec in records:
@@ -274,10 +280,12 @@ def _fetch_shareholder_events(symbol: str) -> list[dict]:
 
     数据通常较旧（16 条），作为 notice_report 的辅助补充。
     """
-    import akshare as ak
+    from .proxy import akshare_direct_session
 
     try:
-        df = ak.stock_shareholder_change_ths(symbol=symbol)
+        with akshare_direct_session():
+            import akshare as ak
+            df = ak.stock_shareholder_change_ths(symbol=symbol)
         if df is None or df.empty:
             return []
 
@@ -425,11 +433,27 @@ def _normalize_title_for_dedup(title: str) -> str:
     return t[:80]  # 截断以避免超长比较
 
 
+def needs_events_backfill(collection: dict) -> bool:
+    """判断 collection 是否需要重新采集 events。
+
+    - ``events`` 缺失：从未挂载
+    - ``events == []`` 且无 ``events_summary``：采集未完成或失败，应重试
+    - ``events == []`` 且有 ``events_summary``：窗口内确实无事件，不重试
+    """
+    events = collection.get("events")
+    if events is None:
+        return True
+    if isinstance(events, list) and len(events) == 0:
+        meta = collection.get("_meta") or {}
+        return "events_summary" not in meta
+    return False
+
+
 def _filter_by_days(events: list[dict], days: int) -> list[dict]:
     """按时间窗口过滤事件。
 
     仅保留在 days 天内（含当日）的事件。
-    日期为空或解析失败的事件默认保留。
+    日期为空的事件保留；无法解析的日期丢弃（避免窗口过滤失效）。
 
     Args:
         events: 事件卡片列表
@@ -453,7 +477,10 @@ def _filter_by_days(events: list[dict], days: int) -> list[dict]:
             if event_d >= cutoff_date:
                 out.append(e)
         except (ValueError, TypeError):
-            out.append(e)
+            logger.warning(
+                "events: unparseable date '%s' in event %s — dropped",
+                date_str, e.get("title", ""),
+            )
     return out
 
 
@@ -493,7 +520,7 @@ def _build_summary(events: list[dict], days: int) -> dict:
     Returns:
         汇总字典。
     """
-    count_30d = len(events)
+    count = len(events)
 
     # 最新日期
     dates = [str(e.get("date", "")) for e in events if e.get("date")]
@@ -509,7 +536,8 @@ def _build_summary(events: list[dict], days: int) -> dict:
     top_types = sorted(type_counts.items(), key=lambda x: -x[1])
 
     return {
-        "count_30d": count_30d,
+        f"count_{days}d": count,
+        "event_count": count,
         "window_days": days,
         "latest_date": latest_date,
         "top_types": [{"type": t, "count": c} for t, c in top_types[:5]],

@@ -32,11 +32,16 @@ class TestRenderAttachExtrasDedup:
         mock_attach.assert_not_called()
         mock_cards.assert_not_called()
 
-    def test_skips_attach_events_when_events_empty_list(self):
+    def test_skips_attach_events_when_empty_with_summary(self):
         from lib import render
 
         coll = _minimal_with_events_and_cards()
         coll["events"] = []
+        coll["_meta"]["events_summary"] = {
+            "event_count": 0,
+            "window_days": 30,
+            "top_types": [],
+        }
 
         with (
             patch("lib.events.attach_events") as mock_attach,
@@ -48,6 +53,24 @@ class TestRenderAttachExtrasDedup:
 
         mock_attach.assert_not_called()
         mock_cards.assert_not_called()
+
+    def test_retries_attach_events_when_empty_without_summary(self):
+        from lib import render
+
+        coll = _minimal_with_events_and_cards()
+        coll["events"] = []
+        coll["_meta"].pop("events_summary", None)
+
+        with (
+            patch("lib.events.attach_events") as mock_attach,
+            patch("lib.analysis_templates.build_analysis_cards") as mock_cards,
+            patch("lib.collector.attach_market_structure"),
+            patch("lib.collector.attach_phase2_extras"),
+        ):
+            render.render(coll, "600176", "compact")
+
+        mock_attach.assert_called_once()
+        mock_cards.assert_called_once()
 
     def test_attaches_events_and_builds_cards_when_missing(self):
         from lib import render

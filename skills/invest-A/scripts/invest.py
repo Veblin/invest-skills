@@ -833,9 +833,6 @@ def cmd_peer(args: argparse.Namespace) -> int:
         "roe": "roe",
     }
     sf = sort_field_map.get(sort_by, "total_mv")
-    sorted_peers = sorted(
-        peers, key=lambda p: (p.get(sf) is None, -(p.get(sf) or 0)),
-    )
 
     def _fmt_row(code: str, name: str, entry: dict, bold: bool = False) -> str:
         """Format a single table row."""
@@ -856,18 +853,24 @@ def cmd_peer(args: argparse.Namespace) -> int:
             name = f"**{name}**"
         return f"{code} | {name} | {mv_s} | {pe_s} | {pb_s} | {roe_s} | {rev_s} |"
 
-    rank = 1
+    target_code = (target or {}).get("symbol", "")
+    all_entries: list[dict] = []
     if target:
-        t_code = target.get("symbol", "")
-        t_name = target.get("name", "")
-        lines.append(f"| {rank} | {_fmt_row(t_code, t_name, target, bold=True)}")
-        rank += 1
+        all_entries.append(target)
+    for p in peers:
+        if target_code and p.get("symbol") == target_code:
+            continue
+        all_entries.append(p)
 
-    for p in sorted_peers:
-        code = p.get("symbol", "")
-        name = p.get("name", "")
-        lines.append(f"| {rank} | {_fmt_row(code, name, p)}")
-        rank += 1
+    ranked = sorted(
+        all_entries, key=lambda p: (p.get(sf) is None, -(p.get(sf) or 0)),
+    )
+
+    for rank, entry in enumerate(ranked, start=1):
+        code = entry.get("symbol", "")
+        name = entry.get("name", "")
+        is_target = bool(target_code and code == target_code)
+        lines.append(f"| {rank} | {_fmt_row(code, name, entry, bold=is_target)}")
 
     lines.append("")
 
@@ -886,7 +889,7 @@ def cmd_peer(args: argparse.Namespace) -> int:
     lines.append(f"> 数据来源: {source_note}")
     lines.append(
         f"> 排序: {sort_label}降序 | "
-        f"成分股: {len(sorted_peers)}只（排除标的自身）",
+        f"共 {len(ranked)} 行（含标的）",
     )
 
     print("\n".join(lines))
@@ -1076,8 +1079,13 @@ def _print_diff_events(key_diff: dict) -> None:
     count_change = events_diff.get("count_change", 0)
     new_types = events_diff.get("new_types", [])
     removed_types = events_diff.get("removed_types", [])
+    window_changed = events_diff.get("window_days_changed")
 
     parts: list[str] = []
+    if window_changed:
+        parts.append(
+            f"事件窗口: {window_changed.get('old')}日 → {window_changed.get('new')}日",
+        )
     if count_change != 0:
         sign = "+" if count_change > 0 else ""
         parts.append(f"事件数量变化: {sign}{count_change}")
