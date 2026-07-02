@@ -1,6 +1,6 @@
 ---
 name: invest-A
-version: "0.1.5"
+version: "0.1.6"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
 argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --deep | /invest-A 600176 --compare 000858"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
@@ -243,7 +243,8 @@ Claude 对话中输出的内容须精简为**可一目扫完**的简报，核心
 - **腾讯行情** ✅ — 实时报价兜底
 - **akshare** ✅ — 免费数据源，Tushare 不可用时的兜底（部分接口因东方财富反爬不可用）
 - **baostock** ✅ — 免费交易所 K 线数据，无需 token
-- **efinance / yfinance** 🔜 — 计划在未来版本接入（详见 `docs/roadmap.md`）
+- **TickFlow** ✅ — 免费免注册独立 K 线数据源（非东方财富管道，提供独立交叉验证）
+- **事件引擎** ✅ — akshare 公告采集 + 结构化分类（v0.1.6 新增）
 
 ## CLI 命令（核心交互入口）
 

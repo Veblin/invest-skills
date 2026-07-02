@@ -97,6 +97,15 @@ def is_baostock_available() -> bool:
         return False
 
 
+def is_tickflow_available() -> bool:
+    """检测 TickFlow 是否可用（免费 tier，无需注册）。"""
+    try:
+        import tickflow  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def is_tencent_available() -> bool:
     """检测腾讯行情是否可达（用于 diagnose 报告；与 collector 一致强制直连）。"""
     from .proxy import no_proxy_session
@@ -130,6 +139,7 @@ def diagnose(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "akshare": is_akshare_available(),
         "akshare_eastmoney_api": eastmoney,
         "baostock": is_baostock_available(),
+        "tickflow": is_tickflow_available(),
     }
     hint_kind = px.get("hint_kind")
     bypass = px.get("bypass_effective")

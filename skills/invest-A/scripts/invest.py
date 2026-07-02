@@ -67,6 +67,13 @@ except ImportError:
     archiver_mod = None
     _HAS_ARCHIVER = False
 
+try:
+    from lib import lint as lint_mod
+    _HAS_LINT = True
+except ImportError:
+    lint_mod = None
+    _HAS_LINT = False
+
 
 def _plan_sort_key(module: dict) -> int:
     """计划模块 priority；null/非法值视为最低优先级。"""
@@ -136,6 +143,9 @@ def _apply_deep_dims(dims: list[str], deep: bool) -> list[str]:
             out.append("kline")
         if "industry" not in out:
             out.append("industry")
+        # Add research dim for Template C (architecture decision #4)
+        if "research" not in out:
+            out.append("research")
     return out
 
 
@@ -184,6 +194,8 @@ def _resume_cache_compatible(
         }
         if "industry" not in dim_names:
             issues.append("--deep 已启用但快照无 industry 维度")
+        if "research" not in dim_names:
+            issues.append("--deep 已启用但快照无 research 维度")
 
     if _HAS_STORE:
         step = store_mod.load_pipeline_step(symbol, "collect")
@@ -233,7 +245,7 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--deep", action="store_true",
-        help="深度模式：扩大K线范围，增加行业/产业链分析",
+        help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
 
 
@@ -252,14 +264,14 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
-    pc.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/产业链分析")
+    pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
     pr.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
-    pr.add_argument("--deep", action="store_true", help="深度模式：扩大K线范围，增加行业/产业链分析")
+    pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
@@ -282,6 +294,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     pd = sub.add_parser("diagnose", help="检查数据源")
     pd.add_argument("--json", action="store_true")
+
+    pl = sub.add_parser(
+        "lint",
+        help="合规扫描：检查研究报告是否符合措辞、结构和证据规范",
+    )
+    pl.add_argument("target", help="报告文件路径或 reports/ 目录", nargs="?", default="reports")
+    pl.add_argument("--profile", choices=["claude", "engine"], default="claude",
+                    help="扫描规则集（claude=全部规则，engine=仅措辞+文件名）")
 
     ps = sub.add_parser("store", help="管理存储")
     ps.add_argument("action", nargs="?", default="list", choices=["list", "stats", "clear"])
@@ -311,6 +331,20 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("--mode", default="full", choices=["brief", "full"])
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     _add_collect_flags(psyn)
+
+    pp = sub.add_parser(
+        "peer",
+        help="行业横向对比：输出同行业公司估值与财务对比表",
+    )
+    pp.add_argument("symbol", help="股票代码，如 600176")
+    pp.add_argument(
+        "--top", type=int, default=10,
+        help="对比公司数量（默认10）",
+    )
+    pp.add_argument(
+        "--sort-by", choices=["market_cap", "revenue", "roe"],
+        default="market_cap", help="排序依据（默认市值下降）",
+    )
 
     return p
 
@@ -752,6 +786,116 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
     return cmd_report(args)
 
 
+def cmd_peer(args: argparse.Namespace) -> int:
+    """行业横向对比 CLI：输出 Markdown 对比表。"""
+    try:
+        result = collector.collect_peer_comparison(
+            args.symbol, top_n=args.top, sort_by=args.sort_by,
+        )
+    except Exception as exc:
+        print(f"❌ 同行对比采集失败: {exc}", file=sys.stderr)
+        return 1
+
+    if result.get("error"):
+        print(f"❌ {result['error']}", file=sys.stderr)
+        return 1
+
+    peers = result.get("peers", [])
+    target = result.get("target")
+    industry_name = result.get("industry_name", "")
+    peer_source = result.get("peer_source", "")
+    sort_by = result.get("sort_by", "market_cap")
+
+    target_name = target.get("name", "") if target else ""
+
+    lines = [f"## 行业横向对比: {args.symbol} {target_name}"]
+    if industry_name:
+        lines.append(f"\n行业: {industry_name}")
+    lines.append("")
+
+    # 排序标签
+    sort_labels_map = {
+        "market_cap": "总市值", "revenue": "营收增速", "roe": "ROE",
+    }
+    sort_label = sort_labels_map.get(sort_by, sort_by)
+
+    # Markdown 表头
+    lines.append(
+        "| 排名 | 代码 | 名称 | 总市值(亿) | PE(TTM) | PB | ROE(%) | 营收增速(%) |"
+    )
+    lines.append(
+        "|------|------|------|-----------|---------|-----|--------|------------|"
+    )
+
+    sort_field_map = {
+        "market_cap": "total_mv",
+        "revenue": "revenue_yoy",
+        "roe": "roe",
+    }
+    sf = sort_field_map.get(sort_by, "total_mv")
+
+    def _fmt_row(code: str, name: str, entry: dict, bold: bool = False) -> str:
+        """Format a single table row."""
+        mv = entry.get("total_mv")
+        pe = entry.get("pe_ttm")
+        pb = entry.get("pb")
+        roe = entry.get("roe")
+        rev = entry.get("revenue_yoy")
+
+        mv_s = f"{mv:.1f}" if mv is not None else "-"
+        pe_s = f"{pe:.1f}" if pe is not None else "-"
+        pb_s = f"{pb:.2f}" if pb is not None else "-"
+        roe_s = f"{roe:.1f}" if roe is not None else "-"
+        rev_s = f"{rev:+.1f}" if rev is not None else "-"
+
+        if bold:
+            code = f"**{code}**"
+            name = f"**{name}**"
+        return f"{code} | {name} | {mv_s} | {pe_s} | {pb_s} | {roe_s} | {rev_s} |"
+
+    target_code = (target or {}).get("symbol", "")
+    all_entries: list[dict] = []
+    if target:
+        all_entries.append(target)
+    for p in peers:
+        if target_code and p.get("symbol") == target_code:
+            continue
+        all_entries.append(p)
+
+    ranked = sorted(
+        all_entries, key=lambda p: (p.get(sf) is None, -(p.get(sf) or 0)),
+    )
+
+    for rank, entry in enumerate(ranked, start=1):
+        code = entry.get("symbol", "")
+        name = entry.get("name", "")
+        is_target = bool(target_code and code == target_code)
+        lines.append(f"| {rank} | {_fmt_row(code, name, entry, bold=is_target)}")
+
+    lines.append("")
+
+    # 数据来源标注
+    source_labels = {
+        "tushare_5000": "Tushare index_member（申万L3，需5000+积分）",
+        "tushare_2000": (
+            "Tushare stock_basic（申万粗分类，需2000+积分）"
+        ),
+        "akshare_fallback": (
+            "akshare 东方财富行业板块"
+            " [⚠️ 非申万 L3 精确成分，仅供参考]"
+        ),
+    }
+    source_note = source_labels.get(peer_source, peer_source)
+    lines.append(f"> 数据来源: {source_note}")
+    lines.append(
+        f"> 排序: {sort_label}降序 | "
+        f"共 {len(ranked)} 行（含标的）",
+    )
+
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     """对比同一股票两次快照的变化。"""
     if not _HAS_STORE:
@@ -795,6 +939,10 @@ def cmd_diff(args: argparse.Namespace) -> int:
     key_diff = store_mod.diff_key_snapshots(old, new)
     diff_result["key_changes"] = key_diff
 
+    # 数据源变化检测（基于 manifest 指纹，向后兼容）
+    manifest_diff = _compare_store_manifests(old, new)
+    diff_result["source_changes"] = manifest_diff
+
     if args.emit == "json":
         from lib.json_util import dumps_json
         print(dumps_json(diff_result))
@@ -806,6 +954,73 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
     _print_diff_compact(key_diff, diff_result)
     return 0
+
+
+def _unwrap_raw(raw: dict) -> dict:
+    """从 store 记录中提取 raw_json（兼容两种结构）。"""
+    r = raw.get("raw_json")
+    if isinstance(r, dict):
+        return r
+    if "dimensions" in raw:
+        return raw
+    return {}
+
+
+def _compare_store_manifests(old: dict, new: dict) -> dict | None:
+    """对比两次 store 记录的 manifest，返回源级变化摘要。
+
+    向后兼容：旧版无 manifest 的快照返回 None。
+    """
+    old_raw = _unwrap_raw(old)
+    new_raw = _unwrap_raw(new)
+    old_manifest = old_raw.get("_meta", {}).get("manifest")
+    new_manifest = new_raw.get("_meta", {}).get("manifest")
+    if not old_manifest or not new_manifest:
+        return None
+    try:
+        from lib.manifest import compare_manifests
+        return compare_manifests(old_manifest, new_manifest)
+    except Exception as exc:
+        print(f"⚠️ manifest 对比失败: {exc}", file=sys.stderr)
+        return None
+
+
+def _print_source_changes(manifest_diff: dict | None) -> bool:
+    """输出数据源变化摘要，返回是否有变化输出。"""
+    if manifest_diff is None:
+        return False
+
+    added = manifest_diff.get("sources_added", [])
+    removed = manifest_diff.get("sources_removed", [])
+    changed = manifest_diff.get("sources_changed", [])
+    status_changes = manifest_diff.get("status_changes", [])
+
+    if not (added or removed or changed or status_changes):
+        return False
+
+    print("## 数据源变化")
+    print()
+    if added:
+        print(f"- 新增源: {', '.join(added)}")
+    if removed:
+        print(f"- 移除源: {', '.join(removed)}")
+    for sc in status_changes:
+        print(f"- 状态变化: {sc['source']}: {sc['from']} → {sc['to']}")
+    for sc in changed:
+        parts = [f"{sc['source']}"]
+        if sc.get("fields_added"):
+            parts.append(f"新增字段: {', '.join(sc['fields_added'])}")
+        if sc.get("fields_removed"):
+            parts.append(f"移除字段: {', '.join(sc['fields_removed'])}")
+        if sc.get("row_count"):
+            rc = sc["row_count"]
+            parts.append(f"行数: {rc['from']} → {rc['to']}")
+        if sc.get("date_range"):
+            dr = sc["date_range"]
+            parts.append(f"日期范围: {dr['from']} → {dr['to']}")
+        print(f"- 字段变化: {' | '.join(parts)}")
+    print()
+    return True
 
 
 _CATEGORY_LABELS = {
@@ -856,6 +1071,37 @@ def _print_key_changes(key_diff: dict) -> bool:
     return True
 
 
+def _print_diff_events(key_diff: dict) -> None:
+    """输出事件变化摘要。"""
+    events_diff = key_diff.get("events")
+    if not events_diff:
+        return
+    count_change = events_diff.get("count_change", 0)
+    new_types = events_diff.get("new_types", [])
+    removed_types = events_diff.get("removed_types", [])
+    window_changed = events_diff.get("window_days_changed")
+
+    parts: list[str] = []
+    if window_changed:
+        parts.append(
+            f"事件窗口: {window_changed.get('old')}日 → {window_changed.get('new')}日",
+        )
+    if count_change != 0:
+        sign = "+" if count_change > 0 else ""
+        parts.append(f"事件数量变化: {sign}{count_change}")
+    if new_types:
+        parts.append(f"新增类型: {', '.join(new_types)}")
+    if removed_types:
+        parts.append(f"消失类型: {', '.join(removed_types)}")
+
+    if parts:
+        print("## 事件变化")
+        print()
+        for p in parts:
+            print(f"- {p}")
+        print()
+
+
 def _print_diff_md(key_diff: dict, diff: dict) -> None:
     """Markdown 格式 diff 输出（按类别分组）。"""
     old_at = key_diff.get("old_at", diff.get("old_at", ""))[:19]
@@ -870,6 +1116,10 @@ def _print_diff_md(key_diff: dict, diff: dict) -> None:
     if not _print_key_changes(key_diff):
         print("关键字段无显著变化。")
         print()
+
+    _print_diff_events(key_diff)
+
+    _print_source_changes(diff.get("source_changes"))
 
     _print_diff_dimension_supplement(diff)
 
@@ -888,6 +1138,10 @@ def _print_diff_compact(key_diff: dict, diff: dict) -> None:
     if not _print_key_changes(key_diff):
         print("关键字段无显著变化。")
         print()
+
+    _print_diff_events(key_diff)
+
+    _print_source_changes(diff.get("source_changes"))
 
     _print_diff_dimension_supplement(diff)
 
@@ -1064,6 +1318,49 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
     return 1 if failures == len(symbols) else 0
 
 
+def cmd_lint(args: argparse.Namespace) -> int:
+    """合规扫描入口。"""
+    if not _HAS_LINT:
+        print("❌ lint 模块不可用（lib/lint.py 缺失）", file=sys.stderr)
+        return 1
+
+    target = Path(args.target)
+
+    if not target.exists():
+        print(f"❌ 目标不存在: {target}", file=sys.stderr)
+        return 1
+
+    if target.is_file():
+        try:
+            findings = lint_mod.lint_file(target, profile=args.profile)
+        except lint_mod.RulesLoadError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            return 1
+        exit_code = lint_mod.print_results(target.name, findings)
+        return exit_code
+
+    if target.is_dir():
+        try:
+            results = lint_mod.lint_directory(target, profile=args.profile)
+        except lint_mod.RulesLoadError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            return 1
+        if not results:
+            return 0
+        total_errors = 0
+        for fname, findings in results.items():
+            lint_mod.print_results(fname, findings)
+            errors = [f for f in findings if f.severity == "error"]
+            total_errors += len(errors)
+        # 全局汇总
+        print("---")
+        err_files = sum(1 for f, findings in results.items() if any(f.severity == "error" for f in findings))
+        print(f"共扫描 {len(results)} 个文件，{err_files} 个文件存在错误")
+        return 1 if total_errors > 0 else 0
+
+    return 0
+
+
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
@@ -1079,6 +1376,10 @@ def main() -> int:
         return cmd_watchlist(args)
     elif args.command == "diagnose":
         return cmd_diagnose(args)
+    elif args.command == "lint":
+        return cmd_lint(args)
+    elif args.command == "peer":
+        return cmd_peer(args)
     elif args.command == "store":
         return cmd_store(args)
     elif args.command == "plan":

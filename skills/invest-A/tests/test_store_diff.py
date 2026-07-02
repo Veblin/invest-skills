@@ -150,3 +150,88 @@ class TestGetCollection:
 
     def test_invalid_id(self, isolated_store):
         assert isolated_store.get_collection(-1) is None
+
+
+class TestEventsKeySnapshot:
+    def test_extract_key_snapshot_90_day_event_count(self):
+        from lib.store import extract_key_snapshot, _events_count_from_summary
+
+        collection = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-01T00:00:00Z",
+            "_meta": {
+                "events_summary": {
+                    "count_90d": 7,
+                    "window_days": 90,
+                    "latest_date": "2026-06-15",
+                    "top_types": [{"type": "buyback", "count": 3}],
+                },
+            },
+        }
+        snap = extract_key_snapshot(collection)
+        assert snap["events"]["event_count"] == 7
+        assert snap["events"]["window_days"] == 90
+        assert _events_count_from_summary(collection["_meta"]["events_summary"]) == 7
+
+    def test_diff_key_snapshots_detects_event_count_change(self):
+        from lib.store import diff_key_snapshots
+
+        old = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-01T00:00:00Z",
+            "_meta": {
+                "events_summary": {
+                    "count_30d": 2,
+                    "event_count": 2,
+                    "window_days": 30,
+                    "top_types": [{"type": "buyback", "count": 2}],
+                },
+            },
+        }
+        new = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-08T00:00:00Z",
+            "_meta": {
+                "events_summary": {
+                    "count_30d": 5,
+                    "event_count": 5,
+                    "window_days": 30,
+                    "top_types": [{"type": "buyback", "count": 3}, {"type": "dividend", "count": 2}],
+                },
+            },
+        }
+        result = diff_key_snapshots(old, new)
+        events_diff = result.get("events") or {}
+        assert events_diff.get("count_change") == 3
+
+    def test_diff_skips_count_when_window_days_differ(self):
+        from lib.store import diff_key_snapshots
+
+        old = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-01T00:00:00Z",
+            "_meta": {
+                "events_summary": {
+                    "count_30d": 2,
+                    "event_count": 2,
+                    "window_days": 30,
+                    "top_types": [{"type": "buyback", "count": 2}],
+                },
+            },
+        }
+        new = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-08T00:00:00Z",
+            "_meta": {
+                "events_summary": {
+                    "count_90d": 10,
+                    "event_count": 10,
+                    "window_days": 90,
+                    "top_types": [{"type": "buyback", "count": 10}],
+                },
+            },
+        }
+        result = diff_key_snapshots(old, new)
+        events_diff = result.get("events") or {}
+        assert events_diff.get("count_change") == 0
+        assert events_diff.get("window_days_changed") == {"old": 30, "new": 90}
