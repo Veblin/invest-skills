@@ -846,9 +846,11 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     ed = end_date or _today()
 
     # TickFlow 使用毫秒级 Unix 时间戳
-    from datetime import datetime, timezone
-    start_ms = int(datetime.strptime(sd, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
-    end_ms = int(datetime.strptime(ed, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    sh = ZoneInfo("Asia/Shanghai")
+    start_ms = int(datetime.strptime(sd, "%Y%m%d").replace(tzinfo=sh).timestamp() * 1000)
+    end_ms = int(datetime.strptime(ed, "%Y%m%d").replace(tzinfo=sh).timestamp() * 1000)
 
     # TickFlow 使用 Tushare 风格代码格式：600176.SH
     tf_symbol = _exchange_code(symbol)["tushare"]
@@ -3177,15 +3179,7 @@ _SOURCE_LABEL_MAP: dict[str, str] = {
 
 def _safe_peer_num(v) -> float | None:
     """Convert to float, filtering NaN and infinity."""
-    if v is None:
-        return None
-    try:
-        fv = float(v)
-        if math.isnan(fv) or math.isinf(fv):
-            return None
-        return fv
-    except (ValueError, TypeError):
-        return None
+    return safe_float(v)
 
 
 def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:

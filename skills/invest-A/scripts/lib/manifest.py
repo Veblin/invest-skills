@@ -100,16 +100,34 @@ def _extract_date_range(data) -> dict:
         for candidate in _DATE_FIELD_CANDIDATES:
             val = rec.get(candidate)
             if val and isinstance(val, str) and val.strip():
-                cleaned = val.strip().replace("-", "").replace("/", "")
-                if len(cleaned) >= 8 and cleaned.isdigit():
-                    # 转为 YYYY-MM-DD 格式
-                    formatted = f"{cleaned[:4]}-{cleaned[4:6]}-{cleaned[6:8]}"
-                    dates.append(formatted)
+                raw = val.strip()
+                # Try YYYY-MM-DD first
+                try:
+                    dt = datetime.strptime(raw[:10], "%Y-%m-%d")
+                    dates.append(dt.strftime("%Y-%m-%d"))
+                    break
+                except ValueError:
+                    pass
+                # Try YYYYMMDD (no separators)
+                cleaned = raw.replace("-", "").replace("/", "")
+                if len(cleaned) == 8 and cleaned.isdigit():
+                    dt = datetime.strptime(cleaned, "%Y%m%d")
+                    dates.append(dt.strftime("%Y-%m-%d"))
+                    break
                 elif len(cleaned) == 6 and cleaned.isdigit():
-                    # YYYYMM 格式（如报告期 202412）
-                    formatted = f"{cleaned[:4]}-{cleaned[4:6]}-01"
-                    dates.append(formatted)
-                break  # 每个记录只取第一个匹配日期字段
+                    # YYYYMM format (e.g. report period 202412)
+                    dt = datetime.strptime(cleaned, "%Y%m")
+                    dates.append(dt.strftime("%Y-%m-%d"))
+                    break
+                # Single-digit month "2024-1-1" — parse via dateutil-style fallback
+                parts = raw.replace("/", "-").split("-")
+                if len(parts) == 3:
+                    try:
+                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                        dates.append(f"{y:04d}-{m:02d}-{d:02d}")
+                        break
+                    except (ValueError, TypeError):
+                        pass
 
     if not dates:
         return {}
@@ -157,11 +175,26 @@ def generate_manifest(collection: dict) -> dict:
         manifest["dimensions"].append(dim_name)
 
         source_meta = dim.get("_meta", {})
-        source_name = source_meta.get("source", "unknown")
+        all_sources = source_meta.get("all_sources") or []
 
-        data = dim.get("data")
-        source_fingerprint = _fingerprint_source(data, dim, source_name)
-        manifest["sources"][source_name] = source_fingerprint
+        if all_sources:
+            for src in all_sources:
+                src_name = src.get("source", "unknown")
+                src_data = src.get("data")
+                src_success = src.get("success", src.get("data_available", False))
+                src_dim = {
+                    "_meta": {"success": bool(src_success)},
+                    "data": src_data,
+                    "status": "available" if src_success else "missing",
+                }
+                manifest["sources"][src_name] = _fingerprint_source(
+                    src_data, src_dim, src_name,
+                )
+        else:
+            source_name = source_meta.get("source", "unknown")
+            data = dim.get("data")
+            source_fingerprint = _fingerprint_source(data, dim, source_name)
+            manifest["sources"][source_name] = source_fingerprint
 
     # 也记录 macro / chain 等附加信息的来源
     macro = collection.get("macro_context", {})

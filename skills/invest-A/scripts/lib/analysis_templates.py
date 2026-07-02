@@ -426,10 +426,9 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
         first = eps_forecasts[0]
         eps_mean = first.get("avg_eps")
         eps_count = first.get("n_analysts", 0)
-        eps_high = first.get("max_eps") or first.get("high")
-        eps_low = first.get("min_eps") or first.get("low")
-    # Do not fallback target_price_range (CNY) into EPS fields — different units.
-
+        eps_high = first.get("max_eps")
+        eps_low = first.get("min_eps")
+    # NOTE: Intentionally NOT falling back to target_price_range (CNY stock price) — units differ.
     # ---- Latest summary text ----
     summary_text = summary.get("summary_text", "")
     if not summary_text:

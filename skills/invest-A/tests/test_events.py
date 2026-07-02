@@ -252,10 +252,10 @@ class TestFilterByDays:
         result = _filter_by_days(events, 30)
         assert len(result) == 1
 
-    def test_invalid_date_preserved(self):
+    def test_invalid_date_dropped(self):
         events = [{"date": "bad-date", "title": "Bad date", "type": "other"}]
         result = _filter_by_days(events, 30)
-        assert len(result) == 1
+        assert result == []
 
     def test_boundary_exact_cutoff(self):
         cutoff_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
@@ -669,3 +669,70 @@ class TestCollectAllDeepEvents:
 
         _, kwargs = mock_attach_events.call_args
         assert kwargs["days"] == 30
+
+
+# ── v0.1.6 review fixes ──
+
+
+class TestNeedsEventsBackfill:
+    def test_missing_events_key(self):
+        from lib.events import needs_events_backfill
+
+        assert needs_events_backfill({}) is True
+
+    def test_empty_without_summary(self):
+        from lib.events import needs_events_backfill
+
+        assert needs_events_backfill({"events": []}) is True
+
+    def test_empty_with_summary(self):
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {"events_summary": {"event_count": 0, "window_days": 30}},
+        }
+        assert needs_events_backfill(coll) is False
+
+    def test_nonempty_events(self):
+        from lib.events import needs_events_backfill
+
+        coll = {"events": [{"date": "2026-06-01", "title": "x", "type": "other"}]}
+        assert needs_events_backfill(coll) is False
+
+
+class TestBuildSummaryEventCount:
+    def test_90_day_window_exposes_event_count(self):
+        events = [{"date": "2026-06-15", "type": "buyback", "title": "回购"}]
+        summary = _build_summary(events, 90)
+        assert summary["count_90d"] == 1
+        assert summary["event_count"] == 1
+        assert summary["window_days"] == 90
+
+
+class TestAkshareDirectSession:
+    @patch("lib.proxy.akshare_direct_session")
+    def test_notice_fetcher_uses_direct_session(self, mock_session):
+        mock_session.return_value.__enter__ = MagicMock(return_value=None)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        with patch("akshare.stock_individual_notice_report", side_effect=Exception("skip")):
+            _fetch_notice_events("600176")
+        mock_session.assert_called_once()
+
+    @patch("lib.proxy.akshare_direct_session")
+    def test_dividend_fetcher_uses_direct_session(self, mock_session):
+        mock_session.return_value.__enter__ = MagicMock(return_value=None)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        with patch("akshare.stock_history_dividend_detail", side_effect=Exception("skip")), patch(
+            "akshare.stock_dividend_cninfo", side_effect=Exception("skip"),
+        ):
+            _fetch_dividend_events("600176")
+        assert mock_session.call_count == 2
+
+    @patch("lib.proxy.akshare_direct_session")
+    def test_shareholder_fetcher_uses_direct_session(self, mock_session):
+        mock_session.return_value.__enter__ = MagicMock(return_value=None)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        with patch("akshare.stock_shareholder_change_ths", side_effect=Exception("skip")):
+            _fetch_shareholder_events("600176")
+        mock_session.assert_called_once()

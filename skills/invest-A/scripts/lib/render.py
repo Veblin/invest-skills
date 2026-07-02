@@ -292,12 +292,12 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
             collector.attach_market_structure(collection, symbol)
         collector.attach_phase2_extras(collection, symbol)
 
-        # Events: only backfill when missing (synthesize/offline path).
-        # Standard collect→report already has events from collect_all.
+        # Events: backfill when never attached, or [] without events_summary (failed path).
+        # Standard collect→report with events_summary already ran attach_events.
         events_attached = False
         try:
-            if collection.get("events") is None:
-                from lib.events import attach_events
+            from lib.events import attach_events, needs_events_backfill
+            if needs_events_backfill(collection):
                 deep_mode = collection.get("_meta", {}).get("deep", False)
                 event_days = 90 if deep_mode else 30
                 attach_events(collection, symbol, days=event_days)
@@ -2409,7 +2409,7 @@ def _section_fundamentals_layered(
         np = mda_card.get("net_profit")
         cq = mda_card.get("cashflow_quality_hint", "")
         ratio_str = ""
-        if ocf is not None and np is not None and np != 0:
+        if ocf is not None and np is not None and abs(np) > 1e-9:
             ratio_str = f"{ocf/np:.2f}"
         roe = mda_card.get("roe")
         dr = mda_card.get("debt_ratio")
@@ -3544,7 +3544,7 @@ def _periods_per_year(fin_list: list[dict]) -> int:
     """估算每年报告期数（4=季报，2=半年报，1=年报）。"""
     if len(fin_list) < 2:
         return 4
-    dates = sorted(set(str(r.get("end_date", ""))[:6] for r in fin_list if r.get("end_date")))
+    dates = sorted(set(str(r.get("end_date", "")).replace("-", "")[:6] for r in fin_list if r.get("end_date")))
     if len(dates) <= 1:
         return 4
     return min(4, len(dates))
