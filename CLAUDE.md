@@ -35,6 +35,26 @@ diff         # 对比两次快照
 store list   # 历史采集记录
 ```
 
+## pip 规范
+
+**永远不要在项目目录下直接运行 `pip install`** — `pip` 指向的是 Homebrew 全局 Python（`/opt/homebrew`），安装的包会污染系统环境，而且 `.venv` 里反而没有。
+
+正确的操作：
+
+| 场景 | 命令 |
+|------|------|
+| 安装/同步项目依赖 | `uv sync`（自动根据 `pyproject.toml` + `uv.lock` 同步） |
+| 添加新依赖 | 编辑 `pyproject.toml` 的 `dependencies`，然后 `uv sync` |
+| 查看已安装包 | `uv run python -m pip list` |
+| 临时运行脚本 | `uv run python script.py` |
+| 激活 .venv 后使用 pip | `source .venv/bin/activate && pip list` |
+
+验证 .venv 是否生效：
+```bash
+uv run python -c "import sys; print(sys.executable)"
+# 应输出 .../.venv/bin/python3，而不是 /opt/homebrew/...
+```
+
 ## 数据源
 
 | 源 | 状态 | 注意 |
