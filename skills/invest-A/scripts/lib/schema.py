@@ -22,6 +22,8 @@ DIMENSIONS = {
     "valuation": "估值分析",
     "research": "机构研报",
     "industry": "行业数据",
+    "holder_changes": "股东增减持",
+    "industry_pricing": "行业定价",
 }
 
 # research 维度在 to_legacy_dict 之外附加的汇总字段（collect_research）
