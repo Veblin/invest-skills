@@ -1,6 +1,6 @@
 [project]
 name = "investment-learning-skill"
-version = "0.1.7"
+version = "0.1.8"
 description = "A股个股调研多因子投研助手 — Tushare + FRED 数据采集，产出带来源追溯的 Markdown 研究备忘录"
 readme = "README.md"
 requires-python = ">=3.12"

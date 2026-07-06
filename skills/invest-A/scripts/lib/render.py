@@ -429,6 +429,47 @@ def _header_v2(collection: dict, symbol: str) -> str:
     return "\n".join(lines)
 
 
+_CONFIDENCE_FLAG_MODULES = ("估值判断", "周期拐点判断")
+
+
+def _section_ai_confidence_matrix(collection: dict) -> str:
+    """v0.1.8 A-2: AI 分析置信度矩阵（借鉴报告 §10.8）。
+
+    渲染 `lib.scoring.confidence_matrix()` 的引擎自动计算结果，
+    对"估值判断"与"周期拐点判断"两个恒定中低置信度模块特别标注 ⚠️。
+    """
+    from lib.scoring import confidence_matrix
+
+    matrix = confidence_matrix(collection)
+    rows = matrix.get("rows") or []
+    if not rows:
+        return ""
+
+    lines = ["## AI 分析置信度矩阵", ""]
+    lines.append(
+        "> 置信度由数据可得性/来源丰富度自动计算，非 LLM 主观判断；"
+        "「估值判断」「周期拐点判断」为学术共识固定标注，不随数据完整性提升。"
+    )
+    lines.append("")
+    lines.append("| 分析模块 | AI 置信度 | 原因 |")
+    lines.append("|----------|:--------:|------|")
+    for r in rows:
+        module = str(r.get("module", "?"))
+        confidence = str(r.get("confidence", "?"))
+        reason = str(r.get("reason", "")).replace("|", "/")
+        if module in _CONFIDENCE_FLAG_MODULES:
+            lines.append(f"| ⚠️ **{module}** | **{confidence}** | {reason} |")
+        else:
+            lines.append(f"| {module} | {confidence} | {reason} |")
+    lines.append("")
+    insufficient = matrix.get("insufficient_data") or []
+    if insufficient:
+        lines.append(f"⚠️ 置信度为「低」的模块：{'、'.join(insufficient)}，相关分析结论需结合独立信源核实。")
+        lines.append("")
+    lines.append("[来源: lib.scoring.confidence_matrix / 各维度 collection[dim].status + _meta.multi_source]")
+    return "\n".join(lines)
+
+
 def _section_profile(dims: dict[str, dict]) -> str:
     """公司画像（basic_info 事实罗列）。"""
     data = _get_dim_data(dims, "basic_info")
@@ -1686,6 +1727,11 @@ def _section_snapshot(
         lines.append("")
         lines.append(futures_block)
 
+    cv_table = _section_cross_validation_table(dims)
+    if cv_table:
+        lines.append("")
+        lines.append(cv_table)
+
     return "\n".join(lines)
 
 
@@ -2093,8 +2139,589 @@ def _section_market_structure(
         ms_evidences,
     ))
 
+    # ---- A-6: 价值链位置 + 利润池分布 ----
+    company_gm: float | None = None
+    fin_dim = collection.get("financials") if isinstance(collection, dict) else None
+    fin_rows = fin_dim.get("data") if isinstance(fin_dim, dict) else None
+    if isinstance(fin_rows, list) and fin_rows:
+        from lib.technical import sort_kline_asc
+        fin_sorted = sort_kline_asc(fin_rows)
+        if fin_sorted:
+            company_gm = _fin_field_num(fin_sorted[-1], "grossprofit_margin", "gross_margin")
+    chain_section = _section_value_chain_position(
+        collection.get("chain_context") or {},
+        collection.get("industry_pricing") or {},
+        company_gm,
+    )
+    if chain_section:
+        lines.append("")
+        lines.append(chain_section)
+
     lines.append("")
     lines.append("🔍 **待独立验证:** Tushare 积分不足时见 availability 标注（sw_daily 需 5000 分，2000 分档走 akshare 回退）。")
+    return "\n".join(lines)
+
+
+def _section_value_chain_position(
+    chain: dict, industry_pricing: dict, company_gross_margin: float | None = None,
+) -> str:
+    """A-6: 价值链位置 + 利润池分布 ASCII 图（v0.1.8 挂载于模块 3 市场结构末尾）。
+
+    ``chain`` 为 ``collection["chain_context"]``（见 lib.chain.collect_chain_context /
+    ``_CHAIN_MAP``），字段: industry / chain_position / upstream: list[str] / downstream: list[str]。
+    ``industry_pricing`` 为 ``collection["industry_pricing"]`` legacy dict，用于补充上下游
+    议价力线索（期货映射覆盖 / 涨价信号，详见 3b/3c 小节，此处不重复渲染完整表格）。
+    ``company_gross_margin`` 为可选参数（非原始设计签名的一部分）：调用方可从 financials
+    维度取本公司最新毛利率传入；行业上下游毛利率数据源不可得，明确标注 ⚠️，不编造行业均值。
+    """
+    if not isinstance(chain, dict) or not chain:
+        return ""
+    industry = chain.get("industry") or ""
+    position = chain.get("chain_position")
+    upstream = [s for s in (chain.get("upstream") or []) if s]
+    downstream = [s for s in (chain.get("downstream") or []) if s]
+
+    if not industry and not position and not upstream and not downstream:
+        return ""
+
+    lines = ["### 3f. 价值链位置 + 利润池分布", ""]
+
+    if not position and not upstream and not downstream:
+        lines.append(
+            f"数据不足：行业「{industry}」在 `lib.chain._CHAIN_MAP` 中暂无产业链映射，"
+            "无法渲染价值链图（仅覆盖新能源汽车/电气/汽车/医药/白酒/银行/房地产/半导体/"
+            "新能源/化工/钢铁/食品/计算机/通信/电子等行业关键词）。"
+        )
+        return "\n".join(lines)
+
+    up_label = " / ".join(upstream) if upstream else "⚠️ 未映射"
+    down_label = " / ".join(downstream) if downstream else "⚠️ 未映射"
+    company_label = f"本公司（{industry or '行业未知'}"
+    if position:
+        company_label += f" · {position}"
+    company_label += "）"
+
+    lines.append("```")
+    lines.append(f"[上游: {up_label}]   →   [{company_label}]   →   [下游: {down_label}]")
+    lines.append("```")
+    lines.append("")
+    lines.append(f"[来源: lib.chain.collect_chain_context / 行业分类={industry or '未知'}]")
+    lines.append("")
+
+    lines.append("**各环节毛利率对比（利润池分布代理指标）**")
+    lines.append("")
+    lines.append("| 环节 | 毛利率 | 说明 |")
+    lines.append("|------|--------|------|")
+    lines.append(f"| 上游（{up_label}） | ⚠️ 不可得 | 无上游行业毛利率数据源，不编造行业均值 |")
+    if company_gross_margin is not None:
+        lines.append(
+            f"| 本公司 | {company_gross_margin:.2f}% | [来源: financials 维度 grossprofit_margin] |"
+        )
+    else:
+        lines.append("| 本公司 | 数据不足 | financials 维度毛利率字段不可得 |")
+    lines.append(f"| 下游（{down_label}） | ⚠️ 不可得 | 无下游行业毛利率数据源，不编造行业均值 |")
+    lines.append("")
+    lines.append(
+        "> ⚠️ 利润池分布（各环节增加值/价值占比）需产业链数据库或行业研究报告补充，"
+        "当前引擎仅能提供毛利率对比框架，不构成完整利润池分布结论。"
+    )
+    lines.append("")
+
+    inner, _all_srcs = _industry_pricing_parts(industry_pricing)
+    if inner:
+        has_futures = inner.get("has_futures", False)
+        lines.append("**议价力线索**")
+        lines.append("")
+        if has_futures:
+            lines.append(
+                f"- 该行业存在期货现货映射覆盖（详见「原材料成本速览」小节），"
+                "上游原材料价格趋势可作为上游议价力变化的间接观察窗口——"
+                "原材料价格上涨且本公司毛利率同步收窄，暗示成本传导能力偏弱；"
+                "反之则暗示顺价能力较强，需结合实际毛利率变化验证。"
+            )
+        else:
+            lines.append("- ⚠️ 该行业暂无期货映射，缺少上游价格趋势的量化观察窗口。")
+        news_inner = None
+        for src in _all_srcs:
+            if src.get("source") == "akshare.stock_news_em" and src.get("data"):
+                news_inner = src.get("data") or {}
+                break
+        if news_inner and news_inner.get("signal") and news_inner.get("signal") != "无":
+            lines.append(
+                f"- 公司新闻涨价信号：**{news_inner.get('signal')}**"
+                f"（{news_inner.get('signal_detail', '')}，详见「涨价信号」小节），"
+                "可作为下游顺价能力的定性佐证，需 WebSearch 深搜确认幅度和持续性。"
+            )
+        lines.append("")
+    else:
+        lines.append("**议价力线索**：⚠️ industry_pricing 维度数据不可得，无法补充议价力观察窗口。")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _section_comprehension_statement(
+    dims: dict, market_structure: dict, val_cache: dict,
+) -> str:
+    """F-1: 理解陈述（5 句固定模板，挂载于报告末尾）。
+
+    来源: 借鉴报告 §3.4/§8.1（镜子测试合规改写）。``market_structure`` 参数为固定签名的
+    一部分（预留未来扩展，如结合北向/行业景气度补充生意本质判断），当前实现仅依赖 ``dims``
+    与 ``val_cache``。
+
+    合规（AGENTS.md 约束1）：禁止出现"我以 X 元买入"类表述；每句尽量用已采集数据自动填充，
+    数据不足的槽位保留占位符标注"[Claude report 阶段填充]"，不臆测生意本质/护城河方向/
+    管理层意图。
+    """
+    del market_structure  # 预留扩展参数，当前版本未使用
+
+    from lib.technical import sort_kline_asc
+
+    fin_dim = dims.get("financials") or {}
+    fin_list = fin_dim.get("data") if isinstance(fin_dim.get("data"), list) else []
+    fin_sorted = sort_kline_asc(fin_list) if fin_list else []
+
+    basic = dims.get("basic_info") or {}
+    basic_data = basic.get("data") if isinstance(basic.get("data"), dict) else {}
+    industry = basic_data.get("industry") or basic_data.get("行业")
+
+    lines = [
+        "### F-1 理解陈述", "",
+        "> 五句固定模板，尽量用已采集数据自动填充；数据不足的槽位保留占位符，不编造。",
+        "",
+    ]
+
+    # 1. 生意本质 + 核心变量
+    if industry:
+        lines.append(
+            f"1. 这门生意的本质是___，所属行业为**{industry}**"
+            "[来源: basic_info.industry]，核心变量是___"
+            "（可参考 A-4 商业模式画布中规模效应/增长驱动评分作为量化线索）。"
+            "[Claude report 阶段填充——生意本质的定性描述需人工综合判断]"
+        )
+    else:
+        lines.append(
+            "1. 这门生意的本质是___，核心变量是___。"
+            "[Claude report 阶段填充——basic_info.industry 不可得]"
+        )
+
+    # 2. 护城河宽窄
+    roe_first = _fin_field_num(fin_sorted[0], "roe") if fin_sorted else None
+    roe_now = _fin_field_num(fin_sorted[-1], "roe") if fin_sorted else None
+    if len(fin_sorted) >= 2 and roe_first is not None and roe_now is not None:
+        if roe_now > roe_first + 2:
+            trend = "变宽"
+        elif roe_now < roe_first - 2:
+            trend = "变窄"
+        else:
+            trend = "持平"
+        lines.append(
+            "2. 护城河来自___（具体来源[Claude report 阶段填充]），"
+            f"当前在**{trend}**，依据是 ROE 由 {roe_first:.2f}% → {roe_now:.2f}%"
+            f"（近 {len(fin_sorted)} 期）[来源: financials.roe]。"
+        )
+    else:
+        lines.append(
+            "2. 护城河来自___，当前在变宽/变窄/持平___，依据是___。"
+            "[Claude report 阶段填充——ROE 历史序列不足 2 期，无法判断趋势]"
+        )
+
+    # 3. 管理层公开记录（事实陈述）
+    from lib.scoring import management_ability_proxy
+    holder_changes = dims.get("holder_changes") or {}
+    mgmt = management_ability_proxy(fin_list, holder_changes)
+    if mgmt.get("score") is not None:
+        lines.append(
+            "3. 管理层在资本配置与经营效率方面的公开记录显示：代理评分 "
+            f"{mgmt['score']:.1f}/100（{mgmt.get('note', '')}）"
+            "[来源: lib.scoring.management_ability_proxy]（事实陈述，非信任/不信任二元判断）。"
+        )
+    else:
+        lines.append(
+            "3. 管理层在___方面的公开记录显示___（事实陈述）。"
+            "[Claude report 阶段填充——management_ability_proxy 因数据不足未生成量化代理评分]"
+        )
+
+    # 4. 估值位置 + DCF 隐含假设
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    val_desc = None
+    if pe_pct is not None:
+        val_desc = f"PE 历史位置 {pe_pct:.1f}%（{pe_zone or '—'}）"
+        if pb_pct is not None:
+            val_desc += f"，PB 历史位置 {pb_pct:.1f}%"
+        val_desc += " [来源: valuation 历史位置]"
+
+    dcf_desc = None
+    if fin_dim:
+        from lib.valuation import scenario_fcff
+        base = scenario_fcff(fin_dim, scenario="base")
+        if not base.get("error"):
+            a = base.get("assumptions", {})
+            dcf_desc = (
+                f"DCF Base 情景隐含营收增速 {a.get('revenue_growth', 0) * 100:.1f}%、"
+                f"毛利率假设 {a.get('gross_margin_assumption', 0):.1f}%"
+                "[来源: lib.valuation.scenario_fcff]"
+            )
+    if val_desc or dcf_desc:
+        lines.append(
+            "4. 当前估值处于"
+            + (val_desc or "___")
+            + "，DCF 隐含假设是"
+            + (dcf_desc or "___")
+            + "。"
+        )
+    else:
+        lines.append(
+            "4. 当前估值相当于历史/同行___位置，DCF 隐含假设是___。"
+            "[Claude report 阶段填充——估值历史位置与 DCF 情景假设均不可得]"
+        )
+
+    # 5. 最大的不确定性 + 下一观察节点（无法自动推断，固定占位）
+    lines.append(
+        "5. 最大的不确定性是___，下一观察节点是___。"
+        "[Claude report 阶段基于本次分析过程填写——需结合模块 5 市场分歧与模块 7 风险"
+        "综合判断，本引擎不做主观推断]"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
+    """F-3: 快速否决自动化子集，返回硬触发/软触发及展示文本。
+
+    规则分层：
+      - hard_triggers: 触发后 DCF 段跳过
+      - soft_triggers: 仅展示预警，不跳过 DCF
+
+    当前自动化覆盖：
+      1. FCF/OCF 累计为负（硬触发，FCFF 缺失时退化为 OCF 代理）
+      2. 连续 3 期经营性现金流为负（软触发）
+      3. 资产负债率 >90% 且未见改善（硬触发）
+      4. 近 3 期 ROE 连续 <5%（软触发）
+      5. 商誉/净资产 >50%（硬触发；字段可得时才检查）
+
+    合规：仅陈述量化事实，不使用动作词。
+    """
+    result = {
+        "hard_triggers": [],
+        "soft_triggers": [],
+        "display_lines": [],
+    }
+
+    fin_dim = (dims or {}).get("financials") or (collection or {}).get("financials") or {}
+    fin_list = fin_dim.get("data") if isinstance(fin_dim, dict) else None
+    if not isinstance(fin_list, list) or not fin_list:
+        return result
+
+    from lib.technical import sort_kline_asc
+    rows = sort_kline_asc(fin_list)
+
+    def _append(level: str, line: str) -> None:
+        result[level].append(line)
+        tag = "硬触发" if level == "hard_triggers" else "软触发"
+        result["display_lines"].append(f"- {tag}: {line}")
+
+    # 1. FCF 累计为负（优先 fcff，字段不可得时退化为经营现金流）
+    fcff_vals = [v for v in (_fin_field_num(r, "fcff") for r in rows) if v is not None]
+    if len(fcff_vals) >= 3:
+        total = sum(fcff_vals)
+        if total < 0:
+            _append(
+                "hard_triggers",
+                f"⚠️ 近 {len(fcff_vals)} 期可得 FCFF 累计为负（合计 {total:.2f}）"
+                "[来源: financials.fcff]"
+            )
+    else:
+        ocf_vals = [
+            v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in rows) if v is not None
+        ]
+        if len(ocf_vals) >= 3 and sum(ocf_vals) < 0:
+            _append(
+                "hard_triggers",
+                f"⚠️ FCFF 字段不可得，退化以经营现金流近 {len(ocf_vals)} 期累计为负"
+                f"（合计 {sum(ocf_vals):.2f}）代理观察[来源: financials.n_cashflow_act]"
+            )
+
+    # 2. 连续 3 期经营性现金流为负
+    ocf_series = [v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in rows) if v is not None]
+    if len(ocf_series) >= 3:
+        last3 = ocf_series[-3:]
+        if all(v < 0 for v in last3):
+            _append(
+                "soft_triggers",
+                f"⚠️ 连续 3 期经营性现金流为负（{', '.join(f'{v:.2f}' for v in last3)}）"
+                "[来源: financials.n_cashflow_act]"
+            )
+
+    # 3. 资产负债率 >90% 且未见改善
+    debt_ratios = []
+    for row in rows:
+        total_liab = _fin_field_num(row, "total_liab")
+        total_assets = _fin_field_num(row, "total_assets")
+        if total_liab is not None and total_assets:
+            debt_ratios.append(total_liab / total_assets * 100)
+    latest = rows[-1]
+    total_liab = _fin_field_num(latest, "total_liab")
+    total_assets = _fin_field_num(latest, "total_assets")
+    if total_liab is not None and total_assets:
+        ratio = total_liab / total_assets * 100
+        prev_ratio = debt_ratios[-2] if len(debt_ratios) >= 2 else None
+        if ratio > 90 and (prev_ratio is None or ratio >= prev_ratio):
+            detail = f"⚠️ 最新报告期资产负债率 {ratio:.1f}%（>90%）"
+            if prev_ratio is not None:
+                detail += f"，前一期 {prev_ratio:.1f}%"
+            detail += "[来源: financials.total_liab/total_assets]"
+            _append(
+                "hard_triggers",
+                detail,
+            )
+
+    # 4. 近 3 期 ROE 连续 <5%
+    roe_series = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
+    if len(roe_series) >= 3:
+        last3 = roe_series[-3:]
+        if all(v < 5 for v in last3):
+            _append(
+                "soft_triggers",
+                f"⚠️ 近 3 期 ROE 连续低于 5%（{', '.join(f'{v:.2f}%' for v in last3)}）"
+                "[来源: financials.roe]"
+            )
+
+    # 5. 商誉/净资产 >50%（字段可得时检查）
+    bs_dim = (dims or {}).get("balancesheet") or (collection or {}).get("balancesheet") or {}
+    bs_list = bs_dim.get("data") if isinstance(bs_dim, dict) else None
+    if isinstance(bs_list, list) and bs_list:
+        bs_rows = sort_kline_asc(bs_list)
+        bs_latest = bs_rows[-1]
+        goodwill = _fin_field_num(bs_latest, "goodwill", "good_will")
+        total_equity = _fin_field_num(
+            bs_latest, "total_equity", "total_hldr_eqy_inc_min_int", "total_hldr_eqy_exc_min_int",
+        )
+        if goodwill is not None and total_equity and total_equity > 0:
+            ratio = goodwill / total_equity * 100
+            if ratio > 50:
+                _append(
+                    "hard_triggers",
+                    f"⚠️ 最新报告期商誉/净资产为 {ratio:.1f}%（>50%）"
+                    "[来源: balancesheet.goodwill/total_equity]"
+                )
+
+    return result
+
+
+def _six_gate_row(name: str, score: float | None, label: str, note: str) -> str:
+    score_s = f"{score:.0f}/100" if score is not None else "—"
+    return f"| {name} | {label}（{score_s}） | {note} |"
+
+
+def _section_six_gates_scorecard(
+    dims: dict, collection: dict, val_cache: dict,
+) -> str:
+    """F-4: 六关评分速览（生意/护城河/管理层/财务/估值/风险）。
+
+    来源: 借鉴报告 §6.1 investment-checklist、§8.5。
+
+    合规红线（CLAUDE.md 六关评分规则，最容易违规的一条）：**无通过/不通过二元判决，
+    无仓位动作映射**——每关仅用分数或描述性档位（较强/中等/较弱等）呈现，末尾必须附加
+    合规声明。
+    """
+    from lib.scoring import customer_lockin_score, management_ability_proxy, revenue_quality_score
+
+    fin_dim = dims.get("financials") or {}
+    fin_list = fin_dim.get("data") if isinstance(fin_dim.get("data"), list) else []
+    holder_changes = dims.get("holder_changes") or {}
+    market_structure = collection.get("market_structure") or {}
+
+    def grade(score: float | None) -> str:
+        if score is None:
+            return "数据不足"
+        if score >= 70:
+            return "较强"
+        if score >= 40:
+            return "中等"
+        return "较弱"
+
+    def avg(*vals: float | None) -> float | None:
+        v = [x for x in vals if x is not None]
+        return round(sum(v) / len(v), 1) if v else None
+
+    # 生意：复用 A-4 商业模式画布中规模效应/增长驱动/周期性评分均值
+    scale_score, _n1, _s1 = _canvas_scale_effect(fin_list)
+    growth_score, _n2, _s2 = _canvas_growth_driver(fin_list)
+    cyc_score, _n3, _s3 = _canvas_cyclicality(fin_list)
+    business_score = avg(scale_score, growth_score, cyc_score)
+
+    # 护城河：复用 A-4 客户锁定/收入模式评分
+    rq = revenue_quality_score(fin_list)
+    lockin = customer_lockin_score(fin_list)
+    moat_score = avg(rq.get("score"), lockin.get("score"))
+
+    # 管理层：复用 management_ability_proxy()，附带其"置信度中等"说明
+    mgmt = management_ability_proxy(fin_list, holder_changes)
+    mgmt_score = mgmt.get("score")
+    mgmt_note = mgmt.get("note", "")
+
+    # 财务：近期毛利率稳定性 + OCF/净利润覆盖评分综合（复用 revenue_quality_score 子信号）
+    ocf_detail = (rq.get("detail") or {}).get("ocf_coverage") or {}
+    margin_detail = (rq.get("detail") or {}).get("margin_stability") or {}
+    fin_score = avg(ocf_detail.get("score"), margin_detail.get("score"))
+
+    # 估值：复用 PE/PB 历史位置（呈现位置，非贵贱判断，不与"强弱"混用）
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    if pe_pct is not None:
+        val_desc = f"PE 历史位置 {pe_pct:.1f}%（{pe_zone or '—'}）"
+        if pb_pct is not None:
+            val_desc += f"，PB 历史位置 {pb_pct:.1f}%"
+        val_desc += " [来源: valuation 历史位置]"
+        if pe_pct >= 70:
+            val_grade = "历史高位"
+        elif pe_pct <= 30:
+            val_grade = "历史低位"
+        else:
+            val_grade = "历史中位"
+    else:
+        val_desc, val_grade = "PE/PB 历史位置不可得", "数据不足"
+
+    # 风险：复用 risk_data 触发数量
+    risk_data = _v3_build_risk_report(collection, dims, market_structure, val_cache=val_cache)
+    triggered = risk_data.get("triggered_count", 0) or 0
+    coverage = risk_data.get("coverage") or {}
+    total_signals = sum(v for v in coverage.values() if isinstance(v, (int, float))) if isinstance(coverage, dict) else 0
+    if total_signals:
+        risk_desc = f"触发 {triggered}/{total_signals} 项定量风险信号 [来源: lib.risk_scanner.risk_report]"
+    else:
+        risk_desc = f"触发 {triggered} 项定量风险信号 [来源: lib.risk_scanner.risk_report]"
+    if triggered == 0:
+        risk_grade = "较少触发"
+    elif triggered <= 2:
+        risk_grade = "中等触发"
+    else:
+        risk_grade = "较多触发"
+
+    lines = ["### F-4 六关评分速览", ""]
+    lines.append(
+        "> 巴菲特六关框架（生意/护城河/管理层/财务/估值/风险）的多维度事实与量化评分汇总呈现，"
+        "档位为描述性分档，不做二元判定，不含任何仓位或操作动作映射。"
+    )
+    lines.append("")
+    lines.append("| 关口 | 档位 | 依据 |")
+    lines.append("|------|:---:|------|")
+    lines.append(_six_gate_row(
+        "生意", business_score, grade(business_score),
+        "规模效应/增长驱动/周期性评分均值 [来源: A-4 商业模式画布规则推断]",
+    ))
+    lines.append(_six_gate_row(
+        "护城河", moat_score, grade(moat_score),
+        "收入模式质量 + 客户锁定评分均值 "
+        "[来源: lib.scoring.revenue_quality_score / customer_lockin_score]",
+    ))
+    lines.append(_six_gate_row(
+        "管理层", mgmt_score, grade(mgmt_score),
+        f"管理层能力代理评分（{mgmt_note}） [来源: lib.scoring.management_ability_proxy]",
+    ))
+    lines.append(_six_gate_row(
+        "财务", fin_score, grade(fin_score),
+        "毛利率稳定性 + OCF/净利润覆盖评分均值 [来源: lib.scoring.revenue_quality_score 子信号]",
+    ))
+    lines.append(f"| 估值 | {val_grade} | {val_desc} |")
+    lines.append(f"| 风险 | {risk_grade} | {risk_desc} |")
+    lines.append("")
+    lines.append(
+        "> 本速览为多维度事实与量化评分的汇总呈现，不构成投资建议，"
+        "不代表买卖或持有的行动判断。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+_BIAS_SELF_CHECK_ITEMS: tuple[tuple[str, str], ...] = (
+    (
+        "叙事偏误",
+        '本次分析是否被一个流畅的故事线（如"国产替代""赛道逻辑"）牵引，而忽略了与故事线矛盾的数据点？',
+    ),
+    (
+        "锚定偏误",
+        "本次分析是否过度锚定于某个历史价格/估值倍数/机构一致预期，而未独立评估当前基本面变化？",
+    ),
+    (
+        "幸存者偏误",
+        "本次分析引用的可比公司/历史案例是否仅包含成功案例，遗漏了同类型已失败或退市的公司？",
+    ),
+    (
+        "近因偏误",
+        "本次分析是否被最近一次财报/事件/涨跌幅过度影响判断权重，而低估了更长周期的趋势？",
+    ),
+    (
+        "确认偏误",
+        "本次分析是否只检索了支持初始结论的证据，而未主动搜索反驳证据（见模块 5 Bull-Bear 空方论点）？",
+    ),
+)
+
+
+def _section_bias_self_check() -> str:
+    """F-5: 偏误自查表（5 行固定模板，报告末尾）。
+
+    来源: 借鉴报告 §10.3.4。这是引导 Claude 在生成报告时自我反思的框架，非引擎自动计算
+    的内容——本函数只渲染表格骨架，"具体表现"与"自我纠正措施"两列固定标注
+    "[Claude report 阶段基于本次分析过程填写]"。
+    """
+    lines = [
+        "### F-5 偏误自查表", "",
+        "> 引导性框架：由 Claude 在 report 阶段基于本次分析的实际过程填写「具体表现」与"
+        "「自我纠正措施」两列，本函数仅渲染表格骨架，不做自动判断。",
+        "",
+        "| 偏误类型 | 具体表现 | 自我纠正措施 |",
+        "|---------|---------|-------------|",
+    ]
+    for name, prompt in _BIAS_SELF_CHECK_ITEMS:
+        lines.append(
+            f"| {name} | [Claude report 阶段基于本次分析过程填写——自查提示：{prompt}] "
+            "| [Claude report 阶段基于本次分析过程填写] |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _section_cross_validation_table(dims: dict) -> str:
+    """F-6: 交叉验证记录表（轻量占位，挂载于模块 1 当前状态快照内）。
+
+    来源: 借鉴报告 §7.1/§2.1。遍历 ``dims`` 中各维度的 legacy dict，读取
+    ``dim["_meta"]["cross_validation"]``（"convergence"|"divergence"|None）与
+    ``dim["_meta"]["cross_validation_detail"]``；只渲染有交叉验证结果的维度，没有结果的
+    维度跳过（不是所有维度都有多源交叉验证）。"计算值"列固定占位，待 v0.1.9 rigor 模块
+    自动补全，本函数不做数值计算。
+    """
+    rows: list[tuple[str, str, str]] = []
+    for name, dim in (dims or {}).items():
+        if not isinstance(dim, dict):
+            continue
+        meta = dim.get("_meta") or {}
+        cv_status = meta.get("cross_validation")
+        if not cv_status:
+            continue
+        detail = meta.get("cross_validation_detail") or "—"
+        if cv_status == "convergence":
+            label = "🟢 印证"
+        elif cv_status == "divergence":
+            label = "🟡 分歧"
+        else:
+            label = f"🟡 {cv_status}"
+        rows.append((name, label, detail))
+
+    if not rows:
+        return ""
+
+    lines = ["### F-6 交叉验证记录表（占位）", ""]
+    lines.append(
+        "> 汇总各维度采集层已完成的交叉验证结果；「计算值」列待 v0.1.9 rigor 模块自动补全，"
+        "当前版本仅呈现采集阶段的一致性/分歧标注，不做数值计算。"
+    )
+    lines.append("")
+    lines.append("| 维度 | 交叉验证状态 | 详情 | 计算值(v0.1.9填充) |")
+    lines.append("|------|------|------|------|")
+    for name, label, detail in rows:
+        lines.append(f"| {name} | {label} | {detail} | —（v0.1.9 rigor 填充） |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -2213,8 +2840,11 @@ def _competitive_position_label(pct: float | None) -> str | None:
     return "追赶者"
 
 
-def _section_holder_changes(data: dict) -> str:
-    """股东增减持动向（P0-2 holder_changes 渲染）。"""
+_COMMITMENT_KEYWORDS = ("承诺", "不减持")
+
+
+def _section_holder_changes(data: dict, events: list | None = None) -> str:
+    """股东增减持动向（P0-2 holder_changes 渲染 + v0.1.8 A-1 信号聚合/言行对照）。"""
     if not data or not isinstance(data, dict):
         return ""
     records = data.get("data") or []
@@ -2283,6 +2913,76 @@ def _section_holder_changes(data: dict) -> str:
         lines.append("- **内部人一致性**: 多主体同向减持 → 信号增强（负面）")
     else:
         lines.append("- **内部人一致性**: 增减持方向分歧，信号混杂")
+
+    # ---- v0.1.8 A-1: 信号聚合 ----
+    from lib.scoring import insider_signal
+
+    signal = insider_signal(data)
+    _SIGNAL_HINTS = {
+        "强正向": "近 12 月内 ≥3 名股东增持，0 笔减持，且交叉验证 ≥2 源",
+        "正向": "近 12 月内增持笔数明显多于减持笔数",
+        "分歧": "近 12 月内增减持方向不明确或数据不足以判断趋势",
+        "负向": "近 12 月内减持笔数明显多于增持笔数",
+        "强负向": "近 12 月内 ≥3 名股东减持，0 笔增持，且交叉验证 ≥2 源",
+        "数据不足": "公告日期或增减持记录不足，无法生成聚合信号",
+    }
+    lines.append("")
+    lines.append("### 信号聚合")
+    lines.append("")
+    lines.append(
+        f"- **内部人买卖一致性信号**: **{signal}**（{_SIGNAL_HINTS.get(signal, '')}）"
+        f" [来源: lib.scoring.insider_signal / holder_changes]"
+    )
+    lines.append("⚠️ 以上仅为行为事实的量化聚合，不构成任何投资建议或买卖指令。")
+
+    # ---- v0.1.8 A-1: 言行对照 ----
+    lines.append("")
+    lines.append("### 言行对照")
+    lines.append("")
+    sell_records = [r for r in records if "减" in str(r.get("direction", ""))]
+    commitment_events = []
+    if isinstance(events, list):
+        for e in events:
+            if not isinstance(e, dict):
+                continue
+            title = str(e.get("title", ""))
+            if any(kw in title for kw in _COMMITMENT_KEYWORDS):
+                commitment_events.append(e)
+    if not commitment_events:
+        lines.append("未检索到相关承诺公告，言行对照暂缺。")
+    elif not sell_records:
+        lines.append(
+            f"检索到 {len(commitment_events)} 条承诺/不减持相关公告，同期 holder_changes "
+            "记录中无匹配的减持行为。"
+        )
+        for e in commitment_events[:5]:
+            edate = str(e.get("date", ""))
+            etitle = str(e.get("title", ""))[:60]
+            lines.append(f"- {edate} {etitle} [来源: events]")
+    else:
+        lines.append(
+            f"检索到 {len(commitment_events)} 条承诺/不减持相关公告，"
+            f"同期 holder_changes 记录中存在 {len(sell_records)} 笔减持，时间线对照如下（仅陈述行为事实，"
+            "不判断是否违反承诺，具体条款需人工核实公告原文）："
+        )
+        lines.append("")
+        lines.append("| 日期 | 类型 | 内容 |")
+        lines.append("|------|------|------|")
+        timeline: list[tuple[str, str, str]] = []
+        for e in commitment_events:
+            edate = str(e.get("date", ""))
+            etitle = str(e.get("title", ""))[:60]
+            timeline.append((edate, "承诺公告", etitle))
+        for r in sell_records:
+            rdate = str(r.get("ann_date", ""))
+            if len(rdate) == 8:
+                rdate = f"{rdate[:4]}-{rdate[4:6]}-{rdate[6:8]}"
+            rname = str(r.get("holder_name", ""))[:16]
+            timeline.append((rdate, "减持记录", rname))
+        for edate, etype, content in sorted(timeline, key=lambda t: t[0])[:15]:
+            lines.append(f"| {edate} | {etype} | {content} |")
+        lines.append("")
+        lines.append("🔍 **待独立验证:** 承诺公告的具体条款（承诺期限/主体范围）需与公告原文核对。")
 
     return "\n".join(lines)
 
@@ -2623,6 +3323,377 @@ def _financial_panorama_table(fin_list: list[dict]) -> list[str]:
     lines.append("> EPS 来源: financials 维度 / fina_indicator.basic_eps 或 eps 字段")
     lines.append("")
     return lines
+
+
+# ═══════════════════════════════════════════════════════════════
+# A-4/A-5: 商业模式画布 + 管理层完整评估（v0.1.8 Step 6）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _stars(n: int) -> str:
+    n = max(1, min(5, int(round(n))))
+    return "★" * n
+
+
+def _score_to_stars(score: float | None) -> int | None:
+    """0-100 分制评分 → 1-5 星（数据不足时返回 None，不得裸给星级）。"""
+    if score is None:
+        return None
+    if score >= 80:
+        return 5
+    if score >= 60:
+        return 4
+    if score >= 40:
+        return 3
+    if score >= 20:
+        return 2
+    return 1
+
+
+def _canvas_scale_effect(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
+    """规模效应：近 3-5 期营收增速 vs 毛利率变化关系推断。"""
+    if not fin_list:
+        return None, "数据不足：缺少财务数据，无法判断规模效应", []
+    from lib.technical import sort_kline_asc
+    rows = sort_kline_asc(fin_list)[-5:]
+    pairs = [
+        (_fin_field_num(r, "revenue"), _fin_field_num(r, "grossprofit_margin", "gross_margin"))
+        for r in rows
+    ]
+    valid = [(rev, gm) for rev, gm in pairs if rev is not None and gm is not None]
+    if len(valid) < 3:
+        return None, "数据不足：营收/毛利率至少需 3 期同时可得数据才能判断规模效应", []
+    rev0, gm0 = valid[0]
+    rev1, gm1 = valid[-1]
+    if not rev0:
+        return None, "数据不足：起始期营收为 0，无法计算增速", []
+    rev_growth = (rev1 - rev0) / abs(rev0) * 100
+    margin_change = gm1 - gm0
+    if rev_growth > 0 and margin_change >= -1:
+        score = 80.0
+        note = (
+            f"近 {len(valid)} 期营收增长 {rev_growth:+.1f}%，同期毛利率变化 {margin_change:+.2f}pp"
+            "（未随规模扩大而下降），呈现规模效应特征"
+        )
+    elif rev_growth > 0:
+        score = 40.0
+        note = (
+            f"近 {len(valid)} 期营收增长 {rev_growth:+.1f}%，但毛利率下降 {margin_change:+.2f}pp，"
+            "规模效应证据较弱（可能被价格竞争或成本上升抵消）"
+        )
+    else:
+        score = 20.0
+        note = f"近 {len(valid)} 期营收未见增长（{rev_growth:+.1f}%），规模效应无法验证"
+    return score, note, ["revenue", "grossprofit_margin"]
+
+
+def _canvas_cyclicality(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
+    """周期性：历史 ROE 波动率推断（波动越大周期性越强，星级越低）。"""
+    if not fin_list:
+        return None, "数据不足：缺少财务数据，无法判断周期性", []
+    import statistics
+    from lib.technical import sort_kline_asc
+    rows = sort_kline_asc(fin_list)[-8:]
+    roes = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
+    if len(roes) < 3:
+        return None, "数据不足：ROE 至少需 3 期数据评估波动性", []
+    mean_roe = statistics.mean(roes)
+    if abs(mean_roe) <= 1e-9:
+        return None, "数据不足：ROE 均值接近 0，变异系数不适用", []
+    cv = statistics.pstdev(roes) / abs(mean_roe)
+    if cv < 0.15:
+        score, note = 90.0, f"近 {len(roes)} 期 ROE 变异系数 {cv:.2f}（<0.15），波动小，周期性特征弱"
+    elif cv < 0.35:
+        score, note = 55.0, f"近 {len(roes)} 期 ROE 变异系数 {cv:.2f}（0.15-0.35），中等波动"
+    else:
+        score, note = 20.0, f"近 {len(roes)} 期 ROE 变异系数 {cv:.2f}（≥0.35），波动大，周期性特征明显"
+    return score, note, ["roe"]
+
+
+def _canvas_growth_driver(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
+    """增长驱动：数据不支持精细量/价拆分，用营收增速绝对水平粗略映射。"""
+    if not fin_list:
+        return None, "数据不足：缺少财务数据，无法判断增长驱动", []
+    from lib.technical import sort_kline_asc
+    rows = sort_kline_asc(fin_list)[-5:]
+    revs = [_fin_field_num(r, "revenue") for r in rows]
+    revs = [v for v in revs if v is not None]
+    if len(revs) < 2:
+        return None, "数据不足：营收至少需 2 期数据", []
+    if not revs[0]:
+        return None, "数据不足：起始期营收为 0，无法计算增速", []
+    growth = (revs[-1] - revs[0]) / abs(revs[0]) * 100
+    note_suffix = "（数据不支持量/价精细拆分，以营收增速绝对水平粗略映射）"
+    if growth >= 30:
+        score, note = 85.0, f"近 {len(revs)} 期营收累计增长 {growth:+.1f}%，增长动能强{note_suffix}"
+    elif growth >= 10:
+        score, note = 55.0, f"近 {len(revs)} 期营收累计增长 {growth:+.1f}%，增长动能中等{note_suffix}"
+    elif growth >= 0:
+        score, note = 30.0, f"近 {len(revs)} 期营收累计增长 {growth:+.1f}%，增长动能偏弱{note_suffix}"
+    else:
+        score, note = 10.0, f"近 {len(revs)} 期营收累计下滑 {growth:+.1f}%{note_suffix}"
+    return score, note, ["revenue"]
+
+
+def _canvas_capital_intensity(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
+    """资本密集度：固定资产/总资产比例（评分越低代表资本密集度越高）。
+
+    v0.1.7/v0.1.8 collector.py 未采集 fix_assets/fixed_assets 字段，本函数在字段
+    可得时才计算，当前实际运行路径下恒定标注数据不足（不得凭空编造比例）。
+    """
+    if not fin_list:
+        return None, "数据不足：缺少财务数据，无法判断资本密集度", []
+    latest = fin_list[-1]
+    fix_assets = _fin_field_num(latest, "fix_assets", "fixed_assets")
+    total_assets = _fin_field_num(latest, "total_assets")
+    if fix_assets is None or not total_assets:
+        return (
+            None,
+            "数据不足：固定资产字段（fix_assets/fixed_assets）当前引擎未采集，无法计算资本密集度比例",
+            [],
+        )
+    ratio = fix_assets / total_assets * 100
+    if ratio >= 50:
+        score, note = 15.0, f"固定资产/总资产 = {ratio:.1f}%（≥50%），资本密集度高"
+    elif ratio >= 25:
+        score, note = 50.0, f"固定资产/总资产 = {ratio:.1f}%（25%-50%），资本密集度中等"
+    else:
+        score, note = 85.0, f"固定资产/总资产 = {ratio:.1f}%（<25%），资本密集度低"
+    return score, note, ["fix_assets", "total_assets"]
+
+
+def _canvas_detail_notes(result: dict) -> str:
+    """从 scoring.py 返回结构中提取各子信号 note，拼接为一句可读依据文本。"""
+    detail = result.get("detail") or {}
+    notes = [
+        d.get("note") for d in detail.values()
+        if isinstance(d, dict) and d.get("note") and d.get("score") is not None
+    ]
+    base = "；".join(notes) if notes else "数据不足，各子信号均无法计算"
+    insufficient = result.get("insufficient_data") or []
+    if insufficient:
+        base += f"（未计入子信号: {'; '.join(insufficient)}）"
+    return base
+
+
+def _canvas_row(name: str, score: float | None, note: str, sources: list[str] | None = None) -> str:
+    if score is None:
+        return f"| {name} | 数据不足 | {note} |"
+    stars = _score_to_stars(score)
+    src_note = f" [来源: {', '.join(sorted(set(sources)))}]" if sources else ""
+    return f"| {name} | {_stars(stars)}（{score:.0f}/100） | {note}{src_note} |"
+
+
+def _section_business_model_canvas(
+    fin_list: list[dict], holder_changes: dict, chain: dict,
+) -> str:
+    """A-4: 7 维度商业模式画布。
+
+    5/7 维度可计算（收入模式/客户锁定复用 scoring.py 量化引擎，规模效应/周期性/增长驱动
+    为本函数基于 fin_list 的规则推断）；技术壁垒（需研发占比/专利数据）与资本密集度
+    （固定资产字段当前未采集）2 维度标注数据不足，不得用行业常识编造分数。
+    ``holder_changes``/``chain`` 参数保留用于未来扩展上下文（如按行业调整周期性阈值），
+    当前版本评分逻辑仅依赖 fin_list。
+    """
+    from lib.scoring import customer_lockin_score, revenue_quality_score
+
+    lines = ["#### 商业模式画布（A-4，7 维度）", ""]
+    industry = (chain or {}).get("industry")
+    if industry:
+        lines.append(f"> 所属行业: {industry}（来源: lib.chain.collect_chain_context）")
+        lines.append("")
+
+    rq = revenue_quality_score(fin_list)
+    lockin = customer_lockin_score(fin_list)
+    scale_score, scale_note, scale_src = _canvas_scale_effect(fin_list)
+    cyc_score, cyc_note, cyc_src = _canvas_cyclicality(fin_list)
+    growth_score, growth_note, growth_src = _canvas_growth_driver(fin_list)
+    capital_score, capital_note, capital_src = _canvas_capital_intensity(fin_list)
+
+    rows: list[tuple[str, float | None, str, list[str]]] = [
+        ("收入模式", rq.get("score"), _canvas_detail_notes(rq), rq.get("sources") or []),
+        ("客户锁定", lockin.get("score"), _canvas_detail_notes(lockin), lockin.get("sources") or []),
+        ("规模效应", scale_score, scale_note, scale_src),
+        (
+            "技术壁垒",
+            None,
+            "数据不足，定性推断，置信度低：需研发投入占比/专利数量数据，当前引擎未采集相关字段",
+            [],
+        ),
+        ("周期性", cyc_score, cyc_note, cyc_src),
+        ("增长驱动", growth_score, growth_note, growth_src),
+        ("资本密集度", capital_score, capital_note, capital_src),
+    ]
+
+    lines.append("| 维度 | 评分 | 依据 |")
+    lines.append("|------|:---:|------|")
+    for name, score, note, src in rows:
+        lines.append(_canvas_row(name, score, note, src))
+    lines.append("")
+
+    scored = [(name, score) for name, score, _note, _src in rows if score is not None]
+    if len(scored) >= 2:
+        hi_name, hi_score = max(scored, key=lambda x: x[1])
+        lo_name, lo_score = min(scored, key=lambda x: x[1])
+        if hi_name != lo_name:
+            lines.append(
+                f"> **核心矛盾**：「{hi_name}」评分最高"
+                f"（{_stars(_score_to_stars(hi_score))}，{hi_score:.0f}/100），"
+                f"「{lo_name}」评分最低（{_stars(_score_to_stars(lo_score))}，{lo_score:.0f}/100）——"
+                "两者形成对比，需结合护城河来源（见 B-①）与行业位置（见 4a）综合判断商业模式的一致性。"
+            )
+        else:
+            lines.append("> **核心矛盾**：仅 1 个维度可计算评分，暂无法生成维度间对比。")
+    else:
+        lines.append(f"> **核心矛盾**：可计算维度不足 2 个（当前 {len(scored)} 个），暂无法生成评分对比。")
+    lines.append("")
+    return "\n".join(lines)
+
+
+_MGMT_EVENT_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("回购", "buyback"),
+    ("并购", "ma"),
+    ("收购", "ma"),
+    ("增发", "capital_allocation"),
+    ("定增", "capital_allocation"),
+    ("IPO", "capital_allocation"),
+    ("资本开支", "capex"),
+    ("扩产", "capex"),
+)
+
+_MGMT_CATEGORY_LABELS = {
+    "capital_allocation": "资本配置",
+    "capex": "资本开支",
+    "buyback": "回购",
+    "ma": "并购",
+    "personnel": "人事",
+}
+
+
+def _mgmt_categorize_event(title: str) -> str | None:
+    """按标题关键词分类事件；未命中关键词的记录不纳入时间线，不强行归类。"""
+    for keyword, category in _MGMT_EVENT_KEYWORDS:
+        if keyword in title:
+            return category
+    return None
+
+
+def _section_management_assessment(
+    events: list | None, holder_changes: dict, fin_list: list[dict],
+) -> str:
+    """A-5: 管理层完整评估。
+
+    合规: 仅陈述公开记录事实（决策日期/公告内容/行为统计），不推断管理层主观动机，
+    不给"信赖/不信赖"二元结论。软维度（组织能力/企业文化/接班人风险）固定标注
+    "[Claude report 阶段定性填充]"占位。
+    """
+    from lib.schema import ManagementTimelineEntry
+    from lib.scoring import insider_signal, management_ability_proxy
+
+    lines = ["#### 管理层完整评估（A-5）", ""]
+
+    # ---- 决策时间线 ----
+    lines.append("**关键决策时间线**（按标题关键词分类，未命中关键词的公告不纳入）")
+    lines.append("")
+    timeline: list[ManagementTimelineEntry] = []
+    for ev in (events or []):
+        if not isinstance(ev, dict):
+            continue
+        title = str(ev.get("title", "")).strip()
+        if not title:
+            continue
+        category = _mgmt_categorize_event(title)
+        if category is None:
+            continue
+        timeline.append(ManagementTimelineEntry(
+            date=str(ev.get("date", "")),
+            event=title,
+            category=category,  # type: ignore[arg-type]
+            source="akshare stock_individual_notice_report",
+            rating=None,
+        ))
+    if timeline:
+        timeline.sort(key=lambda e: e.date, reverse=True)
+        lines.append("| 日期 | 决策类别 | 事件 | 评级(1-5) |")
+        lines.append("|------|---------|------|:---:|")
+        for e in timeline[:20]:
+            title_s = e.event.replace("|", "/")
+            if len(title_s) > 50:
+                title_s = title_s[:47] + "..."
+            lines.append(
+                f"| {e.date} | {_MGMT_CATEGORY_LABELS.get(e.category, e.category)} | {title_s} "
+                f"| [待 Claude report 阶段填充] |"
+            )
+        hide = max(0, len(timeline) - 20)
+        if hide:
+            lines.append(f"| ... | ... | （另有 {hide} 条决策相关公告未展示） | ... |")
+        lines.append("")
+        lines.append(
+            f"[来源: akshare stock_individual_notice_report / 共 {len(timeline)} 条决策相关公告；"
+            "评级由 Claude 在 report 阶段依据公告内容与后续实际影响填充，本引擎不预设评分]"
+        )
+    else:
+        lines.append(
+            "数据不足：events 中未检索到可按「回购/并购/收购/增发/定增/IPO/资本开支/扩产」"
+            "关键词分类的决策记录。"
+        )
+    lines.append("")
+
+    # ---- 资本配置能力 ----
+    lines.append("**资本配置能力**（5 维度，1 维度可量化）")
+    lines.append("")
+    mgmt = management_ability_proxy(fin_list, holder_changes)
+    capex_detail = (mgmt.get("detail") or {}).get("capex_efficiency") or {}
+    capex_score25 = capex_detail.get("score")
+    capex_note = capex_detail.get("note", "数据不足，跳过")
+    lines.append("| 维度 | 评分 | 依据 |")
+    lines.append("|------|:---:|------|")
+    if capex_score25 is not None:
+        score100 = capex_score25 / 25.0 * 100
+        lines.append(_canvas_row(
+            "研发回报（代理: ΔRevenue/CAPEX）", score100, capex_note,
+            ["revenue", "cap_ex"],
+        ))
+    else:
+        lines.append(f"| 研发回报（代理: ΔRevenue/CAPEX） | 数据不足 | {capex_note} |")
+    for dim_name, reason in (
+        ("并购", "需并购标的估值倍数/协同效应实现情况，当前引擎未采集"),
+        ("回购", "需回购价格区间/实际执行率数据，当前引擎未采集"),
+        ("IPO 时机", "需发行定价/募资投向执行情况数据，当前引擎未采集"),
+        ("库存管理", "需细分库存周转/呆滞库存数据，当前引擎未采集"),
+    ):
+        lines.append(f"| {dim_name} | 数据不足 | {reason}，需人工定性判断 |")
+    lines.append("")
+    lines.append(f"[来源: lib.scoring.management_ability_proxy / {mgmt.get('note', '')}]")
+    lines.append("")
+
+    # ---- 股东利益一致性 ----
+    lines.append("**股东利益一致性**（复用 A-1 内部人信号，避免重复计算逻辑）")
+    lines.append("")
+    signal = insider_signal(holder_changes)
+    if signal == "数据不足":
+        lines.append("数据不足：holder_changes 缺失或无可解析公告日期，无法生成内部人一致性信号。")
+    else:
+        lines.append(
+            f"内部人买卖一致性信号：**{signal}**（近 12 个月窗口，基于增减持公告聚合，"
+            "详见「3d. 股东增减持动向」信号聚合小节，此处不重复渲染）。"
+        )
+    lines.append("[来源: lib.scoring.insider_signal / holder_changes]")
+    lines.append("")
+
+    # ---- 组织能力 / 企业文化 / 接班人风险 ----
+    lines.append("**组织能力 / 企业文化 / 接班人风险**")
+    lines.append("")
+    lines.append("- 组织能力: [Claude report 阶段定性填充——需结合管理层背景、组织架构变化、核心团队稳定性等公开信息]")
+    lines.append("- 企业文化: [Claude report 阶段定性填充——需结合公司治理公告、员工持股计划、历史危机应对记录等公开信息]")
+    lines.append("- 接班人风险: [Claude report 阶段定性填充——需结合高管年龄结构、董事会变更公告、控制权结构等公开信息]")
+    lines.append("")
+    lines.append(
+        "> ⚠️ 合规声明：以上时间线与评分仅陈述公开记录事实（决策日期、公告内容、行为统计），"
+        "不推断管理层主观动机，不构成对管理层的信赖/不信赖二元结论。"
+    )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _section_fundamentals_layered(
@@ -3083,6 +4154,20 @@ def _section_fundamentals_layered(
         ],
     ))
     lines.append("")
+
+    # A-4: 商业模式画布（v0.1.8 Step 6，紧接 B-① 护城河来源之后）
+    lines.append(_section_business_model_canvas(
+        fin_list,
+        dims.get("holder_changes") or {},
+        collection.get("chain_context") or {},
+    ))
+
+    # A-5: 管理层完整评估（v0.1.8 Step 6，与商业模式画布并列在 4b 商业质量段落）
+    lines.append(_section_management_assessment(
+        collection.get("events"),
+        dims.get("holder_changes") or {},
+        fin_list,
+    ))
 
     # B-② 增长驱动力
     lines.append("#### B-② 增长驱动力")
@@ -3816,6 +4901,330 @@ def _section_static_fundamentals(
     return _section_fundamentals_layered(dims, collection, symbol, val_cache=val_cache)
 
 
+# ═══════════════════════════════════════════════════════════════
+# D-④/D-⑤/D-⑥: DCF 三情景估值区间 + 三角对照 + 敏感性矩阵（v0.1.8 Step 4）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _dcf_try_wacc(financials: dict, market_structure: dict) -> tuple[dict | None, list[str]]:
+    """尝试计算 WACC（CAPM）。
+
+    risk_free_rate / erp 沿用 D-③ 已建立的降级惯例（10Y 国债不可得时用 2.5%
+    默认值 + "[推测，待验证]" 标注，ERP 固定 6% 保守基准），因为这两个是宏观常数，
+    并非对目标公司的主观判断。
+
+    beta 则不允许默认值代入：beta 是公司特定的风险参数，calc_beta() 需要个股
+    vs 沪深300 的历史收益率序列做回归，但当前采集管线（collector.py）尚未产出
+    该序列（无 benchmark kline 维度），因此本函数在 financials / market_structure
+    中预留 "beta" 兜底字段供未来版本直接接入 calc_beta() 结果；若两处均取不到，
+    判定为数据不足，返回 (None, missing) 交由调用方跳过整个 D-④/D-⑥，不编造 beta。
+
+    Returns:
+        (wacc_result, missing_reasons)。wacc_result 为 None 时 missing_reasons 非空。
+    """
+    missing: list[str] = []
+
+    beta = financials.get("beta")
+    if beta is None:
+        beta = market_structure.get("beta")
+    if beta is None:
+        missing.append(
+            "beta（个股 vs 沪深300 历史收益率回归系数）不可得："
+            "当前数据源未采集个股/基准收益率序列，calc_beta() 无输入"
+        )
+
+    erp_data = market_structure.get("erp") or {}
+    risk_free_raw = erp_data.get("dgs10")
+    risk_free_is_default = risk_free_raw is None
+    risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
+
+    if missing:
+        return None, missing
+
+    from lib.valuation import calc_wacc
+
+    wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=0.06, cost_of_debt=None)
+    wacc_result["risk_free_is_default"] = risk_free_is_default
+    return wacc_result, []
+
+
+def _aggregate_scenario_dcf(
+    yearly_fcff: list[dict], wacc: float, terminal_g: float,
+) -> dict | None:
+    """将 scenario_fcff() 的显式期 FCFF 序列直接折现聚合为企业价值。
+
+    设计决策：不复用 dcf_two_stage() 的"恒定复合增速"假设重新生成 FCFF 序列，
+    而是直接对 scenario_fcff 已经按年计算好的 FCFF（其中已经反映了毛利率/EBIT
+    利润率随情景偏移、折旧按营收等比例缩放等非恒定增速的动态）逐年折现——
+    这比"先算出一个平均增速，再喂回 dcf_two_stage 重新按恒定增速展开"更贴近
+    scenario_fcff 本身的建模假设，避免信息损失。终值仍沿用 Gordon 永续增长法，
+    以显式期最后一年 FCFF 为基数。
+
+    Returns:
+        {"explicit_pv", "terminal_pv", "enterprise_value"}，
+        非法参数（wacc<=terminal_g 或序列为空）返回 None。
+    """
+    if not yearly_fcff or wacc <= terminal_g:
+        return None
+
+    explicit_pv = 0.0
+    for row in yearly_fcff:
+        t = row["year"]
+        fcff_t = row["fcff"]
+        explicit_pv += fcff_t / (1 + wacc) ** t
+
+    years = yearly_fcff[-1]["year"]
+    fcff_final = yearly_fcff[-1]["fcff"]
+    terminal_fcff = fcff_final * (1 + terminal_g)
+    terminal_value = terminal_fcff / (wacc - terminal_g)
+    terminal_pv = terminal_value / (1 + wacc) ** years
+    enterprise_value = explicit_pv + terminal_pv
+
+    return {
+        "explicit_pv": round(explicit_pv, 2),
+        "terminal_pv": round(terminal_pv, 2),
+        "enterprise_value": round(enterprise_value, 2),
+    }
+
+
+def _consensus_growth_from_forecasts(research_summary: dict | None) -> float | None:
+    """从机构净利润预测（profit_forecasts，按 quarter 聚合的 avg_np_100m）
+    尝试推导一致预期年化增速。
+
+    保守策略：只接受 quarter 字段可清洗出恰好 4 位数字（视为年度，如 "2026"、
+    "2026年" 等）的记录，取最早与最晚两个年份的均值净利润计算年化复合增速。
+    quarter 字段不是清晰的年度标签（如混杂的季度报告期）时返回 None——
+    不为了凑数据而把季度数字误当年度使用。
+    """
+    if not research_summary:
+        return None
+    forecasts = research_summary.get("profit_forecasts") or []
+    by_year: dict[int, float] = {}
+    for f in forecasts:
+        val = f.get("avg_np_100m")
+        if val is None:
+            continue
+        digits = "".join(ch for ch in str(f.get("quarter", "")) if ch.isdigit())
+        if len(digits) == 4:
+            year = int(digits)
+            by_year.setdefault(year, val)
+    years_sorted = sorted(by_year.items())
+    if len(years_sorted) < 2:
+        return None
+    (y0, v0), (y1, v1) = years_sorted[0], years_sorted[-1]
+    if v0 is None or v1 is None or v0 <= 0 or y1 <= y0:
+        return None
+    return (v1 / v0) ** (1 / (y1 - y0)) - 1
+
+
+_DCF_TERMINAL_G_DEFAULT = 0.025  # 与 D-③ 10Y 国债默认假设一致，作为长期宏观增长代理 [推测，待验证]
+
+
+def _section_dcf_valuation(
+    dims: dict, collection: dict, symbol: str,
+    veto_triggered: bool = False,
+) -> str:
+    """D-④/D-⑤/D-⑥：DCF 三情景估值区间 + 三角对照表 + WACC×终值敏感性矩阵。
+
+    若 veto_triggered=True，只返回一行"研究终止条件触发，估值段落已跳过"，
+    不渲染任何 DCF 数值（Step 7/8 快速否决检测触发时会传入 True）。
+
+    合规红线（AGENTS.md 约束1 / CLAUDE.md LAW 6）：不输出单一"目标价"，
+    只输出企业价值区间 + 三情景假设 + 概率权重，并注明仅供参考。
+    """
+    header = "## D. DCF 估值区间与三角对照"
+    if veto_triggered:
+        return "\n".join([header, "", "**研究终止条件触发，估值段落已跳过。**"])
+
+    lines: list[str] = [
+        header, "",
+        "> 本节为规则驱动的估值区间估算（非分析师预测、非单一价格结论），"
+        "全部假设标注来源，仅供研究参考，不构成投资建议。",
+        "",
+    ]
+
+    financials = dims.get("financials") or {}
+    market_structure = collection.get("market_structure") or {}
+
+    lines.append("#### D-④ DCF 三情景估值区间")
+    lines.append("")
+
+    wacc_result, wacc_missing = _dcf_try_wacc(financials, market_structure)
+    if wacc_result is None:
+        lines.append("数据不足，WACC 无法计算，DCF 段落跳过。缺失项：")
+        for m in wacc_missing:
+            lines.append(f"- {m}")
+        lines.append("")
+        lines.append("[来源: valuation.calc_wacc 所需参数缺失]")
+        return "\n".join(lines)
+
+    wacc = wacc_result["wacc"]
+    terminal_g = _DCF_TERMINAL_G_DEFAULT
+
+    if wacc <= terminal_g:
+        lines.append(
+            f"数据不足，WACC（{wacc*100:.2f}%）不高于永续增长率假设"
+            f"（{terminal_g*100:.2f}%），无法计算终值，DCF 段落跳过。"
+        )
+        lines.append("")
+        lines.append("[来源: valuation.calc_wacc / dcf_two_stage 参数约束]")
+        return "\n".join(lines)
+
+    from lib.valuation import (
+        dcf_sensitivity,
+        default_terminal_g_range,
+        default_wacc_range,
+        scenario_fcff,
+        triangle_check,
+    )
+
+    scenario_results = {sc: scenario_fcff(financials, scenario=sc) for sc in ("bear", "base", "bull")}
+    insufficient_items: list[str] = []
+    for sc, res in scenario_results.items():
+        if "error" in res:
+            insufficient_items.extend(f"[{sc}] {item}" for item in res.get("insufficient_data", []))
+    if insufficient_items:
+        lines.append("数据不足，三情景 FCFF 预测无法生成，DCF 段落跳过。缺失项：")
+        for item in sorted(set(insufficient_items)):
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("[来源: valuation.scenario_fcff 所需财务字段缺失]")
+        return "\n".join(lines)
+
+    scenario_ev: dict[str, dict] = {}
+    for sc, res in scenario_results.items():
+        ev = _aggregate_scenario_dcf(res["yearly_fcff"], wacc, terminal_g)
+        if ev is None:
+            lines.append(f"数据不足，{sc} 情景企业价值计算失败（WACC/终值增长率参数非法）。")
+            lines.append("")
+            return "\n".join(lines)
+        scenario_ev[sc] = ev
+
+    wacc_label = f"{wacc*100:.2f}%"
+    rf_note = (
+        "10Y 国债使用默认值 2.5% [推测，待验证]" if wacc_result.get("risk_free_is_default")
+        else "10Y 国债取自 FRED/akshare"
+    )
+    lines.append(f"- WACC：**{wacc_label}**（cost_of_equity 近似，因债务成本/权重数据不可得；{rf_note}；ERP 假设 6%）")
+    lines.append(f"- 永续增长率假设：**{terminal_g*100:.2f}%**[推测，待验证：长期宏观增长代理，与 D-③ 一致]")
+    lines.append("")
+
+    _sc_label = {"bear": "悲观情景", "base": "中性情景", "bull": "乐观情景"}
+    lines.append("| 情景 | 概率权重 | 核心假设（营收增速 / 毛利率） | 企业价值（元） |")
+    lines.append("|---|---|---|---|")
+    for sc in ("bull", "base", "bear"):
+        res = scenario_results[sc]
+        assump = res["assumptions"]
+        ev = scenario_ev[sc]
+        lines.append(
+            f"| {_sc_label[sc]} | {res['probability']*100:.0f}% | "
+            f"营收增速 {assump['revenue_growth']*100:+.1f}%，毛利率 {assump['gross_margin_assumption']:.1f}% | "
+            f"{ev['enterprise_value']:,.0f} |"
+        )
+    lines.append("")
+
+    def _assump_text(sc: str) -> str:
+        a = scenario_results[sc]["assumptions"]
+        return f"营收增速{a['revenue_growth']*100:+.1f}%、毛利率{a['gross_margin_assumption']:.1f}%"
+
+    lines.append(
+        f"乐观情景（假设{_assump_text('bull')}，概率 {scenario_results['bull']['probability']*100:.0f}%）："
+        f"企业价值 {scenario_ev['bull']['enterprise_value']:,.0f} 元；"
+        f"中性情景（假设{_assump_text('base')}，概率 {scenario_results['base']['probability']*100:.0f}%）："
+        f"企业价值 {scenario_ev['base']['enterprise_value']:,.0f} 元；"
+        f"悲观情景（假设{_assump_text('bear')}，概率 {scenario_results['bear']['probability']*100:.0f}%）："
+        f"企业价值 {scenario_ev['bear']['enterprise_value']:,.0f} 元。"
+        "仅供参考，不构成投资建议。"
+    )
+    lines.append("")
+    lines.append(
+        "股本/每股换算数据不可得（当前数据源未采集总股本口径一致的股份数），"
+        "以上仅为企业价值区间，不换算为每股价值或单一价格结论。"
+    )
+    for sc in ("bear", "base", "bull"):
+        if scenario_results[sc].get("growth_sign_caveat"):
+            lines.append(f"⚠️ [{sc}] {scenario_results[sc]['growth_sign_caveat']}")
+    lines.append("")
+    lines.append(
+        "[来源: valuation.scenario_fcff（三情景假设）+ 本函数对显式期 FCFF 逐年折现"
+        "并叠加 Gordon 永续增长终值（等价于 valuation.dcf_two_stage 的终值公式）]"
+    )
+    lines.append("")
+
+    # =================================================================
+    # D-⑤ 估值三角对照表
+    # =================================================================
+    lines.append("#### D-⑤ 估值三角对照")
+    lines.append("")
+    dcf_growth = scenario_results["base"]["assumptions"]["revenue_growth"]
+
+    fin_raw = _get_dim_data(dims, "financials")
+    fin_list: list[dict] = []
+    if fin_raw and isinstance(fin_raw, list):
+        from lib.technical import sort_kline_asc
+        fin_list = sort_kline_asc(fin_raw)
+    base_assumptions = scenario_results["base"].get("assumptions", {})
+    hist_growth = base_assumptions.get("base_revenue_growth_cagr")
+    if hist_growth is None:
+        hist_cagr_pct, _ = _compute_metric_cagr(fin_list, "revenue")
+        hist_growth = hist_cagr_pct / 100.0 if hist_cagr_pct is not None else None
+
+    research_dim = dims.get("research", {})
+    research_summary = research_dim.get("research_summary") or {}
+    consensus_growth = _consensus_growth_from_forecasts(research_summary)
+
+    triangle = triangle_check(dcf_growth, consensus_growth, hist_growth)
+    lines.append("| 对照维度 | 数值 | 来源 |")
+    lines.append("|---|---|---|")
+    for row in triangle["rows"]:
+        lines.append(f"| {row['label']} | {row['display']} | {row['source']} |")
+    lines.append("")
+    if triangle.get("divergence_note"):
+        lines.append(f"→ {triangle['divergence_note']}")
+    else:
+        lines.append("三者数值接近，或存在不可得项，未生成分歧提示。")
+    lines.append("")
+    lines.append("[来源: valuation.triangle_check；机构一致预期增速取自 research 维度 profit_forecasts"
+                 "（需至少 2 个可解析年度的净利润预测均值），历史营收 CAGR 取自 financials 维度]")
+    lines.append("")
+
+    # =================================================================
+    # D-⑥ WACC × 永续增长率敏感性矩阵
+    # =================================================================
+    lines.append("#### D-⑥ WACC × 永续增长率敏感性矩阵")
+    lines.append("")
+    fcff_base = ((financials.get("dcf_preprocess") or {}).get("fcff") or {}).get("fcff")
+    if fcff_base is None:
+        fcff_base = scenario_results["base"]["yearly_fcff"][0]["fcff"]
+    growth_s1 = scenario_results["base"]["assumptions"]["revenue_growth"]
+
+    wacc_range = default_wacc_range(wacc)
+    terminal_g_range = default_terminal_g_range(terminal_g)
+    sensitivity = dcf_sensitivity(fcff_base, growth_s1, 5, wacc_range, terminal_g_range)
+
+    if "error" in sensitivity:
+        lines.append(f"数据不足：[{sensitivity['error']}]")
+    else:
+        header_row = "| WACC ＼ 永续增长率 | " + " | ".join(sensitivity["terminal_g_labels"]) + " |"
+        lines.append(header_row)
+        lines.append("|" + "---|" * (len(sensitivity["terminal_g_labels"]) + 1))
+        for wl, row in zip(sensitivity["wacc_labels"], sensitivity["matrix"]):
+            cells = " | ".join(
+                f"{c:,.0f}" if isinstance(c, (int, float)) else str(c) for c in row
+            )
+            lines.append(f"| {wl} | {cells} |")
+        lines.append("")
+        lines.append(
+            f"基准：FCFF={fcff_base:,.0f} 元（{'最新一期实际值' if ((financials.get('dcf_preprocess') or {}).get('fcff') or {}).get('fcff') is not None else '基情景首年预测值'}），"
+            f"显式期增速={growth_s1*100:.1f}%（基情景），预测年数=5。{sensitivity['note']}"
+        )
+        lines.append("")
+        lines.append("[来源: valuation.dcf_sensitivity / default_wacc_range / default_terminal_g_range]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def _v3_build_risk_report(
     collection: dict, dims: dict[str, dict], market_structure: dict,
     *, val_cache: dict | None = None,
@@ -4198,6 +5607,77 @@ def _section_bull_bear(
         }
         bear_chains.append(chain)
 
+    # ── bear chain padding (F-2): 若空头论据显著少于多头，用可复用数据构建 ──
+    # 通用空方模板补齐差额；模板本身也可能因数据不足被跳过，绝不为凑数量编造
+    # 无依据的论点（AGENTS.md 约束 3）。
+    _bear_titles = {c["title"] for c in bear_chains}
+
+    def _try_add_valuation_neutral_bear() -> bool:
+        if "估值偏高 — 均值回归风险" in _bear_titles:
+            return False  # 已存在对称的估值偏高链，无需重复
+        if pe_pct is None or pe_pct < ZONE_LOW_THRESHOLD:
+            return False  # PE 分位本身处于低位，构造"估值不低"论点将自相矛盾
+        chain = {
+            "title": "估值未处于低位 — 修复安全边际有限",
+            "assumption": (
+                f"当前 PE 处于历史 {pe_zone or '中性偏高区'}（{pe_pct:.1f}% 分位），"
+                f"并非历史低位，估值端不具备低估安全边际。"
+            ),
+            "transmission": (
+                "估值分位不低 → 市场已给予该标的中性以上定价 → "
+                "若基本面出现边际走弱或不及预期 → 估值缺乏低位缓冲，"
+                "股价对负面消息的敏感度更高。"
+            ),
+            "numbers": [f"- 当前 PE 分位: {pe_pct:.1f}%（{pe_zone or '中性偏高区'}）[来源: valuation 维度]"],
+            "strength": "❓ 弱",
+        }
+        bear_chains.append(chain)
+        _bear_titles.add(chain["title"])
+        return True
+
+    def _try_add_industry_competition_bear() -> bool:
+        title = "行业竞争格局变化"
+        if title in _bear_titles:
+            return False
+        if not industry_peers.get("sufficient"):
+            return False
+        items = []
+        if roe_rank_pct is not None and roe_rank_pct < 50:
+            items.append(f"ROE 同行分位 {roe_rank_pct:.1f}%（低于同行中位）")
+        if rev_yoy_pct is not None and rev_yoy_pct < 50:
+            items.append(f"营收增速同行分位 {rev_yoy_pct:.1f}%（低于同行中位）")
+        if not items:
+            return False  # 同行数据显示公司相对占优，不构造矛盾论点
+        chain = {
+            "title": title,
+            "assumption": (
+                f"同行对比数据显示：{'；'.join(items)}，公司在行业内的相对位置并不领先"
+                f" [来源: industry_peers 维度]。"
+            ),
+            "transmission": (
+                "同行排名靠后 → 议价能力/抗风险能力相对偏弱 → "
+                "若行业竞争加剧或格局生变，公司份额或毛利率可能率先承压 → "
+                "盈利能见度下降，市场可能下调估值倍数。"
+            ),
+            "numbers": [f"- {it}" for it in items],
+            "strength": "⚠️ 中",
+        }
+        bear_chains.append(chain)
+        _bear_titles.add(title)
+        return True
+
+    for _pad_tpl in (_try_add_valuation_neutral_bear, _try_add_industry_competition_bear):
+        if len(bear_chains) >= len(bull_chains) - 1:
+            break
+        _pad_tpl()
+
+    _bear_shortfall_note = ""
+    if len(bear_chains) < len(bull_chains) - 1:
+        _bear_shortfall_note = (
+            "⚠️ 当前数据支持的空头论据数量少于多头，这是数据可得性限制导致的结构性不对称，"
+            "并非模型对该标的方向性看多的结论；补充空头论据所需的同行/估值数据暂不可得。"
+        )
+
     # ── 5a. Bull chain: 假设→传导→数字 ────────────────────────────
     lines.append("### 5a. 多头逻辑链")
     if bull_chains:
@@ -4310,8 +5790,90 @@ def _section_bull_bear(
                 )
             )
     lines.append("")
+    if _bear_shortfall_note:
+        lines.append(_bear_shortfall_note)
+        lines.append("")
     lines.append("🔍 **待独立验证:** 逻辑链为数据驱动的叙事框架，非方向判断；预期差须与财报 PDF 交叉核对。")
     return "\n".join(lines)
+
+
+_INDUSTRY_CUSTOM_UNKNOWN_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("半导体", "芯片", "集成电路"),
+        "国产化率/出口管制：公司核心设备/材料/工艺环节在国内的国产化率与替代进度如何？",
+        "半导体产业链高度依赖进口设备与关键材料，出口管制升级或国产替代加速均可能显著改变公司中期收入/成本结构，且这类信息通常无法从财报直接获得，需产业链调研或公司公告补充。",
+    ),
+    (
+        ("医药", "生物", "制药", "医疗"),
+        "集采/医保政策传导：主力产品是否在近期或未来集采/医保谈判目录范围内，降价幅度预期如何？",
+        "医药类标的的营收/毛利率对集采及医保谈判政策高度敏感，且政策落地时间与幅度具有不确定性，属于财报无法前瞻反映的关键变量。",
+    ),
+    (
+        ("新能源", "锂电", "光伏", "储能"),
+        "行业产能周期位置：当前细分赛道处于产能扩张/出清的哪个阶段，价格战是否已充分反映在近期报表中？",
+        "新能源产业链历史上多次出现产能过剩导致价格快速下探，财报滞后于产能/价格变化，需结合行业排产数据交叉验证。",
+    ),
+)
+
+
+def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[tuple[str, str]]:
+    """v0.1.8 A-3: 根据标的行业/估值历史位置/内部人行为特征生成定制化待验证问题。
+
+    返回 `(问题, 为什么重要)` 元组列表；规则命中的数据字段不可得时跳过该规则，
+    不编造问题所需的数据支撑（AGENTS.md 约束 3）。
+    """
+    result: list[tuple[str, str]] = []
+    if not isinstance(dims, dict):
+        return result
+
+    # 规则 1: 行业关键词匹配
+    basic = _get_dim_data(dims, "basic_info")
+    industry_name = ""
+    if isinstance(basic, dict):
+        industry_name = str(basic.get("industry", "") or basic.get("行业", "") or "")
+    if industry_name:
+        for keywords, question, why in _INDUSTRY_CUSTOM_UNKNOWN_RULES:
+            if any(kw in industry_name for kw in keywords):
+                result.append((question, why))
+                break  # 仅取首个匹配的行业规则，避免同类问题堆叠
+
+    # 规则 2: PE 历史位置极端值
+    try:
+        pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, None)
+    except Exception:
+        pe_pct = None
+    if pe_pct is not None:
+        if pe_pct > 90:
+            result.append((
+                f"当前估值隐含增速能否兑现：PE 历史位置已达 {pe_pct:.1f}%（>90%），"
+                "市场定价隐含的增长预期是否有具体订单/产能落地依据支撑？",
+                "历史高位定价对增长不及预期的敏感度更高，需要独立验证市场隐含增速的合理性，"
+                "而非仅依赖历史位置数字本身下结论。",
+            ))
+        elif pe_pct < 10:
+            result.append((
+                f"低估值历史位置是否反映真实基本面恶化：PE 历史位置仅 {pe_pct:.1f}%（<10%），"
+                "是短期情绪压制还是盈利模式已发生结构性变化？",
+                "极低历史位置可能对应周期底部或基本面持续恶化两种截然不同的情形，"
+                "仅靠估值位置无法区分，需结合订单/现金流等一手信息独立核实。",
+            ))
+
+    # 规则 3: 内部人一致性信号极端值
+    holder_changes = dims.get("holder_changes") or {}
+    try:
+        from lib.scoring import insider_signal
+
+        signal = insider_signal(holder_changes)
+    except Exception:
+        signal = "数据不足"
+    if signal == "强负向":
+        result.append((
+            "内部人集中减持后的资金用途与后续动向：近 12 月已披露的多主体减持是否有后续增持/回购计划？",
+            "多主体同向减持是行为事实但动机不明确（可能是个人资金需求，也可能反映对公司前景的判断），"
+            "需要结合后续公告与管理层表态独立验证，避免单凭减持行为得出方向性结论。",
+        ))
+
+    return result
 
 
 def _section_risk_uncertainty(
@@ -4425,11 +5987,20 @@ def _section_risk_uncertainty(
         ("技术路线时间表", "关键技术验证节点时间窗口待独立核实"),
         ("政策/贸易变量", "相关政策的不确定时间窗口"),
     ]
-    for idx, (slot_name, default_hint) in enumerate(_KNOWN_UNKNOWN_SLOTS, 1):
-        lines.append(f"{idx}. **{slot_name}：** {default_hint}")
+    slot_idx = 0
+    for slot_idx, (slot_name, default_hint) in enumerate(_KNOWN_UNKNOWN_SLOTS, 1):
+        lines.append(f"{slot_idx}. **{slot_name}：** {default_hint}")
+
+    # ---- v0.1.8 A-3: 标的定制化待验证问题 ----
+    custom_unknowns = _generate_custom_unknowns(collection, dims)
+    for question, why_it_matters in custom_unknowns:
+        slot_idx += 1
+        lines.append(f"{slot_idx}. **{question}** — {why_it_matters}")
+
     scanner_unknowns = risk_data.get("known_unknowns") or []
     if scanner_unknowns:
-        lines.append(f"4. **扫描器补充：** " + "；".join(scanner_unknowns[:3]))
+        slot_idx += 1
+        lines.append(f"{slot_idx}. **扫描器补充：** " + "；".join(scanner_unknowns[:3]))
 
     # Governance events cross-reference
     events_all = collection.get("events") or []
@@ -4448,7 +6019,8 @@ def _section_risk_uncertainty(
                     gtitle = gtitle[:57] + "..."
                 gov_lines.append(f"{gdate} {gtitle}")
             if gov_lines:
-                lines.append(f"5. **近期治理事件:** {'；'.join(gov_lines)}")
+                slot_idx += 1
+                lines.append(f"{slot_idx}. **近期治理事件:** {'；'.join(gov_lines)}")
 
     lines.append("")
     lines.append(
@@ -4988,7 +6560,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_dynamic_drivers(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
             ),
-            _section_holder_changes(dims.get("holder_changes", {})),
+            _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_bull_bear(
                 collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
             ),
@@ -5000,6 +6572,8 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _risk_footer(),
         ])
     else:
+        # F-3: 快速否决检测需在 D 段之前算出，供 veto_triggered 联动 + 展示触发条目
+        _fast_veto = _check_fast_veto(dims, collection)
         parts: list[str] = [
             _header_v2(collection, symbol),
         ]
@@ -5007,6 +6581,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         if extras:
             parts.append("\n".join(extras))
         parts.extend([
+            _section_ai_confidence_matrix(collection),
             _report_toc(),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
@@ -5017,11 +6592,17 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 collection, symbol, market_structure, val_cache=val_cache,
             ),
             _section_events_timeline(collection),
-            _section_holder_changes(dims.get("holder_changes", {})),
+            _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_research_summary(collection, symbol, dims),
             _wrap_details(
                 "展开：静态基本面（12题）",
                 _section_static_fundamentals(dims, collection, val_cache=val_cache),
+            ),
+            "\n".join(
+                ["### 快速否决检测（F-3）", ""] + _fast_veto["display_lines"]
+            ) if _fast_veto["display_lines"] else "",
+            _section_dcf_valuation(
+                dims, collection, symbol, veto_triggered=bool(_fast_veto["hard_triggers"]),
             ),
             _section_core_tension(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
@@ -5037,6 +6618,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
             ),
             _section_technical_brief(dims, val_cache=val_cache),
+            _section_six_gates_scorecard(dims, collection, val_cache),
+            _section_comprehension_statement(dims, market_structure, val_cache),
+            _section_bias_self_check(),
             _references_appendix(collection),
             _risk_footer(),
         ])
