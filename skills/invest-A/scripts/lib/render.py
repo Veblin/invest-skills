@@ -429,6 +429,47 @@ def _header_v2(collection: dict, symbol: str) -> str:
     return "\n".join(lines)
 
 
+_CONFIDENCE_FLAG_MODULES = ("估值判断", "周期拐点判断")
+
+
+def _section_ai_confidence_matrix(collection: dict) -> str:
+    """v0.1.8 A-2: AI 分析置信度矩阵（借鉴报告 §10.8）。
+
+    渲染 `lib.scoring.confidence_matrix()` 的引擎自动计算结果，
+    对"估值判断"与"周期拐点判断"两个恒定中低置信度模块特别标注 ⚠️。
+    """
+    from lib.scoring import confidence_matrix
+
+    matrix = confidence_matrix(collection)
+    rows = matrix.get("rows") or []
+    if not rows:
+        return ""
+
+    lines = ["## AI 分析置信度矩阵", ""]
+    lines.append(
+        "> 置信度由数据可得性/来源丰富度自动计算，非 LLM 主观判断；"
+        "「估值判断」「周期拐点判断」为学术共识固定标注，不随数据完整性提升。"
+    )
+    lines.append("")
+    lines.append("| 分析模块 | AI 置信度 | 原因 |")
+    lines.append("|----------|:--------:|------|")
+    for r in rows:
+        module = str(r.get("module", "?"))
+        confidence = str(r.get("confidence", "?"))
+        reason = str(r.get("reason", "")).replace("|", "/")
+        if module in _CONFIDENCE_FLAG_MODULES:
+            lines.append(f"| ⚠️ **{module}** | **{confidence}** | {reason} |")
+        else:
+            lines.append(f"| {module} | {confidence} | {reason} |")
+    lines.append("")
+    insufficient = matrix.get("insufficient_data") or []
+    if insufficient:
+        lines.append(f"⚠️ 置信度为「低」的模块：{'、'.join(insufficient)}，相关分析结论需结合独立信源核实。")
+        lines.append("")
+    lines.append("[来源: lib.scoring.confidence_matrix / 各维度 collection[dim].status + _meta.multi_source]")
+    return "\n".join(lines)
+
+
 def _section_profile(dims: dict[str, dict]) -> str:
     """公司画像（basic_info 事实罗列）。"""
     data = _get_dim_data(dims, "basic_info")
@@ -2213,8 +2254,11 @@ def _competitive_position_label(pct: float | None) -> str | None:
     return "追赶者"
 
 
-def _section_holder_changes(data: dict) -> str:
-    """股东增减持动向（P0-2 holder_changes 渲染）。"""
+_COMMITMENT_KEYWORDS = ("承诺", "不减持")
+
+
+def _section_holder_changes(data: dict, events: list | None = None) -> str:
+    """股东增减持动向（P0-2 holder_changes 渲染 + v0.1.8 A-1 信号聚合/言行对照）。"""
     if not data or not isinstance(data, dict):
         return ""
     records = data.get("data") or []
@@ -2283,6 +2327,76 @@ def _section_holder_changes(data: dict) -> str:
         lines.append("- **内部人一致性**: 多主体同向减持 → 信号增强（负面）")
     else:
         lines.append("- **内部人一致性**: 增减持方向分歧，信号混杂")
+
+    # ---- v0.1.8 A-1: 信号聚合 ----
+    from lib.scoring import insider_signal
+
+    signal = insider_signal(data)
+    _SIGNAL_HINTS = {
+        "强正向": "近 12 月内 ≥3 名股东增持，0 笔减持，且交叉验证 ≥2 源",
+        "正向": "近 12 月内增持笔数明显多于减持笔数",
+        "分歧": "近 12 月内增减持方向不明确或数据不足以判断趋势",
+        "负向": "近 12 月内减持笔数明显多于增持笔数",
+        "强负向": "近 12 月内 ≥3 名股东减持，0 笔增持，且交叉验证 ≥2 源",
+        "数据不足": "公告日期或增减持记录不足，无法生成聚合信号",
+    }
+    lines.append("")
+    lines.append("### 信号聚合")
+    lines.append("")
+    lines.append(
+        f"- **内部人买卖一致性信号**: **{signal}**（{_SIGNAL_HINTS.get(signal, '')}）"
+        f" [来源: lib.scoring.insider_signal / holder_changes]"
+    )
+    lines.append("⚠️ 以上仅为行为事实的量化聚合，不构成任何投资建议或买卖指令。")
+
+    # ---- v0.1.8 A-1: 言行对照 ----
+    lines.append("")
+    lines.append("### 言行对照")
+    lines.append("")
+    sell_records = [r for r in records if "减" in str(r.get("direction", ""))]
+    commitment_events = []
+    if isinstance(events, list):
+        for e in events:
+            if not isinstance(e, dict):
+                continue
+            title = str(e.get("title", ""))
+            if any(kw in title for kw in _COMMITMENT_KEYWORDS):
+                commitment_events.append(e)
+    if not commitment_events:
+        lines.append("未检索到相关承诺公告，言行对照暂缺。")
+    elif not sell_records:
+        lines.append(
+            f"检索到 {len(commitment_events)} 条承诺/不减持相关公告，同期 holder_changes "
+            "记录中无匹配的减持行为。"
+        )
+        for e in commitment_events[:5]:
+            edate = str(e.get("date", ""))
+            etitle = str(e.get("title", ""))[:60]
+            lines.append(f"- {edate} {etitle} [来源: events]")
+    else:
+        lines.append(
+            f"检索到 {len(commitment_events)} 条承诺/不减持相关公告，"
+            f"同期 holder_changes 记录中存在 {len(sell_records)} 笔减持，时间线对照如下（仅陈述行为事实，"
+            "不判断是否违反承诺，具体条款需人工核实公告原文）："
+        )
+        lines.append("")
+        lines.append("| 日期 | 类型 | 内容 |")
+        lines.append("|------|------|------|")
+        timeline: list[tuple[str, str, str]] = []
+        for e in commitment_events:
+            edate = str(e.get("date", ""))
+            etitle = str(e.get("title", ""))[:60]
+            timeline.append((edate, "承诺公告", etitle))
+        for r in sell_records:
+            rdate = str(r.get("ann_date", ""))
+            if len(rdate) == 8:
+                rdate = f"{rdate[:4]}-{rdate[4:6]}-{rdate[6:8]}"
+            rname = str(r.get("holder_name", ""))[:16]
+            timeline.append((rdate, "减持记录", rname))
+        for edate, etype, content in sorted(timeline, key=lambda t: t[0])[:15]:
+            lines.append(f"| {edate} | {etype} | {content} |")
+        lines.append("")
+        lines.append("🔍 **待独立验证:** 承诺公告的具体条款（承诺期限/主体范围）需与公告原文核对。")
 
     return "\n".join(lines)
 
@@ -4635,6 +4749,85 @@ def _section_bull_bear(
     return "\n".join(lines)
 
 
+_INDUSTRY_CUSTOM_UNKNOWN_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("半导体", "芯片", "集成电路"),
+        "国产化率/出口管制：公司核心设备/材料/工艺环节在国内的国产化率与替代进度如何？",
+        "半导体产业链高度依赖进口设备与关键材料，出口管制升级或国产替代加速均可能显著改变公司中期收入/成本结构，且这类信息通常无法从财报直接获得，需产业链调研或公司公告补充。",
+    ),
+    (
+        ("医药", "生物", "制药", "医疗"),
+        "集采/医保政策传导：主力产品是否在近期或未来集采/医保谈判目录范围内，降价幅度预期如何？",
+        "医药类标的的营收/毛利率对集采及医保谈判政策高度敏感，且政策落地时间与幅度具有不确定性，属于财报无法前瞻反映的关键变量。",
+    ),
+    (
+        ("新能源", "锂电", "光伏", "储能"),
+        "行业产能周期位置：当前细分赛道处于产能扩张/出清的哪个阶段，价格战是否已充分反映在近期报表中？",
+        "新能源产业链历史上多次出现产能过剩导致价格快速下探，财报滞后于产能/价格变化，需结合行业排产数据交叉验证。",
+    ),
+)
+
+
+def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[tuple[str, str]]:
+    """v0.1.8 A-3: 根据标的行业/估值分位/内部人行为特征生成定制化待验证问题。
+
+    返回 `(问题, 为什么重要)` 元组列表；规则命中的数据字段不可得时跳过该规则，
+    不编造问题所需的数据支撑（AGENTS.md 约束 3）。
+    """
+    result: list[tuple[str, str]] = []
+    if not isinstance(dims, dict):
+        return result
+
+    # 规则 1: 行业关键词匹配
+    basic = _get_dim_data(dims, "basic_info")
+    industry_name = ""
+    if isinstance(basic, dict):
+        industry_name = str(basic.get("industry", "") or basic.get("行业", "") or "")
+    if industry_name:
+        for keywords, question, why in _INDUSTRY_CUSTOM_UNKNOWN_RULES:
+            if any(kw in industry_name for kw in keywords):
+                result.append((question, why))
+                break  # 仅取首个匹配的行业规则，避免同类问题堆叠
+
+    # 规则 2: PE 历史分位极端值
+    try:
+        pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, None)
+    except Exception:
+        pe_pct = None
+    if pe_pct is not None:
+        if pe_pct > 90:
+            result.append((
+                f"当前估值隐含增速能否兑现：PE 历史分位已达 {pe_pct:.1f}%（>90%），"
+                "市场定价隐含的增长预期是否有具体订单/产能落地依据支撑？",
+                "高分位估值对增长不及预期的敏感度更高，需要独立验证市场隐含增速的合理性，"
+                "而非仅依赖历史分位数字本身下结论。",
+            ))
+        elif pe_pct < 10:
+            result.append((
+                f"低估值分位是否反映真实基本面恶化：PE 历史分位仅 {pe_pct:.1f}%（<10%），"
+                "是短期情绪压制还是盈利模式已发生结构性变化？",
+                "极低分位可能对应周期底部或基本面持续恶化两种截然不同的情形，"
+                "仅靠估值分位无法区分，需结合订单/现金流等一手信息独立核实。",
+            ))
+
+    # 规则 3: 内部人一致性信号极端值
+    holder_changes = dims.get("holder_changes") or {}
+    try:
+        from lib.scoring import insider_signal
+
+        signal = insider_signal(holder_changes)
+    except Exception:
+        signal = "数据不足"
+    if signal == "强负向":
+        result.append((
+            "内部人集中减持后的资金用途与后续动向：近 12 月已披露的多主体减持是否有后续增持/回购计划？",
+            "多主体同向减持是行为事实但动机不明确（可能是个人资金需求，也可能反映对公司前景的判断），"
+            "需要结合后续公告与管理层表态独立验证，避免单凭减持行为得出方向性结论。",
+        ))
+
+    return result
+
+
 def _section_risk_uncertainty(
     collection: dict,
     symbol: str,
@@ -4746,11 +4939,20 @@ def _section_risk_uncertainty(
         ("技术路线时间表", "关键技术验证节点时间窗口待独立核实"),
         ("政策/贸易变量", "相关政策的不确定时间窗口"),
     ]
-    for idx, (slot_name, default_hint) in enumerate(_KNOWN_UNKNOWN_SLOTS, 1):
-        lines.append(f"{idx}. **{slot_name}：** {default_hint}")
+    slot_idx = 0
+    for slot_idx, (slot_name, default_hint) in enumerate(_KNOWN_UNKNOWN_SLOTS, 1):
+        lines.append(f"{slot_idx}. **{slot_name}：** {default_hint}")
+
+    # ---- v0.1.8 A-3: 标的定制化待验证问题 ----
+    custom_unknowns = _generate_custom_unknowns(collection, dims)
+    for question, why_it_matters in custom_unknowns:
+        slot_idx += 1
+        lines.append(f"{slot_idx}. **{question}** — {why_it_matters}")
+
     scanner_unknowns = risk_data.get("known_unknowns") or []
     if scanner_unknowns:
-        lines.append(f"4. **扫描器补充：** " + "；".join(scanner_unknowns[:3]))
+        slot_idx += 1
+        lines.append(f"{slot_idx}. **扫描器补充：** " + "；".join(scanner_unknowns[:3]))
 
     # Governance events cross-reference
     events_all = collection.get("events") or []
@@ -4769,7 +4971,8 @@ def _section_risk_uncertainty(
                     gtitle = gtitle[:57] + "..."
                 gov_lines.append(f"{gdate} {gtitle}")
             if gov_lines:
-                lines.append(f"5. **近期治理事件:** {'；'.join(gov_lines)}")
+                slot_idx += 1
+                lines.append(f"{slot_idx}. **近期治理事件:** {'；'.join(gov_lines)}")
 
     lines.append("")
     lines.append(
@@ -5309,7 +5512,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_dynamic_drivers(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
             ),
-            _section_holder_changes(dims.get("holder_changes", {})),
+            _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_bull_bear(
                 collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
             ),
@@ -5328,6 +5531,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         if extras:
             parts.append("\n".join(extras))
         parts.extend([
+            _section_ai_confidence_matrix(collection),
             _report_toc(),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
@@ -5338,7 +5542,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 collection, symbol, market_structure, val_cache=val_cache,
             ),
             _section_events_timeline(collection),
-            _section_holder_changes(dims.get("holder_changes", {})),
+            _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_research_summary(collection, symbol, dims),
             _wrap_details(
                 "展开：静态基本面（12题）",
