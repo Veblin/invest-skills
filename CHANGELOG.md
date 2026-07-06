@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 策略调整
+
+- **LAW 6 放宽**：移除"禁止目标价"限制。允许多情景估值参考价（乐观/中性/悲观），须标注各情景的假设前提与概率权重，且注明"仅供参考，不构成投资建议"。不标注假设前提的单一目标价数字仍然禁止。涉及 CLAUDE.md（LAW 6、违规模式表）和 SKILL.md（LAW 6、措辞规范、身份声明、QC 清单）。
+
 ### 工具链
 
 - **版本号收敛**：新增 `scripts/version_sync.py`；`bump-version.sh` / `check-version.sh` 以 `pyproject.toml` 为 canonical，一键同步 5 个分发 manifest；JSON bump 保留原文件格式

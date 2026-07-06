@@ -371,3 +371,36 @@ class ProbabilityStructure:
     right_items: list[str] = field(default_factory=list)
     trigger_conditions: list[str] = field(default_factory=list)
     watch_nodes: list[str] = field(default_factory=list)
+
+
+# ---- v0.1.8 DCF 估值 / 管理层评估 / 评分体系数据结构 ----
+
+
+@dataclass
+class ScenarioAssumption:
+    """DCF 三情景假设（V-3 scenario_fcff 消费）。"""
+    name: Literal["bear", "base", "bull"]
+    revenue_growth: float
+    margin_assumption: float
+    capex_intensity: float
+    probability: float = 1 / 3  # V-5 概率权重，默认均等
+
+
+@dataclass
+class ManagementTimelineEntry:
+    """管理层关键决策时间线条目（A-5 消费）。"""
+    date: str
+    event: str
+    category: Literal["capital_allocation", "capex", "buyback", "ma", "personnel"]
+    source: str
+    rating: int | None = None  # Claude report 阶段填充 1-5，None 表示未评级
+
+
+@dataclass
+class ScoringResult:
+    """scoring.py 各函数统一返回结构的类型标注（供 render.py 类型提示，非强制运行时校验）。"""
+    score: float | None
+    partial: bool
+    insufficient_data: list[str]
+    sources: list[str]
+    detail: dict[str, Any]
