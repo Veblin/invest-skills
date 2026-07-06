@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import statistics
+from datetime import date
 from typing import Any
 
 
@@ -676,3 +678,422 @@ def attach_dcf_preprocess(financials_legacy: dict) -> None:
     block = build_dcf_preprocess(financials_legacy)
     if block:
         financials_legacy["dcf_preprocess"] = block
+
+
+# ═══════════════════════════════════════════════════════════════
+# V-1~V-5: DCF 估值模型（v0.1.8 Step 3）
+#
+# 合规红线（AGENTS.md 约束1 / CLAUDE.md LAW 6）：
+#   - dcf_two_stage / dcf_sensitivity 只返回企业价值（enterprise_value）及矩阵，
+#     不做每股换算，不输出任何形式的"目标价"数字。每股价值换算与多情景区间呈现
+#     留给 render.py（Step 4）在调用处完成，且必须伴随情景假设说明。
+#   - scenario_fcff 的默认假设字段标注 assumption_type="rule_based_proxy"，
+#     即"规则代理，非分析师预测"，避免被误读为对未来的判断性预测。
+#   - triangle_check 的分歧提示只做数值比较陈述，不使用"低估/高估"等形容词。
+# ═══════════════════════════════════════════════════════════════
+
+
+def dcf_two_stage(
+    fcff_base: float,
+    growth_s1: float,
+    years: int,
+    wacc: float,
+    terminal_g: float,
+) -> dict:
+    """两阶段 FCFF DCF：显式预测期（growth_s1 恒定复合增速）+ 永续增长终值。
+
+    公式：
+        FCFF_t = fcff_base × (1 + growth_s1)^t，t = 1..years
+        PV(FCFF_t) = FCFF_t / (1 + wacc)^t
+        Terminal FCFF = FCFF_years × (1 + terminal_g)
+        Terminal Value = Terminal FCFF / (wacc - terminal_g)
+        Terminal PV = Terminal Value / (1 + wacc)^years
+        企业价值 = ΣPV(FCFF_t) + Terminal PV
+
+    Args:
+        fcff_base: 基期（最近一期）FCFF，元
+        growth_s1: 显式预测期恒定复合增速（小数，如 0.12 表示 12%）
+        years: 显式预测期年数（正整数，通常 5）
+        wacc: 加权平均资本成本（小数）
+        terminal_g: 永续增长率（小数），须严格小于 wacc
+
+    Returns:
+        正常路径: {"explicit_pv", "terminal_value", "terminal_pv",
+                   "enterprise_value", "yearly_fcff", "assumptions"}
+        非法参数: {"error": "..."}
+
+    合规: 只返回企业价值，不做每股价值换算（不输出目标价）。
+    """
+    if not isinstance(years, int) or years < 1:
+        return {"error": "years 必须为正整数"}
+    if wacc <= terminal_g:
+        return {"error": "WACC 必须大于永续增长率"}
+
+    yearly_fcff: list[dict[str, Any]] = []
+    explicit_pv = 0.0
+    fcff_final = fcff_base
+    for t in range(1, years + 1):
+        fcff_t = fcff_base * (1 + growth_s1) ** t
+        pv = fcff_t / (1 + wacc) ** t
+        explicit_pv += pv
+        yearly_fcff.append({"year": t, "fcff": round(fcff_t, 2), "pv": round(pv, 2)})
+        fcff_final = fcff_t
+
+    terminal_fcff = fcff_final * (1 + terminal_g)
+    terminal_value = terminal_fcff / (wacc - terminal_g)
+    terminal_pv = terminal_value / (1 + wacc) ** years
+    enterprise_value = explicit_pv + terminal_pv
+
+    return {
+        "explicit_pv": round(explicit_pv, 2),
+        "terminal_value": round(terminal_value, 2),
+        "terminal_pv": round(terminal_pv, 2),
+        "enterprise_value": round(enterprise_value, 2),
+        "yearly_fcff": yearly_fcff,
+        "assumptions": {
+            "fcff_base": fcff_base,
+            "growth_s1": growth_s1,
+            "years": years,
+            "wacc": wacc,
+            "terminal_g": terminal_g,
+        },
+    }
+
+
+def default_wacc_range(wacc_center: float) -> list[float]:
+    """生成以 wacc_center 为中心的 5 档 WACC 敏感性区间。
+
+    步长取 design.md 规定的 ±1%/±2%（绝对百分点，非相对比例）：
+    [wacc-2%, wacc-1%, wacc, wacc+1%, wacc+2%]
+    """
+    return [round(wacc_center + d, 6) for d in (-0.02, -0.01, 0.0, 0.01, 0.02)]
+
+
+def default_terminal_g_range(terminal_g_center: float) -> list[float]:
+    """生成以 terminal_g_center 为中心的 5 档永续增长率敏感性区间。
+
+    步长取 design.md 规定的 ±0.5%/±1%（绝对百分点）：
+    [g-1%, g-0.5%, g, g+0.5%, g+1%]
+    """
+    return [round(terminal_g_center + d, 6) for d in (-0.01, -0.005, 0.0, 0.005, 0.01)]
+
+
+def dcf_sensitivity(
+    fcff_base: float,
+    growth_s1: float,
+    years: int,
+    wacc_range: list[float],
+    terminal_g_range: list[float],
+) -> dict:
+    """WACC × 永续增长率敏感性矩阵，每格调用 dcf_two_stage。
+
+    默认区间生成规则（供调用方参考，见 default_wacc_range / default_terminal_g_range）：
+      - wacc_range: 以基准 WACC 为中心，±1%/±2% 共 5 档
+      - terminal_g_range: 以基准永续增长率为中心，±0.5%/±1% 共 5 档
+    本函数不强制区间长度为 5（调用方可传入任意长度的等值区间），矩阵形状为
+    len(wacc_range) × len(terminal_g_range)。
+
+    非法组合（wacc <= terminal_g）不报错、不中断，单元格标注 "N/A"，其余格子照常计算。
+
+    Returns:
+        {"matrix": [[...] x len(wacc_range)], "wacc_labels": [...],
+         "terminal_g_labels": [...], "note": "..."}
+        wacc_range/terminal_g_range 为空时返回 {"error": "..."}
+    """
+    if not wacc_range or not terminal_g_range:
+        return {"error": "wacc_range 与 terminal_g_range 均不能为空"}
+
+    matrix: list[list[Any]] = []
+    for wacc in wacc_range:
+        row: list[Any] = []
+        for terminal_g in terminal_g_range:
+            cell = dcf_two_stage(fcff_base, growth_s1, years, wacc, terminal_g)
+            row.append("N/A" if "error" in cell else cell["enterprise_value"])
+        matrix.append(row)
+
+    return {
+        "matrix": matrix,
+        "wacc_labels": [f"{w * 100:.2f}%" for w in wacc_range],
+        "terminal_g_labels": [f"{g * 100:.2f}%" for g in terminal_g_range],
+        "note": (
+            "矩阵单元为企业价值（enterprise_value），非每股价值，不换算为单一价格结论；"
+            "wacc<=terminal_g 的非法组合标注 N/A"
+        ),
+    }
+
+
+def _parse_end_date(raw: Any) -> date | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().replace("-", "")
+    if len(s) < 8 or not s[:8].isdigit():
+        return None
+    try:
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    except ValueError:
+        return None
+
+
+def _historical_revenue_cagr(rows: list[dict]) -> tuple[float | None, dict]:
+    """估算历史营收复合增长率（优先使用年报 1231 记录，覆盖窗口尽量接近 3 年）。
+
+    退化策略：
+      1. 优先取全部年报（end_date 以 1231 结尾）记录，取最早与最新一期年报计算跨期 CAGR。
+      2. 年报记录不足 2 期时，退回全部记录中最早与最新一期（可能为季报），按实际
+         跨越的自然年数（days/365.25）折算年化增长率，并在 meta 中标注真实跨度，
+         不假装是严格的"3年"CAGR。
+      3. 数据不足 2 期或跨度过短（<0.5 年）时返回 (None, meta)。
+    """
+    annual = sorted(
+        (
+            r
+            for r in rows
+            if str(r.get("end_date", "")).strip().endswith("1231")
+            and _as_float(r.get("revenue")) is not None
+        ),
+        key=lambda r: str(r.get("end_date", "")),
+    )
+    pool = annual if len(annual) >= 2 else [
+        r for r in rows if _as_float(r.get("revenue")) is not None
+    ]
+    if len(pool) < 2:
+        return None, {"note": "revenue 历史数据不足 2 期，无法计算 CAGR"}
+
+    first, last = pool[0], pool[-1]
+    rev_first = _as_float(first.get("revenue"))
+    rev_last = _as_float(last.get("revenue"))
+    d_first = _parse_end_date(first.get("end_date"))
+    d_last = _parse_end_date(last.get("end_date"))
+    if rev_first is None or rev_last is None or rev_first <= 0 or d_first is None or d_last is None:
+        return None, {"note": "revenue 或 end_date 无法解析，无法计算 CAGR"}
+
+    span_years = (d_last - d_first).days / 365.25
+    if span_years < 0.5:
+        return None, {"note": "时间跨度过短（<0.5年），无法计算年化增长率"}
+
+    cagr = (rev_last / rev_first) ** (1 / span_years) - 1
+    return cagr, {
+        "start_period": first.get("end_date"),
+        "end_period": last.get("end_date"),
+        "span_years": round(span_years, 2),
+        "cagr": round(cagr, 4),
+        "basis": "年报(1231)" if len(annual) >= 2 else "季报退化(跨度非精确3年)",
+        "note": f"基于 {first.get('end_date')}→{last.get('end_date')}（约 {span_years:.1f} 年）营收复合增长率",
+    }
+
+
+_SCENARIOS = ("bear", "base", "bull")
+_SCENARIO_GROWTH_MULTIPLIER = {"bear": 0.5, "base": 1.0, "bull": 1.5}
+_SCENARIO_MARGIN_DELTA_PP = {"bear": -3.0, "base": 0.0, "bull": 2.0}
+
+
+def scenario_fcff(
+    financials: dict,
+    scenario: str = "base",
+    probabilities: dict[str, float] | None = None,
+) -> dict:
+    """基于历史财务数据生成 Bear/Base/Bull 情景下的 5 年 FCFF 预测序列。
+
+    默认假设生成规则（无外部输入时的规则代理，非分析师预测）：
+      - base: 营收增速 = 历史营收 CAGR（见 _historical_revenue_cagr，优先取年报，
+        退化到可得的最早/最新两期折算年化）；毛利率 = 近 4 期 grossprofit_margin 均值；
+        capex 强度 = 历史全部可得期数 cap_ex/revenue 均值（三情景共用同一历史均值，
+        设计上不对 capex 强度做情景化调整——scope.md 仅对营收增速与毛利率做情景区分）
+      - bear: 营收增速 = base 营收增速 × 0.5；毛利率 = base 毛利率 - 3pp
+      - bull: 营收增速 = base 营收增速 × 1.5；毛利率 = base 毛利率 + 2pp
+
+    毛利率情景差（pp）同步施加到 EBIT 利润率上（EBIT margin 以最新一期 ebit/revenue
+    为基准，加上同等 pp 偏移），作为"利润率随经营杠杆同向变化"的保守简化——
+    未对毛利率与 EBIT 利润率的传导系数做进一步精细建模，[推测，待验证]。
+    折旧按营收同比例缩放（depr_t = depr_latest × revenue_t/revenue_latest），
+    ΔNWC 简化为 0（保守假设，未单独建模营运资本变化）。
+
+    已知局限：若历史营收 CAGR 本身为负，bear 情景（×0.5）产出的降幅小于 base，
+    数值上"更乐观"，这是规则代理公式的已知局限而非解读错误，返回值中会标注
+    `growth_sign_caveat` 字段提示调用方。
+
+    Args:
+        financials: financials 维度 legacy dict（含 "data" 或 "_meta.all_sources"，
+            与 extract_financial_rows 消费格式一致），也兼容直接传入 list[dict] 财报行。
+        scenario: "bear" | "base" | "bull"
+        probabilities: 三情景主观概率权重（V-5），如 {"bear":0.3,"base":0.4,"bull":0.3}；
+            未提供的情景键补齐为均等权重的默认值 1/3；不做归一化强制校验（调用方自行保证
+            概率合理性），仅按需分渲染标注"概率为主观假设，不构成估值结论"。
+
+    Returns:
+        正常: {"scenario", "assumption_type": "rule_based_proxy", "assumptions": {...},
+               "sources": [...], "growth_basis": {...}, "yearly_fcff": [...],
+               "probability": float}
+        数据不足: {"scenario", "assumption_type": "rule_based_proxy",
+                   "error": "数据不足，无法生成 FCFF 预测", "insufficient_data": [...]}
+    """
+    if scenario not in _SCENARIOS:
+        return {"error": f"未知情景: {scenario!r}，仅支持 {_SCENARIOS}"}
+
+    default_probs = {"bear": 1 / 3, "base": 1 / 3, "bull": 1 / 3}
+    probs = dict(default_probs)
+    if probabilities:
+        probs.update({k: v for k, v in probabilities.items() if k in default_probs})
+
+    if isinstance(financials, dict):
+        rows = extract_financial_rows(financials)
+    elif isinstance(financials, list):
+        rows = [r for r in financials if isinstance(r, dict)]
+    else:
+        rows = []
+    rows = sorted(
+        (r for r in rows if isinstance(r, dict) and r.get("end_date")),
+        key=lambda r: str(r.get("end_date", "")),
+    )
+
+    latest = _latest_financial_row(rows)
+    insufficient: list[str] = []
+
+    revenue_latest = _as_float(latest.get("revenue")) if latest else None
+    ebit_latest = _as_float(latest.get("ebit")) if latest else None
+    base_growth, growth_meta = _historical_revenue_cagr(rows)
+    margins = [
+        v for v in (_as_float(r.get("grossprofit_margin")) for r in rows[-4:])
+        if v is not None
+    ]
+    base_margin = statistics.mean(margins) if margins else None
+    intensities = []
+    for r in rows:
+        rev = _as_float(r.get("revenue"))
+        capex_raw = _as_float(r.get("cap_ex"))
+        if rev is not None and rev > 0 and capex_raw is not None:
+            intensities.append(abs(capex_raw) / rev)
+    base_capex_intensity = statistics.mean(intensities) if intensities else None
+
+    if latest is None:
+        insufficient.append("financials 无有效历史财报记录（end_date 缺失或格式不可解析）")
+    if revenue_latest is None:
+        insufficient.append("revenue（最新期）不可得")
+    if ebit_latest is None:
+        insufficient.append("ebit（最新期）不可得")
+    if base_growth is None:
+        insufficient.append(f"营收历史 CAGR 不可得（{growth_meta.get('note')}）")
+    if base_margin is None:
+        insufficient.append("grossprofit_margin（近4期均值）不可得")
+    if base_capex_intensity is None:
+        insufficient.append("cap_ex/revenue 历史强度不可得")
+
+    if insufficient:
+        return {
+            "scenario": scenario,
+            "assumption_type": "rule_based_proxy",
+            "error": "数据不足，无法生成 FCFF 预测",
+            "insufficient_data": insufficient,
+            "probability": round(probs.get(scenario, 1 / 3), 4),
+        }
+
+    tax_rate = _infer_tax_rate(latest)
+    depr_latest = _as_float(latest.get("depr_amort")) or 0.0
+    ebit_margin_latest = ebit_latest / revenue_latest if revenue_latest else 0.0
+
+    growth = base_growth * _SCENARIO_GROWTH_MULTIPLIER[scenario]
+    margin_delta_pp = _SCENARIO_MARGIN_DELTA_PP[scenario]
+    scenario_gross_margin = base_margin + margin_delta_pp
+    scenario_ebit_margin = max(0.0, ebit_margin_latest + margin_delta_pp / 100.0)
+
+    yearly_fcff: list[dict[str, Any]] = []
+    revenue_t = revenue_latest
+    for t in range(1, 6):
+        revenue_t = revenue_t * (1 + growth)
+        ebit_t = revenue_t * scenario_ebit_margin
+        capex_t = revenue_t * base_capex_intensity
+        depr_t = depr_latest * (revenue_t / revenue_latest) if revenue_latest else depr_latest
+        fcff_calc = calc_fcff(ebit=ebit_t, tax_rate=tax_rate, depr=depr_t, cap_ex=capex_t, delta_nwc=0)
+        yearly_fcff.append({
+            "year": t,
+            "revenue": round(revenue_t, 2),
+            "ebit": round(ebit_t, 2),
+            "fcff": fcff_calc["fcff"],
+        })
+
+    result: dict[str, Any] = {
+        "scenario": scenario,
+        "assumption_type": "rule_based_proxy",
+        "assumptions": {
+            "revenue_growth": round(growth, 4),
+            "base_revenue_growth_cagr": round(base_growth, 4),
+            "gross_margin_assumption": round(scenario_gross_margin, 2),
+            "base_gross_margin": round(base_margin, 2),
+            "ebit_margin_assumption": round(scenario_ebit_margin, 4),
+            "capex_intensity": round(base_capex_intensity, 4),
+            "tax_rate": round(tax_rate, 4),
+            "note": (
+                "默认假设，非分析师预测；由历史统计规则外推生成（规则代理），"
+                "不代表对公司未来经营的判断性预测"
+            ),
+        },
+        "sources": [
+            "revenue", "ebit", "grossprofit_margin", "cap_ex", "depr_amort",
+            "income_tax/total_profit（用于税率推断）",
+        ],
+        "growth_basis": growth_meta,
+        "yearly_fcff": yearly_fcff,
+        "probability": round(probs.get(scenario, 1 / 3), 4),
+    }
+    if base_growth < 0:
+        result["growth_sign_caveat"] = (
+            "历史营收 CAGR 为负，bear 情景（×0.5）降幅小于 base 情景，数值上呈现"
+            "'更乐观'的反直觉结果，属规则代理公式已知局限，非解读错误"
+        )
+    return result
+
+
+def triangle_check(
+    dcf_growth: float | None,
+    consensus_growth: float | None,
+    hist_growth: float | None,
+) -> dict:
+    """估值三角对照表：自算 DCF 隐含增速 / 机构一致预期增速 / 历史营收 CAGR。
+
+    任一输入为 None → 对应行标注"不可得"，不跳过整个函数（其余行照常输出）。
+    仅当三者都存在且 (max-min) > 3pp 时生成 divergence_note，措辞使用数值比较，
+    禁止"低估/高估"等形容词（CLAUDE.md 禁止词表）。
+
+    Args:
+        dcf_growth: 自算 DCF 隐含增速（小数，如 0.12），通常来自 scenario_fcff/
+            dcf_two_stage 反推的显式期复合增速
+        consensus_growth: 机构一致预期增速（小数），来自 research 维度
+        hist_growth: 历史营收 CAGR（小数），来自 financials 维度
+
+    Returns:
+        {"rows": [{"label", "value", "display", "source"}, ...],
+         "divergence_note": str | None}
+    """
+    specs = [
+        ("自算DCF隐含增速", dcf_growth, "valuation.dcf_two_stage / scenario_fcff 反推"),
+        ("机构一致预期增速", consensus_growth, "research 维度机构盈利预测"),
+        ("历史营收CAGR", hist_growth, "financials 维度历史财报数据"),
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for label, value, source in specs:
+        if value is None:
+            rows.append({"label": label, "value": None, "display": "不可得", "source": source})
+        else:
+            rows.append({
+                "label": label,
+                "value": round(value, 4),
+                "display": f"{value * 100:.1f}%",
+                "source": source,
+            })
+
+    divergence_note = None
+    values = [dcf_growth, consensus_growth, hist_growth]
+    if all(v is not None for v in values):
+        labeled = list(zip((s[0] for s in specs), values))
+        hi_label, hi_val = max(labeled, key=lambda x: x[1])
+        lo_label, lo_val = min(labeled, key=lambda x: x[1])
+        spread_pp = (hi_val - lo_val) * 100
+        if spread_pp > 3.0:
+            divergence_note = (
+                f"{hi_label}（{hi_val * 100:.1f}%）vs {lo_label}（{lo_val * 100:.1f}%），"
+                f"差值 {spread_pp:.1f}pp，三者对增长路径的定价假设存在数值差异，"
+                "具体解读需结合行业周期与订单可见度综合判断，仅供参考，不构成估值结论。"
+            )
+
+    return {"rows": rows, "divergence_note": divergence_note}
