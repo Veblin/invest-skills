@@ -5,6 +5,9 @@ Step 3 覆盖: valuation.py 4 个 DCF 函数（dcf_two_stage/dcf_sensitivity/
              scenario_fcff/triangle_check，正常路径 + 边界 + 数据不足路径）。
 Step 4 覆盖: render.py _section_dcf_valuation()（D-④/D-⑤/D-⑥ 渲染，
              正常路径 + WACC 数据不足路径 + veto_triggered 跳过路径）。
+Step 5 覆盖: render.py A-1 (_section_holder_changes 言行对照增强) /
+             A-2 (_section_ai_confidence_matrix) /
+             A-3 (_generate_custom_unknowns)。
 """
 
 from __future__ import annotations
@@ -611,4 +614,177 @@ class TestSectionDcfValuation:
         text = _section_dcf_valuation(dims, collection, "000001")
 
         assert "机构一致预期增速 | 不可得" in text
+        _check_no_forbidden_words(text)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Step 5: render.py A-1/A-2/A-3 分析深度增强模块测试
+# ═══════════════════════════════════════════════════════════════
+
+from lib.render import (  # noqa: E402
+    _generate_custom_unknowns,
+    _section_ai_confidence_matrix,
+    _section_holder_changes,
+    _section_risk_uncertainty,
+)
+
+
+class TestSectionHolderChangesInsiderAndCommitment:
+    """A-1: 信号聚合 + 言行对照。"""
+
+    def _holder_changes_data(self, records: list[dict]) -> dict:
+        return {"data": records}
+
+    def test_signal_aggregation_rendered(self):
+        records = [
+            {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+            {"ann_date": "20250201", "holder_name": "股东乙", "direction": "增持", "source": "akshare"},
+            {"ann_date": "20250301", "holder_name": "股东丙", "direction": "增持", "source": "tushare"},
+        ]
+        text = _section_holder_changes(self._holder_changes_data(records))
+        assert "### 信号聚合" in text
+        assert "强正向" in text
+        assert "lib.scoring.insider_signal" in text
+        assert "不构成任何投资建议或买卖指令" in text
+        _check_no_forbidden_words(text)
+
+    def test_commitment_events_matched_renders_timeline(self):
+        """存在承诺公告 + 存在同期减持记录 → 生成时间线对照表。"""
+        records = [
+            {
+                "ann_date": "20260301", "holder_name": "实控人甲", "direction": "减持",
+                "source": "tushare", "change_vol": 1000000, "change_ratio": 1.2,
+            },
+        ]
+        events = [
+            {"date": "2026-01-15", "title": "关于公司实际控制人不减持承诺的公告", "type": "announcement"},
+        ]
+        text = _section_holder_changes(self._holder_changes_data(records), events)
+        assert "### 言行对照" in text
+        assert "未检索到相关承诺公告" not in text
+        assert "承诺公告" in text
+        assert "减持记录" in text
+        assert "待独立验证" in text
+        _check_no_forbidden_words(text)
+
+    def test_no_commitment_events_marks_missing_explicitly(self):
+        """无匹配承诺公告 → 明确标注暂缺，不得编造。"""
+        records = [
+            {"ann_date": "20260301", "holder_name": "股东甲", "direction": "减持", "source": "tushare"},
+        ]
+        events = [
+            {"date": "2026-01-01", "title": "无关的股权激励公告", "type": "announcement"},
+        ]
+        text = _section_holder_changes(self._holder_changes_data(records), events)
+        assert "### 言行对照" in text
+        assert "未检索到相关承诺公告，言行对照暂缺。" in text
+        _check_no_forbidden_words(text)
+
+    def test_events_none_backward_compatible(self):
+        """events 参数缺省（None）时函数仍可正常渲染，向后兼容旧调用点。"""
+        records = [
+            {"ann_date": "20260301", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+        ]
+        text = _section_holder_changes(self._holder_changes_data(records))
+        assert "## 3d. 股东增减持动向" in text
+        assert "未检索到相关承诺公告，言行对照暂缺。" in text
+        _check_no_forbidden_words(text)
+
+
+class TestSectionAiConfidenceMatrix:
+    """A-2: AI 分析置信度矩阵渲染。"""
+
+    def _dim(self, status: str, multi_source: bool = False) -> dict:
+        return {"status": status, "_meta": {"multi_source": multi_source}}
+
+    def test_normal_rendering(self):
+        collection = {
+            "financials": self._dim("available", multi_source=True),
+            "holder_changes": self._dim("available"),
+            "research": self._dim("partial"),
+            "industry": self._dim("missing"),
+            "northbound": self._dim("available", multi_source=True),
+            "kline": self._dim("available"),
+        }
+        text = _section_ai_confidence_matrix(collection)
+        assert "## AI 分析置信度矩阵" in text
+        assert "财务数据分析" in text
+        assert "| 分析模块 | AI 置信度 | 原因 |" in text
+        _check_no_forbidden_words(text)
+
+    def test_valuation_and_cycle_flagged(self):
+        """估值判断/周期拐点判断须特别标注（⚠️ + 加粗），且不得显示为高置信度。"""
+        collection = {}
+        text = _section_ai_confidence_matrix(collection)
+        assert "⚠️ **估值判断**" in text
+        assert "⚠️ **周期拐点判断**" in text
+        assert "**中/低**" in text
+        assert "高 | 估值依赖" not in text
+        _check_no_forbidden_words(text)
+
+    def test_empty_collection_still_renders(self):
+        text = _section_ai_confidence_matrix({})
+        assert "## AI 分析置信度矩阵" in text
+        assert "低" in text
+
+
+class TestGenerateCustomUnknowns:
+    """A-3: 待验证问题清单定制化。"""
+
+    def _valuation_dim(self, pe_seq: list[float]) -> dict:
+        rows = [
+            {"trade_date": f"2024{str(i).zfill(4)}"[:8], "pe_ttm": pe, "pb": 3.0}
+            for i, pe in enumerate(pe_seq)
+        ]
+        return {"data": rows}
+
+    def test_semiconductor_industry_rule_hit(self):
+        dims = {
+            "basic_info": {"data": {"industry": "半导体设备"}},
+        }
+        result = _generate_custom_unknowns({}, dims)
+        assert any("国产化率" in q for q, _why in result)
+        assert all(isinstance(q, str) and isinstance(why, str) for q, why in result)
+
+    def test_high_pe_percentile_rule_hit(self):
+        pe_seq = [10.0 + i * 2 for i in range(50)]  # 单调递增，最新值为最大 → 高分位
+        dims = {
+            "valuation": self._valuation_dim(pe_seq),
+        }
+        result = _generate_custom_unknowns({}, dims)
+        assert any("当前估值隐含增速能否兑现" in q for q, _why in result)
+
+    def test_no_rule_hit_returns_empty(self):
+        """行业/估值/内部人字段均不可得或不触发规则 → 返回空列表，不编造问题。"""
+        dims = {
+            "basic_info": {"data": {"industry": "综合"}},
+        }
+        result = _generate_custom_unknowns({}, dims)
+        assert result == []
+
+    def test_insider_strong_negative_rule_hit(self):
+        holder_changes = {
+            "data": [
+                {"ann_date": "20260101", "holder_name": "股东甲", "direction": "减持", "source": "tushare"},
+                {"ann_date": "20260102", "holder_name": "股东乙", "direction": "减持", "source": "akshare"},
+                {"ann_date": "20260103", "holder_name": "股东丙", "direction": "减持", "source": "tushare"},
+            ],
+        }
+        dims = {
+            "basic_info": {"data": {"industry": "综合"}},
+            "holder_changes": holder_changes,
+        }
+        result = _generate_custom_unknowns({}, dims)
+        assert any("集中减持" in q for q, _why in result)
+        _check_no_forbidden_words(result)
+
+    def test_integrated_into_section_risk_uncertainty(self):
+        """§7 Known Unknowns 渲染时应附加定制化问题（若命中规则）。"""
+        dims = {
+            "basic_info": {"data": {"industry": "半导体设备"}},
+        }
+        risk_data = {"coverage": {"auto": 10}, "triggered_count": 0, "signals": [], "known_unknowns": []}
+        text = _section_risk_uncertainty({}, "000001", dims, {}, risk_data)
+        assert "Known Unknowns" in text
+        assert "国产化率" in text
         _check_no_forbidden_words(text)
