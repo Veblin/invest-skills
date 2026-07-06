@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import date
 from typing import Any
@@ -726,6 +727,18 @@ def dcf_two_stage(
     """
     if not isinstance(years, int) or years < 1:
         return {"error": "years 必须为正整数"}
+    numeric_inputs = {
+        "fcff_base": fcff_base,
+        "growth_s1": growth_s1,
+        "wacc": wacc,
+        "terminal_g": terminal_g,
+    }
+    invalid_numeric = [
+        name for name, value in numeric_inputs.items()
+        if not isinstance(value, (int, float)) or not math.isfinite(value)
+    ]
+    if invalid_numeric:
+        return {"error": f"参数必须为有限数值: {', '.join(invalid_numeric)}"}
     if wacc <= terminal_g:
         return {"error": "WACC 必须大于永续增长率"}
 
