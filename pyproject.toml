@@ -25,6 +25,9 @@ dev = [
 testpaths = ["skills/invest-A/tests"]
 python_files = ["test_*.py"]
 addopts = ["-q", "--tb=short"]
+markers = [
+    "e2e: live network collect/report smoke (requires INVEST_RUN_E2E=1)",
+]
 
 [tool.coverage.run]
 source = ["skills/invest-A/scripts"]

@@ -1,7 +1,5 @@
 # CLAUDE.md — invest-A 投研助手
 
-> 当前版本：v0.1.7 | 分支：feat/v0.1.7
-
 ## 版本规则
 
 - 最多三位：`v{major}.{minor}.{patch}`
@@ -11,14 +9,18 @@
 
 ### 版本号同步（统一修改）
 
-版本号涉及三个文件：`SKILL.md`（frontmatter）、`CLAUDE.md`（正文）、`pyproject.toml`（项目配置）。**禁止逐个手动修改**，请使用统一的 bump 脚本：
+**canonical 源**：`pyproject.toml` 的 `[project].version`（运行时经 `version.py` 读取）。
+
+**禁止手动改多处版本号**。发布时只运行 bump 脚本，由 `scripts/version_sync.py` 同步 5 个分发 manifest：
 
 ```bash
-# 全部三个文件同步更新
-bash scripts/bump-version.sh 0.1.7
+bash scripts/bump-version.sh X.Y.Z
+bash skills/invest-A/scripts/check-version.sh
 ```
 
-脚本会自动完成全部替换，并提示 git commit / tag 的下一步命令。运行后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
+运行 bump 后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
+
+版本一致性仅在发布/CI 时校验（`check-version.sh`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
 
 ## 运行命令
 
@@ -173,4 +175,4 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 ## 报告路径
 
 - 数据源扩展方案：`code/reports/A股数据源扩展研究报告_v0.1.3.md`
-- 个股报告：`code/reports/{symbol}-{name}-{date}.md`
+- 个股报告：`code/reports/{symbol}-{name}/{date}.md`

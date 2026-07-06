@@ -130,10 +130,11 @@ Tavily → Bocha → WebSearch（Claude 内置）
 
 ### 发布前检查清单
 
-- [ ] `skills/invest-A/SKILL.md` 为最新 canonical 版本（所有 LAWs、工作流、反模式完整）
-- [ ] `.claude-plugin/plugin.json` 版本号与 SKILL.md 一致
+- [ ] `skills/invest-A/SKILL.md` 为最新规格（所有 LAWs、工作流、反模式完整）
+- [ ] `bash scripts/bump-version.sh X.Y.Z` 已执行（禁止手动改多处版本号）
+- [ ] `bash skills/invest-A/scripts/check-version.sh` 通过
 - [ ] `.claude-plugin/marketplace.json` 描述准确
-- [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 版本同步
+- [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 描述同步
 - [ ] `gemini-extension.json` env vars 与 `.env.example` 一致
 - [ ] `CHANGELOG.md` 已更新
 - [ ] `uv run pytest` 通过
@@ -142,12 +143,17 @@ Tavily → Bocha → WebSearch（Claude 内置）
 
 ### 版本号规范
 
-- `SKILL.md` YAML frontmatter `version`
-- `.claude-plugin/plugin.json` `version`
-- `gemini-extension.json` `version`
-- `pyproject.toml` `version`
+**canonical**：`pyproject.toml` `[project].version`
 
-以上四处版本号必须一致。
+由 `bash scripts/bump-version.sh X.Y.Z` 同步的 5 个文件：
+
+- `pyproject.toml`
+- `skills/invest-A/SKILL.md`（frontmatter `version`）
+- `.claude-plugin/plugin.json`
+- `.claude-plugin/marketplace.json`（`plugins[0].version`）
+- `gemini-extension.json`
+
+校验：`bash skills/invest-A/scripts/check-version.sh`（CI / pre-commit 已接入）。
 
 ### 跨 Harness 兼容
 

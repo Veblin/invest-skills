@@ -165,6 +165,25 @@ def diagnose(config: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+# P3-2: WebSearch 白名单（涨价信号触发时使用）
+PRICE_NEWS_WHITELIST = [
+    "stcn.com",              # 证券时报
+    "cnstock.com",           # 上海证券报/中国证券网
+    "cs.com.cn",             # 中国证券报
+    "21jingji.com",          # 21世纪经济报道
+    "eeo.com.cn",            # 经济观察报
+    "finance.sina.com.cn",   # 新浪财经
+    "10jqka.com.cn",         # 同花顺
+    "cls.cn",                # 财联社
+]
+# ⚠️ 东方财富 (eastmoney.com) 因代理问题暂不列入
+
+# cninfo 高管增减持全市场接口超时（秒）；超时则跳过该方向
+CNINFO_HOLDER_TIMEOUT_SEC = max(
+    5, int(os.environ.get("INVEST_CNINFO_HOLDER_TIMEOUT", "45"))
+)
+
+
 def ensure_env_loaded() -> None:
     """将 .env 变量注入 os.environ（向后兼容）。"""
     for key, value in load_env_file(PROJECT_ENV_FILE).items():

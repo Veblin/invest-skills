@@ -82,7 +82,44 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
         cred_s = ", ".join(f"{k}={v:.0f}" for k, v in top)
         lines.append(f"**[证据可信度]** {cred_s}")
 
+    lines.extend(_render_enhancement_hints(collection))
+
     return lines
+
+
+def _render_enhancement_hints(collection: dict[str, Any]) -> list[str]:
+    """渲染 ReportEnhancer 触发的可操作建议。"""
+    enhancements = collection.get("_enhancements") or {}
+    if not enhancements:
+        return []
+
+    lines: list[str] = ["**[报告增强触发]**"]
+
+    price_ws = enhancements.get("price_shock_websearch")
+    if isinstance(price_ws, dict) and price_ws.get("triggered"):
+        from .env import PRICE_NEWS_WHITELIST
+        sites = " OR ".join(f"site:{d}" for d in PRICE_NEWS_WHITELIST[:4])
+        lines.append(f"- 涨价信号确认 → 建议 WebSearch 深搜（{sites} ...）")
+
+    val_alert = enhancements.get("valuation_high_alert")
+    if isinstance(val_alert, dict) and val_alert.get("triggered"):
+        lines.append("- PE 历史位置≥80% → 建议触发源 B 类增强（估值区间驱动）")
+
+    shock = enhancements.get("price_shock_detect")
+    if isinstance(shock, dict) and shock.get("has_shock"):
+        dates = shock.get("shock_dates") or []
+        shock_type = shock.get("shock_type") or "异常波动"
+        date_parts = []
+        for s in dates[:5]:
+            if s.get("date") is None:
+                continue
+            pct = _safe_num(s.get("pct_chg"))
+            pct_s = f"{pct:+.1f}%" if pct is not None else "—"
+            date_parts.append(f"{s.get('date')}({pct_s})")
+        date_s = ", ".join(date_parts)
+        lines.append(f"- 近 60 日价格异常（{shock_type}）: {date_s or '—'}")
+
+    return lines if len(lines) > 1 else []
 
 _EASTMONEY_BLOCKED_SHORT = "东方财富(East Money)主动拒绝连接"
 _RAW_CONNECTION_REFUSED_SHORT = "服务器拒绝连接"
@@ -1643,6 +1680,12 @@ def _section_snapshot(
     ))
     lines.append("")
     lines.append("🔍 **待独立验证:** 快照数字应与财报 PDF / 交易所行情交叉核对。")
+
+    futures_block = _render_pricing_futures_section(collection.get("industry_pricing", {}))
+    if futures_block:
+        lines.append("")
+        lines.append(futures_block)
+
     return "\n".join(lines)
 
 
@@ -1830,6 +1873,12 @@ def _section_dynamic_drivers(
     lines.append(f"→ **主导因子（声明）:** {dominant}")
     lines.append("")
     lines.append("🔍 **待独立验证:** 候选解释仅为假说列表，非因果归因。")
+
+    news_block = _render_pricing_news_section(collection.get("industry_pricing", {}))
+    if news_block:
+        lines.append("")
+        lines.append(news_block)
+
     return "\n".join(lines)
 
 
@@ -2162,6 +2211,198 @@ def _competitive_position_label(pct: float | None) -> str | None:
     if pct >= 40:
         return "挑战者"
     return "追赶者"
+
+
+def _section_holder_changes(data: dict) -> str:
+    """股东增减持动向（P0-2 holder_changes 渲染）。"""
+    if not data or not isinstance(data, dict):
+        return ""
+    records = data.get("data") or []
+    if not records or not isinstance(records, list) or len(records) == 0:
+        return ""
+
+    lines = ["## 3d. 股东增减持动向", ""]
+
+    # 近期重要变动表格
+    lines.append("### 近期重要变动（近 2 年）")
+    lines.append("")
+    lines.append("| 公告日期 | 股东名称 | 方向 | 变动数量(万) | 变动比例(%) | 均价 | 来源 | 交叉验证 |")
+    lines.append("|----------|---------|------|-------------|------------|------|------|---------|")
+    for r in records[:20]:
+        date = str(r.get("ann_date", ""))
+        if len(date) == 8:
+            date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+        name = str(r.get("holder_name", ""))[:16]
+        direction = str(r.get("direction", ""))
+        vol = r.get("change_vol")
+        vol_str = ""
+        if vol is not None:
+            v = _safe_num(vol)
+            if v is not None:
+                if abs(v) >= 10000:
+                    vol_str = f"{v / 10000:.0f}万"
+                else:
+                    vol_str = f"{v:.0f}"
+            else:
+                vol_str = str(r.get("change_vol_raw") or vol)[:12]
+        ratio = _safe_num(r.get("change_ratio"))
+        ratio_str = f"{ratio:.2f}" if ratio is not None else ""
+        price = _safe_num(r.get("avg_price"))
+        price_str = f"{price:.2f}" if price is not None else "—"
+        source = str(r.get("source", ""))
+        cc = r.get("cross_check", 1)
+        cc_str = f"{cc}源一致" if cc >= 2 else ""
+        lines.append(
+            f"| {date} | {name} | {direction} | {vol_str} | {ratio_str} | "
+            f"{price_str} | {source} | {cc_str} |"
+        )
+    lines.append("")
+
+    # 信号分析
+    lines.append("### 信号分析")
+    lines.append("")
+
+    # 净增/减持方向
+    buy_count = sum(1 for r in records if "增" in str(r.get("direction", "")))
+    sell_count = sum(1 for r in records if "减" in str(r.get("direction", "")))
+    lines.append(f"- **净增/减持方向**: 近 2 年 增持 {buy_count} 笔，减持 {sell_count} 笔")
+
+    # 关键主体（按出现次数排序）
+    from collections import Counter
+    name_counter = Counter(
+        str(r.get("holder_name", ""))[:12] for r in records
+    )
+    top_names = name_counter.most_common(3)
+    if top_names:
+        lines.append(f"- **关键主体**: {', '.join(f'{n}({c}次)' for n, c in top_names)}")
+
+    # 内部人一致性
+    if buy_count >= 3 and sell_count == 0:
+        lines.append("- **内部人一致性**: 多主体同向增持 → 信号增强")
+    elif sell_count >= 3 and buy_count == 0:
+        lines.append("- **内部人一致性**: 多主体同向减持 → 信号增强（负面）")
+    else:
+        lines.append("- **内部人一致性**: 增减持方向分歧，信号混杂")
+
+    return "\n".join(lines)
+
+
+def _industry_pricing_parts(data: dict) -> tuple[dict, list]:
+    """解析 industry_pricing legacy dict → (inner, all_sources)。"""
+    if not data or not isinstance(data, dict):
+        return {}, []
+    inner = data.get("data") or {}
+    if not isinstance(inner, dict):
+        return {}, []
+    all_srcs = data.get("_meta", {}).get("all_sources", [])
+    return inner, all_srcs
+
+
+def _render_pricing_futures_section(data: dict) -> str:
+    """模块 1：原材料成本速览（期货现货）。"""
+    inner, all_srcs = _industry_pricing_parts(data)
+    if not inner:
+        return ""
+
+    has_futures = inner.get("has_futures", False)
+    lines: list[str] = []
+
+    if has_futures:
+        lines.append("### 原材料成本速览")
+        lines.append("")
+        futures_data: dict = {}
+        for src in all_srcs:
+            if src.get("source") == "akshare.futures_spot_price" and src.get("data"):
+                futures_data = src.get("data") or {}
+                break
+        if not futures_data:
+            for k, v in inner.items():
+                if isinstance(v, dict) and "code" in v:
+                    futures_data[k] = v
+
+        if futures_data:
+            lines.append("| 品种 | 代码 | 现货价 | 主力合约 | 主力基差率 | 近30日趋势 |")
+            lines.append("|------|------|--------|---------|-----------|-----------|")
+            for name, info in futures_data.items():
+                if not isinstance(info, dict):
+                    continue
+                code = info.get("code", "")
+                spot_n = _safe_num(info.get("spot_price"))
+                spot_s = f"{spot_n:,.0f}" if spot_n is not None else "—"
+                dom_n = _safe_num(info.get("dom_price"))
+                dom_s = f"{dom_n:,.0f}" if dom_n is not None else "—"
+                basis_n = _safe_num(info.get("dom_basis_rate"))
+                basis_s = f"{basis_n:.2f}%" if basis_n is not None else "—"
+                trend = info.get("trend_30d", "—")
+                lines.append(f"| {name} | {code} | {spot_s} | {dom_s} | {basis_s} | {trend} |")
+            lines.append("")
+
+    industry = inner.get("industry", "")
+    note = f"> 行业: {industry} | 数据来源: akshare 期货现货" if industry else ""
+    if not has_futures:
+        note = (note + " | ⚠️ 该行业无期货映射，仅靠新闻源") if note else \
+            "> ⚠️ 该行业无期货映射，仅靠新闻源"
+    if note:
+        lines.append(note)
+
+    return "\n".join(lines) if lines else ""
+
+
+def _render_pricing_news_section(data: dict) -> str:
+    """模块 2：涨价信号（公司新闻）。"""
+    inner, all_srcs = _industry_pricing_parts(data)
+    if not inner:
+        return ""
+
+    news_data: dict = {}
+    for src in all_srcs:
+        if src.get("source") == "akshare.stock_news_em" and src.get("data"):
+            news_data = src.get("data") or {}
+            break
+
+    if not news_data:
+        return ""
+
+    signal = news_data.get("signal", "无")
+    detail = news_data.get("signal_detail", "")
+    lines = [
+        "### 涨价信号",
+        "",
+        f"**状态: {'涨价趋势确认' if signal == '确认' else '单条涨价新闻' if signal == '单条' else '无涨价信号'}**（{detail}）",
+        "",
+    ]
+
+    matches = news_data.get("matches") or []
+    if matches:
+        lines.append("| 日期 | 标题 |")
+        lines.append("|------|------|")
+        for m in matches[:10]:
+            date = str(m.get("date", ""))[:10]
+            title = str(m.get("title", ""))[:50]
+            lines.append(f"| {date} | {title} |")
+        lines.append("")
+        lines.append("> 🔍 待验证: WebSearch 深搜确认涨价幅度和持续性")
+
+    return "\n".join(lines)
+
+
+def _section_industry_pricing(data: dict) -> str:
+    """行业产品定价追踪（兼容旧调用；新报告已拆分至模块 1/2）。"""
+    futures = _render_pricing_futures_section(data)
+    news = _render_pricing_news_section(data)
+    if not futures and not news:
+        return ""
+    parts = []
+    if futures or news:
+        parts.append("## 3e. 行业产品定价追踪")
+        parts.append("")
+    if futures:
+        parts.append(futures)
+    if news:
+        if futures:
+            parts.append("")
+        parts.append(news)
+    return "\n".join(parts)
 
 
 def _v3_trigger_c_active(market_structure: dict) -> bool:
@@ -4641,10 +4882,93 @@ def _section_core_tension(
     return "\n".join(lines)
 
 
+# ═══════════════════════════════════════════════════════════════
+# P3-1: ReportEnhancer 触发器统一
+# ═══════════════════════════════════════════════════════════════
+
+
+class ReportEnhancer:
+    """Report 阶段增强触发器统一管理。
+
+    所有增强逻辑通过 register / apply 机制调用，
+    避免在 render_report_v3() 中散落 if-else。
+    """
+
+    def __init__(self, data: dict):
+        self.data = data
+        self._enhancers: list[tuple[str, callable, callable]] = []
+
+    def register(self, name: str, condition, enhancer_fn):
+        """注册增强器：条件满足时自动调用。"""
+        self._enhancers.append((name, condition, enhancer_fn))
+
+    def apply(self) -> dict:
+        """执行所有满足条件的增强器，返回增强结果。"""
+        results = {}
+        for name, condition, fn in self._enhancers:
+            try:
+                if condition(self.data):
+                    results[name] = fn(self.data)
+            except Exception as e:
+                results[name] = {"error": str(e)}
+        return results
+
+
+def _has_price_signal(data: dict) -> bool:
+    """检查是否触发涨价信号。"""
+    ip = data.get("industry_pricing")
+    if not isinstance(ip, dict):
+        return False
+    for src in ip.get("_meta", {}).get("all_sources", []):
+        if not isinstance(src, dict):
+            continue
+        nd = src.get("data")
+        if isinstance(nd, dict) and nd.get("signal") == "确认":
+            return True
+    return False
+
+
+def _is_valuation_extreme(data: dict, percentile: float = 80) -> bool:
+    """检查估值分位是否超过阈值（从 dimensions 读取，与报告其他模块一致）。"""
+    dims = _index_dims(data)
+    pe_pct, _, _ = _v3_valuation_percentiles(dims, {})
+    return pe_pct is not None and pe_pct >= percentile
+
+
+def setup_default_enhancers(data: dict) -> ReportEnhancer:
+    """配置默认增强器集合。"""
+    enhancer = ReportEnhancer(data)
+
+    enhancer.register(
+        "price_shock_websearch",
+        _has_price_signal,
+        lambda d: {"triggered": True, "reason": "涨价信号确认，建议 WebSearch 深搜"},
+    )
+
+    enhancer.register(
+        "valuation_high_alert",
+        lambda d: _is_valuation_extreme(d, percentile=80),
+        lambda d: {"triggered": True, "reason": "PE 历史位置≥80%，建议 B 类增强"},
+    )
+
+    enhancer.register(
+        "price_shock_detect",
+        lambda d: bool((d.get("price_shock") or {}).get("has_shock")),
+        lambda d: d.get("price_shock"),
+    )
+
+    return enhancer
+
+
 def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full") -> str:
     """v0.1.3 九模块研究备忘录。mode="brief" 仅输出精简简报。"""
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
+
+    # P3-1: 统一增强触发器
+    enhancer = setup_default_enhancers(collection)
+    collection["_enhancements"] = enhancer.apply()
+
     val_cache: dict = {}
     risk_data = _v3_build_risk_report(
         collection, dims, market_structure, val_cache=val_cache,
@@ -4664,6 +4988,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_dynamic_drivers(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
             ),
+            _section_holder_changes(dims.get("holder_changes", {})),
             _section_bull_bear(
                 collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
             ),
@@ -4692,6 +5017,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 collection, symbol, market_structure, val_cache=val_cache,
             ),
             _section_events_timeline(collection),
+            _section_holder_changes(dims.get("holder_changes", {})),
             _section_research_summary(collection, symbol, dims),
             _wrap_details(
                 "展开：静态基本面（12题）",

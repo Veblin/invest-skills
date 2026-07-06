@@ -212,14 +212,14 @@ rules:
     pattern: "^\\d{6}-[^-]+-\\d{4}-?\\d{2}-?\\d{2}\\.md$"
     severity: "info"
     scope: "filename"
-    message: "推荐文件名格式：{symbol}-{name}-{date}.md（如 600176-中国巨石-2026-06-24.md）"
+    message: "推荐路径格式：{symbol}-{name}/{date}.md（如 600176-中国巨石/2026-06-24.md）"
     law_ref: "报告路径 — 个股报告命名规范"
 
   - id: "filename-format-date-symbol"
     pattern: "^\\d{4}-\\d{2}-\\d{2}(-\\d{2}-\\d{2}-\\d{2})?-\\d{6}(-[^-]+)*\\.md$"
     severity: "info"
     scope: "filename"
-    message: "文件名使用日期前缀格式（旧格式，推荐使用 {symbol}-{name}-{date}.md）"
+    message: "文件名使用日期前缀格式（旧格式，推荐使用 {symbol}-{name}/{date}.md）"
     law_ref: "报告路径 — 个股报告命名规范"
 
   # ==========================================================================
