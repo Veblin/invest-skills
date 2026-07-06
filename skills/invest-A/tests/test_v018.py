@@ -32,14 +32,24 @@ from lib.valuation import (
     triangle_check,
 )
 
-FORBIDDEN_WORDS = ("买入", "卖出", "建仓", "目标价", "极度高估", "极度低估", "崩盘")
+FORBIDDEN_WORDS = ("买入", "卖出", "建仓", "极度高估", "极度低估", "崩盘")
+# 2026-07-06 LAW 6 更新：允许免责声明中出现"目标价预测""不构成...目标价"等合法措辞，
+# 仅禁止不标注假设的单一目标价数字（如"目标价 500 元"）。
+# 改用 _check_bare_target_price() 替代简单的关键词匹配。
+FORBIDDEN_TARGET_PRICE_RE = r"目标价\s*[:：]?\s*\d+"
 
 
 def _check_no_forbidden_words(obj) -> None:
-    """递归检查 dict/list/str 中不含合规禁用词。"""
+    """递归检查 dict/list/str 中不含合规禁用词。
+    2026-07-06 LAW 6 更新：目标价改用正则仅禁止"目标价+数字"，
+    免责声明"不构成...目标价预测"为合法措辞。
+    """
+    import re as _re
     if isinstance(obj, str):
         for w in FORBIDDEN_WORDS:
             assert w not in obj, f"发现禁用词 {w!r}: {obj!r}"
+        if _re.search(FORBIDDEN_TARGET_PRICE_RE, obj):
+            assert False, f"发现不标注假设的单一目标价数字: {obj!r}"
     elif isinstance(obj, dict):
         for v in obj.values():
             _check_no_forbidden_words(v)
@@ -360,6 +370,18 @@ class TestDcfTwoStage:
         result = dcf_two_stage(fcff_base=100.0, growth_s1=0.10, years=0, wacc=0.09, terminal_g=0.03)
         assert "error" in result
 
+    def test_nan_input_rejected(self):
+        result = dcf_two_stage(
+            fcff_base=100.0, growth_s1=0.10, years=5, wacc=float("nan"), terminal_g=0.03,
+        )
+        assert result == {"error": "参数必须为有限数值: wacc"}
+
+    def test_inf_input_rejected(self):
+        result = dcf_two_stage(
+            fcff_base=100.0, growth_s1=float("inf"), years=5, wacc=0.09, terminal_g=0.03,
+        )
+        assert result == {"error": "参数必须为有限数值: growth_s1"}
+
     def test_enterprise_value_increases_with_lower_wacc(self):
         higher_wacc = dcf_two_stage(fcff_base=100.0, growth_s1=0.08, years=5, wacc=0.11, terminal_g=0.03)
         lower_wacc = dcf_two_stage(fcff_base=100.0, growth_s1=0.08, years=5, wacc=0.09, terminal_g=0.03)
@@ -396,6 +418,15 @@ class TestDcfSensitivity:
     def test_empty_range_returns_error(self):
         result = dcf_sensitivity(fcff_base=100.0, growth_s1=0.1, years=5, wacc_range=[], terminal_g_range=[0.03])
         assert "error" in result
+
+
+class TestTargetPriceRegex:
+    def test_colon_form_is_rejected(self):
+        with pytest.raises(AssertionError):
+            _check_no_forbidden_words("目标价：500元")
+
+    def test_disclaimer_text_is_allowed(self):
+        _check_no_forbidden_words("仅供参考，不构成投资建议，也不构成目标价预测。")
 
 
 class TestScenarioFcff:
@@ -619,6 +650,16 @@ class TestSectionDcfValuation:
         assert "机构一致预期增速 | 不可得" in text
         _check_no_forbidden_words(text)
 
+    def test_triangle_reuses_base_revenue_cagr_without_recompute(self):
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=1.1),
+            "research": _make_research_dim(),
+        }
+        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        with patch("lib.render._compute_metric_cagr", side_effect=AssertionError("should not call")):
+            text = _section_dcf_valuation(dims, collection, "000001")
+        assert "历史营收CAGR" in text
+
 
 # ═══════════════════════════════════════════════════════════════
 # Step 5: render.py A-1/A-2/A-3 分析深度增强模块测试
@@ -756,6 +797,7 @@ class TestGenerateCustomUnknowns:
         }
         result = _generate_custom_unknowns({}, dims)
         assert any("当前估值隐含增速能否兑现" in q for q, _why in result)
+        assert all("历史分位" not in q and "历史分位" not in why for q, why in result)
 
     def test_no_rule_hit_returns_empty(self):
         """行业/估值/内部人字段均不可得或不触发规则 → 返回空列表，不编造问题。"""
@@ -1033,6 +1075,14 @@ class TestSectionComprehensionStatement:
         assert "我以" not in text and "买入" not in text
         _check_no_forbidden_words(text)
 
+    def test_uses_history_position_wording_outside_module_one(self):
+        dims = {
+            "financials": {"data": _make_canvas_financials(6), "status": "available"},
+            "basic_info": {"data": {"industry": "半导体设备"}},
+        }
+        text = _section_comprehension_statement(dims, {}, {})
+        assert "历史分位" not in text
+
 
 class TestCheckFastVeto:
     """F-3: 快速否决 8 条中可量化子集。"""
@@ -1041,7 +1091,7 @@ class TestCheckFastVeto:
         fin_list = _make_canvas_financials(6)
         dims = {"financials": {"data": fin_list, "status": "available"}}
         result = _check_fast_veto(dims, {})
-        assert result == []
+        assert result == {"hard_triggers": [], "soft_triggers": [], "display_lines": []}
 
     def test_negative_ocf_streak_triggers(self):
         rows = []
@@ -1054,32 +1104,40 @@ class TestCheckFastVeto:
             })
         dims = {"financials": {"data": rows, "status": "available"}}
         result = _check_fast_veto(dims, {})
-        assert any("经营性现金流为负" in r for r in result)
-        for r in result:
+        assert any("经营性现金流为负" in r for r in result["soft_triggers"])
+        for r in result["display_lines"]:
             assert "不买" not in r and "应回避" not in r and "⚠️" in r
 
-    def test_negative_net_profit_streak_no_improvement_triggers(self):
+    def test_low_roe_streak_is_soft_trigger(self):
         rows = []
-        for i, np_v in enumerate([-10.0, -12.0, -15.0]):
+        for i, roe_v in enumerate([4.2, 3.8, 2.6]):
             rows.append({
                 "end_date": f"2025{['0331', '0630', '0930'][i]}",
-                "net_profit": np_v,
+                "roe": roe_v,
                 "revenue": 100.0,
             })
         dims = {"financials": {"data": rows, "status": "available"}}
         result = _check_fast_veto(dims, {})
-        assert any("净利润为负且未见好转" in r for r in result)
+        assert any("ROE 连续低于 5%" in r for r in result["soft_triggers"])
 
     def test_high_debt_ratio_triggers(self):
-        rows = [{
-            "end_date": "20251231",
-            "total_liab": 95.0,
-            "total_assets": 100.0,
-            "revenue": 100.0,
-        }]
+        rows = [
+            {
+                "end_date": "20240930",
+                "total_liab": 93.0,
+                "total_assets": 100.0,
+                "revenue": 100.0,
+            },
+            {
+                "end_date": "20251231",
+                "total_liab": 95.0,
+                "total_assets": 100.0,
+                "revenue": 100.0,
+            },
+        ]
         dims = {"financials": {"data": rows, "status": "available"}}
         result = _check_fast_veto(dims, {})
-        assert any("资产负债率" in r for r in result)
+        assert any("资产负债率" in r for r in result["hard_triggers"])
 
     def test_fcff_cumulative_negative_triggers(self):
         rows = []
@@ -1091,11 +1149,13 @@ class TestCheckFastVeto:
             })
         dims = {"financials": {"data": rows, "status": "available"}}
         result = _check_fast_veto(dims, {})
-        assert any("FCFF 累计为负" in r for r in result)
+        assert any("FCFF 累计为负" in r for r in result["hard_triggers"])
 
     def test_empty_financials_returns_empty_list(self):
-        assert _check_fast_veto({}, {}) == []
-        assert _check_fast_veto({"financials": {}}, {}) == []
+        assert _check_fast_veto({}, {}) == {"hard_triggers": [], "soft_triggers": [], "display_lines": []}
+        assert _check_fast_veto({"financials": {}}, {}) == {
+            "hard_triggers": [], "soft_triggers": [], "display_lines": [],
+        }
 
     def test_falls_back_to_collection_financials(self):
         """dims 中无 financials 时，退化读取 collection["financials"]。"""
@@ -1105,7 +1165,19 @@ class TestCheckFastVeto:
             "total_assets": 100.0,
         }]
         result = _check_fast_veto({}, {"financials": {"data": rows}})
-        assert any("资产负债率" in r for r in result)
+        assert any("资产负债率" in r for r in result["hard_triggers"])
+
+    def test_goodwill_ratio_hard_trigger_when_balancesheet_available(self):
+        dims = {
+            "financials": {"data": _make_canvas_financials(6), "status": "available"},
+            "balancesheet": {"data": [{
+                "end_date": "20251231",
+                "goodwill": 60.0,
+                "total_hldr_eqy_inc_min_int": 100.0,
+            }]},
+        }
+        result = _check_fast_veto(dims, {})
+        assert any("商誉/净资产" in r for r in result["hard_triggers"])
 
 
 class TestSectionSixGatesScorecard:
@@ -1148,6 +1220,11 @@ class TestSectionSixGatesScorecard:
         text = _section_six_gates_scorecard(self._dims(), {}, {})
         assert "置信度中等" in text
 
+    def test_valuation_gate_uses_history_position_wording(self):
+        text = _section_six_gates_scorecard(self._dims(), {}, {})
+        assert "历史位置" in text
+        assert "历史分位" not in text
+
 
 class TestSectionBiasSelfCheck:
     """F-5: 偏误自查表骨架。"""
@@ -1186,3 +1263,174 @@ class TestSectionCrossValidationTable:
         dims = {"financials": {"data": [], "_meta": {}}}
         assert _section_cross_validation_table(dims) == ""
         assert _section_cross_validation_table({}) == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+# F-2/F-3 补充测试：_section_bull_bear 空方补齐 + 快速否决联动 D 段
+# ═══════════════════════════════════════════════════════════════
+
+from unittest.mock import patch  # noqa: E402
+
+from lib.render import _section_bull_bear, render_report_v3  # noqa: E402
+
+_CONVERGENCE_WORDS = (
+    "综合来看应该", "整体判断应该", "结论是应该", "总体偏多", "总体偏空",
+    "建议买入", "建议卖出", "应回避", "不建议",
+)
+
+
+def _bb_financials(*, roe: float, ocf_ratio: float, net_profit: float = 1.2e8) -> list[dict]:
+    """构造一份满足 _section_bull_bear 所需字段的最小财务序列。"""
+    ocf = net_profit * ocf_ratio
+    return [
+        {"end_date": "20230331", "roe": roe - 1, "net_profit": net_profit * 0.9,
+         "n_cashflow_act": ocf * 0.9, "revenue": 3.0e9},
+        {"end_date": "20230630", "roe": roe, "net_profit": net_profit,
+         "n_cashflow_act": ocf, "revenue": 3.2e9},
+    ]
+
+
+class TestSectionBullBearPadding:
+    """F-2: bear_chains 补齐逻辑 + 禁止收敛性/动作性措辞。"""
+
+    def test_bear_chains_padded_when_bull_heavy(self):
+        """多头信号多、空头信号少时，通用空方模板应补齐至 bull-1，且不伪造数据不足论点。"""
+        dims = {
+            "financials": {"data": _bb_financials(roe=20.0, ocf_ratio=0.9)},
+            "valuation": {"data": []},
+        }
+        market_structure = {
+            "sw_index": {},
+            "northbound": {"net_sum_10d": 600_000_000},
+            "moneyflow": {},
+            "erp": {},
+        }
+        collection = {
+            "industry_peers": {"sufficient": False},
+        }
+        risk_data = {
+            "signals": [
+                {"id": "valuation_extreme_low", "triggered": True, "severity": "参考",
+                 "detail": "估值处于极端低位", "category": "market"},
+            ]
+        }
+        with patch("lib.render._v3_valuation_percentiles", return_value=(50.0, 50.0, "中性区")):
+            text = _section_bull_bear(
+                collection, "600176", dims, market_structure, risk_data, val_cache=None,
+            )
+        bull_count = text.count("#### 多头逻辑 ")
+        bear_count = text.count("#### 空头逻辑 ")
+        assert bull_count >= 3
+        assert "数据可得性限制" in text or bear_count >= bull_count - 1
+        assert "数据不足，暂缺同行竞争格局对照" not in text
+
+    def test_shortfall_note_when_no_data_supports_more_bear_chains(self):
+        """若确无数据支撑更多空头论据，应输出数据可得性限制说明，而非硬凑条目。"""
+        dims = {
+            "financials": {"data": _bb_financials(roe=20.0, ocf_ratio=0.9)},
+            "valuation": {"data": []},
+        }
+        market_structure = {
+            "sw_index": {},
+            "northbound": {"net_sum_10d": 600_000_000},
+            "moneyflow": {},
+            "erp": {},
+        }
+        collection = {
+            "industry_peers": {
+                "sufficient": True,
+                "rankings": {"roe_pct": 80.0, "revenue_yoy_pct": 80.0},
+            },
+        }
+        risk_data = {"signals": []}
+        # pe_pct < 30 触发多头估值偏低链，同时使估值补齐模板因"避免自相矛盾"而跳过
+        with patch("lib.render._v3_valuation_percentiles", return_value=(15.0, 15.0, "偏低区")):
+            text = _section_bull_bear(
+                collection, "600176", dims, market_structure, risk_data, val_cache=None,
+            )
+        bull_count = text.count("#### 多头逻辑 ")
+        bear_count = text.count("#### 空头逻辑 ")
+        if bear_count < bull_count - 1:
+            assert "数据可得性限制" in text
+        else:
+            assert bear_count >= bull_count - 1
+
+    def test_no_convergent_or_action_wording(self):
+        """硬性合规：不得出现收敛为单一方向的结论句或买卖动作词。"""
+        dims = {
+            "financials": {"data": _bb_financials(roe=20.0, ocf_ratio=0.9)},
+            "valuation": {"data": []},
+        }
+        market_structure = {
+            "sw_index": {"stock_vs_industry_pct": 3.0},
+            "northbound": {"net_sum_10d": 600_000_000},
+            "moneyflow": {},
+            "erp": {"percentile_5y": 75.0},
+        }
+        collection = {
+            "industry_peers": {"sufficient": False},
+        }
+        risk_data = {
+            "signals": [
+                {"id": "valuation_extreme_low", "triggered": True, "severity": "参考",
+                 "detail": "估值处于极端低位", "category": "market"},
+                {"id": "cashflow_negative", "name": "现金流恶化", "triggered": True,
+                 "severity": "高", "category": "financial", "detail": "经营现金流连续为负"},
+            ]
+        }
+        with patch("lib.render._v3_valuation_percentiles", return_value=(50.0, 50.0, "中性区")):
+            text = _section_bull_bear(
+                collection, "600176", dims, market_structure, risk_data, val_cache=None,
+            )
+        for word in _CONVERGENCE_WORDS:
+            assert word not in text, f"模块 5 输出中发现收敛性/动作性措辞 {word!r}"
+        _check_no_forbidden_words(text)
+
+
+class TestFastVetoDcfLinkage:
+    """F-3: 快速否决触发时 D 段应跳过 DCF 数值，并展示触发条目。"""
+
+    def _collection_with_hard_veto(self):
+        from test_v013_phase3 import _collection_phase3
+
+        c = _collection_phase3()
+        for dim in c["dimensions"]:
+            if dim["dimension"] == "financials":
+                rows = list(dim["data"])
+                # 强制近 3 期 FCFF 为负，触发硬否决
+                rows[-3] = {**rows[-3], "fcff": -1.0e7}
+                rows[-2] = {**rows[-2], "fcff": -2.0e7}
+                rows[-1] = {**rows[-1], "fcff": -3.0e7}
+                dim["data"] = rows
+        return c
+
+    def test_veto_triggered_skips_dcf_and_shows_trigger_detail(self):
+        collection = self._collection_with_hard_veto()
+        text = render_report_v3(collection, "600176", mode="full")
+
+        assert "研究终止条件触发，估值段落已跳过" in text
+        # D 段不应再包含具体 DCF 数值区块标题
+        assert "D-④ DCF 三情景估值区间" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
+        # 触发条目应可见，且是量化陈述（复用 _check_fast_veto 的 ⚠️ 格式）
+        assert "快速否决检测（F-3）" in text
+        assert "⚠️" in text
+        assert "FCFF 累计为负" in text
+        _check_no_forbidden_words(text)
+
+    def test_soft_trigger_keeps_dcf_section(self):
+        from test_v013_phase3 import _collection_phase3
+
+        collection = _collection_phase3()
+        for dim in collection["dimensions"]:
+            if dim["dimension"] == "financials":
+                rows = list(dim["data"])
+                rows[-3] = {**rows[-3], "roe": 4.0}
+                rows[-2] = {**rows[-2], "roe": 3.0}
+                rows[-1] = {**rows[-1], "roe": 2.0}
+                dim["data"] = rows
+        text = render_report_v3(collection, "600176", mode="full")
+        assert "快速否决检测（F-3）" in text
+        assert "研究终止条件触发，估值段落已跳过" not in text
+        assert "D-④ DCF 三情景估值区间" in text

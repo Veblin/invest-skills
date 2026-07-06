@@ -2346,10 +2346,10 @@ def _section_comprehension_statement(
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
     val_desc = None
     if pe_pct is not None:
-        val_desc = f"PE 历史分位 {pe_pct:.1f}%（{pe_zone or '—'}）"
+        val_desc = f"PE 历史位置 {pe_pct:.1f}%（{pe_zone or '—'}）"
         if pb_pct is not None:
-            val_desc += f"，PB 历史分位 {pb_pct:.1f}%"
-        val_desc += " [来源: valuation 维度]"
+            val_desc += f"，PB 历史位置 {pb_pct:.1f}%"
+        val_desc += " [来源: valuation 历史位置]"
 
     dcf_desc = None
     if fin_dim:
@@ -2364,16 +2364,16 @@ def _section_comprehension_statement(
             )
     if val_desc or dcf_desc:
         lines.append(
-            "4. 当前估值相当于历史/同行"
+            "4. 当前估值处于"
             + (val_desc or "___")
-            + "位置，DCF 隐含假设是"
+            + "，DCF 隐含假设是"
             + (dcf_desc or "___")
             + "。"
         )
     else:
         lines.append(
             "4. 当前估值相当于历史/同行___位置，DCF 隐含假设是___。"
-            "[Claude report 阶段填充——估值历史分位与 DCF 情景假设均不可得]"
+            "[Claude report 阶段填充——估值历史位置与 DCF 情景假设均不可得]"
         )
 
     # 5. 最大的不确定性 + 下一观察节点（无法自动推断，固定占位）
@@ -2386,34 +2386,48 @@ def _section_comprehension_statement(
     return "\n".join(lines)
 
 
-def _check_fast_veto(dims: dict, collection: dict) -> list[str]:
-    """F-3: 快速否决 8 条中可自动量化检测的子集，返回触发条目列表（可为空）。
+def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
+    """F-3: 快速否决自动化子集，返回硬触发/软触发及展示文本。
 
-    来源: 借鉴报告 §3.3/§8.2。可自动化的 4 项（其余条目由 Claude 在 report 阶段基于
-    定性证据判断，见 SKILL.md 说明）：
-      1. 近 5 年（或可得年数）FCF 累计为负（financials.fcff，退化到经营现金流）
-      2. 连续 3 期经营性现金流为负
-      3. 连续 3 期净利润为负且未见好转迹象
-      4. 资产负债率 >90%（total_liab/total_assets）
+    规则分层：
+      - hard_triggers: 触发后 DCF 段跳过
+      - soft_triggers: 仅展示预警，不跳过 DCF
 
-    合规（AGENTS.md 约束1）：触发条目仅用 ⚠️ 陈述量化事实，不使用"不买"/"应回避"等动作词。
+    当前自动化覆盖：
+      1. FCF/OCF 累计为负（硬触发，FCFF 缺失时退化为 OCF 代理）
+      2. 连续 3 期经营性现金流为负（软触发）
+      3. 资产负债率 >90% 且未见改善（硬触发）
+      4. 近 3 期 ROE 连续 <5%（软触发）
+      5. 商誉/净资产 >50%（硬触发；字段可得时才检查）
+
+    合规：仅陈述量化事实，不使用动作词。
     """
-    triggered: list[str] = []
+    result = {
+        "hard_triggers": [],
+        "soft_triggers": [],
+        "display_lines": [],
+    }
 
     fin_dim = (dims or {}).get("financials") or (collection or {}).get("financials") or {}
     fin_list = fin_dim.get("data") if isinstance(fin_dim, dict) else None
     if not isinstance(fin_list, list) or not fin_list:
-        return triggered
+        return result
 
     from lib.technical import sort_kline_asc
     rows = sort_kline_asc(fin_list)
+
+    def _append(level: str, line: str) -> None:
+        result[level].append(line)
+        tag = "硬触发" if level == "hard_triggers" else "软触发"
+        result["display_lines"].append(f"- {tag}: {line}")
 
     # 1. FCF 累计为负（优先 fcff，字段不可得时退化为经营现金流）
     fcff_vals = [v for v in (_fin_field_num(r, "fcff") for r in rows) if v is not None]
     if len(fcff_vals) >= 3:
         total = sum(fcff_vals)
         if total < 0:
-            triggered.append(
+            _append(
+                "hard_triggers",
                 f"⚠️ 近 {len(fcff_vals)} 期可得 FCFF 累计为负（合计 {total:.2f}）"
                 "[来源: financials.fcff]"
             )
@@ -2422,7 +2436,8 @@ def _check_fast_veto(dims: dict, collection: dict) -> list[str]:
             v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in rows) if v is not None
         ]
         if len(ocf_vals) >= 3 and sum(ocf_vals) < 0:
-            triggered.append(
+            _append(
+                "hard_triggers",
                 f"⚠️ FCFF 字段不可得，退化以经营现金流近 {len(ocf_vals)} 期累计为负"
                 f"（合计 {sum(ocf_vals):.2f}）代理观察[来源: financials.n_cashflow_act]"
             )
@@ -2432,34 +2447,66 @@ def _check_fast_veto(dims: dict, collection: dict) -> list[str]:
     if len(ocf_series) >= 3:
         last3 = ocf_series[-3:]
         if all(v < 0 for v in last3):
-            triggered.append(
+            _append(
+                "soft_triggers",
                 f"⚠️ 连续 3 期经营性现金流为负（{', '.join(f'{v:.2f}' for v in last3)}）"
                 "[来源: financials.n_cashflow_act]"
             )
 
-    # 3. 连续 3 期净利润为负且未见好转迹象
-    np_series = [v for v in (_fin_field_num(r, "net_profit") for r in rows) if v is not None]
-    if len(np_series) >= 3:
-        last3 = np_series[-3:]
-        if all(v < 0 for v in last3) and last3[-1] <= last3[0]:
-            triggered.append(
-                f"⚠️ 连续 3 期净利润为负且未见好转迹象（{', '.join(f'{v:.2f}' for v in last3)}）"
-                "[来源: financials.net_profit]"
-            )
-
-    # 4. 资产负债率 >90%
+    # 3. 资产负债率 >90% 且未见改善
+    debt_ratios = []
+    for row in rows:
+        total_liab = _fin_field_num(row, "total_liab")
+        total_assets = _fin_field_num(row, "total_assets")
+        if total_liab is not None and total_assets:
+            debt_ratios.append(total_liab / total_assets * 100)
     latest = rows[-1]
     total_liab = _fin_field_num(latest, "total_liab")
     total_assets = _fin_field_num(latest, "total_assets")
     if total_liab is not None and total_assets:
         ratio = total_liab / total_assets * 100
-        if ratio > 90:
-            triggered.append(
-                f"⚠️ 最新报告期资产负债率 {ratio:.1f}%（>90%）"
-                "[来源: financials.total_liab/total_assets]"
+        prev_ratio = debt_ratios[-2] if len(debt_ratios) >= 2 else None
+        if ratio > 90 and (prev_ratio is None or ratio >= prev_ratio):
+            detail = f"⚠️ 最新报告期资产负债率 {ratio:.1f}%（>90%）"
+            if prev_ratio is not None:
+                detail += f"，前一期 {prev_ratio:.1f}%"
+            detail += "[来源: financials.total_liab/total_assets]"
+            _append(
+                "hard_triggers",
+                detail,
             )
 
-    return triggered
+    # 4. 近 3 期 ROE 连续 <5%
+    roe_series = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
+    if len(roe_series) >= 3:
+        last3 = roe_series[-3:]
+        if all(v < 5 for v in last3):
+            _append(
+                "soft_triggers",
+                f"⚠️ 近 3 期 ROE 连续低于 5%（{', '.join(f'{v:.2f}%' for v in last3)}）"
+                "[来源: financials.roe]"
+            )
+
+    # 5. 商誉/净资产 >50%（字段可得时检查）
+    bs_dim = (dims or {}).get("balancesheet") or (collection or {}).get("balancesheet") or {}
+    bs_list = bs_dim.get("data") if isinstance(bs_dim, dict) else None
+    if isinstance(bs_list, list) and bs_list:
+        bs_rows = sort_kline_asc(bs_list)
+        bs_latest = bs_rows[-1]
+        goodwill = _fin_field_num(bs_latest, "goodwill", "good_will")
+        total_equity = _fin_field_num(
+            bs_latest, "total_equity", "total_hldr_eqy_inc_min_int", "total_hldr_eqy_exc_min_int",
+        )
+        if goodwill is not None and total_equity and total_equity > 0:
+            ratio = goodwill / total_equity * 100
+            if ratio > 50:
+                _append(
+                    "hard_triggers",
+                    f"⚠️ 最新报告期商誉/净资产为 {ratio:.1f}%（>50%）"
+                    "[来源: balancesheet.goodwill/total_equity]"
+                )
+
+    return result
 
 
 def _six_gate_row(name: str, score: float | None, label: str, note: str) -> str:
@@ -2519,13 +2566,13 @@ def _section_six_gates_scorecard(
     margin_detail = (rq.get("detail") or {}).get("margin_stability") or {}
     fin_score = avg(ocf_detail.get("score"), margin_detail.get("score"))
 
-    # 估值：复用 PE/PB 历史分位（呈现位置，非贵贱判断，不与"强弱"混用）
+    # 估值：复用 PE/PB 历史位置（呈现位置，非贵贱判断，不与"强弱"混用）
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
     if pe_pct is not None:
-        val_desc = f"PE 历史分位 {pe_pct:.1f}%（{pe_zone or '—'}）"
+        val_desc = f"PE 历史位置 {pe_pct:.1f}%（{pe_zone or '—'}）"
         if pb_pct is not None:
-            val_desc += f"，PB 历史分位 {pb_pct:.1f}%"
-        val_desc += " [来源: valuation 历史分位]"
+            val_desc += f"，PB 历史位置 {pb_pct:.1f}%"
+        val_desc += " [来源: valuation 历史位置]"
         if pe_pct >= 70:
             val_grade = "历史高位"
         elif pe_pct <= 30:
@@ -2533,7 +2580,7 @@ def _section_six_gates_scorecard(
         else:
             val_grade = "历史中位"
     else:
-        val_desc, val_grade = "PE/PB 历史分位不可得", "数据不足"
+        val_desc, val_grade = "PE/PB 历史位置不可得", "数据不足"
 
     # 风险：复用 risk_data 触发数量
     risk_data = _v3_build_risk_report(collection, dims, market_structure, val_cache=val_cache)
@@ -5116,8 +5163,11 @@ def _section_dcf_valuation(
     if fin_raw and isinstance(fin_raw, list):
         from lib.technical import sort_kline_asc
         fin_list = sort_kline_asc(fin_raw)
-    hist_cagr_pct, _ = _compute_metric_cagr(fin_list, "revenue")
-    hist_growth = hist_cagr_pct / 100.0 if hist_cagr_pct is not None else None
+    base_assumptions = scenario_results["base"].get("assumptions", {})
+    hist_growth = base_assumptions.get("base_revenue_growth_cagr")
+    if hist_growth is None:
+        hist_cagr_pct, _ = _compute_metric_cagr(fin_list, "revenue")
+        hist_growth = hist_cagr_pct / 100.0 if hist_cagr_pct is not None else None
 
     research_dim = dims.get("research", {})
     research_summary = research_dim.get("research_summary") or {}
@@ -5557,6 +5607,77 @@ def _section_bull_bear(
         }
         bear_chains.append(chain)
 
+    # ── bear chain padding (F-2): 若空头论据显著少于多头，用可复用数据构建 ──
+    # 通用空方模板补齐差额；模板本身也可能因数据不足被跳过，绝不为凑数量编造
+    # 无依据的论点（AGENTS.md 约束 3）。
+    _bear_titles = {c["title"] for c in bear_chains}
+
+    def _try_add_valuation_neutral_bear() -> bool:
+        if "估值偏高 — 均值回归风险" in _bear_titles:
+            return False  # 已存在对称的估值偏高链，无需重复
+        if pe_pct is None or pe_pct < ZONE_LOW_THRESHOLD:
+            return False  # PE 分位本身处于低位，构造"估值不低"论点将自相矛盾
+        chain = {
+            "title": "估值未处于低位 — 修复安全边际有限",
+            "assumption": (
+                f"当前 PE 处于历史 {pe_zone or '中性偏高区'}（{pe_pct:.1f}% 分位），"
+                f"并非历史低位，估值端不具备低估安全边际。"
+            ),
+            "transmission": (
+                "估值分位不低 → 市场已给予该标的中性以上定价 → "
+                "若基本面出现边际走弱或不及预期 → 估值缺乏低位缓冲，"
+                "股价对负面消息的敏感度更高。"
+            ),
+            "numbers": [f"- 当前 PE 分位: {pe_pct:.1f}%（{pe_zone or '中性偏高区'}）[来源: valuation 维度]"],
+            "strength": "❓ 弱",
+        }
+        bear_chains.append(chain)
+        _bear_titles.add(chain["title"])
+        return True
+
+    def _try_add_industry_competition_bear() -> bool:
+        title = "行业竞争格局变化"
+        if title in _bear_titles:
+            return False
+        if not industry_peers.get("sufficient"):
+            return False
+        items = []
+        if roe_rank_pct is not None and roe_rank_pct < 50:
+            items.append(f"ROE 同行分位 {roe_rank_pct:.1f}%（低于同行中位）")
+        if rev_yoy_pct is not None and rev_yoy_pct < 50:
+            items.append(f"营收增速同行分位 {rev_yoy_pct:.1f}%（低于同行中位）")
+        if not items:
+            return False  # 同行数据显示公司相对占优，不构造矛盾论点
+        chain = {
+            "title": title,
+            "assumption": (
+                f"同行对比数据显示：{'；'.join(items)}，公司在行业内的相对位置并不领先"
+                f" [来源: industry_peers 维度]。"
+            ),
+            "transmission": (
+                "同行排名靠后 → 议价能力/抗风险能力相对偏弱 → "
+                "若行业竞争加剧或格局生变，公司份额或毛利率可能率先承压 → "
+                "盈利能见度下降，市场可能下调估值倍数。"
+            ),
+            "numbers": [f"- {it}" for it in items],
+            "strength": "⚠️ 中",
+        }
+        bear_chains.append(chain)
+        _bear_titles.add(title)
+        return True
+
+    for _pad_tpl in (_try_add_valuation_neutral_bear, _try_add_industry_competition_bear):
+        if len(bear_chains) >= len(bull_chains) - 1:
+            break
+        _pad_tpl()
+
+    _bear_shortfall_note = ""
+    if len(bear_chains) < len(bull_chains) - 1:
+        _bear_shortfall_note = (
+            "⚠️ 当前数据支持的空头论据数量少于多头，这是数据可得性限制导致的结构性不对称，"
+            "并非模型对该标的方向性看多的结论；补充空头论据所需的同行/估值数据暂不可得。"
+        )
+
     # ── 5a. Bull chain: 假设→传导→数字 ────────────────────────────
     lines.append("### 5a. 多头逻辑链")
     if bull_chains:
@@ -5669,6 +5790,9 @@ def _section_bull_bear(
                 )
             )
     lines.append("")
+    if _bear_shortfall_note:
+        lines.append(_bear_shortfall_note)
+        lines.append("")
     lines.append("🔍 **待独立验证:** 逻辑链为数据驱动的叙事框架，非方向判断；预期差须与财报 PDF 交叉核对。")
     return "\n".join(lines)
 
@@ -5693,7 +5817,7 @@ _INDUSTRY_CUSTOM_UNKNOWN_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
 
 
 def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[tuple[str, str]]:
-    """v0.1.8 A-3: 根据标的行业/估值分位/内部人行为特征生成定制化待验证问题。
+    """v0.1.8 A-3: 根据标的行业/估值历史位置/内部人行为特征生成定制化待验证问题。
 
     返回 `(问题, 为什么重要)` 元组列表；规则命中的数据字段不可得时跳过该规则，
     不编造问题所需的数据支撑（AGENTS.md 约束 3）。
@@ -5713,7 +5837,7 @@ def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[t
                 result.append((question, why))
                 break  # 仅取首个匹配的行业规则，避免同类问题堆叠
 
-    # 规则 2: PE 历史分位极端值
+    # 规则 2: PE 历史位置极端值
     try:
         pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, None)
     except Exception:
@@ -5721,17 +5845,17 @@ def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[t
     if pe_pct is not None:
         if pe_pct > 90:
             result.append((
-                f"当前估值隐含增速能否兑现：PE 历史分位已达 {pe_pct:.1f}%（>90%），"
+                f"当前估值隐含增速能否兑现：PE 历史位置已达 {pe_pct:.1f}%（>90%），"
                 "市场定价隐含的增长预期是否有具体订单/产能落地依据支撑？",
-                "高分位估值对增长不及预期的敏感度更高，需要独立验证市场隐含增速的合理性，"
-                "而非仅依赖历史分位数字本身下结论。",
+                "历史高位定价对增长不及预期的敏感度更高，需要独立验证市场隐含增速的合理性，"
+                "而非仅依赖历史位置数字本身下结论。",
             ))
         elif pe_pct < 10:
             result.append((
-                f"低估值分位是否反映真实基本面恶化：PE 历史分位仅 {pe_pct:.1f}%（<10%），"
+                f"低估值历史位置是否反映真实基本面恶化：PE 历史位置仅 {pe_pct:.1f}%（<10%），"
                 "是短期情绪压制还是盈利模式已发生结构性变化？",
-                "极低分位可能对应周期底部或基本面持续恶化两种截然不同的情形，"
-                "仅靠估值分位无法区分，需结合订单/现金流等一手信息独立核实。",
+                "极低历史位置可能对应周期底部或基本面持续恶化两种截然不同的情形，"
+                "仅靠估值位置无法区分，需结合订单/现金流等一手信息独立核实。",
             ))
 
     # 规则 3: 内部人一致性信号极端值
@@ -6448,6 +6572,8 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _risk_footer(),
         ])
     else:
+        # F-3: 快速否决检测需在 D 段之前算出，供 veto_triggered 联动 + 展示触发条目
+        _fast_veto = _check_fast_veto(dims, collection)
         parts: list[str] = [
             _header_v2(collection, symbol),
         ]
@@ -6472,7 +6598,12 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 "展开：静态基本面（12题）",
                 _section_static_fundamentals(dims, collection, val_cache=val_cache),
             ),
-            _section_dcf_valuation(dims, collection, symbol),
+            "\n".join(
+                ["### 快速否决检测（F-3）", ""] + _fast_veto["display_lines"]
+            ) if _fast_veto["display_lines"] else "",
+            _section_dcf_valuation(
+                dims, collection, symbol, veto_triggered=bool(_fast_veto["hard_triggers"]),
+            ),
             _section_core_tension(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
             ),
