@@ -7,10 +7,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT:-${extensionPath:-.}}/hooks/scripts/check-config.sh\""
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT:-${extensionPath:-.}}/skills/invest-A/scripts/check-version.sh\" || true"
           }
         ]
       }

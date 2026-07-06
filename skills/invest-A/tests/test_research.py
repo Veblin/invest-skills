@@ -230,9 +230,22 @@ class TestDefaultDims:
 
         assert "research" not in _DEFAULT_DIMS
 
+    def test_default_dims_include_holder_changes(self):
+        from lib.collector import _DEFAULT_DIMS
+
+        assert "holder_changes" in _DEFAULT_DIMS
+
     def test_invest_parser_default_dims(self):
         from invest import build_parser
 
         parser = build_parser()
         collect_args = parser.parse_args(["collect", "600176"])
         assert "research" not in collect_args.dims
+        assert "holder_changes" in collect_args.dims
+
+    def test_synthesize_parser_default_dims(self):
+        from invest import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["synthesize", "600176"])
+        assert "holder_changes" in args.dims

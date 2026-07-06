@@ -167,7 +167,7 @@ pyproject.toml              ← uv 依赖
 ```bash
 uv sync && uv run pytest
 uv run python skills/invest-A/scripts/invest.py diagnose
-bash skills/invest-A/scripts/check-version.sh   # 版本四件套一致性
+bash skills/invest-A/scripts/check-version.sh   # 分发 manifest（5 文件）版本一致性
 ```
 
 提交前确保测试通过，无 API Key 泄露。

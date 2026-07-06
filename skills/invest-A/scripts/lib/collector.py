@@ -242,7 +242,7 @@ def _q_tushare_basic(symbol: str) -> dict | None:
 def _merge_cashflow_into_financials(
     financials: list[dict], cashflow: list[dict],
 ) -> list[dict]:
-    """按 end_date 合并经营现金流，供 CV-1 交叉验证。"""
+    """按 end_date 合并现金流字段（OCF/CapEx），供 DCF/CV-1。"""
     cf_by_date = {str(r.get("end_date", "")): r for r in cashflow}
     out: list[dict] = []
     for row in financials:
@@ -253,6 +253,48 @@ def _merge_cashflow_into_financials(
             if ncf is not None:
                 merged["n_cashflow_act"] = ncf
                 merged["ocf"] = ncf
+            # P0-1: c_pay_acq_const_fiolta → cap_ex（Tushare 实测仅此 Capex 字段可用）
+            capex = cf.get("c_pay_acq_const_fiolta")
+            if capex is not None:
+                merged["cap_ex"] = capex
+        out.append(merged)
+    return out
+
+
+def _merge_income_into_financials(
+    financials: list[dict], income: list[dict],
+) -> list[dict]:
+    """按 end_date 合并利润表明细（EBIT/EBITDA/费用/税金），供 DCF 估值。"""
+    inc_by_date = {str(r.get("end_date", "")): r for r in income}
+    _income_passthrough = (
+        "ebit", "ebitda", "fin_exp", "income_tax",
+        "sell_exp", "admin_exp", "invest_income",
+        "total_profit", "n_income_attr_p",
+    )
+    out: list[dict] = []
+    for row in financials:
+        merged = dict(row)
+        inc = inc_by_date.get(str(row.get("end_date", "")))
+        if inc:
+            for key in _income_passthrough:
+                val = inc.get(key)
+                if val is not None:
+                    merged[key] = val
+            # 别名映射（与计划一致）
+            tax = inc.get("income_tax")
+            if tax is not None:
+                merged["tax"] = tax
+            sell = inc.get("sell_exp")
+            if sell is not None:
+                merged["selling_exp"] = sell
+            # 推导折旧摊销（EBITDA - EBIT，Tushare 无单独 depr/amort 字段）
+            ebit_v = inc.get("ebit")
+            ebitda_v = inc.get("ebitda")
+            if ebit_v is not None and ebitda_v is not None:
+                try:
+                    merged["depr_amort"] = float(ebitda_v) - float(ebit_v)
+                except (TypeError, ValueError):
+                    pass
         out.append(merged)
     return out
 
@@ -260,8 +302,12 @@ def _merge_cashflow_into_financials(
 def _merge_balancesheet_into_financials(
     financials: list[dict], balancesheet: list[dict],
 ) -> list[dict]:
-    """按 end_date 合并应收/存货，供 CV-2 交叉验证。"""
+    """按 end_date 合并资产负债表字段（应收/存货/负债/权益/现金），供 DCF/CV-2。"""
     bs_by_date = {str(r.get("end_date", "")): r for r in balancesheet}
+    _bs_passthrough = (
+        "total_liab", "total_hldr_eqy_inc_min_int", "money_cap",
+        "total_cur_assets", "total_cur_liab", "total_assets",
+    )
     out: list[dict] = []
     for row in financials:
         merged = dict(row)
@@ -277,6 +323,15 @@ def _merge_balancesheet_into_financials(
                 inv = bs.get("inventory")
             if inv is not None:
                 merged["inventory"] = inv
+            # P0-1: 透传 DCF 所需资产负债表字段
+            for key in _bs_passthrough:
+                val = bs.get(key)
+                if val is not None:
+                    merged[key] = val
+            # total_hldr_eqy_inc_min_int 别名 total_equity（与计划一致）
+            eqy = bs.get("total_hldr_eqy_inc_min_int")
+            if eqy is not None:
+                merged["total_equity"] = eqy
         out.append(merged)
     return out
 
@@ -295,7 +350,7 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
         fields=(
             "ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit,"
             "grossprofit_margin,netprofit_margin,assets_turn,eqt_to_debt,"
-            "debt_to_assets"
+            "debt_to_assets,ebit,ebitda,fcff,fcfe"
         ),
         start_date=lookback, end_date=end,
     )
@@ -311,15 +366,37 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
             if da is not None and 0 <= da <= 100:
                 # Tushare debt_to_assets 为百分比（0-100），如 0.8 表示 0.8%
                 rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
+    # P0-1: income 查询 — 补齐 DCF 所需费用/利润明细字段
+    inc_df = tc.query("income", ts_code=ts,
+                      fields=(
+                          "ts_code,end_date,ebit,ebitda,fin_exp,income_tax,"
+                          "sell_exp,admin_exp,invest_income,"
+                          "total_profit,n_income_attr_p"
+                      ),
+                      start_date=lookback, end_date=end)
+    if inc_df is not None and not inc_df.empty:
+        records = _merge_income_into_financials(records, inc_df.to_dict("records"))
+    elif inc_df is None or inc_df.empty:
+        logger.warning("Tushare income query returned empty for %s; ebit/ebitda/fin_exp fields will be missing from records", ts)
+    # P0-1: cashflow 扩字段 — 补齐 DCF 所需 CapEx（Tushare 此表无 depr/amort，由 fina_indicator 的 ebitda-ebit 推导）
     cf_df = tc.query("cashflow", ts_code=ts,
-                     fields="ts_code,end_date,n_cashflow_act",
+                     fields=(
+                         "ts_code,end_date,n_cashflow_act,"
+                         "c_pay_acq_const_fiolta"
+                     ),
                      start_date=lookback, end_date=end)
     if cf_df is not None and not cf_df.empty:
         records = _merge_cashflow_into_financials(records, cf_df.to_dict("records"))
     elif cf_df is None or cf_df.empty:
         logger.warning("Tushare cashflow query returned empty for %s; n_cashflow_act field will be missing from records", ts)
+    # P0-1: balancesheet 扩字段 — 补齐 DCF 所需负债/权益/现金字段
     bs_df = tc.query("balancesheet", ts_code=ts,
-                     fields="ts_code,end_date,accounts_rece,inventories",
+                     fields=(
+                         "ts_code,end_date,accounts_rece,inventories,"
+                         "total_liab,total_hldr_eqy_inc_min_int,"
+                         "money_cap,total_cur_assets,total_cur_liab,"
+                         "total_assets"
+                     ),
                      start_date=lookback, end_date=end)
     if bs_df is not None and not bs_df.empty:
         records = _merge_balancesheet_into_financials(records, bs_df.to_dict("records"))
@@ -1000,7 +1077,13 @@ def collect_financials(symbol: str) -> dict:
     })
 
     dim = DimensionResult("financials", results)
-    return dim.to_legacy_dict()
+    legacy = dim.to_legacy_dict()
+    try:
+        from .valuation import attach_dcf_preprocess
+        attach_dcf_preprocess(legacy)
+    except Exception as exc:
+        logger.warning("dcf_preprocess failed for %s: %s", symbol, exc)
+    return legacy
 
 
 def collect_shareholders(symbol: str) -> dict:
@@ -1626,6 +1709,548 @@ def collect_industry(symbol: str) -> dict:
     return dim_dict
 
 
+# ---- 股东增减持采集（P0-2 holder_changes） ----
+
+_HOLDER_SOURCE_RANK: dict[str, int] = {
+    "tushare.stk_holdertrade": 0,
+    "akshare.stock_hold_management_detail_cninfo": 1,
+    "akshare.stock_shareholder_change_ths": 2,
+}
+
+
+def _first_dict_value(row: dict, *keys: str):
+    """取 dict 中第一个非 None 值（保留 0，避免 `or` 误判）。"""
+    for k in keys:
+        if k in row and row[k] is not None:
+            return row[k]
+    return None
+
+
+def _infer_holder_direction(
+    row: dict,
+    change_vol_raw,
+    parsed_vol: float | None = None,
+) -> str:
+    """推断增减持方向：变动类型列 > 文本关键词 > 数量符号。"""
+    for key in ("变动类型", "方向", "变动方向"):
+        typ = str(row.get(key) or "")
+        if "增持" in typ:
+            return "增持"
+        if "减持" in typ:
+            return "减持"
+    raw_s = str(change_vol_raw or "")
+    if "增持" in raw_s:
+        return "增持"
+    if "减持" in raw_s:
+        return "减持"
+    vol = parsed_vol if parsed_vol is not None else _parse_holder_change_vol(change_vol_raw)
+    if vol is not None:
+        if vol > 0:
+            return "增持"
+        if vol < 0:
+            return "减持"
+    return "未知"
+
+
+def _source_has_data(data) -> bool:
+    """源结果是否含有效数据（空列表不算）。"""
+    if data is None:
+        return False
+    if isinstance(data, list):
+        return len(data) > 0
+    return bool(data)
+
+
+def _parse_holder_change_vol(raw) -> float | None:
+    """解析 '增持58.11万' / 5901992.0 → 统一为股数（float）。"""
+    import re
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        f = float(raw)
+        if f != f:  # NaN
+            return None
+        return f
+    s = str(raw).strip().replace(",", "")
+    m = re.search(r"([\d.]+)\s*(万|亿)?", s)
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2) or ""
+    if unit == "万":
+        val *= 10000
+    elif unit == "亿":
+        val *= 1e8
+    return val
+
+
+def _holder_vol_key(raw) -> str:
+    """变动数量归一化 key（万股精度，供跨源匹配）。"""
+    v = _parse_holder_change_vol(raw)
+    if v is None:
+        return str(raw or "")
+    return f"{round(v / 10000, 2)}"
+
+
+def _normalize_holder_name(name: str) -> str:
+    """股东名称归一化（仅用于 transaction key，不修改展示字段）。"""
+    s = str(name or "").strip()
+    for suffix in ("股份有限公司", "有限公司"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)].strip()
+            break
+    return s
+
+
+def _holder_transaction_key(r: dict) -> tuple:
+    return (
+        _normalize_holder_name(str(r.get("holder_name", ""))),
+        str(r.get("ann_date", ""))[:10],
+        str(r.get("direction", "")),
+        _holder_vol_key(r.get("change_vol")),
+    )
+
+
+def _norm_date(raw: str) -> str:
+    """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。"""
+    import re
+    raw = str(raw).strip()
+    # 已为 YYYYMMDD
+    if re.match(r'^\d{8}$', raw):
+        return raw
+    # YYYY-MM-DD 或 YYYY.MM.DD
+    m = re.search(r'(\d{4})[-./](\d{1,2})[-./](\d{1,2})', raw)
+    if m:
+        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    # 区间格式 "2015.07.23-2015.07.23" → search 已取首段
+    return raw[:8] if len(raw) >= 8 and raw[:8].isdigit() else raw
+
+
+def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
+    """Tushare stk_holdertrade — 股东增减持（主源）。"""
+    from . import env as _env
+    config = _env.get_config()
+    if not _env.is_tushare_available(config):
+        raise RuntimeError("TUSHARE_TOKEN not configured")
+    tc = _tushare_client(config)
+    ts = _ts_code(symbol)
+    df = tc.query(
+        "stk_holdertrade", ts_code=ts,
+        start_date=_days_ago(730), end_date=_today(),
+        fields="ts_code,ann_date,holder_name,holder_type,in_de,"
+               "change_vol,change_ratio,avg_price,after_share,after_ratio",
+    )
+    if df is None or df.empty:
+        return None
+    records = df.to_dict("records")
+    for rec in records:
+        rec["direction"] = "增持" if rec.get("in_de") == "IN" else "减持"
+        rec["source"] = "Tushare stk_holdertrade"
+    return records
+
+
+def _run_with_timeout(fn: Callable[[], Any], timeout_sec: float, label: str) -> Any:
+    """在独立线程中执行阻塞调用，超时则返回 None（用于 cninfo 全市场扫描）。"""
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_sec)
+        except FuturesTimeoutError:
+            logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+            return None
+        except Exception as exc:
+            logger.warning("%s failed: %s", label, exc)
+            return None
+
+
+def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
+    """akshare stock_hold_management_detail_cninfo — 高管增减持（副源）。
+
+    该接口按「增持/减持」分类返回全市场数据（~9500+17300 行），
+    需按 symbol 过滤。⚠️ 内部使用 JS 引擎，不可在并行采集线程池中执行。
+    单次请求超时见 env.CNINFO_HOLDER_TIMEOUT_SEC，超时则跳过该方向。
+    """
+    if not env.is_akshare_available():
+        return None
+    import akshare as ak
+
+    sym = symbol.strip().zfill(6)
+    records: list[dict] = []
+    timeout_sec = float(env.CNINFO_HOLDER_TIMEOUT_SEC)
+
+    for direction in ("增持", "减持"):
+        df = _run_with_timeout(
+            lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
+            timeout_sec,
+            f"akshare cninfo({direction})",
+        )
+        if df is None or getattr(df, "empty", True):
+            continue
+        # 过滤当前标的
+        code_col = "证券代码" if "证券代码" in df.columns else (
+            "股票代码" if "股票代码" in df.columns else None)
+        if code_col is None:
+            logger.warning(
+                "akshare cninfo(%s): missing symbol column (%s), skip",
+                direction, list(df.columns),
+            )
+            continue
+        df = df[df[code_col].astype(str).str.contains(sym, na=False)]
+        if df.empty:
+            continue
+        for row in df.to_dict("records"):
+            records.append({
+                "ann_date": _norm_date(
+                    row.get("公告日期") or row.get("变动日期") or ""),
+                "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
+                "position": row.get("董监高职务") or row.get("职务") or "",
+                "direction": direction,
+                "change_vol": _first_dict_value(row, "变动数量", "变动股数"),
+                "avg_price": _first_dict_value(row, "成交均价", "交易均价"),
+                "reason": row.get("持股变动原因") or row.get("变动原因") or "",
+                "source": "akshare cninfo",
+            })
+    return records or None
+
+
+def _q_akshare_shareholder_change_ths(symbol: str) -> list[dict] | None:
+    """akshare stock_shareholder_change_ths — 同花顺股东变动（降级备选）。"""
+    if not env.is_akshare_available():
+        return None
+    import akshare as ak
+    df = ak.stock_shareholder_change_ths(symbol=symbol.strip().zfill(6))
+    if df is None or df.empty:
+        return None
+    records = []
+    for row in df.to_dict("records"):
+        change_vol_raw = row.get("变动数量")
+        parsed_vol = _parse_holder_change_vol(change_vol_raw)
+        direction = _infer_holder_direction(row, change_vol_raw, parsed_vol)
+        records.append({
+            "ann_date": _norm_date(str(row.get("公告日期") or row.get("变动期间") or "")),
+            "holder_name": row.get("变动股东") or "",
+            "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
+            "change_vol_raw": change_vol_raw,
+            "avg_price": row.get("交易均价"),
+            "remain_vol": row.get("剩余股份总数"),
+            "direction": direction,
+            "source": "akshare ths",
+        })
+    return records or None
+
+
+def _merge_holder_records(results: list) -> list[dict]:
+    """合并多源增减持记录，按 transaction_key 分组并标注 cross_check。
+
+    同源同日多笔交易（不同变动数量）全部保留；仅跨源命中同一笔时折叠为 1 条。
+    去重优先级：Tushare > akshare cninfo > akshare ths。
+    """
+    pending: list[dict] = []
+    for sr in results:
+        if not sr.success or sr.data is None:
+            continue
+        records = sr.data if isinstance(sr.data, list) else [sr.data]
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            rec = dict(r)
+            rec["_source_api_key"] = sr.source
+            rec["_source_rank"] = _HOLDER_SOURCE_RANK.get(sr.source, 99)
+            pending.append(rec)
+
+    if not pending:
+        return []
+
+    groups: dict[tuple, list[dict]] = {}
+    for r in pending:
+        groups.setdefault(_holder_transaction_key(r), []).append(r)
+
+    merged: list[dict] = []
+    for group in groups.values():
+        sources = {r["_source_api_key"] for r in group}
+        if len(sources) > 1:
+            group.sort(key=lambda r: r.get("_source_rank", 99))
+            best = group[0]
+            best["cross_check"] = len(sources)
+            best.pop("_source_api_key", None)
+            best.pop("_source_rank", None)
+            merged.append(best)
+        else:
+            for r in group:
+                r["cross_check"] = 1
+                r.pop("_source_api_key", None)
+                r.pop("_source_rank", None)
+                merged.append(r)
+
+    merged.sort(key=lambda r: str(r.get("ann_date", "")), reverse=True)
+    return merged
+
+
+def _needs_cninfo_holder_fallback(results: list) -> bool:
+    """并行源（Tushare + ths）均有数据时跳过慢速 cninfo；否则顺序补采。"""
+    has_tushare = any(
+        r.source == "tushare.stk_holdertrade" and _source_has_data(r.data)
+        for r in results
+    )
+    has_ths = any(
+        r.source == "akshare.stock_shareholder_change_ths" and _source_has_data(r.data)
+        for r in results
+    )
+    return not (has_tushare and has_ths)
+
+
+def collect_holder_changes(symbol: str) -> dict:
+    """股东增减持动向 — 三源并行 + 交叉验证（与 collect_financials 同构）。
+
+    cninfo 源因内部使用 JS 引擎（mini_racer），不在线程池中执行。
+    当 Tushare 与 ths 并行源均有数据时跳过 cninfo；否则顺序补采高管维度数据。
+    """
+    # 线程安全的源（Tushare + ths）
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.stk_holdertrade", lambda: _q_tushare_holdertrade(symbol)))
+    if env.is_akshare_available():
+        tasks.append(("akshare.stock_shareholder_change_ths",
+                      lambda: _q_akshare_shareholder_change_ths(symbol)))
+
+    results = _run_sources_parallel(tasks, "holder_changes")
+
+    # cninfo 源（不可在线程中运行 — 内部使用 JS 引擎，且全市场数据极慢）
+    if env.is_akshare_available() and _needs_cninfo_holder_fallback(results):
+        results.append(_run_one_source(
+            "akshare.stock_hold_management_detail_cninfo",
+            lambda: _q_akshare_management_hold(symbol),
+            "holder_changes",
+        ))
+
+    result_map = {r.source: r for r in results}
+    _annotate_query_params(result_map, {
+        "tushare.stk_holdertrade": _qp_tushare("stk_holdertrade", symbol,
+                                               start_date=_days_ago(730), end_date=_today()),
+        "akshare.stock_hold_management_detail_cninfo": _qp_akshare(
+            "stock_hold_management_detail_cninfo", symbol),
+        "akshare.stock_shareholder_change_ths": _qp_akshare(
+            "stock_shareholder_change_ths", symbol),
+    })
+
+    dim = DimensionResult("holder_changes", results)
+    legacy = dim.to_legacy_dict()
+    # 合并多源记录做去重 + 交叉验证标注
+    merged = _merge_holder_records(results)
+    legacy["data"] = merged if merged else legacy.get("data")
+    return legacy
+
+
+# ---- 行业定价采集（P1-2 + P1-3 industry_pricing） ----
+
+def _calc_futures_trend(daily_df, days: int = 30) -> str:
+    """从 futures_spot_price_daily 的 DataFrame 计算近 N 日趋势（v0.1.8 扩展用）。"""
+    if daily_df is None or daily_df.empty:
+        return "数据不足"
+    tail = daily_df.tail(days)
+    prices = tail.get("spot_price") if "spot_price" in tail.columns else tail.get("sp")
+    if prices is None or len(prices) < 5:
+        return "数据不足"
+    try:
+        first = float(prices.iloc[0])
+        last = float(prices.iloc[-1])
+        pct = (last - first) / abs(first) * 100 if first != 0 else 0
+        arrow = "↗" if pct > 0 else "↘" if pct < 0 else "→"
+        return f"{arrow} {pct:+.1f}%"
+    except (TypeError, ValueError, IndexError):
+        return "数据不足"
+
+
+def _calc_futures_trend_from_spot(spot_old, spot_new, code: str, code_col: str) -> str:
+    """对比两日期货现货价，计算近 30 日趋势（2 次 API，不按品种循环）。"""
+    if spot_old is None or spot_old.empty or spot_new is None or spot_new.empty:
+        return "数据不足"
+    row_old = spot_old[spot_old[code_col] == code]
+    row_new = spot_new[spot_new[code_col] == code]
+    if row_old.empty or row_new.empty:
+        return "数据不足"
+    try:
+        old_p = safe_float(row_old.iloc[-1].get("spot_price") or row_old.iloc[-1].get("sp"))
+        new_p = safe_float(row_new.iloc[-1].get("spot_price") or row_new.iloc[-1].get("sp"))
+        if old_p is None or new_p is None or old_p == 0:
+            return "数据不足"
+        pct = (new_p - old_p) / abs(old_p) * 100
+        arrow = "↗" if pct > 0 else "↘" if pct < 0 else "→"
+        return f"{arrow} {pct:+.1f}%"
+    except (TypeError, ValueError, IndexError):
+        return "数据不足"
+
+
+def _q_akshare_futures_spot(symbol: str, industry: str) -> dict | None:
+    """期货现货价格 + 近月合约价格 + 基差率。"""
+    from .chain import get_futures_for_industry
+
+    futures_list = get_futures_for_industry(industry)
+    if not futures_list:
+        return None
+
+    if not env.is_akshare_available():
+        return None
+    import akshare as ak
+
+    codes = [code for _, code in futures_list]
+    results = {}
+    # 尝试昨天 → 前天（期货数据通常 T+1 更新，跳过今天）
+    spot = None
+    for day_offset in (1, 2, 3):
+        try:
+            spot = ak.futures_spot_price(date=_days_ago(day_offset), vars_list=codes)
+            if spot is not None and not spot.empty:
+                break
+        except Exception:
+            continue
+
+    if spot is None or spot.empty:
+        return None
+
+    spot_old = None
+    try:
+        spot_old = ak.futures_spot_price(date=_days_ago(30), vars_list=codes)
+    except Exception:
+        pass
+
+    code_col = "symbol" if "symbol" in spot.columns else "var"
+    for name, code in futures_list:
+        row = spot[spot[code_col] == code]
+        if row.empty:
+            results[name] = {"code": code, "error": "无数据"}
+            continue
+        r = row.iloc[-1]
+        trend = _calc_futures_trend_from_spot(spot_old, spot, code, code_col)
+        results[name] = {
+            "code": code,
+            "spot_price": r.get("spot_price") or r.get("sp"),
+            "near_month_price": r.get("near_contract_price") or r.get("near_price"),
+            "dom_price": r.get("dominant_contract_price") or r.get("dom_price"),
+            "near_basis_rate": r.get("near_basis_rate"),
+            "dom_basis_rate": r.get("dom_basis_rate"),
+            "trend_30d": trend,
+        }
+
+    return results or None
+
+
+def _q_akshare_company_news_price(symbol: str) -> dict | None:
+    """公司新闻涨价信号检测。正则匹配: 涨价|提价|上调|调价|价格上涨。"""
+    import re
+    from datetime import datetime, timedelta
+
+    if not env.is_akshare_available():
+        return None
+    import akshare as ak
+    with akshare_direct_session():
+        df = ak.stock_news_em(symbol=symbol.strip().zfill(6))
+    if df is None or df.empty:
+        return None
+
+    pattern = re.compile(r"涨价|提价|上调|调价|价格上涨")
+    cutoff = datetime.now() - timedelta(days=30)
+    matches = []
+    for row in df.to_dict("records"):
+        title = str(row.get("新闻标题", ""))
+        content = str(row.get("新闻内容", ""))
+        if not (pattern.search(title) or pattern.search(content)):
+            continue
+        date_raw = str(row.get("发布时间", ""))
+        if not _news_date_within(date_raw, cutoff):
+            continue
+        matches.append({
+            "date": date_raw,
+            "title": title,
+            "content_snippet": content[:200],
+        })
+
+    signal = "确认" if len(matches) >= 2 else ("单条" if len(matches) == 1 else "无")
+    return {
+        "matches": matches,
+        "signal": signal,
+        "signal_detail": f"近 30 日 {len(matches)} 条涨价相关新闻",
+    }
+
+
+def _parse_news_datetime(date_raw: str):
+    """解析 akshare stock_news_em 发布时间。"""
+    from datetime import datetime
+
+    raw = str(date_raw).strip()
+    if not raw:
+        return None
+    for fmt, maxlen in (
+        ("%Y-%m-%d %H:%M:%S", 19),
+        ("%Y-%m-%d %H:%M", 16),
+        ("%Y-%m-%d", 10),
+        ("%Y/%m/%d", 10),
+    ):
+        try:
+            return datetime.strptime(raw[:maxlen], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _news_date_within(date_raw: str, cutoff) -> bool:
+    """判断新闻是否在 cutoff 之后（近 30 日窗口）。"""
+    dt = _parse_news_datetime(date_raw)
+    return dt is not None and dt >= cutoff
+
+
+def _resolve_industry_for_pricing(
+    symbol: str,
+    dim_results: dict[str, dict] | None = None,
+) -> str:
+    """解析行业名（优先已采集 basic_info，否则补采）。"""
+    if dim_results:
+        basic = dim_results.get("basic_info")
+        if basic:
+            industry = extract_industry_from_basic_info(basic.get("data"))
+            if industry:
+                return industry
+    try:
+        basic = collect_basic_info(symbol)
+        return extract_industry_from_basic_info(basic.get("data")) or ""
+    except Exception as exc:
+        logger.warning(
+            "industry_pricing: industry lookup failed for %s: %s", symbol, exc,
+        )
+        return ""
+
+
+def collect_industry_pricing_dim(symbol: str) -> dict:
+    """COLLECTORS 入口：采集前解析行业（期货映射依赖 industry）。"""
+    return collect_industry_pricing(
+        symbol, _resolve_industry_for_pricing(symbol),
+    )
+
+
+def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
+    """行业产品定价追踪（与 collect_financials 同构）。"""
+    from .chain import get_futures_for_industry
+
+    tasks: list[tuple[str, Callable]] = [
+        ("akshare.futures_spot_price",
+         lambda: _q_akshare_futures_spot(symbol, industry)),
+    ]
+    if env.is_akshare_available():
+        tasks.append(("akshare.stock_news_em",
+                      lambda: _q_akshare_company_news_price(symbol)))
+
+    results = _run_sources_parallel(tasks, "industry_pricing")
+    dim = DimensionResult("industry_pricing", results)
+    legacy = dim.to_legacy_dict()
+    legacy.setdefault("data", {})
+    if isinstance(legacy["data"], dict):
+        legacy["data"]["industry"] = industry
+        legacy["data"]["has_futures"] = bool(get_futures_for_industry(industry))
+    return legacy
+
+
 # ---- 全维度采集 ----
 
 COLLECTORS = {
@@ -1638,10 +2263,12 @@ COLLECTORS = {
     "valuation": ("估值分析", collect_valuation),
     "research": ("机构研报", collect_research),
     "industry": ("行业数据", collect_industry),  # R-11: NEW
+    "holder_changes": ("股东增减持", collect_holder_changes),  # P0-2
+    "industry_pricing": ("行业定价", collect_industry_pricing_dim),  # P1-2
 }
 
 _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
-                 "northbound", "valuation", "kline"]
+                 "northbound", "valuation", "kline", "holder_changes"]
 
 
 def collect_all(symbol: str, dims: list[str] | None = None,
@@ -1677,6 +2304,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             if dim not in COLLECTORS:
                 logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
                 continue
+            if dim == "industry_pricing":
+                continue
             if dim == "kline" and kline_kwargs:
                 _, fn = COLLECTORS[dim]
                 future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
@@ -1699,6 +2328,24 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                               "all_sources": [], "multi_source": False,
                               "source_count": 0, "error": str(exc)},
                 }
+
+    if "industry_pricing" in dims:
+        try:
+            industry = _resolve_industry_for_pricing(symbol, dim_results)
+            dim_results["industry_pricing"] = collect_industry_pricing(symbol, industry)
+        except Exception as exc:
+            dim_results["industry_pricing"] = {
+                "dimension": "industry_pricing",
+                "display": COLLECTORS["industry_pricing"][0],
+                "data": None,
+                "status": "missing",
+                "error": f"维度采集失败: {exc}",
+                "_meta": {
+                    "source": "none", "success": False,
+                    "all_sources": [], "multi_source": False,
+                    "source_count": 0, "error": str(exc),
+                },
+            }
 
     # 按输入顺序排列
     dimensions = [dim_results.get(d) for d in dims if d in COLLECTORS]
@@ -2764,6 +3411,79 @@ def attach_pe_band(collection: dict, *, years: int = 5) -> dict[str, Any] | None
     return band
 
 
+# P3-3: 价格异常检测原型（预留 v0.1.9 news 全栈使用）
+
+
+def _extract_kline_from_collection(collection: dict) -> list:
+    """从 collect_all 结果中提取 kline 维度数据列表。"""
+    for dim in collection.get("dimensions", []):
+        if dim.get("dimension") == "kline":
+            data = dim.get("data")
+            if isinstance(data, list):
+                return data
+    return []
+
+
+def _bar_pct_chg(bar: dict, prev_bar: dict | None) -> float | None:
+    """从 pct_chg 字段或相邻 close 计算涨跌幅（%）。"""
+    raw = bar.get("pct_chg")
+    if raw is not None:
+        pct = safe_float(raw)
+        if pct is not None:
+            return pct
+    if prev_bar is None:
+        return None
+    close = safe_float(bar.get("close"))
+    prev_close = safe_float(prev_bar.get("close"))
+    if close is not None and prev_close is not None and prev_close != 0:
+        return (close - prev_close) / prev_close * 100
+    return None
+
+
+def _detect_price_shock(symbol: str, kline_data: list) -> dict:
+    """价格异常检测原型。
+
+    当前仅检测极端涨跌停，不做新闻关联。
+    v0.1.9 将扩展为：价格异常 + 新闻关联 + 事件归因。
+
+    Returns:
+        {"has_shock": bool, "shock_dates": [...], "shock_type": str|None}
+    """
+    if not kline_data:
+        return {"has_shock": False, "shock_dates": []}
+
+    bars = kline_data[-61:] if len(kline_data) > 1 else kline_data
+    shocks = []
+    for i in range(1, len(bars)):
+        bar = bars[i]
+        pct = _bar_pct_chg(bar, bars[i - 1])
+        if pct is None:
+            continue
+        if abs(pct) >= 9.5:  # A股涨跌停阈值
+            shocks.append({
+                "date": bar.get("trade_date"),
+                "pct_chg": round(pct, 2),
+                "type": "limit_up" if pct > 0 else "limit_down",
+            })
+
+    def _classify(s: list) -> str | None:
+        if not s:
+            return None
+        up = sum(1 for x in s if x["type"] == "limit_up")
+        dn = len(s) - up
+        if up >= 2 and dn == 0:
+            return "连续涨停"
+        elif dn >= 2 and up == 0:
+            return "连续跌停"
+        return "混合异常"
+
+    return {
+        "has_shock": len(shocks) > 0,
+        "shock_dates": shocks,
+        "shock_type": _classify(shocks),
+    }
+
+
 def attach_phase2_extras(collection: dict, symbol: str) -> None:
     """挂载 Phase 2 扩展数据（同行、PE Band）。"""
     errors: list[str] = []
@@ -2787,6 +3507,30 @@ def attach_phase2_extras(collection: dict, symbol: str) -> None:
         except Exception as exc:
             errors.append(f"pe_band: {exc}")
             collection["pe_band"] = None
+
+    # P1-2: industry_pricing — 依赖 basic_info 已采集的行业信息
+    if collection.get("industry_pricing") is None:
+        try:
+            industry = extract_industry_from_collection(collection) or ""
+            collection["industry_pricing"] = collect_industry_pricing(symbol, industry)
+        except Exception as exc:
+            errors.append(f"industry_pricing: {exc}")
+            collection["industry_pricing"] = {
+                "dimension": "industry_pricing", "data": None,
+                "status": "missing", "error": f"行业定价采集异常: {exc}",
+            }
+
+    # P3-3: 价格异常检测（非阻塞）
+    if collection.get("price_shock") is None:
+        try:
+            kline_bars = _extract_kline_from_collection(collection)
+            collection["price_shock"] = _detect_price_shock(symbol, kline_bars)
+        except Exception as exc:
+            errors.append(f"price_shock: {exc}")
+            collection["price_shock"] = {
+                "has_shock": False, "shock_dates": [], "error": str(exc),
+            }
+
     if errors:
         collection.setdefault("phase2_extras_errors", []).extend(errors)
         logger.warning("attach_phase2_extras partial failure for %s: %s", symbol, errors)

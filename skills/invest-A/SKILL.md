@@ -1,6 +1,6 @@
 ---
 name: invest-A
-version: "0.1.6"
+version: "0.1.7"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
 argument-hint: "/invest-A 600176 | /invest-A 600176 --with-macro | /invest-A 600176 --deep | /invest-A 600176 --compare 000858"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
@@ -15,21 +15,6 @@ metadata:
 ---
 
 # invest-A 投研助手
-
-## Step 0: 版本自检
-
-每次 invoke 本 Skill 时，运行以下检查：
-
-1. 检查 `skills/invest-A/scripts/check-version.sh` 是否存在
-2. 若存在，执行 `bash skills/invest-A/scripts/check-version.sh`
-3. 若版本不一致（exit code ≠ 0），输出警告并建议更新：
-   `⚠️ invest-A 版本不匹配，请运行 git pull 更新`
-4. 若从缓存路径加载（exit code = 2），拒绝执行：
-   `⛔ 检测到从缓存路径加载，请通过 /plugin 重新安装`
-5. 若无 shell 脚本（非 shell 环境），读取 SKILL.md 第一行 frontmatter 的 `version:` 字段
-6. 将版本号与 CLAUDE.md 中的 `当前版本：v` 行对比
-
----
 
 ## OUTPUT CONTRACT（LAWs）
 
@@ -100,7 +85,7 @@ metadata:
 
 - **LAW 6 相关**：禁止出现"买入""卖出""持有""建仓""加仓""减仓""目标价""止损""止盈"等直接或暗示性表述。可使用"市场定价区间""历史估值分位""多源均值对比"等描述。
 - **版本号**：最多三位 `v{major}.{minor}.{patch}`，功能变更递增末位。同版本内修订用日期区分。
-- **报告路径**：详细文档写入 `code/reports/{symbol}-{name}-{date}.md`，Claude 内只输出简报。
+- **报告路径**：详细文档写入 `code/reports/{symbol}-{name}/{date}.md`，Claude 内只输出简报。
 
 ### 数据源策略（v0.2 → v0.3 变更）
 
@@ -154,7 +139,7 @@ Claude 对话中输出的内容须精简为**可一目扫完**的简报，核心
 
 ### 第二层：.md 详细文档（完整研究备忘录）
 
-详细分析内容须写入 `code/reports/{symbol}-{name}-{date}.md` 文件。
+详细分析内容须写入 `code/reports/{symbol}-{name}/{date}.md` 文件。
 - 包含完整九模块（或八段 legacy）全部内容
 - 包含引用来源表（References，见本文件附录规范）
 - 包含完整技术指标计算表
@@ -173,7 +158,7 @@ Claude 对话中输出的内容须精简为**可一目扫完**的简报，核心
 
 **结构检查：**
 - [ ] Claude 内简报已压缩至 3-5 段（不在对话中展开全部九模块）
-- [ ] 详细报告已写入 `code/reports/{symbol}-{name}-{date}.md`
+- [ ] 详细报告已写入 `code/reports/{symbol}-{name}/{date}.md`
 - [ ] 风险提示在首尾部（LAW 4）
 - [ ] 每个数字有追溯路径（LAW 7）
 
@@ -376,3 +361,14 @@ rules:
 - akshare：标注 `ak.{函数名}(参数...)`
 - 腾讯行情：标注 `qt.gtimg.cn` + 请求 URL
 - baostock：标注 `bs.query_history_k_data_plus(...)`
+
+### WebSearch 白名单（涨价信号触发）
+
+当 `industry_pricing` 维度涨价信号为「确认」时，WebSearch 深搜应优先限定以下域名（完整列表见 `env.PRICE_NEWS_WHITELIST`）：
+
+```
+site:stcn.com OR site:cnstock.com OR site:cs.com.cn OR site:21jingji.com
+OR site:eeo.com.cn OR site:finance.sina.com.cn OR site:10jqka.com.cn OR site:cls.cn
+```
+
+> ⚠️ 东方财富 (eastmoney.com) 因代理问题暂不列入白名单。
