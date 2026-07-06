@@ -3,6 +3,8 @@
 Step 1 覆盖: scoring.py 5 个评分函数（正常路径 + 数据不足路径）。
 Step 3 覆盖: valuation.py 4 个 DCF 函数（dcf_two_stage/dcf_sensitivity/
              scenario_fcff/triangle_check，正常路径 + 边界 + 数据不足路径）。
+Step 4 覆盖: render.py _section_dcf_valuation()（D-④/D-⑤/D-⑥ 渲染，
+             正常路径 + WACC 数据不足路径 + veto_triggered 跳过路径）。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from lib.scoring import (
     revenue_quality_score,
 )
 from lib.valuation import (
+    attach_dcf_preprocess,
     dcf_sensitivity,
     dcf_two_stage,
     scenario_fcff,
@@ -500,3 +503,112 @@ class TestTriangleCheck:
         for bad_word in ("低估", "高估", "极度高估", "极度低估"):
             assert bad_word not in result["divergence_note"]
         assert "%" in result["divergence_note"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# Step 4: render.py _section_dcf_valuation() 渲染测试
+# ═══════════════════════════════════════════════════════════════
+
+from lib.render import _section_dcf_valuation  # noqa: E402
+
+
+def _make_dcf_render_financials(n_years: int = 4, *, beta: float | None = 1.1) -> dict:
+    """构造带 beta 兜底字段的 financials legacy dict，并附加 dcf_preprocess。"""
+    legacy: dict = {
+        "dimension": "financials",
+        "data": _make_dcf_financials_rows(n_years),
+        "status": "available",
+    }
+    if beta is not None:
+        legacy["beta"] = beta
+    attach_dcf_preprocess(legacy)
+    return legacy
+
+
+def _make_research_dim(profit_forecasts: list[dict] | None = None) -> dict:
+    return {
+        "dimension": "research",
+        "research_summary": {
+            "status": "ok",
+            "profit_forecasts": profit_forecasts or [],
+        },
+    }
+
+
+class TestSectionDcfValuation:
+    def test_normal_path(self):
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=1.1),
+            "research": _make_research_dim([
+                {"quarter": "2026", "avg_np_100m": 10.0, "n_analysts": 3},
+                {"quarter": "2028", "avg_np_100m": 13.0, "n_analysts": 3},
+            ]),
+        }
+        collection = {
+            "market_structure": {"erp": {"dgs10": 2.65, "source": "FRED.DGS10"}},
+        }
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        assert "D-④" in text
+        assert "D-⑤" in text
+        assert "D-⑥" in text
+        # 三情景区间：乐观/中性/悲观 + 概率权重 + 假设前提，禁止单一目标价数字
+        assert "乐观情景" in text
+        assert "中性情景" in text
+        assert "悲观情景" in text
+        assert "概率" in text
+        assert "仅供参考，不构成投资建议" in text
+        # 三角对照表
+        assert "自算DCF隐含增速" in text
+        assert "机构一致预期增速" in text
+        assert "历史营收CAGR" in text
+        # 敏感性矩阵：5x5（表头 1 行 + 5 个 WACC 行）
+        assert "WACC" in text
+        assert "永续增长率" in text
+        _check_no_forbidden_words(text)
+
+    def test_wacc_insufficient_data_skips_section(self):
+        """beta 不可得（真实报告的默认状态）时，整段标注数据不足并跳过，不编造 WACC。"""
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=None),
+            "research": _make_research_dim(),
+        }
+        collection = {"market_structure": {}}
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        assert "数据不足，WACC 无法计算，DCF 段落跳过" in text
+        assert "beta" in text
+        # 不应出现任何情景企业价值数值渲染
+        assert "乐观情景" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
+        _check_no_forbidden_words(text)
+
+    def test_veto_triggered_skips_all_values(self):
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=1.1),
+            "research": _make_research_dim(),
+        }
+        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        text = _section_dcf_valuation(dims, collection, "000001", veto_triggered=True)
+
+        assert "研究终止条件触发，估值段落已跳过" in text
+        assert "D-④" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
+        assert "乐观情景" not in text
+        _check_no_forbidden_words(text)
+
+    def test_consensus_growth_unavailable_shows_not_available(self):
+        """profit_forecasts 无可解析年度标签时，三角对照表机构一致预期一行显示"不可得"。"""
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=1.1),
+            "research": _make_research_dim([
+                {"quarter": "Q1", "avg_np_100m": 10.0, "n_analysts": 3},
+            ]),
+        }
+        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        assert "机构一致预期增速 | 不可得" in text
+        _check_no_forbidden_words(text)
