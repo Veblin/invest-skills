@@ -10,6 +10,15 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/extract_release_notes.py"
 
 
+def _current_version() -> str:
+    """从 pyproject.toml 读取当前项目版本（避免硬编码版本号导致 CI 每次 bump 都报错）。"""
+    pyproject = ROOT / "pyproject.toml"
+    for line in pyproject.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith("version") and "=" in line:
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise RuntimeError("version not found in pyproject.toml")
+
+
 def test_extract_v013_contains_phases():
     out = subprocess.check_output(
         [sys.executable, str(SCRIPT), "v0.1.3"],
@@ -40,7 +49,7 @@ def test_extract_from_pyproject():
         text=True,
         cwd=ROOT,
     )
-    assert "## v0.1.6" in out
+    assert f"## v{_current_version()}" in out
 
 
 def test_strict_fails_without_section():
@@ -59,7 +68,7 @@ def test_print_tag_from_pyproject():
         text=True,
         cwd=ROOT,
     ).strip()
-    assert out == "v0.1.6"
+    assert out == f"v{_current_version()}"
 
 
 def test_build_release_notes_includes_compare_when_previous_tag_known():
