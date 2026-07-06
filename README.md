@@ -3,9 +3,9 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
-  <a href="https://github.com/Veblin/invest-A-skill/actions/workflows/security.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-A-skill/security.yml?label=security" alt="Security Scan" /></a>
-  <a href="https://github.com/Veblin/invest-A-skill/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-A-skill/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-A-skill/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-A-skill?include_prereleases&label=v0.1.4" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/actions/workflows/security.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/security.yml?label=security" alt="Security Scan" /></a>
+  <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.1.4" alt="Release" /></a>
 </p>
 
 > **学习工具，非决策工具。** 多源采集 A 股数据 → 结构化研究备忘录 → 你独立判断。
@@ -28,11 +28,11 @@ invest-A 分两层：**Skill**（告诉 Agent 怎么调研）+ **Python 引擎**
 
 | 环境 | 安装方式 | 说明 |
 |------|----------|------|
-| **Claude Code** | `/plugin marketplace add Veblin/invest-A-skill` | 推荐；含插件钩子，marketplace 可自动更新 |
-| **Cursor** | `npx skills add Veblin/invest-A-skill --skill invest-A -g -a cursor -y` | 安装到 Cursor Skills 目录 |
-| **OpenClaw** | `npx skills add Veblin/invest-A-skill --skill invest-A -g -a openclaw -y` | 或 `openclaw skills install git:Veblin/invest-A-skill`（需本仓库已 clone） |
-| **Hermes** | `npx skills add Veblin/invest-A-skill --skill invest-A -g -y` | Agent Skills 开放格式，与 Claude Code / Cursor 同源 |
-| **Codex / Gemini CLI 等** | `npx skills add Veblin/invest-A-skill --skill invest-A -g -y` | 可用 `-a <agent>` 指定目标，见 [agentskills.io](https://agentskills.io) |
+| **Claude Code** | `/plugin marketplace add Veblin/invest-skills` | 推荐；含插件钩子，marketplace 可自动更新 |
+| **Cursor** | `npx skills add Veblin/invest-skills --skill invest-A -g -a cursor -y` | 安装到 Cursor Skills 目录 |
+| **OpenClaw** | `npx skills add Veblin/invest-skills --skill invest-A -g -a openclaw -y` | 或 `openclaw skills install git:Veblin/invest-skills`（需本仓库已 clone） |
+| **Hermes** | `npx skills add Veblin/invest-skills --skill invest-A -g -y` | Agent Skills 开放格式，与 Claude Code / Cursor 同源 |
+| **Codex / Gemini CLI 等** | `npx skills add Veblin/invest-skills --skill invest-A -g -y` | 可用 `-a <agent>` 指定目标，见 [agentskills.io](https://agentskills.io) |
 
 <details>
 <summary>各环境安装后怎么用</summary>
@@ -60,7 +60,7 @@ Agent 会按 `skills/invest-A/SKILL.md` 调用 `invest.py` 采集与渲染。
 ### 2. 配置数据采集引擎（一次性，约 2 分钟）
 
 ```bash
-git clone https://github.com/Veblin/invest-A-skill.git && cd invest-A-skill
+git clone https://github.com/Veblin/invest-skills.git && cd invest-skills
 uv sync
 uv run python skills/invest-A/scripts/invest.py diagnose   # 检查数据源是否可用
 ```

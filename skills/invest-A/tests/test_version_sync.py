@@ -37,7 +37,7 @@ def _write_fixture_tree(root: Path, version: str) -> None:
         encoding="utf-8",
     )
     (root / "gemini-extension.json").write_text(
-        json.dumps({"name": "invest-A-skill", "version": version}, indent=2) + "\n",
+        json.dumps({"name": "invest-skills", "version": version}, indent=2) + "\n",
         encoding="utf-8",
     )
 
