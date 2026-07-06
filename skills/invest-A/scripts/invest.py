@@ -35,7 +35,10 @@ while _project_root != _project_root.parent:
     _project_root = _project_root.parent
 
 from lib import collector, env, render
+from lib.collector import _DEFAULT_DIMS
 from lib.proxy import warn_if_proxy_detected
+
+_CLI_DEFAULT_DIMS = ",".join(_DEFAULT_DIMS)
 
 try:
     from lib import store as store_mod
@@ -261,7 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pc = sub.add_parser("collect", help="采集多维度数据")
     pc.add_argument("symbol")
-    pc.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
+    pc.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
     pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
@@ -269,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
-    pr.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
+    pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pr.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
     pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
@@ -315,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("evidence", help="生成结构化证据表")
     pe.add_argument("symbol")
     pe.add_argument("--emit", default="md", choices=["md", "json"])
-    pe.add_argument("--dims", default="basic_info,financials,quote,shareholders,northbound,valuation,kline")
+    pe.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(pe)
 
     pa = sub.add_parser("analyze", help="分析采集结果（输出中间分析 JSON）")
@@ -330,6 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("--emit", default="md", choices=["md", "json"])
     psyn.add_argument("--mode", default="full", choices=["brief", "full"])
     psyn.add_argument("--outdir", default="", help="报告输出目录")
+    psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(psyn)
 
     pp = sub.add_parser(
@@ -409,7 +413,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
 
 
 def _report_basename(result: dict, symbol: str, ts: str) -> str:
-    """生成报告文件名前缀：{ts}-{symbol}-{name}。"""
+    """生成报告子目录名：{symbol}-{name}（文件名用日期，如 2026-07-05.md）。"""
     name = ""
     for dim in result.get("dimensions", []):
         if dim.get("dimension") == "basic_info":
@@ -418,7 +422,15 @@ def _report_basename(result: dict, symbol: str, ts: str) -> str:
                 name = data.get("name", "") or data.get("股票简称", "")
             break
     safe_name = re.sub(r'[\\/:*?"<>|]', "_", name) if name else ""
-    return f"{ts}-{symbol}-{safe_name}" if safe_name else f"{ts}-{symbol}"
+    return f"{symbol}-{safe_name}" if safe_name else symbol
+
+
+def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
+    """生成报告完整路径：{outdir}/{subdir}/{date}.md。"""
+    date = ts[:10]  # 仅日期部分，如 2026-07-05
+    report_dir = outdir / subdir
+    report_dir.mkdir(parents=True, exist_ok=True)
+    return report_dir / f"{date}.md"
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -468,13 +480,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
 
-        basename = _report_basename(result, args.symbol, ts)
+        subdir = _report_basename(result, args.symbol, ts)
         outdir = Path(args.outdir).resolve() if args.outdir else Path.cwd()
-        outdir.mkdir(parents=True, exist_ok=True)
-        htmlpath = outdir / f"{basename}.html"
+        htmlpath = _report_filepath(outdir, subdir, ts).with_suffix(".html")
+        htmlpath.parent.mkdir(parents=True, exist_ok=True)
         htmlpath.write_text(output, encoding="utf-8")
 
-        mdfile = outdir / f"{basename}.md"
+        mdfile = _report_filepath(outdir, subdir, ts)
         mdfile.write_text(md_v2, encoding="utf-8")
 
         print(render.render(result, args.symbol, "compact"))
@@ -496,10 +508,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     if fmt == "md" and args.outdir:
         from datetime import datetime
         ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        basename = _report_basename(result, args.symbol, ts)
+        subdir = _report_basename(result, args.symbol, ts)
         outdir = Path(args.outdir).resolve()
-        outdir.mkdir(parents=True, exist_ok=True)
-        mdpath = outdir / f"{basename}.md"
+        mdpath = _report_filepath(outdir, subdir, ts)
         mdpath.write_text(output, encoding="utf-8")
         print(f"📝 Markdown 报告: {mdpath.resolve()}")
         return 0
@@ -507,8 +518,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if fmt == "md":
         from datetime import datetime
         ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        basename = _report_basename(result, args.symbol, ts)
-        htmlpath = Path.cwd() / f"{basename}.html"
+        subdir = _report_basename(result, args.symbol, ts)
+        htmlpath = Path.cwd() / f"{subdir}-{ts[:10]}.html"
         try:
             html_out = render.render_html(result, args.symbol)
             htmlpath.write_text(html_out, encoding="utf-8")
@@ -647,10 +658,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             print(f"❌ 无法读取输入文件: {exc}", file=sys.stderr)
             return 1
     else:
-        dims = _apply_deep_dims([
-            "basic_info", "financials", "quote", "shareholders",
-            "northbound", "valuation", "kline",
-        ], getattr(args, "deep", False))
+        dims = _apply_deep_dims(list(_DEFAULT_DIMS), getattr(args, "deep", False))
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
 
     if result.get("summary", {}).get("available", 0) == 0:
@@ -737,10 +745,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
                 "ⓘ analyze 输出缺少 dimensions，将补充现场采集",
                 file=sys.stderr,
             )
-            dims = _apply_deep_dims([
-                "basic_info", "financials", "quote", "shareholders",
-                "northbound", "valuation", "kline",
-            ], getattr(args, "deep", False))
+            dims = _apply_deep_dims(list(_DEFAULT_DIMS), getattr(args, "deep", False))
             result = collector.collect_all(
                 args.symbol, dims, **_collect_kwargs(args),
             )
@@ -764,25 +769,21 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         if fmt == "md" and args.outdir:
             from datetime import datetime
             ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-            basename = _report_basename(result, args.symbol, ts)
+            subdir = _report_basename(result, args.symbol, ts)
             outdir = Path(args.outdir).resolve()
-            outdir.mkdir(parents=True, exist_ok=True)
-            mdpath = outdir / f"{basename}.md"
+            mdpath = _report_filepath(outdir, subdir, ts)
             mdpath.write_text(output, encoding="utf-8")
             print(f"📝 Markdown 报告: {mdpath.resolve()}")
             return 0
         print(output)
         return 0
 
-    # 设置 cmd_report 所需的缺省属性
-    if not hasattr(args, 'dims'):
-        args.dims = "basic_info,financials,quote,shareholders,northbound,valuation,kline"
-    if not hasattr(args, 'with_macro'):
+    # 无 --input 时委托 cmd_report（dims 由 parser 默认 _CLI_DEFAULT_DIMS）
+    if not hasattr(args, "with_macro"):
         args.with_macro = False
-    if not hasattr(args, 'deep'):
+    if not hasattr(args, "deep"):
         args.deep = False
 
-    # 委托给 cmd_report 逻辑
     return cmd_report(args)
 
 

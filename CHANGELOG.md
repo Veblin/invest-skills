@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### 工具链
+
+- **版本号收敛**：新增 `scripts/version_sync.py`；`bump-version.sh` / `check-version.sh` 以 `pyproject.toml` 为 canonical，一键同步 5 个分发 manifest；JSON bump 保留原文件格式
+- **移除运行时版本自检**：删除 SKILL.md Step 0 与 SessionStart 钩子中的 `check-version.sh`（保留 CI / pre-commit 校验）
+- **DCF 预处理串联**：`collect_financials` 输出附加 `dcf_preprocess`（`calc_fcff` / `calc_net_debt`）
+- **cninfo 增减持**：`CNINFO_HOLDER_TIMEOUT_SEC`（默认 45s）超时跳过，避免全市场扫描阻塞采集
+
+### 审查修复（第三轮）
+
+- `collect_industry_pricing`：`collect_industry_pricing_dim` + `collect_all` 延后采集，确保 industry 传入期货映射
+- `cmd_synthesize` 默认 dims 对齐 `_DEFAULT_DIMS`（含 `holder_changes`）
+- `_has_price_signal` 非 dict 安全；`calc_beta` 用 epsilon 判断零方差；`cmd_bump` 失败回滚
+- `_norm_date` 移除不可达第三正则
+- 报告增强提示：`估值分位` → `PE 历史位置`（模块 1 外措辞规范）
+- Step 8 e2e：`test_v017_e2e.py`（`INVEST_RUN_E2E=1` 时跑四标的 collect/report 冒烟）
+
+## v0.1.7 (2026-07-04)
+
+v0.1.7 扩展 Tushare 三表 DCF 字段、新增股东增减持与行业定价采集维度，并为 v0.1.8 DCF 模型预埋估值预处理函数。
+
+### 核心新增
+
+- **P0-1 Tushare 三表扩字段** (`collector.py`)：income/cashflow/balancesheet 补齐 EBIT、CapEx、净债务等 DCF 所需字段
+- **P0-2 holder_changes 维度**：三源（Tushare + akshare ths/cninfo）股东增减持采集、去重合并与报告渲染
+- **P1-1 chain.py 期货映射**：`get_futures_for_industry()` 复用长度降序关键词匹配
+- **P1-2 industry_pricing 维度**：期货现货价格 + 公司新闻涨价信号，挂载至 `attach_phase2_extras`
+- **P2 估值预处理** (`valuation.py`)：`calc_wacc` / `calc_fcff` / `calc_net_debt` / `calc_ev_to_equity` / `calc_beta`
+- **P3 WebSearch 白名单** (`env.py` `PRICE_NEWS_WHITELIST`) + `ReportEnhancer` 触发器统一
+- **P3-3 价格异常检测原型** (`_detect_price_shock`)：近 60 日涨跌停检测，接入 `attach_phase2_extras`
+
+### 审查修复
+
+- `_merge_holder_records`：修正 source_rank key、同源同日多笔不合并、cross_check 仅计 distinct 源
+- `calc_wacc`：debt_weight 缺失时不再输出假 50/50 权重，退化为 cost_of_equity 并附 warning
+- 渲染：NaN avg_price 显示为 `—`；章节编号改为 3d/3e 避免与市场结构 3b/3c 冲突
+- 期货趋势：双日期 spot 对比实现 `trend_30d`（替代恒为"数据不足"的占位）
+- `ReportEnhancer` 输出可操作建议至报告头部（涨价 WebSearch / 估值分位 / 价格 shock）
+- akshare ths `change_vol` 文本解析为数值
+- 移除未使用依赖 `pypdf` / `pycryptodome`（PDF 能力留待 v0.1.9 report_audit）
+
+### 审查修复（第二轮）
+
+- `_is_valuation_extreme` 改为从 `dimensions` 读取估值分位（修复触发器死代码）
+- 涨价新闻增加近 30 日日期过滤
+- `industry_pricing` 渲染拆分：期货→模块 1、涨价信号→模块 2
+- `brief` 模式补充股东增减持章节
+- SKILL.md 补充 WebSearch 白名单指引
+
 ## v0.1.6 (2026-07-02)
 
 v0.1.6 引入事件驱动引擎、Peer 对标 CLI、合规 Lint 引擎、TickFlow K-line 数据源及 Manifest 指纹系统。

@@ -1,6 +1,6 @@
 [project]
 name = "investment-learning-skill"
-version = "0.1.6"
+version = "0.1.7"
 description = "A股个股调研多因子投研助手 — Tushare + FRED 数据采集，产出带来源追溯的 Markdown 研究备忘录"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -25,6 +25,9 @@ dev = [
 testpaths = ["skills/invest-A/tests"]
 python_files = ["test_*.py"]
 addopts = ["-q", "--tb=short"]
+markers = [
+    "e2e: live network collect/report smoke (requires INVEST_RUN_E2E=1)",
+]
 
 [tool.coverage.run]
 source = ["skills/invest-A/scripts"]

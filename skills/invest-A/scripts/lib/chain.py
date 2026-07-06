@@ -29,6 +29,19 @@ _CHAIN_MAP: dict[str, dict[str, Any]] = {
     "电子": {"position": "中游制造", "upstream": ["硅", "稀土"], "downstream": ["手机", "汽车"]},
 }
 
+# P1-1: 行业 → 期货品种映射（复用 _match_chain_keyword 做长度降序匹配）
+_INDUSTRY_FUTURES_MAP: dict[str, list[tuple[str, str]]] = {
+    "化工":       [("原油", "SC"), ("纯碱", "SA"), ("甲醇", "MA"), ("PTA", "TA"), ("聚丙烯", "PP")],
+    "玻璃":       [("玻璃", "FG"), ("纯碱", "SA")],
+    "玻纤":       [("玻璃", "FG"), ("纯碱", "SA")],
+    "钢铁":       [("铁矿石", "I"), ("螺纹钢", "RB"), ("热卷", "HC"), ("焦炭", "J")],
+    "有色金属":   [("铜", "CU"), ("铝", "AL"), ("锌", "ZN"), ("镍", "NI"), ("锡", "SN")],
+    "煤炭":       [("焦煤", "JM"), ("焦炭", "J"), ("动力煤", "ZC")],
+    "石油石化":   [("原油", "SC"), ("燃料油", "FU"), ("沥青", "BU")],
+    "新能源汽车": [("碳酸锂", "LC"), ("工业硅", "SI")],
+    "造纸":       [("纸浆", "SP")],
+}
+
 _GLOBAL_PEER_MAP: dict[str, list[str]] = {
     "汽车": ["Tesla (TSLA)", "Toyota (TM)", "Volkswagen (VOW3.DE)"],
     "半导体": ["NVIDIA (NVDA)", "TSMC (TSM)", "Intel (INTC)"],
@@ -44,6 +57,16 @@ def _match_chain_keyword(industry: str, mapping: dict) -> Any:
         if keyword in industry:
             return mapping[keyword]
     return None
+
+
+def get_futures_for_industry(industry: str) -> list[tuple[str, str]]:
+    """根据申万行业名称返回应追踪的期货品种列表。
+
+    复用 _match_chain_keyword() 的长度降序匹配，避免"新能源汽车"
+    被"新能源"或"汽车"的映射误命中。
+    """
+    result = _match_chain_keyword(industry, _INDUSTRY_FUTURES_MAP)
+    return result or []
 
 
 def collect_chain_context(

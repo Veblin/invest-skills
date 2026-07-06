@@ -1,7 +1,5 @@
 # CLAUDE.md — invest-A 投研助手
 
-> 当前版本：v0.1.6 | 分支：feat/v0.1.6
-
 ## 版本规则
 
 - 最多三位：`v{major}.{minor}.{patch}`
@@ -11,14 +9,18 @@
 
 ### 版本号同步（统一修改）
 
-版本号涉及三个文件：`SKILL.md`（frontmatter）、`CLAUDE.md`（正文）、`pyproject.toml`（项目配置）。**禁止逐个手动修改**，请使用统一的 bump 脚本：
+**canonical 源**：`pyproject.toml` 的 `[project].version`（运行时经 `version.py` 读取）。
+
+**禁止手动改多处版本号**。发布时只运行 bump 脚本，由 `scripts/version_sync.py` 同步 5 个分发 manifest：
 
 ```bash
-# 全部三个文件同步更新
-bash scripts/bump-version.sh 0.1.6
+bash scripts/bump-version.sh X.Y.Z
+bash skills/invest-A/scripts/check-version.sh
 ```
 
-脚本会自动完成全部替换，并提示 git commit / tag 的下一步命令。运行后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
+运行 bump 后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
+
+版本一致性仅在发布/CI 时校验（`check-version.sh`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
 
 ## 运行命令
 
@@ -33,6 +35,26 @@ report       # 生成报告
 compare      # 双标的对比
 diff         # 对比两次快照
 store list   # 历史采集记录
+```
+
+## pip 规范
+
+**永远不要在项目目录下直接运行 `pip install`** — `pip` 指向的是 Homebrew 全局 Python（`/opt/homebrew`），安装的包会污染系统环境，而且 `.venv` 里反而没有。
+
+正确的操作：
+
+| 场景 | 命令 |
+|------|------|
+| 安装/同步项目依赖 | `uv sync`（自动根据 `pyproject.toml` + `uv.lock` 同步） |
+| 添加新依赖 | 编辑 `pyproject.toml` 的 `dependencies`，然后 `uv sync` |
+| 查看已安装包 | `uv run python -m pip list` |
+| 临时运行脚本 | `uv run python script.py` |
+| 激活 .venv 后使用 pip | `source .venv/bin/activate && pip list` |
+
+验证 .venv 是否生效：
+```bash
+uv run python -c "import sys; print(sys.executable)"
+# 应输出 .../.venv/bin/python3，而不是 /opt/homebrew/...
 ```
 
 ## 数据源
@@ -153,4 +175,4 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 ## 报告路径
 
 - 数据源扩展方案：`code/reports/A股数据源扩展研究报告_v0.1.3.md`
-- 个股报告：`code/reports/{symbol}-{name}-{date}.md`
+- 个股报告：`code/reports/{symbol}-{name}/{date}.md`

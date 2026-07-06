@@ -392,3 +392,287 @@ def _build_summary_text(result: dict[str, Any]) -> str:
         lines.append(f"⚠️ {w}")
 
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════
+# P2: DCF 估值预处理函数（v0.1.7，供 v0.1.8 DCF 模型使用）
+# ═══════════════════════════════════════════════════════════════
+
+
+def calc_wacc(
+    beta: float,
+    risk_free_rate: float,
+    erp: float,
+    cost_of_debt: float | None = None,
+    tax_rate: float = 0.25,
+    debt_weight: float | None = None,
+) -> dict:
+    """CAPM WACC 计算。
+
+    Args:
+        beta: 5Y 月度收益率 vs 沪深300 回归
+        risk_free_rate: 中国 10Y 国债收益率（小数，如 0.0265）
+        erp: 权益风险溢价（小数，如 0.058）
+        cost_of_debt: 税前债务成本。若为 None，仅返回 cost_of_equity
+        tax_rate: 有效税率
+        debt_weight: 债务权重 D/(D+E)。若为 None 且 cost_of_debt 有值，自动计算
+    """
+    cost_of_equity = risk_free_rate + beta * erp
+
+    if cost_of_debt is None:
+        return {
+            "cost_of_equity": round(cost_of_equity, 6),
+            "wacc": round(cost_of_equity, 6),
+            "components": {
+                "risk_free_rate": risk_free_rate,
+                "beta": beta,
+                "erp": erp,
+            },
+        }
+
+    cost_of_debt_after_tax = cost_of_debt * (1 - tax_rate)
+
+    if debt_weight is None:
+        return {
+            "cost_of_equity": round(cost_of_equity, 6),
+            "cost_of_debt_pre_tax": round(cost_of_debt, 6),
+            "cost_of_debt_after_tax": round(cost_of_debt_after_tax, 6),
+            "wacc": round(cost_of_equity, 6),
+            "warning": "cost_of_debt 已提供但 debt_weight 缺失，WACC 退化为 cost_of_equity",
+            "components": {
+                "risk_free_rate": risk_free_rate,
+                "beta": beta,
+                "erp": erp,
+                "tax_rate": tax_rate,
+                "cost_of_debt_pre_tax": round(cost_of_debt, 6),
+            },
+        }
+
+    equity_weight = 1 - debt_weight
+    wacc = cost_of_equity * equity_weight + cost_of_debt_after_tax * debt_weight
+
+    return {
+        "cost_of_equity": round(cost_of_equity, 6),
+        "cost_of_debt_pre_tax": round(cost_of_debt, 6),
+        "cost_of_debt_after_tax": round(cost_of_debt_after_tax, 6),
+        "wacc": round(wacc, 6),
+        "components": {
+            "risk_free_rate": risk_free_rate,
+            "beta": beta,
+            "erp": erp,
+            "tax_rate": tax_rate,
+            "debt_weight": debt_weight,
+            "equity_weight": equity_weight,
+        },
+    }
+
+
+def calc_fcff(
+    ebit: float,
+    tax_rate: float,
+    depr: float,
+    cap_ex: float,
+    delta_nwc: float = 0,
+) -> dict:
+    """FCFF 计算（单期）。
+
+    FCFF = EBIT × (1 - t) + Depr - CapEx - ΔNWC
+    所有金额单位为元。
+    """
+    nopat = ebit * (1 - tax_rate)
+    fcff = nopat + depr - cap_ex - delta_nwc
+
+    return {
+        "ebit": ebit,
+        "tax_rate": tax_rate,
+        "nopat": round(nopat, 2),
+        "depr": depr,
+        "cap_ex": cap_ex,
+        "delta_nwc": delta_nwc,
+        "fcff": round(fcff, 2),
+        "fcff_margin": round(fcff / ebit, 4) if ebit else None,
+    }
+
+
+def calc_net_debt(debt_total: float, money_cap: float) -> dict:
+    """净债务 = 带息债务 - 货币资金。
+
+    若为负值 → 净现金（企业价值计算时做加法）。
+    """
+    net = debt_total - money_cap
+    return {
+        "debt_total": debt_total,
+        "cash": money_cap,
+        "net_debt": net,
+        "is_net_cash": net < 0,
+    }
+
+
+def calc_ev_to_equity(
+    enterprise_value: float,
+    net_debt: float,
+    shares_outstanding: int,
+) -> dict:
+    """企业价值 → 每股权益价值。
+
+    Args:
+        enterprise_value: ΣPV(FCF) + PV(Terminal)
+        net_debt: 带息债务 - 货币资金（可为负=净现金）
+        shares_outstanding: 总股本（股）
+    """
+    equity_value = enterprise_value - net_debt
+    per_share = equity_value / shares_outstanding if shares_outstanding else None
+
+    return {
+        "enterprise_value": enterprise_value,
+        "net_debt": net_debt,
+        "equity_value": equity_value,
+        "shares_outstanding": shares_outstanding,
+        "per_share": round(per_share, 2) if per_share else None,
+    }
+
+
+def calc_beta(
+    stock_returns: list[float],
+    market_returns: list[float],
+) -> dict:
+    """从收益率序列计算 Beta。
+
+    Args:
+        stock_returns: 个股月度/周度收益率
+        market_returns: 基准（沪深300）同期收益率
+
+    Returns:
+        {"beta": float, "r_squared": float, "observations": int}
+    """
+    import statistics
+
+    n = min(len(stock_returns), len(market_returns))
+    if n < 12:
+        return {"beta": None, "error": f"数据点不足: {n} < 12"}
+
+    mean_s = statistics.mean(stock_returns[:n])
+    mean_m = statistics.mean(market_returns[:n])
+
+    cov = sum(
+        (s - mean_s) * (m - mean_m)
+        for s, m in zip(stock_returns[:n], market_returns[:n])
+    ) / (n - 1)
+    var_m = sum((m - mean_m) ** 2 for m in market_returns[:n]) / (n - 1)
+
+    if abs(var_m) < 1e-12:
+        return {"beta": None, "error": "市场方差为零"}
+
+    beta = cov / var_m
+
+    # R²
+    ss_res = sum(
+        (s - (mean_s + beta * (m - mean_m))) ** 2
+        for s, m in zip(stock_returns[:n], market_returns[:n])
+    )
+    ss_tot = sum((s - mean_s) ** 2 for s in stock_returns[:n])
+    r_squared = 1 - ss_res / ss_tot if ss_tot != 0 else 0
+
+    return {
+        "beta": round(beta, 4),
+        "r_squared": round(r_squared, 4),
+        "observations": n,
+    }
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+        if f != f or f in (float("inf"), float("-inf")):
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_financial_rows(financials: dict) -> list[dict]:
+    """从 financials legacy dict 提取最佳财报行列表（优先 Tushare 源）。"""
+    data = financials.get("data")
+    if isinstance(data, list) and data:
+        return [r for r in data if isinstance(r, dict)]
+
+    all_sources = financials.get("_meta", {}).get("all_sources", [])
+    tushare_rows: list[dict] = []
+    fallback_rows: list[dict] = []
+    for src in all_sources:
+        if not isinstance(src, dict):
+            continue
+        rows = src.get("data")
+        if not isinstance(rows, list) or not rows:
+            continue
+        dict_rows = [r for r in rows if isinstance(r, dict)]
+        if not dict_rows:
+            continue
+        if "tushare" in str(src.get("source", "")):
+            tushare_rows = dict_rows
+        elif not fallback_rows:
+            fallback_rows = dict_rows
+    return tushare_rows or fallback_rows
+
+
+def _latest_financial_row(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+    return max(rows, key=lambda r: str(r.get("end_date", "")))
+
+
+def _infer_tax_rate(row: dict) -> float:
+    tax = _as_float(row.get("income_tax") or row.get("tax"))
+    profit = _as_float(row.get("total_profit") or row.get("ebit"))
+    if tax is not None and profit is not None and profit > 0:
+        return max(0.0, min(0.35, tax / profit))
+    return 0.25
+
+
+def build_dcf_preprocess(financials: dict) -> dict | None:
+    """从 financials 维度最新一期数据生成 DCF 预处理块（供 v0.1.8 消费）。"""
+    row = _latest_financial_row(extract_financial_rows(financials))
+    if not row:
+        return None
+
+    out: dict[str, Any] = {
+        "end_date": row.get("end_date"),
+        "status": "partial",
+    }
+    computed: list[str] = []
+
+    ebit = _as_float(row.get("ebit"))
+    if ebit is not None:
+        depr = _as_float(row.get("depr_amort")) or 0.0
+        cap_ex_raw = _as_float(row.get("cap_ex"))
+        cap_ex = abs(cap_ex_raw) if cap_ex_raw is not None else 0.0
+        tax_rate = _infer_tax_rate(row)
+        out["fcff"] = calc_fcff(
+            ebit=ebit,
+            tax_rate=tax_rate,
+            depr=depr,
+            cap_ex=cap_ex,
+        )
+        computed.append("fcff")
+
+    debt_total = _as_float(row.get("total_liab"))
+    money_cap = _as_float(row.get("money_cap"))
+    if debt_total is not None and money_cap is not None:
+        out["net_debt"] = calc_net_debt(debt_total, money_cap)
+        computed.append("net_debt")
+
+    if not computed:
+        return None
+
+    out["computed"] = computed
+    out["status"] = "available" if len(computed) >= 2 else "partial"
+    return out
+
+
+def attach_dcf_preprocess(financials_legacy: dict) -> None:
+    """将 dcf_preprocess 块写入 financials legacy dict（原地）。"""
+    block = build_dcf_preprocess(financials_legacy)
+    if block:
+        financials_legacy["dcf_preprocess"] = block
