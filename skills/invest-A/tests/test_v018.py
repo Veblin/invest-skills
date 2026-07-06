@@ -988,3 +988,201 @@ class TestSectionValueChainPosition:
         assert "议价力线索" in text
         assert "期货" in text
         _check_no_forbidden_words(text)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Step 7: render.py F-1/F-3/F-4/F-5/F-6 分析框架模板测试
+# ═══════════════════════════════════════════════════════════════
+
+from lib.render import (  # noqa: E402
+    _check_fast_veto,
+    _section_bias_self_check,
+    _section_comprehension_statement,
+    _section_cross_validation_table,
+    _section_six_gates_scorecard,
+)
+
+FORBIDDEN_GATE_WORDS = ("通过", "不通过", "建议持有", "建议买入", "建议卖出", "建议回避")
+
+
+class TestSectionComprehensionStatement:
+    """F-1: 理解陈述（5 句固定模板）。"""
+
+    def test_normal_path_fills_slots_from_data(self):
+        fin_list = _make_canvas_financials(6)
+        dims = {
+            "financials": {"data": fin_list, "status": "available"},
+            "basic_info": {"data": {"industry": "半导体设备"}},
+            "holder_changes": _make_holder_changes([
+                {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+            ]),
+        }
+        text = _section_comprehension_statement(dims, {}, {})
+        assert "F-1 理解陈述" in text
+        assert "半导体设备" in text
+        assert "变宽" in text or "变窄" in text or "持平" in text
+        assert "我以" not in text and "买入" not in text
+        for i in range(1, 6):
+            assert f"{i}. " in text
+        _check_no_forbidden_words(text)
+
+    def test_insufficient_data_uses_placeholders_not_fabricated(self):
+        text = _section_comprehension_statement({}, {}, {})
+        assert "F-1 理解陈述" in text
+        assert text.count("[Claude report 阶段填充") >= 3
+        assert "我以" not in text and "买入" not in text
+        _check_no_forbidden_words(text)
+
+
+class TestCheckFastVeto:
+    """F-3: 快速否决 8 条中可量化子集。"""
+
+    def test_no_trigger_on_healthy_financials(self):
+        fin_list = _make_canvas_financials(6)
+        dims = {"financials": {"data": fin_list, "status": "available"}}
+        result = _check_fast_veto(dims, {})
+        assert result == []
+
+    def test_negative_ocf_streak_triggers(self):
+        rows = []
+        for i, ocf in enumerate([-5.0, -6.0, -7.0]):
+            rows.append({
+                "end_date": f"2025{['0331', '0630', '0930'][i]}",
+                "n_cashflow_act": ocf,
+                "revenue": 100.0,
+                "net_profit": 5.0,
+            })
+        dims = {"financials": {"data": rows, "status": "available"}}
+        result = _check_fast_veto(dims, {})
+        assert any("经营性现金流为负" in r for r in result)
+        for r in result:
+            assert "不买" not in r and "应回避" not in r and "⚠️" in r
+
+    def test_negative_net_profit_streak_no_improvement_triggers(self):
+        rows = []
+        for i, np_v in enumerate([-10.0, -12.0, -15.0]):
+            rows.append({
+                "end_date": f"2025{['0331', '0630', '0930'][i]}",
+                "net_profit": np_v,
+                "revenue": 100.0,
+            })
+        dims = {"financials": {"data": rows, "status": "available"}}
+        result = _check_fast_veto(dims, {})
+        assert any("净利润为负且未见好转" in r for r in result)
+
+    def test_high_debt_ratio_triggers(self):
+        rows = [{
+            "end_date": "20251231",
+            "total_liab": 95.0,
+            "total_assets": 100.0,
+            "revenue": 100.0,
+        }]
+        dims = {"financials": {"data": rows, "status": "available"}}
+        result = _check_fast_veto(dims, {})
+        assert any("资产负债率" in r for r in result)
+
+    def test_fcff_cumulative_negative_triggers(self):
+        rows = []
+        for i, fcff in enumerate([-3.0, -4.0, -2.0]):
+            rows.append({
+                "end_date": f"2025{['0331', '0630', '0930'][i]}",
+                "fcff": fcff,
+                "revenue": 100.0,
+            })
+        dims = {"financials": {"data": rows, "status": "available"}}
+        result = _check_fast_veto(dims, {})
+        assert any("FCFF 累计为负" in r for r in result)
+
+    def test_empty_financials_returns_empty_list(self):
+        assert _check_fast_veto({}, {}) == []
+        assert _check_fast_veto({"financials": {}}, {}) == []
+
+    def test_falls_back_to_collection_financials(self):
+        """dims 中无 financials 时，退化读取 collection["financials"]。"""
+        rows = [{
+            "end_date": "20251231",
+            "total_liab": 99.0,
+            "total_assets": 100.0,
+        }]
+        result = _check_fast_veto({}, {"financials": {"data": rows}})
+        assert any("资产负债率" in r for r in result)
+
+
+class TestSectionSixGatesScorecard:
+    """F-4: 六关评分速览——最高风险合规点：无通过/不通过二元判决，无仓位动作映射。"""
+
+    def _dims(self) -> dict:
+        fin_list = _make_canvas_financials(6)
+        return {
+            "financials": {"data": fin_list, "status": "available"},
+            "holder_changes": _make_holder_changes([
+                {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+            ]),
+        }
+
+    def test_normal_path_renders_six_gates(self):
+        text = _section_six_gates_scorecard(self._dims(), {}, {})
+        assert "F-4 六关评分速览" in text
+        for gate in ("生意", "护城河", "管理层", "财务", "估值", "风险"):
+            assert f"| {gate} " in text
+        assert "不构成投资建议" in text
+        assert "不代表买卖或持有的行动判断" in text
+        _check_no_forbidden_words(text)
+
+    def test_no_binary_pass_fail_or_action_words(self):
+        """硬性合规：不得出现通过/不通过/建议持有/建议买入/建议卖出等字样。"""
+        text = _section_six_gates_scorecard(self._dims(), {}, {})
+        for word in FORBIDDEN_GATE_WORDS:
+            assert word not in text, f"F-4 输出中发现违规字样 {word!r}"
+        _check_no_forbidden_words(text)
+
+    def test_insufficient_data_path_still_renders_without_crash(self):
+        text = _section_six_gates_scorecard({}, {}, {})
+        assert "F-4 六关评分速览" in text
+        assert "数据不足" in text
+        for word in FORBIDDEN_GATE_WORDS:
+            assert word not in text
+        _check_no_forbidden_words(text)
+
+    def test_management_gate_includes_confidence_caveat(self):
+        text = _section_six_gates_scorecard(self._dims(), {}, {})
+        assert "置信度中等" in text
+
+
+class TestSectionBiasSelfCheck:
+    """F-5: 偏误自查表骨架。"""
+
+    def test_renders_five_bias_rows(self):
+        text = _section_bias_self_check()
+        assert "F-5 偏误自查表" in text
+        for name in ("叙事偏误", "锚定偏误", "幸存者偏误", "近因偏误", "确认偏误"):
+            assert name in text
+        assert text.count("[Claude report 阶段基于本次分析过程填写") >= 10
+        _check_no_forbidden_words(text)
+
+
+class TestSectionCrossValidationTable:
+    """F-6: 交叉验证记录表（占位）。"""
+
+    def test_renders_only_dims_with_cross_validation(self):
+        dims = {
+            "financials": {"data": [], "_meta": {
+                "cross_validation": "convergence", "cross_validation_detail": "净利润与经营现金流一致",
+            }},
+            "valuation": {"data": [], "_meta": {
+                "cross_validation": "divergence", "cross_validation_detail": "PE 分位与 PB 分位方向不一致",
+            }},
+            "kline": {"data": []},  # 无 cross_validation，应跳过
+        }
+        text = _section_cross_validation_table(dims)
+        assert "F-6 交叉验证记录表" in text
+        assert "financials" in text
+        assert "valuation" in text
+        assert "kline" not in text
+        assert "v0.1.9 rigor 填充" in text
+        _check_no_forbidden_words(text)
+
+    def test_no_dims_with_cross_validation_returns_empty_string(self):
+        dims = {"financials": {"data": [], "_meta": {}}}
+        assert _section_cross_validation_table(dims) == ""
+        assert _section_cross_validation_table({}) == ""

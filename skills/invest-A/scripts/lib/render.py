@@ -1727,6 +1727,11 @@ def _section_snapshot(
         lines.append("")
         lines.append(futures_block)
 
+    cv_table = _section_cross_validation_table(dims)
+    if cv_table:
+        lines.append("")
+        lines.append(cv_table)
+
     return "\n".join(lines)
 
 
@@ -2252,6 +2257,424 @@ def _section_value_chain_position(
         lines.append("**议价力线索**：⚠️ industry_pricing 维度数据不可得，无法补充议价力观察窗口。")
         lines.append("")
 
+    return "\n".join(lines)
+
+
+def _section_comprehension_statement(
+    dims: dict, market_structure: dict, val_cache: dict,
+) -> str:
+    """F-1: 理解陈述（5 句固定模板，挂载于报告末尾）。
+
+    来源: 借鉴报告 §3.4/§8.1（镜子测试合规改写）。``market_structure`` 参数为固定签名的
+    一部分（预留未来扩展，如结合北向/行业景气度补充生意本质判断），当前实现仅依赖 ``dims``
+    与 ``val_cache``。
+
+    合规（AGENTS.md 约束1）：禁止出现"我以 X 元买入"类表述；每句尽量用已采集数据自动填充，
+    数据不足的槽位保留占位符标注"[Claude report 阶段填充]"，不臆测生意本质/护城河方向/
+    管理层意图。
+    """
+    del market_structure  # 预留扩展参数，当前版本未使用
+
+    from lib.technical import sort_kline_asc
+
+    fin_dim = dims.get("financials") or {}
+    fin_list = fin_dim.get("data") if isinstance(fin_dim.get("data"), list) else []
+    fin_sorted = sort_kline_asc(fin_list) if fin_list else []
+
+    basic = dims.get("basic_info") or {}
+    basic_data = basic.get("data") if isinstance(basic.get("data"), dict) else {}
+    industry = basic_data.get("industry") or basic_data.get("行业")
+
+    lines = [
+        "### F-1 理解陈述", "",
+        "> 五句固定模板，尽量用已采集数据自动填充；数据不足的槽位保留占位符，不编造。",
+        "",
+    ]
+
+    # 1. 生意本质 + 核心变量
+    if industry:
+        lines.append(
+            f"1. 这门生意的本质是___，所属行业为**{industry}**"
+            "[来源: basic_info.industry]，核心变量是___"
+            "（可参考 A-4 商业模式画布中规模效应/增长驱动评分作为量化线索）。"
+            "[Claude report 阶段填充——生意本质的定性描述需人工综合判断]"
+        )
+    else:
+        lines.append(
+            "1. 这门生意的本质是___，核心变量是___。"
+            "[Claude report 阶段填充——basic_info.industry 不可得]"
+        )
+
+    # 2. 护城河宽窄
+    roe_first = _fin_field_num(fin_sorted[0], "roe") if fin_sorted else None
+    roe_now = _fin_field_num(fin_sorted[-1], "roe") if fin_sorted else None
+    if len(fin_sorted) >= 2 and roe_first is not None and roe_now is not None:
+        if roe_now > roe_first + 2:
+            trend = "变宽"
+        elif roe_now < roe_first - 2:
+            trend = "变窄"
+        else:
+            trend = "持平"
+        lines.append(
+            "2. 护城河来自___（具体来源[Claude report 阶段填充]），"
+            f"当前在**{trend}**，依据是 ROE 由 {roe_first:.2f}% → {roe_now:.2f}%"
+            f"（近 {len(fin_sorted)} 期）[来源: financials.roe]。"
+        )
+    else:
+        lines.append(
+            "2. 护城河来自___，当前在变宽/变窄/持平___，依据是___。"
+            "[Claude report 阶段填充——ROE 历史序列不足 2 期，无法判断趋势]"
+        )
+
+    # 3. 管理层公开记录（事实陈述）
+    from lib.scoring import management_ability_proxy
+    holder_changes = dims.get("holder_changes") or {}
+    mgmt = management_ability_proxy(fin_list, holder_changes)
+    if mgmt.get("score") is not None:
+        lines.append(
+            "3. 管理层在资本配置与经营效率方面的公开记录显示：代理评分 "
+            f"{mgmt['score']:.1f}/100（{mgmt.get('note', '')}）"
+            "[来源: lib.scoring.management_ability_proxy]（事实陈述，非信任/不信任二元判断）。"
+        )
+    else:
+        lines.append(
+            "3. 管理层在___方面的公开记录显示___（事实陈述）。"
+            "[Claude report 阶段填充——management_ability_proxy 因数据不足未生成量化代理评分]"
+        )
+
+    # 4. 估值位置 + DCF 隐含假设
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    val_desc = None
+    if pe_pct is not None:
+        val_desc = f"PE 历史分位 {pe_pct:.1f}%（{pe_zone or '—'}）"
+        if pb_pct is not None:
+            val_desc += f"，PB 历史分位 {pb_pct:.1f}%"
+        val_desc += " [来源: valuation 维度]"
+
+    dcf_desc = None
+    if fin_dim:
+        from lib.valuation import scenario_fcff
+        base = scenario_fcff(fin_dim, scenario="base")
+        if not base.get("error"):
+            a = base.get("assumptions", {})
+            dcf_desc = (
+                f"DCF Base 情景隐含营收增速 {a.get('revenue_growth', 0) * 100:.1f}%、"
+                f"毛利率假设 {a.get('gross_margin_assumption', 0):.1f}%"
+                "[来源: lib.valuation.scenario_fcff]"
+            )
+    if val_desc or dcf_desc:
+        lines.append(
+            "4. 当前估值相当于历史/同行"
+            + (val_desc or "___")
+            + "位置，DCF 隐含假设是"
+            + (dcf_desc or "___")
+            + "。"
+        )
+    else:
+        lines.append(
+            "4. 当前估值相当于历史/同行___位置，DCF 隐含假设是___。"
+            "[Claude report 阶段填充——估值历史分位与 DCF 情景假设均不可得]"
+        )
+
+    # 5. 最大的不确定性 + 下一观察节点（无法自动推断，固定占位）
+    lines.append(
+        "5. 最大的不确定性是___，下一观察节点是___。"
+        "[Claude report 阶段基于本次分析过程填写——需结合模块 5 市场分歧与模块 7 风险"
+        "综合判断，本引擎不做主观推断]"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _check_fast_veto(dims: dict, collection: dict) -> list[str]:
+    """F-3: 快速否决 8 条中可自动量化检测的子集，返回触发条目列表（可为空）。
+
+    来源: 借鉴报告 §3.3/§8.2。可自动化的 4 项（其余条目由 Claude 在 report 阶段基于
+    定性证据判断，见 SKILL.md 说明）：
+      1. 近 5 年（或可得年数）FCF 累计为负（financials.fcff，退化到经营现金流）
+      2. 连续 3 期经营性现金流为负
+      3. 连续 3 期净利润为负且未见好转迹象
+      4. 资产负债率 >90%（total_liab/total_assets）
+
+    合规（AGENTS.md 约束1）：触发条目仅用 ⚠️ 陈述量化事实，不使用"不买"/"应回避"等动作词。
+    """
+    triggered: list[str] = []
+
+    fin_dim = (dims or {}).get("financials") or (collection or {}).get("financials") or {}
+    fin_list = fin_dim.get("data") if isinstance(fin_dim, dict) else None
+    if not isinstance(fin_list, list) or not fin_list:
+        return triggered
+
+    from lib.technical import sort_kline_asc
+    rows = sort_kline_asc(fin_list)
+
+    # 1. FCF 累计为负（优先 fcff，字段不可得时退化为经营现金流）
+    fcff_vals = [v for v in (_fin_field_num(r, "fcff") for r in rows) if v is not None]
+    if len(fcff_vals) >= 3:
+        total = sum(fcff_vals)
+        if total < 0:
+            triggered.append(
+                f"⚠️ 近 {len(fcff_vals)} 期可得 FCFF 累计为负（合计 {total:.2f}）"
+                "[来源: financials.fcff]"
+            )
+    else:
+        ocf_vals = [
+            v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in rows) if v is not None
+        ]
+        if len(ocf_vals) >= 3 and sum(ocf_vals) < 0:
+            triggered.append(
+                f"⚠️ FCFF 字段不可得，退化以经营现金流近 {len(ocf_vals)} 期累计为负"
+                f"（合计 {sum(ocf_vals):.2f}）代理观察[来源: financials.n_cashflow_act]"
+            )
+
+    # 2. 连续 3 期经营性现金流为负
+    ocf_series = [v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in rows) if v is not None]
+    if len(ocf_series) >= 3:
+        last3 = ocf_series[-3:]
+        if all(v < 0 for v in last3):
+            triggered.append(
+                f"⚠️ 连续 3 期经营性现金流为负（{', '.join(f'{v:.2f}' for v in last3)}）"
+                "[来源: financials.n_cashflow_act]"
+            )
+
+    # 3. 连续 3 期净利润为负且未见好转迹象
+    np_series = [v for v in (_fin_field_num(r, "net_profit") for r in rows) if v is not None]
+    if len(np_series) >= 3:
+        last3 = np_series[-3:]
+        if all(v < 0 for v in last3) and last3[-1] <= last3[0]:
+            triggered.append(
+                f"⚠️ 连续 3 期净利润为负且未见好转迹象（{', '.join(f'{v:.2f}' for v in last3)}）"
+                "[来源: financials.net_profit]"
+            )
+
+    # 4. 资产负债率 >90%
+    latest = rows[-1]
+    total_liab = _fin_field_num(latest, "total_liab")
+    total_assets = _fin_field_num(latest, "total_assets")
+    if total_liab is not None and total_assets:
+        ratio = total_liab / total_assets * 100
+        if ratio > 90:
+            triggered.append(
+                f"⚠️ 最新报告期资产负债率 {ratio:.1f}%（>90%）"
+                "[来源: financials.total_liab/total_assets]"
+            )
+
+    return triggered
+
+
+def _six_gate_row(name: str, score: float | None, label: str, note: str) -> str:
+    score_s = f"{score:.0f}/100" if score is not None else "—"
+    return f"| {name} | {label}（{score_s}） | {note} |"
+
+
+def _section_six_gates_scorecard(
+    dims: dict, collection: dict, val_cache: dict,
+) -> str:
+    """F-4: 六关评分速览（生意/护城河/管理层/财务/估值/风险）。
+
+    来源: 借鉴报告 §6.1 investment-checklist、§8.5。
+
+    合规红线（CLAUDE.md 六关评分规则，最容易违规的一条）：**无通过/不通过二元判决，
+    无仓位动作映射**——每关仅用分数或描述性档位（较强/中等/较弱等）呈现，末尾必须附加
+    合规声明。
+    """
+    from lib.scoring import customer_lockin_score, management_ability_proxy, revenue_quality_score
+
+    fin_dim = dims.get("financials") or {}
+    fin_list = fin_dim.get("data") if isinstance(fin_dim.get("data"), list) else []
+    holder_changes = dims.get("holder_changes") or {}
+    market_structure = collection.get("market_structure") or {}
+
+    def grade(score: float | None) -> str:
+        if score is None:
+            return "数据不足"
+        if score >= 70:
+            return "较强"
+        if score >= 40:
+            return "中等"
+        return "较弱"
+
+    def avg(*vals: float | None) -> float | None:
+        v = [x for x in vals if x is not None]
+        return round(sum(v) / len(v), 1) if v else None
+
+    # 生意：复用 A-4 商业模式画布中规模效应/增长驱动/周期性评分均值
+    scale_score, _n1, _s1 = _canvas_scale_effect(fin_list)
+    growth_score, _n2, _s2 = _canvas_growth_driver(fin_list)
+    cyc_score, _n3, _s3 = _canvas_cyclicality(fin_list)
+    business_score = avg(scale_score, growth_score, cyc_score)
+
+    # 护城河：复用 A-4 客户锁定/收入模式评分
+    rq = revenue_quality_score(fin_list)
+    lockin = customer_lockin_score(fin_list)
+    moat_score = avg(rq.get("score"), lockin.get("score"))
+
+    # 管理层：复用 management_ability_proxy()，附带其"置信度中等"说明
+    mgmt = management_ability_proxy(fin_list, holder_changes)
+    mgmt_score = mgmt.get("score")
+    mgmt_note = mgmt.get("note", "")
+
+    # 财务：近期毛利率稳定性 + OCF/净利润覆盖评分综合（复用 revenue_quality_score 子信号）
+    ocf_detail = (rq.get("detail") or {}).get("ocf_coverage") or {}
+    margin_detail = (rq.get("detail") or {}).get("margin_stability") or {}
+    fin_score = avg(ocf_detail.get("score"), margin_detail.get("score"))
+
+    # 估值：复用 PE/PB 历史分位（呈现位置，非贵贱判断，不与"强弱"混用）
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    if pe_pct is not None:
+        val_desc = f"PE 历史分位 {pe_pct:.1f}%（{pe_zone or '—'}）"
+        if pb_pct is not None:
+            val_desc += f"，PB 历史分位 {pb_pct:.1f}%"
+        val_desc += " [来源: valuation 历史分位]"
+        if pe_pct >= 70:
+            val_grade = "历史高位"
+        elif pe_pct <= 30:
+            val_grade = "历史低位"
+        else:
+            val_grade = "历史中位"
+    else:
+        val_desc, val_grade = "PE/PB 历史分位不可得", "数据不足"
+
+    # 风险：复用 risk_data 触发数量
+    risk_data = _v3_build_risk_report(collection, dims, market_structure, val_cache=val_cache)
+    triggered = risk_data.get("triggered_count", 0) or 0
+    coverage = risk_data.get("coverage") or {}
+    total_signals = sum(v for v in coverage.values() if isinstance(v, (int, float))) if isinstance(coverage, dict) else 0
+    if total_signals:
+        risk_desc = f"触发 {triggered}/{total_signals} 项定量风险信号 [来源: lib.risk_scanner.risk_report]"
+    else:
+        risk_desc = f"触发 {triggered} 项定量风险信号 [来源: lib.risk_scanner.risk_report]"
+    if triggered == 0:
+        risk_grade = "较少触发"
+    elif triggered <= 2:
+        risk_grade = "中等触发"
+    else:
+        risk_grade = "较多触发"
+
+    lines = ["### F-4 六关评分速览", ""]
+    lines.append(
+        "> 巴菲特六关框架（生意/护城河/管理层/财务/估值/风险）的多维度事实与量化评分汇总呈现，"
+        "档位为描述性分档，不做二元判定，不含任何仓位或操作动作映射。"
+    )
+    lines.append("")
+    lines.append("| 关口 | 档位 | 依据 |")
+    lines.append("|------|:---:|------|")
+    lines.append(_six_gate_row(
+        "生意", business_score, grade(business_score),
+        "规模效应/增长驱动/周期性评分均值 [来源: A-4 商业模式画布规则推断]",
+    ))
+    lines.append(_six_gate_row(
+        "护城河", moat_score, grade(moat_score),
+        "收入模式质量 + 客户锁定评分均值 "
+        "[来源: lib.scoring.revenue_quality_score / customer_lockin_score]",
+    ))
+    lines.append(_six_gate_row(
+        "管理层", mgmt_score, grade(mgmt_score),
+        f"管理层能力代理评分（{mgmt_note}） [来源: lib.scoring.management_ability_proxy]",
+    ))
+    lines.append(_six_gate_row(
+        "财务", fin_score, grade(fin_score),
+        "毛利率稳定性 + OCF/净利润覆盖评分均值 [来源: lib.scoring.revenue_quality_score 子信号]",
+    ))
+    lines.append(f"| 估值 | {val_grade} | {val_desc} |")
+    lines.append(f"| 风险 | {risk_grade} | {risk_desc} |")
+    lines.append("")
+    lines.append(
+        "> 本速览为多维度事实与量化评分的汇总呈现，不构成投资建议，"
+        "不代表买卖或持有的行动判断。"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+_BIAS_SELF_CHECK_ITEMS: tuple[tuple[str, str], ...] = (
+    (
+        "叙事偏误",
+        '本次分析是否被一个流畅的故事线（如"国产替代""赛道逻辑"）牵引，而忽略了与故事线矛盾的数据点？',
+    ),
+    (
+        "锚定偏误",
+        "本次分析是否过度锚定于某个历史价格/估值倍数/机构一致预期，而未独立评估当前基本面变化？",
+    ),
+    (
+        "幸存者偏误",
+        "本次分析引用的可比公司/历史案例是否仅包含成功案例，遗漏了同类型已失败或退市的公司？",
+    ),
+    (
+        "近因偏误",
+        "本次分析是否被最近一次财报/事件/涨跌幅过度影响判断权重，而低估了更长周期的趋势？",
+    ),
+    (
+        "确认偏误",
+        "本次分析是否只检索了支持初始结论的证据，而未主动搜索反驳证据（见模块 5 Bull-Bear 空方论点）？",
+    ),
+)
+
+
+def _section_bias_self_check() -> str:
+    """F-5: 偏误自查表（5 行固定模板，报告末尾）。
+
+    来源: 借鉴报告 §10.3.4。这是引导 Claude 在生成报告时自我反思的框架，非引擎自动计算
+    的内容——本函数只渲染表格骨架，"具体表现"与"自我纠正措施"两列固定标注
+    "[Claude report 阶段基于本次分析过程填写]"。
+    """
+    lines = [
+        "### F-5 偏误自查表", "",
+        "> 引导性框架：由 Claude 在 report 阶段基于本次分析的实际过程填写「具体表现」与"
+        "「自我纠正措施」两列，本函数仅渲染表格骨架，不做自动判断。",
+        "",
+        "| 偏误类型 | 具体表现 | 自我纠正措施 |",
+        "|---------|---------|-------------|",
+    ]
+    for name, prompt in _BIAS_SELF_CHECK_ITEMS:
+        lines.append(
+            f"| {name} | [Claude report 阶段基于本次分析过程填写——自查提示：{prompt}] "
+            "| [Claude report 阶段基于本次分析过程填写] |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _section_cross_validation_table(dims: dict) -> str:
+    """F-6: 交叉验证记录表（轻量占位，挂载于模块 1 当前状态快照内）。
+
+    来源: 借鉴报告 §7.1/§2.1。遍历 ``dims`` 中各维度的 legacy dict，读取
+    ``dim["_meta"]["cross_validation"]``（"convergence"|"divergence"|None）与
+    ``dim["_meta"]["cross_validation_detail"]``；只渲染有交叉验证结果的维度，没有结果的
+    维度跳过（不是所有维度都有多源交叉验证）。"计算值"列固定占位，待 v0.1.9 rigor 模块
+    自动补全，本函数不做数值计算。
+    """
+    rows: list[tuple[str, str, str]] = []
+    for name, dim in (dims or {}).items():
+        if not isinstance(dim, dict):
+            continue
+        meta = dim.get("_meta") or {}
+        cv_status = meta.get("cross_validation")
+        if not cv_status:
+            continue
+        detail = meta.get("cross_validation_detail") or "—"
+        if cv_status == "convergence":
+            label = "🟢 印证"
+        elif cv_status == "divergence":
+            label = "🟡 分歧"
+        else:
+            label = f"🟡 {cv_status}"
+        rows.append((name, label, detail))
+
+    if not rows:
+        return ""
+
+    lines = ["### F-6 交叉验证记录表（占位）", ""]
+    lines.append(
+        "> 汇总各维度采集层已完成的交叉验证结果；「计算值」列待 v0.1.9 rigor 模块自动补全，"
+        "当前版本仅呈现采集阶段的一致性/分歧标注，不做数值计算。"
+    )
+    lines.append("")
+    lines.append("| 维度 | 交叉验证状态 | 详情 | 计算值(v0.1.9填充) |")
+    lines.append("|------|------|------|------|")
+    for name, label, detail in rows:
+        lines.append(f"| {name} | {label} | {detail} | —（v0.1.9 rigor 填充） |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -6064,6 +6487,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
             ),
             _section_technical_brief(dims, val_cache=val_cache),
+            _section_six_gates_scorecard(dims, collection, val_cache),
+            _section_comprehension_statement(dims, market_structure, val_cache),
+            _section_bias_self_check(),
             _references_appendix(collection),
             _risk_footer(),
         ])
