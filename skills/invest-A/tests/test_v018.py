@@ -8,6 +8,9 @@ Step 4 覆盖: render.py _section_dcf_valuation()（D-④/D-⑤/D-⑥ 渲染，
 Step 5 覆盖: render.py A-1 (_section_holder_changes 言行对照增强) /
              A-2 (_section_ai_confidence_matrix) /
              A-3 (_generate_custom_unknowns)。
+Step 6 覆盖: render.py A-4 (_section_business_model_canvas) /
+             A-5 (_section_management_assessment) /
+             A-6 (_section_value_chain_position)。
 """
 
 from __future__ import annotations
@@ -787,4 +790,201 @@ class TestGenerateCustomUnknowns:
         text = _section_risk_uncertainty({}, "000001", dims, {}, risk_data)
         assert "Known Unknowns" in text
         assert "国产化率" in text
+        _check_no_forbidden_words(text)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Step 6: render.py A-4/A-5/A-6 分析深度增强模块测试
+# ═══════════════════════════════════════════════════════════════
+
+from lib.render import (  # noqa: E402
+    _section_business_model_canvas,
+    _section_management_assessment,
+    _section_value_chain_position,
+)
+
+
+def _make_canvas_financials(n: int = 6) -> list[dict]:
+    """构造营收稳步增长、毛利率基本稳定、ROE 波动小的财报序列（商业模式画布正常路径）。"""
+    rows = []
+    base_year = 2023
+    for i in range(n):
+        year = base_year + i // 4
+        q = ["0331", "0630", "0930", "1231"][i % 4]
+        rows.append({
+            "end_date": f"{year}{q}",
+            "revenue": 100.0 + i * 15.0,
+            "grossprofit_margin": 45.0 + (i % 2) * 0.5,
+            "accounts_receiv": 10.0 + i * 1.0,
+            "net_profit": 15.0 + i * 3.0,
+            "n_cashflow_act": 18.0 + i * 3.0,
+            "ebit": 20.0 + i * 4.0,
+            "total_assets": 200.0 + i * 10.0,
+            "total_cur_liab": 50.0,
+            "cap_ex": 5.0,
+            "roe": 10.0 + i * 1.0,
+            "netprofit_margin": 15.0 + i * 0.5,
+        })
+    return rows
+
+
+class TestSectionBusinessModelCanvas:
+    """A-4: 商业模式画布 7 维度评分。"""
+
+    def test_normal_path_renders_all_seven_dimensions(self):
+        fin_list = _make_canvas_financials(6)
+        holder_changes = _make_holder_changes([
+            {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+        ])
+        chain = {
+            "industry": "半导体", "chain_position": "中游制造",
+            "upstream": ["硅片", "设备"], "downstream": ["电子消费品", "汽车"],
+        }
+        text = _section_business_model_canvas(fin_list, holder_changes, chain)
+        assert "商业模式画布" in text
+        for dim in ("收入模式", "客户锁定", "规模效应", "技术壁垒", "周期性", "增长驱动", "资本密集度"):
+            assert dim in text
+        assert "★" in text
+        assert "核心矛盾" in text
+        # 技术壁垒与资本密集度当前引擎恒定数据不足，不得裸给星级
+        assert "数据不足" in text
+        _check_no_forbidden_words(text)
+
+    def test_every_star_rating_has_accompanying_rationale(self):
+        """硬性合规：不能出现裸★评分，每行必须有依据文本。"""
+        fin_list = _make_canvas_financials(6)
+        text = _section_business_model_canvas(fin_list, {}, {})
+        for line in text.splitlines():
+            if line.startswith("| ") and "★" in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                assert len(cells) == 3
+                # 第三列依据文本不能为空
+                assert cells[2], f"裸星级评分（无依据）: {line!r}"
+
+    def test_insufficient_data_path_empty_financials(self):
+        text = _section_business_model_canvas([], {}, {})
+        assert "商业模式画布" in text
+        assert text.count("数据不足") >= 7  # 7 个维度均应标注数据不足
+        assert "可计算维度不足 2 个" in text
+        assert "★" not in text
+        _check_no_forbidden_words(text)
+
+    def test_capital_intensity_and_tech_barrier_always_insufficient(self):
+        """v0.1.7 未采集 fix_assets/研发数据字段，这两维度即使财务数据充足也应标数据不足。"""
+        fin_list = _make_canvas_financials(6)
+        text = _section_business_model_canvas(fin_list, {}, {})
+        lines_by_dim = {ln.split("|")[1].strip(): ln for ln in text.splitlines() if ln.startswith("| ")}
+        assert "数据不足" in lines_by_dim["技术壁垒"]
+        assert "数据不足" in lines_by_dim["资本密集度"]
+        _check_no_forbidden_words(text)
+
+
+class TestSectionManagementAssessment:
+    """A-5: 管理层完整评估。"""
+
+    def test_normal_path_with_timeline_and_capital_allocation(self):
+        fin_list = _make_canvas_financials(6)
+        holder_changes = _make_holder_changes([
+            {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+            {"ann_date": "20250201", "holder_name": "股东乙", "direction": "增持", "source": "akshare"},
+            {"ann_date": "20250301", "holder_name": "股东丙", "direction": "增持", "source": "tushare"},
+        ])
+        events = [
+            {"date": "2026-01-15", "title": "关于回购公司股份的公告"},
+            {"date": "2026-02-01", "title": "关于收购XX资产的公告"},
+            {"date": "2026-03-01", "title": "与决策无关的其他公告"},
+        ]
+        text = _section_management_assessment(events, holder_changes, fin_list)
+        assert "管理层完整评估" in text
+        assert "关键决策时间线" in text
+        assert "回购" in text
+        assert "并购" in text
+        # 未命中关键词的公告不应纳入时间线表格行
+        assert "与决策无关的其他公告" not in text
+        assert "[待 Claude report 阶段填充]" in text
+        assert "资本配置能力" in text
+        assert "股东利益一致性" in text
+        assert "强正向" in text
+        assert "组织能力" in text
+        assert "[Claude report 阶段定性填充" in text
+        _check_no_forbidden_words(text)
+
+    def test_no_matching_events_marks_insufficient(self):
+        fin_list = _make_canvas_financials(6)
+        events = [{"date": "2026-01-01", "title": "无关的股权激励公告"}]
+        text = _section_management_assessment(events, {}, fin_list)
+        assert "数据不足" in text
+        assert "关键决策时间线" in text
+        _check_no_forbidden_words(text)
+
+    def test_empty_inputs_do_not_raise(self):
+        text = _section_management_assessment(None, {}, [])
+        assert "管理层完整评估" in text
+        assert "数据不足" in text
+        _check_no_forbidden_words(text)
+
+    def test_no_binary_trust_conclusion(self):
+        """硬性合规：不得出现「信赖/不信赖」二元结论，且声明不推断动机。"""
+        fin_list = _make_canvas_financials(6)
+        holder_changes = _make_holder_changes([
+            {"ann_date": "20250101", "holder_name": "股东甲", "direction": "减持", "source": "tushare"},
+        ])
+        events = [{"date": "2026-01-15", "title": "关于回购公司股份的公告"}]
+        text = _section_management_assessment(events, holder_changes, fin_list)
+        assert "不推断管理层主观动机" in text
+        assert "不构成对管理层的信赖/不信赖二元结论" in text
+        assert "值得信赖" not in text
+        assert "不值得信赖" not in text
+        _check_no_forbidden_words(text)
+
+
+class TestSectionValueChainPosition:
+    """A-6: 价值链位置 + 利润池分布。"""
+
+    def test_normal_path_renders_ascii_chain(self):
+        chain = {
+            "industry": "半导体", "chain_position": "中游制造",
+            "upstream": ["硅片", "设备"], "downstream": ["电子消费品", "汽车"],
+        }
+        text = _section_value_chain_position(chain, {}, 45.5)
+        assert "价值链位置" in text
+        assert "硅片" in text and "设备" in text
+        assert "电子消费品" in text and "汽车" in text
+        assert "45.50%" in text
+        assert "⚠️" in text  # 上下游行业毛利率不可得须标注
+        _check_no_forbidden_words(text)
+
+    def test_no_industry_mapping_marks_insufficient(self):
+        chain = {"industry": "不存在的冷门行业", "chain_position": None, "upstream": [], "downstream": []}
+        text = _section_value_chain_position(chain, {})
+        assert "数据不足" in text
+        _check_no_forbidden_words(text)
+
+    def test_empty_chain_returns_empty_string(self):
+        assert _section_value_chain_position({}, {}) == ""
+        assert _section_value_chain_position(None, {}) == ""  # type: ignore[arg-type]
+
+    def test_missing_company_gross_margin_marks_insufficient_not_fabricated(self):
+        chain = {
+            "industry": "白酒", "chain_position": "下游消费",
+            "upstream": ["粮食", "包装"], "downstream": ["经销商", "消费者"],
+        }
+        text = _section_value_chain_position(chain, {})
+        assert "本公司 | 数据不足" in text
+        # 不得编造行业平均毛利率等无来源数字
+        assert "行业平均毛利率" not in text
+        _check_no_forbidden_words(text)
+
+    def test_industry_pricing_futures_signal_included(self):
+        chain = {
+            "industry": "钢铁", "chain_position": "上游原料",
+            "upstream": ["铁矿石", "焦煤"], "downstream": ["建筑", "汽车"],
+        }
+        industry_pricing = {
+            "data": {"industry": "钢铁", "has_futures": True},
+            "_meta": {"all_sources": []},
+        }
+        text = _section_value_chain_position(chain, industry_pricing, 18.0)
+        assert "议价力线索" in text
+        assert "期货" in text
         _check_no_forbidden_words(text)
