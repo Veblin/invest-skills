@@ -2,25 +2,76 @@
 
 ## Unreleased
 
+- CI: `test_extract_release_notes.py` 版本号改为动态读取 `pyproject.toml`，不再硬编码
+
+## v0.1.8 (2026-07-07)
+
+v0.1.8 交付 DCF 三情景估值模型、量化评分引擎、分析框架模板和 AI 分析置信度矩阵。
+
 ### 策略调整
 
-- **LAW 6 放宽**：移除"禁止目标价"限制。允许多情景估值参考价（乐观/中性/悲观），须标注各情景的假设前提与概率权重，且注明"仅供参考，不构成投资建议"。不标注假设前提的单一目标价数字仍然禁止。涉及 CLAUDE.md（LAW 6、违规模式表）和 SKILL.md（LAW 6、措辞规范、身份声明、QC 清单）。
+- **LAW 6 放宽**：移除"禁止目标价"限制。允许多情景估值参考价（乐观/中性/悲观），须标注各情景的假设前提与概率权重，且注明"仅供参考，不构成投资建议"。不标注假设前提的单一目标价数字仍然禁止。涉及 CLAUDE.md 和 SKILL.md。
+
+### DCF 估值模型（V-1~V-6，`valuation.py`）
+
+- **`dcf_two_stage`**：两阶段 FCFF 折现模型（显式预测期 + 永续增长终值），`math.isfinite()` NaN/inf 输入校验
+- **`dcf_sensitivity`**：WACC × 终值增长率 5×5 敏感性矩阵
+- **`scenario_fcff`**：Bear/Base/Bull 三情景 FCFF 预测（营收增速/利润率/capex 强度）
+- **`triangle_check`**：自研 DCF 隐含增速 vs 机构一致预期 vs 历史 CAGR 三角对照表
+- **`_section_dcf_valuation` (D-4/D-5/D-6)**：三情景估值区间 + 三角对照 + 敏感性矩阵渲染
+
+### 量化评分引擎（S-1，`scoring.py` 新建）
+
+- **`revenue_quality_score`**：收入模式质量评分（Zha Giedt 2018 三组件应计模型 + 毛利率稳定性 + OCF 覆盖）
+- **`customer_lockin_score`**：客户锁定评分（Shy 2002 转换成本 + CFA 护城河框架）
+- **`management_ability_proxy`**：管理层能力代理评分（Demerjian et al. 2012 DEA+Tobit）
+- **`insider_signal`**：内部人买卖一致性信号聚合（≥3 主体同向 → 强信号）
+- **`confidence_matrix`**：AI 分析置信度矩阵（8 模块 × 数据覆盖率/来源丰富度/时效性/交叉验证）
+
+### 分析深度增强（A-1~A-6，`render.py`）
+
+- **A-1 内部人增强**：言行对照 + 红旗标注 + `insider_signal()` 聚合
+- **A-2 AI 置信度矩阵**：引擎自动计算，非 LLM 判断；估值判断/周期拐点固定中/低
+- **A-3 待验证问题清单**：行业/估值/事件特征 → 定制化问题模板
+- **A-4 商业模式画布**：7 维度评分（5/7 可量化，2/7 数据不足标注）
+- **A-5 管理层完整评估**：决策时间线 + 资本配置能力 5 维度 + 股东利益一致性
+- **A-6 价值链位置**：ASCII 价值链图 + 利润池分布
+
+### 框架模板（F-1~F-6，`render.py`）
+
+- **F-1 理解陈述**：5 句模板（生意/护城河/管理层/估值/不确定性）
+- **F-2 Bull/Bear 增强**：空方论点 ≥ 多方-1、每条款附带数字链条、禁止收敛为共识；估值/行业竞争自动补齐模板
+- **F-3 快速否决**：`_check_fast_veto` 硬/软触发分层（FCFF/负债率/商誉 → 硬触发跳 DCF；OCF/ROE → 软触发预警）
+- **F-4 六关评分速览**：生意/护城河/管理层/财务/估值/风险，无二元判决，无仓位映射
+- **F-5 偏误自查表**：叙事/锚定/幸存者/近因/确认偏误槽位
+- **F-6 交叉验证记录表**：各维度 cross_validation 已有结果占位
 
 ### 工具链
 
-- **版本号收敛**：新增 `scripts/version_sync.py`；`bump-version.sh` / `check-version.sh` 以 `pyproject.toml` 为 canonical，一键同步 5 个分发 manifest；JSON bump 保留原文件格式
+- **版本号收敛**：新增 `scripts/version_sync.py`；`bump-version.sh` / `check-version.sh` 以 `pyproject.toml` 为 canonical，一键同步 5 个分发 manifest
 - **移除运行时版本自检**：删除 SKILL.md Step 0 与 SessionStart 钩子中的 `check-version.sh`（保留 CI / pre-commit 校验）
-- **DCF 预处理串联**：`collect_financials` 输出附加 `dcf_preprocess`（`calc_fcff` / `calc_net_debt`）
-- **cninfo 增减持**：`CNINFO_HOLDER_TIMEOUT_SEC`（默认 45s）超时跳过，避免全市场扫描阻塞采集
 
-### 审查修复（第三轮）
+### Code Review 修复（第三轮 + v0.1.8）
 
-- `collect_industry_pricing`：`collect_industry_pricing_dim` + `collect_all` 延后采集，确保 industry 传入期货映射
-- `cmd_synthesize` 默认 dims 对齐 `_DEFAULT_DIMS`（含 `holder_changes`）
-- `_has_price_signal` 非 dict 安全；`calc_beta` 用 epsilon 判断零方差；`cmd_bump` 失败回滚
+- NaN 守卫：`dcf_two_stage` 新增 `math.isfinite()` 输入校验，防止静默 NaN 传播
+- 措辞规范："分位" → "历史位置"（F-1/F-4/A-3，模块 1 外）
+- CAGR 复用：`_section_dcf_valuation` 优先使用 `scenario_fcff` 内置 CAGR，避免双算法分歧
+- `FORBIDDEN_TARGET_PRICE_RE` 正则覆盖冒号变体
 - `_norm_date` 移除不可达第三正则
-- 报告增强提示：`估值分位` → `PE 历史位置`（模块 1 外措辞规范）
-- Step 8 e2e：`test_v017_e2e.py`（`INVEST_RUN_E2E=1` 时跑四标的 collect/report 冒烟）
+- `_has_price_signal` 非 dict 安全；`calc_beta` epsilon 零方差；`cmd_bump` 失败回滚
+- CI: `test_extract_release_notes.py` 版本号动态读取 `pyproject.toml`
+
+### 文档
+
+- `host-docs/v0.1.8/`：scope.md、dcf-valuation-design.md、implementation-plan.md、补充资料.md
+- `host-docs/开发文档评审流程.md`：六维评审方法论（待沉淀为 skill）
+- `SKILL.md`：新增 F-1~F-4 SOP 规范 + A-4/A-5 置信度标注要求
+- `CLAUDE.md`：LAW 6 放宽措辞同步
+
+### 测试
+
+- `test_v018.py`：100 tests（scoring 5 函数 + DCF 4 函数 + render 12 节 + 合规 grep）
+- `test_v017_e2e.py`：`INVEST_RUN_E2E=1` 时四标的 collect/report 冒烟
 
 ## v0.1.7 (2026-07-04)
 

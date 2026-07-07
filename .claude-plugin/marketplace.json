@@ -2,7 +2,7 @@
   "name": "invest-A-marketplace",
   "owner": {
     "name": "invest-A",
-    "url": "https://github.com/Veblin/invest-A-skill"
+    "url": "https://github.com/Veblin/invest-skills"
   },
   "metadata": {
     "description": "A股投资学习工具 — 七维度数据采集，学术级引用标准，不提供买卖建议。"
@@ -18,7 +18,7 @@
       },
       "source": "./",
       "category": "finance",
-      "homepage": "https://github.com/Veblin/invest-A-skill",
+      "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "stock-analysis", "china-stock", "equity-research", "financial-analysis", "a-share", "claude-code", "learning"]
     }
   ]
