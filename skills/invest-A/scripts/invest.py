@@ -312,7 +312,10 @@ def build_parser() -> argparse.ArgumentParser:
     ppl = sub.add_parser("plan", help="生成采集计划")
     ppl.add_argument("symbol")
     ppl.add_argument("--intent", default="deep_analysis",
-                     choices=["deep_analysis", "quick_check", "catalyst_monitor", "compare"])
+                     choices=[
+                         "deep_analysis", "quick_check", "catalyst_monitor", "compare",
+                         "sentiment_deep", "financials_deep", "game_theory",
+                     ])
     ppl.add_argument("--emit", default="json", choices=["json"])
 
     pe = sub.add_parser("evidence", help="生成结构化证据表")

@@ -116,6 +116,50 @@ INTENT_PRESETS: dict[str, AnalysisPlan] = {
             _m("financials", priority=1, weight=1.0, depth="normal", min_sources=1),
         ],
     ),
+    "sentiment_deep": AnalysisPlan(
+        symbol="",
+        intent="sentiment_deep",
+        modules=[
+            _m("quote", priority=1, weight=1.0, depth="quick", min_sources=1),
+            _m("research", priority=1, weight=0.9, depth="normal", min_sources=1),
+            _m("basic_info", priority=1, weight=0.5, depth="quick", min_sources=1),
+            _m("industry", priority=1, weight=0.7, depth="deep", min_sources=1),
+            _m("kline", priority=2, weight=0.5, depth="normal", min_sources=1),
+            _m("northbound", priority=2, weight=0.6, depth="quick", min_sources=1),
+        ],
+        notes=[
+            "Load references/sentiment.md",
+            "Template C (SentimentCard) = 卖方研报，非社媒舆情",
+        ],
+    ),
+    "financials_deep": AnalysisPlan(
+        symbol="",
+        intent="financials_deep",
+        modules=[
+            _m("financials", priority=1, weight=1.0, depth="deep", min_sources=2),
+            _m("valuation", priority=1, weight=1.0, depth="deep", min_sources=2),
+            _m("quote", priority=1, weight=0.6, depth="quick", min_sources=1),
+            _m("holder_changes", priority=2, weight=0.7, depth="normal", min_sources=1),
+            _m("basic_info", priority=2, weight=0.4, depth="quick", min_sources=1),
+        ],
+        notes=["Load references/financials.md"],
+    ),
+    "game_theory": AnalysisPlan(
+        symbol="",
+        intent="game_theory",
+        modules=[
+            _m("quote", priority=1, weight=1.0, depth="quick", min_sources=1),
+            _m("shareholders", priority=1, weight=0.8, depth="normal", min_sources=1),
+            _m("northbound", priority=1, weight=0.9, depth="normal", min_sources=1),
+            _m("holder_changes", priority=1, weight=0.8, depth="normal", min_sources=1),
+            _m("kline", priority=1, weight=0.6, depth="normal", min_sources=1),
+            _m("basic_info", priority=2, weight=0.4, depth="quick", min_sources=1),
+        ],
+        notes=[
+            "Load references/game-theory.md",
+            "Render: participant_behavior_scan (market_structure attached at render)",
+        ],
+    ),
 }
 
 

@@ -51,6 +51,22 @@ def prior_year_end_date(end_date: str) -> str:
     return f"{int(norm[:4]) - 1}{norm[4:8]}"
 
 
+def find_yoy_row(rows: list[dict], latest: dict) -> dict | None:
+    """Locate the record with same calendar month-day, one year earlier.
+
+    Compares normalized ``end_date`` values so ``2023-12-31`` matches ``20231231``.
+    """
+    yoy_end = prior_year_end_date(str(latest.get("end_date", "")))
+    if not yoy_end:
+        return None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if normalize_end_date(str(r.get("end_date", ""))) == yoy_end:
+            return r
+    return None
+
+
 def gross_margin_annual_series(fin_rows: list[dict]) -> list[tuple[str, float]]:
     """Latest gross margin per calendar year, sorted ascending."""
     by_year: dict[str, float] = {}

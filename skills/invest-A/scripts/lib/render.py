@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from lib.nums import coalesce_field, safe_float as _safe_num
+from lib.participant_scan import build_participant_behavior_section
 
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
@@ -1927,6 +1928,15 @@ def _section_dynamic_drivers(
     return "\n".join(lines)
 
 
+def _section_participant_behavior_scan(
+    collection: dict,
+    symbol: str,
+    market_structure: dict,
+    dims: dict,
+) -> str:
+    return build_participant_behavior_section(collection, symbol, market_structure, dims)
+
+
 def _section_market_structure(
     collection: dict, symbol: str, market_structure: dict, *, val_cache: dict | None = None,
 ) -> str:
@@ -2565,6 +2575,23 @@ def _section_six_gates_scorecard(
     margin_detail = (rq.get("detail") or {}).get("margin_stability") or {}
     fin_score = avg(ocf_detail.get("score"), margin_detail.get("score"))
 
+    from lib.risk_scanner import ocf_np_divergence_flag, revenue_acceleration_flag
+
+    accel = revenue_acceleration_flag(fin_list)
+    ocf_div = ocf_np_divergence_flag(fin_list)
+    soft_notes: list[str] = []
+    for label, flag in (("营收加速度", accel), ("OCF/净利背离", ocf_div)):
+        detail = flag.get("detail", "")
+        if detail and "不足" not in detail and "缺失" not in detail:
+            prefix = "软信号⚠️ " if flag.get("triggered") else "软信号 "
+            soft_notes.append(f"{prefix}{label}: {detail}")
+    fin_note = (
+        "毛利率稳定性 + OCF/净利润覆盖评分均值 "
+        "[来源: lib.scoring.revenue_quality_score 子信号]"
+    )
+    if soft_notes:
+        fin_note += "；" + "；".join(soft_notes)
+
     # 估值：复用 PE/PB 历史位置（呈现位置，非贵贱判断，不与"强弱"混用）
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
     if pe_pct is not None:
@@ -2620,7 +2647,7 @@ def _section_six_gates_scorecard(
     ))
     lines.append(_six_gate_row(
         "财务", fin_score, grade(fin_score),
-        "毛利率稳定性 + OCF/净利润覆盖评分均值 [来源: lib.scoring.revenue_quality_score 子信号]",
+        fin_note,
     ))
     lines.append(f"| 估值 | {val_grade} | {val_desc} |")
     lines.append(f"| 风险 | {risk_grade} | {risk_desc} |")
@@ -6586,6 +6613,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _section_market_structure(
                 collection, symbol, market_structure, val_cache=val_cache,
+            ),
+            _section_participant_behavior_scan(
+                collection, symbol, market_structure, dims,
             ),
             _section_events_timeline(collection),
             _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),

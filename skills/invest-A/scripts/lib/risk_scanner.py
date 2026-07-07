@@ -424,3 +424,43 @@ def risk_report(
         "known_unknowns": known_unknowns,
         "coverage": {"auto": auto_count, "total": 17},
     }
+
+
+def revenue_acceleration_flag(financials: list[dict]) -> dict[str, Any]:
+    """营收增速二阶变化软信号（F-4 财务关参考）。非买卖建议。"""
+    rows = _fin(financials or [])
+    if len(rows) < 3:
+        return {"triggered": False, "detail": "财务期数不足 3 期，无法计算营收加速度"}
+    revs = [safe_float(r.get("revenue")) for r in rows[-3:]]
+    if any(v is None for v in revs):
+        return {"triggered": False, "detail": "revenue 字段缺失"}
+    g1 = (revs[1] - revs[0]) / abs(revs[0]) * 100 if revs[0] else 0.0
+    g2 = (revs[2] - revs[1]) / abs(revs[1]) * 100 if revs[1] else 0.0
+    accel = g2 - g1
+    triggered = abs(accel) >= 5.0
+    return {
+        "triggered": triggered,
+        "detail": f"近三期营收同比增速变化 {accel:+.1f}pp（g1={g1:.1f}%, g2={g2:.1f}%）",
+        "accel_pp": round(accel, 2),
+    }
+
+
+def ocf_np_divergence_flag(financials: list[dict]) -> dict[str, Any]:
+    """经营现金流 vs 净利润背离软信号（F-4 财务关参考）。"""
+    rows = _fin(financials or [])
+    if not rows:
+        return {"triggered": False, "detail": "无财务数据"}
+    latest = rows[-1]
+    ocf = _ocf(latest)
+    np_ = safe_float(latest.get("n_income_attr_p") or latest.get("netprofit"))
+    if ocf is None or np_ is None:
+        return {"triggered": False, "detail": "OCF 或净利润字段缺失"}
+    if np_ == 0:
+        return {"triggered": False, "detail": "净利润为 0，跳过背离检测"}
+    ratio = ocf / np_
+    triggered = (np_ > 0 and ratio < 0.5) or (np_ < 0 and ocf > 0)
+    return {
+        "triggered": triggered,
+        "detail": f"最新期 OCF/净利润 = {ratio:.2f}（OCF={ocf:.0f}, NP={np_:.0f}）",
+        "ratio": round(ratio, 3),
+    }

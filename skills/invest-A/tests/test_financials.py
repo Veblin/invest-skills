@@ -16,6 +16,30 @@ class TestFinancialsHelpers:
         assert prior_year_end_date("2023-12-31") == "20221231"
         assert prior_year_end_date("20240331") == "20230331"
 
+    def test_find_yoy_row_hyphenated_prior_record(self):
+        from lib.financials import find_yoy_row
+
+        rows = [
+            {"end_date": "2023-12-31", "revenue": 100.0},
+            {"end_date": "20241231", "revenue": 120.0},
+        ]
+        latest = {"end_date": "20241231", "revenue": 120.0}
+        yoy = find_yoy_row(rows, latest)
+        assert yoy is not None
+        assert yoy["revenue"] == 100.0
+
+    def test_find_yoy_row_hyphenated_latest_record(self):
+        from lib.financials import find_yoy_row
+
+        rows = [
+            {"end_date": "20231231", "revenue": 100.0},
+            {"end_date": "2024-12-31", "revenue": 120.0},
+        ]
+        latest = {"end_date": "2024-12-31", "revenue": 120.0}
+        yoy = find_yoy_row(rows, latest)
+        assert yoy is not None
+        assert yoy["revenue"] == 100.0
+
     def test_yoy_from_fina_rows_hyphenated_dates(self):
         from lib.store import _yoy_from_fina_rows
 
@@ -68,3 +92,25 @@ class TestFinancialsHelpers:
         int_sig = next(s for s in signals if s["id"] == "interest_coverage_weak")
         assert not int_sig["triggered"]
         assert "为零" in int_sig["detail"] or "不适用" in int_sig["detail"]
+
+
+class TestFinancialSoftSignals:
+    def test_revenue_acceleration_flag(self):
+        from lib.risk_scanner import revenue_acceleration_flag
+
+        rows = [
+            {"end_date": "20211231", "revenue": 100.0},
+            {"end_date": "20221231", "revenue": 110.0},
+            {"end_date": "20231231", "revenue": 130.0},
+        ]
+        out = revenue_acceleration_flag(rows)
+        assert "accel_pp" in out
+        assert isinstance(out["triggered"], bool)
+
+    def test_ocf_np_divergence_flag(self):
+        from lib.risk_scanner import ocf_np_divergence_flag
+
+        rows = [{"end_date": "20231231", "n_cashflow_act": 1e6, "n_income_attr_p": 5e6}]
+        out = ocf_np_divergence_flag(rows)
+        assert out["triggered"] is True
+        assert "ratio" in out
