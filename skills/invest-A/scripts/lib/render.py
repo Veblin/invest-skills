@@ -16,14 +16,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from lib.nums import safe_float as _safe_num
+from lib.nums import coalesce_field, safe_float as _safe_num
 
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
     EASTMONEY_FAILURE_TUN_MARKER,
 )
-from .schema import CrossValidation, DriverFactor, ProbabilityStructure
+from .schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_ICONS, _CV_LABELS, index_dimensions
 
 from .version import get_package_version
 
@@ -36,9 +36,9 @@ def _cross_validation_marker(cv: CrossValidation | None) -> str:
     """生成交叉验证状态标记。"""
     if cv is None:
         return ""
-    if cv.status == "convergence":
-        return f"🟢 **印证** — {cv.detail}"
-    return f"🟡 **分歧** — {cv.detail}"
+    icon = _CV_ICONS.get(cv.status, "🔴")
+    label = _CV_LABELS.get(cv.status, cv.status)
+    return f"{icon} **{label}** — {cv.detail}"
 
 
 def _meta_cv_line(meta: dict) -> str:
@@ -47,9 +47,10 @@ def _meta_cv_line(meta: dict) -> str:
     if not cv_status:
         return ""
     detail = meta.get("cross_validation_detail") or ""
-    if cv_status == "convergence":
-        return f"🟢 **印证** — {detail or '多源数据一致'}"
-    return f"🟡 **分歧** — {detail or '多源数据存在差异'}"
+    icon = _CV_ICONS.get(cv_status, "🔴")
+    label = _CV_LABELS.get(cv_status, cv_status)
+    default_detail = "多源数据一致" if cv_status == "convergence" else "多源数据存在差异"
+    return f"{icon} **{label}** — {detail or default_detail}"
 
 
 def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
@@ -389,9 +390,8 @@ def render_report_v2(collection: dict[str, Any], symbol: str) -> str:
 
 
 def _index_dims(collection: dict) -> dict[str, dict]:
-    """将 dimensions 列表转为 dict。"""
-    dims = collection.get("dimensions", [])
-    return {d.get("dimension", ""): d for d in dims}
+    """将 dimensions 列表转为 dict。委托 schema.index_dimensions。"""
+    return index_dimensions(collection)
 
 
 def _get_dim_data(dims: dict[str, dict], key: str) -> Any:
@@ -1001,8 +1001,7 @@ def _fmt_v2(v: Any, unit: str = "") -> str:
 
 
 # ---- v3 报告模板（v0.1.3 Phase 1） ----
-
-_CV_ICONS = {"convergence": "🟢", "divergence": "🟡", "gap": "🔴"}
+# _CV_ICONS imported from .schema (single source of truth)
 
 
 def _cross_validation_block(cv: CrossValidation) -> str:
@@ -2700,10 +2699,10 @@ def _section_cross_validation_table(dims: dict) -> str:
         if not cv_status:
             continue
         detail = meta.get("cross_validation_detail") or "—"
-        if cv_status == "convergence":
-            label = "🟢 印证"
-        elif cv_status == "divergence":
-            label = "🟡 分歧"
+        if cv_status:
+            icon = _CV_ICONS.get(cv_status, "🔴")
+            cn_label = _CV_LABELS.get(cv_status, cv_status)
+            label = f"{icon} {cn_label}"
         else:
             label = f"🟡 {cv_status}"
         rows.append((name, label, detail))
@@ -2816,11 +2815,8 @@ def _fmt_end_date(val: Any) -> str:
 
 
 def _fin_field_num(row: dict, *keys: str) -> float | None:
-    """按字段名取数值；0.0 为合法值（不用 truthy 判断）。"""
-    for key in keys:
-        if key in row and row[key] is not None:
-            return _safe_num(row[key])
-    return None
+    """按字段名取数值；0.0 为合法值（不用 truthy 判断）。委托 lib.nums.coalesce_field。"""
+    return coalesce_field(row, *keys)
 
 
 def _fmt_peer_metric(v: Any, *, signed: bool = False) -> str:

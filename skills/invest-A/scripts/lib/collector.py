@@ -225,13 +225,25 @@ def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceR
 
 # ---- 单个源查询函数 ----
 
-def _q_tushare_basic(symbol: str) -> dict | None:
-    """Tushare 基本信息来源。"""
+
+def _require_tushare():
+    """Tushare 鉴权 + 客户端惰性加载（复用 10 处 _q_tushare_* 的样板代码）。
+
+    Returns:
+        (config, TushareClient) — 包含配额计数与线程安全包装。
+    Raises:
+        RuntimeError: TUSHARE_TOKEN 未配置或不可用。
+    """
     from . import env as _env
     config = _env.get_config()
     if not _env.is_tushare_available(config):
         raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    return config, _tushare_client(config)
+
+
+def _q_tushare_basic(symbol: str) -> dict | None:
+    """Tushare 基本信息来源。"""
+    config, tc = _require_tushare()
     df = tc.query("stock_basic", ts_code=_ts_code(symbol),
                   fields="ts_code,name,area,industry,market,list_date")
     if df is not None and not df.empty:
@@ -337,11 +349,7 @@ def _merge_balancesheet_into_financials(
 
 
 def _q_tushare_financials(symbol: str) -> list[dict] | None:
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     lookback = _days_ago(730)
     end = _today()
@@ -407,11 +415,7 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
 
 def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
     """Tushare 十大股东（最新报告期）。"""
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("top10_floatholders", ts_code=_ts_code(symbol),
                   fields="ts_code,end_date,holder_name,hold_amount,hold_ratio",
                   period=_latest_quarter_end())
@@ -421,11 +425,7 @@ def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
 
 
 def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("daily", ts_code=_ts_code(symbol),
                   fields="trade_date,open,high,low,close,vol,amount",
                   **kwargs)
@@ -470,11 +470,7 @@ def _flow_amount_yuan(record: dict) -> float | None:
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
                   fields="ts_code,trade_date,net_mf_amount,buy_sm_vol,sell_sm_vol,net_mf_vol",
                   start_date=_days_ago(10), end_date=_today())
@@ -485,11 +481,7 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
 
 def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
     """个股沪/深股通成交（仅上榜日有数据）。net_amount 单位：元。"""
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("hsgt_top10", ts_code=_ts_code(symbol),
                   fields="ts_code,trade_date,net_amount",
                   start_date=_days_ago(30), end_date=_today())
@@ -973,14 +965,11 @@ def _q_tencent_quote(symbol: str) -> dict | None:
     """腾讯行情。"""
     _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
 
-    def _safe_float(val: str | None) -> float | None:
-        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分）。"""
+    def _parse_tencent_float(val: str | None) -> float | None:
+        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分），否则委托 safe_float。"""
         if val is None or val in _UNAVAILABLE_MARKERS:
             return None
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return None
+        return safe_float(val)
 
     market = "sh" if symbol.startswith(("6", "9")) else "sz"
     with no_proxy_session() as sess:
@@ -988,15 +977,15 @@ def _q_tencent_quote(symbol: str) -> dict | None:
     if r.status_code == 200 and "~" in r.text:
         p = r.text.split("~")
         if len(p) > 45:
-            mv = _safe_float(p[45])
+            mv = _parse_tencent_float(p[45])
             return {
-                "price": _safe_float(p[3]),
-                "change_pct": _safe_float(p[32]),
-                "high": _safe_float(p[33]),
-                "low": _safe_float(p[34]),
-                "volume": _safe_float(p[6]),
-                "turnover_rate": _safe_float(p[38]),
-                "pe_ratio": _safe_float(p[39]),
+                "price": _parse_tencent_float(p[3]),
+                "change_pct": _parse_tencent_float(p[32]),
+                "high": _parse_tencent_float(p[33]),
+                "low": _parse_tencent_float(p[34]),
+                "volume": _parse_tencent_float(p[6]),
+                "turnover_rate": _parse_tencent_float(p[38]),
+                "pe_ratio": _parse_tencent_float(p[39]),
                 "total_mv": mv / 10000 if mv is not None else None,
             }
     return None
@@ -1220,11 +1209,7 @@ def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
     API: pro.daily_basic(ts_code, start_date, end_date, fields=...)
     配额: 每股 1 次调用。
     """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("daily_basic", ts_code=_ts_code(symbol),
                   fields="trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv",
                   start_date=_days_ago(1825), end_date=_today())
@@ -1290,11 +1275,7 @@ def _q_tushare_report_rc(symbol: str) -> list[dict] | None:
     Returns:
         list[dict] | None — 研报记录列表，权限不足或失败返回 None
     """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     try:
         df = tc.query("report_rc", ts_code=ts,
@@ -1325,11 +1306,7 @@ def _q_tushare_forecast(symbol: str) -> list[dict] | None:
     Returns:
         list[dict] | None — 业绩预告记录，权限不足或无数据返回 None
     """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     try:
         df = tc.query("forecast", ts_code=ts,
@@ -1812,27 +1789,17 @@ def _holder_transaction_key(r: dict) -> tuple:
 
 
 def _norm_date(raw: str) -> str:
-    """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。"""
-    import re
-    raw = str(raw).strip()
-    # 已为 YYYYMMDD
-    if re.match(r'^\d{8}$', raw):
-        return raw
-    # YYYY-MM-DD 或 YYYY.MM.DD
-    m = re.search(r'(\d{4})[-./](\d{1,2})[-./](\d{1,2})', raw)
-    if m:
-        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
-    # 区间格式 "2015.07.23-2015.07.23" → search 已取首段
-    return raw[:8] if len(raw) >= 8 and raw[:8].isdigit() else raw
+    """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。
+
+    委托 lib.financials.normalize_end_date 处理。
+    """
+    from lib.financials import normalize_end_date
+    return normalize_end_date(raw)
 
 
 def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
     """Tushare stk_holdertrade — 股东增减持（主源）。"""
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     df = tc.query(
         "stk_holdertrade", ts_code=ts,

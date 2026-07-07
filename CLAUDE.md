@@ -59,15 +59,7 @@ uv run python -c "import sys; print(sys.executable)"
 
 ## 数据源
 
-| 源 | 状态 | 注意 |
-|----|------|------|
-| Tushare Pro | ✅ | 需 TOKEN |
-| akshare | ✅ | 东方财富接口可能被代理拦截 |
-| Baostock | ✅ | 免注册 |
-| TickFlow | ✅ | 免注册，独立数据管道 |
-| 腾讯行情 | ✅ | 免注册 |
-| FRED | ✅ | 美宏观数据 |
-| 公告事件 | ✅ | akshare stock_individual_notice_report |
+详见 `skills/invest-A/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
 
 **代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
 

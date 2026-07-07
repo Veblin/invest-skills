@@ -1,18 +1,46 @@
-"""Financial row helpers shared across collector, store, and risk_scanner."""
+"""Financial row helpers shared across collector, store, risk_scanner, and scoring."""
 
 from __future__ import annotations
+
+from datetime import date
+from typing import Any
 
 from lib.nums import safe_float
 
 
 def normalize_end_date(ed: str) -> str:
-    """Normalize report period to YYYYMMDD (accepts YYYY-MM-DD or YYYYMMDD)."""
-    s = str(ed).strip()
-    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-        return s[:4] + s[5:7] + s[8:10]
-    if len(s) >= 8 and s[:4].isdigit():
-        return s[:8]
-    return ""
+    """Normalize report period to YYYYMMDD.
+
+    Accepts: YYYYMMDD, YYYY-MM-DD, YYYY.MM.DD, interval formats (e.g. "2015.07.23-2015.07.23").
+    """
+    import re
+    raw = str(ed).strip()
+    # Already YYYYMMDD
+    if re.match(r'^\d{8}$', raw):
+        return raw
+    # YYYY-MM-DD or YYYY.MM.DD
+    m = re.search(r'(\d{4})[-./](\d{1,2})[-./](\d{1,2})', raw)
+    if m:
+        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    # Fallback: first 8 digits
+    if len(raw) >= 8 and raw[:8].isdigit():
+        return raw[:8]
+    # Return raw string on total failure (preserves old _norm_date behavior;
+    # callers expect non-empty ann_date for dedup keys)
+    return raw
+
+
+def parse_end_date(raw: Any) -> date | None:
+    """Parse a date string (YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD) to a ``date`` object."""
+    if raw is None:
+        return None
+    s = str(raw).strip().replace("-", "")
+    if len(s) < 8 or not s[:8].isdigit():
+        return None
+    try:
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    except ValueError:
+        return None
 
 
 def prior_year_end_date(end_date: str) -> str:
