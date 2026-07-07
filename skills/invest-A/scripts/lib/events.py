@@ -28,28 +28,46 @@ PLACEHOLDER_NOTE_INDUSTRY = "⏭️ 待补来源：暂无稳定 API"
 PLACEHOLDER_NOTE_MARKET = "⏭️ 待补来源：暂无稳定 API"
 
 
-# ── 分类关键词映射 ──
+# ── 事件类型元数据（从 event_type_taxonomy.yaml 加载，共享 analysis_templates 的缓存）──
 
-_CLASSIFICATION_RULES: list[tuple[re.Pattern, str, str, str]] = [
-    # (pattern, event_type, impact_dimension, duration)
-    (re.compile(r"回购"), "buyback", "估值", "中长期变量"),
-    (re.compile(r"股权激励|限制性股票|股票期权"), "equity_incentive", "治理", "中长期变量"),
-    (re.compile(r"增发|非公开发行|募集资金"), "private_placement", "现金流", "中长期变量"),
-    (re.compile(r"并购|重组|收购|合并|资产注入"), "mna", "收入", "中长期变量"),
-    (re.compile(r"分红|派息|送股|转增|利润分配"), "dividend", "估值", "短期扰动"),
-    (re.compile(r"减持"), "holder_decrease", "估值", "短期扰动"),
-    (re.compile(r"增持"), "holder_increase", "估值", "短期扰动"),
-    (re.compile(r"合同|中标"), "major_contract", "收入", "中长期变量"),
-    (re.compile(r"诉讼|仲裁"), "litigation", "治理", "短期扰动"),
-    (re.compile(r"(?<![A-Za-z])ST(?![A-Za-z])|退市|风险警示"), "st_risk", "治理", "结构性质变"),
-    (re.compile(r"年报|年度报告|annual report", re.IGNORECASE),
-     "earnings_report", "收入", "短期扰动"),
-    (re.compile(r"半年报|半年度报告|semi-annual", re.IGNORECASE),
-     "earnings_report", "收入", "短期扰动"),
-    (re.compile(r"季报|季度报告|quarterly", re.IGNORECASE),
-     "earnings_report", "收入", "短期扰动"),
-    (re.compile(r"业绩预告|业绩修正|盈利预测"), "earnings_guidance", "收入", "短期扰动"),
-    (re.compile(r"业绩快报"), "earnings_preview", "收入", "短期扰动"),
+from .analysis_templates import load_event_taxonomy
+
+
+def _event_meta(event_type: str) -> dict:
+    """从 YAML 加载的事件类型元数据（label, impact_dimension, default_duration_hint）。"""
+    taxonomy = load_event_taxonomy()
+    return taxonomy.get("event_types", {}).get(event_type, {})
+
+
+def _event_dimension(event_type: str) -> str:
+    """事件类型 → impact_dimension（来源: event_type_taxonomy.yaml）。"""
+    return _event_meta(event_type).get("impact_dimension", "治理")
+
+
+def _event_duration(event_type: str) -> str:
+    """事件类型 → default_duration_hint（来源: event_type_taxonomy.yaml）。"""
+    return _event_meta(event_type).get("default_duration_hint", "短期扰动")
+
+
+# ── 分类关键词映射（正则规则在代码中，元数据字段委托 YAML 加载）──
+
+_CLASSIFICATION_RULES: list[tuple[re.Pattern, str]] = [
+    # (pattern, event_type)  — impact_dimension/duration 委托 _event_dimension/_event_duration
+    (re.compile(r"回购"), "buyback"),
+    (re.compile(r"股权激励|限制性股票|股票期权"), "equity_incentive"),
+    (re.compile(r"增发|非公开发行|募集资金"), "private_placement"),
+    (re.compile(r"并购|重组|收购|合并|资产注入"), "mna"),
+    (re.compile(r"分红|派息|送股|转增|利润分配"), "dividend"),
+    (re.compile(r"减持"), "holder_decrease"),
+    (re.compile(r"增持"), "holder_increase"),
+    (re.compile(r"合同|中标"), "major_contract"),
+    (re.compile(r"诉讼|仲裁"), "litigation"),
+    (re.compile(r"(?<![A-Za-z])ST(?![A-Za-z])|退市|风险警示"), "st_risk"),
+    (re.compile(r"年报|年度报告|annual report", re.IGNORECASE), "earnings_report"),
+    (re.compile(r"半年报|半年度报告|semi-annual", re.IGNORECASE), "earnings_report"),
+    (re.compile(r"季报|季度报告|quarterly", re.IGNORECASE), "earnings_report"),
+    (re.compile(r"业绩预告|业绩修正|盈利预测"), "earnings_guidance"),
+    (re.compile(r"业绩快报"), "earnings_preview"),
 ]
 
 # 逻辑关系映射（基于事件类型 + impact_dimension 的默认值）
@@ -235,9 +253,9 @@ def _fetch_dividend_events(symbol: str) -> list[dict]:
                     "date": date_str,
                     "type": "dividend",
                     "title": title,
-                    "impact_dimension": "估值",
-                    "duration": "短期扰动",
-                    "logic_relation": "强化",
+                    "impact_dimension": _event_dimension("dividend"),
+                    "duration": _event_duration("dividend"),
+                    "logic_relation": _get_logic_relation("dividend"),
                     "source": "akshare stock_history_dividend_detail",
                     "url": "",
                 })
@@ -263,9 +281,9 @@ def _fetch_dividend_events(symbol: str) -> list[dict]:
                     "date": date_str,
                     "type": "dividend",
                     "title": title,
-                    "impact_dimension": "估值",
-                    "duration": "短期扰动",
-                    "logic_relation": "强化",
+                    "impact_dimension": _event_dimension("dividend"),
+                    "duration": _event_duration("dividend"),
+                    "logic_relation": _get_logic_relation("dividend"),
                     "source": "akshare stock_dividend_cninfo",
                     "url": "",
                 })
@@ -317,8 +335,8 @@ def _fetch_shareholder_events(symbol: str) -> list[dict]:
                 "date": date_str,
                 "type": event_type,
                 "title": title,
-                "impact_dimension": "估值",
-                "duration": "短期扰动",
+                "impact_dimension": _event_dimension(event_type),
+                "duration": _event_duration(event_type),
                 "logic_relation": _get_logic_relation(event_type),
                 "source": "akshare stock_shareholder_change_ths",
                 "url": "",
@@ -344,12 +362,12 @@ def _classify_event(record: dict) -> dict:
     title = str(record.get("title", ""))
     raw_type = str(record.get("raw_type", ""))
 
-    for pattern, etype, impact, duration in _CLASSIFICATION_RULES:
+    for pattern, etype in _CLASSIFICATION_RULES:
         if pattern.search(title) or pattern.search(raw_type):
             return {
                 "event_type": etype,
-                "impact_dimension": impact,
-                "duration": duration,
+                "impact_dimension": _event_dimension(etype),
+                "duration": _event_duration(etype),
             }
 
     return {

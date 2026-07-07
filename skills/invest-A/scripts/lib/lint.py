@@ -238,19 +238,17 @@ def _lint_paragraph_scope(
     for para_start, para_lines in paragraphs:
         para_text = " ".join(para_lines)
         if regex.search(para_text):
-            # 匹配到段落 → flag 段内所有包含 "分位" 的行
-            for j, pline in enumerate(para_lines):
-                if "分位" in pline and "%" in pline:
-                    findings.append(
-                        LintFinding(
-                            line=para_start + j,
-                            rule_id=rule["id"],
-                            severity=rule.get("severity", "info"),
-                            message=rule["message"],
-                            context=_truncate(pline),
-                            law_ref=rule.get("law_ref", ""),
-                        )
-                    )
+            # 匹配到段落 → 标记第一行（通用行为）
+            findings.append(
+                LintFinding(
+                    line=para_start,
+                    rule_id=rule["id"],
+                    severity=rule.get("severity", "info"),
+                    message=rule["message"],
+                    context=_truncate(para_lines[0]),
+                    law_ref=rule.get("law_ref", ""),
+                )
+            )
     return findings
 
 

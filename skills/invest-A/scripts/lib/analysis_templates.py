@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from lib.financials import prior_year_end_date
+
 logger = logging.getLogger(__name__)
 
 # ---- Module-level cache ----
@@ -197,15 +199,12 @@ def _build_mda_card(collection: dict) -> Optional[MDANarrativeCard]:
 
     # ---- Locate the YoY companion (same calendar month-day, year-1) ----
     yoy_record: dict | None = None
-    if len(latest_end) >= 8:
-        try:
-            yoy_end = str(int(latest_end[:4]) - 1) + latest_end[4:]
-            for r in records:
-                if str(r.get("end_date", "")).strip() == yoy_end:
-                    yoy_record = r
-                    break
-        except (ValueError, TypeError):
-            pass
+    yoy_end = prior_year_end_date(latest_end)
+    if yoy_end:
+        for r in records:
+            if str(r.get("end_date", "")).strip() == yoy_end:
+                yoy_record = r
+                break
 
     # ---- Numeric extraction helper ----
     def _get(d: dict, *keys: str) -> Optional[float]:
@@ -465,8 +464,10 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
 # ---- Taxonomy loader ----
 
 
-def _load_taxonomy() -> dict:
+def load_event_taxonomy() -> dict:
     """Load ``event_type_taxonomy.yaml`` with module-level caching.
+
+    Shared by analysis_templates.py and events.py to avoid duplicate YAML loaders.
 
     Returns:
         Parsed taxonomy dict (``{"schema_version": ..., "event_types": ...}``).
@@ -493,6 +494,10 @@ def _load_taxonomy() -> dict:
         _TAXONOMY_CACHE = {"schema_version": "0.1", "event_types": {}}
 
     return _TAXONOMY_CACHE
+
+
+# Backward-compatible alias for internal callers
+_load_taxonomy = load_event_taxonomy
 
 
 # ---- Serialisation ----

@@ -22,7 +22,7 @@ event_types:
     description: "股份回购计划/实施"
   equity_incentive:
     label: "股权激励"
-    impact_dimension: "估值"
+    impact_dimension: "治理"
     default_duration_hint: "中长期变量"
     description: "限制性股票/股票期权激励计划"
   private_placement:
@@ -33,11 +33,11 @@ event_types:
   mna:
     label: "并购重组"
     impact_dimension: "收入"
-    default_duration_hint: "结构性质变"
+    default_duration_hint: "中长期变量"
     description: "并购/重组/收购/资产注入"
   dividend:
     label: "分红"
-    impact_dimension: "现金流"
+    impact_dimension: "估值"
     default_duration_hint: "短期扰动"
     description: "利润分配/分红方案/送转"
   holder_decrease:
@@ -58,7 +58,7 @@ event_types:
   litigation:
     label: "诉讼仲裁"
     impact_dimension: "治理"
-    default_duration_hint: "中长期变量"
+    default_duration_hint: "短期扰动"
     description: "诉讼/仲裁公告"
   st_risk:
     label: "ST/退市风险"

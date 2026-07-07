@@ -134,7 +134,7 @@ rules:
     law_ref: "措辞规范 — 技术结构"
 
   - id: "wording-certain-price-drop"
-    pattern: "股价也可能下跌\\s*\\d+%"
+    pattern: "股价也可能下跌\\s*\\d+(?:-\\d+)?%"
     severity: "warning"
     scope: "line"
     message: "禁止无条件'股价也可能下跌 X%'，需改为：'若盈利路径不及 AAA 预测、且估值回到周期中枢 BBBx，则与当前市值相比，价格有 X% 的回调空间'"
@@ -245,3 +245,83 @@ rules:
     scope: "line"
     message: "禁止给出单一目标价（LAW 6），应提供估值区间"
     law_ref: "LAW 6 — 已知违规模式 #3"
+
+  # ==========================================================================
+  # 占位残留检查（原 check_report.sh 检查项 3）
+  # ==========================================================================
+  - id: "placeholder-todo"
+    pattern: "(TODO|FIXME|XXX)"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在待办标记（TODO/FIXME/XXX），请清理后再提交"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-tbd"
+    pattern: "\\bTBD\\b"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在待定标记（TBD），请补充后再提交"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-pause"
+    pattern: "⏸"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在占位标记（⏸），请补充完整"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-tofill"
+    pattern: "(待补充|待填|待补)"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在待补充字段，请补充完整"
+    law_ref: "SOP-QC — 占位残留"
+
+  # ==========================================================================
+  # 绝对化表述检查（原 check_report.sh 检查项 5）
+  # ==========================================================================
+  - id: "wording-absolute-biran"
+    pattern: "(?<!不)必然(?!性|规律|事件|趋势|联系|关系|因果|条件)"
+    severity: "warning"
+    scope: "line"
+    message: "避免绝对化表述'必然'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-yiding"
+    pattern: "(?<!不)一定(?!程度|范围|条件|比例|意义|影响|作用|关系|差异|时间|期限|波动|风险|收益)"
+    severity: "warning"
+    scope: "line"
+    message: "避免绝对化表述'一定'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-kending"
+    pattern: "(?<!不)肯定(?!了|地|的)"
+    severity: "warning"
+    scope: "line"
+    message: "避免绝对化表述'肯定'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-juebu"
+    pattern: "绝不"
+    severity: "warning"
+    scope: "line"
+    message: "避免绝对化表述'绝不'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-haowuyiwen"
+    pattern: "毫无疑问"
+    severity: "warning"
+    scope: "line"
+    message: "避免绝对化表述'毫无疑问'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  # ==========================================================================
+  # [事实]/[分析] 顺序检查（原 check_report.sh 检查项 4）
+  # 逐行扫描确保每个 [分析] 前有 [事实]
+  # ==========================================================================
+  - id: "structure-analysis-without-fact"
+    pattern: "^(?:(?!\\[事实\\]).)*\\[分析\\]"
+    severity: "warning"
+    scope: "paragraph"
+    message: "[分析] 段落前缺少 [事实] 块（SOP-QC 要求先列事实再分析）"
+    law_ref: "SOP-QC — 分析标记规范"

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from . import env
 from .json_util import dumps_json, json_default
+from .schema import index_dimensions
 
 DB_PATH = env.STORE_DB
 SCHEMA_VERSION = 1
@@ -345,17 +346,8 @@ def _unwrap_raw_json(record: dict) -> dict:
 
 
 def _index_dims(raw: dict) -> dict[str, dict]:
-    """将 raw_json 中的 dimensions 列表转为 dict。"""
-    if not isinstance(raw, dict):
-        return {}
-    dims = raw.get("dimensions")
-    if not isinstance(dims, list):
-        return {}
-    return {
-        d.get("dimension", ""): d
-        for d in dims
-        if isinstance(d, dict) and d.get("dimension")
-    }
+    """将 raw_json 中的 dimensions 列表转为 dict。委托 schema.index_dimensions。"""
+    return index_dimensions(raw)
 
 
 def _dim_data(raw: dict, name: str) -> Any:

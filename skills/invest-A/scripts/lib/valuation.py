@@ -16,6 +16,9 @@ import statistics
 from datetime import date
 from typing import Any
 
+from lib.financials import parse_end_date as _parse_end_date
+from lib.nums import safe_float as _safe_float
+
 
 def percentile_rank(seq: list[float], current: float) -> float | None:
     """计算 current 在 seq 中的百分位（严格低于 current 的比例 × 100）。
@@ -583,16 +586,8 @@ def calc_beta(
     }
 
 
-def _as_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        f = float(value)
-        if f != f or f in (float("inf"), float("-inf")):
-            return None
-        return f
-    except (TypeError, ValueError):
-        return None
+# Backward-compatible alias; superset of old _as_float (inf/Nan handled in safe_float now)
+_as_float = _safe_float
 
 
 def extract_financial_rows(financials: dict) -> list[dict]:
@@ -835,16 +830,7 @@ def dcf_sensitivity(
     }
 
 
-def _parse_end_date(raw: Any) -> date | None:
-    if raw is None:
-        return None
-    s = str(raw).strip().replace("-", "")
-    if len(s) < 8 or not s[:8].isdigit():
-        return None
-    try:
-        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
-    except ValueError:
-        return None
+# _parse_end_date imported above from lib.financials (canonical body lives there)
 
 
 def _historical_revenue_cagr(rows: list[dict]) -> tuple[float | None, dict]:

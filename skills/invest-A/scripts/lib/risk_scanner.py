@@ -12,9 +12,9 @@ from lib.technical import compute, rsi_series, sort_kline_asc
 
 
 def _fin(rows: list[dict]) -> list[dict]:
-    """财务行按报告期升序；与 sort_kline_asc 一致并增加 ann_date 稳定次序。"""
+    """财务行按报告期升序，ann_date 为次要排序键。"""
     return sorted(
-        sort_kline_asc(rows),
+        rows,
         key=lambda r: (
             str(r.get("trade_date") or r.get("end_date", "")),
             str(r.get("ann_date", "")),
