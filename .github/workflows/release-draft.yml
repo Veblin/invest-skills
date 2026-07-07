@@ -7,6 +7,9 @@ on:
   push:
     branches:
       - main
+    paths:
+      - CHANGELOG.md
+      - pyproject.toml
 
 permissions:
   contents: write
