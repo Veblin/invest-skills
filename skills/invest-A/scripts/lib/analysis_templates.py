@@ -10,7 +10,7 @@ Design:
 Card types:
   Template A: MDANarrativeCard — 财报MD&A叙事卡片
   Template B: EventClassificationCard — 公告事件分类卡片
-  Template C: SentimentCard — 业绩会/研报情绪卡片
+  Template C: SentimentCard — 卖方研报/EPS 一致预期情绪卡片（非社媒舆情；社媒见 references/sentiment.md L3）
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from lib.financials import prior_year_end_date
+from lib.financials import find_yoy_row, normalize_end_date
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +102,9 @@ class EventClassificationCard:
 
 @dataclass
 class SentimentCard:
-    """Template C: 业绩会/研报情绪卡片.
+    """Template C: 卖方研报情绪卡片（EPS 一致预期 + 评级分布）。
 
-    Summarises analyst sentiment from research reports:
-    rating distribution, EPS consensus, key takeaways.
+    非社媒/互动易舆情。公开舆情 L3 见 references/sentiment.md。
     """
     research_count: int
     rating_distribution: dict
@@ -192,19 +191,15 @@ def _build_mda_card(collection: dict) -> Optional[MDANarrativeCard]:
     if not records:
         return None
 
-    # Latest first
-    records.sort(key=lambda r: str(r.get("end_date", "")), reverse=True)
+    # Latest first (normalize end_date so YYYY-MM-DD and YYYYMMDD sort correctly)
+    records.sort(
+        key=lambda r: normalize_end_date(str(r.get("end_date", ""))),
+        reverse=True,
+    )
     latest = records[0]
-    latest_end = str(latest.get("end_date", "")).strip()
 
     # ---- Locate the YoY companion (same calendar month-day, year-1) ----
-    yoy_record: dict | None = None
-    yoy_end = prior_year_end_date(latest_end)
-    if yoy_end:
-        for r in records:
-            if str(r.get("end_date", "")).strip() == yoy_end:
-                yoy_record = r
-                break
+    yoy_record: dict | None = find_yoy_row(records, latest)
 
     # ---- Numeric extraction helper ----
     def _get(d: dict, *keys: str) -> Optional[float]:
@@ -438,14 +433,16 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
 
     # ---- Data source note ----
     source = summary.get("source", "")
+    _SENTIMENT_NOTE_SUFFIX = "（卖方研报一致预期，非社媒舆情；社媒见 references/sentiment.md L3）"
+
     if source == "tushare.report_rc":
-        source_note = "数据源: Tushare report_rc（机构研报盈利预测+评级）"
+        source_note = f"数据源: Tushare report_rc（机构研报盈利预测+评级）{_SENTIMENT_NOTE_SUFFIX}"
     elif source == "tushare.forecast":
-        source_note = "数据源: Tushare forecast（公司业绩预告）"
+        source_note = f"数据源: Tushare forecast（公司业绩预告）{_SENTIMENT_NOTE_SUFFIX}"
     elif source == "akshare.research":
-        source_note = "数据源: akshare 东方财富个股研报"
+        source_note = f"数据源: akshare 东方财富个股研报{_SENTIMENT_NOTE_SUFFIX}"
     else:
-        source_note = "数据源: 未获取到结构化研报数据"
+        source_note = f"数据源: 未获取到结构化研报数据{_SENTIMENT_NOTE_SUFFIX}"
 
     return SentimentCard(
         research_count=len(ratings),

@@ -17,7 +17,7 @@ import statistics
 from datetime import date
 from typing import Any
 
-from lib.financials import parse_end_date, prior_year_end_date
+from lib.financials import find_yoy_row, parse_end_date
 from lib.nums import coalesce_field, safe_float
 from lib.technical import sort_kline_asc
 from lib.valuation import _infer_tax_rate
@@ -46,17 +46,8 @@ def _sorted_rows(financials: list[dict] | None) -> list[dict]:
 
 
 def _find_yoy_row(rows: list[dict], latest: dict) -> dict | None:
-    """定位与 latest 同季/同月、年份 -1 的记录（同比配对）。
-
-    委托 financials.prior_year_end_date 做日期算术。
-    """
-    yoy_end = prior_year_end_date(str(latest.get("end_date", "")))
-    if not yoy_end:
-        return None
-    for r in rows:
-        if str(r.get("end_date", "")).strip() == yoy_end:
-            return r
-    return None
+    """定位与 latest 同季/同月、年份 -1 的记录（同比配对）。"""
+    return find_yoy_row(rows, latest)
 
 
 def _coerce_score(value: float, lo: float = 0.0, hi: float = 100.0) -> float:

@@ -18,8 +18,13 @@
 
 | 文档 | 内容 |
 |------|------|
-| [SKILL.md](../skills/invest-A/SKILL.md) | LAWs、工作流、九模块结构（**canonical**） |
-| [source-guide.md](../skills/invest-A/references/source-guide.md) | 数据源优先级、代理说明、降级行为 |
+| [SKILL.md](../skills/invest-A/SKILL.md) | LAWs、路由表、CLI（**canonical 核心**） |
+| [modules.md](../skills/invest-A/references/modules.md) | 九模块与八段 legacy 结构 |
+| [financials.md](../skills/invest-A/references/financials.md) | 财报深研专项（F-1~F-4） |
+| [sentiment.md](../skills/invest-A/references/sentiment.md) | 舆情深研专项（L1~L3） |
+| [game-theory.md](../skills/invest-A/references/game-theory.md) | 参与者行为扫描专项 |
+| [references-format.md](../skills/invest-A/references/references-format.md) | 引用来源表规范 |
+| [source-guide.md](../skills/invest-A/references/source-guide.md) | 数据源优先级、代理说明 |
 
 ## 路线图
 

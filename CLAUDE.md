@@ -168,3 +168,5 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 - 数据源扩展方案：`reports/A股数据源扩展研究报告_v0.1.3.md`
 - 个股报告：`reports/{symbol}-{name}/{date}.md`
+- 财报 F 规范：`skills/invest-A/references/financials.md`
+- 九模块结构：`skills/invest-A/references/modules.md`

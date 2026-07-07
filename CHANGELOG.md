@@ -2,7 +2,38 @@
 
 ## Unreleased
 
-- CI: `test_extract_release_notes.py` 版本号改为动态读取 `pyproject.toml`，不再硬编码
+## v0.1.9 (2026-07-07)
+
+v0.1.9 将 SKILL 拆分为「核心 + 专项 references」架构，扩展 `plan --intent`，并新增参与者行为扫描 render 层。
+
+### Skill 架构
+
+- **SKILL.md 瘦身**（~173 行）：LAWs + 路由表 + CLI；九模块/F 规范/引用格式迁至 `references/`
+- **新增专项文档**：`modules.md`、`references-format.md`、`financials.md`、`sentiment.md`、`game-theory.md`
+- **`plan --intent`** 新增：`sentiment_deep`、`financials_deep`、`game_theory`
+
+### 参与者行为扫描（P0）
+
+- 新模块 `lib/participant_scan.py` + render 节「参与者行为扫描」（full 模式，位于市场结构之后）
+- 基于 northbound / moneyflow / margin / holder_changes / turnover / PCR 现有数据
+- 元分析层，非策略建议；龙虎榜/大宗留 v0.2.0
+
+### 舆情专项（P1）
+
+- `sentiment.md`：L1 卖方研报 / L2 公告 / L3 WebSearch 三层 SOP
+- `SentimentCard` 文档澄清：卖方一致预期，非社媒舆情
+- `source-guide.md` 新增舆情数据源章节
+
+### 财报专项（P2）
+
+- `financials.md`：F-1~F-4 + F-3 决策树 + F-4 六关深化指引
+- `risk_scanner` 新增软信号：`revenue_acceleration_flag`、`ocf_np_divergence_flag`
+
+### 测试
+
+- `test_participant_scan.py`：行为扫描 + full/brief 集成
+- `test_v015_fixes`：3 个新 intent preset
+- `test_financials`：财务软信号
 
 ## v0.1.8 (2026-07-07)
 

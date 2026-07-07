@@ -154,6 +154,18 @@ class TestRevenueQualityScore:
         assert result["partial"] is True
         _check_no_forbidden_words(result)
 
+    def test_margin_trajectory_yoy_hyphenated_prior_end_date(self):
+        from lib.scoring import _score_margin_trajectory
+
+        rows = [
+            {"end_date": "2023-12-31", "grossprofit_margin": 20.0, "netprofit_margin": 8.0},
+            {"end_date": "20241231", "grossprofit_margin": 25.0, "netprofit_margin": 12.0},
+        ]
+        score, detail, _sources, missing = _score_margin_trajectory(rows)
+        assert missing == ""
+        assert score is not None
+        assert detail.get("note", "").startswith("同比")
+
     def test_none_input_does_not_raise(self):
         result = revenue_quality_score(None)  # type: ignore[arg-type]
         assert result["score"] is None
@@ -1224,6 +1236,23 @@ class TestSectionSixGatesScorecard:
         text = _section_six_gates_scorecard(self._dims(), {}, {})
         assert "历史位置" in text
         assert "历史分位" not in text
+
+    def test_financial_gate_includes_soft_signals(self):
+        fin_list = _make_canvas_financials(6)
+        fin_list[-1]["n_income_attr_p"] = 10_000_000.0
+        fin_list[-1]["n_cashflow_act"] = 1_000_000.0
+        dims = {
+            "financials": {"data": fin_list, "status": "available"},
+            "holder_changes": _make_holder_changes([
+                {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+            ]),
+        }
+        text = _section_six_gates_scorecard(dims, {}, {})
+        assert "软信号" in text
+        assert "营收加速度" in text or "OCF/净利背离" in text
+        for word in FORBIDDEN_GATE_WORDS:
+            assert word not in text
+        _check_no_forbidden_words(text)
 
 
 class TestSectionBiasSelfCheck:

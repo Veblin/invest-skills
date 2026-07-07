@@ -77,6 +77,18 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 
 以下数据源已规划但尚未接入，详见 `docs/roadmap.md`：
 - **yfinance** — 美股/港股数据，稳定性 ★★
+- **龙虎榜 / 大宗交易** — 游资席位与大宗成交（v0.2.0，见 [game-theory.md](game-theory.md)）
+- **互动易 / 社媒 API** — L3 公开舆情自动采集（v0.2.0，见 [sentiment.md](sentiment.md)）
+
+## 舆情数据源
+
+| 层级 | 维度 | 接口 | 稳定性 | 说明 |
+|------|------|------|--------|------|
+| L1 卖方研报 | `research` | Tushare `report_rc` / akshare `stock_research_report_em` | ★★★ | 研报情绪卡（`SentimentCard`），非社媒舆情 |
+| L2 公告事件 | `events` | akshare `stock_individual_notice_report` | ★★ | `attach_events` 自动采集 + 事件分类 |
+| L3 公开舆情 | — | WebSearch / Tavily | ❓ | Claude 执行；须 query + 来源标注。见 [sentiment.md](sentiment.md) |
+
+L3 为 fallback，可信度标注 ❓ 弱，推测须标 `[推测，待验证]`。
 
 ## Web 搜索可信度分级
 

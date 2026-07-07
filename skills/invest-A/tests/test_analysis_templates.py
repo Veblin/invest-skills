@@ -195,8 +195,36 @@ class TestBuildMDACard:
         assert card.profit_growth_yoy is None
         assert card.gross_margin_change is None
         assert card.roe_change is None
+
+    def test_yoy_growth_with_hyphenated_prior_end_date(self):
+        records = [
+            {"end_date": "2024-12-31", "revenue": 120.0, "net_profit": 12.0,
+             "grossprofit_margin": 30.0, "roe": 15.0},
+            {"end_date": "2023-12-31", "revenue": 100.0, "net_profit": 10.0,
+             "grossprofit_margin": 25.0, "roe": 12.0},
+        ]
+        collection = {"dimensions": [_make_financials_dimension(records)]}
+        card = _build_mda_card(collection)
+        assert card is not None
+        assert card.revenue_growth_yoy == pytest.approx(20.0)
+        assert card.profit_growth_yoy == pytest.approx(20.0)
+        assert card.gross_margin_change == pytest.approx(5.0)
+        assert card.roe_change == pytest.approx(3.0)
         assert card.debt_ratio_change is None
         assert card.asset_turnover_change is None
+
+    def test_latest_record_with_mixed_date_formats(self):
+        """String sort would pick 20241231 over 2025-12-31; normalized sort must not."""
+        records = [
+            {"end_date": "2025-12-31", "revenue": 120.0, "net_profit": 12.0,
+             "grossprofit_margin": 30.0, "roe": 15.0},
+            {"end_date": "20241231", "revenue": 100.0, "net_profit": 10.0,
+             "grossprofit_margin": 25.0, "roe": 12.0},
+        ]
+        collection = {"dimensions": [_make_financials_dimension(records)]}
+        card = _build_mda_card(collection)
+        assert card is not None
+        assert card.revenue_growth_yoy == pytest.approx(20.0)
 
     def test_no_financials_dimension_returns_none(self):
         collection = {"dimensions": [
