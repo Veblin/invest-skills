@@ -10,6 +10,15 @@ class TestFinancialsHelpers:
         assert normalize_end_date("20231231") == "20231231"
         assert normalize_end_date("2023-12-31") == "20231231"
 
+    def test_parse_end_date_dot_format(self):
+        from lib.financials import parse_end_date
+
+        parsed = parse_end_date("2026.01.01")
+        assert parsed is not None
+        assert parsed.year == 2026
+        assert parsed.month == 1
+        assert parsed.day == 1
+
     def test_prior_year_end_date_hyphenated(self):
         from lib.financials import prior_year_end_date
 
@@ -95,17 +104,33 @@ class TestFinancialsHelpers:
 
 
 class TestFinancialSoftSignals:
-    def test_revenue_acceleration_flag(self):
+    def test_revenue_acceleration_flag_uses_true_yoy_pairs(self):
         from lib.risk_scanner import revenue_acceleration_flag
 
         rows = [
-            {"end_date": "20211231", "revenue": 100.0},
-            {"end_date": "20221231", "revenue": 110.0},
-            {"end_date": "20231231", "revenue": 130.0},
+            {"end_date": "2023-03-31", "revenue": 80.0},
+            {"end_date": "2024-03-31", "revenue": 100.0},
+            {"end_date": "2024-06-30", "revenue": 150.0},
+            {"end_date": "2025-03-31", "revenue": 130.0},
+            {"end_date": "2025-06-30", "revenue": 210.0},
         ]
         out = revenue_acceleration_flag(rows)
-        assert "accel_pp" in out
-        assert isinstance(out["triggered"], bool)
+        assert out["triggered"] is True
+        assert out["accel_pp"] == 10.0
+        assert "2025-03-31=30.0%" in out["detail"]
+        assert "2025-06-30=40.0%" in out["detail"]
+
+    def test_revenue_acceleration_flag_requires_two_yoy_pairs(self):
+        from lib.risk_scanner import revenue_acceleration_flag
+
+        rows = [
+            {"end_date": "2024-03-31", "revenue": 100.0},
+            {"end_date": "2025-03-31", "revenue": 130.0},
+            {"end_date": "2025-06-30", "revenue": 210.0},
+        ]
+        out = revenue_acceleration_flag(rows)
+        assert out["triggered"] is False
+        assert "缺少最近两组可比同比配对" in out["detail"]
 
     def test_ocf_np_divergence_flag(self):
         from lib.risk_scanner import ocf_np_divergence_flag
@@ -114,3 +139,44 @@ class TestFinancialSoftSignals:
         out = ocf_np_divergence_flag(rows)
         assert out["triggered"] is True
         assert "ratio" in out
+
+    def test_ocf_np_divergence_flag_uses_point_six_threshold(self):
+        from lib.risk_scanner import ocf_np_divergence_flag
+
+        rows = [{"end_date": "20231231", "n_cashflow_act": 0.55e6, "n_income_attr_p": 1e6}]
+        out = ocf_np_divergence_flag(rows)
+        assert out["triggered"] is True
+        assert out["ratio"] == 0.55
+
+    def test_ocf_np_divergence_flag_accepts_net_profit_field(self):
+        from lib.risk_scanner import ocf_np_divergence_flag
+
+        rows = [{"end_date": "20231231", "n_cashflow_act": 0.5e6, "net_profit": 1e6}]
+        out = ocf_np_divergence_flag(rows)
+        assert out["triggered"] is True
+        assert out["ratio"] == 0.5
+        assert "缺失" not in out["detail"]
+
+    def test_ocf_np_divergence_flag_preserves_zero_net_profit(self):
+        from lib.risk_scanner import ocf_np_divergence_flag
+
+        rows = [{"end_date": "20231231", "n_cashflow_act": 1e6, "net_profit": 0.0}]
+        out = ocf_np_divergence_flag(rows)
+        assert out["triggered"] is False
+        assert "净利润为 0" in out["detail"]
+        assert "缺失" not in out["detail"]
+
+    def test_ocf_np_divergence_flag_zero_primary_not_fallthrough(self):
+        from lib.risk_scanner import ocf_np_divergence_flag
+
+        # n_income_attr_p=0 must not fall through via `or` to net_profit
+        rows = [{
+            "end_date": "20231231",
+            "n_cashflow_act": 1e6,
+            "n_income_attr_p": 0.0,
+            "net_profit": 1e6,
+        }]
+        out = ocf_np_divergence_flag(rows)
+        assert out["triggered"] is False
+        assert "净利润为 0" in out["detail"]
+        assert "ratio" not in out

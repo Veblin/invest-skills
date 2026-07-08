@@ -34,7 +34,7 @@ def parse_end_date(raw: Any) -> date | None:
     """Parse a date string (YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD) to a ``date`` object."""
     if raw is None:
         return None
-    s = str(raw).strip().replace("-", "")
+    s = normalize_end_date(str(raw))
     if len(s) < 8 or not s[:8].isdigit():
         return None
     try:
