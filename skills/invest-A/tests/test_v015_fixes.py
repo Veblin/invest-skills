@@ -371,6 +371,9 @@ class TestPlannerPresets:
 
 
 # ---- R-10: brief/full 双模式 ----
+
+
+class TestBriefMode:
     """R-10: --mode brief 输出精简，--mode full 输出完整。"""
 
     def test_brief_mode_is_shorter_than_full(self):

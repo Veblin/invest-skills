@@ -192,7 +192,7 @@ def build_participant_behavior_section(
     lines.append("")
 
     if cv_notes:
-        lines.append("**交叉验证（行为分歧）：**")
+        lines.append("**交叉验证（参与者行为）：**")
         for note in cv_notes:
             lines.append(f"- {note}")
         lines.append("")

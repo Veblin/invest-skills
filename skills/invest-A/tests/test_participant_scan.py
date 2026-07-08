@@ -53,7 +53,18 @@ class TestParticipantBehaviorScan:
             "moneyflow": {"net_sum_10d": -5_000_000, "source": "tushare.moneyflow"},
         }
         text = build_participant_behavior_section({}, "600176", ms, _dims())
+        assert "交叉验证（参与者行为）" in text
         assert "方向相反" in text
+
+    def test_cv_convergence_uses_neutral_heading(self):
+        ms = {
+            "northbound": {"net_sum_10d": 10_000_000, "days": 10, "source": "tushare"},
+            "moneyflow": {"net_sum_10d": 5_000_000, "source": "tushare.moneyflow"},
+        }
+        text = build_participant_behavior_section({}, "600176", ms, _dims())
+        assert "交叉验证（参与者行为）" in text
+        assert "行为分歧" not in text
+        assert "方向一致" in text
 
 
 class TestParticipantScanRenderIntegration:

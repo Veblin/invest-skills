@@ -2581,10 +2581,14 @@ def _section_six_gates_scorecard(
     ocf_div = ocf_np_divergence_flag(fin_list)
     soft_notes: list[str] = []
     for label, flag in (("营收加速度", accel), ("OCF/净利背离", ocf_div)):
+        # Only render computed results; skip degrade-path details without accel_pp/ratio
+        if "accel_pp" not in flag and "ratio" not in flag:
+            continue
         detail = flag.get("detail", "")
-        if detail and "不足" not in detail and "缺失" not in detail:
-            prefix = "软信号⚠️ " if flag.get("triggered") else "软信号 "
-            soft_notes.append(f"{prefix}{label}: {detail}")
+        if not detail:
+            continue
+        prefix = "软信号⚠️ " if flag.get("triggered") else "软信号 "
+        soft_notes.append(f"{prefix}{label}: {detail}")
     fin_note = (
         "毛利率稳定性 + OCF/净利润覆盖评分均值 "
         "[来源: lib.scoring.revenue_quality_score 子信号]"

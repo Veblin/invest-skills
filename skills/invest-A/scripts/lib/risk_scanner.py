@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.nums import safe_float
+from lib.financials import find_yoy_row
+from lib.nums import coalesce_field, safe_float
 from lib.technical import compute, rsi_series, sort_kline_asc
 
 
@@ -430,17 +431,40 @@ def revenue_acceleration_flag(financials: list[dict]) -> dict[str, Any]:
     """营收增速二阶变化软信号（F-4 财务关参考）。非买卖建议。"""
     rows = _fin(financials or [])
     if len(rows) < 3:
-        return {"triggered": False, "detail": "财务期数不足 3 期，无法计算营收加速度"}
-    revs = [safe_float(r.get("revenue")) for r in rows[-3:]]
-    if any(v is None for v in revs):
-        return {"triggered": False, "detail": "revenue 字段缺失"}
-    g1 = (revs[1] - revs[0]) / abs(revs[0]) * 100 if revs[0] else 0.0
-    g2 = (revs[2] - revs[1]) / abs(revs[1]) * 100 if revs[1] else 0.0
+        return {"triggered": False, "detail": "财务期数不足 3 期，无法计算同比营收加速度"}
+
+    yoy_pairs: list[tuple[dict, dict]] = []
+    for row in reversed(rows):
+        yoy = find_yoy_row(rows, row)
+        if yoy is None:
+            continue
+        yoy_pairs.append((row, yoy))
+        if len(yoy_pairs) == 2:
+            break
+
+    if len(yoy_pairs) < 2:
+        return {"triggered": False, "detail": "缺少最近两组可比同比配对，无法计算同比营收加速度"}
+
+    (latest, latest_yoy), (prev, prev_yoy) = yoy_pairs[0], yoy_pairs[1]
+    latest_rev = safe_float(latest.get("revenue"))
+    latest_yoy_rev = safe_float(latest_yoy.get("revenue"))
+    prev_rev = safe_float(prev.get("revenue"))
+    prev_yoy_rev = safe_float(prev_yoy.get("revenue"))
+    if None in (latest_rev, latest_yoy_rev, prev_rev, prev_yoy_rev):
+        return {"triggered": False, "detail": "同比配对期 revenue 字段缺失"}
+    if latest_yoy_rev == 0 or prev_yoy_rev == 0:
+        return {"triggered": False, "detail": "同比基期 revenue 为 0，无法计算同比营收加速度"}
+
+    g2 = (latest_rev - latest_yoy_rev) / abs(latest_yoy_rev) * 100
+    g1 = (prev_rev - prev_yoy_rev) / abs(prev_yoy_rev) * 100
     accel = g2 - g1
     triggered = abs(accel) >= 5.0
     return {
         "triggered": triggered,
-        "detail": f"近三期营收同比增速变化 {accel:+.1f}pp（g1={g1:.1f}%, g2={g2:.1f}%）",
+        "detail": (
+            "近两组同比营收增速变化 "
+            f"{accel:+.1f}pp（{prev.get('end_date')}={g1:.1f}%, {latest.get('end_date')}={g2:.1f}%）"
+        ),
         "accel_pp": round(accel, 2),
     }
 
@@ -452,13 +476,14 @@ def ocf_np_divergence_flag(financials: list[dict]) -> dict[str, Any]:
         return {"triggered": False, "detail": "无财务数据"}
     latest = rows[-1]
     ocf = _ocf(latest)
-    np_ = safe_float(latest.get("n_income_attr_p") or latest.get("netprofit"))
+    # coalesce_field preserves legal 0.0 (unlike `or` chains)
+    np_ = coalesce_field(latest, "n_income_attr_p", "net_profit", "netprofit")
     if ocf is None or np_ is None:
         return {"triggered": False, "detail": "OCF 或净利润字段缺失"}
     if np_ == 0:
         return {"triggered": False, "detail": "净利润为 0，跳过背离检测"}
     ratio = ocf / np_
-    triggered = (np_ > 0 and ratio < 0.5) or (np_ < 0 and ocf > 0)
+    triggered = (np_ > 0 and ratio < 0.6) or (np_ < 0 and ocf > 0)  # 0.6 阈值与 scan_financial_risks L83 一致
     return {
         "triggered": triggered,
         "detail": f"最新期 OCF/净利润 = {ratio:.2f}（OCF={ocf:.0f}, NP={np_:.0f}）",
