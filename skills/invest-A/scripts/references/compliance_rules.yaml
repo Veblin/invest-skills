@@ -1,7 +1,7 @@
 # compliance_rules.yaml — invest-A 合规扫描规则
 # 单数据源：从 CLAUDE.md 措辞规范自动编码
 # scope: line → 逐行正则匹配 | file → 全文扫描 | paragraph → 段级分析
-schema_version: "0.1.6"
+schema_version: "0.1.9"
 description: "invest-A 合规扫描规则（从 CLAUDE.md 措辞规范、已知违规模式、估值分位规则、分析标记规范编码）"
 
 rules:
@@ -30,21 +30,21 @@ rules:
     law_ref: "LAW 6"
 
   - id: "law6-buy-standalone"
-    pattern: "(?<!不)(?<!建议)买入(?!成本|价格|价|时点|信号|机会|逻辑|力度|量|意愿|金额|均价|股份|资产|返售|返租|返利|返点|返期|返债|返基金|返保险)"
+    pattern: "(?<!在)(?<!不)(?<!建议)买入(?!成本|价格|价|时点|信号|机会|逻辑|力度|量|意愿|金额|均价|股份|资产|返售|返租|返利|返点|返期|返债|返基金|返保险)"
     severity: "error"
     scope: "line"
     message: "禁止使用'买入'建议词汇（LAW 6）"
     law_ref: "LAW 6"
 
   - id: "law6-sell-standalone"
-    pattern: "(?<!不)(?<!建议)卖出(?!量|金额|均价|收入|资产|股份|价格|信号|机会|时点|逻辑|力度|意愿)"
+    pattern: "(?<!在)(?<!不)(?<!建议)卖出(?!量|金额|均价|收入|资产|股份|价格|信号|机会|时点|逻辑|力度|意愿)"
     severity: "error"
     scope: "line"
     message: "禁止使用'卖出'建议词汇（LAW 6）"
     law_ref: "LAW 6"
 
   - id: "law6-hold-standalone"
-    pattern: "(?<!不)(?<!建议)持有(?!人|股|比例|量|成本|期间|期|者|方|仓|单|证|券|债|基金|保险|资产|股份|股票)"
+    pattern: "(?<!在)(?<!不)(?<!建议)持有(?!人|股|比例|量|成本|期间|期|者|方|仓|单|证|券|债|基金|保险|资产|股份|股票)"
     severity: "error"
     scope: "line"
     message: "禁止使用'持有'建议词汇（LAW 6）"
@@ -88,6 +88,7 @@ rules:
     pattern: "估值崩溃风险"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止使用'估值崩溃风险'，替换为'剧烈估值收缩风险：在 XXX 场景下，估值从 AAAx 收敛至 BBBx'"
     law_ref: "措辞规范 — 风险模块"
 
@@ -95,6 +96,7 @@ rules:
     pattern: "经典周期顶部信号"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止使用'经典周期顶部信号'，需具体描述行为模式并附历史案例"
     law_ref: "措辞规范 — 动态驱动"
 
@@ -102,6 +104,7 @@ rules:
     pattern: "极度高估"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止使用'极度高估'，改为数值比较：'PE 665x vs 同赛道平均 40x，溢价约 16 倍'"
     law_ref: "措辞规范 — 估值段落"
 
@@ -109,6 +112,7 @@ rules:
     pattern: "极度低估"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止使用'极度低估'，改为数值比较"
     law_ref: "措辞规范 — 估值段落"
 
@@ -116,6 +120,7 @@ rules:
     pattern: "崩盘"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止使用'崩盘'，替换为'剧烈回调'+条件描述"
     law_ref: "措辞规范 — 任何场景"
 
@@ -123,6 +128,7 @@ rules:
     pattern: "往往是估值峰值"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止使用'往往是估值峰值'，需附历史案例：'在多次周期品历史走势中…但并非必然规律'"
     law_ref: "措辞规范 — 市场结构"
 
@@ -130,6 +136,7 @@ rules:
     pattern: "往往伴随.*修正"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
     message: "禁止无据'往往伴随'表述，需附案例：'在 AAA、BBB 等类似斜率的高涨中，随后 N 个月内出现 20-30% 回调（案例研究待补）'"
     law_ref: "措辞规范 — 技术结构"
 
@@ -137,6 +144,10 @@ rules:
     pattern: "股价也可能下跌\\s*\\d+(?:-\\d+)?%"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    skip_if_pattern_within_window: "(若|如果|假设|情景|scenario)"
+    context_before: 2
+    context_after: 2
     message: "禁止无条件'股价也可能下跌 X%'，需改为：'若盈利路径不及 AAA 预测、且估值回到周期中枢 BBBx，则与当前市值相比，价格有 X% 的回调空间'"
     law_ref: "措辞规范 — 风险模块"
 
@@ -233,7 +244,7 @@ rules:
     law_ref: "LAW 6 — 已知违规模式 #2"
 
   - id: "known-violation-ting-pai"
-    pattern: "建议(买入|卖出|持有|关注|回避)"
+    pattern: "建议(买入|卖出|持有|回避)"
     severity: "error"
     scope: "line"
     message: "禁止任何形式的'建议'指令（LAW 6）"
@@ -254,6 +265,13 @@ rules:
     severity: "warning"
     scope: "line"
     message: "报告中存在待办标记（TODO/FIXME/XXX），请清理后再提交"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-zhanwei"
+    pattern: "占位"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在占位文本，请补充完整后再提交"
     law_ref: "SOP-QC — 占位残留"
 
   - id: "placeholder-tbd"
@@ -284,6 +302,7 @@ rules:
     pattern: "(?<!不)必然(?!性|规律|事件|趋势|联系|关系|因果|条件)"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
     message: "避免绝对化表述'必然'；若为引用来源内容请标注 [来源:]"
     law_ref: "措辞规范 — 绝对化表述"
 
@@ -291,6 +310,7 @@ rules:
     pattern: "(?<!不)一定(?!程度|范围|条件|比例|意义|影响|作用|关系|差异|时间|期限|波动|风险|收益)"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
     message: "避免绝对化表述'一定'；若为引用来源内容请标注 [来源:]"
     law_ref: "措辞规范 — 绝对化表述"
 
@@ -298,6 +318,7 @@ rules:
     pattern: "(?<!不)肯定(?!了|地|的)"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
     message: "避免绝对化表述'肯定'；若为引用来源内容请标注 [来源:]"
     law_ref: "措辞规范 — 绝对化表述"
 
@@ -305,6 +326,7 @@ rules:
     pattern: "绝不"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
     message: "避免绝对化表述'绝不'；若为引用来源内容请标注 [来源:]"
     law_ref: "措辞规范 — 绝对化表述"
 
@@ -312,16 +334,36 @@ rules:
     pattern: "毫无疑问"
     severity: "warning"
     scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
     message: "避免绝对化表述'毫无疑问'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-yidingbu"
+    pattern: "一定不会"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'一定不会'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-jueduibu"
+    pattern: "绝对不会"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'绝对不会'；若为引用来源内容请标注 [来源:]"
     law_ref: "措辞规范 — 绝对化表述"
 
   # ==========================================================================
   # [事实]/[分析] 顺序检查（原 check_report.sh 检查项 4）
-  # 逐行扫描确保每个 [分析] 前有 [事实]
+  # 逐行扫描：每个 [分析] 前 50 行内须有 [事实]，遇 ## 章节标题停止回溯
   # ==========================================================================
   - id: "structure-analysis-without-fact"
-    pattern: "^(?:(?!\\[事实\\]).)*\\[分析\\]"
-    severity: "warning"
-    scope: "paragraph"
+    pattern: "\\[分析\\]"
+    severity: "error"
+    scope: "line"
+    require_pattern_within_previous_lines: "\\[事实\\]"
+    lookback_lines: 50
+    stop_at_section_header: true
     message: "[分析] 段落前缺少 [事实] 块（SOP-QC 要求先列事实再分析）"
     law_ref: "SOP-QC — 分析标记规范"

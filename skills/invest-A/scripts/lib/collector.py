@@ -2241,7 +2241,8 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
-                with_chain: bool = False) -> dict[str, Any]:
+                with_chain: bool = False,
+                with_news_pack: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
@@ -2253,6 +2254,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         deep: 深度模式，kline 扩大到 730 自然日
         with_macro: 采集中国宏观指标（PMI/CPI/PPI/LPR）
         with_chain: 采集产业链上下文（复用已采集的 basic_info）
+        with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
     """
     if dims is None:
         dims = list(_DEFAULT_DIMS)
@@ -2440,7 +2442,55 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         logger.warning("manifest generation failed (non-fatal): %s", e)
         meta["manifest"] = None
 
+    if with_news_pack:
+        try:
+            attach_news_pack(result, symbol)
+        except Exception as exc:
+            logger.warning("attach_news_pack failed for %s: %s", symbol, exc)
+            result["news"] = {
+                "cards": [],
+                "query_pack": [],
+                "attempted_sources": {"error": str(exc)},
+            }
+
     return result
+
+
+def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict[str, Any]:
+    """v0.1.9: attach news cards + query pack to collection."""
+    from .news_scanner import collect_news
+    from .json_util import dumps_json
+
+    name = ""
+    basic_dim = next(
+        (d for d in result.get("dimensions", []) if d.get("dimension") == "basic_info"),
+        None,
+    )
+    if basic_dim and isinstance(basic_dim.get("data"), dict):
+        name = basic_dim["data"].get("name") or basic_dim["data"].get("股票简称") or ""
+
+    news = collect_news(symbol, name=name, days=days)
+    result["news"] = news
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    pack_path = env.STORE_DIR / f"news_query_pack_{symbol}_{ts}.json"
+    pack_path.parent.mkdir(parents=True, exist_ok=True)
+    pack_path.write_text(
+        dumps_json({"symbol": symbol, "name": name, "query_pack": news.get("query_pack", [])}),
+        encoding="utf-8",
+    )
+    result.setdefault("_meta", {})["news_query_pack_path"] = str(pack_path)
+    return news
+
+
+def collect_news_dim(symbol: str, days: int = 7) -> dict[str, Any]:
+    """Standalone news collection for CLI/testing."""
+    basic = collect_basic_info(symbol)
+    name = ""
+    if isinstance(basic.get("data"), dict):
+        name = basic["data"].get("name") or basic["data"].get("股票简称") or ""
+    from .news_scanner import collect_news
+    return collect_news(symbol, name=name, days=days)
 
 
 # ---- 市场结构采集（v0.1.3 Phase 1） ----
@@ -2608,8 +2658,8 @@ def _akshare_closes_from_hist_sw(index_code: str, *, days: int = 70) -> list[flo
     return [float(v) for v in tail[col].tolist() if v is not None]
 
 
-def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
-    """沪深300 日线收盘价（akshare / 东方财富）。"""
+def _akshare_hs300_dated_closes(*, days: int = 70) -> list[tuple[str, float]]:
+    """沪深300 日线 (trade_date YYYYMMDD, close) 升序。"""
     import akshare as ak
 
     sd = _days_ago(days + 10)
@@ -2625,7 +2675,22 @@ def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
     col = "收盘" if "收盘" in df.columns else "close"
     date_col = "日期" if "日期" in df.columns else "date"
     sorted_df = df.sort_values(date_col)
-    return [float(v) for v in sorted_df[col].tolist() if v is not None]
+    out: list[tuple[str, float]] = []
+    for _, row in sorted_df.iterrows():
+        raw = str(row.get(date_col) or "")
+        td = raw.replace("-", "").replace("/", "")[:8]
+        v = row.get(col)
+        if len(td) == 8 and td.isdigit() and v is not None:
+            try:
+                out.append((td, float(v)))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
+    """沪深300 日线收盘价（akshare / 东方财富）。"""
+    return [c for _, c in _akshare_hs300_dated_closes(days=days)]
 
 
 def _ms_build_sw_index_result(

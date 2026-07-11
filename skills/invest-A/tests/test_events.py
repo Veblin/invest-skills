@@ -136,6 +136,20 @@ class TestClassifyEvent:
         result = _classify_event({"title": "关于募集资金使用的公告", "raw_type": ""})
         assert result["event_type"] == "private_placement"
 
+    def test_classify_uses_hardcoded_defaults_when_taxonomy_missing(self):
+        with patch("lib.events.load_event_taxonomy", return_value={"event_types": {}}):
+            result = _classify_event({"title": "关于回购公司股份的公告", "raw_type": ""})
+        assert result["event_type"] == "buyback"
+        assert result["impact_dimension"] == "估值"
+        assert result["duration"] == "中长期变量"
+
+    def test_other_fallback_uses_other_defaults(self):
+        with patch("lib.events.load_event_taxonomy", return_value={"event_types": {}}):
+            result = _classify_event({"title": "关于召开股东大会的提示性公告", "raw_type": ""})
+        assert result["event_type"] == "other"
+        assert result["impact_dimension"] == "治理"
+        assert result["duration"] == "短期扰动"
+
 
 # ── _get_logic_relation ──
 

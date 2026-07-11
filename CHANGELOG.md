@@ -2,38 +2,47 @@
 
 ## Unreleased
 
-## v0.1.9 (2026-07-07)
+## v0.1.9 (2026-07-10)
 
-v0.1.9 将 SKILL 拆分为「核心 + 专项 references」架构，扩展 `plan --intent`，并新增参与者行为扫描 render 层。
+v0.1.9 交付质量门工具链、新闻三层架构、5 个新 CLI、渲染扩展与技术指标 P0–P1。
 
-### Skill 架构
+### 质量门（Phase 2）
 
-- **SKILL.md 瘦身**（~173 行）：LAWs + 路由表 + CLI；九模块/F 规范/引用格式迁至 `references/`
-- **新增专项文档**：`modules.md`、`references-format.md`、`financials.md`、`sentiment.md`、`game-theory.md`
-- **`plan --intent`** 新增：`sentiment_deep`、`financials_deep`、`game_theory`
+- **`lib/financial_rigor.py`**：`verify-market-cap` / `verify-valuation` / `cross-validate` / `calc`
+- **`lib/report_audit.py`**：`audit --extract` / `--verdict`
+- **`lib/render_extras.py`**：>5% 跨源差异警示（`--strict-rigor` 严格模式）
 
-### 参与者行为扫描（P0）
+### 新闻采集（Phase 3）
 
-- 新模块 `lib/participant_scan.py` + render 节「参与者行为扫描」（full 模式，位于市场结构之后）
-- 基于 northbound / moneyflow / margin / holder_changes / turnover / PCR 现有数据
-- 元分析层，非策略建议；龙虎榜/大宗留 v0.2.0
+- **`lib/news_scanner.py`**：公告 + 声明式查询包 + 可选 Tavily
+- `collect --with-news-pack`；`env.py` 加载 `TAVILY_API_KEY`
+- **`events.calc_price_impact_interpolation`** + `shock` CLI
 
-### 舆情专项（P1）
+### CLI（Phase 4）
 
-- `sentiment.md`：L1 卖方研报 / L2 公告 / L3 WebSearch 三层 SOP
-- `SentimentCard` 文档澄清：卖方一致预期，非社媒舆情
-- `source-guide.md` 新增舆情数据源章节
+- `rigor` / `audit` / `check` / `portfolio` / `thesis`
+- `lib/quality_check.py`：7 指标 + 3 豁免
+- `lib/portfolio_review.py`：行业集中度 / 相关性 / 压力测试
+- `store.py`：`thesis` 表
 
-### 财报专项（P2）
+### 渲染与文档（Phase 5）
 
-- `financials.md`：F-1~F-4 + F-3 决策树 + F-4 六关深化指引
-- `risk_scanner` 新增软信号：`revenue_acceleration_flag`、`ocf_np_divergence_flag`
+- AI 偏见声明 / 逆向思考 / A+H 检测标注 / 外生冲击段
+- SKILL.md：SOP-DEEP、earnings-review、news-pulse
+- source-guide：新闻三层架构
+
+### 技术指标（Phase 6）
+
+- Ichimoku / 波动率锥 / RS / 滚动 Beta（默认基准 000300.SH）
 
 ### 测试
 
-- `test_participant_scan.py`：行为扫描 + full/brief 集成
-- `test_v015_fixes`：3 个新 intent preset
-- `test_financials`：财务软信号
+- `test_financial_rigor` / `test_news_scanner` / `test_report_audit` / `test_quality_check` / `test_technical_v019`
+
+### Phase 1（早期交付 2026-07-07）
+
+- SKILL 拆分为核心 + references；`plan --intent` 扩展
+- `participant_scan.py`；财务软信号 `revenue_acceleration_flag` / `ocf_np_divergence_flag`
 
 ## v0.1.8 (2026-07-07)
 

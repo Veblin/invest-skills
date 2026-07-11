@@ -30,3 +30,20 @@ def coalesce_field(row: dict, *keys: str) -> float | None:
         if v is not None:
             return v
     return None
+
+
+def fmt_amount(v: Any, unit: str = "") -> str:
+    """格式化数值为 亿/万 可读形式，供渲染与标签使用。
+
+    None → "-"；非数字 → str(v)；否则按量级附加 亿/万。
+    """
+    if v is None:
+        return "-"
+    f = safe_float(v)
+    if f is None:
+        return str(v)
+    if abs(f) >= 1e8:
+        return f"{f / 1e8:.2f}亿"
+    if abs(f) >= 1e4:
+        return f"{f / 1e4:.2f}万"
+    return f"{f:.2f}{unit}" if unit else f"{f:.2f}"

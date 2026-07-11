@@ -7,26 +7,29 @@ from __future__ import annotations
 
 from typing import Any
 
+from lib.nums import fmt_amount
 from lib.scoring import insider_signal
 
+_MF_LABELS = {
+    "net_sum_5d": "近5日主力净额",
+    "net_sum_10d": "近10日主力净额",
+    "net_mf_amount": "主力净额",
+}
+_MF_CV_WINDOW = {
+    "net_sum_5d": "主力近5日",
+    "net_sum_10d": "主力近10日",
+    "net_mf_amount": "主力",
+}
+_DEFAULT_MF_KEYS = ("net_sum_5d", "net_sum_10d", "net_mf_amount")
 
-def _fmt_amount(v: Any) -> str:
-    if v is None:
-        return "-"
+
+def northbound_label(nb: dict) -> str:
+    """北向净额标签：hsgt_top10 为上榜日累计，akshare 为连续交易日。"""
     try:
-        f = float(v)
+        days = int(nb.get("days") or 0)
     except (TypeError, ValueError):
-        return str(v)
-    if abs(f) >= 1e8:
-        return f"{f / 1e8:.2f}亿"
-    if abs(f) >= 1e4:
-        return f"{f / 1e4:.2f}万"
-    return f"{f:.2f}"
-
-
-def _northbound_label(nb: dict) -> str:
-    days = int(nb.get("days") or 0)
-    amount = _fmt_amount(nb.get("net_sum_10d"))
+        days = 0
+    amount = fmt_amount(nb.get("net_sum_10d"))
     src = str(nb.get("source") or "")
     if "hsgt_top10" in src:
         return f"上榜日累计净额 {amount}（{days} 个上榜日）"
@@ -47,6 +50,34 @@ def _moneyflow_net(mf: dict, key: str) -> float | None:
         return None
 
 
+def resolve_moneyflow(mf: dict | None, *keys: str) -> tuple[float | None, str | None]:
+    if not keys:
+        keys = _DEFAULT_MF_KEYS
+    if not isinstance(mf, dict):
+        return None, None
+    for key in keys:
+        value = _moneyflow_net(mf, key)
+        if value is not None:
+            return value, key
+    return None, None
+
+
+def moneyflow_signal_label(key: str | None) -> str:
+    if key:
+        return _MF_LABELS.get(key, "主力净额")
+    return "主力净额"
+
+
+def moneyflow_cv_window(key: str | None) -> str:
+    if key:
+        return _MF_CV_WINDOW.get(key, "主力")
+    return "主力"
+
+
+def _table_cell(text: Any) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
 def _scan_rows(
     market_structure: dict,
     dims: dict,
@@ -60,17 +91,19 @@ def _scan_rows(
     if isinstance(nb, dict) and nb.get("net_sum_10d") is not None:
         rows.append({
             "role": "北向（外资）",
-            "signal": _northbound_label(nb),
+            "signal": northbound_label(nb),
             "source": str(nb.get("source") or "market_structure.northbound"),
         })
 
     mf = ms.get("moneyflow")
+    mf_net: float | None = None
+    mf_key: str | None = None
     if isinstance(mf, dict):
-        net10 = _moneyflow_net(mf, "net_sum_10d") or _moneyflow_net(mf, "net_mf_amount")
-        if net10 is not None:
+        mf_net, mf_key = resolve_moneyflow(mf)
+        if mf_net is not None:
             rows.append({
                 "role": "主力（大单代理）",
-                "signal": f"近10日主力净额 {_fmt_amount(net10)}",
+                "signal": f"{moneyflow_signal_label(mf_key)} {fmt_amount(mf_net)}",
                 "source": str(mf.get("source") or "market_structure.moneyflow"),
             })
 
@@ -96,7 +129,7 @@ def _scan_rows(
             "source": "lib.scoring.insider_signal / holder_changes",
         })
 
-    sh = dims.get("shareholders", {}).get("data")
+    sh = (dims.get("shareholders") or {}).get("data")
     if isinstance(sh, list) and sh and not any(r["role"] == "产业/内部人" for r in rows):
         rows.append({
             "role": "股东结构",
@@ -131,16 +164,20 @@ def _scan_rows(
             nb_net = float(nb.get("net_sum_10d"))
         except (TypeError, ValueError):
             nb_net = None
-    mf_net = _moneyflow_net(mf, "net_sum_10d") if isinstance(mf, dict) else None
-    if mf_net is None and isinstance(mf, dict):
-        mf_net = _moneyflow_net(mf, "net_mf_amount")
+    mf_window = moneyflow_cv_window(mf_key)
     if nb_net is not None and mf_net is not None:
-        if (nb_net > 0) == (mf_net > 0):
-            cv_notes.append("北向与主力近10日净流入方向一致")
+        if nb_net * mf_net > 0:
+            cv_notes.append(f"北向与主力净流入方向一致（北向近10日 vs {mf_window}）")
+        elif nb_net == 0 and mf_net == 0:
+            cv_notes.append(f"北向与主力净流入方向一致（北向近10日 vs {mf_window}）")
+        elif nb_net == 0 or mf_net == 0:
+            cv_notes.append(f"资金数据不完整（北向近10日 vs {mf_window}）")
         else:
-            cv_notes.append("北向与主力近10日净流入方向相反（可能存在参与者差异或滞后）")
+            cv_notes.append(
+                f"北向与主力净流入方向相反（北向近10日 vs {mf_window}，可能存在参与者差异或滞后）"
+            )
 
-    quote = dims.get("quote", {}).get("data") or {}
+    quote = (dims.get("quote") or {}).get("data") or {}
     chg = quote.get("change_pct") if isinstance(quote, dict) else None
     if nb_net is not None and chg is not None:
         try:
@@ -188,7 +225,9 @@ def build_participant_behavior_section(
     lines.append("| 参与者类型 | 近期行为信号 | 来源 |")
     lines.append("|-----------|-------------|------|")
     for r in rows:
-        lines.append(f"| {r['role']} | {r['signal']} | {r['source']} |")
+        lines.append(
+            f"| {_table_cell(r['role'])} | {_table_cell(r['signal'])} | {_table_cell(r['source'])} |"
+        )
     lines.append("")
 
     if cv_notes:

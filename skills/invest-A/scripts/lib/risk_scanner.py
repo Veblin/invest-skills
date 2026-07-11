@@ -24,11 +24,11 @@ def _fin(rows: list[dict]) -> list[dict]:
 
 
 def _ocf(row: dict) -> float | None:
-    return safe_float(row.get("n_cashflow_act") or row.get("ocf"))
+    return coalesce_field(row, "n_cashflow_act", "ocf")
 
 
 def _gross_margin(row: dict) -> float | None:
-    return safe_float(row.get("grossprofit_margin") or row.get("gross_margin"))
+    return coalesce_field(row, "grossprofit_margin", "gross_margin")
 
 
 def _signal(
@@ -95,7 +95,7 @@ def scan_financial_risks(
         for y in years:
             r = by_year[y]
             ocf = _ocf(r)
-            np_v = safe_float(r.get("net_profit"))
+            np_v = coalesce_field(r, "n_income_attr_p", "net_profit", "netprofit")
             if ocf is not None and np_v is not None and np_v > 0:
                 ratio = ocf / np_v
                 qual_parts.append(f"{y}: OCF/净利润={ratio:.2f}")
@@ -139,7 +139,7 @@ def scan_financial_risks(
                              triggered=inv_trig, severity="中", detail=inv_detail, auto=True))
 
     pd_v = safe_float(latest.get("profit_dedt"))
-    np_v = safe_float(latest.get("net_profit"))
+    np_v = coalesce_field(latest, "n_income_attr_p", "net_profit", "netprofit")
     if pd_v is not None and np_v is not None and np_v > 0:
         ratio = pd_v / np_v
         ded_trig = ratio < 0.7

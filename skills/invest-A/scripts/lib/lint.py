@@ -84,19 +84,38 @@ def load_rules() -> list[dict]:
 
 # ── 规则过滤 ──────────────────────────────────────────────────────────────
 
+_SECTION_HEADER_RE = re.compile(r"^##\s")
+
 
 def _should_skip_by_profile(rule: dict, profile: str) -> bool:
     """根据 profile 判断规则是否跳过。
 
     claude (默认): 全部规则
+    precommit: 对齐旧 check_report.sh 阻断项（禁止词 + [事实]前置）
     engine: 仅措辞 + 文件名规则，跳过结构/证据检查
     """
     if profile == "claude":
         return False  # 全部启用
 
-    # engine profile: 只保留 wording 类和 filename 类规则
     rule_id: str = rule.get("id", "")
     scope: str = rule.get("scope", "line")
+
+    if profile == "precommit":
+        if scope == "filename":
+            return False
+        if rule_id.startswith("wording-"):
+            return False
+        if rule_id.startswith("placeholder-"):
+            return True
+        if rule_id.startswith("known-violation"):
+            return True
+        if rule_id.startswith("law6-"):
+            return True
+        if rule_id == "structure-analysis-without-fact":
+            return False
+        return True
+
+    # engine profile: 只保留 wording 类和 filename 类规则
 
     # 文件名规则
     if scope == "filename":
@@ -149,6 +168,42 @@ def _compile_regex(pattern: str) -> Optional[re.Pattern]:
         return None
 
 
+def _line_window(lines: list[str], index: int, before: int = 0, after: int = 0) -> str:
+    start = max(0, index - before)
+    end = min(len(lines), index + after + 1)
+    return "\n".join(lines[start:end])
+
+
+def _previous_lines_window(
+    lines: list[str],
+    index: int,
+    before: int,
+    *,
+    stop_at_section: bool = True,
+) -> str:
+    """向上收集最多 before 行；遇 ``## `` 章节标题时停止（对齐旧 check_report.sh）。"""
+    if before <= 0 or index <= 0:
+        return ""
+    start = max(0, index - before)
+    collected: list[str] = []
+    for i in range(index - 1, start - 1, -1):
+        line = lines[i]
+        if stop_at_section and _SECTION_HEADER_RE.match(line.strip()):
+            break
+        collected.append(line)
+    collected.reverse()
+    return "\n".join(collected)
+
+
+def _severity_rank(severity: str) -> int:
+    return {"info": 0, "warning": 1, "error": 2}.get(severity, 2)
+
+
+def _count_by_severity(findings: list[LintFinding], fail_on: str) -> int:
+    threshold = _severity_rank(fail_on) if fail_on in {"info", "warning", "error"} else 2
+    return sum(1 for f in findings if _severity_rank(f.severity) >= threshold)
+
+
 def _lint_line_scope(
     lines: list[str],
     rule: dict,
@@ -159,12 +214,34 @@ def _lint_line_scope(
     regex = _compile_regex(pattern_str)
     if regex is None:
         return findings
+    skip_regex = _compile_regex(rule.get("skip_if_pattern", "")) if rule.get("skip_if_pattern") else None
+    require_regex = _compile_regex(rule.get("require_pattern_within_previous_lines", "")) if rule.get("require_pattern_within_previous_lines") else None
+    skip_window_regex = _compile_regex(rule.get("skip_if_pattern_within_window", "")) if rule.get("skip_if_pattern_within_window") else None
+    lookback_lines = int(rule.get("lookback_lines", 0) or 0)
+    context_before = int(rule.get("context_before", 0) or 0)
+    context_after = int(rule.get("context_after", 0) or 0)
 
-    for i, line in enumerate(lines, start=1):
+    for idx, line in enumerate(lines):
         if regex.search(line):
+            if skip_regex and skip_regex.search(line):
+                continue
+            if skip_window_regex:
+                window_text = _line_window(lines, idx, context_before, context_after)
+                if skip_window_regex.search(window_text):
+                    continue
+            if require_regex:
+                stop_at_section = bool(rule.get("stop_at_section_header", True))
+                previous_window = _previous_lines_window(
+                    lines,
+                    idx,
+                    lookback_lines,
+                    stop_at_section=stop_at_section,
+                )
+                if require_regex.search(previous_window):
+                    continue
             findings.append(
                 LintFinding(
-                    line=i,
+                    line=idx + 1,
                     rule_id=rule["id"],
                     severity=rule.get("severity", "info"),
                     message=rule["message"],
@@ -410,15 +487,15 @@ def format_results(
 def print_results(
     filename: str,
     findings: list[LintFinding],
+    fail_on: str = "error",
     file=sys.stdout,
 ) -> int:
     """打印扫描结果并返回退出码。
 
     Returns:
-        0 = 无错误，1 = 存在错误
+        0 = 未达到失败阈值，1 = 存在达到阈值的发现
     """
     output = format_results(filename, findings)
     print(output, file=file)
 
-    errors = [f for f in findings if f.severity == "error"]
-    return 1 if errors else 0
+    return 1 if _count_by_severity(findings, fail_on) else 0

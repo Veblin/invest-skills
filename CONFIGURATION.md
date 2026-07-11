@@ -18,6 +18,7 @@ cp .env.example .env
 |----------|----------|---------|--------------|
 | `TUSHARE_TOKEN` | 推荐 | Tushare Pro API（A股数据主力源） | [tushare.pro](https://tushare.pro) |
 | `FRED_API_KEY` | 可选 | FRED 美国宏观数据 | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
+| `TAVILY_API_KEY` | 可选 | 新闻 Layer 3（`--with-news-pack`）；无 Key 时公告+查询包仍可用 | [tavily.com](https://tavily.com) |
 | `INVEST_A_FORCE_AKSHARE_EM` | 可选 | 强制尝试东方财富 akshare 接口（跳过 push2 可达性预检） | 设为 `1` / `true` / `yes` |
 
 **不配置 Tushare 时**：实时行情可通过腾讯免费接口获取，但财务指标、股东、资金流向等维度将不可用。
@@ -78,14 +79,26 @@ cp .env.example .env
 
 ```bash
 # 采集维度裁剪（从 code/ 目录运行）
-python3 skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote
+uv run python skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote
 
 # 机构研报维度（非默认，显式启用）
-python3 skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote,research
+uv run python skills/invest-A/scripts/invest.py collect 600176 --dims=basic_info,financials,quote,research
 
-# 扩展日期范围
-python3 skills/invest-A/scripts/invest.py collect 600176  # 默认范围已自动计算
+# 新闻包（公告 + 查询包；TAVILY_API_KEY 可选）
+uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
+
+# v0.1.9 质量门 / 工具子命令
+uv run python skills/invest-A/scripts/invest.py rigor 600176 --verify-all
+uv run python skills/invest-A/scripts/invest.py audit reports/xxx.md --extract
+uv run python skills/invest-A/scripts/invest.py check 600176
+uv run python skills/invest-A/scripts/invest.py portfolio holdings.json [--stress]
+uv run python skills/invest-A/scripts/invest.py thesis 600176 --init|--update|--status
+uv run python skills/invest-A/scripts/invest.py shock 300274 \
+  --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 \
+  --pe-normal 27 --pe-stressed 20
 ```
+
+可选环境变量 `TAVILY_API_KEY`：启用新闻 Layer 3；未配置时 Layer 1（公告）+ Layer 2（查询包）仍可用。
 
 ---
 
