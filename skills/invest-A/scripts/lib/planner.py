@@ -52,20 +52,6 @@ class AnalysisPlan:
 
 # ---- Intent Presets ----
 
-# 模块 ID → collector COLLECTORS key 映射
-_MODULE_TO_DIM: dict[str, str] = {
-    "basic_info": "basic_info",
-    "financials": "financials",
-    "quote": "quote",
-    "shareholders": "shareholders",
-    "northbound": "northbound",
-    "kline": "kline",
-    "valuation": "valuation",
-    "research": "research",
-    "industry": "industry",
-}
-
-
 def _m(module_id: str, priority: int, weight: float, depth: str = "normal",
        min_sources: int = 1) -> ModuleConfig:
     return ModuleConfig(module_id=module_id, priority=priority,

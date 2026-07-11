@@ -25,9 +25,9 @@ def normalize_end_date(ed: str) -> str:
     # Fallback: first 8 digits
     if len(raw) >= 8 and raw[:8].isdigit():
         return raw[:8]
-    # Return raw string on total failure (preserves old _norm_date behavior;
-    # callers expect non-empty ann_date for dedup keys)
-    return raw
+    # Return empty string on total failure — callers use truthiness checks
+    # (e.g. ``if norm_date:``) to skip unparseable records.
+    return ""
 
 
 def parse_end_date(raw: Any) -> date | None:

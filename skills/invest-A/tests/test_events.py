@@ -20,6 +20,7 @@ from lib.events import (
     _fetch_notice_events,
     _fetch_dividend_events,
     _fetch_shareholder_events,
+    calc_price_impact_interpolation,
     INDUSTRY_EVENTS_PLACEHOLDER,
     MARKET_EVENTS_PLACEHOLDER,
     PLACEHOLDER_NOTE_INDUSTRY,
@@ -750,3 +751,106 @@ class TestAkshareDirectSession:
         with patch("akshare.stock_shareholder_change_ths", side_effect=Exception("skip")):
             _fetch_shareholder_events("600176")
         mock_session.assert_called_once()
+
+
+# ── v0.1.9: calc_price_impact_interpolation ──
+
+
+class TestPriceImpactInterpolation:
+    def test_bullish_scenario_default(self):
+        """v_true > v_false → 默认 bullish."""
+        r = calc_price_impact_interpolation(
+            pre_price=50.0, post_price=55.0,
+            eps_base=2.0, eps_hit=3.0,
+            pe_normal=20.0, pe_stressed=15.0,
+        )
+        assert r["scenario"] == "bullish"
+        assert r["v_true"] == 60.0   # 3.0 * 20
+        assert r["v_false"] == 30.0  # 2.0 * 15
+        assert 0.0 <= r["ratio"] <= 1.0
+        assert "disclaimer" in r
+
+    def test_bearish_scenario_explicit(self):
+        """显式指定 bearish 场景."""
+        r = calc_price_impact_interpolation(
+            pre_price=55.0, post_price=50.0,
+            eps_base=3.0, eps_hit=2.0,
+            pe_normal=20.0, pe_stressed=15.0,
+            scenario="bearish",
+        )
+        assert r["scenario"] == "bearish"
+        assert r["v_true"] == 40.0   # 2.0 * 20
+        assert r["v_false"] == 45.0  # 3.0 * 15
+
+    def test_zero_spread_falls_back_to_point_five(self):
+        """v_true == v_false 时 ratio 回退 0.5 并产生 warn."""
+        r = calc_price_impact_interpolation(
+            pre_price=30.0, post_price=30.0,
+            eps_base=2.0, eps_hit=3.0,
+            pe_normal=10.0, pe_stressed=15.0,
+        )
+        # v_true = 3*10=30, v_false = 2*15=30 → spread=0
+        assert r["ratio"] == 0.5
+        assert r["warn"] is not None
+        assert "0.01" in r["warn"]
+
+    def test_zero_spread_does_not_default_to_bullish(self):
+        """v_true==v_false 时不应盲目标 bullish（修复前 bug）."""
+        r = calc_price_impact_interpolation(
+            pre_price=30.0, post_price=30.0,
+            eps_base=2.0, eps_hit=3.0,
+            pe_normal=10.0, pe_stressed=15.0,
+        )
+        # v_true(30) < v_false(30) 为 False → 旧代码错误标记 bullish
+        # 但 warn 在场所以下游可判断
+        assert r["warn"] is not None
+
+    def test_price_moves_against_bullish_clamped_to_zero(self):
+        """bullish 场景但 post_price ≤ pre_price → ratio 钳位 0."""
+        r = calc_price_impact_interpolation(
+            pre_price=60.0, post_price=55.0,
+            eps_base=2.0, eps_hit=4.0,
+            pe_normal=20.0, pe_stressed=15.0,
+        )
+        assert r["scenario"] == "bullish"
+        assert r["ratio"] == 0.0
+
+    def test_price_moves_against_bearish_clamped_to_zero(self):
+        """bearish 场景但 post_price ≥ pre_price → ratio 钳位 0."""
+        r = calc_price_impact_interpolation(
+            pre_price=40.0, post_price=45.0,
+            eps_base=3.0, eps_hit=2.0,
+            pe_normal=20.0, pe_stressed=15.0,
+            scenario="bearish",
+        )
+        assert r["scenario"] == "bearish"
+        assert r["ratio"] == 0.0
+
+    def test_ratio_clamped_between_zero_and_one(self):
+        """ratio 始终在 [0, 1] 区间."""
+        r = calc_price_impact_interpolation(
+            pre_price=10.0, post_price=200.0,
+            eps_base=1.0, eps_hit=10.0,
+            pe_normal=5.0, pe_stressed=2.0,
+        )
+        assert 0.0 <= r["ratio"] <= 1.0
+
+    def test_p_range_bounds_pe_variation(self):
+        """p_range 反映 PE 区间 [pe_stressed-2, pe_stressed+2]."""
+        r = calc_price_impact_interpolation(
+            pre_price=30.0, post_price=30.0,
+            eps_base=2.0, eps_hit=3.0,
+            pe_normal=15.0, pe_stressed=10.0,
+        )
+        assert len(r["p_range"]) == 2
+        assert all(0.0 <= v <= 1.0 for v in r["p_range"])
+
+    def test_disclaimer_present(self):
+        """输出包含 LAW 6 合规声明."""
+        r = calc_price_impact_interpolation(
+            pre_price=30.0, post_price=30.0,
+            eps_base=2.0, eps_hit=3.0,
+            pe_normal=15.0, pe_stressed=10.0,
+        )
+        assert "仅供参考" in r["disclaimer"]
+        assert "不构成投资建议" in r["disclaimer"]

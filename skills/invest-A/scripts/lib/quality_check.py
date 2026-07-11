@@ -50,7 +50,7 @@ def _exemptions(collection: dict, rows: list[dict]) -> list[str]:
     if len(rows) >= 4:
         revs = [coalesce_field(r, "revenue", "total_revenue") for r in rows[-4:]]
         revs = [v for v in revs if v is not None]
-        if len(revs) >= 2 and revs[-1] and revs[0]:
+        if len(revs) >= 2 and revs[-1] is not None and revs[0] is not None:
             change = abs(revs[-1] - revs[0]) / abs(revs[0])
             if change > 0.3:
                 ex.append("转型期（营收结构变更 > 30%）")
