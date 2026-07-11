@@ -90,6 +90,18 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 
 L3 为 fallback，可信度标注 ❓ 弱，推测须标 `[推测，待验证]`。
 
+### v0.1.9 新闻三层架构（`collect --with-news-pack`）
+
+| 层 | 实现 | 依赖 | 无 Key 行为 |
+|----|------|------|------------|
+| Layer 1 公告 | `news_scanner` → akshare `stock_individual_notice_report` | akshare 直连 | 始终尝试 |
+| Layer 2 查询包 | `build_news_query_pack()` 纯 Python | 无 | 始终产出 ≥3 条 |
+| Layer 3 Tavily | REST `api.tavily.com` | `TAVILY_API_KEY` | 静默跳过，标注 `skipped (no key)` |
+
+- Channel B/C（指定源/社区热度）v0.2.0 占位，抛 `NotImplementedError` 并写入 `attempted_sources`
+- `news_query_pack_{symbol}_{ts}.json` 写入 `~/.local/share/investment/`
+- Harness WebSearch 不是 Python API：Layer 2 查询包由 Claude report 阶段执行
+
 ## Web 搜索可信度分级
 
 | 标签 | 源类型 | 示例 |

@@ -46,7 +46,7 @@ def parse_end_date(raw: Any) -> date | None:
 def prior_year_end_date(end_date: str) -> str:
     """Report period → same calendar date one year earlier (YYYYMMDD)."""
     norm = normalize_end_date(end_date)
-    if len(norm) < 8:
+    if len(norm) < 8 or not norm[:8].isdigit():
         return ""
     return f"{int(norm[:4]) - 1}{norm[4:8]}"
 

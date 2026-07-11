@@ -30,11 +30,27 @@ uv run python skills/invest-A/scripts/invest.py <subcommand> <symbol> [--flags]
 
 # 常用子命令
 diagnose     # 检查数据源可用性
-collect      # 采集数据
+collect      # 采集数据（--with-news-pack 新闻三层架构）
 report       # 生成报告
 compare      # 双标的对比
 diff         # 对比两次快照
 store list   # 历史采集记录
+rigor        # 财务验算（市值/估值/跨源）
+audit        # 报告审计 extract/verdict
+check        # 单标的质地检查（7 指标）
+portfolio    # 组合风险特征
+thesis       # 投资假设追踪
+shock        # 价格冲击插值比例
+```
+
+### v0.1.9 新闻采集
+
+- **Layer 1**：akshare 公告（始终可用）
+- **Layer 2**：声明式 `query_pack`（供 Claude WebSearch）
+- **Layer 3**：Tavily REST（`TAVILY_API_KEY` 可选）
+
+```bash
+uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
 ```
 
 ## pip 规范

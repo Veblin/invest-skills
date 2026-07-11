@@ -178,3 +178,52 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 简报首行：`[宏观情景] 增长（PMI）+ 通胀（CPI）+ 政策（LPR）→ 偏宽松/中性/偏紧`
 
 1. `diagnose` → 2. `plan`/`collect` → 3. `evidence`（专项推荐）→ 4. `report` → 5. `store`（可选）
+
+---
+
+## v0.1.9 CLI 扩展
+
+```bash
+# 质量门
+uv run python skills/invest-A/scripts/invest.py rigor 600176 --verify-all [--strict]
+uv run python skills/invest-A/scripts/invest.py audit report.md --extract
+uv run python skills/invest-A/scripts/invest.py audit report.md --verdict
+
+# 质地检查 / 组合 / 假设追踪
+uv run python skills/invest-A/scripts/invest.py check 600176
+uv run python skills/invest-A/scripts/invest.py portfolio holdings.json [--stress]
+uv run python skills/invest-A/scripts/invest.py thesis 600176 --init|--update|--status
+
+# 价格冲击插值（非风险中性概率）
+uv run python skills/invest-A/scripts/invest.py shock 300274 \
+  --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 \
+  --pe-normal 27 --pe-stressed 20
+
+# 新闻包（公告 + 查询包 + 可选 Tavily）
+uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
+```
+
+`TAVILY_API_KEY` 可选；无 Key 时 Layer3 静默跳过，Layer1+2 仍产出。
+
+### SOP-DEEP（四视角并行）
+
+完整 `--deep` 报告时，并行覆盖四视角（不引入品牌名）：
+
+1. **生意质量**：商业模式 / 护城河 / 管理层 / 价值链
+2. **财务与估值**：DCF 三情景 / 财务健康 / 盈利质量 / 估值位置
+3. **行业与竞争**：波特五力 / 竞争格局 / 产业链利润池
+4. **风险与治理**：快速否决 / 风险信号 / 公司治理 / Known Unknowns
+
+### SOP earnings-review（季报/年报后）
+
+- [ ] 对比指引 vs 实际（营收/净利/毛利率）
+- [ ] OCF/净利润是否背离（阈值 0.6）
+- [ ] 资本开支与产能叙事是否一致
+- [ ] 更新 thesis `--update` 假设状态
+
+### SOP industry-research / news-pulse
+
+- [ ] `collect --with-news-pack` 获取公告 + 查询包
+- [ ] 对 `query_pack` 执行 WebSearch/Tavily，回填 NewsCard
+- [ ] 外生冲击假说⑥段：方向 + 可信度 + 来源
+- [ ] 重大波动时用 `shock` CLI 计算价格冲击插值比例（附学术声明）

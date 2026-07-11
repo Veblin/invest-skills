@@ -58,7 +58,7 @@ def get_config() -> dict[str, Any]:
     merged = {**global_env, **project_env}
 
     config: dict[str, Any] = {}
-    for key in ["TUSHARE_TOKEN", "FRED_API_KEY"]:
+    for key in ["TUSHARE_TOKEN", "FRED_API_KEY", "TAVILY_API_KEY"]:
         config[key] = os.environ.get(key) or merged.get(key)
 
     config["_CONFIG_SOURCE"] = (
@@ -77,6 +77,13 @@ def is_tushare_available(config: dict[str, Any]) -> bool:
 def is_fred_available(config: dict[str, Any]) -> bool:
     key = config.get("FRED_API_KEY", "")
     return bool(key and re.match(r'^[a-zA-Z0-9]{32}$', key))
+
+
+def is_tavily_available(config: dict[str, Any] | None = None) -> bool:
+    if config is None:
+        config = get_config()
+    key = config.get("TAVILY_API_KEY", "")
+    return bool(key and len(str(key).strip()) >= 8)
 
 
 def is_akshare_available() -> bool:

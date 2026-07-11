@@ -11,5 +11,5 @@ repos:
         name: invest-A report wording (latest report)
         entry: bash skills/invest-A/scripts/check_report.sh
         language: system
-        pass_filenames: false
+        pass_filenames: true
         files: ^reports/.*\.md$

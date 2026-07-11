@@ -33,10 +33,31 @@ PLACEHOLDER_NOTE_MARKET = "⏭️ 待补来源：暂无稳定 API"
 from .analysis_templates import load_event_taxonomy
 
 
+_EVENT_META_DEFAULTS: dict[str, dict[str, str]] = {
+    "earnings_report": {"impact_dimension": "收入", "default_duration_hint": "短期扰动"},
+    "earnings_guidance": {"impact_dimension": "收入", "default_duration_hint": "短期扰动"},
+    "earnings_preview": {"impact_dimension": "收入", "default_duration_hint": "短期扰动"},
+    "buyback": {"impact_dimension": "估值", "default_duration_hint": "中长期变量"},
+    "equity_incentive": {"impact_dimension": "治理", "default_duration_hint": "中长期变量"},
+    "private_placement": {"impact_dimension": "现金流", "default_duration_hint": "中长期变量"},
+    "mna": {"impact_dimension": "收入", "default_duration_hint": "中长期变量"},
+    "dividend": {"impact_dimension": "估值", "default_duration_hint": "短期扰动"},
+    "holder_decrease": {"impact_dimension": "估值", "default_duration_hint": "短期扰动"},
+    "holder_increase": {"impact_dimension": "估值", "default_duration_hint": "短期扰动"},
+    "major_contract": {"impact_dimension": "收入", "default_duration_hint": "中长期变量"},
+    "litigation": {"impact_dimension": "治理", "default_duration_hint": "短期扰动"},
+    "st_risk": {"impact_dimension": "治理", "default_duration_hint": "结构性质变"},
+    "other": {"impact_dimension": "治理", "default_duration_hint": "短期扰动"},
+}
+
+
 def _event_meta(event_type: str) -> dict:
     """从 YAML 加载的事件类型元数据（label, impact_dimension, default_duration_hint）。"""
     taxonomy = load_event_taxonomy()
-    return taxonomy.get("event_types", {}).get(event_type, {})
+    event_types = taxonomy.get("event_types", {})
+    if event_type in event_types:
+        return event_types[event_type]
+    return _EVENT_META_DEFAULTS.get(event_type, _EVENT_META_DEFAULTS["other"])
 
 
 def _event_dimension(event_type: str) -> str:
@@ -372,8 +393,8 @@ def _classify_event(record: dict) -> dict:
 
     return {
         "event_type": "other",
-        "impact_dimension": "治理",
-        "duration": "短期扰动",
+        "impact_dimension": _event_dimension("other"),
+        "duration": _event_duration("other"),
     }
 
 
@@ -559,4 +580,63 @@ def _build_summary(events: list[dict], days: int) -> dict:
         "window_days": days,
         "latest_date": latest_date,
         "top_types": [{"type": t, "count": c} for t, c in top_types[:5]],
+    }
+
+
+def calc_price_impact_interpolation(
+    pre_price: float,
+    post_price: float,
+    eps_base: float,
+    eps_hit: float,
+    pe_normal: float,
+    pe_stressed: float,
+    scenario: str | None = None,
+) -> dict:
+    """Linear interpolation ratio (not risk-neutral probability).
+
+    ratio = (P_current - V_false) / (V_true - V_false), clamped [0, 1]
+  """
+    v_true = eps_hit * pe_normal
+    v_false = eps_base * pe_stressed
+    spread = v_true - v_false
+
+    if scenario is None:
+        scenario = "bearish" if v_true < v_false else "bullish"
+
+    warn = None
+    if abs(spread) < 0.01:
+        ratio = 0.5
+        warn = "|V_真 - V_假| < 0.01，ratio 默认 0.5"
+    else:
+        ratio = (post_price - v_false) / spread
+        if scenario == "bearish" and post_price >= pre_price:
+            ratio = 0.0
+        elif scenario == "bullish" and post_price <= pre_price:
+            ratio = 0.0
+        ratio = max(0.0, min(1.0, ratio))
+
+    def _ratio_at_pe(pe: float) -> float:
+        vf = eps_base * pe
+        if abs(v_true - vf) < 0.01:
+            return 0.5
+        r = (post_price - vf) / (v_true - vf)
+        return max(0.0, min(1.0, r))
+
+    pe_lo = max(pe_stressed - 2, 0.1)
+    pe_hi = pe_stressed + 2
+    p_range = [round(_ratio_at_pe(pe_lo), 4), round(_ratio_at_pe(pe_hi), 4)]
+
+    return {
+        "ratio": round(ratio, 4),
+        "p_range": p_range,
+        "scenario": scenario,
+        "v_true": round(v_true, 2),
+        "v_false": round(v_false, 2),
+        "pre_price": pre_price,
+        "post_price": post_price,
+        "warn": warn,
+        "disclaimer": (
+            "价格冲击插值比例：反映当前价格在两个假设估值之间的线性位置，"
+            "不具备风险中性理论基础，不应用于概率判断。仅供参考，不构成投资建议。"
+        ),
     }

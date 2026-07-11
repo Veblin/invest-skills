@@ -2,6 +2,8 @@
 
 数据库: ~/.local/share/investment/research.db
 WAL 模式安全并发。轻量 Schema 迁移。
+
+v0.1.9: thesis 表（假设追踪）
 """
 
 from __future__ import annotations
@@ -63,6 +65,15 @@ def init_db() -> None:
                 state_json TEXT,
                 completed_at TEXT,
                 PRIMARY KEY (symbol, step)
+            );
+            CREATE TABLE IF NOT EXISTS thesis (
+                symbol TEXT PRIMARY KEY,
+                assumptions_json TEXT,
+                red_lines_json TEXT,
+                health_score REAL,
+                state TEXT CHECK(state IN ('完整','边际弱化','受损','破裂')),
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
             );
         """)
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
@@ -696,3 +707,96 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
                 base_key = f"{base_key}_{i}"
         result[str(base_key)] = item
     return result
+
+
+# ---- v0.1.9: thesis tracker ----
+
+_DEFAULT_ASSUMPTIONS = [
+    {"id": "a1", "statement": "盈利增速可持续", "confidence": 0.7, "last_check_date": None, "valid": True},
+    {"id": "a2", "statement": "行业景气维持", "confidence": 0.6, "last_check_date": None, "valid": True},
+    {"id": "a3", "statement": "估值溢价有基本面支撑", "confidence": 0.5, "last_check_date": None, "valid": True},
+]
+
+_DEFAULT_RED_LINES = [
+    {"id": "r1", "condition": "单季营收同比 < -10%", "triggered": False},
+    {"id": "r2", "condition": "毛利率同比降 > 5pp", "triggered": False},
+]
+
+
+def _thesis_health(assumptions: list[dict], red_lines: list[dict]) -> tuple[float, str]:
+    a_total = len(assumptions) or 1
+    a_valid = sum(1 for a in assumptions if a.get("valid", True))
+    r_total = len(red_lines) or 1
+    r_triggered = sum(1 for r in red_lines if r.get("triggered"))
+    score = a_valid / a_total * 0.6 + (1 - r_triggered / r_total) * 0.4
+    if score >= 0.75:
+        state = "完整"
+    elif score >= 0.55:
+        state = "边际弱化"
+    elif score >= 0.35:
+        state = "受损"
+    else:
+        state = "破裂"
+    return round(score, 3), state
+
+
+def thesis_init(symbol: str) -> dict[str, Any]:
+    init_db()
+    assumptions = [dict(a) for a in _DEFAULT_ASSUMPTIONS]
+    red_lines = [dict(r) for r in _DEFAULT_RED_LINES]
+    score, state = _thesis_health(assumptions, red_lines)
+    c = _conn()
+    try:
+        c.execute(
+            """INSERT OR REPLACE INTO thesis
+               (symbol, assumptions_json, red_lines_json, health_score, state, updated_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+            (symbol, dumps_json(assumptions), dumps_json(red_lines), score, state),
+        )
+        c.commit()
+    finally:
+        c.close()
+    return {"symbol": symbol, "health_score": score, "state": state, "action": "init"}
+
+
+def thesis_get(symbol: str) -> dict[str, Any] | None:
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute("SELECT * FROM thesis WHERE symbol=?", (symbol,)).fetchone()
+        if not row:
+            return None
+        assumptions = json.loads(row["assumptions_json"] or "[]")
+        red_lines = json.loads(row["red_lines_json"] or "[]")
+        return {
+            "symbol": row["symbol"],
+            "assumptions": assumptions,
+            "red_lines": red_lines,
+            "health_score": row["health_score"],
+            "state": row["state"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+    finally:
+        c.close()
+
+
+def thesis_update(symbol: str, assumptions: list[dict] | None = None,
+                  red_lines: list[dict] | None = None) -> dict[str, Any]:
+    existing = thesis_get(symbol)
+    if not existing:
+        return thesis_init(symbol)
+    a = assumptions if assumptions is not None else existing["assumptions"]
+    r = red_lines if red_lines is not None else existing["red_lines"]
+    score, state = _thesis_health(a, r)
+    c = _conn()
+    try:
+        c.execute(
+            """UPDATE thesis SET assumptions_json=?, red_lines_json=?,
+               health_score=?, state=?, updated_at=datetime('now') WHERE symbol=?""",
+            (dumps_json(a), dumps_json(r), score, state, symbol),
+        )
+        c.commit()
+    finally:
+        c.close()
+    return {"symbol": symbol, "health_score": score, "state": state, "action": "update"}
