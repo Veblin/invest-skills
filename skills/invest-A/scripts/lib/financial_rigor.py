@@ -59,7 +59,7 @@ def _deviation_pct(reported: float | None, computed: float | None) -> float:
         return 0.0
     avg = (abs(reported) + abs(computed)) / 2.0
     if avg < 1e-12:
-        return 0.0 if reported == computed else 100.0
+        return 0.0 if abs(reported - computed) < 1e-12 else 100.0
     return abs(reported - computed) / avg * 100.0
 
 
@@ -91,13 +91,35 @@ def _parse_share_count(basic: dict) -> float | None:
         return safe_float(raw)
 
 
+def _merge_share_fields(basic_dim: dict) -> dict:
+    """Merge share-related fields from all available basic_info sources.
+
+    Tushare stock_basic only queries ts_code/name/area/industry/market/list_date
+    (no total_share), so primary_data alone is insufficient. This helper searches
+    all_sources for 总股本/total_share/float_share from secondary sources (e.g.
+    akshare stock_individual_info_em).
+    """
+    merged: dict = {}
+    if basic_dim:
+        data = basic_dim.get("data")
+        if isinstance(data, dict):
+            merged.update(data)
+        for sd in (basic_dim.get("_meta") or {}).get("all_sources") or []:
+            if isinstance(sd, dict) and sd.get("success"):
+                sd_data = sd.get("data")
+                if isinstance(sd_data, dict):
+                    for k in ("总股本", "total_share", "float_share"):
+                        v = sd_data.get(k)
+                        if v is not None:
+                            merged.setdefault(k, v)
+    return merged
+
+
 def verify_market_cap(collection: dict) -> list[RigorReport]:
     """股价 × 总股本 vs 报告市值。"""
     dims = index_dimensions(collection)
     quote = _quote_snapshot(dims.get("quote", {}).get("data"))
-    basic = dims.get("basic_info", {}).get("data") or {}
-    if not isinstance(basic, dict):
-        basic = {}
+    basic = _merge_share_fields(dims.get("basic_info", {}))
 
     price = coalesce_field(quote, "price", "close")
     shares_wan = _parse_share_count(basic)

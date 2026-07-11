@@ -289,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument(
         "--strict-rigor",
         action="store_true",
-        help="严格验算：跨源差异 >5% 时在报告中硬标注阻断提示",
+        help="严格验算：跨源差异 >5%% 时在报告中硬标注阻断提示",
     )
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
@@ -374,12 +374,12 @@ def build_parser() -> argparse.ArgumentParser:
     prigor = sub.add_parser("rigor", help="财务验算：市值/估值/跨源交叉验证")
     prigor.add_argument("symbol")
     prigor.add_argument("--verify-all", action="store_true", help="运行全部验算命令")
-    prigor.add_argument("--strict", action="store_true", help="严格模式：>5% 差异视为阻断")
+    prigor.add_argument("--strict", action="store_true", help="严格模式：>5%% 差异视为阻断")
     prigor.add_argument("--calc", default="", help="Decimal 精确计算表达式")
 
     paudit = sub.add_parser("audit", help="报告审计：抽取数据点 / 准出判决")
     paudit.add_argument("report")
-    paudit.add_argument("--extract", action="store_true", help="抽取 15% 数据点到 audit_checklist.json")
+    paudit.add_argument("--extract", action="store_true", help="抽取 15%% 数据点到 audit_checklist.json")
     paudit.add_argument("--verdict", action="store_true", help="读取核验结果并输出 PASS/FAIL")
 
     pcheck = sub.add_parser(
@@ -390,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pport = sub.add_parser("portfolio", help="组合风险特征（行业集中度/相关性/压力测试）")
     pport.add_argument("holdings", help="holdings.json 路径")
-    pport.add_argument("--stress", action="store_true", help="指数 -10%/-20%/-30% 压力测试")
+    pport.add_argument("--stress", action="store_true", help="指数 -10%%/-20%%/-30%% 压力测试")
 
     pthesis = sub.add_parser("thesis", help="投资假设追踪")
     pthesis.add_argument("symbol")

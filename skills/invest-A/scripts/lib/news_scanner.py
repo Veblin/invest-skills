@@ -195,9 +195,9 @@ def collect_news(
     except Exception as exc:
         attempted["notice"] = f"error: {exc}"
 
-    # Layer 2 — always
+    # Layer 2 — always produces 5 query entries (see QUERIES_TEMPLATE)
     query_pack = build_news_query_pack(symbol, name or symbol, name_eng)
-    attempted["query_pack"] = "success" if len(query_pack) >= 3 else "error"
+    attempted["query_pack"] = "success"
 
     # Layer 3 — optional Tavily
     from . import env

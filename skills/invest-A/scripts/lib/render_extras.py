@@ -5,11 +5,14 @@ All functions are pure: read collection dict, return markdown strings.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Any
 
 from .financial_rigor import FAIL_THRESHOLD_PCT, WARN_THRESHOLD_PCT, cross_validate
 from .schema import index_dimensions
+
+logger = logging.getLogger(__name__)
 
 
 def render_rigor_warnings(collection: dict, *, strict: bool = False) -> str:
@@ -211,6 +214,7 @@ def render_extended_technical(collection: dict, dims: dict) -> str:
     try:
         bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
     except Exception:
+        logger.warning("沪深300基准数据获取失败，RS/Beta 段跳过", exc_info=True)
         bench_dated = []
 
     if stock_by_date and bench_dated:

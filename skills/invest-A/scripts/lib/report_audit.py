@@ -100,7 +100,7 @@ def extract_report(report_path: Path) -> dict[str, Any]:
 def _deviation_pct(reported: float, fetched: float) -> float:
     avg = (abs(reported) + abs(fetched)) / 2.0
     if avg < 1e-12:
-        return 0.0 if reported == fetched else 100.0
+        return 0.0 if abs(reported - fetched) < 1e-12 else 100.0
     return abs(reported - fetched) / avg * 100.0
 
 
@@ -119,10 +119,16 @@ def verdict_report(report_path: Path) -> dict[str, Any]:
     for c in checks:
         rv = c.get("reported_value")
         fv = c.get("fetched_value")
-        if fv is None:
+        if fv is None or rv is None:
             pending += 1
             continue
-        dev = _deviation_pct(float(rv), float(fv))
+        try:
+            rv_f = float(rv)
+            fv_f = float(fv)
+        except (TypeError, ValueError):
+            pending += 1
+            continue
+        dev = _deviation_pct(rv_f, fv_f)
         c["deviation_pct"] = round(dev, 2)
         verified += 1
         if dev > 5.0:

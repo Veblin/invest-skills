@@ -34,7 +34,11 @@ _RECENT_ROIC_PERIODS = 6
 
 
 def _sorted_rows(financials: list[dict] | None) -> list[dict]:
-    """按 end_date 升序排序（旧→新），过滤非法记录。"""
+    """按 end_date 升序排序（旧→新），过滤非法记录。
+
+    财务行通常仅有 end_date（报告期），无 trade_date，因此委托 sort_kline_asc
+    后实际按 end_date 排序（trade_date 不存在时回退到 end_date）。
+    """
     if not isinstance(financials, list):
         return []
     rows = [r for r in financials if isinstance(r, dict) and r.get("end_date")]
