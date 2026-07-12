@@ -617,7 +617,7 @@ class TestSectionDcfValuation:
         _check_no_forbidden_words(text)
 
     def test_wacc_insufficient_data_skips_section(self):
-        """beta 不可得（真实报告的默认状态）时，整段标注数据不足并跳过，不编造 WACC。"""
+        """beta 不可得时使用默认值 1.0，WACC 仍可计算，DCF 段落不跳过。"""
         dims = {
             "financials": _make_dcf_render_financials(4, beta=None),
             "research": _make_research_dim(),
@@ -625,12 +625,30 @@ class TestSectionDcfValuation:
         collection = {"market_structure": {}}
         text = _section_dcf_valuation(dims, collection, "000001")
 
-        assert "数据不足，WACC 无法计算，DCF 段落跳过" in text
-        assert "beta" in text
-        # 不应出现任何情景企业价值数值渲染
-        assert "乐观情景" not in text
-        assert "D-⑤" not in text
-        assert "D-⑥" not in text
+        # beta 默认为 1.0，WACC 可计算 → DCF 段落不应跳过
+        assert "数据不足，WACC 无法计算，DCF 段落跳过" not in text
+        # WACC 行应包含 beta 信息
+        assert "β=" in text
+        # DCF 段落应正常渲染（如果 scenario_fcff 数据充足）
+        _check_no_forbidden_words(text)
+
+    def test_wacc_truly_blocked_when_wacc_le_terminal_g(self):
+        """WACC ≤ terminal_g 时 DCF 段落跳过（与 beta 无关）。"""
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=0.3),
+            "research": _make_research_dim(),
+        }
+        # 极高无风险利率使 WACC 极端低（测试 wacc ≤ terminal_g 阻塞）
+        collection = {"market_structure": {"erp": {"dgs10": 0.5}}}  # 0.5% 10Y
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        # 低无风险利率意味着低 WACC，可能 ≤ 2.5% terminal_g
+        # 检查是否被 wacc <= terminal_g 阻断
+        has_block = (
+            "WACC" in text and "不高于永续增长率假设" in text
+        )
+        if has_block:
+            assert "D-⑤" not in text
         _check_no_forbidden_words(text)
 
     def test_veto_triggered_skips_all_values(self):

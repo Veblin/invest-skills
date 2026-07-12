@@ -4947,18 +4947,106 @@ def _section_static_fundamentals(
 # ═══════════════════════════════════════════════════════════════
 
 
-def _dcf_try_wacc(financials: dict, market_structure: dict) -> tuple[dict | None, list[str]]:
+def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
+    """从个股 K 线 + 沪深300 基准计算 Beta。
+
+    对齐个股与沪深300 的交易日，计算日收益率序列，
+    调用 valuation.calc_beta() 做回归。
+
+    Args:
+        kline_data: 个股 K 线数据（list of dict，含 trade_date/close）
+
+    Returns:
+        {"beta": float, "r_squared": float | None, "observations": int,
+         "source": str, "is_default": bool}
+        计算失败时返回 {"beta": 1.0, "is_default": True, ...}
+    """
+    from lib.technical import sort_kline_asc
+
+    stock_by_date: dict[str, float] = {}
+    if kline_data and isinstance(kline_data, list):
+        for r in kline_data:
+            if r.get("close") is None:
+                continue
+            td = str(r.get("trade_date") or "").replace("-", "").replace("/", "")[:8]
+            if len(td) == 8 and td.isdigit():
+                stock_by_date[td] = float(r["close"])
+
+    if len(stock_by_date) < 12:
+        return {
+            "beta": 1.0, "r_squared": None, "observations": len(stock_by_date),
+            "source": "默认值（个股 K 线不足 12 个交易日）",
+            "is_default": True,
+        }
+
+    # 获取沪深300 基准数据
+    try:
+        from lib.collector import _akshare_hs300_dated_closes
+        bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
+    except Exception:
+        logger.warning("沪深300基准数据获取失败，Beta 使用默认值 1.0", exc_info=True)
+        bench_dated = []
+
+    if not bench_dated:
+        return {
+            "beta": 1.0, "r_squared": None, "observations": len(stock_by_date),
+            "source": "默认值（HS300 基准数据不可得）",
+            "is_default": True,
+        }
+
+    bench_by_date = dict(bench_dated)
+    common = sorted(set(stock_by_date) & set(bench_by_date))
+    if len(common) < 12:
+        return {
+            "beta": 1.0, "r_squared": None, "observations": len(common),
+            "source": f"默认值（个股与HS300交集仅 {len(common)} 个交易日，< 12）",
+            "is_default": True,
+        }
+
+    # 对齐收盘价后计算日收益率
+    stock_closes = [stock_by_date[d] for d in common]
+    bench_closes = [bench_by_date[d] for d in common]
+    stock_returns = [
+        (stock_closes[i] - stock_closes[i - 1]) / stock_closes[i - 1]
+        for i in range(1, len(stock_closes))
+    ]
+    bench_returns = [
+        (bench_closes[i] - bench_closes[i - 1]) / bench_closes[i - 1]
+        for i in range(1, len(bench_closes))
+    ]
+
+    from lib.valuation import calc_beta
+    beta_result = calc_beta(stock_returns, bench_returns)
+
+    if beta_result.get("beta") is None:
+        return {
+            "beta": 1.0, "r_squared": None, "observations": len(stock_returns),
+            "source": f"默认值（回归失败: {beta_result.get('error', '未知')}）",
+            "is_default": True,
+        }
+
+    return {
+        "beta": beta_result["beta"],
+        "r_squared": beta_result.get("r_squared"),
+        "observations": beta_result.get("observations", len(stock_returns)),
+        "source": f"个股 vs 沪深300 日收益率回归（{beta_result.get('observations', len(stock_returns))} 个对齐交易日）",
+        "is_default": False,
+    }
+
+
+def _dcf_try_wacc(
+    financials: dict, market_structure: dict,
+    kline_data: list[dict] | None = None,
+) -> tuple[dict | None, list[str]]:
     """尝试计算 WACC（CAPM）。
 
     risk_free_rate / erp 沿用 D-③ 已建立的降级惯例（10Y 国债不可得时用 2.5%
-    默认值 + "[推测，待验证]" 标注，ERP 固定 6% 保守基准），因为这两个是宏观常数，
-    并非对目标公司的主观判断。
+    默认值 + "[推测，待验证]" 标注，ERP 固定 6% 保守基准）。
 
-    beta 则不允许默认值代入：beta 是公司特定的风险参数，calc_beta() 需要个股
-    vs 沪深300 的历史收益率序列做回归，但当前采集管线（collector.py）尚未产出
-    该序列（无 benchmark kline 维度），因此本函数在 financials / market_structure
-    中预留 "beta" 兜底字段供未来版本直接接入 calc_beta() 结果；若两处均取不到，
-    判定为数据不足，返回 (None, missing) 交由调用方跳过整个 D-④/D-⑥，不编造 beta。
+    beta 优先级：
+    1. financials / market_structure 中预存的 beta（未来版本直接接入）
+    2. 从 kline_data + HS300 基准实时计算（_dcf_compute_beta）
+    3. 默认值 1.0（标注 [推测，待验证]）
 
     Returns:
         (wacc_result, missing_reasons)。wacc_result 为 None 时 missing_reasons 非空。
@@ -4968,11 +5056,11 @@ def _dcf_try_wacc(financials: dict, market_structure: dict) -> tuple[dict | None
     beta = financials.get("beta")
     if beta is None:
         beta = market_structure.get("beta")
+
+    beta_meta: dict = {}
     if beta is None:
-        missing.append(
-            "beta（个股 vs 沪深300 历史收益率回归系数）不可得："
-            "当前数据源未采集个股/基准收益率序列，calc_beta() 无输入"
-        )
+        beta_meta = _dcf_compute_beta(kline_data)
+        beta = beta_meta["beta"]
 
     erp_data = market_structure.get("erp") or {}
     risk_free_raw = erp_data.get("dgs10")
@@ -4986,7 +5074,89 @@ def _dcf_try_wacc(financials: dict, market_structure: dict) -> tuple[dict | None
 
     wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=0.06, cost_of_debt=None)
     wacc_result["risk_free_is_default"] = risk_free_is_default
+    wacc_result["beta"] = beta
+    wacc_result["beta_is_default"] = beta_meta.get("is_default", False)
+    wacc_result["beta_r_squared"] = beta_meta.get("r_squared")
+    wacc_result["beta_observations"] = beta_meta.get("observations")
+    wacc_result["beta_source"] = beta_meta.get("source", "")
     return wacc_result, []
+
+
+def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
+    """从 basic_info 或 total_mv/price 提取总股本（股）。
+
+    Returns:
+        (shares: float | None, source_description: str)
+    """
+    # Source 1: basic_info 中 akshare 的 "总股本" 字段
+    basic_dim = dims.get("basic_info") or {}
+    basic_data = basic_dim.get("data")
+    if isinstance(basic_data, dict):
+        raw = basic_data.get("总股本") or basic_data.get("total_share") or basic_data.get("float_share")
+        if raw is not None:
+            try:
+                shares = float(str(raw).strip().replace(",", ""))
+                if shares > 0:
+                    return shares, "akshare stock_individual_info_em \"总股本\""
+            except (TypeError, ValueError):
+                pass
+    # 也搜索 all_sources（akshare 可能在二级源中）
+    for sd in (basic_dim.get("_meta") or {}).get("all_sources") or []:
+        if isinstance(sd, dict) and sd.get("success"):
+            sd_data = sd.get("data") or {}
+            if isinstance(sd_data, dict):
+                for k in ("总股本", "total_share", "float_share"):
+                    v = sd_data.get(k)
+                    if v is not None:
+                        try:
+                            shares = float(str(v).strip().replace(",", ""))
+                            if shares > 0:
+                                return shares, f"basic_info all_sources \"{k}\""
+                        except (TypeError, ValueError):
+                            continue
+
+    # Source 2: total_mv / price 推导
+    val_dim = dims.get("valuation") or {}
+    val_data = val_dim.get("data")
+    if isinstance(val_data, list) and val_data:
+        from lib.technical import sort_kline_asc as _sk
+        val_sorted = _sk(val_data)
+        latest_mv = val_sorted[-1].get("total_mv") if val_sorted else None
+        if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
+            latest_mv = float(latest_mv)
+            kline_dim = _get_dim_data(dims, "kline")
+            if isinstance(kline_dim, list) and kline_dim:
+                k_sorted = _sk(kline_dim)
+                price = k_sorted[-1].get("close") if k_sorted else None
+                if price is not None and _safe_num(price) and float(price) > 0:
+                    shares = latest_mv / float(price)
+                    return shares, "total_mv / 当前股价 推导"
+
+    return None, "不可得"
+
+
+def _dcf_extract_net_debt(financials: dict) -> tuple[float, str]:
+    """从 financials dcf_preprocess 提取净债务。
+
+    Returns:
+        (net_debt: float, source_description: str)
+    """
+    dcf_pre = financials.get("dcf_preprocess") or {}
+    net_debt_info = dcf_pre.get("net_debt") or {}
+    nd = net_debt_info.get("net_debt")
+    if nd is not None and isinstance(nd, (int, float)):
+        return float(nd), "valuation.calc_net_debt（最新财报）"
+    # 降级：自己从 financials 行计算
+    from lib.valuation import extract_financial_rows, _latest_financial_row
+    rows = extract_financial_rows(financials)
+    latest = _latest_financial_row(rows)
+    if latest:
+        debt = _safe_num(latest.get("total_liab") or latest.get("debt_total"))
+        cash = _safe_num(latest.get("money_cap") or latest.get("cash"))
+        if debt is not None and cash is not None:
+            nd = debt - cash
+            return nd, "总负债 - 货币资金（最新财报，近似）"
+    return 0.0, "默认值 0（净债务数据不可得）"
 
 
 def _aggregate_scenario_dcf(
@@ -5086,11 +5256,15 @@ def _section_dcf_valuation(
 
     financials = dims.get("financials") or {}
     market_structure = collection.get("market_structure") or {}
+    kline_data = _get_dim_data(dims, "kline")
+    if isinstance(kline_data, list) and kline_data:
+        from lib.technical import sort_kline_asc as _sort_kline
+        kline_data = _sort_kline(kline_data)
 
     lines.append("#### D-④ DCF 三情景估值区间")
     lines.append("")
 
-    wacc_result, wacc_missing = _dcf_try_wacc(financials, market_structure)
+    wacc_result, wacc_missing = _dcf_try_wacc(financials, market_structure, kline_data=kline_data)
     if wacc_result is None:
         lines.append("数据不足，WACC 无法计算，DCF 段落跳过。缺失项：")
         for m in wacc_missing:
@@ -5146,42 +5320,123 @@ def _section_dcf_valuation(
         "10Y 国债使用默认值 2.5% [推测，待验证]" if wacc_result.get("risk_free_is_default")
         else "10Y 国债取自 FRED/akshare"
     )
-    lines.append(f"- WACC：**{wacc_label}**（cost_of_equity 近似，因债务成本/权重数据不可得；{rf_note}；ERP 假设 6%）")
+    # Beta 来源说明
+    beta_val = wacc_result.get("beta")
+    beta_source = wacc_result.get("beta_source", "")
+    beta_r2 = wacc_result.get("beta_r_squared")
+    beta_note_parts = [f"β={beta_val:.3f}"]
+    if beta_r2 is not None:
+        beta_note_parts.append(f"R²={beta_r2:.3f}")
+    if wacc_result.get("beta_is_default"):
+        beta_note_parts.append(f"[推测，待验证: {beta_source}]")
+    else:
+        beta_note_parts.append(f"[{beta_source}]")
+    beta_note = "，".join(beta_note_parts)
+
+    lines.append(
+        f"- WACC：**{wacc_label}**（cost_of_equity 近似，因债务成本/权重数据不可得；"
+        f"{rf_note}；ERP 假设 6%；{beta_note}）"
+    )
     lines.append(f"- 永续增长率假设：**{terminal_g*100:.2f}%**[推测，待验证：长期宏观增长代理，与 D-③ 一致]")
     lines.append("")
 
     _sc_label = {"bear": "悲观情景", "base": "中性情景", "bull": "乐观情景"}
-    lines.append("| 情景 | 概率权重 | 核心假设（营收增速 / 毛利率） | 企业价值（元） |")
-    lines.append("|---|---|---|---|")
+
+    # 提取总股本和净债务（用于每股换算）
+    shares, shares_source = _dcf_extract_shares(dims)
+    net_debt, nd_source = _dcf_extract_net_debt(financials)
+
+    # 当前股价（用于安全边际计算）
+    current_price: float | None = None
+    if kline_data and len(kline_data) >= 1:
+        cp = kline_data[-1].get("close")
+        if cp is not None:
+            current_price = float(cp)
+
+    if shares is not None:
+        lines.append("| 情景 | 概率权重 | 核心假设（营收增速 / 毛利率） | 企业价值（元） | 每股参考价（元） |")
+        lines.append("|---|---|---|---|---|")
+    else:
+        lines.append("| 情景 | 概率权重 | 核心假设（营收增速 / 毛利率） | 企业价值（元） |")
+        lines.append("|---|---|---|---|")
+
+    from lib.valuation import calc_ev_to_equity
+
+    per_share_results: dict[str, dict] = {}
     for sc in ("bull", "base", "bear"):
         res = scenario_results[sc]
         assump = res["assumptions"]
         ev = scenario_ev[sc]
-        lines.append(
-            f"| {_sc_label[sc]} | {res['probability']*100:.0f}% | "
-            f"营收增速 {assump['revenue_growth']*100:+.1f}%，毛利率 {assump['gross_margin_assumption']:.1f}% | "
-            f"{ev['enterprise_value']:,.0f} |"
-        )
+        if shares is not None:
+            eq = calc_ev_to_equity(ev["enterprise_value"], net_debt, int(shares))
+            per_share_results[sc] = eq
+            ps_str = f"{eq['per_share']:.2f}" if eq.get("per_share") is not None else "N/A"
+            lines.append(
+                f"| {_sc_label[sc]} | {res['probability']*100:.0f}% | "
+                f"营收增速 {assump['revenue_growth']*100:+.1f}%，毛利率 {assump['gross_margin_assumption']:.1f}% | "
+                f"{ev['enterprise_value']:,.0f} | "
+                f"{ps_str} |"
+            )
+        else:
+            lines.append(
+                f"| {_sc_label[sc]} | {res['probability']*100:.0f}% | "
+                f"营收增速 {assump['revenue_growth']*100:+.1f}%，毛利率 {assump['gross_margin_assumption']:.1f}% | "
+                f"{ev['enterprise_value']:,.0f} |"
+            )
     lines.append("")
 
     def _assump_text(sc: str) -> str:
         a = scenario_results[sc]["assumptions"]
         return f"营收增速{a['revenue_growth']*100:+.1f}%、毛利率{a['gross_margin_assumption']:.1f}%"
 
-    lines.append(
-        f"乐观情景（假设{_assump_text('bull')}，概率 {scenario_results['bull']['probability']*100:.0f}%）："
-        f"企业价值 {scenario_ev['bull']['enterprise_value']:,.0f} 元；"
-        f"中性情景（假设{_assump_text('base')}，概率 {scenario_results['base']['probability']*100:.0f}%）："
-        f"企业价值 {scenario_ev['base']['enterprise_value']:,.0f} 元；"
-        f"悲观情景（假设{_assump_text('bear')}，概率 {scenario_results['bear']['probability']*100:.0f}%）："
-        f"企业价值 {scenario_ev['bear']['enterprise_value']:,.0f} 元。"
-        "仅供参考，不构成投资建议。"
-    )
-    lines.append("")
-    lines.append(
-        "股本/每股换算数据不可得（当前数据源未采集总股本口径一致的股份数），"
-        "以上仅为企业价值区间，不换算为每股价值或单一价格结论。"
-    )
+    # 每股参考价 + 安全边际 段落
+    if shares is not None and per_share_results:
+        lines.append("**每股估值参考价**（总股本 "
+                     f"{shares:,.0f} 股 [来源: {shares_source}]，"
+                     f"净债务 {net_debt:,.0f} 元 [来源: {nd_source}]）：")
+        lines.append("")
+        for sc in ("bull", "base", "bear"):
+            eq = per_share_results[sc]
+            ps = eq.get("per_share")
+            ev = scenario_ev[sc]
+            ps_display = f"每股 ~{ps:.2f} 元" if ps is not None else "每股 N/A"
+            margin_display = ""
+            if ps is not None and current_price is not None and current_price > 0:
+                margin = (ps - current_price) / current_price * 100
+                margin_display = f"（安全边际 {margin:+.1f}%）"
+            lines.append(
+                f"- {_sc_label[sc]}（假设{_assump_text(sc)}，"
+                f"概率 {scenario_results[sc]['probability']*100:.0f}%）："
+                f"企业价值 {ev['enterprise_value']:,.0f} 元，{ps_display}{margin_display}"
+            )
+        lines.append("")
+        # 净债务为负（净现金）时提示
+        if net_debt < 0:
+            lines.append(
+                "> 净债务为负（净现金状态），企业价值换算为权益价值时做加法，"
+                "每股参考价相应提高。"
+            )
+            lines.append("")
+        lines.append(
+            "> 以上为基于 DCF 模型的多情景估值参考，假设前提与概率权重如上表所示，"
+            "仅供参考，不构成投资建议。"
+        )
+        lines.append("")
+    else:
+        lines.append(
+            f"乐观情景（假设{_assump_text('bull')}，概率 {scenario_results['bull']['probability']*100:.0f}%）："
+            f"企业价值 {scenario_ev['bull']['enterprise_value']:,.0f} 元；"
+            f"中性情景（假设{_assump_text('base')}，概率 {scenario_results['base']['probability']*100:.0f}%）："
+            f"企业价值 {scenario_ev['base']['enterprise_value']:,.0f} 元；"
+            f"悲观情景（假设{_assump_text('bear')}，概率 {scenario_results['bear']['probability']*100:.0f}%）："
+            f"企业价值 {scenario_ev['bear']['enterprise_value']:,.0f} 元。"
+            "仅供参考，不构成投资建议。"
+        )
+        lines.append("")
+        lines.append(
+            "股本/每股换算数据不可得（" + shares_source + "），"
+            "以上仅为企业价值区间，不换算为每股价值或单一价格结论。"
+        )
     for sc in ("bear", "base", "bull"):
         if scenario_results[sc].get("growth_sign_caveat"):
             lines.append(f"⚠️ [{sc}] {scenario_results[sc]['growth_sign_caveat']}")
