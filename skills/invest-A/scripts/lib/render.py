@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
+from lib.technical import compute, sort_kline_asc
 from lib.participant_scan import (
     build_participant_behavior_section,
     moneyflow_cv_window,
@@ -37,15 +38,6 @@ from .version import get_package_version
 logger = logging.getLogger(__name__)
 
 ENGINE_VERSION = get_package_version()
-
-
-def _cross_validation_marker(cv: CrossValidation | None) -> str:
-    """生成交叉验证状态标记。"""
-    if cv is None:
-        return ""
-    icon = _CV_ICONS.get(cv.status, "🔴")
-    label = _CV_LABELS.get(cv.status, cv.status)
-    return f"{icon} **{label}** — {cv.detail}"
 
 
 def _meta_cv_line(meta: dict) -> str:
@@ -165,13 +157,7 @@ def sanitize_error(error: str, max_len: int = 60) -> str:
 _sanitize_error = sanitize_error  # 模块内向后兼容
 
 
-def _fmt(v: Any, unit: str = "") -> str:
-    if v is None: return "-"
-    if isinstance(v, float):
-        if abs(v) >= 1e8: return f"{v/1e8:.2f}亿"
-        if abs(v) >= 1e4: return f"{v/1e4:.2f}万"
-        return f"{v:.2f}{unit}" if unit else f"{v:.2f}"
-    return str(v)
+_fmt = fmt_amount
 
 
 def _render_dimension_data(dn: str, data: Any, lines: list[str]) -> None:
@@ -522,7 +508,6 @@ def _section_quality(dims: dict[str, dict]) -> str:
     if not data or not isinstance(data, list) or len(data) == 0:
         return _missing_section("经营质量", "financials 维度无数据")
 
-    from lib.technical import sort_kline_asc
     data = sort_kline_asc(data)  # end_date 与 trade_date 同格式可复用
 
     lines = ["## 二、经营质量", ""]
@@ -585,7 +570,6 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
 
     # 处理 Tushare daily_basic 序列
     if isinstance(val_data, list) and len(val_data) > 0:
-        from lib.technical import sort_kline_asc
         val_sorted = sort_kline_asc(val_data)
         pe_seq = [r.get("pe_ttm") for r in val_sorted]
         pb_seq = [r.get("pb") for r in val_sorted]
@@ -681,7 +665,6 @@ def _section_flow(dims: dict[str, dict], collection: dict = None) -> str:
     # 北向资金（升序后取最近 7 日）
     nb_data = _get_dim_data(dims, "northbound")
     if nb_data and isinstance(nb_data, list) and nb_data:
-        from lib.technical import sort_kline_asc
         nb_sorted = sort_kline_asc(nb_data)
         lines.append("")
         lines.append("**北向资金近7日:**")
@@ -723,7 +706,6 @@ def render_technical_section(dims: dict[str, dict], collection: dict = None) -> 
     source = meta.get("source", "未知")
     lines.append(f"[复权: 不复权 / 来源: {source}]")
 
-    from lib.technical import compute, sort_kline_asc
     kline_data = sort_kline_asc(kline_data)
     tech = compute(kline_data)
 
@@ -870,7 +852,6 @@ def _section_events_placeholder() -> str:
 
 def _section_thesis_placeholder(dims: dict[str, dict]) -> str:
     """核心矛盾占位（v0.1.2 引擎只填数据卡片）。"""
-    from lib.technical import sort_kline_asc
 
     # 尝试提取关键数据（统一升序后取末位）
     fin_data = _get_dim_data(dims, "financials")
@@ -893,7 +874,6 @@ def _section_thesis_placeholder(dims: dict[str, dict]) -> str:
     trend_str = "?"
     kline_data = _get_dim_data(dims, "kline")
     if kline_data and isinstance(kline_data, list) and len(kline_data) >= 20:
-        from lib.technical import compute
         tech = compute(kline_data)
         if "error" not in tech:
             trend_str = tech["trend"]["alignment"].get("trend_label", "?")
@@ -1003,25 +983,11 @@ def _missing_section(title: str, reason: str) -> str:
 🔍 **待独立验证:** 确认数据源配置后重试，或通过 WebSearch 手动补充。"""
 
 
-def _fmt_v2(v: Any, unit: str = "") -> str:
-    """辅助格式化。"""
-    if v is None:
-        return "-"
-    if isinstance(v, float):
-        if abs(v) >= 1e8:
-            return f"{v / 1e8:.2f}亿"
-        if abs(v) >= 1e4:
-            return f"{v / 1e4:.2f}万"
-        return f"{v:.2f}{unit}" if unit else f"{v:.2f}"
-    return str(v)
+_fmt_v2 = fmt_amount
 
 
 # ---- v3 报告模板（v0.1.3 Phase 1） ----
 # _CV_ICONS imported from .schema (single source of truth)
-
-
-def _cross_validation_block(cv: CrossValidation) -> str:
-    return cv.to_markdown()
 
 
 def _cv(
@@ -1039,7 +1005,6 @@ def _v3_law11_trigger_d(dims: dict[str, dict]) -> bool:
     kline = _get_dim_data(dims, "kline")
     if not kline or not isinstance(kline, list):
         return False
-    from lib.technical import sort_kline_asc, compute
 
     rows = sort_kline_asc(kline)
     closes = [float(r["close"]) for r in rows if r.get("close") is not None]
@@ -1064,13 +1029,6 @@ def _v3_law11_trigger_d(dims: dict[str, dict]) -> bool:
         if abs(cur - float(ma60)) / float(ma60) <= 0.03:
             return True
     return False
-
-
-def _strip_section_heading(text: str) -> str:
-    lines = text.splitlines()
-    if lines and lines[0].startswith("##"):
-        return "\n".join(lines[1:]).lstrip("\n")
-    return text
 
 
 def _evidence_conclusion_block(conclusion: str, evidences: list[tuple[str, str]]) -> str:
@@ -1291,7 +1249,6 @@ def _v3_build_candidate_explanations(
 
     kline = _get_dim_data(dims, "kline")
     if kline and isinstance(kline, list):
-        from lib.technical import sort_kline_asc, compute
         tech = compute(sort_kline_asc(kline))
         if "error" not in tech:
             label = tech["trend"]["alignment"].get("trend_label", "")
@@ -1368,7 +1325,6 @@ def _v3_price_change(dims: dict[str, dict]) -> tuple[float | None, int | None]:
     kline = _get_dim_data(dims, "kline")
     if not kline or not isinstance(kline, list) or len(kline) < 2:
         return None, None
-    from lib.technical import sort_kline_asc
     rows = sort_kline_asc(kline)
     if len(rows) >= 21:
         recent = rows[-21:]
@@ -1393,11 +1349,6 @@ def _v3_price_window_label(window: int | None) -> str:
     return f"近 {window} 个交易日（K 线不足 20 日）"
 
 
-def _v3_price_change_pct(dims: dict[str, dict]) -> float | None:
-    pct, _ = _v3_price_change(dims)
-    return pct
-
-
 def _v3_load_valuation_summary(
     dims: dict[str, dict],
     val_cache: dict | None = None,
@@ -1408,7 +1359,6 @@ def _v3_load_valuation_summary(
     val_data = _get_dim_data(dims, "valuation")
     summary: dict | None = None
     if val_data and isinstance(val_data, list):
-        from lib.technical import sort_kline_asc
         from lib.valuation import valuation_summary, valuation_window_label
         val_sorted = sort_kline_asc(val_data)
         pe_seq = [r.get("pe_ttm") for r in val_sorted]
@@ -1666,7 +1616,6 @@ def _section_snapshot(
 
     fin = _get_dim_data(dims, "financials")
     if fin and isinstance(fin, list):
-        from lib.technical import sort_kline_asc
         fin = sort_kline_asc(fin)
         latest = fin[-1]
         lines.append(
@@ -1743,10 +1692,6 @@ def _section_snapshot(
     return "\n".join(lines)
 
 
-def _v3_matrix_row(factor: DriverFactor) -> str:
-    return factor.to_matrix_row()
-
-
 def _v3_driver_unavailable(category: str) -> DriverFactor:
     return DriverFactor(category, "[数据源不可用，该因子跳过]", "—", "—", "—")
 
@@ -1788,7 +1733,6 @@ def _section_dynamic_drivers(
     fin = _get_dim_data(dims, "financials")
     np_now, np_prev = None, None
     if fin and isinstance(fin, list) and len(fin) >= 2:
-        from lib.technical import sort_kline_asc
         fin = sort_kline_asc(fin)
         np_now = fin[-1].get("net_profit")
         np_prev = fin[-2].get("net_profit")
@@ -1855,7 +1799,6 @@ def _section_dynamic_drivers(
     ma_strength = "❓"
     fin_dir = "→中性"
     if kline and isinstance(kline, list):
-        from lib.technical import sort_kline_asc, compute
         tech = compute(sort_kline_asc(kline))
         if "error" not in tech:
             label = tech["trend"]["alignment"].get("trend_label", "")
@@ -2167,7 +2110,6 @@ def _section_market_structure(
     fin_dim = collection.get("financials") if isinstance(collection, dict) else None
     fin_rows = fin_dim.get("data") if isinstance(fin_dim, dict) else None
     if isinstance(fin_rows, list) and fin_rows:
-        from lib.technical import sort_kline_asc
         fin_sorted = sort_kline_asc(fin_rows)
         if fin_sorted:
             company_gm = _fin_field_num(fin_sorted[-1], "grossprofit_margin", "gross_margin")
@@ -2298,7 +2240,6 @@ def _section_comprehension_statement(
     """
     del market_structure  # 预留扩展参数，当前版本未使用
 
-    from lib.technical import sort_kline_asc
 
     fin_dim = dims.get("financials") or {}
     fin_list = fin_dim.get("data") if isinstance(fin_dim.get("data"), list) else []
@@ -2436,7 +2377,6 @@ def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
     if not isinstance(fin_list, list) or not fin_list:
         return result
 
-    from lib.technical import sort_kline_asc
     rows = sort_kline_asc(fin_list)
 
     def _append(level: str, line: str) -> None:
@@ -3127,25 +3067,6 @@ def _render_pricing_news_section(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _section_industry_pricing(data: dict) -> str:
-    """行业产品定价追踪（兼容旧调用；新报告已拆分至模块 1/2）。"""
-    futures = _render_pricing_futures_section(data)
-    news = _render_pricing_news_section(data)
-    if not futures and not news:
-        return ""
-    parts = []
-    if futures or news:
-        parts.append("## 3e. 行业产品定价追踪")
-        parts.append("")
-    if futures:
-        parts.append(futures)
-    if news:
-        if futures:
-            parts.append("")
-        parts.append(news)
-    return "\n".join(parts)
-
-
 def _v3_trigger_c_active(market_structure: dict) -> bool:
     sw = market_structure.get("sw_index") or {}
     rel = sw.get("relative_vs_benchmark_pct")
@@ -3336,7 +3257,6 @@ def _financial_panorama_table(fin_list: list[dict]) -> list[str]:
     """模块4 业绩全景表（P1b：含 EPS 列）。"""
     if not fin_list:
         return []
-    from lib.technical import sort_kline_asc
     rows = sort_kline_asc(fin_list)[-8:]
     lines = [
         "### 业绩全景（近8期）",
@@ -3395,7 +3315,6 @@ def _canvas_scale_effect(fin_list: list[dict]) -> tuple[float | None, str, list[
     """规模效应：近 3-5 期营收增速 vs 毛利率变化关系推断。"""
     if not fin_list:
         return None, "数据不足：缺少财务数据，无法判断规模效应", []
-    from lib.technical import sort_kline_asc
     rows = sort_kline_asc(fin_list)[-5:]
     pairs = [
         (_fin_field_num(r, "revenue"), _fin_field_num(r, "grossprofit_margin", "gross_margin"))
@@ -3433,7 +3352,6 @@ def _canvas_cyclicality(fin_list: list[dict]) -> tuple[float | None, str, list[s
     if not fin_list:
         return None, "数据不足：缺少财务数据，无法判断周期性", []
     import statistics
-    from lib.technical import sort_kline_asc
     rows = sort_kline_asc(fin_list)[-8:]
     roes = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
     if len(roes) < 3:
@@ -3455,7 +3373,6 @@ def _canvas_growth_driver(fin_list: list[dict]) -> tuple[float | None, str, list
     """增长驱动：数据不支持精细量/价拆分，用营收增速绝对水平粗略映射。"""
     if not fin_list:
         return None, "数据不足：缺少财务数据，无法判断增长驱动", []
-    from lib.technical import sort_kline_asc
     rows = sort_kline_asc(fin_list)[-5:]
     revs = [_fin_field_num(r, "revenue") for r in rows]
     revs = [v for v in revs if v is not None]
@@ -3785,7 +3702,6 @@ def _section_fundamentals_layered(
     fin = _get_dim_data(dims, "financials")
     fin_list: list[dict] = []
     if fin and isinstance(fin, list):
-        from lib.technical import sort_kline_asc
         fin_list = sort_kline_asc(fin)
 
     latest_fin = fin_list[-1] if fin_list else {}
@@ -3819,6 +3735,10 @@ def _section_fundamentals_layered(
     cagr, cagr_years_span = _compute_metric_cagr(fin_list, "revenue")
     np_cagr, np_cagr_years_span = _compute_metric_cagr(fin_list, "net_profit")
     fin_rev_list = [r for r in fin_list if _safe_num(r.get("revenue")) is not None]
+    np_cur = np_v
+    np_prev = _safe_num(prev_fin.get("net_profit"))
+    ocf = ocf_val
+    cf_ratio = cf_ratio_val
 
     lines.append("\n### 核心判断摘要\n")
 
@@ -3958,7 +3878,6 @@ def _section_fundamentals_layered(
     current_pe: float | None = None
     current_pb: float | None = None
     if val_data and isinstance(val_data, list):
-        from lib.technical import sort_kline_asc
         from lib.valuation import valuation_window_label
 
         val_sorted = sort_kline_asc(val_data)
@@ -3986,24 +3905,6 @@ def _section_fundamentals_layered(
     pmi_data = ms.get("pmi") or {}
     pe_pct, pb_pct_ext, _ = _v3_valuation_percentiles(dims, val_cache)
     trigger_c = _v3_trigger_c_active(ms)
-
-    rev_cur = _safe_num(latest_fin.get("revenue"))
-    rev_prev = _safe_num(prev_fin.get("revenue"))
-    rev_yoy: float | None = None
-    if rev_cur is not None and rev_prev is not None and rev_prev > 0:
-        rev_yoy = (rev_cur - rev_prev) / rev_prev * 100
-
-    np_cur = _safe_num(latest_fin.get("net_profit"))
-    np_prev = _safe_num(prev_fin.get("net_profit"))
-    ocf = _safe_num(latest_fin.get("ocf") or latest_fin.get("n_cashflow_act"))
-    np_v = _safe_num(latest_fin.get("net_profit"))
-    cf_ratio: float | None = None
-    if ocf is not None and np_v is not None and np_v > 0:
-        cf_ratio = ocf / np_v
-
-    cagr, cagr_years_span = _compute_metric_cagr(fin_list, "revenue")
-    np_cagr, np_cagr_years_span = _compute_metric_cagr(fin_list, "net_profit")
-    fin_rev_list = [r for r in fin_list if _safe_num(r.get("revenue")) is not None]
 
     # =================================================================
     # 4a. 行业位置（3 题）
@@ -4961,7 +4862,6 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
          "source": str, "is_default": bool}
         计算失败时返回 {"beta": 1.0, "is_default": True, ...}
     """
-    from lib.technical import sort_kline_asc
 
     stock_by_date: dict[str, float] = {}
     if kline_data and isinstance(kline_data, list):
@@ -5119,14 +5019,13 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
     val_dim = dims.get("valuation") or {}
     val_data = val_dim.get("data")
     if isinstance(val_data, list) and val_data:
-        from lib.technical import sort_kline_asc as _sk
-        val_sorted = _sk(val_data)
+        val_sorted = sort_kline_asc(val_data)
         latest_mv = val_sorted[-1].get("total_mv") if val_sorted else None
         if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
             latest_mv = float(latest_mv)
             kline_dim = _get_dim_data(dims, "kline")
             if isinstance(kline_dim, list) and kline_dim:
-                k_sorted = _sk(kline_dim)
+                k_sorted = sort_kline_asc(kline_dim)
                 price = k_sorted[-1].get("close") if k_sorted else None
                 if price is not None and _safe_num(price) and float(price) > 0:
                     shares = latest_mv / float(price)
@@ -5258,8 +5157,7 @@ def _section_dcf_valuation(
     market_structure = collection.get("market_structure") or {}
     kline_data = _get_dim_data(dims, "kline")
     if isinstance(kline_data, list) and kline_data:
-        from lib.technical import sort_kline_asc as _sort_kline
-        kline_data = _sort_kline(kline_data)
+        kline_data = sort_kline_asc(kline_data)
 
     lines.append("#### D-④ DCF 三情景估值区间")
     lines.append("")
@@ -5457,7 +5355,6 @@ def _section_dcf_valuation(
     fin_raw = _get_dim_data(dims, "financials")
     fin_list: list[dict] = []
     if fin_raw and isinstance(fin_raw, list):
-        from lib.technical import sort_kline_asc
         fin_list = sort_kline_asc(fin_raw)
     base_assumptions = scenario_results["base"].get("assumptions", {})
     hist_growth = base_assumptions.get("base_revenue_growth_cagr")
@@ -5564,7 +5461,6 @@ def _v3_bull_bear_implied_growth(
     val_data = _get_dim_data(dims, "valuation")
     current_pe: float | None = None
     if val_data and isinstance(val_data, list):
-        from lib.technical import sort_kline_asc
         val_sorted = sort_kline_asc(val_data)
         pe_seq = [r.get("pe_ttm") for r in val_sorted if r.get("pe_ttm") is not None]
         if pe_seq:
@@ -5579,7 +5475,6 @@ def _v3_bull_bear_implied_growth(
     fin = _get_dim_data(dims, "financials")
     cagr, np_cagr = None, None
     if fin and isinstance(fin, list):
-        from lib.technical import sort_kline_asc
         fin_list = sort_kline_asc(fin)
         cagr, _ = _compute_metric_cagr(fin_list, "revenue")
         np_cagr, _ = _compute_metric_cagr(fin_list, "net_profit")
@@ -5614,7 +5509,6 @@ def _section_bull_bear(
     fin = _get_dim_data(dims, "financials")
     latest_fin: dict = {}
     if fin and isinstance(fin, list):
-        from lib.technical import sort_kline_asc
         latest_fin = sort_kline_asc(fin)[-1]
 
     # ── gather raw data for chains ──────────────────────────────────
@@ -6351,7 +6245,6 @@ def _section_left_right_probability(
     kline = _get_dim_data(dims, "kline")
     trend_label = ""
     if kline and isinstance(kline, list):
-        from lib.technical import sort_kline_asc, compute
         tech = compute(sort_kline_asc(kline))
         if "error" not in tech:
             trend_label = tech["trend"]["alignment"].get("trend_label", "")
@@ -6374,7 +6267,6 @@ def _section_left_right_probability(
     lines.append("### 右侧概率的主要支撑依据")
     right_items: list[str] = []
     if kline and isinstance(kline, list):
-        from lib.technical import sort_kline_asc, compute
         tech = compute(sort_kline_asc(kline))
         if "error" not in tech:
             label = tech["trend"]["alignment"].get("trend_label", "")
@@ -6390,7 +6282,6 @@ def _section_left_right_probability(
     continuation_hits: list[str] = []
     fin_lr = _get_dim_data(dims, "financials")
     if fin_lr and isinstance(fin_lr, list):
-        from lib.technical import sort_kline_asc
         fin_sorted = sort_kline_asc(fin_lr)
         if len(fin_sorted) >= 2:
             rev_now = _safe_num(fin_sorted[-1].get("revenue"))
@@ -6400,7 +6291,6 @@ def _section_left_right_probability(
                 if rev_yoy_lr > 100:
                     continuation_hits.append(f"季度营收同比 {rev_yoy_lr:+.1f}%（>100%）")
     if kline and isinstance(kline, list):
-        from lib.technical import sort_kline_asc, compute
         tech_lr = compute(sort_kline_asc(kline))
         if "error" not in tech_lr:
             ma60 = tech_lr.get("trend", {}).get("ma60") or {}
@@ -6478,7 +6368,6 @@ def _section_technical_brief(
         lines.append("- 量：—")
         lines.append("- 支撑阻力：—")
         return "\n".join(lines)
-    from lib.technical import sort_kline_asc, compute
     tech = compute(sort_kline_asc(kline))
     if "error" in tech:
         lines.append(f"- 趋势：{tech.get('message', '计算失败')}")
@@ -7438,7 +7327,6 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
     if not fin or not isinstance(fin, list) or not fin:
         return [], [], [], [], "<div style='padding:2rem;text-align:center;color:var(--tx-f)'>财务数据不可得</div>", "财务数据不可得"
 
-    from lib.technical import sort_kline_asc
     fin = sort_kline_asc(fin)
     recent = fin[-8:] if len(fin) >= 8 else fin
 
@@ -7509,7 +7397,6 @@ def _extract_valuation_data(dims: dict) -> dict:
     if not val_data or not isinstance(val_data, list) or not val_data:
         return result
 
-    from lib.technical import sort_kline_asc
     from lib.valuation import valuation_summary
 
     vs = sort_kline_asc(val_data)
@@ -7585,7 +7472,6 @@ def _extract_technical_html(dims: dict) -> dict:
         result.update(macd_html=empty, rsi_kdj_html="", boll_html="", ma_grid_html=empty)
         return result
 
-    from lib.technical import compute, sort_kline_asc
     kd = sort_kline_asc(kd)
     result["kline_days"] = len(kd)
     meta = _get_dim_meta(dims, "kline")
@@ -7766,7 +7652,6 @@ def _extract_northbound_data(dims: dict) -> dict:
     if not nb or not isinstance(nb, list) or not nb:
         return result
 
-    from lib.technical import sort_kline_asc
     nb = sort_kline_asc(nb)
     recent = nb[-7:] if len(nb) >= 7 else nb
     result["total_days"] = len(recent)
@@ -7979,7 +7864,6 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     dv_str = "--"
     val_data = _get_dim_data(dims, "valuation")
     if isinstance(val_data, list) and val_data:
-        from lib.technical import sort_kline_asc
         vs = sort_kline_asc(val_data)
         dv = next((r.get("dv_ratio") for r in reversed(vs) if r.get("dv_ratio") is not None), None)
         if dv is not None:
@@ -8073,7 +7957,6 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     kd = _get_dim_data(dims, "kline")
     closep_series = "[]"
     if isinstance(kd, list) and kd:
-        from lib.technical import sort_kline_asc
         kd = sort_kline_asc(kd)
         recent_closes = [r.get("close") for r in kd[-14:]]
         closep_series = json.dumps(recent_closes, ensure_ascii=False)

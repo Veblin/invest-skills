@@ -18,12 +18,11 @@ from datetime import date
 from typing import Any
 
 from lib.financials import find_yoy_row, parse_end_date
-from lib.nums import coalesce_field, safe_float
+from lib.nums import coalesce_field
 from lib.technical import sort_kline_asc
 from lib.valuation import _infer_tax_rate
 
-# Backward-compatible aliases — callers use these module-private names
-_as_float = safe_float
+# Backward-compatible alias — callers use this module-private name
 _field = coalesce_field
 
 # ---- 通用工具 ----
