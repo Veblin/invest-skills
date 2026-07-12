@@ -16,14 +16,21 @@ import re
 from pathlib import Path
 from typing import Any
 
-from lib.nums import safe_float as _safe_num
+from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
+from lib.participant_scan import (
+    build_participant_behavior_section,
+    moneyflow_cv_window,
+    moneyflow_signal_label,
+    northbound_label,
+    resolve_moneyflow,
+)
 
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
     EASTMONEY_FAILURE_TUN_MARKER,
 )
-from .schema import CrossValidation, DriverFactor, ProbabilityStructure
+from .schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_ICONS, _CV_LABELS, index_dimensions
 
 from .version import get_package_version
 
@@ -36,9 +43,9 @@ def _cross_validation_marker(cv: CrossValidation | None) -> str:
     """生成交叉验证状态标记。"""
     if cv is None:
         return ""
-    if cv.status == "convergence":
-        return f"🟢 **印证** — {cv.detail}"
-    return f"🟡 **分歧** — {cv.detail}"
+    icon = _CV_ICONS.get(cv.status, "🔴")
+    label = _CV_LABELS.get(cv.status, cv.status)
+    return f"{icon} **{label}** — {cv.detail}"
 
 
 def _meta_cv_line(meta: dict) -> str:
@@ -47,9 +54,10 @@ def _meta_cv_line(meta: dict) -> str:
     if not cv_status:
         return ""
     detail = meta.get("cross_validation_detail") or ""
-    if cv_status == "convergence":
-        return f"🟢 **印证** — {detail or '多源数据一致'}"
-    return f"🟡 **分歧** — {detail or '多源数据存在差异'}"
+    icon = _CV_ICONS.get(cv_status, "🔴")
+    label = _CV_LABELS.get(cv_status, cv_status)
+    default_detail = "多源数据一致" if cv_status == "convergence" else "多源数据存在差异"
+    return f"{icon} **{label}** — {detail or default_detail}"
 
 
 def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
@@ -389,9 +397,8 @@ def render_report_v2(collection: dict[str, Any], symbol: str) -> str:
 
 
 def _index_dims(collection: dict) -> dict[str, dict]:
-    """将 dimensions 列表转为 dict。"""
-    dims = collection.get("dimensions", [])
-    return {d.get("dimension", ""): d for d in dims}
+    """将 dimensions 列表转为 dict。委托 schema.index_dimensions。"""
+    return index_dimensions(collection)
 
 
 def _get_dim_data(dims: dict[str, dict], key: str) -> Any:
@@ -552,6 +559,15 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
     val_data = _get_dim_data(dims, "valuation")
 
     lines = ["## 三、估值位置", ""]
+    if collection:
+        try:
+            from .render_extras import render_rigor_warnings
+            strict = bool((collection.get("_meta") or {}).get("strict_rigor"))
+            rigor = render_rigor_warnings(collection, strict=strict)
+            if rigor:
+                lines.append(rigor)
+        except ImportError:
+            pass
 
     if val_data is None:
         # 无数据 → 标注
@@ -1001,8 +1017,7 @@ def _fmt_v2(v: Any, unit: str = "") -> str:
 
 
 # ---- v3 报告模板（v0.1.3 Phase 1） ----
-
-_CV_ICONS = {"convergence": "🟢", "divergence": "🟡", "gap": "🔴"}
+# _CV_ICONS imported from .schema (single source of truth)
 
 
 def _cross_validation_block(cv: CrossValidation) -> str:
@@ -1015,16 +1030,8 @@ def _cv(
     return CrossValidation(status, code, data_pair, detail, reliability).to_markdown()
 
 
-def _v3_northbound_signal_label(nb: dict) -> str:
-    """北向净额标签：hsgt_top10 为上榜日累计，akshare 为连续交易日。"""
-    days = int(nb.get("days") or 0)
-    amount = _fmt_v2(nb.get("net_sum_10d"))
-    src = str(nb.get("source") or "")
-    if "hsgt_top10" in src:
-        return f"上榜日累计净额 {amount}（{days} 个上榜日）"
-    if days:
-        return f"近 {days} 日净额 {amount}"
-    return f"净额 {amount}"
+# v0.1.9: 委托 lib.participant_scan.northbound_label（消除重复）
+_v3_northbound_signal_label = northbound_label
 
 
 def _v3_law11_trigger_d(dims: dict[str, dict]) -> bool:
@@ -1231,6 +1238,7 @@ def _v3_build_candidate_explanations(
     sw = market_structure.get("sw_index") or {}
     mf = market_structure.get("moneyflow") or {}
     nb = market_structure.get("northbound") or {}
+    mf_net, mf_key = resolve_moneyflow(mf)
 
     if chg is not None:
         explanations.append((
@@ -1295,7 +1303,7 @@ def _v3_build_candidate_explanations(
                     "⚠️",
                 ))
 
-    mf_v = mf.get("net_sum_5d")
+    mf_v = mf_net
     nb_v = nb.get("net_sum_10d")
     if chg is not None and mf_v is not None:
         price_up = chg > 0
@@ -1303,7 +1311,7 @@ def _v3_build_candidate_explanations(
         if price_up != flow_in:
             explanations.append((
                 "E",
-                f"价格{window_label}{chg_s} 与主力近 5 日净额方向不一致，或存在博弈/滞后",
+                f"价格{window_label}{chg_s} 与{moneyflow_cv_window(mf_key)}净额方向不一致，或存在博弈/滞后",
                 mf.get("source", "moneyflow"),
                 "❓",
             ))
@@ -1813,11 +1821,11 @@ def _section_dynamic_drivers(
         factors.append(_v3_driver_unavailable("资金（北向）"))
 
     mf = market_structure.get("moneyflow")
-    if mf and mf.get("net_sum_5d") is not None:
-        v = mf["net_sum_5d"]
-        d = "↑正向" if v > 0 else ("↓负向" if v < 0 else "→中性")
+    mf_net, mf_key = resolve_moneyflow(mf)
+    if mf_net is not None:
+        d = "↑正向" if mf_net > 0 else ("↓负向" if mf_net < 0 else "→中性")
         factors.append(DriverFactor(
-            "资金（主力）", f"近 5 日主力净额 {_fmt_v2(v)}", d, "⚠️", mf.get("source", ""),
+            "资金（主力）", f"{moneyflow_signal_label(mf_key)} {fmt_amount(mf_net)}", d, "⚠️", mf.get("source", "") if isinstance(mf, dict) else "",
         ))
     else:
         factors.append(_v3_driver_unavailable("资金（主力）"))
@@ -1928,6 +1936,15 @@ def _section_dynamic_drivers(
     return "\n".join(lines)
 
 
+def _section_participant_behavior_scan(
+    collection: dict,
+    symbol: str,
+    market_structure: dict,
+    dims: dict,
+) -> str:
+    return build_participant_behavior_section(collection, symbol, market_structure, dims)
+
+
 def _section_market_structure(
     collection: dict, symbol: str, market_structure: dict, *, val_cache: dict | None = None,
 ) -> str:
@@ -1969,7 +1986,8 @@ def _section_market_structure(
 
     nb = market_structure.get("northbound")
     mf = market_structure.get("moneyflow")
-    if nb or mf:
+    mf_net, mf_key = resolve_moneyflow(mf)
+    if nb or mf_net is not None:
         lines.append("")
         lines.append("### 资金态度")
         if nb:
@@ -1977,12 +1995,17 @@ def _section_market_structure(
             lines.append(
                 f"- 北向个股资金流（{nb_src}）{_v3_northbound_signal_label(nb)}"
             )
-        if mf:
-            lines.append(f"- 主力（moneyflow）近 5 日净额: {_fmt_v2(mf.get('net_sum_5d'))}")
-        if nb and mf:
+        if mf_net is not None:
+            lines.append(
+                f"- 主力（moneyflow）{moneyflow_signal_label(mf_key)}: {fmt_amount(mf_net)}"
+            )
+        if nb and mf_net is not None:
             n_v = float(nb.get("net_sum_10d") or 0)
-            m_v = float(mf.get("net_sum_5d") or 0)
+            m_v = mf_net
             if n_v * m_v > 0:
+                cv4 = "convergence"
+                cv4d = "北向与主力净流入方向一致"
+            elif n_v == 0 and m_v == 0:
                 cv4 = "convergence"
                 cv4d = "北向与主力净流入方向一致"
             elif n_v == 0 or m_v == 0:
@@ -2018,7 +2041,7 @@ def _section_market_structure(
             )
 
     pe_pct, _, _ = _v3_valuation_percentiles(_index_dims(collection), val_cache)
-    mf_out = (mf or {}).get("net_sum_5d")
+    mf_out = mf_net
     cv7 = _v3_cv7_block(pe_pct, mf_out)
     if cv7:
         lines.append("")
@@ -2106,12 +2129,12 @@ def _section_market_structure(
         ))
     else:
         ms_evidences.append(("❓", "申万行业指数不可得"))
-    if nb or mf:
+    if nb or mf_net is not None:
         parts = []
         if nb:
             parts.append(f"北向 {_v3_northbound_signal_label(nb)}")
-        if mf:
-            parts.append(f"主力近5日 {_fmt_v2(mf.get('net_sum_5d'))}")
+        if mf_net is not None:
+            parts.append(f"{moneyflow_cv_window(mf_key)} {fmt_amount(mf_net)}")
         ms_evidences.append(("⚠️", "；".join(parts)))
     else:
         ms_evidences.append(("❓", "北向/主力资金数据不完整"))
@@ -2566,6 +2589,27 @@ def _section_six_gates_scorecard(
     margin_detail = (rq.get("detail") or {}).get("margin_stability") or {}
     fin_score = avg(ocf_detail.get("score"), margin_detail.get("score"))
 
+    from lib.risk_scanner import ocf_np_divergence_flag, revenue_acceleration_flag
+
+    accel = revenue_acceleration_flag(fin_list)
+    ocf_div = ocf_np_divergence_flag(fin_list)
+    soft_notes: list[str] = []
+    for label, flag in (("营收加速度", accel), ("OCF/净利背离", ocf_div)):
+        # Only render computed results; skip degrade-path details without accel_pp/ratio
+        if "accel_pp" not in flag and "ratio" not in flag:
+            continue
+        detail = flag.get("detail", "")
+        if not detail:
+            continue
+        prefix = "软信号⚠️ " if flag.get("triggered") else "软信号 "
+        soft_notes.append(f"{prefix}{label}: {detail}")
+    fin_note = (
+        "毛利率稳定性 + OCF/净利润覆盖评分均值 "
+        "[来源: lib.scoring.revenue_quality_score 子信号]"
+    )
+    if soft_notes:
+        fin_note += "；" + "；".join(soft_notes)
+
     # 估值：复用 PE/PB 历史位置（呈现位置，非贵贱判断，不与"强弱"混用）
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
     if pe_pct is not None:
@@ -2621,7 +2665,7 @@ def _section_six_gates_scorecard(
     ))
     lines.append(_six_gate_row(
         "财务", fin_score, grade(fin_score),
-        "毛利率稳定性 + OCF/净利润覆盖评分均值 [来源: lib.scoring.revenue_quality_score 子信号]",
+        fin_note,
     ))
     lines.append(f"| 估值 | {val_grade} | {val_desc} |")
     lines.append(f"| 风险 | {risk_grade} | {risk_desc} |")
@@ -2700,10 +2744,10 @@ def _section_cross_validation_table(dims: dict) -> str:
         if not cv_status:
             continue
         detail = meta.get("cross_validation_detail") or "—"
-        if cv_status == "convergence":
-            label = "🟢 印证"
-        elif cv_status == "divergence":
-            label = "🟡 分歧"
+        if cv_status:
+            icon = _CV_ICONS.get(cv_status, "🔴")
+            cn_label = _CV_LABELS.get(cv_status, cv_status)
+            label = f"{icon} {cn_label}"
         else:
             label = f"🟡 {cv_status}"
         rows.append((name, label, detail))
@@ -2816,11 +2860,8 @@ def _fmt_end_date(val: Any) -> str:
 
 
 def _fin_field_num(row: dict, *keys: str) -> float | None:
-    """按字段名取数值；0.0 为合法值（不用 truthy 判断）。"""
-    for key in keys:
-        if key in row and row[key] is not None:
-            return _safe_num(row[key])
-    return None
+    """按字段名取数值；0.0 为合法值（不用 truthy 判断）。委托 lib.nums.coalesce_field。"""
+    return coalesce_field(row, *keys)
 
 
 def _fmt_peer_metric(v: Any, *, signed: bool = False) -> str:
@@ -5323,6 +5364,7 @@ def _section_bull_bear(
 
     # ── gather raw data for chains ──────────────────────────────────
     nb_v = _safe_num(nb.get("net_sum_10d"))
+    mf_net, mf_key = resolve_moneyflow(market_structure.get("moneyflow"))
     roe = _safe_num(latest_fin.get("roe") or target.get("roe"))
     roe_rank_pct = rankings.get("roe_pct")
     rev_yoy_pct = rankings.get("revenue_yoy_pct")
@@ -5737,8 +5779,7 @@ def _section_bull_bear(
             f"实际{ref_label} {ref_cagr:+.2f}% 无法匹配，定价{direction_bear}。"
         )
     # divergence: northbound vs moneyflow (if we haven't hit 2)
-    mf = market_structure.get("moneyflow") or {}
-    m_v = _safe_num(mf.get("net_sum_5d"))
+    m_v = mf_net
     if divergence_count < 2 and nb_v is not None and m_v is not None and nb_v * m_v < 0:
         divergence_count += 1
         bull_direction = "净流入" if nb_v > 0 else "净流出"
@@ -6148,9 +6189,9 @@ def _section_left_right_probability(
     lines.append("| 时间 | 事件 | 关注指标 |")
     lines.append("|------|------|---------|")
     lines.extend(prob.watch_nodes)
-    mf = market_structure.get("moneyflow") or {}
+    mf_net, mf_key = resolve_moneyflow(market_structure.get("moneyflow"))
     pe_pct_lr, _, _ = _v3_valuation_percentiles(dims, val_cache)
-    cv7_lr = _v3_cv7_block(pe_pct_lr, mf.get("net_sum_5d"))
+    cv7_lr = _v3_cv7_block(pe_pct_lr, mf_net)
     if cv7_lr:
         lines.append("")
         lines.append("### 估值-资金交叉验证（左/右权重参考）")
@@ -6553,6 +6594,13 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         extras = _render_engine_extras(collection)
         if extras:
             parts.append("\n".join(extras))
+        try:
+            from .render_extras import render_all_extras
+            v019 = render_all_extras(collection, dims)
+            if v019:
+                parts.append("\n\n".join(v019))
+        except ImportError:
+            pass
         parts.extend([
             _section_executive_summary(collection, symbol, dims, val_cache=val_cache),
             _section_research_question(collection, symbol, val_cache=val_cache),
@@ -6580,6 +6628,13 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         extras = _render_engine_extras(collection)
         if extras:
             parts.append("\n".join(extras))
+        try:
+            from .render_extras import render_all_extras
+            v019 = render_all_extras(collection, dims)
+            if v019:
+                parts.append("\n\n".join(v019))
+        except ImportError:
+            pass
         parts.extend([
             _section_ai_confidence_matrix(collection),
             _report_toc(),
@@ -6590,6 +6645,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _section_market_structure(
                 collection, symbol, market_structure, val_cache=val_cache,
+            ),
+            _section_participant_behavior_scan(
+                collection, symbol, market_structure, dims,
             ),
             _section_events_timeline(collection),
             _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),

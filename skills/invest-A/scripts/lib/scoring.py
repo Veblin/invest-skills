@@ -17,7 +17,14 @@ import statistics
 from datetime import date
 from typing import Any
 
-from lib.valuation import _as_float, _infer_tax_rate
+from lib.financials import find_yoy_row, parse_end_date
+from lib.nums import coalesce_field, safe_float
+from lib.technical import sort_kline_asc
+from lib.valuation import _infer_tax_rate
+
+# Backward-compatible aliases — callers use these module-private names
+_as_float = safe_float
+_field = coalesce_field
 
 # ---- 通用工具 ----
 
@@ -27,46 +34,24 @@ _RECENT_ROIC_PERIODS = 6
 
 
 def _sorted_rows(financials: list[dict] | None) -> list[dict]:
-    """按 end_date 升序排序（旧→新），过滤非法记录。"""
+    """按 end_date 升序排序（旧→新），过滤非法记录。
+
+    财务行通常仅有 end_date（报告期），无 trade_date，因此委托 sort_kline_asc
+    后实际按 end_date 排序（trade_date 不存在时回退到 end_date）。
+    """
     if not isinstance(financials, list):
         return []
     rows = [r for r in financials if isinstance(r, dict) and r.get("end_date")]
-    return sorted(rows, key=lambda r: str(r.get("end_date", "")))
+    return sort_kline_asc(rows)
 
 
-def _parse_date(raw: Any) -> date | None:
-    if raw is None:
-        return None
-    s = str(raw).strip().replace("-", "")
-    if len(s) < 8 or not s[:8].isdigit():
-        return None
-    try:
-        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
-    except ValueError:
-        return None
-
-
-def _field(row: dict, *keys: str) -> float | None:
-    for k in keys:
-        v = _as_float(row.get(k))
-        if v is not None:
-            return v
-    return None
+# _parse_date replaced by lib.financials.parse_end_date (imported above)
+# _field replaced by lib.nums.coalesce_field (aliased above)
 
 
 def _find_yoy_row(rows: list[dict], latest: dict) -> dict | None:
-    """定位与 latest 同季/同月、年份 -1 的记录（同比配对），复用 analysis_templates.py 的匹配逻辑。"""
-    latest_end = str(latest.get("end_date", "")).strip()
-    if len(latest_end) < 8:
-        return None
-    try:
-        yoy_end = str(int(latest_end[:4]) - 1) + latest_end[4:]
-    except (ValueError, TypeError):
-        return None
-    for r in rows:
-        if str(r.get("end_date", "")).strip() == yoy_end:
-            return r
-    return None
+    """定位与 latest 同季/同月、年份 -1 的记录（同比配对）。"""
+    return find_yoy_row(rows, latest)
 
 
 def _coerce_score(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -304,7 +289,7 @@ def insider_signal(holder_changes: dict) -> str:
     if not isinstance(data, list) or not data:
         return "数据不足"
 
-    dated = [(r, _parse_date(r.get("ann_date"))) for r in data if isinstance(r, dict)]
+    dated = [(r, parse_end_date(r.get("ann_date"))) for r in data if isinstance(r, dict)]
     dated = [(r, d) for r, d in dated if d is not None]
     if not dated:
         return "数据不足"

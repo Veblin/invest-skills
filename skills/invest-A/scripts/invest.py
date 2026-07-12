@@ -120,6 +120,7 @@ def _collect_kwargs(args: argparse.Namespace) -> dict:
         "deep": deep,
         "with_macro": with_macro,
         "with_chain": with_macro or deep,
+        "with_news_pack": getattr(args, "with_news_pack", False),
     }
 
 
@@ -268,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
     pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
+    pc.add_argument(
+        "--with-news-pack",
+        action="store_true",
+        help="采集新闻包（公告 + 声明式查询包 + 可选 Tavily；无 Key 时 Layer3 静默跳过）",
+    )
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
@@ -275,6 +281,16 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pr.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
     pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
+    pr.add_argument(
+        "--with-news-pack",
+        action="store_true",
+        help="采集新闻包（公告 + 声明式查询包 + 可选 Tavily；无 Key 时 Layer3 静默跳过）",
+    )
+    pr.add_argument(
+        "--strict-rigor",
+        action="store_true",
+        help="严格验算：跨源差异 >5%% 时在报告中硬标注阻断提示",
+    )
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
@@ -303,8 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="合规扫描：检查研究报告是否符合措辞、结构和证据规范",
     )
     pl.add_argument("target", help="报告文件路径或 reports/ 目录", nargs="?", default="reports")
-    pl.add_argument("--profile", choices=["claude", "engine"], default="claude",
-                    help="扫描规则集（claude=全部规则，engine=仅措辞+文件名）")
+    pl.add_argument("--profile", choices=["claude", "precommit", "engine"], default="claude",
+                    help="扫描规则集（claude=全部规则，precommit=钩子阻断项，engine=仅措辞+文件名）")
+    pl.add_argument("--fail-on", choices=["error", "warning", "info"], default="error",
+                    help="达到该级别及以上时返回非零退出码")
 
     ps = sub.add_parser("store", help="管理存储")
     ps.add_argument("action", nargs="?", default="list", choices=["list", "stats", "clear"])
@@ -312,7 +330,10 @@ def build_parser() -> argparse.ArgumentParser:
     ppl = sub.add_parser("plan", help="生成采集计划")
     ppl.add_argument("symbol")
     ppl.add_argument("--intent", default="deep_analysis",
-                     choices=["deep_analysis", "quick_check", "catalyst_monitor", "compare"])
+                     choices=[
+                         "deep_analysis", "quick_check", "catalyst_monitor", "compare",
+                         "sentiment_deep", "financials_deep", "game_theory",
+                     ])
     ppl.add_argument("--emit", default="json", choices=["json"])
 
     pe = sub.add_parser("evidence", help="生成结构化证据表")
@@ -350,6 +371,50 @@ def build_parser() -> argparse.ArgumentParser:
         default="market_cap", help="排序依据（默认市值下降）",
     )
 
+    prigor = sub.add_parser("rigor", help="财务验算：市值/估值/跨源交叉验证")
+    prigor.add_argument("symbol")
+    prigor.add_argument("--verify-all", action="store_true", help="运行全部验算命令")
+    prigor.add_argument("--strict", action="store_true", help="严格模式：>5%% 差异视为阻断")
+    prigor.add_argument("--calc", default="", help="Decimal 精确计算表达式")
+
+    paudit = sub.add_parser("audit", help="报告审计：抽取数据点 / 准出判决")
+    paudit.add_argument("report")
+    paudit.add_argument("--extract", action="store_true", help="抽取 15%% 数据点到 audit_checklist.json")
+    paudit.add_argument("--verdict", action="store_true", help="读取核验结果并输出 PASS/FAIL")
+
+    pcheck = sub.add_parser(
+        "check",
+        help="单标的质地检查（非全市场筛选；全市场扫描 → v0.2.0）",
+    )
+    pcheck.add_argument("symbol")
+
+    pport = sub.add_parser("portfolio", help="组合风险特征（行业集中度/相关性/压力测试）")
+    pport.add_argument("holdings", help="holdings.json 路径")
+    pport.add_argument("--stress", action="store_true", help="指数 -10%%/-20%%/-30%% 压力测试")
+
+    pthesis = sub.add_parser("thesis", help="投资假设追踪")
+    pthesis.add_argument("symbol")
+    pthesis.add_argument("--init", action="store_true", help="初始化假设模板")
+    pthesis.add_argument("--update", action="store_true", help="更新假设状态")
+    pthesis.add_argument("--status", action="store_true", help="查看当前状态")
+    pthesis.add_argument(
+        "--invalidate", action="append", default=[], metavar="ID",
+        help="将指定 assumption id 标为 invalid（可重复，配合 --update）",
+    )
+    pthesis.add_argument(
+        "--trigger-redline", action="append", default=[], metavar="ID",
+        help="将指定 red_line id 标为 triggered（可重复，配合 --update）",
+    )
+
+    pshock = sub.add_parser("shock", help="价格冲击插值比例（非风险中性概率）")
+    pshock.add_argument("symbol", nargs="?", default="", help="标的代码（仅标注用）")
+    pshock.add_argument("--pre-price", type=float, required=True)
+    pshock.add_argument("--post-price", type=float, required=True)
+    pshock.add_argument("--eps-base", type=float, required=True)
+    pshock.add_argument("--eps-hit", type=float, required=True)
+    pshock.add_argument("--pe-normal", type=float, required=True)
+    pshock.add_argument("--pe-stressed", type=float, required=True)
+
     return p
 
 
@@ -386,6 +451,9 @@ def cmd_collect(args: argparse.Namespace) -> int:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
         print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
+    if getattr(args, "with_news_pack", False):
+        print("📰 新闻包模式已启用（公告 + 查询包 + 可选 Tavily）")
+    env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
@@ -458,8 +526,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.with_macro:
         print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
     if result is None:
+        env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    if getattr(args, "strict_rigor", False):
+        result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)
     if result["summary"]["available"] == 0:
         print("⚠️ 所有维度均不可用，无法生成报告")
@@ -532,6 +603,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
+    env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
     ra = collector.collect_all(args.symbol_a)
     rb = collector.collect_all(args.symbol_b)
@@ -627,6 +699,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     if not _HAS_EVIDENCE:
         print("⚠️ evidence 模块不可用")
         return 1
+    env.print_missing_token_warnings()
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
@@ -789,6 +862,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
 
 def cmd_peer(args: argparse.Namespace) -> int:
     """行业横向对比 CLI：输出 Markdown 对比表。"""
+    env.print_missing_token_warnings()
     try:
         result = collector.collect_peer_comparison(
             args.symbol, top_n=args.top, sort_by=args.sort_by,
@@ -1337,7 +1411,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         except lint_mod.RulesLoadError as exc:
             print(f"❌ {exc}", file=sys.stderr)
             return 1
-        exit_code = lint_mod.print_results(target.name, findings)
+        exit_code = lint_mod.print_results(target.name, findings, fail_on=args.fail_on)
         return exit_code
 
     if target.is_dir():
@@ -1348,17 +1422,140 @@ def cmd_lint(args: argparse.Namespace) -> int:
             return 1
         if not results:
             return 0
-        total_errors = 0
+        total_blocking = 0
         for fname, findings in results.items():
-            lint_mod.print_results(fname, findings)
-            errors = [f for f in findings if f.severity == "error"]
-            total_errors += len(errors)
+            lint_mod.print_results(fname, findings, fail_on=args.fail_on)
+            total_blocking += lint_mod._count_by_severity(findings, args.fail_on)
         # 全局汇总
         print("---")
-        err_files = sum(1 for f, findings in results.items() if any(f.severity == "error" for f in findings))
-        print(f"共扫描 {len(results)} 个文件，{err_files} 个文件存在错误")
-        return 1 if total_errors > 0 else 0
+        blocking_files = sum(
+            1 for findings in results.values()
+            if lint_mod._count_by_severity(findings, args.fail_on) > 0
+        )
+        label = {"warning": "违规（含警告）", "error": "错误"}.get(args.fail_on, "违规")
+        print(f"共扫描 {len(results)} 个文件，{blocking_files} 个文件存在{label}")
+        return 1 if total_blocking > 0 else 0
 
+    return 0
+
+
+def cmd_rigor(args: argparse.Namespace) -> int:
+    from lib.financial_rigor import has_blocking_failures, run_rigor
+
+    env.print_missing_token_warnings()
+    dims = _CLI_DEFAULT_DIMS.split(",")
+    result = collector.collect_all(args.symbol, [d.strip() for d in dims if d.strip()])
+    cmds: list[str] = []
+    if args.verify_all or not args.calc:
+        cmds.extend(["verify-market-cap", "verify-valuation", "cross-validate"])
+    if args.calc:
+        cmds.append("calc")
+    reports = run_rigor(result, cmds, calc_expr=args.calc or None)
+    for r in reports:
+        icon = {"pass": "✅", "warn": "⚠️", "fail": "❌"}.get(r.status, "?")
+        print(f"{icon} [{r.command}] {r.field}: {r.detail} (偏差 {r.deviation_pct:.1f}%)")
+    if has_blocking_failures(reports, strict=args.strict):
+        print("❌ 严格模式：存在 >5% 验算失败", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    from lib.report_audit import extract_report, verdict_report
+    from pathlib import Path
+
+    path = Path(args.report)
+    if not path.exists():
+        print(f"❌ 文件不存在: {path}", file=sys.stderr)
+        return 1
+    if args.extract:
+        out = extract_report(path)
+        print(f"✅ 已抽取 {out['sampled_points']}/{out['total_points']} 点到 {out['output']}")
+        return 0
+    if args.verdict:
+        v = verdict_report(path)
+        print(f"判决: {v['verdict']} (已核验 {v.get('verified', 0)}, 失败 {v.get('failed', 0)}, 待填 {v.get('pending', 0)})")
+        return 0 if v["verdict"] == "PASS" else 1
+    print("请指定 --extract 或 --verdict", file=sys.stderr)
+    return 1
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    from lib.quality_check import format_quality_check, run_quality_check
+
+    env.print_missing_token_warnings()
+    dims = ["basic_info", "financials", "quote", "valuation", "kline"]
+    result = collector.collect_all(args.symbol, dims)
+    qc = run_quality_check(result)
+    print(format_quality_check(qc))
+    return 1 if qc["summary"]["overall"] == "fail" else 0
+
+
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    from lib.portfolio_review import format_portfolio_review, load_holdings, review_portfolio
+    from pathlib import Path
+
+    holdings = load_holdings(Path(args.holdings))
+    result = review_portfolio(holdings, stress=args.stress)
+    print(format_portfolio_review(result))
+    return 0
+
+
+def cmd_thesis(args: argparse.Namespace) -> int:
+    if not _HAS_STORE:
+        print("❌ store 模块不可用", file=sys.stderr)
+        return 1
+    if args.init:
+        r = store_mod.thesis_init(args.symbol)
+        print(f"✅ 已初始化 thesis: {args.symbol} · 健康度 {r['health_score']} · {r['state']}")
+        return 0
+    if args.update:
+        existing = store_mod.thesis_get(args.symbol)
+        if not existing:
+            r = store_mod.thesis_init(args.symbol)
+            print(f"✅ 已初始化 thesis: {args.symbol} · 健康度 {r['health_score']} · {r['state']}")
+            existing = store_mod.thesis_get(args.symbol)
+        assumptions = list(existing.get("assumptions") or [])
+        red_lines = list(existing.get("red_lines") or [])
+        for aid in getattr(args, "invalidate", None) or []:
+            for a in assumptions:
+                if a.get("id") == aid:
+                    a["valid"] = False
+        for rid in getattr(args, "trigger_redline", None) or []:
+            for rline in red_lines:
+                if rline.get("id") == rid:
+                    rline["triggered"] = True
+        r = store_mod.thesis_update(args.symbol, assumptions=assumptions, red_lines=red_lines)
+        print(f"✅ 已更新 thesis: {args.symbol} · 健康度 {r['health_score']} · {r['state']}")
+        return 0
+    if args.status or not (args.init or args.update):
+        t = store_mod.thesis_get(args.symbol)
+        if not t:
+            print(f"⚠️ 未找到 {args.symbol} 的 thesis 记录，请先 --init")
+            return 1
+        print(json.dumps(t, ensure_ascii=False, indent=2))
+        return 0
+    return 0
+
+
+def cmd_shock(args: argparse.Namespace) -> int:
+    from lib.events import calc_price_impact_interpolation
+
+    r = calc_price_impact_interpolation(
+        pre_price=args.pre_price,
+        post_price=args.post_price,
+        eps_base=args.eps_base,
+        eps_hit=args.eps_hit,
+        pe_normal=args.pe_normal,
+        pe_stressed=args.pe_stressed,
+    )
+    sym = args.symbol or "—"
+    print(f"# 价格冲击插值 — {sym}")
+    print(f"场景: {r['scenario']} · 插值比例: {r['ratio']:.2%} · p_range: {r['p_range']}")
+    print(f"V_真={r['v_true']} · V_假={r['v_false']}")
+    if r.get("warn"):
+        print(f"⚠️ {r['warn']}")
+    print(r["disclaimer"])
     return 0
 
 
@@ -1391,6 +1588,18 @@ def main() -> int:
         return cmd_analyze(args)
     elif args.command == "synthesize":
         return cmd_synthesize(args)
+    elif args.command == "rigor":
+        return cmd_rigor(args)
+    elif args.command == "audit":
+        return cmd_audit(args)
+    elif args.command == "check":
+        return cmd_check(args)
+    elif args.command == "portfolio":
+        return cmd_portfolio(args)
+    elif args.command == "thesis":
+        return cmd_thesis(args)
+    elif args.command == "shock":
+        return cmd_shock(args)
     return 1
 
 

@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.nums import safe_float
+from lib.financials import find_yoy_row
+from lib.nums import coalesce_field, safe_float
 from lib.technical import compute, rsi_series, sort_kline_asc
 
 
 def _fin(rows: list[dict]) -> list[dict]:
-    """财务行按报告期升序；与 sort_kline_asc 一致并增加 ann_date 稳定次序。"""
+    """财务行按报告期升序，ann_date 为次要排序键。"""
     return sorted(
         sort_kline_asc(rows),
         key=lambda r: (
@@ -23,11 +24,11 @@ def _fin(rows: list[dict]) -> list[dict]:
 
 
 def _ocf(row: dict) -> float | None:
-    return safe_float(row.get("n_cashflow_act") or row.get("ocf"))
+    return coalesce_field(row, "n_cashflow_act", "ocf")
 
 
 def _gross_margin(row: dict) -> float | None:
-    return safe_float(row.get("grossprofit_margin") or row.get("gross_margin"))
+    return coalesce_field(row, "grossprofit_margin", "gross_margin")
 
 
 def _signal(
@@ -94,7 +95,7 @@ def scan_financial_risks(
         for y in years:
             r = by_year[y]
             ocf = _ocf(r)
-            np_v = safe_float(r.get("net_profit"))
+            np_v = coalesce_field(r, "n_income_attr_p", "net_profit", "netprofit")
             if ocf is not None and np_v is not None and np_v > 0:
                 ratio = ocf / np_v
                 qual_parts.append(f"{y}: OCF/净利润={ratio:.2f}")
@@ -138,7 +139,7 @@ def scan_financial_risks(
                              triggered=inv_trig, severity="中", detail=inv_detail, auto=True))
 
     pd_v = safe_float(latest.get("profit_dedt"))
-    np_v = safe_float(latest.get("net_profit"))
+    np_v = coalesce_field(latest, "n_income_attr_p", "net_profit", "netprofit")
     if pd_v is not None and np_v is not None and np_v > 0:
         ratio = pd_v / np_v
         ded_trig = ratio < 0.7
@@ -423,4 +424,68 @@ def risk_report(
         "triggered_count": sum(1 for s in signals if s["triggered"]),
         "known_unknowns": known_unknowns,
         "coverage": {"auto": auto_count, "total": 17},
+    }
+
+
+def revenue_acceleration_flag(financials: list[dict]) -> dict[str, Any]:
+    """营收增速二阶变化软信号（F-4 财务关参考）。非买卖建议。"""
+    rows = _fin(financials or [])
+    if len(rows) < 3:
+        return {"triggered": False, "detail": "财务期数不足 3 期，无法计算同比营收加速度"}
+
+    yoy_pairs: list[tuple[dict, dict]] = []
+    for row in reversed(rows):
+        yoy = find_yoy_row(rows, row)
+        if yoy is None:
+            continue
+        yoy_pairs.append((row, yoy))
+        if len(yoy_pairs) == 2:
+            break
+
+    if len(yoy_pairs) < 2:
+        return {"triggered": False, "detail": "缺少最近两组可比同比配对，无法计算同比营收加速度"}
+
+    (latest, latest_yoy), (prev, prev_yoy) = yoy_pairs[0], yoy_pairs[1]
+    latest_rev = safe_float(latest.get("revenue"))
+    latest_yoy_rev = safe_float(latest_yoy.get("revenue"))
+    prev_rev = safe_float(prev.get("revenue"))
+    prev_yoy_rev = safe_float(prev_yoy.get("revenue"))
+    if None in (latest_rev, latest_yoy_rev, prev_rev, prev_yoy_rev):
+        return {"triggered": False, "detail": "同比配对期 revenue 字段缺失"}
+    if latest_yoy_rev == 0 or prev_yoy_rev == 0:
+        return {"triggered": False, "detail": "同比基期 revenue 为 0，无法计算同比营收加速度"}
+
+    g2 = (latest_rev - latest_yoy_rev) / abs(latest_yoy_rev) * 100
+    g1 = (prev_rev - prev_yoy_rev) / abs(prev_yoy_rev) * 100
+    accel = g2 - g1
+    triggered = abs(accel) >= 5.0
+    return {
+        "triggered": triggered,
+        "detail": (
+            "近两组同比营收增速变化 "
+            f"{accel:+.1f}pp（{prev.get('end_date')}={g1:.1f}%, {latest.get('end_date')}={g2:.1f}%）"
+        ),
+        "accel_pp": round(accel, 2),
+    }
+
+
+def ocf_np_divergence_flag(financials: list[dict]) -> dict[str, Any]:
+    """经营现金流 vs 净利润背离软信号（F-4 财务关参考）。"""
+    rows = _fin(financials or [])
+    if not rows:
+        return {"triggered": False, "detail": "无财务数据"}
+    latest = rows[-1]
+    ocf = _ocf(latest)
+    # coalesce_field preserves legal 0.0 (unlike `or` chains)
+    np_ = coalesce_field(latest, "n_income_attr_p", "net_profit", "netprofit")
+    if ocf is None or np_ is None:
+        return {"triggered": False, "detail": "OCF 或净利润字段缺失"}
+    if np_ == 0:
+        return {"triggered": False, "detail": "净利润为 0，跳过背离检测"}
+    ratio = ocf / np_
+    triggered = (np_ > 0 and ratio < 0.6) or (np_ < 0 and ocf > 0)  # 0.6 阈值与 scan_financial_risks L83 一致
+    return {
+        "triggered": triggered,
+        "detail": f"最新期 OCF/净利润 = {ratio:.2f}（OCF={ocf:.0f}, NP={np_:.0f}）",
+        "ratio": round(ratio, 3),
     }

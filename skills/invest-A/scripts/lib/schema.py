@@ -404,3 +404,20 @@ class ScoringResult:
     insufficient_data: list[str]
     sources: list[str]
     detail: dict[str, Any]
+
+
+def index_dimensions(collection: dict) -> dict[str, dict]:
+    """将 collection 中的 dimensions 列表索引为 {dimension_name: dim_dict}。
+
+    供 store.py / render.py 共用，避免两个模块各自实现 _index_dims。
+    """
+    if not isinstance(collection, dict):
+        return {}
+    dims = collection.get("dimensions")
+    if not isinstance(dims, list):
+        return {}
+    return {
+        d.get("dimension", ""): d
+        for d in dims
+        if isinstance(d, dict) and d.get("dimension")
+    }

@@ -1,6 +1,6 @@
 {
   "name": "invest-skills",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "A股多因子投研助手 — 九模块研究备忘录，带数据引用的 Markdown 报告。研究工具，非决策工具。",
   "settings": [
     {

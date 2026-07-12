@@ -225,13 +225,25 @@ def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceR
 
 # ---- 单个源查询函数 ----
 
-def _q_tushare_basic(symbol: str) -> dict | None:
-    """Tushare 基本信息来源。"""
+
+def _require_tushare():
+    """Tushare 鉴权 + 客户端惰性加载（复用 10 处 _q_tushare_* 的样板代码）。
+
+    Returns:
+        (config, TushareClient) — 包含配额计数与线程安全包装。
+    Raises:
+        RuntimeError: TUSHARE_TOKEN 未配置或不可用。
+    """
     from . import env as _env
     config = _env.get_config()
     if not _env.is_tushare_available(config):
         raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    return config, _tushare_client(config)
+
+
+def _q_tushare_basic(symbol: str) -> dict | None:
+    """Tushare 基本信息来源。"""
+    config, tc = _require_tushare()
     df = tc.query("stock_basic", ts_code=_ts_code(symbol),
                   fields="ts_code,name,area,industry,market,list_date")
     if df is not None and not df.empty:
@@ -337,11 +349,7 @@ def _merge_balancesheet_into_financials(
 
 
 def _q_tushare_financials(symbol: str) -> list[dict] | None:
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     lookback = _days_ago(730)
     end = _today()
@@ -407,11 +415,7 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
 
 def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
     """Tushare 十大股东（最新报告期）。"""
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("top10_floatholders", ts_code=_ts_code(symbol),
                   fields="ts_code,end_date,holder_name,hold_amount,hold_ratio",
                   period=_latest_quarter_end())
@@ -421,11 +425,7 @@ def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
 
 
 def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("daily", ts_code=_ts_code(symbol),
                   fields="trade_date,open,high,low,close,vol,amount",
                   **kwargs)
@@ -470,11 +470,7 @@ def _flow_amount_yuan(record: dict) -> float | None:
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
                   fields="ts_code,trade_date,net_mf_amount,buy_sm_vol,sell_sm_vol,net_mf_vol",
                   start_date=_days_ago(10), end_date=_today())
@@ -485,11 +481,7 @@ def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
 
 def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
     """个股沪/深股通成交（仅上榜日有数据）。net_amount 单位：元。"""
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("hsgt_top10", ts_code=_ts_code(symbol),
                   fields="ts_code,trade_date,net_amount",
                   start_date=_days_ago(30), end_date=_today())
@@ -973,14 +965,11 @@ def _q_tencent_quote(symbol: str) -> dict | None:
     """腾讯行情。"""
     _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
 
-    def _safe_float(val: str | None) -> float | None:
-        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分）。"""
+    def _parse_tencent_float(val: str | None) -> float | None:
+        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分），否则委托 safe_float。"""
         if val is None or val in _UNAVAILABLE_MARKERS:
             return None
-        try:
-            return float(val)
-        except (ValueError, TypeError):
-            return None
+        return safe_float(val)
 
     market = "sh" if symbol.startswith(("6", "9")) else "sz"
     with no_proxy_session() as sess:
@@ -988,15 +977,15 @@ def _q_tencent_quote(symbol: str) -> dict | None:
     if r.status_code == 200 and "~" in r.text:
         p = r.text.split("~")
         if len(p) > 45:
-            mv = _safe_float(p[45])
+            mv = _parse_tencent_float(p[45])
             return {
-                "price": _safe_float(p[3]),
-                "change_pct": _safe_float(p[32]),
-                "high": _safe_float(p[33]),
-                "low": _safe_float(p[34]),
-                "volume": _safe_float(p[6]),
-                "turnover_rate": _safe_float(p[38]),
-                "pe_ratio": _safe_float(p[39]),
+                "price": _parse_tencent_float(p[3]),
+                "change_pct": _parse_tencent_float(p[32]),
+                "high": _parse_tencent_float(p[33]),
+                "low": _parse_tencent_float(p[34]),
+                "volume": _parse_tencent_float(p[6]),
+                "turnover_rate": _parse_tencent_float(p[38]),
+                "pe_ratio": _parse_tencent_float(p[39]),
                 "total_mv": mv / 10000 if mv is not None else None,
             }
     return None
@@ -1220,11 +1209,7 @@ def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
     API: pro.daily_basic(ts_code, start_date, end_date, fields=...)
     配额: 每股 1 次调用。
     """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     df = tc.query("daily_basic", ts_code=_ts_code(symbol),
                   fields="trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv",
                   start_date=_days_ago(1825), end_date=_today())
@@ -1290,11 +1275,7 @@ def _q_tushare_report_rc(symbol: str) -> list[dict] | None:
     Returns:
         list[dict] | None — 研报记录列表，权限不足或失败返回 None
     """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     try:
         df = tc.query("report_rc", ts_code=ts,
@@ -1325,11 +1306,7 @@ def _q_tushare_forecast(symbol: str) -> list[dict] | None:
     Returns:
         list[dict] | None — 业绩预告记录，权限不足或无数据返回 None
     """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     try:
         df = tc.query("forecast", ts_code=ts,
@@ -1812,27 +1789,17 @@ def _holder_transaction_key(r: dict) -> tuple:
 
 
 def _norm_date(raw: str) -> str:
-    """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。"""
-    import re
-    raw = str(raw).strip()
-    # 已为 YYYYMMDD
-    if re.match(r'^\d{8}$', raw):
-        return raw
-    # YYYY-MM-DD 或 YYYY.MM.DD
-    m = re.search(r'(\d{4})[-./](\d{1,2})[-./](\d{1,2})', raw)
-    if m:
-        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
-    # 区间格式 "2015.07.23-2015.07.23" → search 已取首段
-    return raw[:8] if len(raw) >= 8 and raw[:8].isdigit() else raw
+    """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。
+
+    委托 lib.financials.normalize_end_date 处理。
+    """
+    from lib.financials import normalize_end_date
+    return normalize_end_date(raw)
 
 
 def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
     """Tushare stk_holdertrade — 股东增减持（主源）。"""
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    tc = _tushare_client(config)
+    config, tc = _require_tushare()
     ts = _ts_code(symbol)
     df = tc.query(
         "stk_holdertrade", ts_code=ts,
@@ -2274,7 +2241,8 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
-                with_chain: bool = False) -> dict[str, Any]:
+                with_chain: bool = False,
+                with_news_pack: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
@@ -2286,6 +2254,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         deep: 深度模式，kline 扩大到 730 自然日
         with_macro: 采集中国宏观指标（PMI/CPI/PPI/LPR）
         with_chain: 采集产业链上下文（复用已采集的 basic_info）
+        with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
     """
     if dims is None:
         dims = list(_DEFAULT_DIMS)
@@ -2473,7 +2442,55 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         logger.warning("manifest generation failed (non-fatal): %s", e)
         meta["manifest"] = None
 
+    if with_news_pack:
+        try:
+            attach_news_pack(result, symbol)
+        except Exception as exc:
+            logger.warning("attach_news_pack failed for %s: %s", symbol, exc)
+            result["news"] = {
+                "cards": [],
+                "query_pack": [],
+                "attempted_sources": {"error": str(exc)},
+            }
+
     return result
+
+
+def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict[str, Any]:
+    """v0.1.9: attach news cards + query pack to collection."""
+    from .news_scanner import collect_news
+    from .json_util import dumps_json
+
+    name = ""
+    basic_dim = next(
+        (d for d in result.get("dimensions", []) if d.get("dimension") == "basic_info"),
+        None,
+    )
+    if basic_dim and isinstance(basic_dim.get("data"), dict):
+        name = basic_dim["data"].get("name") or basic_dim["data"].get("股票简称") or ""
+
+    news = collect_news(symbol, name=name, days=days)
+    result["news"] = news
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    pack_path = env.STORE_DIR / f"news_query_pack_{symbol}_{ts}.json"
+    pack_path.parent.mkdir(parents=True, exist_ok=True)
+    pack_path.write_text(
+        dumps_json({"symbol": symbol, "name": name, "query_pack": news.get("query_pack", [])}),
+        encoding="utf-8",
+    )
+    result.setdefault("_meta", {})["news_query_pack_path"] = str(pack_path)
+    return news
+
+
+def collect_news_dim(symbol: str, days: int = 7) -> dict[str, Any]:
+    """Standalone news collection for CLI/testing."""
+    basic = collect_basic_info(symbol)
+    name = ""
+    if isinstance(basic.get("data"), dict):
+        name = basic["data"].get("name") or basic["data"].get("股票简称") or ""
+    from .news_scanner import collect_news
+    return collect_news(symbol, name=name, days=days)
 
 
 # ---- 市场结构采集（v0.1.3 Phase 1） ----
@@ -2641,8 +2658,8 @@ def _akshare_closes_from_hist_sw(index_code: str, *, days: int = 70) -> list[flo
     return [float(v) for v in tail[col].tolist() if v is not None]
 
 
-def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
-    """沪深300 日线收盘价（akshare / 东方财富）。"""
+def _akshare_hs300_dated_closes(*, days: int = 70) -> list[tuple[str, float]]:
+    """沪深300 日线 (trade_date YYYYMMDD, close) 升序。"""
     import akshare as ak
 
     sd = _days_ago(days + 10)
@@ -2658,7 +2675,22 @@ def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
     col = "收盘" if "收盘" in df.columns else "close"
     date_col = "日期" if "日期" in df.columns else "date"
     sorted_df = df.sort_values(date_col)
-    return [float(v) for v in sorted_df[col].tolist() if v is not None]
+    out: list[tuple[str, float]] = []
+    for _, row in sorted_df.iterrows():
+        raw = str(row.get(date_col) or "")
+        td = raw.replace("-", "").replace("/", "")[:8]
+        v = row.get(col)
+        if len(td) == 8 and td.isdigit() and v is not None:
+            try:
+                out.append((td, float(v)))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _akshare_hs300_closes(*, days: int = 70) -> list[float]:
+    """沪深300 日线收盘价（akshare / 东方财富）。"""
+    return [c for _, c in _akshare_hs300_dated_closes(days=days)]
 
 
 def _ms_build_sw_index_result(

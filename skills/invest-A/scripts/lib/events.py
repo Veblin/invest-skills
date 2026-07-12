@@ -28,28 +28,67 @@ PLACEHOLDER_NOTE_INDUSTRY = "⏭️ 待补来源：暂无稳定 API"
 PLACEHOLDER_NOTE_MARKET = "⏭️ 待补来源：暂无稳定 API"
 
 
-# ── 分类关键词映射 ──
+# ── 事件类型元数据（从 event_type_taxonomy.yaml 加载，共享 analysis_templates 的缓存）──
 
-_CLASSIFICATION_RULES: list[tuple[re.Pattern, str, str, str]] = [
-    # (pattern, event_type, impact_dimension, duration)
-    (re.compile(r"回购"), "buyback", "估值", "中长期变量"),
-    (re.compile(r"股权激励|限制性股票|股票期权"), "equity_incentive", "治理", "中长期变量"),
-    (re.compile(r"增发|非公开发行|募集资金"), "private_placement", "现金流", "中长期变量"),
-    (re.compile(r"并购|重组|收购|合并|资产注入"), "mna", "收入", "中长期变量"),
-    (re.compile(r"分红|派息|送股|转增|利润分配"), "dividend", "估值", "短期扰动"),
-    (re.compile(r"减持"), "holder_decrease", "估值", "短期扰动"),
-    (re.compile(r"增持"), "holder_increase", "估值", "短期扰动"),
-    (re.compile(r"合同|中标"), "major_contract", "收入", "中长期变量"),
-    (re.compile(r"诉讼|仲裁"), "litigation", "治理", "短期扰动"),
-    (re.compile(r"(?<![A-Za-z])ST(?![A-Za-z])|退市|风险警示"), "st_risk", "治理", "结构性质变"),
-    (re.compile(r"年报|年度报告|annual report", re.IGNORECASE),
-     "earnings_report", "收入", "短期扰动"),
-    (re.compile(r"半年报|半年度报告|semi-annual", re.IGNORECASE),
-     "earnings_report", "收入", "短期扰动"),
-    (re.compile(r"季报|季度报告|quarterly", re.IGNORECASE),
-     "earnings_report", "收入", "短期扰动"),
-    (re.compile(r"业绩预告|业绩修正|盈利预测"), "earnings_guidance", "收入", "短期扰动"),
-    (re.compile(r"业绩快报"), "earnings_preview", "收入", "短期扰动"),
+from .analysis_templates import load_event_taxonomy
+
+
+_EVENT_META_DEFAULTS: dict[str, dict[str, str]] = {
+    "earnings_report": {"impact_dimension": "收入", "default_duration_hint": "短期扰动"},
+    "earnings_guidance": {"impact_dimension": "收入", "default_duration_hint": "短期扰动"},
+    "earnings_preview": {"impact_dimension": "收入", "default_duration_hint": "短期扰动"},
+    "buyback": {"impact_dimension": "估值", "default_duration_hint": "中长期变量"},
+    "equity_incentive": {"impact_dimension": "治理", "default_duration_hint": "中长期变量"},
+    "private_placement": {"impact_dimension": "现金流", "default_duration_hint": "中长期变量"},
+    "mna": {"impact_dimension": "收入", "default_duration_hint": "中长期变量"},
+    "dividend": {"impact_dimension": "估值", "default_duration_hint": "短期扰动"},
+    "holder_decrease": {"impact_dimension": "估值", "default_duration_hint": "短期扰动"},
+    "holder_increase": {"impact_dimension": "估值", "default_duration_hint": "短期扰动"},
+    "major_contract": {"impact_dimension": "收入", "default_duration_hint": "中长期变量"},
+    "litigation": {"impact_dimension": "治理", "default_duration_hint": "短期扰动"},
+    "st_risk": {"impact_dimension": "治理", "default_duration_hint": "结构性质变"},
+    "other": {"impact_dimension": "治理", "default_duration_hint": "短期扰动"},
+}
+
+
+def _event_meta(event_type: str) -> dict:
+    """从 YAML 加载的事件类型元数据（label, impact_dimension, default_duration_hint）。"""
+    taxonomy = load_event_taxonomy()
+    event_types = taxonomy.get("event_types", {})
+    if event_type in event_types:
+        return event_types[event_type]
+    return _EVENT_META_DEFAULTS.get(event_type, _EVENT_META_DEFAULTS["other"])
+
+
+def _event_dimension(event_type: str) -> str:
+    """事件类型 → impact_dimension（来源: event_type_taxonomy.yaml）。"""
+    return _event_meta(event_type).get("impact_dimension", "治理")
+
+
+def _event_duration(event_type: str) -> str:
+    """事件类型 → default_duration_hint（来源: event_type_taxonomy.yaml）。"""
+    return _event_meta(event_type).get("default_duration_hint", "短期扰动")
+
+
+# ── 分类关键词映射（正则规则在代码中，元数据字段委托 YAML 加载）──
+
+_CLASSIFICATION_RULES: list[tuple[re.Pattern, str]] = [
+    # (pattern, event_type)  — impact_dimension/duration 委托 _event_dimension/_event_duration
+    (re.compile(r"回购"), "buyback"),
+    (re.compile(r"股权激励|限制性股票|股票期权"), "equity_incentive"),
+    (re.compile(r"增发|非公开发行|募集资金"), "private_placement"),
+    (re.compile(r"并购|重组|收购|合并|资产注入"), "mna"),
+    (re.compile(r"分红|派息|送股|转增|利润分配"), "dividend"),
+    (re.compile(r"减持"), "holder_decrease"),
+    (re.compile(r"增持"), "holder_increase"),
+    (re.compile(r"合同|中标"), "major_contract"),
+    (re.compile(r"诉讼|仲裁"), "litigation"),
+    (re.compile(r"(?<![A-Za-z])ST(?![A-Za-z])|退市|风险警示"), "st_risk"),
+    (re.compile(r"年报|年度报告|annual report", re.IGNORECASE), "earnings_report"),
+    (re.compile(r"半年报|半年度报告|semi-annual", re.IGNORECASE), "earnings_report"),
+    (re.compile(r"季报|季度报告|quarterly", re.IGNORECASE), "earnings_report"),
+    (re.compile(r"业绩预告|业绩修正|盈利预测"), "earnings_guidance"),
+    (re.compile(r"业绩快报"), "earnings_preview"),
 ]
 
 # 逻辑关系映射（基于事件类型 + impact_dimension 的默认值）
@@ -235,9 +274,9 @@ def _fetch_dividend_events(symbol: str) -> list[dict]:
                     "date": date_str,
                     "type": "dividend",
                     "title": title,
-                    "impact_dimension": "估值",
-                    "duration": "短期扰动",
-                    "logic_relation": "强化",
+                    "impact_dimension": _event_dimension("dividend"),
+                    "duration": _event_duration("dividend"),
+                    "logic_relation": _get_logic_relation("dividend"),
                     "source": "akshare stock_history_dividend_detail",
                     "url": "",
                 })
@@ -263,9 +302,9 @@ def _fetch_dividend_events(symbol: str) -> list[dict]:
                     "date": date_str,
                     "type": "dividend",
                     "title": title,
-                    "impact_dimension": "估值",
-                    "duration": "短期扰动",
-                    "logic_relation": "强化",
+                    "impact_dimension": _event_dimension("dividend"),
+                    "duration": _event_duration("dividend"),
+                    "logic_relation": _get_logic_relation("dividend"),
                     "source": "akshare stock_dividend_cninfo",
                     "url": "",
                 })
@@ -317,8 +356,8 @@ def _fetch_shareholder_events(symbol: str) -> list[dict]:
                 "date": date_str,
                 "type": event_type,
                 "title": title,
-                "impact_dimension": "估值",
-                "duration": "短期扰动",
+                "impact_dimension": _event_dimension(event_type),
+                "duration": _event_duration(event_type),
                 "logic_relation": _get_logic_relation(event_type),
                 "source": "akshare stock_shareholder_change_ths",
                 "url": "",
@@ -344,18 +383,18 @@ def _classify_event(record: dict) -> dict:
     title = str(record.get("title", ""))
     raw_type = str(record.get("raw_type", ""))
 
-    for pattern, etype, impact, duration in _CLASSIFICATION_RULES:
+    for pattern, etype in _CLASSIFICATION_RULES:
         if pattern.search(title) or pattern.search(raw_type):
             return {
                 "event_type": etype,
-                "impact_dimension": impact,
-                "duration": duration,
+                "impact_dimension": _event_dimension(etype),
+                "duration": _event_duration(etype),
             }
 
     return {
         "event_type": "other",
-        "impact_dimension": "治理",
-        "duration": "短期扰动",
+        "impact_dimension": _event_dimension("other"),
+        "duration": _event_duration("other"),
     }
 
 
@@ -541,4 +580,63 @@ def _build_summary(events: list[dict], days: int) -> dict:
         "window_days": days,
         "latest_date": latest_date,
         "top_types": [{"type": t, "count": c} for t, c in top_types[:5]],
+    }
+
+
+def calc_price_impact_interpolation(
+    pre_price: float,
+    post_price: float,
+    eps_base: float,
+    eps_hit: float,
+    pe_normal: float,
+    pe_stressed: float,
+    scenario: str | None = None,
+) -> dict:
+    """Linear interpolation ratio (not risk-neutral probability).
+
+    ratio = (P_current - V_false) / (V_true - V_false), clamped [0, 1]
+  """
+    v_true = eps_hit * pe_normal
+    v_false = eps_base * pe_stressed
+    spread = v_true - v_false
+
+    if scenario is None:
+        scenario = "bearish" if v_true < v_false else "bullish"
+
+    warn = None
+    if abs(spread) < 0.01:
+        ratio = 0.5
+        warn = "|V_真 - V_假| < 0.01，ratio 默认 0.5"
+    else:
+        ratio = (post_price - v_false) / spread
+        if scenario == "bearish" and post_price >= pre_price:
+            ratio = 0.0
+        elif scenario == "bullish" and post_price <= pre_price:
+            ratio = 0.0
+        ratio = max(0.0, min(1.0, ratio))
+
+    def _ratio_at_pe(pe: float) -> float:
+        vf = eps_base * pe
+        if abs(v_true - vf) < 0.01:
+            return 0.5
+        r = (post_price - vf) / (v_true - vf)
+        return max(0.0, min(1.0, r))
+
+    pe_lo = max(pe_stressed - 2, 0.1)
+    pe_hi = pe_stressed + 2
+    p_range = [round(_ratio_at_pe(pe_lo), 4), round(_ratio_at_pe(pe_hi), 4)]
+
+    return {
+        "ratio": round(ratio, 4),
+        "p_range": p_range,
+        "scenario": scenario,
+        "v_true": round(v_true, 2),
+        "v_false": round(v_false, 2),
+        "pre_price": pre_price,
+        "post_price": post_price,
+        "warn": warn,
+        "disclaimer": (
+            "价格冲击插值比例：反映当前价格在两个假设估值之间的线性位置，"
+            "不具备风险中性理论基础，不应用于概率判断。仅供参考，不构成投资建议。"
+        ),
     }

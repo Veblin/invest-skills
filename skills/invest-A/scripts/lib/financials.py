@@ -1,26 +1,70 @@
-"""Financial row helpers shared across collector, store, and risk_scanner."""
+"""Financial row helpers shared across collector, store, risk_scanner, and scoring."""
 
 from __future__ import annotations
+
+from datetime import date
+from typing import Any
 
 from lib.nums import safe_float
 
 
 def normalize_end_date(ed: str) -> str:
-    """Normalize report period to YYYYMMDD (accepts YYYY-MM-DD or YYYYMMDD)."""
-    s = str(ed).strip()
-    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-        return s[:4] + s[5:7] + s[8:10]
-    if len(s) >= 8 and s[:4].isdigit():
-        return s[:8]
+    """Normalize report period to YYYYMMDD.
+
+    Accepts: YYYYMMDD, YYYY-MM-DD, YYYY.MM.DD, interval formats (e.g. "2015.07.23-2015.07.23").
+    """
+    import re
+    raw = str(ed).strip()
+    # Already YYYYMMDD
+    if re.match(r'^\d{8}$', raw):
+        return raw
+    # YYYY-MM-DD or YYYY.MM.DD
+    m = re.search(r'(\d{4})[-./](\d{1,2})[-./](\d{1,2})', raw)
+    if m:
+        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    # Fallback: first 8 digits
+    if len(raw) >= 8 and raw[:8].isdigit():
+        return raw[:8]
+    # Return empty string on total failure — callers use truthiness checks
+    # (e.g. ``if norm_date:``) to skip unparseable records.
     return ""
+
+
+def parse_end_date(raw: Any) -> date | None:
+    """Parse a date string (YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD) to a ``date`` object."""
+    if raw is None:
+        return None
+    s = normalize_end_date(str(raw))
+    if len(s) < 8 or not s[:8].isdigit():
+        return None
+    try:
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    except ValueError:
+        return None
 
 
 def prior_year_end_date(end_date: str) -> str:
     """Report period → same calendar date one year earlier (YYYYMMDD)."""
     norm = normalize_end_date(end_date)
-    if len(norm) < 8:
+    if len(norm) < 8 or not norm[:8].isdigit():
         return ""
     return f"{int(norm[:4]) - 1}{norm[4:8]}"
+
+
+def find_yoy_row(rows: list[dict], latest: dict) -> dict | None:
+    """Locate the record with same calendar month-day, one year earlier.
+
+    Compares normalized ``end_date`` values so ``2023-12-31`` matches ``20231231``.
+    """
+    yoy_end = prior_year_end_date(str(latest.get("end_date", "")))
+    if not yoy_end:
+        return None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if normalize_end_date(str(r.get("end_date", ""))) == yoy_end:
+            return r
+    return None
 
 
 def gross_margin_annual_series(fin_rows: list[dict]) -> list[tuple[str, float]]:

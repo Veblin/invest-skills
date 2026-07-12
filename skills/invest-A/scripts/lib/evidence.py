@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .schema import _CV_ICONS
+
 
 @dataclass
 class EvidenceRow:
@@ -16,7 +18,7 @@ class EvidenceRow:
     value_summary: str
     confidence: str         # "high" | "medium" | "low"
     source_count: int
-    cross_validation: str   # "✅ 一致" | "⚠️ 差异 X%" | "— 单源"
+    cross_validation: str   # "🟢 一致" | "🟡 差异 X%" | "— 单源"
 
 
 def _format_value(data) -> str:
@@ -63,9 +65,11 @@ def _cv_label(meta: dict, all_src: list) -> str:
     cv_status = meta.get("cross_validation")
     cv_detail = meta.get("cross_validation_detail") or ""
     if cv_status == "convergence":
-        return f"✅ 一致" + (f" ({cv_detail})" if cv_detail else "")
+        icon = _CV_ICONS.get(cv_status, "🟢")
+        return f"{icon} 一致" + (f" ({cv_detail})" if cv_detail else "")
     if cv_status:
-        return f"⚠️ {cv_detail}" if cv_detail else "⚠️ 差异"
+        icon = _CV_ICONS.get(cv_status, "🔴")
+        return f"{icon} {cv_detail}" if cv_detail else f"{icon} 差异"
     return "— 单源" if len(all_src) <= 1 else "—"
 
 

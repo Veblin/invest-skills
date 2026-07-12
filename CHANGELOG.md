@@ -2,7 +2,47 @@
 
 ## Unreleased
 
-- CI: `test_extract_release_notes.py` 版本号改为动态读取 `pyproject.toml`，不再硬编码
+## v0.1.9 (2026-07-10)
+
+v0.1.9 交付质量门工具链、新闻三层架构、5 个新 CLI、渲染扩展与技术指标 P0–P1。
+
+### 质量门（Phase 2）
+
+- **`lib/financial_rigor.py`**：`verify-market-cap` / `verify-valuation` / `cross-validate` / `calc`
+- **`lib/report_audit.py`**：`audit --extract` / `--verdict`
+- **`lib/render_extras.py`**：>5% 跨源差异警示（`--strict-rigor` 严格模式）
+
+### 新闻采集（Phase 3）
+
+- **`lib/news_scanner.py`**：公告 + 声明式查询包 + 可选 Tavily
+- `collect --with-news-pack`；`env.py` 加载 `TAVILY_API_KEY`
+- **`events.calc_price_impact_interpolation`** + `shock` CLI
+
+### CLI（Phase 4）
+
+- `rigor` / `audit` / `check` / `portfolio` / `thesis`
+- `lib/quality_check.py`：7 指标 + 3 豁免
+- `lib/portfolio_review.py`：行业集中度 / 相关性 / 压力测试
+- `store.py`：`thesis` 表
+
+### 渲染与文档（Phase 5）
+
+- AI 偏见声明 / 逆向思考 / A+H 检测标注 / 外生冲击段
+- SKILL.md：SOP-DEEP、earnings-review、news-pulse
+- source-guide：新闻三层架构
+
+### 技术指标（Phase 6）
+
+- Ichimoku / 波动率锥 / RS / 滚动 Beta（默认基准 000300.SH）
+
+### 测试
+
+- `test_financial_rigor` / `test_news_scanner` / `test_report_audit` / `test_quality_check` / `test_technical_v019`
+
+### Phase 1（早期交付 2026-07-07）
+
+- SKILL 拆分为核心 + references；`plan --intent` 扩展
+- `participant_scan.py`；财务软信号 `revenue_acceleration_flag` / `ocf_np_divergence_flag`
 
 ## v0.1.8 (2026-07-07)
 

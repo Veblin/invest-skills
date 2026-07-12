@@ -58,7 +58,7 @@ def get_config() -> dict[str, Any]:
     merged = {**global_env, **project_env}
 
     config: dict[str, Any] = {}
-    for key in ["TUSHARE_TOKEN", "FRED_API_KEY"]:
+    for key in ["TUSHARE_TOKEN", "FRED_API_KEY", "TAVILY_API_KEY"]:
         config[key] = os.environ.get(key) or merged.get(key)
 
     config["_CONFIG_SOURCE"] = (
@@ -77,6 +77,90 @@ def is_tushare_available(config: dict[str, Any]) -> bool:
 def is_fred_available(config: dict[str, Any]) -> bool:
     key = config.get("FRED_API_KEY", "")
     return bool(key and re.match(r'^[a-zA-Z0-9]{32}$', key))
+
+
+# ---- Token 缺失提示 ----
+
+_MISSING_TOKEN_INFO = {
+    "TUSHARE_TOKEN": {
+        "env_key": "TUSHARE_TOKEN",
+        "description": "Tushare Token",
+        "how_to_get": "前往 https://tushare.pro 注册并获取 API Token（需积分 ≥120）",
+        "affected_features": [
+            "PE/PB 历史分位与估值位置分析",
+            "十大股东明细",
+            "北向资金流向",
+            "机构研报数据",
+            "行业成分股对比",
+            "基本面数据（Fina Indicator）",
+        ],
+    },
+    "FRED_API_KEY": {
+        "env_key": "FRED_API_KEY",
+        "description": "FRED API Key",
+        "how_to_get": "前往 https://fred.stlouisfed.org/docs/api/api_key.html 免费申请",
+        "affected_features": [
+            "美国 10 年期国债收益率",
+            "美元/人民币汇率",
+            "联邦基金利率",
+            "美国 CPI / PPI / GDP",
+        ],
+    },
+    "TAVILY_API_KEY": {
+        "env_key": "TAVILY_API_KEY",
+        "description": "Tavily API Key",
+        "how_to_get": "前往 https://tavily.com 注册并获取 API Key",
+        "affected_features": [
+            "新闻包 Layer 3（Tavily 联网搜索）",
+            "自动新闻摘要与事件驱动分析",
+        ],
+    },
+}
+
+
+def get_missing_tokens(config: dict[str, Any] | None = None) -> list[dict]:
+    """检查缺失的可选 API Token，返回结构化信息列表。"""
+    if config is None:
+        config = get_config()
+    missing: list[dict] = []
+    for token_key, info in _MISSING_TOKEN_INFO.items():
+        if not config.get(token_key):
+            missing.append(dict(info))
+    return missing
+
+
+def format_missing_token_warnings(config: dict[str, Any] | None = None) -> str | None:
+    """生成缺失 Token 的提示文本。全部已配置则返回 None。"""
+    missing = get_missing_tokens(config)
+    if not missing:
+        return None
+    lines = ["⚠️  以下 API Token 未配置，相关功能将降级或跳过：", ""]
+    for m in missing:
+        lines.append(f"  🔑 {m['description']}（{m['env_key']}）")
+        lines.append(f"     📋 获取方式: {m['how_to_get']}")
+        lines.append(f"     📉 受影响功能:")
+        for feat in m["affected_features"]:
+            lines.append(f"        - {feat}")
+        lines.append("")
+    lines.append(
+        "  💡 配置方式: 将 Token 写入项目 .env 文件或全局 ~/.config/investment/.env"
+    )
+    return "\n".join(lines)
+
+
+def print_missing_token_warnings(config: dict[str, Any] | None = None) -> None:
+    """打印缺失 Token 警告到 stderr（全部已配置则不输出）。"""
+    import sys
+    msg = format_missing_token_warnings(config)
+    if msg:
+        print(msg, file=sys.stderr)
+
+
+def is_tavily_available(config: dict[str, Any] | None = None) -> bool:
+    if config is None:
+        config = get_config()
+    key = config.get("TAVILY_API_KEY", "")
+    return bool(key and len(str(key).strip()) >= 8)
 
 
 def is_akshare_available() -> bool:

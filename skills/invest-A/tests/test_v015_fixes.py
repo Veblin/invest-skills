@@ -265,13 +265,23 @@ class TestCollectAllPartialCounts:
 
 
 class TestPlannerPresets:
-    """R-05: 四种 intent preset 均生成有效 Plan，模块 ID 对应 collector COLLECTORS。"""
+    """R-05: intent preset 均生成有效 Plan，模块 ID 对应 collector COLLECTORS。"""
+
+    @pytest.fixture(autouse=True)
+    def _collector_keys(self):
+        from lib.collector import COLLECTORS
+        self.collector_keys = set(COLLECTORS.keys())
+
+    def _assert_dims_in_collectors(self, dims: list[str]) -> None:
+        for d in dims:
+            assert d in self.collector_keys, f"{d} not in COLLECTORS"
 
     def test_deep_analysis_has_valuation_financials_kline(self):
         from lib.planner import generate_plan
 
         plan = generate_plan("600176", "deep_analysis")
         dims = plan.dimension_list()
+        self._assert_dims_in_collectors(dims)
         assert "quote" in dims
         assert "valuation" in dims
         assert "financials" in dims
@@ -319,6 +329,45 @@ class TestPlannerPresets:
         assert dims[0] == "quote"
         # research is priority=3, should be last
         assert dims[-1] == "research"
+
+    def test_sentiment_deep_intent(self):
+        from lib.planner import generate_plan
+
+        plan = generate_plan("600176", "sentiment_deep")
+        dims = plan.dimension_list()
+        self._assert_dims_in_collectors(dims)
+        assert "research" in dims
+        assert "industry" in dims
+        assert "northbound" in dims
+        assert any("sentiment" in n.lower() for n in plan.notes)
+
+    def test_financials_deep_intent(self):
+        from lib.planner import generate_plan
+
+        plan = generate_plan("600176", "financials_deep")
+        dims = plan.dimension_list()
+        self._assert_dims_in_collectors(dims)
+        assert "financials" in dims
+        assert "valuation" in dims
+        assert "holder_changes" in dims
+
+    def test_game_theory_intent(self):
+        from lib.planner import generate_plan
+
+        plan = generate_plan("600176", "game_theory")
+        dims = plan.dimension_list()
+        self._assert_dims_in_collectors(dims)
+        assert "shareholders" in dims
+        assert "northbound" in dims
+        assert "holder_changes" in dims
+        assert any("game-theory" in n for n in plan.notes)
+
+    def test_unknown_intent_lists_available(self):
+        from lib.planner import generate_plan, INTENT_PRESETS
+
+        with pytest.raises(ValueError, match="sentiment_deep"):
+            generate_plan("600176", "bogus_intent")
+        assert "game_theory" in INTENT_PRESETS
 
 
 # ---- R-10: brief/full 双模式 ----

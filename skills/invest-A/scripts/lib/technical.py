@@ -656,7 +656,202 @@ def compute(rows: list[dict]) -> dict[str, Any]:
         "drawdown_60d": dd,
     }
 
+    # --- v0.1.9 extensions ---
+    ich = ichimoku_summary(highs, lows, closes)
+    if ich:
+        result["ichimoku"] = ich
+    cone = volatility_cone(closes)
+    if cone:
+        result["volatility_cone"] = cone
+
     return result
+
+
+# ---- v0.1.9: Ichimoku / Volatility Cone / RS / Beta ----
+
+def _ichimoku(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    tenkan_n: int = 9,
+    kijun_n: int = 26,
+    senkou_b_n: int = 52,
+    displacement: int = 26,
+) -> dict[str, list[float | None]]:
+    """Ichimoku five lines."""
+    length = len(closes)
+    tenkan: list[float | None] = [None] * length
+    kijun: list[float | None] = [None] * length
+    senkou_a: list[float | None] = [None] * length
+    senkou_b: list[float | None] = [None] * length
+    chikou: list[float | None] = [None] * length
+
+    for i in range(length):
+        if i >= tenkan_n - 1:
+            h = max(highs[i - tenkan_n + 1:i + 1])
+            l = min(lows[i - tenkan_n + 1:i + 1])
+            tenkan[i] = (h + l) / 2.0
+        if i >= kijun_n - 1:
+            h = max(highs[i - kijun_n + 1:i + 1])
+            l = min(lows[i - kijun_n + 1:i + 1])
+            kijun[i] = (h + l) / 2.0
+        if i >= displacement:
+            chikou[i - displacement] = closes[i]
+
+    for i in range(length):
+        if tenkan[i] is not None and kijun[i] is not None:
+            a_val = (tenkan[i] + kijun[i]) / 2.0
+            if i + displacement < length:
+                senkou_a[i + displacement] = a_val
+        if i >= senkou_b_n - 1:
+            h = max(highs[i - senkou_b_n + 1:i + 1])
+            l = min(lows[i - senkou_b_n + 1:i + 1])
+            b_val = (h + l) / 2.0
+            if i + displacement < length:
+                senkou_b[i + displacement] = b_val
+
+    return {
+        "tenkan": tenkan,
+        "kijun": kijun,
+        "senkou_a": senkou_a,
+        "senkou_b": senkou_b,
+        "chikou": chikou,
+    }
+
+
+def ichimoku_summary(highs: list[float], lows: list[float], closes: list[float]) -> dict[str, Any]:
+    """Ichimoku latest values for rendering."""
+    if len(closes) < 52:
+        return {"error": _require_len(
+            [{"close": c} for c in closes], 52, "Ichimoku",
+        )}
+    lines = _ichimoku(highs, lows, closes)
+    tenkan = _last_valid(lines["tenkan"])
+    kijun = _last_valid(lines["kijun"])
+    sa = _last_valid(lines["senkou_a"])
+    sb = _last_valid(lines["senkou_b"])
+    price = closes[-1]
+    cloud_top = max(sa or 0, sb or 0) if sa is not None and sb is not None else None
+    cloud_bot = min(sa or 0, sb or 0) if sa is not None and sb is not None else None
+    pos = "—"
+    if cloud_top is not None and cloud_bot is not None:
+        if price > cloud_top:
+            pos = "云带上方"
+        elif price < cloud_bot:
+            pos = "云带下方"
+        else:
+            pos = "云带内部"
+    return {
+        "tenkan_latest": round(tenkan, 2) if tenkan else None,
+        "kijun_latest": round(kijun, 2) if kijun else None,
+        "senkou_a_latest": round(sa, 2) if sa else None,
+        "senkou_b_latest": round(sb, 2) if sb else None,
+        "price_vs_cloud": pos,
+    }
+
+
+def volatility_cone(
+    closes: list[float],
+    window: int = 252,
+    windows: tuple[int, ...] = (20, 60, 120, 252),
+) -> dict[str, Any]:
+    """Historical volatility cone (annualized HV %)."""
+    if len(closes) < 30:
+        return {"error": "数据不足，波动率锥不可得"}
+
+    def _hv(series: list[float]) -> float | None:
+        if len(series) < 2:
+            return None
+        rets = []
+        for i in range(1, len(series)):
+            if series[i - 1] > 0 and series[i] > 0:
+                rets.append(math.log(series[i] / series[i - 1]))
+        if len(rets) < 2:
+            return None
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+        return math.sqrt(var) * math.sqrt(252) * 100
+
+    hvs: list[float] = []
+    for end in range(window, len(closes) + 1):
+        hv = _hv(closes[end - window:end])
+        if hv is not None:
+            hvs.append(hv)
+
+    current = _hv(closes[-min(window, len(closes)):])
+    if current is None:
+        return {"error": "当前 HV 不可得"}
+
+    percentile = None
+    if hvs:
+        below = sum(1 for h in hvs if h <= current)
+        percentile = below / len(hvs) * 100
+
+    by_window: dict[str, float | None] = {}
+    for w in windows:
+        by_window[str(w)] = _hv(closes[-w:]) if len(closes) >= w else None
+
+    return {
+        "current_hv": round(current, 2),
+        "percentile": round(percentile, 1) if percentile is not None else None,
+        "window": window,
+        "by_window": by_window,
+    }
+
+
+def relative_strength(
+    stock_closes: list[float],
+    benchmark_closes: list[float],
+) -> dict[str, Any]:
+    """RS_t = (stock/benchmark) × 100, base period = first aligned point."""
+    n = min(len(stock_closes), len(benchmark_closes))
+    if n < 2:
+        return {"error": "数据不足"}
+    s0, b0 = stock_closes[-n], benchmark_closes[-n]
+    if not s0 or not b0:
+        return {"error": "基准或股价为零"}
+    rs_series = [s / b * 100 * (b0 / s0) for s, b in zip(stock_closes[-n:], benchmark_closes[-n:])]
+    return {
+        "rs_latest": round(rs_series[-1], 2),
+        "rs_start": round(rs_series[0], 2),
+        "n": n,
+    }
+
+
+def rolling_beta(
+    stock_closes: list[float],
+    benchmark_closes: list[float],
+    windows: list[int] | None = None,
+) -> dict[str, Any]:
+    """Rolling beta via valuation.calc_beta on return series."""
+    from .valuation import calc_beta
+
+    if windows is None:
+        windows = [60, 120, 252]
+
+    n = min(len(stock_closes), len(benchmark_closes))
+    if n < 12:
+        return {"error": "数据不足", "windows": {}}
+
+    def _returns(closes: list[float]) -> list[float]:
+        out: list[float] = []
+        for i in range(1, len(closes)):
+            if closes[i - 1] > 0:
+                out.append(closes[i] / closes[i - 1] - 1)
+        return out
+
+    stock_rets = _returns(stock_closes[-n:])
+    bench_rets = _returns(benchmark_closes[-n:])
+
+    result_windows: dict[str, dict] = {}
+    for w in windows:
+        if len(stock_rets) < w or len(bench_rets) < w:
+            result_windows[str(w)] = {"beta": None, "error": f"需要 ≥{w} 日"}
+            continue
+        info = calc_beta(stock_rets[-w:], bench_rets[-w:])
+        result_windows[str(w)] = info
+
+    return {"windows": result_windows, "benchmark": "000300.SH"}
 
 
 def _last_valid(seq: list[float | None]) -> float | None:

@@ -13,7 +13,9 @@
 | **akshare** | `stock_financial_abstract_ths` / `stock_hsgt_individual_em` / `stock_zh_a_hist` / `stock_individual_info_em` | ★★ | 否 | 多源验证用。⚠️ `stock_zh_a_hist` 和 `stock_individual_info_em` 因东方财富反爬在多数环境下不可用 |
 | **腾讯行情** | `qt.gtimg.cn` HTTP | ★★★★ | 否 | 实时报价（价格/成交量/PE/市值） |
 | **baostock** | `query_history_k_data_plus` | ★★★★ | 否 | K 线历史数据，免费稳定，需网络直连 |
-| **TickFlow** | `TickFlow.free().klines.get` | ★★★★ | 否 | 第四 K 线源，独立数据管道（非东方财富），`TickFlow.free()` 零配置
+| **TickFlow** | `TickFlow.free().klines.get` | ★★★★ | 否 | 第四 K 线源，独立数据管道（非东方财富），`TickFlow.free()` 零配置 |
+| **FRED** | `fredapi` (`fred.series.get_series`) | ★★★★ | 是 | 美宏观数据：US 10Y/2Y 国债、VIX、CPI、美元指数。需 `FRED_API_KEY`，免费注册 |
+| **公告事件** | `akshare.stock_individual_notice_report` / `stock_notice_report` | ★★ | 否 | 上市公司公告采集 + 结构化分类（事件引擎，v0.1.6 新增）。依赖东方财富接口，代理环境下可能不可用 |
 
 ## TickFlow 使用说明
 
@@ -75,6 +77,30 @@ TUN 在网卡层劫持流量，需在 Clash 规则中将国内金融域名设为
 
 以下数据源已规划但尚未接入，详见 `docs/roadmap.md`：
 - **yfinance** — 美股/港股数据，稳定性 ★★
+- **龙虎榜 / 大宗交易** — 游资席位与大宗成交（v0.2.0，见 [game-theory.md](game-theory.md)）
+- **互动易 / 社媒 API** — L3 公开舆情自动采集（v0.2.0，见 [sentiment.md](sentiment.md)）
+
+## 舆情数据源
+
+| 层级 | 维度 | 接口 | 稳定性 | 说明 |
+|------|------|------|--------|------|
+| L1 卖方研报 | `research` | Tushare `report_rc` / akshare `stock_research_report_em` | ★★★ | 研报情绪卡（`SentimentCard`），非社媒舆情 |
+| L2 公告事件 | `events` | akshare `stock_individual_notice_report` | ★★ | `attach_events` 自动采集 + 事件分类 |
+| L3 公开舆情 | — | WebSearch / Tavily | ❓ | Claude 执行；须 query + 来源标注。见 [sentiment.md](sentiment.md) |
+
+L3 为 fallback，可信度标注 ❓ 弱，推测须标 `[推测，待验证]`。
+
+### v0.1.9 新闻三层架构（`collect --with-news-pack`）
+
+| 层 | 实现 | 依赖 | 无 Key 行为 |
+|----|------|------|------------|
+| Layer 1 公告 | `news_scanner` → akshare `stock_individual_notice_report` | akshare 直连 | 始终尝试 |
+| Layer 2 查询包 | `build_news_query_pack()` 纯 Python | 无 | 始终产出 ≥3 条 |
+| Layer 3 Tavily | REST `api.tavily.com` | `TAVILY_API_KEY` | 静默跳过，标注 `skipped (no key)` |
+
+- Channel B/C（指定源/社区热度）v0.2.0 占位，抛 `NotImplementedError` 并写入 `attempted_sources`
+- `news_query_pack_{symbol}_{ts}.json` 写入 `~/.local/share/investment/`
+- Harness WebSearch 不是 Python API：Layer 2 查询包由 Claude report 阶段执行
 
 ## Web 搜索可信度分级
 

@@ -30,11 +30,27 @@ uv run python skills/invest-A/scripts/invest.py <subcommand> <symbol> [--flags]
 
 # 常用子命令
 diagnose     # 检查数据源可用性
-collect      # 采集数据
+collect      # 采集数据（--with-news-pack 新闻三层架构）
 report       # 生成报告
 compare      # 双标的对比
 diff         # 对比两次快照
 store list   # 历史采集记录
+rigor        # 财务验算（市值/估值/跨源）
+audit        # 报告审计 extract/verdict
+check        # 单标的质地检查（7 指标）
+portfolio    # 组合风险特征
+thesis       # 投资假设追踪
+shock        # 价格冲击插值比例
+```
+
+### v0.1.9 新闻采集
+
+- **Layer 1**：akshare 公告（始终可用）
+- **Layer 2**：声明式 `query_pack`（供 Claude WebSearch）
+- **Layer 3**：Tavily REST（`TAVILY_API_KEY` 可选）
+
+```bash
+uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
 ```
 
 ## pip 规范
@@ -59,15 +75,7 @@ uv run python -c "import sys; print(sys.executable)"
 
 ## 数据源
 
-| 源 | 状态 | 注意 |
-|----|------|------|
-| Tushare Pro | ✅ | 需 TOKEN |
-| akshare | ✅ | 东方财富接口可能被代理拦截 |
-| Baostock | ✅ | 免注册 |
-| TickFlow | ✅ | 免注册，独立数据管道 |
-| 腾讯行情 | ✅ | 免注册 |
-| FRED | ✅ | 美宏观数据 |
-| 公告事件 | ✅ | akshare stock_individual_notice_report |
+详见 `skills/invest-A/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
 
 **代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
 
@@ -174,5 +182,7 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 ## 报告路径
 
-- 数据源扩展方案：`code/reports/A股数据源扩展研究报告_v0.1.3.md`
-- 个股报告：`code/reports/{symbol}-{name}/{date}.md`
+- 数据源扩展方案：`reports/A股数据源扩展研究报告_v0.1.3.md`
+- 个股报告：`reports/{symbol}-{name}/{date}.md`
+- 财报 F 规范：`skills/invest-A/references/financials.md`
+- 九模块结构：`skills/invest-A/references/modules.md`
