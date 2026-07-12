@@ -46,12 +46,15 @@ def _days_ago(n: int) -> str:
     return (datetime.now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
-def _fred_date(yyyymmdd: str) -> str:
-    """Tushare 风格 YYYYMMDD → FRED API 要求的 YYYY-MM-DD。"""
+def _to_iso_date(yyyymmdd: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD；非 8 位数字则原样返回。"""
     s = yyyymmdd.strip()
     if len(s) == 8 and s.isdigit():
         return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
     return s
+
+
+_fred_date = _to_iso_date  # 向后兼容
 
 
 def _latest_quarter_end() -> str:
@@ -534,8 +537,8 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
         import akshare as ak
         sd = start_date or _days_ago(365)
         ed = end_date or _today()
-        sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
-        ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+        sd_fmt = _to_iso_date(sd)
+        ed_fmt = _to_iso_date(ed)
         try:
             result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
                                         period="daily",
@@ -727,8 +730,8 @@ def _q_akshare_industry_board(symbol: str, industry_name: str = "") -> dict | No
                 hist = ak.stock_board_industry_hist_em(
                     symbol=board_name,
                     period="日k",
-                    start_date=_days_ago(30)[:4] + "-" + _days_ago(30)[4:6] + "-" + _days_ago(30)[6:],
-                    end_date=_today()[:4] + "-" + _today()[4:6] + "-" + _today()[6:],
+                    start_date=_to_iso_date(_days_ago(30)),
+                    end_date=_to_iso_date(_today()),
                     adjust="",
                 )
                 if hist is not None and not hist.empty:
@@ -856,8 +859,8 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
 
             sd = start_date or _days_ago(365)
             ed = end_date or _today()
-            sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
-            ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+            sd_fmt = _to_iso_date(sd)
+            ed_fmt = _to_iso_date(ed)
 
             bs_code = _baostock_code(symbol)
             rs = bs.query_history_k_data_plus(
@@ -2664,8 +2667,8 @@ def _akshare_hs300_dated_closes(*, days: int = 70) -> list[tuple[str, float]]:
 
     sd = _days_ago(days + 10)
     ed = _today()
-    sd_fmt = f"{sd[:4]}-{sd[4:6]}-{sd[6:]}"
-    ed_fmt = f"{ed[:4]}-{ed[4:6]}-{ed[6:]}"
+    sd_fmt = _to_iso_date(sd)
+    ed_fmt = _to_iso_date(ed)
     with akshare_direct_session():
         df = ak.stock_zh_index_daily_em(
             symbol="sh000300", start_date=sd_fmt, end_date=ed_fmt,
@@ -3095,7 +3098,7 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
         if pe is None or float(pe) <= 0:
             continue
         td = str(r.get("trade_date", ""))
-        d_fmt = f"{td[:4]}-{td[4:6]}-{td[6:8]}" if len(td) == 8 else td
+        d_fmt = _to_iso_date(td) if len(td) == 8 else td
         y10 = _dgs10_for_trade_date(dgs10_by_date, d_fmt)
         if y10 is None:
             continue

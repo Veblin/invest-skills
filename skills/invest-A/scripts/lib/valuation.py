@@ -586,10 +586,6 @@ def calc_beta(
     }
 
 
-# Backward-compatible alias; superset of old _as_float (inf/Nan handled in safe_float now)
-_as_float = _safe_float
-
-
 def extract_financial_rows(financials: dict) -> list[dict]:
     """从 financials legacy dict 提取最佳财报行列表（优先 Tushare 源）。"""
     data = financials.get("data")
@@ -622,8 +618,8 @@ def _latest_financial_row(rows: list[dict]) -> dict | None:
 
 
 def _infer_tax_rate(row: dict) -> float:
-    tax = _as_float(row.get("income_tax") or row.get("tax"))
-    profit = _as_float(row.get("total_profit") or row.get("ebit"))
+    tax = _safe_float(row.get("income_tax") or row.get("tax"))
+    profit = _safe_float(row.get("total_profit") or row.get("ebit"))
     if tax is not None and profit is not None and profit > 0:
         return max(0.0, min(0.35, tax / profit))
     return 0.25
@@ -641,10 +637,10 @@ def build_dcf_preprocess(financials: dict) -> dict | None:
     }
     computed: list[str] = []
 
-    ebit = _as_float(row.get("ebit"))
+    ebit = _safe_float(row.get("ebit"))
     if ebit is not None:
-        depr = _as_float(row.get("depr_amort")) or 0.0
-        cap_ex_raw = _as_float(row.get("cap_ex"))
+        depr = _safe_float(row.get("depr_amort")) or 0.0
+        cap_ex_raw = _safe_float(row.get("cap_ex"))
         cap_ex = abs(cap_ex_raw) if cap_ex_raw is not None else 0.0
         tax_rate = _infer_tax_rate(row)
         out["fcff"] = calc_fcff(
@@ -655,8 +651,8 @@ def build_dcf_preprocess(financials: dict) -> dict | None:
         )
         computed.append("fcff")
 
-    debt_total = _as_float(row.get("total_liab"))
-    money_cap = _as_float(row.get("money_cap"))
+    debt_total = _safe_float(row.get("total_liab"))
+    money_cap = _safe_float(row.get("money_cap"))
     if debt_total is not None and money_cap is not None:
         out["net_debt"] = calc_net_debt(debt_total, money_cap)
         computed.append("net_debt")
@@ -848,19 +844,19 @@ def _historical_revenue_cagr(rows: list[dict]) -> tuple[float | None, dict]:
             r
             for r in rows
             if str(r.get("end_date", "")).strip().endswith("1231")
-            and _as_float(r.get("revenue")) is not None
+            and _safe_float(r.get("revenue")) is not None
         ),
         key=lambda r: str(r.get("end_date", "")),
     )
     pool = annual if len(annual) >= 2 else [
-        r for r in rows if _as_float(r.get("revenue")) is not None
+        r for r in rows if _safe_float(r.get("revenue")) is not None
     ]
     if len(pool) < 2:
         return None, {"note": "revenue 历史数据不足 2 期，无法计算 CAGR"}
 
     first, last = pool[0], pool[-1]
-    rev_first = _as_float(first.get("revenue"))
-    rev_last = _as_float(last.get("revenue"))
+    rev_first = _safe_float(first.get("revenue"))
+    rev_last = _safe_float(last.get("revenue"))
     d_first = _parse_end_date(first.get("end_date"))
     d_last = _parse_end_date(last.get("end_date"))
     if rev_first is None or rev_last is None or rev_first <= 0 or d_first is None or d_last is None:
@@ -948,18 +944,18 @@ def scenario_fcff(
     latest = _latest_financial_row(rows)
     insufficient: list[str] = []
 
-    revenue_latest = _as_float(latest.get("revenue")) if latest else None
-    ebit_latest = _as_float(latest.get("ebit")) if latest else None
+    revenue_latest = _safe_float(latest.get("revenue")) if latest else None
+    ebit_latest = _safe_float(latest.get("ebit")) if latest else None
     base_growth, growth_meta = _historical_revenue_cagr(rows)
     margins = [
-        v for v in (_as_float(r.get("grossprofit_margin")) for r in rows[-4:])
+        v for v in (_safe_float(r.get("grossprofit_margin")) for r in rows[-4:])
         if v is not None
     ]
     base_margin = statistics.mean(margins) if margins else None
     intensities = []
     for r in rows:
-        rev = _as_float(r.get("revenue"))
-        capex_raw = _as_float(r.get("cap_ex"))
+        rev = _safe_float(r.get("revenue"))
+        capex_raw = _safe_float(r.get("cap_ex"))
         if rev is not None and rev > 0 and capex_raw is not None:
             intensities.append(abs(capex_raw) / rev)
     base_capex_intensity = statistics.mean(intensities) if intensities else None
@@ -987,7 +983,7 @@ def scenario_fcff(
         }
 
     tax_rate = _infer_tax_rate(latest)
-    depr_latest = _as_float(latest.get("depr_amort")) or 0.0
+    depr_latest = _safe_float(latest.get("depr_amort")) or 0.0
     ebit_margin_latest = ebit_latest / revenue_latest if revenue_latest else 0.0
 
     growth = base_growth * _SCENARIO_GROWTH_MULTIPLIER[scenario]
