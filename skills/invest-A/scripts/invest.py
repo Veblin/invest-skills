@@ -453,6 +453,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
         print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
     if getattr(args, "with_news_pack", False):
         print("📰 新闻包模式已启用（公告 + 查询包 + 可选 Tavily）")
+    env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
@@ -525,6 +526,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.with_macro:
         print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
     if result is None:
+        env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     if getattr(args, "strict_rigor", False):
@@ -601,6 +603,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
+    env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
     ra = collector.collect_all(args.symbol_a)
     rb = collector.collect_all(args.symbol_b)
@@ -696,6 +699,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     if not _HAS_EVIDENCE:
         print("⚠️ evidence 模块不可用")
         return 1
+    env.print_missing_token_warnings()
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
@@ -858,6 +862,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
 
 def cmd_peer(args: argparse.Namespace) -> int:
     """行业横向对比 CLI：输出 Markdown 对比表。"""
+    env.print_missing_token_warnings()
     try:
         result = collector.collect_peer_comparison(
             args.symbol, top_n=args.top, sort_by=args.sort_by,
@@ -1437,6 +1442,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
 def cmd_rigor(args: argparse.Namespace) -> int:
     from lib.financial_rigor import has_blocking_failures, run_rigor
 
+    env.print_missing_token_warnings()
     dims = _CLI_DEFAULT_DIMS.split(",")
     result = collector.collect_all(args.symbol, [d.strip() for d in dims if d.strip()])
     cmds: list[str] = []
@@ -1477,6 +1483,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     from lib.quality_check import format_quality_check, run_quality_check
 
+    env.print_missing_token_warnings()
     dims = ["basic_info", "financials", "quote", "valuation", "kline"]
     result = collector.collect_all(args.symbol, dims)
     qc = run_quality_check(result)
