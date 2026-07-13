@@ -40,7 +40,9 @@ Claude 读取输出后，以简报形式呈现并引导用户筛选：
 
 ```bash
 uv run python skills/limit-up/scripts/scan.py --sector 半导体 --min-board 2 --max-rows 20
-uv run python skills/limit-up/scripts/scan.py --quality-filter   # 六维质量过滤（默认关闭）
+uv run python skills/limit-up/scripts/scan.py --quality-filter   # 六维质量过滤
+uv run python skills/limit-up/scripts/scan.py --min-price 8      # 传入质量参数亦自动启用
+# --include-st 仅在质量过滤已启用时保留 ST，不单独触发过滤
 ```
 
 ### 理解盘面宽度
@@ -114,7 +116,7 @@ uv run python skills/invest-A/scripts/invest.py collect SYMBOL --with-news-pack
 | L1 封板质量 | akshare（封板时间/封板资金/炸板次数） | 同上 |
 | L2 交易日历 | Tushare `trade_cal` | 有 Token 时；降级到自然日覆盖 |
 | L2 市场分类 | Tushare `stock_basic` | 有 Token 时；降级跳过 |
-| L2 股价过滤 | Tushare `daily` | 有 Token 时；降级跳过 |
+| L2 股价过滤 | Tushare `daily`（优先）/ L1 涨停池 `最新价` 回退 | 有阈值但无价格时剔除 |
 | 题材聚合 | Claude WebSearch（涨停日公告/新闻） | 替代已不可用的 pywencai |
 
 ## 限制

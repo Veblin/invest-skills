@@ -14,7 +14,7 @@ import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # ---- 跨 skill 导入 invest-A 基础设施 ----
 # scripts/lib/ → scripts/ → limit-up/ → skills/ → invest-A/scripts
@@ -97,10 +97,10 @@ def scan_market(days: int = 10) -> dict:
             "enrichment": {"tushare": False, "enriched_count": 0},
         }
 
-    stocks, breadth = _merge_daily_results(daily_data, aux_by_date)
+    stocks = _merge_daily_results(daily_data, aux_by_date)
     trade_date = max(daily_data.keys())
     enrichment = _apply_tushare_enrich(stocks, trade_date=trade_date)
-    # enrich 后补算 market_dist（依赖 L2 market）
+    # enrich 后一次计算 breadth（含 L2 market_dist）
     breadth = _compute_breadth(stocks, daily_data)
     return {
         "scan_date": scan_date,
@@ -115,17 +115,43 @@ def scan_market(days: int = 10) -> dict:
 def quality_filter(
     result: dict,
     *,
+    filter_mode: Literal["full", "lightweight"] = "full",
     min_consecutive: int = 0,
     sectors: list[str] | None = None,
     exclude_delisting: bool = True,
-    max_break_count: int = 3,
-    min_price: float = 5.0,
-    min_float_mkt_cap: float = 20e8,
-    exclude_st: bool = True,
+    max_break_count: int | None = None,
+    min_price: float | None = None,
+    min_float_mkt_cap: float | None = None,
+    exclude_st: bool | None = None,
     min_market_cap: float = 0,
     max_market_cap: float = float("inf"),
 ) -> dict:
-    """六维质量过滤（执行计划 §2.2.2）。"""
+    """质量/轻量过滤。
+
+    filter_mode:
+      - full: 六维质量过滤（默认阈值：炸板≥3 / 股价<5 / 流通市值<20亿 / 排除 ST）
+      - lightweight: 仅行业/连板/退市/总市值等轻量条件；价/炸板/ST 默认关闭，
+        显式传入仍可覆盖
+    """
+    if filter_mode == "lightweight":
+        if max_break_count is None:
+            max_break_count = 10**9
+        if min_price is None:
+            min_price = 0.0
+        if min_float_mkt_cap is None:
+            min_float_mkt_cap = 0.0
+        if exclude_st is None:
+            exclude_st = False
+    else:
+        if max_break_count is None:
+            max_break_count = 3
+        if min_price is None:
+            min_price = 5.0
+        if min_float_mkt_cap is None:
+            min_float_mkt_cap = 20e8
+        if exclude_st is None:
+            exclude_st = True
+
     stocks = result.get("stocks", [])
     filtered: list[dict] = []
     reasons: dict[str, int] = Counter()
@@ -162,10 +188,17 @@ def quality_filter(
             reasons["exclude_st"] += 1
             continue
 
+        # 股价：L2 close → L1 appearance.close（涨停池最新价）；有阈值但缺价 → 剔除
         close = s.get("close")
-        if close is not None and min_price > 0 and close < min_price:
-            reasons["min_price"] += 1
-            continue
+        if close is None and latest:
+            close = latest.get("close")
+        if min_price > 0:
+            if close is None:
+                reasons["price_unknown"] += 1
+                continue
+            if close < min_price:
+                reasons["min_price"] += 1
+                continue
 
         float_mcap = s.get("float_mkt_cap")
         if float_mcap is None and latest:
@@ -176,23 +209,22 @@ def quality_filter(
 
         filtered.append(s)
 
-    # M1+#2: 按筛选集重算日频，保留原扫描交易日骨架（零日填 0）
+    # 按筛选集重算日频，保留原扫描交易日骨架（零日填 0）
     orig_daily = result.get("market_breadth", {}).get("daily_counts", {})
     daily = _daily_counts_from_stocks(filtered, calendar=orig_daily)
-    return {
-        "scan_date": result.get("scan_date", ""),
-        "trading_days_scanned": result.get("trading_days_scanned", 0),
+    out = dict(result)  # #3: 透传未知键
+    out.update({
         "stocks": filtered,
         "market_breadth": _compute_breadth(filtered, daily),
-        "errors": result.get("errors", []),
-        "enrichment": result.get("enrichment", {}),
         "filter_stats": {
             "input_count": len(stocks),
             "output_count": len(filtered),
             "filtered_reasons": dict(reasons),
         },
-        "quality_filter_applied": True,
-    }
+        "filter_mode": filter_mode,
+        "quality_filter_applied": filter_mode == "full",
+    })
+    return out
 
 
 def filter_stocks(
@@ -204,20 +236,17 @@ def filter_stocks(
     min_market_cap: float = 0,
     max_market_cap: float = float("inf"),
 ) -> dict:
-    """从扫描结果筛选股票（兼容入口）。"""
-    exclude_delisting = True
-    if exclude_names_contain is not None:
-        exclude_delisting = "退" in exclude_names_contain
+    """从扫描结果筛选股票（兼容入口，lightweight）。
 
+    始终排除名称含「退」的标的。exclude_names_contain 为额外名称关键词（加法），
+    其中的「退」可省略（与默认退市规则重复）。
+    """
     out = quality_filter(
         result,
+        filter_mode="lightweight",
         min_consecutive=min_consecutive,
         sectors=sectors,
-        exclude_delisting=exclude_delisting,
-        max_break_count=10**9,
-        min_price=0,
-        min_float_mkt_cap=0,
-        exclude_st=False,
+        exclude_delisting=True,
         min_market_cap=min_market_cap,
         max_market_cap=max_market_cap,
     )
@@ -225,9 +254,11 @@ def filter_stocks(
         extra = [kw for kw in exclude_names_contain if kw != "退"]
         if extra:
             kept = []
+            excluded = 0
             for s in out["stocks"]:
                 name = str(s.get("name", ""))
                 if any(kw in name for kw in extra):
+                    excluded += 1
                     continue
                 kept.append(s)
             daily = _daily_counts_from_stocks(
@@ -235,7 +266,12 @@ def filter_stocks(
             )
             out["stocks"] = kept
             out["market_breadth"] = _compute_breadth(kept, daily)
-            out["filter_stats"]["output_count"] = len(kept)
+            stats = out.setdefault("filter_stats", {})
+            reasons = dict(stats.get("filtered_reasons") or {})
+            if excluded:
+                reasons["name_exclude"] = reasons.get("name_exclude", 0) + excluded
+            stats["filtered_reasons"] = reasons
+            stats["output_count"] = len(kept)
     return out
 
 
@@ -266,7 +302,11 @@ def format_market_brief(result: dict) -> str:
 
     if result.get("filter_stats"):
         fs = result.get("filter_stats") or {}
-        mode = "质量过滤" if result.get("quality_filter_applied") else "轻量筛选（行业/连板）"
+        mode_key = result.get("filter_mode")
+        if mode_key == "full" or (mode_key is None and result.get("quality_filter_applied")):
+            mode = "质量过滤"
+        else:
+            mode = "轻量筛选（行业/连板）"
         lines.append(
             f"筛选: 已应用（{mode}）"
             f" | 输入 {fs.get('input_count', '?')} → 输出 {fs.get('output_count', len(stocks))}"
@@ -440,7 +480,7 @@ def _fetch_day_with_aux(
             df = ak.stock_zt_pool_em(date)
             records = None if df is None or len(df) == 0 else df.to_dict("records")
 
-            # #5: 主池为空日跳过辅池，避免 3×N 无效 EastMoney 请求
+            # 主池为空时跳过辅池：merge 只标注主池 symbol，空日拉取无消费端
             if records:
                 for key, fn_name in (
                     ("strong", "stock_zt_pool_strong_em"),
@@ -472,8 +512,8 @@ def _fetch_day_with_aux(
 def _merge_daily_results(
     daily_data: dict[str, list[dict]],
     aux_by_date: dict[str, dict[str, set[str]]] | None = None,
-) -> tuple[list[dict], dict]:
-    """跨日去重合并 + 市场宽度统计。"""
+) -> list[dict]:
+    """跨日去重合并。breadth 由调用方在 enrich 后计算（避免冗余）。"""
     aux_by_date = aux_by_date or {}
     by_symbol: dict[str, dict] = {}
 
@@ -497,6 +537,7 @@ def _merge_daily_results(
                 }
 
             float_mcap = _safe_float(r.get("流通市值"))
+            close = _safe_float(r.get("最新价"))
             in_strong = sym in aux.get("strong", set())
             in_previous = sym in aux.get("previous", set())
             in_zbgc = sym in aux.get("zbgc", set())
@@ -509,6 +550,7 @@ def _merge_daily_results(
                 "turnover": _safe_float(r.get("换手率")),
                 "market_cap": _safe_float(r.get("总市值")),
                 "float_mkt_cap": float_mcap if float_mcap else None,
+                "close": close if close > 0 else None,
                 "change_pct": _safe_float(r.get("涨跌幅")),
                 "stat": str(r.get("涨停统计", "")),
                 "in_strong": in_strong,
@@ -531,12 +573,16 @@ def _merge_daily_results(
         info["total_appearances"] = len(apps)
         info["first_date"] = apps[0]["date"] if apps else ""
         info["last_date"] = apps[-1]["date"] if apps else ""
-        latest_float = apps[-1].get("float_mkt_cap") if apps else None
+        latest = apps[-1] if apps else {}
+        latest_float = latest.get("float_mkt_cap")
         if latest_float:
             info["float_mkt_cap"] = latest_float
+        latest_close = latest.get("close")
+        if latest_close:
+            info["close"] = latest_close
         stocks.append(info)
 
-    return stocks, _compute_breadth(stocks, daily_data)
+    return stocks
 
 
 def _daily_counts_from_stocks(
@@ -586,9 +632,12 @@ def _one_to_two_rate(
 ) -> float:
     """一进二晋级率：交易日历上相邻日，前日连板=1 且次日连板≥2。
 
-    trade_dates: 完整扫描交易日（含零涨停日）。缺省时回退到 appearances 日期
-    （可能把不相邻交易日误判为相邻，仅作兜底）。
+    必须提供完整 trade_dates（含零涨停日）；缺失或不足 2 日时返回 0.0，
+    避免用 appearances 日期把非连续日误判为相邻。
     """
+    if not trade_dates or len(trade_dates) < 2:
+        return 0.0
+
     by_date: dict[str, dict[str, int]] = {}
     for s in stocks:
         sym = s["symbol"]
@@ -598,10 +647,7 @@ def _one_to_two_rate(
                 continue
             by_date.setdefault(d, {})[sym] = int(a.get("consecutive", 0) or 0)
 
-    dates = sorted(trade_dates) if trade_dates else sorted(by_date.keys())
-    if len(dates) < 2:
-        return 0.0
-
+    dates = sorted(trade_dates)
     promoted = 0
     base = 0
     for i in range(len(dates) - 1):
@@ -671,10 +717,10 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
     consec: Counter[str] = Counter()
     for s in stocks:
         mc = int(s.get("max_consecutive", 0) or 0)
-        # #6: max_consecutive<=0 不计入「1板」
+        # #6: mc<=0 归入「其它」，与 total_unique_stocks 对齐
         if mc <= 0:
-            continue
-        if mc >= 4:
+            consec["其它"] += 1
+        elif mc >= 4:
             consec["4板+"] += 1
         elif mc == 3:
             consec["3板"] += 1

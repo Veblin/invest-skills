@@ -5,6 +5,7 @@
   uv run python skills/limit-up/scripts/scan.py --days 10
   uv run python skills/limit-up/scripts/scan.py --sector 半导体 --min-board 2
   uv run python skills/limit-up/scripts/scan.py --quality-filter
+  uv run python skills/limit-up/scripts/scan.py --min-price 8   # 隐式启用质量过滤
   uv run python skills/limit-up/scripts/scan.py --json --out /tmp/scan.json
 """
 
@@ -42,16 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="最低连板数筛选（0=全部）")
     p.add_argument("--quality-filter", action="store_true",
                    help="启用六维质量过滤（炸板/股价/流通市值/ST 等；默认关闭）")
-    p.add_argument("--max-break", type=int, default=3,
-                   help="最大炸板次数（需 --quality-filter；默认3，≥该值排除）")
-    p.add_argument("--min-price", type=float, default=5.0,
-                   help="最低股价（需 --quality-filter / Tushare L2；默认5）")
-    p.add_argument("--min-float-mkt-cap", type=float, default=20e8,
-                   help="最低流通市值（需 --quality-filter；默认20亿）")
+    p.add_argument("--max-break", type=int, default=None,
+                   help="最大炸板次数（传入即启用质量过滤；默认3）")
+    p.add_argument("--min-price", type=float, default=None,
+                   help="最低股价元（传入即启用质量过滤；默认5）")
+    p.add_argument("--min-float-mkt-cap", type=float, default=None,
+                   help="最低流通市值元（传入即启用质量过滤；默认20亿）")
     p.add_argument("--include-st", action="store_true",
-                   help="质量过滤时保留 ST（默认排除）")
-    p.add_argument("--no-quality-filter", action="store_true",
-                   help=argparse.SUPPRESS)  # 兼容旧旗标（现为默认行为）
+                   help="质量过滤时保留 ST（需同时启用 --quality-filter 或其它质量参数）")
     p.add_argument("--max-rows", type=int, default=80,
                    help="股票列表最多显示行数（默认80）")
     p.add_argument("--out", default="",
@@ -59,34 +58,53 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def resolve_cli_filter(args: argparse.Namespace) -> dict | None:
+    """根据 CLI 参数生成 quality_filter kwargs；无需筛选时返回 None。
+
+    --include-st 仅修饰已启用的 full 模式，不单独触发质量过滤。
+    """
+    use_full = (
+        args.quality_filter
+        or any(v is not None for v in (args.max_break, args.min_price, args.min_float_mkt_cap))
+    )
+    if not (use_full or args.sector or args.min_board > 0):
+        return None
+
+    kwargs: dict = {
+        "filter_mode": "full" if use_full else "lightweight",
+        "sectors": [args.sector] if args.sector else None,
+        "min_consecutive": args.min_board,
+    }
+    if use_full:
+        kwargs.update({
+            "max_break_count": args.max_break if args.max_break is not None else 3,
+            "min_price": args.min_price if args.min_price is not None else 5.0,
+            "min_float_mkt_cap": (
+                args.min_float_mkt_cap if args.min_float_mkt_cap is not None else 20e8
+            ),
+            "exclude_st": not args.include_st,
+        })
+    return kwargs
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
     result = scan_market(days=args.days)
 
-    # #4: 默认不做质量过滤；仅 --sector/--min-board 或显式 --quality-filter
-    if args.quality_filter:
-        result = quality_filter(
-            result,
-            sectors=[args.sector] if args.sector else None,
-            min_consecutive=args.min_board,
-            max_break_count=args.max_break,
-            min_price=args.min_price,
-            min_float_mkt_cap=args.min_float_mkt_cap,
-            exclude_st=not args.include_st,
+    use_full = (
+        args.quality_filter
+        or any(v is not None for v in (args.max_break, args.min_price, args.min_float_mkt_cap))
+    )
+    if use_full and not args.quality_filter:
+        print(
+            "ℹ️ 检测到质量过滤参数，已自动启用 --quality-filter",
+            file=sys.stderr,
         )
-    elif args.sector or args.min_board > 0:
-        result = quality_filter(
-            result,
-            sectors=[args.sector] if args.sector else None,
-            min_consecutive=args.min_board,
-            max_break_count=10**9,
-            min_price=0,
-            min_float_mkt_cap=0,
-            exclude_st=False,
-        )
-        # 轻量筛选不算「质量过滤」全套
-        result["quality_filter_applied"] = False
+
+    filter_kwargs = resolve_cli_filter(args)
+    if filter_kwargs is not None:
+        result = quality_filter(result, **filter_kwargs)
 
     if args.out:
         out_path = Path(args.out)

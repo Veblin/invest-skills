@@ -17,6 +17,7 @@ from limit_up_scanner import (
     format_stock_table,
     quality_filter,
     scan_market,
+    _fetch_day_with_aux,
     _merge_daily_results,
     _compute_breadth,
     _daily_counts_from_stocks,
@@ -28,6 +29,12 @@ from limit_up_scanner import (
     _latest_market_cap,
     _one_to_two_rate,
 )
+
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from scan import build_parser, resolve_cli_filter  # noqa: E402
 from tushare_enrich import (
     _market_label,
     _safe_float_or_none,
@@ -100,6 +107,17 @@ class TestFilterStocks:
         assert len(f["stocks"]) == 1
         assert f["stocks"][0]["name"] == "正常股"
 
+    def test_exclude_names_without_tui_keeps_delisting_rule(self):
+        """exclude_names_contain 不含「退」时，退市排除仍生效（加法而非替换）。"""
+        s1 = _make_stock("000001", "国华退", "软件", market_cap=5e10)
+        s2 = _make_stock("000002", "正常", "软件", market_cap=5e10)
+        s3 = _make_stock("000003", "风险股", "软件", market_cap=5e10)
+        r = _make_result([s1, s2, s3])
+        f = filter_stocks(r, exclude_names_contain=["风险"])
+        assert [s["symbol"] for s in f["stocks"]] == ["000002"]
+        assert f["filter_stats"]["filtered_reasons"].get("delisting") == 1
+        assert f["filter_stats"]["filtered_reasons"].get("name_exclude") == 1
+
     def test_filter_by_market_cap(self):
         s1 = _make_stock("000001", "小盘", "银行", market_cap=1e9)
         s2 = _make_stock("000002", "中盘", "银行", market_cap=5e10)
@@ -140,11 +158,23 @@ class TestQualityFilter:
         assert len(f["stocks"]) == 1
         assert f["stocks"][0]["symbol"] == "000001"
 
-    def test_l2_price_skipped_when_missing(self):
+    def test_min_price_unknown_when_missing(self):
+        """有 min_price 但无 L1/L2 股价 → 剔除（不再静默放行）。"""
         s = _make_stock("000001", "A", "银行", market_cap=5e10)
         r = _make_result([s])
         f = quality_filter(r, min_price=5.0, min_float_mkt_cap=0, exclude_st=False)
-        assert len(f["stocks"]) == 1
+        assert len(f["stocks"]) == 0
+        assert f["filter_stats"]["filtered_reasons"]["price_unknown"] == 1
+
+    def test_min_price_uses_l1_appearance_close(self):
+        """无 Tushare close 时回退 appearance.close（来自涨停池最新价）。"""
+        s1 = _make_stock("000001", "贵", "银行", market_cap=5e10)
+        s1["appearances"][0]["close"] = 10.0
+        s2 = _make_stock("000002", "便宜", "银行", market_cap=5e10)
+        s2["appearances"][0]["close"] = 3.0
+        r = _make_result([s1, s2])
+        f = quality_filter(r, min_price=5.0, min_float_mkt_cap=0, exclude_st=False)
+        assert [s["symbol"] for s in f["stocks"]] == ["000001"]
 
     def test_min_price_when_enriched(self):
         s1 = _make_stock("000001", "贵", "银行", market_cap=5e10, close=10.0)
@@ -207,6 +237,53 @@ class TestQualityFilter:
             "20260710": 1, "20260711": 1, "20260712": 0,
         }
         assert f["market_breadth"]["avg_daily_count"] == round(2 / 3, 1)
+
+    def test_filter_mode_full_vs_lightweight(self):
+        s = _make_stock("000001", "A", "银行", market_cap=5e10)
+        r = _make_result([s])
+        full = quality_filter(r, filter_mode="full", min_price=0, min_float_mkt_cap=0, exclude_st=False)
+        light = quality_filter(r, filter_mode="lightweight")
+        assert full["filter_mode"] == "full"
+        assert full["quality_filter_applied"] is True
+        assert light["filter_mode"] == "lightweight"
+        assert light["quality_filter_applied"] is False
+
+    def test_lightweight_defaults_skip_price_break_st(self):
+        """lightweight 默认不施加价/炸板/ST；显式参数仍可覆盖。"""
+        cheap = _make_stock("000001", "便宜", "银行", market_cap=5e10, close=3.0, break_count=5)
+        st = _make_stock("000002", "ST风险", "银行", market_cap=5e10, close=10.0, is_st=True)
+        r = _make_result([cheap, st])
+        light = quality_filter(r, filter_mode="lightweight")
+        assert {s["symbol"] for s in light["stocks"]} == {"000001", "000002"}
+        assert light["quality_filter_applied"] is False
+        # 显式覆盖仍生效
+        overridden = quality_filter(r, filter_mode="lightweight", min_price=5.0)
+        assert [s["symbol"] for s in overridden["stocks"]] == ["000002"]
+
+    def test_full_defaults_apply_price_break_st(self):
+        cheap = _make_stock("000001", "便宜", "银行", market_cap=5e10, close=3.0)
+        r = _make_result([cheap])
+        full = quality_filter(r)  # filter_mode=full 默认
+        assert full["stocks"] == []
+        assert full["filter_stats"]["filtered_reasons"]["min_price"] == 1
+
+    def test_filter_passthrough_unknown_keys(self):
+        s = _make_stock("000001", "A", "银行", market_cap=5e10)
+        r = _make_result([s])
+        r["custom_meta"] = {"foo": 1}
+        f = quality_filter(r, filter_mode="lightweight")
+        assert f["custom_meta"] == {"foo": 1}
+
+    def test_filter_stocks_name_exclude_reason(self):
+        s1 = _make_stock("000001", "正常", "软件", market_cap=5e10)
+        s2 = _make_stock("000002", "风险股", "软件", market_cap=5e10)
+        r = _make_result([s1, s2])
+        f = filter_stocks(r, exclude_names_contain=["退", "风险"])
+        assert len(f["stocks"]) == 1
+        assert f["filter_mode"] == "lightweight"
+        assert f["quality_filter_applied"] is False
+        assert f["filter_stats"]["filtered_reasons"].get("name_exclude") == 1
+        assert f["filter_stats"]["output_count"] == 1
 
 
 # ---- scan_market (mocked) ----
@@ -300,11 +377,13 @@ class TestMergeDailyResults:
                  "涨跌幅": 10.0, "涨停统计": "2/2", "所属行业": "银行"},
             ],
         }
-        stocks, breadth = _merge_daily_results(daily)
+        stocks = _merge_daily_results(daily)
         assert len(stocks) == 1
         assert stocks[0]["total_appearances"] == 2
         assert stocks[0]["max_consecutive"] == 2
         assert len(stocks[0]["appearances"]) == 2
+        breadth = _compute_breadth(stocks, daily)
+        assert breadth["total_unique_stocks"] == 1
 
     def test_exclude_delisting_in_merge(self):
         daily = {
@@ -314,7 +393,7 @@ class TestMergeDailyResults:
                  "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "软件"},
             ],
         }
-        stocks, _ = _merge_daily_results(daily)
+        stocks = _merge_daily_results(daily)
         assert len(stocks) == 0
 
     def test_float_mkt_cap_from_akshare(self):
@@ -325,8 +404,20 @@ class TestMergeDailyResults:
                  "流通市值": 5e9, "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"},
             ],
         }
-        stocks, _ = _merge_daily_results(daily)
+        stocks = _merge_daily_results(daily)
         assert stocks[0]["float_mkt_cap"] == 5e9
+
+    def test_close_from_akshare_latest_price(self):
+        daily = {
+            "20260710": [
+                {"代码": "000001", "名称": "A", "连板数": 1, "首次封板时间": "093000",
+                 "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                 "最新价": 12.5, "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"},
+            ],
+        }
+        stocks = _merge_daily_results(daily)
+        assert stocks[0]["close"] == 12.5
+        assert stocks[0]["appearances"][0]["close"] == 12.5
 
     def test_aux_flags_merged(self):
         daily = {
@@ -337,7 +428,7 @@ class TestMergeDailyResults:
             ],
         }
         aux = {"20260710": {"strong": {"000001"}, "previous": set(), "zbgc": {"000001"}}}
-        stocks, _ = _merge_daily_results(daily, aux)
+        stocks = _merge_daily_results(daily, aux)
         assert stocks[0]["flags"]["in_strong"] is True
         assert stocks[0]["flags"]["in_zbgc"] is True
         assert stocks[0]["appearances"][0]["in_strong"] is True
@@ -414,7 +505,10 @@ class TestComputeBreadth:
                  "market_cap": 1e10, "change_pct": 10.0, "stat": "1/1"},
             ],
         }
-        assert _one_to_two_rate([s, s_fail]) == 0.5
+        cal = ["20260710", "20260711"]
+        assert _one_to_two_rate([s, s_fail], trade_dates=cal) == 0.5
+        # 无日历 → 0（不再误用 appearances 回退）
+        assert _one_to_two_rate([s, s_fail]) == 0.0
         b = _compute_breadth([s, s_fail], {"20260710": 2, "20260711": 1})
         assert b["seal_quality"]["one_to_two_rate"] == 0.5
 
@@ -432,8 +526,7 @@ class TestComputeBreadth:
                  "market_cap": 1e10, "change_pct": 10.0, "stat": "2/2"},
             ],
         }
-        # 无日历时误判为相邻 → 1.0；有完整日历则 10→11 未晋级
-        assert _one_to_two_rate([s]) == 1.0
+        assert _one_to_two_rate([s]) == 0.0
         assert _one_to_two_rate(
             [s], trade_dates=["20260710", "20260711", "20260712"],
         ) == 0.0
@@ -444,7 +537,8 @@ class TestComputeBreadth:
         s1 = _make_stock("000002", "A", "X", max_consecutive=1)
         b = _compute_breadth([s0, s1], {"20260710": 1})
         assert b["consecutive_dist"].get("1板") == 1
-        assert sum(b["consecutive_dist"].values()) == 1
+        assert b["consecutive_dist"].get("其它") == 1
+        assert sum(b["consecutive_dist"].values()) == b["total_unique_stocks"]
 
 
 # ---- Formatting ----
@@ -630,3 +724,86 @@ class TestTushareEnrichGuards:
             client.query.side_effect = _query
             out = enrich_price_data(["600176"], "20260713")
             assert "600176" not in out
+
+
+# ---- CLI filter resolution ----
+
+class TestResolveCliFilter:
+
+    def _parse(self, *argv: str):
+        return build_parser().parse_args(list(argv))
+
+    def test_include_st_alone_does_not_enable_full(self):
+        args = self._parse("--include-st")
+        assert resolve_cli_filter(args) is None
+
+    def test_include_st_with_quality_keeps_st(self):
+        args = self._parse("--quality-filter", "--include-st")
+        kwargs = resolve_cli_filter(args)
+        assert kwargs is not None
+        assert kwargs["filter_mode"] == "full"
+        assert kwargs["exclude_st"] is False
+
+    def test_min_price_auto_enables_full(self):
+        args = self._parse("--min-price", "8")
+        kwargs = resolve_cli_filter(args)
+        assert kwargs is not None
+        assert kwargs["filter_mode"] == "full"
+        assert kwargs["min_price"] == 8.0
+
+    def test_sector_only_is_lightweight(self):
+        args = self._parse("--sector", "半导体")
+        kwargs = resolve_cli_filter(args)
+        assert kwargs is not None
+        assert kwargs["filter_mode"] == "lightweight"
+
+
+# ---- _fetch_day_with_aux ----
+
+class TestFetchDayWithAux:
+
+    def test_skips_aux_when_main_pool_empty(self):
+        import pandas as pd
+
+        ak = MagicMock()
+        ak.stock_zt_pool_em.return_value = pd.DataFrame()
+        strong = MagicMock(name="strong")
+        ak.stock_zt_pool_strong_em = strong
+        ak.stock_zt_pool_previous_em = MagicMock(name="previous")
+        ak.stock_zt_pool_zbgc_em = MagicMock(name="zbgc")
+
+        with patch("limit_up_scanner.akshare_direct_session") as sess, \
+             patch.dict("sys.modules", {"akshare": ak}):
+            sess.return_value.__enter__ = MagicMock(return_value=None)
+            sess.return_value.__exit__ = MagicMock(return_value=False)
+            records, err, aux, aux_errors = _fetch_day_with_aux("20260710")
+
+        assert records is None
+        assert err is None
+        assert aux_errors == []
+        assert aux == {"strong": set(), "previous": set(), "zbgc": set()}
+        strong.assert_not_called()
+        ak.stock_zt_pool_previous_em.assert_not_called()
+        ak.stock_zt_pool_zbgc_em.assert_not_called()
+
+    def test_fetches_aux_when_main_has_rows(self):
+        import pandas as pd
+
+        ak = MagicMock()
+        ak.stock_zt_pool_em.return_value = pd.DataFrame([{
+            "代码": "000001", "名称": "平安银行", "连板数": 1,
+        }])
+        ak.stock_zt_pool_strong_em.return_value = pd.DataFrame([{"代码": "000001"}])
+        ak.stock_zt_pool_previous_em.return_value = pd.DataFrame()
+        ak.stock_zt_pool_zbgc_em.return_value = pd.DataFrame()
+
+        with patch("limit_up_scanner.akshare_direct_session") as sess, \
+             patch.dict("sys.modules", {"akshare": ak}):
+            sess.return_value.__enter__ = MagicMock(return_value=None)
+            sess.return_value.__exit__ = MagicMock(return_value=False)
+            records, err, aux, aux_errors = _fetch_day_with_aux("20260710")
+
+        assert err is None
+        assert records is not None and len(records) == 1
+        assert aux["strong"] == {"000001"}
+        ak.stock_zt_pool_strong_em.assert_called_once_with("20260710")
