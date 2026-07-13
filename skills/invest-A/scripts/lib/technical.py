@@ -823,8 +823,8 @@ def rolling_beta(
     benchmark_closes: list[float],
     windows: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Rolling beta via valuation.calc_beta on return series."""
-    from .valuation import calc_beta
+    """Rolling beta via stats.calc_beta on return series."""
+    from .stats import calc_beta
 
     if windows is None:
         windows = [60, 120, 252]

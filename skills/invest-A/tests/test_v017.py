@@ -34,11 +34,17 @@ class TestHolderDirectionAndDictHelpers:
         assert _infer_holder_direction({}, -500000.0, -500000.0) == "减持"
         assert _infer_holder_direction({}, 500000.0, 500000.0) == "增持"
 
-    def test_first_dict_value_preserves_zero(self):
-        from lib.collector import _first_dict_value
+    def test_first_present_preserves_zero(self):
+        from lib.collector import _first_present
 
         row = {"变动数量": 0, "变动股数": 500}
-        assert _first_dict_value(row, "变动数量", "变动股数") == 0
+        assert _first_present(row, "变动数量", "变动股数") == 0
+
+    def test_coalesce_field_preserves_zero(self):
+        from lib.nums import coalesce_field
+
+        row = {"成交均价": 0, "交易均价": 12.5}
+        assert coalesce_field(row, "成交均价", "交易均价") == 0.0
 
     def test_source_has_data_rejects_empty_list(self):
         from lib.collector import _source_has_data
@@ -331,6 +337,7 @@ class TestReportEnhancer:
         assert _has_price_signal({}) is False
 
     def test_valuation_extreme(self, monkeypatch):
+        # patch facade：_is_valuation_extreme 运行时经 lib.render 查找
         from lib.render import _is_valuation_extreme
 
         monkeypatch.setattr(

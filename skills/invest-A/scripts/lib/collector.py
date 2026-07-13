@@ -21,7 +21,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 from . import env
-from .nums import safe_float
+from .nums import coalesce_field, safe_float
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
@@ -1030,6 +1030,25 @@ def _qp_tickflow(symbol: str, start_date: str, end_date: str) -> str:
 
 # ---- 各维度采集（并行 fan-out）----
 
+def _collect_dimension(
+    dimension: str,
+    tasks: list[tuple[str, Callable]],
+    *,
+    query_params: dict[str, str] | Callable[[list], dict[str, str]] | None = None,
+    postprocess: Callable[[dict, list], dict] | None = None,
+    empty_result: dict | None = None,
+) -> dict:
+    """并行采集样板：tasks → _run_sources_parallel → annotate → legacy → postprocess。"""
+    if not tasks and empty_result is not None:
+        return empty_result
+    results = _run_sources_parallel(tasks, dimension)
+    if query_params is not None:
+        qp = query_params(results) if callable(query_params) else query_params
+        _annotate_query_params({r.source: r for r in results}, qp)
+    legacy = DimensionResult(dimension, results).to_legacy_dict()
+    return postprocess(legacy, results) if postprocess else legacy
+
+
 def collect_basic_info(symbol: str) -> dict:
     """基本信息。并行：Tushare + akshare。"""
     tasks: list[tuple[str, Callable]] = []
@@ -1038,16 +1057,13 @@ def collect_basic_info(symbol: str) -> dict:
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_individual_info_em",
                       lambda: _q_akshare_basic(symbol)))
-
-    results = _run_sources_parallel(tasks, "basic_info")
-    result_map = {r.source: r for r in results}
-    _annotate_query_params(result_map, {
-        "tushare.stock_basic": _qp_tushare("stock_basic", symbol),
-        "akshare.stock_individual_info_em": _qp_akshare("stock_individual_info_em", symbol),
-    })
-
-    dim = DimensionResult("basic_info", results)
-    return dim.to_legacy_dict()
+    return _collect_dimension(
+        "basic_info", tasks,
+        query_params={
+            "tushare.stock_basic": _qp_tushare("stock_basic", symbol),
+            "akshare.stock_individual_info_em": _qp_akshare("stock_individual_info_em", symbol),
+        },
+    )
 
 
 def collect_financials(symbol: str) -> dict:
@@ -1059,23 +1075,25 @@ def collect_financials(symbol: str) -> dict:
         tasks.append(("akshare.stock_financial_abstract_ths",
                       lambda: _q_akshare_financials(symbol)))
 
-    results = _run_sources_parallel(tasks, "financials")
-    result_map = {r.source: r for r in results}
-    _annotate_query_params(result_map, {
-        "tushare.fina_indicator": _qp_tushare("fina_indicator", symbol,
-                                              start_date=_days_ago(730), end_date=_today()),
-        "akshare.stock_financial_abstract_ths": _qp_akshare(
-            "stock_financial_abstract_ths", symbol, indicator="按报告期"),
-    })
+    def _attach_dcf(legacy: dict, _results: list) -> dict:
+        try:
+            from .valuation import attach_dcf_preprocess
+            attach_dcf_preprocess(legacy)
+        except Exception as exc:
+            logger.warning("dcf_preprocess failed for %s: %s", symbol, exc)
+        return legacy
 
-    dim = DimensionResult("financials", results)
-    legacy = dim.to_legacy_dict()
-    try:
-        from .valuation import attach_dcf_preprocess
-        attach_dcf_preprocess(legacy)
-    except Exception as exc:
-        logger.warning("dcf_preprocess failed for %s: %s", symbol, exc)
-    return legacy
+    return _collect_dimension(
+        "financials", tasks,
+        query_params={
+            "tushare.fina_indicator": _qp_tushare(
+                "fina_indicator", symbol,
+                start_date=_days_ago(730), end_date=_today()),
+            "akshare.stock_financial_abstract_ths": _qp_akshare(
+                "stock_financial_abstract_ths", symbol, indicator="按报告期"),
+        },
+        postprocess=_attach_dcf,
+    )
 
 
 def collect_shareholders(symbol: str) -> dict:
@@ -1086,18 +1104,14 @@ def collect_shareholders(symbol: str) -> dict:
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_gdfx_top_10_em",
                       lambda: _q_akshare_shareholders(symbol)))
-
-    results = _run_sources_parallel(tasks, "shareholders")
-    result_map = {r.source: r for r in results}
-
-    _annotate_query_params(result_map, {
-        "tushare.top10_floatholders": _qp_tushare("top10_floatholders", symbol,
-                                                  period=_latest_quarter_end()),
-        "akshare.stock_gdfx_top_10_em": _qp_akshare("stock_gdfx_top_10_em", symbol),
-    })
-
-    dim = DimensionResult("shareholders", results)
-    return dim.to_legacy_dict()
+    return _collect_dimension(
+        "shareholders", tasks,
+        query_params={
+            "tushare.top10_floatholders": _qp_tushare(
+                "top10_floatholders", symbol, period=_latest_quarter_end()),
+            "akshare.stock_gdfx_top_10_em": _qp_akshare("stock_gdfx_top_10_em", symbol),
+        },
+    )
 
 
 def collect_quote(symbol: str) -> dict:
@@ -1110,21 +1124,17 @@ def collect_quote(symbol: str) -> dict:
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
     tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
-
-    results = _run_sources_parallel(tasks, "quote")
-    result_map = {r.source: r for r in results}
-    _annotate_query_params(result_map, {
-        "tushare.daily": _qp_tushare("daily", symbol,
-                                     start_date=_days_ago(10), end_date=_today()),
-        "akshare.stock_zh_a_hist": _qp_akshare("stock_zh_a_hist", symbol,
-                                               period="daily",
-                                               start_date=_days_ago(10),
-                                               end_date=_today()),
-        "tencent_finance": _qp_tencent(symbol),
-    })
-
-    dim = DimensionResult("quote", results)
-    return dim.to_legacy_dict()
+    return _collect_dimension(
+        "quote", tasks,
+        query_params={
+            "tushare.daily": _qp_tushare("daily", symbol,
+                                         start_date=_days_ago(10), end_date=_today()),
+            "akshare.stock_zh_a_hist": _qp_akshare(
+                "stock_zh_a_hist", symbol, period="daily",
+                start_date=_days_ago(10), end_date=_today()),
+            "tencent_finance": _qp_tencent(symbol),
+        },
+    )
 
 
 def collect_northbound(symbol: str) -> dict:
@@ -1135,17 +1145,15 @@ def collect_northbound(symbol: str) -> dict:
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
-
-    results = _run_sources_parallel(tasks, "northbound")
-    result_map = {r.source: r for r in results}
-    _annotate_query_params(result_map, {
-        "tushare.hsgt_top10": _qp_tushare("hsgt_top10", symbol,
-                                          start_date=_days_ago(30), end_date=_today()),
-        "akshare.stock_hsgt_individual_em": _qp_akshare("stock_hsgt_individual_em", symbol),
-    })
-
-    dim = DimensionResult("northbound", results)
-    return dim.to_legacy_dict()
+    return _collect_dimension(
+        "northbound", tasks,
+        query_params={
+            "tushare.hsgt_top10": _qp_tushare(
+                "hsgt_top10", symbol, start_date=_days_ago(30), end_date=_today()),
+            "akshare.stock_hsgt_individual_em": _qp_akshare(
+                "stock_hsgt_individual_em", symbol),
+        },
+    )
 
 
 def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
@@ -1170,21 +1178,19 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
         tasks.append(("tickflow.kline",
                       lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed)))
 
-    results = _run_sources_parallel(tasks, "kline")
-    result_map = {r.source: r for r in results}
-    qp_map: dict[str, str] = {
-        "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed),
-        "akshare.stock_zh_a_hist": _qp_akshare("stock_zh_a_hist", symbol,
-                                               period="daily", start_date=sd, end_date=ed),
-    }
-    if env.is_baostock_available():
-        qp_map["baostock.kline"] = _qp_baostock(symbol, sd, ed)
-    if env.is_tickflow_available():
-        qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
-    _annotate_query_params(result_map, qp_map)
+    def _kline_qp(_results: list) -> dict[str, str]:
+        qp_map: dict[str, str] = {
+            "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed),
+            "akshare.stock_zh_a_hist": _qp_akshare(
+                "stock_zh_a_hist", symbol, period="daily", start_date=sd, end_date=ed),
+        }
+        if env.is_baostock_available():
+            qp_map["baostock.kline"] = _qp_baostock(symbol, sd, ed)
+        if env.is_tickflow_available():
+            qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
+        return qp_map
 
-    dim = DimensionResult("kline", results)
-    return dim.to_legacy_dict()
+    return _collect_dimension("kline", tasks, query_params=_kline_qp)
 
 
 # ---- Tushare 客户端惰性加载 ----
@@ -1252,18 +1258,14 @@ def collect_valuation(symbol: str) -> dict:
         tasks.append(("tushare.daily_basic", lambda: _q_tushare_daily_basic(symbol)))
     tasks.append(("tencent_finance", lambda: _q_tencent_valuation_snapshot(symbol)))
 
-    results = _run_sources_parallel(tasks, "valuation")
-    result_map = {r.source: r for r in results}
+    def _valuation_qp(results: list) -> dict[str, str]:
+        qp_map: dict[str, str] = {"tencent_finance": _qp_tencent(symbol)}
+        sources = {r.source for r in results}
+        if "tushare.daily_basic" in sources:
+            qp_map["tushare.daily_basic"] = _qp_tushare_daily_basic(symbol)
+        return qp_map
 
-    qp_map: dict[str, str] = {
-        "tencent_finance": _qp_tencent(symbol),
-    }
-    if "tushare.daily_basic" in result_map:
-        qp_map["tushare.daily_basic"] = _qp_tushare_daily_basic(symbol)
-    _annotate_query_params(result_map, qp_map)
-
-    dim = DimensionResult("valuation", results)
-    return dim.to_legacy_dict()
+    return _collect_dimension("valuation", tasks, query_params=_valuation_qp)
 
 
 # ---- 机构研报与盈利预测采集 ----
@@ -1650,7 +1652,6 @@ def collect_industry(symbol: str) -> dict:
         if info:
             industry_name = info.get("行业") or info.get("industry", "") or ""
 
-    # 行业板块历史行情（个股所属行业指数）
     if env.is_akshare_available() and akshare_push2_available():
         ind = industry_name
         tasks.append(("akshare.stock_board_industry_hist_em",
@@ -1658,35 +1659,36 @@ def collect_industry(symbol: str) -> dict:
         tasks.append(("akshare.stock_board_industry_pe_ratio_cninfo",
                       lambda i=ind: _q_akshare_industry_pe(symbol, industry_name=i)))
 
-    if not tasks:
-        return {
-            "dimension": dim_val,
-            "display": "行业数据",
-            "data": None,
-            "status": "missing",
-            "error": "无可用行业数据源（需 akshare + 东方财富 push2 可用）",
-            "_meta": {"source": "none", "success": False,
-                      "all_sources": [], "multi_source": False,
-                      "source_count": 0},
-        }
+    empty = {
+        "dimension": dim_val,
+        "display": "行业数据",
+        "data": None,
+        "status": "missing",
+        "error": "无可用行业数据源（需 akshare + 东方财富 push2 可用）",
+        "_meta": {"source": "none", "success": False,
+                  "all_sources": [], "multi_source": False,
+                  "source_count": 0},
+    }
 
-    results = _run_sources_parallel(tasks, dim_val)
-    dim = DimensionResult(dim_val, results)
-    dim_dict = dim.to_legacy_dict()
-    merged: dict = {}
-    sources_ok: list[str] = []
-    for r in results:
-        if r.data and isinstance(r.data, dict):
-            merged.update(r.data)
-            sources_ok.append(r.source)
-    if merged:
-        dim_dict["data"] = merged
-        if len(sources_ok) > 1:
-            meta = dim_dict.setdefault("_meta", {})
-            meta["source"] = "merged:" + "+".join(sources_ok)
-            meta["merged_sources"] = sources_ok
-            meta["multi_source"] = True
-    return dim_dict
+    def _merge_industry(dim_dict: dict, results: list) -> dict:
+        merged: dict = {}
+        sources_ok: list[str] = []
+        for r in results:
+            if r.data and isinstance(r.data, dict):
+                merged.update(r.data)
+                sources_ok.append(r.source)
+        if merged:
+            dim_dict["data"] = merged
+            if len(sources_ok) > 1:
+                meta = dim_dict.setdefault("_meta", {})
+                meta["source"] = "merged:" + "+".join(sources_ok)
+                meta["merged_sources"] = sources_ok
+                meta["multi_source"] = True
+        return dim_dict
+
+    return _collect_dimension(
+        dim_val, tasks, empty_result=empty, postprocess=_merge_industry,
+    )
 
 
 # ---- 股东增减持采集（P0-2 holder_changes） ----
@@ -1698,12 +1700,24 @@ _HOLDER_SOURCE_RANK: dict[str, int] = {
 }
 
 
-def _first_dict_value(row: dict, *keys: str):
-    """取 dict 中第一个非 None 值（保留 0，避免 `or` 误判）。"""
+def _first_present(row: dict, *keys: str):
+    """取 dict 中第一个非 None 原始值（保留 0；不做数值转换）。"""
     for k in keys:
         if k in row and row[k] is not None:
             return row[k]
     return None
+
+
+def _holder_avg_price(row: dict, *keys: str):
+    """成交均价：数值优先于列顺序；无法数值化时回退原文。
+
+    - ``coalesce_field`` 跳过非纯数字串，可能落到靠后的 key
+      （例：成交均价=\"12.50元\" + 交易均价=9.8 → 9.8）
+    - 全部无法数值化时回退 ``_first_present`` 原文（如单独的「12.50元」）
+    """
+    raw = _first_present(row, *keys)
+    num = coalesce_field(row, *keys)
+    return num if num is not None else raw
 
 
 def _infer_holder_direction(
@@ -1871,14 +1885,17 @@ def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
         if df.empty:
             continue
         for row in df.to_dict("records"):
+            change_vol_raw = _first_present(row, "变动数量", "变动股数")
+            parsed_vol = _parse_holder_change_vol(change_vol_raw)
             records.append({
                 "ann_date": _norm_date(
                     row.get("公告日期") or row.get("变动日期") or ""),
                 "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
                 "position": row.get("董监高职务") or row.get("职务") or "",
                 "direction": direction,
-                "change_vol": _first_dict_value(row, "变动数量", "变动股数"),
-                "avg_price": _first_dict_value(row, "成交均价", "交易均价"),
+                "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
+                "change_vol_raw": change_vol_raw,
+                "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
                 "reason": row.get("持股变动原因") or row.get("变动原因") or "",
                 "source": "akshare cninfo",
             })
@@ -1903,7 +1920,7 @@ def _q_akshare_shareholder_change_ths(symbol: str) -> list[dict] | None:
             "holder_name": row.get("变动股东") or "",
             "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
             "change_vol_raw": change_vol_raw,
-            "avg_price": row.get("交易均价"),
+            "avg_price": _holder_avg_price(row, "交易均价"),
             "remain_vol": row.get("剩余股份总数"),
             "direction": direction,
             "source": "akshare ths",
@@ -2211,14 +2228,16 @@ def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
         tasks.append(("akshare.stock_news_em",
                       lambda: _q_akshare_company_news_price(symbol)))
 
-    results = _run_sources_parallel(tasks, "industry_pricing")
-    dim = DimensionResult("industry_pricing", results)
-    legacy = dim.to_legacy_dict()
-    legacy.setdefault("data", {})
-    if isinstance(legacy["data"], dict):
-        legacy["data"]["industry"] = industry
-        legacy["data"]["has_futures"] = bool(get_futures_for_industry(industry))
-    return legacy
+    def _inject_meta(legacy: dict, _results: list) -> dict:
+        legacy.setdefault("data", {})
+        if isinstance(legacy["data"], dict):
+            legacy["data"]["industry"] = industry
+            legacy["data"]["has_futures"] = bool(get_futures_for_industry(industry))
+        return legacy
+
+    return _collect_dimension(
+        "industry_pricing", tasks, postprocess=_inject_meta,
+    )
 
 
 # ---- 全维度采集 ----
@@ -2949,7 +2968,7 @@ def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
 
 
 def _ms_fetch_turnover(tc: Any, symbol: str) -> dict | None:
-    from lib.valuation import percentile_rank
+    from lib.stats import percentile_rank
 
     df = tc.query("daily_basic", ts_code=_ts_code(symbol),
                   fields="trade_date,turnover_rate",
@@ -3080,7 +3099,7 @@ def _dgs10_for_trade_date(
 
 
 def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
-    from lib.valuation import percentile_rank
+    from lib.stats import percentile_rank
 
     df = tc.query("index_dailybasic", ts_code=_HS300_CODE,
                   fields="trade_date,pe_ttm",
@@ -3188,7 +3207,7 @@ def _ms_pcr_on_date(
 
 def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
     """50ETF 认沽认购比（opt_daily，需 5000 积分）。"""
-    from lib.valuation import percentile_rank
+    from lib.stats import percentile_rank
 
     puts, calls = _ms_50etf_option_codes(tc)
     if not puts or not calls:
@@ -3233,7 +3252,7 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
 
 def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
     """融券余额增速（交易所 margin 优先，个股 margin_detail 回退）。"""
-    from lib.valuation import percentile_rank
+    from lib.stats import percentile_rank
 
     df = tc.query("margin", start_date=_days_ago(1825), end_date=_today())
     if df is not None and not df.empty:
@@ -3293,7 +3312,7 @@ def _ms_new_high_ratio_from_panel(panel: dict[str, list[dict]]) -> float | None:
 
 def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     """创新高个股占比（采样 daily，partial 标注）。"""
-    from lib.valuation import percentile_rank
+    from lib.stats import percentile_rank
 
     basic = tc.query("stock_basic", list_status="L", fields="ts_code")
     if basic is None or basic.empty:
