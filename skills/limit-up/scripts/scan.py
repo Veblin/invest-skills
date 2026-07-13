@@ -4,6 +4,7 @@
 用法:
   uv run python skills/limit-up/scripts/scan.py --days 10
   uv run python skills/limit-up/scripts/scan.py --sector 半导体 --min-board 2
+  uv run python skills/limit-up/scripts/scan.py --quality-filter
   uv run python skills/limit-up/scripts/scan.py --json --out /tmp/scan.json
 """
 
@@ -39,16 +40,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="按行业筛选（如 '半导体'）")
     p.add_argument("--min-board", type=int, default=0,
                    help="最低连板数筛选（0=全部）")
+    p.add_argument("--quality-filter", action="store_true",
+                   help="启用六维质量过滤（炸板/股价/流通市值/ST 等；默认关闭）")
     p.add_argument("--max-break", type=int, default=3,
-                   help="最大炸板次数（默认3，≥该值排除）")
+                   help="最大炸板次数（需 --quality-filter；默认3，≥该值排除）")
     p.add_argument("--min-price", type=float, default=5.0,
-                   help="最低股价（元，需 Tushare L2；默认5）")
+                   help="最低股价（需 --quality-filter / Tushare L2；默认5）")
     p.add_argument("--min-float-mkt-cap", type=float, default=20e8,
-                   help="最低流通市值（元，默认20亿；有 L1/L2 数据时生效）")
+                   help="最低流通市值（需 --quality-filter；默认20亿）")
     p.add_argument("--include-st", action="store_true",
-                   help="保留 ST（默认排除；需 Tushare L2 is_st）")
+                   help="质量过滤时保留 ST（默认排除）")
     p.add_argument("--no-quality-filter", action="store_true",
-                   help="关闭质量过滤默认阈值（仅保留 --sector/--min-board）")
+                   help=argparse.SUPPRESS)  # 兼容旧旗标（现为默认行为）
     p.add_argument("--max-rows", type=int, default=80,
                    help="股票列表最多显示行数（默认80）")
     p.add_argument("--out", default="",
@@ -61,32 +64,29 @@ def main() -> int:
 
     result = scan_market(days=args.days)
 
-    need_filter = (
-        args.sector
-        or args.min_board > 0
-        or not args.no_quality_filter
-    )
-    if need_filter:
-        if args.no_quality_filter:
-            result = quality_filter(
-                result,
-                sectors=[args.sector] if args.sector else None,
-                min_consecutive=args.min_board,
-                max_break_count=10**9,
-                min_price=0,
-                min_float_mkt_cap=0,
-                exclude_st=False,
-            )
-        else:
-            result = quality_filter(
-                result,
-                sectors=[args.sector] if args.sector else None,
-                min_consecutive=args.min_board,
-                max_break_count=args.max_break,
-                min_price=args.min_price,
-                min_float_mkt_cap=args.min_float_mkt_cap,
-                exclude_st=not args.include_st,
-            )
+    # #4: 默认不做质量过滤；仅 --sector/--min-board 或显式 --quality-filter
+    if args.quality_filter:
+        result = quality_filter(
+            result,
+            sectors=[args.sector] if args.sector else None,
+            min_consecutive=args.min_board,
+            max_break_count=args.max_break,
+            min_price=args.min_price,
+            min_float_mkt_cap=args.min_float_mkt_cap,
+            exclude_st=not args.include_st,
+        )
+    elif args.sector or args.min_board > 0:
+        result = quality_filter(
+            result,
+            sectors=[args.sector] if args.sector else None,
+            min_consecutive=args.min_board,
+            max_break_count=10**9,
+            min_price=0,
+            min_float_mkt_cap=0,
+            exclude_st=False,
+        )
+        # 轻量筛选不算「质量过滤」全套
+        result["quality_filter_applied"] = False
 
     if args.out:
         out_path = Path(args.out)

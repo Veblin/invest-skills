@@ -176,8 +176,9 @@ def quality_filter(
 
         filtered.append(s)
 
-    # M1: 按筛选集重算日频，不用全市场 daily_counts
-    daily = _daily_counts_from_stocks(filtered)
+    # M1+#2: 按筛选集重算日频，保留原扫描交易日骨架（零日填 0）
+    orig_daily = result.get("market_breadth", {}).get("daily_counts", {})
+    daily = _daily_counts_from_stocks(filtered, calendar=orig_daily)
     return {
         "scan_date": result.get("scan_date", ""),
         "trading_days_scanned": result.get("trading_days_scanned", 0),
@@ -190,6 +191,7 @@ def quality_filter(
             "output_count": len(filtered),
             "filtered_reasons": dict(reasons),
         },
+        "quality_filter_applied": True,
     }
 
 
@@ -228,7 +230,9 @@ def filter_stocks(
                 if any(kw in name for kw in extra):
                     continue
                 kept.append(s)
-            daily = _daily_counts_from_stocks(kept)
+            daily = _daily_counts_from_stocks(
+                kept, calendar=result.get("market_breadth", {}).get("daily_counts", {}),
+            )
             out["stocks"] = kept
             out["market_breadth"] = _compute_breadth(kept, daily)
             out["filter_stats"]["output_count"] = len(kept)
@@ -257,6 +261,15 @@ def format_market_brief(result: dict) -> str:
         lines.append(
             f"数据增强: Tushare L2 {'✅' if ts_ok else '❌（未启用/降级）'}"
             f" | 增强标的: {enrichment.get('enriched_count', 0)}"
+        )
+        lines.append("")
+
+    if result.get("filter_stats"):
+        fs = result.get("filter_stats") or {}
+        mode = "质量过滤" if result.get("quality_filter_applied") else "轻量筛选（行业/连板）"
+        lines.append(
+            f"筛选: 已应用（{mode}）"
+            f" | 输入 {fs.get('input_count', '?')} → 输出 {fs.get('output_count', len(stocks))}"
         )
         lines.append("")
 
@@ -397,11 +410,12 @@ def _apply_tushare_enrich(stocks: list[dict], trade_date: str) -> dict:
             changed = True
         if sym in prices:
             p = prices[sym]
-            if p.get("close"):
+            # #3: 用键存在判断，避免 close/amount=0 被真值判断丢弃
+            if "close" in p and p["close"] is not None:
                 s["close"] = p["close"]
-            if p.get("amount"):
+            if "amount" in p and p["amount"] is not None:
                 s["amount"] = p["amount"]
-            if p.get("float_mkt_cap"):
+            if "float_mkt_cap" in p and p["float_mkt_cap"] is not None:
                 s["float_mkt_cap"] = p["float_mkt_cap"]
             changed = True
         if changed:
@@ -426,26 +440,28 @@ def _fetch_day_with_aux(
             df = ak.stock_zt_pool_em(date)
             records = None if df is None or len(df) == 0 else df.to_dict("records")
 
-            for key, fn_name in (
-                ("strong", "stock_zt_pool_strong_em"),
-                ("previous", "stock_zt_pool_previous_em"),
-                ("zbgc", "stock_zt_pool_zbgc_em"),
-            ):
-                try:
-                    fn = getattr(ak, fn_name, None)
-                    if fn is None:
-                        aux_errors.append(f"{date}: {fn_name} 不可用")
-                        continue
-                    adf = fn(date)
-                    if adf is None or len(adf) == 0:
-                        continue
-                    for row in adf.to_dict("records"):
-                        sym = str(row.get("代码", "") or "")
-                        if sym:
-                            aux[key].add(sym)
-                except Exception as e:
-                    logger.warning("%s(%s) 失败: %s", fn_name, date, e)
-                    aux_errors.append(f"{date}: {fn_name} {e}")
+            # #5: 主池为空日跳过辅池，避免 3×N 无效 EastMoney 请求
+            if records:
+                for key, fn_name in (
+                    ("strong", "stock_zt_pool_strong_em"),
+                    ("previous", "stock_zt_pool_previous_em"),
+                    ("zbgc", "stock_zt_pool_zbgc_em"),
+                ):
+                    try:
+                        fn = getattr(ak, fn_name, None)
+                        if fn is None:
+                            aux_errors.append(f"{date}: {fn_name} 不可用")
+                            continue
+                        adf = fn(date)
+                        if adf is None or len(adf) == 0:
+                            continue
+                        for row in adf.to_dict("records"):
+                            sym = str(row.get("代码", "") or "")
+                            if sym:
+                                aux[key].add(sym)
+                    except Exception as e:
+                        logger.warning("%s(%s) 失败: %s", fn_name, date, e)
+                        aux_errors.append(f"{date}: {fn_name} {e}")
 
             return records, None, aux, aux_errors
     except Exception as e:
@@ -523,15 +539,33 @@ def _merge_daily_results(
     return stocks, _compute_breadth(stocks, daily_data)
 
 
-def _daily_counts_from_stocks(stocks: list[dict]) -> dict[str, int]:
-    """M1: 按筛选集 appearances 重算每日涨停家数。"""
+def _daily_counts_from_stocks(
+    stocks: list[dict],
+    calendar: dict[str, Any] | list[str] | None = None,
+) -> dict[str, int]:
+    """按筛选集 appearances 重算每日涨停家数。
+
+    calendar: 原扫描交易日骨架（dict keys 或 list）；提供时对缺失日填 0，
+    避免筛选后丢掉零涨停日导致日均偏高。
+    """
     counts: Counter[str] = Counter()
     for s in stocks:
         for a in s.get("appearances", []):
             d = a.get("date")
             if d:
                 counts[d] += 1
-    return dict(counts)
+    if calendar is None:
+        return dict(counts)
+    if isinstance(calendar, dict):
+        keys = list(calendar.keys())
+    else:
+        keys = list(calendar)
+    # 保持原顺序；补上筛选集多出的日期
+    out = {d: int(counts.get(d, 0)) for d in keys}
+    for d, c in counts.items():
+        if d not in out:
+            out[d] = c
+    return out
 
 
 def _normalize_seal_time(raw: str) -> str:
@@ -546,9 +580,15 @@ def _normalize_seal_time(raw: str) -> str:
     return digits
 
 
-def _one_to_two_rate(stocks: list[dict]) -> float:
-    """一进二晋级率：前日连板=1 且次日连板≥2。"""
-    # 按日期聚合：date → {symbol: consecutive}
+def _one_to_two_rate(
+    stocks: list[dict],
+    trade_dates: list[str] | None = None,
+) -> float:
+    """一进二晋级率：交易日历上相邻日，前日连板=1 且次日连板≥2。
+
+    trade_dates: 完整扫描交易日（含零涨停日）。缺省时回退到 appearances 日期
+    （可能把不相邻交易日误判为相邻，仅作兜底）。
+    """
     by_date: dict[str, dict[str, int]] = {}
     for s in stocks:
         sym = s["symbol"]
@@ -558,7 +598,7 @@ def _one_to_two_rate(stocks: list[dict]) -> float:
                 continue
             by_date.setdefault(d, {})[sym] = int(a.get("consecutive", 0) or 0)
 
-    dates = sorted(by_date.keys())
+    dates = sorted(trade_dates) if trade_dates else sorted(by_date.keys())
     if len(dates) < 2:
         return 0.0
 
@@ -566,18 +606,21 @@ def _one_to_two_rate(stocks: list[dict]) -> float:
     base = 0
     for i in range(len(dates) - 1):
         d0, d1 = dates[i], dates[i + 1]
-        first_board = {sym for sym, c in by_date[d0].items() if c == 1}
+        first_board = {sym for sym, c in by_date.get(d0, {}).items() if c == 1}
         if not first_board:
             continue
         base += len(first_board)
-        next_map = by_date[d1]
+        next_map = by_date.get(d1, {})
         for sym in first_board:
             if next_map.get(sym, 0) >= 2:
                 promoted += 1
     return round(promoted / base, 4) if base else 0.0
 
 
-def _compute_seal_quality(stocks: list[dict]) -> dict:
+def _compute_seal_quality(
+    stocks: list[dict],
+    trade_dates: list[str] | None = None,
+) -> dict:
     """封板质量指标（基于各股最新 appearance）。"""
     early = 0
     seal_n = 0
@@ -606,7 +649,7 @@ def _compute_seal_quality(stocks: list[dict]) -> dict:
         "early_seal_rate": round(early / seal_n, 4) if seal_n else 0.0,
         "seal_flow_gt_5pct": round(flow_ok / flow_n, 4) if flow_n else 0.0,
         "avg_break_count": round(sum(breaks) / len(breaks), 2) if breaks else 0.0,
-        "one_to_two_rate": _one_to_two_rate(stocks),
+        "one_to_two_rate": _one_to_two_rate(stocks, trade_dates),
     }
 
 
@@ -627,14 +670,17 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
 
     consec: Counter[str] = Counter()
     for s in stocks:
-        mc = s.get("max_consecutive", 0)
+        mc = int(s.get("max_consecutive", 0) or 0)
+        # #6: max_consecutive<=0 不计入「1板」
+        if mc <= 0:
+            continue
         if mc >= 4:
             consec["4板+"] += 1
         elif mc == 3:
             consec["3板"] += 1
         elif mc == 2:
             consec["2板"] += 1
-        else:
+        elif mc == 1:
             consec["1板"] += 1
 
     sector_counter: Counter[str] = Counter()
@@ -646,6 +692,7 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
         market = s.get("market") or "未知"
         market_counter[market] += 1
 
+    trade_dates = sorted(daily_counts.keys())
     return {
         "daily_counts": daily_counts,
         "days_with_limit_ups": days_with,
@@ -654,7 +701,7 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
         "consecutive_dist": dict(consec),
         "sector_dist": sector_counter.most_common(15),
         "market_dist": dict(market_counter),
-        "seal_quality": _compute_seal_quality(stocks),
+        "seal_quality": _compute_seal_quality(stocks, trade_dates),
     }
 
 
