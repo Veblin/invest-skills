@@ -40,6 +40,7 @@ Claude 读取输出后，以简报形式呈现并引导用户筛选：
 
 ```bash
 uv run python skills/limit-up/scripts/scan.py --sector 半导体 --min-board 2 --max-rows 20
+uv run python skills/limit-up/scripts/scan.py --quality-filter   # 六维质量过滤（默认关闭）
 ```
 
 ### 理解盘面宽度

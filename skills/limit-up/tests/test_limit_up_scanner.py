@@ -180,7 +180,7 @@ class TestQualityFilter:
         assert f["filter_stats"]["filtered_reasons"]["market_cap_unknown"] == 1
 
     def test_filtered_daily_counts_consistent(self):
-        """M1: 筛选后 daily_counts 来自筛选集 appearances。"""
+        """筛选后 daily_counts 来自筛选集，并保留原日历零日。"""
         s1 = _make_stock(
             "000001", "A", "半导体", max_consecutive=2, market_cap=5e10, last_date="20260710",
         )
@@ -196,13 +196,17 @@ class TestQualityFilter:
             "000002", "B", "银行", max_consecutive=1, market_cap=5e10, last_date="20260710",
         )
         r = _make_result([s1, s2])
-        # 全市场日频人为写成很大
-        r["market_breadth"]["daily_counts"] = {"20260710": 100, "20260711": 100}
+        # 全市场含第三日（零涨停）与虚高计数
+        r["market_breadth"]["daily_counts"] = {
+            "20260710": 100, "20260711": 100, "20260712": 0,
+        }
         f = quality_filter(
             r, sectors=["半导体"], min_price=0, min_float_mkt_cap=0, exclude_st=False,
         )
-        assert f["market_breadth"]["daily_counts"] == {"20260710": 1, "20260711": 1}
-        assert f["market_breadth"]["avg_daily_count"] == 1.0
+        assert f["market_breadth"]["daily_counts"] == {
+            "20260710": 1, "20260711": 1, "20260712": 0,
+        }
+        assert f["market_breadth"]["avg_daily_count"] == round(2 / 3, 1)
 
 
 # ---- scan_market (mocked) ----
@@ -414,6 +418,34 @@ class TestComputeBreadth:
         b = _compute_breadth([s, s_fail], {"20260710": 2, "20260711": 1})
         assert b["seal_quality"]["one_to_two_rate"] == 0.5
 
+    def test_one_to_two_rate_uses_trade_calendar_gap(self):
+        """中间空交易日不应把 10→12 当成相邻晋级。"""
+        s = {
+            "symbol": "000001", "name": "A", "sector": "X",
+            "max_consecutive": 2, "total_appearances": 2,
+            "appearances": [
+                {"date": "20260710", "consecutive": 1, "seal_time": "093000",
+                 "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+                 "market_cap": 1e10, "change_pct": 10.0, "stat": "1/1"},
+                {"date": "20260712", "consecutive": 2, "seal_time": "093000",
+                 "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+                 "market_cap": 1e10, "change_pct": 10.0, "stat": "2/2"},
+            ],
+        }
+        # 无日历时误判为相邻 → 1.0；有完整日历则 10→11 未晋级
+        assert _one_to_two_rate([s]) == 1.0
+        assert _one_to_two_rate(
+            [s], trade_dates=["20260710", "20260711", "20260712"],
+        ) == 0.0
+
+    def test_consecutive_dist_skips_zero(self):
+        s0 = _make_stock("000001", "Z", "X", max_consecutive=0)
+        s0["max_consecutive"] = 0
+        s1 = _make_stock("000002", "A", "X", max_consecutive=1)
+        b = _compute_breadth([s0, s1], {"20260710": 1})
+        assert b["consecutive_dist"].get("1板") == 1
+        assert sum(b["consecutive_dist"].values()) == 1
+
 
 # ---- Formatting ----
 
@@ -505,6 +537,27 @@ class TestUtilities:
             {"date": "20260711"},
         ]
         assert _daily_counts_from_stocks([s]) == {"20260710": 1, "20260711": 1}
+        assert _daily_counts_from_stocks(
+            [s], calendar={"20260710": 9, "20260711": 9, "20260712": 0},
+        ) == {"20260710": 1, "20260711": 1, "20260712": 0}
+
+
+class TestApplyTushareEnrich:
+
+    def test_keeps_zero_close(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X")]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 0.0, "amount": 0.0, "float_mkt_cap": 1e9}},
+             ):
+            info = _apply_tushare_enrich(stocks, "20260710")
+        assert info["tushare"] is True
+        assert stocks[0]["close"] == 0.0
+        assert stocks[0]["amount"] == 0.0
+        assert stocks[0]["float_mkt_cap"] == 1e9
 
 
 # ---- tushare_enrich helpers / H4-H7 ----
