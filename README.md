@@ -1,4 +1,4 @@
-# invest-A — A股投研助手
+# invest:a-stock — A股投研助手
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
@@ -16,23 +16,28 @@
 
 ## 一句话
 
-输入股票代码，自动采集财务、行情、估值、股东、北向资金、K 线等维度数据，产出带来源追溯的 Markdown 研究备忘录。每条事实标注来源，每个判断标注依据。
+invest:a-stock — 输入股票代码，自动采集财务/行情/估值/股东/北向/K线等维度，产出带来源追溯的九模块研究备忘录。invest:a-limit-up — 全市场涨停扫描+归因。每条事实标注来源，每个判断标注依据。
 
 ---
 
 ## 快速开始
 
-invest-A 分两层：**Skill**（告诉 Agent 怎么调研）+ **Python 引擎**（实际拉数据、渲染报告）。多数用户先装 Skill，再一次性配置引擎。
+invest skills 包含两个子技能：
+
+- **invest:a-stock** — 个股深度研究（九模块多因子分析）
+- **invest:a-limit-up** — 涨停板全市场扫描 + 归因
+
+invest:a-stock 分两层：**Skill**（告诉 Agent 怎么调研）+ **Python 引擎**（实际拉数据、渲染报告）。多数用户先装 Skill，再一次性配置引擎。
 
 ### 1. 安装 Skill（按你的环境选一）
 
 | 环境 | 安装方式 | 说明 |
 |------|----------|------|
 | **Claude Code** | `/plugin marketplace add Veblin/invest-skills` | 推荐；含插件钩子，marketplace 可自动更新 |
-| **Cursor** | `npx skills add Veblin/invest-skills --skill invest-A -g -a cursor -y` | 安装到 Cursor Skills 目录 |
-| **OpenClaw** | `npx skills add Veblin/invest-skills --skill invest-A -g -a openclaw -y` | 或 `openclaw skills install git:Veblin/invest-skills`（需本仓库已 clone） |
-| **Hermes** | `npx skills add Veblin/invest-skills --skill invest-A -g -y` | Agent Skills 开放格式，与 Claude Code / Cursor 同源 |
-| **Codex / Gemini CLI 等** | `npx skills add Veblin/invest-skills --skill invest-A -g -y` | 可用 `-a <agent>` 指定目标，见 [agentskills.io](https://agentskills.io) |
+| **Cursor** | `npx skills add Veblin/invest-skills --skill invest:a-stock -g -a cursor -y` | 安装到 Cursor Skills 目录 |
+| **OpenClaw** | `npx skills add Veblin/invest-skills --skill invest:a-stock -g -a openclaw -y` | 或 `openclaw skills install git:Veblin/invest-skills`（需本仓库已 clone） |
+| **Hermes** | `npx skills add Veblin/invest-skills --skill invest:a-stock -g -y` | Agent Skills 开放格式，与 Claude Code / Cursor 同源 |
+| **Codex / Gemini CLI 等** | `npx skills add Veblin/invest-skills --skill invest:a-stock -g -y` | 可用 `-a <agent>` 指定目标，见 [agentskills.io](https://agentskills.io) |
 
 <details>
 <summary>各环境安装后怎么用</summary>
@@ -40,18 +45,18 @@ invest-A 分两层：**Skill**（告诉 Agent 怎么调研）+ **Python 引擎**
 **Claude Code**
 
 ```
-/invest-A 600176                  # 单标的研究
-/invest-A 600176 --compare 000858 # 双标的对比
-/invest-A 600176 --deep           # 深度模式（730 日 K 线 + 行业分析）
+/invest:a-stock 600176                  # 单标的研究
+/invest:a-stock 600176 --compare 000858 # 双标的对比
+/invest:a-stock 600176 --deep           # 深度模式（730 日 K 线 + 行业分析）
 ```
 
 **Cursor / Hermes / OpenClaw / 其他 Agent**
 
 在对话中直接说明意图即可，例如：
 
-> 用 invest-A 研究 600176，生成九模块 Markdown 备忘录。
+> 用 invest:a-stock 研究 600176，生成九模块 Markdown 备忘录。
 
-Agent 会按 `skills/invest-A/SKILL.md` 调用 `invest.py` 采集与渲染。
+Agent 会按 `skills/invest-a-stock/SKILL.md` 调用 `invest.py` 采集与渲染。
 
 </details>
 
@@ -62,13 +67,13 @@ Agent 会按 `skills/invest-A/SKILL.md` 调用 `invest.py` 采集与渲染。
 ```bash
 git clone https://github.com/Veblin/invest-skills.git && cd invest-skills
 uv sync
-uv run python skills/invest-A/scripts/invest.py diagnose   # 检查数据源是否可用
+uv run python skills/invest-a-stock/scripts/invest.py diagnose   # 检查数据源是否可用
 ```
 
 `diagnose` 通过后即可在 Agent 或 CLI 中正常出报告。开发模式（本地改 Skill 即时生效）：
 
 ```bash
-ln -sfn "$PWD/skills/invest-A" ~/.agents/skills/invest-A   # 可选：symlink 到 Agent Skills 目录
+ln -sfn "$PWD/skills/invest-a-stock" ~/.agents/skills/invest-a-stock   # 可选：symlink 到 Agent Skills 目录
 ```
 
 ### 3. 配置 API Key（可选，不配也能跑基础功能）
@@ -89,20 +94,20 @@ cp .env.example .env   # 编辑填入 Key，全部可选
 
 ```bash
 # 报告与对比
-uv run python skills/invest-A/scripts/invest.py report 600176
-uv run python skills/invest-A/scripts/invest.py compare 600176 000858
-uv run python skills/invest-A/scripts/invest.py store list
+uv run python skills/invest-a-stock/scripts/invest.py report 600176
+uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
+uv run python skills/invest-a-stock/scripts/invest.py store list
 
 # 新闻包（公告 + 声明式查询包 + 可选 Tavily）
-uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
+uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
 
 # v0.1.9 质量门与工具
-uv run python skills/invest-A/scripts/invest.py rigor 600176 --verify-all   # 财务验算
-uv run python skills/invest-A/scripts/invest.py audit report.md --extract  # 报告审计抽样
-uv run python skills/invest-A/scripts/invest.py check 600176               # 单标的质地检查
-uv run python skills/invest-A/scripts/invest.py portfolio holdings.json    # 组合风险特征
-uv run python skills/invest-A/scripts/invest.py thesis 600176 --init       # 投资假设追踪
-uv run python skills/invest-A/scripts/invest.py shock 300274 \
+uv run python skills/invest-a-stock/scripts/invest.py rigor 600176 --verify-all   # 财务验算
+uv run python skills/invest-a-stock/scripts/invest.py audit report.md --extract  # 报告审计抽样
+uv run python skills/invest-a-stock/scripts/invest.py check 600176               # 单标的质地检查
+uv run python skills/invest-a-stock/scripts/invest.py portfolio holdings.json    # 组合风险特征
+uv run python skills/invest-a-stock/scripts/invest.py thesis 600176 --init       # 投资假设追踪
+uv run python skills/invest-a-stock/scripts/invest.py shock 300274 \
   --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 \
   --pe-normal 27 --pe-stressed 20                                         # 价格冲击插值比例
 ```
@@ -135,7 +140,7 @@ uv run python skills/invest-A/scripts/invest.py shock 300274 \
 
 ## 产出法则
 
-所有输出由 9 条法则约束，违反即为 Bug。详见 [SKILL.md](skills/invest-A/SKILL.md)。
+所有输出由 9 条法则约束，违反即为 Bug。详见 [SKILL.md](skills/invest-a-stock/SKILL.md)。
 
 | LAW | 规则 |
 |-----|------|
@@ -151,17 +156,23 @@ uv run python skills/invest-A/scripts/invest.py shock 300274 \
 ## 项目结构
 
 ```
-skills/invest-A/
-  SKILL.md                  ← 核心规格（LAWs + 路由表 + CLI）
-  references/               ← 专项与参考（modules / financials / sentiment / game-theory）
-  scripts/
-    invest.py               ← CLI 单入口
-    lib/                    ← collector / render / store / technical / valuation
-                              + financial_rigor / news_scanner / quality_check 等
-  tests/                    ← pytest
-.claude-plugin/             ← Claude Code 插件注册
-hooks/                      ← SessionStart 钩子
-pyproject.toml              ← uv 依赖
+skills/
+  invest-a-stock/            ← A股个股深度研究（invest:a-stock）
+    SKILL.md                 ← 核心规格（LAWs + 路由表 + CLI）
+    references/              ← 专项与参考（modules / financials / sentiment / game-theory）
+    scripts/
+      invest.py              ← CLI 单入口
+      lib/                   ← collector / render / store / technical / valuation
+                               + financial_rigor / news_scanner / quality_check 等
+    tests/                   ← pytest
+  invest-a-limit-up/         ← A股涨停扫描（invest:a-limit-up）
+    SKILL.md
+    scripts/
+      scan.py                ← 全市场扫描 CLI
+      lib/                   ← limit_up_scanner / tushare_enrich
+.claude-plugin/              ← Claude Code 插件注册
+hooks/                       ← SessionStart 钩子
+pyproject.toml               ← uv 依赖
 ```
 
 ---
@@ -173,8 +184,9 @@ pyproject.toml              ← uv 依赖
 | [docs/README.md](docs/README.md) | 对外文档索引 |
 | [docs/roadmap.md](docs/roadmap.md) | 路线图（待接入数据源） |
 | [CONFIGURATION.md](CONFIGURATION.md) | 各 Harness 安装细节、Tushare 积分、常见问题 |
-| [SKILL.md](skills/invest-A/SKILL.md) | 核心规格（LAWs + 专项路由） |
-| [references/](skills/invest-A/references/) | 九模块、财报/舆情/行为扫描专项 |
+| [SKILL.md](skills/invest-a-stock/SKILL.md) | invest:a-stock 核心规格（LAWs + 专项路由） |
+| [SKILL.md](skills/invest-a-limit-up/SKILL.md) | invest:a-limit-up 涨停扫描规格 |
+| [references/](skills/invest-a-stock/references/) | 九模块、财报/舆情/行为扫描专项 |
 | [AGENTS.md](AGENTS.md) | AI 协作规则、设计约束 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | 贡献指南 |
@@ -185,8 +197,8 @@ pyproject.toml              ← uv 依赖
 
 ```bash
 uv sync && uv run pytest
-uv run python skills/invest-A/scripts/invest.py diagnose
-bash skills/invest-A/scripts/check-version.sh   # 分发 manifest（5 文件）版本一致性
+uv run python skills/invest-a-stock/scripts/invest.py diagnose
+bash skills/invest-a-stock/scripts/check-version.sh   # 分发 manifest（5 文件）版本一致性
 ```
 
 提交前确保测试通过，无 API Key 泄露。

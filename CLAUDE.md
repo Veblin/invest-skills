@@ -1,4 +1,4 @@
-# CLAUDE.md — invest-A 投研助手
+# CLAUDE.md — invest:a-stock 投研助手
 
 ## 版本规则
 
@@ -11,22 +11,22 @@
 
 **canonical 源**：`pyproject.toml` 的 `[project].version`（运行时经 `version.py` 读取）。
 
-**禁止手动改多处版本号**。发布时只运行 bump 脚本，由 `scripts/version_sync.py` 同步 5 个分发 manifest：
+**禁止手动改多处版本号**。`pyproject.toml` 为唯一 canonical 源，`scripts/sync_version.py` 同步全部派生文件：
 
 ```bash
-bash scripts/bump-version.sh X.Y.Z
-bash skills/invest-A/scripts/check-version.sh
+bash scripts/bump-version.sh X.Y.Z   # 或: uv run python scripts/sync_version.py bump X.Y.Z
+uv run python scripts/sync_version.py check
 ```
 
 运行 bump 后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
 
-版本一致性仅在发布/CI 时校验（`check-version.sh`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
+版本一致性仅在发布/CI 时校验（`sync_version.py check`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
 
 ## 运行命令
 
 ```bash
 # 所有命令必须用 uv run python，确保从 .venv 加载依赖
-uv run python skills/invest-A/scripts/invest.py <subcommand> <symbol> [--flags]
+uv run python skills/invest-a-stock/scripts/invest.py <subcommand> <symbol> [--flags]
 
 # 常用子命令
 diagnose     # 检查数据源可用性
@@ -50,7 +50,7 @@ shock        # 价格冲击插值比例
 - **Layer 3**：Tavily REST（`TAVILY_API_KEY` 可选）
 
 ```bash
-uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
+uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
 ```
 
 ## pip 规范
@@ -75,7 +75,7 @@ uv run python -c "import sys; print(sys.executable)"
 
 ## 数据源
 
-详见 `skills/invest-A/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
+详见 `skills/invest-a-stock/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
 
 **代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
 
@@ -184,5 +184,5 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 - 数据源扩展方案：`reports/A股数据源扩展研究报告_v0.1.3.md`
 - 个股报告：`reports/{symbol}-{name}/{date}.md`
-- 财报 F 规范：`skills/invest-A/references/financials.md`
-- 九模块结构：`skills/invest-A/references/modules.md`
+- 财报 F 规范：`skills/invest-a-stock/references/financials.md`
+- 九模块结构：`skills/invest-a-stock/references/modules.md`

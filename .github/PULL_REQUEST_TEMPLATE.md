@@ -26,7 +26,7 @@
 
 ```bash
 # e.g.
-uv run python skills/invest-A/scripts/invest.py diagnose --json
+uv run python skills/invest-a-stock/scripts/invest.py diagnose --json
 uv run pytest
 ```
 

@@ -17,7 +17,7 @@ body:
     attributes:
       label: CLI 参数
       description: 使用了哪些参数？(如 --deep, --compare)
-      placeholder: "/invest-A 600519 --with-macro"
+      placeholder: "/invest:a-stock 600519 --with-macro"
   - type: textarea
     id: expected
     attributes:
@@ -47,5 +47,5 @@ body:
     id: env
     attributes:
       label: 环境信息
-      description: 运行 `uv run python skills/invest-A/scripts/invest.py diagnose --json` 的输出
+      description: 运行 `uv run python skills/invest-a-stock/scripts/invest.py diagnose --json` 的输出
       render: json

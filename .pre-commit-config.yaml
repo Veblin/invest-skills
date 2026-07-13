@@ -1,15 +1,15 @@
 repos:
   - repo: local
     hooks:
-      - id: invest-a-check-version
-        name: invest-A version consistency
-        entry: bash skills/invest-A/scripts/check-version.sh
+      - id: sync-version-check
+        name: version consistency (pyproject.toml → all derived files)
+        entry: uv run python scripts/sync_version.py check
         language: system
         pass_filenames: false
         always_run: true
-      - id: invest-a-check-report
-        name: invest-A report wording (latest report)
-        entry: bash skills/invest-A/scripts/check_report.sh
+      - id: invest-stock-check-report
+        name: invest:a-stock report wording (latest report)
+        entry: bash skills/invest-a-stock/scripts/check_report.sh
         language: system
         pass_filenames: true
         files: ^reports/.*\.md$

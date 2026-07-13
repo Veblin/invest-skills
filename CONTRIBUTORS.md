@@ -1,6 +1,6 @@
 # Contributors
 
-invest-A is a personal learning tool, open-sourced for the community.
+invest skills is a personal learning toolkit, open-sourced for the community.
 
 ## Author
 
@@ -14,11 +14,11 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 2. **Add data sources**: New free APIs for A-share/HK-share data are always welcome.
 3. **Improve knowledge base**: The `knowledge/` directory is meant to grow — add clear, source-cited explanations of financial concepts.
 4. **Fix LAWs violations**: If you find a report that breaks any of the 9 LAWs, that's a bug.
-5. **Platform support**: Help make invest-A work on more Agent Skills harnesses (Codex, Cursor, GitHub Copilot, etc.).
+5. **Platform support**: Help make invest:a-stock work on more Agent Skills harnesses (Codex, Cursor, GitHub Copilot, etc.).
 
 ### Before submitting
 
-- Run `uv run python skills/invest-A/scripts/invest.py diagnose` to verify environment
+- Run `uv run python skills/invest-a-stock/scripts/invest.py diagnose` to verify environment
 - Run `uv run pytest` to verify tests pass
 - Ensure no API keys or secrets are committed
 
@@ -26,7 +26,7 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 
 1. 在 `CHANGELOG.md` 写好 `## vX.Y.Z` 章节（Release 正文从此提取）
 2. 运行 `bash scripts/bump-version.sh X.Y.Z`（同步 pyproject + SKILL + plugin + marketplace + gemini 共 5 文件）
-3. **合并到 `main`** 前可选：`INVEST_RUN_E2E=1 uv run pytest skills/invest-A/tests/test_v017_e2e.py -v`（四标的 live 冒烟）
+3. **合并到 `main`** 前可选：`INVEST_RUN_E2E=1 uv run pytest skills/invest-a-stock/tests/test_v017_e2e.py -v`（四标的 live 冒烟）
 4. **合并到 `main`** → [Release Draft Notes](.github/workflows/release-draft.yml) 自动根据 `pyproject.toml` 版本创建/更新 **Draft Release**（正文来自 CHANGELOG）
 4. 确认 Draft 内容后打 tag：`git tag vX.Y.Z && git push origin vX.Y.Z`
 5. [Release workflow](.github/workflows/release.yml) 打包 tarball 并**正式发布**（`draft: false`）

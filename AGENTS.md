@@ -130,30 +130,24 @@ Tavily → Bocha → WebSearch（Claude 内置）
 
 ### 发布前检查清单
 
-- [ ] `skills/invest-A/SKILL.md` 为最新规格（所有 LAWs、工作流、反模式完整）
-- [ ] `bash scripts/bump-version.sh X.Y.Z` 已执行（禁止手动改多处版本号）
-- [ ] `bash skills/invest-A/scripts/check-version.sh` 通过
+- [ ] `skills/invest-a-stock/SKILL.md` 为最新规格（所有 LAWs、工作流、反模式完整）
+- [ ] `bash scripts/bump-version.sh X.Y.Z` 已执行（`pyproject.toml` 为唯一 canonical 源）
+- [ ] `uv run python scripts/sync_version.py check` 通过
 - [ ] `.claude-plugin/marketplace.json` 描述准确
 - [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 描述同步
-- [ ] `gemini-extension.json` env vars 与 `.env.example` 一致
+- [ ] `gemini-extension.json.in` env vars 与 `.env.example` 一致
 - [ ] `CHANGELOG.md` 已更新
 - [ ] `uv run pytest` 通过
-- [ ] `uv run python skills/invest-A/scripts/invest.py diagnose` 输出正常
+- [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
 - [ ] 无 API Key 或敏感信息泄露（security.yml CI 已验证）
 
 ### 版本号规范
 
-**canonical**：`pyproject.toml` `[project].version`
+**canonical**：`pyproject.toml` `[project].version` — **唯一手动维护的版本号**。
 
-由 `bash scripts/bump-version.sh X.Y.Z` 同步的 5 个文件：
+`bash scripts/bump-version.sh X.Y.Z` 或 `uv run python scripts/sync_version.py bump X.Y.Z` 自动同步全部派生文件。
 
-- `pyproject.toml`
-- `skills/invest-A/SKILL.md`（frontmatter `version`）
-- `.claude-plugin/plugin.json`
-- `.claude-plugin/marketplace.json`（`plugins[0].version`）
-- `gemini-extension.json`
-
-校验：`bash skills/invest-A/scripts/check-version.sh`（CI / pre-commit 已接入）。
+校验：`uv run python scripts/sync_version.py check`（CI / pre-commit 已接入）。
 
 ### 跨 Harness 兼容
 
@@ -175,18 +169,24 @@ code/
   CONTRIBUTORS.md               ← 贡献指南
   .env.example                  ← 环境变量模板
   pyproject.toml                ← uv 依赖管理
-  skills/invest-A/              ← Agent Skills 标准目录
-    SKILL.md                    ← 运行时规格（LAWs + 工作流 + 专业知识）
-    scripts/
-      invest.py                 ← CLI 单入口
-      lib/
-        collector.py            ← 多维度数据采集
-        render.py               ← 报告渲染（compact/json/md）
-        store.py                ← SQLite 持久化存储
-        tushare_client.py       ← Tushare HTTP 轻量客户端
-        env.py                  ← 集中配置管理
-    tests/                      ← pytest 测试
-    references/                 ← 数据源参考文档
+  skills/
+    invest-a-stock/              ← 个股深度研究（invest:a-stock）
+      SKILL.md                    ← 运行时规格（LAWs + 工作流 + 专业知识）
+      scripts/
+        invest.py                 ← CLI 单入口
+        lib/
+          collector.py            ← 多维度数据采集
+          render.py               ← 报告渲染（compact/json/md）
+          store.py                ← SQLite 持久化存储
+          tushare_client.py       ← Tushare HTTP 轻量客户端
+          env.py                  ← 集中配置管理
+      tests/                      ← pytest 测试
+      references/                 ← 数据源参考文档
+    invest-a-limit-up/          ← 涨停板扫描（invest:a-limit-up）
+      SKILL.md
+      scripts/
+        scan.py                   ← 全市场扫描 CLI
+        lib/                      ← limit_up_scanner / tushare_enrich
   .claude-plugin/               ← Claude Code 插件注册
   .agents/                      ← Agent Skills 通用注册
   .github/                      ← CI/workflows/issue templates

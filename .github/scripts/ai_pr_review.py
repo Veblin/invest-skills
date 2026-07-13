@@ -57,7 +57,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 DEFAULT_PROVIDER = "deepseek"
 
 SYSTEM_PROMPT = """\
-你是 invest-A 仓库的 PR 代码审查助手。invest-A 是 A 股个股**学习工具**（非投资决策工具）。
+你是 invest:a-stock 仓库的 PR 代码审查助手。invest:a-stock 是 A 股个股**学习工具**（非投资决策工具）。
 
 审查范围：**仅审查 PR diff 中的变更**，不要臆测未改动的代码。
 
@@ -292,7 +292,7 @@ def main() -> int:
         return _skip_review("No file changes to review.")
 
     agents = _read_limited(ROOT / "AGENTS.md", MAX_CONTEXT_CHARS)
-    skill = _read_limited(ROOT / "skills/invest-A/SKILL.md", MAX_CONTEXT_CHARS)
+    skill = _read_limited(ROOT / "skills/invest-a-stock/SKILL.md", MAX_CONTEXT_CHARS)
     if len(diff) > MAX_DIFF_CHARS:
         diff = diff[:MAX_DIFF_CHARS] + f"\n\n... [diff truncated, {len(diff) - MAX_DIFF_CHARS} chars omitted]"
 
@@ -303,7 +303,7 @@ def main() -> int:
     model = _env_or_default("AI_REVIEW_MODEL", cfg["default_model"])
 
     user_prompt = textwrap.dedent(f"""\
-        Review this pull request for repository invest-A.
+        Review this pull request for repository invest-skills.
 
         PR #{pr_number}: {pr_title}
         Base: {base_ref} ← Head: {head_ref}

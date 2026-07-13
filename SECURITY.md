@@ -9,7 +9,7 @@
 
 ## 报告漏洞
 
-invest-A 是一个本地运行的学习工具，不涉及远程服务或用户数据收集。但仍然可能存在以下安全风险：
+invest skills 是一个本地运行的学习工具集，不涉及远程服务或用户数据收集。但仍然可能存在以下安全风险：
 
 1. **API Key 泄漏** — `.env` 文件中的 Tushare Token 或 FRED API Key 被意外提交
 2. **依赖漏洞** — 使用的第三方库（requests、pandas 等）存在已知 CVE
