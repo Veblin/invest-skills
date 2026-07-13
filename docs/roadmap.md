@@ -1,6 +1,6 @@
 # Roadmap
 
-> 对外精简版。实现状态以 `CHANGELOG.md` 与 `skills/invest-A/SKILL.md` 为准。
+> 对外精简版。实现状态以 `CHANGELOG.md` 与 `skills/invest-a-stock/SKILL.md`, `skills/invest-a-limit-up/SKILL.md` 为准。
 
 ## 数据源
 

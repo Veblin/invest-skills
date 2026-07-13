@@ -1,0 +1,17 @@
+# Skills CLI manifest — https://github.com/antfu/skills-cli
+# 安装: npx skills add Veblin/invest-skills
+# 列出: npx skills add Veblin/invest-skills --list
+# 单装: npx skills add Veblin/invest-skills --skill invest-a-stock
+
+agents: [claude-code]
+
+skills:
+  - name: invest-a-stock
+    description: A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。
+    repo: Veblin/invest-skills
+    skill: invest-a-stock
+
+  - name: invest-a-limit-up
+    description: A股涨停板全市场扫描 + 交互式深挖 — 盘面宽度 / 板块轮动 / 涨停归因，支持质量过滤与交互筛选。研究工具，非决策工具。
+    repo: Veblin/invest-skills
+    skill: invest-a-limit-up

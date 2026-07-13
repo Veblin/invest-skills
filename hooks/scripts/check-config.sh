@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------
-# invest-A 环境配置检测脚本
+# invest:a-stock 环境配置检测脚本
 # 在 SessionStart 钩子中运行，检测依赖是否就绪
 # ------------------------------------------------------------------
 set -euo pipefail
@@ -17,7 +17,7 @@ fi
 
 issues=0
 
-echo "=== invest-A 环境检测 ==="
+echo "=== invest:a-stock 环境检测 ==="
 
 # 检测 Python
 if command -v python3 &>/dev/null; then
@@ -56,8 +56,8 @@ done
 if [ "$issues" -gt 0 ]; then
     echo ""
     echo "⚠️  发现 $issues 个问题。运行 'uv sync' 安装依赖。"
-    echo "   详见: https://github.com/veblin/invest-A"
+    echo "   详见: https://github.com/veblin/invest-skills"
 else
     echo ""
-    echo "✅ invest-A 环境就绪"
+    echo "✅ invest:a-stock 环境就绪"
 fi

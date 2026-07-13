@@ -1,11 +1,23 @@
 {
   "name": "invest-skills",
   "interface": {
-    "displayName": "invest-A 投资学习"
+    "displayName": "invest skills 投资学习"
   },
   "plugins": [
     {
-      "name": "invest-A",
+      "name": "invest:a-stock",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Finance"
+    },
+    {
+      "name": "invest:a-limit-up",
       "source": {
         "source": "local",
         "path": "./"

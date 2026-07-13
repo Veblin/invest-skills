@@ -24,7 +24,8 @@ jobs:
             .claude-plugin \
             .agents \
             hooks \
-            skills/invest-A \
+            skills/invest-a-stock \
+            skills/invest-a-limit-up \
             gemini-extension.json \
             pyproject.toml \
             README.md \
@@ -38,11 +39,11 @@ jobs:
             LICENSE \
             dist/pkg/
           # Clean build artifacts from copy
-          rm -rf dist/pkg/skills/invest-A/__pycache__ dist/pkg/.venv
+          rm -rf dist/pkg/skills/invest-a-stock/__pycache__ dist/pkg/skills/invest-a-limit-up/__pycache__ dist/pkg/.venv
           find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete
-          cd dist && tar -czf invest-A-${{ github.ref_name }}.tar.gz -C pkg .
+          cd dist && tar -czf invest-skills-${{ github.ref_name }}.tar.gz -C pkg .
           rm -rf dist/pkg
-          echo "Archive created: dist/invest-A-${{ github.ref_name }}.tar.gz"
+          echo "Archive created: dist/invest-skills-${{ github.ref_name }}.tar.gz"
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -55,7 +56,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/invest-A-${{ github.ref_name }}.tar.gz
+          files: dist/invest-skills-${{ github.ref_name }}.tar.gz
           body_path: release-notes.md
           generate_release_notes: false
           draft: false
