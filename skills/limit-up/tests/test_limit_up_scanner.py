@@ -1,0 +1,579 @@
+"""Tests for limit_up_scanner — 纯函数测试，无网络依赖。"""
+
+from __future__ import annotations
+
+import math
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+
+from limit_up_scanner import (
+    filter_stocks,
+    format_market_brief,
+    format_stock_table,
+    quality_filter,
+    scan_market,
+    _merge_daily_results,
+    _compute_breadth,
+    _daily_counts_from_stocks,
+    _get_trade_dates,
+    _safe_float,
+    _fmt_yi,
+    _fmt_date,
+    _empty_breadth,
+    _latest_market_cap,
+    _one_to_two_rate,
+)
+from tushare_enrich import (
+    _market_label,
+    _safe_float_or_none,
+    _safe_str,
+    _to_ts_code,
+    enrich_price_data,
+    enrich_stock_info,
+)
+
+
+# ---- Fixtures ----
+
+def _make_stock(symbol, name, sector, max_consecutive=1, total_appearances=1,
+                market_cap=5e9, seal_time="093000", break_count=0, turnover=5.0,
+                first_date="20260710", last_date="20260710", **extra):
+    stock = {
+        "symbol": symbol, "name": name, "sector": sector,
+        "max_consecutive": max_consecutive, "total_appearances": total_appearances,
+        "first_date": first_date, "last_date": last_date,
+        "appearances": [{
+            "date": last_date, "consecutive": max_consecutive,
+            "seal_time": seal_time, "seal_amount": 1e8,
+            "break_count": break_count, "turnover": turnover,
+            "market_cap": market_cap, "change_pct": 10.0,
+            "stat": f"{max_consecutive}/{max_consecutive}",
+        }],
+        "flags": {"in_strong": False, "in_previous": False, "in_zbgc": False},
+    }
+    stock.update(extra)
+    return stock
+
+
+def _make_result(stocks, trading_days=3, scan_date="20260713"):
+    daily_counts = {f"202607{10+i:02d}": len(stocks) for i in range(trading_days)}
+    return {
+        "scan_date": scan_date,
+        "trading_days_scanned": trading_days,
+        "stocks": stocks,
+        "market_breadth": _compute_breadth(stocks, daily_counts),
+        "errors": [],
+        "enrichment": {"tushare": False, "enriched_count": 0},
+    }
+
+
+# ---- filter_stocks ----
+
+class TestFilterStocks:
+
+    def test_filter_by_min_consecutive(self):
+        s1 = _make_stock("000001", "A", "银行", max_consecutive=1)
+        s2 = _make_stock("000002", "B", "银行", max_consecutive=3)
+        r = _make_result([s1, s2])
+        f = filter_stocks(r, min_consecutive=2)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["symbol"] == "000002"
+
+    def test_filter_by_sector(self):
+        s1 = _make_stock("000001", "A", "银行")
+        s2 = _make_stock("000002", "B", "半导体")
+        r = _make_result([s1, s2])
+        f = filter_stocks(r, sectors=["半导体"])
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["name"] == "B"
+
+    def test_filter_exclude_delisting(self):
+        s1 = _make_stock("000001", "国华退", "软件")
+        s2 = _make_stock("000002", "正常股", "软件")
+        r = _make_result([s1, s2])
+        f = filter_stocks(r)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["name"] == "正常股"
+
+    def test_filter_by_market_cap(self):
+        s1 = _make_stock("000001", "小盘", "银行", market_cap=1e9)
+        s2 = _make_stock("000002", "中盘", "银行", market_cap=5e10)
+        r = _make_result([s1, s2])
+        f = filter_stocks(r, min_market_cap=2e10)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["name"] == "中盘"
+
+    def test_filter_combined(self):
+        s1 = _make_stock("000001", "A", "半导体", max_consecutive=2, market_cap=5e10)
+        s2 = _make_stock("000002", "B", "银行", max_consecutive=1, market_cap=1e9)
+        s3 = _make_stock("000003", "ST退", "半导体", max_consecutive=2)
+        s4 = _make_stock("000004", "C", "半导体", max_consecutive=3, market_cap=3e10)
+        r = _make_result([s1, s2, s3, s4])
+        f = filter_stocks(r, sectors=["半导体"], min_consecutive=2, min_market_cap=2e10)
+        syms = {s["symbol"] for s in f["stocks"]}
+        assert syms == {"000001", "000004"}
+
+
+# ---- quality_filter ----
+
+class TestQualityFilter:
+
+    def test_max_break_count(self):
+        s1 = _make_stock("000001", "稳", "银行", break_count=0, market_cap=5e10)
+        s2 = _make_stock("000002", "炸", "银行", break_count=3, market_cap=5e10)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, max_break_count=3, min_price=0, min_float_mkt_cap=0, exclude_st=False)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["symbol"] == "000001"
+        assert f["filter_stats"]["filtered_reasons"]["max_break_count"] == 1
+
+    def test_exclude_st_when_enriched(self):
+        s1 = _make_stock("000001", "正常", "银行", market_cap=5e10, is_st=False)
+        s2 = _make_stock("000002", "ST风险", "银行", market_cap=5e10, is_st=True)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, exclude_st=True, min_price=0, min_float_mkt_cap=0)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["symbol"] == "000001"
+
+    def test_l2_price_skipped_when_missing(self):
+        s = _make_stock("000001", "A", "银行", market_cap=5e10)
+        r = _make_result([s])
+        f = quality_filter(r, min_price=5.0, min_float_mkt_cap=0, exclude_st=False)
+        assert len(f["stocks"]) == 1
+
+    def test_min_price_when_enriched(self):
+        s1 = _make_stock("000001", "贵", "银行", market_cap=5e10, close=10.0)
+        s2 = _make_stock("000002", "便宜", "银行", market_cap=5e10, close=3.0)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, min_price=5.0, min_float_mkt_cap=0, exclude_st=False)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["symbol"] == "000001"
+
+    def test_min_float_mkt_cap(self):
+        s1 = _make_stock("000001", "大", "银行", market_cap=5e10, float_mkt_cap=30e8)
+        s2 = _make_stock("000002", "小", "银行", market_cap=5e10, float_mkt_cap=10e8)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert len(f["stocks"]) == 1
+        assert f["stocks"][0]["symbol"] == "000001"
+
+    def test_exclude_delisting(self):
+        s1 = _make_stock("000001", "国华退", "软件", market_cap=5e10)
+        s2 = _make_stock("000002", "正常", "软件", market_cap=5e10)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, min_price=0, min_float_mkt_cap=0, exclude_st=False)
+        assert len(f["stocks"]) == 1
+
+    def test_market_cap_unknown_when_constrained(self):
+        """M9: 有市值阈值但缺数据 → 剔除。"""
+        s = _make_stock("000001", "无市值", "银行", market_cap=0)
+        r = _make_result([s])
+        f = quality_filter(
+            r, min_market_cap=1e8, min_price=0, min_float_mkt_cap=0, exclude_st=False,
+        )
+        assert len(f["stocks"]) == 0
+        assert f["filter_stats"]["filtered_reasons"]["market_cap_unknown"] == 1
+
+    def test_filtered_daily_counts_consistent(self):
+        """M1: 筛选后 daily_counts 来自筛选集 appearances。"""
+        s1 = _make_stock(
+            "000001", "A", "半导体", max_consecutive=2, market_cap=5e10, last_date="20260710",
+        )
+        s1["appearances"] = [
+            {"date": "20260710", "consecutive": 1, "seal_time": "093000",
+             "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+             "market_cap": 5e10, "change_pct": 10.0, "stat": "1/1"},
+            {"date": "20260711", "consecutive": 2, "seal_time": "093000",
+             "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+             "market_cap": 5e10, "change_pct": 10.0, "stat": "2/2"},
+        ]
+        s2 = _make_stock(
+            "000002", "B", "银行", max_consecutive=1, market_cap=5e10, last_date="20260710",
+        )
+        r = _make_result([s1, s2])
+        # 全市场日频人为写成很大
+        r["market_breadth"]["daily_counts"] = {"20260710": 100, "20260711": 100}
+        f = quality_filter(
+            r, sectors=["半导体"], min_price=0, min_float_mkt_cap=0, exclude_st=False,
+        )
+        assert f["market_breadth"]["daily_counts"] == {"20260710": 1, "20260711": 1}
+        assert f["market_breadth"]["avg_daily_count"] == 1.0
+
+
+# ---- scan_market (mocked) ----
+
+class TestScanMarket:
+
+    def test_scan_market_structure_and_empty_day(self):
+        """含空涨停日仍计入 trading_days_scanned；结构完整。"""
+        def fake_fetch(date):
+            if date == "20260710":
+                return (
+                    [{"代码": "000001", "名称": "A", "连板数": 1, "首次封板时间": "093000",
+                      "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                      "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"}],
+                    None,
+                    {"strong": {"000001"}, "previous": set(), "zbgc": set()},
+                    [],
+                )
+            if date == "20260711":
+                return [], None, {"strong": set(), "previous": set(), "zbgc": set()}, []
+            return (
+                [{"代码": "000001", "名称": "A", "连板数": 2, "首次封板时间": "093015",
+                  "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                  "涨跌幅": 10.0, "涨停统计": "2/2", "所属行业": "银行"}],
+                None,
+                {"strong": set(), "previous": set(), "zbgc": set()},
+                [],
+            )
+
+        with patch("limit_up_scanner.env.is_akshare_available", return_value=True), \
+             patch("limit_up_scanner.akshare_push2_available", return_value=True), \
+             patch("limit_up_scanner.get_trade_dates", return_value=["20260712", "20260711", "20260710"]), \
+             patch("limit_up_scanner._fetch_day_with_aux", side_effect=fake_fetch), \
+             patch("limit_up_scanner._apply_tushare_enrich", return_value={"tushare": False, "enriched_count": 0}):
+            result = scan_market(days=3)
+
+        assert result["trading_days_scanned"] == 3
+        assert result["market_breadth"]["days_with_limit_ups"] == 2
+        assert result["market_breadth"]["daily_counts"]["20260711"] == 0
+        assert len(result["stocks"]) == 1
+        assert result["stocks"][0]["max_consecutive"] == 2
+        assert result["stocks"][0]["total_appearances"] == 2
+        assert result["stocks"][0]["flags"]["in_strong"] is True
+        assert "seal_quality" in result["market_breadth"]
+
+    def test_push2_unavailable(self):
+        with patch("limit_up_scanner.env.is_akshare_available", return_value=True), \
+             patch("limit_up_scanner.akshare_push2_available", return_value=False):
+            result = scan_market(days=3)
+        assert result["trading_days_scanned"] == 0
+        assert result["stocks"] == []
+        assert "push2" in result["errors"][0].lower() or "不可用" in result["errors"][0]
+
+    def test_tushare_fallback(self):
+        def fake_fetch(date):
+            return (
+                [{"代码": "000001", "名称": "A", "连板数": 1, "首次封板时间": "093000",
+                  "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                  "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"}],
+                None,
+                {"strong": set(), "previous": set(), "zbgc": set()},
+                [],
+            )
+
+        with patch("limit_up_scanner.env.is_akshare_available", return_value=True), \
+             patch("limit_up_scanner.akshare_push2_available", return_value=True), \
+             patch("limit_up_scanner.get_trade_dates", return_value=["20260710"]), \
+             patch("limit_up_scanner._fetch_day_with_aux", side_effect=fake_fetch), \
+             patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch("limit_up_scanner.enrich_price_data", return_value={}):
+            result = scan_market(days=1)
+
+        assert result["enrichment"]["tushare"] is False
+        assert len(result["stocks"]) == 1
+
+
+# ---- _merge_daily_results ----
+
+class TestMergeDailyResults:
+
+    def test_dedup_across_days(self):
+        daily = {
+            "20260710": [
+                {"代码": "000001", "名称": "A", "连板数": 1, "首次封板时间": "093000",
+                 "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                 "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"},
+            ],
+            "20260711": [
+                {"代码": "000001", "名称": "A", "连板数": 2, "首次封板时间": "093015",
+                 "封板资金": 1.5e8, "炸板次数": 0, "换手率": 6.0, "总市值": 1.1e10,
+                 "涨跌幅": 10.0, "涨停统计": "2/2", "所属行业": "银行"},
+            ],
+        }
+        stocks, breadth = _merge_daily_results(daily)
+        assert len(stocks) == 1
+        assert stocks[0]["total_appearances"] == 2
+        assert stocks[0]["max_consecutive"] == 2
+        assert len(stocks[0]["appearances"]) == 2
+
+    def test_exclude_delisting_in_merge(self):
+        daily = {
+            "20260710": [
+                {"代码": "000001", "名称": "国华退", "连板数": 1, "首次封板时间": "093000",
+                 "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e9,
+                 "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "软件"},
+            ],
+        }
+        stocks, _ = _merge_daily_results(daily)
+        assert len(stocks) == 0
+
+    def test_float_mkt_cap_from_akshare(self):
+        daily = {
+            "20260710": [
+                {"代码": "000001", "名称": "A", "连板数": 1, "首次封板时间": "093000",
+                 "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                 "流通市值": 5e9, "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"},
+            ],
+        }
+        stocks, _ = _merge_daily_results(daily)
+        assert stocks[0]["float_mkt_cap"] == 5e9
+
+    def test_aux_flags_merged(self):
+        daily = {
+            "20260710": [
+                {"代码": "000001", "名称": "A", "连板数": 1, "首次封板时间": "093000",
+                 "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                 "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"},
+            ],
+        }
+        aux = {"20260710": {"strong": {"000001"}, "previous": set(), "zbgc": {"000001"}}}
+        stocks, _ = _merge_daily_results(daily, aux)
+        assert stocks[0]["flags"]["in_strong"] is True
+        assert stocks[0]["flags"]["in_zbgc"] is True
+        assert stocks[0]["appearances"][0]["in_strong"] is True
+
+
+# ---- _compute_breadth ----
+
+class TestComputeBreadth:
+
+    def test_consecutive_distribution(self):
+        s1 = _make_stock("000001", "A", "X", max_consecutive=1)
+        s2 = _make_stock("000002", "B", "X", max_consecutive=2)
+        s3 = _make_stock("000003", "C", "X", max_consecutive=3)
+        s4 = _make_stock("000004", "D", "X", max_consecutive=5)
+        daily = {"20260710": 4}
+        b = _compute_breadth([s1, s2, s3, s4], daily)
+        assert b["consecutive_dist"]["1板"] == 1
+        assert b["consecutive_dist"]["2板"] == 1
+        assert b["consecutive_dist"]["3板"] == 1
+        assert b["consecutive_dist"]["4板+"] == 1
+        assert b["total_unique_stocks"] == 4
+
+    def test_sector_distribution(self):
+        s1 = _make_stock("000001", "A", "银行")
+        s2 = _make_stock("000002", "B", "银行")
+        s3 = _make_stock("000003", "C", "半导体")
+        daily = {"20260710": 3}
+        b = _compute_breadth([s1, s2, s3], daily)
+        assert ("银行", 2) in b["sector_dist"]
+        assert ("半导体", 1) in b["sector_dist"]
+
+    def test_empty_input(self):
+        b = _compute_breadth([], {})
+        assert b["total_unique_stocks"] == 0
+        assert b["avg_daily_count"] == 0
+        assert b["days_with_limit_ups"] == 0
+
+    def test_market_dist_and_seal_quality(self):
+        s1 = _make_stock(
+            "000001", "A", "银行", max_consecutive=1, seal_time="093000",
+            break_count=1, market_cap=5e10, float_mkt_cap=20e8, market="主板",
+        )
+        s1["appearances"][0]["seal_amount"] = 2e8  # 封流比 10%
+        s2 = _make_stock(
+            "000002", "B", "银行", max_consecutive=1, seal_time="100000",
+            break_count=0, market_cap=5e10, market="创业板",
+        )
+        b = _compute_breadth([s1, s2], {"20260710": 2})
+        assert b["market_dist"]["主板"] == 1
+        assert b["market_dist"]["创业板"] == 1
+        assert b["seal_quality"]["early_seal_rate"] == 0.5
+        assert b["seal_quality"]["avg_break_count"] == 0.5
+        assert b["seal_quality"]["seal_flow_gt_5pct"] == 1.0
+
+    def test_one_to_two_rate(self):
+        s = {
+            "symbol": "000001", "name": "A", "sector": "X",
+            "max_consecutive": 2, "total_appearances": 2,
+            "appearances": [
+                {"date": "20260710", "consecutive": 1, "seal_time": "093000",
+                 "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+                 "market_cap": 1e10, "change_pct": 10.0, "stat": "1/1"},
+                {"date": "20260711", "consecutive": 2, "seal_time": "093000",
+                 "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+                 "market_cap": 1e10, "change_pct": 10.0, "stat": "2/2"},
+            ],
+        }
+        s_fail = {
+            "symbol": "000002", "name": "B", "sector": "X",
+            "max_consecutive": 1, "total_appearances": 1,
+            "appearances": [
+                {"date": "20260710", "consecutive": 1, "seal_time": "093000",
+                 "seal_amount": 1e8, "break_count": 0, "turnover": 5.0,
+                 "market_cap": 1e10, "change_pct": 10.0, "stat": "1/1"},
+            ],
+        }
+        assert _one_to_two_rate([s, s_fail]) == 0.5
+        b = _compute_breadth([s, s_fail], {"20260710": 2, "20260711": 1})
+        assert b["seal_quality"]["one_to_two_rate"] == 0.5
+
+
+# ---- Formatting ----
+
+class TestFormatting:
+
+    def test_market_brief_contains_key_sections(self):
+        s = _make_stock("000001", "测试股", "银行", market="主板")
+        r = _make_result([s])
+        brief = format_market_brief(r)
+        assert "涨停扫描" in brief
+        assert "每日涨停趋势" in brief
+        assert "连板分布" in brief
+        assert "行业热度" in brief
+        assert "市场分布" in brief
+        assert "封板质量" in brief
+
+    def test_stock_table_sorted_by_consecutive(self):
+        s1 = _make_stock("000001", "A", "X", max_consecutive=1)
+        s2 = _make_stock("000002", "B", "X", max_consecutive=3)
+        s3 = _make_stock("000003", "C", "X", max_consecutive=2)
+        table = format_stock_table([s1, s2, s3], max_rows=10)
+        lines = table.split("\n")
+        data_lines = [l for l in lines if l.startswith("| 0")]
+        assert len(data_lines) == 3
+        assert "000002" in data_lines[0]
+        assert "000001" in data_lines[2]
+
+    def test_stock_table_respects_max_rows(self):
+        stocks = [_make_stock(f"00000{i}", f"S{i}", "X") for i in range(10)]
+        table = format_stock_table(stocks, max_rows=5)
+        data_lines = [l for l in table.split("\n") if l.startswith("| 0")]
+        assert len(data_lines) == 5
+
+    def test_leaders_section(self):
+        s = _make_stock("000001", "龙头", "银行", max_consecutive=3)
+        r = _make_result([s])
+        brief = format_market_brief(r)
+        assert "连板龙头" in brief
+        assert "000001" in brief
+
+    def test_leaders_empty_appearances_no_crash(self):
+        s = _make_stock("000001", "龙头", "银行", max_consecutive=3)
+        s["appearances"] = []
+        r = _make_result([s])
+        brief = format_market_brief(r)
+        assert "连板龙头" in brief
+
+
+# ---- Utilities ----
+
+class TestUtilities:
+
+    def test_get_trade_dates(self):
+        dates = _get_trade_dates(5)
+        assert len(dates) >= 5
+        assert all(len(d) == 8 for d in dates)
+
+    def test_safe_float(self):
+        assert _safe_float("3.14") == 3.14
+        assert _safe_float(None) == 0.0
+        assert _safe_float("abc") == 0.0
+        assert _safe_float(float("nan")) == 0.0
+
+    def test_fmt_yi(self):
+        assert _fmt_yi(1e8) == "1.0"
+        assert _fmt_yi(0) == "-"
+        assert _fmt_yi(None) == "-"
+
+    def test_fmt_date(self):
+        assert _fmt_date("20260713") == "2026-07-13"
+        assert _fmt_date("abc") == "abc"
+
+    def test_empty_breadth(self):
+        b = _empty_breadth()
+        assert b["total_unique_stocks"] == 0
+        assert b["sector_dist"] == []
+        assert "seal_quality" in b
+
+    def test_latest_market_cap(self):
+        s = _make_stock("000001", "A", "X", market_cap=5e9)
+        assert _latest_market_cap(s) == 5e9
+        assert _latest_market_cap({"appearances": []}) is None
+        assert _latest_market_cap({"appearances": [{"market_cap": 0}]}) is None
+
+    def test_daily_counts_from_stocks(self):
+        s = _make_stock("000001", "A", "X")
+        s["appearances"] = [
+            {"date": "20260710"},
+            {"date": "20260711"},
+        ]
+        assert _daily_counts_from_stocks([s]) == {"20260710": 1, "20260711": 1}
+
+
+# ---- tushare_enrich helpers / H4-H7 ----
+
+class TestTushareEnrichHelpers:
+
+    def test_safe_float_or_none_rejects_nan(self):
+        assert _safe_float_or_none(float("nan")) is None
+        assert _safe_float_or_none(None) is None
+        assert _safe_float_or_none("12.5") == 12.5
+
+    def test_safe_str_rejects_nan(self):
+        assert _safe_str(float("nan")) == ""
+        assert _safe_str(None) == ""
+        assert _safe_str("主板") == "主板"
+
+    def test_market_label_chinese(self):
+        assert _market_label("主板") == "主板"
+        assert _market_label("创业板") == "创业板"
+        assert _market_label("0") == "主板"
+
+    def test_to_ts_code(self):
+        assert _to_ts_code("600176") == "600176.SH"
+        assert _to_ts_code("000001") == "000001.SZ"
+        assert _to_ts_code("xxx") == ""
+
+
+class TestTushareEnrichGuards:
+
+    def test_enrich_price_empty_ts_codes_no_query(self):
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+            out = enrich_price_data(["bad"], "20260713")
+            assert out == {}
+            client.query.assert_not_called()
+
+    def test_enrich_stock_info_passes_ts_code_filter(self):
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+            client.query.return_value = pd.DataFrame([{
+                "ts_code": "600176.SH", "name": "中国巨石",
+                "market": "主板", "list_date": "19990521",
+            }])
+            out = enrich_stock_info(["600176"])
+            assert "600176" in out
+            kwargs = client.query.call_args.kwargs
+            assert "ts_code" in kwargs
+            assert "600176.SH" in kwargs["ts_code"]
+
+    def test_enrich_price_skips_nan_close(self):
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "trade_date": "20260713",
+                        "close": float("nan"), "pct_chg": float("nan"),
+                        "amount": float("nan"),
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert "600176" not in out
