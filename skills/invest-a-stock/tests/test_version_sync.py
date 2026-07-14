@@ -52,6 +52,17 @@ class TestSyncVersionCheck:
     def test_check_passes_in_repo(self):
         assert _sync.cmd_check(_REPO_ROOT) == 0
 
+    def test_write_pyproject_ignores_version_scheme(self, tmp_path: Path):
+        pp = tmp_path / "pyproject.toml"
+        pp.write_text(
+            '[project]\nname = "x"\nversion_scheme = "pep440"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        _sync.write_pyproject_version(pp, "0.2.0")
+        text = pp.read_text(encoding="utf-8")
+        assert 'version_scheme = "pep440"' in text
+        assert 'version = "0.2.0"' in text
+
     def test_sync_is_idempotent(self, tmp_path: Path):
         _write_fixture_tree(tmp_path, "0.1.0")
         assert _sync.cmd_sync(tmp_path) == 0
@@ -107,6 +118,18 @@ class TestSyncVersionBump:
         plugin.write_text(plugin.read_text().replace("0.1.0", "9.9.9"))
         assert _sync.cmd_check(tmp_path) == 1
 
+    def test_check_graceful_on_corrupt_pyproject(self, tmp_path: Path):
+        _write_fixture_tree(tmp_path, "0.1.0")
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+        assert _sync.cmd_check(tmp_path) == 1
+
+    def test_bump_preflight_missing_template(self, tmp_path: Path):
+        _write_fixture_tree(tmp_path, "0.1.0")
+        (tmp_path / "gemini-extension.json.in").unlink()
+        before = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+        assert _sync.cmd_bump(tmp_path, "0.9.9") == 1
+        assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == before
+
 
 class TestSyncCommand:
     def test_sync_updates_skill_when_pyproject_changed(self, tmp_path: Path):
@@ -116,3 +139,13 @@ class TestSyncCommand:
         pp.write_text(pp.read_text().replace("0.1.0", "0.5.0"))
         assert _sync.cmd_sync(tmp_path) == 0
         assert _sync.cmd_check(tmp_path) == 0
+
+    def test_sync_preflight_missing_template(self, tmp_path: Path):
+        _write_fixture_tree(tmp_path, "0.1.0")
+        (tmp_path / "gemini-extension.json.in").unlink()
+        assert _sync.cmd_sync(tmp_path) == 1
+
+    def test_sync_graceful_on_corrupt_pyproject(self, tmp_path: Path):
+        _write_fixture_tree(tmp_path, "0.1.0")
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
+        assert _sync.cmd_sync(tmp_path) == 1

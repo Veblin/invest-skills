@@ -473,11 +473,6 @@ def load_event_taxonomy() -> dict:
     if _TAXONOMY_CACHE is not None:
         return _TAXONOMY_CACHE
 
-    if not _TAXONOMY_PATH.exists():
-        logger.warning("Taxonomy file not found: %s", _TAXONOMY_PATH)
-        _TAXONOMY_CACHE = {"schema_version": "0.1", "event_types": {}}
-        return _TAXONOMY_CACHE
-
     import yaml
 
     try:
@@ -486,6 +481,9 @@ def load_event_taxonomy() -> dict:
         if not isinstance(data, dict):
             data = {"schema_version": "0.1", "event_types": {}}
         _TAXONOMY_CACHE = data
+    except FileNotFoundError:
+        logger.warning("Taxonomy file not found: %s", _TAXONOMY_PATH)
+        _TAXONOMY_CACHE = {"schema_version": "0.1", "event_types": {}}
     except Exception as exc:
         logger.warning("Failed to load taxonomy: %s", exc)
         _TAXONOMY_CACHE = {"schema_version": "0.1", "event_types": {}}

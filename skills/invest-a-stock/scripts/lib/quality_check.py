@@ -47,13 +47,20 @@ def _exemptions(collection: dict, rows: list[dict]) -> list[str]:
             except ValueError:
                 pass
 
+    # 仅比较年报（end_date 在 12 月），避免季度数据因季节性触发误判
     if len(rows) >= 4:
-        revs = [coalesce_field(r, "revenue", "total_revenue") for r in rows[-4:]]
-        revs = [v for v in revs if v is not None]
-        if len(revs) >= 2 and revs[-1] is not None and revs[0] is not None:
-            change = abs(revs[-1] - revs[0]) / abs(revs[0])
-            if change > 0.3:
-                ex.append("转型期（营收结构变更 > 30%）")
+        from .financials import parse_end_date
+        annual_rows = [
+            r for r in rows[-8:]  # 足够找 2 个年报
+            if str(r.get("end_date", "")).endswith(("12-31", "1231"))
+        ]
+        if len(annual_rows) >= 2:
+            revs = [coalesce_field(r, "revenue", "total_revenue") for r in annual_rows[-2:]]
+            revs = [v for v in revs if v is not None]
+            if len(revs) == 2:
+                change = abs(revs[-1] - revs[0]) / abs(revs[0])
+                if change > 0.3:
+                    ex.append("转型期（营收结构变更 > 30%）")
     return ex
 
 
@@ -87,8 +94,8 @@ def _metric_fcf_5y(rows: list[dict]) -> dict[str, Any]:
     for r in rows[-5:]:
         ocf = coalesce_field(r, "n_cashflow_act", "ocf")
         capex = coalesce_field(r, "cap_ex", "c_pay_acq_const_fiolta")
-        if ocf is not None:
-            fcf = ocf - abs(capex or 0)
+        if ocf is not None and capex is not None:
+            fcf = ocf - abs(capex)
             total += fcf
             count += 1
     if count == 0:
@@ -106,8 +113,10 @@ def _metric_interest_coverage(rows: list[dict]) -> dict[str, Any]:
     latest = rows[-1] if rows else {}
     ebit = coalesce_field(latest, "ebit", "operate_profit")
     interest = coalesce_field(latest, "fin_exp_int_exp", "interest_expense", "interestexpense")
-    if ebit is None or interest is None or interest == 0:
+    if ebit is None or interest is None:
         return {"id": 3, "name": "利息覆盖倍数", "status": "skip", "detail": "字段缺失"}
+    if abs(interest) < 1e-9:
+        return {"id": 3, "name": "利息覆盖倍数", "status": "skip", "detail": "利息费用为零或接近零，覆盖率无定义"}
     cov = ebit / abs(interest)
     fail = cov < 2.0
     return {
@@ -153,7 +162,7 @@ def _metric_net_margin_trend(rows: list[dict]) -> dict[str, Any]:
     for r in rows[-3:]:
         rev = coalesce_field(r, "revenue", "total_revenue")
         np_ = coalesce_field(r, "n_income_attr_p", "net_profit", "netprofit")
-        if rev and rev != 0 and np_ is not None:
+        if rev is not None and abs(rev) > 1e-9 and np_ is not None:
             margins.append(np_ / rev * 100)
     if len(margins) < 3:
         return {"id": 6, "name": "净利率趋势 (3年)", "status": "skip", "detail": "数据不足"}

@@ -674,7 +674,7 @@ def _section_flow(dims: dict[str, dict], collection: dict = None) -> str:
     quote_data = _get_dim_data(dims, "quote")
     if quote_data:
         if isinstance(quote_data, dict):
-            price = quote_data.get("price") or quote_data.get("close")
+            price = coalesce_field(quote_data, "price", "close")
             change = quote_data.get("change_pct")
             turnover = quote_data.get("turnover_rate")
             if price is not None:
@@ -1236,7 +1236,7 @@ def _section_executive_summary(collection, symbol, dims, val_cache=None):
 
     quote = dims.get("quote", {}).get("data", {})
     if isinstance(quote, dict):
-        price = quote.get("close") or quote.get("price")
+        price = coalesce_field(quote, "close", "price")
         if price:
             lines.append(f"- 行情: 最新价 {price}")
 
@@ -1343,7 +1343,7 @@ def _section_snapshot(
     lines = ["## 1. 当前状态快照", ""]
     quote = _get_dim_data(dims, "quote")
     if isinstance(quote, dict):
-        price = quote.get("close") or quote.get("price")
+        price = coalesce_field(quote, "close", "price")
         chg = quote.get("change_pct")
         if price is not None:
             chg_s = f"（{chg:+.2f}%）" if chg is not None else ""

@@ -21,8 +21,8 @@ from datetime import datetime, timedelta, date
 logger = logging.getLogger(__name__)
 
 # ── 占位标记 ──
-INDUSTRY_EVENTS_PLACEHOLDER: list[dict] = []
-MARKET_EVENTS_PLACEHOLDER: list[dict] = []
+INDUSTRY_EVENTS_PLACEHOLDER: tuple[dict, ...] = ()
+MARKET_EVENTS_PLACEHOLDER: tuple[dict, ...] = ()
 
 PLACEHOLDER_NOTE_INDUSTRY = "⏭️ 待补来源：暂无稳定 API"
 PLACEHOLDER_NOTE_MARKET = "⏭️ 待补来源：暂无稳定 API"
@@ -603,10 +603,12 @@ def calc_price_impact_interpolation(
     if scenario is None:
         scenario = "bearish" if v_true < v_false else "bullish"
 
+    # Scale-aware floor: absolute 0.01 fails for tiny per-share EPS inputs
+    _eps = max(1e-9, 1e-6 * max(abs(v_true), abs(v_false), abs(post_price), 1.0))
     warn = None
-    if abs(spread) < 0.01:
+    if abs(spread) < _eps:
         ratio = 0.5
-        warn = "|V_真 - V_假| < 0.01，ratio 默认 0.5"
+        warn = f"|V_真 - V_假| < {_eps:.2e}，ratio 默认 0.5"
     else:
         ratio = (post_price - v_false) / spread
         if scenario == "bearish" and post_price >= pre_price:
@@ -617,9 +619,11 @@ def calc_price_impact_interpolation(
 
     def _ratio_at_pe(pe: float) -> float:
         vf = eps_base * pe
-        if abs(v_true - vf) < 0.01:
+        local_spread = v_true - vf
+        local_eps = max(1e-9, 1e-6 * max(abs(v_true), abs(vf), abs(post_price), 1.0))
+        if abs(local_spread) < local_eps:
             return 0.5
-        r = (post_price - vf) / (v_true - vf)
+        r = (post_price - vf) / local_spread
         return max(0.0, min(1.0, r))
 
     pe_lo = max(pe_stressed - 2, 0.1)

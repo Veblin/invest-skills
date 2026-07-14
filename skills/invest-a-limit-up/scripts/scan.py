@@ -27,6 +27,9 @@ from limit_up_scanner import (
     quality_filter,
     scan_market,
 )
+from _invest_path import ensure_invest_a_scripts_on_path
+
+ensure_invest_a_scripts_on_path()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="股票列表最多显示行数（默认80）")
     p.add_argument("--out", default="",
                    help="保存 JSON 到指定路径（可选）")
+    p.add_argument("--no-save", action="store_true",
+                   help="跳过 SQLite 持久化（默认自动保存至 research.db）")
     return p
 
 
@@ -105,6 +110,36 @@ def main() -> int:
     filter_kwargs = resolve_cli_filter(args)
     if filter_kwargs is not None:
         result = quality_filter(result, **filter_kwargs)
+
+    # ---- SQLite 持久化 ----
+    if not args.no_save:
+        trading_days = int(result.get("trading_days_scanned") or 0)
+        stocks = result.get("stocks") or []
+        if trading_days == 0 and not stocks:
+            print(
+                "ℹ️ 扫描无有效交易日/股票，已跳过 SQLite 持久化",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                from lib.limit_up_store import save_scan, get_stats as lu_stats
+                sid = save_scan(result, filter_params=filter_kwargs)
+                stats = lu_stats()
+                print(
+                    f"💾 已保存至 research.db (scan_id={sid}, "
+                    f"累计 {stats['total_scans']} 次扫描, "
+                    f"覆盖 {stats['first_scan_date']}~{stats['last_scan_date']})",
+                    file=sys.stderr,
+                )
+            except ValueError as exc:
+                print(f"ℹ️ 已跳过持久化: {exc}", file=sys.stderr)
+            except Exception as exc:
+                import traceback
+                print(
+                    f"⚠️ limit-up 持久化失败（扫描结果仍正常输出）: {exc}",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
 
     if args.out:
         out_path = Path(args.out)

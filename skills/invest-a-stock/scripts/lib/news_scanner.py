@@ -169,12 +169,12 @@ def _fetch_tavily_cards(symbol: str, name: str, days: int) -> list[NewsCard]:
 
 def collect_targeted_sites(name_eng: str) -> list[NewsCard]:
     """Channel B — v0.2.0."""
-    raise NotImplementedError("Channel B: deferred to v0.2.0")
+    raise NotImplementedError("Channel B: deferred to v0.3.0")
 
 
 def collect_community_heat(symbol: str) -> list[NewsCard]:
     """Channel C — v0.2.0."""
-    raise NotImplementedError("Channel C: deferred to v0.2.0")
+    raise NotImplementedError("Channel C: deferred to v0.3.0")
 
 
 def collect_news(

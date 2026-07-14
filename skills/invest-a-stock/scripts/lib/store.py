@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,28 @@ def _conn() -> sqlite3.Connection:
     p.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(p))
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
     return c
 
 
-def init_db() -> None:
+def _safe_close(c: sqlite3.Connection) -> None:
+    try:
+        c.close()
+    except Exception:
+        logger.debug("sqlite close failed", exc_info=True)
+
+
+@contextmanager
+def _connection() -> Iterator[sqlite3.Connection]:
     c = _conn()
     try:
+        yield c
+    finally:
+        _safe_close(c)
+
+
+def init_db() -> None:
+    with _connection() as c:
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
         c.executescript("""
@@ -80,8 +97,6 @@ def init_db() -> None:
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         c.commit()
-    finally:
-        c.close()
 
 
 def save_collection(result: dict[str, Any]) -> int:
@@ -116,7 +131,7 @@ def save_collection(result: dict[str, Any]) -> int:
         c.commit()
         return cid
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def list_collections(limit: int = 20, symbol: str | None = None) -> list[dict]:
@@ -129,7 +144,7 @@ def list_collections(limit: int = 20, symbol: str | None = None) -> list[dict]:
             rows = c.execute("SELECT * FROM collections ORDER BY fetched_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def get_stats() -> dict:
@@ -143,7 +158,7 @@ def get_stats() -> dict:
         return {"total_collections": tc, "total_findings": tf, "unique_symbols": us,
                 "latest": [dict(r) for r in lat], "db_path": str(_get_path())}
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def clear_all() -> None:
@@ -156,7 +171,7 @@ def clear_all() -> None:
         c.execute("DELETE FROM pipeline_states")
         c.commit()
     finally:
-        c.close()
+        _safe_close(c)
 
 
 # ---- Pipeline 断点续跑状态 ----
@@ -176,7 +191,7 @@ def save_pipeline_step(symbol: str, step: str, state: dict | None = None) -> Non
         )
         c.commit()
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def load_pipeline_step(symbol: str, step: str) -> dict | None:
@@ -200,7 +215,7 @@ def load_pipeline_step(symbol: str, step: str) -> dict | None:
             result["state"] = {}
         return result
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def get_pipeline_progress(symbol: str) -> dict[str, bool]:
@@ -214,7 +229,7 @@ def get_pipeline_progress(symbol: str) -> dict[str, bool]:
         ).fetchall()
         return {row["step"]: row["completed_at"] is not None for row in rows}
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def clear_pipeline_state(symbol: str) -> None:
@@ -225,7 +240,7 @@ def clear_pipeline_state(symbol: str) -> None:
         c.execute("DELETE FROM pipeline_states WHERE symbol = ?", (symbol,))
         c.commit()
     finally:
-        c.close()
+        _safe_close(c)
 
 
 # ---- Diff 快照对比 ----
@@ -244,7 +259,7 @@ def get_collection(collection_id: int) -> dict | None:
         d["raw_json"] = json.loads(d["raw_json"]) if isinstance(d["raw_json"], str) else d["raw_json"]
         return d
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
@@ -268,7 +283,7 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
         older["raw_json"] = json.loads(older["raw_json"]) if isinstance(older["raw_json"], str) else older["raw_json"]
         return (older, newer)
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def diff_collections(old: dict, new: dict) -> dict:
@@ -755,7 +770,7 @@ def thesis_init(symbol: str) -> dict[str, Any]:
         )
         c.commit()
     finally:
-        c.close()
+        _safe_close(c)
     return {"symbol": symbol, "health_score": score, "state": state, "action": "init"}
 
 
@@ -778,7 +793,7 @@ def thesis_get(symbol: str) -> dict[str, Any] | None:
             "updated_at": row["updated_at"],
         }
     finally:
-        c.close()
+        _safe_close(c)
 
 
 def thesis_update(symbol: str, assumptions: list[dict] | None = None,
@@ -798,5 +813,5 @@ def thesis_update(symbol: str, assumptions: list[dict] | None = None,
         )
         c.commit()
     finally:
-        c.close()
+        _safe_close(c)
     return {"symbol": symbol, "health_score": score, "state": state, "action": "update"}

@@ -20,9 +20,11 @@ from limit_up_scanner import (
     _fetch_day_with_aux,
     _merge_daily_results,
     _compute_breadth,
+    _compute_seal_quality,
     _daily_counts_from_stocks,
-    _get_trade_dates,
+    get_trade_dates,
     _safe_float,
+    _nullable_float,
     _fmt_yi,
     _fmt_date,
     _empty_breadth,
@@ -329,10 +331,28 @@ class TestScanMarket:
         assert result["stocks"][0]["flags"]["in_strong"] is True
         assert "seal_quality" in result["market_breadth"]
 
-    def test_push2_unavailable(self):
-        with patch("limit_up_scanner.env.is_akshare_available", return_value=True), \
-             patch("limit_up_scanner.akshare_push2_available", return_value=False):
+    def test_akshare_unavailable(self):
+        """Gate is env.is_akshare_available — must not hit live EastMoney APIs."""
+        with patch("limit_up_scanner.env.is_akshare_available", return_value=False), \
+             patch("limit_up_scanner.akshare_push2_available", return_value=True), \
+             patch("limit_up_scanner.get_trade_dates") as mock_dates, \
+             patch("limit_up_scanner._fetch_day_with_aux") as mock_fetch:
             result = scan_market(days=3)
+        mock_dates.assert_not_called()
+        mock_fetch.assert_not_called()
+        assert result["trading_days_scanned"] == 0
+        assert result["stocks"] == []
+        assert "push2" in result["errors"][0].lower() or "不可用" in result["errors"][0]
+
+    def test_push2_unavailable(self):
+        """akshare installed but EastMoney push2 blocked — skip live fetches."""
+        with patch("limit_up_scanner.env.is_akshare_available", return_value=True), \
+             patch("limit_up_scanner.akshare_push2_available", return_value=False), \
+             patch("limit_up_scanner.get_trade_dates") as mock_dates, \
+             patch("limit_up_scanner._fetch_day_with_aux") as mock_fetch:
+            result = scan_market(days=3)
+        mock_dates.assert_not_called()
+        mock_fetch.assert_not_called()
         assert result["trading_days_scanned"] == 0
         assert result["stocks"] == []
         assert "push2" in result["errors"][0].lower() or "不可用" in result["errors"][0]
@@ -593,7 +613,7 @@ class TestFormatting:
 class TestUtilities:
 
     def test_get_trade_dates(self):
-        dates = _get_trade_dates(5)
+        dates = get_trade_dates(5)
         assert len(dates) >= 5
         assert all(len(d) == 8 for d in dates)
 
@@ -602,6 +622,31 @@ class TestUtilities:
         assert _safe_float(None) == 0.0
         assert _safe_float("abc") == 0.0
         assert _safe_float(float("nan")) == 0.0
+
+    def test_nullable_float(self):
+        assert _nullable_float(None) is None
+        assert _nullable_float("abc") is None
+        assert _nullable_float(float("nan")) is None
+        assert _nullable_float(0.0) == 0.0
+        assert _nullable_float("1.5") == 1.5
+
+    def test_seal_quality_falls_back_to_stock_float_mkt_cap(self):
+        """Appearance missing/0.0 float_mkt_cap must use Tushare-enriched stock field."""
+        for app_cap in (None, 0.0):
+            stock = {
+                "symbol": "000001",
+                "float_mkt_cap": 1e10,
+                "appearances": [{
+                    "date": "20260710",
+                    "seal_time": "093000",
+                    "seal_amount": 6e8,
+                    "break_count": 0,
+                    "float_mkt_cap": app_cap,
+                    "consecutive": 1,
+                }],
+            }
+            q = _compute_seal_quality([stock], trade_dates=["20260710", "20260711"])
+            assert q["seal_flow_gt_5pct"] == 1.0, app_cap
 
     def test_fmt_yi(self):
         assert _fmt_yi(1e8) == "1.0"

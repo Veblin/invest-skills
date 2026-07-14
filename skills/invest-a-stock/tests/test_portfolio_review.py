@@ -27,14 +27,22 @@ class TestPortfolioReview:
         import lib.collector as col
 
         holdings = [
-            {"weight": 0.5},
+            {"weight": 0.5},  # missing symbol — quietly skipped
             {"symbol": "600176", "weight": 0.5},
         ]
         with patch.object(col, "collect_basic_info", side_effect=_fake_basic), \
              patch.object(col, "collect_kline", side_effect=_fake_kline):
             result = pr.review_portfolio(holdings, stress=False)
         assert "disclaimer" in result
-        assert "600176" in (result.get("skipped_symbols") or []) or True
+        # Empty-symbol holding is continue'd — must not appear in skipped_symbols
+        skipped = result.get("skipped_symbols") or []
+        assert "" not in skipped
+        # Valid symbol with mocked kline should be reviewed, not skipped
+        assert "600176" not in skipped
+        # Only the valid symbol contributes to industry concentration
+        conc = result["industry_concentration"]
+        assert conc == [("制造业", 0.5)]
+
 
     def test_stress_weight_warning(self):
         from lib import portfolio_review as pr

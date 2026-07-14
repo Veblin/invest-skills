@@ -99,7 +99,7 @@ v0.3+ **多源并行**：全部可用源同时采集，差异保留于 `_meta.al
 
 ### SOP-QC 自检
 
-措辞（LAW 6/16/3）、结构（简报 3–5 段、风险提示首尾、LAW 7）、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）。
+措辞（LAW 6/16/3）、结构（简报 3–5 段、风险提示首尾、LAW 7）、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
 
 ### SOP-EV 证据强度
 

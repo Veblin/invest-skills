@@ -9,18 +9,11 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
-import sys
+from _invest_path import ensure_invest_a_scripts_on_path
 
-# scripts/lib/ → scripts/ → invest-a-limit-up/ → skills/ → invest-a-stock/scripts
-_INVEST_A_LIB = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "invest-a-stock" / "scripts"
-)
-if str(_INVEST_A_LIB) not in sys.path:
-    sys.path.insert(0, str(_INVEST_A_LIB))
+ensure_invest_a_scripts_on_path()
 
 from lib import env  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402

@@ -222,6 +222,14 @@ class TestCalcEvToEquity:
         r = calc_ev_to_equity(enterprise_value=1000.0, net_debt=0.0, shares_outstanding=0)
         assert r["per_share"] is None
 
+    def test_zero_per_share_preserved(self):
+        """EV ≈ net debt → equity 0 → per_share must be 0.0, not None."""
+        from lib.valuation import calc_ev_to_equity
+
+        r = calc_ev_to_equity(enterprise_value=200.0, net_debt=200.0, shares_outstanding=100)
+        assert r["equity_value"] == pytest.approx(0.0)
+        assert r["per_share"] == pytest.approx(0.0)
+
 
 class TestCalcBeta:
     def test_returns_beta(self):

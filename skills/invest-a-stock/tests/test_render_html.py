@@ -98,3 +98,13 @@ class TestNorthboundNormalization:
         rows = [{"trade_date": "20260101", "net_mf_vol": 1.5e8}]
         out = _normalize_northbound_records(rows, "akshare.northbound")
         assert out[0]["net_mf_vol"] == 1.5e8
+
+    def test_moneyflow_does_not_scale_net_mf_vol_fallback(self):
+        """moneyflow net_mf_vol is volume(手), must not get 万元×10000."""
+        from lib.collector import _normalize_northbound_records
+
+        rows = [{"trade_date": "20260101", "net_mf_vol": 100.0}]
+        out = _normalize_northbound_records(rows, "tushare.moneyflow")
+        # no net_mf_amount → leave row alone (no invented yuan figure)
+        assert out[0].get("net_mf_amount") is None
+        assert out[0]["net_mf_vol"] == 100.0
