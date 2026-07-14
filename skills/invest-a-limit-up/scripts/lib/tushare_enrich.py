@@ -238,7 +238,7 @@ def _to_ts_code(symbol: str) -> str:
         return ""
     if s.startswith(("6", "9")):
         return f"{s}.SH"
-    if s.startswith(("0", "3")):
+    if s.startswith(("0", "2", "3")):
         return f"{s}.SZ"
     if s.startswith(("8", "4")):
         return f"{s}.BJ"

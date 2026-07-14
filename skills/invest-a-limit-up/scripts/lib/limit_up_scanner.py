@@ -90,8 +90,8 @@ def scan_market(days: int = 10) -> dict:
     stocks = _merge_daily_results(daily_data, aux_by_date)
     trade_date = max(daily_data.keys())
     enrichment = _apply_tushare_enrich(stocks, trade_date=trade_date)
-    # enrich 后一次计算 breadth（含 L2 market_dist）
-    breadth = _compute_breadth(stocks, daily_data)
+    # enrich 后一次计算 breadth（含 L2 market_dist）；传入完整交易日历避免日期缺口
+    breadth = _compute_breadth(stocks, daily_data, trade_dates=dates)
     return {
         "scan_date": scan_date,
         "trading_days_scanned": len(daily_data),
@@ -160,7 +160,7 @@ def quality_filter(
             continue
 
         latest = _latest_appearance(s)
-        break_count = int(latest.get("break_count", 0) or 0) if latest else 0
+        break_count = _safe_int(latest.get("break_count")) if latest else 0
         if break_count >= max_break_count:
             reasons["max_break_count"] += 1
             continue
@@ -524,21 +524,21 @@ def _merge_daily_results(
                 }
 
             float_mcap = _nullable_float(r.get("流通市值"))
-            close = _safe_float(r.get("最新价"))
+            close = _nullable_float(r.get("最新价"))
             in_strong = sym in aux.get("strong", set())
             in_previous = sym in aux.get("previous", set())
             in_zbgc = sym in aux.get("zbgc", set())
             by_symbol[sym]["appearances"].append({
                 "date": date,
-                "consecutive": int(r.get("连板数", 0) or 0),
+                "consecutive": _safe_int(r.get("连板数")),
                 "seal_time": str(r.get("首次封板时间", "")),
-                "seal_amount": _safe_float(r.get("封板资金")),
-                "break_count": int(r.get("炸板次数", 0) or 0),
-                "turnover": _safe_float(r.get("换手率")),
-                "market_cap": _safe_float(r.get("总市值")),
+                "seal_amount": _nullable_float(r.get("封板资金")),
+                "break_count": _safe_int(r.get("炸板次数")),
+                "turnover": _nullable_float(r.get("换手率")),
+                "market_cap": _nullable_float(r.get("总市值")),
                 "float_mkt_cap": float_mcap,
                 "close": close if close is not None and close > 0 else None,
-                "change_pct": _safe_float(r.get("涨跌幅")),
+                "change_pct": _nullable_float(r.get("涨跌幅")),
                 "stat": str(r.get("涨停统计", "")),
                 "in_strong": in_strong,
                 "in_previous": in_previous,
@@ -549,7 +549,7 @@ def _merge_daily_results(
             flags["in_previous"] = flags["in_previous"] or in_previous
             flags["in_zbgc"] = flags["in_zbgc"] or in_zbgc
             sector = str(r.get("所属行业", ""))
-            if sector:
+            if sector and not by_symbol[sym]["sector"]:
                 by_symbol[sym]["sector"] = sector
 
     stocks = []
@@ -634,7 +634,7 @@ def _one_to_two_rate(
             d = a.get("date")
             if not d:
                 continue
-            by_date.setdefault(d, {})[sym] = int(a.get("consecutive", 0) or 0)
+            by_date.setdefault(d, {})[sym] = _safe_int(a.get("consecutive"))
 
     dates = sorted(trade_dates)
     promoted = 0
@@ -671,7 +671,7 @@ def _compute_seal_quality(
         st = _normalize_seal_time(latest.get("seal_time", ""))
         if st and st < _EARLY_SEAL_CUTOFF:
             early += 1
-        breaks.append(int(latest.get("break_count", 0) or 0))
+        breaks.append(_safe_int(latest.get("break_count")))
 
         float_mcap = latest.get("float_mkt_cap")
         # 0.0 from missing EastMoney field must not block Tushare-enriched stock-level cap
@@ -679,7 +679,7 @@ def _compute_seal_quality(
             stock_cap = s.get("float_mkt_cap")
             if stock_cap is not None and stock_cap > 0:
                 float_mcap = stock_cap
-        seal_amt = _safe_float(latest.get("seal_amount"))
+        seal_amt = _nullable_float(latest.get("seal_amount"))
         if float_mcap is not None and float_mcap > 0 and seal_amt > 0:
             flow_n += 1
             if seal_amt / float_mcap > 0.05:
@@ -693,8 +693,17 @@ def _compute_seal_quality(
     }
 
 
-def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
-    """计算市场宽度指标。daily_data 值为 list[dict] 或 int 均可。"""
+def _compute_breadth(
+    stocks: list[dict],
+    daily_data: dict[str, Any],
+    *,
+    trade_dates: list[str] | None = None,
+) -> dict:
+    """计算市场宽度指标。daily_data 值为 list[dict] 或 int 均可。
+
+    trade_dates 为完整交易日历（含扫描失败的日期），用于一进二晋级率计算。
+    不传时降级使用 daily_counts.keys()（仅成功扫描日）。
+    """
     daily_counts: dict[str, int] = {}
     for date, val in daily_data.items():
         if isinstance(val, int):
@@ -710,7 +719,7 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
 
     consec: Counter[str] = Counter()
     for s in stocks:
-        mc = int(s.get("max_consecutive", 0) or 0)
+        mc = _safe_int(s.get("max_consecutive"))
         # #6: mc<=0 归入「其它」，与 total_unique_stocks 对齐
         if mc <= 0:
             consec["其它"] += 1
@@ -732,7 +741,12 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
         market = s.get("market") or "未知"
         market_counter[market] += 1
 
-    trade_dates = sorted(daily_counts.keys())
+    # 优先使用完整交易日历；降级到 daily_counts keys（仅成功扫描日）
+    effective_trade_dates: list[str]
+    if trade_dates:
+        effective_trade_dates = sorted(trade_dates)
+    else:
+        effective_trade_dates = sorted(daily_counts.keys())
     return {
         "daily_counts": daily_counts,
         "days_with_limit_ups": days_with,
@@ -741,7 +755,7 @@ def _compute_breadth(stocks: list[dict], daily_data: dict[str, Any]) -> dict:
         "consecutive_dist": dict(consec),
         "sector_dist": sector_counter.most_common(15),
         "market_dist": dict(market_counter),
-        "seal_quality": _compute_seal_quality(stocks, trade_dates),
+        "seal_quality": _compute_seal_quality(stocks, effective_trade_dates),
     }
 
 
@@ -783,6 +797,7 @@ def _latest_market_cap(stock: dict) -> float | None:
 
 
 def _safe_float(val: Any) -> float:
+    """Parse float; missing / NaN / invalid → 0.0 (for display-only fields)."""
     if val is None:
         return 0.0
     try:
@@ -807,8 +822,25 @@ def _nullable_float(val: Any) -> float | None:
         return None
 
 
+def _safe_int(val: Any, default: int = 0) -> int:
+    """Parse int safely; NaN / missing / invalid → default.
+
+    Uses _nullable_float first to avoid ``int(float('nan'))`` ValueError,
+    since ``float('nan') or 0`` returns nan (NaN is truthy in Python).
+    """
+    f = _nullable_float(val)
+    if f is None:
+        return default
+    try:
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
 def _fmt_yi(val: Any) -> str:
-    v = _safe_float(val)
+    v = _nullable_float(val)
+    if v is None:
+        return "-"
     return f"{v / 1e8:.1f}" if abs(v) > 1e-9 else "-"
 
 
