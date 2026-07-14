@@ -4,7 +4,7 @@
 
 ## v0.2.0 (2026-07-13)
 
-v0.2.0 将项目从单 skill 演进为多 skill 组合，统一命名空间 `invest:`。
+v0.2.0 将项目从单 skill 演进为多 skill 组合，统一命名空间 `invest:`。新增科学估值计算器、多 Agent 并行深度分析、估值持久化与回溯。
 
 ### 多 Skill 架构
 
@@ -18,6 +18,38 @@ v0.2.0 将项目从单 skill 演进为多 skill 组合，统一命名空间 `inv
 - 目录重命名：`skills/invest-A/` → `skills/invest-a-stock/`，`skills/limit-up/` → `skills/invest-a-limit-up/`
 - 项目身份：README / AGENTS / CLAUDE / CONFIGURATION 全面更新
 - pyproject.toml 项目名：`investment-learning-skill` → `invest-skills`
+
+### 科学估值计算器（`valuation_calc.py`）
+
+- **七步估值流程：** 基础参数 → 核心财务（TTM EPS/BVPS/ROE/OCF质量） → 历史分位（PE Band + PB） → 盈利收益率 vs 要求回报率（Fed Model 变体） → 反推 market-implied g → ROE-PB 理论匹配 → 多情景 × 多方法综合区间
+- **TTM EPS 精准计算**：`fina_indicator` 累计 EPS 差分为单季 EPS，再求最近 4 个单季之和
+- **PE 失真检测**：亏损期占比 >30% 时自动切换 Gordon 模型合理 PE，避免被失真的历史 PE 中位数误导
+- **三级数据降级**：akshare 东财 API（代理阻断）→ 腾讯行情兜底 → 报错
+- **CLI 集成**：`invest.py value 002466 [--rf X] [--erp X] [--store] [--emit json]`
+
+### 多 Agent 并行深度分析
+
+- **两阶段并行架构**：Phase 1 — 3 Agent 并行采集 → merge + 交叉验证；Phase 2 — 4 Agent 四视角并行分析；Phase 3 — 主编合成
+- **四视角 Agent prompt 模板**（`references/agent-prompts.md`）：生意质量 / 财务估值 / 行业竞争 / 风险治理，每个含数据提取命令、分析框架、输出规范、LAW 合规要求
+- **交叉验证**（`merge_collections.py`）：关键字段 Tushare vs akshare 双源对比，差异 <5% 通过、5-20% 标注、>20% 触发 tie-breaker
+- **性能提升**：深度报告耗时从 ~14 分钟（串行）压缩至 ~6 分钟（并行），采集 ~2min + 分析 ~3min + 合成 ~1min
+
+### 估值持久化与回溯
+
+- **新增 `valuations` 表**：双写结构化列（price/ttm_eps/bvps/ttm_pe/pb/rf/erp/roe/ocf/pe_pct/pb_pct/各情景区间） + 完整 `result_json`
+- **`store valuations`**：列出历史估值记录，支持 `--symbol` 过滤
+- **`compare_valuations(id1, id2)`**：两期估值快照对比（price/ttm_eps/ttm_pe/pb/base_mid 增量）
+
+### CLI 新增
+
+- `invest.py value` — 科学估值计算（七步多方法：PE/PB/盈利收益率/隐含增长/ROE-PB 匹配）
+- `invest.py store valuations` — 估值历史列表
+- `valuation_calc.py` — 独立脚本，可脱离 CLI 单独使用
+
+### 文档更新
+
+- **README.md**：统一命令格式为 `invest:a-stock` / `invest:a-limit-up`；Token 表格新增 Tushare 积分档位对照（120/2000/5000/10000+）；新增对话式配置 Token 指引；新增多 Agent 深度分析架构图；补充 `value` / `store valuations` 命令
+- **SKILL.md**：SOP-DEEP 重写为三阶段多 Agent 流程；新增数据降级说明
 
 ### 基础设施
 

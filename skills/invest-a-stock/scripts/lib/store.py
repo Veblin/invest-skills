@@ -92,6 +92,21 @@ def init_db() -> None:
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS valuations (
+                id INTEGER PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                price REAL, ttm_eps REAL, bvps REAL,
+                ttm_pe REAL, pb REAL, rf REAL, erp REAL,
+                roe_annualized REAL, ocf_ratio REAL,
+                pe_median REAL, pb_median REAL,
+                pe_pct REAL, pb_pct REAL,
+                bull_low REAL, bull_high REAL,
+                base_low REAL, base_high REAL,
+                bear_low REAL, bear_high REAL,
+                result_json TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_val_sym ON valuations(symbol);
         """)
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
@@ -639,6 +654,176 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
         "categories": categories,
         "unchanged": unchanged,
         "events": events_diff,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Valuations (v0.2.0 — 科学估值持久化)
+# ═══════════════════════════════════════════════════════════════
+
+def save_valuation(result: dict) -> int:
+    """保存估值结果到 valuations 表。
+
+    Args:
+        result: ValuationResult.to_dict() 的输出
+
+    Returns:
+        新插入的 id
+    """
+    init_db()
+    sc = result.get("scenarios", {})
+    sc_data = sc.get("scenarios", {}) if isinstance(sc, dict) else {}
+
+    def _sc_range(key):
+        s = sc_data.get(key, {})
+        m = s.get("methods", {}) if isinstance(s, dict) else {}
+        prices = [
+            p for p in [m.get("price_pe"), m.get("price_pb"), m.get("price_earnings_yield")]
+            if isinstance(p, (int, float)) and p < 99999
+        ]
+        return (min(prices), max(prices)) if prices else (None, None)
+
+    bull_low, bull_high = _sc_range("bull")
+    base_low, base_high = _sc_range("base")
+    bear_low, bear_high = _sc_range("bear")
+
+    # 从 ttm/bvps_data/percentile 提取结构化字段
+    ttm = result.get("ttm", {}) or {}
+    bv = result.get("bvps_data", {}) or {}
+    roe = result.get("roe_data", {}) or {}
+    ocf = result.get("ocf_quality", {}) or {}
+    pct = result.get("percentile", {}) or {}
+
+    c = _conn()
+    try:
+        cur = c.execute(
+            """INSERT INTO valuations
+               (symbol, price, ttm_eps, bvps, ttm_pe, pb, rf, erp,
+                roe_annualized, ocf_ratio,
+                pe_median, pb_median, pe_pct, pb_pct,
+                bull_low, bull_high, base_low, base_high, bear_low, bear_high,
+                result_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                result.get("symbol", "?"),
+                result.get("price"),
+                ttm.get("ttm_eps"),
+                bv.get("bvps"),
+                result.get("price") / ttm["ttm_eps"] if result.get("price") and ttm.get("ttm_eps") else None,
+                result.get("price") / bv["bvps"] if result.get("price") and bv.get("bvps") else None,
+                result.get("rf_china_10y"),
+                result.get("erp"),
+                roe.get("roe_annualized"),
+                ocf.get("ocf_np_ratio"),
+                pct.get("pe_median"),
+                pct.get("pb_median"),
+                pct.get("pe_pct"),
+                pct.get("pb_pct"),
+                bull_low, bull_high,
+                base_low, base_high,
+                bear_low, bear_high,
+                dumps_json(result),
+            ),
+        )
+        cid = cur.lastrowid
+        c.commit()
+        return cid
+    finally:
+        _safe_close(c)
+
+
+def list_valuations(symbol: str | None = None, limit: int = 20) -> list[dict]:
+    """列出估值历史记录。
+
+    Args:
+        symbol: 股票代码，None 表示全部
+        limit: 最大返回条数
+    """
+    init_db()
+    c = _conn()
+    try:
+        if symbol:
+            rows = c.execute(
+                "SELECT id, symbol, price, ttm_eps, bvps, ttm_pe, pb, rf, erp, "
+                "roe_annualized, ocf_ratio, pe_pct, pb_pct, "
+                "bull_low, bull_high, base_low, base_high, bear_low, bear_high, "
+                "created_at FROM valuations WHERE symbol=? ORDER BY created_at DESC LIMIT ?",
+                (symbol, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT id, symbol, price, ttm_eps, bvps, ttm_pe, pb, rf, erp, "
+                "roe_annualized, ocf_ratio, pe_pct, pb_pct, "
+                "bull_low, bull_high, base_low, base_high, bear_low, bear_high, "
+                "created_at FROM valuations ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        _safe_close(c)
+
+
+def get_valuation(valuation_id: int) -> dict | None:
+    """获取单条估值记录（含完整 result_json）。"""
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute(
+            "SELECT * FROM valuations WHERE id=?", (valuation_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        if d.get("result_json"):
+            try:
+                d["result"] = json.loads(d["result_json"])
+            except (json.JSONDecodeError, TypeError):
+                d["result"] = None
+        return d
+    finally:
+        _safe_close(c)
+
+
+def compare_valuations(id1: int, id2: int) -> dict | None:
+    """对比两次估值快照。
+
+    Returns:
+        dict with old/new snapshots and key deltas, or None if either not found.
+    """
+    v1 = get_valuation(id1)
+    v2 = get_valuation(id2)
+    if v1 is None or v2 is None:
+        return None
+
+    def _delta(old, new):
+        if old is None or new is None:
+            return None
+        return round(new - old, 4)
+
+    return {
+        "symbol": v1.get("symbol", "?"),
+        "old": {
+            "id": id1, "created_at": v1.get("created_at", ""),
+            "price": v1.get("price"), "ttm_eps": v1.get("ttm_eps"),
+            "ttm_pe": v1.get("ttm_pe"), "pb": v1.get("pb"),
+            "base_low": v1.get("base_low"), "base_high": v1.get("base_high"),
+        },
+        "new": {
+            "id": id2, "created_at": v2.get("created_at", ""),
+            "price": v2.get("price"), "ttm_eps": v2.get("ttm_eps"),
+            "ttm_pe": v2.get("ttm_pe"), "pb": v2.get("pb"),
+            "base_low": v2.get("base_low"), "base_high": v2.get("base_high"),
+        },
+        "deltas": {
+            "price": _delta(v1.get("price"), v2.get("price")),
+            "ttm_eps": _delta(v1.get("ttm_eps"), v2.get("ttm_eps")),
+            "ttm_pe": _delta(v1.get("ttm_pe"), v2.get("ttm_pe")),
+            "pb": _delta(v1.get("pb"), v2.get("pb")),
+            "base_mid": _delta(
+                ((v1.get("base_low") or 0) + (v1.get("base_high") or 0)) / 2 if v1.get("base_low") and v1.get("base_high") else None,
+                ((v2.get("base_low") or 0) + (v2.get("base_high") or 0)) / 2 if v2.get("base_low") and v2.get("base_high") else None,
+            ),
+        },
     }
 
 

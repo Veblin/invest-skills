@@ -325,7 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="达到该级别及以上时返回非零退出码")
 
     ps = sub.add_parser("store", help="管理存储")
-    ps.add_argument("action", nargs="?", default="list", choices=["list", "stats", "clear"])
+    ps.add_argument("action", nargs="?", default="list", choices=["list", "stats", "clear", "valuations"])
+    ps.add_argument("--symbol", default="", help="过滤股票代码（valuations 模式）")
 
     ppl = sub.add_parser("plan", help="生成采集计划")
     ppl.add_argument("symbol")
@@ -414,6 +415,13 @@ def build_parser() -> argparse.ArgumentParser:
     pshock.add_argument("--eps-hit", type=float, required=True)
     pshock.add_argument("--pe-normal", type=float, required=True)
     pshock.add_argument("--pe-stressed", type=float, required=True)
+
+    pval = sub.add_parser("value", help="科学估值：多方法交叉（PE/PB/盈利收益/隐含增长/ROE-PB匹配）")
+    pval.add_argument("symbol", help="股票代码，如 002466")
+    pval.add_argument("--rf", type=float, help="无风险利率（小数），默认自动获取中国10Y国债")
+    pval.add_argument("--erp", type=float, default=0.06, help="股权风险溢价（默认 0.06）")
+    pval.add_argument("--store", action="store_true", help="结果存入数据库便于回溯")
+    pval.add_argument("--emit", default="text", choices=["text", "json"])
 
     return p
 
@@ -675,6 +683,21 @@ def cmd_store(args: argparse.Namespace) -> int:
     if args.action == "clear":
         store_mod.clear_all()
         print("✅ 已清空")
+        return 0
+    if args.action == "valuations":
+        sym = args.symbol.strip() if args.symbol else None
+        rows = store_mod.list_valuations(symbol=sym, limit=20)
+        if not rows:
+            print("  (暂无估值记录)")
+            return 0
+        print(f"  {'ID':<5} {'symbol':<8} {'日期':<20} {'价格':>8} {'TTM PE':>8} {'PB':>7} {'中性区间':>16}")
+        print(f"  {'─' * 5} {'─' * 8} {'─' * 20} {'─' * 8} {'─' * 8} {'─' * 7} {'─' * 16}")
+        for r in rows:
+            base_lo = f"{r.get('base_low', 0):.0f}" if r.get("base_low") else "?"
+            base_hi = f"{r.get('base_high', 0):.0f}" if r.get("base_high") else "?"
+            print(f"  {r['id']:<5} {r['symbol']:<8} {r.get('created_at', '')[:19]:<20} "
+                  f"{r.get('price', 0) or 0:>8.2f} {r.get('ttm_pe', 0) or 0:>8.1f} "
+                  f"{r.get('pb', 0) or 0:>7.2f} {base_lo}~{base_hi}")
         return 0
     return 0
 
@@ -1559,6 +1582,36 @@ def cmd_shock(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_value(args: argparse.Namespace) -> int:
+    """科学估值：多方法交叉估值（PE/PB/盈利收益/隐含增长/ROE-PB 匹配）。"""
+    from valuation_calc import run_valuation, format_output
+
+    result = run_valuation(
+        symbol=args.symbol,
+        rf_override=args.rf,
+        erp_override=args.erp,
+    )
+
+    if args.emit == "json":
+        import json as _json
+        print(_json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
+    else:
+        print(format_output(result))
+
+    if args.store:
+        if not _HAS_STORE:
+            print("⚠️ store 模块不可用，无法存储", file=sys.stderr)
+        else:
+            val_id = store_mod.save_valuation(result.to_dict())
+            print(f"💾 已存入估值记录 (id={val_id})")
+
+    if result.errors:
+        critical = [e for e in result.errors if "失败" in e or "不可得" in e]
+        if len(critical) >= 3:
+            return 1
+    return 0
+
+
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
@@ -1600,6 +1653,8 @@ def main() -> int:
         return cmd_thesis(args)
     elif args.command == "shock":
         return cmd_shock(args)
+    elif args.command == "value":
+        return cmd_value(args)
     return 1
 
 
