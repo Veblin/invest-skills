@@ -8,6 +8,7 @@ akshare 东方财富接口使用 akshare_direct_session() 强制直连。
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 import urllib.request
@@ -409,8 +410,8 @@ def warn_if_proxy_detected(*, probe: bool = False) -> None:
     if not lines:
         return
     _warned = True
-    print("\n".join(lines))
-    print()
+    print("\n".join(lines), file=sys.stderr)
+    print(file=sys.stderr)
 
 
 @contextmanager

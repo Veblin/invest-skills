@@ -70,7 +70,7 @@ class TestProxyDetection:
         monkeypatch.setattr(proxy_mod, "requests_use_proxy", lambda *a, **k: True)
 
         warn_if_proxy_detected(probe=False)
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
         assert "eastmoney.com" in out
 
     def test_proxy_status_user_action_for_tun(self, monkeypatch):
@@ -237,7 +237,7 @@ class TestProxyDetection:
 
         warn_if_proxy_detected(probe=False)
         warn_if_proxy_detected(probe=False)
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
         assert out.count("无法自动绕过") == 1
 
     def test_no_proxy_session_exports(self):

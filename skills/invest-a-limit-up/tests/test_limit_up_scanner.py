@@ -38,12 +38,14 @@ if str(_SCRIPTS) not in sys.path:
 
 from scan import build_parser, resolve_cli_filter  # noqa: E402
 from tushare_enrich import (
+    _get_client,
     _market_label,
     _safe_float_or_none,
     _safe_str,
     _to_ts_code,
     enrich_price_data,
     enrich_stock_info,
+    get_trade_dates,
 )
 
 
@@ -345,17 +347,24 @@ class TestScanMarket:
         assert "push2" in result["errors"][0].lower() or "不可用" in result["errors"][0]
 
     def test_push2_unavailable(self):
-        """akshare installed but EastMoney push2 blocked — skip live fetches."""
+        """push2 blocked but akshare stock_zt_pool_em may still work — continue scan."""
         with patch("limit_up_scanner.env.is_akshare_available", return_value=True), \
              patch("limit_up_scanner.akshare_push2_available", return_value=False), \
              patch("limit_up_scanner.get_trade_dates") as mock_dates, \
              patch("limit_up_scanner._fetch_day_with_aux") as mock_fetch:
+            mock_dates.return_value = ["20260713", "20260712"]
+            mock_fetch.return_value = (
+                [{"代码": "000001", "名称": "Test", "连板数": 1, "首次封板时间": "093000",
+                  "封板资金": 1e8, "炸板次数": 0, "换手率": 5.0, "总市值": 1e10,
+                  "涨跌幅": 10.0, "涨停统计": "1/1", "所属行业": "银行"}],
+                None,
+                {"strong": set(), "previous": set(), "zbgc": set()},
+                [],
+            )
             result = scan_market(days=3)
-        mock_dates.assert_not_called()
-        mock_fetch.assert_not_called()
-        assert result["trading_days_scanned"] == 0
-        assert result["stocks"] == []
-        assert "push2" in result["errors"][0].lower() or "不可用" in result["errors"][0]
+        # push2 unavailable is logged as warning but scan continues normally
+        assert result["trading_days_scanned"] > 0
+        assert len(result["stocks"]) > 0
 
     def test_tushare_fallback(self):
         def fake_fetch(date):
@@ -852,3 +861,49 @@ class TestFetchDayWithAux:
         assert records is not None and len(records) == 1
         assert aux["strong"] == {"000001"}
         ak.stock_zt_pool_strong_em.assert_called_once_with("20260710")
+
+
+# ---- Tushare enrichment degradation paths (no token / no client) ----
+
+
+class TestTushareEnrichDegradation:
+    """Degradation paths when Tushare client is unavailable."""
+
+    def setup_method(self):
+        """Reset global client cache before each test."""
+        import tushare_enrich
+        tushare_enrich._tushare = None
+        tushare_enrich._tushare_checked = False
+
+    def test_get_client_returns_none_when_token_unavailable(self):
+        """When env.is_tushare_available returns False, _get_client must return None."""
+        import tushare_enrich
+        tushare_enrich._tushare_checked = False
+        tushare_enrich._tushare = None
+        with patch.object(tushare_enrich.env, "get_config", return_value={}), \
+             patch.object(tushare_enrich.env, "is_tushare_available", return_value=False):
+            client = _get_client()
+        assert client is None
+        assert tushare_enrich._tushare_checked is True
+
+    def test_get_trade_dates_fallback_no_tushare(self):
+        """Without Tushare token, fall back to n*1.4 calendar days in YYYYMMDD format."""
+        with patch("tushare_enrich._get_client", return_value=None):
+            dates = get_trade_dates(10)
+        assert len(dates) >= 10
+        assert len(dates) <= 20  # 10 * 1.4 = 14, but allow margin
+        for d in dates:
+            assert len(d) == 8
+            assert d.isdigit()
+
+    def test_enrich_stock_info_no_tushare_token(self):
+        """When _get_client returns None, enrich_stock_info returns {}."""
+        with patch("tushare_enrich._get_client", return_value=None):
+            out = enrich_stock_info(["600176", "000001"])
+        assert out == {}
+
+    def test_enrich_price_data_no_tushare_token(self):
+        """When _get_client returns None, enrich_price_data returns {}."""
+        with patch("tushare_enrich._get_client", return_value=None):
+            out = enrich_price_data(["600176", "000001"], "20260713")
+        assert out == {}

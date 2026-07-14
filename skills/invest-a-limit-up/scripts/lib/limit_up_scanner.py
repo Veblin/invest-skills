@@ -52,15 +52,20 @@ def scan_market(days: int = 10) -> dict:
     from zoneinfo import ZoneInfo
     scan_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
 
-    if not env.is_akshare_available() or not akshare_push2_available():
+    if not env.is_akshare_available():
         return {
             "scan_date": scan_date,
             "trading_days_scanned": 0,
             "stocks": [],
             "market_breadth": _empty_breadth(),
-            "errors": ["akshare / EastMoney push2 不可用"],
+            "errors": ["akshare 不可用"],
             "enrichment": {"tushare": False, "enriched_count": 0},
         }
+
+    # stock_zt_pool_em 与 push2 是不同 API，不应因 push2 不可达就跳过扫描。
+    # push2 探测失败仅记录 warning，不阻塞扫描。
+    if not akshare_push2_available():
+        logger.warning("push2 不可达，但 stock_zt_pool_em 可能仍可用，继续扫描")
 
     dates = get_trade_dates(days)
     errors: list[str] = []
