@@ -787,7 +787,7 @@ def run_valuation(
     ts_code = _fmt_code(symbol)
     code_ak = _fmt_code_ak(symbol)
     rf = rf_override
-    erp = erp_override or DEFAULT_ERP
+    erp = erp_override if erp_override is not None else DEFAULT_ERP
 
     result = ValuationResult(
         symbol=symbol,
@@ -873,7 +873,7 @@ def run_valuation(
     # ---- Step 7: ROE-PB 匹配 ----
     bvps = result.bvps_data.get("bvps")
     roe_ann = result.roe_data.get("roe_annualized")
-    if roe_ann and bvps and rf:
+    if roe_ann is not None and bvps is not None and rf is not None:
         result.roe_pb_match = roe_pb_match(roe_ann, bvps, rf, erp)
     else:
         result.roe_pb_match = {"error": "ROE/BVPS/Rf 不足"}
@@ -938,7 +938,7 @@ def format_output(result: ValuationResult) -> str:
     lines.append("━" * 60)
 
     ttm = result.ttm
-    if ttm.get("ttm_eps"):
+    if ttm.get("ttm_eps") is not None:
         lines.append(f"  TTM EPS            {ttm['ttm_eps']:.4f} 元/股")
         if result.price and ttm['ttm_eps'] > 0:
             current_pe_calc = result.price / ttm['ttm_eps']
@@ -956,7 +956,7 @@ def format_output(result: ValuationResult) -> str:
         lines.append(f"  TTM EPS           不可得 ({ttm.get('error', '')})")
 
     bvps_d = result.bvps_data
-    if bvps_d.get("bvps"):
+    if bvps_d.get("bvps") is not None:
         lines.append(f"  BVPS (每股净资产)  {bvps_d['bvps']:.2f} 元")
         lines.append(f"    <- 报告期: {bvps_d.get('end_date', '?')}")
         if result.price and bvps_d["bvps"]:
