@@ -693,8 +693,8 @@ def cmd_store(args: argparse.Namespace) -> int:
         print(f"  {'ID':<5} {'symbol':<8} {'日期':<20} {'价格':>8} {'TTM PE':>8} {'PB':>7} {'中性区间':>16}")
         print(f"  {'─' * 5} {'─' * 8} {'─' * 20} {'─' * 8} {'─' * 8} {'─' * 7} {'─' * 16}")
         for r in rows:
-            base_lo = f"{r.get('base_low', 0):.0f}" if r.get("base_low") else "?"
-            base_hi = f"{r.get('base_high', 0):.0f}" if r.get("base_high") else "?"
+            base_lo = f"{r.get('base_low', 0):.0f}" if r.get("base_low") is not None else "?"
+            base_hi = f"{r.get('base_high', 0):.0f}" if r.get("base_high") is not None else "?"
             print(f"  {r['id']:<5} {r['symbol']:<8} {r.get('created_at', '')[:19]:<20} "
                   f"{r.get('price', 0) or 0:>8.2f} {r.get('ttm_pe', 0) or 0:>8.1f} "
                   f"{r.get('pb', 0) or 0:>7.2f} {base_lo}~{base_hi}")
@@ -1584,7 +1584,11 @@ def cmd_shock(args: argparse.Namespace) -> int:
 
 def cmd_value(args: argparse.Namespace) -> int:
     """科学估值：多方法交叉估值（PE/PB/盈利收益/隐含增长/ROE-PB 匹配）。"""
-    from valuation_calc import run_valuation, format_output
+    try:
+        from valuation_calc import run_valuation, format_output
+    except ImportError:
+        print("⚠️ valuation_calc 模块不可用", file=sys.stderr)
+        return 1
 
     result = run_valuation(
         symbol=args.symbol,

@@ -709,8 +709,8 @@ def save_valuation(result: dict) -> int:
                 result.get("price"),
                 ttm.get("ttm_eps"),
                 bv.get("bvps"),
-                result.get("price") / ttm["ttm_eps"] if result.get("price") and ttm.get("ttm_eps") else None,
-                result.get("price") / bv["bvps"] if result.get("price") and bv.get("bvps") else None,
+                result.get("price") / ttm["ttm_eps"] if result.get("price") is not None and ttm.get("ttm_eps") is not None and ttm["ttm_eps"] != 0 else None,
+                result.get("price") / bv["bvps"] if result.get("price") is not None and bv.get("bvps") is not None and bv["bvps"] != 0 else None,
                 result.get("rf_china_10y"),
                 result.get("erp"),
                 roe.get("roe_annualized"),
@@ -820,8 +820,8 @@ def compare_valuations(id1: int, id2: int) -> dict | None:
             "ttm_pe": _delta(v1.get("ttm_pe"), v2.get("ttm_pe")),
             "pb": _delta(v1.get("pb"), v2.get("pb")),
             "base_mid": _delta(
-                ((v1.get("base_low") or 0) + (v1.get("base_high") or 0)) / 2 if v1.get("base_low") and v1.get("base_high") else None,
-                ((v2.get("base_low") or 0) + (v2.get("base_high") or 0)) / 2 if v2.get("base_low") and v2.get("base_high") else None,
+                ((v1.get("base_low") or 0) + (v1.get("base_high") or 0)) / 2 if v1.get("base_low") is not None and v1.get("base_high") is not None else None,
+                ((v2.get("base_low") or 0) + (v2.get("base_high") or 0)) / 2 if v2.get("base_low") is not None and v2.get("base_high") is not None else None,
             ),
         },
     }
