@@ -17,7 +17,9 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import redirect_stdout
 from datetime import datetime, timezone, timedelta
+from io import StringIO
 from typing import Any, Callable
 
 from . import env
@@ -935,7 +937,8 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     tf_symbol = _exchange_code(symbol)["tushare"]
 
     try:
-        client = tf.TickFlow.free()
+        with redirect_stdout(StringIO()):
+            client = tf.TickFlow.free()
         df = client.klines.get(
             tf_symbol,
             period="1d",
