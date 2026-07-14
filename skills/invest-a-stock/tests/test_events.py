@@ -378,11 +378,11 @@ class TestBuildSummary:
 
 class TestPlaceholders:
     def test_industry_placeholder_empty(self):
-        assert isinstance(INDUSTRY_EVENTS_PLACEHOLDER, list)
+        assert isinstance(INDUSTRY_EVENTS_PLACEHOLDER, (list, tuple))
         assert len(INDUSTRY_EVENTS_PLACEHOLDER) == 0
 
     def test_market_placeholder_empty(self):
-        assert isinstance(MARKET_EVENTS_PLACEHOLDER, list)
+        assert isinstance(MARKET_EVENTS_PLACEHOLDER, (list, tuple))
         assert len(MARKET_EVENTS_PLACEHOLDER) == 0
 
     def test_placeholder_notes_defined(self):
@@ -792,7 +792,30 @@ class TestPriceImpactInterpolation:
         # v_true = 3*10=30, v_false = 2*15=30 → spread=0
         assert r["ratio"] == 0.5
         assert r["warn"] is not None
-        assert "0.01" in r["warn"]
+        assert "ratio 默认 0.5" in r["warn"]
+
+    def test_small_eps_meaningful_spread_not_forced_to_half(self):
+        """Tiny EPS with meaningful relative spread must not force ratio=0.5."""
+        r = calc_price_impact_interpolation(
+            pre_price=0.05, post_price=0.04,
+            eps_base=0.001, eps_hit=0.002,
+            pe_normal=20.0, pe_stressed=15.0,
+            scenario="bearish",
+        )
+        # v_true=0.04, v_false=0.015, spread=0.025 — old abs(0.01) would
+        # have allowed this; with tiny scale still fine. Use even tinier:
+        # Actually use values where abs(spread) < 0.01 but relative is large.
+        r2 = calc_price_impact_interpolation(
+            pre_price=0.008, post_price=0.006,
+            eps_base=0.0002, eps_hit=0.0004,
+            pe_normal=20.0, pe_stressed=15.0,
+            scenario="bearish",
+        )
+        # v_true=0.008, v_false=0.003, spread=0.005 < 0.01 absolute
+        assert r2["warn"] is None
+        assert r2["ratio"] != 0.5
+        assert 0.0 <= r2["ratio"] <= 1.0
+        assert r["warn"] is None  # sanity on first case too
 
     def test_zero_spread_does_not_default_to_bullish(self):
         """v_true==v_false 时不应盲目标 bullish（修复前 bug）."""

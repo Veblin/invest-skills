@@ -11,6 +11,15 @@ import pytest
 
 
 class TestEnv:
+    def test_project_root_anchors_from_env_module_file(self):
+        """PROJECT_ROOT must come from env.py location, not process CWD."""
+        import lib.env as env_mod
+
+        root = env_mod._find_project_root()
+        assert (root / "pyproject.toml").is_file()
+        # even if CWD is elsewhere, file-anchored walk still finds the repo
+        assert root == env_mod.PROJECT_ROOT
+
     def test_load_env_file_missing(self):
         from lib.env import load_env_file
         assert load_env_file(Path("/nonexistent/.env")) == {}
@@ -139,3 +148,26 @@ class TestStore:
             assert get_stats()["total_collections"] == 0
 
             store_mod._db_override = None
+
+
+class TestEnsureEnvLoaded:
+    def test_loads_global_then_project(self, monkeypatch, tmp_path: Path):
+        import lib.env as env_mod
+
+        global_file = tmp_path / "global.env"
+        project_file = tmp_path / "project.env"
+        global_file.write_text("FROM_GLOBAL=g\nSHARED=global\n", encoding="utf-8")
+        project_file.write_text("FROM_PROJECT=p\nSHARED=project\n", encoding="utf-8")
+
+        monkeypatch.setattr(env_mod, "GLOBAL_CONFIG_FILE", global_file)
+        monkeypatch.setattr(env_mod, "PROJECT_ENV_FILE", project_file)
+        monkeypatch.delenv("FROM_GLOBAL", raising=False)
+        monkeypatch.delenv("FROM_PROJECT", raising=False)
+        monkeypatch.delenv("SHARED", raising=False)
+        monkeypatch.setenv("ALREADY_SET", "os")
+
+        env_mod.ensure_env_loaded()
+        assert os.environ["FROM_GLOBAL"] == "g"
+        assert os.environ["FROM_PROJECT"] == "p"
+        assert os.environ["SHARED"] == "project"  # project wins over global
+        assert os.environ["ALREADY_SET"] == "os"  # os.environ never overwritten

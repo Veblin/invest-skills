@@ -98,6 +98,15 @@ class TestAggregateSellsidePriceRange:
 
 
 class TestCollectResearchShortCircuit:
+    def test_akshare_research_uses_direct_session(self):
+        """EastMoney research_em must force direct (no proxy) session."""
+        import inspect
+        from lib.collector import _q_akshare_research
+
+        src = inspect.getsource(_q_akshare_research)
+        assert "akshare_direct_session" in src
+        assert "stock_research_report_em" in src
+
     def test_skips_lower_tiers_when_report_rc_ok(self):
         from lib.collector import collect_research
 

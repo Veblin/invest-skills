@@ -36,14 +36,19 @@ from .schema import SourceResult, DimensionResult
 logger = logging.getLogger(__name__)
 
 
-# ---- 日期工具（函数形式，避免导入时固化） ----
+# ---- 日期工具（函数形式，避免导入时固化；A 股日历日统一上海时区） ----
+
+def _shanghai_now() -> datetime:
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
+
 
 def _today() -> str:
-    return datetime.now().strftime("%Y%m%d")
+    return _shanghai_now().strftime("%Y%m%d")
 
 
 def _days_ago(n: int) -> str:
-    return (datetime.now() - timedelta(days=n)).strftime("%Y%m%d")
+    return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
 def _to_iso_date(yyyymmdd: str) -> str:
@@ -63,8 +68,8 @@ def _latest_quarter_end() -> str:
     确保季度末日期的完整日已经过去（不提前返回当天）。
     """
     from datetime import date
-    today = date.today()
-    now = datetime.now()
+    now = _shanghai_now()
+    today = now.date()
     quarter_ends = [
         (now.year, "0331"),
         (now.year, "0630"),
@@ -446,13 +451,15 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
     """
     if not records:
         return records
-    # 仅 moneyflow 为万元；hsgt_top10.net_amount 已是元
-    scale = 10000.0 if source.startswith("tushare.moneyflow") else 1.0
+    # 仅 moneyflow.net_mf_amount 为万元；hsgt_top10 / akshare 已是元。
+    # moneyflow 的 net_mf_vol 是「手」量纲，禁止万元 scale 回落放大。
+    is_moneyflow = source.startswith("tushare.moneyflow")
+    scale = 10000.0 if is_moneyflow else 1.0
     out: list[dict] = []
     for r in records:
         row = dict(r)
         raw = row.get("net_mf_amount")
-        if raw is None:
+        if raw is None and not is_moneyflow:
             raw = row.get("net_mf_vol")
         if raw is not None:
             yuan = float(raw) * scale
@@ -911,8 +918,8 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     """
     try:
         import tickflow as tf
-    except ImportError:
-        raise Exception("tickflow 未安装，请运行: uv sync")
+    except ImportError as exc:
+        raise Exception("tickflow 未安装，请运行: uv sync") from exc
 
     sd = start_date or _days_ago(400)
     ed = end_date or _today()
@@ -1345,8 +1352,9 @@ def _q_akshare_research(symbol: str) -> list[dict] | None:
         return None
     try:
         import akshare as ak
-        # stock_research_report_em 接口仅支持 symbol 参数
-        df = ak.stock_research_report_em(symbol=symbol)
+        # stock_research_report_em 接口仅支持 symbol 参数；东财需直连
+        with akshare_direct_session():
+            df = ak.stock_research_report_em(symbol=symbol)
         if df is not None and not df.empty:
             out = df.to_dict("records")
             logger.info("akshare_research: %d records for %s", len(out), symbol)
@@ -1864,41 +1872,42 @@ def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
     records: list[dict] = []
     timeout_sec = float(env.CNINFO_HOLDER_TIMEOUT_SEC)
 
-    for direction in ("增持", "减持"):
-        df = _run_with_timeout(
-            lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
-            timeout_sec,
-            f"akshare cninfo({direction})",
-        )
-        if df is None or getattr(df, "empty", True):
-            continue
-        # 过滤当前标的
-        code_col = "证券代码" if "证券代码" in df.columns else (
-            "股票代码" if "股票代码" in df.columns else None)
-        if code_col is None:
-            logger.warning(
-                "akshare cninfo(%s): missing symbol column (%s), skip",
-                direction, list(df.columns),
+    with akshare_direct_session():
+        for direction in ("增持", "减持"):
+            df = _run_with_timeout(
+                lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
+                timeout_sec,
+                f"akshare cninfo({direction})",
             )
-            continue
-        df = df[df[code_col].astype(str).str.contains(sym, na=False)]
-        if df.empty:
-            continue
-        for row in df.to_dict("records"):
-            change_vol_raw = _first_present(row, "变动数量", "变动股数")
-            parsed_vol = _parse_holder_change_vol(change_vol_raw)
-            records.append({
-                "ann_date": _norm_date(
-                    row.get("公告日期") or row.get("变动日期") or ""),
-                "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
-                "position": row.get("董监高职务") or row.get("职务") or "",
-                "direction": direction,
-                "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
-                "change_vol_raw": change_vol_raw,
-                "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
-                "reason": row.get("持股变动原因") or row.get("变动原因") or "",
-                "source": "akshare cninfo",
-            })
+            if df is None or getattr(df, "empty", True):
+                continue
+            # 过滤当前标的
+            code_col = "证券代码" if "证券代码" in df.columns else (
+                "股票代码" if "股票代码" in df.columns else None)
+            if code_col is None:
+                logger.warning(
+                    "akshare cninfo(%s): missing symbol column (%s), skip",
+                    direction, list(df.columns),
+                )
+                continue
+            df = df[df[code_col].astype(str).str.contains(sym, na=False)]
+            if df.empty:
+                continue
+            for row in df.to_dict("records"):
+                change_vol_raw = _first_present(row, "变动数量", "变动股数")
+                parsed_vol = _parse_holder_change_vol(change_vol_raw)
+                records.append({
+                    "ann_date": _norm_date(
+                        row.get("公告日期") or row.get("变动日期") or ""),
+                    "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
+                    "position": row.get("董监高职务") or row.get("职务") or "",
+                    "direction": direction,
+                    "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
+                    "change_vol_raw": change_vol_raw,
+                    "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
+                    "reason": row.get("持股变动原因") or row.get("变动原因") or "",
+                    "source": "akshare cninfo",
+                })
     return records or None
 
 
@@ -1907,7 +1916,8 @@ def _q_akshare_shareholder_change_ths(symbol: str) -> list[dict] | None:
     if not env.is_akshare_available():
         return None
     import akshare as ak
-    df = ak.stock_shareholder_change_ths(symbol=symbol.strip().zfill(6))
+    with _proxy_bypass():
+        df = ak.stock_shareholder_change_ths(symbol=symbol.strip().zfill(6))
     if df is None or df.empty:
         return None
     records = []
@@ -2043,7 +2053,7 @@ def _calc_futures_trend(daily_df, days: int = 30) -> str:
     try:
         first = float(prices.iloc[0])
         last = float(prices.iloc[-1])
-        pct = (last - first) / abs(first) * 100 if first != 0 else 0
+        pct = (last - first) / abs(first) * 100 if abs(first) > 1e-9 else 0
         arrow = "↗" if pct > 0 else "↘" if pct < 0 else "→"
         return f"{arrow} {pct:+.1f}%"
     except (TypeError, ValueError, IndexError):
@@ -2933,7 +2943,7 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
             return None
         f = float(fv)
         l = float(lv)
-        if f == 0:
+        if abs(f) < 1e-9:
             return None
         return (l - f) / f * 100
 
@@ -3337,7 +3347,14 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as executor:
         futures = {executor.submit(_fetch_daily_panel_row, c): c for c in codes}
         for fut in as_completed(futures):
-            ts_code, records = fut.result()
+            try:
+                ts_code, records = fut.result()
+            except Exception as exc:
+                logger.warning(
+                    "new_high_ratio daily fetch failed for %s: %s",
+                    futures[fut], exc,
+                )
+                continue
             if records:
                 panel[ts_code] = records
     current = _ms_new_high_ratio_from_panel(panel)

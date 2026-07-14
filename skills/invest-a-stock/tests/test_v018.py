@@ -170,6 +170,25 @@ class TestRevenueQualityScore:
         result = revenue_quality_score(None)  # type: ignore[arg-type]
         assert result["score"] is None
 
+    def test_both_negative_ocf_np_does_not_inflate(self):
+        """OCF and net profit both negative must not score as strong cash quality."""
+        rows = [
+            _make_financials_row(
+                f"2025{q}",
+                revenue=100.0 + i * 10,
+                net_profit=-100.0,
+                n_cashflow_act=-100.0,
+                grossprofit_margin=40.0,
+            )
+            for i, q in enumerate(("0331", "0630", "0930", "1231"))
+        ]
+        result = revenue_quality_score(rows)
+        ocf = result.get("detail", {}).get("ocf_coverage", {})
+        # Periods with net_profit <= 0 are excluded → ocf_coverage insufficient
+        assert ocf.get("score") is None or ocf.get("score", 100) < 60
+        note = ocf.get("note", "")
+        assert "现金收入模式特征明显" not in note
+
 
 class TestCustomerLockinScore:
     def test_normal_path(self):
@@ -478,6 +497,16 @@ class TestScenarioFcff:
         assert result["assumption_type"] == "rule_based_proxy"
         assert len(result["insufficient_data"]) > 0
         _check_no_forbidden_words(result)
+
+    def test_zero_revenue_latest_insufficient(self):
+        """Latest revenue 0.0 must not produce all-zero FCFF projections."""
+        rows = _make_dcf_financials_rows(4)
+        rows[-1]["revenue"] = 0.0
+        rows[-1]["ebit"] = 0.0
+        result = scenario_fcff({"data": rows}, scenario="base")
+        assert "error" in result
+        assert any("revenue" in item for item in result["insufficient_data"])
+        assert "yearly_fcff" not in result
 
     def test_single_period_insufficient(self):
         financials = {"data": [_make_dcf_financials_rows(4)[0]]}

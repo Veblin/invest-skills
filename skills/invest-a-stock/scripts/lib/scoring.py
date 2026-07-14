@@ -141,7 +141,11 @@ def revenue_quality_score(financials: list[dict]) -> dict:
     for r in rows[-_RECENT_OCF_PERIODS:]:
         ocf = _field(r, "n_cashflow_act", "ocf")
         net_profit = _field(r, "net_profit")
-        if ocf is not None and net_profit is not None and abs(net_profit) > 1e-9:
+        # Only profitable periods: both-negative OCF/NP would inflate the ratio
+        # (e.g. -100/-100 → 1.0) and falsely signal "cash income quality".
+        # 1e-9 tolerance excludes float rounding noise (e.g. -1e-12) while
+        # preserving genuine small positive profits.
+        if ocf is not None and net_profit is not None and net_profit > 1e-9:
             ratios.append(ocf / net_profit)
     if ratios:
         avg_ratio = statistics.mean(ratios)

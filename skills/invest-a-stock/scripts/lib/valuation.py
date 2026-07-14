@@ -399,7 +399,8 @@ def calc_wacc(
         erp: 权益风险溢价（小数，如 0.058）
         cost_of_debt: 税前债务成本。若为 None，仅返回 cost_of_equity
         tax_rate: 有效税率
-        debt_weight: 债务权重 D/(D+E)。若为 None 且 cost_of_debt 有值，自动计算
+        debt_weight: 债务权重 D/(D+E)。若为 None，即使 cost_of_debt 有值也退化返回
+            cost_of_equity 并附带 warning（需调用方从财报推断 D/E 后传入）
     """
     cost_of_equity = risk_free_rate + beta * erp
 
@@ -512,7 +513,7 @@ def calc_ev_to_equity(
         "net_debt": net_debt,
         "equity_value": equity_value,
         "shares_outstanding": shares_outstanding,
-        "per_share": round(per_share, 2) if per_share else None,
+        "per_share": round(per_share, 2) if per_share is not None else None,
     }
 
 
@@ -892,7 +893,7 @@ def scenario_fcff(
 
     if latest is None:
         insufficient.append("financials 无有效历史财报记录（end_date 缺失或格式不可解析）")
-    if revenue_latest is None:
+    if revenue_latest is None or revenue_latest <= 0:
         insufficient.append("revenue（最新期）不可得")
     if ebit_latest is None:
         insufficient.append("ebit（最新期）不可得")

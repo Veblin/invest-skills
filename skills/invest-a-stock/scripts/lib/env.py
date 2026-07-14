@@ -15,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 def _find_project_root() -> Path:
-    cwd = Path.cwd()
-    for parent in [cwd, *cwd.parents]:
-        if (parent / ".env").exists() or (parent / "pyproject.toml").exists():
+    """Walk up from this file (not CWD) to find pyproject.toml / .env."""
+    start = Path(__file__).resolve().parent
+    for parent in [start, *start.parents]:
+        if (parent / "pyproject.toml").exists() or (parent / ".env").exists():
             return parent
         if parent == Path.home() or parent == parent.parent:
             break
-    return cwd
+    return start
 
 
 PROJECT_ROOT = _find_project_root()
@@ -269,7 +270,12 @@ CNINFO_HOLDER_TIMEOUT_SEC = max(
 
 
 def ensure_env_loaded() -> None:
-    """将 .env 变量注入 os.environ（向后兼容）。"""
-    for key, value in load_env_file(PROJECT_ENV_FILE).items():
+    """将 .env 变量注入 os.environ（向后兼容）。
+
+    优先级与模块文档一致：os.environ > 项目 .env > 全局 ~/.config/investment/.env
+    （合并时项目覆盖全局；已存在的 os.environ 键不覆盖。）
+    """
+    merged = {**load_env_file(GLOBAL_CONFIG_FILE), **load_env_file(PROJECT_ENV_FILE)}
+    for key, value in merged.items():
         if key not in os.environ:
             os.environ[key] = value

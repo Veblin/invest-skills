@@ -13,22 +13,15 @@ import math
 import re
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Literal
 
 # ---- 跨 skill 导入 invest:a-stock 基础设施 ----
-# scripts/lib/ → scripts/ → invest-a-limit-up/ → skills/ → invest-a-stock/scripts
-_INVEST_A_LIB = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "invest-a-stock" / "scripts"
-)
-import sys
+from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
-if str(_INVEST_A_LIB) not in sys.path:
-    sys.path.insert(0, str(_INVEST_A_LIB))
+ensure_invest_a_scripts_on_path()
 
 from lib import env  # noqa: E402
-from lib.proxy import akshare_direct_session  # noqa: E402
+from lib.proxy import akshare_direct_session, akshare_push2_available  # noqa: E402
 
 # tushare_enrich is in the same lib/ directory — scan.py already adds it to sys.path
 from tushare_enrich import (  # noqa: E402
@@ -56,9 +49,10 @@ def scan_market(days: int = 10) -> dict:
     5. Tushare L2 增强（有 Token 时：ST/市场/股价/流通市值）
     6. 计算市场宽度指标（含封板质量 / 市场分布）
     """
-    scan_date = datetime.now().strftime("%Y%m%d")
+    from zoneinfo import ZoneInfo
+    scan_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
 
-    if not env.is_akshare_available():
+    if not env.is_akshare_available() or not akshare_push2_available():
         return {
             "scan_date": scan_date,
             "trading_days_scanned": 0,
@@ -376,7 +370,7 @@ def format_market_brief(result: dict) -> str:
         for s in leaders[:10]:
             latest = _latest_appearance(s) or {}
             lines.append(
-                f"| {s['symbol']} | {s['name']} | {s['max_consecutive']} | "
+                f"| {s.get('symbol', '')} | {s.get('name', '')} | {s.get('max_consecutive', 0)} | "
                 f"{s.get('sector', '-')} | {latest.get('seal_time', '-')} |"
             )
         lines.append("")
@@ -404,7 +398,7 @@ def format_stock_table(stocks: list[dict], max_rows: int = 80) -> str:
         mcap = _fmt_yi(latest.get("market_cap"))
         turnover = f"{latest.get('turnover', 0):.1f}"
         lines.append(
-            f"| {s['symbol']} | {s['name']} | {s.get('max_consecutive', 0)} | "
+            f"| {s.get('symbol', '')} | {s.get('name', '')} | {s.get('max_consecutive', 0)} | "
             f"{s.get('total_appearances', 0)} | {s.get('sector', '-')} | "
             f"{mcap} | {turnover} | {latest.get('seal_time', '-')} | "
             f"{latest.get('break_count', 0)} |"
@@ -419,17 +413,12 @@ def format_stock_table(stocks: list[dict], max_rows: int = 80) -> str:
 # ---- 内部函数 ----
 
 
-def _get_trade_dates(days: int) -> list[str]:
-    """兼容旧测试：委托 tushare_enrich.get_trade_dates。"""
-    return get_trade_dates(days)
-
-
 def _apply_tushare_enrich(stocks: list[dict], trade_date: str) -> dict:
     """将 Tushare L2 字段挂到 stocks；无 Token 时静默跳过。"""
     if not stocks:
         return {"tushare": False, "enriched_count": 0}
 
-    symbols = [s["symbol"] for s in stocks]
+    symbols = [s.get("symbol", "") for s in stocks if s.get("symbol")]
     info = enrich_stock_info(symbols)
     prices = enrich_price_data(symbols, trade_date)
     if not info and not prices:
@@ -437,7 +426,9 @@ def _apply_tushare_enrich(stocks: list[dict], trade_date: str) -> dict:
 
     count = 0
     for s in stocks:
-        sym = s["symbol"]
+        sym = s.get("symbol")
+        if not sym:
+            continue
         changed = False
         if sym in info:
             s["is_st"] = info[sym].get("is_st", False)
@@ -532,7 +523,7 @@ def _merge_daily_results(
                     "flags": {"in_strong": False, "in_previous": False, "in_zbgc": False},
                 }
 
-            float_mcap = _safe_float(r.get("流通市值"))
+            float_mcap = _nullable_float(r.get("流通市值"))
             close = _safe_float(r.get("最新价"))
             in_strong = sym in aux.get("strong", set())
             in_previous = sym in aux.get("previous", set())
@@ -545,8 +536,8 @@ def _merge_daily_results(
                 "break_count": int(r.get("炸板次数", 0) or 0),
                 "turnover": _safe_float(r.get("换手率")),
                 "market_cap": _safe_float(r.get("总市值")),
-                "float_mkt_cap": float_mcap if float_mcap else None,
-                "close": close if close > 0 else None,
+                "float_mkt_cap": float_mcap,
+                "close": close if close is not None and close > 0 else None,
                 "change_pct": _safe_float(r.get("涨跌幅")),
                 "stat": str(r.get("涨停统计", "")),
                 "in_strong": in_strong,
@@ -571,10 +562,10 @@ def _merge_daily_results(
         info["last_date"] = apps[-1]["date"] if apps else ""
         latest = apps[-1] if apps else {}
         latest_float = latest.get("float_mkt_cap")
-        if latest_float:
+        if latest_float is not None:
             info["float_mkt_cap"] = latest_float
         latest_close = latest.get("close")
-        if latest_close:
+        if latest_close is not None:
             info["close"] = latest_close
         stocks.append(info)
 
@@ -636,7 +627,9 @@ def _one_to_two_rate(
 
     by_date: dict[str, dict[str, int]] = {}
     for s in stocks:
-        sym = s["symbol"]
+        sym = s.get("symbol")
+        if not sym:
+            continue
         for a in s.get("appearances", []):
             d = a.get("date")
             if not d:
@@ -680,9 +673,14 @@ def _compute_seal_quality(
             early += 1
         breaks.append(int(latest.get("break_count", 0) or 0))
 
-        float_mcap = s.get("float_mkt_cap") or latest.get("float_mkt_cap")
+        float_mcap = latest.get("float_mkt_cap")
+        # 0.0 from missing EastMoney field must not block Tushare-enriched stock-level cap
+        if float_mcap is None or float_mcap <= 0:
+            stock_cap = s.get("float_mkt_cap")
+            if stock_cap is not None and stock_cap > 0:
+                float_mcap = stock_cap
         seal_amt = _safe_float(latest.get("seal_amount"))
-        if float_mcap and float_mcap > 0 and seal_amt > 0:
+        if float_mcap is not None and float_mcap > 0 and seal_amt > 0:
             flow_n += 1
             if seal_amt / float_mcap > 0.05:
                 flow_ok += 1
@@ -796,9 +794,22 @@ def _safe_float(val: Any) -> float:
         return 0.0
 
 
+def _nullable_float(val: Any) -> float | None:
+    """Parse float; missing / NaN / invalid → None (preserves genuine 0.0)."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f):
+            return None
+        return f
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt_yi(val: Any) -> str:
     v = _safe_float(val)
-    return f"{v / 1e8:.1f}" if v != 0 else "-"
+    return f"{v / 1e8:.1f}" if abs(v) > 1e-9 else "-"
 
 
 def _fmt_date(yyyymmdd: str) -> str:

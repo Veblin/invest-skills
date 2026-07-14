@@ -82,11 +82,13 @@ def write_pyproject_version(path: Path, version: str) -> None:
             in_project = stripped == "[project]"
             out.append(raw)
             continue
-        if in_project and stripped.startswith("version") and "=" in stripped:
-            prefix = raw.split("=", 1)[0]
-            out.append(f'{prefix}= "{version}"\n')
-            updated = True
-            continue
+        if in_project and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key == "version":
+                prefix = raw.split("=", 1)[0]
+                out.append(f'{prefix}= "{version}"\n')
+                updated = True
+                continue
         out.append(raw)
     if not updated:
         raise ValueError(f"could not update version in {path}")
@@ -211,9 +213,32 @@ def _derived_paths(root: Path) -> list[Path]:
     return paths
 
 
+def _preflight_derived(root: Path) -> list[str]:
+    """Return list of missing required paths (empty = ok)."""
+    missing: list[str] = []
+    for t in SKILL_TARGETS:
+        if not (root / t.rel_path).is_file():
+            missing.append(t.rel_path)
+    for tmpl_rel, _out_rel in JSON_TEMPLATES:
+        if not (root / tmpl_rel).is_file():
+            missing.append(tmpl_rel)
+    return missing
+
+
 def cmd_bump(root: Path, version: str) -> int:
     if not VERSION_RE.match(version):
         print(f"❌ invalid version: {version!r} (expected X.Y.Z)", file=sys.stderr)
+        return 1
+
+    missing = _preflight_derived(root)
+    if missing:
+        print("❌ bump preflight failed — missing required files:", file=sys.stderr)
+        for m in missing:
+            print(f"  {m}", file=sys.stderr)
+        return 1
+
+    if not (root / "pyproject.toml").is_file():
+        print("❌ bump preflight failed — pyproject.toml missing", file=sys.stderr)
         return 1
 
     # Backup every file bump may touch so a mid-sync failure restores the tree
@@ -240,7 +265,20 @@ def cmd_bump(root: Path, version: str) -> int:
 
 
 def cmd_sync(root: Path) -> int:
-    version = read_pyproject_version(root / "pyproject.toml")
+    missing = _preflight_derived(root)
+    if missing:
+        print("❌ sync preflight failed — missing required files:", file=sys.stderr)
+        for m in missing:
+            print(f"  {m}", file=sys.stderr)
+        return 1
+
+    try:
+        version = read_pyproject_version(root / "pyproject.toml")
+    except (OSError, ValueError) as exc:
+        print(f"❌ cannot read canonical version from pyproject.toml: {exc}",
+              file=sys.stderr)
+        return 1
+
     changed = _do_sync(root, version)
     if changed:
         print(f"\n✅ {changed} file(s) synced from pyproject.toml ({version})")
@@ -252,8 +290,14 @@ def cmd_sync(root: Path) -> int:
 def cmd_check(root: Path) -> int:
     errors = 0
 
+    try:
+        canonical = read_pyproject_version(root / "pyproject.toml")
+    except (OSError, ValueError) as exc:
+        print(f"❌ cannot read canonical version from pyproject.toml: {exc}",
+              file=sys.stderr)
+        return 1
+
     # 1. Check SKILL.md
-    canonical = read_pyproject_version(root / "pyproject.toml")
     for t in SKILL_TARGETS:
         path = root / t.rel_path
         # Detect cached copies (installed via /plugin marketplace)

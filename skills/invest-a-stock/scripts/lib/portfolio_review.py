@@ -116,7 +116,9 @@ def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str,
 
 def _days_ago(n: int) -> str:
     from datetime import datetime, timedelta
-    return (datetime.now() - timedelta(days=n)).strftime("%Y%m%d")
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    return (now - timedelta(days=n)).strftime("%Y%m%d")
 
 
 def _corr_matrix(series: dict[str, list[float]]) -> dict[str, dict[str, float | None]]:
