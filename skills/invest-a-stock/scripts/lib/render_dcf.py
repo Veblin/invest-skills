@@ -35,11 +35,15 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
     stock_by_date: dict[str, float] = {}
     if kline_data and isinstance(kline_data, list):
         for r in kline_data:
-            if r.get("close") is None:
+            close_v = r.get("close")
+            if close_v is None:
                 continue
+            close_f = float(close_v)
+            if close_f <= 0:
+                continue  # skip zero/negative close (halted/delisted)
             td = str(r.get("trade_date") or "").replace("-", "").replace("/", "")[:8]
             if len(td) == 8 and td.isdigit():
-                stock_by_date[td] = float(r["close"])
+                stock_by_date[td] = close_f
 
     if len(stock_by_date) < 12:
         return {

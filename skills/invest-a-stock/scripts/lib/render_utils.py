@@ -487,13 +487,31 @@ def _bull_bear_valuation_divergence_text(
 
 # --- _periods_per_year ---
 def _periods_per_year(fin_list: list[dict]) -> int:
-    """估算每年报告期数（4=季报，2=半年报，1=年报）。"""
+    """估算每年报告期数（4=季报，2=半年报，1=年报）。
+
+    通过统计 end_date 中出现的唯一月份数推断报告频率：
+    - 仅 12 月 → 年报（1）
+    - 6 + 12 月 → 半年报（2）
+    - ≥3 个不同月份 → 季报（4）
+    """
     if len(fin_list) < 2:
         return 4
-    dates = sorted(set(str(r.get("end_date", "")).replace("-", "")[:6] for r in fin_list if r.get("end_date")))
-    if len(dates) <= 1:
-        return 4
-    return min(4, len(dates))
+    months: set[int] = set()
+    for r in fin_list:
+        raw = str(r.get("end_date", ""))
+        if not raw:
+            continue
+        # Normalize: YYYY-MM-DD or YYYYMMDD → extract month
+        d = raw.replace("-", "").replace("/", "")
+        if len(d) >= 6 and d[4:6].isdigit():
+            months.add(int(d[4:6]))
+    if not months:
+        return 4  # no usable dates, assume quarterly
+    if len(months) == 1:
+        return 1  # annual
+    if len(months) == 2:
+        return 2  # semi-annual
+    return 4  # quarterly (3+ distinct months)
 
 
 # --- _compute_metric_cagr ---
