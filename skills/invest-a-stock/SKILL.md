@@ -205,12 +205,78 @@ uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news
 
 ### SOP-DEEP（四视角并行）
 
-完整 `--deep` 报告时，并行覆盖四视角（不引入品牌名）：
+完整 `--deep` 报告时分两阶段并行：**采集（3 Agent）→ 分析（4 Agent）**。
+
+---
+
+**Phase 1 — 并行采集 + 交叉验证（3 Agent 同时启动）：**
+
+```
+┌─ Collector A: 财务主线（Tushare）─────────────────────┐
+│  invest.py collect SYMBOL --deep                       │
+│    --dims "financials,valuation,basic_info"            │
+│  产出: /tmp/{symbol}_collect_A.json                    │
+└───────────────────────────────────────────────────────┘
+
+┌─ Collector B: 行情+资金+财务交叉验证（akshare主）─────┐
+│  invest.py collect SYMBOL --deep                       │
+│    --dims "financials,quote,kline,valuation"           │
+│  financials 用 akshare 做主源，与 A 的 Tushare 交叉    │
+│  产出: /tmp/{symbol}_collect_B.json                    │
+└───────────────────────────────────────────────────────┘
+
+┌─ Collector C: 补充数据（股东/研报/事件/行业）─────────┐
+│  invest.py collect SYMBOL --deep                       │
+│    --dims "shareholders,research,events"               │
+│  产出: /tmp/{symbol}_collect_C.json                    │
+└───────────────────────────────────────────────────────┘
+```
+
+**验证规则：**
+- financials 维度：A（Tushare）vs B（akshare），关键字段（ROE/EPS/毛利率）差异 <5% → 通过
+- 差异 ≥5% → 触发 Collector D（Tie-breaker, baostock）：
+  `invest.py collect SYMBOL --dims "financials" --source baostock`
+- 三取二投票决定最终值，无法决定则保留差异并标注"跨源分歧"
+- 合并 3-4 份 JSON → 完整 collection（用 `scripts/merge_collections.py`）
+
+**Phase 1 耗时：** 3 Agent 并行 ≈ 30-40s（vs 串行 80s）
+
+---
+
+**Phase 2 — 四视角并行分析（4 Agent 同时启动）：**
+
+```
+同时启动 4 个 Agent（用 references/agent-prompts.md 的模板，替换变量）：
+  Agent A: 生意质量 → section_1_business.md
+  Agent B: 财务与估值 → section_2_financials.md
+  Agent C: 行业与竞争 → section_3_industry.md
+  Agent D: 风险与治理 → section_4_risk.md
+
+每个 Agent 的参数: {collection_json_path} = 合并后的 JSON 路径,
+  {symbol} = 标的代码, {output_dir} = reports/{symbol}-{name}/
+```
+
+---
+
+**Phase 3 — 合成（主编 Claude）：**
+1. 等待 4 个分析 Agent 全部完成
+2. 读取 4 个 section 文件 + 合并后的 collection JSON
+3. 合成完整报告 → `reports/{symbol}-{name}/{date}.md`
+4. 输出 Claude 简报（归因先行 + 核心矛盾 + 关键速览 + 主导因子）
+5. 运行 `valuation_calc.py SYMBOL` 嵌入估值数据
+6. QC 自检：LAW 1-16 逐条验证
+
+---
+
+四视角覆盖内容：
 
 1. **生意质量**：商业模式 / 护城河 / 管理层 / 价值链
 2. **财务与估值**：DCF 三情景 / 财务健康 / 盈利质量 / 估值位置
 3. **行业与竞争**：波特五力 / 竞争格局 / 产业链利润池
 4. **风险与治理**：快速否决 / 风险信号 / 公司治理 / Known Unknowns
+
+> Agent prompt 模板详见 [references/agent-prompts.md](references/agent-prompts.md)。
+> 采集/分析阶段的所有 Agent 只调 Bash（invest.py/merge_collections.py），不调 Tushare/akshare API — 不触发限流。
 
 ### SOP earnings-review（季报/年报后）
 
