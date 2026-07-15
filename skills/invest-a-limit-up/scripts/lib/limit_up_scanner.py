@@ -685,7 +685,7 @@ def _compute_seal_quality(
             if stock_cap is not None and stock_cap > 0:
                 float_mcap = stock_cap
         seal_amt = _nullable_float(latest.get("seal_amount"))
-        if float_mcap is not None and float_mcap > 0 and seal_amt > 0:
+        if float_mcap is not None and float_mcap > 0 and seal_amt is not None and seal_amt > 0:
             flow_n += 1
             if seal_amt / float_mcap > 0.05:
                 flow_ok += 1

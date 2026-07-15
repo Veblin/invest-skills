@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .nums import safe_float
+
 
 def load_holdings(path: Path) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -41,7 +43,7 @@ def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str,
 
     for h in holdings:
         sym = str(h.get("symbol", "")).strip()
-        weight = float(h.get("weight", 0))
+        weight = safe_float(h.get("weight", 0)) or 0.0
         if not sym:
             continue
         weights_by_sym[sym] = weight
