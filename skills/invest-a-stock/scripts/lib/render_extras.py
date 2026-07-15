@@ -5,14 +5,8 @@ All functions are pure: read collection dict, return markdown strings.
 
 from __future__ import annotations
 
-import logging
-from datetime import date, datetime
-from typing import Any
-
 from .financial_rigor import FAIL_THRESHOLD_PCT, WARN_THRESHOLD_PCT, cross_validate
 from .schema import index_dimensions
-
-logger = logging.getLogger(__name__)
 
 
 def render_rigor_warnings(collection: dict, *, strict: bool = False) -> str:
@@ -95,91 +89,4 @@ def section_exogenous_shock(collection: dict) -> str:
         "",
     ])
     return "\n".join(lines)
-
-
-def render_extended_technical(collection: dict, dims: dict) -> str:
-    """v0.1.9: Ichimoku / volatility cone / RS / rolling beta sections."""
-    from .collector import _akshare_hs300_dated_closes
-    from .technical import compute, rolling_beta, sort_kline_asc, volatility_cone, relative_strength
-
-    kline_data = dims.get("kline", {}).get("data")
-    if not kline_data or not isinstance(kline_data, list):
-        return ""
-
-    kline = sort_kline_asc(kline_data)
-    tech = compute(kline)
-    lines = ["### 扩展技术指标（v0.1.9）", ""]
-
-    ich = tech.get("ichimoku") or {}
-    if ich and not ich.get("error"):
-        lines.append("**一目均衡表（Ichimoku）**")
-        lines.append(
-            f"- 転換線: {ich.get('tenkan_latest', '—')} · "
-            f"基準線: {ich.get('kijun_latest', '—')}"
-        )
-        lines.append(
-            f"- 云带（先行スパン A/B）为 26 期前计算值的前瞻放置，属标准 Ichimoku 行为"
-        )
-        pos = ich.get("price_vs_cloud", "—")
-        lines.append(f"- 现价相对云带: {pos}")
-        lines.append("")
-
-    cone = tech.get("volatility_cone") or volatility_cone(
-        [r.get("close") for r in kline if r.get("close") is not None]
-    )
-    if cone and not cone.get("error"):
-        lines.append("**波动率锥（年化 HV）**")
-        cur = cone.get("current_hv")
-        pct = cone.get("percentile")
-        if cur is not None:
-            lines.append(f"- 当前 HV: {cur:.1f}%")
-        if pct is not None:
-            lines.append(f"- 历史分位: {pct:.0f}%（近 {cone.get('window', 252)} 日窗口）")
-        lines.append("")
-
-    stock_by_date: dict[str, float] = {}
-    for r in kline:
-        if r.get("close") is None:
-            continue
-        td = str(r.get("trade_date") or "").replace("-", "").replace("/", "")[:8]
-        if len(td) == 8 and td.isdigit():
-            stock_by_date[td] = float(r["close"])
-
-    try:
-        bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
-    except Exception:
-        logger.warning("沪深300基准数据获取失败，RS/Beta 段跳过", exc_info=True)
-        bench_dated = []
-
-    if stock_by_date and bench_dated:
-        bench_by_date = dict(bench_dated)
-        common = sorted(set(stock_by_date) & set(bench_by_date))
-        if len(common) < 20:
-            lines.append("**相对强度 / Beta**：基准对齐不足（交集交易日 < 20），跳过")
-            lines.append("")
-        else:
-            stock_closes = [stock_by_date[d] for d in common]
-            bench_closes = [bench_by_date[d] for d in common]
-            rs = relative_strength(stock_closes, bench_closes)
-            if rs.get("rs_latest") is not None:
-                lines.append("**相对强度 RS（vs 沪深300）**")
-                lines.append(f"- RS = {rs['rs_latest']:.1f}（基期=100，对齐 {len(common)} 日）")
-                lines.append("")
-
-            beta = rolling_beta(stock_closes, bench_closes)
-            if beta.get("windows"):
-                lines.append("**滚动 Beta（vs 沪深300）**")
-                for w, info in beta["windows"].items():
-                    b = info.get("beta")
-                    if b is not None:
-                        lines.append(f"- {w}日 Beta: {b:.3f}（R²={info.get('r_squared', '—')}）")
-                lines.append("")
-
-    if len(lines) <= 2:
-        return ""
-
-    lines.append("> 以上技术指标仅描述当前市场状态，不构成投资建议。")
-    lines.append("")
-    return "\n".join(lines)
-
 

@@ -15,14 +15,17 @@ _DIM_SCALAR_KEYS: dict[str, tuple[str, ...]] = {
     "kline":       ("close",),
     "valuation":   ("pe_ttm", "pe", "pb"),
     "financials":  ("roe", "eps"),
-    "quote":       ("close", "price"),
+    "quote":       ("close", "price", "change_pct"),
     "basic_info":  (),   # 无标量可比，不参与跨源融合
     "shareholders": (),
     "northbound":  ("net_mf_vol",),
     "holder_changes": ("change_ratio", "change_pct"),
 }
 # 其他维度回退到此序列
-_DEFAULT_SCALAR_KEYS = ("close", "price", "value", "pe_ttm", "pe", "pb", "roe", "eps")
+_DEFAULT_SCALAR_KEYS = (
+    "close", "price", "value", "pe_ttm", "pe", "pb",
+    "roe", "eps", "net_mf_vol", "change_pct",
+)
 
 
 # ---- 维度标识 ----

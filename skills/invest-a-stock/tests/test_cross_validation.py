@@ -29,6 +29,13 @@ class TestExtractScalar:
     def test_from_empty_dict(self):
         assert _extract_scalar({}) is None
 
+    def test_quote_change_pct_zero_with_dimension(self):
+        assert _extract_scalar({"change_pct": 0.0}, "quote") == 0.0
+
+    def test_northbound_list_net_mf_vol_with_dimension(self):
+        data = [{"trade_date": "20260101", "net_mf_vol": 5e7}]
+        assert _extract_scalar(data, "northbound") == 5e7
+
 
 class TestAutoCrossValidate:
     def _make_source(self, source, data):
