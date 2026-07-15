@@ -163,7 +163,7 @@ def fuse_from_source_results(
         for src in dim_result.all_sources:
             if src.data is None:
                 continue
-            v = _extract_scalar(src.data)
+            v = _extract_scalar(src.data, dim_name)
             if v is not None:
                 sources[src.source] = v
         if sources:

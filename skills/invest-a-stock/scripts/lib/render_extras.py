@@ -24,7 +24,7 @@ def render_rigor_warnings(collection: dict, *, strict: bool = False) -> str:
     if not fails and not warns:
         return ""
 
-    lines = ["### 数据验算警示（v0.1.9 financial_rigor）", ""]
+    lines = ["### 数据验算警示（financial_rigor）", ""]
     for r in fails:
         lines.append(f"- ❌ **{r.field}**: {r.detail}（偏差 {r.deviation_pct:.1f}%）")
     for r in warns:
@@ -37,72 +37,6 @@ def render_rigor_warnings(collection: dict, *, strict: bool = False) -> str:
             "后续估值段仅供参考，须独立核验原始数据源。"
         )
     lines.append("")
-    return "\n".join(lines)
-
-
-def classify_info_richness(collection: dict) -> str:
-    """A/B/C information richness for AI bias declaration."""
-    dims = index_dimensions(collection)
-    basic = dims.get("basic_info", {}).get("data") or {}
-    if not isinstance(basic, dict):
-        basic = {}
-    list_date = basic.get("list_date") or basic.get("上市时间") or ""
-    listed_years = 0.0
-    if list_date:
-        s = str(list_date).replace("-", "")[:8]
-        try:
-            ld = datetime.strptime(s, "%Y%m%d").date()
-            listed_years = (date.today() - ld).days / 365.25
-        except ValueError:
-            pass
-
-    research = dims.get("research", {}).get("data")
-    analyst_count = 0
-    if isinstance(research, list):
-        analyst_count = len(research)
-    elif isinstance(research, dict):
-        analyst_count = len(research.get("reports") or [])
-
-    if listed_years >= 5 and analyst_count >= 5:
-        return "A"
-    if listed_years >= 1:
-        return "B"
-    return "C"
-
-
-def render_ai_bias_declaration(collection: dict) -> str:
-    """v0.1.9: AI bias A/B/C declaration at report header."""
-    level = classify_info_richness(collection)
-    labels = {
-        "A": "信息丰富（上市≥5年且研报≥5篇）— AI 训练偏见风险相对较低，但仍须独立验证",
-        "B": "信息中等 — 部分维度可能依赖 LLM 先验，关键数字须追溯数据源",
-        "C": "信息稀疏（新股/冷门）— LLM 幻觉与过时知识风险较高，分析性段落置信度下调",
-    }
-    return (
-        f"**[AI 偏见声明]** 信息丰富度 **{level}**：{labels.get(level, labels['C'])}\n"
-    )
-
-
-def render_contrarian_section(collection: dict) -> str:
-    """v0.1.9: Contrarian thinking — failure paths + bear arguments."""
-    symbol = collection.get("symbol", "")
-    lines = [
-        "### 逆向思考（失败路径预演）",
-        "",
-        "| 假设前提 | 若失效则… | 可观测信号 |",
-        "|---------|----------|-----------|",
-        "| 盈利增速可持续 | 估值收缩 + 盈利下修双杀 | 毛利率连续下滑、应收恶化 |",
-        "| 行业景气维持 | 周期下行拖累业绩 | 产品价格/开工率走弱 |",
-        "| 估值溢价合理 | 向行业中位数回归 | PE 分位回落、同业折价扩大 |",
-        "",
-        "**空方论点（待独立验证）**：",
-        f"- 当前叙事是否过度依赖单一增长驱动？",
-        f"- 管理层指引 vs 现金流是否一致？",
-        f"- {symbol} 是否存在未充分定价的尾部风险（监管/诉讼/客户集中）？",
-        "",
-        "🔍 **待独立验证项**：上述路径为框架性推演，须结合最新财报与公告逐项核验。",
-        "",
-    ]
     return "\n".join(lines)
 
 
@@ -249,20 +183,3 @@ def render_extended_technical(collection: dict, dims: dict) -> str:
     return "\n".join(lines)
 
 
-def render_all_extras(collection: dict, dims: dict | None = None) -> list[str]:
-    """Collect all v0.1.9 extra sections for render_report_v3."""
-    if dims is None:
-        dims = index_dimensions(collection)
-    strict = bool((collection.get("_meta") or {}).get("strict_rigor"))
-    parts: list[str] = []
-    for text in (
-        render_ai_bias_declaration(collection),
-        render_ah_detection_note(collection),
-        render_rigor_warnings(collection, strict=strict),
-        section_exogenous_shock(collection),
-        render_contrarian_section(collection),
-        render_extended_technical(collection, dims),
-    ):
-        if text and text.strip():
-            parts.append(text)
-    return parts

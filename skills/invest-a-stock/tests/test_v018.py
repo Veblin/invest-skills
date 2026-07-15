@@ -6,7 +6,6 @@ Step 3 覆盖: valuation.py 4 个 DCF 函数（dcf_two_stage/dcf_sensitivity/
 Step 4 覆盖: render.py _section_dcf_valuation()（D-④/D-⑤/D-⑥ 渲染，
              正常路径 + WACC 数据不足路径 + veto_triggered 跳过路径）。
 Step 5 覆盖: render.py A-1 (_section_holder_changes 言行对照增强) /
-             A-2 (_section_ai_confidence_matrix) /
              A-3 (_generate_custom_unknowns)。
 Step 6 覆盖: render.py A-4 (_section_business_model_canvas) /
              A-5 (_section_management_assessment) /
@@ -726,7 +725,6 @@ class TestSectionDcfValuation:
 
 from lib.render import (  # noqa: E402
     _generate_custom_unknowns,
-    _section_ai_confidence_matrix,
     _section_holder_changes,
     _section_risk_uncertainty,
 )
@@ -792,43 +790,6 @@ class TestSectionHolderChangesInsiderAndCommitment:
         assert "## 3d. 股东增减持动向" in text
         assert "未检索到相关承诺公告，言行对照暂缺。" in text
         _check_no_forbidden_words(text)
-
-
-class TestSectionAiConfidenceMatrix:
-    """A-2: AI 分析置信度矩阵渲染。"""
-
-    def _dim(self, status: str, multi_source: bool = False) -> dict:
-        return {"status": status, "_meta": {"multi_source": multi_source}}
-
-    def test_normal_rendering(self):
-        collection = {
-            "financials": self._dim("available", multi_source=True),
-            "holder_changes": self._dim("available"),
-            "research": self._dim("partial"),
-            "industry": self._dim("missing"),
-            "northbound": self._dim("available", multi_source=True),
-            "kline": self._dim("available"),
-        }
-        text = _section_ai_confidence_matrix(collection)
-        assert "## AI 分析置信度矩阵" in text
-        assert "财务数据分析" in text
-        assert "| 分析模块 | AI 置信度 | 原因 |" in text
-        _check_no_forbidden_words(text)
-
-    def test_valuation_and_cycle_flagged(self):
-        """估值判断/周期拐点判断须特别标注（⚠️ + 加粗），且不得显示为高置信度。"""
-        collection = {}
-        text = _section_ai_confidence_matrix(collection)
-        assert "⚠️ **估值判断**" in text
-        assert "⚠️ **周期拐点判断**" in text
-        assert "**中/低**" in text
-        assert "高 | 估值依赖" not in text
-        _check_no_forbidden_words(text)
-
-    def test_empty_collection_still_renders(self):
-        text = _section_ai_confidence_matrix({})
-        assert "## AI 分析置信度矩阵" in text
-        assert "低" in text
 
 
 class TestGenerateCustomUnknowns:
@@ -1097,50 +1058,10 @@ class TestSectionValueChainPosition:
 
 from lib.render import (  # noqa: E402
     _check_fast_veto,
-    _section_bias_self_check,
-    _section_comprehension_statement,
-    _section_cross_validation_table,
     _section_six_gates_scorecard,
 )
 
 FORBIDDEN_GATE_WORDS = ("通过", "不通过", "建议持有", "建议买入", "建议卖出", "建议回避")
-
-
-class TestSectionComprehensionStatement:
-    """F-1: 理解陈述（5 句固定模板）。"""
-
-    def test_normal_path_fills_slots_from_data(self):
-        fin_list = _make_canvas_financials(6)
-        dims = {
-            "financials": {"data": fin_list, "status": "available"},
-            "basic_info": {"data": {"industry": "半导体设备"}},
-            "holder_changes": _make_holder_changes([
-                {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
-            ]),
-        }
-        text = _section_comprehension_statement(dims, {}, {})
-        assert "F-1 理解陈述" in text
-        assert "半导体设备" in text
-        assert "变宽" in text or "变窄" in text or "持平" in text
-        assert "我以" not in text and "买入" not in text
-        for i in range(1, 6):
-            assert f"{i}. " in text
-        _check_no_forbidden_words(text)
-
-    def test_insufficient_data_uses_placeholders_not_fabricated(self):
-        text = _section_comprehension_statement({}, {}, {})
-        assert "F-1 理解陈述" in text
-        assert text.count("[Claude report 阶段填充") >= 3
-        assert "我以" not in text and "买入" not in text
-        _check_no_forbidden_words(text)
-
-    def test_uses_history_position_wording_outside_module_one(self):
-        dims = {
-            "financials": {"data": _make_canvas_financials(6), "status": "available"},
-            "basic_info": {"data": {"industry": "半导体设备"}},
-        }
-        text = _section_comprehension_statement(dims, {}, {})
-        assert "历史分位" not in text
 
 
 class TestCheckFastVeto:
@@ -1300,45 +1221,6 @@ class TestSectionSixGatesScorecard:
         for word in FORBIDDEN_GATE_WORDS:
             assert word not in text
         _check_no_forbidden_words(text)
-
-
-class TestSectionBiasSelfCheck:
-    """F-5: 偏误自查表骨架。"""
-
-    def test_renders_five_bias_rows(self):
-        text = _section_bias_self_check()
-        assert "F-5 偏误自查表" in text
-        for name in ("叙事偏误", "锚定偏误", "幸存者偏误", "近因偏误", "确认偏误"):
-            assert name in text
-        assert text.count("[Claude report 阶段基于本次分析过程填写") >= 10
-        _check_no_forbidden_words(text)
-
-
-class TestSectionCrossValidationTable:
-    """F-6: 交叉验证记录表（占位）。"""
-
-    def test_renders_only_dims_with_cross_validation(self):
-        dims = {
-            "financials": {"data": [], "_meta": {
-                "cross_validation": "convergence", "cross_validation_detail": "净利润与经营现金流一致",
-            }},
-            "valuation": {"data": [], "_meta": {
-                "cross_validation": "divergence", "cross_validation_detail": "PE 分位与 PB 分位方向不一致",
-            }},
-            "kline": {"data": []},  # 无 cross_validation，应跳过
-        }
-        text = _section_cross_validation_table(dims)
-        assert "F-6 交叉验证记录表" in text
-        assert "financials" in text
-        assert "valuation" in text
-        assert "kline" not in text
-        assert "v0.1.9 rigor 填充" in text
-        _check_no_forbidden_words(text)
-
-    def test_no_dims_with_cross_validation_returns_empty_string(self):
-        dims = {"financials": {"data": [], "_meta": {}}}
-        assert _section_cross_validation_table(dims) == ""
-        assert _section_cross_validation_table({}) == ""
 
 
 # ═══════════════════════════════════════════════════════════════
