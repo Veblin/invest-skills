@@ -2622,16 +2622,22 @@ def _conclude_asset_liability(
 # --- _evidence_strength_label ---
 def _evidence_strength_label(data_available: list[bool]) -> str:
     """根据可用数据项占比判断证据强度。"""
+    from .render_icons import (
+        ICON_EVIDENCE_INSUFFICIENT,
+        ICON_EVIDENCE_MEDIUM,
+        ICON_EVIDENCE_STRONG,
+        ICON_EVIDENCE_WEAK,
+    )
     if not data_available:
-        return "数据不足"
+        return ICON_EVIDENCE_INSUFFICIENT
     if not any(data_available):
-        return "❓ 弱"
+        return ICON_EVIDENCE_WEAK
     ratio = sum(data_available) / len(data_available)
     if ratio >= 0.8:
-        return "✅ 强"
+        return ICON_EVIDENCE_STRONG
     if ratio >= 0.5:
-        return "⚠️ 中"
-    return "❓ 弱"
+        return ICON_EVIDENCE_MEDIUM
+    return ICON_EVIDENCE_WEAK
 
 
 # --- _financial_panorama_table ---

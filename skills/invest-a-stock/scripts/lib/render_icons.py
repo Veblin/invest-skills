@@ -24,10 +24,11 @@ ICON_CV_LABELS = {
     "gap": "缺口",
 }
 
-# ── Evidence Strength（月球相位：满→缺 = 强→弱）────────────────
-ICON_EVIDENCE_STRONG = "🌕"   # 强 — 满月
-ICON_EVIDENCE_MEDIUM = "🌗"   # 中 — 下弦月
-ICON_EVIDENCE_WEAK = "🌘"     # 弱 — 残月
+# ── Evidence Strength（对齐 CLAUDE.md：✅ 强 / ⚠️ 中 / ❓ 弱）──
+ICON_EVIDENCE_STRONG = "✅ 强"
+ICON_EVIDENCE_MEDIUM = "⚠️ 中"
+ICON_EVIDENCE_WEAK = "❓ 弱"
+ICON_EVIDENCE_INSUFFICIENT = "数据不足"
 
 # ── Semantic Markers ──────────────────────────────────────────────
 ICON_WARN = "⚠️"        # warning, risk alert, caveat

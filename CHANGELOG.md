@@ -9,17 +9,22 @@
 - 恢复报告头部 `[宏观情景]`、`[产业链]`、`[报告增强触发]`
 - `--emit md` 不再自动生成 HTML 兼容文件（需 HTML 时显式 `--emit html --outdir`）
 
+### 数据融合
+
+- `schema._extract_scalar` 按维度映射语义字段（`_DIM_SCALAR_KEYS`），`fusion.fuse_from_source_results` 传入 `dim_name` 避免跨源比较不同量纲
+
 ### Bug 修复
 
 - 修复 `valuation_calc.py` PE 亏损期警告死代码（`pe_negative_excluded` → `pe_none_or_neg`）
 - 修复 ROE 年化乘数始终 ×4 的问题（根据报告期区分 0331×4/0630×2/0930×4/3/1231×1）；`roe_data.roe_quarterly` 重命名为 `roe_cumulative`（YTD 累计值）
 - 修复 collector 业绩预告 "None%" 渲染（`p_min`/`p_max` 为 None 时省略同比）
 - 修复 `cmd_report` HTML 路径缺少 `_ensure_render_ready()`
+- 修复 `schema._extract_scalar` 按维度选字段时 quote/northbound 零值与无 dimension 回退路径回归（`change_pct`/`net_mf_vol` 提取失败导致融合与交叉验证跳过）
 
 ### Emoji 统一
 
-- 新建 `render_icons.py` — 按语义分组（数据状态/交叉验证/证据强度/标记/方向），消除同符多义
-- `schema._CV_ICONS` 迁移至 `render_icons.ICON_CV`
+- 新建 `render_icons.py` — 集中管理 CV 交叉验证与证据强度标签
+- `schema._CV_ICONS` 与 `_evidence_strength_label` 迁移至 `render_icons`
 
 ## v0.2.0 (2026-07-13)
 
