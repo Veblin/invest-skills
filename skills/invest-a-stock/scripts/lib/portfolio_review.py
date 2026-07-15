@@ -16,6 +16,24 @@ def load_holdings(path: Path) -> list[dict[str, Any]]:
     return data
 
 
+def _parse_portfolio_weight(raw: Any) -> tuple[float, str | None]:
+    """Parse a holdings weight into a float fraction.
+
+    Returns (weight, warning_note). warning_note is set when the raw value
+    cannot be parsed and weight is degraded to 0.0.
+    """
+    if raw is None or raw == "":
+        return 0.0, None
+    parsed = safe_float(raw)
+    if parsed is not None:
+        return parsed, None
+    if isinstance(raw, str) and raw.strip().endswith("%"):
+        pct = safe_float(raw.strip()[:-1].strip())
+        if pct is not None:
+            return pct / 100.0, None
+    return 0.0, f"无法解析 weight={raw!r}"
+
+
 def _returns_from_kline(kline: list[dict]) -> list[tuple[str, float]]:
     from .technical import sort_kline_asc
     rows = sort_kline_asc(kline)
@@ -40,12 +58,15 @@ def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str,
     skipped: list[str] = []
     active_symbols: list[str] = []
     weights_by_sym: dict[str, float] = {}
+    weight_parse_warnings: list[str] = []
 
     for h in holdings:
         sym = str(h.get("symbol", "")).strip()
-        weight = safe_float(h.get("weight", 0)) or 0.0
+        weight, w_note = _parse_portfolio_weight(h.get("weight", 0))
         if not sym:
             continue
+        if w_note:
+            weight_parse_warnings.append(f"{sym}: {w_note}")
         weights_by_sym[sym] = weight
         basic = collect_basic_info(sym)
         data = basic.get("data") if isinstance(basic, dict) else {}
@@ -111,6 +132,8 @@ def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str,
         "stress": stress_result,
         "disclaimer": "纯风险特征描述，不构成投资建议或调仓建议。",
     }
+    if weight_parse_warnings:
+        out["weight_parse_warnings"] = weight_parse_warnings
     if weight_warning:
         out["weight_warning"] = weight_warning
     return out
@@ -148,6 +171,10 @@ def _corr_matrix(series: dict[str, list[float]]) -> dict[str, dict[str, float | 
 
 def format_portfolio_review(result: dict) -> str:
     lines = ["# 组合风险特征", ""]
+    for note in result.get("weight_parse_warnings") or []:
+        lines.append(f"⚠️ {note}")
+    if result.get("weight_parse_warnings"):
+        lines.append("")
     if result.get("weight_warning"):
         lines.append(f"⚠️ {result['weight_warning']}")
         lines.append("")

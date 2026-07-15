@@ -332,7 +332,7 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
     md       — Markdown 九模块研究备忘录（v0.1.3 render_report_v3）
     html     — HTML 研究报告（v0.1.2 冻结模板）
 
-    mode     — "full"（完整九模块）或 "brief"（精简简报）
+    mode     — "full"（完整九模块）/"brief"（精简简报）/"concise"（对话场景精简）
     attach_extras — False 时跳过 market_structure / phase2 补采（离线 synthesize）
     """
     if attach_extras:
@@ -1295,7 +1295,7 @@ def _section_snapshot(
             f"ROE={latest.get('roe', '-')}%, 净利润={_fmt_v2(latest.get('net_profit'))}"
         )
         np_v = latest.get("net_profit")
-        ocf = latest.get("ocf") or latest.get("n_cashflow_act")
+        ocf = latest.get("ocf") if latest.get("ocf") is not None else latest.get("n_cashflow_act")
         if np_v is not None and ocf is not None:
             np_f, ocf_f = float(np_v), float(ocf)
             if np_f > 0 and ocf_f > 0:
@@ -4555,9 +4555,307 @@ def _render_extras_block(collection: dict, *, strict: bool) -> list[str]:
     return parts
 
 
+# --- concise helpers (v0.2.0: Hermes/OpenClaw 对话场景) ---
+def _concise_positioning(collection, symbol, dims, val_cache=None):
+    """定位句：symbol + name + industry + PE 历史位置 + 定性。"""
+    basic = dims.get("basic_info", {}).get("data", {})
+    name = ""
+    industry = ""
+    if isinstance(basic, dict):
+        name = basic.get("name", "") or basic.get("股票简称", "")
+        industry = basic.get("industry", "")
+
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    summary = _v3_load_valuation_summary(dims, val_cache)
+    pe_median = (summary.get("pe") or {}).get("median") if summary else None
+    pe_current = (summary.get("pe") or {}).get("latest") if summary else None
+
+    name_str = f"{symbol} {name}".strip()
+    industry_str = f"（{industry}）" if industry else ""
+
+    if pe_current is not None and pe_pct is not None:
+        median_part = f"中位数 {pe_median:.2f}x" if pe_median is not None else ""
+        position = f"PE {pe_current:.2f}x，历史位置 {pe_pct:.1f}%（{median_part}）"
+    elif pe_pct is not None:
+        median_part = f"（中位数 {pe_median:.2f}x）" if pe_median is not None else ""
+        position = f"PE 历史位置 {pe_pct:.1f}%{median_part}"
+    else:
+        position = "PE 数据不可得"
+
+    qualitative = ""
+    if pe_pct is not None and pe_zone:
+        qualitative_map = {"偏贵区": "估值偏高", "合理区": "估值合理", "偏低区": "估值偏低"}
+        qualitative = f" — {qualitative_map.get(pe_zone, '')}"
+    elif pe_pct is not None:
+        if pe_pct >= 80:
+            qualitative = " — 估值偏高"
+        elif pe_pct <= 20:
+            qualitative = " — 估值偏低"
+
+    return f"**{name_str}**{industry_str} — {position}{qualitative}"
+
+
+def _concise_contradictions(collection, dims, val_cache=None):
+    """核心矛盾 1-2 条，复用 _executive_core_contradictions。"""
+    items = _executive_core_contradictions(collection, dims, val_cache)
+    if not items:
+        return "**核心矛盾**：数据不足，无法判断。"
+    lines = ["**核心矛盾**："]
+    for item in items:
+        lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+def _concise_bull(collection, symbol, dims, market_structure, val_cache=None):
+    """Bull Case 1 段：关键假设 + 支撑数值。"""
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    fin = _get_dim_data(dims, "financials")
+    roe = None
+    if fin and isinstance(fin, list):
+        latest = sort_kline_asc(fin)[-1]
+        roe = latest.get("roe")
+
+    summary = _v3_load_valuation_summary(dims, val_cache)
+    pe_latest = (summary.get("pe") or {}).get("latest") if summary else None
+    pe_median = (summary.get("pe") or {}).get("median") if summary else None
+    eps_cagr = (summary.get("earnings") or {}).get("cagr_3y") if summary else None
+
+    points = []
+    if pe_pct is not None and pe_pct <= 30:
+        median_part = f" vs 中位数 {pe_median:.2f}x" if pe_median is not None else ""
+        points.append(f"PE 处于历史偏低位置（{pe_pct:.1f}% 分位{median_part}），存在均值回归空间")
+    if roe is not None and float(roe) >= 12:
+        points.append(f"ROE {float(roe):.1f}%，盈利质量支撑估值修复")
+    if eps_cagr is not None and eps_cagr > 0:
+        points.append(f"近 3 年 EPS CAGR {eps_cagr:+.1f}%，盈利趋势向好")
+    if pe_latest is not None and pe_pct is not None and pe_pct <= 30:
+        sw = market_structure.get("sw_index") or {}
+        svi = sw.get("stock_vs_industry_pct")
+        if svi is not None:
+            points.append(f"个股相对行业指数 {svi:+.1f}%")
+
+    if not points:
+        ms = collection.get("market_structure") or {}
+        nb = ms.get("northbound") or {}
+        net10 = nb.get("net_sum_10d")
+        if net10 is not None and float(net10) > 0:
+            points.append(f"北向近 10 日净流入 {float(net10):+.0f}，资金面偏向积极")
+        if not points:
+            points.append("当前缺乏明确的 Bull Case 数据支撑 [推测，待验证]")
+
+    return "**Bull Case 主导逻辑**：\n" + "\n".join(f"- {p}" for p in points)
+
+
+def _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cache=None):
+    """Bear Case 1 段：主要风险 + 触发条件。"""
+    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    fin = _get_dim_data(dims, "financials")
+    ocf_divergence = False
+    gross_margin_declining = False
+
+    if fin and isinstance(fin, list):
+        fin_sorted = sort_kline_asc(fin)
+        latest = fin_sorted[-1]
+        np_v = latest.get("net_profit")
+        ocf = latest.get("ocf") if latest.get("ocf") is not None else latest.get("n_cashflow_act")
+        if np_v is not None and ocf is not None:
+            try:
+                if float(np_v) > 0 and float(ocf) / float(np_v) < 0.6:
+                    ocf_divergence = True
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        # 毛利率趋势
+        if len(fin_sorted) >= 2:
+            gm_curr = latest.get("gross_profit_margin") if latest.get("gross_profit_margin") is not None else latest.get("grossprofit_margin")
+            gm_prev = fin_sorted[-2].get("gross_profit_margin") if fin_sorted[-2].get("gross_profit_margin") is not None else fin_sorted[-2].get("grossprofit_margin")
+            if gm_curr is not None and gm_prev is not None:
+                try:
+                    if float(gm_curr) < float(gm_prev) - 1:
+                        gross_margin_declining = True
+                except (TypeError, ValueError):
+                    pass
+
+    points = []
+    if pe_pct is not None and pe_pct >= 70:
+        summary = _v3_load_valuation_summary(dims, val_cache)
+        pe_median = (summary.get("pe") or {}).get("median") if summary else None
+        if pe_median is not None:
+            points.append(f"PE 处于历史偏高位置（{pe_pct:.1f}% 分位 vs 中位数 {pe_median:.2f}x），存在估值收缩风险")
+        else:
+            points.append(f"PE 处于历史偏高位置（{pe_pct:.1f}% 分位），存在估值收缩风险")
+
+    if ocf_divergence:
+        points.append("经营现金流/净利润 < 0.6，利润质量需关注")
+
+    if gross_margin_declining:
+        points.append("毛利率连续下滑，竞争压力或成本上升")
+
+    # 从 risk_data 提取关键风险信号
+    for sig in (risk_data.get("signals") or [])[:3]:
+        if sig.get("triggered") and sig.get("severity") in ("高", "中"):
+            detail = sig.get("detail", "")
+            if detail and detail not in points:
+                points.append(detail)
+
+    if not points:
+        ms = collection.get("market_structure") or {}
+        nb = ms.get("northbound") or {}
+        net10 = nb.get("net_sum_10d")
+        if net10 is not None and float(net10) < 0:
+            points.append(f"北向近 10 日净流出 {float(net10):+.0f}，资金面偏谨慎")
+        if not points:
+            points.append("当前缺乏明确的 Bear Case 触发信号 [推测，待验证]")
+
+    return "**Bear Case 主要风险**：\n" + "\n".join(f"- {p}" for p in points)
+
+
+def _concise_catalyst(collection, dims):
+    """催化剂与观察节点（可选），浓缩 _section_events_timeline 关键事件。"""
+    events = collection.get("events")
+    if not events:
+        return ""
+    if isinstance(events, dict):
+        timeline = events.get("timeline") or events.get("items") or []
+    elif isinstance(events, list):
+        timeline = events
+    else:
+        return ""
+
+    if not timeline:
+        return ""
+
+    key_events = []
+    for ev in timeline[:5]:
+        if isinstance(ev, dict):
+            date = ev.get("date") or ev.get("event_date") or ""
+            title = ev.get("title") or ev.get("event") or ev.get("summary", "")
+            if title:
+                key_events.append(f"- {date} {title}" if date else f"- {title}")
+
+    if not key_events:
+        return ""
+
+    return "**催化剂与观察节点**：\n" + "\n".join(key_events)
+
+
+def _concise_financial_snapshot(dims, val_cache=None):
+    """财务速览表（ROE/EPS/毛利率/OCF 比率，4-6 行）。"""
+    fin = _get_dim_data(dims, "financials")
+    if not fin or not isinstance(fin, list):
+        return ""
+
+    fin_sorted = sort_kline_asc(fin)
+    latest = fin_sorted[-1]
+    end_date = latest.get("end_date", "?")
+    roe = latest.get("roe")
+    eps = latest.get("eps")
+    gross_margin = latest.get("gross_profit_margin") if latest.get("gross_profit_margin") is not None else latest.get("grossprofit_margin")
+    np_v = latest.get("net_profit")
+    ocf = latest.get("ocf") or latest.get("n_cashflow_act")
+
+    lines = [
+        f"| 指标 | 报告期 {end_date} |",
+        "|------|------|",
+    ]
+    if roe is not None:
+        lines.append(f"| ROE | {float(roe):.2f}% |")
+    if eps is not None:
+        lines.append(f"| EPS | {float(eps):.4f} |")
+    if gross_margin is not None:
+        lines.append(f"| 毛利率 | {float(gross_margin):.2f}% |")
+    if np_v is not None and ocf is not None:
+        try:
+            ratio = float(ocf) / float(np_v) if float(np_v) != 0 else None
+            if ratio is not None:
+                lines.append(f"| OCF/净利润 | {ratio:.2f} |")
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
+def _concise_valuation_snapshot(dims, val_cache=None):
+    """估值位置表（PE/PB/PS + 分位 + 中位数）。"""
+    summary = _v3_load_valuation_summary(dims, val_cache)
+    if not summary:
+        return ""
+
+    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
+
+    lines = [
+        "| 指标 | 当前值 | 历史分位 | 中位数 |",
+        "|------|-------|---------|-------|",
+    ]
+    pe = summary.get("pe") or {}
+    if pe.get("latest") is not None and pe_pct is not None:
+        lines.append(
+            f"| PE | {pe['latest']:.2f}x | {pe_pct:.1f}% | "
+            f"{pe['median']:.2f}x |" if pe.get("median") is not None
+            else f"| PE | {pe['latest']:.2f}x | {pe_pct:.1f}% | — |"
+        )
+
+    pb = summary.get("pb") or {}
+    if pb.get("latest") is not None and pb_pct is not None:
+        lines.append(
+            f"| PB | {pb['latest']:.2f}x | {pb_pct:.1f}% | "
+            f"{pb['median']:.2f}x |" if pb.get("median") is not None
+            else f"| PB | {pb['latest']:.2f}x | {pb_pct:.1f}% | — |"
+        )
+
+    ps = summary.get("ps") or {}
+    if ps.get("latest") is not None:
+        lines.append(
+            f"| PS | {ps['latest']:.2f}x | — | "
+            f"{ps['median']:.2f}x |" if ps.get("median") is not None
+            else f"| PS | {ps['latest']:.2f}x | — | — |"
+        )
+
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines)
+
+
+def _concise_capital_flow(dims, collection):
+    """资金行为摘要（北向、股东户数、内部人交易）。"""
+    points = []
+    market_structure = collection.get("market_structure") or {}
+    nb = market_structure.get("northbound") or {}
+    net10 = nb.get("net_sum_10d")
+    if net10 is not None:
+        try:
+            direction = "净流入" if float(net10) > 0 else ("持平" if float(net10) == 0 else "净流出")
+            points.append(f"- 北向近 10 日{direction} {abs(float(net10)):.0f}")
+        except (TypeError, ValueError):
+            pass
+
+    holder = dims.get("holder_changes", {}).get("data")
+    if isinstance(holder, dict):
+        holder_change = holder.get("change_pct") or holder.get("change")
+        if holder_change is not None:
+            try:
+                chg = float(holder_change)
+                direction = "增加" if chg > 0 else "减少" if chg < 0 else "持平"
+                points.append(f"- 股东户数{direction} {abs(chg):.1f}%")
+            except (TypeError, ValueError):
+                pass
+
+    events = collection.get("events")
+    insider = ""
+    if isinstance(events, dict):
+        insider = events.get("insider_signal", "") or events.get("insider_trading", "")
+    if insider:
+        points.append(f"- 内部人信号: {insider}")
+
+    if not points:
+        return ""
+    return "\n".join(points)
+
+
 # --- render_report_v3 ---
 def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full") -> str:
-    """v0.1.3 九模块研究备忘录。mode="brief" 仅输出精简简报。"""
+    """v0.2.0 九模块研究备忘录。mode="brief" 仅输出精简简报, mode="concise" 输出对话场景精简。"""
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
 
@@ -4599,6 +4897,40 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _references_appendix(collection),
             _risk_footer(),
         ])
+    elif mode == "concise":
+        # === Hermes/OpenClaw 对话场景精简模式 ===
+        # 结论速览（3-5 段）+ 关键数据展开块（<details>）
+        parts: list[str] = [
+            _header_v2(collection, symbol),
+        ]
+        extras = _render_engine_extras(collection)
+        if extras:
+            parts.append("\n".join(extras))
+        _extras = _render_extras_block(collection, strict=strict)
+        if _extras:
+            parts.append("\n\n".join(_extras))
+        parts.extend([
+            _concise_positioning(collection, symbol, dims, val_cache=val_cache),
+            _concise_contradictions(collection, dims, val_cache=val_cache),
+            _concise_bull(collection, symbol, dims, market_structure, val_cache=val_cache),
+            _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cache=val_cache),
+        ])
+        # 可选第 5 段：催化剂
+        catalyst = _concise_catalyst(collection, dims)
+        if catalyst:
+            parts.append(catalyst)
+        # 关键数据展开块
+        fin_block = _concise_financial_snapshot(dims, val_cache)
+        if fin_block:
+            parts.append(_wrap_details("展开：财务速览", fin_block))
+        val_block = _concise_valuation_snapshot(dims, val_cache)
+        if val_block:
+            parts.append(_wrap_details("展开：估值位置", val_block))
+        cap_block = _concise_capital_flow(dims, collection)
+        if cap_block:
+            parts.append(_wrap_details("展开：资金行为", cap_block))
+        parts.append(_wrap_details("展开：参考资料", _references_appendix(collection)))
+        parts.append(_risk_footer())
     else:
         # F-3: 快速否决检测需在 D 段之前算出，供 veto_triggered 联动 + 展示触发条目
         _fast_veto = _check_fast_veto(dims, collection)

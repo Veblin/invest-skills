@@ -4,6 +4,10 @@
 > 输入数据来自 `collect --deep --save-raw` 的 JSON 文件。
 > 所有 Agent 只读本地文件，不调 Tushare/akshare API — 不触发限流。
 
+> **对话场景（Hermes/OpenClaw）**：各 Agent 输出控制在 500-800 字，
+> 仅保留核心发现 + 关键数值 + 证据强度标签。不写入文件，改为对话内返回 Markdown。
+> 主编合成使用 `--mode concise` 输出契约（见 SKILL.md）。
+
 ---
 
 ## Agent A: 生意质量

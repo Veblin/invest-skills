@@ -256,8 +256,8 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="A股个股调研数据采集与分析")
     p.add_argument("--plan", default="", help="JSON 采集计划文件路径")
-    p.add_argument("--mode", default="full", choices=["brief", "full"],
-                   help="报告模式: brief(简报) / full(完整九模块)")
+    p.add_argument("--mode", default="full", choices=["brief", "full", "concise"],
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     p.add_argument("--resume", action="store_true", help="从上次中断的步骤继续")
     p.add_argument("--save-raw", action="store_true",
                    help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
@@ -353,7 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("symbol")
     psyn.add_argument("--input", default="", help="分析结果 JSON 文件路径")
     psyn.add_argument("--emit", default="md", choices=["md", "json"])
-    psyn.add_argument("--mode", default="full", choices=["brief", "full"])
+    psyn.add_argument("--mode", default="full", choices=["brief", "full", "concise"])
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(psyn)

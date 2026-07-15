@@ -657,6 +657,23 @@ class TestUtilities:
             q = _compute_seal_quality([stock], trade_dates=["20260710", "20260711"])
             assert q["seal_flow_gt_5pct"] == 1.0, app_cap
 
+    def test_seal_quality_missing_seal_amount_no_crash(self):
+        """seal_amount=None must not TypeError; flow metric stays 0.0."""
+        stock = {
+            "symbol": "000001",
+            "float_mkt_cap": 1e10,
+            "appearances": [{
+                "date": "20260710",
+                "seal_time": "093000",
+                "seal_amount": None,
+                "break_count": 0,
+                "float_mkt_cap": 1e10,
+                "consecutive": 1,
+            }],
+        }
+        q = _compute_seal_quality([stock], trade_dates=["20260710", "20260711"])
+        assert q["seal_flow_gt_5pct"] == 0.0
+
     def test_fmt_yi(self):
         assert _fmt_yi(1e8) == "1.0"
         assert _fmt_yi(0) == "-"
