@@ -176,3 +176,36 @@ class TestPortfolioReview:
             result = pr.review_portfolio(holdings, stress=False)
 
         assert "不构成投资建议" in result["disclaimer"]
+
+    def test_weight_percent_string_parsed(self):
+        """weight='10%' → 解析为 0.1，无 weight_parse_warnings."""
+        from lib import portfolio_review as pr
+        import lib.collector as col
+
+        holdings = [{"symbol": "600176", "weight": "10%"}]
+        with patch.object(col, "collect_basic_info", side_effect=_fake_basic), \
+             patch.object(col, "collect_kline", side_effect=_fake_kline):
+            result = pr.review_portfolio(holdings, stress=False)
+
+        assert result.get("weight_parse_warnings") is None
+        conc = result["industry_concentration"]
+        assert conc == [("制造业", 0.1)]
+
+    def test_invalid_weight_emits_parse_warning(self):
+        """weight='N/A' → weight_parse_warnings 含 symbol，权重按 0 计入."""
+        from lib import portfolio_review as pr
+        import lib.collector as col
+
+        holdings = [
+            {"symbol": "600176", "weight": "N/A"},
+            {"symbol": "000858", "weight": 0.5},
+        ]
+        with patch.object(col, "collect_basic_info", side_effect=_fake_basic), \
+             patch.object(col, "collect_kline", side_effect=_fake_kline):
+            result = pr.review_portfolio(holdings, stress=False)
+
+        warns = result.get("weight_parse_warnings") or []
+        assert any("600176" in w and "无法解析" in w for w in warns)
+        # N/A → 0；有效权重仅 0.5
+        conc = dict(result["industry_concentration"])
+        assert conc.get("制造业") == 0.5

@@ -97,6 +97,47 @@ v0.3+ **多源并行**：全部可用源同时采集，差异保留于 `_meta.al
 
 **第二层（.md 文件）**：完整备忘录 + References（见 [references/references-format.md](references/references-format.md)）。
 
+**第三层（concise 对话模式）**：Hermes/OpenClaw 等对话场景使用。结论先行 + 关键数据展开块。3-5 段核心结论直出，详细数据用 `<details>` 折叠。CLI 对应 `--mode concise`。
+
+### Concise 输出契约
+
+对话场景下遵循以下两层结构：
+
+**第 1 层 — 结论速览（3-5 段，最先输出）：**
+
+| 段 | 内容 | 来源 |
+|----|------|------|
+| 1 | **定位句**：symbol/name/industry + PE 历史位置 + 定性 | 估值+基本信息 |
+| 2 | **核心矛盾**：1-2 条，附具体数值 | 交叉验证 |
+| 3 | **Bull Case**：关键假设 + 支撑数值 | 生意+财务分析 |
+| 4 | **Bear Case**：主要风险 + 触发条件 | 风险+治理分析 |
+| 5 | **催化剂与观察节点**（可选） | 事件+公告分析 |
+
+**第 2 层 — 关键数据展开（`<details>` 块）：**
+
+```
+<details><summary>展开：财务速览</summary>
+| 指标 | 最近报告期 | 趋势 |
+ROE / EPS / 毛利率 / OCF/净利润
+</details>
+
+<details><summary>展开：估值位置</summary>
+| 指标 | 当前值 | 历史分位 | 中位数 |
+PE / PB / PS
+</details>
+
+<details><summary>展开：资金行为</summary>
+- 北向资金 / 股东户数 / 内部人信号
+</details>
+```
+
+**强制规则：**
+1. 结论速览第一条输出，不得在前置过程后
+2. 每条结论附来源标签
+3. Bull/Bear 含数值假设
+4. 禁止输出完整九模块
+5. 按"假设→证据→结论"链式排列
+
 ### SOP-QC 自检
 
 措辞（LAW 6/16/3）、结构（简报 3–5 段、风险提示首尾、LAW 7）、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
@@ -119,7 +160,7 @@ v0.3+ **多源并行**：全部可用源同时采集，差异保留于 `_meta.al
 | 资金行为扫描 | [game-theory.md](references/game-theory.md) | `game_theory` |
 | 完整 report --deep | 全部专项 + modules.md | `deep_analysis` + `--deep` |
 
-**规则**：专项单独运行仍须 `evidence`；完整分析用 `report --mode full`（`--mode` 仅 `brief`/`full`，不用 `--mode=sentiment`）。
+**规则**：专项单独运行仍须 `evidence`；完整分析用 `report --mode full`（`--mode` 允许 `brief`/`full`/`concise`，不用 `--mode=sentiment`）。
 
 九模块结构详见 [references/modules.md](references/modules.md)。财报 F 规范详见 [references/financials.md](references/financials.md)。
 
@@ -153,7 +194,7 @@ uv run python skills/invest-a-stock/scripts/invest.py store list
 uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --store
 ```
 
-> 运行目录：`code/`。必须用 `uv run python`。`--mode`：`brief` | `full`。
+> 运行目录：`code/`。必须用 `uv run python`。`--mode`：`brief` | `full` | `concise`。
 
 ## 代理 / VPN
 
