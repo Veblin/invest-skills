@@ -75,9 +75,6 @@ from .render_html import render_html
 
 logger = logging.getLogger(__name__)
 
-_CONFIDENCE_FLAG_MODULES = ("估值判断", "周期拐点判断")
-
-
 def _v3_valuation_percentiles(dims, val_cache=None):
     """Facade-aware：``monkeypatch`` ``lib.render._v3_valuation_percentiles`` 对本模块生效。"""
     from lib import render as facade
@@ -96,29 +93,6 @@ def _v3_load_valuation_summary(dims, val_cache=None):
     if current is not None and current is not _v3_load_valuation_summary:
         return current(dims, val_cache)
     return _ru._v3_load_valuation_summary(dims, val_cache)
-
-_BIAS_SELF_CHECK_ITEMS: tuple[tuple[str, str], ...] = (
-    (
-        "叙事偏误",
-        '本次分析是否被一个流畅的故事线（如"国产替代""赛道逻辑"）牵引，而忽略了与故事线矛盾的数据点？',
-    ),
-    (
-        "锚定偏误",
-        "本次分析是否过度锚定于某个历史价格/估值倍数/机构一致预期，而未独立评估当前基本面变化？",
-    ),
-    (
-        "幸存者偏误",
-        "本次分析引用的可比公司/历史案例是否仅包含成功案例，遗漏了同类型已失败或退市的公司？",
-    ),
-    (
-        "近因偏误",
-        "本次分析是否被最近一次财报/事件/涨跌幅过度影响判断权重，而低估了更长周期的趋势？",
-    ),
-    (
-        "确认偏误",
-        "本次分析是否只检索了支持初始结论的证据，而未主动搜索反驳证据（见模块 5 Bull-Bear 空方论点）？",
-    ),
-)
 
 _COMMITMENT_KEYWORDS = ("承诺", "不减持")
 
@@ -441,45 +415,6 @@ def _header_v2(collection: dict, symbol: str) -> str:
         "> ⚠️ **风险提示:** 本报告由自动化引擎生成，仅供研究备忘录参考，不构成任何投资建议、买卖指令或目标价预测。",
         "",
     ]
-    return "\n".join(lines)
-
-
-# --- _section_ai_confidence_matrix ---
-def _section_ai_confidence_matrix(collection: dict) -> str:
-    """v0.1.8 A-2: AI 分析置信度矩阵（借鉴报告 §10.8）。
-
-    渲染 `lib.scoring.confidence_matrix()` 的引擎自动计算结果，
-    对"估值判断"与"周期拐点判断"两个恒定中低置信度模块特别标注 ⚠️。
-    """
-    from lib.scoring import confidence_matrix
-
-    matrix = confidence_matrix(collection)
-    rows = matrix.get("rows") or []
-    if not rows:
-        return ""
-
-    lines = ["## AI 分析置信度矩阵", ""]
-    lines.append(
-        "> 置信度由数据可得性/来源丰富度自动计算，非 LLM 主观判断；"
-        "「估值判断」「周期拐点判断」为学术共识固定标注，不随数据完整性提升。"
-    )
-    lines.append("")
-    lines.append("| 分析模块 | AI 置信度 | 原因 |")
-    lines.append("|----------|:--------:|------|")
-    for r in rows:
-        module = str(r.get("module", "?"))
-        confidence = str(r.get("confidence", "?"))
-        reason = str(r.get("reason", "")).replace("|", "/")
-        if module in _CONFIDENCE_FLAG_MODULES:
-            lines.append(f"| ⚠️ **{module}** | **{confidence}** | {reason} |")
-        else:
-            lines.append(f"| {module} | {confidence} | {reason} |")
-    lines.append("")
-    insufficient = matrix.get("insufficient_data") or []
-    if insufficient:
-        lines.append(f"⚠️ 置信度为「低」的模块：{'、'.join(insufficient)}，相关分析结论需结合独立信源核实。")
-        lines.append("")
-    lines.append("[来源: lib.scoring.confidence_matrix / 各维度 collection[dim].status + _meta.multi_source]")
     return "\n".join(lines)
 
 
@@ -1294,10 +1229,6 @@ def _section_research_question(
         "为什么这是好问题：将可验证数据与未决不确定性分离，避免把相关性误读为因果。",
         "```",
     ])
-    lines.extend([
-        "", "### 九模块研究框架", "",
-        _research_framework_mermaid(), "",
-    ])
     lines.append("🔍 **待独立验证:** 触发源依赖采集数据完整性；公告/政策类触发需 WebSearch 补充。")
     return "\n".join(lines)
 
@@ -1424,11 +1355,6 @@ def _section_snapshot(
     if futures_block:
         lines.append("")
         lines.append(futures_block)
-
-    cv_table = _section_cross_validation_table(dims)
-    if cv_table:
-        lines.append("")
-        lines.append(cv_table)
 
     return "\n".join(lines)
 
@@ -1971,132 +1897,6 @@ def _section_value_chain_position(
     return "\n".join(lines)
 
 
-# --- _section_comprehension_statement ---
-def _section_comprehension_statement(
-    dims: dict, market_structure: dict, val_cache: dict,
-) -> str:
-    """F-1: 理解陈述（5 句固定模板，挂载于报告末尾）。
-
-    来源: 借鉴报告 §3.4/§8.1（镜子测试合规改写）。``market_structure`` 参数为固定签名的
-    一部分（预留未来扩展，如结合北向/行业景气度补充生意本质判断），当前实现仅依赖 ``dims``
-    与 ``val_cache``。
-
-    合规（AGENTS.md 约束1）：禁止出现"我以 X 元买入"类表述；每句尽量用已采集数据自动填充，
-    数据不足的槽位保留占位符标注"[Claude report 阶段填充]"，不臆测生意本质/护城河方向/
-    管理层意图。
-    """
-    del market_structure  # 预留扩展参数，当前版本未使用
-
-
-    fin_dim = dims.get("financials") or {}
-    fin_list = fin_dim.get("data") if isinstance(fin_dim.get("data"), list) else []
-    fin_sorted = sort_kline_asc(fin_list) if fin_list else []
-
-    basic = dims.get("basic_info") or {}
-    basic_data = basic.get("data") if isinstance(basic.get("data"), dict) else {}
-    industry = basic_data.get("industry") or basic_data.get("行业")
-
-    lines = [
-        "### F-1 理解陈述", "",
-        "> 五句固定模板，尽量用已采集数据自动填充；数据不足的槽位保留占位符，不编造。",
-        "",
-    ]
-
-    # 1. 生意本质 + 核心变量
-    if industry:
-        lines.append(
-            f"1. 这门生意的本质是___，所属行业为**{industry}**"
-            "[来源: basic_info.industry]，核心变量是___"
-            "（可参考 A-4 商业模式画布中规模效应/增长驱动评分作为量化线索）。"
-            "[Claude report 阶段填充——生意本质的定性描述需人工综合判断]"
-        )
-    else:
-        lines.append(
-            "1. 这门生意的本质是___，核心变量是___。"
-            "[Claude report 阶段填充——basic_info.industry 不可得]"
-        )
-
-    # 2. 护城河宽窄
-    roe_first = _fin_field_num(fin_sorted[0], "roe") if fin_sorted else None
-    roe_now = _fin_field_num(fin_sorted[-1], "roe") if fin_sorted else None
-    if len(fin_sorted) >= 2 and roe_first is not None and roe_now is not None:
-        if roe_now > roe_first + 2:
-            trend = "变宽"
-        elif roe_now < roe_first - 2:
-            trend = "变窄"
-        else:
-            trend = "持平"
-        lines.append(
-            "2. 护城河来自___（具体来源[Claude report 阶段填充]），"
-            f"当前在**{trend}**，依据是 ROE 由 {roe_first:.2f}% → {roe_now:.2f}%"
-            f"（近 {len(fin_sorted)} 期）[来源: financials.roe]。"
-        )
-    else:
-        lines.append(
-            "2. 护城河来自___，当前在变宽/变窄/持平___，依据是___。"
-            "[Claude report 阶段填充——ROE 历史序列不足 2 期，无法判断趋势]"
-        )
-
-    # 3. 管理层公开记录（事实陈述）
-    from lib.scoring import management_ability_proxy
-    holder_changes = dims.get("holder_changes") or {}
-    mgmt = management_ability_proxy(fin_list, holder_changes)
-    if mgmt.get("score") is not None:
-        lines.append(
-            "3. 管理层在资本配置与经营效率方面的公开记录显示：代理评分 "
-            f"{mgmt['score']:.1f}/100（{mgmt.get('note', '')}）"
-            "[来源: lib.scoring.management_ability_proxy]（事实陈述，非信任/不信任二元判断）。"
-        )
-    else:
-        lines.append(
-            "3. 管理层在___方面的公开记录显示___（事实陈述）。"
-            "[Claude report 阶段填充——management_ability_proxy 因数据不足未生成量化代理评分]"
-        )
-
-    # 4. 估值位置 + DCF 隐含假设
-    pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
-    val_desc = None
-    if pe_pct is not None:
-        val_desc = f"PE 历史位置 {pe_pct:.1f}%（{pe_zone or '—'}）"
-        if pb_pct is not None:
-            val_desc += f"，PB 历史位置 {pb_pct:.1f}%"
-        val_desc += " [来源: valuation 历史位置]"
-
-    dcf_desc = None
-    if fin_dim:
-        from lib.valuation import scenario_fcff
-        base = scenario_fcff(fin_dim, scenario="base")
-        if not base.get("error"):
-            a = base.get("assumptions", {})
-            dcf_desc = (
-                f"DCF Base 情景隐含营收增速 {a.get('revenue_growth', 0) * 100:.1f}%、"
-                f"毛利率假设 {a.get('gross_margin_assumption', 0):.1f}%"
-                "[来源: lib.valuation.scenario_fcff]"
-            )
-    if val_desc or dcf_desc:
-        lines.append(
-            "4. 当前估值处于"
-            + (val_desc or "___")
-            + "，DCF 隐含假设是"
-            + (dcf_desc or "___")
-            + "。"
-        )
-    else:
-        lines.append(
-            "4. 当前估值相当于历史/同行___位置，DCF 隐含假设是___。"
-            "[Claude report 阶段填充——估值历史位置与 DCF 情景假设均不可得]"
-        )
-
-    # 5. 最大的不确定性 + 下一观察节点（无法自动推断，固定占位）
-    lines.append(
-        "5. 最大的不确定性是___，下一观察节点是___。"
-        "[Claude report 阶段基于本次分析过程填写——需结合模块 5 市场分歧与模块 7 风险"
-        "综合判断，本引擎不做主观推断]"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
 # --- _check_fast_veto ---
 def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
     """F-3: 快速否决自动化子集，返回硬触发/软触发及展示文本。
@@ -2364,75 +2164,6 @@ def _section_six_gates_scorecard(
         "> 本速览为多维度事实与量化评分的汇总呈现，不构成投资建议，"
         "不代表买卖或持有的行动判断。"
     )
-    lines.append("")
-    return "\n".join(lines)
-
-
-# --- _section_bias_self_check ---
-def _section_bias_self_check() -> str:
-    """F-5: 偏误自查表（5 行固定模板，报告末尾）。
-
-    来源: 借鉴报告 §10.3.4。这是引导 Claude 在生成报告时自我反思的框架，非引擎自动计算
-    的内容——本函数只渲染表格骨架，"具体表现"与"自我纠正措施"两列固定标注
-    "[Claude report 阶段基于本次分析过程填写]"。
-    """
-    lines = [
-        "### F-5 偏误自查表", "",
-        "> 引导性框架：由 Claude 在 report 阶段基于本次分析的实际过程填写「具体表现」与"
-        "「自我纠正措施」两列，本函数仅渲染表格骨架，不做自动判断。",
-        "",
-        "| 偏误类型 | 具体表现 | 自我纠正措施 |",
-        "|---------|---------|-------------|",
-    ]
-    for name, prompt in _BIAS_SELF_CHECK_ITEMS:
-        lines.append(
-            f"| {name} | [Claude report 阶段基于本次分析过程填写——自查提示：{prompt}] "
-            "| [Claude report 阶段基于本次分析过程填写] |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
-# --- _section_cross_validation_table ---
-def _section_cross_validation_table(dims: dict) -> str:
-    """F-6: 交叉验证记录表（轻量占位，挂载于模块 1 当前状态快照内）。
-
-    来源: 借鉴报告 §7.1/§2.1。遍历 ``dims`` 中各维度的 legacy dict，读取
-    ``dim["_meta"]["cross_validation"]``（"convergence"|"divergence"|None）与
-    ``dim["_meta"]["cross_validation_detail"]``；只渲染有交叉验证结果的维度，没有结果的
-    维度跳过（不是所有维度都有多源交叉验证）。"计算值"列固定占位，待 v0.1.9 rigor 模块
-    自动补全，本函数不做数值计算。
-    """
-    rows: list[tuple[str, str, str]] = []
-    for name, dim in (dims or {}).items():
-        if not isinstance(dim, dict):
-            continue
-        meta = dim.get("_meta") or {}
-        cv_status = meta.get("cross_validation")
-        if not cv_status:
-            continue
-        detail = meta.get("cross_validation_detail") or "—"
-        if cv_status:
-            icon = _CV_ICONS.get(cv_status, "🔴")
-            cn_label = _CV_LABELS.get(cv_status, cv_status)
-            label = f"{icon} {cn_label}"
-        else:
-            label = f"🟡 {cv_status}"
-        rows.append((name, label, detail))
-
-    if not rows:
-        return ""
-
-    lines = ["### F-6 交叉验证记录表（占位）", ""]
-    lines.append(
-        "> 汇总各维度采集层已完成的交叉验证结果；「计算值」列待 v0.1.9 rigor 模块自动补全，"
-        "当前版本仅呈现采集阶段的一致性/分歧标注，不做数值计算。"
-    )
-    lines.append("")
-    lines.append("| 维度 | 交叉验证状态 | 详情 | 计算值(v0.1.9填充) |")
-    lines.append("|------|------|------|------|")
-    for name, label, detail in rows:
-        lines.append(f"| {name} | {label} | {detail} | —（v0.1.9 rigor 填充） |")
     lines.append("")
     return "\n".join(lines)
 
@@ -4507,22 +4238,6 @@ def _report_toc() -> str:
     return "\n".join(lines)
 
 
-# --- _research_framework_mermaid ---
-def _research_framework_mermaid() -> str:
-    return """```mermaid
-flowchart TD
-  Q0[研究问题卡] --> S1[当前状态快照]
-  S1 --> D2[动态驱动]
-  D2 --> M3[市场结构]
-  M3 --> F4[静态基本面]
-  F4 --> B5[Bull/Bear 情景]
-  B5 --> P6[左/右概率]
-  P6 --> R7[风险与不确定性]
-  R7 --> T8[技术简报]
-  T8 --> A9[引用来源]
-```"""
-
-
 # --- _pe_band_markdown_table ---
 def _pe_band_markdown_table(
     dims: dict[str, dict], val_cache: dict | None = None,
@@ -4818,6 +4533,22 @@ def setup_default_enhancers(data: dict) -> ReportEnhancer:
     return enhancer
 
 
+# --- _render_extras_block (shared by brief & full paths) ---
+def _render_extras_block(collection: dict, *, strict: bool) -> list[str]:
+    """Collect rigor warnings + exogenous shock + AH detection for report body."""
+    try:
+        from .render_extras import render_rigor_warnings, section_exogenous_shock, render_ah_detection_note
+    except ImportError:
+        return []
+    parts: list[str] = []
+    for text in (render_rigor_warnings(collection, strict=strict),
+                 section_exogenous_shock(collection),
+                 render_ah_detection_note(collection)):
+        if text and text.strip():
+            parts.append(text)
+    return parts
+
+
 # --- render_report_v3 ---
 def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full") -> str:
     """v0.1.3 九模块研究备忘录。mode="brief" 仅输出精简简报。"""
@@ -4832,6 +4563,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
     risk_data = _v3_build_risk_report(
         collection, dims, market_structure, val_cache=val_cache,
     )
+    strict = bool((collection.get("_meta") or {}).get("strict_rigor"))
 
     if mode == "brief":
         parts: list[str] = [
@@ -4840,13 +4572,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         extras = _render_engine_extras(collection)
         if extras:
             parts.append("\n".join(extras))
-        try:
-            from .render_extras import render_all_extras
-            v019 = render_all_extras(collection, dims)
-            if v019:
-                parts.append("\n\n".join(v019))
-        except ImportError:
-            pass
+        _extras = _render_extras_block(collection, strict=strict)
+        if _extras:
+            parts.append("\n\n".join(_extras))
         parts.extend([
             _section_executive_summary(collection, symbol, dims, val_cache=val_cache),
             _section_research_question(collection, symbol, val_cache=val_cache),
@@ -4874,15 +4602,10 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         extras = _render_engine_extras(collection)
         if extras:
             parts.append("\n".join(extras))
-        try:
-            from .render_extras import render_all_extras
-            v019 = render_all_extras(collection, dims)
-            if v019:
-                parts.append("\n\n".join(v019))
-        except ImportError:
-            pass
+        _extras = _render_extras_block(collection, strict=strict)
+        if _extras:
+            parts.append("\n\n".join(_extras))
         parts.extend([
-            _section_ai_confidence_matrix(collection),
             _report_toc(),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
@@ -4923,8 +4646,6 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _section_technical_brief(dims, val_cache=val_cache),
             _section_six_gates_scorecard(dims, collection, val_cache),
-            _section_comprehension_statement(dims, market_structure, val_cache),
-            _section_bias_self_check(),
             _references_appendix(collection),
             _risk_footer(),
         ])

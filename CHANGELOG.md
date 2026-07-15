@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### 报告精简
+
+- 移除报告头部冗余段落：AI 偏见声明、逆向思考、Ichimoku/波动率锥、AI 置信度矩阵
+- 移除占位符段落：F-1 理解陈述、F-5 偏误自查表、F-6 交叉验证记录表（占位）、九模块 mermaid 图
+- 恢复报告头部 `[宏观情景]`、`[产业链]`、`[报告增强触发]`
+- `--emit md` 不再自动生成 HTML 兼容文件（需 HTML 时显式 `--emit html --outdir`）
+
+### Bug 修复
+
+- 修复 `valuation_calc.py` PE 亏损期警告死代码（`pe_negative_excluded` → `pe_none_or_neg`）
+- 修复 ROE 年化乘数始终 ×4 的问题（根据报告期区分 0331×4/0630×2/0930×4/3/1231×1）；`roe_data.roe_quarterly` 重命名为 `roe_cumulative`（YTD 累计值）
+- 修复 collector 业绩预告 "None%" 渲染（`p_min`/`p_max` 为 None 时省略同比）
+- 修复 `cmd_report` HTML 路径缺少 `_ensure_render_ready()`
+
+### Emoji 统一
+
+- 新建 `render_icons.py` — 按语义分组（数据状态/交叉验证/证据强度/标记/方向），消除同符多义
+- `schema._CV_ICONS` 迁移至 `render_icons.ICON_CV`
+
 ## v0.2.0 (2026-07-13)
 
 v0.2.0 将项目从单 skill 演进为多 skill 组合，统一命名空间 `invest:`。新增科学估值计算器、多 Agent 并行深度分析、估值持久化与回溯。

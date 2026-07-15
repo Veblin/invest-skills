@@ -9,6 +9,21 @@ from typing import Any, Literal
 CROSS_SOURCE_DIFF_THRESHOLD = 0.01
 _SCALAR_EPSILON = 1e-9
 
+# 按维度指定提取字段，确保跨源比较的是同一语义量
+# 优先级从左到右递减；取第一个可用且非零（零值仅在 _ZERO_OK_KEYS 中放行）
+_DIM_SCALAR_KEYS: dict[str, tuple[str, ...]] = {
+    "kline":       ("close",),
+    "valuation":   ("pe_ttm", "pe", "pb"),
+    "financials":  ("roe", "eps"),
+    "quote":       ("close", "price"),
+    "basic_info":  (),   # 无标量可比，不参与跨源融合
+    "shareholders": (),
+    "northbound":  ("net_mf_vol",),
+    "holder_changes": ("change_ratio", "change_pct"),
+}
+# 其他维度回退到此序列
+_DEFAULT_SCALAR_KEYS = ("close", "price", "value", "pe_ttm", "pe", "pb", "roe", "eps")
+
 
 # ---- 维度标识 ----
 
@@ -52,12 +67,8 @@ def source_confidence(source: str, dimension: str) -> str:
     return "medium"
 
 
-_SCALAR_KEYS = (
-    "value", "close", "price", "pe", "pe_ttm", "pb", "roe", "eps",
-    "net_mf_vol", "change_pct",
-)
 # 财务/资金流字段可为合法零值；close/price/pe 为 0 通常表示缺失
-_ZERO_OK_KEYS = frozenset({"change_pct", "roe", "eps", "net_mf_vol"})
+_ZERO_OK_KEYS = frozenset({"change_pct", "roe", "eps", "net_mf_vol", "change_ratio"})
 
 
 def _numeric_scalar(v: Any) -> float | None:
@@ -73,22 +84,26 @@ def _scalar_key_usable(key: str, v: float) -> bool:
     return v != 0.0 or key in _ZERO_OK_KEYS
 
 
-def _extract_scalar(data: Any) -> float | None:
-    """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。"""
+def _extract_scalar(data: Any, dimension: str = "") -> float | None:
+    """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。
+
+    按维度选择语义正确的字段（``_DIM_SCALAR_KEYS``），避免跨源比较不同量纲。
+    """
+    keys = _DIM_SCALAR_KEYS.get(dimension, _DEFAULT_SCALAR_KEYS)
     num = _numeric_scalar(data)
     if num is not None:
         return num
     if isinstance(data, dict):
-        for key in _SCALAR_KEYS:
+        for key in keys:
             v = _numeric_scalar(data.get(key))
             if v is not None and _scalar_key_usable(key, v):
                 return v
     if isinstance(data, (list, tuple)) and len(data) == 1:
-        return _extract_scalar(data[0])
+        return _extract_scalar(data[0], dimension)
     if isinstance(data, list) and data:
         last = data[-1]
         if isinstance(last, dict):
-            for key in _SCALAR_KEYS:
+            for key in keys:
                 v = _numeric_scalar(last.get(key))
                 if v is not None and _scalar_key_usable(key, v):
                     return v
@@ -149,7 +164,7 @@ class SourceResult:
             "success": self.success,
             "fetched_at": self.fetched_at,
             "data_available": self.data is not None,
-            "scalar_value": _extract_scalar(self.data),
+            "scalar_value": _extract_scalar(self.data, self.dimension),
             "data": self.data,
             "error": self.error,
             "latency_ms": self.latency_ms,
@@ -288,7 +303,7 @@ def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossVa
     for s in sources:
         if s.data is None:
             continue
-        v = _extract_scalar(s.data)
+        v = _extract_scalar(s.data, dimension)
         if v is not None:
             values.append((s.source, v))
     if len(values) < 2:
@@ -321,8 +336,7 @@ def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossVa
 
 CVStatus = Literal["convergence", "divergence", "gap"]
 
-_CV_ICONS: dict[str, str] = {"convergence": "🟢", "divergence": "🟡", "gap": "🔴"}
-_CV_LABELS: dict[str, str] = {"convergence": "印证", "divergence": "分歧", "gap": "缺口"}
+from .render_icons import ICON_CV as _CV_ICONS, ICON_CV_LABELS as _CV_LABELS
 
 
 @dataclass

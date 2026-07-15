@@ -184,3 +184,33 @@ class TestMedian:
     def test_empty(self):
         from lib.valuation import _median
         assert _median([]) is None
+
+
+class TestCalcRoeAnnualized:
+    """calc_roe_annualized: 报告期乘数与 roe_cumulative 字段."""
+
+    @pytest.mark.parametrize(
+        "end_date,roe,expected_ann",
+        [
+            ("20250331", 5.0, 20.0),
+            ("20250630", 10.0, 20.0),
+            ("20250930", 15.0, 20.0),
+            ("20251231", 18.0, 18.0),
+        ],
+    )
+    def test_period_multipliers(self, end_date: str, roe: float, expected_ann: float):
+        from valuation_calc import calc_roe_annualized
+
+        result = calc_roe_annualized([{"end_date": end_date, "roe": roe}])
+        assert "roe_quarterly" not in result
+        assert result["roe_cumulative"] == roe
+        assert result["roe_annualized"] == pytest.approx(expected_ann)
+        assert result["end_date"] == end_date
+
+    def test_unknown_end_date_conservative_multiplier(self):
+        from valuation_calc import calc_roe_annualized
+
+        result = calc_roe_annualized([{"end_date": "", "roe": 8.0}])
+        assert result["roe_cumulative"] == 8.0
+        assert result["roe_annualized"] == 8.0
+        assert result["end_date"] == ""

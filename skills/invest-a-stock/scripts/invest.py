@@ -553,6 +553,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             "⚠️ HTML 为 v0.1.2 旧版模板，迭代期请使用默认 Markdown 输出（省略 --emit 或 --emit md）",
             file=sys.stderr,
         )
+        _ensure_render_ready(result, args.symbol)
         md_v2 = render.render_report_v2(result, args.symbol)
         output = render.render_html(result, args.symbol)
         from datetime import datetime
@@ -593,18 +594,6 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdpath.write_text(output, encoding="utf-8")
         print(f"📝 Markdown 报告: {mdpath.resolve()}")
         return 0
-
-    if fmt == "md":
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        subdir = _report_basename(result, args.symbol, ts)
-        htmlpath = Path.cwd() / f"{subdir}-{ts[:10]}.html"
-        try:
-            html_out = render.render_html(result, args.symbol)
-            htmlpath.write_text(html_out, encoding="utf-8")
-            print(f"📄 HTML 报告（兼容输出）: {htmlpath.resolve()}", file=sys.stderr)
-        except Exception as exc:
-            print(f"⚠️ HTML 兼容输出失败: {exc}", file=sys.stderr)
 
     print(output)
     return 0

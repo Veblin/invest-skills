@@ -1517,11 +1517,17 @@ def _summarize_research(tushare_rc: list[dict] | None,
             summary["source"] = "tushare.forecast"
             summary["status"] = "ok_guidance_only"
             if guidance.get("profit_min_100m") is not None:
-                summary["summary_text"] = (
-                    f"公司业绩预告（{rec.get('type', '')}）：净利润 "
-                    f"{guidance['profit_min_100m']}–{guidance['profit_max_100m']} 亿元 "
-                    f"（同比 {p_min}%–{p_max}%）"
-                )
+                if p_min is not None and p_max is not None:
+                    summary["summary_text"] = (
+                        f"公司业绩预告（{rec.get('type', '')}）：净利润 "
+                        f"{guidance['profit_min_100m']}–{guidance['profit_max_100m']} 亿元 "
+                        f"（同比 {p_min}%–{p_max}%）"
+                    )
+                else:
+                    summary["summary_text"] = (
+                        f"公司业绩预告（{rec.get('type', '')}）：净利润 "
+                        f"{guidance['profit_min_100m']}–{guidance['profit_max_100m']} 亿元"
+                    )
             elif p_min is not None and p_max is not None:
                 summary["summary_text"] = (
                     f"公司业绩预告（{rec.get('type', '')}）：同比 {p_min}%–{p_max}%"

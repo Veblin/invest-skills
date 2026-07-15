@@ -136,46 +136,6 @@ def _minimal_collection(**overrides) -> dict:
     return coll
 
 
-class TestAIBiasDeclaration:
-    def test_level_a_for_mature_listed(self):
-        """上市≥5年且有研报 → A 级."""
-        from lib.render_extras import classify_info_richness
-
-        coll = _minimal_collection()
-        coll["dimensions"].append({
-            "dimension": "research", "display": "研报",
-            "data": [{"title": "研报1"}, {"title": "研报2"}, {"title": "研报3"},
-                      {"title": "研报4"}, {"title": "研报5"}],
-            "status": "available", "_meta": {"source": "test"},
-        })
-        assert classify_info_richness(coll) == "A"
-
-    def test_level_b_for_recently_listed(self):
-        """上市 < 5 年 → B 级."""
-        from lib.render_extras import classify_info_richness
-
-        coll = _minimal_collection()
-        coll["dimensions"][0]["data"]["list_date"] = "20240101"
-        assert classify_info_richness(coll) == "B"
-
-    def test_level_c_for_sparse(self):
-        """无上市日期 → C 级."""
-        from lib.render_extras import classify_info_richness
-
-        coll = _minimal_collection()
-        coll["dimensions"][0]["data"] = {"name": "新股"}
-        assert classify_info_richness(coll) == "C"
-
-    def test_ai_bias_section_contains_level(self):
-        """AI 偏见声明包含等级标记."""
-        from lib.render_extras import render_ai_bias_declaration
-
-        coll = _minimal_collection()
-        out = render_ai_bias_declaration(coll)
-        assert "**" in out
-        assert "信息丰富度" in out
-
-
 class TestAHDetection:
     def test_detects_hk_code(self):
         """有港股代码 → 输出 A+H 标记."""
@@ -194,26 +154,6 @@ class TestAHDetection:
         coll = _minimal_collection()
         out = render_ah_detection_note(coll)
         assert out == ""
-
-
-class TestContrarianSection:
-    def test_contains_failure_paths(self):
-        """逆向思考段包含失败路径预演."""
-        from lib.render_extras import render_contrarian_section
-
-        coll = _minimal_collection()
-        out = render_contrarian_section(coll)
-        assert "逆向思考" in out
-        assert "失败路径" in out
-        assert "估值收缩" in out
-
-    def test_contains_verification_note(self):
-        """逆向思考段包含待独立验证标注."""
-        from lib.render_extras import render_contrarian_section
-
-        coll = _minimal_collection()
-        out = render_contrarian_section(coll)
-        assert "待独立验证" in out
 
 
 class TestExogenousShock:
@@ -295,13 +235,38 @@ class TestRigorWarnings:
         assert isinstance(out, str)
 
 
-class TestRenderAllExtras:
-    def test_returns_list_of_strings(self):
-        """render_all_extras 返回非空字符串列表."""
-        from lib.render_extras import render_all_extras
+class TestRenderReportV3StrictRigor:
+    """brief/full 路径均从 _meta.strict_rigor 读取 strict 标志."""
 
-        coll = _minimal_collection()
-        sections = render_all_extras(coll)
-        assert isinstance(sections, list)
-        # 至少应有 AI 偏见声明
-        assert any("AI 偏见" in s for s in sections)
+    def test_brief_mode_passes_strict_rigor_from_meta(self):
+        from conftest import make_store_collection
+        from lib.render import render_report_v3
+
+        coll = make_store_collection("600176")
+        coll["market_structure"] = {}
+        coll["research_summary"] = {"status": "no_data", "summary_text": ""}
+        coll["_meta"] = {"strict_rigor": True}
+
+        with patch("lib.render_markdown._render_extras_block") as mock_extras:
+            mock_extras.return_value = []
+            render_report_v3(coll, "600176", mode="brief")
+            mock_extras.assert_called_once()
+            _, kwargs = mock_extras.call_args
+            assert kwargs.get("strict") is True
+
+    def test_full_mode_passes_strict_rigor_from_meta(self):
+        from conftest import make_store_collection
+        from lib.render import render_report_v3
+
+        coll = make_store_collection("600176")
+        coll["market_structure"] = {}
+        coll["research_summary"] = {"status": "no_data", "summary_text": ""}
+        coll["_meta"] = {"strict_rigor": True}
+
+        with patch("lib.render_markdown._render_extras_block") as mock_extras:
+            mock_extras.return_value = []
+            render_report_v3(coll, "600176", mode="full")
+            mock_extras.assert_called_once()
+            _, kwargs = mock_extras.call_args
+            assert kwargs.get("strict") is True
+

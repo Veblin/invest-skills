@@ -382,20 +382,27 @@ def calc_bvps(fin_rows: list[dict]) -> dict[str, Any]:
 
 
 def calc_roe_annualized(fin_rows: list[dict]) -> dict[str, Any]:
-    """年化 ROE：基于最近一期 ROE 单季 ×4（近 8 期中的最后一个报告期）。
+    """年化 ROE：根据报告期区分年度化乘数。
 
-    Returns 单季 ROE 和年化 ROE。
+    fina_indicator 的 roe 是累计值（0331=Q1, 0630=H1, 0930=3Q, 1231=全年）。
+    年化乘数：Q1×4, H1×2, 3Q×4/3, 年报×1（不作放大）。
+
+    Returns 累计 ROE（YTD）和年化 ROE。
     """
     if not fin_rows:
-        return {"roe_quarterly": None, "roe_annualized": None, "error": "无财务数据"}
+        return {"roe_cumulative": None, "roe_annualized": None, "error": "无财务数据"}
     latest = fin_rows[-1]
     roe_q = safe_float(latest.get("roe"))
     if roe_q is None:
-        return {"roe_quarterly": None, "roe_annualized": None, "error": "ROE 不可得"}
+        return {"roe_cumulative": None, "roe_annualized": None, "error": "ROE 不可得"}
+    ed = normalize_end_date(str(latest.get("end_date", "")))
+    mmdd = ed[4:8] if len(ed) >= 8 else ""
+    _ROE_MULT = {"0331": 4, "0630": 2, "0930": 4 / 3, "1231": 1}
+    multiplier = _ROE_MULT.get(mmdd, 1)  # default 1=annual, conservative when end_date unknown/parse fails
     return {
-        "roe_quarterly": round(roe_q, 2),
-        "roe_annualized": round(roe_q * 4, 2),
-        "end_date": str(latest.get("end_date", "")),
+        "roe_cumulative": round(roe_q, 2),   # YTD from fina_indicator, not single-quarter
+        "roe_annualized": round(roe_q * multiplier, 2),
+        "end_date": ed,
     }
 
 
@@ -965,8 +972,8 @@ def format_output(result: ValuationResult) -> str:
         lines.append(f"  BVPS              不可得 ({bvps_d.get('error', '')})")
 
     roe_d = result.roe_data
-    if roe_d.get("roe_quarterly") is not None:
-        lines.append(f"  单季 ROE           {roe_d['roe_quarterly']:.2f}%")
+    if roe_d.get("roe_cumulative") is not None:
+        lines.append(f"  累计 ROE（YTD）      {roe_d['roe_cumulative']:.2f}%")
         lines.append(f"  年化 ROE           {roe_d['roe_annualized']:.2f}%")
         lines.append(f"    <- 报告期: {roe_d.get('end_date', '?')}")
 
@@ -990,8 +997,8 @@ def format_output(result: ValuationResult) -> str:
         lines.append(f"  历史分位           {pct['pe_pct']:.1f}%（中位数 {pct.get('pe_median', '?'):.2f}x）")
         lines.append(f"  PE Band (±1σ)      {pct.get('pe_minus_1sigma', '?'):.1f} ~ {pct.get('pe_plus_1sigma', '?'):.1f}")
         lines.append(f"  有效样本           {pct.get('pe_valid', '?')} 交易日")
-        if pct.get("pe_negative_excluded"):
-            lines.append(f"  ⚠️  {pct['pe_negative_excluded']} 个交易日亏损被排除，PE 分位仅作位置参考")
+        if pct.get("pe_none_or_neg"):
+            lines.append(f"  ⚠️  {pct['pe_none_or_neg']} 个交易日亏损被排除，PE 分位仅作位置参考")
     if pct.get("pb_current"):
         lines.append(f"  PB 当前            {pct['pb_current']:.2f}x")
         lines.append(f"  历史分位           {pct['pb_pct']:.1f}%（中位数 {pct.get('pb_median', '?'):.2f}x）")
