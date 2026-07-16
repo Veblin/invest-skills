@@ -1,6 +1,6 @@
 # 舆情深度研究专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–16 约束。`plan --intent sentiment_deep` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent sentiment_deep` 时加载本文件。
 
 ## 三层舆情（勿与 Template C 混淆）
 

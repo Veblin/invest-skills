@@ -1,6 +1,6 @@
 # 财报深度研究专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–16 约束。`plan --intent financials_deep` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent financials_deep` 时加载本文件。
 
 ## 采集工作流
 

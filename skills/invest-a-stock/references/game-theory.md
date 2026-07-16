@@ -1,6 +1,6 @@
 # 参与者行为扫描专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–16 约束。`plan --intent game_theory` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent game_theory` 时加载本文件。
 
 ## 定位（v0.1.9）
 
