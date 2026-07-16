@@ -245,7 +245,7 @@ def _warn_degraded_collection(result: dict) -> None:
 def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--with-macro", action="store_true",
-        help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）",
+        help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）",
     )
     parser.add_argument(
         "--deep", action="store_true",
@@ -267,7 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("symbol")
     pc.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pc.add_argument("--store", action="store_true", help="存入持久化存储")
-    pc.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
+    pc.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
     pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pc.add_argument(
         "--with-news-pack",
@@ -279,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("symbol")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
-    pr.add_argument("--with-macro", action="store_true", help="采集中国宏观指标（PMI/CPI/PPI/LPR，akshare）")
+    pr.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
     pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pr.add_argument(
         "--with-news-pack",
@@ -458,7 +458,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.deep:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
-        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
+        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）")
     if getattr(args, "with_news_pack", False):
         print("📰 新闻包模式已启用（公告 + 查询包 + 可选 Tavily）")
     env.print_missing_token_warnings()
@@ -532,7 +532,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.deep:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
     if args.with_macro:
-        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR）")
+        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）")
     if result is None:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)

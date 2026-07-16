@@ -182,6 +182,165 @@ class TestMacroLabel:
         assert "LPR" in label
         assert "通胀压力" in label or "偏宽松" in label
 
+    def test_vix_and_sox_in_label(self):
+        """VIX 和 SOX 出现在 label 中，用 | 分隔国内/全球。"""
+        from lib.macro import macro_signal_label
+
+        label = macro_signal_label({
+            "indicators": {
+                "pmi": {"value": 50.2},
+                "vix": {"value": 18.5, "signal": "正常"},
+                "sox": {"value": 6850.0},
+            },
+        })
+        assert "VIX" in label
+        assert "18.5" in label
+        assert "正常" in label
+        assert "SOX" in label
+        assert "6,850" in label
+        assert "|" in label
+
+    def test_global_only_when_china_fails(self):
+        """中国指标全部缺失时，仍展示全球指标。"""
+        from lib.macro import macro_signal_label
+
+        label = macro_signal_label({
+            "indicators": {
+                "vix": {"value": 25.0, "signal": "偏高"},
+                "sox": {"value": 7000.0},
+            },
+        })
+        assert "宏观数据不可得" in label
+        assert "|" in label
+        assert "VIX" in label
+        assert "SOX" in label
+
+    def test_no_separator_when_no_global(self):
+        """没有全球指标时，不显示 | 分隔符。"""
+        from lib.macro import macro_signal_label
+
+        label = macro_signal_label({
+            "indicators": {
+                "pmi": {"value": 49.8},
+                "lpr": {"value": 3.1, "signal": "偏宽松"},
+            },
+        })
+        assert "PMI" in label
+        assert "|" not in label
+
+    def test_vix_panic_signal(self):
+        """VIX > 35 显示"恐慌"。"""
+        from lib.macro import macro_signal_label
+
+        label = macro_signal_label({
+            "indicators": {
+                "vix": {"value": 40.0, "signal": "恐慌"},
+            },
+        })
+        assert "恐慌" in label
+        assert "40.0" in label
+
+
+class TestCollectMacroGlobal:
+    """VIX/SOX 采集路径：不依赖 akshare；可独立 mock HTTP。"""
+
+    def test_akshare_unavailable_still_fetches_global(self, monkeypatch):
+        """akshare 不可用时仍采集 VIX/SOX。"""
+        from lib import macro
+
+        monkeypatch.setattr("lib.env.is_akshare_available", lambda: False)
+        monkeypatch.setattr(
+            "lib.macro._fetch_fred_series",
+            lambda *a, **k: (18.5, [("2026-07-01", 18.5)]),
+        )
+        monkeypatch.setattr("lib.macro._fetch_sox_via_yahoo", lambda: 6850.0)
+        monkeypatch.setattr(
+            "lib.env.get_config",
+            lambda: {"FRED_API_KEY": "a" * 32},
+        )
+
+        result = macro.collect_macro_context("600176")
+        assert result["indicators"]["pmi"] is None
+        assert result["indicators"]["vix"]["value"] == 18.5
+        assert result["indicators"]["vix"]["signal"] == "正常"
+        assert result["indicators"]["sox"]["value"] == 6850.0
+        assert result["available_count"] >= 2
+        assert result["status"] == "ok"
+        assert "PMI" in result["failed_indicators"]
+
+    def test_fetch_fred_series_parses_observations(self, monkeypatch):
+        """_fetch_fred_series 解析 FRED JSON 并取最新有效值。"""
+        import json
+        from lib.macro import _fetch_fred_series
+
+        payload = {
+            "observations": [
+                {"date": "2026-06-01", "value": "."},
+                {"date": "2026-06-02", "value": "20.1"},
+                {"date": "2026-06-03", "value": "22.5"},
+            ],
+        }
+
+        class _Resp:
+            def read(self):
+                return json.dumps(payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr("lib.env.is_fred_available", lambda _c: True)
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: _Resp(),
+        )
+        latest, series = _fetch_fred_series(
+            "VIXCLS", {"FRED_API_KEY": "a" * 32}, lookback_days=30,
+        )
+        assert latest == 22.5
+        assert len(series) == 2
+        assert series[-1] == ("2026-06-03", 22.5)
+
+    def test_fetch_sox_via_yahoo_parses_price(self, monkeypatch):
+        """_fetch_sox_via_yahoo 从 chart meta 取 regularMarketPrice。"""
+        import json
+        from lib.macro import _fetch_sox_via_yahoo
+
+        payload = {
+            "chart": {
+                "result": [{
+                    "meta": {"regularMarketPrice": 6123.45},
+                }],
+            },
+        }
+
+        class _Resp:
+            def read(self):
+                return json.dumps(payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            lambda *a, **k: _Resp(),
+        )
+        assert _fetch_sox_via_yahoo() == 6123.45
+
+    def test_fetch_sox_yahoo_failure_returns_none(self, monkeypatch):
+        from lib.macro import _fetch_sox_via_yahoo
+
+        def _boom(*a, **k):
+            raise OSError("network down")
+
+        monkeypatch.setattr("urllib.request.urlopen", _boom)
+        assert _fetch_sox_via_yahoo() is None
+
 
 class TestCollectIndustryMerge:
     def test_merges_board_and_pe(self, monkeypatch):
@@ -430,6 +589,47 @@ class TestBriefMode:
 
         result = render_report_v3(c, "600176")  # default mode
         assert "市场结构" in result or "核心矛盾" in result
+
+
+class TestConciseMode:
+    """--mode concise：对话场景结论速览 + details 展开块。"""
+
+    def _minimal(self) -> dict:
+        from conftest import make_store_collection
+
+        c = make_store_collection("600176")
+        c["market_structure"] = {}
+        c["research_summary"] = {"status": "no_data", "summary_text": ""}
+        c["risk_data"] = {"triggers": [], "signals": []}
+        return c
+
+    def test_concise_shorter_than_full(self):
+        from lib.render import render_report_v3
+
+        c = self._minimal()
+        concise = render_report_v3(c, "600176", mode="concise")
+        full = render_report_v3(c, "600176", mode="full")
+        assert len(concise) < len(full)
+
+    def test_concise_has_bull_bear_and_details(self):
+        from lib.render import render_report_v3
+
+        c = self._minimal()
+        text = render_report_v3(c, "600176", mode="concise")
+        assert "Bull Case" in text
+        assert "Bear Case" in text or "核心矛盾" in text
+        assert "<details>" in text
+        assert "展开：" in text
+        assert "风险提示" in text or "免责" in text
+
+    def test_concise_skips_full_module_headers(self):
+        from lib.render import render_report_v3
+
+        c = self._minimal()
+        text = render_report_v3(c, "600176", mode="concise")
+        assert "## 3. 市场结构分析" not in text
+        assert "## 4. 静态基本面分析" not in text
+        assert "## 6. 左侧/右侧概率判断" not in text
 
 
 # ---- P0-1: 执行摘要 ----

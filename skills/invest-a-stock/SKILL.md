@@ -214,7 +214,9 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ### SOP-M1 宏观情景（`--with-macro`）
 
-简报首行：`[宏观情景] 增长（PMI）+ 通胀（CPI）+ 政策（LPR）→ 偏宽松/中性/偏紧`
+简报首行：`[宏观情景] PMI + CPI + LPR → 政策方向 | VIX + 波动等级 + SOX + 费城半导体指数`
+
+示例：`[宏观情景] PMI 50.2 + CPI +0.3% + LPR 3.45% →偏宽松 | VIX 18.5 正常 SOX 6,850`
 
 1. `diagnose` → 2. `plan`/`collect` → 3. `evidence`（专项推荐）→ 4. `report` → 5. `store`（可选）
 

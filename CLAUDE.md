@@ -98,15 +98,17 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 每次分析时，在 SKILL.md SOP-M1 指导下：
 
-1. 若 `--with-macro` 启用：FRED 数据注入 collector
+1. 若 `--with-macro` 启用：akshare 中国宏观 + FRED VIX + Yahoo SOX 数据注入 collector
 2. Claude 在采集后读取以下指标并生成标签：
    - 增长: 中国 PMI [来源: akshare macro_china_pmi]
    - 通胀: CPI / PPI [来源: akshare macro_china_cpi / ppi]
    - 利率: LPR / US 10Y [来源: akshare macro_china_lpr / FRED]
    - 汇率: USD/CNY [来源: FRED]
+   - 波动: VIX 恐慌指数 [来源: FRED VIXCLS] — 信号: <15 低波 / 15-25 正常 / 25-35 偏高 / >35 恐慌
+   - 科技: SOX 费城半导体指数 [来源: Yahoo Finance] — AI/半导体需求领先指标
 
 输出格式（简报首行）：
-[宏观情景] 增长（PMI XX.X）+ 通胀（CPI +X.X%）+ 政策（LPR X.X%）→ 偏宽松/中性/偏紧
+[宏观情景] PMI XX.X + CPI +X.X% + LPR X.X% →偏宽松/中性/偏紧 | VIX XX.X 正常 SOX X,XXX
 
 ## 关键架构
 

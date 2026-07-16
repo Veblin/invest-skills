@@ -15,6 +15,7 @@
 | **baostock** | `query_history_k_data_plus` | ★★★★ | 否 | K 线历史数据，免费稳定，需网络直连 |
 | **TickFlow** | `TickFlow.free().klines.get` | ★★★★ | 否 | 第四 K 线源，独立数据管道（非东方财富），`TickFlow.free()` 零配置 |
 | **FRED** | `fredapi` (`fred.series.get_series`) | ★★★★ | 是 | 美宏观数据：US 10Y/2Y 国债、VIX、CPI、美元指数。需 `FRED_API_KEY`，免费注册 |
+| **Yahoo Finance** | `query1.finance.yahoo.com/v8/finance/chart` | ★★★ | 否 | 费城半导体指数 SOX（`^SOX`）。`urllib.request` 直连，免 yfinance 依赖。AI/半导体需求领先指标 |
 | **公告事件** | `akshare.stock_individual_notice_report` / `stock_notice_report` | ★★ | 否 | 上市公司公告采集 + 结构化分类（事件引擎，v0.1.6 新增）。依赖东方财富接口，代理环境下可能不可用 |
 
 ## TickFlow 使用说明
