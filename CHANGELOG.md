@@ -9,6 +9,11 @@
 - 恢复报告头部 `[宏观情景]`、`[产业链]`、`[报告增强触发]`
 - `--emit md` 不再自动生成 HTML 兼容文件（需 HTML 时显式 `--emit html --outdir`）
 
+### 宏观扩展
+
+- `--with-macro` 增加全球指标：VIX（FRED VIXCLS）+ SOX（Yahoo `^SOX`）；简报标签国内/全球用 `|` 分隔
+- 修复 akshare 不可用时 early-return 跳过 VIX/SOX 的问题（中国与全球采集路径解耦）
+
 ### 数据融合
 
 - `schema._extract_scalar` 按维度映射语义字段（`_DIM_SCALAR_KEYS`），`fusion.fuse_from_source_results` 传入 `dim_name` 避免跨源比较不同量纲
