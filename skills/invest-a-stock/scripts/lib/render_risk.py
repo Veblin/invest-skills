@@ -132,8 +132,16 @@ def _section_bull_bear(
     """
     from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
 
-    lines = ["## 5. 市场分歧", ""]
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+
+    # LAW 17: 构建含数据的标题 + 段首主旨句
+    pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    title_suffix = f"Bull/Bear 多空逻辑链 · {pe_s}" if pe_s else "Bull/Bear 多空逻辑链与情景估值"
+    judgment = f"当前 {pe_s}，以下为 Bull/Bear 对称辩论与多情景估值参考。" if pe_s else "以下为 Bull/Bear 多空逻辑链与情景估值分析。"
+
+    lines = [f"## 5. {title_suffix}", ""]
+    lines.append(f"**结论：** {judgment}")
+    lines.append("")
     sw = market_structure.get("sw_index") or {}
     nb = market_structure.get("northbound") or {}
     industry_peers = collection.get("industry_peers") or {}
@@ -713,7 +721,15 @@ def _section_risk_uncertainty(
     # 根据严重度推导时间窗口参考
     _TIME_WINDOW_MAP = {"高": "1-3 个月", "中": "3-6 个月", "低": "6-12 个月", "参考": "视条件触发"}
 
-    lines = ["## 7. 风险与不确定性", ""]
+    # LAW 17: 构建含风险统计数据的标题
+    risk_signals_n = risk_data.get("coverage", {}).get("auto", 0) if isinstance(risk_data, dict) else 0
+    triggered_n = risk_data.get("triggered_count", 0) if isinstance(risk_data, dict) else 0
+    title_suffix = f"触发 {triggered_n}/{risk_signals_n} 项风险信号" if risk_signals_n else "风险与不确定性"
+    judgment = f"自动判定覆盖 {risk_signals_n}/17 信号，当前触发 {triggered_n} 项，详见下方三层风险结构。" if risk_signals_n else "以下为三层风险信号与已知未知分析。"
+
+    lines = [f"## 7. {title_suffix}", ""]
+    lines.append(f"**结论：** {judgment}")
+    lines.append("")
     coverage = risk_data.get("coverage") or {}
     auto_n = coverage.get("auto", 0)
     lines.append(
@@ -857,7 +873,16 @@ def _section_left_right_probability(
     collection: dict, symbol: str, dims: dict[str, dict], market_structure: dict,
     *, val_cache: dict | None = None,
 ) -> str:
-    lines = ["## 6. 左侧/右侧概率判断", ""]
+    # LAW 17: 构建含数据的标题
+    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
+    from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
+    pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    title_suffix = f"左/右概率判断 · {pe_s}" if pe_s else "左侧/右侧概率判断"
+    judgment = f"基于 {pe_s} 的综合位置评估，左/右概率见下方分析。" if pe_s else "左侧/右侧概率的综合评估，详见下方。"
+
+    lines = [f"## 6. {title_suffix}", ""]
+    lines.append(f"**结论：** {judgment}")
+    lines.append("")
     lines.append("### 当前趋势位置（描述性参考，非单一结论）")
     kline = _get_dim_data(dims, "kline")
     trend_label = ""
@@ -871,8 +896,6 @@ def _section_left_right_probability(
     lines.append("")
     lines.append("### 左侧概率的主要支撑依据")
     left_items: list[str] = []
-    pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
-    from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
     if pe_pct is not None and pe_pct < ZONE_LOW_THRESHOLD:
         left_items.append(f"① PE 历史位置偏低（{pe_pct:.1f}%），证据强度：⚠️")
     erp = market_structure.get("erp")

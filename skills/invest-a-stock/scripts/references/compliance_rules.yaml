@@ -367,3 +367,34 @@ rules:
     stop_at_section_header: true
     message: "[分析] 段落前缺少 [事实] 块（SOP-QC 要求先列事实再分析）"
     law_ref: "SOP-QC — 分析标记规范"
+
+  # ==========================================================================
+  # LAW 17 — 结论先行金字塔结构（标题即论点、段首主旨句、逻辑链闭环）
+  # ==========================================================================
+  - id: "law17-noun-section-title"
+    pattern: "^##\\s+[0-9一二三四五六七八九十][、.]?\\s*(公司画像|经营质量|估值位置|资金与筹码|技术结构|事件催化|研究问题卡|当前状态快照|动态驱动分析|市场结构分析|静态基本面分析|市场分歧|左侧.*右侧.*判断|风险与不确定性|附录|执行摘要|机构观点与盈利预测|研究快照|基础参数|核心财务数据.*最近一期|历史估值位置|盈利收益率.*要求回报率|Fed Model)"
+    severity: "warning"
+    scope: "line"
+    message: "标题应为完整判断句而非名词短语（LAW 17 — 标题即论点）。正确示例：'PE 55.5x 处 98.4% 分位，已定价乐观预期'"
+    law_ref: "LAW 17"
+
+  - id: "law17-process-module-title"
+    pattern: "^##\\s*模块\\d"
+    severity: "warning"
+    scope: "line"
+    message: "禁止使用'模块1/模块2'等流程性标题（LAW 17），应改为结论句如'PE 36.5x 处 98% 分位，已定价乐观预期'"
+    law_ref: "LAW 17"
+
+  - id: "law17-no-conclusion-sentence"
+    pattern: "\\*\\*结论：\\*\\*"
+    severity: "warning"
+    scope: "file"
+    message: "报告中缺少段首主旨句（**结论：**）（LAW 17），每个分析段落第一句应为加粗主旨句"
+    law_ref: "LAW 17"
+
+  - id: "law17-no-logic-chain"
+    pattern: "\\*\\*逻辑链：\\*\\*"
+    severity: "info"
+    scope: "file"
+    message: "报告中缺少数据→推理→判断逻辑链标注（**逻辑链：**）（LAW 17）"
+    law_ref: "LAW 17"
