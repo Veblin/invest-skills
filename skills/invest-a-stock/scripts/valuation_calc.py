@@ -926,7 +926,11 @@ def format_output(result: ValuationResult) -> str:
     # ==== 1. 基础参数 ====
     lines.append("")
     lines.append("━" * 60)
-    lines.append("  一、基础参数")
+    # LAW 17: 标题含关键数据
+    price_s = f"{result.price:.2f} 元" if result.price else "?"
+    mv_s = f"{result.total_mv_yi:.2f} 亿" if result.total_mv_yi else "?"
+    rf_s = f"Rf={result.rf_china_10y * 100:.2f}%" if result.rf_china_10y else "Rf=?"
+    lines.append(f"  一、基础参数：{price_s} · {mv_s} 市值 · {rf_s}")
     lines.append("━" * 60)
     lines.append(f"  当前股价          {result.price:.2f} 元" if result.price else "  当前股价          不可得")
     lines.append(f"  总股本            {result.total_shares_wan:,.0f} 万股" if result.total_shares_wan else "  总股本            不可得")
@@ -941,7 +945,7 @@ def format_output(result: ValuationResult) -> str:
     # ==== 2. 财务数据 ====
     lines.append("")
     lines.append("━" * 60)
-    lines.append("  二、核心财务数据（最近一期）")
+    lines.append("  二、核心财务数据（TTM EPS · BVPS · ROE · OCF 质量）")
     lines.append("━" * 60)
 
     ttm = result.ttm
@@ -988,7 +992,7 @@ def format_output(result: ValuationResult) -> str:
     # ==== 3. 历史分位 ====
     lines.append("")
     lines.append("━" * 60)
-    lines.append("  三、历史估值位置")
+    lines.append("  三、历史估值位置（PE/PB 分位 · Band · 中位数对照）")
     lines.append("━" * 60)
 
     pct = result.percentile
@@ -1009,7 +1013,7 @@ def format_output(result: ValuationResult) -> str:
     # ==== 4. 隐含增长率 ====
     lines.append("")
     lines.append("━" * 60)
-    lines.append("  四、盈利收益率 vs 要求回报率 (Fed Model 变体)")
+    lines.append("  四、盈利收益率 vs 要求回报率 · 隐含增长率 g_implied 对照")
     lines.append("━" * 60)
 
     ig = result.implied_growth
