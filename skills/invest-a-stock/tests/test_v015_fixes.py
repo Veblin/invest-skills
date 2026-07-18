@@ -572,11 +572,11 @@ class TestBriefMode:
         brief = render_report_v3(c, "600176", mode="brief")
         full = render_report_v3(c, "600176", mode="full")
         # full-mode-only section headers absent from brief
-        assert "## 3. 市场结构分析" not in brief
-        assert "## 4. 静态基本面分析" not in brief
-        assert "## 6. 左侧/右侧概率判断" not in brief
+        assert "## 3." not in brief
+        assert "## 4." not in brief
+        assert "## 6." not in brief
         # but present in full
-        assert "## 3. 市场结构分析" in full
+        assert "## 3." in full
 
     def test_full_mode_default(self):
         from lib.render import render_report_v3

@@ -149,7 +149,7 @@ class TestParticipantScanRenderIntegration:
         text = render_report_v3(c, "600176", mode="full")
         assert "近10日主力净额" in text
         assert "近5日主力净额" not in text
-        section2_start = text.find("## 2. 动态驱动分析")
+        section2_start = text.find("## 2. 动态驱动")
         section2_end = text.find("## 3.", section2_start)
         section2 = text[section2_start:section2_end]
         mf_rows = [line for line in section2.splitlines() if "资金（主力）" in line]

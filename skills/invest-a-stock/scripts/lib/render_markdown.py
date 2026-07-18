@@ -565,7 +565,6 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
                 break
 
         # 判断窗口（A 股 ~242 交易日/年，1250 ≈ 5 年）
-        from lib.valuation import valuation_window_label
         window_label = valuation_window_label(len(val_sorted))
 
         summary = valuation_summary(pe_seq, pb_seq, ps_seq=ps_seq,
@@ -574,13 +573,12 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
         # LAW 17: 构建含数据的标题 + 段首主旨句
         pe = summary["pe"]
         if pe["current"] is not None:
-            title_suffix = f"PE {pe['current']:.1f}x · {pe['pct']:.1f}% 分位 · 中位 {pe.get('median', 0):.1f}x"
-            judgment = f"当前 PE(TTM) {pe['current']:.1f}x，处于{window_label} {pe['pct']:.1f}% 分位（中位数 {pe.get('median', 0):.1f}x），估值处于历史**{pe['zone']}**区间。"
+            pct_s = f"{pe['pct']:.1f}%" if pe.get("pct") is not None else "?"
+            median_s = f"{pe.get('median', 0):.1f}x" if pe.get("median") is not None else "?x"
+            title_suffix = f"PE {pe['current']:.1f}x · {pct_s} 分位 · 中位 {median_s}"
+            judgment = f"当前 PE(TTM) {pe['current']:.1f}x，处于{window_label} {pct_s} 分位（中位数 {median_s}），估值处于历史**{pe['zone']}**区间。"
 
-        lines.insert(0, "")
-        lines.insert(0, f"**结论：** {judgment}")
-        lines.insert(0, "")
-        lines.insert(0, f"## 三、{title_suffix}")
+        lines[:0] = [f"## 三、{title_suffix}", "", f"**结论：** {judgment}", ""]
 
         lines.append(f"**来源:** {source}（{window_label}历史序列 + 分位计算）")
         lines.append(f"**数据:** {summary['n_samples']} 个有效交易日")
@@ -626,10 +624,7 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
         if pe is not None:
             title_suffix = f"PE {pe:.1f}x · 快照估值"
             judgment = f"当前 PE(TTM) {pe:.1f}x（快照数据，无历史分位）。"
-        lines.insert(0, "")
-        lines.insert(0, f"**结论：** {judgment}")
-        lines.insert(0, "")
-        lines.insert(0, f"## 三、{title_suffix}")
+        lines[:0] = [f"## 三、{title_suffix}", "", f"**结论：** {judgment}", ""]
         has_history = val_data.get("history_available", False)
         lines.append(f"**来源:** {source}（快照数据）")
         lines.append("")
@@ -654,8 +649,8 @@ def _section_flow(dims: dict[str, dict], collection: dict = None) -> str:
     price = None
     chg_pct = None
     if isinstance(quote_data, dict):
-        price = quote_data.get("close") or quote_data.get("price")
-        chg_pct = quote_data.get("change_pct") or quote_data.get("pct_chg")
+        price = coalesce_field(quote_data, "close", "price")
+        chg_pct = coalesce_field(quote_data, "change_pct", "pct_chg")
     elif isinstance(quote_data, list) and quote_data:
         price = quote_data[-1].get("close")
         chg_pct = None
@@ -734,10 +729,10 @@ def render_technical_section(dims: dict[str, dict], collection: dict = None) -> 
     tech = compute(kline_data)
 
     if "error" in tech:
-        lines.insert(0, "")
-        lines.insert(0, f"**结论：** 技术指标计算失败，数据不足。")
-        lines.insert(0, "")
-        lines.insert(0, f"## 五、技术结构（计算失败）")
+        lines[:0] = [
+            f"## 五、技术结构（计算失败）", "",
+            f"**结论：** 技术指标计算失败：{sanitize_error(tech.get('message', '未知错误'), 80)}", ""]
+        lines.append(f"[复权: 不复权 / 来源: {source}]")
         return "\n".join(lines)
 
     # LAW 17: 构建含趋势数据的标题 + 段首主旨句
@@ -747,10 +742,7 @@ def render_technical_section(dims: dict[str, dict], collection: dict = None) -> 
     title_suffix = f"MA 排列：{trend_label} · 收盘 {close_str}" if trend_label else f"技术结构 · 收盘 {close_str}"
     judgment = f"当前均线排列：{trend_label}，收盘价 {close_str}，详见下方指标。" if trend_label else f"收盘价 {close_str}，技术指标见下方。"
 
-    lines.insert(0, "")
-    lines.insert(0, f"**结论：** {judgment}")
-    lines.insert(0, "")
-    lines.insert(0, f"## 五、{title_suffix}")
+    lines[:0] = [f"## 五、{title_suffix}", "", f"**结论：** {judgment}", ""]
 
     # --- 趋势 ---
     trend = tech["trend"]
@@ -880,7 +872,7 @@ def render_technical_section(dims: dict[str, dict], collection: dict = None) -> 
 # --- _section_events_placeholder ---
 def _section_events_placeholder() -> str:
     """事件催化占位（v0.1.2 不实现自动分析）。"""
-    return """## 六、近期事件催化（待分析）
+    return """## 六、事件催化待 Claude 通过 WebSearch 补充近期公告与行业动态
 
 **结论：** 本节由分析阶段（Claude）根据公告、新闻、行业动态撰写，非引擎自动生成。
 
@@ -1376,7 +1368,8 @@ def _section_snapshot(
     pb_s = f"PB {pb_pct:.1f}% 分位" if pb_pct is not None else ""
     title_parts = [p for p in [price_s, pe_s, pb_s] if p]
     title_suffix = " · ".join(title_parts) if title_parts else "当前状态快照"
-    judgment = f"最新价 {price_s}，{pe_s}，{pb_s}，关键数据快照如下。" if title_parts else "当前状态快照，关键数据见下方。"
+    judgment_parts = [s for s in [f"最新价 {price_s}" if price_s else "", pe_s, pb_s] if s]
+    judgment = "，".join(judgment_parts) + "，关键数据快照如下。" if judgment_parts else "当前状态快照，关键数据见下方。"
 
     lines = [f"## 1. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
@@ -1479,7 +1472,7 @@ def _section_dynamic_drivers(
     chg_pct_s = f"{chg:+.2f}%" if chg is not None else "不可得"
     chg_title_s = f"{window_label} {chg_pct_s}" if chg is not None else ""
     title_suffix = f"动态驱动 · {chg_title_s}" if chg_title_s else "动态驱动分析"
-    judgment = f"{chg_title_s}价格变化，以下为候选驱动因子分析。" if chg_title_s else "以下为动态驱动的候选解释。"
+    judgment = f"{chg_title_s} 价格变化，以下为候选驱动因子分析。" if chg_title_s else "以下为动态驱动的候选解释。"
 
     lines = [f"## 2. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
@@ -1491,7 +1484,7 @@ def _section_dynamic_drivers(
     candidates = _v3_build_candidate_explanations(
         chg=chg,
         window_label=window_label,
-        chg_s=chg_s,
+        chg_s=chg_pct_s,
         dims=dims,
         market_structure=market_structure,
         val_cache=val_cache,
@@ -4351,21 +4344,22 @@ def _section_technical_brief(
 
 # --- _report_toc ---
 def _report_toc() -> str:
+    # LAW 17: 标题动态包含数据，Markdown 锚点不可预测，TOC 仅作视觉目录
     entries = [
-        ("核心问题与触发源", "0-"),
-        ("当前状态快照（含估值/价格）", "1-"),
-        ("动态驱动分析", "2-"),
-        ("市场结构分析", "3-"),
-        ("静态基本面（12题）", "4-12-题分层激活"),
-        ("Bull/Bear 情景", "5-"),
-        ("左/右概率", "6-"),
-        ("风险与不确定性", "7-"),
-        ("技术简报", "8-技术指标附录"),
-        ("PE Band（5年轨道）", "pe-band5年轨道"),
-        ("引用来源", "引用来源references"),
+        "0. 核心问题与触发源",
+        "1. 当前状态快照（含估值/价格）",
+        "2. 动态驱动分析",
+        "3. 市场结构分析",
+        "4. 静态基本面（12题）",
+        "5. Bull/Bear 情景",
+        "6. 左/右概率判断",
+        "7. 风险与不确定性",
+        "8. 技术指标附录",
+        "PE Band（5年轨道）",
+        "引用来源",
     ]
     lines = ["## 目录", ""]
-    lines.extend(f"- [{label}](#{anchor})" for label, anchor in entries)
+    lines.extend(f"- {label}" for label in entries)
     return "\n".join(lines)
 
 
