@@ -508,19 +508,21 @@ class TestRenderV3:
         from lib.render import render_report_v3
 
         text = render_report_v3(_collection_v3(), "600176")
-        modules = [
-            "## 0. 研究问题卡",
-            "## 1. 当前状态快照",
-            "## 2. 动态驱动分析",
-            "## 3. 市场结构分析",
-            "## 4. 静态基本面分析",
-            "## 5. 市场分歧",
-            "## 6. 左侧/右侧概率判断",
-            "## 7. 风险与不确定性",
-            "## 8. 附录",
+        # LAW 17: 标题现含动态数据，改用前缀 + 关键词验证
+        checks = [
+            ("## 0.", "标题含 section 0"),
+            ("## 1.", "标题含 section 1"),
+            ("## 2.", "标题含 section 2"),
+            ("## 3.", "标题含 section 3"),
+            ("## 4.", "标题含 section 4"),
+            ("## 5.", "标题含 section 5"),
+            ("## 6.", "标题含 section 6"),
+            ("## 7.", "标题含 section 7"),
+            ("## 8.", "标题含 section 8"),
+            ("**结论：**", "段首主旨句"),
         ]
-        for m in modules:
-            assert m in text, f"missing module heading: {m}"
+        for prefix, desc in checks:
+            assert prefix in text, f"缺失: {desc}"
 
     def test_cv5_uses_stock_vs_industry_direction(self):
         from lib.render import render_report_v3

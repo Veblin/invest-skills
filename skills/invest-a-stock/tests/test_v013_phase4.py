@@ -175,10 +175,11 @@ class TestPhase4ReportUx:
         text = render_report_v3(_collection_phase3(), "600176")
         head = text[:2500]
         assert "## 目录" in head
-        assert "[研究问题卡](#0-研究问题卡)" in text
-        assert "[当前状态快照](#1-当前状态快照)" in text
-        assert "[PE Band（5年轨道）](#pe-band5年轨道)" in text
-        assert "[引用来源](#引用来源references)" in text
+        # LAW 17: TOC 现为纯文本列表（标题动态不可预测锚点）
+        assert "0. 核心问题" in text
+        assert "1. 当前状态" in text
+        assert "PE Band（5年轨道）" in text
+        assert "引用来源" in text
 
     def test_snapshot_module1_shows_diff_vs_stored(self, isolated_store):
         from lib.render import render_report_v3

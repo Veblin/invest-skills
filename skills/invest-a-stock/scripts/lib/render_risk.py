@@ -8,6 +8,7 @@ from lib.nums import safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 from lib.participant_scan import resolve_moneyflow
 from lib.schema import ProbabilityStructure
+from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
 
 from .render_utils import (
     _bull_bear_valuation_divergence_text,
@@ -130,8 +131,6 @@ def _section_bull_bear(
     - 每链包含: 核心假设, 传导链, 对应数字(利润预测表+隐含市值)
     - 末尾增加「关键分歧点」独立章节
     """
-    from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
-
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
 
     # LAW 17: 构建含数据的标题 + 段首主旨句
@@ -875,7 +874,6 @@ def _section_left_right_probability(
 ) -> str:
     # LAW 17: 构建含数据的标题
     pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
-    from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
     pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
     title_suffix = f"左/右概率判断 · {pe_s}" if pe_s else "左侧/右侧概率判断"
     judgment = f"基于 {pe_s} 的综合位置评估，左/右概率见下方分析。" if pe_s else "左侧/右侧概率的综合评估，详见下方。"
