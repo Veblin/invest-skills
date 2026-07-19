@@ -164,7 +164,8 @@ class TushareBulkSource(KlineSource):
             return pd.DataFrame()
 
         frames: list[pd.DataFrame] = []
-        for date_str in trade_dates:
+        total = len(trade_dates)
+        for i, date_str in enumerate(trade_dates):
             try:
                 df = self._client.query("daily", trade_date=date_str)
             except Exception as exc:
@@ -178,6 +179,12 @@ class TushareBulkSource(KlineSource):
                 continue
 
             frames.append(df)
+            # Progress every 50 dates or at the end
+            if (i + 1) % 50 == 0 or i == total - 1:
+                logger.info(
+                    "Tushare 日线拉取进度: %d / %d (成功 %d 日)",
+                    i + 1, total, len(frames),
+                )
 
         if not frames:
             logger.warning(
@@ -262,7 +269,8 @@ class TushareBulkSource(KlineSource):
             return pd.DataFrame()
 
         frames: list[pd.DataFrame] = []
-        for date_str in trade_dates:
+        total = len(trade_dates)
+        for i, date_str in enumerate(trade_dates):
             try:
                 df = self._client.query("adj_factor", trade_date=date_str)
             except Exception as exc:
@@ -273,6 +281,12 @@ class TushareBulkSource(KlineSource):
             if df is None or df.empty:
                 continue
             frames.append(df)
+            # Progress every 50 dates or at the end
+            if (i + 1) % 50 == 0 or i == total - 1:
+                logger.info(
+                    "Tushare 复权因子拉取进度: %d / %d (成功 %d 日)",
+                    i + 1, total, len(frames),
+                )
 
         if not frames:
             logger.warning(
@@ -519,10 +533,17 @@ class BaostockSource(KlineSource):
         self._ensure_logged_in()
 
         frames: list[pd.DataFrame] = []
-        for ts_code in self._ts_codes:
+        total = len(self._ts_codes)
+        for i, ts_code in enumerate(self._ts_codes):
             df = self._fetch_one_stock(ts_code, start_date, end_date)
             if df is not None and not df.empty:
                 frames.append(df)
+            # Progress every 50 stocks or at the end
+            if (i + 1) % 50 == 0 or i == total - 1:
+                logger.info(
+                    "Baostock 拉取进度: %d / %d (成功 %d)",
+                    i + 1, total, len(frames),
+                )
 
         if not frames:
             logger.warning("BaostockSource: no data returned for any stock")

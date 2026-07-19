@@ -18,7 +18,20 @@
 
 - `schema._extract_scalar` 按维度映射语义字段（`_DIM_SCALAR_KEYS`），`fusion.fuse_from_source_results` 传入 `dim_name` 避免跨源比较不同量纲
 
+### invest-a-gap-scan
+
+- 新增跳空缺口扫描 skill：沪深300 + 中证A500 + 科创50 并集，向上缺口 + MA60 + 未回补三重筛选
+- **数据源降级**：Tushare Pro（批量按日）→ baostock（逐股前复权 `adjustflag="2"`）自动切换
+- **缓存**：按日期 + 数据源隔离的 pickle 缓存（TTL 3 天），同日二次扫描 ~7s
+- **停牌检测**：交易日历对比日线数据，跨停牌缺口单独列出
+- 容忍规则：从新到旧遍历缺口，遇到首个满足 MA60 + 未回补 + 量比的即命中
+
 ### Bug 修复
+
+- 修复 gap-scan `start_date` 硬编码 90 天导致 MA60 虚设：改为 `gap_lookback + 59` 交易 bar × 1.46 日历转换，默认 ~180 天
+- 修复 gap-scan baostock 部分缓存命中时 `daily_by_date` 缺少缓存标的，导致跨停牌检测静默失效
+- gap-scan `hasattr(source, "set_ts_codes")` → `isinstance(source, BaostockSource)`，消除鸭子类型隐患
+- 新增 gap-scan 回归测试：短历史 MA60 虚设、`min_list_days=60` 默认值、混合停牌检测覆盖
 
 - 修复 `valuation_calc.py` PE 亏损期警告死代码（`pe_negative_excluded` → `pe_none_or_neg`）
 - 修复 ROE 年化乘数始终 ×4 的问题（根据报告期区分 0331×4/0630×2/0930×4/3/1231×1）；`roe_data.roe_quarterly` 重命名为 `roe_cumulative`（YTD 累计值）

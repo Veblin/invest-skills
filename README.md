@@ -50,6 +50,7 @@ Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 /invest-a-stock 600176              # 单标的研究（多 Agent 并行）
 /invest-a-stock 600176 --with-macro # 含宏观情景
 /invest-a-limit-up                  # 涨停扫描
+/invest-a-gap-scan                  # 跳空缺口扫描
 ```
 
 ### Hermes Agent
@@ -76,6 +77,11 @@ uv run python skills/invest-a-stock/scripts/invest.py diff 600176
 # 涨停扫描
 uv run python skills/invest-a-limit-up/scripts/scan.py --quality-filter
 uv run python skills/invest-a-limit-up/scripts/scan.py --sector 半导体
+
+# 跳空缺口扫描
+uv run python skills/invest-a-gap-scan/scripts/scan.py
+uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
+uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
 ```
 
 ---

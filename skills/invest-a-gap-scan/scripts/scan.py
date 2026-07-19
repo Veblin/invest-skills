@@ -58,7 +58,7 @@ import kline_cache  # noqa: E402
 # ---- 由并行代理创建的模块 ----
 try:
     from universe import build_universe  # noqa: E402
-    from kline_source import create_source, build_stock_kline  # noqa: E402
+    from kline_source import BaostockSource, create_source, build_stock_kline  # noqa: E402
 except ImportError:
     print(
         "错误: universe.py 或 kline_source.py 尚未创建。\n"
@@ -100,8 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="20 日均额门槛（元，默认 100000000 = 1 亿）",
     )
     p.add_argument(
-        "--min-list-days", type=int, default=120,
-        help="最少 K 线根数（默认 120）",
+        "--min-list-days", type=int, default=60,
+        help="最少 K 线根数（默认 60）",
     )
     p.add_argument(
         "--top", type=int, default=30,
@@ -291,7 +291,12 @@ def _run_scan(
 ) -> int:
     # ---- Step 3: 交易日历 ----
     end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+    # MA60 needs 59-bar warmup; to have valid MA60 for every bar in the
+    # gap_lookback window we need ≥ gap_lookback + 59 trading bars.
+    # ~1.46x calendar→trading conversion (365 / 250) + 5-day buffer.
+    need_bars = args.gap_lookback + 59
+    calendar_days = int(need_bars * 365 / 250) + 5
+    start_date = (datetime.now() - timedelta(days=calendar_days)).strftime("%Y%m%d")
     trade_dates, cal_is_estimated = _fetch_trade_cal(start_date, end_date)
 
     if not trade_dates:
@@ -333,7 +338,16 @@ def _run_scan(
             len(stock_kline_map),
             len(cache_misses),
         )
-        daily_raw = source.fetch_daily_batch(trade_dates)
+        # baostock: 只拉取缓存未命中的标的，避免全量重复拉取
+        miss_codes = [s.ts_code for s in cache_misses]
+        if isinstance(source, BaostockSource):
+            source.set_ts_codes(miss_codes)
+        try:
+            daily_raw = source.fetch_daily_batch(trade_dates)
+        finally:
+            # 恢复完整 ts_codes（即使 fetch 失败也恢复，避免状态泄漏）
+            if isinstance(source, BaostockSource):
+                source.set_ts_codes(list(universe_ts_codes))
 
         if daily_raw is None or daily_raw.empty:
             if stock_kline_map:
@@ -382,11 +396,12 @@ def _run_scan(
                     except Exception as exc:
                         logger.debug("cache save failed for %s: %s", ts_code, exc)
 
-        # Merge cache + freshly built into daily_by_date for suspension
-        if stock_kline_map and (daily_raw is None or daily_raw.empty):
+        # Build daily_by_date from stock_kline_map when available — it
+        # covers both cached and freshly-fetched stocks.  Fall back to
+        # daily_raw only when no klines were built at all.
+        if stock_kline_map:
             daily_by_date = _daily_by_date_from_klines(stock_kline_map)
         elif daily_raw is not None and not daily_raw.empty:
-            # Prefer full daily for suspension accuracy
             daily_by_date = _build_daily_by_date(daily_raw)
 
     logger.info(

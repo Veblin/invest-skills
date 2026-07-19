@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
@@ -22,6 +24,16 @@ from typing import Any
 from gap_scanner import ScanResult, ScanHit
 
 logger = logging.getLogger(__name__)
+
+# ── Version (canonical source: pyproject.toml, synced via sync_version.py) ──
+_VERSION = "0.0.0"
+_toml_path = Path(__file__).resolve().parents[4] / "pyproject.toml"
+if _toml_path.exists():
+    for _line in _toml_path.read_text(encoding="utf-8").splitlines():
+        _m = re.match(r'^version\s*=\s*["\']([^"\']+)["\']', _line.strip())
+        if _m:
+            _VERSION = _m.group(1)
+            break
 
 
 # ======================================================================
@@ -74,14 +86,18 @@ def _fmt_amount(val: float) -> str:
 
 
 def _fmt_pct(val: float) -> str:
-    """Format percentage with sign."""
+    """Format percentage with sign.  NaN → "N/A"."""
+    if math.isnan(val):
+        return "N/A"
     if val >= 0:
         return f"+{val:.2f}%"
     return f"{val:.2f}%"
 
 
 def _fmt_price(val: float) -> str:
-    """Format price with appropriate decimal places."""
+    """Format price with appropriate decimal places.  NaN → "N/A"."""
+    if math.isnan(val):
+        return "N/A"
     if val >= 1000:
         return f"{val:.1f}"
     if val >= 100:
@@ -110,7 +126,7 @@ def format_brief(result: ScanResult, top_n: int = 30) -> str:
 
     # --- Header ---
     lines.append("=" * 72)
-    lines.append("  invest-a-gap-scan v0.2.0 -- 跳空缺口扫描")
+    lines.append(f"  invest-a-gap-scan v{_VERSION} -- 跳空缺口扫描")
     lines.append("=" * 72)
 
     # --- Universe summary ---

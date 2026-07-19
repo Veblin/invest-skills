@@ -1,4 +1,5 @@
 ---
+
 name: invest-a-limit-up
 version: "0.2.0"
 description: "A股涨停板全市场扫描 + 交互式深挖 — 盘面宽度 / 板块轮动 / 涨停归因"

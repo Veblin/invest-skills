@@ -107,8 +107,13 @@ def load(ts_code: str, date_str: str | None = None,
     if age_days > CACHE_TTL_DAYS:
         return None
 
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        # Corrupt or truncated file — treat as cache miss.
+        # Common causes: Ctrl-C during save, disk full, concurrent write.
+        return None
 
 
 def cleanup_old() -> None:
