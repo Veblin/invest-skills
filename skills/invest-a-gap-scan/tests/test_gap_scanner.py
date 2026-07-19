@@ -230,6 +230,32 @@ class TestExcludeReasons:
         assert result.total_in_universe == 1
         assert result.total_scanned == 0
 
+    def test_min_list_days_default_60(self):
+        """Current CLI default min_list_days=60: 61 bars passes, 59 bars excluded."""
+        params = {**DEFAULT_PARAMS, "min_list_days": 60}
+
+        # 61 bars → passes
+        kline_ok = _make_kline(n_bars=61)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline_ok},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert result.exclude_reasons.get(ExcludeReason.INSUFFICIENT_KLINE, 0) == 0
+
+        # 59 bars → excluded
+        kline_short = _make_kline(n_bars=59)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline_short},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert result.exclude_reasons[ExcludeReason.INSUFFICIENT_KLINE] == 1
+
     def test_missing_adj_factor(self):
         """Kline is None AND adj_factor is None -> MISSING_ADJ_FACTOR."""
         result = scan_all(
@@ -452,6 +478,27 @@ class TestHits:
         assert len(result.hits) == 1
         assert result.hits[0].gap.gap_date == str(kline.iloc[80]["trade_date"])
 
+    def test_short_history_vacuous_ma60(self):
+        """Gap at index 5 with only 80 bars total: MA60 is None for bars
+        5–58, so _check_ma60_streak skips 54 of 59 remaining bars.
+        The gap hits despite almost no real MA60 coverage, demonstrating
+        why the data window must provide ≥ gap_lookback + 59 bars
+        (Fix #1: start_date derived from gap_lookback).
+        """
+        kline = _make_kline(n_bars=80, gap_at=5)
+        # Extend lookback to include index 5: start = max(1, 80-80) = 1
+        params = {**DEFAULT_PARAMS, "min_list_days": 60, "gap_lookback": 80}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        # Gap passes — but only ~5 post-gap bars had a real MA60 check
+        assert len(result.hits) == 1
+        assert result.hits[0].gap.gap_pct >= 1.0
+
 
 class TestAcrossSuspension:
     """Gap detected across a suspension period."""
@@ -558,3 +605,42 @@ class TestScanResultStructure:
         assert result.total_with_kline == 1
         assert result.exclude_reasons[ExcludeReason.LOW_LIQUIDITY] == 1
         assert result.total_scanned == 0
+
+    def test_mixed_suspension_detection_covers_all_stocks(self):
+        """Fix #2 regression: suspension detection must cover all stocks in
+        stock_kline_map, not just those present in daily_raw (baostock
+        partial-cache-hit scenario).  Stock A is correctly flagged as
+        across-suspension even when only stock B would appear in daily_raw.
+        """
+        n_bars = 200
+        kline_a = _make_kline(n_bars=n_bars, gap_at=_GAP_IDX)
+        kline_b = _make_kline(n_bars=n_bars, gap_at=_GAP_IDX)
+        stock_b = MockStock("000002.SZ")
+
+        trade_cal = kline_a["trade_date"].tolist()
+        gap_date = trade_cal[_GAP_IDX]
+        prev_date = trade_cal[_GAP_IDX - 1]
+
+        # Stock A has a real suspension before the gap → across-suspension
+        # Stock B has no suspension → regular hit
+        suspension_map = {"000001.SZ": [prev_date]}
+
+        result = scan_all(
+            stocks=[STOCK, stock_b],
+            stock_kline_map={"000001.SZ": kline_a, "000002.SZ": kline_b},
+            adj_factor_map={
+                "000001.SZ": _valid_adj(),
+                "000002.SZ": _valid_adj(),
+            },
+            suspension_map=suspension_map,
+            params=DEFAULT_PARAMS,
+            trade_cal=trade_cal,
+        )
+        # Stock A: across-suspension (had suspension before gap)
+        # Stock B: regular hit (no suspension)
+        assert len(result.across_suspension_hits) == 1
+        assert result.across_suspension_hits[0].ts_code == "000001.SZ"
+        assert len(result.hits) == 1
+        assert result.hits[0].ts_code == "000002.SZ"
+        assert result.total_in_universe == 2
+        assert result.total_with_kline == 2

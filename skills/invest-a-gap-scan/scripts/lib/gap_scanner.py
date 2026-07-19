@@ -155,16 +155,26 @@ def _find_candidate_gaps(
 
 
 def _check_ma60_streak(closes: list[float], ma60: list[float | None],
-                        gap_idx: int) -> bool:
+                        gap_idx: int, min_valid_ratio: float = 0.25) -> bool:
     """Return True if ``close[t] >= MA60[t]`` for every ``t >= gap_idx``.
 
     Entries where ``ma60[t] is None`` are skipped (the first 59 positions
-    in the SMA output).
+    in the SMA output).  To prevent vacuous passes, at least
+    *min_valid_ratio* of the post-gap positions must have a valid MA60
+    value (default 25 %, i.e. the gap must have formed well after the
+    first 59 bars of MA60 warmup).
     """
+    valid_count = 0
+    total_count = 0
     for t in range(gap_idx, len(closes)):
+        total_count += 1
         m = ma60[t]
-        if m is not None and not (closes[t] >= m):
-            return False
+        if m is not None:
+            valid_count += 1
+            if not (closes[t] >= m):
+                return False
+    if total_count > 0 and valid_count / total_count < min_valid_ratio:
+        return False  # too few valid MA60 bars for a meaningful check
     return True
 
 
@@ -172,12 +182,13 @@ def _check_unfilled(lows: list[float], gap_idx: int,
                     gap_high: float) -> bool:
     """Return True if the gap has never been filled (partially or fully).
 
-    A gap is unfilled when ``min(low[gap_idx+1:]) > gap_high``.
+    A gap is unfilled when ``min(low[gap_idx+1:]) >= gap_high``
+    (touching the boundary does not enter the gap interval).
     If *gap_idx* is the last bar, the condition is vacuously true.
     """
     if gap_idx >= len(lows) - 1:
         return True
-    return min(lows[gap_idx + 1:]) > gap_high
+    return min(lows[gap_idx + 1:]) >= gap_high
 
 
 def _build_scan_hit(
@@ -188,11 +199,20 @@ def _build_scan_hit(
     ma60_list: list[float | None],
     amounts: list[float],
     avg_amount_20d: float,
+    vol_ratio: float,
 ) -> ScanHit:
-    """Construct a ScanHit from the matched gap and current market state."""
+    """Construct a ScanHit from the matched gap and current market state.
+
+    *vol_ratio* is pre-computed by the caller using the gap-local 20-day
+    average (not the current tail average) — see :func:`_scan_stock`.
+    *avg_amount_20d* is the current 20-day average used for the hit table.
+    """
     current_price = closes[-1]
     ma60 = ma60_list[-1]
-    if ma60 is None or ma60 == 0:
+    if ma60 is None:
+        ma60 = float('nan')
+        pct_from_ma60 = float('nan')
+    elif ma60 == 0:
         pct_from_ma60 = 0.0
     else:
         pct_from_ma60 = (current_price - ma60) / ma60 * 100.0
@@ -202,8 +222,6 @@ def _build_scan_hit(
     else:
         pct_from_gap_high = (current_price - gap.gap_high) / gap.gap_high * 100.0
 
-    vol_ratio = amounts[gap_idx] / avg_amount_20d if avg_amount_20d > 0 else 0.0
-
     return ScanHit(
         ts_code=stock.ts_code,
         name=stock.name,
@@ -211,7 +229,7 @@ def _build_scan_hit(
         index_members=getattr(stock, "index_membership", []),
         gap=gap,
         current_price=current_price,
-        ma60=ma60 if ma60 is not None else 0.0,
+        ma60=ma60,
         pct_from_ma60=pct_from_ma60,
         pct_from_gap_high=pct_from_gap_high,
         vol_ratio=vol_ratio,
@@ -293,9 +311,21 @@ def _scan_stock(
 
         any_unfilled = True
 
-        vol_ratio = amounts[gap_idx] / avg_amount_20d if avg_amount_20d > 0 else 0.0
-        if params.get("gap_min_vol_ratio", 1.0) > 1.0:
-            if vol_ratio < params["gap_min_vol_ratio"]:
+        # Gap-local 20-day average: bars preceding the gap day.
+        # Using the gap-proximate baseline (not current tail) means the
+        # vol_ratio reflects whether the gap was "above normal volume at
+        # the time", which is more meaningful for the tolerance rule.
+        local_lookback = min(20, gap_idx)
+        local_avg = (
+            sum(amounts[gap_idx - local_lookback:gap_idx]) / local_lookback
+            if local_lookback > 0
+            else amounts[gap_idx]
+        )
+        vol_ratio = amounts[gap_idx] / local_avg if local_avg > 0 else 0.0
+
+        gap_min_vol = params.get("gap_min_vol_ratio", 1.0)
+        if gap_min_vol != 1.0:  # 1.0 = CLI default "no filter"
+            if vol_ratio < gap_min_vol:
                 any_vol_ratio_fail = True
                 continue  # try older gap
 
@@ -306,7 +336,8 @@ def _scan_stock(
                 gap.is_across_suspension = True
 
         hit = _build_scan_hit(
-            stock, gap, gap_idx, closes, ma60_list, amounts, avg_amount_20d,
+            stock, gap, gap_idx, closes, ma60_list, amounts,
+            avg_amount_20d, vol_ratio,
         )
         return hit, None, None
 
