@@ -33,6 +33,19 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "stock-analysis", "china-stock", "limit-up", "market-scan", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-gap-scan",
+      "description": "A股跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）。学习工具，非决策工具。",
+      "version": "0.2.0",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "stock-analysis", "china-stock", "gap-scan", "technical-analysis", "a-share", "claude-code", "learning"]
     }
   ]
 }
