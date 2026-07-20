@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -422,9 +422,12 @@ class TestAttachEventsIntegration:
     @patch("lib.events._fetch_shareholder_events")
     def test_attach_events_basic(self, mock_shareholder, mock_dividend, mock_notice):
         """验证 attach_events 的正确流程。"""
+        today = date.today()
+        d1 = (today - timedelta(days=5)).strftime("%Y-%m-%d")
+        d2 = (today - timedelta(days=15)).strftime("%Y-%m-%d")
         mock_notice.return_value = [
             {
-                "date": "2026-06-28",
+                "date": d1,
                 "type": "buyback",
                 "title": "关于回购公司股份的公告",
                 "impact_dimension": "估值",
@@ -434,7 +437,7 @@ class TestAttachEventsIntegration:
                 "url": "http://example.com",
             },
             {
-                "date": "2026-06-15",
+                "date": d2,
                 "type": "dividend",
                 "title": "分红方案公告",
                 "impact_dimension": "估值",
@@ -452,8 +455,8 @@ class TestAttachEventsIntegration:
 
         assert "events" in result
         assert len(result["events"]) == 2
-        assert result["events"][0]["date"] == "2026-06-28"  # 降序
-        assert result["events"][1]["date"] == "2026-06-15"
+        assert result["events"][0]["date"] == d1  # 降序：较新的排前面
+        assert result["events"][1]["date"] == d2
 
         # 占位槽
         assert result["industry_events"] == []
