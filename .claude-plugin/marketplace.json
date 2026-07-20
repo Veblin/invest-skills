@@ -1,7 +1,7 @@
 {
-  "name": "invest-A-marketplace",
+  "name": "invest-skills-marketplace",
   "owner": {
-    "name": "invest-A",
+    "name": "invest:a-stock",
     "url": "https://github.com/Veblin/invest-skills"
   },
   "metadata": {
@@ -9,9 +9,9 @@
   },
   "plugins": [
     {
-      "name": "invest-A",
+      "name": "invest:a-stock",
       "description": "A股个股调研学习工具。覆盖基本信息、财务报告、行业产业链、估值/市场状态、机构分析师、情绪舆情、宏观政策七大维度，每条分析论述引用数据来源，区分事实陈述与分析判断。学习工具，非决策工具。",
-      "version": "0.1.9",
+      "version": "0.2.0",
       "author": {
         "name": "Veblin",
         "url": "https://github.com/Veblin"
@@ -20,6 +20,19 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "stock-analysis", "china-stock", "equity-research", "financial-analysis", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-limit-up",
+      "description": "A股涨停板全市场扫描+交互式深挖。盘面宽度/板块轮动/涨停归因，支持质量过滤与交互筛选。学习工具，非决策工具。",
+      "version": "0.2.0",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "stock-analysis", "china-stock", "limit-up", "market-scan", "a-share", "claude-code", "learning"]
     }
   ]
 }

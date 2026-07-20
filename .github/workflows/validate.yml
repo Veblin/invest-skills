@@ -27,8 +27,8 @@ jobs:
 
       - name: Preflight checks (diagnose + version consistency)
         run: |
-          uv run python skills/invest-A/scripts/invest.py diagnose --json
-          bash skills/invest-A/scripts/check-version.sh
+          uv run python skills/invest-a-stock/scripts/invest.py diagnose --json
+          uv run python scripts/sync_version.py check
 
       - name: Run test suite
         run: uv run pytest

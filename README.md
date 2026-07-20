@@ -1,183 +1,156 @@
-# invest-A — A股投研助手
+# invest-skills
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
-  <a href="https://github.com/Veblin/invest-skills/actions/workflows/security.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/security.yml?label=security" alt="Security Scan" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.1.4" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.0" alt="Release" /></a>
 </p>
 
-> **学习工具，非决策工具。** 多源采集 A 股数据 → 结构化研究备忘录 → 你独立判断。
-
-[//]: # (插图1: 架构全景图 — 六数据源 → 九模块报告 → 用户决策。建议尺寸 800×300，格式 PNG/SVG。)
+A 股投研技能集，面向 **Claude Code** 和 **Hermes Agent**。输入代码，自动采集多维数据，产出带来源追溯的结构化研究备忘录。学习工具，非决策工具。
 
 ---
 
-## 一句话
-
-输入股票代码，自动采集财务、行情、估值、股东、北向资金、K 线等维度数据，产出带来源追溯的 Markdown 研究备忘录。每条事实标注来源，每个判断标注依据。
-
----
-
-## 快速开始
-
-invest-A 分两层：**Skill**（告诉 Agent 怎么调研）+ **Python 引擎**（实际拉数据、渲染报告）。多数用户先装 Skill，再一次性配置引擎。
-
-### 1. 安装 Skill（按你的环境选一）
-
-| 环境 | 安装方式 | 说明 |
-|------|----------|------|
-| **Claude Code** | `/plugin marketplace add Veblin/invest-skills` | 推荐；含插件钩子，marketplace 可自动更新 |
-| **Cursor** | `npx skills add Veblin/invest-skills --skill invest-A -g -a cursor -y` | 安装到 Cursor Skills 目录 |
-| **OpenClaw** | `npx skills add Veblin/invest-skills --skill invest-A -g -a openclaw -y` | 或 `openclaw skills install git:Veblin/invest-skills`（需本仓库已 clone） |
-| **Hermes** | `npx skills add Veblin/invest-skills --skill invest-A -g -y` | Agent Skills 开放格式，与 Claude Code / Cursor 同源 |
-| **Codex / Gemini CLI 等** | `npx skills add Veblin/invest-skills --skill invest-A -g -y` | 可用 `-a <agent>` 指定目标，见 [agentskills.io](https://agentskills.io) |
-
-<details>
-<summary>各环境安装后怎么用</summary>
-
-**Claude Code**
-
-```
-/invest-A 600176                  # 单标的研究
-/invest-A 600176 --compare 000858 # 双标的对比
-/invest-A 600176 --deep           # 深度模式（730 日 K 线 + 行业分析）
-```
-
-**Cursor / Hermes / OpenClaw / 其他 Agent**
-
-在对话中直接说明意图即可，例如：
-
-> 用 invest-A 研究 600176，生成九模块 Markdown 备忘录。
-
-Agent 会按 `skills/invest-A/SKILL.md` 调用 `invest.py` 采集与渲染。
-
-</details>
-
-> Skill 安装只注册工作流与规范；**数据采集仍依赖本机 Python 引擎**（下一步）。Claude Code 插件会把仓库脚本挂载到插件目录，其余环境需 clone 一次。
-
-### 2. 配置数据采集引擎（一次性，约 2 分钟）
+## 安装
 
 ```bash
 git clone https://github.com/Veblin/invest-skills.git && cd invest-skills
 uv sync
-uv run python skills/invest-A/scripts/invest.py diagnose   # 检查数据源是否可用
 ```
 
-`diagnose` 通过后即可在 Agent 或 CLI 中正常出报告。开发模式（本地改 Skill 即时生效）：
+配置 Token（至少一个）：
 
 ```bash
-ln -sfn "$PWD/skills/invest-A" ~/.agents/skills/invest-A   # 可选：symlink 到 Agent Skills 目录
-```
-
-### 3. 配置 API Key（可选，不配也能跑基础功能）
-
-```bash
-cp .env.example .env   # 编辑填入 Key，全部可选
+cp .env.example .env   # 编辑填入 TUSHARE_TOKEN 等
 ```
 
 | Key | 作用 | 获取 |
 |-----|------|------|
-| `TUSHARE_TOKEN` | A 股主力源（≥2000 分主要接口；`sw_daily` 等需 5000 分） | [tushare.pro](https://tushare.pro) |
-| `FRED_API_KEY` | 美国 10Y 国债（ERP 计算） | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
-| `TAVILY_API_KEY` | 新闻 Layer 3（可选；无 Key 时公告+查询包仍可用） | [tavily.com](https://tavily.com) |
-
-不配 Tushare 时：腾讯行情 + baostock 免费兜底，基础 K 线与报价仍可用。积分与接口对照见 [CONFIGURATION.md](CONFIGURATION.md)。
-
-### 4. CLI 直接调用（不经过 Agent）
+| `TUSHARE_TOKEN` | 财务/估值/资金/股东 | [tushare.pro](https://tushare.pro) 注册即送 |
+| `FRED_API_KEY` | 美国 10Y 国债（DCF WACC） | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) 免费 |
+| `TAVILY_API_KEY` | 新闻搜索补充 | [tavily.com](https://tavily.com) 免费 |
 
 ```bash
-# 报告与对比
-uv run python skills/invest-A/scripts/invest.py report 600176
-uv run python skills/invest-A/scripts/invest.py compare 600176 000858
-uv run python skills/invest-A/scripts/invest.py store list
+uv run python skills/invest-a-stock/scripts/invest.py diagnose   # 验证
+```
 
-# 新闻包（公告 + 声明式查询包 + 可选 Tavily）
-uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
+Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 
-# v0.1.9 质量门与工具
-uv run python skills/invest-A/scripts/invest.py rigor 600176 --verify-all   # 财务验算
-uv run python skills/invest-A/scripts/invest.py audit report.md --extract  # 报告审计抽样
-uv run python skills/invest-A/scripts/invest.py check 600176               # 单标的质地检查
-uv run python skills/invest-A/scripts/invest.py portfolio holdings.json    # 组合风险特征
-uv run python skills/invest-A/scripts/invest.py thesis 600176 --init       # 投资假设追踪
-uv run python skills/invest-A/scripts/invest.py shock 300274 \
-  --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 \
-  --pe-normal 27 --pe-stressed 20                                         # 价格冲击插值比例
+---
+
+## 使用
+
+### Claude Code
+
+```
+/plugin marketplace add Veblin/invest-skills
+```
+
+```
+/invest-a-stock 600176              # 单标的研究（多 Agent 并行）
+/invest-a-stock 600176 --with-macro # 含宏观情景
+/invest-a-limit-up                  # 涨停扫描
+/invest-a-gap-scan                  # 跳空缺口扫描
+```
+
+### Hermes Agent
+
+安装 `Veblin/invest-skills` 插件后，直接用自然语言调用：
+```
+用 invest-a-stock 研究 600176
+```
+
+### 命令行
+
+```bash
+# 个股研究
+uv run python skills/invest-a-stock/scripts/invest.py report 600176
+uv run python skills/invest-a-stock/scripts/invest.py report 600176 --with-macro
+uv run python skills/invest-a-stock/scripts/invest.py value 600176       # 科学估值
+uv run python skills/invest-a-stock/scripts/invest.py rigor 600176 --verify-all
+uv run python skills/invest-a-stock/scripts/invest.py check 600176       # 质地检查
+
+# 对比 / 回溯
+uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
+uv run python skills/invest-a-stock/scripts/invest.py diff 600176
+
+# 涨停扫描
+uv run python skills/invest-a-limit-up/scripts/scan.py --quality-filter
+uv run python skills/invest-a-limit-up/scripts/scan.py --sector 半导体
+
+# 跳空缺口扫描
+uv run python skills/invest-a-gap-scan/scripts/scan.py
+uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
+uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
 ```
 
 ---
 
-## 数据采集
+## 多 Agent 并行分析
 
-多维度并行采集，多源交叉验证，单源失败不阻塞。
+`/invest-a-stock` 默认两阶段多 Agent 架构：
 
-| # | 维度 | 内容 | 数据源 |
-|---|------|------|--------|
-| 1 | 基本信息 | 公司概况、行业分类 | Tushare ∥ akshare |
-| 2 | 财务报告 | ROE、EPS、扣非净利润 | Tushare ∥ akshare |
-| 3 | 实时行情 | 开高低收、成交量 | Tushare ∥ 腾讯 |
-| 4 | 十大股东 | 前十大流通股东 | Tushare ∥ akshare |
-| 5 | 北向资金 | 个股北向持股 | Tushare ∥ akshare |
-| 6 | 估值历史 | PE/PB 序列与分位 | Tushare ∥ 腾讯快照 |
-| 7 | 日K线 | 历史日线 + 技术指标 | Tushare ∥ baostock |
-| — | 市场结构 | 行业指数、资金流向、ERP | Tushare + FRED |
-| — | 机构研报 | 卖方一致预期、业绩预告（`--dims=...,research`） | Tushare ∥ akshare |
-| — | 宏观/行业 | 美债、行业舆情（`--deep`） | FRED + WebSearch |
-| — | 新闻包 | 公告 + 查询包 + 可选 Tavily（`--with-news-pack`） | akshare ∥ Tavily |
+```
+Phase 1: 并行采集（3 Agent）
+  Collector A (Tushare) ∥ Collector B (akshare交叉) ∥ Collector C (股东/研报)
+  → merge + 交叉验证，差异 >20% 触发 tie-breaker
 
-> v0.1.4 起默认产出九模块研究备忘录。数据源均可选，未配置时自动降级并标注。
+Phase 2: 并行分析（4 Agent）
+  生意质量 ∥ 财务估值 ∥ 行业竞争 ∥ 风险治理
 
-[//]: # (插图2: 报告截图 — 九模块报告渲染效果。)
+Phase 3: 主编合成 → .md 报告
+```
+
+模板见 [references/agent-prompts.md](skills/invest-a-stock/references/agent-prompts.md)。
 
 ---
 
-## 产出法则
+## 数据
 
-所有输出由 9 条法则约束，违反即为 Bug。详见 [SKILL.md](skills/invest-A/SKILL.md)。
+多源并行采集，单源失败不阻塞，差异标注跨源分歧。
 
-| LAW | 规则 |
-|-----|------|
-| 1 | 每条分析论述引用数据来源 |
-| 3 | 区分 [事实] 与 [分析] |
-| 5 | 多源交叉验证优先，单源标注不确定性 |
-| 6 | **禁止买卖建议、仓位建议；允许带假设前提的多情景估值参考价，禁止无假设的单一目标价** |
-| 7 | 每个数字标注可审查的追溯路径 |
-| 9 | 无数据源支撑的分析不输出 |
+| 维度 | 内容 | 源 |
+|------|------|------|
+| 基本信息 | 公司概况、行业 | Tushare ∥ akshare |
+| 财务 | ROE/EPS/毛利率/OCF/杜邦 | Tushare ∥ akshare |
+| 行情 | OHLCV | Tushare ∥ 腾讯 |
+| 估值 | PE/PB 序列、分位、PE Band | Tushare |
+| K 线 | 日线 + MA/MACD/RSI | Tushare ∥ baostock ∥ TickFlow |
+| 股东 | 十大流通股东 + 增减持 | Tushare ∥ akshare |
+| 资金 | 北向/主力/融资/融券 | Tushare ∥ akshare |
+| 市场 | 行业指数、ERP、PCR | Tushare + FRED |
+
+结果自动存入 SQLite（`~/.local/share/investment/research.db`），支持历史回溯。详见 [CONFIGURATION.md](CONFIGURATION.md)。
+
+---
+
+## 输出
+
+16 条法则约束（[SKILL.md](skills/invest-a-stock/SKILL.md)），核心：
+
+- 每条事实标注来源，每条判断标注依据
+- 多源交叉验证，单源标注不确定性
+- 禁止买卖建议；允许多情景估值（须假设前提 + 概率 + 免责）
+- Bull/Bear 须含数值场景化传导链
+- 左/右概率并列，禁止单一方向结论
 
 ---
 
 ## 项目结构
 
 ```
-skills/invest-A/
-  SKILL.md                  ← 核心规格（LAWs + 路由表 + CLI）
-  references/               ← 专项与参考（modules / financials / sentiment / game-theory）
-  scripts/
-    invest.py               ← CLI 单入口
-    lib/                    ← collector / render / store / technical / valuation
-                              + financial_rigor / news_scanner / quality_check 等
-  tests/                    ← pytest
-.claude-plugin/             ← Claude Code 插件注册
-hooks/                      ← SessionStart 钩子
-pyproject.toml              ← uv 依赖
+skills/
+  invest-a-stock/         ← 个股研究
+    SKILL.md              ← 核心规格
+    references/           ← 专项（modules/financials/sentiment/game-theory）
+    scripts/
+      invest.py           ← CLI（19 子命令）
+      valuation_calc.py   ← 科学估值
+      lib/                ← collector/render*/store/valuation/risk_scanner/...
+    tests/
+  invest-a-limit-up/      ← 涨停扫描
+.claude-plugin/           ← Claude Code 插件
 ```
-
----
-
-## 文档
-
-| 文档 | 内容 |
-|------|------|
-| [docs/README.md](docs/README.md) | 对外文档索引 |
-| [docs/roadmap.md](docs/roadmap.md) | 路线图（待接入数据源） |
-| [CONFIGURATION.md](CONFIGURATION.md) | 各 Harness 安装细节、Tushare 积分、常见问题 |
-| [SKILL.md](skills/invest-A/SKILL.md) | 核心规格（LAWs + 专项路由） |
-| [references/](skills/invest-A/references/) | 九模块、财报/舆情/行为扫描专项 |
-| [AGENTS.md](AGENTS.md) | AI 协作规则、设计约束 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
-| [CONTRIBUTORS.md](CONTRIBUTORS.md) | 贡献指南 |
 
 ---
 
@@ -185,18 +158,11 @@ pyproject.toml              ← uv 依赖
 
 ```bash
 uv sync && uv run pytest
-uv run python skills/invest-A/scripts/invest.py diagnose
-bash skills/invest-A/scripts/check-version.sh   # 分发 manifest（5 文件）版本一致性
+bash scripts/bump-version.sh X.Y.Z
 ```
 
 提交前确保测试通过，无 API Key 泄露。
 
 ---
 
-## License
-
-MIT · 不跟踪 · 不上报 · 数据仅存本地
-
-技术栈：Python 3.12+ · Tushare Pro · FRED API · akshare · baostock · SQLite
-
-设计参考：[last30days-skill](https://github.com/mvanhorn/last30days-skill) · [daily_stock_analysis](https://github.com/ben1234560/daily_stock_analysis)
+MIT · 本地运行 · 不跟踪不上报

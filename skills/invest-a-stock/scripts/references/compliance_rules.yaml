@@ -1,0 +1,400 @@
+# compliance_rules.yaml — invest:a-stock 合规扫描规则
+# 单数据源：从 CLAUDE.md 措辞规范自动编码
+# scope: line → 逐行正则匹配 | file → 全文扫描 | paragraph → 段级分析
+schema_version: "0.1.9"
+description: "invest:a-stock 合规扫描规则（从 CLAUDE.md 措辞规范、已知违规模式、估值分位规则、分析标记规范编码）"
+
+rules:
+  # ==========================================================================
+  # LAW 6 — 禁止买卖建议、目标价、仓位建议
+  # ==========================================================================
+  - id: "law6-buy-advice"
+    pattern: "建议买入"
+    severity: "error"
+    scope: "line"
+    message: "禁止使用'建议买入'（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "law6-sell-advice"
+    pattern: "建议卖出"
+    severity: "error"
+    scope: "line"
+    message: "禁止使用'建议卖出'（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "law6-hold-advice"
+    pattern: "建议持有"
+    severity: "error"
+    scope: "line"
+    message: "禁止使用'建议持有'（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "law6-buy-standalone"
+    pattern: "(?<!在)(?<!不)(?<!建议)买入(?!成本|价格|价|时点|信号|机会|逻辑|力度|量|意愿|金额|均价|股份|资产|返售|返租|返利|返点|返期|返债|返基金|返保险)"
+    severity: "error"
+    scope: "line"
+    message: "禁止使用'买入'建议词汇（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "law6-sell-standalone"
+    pattern: "(?<!在)(?<!不)(?<!建议)卖出(?!量|金额|均价|收入|资产|股份|价格|信号|机会|时点|逻辑|力度|意愿)"
+    severity: "error"
+    scope: "line"
+    message: "禁止使用'卖出'建议词汇（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "law6-hold-standalone"
+    pattern: "(?<!在)(?<!不)(?<!建议)持有(?!人|股|比例|量|成本|期间|期|者|方|仓|单|证|券|债|基金|保险|资产|股份|股票)"
+    severity: "error"
+    scope: "line"
+    message: "禁止使用'持有'建议词汇（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "law6-target-price"
+    pattern: "目标价\\s*[：:]*\\s*\\d+[\\.\\d]*"
+    severity: "error"
+    scope: "line"
+    message: "禁止给出单一目标价（LAW 6），应提供估值区间"
+    law_ref: "LAW 6"
+
+  - id: "law6-position-advice"
+    pattern: "(建议|考虑|可以)(加仓|减仓|建仓|清仓|重仓|轻仓)"
+    severity: "error"
+    scope: "line"
+    message: "禁止仓位建议（LAW 6）"
+    law_ref: "LAW 6"
+
+  # ==========================================================================
+  # LAW 16 — 禁止单一"左侧/右侧"结论
+  # ==========================================================================
+  - id: "law16-left-right-standalone"
+    pattern: "[。，；.!;，]?(处于|属于)(左侧|右侧)[。，；.!;，]?$"
+    severity: "warning"
+    scope: "line"
+    message: "禁止单一'左侧/右侧'结论，需标注概率（LAW 16）。正确写法：'左侧特征更强：XXXX；右侧支撑：YYYY。综合概率：左偏（≈60% vs 40%）'"
+    law_ref: "LAW 16"
+
+  - id: "law16-current-left-right"
+    pattern: "当前处于(左侧|右侧)"
+    severity: "warning"
+    scope: "line"
+    message: "禁止单一'当前处于左侧/右侧'（LAW 16），需标注概率分布"
+    law_ref: "LAW 16"
+
+  # ==========================================================================
+  # 措辞规范 — 禁止词与替换表
+  # ==========================================================================
+  - id: "wording-valuation-collapse"
+    pattern: "估值崩溃风险"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止使用'估值崩溃风险'，替换为'剧烈估值收缩风险：在 XXX 场景下，估值从 AAAx 收敛至 BBBx'"
+    law_ref: "措辞规范 — 风险模块"
+
+  - id: "wording-classic-top"
+    pattern: "经典周期顶部信号"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止使用'经典周期顶部信号'，需具体描述行为模式并附历史案例"
+    law_ref: "措辞规范 — 动态驱动"
+
+  - id: "wording-extreme-high"
+    pattern: "极度高估"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止使用'极度高估'，改为数值比较：'PE 665x vs 同赛道平均 40x，溢价约 16 倍'"
+    law_ref: "措辞规范 — 估值段落"
+
+  - id: "wording-extreme-low"
+    pattern: "极度低估"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止使用'极度低估'，改为数值比较"
+    law_ref: "措辞规范 — 估值段落"
+
+  - id: "wording-crash"
+    pattern: "崩盘"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止使用'崩盘'，替换为'剧烈回调'+条件描述"
+    law_ref: "措辞规范 — 任何场景"
+
+  - id: "wording-peak-value-estimate"
+    pattern: "往往是估值峰值"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止使用'往往是估值峰值'，需附历史案例：'在多次周期品历史走势中…但并非必然规律'"
+    law_ref: "措辞规范 — 市场结构"
+
+  - id: "wording-quick-correction"
+    pattern: "往往伴随.*修正"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    message: "禁止无据'往往伴随'表述，需附案例：'在 AAA、BBB 等类似斜率的高涨中，随后 N 个月内出现 20-30% 回调（案例研究待补）'"
+    law_ref: "措辞规范 — 技术结构"
+
+  - id: "wording-certain-price-drop"
+    pattern: "股价也可能下跌\\s*\\d+(?:-\\d+)?%"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
+    skip_if_pattern_within_window: "(若|如果|假设|情景|scenario)"
+    context_before: 2
+    context_after: 2
+    message: "禁止无条件'股价也可能下跌 X%'，需改为：'若盈利路径不及 AAA 预测、且估值回到周期中枢 BBBx，则与当前市值相比，价格有 X% 的回调空间'"
+    law_ref: "措辞规范 — 风险模块"
+
+  # ==========================================================================
+  # LAW 3 — 口头经验须标注来源（"往往""通常"无来源）
+  # ==========================================================================
+  - id: "law3-wangwang-unqualified"
+    pattern: "[。，；]?往往[不]?(伴随|在|是|有|会|出现|高于|低于|处于|位于|大于|小于)"
+    severity: "info"
+    scope: "line"
+    message: "'往往'需标注数据来源或转为具体案例（LAW 3），避免无依据口头经验"
+    law_ref: "LAW 3"
+
+  - id: "law3-tongchang-unqualified"
+    pattern: "[。，；]?通常[不]?(伴随|在|是|有|会|出现|高于|低于|处于|位于|大于|小于)"
+    severity: "info"
+    scope: "line"
+    message: "'通常'需标注数据来源或转为具体案例（LAW 3），避免无依据口头经验"
+    law_ref: "LAW 3"
+
+  # ==========================================================================
+  # 估值分位使用规则
+  # ==========================================================================
+  - id: "percentile-without-median"
+    pattern: "(?=.*分位)(?=.*\\d+\\.?\\d*%)(?!.*中位数)(?!.*均值)(?!.*中位)"
+    severity: "warning"
+    scope: "paragraph"
+    message: "PE 分位数值应伴随中位数或均值，如 'PE 93.11x，近4年 98.3% 分位（中位数 37.52x）'"
+    law_ref: "估值分位规则 — 分位数不单独使用"
+
+  - id: "percentile-loss-label"
+    pattern: "分位.*\\d+\\.?\\d*%"
+    severity: "info"
+    scope: "paragraph"
+    message: "若标的为亏损期，需标注'该标的历史大部分时间微利/亏损，PE 分位数仅作位置参考，不反映估值贵贱'"
+    law_ref: "估值分位规则 — 亏损期标的强制标注"
+
+  # ==========================================================================
+  # 结构检查 — [事实] / [分析] / [来源:]
+  # ==========================================================================
+  - id: "structure-missing-fact"
+    pattern: "\\[事实\\]"
+    severity: "info"
+    scope: "file"
+    message: "报告中应包含 [事实] 块引用数据来源"
+    law_ref: "SOP-QC — 分析标记规范"
+
+  - id: "structure-missing-analysis"
+    pattern: "\\[分析\\]"
+    severity: "info"
+    scope: "file"
+    message: "报告中应包含 [分析] 块（基于事实的逻辑推演）"
+    law_ref: "SOP-QC — 分析标记规范"
+
+  - id: "structure-missing-evidence-tag"
+    pattern: "\\[证据强度"
+    severity: "warning"
+    scope: "file"
+    message: "报告中应包含 [证据强度:] 四维标注（SOP-EV）"
+    law_ref: "SOP-QC — 证据强度标注"
+
+  - id: "structure-missing-source-tag"
+    pattern: "\\[来源:"
+    severity: "info"
+    scope: "file"
+    message: "数据来源段落应标注 [来源:] 标签"
+    law_ref: "SOP-QC — 来源标注"
+
+  # ==========================================================================
+  # 文件名格式验证
+  # ==========================================================================
+  - id: "filename-format-symbol-name-date"
+    pattern: "^\\d{6}-[^-]+-\\d{4}-?\\d{2}-?\\d{2}\\.md$"
+    severity: "info"
+    scope: "filename"
+    message: "推荐路径格式：{symbol}-{name}/{date}.md（如 600176-中国巨石/2026-06-24.md）"
+    law_ref: "报告路径 — 个股报告命名规范"
+
+  - id: "filename-format-date-symbol"
+    pattern: "^\\d{4}-\\d{2}-\\d{2}(-\\d{2}-\\d{2}-\\d{2})?-\\d{6}(-[^-]+)*\\.md$"
+    severity: "info"
+    scope: "filename"
+    message: "文件名使用日期前缀格式（旧格式，推荐使用 {symbol}-{name}/{date}.md）"
+    law_ref: "报告路径 — 个股报告命名规范"
+
+  # ==========================================================================
+  # 已知违规模式补充
+  # ==========================================================================
+  - id: "known-violation-buy-sell-advice-combo"
+    pattern: "(买入|卖出|持有)该(股票|标的|公司|股份)"
+    severity: "error"
+    scope: "line"
+    message: "禁止'买入/卖出/持有该标的'建议词汇（LAW 6）"
+    law_ref: "LAW 6 — 已知违规模式 #2"
+
+  - id: "known-violation-ting-pai"
+    pattern: "建议(买入|卖出|持有|回避)"
+    severity: "error"
+    scope: "line"
+    message: "禁止任何形式的'建议'指令（LAW 6）"
+    law_ref: "LAW 6"
+
+  - id: "known-violation-target-price-amount"
+    pattern: "目标(价|位)[：:]*\\s*\\d+[\\.\\d]*\\s*(元|美元|港元|港币)"
+    severity: "error"
+    scope: "line"
+    message: "禁止给出单一目标价（LAW 6），应提供估值区间"
+    law_ref: "LAW 6 — 已知违规模式 #3"
+
+  # ==========================================================================
+  # 占位残留检查（原 check_report.sh 检查项 3）
+  # ==========================================================================
+  - id: "placeholder-todo"
+    pattern: "(TODO|FIXME|XXX)"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在待办标记（TODO/FIXME/XXX），请清理后再提交"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-zhanwei"
+    pattern: "占位"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在占位文本，请补充完整后再提交"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-tbd"
+    pattern: "\\bTBD\\b"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在待定标记（TBD），请补充后再提交"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-pause"
+    pattern: "⏸"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在占位标记（⏸），请补充完整"
+    law_ref: "SOP-QC — 占位残留"
+
+  - id: "placeholder-tofill"
+    pattern: "(待补充|待填|待补)"
+    severity: "warning"
+    scope: "line"
+    message: "报告中存在待补充字段，请补充完整"
+    law_ref: "SOP-QC — 占位残留"
+
+  # ==========================================================================
+  # 绝对化表述检查（原 check_report.sh 检查项 5）
+  # ==========================================================================
+  - id: "wording-absolute-biran"
+    pattern: "(?<!不)必然(?!性|规律|事件|趋势|联系|关系|因果|条件)"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'必然'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-yiding"
+    pattern: "(?<!不)一定(?!程度|范围|条件|比例|意义|影响|作用|关系|差异|时间|期限|波动|风险|收益)"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'一定'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-kending"
+    pattern: "(?<!不)肯定(?!了|地|的)"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'肯定'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-juebu"
+    pattern: "绝不"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'绝不'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-haowuyiwen"
+    pattern: "毫无疑问"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'毫无疑问'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-yidingbu"
+    pattern: "一定不会"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'一定不会'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  - id: "wording-absolute-jueduibu"
+    pattern: "绝对不会"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:|^\\|.*\\|$)"
+    message: "避免绝对化表述'绝对不会'；若为引用来源内容请标注 [来源:]"
+    law_ref: "措辞规范 — 绝对化表述"
+
+  # ==========================================================================
+  # [事实]/[分析] 顺序检查（原 check_report.sh 检查项 4）
+  # 逐行扫描：每个 [分析] 前 50 行内须有 [事实]，遇 ## 章节标题停止回溯
+  # ==========================================================================
+  - id: "structure-analysis-without-fact"
+    pattern: "\\[分析\\]"
+    severity: "error"
+    scope: "line"
+    require_pattern_within_previous_lines: "\\[事实\\]"
+    lookback_lines: 50
+    stop_at_section_header: true
+    message: "[分析] 段落前缺少 [事实] 块（SOP-QC 要求先列事实再分析）"
+    law_ref: "SOP-QC — 分析标记规范"
+
+  # ==========================================================================
+  # LAW 17 — 结论先行金字塔结构（标题即论点、段首主旨句、逻辑链闭环）
+  # ==========================================================================
+  - id: "law17-noun-section-title"
+    pattern: "^##\\s+[0-9一二三四五六七八九十][、.]?\\s*(公司画像|经营质量|估值位置|资金与筹码|技术结构|事件催化|研究问题卡|当前状态快照|动态驱动分析|市场结构分析|静态基本面分析|市场分歧|左侧.*右侧.*判断|风险与不确定性|附录|执行摘要|机构观点与盈利预测|研究快照|基础参数|核心财务数据.*最近一期|历史估值位置|盈利收益率.*要求回报率|Fed Model)\\s*$"
+    severity: "warning"
+    scope: "line"
+    message: "标题应为完整判断句而非名词短语（LAW 17 — 标题即论点）。正确示例：'PE 55.5x 处 98.4% 分位，已定价乐观预期'"
+    law_ref: "LAW 17"
+
+  - id: "law17-process-module-title"
+    pattern: "^##\\s*模块\\d"
+    severity: "warning"
+    scope: "line"
+    message: "禁止使用'模块1/模块2'等流程性标题（LAW 17），应改为结论句如'PE 36.5x 处 98% 分位，已定价乐观预期'"
+    law_ref: "LAW 17"
+
+  - id: "law17-no-conclusion-sentence"
+    pattern: "\\*\\*结论：\\*\\*"
+    severity: "warning"
+    scope: "file"
+    message: "报告中缺少段首主旨句（**结论：**）（LAW 17），每个分析段落第一句应为加粗主旨句"
+    law_ref: "LAW 17"
+
+  - id: "law17-no-logic-chain"
+    pattern: "\\*\\*逻辑链：\\*\\*"
+    severity: "info"
+    scope: "file"
+    message: "报告中缺少数据→推理→判断逻辑链标注（**逻辑链：**）（LAW 17）"
+    law_ref: "LAW 17"

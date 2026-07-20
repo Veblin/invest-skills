@@ -1,0 +1,67 @@
+{
+  "name": "invest-skills",
+  "version": "{{ VERSION }}",
+  "description": "A股多因子投研助手 — 九模块研究备忘录，带数据引用的 Markdown 报告。研究工具，非决策工具。",
+  "settings": [
+    {
+      "name": "Extension Directory",
+      "description": "Extension installation directory (auto-set by Gemini CLI)",
+      "envVar": "GEMINI_EXTENSION_DIR",
+      "sensitive": false
+    },
+    {
+      "name": "Tushare Token",
+      "description": "Tushare Pro API Token（可选，注册即得 120 积分）— https://tushare.pro",
+      "envVar": "TUSHARE_TOKEN",
+      "sensitive": true
+    },
+    {
+      "name": "FRED API Key",
+      "description": "FRED 美联储宏观经济数据 API Key（可选，免费注册）— https://fred.stlouisfed.org/docs/api/api_key.html",
+      "envVar": "FRED_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Tavily Search API Key",
+      "description": "Tavily AI 搜索 API Key（可选，免费 1000次/月）— https://tavily.com",
+      "envVar": "TAVILY_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Bocha Search API Key",
+      "description": "Bocha 中文搜索 API Key（可选，免费试用）— https://open.bocha.cn",
+      "envVar": "BOCHA_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Longbridge App Key",
+      "description": "Longbridge OpenAPI App Key（可选，港股/美股兜底）— https://open.longbridge.com",
+      "envVar": "LONGBRIDGE_APP_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "Longbridge App Secret",
+      "description": "Longbridge OpenAPI App Secret（可选）— https://open.longbridge.com",
+      "envVar": "LONGBRIDGE_APP_SECRET",
+      "sensitive": true
+    },
+    {
+      "name": "Longbridge Access Token",
+      "description": "Longbridge OpenAPI Access Token（可选）— https://open.longbridge.com",
+      "envVar": "LONGBRIDGE_ACCESS_TOKEN",
+      "sensitive": true
+    },
+    {
+      "name": "Finnhub API Key",
+      "description": "Finnhub API Key（可选，美股数据，免费 60次/分钟）— https://finnhub.io",
+      "envVar": "FINNHUB_API_KEY",
+      "sensitive": true
+    },
+    {
+      "name": "AlphaVantage API Key",
+      "description": "AlphaVantage API Key（可选，美股数据，免费 25次/天）— https://www.alphavantage.co",
+      "envVar": "ALPHAVANTAGE_API_KEY",
+      "sensitive": true
+    }
+  ]
+}

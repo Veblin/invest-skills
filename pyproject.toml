@@ -1,7 +1,7 @@
 [project]
-name = "investment-learning-skill"
-version = "0.1.9"
-description = "A股个股调研多因子投研助手 — Tushare + FRED 数据采集，产出带来源追溯的 Markdown 研究备忘录"
+name = "invest-skills"
+version = "0.2.0"
+description = "投研技能集：A股个股深度研究 + 涨停板扫描 — 多因子交叉验证，学术级引用标准"
 readme = "README.md"
 requires-python = ">=3.12"
 
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["skills/invest-A/tests"]
+testpaths = ["skills/invest-a-stock/tests", "skills/invest-a-limit-up/tests", "skills/invest-a-gap-scan/tests"]
 python_files = ["test_*.py"]
 addopts = ["-q", "--tb=short"]
 markers = [
@@ -30,7 +30,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["skills/invest-A/scripts"]
+source = ["skills/invest-a-stock/scripts", "skills/invest-a-limit-up/scripts", "skills/invest-a-gap-scan/scripts"]
 
 [tool.coverage.report]
 skip_empty = true

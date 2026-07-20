@@ -1,4 +1,4 @@
-# CLAUDE.md — invest-A 投研助手
+# CLAUDE.md — invest:a-stock 投研助手
 
 ## 版本规则
 
@@ -11,22 +11,22 @@
 
 **canonical 源**：`pyproject.toml` 的 `[project].version`（运行时经 `version.py` 读取）。
 
-**禁止手动改多处版本号**。发布时只运行 bump 脚本，由 `scripts/version_sync.py` 同步 5 个分发 manifest：
+**禁止手动改多处版本号**。`pyproject.toml` 为唯一 canonical 源，`scripts/sync_version.py` 同步全部派生文件：
 
 ```bash
-bash scripts/bump-version.sh X.Y.Z
-bash skills/invest-A/scripts/check-version.sh
+bash scripts/bump-version.sh X.Y.Z   # 或: uv run python scripts/sync_version.py bump X.Y.Z
+uv run python scripts/sync_version.py check
 ```
 
 运行 bump 后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
 
-版本一致性仅在发布/CI 时校验（`check-version.sh`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
+版本一致性仅在发布/CI 时校验（`sync_version.py check`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
 
 ## 运行命令
 
 ```bash
 # 所有命令必须用 uv run python，确保从 .venv 加载依赖
-uv run python skills/invest-A/scripts/invest.py <subcommand> <symbol> [--flags]
+uv run python skills/invest-a-stock/scripts/invest.py <subcommand> <symbol> [--flags]
 
 # 常用子命令
 diagnose     # 检查数据源可用性
@@ -50,7 +50,7 @@ shock        # 价格冲击插值比例
 - **Layer 3**：Tavily REST（`TAVILY_API_KEY` 可选）
 
 ```bash
-uv run python skills/invest-A/scripts/invest.py collect 600176 --with-news-pack
+uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
 ```
 
 ## pip 规范
@@ -75,7 +75,7 @@ uv run python -c "import sys; print(sys.executable)"
 
 ## 数据源
 
-详见 `skills/invest-A/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
+详见 `skills/invest-a-stock/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
 
 **代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
 
@@ -98,15 +98,17 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 每次分析时，在 SKILL.md SOP-M1 指导下：
 
-1. 若 `--with-macro` 启用：FRED 数据注入 collector
+1. 若 `--with-macro` 启用：akshare 中国宏观 + FRED VIX + Yahoo SOX 数据注入 collector
 2. Claude 在采集后读取以下指标并生成标签：
    - 增长: 中国 PMI [来源: akshare macro_china_pmi]
    - 通胀: CPI / PPI [来源: akshare macro_china_cpi / ppi]
    - 利率: LPR / US 10Y [来源: akshare macro_china_lpr / FRED]
    - 汇率: USD/CNY [来源: FRED]
+   - 波动: VIX 恐慌指数 [来源: FRED VIXCLS] — 信号: <15 低波 / 15-25 正常 / 25-35 偏高 / >35 恐慌
+   - 科技: SOX 费城半导体指数 [来源: Yahoo Finance] — AI/半导体需求领先指标
 
 输出格式（简报首行）：
-[宏观情景] 增长（PMI XX.X）+ 通胀（CPI +X.X%）+ 政策（LPR X.X%）→ 偏宽松/中性/偏紧
+[宏观情景] PMI XX.X + CPI +X.X% + LPR X.X% →偏宽松/中性/偏紧 | VIX XX.X 正常 SOX X,XXX
 
 ## 关键架构
 
@@ -184,5 +186,5 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 - 数据源扩展方案：`reports/A股数据源扩展研究报告_v0.1.3.md`
 - 个股报告：`reports/{symbol}-{name}/{date}.md`
-- 财报 F 规范：`skills/invest-A/references/financials.md`
-- 九模块结构：`skills/invest-A/references/modules.md`
+- 财报 F 规范：`skills/invest-a-stock/references/financials.md`
+- 九模块结构：`skills/invest-a-stock/references/modules.md`
