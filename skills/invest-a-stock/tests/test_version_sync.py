@@ -18,6 +18,7 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     """Minimal fixture: pyproject.toml + 2 SKILL.md + 3 .json.in templates."""
     (root / "skills" / "invest-a-stock").mkdir(parents=True)
     (root / "skills" / "invest-a-limit-up").mkdir(parents=True)
+    (root / "skills" / "invest-a-gap-scan").mkdir(parents=True)
     (root / ".claude-plugin").mkdir(parents=True)
 
     (root / "pyproject.toml").write_text(
@@ -30,6 +31,10 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     )
     (root / "skills" / "invest-a-limit-up" / "SKILL.md").write_text(
         f'---\nname: invest:a-limit-up\nversion: "{version}"\n---\n',
+        encoding="utf-8",
+    )
+    (root / "skills" / "invest-a-gap-scan" / "SKILL.md").write_text(
+        f'---\nname: invest:a-gap-scan\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
 
