@@ -628,6 +628,25 @@ class TestEdgeCases:
         assert hit.pct_from_ma60 == 0.0
         assert hit.ma60 == 1e-12
 
+    def test_gap_high_near_zero_pct_from_gap_high(self):
+        """gap_high within 1e-9 of zero → pct_from_gap_high=0.0, not huge division."""
+        gap = GapInfo(
+            gap_date="20250101",
+            gap_pct=1.5,
+            gap_low=10.0,
+            gap_high=1e-12,
+        )
+        n = 200
+        closes = [12.0] * n
+        ma60_list: list[float | None] = [None] * 59 + [12.0] * (n - 60)
+        amounts = [5e8] * n
+
+        hit = _build_scan_hit(
+            STOCK, gap, _GAP_IDX, closes, ma60_list, amounts, 5e8, 1.0,
+        )
+        assert hit.pct_from_gap_high == 0.0
+        assert hit.gap.gap_high == 1e-12
+
     def test_negative_local_avg_vol_ratio_zero(self):
         """Negative gap-local average → vol_ratio=0.0, fails vol filter."""
         amounts = np.full(200, 2e8)

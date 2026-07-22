@@ -447,8 +447,10 @@ def _apply_tushare_enrich(stocks: list[dict], trade_date: str) -> dict:
             close_v = p.get("close")
             if close_v is not None and close_v > 0:
                 s["close"] = close_v
-            if "amount" in p and p["amount"] is not None:
-                s["amount"] = p["amount"]
+            # 仅用有效正成交额覆盖 L1；None/0.0 不得覆盖 akshare 有效成交额
+            amount_v = p.get("amount")
+            if amount_v is not None and amount_v > 0:
+                s["amount"] = amount_v
             if "float_mkt_cap" in p and p["float_mkt_cap"] is not None:
                 s["float_mkt_cap"] = p["float_mkt_cap"]
             changed = True

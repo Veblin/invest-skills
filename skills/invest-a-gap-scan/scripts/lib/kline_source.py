@@ -133,7 +133,7 @@ class TushareBulkSource(KlineSource):
     ``pro.adj_factor(ts_code=…)`` per stock.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, skip_availability_check: bool = False) -> None:
         from lib import env  # noqa: F811
         from lib.tushare_client import DAILY_CALL_LIMIT, TushareClient  # noqa: F811
 
@@ -147,7 +147,7 @@ class TushareBulkSource(KlineSource):
             rate_limit_per_minute=180,
             daily_call_limit=daily_limit,
         )
-        if not self._client.is_available():
+        if not skip_availability_check and not self._client.is_available():
             logger.warning(
                 "TushareBulkSource: TushareClient reports unavailable — "
                 "queries will likely return empty DataFrames"
@@ -631,14 +631,15 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
         return BaostockSource(ts_codes=ts_codes or [])
 
     # auto: Tushare first, then baostock
-    # Check token without a separate probe client (Bulk constructs one)
     from lib import env  # noqa: F811
+    from lib.tushare_client import TushareClient  # noqa: F811
 
     config = env.get_config()
-    if config.get("TUSHARE_TOKEN"):
-        bulk = TushareBulkSource()
-        if bulk._client.is_available():
-            return bulk
+    token = config.get("TUSHARE_TOKEN")
+    if token:
+        with TushareClient(token=token) as client:
+            if client.is_available():
+                return TushareBulkSource(skip_availability_check=True)
 
     # Fall back to baostock
     try:

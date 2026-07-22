@@ -178,8 +178,8 @@ def enrich_price_data(
                     result[sym] = {
                         "close": close,
                         "pct_chg": pct_chg,
-                        # Tushare amount 单位：千元 → 元
-                        "amount": (amount * 1000) if amount is not None else 0.0,
+                        # Tushare amount 单位：千元 → 元；缺省用 None（勿用 0.0）
+                        "amount": (amount * 1000) if amount is not None else None,
                     }
 
             # 流通市值（万元）→ 元
@@ -199,7 +199,7 @@ def enrich_price_data(
                     if circ is None:
                         continue
                     entry = result.setdefault(
-                        sym, {"close": None, "pct_chg": None, "amount": 0.0},
+                        sym, {"close": None, "pct_chg": None, "amount": None},
                     )
                     entry["float_mkt_cap"] = circ * 1e4
 

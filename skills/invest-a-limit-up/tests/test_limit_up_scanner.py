@@ -698,7 +698,7 @@ class TestApplyTushareEnrich:
         """B1: Tushare close=0.0 must not clobber akshare L1 valid price."""
         from limit_up_scanner import _apply_tushare_enrich
 
-        stocks = [_make_stock("000001", "A", "X", close=12.5)]
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
         with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
              patch(
                  "limit_up_scanner.enrich_price_data",
@@ -707,13 +707,40 @@ class TestApplyTushareEnrich:
             info = _apply_tushare_enrich(stocks, "20260710")
         assert info["tushare"] is True
         assert stocks[0]["close"] == 12.5
-        assert stocks[0]["amount"] == 0.0
+        assert stocks[0]["amount"] == 5e8
         assert stocks[0]["float_mkt_cap"] == 1e9
+
+    def test_zero_amount_does_not_overwrite_l1(self):
+        """B3: Tushare amount=0.0 must not clobber akshare L1 valid 成交额."""
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": 0.0, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
+        assert stocks[0]["amount"] == 5e8
+
+    def test_none_amount_does_not_overwrite_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": None, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
+        assert stocks[0]["amount"] == 5e8
 
     def test_none_close_does_not_overwrite_l1(self):
         from limit_up_scanner import _apply_tushare_enrich
 
-        stocks = [_make_stock("000001", "A", "X", close=12.5)]
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
         with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
              patch(
                  "limit_up_scanner.enrich_price_data",
@@ -721,6 +748,19 @@ class TestApplyTushareEnrich:
              ):
             _apply_tushare_enrich(stocks, "20260710")
         assert stocks[0]["close"] == 12.5
+        assert stocks[0]["amount"] == 1e8
+
+    def test_valid_amount_overwrites_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": 1e8, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
         assert stocks[0]["amount"] == 1e8
 
     def test_valid_close_overwrites_l1(self):
@@ -823,6 +863,47 @@ class TestTushareEnrichGuards:
             assert out["600176"]["close"] is None
             assert out["600176"]["pct_chg"] == 9.9
             assert out["600176"]["amount"] == 1_000_000.0
+
+    def test_enrich_price_missing_amount_is_none_not_zero(self):
+        """B3: missing Tushare amount → None (not 0.0)."""
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "trade_date": "20260713",
+                        "close": 15.0, "pct_chg": 9.9, "amount": float("nan"),
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert out["600176"]["close"] == 15.0
+            assert out["600176"]["amount"] is None
+
+    def test_enrich_price_daily_basic_only_amount_none(self):
+        """B3: daily_basic-only enrich must not inject amount=0.0."""
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily_basic":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "circ_mv": 500000.0,
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert out["600176"]["float_mkt_cap"] == 5_000_000_000.0
+            assert out["600176"]["amount"] is None
 
 
 # ---- CLI filter resolution ----

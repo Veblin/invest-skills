@@ -22,6 +22,17 @@ def _stock_rows(n: int = 30, base: float = 10.0) -> list[dict]:
     return rows
 
 
+def test_compute_technical_stock_missing():
+    result = {
+        "asset_type": "stock",
+        "kline": {"status": "missing", "data": []},
+        "technical": {},
+    }
+    _compute_technical(result)
+    assert result["technical"]["status"] == "missing"
+    assert result["technical"]["kline_days"] == 0
+
+
 def test_compute_technical_stock_insufficient():
     result = {
         "asset_type": "stock",

@@ -324,7 +324,10 @@ def _compute_technical(result: dict) -> None:
         return
 
     # 个股：调 technical.compute(rows)
-    if not rows or not isinstance(rows, list) or len(rows) < 20:
+    if not rows or not isinstance(rows, list):
+        result["technical"]["status"] = "missing"
+        return
+    if len(rows) < 20:
         result["technical"]["status"] = "insufficient"
         return
 
@@ -440,7 +443,7 @@ def _percentile(value: float | None, population: list[float]) -> float | None:
     if value is None or not population:
         return None
     sorted_vals = sorted(population)
-    rank = sum(1 for x in sorted_vals if x < value)
+    rank = sum(1 for x in sorted_vals if x <= value)
     return round(rank / len(sorted_vals) * 100, 1)
 
 

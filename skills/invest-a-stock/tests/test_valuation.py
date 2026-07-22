@@ -214,3 +214,134 @@ class TestCalcRoeAnnualized:
         assert result["roe_cumulative"] == 8.0
         assert result["roe_annualized"] == 8.0
         assert result["end_date"] == ""
+
+
+class TestCalcOcfQuality:
+    """calc_ocf_quality: EPS/OCFPS 按 end_date 对齐，且要求连续 4 季 TTM。"""
+
+    @staticmethod
+    def _fin_rows_mismatched_quarters() -> list[dict]:
+        """5 期 EPS，最近一期缺 OCFPS；旧逻辑按位置取 last-4 会错位。"""
+        return [
+            {"end_date": "20230331", "eps": 1.0, "ocfps": 10.0},
+            {"end_date": "20230630", "eps": 3.0, "ocfps": 30.0},
+            {"end_date": "20230930", "eps": 6.0, "ocfps": 60.0},
+            {"end_date": "20231231", "eps": 10.0, "ocfps": 100.0},
+            {"end_date": "20240331", "eps": 5.0},  # 无 ocfps → 与 EPS 不匹配
+        ]
+
+    def test_aligns_eps_ocfps_by_end_date(self):
+        from valuation_calc import calc_ocf_quality
+
+        result = calc_ocf_quality(self._fin_rows_mismatched_quarters())
+        assert "error" not in result
+        # 匹配 20230331–20231231 四期：单季 EPS 1+2+3+4=10，OCFPS 10+20+30+40=100
+        assert result["ttm_eps"] == pytest.approx(10.0)
+        assert result["ttm_ocfps"] == pytest.approx(100.0)
+        assert result["ocf_np_ratio"] == pytest.approx(10.0)
+        assert result["end_date"] == "20231231"
+
+    def test_insufficient_matched_pairs(self):
+        from valuation_calc import calc_ocf_quality
+
+        rows = [
+            {"end_date": "20230331", "eps": 1.0, "ocfps": 10.0},
+            {"end_date": "20230630", "eps": 3.0},
+            {"end_date": "20230930", "eps": 6.0},
+            {"end_date": "20231231", "eps": 10.0},
+            {"end_date": "20240331", "eps": 5.0},
+        ]
+        result = calc_ocf_quality(rows)
+        assert result["ocf_np_ratio"] is None
+        assert "数据不足" in result["error"]
+        assert "匹配仅1期" in result["error"]
+
+    def test_gapped_matched_dates_rejected(self):
+        """匹配 last-4 非连续 → _latest_contiguous_ttm_dates 拒绝。"""
+        from valuation_calc import _latest_contiguous_ttm_dates
+
+        # 缺 20230930：任意 last-4 会跨断档
+        matched = ["20230331", "20230630", "20231231", "20240331"]
+        assert _latest_contiguous_ttm_dates(matched) is None
+
+    def test_contiguous_helper_prefers_newest_complete_window(self):
+        from valuation_calc import _latest_contiguous_ttm_dates
+
+        matched = [
+            "20220930", "20221231", "20230331", "20230630",
+            "20231231", "20240331",  # 缺 0930，无法从这两点回推满 4 季
+        ]
+        assert _latest_contiguous_ttm_dates(matched) == [
+            "20220930", "20221231", "20230331", "20230630",
+        ]
+
+    def test_falls_back_to_older_contiguous_window(self):
+        """最新锚点断档时，回退到更早的连续 4 季。"""
+        from valuation_calc import calc_ocf_quality
+
+        # 2022H1 仅作 20220930 单季差的累计底数；窗口为 2022Q3–2023Q2。
+        # 2023Q3 缺 ocfps → 2023Q4 无法做单季差；2024Q1 匹配但无法凑齐连续 4 季。
+        rows = [
+            {"end_date": "20220630", "eps": 2.0, "ocfps": 20.0},
+            {"end_date": "20220930", "eps": 3.0, "ocfps": 30.0},   # 单季 1 / 10
+            {"end_date": "20221231", "eps": 4.0, "ocfps": 40.0},   # 单季 1 / 10
+            {"end_date": "20230331", "eps": 1.0, "ocfps": 10.0},   # 单季 1 / 10
+            {"end_date": "20230630", "eps": 3.0, "ocfps": 30.0},   # 单季 2 / 20
+            {"end_date": "20230930", "eps": 6.0},                 # 无 ocfps → 断档
+            {"end_date": "20231231", "eps": 10.0, "ocfps": 100.0},  # 缺上期 ocf → 不进 ocf 单季
+            {"end_date": "20240331", "eps": 5.0, "ocfps": 50.0},
+        ]
+        result = calc_ocf_quality(rows)
+        assert "error" not in result
+        assert result["end_date"] == "20230630"
+        assert result["ttm_eps"] == pytest.approx(5.0)   # 1+1+1+2
+        assert result["ttm_ocfps"] == pytest.approx(50.0)  # 10+10+10+20
+        assert result["ocf_np_ratio"] == pytest.approx(10.0)
+
+    def test_prev_report_end_date_chain(self):
+        from valuation_calc import _prev_report_end_date
+
+        assert _prev_report_end_date("20240331") == "20231231"
+        assert _prev_report_end_date("20231231") == "20230930"
+        assert _prev_report_end_date("20230630") == "20230331"
+        assert _prev_report_end_date("bad") is None
+
+
+class TestCalcHistoricalPercentile:
+    """calc_historical_percentile: PE/PB 独立计算，不因一侧缺失丢弃另一侧。"""
+
+    def test_pe_only_when_pb_empty(self):
+        from valuation_calc import calc_historical_percentile
+
+        daily_rows = [
+            {"pe_ttm": 10.0, "pb": None},
+            {"pe_ttm": 20.0, "pb": None},
+            {"pe_ttm": 30.0, "pb": None},
+        ]
+        result = calc_historical_percentile(daily_rows)
+        assert "error" not in result
+        assert result["pe_current"] == 30.0
+        assert result["pe_pct"] == pytest.approx(66.7, abs=0.1)
+        assert result["pe_median"] == 20.0
+        assert "pb_current" not in result
+        assert "pb_pct" not in result
+
+    def test_error_only_when_both_empty(self):
+        from valuation_calc import calc_historical_percentile
+
+        assert calc_historical_percentile([])["error"] == "PE/PB 历史数据不足"
+        assert calc_historical_percentile([{"pe_ttm": None, "pb": None}])["error"] == "PE/PB 历史数据不足"
+
+    def test_pb_only_when_pe_empty(self):
+        from valuation_calc import calc_historical_percentile
+
+        daily_rows = [
+            {"pe_ttm": None, "pb": 1.0},
+            {"pe_ttm": None, "pb": 2.0},
+            {"pe_ttm": None, "pb": 3.0},
+        ]
+        result = calc_historical_percentile(daily_rows)
+        assert "error" not in result
+        assert result["pb_current"] == 3.0
+        assert result["pb_pct"] == pytest.approx(66.7, abs=0.1)
+        assert "pe_current" not in result

@@ -264,6 +264,9 @@ def update_journal(journal_id: int, updates: dict) -> bool:
         )
         c.commit()
         return cur.rowcount > 0
+    except Exception:
+        c.rollback()
+        raise
     finally:
         _safe_close(c)
 
@@ -318,6 +321,9 @@ def delete_journal(journal_id: int) -> bool:
         cur = c.execute("DELETE FROM trade_journals WHERE id=?", (journal_id,))
         c.commit()
         return cur.rowcount > 0
+    except Exception:
+        c.rollback()
+        raise
     finally:
         _safe_close(c)
 

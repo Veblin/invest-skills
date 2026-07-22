@@ -218,7 +218,7 @@ def _build_scan_hit(
     else:
         pct_from_ma60 = (current_price - ma60) / ma60 * 100.0
 
-    if gap.gap_high == 0:
+    if abs(gap.gap_high) < 1e-9:
         pct_from_gap_high = 0.0
     else:
         pct_from_gap_high = (current_price - gap.gap_high) / gap.gap_high * 100.0
