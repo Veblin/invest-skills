@@ -291,7 +291,9 @@ def _auto_flags(result: dict) -> None:
 
     pd_val = result.get("premium_discount")
     if pd_val is not None:
-        if pd_val > 2:
+        if not math.isfinite(pd_val):
+            flags.append("⚠️ 折溢价数据异常")
+        elif pd_val > 2:
             flags.append(f"⚠️ 溢价 {pd_val:.1f}%，买入成本偏高")
         elif pd_val < -2:
             flags.append(f"⚠️ 折价 {abs(pd_val):.1f}%，可能存在流动性或结构问题")

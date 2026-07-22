@@ -377,15 +377,12 @@ def _run_scan(
             # Batch adj_factor (tushare); baostock returns empty
             if not already_qfq:
                 adj_all = source.fetch_adj_factor_batch(trade_dates)
-                adj_factor_map = _split_adj_factor_map(
-                    adj_all, [s.ts_code for s in stocks],
-                )
                 # Restrict adj rows to universe when possible
                 if adj_all is not None and not adj_all.empty and "ts_code" in adj_all.columns:
                     adj_all = adj_all[adj_all["ts_code"].isin(universe_ts_codes)]
-                    adj_factor_map = _split_adj_factor_map(
-                        adj_all, [s.ts_code for s in stocks],
-                    )
+                adj_factor_map = _split_adj_factor_map(
+                    adj_all, [s.ts_code for s in stocks],
+                )
 
             daily_by_ts = group_daily_by_ts_code(daily_raw)
             for stock in cache_misses:
@@ -405,7 +402,7 @@ def _run_scan(
                         kline_cache.save(ts_code, kline, date_str=cache_date,
                                          source_name=source.source_name())
                     except Exception as exc:
-                        logger.debug("cache save failed for %s: %s", ts_code, exc)
+                        logger.warning("cache save failed for %s: %s", ts_code, exc)
 
         # Build daily_by_date from stock_kline_map when available — it
         # covers both cached and freshly-fetched stocks.  Fall back to

@@ -443,9 +443,10 @@ def _apply_tushare_enrich(stocks: list[dict], trade_date: str) -> dict:
             changed = True
         if sym in prices:
             p = prices[sym]
-            # #3: 用键存在判断，避免 close/amount=0 被真值判断丢弃
-            if "close" in p and p["close"] is not None:
-                s["close"] = p["close"]
+            # 仅用有效正价覆盖 L1；None/0.0/NaN 不得覆盖 akshare 有效价
+            close_v = p.get("close")
+            if close_v is not None and close_v > 0:
+                s["close"] = close_v
             if "amount" in p and p["amount"] is not None:
                 s["amount"] = p["amount"]
             if "float_mkt_cap" in p and p["float_mkt_cap"] is not None:
@@ -611,7 +612,10 @@ def _normalize_seal_time(raw: str) -> str:
         return digits.zfill(6)
     if len(digits) == 4:
         return digits + "00"
-    return digits
+    if len(digits) == 3:
+        # HMM → HHMMSS（"930" → "093000"），避免字典序把 "930" 排在 "100000" 之后
+        return digits.zfill(4) + "00"
+    return ""
 
 
 def _one_to_two_rate(

@@ -124,7 +124,7 @@ class TestParticipantBehaviorScan:
 
 class TestParticipantScanRenderIntegration:
     def test_full_report_includes_section(self):
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
         from lib.render import render_report_v3
 
         c = make_store_collection("600176")
@@ -138,7 +138,7 @@ class TestParticipantScanRenderIntegration:
         assert "近5日主力净额" in text
 
     def test_render_shows_moneyflow_when_only_net_sum_10d(self):
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
         from lib.render import render_report_v3
 
         c = make_store_collection("600176")
@@ -158,7 +158,7 @@ class TestParticipantScanRenderIntegration:
         assert "[数据源不可用，该因子跳过]" not in mf_rows[0]
 
     def test_brief_report_skips_section(self):
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
         from lib.render import render_report_v3
 
         c = make_store_collection("600176")

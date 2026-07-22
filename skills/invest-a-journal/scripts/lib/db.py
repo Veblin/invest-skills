@@ -219,6 +219,9 @@ def save_journal(entry: dict) -> int:
         )
         c.commit()
         return cur.lastrowid
+    except Exception:
+        c.rollback()
+        raise
     finally:
         _safe_close(c)
 

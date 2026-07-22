@@ -174,9 +174,10 @@ def enrich_price_data(
                     amount = safe_float(row.get("amount"))
                     if close is None and pct_chg is None and amount is None:
                         continue
+                    # close/pct_chg 缺省用 None（勿用 0.0），避免覆盖 akshare L1 有效价
                     result[sym] = {
-                        "close": close if close is not None else 0.0,
-                        "pct_chg": pct_chg if pct_chg is not None else 0.0,
+                        "close": close,
+                        "pct_chg": pct_chg,
                         # Tushare amount 单位：千元 → 元
                         "amount": (amount * 1000) if amount is not None else 0.0,
                     }
@@ -197,7 +198,9 @@ def enrich_price_data(
                     circ = safe_float(row.get("circ_mv"))
                     if circ is None:
                         continue
-                    entry = result.setdefault(sym, {"close": 0.0, "pct_chg": 0.0, "amount": 0.0})
+                    entry = result.setdefault(
+                        sym, {"close": None, "pct_chg": None, "amount": 0.0},
+                    )
                     entry["float_mkt_cap"] = circ * 1e4
 
         return result

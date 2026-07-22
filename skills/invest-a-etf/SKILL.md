@@ -1,6 +1,7 @@
 ---
+
 name: invest-a-etf
-version: "0.2.0"
+version: "0.2.1"
 description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。"
 argument-hint: "/invest-a-etf 563300 | /invest-a-etf 515790"
 allowed-tools: Bash, Read, Write, WebSearch
@@ -23,6 +24,8 @@ metadata:
 **研究工具，非决策工具。** 不做买卖/仓位建议。需要评估「我要买/卖这只 ETF 的方案」时，引导用户用 `/invest-a-journal`。
 
 本 Skill 是 **ETF 数据模块的 canonical 拥有者**。`invest-a-journal` 在 ETF 评估路径上复用同一模块（journal 侧为 thin shim）。
+
+运行时经 path bootstrap（`skills/lib/invest_path.py` → skill-local `_invest_path` shim）依赖 invest-a-stock 的 `lib.nums` / `lib.proxy` / `lib.technical`。
 
 ---
 

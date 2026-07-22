@@ -17,6 +17,7 @@ cp .env.example .env
 | Variable | Required | Purpose | Registration |
 |----------|----------|---------|--------------|
 | `TUSHARE_TOKEN` | 推荐 | Tushare Pro API（A股数据主力源） | [tushare.pro](https://tushare.pro) |
+| `TUSHARE_DAILY_CALL_LIMIT` | 可选 | 日调用上限；高积分账号 / gap-scan 批量可设 `5000` | 见 `.env.example` |
 | `FRED_API_KEY` | 可选 | FRED 美国宏观数据 | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `TAVILY_API_KEY` | 可选 | 新闻 Layer 3（`--with-news-pack`）；无 Key 时公告+查询包仍可用 | [tavily.com](https://tavily.com) |
 | `INVEST_A_FORCE_AKSHARE_EM` | 可选 | 强制尝试东方财富 akshare 接口（跳过 push2 可达性预检） | 设为 `1` / `true` / `yes` |

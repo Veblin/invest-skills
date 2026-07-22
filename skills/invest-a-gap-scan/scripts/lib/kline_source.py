@@ -631,19 +631,14 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
         return BaostockSource(ts_codes=ts_codes or [])
 
     # auto: Tushare first, then baostock
-    # Defer expensive import until needed
-    import lib.tushare_client as tc  # noqa: F811
-
-    from lib.tushare_client import TushareClient  # noqa: F811
-
-    # Check Tushare token without calling the API (avoid rate-limit noise)
+    # Check token without a separate probe client (Bulk constructs one)
     from lib import env  # noqa: F811
 
     config = env.get_config()
     if config.get("TUSHARE_TOKEN"):
-        with TushareClient(token=None) as test_client:
-            if test_client.is_available():
-                return TushareBulkSource()
+        bulk = TushareBulkSource()
+        if bulk._client.is_available():
+            return bulk
 
     # Fall back to baostock
     try:

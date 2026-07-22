@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from etf_data import (  # noqa: E402
+from etf_data import (
     ETF_HEDGE_MAP,
     _auto_flags,
     _em_to_premium_discount,
@@ -64,6 +58,14 @@ class TestAutoFlagsPremiumDiscount:
         r = _base(premium_discount=0.1)
         _auto_flags(r)
         assert not any("溢价" in f or "折价" in f for f in r["flags"])
+
+    def test_inf_nan_marked_abnormal(self):
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            r = _base(premium_discount=bad)
+            _auto_flags(r)
+            assert any("折溢价数据异常" in f for f in r["flags"])
+            assert not any("溢价" in f or "折价" in f for f in r["flags"]
+                           if "数据异常" not in f)
 
 
 class TestAutoFlagsAumAndHedge:

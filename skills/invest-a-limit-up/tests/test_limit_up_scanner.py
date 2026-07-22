@@ -3,13 +3,7 @@
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
 
 from limit_up_scanner import (
     filter_stocks,
@@ -27,15 +21,11 @@ from limit_up_scanner import (
     _fmt_date,
     _empty_breadth,
     _latest_market_cap,
+    _normalize_seal_time,
     _one_to_two_rate,
 )
-from lib.nums import safe_float  # noqa: E402  # via ensure_invest_a_scripts_on_path
-
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
-
-from scan import build_parser, resolve_cli_filter  # noqa: E402
+from lib.nums import safe_float  # via ensure_invest_a_scripts_on_path / conftest
+from scan import build_parser, resolve_cli_filter
 from tushare_enrich import (
     _get_client,
     _safe_str,
@@ -43,12 +33,7 @@ from tushare_enrich import (
     enrich_stock_info,
     get_trade_dates,
 )
-
-_SKILLS_LIB = Path(__file__).resolve().parents[2] / "lib"
-if str(_SKILLS_LIB) not in sys.path:
-    sys.path.insert(0, str(_SKILLS_LIB))
-
-from codes import market_label, symbol_to_ts_code  # noqa: E402
+from codes import market_label, symbol_to_ts_code
 
 
 # ---- Fixtures ----
@@ -709,10 +694,11 @@ class TestUtilities:
 
 class TestApplyTushareEnrich:
 
-    def test_keeps_zero_close(self):
+    def test_zero_close_does_not_overwrite_l1(self):
+        """B1: Tushare close=0.0 must not clobber akshare L1 valid price."""
         from limit_up_scanner import _apply_tushare_enrich
 
-        stocks = [_make_stock("000001", "A", "X")]
+        stocks = [_make_stock("000001", "A", "X", close=12.5)]
         with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
              patch(
                  "limit_up_scanner.enrich_price_data",
@@ -720,9 +706,34 @@ class TestApplyTushareEnrich:
              ):
             info = _apply_tushare_enrich(stocks, "20260710")
         assert info["tushare"] is True
-        assert stocks[0]["close"] == 0.0
+        assert stocks[0]["close"] == 12.5
         assert stocks[0]["amount"] == 0.0
         assert stocks[0]["float_mkt_cap"] == 1e9
+
+    def test_none_close_does_not_overwrite_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": None, "amount": 1e8, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 12.5
+        assert stocks[0]["amount"] == 1e8
+
+    def test_valid_close_overwrites_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": 1e8, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
 
 
 # ---- tushare_enrich helpers / H4-H7 ----
@@ -790,6 +801,28 @@ class TestTushareEnrichGuards:
             client.query.side_effect = _query
             out = enrich_price_data(["600176"], "20260713")
             assert "600176" not in out
+
+    def test_enrich_price_nan_close_keeps_none_when_amount_present(self):
+        """B1: NaN close → None (not 0.0) when other fields exist."""
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "trade_date": "20260713",
+                        "close": float("nan"), "pct_chg": 9.9, "amount": 1000.0,
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert out["600176"]["close"] is None
+            assert out["600176"]["pct_chg"] == 9.9
+            assert out["600176"]["amount"] == 1_000_000.0
 
 
 # ---- CLI filter resolution ----
@@ -919,3 +952,24 @@ class TestTushareEnrichDegradation:
         with patch("tushare_enrich._get_client", return_value=None):
             out = enrich_price_data(["600176", "000001"], "20260713")
         assert out == {}
+
+
+# ---- seal_time normalization (B4) ----
+
+
+class TestNormalizeSealTime:
+    """HHMMSS normalization for lexicographic seal-time compares."""
+
+    def test_hmm_three_digits(self):
+        assert _normalize_seal_time("930") == "093000"
+
+    def test_hhmm_four_digits(self):
+        assert _normalize_seal_time("0930") == "093000"
+
+    def test_colon_separated(self):
+        assert _normalize_seal_time("9:30:00") == "093000"
+
+    def test_short_garbage_empty(self):
+        assert _normalize_seal_time("9") == ""
+        assert _normalize_seal_time("ab") == ""
+        assert _normalize_seal_time("") == ""

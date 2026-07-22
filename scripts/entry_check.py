@@ -197,6 +197,8 @@ def _flow_score(symbol: str) -> tuple[int, dict]:
     """资金流向评分 (0-25)：描述净流入/流出状态。"""
     info = {}
     row = None
+    super_large_yi: float | None = None
+    large_yi: float | None = None
 
     # 当日资金流
     try:
@@ -211,8 +213,11 @@ def _flow_score(symbol: str) -> tuple[int, dict]:
             mid = float(r.get("中单净流入-净额", 0) or 0)
             small = float(r.get("小单净流入-净额", 0) or 0)
 
-            info["超大单"] = f"{super_large/1e8:+.2f}亿"
-            info["大单"] = f"{large/1e8:+.2f}亿"
+            # Keep raw 亿元 floats for scoring; format only for display
+            super_large_yi = super_large / 1e8
+            large_yi = large / 1e8
+            info["超大单"] = f"{super_large_yi:+.2f}亿"
+            info["大单"] = f"{large_yi:+.2f}亿"
             info["中单"] = f"{mid/1e8:+.2f}亿"
             info["小单"] = f"{small/1e8:+.2f}亿"
     except Exception:
@@ -220,12 +225,9 @@ def _flow_score(symbol: str) -> tuple[int, dict]:
 
     score = 15  # 中性起点
 
-    if "超大单" in info and "大单" in info:
-        super_large_val = float(info["超大单"].replace("亿", ""))
-        large_val = float(info["大单"].replace("亿", ""))
-
-        # 主力态度 = 超大单 + 大单方向
-        smart = super_large_val + large_val
+    if super_large_yi is not None and large_yi is not None:
+        # 主力态度 = 超大单 + 大单方向（亿元）
+        smart = super_large_yi + large_yi
         info["主力净额"] = f"{smart:+.2f}亿"
 
         if smart > 1:

@@ -7,16 +7,9 @@ and exclusion reasons.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
-
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
 
 from gap_scanner import GapInfo, _build_scan_hit, _check_unfilled, scan_all
 from skip_reasons import ExcludeReason, NonHitReason

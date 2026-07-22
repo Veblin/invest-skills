@@ -63,15 +63,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _cli_uses_full_filter(args: argparse.Namespace) -> bool:
+    """是否启用 full 质量过滤（显式 flag 或任一质量阈值参数）。"""
+    return bool(
+        args.quality_filter
+        or any(v is not None for v in (args.max_break, args.min_price, args.min_float_mkt_cap))
+    )
+
+
 def resolve_cli_filter(args: argparse.Namespace) -> dict | None:
     """根据 CLI 参数生成 quality_filter kwargs；无需筛选时返回 None。
 
     --include-st 仅修饰已启用的 full 模式，不单独触发质量过滤。
     """
-    use_full = (
-        args.quality_filter
-        or any(v is not None for v in (args.max_break, args.min_price, args.min_float_mkt_cap))
-    )
+    use_full = _cli_uses_full_filter(args)
     if not (use_full or args.sector or args.min_board > 0):
         return None
 
@@ -97,10 +102,7 @@ def main() -> int:
 
     result = scan_market(days=args.days)
 
-    use_full = (
-        args.quality_filter
-        or any(v is not None for v in (args.max_break, args.min_price, args.min_float_mkt_cap))
-    )
+    use_full = _cli_uses_full_filter(args)
     if use_full and not args.quality_filter:
         print(
             "ℹ️ 检测到质量过滤参数，已自动启用 --quality-filter",

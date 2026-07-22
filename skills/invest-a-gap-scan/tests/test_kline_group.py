@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pandas as pd
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from kline_source import build_stock_kline, group_daily_by_ts_code  # noqa: E402
+from kline_source import build_stock_kline, group_daily_by_ts_code
 
 
 def _daily_two_stocks() -> pd.DataFrame:

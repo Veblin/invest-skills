@@ -1,7 +1,8 @@
 ---
 
+
 name: invest-a-stock
-version: "0.2.0"
+version: "0.2.1"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
 argument-hint: "/invest-a-stock 600176 | /invest-a-stock 600176 --deep | /invest-a-stock 600176 --intent game_theory"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
@@ -35,7 +36,7 @@ metadata:
 
 **LAW 6** — 禁止买卖建议、仓位建议。允许多情景估值参考价（须假设前提+概率权重+免责声明）。禁止无假设的单一目标价。
 
-**LAW 6a** — **允许「交易结构分析」**（假设一致性检验）：
+**LAW 6a** — **允许「交易结构分析」**（假设一致性检验）；详见 [references/trade-structure.md](references/trade-structure.md)：
 - 基于多情景估值推导**入场区间**（标注锚定哪个情景 + 对应的假设前提 + 盈亏比）
 - 基于假设追踪输出**假设失效触发**（离场条件：假设被证伪时的重新评估触发）
 - **操作纪律**（研究流程规则，如"季报后 48 小时内 thesis --update"）

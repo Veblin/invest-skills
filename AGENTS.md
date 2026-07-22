@@ -139,7 +139,7 @@ Tavily → Bocha → WebSearch（Claude 内置）
 - [ ] `CHANGELOG.md` 已更新
 - [ ] `uv run pytest` 通过
 - [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
-- [ ] 无 API Key 或敏感信息泄露（security.yml CI 已验证）
+- [ ] 无 API Key 或敏感信息泄露（`validate.yml` Security scan 内联 secrets grep 已验证）
 
 ### 版本号规范
 

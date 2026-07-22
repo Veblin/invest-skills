@@ -1,7 +1,8 @@
 ---
 
+
 name: invest-a-limit-up
-version: "0.2.0"
+version: "0.2.1"
 description: "A股涨停板全市场扫描 + 交互式深挖 — 盘面宽度 / 板块轮动 / 涨停归因"
 argument-hint: "/invest-a-limit-up | /invest-a-limit-up --sector 半导体 | /invest-a-limit-up 600176 深挖"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch

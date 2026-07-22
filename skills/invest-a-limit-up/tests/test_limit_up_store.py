@@ -1,20 +1,13 @@
 """limit_up_store：涨停扫描持久化。"""
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-for p in (_LIB, _SCRIPTS):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-
-import limit_up_store as lus_mod  # noqa: E402
+import limit_up_store as lus_mod
 
 _SH = ZoneInfo("Asia/Shanghai")
 

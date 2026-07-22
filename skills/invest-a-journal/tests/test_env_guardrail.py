@@ -6,14 +6,8 @@ No network — synthetic snapshots only.
 from __future__ import annotations
 
 import copy
-import sys
-from pathlib import Path
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from market_microstructure import (  # noqa: E402
+from market_microstructure import (
     _compute_labels,
     _is_extreme_sentiment_up,
     apply_env_guardrail,
@@ -142,3 +136,17 @@ class TestDeleveragingLabel:
         }
         _compute_labels(snap)
         assert snap["label_sentiment"] == "极端亢奋"
+
+
+class TestMarketBreadth:
+    def test_ad_ratio_lt_0_6_triggers_breadth(self):
+        ev = apply_env_guardrail(_base_eval(), {"ad_ratio": 0.59, "lu_ld_ratio": 1.0})
+        rules = [b["rule"] for b in ev["blind_spots"]]
+        assert "market_breadth" in rules
+        note = next(b["note"] for b in ev["blind_spots"] if b["rule"] == "market_breadth")
+        assert "涨跌比" in note
+
+    def test_ad_ratio_eq_0_6_does_not_trigger(self):
+        ev = apply_env_guardrail(_base_eval(), {"ad_ratio": 0.6, "lu_ld_ratio": 1.0})
+        rules = [b["rule"] for b in ev["blind_spots"]]
+        assert "market_breadth" not in rules

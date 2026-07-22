@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import make_store_collection
+from stock_testutil import make_store_collection
 
 
 class TestDiffCollections:

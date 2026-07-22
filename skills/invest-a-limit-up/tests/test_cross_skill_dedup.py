@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
@@ -43,10 +42,7 @@ def test_invest_path_shim_imports_nums(skill_key: str) -> None:
 
 
 def test_yyyymmdd_to_iso() -> None:
-    """L-03: shared dates helper."""
-    skills_lib = str(_SKILLS / "lib")
-    if skills_lib not in sys.path:
-        sys.path.insert(0, skills_lib)
+    """L-03: shared dates helper (also covered by skills/lib/tests/test_dates.py)."""
     from dates import yyyymmdd_to_iso
 
     assert yyyymmdd_to_iso("20260713") == "2026-07-13"

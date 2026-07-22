@@ -87,7 +87,7 @@ def _like_contains(needle: str) -> str:
 
 
 def init_limit_up_db() -> None:
-    """建表（幂等）。store.py init_db() 也会调用此函数。"""
+    """建表（幂等）。由本模块在首次持久化时调用；store.py init_db() 不包含这些表。"""
     path_key = str(_get_path())
     if path_key in _initialized_paths:
         return

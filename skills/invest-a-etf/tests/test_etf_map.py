@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from etf_data import CSINDEX_MAP, ETF_HEDGE_MAP  # noqa: E402
+from etf_data import CSINDEX_MAP, ETF_HEDGE_MAP
 
 
 def test_159845_in_csindex_map():

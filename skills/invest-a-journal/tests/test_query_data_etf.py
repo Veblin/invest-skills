@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from query_data import _compute_technical, _summarize_quality  # noqa: E402
+from query_data import _compute_technical, _summarize_quality
 
 
 def _etf_result(*, kline: dict, etf_data: dict | None = None) -> dict:
@@ -34,6 +27,11 @@ class TestComputeTechnicalEtf:
 
     def test_zero_rows(self):
         result = _etf_result(kline={"status": "partial", "rows": 0, "data": []})
+        _compute_technical(result)
+        assert result["technical"]["status"] == "missing"
+
+    def test_available_status_but_zero_rows_is_missing(self):
+        result = _etf_result(kline={"status": "available", "rows": 0, "data": []})
         _compute_technical(result)
         assert result["technical"]["status"] == "missing"
 

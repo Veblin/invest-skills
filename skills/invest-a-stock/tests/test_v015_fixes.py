@@ -537,7 +537,7 @@ class TestBriefMode:
 
     def test_brief_mode_is_shorter_than_full(self):
         from lib.render import render_report_v3
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
 
         c = make_store_collection("600176")
         c["market_structure"] = {}
@@ -550,7 +550,7 @@ class TestBriefMode:
 
     def test_brief_mode_includes_risk_footer(self):
         from lib.render import render_report_v3
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
 
         c = make_store_collection("600176")
         c["market_structure"] = {}
@@ -562,7 +562,7 @@ class TestBriefMode:
 
     def test_brief_mode_skips_full_sections(self):
         from lib.render import render_report_v3
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
 
         c = make_store_collection("600176")
         c["market_structure"] = {}
@@ -580,7 +580,7 @@ class TestBriefMode:
 
     def test_full_mode_default(self):
         from lib.render import render_report_v3
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
 
         c = make_store_collection("600176")
         c["market_structure"] = {}
@@ -595,7 +595,7 @@ class TestConciseMode:
     """--mode concise：对话场景结论速览 + details 展开块。"""
 
     def _minimal(self) -> dict:
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
 
         c = make_store_collection("600176")
         c["market_structure"] = {}

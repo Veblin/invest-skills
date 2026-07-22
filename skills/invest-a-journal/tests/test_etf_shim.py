@@ -7,13 +7,8 @@ import sys
 from pathlib import Path
 
 _LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-_SKILLS_LIB = Path(__file__).resolve().parents[3] / "lib"
-for p in (_SKILLS_LIB,):
-    s = str(p)
-    if s not in sys.path:
-        sys.path.insert(0, s)
 
-from invest_path import invest_a_etf_lib_dir  # noqa: E402
+from invest_path import invest_a_etf_lib_dir  # noqa: E402  # skills/lib via conftest
 
 
 def _load_journal_shim():

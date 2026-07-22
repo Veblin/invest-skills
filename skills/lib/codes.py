@@ -58,7 +58,7 @@ def classify_board(ts_code: str, market: str = "") -> str:
     return "主板"
 
 
-def market_label(raw: str) -> str:
+def market_label(raw: str | None) -> str:
     """Map Tushare ``market`` field (numeric or Chinese) to a Chinese label."""
     text = str(raw or "").strip()
     if not text:
@@ -72,10 +72,5 @@ def market_label(raw: str) -> str:
         "2": "科创板",
         "3": "北交所",
         "4": "CDR",
-        "主板": "主板",
-        "创业板": "创业板",
-        "科创板": "科创板",
-        "北交所": "北交所",
-        "CDR": "CDR",
     }
-    return mapping.get(text, text if text else f"未知({raw})")
+    return mapping.get(text, f"未知({text})")

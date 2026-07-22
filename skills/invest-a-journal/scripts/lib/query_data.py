@@ -26,27 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 8 态数据质量枚举
-# ---------------------------------------------------------------------------
-
-DATA_QUALITY = {
-    "available": "数据正常获取",
-    "partial": "数据获取但部分缺失",
-    "degraded": "降级源获取（非主源）",
-    "stale": "数据滞后 >1 交易日",
-    "insufficient": "数据量不足（如 K 线 <20 日）",
-    "inconsistent": "跨源数据差异 >5%",
-    "not_applicable": "该维度不适用",
-    "missing": "所有数据源失败",
-}
-
-
-def _dq(key: str) -> str:
-    """简写：8 态 key → value。"""
-    return DATA_QUALITY.get(key, key)
-
-
-# ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
 
@@ -332,9 +311,11 @@ def _compute_technical(result: dict) -> None:
         result["technical"]["ma60"] = kline.get("ma60")
         rows_count = kline.get("rows", len(rows) if isinstance(rows, list) else 0)
         kline_status = kline.get("status", "missing")
-        if kline_status == "available":
+        if rows_count == 0:
+            result["technical"]["status"] = "missing"
+        elif kline_status == "available":
             result["technical"]["status"] = "available"
-        elif kline_status == "missing" or rows_count == 0:
+        elif kline_status == "missing":
             result["technical"]["status"] = "missing"
         elif rows_count < 20:
             result["technical"]["status"] = "insufficient"

@@ -70,3 +70,12 @@ class TestMarketLabel:
     def test_numeric(self):
         assert market_label("0") == "主板"
         assert market_label("1") == "创业板"
+
+    def test_empty_string(self):
+        assert market_label("") == "未知"
+
+    def test_none(self):
+        assert market_label(None) == "未知"
+
+    def test_unknown(self):
+        assert market_label("99") == "未知(99)"

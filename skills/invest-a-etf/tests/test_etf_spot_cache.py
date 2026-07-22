@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from etf_data import (  # noqa: E402
+from etf_data import (
     clear_etf_spot_cache,
     query_etf_data,
     query_etf_quote,

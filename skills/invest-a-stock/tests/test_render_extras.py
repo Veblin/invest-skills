@@ -239,7 +239,7 @@ class TestRenderReportV3StrictRigor:
     """brief/full 路径均从 _meta.strict_rigor 读取 strict 标志."""
 
     def test_brief_mode_passes_strict_rigor_from_meta(self):
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
         from lib.render import render_report_v3
 
         coll = make_store_collection("600176")
@@ -255,7 +255,7 @@ class TestRenderReportV3StrictRigor:
             assert kwargs.get("strict") is True
 
     def test_full_mode_passes_strict_rigor_from_meta(self):
-        from conftest import make_store_collection
+        from stock_testutil import make_store_collection
         from lib.render import render_report_v3
 
         coll = make_store_collection("600176")
