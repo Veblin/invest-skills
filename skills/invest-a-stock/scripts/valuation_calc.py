@@ -406,11 +406,49 @@ def calc_roe_annualized(fin_rows: list[dict]) -> dict[str, Any]:
     }
 
 
+def _prev_report_end_date(ed: str) -> str | None:
+    """季度报告期末 → 上一季度末（YYYYMMDD）。非法 mmdd 返回 None。"""
+    if len(ed) < 8:
+        return None
+    year, mmdd = int(ed[:4]), ed[4:8]
+    chain = {
+        "0331": (year - 1, "1231"),
+        "0630": (year, "0331"),
+        "0930": (year, "0630"),
+        "1231": (year, "0930"),
+    }
+    if mmdd not in chain:
+        return None
+    y, m = chain[mmdd]
+    return f"{y}{m}"
+
+
+def _latest_contiguous_ttm_dates(matched_dates: list[str]) -> list[str] | None:
+    """在已匹配的 end_date 中，找最近一段连续 4 个报告期（真 TTM）。
+
+    从最新匹配日往回要求上一季也在集合中；若最新锚点断档，再试更早的锚点。
+    """
+    matched_set = set(matched_dates)
+    for end in reversed(matched_dates):
+        window = [end]
+        cur = end
+        for _ in range(3):
+            prev = _prev_report_end_date(cur)
+            if prev is None or prev not in matched_set:
+                break
+            window.append(prev)
+            cur = prev
+        else:
+            window.reverse()
+            return window
+    return None
+
+
 def calc_ocf_quality(fin_rows: list[dict]) -> dict[str, Any]:
     """经营现金流 / 净利润 质量比。
 
     使用 fina_indicator 的 ocfps（每股经营现金流）和 eps（累计每股收益）。
-    用最近 4 个单季 ocfps 之和 / 最近 4 个单季 eps 之和。
+    用最近 **连续** 4 个单季 ocfps 之和 / 同窗 eps 之和（真 TTM，不允许断档季）。
     """
     if not fin_rows:
         return {"ocf_np_ratio": None, "error": "无数据"}
@@ -445,12 +483,26 @@ def calc_ocf_quality(fin_rows: list[dict]) -> dict[str, Any]:
                         "ocfps_standalone": round(ocfps_cum - prev_cum, 4),
                     })
 
-    # 对齐 eps 和 ocfps 的最近 4 期
-    eps_last4 = standalone_eps[-4:]
-    ocf_last4 = ocf_standalone[-4:] if len(ocf_standalone) >= 4 else ocf_standalone
+    # 对齐 eps/ocfps：交集后取最近一段连续 4 季（非任意 last-4）
+    eps_by_date = {q["end_date"]: q for q in standalone_eps}
+    ocf_by_date = {q["end_date"]: q for q in ocf_standalone}
+    matched_dates = sorted(set(eps_by_date) & set(ocf_by_date))
+    if len(matched_dates) < 4:
+        return {
+            "ocf_np_ratio": None,
+            "error": f"数据不足（EPS/OCFPS 匹配仅{len(matched_dates)}期）",
+        }
+    last4_dates = _latest_contiguous_ttm_dates(matched_dates)
+    if last4_dates is None:
+        return {
+            "ocf_np_ratio": None,
+            "error": "数据不足（无连续4个 EPS/OCFPS 匹配单季）",
+        }
+    eps_last4 = [eps_by_date[d] for d in last4_dates]
+    ocf_last4 = [ocf_by_date[d] for d in last4_dates]
 
     sum_eps = sum(q["eps_standalone"] for q in eps_last4)
-    sum_ocf = sum(q.get("ocfps_standalone", 0) for q in ocf_last4)
+    sum_ocf = sum(q["ocfps_standalone"] for q in ocf_last4)
 
     if sum_eps <= 0:
         return {"ocf_np_ratio": None, "error": "TTM EPS 非正，无法计算覆盖比"}
@@ -462,7 +514,7 @@ def calc_ocf_quality(fin_rows: list[dict]) -> dict[str, Any]:
         "ttm_eps": round(sum_eps, 4),
         "quality": "健康" if ratio >= 0.8 else ("偏低" if ratio >= 0.5 else "🔴 预警（<0.5）"),
         "end_date": eps_last4[-1]["end_date"] if eps_last4 else "?",
-        "note": "基于最近 4 个单季 EPS/OCFPS 之和计算（fina_indicator 累计→单季差→TTM）",
+        "note": "基于最近连续 4 个单季 EPS/OCFPS 之和（fina_indicator 累计→单季差→TTM）",
     }
 
 
@@ -490,7 +542,7 @@ def calc_historical_percentile(
         if pb_v is not None and pb_v > 0:
             pb_seq.append(pb_v)
 
-    if not pe_seq or not pb_seq:
+    if not pe_seq and not pb_seq:
         return {"error": "PE/PB 历史数据不足"}
 
     def _pct(seq: list[float], cur: float) -> float:
@@ -503,45 +555,45 @@ def calc_historical_percentile(
             return s[n // 2]
         return (s[n // 2 - 1] + s[n // 2]) / 2
 
-    current_pe = pe_seq[-1]
-    current_pb = pb_seq[-1]
-    pe_pct = _pct(pe_seq, current_pe)
-    pb_pct = _pct(pb_seq, current_pb)
-
-    n = len(pe_seq)
-    mu = sum(pe_seq) / n
-    sigma = math.sqrt(sum((v - mu) ** 2 for v in pe_seq) / n)
-
-    # 推断亏损期占比：每日一行但 PE 不可得，或直接估算
-    # 5 年约 1210 个交易日，实际返回行数可能因 Tushare 接口限制而偏少
     total_daily = len(daily_rows)
-    pe_neg_inferred = pe_none_count
-    pe_neg_pct = pe_neg_inferred / total_daily if total_daily > 0 else 0.0
+    result: dict[str, Any] = {"n_samples": total_daily, "warnings": []}
 
-    warnings = []
-    if pe_neg_pct > 0.3:
-        warnings.append(
-            f"PE 历史序列中约 {pe_neg_pct * 100:.0f}% 交易日 PE 不可得（通常为亏损期），"
-            f"PE 分位数仅作位置参考，不反映估值贵贱。PB 分位更有参考价值。"
-        )
+    if pe_seq:
+        current_pe = pe_seq[-1]
+        pe_pct = _pct(pe_seq, current_pe)
+        n = len(pe_seq)
+        mu = sum(pe_seq) / n
+        sigma = math.sqrt(sum((v - mu) ** 2 for v in pe_seq) / n)
+        pe_neg_inferred = pe_none_count
+        pe_neg_pct = pe_neg_inferred / total_daily if total_daily > 0 else 0.0
+        result.update({
+            "pe_valid": len(pe_seq),
+            "pe_none_or_neg": pe_neg_inferred,
+            "pe_neg_pct": round(pe_neg_pct, 4),
+            "pe_current": round(current_pe, 2),
+            "pe_pct": round(pe_pct, 1),
+            "pe_median": round(_median(pe_seq), 2),
+            "pe_mean": round(mu, 2),
+            "pe_sigma": round(sigma, 2) if sigma else None,
+            "pe_plus_1sigma": round(mu + sigma, 2) if sigma else None,
+            "pe_minus_1sigma": round(mu - sigma, 2) if sigma else None,
+        })
+        if pe_neg_pct > 0.3:
+            result["warnings"].append(
+                f"PE 历史序列中约 {pe_neg_pct * 100:.0f}% 交易日 PE 不可得（通常为亏损期），"
+                f"PE 分位数仅作位置参考，不反映估值贵贱。PB 分位更有参考价值。"
+            )
 
-    return {
-        "n_samples": total_daily,
-        "pe_valid": len(pe_seq),
-        "pe_none_or_neg": pe_neg_inferred,
-        "pe_neg_pct": round(pe_neg_pct, 4),
-        "pe_current": round(current_pe, 2),
-        "pe_pct": round(pe_pct, 1),
-        "pe_median": round(_median(pe_seq), 2),
-        "pe_mean": round(mu, 2),
-        "pe_sigma": round(sigma, 2) if sigma else None,
-        "pe_plus_1sigma": round(mu + sigma, 2) if sigma else None,
-        "pe_minus_1sigma": round(mu - sigma, 2) if sigma else None,
-        "pb_current": round(current_pb, 2),
-        "pb_pct": round(pb_pct, 1),
-        "pb_median": round(_median(pb_seq), 2),
-        "warnings": warnings,
-    }
+    if pb_seq:
+        current_pb = pb_seq[-1]
+        pb_pct = _pct(pb_seq, current_pb)
+        result.update({
+            "pb_current": round(current_pb, 2),
+            "pb_pct": round(pb_pct, 1),
+            "pb_median": round(_median(pb_seq), 2),
+        })
+
+    return result
 
 
 def implied_growth_detailed(

@@ -1,0 +1,1 @@
+../../skills/invest-a-gap-scan/SKILL.md

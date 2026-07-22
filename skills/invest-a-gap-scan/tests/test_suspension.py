@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from suspension import detect_suspensions, is_gap_across_suspension  # noqa: E402
+from suspension import detect_suspensions, is_gap_across_suspension
 
 
 # ---- Fixtures ----

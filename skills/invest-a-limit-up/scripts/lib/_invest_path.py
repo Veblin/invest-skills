@@ -1,24 +1,15 @@
-"""Shared path bootstrap for cross-skill import of invest-a-stock scripts."""
+"""Shim — re-exports shared skills/lib/invest_path (Batch D / X-02)."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+_skills_lib = Path(__file__).resolve().parent.parent.parent.parent / "lib"
+_s = str(_skills_lib)
+if _s not in sys.path:
+    sys.path.insert(0, _s)
 
-def invest_a_scripts_dir() -> Path:
-    """skills/invest-a-stock/scripts — resolved from this file under invest-a-limit-up/scripts/lib/."""
-    return (
-        Path(__file__).resolve().parent.parent.parent.parent
-        / "invest-a-stock"
-        / "scripts"
-    )
+from invest_path import ensure_invest_a_scripts_on_path
 
-
-def ensure_invest_a_scripts_on_path() -> Path:
-    """Insert invest-a-stock/scripts on sys.path (idempotent). Returns the path."""
-    scripts = invest_a_scripts_dir()
-    s = str(scripts)
-    if s not in sys.path:
-        sys.path.insert(0, s)
-    return scripts
+__all__ = ["ensure_invest_a_scripts_on_path"]

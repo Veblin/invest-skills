@@ -15,7 +15,9 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from codes import market_label, symbol_to_ts_code  # noqa: E402
 from lib import env  # noqa: E402
+from lib.nums import safe_float  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,7 @@ def enrich_stock_info(symbols: list[str]) -> dict[str, dict]:
     if not client:
         return {}
 
-    ts_codes = [c for c in (_to_ts_code(s) for s in symbols) if c]
+    ts_codes = [c for c in (symbol_to_ts_code(s) for s in symbols) if c]
     if not ts_codes:
         return {}
 
@@ -118,7 +120,7 @@ def enrich_stock_info(symbols: list[str]) -> dict[str, dict]:
                 result[sym] = {
                     "ts_code": ts_code,
                     "name": name,
-                    "market": _market_label(market_raw),
+                    "market": market_label(market_raw),
                     "market_code": market_raw,
                     "is_st": "ST" in name.upper(),
                     "list_date": _safe_str(row.get("list_date")),
@@ -144,7 +146,7 @@ def enrich_price_data(
     if not client:
         return {}
 
-    ts_codes = [c for c in (_to_ts_code(s) for s in symbols) if c]
+    ts_codes = [c for c in (symbol_to_ts_code(s) for s in symbols) if c]
     if not ts_codes:
         # H6: 全部转换失败时禁止发空 ts_code 请求
         return {}
@@ -167,16 +169,17 @@ def enrich_price_data(
                     if not ts_code:
                         continue
                     sym = ts_code.split(".")[0]
-                    close = _safe_float_or_none(row.get("close"))
-                    pct_chg = _safe_float_or_none(row.get("pct_chg"))
-                    amount = _safe_float_or_none(row.get("amount"))
+                    close = safe_float(row.get("close"))
+                    pct_chg = safe_float(row.get("pct_chg"))
+                    amount = safe_float(row.get("amount"))
                     if close is None and pct_chg is None and amount is None:
                         continue
+                    # close/pct_chg 缺省用 None（勿用 0.0），避免覆盖 akshare L1 有效价
                     result[sym] = {
-                        "close": close if close is not None else 0.0,
-                        "pct_chg": pct_chg if pct_chg is not None else 0.0,
-                        # Tushare amount 单位：千元 → 元
-                        "amount": (amount * 1000) if amount is not None else 0.0,
+                        "close": close,
+                        "pct_chg": pct_chg,
+                        # Tushare amount 单位：千元 → 元；缺省用 None（勿用 0.0）
+                        "amount": (amount * 1000) if amount is not None else None,
                     }
 
             # 流通市值（万元）→ 元
@@ -192,57 +195,18 @@ def enrich_price_data(
                     if not ts_code:
                         continue
                     sym = ts_code.split(".")[0]
-                    circ = _safe_float_or_none(row.get("circ_mv"))
+                    circ = safe_float(row.get("circ_mv"))
                     if circ is None:
                         continue
-                    entry = result.setdefault(sym, {"close": 0.0, "pct_chg": 0.0, "amount": 0.0})
+                    entry = result.setdefault(
+                        sym, {"close": None, "pct_chg": None, "amount": None},
+                    )
                     entry["float_mkt_cap"] = circ * 1e4
 
         return result
     except Exception as e:
         logger.warning("Tushare daily/daily_basic 失败: %s", e)
         return {}
-
-
-def _market_label(code: str) -> str:
-    """Tushare market 字段 → 中文标签（兼容数字码与中文）。"""
-    raw = str(code or "").strip()
-    if not raw:
-        return "未知"
-    # Pro API 通常直接返回中文
-    known_cn = {"主板", "创业板", "科创板", "北交所", "CDR"}
-    if raw in known_cn:
-        return raw
-    mapping = {
-        "0": "主板",
-        "1": "创业板",
-        "2": "科创板",
-        "3": "北交所",
-        "4": "CDR",
-        "主板": "主板",
-        "创业板": "创业板",
-        "科创板": "科创板",
-        "北交所": "北交所",
-        "CDR": "CDR",
-    }
-    return mapping.get(raw, raw if raw else f"未知({code})")
-
-
-def _to_ts_code(symbol: str) -> str:
-    """6 位数字代码 → Tushare ts_code（600176.SH / 300001.SZ）。非法输入返回空串。"""
-    s = str(symbol).strip()
-    if not s.isdigit():
-        return ""
-    s = s.zfill(6)
-    if len(s) != 6:
-        return ""
-    if s.startswith(("6", "9")):
-        return f"{s}.SH"
-    if s.startswith(("0", "2", "3")):
-        return f"{s}.SZ"
-    if s.startswith(("8", "4")):
-        return f"{s}.BJ"
-    return ""
 
 
 def _safe_str(val: Any) -> str:
@@ -259,17 +223,3 @@ def _safe_str(val: Any) -> str:
         return ""
     return text
 
-
-def _safe_float_or_none(val: Any) -> float | None:
-    """安全转 float；None/NaN/非法值返回 None（避免 nan 污染下游）。"""
-    if val is None:
-        return None
-    try:
-        if isinstance(val, float) and math.isnan(val):
-            return None
-        f = float(val)
-        if math.isnan(f):
-            return None
-        return f
-    except (TypeError, ValueError):
-        return None

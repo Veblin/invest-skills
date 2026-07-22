@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from conftest import FORBIDDEN_SIGNAL_WORDS
+from stock_testutil import FORBIDDEN_SIGNAL_WORDS
 from fixtures.collections import collection_v2_minimal, make_kline_rows
 
 

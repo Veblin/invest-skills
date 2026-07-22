@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import re
 from collections import Counter
 from datetime import datetime
@@ -20,7 +19,9 @@ from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
 ensure_invest_a_scripts_on_path()
 
+from dates import yyyymmdd_to_iso  # noqa: E402  # skills/lib (via _invest_path shim)
 from lib import env  # noqa: E402
+from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session, akshare_push2_available  # noqa: E402
 
 # tushare_enrich is in the same lib/ directory — scan.py already adds it to sys.path
@@ -442,11 +443,14 @@ def _apply_tushare_enrich(stocks: list[dict], trade_date: str) -> dict:
             changed = True
         if sym in prices:
             p = prices[sym]
-            # #3: 用键存在判断，避免 close/amount=0 被真值判断丢弃
-            if "close" in p and p["close"] is not None:
-                s["close"] = p["close"]
-            if "amount" in p and p["amount"] is not None:
-                s["amount"] = p["amount"]
+            # 仅用有效正价覆盖 L1；None/0.0/NaN 不得覆盖 akshare 有效价
+            close_v = p.get("close")
+            if close_v is not None and close_v > 0:
+                s["close"] = close_v
+            # 仅用有效正成交额覆盖 L1；None/0.0 不得覆盖 akshare 有效成交额
+            amount_v = p.get("amount")
+            if amount_v is not None and amount_v > 0:
+                s["amount"] = amount_v
             if "float_mkt_cap" in p and p["float_mkt_cap"] is not None:
                 s["float_mkt_cap"] = p["float_mkt_cap"]
             changed = True
@@ -525,11 +529,10 @@ def _merge_daily_results(
                     "name": name,
                     "appearances": [],
                     "sector": "",
-                    "flags": {"in_strong": False, "in_previous": False, "in_zbgc": False},
                 }
 
-            float_mcap = _nullable_float(r.get("流通市值"))
-            close = _nullable_float(r.get("最新价"))
+            float_mcap = safe_float(r.get("流通市值"))
+            close = safe_float(r.get("最新价"))
             in_strong = sym in aux.get("strong", set())
             in_previous = sym in aux.get("previous", set())
             in_zbgc = sym in aux.get("zbgc", set())
@@ -537,22 +540,18 @@ def _merge_daily_results(
                 "date": date,
                 "consecutive": _safe_int(r.get("连板数")),
                 "seal_time": str(r.get("首次封板时间", "")),
-                "seal_amount": _nullable_float(r.get("封板资金")),
+                "seal_amount": safe_float(r.get("封板资金")),
                 "break_count": _safe_int(r.get("炸板次数")),
-                "turnover": _nullable_float(r.get("换手率")),
-                "market_cap": _nullable_float(r.get("总市值")),
+                "turnover": safe_float(r.get("换手率")),
+                "market_cap": safe_float(r.get("总市值")),
                 "float_mkt_cap": float_mcap,
                 "close": close if close is not None and close > 0 else None,
-                "change_pct": _nullable_float(r.get("涨跌幅")),
+                "change_pct": safe_float(r.get("涨跌幅")),
                 "stat": str(r.get("涨停统计", "")),
                 "in_strong": in_strong,
                 "in_previous": in_previous,
                 "in_zbgc": in_zbgc,
             })
-            flags = by_symbol[sym]["flags"]
-            flags["in_strong"] = flags["in_strong"] or in_strong
-            flags["in_previous"] = flags["in_previous"] or in_previous
-            flags["in_zbgc"] = flags["in_zbgc"] or in_zbgc
             sector = str(r.get("所属行业", ""))
             if sector and not by_symbol[sym]["sector"]:
                 by_symbol[sym]["sector"] = sector
@@ -615,7 +614,10 @@ def _normalize_seal_time(raw: str) -> str:
         return digits.zfill(6)
     if len(digits) == 4:
         return digits + "00"
-    return digits
+    if len(digits) == 3:
+        # HMM → HHMMSS（"930" → "093000"），避免字典序把 "930" 排在 "100000" 之后
+        return digits.zfill(4) + "00"
+    return ""
 
 
 def _one_to_two_rate(
@@ -684,7 +686,7 @@ def _compute_seal_quality(
             stock_cap = s.get("float_mkt_cap")
             if stock_cap is not None and stock_cap > 0:
                 float_mcap = stock_cap
-        seal_amt = _nullable_float(latest.get("seal_amount"))
+        seal_amt = safe_float(latest.get("seal_amount"))
         if float_mcap is not None and float_mcap > 0 and seal_amt is not None and seal_amt > 0:
             flow_n += 1
             if seal_amt / float_mcap > 0.05:
@@ -801,39 +803,13 @@ def _latest_market_cap(stock: dict) -> float | None:
         return None
 
 
-def _safe_float(val: Any) -> float:
-    """Parse float; missing / NaN / invalid → 0.0 (for display-only fields)."""
-    if val is None:
-        return 0.0
-    try:
-        f = float(val)
-        if math.isnan(f):
-            return 0.0
-        return f
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _nullable_float(val: Any) -> float | None:
-    """Parse float; missing / NaN / invalid → None (preserves genuine 0.0)."""
-    if val is None:
-        return None
-    try:
-        f = float(val)
-        if math.isnan(f):
-            return None
-        return f
-    except (TypeError, ValueError):
-        return None
-
-
 def _safe_int(val: Any, default: int = 0) -> int:
     """Parse int safely; NaN / missing / invalid → default.
 
-    Uses _nullable_float first to avoid ``int(float('nan'))`` ValueError,
+    Uses safe_float first to avoid ``int(float('nan'))`` ValueError,
     since ``float('nan') or 0`` returns nan (NaN is truthy in Python).
     """
-    f = _nullable_float(val)
+    f = safe_float(val)
     if f is None:
         return default
     try:
@@ -843,13 +819,12 @@ def _safe_int(val: Any, default: int = 0) -> int:
 
 
 def _fmt_yi(val: Any) -> str:
-    v = _nullable_float(val)
+    v = safe_float(val)
     if v is None:
         return "-"
     return f"{v / 1e8:.1f}" if abs(v) > 1e-9 else "-"
 
 
 def _fmt_date(yyyymmdd: str) -> str:
-    if len(yyyymmdd) == 8:
-        return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
-    return yyyymmdd
+    """YYYYMMDD → ISO; thin wrapper over skills/lib/dates.yyyymmdd_to_iso."""
+    return yyyymmdd_to_iso(yyyymmdd)

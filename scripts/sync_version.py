@@ -24,6 +24,7 @@ from pathlib import Path
 
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 VERSION_PLACEHOLDER = "{{ VERSION }}"
+VERSION_PLACEHOLDER_TYPO = "{{VERSION}}"  # no spaces — reject so typo cannot silently pass
 
 JSON_TEMPLATES: tuple[tuple[str, str], ...] = (
     (".claude-plugin/plugin.json.in", ".claude-plugin/plugin.json"),
@@ -42,6 +43,8 @@ SKILL_TARGETS: tuple[SkillTarget, ...] = (
     SkillTarget("skills/invest-a-stock/SKILL.md", "invest:a-stock"),
     SkillTarget("skills/invest-a-limit-up/SKILL.md", "invest:a-limit-up"),
     SkillTarget("skills/invest-a-gap-scan/SKILL.md", "invest:a-gap-scan"),
+    SkillTarget("skills/invest-a-journal/SKILL.md", "invest:a-journal"),
+    SkillTarget("skills/invest-a-etf/SKILL.md", "invest:a-etf"),
 )
 
 
@@ -146,6 +149,17 @@ def write_skill_version(path: Path, version: str) -> bool:
 # ── JSON manifests ──────────────────────────────────────────
 
 
+def _validate_template_placeholder(content: str, tmpl_rel: str) -> None:
+    """Require ``{{ VERSION }}``; reject typo ``{{VERSION}}`` (no spaces)."""
+    if VERSION_PLACEHOLDER_TYPO in content:
+        raise ValueError(
+            f"template {tmpl_rel} has typo {VERSION_PLACEHOLDER_TYPO!r}; "
+            f"use {VERSION_PLACEHOLDER!r}"
+        )
+    if VERSION_PLACEHOLDER not in content:
+        raise ValueError(f"template {tmpl_rel} missing {VERSION_PLACEHOLDER!r}")
+
+
 def generate_json_manifests(root: Path, version: str) -> list[str]:
     """Return list of changed file labels."""
     written: list[str] = []
@@ -155,8 +169,7 @@ def generate_json_manifests(root: Path, version: str) -> list[str]:
         if not tmpl_path.is_file():
             raise FileNotFoundError(f"template not found: {tmpl_path}")
         content = tmpl_path.read_text(encoding="utf-8")
-        if VERSION_PLACEHOLDER not in content:
-            raise ValueError(f"template {tmpl_rel} missing {VERSION_PLACEHOLDER!r}")
+        _validate_template_placeholder(content, tmpl_rel)
         generated = content.replace(VERSION_PLACEHOLDER, version)
         if out_path.is_file() and out_path.read_text(encoding="utf-8") == generated:
             continue
@@ -174,12 +187,16 @@ def check_json_manifests(root: Path, version: str) -> list[str]:
         if not tmpl_path.is_file():
             drifts.append(f"  {tmpl_rel}: template missing")
             continue
+        content = tmpl_path.read_text(encoding="utf-8")
+        try:
+            _validate_template_placeholder(content, tmpl_rel)
+        except ValueError as exc:
+            drifts.append(f"  {exc}")
+            continue
         if not out_path.is_file():
             drifts.append(f"  {out_rel}: missing (run sync_version.py sync)")
             continue
-        expected = tmpl_path.read_text(encoding="utf-8").replace(
-            VERSION_PLACEHOLDER, version
-        )
+        expected = content.replace(VERSION_PLACEHOLDER, version)
         if out_path.read_text(encoding="utf-8") != expected:
             drifts.append(f"  {out_rel}: drift detected")
     return drifts
@@ -280,12 +297,30 @@ def cmd_sync(root: Path) -> int:
               file=sys.stderr)
         return 1
 
-    changed = _do_sync(root, version)
-    if changed:
-        print(f"\n✅ {changed} file(s) synced from pyproject.toml ({version})")
-    else:
-        print(f"\n✅ all files up-to-date with pyproject.toml ({version})")
-    return 0
+    # Backup derived files sync may rewrite (not pyproject.toml) for rollback
+    backups: dict[Path, str | None] = {}
+    for path in _derived_paths(root):
+        if path == root / "pyproject.toml":
+            continue
+        backups[path] = path.read_text(encoding="utf-8") if path.is_file() else None
+
+    try:
+        changed = _do_sync(root, version)
+        if changed:
+            print(f"\n✅ {changed} file(s) synced from pyproject.toml ({version})")
+        else:
+            print(f"\n✅ all files up-to-date with pyproject.toml ({version})")
+        return 0
+    except Exception as exc:
+        for path, content in backups.items():
+            if content is None:
+                if path.is_file():
+                    path.unlink()
+            else:
+                path.write_text(content, encoding="utf-8")
+        print(f"❌ sync failed: {exc}", file=sys.stderr)
+        print("  ↻ all derived files restored", file=sys.stderr)
+        return 1
 
 
 def cmd_check(root: Path) -> int:

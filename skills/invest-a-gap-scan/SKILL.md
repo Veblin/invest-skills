@@ -1,7 +1,8 @@
 ---
 
+
 name: invest-a-gap-scan
-version: "0.2.0"
+version: "0.2.1"
 description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）"
 argument-hint: "/invest-a-gap-scan [--gap-min-pct 1.5] [--gap-min-vol-ratio 1.5]"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
@@ -129,7 +130,7 @@ for gap in qualified_gaps (newest first):
 
 ### MA60 计算
 
-使用 invest-a-stock 的 `lib.technical._sma`（60 日简单移动平均）。前 59 个位置 MA60 为 None，`_check_ma60_streak` 跳过 None 值。NaN close 触发 MA60 失败（利用 `not (NaN >= MA60)` 恒为 True 的特性）。
+使用 invest-a-stock 的 `lib.technical.sma`（60 日简单移动平均）。前 59 个位置 MA60 为 None，`_check_ma60_streak` 跳过 None 值。NaN close 触发 MA60 失败（利用 `not (NaN >= MA60)` 恒为 True 的特性）。
 
 ### 前复权 (QFQ)
 
@@ -184,7 +185,7 @@ for gap in qualified_gaps (newest first):
 
 ```
 ========================================================================
-  invest-a-gap-scan v0.2.0 -- 跳空缺口扫描
+  invest-a-gap-scan v0.2.1 -- 跳空缺口扫描
 ========================================================================
 池构成: 沪深300(300) + 中证A500(500) + 科创50(50) -> 去重 478 只
 数据源: baostock (前复权 adjustflag=2) (前复权)
@@ -286,7 +287,7 @@ auto:
 
 ## 联动
 
-对命中的标的，接 `/invest:a-stock {symbol}` 做深度基本面研究。
+对命中的标的，接 `/invest-a-stock {symbol}` 做深度基本面研究。
 
 ## 合规
 

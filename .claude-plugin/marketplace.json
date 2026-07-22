@@ -11,7 +11,7 @@
     {
       "name": "invest:a-stock",
       "description": "A股个股调研学习工具。覆盖基本信息、财务报告、行业产业链、估值/市场状态、机构分析师、情绪舆情、宏观政策七大维度，每条分析论述引用数据来源，区分事实陈述与分析判断。学习工具，非决策工具。",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "Veblin",
         "url": "https://github.com/Veblin"
@@ -24,7 +24,7 @@
     {
       "name": "invest:a-limit-up",
       "description": "A股涨停板全市场扫描+交互式深挖。盘面宽度/板块轮动/涨停归因，支持质量过滤与交互筛选。学习工具，非决策工具。",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": {
         "name": "Veblin",
         "url": "https://github.com/Veblin"
@@ -33,6 +33,45 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "stock-analysis", "china-stock", "limit-up", "market-scan", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-gap-scan",
+      "description": "A股跳空缺口扫描。向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）。学习工具，非决策工具。",
+      "version": "0.2.1",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "stock-analysis", "china-stock", "gap-scan", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-journal",
+      "description": "交易日志 v2。Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。学习工具，非决策工具。",
+      "version": "0.2.1",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "trading-journal", "china-stock", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-etf",
+      "description": "A股 ETF 结构化研究。指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。学习工具，非决策工具。",
+      "version": "0.2.1",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "etf", "china-stock", "a-share", "claude-code", "learning"]
     }
   ]
 }

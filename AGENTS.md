@@ -139,7 +139,7 @@ Tavily → Bocha → WebSearch（Claude 内置）
 - [ ] `CHANGELOG.md` 已更新
 - [ ] `uv run pytest` 通过
 - [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
-- [ ] 无 API Key 或敏感信息泄露（security.yml CI 已验证）
+- [ ] 无 API Key 或敏感信息泄露（`validate.yml` Security scan 内联 secrets grep 已验证）
 
 ### 版本号规范
 
@@ -170,7 +170,7 @@ code/
   .env.example                  ← 环境变量模板
   pyproject.toml                ← uv 依赖管理
   skills/
-    invest-a-stock/              ← 个股深度研究（invest:a-stock）
+    invest-a-stock/              ← 个股深度研究（slash: /invest-a-stock）
       SKILL.md                    ← 运行时规格（LAWs + 工作流 + 专业知识）
       scripts/
         invest.py                 ← CLI 单入口
@@ -182,11 +182,10 @@ code/
           env.py                  ← 集中配置管理
       tests/                      ← pytest 测试
       references/                 ← 数据源参考文档
-    invest-a-limit-up/          ← 涨停板扫描（invest:a-limit-up）
-      SKILL.md
-      scripts/
-        scan.py                   ← 全市场扫描 CLI
-        lib/                      ← limit_up_scanner / tushare_enrich
+    invest-a-etf/               ← ETF 研究（slash: /invest-a-etf；数据层供 journal 共用）
+    invest-a-journal/           ← 交易方案评估（slash: /invest-a-journal）
+    invest-a-limit-up/          ← 涨停板扫描（slash: /invest-a-limit-up）
+    invest-a-gap-scan/          ← 跳空缺口扫描（slash: /invest-a-gap-scan）
   .claude-plugin/               ← Claude Code 插件注册
   .agents/                      ← Agent Skills 通用注册
   .github/                      ← CI/workflows/issue templates

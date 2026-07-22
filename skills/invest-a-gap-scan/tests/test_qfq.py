@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from qfq import PRICE_COLS, apply_qfq  # noqa: E402
+from qfq import PRICE_COLS, apply_qfq
 
 
 # ---- Helpers ----
@@ -194,6 +187,62 @@ class TestApplyQfqEdgeCases:
             close_prices=[10.0, 12.0],
         )
         adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, 0.0])
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_near_zero_latest_adj_factor_returns_none(self):
+        """Near-zero latest adj_factor (1e-15) must hard-reject, not explode prices."""
+        daily = _make_daily(
+            dates=["20260710", "20260711"],
+            close_prices=[10.0, 12.0],
+        )
+        adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, 1e-15])
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_negative_latest_adj_factor_returns_none(self):
+        """Negative latest adj_factor → None."""
+        daily = _make_daily(
+            dates=["20260710", "20260711"],
+            close_prices=[10.0, 12.0],
+        )
+        adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, -1.0])
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_near_zero_row_adj_factor_returns_none(self):
+        """Any row-level near-zero adj_factor → whole-stock reject."""
+        daily = _make_daily(
+            dates=["20260710", "20260711", "20260712"],
+            close_prices=[10.0, 12.0, 15.0],
+        )
+        adj = _make_adj(
+            dates=["20260710", "20260711", "20260712"],
+            factors=[1e-15, 1.1, 1.0],
+        )
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_negative_row_adj_factor_returns_none(self):
+        """Any row-level negative adj_factor → whole-stock reject."""
+        daily = _make_daily(
+            dates=["20260710", "20260711", "20260712"],
+            close_prices=[10.0, 12.0, 15.0],
+        )
+        adj = _make_adj(
+            dates=["20260710", "20260711", "20260712"],
+            factors=[-0.5, 1.1, 1.0],
+        )
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_inf_adj_factor_returns_none(self):
+        """Non-finite (inf) adj_factor → None."""
+        daily = _make_daily(
+            dates=["20260710", "20260711"],
+            close_prices=[10.0, 12.0],
+        )
+        adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, float("inf")])
         result = apply_qfq(daily, adj)
         assert result is None
 

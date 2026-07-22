@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import FORBIDDEN_SIGNAL_WORDS
+from stock_testutil import FORBIDDEN_SIGNAL_WORDS
 from fixtures.collections import (
     collection_kline_insufficient,
     collection_v2_minimal,

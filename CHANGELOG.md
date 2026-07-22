@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## v0.2.1 (2026-07-23)
+
+v0.2.1 扩展多 Skill 组合：新增 ETF 研究与交易日志评估，补齐跳空缺口扫描；统一用户 slash 为连字符；并收敛一批估值/涨停/数据源正确性修复。
+
+### Slash 与 Skill 入口
+
+- **用户 slash 一律连字符**：`/invest-a-stock`、`/invest-a-etf`、`/invest-a-journal` 等；`.claude/commands/` 文件名改为 `invest-a-*.md`（放弃 `/invest:a-*` 用户入口）
+- 插件 marketplace **包名**仍可使用 `invest:a-*`（与 slash 分层）
+
+### invest-a-etf（新 Skill）
+
+- 新增 ETF 独立研究 Skill：指数估值 / 折溢价 / AUM / 跟踪质量 / 对冲覆盖 → 结构化备忘录
+- CLI：`uv run python skills/invest-a-etf/scripts/etf.py report|diagnose`
+- `etf_data.py` + `etf-hedge-map.md` 自 journal 迁出为本 Skill canonical；journal 经 thin shim 复用
+
+### invest-a-journal
+
+- ETF 评估路径改为调用 invest-a-etf 共用模块；深研引导 `/invest-a-etf {代码}`
+
 ### 报告精简
 
 - 移除报告头部冗余段落：AI 偏见声明、逆向思考、Ichimoku/波动率锥、AI 置信度矩阵
@@ -38,6 +57,13 @@
 - 修复 collector 业绩预告 "None%" 渲染（`p_min`/`p_max` 为 None 时省略同比）
 - 修复 `cmd_report` HTML 路径缺少 `_ensure_render_ready()`
 - 修复 `schema._extract_scalar` 按维度选字段时 quote/northbound 零值与无 dimension 回退路径回归（`change_pct`/`net_mf_vol` 提取失败导致融合与交叉验证跳过）
+
+- **估值 OCF/EPS TTM**：按 `end_date` 对齐，且要求连续 4 个报告期（断档不冒充 TTM）
+- **PE/PB 历史分位**：两侧独立计算，一侧缺失不再整段丢弃
+- **涨停 Tushare enrich**：`amount`/`close` 为 None/0 时不得覆盖 akshare L1 有效值
+- **gap-scan `create_source`**：短生命周期探活一次，避免双探活与失败路径 session 泄漏
+- **journal**：`_percentile` 用 `<=`；个股空 K 线 → `missing`；`update`/`delete` 写路径补 `rollback`
+- **gap-scan**：`gap_high` 近零容差与 MA60 一致，避免百分比爆炸
 
 ### Emoji 统一
 

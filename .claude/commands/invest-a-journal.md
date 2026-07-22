@@ -1,0 +1,1 @@
+../../skills/invest-a-journal/SKILL.md

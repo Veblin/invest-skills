@@ -129,4 +129,4 @@ Claude 内简报聚焦：
 1. F-3 触发状态（硬/软/无）
 2. 12 题核心矛盾（数据不足项列出）
 3. 六关评分极端值 + 下一验证节点
-4. 详细表格写入 `reports/{symbol}-{name}/{date}.md`
+4. 详细表格写入 `reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`

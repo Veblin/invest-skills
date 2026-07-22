@@ -487,9 +487,10 @@ class TestAttachEventsIntegration:
     @patch("lib.events._fetch_shareholder_events")
     def test_attach_events_partial_source_failure(self, mock_shareholder, mock_dividend, mock_notice):
         """单源失败不应影响其他源的正常数据。"""
+        d_recent = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
         mock_notice.return_value = [
             {
-                "date": "2026-06-20",
+                "date": d_recent,
                 "type": "buyback",
                 "title": "回购公告",
                 "impact_dimension": "估值",

@@ -17,7 +17,7 @@ body:
     attributes:
       label: CLI 参数
       description: 使用了哪些参数？(如 --deep, --compare)
-      placeholder: "/invest:a-stock 600519 --with-macro"
+      placeholder: "/invest-a-stock 600519 --with-macro"
   - type: textarea
     id: expected
     attributes:

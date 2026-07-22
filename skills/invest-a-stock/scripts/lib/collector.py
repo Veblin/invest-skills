@@ -53,13 +53,8 @@ def _days_ago(n: int) -> str:
     return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
-def _to_iso_date(yyyymmdd: str) -> str:
-    """YYYYMMDD → YYYY-MM-DD；非 8 位数字则原样返回。"""
-    s = yyyymmdd.strip()
-    if len(s) == 8 and s.isdigit():
-        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    return s
-
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+from .shared_codes import exchange_code as _exchange_code  # noqa: E402
 
 _fred_date = _to_iso_date  # 向后兼容
 
@@ -87,26 +82,6 @@ def _latest_quarter_end() -> str:
 
 
 # ---- 交易所代码转换（共享函数，三种格式统一调度） ----
-
-def _exchange_code(symbol: str) -> dict[str, str]:
-    """根据股票代码前缀返回各 API 格式的交易所代码。
-
-    返回 dict:
-      tushare: "600176.SH"
-      baostock: "sh.600176"
-      akshare: "sh600176"
-
-    上海: 6xxx, 9xxx
-    北京: 4xxx, 8xxx
-    深圳: 0xxx, 2xxx, 3xxx
-    """
-    s = symbol.strip().zfill(6)
-    if s.startswith(("6", "9")):
-        return {"tushare": f"{s}.SH", "baostock": f"sh.{s}", "akshare": f"sh{s}"}
-    if s.startswith(("4", "8")):
-        return {"tushare": f"{s}.BJ", "baostock": f"bj.{s}", "akshare": f"bj{s}"}
-    return {"tushare": f"{s}.SZ", "baostock": f"sz.{s}", "akshare": f"sz{s}"}
-
 
 def _ts_code(symbol: str) -> str:
     """转为 Tushare 格式：600176 → 600176.SH（委托 _exchange_code）。"""

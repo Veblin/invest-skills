@@ -7,18 +7,11 @@ and exclusion reasons.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
 
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
-
-from gap_scanner import scan_all
+from gap_scanner import GapInfo, _build_scan_hit, _check_unfilled, scan_all
 from skip_reasons import ExcludeReason, NonHitReason
 
 
@@ -368,6 +361,33 @@ class TestNonHitReasons:
         assert result.non_hit_reasons[NonHitReason.GAP_FILLED] == 1
         assert len(result.hits) == 0
 
+    def test_touching_gap_high_counts_as_filled(self):
+        """low == gap_high is filled per SKILL (strict > for unfilled)."""
+        assert _check_unfilled([10.0, 11.0, 11.0], gap_idx=1, gap_high=11.0) is False
+        assert _check_unfilled([10.0, 11.0, 11.01], gap_idx=1, gap_high=11.0) is True
+
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX)
+        gap_high = float(kline.iloc[_GAP_IDX]["low_qfq"])
+        touch_idx = _GAP_IDX + 10
+        kline.loc[touch_idx, "low_qfq"] = gap_high
+        # Keep close above MA60 so only fill reason triggers
+        kline.loc[touch_idx, "close_qfq"] = max(
+            float(kline.loc[touch_idx, "close_qfq"]), gap_high * 1.02
+        )
+        kline.loc[touch_idx, "high_qfq"] = max(
+            float(kline.loc[touch_idx, "high_qfq"]),
+            float(kline.loc[touch_idx, "close_qfq"]) * 1.01,
+        )
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+        )
+        assert result.non_hit_reasons[NonHitReason.GAP_FILLED] == 1
+        assert len(result.hits) == 0
+
     def test_vol_ratio_low(self):
         """Gap-day volume ratio below gap_min_vol_ratio -> VOL_RATIO_LOW."""
         amounts = np.full(200, 2e8)  # flat amount, ratio=1.0
@@ -383,6 +403,22 @@ class TestNonHitReasons:
         # Gap qualifies, MA60 passes, unfilled, but vol_ratio=1.0 < 1.5
         assert result.non_hit_reasons[NonHitReason.VOL_RATIO_LOW] == 1
         assert len(result.hits) == 0
+
+    def test_vol_ratio_default_fp_noise_no_filter(self):
+        """gap_min_vol_ratio within 1e-9 of 1.0 is treated as no filter (isclose)."""
+        amounts = np.full(200, 2e8)  # flat → vol_ratio ≈ 1.0
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, amounts=amounts)
+        # FP noise that would falsely trip `!= 1.0` but is within abs_tol=1e-9
+        params = {**DEFAULT_PARAMS, "gap_min_vol_ratio": 1.0 + 1e-15}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert len(result.hits) == 1
+        assert result.non_hit_reasons.get(NonHitReason.VOL_RATIO_LOW, 0) == 0
 
 
 class TestHits:
@@ -567,6 +603,82 @@ class TestAcrossSuspension:
         assert len(result.hits) == 0
         assert len(result.across_suspension_hits) == 0
         assert result.non_hit_reasons[NonHitReason.VOL_RATIO_LOW] == 1
+
+
+class TestEdgeCases:
+    """Near-zero MA60 and invalid vol_ratio baselines."""
+
+    def test_ma60_near_zero_pct_from_ma60(self):
+        """MA60 within 1e-9 of zero → pct_from_ma60=0.0, not huge division."""
+        gap = GapInfo(
+            gap_date="20250101",
+            gap_pct=1.5,
+            gap_low=10.0,
+            gap_high=10.15,
+        )
+        n = 200
+        closes = [12.0] * n
+        ma60_list: list[float | None] = [None] * 59 + [12.0] * (n - 60)
+        ma60_list[-1] = 1e-12
+        amounts = [5e8] * n
+
+        hit = _build_scan_hit(
+            STOCK, gap, _GAP_IDX, closes, ma60_list, amounts, 5e8, 1.0,
+        )
+        assert hit.pct_from_ma60 == 0.0
+        assert hit.ma60 == 1e-12
+
+    def test_gap_high_near_zero_pct_from_gap_high(self):
+        """gap_high within 1e-9 of zero → pct_from_gap_high=0.0, not huge division."""
+        gap = GapInfo(
+            gap_date="20250101",
+            gap_pct=1.5,
+            gap_low=10.0,
+            gap_high=1e-12,
+        )
+        n = 200
+        closes = [12.0] * n
+        ma60_list: list[float | None] = [None] * 59 + [12.0] * (n - 60)
+        amounts = [5e8] * n
+
+        hit = _build_scan_hit(
+            STOCK, gap, _GAP_IDX, closes, ma60_list, amounts, 5e8, 1.0,
+        )
+        assert hit.pct_from_gap_high == 0.0
+        assert hit.gap.gap_high == 1e-12
+
+    def test_negative_local_avg_vol_ratio_zero(self):
+        """Negative gap-local average → vol_ratio=0.0, fails vol filter."""
+        amounts = np.full(200, 2e8)
+        # Pre-gap window for idx 150 is [130, 150) — make average negative
+        amounts[130:150] = -1e8
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, amounts=amounts)
+        params = {**DEFAULT_PARAMS, "gap_min_vol_ratio": 1.5}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert result.non_hit_reasons[NonHitReason.VOL_RATIO_LOW] == 1
+        assert len(result.hits) == 0
+
+    def test_near_zero_local_avg_vol_ratio_zero(self):
+        """Gap-local average near zero → vol_ratio=0.0, fails vol filter."""
+        amounts = np.full(200, 2e8)
+        amounts[130:150] = 1e-15
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, amounts=amounts)
+        params = {**DEFAULT_PARAMS, "gap_min_vol_ratio": 1.5}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert result.non_hit_reasons[NonHitReason.VOL_RATIO_LOW] == 1
+        assert len(result.hits) == 0
 
 
 class TestScanResultStructure:

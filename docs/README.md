@@ -1,6 +1,8 @@
-# invest:a-stock 文档
+# invest-skills 文档
 
 面向使用者和贡献者的**精简文档索引**。详细运行时规格见仓库根目录与各 Skill 文件。
+
+> **命名**：用户 slash 一律 `/invest-a-*`（连字符）。Claude 插件 marketplace 包名可为 `invest:a-*`（冒号），二者分层。
 
 ---
 
@@ -14,7 +16,7 @@
 | [CONTRIBUTORS.md](../CONTRIBUTORS.md) | 贡献指南 |
 | [AGENTS.md](../AGENTS.md) | AI 协作规则与设计约束 |
 
-## invest:a-stock 运行时规格
+## invest-a-stock 运行时规格
 
 | 文档 | 内容 |
 |------|------|

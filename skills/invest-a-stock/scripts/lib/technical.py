@@ -27,7 +27,7 @@ def _require_len(rows: list[dict], n: int, indicator: str) -> str | None:
     return None
 
 
-def _sma(seq: list[float], n: int) -> list[float | None]:
+def sma(seq: list[float], n: int) -> list[float | None]:
     """简单移动平均。前 N-1 位为 None。"""
     out: list[float | None] = []
     window: list[float] = []
@@ -66,7 +66,7 @@ def _ema(seq: list[float], n: int) -> list[float | None]:
 
 def _ma_values(closes: list[float], periods: tuple[int, ...]) -> dict[int, list[float | None]]:
     """计算多周期 SMA。"""
-    return {p: _sma(closes, p) for p in periods}
+    return {p: sma(closes, p) for p in periods}
 
 
 def _ma_alignment(ma: dict[int, list[float | None]], key_periods: tuple[int, ...]) -> dict[str, Any]:
@@ -337,7 +337,7 @@ def _boll(closes: list[float], n: int = 20, k: float = 2.0) -> dict[str, list[fl
     上轨 = 中轨 + k * σ_n
     下轨 = 中轨 - k * σ_n
     """
-    mid = _sma(closes, n)
+    mid = sma(closes, n)
     upper: list[float | None] = []
     lower: list[float | None] = []
     width: list[float | None] = []  # (upper - lower) / mid * 100
@@ -391,7 +391,7 @@ def _atr(highs: list[float], lows: list[float], closes: list[float], n: int = 14
 
 def _volume_ratio(vols: list[float], n: int = 5) -> list[float | None]:
     """量比 = 当日 vol / MA(vol, n)。"""
-    ma_vol = _sma(vols, n)
+    ma_vol = sma(vols, n)
     ratios: list[float | None] = []
     for i in range(len(vols)):
         if ma_vol[i] is not None and ma_vol[i] != 0:

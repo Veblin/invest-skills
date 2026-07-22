@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from conftest import FORBIDDEN_SIGNAL_WORDS
+from stock_testutil import FORBIDDEN_SIGNAL_WORDS
 
 
 def _analysis_body_without_legal_disclaimers(text: str) -> str:

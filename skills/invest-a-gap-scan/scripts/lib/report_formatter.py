@@ -14,26 +14,47 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from gap_scanner import ScanResult, ScanHit
 
 logger = logging.getLogger(__name__)
 
-# ── Version (canonical source: pyproject.toml, synced via sync_version.py) ──
+# ── Version (canonical source: pyproject.toml [project].version) ──
 _VERSION = "0.0.0"
-_toml_path = Path(__file__).resolve().parents[4] / "pyproject.toml"
-if _toml_path.exists():
-    for _line in _toml_path.read_text(encoding="utf-8").splitlines():
-        _m = re.match(r'^version\s*=\s*["\']([^"\']+)["\']', _line.strip())
-        if _m:
-            _VERSION = _m.group(1)
+
+
+def _read_project_version() -> str:
+    """Walk up to pyproject.toml and read ``[project].version`` only."""
+    try:
+        root = Path(__file__).resolve().parent
+        for parent in [root, *root.parents]:
+            pp = parent / "pyproject.toml"
+            if not pp.exists():
+                continue
+            in_project = False
+            for raw in pp.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if line == "[project]":
+                    in_project = True
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    in_project = line == "[project]"
+                    continue
+                if in_project and line.startswith("version") and "=" in line:
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
             break
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+_VERSION = _read_project_version()
 
 
 # ======================================================================
@@ -298,7 +319,7 @@ def format_markdown_report(result: ScanResult, output_path: str) -> str:
 
     Returns the path as a string.
     """
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     lines: list[str] = []
 
     # --- Title ---

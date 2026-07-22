@@ -54,7 +54,7 @@ def render_ah_detection_note(collection: dict) -> str:
     code_str = f"（港股代码: {hk_code}）" if hk_code else ""
     return (
         f"> **A+H 标的{code_str}**：检测到两地上市标记。"
-        "跨准则完整财务对比（毛利率/净利率/ROE 多年度）待 **v0.2.0** 港股采集链交付。"
+        "跨准则完整财务对比（毛利率/净利率/ROE 多年度）待后续港股采集链交付。"
         "当前报告仅基于 A 股数据源。\n"
     )
 

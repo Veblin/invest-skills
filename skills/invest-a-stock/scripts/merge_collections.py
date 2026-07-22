@@ -25,7 +25,13 @@ import argparse
 import json
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+_SCRIPT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from lib.nums import safe_float  # noqa: E402
 
 # 关键交叉验证字段（维度 → 比较字段列表）
 CRITICAL_FIELDS: dict[str, list[str]] = {
@@ -40,16 +46,6 @@ THRESHOLD_WARN = 0.20     # 5-20% → 标注分歧
 # >20% → 🔴 严重分歧
 
 
-def _safe_float(v: Any) -> float | None:
-    try:
-        f = float(v)
-        if f != f:  # NaN
-            return None
-        return f
-    except (TypeError, ValueError):
-        return None
-
-
 def _diff_pct(a: float, b: float) -> float:
     """相对差异百分比（基于均值）。"""
     avg = (abs(a) + abs(b)) / 2.0
@@ -61,14 +57,6 @@ def _diff_pct(a: float, b: float) -> float:
 def load_collection(path: str) -> dict:
     with open(path) as f:
         return json.load(f)
-
-
-def extract_dim_data(collection: dict, dim_name: str) -> dict | list | None:
-    """从 collection JSON 提取指定维度的 data 字段。"""
-    for dim in collection.get("dimensions", []):
-        if dim.get("dimension") == dim_name:
-            return dim.get("data")
-    return None
 
 
 def extract_latest_financial(fin_data) -> dict:
@@ -122,8 +110,8 @@ def cross_validate_dim(
         row_b = data_b if isinstance(data_b, dict) else {}
 
     for field in CRITICAL_FIELDS.get(dim_name, []):
-        val_a = _safe_float(row_a.get(field))
-        val_b = _safe_float(row_b.get(field))
+        val_a = safe_float(row_a.get(field))
+        val_b = safe_float(row_b.get(field))
 
         if val_a is None and val_b is None:
             fields_result[field] = {"a": None, "b": None, "diff_pct": None,

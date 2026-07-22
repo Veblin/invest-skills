@@ -3,13 +3,7 @@
 from __future__ import annotations
 
 import math
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
 
 from limit_up_scanner import (
     filter_stocks,
@@ -23,30 +17,23 @@ from limit_up_scanner import (
     _compute_seal_quality,
     _daily_counts_from_stocks,
     get_trade_dates,
-    _safe_float,
-    _nullable_float,
     _fmt_yi,
     _fmt_date,
     _empty_breadth,
     _latest_market_cap,
+    _normalize_seal_time,
     _one_to_two_rate,
 )
-
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
-
-from scan import build_parser, resolve_cli_filter  # noqa: E402
+from lib.nums import safe_float  # via ensure_invest_a_scripts_on_path / conftest
+from scan import build_parser, resolve_cli_filter
 from tushare_enrich import (
     _get_client,
-    _market_label,
-    _safe_float_or_none,
     _safe_str,
-    _to_ts_code,
     enrich_price_data,
     enrich_stock_info,
     get_trade_dates,
 )
+from codes import market_label, symbol_to_ts_code
 
 
 # ---- Fixtures ----
@@ -65,7 +52,6 @@ def _make_stock(symbol, name, sector, max_consecutive=1, total_appearances=1,
             "market_cap": market_cap, "change_pct": 10.0,
             "stat": f"{max_consecutive}/{max_consecutive}",
         }],
-        "flags": {"in_strong": False, "in_previous": False, "in_zbgc": False},
     }
     stock.update(extra)
     return stock
@@ -330,7 +316,9 @@ class TestScanMarket:
         assert len(result["stocks"]) == 1
         assert result["stocks"][0]["max_consecutive"] == 2
         assert result["stocks"][0]["total_appearances"] == 2
-        assert result["stocks"][0]["flags"]["in_strong"] is True
+        apps = result["stocks"][0]["appearances"]
+        assert any(a.get("in_strong") for a in apps)
+        assert "flags" not in result["stocks"][0]
         assert "seal_quality" in result["market_breadth"]
 
     def test_akshare_unavailable(self):
@@ -458,9 +446,9 @@ class TestMergeDailyResults:
         }
         aux = {"20260710": {"strong": {"000001"}, "previous": set(), "zbgc": {"000001"}}}
         stocks = _merge_daily_results(daily, aux)
-        assert stocks[0]["flags"]["in_strong"] is True
-        assert stocks[0]["flags"]["in_zbgc"] is True
+        assert "flags" not in stocks[0]
         assert stocks[0]["appearances"][0]["in_strong"] is True
+        assert stocks[0]["appearances"][0]["in_zbgc"] is True
 
 
 # ---- _compute_breadth ----
@@ -626,18 +614,15 @@ class TestUtilities:
         assert len(dates) >= 5
         assert all(len(d) == 8 for d in dates)
 
-    def test_safe_float(self):
-        assert _safe_float("3.14") == 3.14
-        assert _safe_float(None) == 0.0
-        assert _safe_float("abc") == 0.0
-        assert _safe_float(float("nan")) == 0.0
-
-    def test_nullable_float(self):
-        assert _nullable_float(None) is None
-        assert _nullable_float("abc") is None
-        assert _nullable_float(float("nan")) is None
-        assert _nullable_float(0.0) == 0.0
-        assert _nullable_float("1.5") == 1.5
+    def test_safe_float_from_nums(self):
+        """L-01: nullable parsing delegates to invest-a-stock nums.safe_float."""
+        assert safe_float(None) is None
+        assert safe_float("abc") is None
+        assert safe_float(float("nan")) is None
+        assert safe_float(float("inf")) is None
+        assert safe_float(float("-inf")) is None
+        assert safe_float(0.0) == 0.0
+        assert safe_float("1.5") == 1.5
 
     def test_seal_quality_falls_back_to_stock_float_mkt_cap(self):
         """Appearance missing/0.0 float_mkt_cap must use Tushare-enriched stock field."""
@@ -709,10 +694,11 @@ class TestUtilities:
 
 class TestApplyTushareEnrich:
 
-    def test_keeps_zero_close(self):
+    def test_zero_close_does_not_overwrite_l1(self):
+        """B1: Tushare close=0.0 must not clobber akshare L1 valid price."""
         from limit_up_scanner import _apply_tushare_enrich
 
-        stocks = [_make_stock("000001", "A", "X")]
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
         with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
              patch(
                  "limit_up_scanner.enrich_price_data",
@@ -720,19 +706,79 @@ class TestApplyTushareEnrich:
              ):
             info = _apply_tushare_enrich(stocks, "20260710")
         assert info["tushare"] is True
-        assert stocks[0]["close"] == 0.0
-        assert stocks[0]["amount"] == 0.0
+        assert stocks[0]["close"] == 12.5
+        assert stocks[0]["amount"] == 5e8
         assert stocks[0]["float_mkt_cap"] == 1e9
+
+    def test_zero_amount_does_not_overwrite_l1(self):
+        """B3: Tushare amount=0.0 must not clobber akshare L1 valid 成交额."""
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": 0.0, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
+        assert stocks[0]["amount"] == 5e8
+
+    def test_none_amount_does_not_overwrite_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": None, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
+        assert stocks[0]["amount"] == 5e8
+
+    def test_none_close_does_not_overwrite_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": None, "amount": 1e8, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 12.5
+        assert stocks[0]["amount"] == 1e8
+
+    def test_valid_amount_overwrites_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5, amount=5e8)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": 1e8, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
+        assert stocks[0]["amount"] == 1e8
+
+    def test_valid_close_overwrites_l1(self):
+        from limit_up_scanner import _apply_tushare_enrich
+
+        stocks = [_make_stock("000001", "A", "X", close=12.5)]
+        with patch("limit_up_scanner.enrich_stock_info", return_value={}), \
+             patch(
+                 "limit_up_scanner.enrich_price_data",
+                 return_value={"000001": {"close": 13.0, "amount": 1e8, "float_mkt_cap": 1e9}},
+             ):
+            _apply_tushare_enrich(stocks, "20260710")
+        assert stocks[0]["close"] == 13.0
 
 
 # ---- tushare_enrich helpers / H4-H7 ----
 
 class TestTushareEnrichHelpers:
-
-    def test_safe_float_or_none_rejects_nan(self):
-        assert _safe_float_or_none(float("nan")) is None
-        assert _safe_float_or_none(None) is None
-        assert _safe_float_or_none("12.5") == 12.5
 
     def test_safe_str_rejects_nan(self):
         assert _safe_str(float("nan")) == ""
@@ -740,14 +786,14 @@ class TestTushareEnrichHelpers:
         assert _safe_str("主板") == "主板"
 
     def test_market_label_chinese(self):
-        assert _market_label("主板") == "主板"
-        assert _market_label("创业板") == "创业板"
-        assert _market_label("0") == "主板"
+        assert market_label("主板") == "主板"
+        assert market_label("创业板") == "创业板"
+        assert market_label("0") == "主板"
 
     def test_to_ts_code(self):
-        assert _to_ts_code("600176") == "600176.SH"
-        assert _to_ts_code("000001") == "000001.SZ"
-        assert _to_ts_code("xxx") == ""
+        assert symbol_to_ts_code("600176") == "600176.SH"
+        assert symbol_to_ts_code("000001") == "000001.SZ"
+        assert symbol_to_ts_code("xxx") == ""
 
 
 class TestTushareEnrichGuards:
@@ -795,6 +841,69 @@ class TestTushareEnrichGuards:
             client.query.side_effect = _query
             out = enrich_price_data(["600176"], "20260713")
             assert "600176" not in out
+
+    def test_enrich_price_nan_close_keeps_none_when_amount_present(self):
+        """B1: NaN close → None (not 0.0) when other fields exist."""
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "trade_date": "20260713",
+                        "close": float("nan"), "pct_chg": 9.9, "amount": 1000.0,
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert out["600176"]["close"] is None
+            assert out["600176"]["pct_chg"] == 9.9
+            assert out["600176"]["amount"] == 1_000_000.0
+
+    def test_enrich_price_missing_amount_is_none_not_zero(self):
+        """B3: missing Tushare amount → None (not 0.0)."""
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "trade_date": "20260713",
+                        "close": 15.0, "pct_chg": 9.9, "amount": float("nan"),
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert out["600176"]["close"] == 15.0
+            assert out["600176"]["amount"] is None
+
+    def test_enrich_price_daily_basic_only_amount_none(self):
+        """B3: daily_basic-only enrich must not inject amount=0.0."""
+        import pandas as pd
+
+        with patch("tushare_enrich._get_client") as mock_client:
+            client = MagicMock()
+            mock_client.return_value = client
+
+            def _query(api_name, **kwargs):
+                if api_name == "daily_basic":
+                    return pd.DataFrame([{
+                        "ts_code": "600176.SH", "circ_mv": 500000.0,
+                    }])
+                return pd.DataFrame()
+
+            client.query.side_effect = _query
+            out = enrich_price_data(["600176"], "20260713")
+            assert out["600176"]["float_mkt_cap"] == 5_000_000_000.0
+            assert out["600176"]["amount"] is None
 
 
 # ---- CLI filter resolution ----
@@ -924,3 +1033,24 @@ class TestTushareEnrichDegradation:
         with patch("tushare_enrich._get_client", return_value=None):
             out = enrich_price_data(["600176", "000001"], "20260713")
         assert out == {}
+
+
+# ---- seal_time normalization (B4) ----
+
+
+class TestNormalizeSealTime:
+    """HHMMSS normalization for lexicographic seal-time compares."""
+
+    def test_hmm_three_digits(self):
+        assert _normalize_seal_time("930") == "093000"
+
+    def test_hhmm_four_digits(self):
+        assert _normalize_seal_time("0930") == "093000"
+
+    def test_colon_separated(self):
+        assert _normalize_seal_time("9:30:00") == "093000"
+
+    def test_short_garbage_empty(self):
+        assert _normalize_seal_time("9") == ""
+        assert _normalize_seal_time("ab") == ""
+        assert _normalize_seal_time("") == ""
