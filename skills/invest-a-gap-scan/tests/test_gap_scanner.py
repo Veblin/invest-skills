@@ -384,6 +384,22 @@ class TestNonHitReasons:
         assert result.non_hit_reasons[NonHitReason.VOL_RATIO_LOW] == 1
         assert len(result.hits) == 0
 
+    def test_vol_ratio_default_fp_noise_no_filter(self):
+        """gap_min_vol_ratio within 1e-9 of 1.0 is treated as no filter (isclose)."""
+        amounts = np.full(200, 2e8)  # flat → vol_ratio ≈ 1.0
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, amounts=amounts)
+        # FP noise that would falsely trip `!= 1.0` but is within abs_tol=1e-9
+        params = {**DEFAULT_PARAMS, "gap_min_vol_ratio": 1.0 + 1e-15}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert len(result.hits) == 1
+        assert result.non_hit_reasons.get(NonHitReason.VOL_RATIO_LOW, 0) == 0
+
 
 class TestHits:
     """Stocks that produce a qualifying gap hit."""

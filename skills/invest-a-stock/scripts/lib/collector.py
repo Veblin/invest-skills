@@ -53,13 +53,7 @@ def _days_ago(n: int) -> str:
     return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
-def _to_iso_date(yyyymmdd: str) -> str:
-    """YYYYMMDD → YYYY-MM-DD；非 8 位数字则原样返回。"""
-    s = yyyymmdd.strip()
-    if len(s) == 8 and s.isdigit():
-        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    return s
-
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
 
 _fred_date = _to_iso_date  # 向后兼容
 

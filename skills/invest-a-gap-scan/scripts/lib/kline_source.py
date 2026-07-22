@@ -15,14 +15,19 @@ based on availability or explicit user choice.
 
 Usage::
 
-    from kline_source import create_source, build_stock_kline
+    from kline_source import (
+        create_source, build_stock_kline, group_daily_by_ts_code,
+    )
 
     src = create_source("auto")          # Tushare if token available, else baostock
     daily_all = src.fetch_daily_batch(trade_dates)
+    daily_by_ts = group_daily_by_ts_code(daily_all)
 
     for ts_code in universe_ts_codes:
         adj = src.fetch_adj_factor(ts_code)
-        kline = build_stock_kline(daily_all, adj, ts_code, min_bars=120)
+        kline = build_stock_kline(
+            daily_all, adj, ts_code, min_bars=120, daily_by_ts=daily_by_ts,
+        )
         if kline is not None:
             ...  # scan for gaps
 """
@@ -657,18 +662,34 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
 # ---------------------------------------------------------------------------
 
 
+def group_daily_by_ts_code(daily_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Pre-group batch daily bars by ``ts_code`` for O(1) per-stock lookup.
+
+    Call once before looping :func:`build_stock_kline` over many stocks to
+    avoid repeated linear scans of a large ``daily_df``.
+    """
+    if daily_df is None or daily_df.empty or "ts_code" not in daily_df.columns:
+        return {}
+    return {
+        str(code): group
+        for code, group in daily_df.groupby("ts_code", sort=False)
+    }
+
+
 def build_stock_kline(
     daily_df: pd.DataFrame,
     adj_factor_df: pd.DataFrame | None,
     ts_code: str,
     min_bars: int = 120,
     already_qfq: bool = False,
+    daily_by_ts: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame | None:
     """Extract one stock's daily bars, apply qfq adjustment, and validate.
 
     Args:
         daily_df: Full daily data for **all** stocks (as returned by
-            :meth:`KlineSource.fetch_daily_batch`).
+            :meth:`KlineSource.fetch_daily_batch`).  Ignored for filtering
+            when *daily_by_ts* is provided (still accepted for API compat).
         adj_factor_df: Adjustment factor series for this stock, or
             ``None`` if the source does not provide factors.
         ts_code: The stock code to extract (e.g. ``"600176.SH"``).
@@ -679,6 +700,9 @@ def build_stock_kline(
             The ``*_qfq`` columns will simply mirror the original price
             columns.  If ``False`` (default), ``apply_qfq`` is called
             with *adj_factor_df* and the result must be non-``None``.
+        daily_by_ts: Optional pre-grouped map from
+            :func:`group_daily_by_ts_code`.  When provided, lookup is O(1)
+            instead of a linear filter over *daily_df*.
 
     Returns:
         A DataFrame with columns ``[trade_date, open, high, low, close,
@@ -690,14 +714,20 @@ def build_stock_kline(
           (missing adj factor — the stock is skipped).
         - ``apply_qfq`` fails (returns ``None``).
     """
-    if daily_df is None or daily_df.empty:
-        return None
-
-    # Filter by ts_code
-    stock_df = daily_df[daily_df["ts_code"] == ts_code].copy()
-    if stock_df.empty:
-        logger.debug("build_stock_kline: no data for %s", ts_code)
-        return None
+    if daily_by_ts is not None:
+        stock_df = daily_by_ts.get(ts_code)
+        if stock_df is None or stock_df.empty:
+            logger.debug("build_stock_kline: no data for %s", ts_code)
+            return None
+        stock_df = stock_df.copy()
+    else:
+        if daily_df is None or daily_df.empty:
+            return None
+        # Filter by ts_code (linear scan — prefer daily_by_ts in hot loops)
+        stock_df = daily_df[daily_df["ts_code"] == ts_code].copy()
+        if stock_df.empty:
+            logger.debug("build_stock_kline: no data for %s", ts_code)
+            return None
 
     # Sort by trade_date ascending
     if "trade_date" in stock_df.columns:

@@ -24,13 +24,13 @@ from limit_up_scanner import (
     _daily_counts_from_stocks,
     get_trade_dates,
     _safe_float,
-    _nullable_float,
     _fmt_yi,
     _fmt_date,
     _empty_breadth,
     _latest_market_cap,
     _one_to_two_rate,
 )
+from lib.nums import safe_float  # noqa: E402  # via ensure_invest_a_scripts_on_path
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS) not in sys.path:
@@ -65,7 +65,6 @@ def _make_stock(symbol, name, sector, max_consecutive=1, total_appearances=1,
             "market_cap": market_cap, "change_pct": 10.0,
             "stat": f"{max_consecutive}/{max_consecutive}",
         }],
-        "flags": {"in_strong": False, "in_previous": False, "in_zbgc": False},
     }
     stock.update(extra)
     return stock
@@ -330,7 +329,9 @@ class TestScanMarket:
         assert len(result["stocks"]) == 1
         assert result["stocks"][0]["max_consecutive"] == 2
         assert result["stocks"][0]["total_appearances"] == 2
-        assert result["stocks"][0]["flags"]["in_strong"] is True
+        apps = result["stocks"][0]["appearances"]
+        assert any(a.get("in_strong") for a in apps)
+        assert "flags" not in result["stocks"][0]
         assert "seal_quality" in result["market_breadth"]
 
     def test_akshare_unavailable(self):
@@ -458,9 +459,9 @@ class TestMergeDailyResults:
         }
         aux = {"20260710": {"strong": {"000001"}, "previous": set(), "zbgc": {"000001"}}}
         stocks = _merge_daily_results(daily, aux)
-        assert stocks[0]["flags"]["in_strong"] is True
-        assert stocks[0]["flags"]["in_zbgc"] is True
+        assert "flags" not in stocks[0]
         assert stocks[0]["appearances"][0]["in_strong"] is True
+        assert stocks[0]["appearances"][0]["in_zbgc"] is True
 
 
 # ---- _compute_breadth ----
@@ -632,12 +633,15 @@ class TestUtilities:
         assert _safe_float("abc") == 0.0
         assert _safe_float(float("nan")) == 0.0
 
-    def test_nullable_float(self):
-        assert _nullable_float(None) is None
-        assert _nullable_float("abc") is None
-        assert _nullable_float(float("nan")) is None
-        assert _nullable_float(0.0) == 0.0
-        assert _nullable_float("1.5") == 1.5
+    def test_safe_float_from_nums(self):
+        """L-01: nullable parsing delegates to invest-a-stock nums.safe_float."""
+        assert safe_float(None) is None
+        assert safe_float("abc") is None
+        assert safe_float(float("nan")) is None
+        assert safe_float(float("inf")) is None
+        assert safe_float(float("-inf")) is None
+        assert safe_float(0.0) == 0.0
+        assert safe_float("1.5") == 1.5
 
     def test_seal_quality_falls_back_to_stock_float_mkt_cap(self):
         """Appearance missing/0.0 float_mkt_cap must use Tushare-enriched stock field."""

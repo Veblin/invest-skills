@@ -3,16 +3,16 @@
 investment-learning CLI。
 
 用法:
-  python3 invest.py collect 600176              # 采集数据
-  python3 invest.py report 600176               # Markdown 报告（默认 stdout）
-  python3 invest.py report 600176 --outdir ./out # Markdown 写入目录
-  python3 invest.py report 600176 --emit=html    # HTML 报告（v0.1.2 旧版，须显式指定）
-  python3 invest.py report 600176 --emit=json   # JSON 报告（stdout）
-  python3 invest.py compare 600176 000858        # 对比
-  python3 invest.py diagnose                     # 检查数据源
-  python3 invest.py store list                   # 查看存储
-  python3 invest.py collect 600176 --store       # 采集并存储
-  python3 invest.py watchlist 000001,600519 --outdir ./out  # 批量标的摘要
+  uv run python skills/invest-a-stock/scripts/invest.py collect 600176              # 采集数据
+  uv run python skills/invest-a-stock/scripts/invest.py report 600176               # Markdown 报告（默认 stdout）
+  uv run python skills/invest-a-stock/scripts/invest.py report 600176 --outdir ./out # Markdown 写入目录
+  uv run python skills/invest-a-stock/scripts/invest.py report 600176 --emit=html    # HTML 报告（v0.1.2 旧版，须显式指定）
+  uv run python skills/invest-a-stock/scripts/invest.py report 600176 --emit=json   # JSON 报告（stdout）
+  uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858        # 对比
+  uv run python skills/invest-a-stock/scripts/invest.py diagnose                     # 检查数据源
+  uv run python skills/invest-a-stock/scripts/invest.py store list                   # 查看存储
+  uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --store       # 采集并存储
+  uv run python skills/invest-a-stock/scripts/invest.py watchlist 000001,600519 --outdir ./out  # 批量标的摘要
 """
 
 from __future__ import annotations

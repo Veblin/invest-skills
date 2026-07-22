@@ -197,6 +197,62 @@ class TestApplyQfqEdgeCases:
         result = apply_qfq(daily, adj)
         assert result is None
 
+    def test_near_zero_latest_adj_factor_returns_none(self):
+        """Near-zero latest adj_factor (1e-15) must hard-reject, not explode prices."""
+        daily = _make_daily(
+            dates=["20260710", "20260711"],
+            close_prices=[10.0, 12.0],
+        )
+        adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, 1e-15])
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_negative_latest_adj_factor_returns_none(self):
+        """Negative latest adj_factor → None."""
+        daily = _make_daily(
+            dates=["20260710", "20260711"],
+            close_prices=[10.0, 12.0],
+        )
+        adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, -1.0])
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_near_zero_row_adj_factor_returns_none(self):
+        """Any row-level near-zero adj_factor → whole-stock reject."""
+        daily = _make_daily(
+            dates=["20260710", "20260711", "20260712"],
+            close_prices=[10.0, 12.0, 15.0],
+        )
+        adj = _make_adj(
+            dates=["20260710", "20260711", "20260712"],
+            factors=[1e-15, 1.1, 1.0],
+        )
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_negative_row_adj_factor_returns_none(self):
+        """Any row-level negative adj_factor → whole-stock reject."""
+        daily = _make_daily(
+            dates=["20260710", "20260711", "20260712"],
+            close_prices=[10.0, 12.0, 15.0],
+        )
+        adj = _make_adj(
+            dates=["20260710", "20260711", "20260712"],
+            factors=[-0.5, 1.1, 1.0],
+        )
+        result = apply_qfq(daily, adj)
+        assert result is None
+
+    def test_inf_adj_factor_returns_none(self):
+        """Non-finite (inf) adj_factor → None."""
+        daily = _make_daily(
+            dates=["20260710", "20260711"],
+            close_prices=[10.0, 12.0],
+        )
+        adj = _make_adj(dates=["20260710", "20260711"], factors=[1.2, float("inf")])
+        result = apply_qfq(daily, adj)
+        assert result is None
+
     def test_single_row(self):
         """Single-row daily with matching adj_factor works correctly."""
         daily = _make_daily(dates=["20260710"], close_prices=[42.0])

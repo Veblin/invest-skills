@@ -88,16 +88,22 @@ class StockInfo:
 def _convert_to_ts_code(code_6d: str) -> str:
     """Convert a 6-digit stock code to Tushare ``ts_code`` format.
 
+    Exchange suffix (aligned with invest-a-stock / limit-up BJ convention):
+    ``60``/``688`` → ``.SH``; ``8``/``4`` (北交所) → ``.BJ``; else → ``.SZ``.
+
     Args:
         code_6d: 6-digit stock code (e.g. ``"600176"``).
 
     Returns:
-        Tushare-format code (e.g. ``"600176.SH"`` for Shanghai,
-        ``"000001.SZ"`` for Shenzhen).
+        Tushare-format code (e.g. ``"600176.SH"``, ``"000001.SZ"``,
+        ``"830799.BJ"``).
     """
     code = code_6d.strip().zfill(6)[:6]
     if code.startswith(("60", "688")):
         return f"{code}.SH"
+    # Beijing Stock Exchange: 8xxxx / 4xxxx (e.g. 83/87/88, 43)
+    if code.startswith(("8", "4")):
+        return f"{code}.BJ"
     return f"{code}.SZ"
 
 

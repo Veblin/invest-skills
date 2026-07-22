@@ -26,6 +26,7 @@ The ``kline_source`` layer **must** convert to **元** before populating
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
@@ -324,7 +325,8 @@ def _scan_stock(
         vol_ratio = amounts[gap_idx] / local_avg if local_avg > 0 else 0.0
 
         gap_min_vol = params.get("gap_min_vol_ratio", 1.0)
-        if gap_min_vol != 1.0:  # 1.0 = CLI default "no filter"
+        # 1.0 = CLI default "no filter"; isclose avoids FP false-triggers
+        if not math.isclose(float(gap_min_vol), 1.0, abs_tol=1e-9):
             if vol_ratio < gap_min_vol:
                 any_vol_ratio_fail = True
                 continue  # try older gap

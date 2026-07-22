@@ -9,9 +9,19 @@ Chinese securities terminals.
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 PRICE_COLS = ("open", "high", "low", "close")
+
+# Reject zero / near-zero / non-positive factors that would explode qfq prices.
+_ADJ_EPS = 1e-12
+
+
+def _adj_invalid(val: float) -> bool:
+    """True if *val* is non-finite, non-positive, or below ``_ADJ_EPS``."""
+    return (not math.isfinite(val)) or val <= _ADJ_EPS
 
 
 def apply_qfq(daily_df: pd.DataFrame, adj_factor_df: pd.DataFrame | None) -> pd.DataFrame | None:
@@ -28,25 +38,32 @@ def apply_qfq(daily_df: pd.DataFrame, adj_factor_df: pd.DataFrame | None) -> pd.
         adj_factor_df: Adjustment factor series with columns
             ``[trade_date, adj_factor]``, typically fetched via
             Tushare's ``adj_factor`` API.  **May be None or empty.**
+            Assumed **dense daily** (one factor per trade date).  A sparse
+            (ex-rights-only) series would NaN-out most rows after the left
+            merge and hard-reject; no forward-fill is applied.
 
     Returns:
         A new DataFrame with the original columns **plus** the qfq-adjusted
         columns named ``open_qfq``, ``high_qfq``, ``low_qfq``, ``close_qfq``.
         Returns **None** if *adj_factor_df* is None, empty, has no overlapping
-        dates, any daily bar lacks a factor, the latest factor is NaN, or the
-        latest factor is zero (whole-stock exclude — never emit partial-NaN
-        qfq prices).
+        dates, any daily bar lacks a factor, any factor is non-finite /
+        non-positive / near-zero (``<= 1e-12``), or OHLC contains NaN
+        (whole-stock exclude — never emit partial-NaN or astronomical qfq
+        prices).
 
     Notes:
         - Uses pandas vectorized operations — no row-level loops.
         - ``amount`` is **not** adjusted (it is already in monetary terms).
         - Partial adj_factor coverage (any NaN after merge) causes a hard
           reject so gap/MA60 logic never sees corrupted prices.
+        - Dense-daily adj_factor is a hard assumption; sparse series are
+          documentation debt (no ffill) until a safe fill policy is proven.
     """
     if adj_factor_df is None or adj_factor_df.empty:
         return None
 
-    # Merge on trade_date (left join to preserve all daily rows)
+    # Merge on trade_date (left join to preserve all daily rows).
+    # Dense daily adj_factor assumed — sparse (ex-rights-only) → mostly NaN → reject.
     merged = daily_df.merge(
         adj_factor_df[["trade_date", "adj_factor"]],
         on="trade_date",
@@ -57,11 +74,13 @@ def apply_qfq(daily_df: pd.DataFrame, adj_factor_df: pd.DataFrame | None) -> pd.
     if merged["adj_factor"].isna().any():
         return None
 
-    latest_adj = merged["adj_factor"].iloc[-1]
-    if pd.isna(latest_adj) or float(latest_adj) == 0.0:
+    factors = merged["adj_factor"].astype(float)
+    # Row-level + latest: reject non-finite / <=0 / near-zero (avoids astronomical prices)
+    if any(_adj_invalid(float(v)) for v in factors):
         return None
 
-    scale = merged["adj_factor"] / latest_adj
+    latest_adj = float(factors.iloc[-1])
+    scale = factors / latest_adj
 
     # Reject if any OHLC column contains NaN (R7)
     for col in PRICE_COLS:

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 辅助函数（与 collector.py 中的实现一致，避免循环导入）
+# 辅助函数（日期格式用 skills/lib/dates；避免从 collector 循环导入）
 # ---------------------------------------------------------------------------
 
 def _shanghai_now() -> datetime:
@@ -32,12 +32,7 @@ def _days_ago(n: int) -> str:
     return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
-def _to_iso_date(yyyymmdd: str) -> str:
-    """YYYYMMDD → YYYY-MM-DD；非 8 位数字则原样返回。"""
-    s = yyyymmdd.strip()
-    if len(s) == 8 and s.isdigit():
-        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    return s
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

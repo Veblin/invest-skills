@@ -29,6 +29,9 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
 
 import pandas as pd
 
@@ -58,7 +61,12 @@ import kline_cache  # noqa: E402
 # ---- 由并行代理创建的模块 ----
 try:
     from universe import build_universe  # noqa: E402
-    from kline_source import BaostockSource, create_source, build_stock_kline  # noqa: E402
+    from kline_source import (  # noqa: E402
+        BaostockSource,
+        create_source,
+        build_stock_kline,
+        group_daily_by_ts_code,
+    )
 except ImportError:
     print(
         "错误: universe.py 或 kline_source.py 尚未创建。\n"
@@ -290,13 +298,14 @@ def _run_scan(
     start_wall: float,
 ) -> int:
     # ---- Step 3: 交易日历 ----
-    end_date = datetime.now().strftime("%Y%m%d")
+    now = datetime.now(_CN_TZ)
+    end_date = now.strftime("%Y%m%d")
     # MA60 needs 59-bar warmup; to have valid MA60 for every bar in the
     # gap_lookback window we need ≥ gap_lookback + 59 trading bars.
     # ~1.46x calendar→trading conversion (365 / 250) + 5-day buffer.
     need_bars = args.gap_lookback + 59
     calendar_days = int(need_bars * 365 / 250) + 5
-    start_date = (datetime.now() - timedelta(days=calendar_days)).strftime("%Y%m%d")
+    start_date = (now - timedelta(days=calendar_days)).strftime("%Y%m%d")
     trade_dates, cal_is_estimated = _fetch_trade_cal(start_date, end_date)
 
     if not trade_dates:
@@ -306,7 +315,7 @@ def _run_scan(
     trade_dates = sorted(td for td in trade_dates if td <= end_date)
     logger.info("交易日: %d 日 (%s ~ %s)", len(trade_dates), trade_dates[0], trade_dates[-1])
 
-    cache_date = datetime.now().strftime("%Y%m%d")
+    cache_date = now.strftime("%Y%m%d")
 
     # ---- Step 4/5: 缓存 + 日线 / 前复权 ----
     stock_kline_map: dict[str, pd.DataFrame] = {}
@@ -378,6 +387,7 @@ def _run_scan(
                         adj_all, [s.ts_code for s in stocks],
                     )
 
+            daily_by_ts = group_daily_by_ts_code(daily_raw)
             for stock in cache_misses:
                 ts_code = stock.ts_code
                 adj_df = adj_factor_map.get(ts_code)
@@ -387,6 +397,7 @@ def _run_scan(
                     ts_code,
                     min_bars=1,
                     already_qfq=already_qfq,
+                    daily_by_ts=daily_by_ts,
                 )
                 if kline is not None:
                     stock_kline_map[ts_code] = kline
@@ -469,7 +480,7 @@ def _run_scan(
 
     # ---- Step 9: 保存详文档 ----
     if not args.no_save_report:
-        date_str = datetime.now().strftime("%Y%m%d")
+        date_str = datetime.now(_CN_TZ).strftime("%Y%m%d")
         report_dir = Path("reports/gap-scan")
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"{date_str}.md"
