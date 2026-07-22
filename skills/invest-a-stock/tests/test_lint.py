@@ -266,3 +266,27 @@ class TestLintBehaviorParity:
         findings = lint_mod.lint_file(report)
         lint_mod._RULES_CACHE = None
         assert any(f.rule_id == "structure-analysis-without-fact" for f in findings)
+
+
+class TestFilenameFormatLint:
+    def test_recommended_datetime_filename_has_no_filename_findings(self, tmp_path):
+        from lib import lint as lint_mod
+
+        report = tmp_path / "2026-07-22-14-30-05.md"
+        report.write_text("# ok\n", encoding="utf-8")
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report, profile="engine")
+        lint_mod._RULES_CACHE = None
+        assert not any(f.rule_id.startswith("filename-format-") for f in findings)
+
+    def test_date_only_filename_gets_datetime_recommendation(self, tmp_path):
+        from lib import lint as lint_mod
+
+        report = tmp_path / "2026-07-22.md"
+        report.write_text("# ok\n", encoding="utf-8")
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report, profile="engine")
+        lint_mod._RULES_CACHE = None
+        filename_findings = [f for f in findings if f.rule_id.startswith("filename-format-")]
+        assert len(filename_findings) == 1
+        assert filename_findings[0].rule_id == "filename-format-datetime"

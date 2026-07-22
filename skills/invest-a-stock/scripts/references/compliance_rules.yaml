@@ -218,19 +218,14 @@ rules:
 
   # ==========================================================================
   # 文件名格式验证
+  # scope=filename 语义：不匹配 pattern → 记 finding。
+  # 因此只能保留一条「推荐格式」规则；勿再叠加旧格式 pattern，否则会误伤正确新文件名。
   # ==========================================================================
-  - id: "filename-format-symbol-name-date"
-    pattern: "^\\d{6}-[^-]+-\\d{4}-?\\d{2}-?\\d{2}\\.md$"
+  - id: "filename-format-datetime"
+    pattern: "^\\d{4}-\\d{2}-\\d{2}-\\d{2}-\\d{2}-\\d{2}\\.md$"
     severity: "info"
     scope: "filename"
-    message: "推荐路径格式：{symbol}-{name}/{date}.md（如 600176-中国巨石/2026-06-24.md）"
-    law_ref: "报告路径 — 个股报告命名规范"
-
-  - id: "filename-format-date-symbol"
-    pattern: "^\\d{4}-\\d{2}-\\d{2}(-\\d{2}-\\d{2}-\\d{2})?-\\d{6}(-[^-]+)*\\.md$"
-    severity: "info"
-    scope: "filename"
-    message: "文件名使用日期前缀格式（旧格式，推荐使用 {symbol}-{name}/{date}.md）"
+    message: "推荐路径格式：{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md（如 600176-中国巨石/2026-07-22-14-30-05.md）"
     law_ref: "报告路径 — 个股报告命名规范"
 
   # ==========================================================================

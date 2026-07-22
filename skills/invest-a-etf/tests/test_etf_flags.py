@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 _LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
@@ -15,6 +17,8 @@ from etf_data import (  # noqa: E402
     ETF_HEDGE_MAP,
     _auto_flags,
     _em_to_premium_discount,
+    _fetch_csindex_pe,
+    query_etf_data,
 )
 
 
@@ -73,9 +77,56 @@ class TestAutoFlagsAumAndHedge:
         _auto_flags(r)
         assert any("无可用" in f for f in r["flags"])
 
+    def test_coverage_low(self):
+        r = _base(hedge_coverage={"coverage": "low"})
+        _auto_flags(r)
+        assert any("覆盖有限" in f for f in r["flags"])
+
+
+class TestQueryEtfDataMetadata:
+    @patch("etf_data._lookup_etf_spot_row", return_value=(None, "etf_spot: test skip"))
+    def test_not_mapped_index_pe_status_for_theme_etf(self, _mock_spot):
+        r = query_etf_data("515790")
+        assert r["index_pe_status"] == "not_mapped"
+        assert r["index_pe"] is None
+        assert "csindex" in r.get("index_pe_note", "")
+
+    @patch("etf_data._lookup_etf_spot_row", return_value=(None, "etf_spot: test skip"))
+    def test_data_quality_populated(self, _mock_spot):
+        r = query_etf_data("515790")
+        dq = r.get("data_quality", {})
+        assert dq.get("index_pe") == "not_applicable"
+        assert dq.get("hedge") == "available"
+
+    @patch("etf_data._lookup_etf_spot_row", return_value=(None, "etf_spot: test skip"))
+    def test_tracking_error_note_no_fake_estimate(self, _mock_spot):
+        r = query_etf_data("510300")
+        assert r["tracking_error"] is None
+        assert "0.05" not in r.get("tracking_error_note", "")
+        assert "未实现" in r.get("tracking_error_note", "")
+
 
 class Test588000HedgeMap:
     def test_has_star50_options_and_high_coverage(self):
         entry = ETF_HEDGE_MAP["588000"]
         assert entry["options"] == "科创50ETF期权"
         assert entry["coverage"] == "high"
+
+
+class TestFetchCsindexPe:
+    @patch("akshare.stock_zh_index_value_csindex")
+    @patch("etf_data.akshare_direct_session")
+    def test_pe1_zero_preserves_zero_not_falls_back_to_pe2(
+        self, mock_session, mock_csindex
+    ):
+        mock_session.return_value.__enter__ = MagicMock(return_value=None)
+        mock_session.return_value.__exit__ = MagicMock(return_value=False)
+        mock_csindex.return_value = pd.DataFrame(
+            [{"市盈率1": 0.0, "市盈率2": 15.5}]
+        )
+
+        result: dict = {"_errors": []}
+        _fetch_csindex_pe(result, "000300")
+
+        assert result["index_pe"] == 0.0
+        assert result["index_pe"] != 15.5

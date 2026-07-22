@@ -42,9 +42,9 @@ def _make_kline(n: int, base: float = 100.0, step: float = 1.0,
 class TestSMA:
     def test_sma_basic(self):
         """SMA 基本计算：5 日均线。"""
-        from lib.technical import _sma
+        from lib.technical import sma
         closes = [10.0, 12.0, 14.0, 16.0, 18.0]
-        result = _sma(closes, 3)
+        result = sma(closes, 3)
         assert result[0] is None
         assert result[1] is None
         assert result[2] == pytest.approx(12.0)  # (10+12+14)/3
@@ -53,9 +53,9 @@ class TestSMA:
 
     def test_sma_insufficient_data(self):
         """数据不足 N 时前 N-1 位为 None。"""
-        from lib.technical import _sma
+        from lib.technical import sma
         closes = [10.0, 12.0]
-        result = _sma(closes, 5)
+        result = sma(closes, 5)
         assert all(v is None for v in result)
 
     def test_ma250_requires_250(self):

@@ -123,9 +123,10 @@ class KlineSource(ABC):
 class TushareBulkSource(KlineSource):
     """Bulk daily K-line fetcher using Tushare Pro.
 
-    Monkey-patches ``RATE_LIMIT_PER_MINUTE`` and ``DAILY_CALL_LIMIT`` in
-    ``tushare_client`` to 180 and 5000 respectively (appropriate for a
-    2000-point Tushare account operating in an isolated process).
+    Uses a ``TushareClient`` with elevated per-minute rate (180/min) for bulk
+    scans.  Daily call limit follows ``TUSHARE_DAILY_CALL_LIMIT`` env/config
+    when set; otherwise ``tushare_client.DAILY_CALL_LIMIT`` (500).  High-tier
+    accounts may set ``TUSHARE_DAILY_CALL_LIMIT=5000`` in ``.env``.
 
     ``fetch_daily_batch`` calls ``pro.daily(trade_date=…)`` once per date
     and returns the union of all stocks.  ``fetch_adj_factor`` calls
@@ -133,15 +134,19 @@ class TushareBulkSource(KlineSource):
     """
 
     def __init__(self) -> None:
-        # Monkey-patch rate limits for 2000-point account
-        import lib.tushare_client as tc  # noqa: F811
+        from lib import env  # noqa: F811
+        from lib.tushare_client import DAILY_CALL_LIMIT, TushareClient  # noqa: F811
 
-        tc.RATE_LIMIT_PER_MINUTE = 180
-        tc.DAILY_CALL_LIMIT = 5000
+        config = env.get_config()
+        daily_limit = config.get("TUSHARE_DAILY_CALL_LIMIT")
+        if daily_limit is None:
+            daily_limit = DAILY_CALL_LIMIT
 
-        from lib.tushare_client import TushareClient  # noqa: F811
-
-        self._client = TushareClient(token=None)
+        self._client = TushareClient(
+            token=None,
+            rate_limit_per_minute=180,
+            daily_call_limit=daily_limit,
+        )
         if not self._client.is_available():
             logger.warning(
                 "TushareBulkSource: TushareClient reports unavailable — "

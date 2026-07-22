@@ -18,6 +18,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 ensure_invest_a_scripts_on_path()
 
 from lib.collector import collect_quote, collect_kline, collect_valuation  # noqa: E402
+from lib.nums import safe_float  # noqa: E402
 from lib.technical import compute  # noqa: E402
 from lib.macro import collect_macro_context  # noqa: E402
 
@@ -69,6 +70,13 @@ def query_for_evaluation(symbol: str, asset_type: str = "stock") -> dict[str, An
          market_microstructure, etf_data, data_quality}
     """
     t0 = time.monotonic()
+
+    if asset_type == "etf":
+        try:
+            from etf_data import prefetch_etf_spot
+            prefetch_etf_spot()
+        except Exception as exc:
+            logger.warning("etf spot prefetch failed: %s", exc)
 
     result: dict[str, Any] = {
         "symbol": symbol,
@@ -141,11 +149,11 @@ def _safe_collect_quote(symbol: str) -> dict:
             data = {}
 
         return {
-            "price": _to_float(data.get("close")),
-            "change_pct": _to_float(data.get("pct_chg")),
-            "pe_ttm": _to_float(data.get("pe_ttm")),
-            "pb": _to_float(data.get("pb")),
-            "total_mv": _to_float(data.get("total_mv")),
+            "price": safe_float(data.get("close")),
+            "change_pct": safe_float(data.get("pct_chg")),
+            "pe_ttm": safe_float(data.get("pe_ttm")),
+            "pb": safe_float(data.get("pb")),
+            "total_mv": safe_float(data.get("total_mv")),
             "source": meta.get("source", "unknown"),
             "status": _status_from_raw(raw),
             "_raw_status": raw.get("status"),
@@ -188,8 +196,8 @@ def _safe_collect_valuation(symbol: str) -> dict:
         if isinstance(data, list) and data:
             history_available = True
             for d in data:
-                pe = _to_float(d.get("pe_ttm"))
-                pb = _to_float(d.get("pb"))
+                pe = safe_float(d.get("pe_ttm"))
+                pb = safe_float(d.get("pb"))
                 if pe is not None:
                     pe_list.append(pe)
                 if pb is not None:
@@ -199,8 +207,8 @@ def _safe_collect_valuation(symbol: str) -> dict:
             if pb_list:
                 pb_current = pb_list[-1]
         elif isinstance(data, dict):
-            pe_current = _to_float(data.get("pe_ttm"))
-            pb_current = _to_float(data.get("pb"))
+            pe_current = safe_float(data.get("pe_ttm"))
+            pb_current = safe_float(data.get("pb"))
 
         return {
             "pe_current": pe_current,
@@ -256,6 +264,8 @@ def _safe_etf_kline(symbol: str) -> dict:
             "status": raw.get("status", "missing"),
             "volatility_annualized": raw.get("volatility_annualized"),
             "latest_nav": raw.get("latest_nav"),
+            "rsi": raw.get("rsi"),
+            "rsi_period": raw.get("rsi_period"),
             "rsi_24": raw.get("rsi_24"),
             "ma20": raw.get("ma20"),
             "ma60": raw.get("ma60"),
@@ -301,6 +311,8 @@ def _compute_technical(result: dict) -> None:
 
     result["technical"] = {
         "volatility_annualized": None,
+        "rsi": None,
+        "rsi_period": None,
         "rsi_24": None,
         "latest_close": None,
         "ma20": None,
@@ -313,13 +325,21 @@ def _compute_technical(result: dict) -> None:
     if is_etf:
         result["technical"]["latest_close"] = kline.get("latest_nav")
         result["technical"]["volatility_annualized"] = kline.get("volatility_annualized")
+        result["technical"]["rsi"] = kline.get("rsi")
+        result["technical"]["rsi_period"] = kline.get("rsi_period")
         result["technical"]["rsi_24"] = kline.get("rsi_24")
         result["technical"]["ma20"] = kline.get("ma20")
         result["technical"]["ma60"] = kline.get("ma60")
-        if kline.get("status") == "available":
+        rows_count = kline.get("rows", len(rows) if isinstance(rows, list) else 0)
+        kline_status = kline.get("status", "missing")
+        if kline_status == "available":
             result["technical"]["status"] = "available"
-        elif kline.get("rows", 0) < 20:
+        elif kline_status == "missing" or rows_count == 0:
+            result["technical"]["status"] = "missing"
+        elif rows_count < 20:
             result["technical"]["status"] = "insufficient"
+        else:
+            result["technical"]["status"] = kline_status
         return
 
     # 个股：调 technical.compute(rows)
@@ -407,7 +427,11 @@ def _summarize_quality(result: dict) -> None:
     # etf
     etf = result.get("etf_data")
     if etf is not None:
-        dq["etf"] = "available" if not etf.get("_error") else "missing"
+        from etf_data import rollup_etf_quality_status
+
+        dq["etf"] = rollup_etf_quality_status(etf)
+        for key, val in (etf.get("data_quality") or {}).items():
+            dq[f"etf_{key}"] = val
     else:
         dq["etf"] = "not_applicable"
 
@@ -428,23 +452,6 @@ def _summarize_quality(result: dict) -> None:
         dq["overall"] = "partial"
 
     result["data_quality"] = dq
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-def _to_float(val: Any) -> float | None:
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        import math
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-    except (ValueError, TypeError):
-        return None
 
 
 def _percentile(value: float | None, population: list[float]) -> float | None:

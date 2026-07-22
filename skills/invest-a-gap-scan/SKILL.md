@@ -129,7 +129,7 @@ for gap in qualified_gaps (newest first):
 
 ### MA60 计算
 
-使用 invest-a-stock 的 `lib.technical._sma`（60 日简单移动平均）。前 59 个位置 MA60 为 None，`_check_ma60_streak` 跳过 None 值。NaN close 触发 MA60 失败（利用 `not (NaN >= MA60)` 恒为 True 的特性）。
+使用 invest-a-stock 的 `lib.technical.sma`（60 日简单移动平均）。前 59 个位置 MA60 为 None，`_check_ma60_streak` 跳过 None 值。NaN close 触发 MA60 失败（利用 `not (NaN >= MA60)` 恒为 True 的特性）。
 
 ### 前复权 (QFQ)
 
@@ -286,7 +286,7 @@ auto:
 
 ## 联动
 
-对命中的标的，接 `/invest:a-stock {symbol}` 做深度基本面研究。
+对命中的标的，接 `/invest-a-stock {symbol}` 做深度基本面研究。
 
 ## 合规
 

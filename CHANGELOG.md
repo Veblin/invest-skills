@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Slash 与 Skill 入口
+
+- **用户 slash 一律连字符**：`/invest-a-stock`、`/invest-a-etf`、`/invest-a-journal` 等；`.claude/commands/` 文件名改为 `invest-a-*.md`（放弃 `/invest:a-*` 用户入口）
+- 插件 marketplace **包名**仍可使用 `invest:a-*`（与 slash 分层）
+
+### invest-a-etf（新 Skill）
+
+- 新增 ETF 独立研究 Skill：指数估值 / 折溢价 / AUM / 跟踪质量 / 对冲覆盖 → 结构化备忘录
+- CLI：`uv run python skills/invest-a-etf/scripts/etf.py report|diagnose`
+- `etf_data.py` + `etf-hedge-map.md` 自 journal 迁出为本 Skill canonical；journal 经 thin shim 复用
+
+### invest-a-journal
+
+- ETF 评估路径改为调用 invest-a-etf 共用模块；深研引导 `/invest-a-etf {代码}`
+
 ### 报告精简
 
 - 移除报告头部冗余段落：AI 偏见声明、逆向思考、Ichimoku/波动率锥、AI 置信度矩阵

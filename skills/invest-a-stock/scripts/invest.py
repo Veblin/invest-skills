@@ -502,11 +502,10 @@ def _report_basename(result: dict, symbol: str, ts: str) -> str:
 
 
 def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
-    """生成报告完整路径：{outdir}/{subdir}/{date}.md。"""
-    date = ts[:10]  # 仅日期部分，如 2026-07-05
+    """生成报告完整路径：{outdir}/{subdir}/{YYYY-MM-DD-HH-MM-SS}.md。"""
     report_dir = outdir / subdir
     report_dir.mkdir(parents=True, exist_ok=True)
-    return report_dir / f"{date}.md"
+    return report_dir / f"{ts}.md"
 
 
 def cmd_report(args: argparse.Namespace) -> int:

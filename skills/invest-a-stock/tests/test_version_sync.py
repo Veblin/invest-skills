@@ -20,6 +20,7 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     (root / "skills" / "invest-a-limit-up").mkdir(parents=True)
     (root / "skills" / "invest-a-gap-scan").mkdir(parents=True)
     (root / "skills" / "invest-a-journal").mkdir(parents=True)
+    (root / "skills" / "invest-a-etf").mkdir(parents=True)
     (root / ".claude-plugin").mkdir(parents=True)
 
     (root / "pyproject.toml").write_text(
@@ -40,6 +41,10 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     )
     (root / "skills" / "invest-a-journal" / "SKILL.md").write_text(
         f'---\nname: invest:a-journal\nversion: "{version}"\n---\n',
+        encoding="utf-8",
+    )
+    (root / "skills" / "invest-a-etf" / "SKILL.md").write_text(
+        f'---\nname: invest:a-etf\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
 

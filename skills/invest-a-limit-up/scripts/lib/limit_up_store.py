@@ -1,7 +1,8 @@
 """SQLite 持久化：涨停扫描结果存储与回溯查询。
 
 与 store.py 共享同一个数据库（~/.local/share/investment/research.db），
-新增 limit_up_scans / limit_up_stocks 两张表。
+新增 limit_up_scans / limit_up_stocks 两张表。表由本模块 ``init_limit_up_db()``
+在首次 limit-up 持久化时创建（``store.init_db()`` 不包含这些表）。
 
 v0.2.0: 首版，支持 scan 存储、按日期/标的/行业/连板回溯。
 """
@@ -16,9 +17,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import env
-from .json_util import dumps_json
-from .nums import safe_float
+from _invest_path import ensure_invest_a_scripts_on_path
+
+ensure_invest_a_scripts_on_path()
+
+from lib import env  # noqa: E402
+from lib import store as store_mod  # noqa: E402
+from lib.json_util import dumps_json  # noqa: E402
+from lib.nums import safe_float  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +40,6 @@ def _get_path() -> Path:
     """
     if _db_override is not None:
         return _db_override
-    # Lazy import avoids circular import at module load (store.init_db → here).
-    from . import store as store_mod
-
     return store_mod._get_path()
 
 

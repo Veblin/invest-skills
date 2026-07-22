@@ -13,6 +13,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -72,8 +73,8 @@ def _fetch_margin(result: dict) -> None:
             return
         latest = df.iloc[-1]
         # 亿元（见 docstring）；勿再 /1e8
-        result["margin_balance"] = _to_float(latest.get("融资余额"))
-        result["margin_buy_amount"] = _to_float(latest.get("融资买入额"))
+        result["margin_balance"] = safe_float(latest.get("融资余额"))
+        result["margin_buy_amount"] = safe_float(latest.get("融资买入额"))
     except Exception as exc:
         logger.warning("margin fetch failed: %s", exc)
         result["_errors"].append(f"margin: {exc}")
@@ -93,8 +94,8 @@ def _fetch_ad_ratio(result: dict) -> None:
             return
         # key-value 格式：item 列 = 指标名，value 列 = 数值
         kv = dict(zip(df["item"], df["value"]))
-        up = _to_float(kv.get("上涨"))
-        down = _to_float(kv.get("下跌"))
+        up = safe_float(kv.get("上涨"))
+        down = safe_float(kv.get("下跌"))
         if up is not None and down is not None and down > 0:
             result["ad_ratio"] = round(up / down, 4)
     except Exception as exc:
@@ -145,8 +146,8 @@ def _fetch_turnover(result: dict) -> None:
         with akshare_direct_session():
             sse = ak.stock_sse_summary()
             szse = ak.stock_szse_summary()
-        sse_amount = _to_float(sse.iloc[0].get("成交金额", 0)) if sse is not None and not sse.empty else 0
-        szse_amount = _to_float(szse.iloc[0].get("成交金额", 0)) if szse is not None and not szse.empty else 0
+        sse_amount = safe_float(sse.iloc[0].get("成交金额", 0)) if sse is not None and not sse.empty else 0
+        szse_amount = safe_float(szse.iloc[0].get("成交金额", 0)) if szse is not None and not szse.empty else 0
         if sse_amount or szse_amount:
             result["total_turnover"] = round((sse_amount + szse_amount) / 1e8, 2)  # 元→亿
     except Exception as exc:
@@ -308,20 +309,3 @@ def apply_env_guardrail(evaluation_json: dict, snap: dict | None = None) -> dict
     evaluation_json["blind_spots"] = blind_spots
     return evaluation_json
 
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-def _to_float(val: Any) -> float | None:
-    """安全转 float，None/NaN → None。"""
-    if val is None:
-        return None
-    try:
-        v = float(val)
-        import math
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-    except (ValueError, TypeError):
-        return None

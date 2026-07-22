@@ -1,11 +1,20 @@
 """limit_up_store：涨停扫描持久化。"""
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+
+_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
+_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+for p in (_LIB, _SCRIPTS):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+import limit_up_store as lus_mod  # noqa: E402
 
 _SH = ZoneInfo("Asia/Shanghai")
 
@@ -64,7 +73,6 @@ def _result(scan_date: str, stocks: list[dict] | None = None) -> dict:
 @pytest.fixture
 def lus(tmp_path: Path):
     """Isolate both store and limit_up_store onto the same temp DB."""
-    import lib.limit_up_store as lus_mod
     import lib.store as store_mod
 
     prev_store = store_mod._db_override
@@ -94,11 +102,10 @@ class TestDbPathIsolation:
 
     def test_store_init_db_uses_same_path(self, lus, tmp_path: Path):
         import lib.store as store_mod
-        import lib.limit_up_store as lus_mod
 
         store_mod.init_db()
         # limit_up tables created independently (not via init_db side-effect)
-        lus_mod.init_limit_up_db()
+        lus.init_limit_up_db()
         import sqlite3
 
         c = sqlite3.connect(str(tmp_path / "research.db"))

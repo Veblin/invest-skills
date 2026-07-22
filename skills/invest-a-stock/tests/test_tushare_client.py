@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+BEIJING = ZoneInfo("Asia/Shanghai")
+UTC = ZoneInfo("UTC")
 
 
 class TestTusharePermissionDenied:
@@ -94,3 +99,79 @@ class TestTusharePermissionDenied:
         assert result is not None
         assert result["index_code"] == "801093"
         assert result["source"] == "akshare.index_hist_sw"
+
+
+class TestTushareInstanceRateLimits:
+    def test_custom_limits_do_not_mutate_module_defaults(self):
+        from lib import tushare_client as tc
+
+        default_rpm = tc.RATE_LIMIT_PER_MINUTE
+        default_daily = tc.DAILY_CALL_LIMIT
+
+        client = tc.TushareClient(
+            token="a" * 32,
+            rate_limit_per_minute=180,
+            daily_call_limit=5000,
+        )
+
+        assert client._rate_limit_per_minute == 180
+        assert client._daily_call_limit == 5000
+        assert tc.RATE_LIMIT_PER_MINUTE == default_rpm
+        assert tc.DAILY_CALL_LIMIT == default_daily
+        assert client.remaining_calls_today() == 5000
+
+    def test_default_limits_match_module_constants(self):
+        from lib import tushare_client as tc
+
+        client = tc.TushareClient(token="a" * 32)
+        assert client._rate_limit_per_minute == tc.RATE_LIMIT_PER_MINUTE
+        assert client._daily_call_limit == tc.DAILY_CALL_LIMIT
+
+
+class TestTushareDailyQuotaReset:
+    def test_init_reset_at_next_beijing_midnight(self):
+        from lib.tushare_client import TushareClient
+
+        # 2024-06-15 20:00 UTC = 2024-06-16 04:00 Beijing
+        now = datetime(2024, 6, 15, 20, 0, 0, tzinfo=UTC).timestamp()
+        expected = datetime(2024, 6, 17, 0, 0, 0, tzinfo=BEIJING).timestamp()
+
+        with patch("lib.tushare_client.time.time", return_value=now):
+            client = TushareClient(token="a" * 32)
+
+        assert client._daily_reset_at == expected
+
+    def test_counter_not_reset_before_beijing_midnight(self):
+        from lib.tushare_client import TushareClient
+
+        # 23:30 Beijing = 15:30 UTC — 30 min before Beijing midnight
+        init_ts = datetime(2024, 1, 15, 15, 30, 0, tzinfo=UTC).timestamp()
+        check_ts = datetime(2024, 1, 15, 15, 45, 0, tzinfo=UTC).timestamp()
+
+        with patch("lib.tushare_client.time.time", return_value=init_ts):
+            client = TushareClient(token="a" * 32)
+        client._daily_calls = 42
+
+        with patch("lib.tushare_client.time.time", return_value=check_ts):
+            client._reset_daily_counter_if_needed()
+
+        assert client._daily_calls == 42
+
+    def test_counter_resets_after_beijing_midnight_not_utc(self):
+        from lib.tushare_client import TushareClient
+
+        # 23:30 Beijing = 15:30 UTC
+        init_ts = datetime(2024, 1, 15, 15, 30, 0, tzinfo=UTC).timestamp()
+        # 00:30 Beijing next day = 16:30 UTC — past Beijing midnight, before UTC midnight
+        after_beijing_midnight = datetime(2024, 1, 15, 16, 30, 0, tzinfo=UTC).timestamp()
+        expected_next_reset = datetime(2024, 1, 17, 0, 0, 0, tzinfo=BEIJING).timestamp()
+
+        with patch("lib.tushare_client.time.time", return_value=init_ts):
+            client = TushareClient(token="a" * 32)
+        client._daily_calls = 42
+
+        with patch("lib.tushare_client.time.time", return_value=after_beijing_midnight):
+            client._reset_daily_counter_if_needed()
+
+        assert client._daily_calls == 0
+        assert client._daily_reset_at == expected_next_reset

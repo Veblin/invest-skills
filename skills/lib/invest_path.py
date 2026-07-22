@@ -9,12 +9,21 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-__all__ = ["invest_a_scripts_dir", "ensure_invest_a_scripts_on_path"]
+__all__ = [
+    "invest_a_scripts_dir",
+    "invest_a_etf_lib_dir",
+    "ensure_invest_a_scripts_on_path",
+]
 
 
 def invest_a_scripts_dir() -> Path:
     """skills/invest-a-stock/scripts — resolved from skills/lib/."""
     return Path(__file__).resolve().parent.parent / "invest-a-stock" / "scripts"
+
+
+def invest_a_etf_lib_dir() -> Path:
+    """skills/invest-a-etf/scripts/lib — canonical ETF data module."""
+    return Path(__file__).resolve().parent.parent / "invest-a-etf" / "scripts" / "lib"
 
 
 def ensure_invest_a_scripts_on_path() -> Path:

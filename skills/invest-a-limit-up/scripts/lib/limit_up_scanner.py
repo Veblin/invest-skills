@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import re
 from collections import Counter
 from datetime import datetime
@@ -796,19 +795,6 @@ def _latest_market_cap(stock: dict) -> float | None:
         return v if v > 0 else None
     except (TypeError, ValueError):
         return None
-
-
-def _safe_float(val: Any) -> float:
-    """Parse float; missing / NaN / invalid → 0.0 (for display-only fields)."""
-    if val is None:
-        return 0.0
-    try:
-        f = float(val)
-        if math.isnan(f):
-            return 0.0
-        return f
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def _safe_int(val: Any, default: int = 0) -> int:

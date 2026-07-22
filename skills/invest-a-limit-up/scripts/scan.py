@@ -122,7 +122,7 @@ def main() -> int:
             )
         else:
             try:
-                from lib.limit_up_store import save_scan, get_stats as lu_stats
+                from limit_up_store import save_scan, get_stats as lu_stats
                 sid = save_scan(result, filter_params=filter_kwargs)
                 stats = lu_stats()
                 print(

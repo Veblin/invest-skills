@@ -14,7 +14,7 @@ Import conventions
 Follows the invest-a-limit-up pattern: sibling modules in ``scripts/lib/`` are
 imported as top-level names (this file is found via ``_LIB_DIR`` on ``sys.path``,
 so relative imports would fail).  invest-a-stock modules use
-``ensure_invest_a_scripts_on_path()`` then ``from lib.technical import _sma``.
+``ensure_invest_a_scripts_on_path()`` then ``from lib.technical import sma``.
 
 Amount unit
 -----------
@@ -37,7 +37,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from lib.technical import _sma  # noqa: E402
+from lib.technical import sma  # noqa: E402
 
 # Sibling modules (found via _LIB_DIR on sys.path)
 from skip_reasons import ExcludeReason, NonHitReason  # noqa: E402
@@ -183,13 +183,13 @@ def _check_unfilled(lows: list[float], gap_idx: int,
                     gap_high: float) -> bool:
     """Return True if the gap has never been filled (partially or fully).
 
-    A gap is unfilled when ``min(low[gap_idx+1:]) >= gap_high``
-    (touching the boundary does not enter the gap interval).
+    A gap is unfilled when ``min(low[gap_idx+1:]) > gap_high``
+    (touching the upper edge counts as filled).
     If *gap_idx* is the last bar, the condition is vacuously true.
     """
     if gap_idx >= len(lows) - 1:
         return True
-    return min(lows[gap_idx + 1:]) >= gap_high
+    return min(lows[gap_idx + 1:]) > gap_high
 
 
 def _build_scan_hit(
@@ -213,7 +213,7 @@ def _build_scan_hit(
     if ma60 is None:
         ma60 = float('nan')
         pct_from_ma60 = float('nan')
-    elif ma60 == 0:
+    elif abs(ma60) < 1e-9:
         pct_from_ma60 = 0.0
     else:
         pct_from_ma60 = (current_price - ma60) / ma60 * 100.0
@@ -279,7 +279,7 @@ def _scan_stock(
         return None, ExcludeReason.LOW_LIQUIDITY, None
 
     # --- Compute MA60 ---
-    ma60_list = _sma(closes, 60)
+    ma60_list = sma(closes, 60)
 
     # --- Find gaps ---
     gap_lookback = params["gap_lookback"]
@@ -322,7 +322,10 @@ def _scan_stock(
             if local_lookback > 0
             else amounts[gap_idx]
         )
-        vol_ratio = amounts[gap_idx] / local_avg if local_avg > 0 else 0.0
+        if local_avg >= 1e-9:
+            vol_ratio = amounts[gap_idx] / local_avg
+        else:
+            vol_ratio = 0.0
 
         gap_min_vol = params.get("gap_min_vol_ratio", 1.0)
         # 1.0 = CLI default "no filter"; isclose avoids FP false-triggers

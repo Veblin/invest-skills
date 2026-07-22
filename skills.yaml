@@ -22,6 +22,11 @@ skills:
     skill: invest-a-gap-scan
 
   - name: invest-a-journal
-    description: 交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎 + ETF 对冲检查。研究工具，非决策工具。
+    description: 交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。
     repo: Veblin/invest-skills
     skill: invest-a-journal
+
+  - name: invest-a-etf
+    description: A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。
+    repo: Veblin/invest-skills
+    skill: invest-a-etf

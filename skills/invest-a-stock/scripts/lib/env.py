@@ -62,6 +62,22 @@ def get_config() -> dict[str, Any]:
     for key in ["TUSHARE_TOKEN", "FRED_API_KEY", "TAVILY_API_KEY"]:
         config[key] = os.environ.get(key) or merged.get(key)
 
+    _daily_limit_raw = (
+        os.environ.get("TUSHARE_DAILY_CALL_LIMIT")
+        or merged.get("TUSHARE_DAILY_CALL_LIMIT")
+    )
+    if _daily_limit_raw is not None and str(_daily_limit_raw).strip():
+        try:
+            config["TUSHARE_DAILY_CALL_LIMIT"] = int(_daily_limit_raw)
+        except ValueError:
+            logger.warning(
+                "TUSHARE_DAILY_CALL_LIMIT=%r 无效，将使用 TushareClient 默认值",
+                _daily_limit_raw,
+            )
+            config["TUSHARE_DAILY_CALL_LIMIT"] = None
+    else:
+        config["TUSHARE_DAILY_CALL_LIMIT"] = None
+
     config["_CONFIG_SOURCE"] = (
         f"project:{PROJECT_ENV_FILE}" if PROJECT_ENV_FILE.exists()
         else f"global:{GLOBAL_CONFIG_FILE}" if GLOBAL_CONFIG_FILE.exists()

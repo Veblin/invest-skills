@@ -15,7 +15,9 @@ from __future__ import annotations
 import os
 import time
 import logging
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 import pandas as pd
@@ -61,6 +63,19 @@ def _is_permission_denied(code: int, msg: str) -> bool:
     return "访问权限" in msg or "没有接口" in msg
 
 
+_BEIJING_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _next_beijing_midnight_reset_at(now: float | None = None) -> float:
+    """Return Unix timestamp of the next Asia/Shanghai (UTC+8) midnight."""
+    if now is None:
+        now = time.time()
+    dt = datetime.fromtimestamp(now, tz=_BEIJING_TZ)
+    next_day = dt.date() + timedelta(days=1)
+    next_midnight = datetime.combine(next_day, datetime.min.time(), tzinfo=_BEIJING_TZ)
+    return next_midnight.timestamp()
+
+
 class TushareClient:
     """Tushare Pro HTTP 轻量客户端。
 
@@ -68,17 +83,27 @@ class TushareClient:
     借鉴 daily_stock_analysis/data_provider/tushare_fetcher.py 的生产实践。
     """
 
-    def __init__(self, token: str | None = None, timeout: int = 30):
+    def __init__(
+        self,
+        token: str | None = None,
+        timeout: int = 30,
+        rate_limit_per_minute: int | None = None,
+        daily_call_limit: int | None = None,
+    ):
         self._token = token or os.environ.get("TUSHARE_TOKEN")
         self._timeout = timeout
+        self._rate_limit_per_minute = (
+            RATE_LIMIT_PER_MINUTE if rate_limit_per_minute is None else rate_limit_per_minute
+        )
+        self._daily_call_limit = (
+            DAILY_CALL_LIMIT if daily_call_limit is None else daily_call_limit
+        )
         self._session = requests.Session()
         self._session.trust_env = False
         self._call_timestamps: list[float] = []
         self._daily_calls = 0
-        # 当日结束时重置计数器
-        now = time.time()
-        midnight = now - (now % 86400)
-        self._daily_reset_at = midnight + 86400
+        # 当日结束时重置计数器（Tushare 日配额按北京时间 UTC+8 零点重置）
+        self._daily_reset_at = _next_beijing_midnight_reset_at(time.time())
         self._permission_denied_apis: set[str] = set()
         # 在初始化时捕获代理设置，供显式传入 Session（trust_env=False）
         self._proxies: dict[str, str] = {}
@@ -113,7 +138,7 @@ class TushareClient:
     def remaining_calls_today(self) -> int:
         """今日剩余配额（估估值）。"""
         self._reset_daily_counter_if_needed()
-        return max(0, DAILY_CALL_LIMIT - self._daily_calls)
+        return max(0, self._daily_call_limit - self._daily_calls)
 
     def query(self, api_name: str, fields: str = "", **kwargs: Any) -> pd.DataFrame:
         """统一查询入口。
@@ -223,20 +248,21 @@ class TushareClient:
         self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
 
     def _wait_for_rate_limit(self) -> None:
-        """遵守 80 次/分钟 的频率限制。"""
+        """遵守实例级频率限制（默认 80 次/分钟）。"""
         cutoff = time.time() - 60
         self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
         recent_calls = len(self._call_timestamps)
-        if recent_calls >= RATE_LIMIT_PER_MINUTE:
-            wait = 1.0 + (recent_calls - RATE_LIMIT_PER_MINUTE + 1) * 0.75
+        limit = self._rate_limit_per_minute
+        if recent_calls >= limit:
+            wait = 1.0 + (recent_calls - limit + 1) * 0.75
             logger.debug("Tushare: 频率限制，等待 %.1fs", wait)
             time.sleep(min(wait, 5.0))
 
     def _reset_daily_counter_if_needed(self) -> None:
         now = time.time()
-        if now > self._daily_reset_at:
+        if now >= self._daily_reset_at:
             self._daily_calls = 0
-            self._daily_reset_at = now + 86400
+            self._daily_reset_at = _next_beijing_midnight_reset_at(now)
 
     # ------------------------------------------------------------------
     # 上下文管理器

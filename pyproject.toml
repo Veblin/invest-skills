@@ -22,7 +22,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["skills/invest-a-stock/tests", "skills/invest-a-limit-up/tests", "skills/invest-a-gap-scan/tests", "skills/invest-a-journal/tests"]
+testpaths = ["skills/invest-a-stock/tests", "skills/invest-a-limit-up/tests", "skills/invest-a-gap-scan/tests", "skills/invest-a-journal/tests", "skills/invest-a-etf/tests"]
 python_files = ["test_*.py"]
 addopts = ["-q", "--tb=short"]
 markers = [
@@ -30,7 +30,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["skills/invest-a-stock/scripts", "skills/invest-a-limit-up/scripts", "skills/invest-a-gap-scan/scripts", "skills/invest-a-journal/scripts"]
+source = ["skills/invest-a-stock/scripts", "skills/invest-a-limit-up/scripts", "skills/invest-a-gap-scan/scripts", "skills/invest-a-journal/scripts", "skills/invest-a-etf/scripts"]
 
 [tool.coverage.report]
 skip_empty = true

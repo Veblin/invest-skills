@@ -115,6 +115,7 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 - **多源并行**：`_run_sources_parallel`，非串行降级
 - **所有源独立记录**：失败不阻塞，全失败标注 "未获取到任何有效数据"
 - **禁止买卖建议、仓位建议**（LAW 6）。**允许多情景估值参考价**（乐观/中性/悲观），须标注各情景的假设前提与概率权重，且注明"仅供参考，不构成投资建议"。**不允许不标注假设前提的单一目标价数字**（如"目标价 XX 元"）
+- **允许「交易结构分析」**（LAW 6a）— 基于多情景估值的入场区间（标注情景锚定 + 假设前提 + 盈亏比）、假设失效触发（离场条件）、操作纪律（研究流程规则）。入场区间 ≠ 买入建议：区间告诉你"在这个假设下，估值模型给出的合理价格带"，由用户自行决定。详见 [trade-structure.md](skills/invest-a-stock/references/trade-structure.md)
 - **archive/ 目录**是 v0.2 遗留，不要引用
 
 ## 措辞规范
@@ -185,6 +186,6 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 ## 报告路径
 
 - 数据源扩展方案：`reports/A股数据源扩展研究报告_v0.1.3.md`
-- 个股报告：`reports/{symbol}-{name}/{date}.md`
+- 个股报告：`reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`
 - 财报 F 规范：`skills/invest-a-stock/references/financials.md`
 - 九模块结构：`skills/invest-a-stock/references/modules.md`

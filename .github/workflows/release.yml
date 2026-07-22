@@ -24,8 +24,13 @@ jobs:
             .claude-plugin \
             .agents \
             hooks \
+            skills/lib \
             skills/invest-a-stock \
             skills/invest-a-limit-up \
+            skills/invest-a-gap-scan \
+            skills/invest-a-journal \
+            skills/invest-a-etf \
+            skills.yaml \
             gemini-extension.json \
             pyproject.toml \
             README.md \
@@ -38,8 +43,15 @@ jobs:
             .env.example \
             LICENSE \
             dist/pkg/
-          # Clean build artifacts from copy
-          rm -rf dist/pkg/skills/invest-a-stock/__pycache__ dist/pkg/skills/invest-a-limit-up/__pycache__ dist/pkg/.venv
+          # Clean build artifacts from copy (cp -r skills/X → dist/pkg/X)
+          rm -rf \
+            dist/pkg/lib/__pycache__ \
+            dist/pkg/invest-a-stock/__pycache__ \
+            dist/pkg/invest-a-limit-up/__pycache__ \
+            dist/pkg/invest-a-gap-scan/__pycache__ \
+            dist/pkg/invest-a-journal/__pycache__ \
+            dist/pkg/invest-a-etf/__pycache__ \
+            dist/pkg/.venv
           find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete
           cd dist && tar -czf invest-skills-${{ github.ref_name }}.tar.gz -C pkg .
           rm -rf dist/pkg

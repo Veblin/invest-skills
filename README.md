@@ -49,9 +49,13 @@ Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 ```
 /invest-a-stock 600176              # 单标的研究（多 Agent 并行）
 /invest-a-stock 600176 --with-macro # 含宏观情景
+/invest-a-etf 563300                # ETF 结构化研究
+/invest-a-journal                   # 交易方案四维评估（ETF/个股）
 /invest-a-limit-up                  # 涨停扫描
 /invest-a-gap-scan                  # 跳空缺口扫描
 ```
+
+> **命名约定**：用户 slash 一律连字符（`/invest-a-*`）。Claude 插件 marketplace 包名可保留冒号（`invest:a-stock`），二者不是同一层。
 
 ### Hermes Agent
 
@@ -82,6 +86,10 @@ uv run python skills/invest-a-limit-up/scripts/scan.py --sector 半导体
 uv run python skills/invest-a-gap-scan/scripts/scan.py
 uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
 uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
+
+# ETF 研究
+uv run python skills/invest-a-etf/scripts/etf.py report 563300
+uv run python skills/invest-a-etf/scripts/etf.py diagnose
 ```
 
 ---
@@ -148,7 +156,10 @@ skills/
       valuation_calc.py   ← 科学估值
       lib/                ← collector/render*/store/valuation/risk_scanner/...
     tests/
+  invest-a-etf/           ← ETF 研究（数据层供 journal 共用）
+  invest-a-journal/       ← 交易方案评估
   invest-a-limit-up/      ← 涨停扫描
+  invest-a-gap-scan/      ← 跳空缺口扫描
 .claude-plugin/           ← Claude Code 插件
 ```
 

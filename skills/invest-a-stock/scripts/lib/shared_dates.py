@@ -6,13 +6,9 @@ the path and re-exports for invest-a-stock internal imports.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from ._skills_lib_path import ensure_skills_lib_on_path
 
-_skills_lib = Path(__file__).resolve().parent.parent.parent.parent / "lib"
-_s = str(_skills_lib)
-if _s not in sys.path:
-    sys.path.insert(0, _s)
+ensure_skills_lib_on_path()
 
 from dates import yyyymmdd_to_iso  # noqa: E402
 

@@ -24,6 +24,7 @@ import pandas as pd
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
+from codes import classify_board, symbol_to_ts_code  # noqa: E402
 from lib import env  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
@@ -85,45 +86,9 @@ class StockInfo:
 # ---------------------------------------------------------------------------
 
 
-def _convert_to_ts_code(code_6d: str) -> str:
-    """Convert a 6-digit stock code to Tushare ``ts_code`` format.
-
-    Exchange suffix (aligned with invest-a-stock / limit-up BJ convention):
-    ``60``/``688`` → ``.SH``; ``8``/``4`` (北交所) → ``.BJ``; else → ``.SZ``.
-
-    Args:
-        code_6d: 6-digit stock code (e.g. ``"600176"``).
-
-    Returns:
-        Tushare-format code (e.g. ``"600176.SH"``, ``"000001.SZ"``,
-        ``"830799.BJ"``).
-    """
-    code = code_6d.strip().zfill(6)[:6]
-    if code.startswith(("60", "688")):
-        return f"{code}.SH"
-    # Beijing Stock Exchange: 8xxxx / 4xxxx (e.g. 83/87/88, 43)
-    if code.startswith(("8", "4")):
-        return f"{code}.BJ"
-    return f"{code}.SZ"
-
-
-def _classify_board(ts_code: str, market: str = "") -> str:
-    """Classify the board of a stock.
-
-    Args:
-        ts_code: Tushare-format stock code.
-        market: Market label from Tushare ``stock_basic`` (preferred).
-
-    Returns:
-        ``"主板"``, ``"创业板"``, or ``"科创板"``.
-    """
-    if market in ("主板", "创业板", "科创板"):
-        return market
-    if ts_code.startswith("688"):
-        return "科创板"
-    if ts_code.startswith(("300", "301")):
-        return "创业板"
-    return "主板"
+# ---------------------------------------------------------------------------
+# Stock code helpers (skills/lib/codes.py)
+# ---------------------------------------------------------------------------
 
 
 def _filter_st_and_delist(name: str) -> bool:
@@ -467,7 +432,7 @@ def _enrich_with_akshare(stock_map: dict[str, dict[str, Any]]) -> None:
             code_6d = str(row.get("code", "")).strip()
             name_val = row.get("name", "")
             if code_6d and pd.notna(name_val):
-                ts_code = _convert_to_ts_code(code_6d)
+                ts_code = symbol_to_ts_code(code_6d)
                 if ts_code in stock_map:
                     stock_map[ts_code]["name"] = str(name_val)
 
@@ -574,7 +539,7 @@ def build_universe(
 
         # Record membership
         for code_6d in codes:
-            ts_code = _convert_to_ts_code(code_6d)
+            ts_code = symbol_to_ts_code(code_6d)
             if ts_code not in stock_map:
                 stock_map[ts_code] = {
                     "ts_code": ts_code,
@@ -609,7 +574,7 @@ def build_universe(
         if _filter_st_and_delist(name):
             continue
 
-        board = _classify_board(info["ts_code"], info.get("market", ""))
+        board = classify_board(info["ts_code"], info.get("market", ""))
 
         si = StockInfo(
             ts_code=info["ts_code"],

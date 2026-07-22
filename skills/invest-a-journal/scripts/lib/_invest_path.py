@@ -10,6 +10,6 @@ _s = str(_skills_lib)
 if _s not in sys.path:
     sys.path.insert(0, _s)
 
-from invest_path import ensure_invest_a_scripts_on_path, invest_a_scripts_dir
+from invest_path import ensure_invest_a_scripts_on_path
 
-__all__ = ["ensure_invest_a_scripts_on_path", "invest_a_scripts_dir"]
+__all__ = ["ensure_invest_a_scripts_on_path"]

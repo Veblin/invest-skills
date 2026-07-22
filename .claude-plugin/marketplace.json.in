@@ -33,6 +33,19 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "stock-analysis", "china-stock", "limit-up", "market-scan", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-etf",
+      "description": "A股 ETF 结构化研究。指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。学习工具，非决策工具。",
+      "version": "{{ VERSION }}",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "etf", "china-stock", "a-share", "claude-code", "learning"]
     }
   ]
 }

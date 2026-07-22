@@ -23,7 +23,6 @@ from limit_up_scanner import (
     _compute_seal_quality,
     _daily_counts_from_stocks,
     get_trade_dates,
-    _safe_float,
     _fmt_yi,
     _fmt_date,
     _empty_breadth,
@@ -39,14 +38,17 @@ if str(_SCRIPTS) not in sys.path:
 from scan import build_parser, resolve_cli_filter  # noqa: E402
 from tushare_enrich import (
     _get_client,
-    _market_label,
-    _safe_float_or_none,
     _safe_str,
-    _to_ts_code,
     enrich_price_data,
     enrich_stock_info,
     get_trade_dates,
 )
+
+_SKILLS_LIB = Path(__file__).resolve().parents[2] / "lib"
+if str(_SKILLS_LIB) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_LIB))
+
+from codes import market_label, symbol_to_ts_code  # noqa: E402
 
 
 # ---- Fixtures ----
@@ -627,12 +629,6 @@ class TestUtilities:
         assert len(dates) >= 5
         assert all(len(d) == 8 for d in dates)
 
-    def test_safe_float(self):
-        assert _safe_float("3.14") == 3.14
-        assert _safe_float(None) == 0.0
-        assert _safe_float("abc") == 0.0
-        assert _safe_float(float("nan")) == 0.0
-
     def test_safe_float_from_nums(self):
         """L-01: nullable parsing delegates to invest-a-stock nums.safe_float."""
         assert safe_float(None) is None
@@ -733,25 +729,20 @@ class TestApplyTushareEnrich:
 
 class TestTushareEnrichHelpers:
 
-    def test_safe_float_or_none_rejects_nan(self):
-        assert _safe_float_or_none(float("nan")) is None
-        assert _safe_float_or_none(None) is None
-        assert _safe_float_or_none("12.5") == 12.5
-
     def test_safe_str_rejects_nan(self):
         assert _safe_str(float("nan")) == ""
         assert _safe_str(None) == ""
         assert _safe_str("主板") == "主板"
 
     def test_market_label_chinese(self):
-        assert _market_label("主板") == "主板"
-        assert _market_label("创业板") == "创业板"
-        assert _market_label("0") == "主板"
+        assert market_label("主板") == "主板"
+        assert market_label("创业板") == "创业板"
+        assert market_label("0") == "主板"
 
     def test_to_ts_code(self):
-        assert _to_ts_code("600176") == "600176.SH"
-        assert _to_ts_code("000001") == "000001.SZ"
-        assert _to_ts_code("xxx") == ""
+        assert symbol_to_ts_code("600176") == "600176.SH"
+        assert symbol_to_ts_code("000001") == "000001.SZ"
+        assert symbol_to_ts_code("xxx") == ""
 
 
 class TestTushareEnrichGuards:
