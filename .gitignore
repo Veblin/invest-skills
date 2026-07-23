@@ -24,7 +24,7 @@ evidence/*.json
 .baoyu-skills/
 cover-image/
 htmlcov/
-host-docs/
+# host-docs/ (temporarily commented for v0.2.2 issue doc)
 .coverage
 *_review.md
 
