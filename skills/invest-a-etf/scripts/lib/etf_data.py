@@ -158,7 +158,7 @@ def _get_etf_spot_df(*, force: bool = False) -> Any:
             and _SPOT_CACHE_DF is not None
             and (now - _SPOT_CACHE_TS) < _SPOT_CACHE_TTL_SEC
         ):
-            return _SPOT_CACHE_DF
+            return _SPOT_CACHE_DF.copy()
         try:
             import akshare as ak
 
@@ -390,15 +390,38 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         calendar_days = int(days * 365 / 250) + 15
         start_date = (date.today() - timedelta(days=calendar_days)).strftime("%Y%m%d")
 
-        with akshare_direct_session():
-            df = ak.fund_etf_fund_info_em(fund=symbol, start_date=start_date, end_date=end_date)
+        # 主链路：fund_etf_fund_info_em（字段更丰富）
+        # fallback：fund_open_fund_info_em — akshare 偶尔变更主接口列数时报
+        #   "Length mismatch: Expected axis has 14 elements, new values have 13 elements"
+        df = None
+        source = "fund_etf_fund_info_em"
+        try:
+            with akshare_direct_session():
+                df = ak.fund_etf_fund_info_em(fund=symbol, start_date=start_date, end_date=end_date)
+        except Exception as exc:
+            msg = str(exc)
+            if "Length mismatch" in msg or "Expected axis has" in msg:
+                logger.info(
+                    "fund_etf_fund_info_em column mismatch, falling back to fund_open_fund_info_em: %s",
+                    exc,
+                )
+                try:
+                    with akshare_direct_session():
+                        df = ak.fund_open_fund_info_em(symbol=symbol, indicator="单位净值走势")
+                    source = "fund_open_fund_info_em"
+                except Exception as fb_exc:
+                    logger.warning("fund_open_fund_info_em fallback also failed: %s", fb_exc)
+                    result["_error"] = f"fund_etf_fund_info_em: {exc}; fallback: {fb_exc}"
+                    return result
+            else:
+                raise
 
         if df is None or df.empty:
-            result["_error"] = "empty response"
+            result["_error"] = f"{source}: empty response"
             return result
 
         result["nav_rows"] = len(df)
-        navs, returns = _aligned_nav_returns(df)
+        navs, returns = _aligned_nav_returns(df, source=source)
         if navs:
             result["latest_nav"] = navs[-1]
 
@@ -442,8 +465,14 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _aligned_nav_returns(df: Any) -> tuple[list[float], list[float]]:
-    """从净值表构建对齐的 navs / returns（同一行样本）。"""
+def _aligned_nav_returns(df: Any, *, source: str = "") -> tuple[list[float], list[float]]:
+    """从净值表构建对齐的 navs / returns（同一行样本）。
+
+    Parameters
+    ----------
+    source : str
+        数据源标识（仅用于日志/调试，不改变字段名解析逻辑）。
+    """
     navs: list[float] = []
     returns: list[float] = []
     prev_nav: float | None = None
@@ -454,14 +483,18 @@ def _aligned_nav_returns(df: Any) -> tuple[list[float], list[float]]:
         chg = safe_float(row_data.get("日增长率"))
         if chg is not None:
             ret = chg / 100.0
+            navs.append(nav)
+            returns.append(ret)
+            prev_nav = nav
         elif prev_nav is not None and prev_nav > 0:
             ret = (nav / prev_nav) - 1.0
-        else:
+            navs.append(nav)
+            returns.append(ret)
             prev_nav = nav
-            continue
-        navs.append(nav)
-        returns.append(ret)
-        prev_nav = nav
+        else:
+            # 首行有效 NAV 但无日增长率 — 保留为锚点，不丢失数据
+            prev_nav = nav
+            navs.append(nav)
     return navs, returns
 
 

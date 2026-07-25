@@ -606,18 +606,27 @@ def _daily_counts_from_stocks(
 
 
 def _normalize_seal_time(raw: str) -> str:
-    """归一化为 HHMMSS 便于比较。"""
+    """归一化为 HHMMSS 便于比较。无效输入返回空字符串。"""
     digits = re.sub(r"\D", "", str(raw or ""))
+    result = ""
     if len(digits) >= 6:
-        return digits[:6]
-    if len(digits) == 5:
-        return digits.zfill(6)
-    if len(digits) == 4:
-        return digits + "00"
-    if len(digits) == 3:
-        # HMM → HHMMSS（"930" → "093000"），避免字典序把 "930" 排在 "100000" 之后
-        return digits.zfill(4) + "00"
-    return ""
+        result = digits[:6]
+    elif len(digits) == 5:
+        result = digits.zfill(6)
+    elif len(digits) == 4:
+        result = digits + "00"
+    elif len(digits) == 3:
+        # HMM → HHMMSS（"930" → "093000"）
+        result = digits.zfill(4) + "00"
+    # 校验 HH=00-23, MM=00-59, SS=00-59
+    if result:
+        try:
+            hh, mm, ss = int(result[0:2]), int(result[2:4]), int(result[4:6])
+            if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+                return ""
+        except (ValueError, IndexError):
+            return ""
+    return result
 
 
 def _one_to_two_rate(

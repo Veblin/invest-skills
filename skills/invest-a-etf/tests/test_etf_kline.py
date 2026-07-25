@@ -27,7 +27,8 @@ def test_aligned_nav_returns_derives_from_nav_when_chg_missing():
         {"单位净值": 1.02, "日增长率": None},
     ])
     navs, returns = _aligned_nav_returns(df)
-    assert len(navs) == 1
+    # fix #2: 首行 NAV 不再被丢弃；navs 保留锚点行 + 推导行
+    assert navs == pytest.approx([1.0, 1.02])
     assert returns == pytest.approx([0.02])
 
 

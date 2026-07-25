@@ -302,6 +302,11 @@ def _compute_technical(result: dict) -> None:
 
     # ETF：净值序列已预计算波动率/RSI/MA
     if is_etf:
+        kline_error = kline.get("_error")
+        if kline_error:
+            result["technical"]["status"] = "fetch_failed"
+            result["technical"]["kline_error"] = str(kline_error)
+            return
         result["technical"]["latest_close"] = kline.get("latest_nav")
         result["technical"]["volatility_annualized"] = kline.get("volatility_annualized")
         result["technical"]["rsi"] = kline.get("rsi")
