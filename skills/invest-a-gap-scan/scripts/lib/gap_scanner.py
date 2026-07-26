@@ -176,7 +176,7 @@ def _check_ma60_streak(closes: list[float], ma60: list[float | None],
         m = ma60[t]
         if m is not None:
             valid_count += 1
-            if not (closes[t] >= m or math.isclose(closes[t], m, rel_tol=1e-9)):
+            if not (closes[t] >= m or math.isclose(closes[t], m, rel_tol=1e-5, abs_tol=0.01)):
                 return False
     if total_count > 0 and valid_count / total_count < min_valid_ratio:
         return False  # too few valid MA60 bars for a meaningful check

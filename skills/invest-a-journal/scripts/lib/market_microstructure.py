@@ -581,16 +581,15 @@ def _fetch_erp(result: dict) -> None:
         config = _env.get_config()
         if _env.is_tushare_available(config):
             try:
-                from lib.tushare_client import _tushare_client as _tc
-                import pandas as pd
-                tc = _tc(config)
+                from lib.tushare_client import TushareClient
+                tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
                 today_str = date.today().strftime("%Y%m%d")
                 df = tc.query("index_dailybasic", ts_code="000300.SH",
                               trade_date=today_str)
                 if df is not None and not df.empty and "pe_ttm" in df.columns:
                     pe_hs300 = safe_float(df.iloc[-1].get("pe_ttm"))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("erp: Tushare HS300 PE unavailable, falling back to akshare: %s", exc)
 
         if pe_hs300 is None:
             with akshare_direct_session():
@@ -610,8 +609,8 @@ def _fetch_erp(result: dict) -> None:
                 dgs10 = _fred("DGS10", config)
                 if dgs10:
                     y10 = dgs10[-1][1]  # (date, value)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("erp: FRED DGS10 unavailable, falling back to akshare: %s", exc)
 
         if y10 is None:
             with akshare_direct_session():
@@ -635,7 +634,8 @@ def _fetch_erp(result: dict) -> None:
 def _fetch_pcr(result: dict) -> None:
     """50ETF PCR（Put/Call Ratio）= 认沽成交量 ÷ 认购成交量。
 
-    优先 Tushare opt_daily（5000 分），降级为 None。
+    优先 Tushare opt_basic + opt_daily（5000 分），降级为 None。
+    先查 opt_basic 获取 50ETF 期权合约代码，再按 exchange 查 opt_daily。
     """
     try:
         from lib import env as _env
@@ -644,23 +644,36 @@ def _fetch_pcr(result: dict) -> None:
             result["_errors"].append("pcr: Tushare unavailable (5000 pts required)")
             return
 
-        from lib.tushare_client import _tushare_client as _tc
-        tc = _tc(config)
-        # 50ETF 期权代码前缀
+        from lib.tushare_client import TushareClient
+        tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
         today_str = date.today().strftime("%Y%m%d")
-        df = tc.query("opt_daily", ts_code="510050.SH", trade_date=today_str)
+
+        # 先获取 50ETF 期权合约代码（opt_daily 的 ts_code 需为合约代码而非 ETF 代码）
+        df_basic = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
+        if df_basic is None or df_basic.empty:
+            result["_errors"].append("pcr: opt_basic empty")
+            return
+        etf50 = df_basic[df_basic["name"].str.contains("50ETF", na=False)]
+        if etf50.empty:
+            result["_errors"].append("pcr: no 50ETF option contracts in opt_basic")
+            return
+        put_codes = set(etf50[etf50["call_put"] == "P"]["ts_code"])
+        call_codes = set(etf50[etf50["call_put"] == "C"]["ts_code"])
+
+        # 按 exchange 查询当日所有 SSE 期权数据，再按合约代码过滤
+        df = tc.query("opt_daily", trade_date=today_str, exchange="SSE")
         if df is None or df.empty:
             result["_errors"].append("pcr: opt_daily empty")
             return
 
-        calls = df[df["call_put"] == "C"]
-        puts = df[df["call_put"] == "P"]
-        if calls.empty or puts.empty:
-            result["_errors"].append("pcr: no C/P data")
+        puts = df[df["ts_code"].isin(put_codes)]
+        calls = df[df["ts_code"].isin(call_codes)]
+        if puts.empty or calls.empty:
+            result["_errors"].append("pcr: no C/P data for 50ETF")
             return
 
-        call_vol = calls["vol"].sum()
         put_vol = puts["vol"].sum()
+        call_vol = calls["vol"].sum()
         if call_vol > 0:
             result["pcr"] = round(put_vol / call_vol, 4)
     except Exception as exc:
@@ -680,8 +693,8 @@ def _fetch_below_book_pct(result: dict) -> None:
             result["_errors"].append("below_book: Tushare unavailable")
             return
 
-        from lib.tushare_client import _tushare_client as _tc
-        tc = _tc(config)
+        from lib.tushare_client import TushareClient
+        tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
         today_str = date.today().strftime("%Y%m%d")
         df = tc.query("daily_basic", trade_date=today_str)
         if df is None or df.empty or "pb" not in df.columns:
