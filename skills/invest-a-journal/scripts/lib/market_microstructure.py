@@ -22,30 +22,16 @@ from lib.proxy import akshare_direct_session  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = env.STORE_DB
-
 # 涨跌停比极端阈值：>5:1 亢奋，<1:5（即 ratio < 0.2）恐慌
 _LU_LD_EXTREME_UP = 5.0
 _LU_LD_EXTREME_DOWN = 0.2  # 1:5
 
 
 # ---------------------------------------------------------------------------
-# 数据库连接（research.db WAL）
+# 数据库连接（委托 db.py，避免 _conn/_safe_close 重复定义）
 # ---------------------------------------------------------------------------
 
-def _conn() -> sqlite3.Connection:
-    p = DB_PATH
-    p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p))
-    c.row_factory = sqlite3.Row
-    return c
-
-
-def _safe_close(c: sqlite3.Connection) -> None:
-    try:
-        c.close()
-    except Exception:
-        pass
+from db import _conn, _safe_close  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
