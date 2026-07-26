@@ -9,6 +9,7 @@ v0.2.1：PE 分位依赖 Tushare；无 Tushare 时标注"无历史分位"。
 from __future__ import annotations
 
 import logging
+import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -453,13 +454,10 @@ def _percentile(value: float | None, population: list[float]) -> float | None:
 
 
 def _median(population: list[float]) -> float | None:
+    """Delegates to stdlib statistics.median; returns None for empty input."""
     if not population:
         return None
-    s = sorted(population)
-    n = len(s)
-    if n % 2 == 1:
-        return s[n // 2]
-    return round((s[n // 2 - 1] + s[n // 2]) / 2, 4)
+    return statistics.median(population)
 
 
 def _status_from_raw(raw: dict) -> str:
