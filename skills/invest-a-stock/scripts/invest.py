@@ -26,6 +26,10 @@ from pathlib import Path
 # 确保从本项目的 lib/ 导入，排除旧归档路径
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_SCRIPT_DIR))
+# 跨 skill 导入 invest-a-journal 的 market_microstructure
+_JOURNAL_LIB = _SCRIPT_DIR.parent.parent / "invest-a-journal" / "scripts" / "lib"
+if str(_JOURNAL_LIB) not in sys.path:
+    sys.path.insert(0, str(_JOURNAL_LIB))
 
 # 查找项目根目录（向上遍历直到找到 pyproject.toml）
 _project_root = _SCRIPT_DIR
@@ -422,6 +426,11 @@ def build_parser() -> argparse.ArgumentParser:
     pval.add_argument("--erp", type=float, default=0.06, help="股权风险溢价（默认 0.06）")
     pval.add_argument("--store", action="store_true", help="结果存入数据库便于回溯")
     pval.add_argument("--emit", default="text", choices=["text", "json"])
+
+    pms = sub.add_parser("market-status", help="市场微观结构快照：杠杆/广度/情绪/估值温度")
+    pms.add_argument("--days", type=int, default=5, help="趋势表周期（默认 5 天）")
+    pms.add_argument("--json", action="store_true", help="输出原始 JSON")
+    pms.add_argument("--save", action="store_true", help="采集并保存当日快照（非交易时段跳过）")
 
     return p
 
@@ -1604,6 +1613,157 @@ def cmd_value(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_market_status(args: argparse.Namespace) -> int:
+    """市场微观结构快照：杠杆/广度/情绪/估值温度。
+
+    --save  采集并保存当日快照
+    --days  趋势表周期（默认 5 天）
+    --json  输出原始 JSON
+    """
+    import json as _json
+    try:
+        from market_microstructure import snapshot, save_snapshot, latest_snapshot, load_history
+    except ImportError:
+        print("⚠️ market_microstructure 模块不可用", file=sys.stderr)
+        return 1
+
+    if args.save:
+        # 确保 market_snapshots 表已创建（首次运行需要）
+        if _HAS_STORE:
+            store_mod.init_db()
+        snap = save_snapshot()
+        if snap is None:
+            print("⚠️ 非交易日或数据缺失，已跳过保存")
+            return 0
+        if args.json:
+            print(_json.dumps(snap, ensure_ascii=False, indent=2, default=str))
+            return 0
+        print("✅ 市场快照已保存")
+        _print_env_labels(snap)
+        return 0
+
+    # 读取模式：优先最新持久化快照，降级当日实时快照
+    latest = latest_snapshot()
+    if latest and not args.save:
+        snap = latest
+    else:
+        snap = snapshot()
+
+    errors = snap.pop("_errors", [])
+    if errors:
+        for e in errors:
+            print(f"⚠️ {e}", file=sys.stderr)
+
+    if args.json:
+        print(_json.dumps(snap, ensure_ascii=False, indent=2, default=str))
+        return 1 if len(errors) >= 5 else 0
+
+    # 环境标签
+    _print_env_labels(snap)
+    print()
+
+    # 关键指标
+    print("━━━ Tier 1 原始指标 ━━━")
+    print(f"  两融余额:   {_fmt(snap.get('margin_balance'), '亿')}")
+    print(f"  融资买入额: {_fmt(snap.get('margin_buy_amount'), '亿')}")
+    print(f"  涨跌比:     {_fmt(snap.get('ad_ratio'))}")
+    print(f"  涨停/跌停:  {snap.get('limit_up_count', '-')} / {snap.get('limit_down_count', '-')}")
+    print(f"  全市场成交: {_fmt(snap.get('total_turnover'), '亿')}")
+    print()
+
+    # Tier 2
+    print("━━━ Tier 2 衍生指标 ━━━")
+    mtm = snap.get("margin_to_mcap")
+    print(f"  两融/流通市值: {_fmt(mtm, '%') if mtm is not None else '待积累'}")
+    mbt = snap.get("margin_buy_to_turnover")
+    print(f"  融资买入/成交: {_fmt(mbt, '%') if mbt is not None else '待积累'}")
+    m20 = snap.get("margin_20d_change")
+    print(f"  融资20日变化:  {_fmt_pct(m20)}")
+    ad5 = snap.get("ad_ratio_5d_ma")
+    print(f"  涨跌比5日均值: {_fmt(ad5)}")
+    ld_pct = snap.get("limit_down_20d_pct")
+    print(f"  跌停20日分位:  {_fmt(ld_pct, '%') if ld_pct is not None else '待积累'}")
+    print()
+
+    # Tier 3
+    print("━━━ Tier 3 估值温度 ━━━")
+    print(f"  ERP (股权风险溢价): {_fmt(snap.get('erp'), '%')}")
+    print(f"  50ETF PCR:          {_fmt(snap.get('pcr'))}")
+    bb = snap.get("below_book_pct")
+    print(f"  破净率:             {_fmt(bb, '%') if bb is not None else '—'}")
+    print()
+
+    # 近 N 日趋势 mini-table
+    history = load_history(args.days)
+    if history:
+        print(f"━━━ 近 {args.days} 日趋势 ━━━")
+        print(f"  {'日期':<12} {'两融(亿)':>10} {'涨跌比':>8} {'涨停':>5} {'跌停':>5} {'成交(亿)':>10}")
+        for h in history[-args.days:]:
+            print(
+                f"  {h['date']:<12} "
+                f"{h.get('margin_balance') or '—':>10} "
+                f"{h.get('ad_ratio') or '—':>8} "
+                f"{h.get('limit_up_count') or 0:>5} "
+                f"{h.get('limit_down_count') or 0:>5} "
+                f"{h.get('total_turnover') or '—':>10}"
+            )
+    else:
+        print("⚠️ 历史数据为空（首次使用？运行 market-status --save 积累首条记录）")
+
+    return 0
+
+
+def _print_env_labels(snap: dict) -> None:
+    """打印环境标签条。
+
+    优先从独立字段读取（实时快照），
+    缺失时从 env_label JSON 降级解析（DB 持久化快照）。
+    """
+    lev = snap.get("label_leverage") or ""
+    brd = snap.get("label_breadth") or ""
+    sent = snap.get("label_sentiment") or ""
+    summary = ""
+    env_str = snap.get("env_label")
+    if env_str:
+        try:
+            env = __import__("json").loads(env_str)
+            # 独立字段缺失时从 JSON 解析
+            if not lev:
+                lev = env.get("leverage", "")
+            if not brd:
+                brd = env.get("breadth", "")
+            if not sent:
+                sent = env.get("sentiment", "")
+            if not summary:
+                summary = env.get("summary", "")
+        except Exception:
+            pass
+
+    print()
+    print("┌──────────────────────────────────────────────────┐")
+    print(f"│ 🧊 杠杆: {lev or '—'}")
+    print(f"│ 🌤  广度: {brd or '—'}")
+    print(f"│ ⚠️  情绪: {sent or '—'}")
+    if summary:
+        print(f"│ → 综合: {summary}")
+    print("└──────────────────────────────────────────────────┘")
+
+
+def _fmt(val, unit: str = "") -> str:
+    if val is None:
+        return "—"
+    if isinstance(val, float):
+        return f"{val:.2f}{unit}"
+    return f"{val}{unit}"
+
+
+def _fmt_pct(val) -> str:
+    if val is None:
+        return "待积累"
+    arrow = "↑" if val > 0 else ("↓" if val < 0 else "→")
+    return f"{arrow} {abs(val):.1f}%"
+
+
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
@@ -1647,6 +1807,8 @@ def main() -> int:
         return cmd_shock(args)
     elif args.command == "value":
         return cmd_value(args)
+    elif args.command == "market-status":
+        return cmd_market_status(args)
     return 1
 
 

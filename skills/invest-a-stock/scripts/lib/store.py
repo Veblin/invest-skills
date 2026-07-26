@@ -107,6 +107,26 @@ def init_db() -> None:
                 created_at TEXT DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_val_sym ON valuations(symbol);
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                date TEXT PRIMARY KEY,
+                -- Tier 1 原始指标
+                margin_balance REAL, margin_buy_amount REAL,
+                ad_ratio REAL, limit_up_count INTEGER, limit_down_count INTEGER,
+                lu_ld_ratio REAL,
+                total_turnover REAL,
+                sse_float_mcap REAL, szse_float_mcap REAL,
+                -- Tier 2 衍生指标
+                margin_to_mcap REAL,
+                margin_buy_to_turnover REAL,
+                margin_20d_change REAL,
+                ad_ratio_5d_ma REAL,
+                limit_down_20d_pct REAL,
+                -- Tier 3 高级指标
+                erp REAL, pcr REAL, below_book_pct REAL,
+                -- 环境标签（JSON）
+                env_label TEXT,
+                collected_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
