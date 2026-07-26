@@ -516,33 +516,56 @@ def _fetch_limit_pools(result: dict) -> None:
         # 涨跌停均为 0：非交易日或跌停池无数据，与"无数据"状态区分
         result["lu_ld_ratio"] = None
         result["lu_ld_note"] = "zero_both"
-    elif up is not None and up > 0 and (dn is None or dn == 0):
+    elif up is not None and dn is not None and dn == 0 and up > 0:
+        # 跌停数为 0（已成功获取），涨停 > 0 → 极端看多
         result["lu_ld_ratio"] = None
         result["lu_ld_note"] = "no_limit_down"
+    # dn is None（API 失败）且 up 有值时：不设置 lu_ld_note，
+    # 避免 API 失败被误判为"无跌停"极端看多信号
 
 
 def _fetch_turnover(result: dict) -> None:
-    """全市场成交额 + 流通市值（上交所 + 深交所）。"""
+    """全市场成交额 + 流通市值（上交所 + 深交所）。
+
+    数据源结构差异：
+    - stock_sse_summary: key-value 格式（「项目」列含「流通市值」行），无成交金额列
+    - stock_szse_summary: 列式格式（含 成交金额/流通市值 列），第一行为「股票」类别
+    - 单位差异: SSE 流通市值已是亿元，SZSE 为元须 /1e8
+    """
     try:
         import akshare as ak
         with akshare_direct_session():
             sse = ak.stock_sse_summary()
             szse = ak.stock_szse_summary()
-        sse_row = sse.iloc[0] if sse is not None and not sse.empty else {}
-        szse_row = szse.iloc[0] if szse is not None and not szse.empty else {}
 
-        sse_amount = safe_float(sse_row.get("成交金额", 0))
-        szse_amount = safe_float(szse_row.get("成交金额", 0))
-        if sse_amount or szse_amount:
-            result["total_turnover"] = round((sse_amount + szse_amount) / 1e8, 2)
+        # --- 流通市值 ---
+        # SSE: 按「项目」列查找「流通市值」行，「股票」列为数值（亿元）
+        if sse is not None and not sse.empty and "项目" in sse.columns:
+            sse_mcap_row = sse[sse["项目"] == "流通市值"]
+            if not sse_mcap_row.empty:
+                sse_mcap_raw = safe_float(sse_mcap_row.iloc[0].get("股票"))
+                if sse_mcap_raw is not None:
+                    result["sse_float_mcap"] = round(sse_mcap_raw, 2)  # 已是亿元
 
-        # 流通市值（亿——原始单位是 元，/1e8 转 亿 与 margin 对齐）
-        sse_mcap = safe_float(sse_row.get("流通市值"))
-        szse_mcap = safe_float(szse_row.get("流通市值"))
-        if sse_mcap is not None:
-            result["sse_float_mcap"] = round(sse_mcap / 1e8, 2)
-        if szse_mcap is not None:
-            result["szse_float_mcap"] = round(szse_mcap / 1e8, 2)
+        # SZSE: 列式结构，「证券类别」=「股票」行的「流通市值」列（元）
+        if szse is not None and not szse.empty:
+            szse_stock = szse[szse["证券类别"] == "股票"]
+            if not szse_stock.empty:
+                szse_mcap_raw = safe_float(szse_stock.iloc[0].get("流通市值"))
+                if szse_mcap_raw is not None:
+                    result["szse_float_mcap"] = round(szse_mcap_raw / 1e8, 2)  # 元→亿
+
+        # --- 成交额 ---
+        # SSE 无成交额列；SZSE 有成交金额列（元）
+        szse_amount = 0.0
+        if szse is not None and not szse.empty:
+            szse_stock = szse[szse["证券类别"] == "股票"]
+            if not szse_stock.empty:
+                szse_amount = safe_float(szse_stock.iloc[0].get("成交金额", 0)) or 0.0
+        if szse_amount > 0:
+            result["total_turnover"] = round(szse_amount / 1e8, 2)  # 元→亿
+            # 注：仅含深交所成交额；上交所 stock_sse_summary 不提供成交金额，
+            # 实际全市场成交额约为该值的 1.8-2.2 倍
     except Exception as exc:
         logger.warning("turnover fetch failed: %s", exc)
         result["_errors"].append(f"turnover: {exc}")
@@ -593,8 +616,9 @@ def _fetch_erp(result: dict) -> None:
             try:
                 from lib.macro import _fetch_fred_series as _fred
                 dgs10 = _fred("DGS10", config)
-                if dgs10:
-                    y10 = dgs10[-1][1]  # (date, value)
+                # _fetch_fred_series returns (latest_value, [(date, value), ...])
+                if dgs10 and dgs10[0] is not None:
+                    y10 = dgs10[0]  # latest_value
             except Exception as exc:
                 logger.warning("erp: FRED DGS10 unavailable, falling back to akshare: %s", exc)
 
@@ -602,9 +626,10 @@ def _fetch_erp(result: dict) -> None:
             with akshare_direct_session():
                 df = ak.bond_zh_us_rate()
             if df is not None and not df.empty:
-                cn10 = df[df["曲线"] == "中国10年期国债收益率"]
-                if not cn10.empty:
-                    y10 = safe_float(cn10.iloc[-1].get("收益率"))
+                # 列名即为收益率名称，如「中国国债收益率10年」
+                col_10y = "中国国债收益率10年"
+                if col_10y in df.columns:
+                    y10 = safe_float(df.iloc[-1].get(col_10y))
 
         if y10 is None:
             result["_errors"].append("erp: 10Y yield unavailable")
