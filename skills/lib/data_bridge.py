@@ -131,8 +131,19 @@ def get_macro(*, force: bool = False) -> dict | None:
 
 
 def get_microstructure(*, force: bool = False) -> dict | None:
-    """市场微观结构快照（缓存 5min）。"""
-    from market_microstructure import snapshot  # noqa: E402
+    """市场微观结构快照（缓存 5min）。
+
+    注意：依赖 invest-a-journal 的 market_microstructure 模块，
+    仅在 journal skill 上下文中可用；其他 skill 调用会返回 None + 日志警告。
+    """
+    try:
+        from market_microstructure import snapshot  # noqa: E402
+    except ImportError:
+        logger.warning(
+            "get_microstructure() requires invest-a-journal on sys.path; "
+            "call from within journal skill context or ensure path bootstrap"
+        )
+        return None
     return _fetch_dimension(
         "microstructure", "market", snapshot,
         force=force, ttl_override=300,

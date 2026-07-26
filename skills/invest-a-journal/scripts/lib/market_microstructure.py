@@ -32,6 +32,7 @@ _LU_LD_EXTREME_DOWN = 0.2  # 1:5
 # ---------------------------------------------------------------------------
 
 from db import _conn, _safe_close  # noqa: E402
+from lib.store import init_db  # noqa: E402  # 确保 market_snapshots 表存在
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +77,6 @@ def snapshot() -> dict[str, Any]:
         "label_breadth": None,
         "label_sentiment": None,
         "label_capital_flow": None,
-        "label_breadth": None,
-        "label_sentiment": None,
         "_errors": [],
     }
 
@@ -119,6 +118,9 @@ def save_snapshot() -> dict[str, Any] | None:
 
     # 计算 Tier 1-2 历史分位标签（v0.2.2 升级）
     _compute_labels_v2(snap, history)
+
+    # 确保 market_snapshots 表存在（独立调用时 init_db 可能未执行）
+    init_db()
 
     # 写入
     c = _conn()
@@ -365,7 +367,6 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     # --- 资金面标签 ---
     nb_net = snap.get("northbound_net_inflow")
     nb_dir = snap.get("northbound_direction")
-    nb_src = snap.get("northbound_source")
     nb_mv = snap.get("northbound_market_value")
     if nb_mv is not None:
         mv_str = f"持股市值 {nb_mv:.0f}亿"
