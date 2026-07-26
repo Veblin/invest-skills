@@ -66,8 +66,16 @@ def snapshot() -> dict[str, Any]:
         "erp": None,
         "pcr": None,
         "below_book_pct": None,
+        # 资金面 — 北向
+        "northbound_net_inflow": None,      # 北向净流入（亿元）
+        "northbound_market_value": None,     # 北向持股市值（亿元）
+        "northbound_direction": None,        # "流入" | "流出" | None
+        "northbound_source": None,           # "direct" | "derived" | None
         # 标签
         "label_leverage": None,
+        "label_breadth": None,
+        "label_sentiment": None,
+        "label_capital_flow": None,
         "label_breadth": None,
         "label_sentiment": None,
         "_errors": [],
@@ -80,6 +88,7 @@ def snapshot() -> dict[str, Any]:
     _fetch_erp(result)
     _fetch_pcr(result)
     _fetch_below_book_pct(result)
+    _fetch_northbound(result)
     _compute_labels(result)
 
     return result
@@ -121,8 +130,10 @@ def save_snapshot() -> dict[str, Any] | None:
              sse_float_mcap, szse_float_mcap,
              margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
              ad_ratio_5d_ma, limit_down_20d_pct,
-             erp, pcr, below_book_pct, env_label)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             erp, pcr, below_book_pct,
+             northbound_net_inflow, northbound_direction, northbound_source,
+             env_label)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             snap["date"],
             snap["margin_balance"], snap["margin_buy_amount"], snap["ad_ratio"],
@@ -133,6 +144,9 @@ def save_snapshot() -> dict[str, Any] | None:
             snap["margin_20d_change"], snap["ad_ratio_5d_ma"],
             snap["limit_down_20d_pct"],
             snap["erp"], snap["pcr"], snap["below_book_pct"],
+            snap.get("northbound_net_inflow"),
+            snap.get("northbound_direction"),
+            snap.get("northbound_source"),
             snap.get("env_label"),
         ))
         c.commit()
@@ -348,11 +362,28 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
         elif lr is not None:
             snap["label_sentiment"] = f"偏热（涨跌停比{lr:.1f}:1）"
 
+    # --- 资金面标签 ---
+    nb_net = snap.get("northbound_net_inflow")
+    nb_dir = snap.get("northbound_direction")
+    nb_src = snap.get("northbound_source")
+    nb_mv = snap.get("northbound_market_value")
+    if nb_mv is not None:
+        mv_str = f"持股市值 {nb_mv:.0f}亿"
+        if nb_net is not None and nb_dir is not None:
+            snap["label_capital_flow"] = (
+                f"北向 {nb_dir} {abs(nb_net):.0f}亿（季度环比，{mv_str}）"
+            )
+        else:
+            snap["label_capital_flow"] = f"北向 {mv_str}（季度快照，日频不可得）"
+    else:
+        snap["label_capital_flow"] = "北向数据暂不可用"
+
     # --- 综合环境标签（JSON，供 journal 注入） ---
     env = {
         "leverage": snap.get("label_leverage"),
         "breadth": snap.get("label_breadth"),
         "sentiment": snap.get("label_sentiment"),
+        "capital_flow": snap.get("label_capital_flow"),
     }
     # 综合判断
     warnings = []
@@ -364,6 +395,8 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
         warnings.append("恐慌")
     if "极冷" in str(env["breadth"] or ""):
         warnings.append("广度极冷")
+    if nb_dir == "流出" and nb_net is not None and nb_net < -20:
+        warnings.append("外资大幅流出")
 
     env["summary"] = "偏谨慎" if len(warnings) >= 2 else (
         "⚠️ " + " + ".join(warnings) if len(warnings) == 1 else "正常"
@@ -435,6 +468,19 @@ def _compute_labels(result: dict) -> None:
             result["label_sentiment"] = "正常"
         elif lr is not None:
             result["label_sentiment"] = "偏热"
+
+    # 资金面标签（v0.2.2）
+    nb_net = result.get("northbound_net_inflow")
+    nb_dir = result.get("northbound_direction")
+    nb_mv = result.get("northbound_market_value")
+    if nb_mv is not None:
+        mv_str = f"持股市值 {nb_mv:.0f}亿"
+        if nb_net is not None and nb_dir is not None:
+            result["label_capital_flow"] = (
+                f"北向 {nb_dir} {abs(nb_net):.0f}亿（季度环比，{mv_str}）"
+            )
+        else:
+            result["label_capital_flow"] = f"北向 {mv_str}（季度快照，日频不可得）"
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +771,62 @@ def _fetch_below_book_pct(result: dict) -> None:
             hint = ""
         logger.warning("below_book fetch failed: %s%s", exc, f" {hint}" if hint else "")
         result["_errors"].append(f"below_book: {exc}{hint}")
+
+
+def _fetch_northbound(result: dict) -> None:
+    """北向资金市场级（沪股通 + 深股通合计）。
+
+    数据源：akshare ``stock_hsgt_hist_em``。
+
+    注意：
+    - ``当日成交净买额`` 自 2024-08-19 起恒为 NaN（交易所停止实时披露）
+    - ``持股市值`` 仅在季度末有非零值，日频数据为 0
+    - 因此方向判断依赖最近两次季度快照的持股市值变动
+
+    单位：akshare 返回元，统一转换为亿元。
+    """
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.stock_hsgt_hist_em()
+        if df is None or df.empty:
+            result["_errors"].append("northbound: empty response")
+            return
+
+        # 过滤持股市值 >0 的行（仅季度末有数据）
+        mv_col = "持股市值"
+        valid = df[df[mv_col].notna() & (df[mv_col] > 0)]
+        if valid.empty:
+            result["_errors"].append("northbound: no valid 持股市值 records")
+            return
+
+        # 最近一次季度快照
+        latest_q = valid.iloc[-1]
+        mv_current = safe_float(latest_q.get(mv_col))
+        if mv_current is not None:
+            result["northbound_market_value"] = round(mv_current / 1e8, 2)
+
+        # 与上一次季度快照比较方向
+        if len(valid) >= 2:
+            prev_q = valid.iloc[-2]
+            mv_prev = safe_float(prev_q.get(mv_col))
+            if mv_current is not None and mv_prev is not None and mv_prev > 0:
+                change = (mv_current - mv_prev) / 1e8
+                result["northbound_net_inflow"] = round(change, 2)
+                result["northbound_source"] = "quarterly"
+                if change > 100:        # 阈值避免噪音
+                    result["northbound_direction"] = "流入"
+                elif change < -100:
+                    result["northbound_direction"] = "流出"
+                else:
+                    result["northbound_direction"] = None
+            else:
+                result["northbound_source"] = "unavailable"
+        else:
+            result["northbound_source"] = "unavailable"
+    except Exception as exc:
+        logger.warning("northbound fetch failed: %s", exc)
+        result["_errors"].append(f"northbound: {exc}")
 
 
 # ---------------------------------------------------------------------------

@@ -3,11 +3,11 @@
 
 
 name: invest-a-limit-up
-version: "0.2.2"
+version: "0.2.1"
 description: "A股涨停板全市场扫描 + 交互式深挖 — 盘面宽度 / 板块轮动 / 涨停归因"
 argument-hint: "/invest-a-limit-up | /invest-a-limit-up --sector 半导体 | /invest-a-limit-up 600176 深挖"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
-user-invocable: true
+user-invocable: false
 metadata:
   requires:
     bins: [uv, python3]
@@ -15,7 +15,11 @@ metadata:
     - TUSHARE_TOKEN
 ---
 
-# invest-a-limit-up 涨停扫描 Skill
+> ⚠️ **DEPRECATED — 此 Skill 已下线用户入口。**
+> 核心功能（涨停家数趋势、行业热度、连板分布、封板质量）已合入 `/invest-a-pulse` 市场情绪分析 Skill。
+> `limit_up_scanner.py` 及 `scan.py` CLI 仍保留为数据管道组件，供 `market_microstructure.py` 调用。
+
+# invest-a-limit-up 涨停扫描 Skill（已废弃）
 
 ## 概述
 

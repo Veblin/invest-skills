@@ -123,11 +123,23 @@ def init_db() -> None:
                 limit_down_20d_pct REAL,
                 -- Tier 3 高级指标
                 erp REAL, pcr REAL, below_book_pct REAL,
+                -- 资金面 — 北向
+                northbound_net_inflow REAL, northbound_direction TEXT, northbound_source TEXT,
                 -- 环境标签（JSON）
                 env_label TEXT,
                 collected_at TEXT DEFAULT (datetime('now'))
             );
         """)
+        # v0.2.2 迁移：为已有表添加北向资金列
+        for col, col_type in [
+            ("northbound_net_inflow", "REAL"),
+            ("northbound_direction", "TEXT"),
+            ("northbound_source", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
