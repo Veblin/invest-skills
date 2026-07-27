@@ -69,6 +69,10 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
     print("## profile")
     print(f"  index_pe:          {profile.get('index_pe')}")
     print(f"  index_pe_status:   {profile.get('index_pe_status')}")
+    alloc = profile.get("industry_allocation")
+    if alloc:
+        top3 = ", ".join(f"{a['industry']} {a['pct']:.1f}%" for a in alloc[:3])
+        print(f"  industry_alloc:    {top3}")
     print(f"  premium_discount:  {profile.get('premium_discount')}")
     print(f"  aum_yi:            {profile.get('aum')}")
     print(f"  hedge_coverage:    {hc.get('coverage')} ({hc.get('index')})")

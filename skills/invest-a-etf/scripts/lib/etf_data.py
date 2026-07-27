@@ -211,6 +211,7 @@ def query_etf_data(
         "industry_pe": None,
         "industry_pe_note": None,
         "valuation_guide": None,
+        "industry_allocation": None,
         "premium_discount": None,
         "aum": None,
         "tracking_error": None,
@@ -231,6 +232,9 @@ def query_etf_data(
 
     # G4: 行业 ETF — 从 industry_weekly 查行业 PE 作为估值参考
     _attach_industry_pe(result, symbol)
+
+    # G6: ETF 行业配置比例（akshare fund_portfolio_industry_allocation_em）
+    _attach_industry_allocation(result, symbol)
 
     # G9: 附加行业特定估值指标指引
     _attach_valuation_guide(result)
@@ -897,6 +901,35 @@ def _attach_industry_pe(result: dict, symbol: str) -> None:
             )
     except Exception:
         pass  # 行业 PE 为非关键附加数据，降级不阻塞主流程
+
+
+def _attach_industry_allocation(result: dict, symbol: str) -> None:
+    """从 akshare ``fund_portfolio_industry_allocation_em`` 获取 ETF 行业配置比例（G6）。
+
+    降级策略：接口不可用或数据为空时静默跳过。
+    取最新报告期数据，去重，过滤占比为 0 的行业。
+    """
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.fund_portfolio_industry_allocation_em(symbol=symbol, date="2026")
+        if df is None or df.empty:
+            return
+        # 取最新一期数据
+        latest_date = str(sorted(df["截止时间"].unique())[-1])
+        latest = df[df["截止时间"] == latest_date]
+        alloc: list[dict] = []
+        for _, row in latest.iterrows():
+            industry = str(row.get("行业类别", ""))
+            pct = safe_float(row.get("占净值比例"))
+            if industry and pct is not None and pct > 0:
+                alloc.append({"industry": industry, "pct": round(pct, 2)})
+        if alloc:
+            alloc.sort(key=lambda x: x["pct"], reverse=True)
+            result["industry_allocation"] = alloc
+            result["industry_allocation_date"] = latest_date
+    except Exception:
+        pass  # 非关键数据，降级不阻塞
 
 
 def _attach_valuation_guide(result: dict) -> None:
