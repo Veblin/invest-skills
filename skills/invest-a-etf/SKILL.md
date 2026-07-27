@@ -30,7 +30,9 @@ metadata:
 
 ---
 
-## 硬约束（对齐 invest-a-stock LAW 6 / 6a）
+## 硬约束
+
+> **共享规范**：[report-conventions.md](../../../skills/lib/references/report-conventions.md) §2 硬约束 + §3 措辞规范 + §6 多情景参考。
 
 1. **禁止买卖建议、仓位建议**
 2. **允许多情景估值参考价**（须假设前提 + 概率权重 +「仅供参考，不构成投资建议」）
@@ -38,6 +40,8 @@ metadata:
 4. **允许交易结构分析**：情景锚定入场区间、假设失效触发、操作纪律（非「建议买入/止损」指令）
 5. **ETF 用指数 PE**，不用个股 PE 套路分析 ETF
 6. **技术指标仅描述状态**（价格相对 MA、RSI 区间位置），不输出交易信号；RSI 须标注 `rsi_period`
+7. **措辞规范**详见共享规范 §3（禁止词替换表 + 已知违规模式）
+8. **证据强度标注**详见共享规范 §5（SOP-EV 四维标注 + [事实]/[分析] 块格式）
 
 ---
 
@@ -133,6 +137,8 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 
 ## 分析合成（必选四步）
 
+> **共享框架**：[report-conventions.md §4](../../../skills/lib/references/report-conventions.md) 分析合成框架（对抗性假设 / 致命一击 / 盲点）。以下为 ETF 视角扩展（增加估值框架展开 + 行业位置解读两步）。
+
 报告按模板撰写完成后，**必须**执行以下四步合成。这不是 checklist——这是你的核心分析工作。
 
 ### 1. 估值框架展开（行业 ETF 必选，宽基 ETF 可选）
@@ -193,6 +199,8 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 
 ## Self-Check
 
+> **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + etf 专项）。
+
 发出备忘录前：
 
 - [ ] 无「建议买入/卖出/持有/加仓/减仓/止损」
@@ -200,6 +208,8 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 - [ ] 每个关键数字有来源
 - [ ] 用指数 PE / 行业 PE，非个股 PE 叙事
 - [ ] 首尾有风险声明
+- [ ] [事实]/[分析] 块带 SOP-EV 证据标签（共享规范 §5）
+- [ ] 措辞无违规（共享规范 §3）
 - [ ] 行业 ETF：估值框架已展开（`valuation_guide` 不是一行标签）
 - [ ] 行业 ETF：行业排名已引用（`industry-pe` 31 行业位置 + TMT 赛道位置）
 - [ ] 份额趋势已查询（`etf_share_flow`），有数据则展示，无数据则标注"积累中"
@@ -207,6 +217,7 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 - [ ] 致命一击：一句话条件式风险归纳，指向可观测失效条件
 - [ ] 盲点检查：≥2 条盲点发现
 - [ ] 关键矛盾已识别（如 CAPEX 总量降 vs 算力增），不是数据点的罗列
+- [ ] 文件名包含实际北京时间（非硬编码）
 
 ---
 
