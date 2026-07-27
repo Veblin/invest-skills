@@ -94,6 +94,46 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
     return 0
 
 
+def cmd_industry_pe() -> int:
+    """打印申万一级行业 PE/PB 一览。"""
+    try:
+        from industry_snapshot import list_industry_snapshot
+    except ImportError:
+        print("industry_snapshot 模块不可用（请检查路径配置）")
+        return 1
+    rows = list_industry_snapshot()
+    if not rows:
+        print("无行业 PE 数据。请先运行 `etf.py collect-weekly` 采集。")
+        print("（首次采集后需等待每周五收盘后自动更新，或手动触发。）")
+        return 0
+    print(f"{'行业':<10s} {'代码':<8s} {'PE':>8s} {'PB':>6s} {'涨跌%':>8s} {'换手%':>8s} {'日期':>10s}")
+    print("-" * 62)
+    for r in rows:
+        pe_str = f"{r.get('pe', 0):.2f}" if r.get('pe') is not None else "N/A"
+        pb_str = f"{r.get('pb', 0):.2f}" if r.get('pb') is not None else "N/A"
+        chg_str = f"{r.get('chg_pct', 0):+.2f}" if r.get('chg_pct') is not None else "N/A"
+        to_str = f"{r.get('turnover_pct', 0):.2f}" if r.get('turnover_pct') is not None else "N/A"
+        print(f"{r['index_name']:<10s} {r['index_code']:<8s} {pe_str:>8s} {pb_str:>6s} {chg_str:>8s} {to_str:>8s} {r['date']:>10s}")
+    print(f"\n共 {len(rows)} 个申万一级行业（数据来源: index_analysis_weekly_sw）")
+    return 0
+
+
+def cmd_collect_weekly() -> int:
+    """手动触发行业 PE 周度采集。"""
+    try:
+        from industry_snapshot import collect_industry_weekly
+    except ImportError:
+        print("industry_snapshot 模块不可用（请检查路径配置）")
+        return 1
+    print("采集申万行业 PE/PB 周度快照...")
+    result = collect_industry_weekly()
+    if result.get("error"):
+        print(f"采集失败: {result['error']}")
+        return 1
+    print(f"完成: {result['industries_saved']} 个行业已写入 industry_weekly（日期 {result['date']}）")
+    return 0
+
+
 def cmd_diagnose() -> int:
     print("invest-a-etf diagnose")
     print(f"  ETF_HEDGE_MAP entries: {len(ETF_HEDGE_MAP)}")
@@ -127,11 +167,18 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("diagnose", help="检查依赖与映射表")
 
+    sub.add_parser("industry-pe", help="申万一级行业 PE/PB 一览")
+    sub.add_parser("collect-weekly", help="手动触发行业 PE 周度采集")
+
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav)
     if args.cmd == "diagnose":
         return cmd_diagnose()
+    if args.cmd == "industry-pe":
+        return cmd_industry_pe()
+    if args.cmd == "collect-weekly":
+        return cmd_collect_weekly()
     return 1
 
 

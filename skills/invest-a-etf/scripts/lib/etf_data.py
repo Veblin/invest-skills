@@ -69,6 +69,114 @@ CSINDEX_MAP: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# ETF 类型分类映射（G1）
+# ---------------------------------------------------------------------------
+
+# ETF 代码 → 类型标签。已覆盖 HEDGE_MAP 所有条目 + 主流行业/主题 ETF。
+# 未列出的 ETF 通过 fund_etf_category_sina 动态查询或名称关键词推断。
+_ETF_CATEGORY_MAP: dict[str, str] = {
+    # 宽基
+    "510050": "broad_market", "510300": "broad_market", "510500": "broad_market",
+    "512100": "broad_market", "159845": "broad_market", "563300": "broad_market",
+    "588000": "broad_market", "159915": "broad_market", "159949": "broad_market",
+    # 行业
+    "515790": "sector", "516970": "sector", "512480": "sector", "512690": "sector",
+    "512010": "sector", "512760": "sector", "516160": "sector", "159995": "sector",
+    "512800": "sector", "512200": "sector", "515050": "sector", "515880": "sector",
+    "512660": "sector", "512710": "sector",
+    # 跨境
+    "513100": "cross_border", "513500": "cross_border",
+    # 商品
+    "518880": "commodity",
+    # 债券/货币
+    "511880": "money_market", "510880": "bond",  # 红利ETF归类为bond策略
+}
+
+_CATEGORY_LABELS: dict[str, str] = {
+    "broad_market": "宽基ETF", "sector": "行业ETF", "thematic": "主题ETF",
+    "cross_border": "跨境ETF", "bond": "债券ETF", "commodity": "商品ETF",
+    "money_market": "货币ETF",
+}
+
+
+# ---------------------------------------------------------------------------
+# ETF → 申万一级行业映射（G4）
+# ---------------------------------------------------------------------------
+
+ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
+    # 科技/TMT
+    "515050": {"sw_code": "801770", "sw_name": "通信",       "sub": "5G"},
+    "515880": {"sw_code": "801770", "sw_name": "通信",       "sub": "通信设备"},
+    "512480": {"sw_code": "801080", "sw_name": "电子",       "sub": "半导体"},
+    "159995": {"sw_code": "801080", "sw_name": "电子",       "sub": "芯片"},
+    "512330": {"sw_code": "801750", "sw_name": "计算机",     "sub": "信息技术"},
+    "515230": {"sw_code": "801750", "sw_name": "计算机",     "sub": "软件"},
+    # 新能源/高端制造
+    "515790": {"sw_code": "801730", "sw_name": "电力设备",   "sub": "光伏"},
+    "516160": {"sw_code": "801730", "sw_name": "电力设备",   "sub": "新能源"},
+    "512760": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工"},
+    "512660": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工"},
+    "516970": {"sw_code": "801720", "sw_name": "建筑装饰",   "sub": "基建"},
+    # 消费/医药
+    "512690": {"sw_code": "801120", "sw_name": "食品饮料",   "sub": "白酒"},
+    "512010": {"sw_code": "801150", "sw_name": "医药生物",   "sub": "医药"},
+    "512200": {"sw_code": "801180", "sw_name": "房地产",     "sub": "地产"},
+    # 金融
+    "512800": {"sw_code": "801780", "sw_name": "银行",       "sub": "银行"},
+    "512070": {"sw_code": "801790", "sw_name": "非银金融",   "sub": "券商"},
+    # 资源/周期
+    "512400": {"sw_code": "801050", "sw_name": "有色金属",   "sub": "有色"},
+    "512710": {"sw_code": "801150", "sw_name": "医药生物",   "sub": "生物医药"},
+}
+
+
+# ---------------------------------------------------------------------------
+# 申万行业 → 推荐估值指标（G9）
+# ---------------------------------------------------------------------------
+
+SECTOR_VALUATION_MAP: dict[str, dict] = {
+    # 金融地产 — PB 为主要指标（利润受拨备/周期扭曲）
+    "银行":       {"primary": "PB",  "secondary": "ROE",        "pe_timing": False, "reason": "利润受拨备周期扭曲，PB+ROE 更可靠"},
+    "非银金融":    {"primary": "PB",  "secondary": "ROE",        "pe_timing": False, "reason": "强周期，保险看 EV"},
+    "房地产":      {"primary": "PB",  "secondary": "净负债率",    "pe_timing": False, "reason": "政策驱动 > 估值驱动"},
+    # 周期行业 — EV/EBITDA 或 PB
+    "石油石化":    {"primary": "EV/EBITDA", "secondary": "PB",  "pe_timing": False, "reason": "油价驱动，PE 失真"},
+    "煤炭":       {"primary": "PE",  "secondary": "股息率",      "pe_timing": True,  "reason": "盈利高位时注意 PE 虚低"},
+    "有色金属":    {"primary": "EV/EBITDA", "secondary": "PB",  "pe_timing": False, "reason": "商品价格驱动"},
+    "基础化工":    {"primary": "PE",  "secondary": "PB",         "pe_timing": True,  "reason": "部分子行业均值回归"},
+    "钢铁":       {"primary": "PB",  "secondary": "股息率",      "pe_timing": False, "reason": "强周期，PE 高位=买点"},
+    "建筑材料":    {"primary": "PE",  "secondary": "PB",         "pe_timing": True,  "reason": "均值回归特征强"},
+    # 制造业
+    "电力设备":    {"primary": "PE",  "secondary": "PB",         "pe_timing": False, "reason": "新能源子行业不适用传统 PE（需结合 PEG/PS）"},
+    "机械设备":    {"primary": "PE",  "secondary": "PB",         "pe_timing": True,  "reason": "部分子行业均值回归"},
+    "国防军工":    {"primary": "PS",  "secondary": "PE",         "pe_timing": False, "reason": "盈利不稳定，主题/政策驱动"},
+    "汽车":       {"primary": "PE",  "secondary": "PB",         "pe_timing": False, "reason": "强周期，需结合月度销量"},
+    "家用电器":    {"primary": "PE",  "secondary": "股息率",      "pe_timing": True,  "reason": "消费属性强，均值回归"},
+    # 消费行业 — 盈利增长消化高 PE
+    "食品饮料":    {"primary": "PE",  "secondary": "ROE",        "pe_timing": False, "reason": "品牌壁垒使高盈利持续，高 PE 不意味必然回调"},
+    "纺织服装":    {"primary": "PE",  "secondary": "PB",         "pe_timing": False, "reason": "品牌/渠道分化大"},
+    "轻工制造":    {"primary": "PE",  "secondary": "PB",         "pe_timing": False, "reason": "子行业差异大"},
+    "商贸零售":    {"primary": "PS",  "secondary": "PE",         "pe_timing": False, "reason": "转型期，盈利不稳定"},
+    "社会服务":    {"primary": "PE",  "secondary": "PS",         "pe_timing": False, "reason": "恢复期"},
+    # TMT — 部分适用 PE，部分需 PS
+    "电子":       {"primary": "PE",  "secondary": "PB",         "pe_timing": True,  "reason": "PE 时机选择在 A 股电子行业有效；半导体早期看 PS"},
+    "计算机":      {"primary": "PS",  "secondary": "PE",         "pe_timing": False, "reason": "亏损占比高，主题/政策驱动"},
+    "通信":       {"primary": "PE",  "secondary": "EV/EBITDA",  "pe_timing": False, "reason": "高增长消化高 PE"},
+    "传媒":       {"primary": "PS",  "secondary": "PE",         "pe_timing": False, "reason": "主题/爆款驱动"},
+    # 公用事业与基础设施
+    "公用事业":    {"primary": "PE",  "secondary": "股息率",      "pe_timing": True,  "reason": "A 股 PE 时机选择最有效的行业之一，盈利稳定，均值回归"},
+    "交通运输":    {"primary": "PE",  "secondary": "PB",         "pe_timing": True,  "reason": "部分子行业有效"},
+    "建筑装饰":    {"primary": "PB",  "secondary": "PE",         "pe_timing": False, "reason": "政策驱动"},
+    "环保":       {"primary": "PB",  "secondary": "PE",         "pe_timing": False, "reason": "政策驱动"},
+    # 其他
+    "农林牧渔":    {"primary": "PE",  "secondary": "PB",         "pe_timing": False, "reason": "猪周期驱动，PE 波动极大"},
+    "医药生物":    {"primary": "PE",  "secondary": "研发费用率",   "pe_timing": False, "reason": "创新药 vs 仿制药差异极大"},
+    "美容护理":    {"primary": "PE",  "secondary": "PS",         "pe_timing": False, "reason": "高增长"},
+    "综合":       {"primary": "PE",  "secondary": "PB",         "pe_timing": False, "reason": "多元化企业，逐案分析"},
+}
+
+
+# ---------------------------------------------------------------------------
 # 主查询函数
 # ---------------------------------------------------------------------------
 
@@ -97,8 +205,12 @@ def query_etf_data(
     """
     result: dict[str, Any] = {
         "symbol": symbol,
+        "category": query_etf_category(symbol),
         "index_pe": None,
         "index_pe_status": "unknown_etf",
+        "industry_pe": None,
+        "industry_pe_note": None,
+        "valuation_guide": None,
         "premium_discount": None,
         "aum": None,
         "tracking_error": None,
@@ -117,6 +229,12 @@ def query_etf_data(
     if idx_code:
         _fetch_csindex_pe(result, idx_code)
 
+    # G4: 行业 ETF — 从 industry_weekly 查行业 PE 作为估值参考
+    _attach_industry_pe(result, symbol)
+
+    # G9: 附加行业特定估值指标指引
+    _attach_valuation_guide(result)
+
     if spot_row is not None:
         _apply_spot_row_to_profile(result, spot_row, symbol)
     else:
@@ -126,7 +244,7 @@ def query_etf_data(
         elif row is not None:
             _apply_spot_row_to_profile(result, row, symbol)
 
-    _auto_flags(result)
+    _auto_flags(result, result["category"].get("category", ""))
     result["data_quality"] = _summarize_etf_data_quality(result)
     return result
 
@@ -594,6 +712,134 @@ def _em_to_premium_discount(em_raw: object) -> float | None:
     """EM 基金折价率（+ = 折价）→ premium_discount（+ = 溢价）。"""
     em = safe_float(em_raw)
     return None if em is None else -em
+
+
+# ---------------------------------------------------------------------------
+# ETF 类型分类（G1）
+# ---------------------------------------------------------------------------
+
+def query_etf_category(symbol: str) -> dict[str, str]:
+    """查询 ETF 类型标签。
+
+    来源优先级：硬编码映射 > fund_etf_category_sina > 名称关键词推断。
+
+    Returns
+    -------
+    dict
+        {"category": "sector", "label": "行业ETF", "source": "builtin_map"}
+    """
+    cat = _ETF_CATEGORY_MAP.get(symbol)
+    if cat:
+        return {"category": cat, "label": _CATEGORY_LABELS.get(cat, cat), "source": "builtin_map"}
+
+    # 动态查询 akshare 分类（兜底）
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.fund_etf_category_sina()
+        row = df[df["代码"] == symbol] if df is not None else None
+        if row is not None and not row.empty:
+            name = str(row.iloc[0].get("名称", ""))
+            cat = _infer_category_from_name(name)
+            return {"category": cat, "label": _CATEGORY_LABELS.get(cat, cat), "source": "sina_dynamic"}
+    except Exception:
+        pass
+
+    # 名称关键词回退
+    try:
+        row2, _ = _lookup_etf_spot_row(symbol)  # type: ignore[arg-type]
+        if row2 is not None:
+            name = str(row2.get("名称", ""))
+            cat = _infer_category_from_name(name)
+            return {"category": cat, "label": _CATEGORY_LABELS.get(cat, cat), "source": "name_fallback"}
+    except Exception:
+        pass
+
+    return {"category": "unknown", "label": "未知", "source": "none"}
+
+
+def _infer_category_from_name(name: str) -> str:
+    """从 ETF 名称关键词推断类型。"""
+    n = name.lower()
+    if any(k in n for k in ["qdii", "纳指", "标普", "恒生", "日经", "德国"]):
+        return "cross_border"
+    if any(k in n for k in ["黄金", "豆粕", "原油", "有色", "商品"]):
+        return "commodity"
+    if any(k in n for k in ["货币", "日利", "保证金"]):
+        return "money_market"
+    if any(k in n for k in ["债", "国债", "信用债", "可转债"]):
+        return "bond"
+    if any(k in n for k in ["300", "500", "1000", "2000", "上证", "深证", "科创", "创业",
+                              "沪深", "中证", "50", "180", "红利", "基本面"]):
+        return "broad_market"
+    return "sector"
+
+
+# ---------------------------------------------------------------------------
+# 行业 PE 附加 + 估值指引（G4 + G9）
+# ---------------------------------------------------------------------------
+
+def _attach_industry_pe(result: dict, symbol: str) -> None:
+    """对行业/主题 ETF，从 industry_weekly SQLite 表查行业 PE 注入 result。"""
+    if result["index_pe_status"] != "not_mapped":
+        return
+    sw_info = ETF_TO_SW_INDUSTRY.get(symbol)
+    if not sw_info:
+        return
+    try:
+        import sqlite3
+        from lib.store import _conn, _safe_close
+        c = _conn()
+        try:
+            row = c.execute(
+                "SELECT pe, pb, date FROM industry_weekly "
+                "WHERE index_code = ? ORDER BY date DESC LIMIT 1",
+                (sw_info["sw_code"],),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return
+        finally:
+            _safe_close(c)
+        if row:
+            result["industry_pe"] = row["pe"]
+            result["industry_pe_note"] = (
+                f"申万{sw_info['sw_name']}({sw_info['sw_code']})行业 PE={row['pe']:.2f}，"
+                f"数据日期 {row['date']}；"
+                f"此为行业层面估值参考，非 ETF 精确 PE"
+            )
+    except Exception:
+        pass
+
+
+def _attach_valuation_guide(result: dict) -> None:
+    """附加该 ETF 对应行业的推荐估值指标指引。"""
+    symbol = result.get("symbol", "")
+    sw_info = ETF_TO_SW_INDUSTRY.get(symbol)
+    if not sw_info:
+        return
+    guide = SECTOR_VALUATION_MAP.get(sw_info["sw_name"])
+    if guide:
+        result["valuation_guide"] = {
+            "industry": sw_info["sw_name"],
+            "sub_sector": sw_info.get("sub", ""),
+            **guide,
+        }
+
+
+def query_sector_valuation_guide(sw_name: str) -> dict | None:
+    """查询申万行业的推荐估值指标。
+
+    Parameters
+    ----------
+    sw_name : str
+        申万一级行业名称（如 "电子"、"银行"）。
+
+    Returns
+    -------
+    dict or None
+        {primary, secondary, pe_timing, reason}
+    """
+    return SECTOR_VALUATION_MAP.get(sw_name)
 
 
 # ---------------------------------------------------------------------------

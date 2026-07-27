@@ -139,6 +139,18 @@ def init_db() -> None:
                 PRIMARY KEY (date, symbol)
             );
         """)
+        # v0.2.2: 申万行业周度 PE/PB 快照
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS industry_weekly (
+                index_code TEXT NOT NULL,
+                index_name TEXT NOT NULL,
+                date TEXT NOT NULL,
+                pe REAL, pb REAL, chg_pct REAL,
+                turnover_pct REAL, dividend_yield REAL,
+                mkt_cap REAL,
+                PRIMARY KEY (index_code, date)
+            );
+        """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [
             ("northbound_net_inflow", "REAL"),
