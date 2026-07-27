@@ -666,7 +666,9 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
             # Tushare fund_adj 日期格式为 "20260724"，akshare 为 "2026-07-24"
             # 统一为无分隔符格式做匹配
             date_key = date_str.replace("-", "")
-            adj_d = adj_map.get(date_key) or adj_map.get(date_str)
+            adj_d = adj_map.get(date_key)
+            if adj_d is None:
+                adj_d = adj_map.get(date_str)
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
         chg = safe_float(row_data.get("日增长率"))
@@ -773,7 +775,8 @@ def _fetch_index_ma(result: dict, idx_code: str) -> None:
     try:
         import akshare as ak
 
-        # csindex 代码 → akshare 行情代码（上证 sh / 深证 sz）
+        # csindex 代码 → akshare 行情代码
+        # 中证(0/9开头)在上交所发布→sh；深证/创业板(3开头)在深交所→sz
         ticker = f"sh{idx_code}" if idx_code.startswith(("0", "9")) else f"sz{idx_code}"
         with akshare_direct_session():
             df = ak.stock_zh_index_daily(symbol=ticker)
