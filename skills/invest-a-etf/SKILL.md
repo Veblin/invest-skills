@@ -53,7 +53,13 @@ Claude: 确认 6 位代码
   uv run python skills/invest-a-etf/scripts/etf.py industry-pe   （行业 ETF 时必须）
   PYTHONPATH=... uv run python -c "from etf_data import etf_share_flow; ..."  （份额趋势）
        ↓
-Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-ETF/{timestamp}.md
+Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
+
+**报告文件命名规则**：
+- `{timestamp}` = 报告生成时的实际时间，格式 `YYYY-MM-DD-HH-MM-SS`（北京时间）
+- `{name}` = ETF 简称（如 `科创50ETF`、`通信ETF`、`卫星ETF`）
+- 示例：`reports/588000-科创50ETF/2026-07-27-19-40-00.md`
+- 写入文件前必须获取当前实际时间，禁止使用硬编码时间戳
        ↓
 引导: 若用户有仓位方案要评估 → /invest-a-journal
 ```

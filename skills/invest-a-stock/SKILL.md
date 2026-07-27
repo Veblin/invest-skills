@@ -100,6 +100,8 @@ metadata:
 
 报告路径：`reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`，Claude 内只输出简报。
 
+**文件命名规则**：`{YYYY-MM-DD-HH-MM-SS}` 为报告生成时的实际北京时间，写入前必须获取当前时间，禁止硬编码时间戳。
+
 ### 数据源策略
 
 v0.3+ **多源并行**：全部可用源同时采集，差异保留于 `_meta.all_sources`，由分析阶段标注。
