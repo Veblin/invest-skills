@@ -500,6 +500,8 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "nav_rows": 0,
         "latest_nav": None,
         "volatility_annualized": None,
+        "adj_applied": False,
+        "adj_note": None,
         "rsi": None,
         "rsi_period": None,
         "rsi_note": "Wilder RSI on NAV closes，默认周期 24（ETF NAV 波动低于个股价格，较标准 14 周期更平滑；数据不足时降级为 14），非交易信号",
@@ -553,7 +555,17 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             return result
 
         result["nav_rows"] = len(df)
-        navs, returns = _aligned_nav_returns(df, source=source)
+
+        # 尝试 Tushare fund_adj 复权（消除分红/拆分断点）
+        adj_map = _fetch_fund_adj_factor(symbol)
+        if adj_map:
+            result["adj_applied"] = True
+            result["adj_note"] = (
+                "NAV 序列已通过 Tushare fund_adj 前复权（消除分红/拆分造成的断点），"
+                "MA/波动率/RSI/BOLL 基于复权后序列计算"
+            )
+
+        navs, returns = _aligned_nav_returns(df, source=source, adj_map=adj_map)
         if navs:
             result["latest_nav"] = navs[-1]
 
@@ -624,14 +636,23 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _aligned_nav_returns(df: Any, *, source: str = "") -> tuple[list[float], list[float]]:
+def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float] | None = None) -> tuple[list[float], list[float]]:
     """从净值表构建对齐的 navs / returns（同一行样本）。
 
     Parameters
     ----------
     source : str
         数据源标识（仅用于日志/调试，不改变字段名解析逻辑）。
+    adj_map : dict[str, float] | None
+        Tushare fund_adj 复权因子映射 {date_str: adj_factor}。
+        不为 None 时，对历史 NAV 做前复权（forward-adjust），
+        使分红/拆分前后的 NAV 连续可比。
     """
+    latest_adj = 1.0
+    if adj_map:
+        sorted_dates = sorted(adj_map.keys())
+        latest_adj = adj_map[sorted_dates[-1]] if sorted_dates else 1.0
+
     navs: list[float] = []
     returns: list[float] = []
     prev_nav: float | None = None
@@ -639,6 +660,15 @@ def _aligned_nav_returns(df: Any, *, source: str = "") -> tuple[list[float], lis
         nav = safe_float(row_data.get("单位净值"))
         if nav is None:
             continue
+        # 前复权：adjusted = raw * adj(d) / adj(latest)
+        if adj_map:
+            date_str = str(row_data.get("净值日期", ""))
+            # Tushare fund_adj 日期格式为 "20260724"，akshare 为 "2026-07-24"
+            # 统一为无分隔符格式做匹配
+            date_key = date_str.replace("-", "")
+            adj_d = adj_map.get(date_key) or adj_map.get(date_str)
+            if adj_d and latest_adj > 0:
+                nav = nav * adj_d / latest_adj
         chg = safe_float(row_data.get("日增长率"))
         if chg is not None:
             ret = chg / 100.0
@@ -682,6 +712,57 @@ def rollup_etf_quality_status(etf: dict) -> str:
     if errors or not has_data:
         return "missing"
     return "available"
+
+
+def _fetch_fund_adj_factor(symbol: str) -> dict[str, float] | None:
+    """从 Tushare ``fund_adj`` 拉取 ETF 复权因子。
+
+    用于前复权 NAV 序列，消除分红/拆分造成的断点。
+
+    Returns
+    -------
+    dict or None
+        {date_str: adj_factor}，Tushare 不可用时返回 None。
+    """
+    try:
+        from lib.env import get_config
+
+        config = get_config()
+        token = config.get("TUSHARE_TOKEN")
+        if not token:
+            logger.info("fund_adj(%s): no TUSHARE_TOKEN, skipping", symbol)
+            return None
+
+        # ETF 代码 → Tushare ts_code（内联，避免跨包导入 lib.codes）
+        s = symbol.strip()
+        if s.startswith(("5", "6")):
+            ts_code = f"{s}.SH"
+        elif s.startswith(("0", "1", "3")):
+            ts_code = f"{s}.SZ"
+        elif s.startswith(("4", "8")):
+            ts_code = f"{s}.BJ"
+        else:
+            return None
+
+        import tushare as ts
+
+        pro = ts.pro_api(token)
+        df = pro.fund_adj(ts_code=ts_code, fields="trade_date,adj_factor")
+        if df is None or df.empty:
+            return None
+
+        adj_map: dict[str, float] = {}
+        for _, row in df.iterrows():
+            d = str(row.get("trade_date", ""))
+            f = safe_float(row.get("adj_factor"))
+            if d and f is not None:
+                adj_map[d] = f
+        logger.info("fund_adj(%s): %d rows loaded, latest adj=%.4f", symbol, len(adj_map),
+                     adj_map.get(sorted(adj_map.keys())[-1], 1.0) if adj_map else 1.0)
+        return adj_map if adj_map else None
+    except Exception as exc:
+        logger.info("fund_adj(%s) unavailable: %s", symbol, exc)
+        return None
 
 
 def _fetch_index_ma(result: dict, idx_code: str) -> None:

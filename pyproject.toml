@@ -13,6 +13,7 @@ dependencies = [
   "baostock>=0.8.9",
   "tickflow>=0.1.0",
   "pyyaml>=6.0.3",
+  "tushare>=1.4.29",
 ]
 
 [dependency-groups]
