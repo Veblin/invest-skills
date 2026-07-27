@@ -529,3 +529,152 @@ def _em_to_premium_discount(em_raw: object) -> float | None:
     """EM 基金折价率（+ = 折价）→ premium_discount（+ = 溢价）。"""
     em = safe_float(em_raw)
     return None if em is None else -em
+
+
+# ---------------------------------------------------------------------------
+# ETF 份额历史序列（v0.2.2 P0）
+# ---------------------------------------------------------------------------
+
+def save_etf_share_snapshot(symbol: str) -> dict | None:
+    """采集当日 ETF 份额快照并写入 etf_share_snapshots 表。
+
+    数据源：akshare ``fund_etf_spot_em`` 的 ``最新份额`` 列。
+
+    Parameters
+    ----------
+    symbol : str
+        6 位 ETF 代码（如 588000）。
+
+    Returns
+    -------
+    dict or None
+        写入的快照字典；非交易日（价格/份额为 NaN）返回 None。
+    """
+    import sqlite3
+    from datetime import date
+
+    from lib import env as _env
+    from lib.store import _conn, _safe_close, init_db
+
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.fund_etf_spot_em()
+    except Exception as exc:
+        logger.warning("etf share snapshot: fund_etf_spot_em failed: %s", exc)
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    row = df[df["代码"] == symbol]
+    if row.empty:
+        logger.warning("etf share snapshot: symbol %s not found in spot data", symbol)
+        return None
+
+    row = row.iloc[0]
+    shares = safe_float(row.get("最新份额"))
+    price = safe_float(row.get("最新价"))
+
+    # 非交易日检测
+    if shares is None or price is None:
+        logger.info("etf share snapshot: %s 疑似非交易日（份额/价格缺失），跳过", symbol)
+        return None
+
+    aum = round(shares * price / 1e8, 2)
+    today = date.today().strftime("%Y%m%d")
+
+    snap = {
+        "date": today,
+        "symbol": symbol,
+        "shares": shares,
+        "price": price,
+        "aum": aum,
+    }
+
+    init_db()
+    c = _conn()
+    try:
+        c.execute(
+            "INSERT OR REPLACE INTO etf_share_snapshots (date, symbol, shares, price, aum) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (today, symbol, shares, price, aum),
+        )
+        c.commit()
+        logger.info("etf share snapshot %s/%s saved: %.0f 份, AUM %.2f 亿", today, symbol, shares, aum)
+        return snap
+    except Exception as exc:
+        logger.warning("etf share snapshot save failed: %s", exc)
+        c.rollback()
+        return None
+    finally:
+        _safe_close(c)
+
+
+def etf_share_flow(symbol: str, days: int = 60) -> dict:
+    """读取 ETF 份额历史序列，计算份额变动和估算资金流。
+
+    Parameters
+    ----------
+    symbol : str
+        6 位 ETF 代码。
+    days : int
+        回溯天数（默认 60 个自然日）。
+
+    Returns
+    -------
+    dict
+        {symbol, date, shares_current, aum_current,
+         share_change_5d/20d/60d (份),
+         flow_est_5d/20d/60d (亿元),
+         history_count}
+    """
+    import sqlite3
+
+    from lib.store import _conn, _safe_close
+
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT date, shares, price, aum FROM etf_share_snapshots "
+            "WHERE symbol = ? ORDER BY date ASC",
+            (symbol,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return {"symbol": symbol, "history_count": 0, "note": "无历史数据（etf_share_snapshots 表不存在）"}
+        raise
+    finally:
+        _safe_close(c)
+
+    if not rows:
+        return {"symbol": symbol, "history_count": 0, "note": "无历史数据"}
+
+    history = [dict(r) for r in rows]
+    latest = history[-1]
+
+    def _change(window: int) -> dict:
+        if len(history) < window + 1:
+            return {"share_change": None, "flow_est": None}
+        prev = history[-(window + 1)]
+        d_shares = latest["shares"] - prev["shares"]
+        avg_price = (latest["price"] + prev["price"]) / 2
+        flow_est = round(d_shares * avg_price / 1e8, 2) if avg_price > 0 else None
+        return {
+            "share_change": d_shares,
+            "flow_est": flow_est,
+        }
+
+    return {
+        "symbol": symbol,
+        "date": latest["date"],
+        "shares_current": latest["shares"],
+        "aum_current": latest["aum"],
+        "share_change_5d": _change(5)["share_change"],
+        "flow_est_5d": _change(5)["flow_est"],
+        "share_change_20d": _change(20)["share_change"],
+        "flow_est_20d": _change(20)["flow_est"],
+        "share_change_60d": _change(60)["share_change"],
+        "flow_est_60d": _change(60)["flow_est"],
+        "history_count": len(history),
+    }

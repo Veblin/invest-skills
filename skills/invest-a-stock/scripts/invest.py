@@ -432,6 +432,12 @@ def build_parser() -> argparse.ArgumentParser:
     pms.add_argument("--json", action="store_true", help="输出原始 JSON")
     pms.add_argument("--save", action="store_true", help="采集并保存当日快照（非交易时段跳过）")
 
+    pef = sub.add_parser("etf-flow", help="ETF 份额变化趋势（需先 --save 积累历史）")
+    pef.add_argument("symbol", help="6 位 ETF 代码（如 588000）")
+    pef.add_argument("--days", type=int, default=60, help="回溯天数（默认 60）")
+    pef.add_argument("--save", action="store_true", help="采集当日份额并存入 DB")
+    pef.add_argument("--json", action="store_true", help="输出原始 JSON")
+
     return p
 
 
@@ -1764,6 +1770,49 @@ def _fmt_pct(val) -> str:
     return f"{arrow} {abs(val):.1f}%"
 
 
+def cmd_etf_flow(args: argparse.Namespace) -> int:
+    """ETF 份额变化趋势 CLI。"""
+    symbol = args.symbol.strip().zfill(6)
+
+    if args.save:
+        from etf_data import save_etf_share_snapshot as _save
+        snap = _save(symbol)
+        if snap is None:
+            print(f"⚠️ {symbol} 非交易日或数据不可得，跳过保存")
+            return 1
+        print(f"✅ {symbol} 份额快照已保存: {snap['shares']:.0f} 份, AUM {snap['aum']} 亿")
+        if not args.json:
+            return 0
+
+    from etf_data import etf_share_flow as _flow
+    flow = _flow(symbol, days=args.days)
+
+    if args.json:
+        import json
+        print(json.dumps(flow, ensure_ascii=False, default=str))
+    else:
+        hc = flow.get("history_count", 0)
+        if hc == 0:
+            note = flow.get("note", "无历史数据")
+            print(f"⚠️ {symbol}: {note}（运行 etf-flow {symbol} --save 积累首条记录）")
+            return 1
+
+        print(f"\n📊 {symbol} ETF 份额变化趋势（近 {hc} 个交易日）\n")
+        print(f"  最新份额: {flow['shares_current']:.0f} 份")
+        print(f"  最新 AUM: {flow['aum_current']} 亿")
+        print()
+        print(f"  {'窗口':<8} {'份额变动':>14} {'估算资金流':>14}")
+        print(f"  {'-' * 8} {'-' * 14} {'-' * 14}")
+        for w, label in [(5, "5 日"), (20, "20 日"), (60, "60 日")]:
+            sc = flow.get(f"share_change_{w}d")
+            fe = flow.get(f"flow_est_{w}d")
+            sc_str = f"{sc:+.0f}" if sc is not None else "待积累"
+            fe_str = f"{fe:+.2f} 亿" if fe is not None else "待积累"
+            print(f"  {label:<8} {sc_str:>14}  {fe_str:>14}")
+
+    return 0
+
+
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
@@ -1809,6 +1858,8 @@ def main() -> int:
         return cmd_value(args)
     elif args.command == "market-status":
         return cmd_market_status(args)
+    elif args.command == "etf-flow":
+        return cmd_etf_flow(args)
     return 1
 
 

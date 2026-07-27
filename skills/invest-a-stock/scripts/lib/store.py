@@ -129,6 +129,15 @@ def init_db() -> None:
                 env_label TEXT,
                 collected_at TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS etf_share_snapshots (
+                date TEXT,
+                symbol TEXT,
+                shares REAL,
+                price REAL,
+                aum REAL,
+                collected_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (date, symbol)
+            );
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [
