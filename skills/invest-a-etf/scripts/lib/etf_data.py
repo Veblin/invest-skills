@@ -637,9 +637,10 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
     try:
         rows = c.execute(
             "SELECT date, shares, price, aum FROM etf_share_snapshots "
-            "WHERE symbol = ? ORDER BY date ASC",
-            (symbol,),
+            "WHERE symbol = ? ORDER BY date DESC LIMIT ?",
+            (symbol, days),
         ).fetchall()
+        rows = list(reversed(rows))  # 恢复为 ASC 顺序
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return {"symbol": symbol, "history_count": 0, "note": "无历史数据（etf_share_snapshots 表不存在）"}

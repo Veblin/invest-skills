@@ -1728,6 +1728,7 @@ def _print_env_labels(snap: dict) -> None:
     lev = snap.get("label_leverage") or ""
     brd = snap.get("label_breadth") or ""
     sent = snap.get("label_sentiment") or ""
+    cap = snap.get("label_capital_flow") or ""
     summary = ""
     env_str = snap.get("env_label")
     if env_str:
@@ -1740,6 +1741,8 @@ def _print_env_labels(snap: dict) -> None:
                 brd = env.get("breadth", "")
             if not sent:
                 sent = env.get("sentiment", "")
+            if not cap:
+                cap = env.get("capital_flow", "")
             if not summary:
                 summary = env.get("summary", "")
         except Exception:
@@ -1750,6 +1753,7 @@ def _print_env_labels(snap: dict) -> None:
     print(f"│ 🧊 杠杆: {lev or '—'}")
     print(f"│ 🌤  广度: {brd or '—'}")
     print(f"│ ⚠️  情绪: {sent or '—'}")
+    print(f"│ 💵 资金: {cap or '—'}")
     if summary:
         print(f"│ → 综合: {summary}")
     print("└──────────────────────────────────────────────────┘")
@@ -1778,10 +1782,13 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
         from etf_data import save_etf_share_snapshot as _save
         snap = _save(symbol)
         if snap is None:
-            print(f"⚠️ {symbol} 非交易日或数据不可得，跳过保存")
+            print(f"⚠️ {symbol} 非交易日或数据不可得，跳过保存", file=sys.stderr)
             return 1
-        print(f"✅ {symbol} 份额快照已保存: {snap['shares']:.0f} 份, AUM {snap['aum']} 亿")
-        if not args.json:
+        msg = f"✅ {symbol} 份额快照已保存: {snap['shares']:.0f} 份, AUM {snap['aum']} 亿"
+        if args.json:
+            print(msg, file=sys.stderr)
+        else:
+            print(msg)
             return 0
 
     from etf_data import etf_share_flow as _flow
