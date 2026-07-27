@@ -763,14 +763,14 @@ def _infer_category_from_name(name: str) -> str:
     n = name.lower()
     if any(k in n for k in ["qdii", "纳指", "标普", "恒生", "日经", "德国"]):
         return "cross_border"
-    if any(k in n for k in ["黄金", "豆粕", "原油", "有色", "商品"]):
+    if any(k in n for k in ["黄金", "豆粕", "原油", "商品期货", "期货"]):
         return "commodity"
     if any(k in n for k in ["货币", "日利", "保证金"]):
         return "money_market"
     if any(k in n for k in ["债", "国债", "信用债", "可转债"]):
         return "bond"
-    if any(k in n for k in ["300", "500", "1000", "2000", "上证", "深证", "科创", "创业",
-                              "沪深", "中证", "50", "180", "红利", "基本面"]):
+    if any(k in n for k in ["沪深300", "中证500", "中证1000", "中证2000",
+                              "上证50", "科创50", "创业板", "深证"]):
         return "broad_market"
     return "sector"
 
@@ -781,10 +781,11 @@ def _infer_category_from_name(name: str) -> str:
 
 def _attach_industry_pe(result: dict, symbol: str) -> None:
     """对行业/主题 ETF，从 industry_weekly SQLite 表查行业 PE 注入 result。"""
-    if result["index_pe_status"] != "not_mapped":
-        return
     sw_info = ETF_TO_SW_INDUSTRY.get(symbol)
     if not sw_info:
+        return
+    # 仅当无 csindex PE 时才附加行业 PE（行业 ETF 通常 not_mapped 或 unknown_etf）
+    if result.get("index_pe") is not None:
         return
     try:
         import sqlite3
@@ -801,14 +802,17 @@ def _attach_industry_pe(result: dict, symbol: str) -> None:
         finally:
             _safe_close(c)
         if row:
-            result["industry_pe"] = row["pe"]
+            pe_val = row["pe"]
+            if pe_val is None:
+                return  # pe 字段为 NULL（如行业整体亏损），静默跳过
+            result["industry_pe"] = pe_val
             result["industry_pe_note"] = (
-                f"申万{sw_info['sw_name']}({sw_info['sw_code']})行业 PE={row['pe']:.2f}，"
+                f"申万{sw_info['sw_name']}({sw_info['sw_code']})行业 PE={pe_val:.2f}，"
                 f"数据日期 {row['date']}；"
                 f"此为行业层面估值参考，非 ETF 精确 PE"
             )
     except Exception:
-        pass
+        pass  # 行业 PE 为非关键附加数据，降级不阻塞主流程
 
 
 def _attach_valuation_guide(result: dict) -> None:
@@ -822,7 +826,10 @@ def _attach_valuation_guide(result: dict) -> None:
         result["valuation_guide"] = {
             "industry": sw_info["sw_name"],
             "sub_sector": sw_info.get("sub", ""),
-            **guide,
+            "primary": guide["primary"],
+            "secondary": guide["secondary"],
+            "pe_timing": guide["pe_timing"],
+            "reason": guide["reason"],
         }
 
 

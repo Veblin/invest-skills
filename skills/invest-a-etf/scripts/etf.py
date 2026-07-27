@@ -113,7 +113,8 @@ def cmd_industry_pe() -> int:
         pb_str = f"{r.get('pb', 0):.2f}" if r.get('pb') is not None else "N/A"
         chg_str = f"{r.get('chg_pct', 0):+.2f}" if r.get('chg_pct') is not None else "N/A"
         to_str = f"{r.get('turnover_pct', 0):.2f}" if r.get('turnover_pct') is not None else "N/A"
-        print(f"{r['index_name']:<10s} {r['index_code']:<8s} {pe_str:>8s} {pb_str:>6s} {chg_str:>8s} {to_str:>8s} {r['date']:>10s}")
+        print(f"{r.get('index_name', '?'):<10s} {r.get('index_code', '?'):<8s} "
+              f"{pe_str:>8s} {pb_str:>6s} {chg_str:>8s} {to_str:>8s} {r.get('date', '?'):>10s}")
     print(f"\n共 {len(rows)} 个申万一级行业（数据来源: index_analysis_weekly_sw）")
     return 0
 

@@ -31,8 +31,9 @@ def collect_industry_weekly() -> dict[str, Any]:
     from lib.proxy import akshare_direct_session
     from lib.store import _conn, _safe_close, init_db
 
+    today = date.today().strftime("%Y%m%d")
     result: dict[str, Any] = {
-        "date": date.today().strftime("%Y%m%d"),
+        "date": today,
         "industries_saved": 0,
         "error": None,
     }
@@ -60,7 +61,7 @@ def collect_industry_weekly() -> dict[str, Any]:
             idx_name = str(row.get("指数名称", ""))
             if not idx_code:
                 continue
-            today = date.today().strftime("%Y%m%d")
+            # 使用 init 阶段固定的 today 避免跨午夜日期不一致
             # 字段映射（index_analysis_weekly_sw 实际列名可能略有变化，兼容常见变体）
             pe = _safe_col(row, "市盈率", "pe", "PE")
             pb = _safe_col(row, "市净率", "pb", "PB")
@@ -90,14 +91,19 @@ def collect_industry_weekly() -> dict[str, Any]:
 
 
 def _safe_col(row: Any, *names: str) -> float | None:
-    """从 DataFrame 行中尝试多个列名，返回首个非空 float。"""
+    """从 DataFrame 行中尝试多个列名，返回首个非空非 NaN float。"""
+    import math
     for n in names:
         v = row.get(n)
-        if v is not None:
-            try:
-                return float(v)
-            except (ValueError, TypeError):
-                pass
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if math.isnan(f) or math.isinf(f):
+                return None
+            return f
+        except (ValueError, TypeError):
+            pass
     return None
 
 
