@@ -246,9 +246,10 @@ def _safe_etf_kline(symbol: str) -> dict:
             "latest_nav": raw.get("latest_nav"),
             "rsi": raw.get("rsi"),
             "rsi_period": raw.get("rsi_period"),
-            "rsi_24": raw.get("rsi_24"),
             "ma20": raw.get("ma20"),
             "ma60": raw.get("ma60"),
+            "index_ma20": raw.get("index_ma20"),
+            "index_ma60": raw.get("index_ma60"),
         }
     except Exception as exc:
         return {"_error": str(exc), "rows": 0, "data": [], "status": "missing"}
@@ -297,6 +298,11 @@ def _compute_technical(result: dict) -> None:
         "latest_close": None,
         "ma20": None,
         "ma60": None,
+        "index_ma20": None,
+        "index_ma60": None,
+        "boll_upper": None,
+        "boll_mid": None,
+        "boll_lower": None,
         "kline_days": len(rows) if isinstance(rows, list) else 0,
         "status": "missing",
     }
@@ -312,9 +318,13 @@ def _compute_technical(result: dict) -> None:
         result["technical"]["volatility_annualized"] = kline.get("volatility_annualized")
         result["technical"]["rsi"] = kline.get("rsi")
         result["technical"]["rsi_period"] = kline.get("rsi_period")
-        result["technical"]["rsi_24"] = kline.get("rsi_24")
         result["technical"]["ma20"] = kline.get("ma20")
         result["technical"]["ma60"] = kline.get("ma60")
+        result["technical"]["index_ma20"] = kline.get("index_ma20")
+        result["technical"]["index_ma60"] = kline.get("index_ma60")
+        result["technical"]["boll_upper"] = kline.get("boll_upper")
+        result["technical"]["boll_mid"] = kline.get("boll_mid")
+        result["technical"]["boll_lower"] = kline.get("boll_lower")
         rows_count = kline.get("rows", len(rows) if isinstance(rows, list) else 0)
         kline_status = kline.get("status", "missing")
         if rows_count == 0:

@@ -281,21 +281,31 @@ def _summarize_etf_data_quality(result: dict) -> dict[str, str]:
 # 自动标记
 # ---------------------------------------------------------------------------
 
-def _auto_flags(result: dict) -> None:
-    """基于阈值自动生成 flags。"""
+# ETF 类型 → 自动标记阈值（默认值适用于 broad_market / sector / thematic）
+_TYPE_THRESHOLDS: dict[str, dict[str, float]] = {
+    "cross_border": {"premium_warn": 5.0, "discount_warn": -5.0, "aum_min": 1.0},
+    "bond":          {"premium_warn": 2.0, "discount_warn": -2.0, "aum_min": 2.0},
+    "commodity":     {"premium_warn": 3.0, "discount_warn": -3.0, "aum_min": 1.0},
+}
+_DEFAULT_THRESHOLDS: dict[str, float] = {"premium_warn": 2.0, "discount_warn": -2.0, "aum_min": 2.0}
+
+
+def _auto_flags(result: dict, etf_category: str = "") -> None:
+    """基于阈值自动生成 flags。etf_category 为空时使用默认阈值。"""
+    thresholds = _TYPE_THRESHOLDS.get(etf_category, _DEFAULT_THRESHOLDS)
     flags: list[str] = []
 
     aum = result.get("aum")
-    if aum is not None and aum < 2:
-        flags.append("❌ AUM < 2 亿，存在清盘/流动性风险")
+    if aum is not None and aum < thresholds["aum_min"]:
+        flags.append(f"❌ AUM < {thresholds['aum_min']} 亿，存在清盘/流动性风险")
 
     pd_val = result.get("premium_discount")
     if pd_val is not None:
         if not math.isfinite(pd_val):
             flags.append("⚠️ 折溢价数据异常")
-        elif pd_val > 2:
+        elif pd_val > thresholds["premium_warn"]:
             flags.append(f"⚠️ 溢价 {pd_val:.1f}%，买入成本偏高")
-        elif pd_val < -2:
+        elif pd_val < thresholds["discount_warn"]:
             flags.append(f"⚠️ 折价 {abs(pd_val):.1f}%，可能存在流动性或结构问题")
 
     hc = result.get("hedge_coverage", {})
@@ -374,10 +384,14 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "volatility_annualized": None,
         "rsi": None,
         "rsi_period": None,
-        "rsi_24": None,
-        "rsi_note": "Wilder RSI on NAV closes（与个股 technical.compute 一致），非交易信号",
+        "rsi_note": "Wilder RSI on NAV closes，默认周期 24（ETF NAV 波动低于个股价格，较标准 14 周期更平滑；数据不足时降级为 14），非交易信号",
         "ma20": None,
         "ma60": None,
+        "index_ma20": None,
+        "index_ma60": None,
+        "boll_upper": None,
+        "boll_mid": None,
+        "boll_lower": None,
         "nav_history": [],
         "status": "missing",
         "_error": None,
@@ -430,22 +444,49 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             result["_error"] = f"only {len(returns)} daily returns"
             return result
 
-        mean_ret = sum(returns) / len(returns)
-        variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1)
+        # 固定 60 日窗口，不同 ETF 间可比；不足 60 日则用全部可用数据
+        returns_window = returns[-60:] if len(returns) >= 60 else returns
+        if len(returns_window) < 5:
+            result["status"] = "insufficient"
+            result["_error"] = f"only {len(returns_window)} daily returns"
+            return result
+        mean_ret = sum(returns_window) / len(returns_window)
+        variance = sum((r - mean_ret) ** 2 for r in returns_window) / (len(returns_window) - 1)
         daily_vol = math.sqrt(variance)
         result["volatility_annualized"] = round(daily_vol * math.sqrt(252) * 100, 2)
+        result["volatility_window"] = len(returns_window)
 
         if len(navs) >= 20:
             result["ma20"] = round(sum(navs[-20:]) / 20, 4)
         if len(navs) >= 60:
             result["ma60"] = round(sum(navs[-60:]) / 60, 4)
 
+        # D4: 指数价格 MA（底层指数的趋势结构，与 NAV MA 互补）
+        idx_code = CSINDEX_MAP.get(symbol, "")
+        if idx_code and len(navs) >= 60:
+            try:
+                _fetch_index_ma(result, idx_code)
+            except Exception as exc:
+                logger.info("index_ma(%s/%s) skipped: %s", symbol, idx_code, exc)
+
+        # D8: BOLL 布林带（基于 NAV 序列，SMA(20) ± 2×std，用于波动率区间判断）
+        if len(navs) >= 20:
+            try:
+                window = navs[-20:]
+                mid = sum(window) / 20
+                variance_boll = sum((x - mid) ** 2 for x in window) / (20 - 1)
+                std_boll = math.sqrt(variance_boll)
+                result["boll_mid"] = round(mid, 4)
+                result["boll_upper"] = round(mid + 2.0 * std_boll, 4)
+                result["boll_lower"] = round(mid - 2.0 * std_boll, 4)
+            except Exception as exc:
+                logger.info("boll(%s) skipped: %s", symbol, exc)
+
         period = 24 if len(navs) >= 25 else (14 if len(navs) >= 15 else None)
         if period is not None:
             rsi_val = _latest_rsi(navs, period)
             result["rsi"] = rsi_val
             result["rsi_period"] = period
-            result["rsi_24"] = rsi_val if period == 24 else None
 
         result["nav_history"] = [
             {"date": str(r.get("净值日期", "")), "nav": safe_float(r.get("单位净值")),
@@ -525,6 +566,30 @@ def rollup_etf_quality_status(etf: dict) -> str:
     return "available"
 
 
+def _fetch_index_ma(result: dict, idx_code: str) -> None:
+    """从 akshare 拉取指数日 K 线，计算 index_ma20/index_ma60。
+
+    降级策略：akshare 不可用或数据不足时静默跳过，不阻塞主流程。
+    """
+    try:
+        import akshare as ak
+
+        # csindex 代码 → akshare 行情代码（上证 sh / 深证 sz）
+        ticker = f"sh{idx_code}" if idx_code.startswith(("0", "9")) else f"sz{idx_code}"
+        with akshare_direct_session():
+            df = ak.stock_zh_index_daily(symbol=ticker)
+        if df is None or df.empty:
+            return
+        closes = [safe_float(r.get("close")) for _, r in df.iterrows()]
+        closes = [c for c in closes if c is not None]
+        if len(closes) >= 20:
+            result["index_ma20"] = round(sum(closes[-20:]) / 20, 2)
+        if len(closes) >= 60:
+            result["index_ma60"] = round(sum(closes[-60:]) / 60, 2)
+    except Exception:
+        pass  # 非关键数据，静默降级
+
+
 def _em_to_premium_discount(em_raw: object) -> float | None:
     """EM 基金折价率（+ = 折价）→ premium_discount（+ = 溢价）。"""
     em = safe_float(em_raw)
@@ -553,7 +618,6 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
     import sqlite3
     from datetime import date
 
-    from lib import env as _env
     from lib.store import _conn, _safe_close, init_db
 
     try:
@@ -619,7 +683,7 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
     symbol : str
         6 位 ETF 代码。
     days : int
-        回溯天数（默认 60 个自然日）。
+        回溯行数（默认 60 行，对应约 60 个交易日；注意非自然日语义，依赖每日 snapshot 采集频率）。
 
     Returns
     -------
