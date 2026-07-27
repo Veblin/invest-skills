@@ -17,7 +17,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from cache import DataCache, default_cache
+try:
+    from .cache import DataCache, default_cache  # 同包相对导入（最安全）
+except ImportError:
+    from cache import DataCache, default_cache  # 降级：sys.path 裸导入
 
 logger = logging.getLogger(__name__)
 
