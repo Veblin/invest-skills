@@ -22,6 +22,8 @@ def percentile_rank(seq: list[float], current: float) -> float | None:
     Returns:
         百分位 [0, 100]，数据不足时返回 None
     """
+    # 仅保留正数 PE（亏损期 PE 无估值意义，已剔除）
+    # 若亏损占比 >30%，调用方应标注"仅作位置参考"
     valid = [v for v in seq if v is not None and v > 0]
     if not valid:
         return None

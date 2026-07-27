@@ -73,7 +73,8 @@ def _latest_quarter_end() -> str:
     ]
     for y, md in reversed(quarter_ends):
         d = datetime.strptime(f"{y}{md}", "%Y%m%d")
-        # 用 date 比较确保季度末整日已过（如 6/30 15:00 不视作 Q2 已完成）
+        # 用 > 确保季度末整日已过（如 6/30 当天仍返回 Q1，7/1 起返回 Q2）
+        # 注：季度末日当天（如 3/31）金融数据尚未披露，提前返回无害
         if today > d.date():
             return f"{y}{md}"
     return f"{now.year - 1}1231"
@@ -159,7 +160,9 @@ def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
         return []
 
     sources: list[SourceResult | None] = []
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
+    # max_workers=8：平衡并发效率与 Tushare/akshare 限流（可通过 INVEST_MAX_WORKERS 环境变量覆盖）
+    max_w = int(os.environ.get("INVEST_MAX_WORKERS", "8"))
+    with ThreadPoolExecutor(max_workers=min(len(tasks), max_w)) as executor:
         futures = {
             executor.submit(_run_one_source, name, fn, dimension): i
             for i, (name, fn) in enumerate(tasks)

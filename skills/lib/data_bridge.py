@@ -18,9 +18,11 @@ import logging
 from typing import Any, Callable
 
 try:
-    from .cache import DataCache, default_cache  # 同包相对导入（最安全）
+    from .cache import DataCache, default_cache  # 同包相对导入（正常路径）
 except ImportError:
-    from cache import DataCache, default_cache  # 降级：sys.path 裸导入
+    # 降级：sys.path 裸导入（当 __package__ 未设置时，如直接运行脚本）
+    # 注意：此路径仅在 skills/lib/ 已在 sys.path 时有效
+    from cache import DataCache, default_cache  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,7 @@ def get_northbound(symbol: str, *, force: bool = False) -> dict | None:
 def get_macro(*, force: bool = False) -> dict | None:
     """宏观快照（缓存 7d）。"""
     from lib.macro import collect_macro_context  # noqa: E402
+    # symbol='' 是故意的：宏观数据（PMI/CPI/LPR/VIX）非个股维度，不按 symbol 筛选
     return _fetch_dimension("macro", "all", collect_macro_context, "", force=force)
 
 

@@ -84,13 +84,14 @@ def _ma_alignment(ma: dict[int, list[float | None]], key_periods: tuple[int, ...
             long_p = periods[j]
             sv = latest.get(short_p)
             lv = latest.get(long_p)
+            relation: str | None = None
             if sv is not None and lv is not None:
                 relation = "上方" if sv > lv else ("下方" if sv < lv else "重合")
                 desc = f"MA{short_p}({sv:.2f}) 位于 MA{long_p}({lv:.2f}){relation}"
             else:
                 desc = f"MA{short_p}-MA{long_p} 数据不足"
             # sv==0 / lv==0 时 relation 正常计算（不等价于数据不足）
-            pair_relation = relation if (sv is not None and lv is not None) else "insufficient"
+            pair_relation = relation if relation is not None else "insufficient"
             pairs.append({"short": short_p, "long": long_p, "relation": pair_relation, "desc": desc})
 
     # 多头/空头排列判断（短均线是否严格排序）

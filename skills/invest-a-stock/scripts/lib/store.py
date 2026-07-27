@@ -138,9 +138,6 @@ def init_db() -> None:
                 collected_at TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (date, symbol)
             );
-        """)
-        # v0.2.2: 申万行业周度 PE/PB 快照
-        c.execute("""
             CREATE TABLE IF NOT EXISTS industry_weekly (
                 index_code TEXT NOT NULL,
                 index_name TEXT NOT NULL,

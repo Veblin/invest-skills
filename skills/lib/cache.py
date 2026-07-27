@@ -124,6 +124,7 @@ class DataCache:
 
         self._hits += 1
         data = entry.get("data")
+        # 仅对 dict 类型标记 _from_cache（list/其他类型不标记，避免类型不一致）
         if isinstance(data, dict):
             data["_from_cache"] = True
         return data
@@ -297,16 +298,17 @@ class DataCache:
         """
         base = entry.get("ttl_seconds", 3600)
         if _is_trading_hour():
-            return base * 0.8
-        return base * 2.0
+            return int(base * 0.8)  # truncate: avoid ms-level boundary flapping
+        return int(base * 2.0)
 
     def _lru_cleanup(self) -> int:
         """超过 _MAX_ENTRIES 时按文件修改时间删除最旧条目。"""
         if not self._cache_dir.exists():
             return 0
 
+        # 仅清理 invest_ 前缀的缓存文件，避免误删其他工具的同目录文件
         files = sorted(
-            self._cache_dir.rglob("*.json"),
+            [f for f in self._cache_dir.rglob("*.json") if f.name.startswith("invest_")],
             key=lambda f: f.stat().st_mtime,
         )
 
