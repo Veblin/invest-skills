@@ -159,11 +159,21 @@ class DataCache:
             "version": _CACHE_VERSION,
         }
 
+        import logging as _cache_logging
+        _cache_log = _cache_logging.getLogger(__name__)
+
+        def _json_default(obj):
+            _cache_log.warning(
+                "cache: non-JSON-serializable type %s serialized via str() — "
+                "data may be lossy on read-back", type(obj).__name__
+            )
+            return str(obj)
+
         # 原子写入：先写临时文件再 rename
         tmp_path = path.with_suffix(".tmp")
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(entry, f, ensure_ascii=False, default=str)
+                json.dump(entry, f, ensure_ascii=False, default=_json_default)
             tmp_path.rename(path)
         except OSError:
             tmp_path.unlink(missing_ok=True)

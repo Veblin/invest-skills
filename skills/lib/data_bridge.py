@@ -144,7 +144,8 @@ def get_microstructure(*, force: bool = False) -> dict | None:
     except ImportError:
         logger.warning(
             "get_microstructure() requires invest-a-journal on sys.path; "
-            "call from within journal skill context or ensure path bootstrap"
+            "call from within journal skill context or ensure path bootstrap. "
+            "Returning None — callers should guard against."
         )
         return None
     return _fetch_dimension(

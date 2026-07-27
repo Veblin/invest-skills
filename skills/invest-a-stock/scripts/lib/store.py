@@ -147,8 +147,11 @@ def init_db() -> None:
         ]:
             try:
                 c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError:
-                pass  # 列已存在
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass  # 列已存在
+                else:
+                    raise
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))

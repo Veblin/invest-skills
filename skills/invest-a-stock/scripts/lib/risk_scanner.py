@@ -173,10 +173,7 @@ def scan_financial_risks(
 
     # 7 利息保障弱
     ebit = safe_float(latest.get("ebit"))
-    _raw_int = latest.get("int_exp")
-    if _raw_int is None:
-        _raw_int = latest.get("interest_expense")
-    int_exp = safe_float(_raw_int)
+    int_exp = coalesce_field(latest, "int_exp", "fin_exp_int_exp", "interest_expense", "interestexpense")
     if ebit is not None and int_exp is not None and int_exp > 0:
         cov = ebit / int_exp
         int_trig = cov < 2

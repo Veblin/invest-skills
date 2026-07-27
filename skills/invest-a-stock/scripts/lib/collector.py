@@ -1756,7 +1756,7 @@ def _parse_holder_change_vol(raw) -> float | None:
             return None
         return f
     s = str(raw).strip().replace(",", "")
-    m = re.search(r"([\d.]+)\s*(万|亿)?", s)
+    m = re.search(r"(-?[\d.]+)\s*(万|亿)?", s)
     if not m:
         return None
     val = float(m.group(1))
@@ -2212,13 +2212,16 @@ def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
     """行业产品定价追踪（与 collect_financials 同构）。"""
     from .chain import get_futures_for_industry
 
-    tasks: list[tuple[str, Callable]] = [
-        ("akshare.futures_spot_price",
-         lambda: _q_akshare_futures_spot(symbol, industry)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
     if env.is_akshare_available():
-        tasks.append(("akshare.stock_news_em",
-                      lambda: _q_akshare_company_news_price(symbol)))
+        tasks.append(
+            ("akshare.futures_spot_price",
+             lambda: _q_akshare_futures_spot(symbol, industry)),
+        )
+        tasks.append(
+            ("akshare.stock_news_em",
+             lambda: _q_akshare_company_news_price(symbol)),
+        )
 
     def _inject_meta(legacy: dict, _results: list) -> dict:
         legacy.setdefault("data", {})
@@ -2288,6 +2291,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
                 continue
             if dim == "industry_pricing":
+                # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
                 continue
             if dim == "kline" and kline_kwargs:
                 _, fn = COLLECTORS[dim]
