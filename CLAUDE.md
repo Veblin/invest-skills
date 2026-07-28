@@ -118,6 +118,10 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 - **允许「交易结构分析」**（LAW 6a）— 基于多情景估值的入场区间（标注情景锚定 + 假设前提 + 盈亏比）、假设失效触发（离场条件）、操作纪律（研究流程规则）。入场区间 ≠ 买入建议：区间告诉你"在这个假设下，估值模型给出的合理价格带"，由用户自行决定。详见 [trade-structure.md](skills/invest-a-stock/references/trade-structure.md)
 - **archive/ 目录**是 v0.2 遗留，不要引用
 
+## 开发规范
+
+详见 [development-rules.md](skills/lib/references/development-rules.md) — 12 条规则（D1-D12），来自 `/code-review` 反复出现的缺陷模式。每次 `/code-review` 应加载此文件作为审查标准。
+
 ## 措辞规范
 
 ### 禁止词与替换表

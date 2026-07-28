@@ -217,9 +217,9 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
         if total_mcap > 0:
             snap["margin_to_mcap"] = round(margin / total_mcap * 100, 2)
 
-    # 8. 融资买入/成交额
+    # 8. 融资买入/成交额（优先使用估算全市场成交额，避免仅用深交所而被夸大 ~2x）
     buy = snap.get("margin_buy_amount")
-    turnover = snap.get("total_turnover")
+    turnover = snap.get("total_turnover_est") or snap.get("total_turnover")
     if buy is not None and turnover is not None and turnover > 0:
         snap["margin_buy_to_turnover"] = round(buy / turnover * 100, 2)
 
@@ -612,7 +612,10 @@ def _fetch_turnover(result: dict) -> None:
         if szse_amount > 0:
             result["total_turnover"] = round(szse_amount / 1e8, 2)  # 元→亿
             # 注：仅含深交所成交额；上交所 stock_sse_summary 不提供成交金额，
-            # 实际全市场成交额约为该值的 1.8-2.2 倍
+            # 实际全市场成交额约为该值的 1.8-2.2 倍。
+            # 融资买入/成交额 比率已除以估算全市场值（×1.9），避免被夸大 ~2x。
+            result["total_turnover_est"] = round(szse_amount / 1e8 * 1.9, 2)
+            result["total_turnover_note"] = "仅深交所；全市场估算 = 深交所 × 1.9"
     except Exception as exc:
         logger.warning("turnover fetch failed: %s", exc)
         result["_errors"].append(f"turnover: {exc}")

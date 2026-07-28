@@ -141,8 +141,11 @@ def _dcf_try_wacc(
     risk_free_is_default = risk_free_raw is None
     risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
 
-    if missing:
-        return None, missing
+    # Populate missing with any defaults that were applied, for caller transparency.
+    if beta_meta.get("is_default"):
+        missing.append(f"beta 使用默认值 1.0（{beta_meta.get('source', '未知')}）")
+    if risk_free_is_default:
+        missing.append("无风险利率使用默认值 2.5%（10Y 国债不可得）[推测，待验证]")
 
     from lib.valuation import calc_wacc
 
@@ -210,11 +213,11 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
 
 
 # --- _dcf_extract_net_debt ---
-def _dcf_extract_net_debt(financials: dict) -> tuple[float, str]:
+def _dcf_extract_net_debt(financials: dict) -> tuple[float | None, str]:
     """从 financials dcf_preprocess 提取净债务。
 
     Returns:
-        (net_debt: float, source_description: str)
+        (net_debt: float | None, source_description: str)
     """
     dcf_pre = financials.get("dcf_preprocess") or {}
     net_debt_info = dcf_pre.get("net_debt") or {}
@@ -231,7 +234,7 @@ def _dcf_extract_net_debt(financials: dict) -> tuple[float, str]:
         if debt is not None and cash is not None:
             nd = debt - cash
             return nd, "总负债 - 货币资金（最新财报，近似）"
-    return 0.0, "默认值 0（净债务数据不可得）"
+    return None, "net debt 数据不可得，DCF 估值可能偏高"
 
 
 # --- _aggregate_scenario_dcf ---
@@ -427,7 +430,7 @@ def _section_dcf_valuation(
         if cp is not None:
             current_price = float(cp)
 
-    if shares is not None:
+    if shares is not None and net_debt is not None:
         lines.append("| 情景 | 概率权重 | 核心假设（营收增速 / 毛利率） | 企业价值（元） | 每股参考价（元） |")
         lines.append("|---|---|---|---|---|")
     else:
@@ -436,12 +439,14 @@ def _section_dcf_valuation(
 
     from lib.valuation import calc_ev_to_equity
 
+    can_compute_per_share = shares is not None and net_debt is not None
+
     per_share_results: dict[str, dict] = {}
     for sc in ("bull", "base", "bear"):
         res = scenario_results[sc]
         assump = res["assumptions"]
         ev = scenario_ev[sc]
-        if shares is not None:
+        if can_compute_per_share:
             eq = calc_ev_to_equity(ev["enterprise_value"], net_debt, int(shares))
             per_share_results[sc] = eq
             ps_str = f"{eq['per_share']:.2f}" if eq.get("per_share") is not None else "N/A"
@@ -464,7 +469,7 @@ def _section_dcf_valuation(
         return f"营收增速{a['revenue_growth']*100:+.1f}%、毛利率{a['gross_margin_assumption']:.1f}%"
 
     # 每股参考价 + 安全边际 段落
-    if shares is not None and per_share_results:
+    if can_compute_per_share and per_share_results:
         lines.append("**每股估值参考价**（总股本 "
                      f"{shares:,.0f} 股 [来源: {shares_source}]，"
                      f"净债务 {net_debt:,.0f} 元 [来源: {nd_source}]）：")
@@ -507,10 +512,16 @@ def _section_dcf_valuation(
             "仅供参考，不构成投资建议。"
         )
         lines.append("")
-        lines.append(
-            "股本/每股换算数据不可得（" + shares_source + "），"
-            "以上仅为企业价值区间，不换算为每股价值或单一价格结论。"
-        )
+        if shares is None:
+            lines.append(
+                "股本/每股换算数据不可得（" + shares_source + "），"
+                "以上仅为企业价值区间，不换算为每股价值或单一价格结论。"
+            )
+        else:
+            lines.append(
+                "净债务数据不可得（" + nd_source + "），"
+                "无法从企业价值扣减计算出权益价值，以上仅为企业价值区间。"
+            )
     for sc in ("bear", "base", "bull"):
         if scenario_results[sc].get("growth_sign_caveat"):
             lines.append(f"⚠️ [{sc}] {scenario_results[sc]['growth_sign_caveat']}")

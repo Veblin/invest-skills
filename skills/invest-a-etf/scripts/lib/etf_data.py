@@ -11,6 +11,7 @@ import logging
 import math
 import threading
 import time
+from datetime import datetime
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
@@ -35,23 +36,56 @@ _SPOT_CACHE_TTL_SEC = 30.0
 # ---------------------------------------------------------------------------
 
 # 运行时 canonical 源；人类可读副本见 references/etf-hedge-map.md（改映射请先改此处再同步文档）
+# 各类型对应对冲覆盖率说明：
+#   high    — 有期货 + 期权
+#   partial — 仅有期权或期货
+#   low     — 跨市场/商品类，有相关衍生品但非直接挂钩
+#   none    — 行业/主题 ETF，无直接对冲工具
 ETF_HEDGE_MAP: dict[str, dict[str, str | None]] = {
-    "510050": {"index": "上证50", "futures": "上证50股指期货(IH)", "options": "上证50ETF期权", "coverage": "high"},
-    "510300": {"index": "沪深300", "futures": "沪深300股指期货(IF)", "options": "沪深300ETF期权", "coverage": "high"},
-    "510500": {"index": "中证500", "futures": "中证500股指期货(IC)", "options": "中证500ETF期权", "coverage": "high"},
-    "512100": {"index": "中证1000", "futures": "中证1000股指期货(IM)", "options": "中证1000ETF期权(部分)", "coverage": "partial"},
-    "159845": {"index": "中证1000", "futures": "中证1000股指期货(IM)", "options": "中证1000ETF期权(部分)", "coverage": "partial"},
-    "588000": {"index": "科创50", "futures": "科创50期货(2025上线)", "options": "科创50ETF期权", "coverage": "high"},
-    "159915": {"index": "创业板指", "futures": None, "options": "创业板ETF期权", "coverage": "partial"},
-    "159949": {"index": "创业板50", "futures": None, "options": "创业板50ETF期权", "coverage": "partial"},
-    "563300": {"index": "中证2000", "futures": None, "options": None, "coverage": "none"},
-    "510880": {"index": "红利指数", "futures": None, "options": None, "coverage": "none"},
-    "511880": {"index": "银华日利", "futures": None, "options": None, "coverage": "none"},
-    "513100": {"index": "纳指100", "futures": None, "options": None, "coverage": "low"},
-    "513500": {"index": "标普500", "futures": None, "options": None, "coverage": "low"},
-    "515790": {"index": "光伏产业", "futures": None, "options": None, "coverage": "none"},
-    "516970": {"index": "基建工程", "futures": None, "options": None, "coverage": "none"},
-    "518880": {"index": "黄金9999", "futures": "黄金期货(AU)", "options": None, "coverage": "low"},
+    # —— 宽基（高对冲覆盖） ——
+    "510050": {"index": "上证50",       "futures": "上证50股指期货(IH)",  "options": "上证50ETF期权",       "coverage": "high"},
+    "510300": {"index": "沪深300",      "futures": "沪深300股指期货(IF)", "options": "沪深300ETF期权",      "coverage": "high"},
+    "510500": {"index": "中证500",      "futures": "中证500股指期货(IC)", "options": "中证500ETF期权",      "coverage": "high"},
+    "512100": {"index": "中证1000",     "futures": "中证1000股指期货(IM)", "options": "中证1000ETF期权(部分)", "coverage": "partial"},
+    "159845": {"index": "中证1000",     "futures": "中证1000股指期货(IM)", "options": "中证1000ETF期权(部分)", "coverage": "partial"},
+    "588000": {"index": "科创50",       "futures": "科创50期货(2025上线)",  "options": "科创50ETF期权",       "coverage": "high"},
+    "159915": {"index": "创业板指",     "futures": None,                   "options": "创业板ETF期权",       "coverage": "partial"},
+    "159949": {"index": "创业板50",     "futures": None,                   "options": "创业板50ETF期权",     "coverage": "partial"},
+    "563300": {"index": "中证2000",     "futures": None, "options": None, "coverage": "none"},
+    # —— 策略/红利/货币 ——
+    "510880": {"index": "红利指数",     "futures": None, "options": None, "coverage": "none"},
+    "511880": {"index": "银华日利",     "futures": None, "options": None, "coverage": "none"},
+    # —— 跨境 ——
+    "513100": {"index": "纳指100",      "futures": None, "options": None, "coverage": "low"},
+    "513500": {"index": "标普500",      "futures": None, "options": None, "coverage": "low"},
+    "159920": {"index": "恒生ETF",      "futures": None, "options": None, "coverage": "low"},
+    "513050": {"index": "中概互联",     "futures": None, "options": None, "coverage": "low"},
+    "159941": {"index": "纳指ETF",      "futures": None, "options": None, "coverage": "low"},
+    # —— 商品 ——
+    "518880": {"index": "黄金9999",     "futures": "黄金期货(AU)", "options": None, "coverage": "low"},
+    # —— 行业/主题（无直接对冲工具） ——
+    "512480": {"index": "半导体",       "futures": None, "options": None, "coverage": "none"},
+    "159995": {"index": "国证芯片",     "futures": None, "options": None, "coverage": "none"},
+    "512760": {"index": "军工龙头",     "futures": None, "options": None, "coverage": "none"},
+    "512660": {"index": "军工ETF",      "futures": None, "options": None, "coverage": "none"},
+    "512690": {"index": "中证酒",       "futures": None, "options": None, "coverage": "none"},
+    "512010": {"index": "300医药",      "futures": None, "options": None, "coverage": "none"},
+    "512170": {"index": "中证医疗",     "futures": None, "options": None, "coverage": "none"},
+    "516160": {"index": "新能源",       "futures": None, "options": None, "coverage": "none"},
+    "159806": {"index": "新能源车",     "futures": None, "options": None, "coverage": "none"},
+    "515790": {"index": "光伏产业",     "futures": None, "options": None, "coverage": "none"},
+    "512880": {"index": "证券公司",     "futures": None, "options": None, "coverage": "none"},
+    "512800": {"index": "中证银行",     "futures": None, "options": None, "coverage": "none"},
+    "512200": {"index": "中证地产",     "futures": None, "options": None, "coverage": "none"},
+    "516970": {"index": "基建工程",     "futures": None, "options": None, "coverage": "none"},
+    "159865": {"index": "中证畜牧",     "futures": None, "options": None, "coverage": "none"},
+    "159766": {"index": "旅游",         "futures": None, "options": None, "coverage": "none"},
+    "159611": {"index": "电力",         "futures": None, "options": None, "coverage": "none"},
+    "512980": {"index": "中证传媒",     "futures": None, "options": None, "coverage": "none"},
+    "159869": {"index": "动漫游戏",     "futures": None, "options": None, "coverage": "none"},
+    "516510": {"index": "云计算",       "futures": None, "options": None, "coverage": "none"},
+    "515050": {"index": "5G通信",       "futures": None, "options": None, "coverage": "none"},
+    "515880": {"index": "通信设备",     "futures": None, "options": None, "coverage": "none"},
 }
 
 # csindex 符号映射（ETF 代码 → csindex 指数代码）
@@ -274,6 +308,7 @@ def _get_etf_spot_df(*, force: bool = False) -> Any:
     """带锁 + TTL 的 fund_etf_spot_em 全表缓存。"""
     global _SPOT_CACHE_DF, _SPOT_CACHE_TS
     now = time.monotonic()
+    # Step 1: 检查缓存（在锁内）
     with _SPOT_CACHE_LOCK:
         if (
             not force
@@ -281,18 +316,21 @@ def _get_etf_spot_df(*, force: bool = False) -> Any:
             and (now - _SPOT_CACHE_TS) < _SPOT_CACHE_TTL_SEC
         ):
             return _SPOT_CACHE_DF.copy()
-        try:
-            import akshare as ak
+    # Step 2: 释放锁后拉取数据（网络 I/O 不占锁，避免串行化）
+    try:
+        import akshare as ak
 
-            with akshare_direct_session():
-                df = ak.fund_etf_spot_em()
-        except Exception as exc:
-            logger.warning("fund_etf_spot_em failed: %s", exc)
-            return None
-        if df is None or df.empty:
-            return None
+        with akshare_direct_session():
+            df = ak.fund_etf_spot_em()
+    except Exception as exc:
+        logger.warning("fund_etf_spot_em failed: %s", exc)
+        return None
+    if df is None or df.empty:
+        return None
+    # Step 3: 重新获取锁，更新缓存
+    with _SPOT_CACHE_LOCK:
         _SPOT_CACHE_DF = df
-        _SPOT_CACHE_TS = now
+        _SPOT_CACHE_TS = time.monotonic()
         return df
 
 
@@ -566,7 +604,9 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             result["adj_applied"] = True
             result["adj_note"] = (
                 "NAV 序列已通过 Tushare fund_adj 前复权（消除分红/拆分造成的断点），"
-                "MA/波动率/RSI/BOLL 基于复权后序列计算"
+                "MA/波动率/RSI/BOLL 基于复权后序列计算；"
+                "nav_history.change_pct 基于复权 NAV 重新计算，"
+                "原始 日增长率 不再适用"
             )
 
         navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
@@ -677,24 +717,39 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
                 adj_d = adj_map.get(date_str)
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
-        chg = chg_pct
-        if chg is not None:
-            ret = chg / 100.0
-            navs.append(nav)
-            returns.append(ret)
-            rows.append({"date": date_str, "change_pct": chg_pct})
-            prev_nav = nav
-        elif prev_nav is not None and prev_nav > 0:
-            ret = (nav / prev_nav) - 1.0
-            navs.append(nav)
-            returns.append(ret)
-            rows.append({"date": date_str, "change_pct": chg_pct})
-            prev_nav = nav
+        # 复权状态下：原始 日增长率 基于未复权净值，与调整后的 nav 不匹配
+        # 必须从调整后的 NAV 重新计算收益率，nav_history.change_pct 设为 None
+        if adj_map:
+            if prev_nav is not None and prev_nav > 0:
+                ret = (nav / prev_nav) - 1.0
+                navs.append(nav)
+                returns.append(ret)
+                rows.append({"date": date_str, "change_pct": None})
+            else:
+                # 复权首行，无法计算收益率；保留 NAV 用于 MA/RSI 连续性
+                prev_nav = nav
+                navs.append(nav)
+                rows.append({"date": date_str, "change_pct": None})
         else:
-            # 首行有效 NAV 但无日增长率 — 保留为锚点，不丢失数据
-            prev_nav = nav
-            navs.append(nav)
-            rows.append({"date": date_str, "change_pct": chg_pct})
+            # 未复权：使用原始 日增长率
+            chg = chg_pct
+            if chg is not None:
+                ret = chg / 100.0
+                navs.append(nav)
+                returns.append(ret)
+                rows.append({"date": date_str, "change_pct": chg_pct})
+                prev_nav = nav
+            elif prev_nav is not None and prev_nav > 0:
+                ret = (nav / prev_nav) - 1.0
+                navs.append(nav)
+                returns.append(ret)
+                rows.append({"date": date_str, "change_pct": chg_pct})
+                prev_nav = nav
+            else:
+                # 首行有效 NAV 但无日增长率 — 保留为锚点，不丢失数据
+                prev_nav = nav
+                navs.append(nav)
+                rows.append({"date": date_str, "change_pct": chg_pct})
     return navs, returns, rows
 
 
@@ -714,10 +769,12 @@ def rollup_etf_quality_status(etf: dict) -> str:
     errors = list(etf.get("_errors") or [])
     if etf.get("_error") and not errors:
         errors = [str(etf["_error"])]
+    hc = etf.get("hedge_coverage") or {}
+    has_hedge_data = hc.get("coverage") not in (None, "unknown")
     has_data = any(
         etf.get(k) is not None
         for k in ("index_pe", "premium_discount", "aum", "tracking_error")
-    ) or bool(etf.get("hedge_coverage"))
+    ) or has_hedge_data
     if errors and has_data:
         return "partial"
     if errors or not has_data:
@@ -784,9 +841,17 @@ def _fetch_index_ma(result: dict, idx_code: str) -> None:
     try:
         import akshare as ak
 
-        # csindex 代码 → akshare 行情代码
-        # 中证(0/9开头)在上交所发布→sh；深证/创业板(3开头)在深交所→sz
-        ticker = f"sh{idx_code}" if idx_code.startswith(("0", "9")) else f"sz{idx_code}"
+        # csindex 代码 → akshare 行情代码前缀路由
+        # 0xxxxx / 9xxxxx → 上交所发布（sh）
+        # 1xxxxx / 3xxxxx → 深交所发布（sz）
+        if idx_code.startswith(("0", "9")):
+            ticker = f"sh{idx_code}"
+        elif idx_code.startswith(("1", "3")):
+            ticker = f"sz{idx_code}"
+        else:
+            logger.debug("_fetch_index_ma(%s): unrecognized csindex prefix '%s', defaulting to sz, verify routing",
+                         idx_code, idx_code[0] if idx_code else "")
+            ticker = f"sz{idx_code}"
         with akshare_direct_session():
             df = ak.stock_zh_index_daily(symbol=ticker)
         if df is None or df.empty:
@@ -798,7 +863,7 @@ def _fetch_index_ma(result: dict, idx_code: str) -> None:
         if len(closes) >= 60:
             result["index_ma60"] = round(sum(closes[-60:]) / 60, 2)
     except Exception:
-        pass  # 非关键数据，静默降级
+        logger.debug("_fetch_index_ma(%s): index daily fetch failed, silent degrade", idx_code)
 
 
 def _em_to_premium_discount(em_raw: object) -> float | None:
@@ -917,7 +982,7 @@ def _attach_industry_allocation(result: dict, symbol: str) -> None:
     try:
         import akshare as ak
         with akshare_direct_session():
-            df = ak.fund_portfolio_industry_allocation_em(symbol=symbol, date="2026")
+            df = ak.fund_portfolio_industry_allocation_em(symbol=symbol, date=str(datetime.now().year))
         if df is None or df.empty:
             return
         # 取最新一期数据
@@ -934,7 +999,7 @@ def _attach_industry_allocation(result: dict, symbol: str) -> None:
             result["industry_allocation"] = alloc
             result["industry_allocation_date"] = latest_date
     except Exception:
-        pass  # 非关键数据，降级不阻塞
+        logger.debug("_attach_industry_allocation(%s): failed, silent degrade", symbol)
 
 
 def _attach_valuation_guide(result: dict) -> None:
@@ -1077,7 +1142,7 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         rows = c.execute(
             "SELECT date, shares, price, aum FROM etf_share_snapshots "
             "WHERE symbol = ? ORDER BY date DESC LIMIT ?",
-            (symbol, days),
+            (symbol, days + 1),  # +1 确保 _change(window) 所需的 window+1 行
         ).fetchall()
         rows = list(reversed(rows))  # 恢复为 ASC 顺序
     except sqlite3.OperationalError as exc:

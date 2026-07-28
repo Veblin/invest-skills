@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, time as dt_time
 from pathlib import Path
@@ -67,6 +68,8 @@ class DataCache:
         self._cache_dir = Path(cache_dir) if cache_dir else _CACHE_DIR
         self._hits = 0
         self._misses = 0
+        self._lock = threading.Lock()
+        self._set_count = 0
 
     # ------------------------------------------------------------------
     # 公共 API
@@ -92,40 +95,56 @@ class DataCache:
         """
         path = self._cache_path(dimension, symbol)
         if not path.exists():
-            self._misses += 1
+            with self._lock:
+                self._misses += 1
             return None
 
         try:
             entry = self._load(path)
         except (json.JSONDecodeError, OSError):
-            path.unlink(missing_ok=True)
-            self._misses += 1
+            with self._lock:
+                path.unlink(missing_ok=True)
+                self._misses += 1
             return None
 
         if entry is None:
-            self._misses += 1
+            with self._lock:
+                self._misses += 1
             return None
 
-        # 版本不匹配视为过期
+        # 版本不匹配视为过期（不删除文件，留给 LRU 清理；避免与 set() 的并发写入竞态）
         if entry.get("version") != _CACHE_VERSION:
-            path.unlink(missing_ok=True)
-            self._misses += 1
+            with self._lock:
+                self._misses += 1
             return None
 
         # 检查过期
         if max_age_seconds is not None:
-            age = time.time() - entry.get("fetched_at_epoch", 0)
+            fetched_at = entry.get("fetched_at_epoch", 0)
+            if not isinstance(fetched_at, (int, float)):
+                with self._lock:
+                    self._misses += 1
+                return None  # 损坏的缓存文件
+            age = time.time() - fetched_at
             if age > max_age_seconds:
-                self._misses += 1
+                with self._lock:
+                    self._misses += 1
                 return None
         elif self._is_expired(entry):
-            self._misses += 1
+            with self._lock:
+                self._misses += 1
             return None
 
-        self._hits += 1
+        with self._lock:
+            self._hits += 1
         data = entry.get("data")
-        # 仅对 dict 类型标记 _from_cache（list/其他类型不标记，避免类型不一致）
+        # 仅对 dict 类型标记 _from_cache（list/其他类型不标记，避免类型不一致）。
+        # shallow-copy 防止 _from_cache 被 caller 持久化到 JSON 缓存文件。
+        # 注意：嵌套的 list/dict 仍与缓存条目共享引用；caller 如需修改嵌套
+        # 结构必须自行 deepcopy。当前所有 caller 仅写入顶层 _from_cache 键，
+        # 因此 shallow copy 足够。
         if isinstance(data, dict):
+            data = dict(data)
             data["_from_cache"] = True
         return data
 
@@ -170,18 +189,21 @@ class DataCache:
             )
             return str(obj)
 
-        # 原子写入：先写临时文件再 rename
+        # 原子写入 + LRU 清理：持锁防止与 get() 的 unlink 竞态
         tmp_path = path.with_suffix(".tmp")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(entry, f, ensure_ascii=False, default=_json_default)
-            tmp_path.rename(path)
-        except OSError:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        with self._lock:
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(entry, f, ensure_ascii=False, default=_json_default)
+                tmp_path.rename(path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
-        # LRU 清理
-        self._lru_cleanup()
+            # LRU 清理：每 50 次写入执行一次，避免每次 O(N log N) 文件扫描
+            self._set_count += 1
+            if self._set_count % 50 == 0:
+                self._lru_cleanup_locked()
 
     def is_fresh(self, dimension: str, symbol: str) -> bool:
         """判断缓存是否仍然新鲜。"""
@@ -221,7 +243,7 @@ class DataCache:
         if symbol is not None:
             path = self._cache_path(dimension, symbol)
             if path.exists():
-                path.unlink()
+                path.unlink(missing_ok=True)
                 return 1
             return 0
 
@@ -229,7 +251,10 @@ class DataCache:
         dim_dir = self._cache_dir / dimension
         if dim_dir.exists():
             for f in dim_dir.rglob("*.json"):
-                f.unlink()
+                try:
+                    f.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass  # 并发删除
                 count += 1
         return count
 
@@ -277,16 +302,22 @@ class DataCache:
 
     @staticmethod
     def _load(path: Path) -> dict | None:
-        """加载并验证缓存文件。损坏返回 None。"""
-        with open(path, encoding="utf-8") as f:
-            entry = json.load(f)
+        """加载并验证缓存文件。损坏或并发删除返回 None。"""
+        try:
+            with open(path, encoding="utf-8") as f:
+                entry = json.load(f)
+        except FileNotFoundError:
+            return None  # 并发 _lru_cleanup 已删除此文件
         if not isinstance(entry, dict) or "data" not in entry:
             return None
         return entry
 
     def _is_expired(self, entry: dict) -> bool:
         """判断缓存条目是否过期。"""
-        age = time.time() - entry.get("fetched_at_epoch", 0)
+        fetched_at = entry.get("fetched_at_epoch", 0)
+        if not isinstance(fetched_at, (int, float)):
+            return True  # 损坏的缓存文件，视为过期
+        age = time.time() - fetched_at
         effective = self._effective_ttl(entry)
         return age >= effective
 
@@ -301,8 +332,8 @@ class DataCache:
             return float(base * 0.8)  # truncate: avoid ms-level boundary flapping
         return float(base * 2.0)
 
-    def _lru_cleanup(self) -> int:
-        """超过 _MAX_ENTRIES 时按文件修改时间删除最旧条目。"""
+    def _lru_cleanup_locked(self) -> int:
+        """超过 _MAX_ENTRIES 时按文件修改时间删除最旧条目（调用方须已持有 self._lock）。"""
         if not self._cache_dir.exists():
             return 0
 

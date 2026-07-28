@@ -123,8 +123,13 @@ def _env_bypass_enter() -> None:
 
 
 def _env_bypass_exit() -> None:
-    """在已持有 _PROXY_IO_LOCK 时调用。"""
-    global _env_bypass_depth, _env_bypass_saved
+    """在已持有 _PROXY_IO_LOCK 时调用。
+
+    当最后一个 env scope 退出时，同时恢复 requests patch。
+    这防止了跨线程 enter/exit 交错：即使某线程退出时 requests depth 归零，
+    requests 也会保持 patched 直到最后一个 env scope 退出。
+    """
+    global _env_bypass_depth, _env_bypass_saved, _requests_direct_depth, _requests_direct_sess, _requests_direct_orig
     _env_bypass_depth -= 1
     if _env_bypass_depth > 0:
         return
@@ -133,12 +138,30 @@ def _env_bypass_exit() -> None:
     saved = _env_bypass_saved
     _env_bypass_saved = {}
     if not saved:
+        # Still need to restore requests if it was patched
+        if _requests_direct_orig is not None:
+            for mod, attr, orig in _requests_direct_orig:
+                setattr(mod, attr, orig)
+            if _requests_direct_sess is not None:
+                _requests_direct_sess.close()
+            _requests_direct_sess = None
+            _requests_direct_orig = None
+            _requests_direct_depth = 0
         return
     for k, v in saved.items():
         if v is None or v == "":
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+    # 当最后一个 env scope 退出时，确保 requests 也被恢复
+    if _requests_direct_orig is not None:
+        for mod, attr, orig in _requests_direct_orig:
+            setattr(mod, attr, orig)
+        if _requests_direct_sess is not None:
+            _requests_direct_sess.close()
+        _requests_direct_sess = None
+        _requests_direct_orig = None
+        _requests_direct_depth = 0
 
 
 def _requests_direct_enter() -> None:
@@ -251,11 +274,25 @@ def _probe_push2_eastmoney_unlocked(timeout: float) -> dict[str, Any]:
 
 @contextmanager
 def _direct_scope(*, patch_requests: bool) -> Iterator[None]:
-    """临时激活 env 绕过；patch_requests=True 时同时 patch requests（锁仅包裹 enter/exit）。"""
+    """临时激活 env 绕过 + 可选 requests patch。
+
+    锁仅包裹 enter/exit，不阻塞 yield 期间的网络 I/O。
+    跨线程安全性由 _env_bypass_exit() 保证：即使某线程在另一线程退出前先行
+    恢复 requests，requests 也会在最后一个 env scope 退出时再次恢复。
+
+    异常安全：若 _requests_direct_enter() 在 _env_bypass_enter() 之后抛出，
+    except 分支立即调用 _env_bypass_exit() 恢复 os.environ，然后重新抛出。
+    """
     with _PROXY_IO_LOCK:
         _env_bypass_enter()
-        if patch_requests:
-            _requests_direct_enter()
+        try:
+            if patch_requests:
+                _requests_direct_enter()
+        except BaseException:
+            # _requests_direct_enter() failed after env was modified;
+            # restore env before the exception propagates.
+            _env_bypass_exit()
+            raise
     try:
         yield
     finally:
@@ -428,14 +465,15 @@ def no_proxy_session() -> Iterator[requests.Session]:
 
 @contextmanager
 def _akshare_direct_session_unlocked() -> Iterator[None]:
-    """兼容测试 mock：在已持有 _PROXY_IO_LOCK 时同步 enter/exit（勿在 I/O 期间使用）。"""
-    _env_bypass_enter()
-    _requests_direct_enter()
-    try:
-        yield
-    finally:
-        _requests_direct_exit()
-        _env_bypass_exit()
+    """兼容测试 mock：acquires _PROXY_IO_LOCK internally, then enter/exit synchronously."""
+    with _PROXY_IO_LOCK:
+        _env_bypass_enter()
+        _requests_direct_enter()
+        try:
+            yield
+        finally:
+            _requests_direct_exit()
+            _env_bypass_exit()
 
 
 @contextmanager
