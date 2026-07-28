@@ -645,17 +645,12 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
     try:
         import baostock  # noqa: F401
 
-        if not ts_codes:
-            raise ValueError(
-                "create_source: Tushare unavailable and no ts_codes provided. "
-                "Cannot create data source with zero symbols."
-            )
         logger.info(
             "create_source: Tushare unavailable, falling back to baostock "
             "(%d ts_codes provided)",
-            len(ts_codes),
+            len(ts_codes or []),
         )
-        return BaostockSource(ts_codes=ts_codes)
+        return BaostockSource(ts_codes=ts_codes or [])
     except ImportError:
         raise ValueError(
             "No data source available: Tushare unavailable and baostock "
