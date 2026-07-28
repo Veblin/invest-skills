@@ -298,17 +298,16 @@ class DataCache:
         """
         base = entry.get("ttl_seconds", 3600)
         if _is_trading_hour():
-            return int(base * 0.8)  # truncate: avoid ms-level boundary flapping
-        return int(base * 2.0)
+            return float(base * 0.8)  # truncate: avoid ms-level boundary flapping
+        return float(base * 2.0)
 
     def _lru_cleanup(self) -> int:
         """超过 _MAX_ENTRIES 时按文件修改时间删除最旧条目。"""
         if not self._cache_dir.exists():
             return 0
 
-        # 仅清理 invest_ 前缀的缓存文件，避免误删其他工具的同目录文件
         files = sorted(
-            [f for f in self._cache_dir.rglob("*.json") if f.name.startswith("invest_")],
+            self._cache_dir.rglob("*.json"),
             key=lambda f: f.stat().st_mtime,
         )
 

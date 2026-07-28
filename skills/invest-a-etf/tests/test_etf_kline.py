@@ -14,9 +14,10 @@ def test_aligned_nav_returns_skips_rows_without_nav():
         {"单位净值": None, "日增长率": 0.5},
         {"单位净值": 1.01, "日增长率": 1.0},
     ])
-    navs, returns = _aligned_nav_returns(df)
+    navs, returns, rows = _aligned_nav_returns(df)
     assert len(navs) == 2
     assert len(returns) == 2
+    assert len(rows) == 2
     assert navs == pytest.approx([1.0, 1.01])
     assert returns == pytest.approx([0.01, 0.01])
 
@@ -26,10 +27,11 @@ def test_aligned_nav_returns_derives_from_nav_when_chg_missing():
         {"单位净值": 1.0, "日增长率": None},
         {"单位净值": 1.02, "日增长率": None},
     ])
-    navs, returns = _aligned_nav_returns(df)
+    navs, returns, rows = _aligned_nav_returns(df)
     # fix #2: 首行 NAV 不再被丢弃；navs 保留锚点行 + 推导行
     assert navs == pytest.approx([1.0, 1.02])
     assert returns == pytest.approx([0.02])
+    assert len(rows) == 2
 
 
 def test_latest_rsi_uses_wilder_on_nav_closes():

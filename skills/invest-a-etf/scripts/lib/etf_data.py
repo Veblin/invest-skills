@@ -569,7 +569,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
                 "MA/波动率/RSI/BOLL 基于复权后序列计算"
             )
 
-        navs, returns = _aligned_nav_returns(df, source=source, adj_map=adj_map)
+        navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
         if navs:
             result["latest_nav"] = navs[-1]
 
@@ -622,10 +622,10 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             result["rsi"] = rsi_val
             result["rsi_period"] = period
 
+        # 使用与指标计算相同的对齐数据构建 nav_history（含复权调整）
         result["nav_history"] = [
-            {"date": str(r.get("净值日期", "")), "nav": safe_float(r.get("单位净值")),
-             "change_pct": safe_float(r.get("日增长率"))}
-            for _, r in df.iterrows()
+            {"date": r["date"], "nav": navs[i], "change_pct": r["change_pct"]}
+            for i, r in enumerate(aligned_rows)
         ]
         result["status"] = "available"
 
@@ -640,7 +640,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float] | None = None) -> tuple[list[float], list[float]]:
+def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float] | None = None) -> tuple[list[float], list[float], list[dict]]:
     """从净值表构建对齐的 navs / returns（同一行样本）。
 
     Parameters
@@ -659,14 +659,16 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
 
     navs: list[float] = []
     returns: list[float] = []
+    rows: list[dict] = []
     prev_nav: float | None = None
     for _, row_data in df.iterrows():
         nav = safe_float(row_data.get("单位净值"))
         if nav is None:
             continue
+        date_str = str(row_data.get("净值日期", ""))
+        chg_pct = safe_float(row_data.get("日增长率"))
         # 前复权：adjusted = raw * adj(d) / adj(latest)
         if adj_map:
-            date_str = str(row_data.get("净值日期", ""))
             # Tushare fund_adj 日期格式为 "20260724"，akshare 为 "2026-07-24"
             # 统一为无分隔符格式做匹配
             date_key = date_str.replace("-", "")
@@ -675,22 +677,25 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
                 adj_d = adj_map.get(date_str)
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
-        chg = safe_float(row_data.get("日增长率"))
+        chg = chg_pct
         if chg is not None:
             ret = chg / 100.0
             navs.append(nav)
             returns.append(ret)
+            rows.append({"date": date_str, "change_pct": chg_pct})
             prev_nav = nav
         elif prev_nav is not None and prev_nav > 0:
             ret = (nav / prev_nav) - 1.0
             navs.append(nav)
             returns.append(ret)
+            rows.append({"date": date_str, "change_pct": chg_pct})
             prev_nav = nav
         else:
             # 首行有效 NAV 但无日增长率 — 保留为锚点，不丢失数据
             prev_nav = nav
             navs.append(nav)
-    return navs, returns
+            rows.append({"date": date_str, "change_pct": chg_pct})
+    return navs, returns, rows
 
 
 def _latest_rsi(navs: list[float], period: int) -> float | None:
