@@ -134,6 +134,8 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
         "cpi": None,
         "ppi": None,
         "lpr": None,
+        "money_supply": None,
+        "loan": None,
         "vix": None,
         "sox": None,
     }
@@ -259,6 +261,84 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
             logger.warning("LPR fetch failed: %s", exc)
             failures.append("LPR")
 
+        # M2 货币供应量同比增速（信用脉冲参考）
+        try:
+            from .proxy import akshare_direct_session
+
+            with akshare_direct_session():
+                import akshare as ak
+
+                df = ak.macro_china_money_supply()
+                if df is not None and not df.empty:
+                    # 注意：此 API 返回降序（最新在前），用 iloc[0]
+                    row = df.iloc[0]
+                    m2_yoy = None
+                    for col in ["货币和准货币(M2)-同比增长"]:
+                        v = row.get(col)
+                        if v is not None:
+                            m2_yoy = float(v)
+                            break
+                    if m2_yoy is not None:
+                        # 信用脉冲信号：M2 同比 − 名义GDP增速(估~5%)
+                        credit_pulse = round(m2_yoy - 5.0, 1)
+                        if m2_yoy > 12:
+                            signal = "宽松"
+                        elif m2_yoy > 8:
+                            signal = "偏松"
+                        elif m2_yoy >= 5:
+                            signal = "稳健"
+                        else:
+                            signal = "偏紧"
+                        context["money_supply"] = {
+                            "value": round(m2_yoy, 2),
+                            "signal": signal,
+                            "credit_pulse": credit_pulse,
+                            "source": "akshare.macro_china_money_supply",
+                        }
+            if context["money_supply"] is None:
+                failures.append("M2")
+        except Exception as exc:
+            logger.warning("M2 fetch failed: %s", exc)
+            failures.append("M2")
+
+        # 新增人民币贷款（月度）
+        try:
+            if context.get("money_supply") is not None:  # 共用 akshare session
+                from .proxy import akshare_direct_session
+
+                with akshare_direct_session():
+                    import akshare as ak
+
+                    df = ak.macro_rmb_loan()
+                    if df is not None and not df.empty:
+                        row = df.iloc[-1]
+                        loan_val = None
+                        loan_yoy_str = row.get("新增人民币贷款-同比", "")
+                        for col in ["新增人民币贷款-总额"]:
+                            v = row.get(col)
+                            if v is not None:
+                                loan_val = float(v)
+                                break
+                        if loan_val is not None:
+                            # 同比增速（去掉 % 符号）
+                            loan_yoy = None
+                            if isinstance(loan_yoy_str, str) and "%" in loan_yoy_str:
+                                try:
+                                    loan_yoy = float(loan_yoy_str.replace("%", ""))
+                                except ValueError:
+                                    pass
+                            context["loan"] = {
+                                "value": round(loan_val, 2),
+                                "yoy": loan_yoy,
+                                "signal": "扩张" if loan_val > 15000 else ("正常" if loan_val > 5000 else "收缩"),
+                                "source": "akshare.macro_rmb_loan",
+                            }
+            if context["loan"] is None:
+                failures.append("Loan")
+        except Exception as exc:
+            logger.warning("Loan fetch failed: %s", exc)
+            failures.append("Loan")
+
     # VIX (CBOE Volatility Index via FRED)
     try:
         config = env.get_config()
@@ -329,6 +409,18 @@ def macro_signal_label(macro: dict) -> str:
     lpr = indicators.get("lpr")
     if lpr:
         parts.append(f"LPR {lpr['value']}%")
+
+    m2 = indicators.get("money_supply")
+    if m2:
+        cp = m2.get("credit_pulse")
+        cp_str = f" 脉冲{cp:+.1f}%" if cp is not None else ""
+        parts.append(f"M2 {m2['value']}%{cp_str}")
+
+    loan = indicators.get("loan")
+    if loan:
+        loan_val = loan.get("value", 0)
+        loan_fmt = f"{loan_val:.0f}亿" if loan_val >= 10000 else f"{loan_val/10000:.1f}万亿"
+        parts.append(f"信贷 {loan_fmt}")
 
     # 政策方向：综合 LPR 与 CPI（LPR 优先，CPI 作为补充信号）
     policy_parts: list[str] = []

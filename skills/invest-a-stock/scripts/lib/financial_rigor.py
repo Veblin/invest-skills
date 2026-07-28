@@ -73,7 +73,11 @@ def _quote_snapshot(quote_data: Any) -> dict:
 
 def _parse_share_count(basic: dict) -> float | None:
     """Parse total shares from basic_info (万股 → 万股 float)."""
-    raw = basic.get("总股本") or basic.get("total_share") or basic.get("float_share")
+    raw = basic.get("总股本")
+    if raw is None:
+        raw = basic.get("total_share")
+    if raw is None:
+        raw = basic.get("float_share")
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
@@ -111,7 +115,8 @@ def _merge_share_fields(basic_dim: dict) -> dict:
                     for k in ("总股本", "total_share", "float_share"):
                         v = sd_data.get(k)
                         if v is not None:
-                            merged.setdefault(k, v)
+                            if k not in merged or merged[k] is None:
+                                merged[k] = v
     return merged
 
 
@@ -191,6 +196,8 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
                 detail=f"非年报净利（end_date={ed or '—'}），跳过 PE(TTM) 验算",
             ))
         else:
+            # 单位推断：绝对值 >100万 → 视为"元"→ 转换为"亿"；≤100万 → 视为已是"亿"
+            # 注意：微利公司（净利润<100万但以元计）会被误判，导致 PE 偏高
             ni_yi = net_income / 1e8 if abs(net_income) > 1e6 else net_income
             if ni_yi and ni_yi > 0:
                 pe_calc = reported_mv / ni_yi

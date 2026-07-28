@@ -1,5 +1,75 @@
 # Changelog — invest skills
 
+## v0.2.2 (2026-07-28)
+
+v0.2.2 建设市场微观结构指标体系与平台化基础设施：新增市场情绪全景 Skill、共用函数层、TTL 缓存层；ETF 模块补齐行业基础设施（类型分类/PE快照/持仓代理/对冲映射），并修复 8 项设计问题。
+
+### 市场微观结构
+
+- **`market_microstructure.py`**：17 指标统一采集管道（Tier 1 涨跌比/涨跌停比/两融/北向/成交额 + Tier 2 衍生指标/分位 + Tier 3 ERP/PCR/破净率）
+- **`market_snapshots` 表**：每日快照持久化，支持历史分位计算与趋势对比
+- **`market-status` CLI**：`invest.py market-status [--save] [--days N] [--json]`，一键查看当日杠杆/广度/情绪/估值温度
+- **环境标签 v2**：历史分位 + 趋势 + 多指标交叉验证规则，`env_label` JSON 输出供 journal 自动注入
+- **北向资金**：季度持股市值变动推算净流向（日频 2024-08-19 起停更后的替代方案）
+- **两融 akshare 降级**：`collector._ms_fetch_margin()` 添加 `stock_margin_account_info` 降级路径（Tushare margin_detail 不可用时自动切换全市场汇总）
+
+### invest-a-pulse（新 Skill）
+
+- 市场情绪全景分析 Skill：5 章节结构化报告（杠杆周期/市场广度/极端情绪/资金面/估值温度）
+- 数据来源：`market_microstructure.snapshot()` + `load_history(60)`
+- 综合环境标签自动生成（正常/偏谨慎/⚠️ 警告），journal 评估流程自动注入
+
+### 平台化基础设施
+
+- **`skills/lib/` 共用层**：从 invest-a-stock 抽离纯函数（`nums.py`/`stats.py`/`technical.py`/`dates.py`/`codes.py`），各 Skill 经 `_invest_path` shim 引用
+- **TTL 缓存层**（`cache.py`）：JSON 文件缓存，维度级 TTL，盘中/盘后差异化过期策略
+- **`data_bridge.py`**：跨源数据桥接，带重试与降级
+- **共享报告规范**（`report-conventions.md`）：措辞规范/证据强度/分析合成三步/self-check — stock/etf/journal/pulse 统一引用
+- **`industry_snapshot.py`**：申万行业 PE/PB 周频采集，`industry_weekly` 表持久化
+
+### invest-a-etf 行业基础设施（G1-G9）
+
+- **G1 ETF 类型分类**：`query_etf_category()` — 硬编码映射 → fund_etf_category_sina → 名称关键词推断，三级降级
+- **G2 行业 PE 快照**：`collect_industry_weekly()` + `industry_weekly` 表，31 申万行业 PE/PB 排名
+- **G4 行业 ETF PE 映射**：`_attach_industry_pe()`，ETF→SW 行业→行业 PE 代理
+- **G6 持仓代理**：`_attach_industry_allocation()`，`stock_board_industry_cons_em` 获取前 5 大行业暴露
+- **G7 对冲映射扩展**：`ETF_HEDGE_MAP` 16→39 只，覆盖宽基/跨境/商品/主要行业 ETF
+- **G9 行业估值指引**：`query_sector_valuation_guide()` + `_attach_valuation_guide()`，行业特定估值指标与 pe_timing 判断
+- **ETF 份额流跟踪**：`save_etf_share_snapshot()` + `etf_share_flow()`，份额变动 + 估算资金流
+
+### 设计问题修复（D1-D8）
+
+- **D1** auto-flags 按 ETF 类型区分阈值：`_TYPE_THRESHOLDS` 区分跨境(5%)/债券(2%)/商品(3%)，消除 QDII 误报
+- **D2** RSI 注释修正：注明 Wilder RSI 默认周期 24（非 standard 14），删除冗余 `rsi_24` 字段
+- **D3** 折溢价符号验证：确认 EM `基金折价率` + = 折价，`-em` 取反逻辑正确，补充注释
+- **D4** MA 增加指数价格 MA：`_fetch_index_ma()`，NAV MA 重命名为 `ma20`/`ma60`，新增 `index_ma20`/`index_ma60`
+- **D5** `etf_share_flow` 文档修正：`days` 参数语义从"自然日"更正为"行数"
+- **D6** 死代码删除：移除 `from lib import env as _env` 未使用导入
+- **D7** 波动率固定 60 日窗口：跨 ETF 可比性
+- **D8** BOLL 接入 kline：`boll_upper`/`boll_mid`/`boll_lower`，基于 NAV 20 日窗口
+
+### invest-a-limit-up 废弃
+
+- 用户入口下线：移除 `.claude/commands/invest-a-limit-up.md` 符号链接
+- SKILL.md 精简为数据管道说明（134→53 行），`user-invocable: false`
+- `limit_up_scanner.py` + `scan.py` CLI 保留为 `market_microstructure._fetch_limit_pools()` 的数据源
+
+### Bug 修复
+
+- 修复 `market_microstructure` 6 个数据抓取缺陷（Tushare 导入、PCR 查询、裸 except 等）
+- 修复 `query_data._median` 替换为 `statistics.median`
+- 移除 4 个未使用导入（`os`/`math`/`as_completed`/`List`）
+- 去重 `_conn`/`_safe_close` 数据库连接工具函数
+- 修复 `data_bridge` 裸导入：添加相对导入 fallback
+- 修复 etf-flow JSON 序列化、days 参数语义、capital_flow 显示
+- `fund_adj` 前复权集成：消除 NAV 序列分红/拆分断点
+- 报告文件名强制实际时间戳（禁止硬编码）
+
+### 文档
+
+- `host-docs/v0.2.2/`：requirements.md / gap-verification-and-design-flaws.md / fix-execution-plan.md / architecture-cache-layer.md / architecture-shared-lib.md / deep-research/（9 篇调研文档）
+- README 更新：版本号 v0.2.2、新增 invest-a-pulse / market-status、项目结构更新
+
 ## Unreleased
 
 ## v0.2.1 (2026-07-23)

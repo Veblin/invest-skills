@@ -41,14 +41,18 @@ query_etf_data = _mod.query_etf_data
 query_etf_kline = _mod.query_etf_kline
 query_etf_quote = _mod.query_etf_quote
 rollup_etf_quality_status = _mod.rollup_etf_quality_status
+etf_share_flow = _mod.etf_share_flow
+save_etf_share_snapshot = _mod.save_etf_share_snapshot
 
 __all__ = [
     "CSINDEX_MAP",
     "ETF_HEDGE_MAP",
     "clear_etf_spot_cache",
+    "etf_share_flow",
     "prefetch_etf_spot",
     "query_etf_data",
     "query_etf_kline",
     "query_etf_quote",
     "rollup_etf_quality_status",
+    "save_etf_share_snapshot",
 ]

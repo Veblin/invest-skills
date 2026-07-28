@@ -9,8 +9,9 @@ v0.2.1：PE 分位依赖 Tushare；无 Tushare 时标注"无历史分位"。
 from __future__ import annotations
 
 import logging
+import statistics
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
@@ -245,9 +246,10 @@ def _safe_etf_kline(symbol: str) -> dict:
             "latest_nav": raw.get("latest_nav"),
             "rsi": raw.get("rsi"),
             "rsi_period": raw.get("rsi_period"),
-            "rsi_24": raw.get("rsi_24"),
             "ma20": raw.get("ma20"),
             "ma60": raw.get("ma60"),
+            "index_ma20": raw.get("index_ma20"),
+            "index_ma60": raw.get("index_ma60"),
         }
     except Exception as exc:
         return {"_error": str(exc), "rows": 0, "data": [], "status": "missing"}
@@ -296,19 +298,33 @@ def _compute_technical(result: dict) -> None:
         "latest_close": None,
         "ma20": None,
         "ma60": None,
+        "index_ma20": None,
+        "index_ma60": None,
+        "boll_upper": None,
+        "boll_mid": None,
+        "boll_lower": None,
         "kline_days": len(rows) if isinstance(rows, list) else 0,
         "status": "missing",
     }
 
     # ETF：净值序列已预计算波动率/RSI/MA
     if is_etf:
+        kline_error = kline.get("_error")
+        if kline_error:
+            result["technical"]["status"] = "fetch_failed"
+            result["technical"]["kline_error"] = str(kline_error)
+            return
         result["technical"]["latest_close"] = kline.get("latest_nav")
         result["technical"]["volatility_annualized"] = kline.get("volatility_annualized")
         result["technical"]["rsi"] = kline.get("rsi")
         result["technical"]["rsi_period"] = kline.get("rsi_period")
-        result["technical"]["rsi_24"] = kline.get("rsi_24")
         result["technical"]["ma20"] = kline.get("ma20")
         result["technical"]["ma60"] = kline.get("ma60")
+        result["technical"]["index_ma20"] = kline.get("index_ma20")
+        result["technical"]["index_ma60"] = kline.get("index_ma60")
+        result["technical"]["boll_upper"] = kline.get("boll_upper")
+        result["technical"]["boll_mid"] = kline.get("boll_mid")
+        result["technical"]["boll_lower"] = kline.get("boll_lower")
         rows_count = kline.get("rows", len(rows) if isinstance(rows, list) else 0)
         kline_status = kline.get("status", "missing")
         if rows_count == 0:
@@ -448,13 +464,10 @@ def _percentile(value: float | None, population: list[float]) -> float | None:
 
 
 def _median(population: list[float]) -> float | None:
+    """Delegates to stdlib statistics.median; returns None for empty input."""
     if not population:
         return None
-    s = sorted(population)
-    n = len(s)
-    if n % 2 == 1:
-        return s[n // 2]
-    return round((s[n // 2 - 1] + s[n // 2]) / 2, 4)
+    return statistics.median(population)
 
 
 def _status_from_raw(raw: dict) -> str:

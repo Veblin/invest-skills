@@ -246,7 +246,10 @@ def _v3_cv8_assessment(
 ) -> tuple[str, str] | None:
     """CV-8：ERP 分位 vs 认沽认购比 vs 融券增速。"""
     erp_p = (erp or {}).get("percentile_5y")
-    pcr_p = (pcr or {}).get("percentile_5y") or (pcr or {}).get("percentile_60d")
+    _pcr_data = pcr or {}
+    pcr_p = _pcr_data.get("percentile_5y")
+    if pcr_p is None:
+        pcr_p = _pcr_data.get("percentile_60d")
     sm_g = (short_margin or {}).get("growth_pct")
     sm_p = (short_margin or {}).get("percentile_5y")
 

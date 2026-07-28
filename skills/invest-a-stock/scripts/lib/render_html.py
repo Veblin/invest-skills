@@ -273,7 +273,8 @@ def _load_chart_js() -> str:
     try:
         _CHART_JS_CACHE = p.read_text(encoding="utf-8")
         return _CHART_JS_CACHE
-    except Exception:
+    except Exception as e:
+        logger.warning("chart.umd.min.js not found at %s; charts will be disabled: %s", p, e)
         _CHART_JS_CACHE = ""
         return ""
 

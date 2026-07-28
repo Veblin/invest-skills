@@ -280,9 +280,12 @@ PRICE_NEWS_WHITELIST = [
 # ⚠️ 东方财富 (eastmoney.com) 因代理问题暂不列入
 
 # cninfo 高管增减持全市场接口超时（秒）；超时则跳过该方向
-CNINFO_HOLDER_TIMEOUT_SEC = max(
-    5, int(os.environ.get("INVEST_CNINFO_HOLDER_TIMEOUT", "45"))
-)
+_raw_cninfo_timeout = os.environ.get("INVEST_CNINFO_HOLDER_TIMEOUT", "45")
+try:
+    _cninfo_timeout_val = int(_raw_cninfo_timeout)
+except (ValueError, TypeError):
+    _cninfo_timeout_val = 45
+CNINFO_HOLDER_TIMEOUT_SEC = max(5, _cninfo_timeout_val)
 
 
 def ensure_env_loaded() -> None:

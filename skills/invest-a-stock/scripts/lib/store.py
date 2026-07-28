@@ -107,7 +107,60 @@ def init_db() -> None:
                 created_at TEXT DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_val_sym ON valuations(symbol);
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                date TEXT PRIMARY KEY,
+                -- Tier 1 原始指标
+                margin_balance REAL, margin_buy_amount REAL,
+                ad_ratio REAL, limit_up_count INTEGER, limit_down_count INTEGER,
+                lu_ld_ratio REAL,
+                total_turnover REAL,
+                sse_float_mcap REAL, szse_float_mcap REAL,
+                -- Tier 2 衍生指标
+                margin_to_mcap REAL,
+                margin_buy_to_turnover REAL,
+                margin_20d_change REAL,
+                ad_ratio_5d_ma REAL,
+                limit_down_20d_pct REAL,
+                -- Tier 3 高级指标
+                erp REAL, pcr REAL, below_book_pct REAL,
+                -- 资金面 — 北向
+                northbound_net_inflow REAL, northbound_direction TEXT, northbound_source TEXT,
+                -- 环境标签（JSON）
+                env_label TEXT,
+                collected_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS etf_share_snapshots (
+                date TEXT,
+                symbol TEXT,
+                shares REAL,
+                price REAL,
+                aum REAL,
+                collected_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (date, symbol)
+            );
+            CREATE TABLE IF NOT EXISTS industry_weekly (
+                index_code TEXT NOT NULL,
+                index_name TEXT NOT NULL,
+                date TEXT NOT NULL,
+                pe REAL, pb REAL, chg_pct REAL,
+                turnover_pct REAL, dividend_yield REAL,
+                mkt_cap REAL,
+                PRIMARY KEY (index_code, date)
+            );
         """)
+        # v0.2.2 迁移：为已有表添加北向资金列
+        for col, col_type in [
+            ("northbound_net_inflow", "REAL"),
+            ("northbound_direction", "TEXT"),
+            ("northbound_source", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass  # 列已存在
+                else:
+                    raise
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))

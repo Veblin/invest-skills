@@ -6,10 +6,13 @@ v0.2.1: direction / linked_journal_id / evaluation_json 三字段。
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 
 from _invest_path import ensure_invest_a_scripts_on_path
+
+logger = logging.getLogger(__name__)
 
 ensure_invest_a_scripts_on_path()
 
@@ -220,6 +223,7 @@ def save_journal(entry: dict) -> int:
         c.commit()
         return cur.lastrowid
     except Exception:
+        logger.warning("save_journal failed for symbol=%s — rolling back", entry.get("symbol", "?"), exc_info=True)
         c.rollback()
         raise
     finally:
@@ -265,6 +269,7 @@ def update_journal(journal_id: int, updates: dict) -> bool:
         c.commit()
         return cur.rowcount > 0
     except Exception:
+        logger.warning("update_journal failed for id=%s — rolling back", journal_id, exc_info=True)
         c.rollback()
         raise
     finally:

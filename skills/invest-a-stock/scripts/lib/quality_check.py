@@ -95,6 +95,8 @@ def _metric_fcf_5y(rows: list[dict]) -> dict[str, Any]:
         ocf = coalesce_field(r, "n_cashflow_act", "ocf")
         capex = coalesce_field(r, "cap_ex", "c_pay_acq_const_fiolta")
         if ocf is not None and capex is not None:
+            # CapEx 字段约定：正数=资本支出金额。abs() 兼容少数来源返回负数的场景。
+            # 若新来源使用不同约定（如负数=支出），需在此处显式判断符号。
             fcf = ocf - abs(capex)
             total += fcf
             count += 1
@@ -219,7 +221,7 @@ def run_quality_check(collection: dict) -> dict[str, Any]:
         for m in metrics:
             if m.get("type") == "veto" and m.get("status") == "fail":
                 m["status"] = "exempted"
-                m["detail"] = f"豁免: {', '.join(exemptions)}"
+                m["detail"] = f"豁免({', '.join(exemptions)}); 原值: {m['detail']}"
 
     veto_fails = sum(1 for m in metrics if m.get("type") == "veto" and m.get("status") == "fail")
     warnings = sum(1 for m in metrics if m.get("status") == "warn")

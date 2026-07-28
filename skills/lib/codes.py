@@ -36,7 +36,10 @@ def exchange_code(symbol: str) -> dict[str, str]:
     Keys: ``tushare`` (``600176.SH``), ``baostock`` (``sh.600176``),
     ``akshare`` (``sh600176``).
     """
-    s = symbol.strip().zfill(6)
+    s = symbol.strip()
+    if not s.isdigit():
+        raise ValueError(f"Invalid symbol: {symbol!r} (must be 1-6 digits)")
+    s = s.zfill(6)
     if s.startswith(("6", "9")):
         return {"tushare": f"{s}.SH", "baostock": f"sh.{s}", "akshare": f"sh{s}"}
     if s.startswith(("4", "8")):

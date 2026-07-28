@@ -154,13 +154,19 @@ def _section_bull_bear(
     # ── gather raw data for chains ──────────────────────────────────
     nb_v = _safe_num(nb.get("net_sum_10d"))
     mf_net, mf_key = resolve_moneyflow(market_structure.get("moneyflow"))
-    roe = _safe_num(latest_fin.get("roe") or target.get("roe"))
+    _roe_raw = latest_fin.get("roe")
+    if _roe_raw is None:
+        _roe_raw = target.get("roe")
+    roe = _safe_num(_roe_raw)
     roe_rank_pct = rankings.get("roe_pct")
     rev_yoy_pct = rankings.get("revenue_yoy_pct")
     svi = sw.get("stock_vs_industry_pct")
     erp_data = market_structure.get("erp") or {}
     erp_pct = erp_data.get("percentile_5y")
-    ocf = _safe_num(latest_fin.get("ocf") or latest_fin.get("n_cashflow_act"))
+    _ocf_raw = latest_fin.get("ocf")
+    if _ocf_raw is None:
+        _ocf_raw = latest_fin.get("n_cashflow_act")
+    ocf = _safe_num(_ocf_raw)
     np_v = _safe_num(latest_fin.get("net_profit"))
     ig, cagr, np_cagr = _v3_bull_bear_implied_growth(dims, market_structure)
     ref_cagr = cagr if cagr is not None else np_cagr
@@ -721,7 +727,7 @@ def _section_risk_uncertainty(
     _TIME_WINDOW_MAP = {"高": "1-3 个月", "中": "3-6 个月", "低": "6-12 个月", "参考": "视条件触发"}
 
     # LAW 17: 构建含风险统计数据的标题
-    risk_signals_n = risk_data.get("coverage", {}).get("auto", 0) if isinstance(risk_data, dict) else 0
+    risk_signals_n = (risk_data.get("coverage") or {}).get("auto", 0) if isinstance(risk_data, dict) else 0
     triggered_n = risk_data.get("triggered_count", 0) if isinstance(risk_data, dict) else 0
     title_suffix = f"触发 {triggered_n}/{risk_signals_n} 项风险信号" if risk_signals_n else "风险与不确定性"
     judgment = f"自动判定覆盖 {risk_signals_n}/17 信号，当前触发 {triggered_n} 项，详见下方三层风险结构。" if risk_signals_n else "以下为三层风险信号与已知未知分析。"
@@ -883,7 +889,9 @@ def _section_left_right_probability(
     lines.append("")
     lines.append("### 当前趋势位置（描述性参考，非单一结论）")
     kline = _get_dim_data(dims, "kline")
+    # 计算一次技术指标，后续三处复用（避免 3x compute() 冗余）
     trend_label = ""
+    tech: dict = {}
     if kline and isinstance(kline, list):
         tech = compute(sort_kline_asc(kline))
         if "error" not in tech:
@@ -904,15 +912,13 @@ def _section_left_right_probability(
     lines.append("")
     lines.append("### 右侧概率的主要支撑依据")
     right_items: list[str] = []
-    if kline and isinstance(kline, list):
-        tech = compute(sort_kline_asc(kline))
-        if "error" not in tech:
-            label = tech["trend"]["alignment"].get("trend_label", "")
-            if "多头" in label:
-                right_items.append(f"① MA 多头排列（{label}），证据强度：⚠️")
-            macd = tech["momentum"]["macd"]
-            if macd.get("available"):
-                right_items.append(f"② MACD DIF={macd.get('dif')} DEA={macd.get('dea')}，证据强度：❓")
+    if tech and "error" not in tech:
+        label = tech["trend"]["alignment"].get("trend_label", "")
+        if "多头" in label:
+            right_items.append(f"① MA 多头排列（{label}），证据强度：⚠️")
+        macd = tech["momentum"]["macd"]
+        if macd.get("available"):
+            right_items.append(f"② MACD DIF={macd.get('dif')} DEA={macd.get('dea')}，证据强度：❓")
     sw = market_structure.get("sw_index")
     if sw and sw.get("stock_vs_industry_pct") is not None and sw["stock_vs_industry_pct"] > 0:
         right_items.append(f"③ 个股跑赢行业（{sw['stock_vs_industry_pct']:+.2f}%），证据强度：⚠️")
@@ -928,15 +934,16 @@ def _section_left_right_probability(
                 rev_yoy_lr = (rev_now - rev_prev) / rev_prev * 100
                 if rev_yoy_lr > 100:
                     continuation_hits.append(f"季度营收同比 {rev_yoy_lr:+.1f}%（>100%）")
-    if kline and isinstance(kline, list):
-        tech_lr = compute(sort_kline_asc(kline))
-        if "error" not in tech_lr:
-            ma60 = tech_lr.get("trend", {}).get("ma60") or {}
-            if ma60.get("slope_pct") is not None and ma60["slope_pct"] > 0:
-                continuation_hits.append(f"MA60 斜率为正（{ma60['slope_pct']:+.2f}%/期）")
+    if tech and "error" not in tech:
+        ma60 = tech.get("trend", {}).get("ma60") or {}
+        if ma60.get("slope_pct") is not None and ma60["slope_pct"] > 0:
+            continuation_hits.append(f"MA60 斜率为正（{ma60['slope_pct']:+.2f}%/期）")
     mf_lr = market_structure.get("moneyflow") or {}
     nb_lr = market_structure.get("northbound") or {}
-    mf10 = _safe_num(mf_lr.get("net_sum_10d") or nb_lr.get("net_sum_10d"))
+    _mf_raw = mf_lr.get("net_sum_10d")
+    if _mf_raw is None:
+        _mf_raw = nb_lr.get("net_sum_10d")
+    mf10 = _safe_num(_mf_raw)
     if mf10 is not None and mf10 > 0:
         continuation_hits.append(f"主力资金/北向近10日净流入 {_fmt_v2(mf10)}")
     if len(continuation_hits) >= 2:

@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import threading
 import time
@@ -75,7 +74,8 @@ def _latest_quarter_end() -> str:
     ]
     for y, md in reversed(quarter_ends):
         d = datetime.strptime(f"{y}{md}", "%Y%m%d")
-        # 用 date 比较确保季度末整日已过（如 6/30 15:00 不视作 Q2 已完成）
+        # 用 > 确保季度末整日已过（如 6/30 当天仍返回 Q1，7/1 起返回 Q2）
+        # 注：季度末日当天（如 3/31）金融数据尚未披露，提前返回无害
         if today > d.date():
             return f"{y}{md}"
     return f"{now.year - 1}1231"
@@ -161,7 +161,9 @@ def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
         return []
 
     sources: list[SourceResult | None] = []
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
+    # max_workers=8：平衡并发效率与 Tushare/akshare 限流（可通过 INVEST_MAX_WORKERS 环境变量覆盖）
+    max_w = int(os.environ.get("INVEST_MAX_WORKERS", "8"))
+    with ThreadPoolExecutor(max_workers=min(len(tasks), max_w)) as executor:
         futures = {
             executor.submit(_run_one_source, name, fn, dimension): i
             for i, (name, fn) in enumerate(tasks)
@@ -1758,7 +1760,7 @@ def _parse_holder_change_vol(raw) -> float | None:
             return None
         return f
     s = str(raw).strip().replace(",", "")
-    m = re.search(r"([\d.]+)\s*(万|亿)?", s)
+    m = re.search(r"(-?[\d.]+)\s*(万|亿)?", s)
     if not m:
         return None
     val = float(m.group(1))
@@ -2214,13 +2216,16 @@ def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
     """行业产品定价追踪（与 collect_financials 同构）。"""
     from .chain import get_futures_for_industry
 
-    tasks: list[tuple[str, Callable]] = [
-        ("akshare.futures_spot_price",
-         lambda: _q_akshare_futures_spot(symbol, industry)),
-    ]
+    tasks: list[tuple[str, Callable]] = []
     if env.is_akshare_available():
-        tasks.append(("akshare.stock_news_em",
-                      lambda: _q_akshare_company_news_price(symbol)))
+        tasks.append(
+            ("akshare.futures_spot_price",
+             lambda: _q_akshare_futures_spot(symbol, industry)),
+        )
+        tasks.append(
+            ("akshare.stock_news_em",
+             lambda: _q_akshare_company_news_price(symbol)),
+        )
 
     def _inject_meta(legacy: dict, _results: list) -> dict:
         legacy.setdefault("data", {})
@@ -2290,6 +2295,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
                 continue
             if dim == "industry_pricing":
+                # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
                 continue
             if dim == "kline" and kline_kwargs:
                 _, fn = COLLECTORS[dim]
@@ -2909,43 +2915,86 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
       - change_pct: 融资余额（rzye）增速
       - rqye_change_pct: 融券余额增速
       - rzrqye_change_pct: 融资融券合计余额增速（如有）
+
+    Tushare margin_detail 不可用时降级到 akshare stock_margin_account_info
+    （全市场汇总粒度，非个股粒度；source 标记为 "akshare.margin_account"）。
     """
+    # 主线：Tushare margin_detail（个股粒度）
     df = tc.query("margin_detail", ts_code=_ts_code(symbol),
                   start_date=_days_ago(15), end_date=_today())
-    if df is None or df.empty:
-        return None
-    records = df.sort_values("trade_date").to_dict("records")
-    if len(records) < 2:
-        return None
+    if df is not None and not df.empty:
+        records = df.sort_values("trade_date").to_dict("records")
+        if len(records) >= 2:
+            first, last = records[0], records[-1]
 
-    first, last = records[0], records[-1]
+            def _pct_chg(key: str) -> float | None:
+                fv = first.get(key)
+                lv = last.get(key)
+                if fv is None or lv is None:
+                    return None
+                f = float(fv)
+                l = float(lv)
+                if abs(f) < 1e-9:
+                    return None
+                return (l - f) / f * 100
 
-    def _pct_chg(key: str) -> float | None:
-        fv = first.get(key)
-        lv = last.get(key)
-        if fv is None or lv is None:
+            change_pct = _pct_chg("rzye")
+            rqye_change_pct = _pct_chg("rqye")
+            rzrqye_change_pct = _pct_chg("rzrqye")
+
+            result: dict[str, Any] = {
+                "records": records[-10:],
+                "source": "tushare.margin_detail",
+            }
+            if change_pct is not None:
+                result["change_pct"] = round(change_pct, 2)
+            if rqye_change_pct is not None:
+                result["rqye_change_pct"] = round(rqye_change_pct, 2)
+            if rzrqye_change_pct is not None:
+                result["rzrqye_change_pct"] = round(rzrqye_change_pct, 2)
+            if result.get("change_pct") is not None or \
+               result.get("rqye_change_pct") is not None or \
+               result.get("rzrqye_change_pct") is not None:
+                # 至少有一个变化字段有效即返回（rzye 可能因首期近零而为 None，
+                # 但 rqye/rzrqye 仍有效，不应丢弃导致降级到全市场聚合数据）
+                return result
+
+    # 降级：akshare 全市场汇总（有损：非个股粒度，仅提供方向性参考）
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df_ak = ak.stock_margin_account_info()
+        if df_ak is None or df_ak.empty:
             return None
-        f = float(fv)
-        l = float(lv)
-        if abs(f) < 1e-9:
+        # 尝试已知日期列名，降级到首列（标注警告）
+        date_col = None
+        for candidate in ("交易日期", "日期", "date", "trade_date"):
+            if candidate in df_ak.columns:
+                date_col = candidate
+                break
+        if date_col is None:
+            date_col = df_ak.columns[0]
+            logger.warning("margin akshare fallback: no known date column, using %s", date_col)
+        records_ak = df_ak.sort_values(date_col).to_dict("records")
+        if len(records_ak) < 2:
             return None
-        return (l - f) / f * 100
 
-    change_pct = _pct_chg("rzye")
-    rqye_change_pct = _pct_chg("rqye")
-    rzrqye_change_pct = _pct_chg("rzrqye")
+        first_a = safe_float(records_ak[0].get("融资余额"))
+        last_a = safe_float(records_ak[-1].get("融资余额"))
+        if first_a is None or last_a is None or abs(first_a) < 1e-9:
+            return None
 
-    result: dict[str, Any] = {
-        "records": records[-10:],
-        "source": "tushare.margin_detail",
-    }
-    if change_pct is not None:
-        result["change_pct"] = round(change_pct, 2)
-    if rqye_change_pct is not None:
-        result["rqye_change_pct"] = round(rqye_change_pct, 2)
-    if rzrqye_change_pct is not None:
-        result["rzrqye_change_pct"] = round(rzrqye_change_pct, 2)
-    return result if result.get("change_pct") is not None else None
+        change_pct_ak = round((last_a - first_a) / first_a * 100, 2)
+        return {
+            "records": records_ak[-10:],
+            "source": "akshare.margin_account",
+            "change_pct": change_pct_ak,
+            "note": "全市场汇总，非个股数据；仅供方向性参考",
+        }
+    except Exception as exc:
+        logger.warning("margin akshare fallback failed: %s", exc)
+
+    return None
 
 
 def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:

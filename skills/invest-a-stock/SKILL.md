@@ -1,8 +1,9 @@
 ---
 
 
+
 name: invest-a-stock
-version: "0.2.1"
+version: "0.2.2"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
 argument-hint: "/invest-a-stock 600176 | /invest-a-stock 600176 --deep | /invest-a-stock 600176 --intent game_theory"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
@@ -93,11 +94,13 @@ metadata:
 
 ### 措辞规范
 
+> **Canonical 源**：[skills/lib/references/report-conventions.md](../../../skills/lib/references/report-conventions.md) §2 硬约束 + §3 措辞规范 + §1 输出格式。
+
 禁止：买入/卖出/持有/建仓/加仓/减仓/止损/止盈、建议（某价格）买入/卖出。
 
 允许（LAW 6a 交易结构分析）：入场区间、假设失效触发、操作纪律、盈亏比、情景锚定。
 
-报告路径：`reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`，Claude 内只输出简报。
+报告路径：`reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`，Claude 内只输出简报。详见共享规范 §1。
 
 ### 数据源策略
 
@@ -241,11 +244,15 @@ PE / PB / PS
 
 ### SOP-QC 自检
 
-措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
+> **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + stock 专项）。
+
+措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条，详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
 
 ---
 
 ### 分析合成三步（所有模式强制）
+
+> **Canonical 定义**：[report-conventions.md §4](../../../skills/lib/references/report-conventions.md) 分析合成框架。以下为 stock 视角摘要，完整规则见共享规范。
 
 简报和完整报告均须包含以下三步。不可跳过。
 

@@ -164,6 +164,10 @@ def _check_ma60_streak(closes: list[float], ma60: list[float | None],
     *min_valid_ratio* of the post-gap positions must have a valid MA60
     value (default 25 %, i.e. the gap must have formed well after the
     first 59 bars of MA60 warmup).
+
+    Uses a relative epsilon tolerance (``rel_tol=1e-9``) for the close vs
+    MA60 comparison to avoid spurious breaks from QFQ-adjustment float
+    rounding while still detecting genuine breaches.
     """
     valid_count = 0
     total_count = 0
@@ -172,7 +176,7 @@ def _check_ma60_streak(closes: list[float], ma60: list[float | None],
         m = ma60[t]
         if m is not None:
             valid_count += 1
-            if not (closes[t] >= m):
+            if not (closes[t] >= m or math.isclose(closes[t], m, rel_tol=1e-5, abs_tol=0.01)):
                 return False
     if total_count > 0 and valid_count / total_count < min_valid_ratio:
         return False  # too few valid MA60 bars for a meaningful check
