@@ -4,7 +4,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.1" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.2" alt="Release" /></a>
 </p>
 
 A 股投研技能集，面向 **Claude Code** 和 **Hermes Agent**。输入代码，自动采集多维数据，产出带来源追溯的结构化研究备忘录。学习工具，非决策工具。
@@ -51,7 +51,8 @@ Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 /invest-a-stock 600176 --with-macro # 含宏观情景
 /invest-a-etf 563300                # ETF 结构化研究
 /invest-a-journal                   # 交易方案四维评估（ETF/个股）
-/invest-a-limit-up                  # 涨停扫描
+/invest-a-pulse                     # 市场情绪全景（杠杆/广度/情绪/资金/估值）
+/invest-a-limit-up                  # 涨停扫描（已废弃，核心功能合入 pulse）
 /invest-a-gap-scan                  # 跳空缺口扫描
 ```
 
@@ -78,6 +79,10 @@ uv run python skills/invest-a-stock/scripts/invest.py check 600176       # 质�
 uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
 uv run python skills/invest-a-stock/scripts/invest.py diff 600176
 
+# 市场情绪
+uv run python skills/invest-a-stock/scripts/invest.py market-status       # 当日市场快照
+uv run python skills/invest-a-stock/scripts/invest.py market-status --save  # 采集并保存
+
 # 涨停扫描
 uv run python skills/invest-a-limit-up/scripts/scan.py --quality-filter
 uv run python skills/invest-a-limit-up/scripts/scan.py --sector 半导体
@@ -90,6 +95,7 @@ uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
 # ETF 研究
 uv run python skills/invest-a-etf/scripts/etf.py report 563300
 uv run python skills/invest-a-etf/scripts/etf.py diagnose
+uv run python skills/invest-a-etf/scripts/etf.py industry-pe              # 31 行业 PE 排名
 ```
 
 ---
@@ -148,19 +154,24 @@ Phase 3: 主编合成 → .md 报告
 
 ```
 skills/
-  invest-a-stock/         ← 个股研究
-    SKILL.md              ← 核心规格
-    references/           ← 专项（modules/financials/sentiment/game-theory）
+  lib/                     ← 共用层（nums/stats/technical/cache/data_bridge）
+    references/            ← 共享规范（report-conventions.md）
+  invest-a-stock/          ← 个股研究
+    SKILL.md               ← 核心规格
+    references/            ← 专项（modules/financials/sentiment/game-theory）
     scripts/
-      invest.py           ← CLI（19 子命令）
-      valuation_calc.py   ← 科学估值
-      lib/                ← collector/render*/store/valuation/risk_scanner/...
+      invest.py            ← CLI（19+ 子命令，含 market-status）
+      valuation_calc.py    ← 科学估值
+      lib/                 ← collector/store/valuation/risk_scanner/...
     tests/
-  invest-a-etf/           ← ETF 研究（数据层供 journal 共用）
-  invest-a-journal/       ← 交易方案评估
-  invest-a-limit-up/      ← 涨停扫描
-  invest-a-gap-scan/      ← 跳空缺口扫描
-.claude-plugin/           ← Claude Code 插件
+  invest-a-etf/            ← ETF 研究（数据层供 journal 共用）
+  invest-a-journal/        ← 交易方案评估
+    scripts/lib/
+      market_microstructure.py  ← 市场微观结构管道（17 指标）
+  invest-a-pulse/          ← 市场情绪全景（杠杆/广度/情绪/资金/估值）
+  invest-a-limit-up/       ← 涨停数据管道（已废弃用户入口）
+  invest-a-gap-scan/       ← 跳空缺口扫描
+.claude-plugin/            ← Claude Code 插件
 ```
 
 ---
