@@ -21,9 +21,9 @@ from datetime import datetime, timezone, timedelta
 from io import StringIO
 from typing import Any, Callable
 
-from . import env
-from .nums import coalesce_field, safe_float
-from .proxy import (
+from .. import env
+from ..nums import coalesce_field, safe_float
+from ..proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
     EASTMONEY_FAILURE_TUN_MARKER,
@@ -32,7 +32,7 @@ from .proxy import (
     no_proxy_session,
     proxy_bypass,
 )
-from .schema import SourceResult, DimensionResult
+from ..schema import SourceResult, DimensionResult
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +52,8 @@ def _days_ago(n: int) -> str:
     return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
 
 
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
-from .shared_codes import exchange_code as _exchange_code  # noqa: E402
+from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+from ..shared_codes import exchange_code as _exchange_code  # noqa: E402
 
 _fred_date = _to_iso_date  # 向后兼容
 
@@ -112,7 +112,7 @@ def _is_eastmoney_blocked_error(error: str) -> bool:
 
 
 def _eastmoney_failure_message() -> str:
-    from .proxy import proxy_status
+    from ..proxy import proxy_status
 
     status = proxy_status(probe=False)
     if status.get("bypass_effective"):
@@ -221,7 +221,7 @@ def _require_tushare():
     Raises:
         RuntimeError: TUSHARE_TOKEN 未配置或不可用。
     """
-    from . import env as _env
+    from .. import env as _env
     config = _env.get_config()
     if not _env.is_tushare_available(config):
         raise RuntimeError("TUSHARE_TOKEN not configured")
@@ -1064,7 +1064,7 @@ def collect_financials(symbol: str) -> dict:
 
     def _attach_dcf(legacy: dict, _results: list) -> dict:
         try:
-            from .valuation import attach_dcf_preprocess
+            from ..valuation import attach_dcf_preprocess
             attach_dcf_preprocess(legacy)
         except Exception as exc:
             logger.warning("dcf_preprocess failed for %s: %s", symbol, exc)
@@ -2068,7 +2068,7 @@ def _calc_futures_trend_from_spot(spot_old, spot_new, code: str, code_col: str) 
 
 def _q_akshare_futures_spot(symbol: str, industry: str) -> dict | None:
     """期货现货价格 + 近月合约价格 + 基差率。"""
-    from .chain import get_futures_for_industry
+    from ..chain import get_futures_for_industry
 
     futures_list = get_futures_for_industry(industry)
     if not futures_list:
@@ -2214,7 +2214,7 @@ def collect_industry_pricing_dim(symbol: str) -> dict:
 
 def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
     """行业产品定价追踪（与 collect_financials 同构）。"""
-    from .chain import get_futures_for_industry
+    from ..chain import get_futures_for_industry
 
     tasks: list[tuple[str, Callable]] = []
     if env.is_akshare_available():
@@ -2344,7 +2344,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # R-08: RRF 多源融合
     fusion_results: dict[str, Any] = {}
     try:
-        from .fusion import (
+        from ..fusion import (
             dimension_results_from_legacy,
             fuse_from_legacy_dicts,
             fuse_from_source_results,
@@ -2367,7 +2367,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # R-09: 证据可信度评分
     credibility_scores: dict[str, float] = {}
     try:
-        from .rerank import score_all_dimensions
+        from ..rerank import score_all_dimensions
         credibility_scores = score_all_dimensions(dimensions)
     except Exception as exc:
         logger.warning("rerank scoring failed for %s: %s", symbol, exc)
@@ -2376,7 +2376,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     macro_context: dict[str, Any] = {}
     if with_macro:
         try:
-            from .macro import collect_macro_context
+            from ..macro import collect_macro_context
             macro_context = collect_macro_context(symbol)
         except Exception as exc:
             logger.warning("macro context collection failed for %s: %s", symbol, exc)
@@ -2386,7 +2386,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     chain_context: dict[str, Any] = {}
     if with_chain:
         try:
-            from .chain import collect_chain_context
+            from ..chain import collect_chain_context
             basic_dim = dim_results.get("basic_info") or {}
             basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
             industry = ""
@@ -2480,8 +2480,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
 
 def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict[str, Any]:
     """v0.1.9: attach news cards + query pack to collection."""
-    from .news_scanner import collect_news
-    from .json_util import dumps_json
+    from ..news_scanner import collect_news
+    from ..json_util import dumps_json
 
     name = ""
     basic_dim = next(
@@ -2511,7 +2511,7 @@ def collect_news_dim(symbol: str, days: int = 7) -> dict[str, Any]:
     name = ""
     if isinstance(basic.get("data"), dict):
         name = basic["data"].get("name") or basic["data"].get("股票简称") or ""
-    from .news_scanner import collect_news
+    from ..news_scanner import collect_news
     return collect_news(symbol, name=name, days=days)
 
 
@@ -4033,7 +4033,7 @@ def _safe_peer_num(v) -> float | None:
 def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
     """akshare 回退方案：使用东方财富行业板块成分股进行行业横向对比。"""
     import akshare as ak  # noqa: F811
-    from .proxy import akshare_direct_session
+    from ..proxy import akshare_direct_session
 
     # 1. 获取基本信息和行业分类
     info = _q_akshare_basic(symbol)

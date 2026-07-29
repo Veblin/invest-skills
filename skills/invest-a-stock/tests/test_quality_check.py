@@ -37,7 +37,7 @@ class TestQualityCheck:
 
         rows = [{"end_date": "20231231", "n_income_attr_p": -1, "revenue": 1}]
         result = run_quality_check(_fin_collection(rows, industry="银行"))
-        assert any("行业特殊" in e for e in result["exemptions"])
+        assert any("金融" in e or "financial" in e for e in result["exemptions"])
 
     def test_disclaimer_present(self):
         from lib.quality_check import run_quality_check

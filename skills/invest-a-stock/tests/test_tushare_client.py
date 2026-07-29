@@ -71,7 +71,7 @@ class TestTusharePermissionDenied:
 
         with patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32},
-        ), patch.object(collector, "_tushare_client", return_value=mock_tc), patch.object(
+        ), patch.object(collector._legacy, "_tushare_client", return_value=mock_tc), patch.object(
             collector, "_ms_fetch_sw_index_akshare", return_value=fake_sw,
         ):
             result = collector._ms_fetch_sw_index(mock_tc, "300308", "通信设备")

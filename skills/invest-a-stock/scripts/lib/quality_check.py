@@ -1,9 +1,10 @@
-"""Single-symbol quality check — 7 metrics + 3 exemptions (v0.1.9)."""
+"""Single-symbol quality check — 7 metrics + industry-aware exemptions (v0.2.3)."""
 
 from __future__ import annotations
 
 from typing import Any
 
+from .industry import get_quality_overrides, get_sector_group
 from .nums import coalesce_field, safe_float
 from .risk_scanner import ocf_np_divergence_flag
 from .scoring import _score_roic_trend
@@ -26,7 +27,7 @@ def _sorted_fin_rows(collection: dict) -> list[dict]:
 
 
 def _exemptions(collection: dict, rows: list[dict]) -> list[str]:
-    """Return triggered exemption labels."""
+    """Return triggered exemption labels (v0.2.3: industry-aware)."""
     from .schema import index_dimensions
     from datetime import datetime
 
@@ -34,8 +35,10 @@ def _exemptions(collection: dict, rows: list[dict]) -> list[str]:
     basic = index_dimensions(collection).get("basic_info", {}).get("data") or {}
     if isinstance(basic, dict):
         industry = str(basic.get("industry") or basic.get("行业") or "")
-        if any(k in industry for k in ("银行", "保险", "证券", "地产", "房地产")):
-            ex.append("行业特殊（金融/地产）")
+        if industry:
+            sector = get_sector_group(industry)
+            if sector != "general":
+                ex.append(f"行业模块: {sector}")
         list_date = str(basic.get("list_date") or basic.get("上市时间") or "")
         if list_date:
             s = list_date.replace("-", "")[:8]
@@ -199,9 +202,32 @@ def _metric_share_dilution(rows: list[dict]) -> dict[str, Any]:
 
 
 def run_quality_check(collection: dict) -> dict[str, Any]:
-    """Run 7 metrics with exemptions."""
+    """Run 7 metrics with industry-aware exemptions (v0.2.3).
+
+    Per-metric overrides from the industry module allow skipping metrics
+    that don't apply to a sector (e.g., gross_margin for banks).
+    """
+    from .schema import index_dimensions
+
     rows = _sorted_fin_rows(collection)
     exemptions = _exemptions(collection, rows)
+
+    # 获取行业特异性质量检查覆盖规则
+    basic = index_dimensions(collection).get("basic_info", {}).get("data") or {}
+    industry = str(basic.get("industry") or basic.get("行业") or "") if isinstance(basic, dict) else ""
+    overrides = get_quality_overrides(industry) if industry else {}
+
+    # 指标名 → 覆盖率映射（用于跳过不适用的指标）
+    _METRIC_OVERRIDE_MAP = {
+        "ROIC (3年均)": overrides.get("roic"),
+        "累计 FCF (5年)": None,  # FCF is always relevant
+        "利息覆盖倍数": overrides.get("interest_coverage"),
+        "毛利率波动 (5年 std)": overrides.get("gross_margin_volatility") or overrides.get("gross_margin"),
+        "OCF/净利润 (最新期)": overrides.get("ocf_to_np") or overrides.get("ocf_negative"),
+        "净利率趋势 (3年)": None,  # net margin is always relevant
+        "股本膨胀": None,  # share dilution is always relevant
+    }
+
     metrics = [
         _metric_roic(rows),
         _metric_fcf_5y(rows),
@@ -212,16 +238,25 @@ def run_quality_check(collection: dict) -> dict[str, Any]:
         _metric_share_dilution(rows),
     ]
 
-    # Apply exemptions to veto metrics (上市 / 行业特殊 / 转型期)
+    # Apply per-metric industry overrides (v0.2.3)
+    for m in metrics:
+        metric_name = m.get("name", "")
+        override = _METRIC_OVERRIDE_MAP.get(metric_name)
+        if override == "skip":
+            m["status"] = "exempted"
+            m["detail"] = f"行业豁免 ({sector_label(industry)}); 原值: {m.get('detail', '')}"
+
+    # Apply legacy exemptions (上市 <3y / 转型期) to veto metrics
     skip_veto = any(
-        any(k in e for k in ("上市", "行业特殊", "转型期"))
+        any(k in e for k in ("上市", "转型期"))
         for e in exemptions
     )
     if skip_veto:
         for m in metrics:
             if m.get("type") == "veto" and m.get("status") == "fail":
-                m["status"] = "exempted"
-                m["detail"] = f"豁免({', '.join(exemptions)}); 原值: {m['detail']}"
+                if m.get("status") != "exempted":
+                    m["status"] = "exempted"
+                    m["detail"] = f"豁免({', '.join(exemptions)}); 原值: {m['detail']}"
 
     veto_fails = sum(1 for m in metrics if m.get("type") == "veto" and m.get("status") == "fail")
     warnings = sum(1 for m in metrics if m.get("status") == "warn")
@@ -237,6 +272,20 @@ def run_quality_check(collection: dict) -> dict[str, Any]:
         },
         "disclaimer": "指标阈值为行业启发式规则，非精确学术阈值。",
     }
+
+
+def sector_label(industry: str) -> str:
+    """返回行业可读标签。"""
+    sg = get_sector_group(industry)
+    labels = {
+        "financial": "金融行业",
+        "tech": "科技行业",
+        "consumer": "消费品行业",
+        "industrial": "周期性行业",
+        "healthcare": "医药行业",
+        "general": "通用",
+    }
+    return labels.get(sg, sg)
 
 
 def format_quality_check(result: dict) -> str:

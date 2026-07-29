@@ -662,7 +662,7 @@ class TestCollectAllDeepEvents:
 
         with patch.object(
             collector, "COLLECTORS", {"basic_info": ("基本信息", _fake_basic)},
-        ), patch.object(collector, "attach_phase2_extras"), patch(
+        ), patch.object(collector._legacy, "attach_phase2_extras"), patch(
             "lib.manifest.generate_manifest", return_value={},
         ), patch("lib.analysis_templates.build_analysis_cards"):
             result = collector.collect_all("600176", dims=["basic_info"], deep=True)
@@ -681,7 +681,7 @@ class TestCollectAllDeepEvents:
 
         with patch.object(
             collector, "COLLECTORS", {"basic_info": ("基本信息", _fake_basic)},
-        ), patch.object(collector, "attach_phase2_extras"), patch(
+        ), patch.object(collector._legacy, "attach_phase2_extras"), patch(
             "lib.manifest.generate_manifest", return_value={},
         ), patch("lib.analysis_templates.build_analysis_cards"):
             collector.collect_all("600176", dims=["basic_info"], deep=False)

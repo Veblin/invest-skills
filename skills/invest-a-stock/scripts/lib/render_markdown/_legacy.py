@@ -18,16 +18,16 @@ from lib.participant_scan import (
     resolve_moneyflow,
 )
 
-from .proxy import (
+from ..proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
     EASTMONEY_FAILURE_TUN_MARKER,
 )
-from .schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_ICONS, _CV_LABELS, index_dimensions
-from .version import get_package_version
+from ..schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_ICONS, _CV_LABELS, index_dimensions
+from ..version import get_package_version
 
-from . import render_utils as _ru
-from .render_utils import (
+from .. import render_utils as _ru
+from ..render_utils import (
     ENGINE_VERSION,
     sanitize_error,
     _sanitize_error,
@@ -63,15 +63,15 @@ from .render_utils import (
     _v3_price_window_label,
     _data_fields,
 )
-from .render_dcf import _section_dcf_valuation
-from .render_risk import (
+from ..render_dcf import _section_dcf_valuation
+from ..render_risk import (
     _v3_build_risk_report,
     _v3_bull_bear_implied_growth,
     _section_bull_bear,
     _section_risk_uncertainty,
     _section_left_right_probability,
 )
-from .render_html import render_html
+from ..render_html import render_html
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
 
     macro = collection.get("macro_context") or {}
     if macro.get("status") == "ok":
-        from .macro import macro_signal_label
+        from ..macro import macro_signal_label
         lines.append(f"**[宏观情景]** {macro_signal_label(macro)}")
 
     chain = collection.get("chain_context") or {}
@@ -166,7 +166,7 @@ def _render_enhancement_hints(collection: dict[str, Any]) -> list[str]:
 
     price_ws = enhancements.get("price_shock_websearch")
     if isinstance(price_ws, dict) and price_ws.get("triggered"):
-        from .env import PRICE_NEWS_WHITELIST
+        from ..env import PRICE_NEWS_WHITELIST
         sites = " OR ".join(f"site:{d}" for d in PRICE_NEWS_WHITELIST[:4])
         lines.append(f"- 涨价信号确认 → 建议 WebSearch 深搜（{sites} ...）")
 
@@ -318,7 +318,7 @@ def render_compact(collection: dict[str, Any], symbol: str) -> str:
 
 # --- render_json ---
 def render_json(collection: dict[str, Any]) -> str:
-    from .json_util import dumps_json
+    from ..json_util import dumps_json
     return dumps_json(collection)
 
 
@@ -526,7 +526,7 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
     lines = []
     if collection:
         try:
-            from .render_extras import render_rigor_warnings
+            from ..render_extras import render_rigor_warnings
             strict = bool((collection.get("_meta") or {}).get("strict_rigor"))
             rigor = render_rigor_warnings(collection, strict=strict)
             if rigor:
@@ -2735,7 +2735,7 @@ def _conclude_asset_liability(
 # --- _evidence_strength_label ---
 def _evidence_strength_label(data_available: list[bool]) -> str:
     """根据可用数据项占比判断证据强度。"""
-    from .render_icons import (
+    from ..render_icons import (
         ICON_EVIDENCE_INSUFFICIENT,
         ICON_EVIDENCE_MEDIUM,
         ICON_EVIDENCE_STRONG,
@@ -4662,7 +4662,7 @@ def setup_default_enhancers(data: dict) -> ReportEnhancer:
 def _render_extras_block(collection: dict, *, strict: bool) -> list[str]:
     """Collect rigor warnings + exogenous shock + AH detection for report body."""
     try:
-        from .render_extras import render_rigor_warnings, section_exogenous_shock, render_ah_detection_note
+        from ..render_extras import render_rigor_warnings, section_exogenous_shock, render_ah_detection_note
     except ImportError:
         return []
     parts: list[str] = []

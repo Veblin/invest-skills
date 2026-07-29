@@ -30,21 +30,9 @@ from .render_utils import (
 logger = logging.getLogger(__name__)
 
 _INDUSTRY_CUSTOM_UNKNOWN_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
-    (
-        ("半导体", "芯片", "集成电路"),
-        "国产化率/出口管制：公司核心设备/材料/工艺环节在国内的国产化率与替代进度如何？",
-        "半导体产业链高度依赖进口设备与关键材料，出口管制升级或国产替代加速均可能显著改变公司中期收入/成本结构，且这类信息通常无法从财报直接获得，需产业链调研或公司公告补充。",
-    ),
-    (
-        ("医药", "生物", "制药", "医疗"),
-        "集采/医保政策传导：主力产品是否在近期或未来集采/医保谈判目录范围内，降价幅度预期如何？",
-        "医药类标的的营收/毛利率对集采及医保谈判政策高度敏感，且政策落地时间与幅度具有不确定性，属于财报无法前瞻反映的关键变量。",
-    ),
-    (
-        ("新能源", "锂电", "光伏", "储能"),
-        "行业产能周期位置：当前细分赛道处于产能扩张/出清的哪个阶段，价格战是否已充分反映在近期报表中？",
-        "新能源产业链历史上多次出现产能过剩导致价格快速下探，财报滞后于产能/价格变化，需结合行业排产数据交叉验证。",
-    ),
+    # v0.2.3: 行业 Known Unknowns 已迁移至 lib/industry/ 下的行业模块。
+    # 此常量保留为空元组，实际规则由 _generate_custom_unknowns 从
+    # lib.industry.get_unknown_rules() 动态获取。
 )
 
 
@@ -644,16 +632,23 @@ def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[t
     if not isinstance(dims, dict):
         return result
 
-    # 规则 1: 行业关键词匹配
+    # 规则 1: 行业关键词匹配（v0.2.3: 从 industry 模块动态获取）
     basic = _get_dim_data(dims, "basic_info")
     industry_name = ""
     if isinstance(basic, dict):
         industry_name = str(basic.get("industry", "") or basic.get("行业", "") or "")
     if industry_name:
-        for keywords, question, why in _INDUSTRY_CUSTOM_UNKNOWN_RULES:
-            if any(kw in industry_name for kw in keywords):
+        try:
+            from lib.industry import get_unknown_rules
+            rules = get_unknown_rules(industry_name)
+            for question, why in rules:
                 result.append((question, why))
-                break  # 仅取首个匹配的行业规则，避免同类问题堆叠
+        except Exception:
+            # fallback: 保留旧版硬编码规则的兼容性
+            for keywords, question, why in _INDUSTRY_CUSTOM_UNKNOWN_RULES:
+                if any(kw in industry_name for kw in keywords):
+                    result.append((question, why))
+                    break  # 仅取首个匹配的行业规则
 
     # 规则 2: PE 历史位置极端值
     try:

@@ -55,7 +55,7 @@ class TestCmdPeerRanking:
             "sort_by": "market_cap",
         }
 
-        with patch.object(invest.collector, "collect_peer_comparison", return_value=mock_result):
+        with patch.object(invest.collector._legacy, "collect_peer_comparison", return_value=mock_result):
             rc = invest.cmd_peer(
                 Namespace(symbol="600176", top=10, sort_by="market_cap"),
             )

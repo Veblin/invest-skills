@@ -73,7 +73,7 @@ class TestCollectMarketStructure:
 
         with patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
-        ), patch.object(collector, "_tushare_client", return_value=mock_tc), patch.object(
+        ), patch.object(collector._legacy, "_tushare_client", return_value=mock_tc), patch.object(
             collector, "_q_akshare_northbound", return_value=None
         ):
             result = collector.collect_market_structure("600176", industry="电气设备")
@@ -237,7 +237,7 @@ class TestCollectorHelpers:
             "lib.collector._q_tushare_moneyflow"
         ) as mock_mf, patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
-        ), patch.object(collector, "_tushare_client", return_value=MagicMock()):
+        ), patch.object(collector._legacy, "_tushare_client", return_value=MagicMock()):
             mock_nb.return_value = [
                 {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(i + 1)}
                 for i in range(6)
@@ -473,7 +473,7 @@ class TestRenderV3:
 
         c = collection_v2_minimal()
         assert "market_structure" not in c
-        with patch.object(collector, "attach_market_structure") as mock_ms:
+        with patch.object(collector._legacy, "attach_market_structure") as mock_ms:
             mock_ms.side_effect = lambda col, sym: col.update(
                 market_structure={"availability": {}}
             ) or col["market_structure"]

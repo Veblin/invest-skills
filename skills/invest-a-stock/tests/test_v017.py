@@ -272,9 +272,9 @@ class TestIndustryPricingIndustry:
             captured["industry"] = industry
             return {"dimension": "industry_pricing", "data": {"industry": industry}}
 
-        monkeypatch.setattr("lib.collector.collect_industry_pricing", fake_pricing)
+        monkeypatch.setattr("lib.collector._legacy.collect_industry_pricing", fake_pricing)
         monkeypatch.setattr(
-            "lib.collector._resolve_industry_for_pricing",
+            "lib.collector._legacy._resolve_industry_for_pricing",
             lambda sym, dr=None: "玻纤",
         )
         from lib.collector import collect_industry_pricing_dim
@@ -490,10 +490,10 @@ class TestCollectHolderChangesFallback:
             cninfo_called["value"] = True
             return [{"ann_date": "20260101", "direction": "增持", "source": "akshare cninfo"}]
 
-        monkeypatch.setattr("lib.collector._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector._q_akshare_management_hold", fake_cninfo)
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
-        monkeypatch.setattr("lib.collector.env.is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._legacy._q_akshare_management_hold", fake_cninfo)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
 
         collect_holder_changes("600176")
         assert cninfo_called["value"] is True
@@ -519,10 +519,10 @@ class TestCollectHolderChangesFallback:
             cninfo_called["value"] = True
             return [{"ann_date": "20260101", "direction": "增持", "source": "akshare cninfo"}]
 
-        monkeypatch.setattr("lib.collector._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector._q_akshare_management_hold", fake_cninfo)
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
-        monkeypatch.setattr("lib.collector.env.is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._legacy._q_akshare_management_hold", fake_cninfo)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
 
         collect_holder_changes("600176")
         assert cninfo_called["value"] is True
@@ -553,10 +553,10 @@ class TestCollectHolderChangesFallback:
             cninfo_called["value"] = True
             return [{"ann_date": "20260101", "direction": "增持", "source": "akshare cninfo"}]
 
-        monkeypatch.setattr("lib.collector._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector._q_akshare_management_hold", fake_cninfo)
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
-        monkeypatch.setattr("lib.collector.env.is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._legacy._q_akshare_management_hold", fake_cninfo)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
 
         collect_holder_changes("600176")
         assert cninfo_called["value"] is False
@@ -580,8 +580,8 @@ class TestAkshareCompanyNewsPrice:
             calls["news"] += 1
             return None
 
-        monkeypatch.setattr("lib.collector.akshare_direct_session", lambda: FakeCtx())
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._legacy.akshare_direct_session", lambda: FakeCtx())
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
         monkeypatch.setattr("akshare.stock_news_em", fake_news)
 
         _q_akshare_company_news_price("600176")
@@ -596,7 +596,7 @@ class TestCninfoManagementHold:
 
         df = pd.DataFrame([{"董监高姓名": "张三", "变动数量": 1000}])
 
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
         monkeypatch.setattr(
             "akshare.stock_hold_management_detail_cninfo",
             lambda symbol: df,
@@ -612,8 +612,8 @@ class TestCninfoManagementHold:
             time.sleep(2)
             return None
 
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
-        monkeypatch.setattr("lib.collector.env.CNINFO_HOLDER_TIMEOUT_SEC", 0)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._legacy.env.CNINFO_HOLDER_TIMEOUT_SEC", 0)
         monkeypatch.setattr(
             "akshare.stock_hold_management_detail_cninfo",
             slow_cninfo,
@@ -667,8 +667,8 @@ class TestDcfPreprocess:
             "lib.collector._run_sources_parallel",
             lambda tasks, dim: [SourceResult("tushare.fina_indicator", rows, dim)],
         )
-        monkeypatch.setattr("lib.collector.env.is_tushare_available", lambda cfg: True)
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: False)
+        monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: False)
 
         legacy = collect_financials("600176")
         assert "dcf_preprocess" in legacy
