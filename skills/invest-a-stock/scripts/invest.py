@@ -420,6 +420,18 @@ def build_parser() -> argparse.ArgumentParser:
     pshock.add_argument("--pe-normal", type=float, required=True)
     pshock.add_argument("--pe-stressed", type=float, required=True)
 
+    prr = sub.add_parser("risk-reward", help="DCF 三情景盈亏比分析")
+    prr.add_argument("symbol", help="股票代码，如 600176")
+    prr.add_argument("--rf", type=float, help="无风险利率（小数），默认 2.5%%")
+    prr.add_argument("--erp", type=float, help="股权风险溢价（默认 0.06）")
+    prr.add_argument("--terminal-g", type=float, default=0.025, help="终端增长率（默认 0.025）")
+    prr.add_argument("--store", action="store_true", help="从 store 读取最近采集结果")
+
+    pic = sub.add_parser("ic", help="投资委员会决策框架")
+    pic.add_argument("symbol", help="股票代码，如 600176")
+    pic.add_argument("--rf", type=float, help="无风险利率（小数），默认 2.5%%")
+    pic.add_argument("--erp", type=float, help="股权风险溢价（默认 0.06）")
+
     pval = sub.add_parser("value", help="科学估值：多方法交叉（PE/PB/盈利收益/隐含增长/ROE-PB匹配）")
     pval.add_argument("symbol", help="股票代码，如 002466")
     pval.add_argument("--rf", type=float, help="无风险利率（小数），默认自动获取中国10Y国债")
@@ -437,6 +449,10 @@ def build_parser() -> argparse.ArgumentParser:
     pef.add_argument("--days", type=int, default=60, help="回溯天数（默认 60）")
     pef.add_argument("--save", action="store_true", help="采集当日份额并存入 DB")
     pef.add_argument("--json", action="store_true", help="输出原始 JSON")
+
+    pcat = sub.add_parser("catalyst", help="催化剂日历：分红/解禁/公告前瞻事件")
+    pcat.add_argument("symbol", help="股票代码，如 600176")
+    pcat.add_argument("--days", type=int, default=90, help="前瞻天数（默认 90）")
 
     return p
 
@@ -1585,6 +1601,183 @@ def cmd_shock(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_risk_reward(args: argparse.Namespace) -> int:
+    """DCF 三情景盈亏比分析。"""
+    from lib.risk_reward import compute_dcf_risk_reward, format_risk_reward_table
+
+    # 优先从 store 读取最近采集结果
+    if args.store and _HAS_STORE:
+        rows = store_mod.list_collections(limit=1, symbol=args.symbol)
+        if rows:
+            collection = store_mod.get_collection(rows[0]["id"])
+        else:
+            print(f"⚠️ store 中无 {args.symbol} 的采集记录，请先运行 collect --store",
+                  file=sys.stderr)
+            return 1
+    else:
+        # 实时采集最小维度集
+        from lib.collector import collect_all
+        print(f"采集 {args.symbol} 数据...", file=sys.stderr)
+        collection = collect_all(args.symbol, dims=["kline", "financials", "basic_info",
+                                                      "valuation"])
+        if (collection.get("summary") or {}).get("available", 0) == 0:
+            print("❌ 采集失败，无可用数据", file=sys.stderr)
+            return 1
+
+    result = compute_dcf_risk_reward(
+        collection,
+        rf_override=args.rf,
+        erp_override=args.erp,
+        terminal_g_override=args.terminal_g,
+    )
+
+    print(format_risk_reward_table(result))
+    return 0 if "error" not in result else 1
+
+
+def cmd_ic(args: argparse.Namespace) -> int:
+    """投资委员会决策框架。"""
+    from lib.risk_reward import compute_dcf_risk_reward, format_risk_reward_table
+    from lib.quality_check import run_quality_check, format_quality_check
+    from lib.risk_scanner import risk_report
+    from lib.collector import collect_all
+    from datetime import datetime
+
+    # 采集数据
+    collection = None
+    if _HAS_STORE:
+        rows = store_mod.list_collections(limit=1, symbol=args.symbol)
+        if rows:
+            collection = store_mod.get_collection(rows[0]["id"])
+
+    if collection is None:
+        print(f"采集 {args.symbol} 数据...", file=sys.stderr)
+        collection = collect_all(args.symbol, dims=["kline", "financials",
+                                                      "basic_info", "valuation",
+                                                      "quote"])
+
+    if (collection.get("summary") or {}).get("available", 0) == 0:
+        print("❌ 采集失败，无可用数据", file=sys.stderr)
+        return 1
+
+    # 获取基本信息
+    from lib.schema import index_dimensions
+    dims = index_dimensions(collection)
+    basic = (dims.get("basic_info") or {}).get("data") or {}
+    name = (basic.get("name") or basic.get("名称") or args.symbol) if isinstance(basic, dict) else args.symbol
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 调用各引擎
+    rr = compute_dcf_risk_reward(collection, rf_override=args.rf, erp_override=args.erp)
+    qc = run_quality_check(collection)
+    risks = risk_report((dims.get("financials") or {}).get("data") or [])
+
+    # 查询假设追踪（thesis）
+    verifiable_assumptions = 0
+    thesis_info = None
+    if _HAS_STORE:
+        thesis_info = store_mod.thesis_get(args.symbol)
+    if thesis_info:
+        assumptions = thesis_info.get("assumptions") or []
+        # 可验证假设：valid=True 的假设（存在且被认为成立）
+        verifiable_assumptions = sum(1 for a in assumptions if a.get("valid", True))
+    else:
+        # 无 thesis 数据 → 假设数为 0
+        verifiable_assumptions = 0
+
+    # 渲染 IC 决策模板
+    # 决策规则（ic-framework.md §决策规则）：
+    #   通过: 盈亏比 ≥ 2:1 + 质量检查无否决项 + 关键假设 ≥2 个可验证
+    #   否决: 盈亏比 < 1:1 或 质量检查有否决项
+    #   灰色: 其余情况（1:1~2:1 或 假设不足）
+    rr_ok = "error" not in rr
+    qc_pass = (qc.get("summary") or {}).get("overall", "fail") != "fail"
+    rr_ratio = rr.get("risk_reward_ratio", 0) if rr_ok else 0
+    rr_meets = rr.get("meets_threshold", False) if rr_ok else False
+    assumptions_sufficient = verifiable_assumptions >= 2
+
+    if not qc_pass:
+        verdict = "❌ 否决"
+        veto_reason = "质量检查存在否决项"
+    elif rr_ok and rr_ratio < 1.0:
+        verdict = "❌ 否决"
+        veto_reason = f"盈亏比 {rr_ratio:.1f}:1 < 1:1"
+    elif rr_ok and qc_pass and rr_meets and assumptions_sufficient:
+        verdict = "✅ 通过"
+        veto_reason = ""
+    else:
+        verdict = "灰色（需补充信息）"
+        veto_reason = ""
+
+    print(f"# 投资委员会决策备忘录 — {name} ({args.symbol})")
+    print(f"> 决策日期: {date_str} | 引擎: invest-a-stock v0.2.3")
+    print(f"> ⚠️ 本备忘录为自动化引擎输出，不构成投资建议。")
+    print()
+
+    # 质量检查
+    print("## 质量速查")
+    qc_output = format_quality_check(qc)
+    print(qc_output)
+    print()
+
+    # 风险信号
+    triggered = [s for s in risks if s.get("triggered")]
+    if triggered:
+        print(f"## 风险信号（{len(triggered)} 个触发）")
+        for s in triggered:
+            print(f"- {'🔴' if s.get('severity') == 'critical' else '🟡'} "
+                  f"**{s.get('name', '?')}**: {s.get('detail', '')}")
+    else:
+        print("## 风险信号")
+        print("✅ 无触发信号")
+    print()
+
+    # 盈亏比
+    print(format_risk_reward_table(rr))
+    print()
+
+    # 关键假设
+    print("## 关键假设")
+    if thesis_info:
+        print(f"可验证假设: **{verifiable_assumptions}** 个"
+              f"（{'≥2 ✓' if assumptions_sufficient else '<2 ✗，需补充'}）")
+        for a in (thesis_info.get("assumptions") or []):
+            status = "✅" if a.get("valid", True) else "❌"
+            checked = a.get("last_check_date") or "未验证"
+            print(f"- {status} {a.get('statement', '?')}（置信度: {a.get('confidence', '?')}, "
+                  f"上次检查: {checked}）")
+    else:
+        print(f"可验证假设: **0** 个（<2 ✗，需补充）")
+        print(f"> 使用 `invest.py thesis {args.symbol} --update` 初始化假设追踪")
+    print()
+
+    # 判决
+    print("## 判决")
+    print(f"**{verdict}**")
+    if verdict.startswith("✅"):
+        print("> 盈亏比 ≥ 2:1，质量检查无否决项，关键假设 ≥2 个可验证。")
+        print("> 请在深入验证关键假设后自行决策。")
+    elif verdict.startswith("❌"):
+        print(f"> 否决原因: {veto_reason}")
+        print("> 建议等待条件改善后重新评估。")
+    else:
+        print("> 关键数据不完整或盈亏比处于灰色区间（1:1 ~ 2:1）。")
+        print("> 建议补充以下信息后重新评估：")
+        if not rr_ok:
+            print(f">  - 估值数据: {rr.get('error', '未知错误')}")
+        if rr_ok and not rr_meets:
+            print(f">  - 盈亏比 {rr_ratio:.1f}:1，未达 2:1 阈值")
+        if not qc_pass:
+            print(f">  - 质量检查存在否决项")
+        if not assumptions_sufficient:
+            print(f">  - 关键假设仅 {verifiable_assumptions} 个（需 ≥2 个可验证）")
+
+    print()
+    print("> ⚠️ 免责声明：本备忘录由 invest-a-stock 自动化引擎生成。"
+          "所有估值数据基于规则代理（非分析师预测）。不构成投资建议。")
+    return 0
+
+
 def cmd_value(args: argparse.Namespace) -> int:
     """科学估值：多方法交叉估值（PE/PB/盈利收益/隐含增长/ROE-PB 匹配）。"""
     try:
@@ -1820,6 +2013,25 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_catalyst(args: argparse.Namespace) -> int:
+    """催化剂日历 CLI。"""
+    from lib.catalyst import collect_catalyst_events, format_catalyst_calendar
+
+    print(f"采集 {args.symbol} 未来 {args.days} 天催化剂...", file=sys.stderr)
+    try:
+        events = collect_catalyst_events(args.symbol, days=args.days)
+    except Exception as e:
+        print(f"❌ 催化剂采集失败: {e}", file=sys.stderr)
+        return 1
+
+    if not events:
+        print("⚠️ 未获取到催化剂事件（可能数据源不可用）", file=sys.stderr)
+
+    print(format_catalyst_calendar(events, symbol=args.symbol))
+    return 0
+
+
+
 def main() -> int:
     env.ensure_env_loaded()
     args = build_parser().parse_args()
@@ -1861,12 +2073,18 @@ def main() -> int:
         return cmd_thesis(args)
     elif args.command == "shock":
         return cmd_shock(args)
+    elif args.command == "risk-reward":
+        return cmd_risk_reward(args)
+    elif args.command == "ic":
+        return cmd_ic(args)
     elif args.command == "value":
         return cmd_value(args)
     elif args.command == "market-status":
         return cmd_market_status(args)
     elif args.command == "etf-flow":
         return cmd_etf_flow(args)
+    elif args.command == "catalyst":
+        return cmd_catalyst(args)
     return 1
 
 

@@ -111,11 +111,14 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
 def _dcf_try_wacc(
     financials: dict, market_structure: dict,
     kline_data: list[dict] | None = None,
+    rf_override: float | None = None,
+    erp_override: float | None = None,
 ) -> tuple[dict | None, list[str]]:
     """尝试计算 WACC（CAPM）。
 
     risk_free_rate / erp 沿用 D-③ 已建立的降级惯例（10Y 国债不可得时用 2.5%
     默认值 + "[推测，待验证]" 标注，ERP 固定 6% 保守基准）。
+    当 rf_override / erp_override 传入时，优先使用用户指定值。
 
     beta 优先级：
     1. financials / market_structure 中预存的 beta（未来版本直接接入）
@@ -136,27 +139,39 @@ def _dcf_try_wacc(
         beta_meta = _dcf_compute_beta(kline_data)
         beta = beta_meta["beta"]
 
-    erp_data = market_structure.get("erp") or {}
-    risk_free_raw = erp_data.get("dgs10")
-    risk_free_is_default = risk_free_raw is None
-    risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
+    # rf: user override > data source > default
+    if rf_override is not None:
+        risk_free = rf_override
+        risk_free_is_default = False
+    else:
+        erp_data = market_structure.get("erp") or {}
+        risk_free_raw = erp_data.get("dgs10")
+        risk_free_is_default = risk_free_raw is None
+        risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
+
+    # erp: user override > default 6%
+    erp = erp_override if erp_override is not None else 0.06
 
     # Populate missing with any defaults that were applied, for caller transparency.
     if beta_meta.get("is_default"):
         missing.append(f"beta 使用默认值 1.0（{beta_meta.get('source', '未知')}）")
     if risk_free_is_default:
         missing.append("无风险利率使用默认值 2.5%（10Y 国债不可得）[推测，待验证]")
+    if erp_override is not None:
+        missing.append(f"ERP 使用用户指定值 {erp_override*100:.1f}%")
+    if rf_override is not None:
+        missing.append(f"无风险利率使用用户指定值 {rf_override*100:.1f}%")
 
     from lib.valuation import calc_wacc
 
-    wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=0.06, cost_of_debt=None)
+    wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=erp, cost_of_debt=None)
     wacc_result["risk_free_is_default"] = risk_free_is_default
     wacc_result["beta"] = beta
     wacc_result["beta_is_default"] = beta_meta.get("is_default", False)
     wacc_result["beta_r_squared"] = beta_meta.get("r_squared")
     wacc_result["beta_observations"] = beta_meta.get("observations")
     wacc_result["beta_source"] = beta_meta.get("source", "")
-    return wacc_result, []
+    return wacc_result, missing
 
 
 # --- _dcf_extract_shares ---
@@ -229,8 +244,15 @@ def _dcf_extract_net_debt(financials: dict) -> tuple[float | None, str]:
     rows = extract_financial_rows(financials)
     latest = _latest_financial_row(rows)
     if latest:
-        debt = _safe_num(latest.get("total_liab") or latest.get("debt_total"))
-        cash = _safe_num(latest.get("money_cap") or latest.get("cash"))
+        _raw_debt = latest.get("total_liab")
+        if _raw_debt is None:
+            _raw_debt = latest.get("debt_total")
+        debt = _safe_num(_raw_debt)
+
+        _raw_cash = latest.get("money_cap")
+        if _raw_cash is None:
+            _raw_cash = latest.get("cash")
+        cash = _safe_num(_raw_cash)
         if debt is not None and cash is not None:
             nd = debt - cash
             return nd, "总负债 - 货币资金（最新财报，近似）"
