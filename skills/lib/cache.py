@@ -102,8 +102,9 @@ class DataCache:
         try:
             entry = self._load(path)
         except (json.JSONDecodeError, OSError):
+            # 不在此处删除文件：_load 在锁外执行，删文件可能误伤并发的 set()
+            # 损坏/空文件留给 LRU 清理或下次 set() 覆盖
             with self._lock:
-                path.unlink(missing_ok=True)
                 self._misses += 1
             return None
 
@@ -236,7 +237,7 @@ class DataCache:
             # 清空全部
             if self._cache_dir.exists():
                 for f in self._cache_dir.rglob("*.json"):
-                    f.unlink()
+                    f.unlink(missing_ok=True)
                     count += 1
             return count
 
@@ -337,9 +338,14 @@ class DataCache:
         if not self._cache_dir.exists():
             return 0
 
+        def _safe_mtime(f):
+            try:
+                return f.stat().st_mtime
+            except FileNotFoundError:
+                return 0.0  # 并发删除：推到列表最前面（最早删除）
         files = sorted(
             self._cache_dir.rglob("*.json"),
-            key=lambda f: f.stat().st_mtime,
+            key=_safe_mtime,
         )
 
         removed = 0

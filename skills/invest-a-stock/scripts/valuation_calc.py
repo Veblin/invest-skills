@@ -130,14 +130,14 @@ def _get_quote_tencent(symbol: str) -> dict[str, Any]:
         return {
             "price": price,
             "change_pct": change_pct,
-            "total_mv_yi": total_mv,
+            "total_mv_yi": round(total_mv / 1e8, 2) if total_mv is not None else None,  # 元→亿元
             "pe_dynamic": pe,
             "pb": pb,
             "source": "tencent.qt.gtimg.cn",
         }
-    except Exception:
-        logger.warning("腾讯行情也失败")
-        return {"price": None, "source": "failed: tencent", "error": str(r) if 'r' in dir() else "request failed"}
+    except Exception as exc:
+        logger.warning("腾讯行情也失败: %s", exc)
+        return {"price": None, "source": "failed: tencent", "error": str(exc)}
 
 
 def get_total_shares_ak(symbol: str) -> float | None:

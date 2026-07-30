@@ -160,7 +160,7 @@ ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
     "512070": {"sw_code": "801790", "sw_name": "非银金融",   "sub": "券商"},
     # 资源/周期
     "512400": {"sw_code": "801050", "sw_name": "有色金属",   "sub": "有色"},
-    "512710": {"sw_code": "801150", "sw_name": "医药生物",   "sub": "生物医药"},
+    "512710": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工龙头"},
 }
 
 
@@ -757,6 +757,7 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
                 navs.append(nav)
                 returns.append(ret)
                 rows.append({"date": date_str, "change_pct": None})
+                prev_nav = nav  # D15 fix: 更新 prev_nav 使下期收益率为单期而非累积
             else:
                 # 复权首行，无法计算收益率；保留 NAV 用于 MA/RSI 连续性
                 prev_nav = nav

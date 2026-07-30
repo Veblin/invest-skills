@@ -593,7 +593,8 @@ def extract_key_snapshot(raw: dict) -> dict:
     risk = body.get("risk_scan") or body.get("risk_data")
     if isinstance(risk, dict):
         snap["risk"]["triggered_count"] = risk.get("triggered_count", 0)
-        triggered = [s.get("id") for s in risk.get("signals", []) if s.get("triggered")]
+        signals = risk.get("signals") or []  # .get() 在 key 存在但值为 null 时返回 None
+        triggered = [s.get("id") for s in signals if s.get("triggered")]
         snap["risk"]["triggered_signals"] = triggered
 
     # Events
