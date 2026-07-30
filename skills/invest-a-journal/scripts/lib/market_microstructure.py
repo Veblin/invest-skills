@@ -89,8 +89,97 @@ def snapshot() -> dict[str, Any]:
     _fetch_below_book_pct(result)
     _fetch_northbound(result)
     _compute_labels(result)
+    _auto_persist(result)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 自动持久化：每次 snapshot() 调用即积累一条历史记录
+# ---------------------------------------------------------------------------
+
+def _auto_persist(snap: dict) -> None:
+    """snapshot() 调用后自动将 Tier 1 + Tier 3 写入 market_snapshots。
+
+    非交易日（成交额 + 涨跌比均缺失）跳过写入。
+    save_snapshot() 后续调用会通过 INSERT OR REPLACE 补全 Tier 2 + v2 标签，
+    二者无冲突。
+
+    此函数静默失败：持久化异常不阻塞 snapshot() 正常返回。
+    """
+    try:
+        # 非交易日检测
+        if snap.get("total_turnover") is None and snap.get("ad_ratio") is None:
+            return
+
+        # 构造简易 env_label JSON（v1 标签，无历史分位）
+        env = {
+            "leverage": snap.get("label_leverage"),
+            "breadth": snap.get("label_breadth"),
+            "sentiment": snap.get("label_sentiment"),
+            "capital_flow": snap.get("label_capital_flow"),
+        }
+        warnings = []
+        lev = str(env.get("leverage") or "")
+        brd = str(env.get("breadth") or "")
+        sen = str(env.get("sentiment") or "")
+        if "去杠杆" in lev:
+            warnings.append("去杠杆")
+        if "极冷" in brd:
+            warnings.append("广度极冷")
+        if "极热" in brd:
+            warnings.append("广度极热")
+        if "极端亢奋" in sen:
+            warnings.append("情绪极端亢奋")
+        if "恐慌" in sen:
+            warnings.append("恐慌")
+        if "背离" in sen:
+            warnings.append("情绪背离")
+        env["summary"] = (
+            "偏谨慎" if len(warnings) >= 2
+            else ("⚠️ " + " + ".join(warnings) if len(warnings) == 1 else "正常")
+        )
+        snap["env_label"] = json.dumps(env, ensure_ascii=False)
+
+        init_db()
+        c = _conn()
+        try:
+            c.execute("""
+                INSERT OR REPLACE INTO market_snapshots
+                (date, margin_balance, margin_buy_amount, ad_ratio,
+                 limit_up_count, limit_down_count, lu_ld_ratio, total_turnover,
+                 sse_float_mcap, szse_float_mcap,
+                 margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
+                 ad_ratio_5d_ma, limit_down_20d_pct,
+                 erp, pcr, below_book_pct,
+                 northbound_net_inflow, northbound_direction, northbound_source,
+                 env_label)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                snap["date"],
+                snap.get("margin_balance"), snap.get("margin_buy_amount"),
+                snap.get("ad_ratio"),
+                snap.get("limit_up_count"), snap.get("limit_down_count"),
+                snap.get("lu_ld_ratio"),
+                snap.get("total_turnover"),
+                snap.get("sse_float_mcap"), snap.get("szse_float_mcap"),
+                snap.get("margin_to_mcap"), snap.get("margin_buy_to_turnover"),
+                snap.get("margin_20d_change"), snap.get("ad_ratio_5d_ma"),
+                snap.get("limit_down_20d_pct"),
+                snap.get("erp"), snap.get("pcr"), snap.get("below_book_pct"),
+                snap.get("northbound_net_inflow"),
+                snap.get("northbound_direction"),
+                snap.get("northbound_source"),
+                snap.get("env_label"),
+            ))
+            c.commit()
+        except Exception:
+            c.rollback()
+            logger.warning("_auto_persist(%s): DB write failed", snap.get("date"), exc_info=True)
+        finally:
+            _safe_close(c)
+    except Exception:
+        logger.warning("_auto_persist: persist failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

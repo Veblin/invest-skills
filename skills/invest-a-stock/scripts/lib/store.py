@@ -174,8 +174,13 @@ def save_collection(result: dict[str, Any]) -> int:
     if not isinstance(dims, list):
         dims = []
     sm = result.get("summary", {})
-    name = next((d["data"].get("name", "") for d in dims
-                 if d.get("dimension") == "basic_info" and d.get("data")), "")
+    name = ""
+    for d in dims:
+        if d.get("dimension") == "basic_info":
+            data = d.get("data")
+            if isinstance(data, dict):
+                name = data.get("name", "")
+            break
     c = _conn()
     try:
         cur = c.execute(
@@ -324,7 +329,14 @@ def get_collection(collection_id: int) -> dict | None:
         if not row:
             return None
         d = dict(row)
-        d["raw_json"] = json.loads(d["raw_json"]) if isinstance(d["raw_json"], str) else d["raw_json"]
+        raw = d["raw_json"]
+        if isinstance(raw, str):
+            try:
+                d["raw_json"] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("get_collection(%d): raw_json parse failed, returning raw string", collection_id)
+        else:
+            d["raw_json"] = raw
         return d
     finally:
         _safe_close(c)
@@ -347,8 +359,13 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
             return None
         newer = dict(rows[0])
         older = dict(rows[1])
-        newer["raw_json"] = json.loads(newer["raw_json"]) if isinstance(newer["raw_json"], str) else newer["raw_json"]
-        older["raw_json"] = json.loads(older["raw_json"]) if isinstance(older["raw_json"], str) else older["raw_json"]
+        for d in (newer, older):
+            raw = d.get("raw_json")
+            if isinstance(raw, str):
+                try:
+                    d["raw_json"] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("get_latest_two(%s): raw_json parse failed, returning raw string", symbol)
         return (older, newer)
     finally:
         _safe_close(c)
@@ -942,18 +959,20 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
     避免静默覆盖（H2 修复）。
     """
     result: dict[str, dict] = {}
+    composite_dates: set[str] = set()  # 已转为复合键的日期，避免第 3+ 条覆盖
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             continue
         base_key = item.get("trade_date") or item.get("end_date") or str(i)
         holder = item.get("holder_name")
-        # 若已有同键记录，说明存在多记录同日期，对全部记录改用复合键
-        if base_key in result:
-            existing = result.pop(base_key)
-            eh = existing.get("holder_name")
-            # 回写已存在记录（无 holder_name 时用序号兜底）
-            suffix = eh if eh else "0"
-            result[f"{base_key}_{suffix}"] = existing
+        # 检查是否已有同键记录，或该日期已转入复合键模式
+        if base_key in result or base_key in composite_dates:
+            if base_key in result:
+                existing = result.pop(base_key)
+                eh = existing.get("holder_name")
+                suffix = eh if eh else "0"
+                result[f"{base_key}_{suffix}"] = existing
+                composite_dates.add(base_key)
             if holder:
                 base_key = f"{base_key}_{holder}"
             else:
@@ -1019,8 +1038,16 @@ def thesis_get(symbol: str) -> dict[str, Any] | None:
         row = c.execute("SELECT * FROM thesis WHERE symbol=?", (symbol,)).fetchone()
         if not row:
             return None
-        assumptions = json.loads(row["assumptions_json"] or "[]")
-        red_lines = json.loads(row["red_lines_json"] or "[]")
+        try:
+            assumptions = json.loads(row["assumptions_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("get_thesis(%s): assumptions_json parse failed", symbol)
+            assumptions = []
+        try:
+            red_lines = json.loads(row["red_lines_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("get_thesis(%s): red_lines_json parse failed", symbol)
+            red_lines = []
         return {
             "symbol": row["symbol"],
             "assumptions": assumptions,

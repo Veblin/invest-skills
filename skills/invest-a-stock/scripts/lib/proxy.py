@@ -146,7 +146,6 @@ def _env_bypass_exit() -> None:
                 _requests_direct_sess.close()
             _requests_direct_sess = None
             _requests_direct_orig = None
-            _requests_direct_depth = 0
         return
     for k, v in saved.items():
         if v is None or v == "":
@@ -161,7 +160,6 @@ def _env_bypass_exit() -> None:
             _requests_direct_sess.close()
         _requests_direct_sess = None
         _requests_direct_orig = None
-        _requests_direct_depth = 0
 
 
 def _requests_direct_enter() -> None:
@@ -288,7 +286,7 @@ def _direct_scope(*, patch_requests: bool) -> Iterator[None]:
         try:
             if patch_requests:
                 _requests_direct_enter()
-        except BaseException:
+        except Exception:
             # _requests_direct_enter() failed after env was modified;
             # restore env before the exception propagates.
             _env_bypass_exit()
@@ -298,7 +296,11 @@ def _direct_scope(*, patch_requests: bool) -> Iterator[None]:
     finally:
         with _PROXY_IO_LOCK:
             if patch_requests:
-                _requests_direct_exit()
+                try:
+                    _requests_direct_exit()
+                except Exception:
+                    logger.warning("_requests_direct_exit failed, falling through to env restore",
+                                   exc_info=True)
             _env_bypass_exit()
 
 

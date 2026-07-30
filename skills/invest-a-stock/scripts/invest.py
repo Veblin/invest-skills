@@ -1980,6 +1980,7 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
         msg = f"✅ {symbol} 份额快照已保存: {snap['shares']:.0f} 份, AUM {snap['aum']} 亿"
         if args.json:
             print(msg, file=sys.stderr)
+            return 0
         else:
             print(msg)
             return 0

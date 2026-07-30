@@ -554,6 +554,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "boll_upper": None,
         "boll_mid": None,
         "boll_lower": None,
+        "derived": None,  # D14: 衍生指标（NAV 偏离度/BOLL 位置，避免 AI 手工计算）
         "nav_history": [],
         "status": "missing",
         "_error": None,
@@ -661,6 +662,37 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             rsi_val = _latest_rsi(navs, period)
             result["rsi"] = rsi_val
             result["rsi_period"] = period
+
+        # D14: 衍生指标 — 所有 NAV vs 均线/BOLL 的百分比偏离与位置
+        # 由引擎统一计算，避免 AI 手工心算引入误差
+        derived: dict[str, Any] = {}
+        latest = result["latest_nav"]
+        if latest is not None:
+            ma20 = result.get("ma20")
+            ma60 = result.get("ma60")
+            boll_upper = result.get("boll_upper")
+            boll_lower = result.get("boll_lower")
+            boll_mid = result.get("boll_mid")
+
+            if ma20 is not None:
+                derived["nav_vs_ma20_pct"] = round((latest / ma20 - 1) * 100, 2)
+            if ma60 is not None:
+                derived["nav_vs_ma60_pct"] = round((latest / ma60 - 1) * 100, 2)
+            if boll_mid is not None:
+                derived["nav_vs_boll_mid_pct"] = round((latest / boll_mid - 1) * 100, 2)
+            if boll_upper is not None and boll_lower is not None and boll_upper != boll_lower:
+                derived["boll_position_pct"] = round(
+                    (latest - boll_lower) / (boll_upper - boll_lower) * 100, 2
+                )
+                derived["nav_to_boll_lower_pct"] = round((latest / boll_lower - 1) * 100, 2)
+                derived["nav_to_boll_upper_pct"] = round((latest / boll_upper - 1) * 100, 2)
+                derived["boll_bandwidth_pct"] = round((boll_upper / boll_lower - 1) * 100, 2)
+            vol_ann = result.get("volatility_annualized")
+            if vol_ann is not None:
+                derived["daily_volatility_pct"] = round(vol_ann / math.sqrt(252), 2)
+
+        if derived:
+            result["derived"] = derived
 
         # 使用与指标计算相同的对齐数据构建 nav_history（含复权调整）
         result["nav_history"] = [
@@ -1182,4 +1214,202 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         "share_change_60d": _change(60)["share_change"],
         "flow_est_60d": _change(60)["flow_est"],
         "history_count": len(history),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ETF 份额资金流历史序列（Tushare fund_share + fund_daily，v0.2.3）
+# ---------------------------------------------------------------------------
+
+def query_etf_share_history(symbol: str, days: int = 20) -> dict:
+    """查询 ETF 份额历史序列 + 每日资金流估算 + OHLCV 趋势数据。
+
+    数据源：Tushare ``fund_share``（份额，万份）+ ``fund_daily``（OHLCV）。
+
+    Parameters
+    ----------
+    symbol : str
+        6 位 ETF 代码（如 515050）。
+    days : int
+        回溯行数（默认 20 日）。
+
+    Returns
+    -------
+    dict
+        {symbol, date_range, rows: [{date, open, high, low, close, pre_close,
+         pct_chg, vol, amount, turnover_rate, shares, share_change, flow_est,
+         direction}], summary: {...}}
+    """
+    from datetime import date, timedelta
+
+    from lib import env
+    from lib.tushare_client import TushareClient
+
+    config = env.get_config()
+    token = config.get("TUSHARE_TOKEN")
+    if not token:
+        return {"symbol": symbol, "available": False, "note": "Tushare 不可用"}
+
+    ts_code = f"{symbol}.SH"
+    if symbol.startswith("159") or symbol.startswith("30"):
+        ts_code = f"{symbol}.SZ"
+
+    end_date = date.today().strftime("%Y%m%d")
+    start_date = (date.today() - timedelta(days=days + 10)).strftime("%Y%m%d")
+
+    try:
+        client = TushareClient(token=token, timeout=15)
+
+        # 份额数据
+        shares_df = client.query("fund_share", ts_code=ts_code,
+                                 start_date=start_date, end_date=end_date)
+        if shares_df is None or shares_df.empty:
+            return {"symbol": symbol, "available": False,
+                    "note": "fund_share 无数据（需 ≥2000 Tushare 积分）"}
+
+        # OHLCV 数据
+        daily_df = client.query("fund_daily", ts_code=ts_code,
+                                start_date=start_date, end_date=end_date)
+        if daily_df is None or daily_df.empty:
+            return {"symbol": symbol, "available": False,
+                    "note": "fund_daily 无数据"}
+
+    except Exception as exc:
+        return {"symbol": symbol, "available": False,
+                "note": f"Tushare 查询失败: {exc}"}
+
+    try:
+        # 合并：按 trade_date 对齐。left join → 确保 fund_daily 最新日期的 OHLCV
+        # 不被 fund_share 的 T+1 延迟丢掉（份额字段为 null 但价格/成交仍可用）
+        shares_df = shares_df.sort_values("trade_date")
+        daily_df = daily_df.sort_values("trade_date")
+        daily_cols = ["trade_date", "open", "high", "low", "close",
+                      "pre_close", "pct_chg", "vol", "amount"]
+        merged = daily_df[[c for c in daily_cols if c in daily_df.columns]].merge(
+            shares_df, on="trade_date", how="left"
+        )
+    except Exception as exc:
+        return {"symbol": symbol, "available": False,
+                "note": f"份额-价格合并失败: {exc}"}
+    if merged.empty:
+        return {"symbol": symbol, "available": False, "note": "份额-价格日期无交集"}
+
+    # 取最近 days 行
+    merged = merged.tail(days + 1)  # +1 用于计算第一行的变化
+
+    rows = []
+    prev_share = None
+    prev_price = None
+    latest_shares = None
+    earliest_shares = None
+
+    import math as _math
+
+    for _, row in merged.iterrows():
+        date_str = str(row.get("trade_date", ""))
+        shares_raw = row.get("fd_share")
+        shares_val = safe_float(shares_raw) if (shares_raw is not None
+            and not (isinstance(shares_raw, (int, float)) and _math.isnan(float(shares_raw)))) else None
+        close_val = safe_float(row.get("close"))
+        if close_val is None:
+            continue
+        open_val = safe_float(row.get("open"))
+        high_val = safe_float(row.get("high"))
+        low_val = safe_float(row.get("low"))
+        pre_close_val = safe_float(row.get("pre_close"))
+        pct_chg_val = safe_float(row.get("pct_chg"))
+        vol_val = safe_float(row.get("vol"))       # 手
+        amount_val = safe_float(row.get("amount"))  # 千元
+
+        # 估算换手率(%)。Tushare vol=手(1手=100份), shares=万份
+        # turnover = (vol×100) / (shares×10000) × 100 = vol / shares (直接得到 %)
+        turnover = None
+        if vol_val is not None and shares_val is not None and shares_val > 0:
+            turnover = round(vol_val / shares_val, 2)
+
+        share_change = None
+        flow_est = None
+        direction = None
+
+        if prev_share is not None and shares_val is not None:
+            share_change = round(shares_val - prev_share, 2)  # 万份
+            avg_price = (close_val + prev_price) / 2
+            flow_est = round(share_change * avg_price / 1e4, 2)  # 亿元
+            if abs(flow_est) < 0.3:
+                direction = "→ 持平"
+            elif flow_est > 0:
+                direction = "🟢 净流入" if flow_est >= 3 else "🟢→ 小幅流入"
+            else:
+                direction = "🔴 净流出" if abs(flow_est) >= 3 else "🔴→ 小幅流出"
+
+        # 成交额格式化（亿元）。Tushare fund_daily.amount 单位为千元
+        amount_e = round(amount_val / 1e5, 2) if amount_val is not None else None
+
+        rows.append({
+            "date": date_str,
+            "open": open_val,
+            "high": high_val,
+            "low": low_val,
+            "close": close_val,
+            "pre_close": pre_close_val,
+            "pct_chg": pct_chg_val,
+            "vol": int(vol_val) if vol_val is not None else None,     # 手
+            "amount": amount_e,                                        # 亿元
+            "turnover_rate": turnover,                                 # %
+            "shares": round(shares_val, 2) if shares_val is not None else None,  # 万份
+            "share_change": share_change,                              # 万份
+            "flow_est": flow_est,                                      # 亿元
+            "direction": direction,
+        })
+
+        if shares_val is not None:
+            if earliest_shares is None:
+                earliest_shares = shares_val
+            latest_shares = shares_val
+            prev_share = shares_val
+            prev_price = close_val  # 仅当份额有效时更新，保持 prev_share/prev_price 窗口一致
+
+    # 去掉第一行（无变化数据）
+    detail_rows = rows[1:]
+
+    # 汇总
+    flows = [r["flow_est"] for r in detail_rows if r["flow_est"] is not None]
+    total_flow = round(sum(flows), 2) if flows else None
+    avg_daily = round(total_flow / len(flows), 2) if flows and total_flow is not None else None
+
+    if total_flow is not None and total_flow > 5:
+        trend = "🟢 持续净流入"
+    elif total_flow is not None and total_flow < -5:
+        trend = "🔴 持续净流出"
+    elif total_flow is not None:
+        trend = "→ 资金面平稳"
+    else:
+        trend = "数据不足"
+
+    # 交易量趋势
+    amounts = [r["amount"] for r in detail_rows if r["amount"] is not None]
+    avg_amount = round(sum(amounts) / len(amounts), 2) if amounts else None
+    max_amount = max(amounts) if amounts else None
+
+    # 份额总变化
+    share_total_change = None
+    if latest_shares is not None and earliest_shares is not None:
+        share_total_change = round(latest_shares - earliest_shares, 2)
+
+    date_range = f"{detail_rows[0]['date']} ~ {detail_rows[-1]['date']}" if detail_rows else ""
+
+    return {
+        "symbol": symbol,
+        "available": True,
+        "date_range": date_range,
+        "rows": detail_rows,
+        "summary": {
+            "total_flow_est": total_flow,
+            "avg_daily_flow_est": avg_daily,
+            "trend": trend,
+            "row_count": len(detail_rows),
+            "avg_amount_e": avg_amount,
+            "max_amount_e": max_amount,
+            "share_total_change": share_total_change,
+        },
     }

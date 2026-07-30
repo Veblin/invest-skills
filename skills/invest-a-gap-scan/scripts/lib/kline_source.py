@@ -143,7 +143,7 @@ class TushareBulkSource(KlineSource):
             daily_limit = DAILY_CALL_LIMIT
 
         self._client = TushareClient(
-            token=None,
+            token=config.get("TUSHARE_TOKEN"),
             rate_limit_per_minute=180,
             daily_call_limit=daily_limit,
         )
