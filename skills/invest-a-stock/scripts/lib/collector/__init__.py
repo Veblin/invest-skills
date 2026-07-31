@@ -1,6 +1,7 @@
-"""collector 包 — v0.2.3 重构版。
+"""collector 包 — v0.2.3 Phase 2（真正拆分）。
 
-当前阶段（Phase 1）：透明 re-export，从 _legacy.py 导出全部名称。
+子模块: _base (utils + parallel helpers) | _sources (source queries) | _orchestrate (dimensions + market + peers).
+_legacy.py 为 thin backward-compat 层，所有业务代码已迁至子模块。
 外部消费者（invest.py / render.py / 测试等）无感知。
 """
 

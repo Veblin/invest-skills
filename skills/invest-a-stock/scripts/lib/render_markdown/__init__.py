@@ -1,16 +1,11 @@
-"""render_markdown 包 — v0.2.3 重构版。
+"""render_markdown 包 — v0.2.3 Phase 2（真正拆分）。
 
-当前阶段（Phase 1）：透明 re-export，从 _legacy.py 导出全部名称。
-后续阶段：逐步拆分 _legacy.py 为子模块，更新本文件。
-
+子模块: _base (helpers) | _v2 (legacy V2) | _v3 (core sections) | _concise (enhancer + V3 entry).
+_legacy.py 为 thin backward-compat 层，所有业务代码已迁至子模块。
 外部消费者（render.py / render_html.py / 测试）无感知。
 """
 
 from __future__ import annotations
-
-# ---------------------------------------------------------------------------
-# Phase 1：从 _legacy 透明 re-export（镜像 render.py 的 _reexport 模式）
-# ---------------------------------------------------------------------------
 
 from . import _legacy as _mod
 
@@ -19,5 +14,4 @@ for _name, _value in vars(_mod).items():
         continue
     globals()[_name] = _value
 
-# 清理循环变量
 del _name, _value, _mod
