@@ -37,22 +37,14 @@ from ..schema import SourceResult, DimensionResult
 logger = logging.getLogger(__name__)
 
 
-# ---- 日期工具（函数形式，避免导入时固化；A 股日历日统一上海时区） ----
+# ---- 日期工具（skills/lib/dates 统一实现，A 股日历日上海时区） ----
 
-def _shanghai_now() -> datetime:
-    from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo("Asia/Shanghai"))
-
-
-def _today() -> str:
-    return _shanghai_now().strftime("%Y%m%d")
-
-
-def _days_ago(n: int) -> str:
-    return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
-
-
-from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+from ..shared_dates import (  # noqa: E402
+    shanghai_days_ago as _days_ago,
+    shanghai_now as _shanghai_now,
+    shanghai_today as _today,
+    yyyymmdd_to_iso as _to_iso_date,
+)
 from ..shared_codes import exchange_code as _exchange_code  # noqa: E402
 
 _fred_date = _to_iso_date  # 向后兼容

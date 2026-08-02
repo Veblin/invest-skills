@@ -15,6 +15,8 @@ for __v2_n in dir(__v2_ref):
         globals()[__v2_n] = getattr(__v2_ref, __v2_n)
 del __v2_ref, __v2_n
 
+from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+
 
 logger = logging.getLogger(__name__)
 
@@ -1490,9 +1492,7 @@ def _section_holder_changes(data: dict, events: list | None = None) -> str:
     lines.append("| 公告日期 | 股东名称 | 方向 | 变动数量(万) | 变动比例(%) | 均价 | 来源 | 交叉验证 |")
     lines.append("|----------|---------|------|-------------|------------|------|------|---------|")
     for r in records[:20]:
-        date = str(r.get("ann_date", ""))
-        if len(date) == 8:
-            date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+        date = _to_iso_date(str(r.get("ann_date", "")))
         name = str(r.get("holder_name", ""))[:16]
         direction = str(r.get("direction", ""))
         vol = r.get("change_vol")
@@ -1605,9 +1605,7 @@ def _section_holder_changes(data: dict, events: list | None = None) -> str:
             etitle = str(e.get("title", ""))[:60]
             timeline.append((edate, "承诺公告", etitle))
         for r in sell_records:
-            rdate = str(r.get("ann_date", ""))
-            if len(rdate) == 8:
-                rdate = f"{rdate[:4]}-{rdate[4:6]}-{rdate[6:8]}"
+            rdate = _to_iso_date(str(r.get("ann_date", "")))
             rname = str(r.get("holder_name", ""))[:16]
             timeline.append((rdate, "减持记录", rname))
         for edate, etype, content in sorted(timeline, key=lambda t: t[0])[:15]:

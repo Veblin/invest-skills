@@ -18,6 +18,8 @@ import logging
 import re
 from datetime import datetime, timedelta, date
 
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date
+
 logger = logging.getLogger(__name__)
 
 # ── 占位标记 ──
@@ -432,7 +434,7 @@ def _normalize_date(raw: str) -> str | None:
 
     # YYYYMMDD
     if re.match(r'^\d{8}$', raw):
-        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+        return _to_iso_date(raw)
 
     # YYYY/MM/DD
     m = re.match(r'^(\d{4})/(\d{1,2})/(\d{1,2})$', raw)

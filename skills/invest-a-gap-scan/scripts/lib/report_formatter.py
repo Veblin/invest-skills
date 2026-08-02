@@ -22,6 +22,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from gap_scanner import ScanResult, ScanHit
+from lib.nums import fmt_amount
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +99,15 @@ def _index_members_label(hit: ScanHit) -> str:
 
 
 def _fmt_amount(val: float) -> str:
-    """Format amount in yuan to human-readable string (亿 or 万)."""
+    """Format amount in yuan to human-readable string (亿 or 万).
+
+    Delegates to shared ``lib.nums.fmt_amount``; 亿 keeps 2 decimals,
+    below 亿 uses integer precision (compact display) — matching the
+    historical output.
+    """
     if abs(val) >= 1e8:
-        return f"{val / 1e8:.2f}亿"
-    if abs(val) >= 1e4:
-        return f"{val / 1e4:.0f}万"
-    return f"{val:.0f}"
+        return fmt_amount(val)
+    return fmt_amount(val, precision=0)
 
 
 def _fmt_pct(val: float) -> str:

@@ -98,8 +98,8 @@ class TestRenderAttachExtras:
             "market_structure": {"availability": {}},
             "industry_peers": {"peers": [], "sufficient": True},
         }
-        with patch.object(collector._legacy, "attach_market_structure") as ms_mock, \
-             patch.object(collector._legacy, "attach_phase2_extras") as p2_mock:
+        with patch.object(collector, "attach_market_structure") as ms_mock, \
+             patch.object(collector, "attach_phase2_extras") as p2_mock:
             render(c, "600176", "compact", attach_extras=False)
         ms_mock.assert_not_called()
         p2_mock.assert_not_called()
@@ -356,11 +356,11 @@ class TestCollectIndustryMerge:
                 SourceResult("akshare.pe", pe, dim),
             ]
 
-        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._orchestrate._run_sources_parallel", fake_parallel)
         monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
-        monkeypatch.setattr("lib.collector._legacy.akshare_push2_available", lambda: True)
+        monkeypatch.setattr("lib.collector._orchestrate.akshare_push2_available", lambda: True)
         monkeypatch.setattr(
-            "lib.collector._q_akshare_basic",
+            "lib.collector._orchestrate._q_akshare_basic",
             lambda _symbol: {"行业": "半导体"},
         )
 

@@ -37,6 +37,7 @@ DEFAULT_TTL: dict[str, int] = {
     "quote":         5 * 60,       # 实时行情：5 分钟
     "kline":         4 * 3600,     # K 线：4 小时
     "financials":    7 * 86400,    # 财务报表：7 天
+    "valuation":     7 * 86400,    # 估值分析：7 天（独立维度，勿与 financials 共用槽位）
     "macro":         7 * 86400,    # 宏观指标：7 天（VIX 盘中例外）
     "basic_info":   30 * 86400,    # 基本信息：30 天
     "northbound":    1 * 86400,    # 北向资金：1 天
@@ -123,28 +124,52 @@ def _import_lib_module_attr(module_name: str, attr: str):
         ) from e
 
 
-def get_kline(symbol: str, *, force: bool = False) -> dict | None:
-    """K 线数据（缓存 4h）。"""
+def get_kline(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | None:
+    """K 线数据（缓存 4h）。
+
+    额外 kwargs 透传至 collector；**带 kwargs 时跳过缓存**——缓存 key
+    不编码参数（如 start_date），不同参数产生不同数据，直调更安全。
+    """
     collect_kline = _import_lib_module_attr("collector", "collect_kline")  # noqa: E402
+    if kwargs:
+        return collect_kline(symbol, **kwargs)
     return _fetch_dimension("kline", symbol, collect_kline, symbol, force=force)
 
 
-def get_quote(symbol: str, *, force: bool = False) -> dict | None:
-    """实时行情（缓存 5min）。"""
+def get_quote(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | None:
+    """实时行情（缓存 5min）。额外 kwargs 透传并跳过缓存。"""
     collect_quote = _import_lib_module_attr("collector", "collect_quote")  # noqa: E402
+    if kwargs:
+        return collect_quote(symbol, **kwargs)
     return _fetch_dimension("quote", symbol, collect_quote, symbol, force=force)
 
 
-def get_financials(symbol: str, *, force: bool = False) -> dict | None:
-    """财务报表（缓存 7d）。"""
+def get_financials(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | None:
+    """财务报表（缓存 7d）。额外 kwargs 透传并跳过缓存。"""
     collect_financials = _import_lib_module_attr("collector", "collect_financials")  # noqa: E402
+    if kwargs:
+        return collect_financials(symbol, **kwargs)
     return _fetch_dimension("financials", symbol, collect_financials, symbol, force=force)
 
 
-def get_basic_info(symbol: str, *, force: bool = False) -> dict | None:
-    """基本信息（缓存 30d）。"""
+def get_basic_info(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | None:
+    """基本信息（缓存 30d）。额外 kwargs 透传并跳过缓存。"""
     collect_basic_info = _import_lib_module_attr("collector", "collect_basic_info")  # noqa: E402
+    if kwargs:
+        return collect_basic_info(symbol, **kwargs)
     return _fetch_dimension("basic_info", symbol, collect_basic_info, symbol, force=force)
+
+
+def get_valuation(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | None:
+    """估值分析（缓存 7d，独立 valuation 维度）。额外 kwargs 透传并跳过缓存。
+
+    注意：维度 key 必须是 "valuation" 而非 "financials"——两者负载不同
+    （估值含 PE 历史序列，财报含报表字段），共用缓存槽位会互相污染。
+    """
+    collect_valuation = _import_lib_module_attr("collector", "collect_valuation")  # noqa: E402
+    if kwargs:
+        return collect_valuation(symbol, **kwargs)
+    return _fetch_dimension("valuation", symbol, collect_valuation, symbol, force=force)
 
 
 def get_northbound(symbol: str, *, force: bool = False) -> dict | None:

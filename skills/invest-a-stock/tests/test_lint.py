@@ -107,6 +107,73 @@ class TestLintBehaviorParity:
         lint_mod._RULES_CACHE = None
         assert not any(f.rule_id == "wording-certain-price-drop" for f in findings)
 
+    def test_yiding_skips_neutral_quantifier_context(self, tmp_path):
+        """'有一定X'/'这一定价' 是中性描述，不是绝对化断言（v0.2.3 修复）。"""
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text(
+            "下方有一定承接，但短期缺乏催化剂。\n"
+            "公司在 CW 布局有一定对冲。\n"
+            "市场已有一定预期。\n"
+            "这一定价隐含了对增速骤降的担忧。\n"
+            "这一定性判断需要 Q2-Q3 业绩验证。\n",
+            encoding="utf-8",
+        )
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report, profile="claude")
+        lint_mod._RULES_CACHE = None
+        assert not any(f.rule_id == "wording-absolute-yiding" for f in findings)
+
+    def test_yiding_keeps_assertions_and_skips_conditionals(self, tmp_path):
+        """绝对化断言保留；'如果一定要'条件句豁免。"""
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text(
+            "该模式一定要持续有效。\n"
+            "这种结构一定会在下季度兑现。\n"
+            "如果一定要减仓，唯一站得住脚的规则是估值分位减仓。\n",
+            encoding="utf-8",
+        )
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report, profile="claude")
+        lint_mod._RULES_CACHE = None
+        ids = {f.rule_id for f in findings}
+        assert "wording-absolute-yiding" in ids  # 前两行仍报
+        # 条件句行被豁免，但断言行仍报 → 至少 1 条
+        assert len([f for f in findings if f.rule_id == "wording-absolute-yiding"]) == 1
+
+    def test_biran_skips_negative_context(self, tmp_path):
+        """'不代表/不等于必然' 是否定语境，不是绝对化断言（v0.2.3 修复）。"""
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text(
+            "目标价不代表股价必然到达。\n"
+            "风险不等于必然发生。\n",
+            encoding="utf-8",
+        )
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report, profile="claude")
+        lint_mod._RULES_CACHE = None
+        assert not any(f.rule_id == "wording-absolute-biran" for f in findings)
+
+    def test_biran_keeps_assertions(self, tmp_path):
+        """分析性绝对化断言'必然'仍报。"""
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text(
+            "拥挤度极致后必然均值回归。\n"
+            "车企在价格战中必然压价电池供应商。\n",
+            encoding="utf-8",
+        )
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report, profile="claude")
+        lint_mod._RULES_CACHE = None
+        assert any(f.rule_id == "wording-absolute-biran" for f in findings)
+
     def test_placeholder_zhanwei_is_reported(self, tmp_path):
         from lib import lint as lint_mod
 

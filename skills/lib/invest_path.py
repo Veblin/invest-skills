@@ -13,6 +13,7 @@ __all__ = [
     "invest_a_scripts_dir",
     "invest_a_etf_lib_dir",
     "ensure_invest_a_scripts_on_path",
+    "ensure_shared_lib_on_path",
 ]
 
 
@@ -33,3 +34,16 @@ def ensure_invest_a_scripts_on_path() -> Path:
     if s not in sys.path:
         sys.path.insert(0, s)
     return scripts
+
+
+def ensure_shared_lib_on_path() -> Path:
+    """Insert skills/lib on sys.path (idempotent). Returns the directory.
+
+    Note: chicken-and-egg — modules *outside* skills/lib must inline a
+    bootstrap before importing this (see skill-local ``_invest_path.py``).
+    """
+    d = Path(__file__).resolve().parent
+    s = str(d)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+    return d

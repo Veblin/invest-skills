@@ -4,6 +4,24 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_data_bridge_cache(tmp_path, monkeypatch):
+    """隔离 data_bridge 全局缓存（真实目录），避免污染测试。
+
+    review_portfolio 经 data_bridge.get_* 获取数据；若真实缓存里已有
+    该 symbol 的条目（如上次真实运行），mock 的 collector 不会生效。
+    """
+    from lib._skills_lib_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+
+    import data_bridge
+    from cache import DataCache
+
+    monkeypatch.setattr(data_bridge, "_cache", DataCache(cache_dir=tmp_path / "cache"))
+
 
 def _fake_kline(_sym, start_date=""):
     return {

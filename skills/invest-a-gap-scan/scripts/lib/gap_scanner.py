@@ -37,6 +37,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from codes import is_st_or_delisted  # noqa: E402
 from lib.technical import sma  # noqa: E402
 
 # Sibling modules (found via _LIB_DIR on sys.path)
@@ -468,11 +469,11 @@ def scan_all(
         # (These are handled by universe.py at build time, but we keep a
         #  defensive check for stock_basic enrichment edge cases.)
         name = getattr(stock, "name", "")
-        if "ST" in name.upper():
-            exclude[ExcludeReason.ST_STOCK] += 1
-            continue
-        if "退" in name:  # 退
-            exclude[ExcludeReason.DELIST] += 1
+        if is_st_or_delisted(name):
+            if "退" in name:
+                exclude[ExcludeReason.DELIST] += 1
+            else:
+                exclude[ExcludeReason.ST_STOCK] += 1
             continue
 
         # --- Scan stock ---

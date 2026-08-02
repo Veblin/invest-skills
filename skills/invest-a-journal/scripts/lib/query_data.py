@@ -1,7 +1,8 @@
 """轻量数据查询模块 — 为 journal 评估提供按需数据。
 
-直接调 invest-a-stock 底层采集函数（collect_quote / collect_kline /
-collect_valuation / collect_macro_context），不走 collect_all() 后处理链。
+经 skills/lib/data_bridge 调 invest-a-stock 底层采集函数（get_quote /
+get_kline / get_valuation / get_macro），自动享受 TTL 缓存，不走
+collect_all() 后处理链。
 
 v0.2.1：PE 分位依赖 Tushare；无 Tushare 时标注"无历史分位"。
 """
@@ -18,10 +19,9 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from lib.collector import collect_quote, collect_kline, collect_valuation  # noqa: E402
+from data_bridge import get_kline, get_macro, get_quote, get_valuation  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.technical import compute  # noqa: E402
-from lib.macro import collect_macro_context  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ def query_for_evaluation(symbol: str, asset_type: str = "stock") -> dict[str, An
 
 def _safe_collect_quote(symbol: str) -> dict:
     try:
-        raw = collect_quote(symbol)
+        raw = get_quote(symbol)
         data = raw.get("data", {})
         meta = raw.get("_meta", {})
         # data 可能是 list[dict] 或 dict
@@ -144,7 +144,7 @@ def _safe_collect_quote(symbol: str) -> dict:
 
 def _safe_collect_kline(symbol: str) -> dict:
     try:
-        raw = collect_kline(symbol)
+        raw = get_kline(symbol)
         data = raw.get("data", [])
         if not isinstance(data, list):
             data = []
@@ -163,7 +163,7 @@ def _safe_collect_kline(symbol: str) -> dict:
 
 def _safe_collect_valuation(symbol: str) -> dict:
     try:
-        raw = collect_valuation(symbol)
+        raw = get_valuation(symbol)
         data = raw.get("data", {})
         meta = raw.get("_meta", {})
         # data 可能是 list (Tushare 日频序列) 或 dict (腾讯快照)
@@ -209,7 +209,8 @@ def _safe_collect_valuation(symbol: str) -> dict:
 
 def _safe_collect_macro(symbol: str) -> dict:
     try:
-        return collect_macro_context(symbol)
+        # 宏观数据非个股维度，data_bridge.get_macro() 不接收 symbol
+        return get_macro()
     except Exception as exc:
         return {"status": "all_failed", "indicators": {}, "_error": str(exc)}
 
@@ -250,6 +251,9 @@ def _safe_etf_kline(symbol: str) -> dict:
             "ma60": raw.get("ma60"),
             "index_ma20": raw.get("index_ma20"),
             "index_ma60": raw.get("index_ma60"),
+            "boll_upper": raw.get("boll_upper"),
+            "boll_mid": raw.get("boll_mid"),
+            "boll_lower": raw.get("boll_lower"),
         }
     except Exception as exc:
         return {"_error": str(exc), "rows": 0, "data": [], "status": "missing"}

@@ -18,9 +18,15 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from codes import etf_symbol_to_ts_code  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
-from lib.technical import rsi_series  # noqa: E402
+from lib.technical import (  # noqa: E402
+    annualized_volatility_from_returns,
+    boll_latest,
+    rsi_series,
+    sma,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -620,21 +626,21 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             return result
 
         # 固定 60 日窗口，不同 ETF 间可比；不足 60 日则用全部可用数据
-        returns_window = returns[-60:] if len(returns) >= 60 else returns
-        if len(returns_window) < 5:
+        # 引擎统一计算（lib.technical），避免手写公式与共享库分歧
+        vol_ann = annualized_volatility_from_returns(returns, window=60)
+        if vol_ann is None:
             result["status"] = "insufficient"
-            result["_error"] = f"only {len(returns_window)} daily returns"
+            result["_error"] = f"only {len(returns)} daily returns"
             return result
-        mean_ret = sum(returns_window) / len(returns_window)
-        variance = sum((r - mean_ret) ** 2 for r in returns_window) / (len(returns_window) - 1)
-        daily_vol = math.sqrt(variance)
-        result["volatility_annualized"] = round(daily_vol * math.sqrt(252) * 100, 2)
-        result["volatility_window"] = len(returns_window)
+        result["volatility_annualized"] = vol_ann
+        result["volatility_window"] = min(len(returns), 60)
 
-        if len(navs) >= 20:
-            result["ma20"] = round(sum(navs[-20:]) / 20, 4)
-        if len(navs) >= 60:
-            result["ma60"] = round(sum(navs[-60:]) / 60, 4)
+        ma20_series = sma(navs, 20)
+        ma60_series = sma(navs, 60)
+        if ma20_series and ma20_series[-1] is not None:
+            result["ma20"] = round(ma20_series[-1], 4)
+        if ma60_series and ma60_series[-1] is not None:
+            result["ma60"] = round(ma60_series[-1], 4)
 
         # D4: 指数价格 MA（底层指数的趋势结构，与 NAV MA 互补）
         idx_code = CSINDEX_MAP.get(symbol, "")
@@ -645,15 +651,16 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
                 logger.info("index_ma(%s/%s) skipped: %s", symbol, idx_code, exc)
 
         # D8: BOLL 布林带（基于 NAV 序列，SMA(20) ± 2×std，用于波动率区间判断）
+        # 引擎统一计算（lib.technical.boll_latest，总体方差，Bollinger 定义）
         if len(navs) >= 20:
             try:
-                window = navs[-20:]
-                mid = sum(window) / 20
-                variance_boll = sum((x - mid) ** 2 for x in window) / (20 - 1)
-                std_boll = math.sqrt(variance_boll)
-                result["boll_mid"] = round(mid, 4)
-                result["boll_upper"] = round(mid + 2.0 * std_boll, 4)
-                result["boll_lower"] = round(mid - 2.0 * std_boll, 4)
+                boll = boll_latest(navs)
+                if boll["mid"] is not None:
+                    result["boll_mid"] = round(boll["mid"], 4)
+                if boll["upper"] is not None:
+                    result["boll_upper"] = round(boll["upper"], 4)
+                if boll["lower"] is not None:
+                    result["boll_lower"] = round(boll["lower"], 4)
             except Exception as exc:
                 logger.info("boll(%s) skipped: %s", symbol, exc)
 
@@ -834,15 +841,9 @@ def _fetch_fund_adj_factor(symbol: str) -> dict[str, float] | None:
             logger.info("fund_adj(%s): no TUSHARE_TOKEN, skipping", symbol)
             return None
 
-        # ETF 代码 → Tushare ts_code（内联，避免跨包导入 lib.codes）
-        s = symbol.strip()
-        if s.startswith(("5", "6")):
-            ts_code = f"{s}.SH"
-        elif s.startswith(("0", "1", "3")):
-            ts_code = f"{s}.SZ"
-        elif s.startswith(("4", "8")):
-            ts_code = f"{s}.BJ"
-        else:
+        # ETF 代码 → Tushare ts_code（共享 lib.codes，ETF 规则与股票不同：5→SH）
+        ts_code = etf_symbol_to_ts_code(symbol)
+        if not ts_code:
             return None
 
         import tushare as ts
@@ -891,10 +892,12 @@ def _fetch_index_ma(result: dict, idx_code: str) -> None:
             return
         closes = [safe_float(r.get("close")) for _, r in df.iterrows()]
         closes = [c for c in closes if c is not None]
-        if len(closes) >= 20:
-            result["index_ma20"] = round(sum(closes[-20:]) / 20, 2)
-        if len(closes) >= 60:
-            result["index_ma60"] = round(sum(closes[-60:]) / 60, 2)
+        idx_ma20 = sma(closes, 20)
+        idx_ma60 = sma(closes, 60)
+        if idx_ma20 and idx_ma20[-1] is not None:
+            result["index_ma20"] = round(idx_ma20[-1], 2)
+        if idx_ma60 and idx_ma60[-1] is not None:
+            result["index_ma60"] = round(idx_ma60[-1], 2)
     except Exception:
         logger.debug("_fetch_index_ma(%s): index daily fetch failed, silent degrade", idx_code)
 

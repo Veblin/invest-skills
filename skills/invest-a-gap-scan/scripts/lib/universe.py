@@ -24,7 +24,7 @@ import pandas as pd
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
-from codes import classify_board, symbol_to_ts_code  # noqa: E402
+from codes import classify_board, is_st_or_delisted, symbol_to_ts_code  # noqa: E402
 from lib import env  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
@@ -94,19 +94,9 @@ class StockInfo:
 def _filter_st_and_delist(name: str) -> bool:
     """Check whether a stock name indicates ST or delisting status.
 
-    Args:
-        name: Stock short name.
-
-    Returns:
-        ``True`` if the stock should be **excluded** from the universe.
+    Delegates to shared ``codes.is_st_or_delisted`` (skills/lib/codes.py).
     """
-    if not name:
-        return False
-    if "ST" in name.upper():
-        return True
-    if "退" in name:
-        return True
-    return False
+    return is_st_or_delisted(name)
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ def collect_industry_weekly() -> dict[str, Any]:
     """
     from datetime import date
 
+    from lib.nums import coalesce_field as _safe_col
     from lib.proxy import akshare_direct_session
     from lib.store import _conn, _safe_close, init_db
 
@@ -90,21 +91,7 @@ def collect_industry_weekly() -> dict[str, Any]:
     return result
 
 
-def _safe_col(row: Any, *names: str) -> float | None:
-    """从 DataFrame 行中尝试多个列名，返回首个非空非 NaN float。"""
-    import math
-    for n in names:
-        v = row.get(n)
-        if v is None:
-            continue
-        try:
-            f = float(v)
-            if math.isnan(f) or math.isinf(f):
-                return None
-            return f
-        except (ValueError, TypeError):
-            pass
-    return None
+# 共享 lib.nums.coalesce_field：从行中取首个有效数值字段（跳过 None/NaN/inf）
 
 
 # ---------------------------------------------------------------------------

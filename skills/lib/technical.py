@@ -366,6 +366,17 @@ def _boll(closes: list[float], n: int = 20, k: float = 2.0) -> dict[str, list[fl
     return {"mid": mid, "upper": upper, "lower": lower, "width": width}
 
 
+def boll_latest(closes: list[float], n: int = 20, k: float = 2.0) -> dict[str, float | None]:
+    """Latest BOLL scalars (not full series). Population std per Bollinger's definition."""
+    data = _boll(closes, n, k)
+    return {
+        "mid": data["mid"][-1] if data["mid"] and data["mid"][-1] is not None else None,
+        "upper": data["upper"][-1] if data["upper"] and data["upper"][-1] is not None else None,
+        "lower": data["lower"][-1] if data["lower"] and data["lower"][-1] is not None else None,
+        "width": data["width"][-1] if data["width"] and data["width"][-1] is not None else None,
+    }
+
+
 def _atr(highs: list[float], lows: list[float], closes: list[float], n: int = 14) -> list[float | None]:
     """ATR 平均真实波幅 (Average True Range)。"""
     if len(closes) < n + 1:
@@ -798,6 +809,17 @@ def volatility_cone(
         "window": window,
         "by_window": by_window,
     }
+
+
+def annualized_volatility_from_returns(returns: list[float], window: int = 60) -> float | None:
+    """Annualized volatility from simple daily returns (sample std, preserves etf_data formula)."""
+    if len(returns) < 5:
+        return None
+    series = returns[-window:] if len(returns) >= window else returns
+    mean = sum(series) / len(series)
+    variance = sum((r - mean) ** 2 for r in series) / (len(series) - 1)
+    daily_vol = math.sqrt(variance)
+    return round(daily_vol * math.sqrt(252) * 100, 2)
 
 
 def relative_strength(

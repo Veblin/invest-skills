@@ -7,6 +7,9 @@ __all__ = [
     "exchange_code",
     "classify_board",
     "market_label",
+    "is_st_or_delisted",
+    "ts_code_to_baostock",
+    "etf_symbol_to_ts_code",
 ]
 
 
@@ -77,3 +80,44 @@ def market_label(raw: str | None) -> str:
         "4": "CDR",
     }
     return mapping.get(text, f"未知({text})")
+
+
+def is_st_or_delisted(name: str | None) -> bool:
+    """Return True if stock name indicates ST or delisting (退市)."""
+    if not name:
+        return False
+    up = name.upper()
+    return "ST" in up or "退" in name
+
+
+def ts_code_to_baostock(ts_code: str) -> str:
+    """Convert Tushare ts_code (600176.SH) to baostock format (sh.600176).
+
+    Uses the authoritative exchange suffix from the ts_code itself
+    (``parts[1].lower()``), NOT digit-prefix inference — suffix rules differ
+    from A-share prefix rules (BSE 920xxx, 5-prefix ETFs), so re-inferring
+    the exchange would misroute them.
+
+    Malformed input (no dot separator) is returned as-is for downstream
+    graceful degradation.
+    """
+    parts = ts_code.strip().split(".")
+    if len(parts) != 2:
+        return ts_code
+    return f"{parts[1].lower()}.{parts[0]}"
+
+
+def etf_symbol_to_ts_code(symbol: str) -> str:
+    """ETF code → Tushare ts_code. ETF rules: 5/6→SH, 0/1/3→SZ, 4/8→BJ.
+
+    Distinct from :func:`symbol_to_ts_code` (A-share rules: 5xxxxx → SZ);
+    ETF 5-prefix codes are Shanghai-listed.
+    """
+    s = str(symbol).strip()
+    if not s.isdigit():
+        return ""
+    if s.startswith(("5", "6")):
+        return f"{s}.SH"
+    if s.startswith(("4", "8")):
+        return f"{s}.BJ"
+    return f"{s}.SZ"

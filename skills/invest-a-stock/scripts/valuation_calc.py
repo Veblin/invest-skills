@@ -95,10 +95,11 @@ def get_quote_ak(symbol: str) -> dict[str, Any]:
         if row.empty:
             raise ValueError(f"未找到 {code}")
         r = row.iloc[0]
+        mv_raw = safe_float(r.get("总市值"))
         return {
             "price": safe_float(r.get("最新价")),
             "change_pct": safe_float(r.get("涨跌幅")),
-            "total_mv_yi": safe_float(r.get("总市值")),
+            "total_mv_yi": mv_raw / 1e8 if mv_raw is not None else None,  # akshare 总市值单位: 元 → 亿元
             "pe_dynamic": safe_float(r.get("市盈率-动态")),
             "pb": safe_float(r.get("市净率")),
             "source": "akshare.stock_zh_a_spot_em",
@@ -130,7 +131,7 @@ def _get_quote_tencent(symbol: str) -> dict[str, Any]:
         return {
             "price": price,
             "change_pct": change_pct,
-            "total_mv_yi": round(total_mv / 1e8, 2) if total_mv is not None else None,  # 元→亿元
+            "total_mv_yi": round(total_mv, 2) if total_mv is not None else None,  # 腾讯 field45 返回亿元，无需转换
             "pe_dynamic": pe,
             "pb": pb,
             "source": "tencent.qt.gtimg.cn",

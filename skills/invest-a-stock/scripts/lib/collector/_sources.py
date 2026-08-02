@@ -792,7 +792,7 @@ def _q_tencent_quote(symbol: str) -> dict | None:
                 "volume": _parse_tencent_float(p[6]),
                 "turnover_rate": _parse_tencent_float(p[38]),
                 "pe_ratio": _parse_tencent_float(p[39]),
-                "total_mv": mv / 10000 if mv is not None else None,
+                "total_mv": mv if mv is not None else None,  # 腾讯 field45 返回亿元，无需转换
             }
     return None
 

@@ -15,7 +15,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from codes import market_label, symbol_to_ts_code  # noqa: E402
+from codes import is_st_or_delisted, market_label, symbol_to_ts_code  # noqa: E402
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
@@ -122,7 +122,7 @@ def enrich_stock_info(symbols: list[str]) -> dict[str, dict]:
                     "name": name,
                     "market": market_label(market_raw),
                     "market_code": market_raw,
-                    "is_st": "ST" in name.upper(),
+                    "is_st": is_st_or_delisted(name),
                     "list_date": _safe_str(row.get("list_date")),
                 }
         return {s: result[s] for s in symbols if s in result}

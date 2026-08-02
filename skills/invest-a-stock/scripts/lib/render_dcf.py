@@ -7,6 +7,7 @@ from typing import Any
 from lib.nums import safe_float as _safe_num
 from lib.technical import sort_kline_asc
 from lib.stats import calc_beta
+from lib.financial_rigor import _merge_share_fields, _parse_share_count
 
 from .render_utils import _compute_metric_cagr, _get_dim_data, _fmt_v2
 
@@ -182,47 +183,41 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
         (shares: float | None, source_description: str)
     """
     # Source 1: basic_info 中 akshare 的 "总股本" 字段
+    # _parse_share_count 处理 亿/万 后缀 → 万股；×1e4 转 股
     basic_dim = dims.get("basic_info") or {}
-    basic_data = basic_dim.get("data")
-    if isinstance(basic_data, dict):
-        raw = basic_data.get("总股本") or basic_data.get("total_share") or basic_data.get("float_share")
-        if raw is not None:
-            try:
-                shares = float(str(raw).strip().replace(",", ""))
-                if shares > 0:
-                    return shares, "akshare stock_individual_info_em \"总股本\""
-            except (TypeError, ValueError):
-                pass
-    # 也搜索 all_sources（akshare 可能在二级源中）
-    for sd in (basic_dim.get("_meta") or {}).get("all_sources") or []:
-        if isinstance(sd, dict) and sd.get("success"):
-            sd_data = sd.get("data") or {}
-            if isinstance(sd_data, dict):
-                for k in ("总股本", "total_share", "float_share"):
-                    v = sd_data.get(k)
-                    if v is not None:
-                        try:
-                            shares = float(str(v).strip().replace(",", ""))
-                            if shares > 0:
-                                return shares, f"basic_info all_sources \"{k}\""
-                        except (TypeError, ValueError):
-                            continue
+    merged = _merge_share_fields(basic_dim)
+    if merged:
+        shares_wan = _parse_share_count(merged)
+        if shares_wan is not None and shares_wan > 0:
+            return shares_wan * 1e4, "akshare stock_individual_info_em \"总股本\" (万股→股)"
 
     # Source 2: total_mv / price 推导
+    # total_mv 单位: valuation 列表 = Tushare daily_basic(万元)；dict = 腾讯快照(亿元)
     val_dim = dims.get("valuation") or {}
     val_data = val_dim.get("data")
+    latest_mv: float | None = None
+    mv_unit = ""
     if isinstance(val_data, list) and val_data:
         val_sorted = sort_kline_asc(val_data)
         latest_mv = val_sorted[-1].get("total_mv") if val_sorted else None
-        if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
-            latest_mv = float(latest_mv)
-            kline_dim = _get_dim_data(dims, "kline")
-            if isinstance(kline_dim, list) and kline_dim:
-                k_sorted = sort_kline_asc(kline_dim)
-                price = k_sorted[-1].get("close") if k_sorted else None
-                if price is not None and _safe_num(price) and float(price) > 0:
-                    shares = latest_mv / float(price)
-                    return shares, "total_mv / 当前股价 推导"
+        mv_unit = "万元"
+    elif isinstance(val_data, dict):
+        latest_mv = val_data.get("total_mv")
+        mv_unit = "亿元"
+    if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
+        latest_mv = float(latest_mv)
+        kline_dim = _get_dim_data(dims, "kline")
+        if isinstance(kline_dim, list) and kline_dim:
+            k_sorted = sort_kline_asc(kline_dim)
+            price = k_sorted[-1].get("close") if k_sorted else None
+            if price is not None and _safe_num(price) and float(price) > 0:
+                price = float(price)
+                if mv_unit == "亿元":
+                    shares = latest_mv * 1e8 / price
+                    return shares, "total_mv (亿元) / 当前股价 推导"
+                # 万元 × 1e4 = 元；元 / (元/股) = 股
+                shares = latest_mv * 1e4 / price
+                return shares, "total_mv (万元) / 当前股价 推导"
 
     return None, "不可得"
 

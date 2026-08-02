@@ -272,9 +272,9 @@ class TestIndustryPricingIndustry:
             captured["industry"] = industry
             return {"dimension": "industry_pricing", "data": {"industry": industry}}
 
-        monkeypatch.setattr("lib.collector._legacy.collect_industry_pricing", fake_pricing)
+        monkeypatch.setattr("lib.collector._orchestrate.collect_industry_pricing", fake_pricing)
         monkeypatch.setattr(
-            "lib.collector._legacy._resolve_industry_for_pricing",
+            "lib.collector._orchestrate._resolve_industry_for_pricing",
             lambda sym, dr=None: "玻纤",
         )
         from lib.collector import collect_industry_pricing_dim
@@ -490,8 +490,8 @@ class TestCollectHolderChangesFallback:
             cninfo_called["value"] = True
             return [{"ann_date": "20260101", "direction": "增持", "source": "akshare cninfo"}]
 
-        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector._legacy._q_akshare_management_hold", fake_cninfo)
+        monkeypatch.setattr("lib.collector._orchestrate._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._orchestrate._q_akshare_management_hold", fake_cninfo)
         monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
         monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
 
@@ -519,8 +519,8 @@ class TestCollectHolderChangesFallback:
             cninfo_called["value"] = True
             return [{"ann_date": "20260101", "direction": "增持", "source": "akshare cninfo"}]
 
-        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector._legacy._q_akshare_management_hold", fake_cninfo)
+        monkeypatch.setattr("lib.collector._orchestrate._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._orchestrate._q_akshare_management_hold", fake_cninfo)
         monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
         monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
 
@@ -553,8 +553,8 @@ class TestCollectHolderChangesFallback:
             cninfo_called["value"] = True
             return [{"ann_date": "20260101", "direction": "增持", "source": "akshare cninfo"}]
 
-        monkeypatch.setattr("lib.collector._legacy._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector._legacy._q_akshare_management_hold", fake_cninfo)
+        monkeypatch.setattr("lib.collector._orchestrate._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._orchestrate._q_akshare_management_hold", fake_cninfo)
         monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
         monkeypatch.setattr("lib.collector._legacy.env.is_tushare_available", lambda cfg: True)
 

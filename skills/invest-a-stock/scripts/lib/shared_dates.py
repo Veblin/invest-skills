@@ -10,6 +10,11 @@ from ._skills_lib_path import ensure_skills_lib_on_path
 
 ensure_skills_lib_on_path()
 
-from dates import yyyymmdd_to_iso  # noqa: E402
+from dates import (  # noqa: E402
+    shanghai_days_ago,
+    shanghai_now,
+    shanghai_today,
+    yyyymmdd_to_iso,
+)
 
-__all__ = ["yyyymmdd_to_iso"]
+__all__ = ["yyyymmdd_to_iso", "shanghai_now", "shanghai_today", "shanghai_days_ago"]

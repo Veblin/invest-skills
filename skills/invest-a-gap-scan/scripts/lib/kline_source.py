@@ -44,6 +44,8 @@ import pandas as pd
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
+from codes import ts_code_to_baostock  # noqa: E402
+from dates import yyyymmdd_to_iso  # noqa: E402
 from qfq import apply_qfq  # noqa: E402  (same-directory import)
 from lib.proxy import proxy_bypass  # noqa: E402
 
@@ -368,27 +370,6 @@ class BaostockSource(KlineSource):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _ts_code_to_baostock(ts_code: str) -> str:
-        """Convert a Tushare ``ts_code`` to baostock format.
-
-        ``"600176.SH"`` → ``"sh.600176"``
-        ``"000001.SZ"`` → ``"sz.000001"``
-
-        Args:
-            ts_code: Tushare format stock code.
-
-        Returns:
-            Baostock format stock code.
-        """
-        parts = ts_code.strip().split(".")
-        if len(parts) != 2:
-            logger.warning(
-                "Cannot convert %s to baostock format, using as-is", ts_code
-            )
-            return ts_code
-        return f"{parts[1].lower()}.{parts[0]}"
-
     def _ensure_logged_in(self) -> None:
         """Ensure baostock is logged in (thread-safe with global lock)."""
         if self._logged_in:
@@ -424,11 +405,11 @@ class BaostockSource(KlineSource):
             DataFrame with columns ``[ts_code, trade_date, open, high, low,
             close, vol, amount]``, or ``None`` on failure.
         """
-        bs_code = self._ts_code_to_baostock(ts_code)
+        bs_code = ts_code_to_baostock(ts_code)
 
         # Baostock expects YYYY-MM-DD; convert from yyyymmdd
-        start_fmt = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
-        end_fmt = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
+        start_fmt = yyyymmdd_to_iso(start_date)
+        end_fmt = yyyymmdd_to_iso(end_date)
 
         with _BAOSTOCK_LOCK, proxy_bypass():
             try:

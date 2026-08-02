@@ -244,9 +244,9 @@ class TestRenderFundamentals:
         from lib.render import render
 
         c = collection_v2_minimal()
-        with patch.object(collector._legacy, "attach_market_structure") as ms_mock, \
-             patch.object(collector._legacy, "attach_industry_peers") as ip_mock, \
-             patch.object(collector._legacy, "attach_pe_band") as pb_mock:
+        with patch.object(collector, "attach_market_structure") as ms_mock, \
+             patch.object(collector._orchestrate, "attach_industry_peers") as ip_mock, \
+             patch.object(collector._orchestrate, "attach_pe_band") as pb_mock:
             ms_mock.side_effect = lambda coll, sym: coll.update({"market_structure": {}}) or {}
             ip_mock.side_effect = lambda coll, sym: coll.update({"industry_peers": {}}) or {}
             pb_mock.return_value = {"n_samples": 0}
@@ -445,8 +445,8 @@ class TestCollectIndustryPeers:
 
         with patch.object(collector.env, "is_tushare_available", return_value=True), \
              patch.object(collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}), \
-             patch.object(collector._legacy, "_tushare_client", return_value=mock_tc), \
-             patch.object(collector._legacy, "_ms_lookup_sw_index_code", return_value="851121.SI"):
+             patch.object(collector._orchestrate, "_tushare_client", return_value=mock_tc), \
+             patch.object(collector._orchestrate, "_ms_lookup_sw_index_code", return_value="851121.SI"):
             result = collector.collect_industry_peers("600176", industry="电气设备")
 
         assert result["industry_name"] == "电气设备"
@@ -502,8 +502,8 @@ class TestCollectIndustryPeers:
             return {"dimension": "basic_info", "data": {}, "status": "available"}
 
         with patch.object(
-            collector, "COLLECTORS", {"basic_info": ("基本信息", _fake_basic)},
-        ), patch.object(collector._legacy, "attach_phase2_extras") as mock_attach:
+            collector._orchestrate, "COLLECTORS", {"basic_info": ("基本信息", _fake_basic)},
+        ), patch.object(collector._orchestrate, "attach_phase2_extras") as mock_attach:
             result = collector.collect_all("600176", dims=["basic_info"])
         mock_attach.assert_called_once_with(result, "600176")
 
