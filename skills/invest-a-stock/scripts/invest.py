@@ -494,6 +494,12 @@ def cmd_collect(args: argparse.Namespace) -> int:
         print("📰 新闻包模式已启用（公告 + 查询包 + 可选 Tavily）")
     env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
+    if "kline" in dims:
+        try:
+            from lib.collector import _kline_cache
+            _kline_cache.cleanup_old()
+        except Exception:
+            pass
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
     if result["summary"]["available"] == 0:
@@ -2035,6 +2041,11 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
 def main() -> int:
     env.ensure_env_loaded()
+    # 全局 socket 兜底超时：必须在任何网络调用之前（.env 注入后读取才生效）。
+    # 覆盖 baostock/tickflow/akshare 无 timeout 参数的接口，防无限挂起。
+    env.configure_socket_timeout()
+    from lib.logutil import setup_logging
+    setup_logging()  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     args = build_parser().parse_args()
     if args.command == "collect":
         return cmd_collect(args)

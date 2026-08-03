@@ -15,7 +15,6 @@ import logging
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stdout
 from datetime import datetime, timezone, timedelta
 from io import StringIO
@@ -137,44 +136,82 @@ def _baostock_code(symbol: str) -> str:
 # ---- 并行执行辅助 ----
 
 def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
-                          dimension: str) -> list[SourceResult]:
-    """并行执行多个源查询任务，返回 SourceResult 列表。
+                          dimension: str,
+                          deadline_sec: float | None = None) -> list[SourceResult]:
+    """并行执行多个源查询任务，按任务索引顺序返回 SourceResult 列表。
 
-    last30days 的 ThreadPoolExecutor fan-out 模式：
-    - 每个任务独立提交
-    - 失败不阻塞其他任务
-    - 返回所有结果（含失败）供合并
+    线程方案（daemon 线程 + 信号量限流 + 锁保护结果字典）：
+    - 不用 `with ThreadPoolExecutor`：其 __exit__ 会 join 所有 worker，
+      挂起源会拖死整个维度（实测曾挂死 20 分钟）。
+    - daemon 线程：deadline 到期后本函数立即返回；解释器退出时挂起线程
+      被直接杀死，不阻塞进程退出。
+    - 语义等价旧 as_completed：结果按任务索引排列，含失败/超时占位。
+    - 残留副作用：deadline 后仍有后台线程在跑（持 _BAOSTOCK_LOCK、消耗
+      tushare 配额）——行为边界由 env.configure_socket_timeout() 的 socket
+      默认超时保证（INVEST_SOCKET_TIMEOUT，默认 30s）。
 
     Args:
         tasks: [(source_name, callable), ...]
         dimension: 维度标识
+        deadline_sec: 单源 deadline；None 时用 env.SOURCE_DEADLINE_SEC
+            （INVEST_SOURCE_TIMEOUT）；0 或 None 表示不设限（旧语义）
     """
     if not tasks:
         return []
 
-    sources: list[SourceResult | None] = []
+    n = len(tasks)
     # max_workers=8：平衡并发效率与 Tushare/akshare 限流（可通过 INVEST_MAX_WORKERS 环境变量覆盖）
-    max_w = int(os.environ.get("INVEST_MAX_WORKERS", "8"))
-    with ThreadPoolExecutor(max_workers=min(len(tasks), max_w)) as executor:
-        futures = {
-            executor.submit(_run_one_source, name, fn, dimension): i
-            for i, (name, fn) in enumerate(tasks)
-        }
-        results: dict[int, SourceResult] = {}
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results[idx] = future.result()
-            except Exception as exc:
-                results[idx] = SourceResult(
-                    source=f"__internal__",
-                    data=None,
-                    dimension=dimension,
-                    error=f"Executor failure: {exc}",
-                )
-        sources = [results.get(i) for i in range(len(tasks))]
+    max_w = min(n, int(os.environ.get("INVEST_MAX_WORKERS", "8")))
+    if deadline_sec is None:
+        deadline_sec = env.SOURCE_DEADLINE_SEC
+    if deadline_sec is not None and deadline_sec <= 0:
+        deadline_sec = None  # 0 = 不设限
 
-    return [s for s in sources if s is not None]
+    results: dict[int, SourceResult] = {}
+    lock = threading.Lock()
+    sem = threading.Semaphore(max_w)
+    done = threading.Event()
+    remaining = n
+
+    def worker(i: int, name: str, fn: Callable[[], Any]) -> None:
+        nonlocal remaining
+        try:
+            with sem:  # 队列限流，等价 max_workers
+                res = _run_one_source(name, fn, dimension)
+        except Exception as exc:  # 防御：_run_one_source 已全捕获
+            res = SourceResult(name, None, dimension,
+                               error=f"Executor failure: {exc}")
+        with lock:
+            results[i] = res
+            remaining -= 1
+            if remaining == 0:
+                done.set()
+
+    threads = []
+    for i, (name, fn) in enumerate(tasks):
+        t = threading.Thread(target=worker, args=(i, name, fn),
+                             name=f"src:{dimension}:{name}", daemon=True)
+        t.start()
+        threads.append(t)  # 仅保留引用防 GC，不 join
+
+    start = time.monotonic()
+    if deadline_sec is None:
+        done.wait()  # 逃生口：等全部完成（旧语义）
+    elif not done.wait(timeout=deadline_sec):
+        elapsed = time.monotonic() - start  # deadline 到期：立即返回
+        timed_out: list[str] = []
+        with lock:
+            for i, (name, _fn) in enumerate(tasks):
+                if i not in results:
+                    results[i] = SourceResult(
+                        name, None, dimension,
+                        error=f"timeout after {elapsed:.1f}s",
+                        latency_ms=elapsed * 1000)
+                    timed_out.append(name)
+        logger.warning("dimension=%s source timeout after %.1fs: %s",
+                       dimension, elapsed, ", ".join(timed_out))
+
+    return [results[i] for i in range(n)]  # 每个索引必有值（worker 或超时占位）
 
 
 def _annotate_query_params(result_map: dict[str, SourceResult],
@@ -190,15 +227,23 @@ def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceR
     start = time.time()
     try:
         data = fn()
-        elapsed = (time.time() - start) * 1000
-        if data is not None:
-            return SourceResult(name, data, dimension, latency_ms=elapsed)
-        return SourceResult(name, None, dimension, error="No data returned",
-                           latency_ms=elapsed)
     except Exception as e:
         elapsed = (time.time() - start) * 1000
         logger.warning("Source %s failed: %s", name, e)
-        return SourceResult(name, None, dimension, error=str(e),
+        res = SourceResult(name, None, dimension, error=str(e),
                            latency_ms=elapsed)
+    else:
+        elapsed = (time.time() - start) * 1000
+        if data is not None:
+            res = SourceResult(name, data, dimension, latency_ms=elapsed)
+        else:
+            res = SourceResult(name, None, dimension, error="No data returned",
+                               latency_ms=elapsed)
+    logger.info("source=%s dim=%s latency_ms=%.0f success=%s",
+                name, dimension, res.latency_ms, res.success)
+    if res.latency_ms > 60_000:  # 慢源告警（开发日志与 stderr 均可观测）
+        logger.warning("slow source: %s dim=%s took %.1fs",
+                       name, dimension, res.latency_ms / 1000)
+    return res
 
 

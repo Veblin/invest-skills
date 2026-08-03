@@ -1,5 +1,7 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
     if not __base_n.startswith("__"):
@@ -149,22 +151,30 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
 
     默认窗口 400 自然日，覆盖 MA250（需 ≥250 个交易日缓冲）。
     --deep 模式通过 invest.py 传入 start_date=_days_ago(730)。
+    同日重复采集命中 _kline_cache（TTL 1 天，INVEST_KLINE_CACHE=0 禁用）；
+    quote 维度（近实时行情）有意不进缓存。
     """
     sd = start_date or _days_ago(400)
     ed = end_date or _today()
 
+    from . import _kline_cache  # 惰性导入，避免包初始化开销
+
+    def _cached(source: str, fetch: Callable[[], list | None]) -> list | None:
+        return _kline_cache.load_or_fetch(symbol, source, sd, ed, fetch)
+
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed)))
+        tasks.append(("tushare.daily", lambda: _cached("tushare.daily",
+                      lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed))))
     if env.is_akshare_available() and akshare_push2_available():
-        tasks.append(("akshare.stock_zh_a_hist",
-                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed)))
+        tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
+                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
     if env.is_baostock_available():
-        tasks.append(("baostock.kline",
-                      lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed)))
+        tasks.append(("baostock.kline", lambda: _cached("baostock.kline",
+                      lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed))))
     if env.is_tickflow_available():
-        tasks.append(("tickflow.kline",
-                      lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed)))
+        tasks.append(("tickflow.kline", lambda: _cached("tickflow.kline",
+                      lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed))))
 
     def _kline_qp(_results: list) -> dict[str, str]:
         qp_map: dict[str, str] = {
@@ -821,19 +831,31 @@ def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
 
 
 def _run_with_timeout(fn: Callable[[], Any], timeout_sec: float, label: str) -> Any:
-    """在独立线程中执行阻塞调用，超时则返回 None（用于 cninfo 全市场扫描）。"""
-    from concurrent.futures import TimeoutError as FuturesTimeoutError
+    """在 daemon 线程中执行阻塞调用，超时/异常返回 None（不 join 挂起线程）。
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
+    用于 cninfo 全市场扫描等慢接口：超时后立即返回，挂起线程在解释器
+    退出时被杀（边界由 env.configure_socket_timeout 兜底）。
+    """
+    box: dict[str, Any] = {"result": None, "error": None}
+    box["done"] = threading.Event()
+
+    def _target() -> None:
         try:
-            return future.result(timeout=timeout_sec)
-        except FuturesTimeoutError:
-            logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
-            return None
+            box["result"] = fn()
         except Exception as exc:
-            logger.warning("%s failed: %s", label, exc)
-            return None
+            box["error"] = exc
+        finally:
+            box["done"].set()
+
+    t = threading.Thread(target=_target, name=f"timeout:{label}", daemon=True)
+    t.start()
+    if not box["done"].wait(timeout=timeout_sec):
+        logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+        return None
+    if box["error"] is not None:
+        logger.warning("%s failed: %s", label, box["error"])
+        return None
+    return box["result"]
 
 
 def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
@@ -1273,6 +1295,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     if dims is None:
         dims = list(_DEFAULT_DIMS)
 
+    start_all = time.time()
     dim_results: dict[str, dict] = {}
 
     # 深度模式：kline 用更长窗口
@@ -1281,6 +1304,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         kline_kwargs["start_date"] = _days_ago(730)
 
     # 跨维度并行
+    dim_start: dict[str, float] = {}
     with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
         future_map = {}
         for dim in dims:
@@ -1290,6 +1314,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             if dim == "industry_pricing":
                 # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
                 continue
+            dim_start[dim] = time.time()
             if dim == "kline" and kline_kwargs:
                 _, fn = COLLECTORS[dim]
                 future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
@@ -1301,6 +1326,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             dim = future_map[future]
             try:
                 dim_results[dim] = future.result()
+                logger.info("dimension=%s done in %.1fs", dim,
+                            time.time() - dim_start[dim])
             except Exception as exc:
                 dim_results[dim] = {
                     "dimension": dim,
@@ -1468,6 +1495,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 "attempted_sources": {"error": str(exc)},
             }
 
+    logger.info("collect_all total=%.1fs symbol=%s dims=%d",
+                time.time() - start_all, symbol, len(dims))
     return result
 
 
