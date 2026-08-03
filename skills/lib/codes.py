@@ -18,6 +18,7 @@ def symbol_to_ts_code(symbol: str) -> str:
 
     Rules aligned with ``collector._exchange_code``:
     ``6``/``9`` → SH; ``4``/``8`` → BJ; else → SZ.
+    BSE 920xxx (trading since 2025-10) also starts with ``9`` → BJ.
     Invalid input returns ``""``.
     """
     s = str(symbol).strip()
@@ -26,6 +27,8 @@ def symbol_to_ts_code(symbol: str) -> str:
     s = s.zfill(6)
     if len(s) != 6:
         return ""
+    if s.startswith("920"):
+        return f"{s}.BJ"
     if s.startswith(("6", "9")):
         return f"{s}.SH"
     if s.startswith(("4", "8")):
@@ -43,6 +46,8 @@ def exchange_code(symbol: str) -> dict[str, str]:
     if not s.isdigit():
         raise ValueError(f"Invalid symbol: {symbol!r} (must be 1-6 digits)")
     s = s.zfill(6)
+    if s.startswith("920"):
+        return {"tushare": f"{s}.BJ", "baostock": f"bj.{s}", "akshare": f"bj{s}"}
     if s.startswith(("6", "9")):
         return {"tushare": f"{s}.SH", "baostock": f"sh.{s}", "akshare": f"sh{s}"}
     if s.startswith(("4", "8")):
@@ -111,11 +116,13 @@ def etf_symbol_to_ts_code(symbol: str) -> str:
     """ETF code → Tushare ts_code. ETF rules: 5/6→SH, 0/1/3→SZ, 4/8→BJ.
 
     Distinct from :func:`symbol_to_ts_code` (A-share rules: 5xxxxx → SZ);
-    ETF 5-prefix codes are Shanghai-listed.
+    ETF 5-prefix codes are Shanghai-listed. BSE 920xxx funds → BJ.
     """
     s = str(symbol).strip()
     if not s.isdigit():
         return ""
+    if s.startswith("920"):
+        return f"{s}.BJ"
     if s.startswith(("5", "6")):
         return f"{s}.SH"
     if s.startswith(("4", "8")):

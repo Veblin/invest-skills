@@ -798,6 +798,18 @@ class TestPriceImpactInterpolation:
         assert r["warn"] is not None
         assert "ratio 默认 0.5" in r["warn"]
 
+    def test_zero_spread_not_overwritten_by_scenario_clamp(self):
+        """零价差回退 0.5 不被场景钳位覆盖（v0.2.3 review fix #1）."""
+        r = calc_price_impact_interpolation(
+            pre_price=30.0, post_price=30.0,
+            eps_base=2.0, eps_hit=3.0,
+            pe_normal=10.0, pe_stressed=15.0,
+            scenario="bullish",
+        )
+        # pre == post 会命中 bullish 钳位条件，但零价差回退优先
+        assert r["ratio"] == 0.5
+        assert r["warn"] is not None
+
     def test_small_eps_meaningful_spread_not_forced_to_half(self):
         """Tiny EPS with meaningful relative spread must not force ratio=0.5."""
         r = calc_price_impact_interpolation(

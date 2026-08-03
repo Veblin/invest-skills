@@ -246,6 +246,31 @@ class TestKlineSortOrder:
         assert asc[0]["trade_date"] <= asc[-1]["trade_date"]
         assert sort_kline_asc(list(reversed(rows))) == asc
 
+    def test_mixed_date_formats_sort_correctly(self):
+        """混合格式（20260801 vs 2026-08-01）归一化后正确排序（review fix #15）。"""
+        from lib.technical import sort_kline_asc
+
+        rows = [
+            {"trade_date": "2026-08-01", "close": 3.0},
+            {"trade_date": "20260730", "close": 1.0},
+            {"trade_date": "2026.07.31", "close": 2.0},
+        ]
+        asc = sort_kline_asc(rows)
+        assert [r["close"] for r in asc] == [1.0, 2.0, 3.0]
+
+    def test_empty_date_rows_sort_last(self):
+        """无 trade_date 的快照行排最后，data[-1] 语义保持「最新」（review fix #15）。"""
+        from lib.technical import sort_kline_asc
+
+        rows = [
+            {"trade_date": "20260801", "close": 2.0},
+            {"close": 3.0},  # intraday 快照行，无日期
+            {"trade_date": "20260731", "close": 1.0},
+        ]
+        asc = sort_kline_asc(rows)
+        assert asc[-1].get("trade_date") is None
+        assert asc[-1]["close"] == 3.0
+
 
 class TestNoSignalWords:
     """合规：输出不含交易信号词汇。"""

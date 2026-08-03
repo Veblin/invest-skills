@@ -6,6 +6,29 @@ import statistics
 from typing import Any
 
 
+def median(seq: list[float]) -> float | None:
+    """中位数（偶数样本取两中值平均）；空序列返回 None。"""
+    if not seq:
+        return None
+    return statistics.median(seq)
+
+
+def percentile_rank_inclusive(
+    seq: list[float], current: float | None, *, round_to: int | None = None,
+) -> float | None:
+    """含边界（<=）百分位：count(v <= current) / len × 100。
+
+    与 :func:`percentile_rank`（严格 <、>0 过滤）互补：此处不剔除非正值，
+    仅剔除 None（调用方按需预过滤）；``round_to`` 指定四舍五入位数。
+    ``seq`` 为空或 ``current`` 为 None 时返回 None。
+    """
+    valid = [v for v in seq if v is not None]
+    if current is None or not valid:
+        return None
+    pct = sum(1 for v in valid if v <= current) / len(valid) * 100
+    return round(pct, round_to) if round_to is not None else pct
+
+
 def percentile_rank(seq: list[float], current: float) -> float | None:
     """计算 current 在 seq 中的百分位（严格低于 current 的比例 × 100）。
 

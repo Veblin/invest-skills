@@ -957,13 +957,30 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
     """尝试用 trade_date 或 end_date 索引列表。
 
     对 shareholders 等同一日期有多条记录的维度，使用 holder_name 或序号构建复合键，
-    避免静默覆盖（H2 修复）。
+    避免静默覆盖（H2 修复）。同名同日期多条经 _unique_key 递增后缀区分，杜绝
+    复合键二次碰撞（review fix #8）。输入先按 (date, holder, 内容) 稳定排序，
+    保证同名同日期记录跨快照键一致，diff 不报假变化（review fix #12）。
     """
+    def _unique_key(key: str, used: set[str]) -> str:
+        candidate = key
+        n = 2
+        while candidate in used:
+            candidate = f"{key}_{n}"
+            n += 1
+        used.add(candidate)
+        return candidate
+
+    items = [it for it in data if isinstance(it, dict)]
+    items.sort(key=lambda r: (
+        str(r.get("trade_date") or r.get("end_date") or ""),
+        str(r.get("holder_name") or ""),
+        tuple(sorted(f"{k}={r.get(k)}" for k in r)),  # 内容稳定序
+    ))
+
     result: dict[str, dict] = {}
     composite_dates: set[str] = set()  # 已转为复合键的日期，避免第 3+ 条覆盖
-    for i, item in enumerate(data):
-        if not isinstance(item, dict):
-            continue
+    used: set[str] = set()  # 所有已占用 key，保证同名同日期记录不互相覆盖
+    for i, item in enumerate(items):
         base_key = item.get("trade_date") or item.get("end_date") or str(i)
         holder = item.get("holder_name")
         # 检查是否已有同键记录，或该日期已转入复合键模式
@@ -972,13 +989,13 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
                 existing = result.pop(base_key)
                 eh = existing.get("holder_name")
                 suffix = eh if eh else "0"
-                result[f"{base_key}_{suffix}"] = existing
+                result[_unique_key(f"{base_key}_{suffix}", used)] = existing
                 composite_dates.add(base_key)
             if holder:
                 base_key = f"{base_key}_{holder}"
             else:
                 base_key = f"{base_key}_{i}"
-        result[str(base_key)] = item
+        result[_unique_key(str(base_key), used)] = item
     return result
 
 

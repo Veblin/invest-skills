@@ -13,7 +13,6 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -21,6 +20,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from dates import shanghai_days_ago  # noqa: E402
 from lib import env  # noqa: E402
 from lib import store as store_mod  # noqa: E402
 from lib.json_util import dumps_json  # noqa: E402
@@ -71,9 +71,7 @@ def _connection() -> Iterator[sqlite3.Connection]:
 
 def _cutoff_yyyymmdd(days: int) -> str:
     """Calendar lookback as YYYYMMDD (matches scan_date / Asia/Shanghai storage)."""
-    from zoneinfo import ZoneInfo
-    d = datetime.now(ZoneInfo("Asia/Shanghai")).date() - timedelta(days=max(0, days))
-    return d.strftime("%Y%m%d")
+    return shanghai_days_ago(max(0, days))
 
 
 def _like_contains(needle: str) -> str:

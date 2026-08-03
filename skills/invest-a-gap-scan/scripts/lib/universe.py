@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import pickle
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 from codes import classify_board, is_st_or_delisted, symbol_to_ts_code  # noqa: E402
+from dates import shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
@@ -116,7 +116,7 @@ def _cache_path(date_str: str | None = None) -> Path:
         Absolute path to the cache pickle file.
     """
     if date_str is None:
-        date_str = date.today().strftime("%Y%m%d")
+        date_str = shanghai_today()
     return env.STORE_DIR / "gap_scan_cache" / f"universe_{date_str}.pkl"
 
 
@@ -477,7 +477,7 @@ def build_universe(
     if indices is None:
         indices = DEFAULT_INDICES
 
-    today_str = date.today().strftime("%Y%m%d")
+    today_str = shanghai_today()
 
     # ---- Cache check ----
     if not force_refresh:

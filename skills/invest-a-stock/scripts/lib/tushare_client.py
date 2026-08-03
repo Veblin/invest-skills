@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 import requests
 import pandas as pd
 
+from .shared_dates import shanghai_days_ago, shanghai_today
+
 logger = logging.getLogger(__name__)
 
 TUSHARE_API_URL = "http://api.tushare.pro"
@@ -283,7 +285,7 @@ class TushareClient:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import datetime, sys
+    import sys
     from pathlib import Path
     _d = Path(__file__).parent.parent
     sys.path.insert(0, str(_d))
@@ -294,8 +296,8 @@ if __name__ == "__main__":
     available = client.is_available()
     print(f"Tushare available: {available}")
     if available:
-        end = datetime.date.today().strftime("%Y%m%d")
-        start = (datetime.date.today() - datetime.timedelta(days=5)).strftime("%Y%m%d")
+        end = shanghai_today()
+        start = shanghai_days_ago(5)
         df = client.query("daily", ts_code="600519.SH",
                           start_date=start, end_date=end,
                           fields="trade_date,open,high,low,close")

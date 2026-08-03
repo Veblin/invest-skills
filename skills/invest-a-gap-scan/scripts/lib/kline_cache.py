@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pickle
 import time
-from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +19,7 @@ import pandas as pd
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
+from dates import shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 
 
@@ -65,7 +65,7 @@ def save(ts_code: str, df: pd.DataFrame, date_str: str | None = None,
             source-specific subdirectory to prevent cross-source reuse.
     """
     if date_str is None:
-        date_str = date.today().strftime("%Y%m%d")
+        date_str = shanghai_today()
     cache_dir = _cache_dir(date_str)
     if source_name:
         cache_dir = cache_dir / source_name
@@ -93,7 +93,7 @@ def load(ts_code: str, date_str: str | None = None,
         or expiration.
     """
     if date_str is None:
-        date_str = date.today().strftime("%Y%m%d")
+        date_str = shanghai_today()
     cache_dir = _cache_dir(date_str)
     if source_name:
         cache_dir = cache_dir / source_name

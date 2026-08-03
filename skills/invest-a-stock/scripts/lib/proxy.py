@@ -13,10 +13,12 @@ import threading
 import time
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Iterator
 
 import requests
+
+from .shared_dates import shanghai_now
 import requests.utils as ru
 
 # 东方财富 API 封锁/阻断标识（共享给 collector / render / schema）。
@@ -232,7 +234,7 @@ def _probe_push2_eastmoney_unlocked(timeout: float) -> dict[str, Any]:
         "http_status": None,
         "error": None,
     }
-    now = datetime.now()
+    now = shanghai_now()
     beg = (now - timedelta(days=10)).strftime("%Y%m%d")
     end = now.strftime("%Y%m%d")
     try:

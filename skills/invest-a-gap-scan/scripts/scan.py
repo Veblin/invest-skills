@@ -29,9 +29,6 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
-_CN_TZ = ZoneInfo("Asia/Shanghai")
 
 import pandas as pd
 
@@ -45,6 +42,7 @@ from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
 ensure_invest_a_scripts_on_path()
 
+from dates import shanghai_now, shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
 
@@ -298,7 +296,7 @@ def _run_scan(
     start_wall: float,
 ) -> int:
     # ---- Step 3: 交易日历 ----
-    now = datetime.now(_CN_TZ)
+    now = shanghai_now()
     end_date = now.strftime("%Y%m%d")
     # MA60 needs 59-bar warmup; to have valid MA60 for every bar in the
     # gap_lookback window we need ≥ gap_lookback + 59 trading bars.
@@ -477,7 +475,7 @@ def _run_scan(
 
     # ---- Step 9: 保存详文档 ----
     if not args.no_save_report:
-        date_str = datetime.now(_CN_TZ).strftime("%Y%m%d")
+        date_str = shanghai_today()
         report_dir = Path("reports/gap-scan")
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"{date_str}.md"

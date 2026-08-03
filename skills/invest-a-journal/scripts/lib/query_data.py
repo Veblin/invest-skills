@@ -10,7 +10,6 @@ v0.2.1：PE 分位依赖 Tushare；无 Tushare 时标注"无历史分位"。
 from __future__ import annotations
 
 import logging
-import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -21,7 +20,8 @@ ensure_invest_a_scripts_on_path()
 
 from data_bridge import get_kline, get_macro, get_quote, get_valuation  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
-from lib.technical import compute  # noqa: E402
+from lib.stats import median, percentile_rank_inclusive  # noqa: E402
+from lib.technical import compute, sort_kline_asc  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +122,9 @@ def _safe_collect_quote(symbol: str) -> dict:
         raw = get_quote(symbol)
         data = raw.get("data", {})
         meta = raw.get("_meta", {})
-        # data 可能是 list[dict] 或 dict
+        # data 可能是 list[dict] 或 dict；list 源（Tushare 等）常为降序，先升序再取最新
         if isinstance(data, list) and data:
-            data = data[-1]
+            data = sort_kline_asc(data)[-1]
         elif not isinstance(data, dict):
             data = {}
 
@@ -148,6 +148,9 @@ def _safe_collect_kline(symbol: str) -> dict:
         data = raw.get("data", [])
         if not isinstance(data, list):
             data = []
+        # Tushare 等源常为降序，升序后再取首/末日期，避免 first/last 颠倒
+        if data:
+            data = sort_kline_asc(data)
         meta = raw.get("_meta", {})
         return {
             "rows": len(data),
@@ -175,6 +178,8 @@ def _safe_collect_valuation(symbol: str) -> dict:
 
         if isinstance(data, list) and data:
             history_available = True
+            # Tushare 等源常为降序，升序后取末尾即为最新一期
+            data = sort_kline_asc(data)
             for d in data:
                 pe = safe_float(d.get("pe_ttm"))
                 pb = safe_float(d.get("pb"))
@@ -459,19 +464,13 @@ def _summarize_quality(result: dict) -> None:
 
 
 def _percentile(value: float | None, population: list[float]) -> float | None:
-    """计算 value 在 population 中的分位（0-100）。"""
-    if value is None or not population:
-        return None
-    sorted_vals = sorted(population)
-    rank = sum(1 for x in sorted_vals if x <= value)
-    return round(rank / len(sorted_vals) * 100, 1)
+    """含边界分位（journal 语义：<=、四舍五入 1 位）。委托 skills/lib/stats。"""
+    return percentile_rank_inclusive(population, value, round_to=1)
 
 
 def _median(population: list[float]) -> float | None:
-    """Delegates to stdlib statistics.median; returns None for empty input."""
-    if not population:
-        return None
-    return statistics.median(population)
+    """中位数；空序列返回 None。委托 skills/lib/stats。"""
+    return median(population)
 
 
 def _status_from_raw(raw: dict) -> str:

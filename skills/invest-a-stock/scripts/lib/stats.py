@@ -8,4 +8,4 @@ _lib = str(Path(__file__).resolve().parent.parent.parent.parent / "lib")
 if _lib not in sys.path:
     sys.path.insert(0, _lib)
 
-from stats import percentile_rank, calc_beta  # noqa: E402, F401
+from stats import calc_beta, median, percentile_rank, percentile_rank_inclusive  # noqa: E402, F401

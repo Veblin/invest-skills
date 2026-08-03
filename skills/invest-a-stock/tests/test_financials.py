@@ -86,7 +86,8 @@ class TestFinancialsHelpers:
             df if api == "fina_indicator" else pd.DataFrame()
         )
 
-        with patch("lib.collector._tushare_client", return_value=mock_tc), patch(
+        # _q_tushare_financials 定义于 _sources，从 _sources globals 解析 _tushare_client
+        with patch("lib.collector._sources._tushare_client", return_value=mock_tc), patch(
             "lib.env.is_tushare_available", return_value=True
         ), patch("lib.env.get_config", return_value={"TUSHARE_TOKEN": "x" * 32}):
             records = _q_tushare_financials("600176")

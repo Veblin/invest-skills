@@ -8,6 +8,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
 if str(_SKILLS_LIB) not in sys.path:
     sys.path.insert(0, str(_SKILLS_LIB))
@@ -94,3 +96,63 @@ def test_corrupt_file_treated_as_miss(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{corrupt json", encoding="utf-8")
     assert c.get("quote", "600176") is None
+
+
+def test_numpy_scalars_roundtrip_as_native_types(tmp_path):
+    """np.int64 等标量不得经 str() 写回为字符串（review fix #5）。"""
+    np = pytest.importorskip("numpy")
+    c = _make_cache(tmp_path)
+    c.set("kline", "600176", {
+        "volume": np.int64(123456),
+        "close": np.float64(10.5),
+        "flag": np.bool_(True),
+        "arr": np.array([1, 2]),
+    }, ttl_seconds=300, source="test")
+    got = c.get("kline", "600176")
+    assert got["volume"] == 123456
+    assert type(got["volume"]) is int
+    assert got["close"] == 10.5
+    assert type(got["close"]) is float
+    assert got["flag"] is True
+    assert got["arr"] == [1, 2]
+    assert type(got["arr"]) is list
+
+
+def test_numpy_int_inside_records_roundtrip_as_int(tmp_path):
+    """df.to_dict('records') 嵌套的 np.int64 值读回为 int 而非字符串。"""
+    np = pytest.importorskip("numpy")
+    c = _make_cache(tmp_path)
+    records = [{"trade_date": "20260801", "volume": np.int64(88)}]
+    c.set("kline", "600176", records, ttl_seconds=300, source="test")
+    got = c.get("kline", "600176")
+    assert got[0]["volume"] == 88
+    assert type(got[0]["volume"]) is int
+
+
+def test_pandas_timestamp_roundtrip(tmp_path):
+    pd = pytest.importorskip("pandas")
+    c = _make_cache(tmp_path)
+    c.set("kline", "600176", {"trade_time": pd.Timestamp("2026-08-01 10:30:00")},
+          ttl_seconds=300, source="test")
+    got = c.get("kline", "600176")
+    assert got["trade_time"] == "2026-08-01T10:30:00"
+
+
+def test_np_timedelta64_roundtrip_as_seconds(tmp_path):
+    """np.timedelta64 不得让 DataCache.set 崩溃（review fix #2）。"""
+    np = pytest.importorskip("numpy")
+    c = _make_cache(tmp_path)
+    c.set("kline", "600176", {"dur": np.timedelta64(5, "D")},
+          ttl_seconds=300, source="test")
+    got = c.get("kline", "600176")
+    assert got["dur"] == 432000.0  # 5 天 = 432000 秒
+
+
+def test_np_complex_roundtrip_no_crash(tmp_path):
+    """np.complex128 的 item() 返回 complex → 兜底 str，不崩溃。"""
+    np = pytest.importorskip("numpy")
+    c = _make_cache(tmp_path)
+    c.set("kline", "600176", {"phase": np.complex128(1 + 2j)},
+          ttl_seconds=300, source="test")
+    got = c.get("kline", "600176")
+    assert isinstance(got["phase"], str)

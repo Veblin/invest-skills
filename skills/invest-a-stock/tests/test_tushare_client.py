@@ -54,6 +54,7 @@ class TestTusharePermissionDenied:
 
     def test_sw_index_falls_back_to_akshare_when_tushare_empty(self, monkeypatch):
         from lib import collector
+        from lib.collector import _orchestrate as collector_orch
 
         mock_tc = MagicMock()
         mock_tc.query.side_effect = lambda api, **kw: (
@@ -71,8 +72,8 @@ class TestTusharePermissionDenied:
 
         with patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32},
-        ), patch.object(collector._legacy, "_tushare_client", return_value=mock_tc), patch.object(
-            collector, "_ms_fetch_sw_index_akshare", return_value=fake_sw,
+        ), patch.object(collector_orch, "_tushare_client", return_value=mock_tc), patch.object(
+            collector_orch, "_ms_fetch_sw_index_akshare", return_value=fake_sw,
         ):
             result = collector._ms_fetch_sw_index(mock_tc, "300308", "通信设备")
 
@@ -81,16 +82,18 @@ class TestTusharePermissionDenied:
 
     def test_sw_index_akshare_prefers_industry_lookup_over_tushare_code(self, monkeypatch):
         from lib import collector
+        from lib.collector import _orchestrate as collector_orch
 
+        # _ms_fetch_sw_index_akshare 从 _orchestrate 命名空间解析这三个名字
         monkeypatch.setattr(
-            collector, "_ms_lookup_akshare_sw_code", lambda industry: "801093",
+            collector_orch, "_ms_lookup_akshare_sw_code", lambda industry: "801093",
         )
         monkeypatch.setattr(
-            collector, "_akshare_closes_from_hist_sw",
+            collector_orch, "_akshare_closes_from_hist_sw",
             lambda code, **kw: [100.0, 105.0] if code == "801093" else [],
         )
         monkeypatch.setattr(
-            collector, "_akshare_hs300_closes", lambda **kw: [3000.0, 3010.0],
+            collector_orch, "_akshare_hs300_closes", lambda **kw: [3000.0, 3010.0],
         )
 
         result = collector._ms_fetch_sw_index_akshare(

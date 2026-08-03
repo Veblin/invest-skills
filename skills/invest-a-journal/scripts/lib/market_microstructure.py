@@ -9,16 +9,17 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import date
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from dates import shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
+from lib.stats import percentile_rank_inclusive  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ def snapshot() -> dict[str, Any]:
     每个指标独立采集，失败不阻塞其他维度。
     """
     result: dict[str, Any] = {
-        "date": date.today().strftime("%Y%m%d"),
+        "date": shanghai_today(),
         # Tier 1
         "margin_balance": None,          # 融资余额（亿元）
         "margin_buy_amount": None,        # 融资买入额（亿元）
@@ -335,9 +336,9 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
                       if h.get("limit_down_count") is not None]
         ld_history.append(ld)
         if ld_history:
-            sorted_ld = sorted(ld_history)
-            rank = sum(1 for x in sorted_ld if x <= ld)
-            snap["limit_down_20d_pct"] = round(rank / len(sorted_ld) * 100, 1)
+            # 含边界分位（<=、1 位小数），委托 skills/lib/stats
+            snap["limit_down_20d_pct"] = percentile_rank_inclusive(
+                ld_history, ld, round_to=1)
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +620,7 @@ def _fetch_ad_ratio(result: dict) -> None:
 
 def _fetch_limit_pools(result: dict) -> None:
     """涨跌停池：涨停数 + 跌停数。"""
-    today = date.today().strftime("%Y%m%d")
+    today = shanghai_today()
     # 涨停
     try:
         import akshare as ak
@@ -731,7 +732,9 @@ def _fetch_erp(result: dict) -> None:
             try:
                 from lib.tushare_client import TushareClient
                 tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
-                today_str = date.today().strftime("%Y%m%d")
+                # 查询当日 trade_date；非上海时区主机在上海 00:00-08:00 窗口可能为空
+                # （naive→上海时区统一的有意变更）
+                today_str = shanghai_today()
                 df = tc.query("index_dailybasic", ts_code="000300.SH",
                               trade_date=today_str)
                 if df is not None and not df.empty and "pe_ttm" in df.columns:
@@ -796,7 +799,9 @@ def _fetch_pcr(result: dict) -> None:
 
         from lib.tushare_client import TushareClient
         tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
-        today_str = date.today().strftime("%Y%m%d")
+        # 查询当日 trade_date；非上海时区主机在上海 00:00-08:00 窗口可能为空
+        # （naive→上海时区统一的有意变更）
+        today_str = shanghai_today()
 
         # 先获取 50ETF 期权合约代码（opt_daily 的 ts_code 需为合约代码而非 ETF 代码）
         df_basic = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
@@ -845,7 +850,9 @@ def _fetch_below_book_pct(result: dict) -> None:
 
         from lib.tushare_client import TushareClient
         tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
-        today_str = date.today().strftime("%Y%m%d")
+        # 查询当日 trade_date；非上海时区主机在上海 00:00-08:00 窗口可能为空
+        # （naive→上海时区统一的有意变更）
+        today_str = shanghai_today()
         df = tc.query("daily_basic", trade_date=today_str)
         if df is None or df.empty or "pb" not in df.columns:
             result["_errors"].append("below_book: daily_basic empty")

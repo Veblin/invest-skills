@@ -18,7 +18,9 @@ from typing import Any
 
 from lib.financials import parse_end_date as _parse_end_date
 from lib.nums import safe_float as _safe_float
-from lib.stats import calc_beta, percentile_rank  # re-exported for BC
+from lib.stats import calc_beta, median, percentile_rank  # re-exported for BC
+
+from .shared_dates import shanghai_days_ago
 
 
 # 与 CV-7 / 左-右概率分位边界一致（严格小于/大于，不含端点）
@@ -171,19 +173,9 @@ def valuation_window_label(n_trading_days: int) -> str:
     return "上市以来（数据有限）"
 
 
-def median_of(seq: list[float]) -> float | None:
-    """中位数（偶数样本取两中值平均）。"""
-    if not seq:
-        return None
-    s = sorted(seq)
-    n = len(s)
-    if n % 2 == 1:
-        return s[n // 2]
-    return (s[n // 2 - 1] + s[n // 2]) / 2
-
-
-def _median(seq: list[float]) -> float | None:
-    return median_of(seq)
+# 中位数统一在 skills/lib/stats.py（共用库提升）；别名保留 BC
+median_of = median
+_median = median_of
 
 
 def implied_growth(
@@ -261,10 +253,9 @@ def pe_band_series(
           - current_position: 当前 PE 在 band 中的位置描述
     """
     from .technical import sort_kline_asc
-    from datetime import datetime, timedelta
 
     rows = sort_kline_asc(daily_basic_rows)
-    cutoff = (datetime.now() - timedelta(days=max(1, years) * 365)).strftime("%Y%m%d")
+    cutoff = shanghai_days_ago(max(1, years) * 365)
     pe_pairs = [
         (str(r.get("trade_date", "")), float(r.get("pe_ttm")))
         for r in rows

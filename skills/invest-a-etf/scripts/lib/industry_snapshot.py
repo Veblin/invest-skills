@@ -26,13 +26,12 @@ def collect_industry_weekly() -> dict[str, Any]:
     dict
         {date, industries_saved: int, error: str|None}
     """
-    from datetime import date
-
+    from dates import shanghai_today
     from lib.nums import coalesce_field as _safe_col
     from lib.proxy import akshare_direct_session
     from lib.store import _conn, _safe_close, init_db
 
-    today = date.today().strftime("%Y%m%d")
+    today = shanghai_today()
     result: dict[str, Any] = {
         "date": today,
         "industries_saved": 0,

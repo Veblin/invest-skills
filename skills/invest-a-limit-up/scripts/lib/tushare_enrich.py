@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
@@ -16,6 +15,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 ensure_invest_a_scripts_on_path()
 
 from codes import is_st_or_delisted, market_label, symbol_to_ts_code  # noqa: E402
+from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
@@ -59,8 +59,8 @@ def get_trade_dates(n: int) -> list[str]:
     client = _get_client()
     if client:
         try:
-            end = datetime.now().strftime("%Y%m%d")
-            start = (datetime.now() - timedelta(days=max(n * 2, 14))).strftime("%Y%m%d")
+            end = shanghai_today()
+            start = shanghai_days_ago(max(n * 2, 14))
             cal = client.query(
                 "trade_cal", exchange="SSE",
                 start_date=start, end_date=end,
@@ -78,7 +78,7 @@ def get_trade_dates(n: int) -> list[str]:
 
     # 降级：自然日覆盖
     count = max(int(n * 1.4), 1)
-    return [(datetime.now() - timedelta(days=i)).strftime("%Y%m%d") for i in range(count)]
+    return [shanghai_days_ago(i) for i in range(count)]
 
 
 def enrich_stock_info(symbols: list[str]) -> dict[str, dict]:

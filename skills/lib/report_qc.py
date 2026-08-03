@@ -72,10 +72,10 @@ class QCResult:
 def _classify_by_symbol(symbol: str) -> str:
     """代码前缀 → 标的类型。
 
-    ETF 代码：159xxx（深市）、51xxxx/56xxxx/58xxxx（沪市）。
+    ETF 代码：159xxx（深市）、51xxxx/56xxxx/58xxxx（沪市）、920xxx（北证基金）。
     其余按 A 股处理；无法识别前缀时按 stock 兜底（报告内容仍可 lint）。
     """
-    if symbol.startswith(("159", "51", "56", "58")):
+    if symbol.startswith(("159", "51", "56", "58", "920")):
         return "etf"
     return "stock"
 
@@ -185,21 +185,49 @@ _DERIVED_PATTERN = re.compile(
     r"[：:]\s*([+-]?\d+\.?\d*)%?"
 )
 
-# 中文标签 → 字段名（ETF 报告模板用 "NAV vs MA20 偏离 -15.36%" 形式）
+# 中文标签 → 字段名（ETF 报告模板表格行用 "| NAV vs MA20 偏离 | -15.36% |" 形式）。
+# 模板措辞存在漂移变体，均收录：无"偏离"（515880 式）、"NAV 距 BOLL 下轨"
+# （588000 式，带 "NAV " 前缀）。
 _DERIVED_CN_LABELS: dict[str, str] = {
     "NAV vs MA20 偏离": "nav_vs_ma20_pct",
     "NAV vs MA60 偏离": "nav_vs_ma60_pct",
     "NAV vs BOLL 中轨偏离": "nav_vs_boll_mid_pct",
+    "NAV vs MA20": "nav_vs_ma20_pct",
+    "NAV vs MA60": "nav_vs_ma60_pct",
+    "NAV vs BOLL 中轨": "nav_vs_boll_mid_pct",
     "BOLL 位置": "boll_position_pct",
+    "NAV 距 BOLL 下轨": "nav_to_boll_lower_pct",
+    "NAV 距 BOLL 上轨": "nav_to_boll_upper_pct",
     "距 BOLL 下轨": "nav_to_boll_lower_pct",
     "距 BOLL 上轨": "nav_to_boll_upper_pct",
     "BOLL 带宽": "boll_bandwidth_pct",
     "日均波动率": "daily_volatility_pct",
 }
+# 仅匹配表格行（以 | 开头、数值后跟 | 收尾）：衍生值只在模板表格渲染，
+# 散文中的指标名词（如 "距 BOLL 下轨仅 6.41%，BOLL 带宽 54%"）天然排除。
+# 交替顺序长串优先（"NAV vs MA20 偏离" 先于 "NAV vs MA20"）。
+# 中段允许至多一个 |（标签格与数值格的分隔符），但禁止两个以上：
+# "| 日均波动率 | 暂无 | 16.381% |" 不得把第三格数字认作本字段值（review fix #3）。
 _DERIVED_CN_PATTERN = re.compile(
-    r"(NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|BOLL 位置|"
-    r"距 BOLL 下轨|距 BOLL 上轨|BOLL 带宽|日均波动率)"
-    r"[^\d\-+.]{0,10}?([+-]?\d+\.?\d*)%?"
+    r"\|[^|\d\n]*?("
+    r"NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|"
+    r"NAV vs MA20|NAV vs MA60|NAV vs BOLL 中轨|"
+    r"NAV 距 BOLL 下轨|NAV 距 BOLL 上轨|BOLL 位置|距 BOLL 下轨|距 BOLL 上轨|"
+    r"BOLL 带宽|日均波动率)"
+    r"(?:[^|\d\-+.\n]*?\|)?[^|\d\-+.\n]*?([+-]?\d+\.?\d*)%?[^|\d\n]*?\|"
+)
+# 已知标签行检测（值可缺失）：标签命中即算「措辞正常」——
+# "| NAV vs MA20 偏离 | — |" 是引擎 derived=None 的合法渲染，不视为漂移
+_DERIVED_CN_LABEL_ONLY = re.compile(
+    r"\|[^|\n]*?("
+    r"NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|"
+    r"NAV vs MA20|NAV vs MA60|NAV vs BOLL 中轨|"
+    r"NAV 距 BOLL 下轨|NAV 距 BOLL 上轨|BOLL 位置|距 BOLL 下轨|距 BOLL 上轨|"
+    r"BOLL 带宽|日均波动率)[^|\n]*\|"
+)
+# 存在性检测：表格行出现衍生指标名词（已知或未知标签）→ 用于漂移判定
+_DERIVED_CN_ROW_PRESENT = re.compile(
+    r"\|[^|\n]*(NAV vs MA|BOLL 位置|BOLL 带宽|日均波动率|距 BOLL)[^|\n]*\|"
 )
 
 
@@ -219,38 +247,54 @@ def _check_etf_derived(text: str) -> LayerResult:
     """derived 层：ETF 报告中的 derived 字段值域合理性。"""
     layer = LayerResult(layer="derived", status="skip")
     found = _extract_derived_values(text)
-    if not found:
-        return layer  # 报告未引用 derived 字段 → skip
-
-    layer.status = "pass"
-    for field_name, raw in found.items():
-        try:
-            value = float(raw)
-        except ValueError:
-            layer.findings_count += 1
-            layer.details.append({
-                "id": f"derived-{field_name}",
-                "severity": "warn",
-                "message": f"字段 {field_name} 值 '{raw}' 无法解析为数值",
-            })
-            continue
-        lo, hi = _ETF_DERIVED_RANGES.get(field_name, (-1e9, 1e9))
-        if not (lo <= value <= hi):
-            layer.findings_count += 1
-            layer.details.append({
-                "id": f"derived-{field_name}",
-                "severity": "warn",
-                "message": f"字段 {field_name} 值 {value} 超出合理范围 [{lo}, {hi}]",
-            })
-        elif abs(round(value, 2) - value) > 1e-6:
-            layer.findings_count += 1
-            layer.details.append({
-                "id": f"derived-{field_name}",
-                "severity": "info",
-                "message": f"字段 {field_name} 值 {value} 未保留两位小数（引擎输出 round(…, 2)）",
-            })
-    if layer.findings_count:
+    label_rows = _DERIVED_CN_LABEL_ONLY.findall(text)     # 已知标签行（含值缺失）
+    present_rows = _DERIVED_CN_ROW_PRESENT.findall(text)  # 全部指标行（含未知标签）
+    drift = len(present_rows) - len(label_rows)
+    if drift > 0:
+        # 存在措辞漂移/未知标签的指标行 → 无论其他行是否有效，该行未被校验（假绿防护）
         layer.status = "warn"
+        layer.findings_count = 1
+        layer.details.append({
+            "id": "derived-template-drift",
+            "severity": "warn",
+            "message": "报告存在标签与引擎命名不匹配的衍生指标行，字段未被校验",
+        })
+
+    if found:
+        if layer.status != "warn":
+            layer.status = "pass"
+        for field_name, raw in found.items():
+            try:
+                value = float(raw)
+            except ValueError:
+                layer.findings_count += 1
+                layer.details.append({
+                    "id": f"derived-{field_name}",
+                    "severity": "warn",
+                    "message": f"字段 {field_name} 值 '{raw}' 无法解析为数值",
+                })
+                continue
+            lo, hi = _ETF_DERIVED_RANGES.get(field_name, (-1e9, 1e9))
+            if not (lo <= value <= hi):
+                layer.findings_count += 1
+                layer.details.append({
+                    "id": f"derived-{field_name}",
+                    "severity": "warn",
+                    "message": f"字段 {field_name} 值 {value} 超出合理范围 [{lo}, {hi}]",
+                })
+            elif abs(round(value, 2) - value) > 1e-6:
+                layer.findings_count += 1
+                layer.details.append({
+                    "id": f"derived-{field_name}",
+                    "severity": "info",
+                    "message": f"字段 {field_name} 值 {value} 未保留两位小数（引擎输出 round(…, 2)）",
+                })
+        # 仅 warn 级发现（超范围/无法解析/漂移）翻转状态；info 级（位数）不阻塞
+        if any(d["severity"] == "warn" for d in layer.details):
+            layer.status = "warn"
+    elif not present_rows:
+        return layer  # 报告未引用衍生字段 → skip
+    # 已知标签行但值缺失（"—"/"暂无"，引擎 derived=None 渲染）→ 合法，不视为漂移
     return layer
 
 
@@ -303,7 +347,8 @@ def _run_lint_layer(report_path: Path, profile: str, fail_on: str = "warning") -
     try:
         lint_mod = _load_lint_module()
     except Exception as exc:  # pragma: no cover — 依赖环境问题
-        layer.status = "skip"
+        # 不可静默 skip：skip 会被 _compute_overall 过滤成假 PASS，掩盖环境故障
+        layer.status = "warn"
         layer.details.append({"id": "lint-unavailable", "severity": "info",
                               "message": f"lint 模块不可用: {exc}"})
         return layer
@@ -311,7 +356,7 @@ def _run_lint_layer(report_path: Path, profile: str, fail_on: str = "warning") -
     try:
         findings = lint_mod.lint_file(report_path, profile=profile)
     except lint_mod.RulesLoadError as exc:
-        layer.status = "skip"
+        layer.status = "warn"
         layer.details.append({"id": "lint-rules-unavailable", "severity": "info",
                               "message": f"合规规则无法加载: {exc}"})
         return layer
@@ -329,8 +374,10 @@ def _run_lint_layer(report_path: Path, profile: str, fail_on: str = "warning") -
     threshold = _SEVERITY_RANK.get(fail_on, 1)
     if any(_SEVERITY_RANK.get(f.severity, 2) >= threshold for f in findings):
         layer.status = "fail"
-    elif findings:
+    elif any(_SEVERITY_RANK.get(f.severity, 2) >= 1 for f in findings):
+        # 低于 fail_on 阈值但仍有 error/warning 级发现（如 --fail-on error 时的 warning）
         layer.status = "warn"
+    # info 级发现仅记录在 details，不翻转层状态（假红防护）
     return layer
 
 

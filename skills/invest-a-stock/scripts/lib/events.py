@@ -613,11 +613,11 @@ def calc_price_impact_interpolation(
         warn = f"|V_真 - V_假| < {_eps:.2e}，ratio 默认 0.5"
     else:
         ratio = (post_price - v_false) / spread
-    # Scenario clamp applies regardless of zero-spread fallback
-    if scenario == "bearish" and post_price >= pre_price:
-        ratio = 0.0
-    elif scenario == "bullish" and post_price <= pre_price:
-        ratio = 0.0
+        # 场景钳位仅对真实价差生效；零价差回退 0.5 不被钳位覆盖
+        if scenario == "bearish" and post_price >= pre_price:
+            ratio = 0.0
+        elif scenario == "bullish" and post_price <= pre_price:
+            ratio = 0.0
     ratio = max(0.0, min(1.0, ratio))
 
     def _ratio_at_pe(pe: float) -> float:

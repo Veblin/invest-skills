@@ -117,6 +117,40 @@ class TestIndexByDate:
         assert indexed["20251231_0"]["hold_ratio"] == 5.0
         assert "20251231_股东A" in indexed
 
+    def test_same_date_same_holder_multiple_records_preserved(self):
+        """同日期同 holder 多条记录不互相覆盖（review fix #8）。"""
+        from lib.store import _index_by_date
+
+        data = [
+            {"end_date": "20240101", "holder_name": "张三", "change_ratio": 1.0},
+            {"end_date": "20240101", "holder_name": "张三", "change_ratio": 2.0},
+            {"end_date": "20240101", "holder_name": "张三", "change_ratio": 3.0},
+        ]
+        indexed = _index_by_date(data)
+        # 3 条记录全部保留（复合键 + 递增后缀），不得折叠为 1 条
+        assert len(indexed) == 3
+        ratios = sorted(v["change_ratio"] for v in indexed.values())
+        assert ratios == [1.0, 2.0, 3.0]
+        assert "20240101_张三" in indexed
+        assert "20240101_张三_2" in indexed
+        assert "20240101_张三_3" in indexed
+
+    def test_same_holder_records_stable_keys_across_order(self):
+        """同 (date, holder) 记录键跨快照稳定（内容序，review fix #12）。"""
+        from lib.store import _index_by_date
+
+        def rec(ratio: float) -> dict:
+            return {"end_date": "20240101", "holder_name": "张三", "change_ratio": ratio}
+
+        fwd = _index_by_date([rec(1.0), rec(2.0), rec(3.0)])
+        rev = _index_by_date([rec(3.0), rec(2.0), rec(1.0)])
+        # 键集合一致，且内容序（change_ratio 升序）映射到相同后缀
+        assert sorted(fwd) == sorted(rev)
+        assert fwd["20240101_张三"]["change_ratio"] == 1.0
+        assert fwd["20240101_张三_2"]["change_ratio"] == 2.0
+        assert fwd["20240101_张三_3"]["change_ratio"] == 3.0
+        assert rev["20240101_张三"]["change_ratio"] == 1.0
+
 
 class TestGetLatestTwo:
     def test_single_record_returns_none(self, isolated_store):

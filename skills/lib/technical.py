@@ -469,9 +469,24 @@ def _drawdown(closes: list[float], dates: list[str], n: int = 60) -> dict[str, A
 
 # ---- 主入口 ----
 
+def _kline_sort_key(r: dict) -> str:
+    """K 线日期排序键：混合格式归一化为 8 位数字；空/不可解析排最后。
+
+    快照行（intraday）常无 trade_date 且为最新数据，排最后让 data[-1]
+    语义保持「最新」（review fix #15）。
+    """
+    raw = str(r.get("trade_date") or r.get("end_date") or "")
+    s = raw.replace("-", "").replace(".", "").replace("/", "").strip()
+    return s if s.isdigit() else "99999999"
+
+
 def sort_kline_asc(rows: list[dict]) -> list[dict]:
-    """按日期升序排列（trade_date 或 end_date，Tushare 等源常为降序）。"""
-    return sorted(rows, key=lambda r: str(r.get("trade_date") or r.get("end_date", "")))
+    """按日期升序排列（trade_date 或 end_date，Tushare 等源常为降序）。
+
+    混合格式（20260801 vs 2026-08-01）归一化为 8 位数字比较；
+    空/无法解析日期排最后（无日期的快照行通常为最新）。
+    """
+    return sorted(rows, key=_kline_sort_key)
 
 
 def compute(rows: list[dict]) -> dict[str, Any]:

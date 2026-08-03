@@ -19,6 +19,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 ensure_invest_a_scripts_on_path()
 
 from codes import etf_symbol_to_ts_code  # noqa: E402
+from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.technical import (  # noqa: E402
@@ -541,8 +542,6 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             Calendar lookback uses ``int(days * 365 / 250) + 15`` so MA60
             has enough history after weekends/holidays.
     """
-    from datetime import date, timedelta
-
     result: dict[str, Any] = {
         "symbol": symbol,
         "nav_rows": 0,
@@ -569,9 +568,9 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
     try:
         import akshare as ak
 
-        end_date = date.today().strftime("%Y%m%d")
+        end_date = shanghai_today()
         calendar_days = int(days * 365 / 250) + 15
-        start_date = (date.today() - timedelta(days=calendar_days)).strftime("%Y%m%d")
+        start_date = shanghai_days_ago(calendar_days)
 
         # 主链路：fund_etf_fund_info_em（字段更丰富）
         # fallback：fund_open_fund_info_em — akshare 偶尔变更主接口列数时报
@@ -1092,7 +1091,6 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         写入的快照字典；非交易日（价格/份额为 NaN）返回 None。
     """
     import sqlite3
-    from datetime import date
 
     from lib.store import _conn, _safe_close, init_db
 
@@ -1122,7 +1120,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         return None
 
     aum = round(shares * price / 1e8, 2)
-    today = date.today().strftime("%Y%m%d")
+    today = shanghai_today()
 
     snap = {
         "date": today,
@@ -1244,8 +1242,6 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
          pct_chg, vol, amount, turnover_rate, shares, share_change, flow_est,
          direction}], summary: {...}}
     """
-    from datetime import date, timedelta
-
     from lib import env
     from lib.tushare_client import TushareClient
 
@@ -1254,12 +1250,12 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     if not token:
         return {"symbol": symbol, "available": False, "note": "Tushare 不可用"}
 
-    ts_code = f"{symbol}.SH"
-    if symbol.startswith("159") or symbol.startswith("30"):
-        ts_code = f"{symbol}.SZ"
+    ts_code = etf_symbol_to_ts_code(symbol)
+    if not ts_code:
+        return {"symbol": symbol, "available": False, "note": "无效的 ETF 代码"}
 
-    end_date = date.today().strftime("%Y%m%d")
-    start_date = (date.today() - timedelta(days=days + 10)).strftime("%Y%m%d")
+    end_date = shanghai_today()
+    start_date = shanghai_days_ago(days + 10)
 
     try:
         client = TushareClient(token=token, timeout=15)

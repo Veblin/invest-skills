@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from datetime import datetime
 from typing import Any, Literal
 
 # ---- 跨 skill 导入 invest:a-stock 基础设施 ----
@@ -19,7 +18,7 @@ from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
 ensure_invest_a_scripts_on_path()
 
-from dates import yyyymmdd_to_iso  # noqa: E402  # skills/lib (via _invest_path shim)
+from dates import shanghai_today, yyyymmdd_to_iso  # noqa: E402  # skills/lib (via _invest_path shim)
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session, akshare_push2_available  # noqa: E402
@@ -50,8 +49,7 @@ def scan_market(days: int = 10) -> dict:
     5. Tushare L2 增强（有 Token 时：ST/市场/股价/流通市值）
     6. 计算市场宽度指标（含封板质量 / 市场分布）
     """
-    from zoneinfo import ZoneInfo
-    scan_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    scan_date = shanghai_today()
 
     if not env.is_akshare_available():
         return {

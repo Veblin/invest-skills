@@ -786,10 +786,19 @@ def _holder_transaction_key(r: dict) -> tuple:
 def _norm_date(raw: str) -> str:
     """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。
 
-    委托 lib.financials.normalize_end_date 处理。
+    委托 lib.financials.normalize_end_date 处理；无法解析时先尝试中文
+    「X年X月X日」格式（cninfo 公告日期），再回退保留原始串（截断至 10
+    字符），避免不同日期的记录塌缩到同一空 key（跨源误折叠）。
     """
+    import re
     from lib.financials import normalize_end_date
-    return normalize_end_date(raw)
+    norm = normalize_end_date(raw)
+    if norm:
+        return norm
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", str(raw))
+    if m:
+        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    return str(raw).strip()[:10]
 
 
 def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
@@ -2415,20 +2424,40 @@ def _ms_fetch_etf_flow(tc: Any) -> dict | None:
     if df_share is None or df_share.empty:
         return None
     shares = df_share.sort_values("trade_date").to_dict("records")
+
+    def _valid_fd_share(r: dict) -> bool:
+        """fd_share 须为可解析的有限数值；None/空串/NaN/±inf 剔除。"""
+        from math import isfinite
+        v = r.get("fd_share")
+        if v is None:
+            return False
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return False
+        return f == f and isfinite(f)  # NaN 不自等；inf 会污染 flow 估算
+
+    # 保留全序列 + 有效行索引：窗口按「最后 N 个有效行」取，
+    # 实际跨度（含被过滤的 NULL 行）如实标注，避免标 5d 实跨 8-9 日
+    valid_idx = [i for i, r in enumerate(shares) if _valid_fd_share(r)]
+    if not valid_idx:
+        return None
     prices = {}
     if df_price is not None and not df_price.empty:
         for r in df_price.sort_values("trade_date").to_dict("records"):
             prices[str(r.get("trade_date", ""))] = safe_float(r.get("close"))
 
-    def _net_flow(days: int) -> float | None:
-        if len(shares) < days + 1:
+    def _net_flow(days: int) -> tuple[float, int] | None:
+        if len(valid_idx) < days + 1:
             return None
-        first, last = shares[-(days + 1)], shares[-1]
-        d_shares = float(last.get("fd_share") or 0) - float(first.get("fd_share") or 0)
+        last_i, first_i = valid_idx[-1], valid_idx[-(days + 1)]
+        first, last = shares[first_i], shares[last_i]
+        d_shares = float(last.get("fd_share")) - float(first.get("fd_share"))
+        span = last_i - first_i + 1  # 实际覆盖的交易日行数（含被过滤的 NULL 行）
         px = prices.get(str(last.get("trade_date", "")))
         if px is None or px <= 0:
             return None
-        return d_shares * 10000 * px  # fd_share 单位：万份
+        return d_shares * 10000 * px, span  # fd_share 单位：万份
 
     flow_5d = _net_flow(5)
     flow_10d = _net_flow(10)
@@ -2441,9 +2470,13 @@ def _ms_fetch_etf_flow(tc: Any) -> dict | None:
     if not prices:
         out["price_incomplete"] = True
     if flow_5d is not None:
-        out["net_flow_5d"] = round(flow_5d, 0)
+        out["net_flow_5d"] = round(flow_5d[0], 0)
+        if flow_5d[1] > 5 + 1:
+            out["net_flow_5d_span_rows"] = flow_5d[1]
     if flow_10d is not None:
-        out["net_flow_10d"] = round(flow_10d, 0)
+        out["net_flow_10d"] = round(flow_10d[0], 0)
+        if flow_10d[1] > 10 + 1:
+            out["net_flow_10d_span_rows"] = flow_10d[1]
     return out
 
 

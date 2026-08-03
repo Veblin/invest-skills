@@ -168,9 +168,10 @@ class TestCollectorHelpers:
         from lib import collector
 
         c = collection_v2_minimal()
-        with patch.object(
-            collector, "collect_market_structure", return_value={"availability": {}}
-        ) as mock_ms:
+        # attach_market_structure 在 _orchestrate 中解析 collect_market_structure，
+        # 补丁须指向定义处模块（包级 re-export 是 no-op，split 后修复）
+        with patch("lib.collector._orchestrate.collect_market_structure",
+                   return_value={"availability": {}}) as mock_ms:
             collector.attach_market_structure(c, "600176")
         mock_ms.assert_called_once_with("600176", industry="电气设备")
         assert "market_structure" in c
@@ -234,7 +235,7 @@ class TestCollectorHelpers:
         from lib import collector
 
         with patch("lib.collector._orchestrate._q_tushare_hsgt_top10") as mock_nb, patch(
-            "lib.collector._q_tushare_moneyflow"
+            "lib.collector._orchestrate._q_tushare_moneyflow"
         ) as mock_mf, patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
         ), patch.object(collector._orchestrate, "_tushare_client", return_value=MagicMock()):

@@ -47,6 +47,9 @@ DEFAULT_TTL: dict[str, int] = {
     "microstructure": 5 * 60,      # 市场微观结构快照：5 分钟
 }
 
+# 失败状态集合：collector legacy 信封的 missing + macro 全失败（macro.py:376）
+_FAILURE_STATUSES = ("missing", "all_failed")
+
 
 # ═════════════════════════════════════════════════════
 # 通用缓存包装器
@@ -94,6 +97,11 @@ def _fetch_dimension(
         # 跳过空集合缓存（[] / {}），避免非交易日/错误结果阻止后续重新抓取
         if isinstance(data, (list, dict)) and len(data) == 0:
             logger.debug("skipping cache for empty %s:%s result", dimension, symbol)
+        elif isinstance(data, dict) and data.get("status") in _FAILURE_STATUSES:
+            # 失败信封（missing / macro all_failed）不缓存：否则会在整个
+            # TTL（kline 4h / financials 7d / basic_info 30d / macro 7d）内持续
+            # 服务 stale 失败结果，源恢复后 journal/portfolio_review 仍读不到数据
+            logger.debug("skipping cache for failed %s:%s result", dimension, symbol)
         else:
             ttl = ttl_override or DEFAULT_TTL.get(dimension, 3600)
             _cache.set(dimension, symbol, data, ttl_seconds=ttl, source="data_bridge")

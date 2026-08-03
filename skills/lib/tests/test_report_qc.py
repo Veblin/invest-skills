@@ -246,6 +246,68 @@ class TestEtfDerived:
         layer = _check_etf_derived(text)
         assert layer.status == "pass"
 
+    def test_drifted_label_variants_still_validate(self):
+        # 模板措辞漂移变体仍须提取校验：无"偏离"（515880 式）+ "NAV 距 BOLL 下轨"（588000 式）
+        text = ("| NAV vs MA20 | **-15.36%** |\n"
+                "| NAV vs MA60 | **-24.35%** |\n"
+                "| NAV 距 BOLL 下轨 | **+1.23%** |\n"
+                "| NAV 距 BOLL 上轨 | **-27.28%** |")
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+        assert layer.findings_count == 0
+
+    def test_prose_mentions_not_mistaken_for_derived(self):
+        # 散文中的指标名词（无表格行上下文）不产生 derived finding（假红防护）
+        text = ("[事实] 当前距 BOLL 下轨仅 6.41%，BOLL 带宽 54% 显示极端波动，"
+                "日均波动率约 25% 左右。")
+        layer = _check_etf_derived(text)
+        assert layer.status == "skip"
+        assert layer.findings_count == 0
+
+    def test_real_report_shape_table_plus_prose_passes(self):
+        # 真实报告形态：表格行 + 同页散文提及，散文不得被误提取
+        text = ("| NAV vs MA20 | -16.22% | 净值显著低于20日均线 |\n"
+                "[事实] 当前距 BOLL 下轨仅 6.41%，BOLL 带宽 54% 显示极端波动。")
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+        assert layer.findings_count == 0
+
+    def test_drifted_template_warns_unvalidated(self):
+        # 未知标签的指标行（present 命中、label-only 不命中）→ 字段未被校验 → warn
+        text = "| NAV vs MA5 | -3% |"
+        layer = _check_etf_derived(text)
+        assert layer.status == "warn"
+        assert any(d["id"] == "derived-template-drift" for d in layer.details)
+
+    def test_empty_value_cell_is_not_drift(self):
+        # 已知标签行但值缺失（"—"：引擎 derived=None 渲染）→ 合法，不 warn
+        text = "| NAV vs MA20 偏离 | — |"
+        layer = _check_etf_derived(text)
+        assert layer.status == "skip"
+        assert layer.findings_count == 0
+
+    def test_cross_cell_number_not_attributed(self):
+        # 数值不得跨格归属（"暂无"格 + 第三格数字 → 不提取、不误判）
+        text = "| 日均波动率 | 暂无 | 16.381% |"
+        layer = _check_etf_derived(text)
+        assert layer.status == "skip"
+        assert layer.findings_count == 0
+
+    def test_unknown_label_with_valid_rows_warns(self):
+        # 未知标签行与有效行并存 → 仍 warn（单行假绿防护）
+        text = ("| NAV vs MA20 | -16.22% |\n"
+                "| NAV vs MA120 | -5.2% |")
+        layer = _check_etf_derived(text)
+        assert layer.status == "warn"
+        assert any(d["id"] == "derived-template-drift" for d in layer.details)
+
+    def test_info_only_decimals_finding_keeps_pass(self):
+        # info 级（未保留两位小数）不翻转层状态（假红防护）
+        text = "| 日均波动率 | **16.381%** |"
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+        assert any(d["severity"] == "info" for d in layer.details)
+
     def test_not_etf_report_skip(self, tmp_path: Path):
         p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
         r = qc_file(p)
