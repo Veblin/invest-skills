@@ -45,6 +45,25 @@ def test_shim_callables_are_canonical():
     assert shim.rollup_etf_quality_status is canon.rollup_etf_quality_status
 
 
+def test_shim_fetch_functions_are_canonical():
+    """v0.2.3：data_bridge._import_etf_attr 在 journal 上下文解析到 shim，
+    fetch_* 必须 re-export 且与 canonical 同一性一致。"""
+    shim = _load_journal_shim()
+    canon = sys.modules["invest_a_etf_etf_data"]
+    for name in (
+        "fetch_etf_spot_rows",
+        "fetch_etf_index_pe",
+        "fetch_etf_nav",
+        "fetch_etf_index_daily",
+        "fetch_etf_adj_factor",
+        "fetch_etf_share_history",
+        "fetch_etf_industry_alloc",
+        "fetch_etf_category_sina",
+    ):
+        assert getattr(shim, name) is getattr(canon, name), name
+        assert name in shim.__all__, name
+
+
 def test_invest_a_etf_lib_dir_resolves():
     lib = invest_a_etf_lib_dir()
     assert lib.name == "lib"

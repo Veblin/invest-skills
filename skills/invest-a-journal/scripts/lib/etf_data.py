@@ -44,6 +44,17 @@ rollup_etf_quality_status = _mod.rollup_etf_quality_status
 etf_share_flow = _mod.etf_share_flow
 save_etf_share_snapshot = _mod.save_etf_share_snapshot
 
+# v0.2.3：data_bridge._import_etf_attr 在 journal 上下文解析到本 shim，
+# fetch_* 必须 re-export（否则 data_bridge getter 取不到函数）
+fetch_etf_spot_rows = _mod.fetch_etf_spot_rows
+fetch_etf_index_pe = _mod.fetch_etf_index_pe
+fetch_etf_nav = _mod.fetch_etf_nav
+fetch_etf_index_daily = _mod.fetch_etf_index_daily
+fetch_etf_adj_factor = _mod.fetch_etf_adj_factor
+fetch_etf_share_history = _mod.fetch_etf_share_history
+fetch_etf_industry_alloc = _mod.fetch_etf_industry_alloc
+fetch_etf_category_sina = _mod.fetch_etf_category_sina
+
 __all__ = [
     "CSINDEX_MAP",
     "ETF_HEDGE_MAP",
@@ -55,4 +66,12 @@ __all__ = [
     "query_etf_quote",
     "rollup_etf_quality_status",
     "save_etf_share_snapshot",
+    "fetch_etf_spot_rows",
+    "fetch_etf_index_pe",
+    "fetch_etf_nav",
+    "fetch_etf_index_daily",
+    "fetch_etf_adj_factor",
+    "fetch_etf_share_history",
+    "fetch_etf_industry_alloc",
+    "fetch_etf_category_sina",
 ]
