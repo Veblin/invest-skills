@@ -1010,9 +1010,19 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
         使分红/拆分前后的 NAV 连续可比。
     """
     latest_adj = 1.0
+    switch_factors: dict[str, float] = {}
     if adj_map:
         sorted_dates = sorted(adj_map.keys())
         latest_adj = adj_map[sorted_dates[-1]] if sorted_dates else 1.0
+        # 因子切换点：Tushare fund_adj 因子在除权日次日才更新，而净值源
+        # （akshare）在除权日当天已是拆后口径（如 515050 2026-05-13 因子变
+        # 3.0，但净值 05-12 已从 3.29 → 1.1095）→ 切换日**前一行**须按新
+        # 因子重算，否则前复权在该行产生假跳变（×3 假低点），污染
+        # 波动率/MA/RSI/BOLL。是否采用由循环内的连续性校验决定。
+        for i in range(1, len(sorted_dates)):
+            prev_d, cur_d = sorted_dates[i - 1], sorted_dates[i]
+            if adj_map[cur_d] != adj_map[prev_d]:
+                switch_factors[prev_d] = adj_map[cur_d]
 
     navs: list[float] = []
     returns: list[float] = []
@@ -1032,6 +1042,17 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
             adj_d = adj_map.get(date_key)
             if adj_d is None:
                 adj_d = adj_map.get(date_str)
+            aligned = switch_factors.get(date_key)
+            if (aligned is not None and adj_d and latest_adj > 0
+                    and prev_nav is not None and prev_nav > 0):
+                # 错位对齐 + 连续性校验：切换日前一行若已是新口径（净值源提前
+                # 一天除权），按新因子重算应与前值连续（变动 <15%），而按旧因子
+                # 则跳变（≥15%）→ 采用新因子；否则维持原因子（无错位）
+                cand_nav = nav * aligned / latest_adj
+                cur_nav = nav * adj_d / latest_adj
+                if (abs(cand_nav / prev_nav - 1) < 0.15
+                        and abs(cur_nav / prev_nav - 1) >= 0.15):
+                    adj_d = aligned
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
         # 复权状态下：原始 日增长率 基于未复权净值，与调整后的 nav 不匹配
