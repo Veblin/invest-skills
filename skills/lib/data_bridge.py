@@ -45,6 +45,15 @@ DEFAULT_TTL: dict[str, int] = {
     "ad_ratio":      5 * 60,       # 涨跌比：5 分钟
     "lu_ld_ratio":   5 * 60,       # 涨跌停比：5 分钟
     "microstructure": 5 * 60,      # 市场微观结构快照：5 分钟
+    # ETF 维度（invest-a-etf canonical；L1=引擎内进程缓存，L2=本缓存层）
+    "etf_spot":           60,      # ETF 全市场现价表（L1 30s 进程内，L2 跨进程）
+    "etf_index_pe":       1 * 86400,  # csindex 指数 PE（日频）
+    "etf_nav":            1 * 86400,  # ETF 净值序列（盘后更新）
+    "etf_index_daily":    1 * 86400,  # 指数日 K（日频）
+    "etf_adj_factor":     7 * 86400,  # Tushare 复权因子（仅除权日变化）
+    "etf_share_history":  1 * 86400,  # Tushare 份额 + fund_daily
+    "etf_industry_alloc": 7 * 86400,  # 行业配置（季度报告期）
+    "etf_category_sina":  7 * 86400,  # sina 分类表（低频）
 }
 
 # 失败状态集合：collector legacy 信封的 missing + macro 全失败（macro.py:376）
@@ -212,6 +221,89 @@ def get_microstructure(*, force: bool = False) -> dict | None:
         "microstructure", "market", snapshot,
         force=force, ttl_override=300,
     )
+
+
+def _import_etf_attr(attr: str) -> Callable[..., Any] | None:
+    """Lazy-import *attr* from etf_data (invest-a-etf canonical / journal shim).
+
+    上下文解析：
+    - journal：importlib 解析到 journal shim（re-export fetch_*，见
+      skills/invest-a-journal/scripts/lib/etf_data.py）
+    - invest-a-etf：解析到 canonical
+    - 其他上下文：ImportError/AttributeError → None + 日志警告（调用方需防 None）
+    """
+    try:
+        mod = importlib.import_module("etf_data")
+        return getattr(mod, attr)
+    except (ImportError, AttributeError) as exc:
+        logger.warning(
+            "get_etf_*(%s) requires invest-a-etf etf_data on sys.path; "
+            "returning None — callers should guard against. %s", attr, exc)
+        return None
+
+
+def get_etf_spot_rows(*, force: bool = False) -> list | None:
+    """ETF 全市场现价表 records（缓存 60s，市场级共享一份文件）。"""
+    fetch = _import_etf_attr("fetch_etf_spot_rows")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_spot", "market", fetch, force=force)
+
+
+def get_etf_index_pe(idx_code: str, *, force: bool = False) -> dict | None:
+    """csindex 指数 PE（缓存 1d；同一指数多 ETF 共享缓存键）。"""
+    fetch = _import_etf_attr("fetch_etf_index_pe")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_index_pe", idx_code, fetch, idx_code, force=force)
+
+
+def get_etf_nav(symbol: str, *, force: bool = False) -> dict | None:
+    """ETF 净值历史序列（缓存 1d，fetch 内固定 400 自然日窗口）。"""
+    fetch = _import_etf_attr("fetch_etf_nav")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_nav", symbol, fetch, symbol, force=force)
+
+
+def get_etf_index_daily(idx_code: str, *, force: bool = False) -> dict | None:
+    """指数日 K（缓存 1d；sh/sz 前缀路由在 fetch 内，不参与缓存键）。"""
+    fetch = _import_etf_attr("fetch_etf_index_daily")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_index_daily", idx_code, fetch, idx_code, force=force)
+
+
+def get_etf_adj_factor(symbol: str, *, force: bool = False) -> dict | None:
+    """ETF 复权因子（缓存 7d，仅除权日变化）。"""
+    fetch = _import_etf_attr("fetch_etf_adj_factor")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_adj_factor", symbol, fetch, symbol, force=force)
+
+
+def get_etf_share_history(symbol: str, *, force: bool = False) -> dict | None:
+    """ETF 份额历史 + fund_daily（缓存 1d，fetch 内固定 100 自然日窗口）。"""
+    fetch = _import_etf_attr("fetch_etf_share_history")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_share_history", symbol, fetch, symbol, force=force)
+
+
+def get_etf_industry_alloc(symbol: str, *, force: bool = False) -> dict | None:
+    """ETF 行业配置（缓存 7d，季度报告期数据）。"""
+    fetch = _import_etf_attr("fetch_etf_industry_alloc")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_industry_alloc", symbol, fetch, symbol, force=force)
+
+
+def get_etf_category_sina(*, force: bool = False) -> dict | None:
+    """sina ETF 分类表（缓存 7d，低频，市场级共享一份文件）。"""
+    fetch = _import_etf_attr("fetch_etf_category_sina")
+    if fetch is None:
+        return None
+    return _fetch_dimension("etf_category_sina", "market", fetch, force=force)
 
 
 # ═════════════════════════════════════════════════════
