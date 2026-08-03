@@ -50,7 +50,8 @@ DEFAULT_TTL: dict[str, int] = {
     "etf_index_pe":       1 * 86400,  # csindex 指数 PE（日频）
     "etf_nav":            1 * 86400,  # ETF 净值序列（盘后更新）
     "etf_index_daily":    1 * 86400,  # 指数日 K（日频）
-    "etf_adj_factor":     7 * 86400,  # Tushare 复权因子（仅除权日变化）
+    "etf_adj_factor":     6 * 3600,   # Tushare 复权因子：6h（TTL×0.8 盘中/×2 盘后，保证除息日开盘前必过期重拉；
+                                      #   7d 时除息后 stale 因子 + 日更 NAV 会跨断点算收益率 → 假跳价）
     "etf_share_history":  1 * 86400,  # Tushare 份额 + fund_daily
     "etf_industry_alloc": 7 * 86400,  # 行业配置（季度报告期）
     "etf_category_sina":  7 * 86400,  # sina 分类表（低频）
@@ -259,7 +260,7 @@ def get_etf_index_pe(idx_code: str, *, force: bool = False) -> dict | None:
 
 
 def get_etf_nav(symbol: str, *, force: bool = False) -> dict | None:
-    """ETF 净值历史序列（缓存 1d，fetch 内固定 400 自然日窗口）。"""
+    """ETF 净值历史序列（缓存 1d，fetch 内固定 700 自然日窗口）。"""
     fetch = _import_etf_attr("fetch_etf_nav")
     if fetch is None:
         return None
@@ -283,7 +284,7 @@ def get_etf_adj_factor(symbol: str, *, force: bool = False) -> dict | None:
 
 
 def get_etf_share_history(symbol: str, *, force: bool = False) -> dict | None:
-    """ETF 份额历史 + fund_daily（缓存 1d，fetch 内固定 100 自然日窗口）。"""
+    """ETF 份额历史 + fund_daily（缓存 1d，fetch 内固定 250 自然日窗口）。"""
     fetch = _import_etf_attr("fetch_etf_share_history")
     if fetch is None:
         return None

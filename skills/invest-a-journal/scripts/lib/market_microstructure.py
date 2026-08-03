@@ -27,6 +27,17 @@ logger = logging.getLogger(__name__)
 _LU_LD_EXTREME_UP = 5.0
 _LU_LD_EXTREME_DOWN = 0.2  # 1:5
 
+# 数据维度键（全失败判定用；date/labels/_errors 等元数据键不计入）
+# 任一维度有值即视为采集成功；全部为 None → 信封标记 all_failed，
+# 使 data_bridge 的失败不缓存语义（_FAILURE_STATUSES）对 microstructure 生效
+_SNAPSHOT_DATA_KEYS = (
+    "margin_balance", "margin_buy_amount", "ad_ratio",
+    "lu_ld_ratio", "limit_up_count", "limit_down_count",
+    "total_turnover", "sse_float_mcap", "szse_float_mcap",
+    "erp", "pcr", "below_book_pct",
+    "northbound_net_inflow", "northbound_market_value",
+)
+
 
 # ---------------------------------------------------------------------------
 # 数据库连接（委托 db.py，避免 _conn/_safe_close 重复定义）
@@ -92,6 +103,13 @@ def snapshot() -> dict[str, Any]:
     _compute_labels(result)
     _auto_persist(result)
 
+    # 状态信封：全部数据维度失败 → "all_failed"，使 data_bridge 的失败
+    # 不缓存语义（_FAILURE_STATUSES）生效。否则全 None 快照会被 5min 缓存
+    # 服务给后续每次评估与 market-status --save（v0.2.3 回归修复）。
+    if all(result.get(k) is None for k in _SNAPSHOT_DATA_KEYS):
+        result["status"] = "all_failed"
+    else:
+        result["status"] = "ok"
     return result
 
 

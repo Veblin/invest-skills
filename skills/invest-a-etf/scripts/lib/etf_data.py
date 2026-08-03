@@ -37,6 +37,15 @@ _SPOT_CACHE_DF: Any = None
 _SPOT_CACHE_TS: float = 0.0
 _SPOT_CACHE_TTL_SEC = 30.0
 
+# fetch_etf_nav 固定取数窗口（自然日）：与 fetch_etf_index_daily 的 700 对齐。
+# 覆盖 days ≤ ~470 交易日的 query_etf_kline 请求（MA60 需 ~75 交易日缓冲，
+# 裕量约 6 倍）；超窗请求在 query_etf_kline 显式告警而非静默截断
+_NAV_FETCH_NATURAL_DAYS = 700
+
+# fetch_etf_share_history 固定取数窗口（自然日）：覆盖 days ≤ ~170 交易日的
+# query_etf_share_history 请求；超窗在查询侧显式告警而非静默少返回
+_SHARE_FETCH_NATURAL_DAYS = 250
+
 
 # ---------------------------------------------------------------------------
 # 对冲工具覆盖映射表
@@ -299,12 +308,16 @@ def query_etf_data(
 # ---------------------------------------------------------------------------
 
 def prefetch_etf_spot() -> bool:
-    """预热 spot 全表。优先走 data_bridge L2（热时零网络）；L2 不可用则强制回源写 L1。"""
+    """预热 spot 全表。优先走 data_bridge L2（热时零网络）；L2 不可用则强制回源写 L1。
+
+    空表/失败一律返回 False（与旧语义一致）：L2 路径下 `[] is not None`
+    曾把空表误报为成功（v0.2.3 修复），隐藏失败的预热。
+    """
     try:
         import data_bridge  # noqa: PLC0415
     except ImportError:
         return _get_etf_spot_df(force=True) is not None
-    return data_bridge.get_etf_spot_rows() is not None
+    return bool(data_bridge.get_etf_spot_rows())
 
 
 def clear_etf_spot_cache() -> None:
@@ -362,13 +375,19 @@ def _lookup_etf_spot_row(symbol: str) -> tuple[Any | None, str | None]:
     两者均支持 .get()，下游 _spot_row_to_quote / _apply_spot_row_to_profile 不变。
     """
     df = _peek_etf_spot_df()
-    if df is not None:
+    l1_fresh = df is not None
+    if l1_fresh:
         row_df = df[df["代码"] == symbol]
         if not row_df.empty:
             return row_df.iloc[0], None
-        return None, f"etf_spot: {symbol} not found"
+        # L1 新鲜但未命中该符号（如新上市/盘中异动）：继续查 L2，
+        # 避免 30s L1 窗口内屏蔽掉更新更完整的 L2 数据（v0.2.3 修复）
     rows = _bridge_get("get_etf_spot_rows")
     if rows is None:
+        if l1_fresh:
+            # L2/网络不可用：保留 L1 判定结果（与旧行为一致）
+            return None, f"etf_spot: {symbol} not found"
+        # L1 冷且 L2/网络失败：无法获取任何数据（保持旧错误语义）
         return None, "etf_spot: empty response"
     for r in rows:
         if str(r.get("代码")) == symbol:
@@ -440,14 +459,17 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
 def fetch_etf_nav(symbol: str) -> dict:
     """原始取数：ETF 历史单位净值（data_bridge etf_nav 维度）。
 
-    固定 400 自然日窗口；主源 fund_etf_fund_info_em，akshare 列数变更
-    （Length mismatch）时降级 fund_open_fund_info_em。
+    固定 _NAV_FETCH_NATURAL_DAYS 自然日窗口；主源 fund_etf_fund_info_em，
+    akshare 列数变更（Length mismatch）时降级 fund_open_fund_info_em
+    （fallback 无日期参数，须按同一窗口过滤全量历史，防止旧 ETF 全量
+    入 L2 缓存——v0.2.3 修复）。
     rows 归一化为 [{date, nav, change_pct}]。
     """
     import akshare as ak
 
     end_date = shanghai_today()
-    start_date = shanghai_days_ago(400)
+    start_date = shanghai_days_ago(_NAV_FETCH_NATURAL_DAYS)
+    start_key = start_date.replace("-", "")
 
     df = None
     source = "fund_etf_fund_info_em"
@@ -479,7 +501,8 @@ def fetch_etf_nav(symbol: str) -> dict:
     for _, r in df.iterrows():
         d = str(r.get("净值日期", "")).replace(" 00:00:00", "")[:10]
         nav = safe_float(r.get("单位净值"))
-        if d and nav is not None:
+        # 日期窗口过滤（YYYYMMDD 字典序比较）：fallback 全量历史在此截断
+        if d and nav is not None and d.replace("-", "")[:8] >= start_key:
             rows.append({"date": d, "nav": nav, "change_pct": safe_float(r.get("日增长率"))})
     return {"status": "ok", "source": source, "rows": rows, "error": None}
 
@@ -532,7 +555,7 @@ def fetch_etf_adj_factor(symbol: str) -> dict:
 def fetch_etf_share_history(symbol: str) -> dict:
     """原始取数：Tushare fund_share + fund_daily（data_bridge etf_share_history 维度）。
 
-    固定 100 自然日窗口；token/ts_code/积分检查失败 → status="missing"。
+    固定 _SHARE_FETCH_NATURAL_DAYS 自然日窗口；token/ts_code/积分检查失败 → status="missing"。
     """
     from lib import env
     from lib.tushare_client import TushareClient
@@ -547,7 +570,7 @@ def fetch_etf_share_history(symbol: str) -> dict:
         return {"status": "missing", "fund_share": [], "fund_daily": [], "note": "无效的 ETF 代码"}
 
     end_date = shanghai_today()
-    start_date = shanghai_days_ago(100)
+    start_date = shanghai_days_ago(_SHARE_FETCH_NATURAL_DAYS)
 
     try:
         client = TushareClient(token=token, timeout=15)
@@ -819,7 +842,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
     }
 
     try:
-        # v0.2.3：原始取数经 data_bridge L2 缓存（fetch_etf_nav 固定 400 自然日窗口）
+        # v0.2.3：原始取数经 data_bridge L2 缓存（fetch_etf_nav 固定 _NAV_FETCH_NATURAL_DAYS 自然日窗口）
         nav_env = _bridge_get("get_etf_nav", symbol)
         if nav_env is None or nav_env.get("status") != "ok":
             result["_error"] = (nav_env or {}).get("error") or "etf_nav: empty response"
@@ -832,10 +855,22 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 
         # 按调用方窗口切片：锚定数据末端日期（缓存跨日/跨节假日时窗口长度稳定）
         calendar_days = int(days * 365 / 250) + 15
+        if calendar_days > _NAV_FETCH_NATURAL_DAYS:
+            # 超窗请求：显式告警 + 结果 note，不再静默截断（v0.2.3 修复）
+            logger.warning(
+                "query_etf_kline(%s, days=%d): 请求窗口 %d 自然日超过取数上限 %d"
+                "（约 %d 个交易日），已按上限截断",
+                symbol, days, calendar_days, _NAV_FETCH_NATURAL_DAYS,
+                int(_NAV_FETCH_NATURAL_DAYS * 250 / 365),
+            )
+            result["note"] = (
+                f"请求 {days} 个交易日，超过取数上限 {_NAV_FETCH_NATURAL_DAYS} 自然日"
+                f"（约 {int(_NAV_FETCH_NATURAL_DAYS * 250 / 365)} 个交易日），已按上限截断"
+            )
         start = shanghai_days_ago(calendar_days).replace("-", "")
         sliced = [r for r in rows if str(r["date"]).replace("-", "")[:8] >= start]
         if len(sliced) < 5:
-            sliced = rows  # 兜底：窗口过短时退回全部
+            sliced = rows  # 兜底：数据跨度不足窗口时退回全部（超窗时已附 note 告警）
         rows = sliced
 
         import pandas as pd
@@ -1443,7 +1478,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
          pct_chg, vol, amount, turnover_rate, shares, share_change, flow_est,
          direction}], summary: {...}}
     """
-    # v0.2.3：原始取数迁至 fetch_etf_share_history（固定 100 自然日窗口），
+    # v0.2.3：原始取数迁至 fetch_etf_share_history（固定 _SHARE_FETCH_NATURAL_DAYS 自然日窗口），
     # 经 data_bridge L2 缓存（1d）
     env = _bridge_get("get_etf_share_history", symbol)
     if env is None or env.get("status") != "ok":
@@ -1477,8 +1512,17 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     if merged.empty:
         return {"symbol": symbol, "available": False, "note": "份额-价格日期无交集"}
 
-    # 取最近 days 行
-    merged = merged.tail(days + 1)  # +1 用于计算第一行的变化
+    # 取最近 days 行（+1 用于计算第一行的变化）
+    # 超窗检测：取数窗口（_SHARE_FETCH_NATURAL_DAYS 自然日）行数不足 days+1 时
+    # 显式告警 + 结果 note，不再静默少返回（v0.2.3 修复）
+    clipped = len(merged) < days + 1
+    if clipped:
+        logger.warning(
+            "query_etf_share_history(%s, days=%d): 取数窗口仅覆盖 %d 行，少于请求的 %d，"
+            "已按可用数据返回",
+            symbol, days, len(merged), days,
+        )
+    merged = merged.tail(days + 1)
 
     rows = []
     prev_share = None
@@ -1581,7 +1625,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
 
     date_range = f"{detail_rows[0]['date']} ~ {detail_rows[-1]['date']}" if detail_rows else ""
 
-    return {
+    result = {
         "symbol": symbol,
         "available": True,
         "date_range": date_range,
@@ -1596,3 +1640,9 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             "share_total_change": share_total_change,
         },
     }
+    if clipped:
+        result["note"] = (
+            f"请求 {days} 日窗口，取数上限（{_SHARE_FETCH_NATURAL_DAYS} 自然日）"
+            f"仅覆盖 {len(detail_rows)} 行，已按可用数据返回"
+        )
+    return result
