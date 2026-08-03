@@ -310,6 +310,9 @@ def query_etf_data(
 def prefetch_etf_spot() -> bool:
     """预热 spot 全表。优先走 data_bridge L2（热时零网络）；L2 不可用则强制回源写 L1。
 
+    L2 取回（含命中）后回填 L1（30s 进程内缓存），使后续 _lookup_etf_spot_row
+    走内存而非每次全表磁盘读 + 线性扫描（v0.2.3 补丁 #5）。
+
     空表/失败一律返回 False（与旧语义一致）：L2 路径下 `[] is not None`
     曾把空表误报为成功（v0.2.3 修复），隐藏失败的预热。
     """
@@ -317,7 +320,11 @@ def prefetch_etf_spot() -> bool:
         import data_bridge  # noqa: PLC0415
     except ImportError:
         return _get_etf_spot_df(force=True) is not None
-    return bool(data_bridge.get_etf_spot_rows())
+    rows = data_bridge.get_etf_spot_rows()
+    if rows:
+        _seed_etf_spot_l1(rows)
+        return True
+    return False
 
 
 def clear_etf_spot_cache() -> None:
@@ -368,6 +375,21 @@ def _get_etf_spot_df(*, force: bool = False) -> Any:
         return df
 
 
+def _seed_etf_spot_l1(records: list[dict]) -> None:
+    """用 L2/网络取回的 records 回填 L1 进程内缓存（prefetch 预热用）。
+
+    保证 prefetch 后进程内后续 _lookup_etf_spot_row 走内存而非每次
+    全表磁盘读 + 线性扫描（v0.2.3 补丁 #5：L2 命中时 L1 曾永远不热）。
+    """
+    if not records:
+        return
+    import pandas as pd
+    global _SPOT_CACHE_DF, _SPOT_CACHE_TS
+    with _SPOT_CACHE_LOCK:
+        _SPOT_CACHE_DF = pd.DataFrame(records)
+        _SPOT_CACHE_TS = time.monotonic()
+
+
 def _lookup_etf_spot_row(symbol: str) -> tuple[Any | None, str | None]:
     """从 L1（进程内 30s）→ L2（data_bridge 60s）→ 网络 查找单只 ETF spot 行。
 
@@ -396,14 +418,25 @@ def _lookup_etf_spot_row(symbol: str) -> tuple[Any | None, str | None]:
 
 
 def _bridge_get(getter: str, *args: Any) -> Any:
-    """函数体内惰性调 skills/lib data_bridge；不可用时返回 None（查询侧视为 missing）。"""
+    """函数体内惰性调 skills/lib data_bridge；不可用时返回 None（查询侧视为 missing）。
+
+    调用本身也包异常：缓存层（_fetch_dimension→collector）抛出的 OSError/
+    UnicodeDecodeError 等不应让报告流程崩溃，按查询侧 missing 降级
+    （v0.2.3 补丁 #6）。
+    """
     try:
         import data_bridge  # noqa: PLC0415
     except ImportError:
         logger.debug("data_bridge unavailable; %s degraded", getter)
         return None
     fn = getattr(data_bridge, getter, None)
-    return fn(*args) if fn is not None else None
+    if fn is None:
+        return None
+    try:
+        return fn(*args)
+    except Exception as exc:
+        logger.warning("data_bridge %s(%s) raised %r; degraded to missing", getter, args, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +537,11 @@ def fetch_etf_nav(symbol: str) -> dict:
         # 日期窗口过滤（YYYYMMDD 字典序比较）：fallback 全量历史在此截断
         if d and nav is not None and d.replace("-", "")[:8] >= start_key:
             rows.append({"date": d, "nav": nav, "change_pct": safe_float(r.get("日增长率"))})
+    if not rows:
+        # df 非空但窗口过滤/解析后无有效行（数据停更或列格式漂移）→ missing，
+        # 避免 ok+[] 空信封被 L2 缓存 1 天（v0.2.3 补丁 #3）
+        return {"status": "missing", "source": source, "rows": [],
+                "error": f"{source}: 无有效净值行（窗口过滤后为空）"}
     return {"status": "ok", "source": source, "rows": rows, "error": None}
 
 
@@ -538,6 +576,10 @@ def fetch_etf_index_daily(idx_code: str) -> dict:
             if close is None:
                 continue
             rows.append({"date": str(r.get("date", ""))[:10], "close": close})
+        if not rows:
+            # 全行 close 解析失败（列格式漂移）→ missing，避免 ok+[] 被 L2 缓存
+            return {"status": "missing", "ticker": ticker, "rows": [],
+                    "error": "index daily 无有效 close"}
         return {"status": "ok", "ticker": ticker, "rows": rows, "error": None}
     except Exception as exc:
         logger.debug("fetch_etf_index_daily(%s): failed, silent degrade: %s", idx_code, exc)
@@ -822,6 +864,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "symbol": symbol,
         "nav_rows": 0,
         "latest_nav": None,
+        "latest_nav_date": None,  # 数据末端日期（L2 缓存命中时可能滞后，供识别陈旧）
         "volatility_annualized": None,
         "adj_applied": False,
         "adj_note": None,
@@ -868,9 +911,16 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
                 f"（约 {int(_NAV_FETCH_NATURAL_DAYS * 250 / 365)} 个交易日），已按上限截断"
             )
         start = shanghai_days_ago(calendar_days).replace("-", "")
-        sliced = [r for r in rows if str(r["date"]).replace("-", "")[:8] >= start]
+        # 切片多取 2 自然日上下文：复权切换行若恰为窗口首行，prev_nav 需要
+        # 前一行做连续性校验（v0.2.3 补丁 #2：无上下文时假跳变残留）；
+        # _aligned_nav_returns 计算完成后按 start 裁剪回请求窗口。
+        used_ctx = False
+        ctx_start = shanghai_days_ago(calendar_days + 2).replace("-", "")
+        sliced = [r for r in rows if str(r["date"]).replace("-", "")[:8] >= ctx_start]
         if len(sliced) < 5:
             sliced = rows  # 兜底：数据跨度不足窗口时退回全部（超窗时已附 note 告警）
+        else:
+            used_ctx = True
         rows = sliced
 
         import pandas as pd
@@ -882,7 +932,8 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 
         result["nav_rows"] = len(df)
 
-        # 尝试 Tushare fund_adj 复权（消除分红/拆分断点；data_bridge 7d 缓存）
+        # 尝试 Tushare fund_adj 复权（消除分红/拆分断点；data_bridge 6h 缓存，
+        # 除息日开盘前必过期重拉，防 stale 因子跨断点算收益率）
         adj_env = _bridge_get("get_etf_adj_factor", symbol)
         adj_map = adj_env.get("adj_map") if adj_env and adj_env.get("status") == "ok" else None
         if adj_map:
@@ -895,6 +946,17 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             )
 
         navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
+        # 裁剪上下文行（date < start）：仅当上下文切片实际生效（非兜底）时执行，
+        # 保持 navs/returns/rows 三者对齐（returns 索引 j 对应 navs[j+1] 的收益）
+        if used_ctx:
+            keep = [i for i, r in enumerate(aligned_rows)
+                    if str(r["date"]).replace("-", "")[:8] >= start]
+            if keep and len(keep) < len(navs):
+                ret_keep = [j for j in range(len(returns))
+                            if str(aligned_rows[j + 1]["date"]).replace("-", "")[:8] >= start]
+                navs = [navs[i] for i in keep]
+                returns = [returns[j] for j in ret_keep]
+                aligned_rows = [aligned_rows[i] for i in keep]
         if navs:
             result["latest_nav"] = navs[-1]
 
@@ -984,6 +1046,10 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             {"date": r["date"], "nav": navs[i], "change_pct": r["change_pct"]}
             for i, r in enumerate(aligned_rows)
         ]
+        # 暴露数据末端日期：L2 缓存命中时序列可能滞后 1-2 交易日（净值晚间公布、
+        # 缓存 TTL 内不重拉），供消费方识别陈旧（v0.2.3 补丁 #4）
+        if aligned_rows:
+            result["latest_nav_date"] = aligned_rows[-1]["date"]
         result["status"] = "available"
 
     except Exception as exc:
@@ -1046,12 +1112,20 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
             if (aligned is not None and adj_d and latest_adj > 0
                     and prev_nav is not None and prev_nav > 0):
                 # 错位对齐 + 连续性校验：切换日前一行若已是新口径（净值源提前
-                # 一天除权），按新因子重算应与前值连续（变动 <15%），而按旧因子
-                # 则跳变（≥15%）→ 采用新因子；否则维持原因子（无错位）
+                # 一天除权），按新因子重算应与前值连续（市场变动 <15%，A 股
+                # 涨跌停保证），而按旧因子则出现 ≈除权幅度 的跳变 → 采用新因子。
+                # 阈值不再硬编码 15%：改为感知除权幅度先验 expected_drop
+                # （= 1 - 旧因子/新因子），小分红（除权 1-5%，cur 跳变不足 15%）
+                # 同样能命中，避免假跳变残留；同时保留"新因子下必须连续"
+                # （cand_dev < 15%）防误采。
                 cand_nav = nav * aligned / latest_adj
                 cur_nav = nav * adj_d / latest_adj
-                if (abs(cand_nav / prev_nav - 1) < 0.15
-                        and abs(cur_nav / prev_nav - 1) >= 0.15):
+                cand_dev = abs(cand_nav / prev_nav - 1)
+                cur_dev = abs(cur_nav / prev_nav - 1)
+                expected_drop = 1.0 - adj_d / aligned
+                if (cand_dev < 0.15
+                        and cur_dev >= expected_drop * 0.5
+                        and abs(cur_dev - expected_drop) <= max(0.05, expected_drop * 0.5)):
                     adj_d = aligned
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
@@ -1296,7 +1370,8 @@ def _attach_industry_allocation(result: dict, symbol: str) -> None:
     """ETF 行业配置比例（G6）。
 
     v0.2.3：原始取数迁至 fetch_etf_industry_alloc（季度报告期数据，
-    data_bridge L2 缓存 7d）。降级策略：接口不可用或数据为空时静默跳过。
+    data_bridge L2 缓存 1d，保证新季度报告 1d 内可见）。降级策略：
+    接口不可用或数据为空时静默跳过。
     """
     env = _bridge_get("get_etf_industry_alloc", symbol)
     if env is None or env.get("status") != "ok" or not env.get("allocation"):

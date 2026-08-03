@@ -146,6 +146,53 @@ def test_kline_within_window_no_note(monkeypatch):
     assert "note" not in out
 
 
+def test_kline_exposes_latest_nav_date(monkeypatch):
+    """修复 #4：结果暴露数据末端日期（L2 缓存命中时可能滞后，供识别陈旧）。"""
+    monkeypatch.setattr("etf_data._bridge_get", _bridge_nav_only)
+    out = query_etf_kline("510300", days=60)
+    assert out["status"] == "available"
+    assert out["latest_nav_date"] is not None
+    assert out["latest_nav_date"] == out["nav_history"][-1]["date"]
+
+
+def test_kline_switch_row_as_first_row_no_fake_jump(monkeypatch):
+    """修复 #2：复权切换行恰为窗口首行时，上下文行保证 prev_nav 连续性校验。
+
+    旧行为：切片首行 = 切换行（prev_nav=None）→ 维持旧因子 → 假低点 + 假跳变。
+    新行为：切片多取 2 自然日上下文，切换日采用新因子，序列连续。
+    """
+    # 构造：切换行（除权日，净值已拆后）位于窗口起点附近；days=60 → 窗口 102 自然日
+    adj_env = {
+        "status": "ok",
+        "adj_map": {"20260101": 1.0, "20260102": 1.0, "20260103": 1.0,
+                    "20260104": 3.0, "20260105": 3.0},
+    }
+    # 净值序列：除权日 01-02 已拆后（3.0 → 1.0），其后连续
+    rows = []
+    base = datetime.date(2026, 1, 1)
+    navs_seq = [3.0, 1.0, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06]
+    for i, nav in enumerate(navs_seq):
+        d = (base + datetime.timedelta(days=i)).isoformat()
+        rows.append({"date": d, "nav": nav, "change_pct": 1.0})
+    # 从 L2 缓存的角度：fetch_etf_nav 返回 700 自然日窗口（1 月初起），窗口起点
+    # 恰在除权日（01-02）附近 —— days 选大值使 start 落在 01-02 前后
+    env = {"status": "ok", "source": "fund_etf_fund_info_em", "rows": rows, "error": None}
+
+    def bridge(getter, *a):
+        if getter == "get_etf_nav":
+            return env
+        if getter == "get_etf_adj_factor":
+            return adj_env
+        return None
+
+    monkeypatch.setattr("etf_data._bridge_get", bridge)
+    out = query_etf_kline("510300", days=470)
+    assert out["status"] == "available"
+    # 无 0.33 假低点（旧行为 navs[0] ≈ 1.0/3.0）；复权后序列连续
+    assert out["nav_history"][0]["nav"] > 0.5
+    assert out["latest_nav"] == pytest.approx(1.06, abs=1e-3)
+
+
 # ---------------------------------------------------------------------------
 # #7: query_etf_share_history 超窗显式标注（不再静默少返回）
 # ---------------------------------------------------------------------------

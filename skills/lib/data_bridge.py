@@ -48,17 +48,22 @@ DEFAULT_TTL: dict[str, int] = {
     # ETF 维度（invest-a-etf canonical；L1=引擎内进程缓存，L2=本缓存层）
     "etf_spot":           60,      # ETF 全市场现价表（L1 30s 进程内，L2 跨进程）
     "etf_index_pe":       1 * 86400,  # csindex 指数 PE（日频）
-    "etf_nav":            1 * 86400,  # ETF 净值序列（盘后更新）
+    "etf_nav":            6 * 3600,    # ETF 净值序列（净值 T-1 晚间公布，6h 盘中≈4.8h 保证公布后重拉，避免报告用 T-2 序列）
     "etf_index_daily":    1 * 86400,  # 指数日 K（日频）
     "etf_adj_factor":     6 * 3600,   # Tushare 复权因子：6h（TTL×0.8 盘中/×2 盘后，保证除息日开盘前必过期重拉；
                                       #   7d 时除息后 stale 因子 + 日更 NAV 会跨断点算收益率 → 假跳价）
     "etf_share_history":  1 * 86400,  # Tushare 份额 + fund_daily
-    "etf_industry_alloc": 7 * 86400,  # 行业配置（季度报告期）
+    "etf_industry_alloc": 1 * 86400,  # 行业配置（季度报告期，1d 保证新报告 1d 内可见；7d/盘后×2=14d 曾让新季度配置滞后近两周）
     "etf_category_sina":  7 * 86400,  # sina 分类表（低频）
 }
 
 # 失败状态集合：collector legacy 信封的 missing + macro 全失败（macro.py:376）
 _FAILURE_STATUSES = ("missing", "all_failed")
+
+# ok 信封的 payload 字段：全部为空视为空信封（防御 fetch 侧漏网，v0.2.3 补丁 #3）
+_OK_ENVELOPE_PAYLOAD_KEYS = (
+    "rows", "adj_map", "fund_share", "fund_daily", "allocation", "index_pe",
+)
 
 
 # ═════════════════════════════════════════════════════
@@ -112,6 +117,16 @@ def _fetch_dimension(
             # TTL（kline 4h / financials 7d / basic_info 30d / macro 7d）内持续
             # 服务 stale 失败结果，源恢复后 journal/portfolio_review 仍读不到数据
             logger.debug("skipping cache for failed %s:%s result", dimension, symbol)
+        elif isinstance(data, dict) and data.get("status") == "ok":
+            # 防御：ok 信封但 payload 字段全空（如 fetch 窗口过滤后 rows=[] 漏网）
+            # → 视同失败不缓存，否则源恢复后整个 TTL 内服务空数据
+            payload_keys = [k for k in _OK_ENVELOPE_PAYLOAD_KEYS if k in data]
+            if payload_keys and all(not data.get(k) for k in payload_keys):
+                logger.debug("skipping cache for ok-but-empty %s:%s result",
+                             dimension, symbol)
+            else:
+                ttl = ttl_override or DEFAULT_TTL.get(dimension, 3600)
+                _cache.set(dimension, symbol, data, ttl_seconds=ttl, source="data_bridge")
         else:
             ttl = ttl_override or DEFAULT_TTL.get(dimension, 3600)
             _cache.set(dimension, symbol, data, ttl_seconds=ttl, source="data_bridge")
@@ -236,7 +251,9 @@ def _import_etf_attr(attr: str) -> Callable[..., Any] | None:
     try:
         mod = importlib.import_module("etf_data")
         return getattr(mod, attr)
-    except (ImportError, AttributeError) as exc:
+    except (ImportError, AttributeError, OSError) as exc:
+        # OSError：shim exec canonical 时文件缺失抛 FileNotFoundError（非
+        # ImportError 子类），同样按环境降级处理（v0.2.3 补丁 #6）
         logger.warning(
             "get_etf_*(%s) requires invest-a-etf etf_data on sys.path; "
             "returning None — callers should guard against. %s", attr, exc)
@@ -276,7 +293,8 @@ def get_etf_index_daily(idx_code: str, *, force: bool = False) -> dict | None:
 
 
 def get_etf_adj_factor(symbol: str, *, force: bool = False) -> dict | None:
-    """ETF 复权因子（缓存 7d，仅除权日变化）。"""
+    """ETF 复权因子（缓存 6h：盘中 ×0.8≈4.8h/盘后 ×2=12h，保证除息日开盘前
+    必过期重拉；7d 时除息后 stale 因子 + 日更 NAV 会跨断点算收益率 → 假跳价）。"""
     fetch = _import_etf_attr("fetch_etf_adj_factor")
     if fetch is None:
         return None

@@ -271,3 +271,50 @@ def test_invalidate_symbol_covers_etf_dims(fake_etf_bridge):
     data_bridge.invalidate_symbol("market")
     data_bridge.get_etf_spot_rows()
     assert fake_etf_bridge["fetch_etf_spot_rows"] == 2
+
+
+def test_ok_empty_payload_envelope_not_cached(tmp_path, monkeypatch):
+    """修复 #3：ok 状态但 payload 全空的信封不写缓存（防空数据被 TTL 缓存住）。
+
+    fetch 侧窗口过滤后 rows=[] 漏网为 status='ok' 时，_fetch_dimension 必须
+    视同失败跳过缓存——否则源恢复后整个 TTL（etf_nav 6h）内持续读空。
+    """
+    monkeypatch.setattr(data_bridge, "_cache", DataCache(cache_dir=tmp_path / "cache"))
+    calls = {"n": 0}
+
+    def fake_collector(symbol: str, **kwargs) -> dict:
+        calls["n"] += 1
+        return {"status": "ok", "rows": [], "error": None}
+
+    monkeypatch.setattr(
+        data_bridge,
+        "_import_lib_module_attr",
+        lambda module_name, attr: fake_collector,
+    )
+    first = data_bridge.get_quote("600176")
+    second = data_bridge.get_quote("600176")
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert "_from_cache" not in second
+    assert calls["n"] == 2  # ok+[] 未缓存，每次回源
+    assert data_bridge._cache.stats()["total_entries"] == 0
+
+
+def test_ok_with_payload_cached(tmp_path, monkeypatch):
+    """对照：ok 且有 payload 的正常信封照常缓存（避免修复误伤）。"""
+    monkeypatch.setattr(data_bridge, "_cache", DataCache(cache_dir=tmp_path / "cache"))
+    calls = {"n": 0}
+
+    def fake_collector(symbol: str, **kwargs) -> dict:
+        calls["n"] += 1
+        return {"status": "ok", "rows": [{"date": "2026-08-03", "nav": 1.0}], "error": None}
+
+    monkeypatch.setattr(
+        data_bridge,
+        "_import_lib_module_attr",
+        lambda module_name, attr: fake_collector,
+    )
+    first = data_bridge.get_quote("600176")
+    second = data_bridge.get_quote("600176")
+    assert "_from_cache" in second
+    assert calls["n"] == 1

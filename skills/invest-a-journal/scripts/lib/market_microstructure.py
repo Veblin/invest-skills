@@ -222,7 +222,10 @@ def save_snapshot() -> dict[str, Any] | None:
         from data_bridge import get_microstructure  # noqa: PLC0415
 
         snap = get_microstructure()
-    except ImportError:
+    except Exception:
+        # 缓存层任何异常（ImportError/OSError/UnicodeDecodeError，如磁盘满、
+        # 坏缓存文件）一律降级直连 snapshot()——旧行为即直连，不能因缓存层
+        # 新增失败面崩掉 market-status --save（v0.2.3 补丁 #6）
         snap = snapshot()
     if snap is None:
         return None
