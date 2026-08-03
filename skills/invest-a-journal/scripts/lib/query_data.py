@@ -18,7 +18,13 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from data_bridge import get_kline, get_macro, get_quote, get_valuation  # noqa: E402
+from data_bridge import (  # noqa: E402
+    get_kline,
+    get_macro,
+    get_microstructure,
+    get_quote,
+    get_valuation,
+)
 from lib.nums import safe_float  # noqa: E402
 from lib.stats import median, percentile_rank_inclusive  # noqa: E402
 from lib.technical import compute, sort_kline_asc  # noqa: E402
@@ -278,9 +284,10 @@ def _safe_collect_etf(symbol: str) -> dict:
 
 
 def _safe_collect_microstructure() -> dict:
+    """走 data_bridge 5min TTL 缓存（v0.2.3）；避免每次评估重采 8 个数据源。"""
     try:
-        from market_microstructure import snapshot
-        return snapshot()
+        snap = get_microstructure()
+        return snap if snap is not None else {"_error": "microstructure unavailable"}
     except Exception as exc:
         return {"_error": str(exc)}
 

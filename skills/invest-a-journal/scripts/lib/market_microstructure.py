@@ -190,12 +190,24 @@ def _auto_persist(snap: dict) -> None:
 def save_snapshot() -> dict[str, Any] | None:
     """采集当日快照 → 计算 Tier 2 衍生指标 → 写入 market_snapshots 表。
 
+    v0.2.3：优先复用 data_bridge 5min 缓存快照（get_microstructure），
+    避免与 query_data 评估路径重复重采 8 个数据源（含 Tushare 昂贵接口）；
+    data_bridge 不可用时降级直接 snapshot()（与旧行为一致）。
+    缓存命中时 _auto_persist 不重复执行——INSERT OR REPLACE 保证无重复行。
+
     Returns
     -------
     dict or None
         写入的快照字典；非交易日（涨跌家数/成交额缺失）返回 None 以跳过写入。
     """
-    snap = snapshot()
+    try:
+        from data_bridge import get_microstructure  # noqa: PLC0415
+
+        snap = get_microstructure()
+    except ImportError:
+        snap = snapshot()
+    if snap is None:
+        return None
 
     # 非交易日检测：成交额缺失 → 大概率非交易日
     if snap.get("total_turnover") is None and snap.get("ad_ratio") is None:
