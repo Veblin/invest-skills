@@ -59,3 +59,35 @@ def test_spot_fetched_once_for_data_and_quote(mock_session, monkeypatch):
     assert profile["premium_discount"] == pytest.approx(-0.2)
     assert quote["status"] == "available"
     assert quote["price"] == pytest.approx(4.5)
+
+
+@patch("etf_data.akshare_direct_session")
+def test_spot_served_by_l2_when_l1_cold(mock_session, monkeypatch):
+    """L1 清空后 L2（data_bridge 磁盘缓存）仍命中：跨进程去重的核心路径。"""
+    mock_session.return_value.__enter__ = MagicMock(return_value=None)
+    mock_session.return_value.__exit__ = MagicMock(return_value=False)
+
+    fake_df = _fake_spot_df()
+    call_count = {"n": 0}
+
+    def _fake_spot_em():
+        call_count["n"] += 1
+        return fake_df
+
+    ak = MagicMock()
+    ak.fund_etf_spot_em = _fake_spot_em
+    monkeypatch.setitem(sys.modules, "akshare", ak)
+
+    # 首次：L1/L2 双写（网络 1 次）
+    assert query_etf_quote("515790")["status"] == "available"
+    assert call_count["n"] == 1
+
+    # 清 L1 后：L2 命中，零网络
+    clear_etf_spot_cache()
+    assert query_etf_quote("515790")["status"] == "available"
+    assert call_count["n"] == 1
+
+    # L2 已落盘（etf_spot/market 维度）
+    import data_bridge
+
+    assert data_bridge._cache.is_fresh("etf_spot", "market")
