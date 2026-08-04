@@ -211,6 +211,19 @@ def merge_collections(collections: list[dict]) -> dict:
             ]
             primary.setdefault("_meta", {})["alternative_sources"] = alt_sources
             primary["_meta"]["multi_source_count"] = len(dims)
+            # 合并 all_sources：不同采集器可能覆盖不同源（如 research 维度
+            # 一个采集器拿到 report_rc、另一个拿到 forecast）——按 source 名
+            # 并集，后到覆盖同源，确保任何源的 data 不丢失
+            seen: dict[str, dict] = {}
+            for d in dims:
+                for s in d.get("_meta", {}).get("all_sources", []):
+                    name = s.get("source") or "unknown"
+                    if s.get("data") is not None:
+                        seen[name] = s
+            if seen:
+                primary.setdefault("_meta", {})["all_sources"] = list(seen.values())
+                primary["_meta"]["source_count"] = sum(
+                    1 for s in seen.values() if s.get("data") is not None)
             result_dimensions.append(primary)
 
             # 交叉验证（仅对比前两个源）
