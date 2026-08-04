@@ -108,6 +108,10 @@ class ScanResult:
 # Gap detection helpers
 # ======================================================================
 
+# 单日向上跳空幅度上限（%）——A 股涨跌停 10%/20%/30% 加阈值裕度；
+# 超过视为数据毛刺（零价 bar 后接正常价会算出天文 gap）
+_MAX_GAP_PCT = 50.0
+
 
 def _find_candidate_gaps(
     kline: pd.DataFrame,
@@ -142,8 +146,13 @@ def _find_candidate_gaps(
 
     all_candidates: list[tuple[int, GapInfo]] = []
     for i in range(start, n):
-        if lows[i] > highs[i - 1]:
+        # highs[i-1]<=0（零价毛刺/停牌残留 bar）时跳过：除零会炸掉整个扫描；
+        # gap_pct 超 _MAX_GAP_PCT 视为毛刺（如 high_qfq=0.001 后接正常 bar
+        # 会算出 +499,900% 的天文缺口并排到命中榜首）
+        if highs[i - 1] > 0 and lows[i] > highs[i - 1]:
             gap_pct = (lows[i] / highs[i - 1] - 1.0) * 100.0
+            if gap_pct > _MAX_GAP_PCT:
+                continue
             gi = GapInfo(
                 gap_date=str(dates[i]),
                 gap_pct=gap_pct,
@@ -477,9 +486,17 @@ def scan_all(
             continue
 
         # --- Scan stock ---
-        hit, excl_reason, non_reason = _scan_stock(
-            stock, kline, suspension_map, params, trade_cal,
-        )
+        # 逐股异常隔离：单只标的数据毛刺（除零/空值等）不得终止全池扫描
+        try:
+            hit, excl_reason, non_reason = _scan_stock(
+                stock, kline, suspension_map, params, trade_cal,
+            )
+        except Exception:
+            # 逐股隔离防整池中断，但异常需带追溯栈（不静默掩盖代码缺陷）
+            logger.exception("gap scan failed for %s", ts_code)
+            exclude[ExcludeReason.FETCH_ERROR] += 1
+            total_fetch_errors += 1
+            continue
 
         if excl_reason is not None:
             exclude[excl_reason] += 1

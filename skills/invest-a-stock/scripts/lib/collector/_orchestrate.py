@@ -104,12 +104,29 @@ def collect_shareholders(symbol: str) -> dict:
     )
 
 
+def _quote_tushare_rows(symbol: str) -> list[dict] | None:
+    """quote 维度的 Tushare 日线：前复权 + 升序。
+
+    升序使 data[-1] = 最新日，与 akshare 升序及共享消费者
+    （schema._extract_scalar 等 data[-1]-is-newest 约定）对齐——
+    tushare 降序时 data[-1] 是最旧 bar，逐份报告产出"最新收盘"错值。
+    盘中 adj_factor 滞后/缺失时回退 raw（仅最新日标量被消费，
+    最新日 qfq==raw，回退不产生错基）。
+    """
+    rows = _q_tushare_daily_qfq(symbol, start_date=_days_ago(10), end_date=_today())
+    if rows is None:
+        rows = _q_tushare_daily(symbol, start_date=_days_ago(10), end_date=_today())
+    if not rows:
+        return None
+    return sorted(rows, key=lambda r: str(r.get("trade_date", "")))
+
+
 def collect_quote(symbol: str) -> dict:
     """实时行情。并行：Tushare + akshare + 腾讯。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol,
-                      start_date=_days_ago(10), end_date=_today())))
+        # 统一前复权语义（与 akshare qfq 对齐，跨源校验不再因 raw/qfq 错配产生 divergence 噪音）
+        tasks.append(("tushare.daily", lambda: _quote_tushare_rows(symbol)))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
@@ -118,7 +135,8 @@ def collect_quote(symbol: str) -> dict:
         "quote", tasks,
         query_params={
             "tushare.daily": _qp_tushare("daily", symbol,
-                                         start_date=_days_ago(10), end_date=_today()),
+                                         start_date=_days_ago(10), end_date=_today())
+                                         + " (qfq via adj_factor, asc, raw-fallback)",
             "akshare.stock_zh_a_hist": _qp_akshare(
                 "stock_zh_a_hist", symbol, period="daily",
                 start_date=_days_ago(10), end_date=_today()),
@@ -835,7 +853,9 @@ def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
         return None
     records = df.to_dict("records")
     for rec in records:
-        rec["direction"] = "增持" if rec.get("in_de") == "IN" else "减持"
+        # 三态：in_de 缺失/NaN 标"未知"（None/NaN 恒不等于字符串，默认"减持"会把缺失误判为看空信号）
+        in_de = rec.get("in_de")
+        rec["direction"] = "增持" if in_de == "IN" else ("减持" if in_de == "DE" else "未知")
         rec["source"] = "Tushare stk_holdertrade"
     return records
 
@@ -2219,6 +2239,7 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
 _50ETF_UNDERLYING = "510050.SH"
 _ETF_300_CODE = "510300.SH"
 _NEW_HIGH_SAMPLE = 30
+_NEW_HIGH_SAMPLE_SEED = 20260804  # 创新高抽样固定种子（可复现）
 _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
 _PCR_MIN_5Y_TRADING_DAYS = 252
@@ -2261,8 +2282,13 @@ def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
 def _ms_pcr_on_date(
     tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
 ) -> float | None:
-    df = tc.query("opt_daily", trade_date=trade_date, exchange="SSE")
-    if df is None or df.empty:
+    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
+    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
+    df = _run_with_timeout(
+        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
+        8.0, f"opt_daily:{trade_date}",
+    )
+    if df is None or getattr(df, "empty", True):
         return None
     put_vol = call_vol = 0.0
     for _, row in df.iterrows():
@@ -2296,17 +2322,42 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         return None
     dates = sorted(str(d) for d in cal["cal_date"].tolist())
     raw_days = len(dates)
-    dates = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
-    ratios: list[float] = []
-    for td in dates:
-        r = _ms_pcr_on_date(tc, td, put_set, call_set)
-        if r is not None:
-            ratios.append(r)
+    sampled = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+    # 60 日分位窗口取最近 _PCR_HISTORY_60D 个自然日全分辨率（此前对降采样
+    # 序列取 ratios[-60:] 实际横跨 ~3.5 年——降采样 step≈15 时 60 点覆盖 900+ 交易日）
+    cutoff = _days_ago(_PCR_HISTORY_60D)
+    recent_dates = [d for d in dates if d >= cutoff]
+    fetch_dates = sorted(set(sampled) | set(recent_dates))
+    # 全窗口并行取数（单次查询 8s 时限内部兜底）：~123 次串行最坏 16 分钟
+    ratio_by_date: dict[str, float] = {}
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(len(fetch_dates), _env_max_workers()))
+    ) as _pcr_ex:
+        _pcr_futs = {
+            _pcr_ex.submit(_ms_pcr_on_date, tc, td, put_set, call_set): td
+            for td in fetch_dates
+        }
+        for _pcr_fut in as_completed(_pcr_futs):
+            td = _pcr_futs[_pcr_fut]
+            try:
+                r = _pcr_fut.result()
+            except Exception as _pcr_exc:
+                logger.debug("opt_daily %s failed: %s", td, _pcr_exc)
+                r = None
+            if r is not None:
+                ratio_by_date[td] = r
+    if not ratio_by_date:
+        return None
+    ratios = [ratio_by_date[td] for td in sampled if td in ratio_by_date]
     if not ratios:
         return None
+    ratio_dates = [td for td in sampled if td in ratio_by_date]
     current = ratios[-1]
+    current_date = ratio_dates[-1] if ratio_dates else None
+    # 最新日查询失败 → current 静默回退到旧样本，需显式 staleness 标识
+    stale = current_date is None or current_date != sampled[-1]
     pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
-    ratios_60d = ratios[-_PCR_HISTORY_60D:]
+    ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
     pct_60d = (
         percentile_rank(ratios_60d, current)
         if len(ratios_60d) >= 5 else None
@@ -2315,10 +2366,12 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         "ratio": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
+        "current_date": current_date,
         "history_days": len(ratios),
-        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS or raw_days > len(dates),
-        "sampled": raw_days > len(dates),
-        "sample_points": len(dates),
+        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS
+        or raw_days > len(sampled) or stale,
+        "sampled": raw_days > len(sampled),
+        "sample_points": len(fetch_dates),
         "calendar_days": raw_days,
         "underlying": _50ETF_UNDERLYING,
         "source": "tushare.opt_daily",
@@ -2327,7 +2380,9 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
 
 def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
     """融券余额增速（交易所 margin 优先，个股 margin_detail 回退）。"""
-    from lib.stats import percentile_rank
+    # 增速序列约半数日为负：percentile_rank（v>0 过滤）把负增速日从分母剔除
+    # → "5年最低位"系统性失真；percentile_rank_inclusive 对冻结序列给 100% 假
+    # 信号 → 改用 mid-rank（count(<cur)/n + 0.5×count(==cur)/n）：冻结序列 50%
 
     df = tc.query("margin", start_date=_days_ago(1825), end_date=_today())
     if df is not None and not df.empty:
@@ -2347,7 +2402,12 @@ def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
                     growths.append((cur - base) / base * 100)
             if growths:
                 current_g = growths[-1]
-                pct = percentile_rank(growths, current_g) if len(growths) >= 5 else None
+                if len(growths) >= 5:
+                    below = sum(1 for v in growths if v < current_g)
+                    ties = sum(1 for v in growths if v == current_g)
+                    pct = (below + ties / 2.0) / len(growths) * 100.0
+                else:
+                    pct = None
                 return {
                     "growth_pct": round(current_g, 2),
                     "percentile_5y": round(pct, 1) if pct is not None else None,
@@ -2392,10 +2452,15 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     basic = tc.query("stock_basic", list_status="L", fields="ts_code")
     if basic is None or basic.empty:
         return None
-    codes = [
-        str(c) for c in basic["ts_code"].tolist()
-        if c is not None
-    ][:_NEW_HIGH_SAMPLE]
+    # 全市场种子随机抽样：此前取前 30 行恒为 000xxx SZ 小盘；等步长抽样
+    # 头锚定 0 且 [:30] 截断使词序尾部（920xxx 北交所）永不入样。
+    # 固定种子保证可复现。
+    import random
+    codes_all = sorted(str(c) for c in basic["ts_code"].tolist() if c is not None)
+    if not codes_all:
+        return None
+    rng = random.Random(_NEW_HIGH_SAMPLE_SEED)
+    codes = rng.sample(codes_all, min(_NEW_HIGH_SAMPLE, len(codes_all)))
     if not codes:
         return None
     def _fetch_daily_panel_row(ts_code: str) -> tuple[str, list[dict] | None]:
@@ -2409,7 +2474,7 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
         return ts_code, df.sort_values("trade_date").to_dict("records")
 
     panel: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, min(len(codes), _env_max_workers()))) as executor:
         futures = {executor.submit(_fetch_daily_panel_row, c): c for c in codes}
         for fut in as_completed(futures):
             try:

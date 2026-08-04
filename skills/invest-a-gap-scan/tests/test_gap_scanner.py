@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gap_scanner import GapInfo, _build_scan_hit, _check_unfilled, scan_all
+from gap_scanner import (GapInfo, _build_scan_hit, _check_unfilled, _find_candidate_gaps, scan_all)
 from skip_reasons import ExcludeReason, NonHitReason
 
 
@@ -756,3 +756,42 @@ class TestScanResultStructure:
         assert result.hits[0].ts_code == "000002.SZ"
         assert result.total_in_universe == 2
         assert result.total_with_kline == 2
+
+
+class TestZeroPriceBarGuard:
+    """F14: 零价 bar 不得触发除零，且单股异常不终止全池扫描。"""
+
+    def test_zero_prior_high_skips_candidate(self):
+        kline = _make_kline(n_bars=100)
+        # bar50 收盘为零价毛刺 → bar51 low(5.0) > bar50 high(0.0) 修复前触发除零
+        kline.loc[kline.index[50], "high_qfq"] = 0.0
+        kline.loc[kline.index[51], "low_qfq"] = 5.0
+        all_c, qualified = _find_candidate_gaps(kline, 60, 1.0)
+        assert all_c == []  # 零高 bar 不作为缺口前一日
+
+    def test_tiny_positive_high_spike_filtered(self):
+        """0.001 级毛刺 high 后接正常 bar → 天文 gap 被 _MAX_GAP_PCT 过滤。"""
+        kline = _make_kline(n_bars=100)
+        kline.loc[kline.index[50], "high_qfq"] = 0.001
+        kline.loc[kline.index[51], "low_qfq"] = 5.0
+        all_c, qualified = _find_candidate_gaps(kline, 60, 1.0)
+        # gap_pct ≈ +499,900% 超上限 → 不作为缺口候选
+        assert all_c == []
+
+    def test_scan_all_isolates_stock_exception(self, monkeypatch):
+        kline = _make_kline(n_bars=200)
+
+        def boom(*a, **k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr("gap_scanner._scan_stock", boom)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+        )
+        assert result.exclude_reasons[ExcludeReason.FETCH_ERROR] == 1
+        assert result.total_fetch_errors == 1
+        assert len(result.hits) == 0

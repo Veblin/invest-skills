@@ -178,8 +178,12 @@ def _safe_collect_valuation(symbol: str) -> dict:
         # data 可能是 list (Tushare 日频序列) 或 dict (腾讯快照)
         pe_list: list[float] = []
         pb_list: list[float] = []
+        pe_dates: list[str] = []
+        pb_dates: list[str] = []
         pe_current: float | None = None
         pb_current: float | None = None
+        pe_date: str | None = None
+        pb_date: str | None = None
         history_available = False
 
         if isinstance(data, list) and data:
@@ -187,23 +191,35 @@ def _safe_collect_valuation(symbol: str) -> dict:
             # Tushare 等源常为降序，升序后取末尾即为最新一期
             data = sort_kline_asc(data)
             for d in data:
+                td = str(d.get("trade_date") or "")
                 pe = safe_float(d.get("pe_ttm"))
                 pb = safe_float(d.get("pb"))
-                if pe is not None:
+                # 剔除亏损期负 PE/PB：负值参与 percentile_rank_inclusive（含边界、
+                # 不剔非正）会抬高"分位"与拉低中位数（CLAUDE.md P0-2 口径）
+                if pe is not None and pe > 0:
                     pe_list.append(pe)
-                if pb is not None:
+                    pe_dates.append(td)
+                if pb is not None and pb > 0:
                     pb_list.append(pb)
+                    pb_dates.append(td)
             if pe_list:
                 pe_current = pe_list[-1]
+                pe_date = pe_dates[-1]
             if pb_list:
                 pb_current = pb_list[-1]
+                pb_date = pb_dates[-1]
         elif isinstance(data, dict):
             pe_current = safe_float(data.get("pe_ttm"))
             pb_current = safe_float(data.get("pb"))
+            pe_date = str(data.get("trade_date") or "") or None
+            pb_date = pe_date
 
         return {
             "pe_current": pe_current,
             "pb_current": pb_current,
+            # 最新正 PE/PB 的报告期（亏损期回退旧值时供消费者识别陈旧）
+            "pe_date": pe_date,
+            "pb_date": pb_date,
             "pe_percentile": _percentile(pe_current, pe_list) if history_available else None,
             "pb_percentile": _percentile(pb_current, pb_list) if history_available else None,
             "pe_median": _median(pe_list) if pe_list else None,
@@ -485,13 +501,11 @@ def _status_from_raw(raw: dict) -> str:
     status = raw.get("status", "missing")
     meta = raw.get("_meta", {})
     if status == "available":
-        # 检查是否为降级源
-        sources = meta.get("all_sources", [])
-        primary_ok = any(
-            s.get("source_group") == "primary" and s.get("success")
-            for s in sources
-        )
-        return "available" if primary_ok else "degraded"
+        # 维度级 _meta 恒带 success（schema._best_meta：有 primary 源即 True，
+        # "merged:" 前缀源同样携带）；此前在 all_sources 条目上找
+        # source_group == "primary" 恒为假（SourceResult.to_dict 无此键，
+        # 该键只存在于维度级 _meta 且值为厂商前缀）→ 所有 available 被误降级
+        return "available" if meta.get("success") is not False else "degraded"
     if status == "partial":
         return "partial"
     return "missing"

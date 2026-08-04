@@ -400,7 +400,10 @@ def format_stock_table(stocks: list[dict], max_rows: int = 80) -> str:
     for s in display:
         latest = _latest_appearance(s) or {}
         mcap = _fmt_yi(latest.get("market_cap"))
-        turnover = f"{latest.get('turnover', 0):.1f}"
+        # turnover key 恒存在但值可为 None（safe_float 对 '--'/NaN 返回 None），
+        # .get 默认值不生效 → 直接 f-string 格式化 None 会 TypeError 崩溃 CLI
+        tv = latest.get("turnover")
+        turnover = f"{tv:.1f}" if tv is not None else "-"
         lines.append(
             f"| {s.get('symbol', '')} | {s.get('name', '')} | {s.get('max_consecutive', 0)} | "
             f"{s.get('total_appearances', 0)} | {s.get('sector', '-')} | "

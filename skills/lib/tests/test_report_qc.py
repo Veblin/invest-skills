@@ -19,6 +19,7 @@ from report_qc import (  # noqa: E402
     qc_latest,
     _check_etf_derived,
     _compute_overall,
+    _run_verify_layers,
 )
 
 # ── 可复用的合规样例（含 [事实]/[分析]/[证据强度] + 风险声明）──
@@ -403,3 +404,77 @@ class TestQcLatest:
 
     def test_missing_dir(self, tmp_path: Path):
         assert qc_latest(tmp_path / "nope") is None
+
+
+# ── 920xxx 北交所股票（F11）──────────────────────────────────────────────
+
+
+class TestBseStockClassification:
+    def test_920_prefix_classified_as_stock(self, tmp_path: Path):
+        p = _write(tmp_path, "920001-北交所公司", "2026-08-02-10-00-00.md", "# x\n")
+        assert detect_report_type(p) == "stock"
+
+    def test_159_etf_still_etf(self, tmp_path: Path):
+        p = _write(tmp_path, "159206-卫星ETF", "2026-08-02-10-00-00.md", "# x\n")
+        assert detect_report_type(p) == "etf"
+
+
+# ── verify-data 层异常不静默（F10）──────────────────────────────────────
+
+
+class TestVerifyLayersFailOnException:
+    """F10: quality/rigor 各自 try，异常 → fail 而非 skip（防假 PASS）。"""
+
+    @staticmethod
+    def _fake_load(failing: str):
+        class FakeCollector:
+            def collect_all(self, *a, **k):
+                if failing == "collect":
+                    raise RuntimeError("collect boom")
+                return {"dimensions": []}
+
+        class FakeQC:
+            def run_quality_check(self, result):
+                if failing == "quality":
+                    raise RuntimeError("quality boom")
+                return {"summary": {"overall": "pass"}, "metrics": []}
+
+        class FakeRigor:
+            def run_rigor(self, result):
+                if failing == "rigor":
+                    raise RuntimeError("rigor boom")
+                return []
+
+        def load(name):
+            return {"collector": FakeCollector(),
+                    "financial_rigor": FakeRigor(),
+                    "quality_check": FakeQC()}[name]
+
+        return load
+
+    def test_rigor_exception_fails_not_skip(self, tmp_path: Path, monkeypatch):
+        p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
+        monkeypatch.setattr("report_qc._load_stock_module", self._fake_load("rigor"))
+        layers = _run_verify_layers(p, "stock")
+        by_layer = {l.layer: l for l in layers}
+        assert by_layer["quality"].status == "pass"
+        assert by_layer["rigor"].status == "fail"
+        assert _compute_overall(layers) == "FAIL"
+
+    def test_collect_failure_fails_both_layers(self, tmp_path: Path, monkeypatch):
+        p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
+        monkeypatch.setattr("report_qc._load_stock_module", self._fake_load("collect"))
+        layers = _run_verify_layers(p, "stock")
+        by_layer = {l.layer: l for l in layers}
+        assert by_layer["quality"].status == "fail"
+        assert by_layer["rigor"].status == "fail"
+        assert _compute_overall(layers) == "FAIL"
+
+    def test_quality_exception_does_not_suppress_rigor(self, tmp_path: Path, monkeypatch):
+        p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
+        monkeypatch.setattr("report_qc._load_stock_module", self._fake_load("quality"))
+        layers = _run_verify_layers(p, "stock")
+        by_layer = {l.layer: l for l in layers}
+        assert by_layer["quality"].status == "fail"
+        assert by_layer["rigor"].status == "pass"  # rigor 仍运行
+        assert _compute_overall(layers) == "FAIL"

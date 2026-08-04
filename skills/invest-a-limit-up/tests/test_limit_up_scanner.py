@@ -1054,3 +1054,14 @@ class TestNormalizeSealTime:
         assert _normalize_seal_time("9") == ""
         assert _normalize_seal_time("ab") == ""
         assert _normalize_seal_time("") == ""
+
+
+class TestStockTableTurnoverNone:
+    """F15: 换手率 None（safe_float('--') 路径）渲染 '-'，不崩溃 CLI。"""
+
+    def test_turnover_none_renders_dash(self):
+        s = _make_stock("000001", "A", "X", max_consecutive=1, turnover=None)
+        table = format_stock_table([s], max_rows=10)
+        data_lines = [l for l in table.split("\n") if l.startswith("| 0")]
+        assert len(data_lines) == 1
+        assert "| - |" in data_lines[0]

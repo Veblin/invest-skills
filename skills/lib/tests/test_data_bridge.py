@@ -318,3 +318,70 @@ def test_ok_with_payload_cached(tmp_path, monkeypatch):
     second = data_bridge.get_quote("600176")
     assert "_from_cache" in second
     assert calls["n"] == 1
+
+
+# ── F13: get_macro 交易时段 TTL 覆盖（VIX/SOX 盘中例外）──────────────────
+
+
+def _fake_macro_collector(symbol, **kwargs):
+    return {"dimension": "macro", "display": "macro", "symbol": symbol,
+            "data": {"vix": 18.5, "pmi": 50.2}, "status": "ok",
+            "_meta": {"source": "fake"}}
+
+
+def test_macro_trading_hour_ttl_override(fake_bridge, monkeypatch):
+    """交易时段写入 4h TTL。"""
+    import json
+
+    monkeypatch.setattr(data_bridge, "_is_trading_hour", lambda: True)
+    monkeypatch.setattr(data_bridge, "_import_lib_module_attr",
+                        lambda module_name, attr: _fake_macro_collector)
+    data_bridge.get_macro(force=True)
+    entry = data_bridge._cache._cache_path("macro", "all")
+    assert entry.exists()
+    with open(entry) as f:
+        assert json.load(f)["ttl_seconds"] == 14400
+
+
+def test_macro_after_hours_default_ttl(fake_bridge, monkeypatch):
+    """盘后保持 7 天基准 TTL。"""
+    import json
+
+    monkeypatch.setattr(data_bridge, "_is_trading_hour", lambda: False)
+    monkeypatch.setattr(data_bridge, "_import_lib_module_attr",
+                        lambda module_name, attr: _fake_macro_collector)
+    data_bridge.get_macro(force=True)
+    entry = data_bridge._cache._cache_path("macro", "all")
+    with open(entry) as f:
+        assert json.load(f)["ttl_seconds"] == 604800
+
+
+def test_macro_trading_hour_read_path_refetches(fake_bridge, monkeypatch):
+    """F13 复评: 盘后写入(7d TTL) → 盘中读取按 4h 新鲜度上限判定过期并回源。"""
+    import json
+    import time
+
+    calls = {"n": 0}
+
+    def counting_collector(symbol, **kwargs):
+        calls["n"] += 1
+        return _fake_macro_collector(symbol, **kwargs)
+
+    monkeypatch.setattr(data_bridge, "_import_lib_module_attr",
+                        lambda module_name, attr: counting_collector)
+    # 构造 5 小时前写入的 macro 条目（盘后写入语义，7d TTL）
+    entry_path = data_bridge._cache._cache_path("macro", "all")
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry_path.write_text(json.dumps({
+        "data": {"vix": 18.5}, "ttl_seconds": 604800,
+        "fetched_at_epoch": time.time() - 5 * 3600,
+        "source": "data_bridge",
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(data_bridge, "_is_trading_hour", lambda: True)
+    data_bridge.get_macro()          # 盘中读取 → 4h max_age → 5h 旧条目过期回源
+    assert calls["n"] == 1
+
+    monkeypatch.setattr(data_bridge, "_is_trading_hour", lambda: False)
+    data_bridge.get_macro()          # 盘后读取 → 7d TTL → 命中缓存不回源
+    assert calls["n"] == 1

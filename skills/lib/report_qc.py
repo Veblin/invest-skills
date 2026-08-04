@@ -72,10 +72,13 @@ class QCResult:
 def _classify_by_symbol(symbol: str) -> str:
     """代码前缀 → 标的类型。
 
-    ETF 代码：159xxx（深市）、51xxxx/56xxxx/58xxxx（沪市）、920xxx（北证基金）。
-    其余按 A 股处理；无法识别前缀时按 stock 兜底（报告内容仍可 lint）。
+    ETF 代码：159xxx（深市）、51xxxx/56xxxx/58xxxx（沪市）。
+    920xxx 按 stock 处理（codes.py 将 920 路由至 .BJ——北交所 2025-10 起
+    既有基金也有股票，前缀无法区分；股票报告必须走 audit/quality/rigor，
+    基金报告误走 stock 检查只会产生可见告警，优于静默跳过）。
+    无法识别前缀时按 stock 兜底（报告内容仍可 lint）。
     """
-    if symbol.startswith(("159", "51", "56", "58", "920")):
+    if symbol.startswith(("159", "51", "56", "58")):
         return "etf"
     return "stock"
 
@@ -422,6 +425,10 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
     layers.append(audit)
 
     # ── quality + rigor：需要先采集数据 ──
+    # 注意：三层各自独立 try——rigor 异常不得被 quality 的 except 吞掉
+    # （此前共用 try 导致 rigor 抛异常时被替换为重复 quality-skip 层，
+    # _compute_overall 过滤 skip 后假 PASS）。异常一律 fail 不静默
+    # （遵循 _run_lint_layer "不可静默 skip" 原则）。
     if report_type == "stock" and symbol:
         try:
             collector = _load_stock_module("collector")
@@ -432,8 +439,17 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
 
             result = collector.collect_all(symbol, ["basic_info", "financials",
                                                     "quote", "valuation", "kline"])
+        except Exception as exc:  # pragma: no cover
+            # 采集失败：两层都无法执行 → 两层都 fail
+            for layer_name in ("quality", "rigor"):
+                layers.append(LayerResult(
+                    layer=layer_name, status="fail",
+                    details=[{"id": f"{layer_name}-unavailable", "severity": "error",
+                              "message": f"collect_all 失败，{layer_name} 未执行: {exc}"}]))
+            return layers
 
-            # quality 层
+        # quality 层
+        try:
             qc = run_quality_check(result)
             q_overall = (qc.get("summary") or {}).get("overall", "pass")
             quality = LayerResult(layer="quality", status="pass")
@@ -448,9 +464,14 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
                 quality.status = "fail"
             elif q_overall == "warn":
                 quality.status = "warn"
-            layers.append(quality)
+        except Exception as exc:  # pragma: no cover
+            quality = LayerResult(layer="quality", status="fail",
+                                  details=[{"id": "quality-unavailable", "severity": "error",
+                                            "message": f"quality 层异常: {exc}"}])
+        layers.append(quality)
 
-            # rigor 层
+        # rigor 层（quality 异常不压制 rigor 运行）
+        try:
             reports = run_rigor(result)
             rigor = LayerResult(layer="rigor", status="pass")
             rigor.details = [
@@ -464,11 +485,11 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
                 rigor.status = "fail"
             elif any(r.status == "warn" for r in reports):
                 rigor.status = "warn"
-            layers.append(rigor)
         except Exception as exc:  # pragma: no cover
-            layers.append(LayerResult(layer="quality", status="skip",
-                                      details=[{"id": "quality-unavailable", "severity": "info",
-                                                "message": f"quality/rigor 不可用: {exc}"}]))
+            rigor = LayerResult(layer="rigor", status="fail",
+                                details=[{"id": "rigor-unavailable", "severity": "error",
+                                          "message": f"rigor 层异常: {exc}"}])
+        layers.append(rigor)
     return layers
 
 

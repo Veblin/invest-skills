@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from datetime import datetime
@@ -172,6 +173,30 @@ def cross_validate_dim(
     }
 
 
+def _dim_has_data(dim: dict) -> bool:
+    """维度是否有实质数据：None 与空 list/dict 均视为无数据。
+
+    采集器可能合法返回 data=[]（非交易日 quote 空行、窗口过滤后空列表），
+    `is not None` 判断会把空维度选为主数据并连带其 status/_meta。
+    """
+    data = dim.get("data")
+    if data is None:
+        return False
+    if isinstance(data, (list, dict)) and len(data) == 0:
+        return False
+    return True
+
+
+def _source_has_data(s: dict) -> bool:
+    """all_sources 条目是否有实质数据（同 _dim_has_data 口径）。"""
+    data = s.get("data")
+    if data is None:
+        return False
+    if isinstance(data, (list, dict)) and len(data) == 0:
+        return False
+    return True
+
+
 def merge_collections(collections: list[dict]) -> dict:
     """合并多个 collection JSON 为一。
 
@@ -200,14 +225,19 @@ def merge_collections(collections: list[dict]) -> dict:
         if len(dims) == 1:
             result_dimensions.append(dims[0])
         else:
-            # 多源 → 保留第一条作为主数据，标注多源
-            primary = dims[0].copy()
+            # 多源 → 选取首个有数据的维度作为主数据（连带 status/_meta 跟随，
+            # 避免 status 与 data 错配），标注多源
+            chosen = next((d for d in dims if _dim_has_data(d)), dims[0])
+            # deepcopy：后续写入 alternative_sources/all_sources/multi_source_count
+            # 等合并产物，不得原地污染输入 collection 共享的 _meta（D7）
+            primary = copy.deepcopy(chosen)
             alt_sources = [
                 {
                     "source": d.get("_meta", {}).get("source", "unknown"),
                     "fetched_at": d.get("_meta", {}).get("fetched_at", ""),
                 }
-                for d in dims[1:]
+                for d in dims
+                if d is not chosen
             ]
             primary.setdefault("_meta", {})["alternative_sources"] = alt_sources
             primary["_meta"]["multi_source_count"] = len(dims)
@@ -218,22 +248,48 @@ def merge_collections(collections: list[dict]) -> dict:
             for d in dims:
                 for s in d.get("_meta", {}).get("all_sources", []):
                     name = s.get("source") or "unknown"
-                    if s.get("data") is not None:
+                    if _source_has_data(s):
                         seen[name] = s
             if seen:
                 primary.setdefault("_meta", {})["all_sources"] = list(seen.values())
                 primary["_meta"]["source_count"] = sum(
-                    1 for s in seen.values() if s.get("data") is not None)
+                    1 for s in seen.values() if _source_has_data(s))
+            # research 维度按 key 合并 research_summary（first-non-None per key）：
+            # 各渲染消费者（_concise/_render_dcf/analysis_templates）只读
+            # research_summary，all_sources 并集不参与渲染——B 采集器独有的
+            # forecast/业绩预告此前在 merged 报告中静默消失。
+            # 只从"有数据的维度"合并（失败采集器的骨架默认值
+            # latest_ratings:[]/profit_forecasts:[]/status:'no_data' 不得遮蔽
+            # 健康采集器的真实数据）；空容器（[]/{}/''）视为缺失。
+            if dim_name == "research":
+                merged_summary: dict = {}
+                for d in dims:
+                    if not _dim_has_data(d):
+                        continue
+                    sm = d.get("research_summary")
+                    if not isinstance(sm, dict):
+                        continue
+                    for k, v in sm.items():
+                        if v in (None, [], {}, ""):
+                            continue
+                        if k not in merged_summary or merged_summary[k] in (None, [], {}, ""):
+                            merged_summary[k] = v
+                if merged_summary:
+                    primary["research_summary"] = merged_summary
             result_dimensions.append(primary)
 
-            # 交叉验证（仅对比前两个源）
-            if len(dims) >= 2 and dim_name in CRITICAL_FIELDS:
+            # 交叉验证：对比两个"有数据的"源（chosen 之后首个有数据维度）；
+            # 此前硬编码 dims[0] vs dims[1]，dims[0] 无数据时真实分歧静默消失
+            data_bearing = [d for d in dims if _dim_has_data(d)]
+            if len(data_bearing) >= 2 and dim_name in CRITICAL_FIELDS:
                 cv = cross_validate_dim(
                     dim_name,
-                    dims[0].get("data"),
-                    dims[1].get("data"),
-                    dims[0].get("_meta", {}).get("source", str(dims[0].get("_meta", {}))),
-                    dims[1].get("_meta", {}).get("source", str(dims[1].get("_meta", {}))),
+                    data_bearing[0].get("data"),
+                    data_bearing[1].get("data"),
+                    data_bearing[0].get("_meta", {}).get("source",
+                                                         str(data_bearing[0].get("_meta", {}))),
+                    data_bearing[1].get("_meta", {}).get("source",
+                                                         str(data_bearing[1].get("_meta", {}))),
                 )
                 if cv["max_diff_pct"] > 0:
                     cv_results.append(cv)
@@ -248,9 +304,12 @@ def merge_collections(collections: list[dict]) -> dict:
         "dimensions": result_dimensions,
         "summary": {
             "total": len(all_dim_names),
+            # 镜像 collect_all 的 has_data 语义：'failed' 状态从未被发射
+            # （状态只有 available/partial/missing），旧判断恒真 → available 恒等于 total
             "available": sum(
                 1 for d in result_dimensions
-                if d.get("status") != "failed"
+                if _dim_has_data(d)
+                and d.get("status") in ("available", "partial")
             ),
             "multi_source_count": len(multi_source_dims),
             "multi_source_dims": multi_source_dims,

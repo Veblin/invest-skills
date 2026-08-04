@@ -135,6 +135,14 @@ def _baostock_code(symbol: str) -> str:
 
 # ---- 并行执行辅助 ----
 
+def _env_max_workers(default: int = 8) -> int:
+    """INVEST_MAX_WORKERS 环境变量 → worker 数（钳制下限 1，防 0/负值挂死信号量）。"""
+    try:
+        return max(1, int(os.environ.get("INVEST_MAX_WORKERS", str(default))))
+    except ValueError:
+        return max(1, default)
+
+
 def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
                           dimension: str,
                           deadline_sec: float | None = None) -> list[SourceResult]:
@@ -160,8 +168,9 @@ def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
         return []
 
     n = len(tasks)
-    # max_workers=8：平衡并发效率与 Tushare/akshare 限流（可通过 INVEST_MAX_WORKERS 环境变量覆盖）
-    max_w = min(n, int(os.environ.get("INVEST_MAX_WORKERS", "8")))
+    # max_workers=8：平衡并发效率与 Tushare/akshare 限流（可通过 INVEST_MAX_WORKERS 环境变量覆盖；
+    # 钳制下限 1：0/负值会让 Semaphore(0) 永久关闭 → 全部 worker 挂死）
+    max_w = min(n, _env_max_workers())
     if deadline_sec is None:
         deadline_sec = env.SOURCE_DEADLINE_SEC
     if deadline_sec is not None and deadline_sec <= 0:

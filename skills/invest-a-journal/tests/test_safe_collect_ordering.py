@@ -7,7 +7,7 @@ v0.2.3 review fix #2：修复前降序数据被 data[-1] 当"最新"，报价滞
 from __future__ import annotations
 
 import query_data
-from query_data import _safe_collect_kline, _safe_collect_quote, _safe_collect_valuation
+from query_data import (_safe_collect_kline, _safe_collect_quote, _safe_collect_valuation, _status_from_raw)
 
 
 def _desc_rows() -> list[dict]:
@@ -70,3 +70,59 @@ class TestSafeCollectValuationOrdering:
         assert r["pb_current"] == 1.2
         assert r["pe_median"] == 8.5
         assert r["history_available"] is True
+
+
+class TestSafeCollectValuationNegativeFilter:
+    """F3: 亏损期负 PE 不得进入分位/中位数总体（CLAUDE.md P0-2 口径）。"""
+
+    def test_negative_pe_excluded(self, monkeypatch):
+        rows = [
+            {"trade_date": "20260101", "pe_ttm": 8.0, "pb": 1.0},
+            {"trade_date": "20260201", "pe_ttm": -3.0, "pb": 0.8},  # 亏损期
+            {"trade_date": "20260301", "pe_ttm": 9.0, "pb": 1.1},
+        ]
+        monkeypatch.setattr(query_data, "get_valuation", lambda s: {
+            "data": rows, "status": "available",
+            "_meta": {"source": "tushare.daily_basic", "success": True},
+        })
+        r = _safe_collect_valuation("600176")
+        assert r["pe_current"] == 9.0
+        assert r["pe_median"] == 8.5  # (8+9)/2，负值不拖低中位数
+        assert r["pe_percentile"] == 100.0
+        assert r["history_rows"] == 2
+        assert r["pe_date"] == "20260301"  # 最新正 PE 的报告期
+
+    def test_latest_loss_current_falls_back_to_last_positive(self, monkeypatch):
+        rows = [
+            {"trade_date": "20260101", "pe_ttm": -5.0, "pb": 0.7},
+            {"trade_date": "20260201", "pe_ttm": 8.0, "pb": 1.0},
+            {"trade_date": "20260301", "pe_ttm": -2.0, "pb": 0.9},  # 最新期亏损
+        ]
+        monkeypatch.setattr(query_data, "get_valuation", lambda s: {
+            "data": rows, "status": "available",
+            "_meta": {"source": "tushare.daily_basic", "success": True},
+        })
+        r = _safe_collect_valuation("600176")
+        assert r["pe_current"] == 8.0  # 最近正 PE（与 valuation.py 一致）
+        assert r["pe_date"] == "20260201"  # 亏损期回退旧值仍带日期上下文
+        assert r["pe_median"] == 8.0
+        assert r["pe_percentile"] == 100.0
+
+
+class TestStatusFromRaw:
+    """F9b: available 判定用维度级 success（source_group 恒不存在于源条目）。"""
+
+    def test_available_with_success(self):
+        assert _status_from_raw({"status": "available",
+                                 "_meta": {"success": True}}) == "available"
+
+    def test_available_without_success_degraded(self):
+        assert _status_from_raw({"status": "available",
+                                 "_meta": {"success": False}}) == "degraded"
+
+    def test_partial_passthrough(self):
+        assert _status_from_raw({"status": "partial", "_meta": {}}) == "partial"
+
+    def test_missing_default(self):
+        assert _status_from_raw({"status": "missing"}) == "missing"
+        assert _status_from_raw({}) == "missing"

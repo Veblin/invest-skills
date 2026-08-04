@@ -263,10 +263,13 @@ def _apply_qfq(rows: list[dict], factors: dict[str, float]) -> list[dict] | None
 
     公式与 skills/invest-a-gap-scan/scripts/lib/qfq.py 一致；vol/amount 不变。
     复权因子缺失/非法 → 整体拒绝（返回 None，与 gap-scan 的密集日频要求一致）。
+    注意：锚定"最新日"按 trade_date 取最大行（而非 rows[-1]）——Tushare 日线
+    降序返回，rows[-1] 是最旧 bar，曾导致整个序列被 f_oldest 错标度。
     """
     if not rows or not factors:
         return None
-    latest = factors.get(str(rows[-1].get("trade_date")))
+    newest = max(rows, key=lambda r: str(r.get("trade_date", "")))
+    latest = factors.get(str(newest.get("trade_date")))
     if latest is None or latest <= 0:
         return None
     out: list[dict] = []

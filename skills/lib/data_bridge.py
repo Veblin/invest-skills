@@ -19,11 +19,11 @@ import logging
 from typing import Any, Callable
 
 try:
-    from .cache import DataCache, default_cache  # 同包相对导入（正常路径）
+    from .cache import DataCache, default_cache, _is_trading_hour  # 同包相对导入（正常路径）
 except ImportError:
     # 降级：sys.path 裸导入（当 __package__ 未设置时，如直接运行脚本）
     # 注意：此路径仅在 skills/lib/ 已在 sys.path 时有效
-    from cache import DataCache, default_cache  # noqa: F811
+    from cache import DataCache, default_cache, _is_trading_hour  # noqa: F811
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ DEFAULT_TTL: dict[str, int] = {
     "kline":         4 * 3600,     # K 线：4 小时
     "financials":    7 * 86400,    # 财务报表：7 天
     "valuation":     7 * 86400,    # 估值分析：7 天（独立维度，勿与 financials 共用槽位）
-    "macro":         7 * 86400,    # 宏观指标：7 天（VIX 盘中例外）
+    "macro":         7 * 86400,    # 宏观指标：7 天（A 股交易时段 TTL 覆盖为 4h，见 get_macro）
     "basic_info":   30 * 86400,    # 基本信息：30 天
     "northbound":    1 * 86400,    # 北向资金：1 天
     "margin":        1 * 86400,    # 两融余额：1 天
@@ -77,6 +77,7 @@ def _fetch_dimension(
     *args: Any,
     force: bool = False,
     ttl_override: int | None = None,
+    max_age_seconds: int | None = None,
     **kwargs: Any,
 ) -> Any:
     """通用缓存包装器：先查缓存，miss 则回源采集并写入缓存。
@@ -92,7 +93,11 @@ def _fetch_dimension(
     force : bool
         为 True 时跳过缓存直接回源。
     ttl_override : int | None
-        覆盖 DEFAULT_TTL 的自定义 TTL（秒）。
+        覆盖 DEFAULT_TTL 的自定义 TTL（秒，写入时烘焙）。
+    max_age_seconds : int | None
+        读路径新鲜度上限（秒）：覆盖条目自带 TTL，过期即回源。
+        与 ttl_override 互补——写入时点不在交易时段时，读路径仍能
+        强制盘中刷新。
 
     Returns
     -------
@@ -100,7 +105,7 @@ def _fetch_dimension(
         collector_func 的返回值，或缓存中的 data 字段。
     """
     if not force:
-        cached = _cache.get(dimension, symbol)
+        cached = _cache.get(dimension, symbol, max_age_seconds=max_age_seconds)
         if cached is not None:
             logger.debug("cache hit: %s:%s", dimension, symbol)
             return cached
@@ -212,10 +217,24 @@ def get_northbound(symbol: str, *, force: bool = False) -> dict | None:
 
 
 def get_macro(*, force: bool = False) -> dict | None:
-    """宏观快照（缓存 7d）。"""
+    """宏观快照（缓存 7d；A 股交易时段 9:30-15:00 新鲜度上限 4h——VIX/SOX 盘中有更新需求）。
+
+    注意：TTL 在写入时烘焙（cache.set ttl_seconds），盘后保持 7d 基准；
+    读路径 max_age_seconds 与写入时点无关——盘后/盘前写入的条目在
+    交易时段读取时按 4h 新鲜度判定过期并回源（叠加 _effective_ttl ×0.8
+    乘子 → 有效 3.2h），保证 9:30 取数恒为隔夜新鲜数据。
+    """
     collect_macro_context = _import_lib_module_attr("macro", "collect_macro_context")  # noqa: E402
     # symbol='' 是故意的：宏观数据（PMI/CPI/LPR/VIX）非个股维度，不按 symbol 筛选
-    return _fetch_dimension("macro", "all", collect_macro_context, "", force=force)
+    if _is_trading_hour():
+        ttl_override = 4 * 3600
+        max_age_seconds = 4 * 3600
+    else:
+        ttl_override = None
+        max_age_seconds = None
+    return _fetch_dimension("macro", "all", collect_macro_context, "",
+                            force=force, ttl_override=ttl_override,
+                            max_age_seconds=max_age_seconds)
 
 
 def get_microstructure(*, force: bool = False) -> dict | None:
