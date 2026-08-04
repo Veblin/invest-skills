@@ -237,6 +237,71 @@ def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
     return None
 
 
+def _q_tushare_adj_factor(symbol: str, start_date: str = "",
+                          end_date: str = "") -> dict[str, float] | None:
+    """Tushare 复权因子，返回 {trade_date: adj_factor}（前复权计算基础）。"""
+    config, tc = _require_tushare()
+    df = tc.query("adj_factor", ts_code=_ts_code(symbol),
+                  start_date=start_date or _days_ago(400),
+                  end_date=end_date or _today())
+    if df is None or df.empty:
+        return None
+    factors: dict[str, float] = {}
+    for r in df.to_dict("records"):
+        td = str(r.get("trade_date") or "")
+        f = r.get("adj_factor")
+        if td and f is not None:
+            try:
+                factors[td] = float(f)
+            except (TypeError, ValueError):
+                pass
+    return factors or None
+
+
+def _apply_qfq(rows: list[dict], factors: dict[str, float]) -> list[dict] | None:
+    """前复权：qfq_price = raw_price × factor / latest_factor（以最新日为基准）。
+
+    公式与 skills/invest-a-gap-scan/scripts/lib/qfq.py 一致；vol/amount 不变。
+    复权因子缺失/非法 → 整体拒绝（返回 None，与 gap-scan 的密集日频要求一致）。
+    """
+    if not rows or not factors:
+        return None
+    latest = factors.get(str(rows[-1].get("trade_date")))
+    if latest is None or latest <= 0:
+        return None
+    out: list[dict] = []
+    for r in rows:
+        f = factors.get(str(r.get("trade_date")))
+        if f is None or f <= 0:
+            return None  # 缺失 → 整体拒绝
+        ratio = f / latest
+        out.append({
+            **r,
+            "open": round(r["open"] * ratio, 4) if r.get("open") is not None else None,
+            "high": round(r["high"] * ratio, 4) if r.get("high") is not None else None,
+            "low": round(r["low"] * ratio, 4) if r.get("low") is not None else None,
+            "close": round(r["close"] * ratio, 4) if r.get("close") is not None else None,
+        })
+    return out
+
+
+def _q_tushare_daily_qfq(symbol: str, start_date: str = "",
+                         end_date: str = "") -> list[dict] | None:
+    """Tushare 日K线（前复权，adj_factor 自算）。
+
+    统一 K 线复权语义：技术指标（MA/BOLL/RSI）在不复权价格上会被除权日
+    跳变污染；前复权使历史价格连续。多一次 adj_factor 调用，受 Tushare
+    限流约束，由同日缓存（_kline_cache）消化。
+    """
+    rows = _q_tushare_daily(symbol, start_date=start_date, end_date=end_date)
+    if not rows:
+        return None
+    factors = _q_tushare_adj_factor(symbol, start_date=start_date, end_date=end_date)
+    if factors is None:
+        return None
+    return _apply_qfq(rows, factors)
+
+
 def _normalize_northbound_records(records: list[dict], source: str) -> list[dict]:
     """统一主力资金/北向净额为「元」。
 
@@ -346,7 +411,7 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
                                         period="daily",
                                         start_date=sd_fmt,
                                         end_date=ed_fmt,
-                                        adjust="",
+                                        adjust="qfq",  # 前复权：统一复权语义
                                         timeout=10)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
@@ -669,7 +734,7 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
                 bs_code,
                 "date,open,high,low,close,volume,amount",
                 start_date=sd_fmt, end_date=ed_fmt,
-                frequency="d", adjustflag="3",
+                frequency="d", adjustflag="2",  # 前复权：统一复权语义（gap-scan 同款）
             )
             if rs.error_code != "0":
                 logger.warning("baostock query failed: %s", rs.error_msg)

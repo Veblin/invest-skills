@@ -208,6 +208,29 @@ def is_tickflow_available() -> bool:
         return False
 
 
+def tickflow_kline_enabled() -> bool:
+    """tickflow K 线开关。默认关闭：免费 tier 慢且曾与其余源复权语义错配，
+    其前复权价值已由 tushare adj_factor 自算（_q_tushare_daily_qfq）覆盖。
+    INVEST_ENABLE_TICKFLOW=1/true 时启用。"""
+    return (os.environ.get("INVEST_ENABLE_TICKFLOW", "0")
+            .strip().lower() in ("1", "true", "on", "yes"))
+
+
+def baostock_kline_enabled() -> bool:
+    """baostock K 线开关。默认 auto：仅当 Tushare 不可用时启用（兜底，
+    与 gap-scan 的 create_source("auto") 语义一致）。
+    INVEST_ENABLE_BAOSTOCK=1 强制启用；=0 禁用。"""
+    raw = os.environ.get("INVEST_ENABLE_BAOSTOCK", "auto").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    # auto：Tushare 可用时 baostock 只作兜底
+    if not is_baostock_available():
+        return False
+    return not is_tushare_available(get_config())
+
+
 def is_tencent_available() -> bool:
     """检测腾讯行情是否可达（用于 diagnose 报告；与 collector 一致强制直连）。"""
     from .proxy import no_proxy_session

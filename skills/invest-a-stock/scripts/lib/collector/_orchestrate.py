@@ -147,40 +147,50 @@ def collect_northbound(symbol: str) -> dict:
 
 
 def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
-    """日K线。并行：Tushare + akshare + baostock。
+    """日K线。并行：Tushare + akshare + baostock(兜底) [+ tickflow(可选)]。
+
+    复权语义：全部源统一前复权（tushare adj_factor 自算 / akshare adjust=qfq /
+    baostock adjustflag=2 / tickflow forward）——技术指标（MA/BOLL/RSI）在不复权
+    价格上会被除权日跳变污染，前复权使历史价格连续，且跨源校验不再因语义
+    错配产生 divergence 噪音。
 
     默认窗口 400 自然日，覆盖 MA250（需 ≥250 个交易日缓冲）。
     --deep 模式通过 invest.py 传入 start_date=_days_ago(730)。
     同日重复采集命中 _kline_cache（TTL 1 天，INVEST_KLINE_CACHE=0 禁用）；
     quote 维度（近实时行情）有意不进缓存。
+    源开关：baostock 默认 auto（仅无 Tushare token 时启用，INVEST_ENABLE_BAOSTOCK
+    可覆盖）；tickflow 默认关闭（INVEST_ENABLE_TICKFLOW=1 启用）。
     """
     sd = start_date or _days_ago(400)
     ed = end_date or _today()
 
     from . import _kline_cache  # 惰性导入，避免包初始化开销
 
-    def _cached(source: str, fetch: Callable[[], list | None]) -> list | None:
-        return _kline_cache.load_or_fetch(symbol, source, sd, ed, fetch)
+    def _cached(source: str, fetch: Callable[[], list | None],
+                qfq: bool = True) -> list | None:
+        return _kline_cache.load_or_fetch(symbol, source, sd, ed, fetch, qfq=qfq)
 
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.daily", lambda: _cached("tushare.daily",
-                      lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed))))
+                      lambda: _q_tushare_daily_qfq(symbol, start_date=sd, end_date=ed))))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
-    if env.is_baostock_available():
+    if env.baostock_kline_enabled():
         tasks.append(("baostock.kline", lambda: _cached("baostock.kline",
                       lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed))))
-    if env.is_tickflow_available():
+    if env.tickflow_kline_enabled():
         tasks.append(("tickflow.kline", lambda: _cached("tickflow.kline",
                       lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed))))
 
     def _kline_qp(_results: list) -> dict[str, str]:
         qp_map: dict[str, str] = {
-            "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed),
+            "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed)
+            + " + adj_factor(前复权自算)",
             "akshare.stock_zh_a_hist": _qp_akshare(
-                "stock_zh_a_hist", symbol, period="daily", start_date=sd, end_date=ed),
+                "stock_zh_a_hist", symbol, period="daily",
+                start_date=sd, end_date=ed, adjust="qfq"),
         }
         if env.is_baostock_available():
             qp_map["baostock.kline"] = _qp_baostock(symbol, sd, ed)

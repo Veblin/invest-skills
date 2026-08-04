@@ -1,7 +1,8 @@
 """同日 K 线缓存（pickle，源隔离）。
 
-路径: {STORE_DIR}/collect_kline_cache/{yyyymmdd}/{source}/{symbol}__{sd}_{ed}.pkl
-- 键含 source：tushare.daily/akshare 不复权 vs tickflow.kline 前复权 互不污染
+路径: {STORE_DIR}/collect_kline_cache/{yyyymmdd}/{source}/{symbol}__{sd}_{ed}{__qfq}.pkl
+- 键含 source：tushare.daily/akshare/baostock 与 tickflow.kline 互不污染
+- 键含 qfq 标记：前复权语义变更时新键生效，不复权旧缓存自动失效
 - 键含 sd/ed 查询窗口：默认 400 日 与 --deep 730 日 互不误用（只按 symbol 缓存
   会导致 deep 模式复用 400 日截断数据）
 - TTL 1 天（mtime）：同日重复采集命中；次日必然 miss（与 gap-scan 语义一致）
@@ -39,18 +40,19 @@ def _cache_root() -> Path:
 
 
 def _cache_path(symbol: str, source: str, sd: str, ed: str,
-                date_str: str) -> Path:
+                date_str: str, qfq: bool = False) -> Path:
+    marker = "__qfq" if qfq else ""
     return (_cache_root() / date_str / source
-            / f"{symbol}__{sd}_{ed}.pkl")
+            / f"{symbol}__{sd}_{ed}{marker}.pkl")
 
 
 def load(symbol: str, source: str, sd: str, ed: str,
-         date_str: str | None = None) -> list[dict] | None:
+         date_str: str | None = None, qfq: bool = False) -> list[dict] | None:
     """读取缓存；未启用/不存在/过期/损坏均返回 None（视为未命中）。"""
     if not enabled():
         return None
     date_str = date_str or shanghai_today()
-    path = _cache_path(symbol, source, sd, ed, date_str)
+    path = _cache_path(symbol, source, sd, ed, date_str, qfq=qfq)
     try:
         if not path.exists():
             return None
@@ -63,12 +65,13 @@ def load(symbol: str, source: str, sd: str, ed: str,
 
 
 def save(symbol: str, source: str, sd: str, ed: str,
-         rows: list[dict], date_str: str | None = None) -> None:
+         rows: list[dict], date_str: str | None = None,
+         qfq: bool = False) -> None:
     """写入缓存；失败不影响采集。"""
     if not enabled() or not rows:
         return
     date_str = date_str or shanghai_today()
-    path = _cache_path(symbol, source, sd, ed, date_str)
+    path = _cache_path(symbol, source, sd, ed, date_str, qfq=qfq)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
@@ -89,17 +92,22 @@ def cleanup_old() -> None:
 
 
 def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
-                  fetch: Callable[[], list[dict] | None]) -> list[dict] | None:
-    """collect_kline 的包装：命中返回缓存，未命中拉取后落盘。全路径异常安全。"""
+                  fetch: Callable[[], list[dict] | None],
+                  qfq: bool = False) -> list[dict] | None:
+    """collect_kline 的包装：命中返回缓存，未命中拉取后落盘。全路径异常安全。
+
+    qfq: 数据是否为前复权语义（写入缓存键，避免新旧语义混用）。
+    """
     if not enabled():
         return fetch()
-    hit = load(symbol, source, sd, ed)
+    hit = load(symbol, source, sd, ed, qfq=qfq)
     if hit is not None:
-        logger.info("kline cache hit: %s %s %s..%s", source, symbol, sd, ed)
+        logger.info("kline cache hit: %s %s %s..%s%s", source, symbol, sd, ed,
+                    " (qfq)" if qfq else "")
         return hit
     data = fetch()
     if data:
-        save(symbol, source, sd, ed, data)
+        save(symbol, source, sd, ed, data, qfq=qfq)
     return data
 
 
