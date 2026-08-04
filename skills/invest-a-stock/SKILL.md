@@ -3,6 +3,8 @@
 
 
 
+
+
 name: invest-a-stock
 version: "0.2.3"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
