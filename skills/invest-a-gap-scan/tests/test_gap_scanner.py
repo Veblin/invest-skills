@@ -778,6 +778,29 @@ class TestZeroPriceBarGuard:
         # gap_pct ≈ +499,900% 超上限 → 不作为缺口候选
         assert all_c == []
 
+    def test_relisting_giant_gap_not_filtered(self):
+        """复牌首日真实大跳空（>50%）不被 _MAX_GAP_PCT 拦截（盐湖 +347% 场景）。
+
+        F1: 前一日在停牌表内 → 放行大缺口并保留跨停牌标注机会；
+        同场景无停牌信息时毛刺拦截仍生效。
+        """
+        dates = [d.strftime("%Y%m%d")
+                 for d in pd.date_range("2025-01-01", periods=100, freq="B")]
+        kline = _make_kline(n_bars=100)
+        # bar50 停牌残留低基准，bar51 复牌日 low 跳空 +347%
+        kline.loc[kline.index[50], "high_qfq"] = 1.0
+        kline.loc[kline.index[51], "low_qfq"] = 4.47
+        all_c, qualified = _find_candidate_gaps(
+            kline, 60, 1.0,
+            suspensions=[dates[50]], trade_cal=dates,
+        )
+        assert len(all_c) == 1
+        assert all_c[0][1].gap_pct > 50.0
+        assert all_c[0][1].gap_date == dates[51]
+        # 无停牌信息 → 仍按毛刺拦截
+        all_c2, _ = _find_candidate_gaps(kline, 60, 1.0)
+        assert all_c2 == []
+
     def test_scan_all_isolates_stock_exception(self, monkeypatch):
         kline = _make_kline(n_bars=200)
 

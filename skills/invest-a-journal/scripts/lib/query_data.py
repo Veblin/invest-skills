@@ -26,8 +26,8 @@ from data_bridge import (  # noqa: E402
     get_valuation,
 )
 from lib.nums import safe_float  # noqa: E402
-from lib.stats import median, percentile_rank_inclusive  # noqa: E402
 from lib.technical import compute, sort_kline_asc  # noqa: E402
+from lib.valuation import valuation_summary  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -194,8 +194,8 @@ def _safe_collect_valuation(symbol: str) -> dict:
                 td = str(d.get("trade_date") or "")
                 pe = safe_float(d.get("pe_ttm"))
                 pb = safe_float(d.get("pb"))
-                # 剔除亏损期负 PE/PB：负值参与 percentile_rank_inclusive（含边界、
-                # 不剔非正）会抬高"分位"与拉低中位数（CLAUDE.md P0-2 口径）
+                # 剔除亏损期负 PE/PB：负值参与分位会抬高"分位"与拉低中位数
+                # （CLAUDE.md P0-2 口径；与 invest-a-stock valuation.py 一致）
                 if pe is not None and pe > 0:
                     pe_list.append(pe)
                     pe_dates.append(td)
@@ -214,16 +214,24 @@ def _safe_collect_valuation(symbol: str) -> dict:
             pe_date = str(data.get("trade_date") or "") or None
             pb_date = pe_date
 
+        # 分位/中位数委托 invest-a-stock lib.valuation.valuation_summary：
+        # >0 过滤 + 严格 percentile_rank + median 的唯一实现（journal 此前
+        # 自维护一份 percentile_rank_inclusive 副本，同一缓存两个分位语义）
+        summary = valuation_summary(
+            pe_list, pb_list, current_pe=pe_current, current_pb=pb_current)
+        pe_stat = summary.get("pe", {})
+        pb_stat = summary.get("pb", {})
+
         return {
             "pe_current": pe_current,
             "pb_current": pb_current,
             # 最新正 PE/PB 的报告期（亏损期回退旧值时供消费者识别陈旧）
             "pe_date": pe_date,
             "pb_date": pb_date,
-            "pe_percentile": _percentile(pe_current, pe_list) if history_available else None,
-            "pb_percentile": _percentile(pb_current, pb_list) if history_available else None,
-            "pe_median": _median(pe_list) if pe_list else None,
-            "pb_median": _median(pb_list) if pb_list else None,
+            "pe_percentile": pe_stat.get("pct") if history_available else None,
+            "pb_percentile": pb_stat.get("pct") if history_available else None,
+            "pe_median": pe_stat.get("median"),
+            "pb_median": pb_stat.get("median"),
             "history_available": history_available,
             "history_rows": len(pe_list),
             "source": meta.get("source", "unknown"),
@@ -484,16 +492,6 @@ def _summarize_quality(result: dict) -> None:
         dq["overall"] = "partial"
 
     result["data_quality"] = dq
-
-
-def _percentile(value: float | None, population: list[float]) -> float | None:
-    """含边界分位（journal 语义：<=、四舍五入 1 位）。委托 skills/lib/stats。"""
-    return percentile_rank_inclusive(population, value, round_to=1)
-
-
-def _median(population: list[float]) -> float | None:
-    """中位数；空序列返回 None。委托 skills/lib/stats。"""
-    return median(population)
 
 
 def _status_from_raw(raw: dict) -> str:

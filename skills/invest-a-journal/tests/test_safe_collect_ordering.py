@@ -88,7 +88,8 @@ class TestSafeCollectValuationNegativeFilter:
         r = _safe_collect_valuation("600176")
         assert r["pe_current"] == 9.0
         assert r["pe_median"] == 8.5  # (8+9)/2，负值不拖低中位数
-        assert r["pe_percentile"] == 100.0
+        # 严格 percentile_rank（统一 valuation.py 语义）：count(<9.0)/2 = 50.0
+        assert r["pe_percentile"] == 50.0
         assert r["history_rows"] == 2
         assert r["pe_date"] == "20260301"  # 最新正 PE 的报告期
 
@@ -106,7 +107,8 @@ class TestSafeCollectValuationNegativeFilter:
         assert r["pe_current"] == 8.0  # 最近正 PE（与 valuation.py 一致）
         assert r["pe_date"] == "20260201"  # 亏损期回退旧值仍带日期上下文
         assert r["pe_median"] == 8.0
-        assert r["pe_percentile"] == 100.0
+        # 严格 percentile_rank：单样本总体 count(<8.0)/1 = 0.0
+        assert r["pe_percentile"] == 0.0
 
 
 class TestStatusFromRaw:

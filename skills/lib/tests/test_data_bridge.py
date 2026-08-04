@@ -329,8 +329,13 @@ def _fake_macro_collector(symbol, **kwargs):
             "_meta": {"source": "fake"}}
 
 
-def test_macro_trading_hour_ttl_override(fake_bridge, monkeypatch):
-    """交易时段写入 4h TTL。"""
+def test_macro_trading_hour_no_ttl_override(fake_bridge, monkeypatch):
+    """F15: 交易时段写入仍烘焙 7d——新鲜度单旋钮在读路径，不再按时段烘焙短 TTL。
+
+    此前 ttl_override=4h 会在写入当晩（_effective_ttl 乘子后）过期触发无谓
+    回源；读路径 max_age_seconds（test_macro_trading_hour_read_path_refetches）
+    已覆盖盘中刷新语义。
+    """
     import json
 
     monkeypatch.setattr(data_bridge, "_is_trading_hour", lambda: True)
@@ -340,7 +345,7 @@ def test_macro_trading_hour_ttl_override(fake_bridge, monkeypatch):
     entry = data_bridge._cache._cache_path("macro", "all")
     assert entry.exists()
     with open(entry) as f:
-        assert json.load(f)["ttl_seconds"] == 14400
+        assert json.load(f)["ttl_seconds"] == 604800
 
 
 def test_macro_after_hours_default_ttl(fake_bridge, monkeypatch):

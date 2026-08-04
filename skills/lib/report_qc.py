@@ -70,17 +70,18 @@ class QCResult:
 
 
 def _classify_by_symbol(symbol: str) -> str:
-    """代码前缀 → 标的类型。
+    """代码前缀 → 标的类型（前缀政策集中管理于 codes.is_etf_symbol）。
 
-    ETF 代码：159xxx（深市）、51xxxx/56xxxx/58xxxx（沪市）。
-    920xxx 按 stock 处理（codes.py 将 920 路由至 .BJ——北交所 2025-10 起
-    既有基金也有股票，前缀无法区分；股票报告必须走 audit/quality/rigor，
-    基金报告误走 stock 检查只会产生可见告警，优于静默跳过）。
-    无法识别前缀时按 stock 兜底（报告内容仍可 lint）。
+    920xxx 等北交所基金/股票无法区分 → 按 stock 处理（股票报告必须走
+    audit/quality/rigor；基金报告误走 stock 检查只会产生可见告警，优于
+    静默跳过）。无法识别前缀时按 stock 兜底（报告内容仍可 lint）。
     """
-    if symbol.startswith(("159", "51", "56", "58")):
-        return "etf"
-    return "stock"
+    try:
+        from .codes import is_etf_symbol  # 同包相对导入（正常路径）
+    except ImportError:  # pragma: no cover
+        from codes import is_etf_symbol  # noqa: E402  sys.path 裸导入
+
+    return "etf" if is_etf_symbol(symbol) else "stock"
 
 
 def detect_report_type(report_path: Path) -> str:

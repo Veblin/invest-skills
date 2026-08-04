@@ -79,7 +79,12 @@ def apply_qfq(daily_df: pd.DataFrame, adj_factor_df: pd.DataFrame | None) -> pd.
     if any(_adj_invalid(float(v)) for v in factors):
         return None
 
-    latest_adj = float(factors.iloc[-1])
+    # 锚定最新交易日（按 trade_date 取最大行，而非末行）：Tushare 原生日线为
+    # 降序，降序输入时 factors.iloc[-1] 是最旧 bar 的因子 → 整个序列被
+    # f_oldest 错标度（与 _sources._apply_qfq 的锚定语义保持一致）
+    newest = str(merged["trade_date"].max())
+    latest_adj = float(merged.loc[
+        merged["trade_date"].astype(str) == newest, "adj_factor"].iloc[0])
     scale = factors / latest_adj
 
     # Reject if any OHLC column contains NaN (R7)

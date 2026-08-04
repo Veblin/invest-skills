@@ -117,6 +117,9 @@ def _find_candidate_gaps(
     kline: pd.DataFrame,
     lookback: int,
     gap_min_pct: float,
+    *,
+    suspensions: list[str] | None = None,
+    trade_cal: list[str] | None = None,
 ) -> tuple[list[tuple[int, GapInfo]], list[tuple[int, GapInfo]]]:
     """Find all upward gaps in the lookback window.
 
@@ -129,6 +132,10 @@ def _find_candidate_gaps(
         Number of most-recent trading days to search.
     gap_min_pct : float
         Minimum gap magnitude (e.g. 1.0 = 1 %) for a gap to be "qualified".
+    suspensions : list[str] | None
+        该股停牌日期列表（yyyymmdd）；复牌日真实大跳空不受 _MAX_GAP_PCT 拦截。
+    trade_cal : list[str] | None
+        交易日历（yyyymmdd，有序）；用于跨停牌判定，None 时不拦截大缺口。
 
     Returns
     -------
@@ -148,10 +155,14 @@ def _find_candidate_gaps(
     for i in range(start, n):
         # highs[i-1]<=0（零价毛刺/停牌残留 bar）时跳过：除零会炸掉整个扫描；
         # gap_pct 超 _MAX_GAP_PCT 视为毛刺（如 high_qfq=0.001 后接正常 bar
-        # 会算出 +499,900% 的天文缺口并排到命中榜首）
+        # 会算出 +499,900% 的天文缺口并排到命中榜首）——但"跨停牌"的复牌日
+        # 大跳空是真实信号（盐湖股份 2021-08-10 复牌 +347%），不拦截：
+        # 前一日在停牌表内 → 放行并保留 is_gap_across_suspension 标注机会
         if highs[i - 1] > 0 and lows[i] > highs[i - 1]:
             gap_pct = (lows[i] / highs[i - 1] - 1.0) * 100.0
-            if gap_pct > _MAX_GAP_PCT:
+            if gap_pct > _MAX_GAP_PCT and not _is_gap_across_suspension(
+                str(dates[i]), suspensions, trade_cal,
+            ):
                 continue
             gi = GapInfo(
                 gap_date=str(dates[i]),
@@ -163,6 +174,21 @@ def _find_candidate_gaps(
 
     qualified = [(i, gi) for i, gi in all_candidates if gi.gap_pct >= gap_min_pct]
     return all_candidates, qualified
+
+
+def _is_gap_across_suspension(
+    gap_date: str,
+    suspensions: list[str] | None,
+    trade_cal: list[str] | None,
+) -> bool:
+    """gap_date 前一个交易日是否为停牌日（复牌首日跳空）。
+
+    与命中后的标注（is_gap_across_suspension）共用同一语义；缺少
+    停牌表或交易日历时返回 False（保守：不拦截大缺口）。
+    """
+    if not suspensions or not trade_cal:
+        return False
+    return is_gap_across_suspension(gap_date, suspensions, trade_cal)
 
 
 def _check_ma60_streak(closes: list[float], ma60: list[float | None],
@@ -298,7 +324,11 @@ def _scan_stock(
     # --- Find gaps ---
     gap_lookback = params["gap_lookback"]
     gap_min_pct = params["gap_min_pct"]
-    all_candidates, qualified = _find_candidate_gaps(kline, gap_lookback, gap_min_pct)
+    stock_suspensions = suspension_map.get(ts_code, []) if trade_cal is not None else []
+    all_candidates, qualified = _find_candidate_gaps(
+        kline, gap_lookback, gap_min_pct,
+        suspensions=stock_suspensions, trade_cal=trade_cal,
+    )
 
     # --- Non-hit: no gap at all ---
     if len(all_candidates) == 0:
@@ -350,7 +380,6 @@ def _scan_stock(
 
         # Qualifying hit — tag across-suspension if applicable
         if trade_cal is not None:
-            stock_suspensions = suspension_map.get(ts_code, [])
             if is_gap_across_suspension(gap.gap_date, stock_suspensions, trade_cal):
                 gap.is_across_suspension = True
 

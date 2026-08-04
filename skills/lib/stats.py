@@ -54,6 +54,36 @@ def percentile_rank(seq: list[float], current: float) -> float | None:
     return (below / len(valid)) * 100
 
 
+def percentile_rank_mid(
+    seq: list[float], current: float, *, round_to: int | None = None,
+) -> float | None:
+    """mid-rank 百分位：count(<cur)/n + 0.5×count(==cur)/n × 100。
+
+    介于严格百分位（`percentile_rank`）与含边界百分位
+    （`percentile_rank_inclusive`）之间：平局各计半票，冻结序列
+    （全值相等）稳定落在 50%——严格版会报 0%（或 100% 取决于边界），
+    含边界版恒报 100%，均对"序列无变动"给出误导性极值。
+
+    适用于负值有意义的序列（如融券增速，percentile_rank 的 >0 过滤
+    会把负增速日从分母剔除，系统性抬高分位）。
+
+    Args:
+        seq: 历史序列（允许负值；None 剔除）
+        current: 当前值
+        round_to: 指定则四舍五入到该位小数
+
+    Returns:
+        百分位 [0, 100]，seq 为空或 current 为 None 时返回 None
+    """
+    valid = [v for v in seq if v is not None]
+    if current is None or not valid:
+        return None
+    below = sum(1 for v in valid if v < current)
+    ties = sum(1 for v in valid if v == current)
+    pct = (below + ties / 2.0) / len(valid) * 100.0
+    return round(pct, round_to) if round_to is not None else pct
+
+
 def calc_beta(
     stock_returns: list[float],
     market_returns: list[float],

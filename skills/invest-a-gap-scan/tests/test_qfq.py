@@ -127,6 +127,31 @@ class TestApplyQfqBasic:
         assert "trade_date" in result.columns
         assert result["trade_date"].tolist() == ["20260710", "20260711", "20260712"]
 
+    def test_descending_input_anchors_on_newest_date(self):
+        """降序输入（Tushare 原生顺序）时锚定最新交易日，而非末行。
+
+        D11 回归：此前 factors.iloc[-1] 对降序输入取最旧 bar 的因子，
+        整个序列被 f_oldest 错标度。锚定 trade_date 最大行后，
+        最新日 qfq 价应恒等于原始价（无论输入升序/降序）。
+        """
+        daily = _make_daily(
+            dates=["20260712", "20260711", "20260710"],  # 降序
+            close_prices=[15.0, 12.0, 10.0],
+        )
+        adj = _make_adj(
+            dates=["20260712", "20260711", "20260710"],  # 降序（Tushare 原生）
+            factors=[1.0, 1.1, 1.2],
+        )
+        result = apply_qfq(daily, adj)
+
+        assert result is not None
+        # 最新日（20260712）qfq == raw
+        newest = result.loc[result["trade_date"] == "20260712", "close_qfq"].iloc[0]
+        assert newest == pytest.approx(15.0)
+        # 20260710: 10.0 * 1.2 / 1.0 = 12.0（与升序输入的基准测试一致）
+        oldest = result.loc[result["trade_date"] == "20260710", "close_qfq"].iloc[0]
+        assert oldest == pytest.approx(12.0)
+
 
 # ---- Edge cases ----
 

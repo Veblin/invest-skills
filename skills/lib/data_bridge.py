@@ -217,24 +217,22 @@ def get_northbound(symbol: str, *, force: bool = False) -> dict | None:
 
 
 def get_macro(*, force: bool = False) -> dict | None:
-    """宏观快照（缓存 7d；A 股交易时段 9:30-15:00 新鲜度上限 4h——VIX/SOX 盘中有更新需求）。
+    """宏观快照（缓存 7d；A 股交易时段 9:30-15:00 读路径新鲜度上限 4h）。
 
-    注意：TTL 在写入时烘焙（cache.set ttl_seconds），盘后保持 7d 基准；
-    读路径 max_age_seconds 与写入时点无关——盘后/盘前写入的条目在
-    交易时段读取时按 4h 新鲜度判定过期并回源（叠加 _effective_ttl ×0.8
-    乘子 → 有效 3.2h），保证 9:30 取数恒为隔夜新鲜数据。
+    新鲜度只在读路径判定（max_age_seconds，cache.get 内按 age > N 硬判定，
+    无 _effective_ttl 乘子），与写入时点无关：盘后/盘前写入的条目在交易
+    时段读取时按 4h 过期并回源，保证 9:30 取数恒为隔夜新鲜数据（VIX/SOX
+    盘中有更新需求）。写入侧恒烘焙 7d（DEFAULT_TTL）——不再按交易时段
+    烘焙短 TTL，避免盘中写入的条目当晩过期触发无谓回源（读路径单旋钮
+    已覆盖全部新鲜度语义）。
     """
     collect_macro_context = _import_lib_module_attr("macro", "collect_macro_context")  # noqa: E402
     # symbol='' 是故意的：宏观数据（PMI/CPI/LPR/VIX）非个股维度，不按 symbol 筛选
-    if _is_trading_hour():
-        ttl_override = 4 * 3600
-        max_age_seconds = 4 * 3600
-    else:
-        ttl_override = None
-        max_age_seconds = None
-    return _fetch_dimension("macro", "all", collect_macro_context, "",
-                            force=force, ttl_override=ttl_override,
-                            max_age_seconds=max_age_seconds)
+    return _fetch_dimension(
+        "macro", "all", collect_macro_context, "",
+        force=force,
+        max_age_seconds=4 * 3600 if _is_trading_hour() else None,
+    )
 
 
 def get_microstructure(*, force: bool = False) -> dict | None:

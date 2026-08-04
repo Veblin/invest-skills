@@ -10,6 +10,7 @@ __all__ = [
     "is_st_or_delisted",
     "ts_code_to_baostock",
     "etf_symbol_to_ts_code",
+    "is_etf_symbol",
 ]
 
 
@@ -128,3 +129,16 @@ def etf_symbol_to_ts_code(symbol: str) -> str:
     if s.startswith(("4", "8")):
         return f"{s}.BJ"
     return f"{s}.SZ"
+
+
+def is_etf_symbol(symbol: str) -> bool:
+    """6 位代码是否为 ETF（报告 QC 判定用，非交易所路由用）。
+
+    ETF 代码：159xxx（深市）、51xxxx/56xxxx/58xxxx（沪市）。
+    920xxx 恒为 False：北交所 2025-10 起既有基金也有股票，前缀无法区分——
+    报告 QC 按股票处理（股票报告必须走 audit/quality/rigor；基金报告误走
+    stock 检查只会产生可见告警，优于静默跳过）。
+    无法识别前缀时返回 False（按 stock 兜底，报告内容仍可 lint）。
+    前缀政策集中于此（report_qc 曾自维护一份并在此规则上发生过分歧）。
+    """
+    return str(symbol).startswith(("159", "51", "56", "58"))

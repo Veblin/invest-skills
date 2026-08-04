@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stdout
 from datetime import datetime, timezone, timedelta
 from io import StringIO
@@ -141,6 +142,52 @@ def _env_max_workers(default: int = 8) -> int:
         return max(1, int(os.environ.get("INVEST_MAX_WORKERS", str(default))))
     except ValueError:
         return max(1, default)
+
+
+def _map_parallel(
+    items: list[Any],
+    fn: Callable[[Any], Any],
+    *,
+    on_error: Callable[[Any, Exception], None] | None = None,
+) -> list[tuple[Any, Any]]:
+    """并行 fan-out 样板：ThreadPoolExecutor + submit-dict + as_completed。
+
+    此前 _ms_fetch_put_call_ratio 与 _ms_fetch_new_high_ratio 各自手写一份
+    （~15 行近同样板，worker 公式一致）；异常处理/worker 上限语义须手动
+    保持同步——收敛为共享实现。
+
+    Args:
+        items: 待处理元素列表。
+        fn: 单元素执行函数；**调用方须保证其内部单次执行有超时兜底**
+            （如 _run_with_timeout），否则挂起任务会拖住 with 块的 join
+            （与 _run_sources_parallel 的 daemon 线程方案不同，这里用
+            `with` 是因为调用方已各自内部限时）。
+        on_error: 单元素异常回调（item, exc）；提供后该元素返回
+            (item, None) 占位，否则异常向上传播。
+
+    Returns:
+        [(item, result), ...]，按 items 原序（全部任务已结束，顺序确定）。
+    """
+    if not items:
+        return []
+    n = len(items)
+    # worker 上限钳制下限 1（0/负值会让 ThreadPoolExecutor 拒绝 max_workers）
+    max_w = max(1, min(n, _env_max_workers()))
+    results: dict[int, tuple[Any, Any]] = {}
+    with ThreadPoolExecutor(max_workers=max_w) as ex:
+        fut_to_idx = {ex.submit(fn, item): i for i, item in enumerate(items)}
+        for fut in as_completed(fut_to_idx):
+            i = fut_to_idx[fut]
+            item = items[i]
+            try:
+                results[i] = (item, fut.result())
+            except Exception as exc:
+                if on_error is not None:
+                    on_error(item, exc)
+                    results[i] = (item, None)
+                else:
+                    raise
+    return [results[i] for i in range(n)]
 
 
 def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],

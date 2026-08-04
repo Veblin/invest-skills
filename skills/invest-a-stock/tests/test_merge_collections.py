@@ -115,6 +115,19 @@ class TestMergeDataFallback:
         merged = merge_collections([_collection([a])])
         assert merged["dimensions"][0] is a or merged["dimensions"][0] == a
 
+    def test_input_not_polluted_by_merge_meta(self):
+        """D7：浅拷贝主数据 + 全新 _meta，合并产物不得原地污染输入 collection。"""
+        a = _dim("quote", data={"close": 10.0}, source="tushare.daily")
+        b = _dim("quote", data={"close": 10.1}, source="akshare")
+        a_meta_before = dict(a["_meta"])
+        merge_collections([_collection([a]), _collection([b])])
+        # 输入 _meta 未被写入 alternative_sources/all_sources/multi_source_count
+        assert a["_meta"] == a_meta_before
+        assert "alternative_sources" not in a["_meta"]
+        assert "multi_source_count" not in a["_meta"]
+        # 输入 data 未被原地修改
+        assert a["data"] == {"close": 10.0}
+
 
 class TestMergeSummaryAvailable:
     """F9: available 只计有数据的 available/partial 维度。"""

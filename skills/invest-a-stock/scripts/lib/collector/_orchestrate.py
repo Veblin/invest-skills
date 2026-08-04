@@ -113,12 +113,21 @@ def _quote_tushare_rows(symbol: str) -> list[dict] | None:
     盘中 adj_factor 滞后/缺失时回退 raw（仅最新日标量被消费，
     最新日 qfq==raw，回退不产生错基）。
     """
-    rows = _q_tushare_daily_qfq(symbol, start_date=_days_ago(10), end_date=_today())
-    if rows is None:
-        rows = _q_tushare_daily(symbol, start_date=_days_ago(10), end_date=_today())
-    if not rows:
+    from lib.technical import sort_kline_asc
+
+    # 单次 daily 取数：_q_tushare_daily_qfq 内部先取 daily 再取 adj_factor，
+    # 盘中 adj_factor 未发布时返回 None → 再调 _q_tushare_daily 会重复取同一
+    # daily 序列（3 次 Tushare 往返）；这里组合拆开，raw 回退复用已取的行。
+    raw_rows = _q_tushare_daily(symbol, start_date=_days_ago(10), end_date=_today())
+    if not raw_rows:
         return None
-    return sorted(rows, key=lambda r: str(r.get("trade_date", "")))
+    rows = _apply_qfq(
+        raw_rows,
+        _q_tushare_adj_factor(symbol, start_date=_days_ago(10), end_date=_today()),
+    )
+    # 升序排序委托 lib.technical.sort_kline_asc（混合日期格式归一化 +
+    # 无日期行置尾的共享约定，而非本地字符串排序）
+    return sort_kline_asc(rows if rows is not None else raw_rows)
 
 
 def collect_quote(symbol: str) -> dict:
@@ -763,12 +772,10 @@ def _infer_holder_direction(
 
 
 def _source_has_data(data) -> bool:
-    """源结果是否含有效数据（空列表不算）。"""
-    if data is None:
-        return False
-    if isinstance(data, list):
-        return len(data) > 0
-    return bool(data)
+    """源结果是否含有效数据（空列表不算）——统一口径在 lib.data_util.has_data。"""
+    from lib.data_util import has_data
+
+    return has_data(data)
 
 
 def _parse_holder_change_vol(raw) -> float | None:
@@ -1449,9 +1456,12 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             logger.warning("chain context collection failed for %s: %s", symbol, exc)
             chain_context = {"status": "error", "error": str(exc)}
 
+    # 与 merge_collections 共用 has_data 口径：空 list/dict 的维度不计 available
+    # （此前 is not None 把 data=[] 的非交易日 quote 计入，两个消费者计数分歧）
     has_data = sum(
         1 for d in dimensions
-        if d and d.get("data") is not None and d.get("status") in ("available", "partial")
+        if d and _source_has_data(d.get("data"))
+        and d.get("status") in ("available", "partial")
     )
     partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
     missing = sum(1 for d in dimensions if d and (d.get("data") is None and d.get("status") != "partial"))
@@ -2328,34 +2338,33 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
     cutoff = _days_ago(_PCR_HISTORY_60D)
     recent_dates = [d for d in dates if d >= cutoff]
     fetch_dates = sorted(set(sampled) | set(recent_dates))
-    # 全窗口并行取数（单次查询 8s 时限内部兜底）：~123 次串行最坏 16 分钟
+
+    def _on_pcr_error(td: str, exc: Exception) -> None:
+        logger.debug("opt_daily %s failed: %s", td, exc)
+
+    # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
+    # _base._map_parallel）：~123 次串行最坏 16 分钟
     ratio_by_date: dict[str, float] = {}
-    with ThreadPoolExecutor(
-        max_workers=max(1, min(len(fetch_dates), _env_max_workers()))
-    ) as _pcr_ex:
-        _pcr_futs = {
-            _pcr_ex.submit(_ms_pcr_on_date, tc, td, put_set, call_set): td
-            for td in fetch_dates
-        }
-        for _pcr_fut in as_completed(_pcr_futs):
-            td = _pcr_futs[_pcr_fut]
-            try:
-                r = _pcr_fut.result()
-            except Exception as _pcr_exc:
-                logger.debug("opt_daily %s failed: %s", td, _pcr_exc)
-                r = None
-            if r is not None:
-                ratio_by_date[td] = r
+    for td, r in _map_parallel(
+        fetch_dates,
+        lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
+        on_error=_on_pcr_error,
+    ):
+        if r is not None:
+            ratio_by_date[td] = r
     if not ratio_by_date:
         return None
-    ratios = [ratio_by_date[td] for td in sampled if td in ratio_by_date]
-    if not ratios:
+    # 单次扫描按 sampled 顺序构建 (date, ratio) 对（此前两次同谓词扫描
+    # 生成 ratios 与 ratio_dates，alignment 靠"同一谓词"隐含保证）
+    ratio_pairs = [(td, ratio_by_date[td]) for td in sampled if td in ratio_by_date]
+    if not ratio_pairs:
         return None
-    ratio_dates = [td for td in sampled if td in ratio_by_date]
-    current = ratios[-1]
-    current_date = ratio_dates[-1] if ratio_dates else None
+    current = ratio_pairs[-1][1]
+    current_date = ratio_pairs[-1][0]
     # 最新日查询失败 → current 静默回退到旧样本，需显式 staleness 标识
-    stale = current_date is None or current_date != sampled[-1]
+    # （ratio_pairs 非空 ⇒ current_date 必非 None，无需冗余守卫）
+    stale = current_date != sampled[-1]
+    ratios = [r for _, r in ratio_pairs]
     pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
     ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
     pct_60d = (
@@ -2380,6 +2389,8 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
 
 def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
     """融券余额增速（交易所 margin 优先，个股 margin_detail 回退）。"""
+    from lib.stats import percentile_rank_mid
+
     # 增速序列约半数日为负：percentile_rank（v>0 过滤）把负增速日从分母剔除
     # → "5年最低位"系统性失真；percentile_rank_inclusive 对冻结序列给 100% 假
     # 信号 → 改用 mid-rank（count(<cur)/n + 0.5×count(==cur)/n）：冻结序列 50%
@@ -2402,12 +2413,8 @@ def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
                     growths.append((cur - base) / base * 100)
             if growths:
                 current_g = growths[-1]
-                if len(growths) >= 5:
-                    below = sum(1 for v in growths if v < current_g)
-                    ties = sum(1 for v in growths if v == current_g)
-                    pct = (below + ties / 2.0) / len(growths) * 100.0
-                else:
-                    pct = None
+                pct = (percentile_rank_mid(growths, current_g)
+                       if len(growths) >= 5 else None)
                 return {
                     "growth_pct": round(current_g, 2),
                     "percentile_5y": round(pct, 1) if pct is not None else None,
@@ -2473,20 +2480,14 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
             return ts_code, None
         return ts_code, df.sort_values("trade_date").to_dict("records")
 
+    def _on_panel_error(ts_code: str, exc: Exception) -> None:
+        logger.warning("new_high_ratio daily fetch failed for %s: %s", ts_code, exc)
+
     panel: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, min(len(codes), _env_max_workers()))) as executor:
-        futures = {executor.submit(_fetch_daily_panel_row, c): c for c in codes}
-        for fut in as_completed(futures):
-            try:
-                ts_code, records = fut.result()
-            except Exception as exc:
-                logger.warning(
-                    "new_high_ratio daily fetch failed for %s: %s",
-                    futures[fut], exc,
-                )
-                continue
-            if records:
-                panel[ts_code] = records
+    for ts_code, records in _map_parallel(
+        codes, _fetch_daily_panel_row, on_error=_on_panel_error):
+        if records:
+            panel[ts_code] = records
     current = _ms_new_high_ratio_from_panel(panel)
     if current is None:
         return None
