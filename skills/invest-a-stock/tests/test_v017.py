@@ -663,8 +663,13 @@ class TestDcfPreprocess:
             "money_cap": 5e8,
         }]
 
+        # 必须 patch _orchestrate 命名空间（collect_financials 的查找点）：
+        # patch 包命名空间（lib.collector._run_sources_parallel，_legacy/
+        # __init__ re-export 的拷贝属性）不生效 → 真实 _run_sources_parallel
+        # 执行 → 无数据源环境（CI 无 TUSHARE_TOKEN）下所有源失败得
+        # 'No data returned' 骨架 → dcf_preprocess 未附着 → 环境依赖失败
         monkeypatch.setattr(
-            "lib.collector._run_sources_parallel",
+            "lib.collector._orchestrate._run_sources_parallel",
             lambda tasks, dim: [SourceResult("tushare.fina_indicator", rows, dim)],
         )
         monkeypatch.setattr("lib.collector._orchestrate.env.is_tushare_available", lambda cfg: True)
