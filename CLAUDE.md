@@ -152,7 +152,7 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 ## 开发规范
 
-详见 [development-rules.md](skills/lib/references/development-rules.md) — 12 条规则（D1-D12），来自 `/code-review` 反复出现的缺陷模式。每次 `/code-review` 应加载此文件作为审查标准。
+详见 [development-rules.md](skills/lib/references/development-rules.md) — 13 条规则（D1-D13），来自 `/code-review` 反复出现的缺陷模式。每次 `/code-review` 应加载此文件作为审查标准。
 
 ## 措辞规范
 

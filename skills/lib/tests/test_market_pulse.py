@@ -1,7 +1,9 @@
 """Tests for skills/lib/market_pulse.py — 两融余额抓取（无网络）。
 
-D13：canonical 在函数内惰性 import akshare 与 lib.proxy →
-打 sys.modules["akshare"] 与 sys.modules["lib.proxy"]（调用时查找点）。
+D13：canonical 在函数内惰性 `from lib.proxy import akshare_direct_session`
+（调用时查找点）→ monkeypatch 真实 lib.proxy 的该属性；akshare 经
+sys.modules["akshare"] 注入。**不替换 sys.modules["lib"]**——全局替换会在
+测试窗口内劫持其他进程内惰性 `from lib import ...` 的绑定。
 """
 
 from __future__ import annotations
@@ -14,9 +16,13 @@ import pandas as pd
 import pytest
 
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
-if str(_SKILLS_LIB) not in sys.path:
-    sys.path.insert(0, str(_SKILLS_LIB))
+sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
+# canonical 的 `from lib.proxy import ...` 需要 invest-a-stock/scripts 在 path
+_STOCK_SCRIPTS = Path(__file__).resolve().parents[2] / "invest-a-stock" / "scripts"
+sys.path.insert(0, str(_STOCK_SCRIPTS))
+
+import lib.proxy  # noqa: E402
 from market_pulse import fetch_margin_account_info  # noqa: E402
 
 
@@ -37,7 +43,7 @@ class _SessionCtx:
 
 
 def _install_fakes(monkeypatch, df) -> tuple[_SessionCtx, types.ModuleType]:
-    """注入假 akshare / lib.proxy 模块；返回 ctx 供断言进出会话次数。
+    """注入假 akshare + patch 真实 lib.proxy.akshare_direct_session。
 
     真实 akshare_direct_session 是返回 context manager 的函数 → fake 也须可调用。
     """
@@ -47,10 +53,7 @@ def _install_fakes(monkeypatch, df) -> tuple[_SessionCtx, types.ModuleType]:
     fake_ak.stock_margin_account_info = lambda: df
     monkeypatch.setitem(sys.modules, "akshare", fake_ak)
 
-    fake_proxy = types.ModuleType("lib.proxy")
-    fake_proxy.akshare_direct_session = lambda: ctx
-    monkeypatch.setitem(sys.modules, "lib", types.ModuleType("lib"))
-    monkeypatch.setitem(sys.modules, "lib.proxy", fake_proxy)
+    monkeypatch.setattr(lib.proxy, "akshare_direct_session", lambda: ctx)
     return ctx, fake_ak
 
 
@@ -79,10 +82,7 @@ class TestFetchMarginAccountInfo:
         fake_ak = types.ModuleType("akshare")
         fake_ak.stock_margin_account_info = _boom
         monkeypatch.setitem(sys.modules, "akshare", fake_ak)
-        fake_proxy = types.ModuleType("lib.proxy")
-        fake_proxy.akshare_direct_session = lambda: _SessionCtx()
-        monkeypatch.setitem(sys.modules, "lib", types.ModuleType("lib"))
-        monkeypatch.setitem(sys.modules, "lib.proxy", fake_proxy)
+        monkeypatch.setattr(lib.proxy, "akshare_direct_session", lambda: _SessionCtx())
 
         with pytest.raises(RuntimeError, match="api down"):
             fetch_margin_account_info()

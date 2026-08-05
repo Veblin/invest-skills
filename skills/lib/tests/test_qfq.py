@@ -13,8 +13,7 @@ import pandas as pd
 import pytest
 
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
-if str(_SKILLS_LIB) not in sys.path:
-    sys.path.insert(0, str(_SKILLS_LIB))
+sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
 from qfq import PRICE_COLS, apply_qfq, apply_qfq_rows  # noqa: E402
 

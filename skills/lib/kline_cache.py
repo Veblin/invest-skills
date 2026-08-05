@@ -37,6 +37,8 @@ class KlineTTLCache:
         return self._root() if callable(self._root) else Path(self._root)
 
     def _path(self, date_str: str, parts: tuple[str, ...]) -> Path:
+        if not parts:
+            raise ValueError("parts 必须至少含文件 stem（最后一项）")
         *dirs, stem = parts
         return self._root_dir().joinpath(date_str, *dirs, f"{stem}.pkl")
 
@@ -74,16 +76,16 @@ class KlineTTLCache:
             return None
         path = self._path(date_str, parts)
         try:
-            if not path.exists():
+            st = path.stat()  # 单次 stat（FileNotFoundError 由 except 兜底）
+            if time.time() - st.st_mtime > self.ttl_seconds:
                 return None
-            if time.time() - path.stat().st_mtime > self.ttl_seconds:
-                return None
-            data = pickle.load(open(path, "rb"))
+            with open(path, "rb") as f:
+                data = pickle.load(f)
             if type_guard is not None and not isinstance(data, type_guard):
                 return None
             return data
         except Exception:
-            return None  # 损坏/截断 pickle → 视为未命中
+            return None  # 不存在/损坏/截断 pickle → 视为未命中
 
     def cleanup_old(self, *, ignore_errors: bool = False) -> None:
         """清理超 TTL 的日期目录（按目录 mtime）。"""
@@ -109,7 +111,8 @@ class KlineTTLCache:
             return hit
         data = fetch()
         if data:
-            self.save(date_str, parts, data)
+            # 落盘失败只记 warning 不上抛（stock 不变量"写入缓存；失败不影响采集"）
+            self.save(date_str, parts, data, log_errors=True)
         return data
 
 

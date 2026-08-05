@@ -46,9 +46,10 @@ def _cache_parts(symbol: str, source: str, sd: str, ed: str, qfq: bool) -> tuple
 
 def load(symbol: str, source: str, sd: str, ed: str,
          date_str: str | None = None, qfq: bool = False) -> list[dict] | None:
-    """读取缓存；未启用/不存在/过期/损坏均返回 None（视为未命中）。"""
-    if not enabled():
-        return None
+    """读取缓存；未启用/不存在/过期/损坏均返回 None（视为未命中）。
+
+    门控由 canonical _CACHE 统一判定（INVEST_KLINE_CACHE 读取单点）。
+    """
     date_str = date_str or shanghai_today()
     return _CACHE.load(date_str, _cache_parts(symbol, source, sd, ed, qfq),
                        type_guard=list)
@@ -58,8 +59,6 @@ def save(symbol: str, source: str, sd: str, ed: str,
          rows: list[dict], date_str: str | None = None,
          qfq: bool = False) -> None:
     """写入缓存；失败不影响采集。"""
-    if not enabled():
-        return
     date_str = date_str or shanghai_today()
     _CACHE.save(date_str, _cache_parts(symbol, source, sd, ed, qfq), rows,
                 skip_empty=True, log_errors=True)
@@ -77,8 +76,6 @@ def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
 
     qfq: 数据是否为前复权语义（写入缓存键，避免新旧语义混用）。
     """
-    if not enabled():
-        return fetch()
     date_str = shanghai_today()
     return _CACHE.load_or_fetch(
         date_str, _cache_parts(symbol, source, sd, ed, qfq), fetch,

@@ -32,8 +32,10 @@ _VERSION = "0.0.0"
 
 def _read_project_version() -> str:
     """Walk up to pyproject.toml and read ``[project].version`` only."""
-    from version import get_package_version  # skills/lib（bootstrap 后可达）
-
+    try:
+        from version import get_package_version  # skills/lib（bootstrap 后可达）
+    except ModuleNotFoundError:
+        return "0.0.0"  # 无 skills/lib 环境时保持旧实现"永不失败"不变量
     return get_package_version(default="0.0.0", stop_at_first=True)
 
 

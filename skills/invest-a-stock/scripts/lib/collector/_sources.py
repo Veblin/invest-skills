@@ -268,7 +268,9 @@ def _apply_qfq(rows: list[dict], factors: dict[str, float]) -> list[dict] | None
     """
     from lib.qfq import apply_qfq_rows  # 惰性导入（store.py 同款模式）
 
-    return apply_qfq_rows(rows, factors, round_prices=True)
+    # check_finite=True：与 DataFrame 路径（gap 语义）统一 NaN 完整性策略——
+    # NaN 因子（nan <= 0 为 False 会穿过旧校验）整体拒绝而非毒化下游指标
+    return apply_qfq_rows(rows, factors, round_prices=True, check_finite=True)
 
 
 def _q_tushare_daily_qfq(symbol: str, start_date: str = "",

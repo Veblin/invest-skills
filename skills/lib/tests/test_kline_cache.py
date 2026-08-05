@@ -9,8 +9,7 @@ import time
 from pathlib import Path
 
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
-if str(_SKILLS_LIB) not in sys.path:
-    sys.path.insert(0, str(_SKILLS_LIB))
+sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
 import pytest
 
@@ -149,6 +148,21 @@ class TestLoadOrFetch:
     def test_disabled_bypasses_cache(self, tmp_path: Path):
         c = _cache(tmp_path, enabled=lambda: False)
         assert c.load_or_fetch("20260722", ("s", "x"), lambda: "live") == "live"
+
+    def test_save_error_does_not_discard_fetched(self, tmp_path: Path, caplog):
+        """回归（/code-review low F1）：落盘失败不得上抛丢弃已拉取数据。
+
+        stock 不变量"写入缓存；失败不影响采集"——load_or_fetch 内部 save
+        以 log_errors=True 记 warning 后仍返回 fetch 结果。
+        """
+        import logging
+
+        c = _cache(tmp_path)
+        unpicklable = lambda: 1  # noqa: E731 — pickle 必失败
+        with caplog.at_level(logging.WARNING, logger="kline_cache"):
+            out = c.load_or_fetch("20260722", ("s", "x"), lambda: unpicklable)
+        assert out is unpicklable  # 数据不因写缓存失败而丢失
+        assert any("kline cache save failed" in r.message for r in caplog.records)
 
 
 class TestCallableRoot:

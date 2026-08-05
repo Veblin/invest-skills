@@ -2,7 +2,7 @@
 
 > **来源**: 反复出现的 `/code-review` 缺陷模式汇总。
 > **使用者**: `/code-review` skill、开发者自我审查、新代码提交前检查。
-> **格式**: D1-D12 规则 ID，可被 review finding 引用（如 "违反 D1"）。
+> **格式**: D1-D13 规则 ID，可被 review finding 引用（如 "违反 D1"）。
 >
 > 每条标注 🌐 = 跨语言通用 / 🐍 = Python 专项。
 
