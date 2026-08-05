@@ -16,25 +16,18 @@ logger = logging.getLogger(__name__)
 
 ensure_invest_a_scripts_on_path()
 
+from db_util import connect_db, safe_close  # noqa: E402
 from lib import env  # noqa: E402
 
 DB_PATH = env.STORE_DB
 
 
 def _conn() -> sqlite3.Connection:
-    p = DB_PATH
-    p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p))
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    return connect_db(DB_PATH)
 
 
 def _safe_close(c: sqlite3.Connection) -> None:
-    try:
-        c.close()
-    except Exception:
-        pass
+    safe_close(c)
 
 
 # ---------------------------------------------------------------------------

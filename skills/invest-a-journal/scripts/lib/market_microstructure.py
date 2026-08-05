@@ -20,6 +20,7 @@ from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.stats import percentile_rank_inclusive  # noqa: E402
+from market_pulse import fetch_margin_account_info  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -618,9 +619,7 @@ def _fetch_margin(result: dict) -> None:
     的 FIN_BALANCE / FIN_BUY_AMT 已是亿元（实测约 2.6e4）。
     """
     try:
-        import akshare as ak
-        with akshare_direct_session():
-            df = ak.stock_margin_account_info()
+        df = fetch_margin_account_info()
         if df is None or df.empty:
             result["_errors"].append("margin: empty response")
             return

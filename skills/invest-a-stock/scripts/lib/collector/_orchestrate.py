@@ -2079,9 +2079,9 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
 
     # 降级：akshare 全市场汇总（有损：非个股粒度，仅提供方向性参考）
     try:
-        import akshare as ak
-        with akshare_direct_session():
-            df_ak = ak.stock_margin_account_info()
+        from lib.market_pulse import fetch_margin_account_info  # 惰性导入
+
+        df_ak = fetch_margin_account_info()
         if df_ak is None or df_ak.empty:
             return None
         # 尝试已知日期列名，降级到首列（标注警告）

@@ -6,7 +6,7 @@ the path and re-exports for invest-a-stock internal imports.
 
 from __future__ import annotations
 
-from ._skills_lib_path import ensure_skills_lib_on_path
+from ._invest_path import ensure_skills_lib_on_path
 
 ensure_skills_lib_on_path()
 

@@ -52,7 +52,7 @@ def _returns_from_kline(kline: list[dict]) -> list[tuple[str, float]]:
 
 
 def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str, Any]:
-    from ._skills_lib_path import ensure_skills_lib_on_path
+    from ._invest_path import ensure_skills_lib_on_path
     ensure_skills_lib_on_path()
     from data_bridge import get_basic_info, get_kline  # noqa: E402
 

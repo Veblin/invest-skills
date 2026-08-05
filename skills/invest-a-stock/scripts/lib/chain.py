@@ -83,7 +83,7 @@ def collect_chain_context(
         if isinstance(basic_data, dict):
             industry = basic_data.get("industry", "") or basic_data.get("行业", "")
         if not industry:
-            from ._skills_lib_path import ensure_skills_lib_on_path
+            from ._invest_path import ensure_skills_lib_on_path
             ensure_skills_lib_on_path()
             from data_bridge import get_basic_info  # noqa: E402
             try:

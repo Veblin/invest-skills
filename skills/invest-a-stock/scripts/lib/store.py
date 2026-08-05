@@ -19,6 +19,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 from . import env
+from .db_util import connect_db, safe_close
 from .json_util import dumps_json, json_default
 from .schema import index_dimensions
 
@@ -33,19 +34,11 @@ def _get_path() -> Path:
 
 
 def _conn() -> sqlite3.Connection:
-    p = _get_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p))
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    return connect_db(_get_path())
 
 
 def _safe_close(c: sqlite3.Connection) -> None:
-    try:
-        c.close()
-    except Exception:
-        logger.debug("sqlite close failed", exc_info=True)
+    safe_close(c, logger=logger)
 
 
 @contextmanager

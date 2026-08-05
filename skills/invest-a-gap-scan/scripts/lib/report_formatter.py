@@ -32,27 +32,9 @@ _VERSION = "0.0.0"
 
 def _read_project_version() -> str:
     """Walk up to pyproject.toml and read ``[project].version`` only."""
-    try:
-        root = Path(__file__).resolve().parent
-        for parent in [root, *root.parents]:
-            pp = parent / "pyproject.toml"
-            if not pp.exists():
-                continue
-            in_project = False
-            for raw in pp.read_text(encoding="utf-8").splitlines():
-                line = raw.strip()
-                if line == "[project]":
-                    in_project = True
-                    continue
-                if line.startswith("[") and line.endswith("]"):
-                    in_project = line == "[project]"
-                    continue
-                if in_project and line.startswith("version") and "=" in line:
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
-    except OSError:
-        pass
-    return "0.0.0"
+    from version import get_package_version  # skills/lib（bootstrap 后可达）
+
+    return get_package_version(default="0.0.0", stop_at_first=True)
 
 
 _VERSION = _read_project_version()
