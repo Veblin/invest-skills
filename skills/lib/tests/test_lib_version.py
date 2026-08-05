@@ -1,4 +1,8 @@
-"""Tests for skills/lib/version.py — pyproject [project].version 解析（无网络）。"""
+"""Tests for skills/lib/version.py — pyproject [project].version 解析（无网络）。
+
+basename 用 test_lib_version 避免与 invest-a-stock/tests/test_version.py 撞名
+（两目录均无 __init__.py，pytest 收集同 basename 报 import file mismatch）。
+"""
 
 from __future__ import annotations
 
