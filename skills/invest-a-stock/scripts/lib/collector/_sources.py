@@ -259,33 +259,16 @@ def _q_tushare_adj_factor(symbol: str, start_date: str = "",
 
 
 def _apply_qfq(rows: list[dict], factors: dict[str, float]) -> list[dict] | None:
-    """前复权：qfq_price = raw_price × factor / latest_factor（以最新日为基准）。
+    """前复权（list[dict] 版）——委托 skills/lib/qfq.apply_qfq_rows（round_prices=True）。
 
-    公式与 skills/invest-a-gap-scan/scripts/lib/qfq.py 一致；vol/amount 不变。
-    复权因子缺失/非法 → 整体拒绝（返回 None，与 gap-scan 的密集日频要求一致）。
-    注意：锚定"最新日"按 trade_date 取最大行（而非 rows[-1]）——Tushare 日线
-    降序返回，rows[-1] 是最旧 bar，曾导致整个序列被 f_oldest 错标度。
+    公式与语义同 canonical：qfq_price = raw_price × factor / latest_factor（以
+    最新日为基准）；vol/amount 不变；复权因子缺失/非法 → 整体拒绝（返回 None）。
+    锚定"最新日"按 trade_date 取最大行（而非 rows[-1]）——Tushare 日线降序返回，
+    rows[-1] 是最旧 bar，曾导致整个序列被 f_oldest 错标度。
     """
-    if not rows or not factors:
-        return None
-    newest = max(rows, key=lambda r: str(r.get("trade_date", "")))
-    latest = factors.get(str(newest.get("trade_date")))
-    if latest is None or latest <= 0:
-        return None
-    out: list[dict] = []
-    for r in rows:
-        f = factors.get(str(r.get("trade_date")))
-        if f is None or f <= 0:
-            return None  # 缺失 → 整体拒绝
-        ratio = f / latest
-        out.append({
-            **r,
-            "open": round(r["open"] * ratio, 4) if r.get("open") is not None else None,
-            "high": round(r["high"] * ratio, 4) if r.get("high") is not None else None,
-            "low": round(r["low"] * ratio, 4) if r.get("low") is not None else None,
-            "close": round(r["close"] * ratio, 4) if r.get("close") is not None else None,
-        })
-    return out
+    from lib.qfq import apply_qfq_rows  # 惰性导入（store.py 同款模式）
+
+    return apply_qfq_rows(rows, factors, round_prices=True)
 
 
 def _q_tushare_daily_qfq(symbol: str, start_date: str = "",

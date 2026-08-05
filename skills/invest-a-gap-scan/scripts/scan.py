@@ -54,7 +54,14 @@ from report_formatter import (  # noqa: E402
     format_markdown_report,
 )
 from suspension import detect_suspensions  # noqa: E402
-import kline_cache  # noqa: E402
+from kline_cache import KlineTTLCache  # noqa: E402（canonical: skills/lib）
+
+_KLINE_CACHE = KlineTTLCache(lambda: env.STORE_DIR / "gap_scan_cache", 3 * 86400)
+
+
+def _cache_parts(ts_code: str, source_name: str | None) -> tuple[str, ...]:
+    """缓存键：{source}/{ts_code}（无源时仅 {ts_code}）— 与旧 kline_cache 键布局一致。"""
+    return (source_name, ts_code) if source_name else (ts_code,)
 
 # ---- 由并行代理创建的模块 ----
 try:
@@ -245,7 +252,7 @@ def main() -> int:
 
     # Expire old K-line cache directories
     try:
-        kline_cache.cleanup_old()
+        _KLINE_CACHE.cleanup_old()
     except Exception as exc:
         logger.warning("kline_cache.cleanup_old failed: %s", exc)
 
@@ -324,8 +331,8 @@ def _run_scan(
 
     if not args.no_cache:
         for stock in stocks:
-            cached = kline_cache.load(stock.ts_code, date_str=cache_date,
-                                      source_name=source.source_name())
+            cached = _KLINE_CACHE.load(cache_date,
+                                       _cache_parts(stock.ts_code, source.source_name()))
             if cached is not None and not cached.empty:
                 stock_kline_map[stock.ts_code] = cached
             else:
@@ -397,8 +404,9 @@ def _run_scan(
                 if kline is not None:
                     stock_kline_map[ts_code] = kline
                     try:
-                        kline_cache.save(ts_code, kline, date_str=cache_date,
-                                         source_name=source.source_name())
+                        _KLINE_CACHE.save(cache_date,
+                                          _cache_parts(ts_code, source.source_name()),
+                                          kline)
                     except Exception as exc:
                         logger.warning("cache save failed for %s: %s", ts_code, exc)
 

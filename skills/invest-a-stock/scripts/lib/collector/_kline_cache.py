@@ -1,33 +1,37 @@
-"""同日 K 线缓存（pickle，源隔离）。
+"""同日 K 线缓存（pickle，源隔离）— 委托 skills/lib/kline_cache.KlineTTLCache。
 
 路径: {STORE_DIR}/collect_kline_cache/{yyyymmdd}/{source}/{symbol}__{sd}_{ed}{__qfq}.pkl
 - 键含 source：tushare.daily/akshare/baostock 与 tickflow.kline 互不污染
 - 键含 qfq 标记：前复权语义变更时新键生效，不复权旧缓存自动失效
 - 键含 sd/ed 查询窗口：默认 400 日 与 --deep 730 日 互不误用（只按 symbol 缓存
   会导致 deep 模式复用 400 日截断数据）
-- TTL 1 天（mtime）：同日重复采集命中；次日必然 miss（与 gap-scan 语义一致）
+- TTL 1 天（mtime）：同日重复采集命中；次日必然 miss（本 skill 语义，参数化在 canonical）
 - INVEST_KLINE_CACHE=0 禁用（逃生口）
-
-镜像 skills/invest-a-gap-scan/scripts/lib/kline_cache.py 模式，但存 list[dict]
-（与 collector/_sources.py 的 _q_* 返回类型一致）而非 DataFrame。
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import pickle
-import shutil
-import time
-from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
-from .. import env
-from ..shared_dates import shanghai_today
+from .._invest_path import ensure_invest_a_scripts_on_path
+
+ensure_invest_a_scripts_on_path()
+
+from .. import env  # noqa: E402
+from ..kline_cache import KlineTTLCache  # noqa: E402
+from ..shared_dates import shanghai_today  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SEC = 86400  # 1 天（mtime 基准）
+
+_CACHE = KlineTTLCache(
+    lambda: env.STORE_DIR / "collect_kline_cache",
+    CACHE_TTL_SEC,
+    enabled=lambda: os.environ.get("INVEST_KLINE_CACHE", "1") != "0",
+)
 
 
 def enabled() -> bool:
@@ -35,15 +39,9 @@ def enabled() -> bool:
     return os.environ.get("INVEST_KLINE_CACHE", "1") != "0"
 
 
-def _cache_root() -> Path:
-    return env.STORE_DIR / "collect_kline_cache"
-
-
-def _cache_path(symbol: str, source: str, sd: str, ed: str,
-                date_str: str, qfq: bool = False) -> Path:
+def _cache_parts(symbol: str, source: str, sd: str, ed: str, qfq: bool) -> tuple[str, str]:
     marker = "__qfq" if qfq else ""
-    return (_cache_root() / date_str / source
-            / f"{symbol}__{sd}_{ed}{marker}.pkl")
+    return (source, f"{symbol}__{sd}_{ed}{marker}")
 
 
 def load(symbol: str, source: str, sd: str, ed: str,
@@ -52,43 +50,24 @@ def load(symbol: str, source: str, sd: str, ed: str,
     if not enabled():
         return None
     date_str = date_str or shanghai_today()
-    path = _cache_path(symbol, source, sd, ed, date_str, qfq=qfq)
-    try:
-        if not path.exists():
-            return None
-        if time.time() - path.stat().st_mtime > CACHE_TTL_SEC:
-            return None
-        data = pickle.load(open(path, "rb"))
-        return data if isinstance(data, list) else None
-    except Exception:
-        return None  # 损坏/截断 pickle → 视为未命中
+    return _CACHE.load(date_str, _cache_parts(symbol, source, sd, ed, qfq),
+                       type_guard=list)
 
 
 def save(symbol: str, source: str, sd: str, ed: str,
          rows: list[dict], date_str: str | None = None,
          qfq: bool = False) -> None:
     """写入缓存；失败不影响采集。"""
-    if not enabled() or not rows:
+    if not enabled():
         return
     date_str = date_str or shanghai_today()
-    path = _cache_path(symbol, source, sd, ed, date_str, qfq=qfq)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump(rows, f)
-    except Exception as exc:
-        logger.warning("kline cache save failed: %s: %s", path, exc)
+    _CACHE.save(date_str, _cache_parts(symbol, source, sd, ed, qfq), rows,
+                skip_empty=True, log_errors=True)
 
 
 def cleanup_old() -> None:
     """清理超 TTL 的日期目录（按目录 mtime）。"""
-    root = _cache_root()
-    if not root.exists():
-        return
-    now = time.time()
-    for entry in root.iterdir():
-        if entry.is_dir() and now - entry.stat().st_mtime > CACHE_TTL_SEC:
-            shutil.rmtree(entry, ignore_errors=True)
+    _CACHE.cleanup_old(ignore_errors=True)
 
 
 def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
@@ -100,15 +79,13 @@ def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
     """
     if not enabled():
         return fetch()
-    hit = load(symbol, source, sd, ed, qfq=qfq)
-    if hit is not None:
-        logger.info("kline cache hit: %s %s %s..%s%s", source, symbol, sd, ed,
-                    " (qfq)" if qfq else "")
-        return hit
-    data = fetch()
-    if data:
-        save(symbol, source, sd, ed, data, qfq=qfq)
-    return data
+    date_str = shanghai_today()
+    return _CACHE.load_or_fetch(
+        date_str, _cache_parts(symbol, source, sd, ed, qfq), fetch,
+        type_guard=list,
+        on_hit=lambda: logger.info("kline cache hit: %s %s %s..%s%s", source, symbol,
+                                   sd, ed, " (qfq)" if qfq else ""),
+    )
 
 
 __all__ = ["enabled", "load", "save", "cleanup_old", "load_or_fetch",

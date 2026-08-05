@@ -8,8 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 
-import kline_cache
-from report_formatter import _fmt_amount, _fmt_pct, _fmt_price, _parse_universe_indices
+from _invest_path import ensure_invest_a_scripts_on_path
+
+ensure_invest_a_scripts_on_path()
+
+from kline_cache import KlineTTLCache  # noqa: E402（canonical: skills/lib）
+from report_formatter import _fmt_amount, _fmt_pct, _fmt_price, _parse_universe_indices  # noqa: E402
 
 _SCAN_PY = Path(__file__).resolve().parent.parent / "scripts" / "scan.py"
 
@@ -29,13 +33,15 @@ def test_parse_universe_indices_default():
     assert ("中证A500", 500) in labels
 
 
-def test_kline_cache_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr(kline_cache.env, "STORE_DIR", tmp_path)
+def test_kline_cache_roundtrip(tmp_path):
+    """canonical KlineTTLCache 键布局兼容旧 gap 布局：{root}/{date}/{source}/{code}.pkl。"""
+    cache = KlineTTLCache(lambda: tmp_path / "gap_scan_cache", 3 * 86400)
     df = pd.DataFrame({"close": [1.0, 2.0]})
-    kline_cache.save("000001.SZ", df, date_str="20260722", source_name="test")
-    loaded = kline_cache.load("000001.SZ", date_str="20260722", source_name="test")
+    cache.save("20260722", ("test", "000001.SZ"), df)
+    loaded = cache.load("20260722", ("test", "000001.SZ"))
     assert loaded is not None
     assert list(loaded["close"]) == [1.0, 2.0]
+    assert (tmp_path / "gap_scan_cache" / "20260722" / "test" / "000001.SZ.pkl").is_file()
 
 
 def test_scan_cli_help_exit_0():
