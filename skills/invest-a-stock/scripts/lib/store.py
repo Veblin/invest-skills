@@ -19,6 +19,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 from . import env
+from .db_util import connect_db, safe_close
 from .json_util import dumps_json, json_default
 from .schema import index_dimensions
 
@@ -33,19 +34,11 @@ def _get_path() -> Path:
 
 
 def _conn() -> sqlite3.Connection:
-    p = _get_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p))
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    return connect_db(_get_path())
 
 
 def _safe_close(c: sqlite3.Connection) -> None:
-    try:
-        c.close()
-    except Exception:
-        logger.debug("sqlite close failed", exc_info=True)
+    safe_close(c, logger=logger)
 
 
 @contextmanager
@@ -174,8 +167,13 @@ def save_collection(result: dict[str, Any]) -> int:
     if not isinstance(dims, list):
         dims = []
     sm = result.get("summary", {})
-    name = next((d["data"].get("name", "") for d in dims
-                 if d.get("dimension") == "basic_info" and d.get("data")), "")
+    name = ""
+    for d in dims:
+        if d.get("dimension") == "basic_info":
+            data = d.get("data")
+            if isinstance(data, dict):
+                name = data.get("name", "")
+            break
     c = _conn()
     try:
         cur = c.execute(
@@ -324,7 +322,14 @@ def get_collection(collection_id: int) -> dict | None:
         if not row:
             return None
         d = dict(row)
-        d["raw_json"] = json.loads(d["raw_json"]) if isinstance(d["raw_json"], str) else d["raw_json"]
+        raw = d["raw_json"]
+        if isinstance(raw, str):
+            try:
+                d["raw_json"] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("get_collection(%d): raw_json parse failed, returning raw string", collection_id)
+        else:
+            d["raw_json"] = raw
         return d
     finally:
         _safe_close(c)
@@ -347,8 +352,13 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
             return None
         newer = dict(rows[0])
         older = dict(rows[1])
-        newer["raw_json"] = json.loads(newer["raw_json"]) if isinstance(newer["raw_json"], str) else newer["raw_json"]
-        older["raw_json"] = json.loads(older["raw_json"]) if isinstance(older["raw_json"], str) else older["raw_json"]
+        for d in (newer, older):
+            raw = d.get("raw_json")
+            if isinstance(raw, str):
+                try:
+                    d["raw_json"] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("get_latest_two(%s): raw_json parse failed, returning raw string", symbol)
         return (older, newer)
     finally:
         _safe_close(c)
@@ -576,7 +586,8 @@ def extract_key_snapshot(raw: dict) -> dict:
     risk = body.get("risk_scan") or body.get("risk_data")
     if isinstance(risk, dict):
         snap["risk"]["triggered_count"] = risk.get("triggered_count", 0)
-        triggered = [s.get("id") for s in risk.get("signals", []) if s.get("triggered")]
+        signals = risk.get("signals") or []  # .get() 在 key 存在但值为 null 时返回 None
+        triggered = [s.get("id") for s in signals if s.get("triggered")]
         snap["risk"]["triggered_signals"] = triggered
 
     # Events
@@ -939,26 +950,45 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
     """尝试用 trade_date 或 end_date 索引列表。
 
     对 shareholders 等同一日期有多条记录的维度，使用 holder_name 或序号构建复合键，
-    避免静默覆盖（H2 修复）。
+    避免静默覆盖（H2 修复）。同名同日期多条经 _unique_key 递增后缀区分，杜绝
+    复合键二次碰撞（review fix #8）。输入先按 (date, holder, 内容) 稳定排序，
+    保证同名同日期记录跨快照键一致，diff 不报假变化（review fix #12）。
     """
+    def _unique_key(key: str, used: set[str]) -> str:
+        candidate = key
+        n = 2
+        while candidate in used:
+            candidate = f"{key}_{n}"
+            n += 1
+        used.add(candidate)
+        return candidate
+
+    items = [it for it in data if isinstance(it, dict)]
+    items.sort(key=lambda r: (
+        str(r.get("trade_date") or r.get("end_date") or ""),
+        str(r.get("holder_name") or ""),
+        tuple(sorted(f"{k}={r.get(k)}" for k in r)),  # 内容稳定序
+    ))
+
     result: dict[str, dict] = {}
-    for i, item in enumerate(data):
-        if not isinstance(item, dict):
-            continue
+    composite_dates: set[str] = set()  # 已转为复合键的日期，避免第 3+ 条覆盖
+    used: set[str] = set()  # 所有已占用 key，保证同名同日期记录不互相覆盖
+    for i, item in enumerate(items):
         base_key = item.get("trade_date") or item.get("end_date") or str(i)
         holder = item.get("holder_name")
-        # 若已有同键记录，说明存在多记录同日期，对全部记录改用复合键
-        if base_key in result:
-            existing = result.pop(base_key)
-            eh = existing.get("holder_name")
-            # 回写已存在记录（无 holder_name 时用序号兜底）
-            suffix = eh if eh else "0"
-            result[f"{base_key}_{suffix}"] = existing
+        # 检查是否已有同键记录，或该日期已转入复合键模式
+        if base_key in result or base_key in composite_dates:
+            if base_key in result:
+                existing = result.pop(base_key)
+                eh = existing.get("holder_name")
+                suffix = eh if eh else "0"
+                result[_unique_key(f"{base_key}_{suffix}", used)] = existing
+                composite_dates.add(base_key)
             if holder:
                 base_key = f"{base_key}_{holder}"
             else:
                 base_key = f"{base_key}_{i}"
-        result[str(base_key)] = item
+        result[_unique_key(str(base_key), used)] = item
     return result
 
 
@@ -1019,8 +1049,16 @@ def thesis_get(symbol: str) -> dict[str, Any] | None:
         row = c.execute("SELECT * FROM thesis WHERE symbol=?", (symbol,)).fetchone()
         if not row:
             return None
-        assumptions = json.loads(row["assumptions_json"] or "[]")
-        red_lines = json.loads(row["red_lines_json"] or "[]")
+        try:
+            assumptions = json.loads(row["assumptions_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("get_thesis(%s): assumptions_json parse failed", symbol)
+            assumptions = []
+        try:
+            red_lines = json.loads(row["red_lines_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("get_thesis(%s): red_lines_json parse failed", symbol)
+            red_lines = []
         return {
             "symbol": row["symbol"],
             "assumptions": assumptions,

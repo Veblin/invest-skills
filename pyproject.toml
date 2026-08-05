@@ -1,6 +1,6 @@
 [project]
 name = "invest-skills"
-version = "0.2.2"
+version = "0.2.3"
 description = "投研技能集：A股个股深度研究 + 涨停板扫描 — 多因子交叉验证，学术级引用标准"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -22,6 +22,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from gap_scanner import ScanResult, ScanHit
+from lib.nums import fmt_amount
 
 logger = logging.getLogger(__name__)
 
@@ -32,26 +33,10 @@ _VERSION = "0.0.0"
 def _read_project_version() -> str:
     """Walk up to pyproject.toml and read ``[project].version`` only."""
     try:
-        root = Path(__file__).resolve().parent
-        for parent in [root, *root.parents]:
-            pp = parent / "pyproject.toml"
-            if not pp.exists():
-                continue
-            in_project = False
-            for raw in pp.read_text(encoding="utf-8").splitlines():
-                line = raw.strip()
-                if line == "[project]":
-                    in_project = True
-                    continue
-                if line.startswith("[") and line.endswith("]"):
-                    in_project = line == "[project]"
-                    continue
-                if in_project and line.startswith("version") and "=" in line:
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-            break
-    except OSError:
-        pass
-    return "0.0.0"
+        from version import get_package_version  # skills/lib（bootstrap 后可达）
+    except ModuleNotFoundError:
+        return "0.0.0"  # 无 skills/lib 环境时保持旧实现"永不失败"不变量
+    return get_package_version(default="0.0.0", stop_at_first=True)
 
 
 _VERSION = _read_project_version()
@@ -98,12 +83,15 @@ def _index_members_label(hit: ScanHit) -> str:
 
 
 def _fmt_amount(val: float) -> str:
-    """Format amount in yuan to human-readable string (亿 or 万)."""
+    """Format amount in yuan to human-readable string (亿 or 万).
+
+    Delegates to shared ``lib.nums.fmt_amount``; 亿 keeps 2 decimals,
+    below 亿 uses integer precision (compact display) — matching the
+    historical output.
+    """
     if abs(val) >= 1e8:
-        return f"{val / 1e8:.2f}亿"
-    if abs(val) >= 1e4:
-        return f"{val / 1e4:.0f}万"
-    return f"{val:.0f}"
+        return fmt_amount(val)
+    return fmt_amount(val, precision=0)
 
 
 def _fmt_pct(val: float) -> str:

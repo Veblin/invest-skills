@@ -18,9 +18,16 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from codes import etf_symbol_to_ts_code  # noqa: E402
+from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
-from lib.technical import rsi_series  # noqa: E402
+from lib.technical import (  # noqa: E402
+    annualized_volatility_from_returns,
+    boll_latest,
+    rsi_series,
+    sma,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +36,15 @@ _SPOT_CACHE_LOCK = threading.Lock()
 _SPOT_CACHE_DF: Any = None
 _SPOT_CACHE_TS: float = 0.0
 _SPOT_CACHE_TTL_SEC = 30.0
+
+# fetch_etf_nav 固定取数窗口（自然日）：与 fetch_etf_index_daily 的 700 对齐。
+# 覆盖 days ≤ ~470 交易日的 query_etf_kline 请求（MA60 需 ~75 交易日缓冲，
+# 裕量约 6 倍）；超窗请求在 query_etf_kline 显式告警而非静默截断
+_NAV_FETCH_NATURAL_DAYS = 700
+
+# fetch_etf_share_history 固定取数窗口（自然日）：覆盖 days ≤ ~170 交易日的
+# query_etf_share_history 请求；超窗在查询侧显式告警而非静默少返回
+_SHARE_FETCH_NATURAL_DAYS = 250
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +176,7 @@ ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
     "512070": {"sw_code": "801790", "sw_name": "非银金融",   "sub": "券商"},
     # 资源/周期
     "512400": {"sw_code": "801050", "sw_name": "有色金属",   "sub": "有色"},
-    "512710": {"sw_code": "801150", "sw_name": "医药生物",   "sub": "生物医药"},
+    "512710": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工龙头"},
 }
 
 
@@ -292,31 +308,56 @@ def query_etf_data(
 # ---------------------------------------------------------------------------
 
 def prefetch_etf_spot() -> bool:
-    """预拉 fund_etf_spot_em 全表并写入短 TTL 缓存。返回是否成功。"""
-    return _get_etf_spot_df(force=True) is not None
+    """预热 spot 全表。优先走 data_bridge L2（热时零网络）；L2 不可用则强制回源写 L1。
+
+    L2 取回（含命中）后回填 L1（30s 进程内缓存），使后续 _lookup_etf_spot_row
+    走内存而非每次全表磁盘读 + 线性扫描（v0.2.3 补丁 #5）。
+
+    空表/失败一律返回 False（与旧语义一致）：L2 路径下 `[] is not None`
+    曾把空表误报为成功（v0.2.3 修复），隐藏失败的预热。
+    """
+    try:
+        import data_bridge  # noqa: PLC0415
+    except ImportError:
+        return _get_etf_spot_df(force=True) is not None
+    rows = data_bridge.get_etf_spot_rows()
+    if rows:
+        _seed_etf_spot_l1(rows)
+        return True
+    return False
 
 
 def clear_etf_spot_cache() -> None:
-    """清空 spot 缓存（测试用）。"""
+    """清空**进程内**（L1）spot 缓存（测试用）。
+
+    L2（data_bridge 磁盘缓存）由 data_bridge.invalidate_symbol("market")
+    或测试的 tmp cache_dir 隔离负责，此处不触碰。
+    """
     global _SPOT_CACHE_DF, _SPOT_CACHE_TS
     with _SPOT_CACHE_LOCK:
         _SPOT_CACHE_DF = None
         _SPOT_CACHE_TS = 0.0
 
 
-def _get_etf_spot_df(*, force: bool = False) -> Any:
-    """带锁 + TTL 的 fund_etf_spot_em 全表缓存。"""
-    global _SPOT_CACHE_DF, _SPOT_CACHE_TS
-    now = time.monotonic()
-    # Step 1: 检查缓存（在锁内）
+def _peek_etf_spot_df() -> Any:
+    """纯缓存检查：L1 新鲜则返回 df，否则 None；绝不触发网络。"""
     with _SPOT_CACHE_LOCK:
         if (
-            not force
-            and _SPOT_CACHE_DF is not None
-            and (now - _SPOT_CACHE_TS) < _SPOT_CACHE_TTL_SEC
+            _SPOT_CACHE_DF is not None
+            and (time.monotonic() - _SPOT_CACHE_TS) < _SPOT_CACHE_TTL_SEC
         ):
             return _SPOT_CACHE_DF.copy()
-    # Step 2: 释放锁后拉取数据（网络 I/O 不占锁，避免串行化）
+    return None
+
+
+def _get_etf_spot_df(*, force: bool = False) -> Any:
+    """带锁 + TTL 的 fund_etf_spot_em 全表缓存（L1，进程内 30s）。"""
+    global _SPOT_CACHE_DF, _SPOT_CACHE_TS
+    if not force:
+        cached = _peek_etf_spot_df()
+        if cached is not None:
+            return cached
+    # 释放锁后拉取数据（网络 I/O 不占锁，避免串行化）
     try:
         import akshare as ak
 
@@ -327,22 +368,312 @@ def _get_etf_spot_df(*, force: bool = False) -> Any:
         return None
     if df is None or df.empty:
         return None
-    # Step 3: 重新获取锁，更新缓存
+    # 重新获取锁，更新缓存
     with _SPOT_CACHE_LOCK:
         _SPOT_CACHE_DF = df
         _SPOT_CACHE_TS = time.monotonic()
         return df
 
 
+def _seed_etf_spot_l1(records: list[dict]) -> None:
+    """用 L2/网络取回的 records 回填 L1 进程内缓存（prefetch 预热用）。
+
+    保证 prefetch 后进程内后续 _lookup_etf_spot_row 走内存而非每次
+    全表磁盘读 + 线性扫描（v0.2.3 补丁 #5：L2 命中时 L1 曾永远不热）。
+    """
+    if not records:
+        return
+    import pandas as pd
+    global _SPOT_CACHE_DF, _SPOT_CACHE_TS
+    with _SPOT_CACHE_LOCK:
+        _SPOT_CACHE_DF = pd.DataFrame(records)
+        _SPOT_CACHE_TS = time.monotonic()
+
+
 def _lookup_etf_spot_row(symbol: str) -> tuple[Any | None, str | None]:
-    """从缓存/网络查找单只 ETF spot 行。返回 (row, error)。"""
+    """从 L1（进程内 30s）→ L2（data_bridge 60s）→ 网络 查找单只 ETF spot 行。
+
+    返回 (row, error)：row 为 pandas Series（L1 路径）或 dict（L2 路径），
+    两者均支持 .get()，下游 _spot_row_to_quote / _apply_spot_row_to_profile 不变。
+    """
+    df = _peek_etf_spot_df()
+    l1_fresh = df is not None
+    if l1_fresh:
+        row_df = df[df["代码"] == symbol]
+        if not row_df.empty:
+            return row_df.iloc[0], None
+        # L1 新鲜但未命中该符号（如新上市/盘中异动）：继续查 L2，
+        # 避免 30s L1 窗口内屏蔽掉更新更完整的 L2 数据（v0.2.3 修复）
+    rows = _bridge_get("get_etf_spot_rows")
+    if rows is None:
+        if l1_fresh:
+            # L2/网络不可用：保留 L1 判定结果（与旧行为一致）
+            return None, f"etf_spot: {symbol} not found"
+        # L1 冷且 L2/网络失败：无法获取任何数据（保持旧错误语义）
+        return None, "etf_spot: empty response"
+    for r in rows:
+        if str(r.get("代码")) == symbol:
+            return r, None
+    return None, f"etf_spot: {symbol} not found"
+
+
+def _bridge_get(getter: str, *args: Any) -> Any:
+    """函数体内惰性调 skills/lib data_bridge；不可用时返回 None（查询侧视为 missing）。
+
+    调用本身也包异常：缓存层（_fetch_dimension→collector）抛出的 OSError/
+    UnicodeDecodeError 等不应让报告流程崩溃，按查询侧 missing 降级
+    （v0.2.3 补丁 #6）。
+    """
+    try:
+        import data_bridge  # noqa: PLC0415
+    except ImportError:
+        logger.debug("data_bridge unavailable; %s degraded", getter)
+        return None
+    fn = getattr(data_bridge, getter, None)
+    if fn is None:
+        return None
+    try:
+        return fn(*args)
+    except Exception as exc:
+        logger.warning("data_bridge %s(%s) raised %r; degraded to missing", getter, args, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# data_bridge L2 取数层（fetch_*，canonical 公开原始取数）
+# 信封统一带 status（"ok" / "missing"），使 data_bridge 的失败不缓存语义
+# （_FAILURE_STATUSES）直接生效；参数全部在 fetch 内部固定，不透出 kwargs。
+# ---------------------------------------------------------------------------
+
+def fetch_etf_spot_rows() -> list[dict] | None:
+    """原始取数：fund_etf_spot_em 全表 → records（data_bridge etf_spot 维度）。
+
+    经 _get_etf_spot_df（L1 30s 进程内缓存）去重；失败/空表返回 None（不缓存）。
+    """
     df = _get_etf_spot_df()
     if df is None:
-        return None, "etf_spot: empty response"
-    row_df = df[df["代码"] == symbol]
-    if row_df.empty:
-        return None, f"etf_spot: {symbol} not found"
-    return row_df.iloc[0], None
+        return None
+    return df.to_dict("records")
+
+
+def fetch_etf_index_pe(idx_code: str) -> dict:
+    """原始取数：csindex 指数 PE（data_bridge etf_index_pe 维度）。
+
+    PE 取不到时返回 status="missing"（而非 ok+None），避免"无 PE"状态被
+    1d TTL 缓存住。
+    """
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.stock_zh_index_value_csindex(symbol=idx_code)
+        if df is None or df.empty:
+            return {"status": "missing", "index_pe": None, "index_pe_note": None,
+                    "rows": [], "error": "csindex empty response"}
+        latest = df.iloc[-1]
+        pe1 = safe_float(latest.get("市盈率1"))
+        pe2 = safe_float(latest.get("市盈率2"))
+        pe = pe1 if pe1 is not None else pe2
+        return {
+            "status": "ok" if pe is not None else "missing",
+            "index_pe": pe,
+            "index_pe_note": (
+                f"来源: csindex {idx_code}，仅 {len(df)} 条历史，"
+                "无可靠分位；市盈率1=股本加权，市盈率2=流通加权"
+            ),
+            "rows": df.to_dict("records"),
+            "error": None,
+        }
+    except Exception as exc:
+        logger.warning("csindex_pe(%s) failed: %s", idx_code, exc)
+        return {"status": "missing", "index_pe": None, "index_pe_note": None,
+                "rows": [], "error": str(exc)}
+
+
+def fetch_etf_nav(symbol: str) -> dict:
+    """原始取数：ETF 历史单位净值（data_bridge etf_nav 维度）。
+
+    固定 _NAV_FETCH_NATURAL_DAYS 自然日窗口；主源 fund_etf_fund_info_em，
+    akshare 列数变更（Length mismatch）时降级 fund_open_fund_info_em
+    （fallback 无日期参数，须按同一窗口过滤全量历史，防止旧 ETF 全量
+    入 L2 缓存——v0.2.3 修复）。
+    rows 归一化为 [{date, nav, change_pct}]。
+    """
+    import akshare as ak
+
+    end_date = shanghai_today()
+    start_date = shanghai_days_ago(_NAV_FETCH_NATURAL_DAYS)
+    start_key = start_date.replace("-", "")
+
+    df = None
+    source = "fund_etf_fund_info_em"
+    try:
+        with akshare_direct_session():
+            df = ak.fund_etf_fund_info_em(fund=symbol, start_date=start_date, end_date=end_date)
+    except Exception as exc:
+        msg = str(exc)
+        if "Length mismatch" in msg or "Expected axis has" in msg:
+            logger.info(
+                "fund_etf_fund_info_em column mismatch, falling back to fund_open_fund_info_em: %s",
+                exc,
+            )
+            try:
+                with akshare_direct_session():
+                    df = ak.fund_open_fund_info_em(symbol=symbol, indicator="单位净值走势")
+                source = "fund_open_fund_info_em"
+            except Exception as fb_exc:
+                logger.warning("fund_open_fund_info_em fallback also failed: %s", fb_exc)
+                return {"status": "missing", "source": source, "rows": [],
+                        "error": f"fund_etf_fund_info_em: {exc}; fallback: {fb_exc}"}
+        else:
+            raise
+
+    if df is None or df.empty:
+        return {"status": "missing", "source": source, "rows": [], "error": f"{source}: empty response"}
+
+    rows = []
+    for _, r in df.iterrows():
+        d = str(r.get("净值日期", "")).replace(" 00:00:00", "")[:10]
+        nav = safe_float(r.get("单位净值"))
+        # 日期窗口过滤（YYYYMMDD 字典序比较）：fallback 全量历史在此截断
+        if d and nav is not None and d.replace("-", "")[:8] >= start_key:
+            rows.append({"date": d, "nav": nav, "change_pct": safe_float(r.get("日增长率"))})
+    if not rows:
+        # df 非空但窗口过滤/解析后无有效行（数据停更或列格式漂移）→ missing，
+        # 避免 ok+[] 空信封被 L2 缓存 1 天（v0.2.3 补丁 #3）
+        return {"status": "missing", "source": source, "rows": [],
+                "error": f"{source}: 无有效净值行（窗口过滤后为空）"}
+    return {"status": "ok", "source": source, "rows": rows, "error": None}
+
+
+def fetch_etf_index_daily(idx_code: str) -> dict:
+    """原始取数：指数日 K 收盘（data_bridge etf_index_daily 维度）。
+
+    sh/sz 前缀路由在 fetch 内（不参与缓存键）；只保留最近 700 自然日
+    （≈470 交易日，MA60 需 ~75 交易日缓冲，裕量约 6 倍；若未来加长
+    周期 MA 需同步上调此窗口）。
+    """
+    try:
+        import akshare as ak
+
+        # csindex 代码 → akshare 行情代码前缀路由
+        # 0xxxxx / 9xxxxx → 上交所发布（sh）；1xxxxx / 3xxxxx → 深交所发布（sz）
+        if idx_code.startswith(("0", "9")):
+            ticker = f"sh{idx_code}"
+        elif idx_code.startswith(("1", "3")):
+            ticker = f"sz{idx_code}"
+        else:
+            logger.debug("fetch_etf_index_daily(%s): unrecognized csindex prefix '%s', defaulting to sz",
+                         idx_code, idx_code[0] if idx_code else "")
+            ticker = f"sz{idx_code}"
+        with akshare_direct_session():
+            df = ak.stock_zh_index_daily(symbol=ticker)
+        if df is None or df.empty:
+            return {"status": "missing", "ticker": ticker, "rows": [], "error": "index daily empty"}
+        df = df.tail(700)
+        rows = []
+        for _, r in df.iterrows():
+            close = safe_float(r.get("close"))
+            if close is None:
+                continue
+            rows.append({"date": str(r.get("date", ""))[:10], "close": close})
+        if not rows:
+            # 全行 close 解析失败（列格式漂移）→ missing，避免 ok+[] 被 L2 缓存
+            return {"status": "missing", "ticker": ticker, "rows": [],
+                    "error": "index daily 无有效 close"}
+        return {"status": "ok", "ticker": ticker, "rows": rows, "error": None}
+    except Exception as exc:
+        logger.debug("fetch_etf_index_daily(%s): failed, silent degrade: %s", idx_code, exc)
+        return {"status": "missing", "ticker": None, "rows": [], "error": str(exc)}
+
+
+def fetch_etf_adj_factor(symbol: str) -> dict:
+    """原始取数：Tushare fund_adj 复权因子（data_bridge etf_adj_factor 维度）。"""
+    adj_map = _fetch_fund_adj_factor(symbol)
+    if not adj_map:
+        return {"status": "missing", "adj_map": None}
+    return {"status": "ok", "adj_map": adj_map}
+
+
+def fetch_etf_share_history(symbol: str) -> dict:
+    """原始取数：Tushare fund_share + fund_daily（data_bridge etf_share_history 维度）。
+
+    固定 _SHARE_FETCH_NATURAL_DAYS 自然日窗口；token/ts_code/积分检查失败 → status="missing"。
+    """
+    from lib import env
+    from lib.tushare_client import TushareClient
+
+    config = env.get_config()
+    token = config.get("TUSHARE_TOKEN")
+    if not token:
+        return {"status": "missing", "fund_share": [], "fund_daily": [], "note": "Tushare 不可用"}
+
+    ts_code = etf_symbol_to_ts_code(symbol)
+    if not ts_code:
+        return {"status": "missing", "fund_share": [], "fund_daily": [], "note": "无效的 ETF 代码"}
+
+    end_date = shanghai_today()
+    start_date = shanghai_days_ago(_SHARE_FETCH_NATURAL_DAYS)
+
+    try:
+        client = TushareClient(token=token, timeout=15)
+        shares_df = client.query("fund_share", ts_code=ts_code,
+                                 start_date=start_date, end_date=end_date)
+        if shares_df is None or shares_df.empty:
+            return {"status": "missing", "fund_share": [], "fund_daily": [],
+                    "note": "fund_share 无数据（需 ≥2000 Tushare 积分）"}
+        daily_df = client.query("fund_daily", ts_code=ts_code,
+                                start_date=start_date, end_date=end_date)
+        if daily_df is None or daily_df.empty:
+            return {"status": "missing", "fund_share": [], "fund_daily": [],
+                    "note": "fund_daily 无数据"}
+    except Exception as exc:
+        return {"status": "missing", "fund_share": [], "fund_daily": [],
+                "note": f"Tushare 查询失败: {exc}"}
+
+    return {
+        "status": "ok",
+        "fund_share": shares_df.to_dict("records"),
+        "fund_daily": daily_df.to_dict("records"),
+        "note": None,
+    }
+
+
+def fetch_etf_industry_alloc(symbol: str) -> dict:
+    """原始取数：ETF 行业配置（data_bridge etf_industry_alloc 维度，季度报告期）。"""
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.fund_portfolio_industry_allocation_em(symbol=symbol, date=str(datetime.now().year))
+        if df is None or df.empty:
+            return {"status": "missing", "allocation": [], "latest_date": None, "error": "empty"}
+        latest_date = str(sorted(df["截止时间"].unique())[-1])
+        latest = df[df["截止时间"] == latest_date]
+        alloc: list[dict] = []
+        for _, row in latest.iterrows():
+            industry = str(row.get("行业类别", ""))
+            pct = safe_float(row.get("占净值比例"))
+            if industry and pct is not None and pct > 0:
+                alloc.append({"industry": industry, "pct": round(pct, 2)})
+        alloc.sort(key=lambda x: x["pct"], reverse=True)
+        return {"status": "ok" if alloc else "missing", "allocation": alloc,
+                "latest_date": latest_date, "error": None}
+    except Exception as exc:
+        logger.debug("fetch_etf_industry_alloc(%s): failed, silent degrade: %s", symbol, exc)
+        return {"status": "missing", "allocation": [], "latest_date": None, "error": str(exc)}
+
+
+def fetch_etf_category_sina() -> dict:
+    """原始取数：sina ETF 分类表（data_bridge etf_category_sina 维度，市场级）。"""
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.fund_etf_category_sina()
+        if df is None or df.empty:
+            return {"status": "missing", "rows": [], "error": "empty"}
+        return {"status": "ok", "rows": df.to_dict("records"), "error": None}
+    except Exception as exc:
+        logger.debug("fetch_etf_category_sina: failed, silent degrade: %s", exc)
+        return {"status": "missing", "rows": [], "error": str(exc)}
 
 
 def _apply_spot_row_to_profile(result: dict, row: Any, symbol: str) -> None:
@@ -388,25 +719,19 @@ def _set_index_pe_status(result: dict, symbol: str, idx_code: str) -> None:
 
 
 def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
-    """指数 PE（csindex，仅 20 条历史，不足以计算可靠分位）。"""
-    try:
-        import akshare as ak
-        with akshare_direct_session():
-            df = ak.stock_zh_index_value_csindex(symbol=idx_code)
-        if df is None or df.empty:
-            result["_errors"].append("csindex_pe: empty response")
-            return
-        latest = df.iloc[-1]
-        pe1 = safe_float(latest.get("市盈率1"))
-        pe2 = safe_float(latest.get("市盈率2"))
-        result["index_pe"] = pe1 if pe1 is not None else pe2
-        result["index_pe_note"] = (
-            f"来源: csindex {idx_code}，仅 {len(df)} 条历史，"
-            "无可靠分位；市盈率1=股本加权，市盈率2=流通加权"
-        )
-    except Exception as exc:
-        logger.warning("csindex_pe(%s) failed: %s", idx_code, exc)
-        result["_errors"].append(f"csindex_pe: {exc}")
+    """指数 PE（csindex，仅 20 条历史，不足以计算可靠分位）。
+
+    v0.2.3：原始取数迁至 fetch_etf_index_pe，经 data_bridge L2 缓存（1d）。
+    """
+    env = _bridge_get("get_etf_index_pe", idx_code)
+    if env is None:
+        result["_errors"].append("csindex_pe: empty response")
+        return
+    if env.get("status") != "ok":
+        result["_errors"].append(env.get("error") or "csindex_pe: empty response")
+        return
+    result["index_pe"] = env.get("index_pe")
+    result["index_pe_note"] = env.get("index_pe_note")
 
 
 def _summarize_etf_data_quality(result: dict) -> dict[str, str]:
@@ -535,12 +860,11 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             Calendar lookback uses ``int(days * 365 / 250) + 15`` so MA60
             has enough history after weekends/holidays.
     """
-    from datetime import date, timedelta
-
     result: dict[str, Any] = {
         "symbol": symbol,
         "nav_rows": 0,
         "latest_nav": None,
+        "latest_nav_date": None,  # 数据末端日期（L2 缓存命中时可能滞后，供识别陈旧）
         "volatility_annualized": None,
         "adj_applied": False,
         "adj_note": None,
@@ -554,52 +878,64 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "boll_upper": None,
         "boll_mid": None,
         "boll_lower": None,
+        "derived": None,  # D14: 衍生指标（NAV 偏离度/BOLL 位置，避免 AI 手工计算）
         "nav_history": [],
         "status": "missing",
         "_error": None,
     }
 
     try:
-        import akshare as ak
-
-        end_date = date.today().strftime("%Y%m%d")
-        calendar_days = int(days * 365 / 250) + 15
-        start_date = (date.today() - timedelta(days=calendar_days)).strftime("%Y%m%d")
-
-        # 主链路：fund_etf_fund_info_em（字段更丰富）
-        # fallback：fund_open_fund_info_em — akshare 偶尔变更主接口列数时报
-        #   "Length mismatch: Expected axis has 14 elements, new values have 13 elements"
-        df = None
-        source = "fund_etf_fund_info_em"
-        try:
-            with akshare_direct_session():
-                df = ak.fund_etf_fund_info_em(fund=symbol, start_date=start_date, end_date=end_date)
-        except Exception as exc:
-            msg = str(exc)
-            if "Length mismatch" in msg or "Expected axis has" in msg:
-                logger.info(
-                    "fund_etf_fund_info_em column mismatch, falling back to fund_open_fund_info_em: %s",
-                    exc,
-                )
-                try:
-                    with akshare_direct_session():
-                        df = ak.fund_open_fund_info_em(symbol=symbol, indicator="单位净值走势")
-                    source = "fund_open_fund_info_em"
-                except Exception as fb_exc:
-                    logger.warning("fund_open_fund_info_em fallback also failed: %s", fb_exc)
-                    result["_error"] = f"fund_etf_fund_info_em: {exc}; fallback: {fb_exc}"
-                    return result
-            else:
-                raise
-
-        if df is None or df.empty:
-            result["_error"] = f"{source}: empty response"
+        # v0.2.3：原始取数经 data_bridge L2 缓存（fetch_etf_nav 固定 _NAV_FETCH_NATURAL_DAYS 自然日窗口）
+        nav_env = _bridge_get("get_etf_nav", symbol)
+        if nav_env is None or nav_env.get("status") != "ok":
+            result["_error"] = (nav_env or {}).get("error") or "etf_nav: empty response"
             return result
+
+        rows = nav_env.get("rows") or []
+        if not rows:
+            result["_error"] = nav_env.get("error") or "etf_nav: empty response"
+            return result
+
+        # 按调用方窗口切片：锚定数据末端日期（缓存跨日/跨节假日时窗口长度稳定）
+        calendar_days = int(days * 365 / 250) + 15
+        if calendar_days > _NAV_FETCH_NATURAL_DAYS:
+            # 超窗请求：显式告警 + 结果 note，不再静默截断（v0.2.3 修复）
+            logger.warning(
+                "query_etf_kline(%s, days=%d): 请求窗口 %d 自然日超过取数上限 %d"
+                "（约 %d 个交易日），已按上限截断",
+                symbol, days, calendar_days, _NAV_FETCH_NATURAL_DAYS,
+                int(_NAV_FETCH_NATURAL_DAYS * 250 / 365),
+            )
+            result["note"] = (
+                f"请求 {days} 个交易日，超过取数上限 {_NAV_FETCH_NATURAL_DAYS} 自然日"
+                f"（约 {int(_NAV_FETCH_NATURAL_DAYS * 250 / 365)} 个交易日），已按上限截断"
+            )
+        start = shanghai_days_ago(calendar_days).replace("-", "")
+        # 切片多取 2 自然日上下文：复权切换行若恰为窗口首行，prev_nav 需要
+        # 前一行做连续性校验（v0.2.3 补丁 #2：无上下文时假跳变残留）；
+        # _aligned_nav_returns 计算完成后按 start 裁剪回请求窗口。
+        used_ctx = False
+        ctx_start = shanghai_days_ago(calendar_days + 2).replace("-", "")
+        sliced = [r for r in rows if str(r["date"]).replace("-", "")[:8] >= ctx_start]
+        if len(sliced) < 5:
+            sliced = rows  # 兜底：数据跨度不足窗口时退回全部（超窗时已附 note 告警）
+        else:
+            used_ctx = True
+        rows = sliced
+
+        import pandas as pd
+
+        df = pd.DataFrame(rows).rename(
+            columns={"date": "净值日期", "nav": "单位净值", "change_pct": "日增长率"}
+        )
+        source = nav_env.get("source", "fund_etf_fund_info_em")
 
         result["nav_rows"] = len(df)
 
-        # 尝试 Tushare fund_adj 复权（消除分红/拆分断点）
-        adj_map = _fetch_fund_adj_factor(symbol)
+        # 尝试 Tushare fund_adj 复权（消除分红/拆分断点；data_bridge 6h 缓存，
+        # 除息日开盘前必过期重拉，防 stale 因子跨断点算收益率）
+        adj_env = _bridge_get("get_etf_adj_factor", symbol)
+        adj_map = adj_env.get("adj_map") if adj_env and adj_env.get("status") == "ok" else None
         if adj_map:
             result["adj_applied"] = True
             result["adj_note"] = (
@@ -610,6 +946,17 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             )
 
         navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
+        # 裁剪上下文行（date < start）：仅当上下文切片实际生效（非兜底）时执行，
+        # 保持 navs/returns/rows 三者对齐（returns 索引 j 对应 navs[j+1] 的收益）
+        if used_ctx:
+            keep = [i for i, r in enumerate(aligned_rows)
+                    if str(r["date"]).replace("-", "")[:8] >= start]
+            if keep and len(keep) < len(navs):
+                ret_keep = [j for j in range(len(returns))
+                            if str(aligned_rows[j + 1]["date"]).replace("-", "")[:8] >= start]
+                navs = [navs[i] for i in keep]
+                returns = [returns[j] for j in ret_keep]
+                aligned_rows = [aligned_rows[i] for i in keep]
         if navs:
             result["latest_nav"] = navs[-1]
 
@@ -619,21 +966,21 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             return result
 
         # 固定 60 日窗口，不同 ETF 间可比；不足 60 日则用全部可用数据
-        returns_window = returns[-60:] if len(returns) >= 60 else returns
-        if len(returns_window) < 5:
+        # 引擎统一计算（lib.technical），避免手写公式与共享库分歧
+        vol_ann = annualized_volatility_from_returns(returns, window=60)
+        if vol_ann is None:
             result["status"] = "insufficient"
-            result["_error"] = f"only {len(returns_window)} daily returns"
+            result["_error"] = f"only {len(returns)} daily returns"
             return result
-        mean_ret = sum(returns_window) / len(returns_window)
-        variance = sum((r - mean_ret) ** 2 for r in returns_window) / (len(returns_window) - 1)
-        daily_vol = math.sqrt(variance)
-        result["volatility_annualized"] = round(daily_vol * math.sqrt(252) * 100, 2)
-        result["volatility_window"] = len(returns_window)
+        result["volatility_annualized"] = vol_ann
+        result["volatility_window"] = min(len(returns), 60)
 
-        if len(navs) >= 20:
-            result["ma20"] = round(sum(navs[-20:]) / 20, 4)
-        if len(navs) >= 60:
-            result["ma60"] = round(sum(navs[-60:]) / 60, 4)
+        ma20_series = sma(navs, 20)
+        ma60_series = sma(navs, 60)
+        if ma20_series and ma20_series[-1] is not None:
+            result["ma20"] = round(ma20_series[-1], 4)
+        if ma60_series and ma60_series[-1] is not None:
+            result["ma60"] = round(ma60_series[-1], 4)
 
         # D4: 指数价格 MA（底层指数的趋势结构，与 NAV MA 互补）
         idx_code = CSINDEX_MAP.get(symbol, "")
@@ -644,15 +991,16 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
                 logger.info("index_ma(%s/%s) skipped: %s", symbol, idx_code, exc)
 
         # D8: BOLL 布林带（基于 NAV 序列，SMA(20) ± 2×std，用于波动率区间判断）
+        # 引擎统一计算（lib.technical.boll_latest，总体方差，Bollinger 定义）
         if len(navs) >= 20:
             try:
-                window = navs[-20:]
-                mid = sum(window) / 20
-                variance_boll = sum((x - mid) ** 2 for x in window) / (20 - 1)
-                std_boll = math.sqrt(variance_boll)
-                result["boll_mid"] = round(mid, 4)
-                result["boll_upper"] = round(mid + 2.0 * std_boll, 4)
-                result["boll_lower"] = round(mid - 2.0 * std_boll, 4)
+                boll = boll_latest(navs)
+                if boll["mid"] is not None:
+                    result["boll_mid"] = round(boll["mid"], 4)
+                if boll["upper"] is not None:
+                    result["boll_upper"] = round(boll["upper"], 4)
+                if boll["lower"] is not None:
+                    result["boll_lower"] = round(boll["lower"], 4)
             except Exception as exc:
                 logger.info("boll(%s) skipped: %s", symbol, exc)
 
@@ -662,11 +1010,46 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             result["rsi"] = rsi_val
             result["rsi_period"] = period
 
+        # D14: 衍生指标 — 所有 NAV vs 均线/BOLL 的百分比偏离与位置
+        # 由引擎统一计算，避免 AI 手工心算引入误差
+        derived: dict[str, Any] = {}
+        latest = result["latest_nav"]
+        if latest is not None:
+            ma20 = result.get("ma20")
+            ma60 = result.get("ma60")
+            boll_upper = result.get("boll_upper")
+            boll_lower = result.get("boll_lower")
+            boll_mid = result.get("boll_mid")
+
+            if ma20 is not None:
+                derived["nav_vs_ma20_pct"] = round((latest / ma20 - 1) * 100, 2)
+            if ma60 is not None:
+                derived["nav_vs_ma60_pct"] = round((latest / ma60 - 1) * 100, 2)
+            if boll_mid is not None:
+                derived["nav_vs_boll_mid_pct"] = round((latest / boll_mid - 1) * 100, 2)
+            if boll_upper is not None and boll_lower is not None and boll_upper != boll_lower:
+                derived["boll_position_pct"] = round(
+                    (latest - boll_lower) / (boll_upper - boll_lower) * 100, 2
+                )
+                derived["nav_to_boll_lower_pct"] = round((latest / boll_lower - 1) * 100, 2)
+                derived["nav_to_boll_upper_pct"] = round((latest / boll_upper - 1) * 100, 2)
+                derived["boll_bandwidth_pct"] = round((boll_upper / boll_lower - 1) * 100, 2)
+            vol_ann = result.get("volatility_annualized")
+            if vol_ann is not None:
+                derived["daily_volatility_pct"] = round(vol_ann / math.sqrt(252), 2)
+
+        if derived:
+            result["derived"] = derived
+
         # 使用与指标计算相同的对齐数据构建 nav_history（含复权调整）
         result["nav_history"] = [
             {"date": r["date"], "nav": navs[i], "change_pct": r["change_pct"]}
             for i, r in enumerate(aligned_rows)
         ]
+        # 暴露数据末端日期：L2 缓存命中时序列可能滞后 1-2 交易日（净值晚间公布、
+        # 缓存 TTL 内不重拉），供消费方识别陈旧（v0.2.3 补丁 #4）
+        if aligned_rows:
+            result["latest_nav_date"] = aligned_rows[-1]["date"]
         result["status"] = "available"
 
     except Exception as exc:
@@ -693,9 +1076,19 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
         使分红/拆分前后的 NAV 连续可比。
     """
     latest_adj = 1.0
+    switch_factors: dict[str, float] = {}
     if adj_map:
         sorted_dates = sorted(adj_map.keys())
         latest_adj = adj_map[sorted_dates[-1]] if sorted_dates else 1.0
+        # 因子切换点：Tushare fund_adj 因子在除权日次日才更新，而净值源
+        # （akshare）在除权日当天已是拆后口径（如 515050 2026-05-13 因子变
+        # 3.0，但净值 05-12 已从 3.29 → 1.1095）→ 切换日**前一行**须按新
+        # 因子重算，否则前复权在该行产生假跳变（×3 假低点），污染
+        # 波动率/MA/RSI/BOLL。是否采用由循环内的连续性校验决定。
+        for i in range(1, len(sorted_dates)):
+            prev_d, cur_d = sorted_dates[i - 1], sorted_dates[i]
+            if adj_map[cur_d] != adj_map[prev_d]:
+                switch_factors[prev_d] = adj_map[cur_d]
 
     navs: list[float] = []
     returns: list[float] = []
@@ -715,6 +1108,25 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
             adj_d = adj_map.get(date_key)
             if adj_d is None:
                 adj_d = adj_map.get(date_str)
+            aligned = switch_factors.get(date_key)
+            if (aligned is not None and adj_d and latest_adj > 0
+                    and prev_nav is not None and prev_nav > 0):
+                # 错位对齐 + 连续性校验：切换日前一行若已是新口径（净值源提前
+                # 一天除权），按新因子重算应与前值连续（市场变动 <15%，A 股
+                # 涨跌停保证），而按旧因子则出现 ≈除权幅度 的跳变 → 采用新因子。
+                # 阈值不再硬编码 15%：改为感知除权幅度先验 expected_drop
+                # （= 1 - 旧因子/新因子），小分红（除权 1-5%，cur 跳变不足 15%）
+                # 同样能命中，避免假跳变残留；同时保留"新因子下必须连续"
+                # （cand_dev < 15%）防误采。
+                cand_nav = nav * aligned / latest_adj
+                cur_nav = nav * adj_d / latest_adj
+                cand_dev = abs(cand_nav / prev_nav - 1)
+                cur_dev = abs(cur_nav / prev_nav - 1)
+                expected_drop = 1.0 - adj_d / aligned
+                if (cand_dev < 0.15
+                        and cur_dev >= expected_drop * 0.5
+                        and abs(cur_dev - expected_drop) <= max(0.05, expected_drop * 0.5)):
+                    adj_d = aligned
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
         # 复权状态下：原始 日增长率 基于未复权净值，与调整后的 nav 不匹配
@@ -725,6 +1137,7 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
                 navs.append(nav)
                 returns.append(ret)
                 rows.append({"date": date_str, "change_pct": None})
+                prev_nav = nav  # D15 fix: 更新 prev_nav 使下期收益率为单期而非累积
             else:
                 # 复权首行，无法计算收益率；保留 NAV 用于 MA/RSI 连续性
                 prev_nav = nav
@@ -801,21 +1214,16 @@ def _fetch_fund_adj_factor(symbol: str) -> dict[str, float] | None:
             logger.info("fund_adj(%s): no TUSHARE_TOKEN, skipping", symbol)
             return None
 
-        # ETF 代码 → Tushare ts_code（内联，避免跨包导入 lib.codes）
-        s = symbol.strip()
-        if s.startswith(("5", "6")):
-            ts_code = f"{s}.SH"
-        elif s.startswith(("0", "1", "3")):
-            ts_code = f"{s}.SZ"
-        elif s.startswith(("4", "8")):
-            ts_code = f"{s}.BJ"
-        else:
+        # ETF 代码 → Tushare ts_code（共享 lib.codes，ETF 规则与股票不同：5→SH）
+        ts_code = etf_symbol_to_ts_code(symbol)
+        if not ts_code:
             return None
 
-        import tushare as ts
+        # v0.2.3：统一走 TushareClient（原裸 ts.pro_api，缺限流/权限降级）
+        from lib.tushare_client import TushareClient
 
-        pro = ts.pro_api(token)
-        df = pro.fund_adj(ts_code=ts_code, fields="trade_date,adj_factor")
+        client = TushareClient(token=token, timeout=15)
+        df = client.query("fund_adj", ts_code=ts_code, fields="trade_date,adj_factor")
         if df is None or df.empty:
             return None
 
@@ -834,34 +1242,23 @@ def _fetch_fund_adj_factor(symbol: str) -> dict[str, float] | None:
 
 
 def _fetch_index_ma(result: dict, idx_code: str) -> None:
-    """从 akshare 拉取指数日 K 线，计算 index_ma20/index_ma60。
+    """指数日 K → index_ma20/index_ma60。
 
-    降级策略：akshare 不可用或数据不足时静默跳过，不阻塞主流程。
+    v0.2.3：原始取数迁至 fetch_etf_index_daily（sh/sz 路由在内），
+    经 data_bridge L2 缓存（1d）。降级策略：数据不足时静默跳过。
     """
     try:
-        import akshare as ak
-
-        # csindex 代码 → akshare 行情代码前缀路由
-        # 0xxxxx / 9xxxxx → 上交所发布（sh）
-        # 1xxxxx / 3xxxxx → 深交所发布（sz）
-        if idx_code.startswith(("0", "9")):
-            ticker = f"sh{idx_code}"
-        elif idx_code.startswith(("1", "3")):
-            ticker = f"sz{idx_code}"
-        else:
-            logger.debug("_fetch_index_ma(%s): unrecognized csindex prefix '%s', defaulting to sz, verify routing",
-                         idx_code, idx_code[0] if idx_code else "")
-            ticker = f"sz{idx_code}"
-        with akshare_direct_session():
-            df = ak.stock_zh_index_daily(symbol=ticker)
-        if df is None or df.empty:
+        env = _bridge_get("get_etf_index_daily", idx_code)
+        if env is None or env.get("status") != "ok":
             return
-        closes = [safe_float(r.get("close")) for _, r in df.iterrows()]
+        closes = [safe_float(r.get("close")) for r in env.get("rows", [])]
         closes = [c for c in closes if c is not None]
-        if len(closes) >= 20:
-            result["index_ma20"] = round(sum(closes[-20:]) / 20, 2)
-        if len(closes) >= 60:
-            result["index_ma60"] = round(sum(closes[-60:]) / 60, 2)
+        idx_ma20 = sma(closes, 20)
+        idx_ma60 = sma(closes, 60)
+        if idx_ma20 and idx_ma20[-1] is not None:
+            result["index_ma20"] = round(idx_ma20[-1], 2)
+        if idx_ma60 and idx_ma60[-1] is not None:
+            result["index_ma60"] = round(idx_ma60[-1], 2)
     except Exception:
         logger.debug("_fetch_index_ma(%s): index daily fetch failed, silent degrade", idx_code)
 
@@ -890,18 +1287,14 @@ def query_etf_category(symbol: str) -> dict[str, str]:
     if cat:
         return {"category": cat, "label": _CATEGORY_LABELS.get(cat, cat), "source": "builtin_map"}
 
-    # 动态查询 akshare 分类（兜底）
-    try:
-        import akshare as ak
-        with akshare_direct_session():
-            df = ak.fund_etf_category_sina()
-        row = df[df["代码"] == symbol] if df is not None else None
-        if row is not None and not row.empty:
-            name = str(row.iloc[0].get("名称", ""))
-            cat = _infer_category_from_name(name)
-            return {"category": cat, "label": _CATEGORY_LABELS.get(cat, cat), "source": "sina_dynamic"}
-    except Exception:
-        pass
+    # 动态查询 akshare 分类（兜底；v0.2.3 经 data_bridge L2 缓存，7d TTL）
+    env = _bridge_get("get_etf_category_sina")
+    if env is not None and env.get("status") == "ok":
+        for r in env.get("rows", []):
+            if str(r.get("代码")) == symbol:
+                name = str(r.get("名称", ""))
+                cat = _infer_category_from_name(name)
+                return {"category": cat, "label": _CATEGORY_LABELS.get(cat, cat), "source": "sina_dynamic"}
 
     # 名称关键词回退
     try:
@@ -974,32 +1367,17 @@ def _attach_industry_pe(result: dict, symbol: str) -> None:
 
 
 def _attach_industry_allocation(result: dict, symbol: str) -> None:
-    """从 akshare ``fund_portfolio_industry_allocation_em`` 获取 ETF 行业配置比例（G6）。
+    """ETF 行业配置比例（G6）。
 
-    降级策略：接口不可用或数据为空时静默跳过。
-    取最新报告期数据，去重，过滤占比为 0 的行业。
+    v0.2.3：原始取数迁至 fetch_etf_industry_alloc（季度报告期数据，
+    data_bridge L2 缓存 1d，保证新季度报告 1d 内可见）。降级策略：
+    接口不可用或数据为空时静默跳过。
     """
-    try:
-        import akshare as ak
-        with akshare_direct_session():
-            df = ak.fund_portfolio_industry_allocation_em(symbol=symbol, date=str(datetime.now().year))
-        if df is None or df.empty:
-            return
-        # 取最新一期数据
-        latest_date = str(sorted(df["截止时间"].unique())[-1])
-        latest = df[df["截止时间"] == latest_date]
-        alloc: list[dict] = []
-        for _, row in latest.iterrows():
-            industry = str(row.get("行业类别", ""))
-            pct = safe_float(row.get("占净值比例"))
-            if industry and pct is not None and pct > 0:
-                alloc.append({"industry": industry, "pct": round(pct, 2)})
-        if alloc:
-            alloc.sort(key=lambda x: x["pct"], reverse=True)
-            result["industry_allocation"] = alloc
-            result["industry_allocation_date"] = latest_date
-    except Exception:
-        logger.debug("_attach_industry_allocation(%s): failed, silent degrade", symbol)
+    env = _bridge_get("get_etf_industry_alloc", symbol)
+    if env is None or env.get("status") != "ok" or not env.get("allocation"):
+        return
+    result["industry_allocation"] = env["allocation"]
+    result["industry_allocation_date"] = env.get("latest_date")
 
 
 def _attach_valuation_guide(result: dict) -> None:
@@ -1056,27 +1434,15 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         写入的快照字典；非交易日（价格/份额为 NaN）返回 None。
     """
     import sqlite3
-    from datetime import date
 
     from lib.store import _conn, _safe_close, init_db
 
-    try:
-        import akshare as ak
-        with akshare_direct_session():
-            df = ak.fund_etf_spot_em()
-    except Exception as exc:
-        logger.warning("etf share snapshot: fund_etf_spot_em failed: %s", exc)
+    # v0.2.3：经 _lookup_etf_spot_row（L1 30s → L2 60s）取 spot 行，修直原直连绕过缓存问题
+    row, err = _lookup_etf_spot_row(symbol)
+    if err or row is None:
+        logger.warning("etf share snapshot: %s（%s）", symbol, err or "no spot row")
         return None
 
-    if df is None or df.empty:
-        return None
-
-    row = df[df["代码"] == symbol]
-    if row.empty:
-        logger.warning("etf share snapshot: symbol %s not found in spot data", symbol)
-        return None
-
-    row = row.iloc[0]
     shares = safe_float(row.get("最新份额"))
     price = safe_float(row.get("最新价"))
 
@@ -1086,7 +1452,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         return None
 
     aum = round(shares * price / 1e8, 2)
-    today = date.today().strftime("%Y%m%d")
+    today = shanghai_today()
 
     snap = {
         "date": today,
@@ -1183,3 +1549,196 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         "flow_est_60d": _change(60)["flow_est"],
         "history_count": len(history),
     }
+
+
+# ---------------------------------------------------------------------------
+# ETF 份额资金流历史序列（Tushare fund_share + fund_daily，v0.2.3）
+# ---------------------------------------------------------------------------
+
+def query_etf_share_history(symbol: str, days: int = 20) -> dict:
+    """查询 ETF 份额历史序列 + 每日资金流估算 + OHLCV 趋势数据。
+
+    数据源：Tushare ``fund_share``（份额，万份）+ ``fund_daily``（OHLCV）。
+
+    Parameters
+    ----------
+    symbol : str
+        6 位 ETF 代码（如 515050）。
+    days : int
+        回溯行数（默认 20 日）。
+
+    Returns
+    -------
+    dict
+        {symbol, date_range, rows: [{date, open, high, low, close, pre_close,
+         pct_chg, vol, amount, turnover_rate, shares, share_change, flow_est,
+         direction}], summary: {...}}
+    """
+    # v0.2.3：原始取数迁至 fetch_etf_share_history（固定 _SHARE_FETCH_NATURAL_DAYS 自然日窗口），
+    # 经 data_bridge L2 缓存（1d）
+    env = _bridge_get("get_etf_share_history", symbol)
+    if env is None or env.get("status") != "ok":
+        return {"symbol": symbol, "available": False,
+                "note": (env or {}).get("note") or "份额历史不可用"}
+
+    import pandas as pd
+
+    shares_df = pd.DataFrame(env.get("fund_share") or [])
+    daily_df = pd.DataFrame(env.get("fund_daily") or [])
+    if shares_df.empty:
+        return {"symbol": symbol, "available": False,
+                "note": "fund_share 无数据（需 ≥2000 Tushare 积分）"}
+    if daily_df.empty:
+        return {"symbol": symbol, "available": False,
+                "note": "fund_daily 无数据"}
+
+    try:
+        # 合并：按 trade_date 对齐。left join → 确保 fund_daily 最新日期的 OHLCV
+        # 不被 fund_share 的 T+1 延迟丢掉（份额字段为 null 但价格/成交仍可用）
+        shares_df = shares_df.sort_values("trade_date")
+        daily_df = daily_df.sort_values("trade_date")
+        daily_cols = ["trade_date", "open", "high", "low", "close",
+                      "pre_close", "pct_chg", "vol", "amount"]
+        merged = daily_df[[c for c in daily_cols if c in daily_df.columns]].merge(
+            shares_df, on="trade_date", how="left"
+        )
+    except Exception as exc:
+        return {"symbol": symbol, "available": False,
+                "note": f"份额-价格合并失败: {exc}"}
+    if merged.empty:
+        return {"symbol": symbol, "available": False, "note": "份额-价格日期无交集"}
+
+    # 取最近 days 行（+1 用于计算第一行的变化）
+    # 超窗检测：取数窗口（_SHARE_FETCH_NATURAL_DAYS 自然日）行数不足 days+1 时
+    # 显式告警 + 结果 note，不再静默少返回（v0.2.3 修复）
+    clipped = len(merged) < days + 1
+    if clipped:
+        logger.warning(
+            "query_etf_share_history(%s, days=%d): 取数窗口仅覆盖 %d 行，少于请求的 %d，"
+            "已按可用数据返回",
+            symbol, days, len(merged), days,
+        )
+    merged = merged.tail(days + 1)
+
+    rows = []
+    prev_share = None
+    prev_price = None
+    latest_shares = None
+    earliest_shares = None
+
+    import math as _math
+
+    for _, row in merged.iterrows():
+        date_str = str(row.get("trade_date", ""))
+        shares_raw = row.get("fd_share")
+        shares_val = safe_float(shares_raw) if (shares_raw is not None
+            and not (isinstance(shares_raw, (int, float)) and _math.isnan(float(shares_raw)))) else None
+        close_val = safe_float(row.get("close"))
+        if close_val is None:
+            continue
+        open_val = safe_float(row.get("open"))
+        high_val = safe_float(row.get("high"))
+        low_val = safe_float(row.get("low"))
+        pre_close_val = safe_float(row.get("pre_close"))
+        pct_chg_val = safe_float(row.get("pct_chg"))
+        vol_val = safe_float(row.get("vol"))       # 手
+        amount_val = safe_float(row.get("amount"))  # 千元
+
+        # 估算换手率(%)。Tushare vol=手(1手=100份), shares=万份
+        # turnover = (vol×100) / (shares×10000) × 100 = vol / shares (直接得到 %)
+        turnover = None
+        if vol_val is not None and shares_val is not None and shares_val > 0:
+            turnover = round(vol_val / shares_val, 2)
+
+        share_change = None
+        flow_est = None
+        direction = None
+
+        if prev_share is not None and shares_val is not None:
+            share_change = round(shares_val - prev_share, 2)  # 万份
+            avg_price = (close_val + prev_price) / 2
+            flow_est = round(share_change * avg_price / 1e4, 2)  # 亿元
+            if abs(flow_est) < 0.3:
+                direction = "→ 持平"
+            elif flow_est > 0:
+                direction = "🟢 净流入" if flow_est >= 3 else "🟢→ 小幅流入"
+            else:
+                direction = "🔴 净流出" if abs(flow_est) >= 3 else "🔴→ 小幅流出"
+
+        # 成交额格式化（亿元）。Tushare fund_daily.amount 单位为千元
+        amount_e = round(amount_val / 1e5, 2) if amount_val is not None else None
+
+        rows.append({
+            "date": date_str,
+            "open": open_val,
+            "high": high_val,
+            "low": low_val,
+            "close": close_val,
+            "pre_close": pre_close_val,
+            "pct_chg": pct_chg_val,
+            "vol": int(vol_val) if vol_val is not None else None,     # 手
+            "amount": amount_e,                                        # 亿元
+            "turnover_rate": turnover,                                 # %
+            "shares": round(shares_val, 2) if shares_val is not None else None,  # 万份
+            "share_change": share_change,                              # 万份
+            "flow_est": flow_est,                                      # 亿元
+            "direction": direction,
+        })
+
+        if shares_val is not None:
+            if earliest_shares is None:
+                earliest_shares = shares_val
+            latest_shares = shares_val
+            prev_share = shares_val
+            prev_price = close_val  # 仅当份额有效时更新，保持 prev_share/prev_price 窗口一致
+
+    # 去掉第一行（无变化数据）
+    detail_rows = rows[1:]
+
+    # 汇总
+    flows = [r["flow_est"] for r in detail_rows if r["flow_est"] is not None]
+    total_flow = round(sum(flows), 2) if flows else None
+    avg_daily = round(total_flow / len(flows), 2) if flows and total_flow is not None else None
+
+    if total_flow is not None and total_flow > 5:
+        trend = "🟢 持续净流入"
+    elif total_flow is not None and total_flow < -5:
+        trend = "🔴 持续净流出"
+    elif total_flow is not None:
+        trend = "→ 资金面平稳"
+    else:
+        trend = "数据不足"
+
+    # 交易量趋势
+    amounts = [r["amount"] for r in detail_rows if r["amount"] is not None]
+    avg_amount = round(sum(amounts) / len(amounts), 2) if amounts else None
+    max_amount = max(amounts) if amounts else None
+
+    # 份额总变化
+    share_total_change = None
+    if latest_shares is not None and earliest_shares is not None:
+        share_total_change = round(latest_shares - earliest_shares, 2)
+
+    date_range = f"{detail_rows[0]['date']} ~ {detail_rows[-1]['date']}" if detail_rows else ""
+
+    result = {
+        "symbol": symbol,
+        "available": True,
+        "date_range": date_range,
+        "rows": detail_rows,
+        "summary": {
+            "total_flow_est": total_flow,
+            "avg_daily_flow_est": avg_daily,
+            "trend": trend,
+            "row_count": len(detail_rows),
+            "avg_amount_e": avg_amount,
+            "max_amount_e": max_amount,
+            "share_total_change": share_total_change,
+        },
+    }
+    if clipped:
+        result["note"] = (
+            f"请求 {days} 日窗口，取数上限（{_SHARE_FETCH_NATURAL_DAYS} 自然日）"
+            f"仅覆盖 {len(detail_rows)} 行，已按可用数据返回"
+        )
+    return result

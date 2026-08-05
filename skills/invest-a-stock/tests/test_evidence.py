@@ -102,6 +102,10 @@ class TestBuildEvidenceTable:
         # One success, one failure
         assert any("❌" in r.value_summary for r in rows)
         assert any("Connection refused" in r.value_summary for r in rows)
+        # A8: source_count 只统计有数据的源（失败条目不计数、不虚增多源）
+        ok_row = [r for r in rows if "❌" not in r.value_summary][0]
+        assert ok_row.source_count == 1
+        assert rows[0].cross_validation == "— 单源"
 
     def test_no_all_sources(self):
         dims = [{

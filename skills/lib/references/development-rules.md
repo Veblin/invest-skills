@@ -2,7 +2,7 @@
 
 > **来源**: 反复出现的 `/code-review` 缺陷模式汇总。
 > **使用者**: `/code-review` skill、开发者自我审查、新代码提交前检查。
-> **格式**: D1-D12 规则 ID，可被 review finding 引用（如 "违反 D1"）。
+> **格式**: D1-D13 规则 ID，可被 review finding 引用（如 "违反 D1"）。
 >
 > 每条标注 🌐 = 跨语言通用 / 🐍 = Python 专项。
 
@@ -234,6 +234,27 @@ with _lock:
 
 ---
 
+### D13 — 测试 mock 必须可验证生效 + 提交前跑「无凭据环境」套件 🌐
+
+**原则**: 环境依赖的测试（本地过、CI 挂）源于 mock 未生效——被测函数从定义模块
+的全局查找名字，而 patch 打在 re-export 包命名空间的**拷贝属性**上。collector
+拆分后 `lib.collector` 经 `_legacy`/`__init__` 逐层 star-import，`lib.collector._xxx`
+是无效 patch 目标（`collect_financials` 从 `_orchestrate` 全局查找）。
+
+**触发来源**: test_v017 `dcf_preprocess` 测试 — patch `lib.collector._run_sources_parallel`
+不生效，真实 `_run_sources_parallel` 执行：本地有 TUSHARE_TOKEN 碰巧通过，
+CI 无源（'No data returned' 骨架）失败。
+
+**标准流程**:
+1. **patch 目标必须匹配消费方查找点**：私有名（下划线前缀）按约定模块内部使用，
+   调用方是定义模块自己的全局 → 必须打定义模块命名空间（`lib.collector._orchestrate._xxx`
+   / `_base.` / `_sources.` / `_legacy.`）；公共 API 名（如 `attach_phase2_extras`）
+   消费方经包命名空间属性查找 → 包级 patch 有效。静态规则见 `test_test_hygiene.py`
+2. **mock 输出带环境无关的独特标记并断言之**（如 `end_date: "20991231"`）：patch 失效时即使真实源成功，断言也失败，不会碰巧通过
+3. **提交前以无凭据环境跑全仓套件**（等价 CI）：`TUSHARE_TOKEN="bogus" FRED_API_KEY="bogus" TAVILY_API_KEY="bogus" uv run python -m pytest -q` —— 任何依赖真实数据源才过的测试都会在此暴露
+
+---
+
 ### D12 — WONTFIX 必须写理由 🌐
 
 **原则**: 没有理由的 WONTFIX = 技术债。每个决定不修的 finding 必须标注：
@@ -260,3 +281,4 @@ with _lock:
 - [ ] D10: 有没有同一个函数内重复调用昂贵纯函数？
 - [ ] D11: 修复的 bug 模式在其他文件里还有吗？
 - [ ] D12: 决定不修的 finding 写了理由吗？
+- [ ] D13: 测试 mock 打在定义模块命名空间了吗？提交前跑过无凭据套件（`TUSHARE_TOKEN="bogus" ... pytest -q`）吗？

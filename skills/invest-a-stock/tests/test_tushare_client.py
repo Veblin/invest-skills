@@ -54,6 +54,7 @@ class TestTusharePermissionDenied:
 
     def test_sw_index_falls_back_to_akshare_when_tushare_empty(self, monkeypatch):
         from lib import collector
+        from lib.collector import _orchestrate as collector_orch
 
         mock_tc = MagicMock()
         mock_tc.query.side_effect = lambda api, **kw: (
@@ -71,8 +72,8 @@ class TestTusharePermissionDenied:
 
         with patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32},
-        ), patch.object(collector, "_tushare_client", return_value=mock_tc), patch.object(
-            collector, "_ms_fetch_sw_index_akshare", return_value=fake_sw,
+        ), patch.object(collector_orch, "_tushare_client", return_value=mock_tc), patch.object(
+            collector_orch, "_ms_fetch_sw_index_akshare", return_value=fake_sw,
         ):
             result = collector._ms_fetch_sw_index(mock_tc, "300308", "通信设备")
 
@@ -81,16 +82,18 @@ class TestTusharePermissionDenied:
 
     def test_sw_index_akshare_prefers_industry_lookup_over_tushare_code(self, monkeypatch):
         from lib import collector
+        from lib.collector import _orchestrate as collector_orch
 
+        # _ms_fetch_sw_index_akshare 从 _orchestrate 命名空间解析这三个名字
         monkeypatch.setattr(
-            collector, "_ms_lookup_akshare_sw_code", lambda industry: "801093",
+            collector_orch, "_ms_lookup_akshare_sw_code", lambda industry: "801093",
         )
         monkeypatch.setattr(
-            collector, "_akshare_closes_from_hist_sw",
+            collector_orch, "_akshare_closes_from_hist_sw",
             lambda code, **kw: [100.0, 105.0] if code == "801093" else [],
         )
         monkeypatch.setattr(
-            collector, "_akshare_hs300_closes", lambda **kw: [3000.0, 3010.0],
+            collector_orch, "_akshare_hs300_closes", lambda **kw: [3000.0, 3010.0],
         )
 
         result = collector._ms_fetch_sw_index_akshare(
@@ -175,3 +178,34 @@ class TestTushareDailyQuotaReset:
 
         assert client._daily_calls == 0
         assert client._daily_reset_at == expected_next_reset
+
+
+class TestConcurrentRateLimitCounters:
+    """A1: 并发 _record_call 不得丢更新（_map_parallel 8 线程共享实例）。"""
+
+    def test_concurrent_record_call_no_lost_update(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from lib.tushare_client import TushareClient
+
+        client = TushareClient(token="a" * 32, rate_limit_per_minute=10000)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(lambda _: client._record_call(), range(200)))
+        assert client._daily_calls == 200
+        assert len(client._call_timestamps) == 200
+
+    def test_concurrent_wait_for_rate_limit_no_crash(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from lib.tushare_client import TushareClient
+
+        client = TushareClient(token="a" * 32, rate_limit_per_minute=10000)
+
+        def _mixed(_):
+            client._record_call()
+            client._wait_for_rate_limit()
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_mixed, range(64)))
+        assert client._daily_calls == 64
+        assert len(client._call_timestamps) == 64

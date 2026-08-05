@@ -366,6 +366,17 @@ def _boll(closes: list[float], n: int = 20, k: float = 2.0) -> dict[str, list[fl
     return {"mid": mid, "upper": upper, "lower": lower, "width": width}
 
 
+def boll_latest(closes: list[float], n: int = 20, k: float = 2.0) -> dict[str, float | None]:
+    """Latest BOLL scalars (not full series). Population std per Bollinger's definition."""
+    data = _boll(closes, n, k)
+    return {
+        "mid": data["mid"][-1] if data["mid"] and data["mid"][-1] is not None else None,
+        "upper": data["upper"][-1] if data["upper"] and data["upper"][-1] is not None else None,
+        "lower": data["lower"][-1] if data["lower"] and data["lower"][-1] is not None else None,
+        "width": data["width"][-1] if data["width"] and data["width"][-1] is not None else None,
+    }
+
+
 def _atr(highs: list[float], lows: list[float], closes: list[float], n: int = 14) -> list[float | None]:
     """ATR 平均真实波幅 (Average True Range)。"""
     if len(closes) < n + 1:
@@ -458,9 +469,24 @@ def _drawdown(closes: list[float], dates: list[str], n: int = 60) -> dict[str, A
 
 # ---- 主入口 ----
 
+def _kline_sort_key(r: dict) -> str:
+    """K 线日期排序键：混合格式归一化为 8 位数字；空/不可解析排最后。
+
+    快照行（intraday）常无 trade_date 且为最新数据，排最后让 data[-1]
+    语义保持「最新」（review fix #15）。
+    """
+    raw = str(r.get("trade_date") or r.get("end_date") or "")
+    s = raw.replace("-", "").replace(".", "").replace("/", "").strip()
+    return s if s.isdigit() else "99999999"
+
+
 def sort_kline_asc(rows: list[dict]) -> list[dict]:
-    """按日期升序排列（trade_date 或 end_date，Tushare 等源常为降序）。"""
-    return sorted(rows, key=lambda r: str(r.get("trade_date") or r.get("end_date", "")))
+    """按日期升序排列（trade_date 或 end_date，Tushare 等源常为降序）。
+
+    混合格式（20260801 vs 2026-08-01）归一化为 8 位数字比较；
+    空/无法解析日期排最后（无日期的快照行通常为最新）。
+    """
+    return sorted(rows, key=_kline_sort_key)
 
 
 def compute(rows: list[dict]) -> dict[str, Any]:
@@ -783,10 +809,11 @@ def volatility_cone(
     if current is None:
         return {"error": "当前 HV 不可得"}
 
-    percentile = None
-    if hvs:
-        below = sum(1 for h in hvs if h <= current)
-        percentile = below / len(hvs) * 100
+    try:
+        from .stats import percentile_rank_inclusive  # 同包相对导入（正常路径）
+    except ImportError:
+        from stats import percentile_rank_inclusive  # sys.path 裸导入
+    percentile = percentile_rank_inclusive(hvs, current) if hvs else None
 
     by_window: dict[str, float | None] = {}
     for w in windows:
@@ -800,11 +827,25 @@ def volatility_cone(
     }
 
 
+def annualized_volatility_from_returns(returns: list[float], window: int = 60) -> float | None:
+    """Annualized volatility from simple daily returns (sample std, preserves etf_data formula)."""
+    if len(returns) < 5:
+        return None
+    series = returns[-window:] if len(returns) >= window else returns
+    mean = sum(series) / len(series)
+    variance = sum((r - mean) ** 2 for r in series) / (len(series) - 1)
+    daily_vol = math.sqrt(variance)
+    return round(daily_vol * math.sqrt(252) * 100, 2)
+
+
 def relative_strength(
     stock_closes: list[float],
     benchmark_closes: list[float],
 ) -> dict[str, Any]:
-    """RS_t = (stock/benchmark) × 100, base period = first aligned point."""
+    """RS_t = (stock/benchmark) × 100, base period = first aligned point.
+
+    仅测试（invest-a-stock/tests/test_technical_v019.py）使用；保留。
+    """
     n = min(len(stock_closes), len(benchmark_closes))
     if n < 2:
         return {"error": "数据不足"}
@@ -824,8 +865,14 @@ def rolling_beta(
     benchmark_closes: list[float],
     windows: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Rolling beta via stats.calc_beta on return series."""
-    from stats import calc_beta
+    """Rolling beta via stats.calc_beta on return series.
+
+    仅测试（invest-a-stock/tests/test_technical_v019.py）使用；保留。
+    """
+    try:
+        from .stats import calc_beta  # 同包相对导入（正常路径）
+    except ImportError:
+        from stats import calc_beta  # sys.path 裸导入
 
     if windows is None:
         windows = [60, 120, 252]

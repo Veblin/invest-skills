@@ -9,7 +9,6 @@ import json
 import logging
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -19,20 +18,12 @@ logger = logging.getLogger(__name__)
 # 辅助函数（日期格式用 skills/lib/dates；避免从 collector 循环导入）
 # ---------------------------------------------------------------------------
 
-def _shanghai_now() -> datetime:
-    from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo("Asia/Shanghai"))
-
-
-def _today() -> str:
-    return _shanghai_now().strftime("%Y%m%d")
-
-
-def _days_ago(n: int) -> str:
-    return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
-
-
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+from .shared_dates import (  # noqa: E402
+    shanghai_days_ago as _days_ago,
+    shanghai_now as _shanghai_now,
+    shanghai_today as _today,
+    yyyymmdd_to_iso as _to_iso_date,
+)
 
 
 # ---------------------------------------------------------------------------

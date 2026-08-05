@@ -19,8 +19,12 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import threading
+
 import requests
 import pandas as pd
+
+from .shared_dates import shanghai_days_ago, shanghai_today
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,10 @@ class TushareClient:
         self._session.trust_env = False
         self._call_timestamps: list[float] = []
         self._daily_calls = 0
+        # 限流计数器并发保护：_map_parallel 的 PCR/创新高面板 fan-out
+        # （默认 8 线程）共享同一实例并发 query，append+重绑定的复合操作
+        # 在无锁下丢失更新会低估调用数 → 80/min 自节流失效
+        self._lock = threading.Lock()
         # 当日结束时重置计数器（Tushare 日配额按北京时间 UTC+8 零点重置）
         self._daily_reset_at = _next_beijing_midnight_reset_at(time.time())
         self._permission_denied_apis: set[str] = set()
@@ -240,29 +248,36 @@ class TushareClient:
     # ------------------------------------------------------------------
 
     def _record_call(self) -> None:
-        now = time.time()
-        self._call_timestamps.append(now)
-        self._daily_calls += 1
-        # 只保留最近 60 秒的记录
-        cutoff = now - 60
-        self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
+        with self._lock:
+            now = time.time()
+            self._call_timestamps.append(now)
+            self._daily_calls += 1
+            # 只保留最近 60 秒的记录
+            cutoff = now - 60
+            self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
 
     def _wait_for_rate_limit(self) -> None:
-        """遵守实例级频率限制（默认 80 次/分钟）。"""
-        cutoff = time.time() - 60
-        self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
-        recent_calls = len(self._call_timestamps)
-        limit = self._rate_limit_per_minute
-        if recent_calls >= limit:
-            wait = 1.0 + (recent_calls - limit + 1) * 0.75
-            logger.debug("Tushare: 频率限制，等待 %.1fs", wait)
-            time.sleep(min(wait, 5.0))
+        """遵守实例级频率限制（默认 80 次/分钟）。
+
+        sleep 保持在锁内：串行化即限流器本意——并发线程到达限制时
+        依次等待，而不是各自估算后一起放行。
+        """
+        with self._lock:
+            cutoff = time.time() - 60
+            self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
+            recent_calls = len(self._call_timestamps)
+            limit = self._rate_limit_per_minute
+            if recent_calls >= limit:
+                wait = 1.0 + (recent_calls - limit + 1) * 0.75
+                logger.debug("Tushare: 频率限制，等待 %.1fs", wait)
+                time.sleep(min(wait, 5.0))
 
     def _reset_daily_counter_if_needed(self) -> None:
-        now = time.time()
-        if now >= self._daily_reset_at:
-            self._daily_calls = 0
-            self._daily_reset_at = _next_beijing_midnight_reset_at(now)
+        with self._lock:
+            now = time.time()
+            if now >= self._daily_reset_at:
+                self._daily_calls = 0
+                self._daily_reset_at = _next_beijing_midnight_reset_at(now)
 
     # ------------------------------------------------------------------
     # 上下文管理器
@@ -283,7 +298,7 @@ class TushareClient:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import datetime, sys
+    import sys
     from pathlib import Path
     _d = Path(__file__).parent.parent
     sys.path.insert(0, str(_d))
@@ -294,8 +309,8 @@ if __name__ == "__main__":
     available = client.is_available()
     print(f"Tushare available: {available}")
     if available:
-        end = datetime.date.today().strftime("%Y%m%d")
-        start = (datetime.date.today() - datetime.timedelta(days=5)).strftime("%Y%m%d")
+        end = shanghai_today()
+        start = shanghai_days_ago(5)
         df = client.query("daily", ts_code="600519.SH",
                           start_date=start, end_date=end,
                           fields="trade_date,open,high,low,close")

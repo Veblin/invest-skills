@@ -116,19 +116,22 @@ class Test588000HedgeMap:
 
 
 class TestFetchCsindexPe:
-    @patch("akshare.stock_zh_index_value_csindex")
-    @patch("etf_data.akshare_direct_session")
-    def test_pe1_zero_preserves_zero_not_falls_back_to_pe2(
-        self, mock_session, mock_csindex
-    ):
-        mock_session.return_value.__enter__ = MagicMock(return_value=None)
-        mock_session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_csindex.return_value = pd.DataFrame(
-            [{"市盈率1": 0.0, "市盈率2": 15.5}]
-        )
+    @patch("etf_data._bridge_get")
+    def test_pe1_zero_preserves_zero_not_falls_back_to_pe2(self, mock_bridge):
+        """pe1=0.0 必须保留（0 是有效值），不得回退到 pe2。
+
+        v0.2.3：_fetch_csindex_pe 消费 data_bridge 信封（fetch_etf_index_pe
+        已保证 pe=pe1 if pe1 is not None else pe2），此处验证消费侧不丢 0。
+        """
+        mock_bridge.return_value = {
+            "status": "ok",
+            "index_pe": 0.0,
+            "index_pe_note": "来源: csindex 000300，仅 20 条历史，无可靠分位；市盈率1=股本加权，市盈率2=流通加权",
+        }
 
         result: dict = {"_errors": []}
         _fetch_csindex_pe(result, "000300")
 
         assert result["index_pe"] == 0.0
         assert result["index_pe"] != 15.5
+        assert mock_bridge.call_args.args == ("get_etf_index_pe", "000300")

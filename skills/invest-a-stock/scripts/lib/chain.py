@@ -83,9 +83,11 @@ def collect_chain_context(
         if isinstance(basic_data, dict):
             industry = basic_data.get("industry", "") or basic_data.get("行业", "")
         if not industry:
-            from .collector import collect_basic_info
+            from ._invest_path import ensure_skills_lib_on_path
+            ensure_skills_lib_on_path()
+            from data_bridge import get_basic_info  # noqa: E402
             try:
-                basic = collect_basic_info(symbol)
+                basic = get_basic_info(symbol)
             except Exception as exc:
                 logger.debug("chain: basic_info failed for %s: %s", symbol, exc)
                 return {"status": "missing", "error": str(exc)}

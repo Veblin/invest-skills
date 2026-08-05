@@ -18,6 +18,8 @@ import logging
 import re
 from datetime import datetime, timedelta, date
 
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date
+
 logger = logging.getLogger(__name__)
 
 # ── 占位标记 ──
@@ -432,7 +434,7 @@ def _normalize_date(raw: str) -> str | None:
 
     # YYYYMMDD
     if re.match(r'^\d{8}$', raw):
-        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+        return _to_iso_date(raw)
 
     # YYYY/MM/DD
     m = re.match(r'^(\d{4})/(\d{1,2})/(\d{1,2})$', raw)
@@ -611,19 +613,21 @@ def calc_price_impact_interpolation(
         warn = f"|V_真 - V_假| < {_eps:.2e}，ratio 默认 0.5"
     else:
         ratio = (post_price - v_false) / spread
+        # 场景钳位仅对真实价差生效；零价差回退 0.5 不被钳位覆盖
         if scenario == "bearish" and post_price >= pre_price:
             ratio = 0.0
         elif scenario == "bullish" and post_price <= pre_price:
             ratio = 0.0
-        ratio = max(0.0, min(1.0, ratio))
+    ratio = max(0.0, min(1.0, ratio))
 
     def _ratio_at_pe(pe: float) -> float:
         vf = eps_base * pe
         local_spread = v_true - vf
         local_eps = max(1e-9, 1e-6 * max(abs(v_true), abs(vf), abs(post_price), 1.0))
         if abs(local_spread) < local_eps:
-            return 0.5
-        r = (post_price - vf) / local_spread
+            r = 0.5
+        else:
+            r = (post_price - vf) / local_spread
         return max(0.0, min(1.0, r))
 
     pe_lo = max(pe_stressed - 2, 0.1)

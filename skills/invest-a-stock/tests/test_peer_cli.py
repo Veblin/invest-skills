@@ -55,6 +55,8 @@ class TestCmdPeerRanking:
             "sort_by": "market_cap",
         }
 
+        # cmd_peer 经包属性 collector.collect_peer_comparison 调用（invest.py:909），
+        # 须 patch 包命名空间；patch 子模块 _legacy 在拆分后无效。
         with patch.object(invest.collector, "collect_peer_comparison", return_value=mock_result):
             rc = invest.cmd_peer(
                 Namespace(symbol="600176", top=10, sort_by="market_cap"),

@@ -6,10 +6,15 @@ import sys
 from pathlib import Path
 
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
-if str(_SKILLS_LIB) not in sys.path:
-    sys.path.insert(0, str(_SKILLS_LIB))
+sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
-from codes import classify_board, exchange_code, market_label, symbol_to_ts_code  # noqa: E402
+from codes import (  # noqa: E402
+    classify_board,
+    etf_symbol_to_ts_code,
+    exchange_code,
+    market_label,
+    symbol_to_ts_code,
+)
 
 
 class TestSymbolToTsCode:
@@ -32,6 +37,10 @@ class TestSymbolToTsCode:
         assert symbol_to_ts_code("830799") == "830799.BJ"
         assert symbol_to_ts_code("430047") == "430047.BJ"
 
+    def test_bse_920_series(self):
+        # BSE 920xxx（2025-10 起交易）以 '9' 开头，须路由到 BJ 而非 SH
+        assert symbol_to_ts_code("920002") == "920002.BJ"
+
     def test_padded(self):
         assert symbol_to_ts_code("1") == "000001.SZ"
 
@@ -51,6 +60,35 @@ class TestExchangeCode:
     def test_beijing_formats(self):
         codes = exchange_code("830799")
         assert codes["tushare"] == "830799.BJ"
+
+    def test_bse_920_formats(self):
+        codes = exchange_code("920002")
+        assert codes == {
+            "tushare": "920002.BJ",
+            "baostock": "bj.920002",
+            "akshare": "bj920002",
+        }
+
+
+class TestEtfSymbolToTsCode:
+    def test_shanghai_5_prefix(self):
+        assert etf_symbol_to_ts_code("510300") == "510300.SH"
+
+    def test_shanghai_6_prefix(self):
+        assert etf_symbol_to_ts_code("588000") == "588000.SH"
+
+    def test_shenzhen(self):
+        assert etf_symbol_to_ts_code("159915") == "159915.SZ"
+        assert etf_symbol_to_ts_code("161725") == "161725.SZ"
+
+    def test_beijing(self):
+        assert etf_symbol_to_ts_code("830799") == "830799.BJ"
+
+    def test_bse_920_series(self):
+        assert etf_symbol_to_ts_code("920002") == "920002.BJ"
+
+    def test_invalid(self):
+        assert etf_symbol_to_ts_code("xxx") == ""
 
 
 class TestClassifyBoard:

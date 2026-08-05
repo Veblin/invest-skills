@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -207,6 +208,29 @@ def is_tickflow_available() -> bool:
         return False
 
 
+def tickflow_kline_enabled() -> bool:
+    """tickflow K 线开关。默认关闭：免费 tier 慢且曾与其余源复权语义错配，
+    其前复权价值已由 tushare adj_factor 自算（_q_tushare_daily_qfq）覆盖。
+    INVEST_ENABLE_TICKFLOW=1/true 时启用。"""
+    return (os.environ.get("INVEST_ENABLE_TICKFLOW", "0")
+            .strip().lower() in ("1", "true", "on", "yes"))
+
+
+def baostock_kline_enabled() -> bool:
+    """baostock K 线开关。默认 auto：仅当 Tushare 不可用时启用（兜底，
+    与 gap-scan 的 create_source("auto") 语义一致）。
+    INVEST_ENABLE_BAOSTOCK=1 强制启用；=0 禁用。"""
+    raw = os.environ.get("INVEST_ENABLE_BAOSTOCK", "auto").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    # auto：Tushare 可用时 baostock 只作兜底
+    if not is_baostock_available():
+        return False
+    return not is_tushare_available(get_config())
+
+
 def is_tencent_available() -> bool:
     """检测腾讯行情是否可达（用于 diagnose 报告；与 collector 一致强制直连）。"""
     from .proxy import no_proxy_session
@@ -286,6 +310,37 @@ try:
 except (ValueError, TypeError):
     _cninfo_timeout_val = 45
 CNINFO_HOLDER_TIMEOUT_SEC = max(5, _cninfo_timeout_val)
+
+# 单源采集 deadline（秒）：超时未完成的源返回 timeout SourceResult（维度 partial）。
+# INVEST_SOURCE_TIMEOUT=0 表示不设限（等价旧行为）。下限 5s。
+_raw_src_timeout = os.environ.get("INVEST_SOURCE_TIMEOUT", "60")
+try:
+    _src_timeout_val = float(_raw_src_timeout)
+except (ValueError, TypeError):
+    _src_timeout_val = 60.0
+SOURCE_DEADLINE_SEC = None if _src_timeout_val <= 0 else max(5.0, _src_timeout_val)
+
+
+def configure_socket_timeout() -> float:
+    """设置全局 socket 默认超时（必须在任何网络调用之前调用）。
+
+    requests/urllib3/urllib/http.client 在未显式传 timeout 时都会回落到
+    socket.getdefaulttimeout()，因此这是所有采集路径（含 baostock、tickflow、
+    akshare 无 timeout 参数的接口）的最后兜底。
+    已显式传 timeout 的调用（如 akshare timeout=10）不受影响。
+    INVEST_SOCKET_TIMEOUT=0 表示不设置（逃生口）。
+    """
+    raw = os.environ.get("INVEST_SOCKET_TIMEOUT", "30")
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        val = 30.0
+    if val <= 0:
+        socket.setdefaulttimeout(None)
+        return 0.0
+    val = max(5.0, val)  # 钳制下限，防误配成毫秒级
+    socket.setdefaulttimeout(val)
+    return val
 
 
 def ensure_env_loaded() -> None:

@@ -356,11 +356,11 @@ class TestCollectIndustryMerge:
                 SourceResult("akshare.pe", pe, dim),
             ]
 
-        monkeypatch.setattr("lib.collector._run_sources_parallel", fake_parallel)
-        monkeypatch.setattr("lib.collector.env.is_akshare_available", lambda: True)
-        monkeypatch.setattr("lib.collector.akshare_push2_available", lambda: True)
+        monkeypatch.setattr("lib.collector._orchestrate._run_sources_parallel", fake_parallel)
+        monkeypatch.setattr("lib.collector._legacy.env.is_akshare_available", lambda: True)
+        monkeypatch.setattr("lib.collector._orchestrate.akshare_push2_available", lambda: True)
         monkeypatch.setattr(
-            "lib.collector._q_akshare_basic",
+            "lib.collector._orchestrate._q_akshare_basic",
             lambda _symbol: {"行业": "半导体"},
         )
 

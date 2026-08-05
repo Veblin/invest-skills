@@ -10,6 +10,8 @@ from typing import Any
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
+
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date
 from lib.participant_scan import (
     build_participant_behavior_section,
     moneyflow_cv_window,
@@ -404,7 +406,7 @@ def _fmt_end_date(val: Any) -> str:
         return ""
     digits = s.replace("-", "").replace("/", "")[:8]
     if len(digits) == 8 and digits.isdigit():
-        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+        return _to_iso_date(digits)
     return s
 
 

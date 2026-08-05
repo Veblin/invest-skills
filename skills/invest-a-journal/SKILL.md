@@ -1,8 +1,11 @@
 ---
 
 
+
+
+
 name: invest-a-journal
-version: "0.2.2"
+version: "0.2.3"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
 allowed-tools: Bash, Read, Write
@@ -553,6 +556,11 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 | 两融/市值 | ... | ... | available |
 | 涨跌比 | ... | ... | available |
 | 涨跌停比 | ... | ... | available |
+
+> 估值陈旧提示：当 query_data 返回的 `pe_stale`/`pb_stale` 为 True（最新报告期
+> 亏损、PE/PB 回退自 `pe_date`/`pb_date` 对应旧期）时，数据快照的 PE/PB 行
+> **必须**注明数据期与回退原因（如"PE 8.0x（数据期 20260101；最新期亏损）"），
+> 不得把旧期值当作当期估值呈现。
 
 ## 逻辑完整性: {✅/⚠️/❌}
 {文字}

@@ -31,6 +31,7 @@ from typing import Any
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+from lib.data_util import has_data, merge_first_non_empty  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 
 # 关键交叉验证字段（维度 → 比较字段列表）
@@ -200,27 +201,75 @@ def merge_collections(collections: list[dict]) -> dict:
         if len(dims) == 1:
             result_dimensions.append(dims[0])
         else:
-            # 多源 → 保留第一条作为主数据，标注多源
-            primary = dims[0].copy()
+            # 多源 → 选取首个有数据的维度作为主数据（连带 status/_meta 跟随，
+            # 避免 status 与 data 错配），标注多源
+            data_bearing = [d for d in dims if has_data(d.get("data"))]
+            chosen = data_bearing[0] if data_bearing else dims[0]
+            # 浅拷贝 + 全新 _meta：后续只写 _meta 键与顶层 research_summary
+            # （整体替换，不原地改 dict），data 载荷共享但从不被原地修改 →
+            # D7 输入隔离保持；deepcopy 整维数据载荷纯属浪费
+            primary = dict(chosen)
+            primary["_meta"] = dict(chosen.get("_meta") or {})
             alt_sources = [
                 {
                     "source": d.get("_meta", {}).get("source", "unknown"),
                     "fetched_at": d.get("_meta", {}).get("fetched_at", ""),
                 }
-                for d in dims[1:]
+                for d in dims
+                if d is not chosen
             ]
-            primary.setdefault("_meta", {})["alternative_sources"] = alt_sources
+            primary["_meta"]["alternative_sources"] = alt_sources
             primary["_meta"]["multi_source_count"] = len(dims)
+            # 合并 all_sources：不同采集器可能覆盖不同源（如 research 维度
+            # 一个采集器拿到 report_rc、另一个拿到 forecast）——按 source 名
+            # 并集。去重优先级：chosen 维度条目（payload == primary.data）>
+            # 有数据条目 > 失败条目（保留供 provenance 展示；evidence/
+            # render_utils 已有 ❌ 失败渲染分支，financial_rigor/fusion/
+            # valuation/manifest 均按 success/data_available 过滤）。
+            # 不重算 source_count/multi_source/cross_validation：chosen 维度
+            # 自身取值（浅拷贝已保留，schema 口径 = 有数据的源数）描述
+            # primary.data 的真实验证——并集计数会虚增 rerank 的
+            # MULTI_SOURCE_BONUS（+5）并跳过 SINGLE_SOURCE（-10）。
+            seen: dict[str, dict] = {}
+            for s in chosen.get("_meta", {}).get("all_sources", []):
+                seen.setdefault(s.get("source") or "unknown", s)
+            for d in dims:
+                for s in d.get("_meta", {}).get("all_sources", []):
+                    name = s.get("source") or "unknown"
+                    if name not in seen and has_data(s.get("data")):
+                        seen[name] = s
+            for d in dims:
+                for s in d.get("_meta", {}).get("all_sources", []):
+                    name = s.get("source") or "unknown"
+                    if name not in seen:
+                        seen[name] = s
+            if seen:
+                primary["_meta"]["all_sources"] = list(seen.values())
+            # 按字段形状（而非维度名硬编码）逐 key 合并 research_summary：
+            # 各渲染消费者（_concise/_render_dcf/analysis_templates）只读
+            # research_summary，all_sources 并集不参与渲染——B 采集器独有的
+            # forecast/业绩预告此前在 merged 报告中静默消失。
+            # 只从"有数据的维度"合并（失败采集器的骨架默认值
+            # latest_ratings:[]/profit_forecasts:[]/status:'no_data' 不得遮蔽
+            # 健康采集器的真实数据）；空容器（[]/{}/''）由共享
+            # merge_first_non_empty 视为缺失。
+            merged_summary = merge_first_non_empty(
+                [d.get("research_summary") for d in data_bearing])
+            if merged_summary:
+                primary["research_summary"] = merged_summary
             result_dimensions.append(primary)
 
-            # 交叉验证（仅对比前两个源）
-            if len(dims) >= 2 and dim_name in CRITICAL_FIELDS:
+            # 交叉验证：对比两个"有数据的"源（chosen 之后首个有数据维度）；
+            # 此前硬编码 dims[0] vs dims[1]，dims[0] 无数据时真实分歧静默消失
+            if len(data_bearing) >= 2 and dim_name in CRITICAL_FIELDS:
                 cv = cross_validate_dim(
                     dim_name,
-                    dims[0].get("data"),
-                    dims[1].get("data"),
-                    dims[0].get("_meta", {}).get("source", str(dims[0].get("_meta", {}))),
-                    dims[1].get("_meta", {}).get("source", str(dims[1].get("_meta", {}))),
+                    data_bearing[0].get("data"),
+                    data_bearing[1].get("data"),
+                    data_bearing[0].get("_meta", {}).get("source",
+                                                         str(data_bearing[0].get("_meta", {}))),
+                    data_bearing[1].get("_meta", {}).get("source",
+                                                         str(data_bearing[1].get("_meta", {}))),
                 )
                 if cv["max_diff_pct"] > 0:
                     cv_results.append(cv)
@@ -235,9 +284,12 @@ def merge_collections(collections: list[dict]) -> dict:
         "dimensions": result_dimensions,
         "summary": {
             "total": len(all_dim_names),
+            # 与 collect_all 共用 lib.data_util.has_data 口径（空 list/dict 不计
+            # available）：同一 collection 的两个消费者计数一致
             "available": sum(
                 1 for d in result_dimensions
-                if d.get("status") != "failed"
+                if has_data(d.get("data"))
+                and d.get("status") in ("available", "partial")
             ),
             "multi_source_count": len(multi_source_dims),
             "multi_source_dims": multi_source_dims,

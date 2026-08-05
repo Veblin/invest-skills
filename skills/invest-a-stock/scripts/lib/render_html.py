@@ -12,6 +12,7 @@ from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 
 from . import render_utils as _u
+from .shared_dates import yyyymmdd_to_iso as _to_iso_date
 from .render_utils import (
     ENGINE_VERSION,
     _data_fields,
@@ -612,10 +613,7 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
     rows_html = ""
     for r in recent:
         ed = str(r.get("end_date", ""))
-        if len(ed) >= 7:
-            qlabel = ed[:4] + "-" + ed[4:6] + "-" + ed[6:8] if len(ed) == 8 else ed
-        else:
-            qlabel = ed
+        qlabel = _to_iso_date(ed)
         roe_v = r.get("roe")
         roe_str = f"{roe_v:.2f}" if roe_v is not None else "-"
         eps_str = f"{eps_v:.2f}" if (eps_v := r.get("eps")) is not None else "-"

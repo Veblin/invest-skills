@@ -7,6 +7,7 @@ from typing import Any
 from lib.nums import safe_float as _safe_num
 from lib.technical import sort_kline_asc
 from lib.stats import calc_beta
+from lib.financial_rigor import _merge_share_fields, _parse_share_count
 
 from .render_utils import _compute_metric_cagr, _get_dim_data, _fmt_v2
 
@@ -111,11 +112,14 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
 def _dcf_try_wacc(
     financials: dict, market_structure: dict,
     kline_data: list[dict] | None = None,
+    rf_override: float | None = None,
+    erp_override: float | None = None,
 ) -> tuple[dict | None, list[str]]:
     """尝试计算 WACC（CAPM）。
 
     risk_free_rate / erp 沿用 D-③ 已建立的降级惯例（10Y 国债不可得时用 2.5%
     默认值 + "[推测，待验证]" 标注，ERP 固定 6% 保守基准）。
+    当 rf_override / erp_override 传入时，优先使用用户指定值。
 
     beta 优先级：
     1. financials / market_structure 中预存的 beta（未来版本直接接入）
@@ -136,27 +140,39 @@ def _dcf_try_wacc(
         beta_meta = _dcf_compute_beta(kline_data)
         beta = beta_meta["beta"]
 
-    erp_data = market_structure.get("erp") or {}
-    risk_free_raw = erp_data.get("dgs10")
-    risk_free_is_default = risk_free_raw is None
-    risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
+    # rf: user override > data source > default
+    if rf_override is not None:
+        risk_free = rf_override
+        risk_free_is_default = False
+    else:
+        erp_data = market_structure.get("erp") or {}
+        risk_free_raw = erp_data.get("dgs10")
+        risk_free_is_default = risk_free_raw is None
+        risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
+
+    # erp: user override > default 6%
+    erp = erp_override if erp_override is not None else 0.06
 
     # Populate missing with any defaults that were applied, for caller transparency.
     if beta_meta.get("is_default"):
         missing.append(f"beta 使用默认值 1.0（{beta_meta.get('source', '未知')}）")
     if risk_free_is_default:
         missing.append("无风险利率使用默认值 2.5%（10Y 国债不可得）[推测，待验证]")
+    if erp_override is not None:
+        missing.append(f"ERP 使用用户指定值 {erp_override*100:.1f}%")
+    if rf_override is not None:
+        missing.append(f"无风险利率使用用户指定值 {rf_override*100:.1f}%")
 
     from lib.valuation import calc_wacc
 
-    wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=0.06, cost_of_debt=None)
+    wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=erp, cost_of_debt=None)
     wacc_result["risk_free_is_default"] = risk_free_is_default
     wacc_result["beta"] = beta
     wacc_result["beta_is_default"] = beta_meta.get("is_default", False)
     wacc_result["beta_r_squared"] = beta_meta.get("r_squared")
     wacc_result["beta_observations"] = beta_meta.get("observations")
     wacc_result["beta_source"] = beta_meta.get("source", "")
-    return wacc_result, []
+    return wacc_result, missing
 
 
 # --- _dcf_extract_shares ---
@@ -167,47 +183,41 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
         (shares: float | None, source_description: str)
     """
     # Source 1: basic_info 中 akshare 的 "总股本" 字段
+    # _parse_share_count 处理 亿/万 后缀 → 万股；×1e4 转 股
     basic_dim = dims.get("basic_info") or {}
-    basic_data = basic_dim.get("data")
-    if isinstance(basic_data, dict):
-        raw = basic_data.get("总股本") or basic_data.get("total_share") or basic_data.get("float_share")
-        if raw is not None:
-            try:
-                shares = float(str(raw).strip().replace(",", ""))
-                if shares > 0:
-                    return shares, "akshare stock_individual_info_em \"总股本\""
-            except (TypeError, ValueError):
-                pass
-    # 也搜索 all_sources（akshare 可能在二级源中）
-    for sd in (basic_dim.get("_meta") or {}).get("all_sources") or []:
-        if isinstance(sd, dict) and sd.get("success"):
-            sd_data = sd.get("data") or {}
-            if isinstance(sd_data, dict):
-                for k in ("总股本", "total_share", "float_share"):
-                    v = sd_data.get(k)
-                    if v is not None:
-                        try:
-                            shares = float(str(v).strip().replace(",", ""))
-                            if shares > 0:
-                                return shares, f"basic_info all_sources \"{k}\""
-                        except (TypeError, ValueError):
-                            continue
+    merged = _merge_share_fields(basic_dim)
+    if merged:
+        shares_wan = _parse_share_count(merged)
+        if shares_wan is not None and shares_wan > 0:
+            return shares_wan * 1e4, "akshare stock_individual_info_em \"总股本\" (万股→股)"
 
     # Source 2: total_mv / price 推导
+    # total_mv 单位: valuation 列表 = Tushare daily_basic(万元)；dict = 腾讯快照(亿元)
     val_dim = dims.get("valuation") or {}
     val_data = val_dim.get("data")
+    latest_mv: float | None = None
+    mv_unit = ""
     if isinstance(val_data, list) and val_data:
         val_sorted = sort_kline_asc(val_data)
         latest_mv = val_sorted[-1].get("total_mv") if val_sorted else None
-        if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
-            latest_mv = float(latest_mv)
-            kline_dim = _get_dim_data(dims, "kline")
-            if isinstance(kline_dim, list) and kline_dim:
-                k_sorted = sort_kline_asc(kline_dim)
-                price = k_sorted[-1].get("close") if k_sorted else None
-                if price is not None and _safe_num(price) and float(price) > 0:
-                    shares = latest_mv / float(price)
-                    return shares, "total_mv / 当前股价 推导"
+        mv_unit = "万元"
+    elif isinstance(val_data, dict):
+        latest_mv = val_data.get("total_mv")
+        mv_unit = "亿元"
+    if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
+        latest_mv = float(latest_mv)
+        kline_dim = _get_dim_data(dims, "kline")
+        if isinstance(kline_dim, list) and kline_dim:
+            k_sorted = sort_kline_asc(kline_dim)
+            price = k_sorted[-1].get("close") if k_sorted else None
+            if price is not None and _safe_num(price) and float(price) > 0:
+                price = float(price)
+                if mv_unit == "亿元":
+                    shares = latest_mv * 1e8 / price
+                    return shares, "total_mv (亿元) / 当前股价 推导"
+                # 万元 × 1e4 = 元；元 / (元/股) = 股
+                shares = latest_mv * 1e4 / price
+                return shares, "total_mv (万元) / 当前股价 推导"
 
     return None, "不可得"
 
@@ -229,8 +239,15 @@ def _dcf_extract_net_debt(financials: dict) -> tuple[float | None, str]:
     rows = extract_financial_rows(financials)
     latest = _latest_financial_row(rows)
     if latest:
-        debt = _safe_num(latest.get("total_liab") or latest.get("debt_total"))
-        cash = _safe_num(latest.get("money_cap") or latest.get("cash"))
+        _raw_debt = latest.get("total_liab")
+        if _raw_debt is None:
+            _raw_debt = latest.get("debt_total")
+        debt = _safe_num(_raw_debt)
+
+        _raw_cash = latest.get("money_cap")
+        if _raw_cash is None:
+            _raw_cash = latest.get("cash")
+        cash = _safe_num(_raw_cash)
         if debt is not None and cash is not None:
             nd = debt - cash
             return nd, "总负债 - 货币资金（最新财报，近似）"

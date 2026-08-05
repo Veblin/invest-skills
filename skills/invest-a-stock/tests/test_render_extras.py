@@ -247,7 +247,7 @@ class TestRenderReportV3StrictRigor:
         coll["research_summary"] = {"status": "no_data", "summary_text": ""}
         coll["_meta"] = {"strict_rigor": True}
 
-        with patch("lib.render_markdown._render_extras_block") as mock_extras:
+        with patch("lib.render_markdown._concise._render_extras_block") as mock_extras:
             mock_extras.return_value = []
             render_report_v3(coll, "600176", mode="brief")
             mock_extras.assert_called_once()
@@ -263,7 +263,7 @@ class TestRenderReportV3StrictRigor:
         coll["research_summary"] = {"status": "no_data", "summary_text": ""}
         coll["_meta"] = {"strict_rigor": True}
 
-        with patch("lib.render_markdown._render_extras_block") as mock_extras:
+        with patch("lib.render_markdown._concise._render_extras_block") as mock_extras:
             mock_extras.return_value = []
             render_report_v3(coll, "600176", mode="full")
             mock_extras.assert_called_once()

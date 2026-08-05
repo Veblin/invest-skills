@@ -9,22 +9,35 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import date
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
+from dates import shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
+from lib.stats import percentile_rank_inclusive  # noqa: E402
+from market_pulse import fetch_margin_account_info  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 # 涨跌停比极端阈值：>5:1 亢奋，<1:5（即 ratio < 0.2）恐慌
 _LU_LD_EXTREME_UP = 5.0
 _LU_LD_EXTREME_DOWN = 0.2  # 1:5
+
+# 数据维度键（全失败判定用；date/labels/_errors 等元数据键不计入）
+# 任一维度有值即视为采集成功；全部为 None → 信封标记 all_failed，
+# 使 data_bridge 的失败不缓存语义（_FAILURE_STATUSES）对 microstructure 生效
+_SNAPSHOT_DATA_KEYS = (
+    "margin_balance", "margin_buy_amount", "ad_ratio",
+    "lu_ld_ratio", "limit_up_count", "limit_down_count",
+    "total_turnover", "sse_float_mcap", "szse_float_mcap",
+    "erp", "pcr", "below_book_pct",
+    "northbound_net_inflow", "northbound_market_value",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +58,7 @@ def snapshot() -> dict[str, Any]:
     每个指标独立采集，失败不阻塞其他维度。
     """
     result: dict[str, Any] = {
-        "date": date.today().strftime("%Y%m%d"),
+        "date": shanghai_today(),
         # Tier 1
         "margin_balance": None,          # 融资余额（亿元）
         "margin_buy_amount": None,        # 融资买入额（亿元）
@@ -89,8 +102,104 @@ def snapshot() -> dict[str, Any]:
     _fetch_below_book_pct(result)
     _fetch_northbound(result)
     _compute_labels(result)
+    _auto_persist(result)
 
+    # 状态信封：全部数据维度失败 → "all_failed"，使 data_bridge 的失败
+    # 不缓存语义（_FAILURE_STATUSES）生效。否则全 None 快照会被 5min 缓存
+    # 服务给后续每次评估与 market-status --save（v0.2.3 回归修复）。
+    if all(result.get(k) is None for k in _SNAPSHOT_DATA_KEYS):
+        result["status"] = "all_failed"
+    else:
+        result["status"] = "ok"
     return result
+
+
+# ---------------------------------------------------------------------------
+# 自动持久化：每次 snapshot() 调用即积累一条历史记录
+# ---------------------------------------------------------------------------
+
+def _auto_persist(snap: dict) -> None:
+    """snapshot() 调用后自动将 Tier 1 + Tier 3 写入 market_snapshots。
+
+    非交易日（成交额 + 涨跌比均缺失）跳过写入。
+    save_snapshot() 后续调用会通过 INSERT OR REPLACE 补全 Tier 2 + v2 标签，
+    二者无冲突。
+
+    此函数静默失败：持久化异常不阻塞 snapshot() 正常返回。
+    """
+    try:
+        # 非交易日检测
+        if snap.get("total_turnover") is None and snap.get("ad_ratio") is None:
+            return
+
+        # 构造简易 env_label JSON（v1 标签，无历史分位）
+        env = {
+            "leverage": snap.get("label_leverage"),
+            "breadth": snap.get("label_breadth"),
+            "sentiment": snap.get("label_sentiment"),
+            "capital_flow": snap.get("label_capital_flow"),
+        }
+        warnings = []
+        lev = str(env.get("leverage") or "")
+        brd = str(env.get("breadth") or "")
+        sen = str(env.get("sentiment") or "")
+        if "去杠杆" in lev:
+            warnings.append("去杠杆")
+        if "极冷" in brd:
+            warnings.append("广度极冷")
+        if "极热" in brd:
+            warnings.append("广度极热")
+        if "极端亢奋" in sen:
+            warnings.append("情绪极端亢奋")
+        if "恐慌" in sen:
+            warnings.append("恐慌")
+        if "背离" in sen:
+            warnings.append("情绪背离")
+        env["summary"] = (
+            "偏谨慎" if len(warnings) >= 2
+            else ("⚠️ " + " + ".join(warnings) if len(warnings) == 1 else "正常")
+        )
+        snap["env_label"] = json.dumps(env, ensure_ascii=False)
+
+        init_db()
+        c = _conn()
+        try:
+            c.execute("""
+                INSERT OR REPLACE INTO market_snapshots
+                (date, margin_balance, margin_buy_amount, ad_ratio,
+                 limit_up_count, limit_down_count, lu_ld_ratio, total_turnover,
+                 sse_float_mcap, szse_float_mcap,
+                 margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
+                 ad_ratio_5d_ma, limit_down_20d_pct,
+                 erp, pcr, below_book_pct,
+                 northbound_net_inflow, northbound_direction, northbound_source,
+                 env_label)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                snap["date"],
+                snap.get("margin_balance"), snap.get("margin_buy_amount"),
+                snap.get("ad_ratio"),
+                snap.get("limit_up_count"), snap.get("limit_down_count"),
+                snap.get("lu_ld_ratio"),
+                snap.get("total_turnover"),
+                snap.get("sse_float_mcap"), snap.get("szse_float_mcap"),
+                snap.get("margin_to_mcap"), snap.get("margin_buy_to_turnover"),
+                snap.get("margin_20d_change"), snap.get("ad_ratio_5d_ma"),
+                snap.get("limit_down_20d_pct"),
+                snap.get("erp"), snap.get("pcr"), snap.get("below_book_pct"),
+                snap.get("northbound_net_inflow"),
+                snap.get("northbound_direction"),
+                snap.get("northbound_source"),
+                snap.get("env_label"),
+            ))
+            c.commit()
+        except Exception:
+            c.rollback()
+            logger.warning("_auto_persist(%s): DB write failed", snap.get("date"), exc_info=True)
+        finally:
+            _safe_close(c)
+    except Exception:
+        logger.warning("_auto_persist: persist failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +209,27 @@ def snapshot() -> dict[str, Any]:
 def save_snapshot() -> dict[str, Any] | None:
     """采集当日快照 → 计算 Tier 2 衍生指标 → 写入 market_snapshots 表。
 
+    v0.2.3：优先复用 data_bridge 5min 缓存快照（get_microstructure），
+    避免与 query_data 评估路径重复重采 8 个数据源（含 Tushare 昂贵接口）；
+    data_bridge 不可用时降级直接 snapshot()（与旧行为一致）。
+    缓存命中时 _auto_persist 不重复执行——INSERT OR REPLACE 保证无重复行。
+
     Returns
     -------
     dict or None
         写入的快照字典；非交易日（涨跌家数/成交额缺失）返回 None 以跳过写入。
     """
-    snap = snapshot()
+    try:
+        from data_bridge import get_microstructure  # noqa: PLC0415
+
+        snap = get_microstructure()
+    except Exception:
+        # 缓存层任何异常（ImportError/OSError/UnicodeDecodeError，如磁盘满、
+        # 坏缓存文件）一律降级直连 snapshot()——旧行为即直连，不能因缓存层
+        # 新增失败面崩掉 market-status --save（v0.2.3 补丁 #6）
+        snap = snapshot()
+    if snap is None:
+        return None
 
     # 非交易日检测：成交额缺失 → 大概率非交易日
     if snap.get("total_turnover") is None and snap.get("ad_ratio") is None:
@@ -246,9 +370,9 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
                       if h.get("limit_down_count") is not None]
         ld_history.append(ld)
         if ld_history:
-            sorted_ld = sorted(ld_history)
-            rank = sum(1 for x in sorted_ld if x <= ld)
-            snap["limit_down_20d_pct"] = round(rank / len(sorted_ld) * 100, 1)
+            # 含边界分位（<=、1 位小数），委托 skills/lib/stats
+            snap["limit_down_20d_pct"] = percentile_rank_inclusive(
+                ld_history, ld, round_to=1)
 
 
 # ---------------------------------------------------------------------------
@@ -495,9 +619,7 @@ def _fetch_margin(result: dict) -> None:
     的 FIN_BALANCE / FIN_BUY_AMT 已是亿元（实测约 2.6e4）。
     """
     try:
-        import akshare as ak
-        with akshare_direct_session():
-            df = ak.stock_margin_account_info()
+        df = fetch_margin_account_info()
         if df is None or df.empty:
             result["_errors"].append("margin: empty response")
             return
@@ -530,7 +652,7 @@ def _fetch_ad_ratio(result: dict) -> None:
 
 def _fetch_limit_pools(result: dict) -> None:
     """涨跌停池：涨停数 + 跌停数。"""
-    today = date.today().strftime("%Y%m%d")
+    today = shanghai_today()
     # 涨停
     try:
         import akshare as ak
@@ -642,7 +764,9 @@ def _fetch_erp(result: dict) -> None:
             try:
                 from lib.tushare_client import TushareClient
                 tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
-                today_str = date.today().strftime("%Y%m%d")
+                # 查询当日 trade_date；非上海时区主机在上海 00:00-08:00 窗口可能为空
+                # （naive→上海时区统一的有意变更）
+                today_str = shanghai_today()
                 df = tc.query("index_dailybasic", ts_code="000300.SH",
                               trade_date=today_str)
                 if df is not None and not df.empty and "pe_ttm" in df.columns:
@@ -707,7 +831,9 @@ def _fetch_pcr(result: dict) -> None:
 
         from lib.tushare_client import TushareClient
         tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
-        today_str = date.today().strftime("%Y%m%d")
+        # 查询当日 trade_date；非上海时区主机在上海 00:00-08:00 窗口可能为空
+        # （naive→上海时区统一的有意变更）
+        today_str = shanghai_today()
 
         # 先获取 50ETF 期权合约代码（opt_daily 的 ts_code 需为合约代码而非 ETF 代码）
         df_basic = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
@@ -756,7 +882,9 @@ def _fetch_below_book_pct(result: dict) -> None:
 
         from lib.tushare_client import TushareClient
         tc = TushareClient(token=config.get("TUSHARE_TOKEN"))
-        today_str = date.today().strftime("%Y%m%d")
+        # 查询当日 trade_date；非上海时区主机在上海 00:00-08:00 窗口可能为空
+        # （naive→上海时区统一的有意变更）
+        today_str = shanghai_today()
         df = tc.query("daily_basic", trade_date=today_str)
         if df is None or df.empty or "pb" not in df.columns:
             result["_errors"].append("below_book: daily_basic empty")

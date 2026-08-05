@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gap_scanner import GapInfo, _build_scan_hit, _check_unfilled, scan_all
+from gap_scanner import (GapInfo, _build_scan_hit, _check_unfilled, _find_candidate_gaps, scan_all)
 from skip_reasons import ExcludeReason, NonHitReason
 
 
@@ -756,3 +756,123 @@ class TestScanResultStructure:
         assert result.hits[0].ts_code == "000002.SZ"
         assert result.total_in_universe == 2
         assert result.total_with_kline == 2
+
+
+class TestZeroPriceBarGuard:
+    """F14: 零价 bar 不得触发除零，且单股异常不终止全池扫描。"""
+
+    def test_zero_prior_high_skips_candidate(self):
+        kline = _make_kline(n_bars=100)
+        # bar50 收盘为零价毛刺 → bar51 low(5.0) > bar50 high(0.0) 修复前触发除零
+        kline.loc[kline.index[50], "high_qfq"] = 0.0
+        kline.loc[kline.index[51], "low_qfq"] = 5.0
+        all_c, qualified = _find_candidate_gaps(kline, 60, 1.0)
+        assert all_c == []  # 零高 bar 不作为缺口前一日
+
+    def test_tiny_positive_high_spike_filtered(self):
+        """0.001 级毛刺 high 后接正常 bar → 天文 gap 被 _MAX_GAP_PCT 过滤。"""
+        kline = _make_kline(n_bars=100)
+        kline.loc[kline.index[50], "high_qfq"] = 0.001
+        kline.loc[kline.index[51], "low_qfq"] = 5.0
+        all_c, qualified = _find_candidate_gaps(kline, 60, 1.0)
+        # gap_pct ≈ +499,900% 超上限 → 不作为缺口候选
+        assert all_c == []
+
+    def test_relisting_giant_gap_not_filtered(self):
+        """复牌首日真实大跳空（>50%）不被 _MAX_GAP_PCT 拦截（盐湖 +347% 场景）。
+
+        F1: 前一日在停牌表内 → 放行大缺口并保留跨停牌标注机会；
+        同场景无停牌信息时毛刺拦截仍生效。
+        """
+        dates = [d.strftime("%Y%m%d")
+                 for d in pd.date_range("2025-01-01", periods=100, freq="B")]
+        kline = _make_kline(n_bars=100)
+        # bar50 停牌残留低基准，bar51 复牌日 low 跳空 +347%
+        kline.loc[kline.index[50], "high_qfq"] = 1.0
+        kline.loc[kline.index[51], "low_qfq"] = 4.47
+        all_c, qualified = _find_candidate_gaps(
+            kline, 60, 1.0,
+            suspensions=[dates[50]], trade_cal=dates,
+        )
+        assert len(all_c) == 1
+        assert all_c[0][1].gap_pct > 50.0
+        assert all_c[0][1].gap_date == dates[51]
+        # 无停牌信息 → 仍按毛刺拦截
+        all_c2, _ = _find_candidate_gaps(kline, 60, 1.0)
+        assert all_c2 == []
+
+    def test_scan_all_isolates_stock_exception(self, monkeypatch):
+        kline = _make_kline(n_bars=200)
+
+        def boom(*a, **k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr("gap_scanner._scan_stock", boom)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+        )
+        assert result.exclude_reasons[ExcludeReason.FETCH_ERROR] == 1
+        assert result.total_fetch_errors == 1
+        assert len(result.hits) == 0
+
+
+class TestMaxGapFailOpenAndBoard:
+    """B1/B2: 估计日历 fail-open + 按板块阈值（/code-review max）。"""
+
+    def test_estimated_calendar_fail_open_keeps_relisting_gap(self):
+        """suspension_map={}（估计日历）→ 347% 复牌跳空不再被静默丢弃。"""
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, gap_pct=347, fill_gap=False)
+        trade_cal = kline["trade_date"].tolist()
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},  # 估计日历路径：无停牌信息 → fail-open
+            params=DEFAULT_PARAMS,
+            trade_cal=trade_cal,
+        )
+        assert len(result.hits) == 1
+        assert len(result.across_suspension_hits) == 0
+
+    def test_real_calendar_still_filters_giant_gap(self):
+        """停牌数据可用 + 非跨停牌 → 347% 缺口仍按毛刺过滤（fail-closed）。"""
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, gap_pct=347, fill_gap=False)
+        trade_cal = kline["trade_date"].tolist()
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={"000001.SZ": []},  # 数据可用（该股无停牌记录）
+            params=DEFAULT_PARAMS,
+            trade_cal=trade_cal,
+        )
+        assert len(result.hits) == 0
+        assert len(result.across_suspension_hits) == 0
+
+    def test_max_gap_pct_for_code(self):
+        from gap_scanner import _max_gap_pct_for_code
+
+        assert _max_gap_pct_for_code("000001.SZ") == 30.0
+        assert _max_gap_pct_for_code("300001.SZ") == 60.0
+        assert _max_gap_pct_for_code("301001.SZ") == 60.0
+        assert _max_gap_pct_for_code("688001.SH") == 60.0
+        assert _max_gap_pct_for_code("920001.BJ") == 95.0
+        assert _max_gap_pct_for_code("832001.BJ") == 95.0
+        assert _max_gap_pct_for_code("430001.BJ") == 95.0
+        assert _max_gap_pct_for_code("") == 30.0
+
+    def test_cyb_gap_above_main_cap_kept_by_board_threshold(self):
+        """创业板 55% 缺口：主板阈值（30）下过滤、板块阈值（60）下保留。"""
+        kline = _make_kline(n_bars=50, gap_at=30, gap_pct=55, fill_gap=False)
+        dates = kline["trade_date"].tolist()
+        all_c, _ = _find_candidate_gaps(
+            kline, 40, 1.0, suspensions=[], trade_cal=dates, ts_code="000001.SZ")
+        assert all_c == []
+        all_c, _ = _find_candidate_gaps(
+            kline, 40, 1.0, suspensions=[], trade_cal=dates, ts_code="300001.SZ")
+        assert len(all_c) == 1
+        assert all_c[0][1].gap_pct == pytest.approx(55.0)

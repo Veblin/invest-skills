@@ -73,8 +73,8 @@ class TestCollectMarketStructure:
 
         with patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
-        ), patch.object(collector, "_tushare_client", return_value=mock_tc), patch.object(
-            collector, "_q_akshare_northbound", return_value=None
+        ), patch.object(collector._orchestrate, "_tushare_client", return_value=mock_tc), patch.object(
+            collector._orchestrate, "_q_akshare_northbound", return_value=None
         ):
             result = collector.collect_market_structure("600176", industry="电气设备")
 
@@ -168,9 +168,10 @@ class TestCollectorHelpers:
         from lib import collector
 
         c = collection_v2_minimal()
-        with patch.object(
-            collector, "collect_market_structure", return_value={"availability": {}}
-        ) as mock_ms:
+        # attach_market_structure 在 _orchestrate 中解析 collect_market_structure，
+        # 补丁须指向定义处模块（包级 re-export 是 no-op，split 后修复）
+        with patch("lib.collector._orchestrate.collect_market_structure",
+                   return_value={"availability": {}}) as mock_ms:
             collector.attach_market_structure(c, "600176")
         mock_ms.assert_called_once_with("600176", industry="电气设备")
         assert "market_structure" in c
@@ -182,7 +183,7 @@ class TestCollectorHelpers:
         out = _normalize_northbound_records(rows, "tushare.moneyflow")
         assert out[0]["net_mf_amount"] == 1_000_000.0
 
-        with patch("lib.collector._q_tushare_moneyflow") as mock_q:
+        with patch("lib.collector._orchestrate._q_tushare_moneyflow") as mock_q:
             mock_q.return_value = [
                 {"trade_date": "20260101", "net_mf_amount": 100.0},
                 {"trade_date": "20260102", "net_mf_amount": 200.0},
@@ -202,8 +203,8 @@ class TestCollectorHelpers:
             for i in range(6)
         ]
 
-        with patch("lib.collector._q_tushare_hsgt_top10") as mock_q, patch(
-            "lib.collector._q_akshare_northbound", return_value=None
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10") as mock_q, patch(
+            "lib.collector._orchestrate._q_akshare_northbound", return_value=None
         ):
             mock_q.return_value = mock_records
             result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
@@ -222,8 +223,8 @@ class TestCollectorHelpers:
             for i in range(6)
         ]
 
-        with patch("lib.collector._q_tushare_hsgt_top10", return_value=sparse), patch(
-            "lib.collector._q_akshare_northbound", return_value=akshare_records
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10", return_value=sparse), patch(
+            "lib.collector._orchestrate._q_akshare_northbound", return_value=akshare_records
         ):
             result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
 
@@ -233,11 +234,11 @@ class TestCollectorHelpers:
     def test_northbound_and_moneyflow_sources_distinct(self):
         from lib import collector
 
-        with patch("lib.collector._q_tushare_hsgt_top10") as mock_nb, patch(
-            "lib.collector._q_tushare_moneyflow"
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10") as mock_nb, patch(
+            "lib.collector._orchestrate._q_tushare_moneyflow"
         ) as mock_mf, patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
-        ), patch.object(collector, "_tushare_client", return_value=MagicMock()):
+        ), patch.object(collector._orchestrate, "_tushare_client", return_value=MagicMock()):
             mock_nb.return_value = [
                 {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(i + 1)}
                 for i in range(6)
@@ -271,8 +272,8 @@ class TestCollectorHelpers:
         mock_tc = MagicMock()
         mock_tc.query.return_value = mock_df
 
-        with patch("lib.collector._ms_fetch_fred_dgs10_series", return_value=[]), patch(
-            "lib.collector._ms_fetch_akshare_cn10y_series",
+        with patch("lib.collector._orchestrate._ms_fetch_fred_dgs10_series", return_value=[]), patch(
+            "lib.collector._orchestrate._ms_fetch_akshare_cn10y_series",
             return_value=[("2026-01-01", 2.5), ("2026-01-02", 2.6)],
         ):
             result = collector._ms_fetch_erp(mock_tc, {})

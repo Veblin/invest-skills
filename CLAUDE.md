@@ -43,6 +43,38 @@ thesis       # 投资假设追踪
 shock        # 价格冲击插值比例
 ```
 
+## 核心原则
+
+### P0 — AI 禁止做数学计算
+
+**所有涉及数值的计算（加减乘除、百分比、均值、偏离度、比值等）必须由 Python 引擎完成，AI 不得在脑中或对话中进行任何数学计算。**
+
+| 规则 | 说明 |
+|------|------|
+| **禁止 AI 心算** | 不得在报告/简报中写出任何经 AI 手动计算得出的数字（如 "NAV 低于 MA20 约 15%"） |
+| **引擎预计算** | 衍生指标（偏离度%、BOLL 位置%、日均波动等）由数据引擎统一输出到 `derived` 字段 |
+| **报告引用** | 报告中所有数字必须直接引用引擎输出的字段值，不得二次加工 |
+| **验证** | 涉及计算的数字若引擎未输出，先用 Python 算一遍，将结果作为引用源，再写入报告 |
+
+**正确 vs 错误示例**：
+
+```markdown
+# ❌ 错误 — AI 心算
+NAV 1.676 低于 MA20 1.9802 约 15.4%
+
+# ✅ 正确 — 引用引擎 derived 字段
+NAV 1.676 vs MA20 1.9802，偏离 -15.36% [来源: kline.derived.nav_vs_ma20_pct]
+```
+
+**引擎覆盖的衍生指标**（`query_etf_kline` → `derived`）：
+- `nav_vs_ma20_pct` / `nav_vs_ma60_pct` / `nav_vs_boll_mid_pct` — NAV 与均线的偏离%
+- `boll_position_pct` — NAV 在 BOLL 带内位置（0% = 下轨，100% = 上轨）
+- `nav_to_boll_lower_pct` / `nav_to_boll_upper_pct` — NAV 距 BOLL 上下轨的%
+- `boll_bandwidth_pct` — BOLL 带宽%
+- `daily_volatility_pct` — 日均波动率（年化/√252）
+
+**引擎未覆盖的计算**：先用 Python 脚本计算，将结果写入报告时标注 `[来源: Python calc: formula]`。
+
 ### v0.1.9 新闻采集
 
 - **Layer 1**：akshare 公告（始终可用）
@@ -120,7 +152,7 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 ## 开发规范
 
-详见 [development-rules.md](skills/lib/references/development-rules.md) — 12 条规则（D1-D12），来自 `/code-review` 反复出现的缺陷模式。每次 `/code-review` 应加载此文件作为审查标准。
+详见 [development-rules.md](skills/lib/references/development-rules.md) — 13 条规则（D1-D13），来自 `/code-review` 反复出现的缺陷模式。每次 `/code-review` 应加载此文件作为审查标准。
 
 ## 措辞规范
 

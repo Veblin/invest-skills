@@ -1,5 +1,36 @@
 # Changelog — invest skills
 
+## v0.2.3 (2026-08-04)
+
+数据桥接层（data_bridge）落地 + 巨型模块拆分 + 多轮 /code-review 修复 + 采集管线性能与健壮性优化 + 数据源必要性落地（4 源评估：tushare+akshare 必要 / baostock 兜底 / tickflow 可移除）。
+
+### 数据桥接层
+
+- **data_bridge 新增 8 个 ETF 缓存维度**：`etf_spot` / `index_pe` / `nav` / `index_daily` / `adj_factor` / `share_history` / `industry_alloc` / `category_sina`
+- **canonical etf_data 全部网络调用接入 data_bridge L2 缓存**
+- **journal 消费侧接入 data_bridge**：microstructure 5min 缓存生效；shim re-export 8 个 `fetch_*`（data_bridge 上下文解析关键）
+
+### 采集管线 4 项优化（挂死根因修复 + 提速）
+
+- **全局 socket 超时**（`INVEST_SOCKET_TIMEOUT` 默认 30s，`0`=不设置）：修复 akshare/baostock 无 timeout 接口无限挂死（实测曾挂死 20 分钟），已显式传 timeout 的调用不受影响
+- **同日 K 线缓存**（`collect_kline_cache`，TTL 1 天，`INVEST_KLINE_CACHE=0` 禁用）：键含 source + 查询窗口 + 复权语义，默认 400 日与 `--deep` 730 日互不误用；**kline 维度实测 76.8s → 0.4s**
+- **开发模式日志**（`INVEST_DEV=1` → stderr INFO + 轮转文件，release 零文件 I/O）：逐源耗时 + 维度耗时 + 慢源（>60s）告警，挂死类问题可秒级定位
+- **慢源降级**（`INVEST_SOURCE_TIMEOUT` 默认 60s deadline）：`_run_sources_parallel` 重写为 daemon 线程 + 信号量限流，超时源返回 timeout 占位 → 维度 partial 优雅降级；`_run_with_timeout` 同病同治。弃用 `ThreadPoolExecutor`（其 `__exit__` join 挂起线程会拖死整个维度）
+
+### 数据源必要性落地
+
+- **tickflow 默认关闭**（`INVEST_ENABLE_TICKFLOW=1` 启用）：免费 tier 慢，其前复权价值已由 tushare adj_factor 自算覆盖
+- **baostock 默认 auto**（`INVEST_ENABLE_BAOSTOCK=1/0` 覆盖）：仅无 Tushare token 时启用（与 gap-scan `create_source("auto")` 语义一致）
+- **K 线统一前复权**：tushare `daily + adj_factor` 自算（`_q_tushare_daily_qfq`，公式对齐 gap-scan `qfq.py`）、akshare `adjust="qfq"`、baostock `adjustflag="2"` — 除权日假跳变消除（301165 转增史 5 个 -16.7% 假跳变日全部消失，最大单日波动 40.26% → 20.87%），技术指标不再被除权污染，跨源校验不再因语义错配误报 divergence
+- 缓存键 `__qfq` 标记：复权语义变更后新键生效，旧缓存自动失效
+
+### 代码结构与质量
+
+- **共用库提升**：6 个 skill 去重（`skills/lib/` 纯函数层 + shim）
+- **巨型模块拆分**：`render_markdown` 5110 行 → 4 模块、`collector` 4234 行 → 3 模块
+- **多轮 /code-review max 修复**（30 + 15 + 8 + 8 项）：复权启发式 / 空信封缓存 / 缓存陈旧 / 复权因子除权日错位（拆分 ETF 假跳变）/ cache TOCTOU 等
+- **行业分析框架** + 引擎衍生指标（`derived` 字段）+ AI 计算禁令（P0）
+
 ## v0.2.2 (2026-07-28)
 
 v0.2.2 建设市场微观结构指标体系与平台化基础设施：新增市场情绪全景 Skill、共用函数层、TTL 缓存层；ETF 模块补齐行业基础设施（类型分类/PE快照/持仓代理/对冲映射），并修复 8 项设计问题。

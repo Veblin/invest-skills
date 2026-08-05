@@ -1,7 +1,8 @@
 """轻量数据查询模块 — 为 journal 评估提供按需数据。
 
-直接调 invest-a-stock 底层采集函数（collect_quote / collect_kline /
-collect_valuation / collect_macro_context），不走 collect_all() 后处理链。
+经 skills/lib/data_bridge 调 invest-a-stock 底层采集函数（get_quote /
+get_kline / get_valuation / get_macro），自动享受 TTL 缓存，不走
+collect_all() 后处理链。
 
 v0.2.1：PE 分位依赖 Tushare；无 Tushare 时标注"无历史分位"。
 """
@@ -9,7 +10,6 @@ v0.2.1：PE 分位依赖 Tushare；无 Tushare 时标注"无历史分位"。
 from __future__ import annotations
 
 import logging
-import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -18,10 +18,16 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from lib.collector import collect_quote, collect_kline, collect_valuation  # noqa: E402
+from data_bridge import (  # noqa: E402
+    get_kline,
+    get_macro,
+    get_microstructure,
+    get_quote,
+    get_valuation,
+)
 from lib.nums import safe_float  # noqa: E402
-from lib.technical import compute  # noqa: E402
-from lib.macro import collect_macro_context  # noqa: E402
+from lib.technical import compute, sort_kline_asc  # noqa: E402
+from lib.valuation import valuation_summary  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +125,12 @@ def query_for_evaluation(symbol: str, asset_type: str = "stock") -> dict[str, An
 
 def _safe_collect_quote(symbol: str) -> dict:
     try:
-        raw = collect_quote(symbol)
+        raw = get_quote(symbol)
         data = raw.get("data", {})
         meta = raw.get("_meta", {})
-        # data 可能是 list[dict] 或 dict
+        # data 可能是 list[dict] 或 dict；list 源（Tushare 等）常为降序，先升序再取最新
         if isinstance(data, list) and data:
-            data = data[-1]
+            data = sort_kline_asc(data)[-1]
         elif not isinstance(data, dict):
             data = {}
 
@@ -144,10 +150,13 @@ def _safe_collect_quote(symbol: str) -> dict:
 
 def _safe_collect_kline(symbol: str) -> dict:
     try:
-        raw = collect_kline(symbol)
+        raw = get_kline(symbol)
         data = raw.get("data", [])
         if not isinstance(data, list):
             data = []
+        # Tushare 等源常为降序，升序后再取首/末日期，避免 first/last 颠倒
+        if data:
+            data = sort_kline_asc(data)
         meta = raw.get("_meta", {})
         return {
             "rows": len(data),
@@ -163,45 +172,99 @@ def _safe_collect_kline(symbol: str) -> dict:
 
 def _safe_collect_valuation(symbol: str) -> dict:
     try:
-        raw = collect_valuation(symbol)
+        raw = get_valuation(symbol)
         data = raw.get("data", {})
         meta = raw.get("_meta", {})
         # data 可能是 list (Tushare 日频序列) 或 dict (腾讯快照)
         pe_list: list[float] = []
         pb_list: list[float] = []
+        pe_dates: list[str] = []
+        pb_dates: list[str] = []
         pe_current: float | None = None
         pb_current: float | None = None
+        pe_date: str | None = None
+        pb_date: str | None = None
+        pe_stale = pb_stale = False
         history_available = False
 
         if isinstance(data, list) and data:
             history_available = True
+            # Tushare 等源常为降序，升序后取末尾即为最新一期
+            data = sort_kline_asc(data)
             for d in data:
+                td = str(d.get("trade_date") or "")
                 pe = safe_float(d.get("pe_ttm"))
                 pb = safe_float(d.get("pb"))
-                if pe is not None:
+                # 剔除亏损期负 PE/PB：负值参与分位会抬高"分位"与拉低中位数
+                # （CLAUDE.md P0-2 口径；与 invest-a-stock valuation.py 一致）
+                if pe is not None and pe > 0:
                     pe_list.append(pe)
-                if pb is not None:
+                    pe_dates.append(td)
+                if pb is not None and pb > 0:
                     pb_list.append(pb)
+                    pb_dates.append(td)
             if pe_list:
                 pe_current = pe_list[-1]
+                pe_date = pe_dates[-1]
             if pb_list:
                 pb_current = pb_list[-1]
+                pb_date = pb_dates[-1]
+            # 陈旧性：最新报告期无正 PE/PB（亏损期被 >0 过滤）→ 当前值回退
+            # 自旧期。pe_date != 最新期即回退（亏损期被剔除，两者必然不等）。
+            # 信号须进入报告 prose（SKILL.md 数据快照节指示），否则
+            # "当前亏损却显示旧期 PE 8.0x"会被静默当成当期估值。
+            latest_td = str(data[-1].get("trade_date") or "")
+            pe_stale = bool(pe_dates) and bool(latest_td) and pe_dates[-1] != latest_td
+            pb_stale = bool(pb_dates) and bool(latest_td) and pb_dates[-1] != latest_td
         elif isinstance(data, dict):
             pe_current = safe_float(data.get("pe_ttm"))
             pb_current = safe_float(data.get("pb"))
+            pe_date = str(data.get("trade_date") or "") or None
+            pb_date = pe_date
+            latest_td = ""
+
+        note = ""
+        if not history_available:
+            note = "无历史分位（仅当前快照）"
+        elif pe_stale or pb_stale:
+            stale_parts = []
+            if pe_stale:
+                stale_parts.append(
+                    f"最新报告期 {latest_td} 无正 PE（亏损期），"
+                    f"当前 PE {pe_current} 回退自 {pe_date}")
+            if pb_stale:
+                stale_parts.append(
+                    f"最新报告期 {latest_td} 无正 PB（亏损期），"
+                    f"当前 PB {pb_current} 回退自 {pb_date}")
+            note = "；".join(stale_parts)
+
+        # 分位/中位数委托 invest-a-stock lib.valuation.valuation_summary：
+        # >0 过滤 + 严格 percentile_rank + median 的唯一实现（journal 此前
+        # 自维护一份 percentile_rank_inclusive 副本，同一缓存两个分位语义）
+        summary = valuation_summary(
+            pe_list, pb_list, current_pe=pe_current, current_pb=pb_current)
+        pe_stat = summary.get("pe", {})
+        pb_stat = summary.get("pb", {})
 
         return {
             "pe_current": pe_current,
             "pb_current": pb_current,
-            "pe_percentile": _percentile(pe_current, pe_list) if history_available else None,
-            "pb_percentile": _percentile(pb_current, pb_list) if history_available else None,
-            "pe_median": _median(pe_list) if pe_list else None,
-            "pb_median": _median(pb_list) if pb_list else None,
+            # 最新正 PE/PB 的报告期（亏损期回退旧值时供消费者识别陈旧）
+            "pe_date": pe_date,
+            "pb_date": pb_date,
+            # 最新报告期亏损、当前值回退自旧期（pe_date/pb_date）的标志；
+            # 报告 prose 必须注明数据期与回退原因（见 SKILL.md 数据快照节）
+            "pe_stale": pe_stale,
+            "pb_stale": pb_stale,
+            "pe_percentile": pe_stat.get("pct") if history_available else None,
+            "pb_percentile": pb_stat.get("pct") if history_available else None,
+            "pe_median": pe_stat.get("median"),
+            "pb_median": pb_stat.get("median"),
             "history_available": history_available,
             "history_rows": len(pe_list),
             "source": meta.get("source", "unknown"),
             "status": _status_from_raw(raw),
-            "note": "" if history_available else "无历史分位（仅当前快照）",
+            "note": note,
         }
     except Exception as exc:
         return {"_error": str(exc), "status": "missing", "history_available": False}
@@ -209,7 +272,8 @@ def _safe_collect_valuation(symbol: str) -> dict:
 
 def _safe_collect_macro(symbol: str) -> dict:
     try:
-        return collect_macro_context(symbol)
+        # 宏观数据非个股维度，data_bridge.get_macro() 不接收 symbol
+        return get_macro()
     except Exception as exc:
         return {"status": "all_failed", "indicators": {}, "_error": str(exc)}
 
@@ -250,6 +314,9 @@ def _safe_etf_kline(symbol: str) -> dict:
             "ma60": raw.get("ma60"),
             "index_ma20": raw.get("index_ma20"),
             "index_ma60": raw.get("index_ma60"),
+            "boll_upper": raw.get("boll_upper"),
+            "boll_mid": raw.get("boll_mid"),
+            "boll_lower": raw.get("boll_lower"),
         }
     except Exception as exc:
         return {"_error": str(exc), "rows": 0, "data": [], "status": "missing"}
@@ -269,9 +336,10 @@ def _safe_collect_etf(symbol: str) -> dict:
 
 
 def _safe_collect_microstructure() -> dict:
+    """走 data_bridge 5min TTL 缓存（v0.2.3）；避免每次评估重采 8 个数据源。"""
     try:
-        from market_microstructure import snapshot
-        return snapshot()
+        snap = get_microstructure()
+        return snap if snap is not None else {"_error": "microstructure unavailable"}
     except Exception as exc:
         return {"_error": str(exc)}
 
@@ -454,34 +522,15 @@ def _summarize_quality(result: dict) -> None:
     result["data_quality"] = dq
 
 
-def _percentile(value: float | None, population: list[float]) -> float | None:
-    """计算 value 在 population 中的分位（0-100）。"""
-    if value is None or not population:
-        return None
-    sorted_vals = sorted(population)
-    rank = sum(1 for x in sorted_vals if x <= value)
-    return round(rank / len(sorted_vals) * 100, 1)
-
-
-def _median(population: list[float]) -> float | None:
-    """Delegates to stdlib statistics.median; returns None for empty input."""
-    if not population:
-        return None
-    return statistics.median(population)
-
-
 def _status_from_raw(raw: dict) -> str:
     """将 collector 返回的 status 映射到 8 态枚举。"""
     status = raw.get("status", "missing")
     meta = raw.get("_meta", {})
     if status == "available":
-        # 检查是否为降级源
-        sources = meta.get("all_sources", [])
-        primary_ok = any(
-            s.get("source_group") == "primary" and s.get("success")
-            for s in sources
-        )
-        return "available" if primary_ok else "degraded"
+        # 维度级 _meta 恒带 success（schema._best_meta：有 primary 源即 True，
+        # "merged:" 前缀源同样携带）；缺 key/非 True（legacy 缓存、手写 meta、
+        # 未来生产者）一律 fail-closed 降级——不信任未标注的维度
+        return "available" if meta.get("success") is True else "degraded"
     if status == "partial":
         return "partial"
     return "missing"

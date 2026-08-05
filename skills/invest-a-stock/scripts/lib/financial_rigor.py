@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from .data_util import merge_first_non_empty
 from .nums import coalesce_field, safe_float
 from .schema import SourceResult, _auto_cross_validate, index_dimensions, relative_diff_pct
 
@@ -102,22 +103,20 @@ def _merge_share_fields(basic_dim: dict) -> dict:
     (no total_share), so primary_data alone is insufficient. This helper searches
     all_sources for 总股本/total_share/float_share from secondary sources (e.g.
     akshare stock_individual_info_em).
+
+    实现委托共享 merge_first_non_empty（empty_values=(None,) 保 None-only 语义）：
+    主数据优先，secondary 只在缺失/为 None 时补位。
     """
-    merged: dict = {}
-    if basic_dim:
-        data = basic_dim.get("data")
-        if isinstance(data, dict):
-            merged.update(data)
-        for sd in (basic_dim.get("_meta") or {}).get("all_sources") or []:
-            if isinstance(sd, dict) and sd.get("success"):
-                sd_data = sd.get("data")
-                if isinstance(sd_data, dict):
-                    for k in ("总股本", "total_share", "float_share"):
-                        v = sd_data.get(k)
-                        if v is not None:
-                            if k not in merged or merged[k] is None:
-                                merged[k] = v
-    return merged
+    if not basic_dim:
+        return {}
+    data = basic_dim.get("data")
+    secondary = [
+        sd.get("data")
+        for sd in (basic_dim.get("_meta") or {}).get("all_sources") or []
+        if isinstance(sd, dict) and sd.get("success")
+        and isinstance(sd.get("data"), dict)
+    ]
+    return merge_first_non_empty([data] + secondary, empty_values=(None,))
 
 
 def verify_market_cap(collection: dict) -> list[RigorReport]:

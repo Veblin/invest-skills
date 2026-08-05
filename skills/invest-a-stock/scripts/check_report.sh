@@ -2,8 +2,9 @@
 #
 # check_report.sh — invest:a-stock 研究报告措辞检查工具
 #
-# 委托 lint.py (YAML 规则引擎) 执行所有合规检查。
-# 保留此脚本以兼容现有 pre-commit hook。
+# ⚠️ DEPRECATED（v0.2.3）: 已被 skills/lib/report_qc.py 取代。
+#    report_qc.py 统一覆盖 lint + 结构 + ETF derived 校验，
+#    pre-commit hook 已切换为 report-qc。本脚本仅保留兼容性。
 #
 # 用法:
 #   ./check_report.sh                   # 扫描 reports/ 下最新 .md 文件

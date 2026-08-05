@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .nums import safe_float
+from .shared_dates import shanghai_days_ago as _days_ago
 
 
 def load_holdings(path: Path) -> list[dict[str, Any]]:
@@ -51,7 +52,9 @@ def _returns_from_kline(kline: list[dict]) -> list[tuple[str, float]]:
 
 
 def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str, Any]:
-    from .collector import collect_basic_info, collect_kline
+    from ._invest_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from data_bridge import get_basic_info, get_kline  # noqa: E402
 
     industries: dict[str, float] = {}
     kline_by_sym: dict[str, dict[str, float]] = {}
@@ -68,14 +71,14 @@ def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str,
         if w_note:
             weight_parse_warnings.append(f"{sym}: {w_note}")
         weights_by_sym[sym] = weight
-        basic = collect_basic_info(sym)
+        basic = get_basic_info(sym)
         data = basic.get("data") if isinstance(basic, dict) else {}
         industry = "未知"
         if isinstance(data, dict):
             industry = data.get("industry") or data.get("行业") or "未知"
         industries[industry] = industries.get(industry, 0) + weight
 
-        kdim = collect_kline(sym, start_date=_days_ago(150))
+        kdim = get_kline(sym, start_date=_days_ago(150))
         kdata = kdim.get("data") if isinstance(kdim, dict) else None
         if not isinstance(kdata, list) or len(kdata) < 60:
             skipped.append(sym)
@@ -139,11 +142,6 @@ def review_portfolio(holdings: list[dict], *, stress: bool = False) -> dict[str,
     return out
 
 
-def _days_ago(n: int) -> str:
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    return (now - timedelta(days=n)).strftime("%Y%m%d")
 
 
 def _corr_matrix(series: dict[str, list[float]]) -> dict[str, dict[str, float | None]]:

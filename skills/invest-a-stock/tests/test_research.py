@@ -110,9 +110,12 @@ class TestCollectResearchShortCircuit:
     def test_skips_lower_tiers_when_report_rc_ok(self):
         from lib.collector import collect_research
 
-        with patch("lib.collector._q_tushare_report_rc", return_value=[{"rating": "买入"}]):
-            with patch("lib.collector._q_tushare_forecast") as mock_fc:
-                with patch("lib.collector._q_akshare_research") as mock_ak:
+        # collect_research 在 _orchestrate 中解析 _q_*，补丁须指向定义处模块
+        # （包级 re-export 是 no-op，split 后修复）
+        with patch("lib.collector._orchestrate._q_tushare_report_rc",
+                   return_value=[{"rating": "买入"}]):
+            with patch("lib.collector._orchestrate._q_tushare_forecast") as mock_fc:
+                with patch("lib.collector._orchestrate._q_akshare_research") as mock_ak:
                     dim = collect_research("600176")
                     mock_fc.assert_not_called()
                     mock_ak.assert_not_called()
@@ -122,9 +125,10 @@ class TestCollectResearchShortCircuit:
     def test_forecast_only_when_report_rc_fails(self):
         from lib.collector import collect_research
 
-        with patch("lib.collector._q_tushare_report_rc", return_value=None):
-            with patch("lib.collector._q_tushare_forecast", return_value=[{"type": "预增"}]):
-                with patch("lib.collector._q_akshare_research") as mock_ak:
+        with patch("lib.collector._orchestrate._q_tushare_report_rc", return_value=None):
+            with patch("lib.collector._orchestrate._q_tushare_forecast",
+                       return_value=[{"type": "预增"}]):
+                with patch("lib.collector._orchestrate._q_akshare_research") as mock_ak:
                     dim = collect_research("600176")
                     mock_ak.assert_not_called()
         sources = [s["source"] for s in dim["_meta"]["all_sources"]]

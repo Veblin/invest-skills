@@ -35,7 +35,7 @@ import sys
 import time
 import math
 from dataclasses import dataclass, field, asdict
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -49,6 +49,9 @@ if _SCRIPT_DIR not in sys.path:
 from lib.env import get_config, ensure_env_loaded, PROJECT_ROOT
 from lib.nums import safe_float, coalesce_field
 from lib.financials import normalize_end_date, parse_end_date
+from lib.shared_codes import symbol_to_ts_code
+from lib.shared_dates import shanghai_days_ago, shanghai_today
+from lib.stats import median, percentile_rank
 from lib.tushare_client import TushareClient
 
 # ---------------------------------------------------------------------------
@@ -71,13 +74,15 @@ SCENARIOS = {
 # ---------------------------------------------------------------------------
 
 def _fmt_code(symbol: str) -> str:
-    """将 002466 → 002466.SZ（Tushare 格式）。"""
+    """将 002466 → 002466.SZ（Tushare 格式）。
+
+    路由委托共享 codes.symbol_to_ts_code（6/9→SH、4/8/920→BJ、else SZ），
+    避免本文件第三张内联路由表与共享库分叉（review fix #14）。
+    """
     s = symbol.strip()
     if "." in s:
         return s
-    if s.startswith(("60", "68")):
-        return f"{s}.SH"
-    return f"{s}.SZ"
+    return symbol_to_ts_code(s)
 
 
 def _fmt_code_ak(symbol: str) -> str:
@@ -95,10 +100,11 @@ def get_quote_ak(symbol: str) -> dict[str, Any]:
         if row.empty:
             raise ValueError(f"未找到 {code}")
         r = row.iloc[0]
+        mv_raw = safe_float(r.get("总市值"))
         return {
             "price": safe_float(r.get("最新价")),
             "change_pct": safe_float(r.get("涨跌幅")),
-            "total_mv_yi": safe_float(r.get("总市值")),
+            "total_mv_yi": mv_raw / 1e8 if mv_raw is not None else None,  # akshare 总市值单位: 元 → 亿元
             "pe_dynamic": safe_float(r.get("市盈率-动态")),
             "pb": safe_float(r.get("市净率")),
             "source": "akshare.stock_zh_a_spot_em",
@@ -130,14 +136,14 @@ def _get_quote_tencent(symbol: str) -> dict[str, Any]:
         return {
             "price": price,
             "change_pct": change_pct,
-            "total_mv_yi": total_mv,
+            "total_mv_yi": round(total_mv, 2) if total_mv is not None else None,  # 腾讯 field45 返回亿元，无需转换
             "pe_dynamic": pe,
             "pb": pb,
             "source": "tencent.qt.gtimg.cn",
         }
-    except Exception:
-        logger.warning("腾讯行情也失败")
-        return {"price": None, "source": "failed: tencent", "error": str(r) if 'r' in dir() else "request failed"}
+    except Exception as exc:
+        logger.warning("腾讯行情也失败: %s", exc)
+        return {"price": None, "source": "failed: tencent", "error": str(exc)}
 
 
 def get_total_shares_ak(symbol: str) -> float | None:
@@ -184,8 +190,8 @@ def get_financials(ts: TushareClient, ts_code: str) -> list[dict]:
     返回按 end_date 升序排列、去重后的行列表。
     """
     try:
-        start_date = (date.today() - timedelta(days=3 * 365)).strftime("%Y%m%d")
-        end_date = date.today().strftime("%Y%m%d")
+        start_date = shanghai_days_ago(3 * 365)
+        end_date = shanghai_today()
         result = ts.query(
             "fina_indicator",
             ts_code=ts_code,
@@ -221,8 +227,8 @@ def get_daily_basic_history(
     Tushare query() 直接返回 DataFrame，不包在 dict 里。
     daily_basic 支持 start_date/end_date 参数。
     """
-    start_date = (date.today() - timedelta(days=years * 365)).strftime("%Y%m%d")
-    end_date = date.today().strftime("%Y%m%d")
+    start_date = shanghai_days_ago(years * 365)
+    end_date = shanghai_today()
     try:
         result = ts.query(
             "daily_basic",
@@ -545,22 +551,12 @@ def calc_historical_percentile(
     if not pe_seq and not pb_seq:
         return {"error": "PE/PB 历史数据不足"}
 
-    def _pct(seq: list[float], cur: float) -> float:
-        return sum(1 for v in seq if v < cur) / len(seq) * 100
-
-    def _median(seq: list[float]) -> float:
-        s = sorted(seq)
-        n = len(s)
-        if n % 2 == 1:
-            return s[n // 2]
-        return (s[n // 2 - 1] + s[n // 2]) / 2
-
     total_daily = len(daily_rows)
     result: dict[str, Any] = {"n_samples": total_daily, "warnings": []}
 
     if pe_seq:
         current_pe = pe_seq[-1]
-        pe_pct = _pct(pe_seq, current_pe)
+        pe_pct = percentile_rank(pe_seq, current_pe)
         n = len(pe_seq)
         mu = sum(pe_seq) / n
         sigma = math.sqrt(sum((v - mu) ** 2 for v in pe_seq) / n)
@@ -572,7 +568,7 @@ def calc_historical_percentile(
             "pe_neg_pct": round(pe_neg_pct, 4),
             "pe_current": round(current_pe, 2),
             "pe_pct": round(pe_pct, 1),
-            "pe_median": round(_median(pe_seq), 2),
+            "pe_median": round(median(pe_seq), 2),
             "pe_mean": round(mu, 2),
             "pe_sigma": round(sigma, 2) if sigma else None,
             "pe_plus_1sigma": round(mu + sigma, 2) if sigma else None,
@@ -586,11 +582,11 @@ def calc_historical_percentile(
 
     if pb_seq:
         current_pb = pb_seq[-1]
-        pb_pct = _pct(pb_seq, current_pb)
+        pb_pct = percentile_rank(pb_seq, current_pb)
         result.update({
             "pb_current": round(current_pb, 2),
             "pb_pct": round(pb_pct, 1),
-            "pb_median": round(_median(pb_seq), 2),
+            "pb_median": round(median(pb_seq), 2),
         })
 
     return result

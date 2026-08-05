@@ -68,6 +68,7 @@ class TestFacadeAwareValuation:
 class TestCollectDimension:
     def test_parallel_success_and_query_params(self, monkeypatch):
         from lib import collector
+        from lib.collector import _orchestrate as collector_orch
         from lib.schema import SourceResult
 
         def _ok():
@@ -76,8 +77,10 @@ class TestCollectDimension:
         def _fail():
             raise RuntimeError("boom")
 
+        # _collect_dimension 在 _orchestrate 命名空间解析这两个名字（拆分包后，
+        # patch 包命名空间的同名拷贝无效）
         monkeypatch.setattr(
-            collector,
+            collector_orch,
             "_run_sources_parallel",
             lambda tasks, dim: [
                 SourceResult("a", {"x": 1}, dim, latency_ms=1.0),
@@ -89,7 +92,7 @@ class TestCollectDimension:
         def _annotate(by_source, qp):
             annotated.append((sorted(by_source), qp))
 
-        monkeypatch.setattr(collector, "_annotate_query_params", _annotate)
+        monkeypatch.setattr(collector_orch, "_annotate_query_params", _annotate)
 
         out = collector._collect_dimension(
             "demo",
@@ -108,10 +111,11 @@ class TestCollectDimension:
 
     def test_postprocess_receives_legacy_and_results(self, monkeypatch):
         from lib import collector
+        from lib.collector import _orchestrate as collector_orch
         from lib.schema import SourceResult
 
         monkeypatch.setattr(
-            collector,
+            collector_orch,
             "_run_sources_parallel",
             lambda tasks, dim: [
                 SourceResult("s1", [1, 2], dim, latency_ms=0.1),

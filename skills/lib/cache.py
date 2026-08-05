@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, time as dt_time
+from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Any
 
@@ -102,8 +102,9 @@ class DataCache:
         try:
             entry = self._load(path)
         except (json.JSONDecodeError, OSError):
+            # 不在此处删除文件：_load 在锁外执行，删文件可能误伤并发的 set()
+            # 损坏/空文件留给 LRU 清理或下次 set() 覆盖
             with self._lock:
-                path.unlink(missing_ok=True)
                 self._misses += 1
             return None
 
@@ -183,6 +184,40 @@ class DataCache:
         _cache_log = _cache_logging.getLogger(__name__)
 
         def _json_default(obj):
+            # numpy/pandas 标量转原生类型（惰性 import，不加重模块顶层依赖）：
+            # 否则 np.int64 等经 str() 写回后读出来是字符串，下游数值计算错乱
+            try:
+                import numpy as _np  # noqa: PLC0415
+
+                # timedelta64 是 signedinteger 子类，必须先于 integer 分支判断
+                if isinstance(obj, _np.timedelta64):
+                    # item() 会返回 datetime.timedelta（C 编码器不再递归 default → 崩溃）
+                    return float(obj / _np.timedelta64(1, "s"))  # → 秒数
+                if isinstance(obj, _np.integer):
+                    return int(obj)
+                if isinstance(obj, _np.floating):
+                    return float(obj)
+                if isinstance(obj, _np.bool_):
+                    return bool(obj)
+                if isinstance(obj, _np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, _np.generic):
+                    item = obj.item()
+                    # item() 可能返回 timedelta/complex 等仍不可序列化类型 → 兜底 str()
+                    if item is None or isinstance(item, (int, float, bool, str, list, dict)):
+                        return item
+                    return str(item)
+            except ImportError:
+                pass
+            try:
+                import pandas as _pd  # noqa: PLC0415
+
+                if isinstance(obj, _pd.Timestamp):
+                    return obj.isoformat()
+            except ImportError:
+                pass
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
             _cache_log.warning(
                 "cache: non-JSON-serializable type %s serialized via str() — "
                 "data may be lossy on read-back", type(obj).__name__
@@ -236,7 +271,7 @@ class DataCache:
             # 清空全部
             if self._cache_dir.exists():
                 for f in self._cache_dir.rglob("*.json"):
-                    f.unlink()
+                    f.unlink(missing_ok=True)
                     count += 1
             return count
 
@@ -337,9 +372,14 @@ class DataCache:
         if not self._cache_dir.exists():
             return 0
 
+        def _safe_mtime(f):
+            try:
+                return f.stat().st_mtime
+            except FileNotFoundError:
+                return 0.0  # 并发删除：推到列表最前面（最早删除）
         files = sorted(
             self._cache_dir.rglob("*.json"),
-            key=lambda f: f.stat().st_mtime,
+            key=_safe_mtime,
         )
 
         removed = 0

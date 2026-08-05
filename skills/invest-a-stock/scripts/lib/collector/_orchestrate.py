@@ -1,1019 +1,23 @@
-"""数据采集模块。封装各数据源，依赖 env.py 做可用性检测。
-
-设计模式（参考 last30days-skill 的 parallel fan-out）：
-  每个维度下，对所有可用源并行查询 → SourceResult 归一化 → DimensionResult 合并。
-  失败不阻塞，选取最优源为主数据。
-
-数据源策略（v0.3+ 并行取证）：
-  有 Token: Tushare ∥ akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
-  无 Token: akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
-"""
-
+"""Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
-
-import logging
-import os
-import threading
-import time
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import redirect_stdout
-from datetime import datetime, timezone, timedelta
-from io import StringIO
-from typing import Any, Callable
 
-from . import env
-from .nums import coalesce_field, safe_float
-from .proxy import (
-    EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
-    EASTMONEY_FAILURE_PROXY_MARKER,
-    EASTMONEY_FAILURE_TUN_MARKER,
-    akshare_direct_session,
-    akshare_push2_available,
-    no_proxy_session,
-    proxy_bypass,
-)
-from .schema import SourceResult, DimensionResult
+from . import _base as __base_ref
+for __base_n in dir(__base_ref):
+    if not __base_n.startswith("__"):
+        globals()[__base_n] = getattr(__base_ref, __base_n)
+del __base_ref, __base_n
+
+
+from . import _sources as __sources_ref
+for __sources_n in dir(__sources_ref):
+    if not __sources_n.startswith("__"):
+        globals()[__sources_n] = getattr(__sources_ref, __sources_n)
+del __sources_ref, __sources_n
+
 
 logger = logging.getLogger(__name__)
-
-
-# ---- 日期工具（函数形式，避免导入时固化；A 股日历日统一上海时区） ----
-
-def _shanghai_now() -> datetime:
-    from zoneinfo import ZoneInfo
-    return datetime.now(ZoneInfo("Asia/Shanghai"))
-
-
-def _today() -> str:
-    return _shanghai_now().strftime("%Y%m%d")
-
-
-def _days_ago(n: int) -> str:
-    return (_shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
-
-
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
-from .shared_codes import exchange_code as _exchange_code  # noqa: E402
-
-_fred_date = _to_iso_date  # 向后兼容
-
-
-def _latest_quarter_end() -> str:
-    """返回最近一个已完整的季度末日期（0331/0630/0930/1231）。
-
-    确保季度末日期的完整日已经过去（不提前返回当天）。
-    """
-    from datetime import date
-    now = _shanghai_now()
-    today = now.date()
-    quarter_ends = [
-        (now.year, "0331"),
-        (now.year, "0630"),
-        (now.year, "0930"),
-        (now.year, "1231"),
-    ]
-    for y, md in reversed(quarter_ends):
-        d = datetime.strptime(f"{y}{md}", "%Y%m%d")
-        # 用 > 确保季度末整日已过（如 6/30 当天仍返回 Q1，7/1 起返回 Q2）
-        # 注：季度末日当天（如 3/31）金融数据尚未披露，提前返回无害
-        if today > d.date():
-            return f"{y}{md}"
-    return f"{now.year - 1}1231"
-
-
-# ---- 交易所代码转换（共享函数，三种格式统一调度） ----
-
-def _ts_code(symbol: str) -> str:
-    """转为 Tushare 格式：600176 → 600176.SH（委托 _exchange_code）。"""
-    return _exchange_code(symbol)["tushare"]
-
-
-# 向后兼容：测试与外部调用仍可从 collector 导入 _proxy_bypass
-_proxy_bypass = proxy_bypass
-
-# Baostock 全局 socket 非线程安全，需串行化访问
-_BAOSTOCK_LOCK = threading.Lock()
-
-_EASTMONEY_PROXY_MSG = (
-    "东方财富(East Money) API 连接失败。"
-    f"{EASTMONEY_FAILURE_PROXY_MARKER}，请在 Clash 规则中将 DOMAIN-SUFFIX,eastmoney.com,DIRECT；"
-    "或暂时关闭全局代理后重试。"
-    "可改用 Tushare / Baostock 作为替代数据源。"
-)
-_EASTMONEY_TUN_OR_CDN_MSG = (
-    f"东方财富 {EASTMONEY_FAILURE_TUN_MARKER}（非 HTTP 代理问题，可能为 TUN 劫持或 CDN 限制）。"
-    "已使用 Tushare / Baostock 替代。"
-)
-
-
-def _is_eastmoney_blocked_error(error: str) -> bool:
-    """检测异常消息是否明确指向东方财富。"""
-    return any(kw in str(error) for kw in _EASTMONEY_BLOCKED_KEYWORDS)
-
-
-def _eastmoney_failure_message() -> str:
-    from .proxy import proxy_status
-
-    status = proxy_status(probe=False)
-    if status.get("bypass_effective"):
-        return _EASTMONEY_TUN_OR_CDN_MSG
-    return _EASTMONEY_PROXY_MSG
-
-
-def _reraise_eastmoney_api_error(exc: Exception) -> None:
-    """在东方财富 akshare 接口内，将连接失败转为可操作提示。
-
-    仅在已知调用东方财富 API 的函数中使用，避免误伤同花顺等其他源。
-    """
-    msg = _eastmoney_failure_message()
-    if _is_eastmoney_blocked_error(str(exc)):
-        raise RuntimeError(msg) from exc
-    err = str(exc)
-    if any(kw in err for kw in (
-        "Connection", "Remote end closed", "RemoteDisconnected", "ProxyError",
-        "Max retries exceeded",
-    )):
-        raise RuntimeError(msg) from exc
-    raise exc
-
-
-def _baostock_code(symbol: str) -> str:
-    """Baostock 证券代码：sz. / sh. / bj. 前缀（委托 _exchange_code）。"""
-    return _exchange_code(symbol)["baostock"]
-
-
-# ---- 并行执行辅助 ----
-
-def _run_sources_parallel(tasks: list[tuple[str, Callable[[], Any]]],
-                          dimension: str) -> list[SourceResult]:
-    """并行执行多个源查询任务，返回 SourceResult 列表。
-
-    last30days 的 ThreadPoolExecutor fan-out 模式：
-    - 每个任务独立提交
-    - 失败不阻塞其他任务
-    - 返回所有结果（含失败）供合并
-
-    Args:
-        tasks: [(source_name, callable), ...]
-        dimension: 维度标识
-    """
-    if not tasks:
-        return []
-
-    sources: list[SourceResult | None] = []
-    # max_workers=8：平衡并发效率与 Tushare/akshare 限流（可通过 INVEST_MAX_WORKERS 环境变量覆盖）
-    max_w = int(os.environ.get("INVEST_MAX_WORKERS", "8"))
-    with ThreadPoolExecutor(max_workers=min(len(tasks), max_w)) as executor:
-        futures = {
-            executor.submit(_run_one_source, name, fn, dimension): i
-            for i, (name, fn) in enumerate(tasks)
-        }
-        results: dict[int, SourceResult] = {}
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results[idx] = future.result()
-            except Exception as exc:
-                results[idx] = SourceResult(
-                    source=f"__internal__",
-                    data=None,
-                    dimension=dimension,
-                    error=f"Executor failure: {exc}",
-                )
-        sources = [results.get(i) for i in range(len(tasks))]
-
-    return [s for s in sources if s is not None]
-
-
-def _annotate_query_params(result_map: dict[str, SourceResult],
-                           params: dict[str, str]) -> None:
-    """为 result_map 中的 SourceResult 设置 query_params（无论成功/失败）。"""
-    for name, qp in params.items():
-        if name in result_map:
-            result_map[name].query_params = qp
-
-
-def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceResult:
-    """包装单个源查询为 SourceResult。"""
-    start = time.time()
-    try:
-        data = fn()
-        elapsed = (time.time() - start) * 1000
-        if data is not None:
-            return SourceResult(name, data, dimension, latency_ms=elapsed)
-        return SourceResult(name, None, dimension, error="No data returned",
-                           latency_ms=elapsed)
-    except Exception as e:
-        elapsed = (time.time() - start) * 1000
-        logger.warning("Source %s failed: %s", name, e)
-        return SourceResult(name, None, dimension, error=str(e),
-                           latency_ms=elapsed)
-
-
-# ---- 单个源查询函数 ----
-
-
-def _require_tushare():
-    """Tushare 鉴权 + 客户端惰性加载（复用 10 处 _q_tushare_* 的样板代码）。
-
-    Returns:
-        (config, TushareClient) — 包含配额计数与线程安全包装。
-    Raises:
-        RuntimeError: TUSHARE_TOKEN 未配置或不可用。
-    """
-    from . import env as _env
-    config = _env.get_config()
-    if not _env.is_tushare_available(config):
-        raise RuntimeError("TUSHARE_TOKEN not configured")
-    return config, _tushare_client(config)
-
-
-def _q_tushare_basic(symbol: str) -> dict | None:
-    """Tushare 基本信息来源。"""
-    config, tc = _require_tushare()
-    df = tc.query("stock_basic", ts_code=_ts_code(symbol),
-                  fields="ts_code,name,area,industry,market,list_date")
-    if df is not None and not df.empty:
-        return df.iloc[0].to_dict()
-    return None
-
-
-def _merge_cashflow_into_financials(
-    financials: list[dict], cashflow: list[dict],
-) -> list[dict]:
-    """按 end_date 合并现金流字段（OCF/CapEx），供 DCF/CV-1。"""
-    cf_by_date = {str(r.get("end_date", "")): r for r in cashflow}
-    out: list[dict] = []
-    for row in financials:
-        merged = dict(row)
-        cf = cf_by_date.get(str(row.get("end_date", "")))
-        if cf:
-            ncf = cf.get("n_cashflow_act")
-            if ncf is not None:
-                merged["n_cashflow_act"] = ncf
-                merged["ocf"] = ncf
-            # P0-1: c_pay_acq_const_fiolta → cap_ex（Tushare 实测仅此 Capex 字段可用）
-            capex = cf.get("c_pay_acq_const_fiolta")
-            if capex is not None:
-                merged["cap_ex"] = capex
-        out.append(merged)
-    return out
-
-
-def _merge_income_into_financials(
-    financials: list[dict], income: list[dict],
-) -> list[dict]:
-    """按 end_date 合并利润表明细（EBIT/EBITDA/费用/税金），供 DCF 估值。"""
-    inc_by_date = {str(r.get("end_date", "")): r for r in income}
-    _income_passthrough = (
-        "ebit", "ebitda", "fin_exp", "income_tax",
-        "sell_exp", "admin_exp", "invest_income",
-        "total_profit", "n_income_attr_p",
-    )
-    out: list[dict] = []
-    for row in financials:
-        merged = dict(row)
-        inc = inc_by_date.get(str(row.get("end_date", "")))
-        if inc:
-            for key in _income_passthrough:
-                val = inc.get(key)
-                if val is not None:
-                    merged[key] = val
-            # 别名映射（与计划一致）
-            tax = inc.get("income_tax")
-            if tax is not None:
-                merged["tax"] = tax
-            sell = inc.get("sell_exp")
-            if sell is not None:
-                merged["selling_exp"] = sell
-            # 推导折旧摊销（EBITDA - EBIT，Tushare 无单独 depr/amort 字段）
-            ebit_v = inc.get("ebit")
-            ebitda_v = inc.get("ebitda")
-            if ebit_v is not None and ebitda_v is not None:
-                try:
-                    merged["depr_amort"] = float(ebitda_v) - float(ebit_v)
-                except (TypeError, ValueError):
-                    pass
-        out.append(merged)
-    return out
-
-
-def _merge_balancesheet_into_financials(
-    financials: list[dict], balancesheet: list[dict],
-) -> list[dict]:
-    """按 end_date 合并资产负债表字段（应收/存货/负债/权益/现金），供 DCF/CV-2。"""
-    bs_by_date = {str(r.get("end_date", "")): r for r in balancesheet}
-    _bs_passthrough = (
-        "total_liab", "total_hldr_eqy_inc_min_int", "money_cap",
-        "total_cur_assets", "total_cur_liab", "total_assets",
-    )
-    out: list[dict] = []
-    for row in financials:
-        merged = dict(row)
-        bs = bs_by_date.get(str(row.get("end_date", "")))
-        if bs:
-            ar = bs.get("accounts_rece")
-            if ar is None:
-                ar = bs.get("accounts_receiv")
-            if ar is not None:
-                merged["accounts_receiv"] = ar
-            inv = bs.get("inventories")
-            if inv is None:
-                inv = bs.get("inventory")
-            if inv is not None:
-                merged["inventory"] = inv
-            # P0-1: 透传 DCF 所需资产负债表字段
-            for key in _bs_passthrough:
-                val = bs.get(key)
-                if val is not None:
-                    merged[key] = val
-            # total_hldr_eqy_inc_min_int 别名 total_equity（与计划一致）
-            eqy = bs.get("total_hldr_eqy_inc_min_int")
-            if eqy is not None:
-                merged["total_equity"] = eqy
-        out.append(merged)
-    return out
-
-
-def _q_tushare_financials(symbol: str) -> list[dict] | None:
-    config, tc = _require_tushare()
-    ts = _ts_code(symbol)
-    lookback = _days_ago(730)
-    end = _today()
-    df = tc.query(
-        "fina_indicator", ts_code=ts,
-        fields=(
-            "ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit,"
-            "grossprofit_margin,netprofit_margin,assets_turn,eqt_to_debt,"
-            "debt_to_assets,ebit,ebitda,fcff,fcfe"
-        ),
-        start_date=lookback, end_date=end,
-    )
-    if df is None or df.empty:
-        return None
-    records = df.to_dict("records")
-    for rec in records:
-        em = rec.get("eqt_to_debt")
-        if em is not None and safe_float(em) not in (None, 0):
-            rec["equity_multiplier"] = 1.0 + 1.0 / float(em)
-        elif rec.get("debt_to_assets") is not None:
-            da = safe_float(rec.get("debt_to_assets"))
-            if da is not None and 0 <= da <= 100:
-                # Tushare debt_to_assets 为百分比（0-100），如 0.8 表示 0.8%
-                rec["equity_multiplier"] = 1.0 / max(0.01, (100.0 - da) / 100.0)
-    # P0-1: income 查询 — 补齐 DCF 所需费用/利润明细字段
-    inc_df = tc.query("income", ts_code=ts,
-                      fields=(
-                          "ts_code,end_date,ebit,ebitda,fin_exp,income_tax,"
-                          "sell_exp,admin_exp,invest_income,"
-                          "total_profit,n_income_attr_p"
-                      ),
-                      start_date=lookback, end_date=end)
-    if inc_df is not None and not inc_df.empty:
-        records = _merge_income_into_financials(records, inc_df.to_dict("records"))
-    elif inc_df is None or inc_df.empty:
-        logger.warning("Tushare income query returned empty for %s; ebit/ebitda/fin_exp fields will be missing from records", ts)
-    # P0-1: cashflow 扩字段 — 补齐 DCF 所需 CapEx（Tushare 此表无 depr/amort，由 fina_indicator 的 ebitda-ebit 推导）
-    cf_df = tc.query("cashflow", ts_code=ts,
-                     fields=(
-                         "ts_code,end_date,n_cashflow_act,"
-                         "c_pay_acq_const_fiolta"
-                     ),
-                     start_date=lookback, end_date=end)
-    if cf_df is not None and not cf_df.empty:
-        records = _merge_cashflow_into_financials(records, cf_df.to_dict("records"))
-    elif cf_df is None or cf_df.empty:
-        logger.warning("Tushare cashflow query returned empty for %s; n_cashflow_act field will be missing from records", ts)
-    # P0-1: balancesheet 扩字段 — 补齐 DCF 所需负债/权益/现金字段
-    bs_df = tc.query("balancesheet", ts_code=ts,
-                     fields=(
-                         "ts_code,end_date,accounts_rece,inventories,"
-                         "total_liab,total_hldr_eqy_inc_min_int,"
-                         "money_cap,total_cur_assets,total_cur_liab,"
-                         "total_assets"
-                     ),
-                     start_date=lookback, end_date=end)
-    if bs_df is not None and not bs_df.empty:
-        records = _merge_balancesheet_into_financials(records, bs_df.to_dict("records"))
-    elif bs_df is None or bs_df.empty:
-        logger.warning("Tushare balancesheet query returned empty for %s; accounts_receiv/inventory fields will be missing from records", ts)
-    return records
-
-
-def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
-    """Tushare 十大股东（最新报告期）。"""
-    config, tc = _require_tushare()
-    df = tc.query("top10_floatholders", ts_code=_ts_code(symbol),
-                  fields="ts_code,end_date,holder_name,hold_amount,hold_ratio",
-                  period=_latest_quarter_end())
-    if df is not None and not df.empty:
-        return df.to_dict("records")
-    return None
-
-
-def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
-    config, tc = _require_tushare()
-    df = tc.query("daily", ts_code=_ts_code(symbol),
-                  fields="trade_date,open,high,low,close,vol,amount",
-                  **kwargs)
-    if df is not None and not df.empty:
-        return df.to_dict("records")
-    return None
-
-
-def _normalize_northbound_records(records: list[dict], source: str) -> list[dict]:
-    """统一主力资金/北向净额为「元」。
-
-    Tushare moneyflow: ``net_mf_amount`` 单位为万元。
-    akshare 北向: ``今日增持资金`` 映射为 ``net_mf_vol``，单位已是元。
-    输出同时写入 ``net_mf_amount`` 与 ``net_mf_vol``（后者为兼容别名）。
-    """
-    if not records:
-        return records
-    # 仅 moneyflow.net_mf_amount 为万元；hsgt_top10 / akshare 已是元。
-    # moneyflow 的 net_mf_vol 是「手」量纲，禁止万元 scale 回落放大。
-    is_moneyflow = source.startswith("tushare.moneyflow")
-    scale = 10000.0 if is_moneyflow else 1.0
-    out: list[dict] = []
-    for r in records:
-        row = dict(r)
-        raw = row.get("net_mf_amount")
-        if raw is None and not is_moneyflow:
-            raw = row.get("net_mf_vol")
-        if raw is not None:
-            yuan = float(raw) * scale
-            row["net_mf_amount"] = yuan
-            row["net_mf_vol"] = yuan
-        out.append(row)
-    return out
-
-
-def _flow_amount_yuan(record: dict) -> float | None:
-    """从归一化后的资金流记录读取净额（元），缺失时返回 None。"""
-    val = record.get("net_mf_amount")
-    if val is None:
-        val = record.get("net_mf_vol")
-    if val is None:
-        return None
-    return float(val)
-
-
-def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
-    config, tc = _require_tushare()
-    df = tc.query("moneyflow", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,net_mf_amount,buy_sm_vol,sell_sm_vol,net_mf_vol",
-                  start_date=_days_ago(10), end_date=_today())
-    if df is not None and not df.empty:
-        return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
-    return None
-
-
-def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
-    """个股沪/深股通成交（仅上榜日有数据）。net_amount 单位：元。"""
-    config, tc = _require_tushare()
-    df = tc.query("hsgt_top10", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,net_amount",
-                  start_date=_days_ago(30), end_date=_today())
-    if df is None or df.empty:
-        return None
-    rows = [
-        {"trade_date": r.get("trade_date"), "net_mf_amount": r.get("net_amount")}
-        for r in df.to_dict("records")
-        if r.get("net_amount") is not None
-    ]
-    if not rows:
-        return None
-    return _normalize_northbound_records(rows, "tushare.hsgt_top10")
-
-
-def _q_akshare_basic(symbol: str) -> dict | None:
-    """akshare 基本信息来源（东方财富 push2 API）。"""
-    with akshare_direct_session():
-        import akshare as ak
-        try:
-            result = ak.stock_individual_info_em(symbol=symbol.strip().zfill(6),
-                                                  timeout=8)
-            if result is not None:
-                if hasattr(result, "to_dict"):
-                    records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                    if isinstance(records, list) and records:
-                        return {str(r.get("item", "")): r.get("value", "") for r in records}
-                if isinstance(result, dict):
-                    return result
-            return None
-        except Exception as e:
-            _reraise_eastmoney_api_error(e)
-
-
-def _q_akshare_financials(symbol: str) -> list[dict] | None:
-    with _proxy_bypass():
-        import akshare as ak
-        result = ak.stock_financial_abstract_ths(symbol=symbol.strip().zfill(6),
-                                                 indicator="按报告期")
-        if result is not None and hasattr(result, "to_dict"):
-            records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-            if records:
-                return [_map_akshare_financial_keys(r) for r in records]
-        return None
-
-
-def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """akshare K线来源（东方财富 push2 API）。"""
-    with akshare_direct_session():
-        import akshare as ak
-        sd = start_date or _days_ago(365)
-        ed = end_date or _today()
-        sd_fmt = _to_iso_date(sd)
-        ed_fmt = _to_iso_date(ed)
-        try:
-            result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                        period="daily",
-                                        start_date=sd_fmt,
-                                        end_date=ed_fmt,
-                                        adjust="",
-                                        timeout=10)
-            if result is not None and hasattr(result, "to_dict"):
-                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                if records:
-                    return [_map_akshare_kline_keys(r) for r in records]
-            return None
-        except Exception as e:
-            _reraise_eastmoney_api_error(e)
-
-
-def _q_akshare_northbound(symbol: str) -> list[dict] | None:
-    with akshare_direct_session():
-        import akshare as ak
-        try:
-            result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
-            if result is not None and hasattr(result, "to_dict"):
-                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                if records:
-                    mapped = [_map_akshare_northbound_keys(r) for r in records]
-                    return _normalize_northbound_records(mapped, "akshare.northbound")
-            return None
-        except Exception as e:
-            _reraise_eastmoney_api_error(e)
-
-
-# ---- akshare 中文列名 → 英文键名映射 ----
-
-def _map_akshare_kline_keys(r: dict) -> dict:
-    """akshare stock_zh_a_hist 列名映射。"""
-    return {
-        "trade_date": str(r.get("日期", "")),
-        "open": r.get("开盘"),
-        "high": r.get("最高"),
-        "low": r.get("最低"),
-        "close": r.get("收盘"),
-        "vol": r.get("成交量"),
-    }
-
-
-def _parse_akshare_num(v) -> float | None:
-    """将 akshare 返回的字符串数值转为 float，兼容 '%' / '万亿' / '亿' / '万' 后缀。
-
-    例如 "8.37%" → 8.37, "17.88亿" → 1788000000.0, "2.35万亿" → 2.35e12
-    """
-    if v is None:
-        return None
-    if isinstance(v, str):
-        s = v.strip().replace(",", "").replace(" ", "")
-        multiplier = 1.0
-        if "万亿" in s:
-            multiplier = 1e12
-            s = s.replace("万亿", "")
-        elif "亿" in s:
-            multiplier = 1e8
-            s = s.replace("亿", "")
-        elif "万" in s:
-            multiplier = 1e4
-            s = s.replace("万", "")
-        if "%" in s:
-            s = s.replace("%", "")
-        try:
-            return float(s) * multiplier
-        except (ValueError, TypeError):
-            return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def _map_akshare_financial_keys(r: dict) -> dict:
-    """akshare stock_financial_abstract_ths 列名映射。
-
-    注意：akshare 返回的数值带中文单位（如 "17.88亿"、"8.37%"),
-    _parse_akshare_num 将其转换为与 Tushare 一致的纯 float 格式。
-    """
-    out = {
-        "end_date": str(r.get("报告期", "")),
-        "roe": _parse_akshare_num(r.get("净资产收益率")),
-        "eps": _parse_akshare_num(r.get("基本每股收益")),
-        "profit_dedt": _parse_akshare_num(r.get("扣非净利润")),
-        "revenue": _parse_akshare_num(r.get("营业总收入")),
-        "net_profit": _parse_akshare_num(r.get("净利润")),
-    }
-    gm = _parse_akshare_num(r.get("销售毛利率") or r.get("毛利率"))
-    if gm is not None:
-        out["grossprofit_margin"] = gm
-    ar = _parse_akshare_num(r.get("应收账款"))
-    if ar is not None:
-        out["accounts_receiv"] = ar
-    inv = _parse_akshare_num(r.get("存货"))
-    if inv is not None:
-        out["inventory"] = inv
-    return out
-
-
-def _map_akshare_northbound_keys(r: dict) -> dict:
-    """akshare stock_hsgt_individual_em 列名映射。"""
-    return {
-        "trade_date": str(r.get("持股日期", "")),
-        "net_mf_vol": r.get("今日增持资金"),
-    }
-
-
-# ---- akshare 股东信息 ----
-
-def _akshare_top10_code(symbol: str) -> str:
-    """akshare 股东接口需要的代码格式：sh600519 / sz000858（委托 _exchange_code）。"""
-    return _exchange_code(symbol)["akshare"]
-
-
-def _q_akshare_shareholders(symbol: str) -> list[dict] | None:
-    """akshare 前十大股东来源（东方财富 datacenter API）。"""
-    with akshare_direct_session():
-        import akshare as ak
-        dates_to_try = _latest_quarter_dates()
-        for date_str in dates_to_try:
-            try:
-                code = _akshare_top10_code(symbol)
-                result = ak.stock_gdfx_top_10_em(symbol=code, date=date_str)
-                if result is not None and hasattr(result, "to_dict"):
-                    records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                    if records:
-                        return [{"holder_name": str(r.get("股东名称", "")),
-                                 "hold_amount": r.get("持股数"),
-                                 "hold_ratio": r.get("占总股本持股比例")}
-                                for r in records[:10]]
-            except Exception as e:
-                if _is_eastmoney_blocked_error(str(e)):
-                    _reraise_eastmoney_api_error(e)
-                continue
-        return None
-
-
-# ---- akshare 行业数据查询辅助 ----
-
-
-def _q_akshare_industry_board(symbol: str, industry_name: str = "") -> dict | None:
-    """获取个股所属行业板块的近期行情（akshare 东方财富）。
-
-    Returns:
-        dict with keys: industry_name, board_code, recent_return_pct
-        或 None（采集失败时）
-    """
-    if not env.is_akshare_available() or not akshare_push2_available():
-        return None
-    try:
-        with akshare_direct_session():
-            import akshare as ak
-            # 获取行业板块列表
-            df = ak.stock_board_industry_name_em()
-            if df is None or df.empty:
-                return None
-
-            # 获取个股所属行业（优先使用预取，避免重复 API）
-            if not industry_name:
-                info = _q_akshare_basic(symbol)
-                if not info:
-                    return None
-                industry_name = info.get("行业") or info.get("industry", "")
-            if not industry_name:
-                return None
-
-            # 在板块列表中匹配行业
-            matched = df[df["板块名称"].str.contains(industry_name, na=False)]
-            if matched.empty:
-                # 模糊匹配
-                for _, row in df.iterrows():
-                    name = str(row.get("板块名称", ""))
-                    if industry_name in name or name in industry_name:
-                        matched = df[df["板块名称"] == name]
-                        break
-
-            if matched.empty:
-                return {"industry_name": industry_name, "board_code": None,
-                        "note": "未在板块列表中找到匹配"}
-
-            board_name = str(matched.iloc[0]["板块名称"])
-            board_code = str(matched.iloc[0]["板块代码"])
-
-            # 获取板块历史行情（近30日）
-            try:
-                hist = ak.stock_board_industry_hist_em(
-                    symbol=board_name,
-                    period="日k",
-                    start_date=_to_iso_date(_days_ago(30)),
-                    end_date=_to_iso_date(_today()),
-                    adjust="",
-                )
-                if hist is not None and not hist.empty:
-                    closes = [
-                        f for v in hist["收盘"].tolist()
-                        if (f := safe_float(v)) is not None
-                    ]
-                    recent_ret = None
-                    if len(closes) >= 2 and closes[0] != 0:
-                        recent_ret = safe_float(
-                            (closes[-1] - closes[0]) / closes[0] * 100,
-                        )
-                    return {
-                        "industry_name": industry_name,
-                        "board_name": board_name,
-                        "board_code": board_code,
-                        "recent_return_pct": (
-                            round(recent_ret, 2) if recent_ret is not None else None
-                        ),
-                        "trading_days_in_window": len(closes),
-                        "source": "akshare.stock_board_industry_hist_em",
-                    }
-            except Exception as exc:
-                logger.debug("akshare board hist failed for %s: %s", board_name, exc)
-
-            return {
-                "industry_name": industry_name,
-                "board_name": board_name,
-                "board_code": board_code,
-                "source": "akshare.stock_board_industry_name_em",
-            }
-    except Exception as exc:
-        logger.debug("akshare industry board failed for %s: %s", symbol, exc)
-        return None
-
-
-def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
-    """获取行业PE中位数（akshare/巨潮资讯）。
-
-    Returns:
-        dict with: industry_pe_median, industry_pe_avg, company_pe, relative_position
-        或 None
-    """
-    if not env.is_akshare_available() or not akshare_push2_available():
-        return None
-    try:
-        with akshare_direct_session():
-            import akshare as ak
-            df = ak.stock_board_industry_pe_ratio_cninfo()
-            if df is None or df.empty:
-                return None
-
-            # 获取个股行业（优先使用预取）
-            if not industry_name:
-                info = _q_akshare_basic(symbol)
-                if not info:
-                    return None
-                industry_name = info.get("行业") or info.get("industry", "")
-
-            # 匹配行业PE
-            matched = df[df["行业名称"].str.contains(industry_name, na=False)]
-            if matched.empty:
-                for _, row in df.iterrows():
-                    name = str(row.get("行业名称", ""))
-                    if industry_name in name or name in industry_name:
-                        matched = df[df["行业名称"] == name]
-                        break
-
-            if matched.empty:
-                return {"industry_name": industry_name, "note": "未匹配到行业PE数据"}
-
-            row = matched.iloc[0]
-            pe_median = safe_float(row.get("市盈率中位数") or row.get("市盈率"))
-            pe_avg = safe_float(row.get("市盈率平均值"))
-
-            return {
-                "industry_name": str(row.get("行业名称", "")),
-                "industry_pe_median": pe_median,
-                "industry_pe_avg": pe_avg,
-                "stock_count": safe_float(row.get("公司数量")),
-                "source": "akshare.stock_board_industry_pe_ratio_cninfo",
-            }
-    except Exception as exc:
-        logger.debug("akshare industry PE failed for %s: %s", symbol, exc)
-        return None
-
-
-def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list[str]:
-    """返回最近 count 个已结束季末日期（YYYYMMDD），用于股东多期查询。"""
-    import calendar
-    from datetime import datetime
-
-    now = as_of or datetime.now()
-    dates: list[str] = []
-    year, quarter = now.year, (now.month - 1) // 3 + 1
-
-    while len(dates) < count:
-        end_month = quarter * 3
-        last_day = calendar.monthrange(year, end_month)[1]
-        q_end = datetime(year, end_month, last_day)
-        if q_end <= now:
-            dates.append(q_end.strftime("%Y%m%d"))
-        quarter -= 1
-        if quarter < 1:
-            quarter = 4
-            year -= 1
-    return dates
-
-
-def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """Baostock K 线来源（免费、稳定，适合历史日K线）。
-
-    使用 _BAOSTOCK_LOCK 串行化访问：Baostock 内部使用全局单例 socket，
-    多线程并行调用会导致连接竞态。
-    """
-    with _BAOSTOCK_LOCK, _proxy_bypass():
-        import baostock as bs
-        logged_in = False
-        try:
-            lg = bs.login()
-            if lg.error_code != "0":
-                logger.warning("baostock login failed: %s", lg.error_msg)
-                return None
-            logged_in = True
-
-            sd = start_date or _days_ago(365)
-            ed = end_date or _today()
-            sd_fmt = _to_iso_date(sd)
-            ed_fmt = _to_iso_date(ed)
-
-            bs_code = _baostock_code(symbol)
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount",
-                start_date=sd_fmt, end_date=ed_fmt,
-                frequency="d", adjustflag="3",
-            )
-            if rs.error_code != "0":
-                logger.warning("baostock query failed: %s", rs.error_msg)
-                return None
-
-            rows = []
-            while rs.next():
-                row = rs.get_row_data()
-                rows.append({
-                    "trade_date": row[0].replace("-", ""),
-                    "open": float(row[1]) if row[1] else None,
-                    "high": float(row[2]) if row[2] else None,
-                    "low": float(row[3]) if row[3] else None,
-                    "close": float(row[4]) if row[4] else None,
-                    "vol": float(row[5]) if row[5] else 0,
-                    "amount": float(row[6]) if row[6] else 0,
-                })
-            return rows if rows else None
-        except Exception as e:
-            logger.warning("baostock query failed: %s", e)
-            return None
-        finally:
-            if logged_in:
-                try:
-                    bs.logout()
-                except Exception:
-                    pass
-
-
-def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """TickFlow K 线来源（独立数据管道，非东方财富，免费免注册）。
-
-    TickFlow 提供独立的行情数据源（非东方财富爬虫），与现有
-    akshare（东方财富）、baostock、Tushare 形成第4条验证链路。
-    免费 tier 无需注册，提供完整日K历史数据。
-    如 free tier 升级提示输出到 stdout（不影响数据采集），
-    建议调用方将 stdout 重定向到 stderr 或丢弃。
-
-    API: TickFlow.free().klines.get(symbol, start=ms, end=ms, adjust="forward")
-    Symbol 格式: "600176.SH" (SH/SZ/BJ, 与 Tushare 格式一致)
-    """
-    try:
-        import tickflow as tf
-    except ImportError as exc:
-        raise Exception("tickflow 未安装，请运行: uv sync") from exc
-
-    sd = start_date or _days_ago(400)
-    ed = end_date or _today()
-
-    # TickFlow 使用毫秒级 Unix 时间戳
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    sh = ZoneInfo("Asia/Shanghai")
-    start_ms = int(datetime.strptime(sd, "%Y%m%d").replace(tzinfo=sh).timestamp() * 1000)
-    end_ms = int(datetime.strptime(ed, "%Y%m%d").replace(tzinfo=sh).timestamp() * 1000)
-
-    # TickFlow 使用 Tushare 风格代码格式：600176.SH
-    tf_symbol = _exchange_code(symbol)["tushare"]
-
-    try:
-        with redirect_stdout(StringIO()):
-            client = tf.TickFlow.free()
-        df = client.klines.get(
-            tf_symbol,
-            period="1d",
-            start_time=start_ms,
-            end_time=end_ms,
-            adjust="forward",
-            as_dataframe=True,
-        )
-    except Exception:
-        logger.warning("tickflow query failed for %s", symbol)
-        return None
-
-    if df is None or df.empty:
-        return None
-
-    # 标准化列名：trade_date (YYYYMMDD), open, high, low, close, vol, amount
-    rows = []
-    for _, row in df.iterrows():
-        td = str(row.get("trade_date", ""))
-        if td:
-            td = td.replace("-", "")  # YYYY-MM-DD → YYYYMMDD
-
-        rows.append({
-            "trade_date": td,
-            "open": safe_float(row.get("open")),
-            "high": safe_float(row.get("high")),
-            "low": safe_float(row.get("low")),
-            "close": safe_float(row.get("close")),
-            "vol": safe_float(row.get("volume")) or 0,
-            "amount": safe_float(row.get("amount")) or 0,
-        })
-
-    return rows if rows else None
-
-
-def _q_tencent_quote(symbol: str) -> dict | None:
-    """腾讯行情。"""
-    _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
-
-    def _parse_tencent_float(val: str | None) -> float | None:
-        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分），否则委托 safe_float。"""
-        if val is None or val in _UNAVAILABLE_MARKERS:
-            return None
-        return safe_float(val)
-
-    market = "sh" if symbol.startswith(("6", "9")) else "sz"
-    with no_proxy_session() as sess:
-        r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
-    if r.status_code == 200 and "~" in r.text:
-        p = r.text.split("~")
-        if len(p) > 45:
-            mv = _parse_tencent_float(p[45])
-            return {
-                "price": _parse_tencent_float(p[3]),
-                "change_pct": _parse_tencent_float(p[32]),
-                "high": _parse_tencent_float(p[33]),
-                "low": _parse_tencent_float(p[34]),
-                "volume": _parse_tencent_float(p[6]),
-                "turnover_rate": _parse_tencent_float(p[38]),
-                "pe_ratio": _parse_tencent_float(p[39]),
-                "total_mv": mv / 10000 if mv is not None else None,
-            }
-    return None
-
-
-# ---- 查询参数字符串生成 ----
-
-def _qp_tushare(api: str, symbol: str, **kw) -> str:
-    pairs = [f"{k}='{v}'" for k, v in sorted(kw.items()) if v]
-    return f"pro.{api}(ts_code='{_ts_code(symbol)}'{', ' + ', '.join(pairs) if pairs else ''})"
-
-
-def _qp_akshare(name: str, symbol: str, **kw) -> str:
-    pairs = [f"{k}='{v}'" for k, v in sorted(kw.items()) if v]
-    return f"ak.{name}(symbol='{symbol.strip().zfill(6)}'{', ' + ', '.join(pairs) if pairs else ''})"
-
-
-def _qp_tencent(symbol: str) -> str:
-    market = "sh" if symbol.startswith(("6", "9")) else "sz"
-    return f"qt.gtimg.cn/q={market}{symbol}"
-
-
-def _qp_baostock(symbol: str, start_date: str, end_date: str) -> str:
-    code = _baostock_code(symbol)
-    return (
-        f"bs.query_history_k_data_plus(code='{code}', "
-        f"start='{start_date}', end='{end_date}', frequency='d')"
-    )
-
-
-def _qp_tickflow(symbol: str, start_date: str, end_date: str) -> str:
-    """TickFlow K-line 查询参数字符串。"""
-    code = _exchange_code(symbol)["tushare"]
-    return (
-        f"tf.TickFlow.free().klines.get(symbol='{code}', "
-        f"start={start_date}, end={end_date}, adjust='forward')"
-    )
-
 
 # ---- 各维度采集（并行 fan-out）----
 
@@ -1064,7 +68,7 @@ def collect_financials(symbol: str) -> dict:
 
     def _attach_dcf(legacy: dict, _results: list) -> dict:
         try:
-            from .valuation import attach_dcf_preprocess
+            from ..valuation import attach_dcf_preprocess
             attach_dcf_preprocess(legacy)
         except Exception as exc:
             logger.warning("dcf_preprocess failed for %s: %s", symbol, exc)
@@ -1101,12 +105,70 @@ def collect_shareholders(symbol: str) -> dict:
     )
 
 
+def _apply_qfq_with_newest_raw_fallback(
+    rows: list[dict], factors: dict[str, float],
+) -> list[dict] | None:
+    """盘中 adj_factor 未发布时的 qfq 兜底：去掉最新日重试，尾部按 raw 保留。
+
+    Tushare 当日 adj_factor 盘后才发布：_apply_qfq 对"最新日缺因子"整体
+    拒绝 → 调用方此前整串回退 raw，与 akshare qfq 历史混串，多日消费者
+    （10 日趋势等）看到未复权收盘。这里去掉最新日重试 _apply_qfq，成功
+    则最新日按 raw 价格原样保留。
+
+    近似说明：最新日在自身锚定下 qfq==raw；若当日恰为除权日，锚点由 D
+    平移至 D-1，raw 值与真 qfq 值相差 f_D/f_{D-1} 量级（小近似，除权日
+    罕见且因子盘后即发布）。重试仍失败（因子整体缺失/中间日缺失）→ 返回
+    None，调用方沿用 raw 整串回退。
+    """
+    adjusted = _apply_qfq(rows, factors)
+    if adjusted is not None:
+        return adjusted
+    if not factors or len(rows) < 2:
+        return None
+    newest_td = max(str(r.get("trade_date") or "") for r in rows)
+    rest = [r for r in rows if str(r.get("trade_date") or "") != newest_td]
+    if not rest:
+        return None
+    adjusted_rest = _apply_qfq(rest, factors)
+    if adjusted_rest is None:
+        return None
+    newest_rows = [r for r in rows if str(r.get("trade_date") or "") == newest_td]
+    return adjusted_rest + newest_rows
+
+
+def _quote_tushare_rows(symbol: str) -> list[dict] | None:
+    """quote 维度的 Tushare 日线：前复权 + 升序。
+
+    升序使 data[-1] = 最新日，与 akshare 升序及共享消费者
+    （schema._extract_scalar 等 data[-1]-is-newest 约定）对齐——
+    tushare 降序时 data[-1] 是最旧 bar，逐份报告产出"最新收盘"错值。
+    盘中 adj_factor 未发布（常态）时经 _apply_qfq_with_newest_raw_fallback
+    去掉最新日重试、最新日按 raw 保留：历史段保持 qfq 连续，最新日标量
+    不变（qfq==raw 于自身锚定）；因子整体缺失才整串回退 raw。
+    """
+    from lib.technical import sort_kline_asc
+
+    # 单次 daily 取数：_q_tushare_daily_qfq 内部先取 daily 再取 adj_factor，
+    # 盘中 adj_factor 未发布时返回 None → 再调 _q_tushare_daily 会重复取同一
+    # daily 序列（3 次 Tushare 往返）；这里组合拆开，raw 兜底复用已取的行。
+    raw_rows = _q_tushare_daily(symbol, start_date=_days_ago(10), end_date=_today())
+    if not raw_rows:
+        return None
+    rows = _apply_qfq_with_newest_raw_fallback(
+        raw_rows,
+        _q_tushare_adj_factor(symbol, start_date=_days_ago(10), end_date=_today()),
+    )
+    # 升序排序委托 lib.technical.sort_kline_asc（混合日期格式归一化 +
+    # 无日期行置尾的共享约定，而非本地字符串排序）
+    return sort_kline_asc(rows if rows is not None else raw_rows)
+
+
 def collect_quote(symbol: str) -> dict:
     """实时行情。并行：Tushare + akshare + 腾讯。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol,
-                      start_date=_days_ago(10), end_date=_today())))
+        # 统一前复权语义（与 akshare qfq 对齐，跨源校验不再因 raw/qfq 错配产生 divergence 噪音）
+        tasks.append(("tushare.daily", lambda: _quote_tushare_rows(symbol)))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
@@ -1115,7 +177,8 @@ def collect_quote(symbol: str) -> dict:
         "quote", tasks,
         query_params={
             "tushare.daily": _qp_tushare("daily", symbol,
-                                         start_date=_days_ago(10), end_date=_today()),
+                                         start_date=_days_ago(10), end_date=_today())
+                                         + " (qfq via adj_factor, asc, raw-fallback)",
             "akshare.stock_zh_a_hist": _qp_akshare(
                 "stock_zh_a_hist", symbol, period="daily",
                 start_date=_days_ago(10), end_date=_today()),
@@ -1144,32 +207,50 @@ def collect_northbound(symbol: str) -> dict:
 
 
 def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
-    """日K线。并行：Tushare + akshare + baostock。
+    """日K线。并行：Tushare + akshare + baostock(兜底) [+ tickflow(可选)]。
+
+    复权语义：全部源统一前复权（tushare adj_factor 自算 / akshare adjust=qfq /
+    baostock adjustflag=2 / tickflow forward）——技术指标（MA/BOLL/RSI）在不复权
+    价格上会被除权日跳变污染，前复权使历史价格连续，且跨源校验不再因语义
+    错配产生 divergence 噪音。
 
     默认窗口 400 自然日，覆盖 MA250（需 ≥250 个交易日缓冲）。
     --deep 模式通过 invest.py 传入 start_date=_days_ago(730)。
+    同日重复采集命中 _kline_cache（TTL 1 天，INVEST_KLINE_CACHE=0 禁用）；
+    quote 维度（近实时行情）有意不进缓存。
+    源开关：baostock 默认 auto（仅无 Tushare token 时启用，INVEST_ENABLE_BAOSTOCK
+    可覆盖）；tickflow 默认关闭（INVEST_ENABLE_TICKFLOW=1 启用）。
     """
     sd = start_date or _days_ago(400)
     ed = end_date or _today()
 
+    from . import _kline_cache  # 惰性导入，避免包初始化开销
+
+    def _cached(source: str, fetch: Callable[[], list | None],
+                qfq: bool = True) -> list | None:
+        return _kline_cache.load_or_fetch(symbol, source, sd, ed, fetch, qfq=qfq)
+
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.daily", lambda: _q_tushare_daily(symbol, start_date=sd, end_date=ed)))
+        tasks.append(("tushare.daily", lambda: _cached("tushare.daily",
+                      lambda: _q_tushare_daily_qfq(symbol, start_date=sd, end_date=ed))))
     if env.is_akshare_available() and akshare_push2_available():
-        tasks.append(("akshare.stock_zh_a_hist",
-                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed)))
-    if env.is_baostock_available():
-        tasks.append(("baostock.kline",
-                      lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed)))
-    if env.is_tickflow_available():
-        tasks.append(("tickflow.kline",
-                      lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed)))
+        tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
+                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
+    if env.baostock_kline_enabled():
+        tasks.append(("baostock.kline", lambda: _cached("baostock.kline",
+                      lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed))))
+    if env.tickflow_kline_enabled():
+        tasks.append(("tickflow.kline", lambda: _cached("tickflow.kline",
+                      lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed))))
 
     def _kline_qp(_results: list) -> dict[str, str]:
         qp_map: dict[str, str] = {
-            "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed),
+            "tushare.daily": _qp_tushare("daily", symbol, start_date=sd, end_date=ed)
+            + " + adj_factor(前复权自算)",
             "akshare.stock_zh_a_hist": _qp_akshare(
-                "stock_zh_a_hist", symbol, period="daily", start_date=sd, end_date=ed),
+                "stock_zh_a_hist", symbol, period="daily",
+                start_date=sd, end_date=ed, adjust="qfq"),
         }
         if env.is_baostock_available():
             qp_map["baostock.kline"] = _qp_baostock(symbol, sd, ed)
@@ -1178,23 +259,6 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
         return qp_map
 
     return _collect_dimension("kline", tasks, query_params=_kline_qp)
-
-
-# ---- Tushare 客户端惰性加载 ----
-# 使用 threading.local() 避免多线程共享同一个 requests.Session
-# （requests.Session 不是线程安全的，且 TushareClient 内部维护配额计数无锁保护）
-
-_tc_local = threading.local()
-
-
-def _tushare_client(config: dict) -> Any:
-    """按线程惰性加载 TushareClient，配置变化时重建实例。"""
-    token = config.get("TUSHARE_TOKEN")
-    if not hasattr(_tc_local, "instance") or getattr(_tc_local, "_tc_token", None) != token:
-        from lib.tushare_client import TushareClient
-        _tc_local.instance = TushareClient(token=token)
-        _tc_local._tc_token = token
-    return _tc_local.instance
 
 
 # ---- 估值维度 ----
@@ -1741,12 +805,51 @@ def _infer_holder_direction(
 
 
 def _source_has_data(data) -> bool:
-    """源结果是否含有效数据（空列表不算）。"""
-    if data is None:
-        return False
-    if isinstance(data, list):
-        return len(data) > 0
-    return bool(data)
+    """源结果是否含有效数据（空列表不算）——统一口径在 lib.data_util.has_data。"""
+    from lib.data_util import has_data
+
+    return has_data(data)
+
+
+def _build_summary(dimensions: list) -> dict:
+    """维度汇总：与 merge_collections 共用 has_data 口径（空 list/dict 不计
+    available）。missing 用 not _source_has_data（而非 is None）：status='available'
+    但 data=[]（非交易日 quote）此前不计入任何计数器 → available+partial+missing
+    < total，all_partial 失真，invest.py 的 available==0 中止误触发。
+    sources_responded：status ∈ {available, partial} 的维度数——"数据源有响应"
+    语义；响应的源返回空数据（节假日）不算失败，报告照常渲染无数据区块。
+    """
+    has_data = sum(
+        1 for d in dimensions
+        if d and _source_has_data(d.get("data"))
+        and d.get("status") in ("available", "partial")
+    )
+    partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
+    missing = sum(
+        1 for d in dimensions
+        if d and not _source_has_data(d.get("data")) and d.get("status") != "partial"
+    )
+    sources_responded = sum(
+        1 for d in dimensions if d and d.get("status") in ("available", "partial")
+    )
+    # 全部"有数据"维度均为 partial 才算 all_partial（partial==has_data 在
+    # 存在无数据的 partial 维度时会误判为 True）
+    all_partial = (
+        has_data > 0
+        and missing == 0
+        and all(
+            d.get("status") == "partial"
+            for d in dimensions if d and _source_has_data(d.get("data"))
+        )
+    )
+    return {
+        "total": len(dimensions),
+        "available": has_data,
+        "degraded": partial,
+        "missing": missing,
+        "all_partial": all_partial,
+        "sources_responded": sources_responded,
+    }
 
 
 def _parse_holder_change_vol(raw) -> float | None:
@@ -1802,10 +905,19 @@ def _holder_transaction_key(r: dict) -> tuple:
 def _norm_date(raw: str) -> str:
     """日期归一化：尝试 YYYYMMDD / YYYY-MM-DD / YYYY.MM.DD → YYYYMMDD。
 
-    委托 lib.financials.normalize_end_date 处理。
+    委托 lib.financials.normalize_end_date 处理；无法解析时先尝试中文
+    「X年X月X日」格式（cninfo 公告日期），再回退保留原始串（截断至 10
+    字符），避免不同日期的记录塌缩到同一空 key（跨源误折叠）。
     """
+    import re
     from lib.financials import normalize_end_date
-    return normalize_end_date(raw)
+    norm = normalize_end_date(raw)
+    if norm:
+        return norm
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", str(raw))
+    if m:
+        return f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    return str(raw).strip()[:10]
 
 
 def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
@@ -1822,25 +934,39 @@ def _q_tushare_holdertrade(symbol: str) -> list[dict] | None:
         return None
     records = df.to_dict("records")
     for rec in records:
-        rec["direction"] = "增持" if rec.get("in_de") == "IN" else "减持"
+        # 三态：in_de 缺失/NaN 标"未知"（None/NaN 恒不等于字符串，默认"减持"会把缺失误判为看空信号）
+        in_de = rec.get("in_de")
+        rec["direction"] = "增持" if in_de == "IN" else ("减持" if in_de == "DE" else "未知")
         rec["source"] = "Tushare stk_holdertrade"
     return records
 
 
 def _run_with_timeout(fn: Callable[[], Any], timeout_sec: float, label: str) -> Any:
-    """在独立线程中执行阻塞调用，超时则返回 None（用于 cninfo 全市场扫描）。"""
-    from concurrent.futures import TimeoutError as FuturesTimeoutError
+    """在 daemon 线程中执行阻塞调用，超时/异常返回 None（不 join 挂起线程）。
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn)
+    用于 cninfo 全市场扫描等慢接口：超时后立即返回，挂起线程在解释器
+    退出时被杀（边界由 env.configure_socket_timeout 兜底）。
+    """
+    box: dict[str, Any] = {"result": None, "error": None}
+    box["done"] = threading.Event()
+
+    def _target() -> None:
         try:
-            return future.result(timeout=timeout_sec)
-        except FuturesTimeoutError:
-            logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
-            return None
+            box["result"] = fn()
         except Exception as exc:
-            logger.warning("%s failed: %s", label, exc)
-            return None
+            box["error"] = exc
+        finally:
+            box["done"].set()
+
+    t = threading.Thread(target=_target, name=f"timeout:{label}", daemon=True)
+    t.start()
+    if not box["done"].wait(timeout=timeout_sec):
+        logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+        return None
+    if box["error"] is not None:
+        logger.warning("%s failed: %s", label, box["error"])
+        return None
+    return box["result"]
 
 
 def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
@@ -2068,7 +1194,7 @@ def _calc_futures_trend_from_spot(spot_old, spot_new, code: str, code_col: str) 
 
 def _q_akshare_futures_spot(symbol: str, industry: str) -> dict | None:
     """期货现货价格 + 近月合约价格 + 基差率。"""
-    from .chain import get_futures_for_industry
+    from ..chain import get_futures_for_industry
 
     futures_list = get_futures_for_industry(industry)
     if not futures_list:
@@ -2214,7 +1340,7 @@ def collect_industry_pricing_dim(symbol: str) -> dict:
 
 def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
     """行业产品定价追踪（与 collect_financials 同构）。"""
-    from .chain import get_futures_for_industry
+    from ..chain import get_futures_for_industry
 
     tasks: list[tuple[str, Callable]] = []
     if env.is_akshare_available():
@@ -2280,6 +1406,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     if dims is None:
         dims = list(_DEFAULT_DIMS)
 
+    start_all = time.time()
     dim_results: dict[str, dict] = {}
 
     # 深度模式：kline 用更长窗口
@@ -2288,6 +1415,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         kline_kwargs["start_date"] = _days_ago(730)
 
     # 跨维度并行
+    dim_start: dict[str, float] = {}
     with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
         future_map = {}
         for dim in dims:
@@ -2297,6 +1425,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             if dim == "industry_pricing":
                 # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
                 continue
+            dim_start[dim] = time.time()
             if dim == "kline" and kline_kwargs:
                 _, fn = COLLECTORS[dim]
                 future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
@@ -2308,6 +1437,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             dim = future_map[future]
             try:
                 dim_results[dim] = future.result()
+                logger.info("dimension=%s done in %.1fs", dim,
+                            time.time() - dim_start[dim])
             except Exception as exc:
                 dim_results[dim] = {
                     "dimension": dim,
@@ -2344,7 +1475,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # R-08: RRF 多源融合
     fusion_results: dict[str, Any] = {}
     try:
-        from .fusion import (
+        from ..fusion import (
             dimension_results_from_legacy,
             fuse_from_legacy_dicts,
             fuse_from_source_results,
@@ -2367,7 +1498,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # R-09: 证据可信度评分
     credibility_scores: dict[str, float] = {}
     try:
-        from .rerank import score_all_dimensions
+        from ..rerank import score_all_dimensions
         credibility_scores = score_all_dimensions(dimensions)
     except Exception as exc:
         logger.warning("rerank scoring failed for %s: %s", symbol, exc)
@@ -2376,7 +1507,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     macro_context: dict[str, Any] = {}
     if with_macro:
         try:
-            from .macro import collect_macro_context
+            from ..macro import collect_macro_context
             macro_context = collect_macro_context(symbol)
         except Exception as exc:
             logger.warning("macro context collection failed for %s: %s", symbol, exc)
@@ -2386,7 +1517,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     chain_context: dict[str, Any] = {}
     if with_chain:
         try:
-            from .chain import collect_chain_context
+            from ..chain import collect_chain_context
             basic_dim = dim_results.get("basic_info") or {}
             basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
             industry = ""
@@ -2399,13 +1530,6 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             logger.warning("chain context collection failed for %s: %s", symbol, exc)
             chain_context = {"status": "error", "error": str(exc)}
 
-    has_data = sum(
-        1 for d in dimensions
-        if d and d.get("data") is not None and d.get("status") in ("available", "partial")
-    )
-    partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
-    missing = sum(1 for d in dimensions if d and (d.get("data") is None and d.get("status") != "partial"))
-
     result: dict[str, Any] = {
         "symbol": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -2414,15 +1538,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         "credibility": credibility_scores,  # R-09: 证据可信度评分
         "macro_context": macro_context,  # R-12
         "chain_context": chain_context,  # R-12
-        "summary": {
-            "total": len(dimensions),
-            "available": has_data,
-            "degraded": partial,
-            "missing": missing,
-            "all_partial": (
-                has_data > 0 and partial == has_data and missing == 0
-            ),
-        },
+        "summary": _build_summary(dimensions),
     }
     try:
         attach_phase2_extras(result, symbol)
@@ -2475,13 +1591,15 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 "attempted_sources": {"error": str(exc)},
             }
 
+    logger.info("collect_all total=%.1fs symbol=%s dims=%d",
+                time.time() - start_all, symbol, len(dims))
     return result
 
 
 def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict[str, Any]:
     """v0.1.9: attach news cards + query pack to collection."""
-    from .news_scanner import collect_news
-    from .json_util import dumps_json
+    from ..news_scanner import collect_news
+    from ..json_util import dumps_json
 
     name = ""
     basic_dim = next(
@@ -2511,7 +1629,7 @@ def collect_news_dim(symbol: str, days: int = 7) -> dict[str, Any]:
     name = ""
     if isinstance(basic.get("data"), dict):
         name = basic["data"].get("name") or basic["data"].get("股票简称") or ""
-    from .news_scanner import collect_news
+    from ..news_scanner import collect_news
     return collect_news(symbol, name=name, days=days)
 
 
@@ -2961,9 +2079,9 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
 
     # 降级：akshare 全市场汇总（有损：非个股粒度，仅提供方向性参考）
     try:
-        import akshare as ak
-        with akshare_direct_session():
-            df_ak = ak.stock_margin_account_info()
+        from lib.market_pulse import fetch_margin_account_info  # 惰性导入
+
+        df_ak = fetch_margin_account_info()
         if df_ak is None or df_ak.empty:
             return None
         # 尝试已知日期列名，降级到首列（标注警告）
@@ -3229,8 +2347,13 @@ def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
 def _ms_pcr_on_date(
     tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
 ) -> float | None:
-    df = tc.query("opt_daily", trade_date=trade_date, exchange="SSE")
-    if df is None or df.empty:
+    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
+    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
+    df = _run_with_timeout(
+        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
+        8.0, f"opt_daily:{trade_date}",
+    )
+    if df is None or getattr(df, "empty", True):
         return None
     put_vol = call_vol = 0.0
     for _, row in df.iterrows():
@@ -3239,6 +2362,10 @@ def _ms_pcr_on_date(
             vol = float(row.get("vol") or 0)
         except (TypeError, ValueError):
             continue
+        if math.isnan(vol):
+            continue  # NaN 成交量视同缺失：NaN 恒不等于 0 且 call_vol<=0 守卫
+            # 放行 NaN（NaN<=0 为 False），会把 NaN 比值存成"当前 PCR"并
+            # 渲染成伪造的历史新低信号
         if code in put_codes:
             put_vol += vol
         elif code in call_codes:
@@ -3264,29 +2391,59 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         return None
     dates = sorted(str(d) for d in cal["cal_date"].tolist())
     raw_days = len(dates)
-    dates = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
-    ratios: list[float] = []
-    for td in dates:
-        r = _ms_pcr_on_date(tc, td, put_set, call_set)
+    sampled = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+    # 60 日分位窗口取最近 _PCR_HISTORY_60D 个自然日全分辨率（此前对降采样
+    # 序列取 ratios[-60:] 实际横跨 ~3.5 年——降采样 step≈15 时 60 点覆盖 900+ 交易日）
+    cutoff = _days_ago(_PCR_HISTORY_60D)
+    recent_dates = [d for d in dates if d >= cutoff]
+    fetch_dates = sorted(set(sampled) | set(recent_dates))
+
+    def _on_pcr_error(td: str, exc: Exception) -> None:
+        logger.debug("opt_daily %s failed: %s", td, exc)
+
+    # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
+    # _base._map_parallel）：~123 次串行最坏 16 分钟
+    ratio_by_date: dict[str, float] = {}
+    for td, r in _map_parallel(
+        fetch_dates,
+        lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
+        on_error=_on_pcr_error,
+    ):
         if r is not None:
-            ratios.append(r)
-    if not ratios:
+            ratio_by_date[td] = r
+    if not ratio_by_date:
         return None
-    current = ratios[-1]
+    # 单次扫描按 sampled 顺序构建 (date, ratio) 对（此前两次同谓词扫描
+    # 生成 ratios 与 ratio_dates，alignment 靠"同一谓词"隐含保证）
+    ratio_pairs = [(td, ratio_by_date[td]) for td in sampled if td in ratio_by_date]
+    if not ratio_pairs:
+        return None
+    current = ratio_pairs[-1][1]
+    current_date = ratio_pairs[-1][0]
+    # 最新日查询失败 → current 静默回退到旧样本，需显式 staleness 标识
+    # （ratio_pairs 非空 ⇒ current_date 必非 None，无需冗余守卫）
+    stale = current_date != sampled[-1]
+    ratios = [r for _, r in ratio_pairs]
     pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
-    ratios_60d = ratios[-_PCR_HISTORY_60D:]
+    ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
+    # current 在窗口内（current_date >= cutoff）才计算 60 日分位：最新 1-3 个
+    # 采样日查询失败时 current 回退约 step×失败点数 天（降采样 step≈15），
+    # 可能滑出 60 日窗口——此时 current 与窗口样本非同区间，分位无意义，
+    # 置 None 而非渲染成"0.0% 低位"（与 stale/partial 标志并存，互不替代）
     pct_60d = (
         percentile_rank(ratios_60d, current)
-        if len(ratios_60d) >= 5 else None
+        if len(ratios_60d) >= 5 and current_date >= cutoff else None
     )
     return {
         "ratio": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
+        "current_date": current_date,
         "history_days": len(ratios),
-        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS or raw_days > len(dates),
-        "sampled": raw_days > len(dates),
-        "sample_points": len(dates),
+        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS
+        or raw_days > len(sampled) or stale,
+        "sampled": raw_days > len(sampled),
+        "sample_points": len(fetch_dates),
         "calendar_days": raw_days,
         "underlying": _50ETF_UNDERLYING,
         "source": "tushare.opt_daily",
@@ -3295,7 +2452,11 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
 
 def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
     """融券余额增速（交易所 margin 优先，个股 margin_detail 回退）。"""
-    from lib.stats import percentile_rank
+    from lib.stats import percentile_rank_mid
+
+    # 增速序列约半数日为负：percentile_rank（v>0 过滤）把负增速日从分母剔除
+    # → "5年最低位"系统性失真；percentile_rank_inclusive 对冻结序列给 100% 假
+    # 信号 → 改用 mid-rank（count(<cur)/n + 0.5×count(==cur)/n）：冻结序列 50%
 
     df = tc.query("margin", start_date=_days_ago(1825), end_date=_today())
     if df is not None and not df.empty:
@@ -3315,7 +2476,8 @@ def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
                     growths.append((cur - base) / base * 100)
             if growths:
                 current_g = growths[-1]
-                pct = percentile_rank(growths, current_g) if len(growths) >= 5 else None
+                pct = (percentile_rank_mid(growths, current_g)
+                       if len(growths) >= 5 else None)
                 return {
                     "growth_pct": round(current_g, 2),
                     "percentile_5y": round(pct, 1) if pct is not None else None,
@@ -3360,36 +2522,42 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     basic = tc.query("stock_basic", list_status="L", fields="ts_code")
     if basic is None or basic.empty:
         return None
-    codes = [
-        str(c) for c in basic["ts_code"].tolist()
-        if c is not None
-    ][:_NEW_HIGH_SAMPLE]
+    # 全市场种子随机抽样：此前取前 30 行恒为 000xxx SZ 小盘；等步长抽样
+    # 头锚定 0 且 [:30] 截断使词序尾部（920xxx 北交所）永不入样。
+    # 种子按当日日期（YYYYMMDD）播种：每日面板轮换（固定种子会恒抽同一
+    # 批，停牌/退市样本永久缩小面板），同日内可复现。
+    import random
+    codes_all = sorted(str(c) for c in basic["ts_code"].tolist() if c is not None)
+    if not codes_all:
+        return None
+    rng = random.Random(int(_today()))
+    codes = rng.sample(codes_all, min(_NEW_HIGH_SAMPLE, len(codes_all)))
     if not codes:
         return None
     def _fetch_daily_panel_row(ts_code: str) -> tuple[str, list[dict] | None]:
-        df = tc.query(
-            "daily", ts_code=ts_code,
-            start_date=_days_ago(70), end_date=_today(),
-            fields="trade_date,close,high",
+        # 单次 daily 查询加时限（与 _ms_pcr_on_date 同款 8s）：_map_parallel
+        # 契约要求内部单次执行有超时兜底，否则挂起 socket 会拖住
+        # with ThreadPoolExecutor 的 join，market_structure 整块阻塞数分钟
+        df = _run_with_timeout(
+            lambda: tc.query(
+                "daily", ts_code=ts_code,
+                start_date=_days_ago(70), end_date=_today(),
+                fields="trade_date,close,high",
+            ),
+            8.0, f"daily:{ts_code}",
         )
         if df is None or df.empty:
             return ts_code, None
         return ts_code, df.sort_values("trade_date").to_dict("records")
 
+    def _on_panel_error(ts_code: str, exc: Exception) -> None:
+        logger.warning("new_high_ratio daily fetch failed for %s: %s", ts_code, exc)
+
     panel: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(codes), 8)) as executor:
-        futures = {executor.submit(_fetch_daily_panel_row, c): c for c in codes}
-        for fut in as_completed(futures):
-            try:
-                ts_code, records = fut.result()
-            except Exception as exc:
-                logger.warning(
-                    "new_high_ratio daily fetch failed for %s: %s",
-                    futures[fut], exc,
-                )
-                continue
-            if records:
-                panel[ts_code] = records
+    for ts_code, records in _map_parallel(
+        codes, _fetch_daily_panel_row, on_error=_on_panel_error):
+        if records:
+            panel[ts_code] = records
     current = _ms_new_high_ratio_from_panel(panel)
     if current is None:
         return None
@@ -3431,20 +2599,40 @@ def _ms_fetch_etf_flow(tc: Any) -> dict | None:
     if df_share is None or df_share.empty:
         return None
     shares = df_share.sort_values("trade_date").to_dict("records")
+
+    def _valid_fd_share(r: dict) -> bool:
+        """fd_share 须为可解析的有限数值；None/空串/NaN/±inf 剔除。"""
+        from math import isfinite
+        v = r.get("fd_share")
+        if v is None:
+            return False
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return False
+        return f == f and isfinite(f)  # NaN 不自等；inf 会污染 flow 估算
+
+    # 保留全序列 + 有效行索引：窗口按「最后 N 个有效行」取，
+    # 实际跨度（含被过滤的 NULL 行）如实标注，避免标 5d 实跨 8-9 日
+    valid_idx = [i for i, r in enumerate(shares) if _valid_fd_share(r)]
+    if not valid_idx:
+        return None
     prices = {}
     if df_price is not None and not df_price.empty:
         for r in df_price.sort_values("trade_date").to_dict("records"):
             prices[str(r.get("trade_date", ""))] = safe_float(r.get("close"))
 
-    def _net_flow(days: int) -> float | None:
-        if len(shares) < days + 1:
+    def _net_flow(days: int) -> tuple[float, int] | None:
+        if len(valid_idx) < days + 1:
             return None
-        first, last = shares[-(days + 1)], shares[-1]
-        d_shares = float(last.get("fd_share") or 0) - float(first.get("fd_share") or 0)
+        last_i, first_i = valid_idx[-1], valid_idx[-(days + 1)]
+        first, last = shares[first_i], shares[last_i]
+        d_shares = float(last.get("fd_share")) - float(first.get("fd_share"))
+        span = last_i - first_i + 1  # 实际覆盖的交易日行数（含被过滤的 NULL 行）
         px = prices.get(str(last.get("trade_date", "")))
         if px is None or px <= 0:
             return None
-        return d_shares * 10000 * px  # fd_share 单位：万份
+        return d_shares * 10000 * px, span  # fd_share 单位：万份
 
     flow_5d = _net_flow(5)
     flow_10d = _net_flow(10)
@@ -3457,9 +2645,13 @@ def _ms_fetch_etf_flow(tc: Any) -> dict | None:
     if not prices:
         out["price_incomplete"] = True
     if flow_5d is not None:
-        out["net_flow_5d"] = round(flow_5d, 0)
+        out["net_flow_5d"] = round(flow_5d[0], 0)
+        if flow_5d[1] > 5 + 1:
+            out["net_flow_5d_span_rows"] = flow_5d[1]
     if flow_10d is not None:
-        out["net_flow_10d"] = round(flow_10d, 0)
+        out["net_flow_10d"] = round(flow_10d[0], 0)
+        if flow_10d[1] > 10 + 1:
+            out["net_flow_10d_span_rows"] = flow_10d[1]
     return out
 
 
@@ -4033,7 +3225,7 @@ def _safe_peer_num(v) -> float | None:
 def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
     """akshare 回退方案：使用东方财富行业板块成分股进行行业横向对比。"""
     import akshare as ak  # noqa: F811
-    from .proxy import akshare_direct_session
+    from ..proxy import akshare_direct_session
 
     # 1. 获取基本信息和行业分类
     info = _q_akshare_basic(symbol)

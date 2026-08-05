@@ -8,6 +8,13 @@
 > 仅保留核心发现 + 关键数值 + 证据强度标签。不写入文件，改为对话内返回 Markdown。
 > 主编合成使用 `--mode concise` 输出契约（见 SKILL.md）。
 
+## 搜索纪律（强制，所有需要 WebSearch 的 Agent 适用）
+
+1. **并行批搜**：需要 WebSearch 时，在**同一条消息内一次性并行发出全部查询**（多个 WebSearch 调用），禁止"搜一条 → 等结果 → 再搜下一条"的串行模式
+2. **缓存优先**：搜索前先执行 `uv run python skills/invest-a-stock/scripts/lib/search_cache.py get {symbol} "<查询词>"` — 命中（30 天内）直接使用结果，跳过该查询的 WebSearch；未命中才搜索
+3. **回写缓存**：WebSearch 得到结果后，将 `[{"url": ..., "title": ..., "snippet": ...}]` 写入临时文件并执行 `uv run python skills/invest-a-stock/scripts/lib/search_cache.py put {symbol} "<查询词>" /tmp/search_results.json`
+4. **引用标注**：引用搜索结果时标注 URL 与搜索日期
+
 ---
 
 ## Agent A: 生意质量
@@ -213,7 +220,7 @@ if 'chain_context' in d:
             print(f'  {k}: {v}')
   "
 
-并搜索最新行业动态:
+并搜索最新行业动态（遵守上方「搜索纪律」：并行批搜 + 缓存优先）:
   # 用 WebSearch 查近 30 日行业新闻、政策变化、供需数据
 
 ## 分析框架
@@ -293,7 +300,7 @@ for dim in d.get('dimensions', []):
                 print(f'  {k}: {v}')
   "
 
-并搜索最新风险事件:
+并搜索最新风险事件（遵守上方「搜索纪律」：并行批搜 + 缓存优先）:
   # 用 WebSearch 查 "公司 诉讼 监管 处罚 债务 违约"
 
 ## 分析框架

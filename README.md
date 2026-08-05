@@ -4,7 +4,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.2" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.3" alt="Release" /></a>
 </p>
 
 A 股投研技能集，面向 **Claude Code** 和 **Hermes Agent**。输入代码，自动采集多维数据，产出带来源追溯的结构化研究备忘录。学习工具，非决策工具。
@@ -129,7 +129,7 @@ Phase 3: 主编合成 → .md 报告
 | 财务 | ROE/EPS/毛利率/OCF/杜邦 | Tushare ∥ akshare |
 | 行情 | OHLCV | Tushare ∥ 腾讯 |
 | 估值 | PE/PB 序列、分位、PE Band | Tushare |
-| K 线 | 日线 + MA/MACD/RSI | Tushare ∥ baostock ∥ TickFlow |
+| K 线 | 日线 + MA/MACD/RSI（统一前复权） | Tushare(adj_factor 自算) ∥ akshare ∥ baostock(无 Token 时兜底) [+tickflow 可选] |
 | 股东 | 十大流通股东 + 增减持 | Tushare ∥ akshare |
 | 资金 | 北向/主力/融资/融券 | Tushare ∥ akshare |
 | 市场 | 行业指数、ERP、PCR | Tushare + FRED |

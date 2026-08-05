@@ -213,7 +213,7 @@ class TestCollectorPhase3Fixes:
 
         c = {"dimensions": []}
         c["industry_peers"] = {"peers": [], "error": "timeout", "sufficient": False}
-        with patch.object(collector, "attach_industry_peers") as mock_ip:
+        with patch.object(collector._orchestrate, "attach_industry_peers") as mock_ip:
             mock_ip.side_effect = lambda coll, sym: coll.update({
                 "industry_peers": {"peers": [{"symbol": "002001"}], "sufficient": True},
             })

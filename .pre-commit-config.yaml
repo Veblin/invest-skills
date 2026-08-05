@@ -7,9 +7,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-      - id: invest-stock-check-report
-        name: invest:a-stock report wording (latest report)
-        entry: bash skills/invest-a-stock/scripts/check_report.sh
+      - id: report-qc
+        name: report quality check (unified: lint + structure + derived)
+        entry: uv run python skills/lib/report_qc.py
         language: system
         pass_filenames: true
         files: ^reports/.*\.md$
+        args: ["--profile", "precommit", "--fail-on", "warning"]

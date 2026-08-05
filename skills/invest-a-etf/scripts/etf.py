@@ -27,12 +27,18 @@ from etf_data import (  # noqa: E402
     query_etf_data,
     query_etf_kline,
     query_etf_quote,
+    query_etf_share_history,
 )
 
 
 def _kline_summary(kline: dict) -> dict:
     """Drop bulky nav_history for default stdout."""
     return {k: v for k, v in kline.items() if k != "nav_history"}
+
+
+def _share_history_summary(sh: dict) -> dict:
+    """Drop detail rows, keep summary + row_count for compact stdout."""
+    return {k: v for k, v in sh.items() if k != "rows"}
 
 
 def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
@@ -45,6 +51,7 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
     profile = query_etf_data(symbol)
     quote = query_etf_quote(symbol)
     kline = query_etf_kline(symbol)
+    share_history = query_etf_share_history(symbol, days=20)
 
     payload = {
         "skill": "invest-a-etf",
@@ -54,6 +61,7 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
         "profile": profile,
         "quote": quote,
         "kline": kline if with_nav else _kline_summary(kline),
+        "share_history": _share_history_summary(share_history) if not with_nav else share_history,
         "disclaimer": "研究数据快照，不构成投资建议。",
     }
 
@@ -91,6 +99,40 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
     print(f"  ma20/ma60 (NAV):   {kline.get('ma20')} / {kline.get('ma60')}")
     print(f"  ma20/ma60 (index): {kline.get('index_ma20')} / {kline.get('index_ma60')}")
     print(f"  boll (u/m/l):      {kline.get('boll_upper')} / {kline.get('boll_mid')} / {kline.get('boll_lower')}")
+    print()
+    print("## share_history (近20日 份额资金流 + OHLCV | Tushare fund_share+fund_daily)")
+    if share_history.get("available"):
+        # 表头
+        print(f"  {'日期':<10s} {'开盘':>6s} {'最高':>6s} {'最低':>6s} {'收盘':>6s} {'涨跌%':>7s} "
+              f"{'成交额':>7s} {'换手%':>6s} {'份额变':>8s} {'资金流':>7s}  方向")
+        print("  " + "-" * 90)
+        for r in share_history.get("rows", []):
+            sc = r.get('share_change')
+            fe = r.get('flow_est')
+            dr = r.get('direction')
+            to = r.get('turnover_rate')
+            sh = r.get('shares')
+            # T+1 延迟：份额/资金流字段可能为空
+            share_str = f"{sc:>+8.0f}" if sc is not None else "       ⏳"
+            flow_str = f"{fe:>+7.2f}" if fe is not None else "     ⏳"
+            dir_str = dr if dr else ("⏳ T+1 待确认" if sc is None else "?")
+            to_str = f"{to:>6.2f}" if to is not None else "    ⏳"
+            print(f"  {r['date']:<10s} "
+                  f"{r.get('open', '-'):>6} "
+                  f"{r.get('high', '-'):>6} "
+                  f"{r.get('low', '-'):>6} "
+                  f"{r.get('close', '-'):>6} "
+                  f"{r.get('pct_chg', 0):>+7.2f} "
+                  f"{r.get('amount', 0) or 0:>7.2f} "
+                  f"{to_str} "
+                  f"{share_str} "
+                  f"{flow_str}  "
+                  f"{dir_str}")
+        s = share_history.get("summary", {})
+        print(f"  资金趋势: {s.get('trend', '?')} | {s['row_count']}日合计: {s.get('total_flow_est', 0):+.2f} 亿 | "
+              f"日均成交: {s.get('avg_amount_e', 0):.2f} 亿 | 份额变化: {s.get('share_total_change', 0):+.0f} 万份")
+    else:
+        print(f"  不可用: {share_history.get('note', '未知')}")
     print()
     print("> 完整叙事请按 skills/invest-a-etf/references/report-template.md 合成。")
     print("> ⚠️ 不构成投资建议。")
