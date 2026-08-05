@@ -3,13 +3,12 @@
 在 collector 外围包装缓存层，所有 skill 通过此模块获取维度数据，
 自动享受缓存命中/回源逻辑。**不修改 invest-a-stock/collector.py。**
 
-用法::
+用法（bootstrap 后裸导入，与各消费方一致）::
 
-    from skills_lib.data_bridge import get_kline, get_quote, cache_stats
+    from data_bridge import get_kline, get_quote
 
     kline = get_kline("600176")
     kline = get_kline("600176", force=True)   # 强制跳过缓存回源
-    stats = cache_stats()
 """
 
 from __future__ import annotations
@@ -211,7 +210,7 @@ def get_valuation(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | 
 
 
 def get_northbound(symbol: str, *, force: bool = False) -> dict | None:
-    """北向资金（缓存 1d）。"""
+    """北向资金（缓存 1d）。无生产调用方；保留（历史/兼容）。"""
     collect_northbound = _import_lib_module_attr("collector", "collect_northbound")  # noqa: E402
     return _fetch_dimension("northbound", symbol, collect_northbound, symbol, force=force)
 
@@ -361,10 +360,10 @@ def invalidate_symbol(symbol: str) -> int:
 
 
 def cache_stats() -> dict:
-    """查看缓存状态。"""
+    """查看缓存状态。仅测试（skills/lib/tests/test_data_bridge.py）使用；保留。"""
     return _cache.stats()
 
 
 def cache_clear() -> int:
-    """清空全部缓存。"""
+    """清空全部缓存。仅测试（skills/lib/tests/test_data_bridge.py）使用；保留。"""
     return _cache.invalidate(None, None)

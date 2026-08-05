@@ -809,10 +809,11 @@ def volatility_cone(
     if current is None:
         return {"error": "当前 HV 不可得"}
 
-    percentile = None
-    if hvs:
-        below = sum(1 for h in hvs if h <= current)
-        percentile = below / len(hvs) * 100
+    try:
+        from .stats import percentile_rank_inclusive  # 同包相对导入（正常路径）
+    except ImportError:
+        from stats import percentile_rank_inclusive  # sys.path 裸导入
+    percentile = percentile_rank_inclusive(hvs, current) if hvs else None
 
     by_window: dict[str, float | None] = {}
     for w in windows:
@@ -841,7 +842,10 @@ def relative_strength(
     stock_closes: list[float],
     benchmark_closes: list[float],
 ) -> dict[str, Any]:
-    """RS_t = (stock/benchmark) × 100, base period = first aligned point."""
+    """RS_t = (stock/benchmark) × 100, base period = first aligned point.
+
+    仅测试（invest-a-stock/tests/test_technical_v019.py）使用；保留。
+    """
     n = min(len(stock_closes), len(benchmark_closes))
     if n < 2:
         return {"error": "数据不足"}
@@ -861,8 +865,14 @@ def rolling_beta(
     benchmark_closes: list[float],
     windows: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Rolling beta via stats.calc_beta on return series."""
-    from stats import calc_beta
+    """Rolling beta via stats.calc_beta on return series.
+
+    仅测试（invest-a-stock/tests/test_technical_v019.py）使用；保留。
+    """
+    try:
+        from .stats import calc_beta  # 同包相对导入（正常路径）
+    except ImportError:
+        from stats import calc_beta  # sys.path 裸导入
 
     if windows is None:
         windows = [60, 120, 252]
