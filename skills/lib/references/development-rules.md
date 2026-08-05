@@ -251,7 +251,7 @@ CI 无源（'No data returned' 骨架）失败。
    / `_base.` / `_sources.` / `_legacy.`）；公共 API 名（如 `attach_phase2_extras`）
    消费方经包命名空间属性查找 → 包级 patch 有效。静态规则见 `test_test_hygiene.py`
 2. **mock 输出带环境无关的独特标记并断言之**（如 `end_date: "20991231"`）：patch 失效时即使真实源成功，断言也失败，不会碰巧通过
-3. **提交前以无凭据环境跑全仓套件**（等价 CI）：`TUSHARE_TOKEN=bogus FRED_API_KEY=bogus TAVILY_API_KEY=bogus uv run python -m pytest -q` —— 任何依赖真实数据源才过的测试都会在此暴露
+3. **提交前以无凭据环境跑全仓套件**（等价 CI）：`TUSHARE_TOKEN="bogus" FRED_API_KEY="bogus" TAVILY_API_KEY="bogus" uv run python -m pytest -q` —— 任何依赖真实数据源才过的测试都会在此暴露
 
 ---
 
@@ -281,4 +281,4 @@ CI 无源（'No data returned' 骨架）失败。
 - [ ] D10: 有没有同一个函数内重复调用昂贵纯函数？
 - [ ] D11: 修复的 bug 模式在其他文件里还有吗？
 - [ ] D12: 决定不修的 finding 写了理由吗？
-- [ ] D13: 测试 mock 打在定义模块命名空间了吗？提交前跑过无凭据套件（`TUSHARE_TOKEN=bogus ... pytest -q`）吗？
+- [ ] D13: 测试 mock 打在定义模块命名空间了吗？提交前跑过无凭据套件（`TUSHARE_TOKEN="bogus" ... pytest -q`）吗？
