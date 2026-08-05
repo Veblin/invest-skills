@@ -108,9 +108,22 @@ class ScanResult:
 # Gap detection helpers
 # ======================================================================
 
-# 单日向上跳空幅度上限（%）——A 股涨跌停 10%/20%/30% 加阈值裕度；
-# 超过视为数据毛刺（零价 bar 后接正常价会算出天文 gap）
-_MAX_GAP_PCT = 50.0
+# 单日向上跳空幅度上限（%）——按板块涨跌停推导，超过视为数据毛刺
+# （零价/错价 bar 后接正常价会算出天文 gap）：主板 10% → 1.1/0.9-1=22.2%；
+# 创业板/科创板 20% → 1.2/0.8-1=50%（涨停价四舍五入可至 ~50.06%）；
+# 北交所 30% → 1.3/0.7-1=85.7%。各加裕度。停牌数据不可得时不拦截（fail-open）。
+_MAX_GAP_PCT = 30.0          # 主板默认
+_MAX_GAP_PCT_CN_CYB = 60.0   # 创业板/科创板（300/301/688 前缀）
+_MAX_GAP_PCT_BSE = 95.0      # 北交所（4/8/920 前缀）
+
+
+def _max_gap_pct_for_code(ts_code: str) -> float:
+    """按代码前缀返回毛刺过滤上限（%）；未知前缀按主板。"""
+    if ts_code.startswith(("300", "301", "688")):
+        return _MAX_GAP_PCT_CN_CYB
+    if ts_code.startswith(("4", "8", "920")):
+        return _MAX_GAP_PCT_BSE
+    return _MAX_GAP_PCT
 
 
 def _find_candidate_gaps(
@@ -120,6 +133,8 @@ def _find_candidate_gaps(
     *,
     suspensions: list[str] | None = None,
     trade_cal: list[str] | None = None,
+    ts_code: str = "",
+    suspensions_available: bool = True,
 ) -> tuple[list[tuple[int, GapInfo]], list[tuple[int, GapInfo]]]:
     """Find all upward gaps in the lookback window.
 
@@ -133,9 +148,15 @@ def _find_candidate_gaps(
     gap_min_pct : float
         Minimum gap magnitude (e.g. 1.0 = 1 %) for a gap to be "qualified".
     suspensions : list[str] | None
-        该股停牌日期列表（yyyymmdd）；复牌日真实大跳空不受 _MAX_GAP_PCT 拦截。
+        该股停牌日期列表（yyyymmdd）；复牌日真实大跳空不受板块毛刺上限拦截。
     trade_cal : list[str] | None
-        交易日历（yyyymmdd，有序）；用于跨停牌判定，None 时不拦截大缺口。
+        交易日历（yyyymmdd，有序）；用于跨停牌判定。
+    ts_code : str
+        股票代码，用于按板块推导毛刺过滤上限（默认 "" → 主板 30%）。
+    suspensions_available : bool
+        停牌/日历数据是否可信。False（估计日历、trade_cal=None）时大缺口
+        过滤 fail-open——不拦截任何 gap（docstring：保守不拦截大缺口），
+        仅正向验证过的跨停牌跳空打 is_across_suspension 标注。
 
     Returns
     -------
@@ -151,17 +172,24 @@ def _find_candidate_gaps(
     n = len(kline)
     start = max(1, n - lookback)
 
+    max_gap_pct = _max_gap_pct_for_code(ts_code)
     all_candidates: list[tuple[int, GapInfo]] = []
     for i in range(start, n):
         # highs[i-1]<=0（零价毛刺/停牌残留 bar）时跳过：除零会炸掉整个扫描；
-        # gap_pct 超 _MAX_GAP_PCT 视为毛刺（如 high_qfq=0.001 后接正常 bar
+        # gap_pct 超板块毛刺上限视为毛刺（如 high_qfq=0.001 后接正常 bar
         # 会算出 +499,900% 的天文缺口并排到命中榜首）——但"跨停牌"的复牌日
         # 大跳空是真实信号（盐湖股份 2021-08-10 复牌 +347%），不拦截：
-        # 前一日在停牌表内 → 放行并保留 is_gap_across_suspension 标注机会
+        # 前一日在停牌表内 → 放行并保留 is_gap_across_suspension 标注机会；
+        # suspensions_available=False（估计日历/无停牌表）时同样放行
+        # （fail-open：缺信息不丢弃潜在真实信号）
         if highs[i - 1] > 0 and lows[i] > highs[i - 1]:
             gap_pct = (lows[i] / highs[i - 1] - 1.0) * 100.0
-            if gap_pct > _MAX_GAP_PCT and not _is_gap_across_suspension(
-                str(dates[i]), suspensions, trade_cal,
+            if (
+                gap_pct > max_gap_pct
+                and suspensions_available
+                and not _is_gap_across_suspension(
+                    str(dates[i]), suspensions, trade_cal,
+                )
             ):
                 continue
             gi = GapInfo(
@@ -324,10 +352,16 @@ def _scan_stock(
     # --- Find gaps ---
     gap_lookback = params["gap_lookback"]
     gap_min_pct = params["gap_min_pct"]
-    stock_suspensions = suspension_map.get(ts_code, []) if trade_cal is not None else []
+    # 停牌数据可用性：估计日历路径 suspension_map={}（scan.py）与
+    # trade_cal=None 时无停牌信息 → 大缺口过滤须 fail-open（docstring
+    # 承诺"保守：不拦截大缺口"；盐湖 2021-08-10 复牌 +347% 不得静默丢弃）。
+    # 个股不在 map 中（从未停牌）≠ 信息缺失：map 非空即视为可用。
+    susp_available = trade_cal is not None and bool(suspension_map)
+    stock_suspensions = suspension_map.get(ts_code, []) if susp_available else []
     all_candidates, qualified = _find_candidate_gaps(
         kline, gap_lookback, gap_min_pct,
         suspensions=stock_suspensions, trade_cal=trade_cal,
+        ts_code=ts_code, suspensions_available=susp_available,
     )
 
     # --- Non-hit: no gap at all ---

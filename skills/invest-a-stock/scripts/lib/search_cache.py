@@ -89,6 +89,22 @@ def put(symbol: str, query: str, results: list[dict[str, str]]) -> None:
         pass
 
 
+def _valid_results(results: Any) -> bool:
+    """与 get() 的命中口径一致：非空 list，每项为 dict 且 url/title 非空。
+
+    CLI 写入未校验的载荷（如单 dict）会被 get() 判定为永久 miss 达
+    CACHE_TTL_SEC 天——agent 以为搜索已缓存实则每次都重搜。
+    """
+    if not isinstance(results, list) or not results:
+        return False
+    for r in results:
+        if not isinstance(r, dict):
+            return False
+        if not (str(r.get("url") or "").strip() and str(r.get("title") or "").strip()):
+            return False
+    return True
+
+
 def list_queries(symbol: str) -> list[str]:
     """列出该标的已缓存的查询。"""
     d = _cache_root() / symbol
@@ -139,6 +155,12 @@ def _main(argv: list[str]) -> int:
             results = json.loads(Path(argv[4]).read_text(encoding="utf-8"))
         except Exception as exc:
             print(f"读取结果文件失败: {exc}", file=sys.stderr)
+            return 2
+        if not _valid_results(results):
+            print(
+                "缓存内容无效：需为非空 JSON 数组，且每项含非空 url 与 title",
+                file=sys.stderr,
+            )
             return 2
         put(argv[2], argv[3], results)
         print("ok")

@@ -359,3 +359,53 @@ class TestApplyQfqEdgeCases:
         assert result.loc[result["trade_date"] == "20260709", "close_qfq"].iloc[0] == pytest.approx(12.0)
         # 20260710: identity
         assert result.loc[result["trade_date"] == "20260710", "close_qfq"].iloc[0] == 7.0
+
+
+# ---- trade_date dtype robustness (B3, /code-review max) ----
+
+class TestApplyQfqDtype:
+    """datetime64/int trade_date 不再崩锚点（此前空掩码 → IndexError）。"""
+
+    def test_datetime64_ascending(self):
+        daily = _make_daily(
+            dates=pd.to_datetime(["2026-07-10", "2026-07-11", "2026-07-12"]),
+            close_prices=[10.0, 12.0, 15.0],
+        )
+        adj = _make_adj(
+            dates=pd.to_datetime(["2026-07-10", "2026-07-11", "2026-07-12"]),
+            factors=[1.2, 1.1, 1.0],
+        )
+        result = apply_qfq(daily, adj)
+        assert result is not None
+        latest = result.loc[result["trade_date"] == "2026-07-12", "close_qfq"].iloc[0]
+        assert latest == 15.0  # 最新日 identity
+        old = result.loc[result["trade_date"] == "2026-07-10", "close_qfq"].iloc[0]
+        assert old == pytest.approx(12.0)  # 10.0 * 1.2 / 1.0
+
+    def test_datetime64_descending(self):
+        """Tushare 降序 + datetime64（旧 cache pickle）→ 锚定最新日不崩。"""
+        daily = _make_daily(
+            dates=pd.to_datetime(["2026-07-12", "2026-07-11", "2026-07-10"]),
+            close_prices=[15.0, 12.0, 10.0],
+        )
+        adj = _make_adj(
+            dates=pd.to_datetime(["2026-07-12", "2026-07-11", "2026-07-10"]),
+            factors=[1.0, 1.1, 1.2],
+        )
+        result = apply_qfq(daily, adj)
+        assert result is not None
+        latest = result.loc[result["trade_date"] == "2026-07-12", "close_qfq"].iloc[0]
+        assert latest == 15.0
+        old = result.loc[result["trade_date"] == "2026-07-10", "close_qfq"].iloc[0]
+        assert old == pytest.approx(12.0)
+
+    def test_int_trade_date(self):
+        daily = _make_daily(
+            dates=[20260710, 20260711, 20260712],
+            close_prices=[10.0, 12.0, 15.0],
+        )
+        adj = _make_adj(dates=[20260710, 20260711, 20260712], factors=[1.2, 1.1, 1.0])
+        result = apply_qfq(daily, adj)
+        assert result is not None
+        latest = result.loc[result["trade_date"] == "20260712", "close_qfq"].iloc[0]
+        assert latest == 15.0

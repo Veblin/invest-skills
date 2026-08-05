@@ -128,3 +128,60 @@ class TestStatusFromRaw:
     def test_missing_default(self):
         assert _status_from_raw({"status": "missing"}) == "missing"
         assert _status_from_raw({}) == "missing"
+
+
+class TestValuationStaleFlags:
+    """C1: 最新期亏损 → pe_stale/pb_stale + note 指明回退（/code-review max）。"""
+
+    def test_latest_loss_marks_stale(self, monkeypatch):
+        rows = [
+            {"trade_date": "20260101", "pe_ttm": 8.0, "pb": 1.0},
+            {"trade_date": "20260201", "pe_ttm": 8.5, "pb": 1.1},
+            {"trade_date": "20260301", "pe_ttm": -2.0, "pb": -0.9},  # 最新期亏损
+        ]
+        monkeypatch.setattr(query_data, "get_valuation", lambda s: {
+            "data": rows, "status": "available",
+            "_meta": {"source": "tushare.daily_basic", "success": True},
+        })
+        r = _safe_collect_valuation("600176")
+        assert r["pe_stale"] is True
+        assert r["pb_stale"] is True
+        assert r["pe_current"] == 8.5  # 回退自 20260201
+        assert "回退自 20260201" in r["note"]
+        assert "20260301" in r["note"]  # 最新报告期出现在回退说明中
+
+    def test_all_positive_no_stale(self, monkeypatch):
+        rows = [
+            {"trade_date": "20260101", "pe_ttm": 8.0, "pb": 1.0},
+            {"trade_date": "20260201", "pe_ttm": 8.5, "pb": 1.1},
+        ]
+        monkeypatch.setattr(query_data, "get_valuation", lambda s: {
+            "data": rows, "status": "available",
+            "_meta": {"source": "tushare.daily_basic", "success": True},
+        })
+        r = _safe_collect_valuation("600176")
+        assert r["pe_stale"] is False
+        assert r["pb_stale"] is False
+        assert r["note"] == ""
+
+    def test_dict_snapshot_no_stale(self, monkeypatch):
+        monkeypatch.setattr(query_data, "get_valuation", lambda s: {
+            "data": {"pe_ttm": 8.0, "pb": 1.0, "trade_date": "20260301"},
+            "status": "available",
+            "_meta": {"source": "tencent_finance", "success": True},
+        })
+        r = _safe_collect_valuation("600176")
+        assert r["pe_stale"] is False
+        assert r["pb_stale"] is False
+        assert r["note"] == "无历史分位（仅当前快照）"
+
+
+class TestStatusFromRawMissingSuccess:
+    """C2: 缺 success key（legacy 缓存/手写 meta）→ fail-closed 降级。"""
+
+    def test_available_without_meta_degraded(self):
+        assert _status_from_raw({"status": "available", "_meta": {}}) == "degraded"
+
+    def test_available_without_success_key_degraded(self):
+        assert _status_from_raw({"status": "available",
+                                 "_meta": {"source": "x"}}) == "degraded"

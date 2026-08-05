@@ -178,3 +178,34 @@ class TestTushareDailyQuotaReset:
 
         assert client._daily_calls == 0
         assert client._daily_reset_at == expected_next_reset
+
+
+class TestConcurrentRateLimitCounters:
+    """A1: 并发 _record_call 不得丢更新（_map_parallel 8 线程共享实例）。"""
+
+    def test_concurrent_record_call_no_lost_update(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from lib.tushare_client import TushareClient
+
+        client = TushareClient(token="a" * 32, rate_limit_per_minute=10000)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(lambda _: client._record_call(), range(200)))
+        assert client._daily_calls == 200
+        assert len(client._call_timestamps) == 200
+
+    def test_concurrent_wait_for_rate_limit_no_crash(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from lib.tushare_client import TushareClient
+
+        client = TushareClient(token="a" * 32, rate_limit_per_minute=10000)
+
+        def _mixed(_):
+            client._record_call()
+            client._wait_for_rate_limit()
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_mixed, range(64)))
+        assert client._daily_calls == 64
+        assert len(client._call_timestamps) == 64

@@ -1,5 +1,6 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import _base as __base_ref
@@ -104,24 +105,56 @@ def collect_shareholders(symbol: str) -> dict:
     )
 
 
+def _apply_qfq_with_newest_raw_fallback(
+    rows: list[dict], factors: dict[str, float],
+) -> list[dict] | None:
+    """盘中 adj_factor 未发布时的 qfq 兜底：去掉最新日重试，尾部按 raw 保留。
+
+    Tushare 当日 adj_factor 盘后才发布：_apply_qfq 对"最新日缺因子"整体
+    拒绝 → 调用方此前整串回退 raw，与 akshare qfq 历史混串，多日消费者
+    （10 日趋势等）看到未复权收盘。这里去掉最新日重试 _apply_qfq，成功
+    则最新日按 raw 价格原样保留。
+
+    近似说明：最新日在自身锚定下 qfq==raw；若当日恰为除权日，锚点由 D
+    平移至 D-1，raw 值与真 qfq 值相差 f_D/f_{D-1} 量级（小近似，除权日
+    罕见且因子盘后即发布）。重试仍失败（因子整体缺失/中间日缺失）→ 返回
+    None，调用方沿用 raw 整串回退。
+    """
+    adjusted = _apply_qfq(rows, factors)
+    if adjusted is not None:
+        return adjusted
+    if not factors or len(rows) < 2:
+        return None
+    newest_td = max(str(r.get("trade_date") or "") for r in rows)
+    rest = [r for r in rows if str(r.get("trade_date") or "") != newest_td]
+    if not rest:
+        return None
+    adjusted_rest = _apply_qfq(rest, factors)
+    if adjusted_rest is None:
+        return None
+    newest_rows = [r for r in rows if str(r.get("trade_date") or "") == newest_td]
+    return adjusted_rest + newest_rows
+
+
 def _quote_tushare_rows(symbol: str) -> list[dict] | None:
     """quote 维度的 Tushare 日线：前复权 + 升序。
 
     升序使 data[-1] = 最新日，与 akshare 升序及共享消费者
     （schema._extract_scalar 等 data[-1]-is-newest 约定）对齐——
     tushare 降序时 data[-1] 是最旧 bar，逐份报告产出"最新收盘"错值。
-    盘中 adj_factor 滞后/缺失时回退 raw（仅最新日标量被消费，
-    最新日 qfq==raw，回退不产生错基）。
+    盘中 adj_factor 未发布（常态）时经 _apply_qfq_with_newest_raw_fallback
+    去掉最新日重试、最新日按 raw 保留：历史段保持 qfq 连续，最新日标量
+    不变（qfq==raw 于自身锚定）；因子整体缺失才整串回退 raw。
     """
     from lib.technical import sort_kline_asc
 
     # 单次 daily 取数：_q_tushare_daily_qfq 内部先取 daily 再取 adj_factor，
     # 盘中 adj_factor 未发布时返回 None → 再调 _q_tushare_daily 会重复取同一
-    # daily 序列（3 次 Tushare 往返）；这里组合拆开，raw 回退复用已取的行。
+    # daily 序列（3 次 Tushare 往返）；这里组合拆开，raw 兜底复用已取的行。
     raw_rows = _q_tushare_daily(symbol, start_date=_days_ago(10), end_date=_today())
     if not raw_rows:
         return None
-    rows = _apply_qfq(
+    rows = _apply_qfq_with_newest_raw_fallback(
         raw_rows,
         _q_tushare_adj_factor(symbol, start_date=_days_ago(10), end_date=_today()),
     )
@@ -776,6 +809,47 @@ def _source_has_data(data) -> bool:
     from lib.data_util import has_data
 
     return has_data(data)
+
+
+def _build_summary(dimensions: list) -> dict:
+    """维度汇总：与 merge_collections 共用 has_data 口径（空 list/dict 不计
+    available）。missing 用 not _source_has_data（而非 is None）：status='available'
+    但 data=[]（非交易日 quote）此前不计入任何计数器 → available+partial+missing
+    < total，all_partial 失真，invest.py 的 available==0 中止误触发。
+    sources_responded：status ∈ {available, partial} 的维度数——"数据源有响应"
+    语义；响应的源返回空数据（节假日）不算失败，报告照常渲染无数据区块。
+    """
+    has_data = sum(
+        1 for d in dimensions
+        if d and _source_has_data(d.get("data"))
+        and d.get("status") in ("available", "partial")
+    )
+    partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
+    missing = sum(
+        1 for d in dimensions
+        if d and not _source_has_data(d.get("data")) and d.get("status") != "partial"
+    )
+    sources_responded = sum(
+        1 for d in dimensions if d and d.get("status") in ("available", "partial")
+    )
+    # 全部"有数据"维度均为 partial 才算 all_partial（partial==has_data 在
+    # 存在无数据的 partial 维度时会误判为 True）
+    all_partial = (
+        has_data > 0
+        and missing == 0
+        and all(
+            d.get("status") == "partial"
+            for d in dimensions if d and _source_has_data(d.get("data"))
+        )
+    )
+    return {
+        "total": len(dimensions),
+        "available": has_data,
+        "degraded": partial,
+        "missing": missing,
+        "all_partial": all_partial,
+        "sources_responded": sources_responded,
+    }
 
 
 def _parse_holder_change_vol(raw) -> float | None:
@@ -1456,16 +1530,6 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             logger.warning("chain context collection failed for %s: %s", symbol, exc)
             chain_context = {"status": "error", "error": str(exc)}
 
-    # 与 merge_collections 共用 has_data 口径：空 list/dict 的维度不计 available
-    # （此前 is not None 把 data=[] 的非交易日 quote 计入，两个消费者计数分歧）
-    has_data = sum(
-        1 for d in dimensions
-        if d and _source_has_data(d.get("data"))
-        and d.get("status") in ("available", "partial")
-    )
-    partial = sum(1 for d in dimensions if d and d.get("status") == "partial")
-    missing = sum(1 for d in dimensions if d and (d.get("data") is None and d.get("status") != "partial"))
-
     result: dict[str, Any] = {
         "symbol": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -1474,15 +1538,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         "credibility": credibility_scores,  # R-09: 证据可信度评分
         "macro_context": macro_context,  # R-12
         "chain_context": chain_context,  # R-12
-        "summary": {
-            "total": len(dimensions),
-            "available": has_data,
-            "degraded": partial,
-            "missing": missing,
-            "all_partial": (
-                has_data > 0 and partial == has_data and missing == 0
-            ),
-        },
+        "summary": _build_summary(dimensions),
     }
     try:
         attach_phase2_extras(result, symbol)
@@ -2249,7 +2305,6 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
 _50ETF_UNDERLYING = "510050.SH"
 _ETF_300_CODE = "510300.SH"
 _NEW_HIGH_SAMPLE = 30
-_NEW_HIGH_SAMPLE_SEED = 20260804  # 创新高抽样固定种子（可复现）
 _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
 _PCR_MIN_5Y_TRADING_DAYS = 252
@@ -2307,6 +2362,10 @@ def _ms_pcr_on_date(
             vol = float(row.get("vol") or 0)
         except (TypeError, ValueError):
             continue
+        if math.isnan(vol):
+            continue  # NaN 成交量视同缺失：NaN 恒不等于 0 且 call_vol<=0 守卫
+            # 放行 NaN（NaN<=0 为 False），会把 NaN 比值存成"当前 PCR"并
+            # 渲染成伪造的历史新低信号
         if code in put_codes:
             put_vol += vol
         elif code in call_codes:
@@ -2367,9 +2426,13 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
     ratios = [r for _, r in ratio_pairs]
     pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
     ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
+    # current 在窗口内（current_date >= cutoff）才计算 60 日分位：最新 1-3 个
+    # 采样日查询失败时 current 回退约 step×失败点数 天（降采样 step≈15），
+    # 可能滑出 60 日窗口——此时 current 与窗口样本非同区间，分位无意义，
+    # 置 None 而非渲染成"0.0% 低位"（与 stale/partial 标志并存，互不替代）
     pct_60d = (
         percentile_rank(ratios_60d, current)
-        if len(ratios_60d) >= 5 else None
+        if len(ratios_60d) >= 5 and current_date >= cutoff else None
     )
     return {
         "ratio": round(current, 3),
@@ -2461,20 +2524,27 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
         return None
     # 全市场种子随机抽样：此前取前 30 行恒为 000xxx SZ 小盘；等步长抽样
     # 头锚定 0 且 [:30] 截断使词序尾部（920xxx 北交所）永不入样。
-    # 固定种子保证可复现。
+    # 种子按当日日期（YYYYMMDD）播种：每日面板轮换（固定种子会恒抽同一
+    # 批，停牌/退市样本永久缩小面板），同日内可复现。
     import random
     codes_all = sorted(str(c) for c in basic["ts_code"].tolist() if c is not None)
     if not codes_all:
         return None
-    rng = random.Random(_NEW_HIGH_SAMPLE_SEED)
+    rng = random.Random(int(_today()))
     codes = rng.sample(codes_all, min(_NEW_HIGH_SAMPLE, len(codes_all)))
     if not codes:
         return None
     def _fetch_daily_panel_row(ts_code: str) -> tuple[str, list[dict] | None]:
-        df = tc.query(
-            "daily", ts_code=ts_code,
-            start_date=_days_ago(70), end_date=_today(),
-            fields="trade_date,close,high",
+        # 单次 daily 查询加时限（与 _ms_pcr_on_date 同款 8s）：_map_parallel
+        # 契约要求内部单次执行有超时兜底，否则挂起 socket 会拖住
+        # with ThreadPoolExecutor 的 join，market_structure 整块阻塞数分钟
+        df = _run_with_timeout(
+            lambda: tc.query(
+                "daily", ts_code=ts_code,
+                start_date=_days_ago(70), end_date=_today(),
+                fields="trade_date,close,high",
+            ),
+            8.0, f"daily:{ts_code}",
         )
         if df is None or df.empty:
             return ts_code, None

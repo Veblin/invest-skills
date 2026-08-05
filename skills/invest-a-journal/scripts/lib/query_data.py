@@ -184,6 +184,7 @@ def _safe_collect_valuation(symbol: str) -> dict:
         pb_current: float | None = None
         pe_date: str | None = None
         pb_date: str | None = None
+        pe_stale = pb_stale = False
         history_available = False
 
         if isinstance(data, list) and data:
@@ -208,11 +209,34 @@ def _safe_collect_valuation(symbol: str) -> dict:
             if pb_list:
                 pb_current = pb_list[-1]
                 pb_date = pb_dates[-1]
+            # 陈旧性：最新报告期无正 PE/PB（亏损期被 >0 过滤）→ 当前值回退
+            # 自旧期。pe_date != 最新期即回退（亏损期被剔除，两者必然不等）。
+            # 信号须进入报告 prose（SKILL.md 数据快照节指示），否则
+            # "当前亏损却显示旧期 PE 8.0x"会被静默当成当期估值。
+            latest_td = str(data[-1].get("trade_date") or "")
+            pe_stale = bool(pe_dates) and bool(latest_td) and pe_dates[-1] != latest_td
+            pb_stale = bool(pb_dates) and bool(latest_td) and pb_dates[-1] != latest_td
         elif isinstance(data, dict):
             pe_current = safe_float(data.get("pe_ttm"))
             pb_current = safe_float(data.get("pb"))
             pe_date = str(data.get("trade_date") or "") or None
             pb_date = pe_date
+            latest_td = ""
+
+        note = ""
+        if not history_available:
+            note = "无历史分位（仅当前快照）"
+        elif pe_stale or pb_stale:
+            stale_parts = []
+            if pe_stale:
+                stale_parts.append(
+                    f"最新报告期 {latest_td} 无正 PE（亏损期），"
+                    f"当前 PE {pe_current} 回退自 {pe_date}")
+            if pb_stale:
+                stale_parts.append(
+                    f"最新报告期 {latest_td} 无正 PB（亏损期），"
+                    f"当前 PB {pb_current} 回退自 {pb_date}")
+            note = "；".join(stale_parts)
 
         # 分位/中位数委托 invest-a-stock lib.valuation.valuation_summary：
         # >0 过滤 + 严格 percentile_rank + median 的唯一实现（journal 此前
@@ -228,6 +252,10 @@ def _safe_collect_valuation(symbol: str) -> dict:
             # 最新正 PE/PB 的报告期（亏损期回退旧值时供消费者识别陈旧）
             "pe_date": pe_date,
             "pb_date": pb_date,
+            # 最新报告期亏损、当前值回退自旧期（pe_date/pb_date）的标志；
+            # 报告 prose 必须注明数据期与回退原因（见 SKILL.md 数据快照节）
+            "pe_stale": pe_stale,
+            "pb_stale": pb_stale,
             "pe_percentile": pe_stat.get("pct") if history_available else None,
             "pb_percentile": pb_stat.get("pct") if history_available else None,
             "pe_median": pe_stat.get("median"),
@@ -236,7 +264,7 @@ def _safe_collect_valuation(symbol: str) -> dict:
             "history_rows": len(pe_list),
             "source": meta.get("source", "unknown"),
             "status": _status_from_raw(raw),
-            "note": "" if history_available else "无历史分位（仅当前快照）",
+            "note": note,
         }
     except Exception as exc:
         return {"_error": str(exc), "status": "missing", "history_available": False}
@@ -500,10 +528,9 @@ def _status_from_raw(raw: dict) -> str:
     meta = raw.get("_meta", {})
     if status == "available":
         # 维度级 _meta 恒带 success（schema._best_meta：有 primary 源即 True，
-        # "merged:" 前缀源同样携带）；此前在 all_sources 条目上找
-        # source_group == "primary" 恒为假（SourceResult.to_dict 无此键，
-        # 该键只存在于维度级 _meta 且值为厂商前缀）→ 所有 available 被误降级
-        return "available" if meta.get("success") is not False else "degraded"
+        # "merged:" 前缀源同样携带）；缺 key/非 True（legacy 缓存、手写 meta、
+        # 未来生产者）一律 fail-closed 降级——不信任未标注的维度
+        return "available" if meta.get("success") is True else "degraded"
     if status == "partial":
         return "partial"
     return "missing"

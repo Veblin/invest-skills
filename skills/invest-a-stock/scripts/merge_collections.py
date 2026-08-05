@@ -222,17 +222,29 @@ def merge_collections(collections: list[dict]) -> dict:
             primary["_meta"]["multi_source_count"] = len(dims)
             # 合并 all_sources：不同采集器可能覆盖不同源（如 research 维度
             # 一个采集器拿到 report_rc、另一个拿到 forecast）——按 source 名
-            # 并集，后到覆盖同源，确保任何源的 data 不丢失
+            # 并集。去重优先级：chosen 维度条目（payload == primary.data）>
+            # 有数据条目 > 失败条目（保留供 provenance 展示；evidence/
+            # render_utils 已有 ❌ 失败渲染分支，financial_rigor/fusion/
+            # valuation/manifest 均按 success/data_available 过滤）。
+            # 不重算 source_count/multi_source/cross_validation：chosen 维度
+            # 自身取值（浅拷贝已保留，schema 口径 = 有数据的源数）描述
+            # primary.data 的真实验证——并集计数会虚增 rerank 的
+            # MULTI_SOURCE_BONUS（+5）并跳过 SINGLE_SOURCE（-10）。
             seen: dict[str, dict] = {}
+            for s in chosen.get("_meta", {}).get("all_sources", []):
+                seen.setdefault(s.get("source") or "unknown", s)
             for d in dims:
                 for s in d.get("_meta", {}).get("all_sources", []):
                     name = s.get("source") or "unknown"
-                    if has_data(s.get("data")):
+                    if name not in seen and has_data(s.get("data")):
+                        seen[name] = s
+            for d in dims:
+                for s in d.get("_meta", {}).get("all_sources", []):
+                    name = s.get("source") or "unknown"
+                    if name not in seen:
                         seen[name] = s
             if seen:
                 primary["_meta"]["all_sources"] = list(seen.values())
-                primary["_meta"]["source_count"] = sum(
-                    1 for s in seen.values() if has_data(s.get("data")))
             # 按字段形状（而非维度名硬编码）逐 key 合并 research_summary：
             # 各渲染消费者（_concise/_render_dcf/analysis_templates）只读
             # research_summary，all_sources 并集不参与渲染——B 采集器独有的

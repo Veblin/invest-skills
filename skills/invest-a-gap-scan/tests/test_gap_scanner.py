@@ -818,3 +818,61 @@ class TestZeroPriceBarGuard:
         assert result.exclude_reasons[ExcludeReason.FETCH_ERROR] == 1
         assert result.total_fetch_errors == 1
         assert len(result.hits) == 0
+
+
+class TestMaxGapFailOpenAndBoard:
+    """B1/B2: 估计日历 fail-open + 按板块阈值（/code-review max）。"""
+
+    def test_estimated_calendar_fail_open_keeps_relisting_gap(self):
+        """suspension_map={}（估计日历）→ 347% 复牌跳空不再被静默丢弃。"""
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, gap_pct=347, fill_gap=False)
+        trade_cal = kline["trade_date"].tolist()
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},  # 估计日历路径：无停牌信息 → fail-open
+            params=DEFAULT_PARAMS,
+            trade_cal=trade_cal,
+        )
+        assert len(result.hits) == 1
+        assert len(result.across_suspension_hits) == 0
+
+    def test_real_calendar_still_filters_giant_gap(self):
+        """停牌数据可用 + 非跨停牌 → 347% 缺口仍按毛刺过滤（fail-closed）。"""
+        kline = _make_kline(n_bars=200, gap_at=_GAP_IDX, gap_pct=347, fill_gap=False)
+        trade_cal = kline["trade_date"].tolist()
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={"000001.SZ": []},  # 数据可用（该股无停牌记录）
+            params=DEFAULT_PARAMS,
+            trade_cal=trade_cal,
+        )
+        assert len(result.hits) == 0
+        assert len(result.across_suspension_hits) == 0
+
+    def test_max_gap_pct_for_code(self):
+        from gap_scanner import _max_gap_pct_for_code
+
+        assert _max_gap_pct_for_code("000001.SZ") == 30.0
+        assert _max_gap_pct_for_code("300001.SZ") == 60.0
+        assert _max_gap_pct_for_code("301001.SZ") == 60.0
+        assert _max_gap_pct_for_code("688001.SH") == 60.0
+        assert _max_gap_pct_for_code("920001.BJ") == 95.0
+        assert _max_gap_pct_for_code("832001.BJ") == 95.0
+        assert _max_gap_pct_for_code("430001.BJ") == 95.0
+        assert _max_gap_pct_for_code("") == 30.0
+
+    def test_cyb_gap_above_main_cap_kept_by_board_threshold(self):
+        """创业板 55% 缺口：主板阈值（30）下过滤、板块阈值（60）下保留。"""
+        kline = _make_kline(n_bars=50, gap_at=30, gap_pct=55, fill_gap=False)
+        dates = kline["trade_date"].tolist()
+        all_c, _ = _find_candidate_gaps(
+            kline, 40, 1.0, suspensions=[], trade_cal=dates, ts_code="000001.SZ")
+        assert all_c == []
+        all_c, _ = _find_candidate_gaps(
+            kline, 40, 1.0, suspensions=[], trade_cal=dates, ts_code="300001.SZ")
+        assert len(all_c) == 1
+        assert all_c[0][1].gap_pct == pytest.approx(55.0)

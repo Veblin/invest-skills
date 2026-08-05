@@ -557,6 +557,11 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 | 涨跌比 | ... | ... | available |
 | 涨跌停比 | ... | ... | available |
 
+> 估值陈旧提示：当 query_data 返回的 `pe_stale`/`pb_stale` 为 True（最新报告期
+> 亏损、PE/PB 回退自 `pe_date`/`pb_date` 对应旧期）时，数据快照的 PE/PB 行
+> **必须**注明数据期与回退原因（如"PE 8.0x（数据期 20260101；最新期亏损）"），
+> 不得把旧期值当作当期估值呈现。
+
 ## 逻辑完整性: {✅/⚠️/❌}
 {文字}
 

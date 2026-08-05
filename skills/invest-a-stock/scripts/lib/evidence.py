@@ -81,7 +81,11 @@ def build_evidence_table(dimensions: list[dict]) -> list[EvidenceRow]:
         display = dim.get("display", dn)
         meta = dim.get("_meta", {})
         all_src = meta.get("all_sources", [])
-        cv_label = _cv_label(meta, all_src)
+        # 计数口径只统计有数据的源：merged all_sources 含失败条目供溯源
+        # 展示（❌ 失败行），不参与 source_count/交叉验证标签——并集计数
+        # 曾虚增 rerank 的 MULTI_SOURCE_BONUS 并跳过 SINGLE_SOURCE
+        data_src = [s for s in all_src if s.get("data_available")]
+        cv_label = _cv_label(meta, data_src)
 
         if all_src:
             for s in all_src:
@@ -94,7 +98,7 @@ def build_evidence_table(dimensions: list[dict]) -> list[EvidenceRow]:
                         channel=src_name,
                         value_summary=_format_source_value(s),
                         confidence=_confidence_label(confidence),
-                        source_count=len(all_src),
+                        source_count=len(data_src),
                         cross_validation=cv_label,
                     ))
                 elif s.get("error"):
@@ -103,7 +107,7 @@ def build_evidence_table(dimensions: list[dict]) -> list[EvidenceRow]:
                         channel=src_name,
                         value_summary=f"❌ {s.get('error', '失败')[:40]}",
                         confidence="—",
-                        source_count=len(all_src),
+                        source_count=len(data_src),
                         cross_validation=cv_label,
                     ))
         else:

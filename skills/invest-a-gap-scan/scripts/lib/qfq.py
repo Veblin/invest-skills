@@ -79,12 +79,19 @@ def apply_qfq(daily_df: pd.DataFrame, adj_factor_df: pd.DataFrame | None) -> pd.
     if any(_adj_invalid(float(v)) for v in factors):
         return None
 
+    # 归一化 trade_date 为 str：datetime64 → 'YYYY-MM-DD'、int → 'yyyymmdd'、
+    # str 原样（字典序 max 保持时间序）。此前 str(df.max()) 对 datetime64 得
+    # '2026-07-12 00:00:00'，与 astype(str) 的 '2026-07-12' 永不等 → 空掩码
+    # IndexError → 整股被 scan_all 记 FETCH_ERROR 静默消失（kline_cache 旧
+    # pickle 可能存 datetime64；生产路径 Tushare/baostock 均为 str）。
+    # merged 是 fresh merge 结果，改列不影响调用方输入。
+    merged["trade_date"] = merged["trade_date"].astype(str)
     # 锚定最新交易日（按 trade_date 取最大行，而非末行）：Tushare 原生日线为
     # 降序，降序输入时 factors.iloc[-1] 是最旧 bar 的因子 → 整个序列被
     # f_oldest 错标度（与 _sources._apply_qfq 的锚定语义保持一致）
-    newest = str(merged["trade_date"].max())
+    newest = merged["trade_date"].max()
     latest_adj = float(merged.loc[
-        merged["trade_date"].astype(str) == newest, "adj_factor"].iloc[0])
+        merged["trade_date"] == newest, "adj_factor"].iloc[0])
     scale = factors / latest_adj
 
     # Reject if any OHLC column contains NaN (R7)

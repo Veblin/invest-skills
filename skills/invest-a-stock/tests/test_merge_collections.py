@@ -145,3 +145,49 @@ class TestMergeSummaryAvailable:
         merged = merge_collections([_collection([a])])
         assert merged["summary"]["total"] == 1
         assert merged["summary"]["available"] == 0
+
+
+class TestAllSourcesUnion:
+    """A8: 合并 all_sources 保留失败条目、source_count 用 chosen 计数（不虚增）。"""
+
+    def test_failed_source_kept_and_count_not_inflated(self):
+        a_srcs = [
+            {"source": "tushare.daily", "success": True, "data": [{"close": 10.0}],
+             "data_available": True},
+        ]
+        b_srcs = [
+            {"source": "tushare.daily", "success": True, "data": [{"close": 20.0}],
+             "data_available": True},
+            {"source": "akshare.stock_zh_a_hist", "success": False, "data": None,
+             "data_available": False, "error": "Connection refused"},
+        ]
+        a = {
+            "dimension": "kline", "display": "日K线",
+            "data": [{"close": 10.0}], "status": "available",
+            "_meta": {"source": "tushare.daily", "success": True,
+                      "source_count": 1, "multi_source": False,
+                      "cross_validation": None,
+                      "all_sources": a_srcs},
+        }
+        b = {
+            "dimension": "kline", "display": "日K线",
+            "data": [{"close": 20.0}], "status": "available",
+            "_meta": {"source": "tushare.daily", "success": True,
+                      "source_count": 2, "multi_source": True,
+                      "cross_validation": "convergence",
+                      "all_sources": b_srcs},
+        }
+        merged = merge_collections([_collection([a]), _collection([b])])
+        r = {d["dimension"]: d for d in merged["dimensions"]}["kline"]
+        meta = r["_meta"]
+        # primary.data 来自 chosen（a）→ source_count 恒为 chosen 计数，不并集虚增
+        assert meta["source_count"] == 1
+        assert meta["multi_source"] is False
+        # 失败条目保留（provenance）：evidence 的 ❌ 渲染分支重新可见
+        names = [s["source"] for s in meta["all_sources"]]
+        assert names == ["tushare.daily", "akshare.stock_zh_a_hist"]
+        failed = [s for s in meta["all_sources"] if s["source"].startswith("akshare")][0]
+        assert failed["success"] is False
+        # 同名去重：chosen（a）的 payload 优先，不被 b 的同名条目覆盖
+        td = [s for s in meta["all_sources"] if s["source"] == "tushare.daily"][0]
+        assert td["data"] == a_srcs[0]["data"]

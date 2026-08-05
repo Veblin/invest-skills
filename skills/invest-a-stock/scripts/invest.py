@@ -246,6 +246,17 @@ def _warn_degraded_collection(result: dict) -> None:
         print("⚠️ 全部有数据维度均为 partial，交叉验证与融合可靠性受限", file=sys.stderr)
 
 
+def _no_sources_responded(summary: dict | None) -> bool:
+    """中止条件：无任一维度有数据源响应（status 均非 available/partial）。
+
+    与 summary.available 区分：数据源响应但返回空数据（非交易日 quote、
+    节假日）不算失败——报告照常渲染为无数据区块。旧存档缺
+    sources_responded 时回退 available 保持旧行为。
+    """
+    s = summary or {}
+    return (s.get("sources_responded", s.get("available", 0)) or 0) == 0
+
+
 def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--with-macro", action="store_true",
@@ -502,7 +513,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
             pass
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
-    if result["summary"]["available"] == 0:
+    if _no_sources_responded(result["summary"]):
         print(render.render(result, args.symbol, "compact"))
         print("⚠️ 所有维度均不可用。请运行 diagnose。")
         return 1
@@ -576,7 +587,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     if getattr(args, "strict_rigor", False):
         result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)
-    if result["summary"]["available"] == 0:
+    if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成报告")
         return 1
     if _HAS_STORE:
@@ -751,7 +762,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
-    if result["summary"]["available"] == 0:
+    if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成证据表")
         return 1
     rows = evidence_mod.build_evidence_table(result["dimensions"])
@@ -782,7 +793,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         dims = _apply_deep_dims(list(_DEFAULT_DIMS), getattr(args, "deep", False))
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
 
-    if result.get("summary", {}).get("available", 0) == 0:
+    if _no_sources_responded(result.get("summary")):
         print("⚠️ 所有维度均不可用", file=sys.stderr)
         return 1
 
@@ -1626,7 +1637,7 @@ def cmd_risk_reward(args: argparse.Namespace) -> int:
         print(f"采集 {args.symbol} 数据...", file=sys.stderr)
         collection = collect_all(args.symbol, dims=["kline", "financials", "basic_info",
                                                       "valuation"])
-        if (collection.get("summary") or {}).get("available", 0) == 0:
+        if _no_sources_responded(collection.get("summary")):
             print("❌ 采集失败，无可用数据", file=sys.stderr)
             return 1
 
