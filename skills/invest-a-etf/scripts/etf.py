@@ -31,11 +31,72 @@ from etf_data import (  # noqa: E402
     query_etf_quote,
     query_etf_share_history,
 )
+from lib.nums import safe_float  # noqa: E402
 
 
 def _kline_summary(kline: dict) -> dict:
     """Drop bulky nav_history for default stdout."""
     return {k: v for k, v in kline.items() if k != "nav_history"}
+
+
+# 事件文件缺省目录（R11b）：skills/invest-a-etf/events/{symbol}.json
+_EVENTS_DIR = Path(__file__).resolve().parent.parent / "events"
+
+
+def _build_events_block(symbol: str, events_path: str | None,
+                        history_block: dict | None) -> dict:
+    """R11b: 事件文件加载 + 事件-价格对照（±1 交易日对齐）。无文件不阻断。"""
+    from etf_timeline import align_events_with_price, detect_big_move_days, load_events_file
+
+    path = Path(events_path) if events_path else _EVENTS_DIR / f"{symbol}.json"
+    if not path.exists():
+        return {"available": False, "path": str(path),
+                "note": f"无事件文件（{path.name}），跳过（不阻断）",
+                "rows": None, "aligned": None}
+    events, msg = load_events_file(path)
+    if events is None:
+        return {"available": False, "path": str(path),
+                "note": f"事件文件校验失败: {msg}", "rows": None, "aligned": None}
+    aligned = None
+    if (history_block and history_block.get("stats")
+            and history_block["stats"].get("status") == "available"):
+        move_days = detect_big_move_days(history_block["history"].get("rows") or [])
+        aligned = align_events_with_price(move_days, events)
+    return {"available": True, "path": str(path), "note": None,
+            "rows": events, "aligned": aligned}
+
+
+def _build_playbook_block(history_block: dict | None, kline: dict) -> dict:
+    """R11c: 回撤档位 σ 分级 + 三步核查 + LAW 6a 声明（研究流程规则，非买卖指令）。"""
+    from etf_playbook import (
+        LAW6A_DISCLAIMER,
+        daily_vol_pct,
+        drawdown_levels,
+        three_step_checklist,
+    )
+
+    closes: list[float] = []
+    if (history_block and history_block.get("stats")
+            and history_block["stats"].get("status") == "available"):
+        rows = history_block["history"].get("rows") or []
+        closes = [c for c in (safe_float(r.get("nav", r.get("close"))) for r in rows)
+                  if c is not None]
+    vol = daily_vol_pct(closes)
+    vol_source = "history"
+    if vol is None:
+        derived = kline.get("derived") or {}
+        vol = derived.get("daily_volatility_pct")
+        vol_source = "kline.derived"
+    return {
+        "available": vol is not None,
+        "vol_60d_daily_pct": round(vol, 2) if vol is not None else None,
+        "vol_source": vol_source if vol is not None else None,
+        "drawdown_levels": drawdown_levels(closes, vol),
+        "checklist": three_step_checklist(),
+        "disclaimer": LAW6A_DISCLAIMER,
+        "note": None if vol is not None
+        else "无足够历史数据计算 60 日日均波动（需 ≥61 个收盘价）",
+    }
 
 
 def _share_history_summary(sh: dict) -> dict:
@@ -44,7 +105,8 @@ def _share_history_summary(sh: dict) -> dict:
 
 
 def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
-               history: bool = False, history_days: int = 250) -> int:
+               history: bool = False, history_days: int = 250,
+               events_path: str | None = None, playbook: bool = False) -> int:
     symbol = symbol.strip()
     if not symbol.isdigit() or len(symbol) != 6:
         print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
@@ -56,15 +118,20 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     kline = query_etf_kline(symbol)
     share_history = query_etf_share_history(symbol, days=20)
 
-    # R11a: --history 时取历史行情深度（nav 链路优先，失败回退 baostock）+ 历史统计
+    # R11a: --history/--playbook 时取历史行情深度（nav 链路优先，失败回退 baostock）+ 历史统计
     history_block = None
-    if history:
+    if history or playbook:
         hist = query_etf_kline_history(symbol, days=history_days)
         hist_stats = (
             compute_history_stats(hist.get("rows") or [])
             if hist.get("status") == "available" else None
         )
         history_block = {"history": hist, "stats": hist_stats}
+
+    # R11b: 事件文件（缺省自动读 events/{symbol}.json，无文件不阻断）+ 事件-价格对照
+    events_block = _build_events_block(symbol, events_path, history_block)
+    # R11c: 情景预案（回撤档位 σ 分级 + 三步核查 + LAW 6a 声明）
+    playbook_block = _build_playbook_block(history_block, kline) if playbook else None
 
     payload = {
         "skill": "invest-a-etf",
@@ -75,7 +142,9 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         "quote": quote,
         "kline": kline if with_nav else _kline_summary(kline),
         "share_history": _share_history_summary(share_history) if not with_nav else share_history,
-        "history": history_block,
+        "history": history_block if history else None,
+        "events": events_block,
+        "playbook": playbook_block,
         "disclaimer": "研究数据快照，不构成投资建议。",
     }
 
@@ -114,6 +183,38 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     print(f"  ma20/ma60 (index): {kline.get('index_ma20')} / {kline.get('index_ma60')}")
     print(f"  boll (u/m/l):      {kline.get('boll_upper')} / {kline.get('boll_mid')} / {kline.get('boll_lower')}")
     print()
+    print()
+    print("## events (事件-价格对照 · R11b)")
+    if events_block.get("available"):
+        print(f"  {events_block['path']} · {len(events_block['rows'])} 条事件")
+        aligned_rows = events_block.get("aligned")
+        if aligned_rows:
+            for r in aligned_rows:
+                facts = "; ".join(r["同日事实"]) if r["同日事实"] else "无同日大波动"
+                link = r["可能关联（待验证）"] or "未对齐"
+                print(f"  {r['date']} {r['event'][:24]:<24s} | 同日: {facts[:34]:<34s} | {link}")
+        else:
+            print("  提示: 加 --history 输出事件-价格对照（±1 交易日对齐）")
+    else:
+        print(f"  {events_block['note']}")
+
+    if playbook_block is not None:
+        print()
+        print("## playbook (情景预案 · R11c · LAW 6a)")
+        if playbook_block.get("available"):
+            print(f"  60 日日均波动: {playbook_block['vol_60d_daily_pct']}%  "
+                  f"(来源: {playbook_block['vol_source']})")
+            print("  回撤档位 → σ 倍数 → 触发核验深度（非动作指令）:")
+            for lv in playbook_block["drawdown_levels"]:
+                sigma = f"{lv['sigma_multiple']}σ" if lv["sigma_multiple"] is not None else "N/A"
+                print(f"    {lv['level_pct']:+.0f}%  →  {sigma}  →  {lv['verification_depth']}")
+            print("  三步核查:")
+            for step in playbook_block["checklist"]:
+                print(f"    {step}")
+            print(f"  {playbook_block['disclaimer']}")
+        else:
+            print(f"  {playbook_block['note']}")
+
     if history_block is not None:
         hist = history_block["history"]
         stats = history_block["stats"]
@@ -301,6 +402,17 @@ def main(argv: list[str] | None = None) -> int:
         default=250,
         help="历史行情回溯交易日数（默认 250）",
     )
+    p_report.add_argument(
+        "--events",
+        metavar="PATH",
+        default=None,
+        help="R11b: 事件文件路径（JSON Lines）；缺省自动读 skills/invest-a-etf/events/{symbol}.json，无文件不阻断",
+    )
+    p_report.add_argument(
+        "--playbook",
+        action="store_true",
+        help="R11c: 输出情景预案（回撤档位 σ 分级 + 三步核查清单 + LAW 6a 声明）",
+    )
 
     sub.add_parser("diagnose", help="检查依赖与映射表")
 
@@ -317,7 +429,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
-                          history=args.history, history_days=args.history_days)
+                          history=args.history, history_days=args.history_days,
+                          events_path=args.events, playbook=args.playbook)
     if args.cmd == "diagnose":
         return cmd_diagnose()
     if args.cmd == "industry-pe":

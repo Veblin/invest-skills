@@ -23,6 +23,12 @@ from etf_data import (
     fetch_etf_kline_baostock,
     query_etf_kline_history,
 )
+from etf_timeline import (
+    align_events_with_price,
+    detect_big_move_days,
+    load_events_file,
+    validate_events_file,
+)
 
 _FIXTURE = (
     Path(__file__).resolve().parent.parent.parent
@@ -240,3 +246,146 @@ def test_frozen_588000_fixture_stats_match_measured():
     assert stats["status"] == "available"
     assert len(stats["big_move_days"]) == 16  # 2026 年实测 16 个 |change_pct|>=5% 交易日
     assert all(abs(m["change_pct"]) >= 5.0 for m in stats["big_move_days"])
+
+
+# ---------------------------------------------------------------------------
+# R11b：大波动日识别 / 事件-价格对齐 / 事件文件校验
+# ---------------------------------------------------------------------------
+
+def test_detect_big_move_days_frozen_588000():
+    """冻结 fixture 验证：detect_big_move_days 与 compute_history_stats 同口径
+    （588000 2026 年实测 16 个 |change_pct|>=5% 交易日）。"""
+    if not _FIXTURE.exists():
+        pytest.skip("冻结 fixture 缺失（baostock 不可用时未生成）")
+    rows = json.loads(_FIXTURE.read_text(encoding="utf-8"))["rows"]
+    move_days = detect_big_move_days(rows)
+    assert len(move_days) == 16
+    assert all(abs(m["change_pct"]) >= 5.0 for m in move_days)
+    # 与 compute_history_stats 口径一致（日期集相同）
+    stats_days = {m["date"] for m in compute_history_stats(rows)["big_move_days"]}
+    assert {m["date"] for m in move_days} == stats_days
+
+
+def test_detect_big_move_days_threshold_and_keys():
+    rows = [
+        {"date": "2026-01-05", "close": 100.0},
+        {"date": "2026-01-06", "close": 95.0},   # -5.00%
+        {"date": "2026-01-07", "close": 97.0},   # +2.11%
+        {"date": "2026-01-08", "close": 106.0},  # +9.28%
+    ]
+    moves = detect_big_move_days(rows)
+    assert [m["date"] for m in moves] == ["2026-01-06", "2026-01-08"]
+    assert moves[0]["change_pct"] == pytest.approx(-5.0)
+    # threshold 调整（01-07 为 +2.11%，abs < 3 → 不入选）
+    moves2 = detect_big_move_days(rows, threshold_pct=3.0)
+    assert [m["date"] for m in moves2] == ["2026-01-06", "2026-01-08"]
+    # nav 键兼容
+    nav_rows = [{"date": r["date"], "nav": r["close"]} for r in rows]
+    assert detect_big_move_days(nav_rows) == moves
+
+
+def test_align_events_with_price_same_day_and_nearby():
+    # 2026-05-11 为周一；05-12 周二 / 05-13 周三 / 05-14 周四 / 05-15 周五
+    move_days = [
+        {"date": "2026-05-08", "change_pct": -5.12},
+        {"date": "2026-05-11", "change_pct": 6.80},
+        {"date": "2026-05-15", "change_pct": -7.30},
+    ]
+    events = [
+        {"date": "2026-05-11", "event": "指数创历史新高", "source_url": "https://a",
+         "published_date": "2026-05-11", "confidence": "一手"},   # 同日
+        {"date": "2026-05-12", "event": "半导体设备景气报道", "source_url": "https://b",
+         "published_date": "2026-05-12", "confidence": "二手"},   # 前一交易日 = 05-11 对齐（邻近）
+        {"date": "2026-05-14", "event": "权重股中报预告", "source_url": "https://c",
+         "published_date": "2026-05-14", "confidence": "二手"},   # 后一交易日 = 05-15 对齐（邻近）
+        {"date": "2026-06-01", "event": "无大波动邻近", "source_url": "https://d",
+         "published_date": "2026-06-01", "confidence": "一手"},   # 未对齐
+    ]
+    out = align_events_with_price(move_days, events)
+    assert len(out) == 4
+    by_date = {r["date"]: r for r in out}
+
+    r1 = by_date["2026-05-11"]
+    assert r1["aligned"] is True
+    assert r1["同日事实"] == ["2026-05-11 单日 +6.80%"]
+    assert "高可信说明候选" in r1["可能关联（待验证）"]  # confidence=一手
+
+    r2 = by_date["2026-05-12"]
+    assert r2["aligned"] is True  # 邻近：前一交易日 05-11 有大波动
+    assert r2["同日事实"] == []   # 非同日 → 同日事实为空（纯时间线列不受污染）
+    assert r2["可能关联（待验证）"].startswith("待验证")  # confidence=二手
+    assert "邻近" in r2["可能关联（待验证）"]
+
+    r3 = by_date["2026-05-14"]
+    assert r3["aligned"] is True  # 邻近：后一交易日 05-15 有大波动
+    assert r3["同日事实"] == []
+    assert r3["可能关联（待验证）"].startswith("待验证")  # confidence=二手
+
+    r4 = by_date["2026-06-01"]
+    assert r4["aligned"] is False
+    assert r4["同日事实"] == []
+    assert r4["可能关联（待验证）"] is None
+
+
+def test_validate_events_file_ok_and_rejections(tmp_path):
+    ok_file = tmp_path / "events_ok.json"
+    ok_file.write_text(
+        '{"date": "2026-05-11", "event": "A", "source_url": "https://a", '
+        '"published_date": "2026-05-11", "confidence": "一手"}\n'
+        '{"date": "2026-05-12", "event": "B", "source_url": "https://b", '
+        '"published_date": "2026-05-12T10:00:00", "confidence": "二手"}\n',
+        encoding="utf-8",
+    )
+    ok, msg = validate_events_file(ok_file)
+    assert ok is True
+    assert "2 条事件" in msg
+    events, _ = load_events_file(ok_file)
+    assert len(events) == 2
+    assert events[1]["confidence"] == "二手"
+
+    # 缺 source_url → 整文件拒绝并报行号
+    bad1 = tmp_path / "events_missing_url.json"
+    bad1.write_text(
+        '{"date": "2026-05-11", "event": "A", "source_url": "https://a", '
+        '"published_date": "2026-05-11", "confidence": "一手"}\n'
+        '{"date": "2026-05-12", "event": "B", "published_date": "2026-05-12", '
+        '"confidence": "二手"}\n',
+        encoding="utf-8",
+    )
+    ok, msg = validate_events_file(bad1)
+    assert ok is False
+    assert "第 2 行" in msg and "source_url" in msg
+
+    # 非 ISO 日期 → 整文件拒绝并报行号
+    bad2 = tmp_path / "events_bad_date.json"
+    bad2.write_text(
+        '{"date": "2026/05/11", "event": "A", "source_url": "https://a", '
+        '"published_date": "2026-05-11", "confidence": "一手"}\n',
+        encoding="utf-8",
+    )
+    ok, msg = validate_events_file(bad2)
+    assert ok is False
+    assert "第 1 行" in msg and "date 非 ISO" in msg
+
+    # confidence 非法 → 整文件拒绝并报行号
+    bad3 = tmp_path / "events_bad_conf.json"
+    bad3.write_text(
+        '{"date": "2026-05-11", "event": "A", "source_url": "https://a", '
+        '"published_date": "2026-05-11", "confidence": "第三方"}\n',
+        encoding="utf-8",
+    )
+    ok, msg = validate_events_file(bad3)
+    assert ok is False
+    assert "第 1 行" in msg and "confidence 非法" in msg
+
+    # JSON 解析失败 → 行号报告；文件不存在/为空 → 拒绝
+    bad4 = tmp_path / "events_bad_json.json"
+    bad4.write_text('{"date": "2026-05-11", broken\n', encoding="utf-8")
+    ok, msg = validate_events_file(bad4)
+    assert ok is False and "第 1 行 JSON 解析失败" in msg
+    ok, msg = validate_events_file(tmp_path / "missing.json")
+    assert ok is False and "不存在" in msg
+    empty = tmp_path / "events_empty.json"
+    empty.write_text("", encoding="utf-8")
+    ok, msg = validate_events_file(empty)
+    assert ok is False and "为空" in msg
