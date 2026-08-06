@@ -27,7 +27,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_not_called()
         mock_cards.assert_not_called()
@@ -49,7 +49,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_not_called()
         mock_cards.assert_not_called()
@@ -67,7 +67,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_called_once()
         mock_cards.assert_called_once()
@@ -84,7 +84,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_called_once()
         mock_cards.assert_called_once()
@@ -102,7 +102,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_called_once()
         mock_cards.assert_called_once()

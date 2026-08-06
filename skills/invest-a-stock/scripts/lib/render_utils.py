@@ -218,6 +218,10 @@ def _v3_cv7_assessment(
     """CV-7：PE 分位 vs 主力资金方向。
 
     分位边界与 valuation.ZONE_LOW/HIGH_THRESHOLD 一致（严格 <30 / >70）。
+
+    收敛/分歧语义（方向一致 = convergence）：
+    - 估值低位 + 资金净流入 / 估值高位 + 资金净流出 → convergence（共振）
+    - 估值低位 + 资金净流出 / 估值高位 + 资金净流入 → divergence（背离）
     """
     from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
 
@@ -225,9 +229,13 @@ def _v3_cv7_assessment(
         return None
     mf_f = float(mf_out)
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f < 0:
-        return "convergence", f"PE 低位（{pe_pct:.1f}%）且主力资金净流出"
+        return "divergence", f"PE 低位（{pe_pct:.1f}%）但主力资金净流出"
     if pe_pct > ZONE_HIGH_THRESHOLD and mf_f > 0:
         return "divergence", f"PE 高位（{pe_pct:.1f}%）但主力资金净流入"
+    if pe_pct < ZONE_LOW_THRESHOLD and mf_f > 0:
+        return "convergence", f"PE 低位（{pe_pct:.1f}%）且主力资金净流入"
+    if pe_pct > ZONE_HIGH_THRESHOLD and mf_f < 0:
+        return "convergence", f"PE 高位（{pe_pct:.1f}%）且主力资金净流出"
     return "gap", "估值与资金流向未呈现典型背离/共振"
 
 

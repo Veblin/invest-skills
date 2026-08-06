@@ -478,7 +478,7 @@ class TestRenderV3:
             mock_ms.side_effect = lambda col, sym: col.update(
                 market_structure={"availability": {}}
             ) or col["market_structure"]
-            render(c, "600176", "md")
+            render(c, "600176", "md", attach_extras=True)
         mock_ms.assert_called_once_with(c, "600176")
         assert "market_structure" in c
 

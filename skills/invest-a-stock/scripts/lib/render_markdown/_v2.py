@@ -108,7 +108,7 @@ def render_json(collection: dict[str, Any]) -> str:
 
 # --- render ---
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
-           mode: str = "full", *, attach_extras: bool = True) -> str:
+           mode: str = "full", *, attach_extras: bool = False) -> str:
     """统一渲染入口。支持 compact / json / md / html 格式。
 
     compact  — 紧凑文本报告（v0.1.2 八段 v2 模板）
@@ -117,13 +117,24 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
     html     — HTML 研究报告（v0.1.2 冻结模板）
 
     mode     — "full"（完整九模块）/"brief"（精简简报）/"concise"（对话场景精简）
-    attach_extras — False 时跳过 market_structure / phase2 补采（离线 synthesize）
+    attach_extras — 默认 False：纯渲染流程不发起任何网络调用。仅显式置 True 时
+                    联网补采 market_structure / phase2（如 synthesize 现场补齐）。
+                    联网路径任何异常（超时/挂起/权限）都快速降级：记日志 + 渲染
+                    缺失块标注（renderer 对缺失数据输出"未获取到任何有效数据"），
+                    绝不阻塞渲染。
     """
     if attach_extras:
         from lib import collector
         if not collection.get("market_structure"):
-            collector.attach_market_structure(collection, symbol)
-        collector.attach_phase2_extras(collection, symbol)
+            try:
+                collector.attach_market_structure(collection, symbol)
+            except Exception as exc:
+                logger.warning("attach_market_structure failed (non-fatal): %s", exc)
+                collection.setdefault("_meta", {})["market_structure_error"] = str(exc)
+        try:
+            collector.attach_phase2_extras(collection, symbol)
+        except Exception as exc:
+            logger.warning("attach_phase2_extras failed (non-fatal): %s", exc)
 
         # Events: backfill when never attached, or [] without events_summary (failed path).
         # Standard collect→report with events_summary already ran attach_events.

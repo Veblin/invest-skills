@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from stock_testutil import FORBIDDEN_SIGNAL_WORDS
@@ -113,6 +115,40 @@ class TestRenderReportV2Structure:
         assert "ROE=20.2%" in text
         # PE 应取 ~24.9x（最新），不是 20.0x（降序末位）
         assert "PE=24.9x" in text
+
+
+class TestRenderAttachExtras:
+    """render() 的 attach_extras 网络行为（纯渲染流程不得联网；联网失败快速降级）。"""
+
+    def test_render_default_no_network_calls(self):
+        """默认 attach_extras=False：render 不发起任何联网补采（mock 记录调用数=0）。"""
+        from lib import collector
+        from lib.render import render
+
+        c = collection_v2_minimal()
+        with patch.object(collector, "attach_market_structure") as m_ms, \
+             patch.object(collector, "attach_phase2_extras") as m_p2:
+            render(c, "600176", "md")
+            render(c, "600176", "compact")
+        m_ms.assert_not_called()
+        m_p2.assert_not_called()
+        assert "market_structure" not in c
+
+    def test_render_attach_extras_network_exception_degrades(self):
+        """显式 attach_extras=True 且联网抛异常（超时/挂起）：不卡死、不崩溃，
+        输出缺失块标注（participant 节渲染"未获取到任何有效数据"）。"""
+        from lib import collector
+        from lib.render import render
+
+        c = collection_v2_minimal()
+        with patch.object(
+            collector, "attach_market_structure",
+            side_effect=TimeoutError("opt_daily timeout"),
+        ), patch.object(collector, "attach_phase2_extras"), \
+           patch("lib.events.attach_events"):
+            text = render(c, "600176", "md", attach_extras=True)
+        assert "未获取到任何有效数据" in text
+        assert "market_structure" not in c
 
 
 class TestRenderValuationDegraded:

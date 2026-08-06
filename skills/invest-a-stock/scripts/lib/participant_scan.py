@@ -138,12 +138,12 @@ def _scan_rows(
         })
 
     turnover = ms.get("turnover")
-    if isinstance(turnover, dict) and turnover.get("percentile_1y") is not None:
+    if isinstance(turnover, dict) and turnover.get("percentile_60d") is not None:
         try:
-            pct = float(turnover["percentile_1y"])
+            pct = float(turnover["percentile_60d"])
             rows.append({
                 "role": "换手（散户活跃度代理）",
-                "signal": f"近一年换手历史位置 {pct:.0f}%",
+                "signal": f"近60日换手历史位置 {pct:.0f}%",
                 "source": str(turnover.get("source") or "market_structure.turnover"),
             })
         except (TypeError, ValueError):
