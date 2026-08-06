@@ -159,3 +159,73 @@ class TestPercentileBoundaries:
         card = industry_climate_card(_dims(pct_valid=False))
         assert card["context"] == "mid"
         assert card["state"] == "扩张"
+
+
+# ---------------------------------------------------------------------------
+# _dim_rs：近期窗口相对强度（修复：全历史累计 RS 恒 up）
+# ---------------------------------------------------------------------------
+
+class TestDimRsRecentWindow:
+    """构造「长端涨 300% 但近 120 日下跌」的序列 → 方向必须是 down（近期信号）。"""
+
+    @staticmethod
+    def _make_closes(n: int, long_start: float, long_end: float,
+                     near_start: float, near_end: float) -> list[float]:
+        """前 (n-120) 日线性上行（long_start→long_end），尾部 120 日线性下行。"""
+        long_len = n - 120
+        long_vals = [long_start + (long_end - long_start) * i / max(long_len - 1, 1)
+                     for i in range(long_len)]
+        near_vals = [near_start + (near_end - near_start) * i / 119 for i in range(120)]
+        return long_vals + near_vals
+
+    def test_long_gain_but_recent_decline_gives_down(self, monkeypatch):
+        from types import SimpleNamespace
+        import pandas as pd
+        from lib.climate import _dim_rs
+
+        n = 1000
+        # 行业指数：全历史 100 → 400（+300%），近 120 日 400 → 300（-25%）
+        ind_closes = self._make_closes(n, 100, 400, 400, 300)
+        # 基准：全历史 1000 → 1100（+10%），近 120 日持平
+        bench_closes = self._make_closes(n, 1000, 1100, 1100, 1100)
+        fake_ak = SimpleNamespace(
+            index_hist_sw=lambda **kw: pd.DataFrame({"close": ind_closes}),
+            stock_zh_index_daily=lambda **kw: pd.DataFrame({"close": bench_closes}),
+        )
+        monkeypatch.setattr(
+            "lib.climate._sw_tables",
+            lambda: {"first": [], "second": [],
+                     "map": {"半导体": ("801081", "second")}},
+        )
+        monkeypatch.setattr("lib.climate._ak", lambda: fake_ak)
+
+        result = _dim_rs("半导体")
+        assert result["valid"] is True
+        # 旧实现（全历史对齐）会得 "up"；修复后必须是近期窗口的 "down"
+        assert result["value"] == "down"
+        assert result.get("window") == 120
+        assert "近 120 交易日" in result["source"]
+
+    def test_recent_window_rise_gives_up(self, monkeypatch):
+        from types import SimpleNamespace
+        import pandas as pd
+        from lib.climate import _dim_rs
+
+        n = 1000
+        # 行业指数：全历史 100 → 200，近 120 日 200 → 260（+30%）→ 近端 up
+        ind_closes = self._make_closes(n, 100, 200, 200, 260)
+        bench_closes = self._make_closes(n, 1000, 1100, 1100, 1100)
+        fake_ak = SimpleNamespace(
+            index_hist_sw=lambda **kw: pd.DataFrame({"close": ind_closes}),
+            stock_zh_index_daily=lambda **kw: pd.DataFrame({"close": bench_closes}),
+        )
+        monkeypatch.setattr(
+            "lib.climate._sw_tables",
+            lambda: {"first": [], "second": [],
+                     "map": {"半导体": ("801081", "second")}},
+        )
+        monkeypatch.setattr("lib.climate._ak", lambda: fake_ak)
+
+        result = _dim_rs("半导体")
+        assert result["valid"] is True
+        assert result["value"] == "up"

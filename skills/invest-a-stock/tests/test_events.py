@@ -280,6 +280,25 @@ class TestFilterByDays:
         result = _filter_by_days(events, 30)
         assert len(result) == 1
 
+    def test_cutoff_uses_shanghai_date_not_host_local(self, monkeypatch):
+        """UTC 主机已过上海零点（上海日期 = host 日期 + 1）→ cutoff 必须按上海口径。
+
+        host 视角 30 日前事件 = 上海视角 31 日前 → 落在上海 30 日窗口之下，必须被丢弃；
+        host 口径（cutoff=host-30）会错误保留它。
+        """
+        host_today = date.today()
+        fake_shanghai = datetime.now() + timedelta(days=1)  # 模拟上海已翻日
+        monkeypatch.setattr("lib.events._shanghai_now", lambda: fake_shanghai)
+
+        events = [
+            {"date": (host_today - timedelta(days=30)).isoformat(),
+             "title": "Host boundary", "type": "other"},
+            {"date": fake_shanghai.date().isoformat(),
+             "title": "Shanghai today", "type": "other"},
+        ]
+        result = _filter_by_days(events, 30)
+        assert [e["title"] for e in result] == ["Shanghai today"]
+
 
 # ── _dedup_events ──
 

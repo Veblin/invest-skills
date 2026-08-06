@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
+from .shared_dates import shanghai_now as _shanghai_now
 from .shared_dates import yyyymmdd_to_iso as _to_iso_date
 
 logger = logging.getLogger(__name__)
@@ -506,7 +507,7 @@ def _filter_by_days(events: list[dict], days: int) -> list[dict]:
     if days <= 0:
         return []
 
-    cutoff_date = date.today() - timedelta(days=days)
+    cutoff_date = _shanghai_now().date() - timedelta(days=days)
     out: list[dict] = []
     for e in events:
         date_str = str(e.get("date", ""))

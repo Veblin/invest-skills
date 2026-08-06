@@ -244,3 +244,117 @@ class TestNoTriggerNoNetwork:
 
         from lib.render_markdown._base import _render_limit_streak_structure
         assert _render_limit_streak_structure(coll) == []
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 时区：上海日期口径（host-local date.today() 修复）
+# ---------------------------------------------------------------------------
+
+class TestShanghaiDateSemantics:
+    """模拟 UTC 主机已过上海零点（上海日期 = host 日期 + 1）→ 断言采集用上海日期。"""
+
+    @staticmethod
+    def _patch_shanghai(monkeypatch) -> "datetime":
+        from datetime import datetime, timedelta
+        fake = datetime.now() + timedelta(days=1)  # 上海已比 host 早一天
+        monkeypatch.setattr("lib.lhb._shanghai_now", lambda: fake)
+        return fake
+
+    def test_zt_pool_uses_shanghai_date(self, monkeypatch):
+        import akshare as ak
+        from datetime import date
+        fake = self._patch_shanghai(monkeypatch)
+        called: dict = {}
+
+        def fake_zt(date):
+            called["date"] = date
+            return pd.DataFrame([{"代码": "600001", "名称": "A", "连板数": 1}])
+
+        monkeypatch.setattr(ak, "stock_zt_pool_em", fake_zt)
+        from lib.lhb import fetch_zt_pool
+        result = fetch_zt_pool()
+        assert result is not None
+        shanghai_ymd = fake.strftime("%Y%m%d")
+        assert called["date"] == shanghai_ymd
+        assert called["date"] != date.today().strftime("%Y%m%d")
+        assert result["date"] == fake.strftime("%Y-%m-%d")
+
+    def test_lhb_em_uses_shanghai_dates(self, monkeypatch):
+        from datetime import date, timedelta
+        import akshare as ak
+        fake = self._patch_shanghai(monkeypatch)
+        called: dict = {}
+        monkeypatch.setattr(
+            ak, "stock_lhb_detail_em",
+            lambda **kw: (called.update(kw) or pd.DataFrame()),
+        )
+        from lib.lhb import _fetch_lhb_em
+        assert _fetch_lhb_em("600001", days=7) is None  # 空 df → None，仅断言窗口参数
+        end = fake.date()
+        assert called["end_date"] == end.strftime("%Y%m%d")
+        assert called["start_date"] == (end - timedelta(days=6)).strftime("%Y%m%d")
+        assert called["end_date"] != date.today().strftime("%Y%m%d")
+
+    def test_lhb_sina_uses_shanghai_date(self, monkeypatch):
+        from datetime import date
+        import akshare as ak
+        fake = self._patch_shanghai(monkeypatch)
+        calls: list = []
+
+        def fake_sina(date):
+            calls.append(date)
+            return pd.DataFrame([{"代码": "600001", "名称": "A"}])
+
+        monkeypatch.setattr(ak, "stock_lhb_detail_daily_sina", fake_sina)
+        from lib.lhb import _fetch_lhb_sina
+        result = _fetch_lhb_sina("600001", days=7)
+        assert result is not None
+        assert calls[0] == fake.strftime("%Y%m%d")
+        assert calls[0] != date.today().strftime("%Y%m%d")
+
+
+class TestRenderMaSystemUnavailableClose:
+    """缺陷5: latest_close=None/NaN → 不抛错、不误标全部「现价下方」。"""
+
+    def _fake_tech(self, latest_close):
+        return {
+            "latest_close": latest_close,
+            "trend": {
+                "ma": {"5": [11.0], "10": [10.5], "20": [10.0], "60": [9.0]},
+                "alignment": {"trend_label": "多头排列"},
+            },
+        }
+
+    def test_none_latest_close_does_not_crash(self):
+        from lib.render_markdown._base import _render_ma_system
+
+        coll = _collection(_kline(60))
+        with patch("lib.technical.compute", return_value=self._fake_tech(None)):
+            lines = _render_ma_system(coll)  # 修复前: None >= v → TypeError 逃出渲染
+        joined = "\n".join(lines)
+        assert joined
+        assert "现价下方" not in joined
+        assert "现价不可得" in joined  # 该行标不可得，而非错标
+        assert "现价 " not in joined or "现价 nan" not in joined
+
+    def test_nan_latest_close_marks_unavailable(self):
+        from lib.render_markdown._base import _render_ma_system
+
+        coll = _collection(_kline(60))
+        with patch("lib.technical.compute", return_value=self._fake_tech(float("nan"))):
+            lines = _render_ma_system(coll)
+        joined = "\n".join(lines)
+        assert joined
+        assert "现价下方" not in joined  # NaN 参与比较恒 False → 修复前四根 MA 全误标
+        assert "现价不可得" in joined
+
+    def test_nan_close_natural_path_no_crash(self):
+        from lib.render_markdown._base import _render_ma_system
+
+        rows = _kline(60)
+        rows[-1]["close"] = float("nan")  # compute() 的 latest_close 为 NaN（or 0 不拦截 NaN）
+        lines = _render_ma_system(_collection(rows))
+        joined = "\n".join(lines)
+        assert joined
+        assert "现价下方" not in joined
+        assert "MA5: —" in joined  # MA 值亦为 NaN → 标不可得，不渲染 'MA5=nan'

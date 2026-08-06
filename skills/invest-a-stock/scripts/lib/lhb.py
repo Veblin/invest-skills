@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
+
+from .shared_dates import shanghai_now as _shanghai_now
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ def _fetch_lhb_em(symbol: str, days: int) -> dict | None:
     """东财龙虎榜明细（datacenter-web，2026-08-06 探测可达）。"""
     try:
         import akshare as ak
-        end = date.today()
+        end = _shanghai_now().date()
         start = end - timedelta(days=days - 1)
         df = ak.stock_lhb_detail_em(
             start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"),
@@ -108,7 +110,7 @@ def _fetch_lhb_sina(symbol: str, days: int) -> dict | None:
         import akshare as ak
         rows: list[dict] = []
         for offset in range(days):
-            day = date.today() - timedelta(days=offset)
+            day = _shanghai_now().date() - timedelta(days=offset)
             df = ak.stock_lhb_detail_daily_sina(date=day.strftime("%Y%m%d"))
             if df is None or df.empty:
                 continue
@@ -134,7 +136,7 @@ def fetch_zt_pool(max_lookback: int = 5) -> dict | None:
     try:
         import akshare as ak
         for offset in range(max_lookback):
-            day = date.today() - timedelta(days=offset)
+            day = _shanghai_now().date() - timedelta(days=offset)
             df = ak.stock_zt_pool_em(date=day.strftime("%Y%m%d"))
             if df is None or df.empty:
                 continue

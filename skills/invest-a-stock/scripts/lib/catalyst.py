@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from .shared_dates import shanghai_now as _shanghai_now
+
 logger = logging.getLogger(__name__)
 
 _CATALYST_TYPES = {
@@ -51,7 +53,7 @@ class CatalystEvent:
 def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
     """从 akshare 分红数据提取未来除权日。"""
     events: list[CatalystEvent] = []
-    today = date.today()
+    today = _shanghai_now().date()
     cutoff = today + timedelta(days=lookahead_days)
 
     try:
@@ -101,7 +103,7 @@ def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEve
 def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
     """从 akshare 限售解禁队列提取未来解禁事件。"""
     events: list[CatalystEvent] = []
-    today = date.today()
+    today = _shanghai_now().date()
     cutoff = today + timedelta(days=lookahead_days)
 
     try:
@@ -136,12 +138,13 @@ def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[Ca
             if today <= event_date <= cutoff:
                 shares = row.get("解禁数量") or 0
                 shares_yi = float(shares) / 1e8 if shares else 0
-                holder_count = row.get("解禁股东数", 0)
+                holder_count = _safe_int(row.get("解禁股东数", 0))
+                holder_label = f"{holder_count} 个股东" if holder_count is not None else "股东数不可得"
                 stock_type = row.get("限售股类型", "")
                 events.append(CatalystEvent(
                     symbol=symbol, date=event_date, event_type="restricted_unlock",
                     title=f"限售解禁 {shares_yi:.2f} 亿股" if shares_yi > 0 else "限售解禁",
-                    detail=f"{int(holder_count)} 个股东, {stock_type}",
+                    detail=f"{holder_label}, {stock_type}",
                     impact="高", source="akshare.stock_restricted_release_queue_em",
                 ))
     except Exception as exc:
@@ -153,7 +156,7 @@ def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[Ca
 def _fetch_announcement_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
     """从公告中提取未来日期（如"定于 XXXX年XX月XX日 召开股东大会"）。"""
     events: list[CatalystEvent] = []
-    today = date.today()
+    today = _shanghai_now().date()
     cutoff = today + timedelta(days=lookahead_days)
 
     try:
@@ -301,6 +304,23 @@ def format_catalyst_calendar(events: list[CatalystEvent], symbol: str = "") -> s
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
+
+def _safe_int(value: Any, default: int | None = None) -> int | None:
+    """NaN 安全整数转换：pandas NaN / float('nan') → None，缺失或非法 → default。
+
+    单条记录字段异常不再抛错吞掉整批事件（如解禁股东数为 NaN）。
+    """
+    try:
+        import pandas as pd
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def _parse_date(raw: Any) -> date | None:
     """解析多种日期格式，容忍 NaT/NaN。"""

@@ -26,6 +26,9 @@ CLIMATE_PCT_LOW = 0.30
 CLIMATE_PCT_HIGH = 0.70
 CLIMATE_MIN_VALID = 3
 
+# 相对强度窗口（交易日）：RS 方向反映近期相对强度，而非 2005 年起的累计表现
+RS_WINDOW = 120
+
 _DIM_ORDER = ("估值分位", "盈利趋势", "相对强度", "资金流", "政策证据")
 _DIRECTION_DIMS = ("盈利趋势", "相对强度", "资金流")
 
@@ -248,7 +251,11 @@ def _dim_earnings(industry: str) -> dict:
 
 
 def _dim_rs(industry: str) -> dict:
-    """相对强度：申万行业指数（日线）vs 沪深300（新浪 sh000300）的 RS。"""
+    """相对强度：申万行业指数（日线）vs 沪深300（新浪 sh000300）的 RS。
+
+    仅取近 RS_WINDOW 个交易日计算方向——全历史（2005 起）累计涨跌会掩盖近期
+    走弱信号（长端涨 300%、近 12 月下跌的板块仍会恒投 up 票）。
+    """
     name = "相对强度"
     try:
         entry = _sw_tables()["map"].get(industry)
@@ -265,12 +272,17 @@ def _dim_rs(industry: str) -> dict:
             return {"name": name, "value": None, "source": "申万行业指数/沪深300", "valid": False}
         ind_closes = ind[ind_col].astype(float).tolist()
         bench_closes = bench["close"].astype(float).tolist()
+        # 近期窗口：不足窗口长度时取全部可用（relative_strength 仍会做长度对齐）
+        ind_closes = ind_closes[-RS_WINDOW:]
+        bench_closes = bench_closes[-RS_WINDOW:]
         from lib.technical import relative_strength
         rs = relative_strength(ind_closes, bench_closes)
         if "rs_latest" not in rs:
             return {"name": name, "value": None, "source": "申万行业指数/沪深300", "valid": False}
         direction = "up" if rs["rs_latest"] > rs["rs_start"] else "down"
-        return {"name": name, "value": direction, "source": "申万行业指数 vs 沪深300", "valid": True}
+        return {"name": name, "value": direction,
+                "source": f"申万行业指数 vs 沪深300（近 {RS_WINDOW} 交易日）",
+                "window": RS_WINDOW, "valid": True}
     except Exception as exc:
         logger.warning("climate[相对强度] %s: %s", industry, exc)
         return {"name": name, "value": None, "source": "申万行业指数/沪深300", "valid": False}
