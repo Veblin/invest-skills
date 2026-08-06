@@ -631,6 +631,12 @@ def cmd_report(args: argparse.Namespace) -> int:
             print("⚡ 近 5 日 ≥2 涨停，已附加连板结构数据（龙虎榜/涨停池）", file=sys.stderr)
     except Exception:  # 采集失败不阻断报告
         pass
+    # R10/R12g-B: 风格-标的匹配三态（风格档案 + 同标的 journal Q1 代理）
+    try:
+        from lib.style_match import assemble_style_match
+        result["style_match"] = assemble_style_match(result, args.symbol)
+    except Exception:  # 装配失败不阻断报告
+        pass
     if getattr(args, "strict_rigor", False):
         result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)

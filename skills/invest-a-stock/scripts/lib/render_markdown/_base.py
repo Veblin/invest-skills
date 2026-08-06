@@ -135,6 +135,7 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
         lines.append(f"**[产业链]** {chain['industry']} · {pos}")
 
     lines.extend(_render_income_driver(collection))
+    lines.extend(_render_style_match(collection))
     lines.extend(_render_success_factors(collection))
     lines.extend(_render_ma_system(collection))
     lines.extend(_render_price_structure(collection))
@@ -199,6 +200,28 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
             lines.append(f"  - ⚠️ 反例: {item}")
     if result.get("missing_evidence"):
         lines.append("  - 🔍 证据缺失（需 WebSearch/公告补充）: " + "、".join(result["missing_evidence"]))
+    return lines
+
+
+# --- _render_style_match (R10) ---
+def _render_style_match(collection: dict[str, Any]) -> list[str]:
+    """R10: 报告头部「风格-标的匹配」三态行 + 混搭提示（固定模板）。
+
+    数据来源：cmd_report 装配的 collection["style_match"] =
+    {"style", "driver", "journal_driver", "state", "reason", "hint"}（match_style 产出）。
+    无 style_match → 不渲染。
+    """
+    cfg = collection.get("style_match")
+    if not isinstance(cfg, dict) or not cfg.get("state"):
+        return []
+    state = cfg["state"]
+    driver = str(cfg.get("driver") or "?")
+    style = str(cfg.get("style") or "未填写")
+    lines = [f"**[风格-标的匹配（R10）]** {state}：自评风格 {style} × 收益驱动 {driver}"]
+    if state == "混搭风险" and cfg.get("hint"):
+        lines.append(f"  - ⚠️ {cfg['hint']}")
+    elif cfg.get("reason"):
+        lines.append(f"  - {cfg['reason']}")
     return lines
 
 
