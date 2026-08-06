@@ -17,7 +17,7 @@ from datetime import date
 from typing import Any
 
 from lib.financials import parse_end_date as _parse_end_date
-from lib.nums import safe_float as _safe_float
+from lib.nums import coalesce_field as _coalesce_field, safe_float as _safe_float
 from lib.stats import calc_beta, median, percentile_rank  # re-exported for BC
 
 from .shared_dates import shanghai_days_ago
@@ -546,8 +546,11 @@ def _latest_financial_row(rows: list[dict]) -> dict | None:
 
 
 def _infer_tax_rate(row: dict) -> float:
-    tax = _safe_float(row.get("income_tax") or row.get("tax"))
-    profit = _safe_float(row.get("total_profit") or row.get("ebit"))
+    # D1: 0.0 是合法值（免税/亏损抵免期 income_tax=0 → 税率 0%，total_profit=0 → 盈亏平衡），
+    # 不得用 `or` 链（0.0 判为 falsy 降级到备用 key/None → 默认 0.25 系统性误算）。
+    # coalesce_field 按 key 存在性取值：0.0 保留，仅缺失/None/NaN 才 fallback 下一 key。
+    tax = _coalesce_field(row, "income_tax", "tax")
+    profit = _coalesce_field(row, "total_profit", "ebit")
     if tax is not None and profit is not None and profit > 0:
         return max(0.0, min(0.35, tax / profit))
     return 0.25

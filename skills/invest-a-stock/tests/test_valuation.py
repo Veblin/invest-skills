@@ -757,3 +757,78 @@ class TestOpportunityCost:
             r = calc_opportunity_cost(pe, 0.025)
             assert r["available"] is False
             assert "PE" in r["reason"]
+
+
+class TestInferTaxRateZeroSafe:
+    """D1 缺陷1: 0.0 是合法值（免税/亏损抵免期），不得被 `or` 链当缺失。"""
+
+    def test_tax_zero_is_zero_not_default(self):
+        from lib.valuation import _infer_tax_rate
+
+        # income_tax=0.0（免税期）→ 税率 0%，而非 or 回退 tax=0.05 或默认 0.25
+        assert _infer_tax_rate({"income_tax": 0.0, "tax": 0.05, "total_profit": 100.0}) == 0.0
+        # 备用 key 缺失时同样保持 0.0 → 0%
+        assert _infer_tax_rate({"income_tax": 0.0, "total_profit": 100.0}) == 0.0
+
+    def test_profit_zero_preserved_not_fallback_to_ebit(self):
+        from lib.valuation import _infer_tax_rate
+
+        # total_profit=0.0（盈亏平衡期）不得 or 回退到 ebit=50 → 走默认税率 0.25，
+        # 而非用 ebit 反推 5.0/50.0=0.1（用错误的口径计算税率）
+        assert _infer_tax_rate({"income_tax": 5.0, "total_profit": 0.0, "ebit": 50.0}) == 0.25
+
+    def test_normal_positive_rate(self):
+        from lib.valuation import _infer_tax_rate
+
+        assert _infer_tax_rate({"income_tax": 15.0, "total_profit": 100.0}) == 0.15
+
+
+class TestDualEngineParity:
+    """缺陷4: 脚本路径 delegate 到 lib/valuation.py，双引擎核心公式一致。"""
+
+    def test_implied_growth_matches_lib(self):
+        from valuation_calc import implied_growth_detailed
+        from lib.valuation import implied_growth as lib_implied_growth
+
+        script = implied_growth_detailed(pe=25.0, rf=0.02, erp=0.06)
+        lib = lib_implied_growth(pe_ttm=25.0, risk_free_rate=0.02, erp=0.06)
+        assert script["g_implied"] == lib["g_implied"]
+        assert script["r_required"] == lib["r"]
+        assert script["earnings_yield"] == pytest.approx(1.0 / 25.0, rel=1e-9)
+
+    def test_implied_growth_error_parity(self):
+        from valuation_calc import implied_growth_detailed
+        from lib.valuation import implied_growth as lib_implied_growth
+
+        script = implied_growth_detailed(pe=0.0, rf=0.02)
+        assert "error" in script
+        assert script["error"] == lib_implied_growth(0.0, 0.02)["error"]
+
+    def test_historical_percentile_matches_lib(self):
+        from valuation_calc import calc_historical_percentile
+        from lib.valuation import valuation_summary
+
+        rows = [
+            {"pe_ttm": 10.0, "pb": 1.0},
+            {"pe_ttm": 20.0, "pb": 2.0},
+            {"pe_ttm": 30.0, "pb": 3.0},
+        ]
+        script = calc_historical_percentile(rows)
+        lib = valuation_summary([10.0, 20.0, 30.0], [1.0, 2.0, 3.0])
+        assert script["pe_current"] == lib["pe"]["current"]
+        assert script["pe_median"] == lib["pe"]["median"]
+        assert script["pe_pct"] == round(lib["pe"]["pct"], 1)
+        assert script["pb_current"] == lib["pb"]["current"]
+        assert script["pb_median"] == lib["pb"]["median"]
+        assert script["pb_pct"] == round(lib["pb"]["pct"], 1)
+
+    def test_historical_percentile_loss_warning_kept(self):
+        from valuation_calc import calc_historical_percentile
+
+        # 12/30 交易日 PE 不可得（亏损期）→ 亏损期标注仍在脚本路径暴露
+        rows = [{"pe_ttm": None, "pb": 1.0}] * 12 + [
+            {"pe_ttm": 20.0 + i, "pb": 2.0} for i in range(18)
+        ]
+        result = calc_historical_percentile(rows)
+        assert result["pe_neg_pct"] == pytest.approx(0.4)
+        assert any("仅作位置参考" in w for w in result["warnings"])

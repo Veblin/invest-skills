@@ -2331,12 +2331,12 @@ def _section_fundamentals_layered(
     rev_yoy: float | None = None
     if rev_cur is not None and rev_prev is not None and rev_prev > 0:
         rev_yoy = (rev_cur - rev_prev) / rev_prev * 100
-    ar_cur = _safe_num(latest_fin.get("accounts_receiv") or latest_fin.get("ar"))
-    ar_prev = _safe_num(prev_fin.get("accounts_receiv") or prev_fin.get("ar"))
+    ar_cur = _fin_field_num(latest_fin, "accounts_receiv", "ar")
+    ar_prev = _fin_field_num(prev_fin, "accounts_receiv", "ar")
     ar_growth: float | None = None
     if ar_cur is not None and ar_prev is not None and ar_prev > 0:
         ar_growth = (ar_cur - ar_prev) / ar_prev * 100
-    inv_cur = _safe_num(latest_fin.get("inventory") or latest_fin.get("inventories"))
+    inv_cur = _fin_field_num(latest_fin, "inventory", "inventories")
     cagr, cagr_years_span = _compute_metric_cagr(fin_list, "revenue")
     np_cagr, np_cagr_years_span = _compute_metric_cagr(fin_list, "net_profit")
     fin_rev_list = [r for r in fin_list if _safe_num(r.get("revenue")) is not None]
@@ -2864,9 +2864,9 @@ def _section_fundamentals_layered(
     # C-② 杜邦拆解 ROE
     lines.append("#### C-② 杜邦拆解 ROE")
     roe_v = _safe_num(latest_fin.get("roe"))
-    npm = _safe_num(latest_fin.get("netprofit_margin") or latest_fin.get("np_margin"))
-    tat = _safe_num(latest_fin.get("asset_turnover") or latest_fin.get("assets_turn"))
-    em = _safe_num(latest_fin.get("equity_multiplier") or latest_fin.get("em"))
+    npm = _fin_field_num(latest_fin, "netprofit_margin", "np_margin")
+    tat = _fin_field_num(latest_fin, "asset_turnover", "assets_turn")
+    em = _fin_field_num(latest_fin, "equity_multiplier", "em")
     # 若杜邦字段不可得，尝试从已有数据计算
     if npm is None and np_cur is not None and rev_cur is not None and rev_cur > 0:
         npm = np_cur / rev_cur * 100
@@ -2914,10 +2914,10 @@ def _section_fundamentals_layered(
     else:
         lines.append("数据不足：[经营现金流或净利润字段不可得，无法计算覆盖比]")
     # 应收增速 vs 营收增速 (CV-2)
-    ar_cur = _safe_num(latest_fin.get("accounts_receiv") or latest_fin.get("ar"))
-    ar_prev = _safe_num(prev_fin.get("accounts_receiv") or prev_fin.get("ar"))
-    inv_cur = _safe_num(latest_fin.get("inventory") or latest_fin.get("inventories"))
-    inv_prev = _safe_num(prev_fin.get("inventory") or prev_fin.get("inventories"))
+    ar_cur = _fin_field_num(latest_fin, "accounts_receiv", "ar")
+    ar_prev = _fin_field_num(prev_fin, "accounts_receiv", "ar")
+    inv_cur = _fin_field_num(latest_fin, "inventory", "inventories")
+    inv_prev = _fin_field_num(prev_fin, "inventory", "inventories")
     rev_growth: float | None = rev_yoy
     ar_growth: float | None = None
     inv_growth: float | None = None
@@ -3336,9 +3336,9 @@ def _section_fundamentals_layered(
 
     # C-② 杜邦拆解 ROE（须净利率+周转+权益乘数）
     _c2_roe = _safe_num(latest_fin.get("roe"))
-    _c2_npm = _safe_num(latest_fin.get("netprofit_margin") or latest_fin.get("np_margin"))
-    _c2_tat = _safe_num(latest_fin.get("asset_turnover") or latest_fin.get("assets_turn"))
-    _c2_em = _safe_num(latest_fin.get("equity_multiplier") or latest_fin.get("em"))
+    _c2_npm = _fin_field_num(latest_fin, "netprofit_margin", "np_margin")
+    _c2_tat = _fin_field_num(latest_fin, "asset_turnover", "assets_turn")
+    _c2_em = _fin_field_num(latest_fin, "equity_multiplier", "em")
     _c2_ok = (
         _c2_roe is not None and _c2_npm is not None
         and _c2_tat is not None and _c2_em is not None
@@ -3350,8 +3350,8 @@ def _section_fundamentals_layered(
     lines.append(f"| C-② | 杜邦拆解ROE | {'✅' if _c2_ok else '❌'} | {_c2_s} |")
 
     # C-③ 现金流覆盖 + 应收/存货交叉验证
-    _c3_ar = _safe_num(latest_fin.get("accounts_receiv") or latest_fin.get("ar"))
-    _c3_inv = _safe_num(latest_fin.get("inventory") or latest_fin.get("inventories"))
+    _c3_ar = _fin_field_num(latest_fin, "accounts_receiv", "ar")
+    _c3_inv = _fin_field_num(latest_fin, "inventory", "inventories")
     _c3_ok = (
         ocf_val is not None and np_v is not None and np_v > 0
         and _c3_ar is not None and _c3_inv is not None
@@ -3470,8 +3470,11 @@ def _report_toc() -> str:
         "7. 风险与不确定性",
         "8. 技术指标附录",
         "PE Band（5年轨道）",
-        "引用来源",
     ]
+    # R12g-A 头部区块（brief/concise/full 三模式 engine extras 均渲染）——
+    # 标签与渲染顺序单一来源 _base._R12G_HEADER_SECTIONS，禁止在此手写新增条目
+    entries.extend(label for label, _fn in _R12G_HEADER_SECTIONS)
+    entries.append("引用来源")
     lines = ["## 目录", ""]
     lines.extend(f"- {label}" for label in entries)
     return "\n".join(lines)

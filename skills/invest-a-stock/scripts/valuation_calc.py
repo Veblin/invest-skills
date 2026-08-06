@@ -52,7 +52,8 @@ from lib.nums import safe_float, coalesce_field
 from lib.financials import normalize_end_date, parse_end_date
 from lib.shared_codes import symbol_to_ts_code
 from lib.shared_dates import shanghai_days_ago, shanghai_today
-from lib.stats import median, percentile_rank
+# NOTE: median / percentile_rank 原为 calc_historical_percentile 本地使用，
+# 该函数现已委托 lib.valuation.valuation_summary（缺陷4 单公式源），此处不再直接调用。
 from lib.tushare_client import TushareClient
 
 # ---------------------------------------------------------------------------
@@ -819,6 +820,10 @@ def calc_historical_percentile(
 
     Tushare daily_basic 对亏损期返回 None/null PE（非负值），
     无法直接计为负值天数。通过 daily_rows 总数 vs PE 有效样本数的差值推断。
+
+    核心统计（当前值/分位/中位数）委托 lib.valuation.valuation_summary——
+    权威引擎单一公式源（缺陷4：消除脚本路径与 lib 路径双份公式漂移）。
+    脚本侧仅保留 rows→序列数据预处理、±1σ Band（lib 无对应）与输出 schema 映射。
     """
     pe_seq = []
     pb_seq = []
@@ -838,24 +843,27 @@ def calc_historical_percentile(
     if not pe_seq and not pb_seq:
         return {"error": "PE/PB 历史数据不足"}
 
-    total_daily = len(daily_rows)
-    result: dict[str, Any] = {"n_samples": total_daily, "warnings": []}
+    from lib.valuation import valuation_summary as _lib_valuation_summary
+    vs = _lib_valuation_summary(pe_seq, pb_seq, window_label="近5年")
 
-    if pe_seq:
-        current_pe = pe_seq[-1]
-        pe_pct = percentile_rank(pe_seq, current_pe)
+    total_daily = len(daily_rows)
+    result: dict[str, Any] = {"n_samples": total_daily, "warnings": list(vs.get("warnings") or [])}
+
+    pe = vs.get("pe") or {}
+    if pe.get("current") is not None:
+        current_pe = pe["current"]
         n = len(pe_seq)
         mu = sum(pe_seq) / n
         sigma = math.sqrt(sum((v - mu) ** 2 for v in pe_seq) / n)
         pe_neg_inferred = pe_none_count
         pe_neg_pct = pe_neg_inferred / total_daily if total_daily > 0 else 0.0
         result.update({
-            "pe_valid": len(pe_seq),
+            "pe_valid": n,
             "pe_none_or_neg": pe_neg_inferred,
             "pe_neg_pct": round(pe_neg_pct, 4),
-            "pe_current": round(current_pe, 2),
-            "pe_pct": round(pe_pct, 1),
-            "pe_median": round(median(pe_seq), 2),
+            "pe_current": current_pe,
+            "pe_pct": round(pe["pct"], 1) if pe.get("pct") is not None else None,
+            "pe_median": pe.get("median"),
             "pe_mean": round(mu, 2),
             "pe_sigma": round(sigma, 2) if sigma else None,
             "pe_plus_1sigma": round(mu + sigma, 2) if sigma else None,
@@ -867,13 +875,12 @@ def calc_historical_percentile(
                 f"PE 分位数仅作位置参考，不反映估值贵贱。PB 分位更有参考价值。"
             )
 
-    if pb_seq:
-        current_pb = pb_seq[-1]
-        pb_pct = percentile_rank(pb_seq, current_pb)
+    pb = vs.get("pb") or {}
+    if pb.get("current") is not None:
         result.update({
-            "pb_current": round(current_pb, 2),
-            "pb_pct": round(pb_pct, 1),
-            "pb_median": round(median(pb_seq), 2),
+            "pb_current": pb["current"],
+            "pb_pct": round(pb["pct"], 1) if pb.get("pct") is not None else None,
+            "pb_median": pb.get("median"),
         })
 
     return result
@@ -888,13 +895,20 @@ def implied_growth_detailed(
 
     g_implied = r - E/P = (rf + erp) - 1/pe
     fair_pe(g) = 1 / (rf + erp - g)
-    """
-    if pe <= 0:
-        return {"error": "PE 非正"}
 
-    r = rf + erp
+    核心计算（PE 非正检查 / r / g_implied / PE>50 提示）委托
+    lib.valuation.implied_growth——权威引擎（缺陷4：消除脚本路径与 lib 路径
+    双份公式漂移）。fair_pe_by_g 表与 note 为脚本侧特有展示（lib 无对应），保留本地。
+    """
+    from lib.valuation import implied_growth as _lib_implied_growth
+
+    core = _lib_implied_growth(pe, rf, erp)
+    if core.get("error"):
+        return {"error": core["error"]}
+
+    r = core["r"]
     earnings_yield = 1.0 / pe
-    g_implied = r - earnings_yield
+    g_implied = core["g_implied"]
 
     # 不同 g 下的合理 PE
     fair_pe_table = []
@@ -917,9 +931,9 @@ def implied_growth_detailed(
     return {
         "rf": round(rf, 4),
         "erp": erp,
-        "r_required": round(r, 4),
+        "r_required": r,
         "earnings_yield": round(earnings_yield, 4),
-        "g_implied": round(g_implied, 4),
+        "g_implied": g_implied,
         "fair_pe_by_g": fair_pe_table,
         "note": (
             f"当前 PE {pe:.2f}x 隐含永续增长率 {g_implied * 100:.2f}%。"
