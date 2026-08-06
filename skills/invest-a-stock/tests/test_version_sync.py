@@ -15,13 +15,20 @@ import sync_version as _sync
 
 
 def _write_fixture_tree(root: Path, version: str) -> None:
-    """Minimal fixture: pyproject.toml + SKILL.md targets + 3 .json.in templates."""
+    """Minimal fixture: pyproject.toml + all SKILL.md targets + json.in templates.
+
+    Mirrors the current SKILL_TARGETS / JSON_TEMPLATES layout (incl. invest-a-pulse
+    and the .agents/plugins/marketplace.json output dir) so sync/bump preflight
+    and output generation pass.
+    """
     (root / "skills" / "invest-a-stock").mkdir(parents=True)
     (root / "skills" / "invest-a-limit-up").mkdir(parents=True)
     (root / "skills" / "invest-a-gap-scan").mkdir(parents=True)
     (root / "skills" / "invest-a-journal").mkdir(parents=True)
     (root / "skills" / "invest-a-etf").mkdir(parents=True)
+    (root / "skills" / "invest-a-pulse").mkdir(parents=True)
     (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".agents" / "plugins").mkdir(parents=True)
 
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "test"\nversion = "{version}"\n',
@@ -45,6 +52,10 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     )
     (root / "skills" / "invest-a-etf" / "SKILL.md").write_text(
         f'---\nname: invest:a-etf\nversion: "{version}"\n---\n',
+        encoding="utf-8",
+    )
+    (root / "skills" / "invest-a-pulse" / "SKILL.md").write_text(
+        f'---\nname: invest:a-pulse\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
 

@@ -69,3 +69,67 @@ def test_invest_a_etf_lib_dir_resolves():
     assert lib.name == "lib"
     assert lib.parent.name == "scripts"
     assert (lib / "etf_data.py").is_file()
+
+
+def test_data_bridge_etf_attr_resolves_under_hostile_sys_path(monkeypatch, tmp_path):
+    """v0.2.4 缺陷修复：_import_etf_attr 显式定位 invest-a-etf canonical
+    （invest_path.load_invest_a_etf_module），不再裸 ``import etf_data``。
+
+    模拟 sys.path 变化：invest-a-etf lib 缺席 / 后置 / 有同名 decoy
+    etf_data.py 抢占首位 —— 旧实现分别 ImportError→None 或解析到 decoy，
+    新实现三种布局下都解析到 canonical 同一实例。
+    """
+    import data_bridge
+
+    scripts = Path(__file__).resolve().parent.parent.parent
+    stock_scripts = scripts / "invest-a-stock" / "scripts"
+    skills_lib = scripts / "lib"
+    journal_lib = scripts / "invest-a-journal" / "scripts" / "lib"
+
+    decoy = tmp_path / "etf_data.py"
+    decoy.write_text(
+        "def fetch_etf_spot_rows():\n    raise AssertionError('decoy resolved')\n",
+        encoding="utf-8",
+    )
+
+    configs = [
+        # 1. invest-a-etf lib 完全不在 sys.path（invest-a-stock 上下文）
+        [str(stock_scripts), str(skills_lib)],
+        # 2. journal 上下文但 etf lib 缺席（旧实现依赖 journal shim 被
+        #    先导入才不返回 None；未导入时 ImportError → None）
+        [str(journal_lib), str(skills_lib), str(stock_scripts)],
+        # 3. 敌意首位：同名 decoy etf_data.py 抢先 —— 旧裸 import 解析到 decoy
+        [str(decoy.parent), str(stock_scripts), str(skills_lib)],
+    ]
+    for cfg in configs:
+        monkeypatch.setattr(sys, "path", list(cfg))
+        monkeypatch.delitem(sys.modules, "invest_a_etf_etf_data", raising=False)
+        fetch = data_bridge._import_etf_attr("fetch_etf_spot_rows")
+        assert callable(fetch), f"resolve failed under sys.path={cfg}"
+        canon = sys.modules["invest_a_etf_etf_data"]
+        assert fetch is canon.fetch_etf_spot_rows, (
+            f"resolved wrong module under sys.path={cfg}"
+        )
+
+
+def test_get_etf_spot_rows_resolves_end_to_end_under_hostile_path(monkeypatch):
+    """get_etf_* getter 全链路在敌意 sys.path 下解析成功（dummy fetch，无网络）。
+
+    旧实现：etf lib 不在 sys.path → _import_etf_attr 返回 None →
+    getter 静默返回 None；新实现 resolve 后正常走缓存维度包装。
+    """
+    import data_bridge
+
+    scripts = Path(__file__).resolve().parent.parent.parent
+    monkeypatch.setattr(
+        sys, "path",
+        [str(scripts / "invest-a-stock" / "scripts"), str(scripts / "lib")],
+    )
+    monkeypatch.delitem(sys.modules, "invest_a_etf_etf_data", raising=False)
+
+    fetch = data_bridge._import_etf_attr("fetch_etf_spot_rows")
+    assert callable(fetch)
+    # 解析到 canonical 后把 fetch 换成 dummy，避免 getter 触发真实网络
+    canon = sys.modules["invest_a_etf_etf_data"]
+    monkeypatch.setattr(canon, "fetch_etf_spot_rows", lambda: [])
+    assert data_bridge.get_etf_spot_rows(force=True) == []

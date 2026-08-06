@@ -24,6 +24,11 @@ except ImportError:
     # 注意：此路径仅在 skills/lib/ 已在 sys.path 时有效
     from cache import DataCache, default_cache, _is_trading_hour  # noqa: F811
 
+try:
+    from .invest_path import load_invest_a_etf_module  # 同包相对导入（正常路径）
+except ImportError:
+    from invest_path import load_invest_a_etf_module  # noqa: F811  # sys.path 裸导入
+
 logger = logging.getLogger(__name__)
 
 _cache: DataCache = default_cache()
@@ -256,22 +261,23 @@ def get_microstructure(*, force: bool = False) -> dict | None:
 
 
 def _import_etf_attr(attr: str) -> Callable[..., Any] | None:
-    """Lazy-import *attr* from etf_data (invest-a-etf canonical / journal shim).
+    """Lazy-import *attr* from invest-a-etf canonical etf_data module.
 
-    上下文解析：
-    - journal：importlib 解析到 journal shim（re-export fetch_*，见
-      skills/invest-a-journal/scripts/lib/etf_data.py）
-    - invest-a-etf：解析到 canonical
-    - 其他上下文：ImportError/AttributeError → None + 日志警告（调用方需防 None）
+    解析（v0.2.4 修复）：显式经 invest_path.load_invest_a_etf_module()
+    按文件路径加载 canonical（invest-a-etf/scripts/lib/etf_data.py），与
+    journal shim 同一加载器、同一 sys.modules 实例——不再裸
+    ``import etf_data``（其解析依赖 sys.path 顺序：invest-a-etf lib 不在
+    首位/不在路径上时 ImportError → 静默 None）。
+    ImportError/AttributeError/OSError → None + 日志警告（调用方需防
+    None）；OSError：canonical 文件缺失时 spec 加载抛 FileNotFoundError
+    （非 ImportError 子类），同样按环境降级处理。
     """
     try:
-        mod = importlib.import_module("etf_data")
+        mod = load_invest_a_etf_module()
         return getattr(mod, attr)
     except (ImportError, AttributeError, OSError) as exc:
-        # OSError：shim exec canonical 时文件缺失抛 FileNotFoundError（非
-        # ImportError 子类），同样按环境降级处理（v0.2.3 补丁 #6）
         logger.warning(
-            "get_etf_*(%s) requires invest-a-etf etf_data on sys.path; "
+            "get_etf_*(%s) requires invest-a-etf etf_data; "
             "returning None — callers should guard against. %s", attr, exc)
         return None
 
