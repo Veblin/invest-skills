@@ -6,20 +6,31 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 # 跨源差异阈值（交叉验证与融合共用）
-CROSS_SOURCE_DIFF_THRESHOLD = 0.01
+# R12h（决策 C5）：1% → 5%——全量双源假警报洪水（沃格 PE 2548.1% 类噪音）无决策价值，
+# 差异标注仅对 L2 关键字段生效（见 _CV_L2_FIELDS）；fusion 共识带已解耦为自有常量
+# （fusion._FUSION_STRONG_MAX / _FUSION_MODERATE_MAX），不随本阈值漂移。
+CROSS_SOURCE_DIFF_THRESHOLD = 0.05
 _SCALAR_EPSILON = 1e-9
 
 # 按维度指定提取字段，确保跨源比较的是同一语义量
 # 优先级从左到右递减；取第一个可用且非零（零值仅在 _ZERO_OK_KEYS 中放行）
 _DIM_SCALAR_KEYS: dict[str, tuple[str, ...]] = {
     "kline":       ("close",),
-    "valuation":   ("pe_ttm", "pe", "pb"),
-    "financials":  ("roe", "eps"),
+    # R12h：估值维度增加市值字段（L2 抽查成员）；PE/PB 属比率/分位类不参与差异标注
+    "valuation":   ("pe_ttm", "pe", "pb", "total_mv", "total_mv_yi", "market_cap"),
+    "financials":  ("roe", "eps", "grossprofit_margin", "revenue", "net_profit"),
     "quote":       ("close", "price", "change_pct"),
     "basic_info":  (),   # 无标量可比，不参与跨源融合
     "shareholders": (),
     "northbound":  ("net_mf_vol",),
     "holder_changes": ("change_ratio", "change_pct"),
+}
+
+# R12h（决策 C5）：跨源差异标注仅对 L2 关键字段生效——营收/净利/市值/ROE/毛利率。
+# 比率/分位类（PE/PB）与行情/资金类差异不再标注（亏损公司 PE 假警报，无决策价值——沃格 2548.1% 实证）。
+_CV_L2_FIELDS: dict[str, tuple[str, ...]] = {
+    "financials": ("roe", "grossprofit_margin", "revenue", "net_profit"),
+    "valuation": ("total_mv", "total_mv_yi", "market_cap"),
 }
 # 其他维度回退到此序列
 _DEFAULT_SCALAR_KEYS = (
@@ -111,6 +122,15 @@ def _extract_scalar(data: Any, dimension: str = "") -> float | None:
                 if v is not None and _scalar_key_usable(key, v):
                     return v
     return None
+
+
+def _has_any_key(data: Any, keys: tuple[str, ...]) -> bool:
+    """data（dict 或 list[dict]）是否含 keys 中任一字段（R12h L2 白名单判定）。"""
+    if isinstance(data, dict):
+        return any(k in data for k in keys)
+    if isinstance(data, list):
+        return any(isinstance(r, dict) and any(k in r for k in keys) for r in data)
+    return False
 
 
 def relative_diff_pct(max_v: float, min_v: float, avg: float) -> float | None:
@@ -298,17 +318,25 @@ class DimensionResult:
 # ---- R-01: 自动交叉验证 ----
 
 def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossValidation | None:
-    """自动检测多源数据差异。 >1% 差异 → divergence，否则 → convergence。
+    """自动检测多源数据差异。 >5% 差异 → divergence，否则 → convergence。
 
-    只对数值型维度做检测。返回 None 表示不适合交叉验证（如非数值维度）。
+    R12h（决策 C5）：差异标注仅对 L2 关键字段（营收/净利/市值/ROE/毛利率）生效——
+    比率/分位类（PE/PB）与行情/资金类不再标注（亏损公司 PE 假警报，沃格 2548.1% 实证）；
+    原始数值（无字段语义的 raw scalar）仍参与。返回 None 表示不适合交叉验证。
     """
     values = []
     for s in sources:
         if s.data is None:
             continue
         v = _extract_scalar(s.data, dimension)
-        if v is not None:
-            values.append((s.source, v))
+        if v is None:
+            continue
+        # 字段级白名单：raw scalar 无字段语义保留；dict/list 数据须命中 L2 字段
+        if _numeric_scalar(s.data) is None:
+            keys = _CV_L2_FIELDS.get(dimension)
+            if not keys or not _has_any_key(s.data, keys):
+                continue
+        values.append((s.source, v))
     if len(values) < 2:
         return None
 

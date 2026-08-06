@@ -28,11 +28,16 @@ def _collect_dimension(
     query_params: dict[str, str] | Callable[[list], dict[str, str]] | None = None,
     postprocess: Callable[[dict, list], dict] | None = None,
     empty_result: dict | None = None,
+    cascade: bool = False,
 ) -> dict:
-    """并行采集样板：tasks → _run_sources_parallel → annotate → legacy → postprocess。"""
+    """采集样板（R12h：cascade=True 时首选源单发、失败按序降级；L2 维度保持并行双源先到先用）。
+
+    tasks → _run_sources_parallel | _run_sources_cascade → annotate → legacy → postprocess。
+    """
     if not tasks and empty_result is not None:
         return empty_result
-    results = _run_sources_parallel(tasks, dimension)
+    results = (_run_sources_cascade(tasks, dimension) if cascade
+               else _run_sources_parallel(tasks, dimension))
     if query_params is not None:
         qp = query_params(results) if callable(query_params) else query_params
         _annotate_query_params({r.source: r for r in results}, qp)
@@ -54,6 +59,8 @@ def collect_basic_info(symbol: str) -> dict:
             "tushare.stock_basic": _qp_tushare("stock_basic", symbol),
             "akshare.stock_individual_info_em": _qp_akshare("stock_individual_info_em", symbol),
         },
+        # R12h: 非 L2 维度首选源单发（tushare 失败 → akshare 降级）
+        cascade=True,
     )
 
 
@@ -102,6 +109,7 @@ def collect_shareholders(symbol: str) -> dict:
                 "top10_floatholders", symbol, period=_latest_quarter_end()),
             "akshare.stock_gdfx_top_10_em": _qp_akshare("stock_gdfx_top_10_em", symbol),
         },
+        cascade=True,  # R12h: tushare 首选，失败 → akshare
     )
 
 
@@ -164,15 +172,15 @@ def _quote_tushare_rows(symbol: str) -> list[dict] | None:
 
 
 def collect_quote(symbol: str) -> dict:
-    """实时行情。并行：Tushare + akshare + 腾讯。"""
+    """实时行情。R12h：Tushare 首选单发 → 腾讯 → akshare（L3 行情类，EM 最后）。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         # 统一前复权语义（与 akshare qfq 对齐，跨源校验不再因 raw/qfq 错配产生 divergence 噪音）
         tasks.append(("tushare.daily", lambda: _quote_tushare_rows(symbol)))
+    tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
-    tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
     return _collect_dimension(
         "quote", tasks,
         query_params={
@@ -184,6 +192,7 @@ def collect_quote(symbol: str) -> dict:
                 start_date=_days_ago(10), end_date=_today()),
             "tencent_finance": _qp_tencent(symbol),
         },
+        cascade=True,  # R12h: tushare → 腾讯 → akshare(EM 最后)
     )
 
 
@@ -203,6 +212,7 @@ def collect_northbound(symbol: str) -> dict:
             "akshare.stock_hsgt_individual_em": _qp_akshare(
                 "stock_hsgt_individual_em", symbol),
         },
+        cascade=True,  # R12h: tushare 首选，失败 → akshare
     )
 
 
@@ -230,19 +240,20 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
                 qfq: bool = True) -> list | None:
         return _kline_cache.load_or_fetch(symbol, source, sd, ed, fetch, qfq=qfq)
 
+    # R12h（L3 行情类：tushare → baostock → 腾讯类 → EM 最后）——cascade 首选源单发
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.daily", lambda: _cached("tushare.daily",
                       lambda: _q_tushare_daily_qfq(symbol, start_date=sd, end_date=ed))))
-    if env.is_akshare_available() and akshare_push2_available():
-        tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
-                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
     if env.baostock_kline_enabled():
         tasks.append(("baostock.kline", lambda: _cached("baostock.kline",
                       lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed))))
     if env.tickflow_kline_enabled():
         tasks.append(("tickflow.kline", lambda: _cached("tickflow.kline",
                       lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed))))
+    if env.is_akshare_available() and akshare_push2_available():
+        tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
+                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
 
     def _kline_qp(_results: list) -> dict[str, str]:
         qp_map: dict[str, str] = {
@@ -258,7 +269,7 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
             qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
         return qp_map
 
-    return _collect_dimension("kline", tasks, query_params=_kline_qp)
+    return _collect_dimension("kline", tasks, query_params=_kline_qp, cascade=True)
 
 
 # ---- 估值维度 ----
@@ -746,6 +757,7 @@ def collect_industry(symbol: str) -> dict:
 
     return _collect_dimension(
         dim_val, tasks, empty_result=empty, postprocess=_merge_industry,
+        # 注：本维度两个任务为互补数据（板块行情 + 行业 PE），非冗余备份——保持并行
     )
 
 
@@ -1124,6 +1136,8 @@ def collect_holder_changes(symbol: str) -> dict:
         tasks.append(("akshare.stock_shareholder_change_ths",
                       lambda: _q_akshare_shareholder_change_ths(symbol)))
 
+    # 注：tushare/ths 两源数据合并去重（互补），cninfo 兜底决策依赖双源数据——
+    # 保持并行（R12h 单源化仅适用于冗余同义源，此处不适用）
     results = _run_sources_parallel(tasks, "holder_changes")
 
     # cninfo 源（不可在线程中运行 — 内部使用 JS 引擎，且全市场数据极慢）

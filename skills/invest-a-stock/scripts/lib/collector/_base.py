@@ -29,6 +29,7 @@ from ..proxy import (
     EASTMONEY_FAILURE_TUN_MARKER,
     akshare_direct_session,
     akshare_push2_available,
+    em_request_with_retry,
     no_proxy_session,
     proxy_bypass,
 )
@@ -276,6 +277,27 @@ def _annotate_query_params(result_map: dict[str, SourceResult],
     for name, qp in params.items():
         if name in result_map:
             result_map[name].query_params = qp
+
+
+def _run_sources_cascade(tasks: list[tuple[str, Callable[[], Any]]],
+                         dimension: str) -> list[SourceResult]:
+    """按优先级顺序执行源查询（R12h：首选源单发，失败才启动下一源）。
+
+    与 _run_sources_parallel 语义对齐：结果按任务索引顺序排列；
+    未执行的后续源标记「未尝试」（data=None 且无 error → 渲染层显示"未尝试"）。
+    耗时：首选源成功 → 单源耗时（验收基准：非 L2 单源 ≤ 旧全量双源）。
+    """
+    results: list[SourceResult] = []
+    succeeded = False
+    for name, fn in tasks:
+        if succeeded:
+            results.append(SourceResult(name, None, dimension))  # 未尝试
+            continue
+        res = _run_one_source(name, fn, dimension)
+        results.append(res)
+        if res.data is not None:
+            succeeded = True
+    return results
 
 
 def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceResult:

@@ -399,7 +399,7 @@ def _q_akshare_financials(symbol: str) -> list[dict] | None:
 
 
 def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """akshare K线来源（东方财富 push2 API）。"""
+    """akshare K线来源（东方财富 push2 API）。R12h：指数退避重试（1s→2s→4s，max 3）。"""
     with akshare_direct_session():
         import akshare as ak
         sd = start_date or _days_ago(365)
@@ -407,12 +407,14 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
         sd_fmt = _to_iso_date(sd)
         ed_fmt = _to_iso_date(ed)
         try:
-            result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                        period="daily",
-                                        start_date=sd_fmt,
-                                        end_date=ed_fmt,
-                                        adjust="qfq",  # 前复权：统一复权语义
-                                        timeout=10)
+            def _fetch() -> Any:
+                return ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
+                                          period="daily",
+                                          start_date=sd_fmt,
+                                          end_date=ed_fmt,
+                                          adjust="qfq",  # 前复权：统一复权语义
+                                          timeout=10)
+            result = em_request_with_retry(_fetch)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:

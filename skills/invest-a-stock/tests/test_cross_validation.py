@@ -50,10 +50,18 @@ class TestAutoCrossValidate:
 
     def test_two_sources_diverge(self):
         s1 = self._make_source("a", 10.0)
-        s2 = self._make_source("b", 10.5)  # 5% diff, per execution plan spec
+        s2 = self._make_source("b", 10.6)  # ≈5.83% diff > 5% threshold (R12h C5)
         result = _auto_cross_validate("test", [s1, s2])
         assert result is not None
         assert result.status == "divergence"
+
+    def test_five_percent_diff_is_convergence(self):
+        """R12h C5：5% 边界内 → convergence（阈值 1% → 5%）。"""
+        s1 = self._make_source("a", 10.0)
+        s2 = self._make_source("b", 10.5)  # 10.0 vs 10.5 ≈ 4.88% < 5%
+        result = _auto_cross_validate("test", [s1, s2])
+        assert result is not None
+        assert result.status == "convergence"
 
     def test_single_source_returns_none(self):
         s1 = self._make_source("a", 10.0)
@@ -77,15 +85,30 @@ class TestDimensionResultCrossValidation:
     def _make_source(self, source, data):
         return SourceResult(source, data, "valuation")
 
-    def test_multi_source_triggers_cv(self):
-        s1 = self._make_source("tushare.daily_basic", [{"pe_ttm": 15.0}])
-        s2 = self._make_source("tencent_finance", {"pe_ttm": 15.2})
+    def test_multi_source_l2_field_convergence(self):
+        """市值（L2 字段）1.3% 差异 → convergence（阈值 5%）。"""
+        s1 = self._make_source("tushare.daily_basic", [{"total_mv": 1.5e9}])
+        s2 = self._make_source("tencent_finance", {"total_mv": 1.52e9})
         dim = DimensionResult("valuation", [s1, s2])
         assert dim.cross_validation is not None
-        # 15.0 vs 15.2 ≈ 1.3% diff > 1% threshold → divergence
+        assert dim.cross_validation.status == "convergence"
+
+    def test_multi_source_l2_field_divergence(self):
+        """市值（L2 字段）6.5% 差异 → divergence。"""
+        s1 = self._make_source("tushare.daily_basic", [{"total_mv": 1.5e9}])
+        s2 = self._make_source("tencent_finance", {"total_mv": 1.6e9})
+        dim = DimensionResult("valuation", [s1, s2])
+        assert dim.cross_validation is not None
         assert dim.cross_validation.status == "divergence"
 
+    def test_pe_ratio_no_longer_annotated(self):
+        """R12h C5：PE/PB（比率/分位类）不再标注——即使差异极大（沃格 2548.1% 类假警报根因）。"""
+        s1 = self._make_source("tushare.daily_basic", [{"pe_ttm": 15.0}])
+        s2 = self._make_source("tencent_finance", {"pe_ttm": 100.0})
+        dim = DimensionResult("valuation", [s1, s2])
+        assert dim.cross_validation is None
+
     def test_single_source_no_cv(self):
-        s1 = self._make_source("tencent_finance", {"pe_ttm": 15.0})
+        s1 = self._make_source("tencent_finance", {"total_mv": 1.5e9})
         dim = DimensionResult("valuation", [s1])
         assert dim.cross_validation is None

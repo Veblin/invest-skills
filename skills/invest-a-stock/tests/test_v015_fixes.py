@@ -38,13 +38,16 @@ class TestAutoCrossValidateZero:
         s2 = SourceResult("b", -1e-20, "valuation")
         assert _auto_cross_validate("valuation", [s1, s2]) is None
 
-    def test_zero_change_pct_included(self):
+    def test_zero_roe_included(self):
+        """R12h C5 适配：差异标注仅 L2 字段（quote/change_pct 已退出）——
+        用 financials.roe（L2 成员 + 零值白名单）验证零值不跳过。"""
         from lib.schema import SourceResult, _auto_cross_validate
 
-        s1 = SourceResult("a", {"change_pct": 0.0}, "quote")
-        s2 = SourceResult("b", {"change_pct": 0.5}, "quote")
-        cv = _auto_cross_validate("quote", [s1, s2])
+        s1 = SourceResult("a", {"roe": 0.0}, "financials")
+        s2 = SourceResult("b", {"roe": 5.0}, "financials")
+        cv = _auto_cross_validate("financials", [s1, s2])
         assert cv is not None
+        assert cv.status == "divergence"  # 0 vs 5 → 200% diff
 
 
 class TestFusionZeroScalar:
