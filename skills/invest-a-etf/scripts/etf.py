@@ -23,9 +23,11 @@ if str(_LIB_DIR) not in sys.path:
 from etf_data import (  # noqa: E402
     CSINDEX_MAP,
     ETF_HEDGE_MAP,
+    compute_history_stats,
     prefetch_etf_spot,
     query_etf_data,
     query_etf_kline,
+    query_etf_kline_history,
     query_etf_quote,
     query_etf_share_history,
 )
@@ -41,7 +43,8 @@ def _share_history_summary(sh: dict) -> dict:
     return {k: v for k, v in sh.items() if k != "rows"}
 
 
-def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
+def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
+               history: bool = False, history_days: int = 250) -> int:
     symbol = symbol.strip()
     if not symbol.isdigit() or len(symbol) != 6:
         print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
@@ -53,6 +56,16 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
     kline = query_etf_kline(symbol)
     share_history = query_etf_share_history(symbol, days=20)
 
+    # R11a: --history 时取历史行情深度（nav 链路优先，失败回退 baostock）+ 历史统计
+    history_block = None
+    if history:
+        hist = query_etf_kline_history(symbol, days=history_days)
+        hist_stats = (
+            compute_history_stats(hist.get("rows") or [])
+            if hist.get("status") == "available" else None
+        )
+        history_block = {"history": hist, "stats": hist_stats}
+
     payload = {
         "skill": "invest-a-etf",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -62,6 +75,7 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
         "quote": quote,
         "kline": kline if with_nav else _kline_summary(kline),
         "share_history": _share_history_summary(share_history) if not with_nav else share_history,
+        "history": history_block,
         "disclaimer": "研究数据快照，不构成投资建议。",
     }
 
@@ -99,6 +113,24 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool) -> int:
     print(f"  ma20/ma60 (NAV):   {kline.get('ma20')} / {kline.get('ma60')}")
     print(f"  ma20/ma60 (index): {kline.get('index_ma20')} / {kline.get('index_ma60')}")
     print(f"  boll (u/m/l):      {kline.get('boll_upper')} / {kline.get('boll_mid')} / {kline.get('boll_lower')}")
+    print()
+    if history_block is not None:
+        hist = history_block["history"]
+        stats = history_block["stats"]
+        print("## history (历史行情深度 · R11a)")
+        if hist.get("status") == "available" and stats:
+            print(f"  source:            {hist['source']}  ({hist.get('note', '')})")
+            print(f"  rows:              {stats['rows']}  ({stats['date_range']})")
+            ah, al = stats["annual_high"], stats["annual_low"]
+            print(f"  annual_high/low:   {ah['close']} @ {ah['date']} / {al['close']} @ {al['date']}")
+            md = stats["max_drawdown"]
+            print(f"  max_drawdown:      {md['drawdown_pct']}%  "
+                  f"({md['peak_close']} @ {md['peak_date']} → {md['trough_close']} @ {md['trough_date']})")
+            print(f"  big_move_days:     {len(stats['big_move_days'])} 个 |change_pct|≥5% 交易日")
+            print(f"  ma20/60/120:       {stats['ma20']} / {stats['ma60']} / {stats['ma120']}")
+            print(f"  current_vs_high/low: {stats['current_vs_high_pct']}% / {stats['current_vs_low_pct']}%")
+        else:
+            print(f"  不可用: {hist.get('error') or '历史行情获取失败'}")
     print()
     print("## share_history (近20日 份额资金流 + OHLCV | Tushare fund_share+fund_daily)")
     if share_history.get("available"):
@@ -258,6 +290,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="JSON/摘要中保留完整净值历史（默认摘要省略）",
     )
+    p_report.add_argument(
+        "--history",
+        action="store_true",
+        help="R11a: 输出历史行情深度（nav 链路优先，失败自动回退 baostock）+ 历史统计",
+    )
+    p_report.add_argument(
+        "--history-days",
+        type=int,
+        default=250,
+        help="历史行情回溯交易日数（默认 250）",
+    )
 
     sub.add_parser("diagnose", help="检查依赖与映射表")
 
@@ -273,7 +316,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.cmd == "report":
-        return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav)
+        return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
+                          history=args.history, history_days=args.history_days)
     if args.cmd == "diagnose":
         return cmd_diagnose()
     if args.cmd == "industry-pe":

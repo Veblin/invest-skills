@@ -1742,3 +1742,248 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             f"仅覆盖 {len(detail_rows)} 行，已按可用数据返回"
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# ETF 历史行情深度（R11a，v0.2.4）：baostock 双源回退 + 历史统计
+# ---------------------------------------------------------------------------
+
+# baostock 取数窗口自然日缓冲（节假日/周末），与 query_etf_kline 的
+# int(days * 365 / 250) + 15 口径对齐
+_BAOSTOCK_LOOKBACK_BUFFER = 15
+
+
+def baostock_code(symbol: str) -> str:
+    """ETF 代码 → baostock 证券代码（sh./sz. 前缀路由）。
+
+    交易所解析规则：51/56/58 开头 → 上交所（sh.{symbol}）；
+    15/16/18 开头 → 深交所（sz.{symbol}）；其余抛 ValueError。
+    """
+    if symbol.startswith(("51", "56", "58")):
+        return f"sh.{symbol}"
+    if symbol.startswith(("15", "16", "18")):
+        return f"sz.{symbol}"
+    raise ValueError(
+        f"无法映射交易所: {symbol!r}（ETF 代码须 51/56/58=沪 或 15/16/18=深）"
+    )
+
+
+def fetch_etf_kline_baostock(symbol: str, days: int = 250) -> dict:
+    """原始取数：baostock 日线（sh.588000 格式，R11a 备源）。
+
+    baostock 为一次性全局登录：bs.login() 后同一进程后续调用直接返回成功；
+    本函数异常安全（try/finally 内 logout）。失败返回 status="missing"
+    （不抛异常，与其它 fetch_* 信封一致），供查询侧降级。
+
+    rows 归一化为 [{date, open, close, high, low, volume, change_pct}]，
+    与现有 kline 结构对齐（nav 链路的 nav_history 为 {date, nav, change_pct}；
+    消费方 compute_history_stats 同时兼容 nav/close 键）。
+    """
+    code: str | None = None
+    try:
+        code = baostock_code(symbol)
+        import baostock as bs
+
+        login = bs.login()
+        try:
+            if login is None or login.error_code != "0":
+                return {"status": "missing", "source": "baostock", "code": code,
+                        "rows": [], "error": "baostock login failed"
+                        + (f": {login.error_msg}" if login is not None else "（无返回）")}
+            # baostock 要求 YYYY-MM-DD；shanghai_days_ago/shanghai_today 返回 YYYYMMDD
+            def _iso(yyyymmdd: str) -> str:
+                return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+            end_date = _iso(shanghai_today())
+            start_date = _iso(shanghai_days_ago(int(days * 365 / 250) + _BAOSTOCK_LOOKBACK_BUFFER))
+            rs = bs.query_history_k_data_plus(
+                code,
+                "date,open,high,low,close,volume",
+                start_date=start_date,
+                end_date=end_date,
+                frequency="d",
+                adjustflag="3",  # 不复权
+            )
+            if rs.error_code != "0":
+                return {"status": "missing", "source": "baostock", "code": code,
+                        "rows": [], "error": f"baostock query failed: {rs.error_msg}"}
+            raw = []
+            while rs.next():
+                raw.append(rs.get_row_data())
+        finally:
+            bs.logout()
+
+        rows = []
+        prev_close: float | None = None
+        for r in raw:
+            close = safe_float(r[4]) if len(r) > 4 else None
+            if close is None:
+                continue
+            chg = None
+            if prev_close is not None and prev_close > 0:
+                chg = round((close / prev_close - 1) * 100, 2)
+            prev_close = close
+            rows.append({
+                "date": str(r[0])[:10] if len(r) > 0 else "",
+                "open": safe_float(r[1]) if len(r) > 1 else None,
+                "close": close,
+                "high": safe_float(r[2]) if len(r) > 2 else None,
+                "low": safe_float(r[3]) if len(r) > 3 else None,
+                "volume": safe_float(r[5]) if len(r) > 5 else None,
+                "change_pct": chg,
+            })
+        if not rows:
+            return {"status": "missing", "source": "baostock", "code": code,
+                    "rows": [], "error": "baostock: 无有效 K 线行"}
+        return {"status": "ok", "source": "baostock", "code": code,
+                "rows": rows, "error": None}
+    except Exception as exc:
+        logger.warning("fetch_etf_kline_baostock(%s) failed: %s", symbol, exc)
+        return {"status": "missing", "source": "baostock", "code": code,
+                "rows": [], "error": str(exc)}
+
+
+def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
+    """ETF 历史行情深度（R11a）：nav 链路优先，失败/异常自动回退 baostock。
+
+    返回 dict 附 source 字段标注数据链路（"nav" / "baostock"）；
+    两条链路均不可用时 status="missing"（不抛异常）。
+
+    Returns
+    -------
+    dict
+        {symbol, source, status, rows, requested_days, note, error?}
+        rows 为 nav_history（{date, nav, change_pct}）或 baostock
+        K 线行（{date, open, close, high, low, volume, change_pct}）。
+    """
+    nav_kline = None
+    try:
+        nav_kline = query_etf_kline(symbol, days=days)
+    except Exception as exc:
+        logger.warning(
+            "etf_kline_history(%s): nav chain raised %r, falling back to baostock",
+            symbol, exc,
+        )
+    nav_rows = (nav_kline or {}).get("nav_history") or []
+    if nav_kline is not None and nav_kline.get("status") == "available" and nav_rows:
+        return {
+            "symbol": symbol,
+            "source": "nav",
+            "status": "available",
+            "rows": nav_rows,
+            "requested_days": days,
+            "note": "来源: 基金单位净值（fund_etf_fund_info_em，Tushare 复权）",
+        }
+
+    env = fetch_etf_kline_baostock(symbol, days=days)
+    if env.get("status") == "ok" and env.get("rows"):
+        return {
+            "symbol": symbol,
+            "source": "baostock",
+            "status": "available",
+            "rows": env["rows"],
+            "requested_days": days,
+            "note": "来源: baostock 日线（不复权）",
+        }
+    return {
+        "symbol": symbol,
+        "source": "none",
+        "status": "missing",
+        "rows": [],
+        "requested_days": days,
+        "error": (env.get("error") or (nav_kline or {}).get("_error")
+                  or "nav 与 baostock 均不可用"),
+    }
+
+
+def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
+    """历史统计（引擎计算，AI 不得心算；R11a）。
+
+    输入 nav_history（nav 链路 {date, nav, change_pct}）或 baostock K 线行
+    （{date, open, close, high, low, volume, change_pct}），两种键均可。
+
+    统计项（全部由引擎计算）：
+    - annual_high / annual_low：年度最高/最低收盘价 + 各自日期
+    - max_drawdown：最大回撤峰值/谷底 + 日期 + 幅度%（负数）
+    - big_move_days：|change_pct| >= 5% 的交易日清单（基于收盘价逐日计算）
+    - ma20 / ma60 / ma120：收盘价均线尾部值
+    - current_vs_high_pct / current_vs_low_pct：当前价 vs 历史高低点偏离%
+    """
+    dates: list[str] = []
+    closes: list[float] = []
+    for r in nav_history:
+        close = safe_float(r.get("nav", r.get("close")))
+        d = str(r.get("date", ""))[:10]
+        if close is not None and d:
+            dates.append(d)
+            closes.append(close)
+
+    stats: dict[str, Any] = {
+        "rows": len(closes),
+        "date_range": (
+            f"{dates[0]} ~ {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else None)
+        ),
+        "annual_high": None,
+        "annual_low": None,
+        "max_drawdown": None,
+        "big_move_days": [],
+        "ma20": None,
+        "ma60": None,
+        "ma120": None,
+        "current_vs_high_pct": None,
+        "current_vs_low_pct": None,
+        "status": "available" if len(closes) >= 2 else "insufficient",
+    }
+    if len(closes) < 2:
+        return stats
+
+    # 年度高低点（首次出现优先，序列首行持平不翻转）
+    high_i = low_i = 0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[high_i]:
+            high_i = i
+        if closes[i] < closes[low_i]:
+            low_i = i
+    stats["annual_high"] = {"date": dates[high_i], "close": closes[high_i]}
+    stats["annual_low"] = {"date": dates[low_i], "close": closes[low_i]}
+
+    # 最大回撤：运行峰值 → 谷底（峰值之后的最低收盘）
+    peak_i = 0
+    trough_i = 0
+    max_dd = 0.0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[peak_i]:
+            peak_i = i
+        dd = (closes[i] / closes[peak_i] - 1) * 100
+        if dd < max_dd:
+            max_dd = dd
+            trough_i = i
+    stats["max_drawdown"] = {
+        "peak_date": dates[peak_i],
+        "peak_close": closes[peak_i],
+        "trough_date": dates[trough_i],
+        "trough_close": closes[trough_i],
+        "drawdown_pct": round(max_dd, 2),
+    }
+
+    # |change_pct| >= 5% 交易日清单（由收盘价重算，与 nav 源的日增长率口径解耦）
+    big: list[dict[str, Any]] = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] > 0:
+            chg = (closes[i] / closes[i - 1] - 1) * 100
+            if abs(chg) >= 5.0:
+                big.append({"date": dates[i], "change_pct": round(chg, 2)})
+    stats["big_move_days"] = big
+
+    for n, key in ((20, "ma20"), (60, "ma60"), (120, "ma120")):
+        series = sma(closes, n)
+        if series and series[-1] is not None:
+            stats[key] = round(series[-1], 4)
+
+    latest = closes[-1]
+    high = stats["annual_high"]["close"]
+    low = stats["annual_low"]["close"]
+    if high > 0:
+        stats["current_vs_high_pct"] = round((latest / high - 1) * 100, 2)
+    if low > 0:
+        stats["current_vs_low_pct"] = round((latest / low - 1) * 100, 2)
+    return stats
