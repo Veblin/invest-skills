@@ -29,15 +29,17 @@ def _collect_dimension(
     postprocess: Callable[[dict, list], dict] | None = None,
     empty_result: dict | None = None,
     cascade: bool = False,
+    cascade_always: set[str] | None = None,
 ) -> dict:
     """采集样板（R12h：cascade=True 时首选源单发、失败按序降级；L2 维度保持并行双源先到先用）。
 
     tasks → _run_sources_parallel | _run_sources_cascade → annotate → legacy → postprocess。
+    cascade_always：cascade 模式下不随降级链跳过的源名集合（如 quote 的腾讯实时快照）。
     """
     if not tasks and empty_result is not None:
         return empty_result
-    results = (_run_sources_cascade(tasks, dimension) if cascade
-               else _run_sources_parallel(tasks, dimension))
+    results = (_run_sources_cascade(tasks, dimension, always_attempt=cascade_always)
+               if cascade else _run_sources_parallel(tasks, dimension))
     if query_params is not None:
         qp = query_params(results) if callable(query_params) else query_params
         _annotate_query_params({r.source: r for r in results}, qp)
@@ -172,7 +174,13 @@ def _quote_tushare_rows(symbol: str) -> list[dict] | None:
 
 
 def collect_quote(symbol: str) -> dict:
-    """实时行情。R12h：Tushare 首选单发 → 腾讯 → akshare（L3 行情类，EM 最后）。"""
+    """实时行情。R12h：Tushare 首选单发 → akshare（L3 行情类，EM 最后）；腾讯实时快照始终并行尝试。
+
+    腾讯实时快照（change_pct/turnover_rate/pe_ratio/total_mv）是 quote 维度最关键的
+    实时字段，不依赖 tushare 成功：无论链内是否已成功都独立尝试（失败不影响 tushare
+    结果）；成功后实时字段并入维度数据（主数据为 K 线 list 时 → 合并为 dict，K 线保留
+    在 kline 字段），tushare 健康时报告不再丢失实时涨跌/换手/市值。
+    """
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         # 统一前复权语义（与 akshare qfq 对齐，跨源校验不再因 raw/qfq 错配产生 divergence 噪音）
@@ -181,6 +189,22 @@ def collect_quote(symbol: str) -> dict:
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
+
+    def _merge_realtime(legacy: dict, results: list) -> dict:
+        """腾讯实时快照并入维度主数据（仅当快照含有效字段，全空快照不覆盖 K 线）。"""
+        tencent = next(
+            (r for r in results if r.source == "tencent_finance"), None)
+        if tencent is None or not isinstance(tencent.data, dict):
+            return legacy
+        if not any(v is not None for v in tencent.data.values()):
+            return legacy  # 休市/停牌全空快照：保留主数据原状
+        data = legacy.get("data")
+        if isinstance(data, list):
+            merged = dict(tencent.data)
+            merged["kline"] = data  # 保留 10 日 K 线（消费方按 dict 读实时字段）
+            legacy["data"] = merged
+        return legacy
+
     return _collect_dimension(
         "quote", tasks,
         query_params={
@@ -192,7 +216,9 @@ def collect_quote(symbol: str) -> dict:
                 start_date=_days_ago(10), end_date=_today()),
             "tencent_finance": _qp_tencent(symbol),
         },
-        cascade=True,  # R12h: tushare → 腾讯 → akshare(EM 最后)
+        cascade=True,           # kline 冗余链：tushare → akshare(EM 最后)
+        cascade_always={"tencent_finance"},  # 实时快照始终并行尝试
+        postprocess=_merge_realtime,
     )
 
 
@@ -279,13 +305,26 @@ def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
 
     API: pro.daily_basic(ts_code, start_date, end_date, fields=...)
     配额: 每股 1 次调用。
+
+    归一化（跨源校验 C5 缺陷修复）：
+    - 单位：total_mv 原始为万元 → 亿元（与腾讯快照 total_mv 亿元口径一致；
+      此前无换算 → 跨源校验恒差 ~200%，每份报告误标 divergence）。
+    - 行序：Tushare 返回最新在前（降序）→ 显式按 trade_date 升序，
+      data[-1] = 最新（共享 data[-1]-is-newest 约定，见 _quote_tushare_rows）。
     """
     config, tc = _require_tushare()
     df = tc.query("daily_basic", ts_code=_ts_code(symbol),
                   fields="trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv",
                   start_date=_days_ago(1825), end_date=_today())
     if df is not None and not df.empty:
-        return df.to_dict("records")
+        records = df.to_dict("records")
+        for rec in records:
+            mv = safe_float(rec.get("total_mv"))
+            if mv is not None:
+                rec["total_mv"] = mv / 10000.0  # 万元 → 亿元
+        from lib.technical import sort_kline_asc
+
+        return sort_kline_asc(records)
     return None
 
 

@@ -211,3 +211,206 @@ class TestEmRequestWithRetry:
         monkeypatch.setattr(proxy.time, "sleep", lambda s: sleeps.append(s))
         assert proxy.em_request_with_retry(lambda: "ok", retries=3) == "ok"
         assert sleeps == []
+
+
+class TestValuationDailyBasicNormalization:
+    """缺陷修复回归：tushare daily_basic 万元→亿元 + 降序行序 → 跨源校验 convergence。
+
+    缺陷场景（code-review CONFIRMED）：Tushare daily_basic 返回最新在前（降序）且
+    total_mv 单位为万元，而 schema 提取假定升序（取 data[-1]=最新）且与腾讯快照
+    （亿元）无单位换算 → 正常运行时恒算 ~200% relative_diff_pct，每份报告误标
+    divergence。原测试喂单元素同单位列表，顺序与单位问题被构造数据掩盖。
+    """
+
+    class _FakeDF:
+        """df.to_dict('records') 兼容的最小假 DataFrame。"""
+
+        def __init__(self, records):
+            self._records = records
+            self.empty = not records
+
+        def to_dict(self, orient="records"):
+            return self._records
+
+    def _install_tushare(self, monkeypatch, records):
+        """安装假 Tushare 客户端：daily_basic 返回「万元 + 最新在前（降序）」原始序。"""
+        from lib.collector import _orchestrate as orch
+
+        fake_df = self._FakeDF(records)
+
+        class _FakeTC:
+            def query(self, api, **kw):
+                assert api == "daily_basic"
+                return fake_df
+
+        monkeypatch.setattr(orch.env, "is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr(orch, "_require_tushare", lambda: (None, _FakeTC()))
+
+    def test_daily_basic_wan_to_yi_and_asc_order(self, monkeypatch):
+        """万元 total_mv + 降序输入 → 亿元输出 + 升序（最新在尾）。"""
+        from lib.collector import _orchestrate as orch
+
+        self._install_tushare(monkeypatch, [
+            {"trade_date": "20260805", "total_mv": 1520000.0, "pe_ttm": 15.3},  # 最新
+            {"trade_date": "20260701", "total_mv": 1500000.0, "pe_ttm": 15.0},
+        ])
+        rows = orch._q_tushare_daily_basic("600000")
+        assert rows is not None
+        assert [r["trade_date"] for r in rows] == ["20260701", "20260805"]  # 升序
+        assert rows[-1]["total_mv"] == pytest.approx(152.0)  # 最新行 万元→亿元
+        assert rows[0]["total_mv"] == pytest.approx(150.0)
+
+    def test_collect_valuation_cv_converges_after_normalization(self, monkeypatch):
+        """万元/亿元混合源（真实生产序）→ 归一化后 convergence，不再误标 divergence。
+
+        修复前：误取最旧行 1500000（万元） vs 腾讯 151.0（亿元）→ 199.98% → divergence；
+        修复后：最新行 152.0 亿 vs 151.0 亿 → 0.66% → convergence。
+        """
+        from lib.collector import _orchestrate as orch
+
+        self._install_tushare(monkeypatch, [
+            {"trade_date": "20260805", "total_mv": 1520000.0, "pe_ttm": 15.3},  # 最新
+            {"trade_date": "20260701", "total_mv": 1500000.0, "pe_ttm": 15.0},
+        ])
+        monkeypatch.setattr(
+            orch, "_q_tencent_quote",
+            lambda symbol: {"total_mv": 151.0, "pe_ratio": 15.2},  # 腾讯原生亿元
+        )
+        res = orch.collect_valuation("600000")
+        meta = res.get("_meta") or {}
+        assert meta.get("cross_validation") == "convergence"
+        assert "源一致" in (meta.get("cross_validation_detail") or "")
+
+
+class TestCascadeNotAttemptedNotFailure:
+    """修复回归（code-review CONFIRMED）：cascade「未尝试」源不计为失败。
+
+    修复前：SourceResult(data=None, error=None) 占位被 success() 判为失败 →
+    健康级联运行（首选源成功、备用源未尝试）每个维度 status='partial' →
+    summary.degraded≥5 → 每次健康采集都打印降级告警，真实降级无法区分。
+    """
+
+    def test_healthy_cascade_status_available(self):
+        """首选成功 → 备用源「未尝试」（attempted=False）→ status='available'。"""
+        from lib.schema import DimensionResult
+
+        results = _run_sources_cascade(
+            [("a", lambda: [1]), ("b", lambda: [2]), ("c", lambda: [3])],
+            "test",
+        )
+        assert results[0].data == [1]
+        assert results[1].attempted is False and results[1].error is None
+        assert results[2].attempted is False and results[2].error is None
+        dim = DimensionResult("test", results)
+        assert dim.status == "available"  # 修复前: partial（未尝试被计为失败）
+        assert dim.multi_source is False
+
+    def test_real_degradation_still_partial(self):
+        """首选源真实失败 → 仍标 partial（真实降级与健康运行可区分）。"""
+        from lib.schema import DimensionResult
+
+        results = _run_sources_cascade(
+            [("a", lambda: None), ("b", lambda: [2]), ("c", lambda: [3])],
+            "test",
+        )
+        assert results[0].attempted is True and results[0].error is not None
+        assert results[1].attempted is True and results[1].data == [2]
+        dim = DimensionResult("test", results)
+        assert dim.status == "partial"
+
+
+class TestHealthyCollectionNoDegraded:
+    """端到端回归：8 维度健康采集 → 无降级告警（summary.degraded == 0）。"""
+
+    def test_collect_all_healthy_no_degraded_warning(self, monkeypatch):
+        from lib.collector import _DEFAULT_DIMS, collect_all
+        from lib.collector import _orchestrate as orch
+
+        monkeypatch.setenv("INVEST_KLINE_CACHE", "0")
+        # tushare 健康；akshare/baostock/tickflow 不可用 → cascade 备用源「未尝试」
+        monkeypatch.setattr(orch.env, "is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: False)
+        monkeypatch.setattr(orch, "akshare_push2_available", lambda: False)
+        monkeypatch.setattr(orch.env, "baostock_kline_enabled", lambda: False)
+        monkeypatch.setattr(orch.env, "tickflow_kline_enabled", lambda: False)
+        monkeypatch.setattr(orch.env, "is_baostock_available", lambda: False)
+
+        kline_rows = [{"trade_date": "2026-08-05", "close": 10.0}]
+        monkeypatch.setattr(orch, "_q_tushare_basic",
+                            lambda s: {"name": "测试股份", "industry": "测试行业"})
+        monkeypatch.setattr(orch, "_q_tushare_financials", lambda s: kline_rows)
+        monkeypatch.setattr(orch, "_quote_tushare_rows", lambda s: kline_rows)
+        monkeypatch.setattr(orch, "_q_tencent_quote",
+                            lambda s: {"price": 10.0, "change_pct": 1.2,
+                                       "turnover_rate": 3.0, "pe_ratio": 15.0,
+                                       "total_mv": 100.0})
+        monkeypatch.setattr(orch, "_q_tushare_shareholders", lambda s: kline_rows)
+        monkeypatch.setattr(orch, "_q_tushare_hsgt_top10", lambda s: kline_rows)
+        monkeypatch.setattr(orch, "_q_tushare_daily_basic", lambda s: kline_rows)
+        monkeypatch.setattr(orch, "_q_tencent_valuation_snapshot",
+                            lambda s: {"pe_ttm": 15.0, "total_mv": 100.0})
+        monkeypatch.setattr(orch, "_q_tushare_daily_qfq", lambda s, **k: kline_rows)
+        monkeypatch.setattr(orch, "_q_tushare_holdertrade", lambda s: kline_rows)
+        # 非采集挂载钩子去网络化（industry_peers / events）
+        monkeypatch.setattr(orch, "attach_phase2_extras", lambda r, s: None)
+        import lib.events as events_mod
+        monkeypatch.setattr(events_mod, "attach_events",
+                            lambda r, s, days=30: None)
+
+        result = collect_all("600000", dims=list(_DEFAULT_DIMS))
+        summary = result.get("summary") or {}
+        assert summary.get("degraded", -1) == 0  # 修复前: ≥5（每次健康采集误报降级）
+        assert summary.get("available", 0) == len(_DEFAULT_DIMS)
+        for d in result.get("dimensions", []):
+            assert d.get("status") == "available", d.get("dimension")
+
+
+class TestQuoteTencentRealtimeIndependent:
+    """修复回归（code-review CONFIRMED）：腾讯实时快照不依赖 tushare 成功。
+
+    修复前：collect_quote 为 cascade，tushare 健康时腾讯永不尝试 → quote 维度
+    失去实时字段（change_pct/turnover_rate/pe_ratio/total_mv）。
+    """
+
+    def test_tencent_attempted_and_merged_when_tushare_healthy(self, monkeypatch):
+        from lib.collector import _orchestrate as orch
+
+        monkeypatch.setattr(orch.env, "is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: False)
+        monkeypatch.setattr(orch, "akshare_push2_available", lambda: False)
+        kline_rows = [{"trade_date": "2026-08-05", "close": 10.0, "pct_chg": 1.2}]
+        monkeypatch.setattr(orch, "_quote_tushare_rows", lambda s: kline_rows)
+        monkeypatch.setattr(
+            orch, "_q_tencent_quote",
+            lambda s: {"price": 10.12, "change_pct": 1.2, "turnover_rate": 3.1,
+                       "pe_ratio": 15.2, "total_mv": 101.2})
+
+        res = orch.collect_quote("600000")
+        meta = res.get("_meta") or {}
+        srcs = {s.get("source"): s for s in meta.get("all_sources", [])}
+        assert srcs["tencent_finance"]["data_available"] is True  # 修复前: 未尝试
+        assert res.get("status") == "available"
+        data = res.get("data")
+        assert isinstance(data, dict)  # 实时字段并入维度数据
+        assert data.get("change_pct") == 1.2
+        assert data.get("turnover_rate") == 3.1
+        assert data.get("pe_ratio") == 15.2
+        assert data.get("total_mv") == 101.2
+        assert data["kline"] == kline_rows  # 10 日 K 线保留
+
+    def test_tencent_failure_does_not_block_tushare(self, monkeypatch):
+        from lib.collector import _orchestrate as orch
+
+        monkeypatch.setattr(orch.env, "is_tushare_available", lambda cfg: True)
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: False)
+        monkeypatch.setattr(orch, "akshare_push2_available", lambda: False)
+        kline_rows = [{"trade_date": "2026-08-05", "close": 10.0}]
+        monkeypatch.setattr(orch, "_quote_tushare_rows", lambda s: kline_rows)
+        monkeypatch.setattr(orch, "_q_tencent_quote", lambda s: None)
+
+        res = orch.collect_quote("600000")
+        assert res.get("data") == kline_rows  # tushare 结果不受腾讯失败影响
+        meta = res.get("_meta") or {}
+        srcs = {s.get("source"): s for s in meta.get("all_sources", [])}
+        assert srcs["tencent_finance"]["data_available"] is False
+        assert srcs["tencent_finance"].get("error")  # 失败原因可追溯

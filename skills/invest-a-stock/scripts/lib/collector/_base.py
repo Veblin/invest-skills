@@ -280,18 +280,40 @@ def _annotate_query_params(result_map: dict[str, SourceResult],
 
 
 def _run_sources_cascade(tasks: list[tuple[str, Callable[[], Any]]],
-                         dimension: str) -> list[SourceResult]:
+                         dimension: str,
+                         always_attempt: set[str] | None = None) -> list[SourceResult]:
     """按优先级顺序执行源查询（R12h：首选源单发，失败才启动下一源）。
 
     与 _run_sources_parallel 语义对齐：结果按任务索引顺序排列；
-    未执行的后续源标记「未尝试」（data=None 且无 error → 渲染层显示"未尝试"）。
-    耗时：首选源成功 → 单源耗时（验收基准：非 L2 单源 ≤ 旧全量双源）。
+    未执行的后续源标记「未尝试」（data=None 且无 error，attempted=False →
+    渲染层显示"未尝试"，且不计入降级统计）。
+
+    always_attempt：无论链内是否已成功都并行独立尝试的源名集合（如腾讯实时快照——
+    实时字段不依赖首选源成功）。其成功/失败不影响降级链的启动顺序；链内某源
+    成功 → 其后的链源「未尝试」（与 always 源成功与否无关，保持纯级联语义）。
+
+    耗时：首选源成功 → max(always 并行, 单源耗时)（验收基准：非 L2 单源 ≤ 旧全量双源）。
     """
+    always = always_attempt or set()
+    always_results: dict[str, SourceResult] = {}
+    if always:
+        always_results = {
+            r.source: r
+            for r in _run_sources_parallel(
+                [t for t in tasks if t[0] in always], dimension)
+        }
+
     results: list[SourceResult] = []
     succeeded = False
     for name, fn in tasks:
+        if name in always:
+            res = always_results[name]
+            results.append(res)
+            if res.data is not None:
+                succeeded = True
+            continue
         if succeeded:
-            results.append(SourceResult(name, None, dimension))  # 未尝试
+            results.append(SourceResult(name, None, dimension, attempted=False))  # 未尝试
             continue
         res = _run_one_source(name, fn, dimension)
         results.append(res)

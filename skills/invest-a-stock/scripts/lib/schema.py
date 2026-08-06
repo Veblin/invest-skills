@@ -98,6 +98,22 @@ def _scalar_key_usable(key: str, v: float) -> bool:
     return v != 0.0 or key in _ZERO_OK_KEYS
 
 
+def _rows_newest_last(rows: list[Any]) -> list[Any]:
+    """显式按日期升序排列（最新=最后一行），不依赖生产者的隐式行序。
+
+    Tushare daily_basic 等源返回最新在前（降序），此前取 data[-1] 实为最旧行
+    → 跨源校验取到最旧一期数据（缺陷修复）。委托 lib.technical.sort_kline_asc
+    （共享约定：trade_date/end_date 混合格式归一化 8 位比较，无日期行置尾——
+    快照行通常最新）。非 dict 行无日期语义，保留原位置。
+    """
+    dict_rows = [r for r in rows if isinstance(r, dict)]
+    if len(dict_rows) < 2:
+        return rows
+    from lib.technical import sort_kline_asc
+
+    return sort_kline_asc(dict_rows)
+
+
 def _extract_scalar(data: Any, dimension: str = "") -> float | None:
     """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。
 
@@ -115,7 +131,8 @@ def _extract_scalar(data: Any, dimension: str = "") -> float | None:
     if isinstance(data, (list, tuple)) and len(data) == 1:
         return _extract_scalar(data[0], dimension)
     if isinstance(data, list) and data:
-        last = data[-1]
+        # 显式升序：最新=最后一行（见 _rows_newest_last），不假设生产者行序
+        last = _rows_newest_last(data)[-1]
         if isinstance(last, dict):
             for key in keys:
                 v = _numeric_scalar(last.get(key))
@@ -135,7 +152,9 @@ def _extract_l2_scalar(data: Any, keys: tuple[str, ...]) -> float | None:
             if v is not None and _scalar_key_usable(key, v):
                 return v
     elif isinstance(data, list):
-        for r in reversed(data):
+        # 显式升序后再从尾部回溯：最新=最后一行（Tushare daily_basic 返回
+        # 降序，隐式 reversed(data) 会先取到最旧行 — 缺陷修复）
+        for r in reversed(_rows_newest_last(data)):
             if not isinstance(r, dict):
                 continue
             for key in keys:
@@ -167,6 +186,7 @@ class SourceResult:
         "latency_ms",   # float
         "error",        # str | None
         "fetched_at",   # str
+        "attempted",    # bool: 是否实际尝试过（False = 级联链跳过未执行，非失败）
     )
 
     def __init__(
@@ -179,15 +199,17 @@ class SourceResult:
         latency_ms: float = 0,
         error: str | None = None,
         fetched_at: str | None = None,
+        attempted: bool = True,
     ):
         self.source = source
         self.data = data
         self.dimension = dimension
         self.query_params = query_params
         self.confidence = confidence if confidence is not None else source_confidence(source, dimension)
-        self.success = data is not None and error is None
+        self.success = attempted and data is not None and error is None
         self.latency_ms = latency_ms
         self.error = error
+        self.attempted = attempted
         from datetime import datetime, timezone
         self.fetched_at = fetched_at or datetime.now(timezone.utc).isoformat()
 
@@ -203,6 +225,7 @@ class SourceResult:
             "data": self.data,
             "error": self.error,
             "latency_ms": self.latency_ms,
+            "attempted": self.attempted,
         }
 
 
@@ -248,7 +271,8 @@ class DimensionResult:
             self.primary_data = primary.data
             self.primary_source = primary.source
             self.multi_source = sum(1 for s in all_sources if s.data is not None) > 1
-            failures = sum(1 for s in all_sources if not s.success)
+            # 「未尝试」源（级联链首选成功后的占位）不是失败：不计入降级统计
+            failures = sum(1 for s in all_sources if s.attempted and not s.success)
             self.status = "available" if failures == 0 else "partial"
         else:
             self.primary_data = None
