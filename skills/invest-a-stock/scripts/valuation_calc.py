@@ -219,6 +219,232 @@ def get_financials(ts: TushareClient, ts_code: str) -> list[dict]:
         return []
 
 
+def get_annual_net_profit(ts: TushareClient, ts_code: str, years: int = 10) -> list[dict]:
+    """R2: 近 N 年年度净利润（income 表 n_income_attr_p，年报期 1231 结尾）。
+
+    income 表为累计口径：年报期即全年净利。fina_indicator 的 net_profit 字段
+    在低积分档被过滤（R12b 实测 2000 分档返回 None），故稳态盈利一律走 income 表。
+    返回 [{year: "YYYY1231", net_profit: float}] 升序。
+    """
+    start_date = shanghai_days_ago(years * 365)
+    end_date = shanghai_today()
+    try:
+        result = ts.query(
+            "income", ts_code=ts_code,
+            start_date=start_date, end_date=end_date,
+            fields="end_date,n_income_attr_p",
+        )
+        if result is None or (hasattr(result, "empty") and result.empty):
+            return []
+        rows = result.to_dict(orient="records") if hasattr(result, "to_dict") else list(result)
+        annual: dict[str, float] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            ed = str(r.get("end_date", ""))
+            if not ed.endswith("1231"):
+                continue
+            npv = r.get("n_income_attr_p")
+            if npv is None:
+                continue
+            try:
+                annual[ed] = float(npv)  # 同一年重复行取最后一条（后覆盖前）
+            except (TypeError, ValueError):
+                continue
+        return [{"year": ed, "net_profit": v} for ed, v in sorted(annual.items())]
+    except Exception:
+        logger.warning("Tushare income 年度净利查询失败", exc_info=True)
+        return []
+
+
+def calc_steady_earnings(
+    annual_rows: list[dict],
+    *,
+    cycle_start: str | None = None,
+    cycle_end: str | None = None,
+    method: str = "median",
+    min_years: int = 5,
+) -> dict:
+    """R2: 稳态盈利估算（穿越周期视角）。
+
+    method:
+      median  — 年度净利润中位数（默认）
+      trimmed — 截尾均值（去最高最低年）
+      range   — 用户定义周期区间（cycle_start/cycle_end）内的均值
+    样本 < min_years → 返回不可得（避免用 2-3 年数据冒充稳态——海力士式
+    "周期高点低 PE 陷阱"的识别前提是足够长的周期样本）。
+    """
+    rows = [r for r in annual_rows if r.get("net_profit") is not None]
+    if cycle_start:
+        rows = [r for r in rows if r["year"] >= cycle_start]
+    if cycle_end:
+        rows = [r for r in rows if r["year"] <= cycle_end]
+    if len(rows) < min_years:
+        return {
+            "available": False,
+            "reason": f"年度样本 {len(rows)} < {min_years} 年，稳态盈利不可得",
+            "n_years": len(rows),
+        }
+    vals = sorted(float(r["net_profit"]) for r in rows)
+    if method == "median":
+        n = len(vals)
+        mid = n // 2
+        steady = vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2
+    elif method == "trimmed":
+        if len(vals) <= 2:
+            steady = sum(vals) / len(vals)
+        else:
+            steady = sum(vals[1:-1]) / (len(vals) - 2)
+    elif method == "range":
+        steady = sum(vals) / len(vals)
+    else:
+        raise ValueError(f"未知 method: {method}")
+    return {
+        "available": True,
+        "method": method,
+        "steady_earnings": round(steady, 2),
+        "n_years": len(vals),
+        "period": f"{rows[0]['year']}~{rows[-1]['year']}",
+        "min": vals[0],
+        "max": vals[-1],
+        "latest": vals[-1],
+    }
+
+
+# 周期中枢 PE 兜底配置（钢铁/化工/有色等周期行业常见中枢，R4 行业模块可覆盖）
+_CYCLE_PE_DEFAULT = 12.0
+_CYCLE_PE_BY_INDUSTRY: dict[str, float] = {
+    "钢铁": 8.0,
+    "煤炭": 9.0,
+    "石油石化": 10.0,
+    "化工": 12.0,
+    "有色金属": 15.0,
+    "小金属": 15.0,
+    "建筑材料": 12.0,
+}
+
+
+def calc_cycle_pe(industry: str | None = None, user_pe: float | None = None) -> float:
+    """R2: 周期中枢 PE。优先级：用户覆盖 > 行业配置 > 默认 12。"""
+    if user_pe is not None:
+        return float(user_pe)
+    if industry:
+        for key, val in _CYCLE_PE_BY_INDUSTRY.items():
+            if key in industry:
+                return val
+    return _CYCLE_PE_DEFAULT
+
+
+def steady_valuation_band(
+    steady: dict, cycle_pe: float, *, band_pct: float = 0.25,
+) -> dict | None:
+    """R2: 稳态盈利 × 周期中枢 PE → 穿越周期估值区间（±band_pct 带宽）。
+
+    输出为多情景参考（乐观=中枢 PE 上沿 / 悲观=下沿），非单一目标价。
+    """
+    if not steady.get("available"):
+        return None
+    mid = steady["steady_earnings"] * cycle_pe
+    return {
+        "low": round(mid * (1 - band_pct), 2),
+        "mid": round(mid, 2),
+        "high": round(mid * (1 + band_pct), 2),
+        "cycle_pe": cycle_pe,
+        "band_pct": band_pct,
+    }
+
+
+# 金融业豁免关键词（EV/EBITDA 对银行/保险无意义）
+_FINANCIAL_INDUSTRY_KEYWORDS = ("银行", "保险", "证券", "多元金融", "非银")
+
+
+def is_financial_industry(industry: str | None) -> bool:
+    """R3: 金融业判定（EV/EBITDA 不适用）。"""
+    if not industry:
+        return False
+    return any(k in industry for k in _FINANCIAL_INDUSTRY_KEYWORDS)
+
+
+def _nan_to_none(v: Any) -> float | None:
+    """NaN → None（income 表 ebitda 等字段可能返回 NaN，须与缺失同等对待）。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    import math
+    return None if math.isnan(f) else f
+
+
+def calc_ev_ebitda(
+    *,
+    total_mv_yi: float | None,
+    cash: float | None,
+    st_loan: float | None = None,
+    lt_loan: float | None = None,
+    bond_payable: float | None = None,
+    ebitda: float | None = None,
+    industry: str | None = None,
+) -> dict:
+    """R3: EV/EBITDA 可审计桥接表。
+
+    口径：EV = 市值 + 有息负债（短贷+长贷+应付债券） - 现金
+          EBITDA = fina_indicator.ebitda（累计年报口径）
+    可审计性：逐项标注可得/缺失；有息负债全缺失时降级为
+    「净现金口径 EV = 市值 - 现金」，并提示方向偏差。
+    金融业 → 不适用（EBITDA 无意义）。
+    """
+    if is_financial_industry(industry):
+        return {"available": False, "reason": "不适用（金融业，EBITDA 无意义）",
+                "exempt": True}
+    total_mv_yi = _nan_to_none(total_mv_yi)
+    cash = _nan_to_none(cash)
+    st_loan = _nan_to_none(st_loan)
+    lt_loan = _nan_to_none(lt_loan)
+    bond_payable = _nan_to_none(bond_payable)
+    ebitda = _nan_to_none(ebitda)
+    missing: list[str] = []
+    if cash is None:
+        missing.append("cash")
+    if st_loan is None:
+        missing.append("short_loan")
+    if lt_loan is None:
+        missing.append("long_loan")
+    if bond_payable is None:
+        missing.append("bond_payable")
+    if ebitda is None:
+        missing.append("ebitda")
+
+    debt = None
+    if st_loan is not None or lt_loan is not None or bond_payable is not None:
+        debt = (st_loan or 0.0) + (lt_loan or 0.0) + (bond_payable or 0.0)
+    ev = None
+    if total_mv_yi is not None and cash is not None:
+        ev = total_mv_yi * 1e8 - (cash or 0.0)
+        if debt is not None:
+            ev += debt
+    ratio = None
+    if ev is not None and ebitda not in (None, 0.0):
+        ratio = round(ev / ebitda, 2)
+
+    return {
+        "available": ev is not None and ebitda is not None,
+        "exempt": False,
+        "bridge": {
+            "mv_yi": round(total_mv_yi, 2) if total_mv_yi is not None else None,
+            "cash_yi": round(cash / 1e8, 2) if cash is not None else None,
+            "interest_debt_yi": round(debt / 1e8, 2) if debt is not None else None,
+            "ev_yi": round(ev / 1e8, 2) if ev is not None else None,
+        },
+        "ebitda_yi": round(ebitda / 1e8, 2) if ebitda is not None else None,
+        "ev_ebitda": ratio,
+        "debt_available": debt is not None,
+        "missing": missing,
+        "note": None if debt is not None else "有息负债不可得（低积分档字段过滤），EV 为净现金口径近似，若公司有负债则实际 EV 更高",
+    }
+
+
 def get_daily_basic_history(
     ts: TushareClient, ts_code: str, years: int = 5
 ) -> list[dict]:
@@ -813,6 +1039,10 @@ class ValuationResult:
     implied_growth: dict = field(default_factory=dict)
     roe_pb_match: dict = field(default_factory=dict)
     scenarios: dict = field(default_factory=dict)
+    # R2: 稳态盈利估值（穿越周期视角）
+    steady: dict = field(default_factory=dict)
+    # R3: EV/EBITDA 企业价值桥接
+    ev_ebitda: dict = field(default_factory=dict)
     # 获取来源
     sources: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -826,6 +1056,14 @@ def run_valuation(
     symbol: str,
     rf_override: float | None = None,
     erp_override: float | None = None,
+    *,
+    steady: bool = False,
+    cycle_start: str | None = None,
+    cycle_end: str | None = None,
+    cycle_method: str = "median",
+    cycle_pe: float | None = None,
+    ev_ebitda: bool = False,
+    ev_ebitda_industry: str | None = None,
 ) -> ValuationResult:
     """执行完整估值计算流程。
 
@@ -833,6 +1071,10 @@ def run_valuation(
         symbol: 股票代码 (如 "002466")
         rf_override: 手动指定无风险利率（小数）
         erp_override: 手动指定 ERP（小数）
+        steady: R2 — 追加稳态盈利估值（穿越周期视角）
+        cycle_start/cycle_end: 用户定义周期区间（cycle_method="range" 时生效）
+        cycle_method: median / trimmed / range
+        cycle_pe: 周期中枢 PE（默认行业配置/12）
 
     Returns:
         ValuationResult
@@ -947,6 +1189,74 @@ def run_valuation(
         )
     else:
         result.scenarios = {"error": "基础数据不足"}
+
+    # ---- Step 9 (R2): 稳态盈利估值（value --steady）----
+    if steady:
+        annual = get_annual_net_profit(ts, ts_code)
+        ste = calc_steady_earnings(
+            annual,
+            cycle_start=cycle_start, cycle_end=cycle_end, method=cycle_method,
+        )
+        block = {"steady": ste, "annual": annual}
+        if ste.get("available"):
+            cyc_pe = calc_cycle_pe(industry=None, user_pe=cycle_pe)
+            band = steady_valuation_band(ste, cyc_pe)
+            block["cycle_pe"] = cyc_pe
+            block["band"] = band
+            # 当期市值 vs 稳态估值对照（海力士式"周期高点低 PE 陷阱"识别）
+            # steady_earnings 为全公司净利（元）× PE → 稳态市值（元），转亿元对照。
+            if result.total_mv_yi and band:
+                block["mv_vs_steady"] = {
+                    "total_mv_yi": result.total_mv_yi,
+                    "steady_mv_low_yi": round(band["low"] / 1e8, 2),
+                    "steady_mv_mid_yi": round(band["mid"] / 1e8, 2),
+                    "steady_mv_high_yi": round(band["high"] / 1e8, 2),
+                }
+        result.steady = block
+
+    # ---- Step 10 (R3): EV/EBITDA 桥接（value --ev-ebitda）----
+    if ev_ebitda:
+        ebitda_v: float | None = None
+        for r in reversed(fin_rows):
+            try:
+                ebitda_v = float(r["ebitda"])
+                break
+            except (TypeError, ValueError, KeyError):
+                continue
+        cash = st_loan = lt_loan = bond_payable = None
+        try:
+            bs_df = ts.query(
+                "balancesheet", ts_code=ts_code,
+                start_date=shanghai_days_ago(2 * 365), end_date=shanghai_today(),
+                fields="end_date,money_cap,short_loan,long_loan,bond_payable",
+            )
+            if bs_df is not None and not (hasattr(bs_df, "empty") and bs_df.empty):
+                bs_rows = bs_df.to_dict(orient="records") if hasattr(bs_df, "to_dict") else list(bs_df)
+                latest = None
+                for r in sorted(bs_rows, key=lambda x: str(x.get("end_date", ""))):
+                    latest = r
+                if latest:
+                    cash = safe_float(latest.get("money_cap"))
+                    st_loan = safe_float(latest.get("short_loan"))
+                    lt_loan = safe_float(latest.get("long_loan"))
+                    bond_payable = safe_float(latest.get("bond_payable"))
+        except Exception:
+            logger.warning("Tushare balancesheet 查询失败（R3 EV 桥接）", exc_info=True)
+        ev_block = calc_ev_ebitda(
+            total_mv_yi=result.total_mv_yi,
+            cash=cash, st_loan=st_loan, lt_loan=lt_loan, bond_payable=bond_payable,
+            ebitda=ebitda_v, industry=ev_ebitda_industry,
+        )
+        # 私有化检验（研究问题，非结论）：市值 / 稳态盈利 → 回本年限
+        ste = (result.steady or {}).get("steady")
+        if (ev_block.get("available") and ste and ste.get("available")
+                and result.total_mv_yi and ste.get("steady_earnings", 0) > 0):
+            payback = result.total_mv_yi / (ste["steady_earnings"] / 1e8)
+            ev_block["takeover_payback_years"] = round(payback, 1)
+            ev_block["takeover_note"] = (
+                "研究问题（非结论）：在稳态盈利假设下当前市值的回本年限；"
+                "不构成买入/目标价判断")
+        result.ev_ebitda = ev_block
 
     return result
 

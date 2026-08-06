@@ -306,6 +306,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="严格验算：跨源差异 >5%% 时在报告中硬标注阻断提示",
     )
+    pr.add_argument(
+        "--material-gap",
+        action="store_true",
+        help="R12c：报告生成前输出 12 题数据缺口清单（先回填再出报告）",
+    )
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
@@ -443,12 +448,29 @@ def build_parser() -> argparse.ArgumentParser:
     pic.add_argument("--rf", type=float, help="无风险利率（小数），默认 2.5%%")
     pic.add_argument("--erp", type=float, help="股权风险溢价（默认 0.06）")
 
+    pcls = sub.add_parser("classify", help="R1: 收益驱动假设分类（研究路径分流）")
+    pcls.add_argument("symbol", help="股票代码，如 002466")
+    pcls.add_argument("--div-years", type=int, default=None, help="连续分红年数（未提供则标注证据缺失）")
+    pcls.add_argument("--div-yield", type=float, default=None, help="股息率（小数，如 0.03）")
+    pcls.add_argument("--refi-times", type=int, default=None, help="近 N 年再融资次数（未提供则标注证据缺失）")
+    pcls.add_argument("--emit", default="text", choices=["text", "json"])
+
     pval = sub.add_parser("value", help="科学估值：多方法交叉（PE/PB/盈利收益/隐含增长/ROE-PB匹配）")
     pval.add_argument("symbol", help="股票代码，如 002466")
     pval.add_argument("--rf", type=float, help="无风险利率（小数），默认自动获取中国10Y国债")
     pval.add_argument("--erp", type=float, default=0.06, help="股权风险溢价（默认 0.06）")
     pval.add_argument("--store", action="store_true", help="结果存入数据库便于回溯")
     pval.add_argument("--emit", default="text", choices=["text", "json"])
+    pval.add_argument("--steady", action="store_true",
+                      help="R2: 追加稳态盈利估值（穿越周期视角，识别周期高点低PE陷阱）")
+    pval.add_argument("--cycle-start", default=None, help="周期区间起点（YYYY1231）")
+    pval.add_argument("--cycle-end", default=None, help="周期区间终点（YYYY1231）")
+    pval.add_argument("--cycle-method", default="median", choices=["median", "trimmed", "range"],
+                      help="稳态盈利算法（默认 median）")
+    pval.add_argument("--cycle-pe", type=float, default=None, help="周期中枢 PE（默认 12）")
+    pval.add_argument("--ev-ebitda", action="store_true",
+                      help="R3: 追加 EV/EBITDA 企业价值桥接表（可审计逐项）+ 私有化检验研究问题")
+    pval.add_argument("--industry", default=None, help="行业名（用于 R3 金融业豁免判定）")
 
     pms = sub.add_parser("market-status", help="市场微观结构快照：杠杆/广度/情绪/估值温度")
     pms.add_argument("--days", type=int, default=5, help="趋势表周期（默认 5 天）")
@@ -587,6 +609,12 @@ def cmd_report(args: argparse.Namespace) -> int:
     if getattr(args, "strict_rigor", False):
         result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)
+    if getattr(args, "material_gap", False):
+        try:
+            from lib.render_utils import format_material_gap, material_gap_report
+            print(format_material_gap(material_gap_report(result)), file=sys.stderr)
+        except Exception as exc:  # 缺口检查失败不阻断报告
+            print(f"⚠️ material-gap 检查失败: {exc}", file=sys.stderr)
     if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成报告")
         return 1
@@ -1795,6 +1823,107 @@ def cmd_ic(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_steady_block(steady: dict) -> str:
+    """R2: 稳态盈利估值块文本渲染（value --steady）。"""
+    ste = steady.get("steady") or {}
+    lines = ["", "【稳态盈利估值（R2 · 穿越周期视角）】"]
+    if not ste.get("available"):
+        lines.append(f"  ⚠️ {ste.get('reason', '稳态盈利不可得')}")
+        return "\n".join(lines)
+    lines.append(f"  年度净利样本: {ste.get('period')}（{ste.get('n_years')} 年, method={ste.get('method')}）")
+    lines.append(
+        f"  稳态盈利: {ste['steady_earnings']/1e8:.2f} 亿元"
+        f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元）"
+    )
+    band = steady.get("band")
+    mv = steady.get("mv_vs_steady")
+    if band:
+        lines.append(
+            f"  周期中枢 PE: {band['cycle_pe']} | 稳态市值带:"
+            f" {band['low']/1e8:.0f}~{band['mid']/1e8:.0f}~{band['high']/1e8:.0f} 亿元（±{band['band_pct']*100:.0f}%）"
+        )
+    if mv and mv.get("total_mv_yi"):
+        if mv["steady_mv_high_yi"] and mv["total_mv_yi"] > mv["steady_mv_high_yi"]:
+            over = (mv["total_mv_yi"] / mv["steady_mv_high_yi"] - 1) * 100
+            pos = f"高于稳态上沿 {over:.0f}%——周期高点低 PE 陷阱风险（海力士式）"
+        elif mv["steady_mv_low_yi"] and mv["total_mv_yi"] < mv["steady_mv_low_yi"]:
+            under = (mv["steady_mv_low_yi"] / mv["total_mv_yi"] - 1) * 100
+            pos = f"低于稳态下沿 {under:.0f}%——穿越周期视角存在低估"
+        else:
+            pos = "处于稳态市值带内"
+        lines.append(f"  当期市值 {mv['total_mv_yi']:.0f} 亿元 vs 稳态带: {pos}")
+    lines.append("  （稳态估值为多情景参考，非目标价；概率权重由用户自设）")
+    return "\n".join(lines)
+
+
+def _format_ev_ebitda_block(ev: dict) -> str:
+    """R3: EV/EBITDA 桥接表文本渲染（value --ev-ebitda）。"""
+    lines = ["", "【EV/EBITDA 企业价值桥接（R3）】"]
+    if ev.get("exempt"):
+        lines.append(f"  ⚠️ {ev.get('reason', '不适用')}")
+        return "\n".join(lines)
+    if not ev.get("available"):
+        lines.append(f"  ⚠️ 桥接数据不可得（缺失: {', '.join(ev.get('missing') or [])}）")
+        if ev.get("note"):
+            lines.append(f"  · {ev['note']}")
+        return "\n".join(lines)
+    b = ev["bridge"]
+    lines.append("  桥接表（逐项可审计）:")
+    lines.append(f"    - 市值: {b['mv_yi']} 亿元")
+    if b["interest_debt_yi"] is not None:
+        lines.append(f"    + 有息负债: {b['interest_debt_yi']} 亿元（短贷+长贷+应付债券）")
+    else:
+        lines.append(f"    + 有息负债: 不可得（降级净现金口径）")
+    lines.append(f"    - 现金: {b['cash_yi']} 亿元")
+    lines.append(f"    = EV: {b['ev_yi']} 亿元")
+    lines.append(f"  EBITDA: {ev['ebitda_yi']} 亿元 → EV/EBITDA = {ev['ev_ebitda']}x")
+    if ev.get("note"):
+        lines.append(f"  ⚠️ {ev['note']}")
+    if ev.get("takeover_payback_years"):
+        lines.append(f"  私有化检验（研究问题）: 回本年限 ≈ {ev['takeover_payback_years']} 年")
+        lines.append(f"    · {ev['takeover_note']}")
+    return "\n".join(lines)
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    """R1: 收益驱动假设分类（研究路径分流）。"""
+    try:
+        from lib.income_driver import classify_income_driver, format_classify_result
+        from valuation_calc import get_annual_net_profit
+        from lib.tushare_client import TushareClient
+    except ImportError as exc:
+        print(f"⚠️ classify 依赖模块不可用: {exc}", file=sys.stderr)
+        return 1
+    ts = TushareClient()
+    ts_code = _fmt_code(args.symbol) if "_fmt_code" in globals() else None
+    if ts_code is None:
+        from valuation_calc import _fmt_code
+        ts_code = _fmt_code(args.symbol)
+    annual = get_annual_net_profit(ts, ts_code)
+    if not annual:
+        print("⚠️ 年度净利序列不可得（income 表查询为空），无法分类", file=sys.stderr)
+        return 1
+    # fina_indicator（fcff 等）由 collector 同款查询补入
+    fin_rows: list[dict] = []
+    try:
+        from lib.collector import _q_tushare_financials
+        fin_rows = _q_tushare_financials(args.symbol) or []
+    except Exception:
+        pass
+    result = classify_income_driver(
+        annual, fin_rows,
+        div_years=args.div_years,
+        div_yield=args.div_yield,
+        refi_times=args.refi_times,
+    )
+    if args.emit == "json":
+        import json as _json
+        print(_json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(format_classify_result(result))
+    return 0
+
+
 def cmd_value(args: argparse.Namespace) -> int:
     """科学估值：多方法交叉估值（PE/PB/盈利收益/隐含增长/ROE-PB 匹配）。"""
     try:
@@ -1807,6 +1936,13 @@ def cmd_value(args: argparse.Namespace) -> int:
         symbol=args.symbol,
         rf_override=args.rf,
         erp_override=args.erp,
+        steady=getattr(args, "steady", False),
+        cycle_start=getattr(args, "cycle_start", None),
+        cycle_end=getattr(args, "cycle_end", None),
+        cycle_method=getattr(args, "cycle_method", "median"),
+        cycle_pe=getattr(args, "cycle_pe", None),
+        ev_ebitda=getattr(args, "ev_ebitda", False),
+        ev_ebitda_industry=getattr(args, "industry", None),
     )
 
     if args.emit == "json":
@@ -1814,6 +1950,10 @@ def cmd_value(args: argparse.Namespace) -> int:
         print(_json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
     else:
         print(format_output(result))
+        if result.steady:
+            print(_format_steady_block(result.steady))
+        if result.ev_ebitda:
+            print(_format_ev_ebitda_block(result.ev_ebitda))
 
     if args.store:
         if not _HAS_STORE:
@@ -2102,6 +2242,8 @@ def main() -> int:
         return cmd_ic(args)
     elif args.command == "value":
         return cmd_value(args)
+    elif args.command == "classify":
+        return cmd_classify(args)
     elif args.command == "market-status":
         return cmd_market_status(args)
     elif args.command == "etf-flow":

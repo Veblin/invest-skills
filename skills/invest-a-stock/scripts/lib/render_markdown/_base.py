@@ -134,6 +134,8 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
         pos = chain.get("chain_position") or "—"
         lines.append(f"**[产业链]** {chain['industry']} · {pos}")
 
+    lines.extend(_render_income_driver(collection))
+
     fusion = collection.get("fusion") or {}
     if fusion:
         lines.append("**[多源融合]**")
@@ -152,6 +154,47 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
 
     lines.extend(_render_enhancement_hints(collection))
 
+    return lines
+
+
+# --- _render_income_driver (R1) ---
+def _render_income_driver(collection: dict[str, Any]) -> list[str]:
+    """R1: 报告头部「收益驱动假设」块（研究路径分流）。
+
+    数据来源：collection.financials 中年报期（1231）记录的 net_profit——
+    R12b 后 net_profit 由 income 表兜底（fina_indicator 字段被积分过滤时）。
+    纯本地计算，零网络；年度样本 <3 年或净利全缺失 → 不渲染。
+    """
+    dims = _index_dims(collection)
+    fin = _get_dim_data(dims, "financials")
+    if not isinstance(fin, list) or not fin:
+        return []
+    annual: list[dict] = []
+    for r in fin:
+        if not isinstance(r, dict):
+            continue
+        ed = str(r.get("end_date", ""))
+        npv = r.get("net_profit")
+        if ed.endswith("1231") and npv is not None:
+            try:
+                annual.append({"year": ed, "net_profit": float(npv)})
+            except (TypeError, ValueError):
+                continue
+    if len(annual) < 3:
+        return []
+    try:
+        from lib.income_driver import classify_income_driver
+    except ImportError:
+        return []
+    result = classify_income_driver(annual, fin)
+    driver = result.get("driver", "")
+    conf = result.get("confidence", "")
+    lines = [f"**[收益驱动假设（R1）]** {driver}（置信度: {conf}）— 研究路径分流依据，决定模块权重（R12d）"]
+    if result.get("counter_evidence"):
+        for item in result["counter_evidence"][:2]:
+            lines.append(f"  - ⚠️ 反例: {item}")
+    if result.get("missing_evidence"):
+        lines.append("  - 🔍 证据缺失（需 WebSearch/公告补充）: " + "、".join(result["missing_evidence"]))
     return lines
 
 

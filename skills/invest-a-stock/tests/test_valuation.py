@@ -345,3 +345,230 @@ class TestCalcHistoricalPercentile:
         assert result["pb_current"] == 3.0
         assert result["pb_pct"] == pytest.approx(66.7, abs=0.1)
         assert "pe_current" not in result
+
+
+class TestLossRatioStructured:
+    """R12c: PE 亏损期占比结构化暴露（P0-2 标题标注的数据基础）。"""
+
+    def test_loss_ratio_computed(self):
+        from lib.valuation import valuation_summary
+
+        # 30 个交易日：12 个亏损期（负 PE 被过滤），18 个正值
+        pe_seq = [-5.0] * 12 + [20.0 + i for i in range(18)]
+        result = valuation_summary(pe_seq, [2.0] * 30)
+        pe = result["pe"]
+        assert pe["loss_days"] == 12
+        assert pe["loss_ratio"] == round(12 / 30, 4)
+        assert pe["loss_ratio"] > 0.3  # 触发标题失真标注阈值
+
+    def test_no_loss_ratio_zero(self):
+        from lib.valuation import valuation_summary
+
+        pe_seq = [20.0 + i for i in range(30)]
+        result = valuation_summary(pe_seq, [2.0] * 30)
+        assert result["pe"]["loss_days"] == 0
+        assert result["pe"]["loss_ratio"] == 0.0
+
+
+class TestSanitizeCpi:
+    """R12c: CPI 口径归一（修复 107.1 → +107.1% 异常渲染）。"""
+
+    def test_index_scale_converted(self):
+        from lib.macro import _sanitize_cpi
+
+        assert _sanitize_cpi(107.1) == 7.1  # 基期指数口径 → 同比
+
+    def test_pct_passthrough(self):
+        from lib.macro import _sanitize_cpi
+
+        assert _sanitize_cpi(0.3) == 0.3
+        assert _sanitize_cpi(-1.5) == -1.5
+
+    def test_out_of_sane_range_rejected(self):
+        from lib.macro import _sanitize_cpi
+
+        assert _sanitize_cpi(999.0) is None
+        assert _sanitize_cpi(50.0) is None
+
+
+class TestMaterialGapReport:
+    """R12c: 12 题数据缺口检查器。"""
+
+    def _collection(self, **overrides):
+        base = {
+            "dimensions": [
+                {"dimension": "financials", "data": [
+                    {"end_date": "20260331", "roe": -1.85,
+                     "grossprofit_margin": 9.59, "revenue": 355088600.0,
+                     "netprofit_margin": -7.57, "n_cashflow_act": -16923620.0,
+                     "profit_dedt": -1.0, "accounts_receiv": 1.0},
+                ]},
+                {"dimension": "valuation", "data": [
+                    {"trade_date": "20260805", "pe_ttm": 6612.0, "pb": 9.71},
+                ]},
+                {"dimension": "market_structure", "data": {"sw_index": {"pct": -8.39}}},
+            ],
+        }
+        return base
+
+    def test_full_data_no_gap(self):
+        from lib.render_utils import material_gap_report
+
+        gap = material_gap_report(self._collection())
+        missing = [q for q, s in gap.items() if not s["available"]]
+        # 引擎可覆盖项无缺口；peer 类缺口标记 r12a
+        assert "A-③ 毛利率 vs 行业" not in missing
+        assert "B-① 护城河（ROE）" not in missing
+        assert "D-① PE/PB 历史分位" not in missing
+        assert gap["A-② 竞争位置"] == {"available": False, "requires": "r12a"}
+        assert gap["D-② PE vs 行业中位"] == {"available": False, "requires": "r12a"}
+
+    def test_missing_financials_marked(self):
+        from lib.render_utils import material_gap_report
+
+        coll = self._collection()
+        coll["dimensions"][0] = {"dimension": "financials", "data": []}
+        gap = material_gap_report(coll)
+        assert gap["C-① 营收 CAGR（≥3 期）"]["available"] is False
+        assert gap["C-① 营收 CAGR（≥3 期）"]["requires"] == "engine"
+
+
+class TestSteadyEarnings:
+    """R2: 稳态盈利估值（穿越周期视角）。"""
+
+    def test_median_steady(self):
+        from valuation_calc import calc_steady_earnings
+
+        rows = [{"year": f"20{i:02d}1231", "net_profit": v}
+                for i, v in enumerate([100.0, 80.0, 120.0, 90.0, 1700.0, 95.0, 110.0, 85.0, 105.0, 98.0])]
+        # 周期峰值年 1700 存在 → 中位数不受峰值影响（海力士式场景）
+        ste = calc_steady_earnings(rows)
+        assert ste["available"] is True
+        assert ste["steady_earnings"] == 99.0  # sorted: 80,85,90,95,98,100,105,110,120,1700 → (98+100)/2
+        assert ste["n_years"] == 10
+
+    def test_insufficient_sample(self):
+        from valuation_calc import calc_steady_earnings
+
+        rows = [{"year": "20241231", "net_profit": 100.0},
+                {"year": "20251231", "net_profit": 110.0}]
+        ste = calc_steady_earnings(rows)
+        assert ste["available"] is False
+        assert "样本" in ste["reason"]
+
+    def test_cycle_range(self):
+        from valuation_calc import calc_steady_earnings
+
+        rows = [{"year": f"{2016 + i}1231", "net_profit": float(v)}
+                for i, v in enumerate([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])]
+        ste = calc_steady_earnings(rows, cycle_start="20211231", cycle_end="20251231", method="range")
+        assert ste["available"] is True
+        assert ste["n_years"] == 5
+        assert ste["steady_earnings"] == 80.0  # 2021~2025 → 60,70,80,90,100 → mean 80.0
+
+    def test_band(self):
+        from valuation_calc import steady_valuation_band
+
+        ste = {"available": True, "steady_earnings": 100.0}
+        band = steady_valuation_band(ste, 12.0)
+        assert band is not None
+        assert band["mid"] == 1200.0
+        assert band["low"] == 900.0
+        assert band["high"] == 1500.0
+
+    def test_cycle_pe_precedence(self):
+        from valuation_calc import calc_cycle_pe
+
+        assert calc_cycle_pe(user_pe=7.0) == 7.0  # 用户覆盖
+        assert calc_cycle_pe(industry="钢铁") == 8.0  # 行业配置
+        assert calc_cycle_pe(industry="未知行业") == 12.0  # 默认
+
+
+class TestEvEbitda:
+    """R3: EV/EBITDA 企业价值桥接表。"""
+
+    def test_bridge_full(self):
+        from valuation_calc import calc_ev_ebitda
+
+        r = calc_ev_ebitda(
+            total_mv_yi=100.0, cash=5e8, st_loan=10e8,
+            lt_loan=5e8, bond_payable=0.0, ebitda=20e8,
+        )
+        assert r["available"] is True
+        b = r["bridge"]
+        assert b["ev_yi"] == 110.0  # 100 + 15 - 5
+        assert b["interest_debt_yi"] == 15.0
+        assert r["ebitda_yi"] == 20.0
+        assert r["ev_ebitda"] == 5.5
+
+    def test_bridge_missing_debt_falls_back(self):
+        from valuation_calc import calc_ev_ebitda
+
+        r = calc_ev_ebitda(total_mv_yi=100.0, cash=5e8, ebitda=20e8)
+        assert r["available"] is True
+        assert r["debt_available"] is False
+        assert r["bridge"]["ev_yi"] == 95.0  # 净现金口径
+        assert "有息负债不可得" in r["note"]
+
+    def test_financial_exempt(self):
+        from valuation_calc import calc_ev_ebitda
+
+        r = calc_ev_ebitda(total_mv_yi=100.0, cash=5e8, ebitda=20e8, industry="银行")
+        assert r["available"] is False
+        assert r["exempt"] is True
+
+    def test_ebitda_missing_not_available(self):
+        from valuation_calc import calc_ev_ebitda
+
+        r = calc_ev_ebitda(total_mv_yi=100.0, cash=5e8, ebitda=None)
+        assert r["available"] is False
+        assert "ebitda" in r["missing"]
+
+
+class TestIncomeDriver:
+    """R1: 收益驱动假设分类（研究路径分流）。"""
+
+    def _annual(self, vals):
+        return [{"year": f"{2015 + i}1231", "net_profit": float(v)}
+                for i, v in enumerate(vals)]
+
+    def test_growth_driver(self):
+        from lib.income_driver import classify_income_driver, DRIVER_GROWTH
+
+        # 持续高增长 + FCF 强
+        annual = self._annual([1.0, 1.5, 2.2, 3.1, 4.5, 6.0, 8.0, 11.0, 15.0, 20.0])
+        fin = [{"fcff": 1e8 * i} for i in range(1, 7)]
+        r = classify_income_driver(annual, fin)
+        assert r["driver"] == DRIVER_GROWTH
+        assert r["confidence"] in ("高", "中")
+
+    def test_value_driver(self):
+        from lib.income_driver import classify_income_driver, DRIVER_VALUE
+
+        # 盈利平稳 + 连续分红
+        annual = self._annual([10.0, 10.5, 9.8, 10.2, 10.1, 10.4, 10.0, 10.3, 10.2, 10.5])
+        fin = [{"fcff": 5e8}] * 6
+        r = classify_income_driver(annual, fin, div_years=8, div_yield=0.04)
+        assert r["driver"] == DRIVER_VALUE
+
+    def test_cycle_driver(self):
+        from lib.income_driver import classify_income_driver, DRIVER_CYCLE
+
+        # 剧烈波动 + 亏损年（海力士式）
+        annual = self._annual([5.0, -3.0, 12.0, 2.0, -5.0, 20.0, 1.0, -2.0, 8.0, 30.0])
+        fin = [{"fcff": 1e8}] * 5
+        r = classify_income_driver(annual, fin)
+        assert r["driver"] == DRIVER_CYCLE
+
+    def test_unknown_when_insufficient(self):
+        from lib.income_driver import classify_income_driver, DRIVER_UNKNOWN
+
+        r = classify_income_driver(self._annual([1.0, 1.2, 1.4]), [])
+        assert r["driver"] == DRIVER_UNKNOWN
+
+    def test_missing_evidence_marked(self):
+        from lib.income_driver import classify_income_driver
+
+        r = classify_income_driver(self._annual([1.0, 1.2, 1.4, 1.5]), [])
+        assert "dividend" in r["missing_evidence"]
+        assert "refi" in r["missing_evidence"]
