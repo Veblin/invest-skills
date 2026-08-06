@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 ensure_invest_a_scripts_on_path()
 
 from db_util import connect_db, safe_close  # noqa: E402
+from dates import shanghai_now  # noqa: E402 — 上海时区口径（曾用 UTC，偏移 8h）
 from lib import env  # noqa: E402
 
 DB_PATH = env.STORE_DB
@@ -194,6 +195,7 @@ def save_journal(entry: dict) -> int:
     init_db()
     entry = resolve_sell_link(entry)
     symbol = str(entry.get("symbol", "")).strip().upper()
+    now_s = shanghai_now().strftime("%Y-%m-%d %H:%M:%S")
     c = _conn()
     try:
         # evaluation_json 如果是 dict 则序列化
@@ -214,8 +216,9 @@ def save_journal(entry: dict) -> int:
                (symbol, asset_type, driver, hypothesis, wrong_conditions,
                 target_period, target_return, max_loss_amount, position_pct,
                 entry_price, entry_date,
-                direction, linked_journal_id, evaluation_json, attribution)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                direction, linked_journal_id, evaluation_json, attribution,
+                created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 symbol,
                 entry.get("asset_type", ""),
@@ -232,6 +235,8 @@ def save_journal(entry: dict) -> int:
                 link_id,
                 eval_raw,
                 entry.get("attribution", ""),
+                now_s,
+                now_s,
             ),
         )
         c.commit()
@@ -277,8 +282,8 @@ def update_journal(journal_id: int, updates: dict) -> bool:
         set_clause = ", ".join(f"{k}=?" for k in cols)
         values = [prepared[k] for k in cols]
         cur = c.execute(
-            f"UPDATE trade_journals SET {set_clause}, updated_at=datetime('now') WHERE id=?",
-            values + [journal_id],
+            f"UPDATE trade_journals SET {set_clause}, updated_at=? WHERE id=?",
+            values + [shanghai_now().strftime("%Y-%m-%d %H:%M:%S"), journal_id],
         )
         c.commit()
         return cur.rowcount > 0
@@ -333,9 +338,9 @@ def delete_journal(journal_id: int) -> bool:
     c = _conn()
     try:
         c.execute(
-            "UPDATE trade_journals SET linked_journal_id=NULL, updated_at=datetime('now') "
+            "UPDATE trade_journals SET linked_journal_id=NULL, updated_at=? "
             "WHERE linked_journal_id=?",
-            (journal_id,),
+            (shanghai_now().strftime("%Y-%m-%d %H:%M:%S"), journal_id),
         )
         cur = c.execute("DELETE FROM trade_journals WHERE id=?", (journal_id,))
         c.commit()

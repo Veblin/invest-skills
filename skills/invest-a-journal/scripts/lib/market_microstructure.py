@@ -356,17 +356,23 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
                 snap["margin_20d_change"] = round((margin - prev_margin) / prev_margin * 100, 2)
 
     # 10. 涨跌比N日均值（首次运行可能不足5日）
+    # 注意：history 已含今日刚持久化的行（snapshot→_auto_persist→load_history），
+    # 拼接前必须剔除今日，否则今日被双计（"5 日 MA"实际跨 4 个不同日、今日权重 40%）
     ad = snap.get("ad_ratio")
-    recent_ad = [h.get("ad_ratio") for h in history[-4:] if h.get("ad_ratio") is not None]
+    snap_date = snap.get("date")
+    hist_ex_today = [h for h in history
+                     if (h.get("date") or h.get("trade_date")) != snap_date]
+    recent_ad = [h.get("ad_ratio") for h in hist_ex_today[-4:]
+                 if h.get("ad_ratio") is not None]
     if ad is not None:
         recent_ad.append(ad)
         snap["ad_ratio_5d_ma"] = round(sum(recent_ad) / len(recent_ad), 4)
         snap["_ad_ma_window"] = len(recent_ad)  # 实际窗口大小，用于标签
 
-    # 11. 跌停家数20日分位
+    # 11. 跌停家数20日分位（同上，剔除今日避免窗口偏移）
     ld = snap.get("limit_down_count")
-    if ld is not None and len(history) >= 19:
-        ld_history = [h.get("limit_down_count") for h in history[-19:]
+    if ld is not None and len(hist_ex_today) >= 19:
+        ld_history = [h.get("limit_down_count") for h in hist_ex_today[-19:]
                       if h.get("limit_down_count") is not None]
         ld_history.append(ld)
         if ld_history:
@@ -705,7 +711,9 @@ def _fetch_turnover(result: dict) -> None:
         import akshare as ak
         with akshare_direct_session():
             sse = ak.stock_sse_summary()
-            szse = ak.stock_szse_summary()
+            # stock_szse_summary 不传日期时 akshare 硬编码默认 '20240830'，
+            # 会把流通市值/成交额冻结在 2 年前；必须显式传上海时区当日
+            szse = ak.stock_szse_summary(date=shanghai_today())
 
         # --- 流通市值 ---
         # SSE: 按「项目」列查找「流通市值」行，「股票」列为数值（亿元）
