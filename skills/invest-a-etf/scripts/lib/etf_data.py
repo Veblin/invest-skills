@@ -1946,9 +1946,14 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
     stats["annual_high"] = {"date": dates[high_i], "close": closes[high_i]}
     stats["annual_low"] = {"date": dates[low_i], "close": closes[low_i]}
 
-    # 最大回撤：运行峰值 → 谷底（峰值之后的最低收盘）
+    # 最大回撤：运行峰值 → 谷底（峰值之后的最低收盘）。
+    # peak/trough 必须配对记录：trough 更新时快照当时的运行峰值，
+    # 否则循环结束后 peak_i 是"最后"一个运行峰值（可能晚于 trough），
+    # V 型反转窗口会输出自相矛盾的峰谷对（{peak:110, trough:90, dd:-10%}
+    # 实际是 110→90 = -18.18%）。
     peak_i = 0
     trough_i = 0
+    dd_peak_i = 0  # 与最大回撤配对的峰值索引
     max_dd = 0.0
     for i in range(1, len(closes)):
         if closes[i] > closes[peak_i]:
@@ -1957,9 +1962,10 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
         if dd < max_dd:
             max_dd = dd
             trough_i = i
+            dd_peak_i = peak_i
     stats["max_drawdown"] = {
-        "peak_date": dates[peak_i],
-        "peak_close": closes[peak_i],
+        "peak_date": dates[dd_peak_i],
+        "peak_close": closes[dd_peak_i],
         "trough_date": dates[trough_i],
         "trough_close": closes[trough_i],
         "drawdown_pct": round(max_dd, 2),
