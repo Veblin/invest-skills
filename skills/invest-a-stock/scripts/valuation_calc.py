@@ -19,6 +19,7 @@
     3. 获取 PE/PB 历史序列，计算历史分位
     4. 获取中国 10Y 国债收益率作为 Rf
     5. 盈利收益率框架 (Rf + ERP)
+    5b. 机会成本行 (R8): E/P vs 10Y 国债利差（估值机会成本代理，不称 ERP）
     6. 反推市场隐含 g
     7. ROE-PB 理论匹配
     8. 多情景（乐观/中性/悲观）× 多方法估值区间
@@ -868,6 +869,41 @@ def implied_growth_detailed(
     }
 
 
+def calc_opportunity_cost(pe: float | None, rf_10y: float | None) -> dict:
+    """R8: 估值机会成本行 — 盈利收益率 (E/P) vs 中国 10Y 国债收益率。
+
+    earnings_yield = 1/pe（pe>0 时），ey_minus_10y = E/P − 10Y（利差）。
+    利差是"持有一单位盈利收益 vs 无风险收益"的机会成本代理——**不称 ERP**
+    （ERP 另有含权益风险溢价的定义口径）。E/P 高于 10Y 越多，估值相对债券
+    越便宜；倒挂（利差 < 0）说明市场把大部分收益押注在增长预期上。
+
+    pe<=0（亏损期）或 rf 缺失 → available=False，标注不可得。
+    """
+    if pe is None or pe <= 0 or rf_10y is None:
+        reasons: list[str] = []
+        if pe is None or pe <= 0:
+            reasons.append("PE 非正（亏损期或无有效 PE）")
+        if rf_10y is None:
+            reasons.append("中国 10Y 国债收益率不可得")
+        return {
+            "available": False,
+            "reason": "；".join(reasons),
+        }
+    earnings_yield = 1.0 / pe
+    ey_minus_10y = earnings_yield - rf_10y
+    return {
+        "available": True,
+        "pe": round(pe, 2),
+        "earnings_yield_pct": round(earnings_yield * 100, 2),
+        "rf_10y_pct": round(rf_10y * 100, 2),
+        "ey_minus_10y_pp": round(ey_minus_10y * 100, 2),
+        "note": (
+            "口径：盈利收益率 E/P = 1/PE（TTM），对比中国 10Y 国债收益率；"
+            "利差 (E/P − 10Y) 为估值机会成本代理，不称 ERP。"
+        ),
+    }
+
+
 def roe_pb_match(
     roe_annualized: float,
     bvps: float,
@@ -1044,6 +1080,8 @@ class ValuationResult:
     steady: dict = field(default_factory=dict)
     # R3: EV/EBITDA 企业价值桥接
     ev_ebitda: dict = field(default_factory=dict)
+    # R8: 机会成本行（盈利收益率 vs 10Y 国债利差）
+    opportunity_cost: dict = field(default_factory=dict)
     # 获取来源
     sources: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -1167,6 +1205,11 @@ def run_valuation(
         result.implied_growth = implied_growth_detailed(current_pe, rf, erp)
     else:
         result.implied_growth = {"error": "PE/Rf 不可得"}
+
+    # ---- Step 6b (R8): 机会成本行（盈利收益率 vs 10Y 国债利差）----
+    # pe 用 Step 6 同源的 current_pe（实时价格/TTM EPS，回退 daily_basic），
+    # rf 用 Step 5 取得的中国 10Y 国债；亏损或无 rf 时返回不可得标注。
+    result.opportunity_cost = calc_opportunity_cost(current_pe, rf)
 
     # ---- Step 7: ROE-PB 匹配 ----
     bvps = result.bvps_data.get("bvps")
@@ -1417,6 +1460,19 @@ def format_output(result: ValuationResult) -> str:
             lines.append(f"  当前 PE {current_pe_val:.1f}x → 定价 g ≈ {ig['g_implied'] * 100:.2f}%")
     else:
         lines.append(f"  计算不可得 ({ig.get('error', '')})")
+
+    # ---- R8: 机会成本行（估值段落末尾）----
+    oc = result.opportunity_cost or {}
+    if oc.get("available"):
+        lines.append("")
+        lines.append(
+            f"  机会成本          盈利收益率 E/P = {oc['earnings_yield_pct']:.2f}%"
+            f" vs 10Y 国债 {oc['rf_10y_pct']:.2f}%"
+            f" → 利差 (E/P−10Y) = {oc['ey_minus_10y_pp']:.2f}pp"
+        )
+    elif oc:
+        lines.append("")
+        lines.append(f"  机会成本          不可得（{oc.get('reason', 'PE/Rf 不可得')}）")
 
     # ==== 5. ROE-PB 匹配 ====
     lines.append("")

@@ -620,3 +620,34 @@ class TestLimitStreakDetector:
         assert st["period_low"]["value"] == 64.94
         down_streaks = [s for s in st["streaks"] if s["type"] == "down"]
         assert down_streaks and down_streaks[0]["days"] == 2  # 85.5/76.95 两连跌停
+
+
+class TestOpportunityCost:
+    """R8: 机会成本行 — 盈利收益率 (E/P) vs 10Y 国债利差。"""
+
+    def test_ey_and_spread(self):
+        from valuation_calc import calc_opportunity_cost
+
+        # pe=38 → E/P = 1/38 ≈ 2.63%；rf=2.5% → 利差 ≈ 0.13pp
+        r = calc_opportunity_cost(38.0, 0.025)
+        assert r["available"] is True
+        assert r["earnings_yield_pct"] == pytest.approx(2.63, abs=0.01)
+        assert r["rf_10y_pct"] == pytest.approx(2.5)
+        assert r["ey_minus_10y_pp"] == pytest.approx(0.13, abs=0.01)
+        assert r["pe"] == pytest.approx(38.0)
+        assert "note" in r and "E/P" in r["note"]
+
+    def test_rf_missing_annotated_not_available(self):
+        from valuation_calc import calc_opportunity_cost
+
+        r = calc_opportunity_cost(38.0, None)
+        assert r["available"] is False
+        assert "10Y" in r["reason"]
+
+    def test_pe_non_positive_annotated_not_available(self):
+        from valuation_calc import calc_opportunity_cost
+
+        for pe in (0.0, -5.0, None):
+            r = calc_opportunity_cost(pe, 0.025)
+            assert r["available"] is False
+            assert "PE" in r["reason"]
