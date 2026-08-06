@@ -135,6 +135,7 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
         lines.append(f"**[产业链]** {chain['industry']} · {pos}")
 
     lines.extend(_render_income_driver(collection))
+    lines.extend(_render_price_structure(collection))
 
     fusion = collection.get("fusion") or {}
     if fusion:
@@ -196,6 +197,39 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
     if result.get("missing_evidence"):
         lines.append("  - 🔍 证据缺失（需 WebSearch/公告补充）: " + "、".join(result["missing_evidence"]))
     return lines
+
+
+# --- _render_price_structure (R12e) ---
+def _render_price_structure(collection: dict[str, Any]) -> list[str]:
+    """R12e: 近端价格结构（涨跌停/连板/极端波动）头部行。
+
+    修复沃格光电实证缺陷：20 日窗口累计数掩盖"三跌停 → 三连板"近端结构。
+    """
+    dims = _index_dims(collection)
+    kline = _get_dim_data(dims, "kline")
+    if not isinstance(kline, list) or len(kline) < 5:
+        return []
+    try:
+        from lib.technical import detect_limit_streaks
+        symbol = str(collection.get("symbol") or "")
+        st = detect_limit_streaks(kline, symbol=symbol)
+    except Exception:
+        return []
+    if not st.get("available"):
+        return []
+    parts = [f"近 {st['lookback']} 日 {st['window_pct']:+.1f}%"]
+    if st["recent_limit_ups"] or st["recent_limit_downs"]:
+        parts.append(
+            f"涨跌停 {st['recent_limit_ups']}↑/{st['recent_limit_downs']}↓"
+            f"（{st['limit_threshold']:.0f}% 阈值）")
+    for s in st.get("streaks") or []:
+        label = "连板" if s["type"] == "up" else "连跌停"
+        total = f"，累计 {s['total_pct']:+.1f}%" if s.get("total_pct") is not None else ""
+        parts.append(f"{s['start_date']}~{s['end_date']} {s['days']}日{label}{total}")
+    low = st.get("period_low") or {}
+    if low.get("date"):
+        parts.append(f"区间低点 {low['value']}（{low['date']}）")
+    return [f"**[近端价格结构]** " + " · ".join(parts)]
 
 
 # --- _render_enhancement_hints ---

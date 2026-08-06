@@ -908,3 +908,111 @@ def _last_valid(seq: list[float | None]) -> float | None:
         if v is not None:
             return v
     return None
+
+
+# --- 近端价格结构检测（R12e: 涨跌停/连板/极端波动）---
+def _limit_pct_for_symbol(symbol: str) -> float:
+    """板块涨跌停阈值：创业板(30x)/科创板(68x) 20%，其余主板 10%。"""
+    if symbol.startswith(("30", "68")):
+        return 20.0
+    return 10.0
+
+
+def detect_limit_streaks(
+    rows: list[dict],
+    *,
+    symbol: str = "",
+    lookback: int = 15,
+    limit_pct: float | None = None,
+) -> dict:
+    """近端涨跌停/连板/极端波动结构检测（R12e）。
+
+    rows: kline 行（trade_date/open/high/low/close/vol 标准化字段）。
+    引擎计算——识别"跌停→连板"这类窗口累计数掩盖的近端结构
+    （沃格光电 603773 实证：20 日 -35.79% 掩盖了 7 月三跌停 → 8 月初
+    三连板反包的实际结构）。
+
+    返回:
+      {
+        "available": bool,
+        "limit_threshold": 10.0 或 20.0,
+        "streaks": [{type: up/down, days, start_date, end_date, total_pct}],  # 仅 days>=2
+        "recent_limit_ups"/"recent_limit_downs": lookback 内涨跌停天数,
+        "window_pct": lookback 累计涨跌%,
+        "period_high"/"period_low": lookback 内高低点及日期,
+      }
+    """
+    thr = limit_pct if limit_pct is not None else _limit_pct_for_symbol(symbol)
+    srows = sort_kline_asc(rows)
+    window = srows[-lookback:] if len(srows) > lookback else srows
+    if len(window) < 3:
+        return {"available": False, "reason": "kline 样本不足"}
+
+    closes: list[float] = []
+    dates: list[str] = []
+    pcts: list[float] = []
+    for i, r in enumerate(window):
+        try:
+            cur = float(r["close"])
+        except (TypeError, ValueError):
+            return {"available": False, "reason": "close 字段缺失"}
+        closes.append(cur)
+        dates.append(str(r.get("trade_date") or r.get("date") or ""))
+        cp = r.get("change_pct")
+        if cp is not None:
+            try:
+                pcts.append(float(cp))
+            except (TypeError, ValueError):
+                pcts.append(0.0)
+        elif i > 0 and closes[i - 1]:
+            pcts.append((cur / closes[i - 1] - 1) * 100)
+        else:
+            pcts.append(0.0)
+
+    def _is_limit(p: float) -> bool:
+        return abs(p) >= thr - 0.2  # 容忍四舍五入（9.99% vs 10.01%）
+
+    ups = [i for i, p in enumerate(pcts) if _is_limit(p) and p > 0]
+    downs = [i for i, p in enumerate(pcts) if _is_limit(p) and p < 0]
+
+    def _streak_groups(indices: list[int]) -> list[list[int]]:
+        out: list[list[int]] = []
+        for idx in indices:
+            if out and idx == out[-1][-1] + 1:
+                out[-1].append(idx)
+            else:
+                out.append([idx])
+        return out
+
+    streaks: list[dict] = []
+    for grp in _streak_groups(ups):
+        if len(grp) >= 2:
+            start, end = grp[0], grp[-1]
+            base = closes[start - 1] if start > 0 else None
+            streaks.append({
+                "type": "up", "days": len(grp),
+                "start_date": dates[start], "end_date": dates[end],
+                "total_pct": round((closes[end] / base - 1) * 100, 1) if base else None,
+            })
+    for grp in _streak_groups(downs):
+        if len(grp) >= 2:
+            start, end = grp[0], grp[-1]
+            base = closes[start - 1] if start > 0 else None
+            streaks.append({
+                "type": "down", "days": len(grp),
+                "start_date": dates[start], "end_date": dates[end],
+                "total_pct": round((closes[end] / base - 1) * 100, 1) if base else None,
+            })
+
+    hi, lo = max(closes), min(closes)
+    return {
+        "available": True,
+        "limit_threshold": thr,
+        "streaks": streaks,
+        "recent_limit_ups": len(ups),
+        "recent_limit_downs": len(downs),
+        "window_pct": round((closes[-1] / closes[0] - 1) * 100, 2),
+        "period_high": {"value": round(hi, 2), "date": dates[closes.index(hi)]},
+        "period_low": {"value": round(lo, 2), "date": dates[closes.index(lo)]},
+        "lookback": len(window),
+    }

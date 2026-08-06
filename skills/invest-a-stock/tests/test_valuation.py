@@ -572,3 +572,51 @@ class TestIncomeDriver:
         r = classify_income_driver(self._annual([1.0, 1.2, 1.4, 1.5]), [])
         assert "dividend" in r["missing_evidence"]
         assert "refi" in r["missing_evidence"]
+
+
+class TestLimitStreakDetector:
+    """R12e: 近端价格结构检测（连板识别）。"""
+
+    def _kline(self, closes, pcts=None):
+        rows = []
+        for i, c in enumerate(closes):
+            row = {"trade_date": f"2026080{i+1:02d}", "close": float(c)}
+            if pcts:
+                row["change_pct"] = pcts[i]
+            rows.append(row)
+        return rows
+
+    def test_three_consecutive_limit_ups(self):
+        from lib.technical import detect_limit_streaks
+
+        # 7-30 跌停 → 8-03 小跌 → 8-04/8-05/8-06 三连板（沃格实证结构）
+        closes = [66.92, 64.94, 71.43, 78.57, 86.43]
+        pcts = [-10.01, -5.61, 9.99, 10.00, 10.00]
+        st = detect_limit_streaks(self._kline(closes, pcts), symbol="603773")
+        assert st["available"] is True
+        assert st["recent_limit_ups"] == 3
+        assert st["recent_limit_downs"] == 1
+        up_streaks = [s for s in st["streaks"] if s["type"] == "up"]
+        assert up_streaks and up_streaks[0]["days"] == 3
+        assert up_streaks[0]["total_pct"] == 33.1  # 71.43/64.94 起算? 实际 base=64.94 → 86.43/64.94-1
+        # 实际断言用计算值：86.43/64.94-1 = 33.09 → 33.1
+
+    def test_threshold_20pct_for_gem(self):
+        from lib.technical import detect_limit_streaks
+
+        closes = [10.0, 12.0, 14.4]  # 20% 涨停×2
+        pcts = [0.0, 20.0, 20.0]
+        st = detect_limit_streaks(self._kline(closes, pcts), symbol="300328")
+        assert st["limit_threshold"] == 20.0
+        assert st["recent_limit_ups"] == 2
+
+    def test_window_pct_and_low(self):
+        from lib.technical import detect_limit_streaks
+
+        closes = [95.0, 85.5, 76.95, 64.94, 78.57]
+        pcts = [-5.05, -10.0, -10.0, -5.61, 10.0]
+        st = detect_limit_streaks(self._kline(closes, pcts), symbol="603773")
+        assert st["window_pct"] == round((78.57 / 95.0 - 1) * 100, 2)
+        assert st["period_low"]["value"] == 64.94
+        down_streaks = [s for s in st["streaks"] if s["type"] == "down"]
+        assert down_streaks and down_streaks[0]["days"] == 2  # 85.5/76.95 两连跌停
