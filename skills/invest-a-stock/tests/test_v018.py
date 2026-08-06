@@ -284,11 +284,15 @@ class TestManagementAbilityProxy:
         _check_no_forbidden_words(result)
 
     def test_roe_fallback_when_roic_fields_missing(self):
-        """ebit/total_assets/total_cur_liab 缺失时应回退到 roe 代理指标，而非抛异常或虚构 ROIC。"""
+        """ebit/total_assets/total_cur_liab 缺失时应回退到 roe 代理指标，而非抛异常或虚构 ROIC。
+
+        R12 修复后 roe 同样要求跨年同类型可比序列（roe 为财年累计口径），
+        测试数据改用 3 个跨年年报期（2023/2024/2025 年报）。
+        """
         rows = []
-        for i, q in enumerate(("0331", "0630", "0930", "1231")):
+        for i, year in enumerate((2023, 2024, 2025)):
             rows.append({
-                "end_date": f"2025{q}",
+                "end_date": f"{year}1231",
                 "revenue": 100.0 + i * 10,
                 "net_profit": 10.0,
                 "grossprofit_margin": 40.0,
@@ -298,6 +302,111 @@ class TestManagementAbilityProxy:
         result = management_ability_proxy(rows, {})
         assert result["detail"]["roic_trend"]["metric"] == "代理指标: ROE"
         _check_no_forbidden_words(result)
+
+
+class TestRoicTrendComparability:
+    """R12 修复：ROIC/ROE 趋势必须基于可比口径（跨年同周期类型）。
+
+    背景：fina_indicator 的 ebit/roe 为财年累计口径（Q1→H1→3Q→年报 单调累加），
+    旧实现把累计 ebit 除以近常量的资本基数 → 同财年最近 3 期必然递增 → 25 分白送。
+    """
+
+    def _row(self, end_date: str, ebit: float, *, roe: float | None = None) -> dict:
+        row = {"end_date": end_date, "ebit": ebit, "total_assets": 200.0, "total_cur_liab": 50.0}
+        if roe is not None:
+            row["roe"] = roe
+        return row
+
+    def test_same_fiscal_year_cumulative_series_gets_no_score(self):
+        """同财年 Q1→H1→3Q 累计 ebit 递增（旧实现必给 25 分）→ 修复后标不可得。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20250331", ebit=10.0),
+            self._row("20250630", ebit=22.0),
+            self._row("20250930", ebit=35.0),
+        ]
+        score, detail, _, missing = _score_roic_trend(rows)
+        assert score is None
+        assert detail["score"] is None
+        assert "可比" in missing  # 明确标注不可比原因
+
+    def test_six_quarter_rows_last3_in_same_fiscal_year_gets_no_score(self):
+        """6+ 季度行且最近 3 期同属一个财年（缺陷原文场景）→ 不得 25 分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20240331", ebit=8.0),
+            self._row("20240630", ebit=18.0),
+            self._row("20240930", ebit=30.0),
+            self._row("20241231", ebit=45.0),
+            self._row("20250331", ebit=10.0),
+            self._row("20250630", ebit=22.0),
+        ]
+        score, detail, _, _ = _score_roic_trend(rows)
+        assert score is None  # 同类型（各年 H1）仅 2 期，不可比 → 不得分
+        assert detail["score"] is None
+
+    def test_roe_fallback_same_fiscal_year_cumulative_gets_no_score(self):
+        """ROE 回退同样受累计口径影响：同财年累计递增的 roe 不得给分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20250331", ebit=None, roe=8.0),
+            self._row("20250630", ebit=None, roe=9.5),
+            self._row("20250930", ebit=None, roe=11.0),
+        ]
+        score, detail, _, _ = _score_roic_trend(rows)
+        assert score is None
+        assert detail["score"] is None
+
+    def test_cross_year_same_type_increasing_scores_full(self):
+        """跨年同类型期（各年 Q1）真实递增 → 正常给 25 分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20230331", ebit=10.0),
+            self._row("20240331", ebit=22.0),
+            self._row("20250331", ebit=35.0),
+        ]
+        score, detail, sources, missing = _score_roic_trend(rows)
+        assert score == 25.0
+        assert detail["score"] == 25.0
+        assert detail["period"] == "0331"
+        assert "可比口径" in detail["note"]
+        assert missing == ""
+        assert "ebit" in sources
+
+    def test_roe_fallback_cross_year_same_type_increasing_scores_full(self):
+        """跨年年报 ROE 真实递增 → 回退代理指标正常给 25 分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20231231", ebit=None, roe=8.0),
+            self._row("20241231", ebit=None, roe=9.5),
+            self._row("20251231", ebit=None, roe=11.0),
+        ]
+        score, detail, sources, _ = _score_roic_trend(rows)
+        assert score == 25.0
+        assert detail["metric"] == "代理指标: ROE"
+        assert detail["period"] == "1231"
+        assert sources == ["roe"]
+
+    def test_cross_year_mixed_periods_uses_latest_type_series(self):
+        """多财年混合期数据（含年报+次年 Q1）→ 与最新期同类型的跨年序列可比。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20231231", ebit=30.0),
+            self._row("20240331", ebit=10.0),
+            self._row("20241231", ebit=45.0),
+            self._row("20250331", ebit=22.0),
+            self._row("20251231", ebit=60.0),
+            self._row("20260331", ebit=35.0),
+        ]
+        score, detail, _, _ = _score_roic_trend(rows)
+        assert score == 25.0  # 各年 Q1: 10→22→35 真实递增
+        assert detail["period"] == "0331"
 
 
 class TestConfidenceMatrix:
