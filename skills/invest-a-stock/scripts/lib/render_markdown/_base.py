@@ -135,6 +135,7 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
         lines.append(f"**[产业链]** {chain['industry']} · {pos}")
 
     lines.extend(_render_income_driver(collection))
+    lines.extend(_render_success_factors(collection))
     lines.extend(_render_price_structure(collection))
 
     fusion = collection.get("fusion") or {}
@@ -196,6 +197,55 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
             lines.append(f"  - ⚠️ 反例: {item}")
     if result.get("missing_evidence"):
         lines.append("  - 🔍 证据缺失（需 WebSearch/公告补充）: " + "、".join(result["missing_evidence"]))
+    return lines
+
+
+# --- _render_success_factors (R4) ---
+def _render_success_factors(collection: dict[str, Any]) -> list[str]:
+    """R4: 行业成功关键因素块（先答行业关键问题，再进通用 12 题）。
+
+    数据来源：cmd_report 装配的 collection["success_factors"] =
+    {"industry": 行业名, "covered": bool, "factors": [...]}（get_success_factors 产出）。
+    因子 data_fields 从 financials 最新期取值；引擎外字段输出「需 AI 补查」。
+    未覆盖行业 → 输出「无行业成功因素定义」一行，回退通用 12 题。
+    """
+    cfg = collection.get("success_factors")
+    if not isinstance(cfg, dict):
+        return []
+    industry = str(cfg.get("industry") or "未知行业")
+    factors = cfg.get("factors") or []
+    if not cfg.get("covered") or not factors:
+        return [
+            f"**[行业成功关键因素（R4）]** {industry}：无行业成功因素定义"
+            "（未覆盖行业，回退通用 12 题）"
+        ]
+    dims = _index_dims(collection)
+    fin = _get_dim_data(dims, "financials")
+    latest: dict = {}
+    if isinstance(fin, list) and fin:
+        rows = [r for r in fin if isinstance(r, dict) and r.get("end_date")]
+        if rows:
+            latest = max(rows, key=lambda r: str(r.get("end_date", "")))
+    lines = [f"**[行业成功关键因素（R4）]** {industry}"]
+    for i, factor in enumerate(factors, 1):
+        if not isinstance(factor, dict):
+            continue
+        q = str(factor.get("question", "?"))
+        fields = factor.get("data_fields") or []
+        vals: list[str] = []
+        for f in fields:
+            v = latest.get(f)
+            if v is None:
+                vals.append(f"{f}: 需 AI 补查")
+            else:
+                try:
+                    vals.append(f"{f}: {float(v):.2f}")
+                except (TypeError, ValueError):
+                    vals.append(f"{f}: {v}")
+        src = factor.get("sources") or []
+        data_part = " · ".join(vals) if vals else "需 AI 补查（引擎外字段）"
+        lines.append(f"- {i}. {q}")
+        lines.append(f"  - 数据: {data_part} [来源: {' / '.join(src)}]")
     return lines
 
 

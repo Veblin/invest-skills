@@ -30,6 +30,8 @@ from .base import (
     get_unknown_rules,
     get_risk_signals,
     get_fast_veto_skips,
+    validate_success_factors,
+    get_success_factors,
 
     # 行业类型判断
     is_financial_sector,
@@ -57,6 +59,8 @@ __all__ = [
     "get_unknown_rules",
     "get_risk_signals",
     "get_fast_veto_skips",
+    "validate_success_factors",
+    "get_success_factors",
     "is_financial_sector",
     "is_tech_sector",
     "is_consumer_sector",

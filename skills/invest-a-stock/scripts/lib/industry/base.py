@@ -50,6 +50,10 @@ class IndustryProfile:
     # 行业名（SW2021 分类）
     sw_name: str = ""
 
+    # 行业成功关键因素（R4）— 每项: {question, data_fields, sources, answer_template}
+    # 报告先答这些再进通用 12 题；无数据字段支撑的项 data_fields 可为空（引擎外，需 AI 补查）
+    success_factors: list[dict] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # 默认 Profile — 当前通用框架（行业中性）
@@ -168,6 +172,42 @@ def get_risk_signals(industry: str) -> dict[str, dict[str, Any]]:
 def get_fast_veto_skips(industry: str) -> list[str]:
     """快捷方法：获取不适用的快速否决项。"""
     return resolve_industry_profile(industry).fast_veto_skips
+
+
+# --- 行业成功关键因素（R4） ---
+
+_SUCCESS_FACTOR_FIELDS = ("question", "data_fields", "sources", "answer_template")
+
+
+def validate_success_factors(profile: IndustryProfile) -> list[str]:
+    """校验成功关键因素结构的完整性。
+
+    每项必须含 question / data_fields / sources / answer_template 四字段，
+    缺任一 → 返回该因素的问题清单（供测试与开发期自检，运行期不阻断）。
+    """
+    errors: list[str] = []
+    for idx, factor in enumerate(profile.success_factors):
+        if not isinstance(factor, dict):
+            errors.append(f"[{profile.sw_name or profile.sector_group}] 成功因素 #{idx} 非 dict")
+            continue
+        missing = [f for f in _SUCCESS_FACTOR_FIELDS if f not in factor]
+        if missing:
+            errors.append(
+                f"[{profile.sw_name or profile.sector_group}] 成功因素 #{idx} "
+                f"缺字段: {', '.join(missing)}"
+            )
+    return errors
+
+
+def get_success_factors(industry: str) -> list[dict]:
+    """获取行业成功关键因素清单（R4）。
+
+    未覆盖行业 → 返回空表（渲染层输出「无行业成功因素定义」标注，回退通用 12 题）。
+    """
+    profile = resolve_industry_profile(industry)
+    if profile is default_profile:
+        return []
+    return list(profile.success_factors)
 
 
 def is_financial_sector(industry: str) -> bool:

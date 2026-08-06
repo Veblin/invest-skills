@@ -606,6 +606,22 @@ def cmd_report(args: argparse.Namespace) -> int:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，渲染层标注「无行业成功因素定义」）
+    try:
+        from lib.render_utils import _get_dim_data, _index_dims
+        from lib.industry.base import get_success_factors
+        basic = _get_dim_data(_index_dims(result), "basic_info") or {}
+        industry = ""
+        if isinstance(basic, dict):
+            industry = str(basic.get("industry") or basic.get("行业") or "")
+        factors = get_success_factors(industry)
+        result["success_factors"] = {
+            "industry": industry,
+            "covered": bool(factors),
+            "factors": factors,
+        }
+    except Exception:  # 装配失败不阻断报告
+        result["success_factors"] = {"industry": "", "covered": False, "factors": []}
     if getattr(args, "strict_rigor", False):
         result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)

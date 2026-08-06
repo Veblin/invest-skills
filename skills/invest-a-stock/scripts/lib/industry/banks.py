@@ -136,6 +136,28 @@ bank_profile = IndustryProfile(
         "negative_ocf",           # 银行 OCF 概念不同
         "high_goodwill_ratio",    # 银行通常无商誉
     ],
+
+    # 行业成功关键因素（R4）— 报告先答这 3 问，再进通用 12 题
+    success_factors=[
+        {
+            "question": "净息差（NIM）是否稳定？LPR 下行环境下，息差收窄是被规模增长抵消，还是正在侵蚀利润？",
+            "data_fields": ["net_interest_margin", "roa"],
+            "sources": ["tushare fina_indicator: net_interest_margin/roa", "akshare 财务摘要"],
+            "answer_template": "引用最新期 NIM 与 ROA → 判断息差方向与驱动（LPR/存款成本）→ 与同业对比 → 结论：盈利核心是否承压",
+        },
+        {
+            "question": "不良率与拨备覆盖率是否真实反映资产质量（逾期 90 天偏离度、关注类迁徙）？",
+            "data_fields": ["npl_ratio", "provision_coverage_ratio"],
+            "sources": ["tushare fina_indicator: npl_ratio/provision_coverage_ratio", "年报附注（逾期/迁徙数据，需 AI 补查）"],
+            "answer_template": "引用不良率/拨备覆盖率 → 判断拨备缓冲是否充足 → 逾期偏离度需 AI 补查年报附注 → 结论：资产质量真实性评估",
+        },
+        {
+            "question": "核心一级资本充足率是否支撑资产扩张？内源资本积累 vs 再融资压力如何？",
+            "data_fields": ["cet1_capital_adequacy_ratio"],
+            "sources": ["tushare fina_indicator: cet1_capital_adequacy_ratio", "公司再融资公告（需 AI 补查）"],
+            "answer_template": "引用核心一级资本充足率 → 判断距监管底线缓冲 → 再融资计划需 AI 补查公告 → 结论：增长天花板评估",
+        },
+    ],
 )
 
 # 注册
