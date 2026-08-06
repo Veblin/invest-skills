@@ -622,11 +622,16 @@ def _section_bull_bear(
 
 
 # --- _generate_custom_unknowns ---
-def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[tuple[str, str]]:
+def _generate_custom_unknowns(
+    collection: dict, dims: dict[str, dict], val_cache: dict | None = None,
+) -> list[tuple[str, str]]:
     """v0.1.8 A-3: 根据标的行业/估值历史位置/内部人行为特征生成定制化待验证问题。
 
     返回 `(问题, 为什么重要)` 元组列表；规则命中的数据字段不可得时跳过该规则，
     不编造问题所需的数据支撑（AGENTS.md 约束 3）。
+
+    val_cache 由 _section_risk_uncertainty 透传，与报告其他模块共享分位缓存，
+    避免全量重算 5 年 PE/PB/PS 分位（此前传 None 每次都重算）。
     """
     result: list[tuple[str, str]] = []
     if not isinstance(dims, dict):
@@ -652,7 +657,7 @@ def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[t
 
     # 规则 2: PE 历史位置极端值
     try:
-        pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, None)
+        pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, val_cache)
     except Exception:
         pe_pct = None
     if pe_pct is not None:
@@ -696,6 +701,8 @@ def _section_risk_uncertainty(
     dims: dict[str, dict],
     market_structure: dict,
     risk_data: dict[str, Any],
+    *,
+    val_cache: dict | None = None,
 ) -> str:
     """模块 7：三层结构风险信号表 + Known Unknowns。
 
@@ -722,18 +729,22 @@ def _section_risk_uncertainty(
     _TIME_WINDOW_MAP = {"高": "1-3 个月", "中": "3-6 个月", "低": "6-12 个月", "参考": "视条件触发"}
 
     # LAW 17: 构建含风险统计数据的标题
-    risk_signals_n = (risk_data.get("coverage") or {}).get("auto", 0) if isinstance(risk_data, dict) else 0
+    # 覆盖总数取自 risk_scanner 返回结构 coverage["total"]（当前 17，随扫描器演变），
+    # 不硬编码幻数（code-review: 分母 17 硬编码缺陷）。
+    coverage = (risk_data.get("coverage") or {}) if isinstance(risk_data, dict) else {}
+    risk_signals_n = coverage.get("auto", 0)
+    risk_total_n = coverage.get("total") or risk_signals_n
     triggered_n = risk_data.get("triggered_count", 0) if isinstance(risk_data, dict) else 0
     title_suffix = f"触发 {triggered_n}/{risk_signals_n} 项风险信号" if risk_signals_n else "风险与不确定性"
-    judgment = f"自动判定覆盖 {risk_signals_n}/17 信号，当前触发 {triggered_n} 项，详见下方三层风险结构。" if risk_signals_n else "以下为三层风险信号与已知未知分析。"
+    judgment = f"自动判定覆盖 {risk_signals_n}/{risk_total_n} 信号，当前触发 {triggered_n} 项，详见下方三层风险结构。" if risk_signals_n else "以下为三层风险信号与已知未知分析。"
 
     lines = [f"## 7. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
     lines.append("")
-    coverage = risk_data.get("coverage") or {}
     auto_n = coverage.get("auto", 0)
+    total_n = coverage.get("total") or auto_n
     lines.append(
-        f"自动判定覆盖：**{auto_n}/17** 信号；"
+        f"自动判定覆盖：**{auto_n}/{total_n}** 信号；"
         f"当前触发 **{risk_data.get('triggered_count', 0)}** 项。"
     )
     lines.append("")
@@ -814,7 +825,7 @@ def _section_risk_uncertainty(
         lines.append(f"{slot_idx}. **{slot_name}：** {default_hint}")
 
     # ---- v0.1.8 A-3: 标的定制化待验证问题 ----
-    custom_unknowns = _generate_custom_unknowns(collection, dims)
+    custom_unknowns = _generate_custom_unknowns(collection, dims, val_cache=val_cache)
     for question, why_it_matters in custom_unknowns:
         slot_idx += 1
         lines.append(f"{slot_idx}. **{question}** — {why_it_matters}")
@@ -849,7 +860,11 @@ def _section_risk_uncertainty(
         _evidence_conclusion_block(
             f"{symbol} 风险扫描呈现报表/商业/市场三层定量信号",
             [
-                ("✅" if auto_n >= 15 else "⚠️", f"自动判定 {auto_n}/17 项"),
+                # auto ≥ total-2（原 17 中 ≥15）≈ 自动判定接近全覆盖；阈值随 total 缩放
+                (
+                    "✅" if auto_n >= max(total_n - 2, 0) else "⚠️",
+                    f"自动判定 {auto_n}/{total_n} 项",
+                ),
                 (
                     "⚠️" if risk_data.get("triggered_count", 0) > 0 else "✅",
                     f"触发 {risk_data.get('triggered_count', 0)} 项定量风险信号",

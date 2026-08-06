@@ -1,4 +1,4 @@
-"""量化评分与置信度矩阵（v0.1.8 S-1）。
+"""量化评分（v0.1.8 S-1；置信度矩阵已于 v0.2.1 报告精简时移除，见文件内注释）。
 
 学术依据（详见 host-docs/v0.1.8/补充资料.md）：
   - Zha Giedt (2018), *Abacus* 54(4), 457-484 — 收入应计三组件模型（收入质量公开数据代理）
@@ -576,60 +576,11 @@ def _score_capex_efficiency(rows: list[dict]) -> tuple[float | None, dict, list[
     return score, {"ratio": round(ratio, 3), "score": score, "note": note}, ["revenue", "cap_ex"], ""
 
 
-# ---- AI 分析置信度矩阵 ----
-
-def _dimension_confidence(collection: dict, key: str, module_label: str) -> dict:
-    dim = collection.get(key) if isinstance(collection, dict) else None
-    if not isinstance(dim, dict):
-        return {
-            "module": module_label, "confidence": "低",
-            "reason": f"{key} 维度数据不可得（未采集或采集结果缺失）",
-        }
-    status = dim.get("status")
-    multi_source = bool((dim.get("_meta") or {}).get("multi_source"))
-    if status == "available" and multi_source:
-        return {"module": module_label, "confidence": "高", "reason": f"{key} 维度数据可得且多源交叉验证"}
-    if status == "available":
-        return {"module": module_label, "confidence": "中", "reason": f"{key} 维度数据可得，单源未交叉验证"}
-    if status == "partial":
-        return {"module": module_label, "confidence": "中", "reason": f"{key} 维度数据部分可得"}
-    return {"module": module_label, "confidence": "低", "reason": f"{key} 维度数据不可得（status={status!r}）"}
-
-
-def confidence_matrix(collection: dict) -> dict:
-    """AI 分析置信度矩阵：8 模块 × 高/中/低，由引擎根据数据可得性自动计算（非 LLM 主观判断）。
-
-    `collection` 为顶层采集结果，键为维度名（如 "financials"/"kline"），
-    值为该维度的 legacy dict（`schema.DimensionResult.to_legacy_dict()` 输出，
-    含 `status` 与 `_meta.multi_source` 字段）。
-
-    "估值判断"固定标注"中/低"、"周期拐点判断"固定标注"低"——这是学术共识（估值依赖
-    主观假设参数、周期拐点具有不可预测性），不由数据完整性决定，即使数据完整也不提升。
-    """
-    collection = collection if isinstance(collection, dict) else {}
-    rows = [
-        _dimension_confidence(collection, "financials", "财务数据分析"),
-        _dimension_confidence(collection, "holder_changes", "股东与内部人行为分析"),
-        _dimension_confidence(collection, "research", "机构预期与研报分析"),
-        _dimension_confidence(collection, "industry", "行业与产业链分析"),
-        _dimension_confidence(collection, "northbound", "资金流向分析"),
-        _dimension_confidence(collection, "kline", "技术走势分析"),
-        {
-            "module": "估值判断",
-            "confidence": "中/低",
-            "reason": "估值依赖增长率/贴现率等假设参数的主观选择，非单纯数据可得性问题，学术共识不给高置信度",
-        },
-        {
-            "module": "周期拐点判断",
-            "confidence": "低",
-            "reason": "周期拐点具有不可预测性（学术共识），无论数据完整度如何均固定为低置信度",
-        },
-    ]
-    insufficient_data = [
-        r["module"] for r in rows if r["confidence"] == "低" and r["module"] != "周期拐点判断"
-    ]
-    return {
-        "rows": rows,
-        "sources": ["collection[dim].status", "collection[dim]._meta.multi_source"],
-        "insufficient_data": insufficient_data,
-    }
+# ---- AI 分析置信度矩阵（已移除，CHANGELOG v0.2.1「报告精简」） ----
+# 原 v0.1.8 A-2 段在报告头部渲染 `scoring.confidence_matrix()` 的
+# 8 模块 × 高/中/低 数据可得性矩阵。v0.2.1 报告精简有意移除该冗余段落
+# （CHANGELOG.md「报告精简：移除报告头部冗余段落：AI 偏见声明、逆向思考、
+# Ichimoku/波动率锥、AI 置信度矩阵」）；模块可用性披露已由报告头部
+# [多源融合] / [证据可信度] 及各分析段 [证据强度] 四维标注取代。
+# 因此 confidence_matrix / _dimension_confidence 属无调用者死代码，
+# 2026-08-06 code-review 确认后删除（不得恢复该段，除非 CHANGELOG 撤销精简决定）。

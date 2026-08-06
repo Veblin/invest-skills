@@ -17,7 +17,6 @@ from __future__ import annotations
 import pytest
 
 from lib.scoring import (
-    confidence_matrix,
     customer_lockin_score,
     insider_signal,
     management_ability_proxy,
@@ -409,51 +408,35 @@ class TestRoicTrendComparability:
         assert detail["period"] == "0331"
 
 
-class TestConfidenceMatrix:
-    def _dim(self, status: str, multi_source: bool = False) -> dict:
-        return {"status": status, "_meta": {"multi_source": multi_source}}
+class TestConfidenceMatrixRemoved:
+    """A-2 置信度矩阵死代码删除验证（CHANGELOG v0.2.1「报告精简」意图性移除）。
 
-    def test_normal_path(self):
-        collection = {
-            "financials": self._dim("available", multi_source=True),
-            "holder_changes": self._dim("available"),
-            "research": self._dim("partial"),
-            "industry": self._dim("missing"),
-            "northbound": self._dim("available", multi_source=True),
-            "kline": self._dim("available"),
-        }
-        result = confidence_matrix(collection)
-        assert len(result["rows"]) == 8
-        modules = {r["module"]: r["confidence"] for r in result["rows"]}
-        assert modules["财务数据分析"] == "高"
-        assert modules["行业与产业链分析"] == "低"
-        assert modules["估值判断"] == "中/低"
-        assert modules["周期拐点判断"] == "低"
-        _check_no_forbidden_words(result)
+    confidence_matrix / _dimension_confidence 于 2026-08-06 code-review 确认
+    全仓零调用者后删除；本测试防止复活死代码，并确保渲染层无残留引用。
+    """
 
-    def test_empty_collection_does_not_raise(self):
-        result = confidence_matrix({})
-        assert len(result["rows"]) == 8
-        for r in result["rows"]:
-            assert r["confidence"] in ("高", "中", "低", "中/低")
-        # 全部维度缺失 → 除固定项外均应为低置信度
-        modules = {r["module"]: r["confidence"] for r in result["rows"]}
-        assert modules["财务数据分析"] == "低"
-        assert modules["周期拐点判断"] == "低"
-        _check_no_forbidden_words(result)
+    def test_functions_removed_and_intent_documented(self):
+        import inspect
 
-    def test_none_input_does_not_raise(self):
-        result = confidence_matrix(None)  # type: ignore[arg-type]
-        assert len(result["rows"]) == 8
+        import lib.scoring as scoring
+        import lib.render_markdown._concise as concise
 
-    def test_valuation_never_high_confidence(self):
-        """估值判断/周期拐点判断固定为中低置信度，不随数据完整性提升（学术共识）。"""
-        collection = {k: self._dim("available", multi_source=True) for k in
-                      ("financials", "holder_changes", "research", "industry", "northbound", "kline")}
-        result = confidence_matrix(collection)
-        modules = {r["module"]: r["confidence"] for r in result["rows"]}
-        assert modules["估值判断"] != "高"
-        assert modules["周期拐点判断"] != "高"
+        assert not hasattr(scoring, "confidence_matrix")
+        assert not hasattr(scoring, "_dimension_confidence")
+        # 意图注释保留在删除位置，说明移除原因与 CHANGELOG 依据
+        src = inspect.getsource(scoring)
+        assert "CHANGELOG v0.2.1「报告精简」" in src
+        assert "AI 分析置信度矩阵（已移除" in src
+        # 渲染层无任何引用（facade 延迟解析也不应解析出该名）
+        assert not hasattr(concise, "confidence_matrix")
+        for module in (
+            concise,
+            __import__("lib.render", fromlist=["x"]),
+            __import__("lib.render_risk", fromlist=["x"]),
+            __import__("lib.render_utils", fromlist=["x"]),
+            __import__("lib.render_html", fromlist=["x"]),
+        ):
+            assert not hasattr(module, "confidence_matrix")
 
 
 # ═══════════════════════════════════════════════════════════════

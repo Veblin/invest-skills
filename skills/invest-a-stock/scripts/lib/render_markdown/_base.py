@@ -4,9 +4,10 @@ from __future__ import annotations
 import html as _html_mod
 import json
 import logging
+import math
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
@@ -137,9 +138,10 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
     lines.extend(_render_income_driver(collection))
     lines.extend(_render_style_match(collection))
     lines.extend(_render_success_factors(collection))
-    lines.extend(_render_ma_system(collection))
+    # R12g-A 两段由注册表驱动（标签与 TOC 单一来源，见 _R12G_HEADER_SECTIONS）
+    for _r12g_label, _r12g_fn in _R12G_HEADER_SECTIONS:
+        lines.extend(_r12g_fn(collection))
     lines.extend(_render_price_structure(collection))
-    lines.extend(_render_limit_streak_structure(collection))
 
     fusion = collection.get("fusion") or {}
     if fusion:
@@ -292,18 +294,39 @@ def _render_ma_system(collection: dict[str, Any]) -> list[str]:
     except Exception:
         return []
     closes = tech.get("latest_close")
+    # 缺陷5: latest_close 可为 None/NaN（technical.latest_close）。有限性检查必须在
+    # 比较之前——None 参与 >= 抛 TypeError（逃出唯一的 try/except 中止整个渲染），
+    # NaN 参与比较恒 False（四根 MA 全误标「现价下方」+ 渲染 '现价 nan'）。
+    if closes is not None:
+        try:
+            closes_finite = math.isfinite(closes)
+        except TypeError:
+            closes_finite = False
+        if not closes_finite:
+            closes = None
     ma = t.get("ma") or {}
     latest = {}
     for p in ("5", "10", "20", "60"):
         vals = ma.get(p) or []
-        latest[p] = vals[-1] if vals and vals[-1] is not None else None
+        v = vals[-1] if vals and vals[-1] is not None else None
+        if v is not None:
+            try:
+                v_finite = math.isfinite(v)
+            except TypeError:
+                v_finite = False
+            if not v_finite:
+                v = None
+        latest[p] = v
     parts = []
     for p in ("5", "10", "20", "60"):
         v = latest.get(p)
         if v is None:
             parts.append(f"MA{p}: —")
             continue
-        pos = "（现价上方）" if closes >= v else "（现价下方）"
+        if closes is None:
+            pos = "（现价不可得）"
+        else:
+            pos = "（现价上方）" if closes >= v else "（现价下方）"
         parts.append(f"MA{p}={v:.2f}{pos}")
     label = (t.get("alignment") or {}).get("trend_label", "—")
     if closes is not None:
@@ -347,6 +370,16 @@ def _render_limit_streak_structure(collection: dict[str, Any]) -> list[str]:
     lines.append("- 筹码: 不可得 + attempted sources: [未定义数据源——待数据源验证后补充]")
     lines.append("- 题材纯度: 不可得 + attempted sources: [未定义数据源——待数据源验证后补充]")
     return lines
+
+
+# --- R12g-A 头部区块注册表（单一来源） ---
+# 均线系统表 / 连板结构在 brief/concise/full 三种模式的 engine extras 头部均渲染；
+# TOC 标签（_v3._report_toc）与渲染顺序（_render_engine_extras）由此常量派生，
+# 杜绝 section 列表与静态 TOC 再次漂移（code-review: R12g-A 已渲染但缺失于 TOC）。
+_R12G_HEADER_SECTIONS: tuple[tuple[str, Callable[[dict], list[str]]], ...] = (
+    ("均线系统表（R12g）", _render_ma_system),
+    ("连板结构（R12g）", _render_limit_streak_structure),
+)
 
 
 # --- _render_price_structure (R12e) ---
