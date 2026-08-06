@@ -311,7 +311,8 @@ def calc_steady_earnings(
     }
 
 
-# 周期中枢 PE 兜底配置（钢铁/化工/有色等周期行业常见中枢，R4 行业模块可覆盖）
+# 周期中枢 PE 兜底配置（钢铁/化工/有色等周期行业历史常见中枢——经验估计值，逐项来源待补；
+# 规范：R4 行业模块化后迁入 lib/industry/ 并逐项标注参数来源与适用期间，当前为过渡兜底）
 _CYCLE_PE_DEFAULT = 12.0
 _CYCLE_PE_BY_INDUSTRY: dict[str, float] = {
     "钢铁": 8.0,

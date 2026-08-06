@@ -1845,7 +1845,7 @@ def _format_steady_block(steady: dict) -> str:
     if mv and mv.get("total_mv_yi"):
         if mv["steady_mv_high_yi"] and mv["total_mv_yi"] > mv["steady_mv_high_yi"]:
             over = (mv["total_mv_yi"] / mv["steady_mv_high_yi"] - 1) * 100
-            pos = f"高于稳态上沿 {over:.0f}%——周期高点低 PE 陷阱风险（海力士式）"
+            pos = f"高于稳态上沿 {over:.0f}%——历史经验：周期股盈利高点常伴随低 PE 错觉（海力士式），但并非充分条件"
         elif mv["steady_mv_low_yi"] and mv["total_mv_yi"] < mv["steady_mv_low_yi"]:
             under = (mv["steady_mv_low_yi"] / mv["total_mv_yi"] - 1) * 100
             pos = f"低于稳态下沿 {under:.0f}%——穿越周期视角存在低估"
