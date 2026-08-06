@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -53,3 +54,30 @@ def test_scan_cli_help_exit_0():
     )
     assert r.returncode == 0
     assert "gap" in r.stdout.lower() or "universe" in r.stdout.lower()
+
+
+def _load_scan_module():
+    name = "gap_scan_scan_under_test"
+    sys.modules.pop(name, None)
+    spec = importlib.util.spec_from_file_location(name, str(_SCAN_PY))
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_report_path_has_seconds_timestamp():
+    """report-conventions.md §1.2：详文档路径带时分秒，同日二次运行不覆盖（缺陷 5）。
+
+    修复前写入 reports/gap-scan/{YYYYMMDD}.md（无时分秒）→ 同日二次运行覆盖历史。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    mod = _load_scan_module()
+    tz = ZoneInfo("Asia/Shanghai")
+    p1 = mod._report_path_for_now(datetime(2026, 8, 6, 9, 30, 5, tzinfo=tz))
+    p2 = mod._report_path_for_now(datetime(2026, 8, 6, 9, 30, 6, tzinfo=tz))
+    assert p1.name == "2026-08-06-09-30-05.md"
+    assert p1.parent.name == "gap-scan"
+    assert p1 != p2  # 秒级区分：同日二次运行不覆盖历史

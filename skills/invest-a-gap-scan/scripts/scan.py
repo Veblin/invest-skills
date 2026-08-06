@@ -42,7 +42,7 @@ from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
 ensure_invest_a_scripts_on_path()
 
-from dates import shanghai_now, shanghai_today  # noqa: E402
+from dates import shanghai_now  # noqa: E402
 from lib import env  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
 
@@ -62,6 +62,16 @@ _KLINE_CACHE = KlineTTLCache(lambda: env.STORE_DIR / "gap_scan_cache", 3 * 86400
 def _cache_parts(ts_code: str, source_name: str | None) -> tuple[str, ...]:
     """缓存键：{source}/{ts_code}（无源时仅 {ts_code}）— 与旧 kline_cache 键布局一致。"""
     return (source_name, ts_code) if source_name else (ts_code,)
+
+
+def _report_path_for_now(now: datetime | None = None) -> Path:
+    """详文档路径：reports/gap-scan/{YYYY-MM-DD-HH-MM-SS}.md（report-conventions.md §1.2）。
+
+    汇总式扫描无单一 {symbol}-{name}，目录保留 gap-scan；文件名必须带
+    实际北京时间（含时分秒）——曾用 %Y%m%d 无时分秒导致同日二次运行覆盖历史。
+    """
+    stamp = (now or shanghai_now()).strftime("%Y-%m-%d-%H-%M-%S")
+    return Path("reports/gap-scan") / f"{stamp}.md"
 
 # ---- 由并行代理创建的模块 ----
 try:
@@ -483,10 +493,8 @@ def _run_scan(
 
     # ---- Step 9: 保存详文档 ----
     if not args.no_save_report:
-        date_str = shanghai_today()
-        report_dir = Path("reports/gap-scan")
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"{date_str}.md"
+        report_path = _report_path_for_now()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         format_markdown_report(result, str(report_path))
         print(f"\n详文档: {report_path.resolve()}", file=sys.stderr)
 

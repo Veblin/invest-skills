@@ -183,6 +183,46 @@ class TestQualityFilter:
         assert len(f["stocks"]) == 1
         assert f["stocks"][0]["symbol"] == "000001"
 
+    def test_float_mcap_unknown_when_constrained(self):
+        """有流通市值门槛但缺数据 → 剔除（缺陷 3：此前缺失会静默跳过门槛）。"""
+        s = _make_stock("000001", "无流通市值", "银行", market_cap=5e10)
+        r = _make_result([s])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert len(f["stocks"]) == 0
+        assert f["filter_stats"]["filtered_reasons"]["float_mcap_unknown"] == 1
+
+    def test_float_mcap_from_latest_appearance(self):
+        """股票级缺市值时回退 latest appearance 的流通市值。"""
+        s = _make_stock("000001", "A", "银行", market_cap=5e10)
+        s["appearances"][0]["float_mkt_cap"] = 30e8
+        r = _make_result([s])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert [x["symbol"] for x in f["stocks"]] == ["000001"]
+
+    def test_float_mcap_zero_means_unknown(self):
+        """0.0 流通市值视为缺失（东方财富缺失字段），有门槛时剔除。"""
+        s = _make_stock("000001", "零市值", "银行", market_cap=5e10, float_mkt_cap=0.0)
+        r = _make_result([s])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert len(f["stocks"]) == 0
+        assert f["filter_stats"]["filtered_reasons"]["float_mcap_unknown"] == 1
+
+    def test_exclude_st_by_name_when_no_tushare(self):
+        """无 Tushare L2（is_st 字段缺失）时 *ST 名称启发式补判（缺陷 2）。"""
+        s1 = _make_stock("000001", "*ST风险", "银行", market_cap=5e10)
+        s2 = _make_stock("000002", "正常", "银行", market_cap=5e10)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, exclude_st=True, min_price=0, min_float_mkt_cap=0)
+        assert [s["symbol"] for s in f["stocks"]] == ["000002"]
+        assert f["filter_stats"]["filtered_reasons"]["exclude_st"] == 1
+
+    def test_exclude_st_respects_explicit_is_st_false(self):
+        """Tushare 明确 is_st=False 时名称启发式不覆盖（仅补缺失）。"""
+        s1 = _make_stock("000001", "ST风险", "银行", market_cap=5e10, is_st=False)
+        r = _make_result([s1])
+        f = quality_filter(r, exclude_st=True, min_price=0, min_float_mkt_cap=0)
+        assert [s["symbol"] for s in f["stocks"]] == ["000001"]
+
     def test_exclude_delisting(self):
         s1 = _make_stock("000001", "国华退", "软件", market_cap=5e10)
         s2 = _make_stock("000002", "正常", "软件", market_cap=5e10)

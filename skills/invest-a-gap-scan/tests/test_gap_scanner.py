@@ -454,7 +454,11 @@ class TestHits:
         assert isinstance(hit.avg_amount_20d, float) and hit.avg_amount_20d > 0
 
     def test_gap_day_is_latest(self):
-        """Gap on the last bar -> vacuously unfilled -> hit."""
+        """Gap on the last bar -> 无后续数据无法确认回补 -> 不报命中。
+
+        缺陷 4 修复前：最新 bar 的跳空恒判「未回补」→ 盘中扫描恒命中，
+        每次扫描都会把当日所有跳空股报为命中。
+        """
         kline = _make_kline(n_bars=200, gap_at=199)
         result = scan_all(
             stocks=[STOCK],
@@ -463,11 +467,29 @@ class TestHits:
             suspension_map={},
             params=DEFAULT_PARAMS,
         )
+        assert len(result.hits) == 0
+        assert result.non_hit_reasons[NonHitReason.GAP_UNCONFIRMED] == 1
+
+    def test_check_unfilled_last_bar_returns_false(self):
+        """_check_unfilled 对最新 bar（无后续数据）返回 False，不做空洞真值。"""
+        assert _check_unfilled([10.0, 12.0], gap_idx=1, gap_high=11.0) is False
+
+    def test_latest_bar_gap_falls_back_to_older_confirmed(self):
+        """最新 bar 跳空待收盘确认，容错规则回退到更早的已确认未回补缺口。"""
+        kline = _make_two_gap_kline(
+            n_bars=200,
+            gaps=[(80, 1.5, False), (199, 1.5, False)],
+        )
+        params = {**DEFAULT_PARAMS, "gap_lookback": 150}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
         assert len(result.hits) == 1
-        hit = result.hits[0]
-        assert hit.gap.gap_date == str(kline.iloc[199]["trade_date"])
-        # current_price should be the last close
-        assert hit.current_price == kline.iloc[199]["close_qfq"]
+        assert result.hits[0].gap.gap_date == str(kline.iloc[80]["trade_date"])
 
     def test_tolerance_rule_older_gap_hits(self):
         """Two gaps: newer (idx 160) filled, older (idx 80) valid.

@@ -38,7 +38,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 ensure_invest_a_scripts_on_path()
 
 from codes import is_st_or_delisted  # noqa: E402
-from lib.technical import sma  # noqa: E402
+from lib.technical import limit_pct_for_symbol, sma  # noqa: E402
 
 # Sibling modules (found via _LIB_DIR on sys.path)
 from skip_reasons import ExcludeReason, NonHitReason  # noqa: E402
@@ -118,12 +118,17 @@ _MAX_GAP_PCT_BSE = 95.0      # 北交所（4/8/920 前缀）
 
 
 def _max_gap_pct_for_code(ts_code: str) -> float:
-    """按代码前缀返回毛刺过滤上限（%）；未知前缀按主板。"""
-    if ts_code.startswith(("300", "301", "688")):
-        return _MAX_GAP_PCT_CN_CYB
-    if ts_code.startswith(("4", "8", "920")):
-        return _MAX_GAP_PCT_BSE
-    return _MAX_GAP_PCT
+    """按板块涨跌停推导毛刺过滤上限（%）；未知前缀按主板。
+
+    涨跌停阈值表唯一权威：lib.technical.limit_pct_for_symbol（跨 skill 共享，
+    不在此维护第二份前缀表）。此处仅把涨跌停阈值映射为「涨停价/跌停价 - 1」
+    的极端跳空上限并加裕度（涨停价四舍五入裕度）：
+    10% → 1.1/0.9-1 = 22.2% → 30%；20% → 1.2/0.8-1 = 50% → 60%；
+    30% → 1.3/0.7-1 = 85.7% → 95%。
+    """
+    symbol = str(ts_code).split(".")[0]
+    thr = limit_pct_for_symbol(symbol)
+    return {10.0: _MAX_GAP_PCT, 20.0: _MAX_GAP_PCT_CN_CYB, 30.0: _MAX_GAP_PCT_BSE}[thr]
 
 
 def _find_candidate_gaps(
@@ -253,10 +258,12 @@ def _check_unfilled(lows: list[float], gap_idx: int,
 
     A gap is unfilled when ``min(low[gap_idx+1:]) > gap_high``
     (touching the upper edge counts as filled).
-    If *gap_idx* is the last bar, the condition is vacuously true.
+    最新 bar（gap_idx == len(lows)-1，无后续数据）无法确认回补状态：
+    恒返回 False——避免盘中扫描把最新 bar 跳空误报为「未回补」命中
+    （由调用方以 GAP_UNCONFIRMED 区分「待收盘确认」与「已回补」）。
     """
     if gap_idx >= len(lows) - 1:
-        return True
+        return False
     return min(lows[gap_idx + 1:]) > gap_high
 
 
@@ -378,12 +385,20 @@ def _scan_stock(
     any_passed_ma60 = False
     any_unfilled = False
     any_vol_ratio_fail = False
+    any_unconfirmed = False
 
     for gap_idx, gap in qualified_desc:
         if not _check_ma60_streak(closes, ma60_list, gap_idx):
             continue
 
         any_passed_ma60 = True
+
+        # 最新 bar 的跳空无后续数据：盘中无法确认是否回补——不判 unfilled
+        # （否则最新 bar 跳空恒为「未回补」→ 恒命中），标「待收盘确认」
+        # 并回退到更早的已确认缺口。
+        if gap_idx >= len(lows) - 1:
+            any_unconfirmed = True
+            continue
 
         if not _check_unfilled(lows, gap_idx, gap.gap_high):
             continue  # filled — try older gap (never promote filled+across to hit)
@@ -426,6 +441,8 @@ def _scan_stock(
     # --- No hit after tolerance rule ---
     if not any_passed_ma60:
         return None, None, NonHitReason.MA60_BROKEN
+    if not any_unfilled and any_unconfirmed:
+        return None, None, NonHitReason.GAP_UNCONFIRMED
     if not any_unfilled:
         return None, None, NonHitReason.GAP_FILLED
     if any_vol_ratio_fail:

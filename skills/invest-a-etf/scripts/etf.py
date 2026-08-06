@@ -245,25 +245,38 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
             dr = r.get('direction')
             to = r.get('turnover_rate')
             sh = r.get('shares')
-            # T+1 延迟：份额/资金流字段可能为空
+            # T+1 延迟：份额/资金流字段可能为空；停牌日 OHLC/pct_chg 可为
+            # None（None 直入 f-string 格式说明符会 TypeError 崩溃 CLI）
             share_str = f"{sc:>+8.0f}" if sc is not None else "       ⏳"
             flow_str = f"{fe:>+7.2f}" if fe is not None else "     ⏳"
             dir_str = dr if dr else ("⏳ T+1 待确认" if sc is None else "?")
             to_str = f"{to:>6.2f}" if to is not None else "    ⏳"
+            pct_str = f"{r.get('pct_chg'):>+7.2f}" if r.get('pct_chg') is not None else "      -"
+            amount_str = f"{r.get('amount', 0) or 0:>7.2f}"
+            open_str = f"{r.get('open'):>6}" if r.get('open') is not None else "     -"
+            high_str = f"{r.get('high'):>6}" if r.get('high') is not None else "     -"
+            low_str = f"{r.get('low'):>6}" if r.get('low') is not None else "     -"
+            close_str = f"{r.get('close'):>6}" if r.get('close') is not None else "     -"
             print(f"  {r['date']:<10s} "
-                  f"{r.get('open', '-'):>6} "
-                  f"{r.get('high', '-'):>6} "
-                  f"{r.get('low', '-'):>6} "
-                  f"{r.get('close', '-'):>6} "
-                  f"{r.get('pct_chg', 0):>+7.2f} "
-                  f"{r.get('amount', 0) or 0:>7.2f} "
+                  f"{open_str} "
+                  f"{high_str} "
+                  f"{low_str} "
+                  f"{close_str} "
+                  f"{pct_str} "
+                  f"{amount_str} "
                   f"{to_str} "
                   f"{share_str} "
                   f"{flow_str}  "
                   f"{dir_str}")
         s = share_history.get("summary", {})
-        print(f"  资金趋势: {s.get('trend', '?')} | {s['row_count']}日合计: {s.get('total_flow_est', 0):+.2f} 亿 | "
-              f"日均成交: {s.get('avg_amount_e', 0):.2f} 亿 | 份额变化: {s.get('share_total_change', 0):+.0f} 万份")
+        total_flow = s.get('total_flow_est')
+        total_flow_str = f"{total_flow:+.2f}" if total_flow is not None else "-"
+        avg_amt = s.get('avg_amount_e')
+        avg_amt_str = f"{avg_amt:.2f}" if avg_amt is not None else "-"
+        share_chg = s.get('share_total_change')
+        share_chg_str = f"{share_chg:+.0f}" if share_chg is not None else "-"
+        print(f"  资金趋势: {s.get('trend', '?')} | {s['row_count']}日合计: {total_flow_str} 亿 | "
+              f"日均成交: {avg_amt_str} 亿 | 份额变化: {share_chg_str} 万份")
     else:
         print(f"  不可用: {share_history.get('note', '未知')}")
     print()

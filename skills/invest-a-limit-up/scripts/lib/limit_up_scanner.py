@@ -178,9 +178,16 @@ def quality_filter(
             reasons["market_cap"] += 1
             continue
 
-        if exclude_st and s.get("is_st") is True:
-            reasons["exclude_st"] += 1
-            continue
+        if exclude_st:
+            is_st = s.get("is_st")
+            if is_st is None:
+                # is_st 仅由 Tushare L2 填充；无 TUSHARE_TOKEN 时缺失 →
+                # 名称启发式补判（*ST/ST 名称含 'ST'；退市股已在上方
+                # delisting 规则剔除，不会误伤）。显式 False 仍被尊重。
+                is_st = "ST" in name.upper()
+            if is_st:
+                reasons["exclude_st"] += 1
+                continue
 
         # 股价：L2 close → L1 appearance.close（涨停池最新价）；有阈值但缺价 → 剔除
         close = s.get("close")
@@ -194,10 +201,15 @@ def quality_filter(
                 reasons["min_price"] += 1
                 continue
 
-        float_mcap = s.get("float_mkt_cap")
+        # 流通市值：股票级 → 最新 appearance；与总市值 M9 同承诺——
+        # 「有阈值但缺市值 → 剔除」（此前 float cap 缺失会静默跳过门槛）
+        float_mcap = _as_positive_float(s.get("float_mkt_cap"))
         if float_mcap is None and latest:
-            float_mcap = latest.get("float_mkt_cap")
-        if float_mcap is not None and min_float_mkt_cap > 0 and float_mcap < min_float_mkt_cap:
+            float_mcap = _as_positive_float(latest.get("float_mkt_cap"))
+        if min_float_mkt_cap > 0 and float_mcap is None:
+            reasons["float_mcap_unknown"] += 1
+            continue
+        if float_mcap is not None and float_mcap < min_float_mkt_cap:
             reasons["min_float_mkt_cap"] += 1
             continue
 
@@ -797,6 +809,12 @@ def _empty_breadth() -> dict:
 def _latest_appearance(stock: dict) -> dict | None:
     apps = stock.get("appearances", [])
     return apps[-1] if apps else None
+
+
+def _as_positive_float(val: Any) -> float | None:
+    """None/NaN/非正数 → None（市值必须为正才有意义；0.0 视为缺失）。"""
+    f = safe_float(val)
+    return f if f is not None and f > 0 else None
 
 
 def _latest_market_cap(stock: dict) -> float | None:

@@ -38,6 +38,7 @@ class NonHitReason(str, Enum):
     MA60_BROKEN = "ma60_broken"
     GAP_FILLED = "gap_filled"
     VOL_RATIO_LOW = "vol_ratio_low"
+    GAP_UNCONFIRMED = "gap_unconfirmed"
 
 
 def new_counters() -> tuple[Counter, Counter]:

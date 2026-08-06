@@ -281,6 +281,7 @@ _NON_HIT_LABELS: dict[str, str] = {
     "ma60_broken": "MA60破",
     "gap_filled": "缺口回补",
     "vol_ratio_low": "量比低",
+    "gap_unconfirmed": "最新bar待收盘确认",
 }
 
 

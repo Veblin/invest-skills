@@ -911,11 +911,27 @@ def _last_valid(seq: list[float | None]) -> float | None:
 
 
 # --- 近端价格结构检测（R12e: 涨跌停/连板/极端波动）---
-def _limit_pct_for_symbol(symbol: str) -> float:
-    """板块涨跌停阈值：创业板(30x)/科创板(68x) 20%，其余主板 10%。"""
+def limit_pct_for_symbol(symbol: str, name: str | None = None) -> float:
+    """板块涨跌停阈值（%）：主板 10 / 创业板(30x)科创板(68x) 20 / 北交所(4/8/920) 30。
+
+    全仓涨跌停阈值表的唯一权威（跨 skill 共享）：gap_scanner 等模块按板块
+    推导的阈值一律调用本函数，不得另维护一份前缀表（曾与
+    skills/invest-a-gap-scan 的 _max_gap_pct_for_code 发生两份表分歧）。
+    ST/*ST 股涨跌停 5%：需要名称信息，调用方显式传 name 参数
+    （kline 行无 name 字段时拿不到 → 按板块阈值兜底）。
+    """
+    if name and "ST" in str(name).upper():
+        return 5.0
     if symbol.startswith(("30", "68")):
         return 20.0
+    if symbol.startswith(("4", "8", "920")):
+        return 30.0
     return 10.0
+
+
+def _limit_pct_for_symbol(symbol: str) -> float:
+    """兼容内部入口：无名称信息时的板块阈值。"""
+    return limit_pct_for_symbol(symbol)
 
 
 def detect_limit_streaks(
@@ -924,6 +940,7 @@ def detect_limit_streaks(
     symbol: str = "",
     lookback: int = 15,
     limit_pct: float | None = None,
+    name: str | None = None,
 ) -> dict:
     """近端涨跌停/连板/极端波动结构检测（R12e）。
 
@@ -932,17 +949,19 @@ def detect_limit_streaks(
     （沃格光电 603773 实证：20 日 -35.79% 掩盖了 7 月三跌停 → 8 月初
     三连板反包的实际结构）。
 
+    name: 证券简称；传入时 ST/*ST 股阈值按 5% 判定（需外部提供）。
+
     返回:
       {
         "available": bool,
-        "limit_threshold": 10.0 或 20.0,
+        "limit_threshold": 5.0/10.0/20.0/30.0,
         "streaks": [{type: up/down, days, start_date, end_date, total_pct}],  # 仅 days>=2
         "recent_limit_ups"/"recent_limit_downs": lookback 内涨跌停天数,
         "window_pct": lookback 累计涨跌%,
         "period_high"/"period_low": lookback 内高低点及日期,
       }
     """
-    thr = limit_pct if limit_pct is not None else _limit_pct_for_symbol(symbol)
+    thr = limit_pct if limit_pct is not None else limit_pct_for_symbol(symbol, name=name)
     srows = sort_kline_asc(rows)
     window = srows[-lookback:] if len(srows) > lookback else srows
     if len(window) < 3:
