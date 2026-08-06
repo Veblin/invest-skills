@@ -387,12 +387,17 @@ def calc_ev_ebitda(
     lt_loan: float | None = None,
     bond_payable: float | None = None,
     ebitda: float | None = None,
+    ebitda_period: str | None = None,
     industry: str | None = None,
 ) -> dict:
     """R3: EV/EBITDA 可审计桥接表。
 
     口径：EV = 市值 + 有息负债（短贷+长贷+应付债券） - 现金
-          EBITDA = fina_indicator.ebitda（累计年报口径）
+          EBITDA = fina_indicator.ebitda（**年报期 1231，全年口径**）
+    注意：fina_indicator.ebitda 为累计 YTD 口径，仅 1231 年报期为全年数；
+    非年报期（0331/0630/0930）累计值会使 EV/EBITDA 高估（如 Q1 累计仅约
+    全年 1/4）。调用方必须只传 1231 年报期的 EBITDA，并可通过 ebitda_period
+    标注实际使用的报告期。
     可审计性：逐项标注可得/缺失；有息负债全缺失时降级为
     「净现金口径 EV = 市值 - 现金」，并提示方向偏差。
     金融业 → 不适用（EBITDA 无意义）。
@@ -406,6 +411,7 @@ def calc_ev_ebitda(
     lt_loan = _nan_to_none(lt_loan)
     bond_payable = _nan_to_none(bond_payable)
     ebitda = _nan_to_none(ebitda)
+    # ebitda_period 是报告期字符串（如 "20251231"），不做数值转换
     missing: list[str] = []
     if cash is None:
         missing.append("cash")
@@ -440,11 +446,39 @@ def calc_ev_ebitda(
             "ev_yi": round(ev / 1e8, 2) if ev is not None else None,
         },
         "ebitda_yi": round(ebitda / 1e8, 2) if ebitda is not None else None,
+        "ebitda_period": ebitda_period,
         "ev_ebitda": ratio,
         "debt_available": debt is not None,
         "missing": missing,
         "note": None if debt is not None else "有息负债不可得（低积分档字段过滤），EV 为净现金口径近似，若公司有负债则实际 EV 更高",
     }
+
+
+def _latest_annual_ebitda(fin_rows: list[dict]) -> tuple[float | None, str | None, str | None]:
+    """从 fina_indicator 行中取**最近年报期（1231）**的 EBITDA。
+
+    fina_indicator.ebitda 为累计 YTD 口径，仅 1231 年报期为全年数。
+    用最新非年报期（如 2026Q1 累计）会静默高估 EV/EBITDA 约 4 倍，
+    故必须限定年报期；若 3 年内无 1231 行 → 明确降级（返回不可得 + 口径说明），
+    绝不静默使用累计期。
+
+    Returns:
+        (ebitda, period, note)：note 非 None 表示降级/不可得说明。
+    """
+    annual = [
+        r for r in fin_rows
+        if normalize_end_date(str(r.get("end_date", ""))).endswith("1231")
+    ]
+    for r in reversed(annual):
+        try:
+            return float(r["ebitda"]), str(r.get("end_date", "")), None
+        except (TypeError, ValueError, KeyError):
+            continue
+    latest_ed = str(fin_rows[-1].get("end_date", "")) if fin_rows else "?"
+    return None, None, (
+        f"EBITDA 不可得：3 年内无 1231 年报期（最新期 {latest_ed} 为累计口径，"
+        "不可换算为全年 EBITDA，EV/EBITDA 不计算）"
+    )
 
 
 def get_daily_basic_history(
@@ -560,9 +594,13 @@ def _standalone_quarterly_eps(fin_rows: list[dict]) -> list[dict]:
 
 
 def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) -> dict[str, Any]:
-    """计算 TTM EPS：最近 4 个单季 EPS 之和。
+    """计算 TTM EPS：最近 **连续** 4 个单季 EPS 之和（不允许断档季）。
 
     使用 fina_indicator 的 eps（累计值），转为单季后求和。
+    与 calc_ocf_quality 对齐：经 _latest_contiguous_ttm_dates 校验连续性。
+    缺季/断档时降级：最新期无法构成连续窗口 → 回退更早连续窗口并标注陈旧；
+    无任何连续 4 期 → 标不可得。绝不静默混入过期季度（混入会污染
+    当前 PE、隐含增长 g 及全部多情景估值）。
 
     Args:
         fin_rows: 财务行列表（按 end_date 升序且已去重）
@@ -576,7 +614,21 @@ def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) ->
             "quarterly_eps": standalone,
         }
 
-    last4 = standalone[-4:]
+    dates = [q["end_date"] for q in standalone]
+    contiguous = _latest_contiguous_ttm_dates(dates)
+    if contiguous is None:
+        return {
+            "ttm_eps": None,
+            "error": (
+                "无连续 4 个报告期单季 EPS（最近期序 "
+                f"{', '.join(dates[-4:])} 存在断档/空洞），"
+                "TTM EPS 标为不可得，避免混入过期季度"
+            ),
+            "quarterly_eps": standalone,
+        }
+    by_date = {q["end_date"]: q for q in standalone}
+    last4 = [by_date[d] for d in contiguous]
+    stale = contiguous[-1] != dates[-1]
     ttm_eps = sum(q["eps_standalone"] for q in last4)
 
     # 净利润绝对值
@@ -589,10 +641,17 @@ def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) ->
         "ttm_net_profit_yi": round(net_profit_ttm / 1e8, 2) if net_profit_ttm else None,
         "quarterly_eps": last4,
         "n_quarters": len(last4),
-        "method": "fina_indicator eps 累计 → 单季差 → TTM=Σ(最近4个单季)",
+        "stale": stale,
+        "stale_note": (
+            f"最新期 {dates[-1]} 无法构成连续 TTM，回退至截至 "
+            f"{contiguous[-1]} 的连续窗口（陈旧 TTM，含缺季断档）"
+            if stale else None
+        ),
+        "method": "fina_indicator eps 累计 → 单季差 → TTM=Σ(最近连续4个单季)",
         "note": (
             "fina_indicator 的 eps 为年度累计值（0331=Q1, 0630=H1, 0930=前3Q, 1231=全年），"
-            "单季 EPS = 本期累计 − 前期累计。TTM = Σ(最近4个单季)。"
+            "单季 EPS = 本期累计 − 前期累计。TTM = Σ(最近连续4个单季)；"
+            "断档时降级为不可得或陈旧标注。"
         ),
     }
 
@@ -1260,13 +1319,9 @@ def run_valuation(
 
     # ---- Step 10 (R3): EV/EBITDA 桥接（value --ev-ebitda）----
     if ev_ebitda:
-        ebitda_v: float | None = None
-        for r in reversed(fin_rows):
-            try:
-                ebitda_v = float(r["ebitda"])
-                break
-            except (TypeError, ValueError, KeyError):
-                continue
+        # fina_indicator.ebitda 为累计 YTD 口径，仅年报期（1231）为全年数；
+        # 必须取年报期，无年报期时明确降级（_latest_annual_ebitda 返回口径说明）
+        ebitda_v, ebitda_period, ebitda_note = _latest_annual_ebitda(fin_rows)
         cash = st_loan = lt_loan = bond_payable = None
         try:
             bs_df = ts.query(
@@ -1289,8 +1344,10 @@ def run_valuation(
         ev_block = calc_ev_ebitda(
             total_mv_yi=result.total_mv_yi,
             cash=cash, st_loan=st_loan, lt_loan=lt_loan, bond_payable=bond_payable,
-            ebitda=ebitda_v, industry=ev_ebitda_industry,
+            ebitda=ebitda_v, ebitda_period=ebitda_period, industry=ev_ebitda_industry,
         )
+        if ebitda_note:
+            ev_block["ebitda_note"] = ebitda_note
         # 私有化检验（研究问题，非结论）：市值 / 稳态盈利 → 回本年限
         ste = (result.steady or {}).get("steady")
         if (ev_block.get("available") and ste and ste.get("available")
@@ -1356,6 +1413,8 @@ def format_output(result: ValuationResult) -> str:
         if result.price and ttm['ttm_eps'] > 0:
             current_pe_calc = result.price / ttm['ttm_eps']
             lines.append(f"  TTM PE (实时)      {current_pe_calc:.1f}x (= {result.price:.2f} / {ttm['ttm_eps']:.4f})")
+        if ttm.get("stale"):
+            lines.append(f"  ⚠️ 陈旧标注        {ttm.get('stale_note', 'TTM 非最新期（缺季断档回退）')}")
         lines.append(f"  计算方法           {ttm.get('method', '')}")
         lines.append(f"  计算范围           {ttm.get('n_quarters', '?')} 个单季（累计→差→求和）")
         if ttm.get("quarterly_eps"):

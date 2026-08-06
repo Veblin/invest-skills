@@ -109,34 +109,48 @@ def scan_financial_risks(
     signals.append(_signal("profit_quality_low", "利润质量低", "financial",
                              triggered=qual_trig, severity="中", detail=detail, auto=True))
 
-    # 3–5 应收 / 存货 / 扣非（基于最近两期）
+    # 3–5 应收 / 存货 / 扣非
+    # 同比必须限定**相同报告期类型**（Q1 对 Q1、年报对年报）：
+    # fina_indicator 的 revenue 为累计 YTD 口径，相邻行（如 2026Q1 累计 vs
+    # 2025 年报）直接相除会得到 ~-75% 的伪同比 → 应收/存货扩张信号几乎每轮
+    # 误触发。用 find_yoy_row 取去年同期同类型行；不可比时标不可得/跳过，不误报。
     latest = rows[-1] if rows else {}
-    prev = rows[-2] if len(rows) >= 2 else {}
-    rev_cur = safe_float(latest.get("revenue"))
-    rev_prev = safe_float(prev.get("revenue"))
-    rev_g = ((rev_cur - rev_prev) / rev_prev * 100) if rev_cur and rev_prev and rev_prev > 0 else None
+    yoy_row = find_yoy_row(rows, latest) if latest else None
+    if yoy_row is not None:
+        rev_cur = safe_float(latest.get("revenue"))
+        rev_yoy = safe_float(yoy_row.get("revenue"))
+        rev_g = ((rev_cur - rev_yoy) / rev_yoy * 100) if rev_cur is not None and rev_yoy and rev_yoy > 0 else None
+        rev_base = f"（同比基期 {yoy_row.get('end_date')}）"
+    else:
+        rev_cur, rev_g = None, None
+        rev_base = (f"（{latest.get('end_date')} 无去年同期可比行）" if latest
+                    else "（无财务数据）")
 
     ar_cur = safe_float(latest.get("accounts_receiv") or latest.get("ar"))
-    ar_prev = safe_float(prev.get("accounts_receiv") or prev.get("ar"))
-    if ar_cur is not None and ar_prev is not None and ar_prev > 0 and rev_g is not None:
-        ar_g = (ar_cur - ar_prev) / ar_prev * 100
+    ar_yoy = safe_float(yoy_row.get("accounts_receiv") or yoy_row.get("ar")) if yoy_row else None
+    if ar_cur is not None and ar_yoy is not None and ar_yoy > 0 and rev_g is not None:
+        ar_g = (ar_cur - ar_yoy) / ar_yoy * 100
         ar_trig = ar_g > rev_g * 1.5
-        ar_detail = f"应收增速 {ar_g:+.1f}% vs 营收增速 {rev_g:+.1f}%"
+        ar_status = "triggered" if ar_trig else "clear"
+        ar_detail = f"应收同比 {ar_g:+.1f}% vs 营收同比 {rev_g:+.1f}%{rev_base}"
     else:
-        ar_trig, ar_detail = False, "应收或营收字段不足，无法计算增速对比"
+        ar_trig, ar_detail, ar_status = False, f"应收同比不可比或字段不足{rev_base}", "insufficient_data"
     signals.append(_signal("receivable_expansion", "应收扩张异常", "financial",
-                             triggered=ar_trig, severity="中", detail=ar_detail, auto=True))
+                             triggered=ar_trig, severity="中", detail=ar_detail, auto=True,
+                             status=ar_status))
 
     inv_cur = safe_float(latest.get("inventories") or latest.get("inventory"))
-    inv_prev = safe_float(prev.get("inventories") or prev.get("inventory"))
-    if inv_cur is not None and inv_prev is not None and inv_prev > 0 and rev_g is not None:
-        inv_g = (inv_cur - inv_prev) / inv_prev * 100
+    inv_yoy = safe_float(yoy_row.get("inventories") or yoy_row.get("inventory")) if yoy_row else None
+    if inv_cur is not None and inv_yoy is not None and inv_yoy > 0 and rev_g is not None:
+        inv_g = (inv_cur - inv_yoy) / inv_yoy * 100
         inv_trig = inv_g > rev_g * 1.5
-        inv_detail = f"存货增速 {inv_g:+.1f}% vs 营收增速 {rev_g:+.1f}%"
+        inv_status = "triggered" if inv_trig else "clear"
+        inv_detail = f"存货同比 {inv_g:+.1f}% vs 营收同比 {rev_g:+.1f}%{rev_base}"
     else:
-        inv_trig, inv_detail = False, "存货或营收字段不足，无法计算增速对比"
+        inv_trig, inv_detail, inv_status = False, f"存货同比不可比或字段不足{rev_base}", "insufficient_data"
     signals.append(_signal("inventory_expansion", "存货扩张异常", "financial",
-                             triggered=inv_trig, severity="中", detail=inv_detail, auto=True))
+                             triggered=inv_trig, severity="中", detail=inv_detail, auto=True,
+                             status=inv_status))
 
     pd_v = safe_float(latest.get("profit_dedt"))
     np_v = coalesce_field(latest, "n_income_attr_p", "net_profit", "netprofit")

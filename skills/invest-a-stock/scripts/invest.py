@@ -1895,6 +1895,8 @@ def _format_ev_ebitda_block(ev: dict) -> str:
         return "\n".join(lines)
     if not ev.get("available"):
         lines.append(f"  ⚠️ 桥接数据不可得（缺失: {', '.join(ev.get('missing') or [])}）")
+        if ev.get("ebitda_note"):
+            lines.append(f"  · {ev['ebitda_note']}")
         if ev.get("note"):
             lines.append(f"  · {ev['note']}")
         return "\n".join(lines)
@@ -1907,7 +1909,8 @@ def _format_ev_ebitda_block(ev: dict) -> str:
         lines.append(f"    + 有息负债: 不可得（降级净现金口径）")
     lines.append(f"    - 现金: {b['cash_yi']} 亿元")
     lines.append(f"    = EV: {b['ev_yi']} 亿元")
-    lines.append(f"  EBITDA: {ev['ebitda_yi']} 亿元 → EV/EBITDA = {ev['ev_ebitda']}x")
+    period_s = f"（{ev['ebitda_period']} 年报期）" if ev.get("ebitda_period") else ""
+    lines.append(f"  EBITDA: {ev['ebitda_yi']} 亿元{period_s} → EV/EBITDA = {ev['ev_ebitda']}x")
     if ev.get("note"):
         lines.append(f"  ⚠️ {ev['note']}")
     if ev.get("takeover_payback_years"):

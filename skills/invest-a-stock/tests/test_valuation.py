@@ -307,6 +307,63 @@ class TestCalcOcfQuality:
         assert _prev_report_end_date("bad") is None
 
 
+class TestCalcTtmEps:
+    """calc_ttm_eps: 要求连续 4 个单季（不允许断档），缺季时降级为不可得或陈旧标注。"""
+
+    @staticmethod
+    def _rows(cum_eps: list[tuple[str, float]]) -> list[dict]:
+        return [{"end_date": ed, "eps": v} for ed, v in cum_eps]
+
+    def test_contiguous_4_quarters_normal(self):
+        """连续 4 期 → 正常计算，stale=False。"""
+        from valuation_calc import calc_ttm_eps
+
+        rows = self._rows([
+            ("20250331", 1.0), ("20250630", 3.0), ("20250930", 6.0),
+            ("20251231", 10.0), ("20260331", 2.0),
+        ])
+        r = calc_ttm_eps(rows)
+        assert r["ttm_eps"] == pytest.approx(11.0)   # 单季 2+3+4+2
+        assert r["stale"] is False
+        assert [q["end_date"] for q in r["quarterly_eps"]] == [
+            "20250630", "20250930", "20251231", "20260331",
+        ]
+
+    def test_missing_mid_quarter_marks_stale_not_silent_mix(self):
+        """缺 2025Q3：旧逻辑取 [2024Q4, 2025Q1, 2025Q2, 2026Q1] 跨洞求和；
+        新逻辑回退到最近的连续窗口 [2024Q3..2025Q2] 并标注陈旧，绝不混入
+        过期季度（2026Q1 前有 2025Q3/Q4 空洞，不可入窗）。"""
+        from valuation_calc import calc_ttm_eps
+
+        rows = self._rows([
+            ("20240331", 1.0), ("20240630", 3.0), ("20240930", 6.0),
+            ("20241231", 10.0), ("20250331", 1.5), ("20250630", 4.0),
+            # 缺 20250930（2025Q3 断档）→ 20251231 单季差不可算 → 不构成连续窗
+            ("20251231", 12.0),
+            ("20260331", 2.0),
+        ])
+        r = calc_ttm_eps(rows)
+        assert r["ttm_eps"] == pytest.approx(11.0)   # 回退窗口单季 3+4+1.5+2.5
+        assert r["stale"] is True
+        assert r["stale_note"] is not None and "20260331" in r["stale_note"]
+        # 窗口必须是连续期，绝不能是 [20241231, 20250331, 20250630, 20260331]
+        assert [q["end_date"] for q in r["quarterly_eps"]] == [
+            "20240930", "20241231", "20250331", "20250630",
+        ]
+
+    def test_no_contiguous_window_unavailable(self):
+        """仅 4 期但全部断档（跨年洞）→ TTM 标不可得，不静默求和。"""
+        from valuation_calc import calc_ttm_eps
+
+        rows = self._rows([
+            ("20240331", 1.0), ("20240630", 3.0),
+            ("20250331", 1.5), ("20250630", 4.0),
+        ])
+        r = calc_ttm_eps(rows)
+        assert r["ttm_eps"] is None
+        assert ("连续" in r["error"]) or ("断档" in r["error"])
+
+
 class TestCalcHistoricalPercentile:
     """calc_historical_percentile: PE/PB 独立计算，不因一侧缺失丢弃另一侧。"""
 
@@ -523,6 +580,55 @@ class TestEvEbitda:
         r = calc_ev_ebitda(total_mv_yi=100.0, cash=5e8, ebitda=None)
         assert r["available"] is False
         assert "ebitda" in r["missing"]
+
+    def test_annual_ebitda_requires_1231_period(self):
+        """最新期为非 1231（如 2026Q1 累计）时，不得产出 40x 类高估结果。
+
+        fina_indicator.ebitda 为累计 YTD 口径：最新 2026Q1=5 亿若被当作全年，
+        EV=200 亿 → 40x；必须取 2025 年报 20 亿 → 10x。
+        """
+        from valuation_calc import _latest_annual_ebitda, calc_ev_ebitda
+
+        fin_rows = [
+            {"end_date": "20250331", "ebitda": 4e8},
+            {"end_date": "20250630", "ebitda": 9e8},
+            {"end_date": "20250930", "ebitda": 15e8},
+            {"end_date": "20251231", "ebitda": 20e8},   # 年报期全年 EBITDA
+            {"end_date": "20260331", "ebitda": 5e8},    # 2026Q1 累计（约全年 1/4）
+        ]
+        ebitda, period, note = _latest_annual_ebitda(fin_rows)
+        assert ebitda == 20e8        # 取 2025 年报，而非最新 2026Q1 累计 5e8
+        assert period == "20251231"
+        assert note is None
+        r = calc_ev_ebitda(total_mv_yi=200.0, cash=0.0, ebitda=ebitda, ebitda_period=period)
+        assert r["ev_ebitda"] == 10.0
+        assert r["ebitda_period"] == "20251231"
+
+    def test_annual_ebitda_no_1231_degrades(self):
+        """3 年内无可用 1231 年报期 → 明确降级（不可得 + 口径说明），不静默用累计期。"""
+        from valuation_calc import _latest_annual_ebitda, calc_ev_ebitda
+
+        fin_rows = [
+            {"end_date": "20250930", "ebitda": 15e8},
+            {"end_date": "20251231", "ebitda": None},   # 1231 存在但字段不可得
+            {"end_date": "20260331", "ebitda": 5e8},    # 最新期：累计口径，不可用
+        ]
+        ebitda, period, note = _latest_annual_ebitda(fin_rows)
+        assert ebitda is None
+        assert period is None
+        assert note is not None and "1231" in note and "累计口径" in note
+        r = calc_ev_ebitda(total_mv_yi=200.0, cash=0.0, ebitda=ebitda)
+        assert r["available"] is False
+        assert "ebitda" in r["missing"]
+
+    def test_annual_ebitda_normal_annual_only(self):
+        from valuation_calc import _latest_annual_ebitda
+
+        fin_rows = [{"end_date": "20241231", "ebitda": 30e8}]
+        ebitda, period, note = _latest_annual_ebitda(fin_rows)
+        assert ebitda == 30e8
+        assert period == "20241231"
+        assert note is None
 
 
 class TestIncomeDriver:

@@ -108,6 +108,66 @@ class TestScanFinancialRisks:
         assert "deducted_profit_divergence" in ids
 
 
+class TestReceivableInventorySamePeriodYoY:
+    """应收/存货扩张信号的同比必须限定相同报告期类型（Q1 对 Q1、年报对年报）。
+
+    fina_indicator 的 revenue 为累计 YTD 口径：相邻行（如 2026Q1 累计 vs
+    2025 年报）相除会得到 ~-75% 的伪同比 → 旧逻辑几乎每轮误触发。不可比时
+    标 insufficient_data/跳过，不误报。
+    """
+
+    @staticmethod
+    def _signals(rows: list[dict]) -> dict[str, dict]:
+        from lib.risk_scanner import scan_financial_risks
+
+        return {s["id"]: s for s in scan_financial_risks(rows)}
+
+    def test_q1_cumulative_vs_prior_annual_not_false_trigger(self):
+        """2026Q1 累计 vs 相邻 2025 年报：无去年同期可比行 → 信号不可得，不触发。"""
+        rows = [
+            {"end_date": "2025-12-31", "revenue": 20e9,
+             "accounts_receiv": 2e9, "inventories": 1.5e9},
+            {"end_date": "2026-03-31", "revenue": 5e9,   # 累计口径，非全年
+             "accounts_receiv": 2.2e9, "inventories": 1.8e9},
+        ]
+        s = self._signals(rows)
+        assert s["receivable_expansion"]["triggered"] is False
+        assert s["inventory_expansion"]["triggered"] is False
+        assert s["receivable_expansion"]["status"] == "insufficient_data"
+
+    def test_same_period_yoy_triggers(self):
+        """Q1 对 Q1：应收同比 +150% vs 营收同比 +50%（>1.5×）→ 触发。"""
+        rows = [
+            {"end_date": "2025-03-31", "revenue": 10e9,
+             "accounts_receiv": 1e9, "inventories": 0.8e9},
+            {"end_date": "2026-03-31", "revenue": 15e9,
+             "accounts_receiv": 2.5e9, "inventories": 1.6e9},
+        ]
+        s = self._signals(rows)
+        assert s["receivable_expansion"]["triggered"] is True
+        assert s["inventory_expansion"]["triggered"] is True
+        assert "2025-03-31" in s["receivable_expansion"]["detail"]
+
+    def test_same_period_yoy_clear(self):
+        """Q1 对 Q1：应收增速未超营收 1.5 倍 → 不触发，status=clear。"""
+        rows = [
+            {"end_date": "2025-03-31", "revenue": 10e9, "accounts_receiv": 1e9},
+            {"end_date": "2026-03-31", "revenue": 15e9, "accounts_receiv": 1.1e9},
+        ]
+        s = self._signals(rows)
+        assert s["receivable_expansion"]["triggered"] is False
+        assert s["receivable_expansion"]["status"] == "clear"
+
+    def test_annual_vs_annual_yoy(self):
+        """年报对年报：应收 +120% vs 营收 +30% → 触发。"""
+        rows = [
+            {"end_date": "2024-12-31", "revenue": 20e9, "accounts_receiv": 2e9},
+            {"end_date": "2025-12-31", "revenue": 26e9, "accounts_receiv": 4.4e9},
+        ]
+        s = self._signals(rows)
+        assert s["receivable_expansion"]["triggered"] is True
+
+
 # ---------------------------------------------------------------------------
 # scan_business_risks (industry param is dict|None)
 # ---------------------------------------------------------------------------
