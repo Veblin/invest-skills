@@ -836,8 +836,24 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     return rows if rows else None
 
 
+def _is_tencent_unsupported(symbol: str) -> bool:
+    """北交所代码（4/8/920 前缀）→ 腾讯 qt.gtimg.cn 行情无覆盖。
+
+    与 codes.exchange_code 的北交所规则一致（4xxxxx/8xxxxx 老三板、920xxx
+    北交所新股）。此前市场启发式 'sh' if startswith(("6","9")) 会把 920xxx
+    路由到 sh920xxx（请求不存在）、把 8xxxxx 路由到 sz8xxxxx（可能命中旧
+    三板而返回**别家公司**的报价）——误路由数据比缺失数据危害更大，明确
+    跳过并标注不可得。
+    """
+    s = str(symbol or "").strip().split(".")[0]
+    return s.startswith(("4", "8", "920"))
+
+
 def _q_tencent_quote(symbol: str) -> dict | None:
-    """腾讯行情。"""
+    """腾讯行情。北交所（4/8/920 前缀）腾讯无覆盖 → 不请求、标注不可得。"""
+    if _is_tencent_unsupported(symbol):
+        logger.warning("tencent quote: 北交所代码 %s 腾讯行情无覆盖，跳过（不误路由）", symbol)
+        return None
     _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
 
     def _parse_tencent_float(val: str | None) -> float | None:
@@ -879,6 +895,8 @@ def _qp_akshare(name: str, symbol: str, **kw) -> str:
 
 
 def _qp_tencent(symbol: str) -> str:
+    if _is_tencent_unsupported(symbol):
+        return "qt.gtimg.cn: 北交所无覆盖（不请求）"
     market = "sh" if symbol.startswith(("6", "9")) else "sz"
     return f"qt.gtimg.cn/q={market}{symbol}"
 

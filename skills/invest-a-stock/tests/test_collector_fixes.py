@@ -1,0 +1,430 @@
+"""Collector 层 6 项 code-review CONFIRMED 缺陷修复回归测试（全 mock，零活体网络）。
+
+修复清单：
+1. PCR partial 标志：降采样是设计内的，partial 只在采样本身失败/缺失时置 True
+   （此前 raw_days > len(sampled) 在 5 年窗口下恒 True → 报告恒显示「历史样本不足」）。
+2. margin akshare 降级路径 change_pct：与 Tushare 主路径同窗口口径（最近 15 交易日
+   两端），此前取全历史首尾（约 2 年）→ 同字段两种窗口语义。
+3. qfq fallback 最新日 raw：标记 has_qfq_gap，除权日时不再让假跳变静默进入
+   data[-1] 连续性消费者（MA20 偏离/10 日趋势）。
+4. management_hold run 级缓存：cninfo 全市场接口（2 calls/符号）同 run 内只取一次。
+5. cascade 单源 deadline：挂起的首选源受控超时（此前无 deadline，按 socket 30s
+   串行阻塞）。
+6. 腾讯行情北交所（4/8/920 前缀）明确跳过：此前误路由到 sh920xxx / sz8xxxxx
+   （sz 前缀可能命中旧三板返回别家公司报价）。
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+
+def _null_ctx():
+    from contextlib import nullcontext
+    return nullcontext()
+
+
+# ---------- 缺陷 1：PCR partial 标志 ----------
+
+
+class TestPcrPartialFlag:
+    @staticmethod
+    def _fake_tc(cal: list[str], fail_dates: set[str] | None = None):
+        """opt_basic + trade_cal + opt_daily 假客户端；fail_dates 内查询返回空表。"""
+        import pandas as pd
+
+        fail_dates = fail_dates or set()
+
+        class FakeTC:
+            def query(self, api, **kw):
+                if api == "opt_basic":
+                    return pd.DataFrame([
+                        {"ts_code": "10004567.SH", "name": "50ETF购2601", "call_put": "C"},
+                        {"ts_code": "10004568.SH", "name": "50ETF沽2601", "call_put": "P"},
+                    ])
+                if api == "trade_cal":
+                    return pd.DataFrame({"cal_date": cal})
+                if api == "opt_daily":
+                    td = str(kw.get("trade_date") or "")
+                    if td in fail_dates:
+                        return pd.DataFrame()
+                    return pd.DataFrame({"ts_code": ["10004567.SH", "10004568.SH"],
+                                         "vol": [100.0, 50.0]})  # put/call = 0.5
+                return pd.DataFrame()
+
+        return FakeTC()
+
+    @staticmethod
+    def _five_year_cal() -> list[str]:
+        """~5 年（1230 交易日）日历，> 采样上限 80 → 必然触发降采样。"""
+        import pandas as pd
+
+        dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=1230)
+        return [d.strftime("%Y%m%d") for d in dates]
+
+    def test_pcr_sampling_success_partial_false(self):
+        """5 年窗口降采样且全部采样日查询成功 → partial=False（修复点）。
+
+        修复前：raw_days(1230) > len(sampled)(~80) 恒 True → partial 永久 true →
+        报告恒显示「历史样本不足」警告。
+        """
+        from lib.collector._orchestrate import _ms_fetch_put_call_ratio
+
+        cal = self._five_year_cal()
+        r = _ms_fetch_put_call_ratio(self._fake_tc(cal))
+        assert r is not None
+        assert r["sampled"] is True            # 采样确实发生（5 年 > 80 点上限）
+        assert r["partial"] is False           # 修复点：采样成功 → 非 partial
+        assert r["current_date"] == cal[-1]
+        assert r["ratio"] == 0.5
+
+    def test_pcr_sample_query_missing_partial_true(self):
+        """部分采样日查询失败（采样本身缺失）→ partial=True。"""
+        from lib.collector._orchestrate import (
+            _PCR_MAX_DAILY_QUERIES, _ms_fetch_put_call_ratio,
+            _ms_subsample_trade_dates,
+        )
+
+        cal = self._five_year_cal()
+        sampled = _ms_subsample_trade_dates(cal, _PCR_MAX_DAILY_QUERIES)
+        fail_dates = set(sampled[::7])  # 每 7 个采样日失败 → 实得 < 计划
+        r = _ms_fetch_put_call_ratio(self._fake_tc(cal, fail_dates))
+        assert r is not None
+        assert r["sampled"] is True
+        assert r["partial"] is True            # 实得采样点数 < 计划点数
+        assert r["history_days"] < len(sampled)
+
+
+# ---------- 缺陷 2：margin 降级路径 15 日窗口 ----------
+
+
+class TestMarginFallbackWindow:
+    class _FakeDF:
+        """df 最小兼容：columns / empty / sort_values / to_dict。"""
+
+        def __init__(self, records, columns):
+            self._records = records
+            self._cols = columns
+            self.empty = not records
+
+        @property
+        def columns(self):
+            return self._cols
+
+        def sort_values(self, by, **kw):
+            return self
+
+        def to_dict(self, orient="records"):
+            return self._records
+
+    @staticmethod
+    def _margin_records(n: int) -> list[dict]:
+        """n 行两融记录：融资余额 = 100 + i（第 i 天，i 从 0 起），日期连续。"""
+        import pandas as pd
+
+        dates = pd.bdate_range(end=pd.Timestamp("2026-08-05"), periods=n)
+        return [
+            {"交易日期": d.strftime("%Y%m%d"), "融资余额": 100.0 + i}
+            for i, d in enumerate(dates)
+        ]
+
+    def _call_fallback(self, monkeypatch, records):
+        """空 margin_detail → akshare 降级路径，返回 result dict。"""
+        from lib.collector import _orchestrate as orch
+
+        class FakeTC:
+            def query(self, api, **kw):
+                assert api == "margin_detail"
+                return self._empty_df()
+
+            @staticmethod
+            def _empty_df():
+                import pandas as pd
+                return pd.DataFrame()
+
+        monkeypatch.setattr(
+            "lib.market_pulse.fetch_margin_account_info",
+            lambda: self._FakeDF(records, ["交易日期", "融资余额"]),
+        )
+        return orch._ms_fetch_margin(FakeTC(), "600176")
+
+    def test_fallback_change_pct_uses_15_day_window(self, monkeypatch):
+        """降级路径 change_pct = 最近 15 交易日两端，而非全历史首尾。"""
+        records = self._margin_records(30)  # 30 行：全历史窗口 ≠ 15 日窗口
+        r = self._call_fallback(monkeypatch, records)
+        assert r is not None
+        assert r["source"] == "akshare.margin_account"
+
+        window = records[-15:]
+        expected = (window[-1]["融资余额"] - window[0]["融资余额"]) \
+            / window[0]["融资余额"] * 100
+        full_history = (records[-1]["融资余额"] - records[0]["融资余额"]) \
+            / records[0]["融资余额"] * 100
+        assert r["change_pct"] == pytest.approx(round(expected, 2))
+        assert r["change_pct"] != pytest.approx(round(full_history, 2))  # 修复点
+        assert r["records"] == records[-10:]
+
+    def test_fallback_short_history_uses_all_rows(self, monkeypatch):
+        """不足 15 行时窗口退化为全量（与主路径 len<2 拒绝语义一致）。"""
+        records = self._margin_records(5)
+        r = self._call_fallback(monkeypatch, records)
+        assert r is not None
+        expected = (records[-1]["融资余额"] - records[0]["融资余额"]) \
+            / records[0]["融资余额"] * 100
+        assert r["change_pct"] == pytest.approx(round(expected, 2))
+
+
+# ---------- 缺陷 3：qfq fallback 最新日标记 ----------
+
+
+class TestQfqFallbackGapMark:
+    @staticmethod
+    def _rows():
+        return [
+            {"trade_date": "20260710", "open": 10.0, "high": 10.5, "low": 9.5, "close": 10.0},
+            {"trade_date": "20260711", "open": 11.0, "high": 11.5, "low": 10.5, "close": 11.0},
+            {"trade_date": "20260712", "open": 12.0, "high": 12.5, "low": 11.5, "close": 12.0},
+        ]
+
+    def test_fallback_marks_newest_raw_day_gap(self):
+        """最新日缺 adj_factor（盘中常态）→ fallback 路径最新 raw 日标记 has_qfq_gap。
+
+        修复点：最新日若为除权日，D-1(qfq) → D(raw) 边界是假跳变（10% 分红看似
+        跌 10%）；标记后连续性消费者（MA20 偏离/10 日趋势）可显式排除，不让
+        假跳变静默进入 data[-1]。
+        """
+        from lib.collector._orchestrate import _apply_qfq_with_newest_raw_fallback
+
+        rows = self._rows()
+        factors = {"20260710": 1.2, "20260711": 1.1}  # 最新日缺失（盘中常态）
+        out = _apply_qfq_with_newest_raw_fallback(rows, factors)
+        assert out is not None
+        assert out[-1]["trade_date"] == "20260712"
+        assert out[-1]["has_qfq_gap"] is True    # 修复点：最新 raw 日被标注
+        assert out[-1]["close"] == 12.0          # raw 原样保留
+        # 历史 qfq 段无标记（与最新日的不同标度是序列唯一的断裂点）
+        assert all("has_qfq_gap" not in r for r in out[:-1])
+        # 输入行不被突变（dict 拷贝标记）
+        assert "has_qfq_gap" not in rows[-1]
+
+    def test_ex_div_newest_day_boundary_signaled(self):
+        """除权日场景：最新日 raw 收盘明显低于前一交易日 qfq（10% 分红）→ 有标记。"""
+        from lib.collector._orchestrate import _apply_qfq_with_newest_raw_fallback
+
+        rows = [
+            {"trade_date": "20260710", "close": 10.0},
+            {"trade_date": "20260711", "close": 11.0},
+            {"trade_date": "20260712", "close": 9.9},   # 除权日：raw 跌 ~10%
+        ]
+        factors = {"20260710": 1.2, "20260711": 1.1}    # 最新日因子盘后才发布
+        out = _apply_qfq_with_newest_raw_fallback(rows, factors)
+        assert out is not None
+        assert out[-1]["trade_date"] == "20260712"
+        assert out[-1]["has_qfq_gap"] is True           # 修复点：假跳变被标注
+        # 历史段锚定 20260711 的 qfq（连续），最新 raw 日不参与连续性口径
+        r11 = [r for r in out if r["trade_date"] == "20260711"][0]
+        assert r11["close"] == 11.0
+
+    def test_full_factors_no_gap_marker(self):
+        """全部因子就绪（盘后常态）→ 无 has_qfq_gap 标记。"""
+        from lib.collector._orchestrate import _apply_qfq_with_newest_raw_fallback
+
+        rows = self._rows()
+        factors = {"20260710": 1.2, "20260711": 1.1, "20260712": 1.0}
+        out = _apply_qfq_with_newest_raw_fallback(rows, factors)
+        assert out is not None
+        assert all("has_qfq_gap" not in r for r in out)
+
+
+# ---------- 缺陷 4：management_hold run 级缓存 ----------
+
+
+class TestManagementHoldRunCache:
+    @staticmethod
+    def _install(monkeypatch, df, calls):
+        from lib.collector import _orchestrate as orch
+
+        def fake_cninfo(symbol):
+            calls["n"] += 1
+            return df
+
+        monkeypatch.setattr(orch, "_cninfo_hold_cache", {})
+        monkeypatch.setattr(orch, "_cninfo_hold_cache_day", "")
+        monkeypatch.setattr(orch, "_cninfo_hold_cache_today", lambda: "2026-08-06")
+        monkeypatch.setattr(orch, "akshare_direct_session", lambda: _null_ctx())
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: True)
+        monkeypatch.setattr("akshare.stock_hold_management_detail_cninfo", fake_cninfo)
+        return orch._q_akshare_management_hold
+
+    @staticmethod
+    def _hold_df():
+        import pandas as pd
+
+        return pd.DataFrame({
+            "证券代码": ["600176", "000001"],
+            "董监高姓名": ["张三", "李四"],
+            "变动数量": [1000.0, -500.0],
+        })
+
+    def test_second_call_in_same_run_no_refetch(self, monkeypatch):
+        """同 run 第二次调用 → akshare 全市场接口仅取一次（每方向 1 call，共 2）。"""
+        calls = {"n": 0}
+        fn = self._install(monkeypatch, self._hold_df(), calls)
+
+        r1 = fn("600176")
+        assert calls["n"] == 2  # 首次：增持 + 减持 各 1 call
+        r2 = fn("600176")
+        assert calls["n"] == 2  # 修复点：第二次 0 call（此前 2 calls/次）
+        assert r1 is not None and r2 is not None
+        assert r1 == r2
+
+    def test_cache_shared_across_symbols(self, monkeypatch):
+        """同 run 不同 symbol → 复用同一份全市场数据（watchlist/compare 场景）。"""
+        calls = {"n": 0}
+        fn = self._install(monkeypatch, self._hold_df(), calls)
+
+        r1 = fn("600176")
+        r2 = fn("000001")
+        assert calls["n"] == 2  # 修复点：N 标的只取一次全市场（此前 2 calls/标的）
+        assert r1 is not None and r2 is not None
+        assert any("600176" in r.get("holder_name", "") or True for r in r1)
+        assert r1[0]["change_vol"] == 1000.0
+        assert r2[0]["change_vol"] == -500.0
+
+    def test_cache_expires_next_day(self, monkeypatch):
+        """跨自然日 → 缓存失效重建（按日失效）。"""
+        from lib.collector import _orchestrate as orch
+
+        days = {"d": "2026-08-06"}
+        calls = {"n": 0}
+        fn = self._install(monkeypatch, self._hold_df(), calls)
+        monkeypatch.setattr(orch, "_cninfo_hold_cache_today", lambda: days["d"])
+
+        fn("600176")
+        assert calls["n"] == 2
+        days["d"] = "2026-08-07"
+        fn("600176")
+        assert calls["n"] == 4  # 跨日重建
+
+
+# ---------- 缺陷 5：cascade 单源 deadline ----------
+
+
+class TestCascadeSourceDeadline:
+    def test_hung_source_returns_timeout_controlled(self):
+        """挂起首选源 → 受控超时（非 socket 30s 裸等），链继续降级。"""
+        from lib.collector._base import _run_sources_cascade
+
+        t0 = time.monotonic()
+        results = _run_sources_cascade(
+            [("a", lambda: time.sleep(60)), ("b", lambda: [1])],
+            "test",
+            deadline_sec=0.2,
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0                      # 修复点：0.2s deadline 受控返回
+        assert results[0].error is not None
+        assert "timeout" in results[0].error      # 对齐 parallel 的 timeout 语义
+        assert results[1].data == [1]             # 超时后链继续降级
+
+    def test_timeout_error_message_contains_deadline(self):
+        """timeout error 带 deadline 数值，可追溯。"""
+        from lib.collector._base import _run_sources_cascade
+
+        results = _run_sources_cascade(
+            [("a", lambda: time.sleep(30))], "test", deadline_sec=0.3,
+        )
+        assert "timeout after 0.3s" in results[0].error
+
+    def test_deadline_preserves_exception_message(self):
+        """deadline 路径下异常消息不吞（与无 deadline 路径可追溯性一致）。"""
+        from lib.collector._base import _run_sources_cascade
+
+        def _boom():
+            raise ConnectionError("eastmoney blocked")
+
+        results = _run_sources_cascade(
+            [("a", _boom), ("b", lambda: [9])], "test", deadline_sec=5,
+        )
+        assert "eastmoney blocked" in results[0].error
+        assert results[1].data == [9]
+
+    def test_deadline_zero_means_no_limit(self):
+        """deadline_sec=0 → 不设限（与 _run_sources_parallel 语义一致）。"""
+        from lib.collector._base import _run_sources_cascade
+
+        results = _run_sources_cascade(
+            [("a", lambda: [1]), ("b", lambda: [2])], "test", deadline_sec=0,
+        )
+        assert results[0].data == [1]
+        assert results[1].data is None and results[1].error is None  # 未尝试
+
+
+# ---------- 缺陷 6：腾讯行情北交所跳过 ----------
+
+
+class TestTencentBjSkip:
+    def test_bj_symbols_skipped_without_request(self, monkeypatch):
+        """北交所代码 → 腾讯不发起请求、返回 None（标注不可得）。"""
+        from lib.collector._sources import _q_tencent_quote
+
+        requested: list[str] = []
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                requested.append(url)
+                raise AssertionError("北交所代码不应发起腾讯请求")
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr("lib.collector._sources.no_proxy_session",
+                            lambda: _FakeCtx())
+
+        for sym in ("920001", "830799", "430047", "920001.BJ"):
+            assert _q_tencent_quote(sym) is None, sym
+        assert requested == []  # 修复点：绝不对北交所代码发起请求（此前误路由）
+
+    def test_sh_symbol_still_routes_sh_market(self, monkeypatch):
+        """非北交所代码行为不变：600000 → sh600000。"""
+        from lib.collector._sources import _q_tencent_quote
+
+        captured: dict = {}
+
+        class _FakeResp:
+            status_code = 200
+            text = "~".join(["0"] * 50)  # p[3]..p[45] 均可解析
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                captured["url"] = url
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr("lib.collector._sources.no_proxy_session",
+                            lambda: _FakeCtx())
+
+        r = _q_tencent_quote("600000")
+        assert captured["url"] == "http://qt.gtimg.cn/q=sh600000"
+        assert r is not None and r["price"] == 0.0
+
+    def test_qp_tencent_bj_annotates_unavailable(self):
+        """查询参数字符串：北交所标注不请求，非北交所格式不变。"""
+        from lib.collector._sources import _qp_tencent
+
+        assert "北交所" in _qp_tencent("920001")
+        assert "北交所" in _qp_tencent("830799")
+        assert _qp_tencent("600000") == "qt.gtimg.cn/q=sh600000"
+        assert _qp_tencent("000001") == "qt.gtimg.cn/q=sz000001"

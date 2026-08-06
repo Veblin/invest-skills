@@ -126,9 +126,12 @@ def _apply_qfq_with_newest_raw_fallback(
     则最新日按 raw 价格原样保留。
 
     近似说明：最新日在自身锚定下 qfq==raw；若当日恰为除权日，锚点由 D
-    平移至 D-1，raw 值与真 qfq 值相差 f_D/f_{D-1} 量级（小近似，除权日
-    罕见且因子盘后即发布）。重试仍失败（因子整体缺失/中间日缺失）→ 返回
-    None，调用方沿用 raw 整串回退。
+    平移至 D-1，raw 值与真 qfq 值相差 f_D/f_{D-1} 量级——D-1(qfq) → D(raw)
+    边界会出现假价格跳变（如 10% 分红看似跌 10%）。因此 fallback 路径把
+    最新日标记 ``has_qfq_gap: True``：该行是 raw 而非与历史同标度的 qfq，
+    需要连续性的消费者（MA20 偏离、10 日趋势等）应排除/跳过标记行，不得
+    让假跳变进入 data[-1] 的连续性计算。重试仍失败（因子整体缺失/中间日
+    缺失）→ 返回 None，调用方沿用 raw 整串回退。
     """
     adjusted = _apply_qfq(rows, factors)
     if adjusted is not None:
@@ -142,7 +145,12 @@ def _apply_qfq_with_newest_raw_fallback(
     adjusted_rest = _apply_qfq(rest, factors)
     if adjusted_rest is None:
         return None
-    newest_rows = [r for r in rows if str(r.get("trade_date") or "") == newest_td]
+    # 最新日 raw 与历史 qfq 段不同标度：若当日为除权日，D-1(qfq)→D(raw) 边界
+    # 产生假跳变。标记 has_qfq_gap 而非静默混入，让连续性消费者显式排除。
+    newest_rows = [
+        dict(r, has_qfq_gap=True)
+        for r in rows if str(r.get("trade_date") or "") == newest_td
+    ]
     return adjusted_rest + newest_rows
 
 
@@ -1020,6 +1028,19 @@ def _run_with_timeout(fn: Callable[[], Any], timeout_sec: float, label: str) -> 
     return box["result"]
 
 
+# run 级缓存：cninfo 高管增减持是全市场接口（每次「增持/减持」各
+# ~9500/17300 行、单方向超时 45s），此前每符号重取 —— N 标的
+# watchlist/compare/portfolio 最多 ~7.5 分钟。缓存原始 DataFrame 按方向
+# 存一份，同 run（同日）内所有 symbol 复用；跨自然日自动失效重建。
+_cninfo_hold_cache: dict[str, object] = {}  # {direction: df|None}
+_cninfo_hold_cache_day: str = ""            # 缓存所属日期 YYYY-MM-DD
+
+
+def _cninfo_hold_cache_today() -> str:
+    from datetime import date
+    return date.today().isoformat()
+
+
 def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
     """akshare stock_hold_management_detail_cninfo — 高管增减持（副源）。
 
@@ -1031,46 +1052,59 @@ def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
         return None
     import akshare as ak
 
+    global _cninfo_hold_cache_day
+    # 按日失效：跨日清空重建，同 run（同日）内只取一次全市场数据
+    day = _cninfo_hold_cache_today()
+    if _cninfo_hold_cache_day != day:
+        _cninfo_hold_cache.clear()
+        _cninfo_hold_cache_day = day
+
     sym = symbol.strip().zfill(6)
     records: list[dict] = []
     timeout_sec = float(env.CNINFO_HOLDER_TIMEOUT_SEC)
 
-    with akshare_direct_session():
-        for direction in ("增持", "减持"):
-            df = _run_with_timeout(
-                lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
-                timeout_sec,
-                f"akshare cninfo({direction})",
-            )
-            if df is None or getattr(df, "empty", True):
-                continue
-            # 过滤当前标的
-            code_col = "证券代码" if "证券代码" in df.columns else (
-                "股票代码" if "股票代码" in df.columns else None)
-            if code_col is None:
-                logger.warning(
-                    "akshare cninfo(%s): missing symbol column (%s), skip",
-                    direction, list(df.columns),
+    # 仅拉取未缓存的方向（缓存命中不再请求网络，也不再进入东财限流闸口）
+    missing = [d for d in ("增持", "减持") if d not in _cninfo_hold_cache]
+    if missing:
+        with akshare_direct_session():
+            for direction in missing:
+                _cninfo_hold_cache[direction] = _run_with_timeout(
+                    lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
+                    timeout_sec,
+                    f"akshare cninfo({direction})",
                 )
-                continue
-            df = df[df[code_col].astype(str).str.contains(sym, na=False)]
-            if df.empty:
-                continue
-            for row in df.to_dict("records"):
-                change_vol_raw = _first_present(row, "变动数量", "变动股数")
-                parsed_vol = _parse_holder_change_vol(change_vol_raw)
-                records.append({
-                    "ann_date": _norm_date(
-                        row.get("公告日期") or row.get("变动日期") or ""),
-                    "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
-                    "position": row.get("董监高职务") or row.get("职务") or "",
-                    "direction": direction,
-                    "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
-                    "change_vol_raw": change_vol_raw,
-                    "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
-                    "reason": row.get("持股变动原因") or row.get("变动原因") or "",
-                    "source": "akshare cninfo",
-                })
+
+    for direction in ("增持", "减持"):
+        df = _cninfo_hold_cache[direction]
+        if df is None or getattr(df, "empty", True):
+            continue
+        # 过滤当前标的
+        code_col = "证券代码" if "证券代码" in df.columns else (
+            "股票代码" if "股票代码" in df.columns else None)
+        if code_col is None:
+            logger.warning(
+                "akshare cninfo(%s): missing symbol column (%s), skip",
+                direction, list(df.columns),
+            )
+            continue
+        df = df[df[code_col].astype(str).str.contains(sym, na=False)]
+        if df.empty:
+            continue
+        for row in df.to_dict("records"):
+            change_vol_raw = _first_present(row, "变动数量", "变动股数")
+            parsed_vol = _parse_holder_change_vol(change_vol_raw)
+            records.append({
+                "ann_date": _norm_date(
+                    row.get("公告日期") or row.get("变动日期") or ""),
+                "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
+                "position": row.get("董监高职务") or row.get("职务") or "",
+                "direction": direction,
+                "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
+                "change_vol_raw": change_vol_raw,
+                "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
+                "reason": row.get("持股变动原因") or row.get("变动原因") or "",
+                "source": "akshare cninfo",
+            })
     return records or None
 
 
@@ -2150,8 +2184,12 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
         if len(records_ak) < 2:
             return None
 
-        first_a = safe_float(records_ak[0].get("融资余额"))
-        last_a = safe_float(records_ak[-1].get("融资余额"))
+        # 窗口口径与 Tushare 主路径一致：change_pct 取最近 15 个交易日两端，
+        # 而非全历史（约 2 年）首尾——同字段两种窗口语义会让主/降级路径的
+        # 增速不可比（降级路径的增速被 2 年窗口摊薄）。
+        window_ak = records_ak[-15:]
+        first_a = safe_float(window_ak[0].get("融资余额"))
+        last_a = safe_float(window_ak[-1].get("融资余额"))
         if first_a is None or last_a is None or abs(first_a) < 1e-9:
             return None
 
@@ -2160,7 +2198,7 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
             "records": records_ak[-10:],
             "source": "akshare.margin_account",
             "change_pct": change_pct_ak,
-            "note": "全市场汇总，非个股数据；仅供方向性参考",
+            "note": "全市场汇总，非个股数据；15 日窗口（与主路径同口径）；仅供方向性参考",
         }
     except Exception as exc:
         logger.warning("margin akshare fallback failed: %s", exc)
@@ -2360,7 +2398,6 @@ _ETF_300_CODE = "510300.SH"
 _NEW_HIGH_SAMPLE = 30
 _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
-_PCR_MIN_5Y_TRADING_DAYS = 252
 # 5 年 PCR 历史分位：均匀降采样上限，避免逐日 opt_daily 风暴
 _PCR_MAX_DAILY_QUERIES = 80
 
@@ -2493,8 +2530,13 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
         "current_date": current_date,
         "history_days": len(ratios),
-        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS
-        or raw_days > len(sampled) or stale,
+        # 降采样是设计内的（5 年窗口按 _PCR_MAX_DAILY_QUERIES 均匀采样）：
+        # partial 只在采样本身失败/缺失时置 True —— 实际取得的采样点数少于
+        # 计划点数（len(ratios) < len(sampled)），或最新采样日失败致 current
+        # 回退到旧样本（stale）。此前 raw_days > len(sampled) 在 5 年窗口
+        # （~1220 交易日 vs 上限 80）下恒 True → partial 永久 true → 报告恒
+        # 显示「历史样本不足」警告。
+        "partial": len(ratios) < len(sampled) or stale,
         "sampled": raw_days > len(sampled),
         "sample_points": len(fetch_dates),
         "calendar_days": raw_days,
