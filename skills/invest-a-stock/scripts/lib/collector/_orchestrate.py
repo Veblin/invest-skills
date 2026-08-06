@@ -2843,7 +2843,11 @@ def _detect_price_shock(symbol: str, kline_data: list) -> dict:
     if not kline_data:
         return {"has_shock": False, "shock_dates": []}
 
-    bars = kline_data[-61:] if len(kline_data) > 1 else kline_data
+    # 显式升序：tushare.daily 主源返回降序（无 pct_chg 字段，靠相邻 close 计算），
+    # 不排序会把 +10% 涨停算成 −10% 跌停（_bar_pct_chg 依赖相邻顺序）
+    from lib.technical import sort_kline_asc
+    sorted_bars = sort_kline_asc(kline_data)
+    bars = sorted_bars[-61:] if len(sorted_bars) > 1 else sorted_bars
     shocks = []
     for i in range(1, len(bars)):
         bar = bars[i]

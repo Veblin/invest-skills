@@ -12,7 +12,6 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -22,6 +21,7 @@ from . import env
 from .db_util import connect_db, safe_close
 from .json_util import dumps_json, json_default
 from .schema import index_dimensions
+from .shared_dates import shanghai_now  # 上海时区口径（曾用 UTC，跨时区偏移 8h）
 
 DB_PATH = env.STORE_DB
 SCHEMA_VERSION = 1
@@ -247,7 +247,7 @@ def save_pipeline_step(symbol: str, step: str, state: dict | None = None) -> Non
     init_db()
     c = _conn()
     try:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now = shanghai_now().strftime("%Y-%m-%d %H:%M:%S")
         state_json = (
             json.dumps(state, ensure_ascii=False, default=json_default) if state else None
         )
@@ -1033,8 +1033,9 @@ def thesis_init(symbol: str) -> dict[str, Any]:
         c.execute(
             """INSERT OR REPLACE INTO thesis
                (symbol, assumptions_json, red_lines_json, health_score, state, updated_at)
-               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
-            (symbol, dumps_json(assumptions), dumps_json(red_lines), score, state),
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (symbol, dumps_json(assumptions), dumps_json(red_lines), score, state,
+             shanghai_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         c.commit()
     finally:
@@ -1084,8 +1085,9 @@ def thesis_update(symbol: str, assumptions: list[dict] | None = None,
     try:
         c.execute(
             """UPDATE thesis SET assumptions_json=?, red_lines_json=?,
-               health_score=?, state=?, updated_at=datetime('now') WHERE symbol=?""",
-            (dumps_json(a), dumps_json(r), score, state, symbol),
+               health_score=?, state=?, updated_at=? WHERE symbol=?""",
+            (dumps_json(a), dumps_json(r), score, state,
+             shanghai_now().strftime("%Y-%m-%d %H:%M:%S"), symbol),
         )
         c.commit()
     finally:

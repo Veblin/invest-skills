@@ -61,18 +61,40 @@ def load_collection(path: str) -> dict:
 
 
 def extract_latest_financial(fin_data) -> dict:
-    """从 financials 数据提取最新一期的关键字段。"""
+    """从 financials 数据提取最新一期的关键字段。
+
+    按 end_date 显式取最大报告期（兼容两种行序：Tushare fina_indicator
+    返回 newest-first 未排序；akshare THS 按报告期升序），避免跨源
+    比较时错配到最旧财季（记录数不等时 fin_data[-1] 语义分裂）。
+    """
     if isinstance(fin_data, list) and fin_data:
-        return fin_data[-1] if isinstance(fin_data[-1], dict) else {}
+        rows = [r for r in fin_data if isinstance(r, dict)]
+        if not rows:
+            return {}
+        return max(
+            rows,
+            key=lambda r: str(r.get("end_date") or r.get("report_date")
+                              or r.get("trade_date") or ""),
+        )
     if isinstance(fin_data, dict):
         return fin_data
     return {}
 
 
 def extract_valuation_snapshot(val_data) -> dict:
-    """从 valuation 数据提取当前快照。"""
+    """从 valuation 数据提取当前快照。
+
+    按 trade_date 显式取最大日期（Tushare daily_basic 已升序，但其他
+    源行序不定，取值不能依赖 [-1] 约定）。
+    """
     if isinstance(val_data, list) and val_data:
-        return val_data[-1] if isinstance(val_data[-1], dict) else {}
+        rows = [r for r in val_data if isinstance(r, dict)]
+        if not rows:
+            return {}
+        return max(
+            rows,
+            key=lambda r: str(r.get("trade_date") or r.get("end_date") or ""),
+        )
     if isinstance(val_data, dict):
         return val_data
     return {}
