@@ -95,6 +95,17 @@ def _merge_income_into_financials(
                 val = inc.get(key)
                 if val is not None:
                     merged[key] = val
+            # R12b: revenue/net_profit 兜底 — fina_indicator 的这两个字段可能被
+            # Tushare 积分档过滤（实测 2000 分档返回 None），由 income 表补齐。
+            # 修复现象：业绩全景表营收/净利润列长期为 "-"（宜安 300328 实测）。
+            if merged.get("revenue") is None:
+                rev = inc.get("revenue") or inc.get("total_revenue")
+                if rev is not None:
+                    merged["revenue"] = rev
+            if merged.get("net_profit") is None:
+                np_attr = inc.get("n_income_attr_p")
+                if np_attr is not None:
+                    merged["net_profit"] = np_attr
             # 别名映射（与计划一致）
             tax = inc.get("income_tax")
             if tax is not None:
@@ -182,7 +193,8 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
                       fields=(
                           "ts_code,end_date,ebit,ebitda,fin_exp,income_tax,"
                           "sell_exp,admin_exp,invest_income,"
-                          "total_profit,n_income_attr_p"
+                          "total_profit,n_income_attr_p,"
+                          "revenue,total_revenue,operate_profit"
                       ),
                       start_date=lookback, end_date=end)
     if inc_df is not None and not inc_df.empty:

@@ -20,6 +20,21 @@ from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+def _pe_loss_flag(val_cache: dict | None) -> str:
+    """R12c: PE 亏损期占比 >30% 时标题层强制标注（P0-2 规则）。
+
+    仅在标题（模块 0/1）附加「PE分位失真·仅作位置参考」，提示分位不反映估值贵贱。
+    """
+    if not val_cache:
+        return ""
+    summary = val_cache.get("val_summary") or {}
+    pe = summary.get("pe") or {}
+    if (pe.get("loss_ratio") or 0) > 0.3:
+        return "PE分位失真·仅作位置参考"
+    return ""
+
+
 # --- _v3_law11_trigger_d ---
 def _v3_law11_trigger_d(dims: dict[str, dict]) -> bool:
     """LAW 11 触发源 D：52 周高低区间极端，或价格贴近 MA60 盘整。"""
@@ -367,6 +382,9 @@ def _section_research_question(
     # LAW 17: 构建含触发源数据的标题 + 段首主旨句
     chg_s = f"{chg:+.2f}%" if chg is not None else ""
     pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    loss_flag = _pe_loss_flag(val_cache)
+    if pe_s and loss_flag:
+        pe_s += f"（{loss_flag}）"
     title_parts = [p for p in [chg_s, pe_s] if p]
     title_suffix = " · ".join(title_parts) if title_parts else "核心问题"
     judgment = f"当前{title_suffix}，以下为激活的研究问题与触发源。"
@@ -462,6 +480,9 @@ def _section_snapshot(
     # LAW 17: 构建含数据的标题 + 段首主旨句
     price_s = f"{price}" if price is not None else ""
     pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    loss_flag = _pe_loss_flag(val_cache)
+    if pe_s and loss_flag:
+        pe_s += f"（{loss_flag}）"
     pb_s = f"PB {pb_pct:.1f}% 分位" if pb_pct is not None else ""
     title_parts = [p for p in [price_s, pe_s, pb_s] if p]
     title_suffix = " · ".join(title_parts) if title_parts else "当前状态快照"

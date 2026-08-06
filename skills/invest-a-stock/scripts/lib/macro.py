@@ -30,6 +30,24 @@ from .shared_dates import (  # noqa: E402
 # 全球指标采集（FRED / Yahoo Finance）
 # ---------------------------------------------------------------------------
 
+def _sanitize_cpi(value: float) -> float | None:
+    """R12c: CPI 口径归一与异常拦截。
+
+    - 合理同比区间 (-5, 30) → 直接采用
+    - 基期指数口径 (85, 200) → 转换为同比 (value - 100)
+    - 其余 → None（异常值，调用方标注「不可靠」）
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if -5 < v < 30:
+        return round(v, 2)
+    if 85 < v < 200:
+        return round(v - 100, 2)
+    return None
+
+
 def _fetch_fred_series(
     series_id: str,
     config: dict,
@@ -185,11 +203,19 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
                             cpi_val = float(v)
                             break
                     if cpi_val is not None:
-                        context["cpi"] = {
-                            "value": round(cpi_val, 2),
-                            "signal": "通胀" if cpi_val > 3 else ("通缩" if cpi_val < 0 else "温和"),
-                            "source": "akshare.macro_china_cpi",
-                        }
+                        # R12c: 口径归一 + 合理性校验。akshare macro_china_cpi 末行
+                        # 可能返回同比%（如 0.3）或基期指数口径（如 107.1）——
+                        # 实测 2026-08 曾把 107.1 误当同比渲染为 "CPI +107.1%"。
+                        cpi_clean = _sanitize_cpi(cpi_val)
+                        if cpi_clean is not None:
+                            context["cpi"] = {
+                                "value": cpi_clean,
+                                "signal": "通胀" if cpi_clean > 3 else ("通缩" if cpi_clean < 0 else "温和"),
+                                "source": "akshare.macro_china_cpi",
+                            }
+                        else:
+                            logger.warning("CPI raw value %s outside sane range; marked unreliable", cpi_val)
+                            context["cpi"] = {"value": None, "signal": "不可靠", "source": "akshare.macro_china_cpi"}
             if context["cpi"] is None:
                 failures.append("CPI")
         except Exception as exc:
@@ -394,7 +420,7 @@ def macro_signal_label(macro: dict) -> str:
         parts.append(f"PMI {pmi['value']}")
 
     cpi = indicators.get("cpi")
-    if cpi:
+    if cpi and cpi.get("value") is not None:
         parts.append(f"CPI {cpi['value']:+.1f}%")
 
     lpr = indicators.get("lpr")
@@ -418,8 +444,10 @@ def macro_signal_label(macro: dict) -> str:
     if lpr:
         policy_parts.append(lpr.get("signal", ""))
     if cpi:
-        cpi_val = cpi.get("value", 0)
-        if cpi_val < 0:
+        cpi_val = cpi.get("value")
+        if cpi_val is None:
+            pass  # R12c: 异常值拦截后（signal=不可靠），不参与政策方向判定
+        elif cpi_val < 0:
             policy_parts.append("CPI通缩压力")
         elif cpi_val > 3:
             policy_parts.append("CPI通胀压力")

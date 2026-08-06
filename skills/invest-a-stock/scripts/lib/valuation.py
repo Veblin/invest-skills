@@ -92,17 +92,23 @@ def valuation_summary(
     if pe_seq_clean and current_pe is not None:
         pe_pct = percentile_rank(pe_seq_clean, current_pe)
         pe_median = _median(pe_seq_clean)
+        # R12c: 亏损期占比结构化暴露（P0-2 规则：>30% 亏损交易日 → 分位仅作位置参考）
+        pe_total = len([v for v in pe_ttm_seq if v is not None])
+        pe_loss = pe_total - len(pe_seq_clean)
         result["pe"] = {
             "current": round(current_pe, 2),
             "pct": round(pe_pct, 2) if pe_pct is not None else None,
             "median": round(pe_median, 2) if pe_median is not None else None,
             "zone": zone_label(pe_pct) if pe_pct is not None else "未知",
             "n_valid": len(pe_seq_clean),
+            "loss_days": pe_loss,
+            "loss_ratio": round(pe_loss / pe_total, 4) if pe_total else 0.0,
         }
     else:
         result["pe"] = {"current": None, "pct": None, "median": None,
                         "zone": "未知", "n_valid": 0,
-                        "reason": "PE 数据为空或无正值"}
+                        "reason": "PE 数据为空或无正值",
+                        "loss_days": 0, "loss_ratio": 0.0}
 
     # PB
     if pb_seq_clean and current_pb is not None:
