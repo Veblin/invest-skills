@@ -472,10 +472,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="R3: 追加 EV/EBITDA 企业价值桥接表（可审计逐项）+ 私有化检验研究问题")
     pval.add_argument("--industry", default=None, help="行业名（用于 R3 金融业豁免判定）")
 
-    pms = sub.add_parser("market-status", help="市场微观结构快照：杠杆/广度/情绪/估值温度")
+    pms = sub.add_parser("market-status", help="市场微观结构快照：杠杆/广度/情绪/估值温度；或 R5 行业景气状态卡")
     pms.add_argument("--days", type=int, default=5, help="趋势表周期（默认 5 天）")
     pms.add_argument("--json", action="store_true", help="输出原始 JSON")
     pms.add_argument("--save", action="store_true", help="采集并保存当日快照（非交易时段跳过）")
+    pms.add_argument("--industry", type=str, default="", metavar="SW_NAME",
+                     help="R5 行业景气状态卡：指定申万一级行业名（如 半导体/消费/钢铁），输出五维状态卡")
 
     pef = sub.add_parser("etf-flow", help="ETF 份额变化趋势（需先 --save 积累历史）")
     pef.add_argument("symbol", help="6 位 ETF 代码（如 588000）")
@@ -1986,13 +1988,26 @@ def cmd_value(args: argparse.Namespace) -> int:
 
 
 def cmd_market_status(args: argparse.Namespace) -> int:
-    """市场微观结构快照：杠杆/广度/情绪/估值温度。
+    """市场微观结构快照：杠杆/广度/情绪/估值温度；或 R5 行业景气状态卡（--industry）。
 
     --save  采集并保存当日快照
     --days  趋势表周期（默认 5 天）
     --json  输出原始 JSON
+    --industry  输出行业景气状态卡（独立输出，不进入 snapshot 流程）
     """
     import json as _json
+    if getattr(args, "industry", ""):
+        try:
+            from lib.climate import build_industry_climate, format_climate_card
+            card = build_industry_climate(args.industry)
+            if args.json:
+                print(_json.dumps(card, ensure_ascii=False, indent=2, default=str))
+                return 0
+            print(format_climate_card(card))
+            return 0
+        except Exception as exc:
+            print(f"⚠️ 行业景气状态卡失败: {exc}", file=sys.stderr)
+            return 1
     try:
         from market_microstructure import snapshot, save_snapshot, latest_snapshot, load_history
     except ImportError:
