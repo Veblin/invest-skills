@@ -86,7 +86,7 @@ def collect_financials(symbol: str) -> dict:
         query_params={
             "tushare.fina_indicator": _qp_tushare(
                 "fina_indicator", symbol,
-                start_date=_days_ago(730), end_date=_today()),
+                start_date=_days_ago(1460), end_date=_today()),  # ≥3 年报（R1 需）
             "akshare.stock_financial_abstract_ths": _qp_akshare(
                 "stock_financial_abstract_ths", symbol, indicator="按报告期"),
         },

@@ -165,7 +165,9 @@ def _merge_balancesheet_into_financials(
 def _q_tushare_financials(symbol: str) -> list[dict] | None:
     config, tc = _require_tushare()
     ts = _ts_code(symbol)
-    lookback = _days_ago(730)
+    # R1 验收修正（C12）：730 自然日仅约 2 个年报期，classify 需 ≥3 个年报 →
+    # 扩窗至 1460 自然日（4 年），R1 收益驱动假设在实时路径可渲染
+    lookback = _days_ago(1460)
     end = _today()
     df = tc.query(
         "fina_indicator", ts_code=ts,

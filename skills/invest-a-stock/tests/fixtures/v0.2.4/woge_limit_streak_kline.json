@@ -1,0 +1,254 @@
+[
+ {
+  "trade_date": "2026-07-01",
+  "open": 20.0,
+  "high": 20.4,
+  "low": 19.8,
+  "close": 20.2,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-02",
+  "open": 20.2,
+  "high": 20.6,
+  "low": 19.99,
+  "close": 20.4,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-03",
+  "open": 20.39,
+  "high": 20.81,
+  "low": 20.19,
+  "close": 20.6,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-04",
+  "open": 20.6,
+  "high": 21.02,
+  "low": 20.39,
+  "close": 20.81,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-05",
+  "open": 20.81,
+  "high": 21.23,
+  "low": 20.6,
+  "close": 21.02,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-06",
+  "open": 21.02,
+  "high": 21.44,
+  "low": 20.81,
+  "close": 21.23,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-07",
+  "open": 21.23,
+  "high": 21.65,
+  "low": 21.01,
+  "close": 21.44,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-08",
+  "open": 21.43,
+  "high": 21.87,
+  "low": 21.22,
+  "close": 21.65,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-09",
+  "open": 21.65,
+  "high": 22.09,
+  "low": 21.43,
+  "close": 21.87,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-10",
+  "open": 21.87,
+  "high": 22.31,
+  "low": 21.65,
+  "close": 22.09,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-11",
+  "open": 22.09,
+  "high": 22.53,
+  "low": 21.86,
+  "close": 22.31,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-12",
+  "open": 22.3,
+  "high": 22.76,
+  "low": 22.08,
+  "close": 22.53,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-13",
+  "open": 22.53,
+  "high": 22.99,
+  "low": 22.3,
+  "close": 22.76,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-14",
+  "open": 22.76,
+  "high": 23.22,
+  "low": 22.53,
+  "close": 22.99,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-15",
+  "open": 22.99,
+  "high": 23.45,
+  "low": 22.76,
+  "close": 23.22,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-16",
+  "open": 23.22,
+  "high": 23.68,
+  "low": 22.98,
+  "close": 23.45,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-17",
+  "open": 23.44,
+  "high": 23.92,
+  "low": 23.21,
+  "close": 23.68,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-18",
+  "open": 23.68,
+  "high": 24.16,
+  "low": 23.44,
+  "close": 23.92,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-19",
+  "open": 23.92,
+  "high": 24.4,
+  "low": 23.68,
+  "close": 24.16,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-20",
+  "open": 24.16,
+  "high": 24.64,
+  "low": 23.91,
+  "close": 24.4,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-21",
+  "open": 24.39,
+  "high": 24.89,
+  "low": 24.15,
+  "close": 24.64,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-22",
+  "open": 24.64,
+  "high": 25.14,
+  "low": 24.39,
+  "close": 24.89,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-07-23",
+  "open": 22.18,
+  "high": 22.62,
+  "low": 21.95,
+  "close": 22.4,
+  "vol": 1000000,
+  "change_pct": -10.0
+ },
+ {
+  "trade_date": "2026-07-24",
+  "open": 19.96,
+  "high": 20.36,
+  "low": 19.76,
+  "close": 20.16,
+  "vol": 1000000,
+  "change_pct": -10.0
+ },
+ {
+  "trade_date": "2026-07-25",
+  "open": 17.96,
+  "high": 18.32,
+  "low": 17.78,
+  "close": 18.14,
+  "vol": 1000000,
+  "change_pct": -10.0
+ },
+ {
+  "trade_date": "2026-07-26",
+  "open": 19.75,
+  "high": 20.15,
+  "low": 19.55,
+  "close": 19.95,
+  "vol": 1000000,
+  "change_pct": 10.0
+ },
+ {
+  "trade_date": "2026-07-27",
+  "open": 21.73,
+  "high": 22.17,
+  "low": 21.51,
+  "close": 21.95,
+  "vol": 1000000,
+  "change_pct": 10.0
+ },
+ {
+  "trade_date": "2026-07-28",
+  "open": 23.9,
+  "high": 24.38,
+  "low": 23.66,
+  "close": 24.14,
+  "vol": 1000000,
+  "change_pct": 10.0
+ }
+]

@@ -124,13 +124,25 @@ def _extract_scalar(data: Any, dimension: str = "") -> float | None:
     return None
 
 
-def _has_any_key(data: Any, keys: tuple[str, ...]) -> bool:
-    """data（dict 或 list[dict]）是否含 keys 中任一字段（R12h L2 白名单判定）。"""
+def _extract_l2_scalar(data: Any, keys: tuple[str, ...]) -> float | None:
+    """按 L2 白名单字段提取标量（dict 或 list[dict]，取最新行）。
+
+    与 _extract_scalar 的区别：只认白名单字段，避免非白名单字段（如 pe_ttm）优先命中。
+    """
     if isinstance(data, dict):
-        return any(k in data for k in keys)
-    if isinstance(data, list):
-        return any(isinstance(r, dict) and any(k in r for k in keys) for r in data)
-    return False
+        for key in keys:
+            v = _numeric_scalar(data.get(key))
+            if v is not None and _scalar_key_usable(key, v):
+                return v
+    elif isinstance(data, list):
+        for r in reversed(data):
+            if not isinstance(r, dict):
+                continue
+            for key in keys:
+                v = _numeric_scalar(r.get(key))
+                if v is not None and _scalar_key_usable(key, v):
+                    return v
+    return None
 
 
 def relative_diff_pct(max_v: float, min_v: float, avg: float) -> float | None:
@@ -328,15 +340,18 @@ def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossVa
     for s in sources:
         if s.data is None:
             continue
-        v = _extract_scalar(s.data, dimension)
-        if v is None:
+        raw = _numeric_scalar(s.data)
+        if raw is not None:
+            # raw scalar 无字段语义，保留参与（测试与构造输入）
+            values.append((s.source, raw))
             continue
-        # 字段级白名单：raw scalar 无字段语义保留；dict/list 数据须命中 L2 字段
-        if _numeric_scalar(s.data) is None:
-            keys = _CV_L2_FIELDS.get(dimension)
-            if not keys or not _has_any_key(s.data, keys):
-                continue
-        values.append((s.source, v))
+        # dict/list 数据：仅按 L2 白名单字段提取（避免 pe_ttm 优先于 total_mv 的错配）
+        keys = _CV_L2_FIELDS.get(dimension)
+        if not keys:
+            continue
+        v = _extract_l2_scalar(s.data, keys)
+        if v is not None:
+            values.append((s.source, v))
     if len(values) < 2:
         return None
 
