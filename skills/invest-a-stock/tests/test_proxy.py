@@ -227,6 +227,32 @@ class TestProxyDetection:
         assert errors == []
         assert os.environ.get("HTTP_PROXY") == "http://test-proxy:8080"
 
+    def test_direct_scope_restores_env_when_requests_exit_fails(self, monkeypatch):
+        """C1: _requests_direct_exit 抛错时 finally 仍恢复代理环境变量。
+
+        回归：proxy.py 未定义 logger 时，except 分支的 logger.warning 抛 NameError，
+        _env_bypass_exit() 被跳过 → HTTP_PROXY/HTTPS_PROXY 进程内不再恢复。
+        """
+        from lib import proxy as proxy_mod
+        from lib.proxy import _direct_scope
+
+        monkeypatch.setenv("HTTP_PROXY", "http://test-proxy:8080")
+        monkeypatch.setenv("ALL_PROXY", "http://test-proxy:8080")
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        def _boom() -> None:
+            raise RuntimeError("simulated _requests_direct_exit failure")
+
+        monkeypatch.setattr(proxy_mod, "_requests_direct_exit", _boom)
+        with _direct_scope(patch_requests=True):  # 不得传播 NameError/RuntimeError
+            assert os.environ.get("HTTP_PROXY") is None
+        # 异常被记录后，_env_bypass_exit() 仍必须执行并恢复环境变量
+        assert os.environ.get("HTTP_PROXY") == "http://test-proxy:8080"
+        assert os.environ.get("ALL_PROXY") == "http://test-proxy:8080"
+        # monkeypatched _requests_direct_exit 未递减引用计数 → 复位深度避免污染后续用例
+        # （真实实现先递减再抛错，异常路径深度恒为 0，无需此补偿）
+        proxy_mod._requests_direct_depth = 0
+
     def test_warn_if_proxy_detected_prints_once(self, monkeypatch, capsys):
         from lib import proxy as proxy_mod
         from lib.proxy import warn_if_proxy_detected

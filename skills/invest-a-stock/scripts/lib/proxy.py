@@ -7,6 +7,7 @@ akshare 东方财富接口使用 akshare_direct_session() 强制直连。
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
@@ -20,6 +21,8 @@ import requests
 
 from .shared_dates import shanghai_now
 import requests.utils as ru
+
+logger = logging.getLogger(__name__)
 
 # 东方财富 API 封锁/阻断标识（共享给 collector / render / schema）。
 EASTMONEY_BLOCKED_KEYWORDS = (

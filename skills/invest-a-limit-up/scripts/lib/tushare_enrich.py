@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
@@ -54,7 +55,8 @@ def _get_client() -> TushareClient | None:
 def get_trade_dates(n: int) -> list[str]:
     """获取最近 N 个交易日（YYYYMMDD 降序）。
 
-    Tushare trade_cal 优先，降级到 n*1.4 自然日覆盖。
+    Tushare trade_cal 优先；降级到自然日去周末（节假日无法由日期推断，
+    属已知近似——避免把周末当交易日污染广度统计）。
     """
     client = _get_client()
     if client:
@@ -74,11 +76,32 @@ def get_trade_dates(n: int) -> list[str]:
                 if open_days:
                     return [str(d) for d in open_days[:n]]
         except Exception as e:
-            logger.warning("Tushare trade_cal 失败: %s，降级到自然日覆盖", e)
+            logger.warning("Tushare trade_cal 失败: %s，降级到自然日去周末", e)
 
-    # 降级：自然日覆盖
-    count = max(int(n * 1.4), 1)
-    return [shanghai_days_ago(i) for i in range(count)]
+    return _fallback_weekdays(n)
+
+
+def _fallback_weekdays(n: int) -> list[str]:
+    """无 token 兜底：自然日去周末，返回恰好 n 个工作日（YYYYMMDD 降序）。
+
+    工作日约占自然日 5/7 → 用 1.6 倍 + 余量窗口采样，保证取满 n 个。
+    节假日仍混入（日期本身无法推断），属已知近似。
+    """
+    span = max(int(n * 1.6) + 3, 10)
+    out: list[str] = []
+    for i in range(span):
+        d = shanghai_days_ago(i)
+        if _is_weekend(d):
+            continue
+        out.append(d)
+        if len(out) >= n:
+            break
+    return out
+
+
+def _is_weekend(yyyymmdd: str) -> bool:
+    """周六/周日返回 True（无依赖的周末判定）。"""
+    return datetime.strptime(yyyymmdd, "%Y%m%d").weekday() >= 5
 
 
 def enrich_stock_info(symbols: list[str]) -> dict[str, dict]:

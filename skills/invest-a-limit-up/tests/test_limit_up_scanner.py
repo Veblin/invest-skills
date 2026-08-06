@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from limit_up_scanner import (
@@ -1021,6 +1022,14 @@ class TestTushareEnrichDegradation:
         for d in dates:
             assert len(d) == 8
             assert d.isdigit()
+
+    def test_get_trade_dates_fallback_excludes_weekends(self):
+        """C2: 无 token 兜底只返回交易日——不得含周六/周日（周末当交易日污染广度统计）。"""
+        with patch("tushare_enrich._get_client", return_value=None):
+            dates = get_trade_dates(30)
+        assert len(dates) == 30
+        for d in dates:
+            assert datetime.strptime(d, "%Y%m%d").weekday() < 5, d
 
     def test_enrich_stock_info_no_tushare_token(self):
         """When _get_client returns None, enrich_stock_info returns {}."""
