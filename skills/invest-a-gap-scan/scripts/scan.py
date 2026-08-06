@@ -472,6 +472,9 @@ def _run_scan(
         params,
         trade_cal=trade_dates,
         already_qfq=already_qfq,
+        # 收盘后（上海时间 ≥15:00）日线 bar 完整：最新 bar 缺口 low>gap_high
+        # 可直接确认未回补，不再标 GAP_UNCONFIRMED 假阴性
+        after_close=shanghai_now().hour >= 15,
     )
 
     elapsed = time.time() - start_wall

@@ -121,11 +121,11 @@ class TestDetectSuspensions:
         result = detect_suspensions(universe, daily, trade_cal, list_dates=list_dates)
         assert result == {}
 
-        # Without list_dates, pre-appearance calendar days are suspensions
+        # Without list_dates: 10-13 are absent from daily_by_date entirely
+        # (no daily row at all → 整批拉取失败的数据缺口，非停牌；旧行为把
+        # 键缺失日标为全池停牌，被数据缺口日判定修复)
         result_no_list = detect_suspensions(universe, daily, trade_cal)
-        assert result_no_list == {
-            "A": ["20260710", "20260711", "20260712", "20260713"],
-        }
+        assert result_no_list == {}
 
     def test_subset_of_universe_in_daily(self, trade_cal):
         """Only some stocks in daily data → others flagged as suspended on all dates
@@ -300,11 +300,12 @@ class TestFallbackCalendarIntegration:
         ]
 
     def test_fallback_cal_pollutes_suspension_without_guard(self, fallback_trade_cal):
-        """Without is_estimated guard: weekends flagged as suspension for all stocks.
+        """键缺失日（fallback 日历的周末/节假日）不再判为停牌。
 
-        This test documents the OLD behavior — weekends/holidays from the
-        fallback calendar are NOT in daily_by_date, so detect_suspensions
-        flags every appeared stock as "suspended" on those dates.
+        Weekends/holidays from the fallback calendar are NOT in
+        daily_by_date (no daily rows at all → 数据缺口，等价于整批拉取
+        失败）。数据缺口日判定在函数层修复了 T1 的误标问题——不再依赖
+        调用方 is_estimated 守卫。
         """
         universe = ["A", "B"]
         daily = {
@@ -316,11 +317,8 @@ class TestFallbackCalendarIntegration:
         }
         # Weekends 11/12 are in fallback_trade_cal but NOT in daily
         result = detect_suspensions(universe, daily, fallback_trade_cal)
-        # OLD behavior: A and B flagged as suspended on 11, 12
-        assert "A" in result
-        assert "20260711" in result["A"]
-        assert "20260712" in result["A"]
-        # This is the bug T1 fixes — is_estimated guard skips detection entirely
+        # 数据缺口日判定：11/12 无任何日线行 → 不判停牌（旧行为：全池标停牌）
+        assert result == {}
 
     def test_empty_suspension_when_cal_is_estimated(self):
         """When cal_is_estimated=True, suspension_map should be empty (T1 fix).

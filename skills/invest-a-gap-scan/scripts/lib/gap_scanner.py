@@ -247,22 +247,33 @@ def _check_ma60_streak(closes: list[float], ma60: list[float | None],
             valid_count += 1
             if not (closes[t] >= m or math.isclose(closes[t], m, rel_tol=1e-5, abs_tol=0.01)):
                 return False
-    if total_count > 0 and valid_count / total_count < min_valid_ratio:
+    # 仅 gap bar 自身（无后续数据）：强度验证无意义，放行交由调用方的
+    # GAP_UNCONFIRMED / after_close 分支决定（不被绝对下限误拒）
+    if total_count == 1:
+        return True
+    # 绝对下限（防短历史标的比例被稀释）：MA60 从 bar 59 起有效，61-bar
+    # 标的前期缺口只有 1-2 个真实 MA60 值，比例 50% 仍过 25% 门槛 ——
+    # 需要同时满足 min_valid_ratio 比例与至少 3 个有效 bar。
+    min_valid_bars = max(3, math.ceil(total_count * min_valid_ratio))
+    if total_count > 0 and valid_count < min_valid_bars:
         return False  # too few valid MA60 bars for a meaningful check
     return True
 
 
 def _check_unfilled(lows: list[float], gap_idx: int,
-                    gap_high: float) -> bool:
+                    gap_high: float, after_close: bool = False) -> bool:
     """Return True if the gap has never been filled (partially or fully).
 
     A gap is unfilled when ``min(low[gap_idx+1:]) > gap_high``
     (touching the upper edge counts as filled).
-    最新 bar（gap_idx == len(lows)-1，无后续数据）无法确认回补状态：
-    恒返回 False——避免盘中扫描把最新 bar 跳空误报为「未回补」命中
-    （由调用方以 GAP_UNCONFIRMED 区分「待收盘确认」与「已回补」）。
+    最新 bar（gap_idx == len(lows)-1，无后续数据）：盘中无法确认回补，
+    恒返回 False（由调用方以 GAP_UNCONFIRMED 区分「待收盘确认」与
+    「已回补」）；收盘后（after_close=True）日线 bar 完整，
+    ``low[gap_idx] > gap_high`` 即证明缺口未回补。
     """
     if gap_idx >= len(lows) - 1:
+        if after_close:
+            return lows[gap_idx] > gap_high
         return False
     return min(lows[gap_idx + 1:]) > gap_high
 
@@ -324,6 +335,7 @@ def _scan_stock(
     suspension_map: dict[str, list[str]],
     params: dict,
     trade_cal: list[str] | None,
+    after_close: bool = False,
 ) -> tuple[ScanHit | None, ExcludeReason | None, NonHitReason | None]:
     """Scan a single stock for qualifying gaps.
 
@@ -395,12 +407,13 @@ def _scan_stock(
 
         # 最新 bar 的跳空无后续数据：盘中无法确认是否回补——不判 unfilled
         # （否则最新 bar 跳空恒为「未回补」→ 恒命中），标「待收盘确认」
-        # 并回退到更早的已确认缺口。
-        if gap_idx >= len(lows) - 1:
+        # 并回退到更早的已确认缺口。收盘后（after_close）日线完整，
+        # low > gap_high 已证明未回补，直接放行。
+        if gap_idx >= len(lows) - 1 and not after_close:
             any_unconfirmed = True
             continue
 
-        if not _check_unfilled(lows, gap_idx, gap.gap_high):
+        if not _check_unfilled(lows, gap_idx, gap.gap_high, after_close=after_close):
             continue  # filled — try older gap (never promote filled+across to hit)
 
         any_unfilled = True
@@ -476,6 +489,7 @@ def scan_all(
     params: dict,
     trade_cal: list[str] | None = None,
     already_qfq: bool = False,
+    after_close: bool = False,
 ) -> ScanResult:
     """Run gap scan over the full universe.
 
@@ -570,6 +584,7 @@ def scan_all(
         try:
             hit, excl_reason, non_reason = _scan_stock(
                 stock, kline, suspension_map, params, trade_cal,
+                after_close=after_close,
             )
         except Exception:
             # 逐股隔离防整池中断，但异常需带追溯栈（不静默掩盖代码缺陷）

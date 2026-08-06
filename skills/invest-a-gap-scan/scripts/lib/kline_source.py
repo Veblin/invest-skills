@@ -730,6 +730,15 @@ def build_stock_kline(
         # Prices are already qfq-adjusted; copy to *_qfq columns
         for col in price_cols:
             stock_df[f"{col}_qfq"] = stock_df[col]
+        # NaN 校验（对齐 apply_qfq 的整股排除语义）：baostock 空字段经
+        # to_numeric(errors='coerce') 变 NaN，会以 NaN（非 None）穿透 sma()
+        # → 每缺口 MA60_BROKEN / 均量 NaN → 整池 0 hits；必须整股跳过
+        for col in price_cols:
+            if stock_df[f"{col}_qfq"].isna().any():
+                logger.warning(
+                    "build_stock_kline for %s: NaN in %s (skipping)", ts_code, col,
+                )
+                return None
     else:
         # Need adj_factor
         if adj_factor_df is None:
