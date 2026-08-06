@@ -292,6 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
+    pr.add_argument("--plan", default="", help="JSON 采集计划文件路径")
+    pr.add_argument("--mode", default="full", choices=["brief", "full", "concise"],
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pr.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")

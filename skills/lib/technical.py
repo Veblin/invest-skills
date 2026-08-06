@@ -1030,7 +1030,7 @@ def detect_limit_streaks(
         "streaks": streaks,
         "recent_limit_ups": len(ups),
         "recent_limit_downs": len(downs),
-        "window_pct": round((closes[-1] / closes[0] - 1) * 100, 2),
+        "window_pct": round((closes[-1] / closes[0] - 1) * 100, 2) if closes[0] else None,
         "period_high": {"value": round(hi, 2), "date": dates[closes.index(hi)]},
         "period_low": {"value": round(lo, 2), "date": dates[closes.index(lo)]},
         "lookback": len(window),

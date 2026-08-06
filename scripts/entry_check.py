@@ -133,7 +133,7 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
 
     # RSI(6) — 共享引擎 Wilder 平滑（全涨 RSI=100 / 全跌 RSI=0，不丢超买信号）
     rsi6_list = rsi_series(closes_list, 6)
-    rsi_last = rsi6_list[-1] if rsi6_list else None
+    rsi_last = _safe_float(rsi6_list[-1], None) if rsi6_list else None
     rsi_val = float(rsi_last) if rsi_last is not None else 50
     info["rsi6"] = round(rsi_val, 1)
 
@@ -154,7 +154,7 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
 
     # MA 偏离 — 共享引擎 sma
     ma20_list = sma(closes_list, 20)
-    ma20 = ma20_list[-1] if ma20_list else None
+    ma20 = _safe_float(ma20_list[-1], None) if ma20_list else None
     if ma20 is not None:
         dev = (latest / ma20 - 1) * 100
         info["ma20_dev"] = f"{dev:+.1f}%"

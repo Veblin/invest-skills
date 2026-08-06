@@ -1065,9 +1065,11 @@ def multi_scenario_valuation(
     def _calc_methods(
         eps_fwd: float, pe_mult: float, pb_mult: float, g_assume: float,
     ) -> dict:
-        price_pe = round(eps_fwd * pe_mult, 2)
+        # 亏损期（eps_fwd<=0）：PE 法/盈利收益法无意义，仅 PB 法产出；
+        # 负价格区间会误导"综合区间/处于中性偏低"判断
+        price_pe = round(eps_fwd * pe_mult, 2) if eps_fwd > 0 else None
         price_pb = round(bvps * pb_mult, 2)
-        if r > g_assume:
+        if eps_fwd > 0 and r > g_assume:
             fair_pe_ey = 1.0 / (r - g_assume)
             price_ey = round(eps_fwd * fair_pe_ey, 2)
         else:
@@ -1591,13 +1593,16 @@ def format_output(result: ValuationResult) -> str:
             m = cfg["methods"]
             lines.append(f"  ┌─ {cfg['label']}情景（概率 {cfg['probability']}）")
             lines.append(f"  │  假设前瞻 EPS: {cfg['eps_forward']:.4f} 元/股")
-            lines.append(f"  │  PE 法 ({m['pe_multiple']:.1f}x):         {m['price_pe']:.2f} 元")
+            pe_price_s = (f"{m['price_pe']:.2f} 元" if m["price_pe"] is not None
+                          else "N/A (亏损期)")
+            lines.append(f"  │  PE 法 ({m['pe_multiple']:.1f}x):         {pe_price_s}")
             lines.append(f"  │  PB 法 ({m['pb_multiple']:.2f}x):         {m['price_pb']:.2f} 元")
             pey = m.get("price_earnings_yield", "∞")
             if isinstance(pey, (int, float)) and pey < 99999:
                 lines.append(f"  │  盈利收益法 (PE={m.get('fair_pe_ey', '?')}x): {pey:.2f} 元")
             else:
-                lines.append(f"  │  盈利收益法: N/A (g≥r)")
+                why = "亏损期" if m["price_pe"] is None else "g≥r"
+                lines.append(f"  │  盈利收益法: N/A ({why})")
             prices_valid = [
                 p for p in [m["price_pe"], m["price_pb"], pey]
                 if isinstance(p, (int, float)) and p < 99999
