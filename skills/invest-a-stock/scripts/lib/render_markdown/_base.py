@@ -136,7 +136,9 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
 
     lines.extend(_render_income_driver(collection))
     lines.extend(_render_success_factors(collection))
+    lines.extend(_render_ma_system(collection))
     lines.extend(_render_price_structure(collection))
+    lines.extend(_render_limit_streak_structure(collection))
 
     fusion = collection.get("fusion") or {}
     if fusion:
@@ -246,6 +248,81 @@ def _render_success_factors(collection: dict[str, Any]) -> list[str]:
         data_part = " · ".join(vals) if vals else "需 AI 补查（引擎外字段）"
         lines.append(f"- {i}. {q}")
         lines.append(f"  - 数据: {data_part} [来源: {' / '.join(src)}]")
+    return lines
+
+
+# --- _render_ma_system (R12g-A) ---
+def _render_ma_system(collection: dict[str, Any]) -> list[str]:
+    """R12g-A: 均线系统表（MA5/10/20/60 值 + 现价位置 + 排列标签）。
+
+    复用 technical.compute 的 _ma_alignment（periods=(5,10,20,60)），纯本地计算。
+    kline 样本不足 → 不渲染。
+    """
+    dims = _index_dims(collection)
+    kline = _get_dim_data(dims, "kline")
+    if not isinstance(kline, list) or len(kline) < 5:
+        return []
+    try:
+        from lib.technical import compute
+        tech = compute(kline)
+        t = (tech.get("trend") or {})
+    except Exception:
+        return []
+    closes = tech.get("latest_close")
+    ma = t.get("ma") or {}
+    latest = {}
+    for p in ("5", "10", "20", "60"):
+        vals = ma.get(p) or []
+        latest[p] = vals[-1] if vals and vals[-1] is not None else None
+    parts = []
+    for p in ("5", "10", "20", "60"):
+        v = latest.get(p)
+        if v is None:
+            parts.append(f"MA{p}: —")
+            continue
+        pos = "（现价上方）" if closes >= v else "（现价下方）"
+        parts.append(f"MA{p}={v:.2f}{pos}")
+    label = (t.get("alignment") or {}).get("trend_label", "—")
+    if closes is not None:
+        parts.append(f"现价 {closes:.2f}")
+    lines = ["**[均线系统表（R12g）]** " + " · ".join(parts)]
+    lines.append(f"  排列: {label} [来源: kline derived（technical.compute）]")
+    return lines
+
+
+# --- _render_limit_streak_structure (R12g-A) ---
+def _render_limit_streak_structure(collection: dict[str, Any]) -> list[str]:
+    """R12g-A: 连板结构六步（仅触发时渲染；数据由 lhb/zt_pool 维度提供）。
+
+    已有数据可交付 = 情绪周期 / 梯队 / 龙虎榜席位 / 证伪条件（引擎渲染，AI 只做合成引用）；
+    待数据源验证 = 筹码、题材纯度 → 强制「不可得 + attempted sources」，AI 不得补全。
+    """
+    dims = _index_dims(collection)
+    zt = _get_dim_data(dims, "zt_pool")
+    lhb = _get_dim_data(dims, "lhb")
+    if not isinstance(zt, dict) and not isinstance(lhb, dict):
+        return []
+    lines = ["**[连板结构（R12g）]**（近 5 日 ≥2 涨停触发）"]
+    if isinstance(zt, dict) and zt.get("total"):
+        dist = zt.get("board_dist") or {}
+        dist_s = "、".join(f"{k}板{x}家" for k, x in sorted(dist.items()))
+        lines.append(f"- 情绪周期: 涨停 {zt['total']} 家（{zt.get('date')}）· "
+                     f"最高 {zt.get('max_board')} 板 · {dist_s} [来源: stock_zt_pool_em]")
+        lines.append(f"- 梯队: 最高连板 {zt['max_board']} 板（当日连板高度分层；题材归属由 AI 合成引用）")
+    else:
+        lines.append("- 情绪周期: 数据不可得 [来源: stock_zt_pool_em]")
+        lines.append("- 梯队: 数据不可得 [来源: stock_zt_pool_em]")
+    if isinstance(lhb, dict) and (lhb.get("seats") or {}).get("has_seats"):
+        seats = lhb["seats"]
+        buys = "、".join(str(r.get("交易营业部名称", "?")) for r in seats.get("top_buy", [])[:3])
+        lines.append(f"- 龙虎榜席位: 买入榜 {buys} [来源: stock_lhb_stock_detail_em]")
+    else:
+        lines.append("- 龙虎榜席位: 未上榜或席位不可得（连板 ≠ 必然上榜）——"
+                     "降级用资金流三日结构替代 [来源: stock_lhb_detail_em/sina + stock_fund_flow_industry]")
+    lines.append("- 证伪条件: 涨停次日不延续（连板断板/跌停）→ 情绪退潮；"
+                 "席位纯游资接力无机构 → 高度有限；资金流三日转净流出 → 退潮信号")
+    lines.append("- 筹码: 不可得 + attempted sources: [未定义数据源——待数据源验证后补充]")
+    lines.append("- 题材纯度: 不可得 + attempted sources: [未定义数据源——待数据源验证后补充]")
     return lines
 
 

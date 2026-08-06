@@ -624,6 +624,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         }
     except Exception:  # 装配失败不阻断报告
         result["success_factors"] = {"industry": "", "covered": False, "factors": []}
+    # R12g-A: 连板触发 → 龙虎榜/涨停池采集（仅触发时执行，未触发零额外网络调用）
+    try:
+        from lib.lhb import attach_limit_streak_dims
+        if attach_limit_streak_dims(result, args.symbol):
+            print("⚡ 近 5 日 ≥2 涨停，已附加连板结构数据（龙虎榜/涨停池）", file=sys.stderr)
+    except Exception:  # 采集失败不阻断报告
+        pass
     if getattr(args, "strict_rigor", False):
         result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)
