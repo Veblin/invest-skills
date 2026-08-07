@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from lib.nums import safe_float  # noqa: E402 — canonical（None/NaN/±inf → None）
+
 
 # ---- 内部辅助 ----
 
@@ -417,6 +419,8 @@ def _volume_ratio(vols: list[float], n: int = 5) -> list[float | None]:
 
 def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
     """N 日极值（最高/最低收盘价和日期）。"""
+    # 同 compute()：close None/NaN 行剔除（review #10 第二轮）
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
     closes = [r.get("close", 0) or 0 for r in rows]
     dates = [r.get("trade_date", "") for r in rows]
 
@@ -503,6 +507,11 @@ def compute(rows: list[dict]) -> dict[str, Any]:
         return {"error": "empty_kline_data", "message": "K 线数据为空，无法计算技术指标"}
 
     rows = sort_kline_asc(rows)
+    # close 为 None/NaN（停牌残留 bar/空值填充行）→ 整行剔除，不得 `or 0`
+    # 转 0.0 污染均线/RSI/MACD/BOLL 与 latest_close（review #10 第二轮）
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
+    if not rows:
+        return {"error": "empty_kline_data", "message": "K 线数据为空，无法计算技术指标"}
 
     closes = [r.get("close", 0) or 0 for r in rows]
     highs = [r.get("high", 0) or 0 for r in rows]
@@ -917,15 +926,18 @@ def limit_pct_for_symbol(symbol: str, name: str | None = None) -> float:
     全仓涨跌停阈值表的唯一权威（跨 skill 共享）：gap_scanner 等模块按板块
     推导的阈值一律调用本函数，不得另维护一份前缀表（曾与
     skills/invest-a-gap-scan 的 _max_gap_pct_for_code 发生两份表分歧）。
-    ST/*ST 股涨跌停 5%：需要名称信息，调用方显式传 name 参数
-    （kline 行无 name 字段时拿不到 → 按板块阈值兜底）。
+    ST/*ST 股涨跌停 5% **仅限主板**（法定）：创业板/科创板/北交所 ST 的
+    涨跌幅仍为 20%/20%/30%（2020-08-24 注册制后创业板 ST 无 5% 限制）——
+    ST 规则放在板块判断之后作为主板兜底（review #13 第二轮）。需要名称
+    信息，调用方显式传 name 参数（kline 行无 name 字段时拿不到 → 按板块
+    阈值兜底）。
     """
-    if name and "ST" in str(name).upper():
-        return 5.0
     if symbol.startswith(("30", "68")):
         return 20.0
     if symbol.startswith(("4", "8", "920")):
         return 30.0
+    if name and "ST" in str(name).upper():
+        return 5.0
     return 10.0
 
 

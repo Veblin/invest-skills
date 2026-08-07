@@ -283,3 +283,81 @@ class TestReportAutoStore:
         hist = isolated_store.load_macro_history(7)
         assert len(hist) == 1
         assert hist[0]["vix"] == 18.5
+
+
+class TestWatchlistAllFailedGuard:
+    """review #5（第二轮）：watchlist 现场采集全维度失败 → 不落库。"""
+
+    def test_all_failed_not_stored(self, isolated_store, monkeypatch):
+        import invest
+
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(invest, "store_mod", isolated_store)
+        monkeypatch.setattr(invest.collector, "collect_all",
+                            lambda *a, **k: _fake_result(ok=False))
+
+        result = invest._watchlist_get_result("600176")
+        assert result["summary"]["sources_responded"] == 0
+        assert len(isolated_store.list_collections(symbol="600176")) == 0
+
+    def test_ok_result_stored(self, isolated_store, monkeypatch):
+        import invest
+
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(invest, "store_mod", isolated_store)
+        monkeypatch.setattr(invest.collector, "collect_all",
+                            lambda *a, **k: _fake_result())
+
+        invest._watchlist_get_result("600176")
+        assert len(isolated_store.list_collections(symbol="600176")) == 1
+
+
+class TestSnapshotKindDiff:
+    """review #9（第二轮）：collections.kind 区分 collect/report，
+    diff 自动配对优先 collect；报告 diff 跳过同会话（同 fetched_at）行。"""
+
+    def test_get_latest_two_prefers_collect_kind(self, isolated_store):
+        s1 = _fake_result(symbol="600176")
+        s1["fetched_at"] = "2026-08-01T00:00:00+00:00"
+        rpt = _fake_result(symbol="600176")  # 同会话 report（夹在两次 collect 之间）
+        rpt["fetched_at"] = "2026-08-07T09:05:00+00:00"
+        s2 = _fake_result(symbol="600176")
+        s2["fetched_at"] = "2026-08-07T09:00:00+00:00"
+
+        isolated_store.save_collection(s1)
+        isolated_store.save_collection(rpt, kind="report")
+        isolated_store.save_collection(s2)
+
+        pair = isolated_store.get_latest_two("600176")
+        assert pair is not None
+        older, newer = pair
+        assert older["fetched_at"] == "2026-08-01T00:00:00+00:00"
+        assert newer["fetched_at"] == "2026-08-07T09:00:00+00:00"
+
+    def test_report_rows_are_kind_marked(self, isolated_store, monkeypatch):
+        """report 快照以 kind='report' 落库（render→save 顺序测试的扩展）。"""
+        import invest
+
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(invest, "store_mod", isolated_store)
+        monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
+        monkeypatch.setattr(invest.render, "render", lambda *a, **k: "ok")
+
+        assert invest.cmd_report(_report_args()) == 0
+        rows = isolated_store.list_collections(symbol="600176")
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "report"
+
+    def test_load_key_diff_skips_same_session_row(self, isolated_store):
+        """报告模块 1 的 diff 跳过同 fetched_at 的同会话行，比较上次会话。"""
+        s1 = _phase4_collection("600176", "2026-08-01T00:00:00Z")
+        same_session = _phase4_collection("600176", "2026-08-07T00:00:00Z")
+        current = _phase4_collection(
+            "600176", "2026-08-07T00:00:00Z", latest_roe=22.0)
+
+        isolated_store.save_collection(same_session)  # 同会话行（同 fetched_at）
+        isolated_store.save_collection(s1)
+
+        diff = isolated_store.load_key_diff_vs_stored("600176", current)
+        assert diff is not None
+        assert diff.get("old_at", "").startswith("2026-08-01")  # 与上次会话比较

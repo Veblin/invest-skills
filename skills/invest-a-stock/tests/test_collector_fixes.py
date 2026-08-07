@@ -308,6 +308,35 @@ class TestManagementHoldRunCache:
         fn("600176")
         assert calls["n"] == 4  # 跨日重建
 
+    def test_timeout_not_cached_next_symbol_retries(self, monkeypatch):
+        """review #14（第二轮）：超时/异常结果（None）不落缓存——
+        否则整个 run 其余 symbol 复用 None（该方向数据全缺失且不重试）。"""
+        from lib.collector import _orchestrate as orch
+
+        calls = {"n": 0}
+        fn = self._install(monkeypatch, self._hold_df(), calls)
+        # 第一次调用：增持方向超时 → None；减持正常
+        def fake_cninfo_timeout(symbol):
+            calls["n"] += 1
+            if symbol == "增持" and calls.get("timeout_done"):
+                return self._hold_df()
+            if symbol == "增持":
+                calls["timeout_done"] = True
+                return None
+            return self._hold_df()
+
+        monkeypatch.setattr("akshare.stock_hold_management_detail_cninfo",
+                            fake_cninfo_timeout)
+
+        r1 = fn("600176")  # 增持超时跳过，减持正常
+        assert r1 is not None
+        assert calls["n"] == 2
+        # 缓存中不含增持方向（None 未落缓存）→ 第二次调用重试
+        assert "增持" not in orch._cninfo_hold_cache
+        r2 = fn("600176")
+        assert calls["n"] == 3  # 只重试增持方向
+        assert r2 is not None
+
 
 # ---------- 缺陷 5：cascade 单源 deadline ----------
 

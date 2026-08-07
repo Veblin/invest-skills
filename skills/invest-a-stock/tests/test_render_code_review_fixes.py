@@ -239,3 +239,41 @@ class TestRiskCoverageNoMagic17:
         assert "/17" not in src
         assert ">= 15" not in src
         assert "auto_n >= 15" not in src
+
+
+class TestRiskImpliedMcUsesLatestRow:
+    """review #3：valuation 维度列表按 trade_date 升序（cff62c3 约定），
+    Bull/Bear 隐含市值必须取最新行——此前 for+break 取首行 = 锚定约 5 年前
+    市值（600176 实例 980 亿 vs 最新 396 亿）。"""
+
+    def test_implied_mcap_uses_latest_row(self):
+        from lib.render_risk import _section_bull_bear
+
+        dims = {
+            "valuation": {"data": [
+                {"trade_date": "2021-08-01", "pe_ttm": 40.0, "total_mv": 980.0},
+                {"trade_date": "2026-08-01", "pe_ttm": 20.0, "total_mv": 396.0},
+            ]},
+            "financials": {"data": [
+                {"end_date": "20251231", "roe": 0.15, "net_profit": 2e9},
+            ]},
+        }
+        text = _section_bull_bear({}, "600176", dims, {}, {"signals": []})
+        assert "当前市值 396.00亿" in text
+        assert "980.00亿" not in text
+
+    def test_implied_mcap_tolerates_missing_latest_row(self):
+        """最新行 total_mv 缺失（NaN/None）→ 取最近的有效行。"""
+        from lib.render_risk import _section_bull_bear
+
+        dims = {
+            "valuation": {"data": [
+                {"trade_date": "2021-08-01", "pe_ttm": 40.0, "total_mv": 980.0},
+                {"trade_date": "2026-08-01", "pe_ttm": 20.0, "total_mv": None},
+            ]},
+            "financials": {"data": [
+                {"end_date": "20251231", "roe": 0.15, "net_profit": 2e9},
+            ]},
+        }
+        text = _section_bull_bear({}, "600176", dims, {}, {"signals": []})
+        assert "当前市值 980.00亿" in text

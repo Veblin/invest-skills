@@ -600,7 +600,9 @@ def _maybe_store_report_snapshot(
     if resumed or not getattr(args, "store", True):
         return
     try:
-        store_mod.save_collection(result)
+        # kind='report'：与 collect 快照区分，diff 自动配对优先 collect
+        # （避免同会话两行互相比较，review #9 第二轮）
+        store_mod.save_collection(result, kind="report")
         print("💾 已存入持久化存储")
     except Exception as exc:
         print(f"⚠️ 报告入库失败: {exc}", file=sys.stderr)
@@ -1438,7 +1440,11 @@ def _print_diff_dimension_supplement(diff: dict) -> None:
 
 
 def _watchlist_get_result(symbol: str) -> dict:
-    """优先读 store 最新快照，否则现场采集（结果自动入库，第三采集入口接入默认落库）。"""
+    """优先读 store 最新快照，否则现场采集（结果自动入库，第三采集入口接入默认落库）。
+
+    全维度失败（_no_sources_responded）不入库——与 cmd_collect/cmd_report
+    同守卫，避免空快照被 list_collections 永久复用（review #5 第二轮）。
+    """
     if _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=symbol)
         if rows:
@@ -1447,6 +1453,12 @@ def _watchlist_get_result(symbol: str) -> dict:
                 return rec["raw_json"]
     result = collector.collect_all(symbol)
     if _HAS_STORE:
+        if _no_sources_responded(result.get("summary")):
+            print(
+                f"⚠️ {symbol} 全部数据源不可用，快照未入库（请运行 diagnose）",
+                file=sys.stderr,
+            )
+            return result
         try:
             store_mod.save_collection(result)
         except Exception as exc:

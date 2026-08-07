@@ -3428,6 +3428,13 @@ def _section_technical_brief(
 ) -> str:
     lines = ["## 8. 技术指标附录 · 均线/动量/波动率简报", ""]
     lines.append("**结论：** 以下为技术指标摘要，供交叉参考，不构成交易信号。")
+    # R6 学术纪律固定提示行（引擎/模板层，非 AI 撰写——与 SKILL.md:544 文本一致）
+    lines.append(
+        "> 技术指标仅用于描述市场状态（价格与均线位置关系、MACD 方向）与交叉验证"
+        "其他证据，不单独构成结论，也不构成任何操作依据。学术检验"
+        "（Chen, Zhou & Wang 2018, *Physica A*）：沪深 300 期指 279 个技术策略"
+        "计入交易成本后利润被完全消除。"
+    )
     lines.append("")
     pe_table = _pe_band_markdown_table(dims, val_cache)
     if pe_table:

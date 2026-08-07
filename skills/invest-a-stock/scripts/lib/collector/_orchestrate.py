@@ -1037,8 +1037,9 @@ _cninfo_hold_cache_day: str = ""            # 缓存所属日期 YYYY-MM-DD
 
 
 def _cninfo_hold_cache_today() -> str:
-    from datetime import date
-    return date.today().isoformat()
+    # 上海时区（_today = shanghai_today，全模块统一口径）——date.today() 是
+    # 本机时区，非 UTC+8 主机上缓存键错位会跨日误复用（review #14 第二轮）
+    return _today()
 
 
 def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
@@ -1068,14 +1069,23 @@ def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
     if missing:
         with akshare_direct_session():
             for direction in missing:
-                _cninfo_hold_cache[direction] = _run_with_timeout(
+                df = _run_with_timeout(
                     lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
                     timeout_sec,
                     f"akshare cninfo({direction})",
                 )
+                if df is None:
+                    # 超时/异常不落缓存——否则整个 run 其余 symbol 都复用
+                    # None（该方向数据全缺失且不重试，review #14 第二轮）
+                    logger.warning(
+                        "akshare cninfo(%s) 超时/失败，本 symbol 跳过，"
+                        "后续 symbol 将独立重试", direction,
+                    )
+                    continue
+                _cninfo_hold_cache[direction] = df
 
     for direction in ("增持", "减持"):
-        df = _cninfo_hold_cache[direction]
+        df = _cninfo_hold_cache.get(direction)
         if df is None or getattr(df, "empty", True):
             continue
         # 过滤当前标的

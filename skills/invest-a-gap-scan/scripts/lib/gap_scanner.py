@@ -254,26 +254,35 @@ def _check_ma60_streak(closes: list[float], ma60: list[float | None],
     # 绝对下限（防短历史标的比例被稀释）：MA60 从 bar 59 起有效，61-bar
     # 标的前期缺口只有 1-2 个真实 MA60 值，比例 50% 仍过 25% 门槛 ——
     # 需要同时满足 min_valid_ratio 比例与至少 3 个有效 bar。
-    min_valid_bars = max(3, math.ceil(total_count * min_valid_ratio))
+    # min(3, total_count)：total==2（缺口在倒数第二根 bar = 昨日缺口）时
+    # 绝对下限 3 不可满足会恒拒——退化为比例门槛（2 根 bar 需 2 个有效，
+    # 历史充足标的天然满足）；total>=3 行为与绝对下限 3 完全一致。
+    min_valid_bars = max(math.ceil(total_count * min_valid_ratio),
+                         min(3, total_count))
     if total_count > 0 and valid_count < min_valid_bars:
         return False  # too few valid MA60 bars for a meaningful check
     return True
 
 
 def _check_unfilled(lows: list[float], gap_idx: int,
-                    gap_high: float, after_close: bool = False) -> bool:
+                    gap_high: float, after_close: bool = False,
+                    gap_low: float | None = None) -> bool:
     """Return True if the gap has never been filled (partially or fully).
 
     A gap is unfilled when ``min(low[gap_idx+1:]) > gap_high``
     (touching the upper edge counts as filled).
     最新 bar（gap_idx == len(lows)-1，无后续数据）：盘中无法确认回补，
     恒返回 False（由调用方以 GAP_UNCONFIRMED 区分「待收盘确认」与
-    「已回补」）；收盘后（after_close=True）日线 bar 完整，
-    ``low[gap_idx] > gap_high`` 即证明缺口未回补。
+    「已回补」）；收盘后（after_close=True）日线 bar 完整，缺口未回补
+    的充要条件是 ``lows[gap_idx] > highs[gap_idx-1] == gap_low``（检测
+    谓词已保证成立）。注意不能用 ``lows[gap_idx] > gap_high``：gap_high
+    就是该 bar 自身的 low，自比较恒 False（38a7e1e 回归，review #1）。
     """
     if gap_idx >= len(lows) - 1:
         if after_close:
-            return lows[gap_idx] > gap_high
+            if gap_low is None:
+                return True  # 缺省：检测谓词保证缺口成立
+            return lows[gap_idx] > gap_low
         return False
     return min(lows[gap_idx + 1:]) > gap_high
 
@@ -408,12 +417,13 @@ def _scan_stock(
         # 最新 bar 的跳空无后续数据：盘中无法确认是否回补——不判 unfilled
         # （否则最新 bar 跳空恒为「未回补」→ 恒命中），标「待收盘确认」
         # 并回退到更早的已确认缺口。收盘后（after_close）日线完整，
-        # low > gap_high 已证明未回补，直接放行。
+        # lows[gap_idx] > highs[gap_idx-1]（gap_low）已证明未回补，直接放行。
         if gap_idx >= len(lows) - 1 and not after_close:
             any_unconfirmed = True
             continue
 
-        if not _check_unfilled(lows, gap_idx, gap.gap_high, after_close=after_close):
+        if not _check_unfilled(lows, gap_idx, gap.gap_high,
+                               after_close=after_close, gap_low=gap.gap_low):
             continue  # filled — try older gap (never promote filled+across to hit)
 
         any_unfilled = True

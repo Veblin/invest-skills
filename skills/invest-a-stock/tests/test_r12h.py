@@ -61,6 +61,38 @@ class TestRunSourcesCascade:
         assert results[0].error is not None
         assert results[1].data == [9]
 
+    def test_always_success_does_not_block_cascade_fallback(self):
+        """review #8（第二轮）：always 源成功不得阻断降级链。
+
+        quote 场景（tushare 失败 → 腾讯实时快照成功 → akshare K 线回退）：
+        always 成功若标记链完成，后续 akshare 永不尝试——与 docstring
+        「其成功/失败与降级链无关，保持纯级联语义」矛盾。
+        """
+        results = _run_sources_cascade(
+            [("a", lambda: None),                  # 首选失败
+             ("b", lambda: {"price": 10.0}),       # always 源成功
+             ("c", lambda: [1, 2, 3])],            # 降级链源
+            "test",
+            always_attempt={"b"},
+        )
+        assert len(results) == 3
+        assert results[0].error is not None          # a 失败
+        assert results[1].data == {"price": 10.0}    # b always 成功
+        assert results[2].data == [1, 2, 3]          # c 仍被尝试（不被 b 阻断）
+        assert results[2].error is None
+
+    def test_always_failure_still_degrades_chain(self):
+        """always 源失败也不影响链（与成功对称）。"""
+        results = _run_sources_cascade(
+            [("a", lambda: None),
+             ("b", lambda: None),   # always 失败
+             ("c", lambda: [7])],
+            "test",
+            always_attempt={"b"},
+        )
+        assert results[1].error is not None
+        assert results[2].data == [7]
+
 
 class TestCollectKlineCascade:
     def test_tushare_failure_falls_back_to_baostock(self, monkeypatch):

@@ -427,10 +427,13 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
 
 
 def _q_akshare_northbound(symbol: str) -> list[dict] | None:
+    """akshare 北向资金（东方财富）。R12h：与 kline 路径同型指数退避重试（1s→2s→4s）。"""
     with akshare_direct_session():
         import akshare as ak
         try:
-            result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
+            def _fetch() -> Any:
+                return ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
+            result = em_request_with_retry(_fetch)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:

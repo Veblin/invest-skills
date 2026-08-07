@@ -223,6 +223,43 @@ class TestEmptyInput:
         assert "error" in result
 
 
+class TestInvalidCloseRowsFiltered:
+    """review #10（第二轮）：close 为 None/NaN 的行必须剔除，
+    不得 `or 0` 转 0.0 污染均线/RSI/MACD 与 latest_close。"""
+
+    def test_close_none_rows_removed(self):
+        from lib.technical import compute
+
+        rows = _make_kline(30)
+        rows[10]["close"] = None  # 停牌残留 bar/空值填充行
+        result = compute(rows)
+        assert result["n_rows"] == 29
+        assert result["latest_close"] == pytest.approx(rows[-1]["close"])
+        # 均线序列不含 0.0 污染（latest MA5 应接近真实值而非被拉低）
+        ma5 = result["trend"]["ma"]["5"]
+        expected = sum(r["close"] for r in rows[-5:]) / 5
+        assert ma5[-1] == pytest.approx(expected)
+
+    def test_close_nan_rows_removed(self):
+        import math
+
+        from lib.technical import compute
+
+        rows = _make_kline(30)
+        rows[15]["close"] = float("nan")  # NaN 是 truthy，`or 0` 拦不住
+        result = compute(rows)
+        assert result["n_rows"] == 29
+        for v in (result["latest_close"], result["trend"]["ma"]["5"][-1]):
+            assert not (isinstance(v, float) and math.isnan(v))
+
+    def test_all_close_none_returns_error(self):
+        from lib.technical import compute
+
+        rows = [{"trade_date": "20260101", "close": None}] * 5
+        result = compute(rows)
+        assert "error" in result
+
+
 class TestKlineSortOrder:
     def test_descending_input_uses_latest_close(self):
         """Tushare 降序 K 线：compute 内部升序后 latest_close 为最新交易日。"""
@@ -314,6 +351,13 @@ class TestLimitPctTable:
         assert limit_pct_for_symbol("600001", name="ST某某") == 5.0
         assert limit_pct_for_symbol("600001", name="*ST某某") == 5.0
         assert limit_pct_for_symbol("600001", name="正常公司") == 10.0
+        # review #13：ST 5% 仅限主板——创业板/科创板/北交所 ST 按板块阈值
+        # （2020-08-24 注册制后创业板 ST 涨跌幅 20%，非 5%）
+        assert limit_pct_for_symbol("300328", name="*ST某某") == 20.0
+        assert limit_pct_for_symbol("301001", name="ST某某") == 20.0
+        assert limit_pct_for_symbol("688001", name="ST某某") == 20.0
+        assert limit_pct_for_symbol("430001", name="ST某某") == 30.0
+        assert limit_pct_for_symbol("920001", name="ST某某") == 30.0
 
     def test_bse_20pct_not_limit_up_30pct_is(self):
         """北交所 30% 阈值：20-25% 涨幅不再被计为涨停（缺陷 1）。"""

@@ -318,10 +318,10 @@ def _run_sources_cascade(tasks: list[tuple[str, Callable[[], Any]]],
     succeeded = False
     for name, fn in tasks:
         if name in always:
-            res = always_results[name]
-            results.append(res)
-            if res.data is not None:
-                succeeded = True
+            # always 源成功**不**标记链完成（docstring：其成功/失败与降级链
+            # 无关，保持纯级联语义）——否则 quote 场景（tushare 失败、腾讯
+            # 实时快照成功）会跳过后续 akshare K 线回退（review #8 第二轮）
+            results.append(always_results[name])
             continue
         if succeeded:
             results.append(SourceResult(name, None, dimension, attempted=False))  # 未尝试

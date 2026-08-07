@@ -349,12 +349,15 @@ class TestRenderMaSystemUnavailableClose:
         assert "现价不可得" in joined
 
     def test_nan_close_natural_path_no_crash(self):
+        """review #10（第二轮）：close=NaN 行被 technical.compute 整行剔除——
+        MA 用剩余有效行计算（不再被 NaN 污染成 '—' 假不可得）。"""
         from lib.render_markdown._base import _render_ma_system
 
         rows = _kline(60)
-        rows[-1]["close"] = float("nan")  # compute() 的 latest_close 为 NaN（or 0 不拦截 NaN）
+        rows[-1]["close"] = float("nan")  # 修复前: or 0 不拦截 NaN → 全链 NaN
         lines = _render_ma_system(_collection(rows))
         joined = "\n".join(lines)
         assert joined
         assert "现价下方" not in joined
-        assert "MA5: —" in joined  # MA 值亦为 NaN → 标不可得，不渲染 'MA5=nan'
+        assert "MA5=" in joined  # 有效 MA5（NaN 行已剔除，非 'MA5: —'）
+        assert "nan" not in joined

@@ -80,12 +80,20 @@ Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symb
 ```bash
 uv run python skills/invest-a-etf/scripts/etf.py report 563300        # 单 ETF 数据快照
 uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
+uv run python skills/invest-a-etf/scripts/etf.py report 588000 --history --playbook   # R11: 历史深度 + 情景预案
+uv run python skills/invest-a-etf/scripts/etf.py report 588000 --events events/588000.json  # R11b: 指定事件文件
 uv run python skills/invest-a-etf/scripts/etf.py diagnose
 uv run python skills/invest-a-etf/scripts/etf.py industry-pe          # 31 行业 PE 排名
 uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动触发行业 PE 采集
 ```
 
 `report` 输出引擎数据快照（供 Claude 合成）；完整叙事由 Claude 按模板撰写。
+
+**R11 相关旗标**（`report` 子命令）：
+- `--history`：历史行情深度（nav 链路优先，失败自动回退 baostock `sh.{code}`）+ 年度高低点/最大回撤/±5% 交易日/MA20-60-120/偏离% 统计
+- `--history-days N`：历史回溯交易日数（默认 250，约 1 年）
+- `--events PATH`：事件文件（JSON Lines，`{date, event, source_url, published_date, confidence}`）；缺省自动读 `events/{symbol}.json`，无文件不阻断
+- `--playbook`：情景预案（回撤档位 σ 分级 + 三步核查清单 + LAW 6a 声明）
 
 ---
 
@@ -94,13 +102,15 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 详见 [references/report-template.md](references/report-template.md)：
 
 1. 产品快照（价格 / 折溢价 / AUM / flags）
-2. 指数估值（csindex PE + 历史深度限制）
+2. 指数估值（csindex PE + 历史深度限制 + `index_pe_pct` 历史分位）
 3. **估值框架**（🆕 行业 ETF 必须展开 `valuation_guide`，解释该行业应该怎么估值、PE 时机选择是否有效）
-4. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
-5. 对冲覆盖（hedge-map）
-6. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
-7. 因子/主题逻辑（须可追溯来源，否则「待验证」）
-8. 多情景 / 交易结构（可选，LAW 6a）
+4. **历史演变**（🆕 R11a/b，`--history`/`--events` 时必须有：阶段划分由 AI 合成、数字引用引擎统计；事件-价格对照表「同日事实」与「可能关联（待验证）」两列拆分，因果表述限于一手来源）
+5. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
+6. 对冲覆盖（hedge-map）
+7. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
+8. 因子/主题逻辑（须可追溯来源，否则「待验证」）
+9. 多情景 / 交易结构（可选，LAW 6a）
+10. **情景预案**（🆕 R11c，`--playbook` 时必须有：回撤档位 σ 分级表 = 触发核验深度（例行记录→归因核查→三步全流程→框架重估），非操作阈值；三步核查固定模板；LAW 6a 声明；输出禁用「无动作/如何应对/建议卖出/止损」措辞）
 
 **行业 ETF vs 宽基 ETF 的分析差异**：
 - 宽基 ETF：核心问题是"这个市场便宜吗？"→ 聚焦 PE 分位（如有）
@@ -116,6 +126,8 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 | `query_etf_data(symbol)` | 指数 PE、行业 PE、分类、估值指引、折溢价、AUM、对冲、flags |
 | `query_etf_quote(symbol)` | 现价、涨跌幅、成交 |
 | `query_etf_kline(symbol)` | 净值序列、年化波动、NAV MA20/MA60、指数 MA20/MA60、BOLL、RSI（含 `rsi_period`） |
+| `query_etf_kline_history(symbol, days)` | 🆕 R11a 历史行情深度（nav 链路优先，失败回退 baostock；`source: nav/baostock`） |
+| `compute_history_stats(rows)` | 🆕 R11a 历史统计：年度高低点+日期、最大回撤（峰/谷日期）、±5% 交易日清单、MA20/60/120、当前 vs 高低点偏离% |
 | `list_industry_snapshot()` | 🆕 31 个申万行业 PE/PB 排名 |
 | `etf_share_flow(symbol)` | 🆕 ETF 份额变化趋势 + 估算资金流 |
 | `query_etf_category(symbol)` | 🆕 ETF 类型标签 |

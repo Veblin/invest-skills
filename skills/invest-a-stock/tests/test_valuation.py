@@ -567,6 +567,27 @@ class TestEvEbitda:
         assert r["bridge"]["ev_yi"] == 95.0  # 净现金口径
         assert "有息负债不可得" in r["note"]
 
+    def test_partial_debt_annotated_not_silent_zero(self):
+        """review #11：有息负债部分缺失（2000 分档过滤）→ 按可得分量计算
+        且 note 显式降级说明，缺失分量不得静默按 0。"""
+        from valuation_calc import calc_ev_ebitda
+
+        r = calc_ev_ebitda(
+            total_mv_yi=100.0, cash=5e8,
+            st_loan=10e8, lt_loan=None, bond_payable=None, ebitda=20e8,
+        )
+        assert r["available"] is True
+        assert r["bridge"]["ev_yi"] == 105.0  # 100 + 10 - 5（长贷/债券按 0）
+        assert "部分缺失" in r["note"]
+        assert "长贷" in r["note"] and "应付债券" in r["note"]
+        assert "被低估" in r["note"]
+        # 全量可得 → note 为空
+        r2 = calc_ev_ebitda(
+            total_mv_yi=100.0, cash=5e8,
+            st_loan=10e8, lt_loan=5e8, bond_payable=0.0, ebitda=20e8,
+        )
+        assert r2["note"] is None
+
     def test_financial_exempt(self):
         from valuation_calc import calc_ev_ebitda
 
@@ -580,6 +601,59 @@ class TestEvEbitda:
         r = calc_ev_ebitda(total_mv_yi=100.0, cash=5e8, ebitda=None)
         assert r["available"] is False
         assert "ebitda" in r["missing"]
+
+    def test_income_fallback_when_fina_indicator_ebitda_missing(self):
+        """R3 兜底（R12b 同型）：fina_indicator 2000 分档过滤 ebitda → income 表补齐。
+
+        income.ebitda 同为累计口径，仅取 1231 年报期；最新 2026Q1 累计 5e8
+        不得误用（须取 2025 年报 20e8）。
+        """
+        from valuation_calc import _latest_annual_ebitda_from_income
+
+        class _FakeDf:
+            empty = False
+
+            def __init__(self, rows):
+                self._rows = rows
+
+            def to_dict(self, orient="records"):
+                return self._rows
+
+        class _FakeTs:
+            def __init__(self, rows):
+                self._rows = rows
+                self.calls = []
+
+            def query(self, name, **kw):
+                self.calls.append((name, kw))
+                return _FakeDf(self._rows)
+
+        fake = _FakeTs([
+            {"end_date": "20241231", "ebitda": 10e8},   # 旧年报（不得取）
+            {"end_date": "20250930", "ebitda": 15e8},
+            {"end_date": "20251231", "ebitda": 20e8},   # 最近年报期全年 EBITDA
+            {"end_date": "20260331", "ebitda": 5e8},    # 2026Q1 累计（不得误用）
+        ])
+        ebitda, period = _latest_annual_ebitda_from_income(fake, "000001.SZ")
+        assert ebitda == 20e8      # 取最近年报期，而非 3 年窗口最旧一期（review #2）
+        assert period == "20251231"
+        assert fake.calls[0][0] == "income"
+
+    def test_income_fallback_empty_returns_none(self):
+        """income 表无年报期/空结果 → (None, None)，由调用方走不可得降级。"""
+        from valuation_calc import _latest_annual_ebitda_from_income
+
+        class _FakeDf:
+            empty = False
+
+            def to_dict(self, orient="records"):
+                return []
+
+        class _FakeTs:
+            def query(self, name, **kw):
+                return _FakeDf()
+
+        assert _latest_annual_ebitda_from_income(_FakeTs(), "000001.SZ") == (None, None)
 
     def test_annual_ebitda_requires_1231_period(self):
         """最新期为非 1231（如 2026Q1 累计）时，不得产出 40x 类高估结果。

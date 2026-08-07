@@ -159,12 +159,15 @@ def _section_bull_bear(
     # 当前市值（亿元）— valuation 维度 total_mv（Tushare daily_basic 已归一为亿元，
     # 与腾讯快照同口径）。隐含市值一律用「市值 × PE 比值」的市值比例法，避免
     # 累计 YTD 净利 × TTM PE 的口径错配（0331/0630/0930 报告期会低估 2-4 倍）。
+    # 列表按 trade_date 升序（cff62c3 统一 data[-1]=最新约定）——取**最新**一行
+    # 的 total_mv（reversed 迭代首个非 None；此前 for+break 取首行 = 锚定约
+    # 5 年前市值，review #3；与 render_dcf.py:202 的 [-1] 语义对齐）。
     mcap_v = None
     val_data = _get_dim_data(dims, "valuation")
     if isinstance(val_data, dict):
         mcap_v = _safe_num(val_data.get("total_mv"))
     elif isinstance(val_data, list):
-        for rec in val_data:
+        for rec in reversed(val_data):
             if not isinstance(rec, dict):
                 continue
             mv = _safe_num(rec.get("total_mv"))

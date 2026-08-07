@@ -437,6 +437,25 @@ def calc_ev_ebitda(
     if ev is not None and ebitda not in (None, 0.0):
         ratio = round(ev / ebitda, 2)
 
+    # 有息负债部分缺失（2000 分档过滤单个科目）时，缺失分量被按 0 计 →
+    # EV 被低估且无提示。note 三分支：全缺失 → 净现金口径；部分缺失 →
+    # 显式降级说明（review #11）；完整 → None。
+    missing_debt = [
+        label for label, v in (("短贷", st_loan), ("长贷", lt_loan),
+                               ("应付债券", bond_payable))
+        if v is None
+    ]
+    if debt is None:
+        note = ("有息负债不可得（低积分档字段过滤），EV 为净现金口径近似，"
+                "若公司有负债则实际 EV 更高")
+    elif missing_debt:
+        note = (
+            f"有息负债部分缺失（{', '.join(missing_debt)} 不可得），EV 按可得"
+            "分量计算，若缺失项实际存在则 EV 被低估"
+        )
+    else:
+        note = None
+
     return {
         "available": ev is not None and ebitda is not None,
         "exempt": False,
@@ -451,7 +470,7 @@ def calc_ev_ebitda(
         "ev_ebitda": ratio,
         "debt_available": debt is not None,
         "missing": missing,
-        "note": None if debt is not None else "有息负债不可得（低积分档字段过滤），EV 为净现金口径近似，若公司有负债则实际 EV 更高",
+        "note": note,
     }
 
 
@@ -480,6 +499,44 @@ def _latest_annual_ebitda(fin_rows: list[dict]) -> tuple[float | None, str | Non
         f"EBITDA 不可得：3 年内无 1231 年报期（最新期 {latest_ed} 为累计口径，"
         "不可换算为全年 EBITDA，EV/EBITDA 不计算）"
     )
+
+
+def _latest_annual_ebitda_from_income(
+    ts: TushareClient, ts_code: str
+) -> tuple[float | None, str | None]:
+    """income 表 ebitda 兜底（fina_indicator 2000 分档过滤 ebitda 时，R12b 同型）。
+
+    同口径纪律：income.ebitda 同为累计口径，仅取最近 1231 年报期（全年数）；
+    3 年内无年报期或查询失败 → (None, None)，由调用方走「不可得」降级。
+    """
+    try:
+        df = ts.query(
+            "income", ts_code=ts_code,
+            start_date=shanghai_days_ago(3 * 365), end_date=shanghai_today(),
+            fields="end_date,ebitda",
+        )
+        if df is None or (hasattr(df, "empty") and df.empty):
+            return None, None
+        rows = df.to_dict(orient="records") if hasattr(df, "to_dict") else list(df)
+    except Exception as exc:
+        logger.warning("Tushare income ebitda 查询失败（R3 兜底）: %s", exc)
+        return None, None
+    annual = [
+        r for r in rows
+        if isinstance(r, dict)
+        and normalize_end_date(str(r.get("end_date", ""))).endswith("1231")
+    ]
+    # 取最近 1231 期（升序 + reverse），与 _latest_annual_ebitda 的
+    # reversed 语义一致——此前升序取第一个 = 3 年窗口内最旧一期（review #2）
+    for r in sorted(annual, key=lambda x: str(x.get("end_date", "")), reverse=True):
+        try:
+            v = float(r["ebitda"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if v != v:  # NaN 等同缺失
+            continue
+        return v, str(r.get("end_date", ""))
+    return None, None
 
 
 def get_daily_basic_history(
@@ -1338,6 +1395,15 @@ def run_valuation(
         # fina_indicator.ebitda 为累计 YTD 口径，仅年报期（1231）为全年数；
         # 必须取年报期，无年报期时明确降级（_latest_annual_ebitda 返回口径说明）
         ebitda_v, ebitda_period, ebitda_note = _latest_annual_ebitda(fin_rows)
+        if ebitda_v is None:
+            # R12b 同型兜底：fina_indicator 2000 分档过滤 ebitda → income 表补齐
+            inc_ebitda, inc_period = _latest_annual_ebitda_from_income(ts, ts_code)
+            if inc_ebitda is not None:
+                ebitda_v, ebitda_period = inc_ebitda, inc_period
+                ebitda_note = (
+                    f"EBITDA 取自 income 表（fina_indicator 积分过滤兜底），"
+                    f"报告期 {inc_period}，年报口径"
+                )
         cash = st_loan = lt_loan = bond_payable = None
         try:
             bs_df = ts.query(

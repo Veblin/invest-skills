@@ -61,6 +61,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, name TEXT,
                 fetched_at TEXT NOT NULL, dimensions_total INTEGER DEFAULT 0,
                 dimensions_ok INTEGER DEFAULT 0, raw_json TEXT,
+                kind TEXT NOT NULL DEFAULT 'collect',
                 created_at TEXT DEFAULT (datetime('now')));
             CREATE INDEX IF NOT EXISTS idx_c_sym ON collections(symbol);
             CREATE INDEX IF NOT EXISTS idx_c_fa ON collections(fetched_at);
@@ -172,13 +173,27 @@ def init_db() -> None:
                     pass  # 列已存在
                 else:
                     raise
+        # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
+        # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
+        try:
+            c.execute("ALTER TABLE collections ADD COLUMN kind TEXT NOT NULL DEFAULT 'collect'")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" in str(e).lower():
+                pass  # 列已存在
+            else:
+                raise
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         c.commit()
 
 
-def save_collection(result: dict[str, Any]) -> int:
+def save_collection(result: dict[str, Any], kind: str = "collect") -> int:
+    """采集结果入库。kind: 'collect'（显式采集/现场采集）或 'report'（报告快照）。
+
+    kind 用于 diff 自动配对（get_latest_two 优先同 kind），避免同会话
+    report+collect 两行互相比较掩盖跨会话变化（review #9 第二轮）。
+    """
     init_db()
     symbol = result.get("symbol", "?")
     dims = result.get("dimensions")
@@ -195,9 +210,9 @@ def save_collection(result: dict[str, Any]) -> int:
     c = _conn()
     try:
         cur = c.execute(
-            "INSERT INTO collections (symbol,name,fetched_at,dimensions_total,dimensions_ok,raw_json) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO collections (symbol,name,fetched_at,dimensions_total,dimensions_ok,raw_json,kind) VALUES (?,?,?,?,?,?,?)",
             (symbol, name, result.get("fetched_at", ""), sm.get("total", 0), sm.get("available", 0),
-             dumps_json(result)))
+             dumps_json(result), kind))
         cid = cur.lastrowid
         for d in dims:
             data = d.get("data")
@@ -356,6 +371,10 @@ def get_collection(collection_id: int) -> dict | None:
 def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     """获取指定股票最近两次采集记录。
 
+    优先比较两次 kind='collect' 的真实采集（report/watchlist 快照可能
+    与 collect 同会话、互相掩盖跨会话变化，review #9 第二轮）；纯 report
+    用户（无 collect 行）回退全部 kind。
+
     Returns:
         (older, newer) tuple，仅 1 条记录时返回 None。
     """
@@ -364,8 +383,14 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     try:
         rows = c.execute(
             "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-            "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
+            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 2",
             (symbol,)).fetchall()
+        if len(rows) < 2:
+            # 旧库/纯 report 用户兼容：回退全部 kind
+            rows = c.execute(
+                "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
+                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
+                (symbol,)).fetchall()
         if len(rows) < 2:
             return None
         newer = dict(rows[0])
@@ -653,11 +678,21 @@ def format_key_diff_markdown_lines(key_diff: dict) -> list[str]:
 
 
 def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
-    """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。"""
-    rows = list_collections(limit=1, symbol=symbol)
-    if not rows:
-        return None
-    prev = get_collection(rows[0]["id"])
+    """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。
+
+    跳过 fetched_at 与当前采集相同的行（同会话刚写入的 collect 行）——
+    否则「相对上次调研变化」比较的是几分钟前的同会话快照，恒无变化
+    （review #9 第二轮）。fetched_at 精度为秒，跨会话不相等。
+    """
+    cur_ts = str(current.get("fetched_at", ""))
+    rows = list_collections(limit=20, symbol=symbol)
+    prev = None
+    for row in rows:
+        if str(row.get("fetched_at", "")) == cur_ts:
+            continue  # 同会话行
+        prev = get_collection(row["id"])
+        if prev:
+            break
     if not prev:
         return None
     return diff_key_snapshots(prev, current)

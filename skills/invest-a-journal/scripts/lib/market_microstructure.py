@@ -399,7 +399,14 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     ad = snap.get("ad_ratio")
     ad5 = snap.get("ad_ratio_5d_ma")
     if ad is not None:
-        ad_hist = [h.get("ad_ratio") for h in history if h.get("ad_ratio") is not None]
+        # 60日分位（剔除 history 中今日已持久化行——snapshot→_auto_persist→
+        # load_history 已含今日，双计会抬高约 2/(N+1) 个分位点、在 10/30/70/90
+        # 边界翻转冷暖标签；与杠杆分位/_compute_tier2 同型防双计，review #6）
+        snap_date = snap.get("date")
+        hist_ex_today = [h for h in history
+                         if (h.get("date") or h.get("trade_date")) != snap_date]
+        ad_hist = [h.get("ad_ratio") for h in hist_ex_today
+                   if h.get("ad_ratio") is not None]
         if len(ad_hist) >= 20:
             ad_hist.append(ad)
             sorted_ad = sorted(ad_hist)

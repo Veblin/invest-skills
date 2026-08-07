@@ -1823,7 +1823,8 @@ def fetch_etf_kline_baostock(symbol: str, days: int = 250) -> dict:
                 start_date=start_date,
                 end_date=end_date,
                 frequency="d",
-                adjustflag="3",  # 不复权
+                adjustflag="2",  # 前复权：与全仓统一复权语义（_sources.py / gap-scan 同款）
+                # 不复权（3）会使除息日出现假 ≥5% 大波动/假最大回撤（review #7）
             )
             if rs.error_code != "0":
                 return {"status": "missing", "source": "baostock", "code": code,
@@ -1904,7 +1905,7 @@ def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
             "status": "available",
             "rows": env["rows"],
             "requested_days": days,
-            "note": "来源: baostock 日线（不复权）",
+            "note": "来源: baostock 日线（前复权 adjustflag=2）",
         }
     return {
         "symbol": symbol,

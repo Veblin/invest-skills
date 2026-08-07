@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,55 @@ def test_fetch_etf_kline_baostock_invalid_code_no_network():
     assert env["source"] == "baostock"
     assert "无法映射交易所" in env["error"]
     assert env["rows"] == []
+
+
+def test_fetch_etf_kline_baostock_uses_qfq_adjustflag(monkeypatch):
+    """review #7：baostock 回退必须用前复权（adjustflag=2）。
+
+    不复权（3）会使除息日出现假 ≥5% 大波动/假最大回撤，与 nav 主链路
+    （Tushare fund_adj 复权）统计不一致。全仓其余 baostock 路径（股票
+    kline、gap-scan）均为 adjustflag=2，ETF 是唯一 3。
+    """
+    captured: dict = {}
+
+    class _FakeRs:
+        error_code = "0"
+        _rows = [
+            ["2026-07-01", "1.50", "1.55", "1.52", "1.49", "1000000"],
+            ["2026-07-02", "1.52", "1.53", "1.48", "1.47", "1200000"],
+        ]
+
+        def __init__(self):
+            self._i = 0
+
+        def next(self):
+            if self._i < len(self._rows):
+                self._i += 1
+                return True
+            return False
+
+        def get_row_data(self):
+            return self._rows[self._i - 1]
+
+    class _FakeBs:
+        @staticmethod
+        def login():
+            return type("L", (), {"error_code": "0", "error_msg": ""})()
+
+        @staticmethod
+        def logout():
+            pass
+
+        @staticmethod
+        def query_history_k_data_plus(*args, **kwargs):
+            captured["adjustflag"] = kwargs.get("adjustflag")
+            return _FakeRs()
+
+    monkeypatch.setitem(sys.modules, "baostock", _FakeBs)
+    env = fetch_etf_kline_baostock("588000", days=250)
+    assert env["status"] == "ok"
+    assert len(env["rows"]) == 2
+    assert captured["adjustflag"] == "2"
 
 
 # ---------------------------------------------------------------------------
