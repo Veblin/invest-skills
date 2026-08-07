@@ -11,7 +11,7 @@ investment-learning CLI。
   uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858        # 对比
   uv run python skills/invest-a-stock/scripts/invest.py diagnose                     # 检查数据源
   uv run python skills/invest-a-stock/scripts/invest.py store list                   # 查看存储
-  uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --store       # 采集并存储
+  uv run python skills/invest-a-stock/scripts/invest.py collect 600176               # 采集（默认自动入库；--no-store 关闭）
   uv run python skills/invest-a-stock/scripts/invest.py watchlist 000001,600519 --outdir ./out  # 批量标的摘要
 """
 
@@ -281,7 +281,10 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("collect", help="采集多维度数据")
     pc.add_argument("symbol")
     pc.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
-    pc.add_argument("--store", action="store_true", help="存入持久化存储")
+    pc.add_argument("--store", action="store_true", default=True, dest="store",
+                   help="存入持久化存储（默认开启；--no-store 关闭）")
+    pc.add_argument("--no-store", action="store_false", dest="store",
+                   help="不存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
     pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pc.add_argument(
@@ -315,6 +318,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="R12c：报告生成前输出 12 题数据缺口清单（先回填再出报告）",
     )
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
+    pr.add_argument("--no-store", action="store_false", dest="store", default=True,
+                   help="不存入持久化存储（report 默认自动入库；--resume 恒不重复入库）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
@@ -379,6 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("--mode", default="full", choices=["brief", "full", "concise"])
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
+    psyn.add_argument("--no-store", action="store_false", dest="store", default=True,
+                      help="不存入持久化存储（synthesize 无 --input 时委托 report，默认自动入库；--input 分支不落库）")
     _add_collect_flags(psyn)
 
     pp = sub.add_parser(
@@ -548,7 +555,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.store and _HAS_STORE:
         store_mod.save_collection(result)
         print("💾 已存入持久化存储")
-    if _HAS_STORE:
+        _maybe_store_macro_snapshot(result, args)
+    if getattr(args, "store", True) and _HAS_STORE:
         store_mod.save_pipeline_step(
             args.symbol, "collect", _collect_pipeline_state(args, dims),
         )
@@ -561,6 +569,42 @@ def cmd_collect(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
     return 0
+
+
+def _maybe_store_macro_snapshot(result: dict, args: argparse.Namespace) -> None:
+    """--with-macro 采集成功后顺带写宏观日快照（best-effort，失败不阻断）。
+
+    与报告/采集入库同一 guard 域（--no-store / --resume 时不写）。
+    """
+    if not getattr(args, "with_macro", False) or not _HAS_STORE:
+        return
+    try:
+        store_mod.save_macro_snapshot(result.get("macro_context") or {})
+    except Exception as exc:
+        print(f"⚠️ 宏观快照入库失败: {exc}", file=sys.stderr)
+
+
+def _maybe_store_report_snapshot(
+    args: argparse.Namespace, result: dict, *, resumed: bool = False
+) -> None:
+    """report 默认自动入库；--resume（快照已恢复）与 --no-store 跳过。
+
+    必须在 render 之后调用：diff 渲染（_load_report_key_diff）读的是 store
+    最新快照，先入库会让「相对上次调研变化」退化为自比空 diff。
+
+    resumed 由 cmd_report 传入：仅当 --resume 实际恢复了兼容快照时为 True；
+    resume 被拒（快照不兼容）后重新采集的结果仍应入库（v0.2.4 review #3）。
+    """
+    if not _HAS_STORE:
+        return
+    if resumed or not getattr(args, "store", True):
+        return
+    try:
+        store_mod.save_collection(result)
+        print("💾 已存入持久化存储")
+    except Exception as exc:
+        print(f"⚠️ 报告入库失败: {exc}", file=sys.stderr)
+    _maybe_store_macro_snapshot(result, args)
 
 
 def _report_basename(result: dict, symbol: str, ts: str) -> str:
@@ -586,6 +630,7 @@ def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = None
+    resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
     if args.resume and _HAS_STORE:
         progress = store_mod.get_pipeline_progress(args.symbol)
         completed_steps = [s for s, done in progress.items() if done]
@@ -593,6 +638,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"📋 已完成步骤: {', '.join(completed_steps)}")
         result = _try_resume_collection(args.symbol)
         if result and _resume_cache_compatible(args, dims, result):
+            resumed_from_store = True
             print("♻️ 从 store 恢复上次采集结果（--resume）", file=sys.stderr)
         elif result:
             result = None
@@ -652,7 +698,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成报告")
         return 1
-    if _HAS_STORE:
+    if _HAS_STORE and getattr(args, "store", True):
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
@@ -681,9 +727,11 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}")
         print(f"📝 Markdown 报告: {mdfile.resolve()}")
+        _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
         return 0
 
     output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'))
+    _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     if getattr(args, 'save_raw', False):
         try:
@@ -1390,14 +1438,20 @@ def _print_diff_dimension_supplement(diff: dict) -> None:
 
 
 def _watchlist_get_result(symbol: str) -> dict:
-    """优先读 store 最新快照，否则现场采集。"""
+    """优先读 store 最新快照，否则现场采集（结果自动入库，第三采集入口接入默认落库）。"""
     if _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=symbol)
         if rows:
             rec = store_mod.get_collection(rows[0]["id"])
             if rec and rec.get("raw_json"):
                 return rec["raw_json"]
-    return collector.collect_all(symbol)
+    result = collector.collect_all(symbol)
+    if _HAS_STORE:
+        try:
+            store_mod.save_collection(result)
+        except Exception as exc:
+            print(f"⚠️ 快照入库失败（{symbol}）: {exc}", file=sys.stderr)
+    return result
 
 
 def _watchlist_summary_fields(result: dict) -> dict:
@@ -1489,8 +1543,8 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
     body: list[str] = [f"# 观察列表摘要 — {today}", "", f"> 共 {len(symbols)} 只标的"]
     if _watchlist_needs_live_collect(symbols):
         body.append(
-            "> ⚠️ 部分标的无 `--store` 历史快照，将触发现场采集（较慢）。"
-            "建议先执行 `invest.py collect SYMBOL --store`。"
+            "> ⚠️ 部分标的缺少历史快照，将触发现场采集（较慢）；"
+            "采集结果会自动入库，下次直接复用。"
         )
     body.append("")
     failures = 0

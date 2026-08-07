@@ -18,7 +18,7 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 from . import env
-from .db_util import connect_db, safe_close
+from .db_util import connect_db, load_recent_rows, safe_close, upsert_daily_rows
 from .json_util import dumps_json, json_default
 from .schema import index_dimensions
 from .shared_dates import shanghai_now  # 上海时区口径（曾用 UTC，跨时区偏移 8h）
@@ -139,6 +139,24 @@ def init_db() -> None:
                 turnover_pct REAL, dividend_yield REAL,
                 mkt_cap REAL,
                 PRIMARY KEY (index_code, date)
+            );
+            CREATE TABLE IF NOT EXISTS index_pe_history (
+                index_code TEXT NOT NULL,
+                index_name TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL,
+                pe REAL, pe_circulating REAL,
+                dividend_yield REAL, dividend_yield_circulating REAL,
+                source TEXT DEFAULT 'csindex',
+                collected_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (index_code, date)
+            );
+            CREATE TABLE IF NOT EXISTS macro_snapshots (
+                date TEXT PRIMARY KEY,
+                pmi REAL, cpi REAL, ppi REAL, lpr REAL,
+                money_supply REAL, loan REAL,
+                vix REAL, sox REAL,
+                raw_json TEXT,
+                collected_at TEXT DEFAULT (datetime('now'))
             );
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
@@ -1093,3 +1111,80 @@ def thesis_update(symbol: str, assumptions: list[dict] | None = None,
     finally:
         _safe_close(c)
     return {"symbol": symbol, "health_score": score, "state": state, "action": "update"}
+
+
+# ---------------------------------------------------------------------------
+# 宏观日快照（macro_snapshots 表，v0.2.4）
+#
+# 放置于 store.py 而非 journal lib：journal 侧 db.py 直连 env.STORE_DB，
+# 不 honor _db_override，写入若在 journal 侧将无法测试隔离（污染真实库）。
+# 日期用上海口径（宏观指标无交易日概念，LPR/PMI 月度、VIX/SOX 日频，
+# 非交易日也写入，与 market_snapshots 的交易日跳过策略不同）。
+# ---------------------------------------------------------------------------
+
+_MACRO_INDICATOR_KEYS = ("pmi", "cpi", "ppi", "lpr", "money_supply", "loan", "vix", "sox")
+
+
+def _macro_safe_float(v: Any) -> float | None:
+    """宏观指标值转 float；dict 形态（{value, source, signal}）取 value。
+
+    None / NaN / ±inf / 非数字返回 None（对齐 lib.nums.safe_float 语义，
+    NaN 若写入 sqlite 会绑定为 NULL，穿透到分位计算会污染序列）。
+    """
+    if isinstance(v, dict):
+        v = v.get("value")
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):  # NaN / ±inf
+        return None
+    return f
+
+
+def save_macro_snapshot(macro_context: dict) -> str | None:
+    """宏观指标日快照入库（by date 幂等，逐列合并写）。
+
+    兼容两种形态：collector 结果 ``{"indicators": {...}}`` 或
+    ``collect_macro_context`` 原样 ``{key: {value, source, signal}}``。
+    全部指标无值 → 返回 None 不写。返回写入日期（上海口径 YYYYMMDD）。
+
+    合并语义：同一天第二次写入（部分指标 fetch 失败为 None、或 7d TTL
+    缓存旧值）不整行覆盖——新值非 NULL 覆盖，NULL 保留旧值，避免冲掉
+    早先写入的好值（v0.2.4 review #2）。
+    """
+    if not isinstance(macro_context, dict) or not macro_context:
+        return None
+    indicators = macro_context.get("indicators")
+    if not isinstance(indicators, dict) or not indicators:
+        indicators = macro_context
+    row = {k: _macro_safe_float(indicators.get(k)) for k in _MACRO_INDICATOR_KEYS}
+    if all(v is None for v in row.values()):
+        return None
+    date = shanghai_now().strftime("%Y%m%d")
+    init_db()  # 全新库/旧库上建表（review #1：此前缺失导致 journal 首启静默丢快照）
+    c = _conn()
+    try:
+        upsert_daily_rows(
+            c, "macro_snapshots",
+            [{"date": date, **row, "raw_json": dumps_json(indicators)}],
+            pk=("date",), merge=True,
+        )
+        c.commit()
+    finally:
+        _safe_close(c)
+    return date
+
+
+def load_macro_history(days: int = 365) -> list[dict]:
+    """macro_snapshots 近 N 日记录，按 date ASC（供宏观护栏趋势/分位消费）。"""
+    init_db()
+    c = _conn()
+    try:
+        return load_recent_rows(c, "macro_snapshots", limit=int(days))
+    except sqlite3.OperationalError:
+        return []  # 表不可用（DB 被替换等）→ 空历史而非抛异常
+    finally:
+        _safe_close(c)

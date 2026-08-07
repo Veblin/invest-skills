@@ -165,7 +165,8 @@ class TestPhase4Watchlist:
         invest.cmd_watchlist(args)
         out = capsys.readouterr().out
         assert "现场采集" in out
-        assert "--store" in out
+        # v0.2.4: collect 默认落库，`--store` 已为冗余旗标，不再出现在建议文案（review #9）
+        assert "--store" not in out
 
 
 class TestPhase4ReportUx:

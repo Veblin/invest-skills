@@ -466,6 +466,13 @@ def _process_macro(result: dict) -> None:
         else:
             snap[key] = None
     result["macro_snapshot"] = snap
+    # v0.2.4: 宏观日快照入库（best-effort；journal 每次评估必经此处，天然 1 行/天幂等累积，
+    # 缓解 macro 缓存 TTL 7d 造成的断档，供宏观护栏历史分位消费）
+    try:
+        from lib.store import save_macro_snapshot
+        save_macro_snapshot(macro_raw)
+    except Exception:
+        logger.warning("macro snapshot persist failed", exc_info=True)
 
 
 def _summarize_quality(result: dict) -> None:

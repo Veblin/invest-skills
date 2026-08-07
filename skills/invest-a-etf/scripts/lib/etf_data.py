@@ -257,6 +257,7 @@ def query_etf_data(
         "symbol": symbol,
         "category": query_etf_category(symbol),
         "index_pe": None,
+        "index_pe_pct": None,
         "index_pe_status": "unknown_etf",
         "industry_pe": None,
         "industry_pe_note": None,
@@ -477,8 +478,8 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
             "status": "ok" if pe is not None else "missing",
             "index_pe": pe,
             "index_pe_note": (
-                f"来源: csindex {idx_code}，仅 {len(df)} 条历史，"
-                "无可靠分位；市盈率1=股本加权，市盈率2=流通加权"
+                f"来源: csindex {idx_code}，单窗 {len(df)} 条历史；"
+                "市盈率1=股本加权，市盈率2=流通加权（历史分位见 index_pe_pct）"
             ),
             "rows": df.to_dict("records"),
             "error": None,
@@ -719,9 +720,10 @@ def _set_index_pe_status(result: dict, symbol: str, idx_code: str) -> None:
 
 
 def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
-    """指数 PE（csindex，仅 20 条历史，不足以计算可靠分位）。
+    """指数 PE（csindex，单窗仅约 20 条历史）。
 
     v0.2.3：原始取数迁至 fetch_etf_index_pe，经 data_bridge L2 缓存（1d）。
+    v0.2.4：index_pe_history 表累积 ≥20 条时附加历史分位（best-effort）。
     """
     env = _bridge_get("get_etf_index_pe", idx_code)
     if env is None:
@@ -732,6 +734,26 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
         return
     result["index_pe"] = env.get("index_pe")
     result["index_pe_note"] = env.get("index_pe_note")
+    result["index_pe_pct"] = _index_pe_percentile_from_db(idx_code, env.get("index_pe"))
+
+
+def _index_pe_percentile_from_db(idx_code: str, current_pe: Any) -> float | None:
+    """index_pe_history 累积 ≥20 条时计算当前 PE 历史分位；否则 None（数据不足）。
+
+    best-effort：任何异常返回 None，不阻断报告流程。
+    """
+    if current_pe is None:
+        return None
+    current = safe_float(current_pe)
+    if current is None:  # NaN/±inf/非数字 → 无分位（防 nan<=v 恒 False 的假 0%）
+        return None
+    try:
+        from index_pe_snapshot import get_index_pe_history, index_pe_percentile
+        rows = get_index_pe_history(idx_code)
+        return index_pe_percentile(rows, current)
+    except Exception as exc:  # DB 不可用等：分位缺失不阻断
+        logger.debug("index_pe_percentile(%s) failed: %s", idx_code, exc)
+        return None
 
 
 def _summarize_etf_data_quality(result: dict) -> dict[str, str]:

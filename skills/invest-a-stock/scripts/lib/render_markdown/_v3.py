@@ -552,7 +552,7 @@ def _section_snapshot(
 
     if key_diff is None:
         key_diff = _load_report_key_diff(symbol, collection)
-    if key_diff and key_diff.get("categories"):
+    if key_diff:  # 有历史快照即显示对比块（无显著变化时显示状态行，diff_key_snapshots 恒返回 old_at/new_at）
         lines.append(_snapshot_diff_block(key_diff))
 
     lines.append("")

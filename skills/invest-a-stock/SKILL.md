@@ -522,7 +522,7 @@ uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
 uv run python skills/invest-a-stock/scripts/invest.py diagnose
 uv run python skills/invest-a-stock/scripts/invest.py diff 600176
 uv run python skills/invest-a-stock/scripts/invest.py store list
-uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --store
+uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --no-store   # 默认自动入库，--no-store 关闭
 ```
 
 > 运行目录：`code/`。必须用 `uv run python`。`--mode`：`brief` | `full` | `concise`。

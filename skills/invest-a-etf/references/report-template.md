@@ -37,7 +37,7 @@
 | 指数 PE | … | csindex 市盈率1/2 |
 | index_pe_status | mapped / not_mapped / unknown_etf | 指数 PE 获取状态 |
 | index_pe_note | … | 状态说明或数据来源备注 |
-| 历史深度 | … 条 | ⚠️ csindex 通常仅约 20 条，无可靠分位 |
+| 历史深度 | … 条 | ⚠️ csindex 单窗仅约 20 条；历史分位见 index_pe_pct（index_pe_history 累积 ≥20 个有效 PE 值） |
 
 [分析] …
 [证据强度: …]

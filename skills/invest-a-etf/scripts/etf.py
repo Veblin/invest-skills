@@ -114,6 +114,14 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
 
     prefetch_etf_spot()
     profile = query_etf_data(symbol)
+    # 先查询再入库：index_pe_pct 分位只对「不含今日行」的历史序列计算（避免今日
+    # 自投成 100%/5% 假象），与 journal 路径（不 persist-first）语义一致；写库放
+    # 查询后，下次报告的分位即含今日（幂等，失败不阻断报告）
+    idx = CSINDEX_MAP.get(symbol)
+    if idx:
+        res = _persist_index_pe([idx])
+        if res.get("error"):
+            print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
     quote = query_etf_quote(symbol)
     kline = query_etf_kline(symbol)
     share_history = query_etf_share_history(symbol, days=20)
@@ -160,6 +168,9 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     print("## profile")
     print(f"  index_pe:          {profile.get('index_pe')}")
     print(f"  index_pe_status:   {profile.get('index_pe_status')}")
+    ipe_pct = profile.get("index_pe_pct")
+    if ipe_pct is not None:
+        print(f"  index_pe_pct:      {ipe_pct}%（index_pe_history 历史分位）")
     alloc = profile.get("industry_allocation")
     if alloc:
         top3 = ", ".join(f"{a['industry']} {a['pct']:.1f}%" for a in alloc[:3])
@@ -310,8 +321,23 @@ def cmd_industry_pe() -> int:
     return 0
 
 
+def _persist_index_pe(idx_codes: list[str] | None) -> dict:
+    """把 etf_index_pe 缓存信封写入 index_pe_history（幂等，失败不阻断报告）。
+
+    返回 persist_index_pe_from_cache 的结果 dict（含 error/rows_saved/
+    index_codes/ok_envelopes）；调用抛异常时返回 {"error": ...}，由调用方
+    决定是否提示。cold-cache 失败日 data_bridge 不缓存 missing 信封，此
+    调用与报告自身取数各回源一次（见 index_pe_snapshot 模块 docstring）。
+    """
+    from index_pe_snapshot import persist_index_pe_from_cache
+    try:
+        return persist_index_pe_from_cache(idx_codes)
+    except Exception as exc:
+        return {"error": f"index_pe persist raised: {exc}"}
+
+
 def cmd_collect_weekly() -> int:
-    """手动触发行业 PE 周度采集。"""
+    """手动触发行业 PE 周度采集 + 指数 PE 历史快照入库。"""
     try:
         from industry_snapshot import collect_industry_weekly
     except ImportError:
@@ -323,6 +349,19 @@ def cmd_collect_weekly() -> int:
         print(f"采集失败: {result['error']}")
         return 1
     print(f"完成: {result['industries_saved']} 个行业已写入 industry_weekly（日期 {result['date']}）")
+    # 顺带全量写指数 PE 历史（CSINDEX_MAP 全部代码，从 L2 缓存信封提取）
+    pe_result = _persist_index_pe(None)
+    if pe_result.get("error"):
+        print(f"⚠️ 指数 PE 入库失败: {pe_result['error']}", file=sys.stderr)
+    elif pe_result.get("rows_saved", 0) == 0:
+        # 0 行 ≠ 成功：信封全部缺失（非交易日/取数失败）需要显式告警（D5）
+        print(
+            f"⚠️ 指数 PE 历史: 0 行可写（{pe_result.get('index_codes', 0)} 个指数代码均无 ok 信封；"
+            "非交易日或取数失败）",
+            file=sys.stderr,
+        )
+    else:
+        print(f"指数 PE 历史: {pe_result['rows_saved']} 行已写入 index_pe_history（{pe_result['index_codes']} 个指数代码）")
     return 0
 
 

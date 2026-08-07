@@ -29,3 +29,69 @@ def safe_close(conn: sqlite3.Connection, *, logger: logging.Logger | None = None
     except Exception:
         if logger is not None:
             logger.debug("sqlite close failed", exc_info=True)
+
+
+def upsert_daily_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    rows: list[dict],
+    *,
+    pk: tuple[str, ...],
+    merge: bool = False,
+) -> int:
+    """日快照批量写入（合并 macro_snapshots / market_snapshots / index_pe_history 三处拷贝）。
+
+    - ``merge=False``：``INSERT OR REPLACE``（整行替换，PK 冲突时按现有语义）。
+    - ``merge=True``：``INSERT ... ON CONFLICT(pk) DO UPDATE SET``
+      ``col=COALESCE(excluded.col, table.col)`` — 逐列合并：新值非 NULL 覆盖，
+      新值 NULL 保留旧值。防同一天第二次写入（部分指标 fetch 失败为 None、
+      或 7d TTL 缓存旧值）冲掉早先写入的好值。冲突时不更新 PK 列，
+      ``collected_at`` 类时间戳列保留首次写入值。
+
+    rows 为 dict 列表，键即列名（各 row 键必须一致）；返回写入行数。
+    table/pk 必须为代码控制的字面量，不拼接外部输入。
+    """
+    if not rows:
+        return 0
+    columns = list(rows[0].keys())
+    assert all(list(r.keys()) == columns for r in rows), "rows must share identical keys"
+    ph = ",".join("?" * len(columns))
+    cols_sql = ",".join(columns)
+    if merge:
+        pk_cols = ",".join(pk)
+        assign = ",".join(
+            f"{col}=COALESCE(excluded.{col}, {table}.{col})"
+            for col in columns
+            if col not in pk
+        )
+        sql = (
+            f"INSERT INTO {table} ({cols_sql}) VALUES ({ph}) "
+            f"ON CONFLICT({pk_cols}) DO UPDATE SET {assign}"
+        )
+    else:
+        sql = f"INSERT OR REPLACE INTO {table} ({cols_sql}) VALUES ({ph})"
+    for row in rows:
+        conn.execute(sql, tuple(row.get(col) for col in columns))
+    return len(rows)
+
+
+def load_recent_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    *,
+    limit: int,
+    order_col: str = "date",
+    where: str = "",
+    params: tuple = (),
+) -> list[dict]:
+    """近 N 行按 order_col 降序取后反转（升序），供分位/趋势窗口消费。
+
+    对齐三处历史实现的 ``SELECT * ... ORDER BY {order_col} DESC LIMIT ?
+    → reversed`` 模式。table/order_col/where 必须为代码控制的字面量。
+    """
+    sql = f"SELECT * FROM {table}"
+    if where:
+        sql += f" WHERE {where}"
+    sql += f" ORDER BY {order_col} DESC LIMIT ?"
+    rows = conn.execute(sql, (*params, int(limit))).fetchall()
+    return [dict(r) for r in reversed(rows)]

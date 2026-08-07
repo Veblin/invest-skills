@@ -45,7 +45,20 @@ _SNAPSHOT_DATA_KEYS = (
 # ---------------------------------------------------------------------------
 
 from db import _conn, _safe_close  # noqa: E402
+from db_util import load_recent_rows, upsert_daily_rows  # noqa: E402
 from lib.store import init_db  # noqa: E402  # 确保 market_snapshots 表存在
+
+# market_snapshots 表列（与 store.init_db schema 对齐；写入统一走 upsert_daily_rows）
+_MARKET_SNAPSHOT_COLUMNS = (
+    "date", "margin_balance", "margin_buy_amount", "ad_ratio",
+    "limit_up_count", "limit_down_count", "lu_ld_ratio", "total_turnover",
+    "sse_float_mcap", "szse_float_mcap",
+    "margin_to_mcap", "margin_buy_to_turnover", "margin_20d_change",
+    "ad_ratio_5d_ma", "limit_down_20d_pct",
+    "erp", "pcr", "below_book_pct",
+    "northbound_net_inflow", "northbound_direction", "northbound_source",
+    "env_label",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -164,34 +177,11 @@ def _auto_persist(snap: dict) -> None:
         init_db()
         c = _conn()
         try:
-            c.execute("""
-                INSERT OR REPLACE INTO market_snapshots
-                (date, margin_balance, margin_buy_amount, ad_ratio,
-                 limit_up_count, limit_down_count, lu_ld_ratio, total_turnover,
-                 sse_float_mcap, szse_float_mcap,
-                 margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
-                 ad_ratio_5d_ma, limit_down_20d_pct,
-                 erp, pcr, below_book_pct,
-                 northbound_net_inflow, northbound_direction, northbound_source,
-                 env_label)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                snap["date"],
-                snap.get("margin_balance"), snap.get("margin_buy_amount"),
-                snap.get("ad_ratio"),
-                snap.get("limit_up_count"), snap.get("limit_down_count"),
-                snap.get("lu_ld_ratio"),
-                snap.get("total_turnover"),
-                snap.get("sse_float_mcap"), snap.get("szse_float_mcap"),
-                snap.get("margin_to_mcap"), snap.get("margin_buy_to_turnover"),
-                snap.get("margin_20d_change"), snap.get("ad_ratio_5d_ma"),
-                snap.get("limit_down_20d_pct"),
-                snap.get("erp"), snap.get("pcr"), snap.get("below_book_pct"),
-                snap.get("northbound_net_inflow"),
-                snap.get("northbound_direction"),
-                snap.get("northbound_source"),
-                snap.get("env_label"),
-            ))
+            upsert_daily_rows(
+                c, "market_snapshots",
+                [{col: snap.get(col) for col in _MARKET_SNAPSHOT_COLUMNS}],
+                pk=("date",), merge=False,
+            )
             c.commit()
         except Exception:
             c.rollback()
@@ -249,32 +239,11 @@ def save_snapshot() -> dict[str, Any] | None:
     # 写入
     c = _conn()
     try:
-        c.execute("""
-            INSERT OR REPLACE INTO market_snapshots
-            (date, margin_balance, margin_buy_amount, ad_ratio,
-             limit_up_count, limit_down_count, lu_ld_ratio, total_turnover,
-             sse_float_mcap, szse_float_mcap,
-             margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
-             ad_ratio_5d_ma, limit_down_20d_pct,
-             erp, pcr, below_book_pct,
-             northbound_net_inflow, northbound_direction, northbound_source,
-             env_label)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            snap["date"],
-            snap["margin_balance"], snap["margin_buy_amount"], snap["ad_ratio"],
-            snap["limit_up_count"], snap["limit_down_count"], snap["lu_ld_ratio"],
-            snap["total_turnover"],
-            snap["sse_float_mcap"], snap["szse_float_mcap"],
-            snap["margin_to_mcap"], snap["margin_buy_to_turnover"],
-            snap["margin_20d_change"], snap["ad_ratio_5d_ma"],
-            snap["limit_down_20d_pct"],
-            snap["erp"], snap["pcr"], snap["below_book_pct"],
-            snap.get("northbound_net_inflow"),
-            snap.get("northbound_direction"),
-            snap.get("northbound_source"),
-            snap.get("env_label"),
-        ))
+        upsert_daily_rows(
+            c, "market_snapshots",
+            [{col: snap.get(col) for col in _MARKET_SNAPSHOT_COLUMNS}],
+            pk=("date",), merge=False,
+        )
         c.commit()
         logger.info("market_snapshot %s saved", snap["date"])
         return snap
@@ -296,11 +265,7 @@ def load_history(days: int = 60) -> list[dict]:
     """
     c = _conn()
     try:
-        rows = c.execute(
-            "SELECT * FROM market_snapshots ORDER BY date DESC LIMIT ?",
-            (days,),
-        ).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        return load_recent_rows(c, "market_snapshots", limit=int(days))
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return []

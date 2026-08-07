@@ -126,7 +126,7 @@ class TestFetchCsindexPe:
         mock_bridge.return_value = {
             "status": "ok",
             "index_pe": 0.0,
-            "index_pe_note": "来源: csindex 000300，仅 20 条历史，无可靠分位；市盈率1=股本加权，市盈率2=流通加权",
+            "index_pe_note": "来源: csindex 000300，单窗 20 条历史；市盈率1=股本加权，市盈率2=流通加权（历史分位见 index_pe_pct）",
         }
 
         result: dict = {"_errors": []}
