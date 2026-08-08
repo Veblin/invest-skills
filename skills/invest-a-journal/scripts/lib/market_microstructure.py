@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from typing import Any
 
@@ -317,8 +318,14 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
         snap["margin_buy_to_turnover"] = round(buy / turnover * 100, 2)
 
     # 9. 融资余额20日变化率
+    # 注意：与步骤 10/11 同型——history 已含今日刚持久化的行（snapshot→_auto_persist→load_history），
+    # 必须剔除今日，否则 20 日窗口实际只跨 19 个间隔、lookback[-20] 锚定 T-19 而非 T-20
+    # （与 cd5e7a4 修复的双计 bug 同类，此前遗漏本步骤）
     if margin is not None and len(history) >= 20:
-        lookback = [h for h in history if h.get("margin_balance") is not None]
+        snap_date_9 = snap.get("date")
+        hist_ex_today_9 = [h for h in history
+                           if (h.get("date") or h.get("trade_date")) != snap_date_9]
+        lookback = [h for h in hist_ex_today_9 if h.get("margin_balance") is not None]
         if len(lookback) >= 20:
             prev_margin = lookback[-20].get("margin_balance")
             if prev_margin and prev_margin > 0:
@@ -1040,3 +1047,220 @@ def apply_env_guardrail(evaluation_json: dict, snap: dict | None = None) -> dict
 
     evaluation_json["blind_spots"] = blind_spots
     return evaluation_json
+
+
+def zt_industry_flow(days: int = 10, return_daily: bool = False) -> dict[str, Any]:
+    """涨停行业轮动（近 N 交易日东财涨停池按行业聚合）。
+
+    分析时按需调用的补充材料（invest-a-pulse 极端情绪维度），**不进入
+    snapshot() 常规输出**。东财不可用时 available=False 降级，不阻断。
+
+    return_daily=True 时额外返回 daily（{日期: {行业: 涨停数}}），
+    供板块簇相关性/跷跷板检验等二次分析复用。
+
+    返回：
+    - covered_dates: 实际覆盖交易日（YYYYMMDD，非交易日/失败日跳过）
+    - latest_date / latest_total: 最新交易日及涨停家数
+    - top5: 最新日涨停家数 Top5（并列按 N 日累计），含 n_day_first_half/
+      n_day_second_half 前后半段拆分（轮动方向判断用）
+    - top5_share_pct: Top5 合计占当日涨停总数 %（Python 计算）
+    - industry_trend: 全行业 N 日聚合 {行业: {count, days_active, ...}}
+    - daily: return_daily=True 时返回 {日期: {行业: 涨停数}}
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "window_days": days,
+        "covered_dates": [],
+        "latest_date": None,
+        "latest_total": None,
+        "top5": [],
+        "top5_share_pct": None,
+        "industry_trend": {},
+        "_errors": [],
+    }
+    try:
+        import akshare as ak
+        today = shanghai_today()
+        with akshare_direct_session():
+            cal = ak.tool_trade_date_hist_sina()
+        cal_dates = [str(d).replace("-", "") for d in cal["trade_date"]]
+        dates = [d for d in cal_dates if d <= today][-days:]
+
+        daily: dict[str, dict[str, int]] = {}
+        for d in dates:
+            try:
+                with akshare_direct_session():
+                    df = ak.stock_zt_pool_em(date=d)
+                if df is None or df.empty or "所属行业" not in df.columns:
+                    result["_errors"].append(f"{d}: empty or no industry col")
+                    continue
+                daily[d] = df.groupby("所属行业").size().to_dict()
+            except Exception as exc:
+                logger.warning("zt_industry_flow %s fetch failed: %s", d, exc)
+                result["_errors"].append(f"{d}: {type(exc).__name__}")
+
+        if not daily:
+            return result
+
+        covered = sorted(daily)
+        result["available"] = True
+        result["covered_dates"] = covered
+        latest = covered[-1]
+        result["latest_date"] = latest
+        latest_counts = daily[latest]
+        result["latest_total"] = sum(latest_counts.values())
+
+        # 全行业聚合 + 前后半段拆分（轮动方向）
+        n = len(covered)
+        mid = n // 2
+        first_half = covered[:mid] or [covered[0]]
+        second_half = covered[mid:]
+        all_inds = {ind for dd in daily.values() for ind in dd}
+        trend: dict[str, Any] = {}
+        for ind in all_inds:
+            cnt = [daily[dd].get(ind, 0) for dd in covered]
+            trend[ind] = {
+                "count": sum(cnt),
+                "days_active": sum(1 for c in cnt if c > 0),
+                "first_half": sum(daily[dd].get(ind, 0) for dd in first_half),
+                "second_half": sum(daily[dd].get(ind, 0) for dd in second_half),
+                "latest": latest_counts.get(ind, 0),
+            }
+        result["industry_trend"] = trend
+
+        # Top5：最新日涨停数降序，并列按 N 日累计
+        top = sorted(latest_counts.items(),
+                     key=lambda kv: (-kv[1], -trend[kv[0]]["count"]))[:5]
+        result["top5"] = [
+            {"industry": ind, "count": c,
+             "n_day_total": trend[ind]["count"],
+             "n_day_days_active": trend[ind]["days_active"],
+             "n_day_first_half": trend[ind]["first_half"],
+             "n_day_second_half": trend[ind]["second_half"]}
+            for ind, c in top
+        ]
+        if result["latest_total"]:
+            result["top5_share_pct"] = round(
+                sum(x["count"] for x in result["top5"]) / result["latest_total"] * 100, 1)
+
+        if return_daily:
+            result["daily"] = daily
+    except Exception as exc:
+        logger.warning("zt_industry_flow failed: %s", exc)
+        result["_errors"].append(f"fatal: {type(exc).__name__}: {exc}")
+    return result
+
+
+# 板块簇映射（东财涨停池「所属行业」归并，研究假设非官方分类）
+_ZT_CLUSTERS: dict[str, tuple[str, ...]] = {
+    "电子/AI算力": ("元件", "半导体", "通信设备", "消费电子", "光学光电", "其他电子", "电子化学", "计算机设", "军工电子"),
+    "医药": ("医疗服务", "化学制药", "生物制品", "中药Ⅱ", "医疗器械", "医药商业"),
+    "TMT软/传媒": ("软件开发", "IT服务Ⅱ", "数字媒体", "互联网电", "游戏Ⅱ", "出版", "广告营销", "影视院线", "通信服务", "教育"),
+    "电力设备/新能源": ("电网设备", "电池", "光伏设备", "风电设备", "电机Ⅱ", "其他电源"),
+    "资源/周期": ("贵金属", "小金属", "工业金属", "煤炭开采", "普钢", "特钢Ⅱ", "化学原料", "化学制品", "化学纤维",
+                  "炼化及贸", "水泥", "玻璃玻纤", "非金属材", "农化制品", "能源金属"),
+    "地产链/建筑": ("房地产开", "房地产服", "装修装饰", "装修建材", "家居用品", "家电零部", "厨卫电器", "小家电",
+                   "专业工程", "基础建设", "工程咨询", "房屋建设"),
+    "消费": ("饮料乳品", "食品加工", "休闲食品", "白酒Ⅱ", "非白酒", "调味发酵", "农产品加", "养殖业", "种植业",
+             "化妆品", "个护用品", "服装家纺", "纺织制造", "饰品", "酒店餐饮", "旅游及景", "一般零售",
+             "文娱用品", "造纸", "包装印刷"),
+    "机械/交运": ("通用设备", "专用设备", "自动化设", "工程机械", "环保设备", "汽车零部", "商用车", "乘用车",
+                  "铁路公路", "物流", "航空装备", "航天装备", "地面兵装", "航海装备"),
+    "公用事业": ("电力", "燃气Ⅱ"),
+    "金融": ("证券Ⅱ", "多元金融"),
+}
+
+# Pearson 双尾 p<0.05 临界值查表（n → r_crit，保守取 ≤n 的最大临界）
+_PEARSON_CRIT = ((10, 0.632), (12, 0.576), (15, 0.514), (18, 0.468), (20, 0.444),
+                 (25, 0.396), (30, 0.361), (40, 0.316), (50, 0.279), (60, 0.254))
+
+
+def _pearson_crit(n: int) -> float:
+    for nn, c in _PEARSON_CRIT:
+        if n <= nn:
+            return c
+    return _PEARSON_CRIT[-1][1]
+
+
+def zt_seesaw(days: int = 30, min_days: int = 10) -> dict[str, Any]:
+    """涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比）。
+
+    **参考内容，不构成投资决策**：描述资金在板块簇间的腾挪结构，
+    帮助分析盘面强弱分化的来源，不输出任何方向性预测。
+
+    基于 zt_industry_flow(days, return_daily=True) 的 daily 矩阵：
+    - seesaw_pairs: 显著负相关对（|r| > 临界值，p<0.05 双尾），按 |r| 降序
+    - sync_pairs: 显著正相关对（同步资金池）
+    - half_split: 前后半段占比变化（Δpp），验证轮动方向
+    - 占比口径（簇涨停家数/当日涨停总数），控制总量波动
+    - 东财不可用或样本 <min_days 时 available=False 并说明原因
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "n_days": 0,
+        "dates": [],
+        "significance": None,
+        "seesaw_pairs": [],
+        "sync_pairs": [],
+        "half_split": [],
+        "_errors": [],
+    }
+    flow = zt_industry_flow(days=days, return_daily=True)
+    if not flow.get("available") or not flow.get("daily"):
+        result["_errors"] = flow.get("_errors", ["zt_industry_flow unavailable"])
+        result["_errors"].append("东财涨停池不可用，跷跷板检验跳过")
+        return result
+    daily: dict[str, dict[str, int]] = flow["daily"]
+    dates = sorted(daily)
+    n = len(dates)
+    result["n_days"] = n
+    result["dates"] = dates
+    if n < min_days:
+        result["_errors"].append(f"样本不足: {n} 日 < {min_days}，跳过")
+        return result
+
+    total_by_date = {d: sum(daily[d].values()) for d in dates}
+    cluster_names = list(_ZT_CLUSTERS)
+    share = {
+        c: [sum(daily[d].get(i, 0) for i in _ZT_CLUSTERS[c]) / total_by_date[d] * 100
+            for d in dates]
+        for c in cluster_names
+    }
+
+    def _pearson(x: list[float], y: list[float]) -> float:
+        mx, my = sum(x) / n, sum(y) / n
+        cov = sum((a - mx) * (b - my) for a, b in zip(x, y))
+        sx = math.sqrt(sum((a - mx) ** 2 for a in x))
+        sy = math.sqrt(sum((b - my) ** 2 for b in y))
+        return cov / (sx * sy) if sx and sy else 0.0
+
+    crit = _pearson_crit(n)
+    result["significance"] = {"n": n, "r_crit": crit, "note": f"双尾 p<0.05，|r|>{crit} 为显著"}
+    for i in range(len(cluster_names)):
+        for j in range(i + 1, len(cluster_names)):
+            a, b = cluster_names[i], cluster_names[j]
+            r = _pearson(share[a], share[b])
+            if r <= -crit:
+                result["seesaw_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
+            elif r >= crit:
+                result["sync_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
+    result["seesaw_pairs"].sort(key=lambda p: p["r"])
+    result["sync_pairs"].sort(key=lambda p: -p["r"])
+
+    # 前后半段占比均值差（Δpp）；share[c] 为按 dates 顺序的列表
+    mid = n // 2
+    h1, h2 = dates[:mid], dates[mid:]
+    if h1 and h2:
+        half = []
+        for c in cluster_names:
+            vals = share[c]
+            m1 = sum(vals[:mid]) / len(h1)
+            m2 = sum(vals[mid:]) / len(h2)
+            half.append({"cluster": c, "first_half_share": round(m1, 1),
+                         "second_half_share": round(m2, 1), "delta_pp": round(m2 - m1, 1)})
+        half.sort(key=lambda x: -x["delta_pp"])
+        result["half_split"] = {"first_half": [h1[0], h1[-1]], "second_half": [h2[0], h2[-1]],
+                                "rows": half}
+
+    result["available"] = True
+    return result

@@ -42,15 +42,25 @@ metadata:
   uv run python -c "from market_microstructure import load_history; import json; print(json.dumps(load_history(60), ensure_ascii=False))" 2>/dev/null
 
   # 3. 长序列历史（分析必需 — 估值分位 + 杠杆趋势）
-  uv run python -c "import akshare as ak, bisect
+  # ⚠️ 两融窗口禁止硬编码日期（曾冻结在 2026-08-02 过期 6 天）——end=今天、start=120 天前动态计算
+  uv run python -c "import akshare as ak, bisect, datetime as _dt
 def pct(vals, v): vals=sorted(vals); return round(bisect.bisect_left(vals,v)/len(vals)*100,1)
 pe=ak.stock_index_pe_lg(symbol='沪深300').dropna(subset=['滚动市盈率'])
 pv=pe['滚动市盈率'].astype(float).tolist(); print('PE', pv[-1], '250d', pct(pv[-250:],pv[-1]), '5y', pct(pv[-1250:],pv[-1]))
 pb=ak.stock_market_pb_lg(symbol='上证').dropna(subset=['市净率'])
 bv=pb['市净率'].astype(float).tolist(); print('PB', bv[-1], '250d', pct(bv[-250:],bv[-1]), '5y', pct(bv[-1250:],bv[-1]))
-m=ak.stock_margin_sse(start_date='20260401', end_date='20260802').sort_values('信用交易日期')
+_end=_dt.date.today().strftime('%Y%m%d'); _start=(_dt.date.today()-_dt.timedelta(days=120)).strftime('%Y%m%d')
+m=ak.stock_margin_sse(start_date=_start, end_date=_end).sort_values('信用交易日期')
 mz=m['融资余额'].astype(float); print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-1]/mz.iloc[-21]-1)*100,2))
 " 2>/dev/null
+
+  # 4. 涨停行业轮动（东财可用时必做；极端情绪/广度维度的行业视角）
+  cd skills/invest-a-journal/scripts/lib && \
+  uv run python -c "from market_microstructure import zt_industry_flow; import json; print(json.dumps(zt_industry_flow(10), ensure_ascii=False))" 2>/dev/null
+
+  # 5. 跷跷板检验（东财可用时；板块簇资金对立参考）
+  cd skills/invest-a-journal/scripts/lib && \
+  uv run python -c "from market_microstructure import zt_seesaw; import json; print(json.dumps(zt_seesaw(30), ensure_ascii=False))" 2>/dev/null
        ↓
 Claude: 按输出模板合成「分析版」报告
        ↓
@@ -67,6 +77,8 @@ Claude: 按输出模板合成「分析版」报告
 |------|------|------|
 | `snapshot()` | 当日所有 Tier 1-3 指标 + 标签 | dict（含 `_errors` 列表） |
 | `load_history(60)` | 近 60 交易日历史快照 | list[dict]（按 date ASC） |
+| `zt_industry_flow(days=10)` | 🆕 涨停行业轮动（东财涨停池按行业聚合，近 N 交易日） | dict（Top5 + 全行业 N 日趋势 + 前后半段拆分；`return_daily=True` 返回每日矩阵供二次分析；东财失败 `available: false` 不阻断） |
+| `zt_seesaw(days=30)` | 🆕 涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比） | dict（seesaw_pairs 显著负相关 / sync_pairs 显著正相关 / half_split Δpp；样本 <10 日或东财失败返回 `available: false`） |
 
 ### snapshot() 关键字段
 
@@ -170,8 +182,27 @@ Claude: 按输出模板合成「分析版」报告
 ## ⚠️ 极端情绪
 **[事实]**
 - 涨跌停比 {lu_ld_ratio} | 跌停 20 日分位 {limit_down_20d_pct}%（缺失时标注原因）
+- 涨停行业轮动（zt_industry_flow 可用时）：前 5 行业 + 各自 N 日趋势（前后半段对比），数字引用引擎字段
 **[分析]**
 情绪温度判断；**数据缺失时明确写「无法定论」，不硬编**；可用涨跌比/涨停家数侧面推断但标注局限
+**行业维度（zt_industry_flow 可用时必做）**：输出**分析结论而非行业数据表**——涨停热度集中度（Top5 占比）、轮入/轮出方向（前后半段对比：哪些行业升温、哪些退潮）、与当前市场主线（题材/主题）的对应关系。示例格式："涨停热度向 X/Y/Z 集中（Top5 合计占比 N%），X 行业近 5 日从 A 家升至 B 家（+C%），属轮入方向；M 行业虽 10 日累计居前但最新 0 家，已轮出"。东财不可用（ProxyError）时标注「行业维度数据缺口」，不硬编。
+[证据强度: ...]
+
+---
+
+## ⚖️ 跷跷板观察（参考，不构成投资决策）
+
+> 基于涨停热度占比的板块簇相关性检验（zt_seesaw），描述**资金在簇间的腾挪结构**，
+> 帮助理解盘面强弱分化的来源。**不构成方向性预测，不构成任何买卖依据。**
+
+**[事实]**
+- 显著跷跷板对（|r| 超样本临界值）：{seesaw_pairs — 如 "资源/周期 ↔ 地产链/建筑 r=-0.74"；标注 n 与临界值}
+- 同步资金池（正相关）：{sync_pairs — 如 "地产链/建筑 ↔ 消费 r=+0.76"}
+- 前后半段占比变化（Δpp）：{half_split 流入/流出 Top 各 2-3 个}
+**[分析]**
+资金在哪些簇之间对立/同池、与今日题材热点的对应关系。解读限于**描述资金腾挪结构**
+（"今日普涨缺承接，因资金在簇间切换而非总量扩张"），**禁止**升级为方向性预测
+（如"X 会接棒 Y"）或买卖信号。样本 <15 日或东财不可用时如实标注，不硬编。
 [证据强度: ...]
 
 ---
@@ -206,9 +237,11 @@ Claude: 按输出模板合成「分析版」报告
    - 量价背离：广度（涨跌比/涨停）必须与量能（成交额）对照
    - 资金分化：北向 vs 两融 vs 量能的方向是否一致
    - 杠杆两分法：当日活跃度（买入/余额）与中期趋势（20 日变化）分开看
+   - 涨停行业轮动：极端情绪必须叠加行业维度（`zt_industry_flow` 可用时）——看热度集中在哪、在向哪轮动，而非只有总数
 4. **P0 规则**：所有分位/比率/变化率必须由 Python 计算后引用，禁止 AI 心算；Python calc 结果标注 `[来源: Python calc: ...]`。
 5. **证据标签**：每段分析末尾附四维标注（强度/来源/时效/交叉），同 CLAUDE.md 规范。
 6. **推测标注**：无历史数据支撑的规律性表述（"历史上常出现…"）必须标注「待验证」或附案例。
+7. **跷跷板观察边界**：`zt_seesaw` 是**参考内容**（帮助分析盘面，不构成投资决策）。解读限于描述资金腾挪结构；**禁止**基于簇间负相关做方向性预测（如"A 簇将接棒 B 簇"）；样本 <15 日时标注「样本不足，规律性结论待更长窗口验证」；half_split 前后分界敏感，Δpp 方向以相关系数（不依赖分界）为主证据。
 
 ---
 
@@ -219,7 +252,8 @@ Claude: 按输出模板合成「分析版」报告
 - **涨跌停比无跌停**：`lu_ld_note == "no_limit_down"` 时标注「无跌停（极端亢奋信号）」
 - **非交易日**：成交额/涨跌比缺失 → 提示「可能非交易日，数据为最近交易日快照」
 - **表内历史不足**（`load_history` 条数 <20）：杠杆/趋势/分位字段为 null → 改用 akshare 长序列补分位；仍缺则标注「待积累」
-- **东财接口被代理阻断**：`index_zh_a_hist` / `stock_zh_a_spot_em` 等可能 ProxyError → 换用非东财源（乐咕 PE/PB、交易所两融），标注替代来源
+- **东财接口被代理阻断**：`index_zh_a_hist` / `stock_zh_a_spot_em` 等可能 ProxyError → 换用非东财源（乐咕 PE/PB、交易所两融），标注替代来源；`zt_industry_flow` 返回 `available: false` 时标注「行业维度数据缺口」，不硬编
+- **涨停行业轮动**：`zt_industry_flow(days)` 依赖东财涨停池，单日失败自动跳过并记录 `_errors`；覆盖日数 <5 时结论标注「样本不足」
 
 ---
 
@@ -231,6 +265,8 @@ Claude: 按输出模板合成「分析版」报告
 - [ ] 覆盖 5 个维度（杠杆 / 广度 / 情绪 / 资金 / 估值），每维有 [事实]+[分析]
 - [ ] 每个数字有来源标注；Python calc 结果标注公式来源
 - [ ] 引擎标签与趋势/分位矛盾时已指出并说明取舍
+- [ ] 涨停行业轮动已尝试（zt_industry_flow 可用时），输出为分析结论（Top5 集中度 + 轮入/轮出方向）而非行业数据表；不可用时标注「行业维度数据缺口」
+- [ ] 跷跷板观察已尝试（zt_seesaw 可用时），输出标注「参考，不构成投资决策」，解读限于资金腾挪结构、无方向性预测；样本不足/东财不可用已标注
 - [ ] 包含交叉验证结论表 + 综合判断段 + 综合环境标签 + 声明
 - [ ] 无单一目标价或仓位数字
 - [ ] 无 AI 心算数字（全部来自引擎字段或 Python calc）
