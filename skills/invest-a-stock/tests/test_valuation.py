@@ -581,6 +581,7 @@ class TestEvEbitda:
         assert b["interest_debt_yi"] == 15.0
         assert r["ebitda_yi"] == 20.0
         assert r["ev_ebitda"] == 5.5
+        assert r["debt_label"] == "短贷+长贷+应付债券"  # 全量可得 → 三科目全称
 
     def test_bridge_missing_debt_falls_back(self):
         from valuation_calc import calc_ev_ebitda
@@ -605,6 +606,8 @@ class TestEvEbitda:
         assert "部分缺失" in r["note"]
         assert "长贷" in r["note"] and "应付债券" in r["note"]
         assert "被低估" in r["note"]
+        # batch-test P1-2: 标签只含可得分量（缺失科目按 0 计不得出现在标签）
+        assert r["debt_label"] == "短贷"
         # 全量可得 → note 为空
         r2 = calc_ev_ebitda(
             total_mv_yi=100.0, cash=5e8,

@@ -1171,13 +1171,16 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
         # 复权状态下：原始 日增长率 基于未复权净值，与调整后的 nav 不匹配
-        # 必须从调整后的 NAV 重新计算收益率，nav_history.change_pct 设为 None
+        # → 从调整后的 NAV 重新计算收益率并回写 change_pct（batch-test P1-5：
+        # 旧实现重算 ret 只进 returns，rows.change_pct 恒 None，字段语义与注释
+        # 承诺不符；下游 compute_history_stats/detect_big_move_days 虽防御性
+        # 自行重算，但统一回写使 nav 路径与 baostock 路径口径一致）
         if adj_map:
             if prev_nav is not None and prev_nav > 0:
                 ret = (nav / prev_nav) - 1.0
                 navs.append(nav)
                 returns.append(ret)
-                rows.append({"date": date_str, "change_pct": None})
+                rows.append({"date": date_str, "change_pct": round(ret * 100, 2)})
                 prev_nav = nav  # D15 fix: 更新 prev_nav 使下期收益率为单期而非累积
             else:
                 # 复权首行，无法计算收益率；保留 NAV 用于 MA/RSI 连续性
@@ -1750,6 +1753,31 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     else:
         trend = "数据不足"
 
+    # 近端（最后 5 日）方向：整体合计定性会掩盖近端转向（batch-test P1-4，
+    # 实例：588000 20 日 +326.92 亿但近 5 日连续净流出 -39.88 亿）。
+    # detail_rows 升序，最后 RECENT_FLOW_DAYS 行即最近窗口。
+    recent_n = 5
+    recent_flows = flows[-recent_n:]
+    recent_flow = round(sum(recent_flows), 2) if recent_flows else None
+    # 「近 N 日」实际跨度：flows 只含份额可算行（fund_share T+1 延迟使尾端
+    # 1-2 日无份额），最近 N 个可算行可能覆盖 >N 个交易日（batch-test P1-4
+    # 二次修复：trend 标注实际跨度，避免「近 5 日」实际跨 7 个交易日失真）。
+    recent_span = recent_n
+    if recent_flows:
+        target = max(len(flows) - recent_n + 1, 1)  # flows 中 recent 段首行序号（1-based）
+        seen = 0
+        for i, r in enumerate(detail_rows):
+            if r.get("flow_est") is not None:
+                seen += 1
+                if seen == target:
+                    recent_span = len(detail_rows) - i
+                    break
+    if recent_flow is not None and total_flow is not None:
+        if total_flow > 5 and recent_flow < 0:
+            trend = f"{trend}（近 {recent_span} 日转净流出 {recent_flow:+.2f} 亿）"
+        elif total_flow < -5 and recent_flow > 0:
+            trend = f"{trend}（近 {recent_span} 日转净流入 {recent_flow:+.2f} 亿）"
+
     # 交易量趋势
     amounts = [r["amount"] for r in detail_rows if r["amount"] is not None]
     avg_amount = round(sum(amounts) / len(amounts), 2) if amounts else None
@@ -1772,6 +1800,8 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             "avg_daily_flow_est": avg_daily,
             "trend": trend,
             "row_count": len(detail_rows),
+            "recent_flow_est": recent_flow,
+            "recent_flow_days": recent_span,
             "avg_amount_e": avg_amount,
             "max_amount_e": max_amount,
             "share_total_change": share_total_change,

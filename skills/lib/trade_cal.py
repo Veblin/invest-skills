@@ -99,12 +99,41 @@ def _fallback_weekdays(n: int) -> list[str]:
     return out
 
 
-def fetch_trade_cal(start_date: str, end_date: str) -> tuple[list[str], bool]:
-    """获取交易日列表，返回 (trade_dates, is_estimated)。
+# 日历缓存（code-review #3：prev/next_trading_day 每次调用发一次 Tushare HTTP，
+# R11b 事件对齐对每条事件调 2 次、重叠窗口反复重拉——单段扩展式缓存：
+# 首次请求合并新旧范围，后续查询在缓存段内直接切片命中，零重复请求）。
+# 请求范围对齐到整月（缓存段月度化）：相邻日期序列的 ±30 天窗口随日期逐日
+# 漂移（end 每天 +1），不对齐则每次跨 1 天都扩展请求；对齐后同月内全部命中。
+# 日历历史固定；未来日期随时间新增，查询范围超出缓存段时自动扩展刷新。
+import calendar as _calendar
+import threading as _threading
 
-    优先使用 Tushare trade_cal（SSE is_open=1）；无 token/不可用/失败/空
-    → 自然日估算（is_estimated=True）。
-    """
+_TRADE_CAL_LOCK = _threading.Lock()
+_TRADE_CAL_SEG: list[str] | None = None      # 升序交易日（已覆盖 [START, END]）
+_TRADE_CAL_SEG_START: str | None = None      # YYYYMMDD
+_TRADE_CAL_SEG_END: str | None = None
+_TRADE_CAL_SEG_ESTIMATED: bool = True
+
+
+def _clear_trade_cal_cache() -> None:
+    """清空日历缓存（测试钩子：fixture 隔离估算/真实两路径）。"""
+    global _TRADE_CAL_SEG, _TRADE_CAL_SEG_START, _TRADE_CAL_SEG_END
+    global _TRADE_CAL_SEG_ESTIMATED
+    with _TRADE_CAL_LOCK:
+        _TRADE_CAL_SEG = None
+        _TRADE_CAL_SEG_START = None
+        _TRADE_CAL_SEG_END = None
+        _TRADE_CAL_SEG_ESTIMATED = True
+
+
+def _month_align_end(d: str) -> str:
+    """YYYYMMDD → 所在月最后一天 YYYYMMDD（请求范围月末对齐）。"""
+    y, m = int(d[:4]), int(d[4:6])
+    return f"{y:04d}{m:02d}{_calendar.monthrange(y, m)[1]:02d}"
+
+
+def _fetch_trade_cal_impl(start_date: str, end_date: str) -> tuple[list[str], bool]:
+    """无缓存的取数实现（缓存命中由 fetch_trade_cal 拦截）。"""
     client = _client()
     if client is None:
         # 无 token/不可用 → 零网络估算（review 第三轮 #5：不构造 client 发请求）
@@ -122,6 +151,38 @@ def fetch_trade_cal(start_date: str, end_date: str) -> tuple[list[str], bool]:
         return _estimate_trade_dates(start_date, end_date), True
     date_col = "cal_date" if "cal_date" in cal.columns else "trade_date"
     return sorted(cal[date_col].astype(str).tolist()), False
+
+
+def fetch_trade_cal(start_date: str, end_date: str) -> tuple[list[str], bool]:
+    """获取交易日列表，返回 (trade_dates, is_estimated)。
+
+    优先使用 Tushare trade_cal（SSE is_open=1）；无 token/不可用/失败/空
+    → 自然日估算（is_estimated=True）。带单段扩展式缓存（见模块注释）。
+    """
+    global _TRADE_CAL_SEG, _TRADE_CAL_SEG_START, _TRADE_CAL_SEG_END, _TRADE_CAL_SEG_ESTIMATED
+    with _TRADE_CAL_LOCK:
+        if (_TRADE_CAL_SEG is not None and _TRADE_CAL_SEG_START is not None
+                and _TRADE_CAL_SEG_START <= start_date <= end_date <= _TRADE_CAL_SEG_END):
+            return ([d for d in _TRADE_CAL_SEG if start_date <= d <= end_date],
+                    _TRADE_CAL_SEG_ESTIMATED)
+        req_start = start_date
+        req_end = end_date
+        if _TRADE_CAL_SEG_START is not None and _TRADE_CAL_SEG_END is not None:
+            req_start = min(start_date, _TRADE_CAL_SEG_START)
+            req_end = max(end_date, _TRADE_CAL_SEG_END)
+        # 月度对齐（见模块注释）：请求范围含整月，相邻日期序列 prev/next 同月命中
+        req_start = req_start[:6] + "01"
+        req_end = _month_align_end(req_end)
+    # 网络/估算在锁外执行（避免持锁阻塞并发调用）
+    dates, estimated = _fetch_trade_cal_impl(req_start, req_end)
+    with _TRADE_CAL_LOCK:
+        if dates:
+            # req 范围 = 旧缓存段与本次窗口的并集 → 直接整体替换（单调扩展）
+            _TRADE_CAL_SEG = dates
+            _TRADE_CAL_SEG_START = req_start
+            _TRADE_CAL_SEG_END = req_end
+            _TRADE_CAL_SEG_ESTIMATED = estimated
+        return ([d for d in dates if start_date <= d <= end_date], estimated)
 
 
 def last_trade_dates(n: int) -> list[str]:

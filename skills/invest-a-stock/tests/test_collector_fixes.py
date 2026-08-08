@@ -457,3 +457,37 @@ class TestTencentBjSkip:
         assert "北交所" in _qp_tencent("830799")
         assert _qp_tencent("600000") == "qt.gtimg.cn/q=sh600000"
         assert _qp_tencent("000001") == "qt.gtimg.cn/q=sz000001"
+
+
+# ---------- 缺陷 7：_ms_try_fetch 异常不泄漏（batch-test P1-1） ----------
+
+class TestMsTryFetchExceptionNotLeaked:
+    """异常分支必须写静态 unavailable_msg，不得把 str(exc) 写入 availability
+    （否则渲染层输出「不可得：'str' object has no attribute 'get'」式裸异常文本）。"""
+
+    def test_exception_writes_static_msg_not_exc(self):
+        from lib.collector._orchestrate import _ms_set_unavailable, _ms_try_fetch
+
+        def _boom():
+            raise AttributeError("'str' object has no attribute 'get'")
+
+        result: dict = {"availability": {}}
+        _ms_try_fetch(
+            result, "new_high_ratio", _boom,
+            unavailable_msg="daily sample empty or insufficient",
+        )
+        status = result["availability"]["new_high_ratio"]
+        assert status.startswith("unavailable:")
+        assert "'str' object" not in status
+        assert "daily sample empty or insufficient" in status
+
+    def test_none_value_also_uses_static_msg(self):
+        from lib.collector._orchestrate import _ms_try_fetch
+
+        result: dict = {"availability": {}}
+        _ms_try_fetch(
+            result, "pmi", lambda: None,
+            unavailable_msg="akshare macro_china_pmi unavailable",
+        )
+        assert result["availability"]["pmi"] == (
+            "unavailable: akshare macro_china_pmi unavailable")

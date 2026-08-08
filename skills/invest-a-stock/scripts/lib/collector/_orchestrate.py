@@ -2921,7 +2921,11 @@ def _ms_try_fetch(
         else:
             result["availability"][key] = "available"
     except Exception as exc:
-        _ms_set_unavailable(result["availability"], key, str(exc))
+        # 异常仅进日志；availability 用静态描述（str(exc) 会泄漏底层
+        # Python 异常文本到报告「不可得：{reason}」渲染，用户不可读，
+        # 且违反 R12h「不可得 + attempted sources」标注规范）
+        logger.warning("market_structure %s fetch failed: %s", key, exc)
+        _ms_set_unavailable(result["availability"], key, unavailable_msg)
 
 
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:

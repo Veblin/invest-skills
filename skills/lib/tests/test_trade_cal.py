@@ -15,6 +15,7 @@ sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录�
 def _no_client(monkeypatch):
     import trade_cal as tc
 
+    tc._clear_trade_cal_cache()  # 隔离模块级日历缓存（code-review #3 memoization）
     monkeypatch.setattr(tc, "env", None)
     monkeypatch.setattr(tc, "_CLIENT", None)
     return tc
@@ -69,6 +70,7 @@ class TestRealCalendarPath:
     def _with_client(self, monkeypatch):
         import trade_cal as tc
 
+        tc._clear_trade_cal_cache()  # 隔离模块级日历缓存（code-review #3 memoization）
         monkeypatch.setattr(tc, "_CLIENT", _FakeClient())
         return tc
 
@@ -87,3 +89,70 @@ class TestRealCalendarPath:
         dates, est = tc.fetch_trade_cal("20260508", "20260512")
         assert est is False
         assert dates == ["20260508", "20260509", "20260511", "20260512"]
+
+
+class TestTradeCalCache:
+    """code-review #3：日历缓存——重叠窗口二次查询零网络请求（R11b 事件对齐场景）。"""
+
+    def test_overlapping_windows_serve_from_cache(self, monkeypatch):
+        import trade_cal as tc
+
+        calls: list[str] = []
+
+        class _CountingClient:
+            def query(self, api, **params):
+                calls.append(f"{params['start_date']}~{params['end_date']}")
+                cal = ["20260701", "20260702", "20260703", "20260704",
+                       "20260706", "20260707", "20260708", "20260709",
+                       "20260710"]
+                in_range = [c for c in cal
+                            if params["start_date"] <= c <= params["end_date"]]
+                return pd.DataFrame({"cal_date": in_range})
+
+        tc._clear_trade_cal_cache()
+        monkeypatch.setattr(tc, "_CLIENT", _CountingClient())
+        # 第一次：请求范围月度对齐 → 实际请求 [20260601, 20260731] 并缓存
+        d1, _ = tc.fetch_trade_cal("20260601", "20260710")
+        assert d1[0] == "20260701" and d1[-1] == "20260710"
+        # 第二次：完全落在缓存段内 → 零新请求
+        d2, _ = tc.fetch_trade_cal("20260702", "20260709")
+        assert d2 == ["20260702", "20260703", "20260704",
+                      "20260706", "20260707", "20260708", "20260709"]
+        # 第三次：同月内 end 漂移 → 缓存命中（月度对齐吞掉日级扩展）
+        d3, _ = tc.fetch_trade_cal("20260708", "20260720")
+        assert d3 == ["20260708", "20260709", "20260710"]
+        assert len(calls) == 1  # 对齐后第三次不再触发扩展
+        # 第四次：跨月（end 进入 8 月）→ 扩展请求一次，合并后全量命中
+        d4, _ = tc.fetch_trade_cal("20260725", "20260810")
+        assert d4 == []
+        assert len(calls) == 2
+        # 第五次：新扩展范围内命中 → 零请求
+        d5, _ = tc.fetch_trade_cal("20260801", "20260805")
+        assert d5 == []
+        assert len(calls) == 2
+
+    def test_prev_next_share_cached_calendar(self, monkeypatch):
+        """事件对齐场景：N 个日期的 prev/next 只在首次各请求一次。"""
+        import trade_cal as tc
+
+        calls: list[str] = []
+
+        class _CountingClient:
+            def query(self, api, **params):
+                calls.append(f"{params['start_date']}~{params['end_date']}")
+                cal = ["20260701", "20260702", "20260703",
+                       "20260706", "20260707", "20260708",
+                       "20260709", "20260710", "20260713"]
+                in_range = [c for c in cal
+                            if params["start_date"] <= c <= params["end_date"]]
+                return pd.DataFrame({"cal_date": in_range})
+
+        tc._clear_trade_cal_cache()
+        monkeypatch.setattr(tc, "_CLIENT", _CountingClient())
+        for d in (datetime.date(2026, 7, 6), datetime.date(2026, 7, 7),
+                  datetime.date(2026, 7, 8)):
+            _ = tc.prev_trading_day(d)
+            _ = tc.next_trading_day(d)
+        # 3 个日期 × prev/next：缓存扩展后仅 2 次请求（首 prev + 首 next 范围
+        # 合并），后续 4 次调用全部命中——修复前为 6 次顺序请求
+        assert len(calls) == 2

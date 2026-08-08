@@ -449,6 +449,11 @@ def calc_ev_ebitda(
                                ("应付债券", bond_payable))
         if v is None
     ]
+    # 实际可得分量标签（引擎预计算，供渲染行精确标注构成；缺失分量
+    # 按 0 计但不得出现在标签里，否则行内口径误导 —— batch-test P1-2）
+    debt_parts = [label for label, v in (("短贷", st_loan), ("长贷", lt_loan),
+                                         ("应付债券", bond_payable))
+                  if v is not None]
     if debt is None:
         note = ("有息负债不可得（低积分档字段过滤），EV 为净现金口径近似，"
                 "若公司有负债则实际 EV 更高")
@@ -473,6 +478,7 @@ def calc_ev_ebitda(
         "ebitda_period": ebitda_period,
         "ev_ebitda": ratio,
         "debt_available": debt is not None,
+        "debt_label": "+".join(debt_parts) if debt_parts else None,
         "missing": missing,
         "note": note,
     }

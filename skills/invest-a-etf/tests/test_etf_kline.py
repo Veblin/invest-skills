@@ -121,3 +121,21 @@ def test_aligned_nav_returns_small_dividend_with_market_drop():
     # 07-02 用新因子 → navs[1] = 0.9408（连续），收益率 = 0.9408/0.9800-1 = -4%（纯市场）
     assert navs == pytest.approx([0.9800, 0.9408, 0.9502], abs=1e-3)
     assert returns[0] == pytest.approx(-0.0400, abs=1e-3)
+
+
+def test_aligned_nav_returns_adj_rewrites_change_pct():
+    """batch-test P1-5：复权状态下 change_pct 必须基于调整后 NAV 回写
+    （旧实现恒 None，字段语义与注释承诺不符；nav 路径与 baostock 路径口径
+    由此统一）。"""
+    adj_map = {"20260511": 1.0, "20260512": 3.0, "20260513": 3.0}
+    df = pd.DataFrame([
+        {"净值日期": "2026-05-11", "单位净值": 1.0978, "日增长率": 1.0},
+        {"净值日期": "2026-05-12", "单位净值": 0.3699, "日增长率": 0.5},
+        {"净值日期": "2026-05-13", "单位净值": 0.3710, "日增长率": 0.3},
+    ])
+    navs, returns, rows = _aligned_nav_returns(df, adj_map=adj_map)
+    # 首行无法计算 → None；其余行 change_pct = 重算收益率 × 100（2 位小数）
+    assert rows[0]["change_pct"] is None
+    for i in range(1, len(rows)):
+        assert rows[i]["change_pct"] == round(returns[i - 1] * 100, 2)
+    assert rows[1]["change_pct"] == pytest.approx(1.08, abs=0.01)  # (0.3699/0.3659-1) ≈ 1.08%

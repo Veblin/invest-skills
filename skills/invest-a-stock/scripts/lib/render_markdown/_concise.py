@@ -704,7 +704,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         if _extras:
             parts.append("\n\n".join(_extras))
         parts.extend([
-            _report_toc(),
+            _report_toc(collection),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
             _section_dynamic_drivers(

@@ -3464,7 +3464,7 @@ def _section_technical_brief(
 
 
 # --- _report_toc ---
-def _report_toc() -> str:
+def _report_toc(collection: dict[str, Any] | None = None) -> str:
     # LAW 17: 标题动态包含数据，Markdown 锚点不可预测，TOC 仅作视觉目录
     entries = [
         "0. 核心问题与触发源",
@@ -3479,8 +3479,14 @@ def _report_toc() -> str:
         "PE Band（5年轨道）",
     ]
     # R12g-A 头部区块（brief/concise/full 三模式 engine extras 均渲染）——
-    # 标签与渲染顺序单一来源 _base._R12G_HEADER_SECTIONS，禁止在此手写新增条目
-    entries.extend(label for label, _fn in _R12G_HEADER_SECTIONS)
+    # 标签与渲染顺序单一来源 _base._R12G_HEADER_SECTIONS，禁止在此手写新增条目。
+    # 「连板结构」为条件渲染（近 5 日 ≥2 涨停触发，见 _limit_streak_section_active），
+    # 未触发时 TOC 不得列出不存在的章节（batch-test P1-3）。
+    collection = collection or {}
+    for label, _fn in _R12G_HEADER_SECTIONS:
+        if label == _LIMIT_STREAK_LABEL and not _limit_streak_section_active(collection):
+            continue
+        entries.append(label)
     entries.append("引用来源")
     lines = ["## 目录", ""]
     lines.extend(f"- {label}" for label in entries)

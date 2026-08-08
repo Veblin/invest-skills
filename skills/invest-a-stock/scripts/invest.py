@@ -1986,7 +1986,10 @@ def _format_ev_ebitda_block(ev: dict) -> str:
     lines.append("  桥接表（逐项可审计）:")
     lines.append(f"    - 市值: {b['mv_yi']} 亿元")
     if b["interest_debt_yi"] is not None:
-        lines.append(f"    + 有息负债: {b['interest_debt_yi']} 亿元（短贷+长贷+应付债券）")
+        # 标签由引擎预计算（debt_label 仅含可得分量，缺失科目按 0 计但不出现在
+        # 标签，防行内口径误导，batch-test P1-2）；interest_debt_yi 非 None 时
+        # debt_label 必非 None（valuation_calc 同分支保证），无兜底
+        lines.append(f"    + 有息负债: {b['interest_debt_yi']} 亿元（{ev['debt_label']}）")
     else:
         lines.append(f"    + 有息负债: 不可得（降级净现金口径）")
     lines.append(f"    - 现金: {b['cash_yi']} 亿元")

@@ -137,12 +137,22 @@ class TestR12gTocAndRegistry:
 
         labels = [label for label, _fn in _R12G_HEADER_SECTIONS]
         assert labels == ["均线系统表（R12g）", "连板结构（R12g）"]
-        toc = _report_toc()
+        # 连板结构触发时（zt_pool/lhb 存在）→ TOC 含两段
+        toc = _report_toc(_collection(with_zt_lhb=True))
         for label in labels:
             assert f"- {label}" in toc
         # TOC 顺序与注册表一致（消除漂移）
         idxs = [toc.index(f"- {label}") for label in labels]
         assert idxs == sorted(idxs)
+
+    def test_toc_omits_limit_streak_when_not_triggered(self):
+        """batch-test P1-3：未触发连板（无 zt_pool/lhb）→ TOC 不得列出
+        「连板结构」条目（目录引用不存在的章节）。"""
+        from lib.render_markdown._v3 import _report_toc
+
+        toc = _report_toc(_collection(with_zt_lhb=False))
+        assert "- 均线系统表（R12g）" in toc
+        assert "- 连板结构（R12g）" not in toc
 
     def test_extras_rendered_from_registry(self):
         from lib.render_markdown._base import _R12G_HEADER_SECTIONS, _render_engine_extras
@@ -158,10 +168,16 @@ class TestR12gTocAndRegistry:
         from test_v013_phase3 import _collection_phase3
         from lib.render import render_report_v3
 
+        # 未触发场景（phase3 fixture 无 zt_pool/lhb）：TOC 只有均线表，
+        # 无连板结构条目（batch-test P1-3）
         text = render_report_v3(_collection_phase3(), "600176", mode="full")
-        # TOC 条目与头部区块均出现（全渲染输出中 TOC 位于 ## 目录 后）
         assert "- 均线系统表（R12g）" in text
-        assert "- 连板结构（R12g）" in text
+        assert "- 连板结构（R12g）" not in text
+        # 触发场景：TOC 与头部区块均出现（全渲染输出中 TOC 位于 ## 目录 后）
+        triggered = render_report_v3(
+            _collection(with_zt_lhb=True), "600176", mode="full")
+        assert "- 均线系统表（R12g）" in triggered
+        assert "- 连板结构（R12g）" in triggered
 
 
 # ══════════════════════════════════════════════════════════════════

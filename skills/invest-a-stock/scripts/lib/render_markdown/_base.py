@@ -333,18 +333,35 @@ def _render_ma_system(collection: dict[str, Any]) -> list[str]:
 
 
 # --- _render_limit_streak_structure (R12g-A) ---
+def _limit_streak_section_active(collection: dict[str, Any]) -> bool:
+    """连板结构区块是否激活（TOC 与渲染共用触发判定，batch-test P1-3）。
+
+    触发 = 采集层已写入 zt_pool / lhb 维度（cmd_report 在 detect_limit_streaks
+    判定近 5 日 ≥2 涨停后才采集）；未触发时零网络调用，TOC 也不得列出该条目。
+    """
+    dims = _index_dims(collection)
+    zt = _get_dim_data(dims, "zt_pool")
+    lhb = _get_dim_data(dims, "lhb")
+    return isinstance(zt, dict) or isinstance(lhb, dict)
+
+
+# R12g-A 连板结构区块标签：渲染前缀 + 注册表 + TOC 过滤三处共用单一常量
+# （code-review #2：此前三处字面量手写同步，任一处漂移即 TOC 与正文脱节）
+_LIMIT_STREAK_LABEL = "连板结构（R12g）"
+
+
 def _render_limit_streak_structure(collection: dict[str, Any]) -> list[str]:
     """R12g-A: 连板结构六步（仅触发时渲染；数据由 lhb/zt_pool 维度提供）。
 
     已有数据可交付 = 情绪周期 / 梯队 / 龙虎榜席位 / 证伪条件（引擎渲染，AI 只做合成引用）；
     待数据源验证 = 筹码、题材纯度 → 强制「不可得 + attempted sources」，AI 不得补全。
     """
+    if not _limit_streak_section_active(collection):
+        return []
     dims = _index_dims(collection)
     zt = _get_dim_data(dims, "zt_pool")
     lhb = _get_dim_data(dims, "lhb")
-    if not isinstance(zt, dict) and not isinstance(lhb, dict):
-        return []
-    lines = ["**[连板结构（R12g）]**（近 5 日 ≥2 涨停触发）"]
+    lines = [f"**[{_LIMIT_STREAK_LABEL}]**（近 5 日 ≥2 涨停触发）"]
     if isinstance(zt, dict) and zt.get("total"):
         dist = zt.get("board_dist") or {}
         dist_s = "、".join(f"{k}板{x}家" for k, x in sorted(dist.items()))
@@ -374,7 +391,7 @@ def _render_limit_streak_structure(collection: dict[str, Any]) -> list[str]:
 # 杜绝 section 列表与静态 TOC 再次漂移（code-review: R12g-A 已渲染但缺失于 TOC）。
 _R12G_HEADER_SECTIONS: tuple[tuple[str, Callable[[dict], list[str]]], ...] = (
     ("均线系统表（R12g）", _render_ma_system),
-    ("连板结构（R12g）", _render_limit_streak_structure),
+    (_LIMIT_STREAK_LABEL, _render_limit_streak_structure),
 )
 
 
