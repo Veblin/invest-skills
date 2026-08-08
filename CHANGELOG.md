@@ -1,5 +1,58 @@
 # Changelog — invest skills
 
+## v0.2.4 (2026-08-08)
+
+方法论引擎 R1-R12h 落地 + 事实边界规范 + 三轮 /code-review 修复 + 全域数值/口径安全加固。
+
+v0.2.4 是「从数据采集工具到研究方法论引擎」的转折版本：如果说 v0.2.3 是让 AI 跑得更快更稳（数据桥接、缓存、超时防挂死），v0.2.4 是让 AI **先想清楚该用什么方法，再动手分析**——把"我该怎么分析这只股票"从每次临场发挥，变成结构化决策。配套的还有一条铁律：**AI 不能猜**（事实边界 §2.3）。
+
+### 方法论引擎（R 系列，核心）
+
+- **R1/R2/R3/R12a/R12d 方法论匹配引擎核心**：报告先做框架匹配，不再一套模板打天下
+- **R12b/R12c 财务深度补全 + 准确性硬化**：income 表 revenue/net_profit 兜底、CPI 口径归一 + 合理性校验、亏损期 PE 分位标题层强制标注、`--material-gap` 数据缺口门
+- **R4 行业成功关键因素**：先答行业关键问题，再进通用 12 题
+- **R5 行业景气状态卡**：五维规则引擎 + `market-status --industry`
+- **R6/R7**：学术纪律补丁（技术面定位提示）+ 成长股四分类分流
+- **R8 机会成本行**：盈利收益率 vs 10Y 利差
+- **R9**：投委会两问 + 复盘归因（环境/能力/运气）
+- **R11a ETF 历史行情深度**：baostock 双源回退 + 历史统计（年度高低点/最大回撤/±5% 交易日）
+- **R11b/R11c**：事件-价格对照表 + 情景预案模板（LAW 6a，回撤档位 σ 分级）
+- **R12e 近端价格结构检测**：连板识别进报告
+- **R12f 分析深化契约**：简报铁律
+- **R12g 双路径分流矩阵**：趋势路径引擎补强（均线系统表 + 连板结构触发）+ 开场四问 + 风格-标的匹配三态
+- **R12h 数据源降级链**：字段级首选源 + L2 抽查 + 分治降级 + 限流
+
+### 规范
+
+- **事实边界 §2.3**（随 skill 安装生效）：禁止猜测/推断/幻觉；数据冲突并列不裁决；三态标注（可验证 / 公开不可独立验证 / 未知）；「检索不到」不得断言「数据不存在」
+- R2 措辞修订：周期高点低 PE 表述去断言化
+
+### 修复（多轮 /code-review）
+
+- **数值安全**：`0.0` 合法值不再被 `or` 吞、rigor 除零、双估值引擎 delegate
+- **指标口径**：ROIC 趋势可比口径、5 年 FCF 年报去重叠、EV/EBITDA 强制年报期、TTM EPS 连续期校验、应收信号同报告期同比、SZSE 冻结日期、上海时区统一
+- **采集域**：价格冲击排序、跨源取最新财季、store 上海时区、PCR partial 恒真、margin 窗口分歧、qfq 假跳变、股东缓存、cascade deadline、北交所路由
+- **渲染层**：render 去隐性网络、audit FAIL 判定序、CV7 对称、val_cache 共享、facade 惰性解析、R12g TOC 注册表、幻数消除、participant_scan 换手 key 对齐
+- **报告/估值渲染域**：report `--mode`/`--plan` 断链（argparse 未注册）、`_safe_float` NaN 守卫回归、亏损期估值负区间（PE 法/盈利收益法产 None + N/A 标注）、隐含市值改市值比例法、entry_check 单 K 线越界崩溃、RSI 全涨 NaN、MA20/BOLL 共享引擎去重、资金流 NaN 安全
+- **proxy/limit-up 域**：proxy logger 缺失（代理环境变量不恢复）、tushare 无 token 周末当交易日兜底、limit_up_store 唯一键 `scan_date`→`(scan_date, filter_key)`
+- **跨 skill**：涨跌停表统一、ST 名称补判、市值门槛、gap 最新 bar + 数据缺口误报停牌、报告路径、ETF None 处理、max_drawdown 峰谷配对、杠杆 60 日分位剔除今日持久化行
+- **时区/事件域**：catalyst NaN 整批丢失、RS 近 120 交易日窗口、`collections.kind` 列（collect/report 分离）
+- **R12h 数据层**：L2 提取行序升序 + 单位归一化（total_mv 万元→亿元）、quote 腾讯实时快照独立并行尝试
+- **宏观日快照 / 指数 PE 历史 / 默认落库**
+- **发布域**：marketplace.json 纳入版本同步统一、shim 显式加载（消除 sys.path 顺序依赖）
+- **冗余/死代码清理**（B/C 类 + code-review 第三轮 #1–#8）
+
+### 市场情绪增强（invest-a-pulse）
+
+- **涨停行业轮动** `zt_industry_flow(days)`：东财涨停池按行业聚合，Top5 + N 日趋势 + 前后半段拆分（`return_daily=True` 输出每日矩阵）
+- **跷跷板观察** `zt_seesaw(days)`：板块簇占比 Pearson 相关（10 簇映射 + n 样本 p<0.05 临界值）+ 显著负相关对（跷跷板候选）/正相关对（同步资金池）+ 前后半段 Δpp；标注「参考，不构成投资决策」
+- invest-a-pulse 报告新增「行业维度」与「⚖️ 跷跷板观察」章节，输出分析结论而非数据表
+
+### 工程
+
+- 版本号同步机制：pyproject.toml canonical → 派生文件（bump-version.sh / sync_version.py）
+- 版本验收：四类样例 + 复测记录 + fixtures 冻结
+
 ## v0.2.3 (2026-08-04)
 
 数据桥接层（data_bridge）落地 + 巨型模块拆分 + 多轮 /code-review 修复 + 采集管线性能与健壮性优化 + 数据源必要性落地（4 源评估：tushare+akshare 必要 / baostock 兜底 / tickflow 可移除）。
