@@ -473,8 +473,10 @@ class TestMaterialGapReport:
                 {"dimension": "valuation", "data": [
                     {"trade_date": "20260805", "pe_ttm": 6612.0, "pb": 9.71},
                 ]},
-                {"dimension": "market_structure", "data": {"sw_index": {"pct": -8.39}}},
             ],
+            # market_structure 是 collection 顶层键（非 dimensions 维度），
+            # sw_index 生产字段为 return_20d_pct（见 _orchestrate.collect_market_structure）
+            "market_structure": {"sw_index": {"return_20d_pct": -8.39}},
         }
         return base
 
@@ -484,11 +486,23 @@ class TestMaterialGapReport:
         gap = material_gap_report(self._collection())
         missing = [q for q, s in gap.items() if not s["available"]]
         # 引擎可覆盖项无缺口；peer 类缺口标记 r12a
+        assert "A-① 行业景气" not in missing
+        assert gap["A-① 行业景气"]["available"] is True
         assert "A-③ 毛利率 vs 行业" not in missing
         assert "B-① 护城河（ROE）" not in missing
         assert "D-① PE/PB 历史分位" not in missing
         assert gap["A-② 竞争位置"] == {"available": False, "requires": "r12a"}
         assert gap["D-② PE vs 行业中位"] == {"available": False, "requires": "r12a"}
+
+    def test_missing_market_structure_marked(self):
+        """A-① 在 market_structure 缺失（或 sw_index 无数据）时正确标引擎缺口。"""
+        from lib.render_utils import material_gap_report
+
+        coll = self._collection()
+        coll["market_structure"] = {}
+        gap = material_gap_report(coll)
+        assert gap["A-① 行业景气"]["available"] is False
+        assert gap["A-① 行业景气"]["requires"] == "engine"
 
     def test_missing_financials_marked(self):
         from lib.render_utils import material_gap_report
@@ -725,9 +739,9 @@ class TestIncomeDriver:
     def test_growth_driver(self):
         from lib.income_driver import classify_income_driver, DRIVER_GROWTH
 
-        # 持续高增长 + FCF 强
+        # 持续高增长 + FCF 强（fixture 补 end_date：#7 起按财年取 1231 年报值）
         annual = self._annual([1.0, 1.5, 2.2, 3.1, 4.5, 6.0, 8.0, 11.0, 15.0, 20.0])
-        fin = [{"fcff": 1e8 * i} for i in range(1, 7)]
+        fin = [{"end_date": f"{2018 + i}1231", "fcff": 1e8 * i} for i in range(1, 7)]
         r = classify_income_driver(annual, fin)
         assert r["driver"] == DRIVER_GROWTH
         assert r["confidence"] in ("高", "中")
@@ -737,7 +751,7 @@ class TestIncomeDriver:
 
         # 盈利平稳 + 连续分红
         annual = self._annual([10.0, 10.5, 9.8, 10.2, 10.1, 10.4, 10.0, 10.3, 10.2, 10.5])
-        fin = [{"fcff": 5e8}] * 6
+        fin = [{"end_date": f"{2018 + i}1231", "fcff": 5e8} for i in range(6)]
         r = classify_income_driver(annual, fin, div_years=8, div_yield=0.04)
         assert r["driver"] == DRIVER_VALUE
 
@@ -746,7 +760,7 @@ class TestIncomeDriver:
 
         # 剧烈波动 + 亏损年（海力士式）
         annual = self._annual([5.0, -3.0, 12.0, 2.0, -5.0, 20.0, 1.0, -2.0, 8.0, 30.0])
-        fin = [{"fcff": 1e8}] * 5
+        fin = [{"end_date": f"{2018 + i}1231", "fcff": 1e8} for i in range(5)]
         r = classify_income_driver(annual, fin)
         assert r["driver"] == DRIVER_CYCLE
 
@@ -762,6 +776,39 @@ class TestIncomeDriver:
         r = classify_income_driver(self._annual([1.0, 1.2, 1.4, 1.5]), [])
         assert "dividend" in r["missing_evidence"]
         assert "refi" in r["missing_evidence"]
+
+    def test_fcf_evidence_annual_only(self):
+        """#7：混合累计口径——每年只取 1231 年报期，季报行不参与等权。
+
+        2020 年 0331 为负但 Q2 后累计转正（0630/0930/1231 全正）：
+        旧实现计 4 条正 → ratio 高估；新口径该年仅 1 条正。
+        """
+        from lib.income_driver import _fcf_evidence
+
+        fin = [
+            {"end_date": "20200331", "fcff": -1e8},
+            {"end_date": "20200630", "fcff": 1e8},
+            {"end_date": "20200930", "fcff": 2e8},
+            {"end_date": "20201231", "fcff": 3e8},
+            {"end_date": "20211231", "fcff": 2e8},
+            {"end_date": "20221231", "fcff": 1e8},
+        ]
+        ev = _fcf_evidence(fin)
+        assert ev["available"] is True
+        assert ev["n_periods"] == 3          # 3 个财年（2020/2021/2022）
+        assert ev["positive_ratio"] == 1.0
+
+    def test_fcf_evidence_insufficient_years(self):
+        from lib.income_driver import _fcf_evidence
+
+        fin = [
+            {"end_date": "20201231", "fcff": 1e8},
+            {"end_date": "20211231", "fcff": 1e8},
+            {"end_date": "20210930", "fcff": 9e8},  # 季度行不计数
+        ]
+        ev = _fcf_evidence(fin)
+        assert ev["available"] is False
+        assert "3" in ev["reason"]
 
 
 class TestLimitStreakDetector:

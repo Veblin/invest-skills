@@ -416,7 +416,8 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
                                           end_date=ed_fmt,
                                           adjust="qfq",  # 前复权：统一复权语义
                                           timeout=10)
-            result = em_request_with_retry(_fetch)
+            # deadline 30s：与 timeout=10 × 3 次退避预算匹配，超时后不再后台重试
+            result = em_request_with_retry(_fetch, deadline=time.monotonic() + 30)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:
@@ -433,7 +434,9 @@ def _q_akshare_northbound(symbol: str) -> list[dict] | None:
         try:
             def _fetch() -> Any:
                 return ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
-            result = em_request_with_retry(_fetch)
+            # akshare 该接口无 timeout 参数（依赖 socket 默认超时）；deadline
+            # 30s 确保超时后后台 daemon 线程不再发起重试
+            result = em_request_with_retry(_fetch, deadline=time.monotonic() + 30)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:
@@ -752,12 +755,14 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
                 row = rs.get_row_data()
                 rows.append({
                     "trade_date": row[0].replace("-", ""),
-                    "open": float(row[1]) if row[1] else None,
-                    "high": float(row[2]) if row[2] else None,
-                    "low": float(row[3]) if row[3] else None,
-                    "close": float(row[4]) if row[4] else None,
-                    "vol": float(row[5]) if row[5] else 0,
-                    "amount": float(row[6]) if row[6] else 0,
+                    # safe_float：baostock 空字段返回字符串 "nan"（truthy），
+                    # 裸 float() 会穿透 NaN 污染下游（gap-scan 38a7e1e 同型先例）
+                    "open": safe_float(row[1]),
+                    "high": safe_float(row[2]),
+                    "low": safe_float(row[3]),
+                    "close": safe_float(row[4]),
+                    "vol": safe_float(row[5]) or 0,
+                    "amount": safe_float(row[6]) or 0,
                 })
             return rows if rows else None
         except Exception as e:

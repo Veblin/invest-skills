@@ -928,6 +928,7 @@ def detect_limit_streaks(
     """
     thr = limit_pct if limit_pct is not None else limit_pct_for_symbol(symbol, name=name)
     srows = sort_kline_asc(rows)
+    srows = [r for r in srows if safe_float(r.get("close")) is not None]  # 剥离 NaN/None（与 compute() 同型）
     window = srows[-lookback:] if len(srows) > lookback else srows
     if len(window) < 3:
         return {"available": False, "reason": "kline 样本不足"}

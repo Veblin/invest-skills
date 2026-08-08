@@ -248,7 +248,10 @@ def get_annual_net_profit(ts: TushareClient, ts_code: str, years: int = 10) -> l
             if npv is None:
                 continue
             try:
-                annual[ed] = float(npv)  # 同一年重复行取最后一条（后覆盖前）
+                v = float(npv)
+                if v != v:  # NaN 等同缺失（calc_steady_earnings 中位数污染防护）
+                    continue
+                annual[ed] = v  # 同一年重复行取最后一条（后覆盖前）
             except (TypeError, ValueError):
                 continue
         return [{"year": ed, "net_profit": v} for ed, v in sorted(annual.items())]
@@ -344,6 +347,9 @@ def steady_valuation_band(
     输出为多情景参考（乐观=中枢 PE 上沿 / 悲观=下沿），非单一目标价。
     """
     if not steady.get("available"):
+        return None
+    if not (steady.get("steady_earnings", 0) > 0):
+        # 亏损期（或 NaN）→ 稳态带无意义（镜像 Step 10 takeover 的 >0 守卫）
         return None
     mid = steady["steady_earnings"] * cycle_pe
     return {
@@ -489,9 +495,12 @@ def _latest_annual_ebitda(fin_rows: list[dict]) -> tuple[float | None, str | Non
     ]
     for r in reversed(annual):
         try:
-            return float(r["ebitda"]), str(r.get("end_date", "")), None
+            v = float(r["ebitda"])
         except (TypeError, ValueError, KeyError):
             continue
+        if v != v:  # NaN 等同缺失（与 _latest_annual_ebitda_from_income 同型）
+            continue
+        return v, str(r.get("end_date", "")), None
     latest_ed = str(fin_rows[-1].get("end_date", "")) if fin_rows else "?"
     return None, None, (
         f"EBITDA 不可得：3 年内无 1231 年报期（最新期 {latest_ed} 为累计口径，"

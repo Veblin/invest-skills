@@ -7,6 +7,7 @@ akshare 东方财富接口使用 akshare_direct_session() 强制直连。
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -78,21 +79,36 @@ def throttle_eastmoney() -> None:
         _em_last_call = now
 
 
-def em_request_with_retry(fn: Any, *, retries: int = EM_MAX_RETRIES) -> Any:
+def em_request_with_retry(
+    fn: Any,
+    *,
+    retries: int = EM_MAX_RETRIES,
+    deadline: float | None = None,
+    retry_exceptions: tuple[type[BaseException], ...] = (
+        requests.RequestException, json.JSONDecodeError,
+    ),
+) -> Any:
     """指数退避重试（1s → 2s → 4s，max 3 次）：包裹东财接口调用。
 
-    仅对异常（连接失败/超时/解析错误）重试；成功或耗尽重试次数后返回。
-    测试可 monkeypatch `time.sleep` 加速。
+    仅对瞬态类异常（requests 网络/超时、JSON 解析错误）重试；
+    KeyError/TypeError/ValueError 等逻辑错误立即上抛不重试。
+    deadline（monotonic 截止时间）到期立即上抛：daemon 采集线程在每源
+    deadline 到期后不应继续发东财网络调用（防止重试链击穿超时语义）。
+    测试可 monkeypatch `time.sleep` / `_em_now` 加速。
     """
     attempt = 0
     while True:
         try:
             return fn()
-        except Exception:
+        except retry_exceptions:
             attempt += 1
             if attempt > retries:
                 raise
-            time.sleep(EM_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+            if deadline is not None and _em_now() >= deadline:
+                raise
+            delay = EM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning("eastmoney retry %d/%d after %.1fs", attempt, retries, delay)
+            time.sleep(delay)
 
 _env_bypass_depth = 0
 _env_bypass_saved: dict[str, str | None] = {}

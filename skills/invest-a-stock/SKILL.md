@@ -110,7 +110,7 @@ metadata:
 
 ### 数据源策略
 
-v0.3+ **多源并行**：全部可用源同时采集，差异保留于 `_meta.all_sources`，由分析阶段标注。
+v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/shareholders/northbound）首选源单发、失败按序降级（cascade）；L2 财务类（financials/valuation）并行双源先到先用。差异保留于 `_meta.all_sources`，由分析阶段标注。
 
 ---
 

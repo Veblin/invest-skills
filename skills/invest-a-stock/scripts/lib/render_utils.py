@@ -607,10 +607,18 @@ _MATERIAL_QUESTION_FIELDS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
 )
 
 
-def _material_field_available(dims: dict[str, dict], path: str) -> bool:
-    """检查 collection 中某字段是否有非 None 数据（按 维度.字段 路径）。"""
+def _material_field_available(collection: dict, dims: dict[str, dict], path: str) -> bool:
+    """检查 collection 中某字段是否有非 None 数据（按 维度.字段 路径）。
+
+    market_structure 是 collection 顶层键（非 dimensions 维度，见
+    _orchestrate.collect_all），A-① 行业景气须从顶层取值——此前走 dims 查询
+    恒 None，12 题检查器每份报告误报 1 题「引擎缺口」。
+    """
     dim_key, _, field = path.partition(".")
-    data = _get_dim_data(dims, dim_key)
+    if dim_key == "market_structure":
+        data = collection.get("market_structure")
+    else:
+        data = _get_dim_data(dims, dim_key)
     if not data:
         return False
     if field:
@@ -636,7 +644,7 @@ def material_gap_report(collection: dict) -> dict:
     dims = _index_dims(collection)
     out: dict[str, dict] = {}
     for q, path in _MATERIAL_QUESTION_FIELDS:
-        ok = _material_field_available(dims, path)
+        ok = _material_field_available(collection, dims, path)
         if not ok and path in ("peer",):
             out[q] = {"available": False, "requires": "r12a"}
         else:

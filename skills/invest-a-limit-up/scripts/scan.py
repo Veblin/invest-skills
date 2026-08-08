@@ -110,6 +110,7 @@ def main() -> int:
         )
 
     filter_kwargs = resolve_cli_filter(args)
+    full_result = result  # quality_filter 返回新 dict 不原地改，保留全市场结果
     if filter_kwargs is not None:
         result = quality_filter(result, **filter_kwargs)
 
@@ -125,6 +126,12 @@ def main() -> int:
         else:
             try:
                 from limit_up_store import save_scan, get_stats as lu_stats
+                if filter_kwargs is not None:
+                    # 过滤运行先落全市场行（filter_params=None → filter_key='all'）：
+                    # get_scan 的 'all' 优先契约与 get_breadth_trend 的
+                    # WHERE filter_key='all' 依赖该行；同日两行按
+                    # (scan_date, filter_key) 唯一键并存
+                    save_scan(full_result)
                 sid = save_scan(result, filter_params=filter_kwargs)
                 stats = lu_stats()
                 print(

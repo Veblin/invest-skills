@@ -407,6 +407,25 @@ class TestRoicTrendComparability:
         assert score == 25.0  # 各年 Q1: 10→22→35 真实递增
         assert detail["period"] == "0331"
 
+    def test_latest_period_missing_value_does_not_slide_to_old_period(self):
+        """#10：最新报告期指标缺失（低积分档过滤）→ 不静默滑期，标不可得。
+
+        旧实现锚定「有指标值的最新行」（computed[-1]）：最新期 2026H1 ebit 缺失
+        时滑到 2025Q1 年报期序列（10→22→35 递增）白给 25 分且无陈旧标注。
+        """
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20230331", ebit=10.0),
+            self._row("20240331", ebit=22.0),
+            self._row("20250331", ebit=35.0),
+            self._row("20260630", ebit=None),  # 最新报告期 ebit 缺失
+        ]
+        score, detail, _, missing = _score_roic_trend(rows)
+        assert score is None
+        assert detail["score"] is None
+        assert "可比" in missing
+
 
 class TestConfidenceMatrixRemoved:
     """A-2 置信度矩阵死代码删除验证（CHANGELOG v0.2.1「报告精简」意图性移除）。

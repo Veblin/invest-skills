@@ -49,7 +49,7 @@ def _collect_dimension(
 
 
 def collect_basic_info(symbol: str) -> dict:
-    """基本信息。并行：Tushare + akshare。"""
+    """基本信息。cascade 首选单发（R12h）：Tushare 失败 → akshare 按序降级。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.stock_basic", lambda: _q_tushare_basic(symbol)))
@@ -68,7 +68,7 @@ def collect_basic_info(symbol: str) -> dict:
 
 
 def collect_financials(symbol: str) -> dict:
-    """财务报告。并行：Tushare + akshare。"""
+    """财务报告。并行双源（L2 保持 _run_sources_parallel）：Tushare + akshare 先到先用。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.fina_indicator", lambda: _q_tushare_financials(symbol)))

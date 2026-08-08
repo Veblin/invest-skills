@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 from lib.collector._base import _run_sources_cascade
 
@@ -215,7 +216,7 @@ class TestEmRequestWithRetry:
         def _flaky():
             attempts["n"] += 1
             if attempts["n"] < 3:
-                raise ConnectionError("transient")
+                raise requests.exceptions.ConnectionError("transient")
             return "ok"
 
         assert proxy.em_request_with_retry(_flaky, retries=3) == "ok"
@@ -229,12 +230,46 @@ class TestEmRequestWithRetry:
         monkeypatch.setattr(proxy.time, "sleep", lambda s: sleeps.append(s))
 
         def _always_fail():
-            raise ConnectionError("blocked")
+            raise requests.exceptions.ConnectionError("blocked")
 
         import pytest
-        with pytest.raises(ConnectionError):
+        with pytest.raises(requests.exceptions.ConnectionError):
             proxy.em_request_with_retry(_always_fail, retries=3)
         assert sleeps == [1.0, 2.0, 4.0]  # max 3 次退避
+
+    def test_non_transient_error_raises_immediately(self, monkeypatch):
+        """逻辑错误（ValueError）不在重试白名单内 → 立即上抛不重试。"""
+        from lib import proxy
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(proxy.time, "sleep", lambda s: sleeps.append(s))
+        attempts = {"n": 0}
+
+        def _boom():
+            attempts["n"] += 1
+            raise ValueError("bad arg")
+
+        import pytest
+        with pytest.raises(ValueError):
+            proxy.em_request_with_retry(_boom, retries=3)
+        assert attempts["n"] == 1
+        assert sleeps == []
+
+    def test_deadline_expired_no_further_retries(self, monkeypatch):
+        """deadline 到期后立即上抛，不再退避（切断后台重试链）。"""
+        from lib import proxy
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(proxy.time, "sleep", lambda s: sleeps.append(s))
+        monkeypatch.setattr(proxy, "_em_now", lambda: 100.0)  # 固定时钟
+
+        def _always_fail():
+            raise requests.exceptions.ConnectionError("blocked")
+
+        import pytest
+        with pytest.raises(requests.exceptions.ConnectionError):
+            proxy.em_request_with_retry(_always_fail, retries=3, deadline=100.0)
+        assert sleeps == []  # deadline 到期 → 0 次退避
 
     def test_success_first_try_no_sleep(self, monkeypatch):
         from lib import proxy

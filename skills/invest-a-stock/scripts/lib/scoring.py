@@ -432,15 +432,19 @@ def _latest_comparable_series(rows: list[dict], value_fn) -> tuple[list[float], 
     """提取与最新报告期同周期类型（跨年可比口径）的数值序列。
 
     返回 (series, period_key)；同类型记录不足 3 期 → ([], period_key)，由调用方标不可得。
+    锚定最新报告期（rows[-1]）而非「有指标值的最新行」：最新报告期指标缺失
+    （低积分档过滤 ebit/roe 等字段）时返回空系列，不得静默滑到旧期冒充当前趋势。
     """
-    computed: list[tuple[str, float]] = []
-    for r in rows:
-        v = value_fn(r)
-        if v is not None:
-            computed.append((_period_type_key(r), v))
-    if not computed:
+    if not rows:
         return [], ""
-    latest_key = computed[-1][0]
+    latest_key = _period_type_key(rows[-1])
+    computed = [
+        (_period_type_key(r), v) for r in rows
+        if (v := value_fn(r)) is not None
+    ]
+    # #10：最新报告期无值 → 空系列（不滑期），由调用方标不可得
+    if not any(k == latest_key for k, _ in computed):
+        return [], latest_key
     series = [v for k, v in computed if k == latest_key]
     return (series if len(series) >= 3 else []), latest_key
 

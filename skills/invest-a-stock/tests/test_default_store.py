@@ -176,6 +176,28 @@ class TestReportAutoStore:
         assert invest.cmd_report(_report_args(resume=True)) == 0
         assert len(isolated_store.list_collections(symbol="600176")) == 1
 
+    def test_report_md_renders_with_attach_extras(self, isolated_store, monkeypatch):
+        """#1 回归：cmd_report 默认 md 路径显式传 attach_extras=True（补挂 market_structure）。
+
+        98813b5 把 render 默认值翻转为 False 后，默认 md 报告与落库快照静默缺失
+        模块 5 市场结构；此用例锁定 cmd_report 必须显式开启。
+        """
+        import invest
+
+        captured: dict = {}
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(invest, "store_mod", isolated_store)
+        monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
+
+        def _spy_render(*a, **k):
+            captured["kwargs"] = k
+            return "ok"
+
+        monkeypatch.setattr(invest.render, "render", _spy_render)
+
+        assert invest.cmd_report(_report_args()) == 0
+        assert captured["kwargs"].get("attach_extras") is True
+
     def test_report_no_store_skips_pipeline_step(self, isolated_store, monkeypatch):
         """review #3 附：--no-store 时 report 不标记 pipeline 步骤完成。"""
         import invest

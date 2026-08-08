@@ -732,7 +732,12 @@ def cmd_report(args: argparse.Namespace) -> int:
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
         return 0
 
-    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'))
+    # attach_extras=True：cmd_report 非纯渲染（刚跑完 collect_all / resume 恢复），
+    # 补挂 market_structure/phase2 后再渲染与落库快照（98813b5 把 render 默认值
+    # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
+    # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
+    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
+                           attach_extras=True)
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     if getattr(args, 'save_raw', False):
@@ -1931,10 +1936,18 @@ def _format_steady_block(steady: dict) -> str:
         lines.append(f"  ⚠️ {ste.get('reason', '稳态盈利不可得')}")
         return "\n".join(lines)
     lines.append(f"  年度净利样本: {ste.get('period')}（{ste.get('n_years')} 年, method={ste.get('method')}）")
-    lines.append(
-        f"  稳态盈利: {ste['steady_earnings']/1e8:.2f} 亿元"
-        f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元）"
-    )
+    steady_earnings = ste["steady_earnings"]
+    if steady_earnings <= 0:
+        lines.append(
+            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
+            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元，"
+            "亏损期——稳态估值带不适用）"
+        )
+    else:
+        lines.append(
+            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
+            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元）"
+        )
     band = steady.get("band")
     mv = steady.get("mv_vs_steady")
     if band:

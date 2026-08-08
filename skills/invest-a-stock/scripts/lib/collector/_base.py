@@ -4,9 +4,10 @@
   每个维度下，对所有可用源并行查询 → SourceResult 归一化 → DimensionResult 合并。
   失败不阻塞，选取最优源为主数据。
 
-数据源策略（v0.3+ 并行取证）：
-  有 Token: Tushare ∥ akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
-  无 Token: akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
+数据源策略（v0.2.4 R12h 降级链）：
+  行情类（kline/quote/basic_info/shareholders/northbound）经 _run_sources_cascade：
+    首选源单发（有 Token: Tushare；无 Token: akshare），失败按序降级，未尝试源不计降级
+  财务类（financials/valuation）经 _run_sources_parallel：并行双源先到先用；industry/holder_changes 互补数据并行
 """
 
 from __future__ import annotations

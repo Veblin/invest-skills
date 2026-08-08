@@ -84,9 +84,18 @@ def _cycle_evidence(annual: list[float]) -> dict:
 
 
 def _fcf_evidence(fin_rows: list[dict]) -> dict:
-    """FCF 持续性（fcff 或 OCF-cap_ex，近 N 期为正占比）。"""
-    vals: list[float] = []
+    """FCF 持续性（fcff 或 OCF-cap_ex，按财年取年报期值，正数占比）。
+
+    口径：fina_indicator 为累计 YTD（0331/0630/0930/1231 逐期累加），季报行与
+    年报行等权会高估正数占比——全年 OCF 为负但 Q2 后累计转正的年份会贡献
+    3 条正行；与 quality_check._metric_fcf_5y（e07fe41）同型：每年只取 1231
+    年报期（全年数），同一年重复行后覆盖前。
+    """
+    by_year: dict[str, float] = {}
     for r in fin_rows:
+        ed = str(r.get("end_date") or "")
+        if not ed.endswith("1231"):
+            continue
         v = safe_float(r.get("fcff"))
         if v is None:
             v = safe_float(r.get("fcfe"))
@@ -96,16 +105,17 @@ def _fcf_evidence(fin_rows: list[dict]) -> dict:
             if ocf is not None and capex is not None:
                 v = ocf - capex
         if v is not None:
-            vals.append(v)
-    if len(vals) < 3:
-        return {"available": False, "reason": "FCF 样本 <3 期"}
-    pos = sum(1 for v in vals if v > 0)
+            by_year[ed[:4]] = v
+    years = [by_year[k] for k in sorted(by_year)]
+    if len(years) < 3:
+        return {"available": False, "reason": "FCF 年报样本 <3 年"}
+    pos = sum(1 for v in years if v > 0)
     return {
         "available": True,
-        "positive_ratio": round(pos / len(vals), 2),
+        "positive_ratio": round(pos / len(years), 2),
         "positive_periods": pos,
-        "n_periods": len(vals),
-        "latest": vals[-1],
+        "n_periods": len(years),
+        "latest": years[-1],
     }
 
 
