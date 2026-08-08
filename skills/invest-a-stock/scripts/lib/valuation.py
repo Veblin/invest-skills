@@ -93,8 +93,10 @@ def valuation_summary(
         pe_pct = percentile_rank(pe_seq_clean, current_pe)
         pe_median = _median(pe_seq_clean)
         # R12c: 亏损期占比结构化暴露（P0-2 规则：>30% 亏损交易日 → 分位仅作位置参考）
-        pe_total = len([v for v in pe_ttm_seq if v is not None])
-        pe_loss = pe_total - len(pe_seq_clean)
+        # 分母 = 总交易日数（含亏损日）；分子 = 亏损日数（pe 为 None 或 <=0，
+        # 与 valuation_calc.calc_historical_percentile 的「None+<=0 计数」语义对齐）
+        pe_total = len(pe_ttm_seq)
+        pe_loss = len([v for v in pe_ttm_seq if v is None or v <= 0])
         result["pe"] = {
             "current": round(current_pe, 2),
             "pct": round(pe_pct, 2) if pe_pct is not None else None,
@@ -156,12 +158,12 @@ def valuation_summary(
     if not result["sufficient"]:
         result["warnings"].append("样本不足30个交易日，分位计算结果仅供参考")
 
-    # 检查亏损期（负 PE/PB）是否被过滤
-    pe_total = len([v for v in pe_ttm_seq if v is not None])
+    # 检查亏损期（PE None/<=0，Tushare daily_basic 对亏损期返回 None）是否被过滤
+    pe_total = len(pe_ttm_seq)
     pe_pos = len(pe_seq_clean)
     if pe_total > pe_pos:
         result["warnings"].append(
-            f"PE 历史序列中有 {pe_total - pe_pos} 个交易日为亏损期（负值），"
+            f"PE 历史序列中有 {pe_total - pe_pos} 个交易日为亏损期（PE 不可得或非正），"
             f"已从历史样本中排除，分位计算可能偏高")
 
     # 摘要文本（渲染用）

@@ -51,7 +51,7 @@ def _client() -> Any | None:
         config = env.get_config()
         if not env.is_tushare_available(config):
             return None
-        client = TushareClient(timeout=15)
+        client = TushareClient(token=config.get("TUSHARE_TOKEN"), timeout=15)
         if not client.is_available():
             return None
         _CLIENT = client

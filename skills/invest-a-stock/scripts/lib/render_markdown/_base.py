@@ -396,7 +396,12 @@ def _render_price_structure(collection: dict[str, Any]) -> list[str]:
         return []
     if not st.get("available"):
         return []
-    parts = [f"近 {st['lookback']} 日 {st['window_pct']:+.1f}%"]
+    # window_pct 可为 None：detect_limit_streaks 在窗口首 close 为 0.0（停牌日/故障行
+    # 被 0 填充）时返回 None——None 参与 :+.1f 格式化抛 TypeError，会中止整个渲染
+    # （此处位于唯一 try/except 之外）。None → 占位「—」，与 _render_ma_system 同风格。
+    window_pct = st.get("window_pct")
+    pct_s = f"{window_pct:+.1f}%" if window_pct is not None else "—"
+    parts = [f"近 {st['lookback']} 日 {pct_s}"]
     if st["recent_limit_ups"] or st["recent_limit_downs"]:
         parts.append(
             f"涨跌停 {st['recent_limit_ups']}↑/{st['recent_limit_downs']}↓"

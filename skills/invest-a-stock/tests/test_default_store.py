@@ -361,3 +361,67 @@ class TestSnapshotKindDiff:
         diff = isolated_store.load_key_diff_vs_stored("600176", current)
         assert diff is not None
         assert diff.get("old_at", "").startswith("2026-08-01")  # 与上次会话比较
+
+    def test_get_latest_two_no_fallback_mix_same_session(self, isolated_store):
+        """新用户同会话 collect --store + report：仅 1 条 collect 时不
+        回退混入 report 行配对——否则 diff 比较几分钟内两快照恒显
+        「几乎无变化」，掩盖真实跨会话变化（review #9 移除过的自我
+        比较问题在回退路径复现，code-review 第三轮）。"""
+        collect = _fake_result(symbol="600176")
+        collect["fetched_at"] = "2026-08-07T09:00:00+00:00"
+        rpt = _fake_result(symbol="600176")  # 同会话 report（几分钟后）
+        rpt["fetched_at"] = "2026-08-07T09:05:00+00:00"
+
+        isolated_store.save_collection(collect)
+        isolated_store.save_collection(rpt, kind="report")
+
+        assert isolated_store.get_latest_two("600176") is None
+
+    def test_get_latest_two_fallback_pure_report_user(self, isolated_store):
+        """纯 report 用户（无 collect 行）仍回退全部 kind 配对（兼容不破）。"""
+        r1 = _fake_result(symbol="600176")
+        r1["fetched_at"] = "2026-08-01T00:00:00+00:00"
+        r2 = _fake_result(symbol="600176")
+        r2["fetched_at"] = "2026-08-07T09:00:00+00:00"
+
+        isolated_store.save_collection(r1, kind="report")
+        isolated_store.save_collection(r2, kind="report")
+
+        pair = isolated_store.get_latest_two("600176")
+        assert pair is not None
+        older, newer = pair
+        assert older["fetched_at"] == "2026-08-01T00:00:00+00:00"
+        assert newer["fetched_at"] == "2026-08-07T09:00:00+00:00"
+
+
+class TestMacroRawJsonMerge:
+    """code-review 第三轮：save_macro_snapshot 同日部分写入不丢溯源信封。
+
+    raw_json 存 {value, source, signal} 完整信封；此前 upsert merge=True
+    的 COALESCE 对 raw_json 恒取新值（dumps_json 对非空 dict 恒非 NULL），
+    部分写入会整块覆盖旧信封（数值列因逐列 COALESCE 幸存）。
+    """
+
+    def test_partial_second_write_keeps_full_envelopes(self, isolated_store):
+        import json
+
+        ctx1 = {
+            "pmi": {"value": 50.1, "source": "akshare", "signal": "扩张"},
+            "vix": {"value": 15.0, "source": "fred", "signal": ""},
+            "sox": {"value": 5600.0, "source": "yahoo", "signal": ""},
+        }
+        assert isolated_store.save_macro_snapshot(ctx1) is not None
+        # 第二次仅 pmi 重取成功（macro.py 把 fetch 失败的键初始化为 None）
+        assert isolated_store.save_macro_snapshot(
+            {"pmi": {"value": 50.3, "source": "akshare", "signal": "扩张"},
+             "vix": None, "sox": None}) is not None
+
+        hist = isolated_store.load_macro_history(7)
+        assert len(hist) == 1
+        assert hist[0]["pmi"] == 50.3  # 新值覆盖
+        assert hist[0]["vix"] == 15.0  # 数值列逐列 COALESCE 幸存
+        assert hist[0]["sox"] == 5600.0
+        raw = json.loads(hist[0]["raw_json"])  # 溯源信封同样逐键保留
+        assert raw["pmi"] == {"value": 50.3, "source": "akshare", "signal": "扩张"}
+        assert raw["vix"] == {"value": 15.0, "source": "fred", "signal": ""}
+        assert raw["sox"] == {"value": 5600.0, "source": "yahoo", "signal": ""}

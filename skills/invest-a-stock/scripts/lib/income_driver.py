@@ -34,9 +34,15 @@ _CONF_HIGH_EVIDENCE = 3             # 有效证据 ≥3 → 高置信度
 
 
 def _yearly_net_profit_series(annual_rows: list[dict]) -> list[float]:
-    """年度净利序列（升序）。"""
+    """年度净利序列（升序）。
+
+    按年份字段显式升序归一：报告路径调用者（render_markdown/style_match）
+    喂 Tushare financials 原始行（最新在前），income 表路径为升序——不排序
+    会导致 deltas/近两年方向从最旧两段计算、方向反转（code-review 修复）。
+    """
+    rows = sorted(annual_rows, key=lambda r: str(r.get("year") or ""))
     out: list[float] = []
-    for r in annual_rows:
+    for r in rows:
         v = safe_float(r.get("net_profit"))
         if v is not None:
             out.append(v)

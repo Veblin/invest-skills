@@ -211,6 +211,43 @@ class TestEtfDataIntegration:
         # current_pe None → None
         assert _index_pe_percentile_from_db("000300", None) is None
 
+    def test_index_pe_pct_excludes_today_row(self, isolated_store, monkeypatch):
+        """今日行已持久化（collect-weekly/早间 report）时，分位序列剔除今日自身。
+
+        query-before-persist 仅单次 cmd_report 内成立；传 current_date（信封
+        最新行日期）后分位必须与「不含今日行的历史序列」一致，否则今日自投
+        会把分位推向 100%/0% 假象（同 journal hist_ex_today 型防双计）。
+        """
+        import index_pe_snapshot
+
+        etf_data = _ensure_canonical_etf_data()
+        _pct = etf_data._index_pe_percentile_from_db
+
+        # 24 个历史日（PE 10.0~33.0）+ 今日行（PE 30.0，20260125）一并入库，
+        # 模拟早间 collect-weekly 已持久化今日行的场景
+        today_row = {"日期": "20260125", "指数代码": 300, "指数中文简称": "沪深300",
+                     "市盈率1": 30.0, "市盈率2": None, "股息率1": 2.0, "股息率2": None}
+        monkeypatch.setattr(index_pe_snapshot, "_bridge_envelope",
+                            lambda code: {"status": "ok", "index_pe": 30.0,
+                                          "rows": _envelope_rows(24) + [today_row]})
+        index_pe_snapshot.persist_index_pe_from_cache(["000300"])
+        hist = index_pe_snapshot.get_index_pe_history("000300")
+        assert len(hist) == 25
+
+        # 今日行存在 + 传 current_date → 剔除今日行：分位 = 24 行历史序列
+        # （10.0~33.0 中 ≤30.0 共 21 个 → 21/24 = 87.5）
+        truth = index_pe_snapshot.index_pe_percentile(hist[:-1], 30.0)
+        assert _pct("000300", 30.0, "20260125") == pytest.approx(truth)
+        assert _pct("000300", 30.0, "20260125") == pytest.approx(87.5)
+
+        # 不剔除（旧行为）：今日值 30.0 计入 25 行序列 → 22/25 = 88.0，分位被抬高
+        assert _pct("000300", 30.0, None) == pytest.approx(88.0)
+
+        # 今日行不存在（current_date 不在历史中，query-before-persist 场景）→
+        # 剔除为 no-op，分位与全量历史一致
+        assert _pct("000300", 30.0, "20260201") == \
+            index_pe_snapshot.index_pe_percentile(hist, 30.0)
+
 
 class TestCollectWeeklyTrigger:
     def test_collect_weekly_invokes_index_pe_persist(self, monkeypatch):

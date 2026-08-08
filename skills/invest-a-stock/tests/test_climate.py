@@ -124,18 +124,54 @@ class TestTruthTable:
         assert industry_climate_card(_dims(earn="down", rs="down", flow="out", pct=0.2))["state"] == "收缩"
         assert industry_climate_card(_dims(earn="down", rs="down", flow="out", pct=0.5))["state"] == "收缩"
 
-    def test_tie_unresolved(self):
-        """2 个方向维平局 → 无法定论（即使总数 ≥3）。"""
+    def test_tie_broken_by_priority(self):
+        """2 个方向维 1-1 平局由优先级打破（盈利趋势 > 资金流），不再无法定论。"""
         dims = _dims(rs_valid=False, earn="up", flow="out")
         card = industry_climate_card(dims)
         assert card["valid_count"] == 3
-        assert card["state"] == "无法定论"
+        assert card["direction"] == "up"
+        assert card["state"] == "扩张"
 
     def test_too_few_direction_dims_unresolved(self):
         """STEP 3：有效方向维 <2 → 无法定论（即使总数 ≥3：估值/政策不算方向证据）。"""
         dims = _dims(rs_valid=False, flow_valid=False, policy="有", policy_valid=True)
         card = industry_climate_card(dims)
         assert card["valid_count"] == 3
+        assert card["state"] == "无法定论"
+
+
+class TestDirectionPriority:
+    """⑥ 方向冲突优先级：盈利趋势 > 资金流 > 相对强度（STEP 4，非多数投票）。"""
+
+    def test_2v1_earnings_down_wins_over_two_ups(self):
+        """2-1 投票但盈利趋势=down → 收缩（多数投票旧实现会误判扩张）。"""
+        dims = _dims(earn="down", flow="in", rs="up", pct=0.5)
+        card = industry_climate_card(dims)
+        assert card["direction"] == "down"
+        assert card["state"] == "收缩"
+        assert card["conflict"] is True  # 三票分歧，按优先级裁决
+
+    def test_1v1_tie_earnings_wins(self):
+        """1-1 平局（盈利趋势 vs 资金流）→ 盈利趋势决定方向。"""
+        dims = _dims(rs_valid=False, earn="up", flow="out")
+        card = industry_climate_card(dims)
+        assert card["direction"] == "up"
+        assert card["state"] == "扩张"
+
+    def test_priority_flow_over_rs_when_earnings_neutral(self):
+        """盈利趋势中性（value=None）时由资金流裁决，而非相对强度。"""
+        dims = _dims(earn=None, earn_valid=True, flow="out", rs="up", pct=0.5)
+        card = industry_climate_card(dims)
+        assert card["direction"] == "down"
+        assert card["state"] == "收缩"
+
+    def test_all_direction_dims_neutral_gives_unresolved(self):
+        """全部方向维缺失/中性 → 无法定论（优先级无法打破）。"""
+        dims = _dims(earn=None, flow=None, rs=None,
+                     earn_valid=True, flow_valid=True, rs_valid=True)
+        card = industry_climate_card(dims)
+        assert card["valid_count"] == 4
+        assert card["direction"] is None
         assert card["state"] == "无法定论"
 
 

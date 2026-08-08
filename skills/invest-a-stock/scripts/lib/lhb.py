@@ -24,16 +24,19 @@ logger = logging.getLogger(__name__)
 TRIGGER_LIMIT_UPS_5D = 2
 
 
-def should_trigger_lhb(kline: list[dict], symbol: str = "") -> bool:
+def should_trigger_lhb(kline: list[dict], symbol: str = "",
+                       name: str = "") -> bool:
     """R12g-A 触发判定：近 5 日 ≥2 涨停 → 采集龙虎榜/涨停池。
 
+    name: 证券简称；传入时主板 ST/*ST 股按 5% 涨停阈值判定
+    （否则按板块阈值 10%/20%/30%，ST 两板会被漏判）。
     kline 缺失/异常 → False（防御，不触发）。
     """
     if not isinstance(kline, list) or not kline:
         return False
     try:
         from lib.technical import detect_limit_streaks
-        st = detect_limit_streaks(kline, symbol=symbol, lookback=5)
+        st = detect_limit_streaks(kline, symbol=symbol, name=name, lookback=5)
         if not st.get("available"):
             return False
         return int(st.get("recent_limit_ups", 0)) >= TRIGGER_LIMIT_UPS_5D
@@ -127,6 +130,28 @@ def _fetch_lhb_sina(symbol: str, days: int) -> dict | None:
         return None
 
 
+def _parse_board_count(r: dict) -> int:
+    """连板数逐行安全解析（缺陷修复：单行畸形不得吞整池）。
+
+    - 数值（含 0/0.0）原样返回 → 0 连板不再被 falsy 误改 1
+    - NaN/None/缺字段 → 回退「涨停统计」
+    - 涨停统计为 akshare 'N/M' 风格字符串 → 取 '/' 前 N
+    - 均不可解析 → 1（首板兜底，仅该行降级）
+    """
+    for key in ("连板数", "涨停统计"):
+        v = r.get(key)
+        if v is None:
+            continue
+        try:
+            head = str(v).split("/")[0].strip()
+            f = float(head)
+            if f == f:  # 排除 NaN（'nan' → float nan → 非自身）
+                return int(f)
+        except (TypeError, ValueError):
+            continue
+    return 1
+
+
 def fetch_zt_pool(max_lookback: int = 5) -> dict | None:
     """涨停池：当日涨停家数 + 连板分布（情绪周期定位）。
 
@@ -142,14 +167,17 @@ def fetch_zt_pool(max_lookback: int = 5) -> dict | None:
                 continue
             records = df.to_dict("records")
             total = len(records)
-            board = [int(r.get("连板数") or r.get("涨停统计") or 1) for r in records]
             dist: dict[int, int] = {}
-            for b in board:
+            for r in records:
+                try:
+                    b = _parse_board_count(r)
+                except Exception:  # 单行畸形兜底：仅该行按首板计，不丢整池
+                    b = 1
                 dist[b] = dist.get(b, 0) + 1
             return {
                 "date": day.strftime("%Y-%m-%d"),
                 "total": total,
-                "max_board": max(board) if board else 0,
+                "max_board": max(dist) if dist else 0,
                 "board_dist": {k: dist[k] for k in sorted(dist)},
             }
         return None
@@ -188,8 +216,13 @@ def attach_limit_streak_dims(collection: dict, symbol: str) -> bool:
         from lib.render_utils import _get_dim_data, _index_dims
     except ImportError:
         return False
-    kline = _get_dim_data(_index_dims(collection), "kline")
-    if not should_trigger_lhb(kline, symbol=symbol):
+    indexed = _index_dims(collection)
+    kline = _get_dim_data(indexed, "kline")
+    basic = _get_dim_data(indexed, "basic_info") or {}
+    name = ""
+    if isinstance(basic, dict):
+        name = str(basic.get("name") or basic.get("股票简称") or "")
+    if not should_trigger_lhb(kline, symbol=symbol, name=name):
         return False
     dims = collection.setdefault("dimensions", [])
     lhb = fetch_lhb_detail(symbol, days=7)

@@ -736,11 +736,25 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
         return
     result["index_pe"] = env.get("index_pe")
     result["index_pe_note"] = env.get("index_pe_note")
-    result["index_pe_pct"] = _index_pe_percentile_from_db(idx_code, env.get("index_pe"))
+    # 当前 PE 值所属日期 = 信封最新行日期（query-before-persist 仅单次 cmd_report
+    # 内成立；collect-weekly/早间 report 已持久化今日行时，分位须剔除今日自身，
+    # 同 journal market_microstructure.hist_ex_today 型防双计）
+    rows = env.get("rows") or []
+    current_date = str(rows[-1].get("日期")) if rows else None
+    result["index_pe_pct"] = _index_pe_percentile_from_db(
+        idx_code, env.get("index_pe"), current_date)
 
 
-def _index_pe_percentile_from_db(idx_code: str, current_pe: Any) -> float | None:
+def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
+                                 current_date: str | None = None) -> float | None:
     """index_pe_history 累积 ≥20 条时计算当前 PE 历史分位；否则 None（数据不足）。
+
+    current_date 为当前 PE 值所属日期（csindex 信封最新行日期）：剔除
+    index_pe_history 中同日的已持久化行，防今日自投——collect-weekly/早间
+    report 已把今日行入库时，cmd_report 的 query-before-persist 保证失效，
+    今日值进入分位序列会把分位推向 100%/0% 假象；剔除后与 journal
+    market_microstructure.hist_ex_today（commit cd5e7a4）同型防双计。
+    历史中无该日行（当日尚未入库）时剔除为 no-op，行为与旧路径一致。
 
     best-effort：任何异常返回 None，不阻断报告流程。
     """
@@ -752,6 +766,8 @@ def _index_pe_percentile_from_db(idx_code: str, current_pe: Any) -> float | None
     try:
         from index_pe_snapshot import get_index_pe_history, index_pe_percentile
         rows = get_index_pe_history(idx_code)
+        if current_date is not None:
+            rows = [r for r in rows if str(r.get("date")) != str(current_date)]
         return index_pe_percentile(rows, current)
     except Exception as exc:  # DB 不可用等：分位缺失不阻断
         logger.debug("index_pe_percentile(%s) failed: %s", idx_code, exc)

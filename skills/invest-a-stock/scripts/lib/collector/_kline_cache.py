@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Callable
 
 from .._invest_path import ensure_invest_a_scripts_on_path
@@ -44,6 +45,23 @@ def cleanup_old() -> None:
     _CACHE.cleanup_old(ignore_errors=True)
 
 
+def _suppress_if_abandoned(fetch: Callable[[], list[dict] | None]
+                           ) -> Callable[[], list[dict] | None]:
+    """包装 fetch：当前线程已被调用方放弃时抑制结果（返回 None）。
+
+    _base._run_in_thread 超时会给线程对象置 `abandoned` 标记；此处返回 None
+    使 KlineTTLCache.load_or_fetch 的 `if data:` 跳过落盘——僵尸线程的迟到
+    结果不得写进同日 pickle 缓存（否则「已超时源」会在同日稍后的采集中被
+    缓存复活）。非超时路径的线程无该标记，行为不变。
+    """
+    def _wrapped() -> list[dict] | None:
+        data = fetch()
+        if getattr(threading.current_thread(), "abandoned", False):
+            return None
+        return data
+    return _wrapped
+
+
 def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
                   fetch: Callable[[], list[dict] | None],
                   qfq: bool = False) -> list[dict] | None:
@@ -53,7 +71,8 @@ def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
     """
     date_str = shanghai_today()
     return _CACHE.load_or_fetch(
-        date_str, _cache_parts(symbol, source, sd, ed, qfq), fetch,
+        date_str, _cache_parts(symbol, source, sd, ed, qfq),
+        _suppress_if_abandoned(fetch),
         type_guard=list,
         on_hit=lambda: logger.info("kline cache hit: %s %s %s..%s%s", source, symbol,
                                    sd, ed, " (qfq)" if qfq else ""),

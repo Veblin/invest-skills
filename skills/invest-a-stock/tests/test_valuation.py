@@ -410,13 +410,23 @@ class TestLossRatioStructured:
     def test_loss_ratio_computed(self):
         from lib.valuation import valuation_summary
 
-        # 30 个交易日：12 个亏损期（负 PE 被过滤），18 个正值
-        pe_seq = [-5.0] * 12 + [20.0 + i for i in range(18)]
+        # 30 个交易日：12 个亏损日（Tushare daily_basic 对亏损期返回 pe=None），18 个正值
+        pe_seq = [None] * 12 + [20.0 + i for i in range(18)]
         result = valuation_summary(pe_seq, [2.0] * 30)
         pe = result["pe"]
         assert pe["loss_days"] == 12
         assert pe["loss_ratio"] == round(12 / 30, 4)
         assert pe["loss_ratio"] > 0.3  # 触发标题失真标注阈值
+
+    def test_loss_ratio_counts_none_and_nonpositive(self):
+        from lib.valuation import valuation_summary
+
+        # 20 个交易日：8 个 pe=None + 2 个 pe<=0（同 calc_historical_percentile 计数），10 个正值
+        pe_seq = [None] * 8 + [0.0, -3.5] + [20.0 + i for i in range(10)]
+        result = valuation_summary(pe_seq, [2.0] * 20)
+        pe = result["pe"]
+        assert pe["loss_days"] == 10
+        assert pe["loss_ratio"] == round(10 / 20, 4)
 
     def test_no_loss_ratio_zero(self):
         from lib.valuation import valuation_summary

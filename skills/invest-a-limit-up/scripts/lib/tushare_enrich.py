@@ -39,7 +39,7 @@ def _get_client() -> TushareClient | None:
         config = env.get_config()
         if not env.is_tushare_available(config):
             return None
-        client = TushareClient()
+        client = TushareClient(token=config.get("TUSHARE_TOKEN"))
         if not client.is_available():
             return None
         _tushare = client

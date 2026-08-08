@@ -5,6 +5,7 @@
 规则纪律（决策记录 U4）：
 - 有效维 <3 → 输出「数据不完整（有效维度 N/5）」+ 缺失维度清单，**不做状态结论**、不自动降级猜测
 - 方向投票仅盈利趋势/相对强度/资金流三票；估值分位只定语境；政策证据独立呈现
+- 方向冲突按优先级裁决（盈利趋势 > 资金流 > 相对强度），非多数投票；仅全部方向维缺失/中性才「无法定论」
 - 各维度独立呈现，禁止单维下结论；状态卡是研究判断（可解释状态），不携带仓位/交易含义
 
 引擎分层：
@@ -99,15 +100,23 @@ def industry_climate_card(dims: list[dict]) -> dict:
             "dims": [dict(by_name[n]) for n in _DIM_ORDER if n in by_name],
         }
 
-    # STEP 4 方向 = 三票多数（冲突优先级：盈利趋势 > 资金流 > 相对强度）
-    # 资金流维度取值 in/out 与方向维 up/down 归一化
+    # STEP 4 方向 = 按冲突优先级裁决（盈利趋势 > 资金流 > 相对强度），非多数投票
+    # 资金流维度取值 in/out 与方向维 up/down 归一化；优先级最高的非中性维先决，
+    # 2-1/1-1 均按优先级而非票数；仅全部方向维缺失/中性才留空 → 无法定论
     ups = [n for n in dir_dims if by_name[n].get("value") in ("up", "in")]
     downs = [n for n in dir_dims if by_name[n].get("value") in ("down", "out")]
-    if len(ups) == len(downs):
-        direction = None  # 平局 → 无法定论
-    else:
-        direction = "up" if len(ups) > len(downs) else "down"
     conflict = bool(ups and downs)
+    direction = None
+    for n in _DIRECTION_PRIORITY:
+        if not _valid(n):
+            continue
+        v = by_name[n].get("value")
+        if v in ("up", "in"):
+            direction = "up"
+            break
+        if v in ("down", "out"):
+            direction = "down"
+            break
 
     # STEP 5 语境 = 估值分位档（<30% 低 / ≥70% 高 / 其余含无效中）
     pct = by_name["估值分位"].get("value") if _valid("估值分位") else None

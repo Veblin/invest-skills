@@ -361,8 +361,14 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     """获取指定股票最近两次采集记录。
 
     优先比较两次 kind='collect' 的真实采集（report/watchlist 快照可能
-    与 collect 同会话、互相掩盖跨会话变化，review #9 第二轮）；纯 report
-    用户（无 collect 行）回退全部 kind。
+    与 collect 同会话、互相掩盖跨会话变化，review #9 第二轮）；仅当
+    symbol 无任何 collect 行（纯 report 用户）才回退全部 kind。
+
+    注意：collect 恰好 1 条时不再回退混入 report 行——新用户同会话
+    collect --store + report 会得到 [report, collect] 的同会话配对，
+    diff 恒显「几乎无变化」，掩盖真实跨会话变化（review #9 移除过的
+    自我比较问题在回退路径复现，code-review 第三轮）；须到第二次
+    collect 会话才有配对。
 
     Returns:
         (older, newer) tuple，仅 1 条记录时返回 None。
@@ -374,8 +380,9 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
             "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
             "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 2",
             (symbol,)).fetchall()
-        if len(rows) < 2:
-            # 旧库/纯 report 用户兼容：回退全部 kind
+        if len(rows) == 0:
+            # 旧库/纯 report 用户兼容：回退全部 kind（仅限无 collect 行，
+            # 1 条 collect + 同会话 report 混排会复现自我比较问题）
             rows = c.execute(
                 "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
                 "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
@@ -1125,8 +1132,35 @@ def _macro_safe_float(v: Any) -> float | None:
     return f
 
 
+def _merge_macro_raw_json(c: sqlite3.Connection, date: str, indicators: dict) -> dict:
+    """同日 raw_json 按指标键粒度预合并：本次成功重取的键用新信封，
+    未成功（None/NaN/不可解析，与数值列 COALESCE 同判定）的键保留旧信封。
+
+    背景：dumps_json 对非空 indicators 恒返回非 NULL 字符串，upsert 的
+    COALESCE(excluded.raw_json, table.raw_json) 恒取新值——同日部分写入
+    （失败键为 None）会把完整溯源信封整块覆盖，vix/sox 的 source/signal
+    永久丢失（数值列因逐列 COALESCE 幸存）。此处按键合并使 raw_json 与
+    数值列保持一致（code-review 第三轮）。
+    """
+    merged = dict(indicators)
+    existing = c.execute(
+        "SELECT raw_json FROM macro_snapshots WHERE date=?", (date,)).fetchone()
+    if not existing or not existing["raw_json"]:
+        return merged
+    try:
+        old_raw = json.loads(existing["raw_json"])
+    except (json.JSONDecodeError, TypeError):
+        return merged
+    if not isinstance(old_raw, dict):
+        return merged
+    for k in _MACRO_INDICATOR_KEYS:
+        if _macro_safe_float(indicators.get(k)) is None and k in old_raw:
+            merged[k] = old_raw[k]
+    return merged
+
+
 def save_macro_snapshot(macro_context: dict) -> str | None:
-    """宏观指标日快照入库（by date 幂等，逐列合并写）。
+    """宏观指标日快照入库（by date 幂等，按指标键合并写）。
 
     兼容两种形态：collector 结果 ``{"indicators": {...}}`` 或
     ``collect_macro_context`` 原样 ``{key: {value, source, signal}}``。
@@ -1134,7 +1168,8 @@ def save_macro_snapshot(macro_context: dict) -> str | None:
 
     合并语义：同一天第二次写入（部分指标 fetch 失败为 None、或 7d TTL
     缓存旧值）不整行覆盖——新值非 NULL 覆盖，NULL 保留旧值，避免冲掉
-    早先写入的好值（v0.2.4 review #2）。
+    早先写入的好值（v0.2.4 review #2）；raw_json 溯源信封按指标键同步
+    合并（_merge_macro_raw_json，code-review 第三轮）。
     """
     if not isinstance(macro_context, dict) or not macro_context:
         return None
@@ -1148,9 +1183,10 @@ def save_macro_snapshot(macro_context: dict) -> str | None:
     init_db()  # 全新库/旧库上建表（review #1：此前缺失导致 journal 首启静默丢快照）
     c = _conn()
     try:
+        raw = _merge_macro_raw_json(c, date, indicators)
         upsert_daily_rows(
             c, "macro_snapshots",
-            [{"date": date, **row, "raw_json": dumps_json(indicators)}],
+            [{"date": date, **row, "raw_json": dumps_json(raw)}],
             pk=("date",), merge=True,
         )
         c.commit()

@@ -341,6 +341,10 @@ def _run_in_thread(
     统一 helper（C6 收敛 _run_source_with_deadline 与 _orchestrate._run_with_timeout）：
     超时置 TimeoutError（error 含 "timeout after Xs"），挂起线程不 join（daemon），
     解释器退出时被杀。异常照常捕获返回，不吞消息——错误处理策略由调用方包装。
+
+    超时同时给线程对象置 `abandoned` 标记：写缓存路径（如 _kline_cache）在
+    落盘前检查该标记并跳过——僵尸线程的迟到结果不得写进同日 pickle 缓存
+    （否则「已超时源」会在同日稍后的采集中被缓存复活）。
     """
     box: dict[str, Any] = {"data": None, "error": None}
     done = threading.Event()
@@ -357,6 +361,7 @@ def _run_in_thread(
     t.start()
     if not done.wait(timeout=timeout_sec):
         box["error"] = TimeoutError(f"timeout after {timeout_sec:.1f}s")
+        t.abandoned = True  # 调用方已放弃本次结果：写缓存前须检查（见 _kline_cache）
     return box["data"], box["error"]
 
 
