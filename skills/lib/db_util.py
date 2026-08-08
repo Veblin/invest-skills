@@ -95,3 +95,15 @@ def load_recent_rows(
     sql += f" ORDER BY {order_col} DESC LIMIT ?"
     rows = conn.execute(sql, (*params, int(limit))).fetchall()
     return [dict(r) for r in reversed(rows)]
+
+
+def hist_ex_today(history: list[dict], date) -> list[dict]:
+    """剔除 history 中与 date 同日（``date`` 或 ``trade_date`` 键）的行，防「今日双计」。
+
+    journal market_microstructure / etf index_pe 在 snapshot→持久化→load_history
+    后 history 已含今日刚入库的行，分位/窗口统计前必须剔除自身（cd5e7a4 起
+    多轮修补的同型 bug）；双侧 str 归一（DB 读出为 str，内存 dict 可能为其他
+    类型）。行缺少两个键时按非同日处理（保留）。
+    """
+    d = str(date)
+    return [h for h in history if str(h.get("date") or h.get("trade_date")) != d]

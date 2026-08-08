@@ -43,7 +43,7 @@ def scan_market(days: int = 10) -> dict:
 
     策略：
     1. push2 / akshare 预检
-    2. Tushare trade_cal 优先取交易日，降级 days*1.4 自然日
+    2. Tushare trade_cal 优先取交易日，降级 last_trade_dates 的 1.6×+3 采样
     3. 顺序调用 stock_zt_pool_em + 辅池（strong/previous/zbgc）
     4. 按 symbol 去重合并，排除退市股（名称含"退"）
     5. Tushare L2 增强（有 Token 时：ST/市场/股价/流通市值）

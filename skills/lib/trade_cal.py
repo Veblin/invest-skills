@@ -136,3 +136,38 @@ def last_trade_dates(n: int) -> list[str]:
     if not dates:
         return _fallback_weekdays(n)
     return sorted(dates, reverse=True)[:n]
+
+
+# 30 天回溯/前瞻窗口：覆盖最长休市段（春节 8+ 天休市 + 调休），保证 ±1 交易日
+# 语义在长假前后仍取到真实日历中的最近交易日
+_CAL_WINDOW_DAYS = 30
+
+
+def prev_trading_day(d: datetime.date) -> datetime.date:
+    """前一交易日（有 token：SSE 真实日历，含节假日/调休；无 token：周末近似）。
+
+    收敛 etf_timeline 的 holiday-blind 实现（C8 #12）：事件对齐窗口在
+    节假日前后不再把休市日当作交易日。
+    """
+    start = (d - timedelta(days=_CAL_WINDOW_DAYS)).strftime("%Y%m%d")
+    end = (d - timedelta(days=1)).strftime("%Y%m%d")
+    dates, _ = fetch_trade_cal(start, end)
+    if dates:  # 升序；估算路径与真实日历均以 dates[-1] 为「d 前最近交易日」
+        return datetime.strptime(dates[-1], "%Y%m%d").date()
+    x = d - timedelta(days=1)  # 兜底：周末跳过
+    while x.weekday() >= 5:
+        x -= timedelta(days=1)
+    return x
+
+
+def next_trading_day(d: datetime.date) -> datetime.date:
+    """后一交易日（有 token：SSE 真实日历；无 token：周末近似）。"""
+    start = (d + timedelta(days=1)).strftime("%Y%m%d")
+    end = (d + timedelta(days=_CAL_WINDOW_DAYS)).strftime("%Y%m%d")
+    dates, _ = fetch_trade_cal(start, end)
+    if dates:
+        return datetime.strptime(dates[0], "%Y%m%d").date()
+    x = d + timedelta(days=1)  # 兜底：周末跳过
+    while x.weekday() >= 5:
+        x += timedelta(days=1)
+    return x

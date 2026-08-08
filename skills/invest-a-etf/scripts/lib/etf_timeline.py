@@ -61,19 +61,18 @@ def detect_big_move_days(
 
 
 def _prev_trading_day(d: datetime.date) -> datetime.date:
-    """前一交易日（跳过周末；节假日未精确建模，按日历近似）。"""
-    d = d - timedelta(days=1)
-    while d.weekday() >= 5:  # Sat=5, Sun=6
-        d -= timedelta(days=1)
-    return d
+    """前一交易日（委托 lib.trade_cal：有 token 走 SSE 真实日历含节假日/调休，
+    无 token 周末近似——收敛 C8 #12，替代本模块 holiday-blind 实现）。"""
+    from lib.trade_cal import prev_trading_day as _prev
+
+    return _prev(d)
 
 
 def _next_trading_day(d: datetime.date) -> datetime.date:
-    """后一交易日（跳过周末；节假日未精确建模，按日历近似）。"""
-    d = d + timedelta(days=1)
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d
+    """后一交易日（委托 lib.trade_cal，见 _prev_trading_day）。"""
+    from lib.trade_cal import next_trading_day as _next
+
+    return _next(d)
 
 
 def align_events_with_price(move_days: list[dict], events: list[dict]) -> list[dict]:

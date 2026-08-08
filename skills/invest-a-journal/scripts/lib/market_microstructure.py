@@ -46,7 +46,7 @@ _SNAPSHOT_DATA_KEYS = (
 # ---------------------------------------------------------------------------
 
 from db import _conn, _safe_close  # noqa: E402
-from db_util import load_recent_rows, upsert_daily_rows  # noqa: E402
+from db_util import hist_ex_today, load_recent_rows, upsert_daily_rows  # noqa: E402
 from lib.store import init_db  # noqa: E402  # 确保 market_snapshots 表存在
 
 # market_snapshots 表列（与 store.init_db schema 对齐；写入统一走 upsert_daily_rows）
@@ -323,8 +323,7 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
     # （与 cd5e7a4 修复的双计 bug 同类，此前遗漏本步骤）
     if margin is not None and len(history) >= 20:
         snap_date_9 = snap.get("date")
-        hist_ex_today_9 = [h for h in history
-                           if (h.get("date") or h.get("trade_date")) != snap_date_9]
+        hist_ex_today_9 = hist_ex_today(history, snap_date_9)
         lookback = [h for h in hist_ex_today_9 if h.get("margin_balance") is not None]
         if len(lookback) >= 20:
             prev_margin = lookback[-20].get("margin_balance")
@@ -336,9 +335,8 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
     # 拼接前必须剔除今日，否则今日被双计（"5 日 MA"实际跨 4 个不同日、今日权重 40%）
     ad = snap.get("ad_ratio")
     snap_date = snap.get("date")
-    hist_ex_today = [h for h in history
-                     if (h.get("date") or h.get("trade_date")) != snap_date]
-    recent_ad = [h.get("ad_ratio") for h in hist_ex_today[-4:]
+    hist_ex_today_v = hist_ex_today(history, snap_date)
+    recent_ad = [h.get("ad_ratio") for h in hist_ex_today_v[-4:]
                  if h.get("ad_ratio") is not None]
     if ad is not None:
         recent_ad.append(ad)
@@ -347,8 +345,8 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
 
     # 11. 跌停家数20日分位（同上，剔除今日避免窗口偏移）
     ld = snap.get("limit_down_count")
-    if ld is not None and len(hist_ex_today) >= 19:
-        ld_history = [h.get("limit_down_count") for h in hist_ex_today[-19:]
+    if ld is not None and len(hist_ex_today_v) >= 19:
+        ld_history = [h.get("limit_down_count") for h in hist_ex_today_v[-19:]
                       if h.get("limit_down_count") is not None]
         ld_history.append(ld)
         if ld_history:
@@ -370,9 +368,8 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     if mtm is not None:
         # 60日分位（剔除 history 中今日已持久化行，与 _compute_tier2 同型防双计）
         snap_date = snap.get("date")
-        hist_ex_today = [h for h in history
-                         if (h.get("date") or h.get("trade_date")) != snap_date]
-        mtm_hist = [h.get("margin_to_mcap") for h in hist_ex_today
+        hist_ex_today_v = hist_ex_today(history, snap_date)
+        mtm_hist = [h.get("margin_to_mcap") for h in hist_ex_today_v
                     if h.get("margin_to_mcap") is not None]
         if len(mtm_hist) >= 20:
             mtm_hist.append(mtm)
@@ -414,9 +411,8 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
         # load_history 已含今日，双计会抬高约 2/(N+1) 个分位点、在 10/30/70/90
         # 边界翻转冷暖标签；与杠杆分位/_compute_tier2 同型防双计，review #6）
         snap_date = snap.get("date")
-        hist_ex_today = [h for h in history
-                         if (h.get("date") or h.get("trade_date")) != snap_date]
-        ad_hist = [h.get("ad_ratio") for h in hist_ex_today
+        hist_ex_today_v = hist_ex_today(history, snap_date)
+        ad_hist = [h.get("ad_ratio") for h in hist_ex_today_v
                    if h.get("ad_ratio") is not None]
         if len(ad_hist) >= 20:
             ad_hist.append(ad)

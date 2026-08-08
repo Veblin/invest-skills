@@ -97,7 +97,8 @@ def _rows_newest_last(rows: list[Any]) -> list[Any]:
     Tushare daily_basic 等源返回最新在前（降序），此前取 data[-1] 实为最旧行
     → 跨源校验取到最旧一期数据（缺陷修复）。委托 lib.technical.sort_kline_asc
     （共享约定：trade_date/end_date 混合格式归一化 8 位比较，无日期行置尾——
-    快照行通常最新）。非 dict 行无日期语义，保留原位置。
+    快照行通常最新）。非 dict 行无日期语义：不足 2 个 dict 行时保留原位置；
+    排序仅对 dict 行进行（≥2 个 dict 行时非 dict 行被剔除）。
     """
     dict_rows = [r for r in rows if isinstance(r, dict)]
     if len(dict_rows) < 2:
@@ -107,12 +108,39 @@ def _rows_newest_last(rows: list[Any]) -> list[Any]:
     return sort_kline_asc(dict_rows)
 
 
-def _extract_scalar(data: Any, dimension: str = "") -> float | None:
+def _scan_usable_scalar(
+    rows: list[Any], keys: tuple[str, ...], *, latest_only: bool = False,
+) -> float | None:
+    """反向扫描（最新在前）跳过非 dict 行，找第一个可用标量。
+
+    latest_only=True：仅检查最后一行（与 _extract_scalar list 分支语义等价——
+    最后一行非 dict 或无可用键即返回 None，不回退旧行）；False：全列表扫描
+    （与 _extract_l2_scalar 语义等价，取「最新可用行」）。
+    """
+    for r in reversed(_rows_newest_last(rows)):
+        if not isinstance(r, dict):
+            if latest_only:
+                break
+            continue
+        for key in keys:
+            v = _numeric_scalar(r.get(key))
+            if v is not None and _scalar_key_usable(key, v):
+                return v
+        if latest_only:
+            break
+    return None
+
+
+def _extract_scalar(
+    data: Any, dimension: str = "", *, keys: tuple[str, ...] | None = None,
+) -> float | None:
     """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。
 
-    按维度选择语义正确的字段（``_DIM_SCALAR_KEYS``），避免跨源比较不同量纲。
+    按维度选择语义正确的字段（``_DIM_SCALAR_KEYS``），避免跨源比较不同量纲；
+    keys 显式传入时优先（fusion 对 valuation 维度传市值键，与差异标注口径一致）。
     """
-    keys = _DIM_SCALAR_KEYS.get(dimension, _DEFAULT_SCALAR_KEYS)
+    if keys is None:
+        keys = _DIM_SCALAR_KEYS.get(dimension, _DEFAULT_SCALAR_KEYS)
     num = _numeric_scalar(data)
     if num is not None:
         return num
@@ -122,15 +150,10 @@ def _extract_scalar(data: Any, dimension: str = "") -> float | None:
             if v is not None and _scalar_key_usable(key, v):
                 return v
     if isinstance(data, (list, tuple)) and len(data) == 1:
-        return _extract_scalar(data[0], dimension)
+        return _extract_scalar(data[0], dimension, keys=keys)
     if isinstance(data, list) and data:
         # 显式升序：最新=最后一行（见 _rows_newest_last），不假设生产者行序
-        last = _rows_newest_last(data)[-1]
-        if isinstance(last, dict):
-            for key in keys:
-                v = _numeric_scalar(last.get(key))
-                if v is not None and _scalar_key_usable(key, v):
-                    return v
+        return _scan_usable_scalar(data, keys, latest_only=True)
     return None
 
 
@@ -147,13 +170,7 @@ def _extract_l2_scalar(data: Any, keys: tuple[str, ...]) -> float | None:
     elif isinstance(data, list):
         # 显式升序后再从尾部回溯：最新=最后一行（Tushare daily_basic 返回
         # 降序，隐式 reversed(data) 会先取到最旧行 — 缺陷修复）
-        for r in reversed(_rows_newest_last(data)):
-            if not isinstance(r, dict):
-                continue
-            for key in keys:
-                v = _numeric_scalar(r.get(key))
-                if v is not None and _scalar_key_usable(key, v):
-                    return v
+        return _scan_usable_scalar(data, keys, latest_only=False)
     return None
 
 

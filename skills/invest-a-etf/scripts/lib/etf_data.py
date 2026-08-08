@@ -21,6 +21,7 @@ ensure_invest_a_scripts_on_path()
 from codes import etf_symbol_to_ts_code  # noqa: E402
 from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
+from lib.db_util import hist_ex_today  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.technical import (  # noqa: E402
     annualized_volatility_from_returns,
@@ -767,7 +768,7 @@ def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
         from index_pe_snapshot import get_index_pe_history, index_pe_percentile
         rows = get_index_pe_history(idx_code)
         if current_date is not None:
-            rows = [r for r in rows if str(r.get("date")) != str(current_date)]
+            rows = hist_ex_today(rows, current_date)
         return index_pe_percentile(rows, current)
     except Exception as exc:  # DB 不可用等：分位缺失不阻断
         logger.debug("index_pe_percentile(%s) failed: %s", idx_code, exc)

@@ -207,15 +207,35 @@ class TestFuseFromSourceResults:
         from lib.schema import DimensionResult
 
         sources = [
-            SourceResult("tushare.daily_basic", [{"pe_ttm": 15.0}], "valuation"),
-            SourceResult("tencent_finance", {"pe_ttm": 15.5}, "valuation"),
+            SourceResult(
+                "tushare.daily_basic",
+                [{"pe_ttm": 15.0, "total_mv": 200.0}], "valuation",
+            ),
+            SourceResult(
+                "tencent_finance",
+                {"pe_ttm": 15.5, "total_mv": 205.0}, "valuation",
+            ),
         ]
         dim_results = {"valuation": DimensionResult("valuation", sources)}
         fused = fuse_from_source_results(dim_results)
         assert "valuation" in fused
         fp = fused["valuation"]
         assert fp.consensus in ("strong", "moderate")
-        assert 15.0 <= fp.fused_value <= 15.5
+        # #14：融合值口径与差异标注一致（C5）——市值键参与融合，PE 不参与
+        assert 200.0 <= fp.fused_value <= 205.0
+
+    def test_valuation_pe_only_not_fused(self):
+        """#14：估值维度仅 PE（无市值键）→ 不融合（口径一致：市值键参与融合）。"""
+        from lib.fusion import fuse_from_source_results
+        from lib.schema import DimensionResult
+
+        sources = [
+            SourceResult("tushare.daily_basic", [{"pe_ttm": 15.0}], "valuation"),
+            SourceResult("tencent_finance", {"pe_ttm": 15.5}, "valuation"),
+        ]
+        dim_results = {"valuation": DimensionResult("valuation", sources)}
+        fused = fuse_from_source_results(dim_results)
+        assert "valuation" not in fused
 
     def test_with_missing_dimension_result(self):
         """DimensionResult not passed → skipped."""
@@ -230,7 +250,10 @@ class TestFuseFromSourceResults:
         from lib.schema import DimensionResult
 
         sources = [
-            SourceResult("tushare.daily_basic", [{"pe_ttm": 15.0}], "valuation"),
+            SourceResult(
+                "tushare.daily_basic",
+                [{"pe_ttm": 15.0, "total_mv": 200.0}], "valuation",
+            ),
             SourceResult("akshare.snapshot", None, "valuation", error="no data"),
         ]
         dim_results = {"valuation": DimensionResult("valuation", sources)}
