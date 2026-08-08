@@ -489,9 +489,6 @@ class TestHits:
         """
         assert _check_unfilled([10.0, 12.0], gap_idx=1, gap_high=12.0,
                                after_close=True, gap_low=11.0) is True
-        # gap_low 缺省（无前日 high 信息）时恒 True（检测谓词已保证缺口成立）
-        assert _check_unfilled([10.0, 12.0], gap_idx=1, gap_high=12.0,
-                               after_close=True) is True
 
     def test_gap_day_is_latest_after_close_hits(self):
         """review #1：收盘后（after_close=True）最新 bar 缺口确认命中，

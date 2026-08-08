@@ -329,8 +329,10 @@ def prefetch_etf_spot() -> bool:
 
 
 def clear_etf_spot_cache() -> None:
-    """清空**进程内**（L1）spot 缓存（测试用）。
+    """清空**进程内**（L1）spot 缓存。
 
+    测试隔离公共 API（test_etf_spot_cache/test_etf_cache_fixes 的 fixture
+    依赖它跨测试清 L1，保证 canonical 实例的缓存不跨用例泄漏）。
     L2（data_bridge 磁盘缓存）由 data_bridge.invalidate_symbol("market")
     或测试的 tmp cache_dir 隔离负责，此处不触碰。
     """

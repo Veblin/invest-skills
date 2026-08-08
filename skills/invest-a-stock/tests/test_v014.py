@@ -127,15 +127,6 @@ class TestCollectorEdgeCases:
         assert "None" not in summary["summary_text"]
 
 
-class TestSchemaResearch:
-    def test_research_summary_keys(self):
-        from lib.schema import DIMENSIONS, RESEARCH_SUMMARY_KEYS
-
-        assert DIMENSIONS["research"] == "机构研报"
-        assert "status" in RESEARCH_SUMMARY_KEYS
-        assert "summary_text" in RESEARCH_SUMMARY_KEYS
-
-
 class TestRenderEdgeCases:
     def test_coalesce_fin_field_preserves_zero(self):
         from lib.render import _coalesce_fin_field

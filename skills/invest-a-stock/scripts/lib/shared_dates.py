@@ -12,6 +12,7 @@ ensure_skills_lib_on_path()
 
 from dates import (  # noqa: E402
     normalize_end_date,
+    parse_date,
     shanghai_days_ago,
     shanghai_now,
     shanghai_today,
@@ -19,6 +20,7 @@ from dates import (  # noqa: E402
 )
 
 __all__ = [
+    "parse_date",
     "yyyymmdd_to_iso",
     "shanghai_now",
     "shanghai_today",

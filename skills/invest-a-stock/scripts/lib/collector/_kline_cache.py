@@ -34,34 +34,9 @@ _CACHE = KlineTTLCache(
 )
 
 
-def enabled() -> bool:
-    """缓存总开关。INVEST_KLINE_CACHE=0 禁用。"""
-    return os.environ.get("INVEST_KLINE_CACHE", "1") != "0"
-
-
 def _cache_parts(symbol: str, source: str, sd: str, ed: str, qfq: bool) -> tuple[str, str]:
     marker = "__qfq" if qfq else ""
     return (source, f"{symbol}__{sd}_{ed}{marker}")
-
-
-def load(symbol: str, source: str, sd: str, ed: str,
-         date_str: str | None = None, qfq: bool = False) -> list[dict] | None:
-    """读取缓存；未启用/不存在/过期/损坏均返回 None（视为未命中）。
-
-    门控由 canonical _CACHE 统一判定（INVEST_KLINE_CACHE 读取单点）。
-    """
-    date_str = date_str or shanghai_today()
-    return _CACHE.load(date_str, _cache_parts(symbol, source, sd, ed, qfq),
-                       type_guard=list)
-
-
-def save(symbol: str, source: str, sd: str, ed: str,
-         rows: list[dict], date_str: str | None = None,
-         qfq: bool = False) -> None:
-    """写入缓存；失败不影响采集。"""
-    date_str = date_str or shanghai_today()
-    _CACHE.save(date_str, _cache_parts(symbol, source, sd, ed, qfq), rows,
-                skip_empty=True, log_errors=True)
 
 
 def cleanup_old() -> None:
@@ -85,5 +60,4 @@ def load_or_fetch(symbol: str, source: str, sd: str, ed: str,
     )
 
 
-__all__ = ["enabled", "load", "save", "cleanup_old", "load_or_fetch",
-           "CACHE_TTL_SEC"]
+__all__ = ["cleanup_old", "load_or_fetch", "CACHE_TTL_SEC"]

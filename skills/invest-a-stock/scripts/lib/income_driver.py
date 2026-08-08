@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from lib.nums import safe_float  # canonical（None/NaN/±inf → None）
 
 # 收益驱动假设四分支
 DRIVER_GROWTH = "成长兑现"       # 企业增长创造价值增量（树）
@@ -33,20 +33,11 @@ _DIV_YEARS_MIN = 3                  # 连续分红年数 ≥3 → 股息回归�
 _CONF_HIGH_EVIDENCE = 3             # 有效证据 ≥3 → 高置信度
 
 
-def _safe_float(v: Any) -> float | None:
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
 def _yearly_net_profit_series(annual_rows: list[dict]) -> list[float]:
     """年度净利序列（升序）。"""
     out: list[float] = []
     for r in annual_rows:
-        v = _safe_float(r.get("net_profit"))
+        v = safe_float(r.get("net_profit"))
         if v is not None:
             out.append(v)
     return out
@@ -90,12 +81,12 @@ def _fcf_evidence(fin_rows: list[dict]) -> dict:
     """FCF 持续性（fcff 或 OCF-cap_ex，近 N 期为正占比）。"""
     vals: list[float] = []
     for r in fin_rows:
-        v = _safe_float(r.get("fcff"))
+        v = safe_float(r.get("fcff"))
         if v is None:
-            v = _safe_float(r.get("fcfe"))
+            v = safe_float(r.get("fcfe"))
         if v is None and r.get("ocf") is not None and r.get("cap_ex") is not None:
-            ocf = _safe_float(r.get("ocf"))
-            capex = _safe_float(r.get("cap_ex"))
+            ocf = safe_float(r.get("ocf"))
+            capex = safe_float(r.get("cap_ex"))
             if ocf is not None and capex is not None:
                 v = ocf - capex
         if v is not None:

@@ -17,7 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stdout
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from io import StringIO
 from typing import Any, Callable
 
@@ -333,15 +333,14 @@ def _run_sources_cascade(tasks: list[tuple[str, Callable[[], Any]]],
     return results
 
 
-def _run_source_with_deadline(
+def _run_in_thread(
     fn: Callable[[], Any], timeout_sec: float, label: str,
 ) -> tuple[Any, Exception | None]:
-    """daemon 线程中执行单源查询，超时受控返回 (data, exc)。
+    """daemon 线程中执行阻塞调用，超时受控返回 (data, error)。
 
-    对齐 _run_sources_parallel 的 deadline 语义：超时源返回 TimeoutError
-    （error 含 "timeout after Xs"），立即让出降级链；挂起线程不 join（daemon），
-    解释器退出时被杀。异常照常捕获返回，不吞消息（与 _run_one_source 无
-    deadline 路径的 error 可追溯性一致）。
+    统一 helper（C6 收敛 _run_source_with_deadline 与 _orchestrate._run_with_timeout）：
+    超时置 TimeoutError（error 含 "timeout after Xs"），挂起线程不 join（daemon），
+    解释器退出时被杀。异常照常捕获返回，不吞消息——错误处理策略由调用方包装。
     """
     box: dict[str, Any] = {"data": None, "error": None}
     done = threading.Event()
@@ -354,11 +353,24 @@ def _run_source_with_deadline(
         finally:
             done.set()
 
-    t = threading.Thread(target=_target, name=f"src-timeout:{label}", daemon=True)
+    t = threading.Thread(target=_target, name=f"timeout:{label}", daemon=True)
     t.start()
     if not done.wait(timeout=timeout_sec):
         box["error"] = TimeoutError(f"timeout after {timeout_sec:.1f}s")
     return box["data"], box["error"]
+
+
+def _run_source_with_deadline(
+    fn: Callable[[], Any], timeout_sec: float, label: str,
+) -> tuple[Any, Exception | None]:
+    """daemon 线程中执行单源查询，超时受控返回 (data, exc)。
+
+    对齐 _run_sources_parallel 的 deadline 语义：超时源返回 TimeoutError
+    （error 含 "timeout after Xs"），立即让出降级链；挂起线程不 join（daemon），
+    解释器退出时被杀。异常照常捕获返回，不吞消息（与 _run_one_source 无
+    deadline 路径的 error 可追溯性一致）。
+    """
+    return _run_in_thread(fn, timeout_sec, label)
 
 
 def _run_one_source(name: str, fn: Callable[[], Any], dimension: str,

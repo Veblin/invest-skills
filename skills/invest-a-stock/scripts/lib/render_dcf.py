@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from lib.nums import safe_float as _safe_num
 from lib.technical import sort_kline_asc
 from lib.stats import calc_beta
 from lib.financial_rigor import _merge_share_fields, _parse_share_count
 
-from .render_utils import _compute_metric_cagr, _get_dim_data, _fmt_v2
+from .render_utils import _compute_metric_cagr, _get_dim_data
 
 logger = logging.getLogger(__name__)
 

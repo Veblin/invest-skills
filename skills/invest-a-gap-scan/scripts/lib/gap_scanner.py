@@ -280,8 +280,14 @@ def _check_unfilled(lows: list[float], gap_idx: int,
     """
     if gap_idx >= len(lows) - 1:
         if after_close:
+            # 调用点恒传 gap_low（GapInfo.gap_low = highs[gap_idx-1]）；
+            # 检测谓词已保证 lows[gap_idx] > gap_low（缺口未回补）。
+            # None 显式拒绝（review 第三轮 #2：签名不得宣称 None 合法——
+            # 裸比较会抛 TypeError，显式 ValueError 契约清晰）。
             if gap_low is None:
-                return True  # 缺省：检测谓词保证缺口成立
+                raise ValueError(
+                    "after_close=True 时必须提供 gap_low（缺口下沿 = 前一日 high）"
+                )
             return lows[gap_idx] > gap_low
         return False
     return min(lows[gap_idx + 1:]) > gap_high

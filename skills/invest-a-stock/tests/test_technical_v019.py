@@ -44,14 +44,6 @@ class TestTechnicalV019:
         rs = relative_strength(stock, bench)
         assert rs["rs_latest"] is not None
 
-    def test_rolling_beta(self):
-        from lib.technical import rolling_beta
-
-        stock = [100 * (1.01 ** i) for i in range(80)]
-        bench = [100 * (1.005 ** i) for i in range(80)]
-        beta = rolling_beta(stock, bench, windows=[60])
-        assert "60" in beta["windows"]
-
     def test_compute_includes_ichimoku(self):
         from lib.technical import compute
 

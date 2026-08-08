@@ -34,9 +34,11 @@ rollup_etf_quality_status = _mod.rollup_etf_quality_status
 etf_share_flow = _mod.etf_share_flow
 save_etf_share_snapshot = _mod.save_etf_share_snapshot
 
-# fetch_* 自 v0.2.3 起 re-export 供 data_bridge getter 使用；v0.2.4 起
-# data_bridge 经 invest_path 直接加载 canonical（不再解析到本 shim），
-# 本组 re-export 保留供 `from etf_data import fetch_*` 调用方兼容。
+# 完整转发 canonical 导出（含测试辅助 clear_etf_spot_cache 与 fetch_*）——
+# shim 是 journal 上下文里 etf_data 的完整代理：pytest 会话中 journal lib
+# 可能遮蔽 canonical（conftest 顺序依赖），任一 `from etf_data import X`
+# 都必须可用，否则 etf 测试在 etf 目录在前的调用顺序下 collection 失败
+# （review 第三轮 #1，实证复现）。
 fetch_etf_spot_rows = _mod.fetch_etf_spot_rows
 fetch_etf_index_pe = _mod.fetch_etf_index_pe
 fetch_etf_nav = _mod.fetch_etf_nav

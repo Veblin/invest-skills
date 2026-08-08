@@ -68,8 +68,8 @@ def test_get_kline_force_bypasses_cache(fake_bridge):
 def test_get_valuation_uses_own_dimension(fake_bridge):
     data_bridge.get_valuation("600176")
     # 估值必须用独立 valuation 维度，不得与 financials 共用缓存槽位
-    assert data_bridge._cache.is_fresh("valuation", "600176")
-    assert not data_bridge._cache.is_fresh("financials", "600176")
+    assert data_bridge._cache.get("valuation", "600176") is not None
+    assert data_bridge._cache.get("financials", "600176") is None
 
 
 def test_missing_envelope_not_cached(tmp_path, monkeypatch):
@@ -129,11 +129,10 @@ def test_invalidate_symbol_clears_all_dimensions(fake_bridge):
     assert fake_bridge["quote"] == 2
 
 
-def test_cache_stats_and_clear(fake_bridge):
+def test_cache_invalidate_all(fake_bridge):
     data_bridge.get_quote("600176")
-    st = data_bridge.cache_stats()
-    assert st["total_entries"] >= 1
-    assert data_bridge.cache_clear() >= 1
+    assert data_bridge._cache.stats()["total_entries"] >= 1
+    assert data_bridge.invalidate_symbol("600176") >= 1
     assert data_bridge._cache.stats()["total_entries"] == 0
 
 
@@ -221,8 +220,8 @@ def test_get_etf_index_pe_failure_envelope_not_cached(tmp_path, monkeypatch):
 def test_get_etf_nav_uses_own_dimension(fake_etf_bridge):
     """etf_nav 必须用独立维度，不得与 etf_index_pe 共用缓存槽位。"""
     data_bridge.get_etf_nav("588000")
-    assert data_bridge._cache.is_fresh("etf_nav", "588000")
-    assert not data_bridge._cache.is_fresh("etf_index_pe", "588000")
+    assert data_bridge._cache.get("etf_nav", "588000") is not None
+    assert data_bridge._cache.get("etf_index_pe", "588000") is None
 
 
 def test_get_etf_attr_missing_returns_none(tmp_path, monkeypatch):

@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any
 
-from .shared_dates import shanghai_now as _shanghai_now
+from .shared_dates import parse_date as _parse_date, shanghai_now as _shanghai_now
 
 logger = logging.getLogger(__name__)
 
@@ -322,32 +322,3 @@ def _safe_int(value: Any, default: int | None = None) -> int | None:
         return default
 
 
-def _parse_date(raw: Any) -> date | None:
-    """解析多种日期格式，容忍 NaT/NaN。"""
-    import pandas as pd
-    if raw is None:
-        return None
-    # 检查 pandas NaT/NaN（必须在 isinstance 检查之前）
-    try:
-        if pd.isna(raw):
-            return None
-    except (TypeError, ValueError):
-        pass
-    # pd.Timestamp 是 datetime.datetime 的子类，.date() 返回 date 对象
-    if isinstance(raw, datetime):
-        try:
-            return raw.date()
-        except Exception:
-            return None
-    # date 对象（pd.Timestamp 已被上面拦截，此处是纯 Python date）
-    if isinstance(raw, date):
-        return raw
-    s = str(raw).strip()
-    if not s or s.lower() == "nat":
-        return None
-    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d", "%Y年%m月%d日"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None

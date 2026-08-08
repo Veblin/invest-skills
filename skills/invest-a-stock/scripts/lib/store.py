@@ -331,17 +331,6 @@ def get_pipeline_progress(symbol: str) -> dict[str, bool]:
         _safe_close(c)
 
 
-def clear_pipeline_state(symbol: str) -> None:
-    """清除某 symbol 的全部流水线状态。"""
-    init_db()
-    c = _conn()
-    try:
-        c.execute("DELETE FROM pipeline_states WHERE symbol = ?", (symbol,))
-        c.commit()
-    finally:
-        _safe_close(c)
-
-
 # ---- Diff 快照对比 ----
 
 def get_collection(collection_id: int) -> dict | None:
@@ -899,49 +888,6 @@ def get_valuation(valuation_id: int) -> dict | None:
         return d
     finally:
         _safe_close(c)
-
-
-def compare_valuations(id1: int, id2: int) -> dict | None:
-    """对比两次估值快照。
-
-    Returns:
-        dict with old/new snapshots and key deltas, or None if either not found.
-    """
-    v1 = get_valuation(id1)
-    v2 = get_valuation(id2)
-    if v1 is None or v2 is None:
-        return None
-
-    def _delta(old, new):
-        if old is None or new is None:
-            return None
-        return round(new - old, 4)
-
-    return {
-        "symbol": v1.get("symbol", "?"),
-        "old": {
-            "id": id1, "created_at": v1.get("created_at", ""),
-            "price": v1.get("price"), "ttm_eps": v1.get("ttm_eps"),
-            "ttm_pe": v1.get("ttm_pe"), "pb": v1.get("pb"),
-            "base_low": v1.get("base_low"), "base_high": v1.get("base_high"),
-        },
-        "new": {
-            "id": id2, "created_at": v2.get("created_at", ""),
-            "price": v2.get("price"), "ttm_eps": v2.get("ttm_eps"),
-            "ttm_pe": v2.get("ttm_pe"), "pb": v2.get("pb"),
-            "base_low": v2.get("base_low"), "base_high": v2.get("base_high"),
-        },
-        "deltas": {
-            "price": _delta(v1.get("price"), v2.get("price")),
-            "ttm_eps": _delta(v1.get("ttm_eps"), v2.get("ttm_eps")),
-            "ttm_pe": _delta(v1.get("ttm_pe"), v2.get("ttm_pe")),
-            "pb": _delta(v1.get("pb"), v2.get("pb")),
-            "base_mid": _delta(
-                ((v1.get("base_low") or 0) + (v1.get("base_high") or 0)) / 2 if v1.get("base_low") is not None and v1.get("base_high") is not None else None,
-                ((v2.get("base_low") or 0) + (v2.get("base_high") or 0)) / 2 if v2.get("base_low") is not None and v2.get("base_high") is not None else None,
-            ),
-        },
-    }
 
 
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:

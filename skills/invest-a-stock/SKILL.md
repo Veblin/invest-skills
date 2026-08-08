@@ -616,8 +616,9 @@ uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news
 
 **验证规则：**
 - financials 维度：A（Tushare）vs B（akshare），关键字段（ROE/EPS/毛利率）差异 <5% → 通过
-- 差异 ≥5% → 触发 Collector D（Tie-breaker, baostock）：
-  `invest.py collect SYMBOL --dims "financials" --source baostock`
+- 差异 ≥5% → 触发 Tie-breaker（第三源三方投票）：另采一份第三方 collection
+  `invest.py collect SYMBOL --dims "financials" --deep`（换批次/时点），
+  与 A/B 一起跑 `scripts/merge_collections.py`
 - 三取二投票决定最终值，无法决定则保留差异并标注"跨源分歧"
 - 合并 3-4 份 JSON → 完整 collection（用 `scripts/merge_collections.py`）
 

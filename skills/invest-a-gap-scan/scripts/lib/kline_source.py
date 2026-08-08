@@ -86,20 +86,6 @@ class KlineSource(ABC):
         ...
 
     @abstractmethod
-    def fetch_adj_factor(self, ts_code: str) -> pd.DataFrame | None:
-        """Fetch the adjustment factor series for a single stock.
-
-        Args:
-            ts_code: Tushare-format stock code (e.g. ``"600176.SH"``).
-
-        Returns:
-            DataFrame with columns ``[trade_date, adj_factor]``, or
-            ``None`` if the source does not provide adj factors (or
-            on error).
-        """
-        ...
-
-    @abstractmethod
     def source_name(self) -> str:
         """A human-readable name for this data source.
 
@@ -230,42 +216,6 @@ class TushareBulkSource(KlineSource):
             len(frames),
         )
         return combined
-
-    def fetch_adj_factor(self, ts_code: str) -> pd.DataFrame | None:
-        """Fetch the adjustment factor series for one stock.
-
-        Prefer :meth:`fetch_adj_factor_batch` on the main scan path.
-        Kept for compatibility / debugging.
-
-        Args:
-            ts_code: Stock code in Tushare format (e.g. ``"600176.SH"``).
-
-        Returns:
-            DataFrame with columns ``[trade_date, adj_factor]``, or
-            ``None`` if empty or on error.
-        """
-        try:
-            df = self._client.query("adj_factor", ts_code=ts_code)
-        except Exception as exc:
-            logger.warning(
-                "Tushare adj_factor failed for %s: %s", ts_code, exc
-            )
-            return None
-
-        if df is None or df.empty:
-            logger.debug("Tushare adj_factor empty for %s", ts_code)
-            return None
-
-        needed = ["trade_date", "adj_factor"]
-        if not all(c in df.columns for c in needed):
-            logger.warning(
-                "Tushare adj_factor for %s: missing columns (got %s)",
-                ts_code,
-                list(df.columns),
-            )
-            return None
-
-        return df[needed].copy()
 
     def fetch_adj_factor_batch(self, trade_dates: list[str]) -> pd.DataFrame:
         """Fetch adj_factor for all stocks via ``pro.adj_factor(trade_date=…)``.
@@ -549,17 +499,6 @@ class BaostockSource(KlineSource):
         )
         return combined
 
-    def fetch_adj_factor(self, ts_code: str) -> pd.DataFrame | None:
-        """Return ``None`` — baostock already provides qfq-adjusted prices.
-
-        Args:
-            ts_code: Ignored (returns ``None`` unconditionally).
-
-        Returns:
-            Always ``None``.
-        """
-        return None
-
     def source_name(self) -> str:
         return "baostock"
 
@@ -575,13 +514,6 @@ class BaostockSource(KlineSource):
                     logger.info("Baostock logged out")
         except Exception as exc:
             logger.warning("Baostock logout error: %s", exc)
-
-    def __enter__(self) -> BaostockSource:
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.cleanup()
-
 
 # ---------------------------------------------------------------------------
 # Factory function

@@ -90,43 +90,9 @@ def collect_industry_weekly() -> dict[str, Any]:
     return result
 
 
-# 共享 lib.nums.coalesce_field：从行中取首个有效数值字段（跳过 None/NaN/inf）
-
-
 # ---------------------------------------------------------------------------
 # 查询
 # ---------------------------------------------------------------------------
-
-def query_industry_pe(sw_code: str) -> dict[str, Any] | None:
-    """查单个申万行业最新 PE/PB。
-
-    Parameters
-    ----------
-    sw_code : str
-        申万行业代码（如 "801080" 电子）。
-
-    Returns
-    -------
-    dict or None
-        {index_code, index_name, date, pe, pb, chg_pct, turnover_pct, dividend_yield}
-    """
-    import sqlite3
-
-    from lib.store import _conn, _safe_close
-
-    c = _conn()
-    try:
-        row = c.execute(
-            "SELECT * FROM industry_weekly WHERE index_code = ? ORDER BY date DESC LIMIT 1",
-            (sw_code,),
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    finally:
-        _safe_close(c)
-
-    return dict(row) if row else None
-
 
 def list_industry_snapshot() -> list[dict[str, Any]]:
     """返回所有 28 个申万一级行业的最新 PE/PB/涨跌幅快照（按 PE 降序）。"""

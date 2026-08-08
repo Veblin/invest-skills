@@ -390,7 +390,7 @@ print('saved sell', jid2)
 "
 ```
 
-Shell CLI 的 `journal.py add` **已停用**（退出码 1 + 引导文案）。落库只走上述 `save_journal` 路径。
+Shell CLI 的 `journal.py add` **已移除**（v0.2.4 清理，无调用方）。落库只走上述 `save_journal` 路径。
 
 ---
 

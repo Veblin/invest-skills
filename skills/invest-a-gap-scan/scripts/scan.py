@@ -44,7 +44,6 @@ ensure_invest_a_scripts_on_path()
 
 from dates import shanghai_now  # noqa: E402
 from lib import env  # noqa: E402
-from lib.tushare_client import TushareClient  # noqa: E402
 
 # ---- 本 skill 的 lib 模块（top-level import 通过 _LIB_DIR） ----
 from gap_scanner import scan_all  # noqa: E402
@@ -159,41 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _fetch_trade_cal(start_date: str, end_date: str) -> tuple[list[str], bool]:
-    """获取交易日列表，返回 (trade_dates, is_estimated)。
+    """获取交易日列表（C8 收敛：委托 skills/lib/trade_cal.fetch_trade_cal）。"""
+    from trade_cal import fetch_trade_cal as _fetch
 
-    优先使用 Tushare trade_cal API，失败时用自然日估算（is_estimated=True）。
-    """
-    config = env.get_config()
-    client = TushareClient(token=config.get("TUSHARE_TOKEN"), timeout=15)
-
-    try:
-        cal = client.query(
-            "trade_cal", exchange="SSE", is_open="1",
-            start_date=start_date, end_date=end_date,
-        )
-    except Exception as exc:
-        logger.warning("Tushare trade_cal 请求失败: %s", exc)
-        return _estimate_trade_dates(start_date, end_date), True
-
-    if cal is None or cal.empty:
-        logger.warning("Tushare trade_cal 返回空，使用自然日估算")
-        return _estimate_trade_dates(start_date, end_date), True
-
-    date_col = "cal_date" if "cal_date" in cal.columns else "trade_date"
-    return sorted(cal[date_col].astype(str).tolist()), False
-
-
-def _estimate_trade_dates(start_date: str, end_date: str) -> list[str]:
-    """粗略估算交易日（仅用作兜底）。"""
-    start = datetime.strptime(start_date, "%Y%m%d")
-    end = datetime.strptime(end_date, "%Y%m%d")
-    dates: list[str] = []
-    current = start
-    while current <= end:
-        if current.weekday() < 5:
-            dates.append(current.strftime("%Y%m%d"))
-        current += timedelta(days=1)
-    return dates
+    return _fetch(start_date, end_date)
 
 
 def _build_daily_by_date(

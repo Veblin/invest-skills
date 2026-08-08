@@ -14,7 +14,6 @@ from lib.style_match import (
     format_match_hint,
     load_style,
     match_style,
-    save_style,
 )
 
 
@@ -78,31 +77,20 @@ class TestMatchStyle:
 
 
 class TestStylePersistence:
-    """风格档案持久化（monkeypatch STORE_DIR）。"""
-
-    def test_save_load_roundtrip(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("lib.env.STORE_DIR", tmp_path)
-        assert save_style("趋势") is True
-        assert load_style() == "趋势"
+    """风格档案读取（monkeypatch STORE_DIR）。写入口 save_style 已删
+    （无生产调用方；R10 档案写入后续补 CLI 入口）。"""
 
     def test_missing_file_returns_none(self, monkeypatch, tmp_path):
         monkeypatch.setattr("lib.env.STORE_DIR", tmp_path)
         assert load_style() is None
 
-    def test_write_failure_degrades_gracefully(self, monkeypatch, tmp_path):
-        monkeypatch.setattr("lib.env.STORE_DIR", tmp_path / "no_such_dir" / "x")
-        # STORE_DIR 指向深层不存在目录 → mkdir 失败场景模拟为 False（不抛）
-        assert save_style("价值") is True  # mkdir parents=True 会创建，改测只读场景
-        # 只读目录场景
-        import os
-        ro_dir = tmp_path / "ro"
-        ro_dir.mkdir()
-        os.chmod(ro_dir, 0o500)
-        try:
-            monkeypatch.setattr("lib.env.STORE_DIR", ro_dir)
-            assert save_style("价值") is False
-        finally:
-            os.chmod(ro_dir, 0o700)
+    def test_roundtrip_via_direct_file_write(self, monkeypatch, tmp_path):
+        """档案文件存在 → load_style 解析成功（写路径用文件直写模拟）。"""
+        monkeypatch.setattr("lib.env.STORE_DIR", tmp_path)
+        import json
+        (tmp_path / "user_style.json").write_text(
+            json.dumps({"style": "趋势"}, ensure_ascii=False), encoding="utf-8")
+        assert load_style() == "趋势"
 
 
 class TestRenderStyleMatch:

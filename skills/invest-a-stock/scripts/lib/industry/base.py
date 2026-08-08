@@ -144,16 +144,6 @@ def get_sector_group(industry: str) -> str:
     return resolve_industry_profile(industry).sector_group
 
 
-def get_valuation_metrics(industry: str) -> list[str]:
-    """快捷方法：获取行业应优先展示的估值指标。"""
-    return resolve_industry_profile(industry).primary_valuation_metrics
-
-
-def get_operational_metrics(industry: str) -> dict[str, dict[str, Any]]:
-    """快捷方法：获取行业特有运营指标定义。"""
-    return resolve_industry_profile(industry).operational_metrics
-
-
 def get_quality_overrides(industry: str) -> dict[str, str]:
     """快捷方法：获取质量检查覆盖规则。"""
     return resolve_industry_profile(industry).quality_overrides
@@ -162,16 +152,6 @@ def get_quality_overrides(industry: str) -> dict[str, str]:
 def get_unknown_rules(industry: str) -> list[tuple[str, str]]:
     """快捷方法：获取行业 Known Unknowns 问题模板。"""
     return resolve_industry_profile(industry).unknown_rules
-
-
-def get_risk_signals(industry: str) -> dict[str, dict[str, Any]]:
-    """快捷方法：获取行业特有风险信号。"""
-    return resolve_industry_profile(industry).risk_signals
-
-
-def get_fast_veto_skips(industry: str) -> list[str]:
-    """快捷方法：获取不适用的快速否决项。"""
-    return resolve_industry_profile(industry).fast_veto_skips
 
 
 # --- 行业成功关键因素（R4） ---
@@ -210,59 +190,7 @@ def get_success_factors(industry: str) -> list[dict]:
     return list(profile.success_factors)
 
 
-def is_financial_sector(industry: str) -> bool:
-    """是否是金融行业（银行/保险/券商）。"""
-    return get_sector_group(industry) == "financial"
-
-
-def is_tech_sector(industry: str) -> bool:
-    """是否是科技行业（硬件/软件）。"""
-    return get_sector_group(industry) in ("tech", "tech_hardware", "tech_software")
-
-
-def is_consumer_sector(industry: str) -> bool:
-    """是否是消费品行业。"""
-    return get_sector_group(industry) == "consumer"
-
-
-def is_cyclical_sector(industry: str) -> bool:
-    """是否是周期性行业（工业/能源/材料）。"""
-    return get_sector_group(industry) == "industrial"
-
-
-def list_registered_industries() -> list[str]:
-    """列出所有已注册的行业关键词。"""
-    return sorted(_REGISTRY.keys(), key=len, reverse=True)
-
-
 # ---------------------------------------------------------------------------
 # 预加载子模块（延迟导入以避免循环依赖）
-# ---------------------------------------------------------------------------
-
-_loaded = False
-
-
-def _ensure_loaded() -> None:
-    """确保所有行业子模块已加载到 _REGISTRY 中。"""
-    global _loaded
-    if _loaded:
-        return
-    # 按需导入子模块（副作用：调用 register_profile 填充 _REGISTRY）
-    from . import banks  # noqa: F401
-    from . import tech_hardware  # noqa: F401
-    # 后续迭代中取消注释：
-    # from . import insurance  # noqa: F401
-    # from . import securities  # noqa: F401
-    # from . import real_estate  # noqa: F401
-    # from . import tech_software  # noqa: F401
-    # from . import pharma  # noqa: F401
-    # from . import consumer  # noqa: F401
-    # from . import energy_materials  # noqa: F401
-    # from . import autos_new_energy  # noqa: F401
-    # from . import utilities  # noqa: F401
-    _loaded = True
-
-
-# 在 resolve_industry_profile 入口处确保已加载
-# （通过在函数内调用 _ensure_loaded）
-# 注：实际集成时在 resolve_industry_profile() 顶部加 _ensure_loaded()
+# 行业子模块注册：由 industry/__init__.py 的 `from . import banks/tech_hardware`
+# import 副作用调用 register_profile 填充 _REGISTRY，无需额外加载钩子。

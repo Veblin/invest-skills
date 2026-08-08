@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from datetime import date, datetime, time as dt_time
@@ -239,19 +238,6 @@ class DataCache:
             self._set_count += 1
             if self._set_count % 50 == 0:
                 self._lru_cleanup_locked()
-
-    def is_fresh(self, dimension: str, symbol: str) -> bool:
-        """判断缓存是否仍然新鲜。"""
-        path = self._cache_path(dimension, symbol)
-        if not path.exists():
-            return False
-        try:
-            entry = self._load(path)
-        except (json.JSONDecodeError, OSError):
-            return False
-        if entry is None:
-            return False
-        return not self._is_expired(entry)
 
     def invalidate(self, dimension: str | None = None,
                    symbol: str | None = None) -> int:

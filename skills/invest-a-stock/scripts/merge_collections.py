@@ -48,11 +48,19 @@ THRESHOLD_WARN = 0.20     # 5-20% → 标注分歧
 
 
 def _diff_pct(a: float, b: float) -> float:
-    """相对差异百分比（基于均值）。"""
-    avg = (abs(a) + abs(b)) / 2.0
-    if avg < 1e-12:
+    """相对差异百分比（基于均值，委托 canonical schema.relative_diff_pct）。
+
+    avg 传 (|a|+|b|)/2（绝对值均值）——同号对与有符号均值数学等价；
+    异号对完全复刻旧实现（|a-b|/((|a|+|b|)/2)，上限 100% 或 200% 精确值），
+    避免有符号均值近抵消导致的爆炸（review 第三轮 #3：5 vs -4.9 →
+    19800% 假警报）。
+    """
+    from lib.schema import relative_diff_pct
+
+    d = relative_diff_pct(max(a, b), min(a, b), (abs(a) + abs(b)) / 2)
+    if d is None:
         return 0.0 if abs(a - b) < 1e-12 else 100.0
-    return abs(a - b) / avg * 100.0
+    return d * 100.0
 
 
 def load_collection(path: str) -> dict:

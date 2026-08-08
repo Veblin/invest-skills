@@ -365,54 +365,6 @@ def cmd_collect_weekly() -> int:
     return 0
 
 
-def cmd_share_snap(symbol: str) -> int:
-    """保存单只或全部已映射 ETF 的份额快照。"""
-    from etf_data import save_etf_share_snapshot
-
-    if symbol == "all":
-        symbols = list(set(ETF_HEDGE_MAP.keys()) | set(CSINDEX_MAP.keys()))
-        symbols.sort()
-        ok = 0
-        for sym in symbols:
-            snap = save_etf_share_snapshot(sym)
-            status = f"AUM {snap['aum']:.2f} 亿" if snap else "跳过(非交易日?)"
-            print(f"  {sym}: {status}")
-            if snap:
-                ok += 1
-        print(f"完成: {ok}/{len(symbols)} 只 ETF 份额已保存")
-        return 0 if ok > 0 else 1
-
-    snap = save_etf_share_snapshot(symbol)
-    if snap:
-        print(f"{symbol}: 份额 {snap['shares']:.0f}, AUM {snap['aum']:.2f} 亿 (日期 {snap['date']})")
-        return 0
-    print(f"{symbol}: 跳过（非交易日或数据不可用）")
-    return 1
-
-
-def cmd_share_flow(symbol: str, days: int = 60) -> int:
-    """查询 ETF 份额变化趋势。"""
-    from etf_data import etf_share_flow
-
-    flow = etf_share_flow(symbol, days=days)
-    if flow.get("note"):
-        print(f"{symbol}: {flow['note']}")
-        return 0
-
-    print(f"{symbol} 份额变化趋势（{flow.get('history_count', 0)} 条记录）:")
-    print(f"  当前份额: {flow.get('shares_current', 0):.0f}")
-    print(f"  当前 AUM: {flow.get('aum_current', 0):.2f} 亿")
-    for window, label in [(5, "5日"), (20, "20日"), (60, "60日")]:
-        chg = flow.get(f"share_change_{window}d")
-        flow_est = flow.get(f"flow_est_{window}d")
-        if chg is not None and flow_est is not None:
-            direction = "流入" if flow_est > 0 else "流出"
-            print(f"  {label}: 份额 {chg:+.0f}, 估算资金 {flow_est:+.2f} 亿 ({direction})")
-        else:
-            print(f"  {label}: 数据不足（需 ≥{window+1} 条记录）")
-    return 0
-
-
 def cmd_diagnose() -> int:
     print("invest-a-etf diagnose")
     print(f"  ETF_HEDGE_MAP entries: {len(ETF_HEDGE_MAP)}")
@@ -471,13 +423,6 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("industry-pe", help="申万一级行业 PE/PB 一览")
     sub.add_parser("collect-weekly", help="手动触发行业 PE 周度采集")
 
-    p_snap = sub.add_parser("share-snap", help="保存 ETF 份额快照")
-    p_snap.add_argument("symbol", help="6 位 ETF 代码（或 'all' 采集所有已映射 ETF）")
-
-    p_flow = sub.add_parser("share-flow", help="查询 ETF 份额变化趋势")
-    p_flow.add_argument("symbol", help="6 位 ETF 代码")
-    p_flow.add_argument("--days", type=int, default=60, help="回溯天数（默认 60）")
-
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
@@ -489,10 +434,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_industry_pe()
     if args.cmd == "collect-weekly":
         return cmd_collect_weekly()
-    if args.cmd == "share-snap":
-        return cmd_share_snap(args.symbol)
-    if args.cmd == "share-flow":
-        return cmd_share_flow(args.symbol, args.days)
     return 1
 
 

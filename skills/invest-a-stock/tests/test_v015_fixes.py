@@ -151,16 +151,6 @@ class TestFusionSerialization:
         assert loaded["quote"]["fused_value"] == fp.fused_value
 
 
-class TestArchiverList:
-    def test_list_archives_parses_symbol(self, tmp_path):
-        from lib.archiver import list_archives
-
-        f = tmp_path / "20260622-120000-600176.json"
-        f.write_text("{}", encoding="utf-8")
-        rows = list_archives(symbol="600176", raw_dir=str(tmp_path))
-        assert len(rows) == 1
-        assert rows[0]["symbol"] == "600176"
-        assert rows[0]["timestamp"] == "20260622-120000"
 
 
 class TestChainKeywordOrder:

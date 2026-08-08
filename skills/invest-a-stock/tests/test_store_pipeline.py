@@ -28,11 +28,6 @@ class TestPipelineState:
         assert progress.get("collect") is True
         assert progress.get("evidence") is not True
 
-    def test_clear(self, isolated_store):
-        isolated_store.save_pipeline_step("TEST999", "plan")
-        isolated_store.clear_pipeline_state("TEST999")
-        assert isolated_store.load_pipeline_step("TEST999", "plan") is None
-
     def test_none_state(self, isolated_store):
         isolated_store.save_pipeline_step("TEST999", "plan", None)
         result = isolated_store.load_pipeline_step("TEST999", "plan")

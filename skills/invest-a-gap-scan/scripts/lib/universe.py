@@ -91,14 +91,6 @@ class StockInfo:
 # ---------------------------------------------------------------------------
 
 
-def _filter_st_and_delist(name: str) -> bool:
-    """Check whether a stock name indicates ST or delisting status.
-
-    Delegates to shared ``codes.is_st_or_delisted`` (skills/lib/codes.py).
-    """
-    return is_st_or_delisted(name)
-
-
 # ---------------------------------------------------------------------------
 # Cache functions
 # ---------------------------------------------------------------------------
@@ -561,7 +553,7 @@ def build_universe(
     result: list[StockInfo] = []
     for info in stock_map.values():
         name = info.get("name", "")
-        if _filter_st_and_delist(name):
+        if is_st_or_delisted(name):
             continue
 
         board = classify_board(info["ts_code"], info.get("market", ""))

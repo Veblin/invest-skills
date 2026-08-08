@@ -60,21 +60,15 @@ def _norm_index_code(code: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def _bridge_envelope(idx_code: str) -> dict[str, Any] | None:
-    """取 etf_index_pe 缓存信封（best-effort；data_bridge 不可用时 None）。"""
-    try:
-        import data_bridge  # noqa: PLC0415
-    except ImportError:
-        logger.debug("data_bridge unavailable; index_pe degraded")
-        return None
-    fn = getattr(data_bridge, "get_etf_index_pe", None)
-    if fn is None:
-        return None
-    try:
-        env = fn(idx_code)
-        return env if isinstance(env, dict) else None
-    except Exception as exc:  # 缓存层异常不阻断报告流程
-        logger.debug("get_etf_index_pe(%s) failed: %s", idx_code, exc)
-        return None
+    """取 etf_index_pe 缓存信封（best-effort；data_bridge 不可用时 None）。
+
+    C15 收敛：委托 etf_data._bridge_get（同目录 peer 的通用惰性包装）；
+    保留函数名与 dict 过滤——6 处测试 monkeypatch 该函数名。
+    """
+    from etf_data import _bridge_get
+
+    env = _bridge_get("get_etf_index_pe", idx_code)
+    return env if isinstance(env, dict) else None
 
 
 def persist_index_pe_from_cache(idx_codes: list[str] | None = None) -> dict[str, Any]:

@@ -22,9 +22,6 @@ from .render_utils import (
     _v3_trend_stage_hints,
     _v3_valuation_percentiles,
     _fmt_v2,
-    _fmt_num,
-    _get_safe,
-    _coalesce_fin_field,
 )
 
 logger = logging.getLogger(__name__)

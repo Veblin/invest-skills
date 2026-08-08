@@ -114,19 +114,6 @@ def load_style() -> str | None:
         return None
 
 
-def save_style(style: str) -> bool:
-    """写入风格档案；失败 → 返回 False（调用方标注「风格档案未持久化」，会话内存降级）。"""
-    try:
-        p = _style_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"style": style}, ensure_ascii=False, indent=2),
-                     encoding="utf-8")
-        return True
-    except Exception as exc:
-        logger.warning("save_style failed: %s", exc)
-        return False
-
-
 # ---------------------------------------------------------------------------
 # cmd_report 装配
 # ---------------------------------------------------------------------------

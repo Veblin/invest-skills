@@ -14,9 +14,11 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 from _invest_path import ensure_invest_a_scripts_on_path
+
+from db_util import connect_db, safe_close  # noqa: E402 — canonical（C9 收敛）
 
 ensure_invest_a_scripts_on_path()
 
@@ -44,20 +46,14 @@ def _get_path() -> Path:
 
 
 def _conn() -> sqlite3.Connection:
-    p = _get_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p))
-    c.row_factory = sqlite3.Row
-    # Required for REFERENCES ... ON DELETE CASCADE to take effect.
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    # C9 收敛：委托 canonical db_util（connect_db 与旧实现逐行为等价）。
+    # 注意不可改用 store_mod._conn——那会丢掉本地 _db_override 优先权
+    # （test_limit_up_store.py:71-88 显式保护该优先权）。
+    return connect_db(_get_path())
 
 
 def _safe_close(c: sqlite3.Connection) -> None:
-    try:
-        c.close()
-    except Exception:
-        logger.debug("sqlite close failed", exc_info=True)
+    safe_close(c, logger=logger)
 
 
 @contextmanager
@@ -342,7 +338,7 @@ def get_stock_history(symbol: str, limit: int = 30) -> list[dict]:
                LIMIT ?""",
             (symbol, limit),
         ).fetchall()
-        return [_stock_row_to_dict(r, include_scan_date=True) for r in rows]
+        return [_stock_row_to_dict(r) for r in rows]
 
 
 def get_sector_top(sector: str, days: int = 30, top_n: int = 20) -> list[dict]:
@@ -447,7 +443,7 @@ def _scan_row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
-def _stock_row_to_dict(row: sqlite3.Row, include_scan_date: bool = False) -> dict:
+def _stock_row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     for key in ("flags_json", "appearances_json"):
         raw = d.pop(key, None)
@@ -458,6 +454,4 @@ def _stock_row_to_dict(row: sqlite3.Row, include_scan_date: bool = False) -> dic
                 d[key.replace("_json", "")] = None
         else:
             d[key.replace("_json", "")] = raw
-    if include_scan_date and "scan_date" in d:
-        pass
     return d

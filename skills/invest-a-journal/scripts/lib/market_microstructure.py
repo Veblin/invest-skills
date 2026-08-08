@@ -230,7 +230,11 @@ def save_snapshot() -> dict[str, Any] | None:
     history = load_history(60)
     _compute_tier2(snap, history)
 
-    # 计算 Tier 1-2 历史分位标签（v0.2.2 升级）
+    # 计算 Tier 1-2 历史分位标签（v0.2.2 升级）。
+    # 注（C14）：缓存快照（get_microstructure / snapshot()）携带 v1 标签
+    # （_compute_labels，绝对值启发式，供 apply_env_guardrail 词表消费），
+    # 此处 v2 分位标签原地 REPLACE 四个 label_* 字段 + env_label，最终
+    # 落库行 = v2 标签——v1 与 v2 是兼容层 + 演进关系，非冗余。
     _compute_labels_v2(snap, history)
 
     # 确保 market_snapshots 表存在（独立调用时 init_db 可能未执行）

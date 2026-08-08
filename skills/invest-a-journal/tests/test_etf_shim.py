@@ -45,12 +45,18 @@ def test_shim_callables_are_canonical():
     assert shim.rollup_etf_quality_status is canon.rollup_etf_quality_status
 
 
-def test_shim_fetch_functions_are_canonical():
-    """v0.2.3：data_bridge._import_etf_attr 在 journal 上下文解析到 shim，
-    fetch_* 必须 re-export 且与 canonical 同一性一致。"""
+def test_shim_fully_forwards_exported_names():
+    """shim 完整转发 canonical 导出（review 第三轮 #1 防护）。
+
+    pytest 会话中 journal lib 可能遮蔽 canonical etf_data（conftest 顺序
+    依赖）——任一 `from etf_data import X` 都必须可用，含测试辅助
+    clear_etf_spot_cache 与 fetch_* 系列。此前删除 re-export 导致
+    `pytest etf目录 journal目录`（etf 在前）collection 失败（实证复现）。
+    """
     shim = _load_journal_shim()
     canon = sys.modules["invest_a_etf_etf_data"]
     for name in (
+        "clear_etf_spot_cache",
         "fetch_etf_spot_rows",
         "fetch_etf_index_pe",
         "fetch_etf_nav",
@@ -62,6 +68,8 @@ def test_shim_fetch_functions_are_canonical():
     ):
         assert getattr(shim, name) is getattr(canon, name), name
         assert name in shim.__all__, name
+
+
 
 
 def test_invest_a_etf_lib_dir_resolves():

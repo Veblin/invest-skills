@@ -869,48 +869,6 @@ def relative_strength(
     }
 
 
-def rolling_beta(
-    stock_closes: list[float],
-    benchmark_closes: list[float],
-    windows: list[int] | None = None,
-) -> dict[str, Any]:
-    """Rolling beta via stats.calc_beta on return series.
-
-    仅测试（invest-a-stock/tests/test_technical_v019.py）使用；保留。
-    """
-    try:
-        from .stats import calc_beta  # 同包相对导入（正常路径）
-    except ImportError:
-        from stats import calc_beta  # sys.path 裸导入
-
-    if windows is None:
-        windows = [60, 120, 252]
-
-    n = min(len(stock_closes), len(benchmark_closes))
-    if n < 12:
-        return {"error": "数据不足", "windows": {}}
-
-    def _returns(closes: list[float]) -> list[float]:
-        out: list[float] = []
-        for i in range(1, len(closes)):
-            if closes[i - 1] > 0:
-                out.append(closes[i] / closes[i - 1] - 1)
-        return out
-
-    stock_rets = _returns(stock_closes[-n:])
-    bench_rets = _returns(benchmark_closes[-n:])
-
-    result_windows: dict[str, dict] = {}
-    for w in windows:
-        if len(stock_rets) < w or len(bench_rets) < w:
-            result_windows[str(w)] = {"beta": None, "error": f"需要 ≥{w} 日"}
-            continue
-        info = calc_beta(stock_rets[-w:], bench_rets[-w:])
-        result_windows[str(w)] = info
-
-    return {"windows": result_windows, "benchmark": "000300.SH"}
-
-
 def _last_valid(seq: list[float | None]) -> float | None:
     """返回序列最后一个非 None 值。"""
     for v in reversed(seq):
@@ -939,11 +897,6 @@ def limit_pct_for_symbol(symbol: str, name: str | None = None) -> float:
     if name and "ST" in str(name).upper():
         return 5.0
     return 10.0
-
-
-def _limit_pct_for_symbol(symbol: str) -> float:
-    """兼容内部入口：无名称信息时的板块阈值。"""
-    return limit_pct_for_symbol(symbol)
 
 
 def detect_limit_streaks(

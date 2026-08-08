@@ -2,6 +2,7 @@
 from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
 
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
@@ -1006,26 +1007,14 @@ def _run_with_timeout(fn: Callable[[], Any], timeout_sec: float, label: str) -> 
     用于 cninfo 全市场扫描等慢接口：超时后立即返回，挂起线程在解释器
     退出时被杀（边界由 env.configure_socket_timeout 兜底）。
     """
-    box: dict[str, Any] = {"result": None, "error": None}
-    box["done"] = threading.Event()
-
-    def _target() -> None:
-        try:
-            box["result"] = fn()
-        except Exception as exc:
-            box["error"] = exc
-        finally:
-            box["done"].set()
-
-    t = threading.Thread(target=_target, name=f"timeout:{label}", daemon=True)
-    t.start()
-    if not box["done"].wait(timeout=timeout_sec):
-        logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+    data, err = _run_in_thread(fn, timeout_sec, label)
+    if err is not None:
+        if isinstance(err, TimeoutError):
+            logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+        else:
+            logger.warning("%s failed: %s", label, err)
         return None
-    if box["error"] is not None:
-        logger.warning("%s failed: %s", label, box["error"])
-        return None
-    return box["result"]
+    return data
 
 
 # run 级缓存：cninfo 高管增减持是全市场接口（每次「增持/减持」各
@@ -1250,24 +1239,6 @@ def collect_holder_changes(symbol: str) -> dict:
 
 
 # ---- 行业定价采集（P1-2 + P1-3 industry_pricing） ----
-
-def _calc_futures_trend(daily_df, days: int = 30) -> str:
-    """从 futures_spot_price_daily 的 DataFrame 计算近 N 日趋势（v0.1.8 扩展用）。"""
-    if daily_df is None or daily_df.empty:
-        return "数据不足"
-    tail = daily_df.tail(days)
-    prices = tail.get("spot_price") if "spot_price" in tail.columns else tail.get("sp")
-    if prices is None or len(prices) < 5:
-        return "数据不足"
-    try:
-        first = float(prices.iloc[0])
-        last = float(prices.iloc[-1])
-        pct = (last - first) / abs(first) * 100 if abs(first) > 1e-9 else 0
-        arrow = "↗" if pct > 0 else "↘" if pct < 0 else "→"
-        return f"{arrow} {pct:+.1f}%"
-    except (TypeError, ValueError, IndexError):
-        return "数据不足"
-
 
 def _calc_futures_trend_from_spot(spot_old, spot_new, code: str, code_col: str) -> str:
     """对比两日期货现货价，计算近 30 日趋势（2 次 API，不按品种循环）。"""
@@ -1718,16 +1689,6 @@ def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict
     )
     result.setdefault("_meta", {})["news_query_pack_path"] = str(pack_path)
     return news
-
-
-def collect_news_dim(symbol: str, days: int = 7) -> dict[str, Any]:
-    """Standalone news collection for CLI/testing."""
-    basic = collect_basic_info(symbol)
-    name = ""
-    if isinstance(basic.get("data"), dict):
-        name = basic["data"].get("name") or basic["data"].get("股票简称") or ""
-    from ..news_scanner import collect_news
-    return collect_news(symbol, name=name, days=days)
 
 
 # ---- 市场结构采集（v0.1.3 Phase 1） ----

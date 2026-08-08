@@ -106,4 +106,4 @@ def test_spot_served_by_l2_when_l1_cold(mock_session, monkeypatch):
     # L2 已落盘（etf_spot/market 维度）
     import data_bridge
 
-    assert data_bridge._cache.is_fresh("etf_spot", "market")
+    assert data_bridge._cache.get("etf_spot", "market") is not None

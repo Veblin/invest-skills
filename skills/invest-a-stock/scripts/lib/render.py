@@ -51,7 +51,6 @@ def __getattr__(name: str):
 ENGINE_VERSION = _render_utils.ENGINE_VERSION
 sanitize_error = _render_utils.sanitize_error
 render = _render_markdown.render
-render_compact = _render_markdown.render_compact
 render_json = _render_markdown.render_json
 render_report_v2 = _render_markdown.render_report_v2
 render_report_v3 = _render_markdown.render_report_v3

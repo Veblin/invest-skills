@@ -80,14 +80,6 @@ def test_stats_reflect_entries(tmp_path):
     assert st["session_misses"] >= 1
 
 
-def test_is_fresh(tmp_path):
-    c = _make_cache(tmp_path)
-    assert not c.is_fresh("quote", "600176")
-    c.set("quote", "600176", {"price": 1.0}, ttl_seconds=300)
-    assert c.is_fresh("quote", "600176")
-    c.invalidate("quote", "600176")
-    assert not c.is_fresh("quote", "600176")
-
 
 def test_corrupt_file_treated_as_miss(tmp_path):
     c = _make_cache(tmp_path)

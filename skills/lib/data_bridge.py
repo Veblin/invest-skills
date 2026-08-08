@@ -44,7 +44,6 @@ DEFAULT_TTL: dict[str, int] = {
     "valuation":     7 * 86400,    # 估值分析：7 天（独立维度，勿与 financials 共用槽位）
     "macro":         7 * 86400,    # 宏观指标：7 天（A 股交易时段 TTL 覆盖为 4h，见 get_macro）
     "basic_info":   30 * 86400,    # 基本信息：30 天
-    "northbound":    1 * 86400,    # 北向资金：1 天
     "margin":        1 * 86400,    # 两融余额：1 天
     "ad_ratio":      5 * 60,       # 涨跌比：5 分钟
     "lu_ld_ratio":   5 * 60,       # 涨跌停比：5 分钟
@@ -214,12 +213,6 @@ def get_valuation(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | 
     return _fetch_dimension("valuation", symbol, collect_valuation, symbol, force=force)
 
 
-def get_northbound(symbol: str, *, force: bool = False) -> dict | None:
-    """北向资金（缓存 1d）。无生产调用方；保留（历史/兼容）。"""
-    collect_northbound = _import_lib_module_attr("collector", "collect_northbound")  # noqa: E402
-    return _fetch_dimension("northbound", symbol, collect_northbound, symbol, force=force)
-
-
 def get_macro(*, force: bool = False) -> dict | None:
     """宏观快照（缓存 7d；A 股交易时段 9:30-15:00 读路径新鲜度上限 4h）。
 
@@ -365,11 +358,3 @@ def invalidate_symbol(symbol: str) -> int:
     return count
 
 
-def cache_stats() -> dict:
-    """查看缓存状态。仅测试（skills/lib/tests/test_data_bridge.py）使用；保留。"""
-    return _cache.stats()
-
-
-def cache_clear() -> int:
-    """清空全部缓存。仅测试（skills/lib/tests/test_data_bridge.py）使用；保留。"""
-    return _cache.invalidate(None, None)

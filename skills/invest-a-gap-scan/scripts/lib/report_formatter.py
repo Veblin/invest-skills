@@ -15,7 +15,6 @@ import json
 import logging
 import math
 from collections import Counter
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,6 @@ from lib.nums import fmt_amount
 logger = logging.getLogger(__name__)
 
 # ── Version (canonical source: pyproject.toml [project].version) ──
-_VERSION = "0.0.0"
 
 
 def _read_project_version() -> str:

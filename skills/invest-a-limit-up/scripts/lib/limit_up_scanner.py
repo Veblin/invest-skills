@@ -233,54 +233,6 @@ def quality_filter(
     return out
 
 
-def filter_stocks(
-    result: dict,
-    *,
-    min_consecutive: int = 0,
-    sectors: list[str] | None = None,
-    exclude_names_contain: list[str] | None = None,
-    min_market_cap: float = 0,
-    max_market_cap: float = float("inf"),
-) -> dict:
-    """从扫描结果筛选股票（兼容入口，lightweight）。
-
-    始终排除名称含「退」的标的。exclude_names_contain 为额外名称关键词（加法），
-    其中的「退」可省略（与默认退市规则重复）。
-    """
-    out = quality_filter(
-        result,
-        filter_mode="lightweight",
-        min_consecutive=min_consecutive,
-        sectors=sectors,
-        exclude_delisting=True,
-        min_market_cap=min_market_cap,
-        max_market_cap=max_market_cap,
-    )
-    if exclude_names_contain:
-        extra = [kw for kw in exclude_names_contain if kw != "退"]
-        if extra:
-            kept = []
-            excluded = 0
-            for s in out["stocks"]:
-                name = str(s.get("name", ""))
-                if any(kw in name for kw in extra):
-                    excluded += 1
-                    continue
-                kept.append(s)
-            daily = _daily_counts_from_stocks(
-                kept, calendar=result.get("market_breadth", {}).get("daily_counts", {}),
-            )
-            out["stocks"] = kept
-            out["market_breadth"] = _compute_breadth(kept, daily)
-            stats = out.setdefault("filter_stats", {})
-            reasons = dict(stats.get("filtered_reasons") or {})
-            if excluded:
-                reasons["name_exclude"] = reasons.get("name_exclude", 0) + excluded
-            stats["filtered_reasons"] = reasons
-            stats["output_count"] = len(kept)
-    return out
-
-
 def format_market_brief(result: dict) -> str:
     """Markdown 市场宽度简报。"""
     b = result.get("market_breadth", {})
@@ -289,7 +241,7 @@ def format_market_brief(result: dict) -> str:
     enrichment = result.get("enrichment", {})
 
     lines = [
-        f"## 涨停扫描 — {_fmt_date(result.get('scan_date', ''))}",
+        f"## 涨停扫描 — {yyyymmdd_to_iso(result.get('scan_date', ''))}",
         "",
         f"扫描交易日: {result.get('trading_days_scanned', 0)} 天"
         f" | 有涨停日: {b.get('days_with_limit_ups', 0)} 天"
@@ -330,7 +282,7 @@ def format_market_brief(result: dict) -> str:
         lines.append("|------|----------|")
         for date, count in sorted(daily.items(), reverse=True):
             bar = "█" * min(int(count / 10), 15) if count else ""
-            lines.append(f"| {_fmt_date(date)} | {bar} {count} |")
+            lines.append(f"| {yyyymmdd_to_iso(date)} | {bar} {count} |")
         lines.append("")
 
     consec = b.get("consecutive_dist", {})
@@ -853,6 +805,3 @@ def _fmt_yi(val: Any) -> str:
     return f"{v / 1e8:.1f}" if abs(v) > 1e-9 else "-"
 
 
-def _fmt_date(yyyymmdd: str) -> str:
-    """YYYYMMDD → ISO; thin wrapper over skills/lib/dates.yyyymmdd_to_iso."""
-    return yyyymmdd_to_iso(yyyymmdd)

@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from pathlib import Path
 
 from _invest_path import ensure_invest_a_scripts_on_path
 

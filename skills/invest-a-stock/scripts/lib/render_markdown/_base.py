@@ -1,12 +1,8 @@
 """Markdown report rendering (v2/v3) and main render() entry."""
 from __future__ import annotations
 
-import html as _html_mod
-import json
 import logging
 import math
-import re
-from pathlib import Path
 from typing import Any, Callable
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num

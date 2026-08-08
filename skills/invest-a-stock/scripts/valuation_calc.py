@@ -31,9 +31,7 @@ import argparse
 import json
 import logging
 import os
-import statistics
 import sys
-import time
 import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -47,9 +45,9 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from lib.env import get_config, ensure_env_loaded, PROJECT_ROOT
-from lib.nums import safe_float, coalesce_field
-from lib.financials import normalize_end_date, parse_end_date
+from lib.env import ensure_env_loaded
+from lib.nums import safe_float
+from lib.financials import normalize_end_date
 from lib.shared_codes import symbol_to_ts_code
 from lib.shared_dates import shanghai_days_ago, shanghai_today
 # NOTE: median / percentile_rank 原为 calc_historical_percentile 本地使用，

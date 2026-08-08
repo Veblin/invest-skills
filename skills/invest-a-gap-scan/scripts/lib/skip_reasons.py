@@ -7,7 +7,6 @@ Both use str, Enum so values can be JSON-serialized without custom encoders.
 
 from __future__ import annotations
 
-from collections import Counter
 from enum import Enum
 
 
@@ -39,13 +38,3 @@ class NonHitReason(str, Enum):
     GAP_FILLED = "gap_filled"
     VOL_RATIO_LOW = "vol_ratio_low"
     GAP_UNCONFIRMED = "gap_unconfirmed"
-
-
-def new_counters() -> tuple[Counter, Counter]:
-    """Return (exclude_counter, non_hit_counter) fresh Counter pair.
-
-    Returns:
-        A tuple of two empty Counters — the first for ExcludeReason counts,
-        the second for NonHitReason counts.
-    """
-    return Counter(), Counter()
