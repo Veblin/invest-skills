@@ -480,7 +480,8 @@ def build_universe(
             return cached
 
     # ---- Prepare Tushare client ----
-    client = TushareClient(token=None)
+    # 显式传 config token（.env 不会自动进 os.environ；token=None 时 is_available 恒 False）
+    client = TushareClient(token=env.get_config().get("TUSHARE_TOKEN"))
     tushare_available = client.is_available()
 
     # ---- Fetch index constituents ----
