@@ -9,7 +9,7 @@
 
 name: invest-a-stock
 version: "0.2.4"
-description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。"
+description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。触发词：个股投研/估值/财报"
 argument-hint: "/invest-a-stock 600176 | /invest-a-stock 600176 --deep | /invest-a-stock 600176 --intent game_theory"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
@@ -339,7 +339,7 @@ Final pass 自问：
 
 > 动机：引擎按固定维度清单采集，无法覆盖"这家公司特有的数据"（分部收入、订单/临床里程碑、可比公司、行业技术路线）。引擎没采到 ≠ 数据不存在——**先找材料，找不到才标「数据不足」**（借鉴 ai-berkshire "材料驱动"）。
 
-采集完成后、合成报告前，**必须**执行以下四步（每步 ≤2 次 WebSearch，遵守 agent-prompts.md 搜索纪律——并行批搜 + search_cache）：
+采集完成后、合成报告前，**必须**执行以下四步（每步 ≤2 次查询新闻/研报——WebSearch / web-search 技能 / /web，视 harness 而定；遵守 agent-prompts.md 搜索纪律——并行批搜 + search_cache）：
 
 ```
 STEP 1 公司画像锚定（必做）
@@ -408,7 +408,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）
 
 **命令**：`market-status --industry 半导体`（独立输出，不进入 snapshot 流程）。
 
-**五维**：① 估值分位（行业 TTM PE 在全体申万一级行业分布内的分位，sw_index_first_info）② 盈利趋势（申万行业指数月线方向，index_hist_sw）③ 相对强度（申万行业指数 vs 沪深300，relative_strength）④ 资金流（同花顺行业资金流净额）⑤ 政策证据（**引擎不自动判定**——由 SOP-M1/WebSearch 引用官方文件填入；无官方来源固定「未查」）。
+**五维**：① 估值分位（行业 TTM PE 在全体申万一级行业分布内的分位，sw_index_first_info）② 盈利趋势（申万行业指数月线方向，index_hist_sw）③ 相对强度（申万行业指数 vs 沪深300，relative_strength）④ 资金流（同花顺行业资金流净额）⑤ 政策证据（**引擎不自动判定**——由 SOP-M1/新闻检索（WebSearch / web-search 技能 / /web，视 harness 而定）引用官方文件填入；无官方来源固定「未查」）。
 
 **判定纪律（决策 U4）**：
 - 有效维度 <3 → 「数据不完整（有效维度 N/5）」+ 缺失维度清单，**不做状态结论、不自动降级猜测**
@@ -508,26 +508,26 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）
 ```bash
 # 生成采集计划（intent: deep_analysis | quick_check | catalyst_monitor | compare
 #   | sentiment_deep | financials_deep | game_theory）
-uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent game_theory
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent game_theory
 
 # 按计划采集 + 证据表 + 报告
-uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
-uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json
-uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full
 
 # 常用
-uv run python skills/invest-a-stock/scripts/invest.py collect 600176
-uv run python skills/invest-a-stock/scripts/invest.py report 600176
-uv run python skills/invest-a-stock/scripts/invest.py report 600176 --outdir=./reports/
-uv run python skills/invest-a-stock/scripts/invest.py report 600176 --deep
-uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
-uv run python skills/invest-a-stock/scripts/invest.py diagnose
-uv run python skills/invest-a-stock/scripts/invest.py diff 600176
-uv run python skills/invest-a-stock/scripts/invest.py store list
-uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --no-store   # 默认自动入库，--no-store 关闭
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --outdir=./reports/
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --deep
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py diagnose
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py diff 600176
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py store list
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --no-store   # 默认自动入库，--no-store 关闭
 ```
 
-> 运行目录：`code/`。必须用 `uv run python`。`--mode`：`brief` | `full` | `concise`。
+> 运行目录：`code/`。必须用 `uv run python`（所有引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀）。`--mode`：`brief` | `full` | `concise`。
 
 ## 代理 / VPN
 
@@ -567,22 +567,22 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ```bash
 # 质量门
-uv run python skills/invest-a-stock/scripts/invest.py rigor 600176 --verify-all [--strict]
-uv run python skills/invest-a-stock/scripts/invest.py audit report.md --extract
-uv run python skills/invest-a-stock/scripts/invest.py audit report.md --verdict
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py rigor 600176 --verify-all [--strict]
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py audit report.md --extract
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py audit report.md --verdict
 
 # 质地检查 / 组合 / 假设追踪
-uv run python skills/invest-a-stock/scripts/invest.py check 600176
-uv run python skills/invest-a-stock/scripts/invest.py portfolio holdings.json [--stress]
-uv run python skills/invest-a-stock/scripts/invest.py thesis 600176 --init|--update|--status
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py check 600176
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py portfolio holdings.json [--stress]
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py thesis 600176 --init|--update|--status
 
 # 价格冲击插值（非风险中性概率）
-uv run python skills/invest-a-stock/scripts/invest.py shock 300274 \
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py shock 300274 \
   --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 \
   --pe-normal 27 --pe-stressed 20
 
 # 新闻包（公告 + 查询包 + 可选 Tavily）
-uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
 ```
 
 `TAVILY_API_KEY` 可选；无 Key 时 Layer3 静默跳过，Layer1+2 仍产出。
@@ -723,6 +723,6 @@ uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news
 ### SOP industry-research / news-pulse
 
 - [ ] `collect --with-news-pack` 获取公告 + 查询包
-- [ ] 对 `query_pack` 执行 WebSearch/Tavily，回填 NewsCard
+- [ ] 对 `query_pack` 查询新闻/研报（WebSearch / web-search 技能 / /web，视 harness 而定；Tavily 可选），回填 NewsCard
 - [ ] 外生冲击假说⑥段：方向 + 可信度 + 来源
 - [ ] 重大波动时用 `shock` CLI 计算价格冲击插值比例（附学术声明）

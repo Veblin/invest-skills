@@ -8,7 +8,7 @@
 
 name: invest-a-etf
 version: "0.2.4"
-description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。"
+description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
 argument-hint: "/invest-a-etf 563300 | /invest-a-etf 515790"
 allowed-tools: Bash, Read, Write, WebSearch
 user-invocable: true
@@ -59,9 +59,9 @@ metadata:
 Claude: 确认 6 位代码
        ↓
 采集（并行）:
-  uv run python skills/invest-a-etf/scripts/etf.py report SYMBOL --json
-  uv run python skills/invest-a-etf/scripts/etf.py industry-pe   （行业 ETF 时必须）
-  PYTHONPATH=... uv run python -c "from etf_data import etf_share_flow; ..."  （份额趋势）
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report SYMBOL --json
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py industry-pe   （行业 ETF 时必须）
+  cd "${INVEST_SKILLS_ROOT:-.}" && PYTHONPATH=... uv run python -c "from etf_data import etf_share_flow; ..."  （份额趋势）
        ↓
 Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
 
@@ -79,13 +79,13 @@ Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symb
 ### CLI
 
 ```bash
-uv run python skills/invest-a-etf/scripts/etf.py report 563300        # 单 ETF 数据快照
-uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
-uv run python skills/invest-a-etf/scripts/etf.py report 588000 --history --playbook   # R11: 历史深度 + 情景预案
-uv run python skills/invest-a-etf/scripts/etf.py report 588000 --events events/588000.json  # R11b: 指定事件文件
-uv run python skills/invest-a-etf/scripts/etf.py diagnose
-uv run python skills/invest-a-etf/scripts/etf.py industry-pe          # 31 行业 PE 排名
-uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动触发行业 PE 采集
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300        # 单 ETF 数据快照
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --history --playbook   # R11: 历史深度 + 情景预案
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --events events/588000.json  # R11b: 指定事件文件
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py diagnose
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py industry-pe          # 31 行业 PE 排名
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动触发行业 PE 采集
 ```
 
 `report` 输出引擎数据快照（供 Claude 合成）；完整叙事由 Claude 按模板撰写。

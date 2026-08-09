@@ -8,7 +8,7 @@
 
 name: invest-a-journal
 version: "0.2.4"
-description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。"
+description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
 allowed-tools: Bash, Read, Write
 user-invocable: true
@@ -216,8 +216,8 @@ Claude: "是否确认保存？"
 用户确认 → save_journal（含 evaluation_json；卖出自动关联买入）
 ```
 
-> **AskUserQuestion 说明**：`allowed-tools` 仅列出 Bash/Read/Write（与 invest-a-limit-up 一致）。
-> AskUserQuestion 是 Claude Code 原生交互能力，不是 Bash 工具，不必写入 frontmatter。
+> **AskUserQuestion 说明**：`allowed-tools` 仅列出 Bash/Read/Write。
+> AskUserQuestion 是 harness 原生交互能力（AskUserQuestion 或对话提问），不是 Bash 工具，不必写入 frontmatter。
 > 运行时优先用 AskUserQuestion 做点选；若当前 harness 不可用，改用普通对话提问，勿阻塞流程。
 
 ### Q&A 点选规范
@@ -230,25 +230,25 @@ Q0 交易三要素:
 |----------|--------|---------|:----------:|
 | 买入还是卖出？ | 方向 | A. 买入 / B. 卖出 | false |
 | ETF 还是个股？ | 类型 | A. ETF / B. 个股 | false |
-| 哪只标的？输入代码 | 代码 | A. 沪深300(510300) / B. 科创50(588000) / C. 中证2000(563300) / D. 创业板(159915) / E. 中证500(510500) / F. 中证1000(512100) / G. 其他（自定义输入） | false |
+| 哪只标的？输入代码 | 代码 | A. 沪深300(510300) / B. 科创50(588000) / C. 中证2000(563300) / D. 其他（自定义输入） | false |
 
-> 代码题选了 A-F 直接用对应代码；选了 G（其他）则通过 "Other" 输入任意 6 位代码。
+> 代码题选了 A-C 直接用对应代码；选了 D（其他）则通过 "Other" 输入任意 6 位代码。
 
 **第二步：数据采集**（在后续 Q&A 前并行查询，确保评估有数据支撑）
 
 ```bash
 # ETF 路径（必须从 scripts/lib 目录运行，否则 import 失败）
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from query_data import query_for_evaluation; import json; print(json.dumps(query_for_evaluation('SYMBOL', 'etf'), ensure_ascii=False))" 2>/dev/null
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from market_microstructure import snapshot; import json; print(json.dumps(snapshot(), ensure_ascii=False))" 2>/dev/null
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from db import search_by_symbol; import json; print(json.dumps(search_by_symbol('SYMBOL'), ensure_ascii=False))" 2>/dev/null
 
 # 个股路径
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from query_data import query_for_evaluation; import json; print(json.dumps(query_for_evaluation('SYMBOL', 'stock'), ensure_ascii=False))" 2>/dev/null
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from db import search_by_symbol; import json; print(json.dumps(search_by_symbol('SYMBOL'), ensure_ascii=False))" 2>/dev/null
 ```
 
@@ -320,7 +320,7 @@ Q7 入场价格（单选）:
 | B | 等待回调至均线附近 |
 | C | 自定义价格 |
 
-**注意**：每题最多 4 个选项。需要自定义数值（如 25% 仓位、7% 止损、自定义代码）时，用户使用 AskUserQuestion 的 "Other" 机制直接输入（若 AskUserQuestion 不可用，在对话中请用户输入）。multiSelect 仅用于 Q2、Q3。Q1-Q4 一屏，Q5-Q7+入场价 一屏。
+**注意**：每题最多 4 个选项。需要自定义数值（如 25% 仓位、7% 止损、自定义代码）时，用户使用 AskUserQuestion 的 "Other" 机制直接输入（若 AskUserQuestion 不可用，在对话中请用户输入）。multiSelect 仅用于 Q2、Q3。Q0 一屏（3 问）、Q1-Q4 一屏（4 问）、Q5-Q7+入场价 一屏（4 问）。WorkBuddy 下按此分屏；AskUserQuestion 不可用则对话回退。
 
 ---
 
@@ -342,7 +342,7 @@ Q7 入场价格（单选）:
 ### 调用示例
 
 ```bash
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from db import save_journal
 from datetime import datetime, timezone
 import json
@@ -416,7 +416,7 @@ Shell CLI 的 `journal.py add` **已移除**（v0.2.4 清理，无调用方）�
 
 ```bash
 # 主查询（所有评估）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from query_data import query_for_evaluation
 import json
 r = query_for_evaluation('600988', 'stock')
@@ -424,7 +424,7 @@ print(json.dumps(r, ensure_ascii=False, indent=2))
 "
 
 # 市场微观结构（个股/ETF 均可；query_for_evaluation 已自动附带）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from market_microstructure import snapshot, apply_env_guardrail
 import json
 snap = snapshot()
@@ -432,17 +432,17 @@ print('SNAPSHOT:', json.dumps(snap, ensure_ascii=False))
 "
 
 # ETF 专属数据（journal shim → invest-a-etf；亦可直接 etf.py report）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from etf_data import query_etf_data
 import json
 r = query_etf_data('563300')
 print(json.dumps(r, ensure_ascii=False, indent=2))
 "
-# 等价：uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
+# 等价：cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
 
 
 # 历史日志查询（卖出时）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from db import search_by_symbol
 import json
 print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))

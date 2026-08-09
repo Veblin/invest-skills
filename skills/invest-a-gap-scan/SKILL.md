@@ -9,7 +9,7 @@
 
 name: invest-a-gap-scan
 version: "0.2.4"
-description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）"
+description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）触发词：缺口/跳空扫描"
 argument-hint: "/invest-a-gap-scan [--gap-min-pct 1.5] [--gap-min-vol-ratio 1.5]"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
@@ -64,7 +64,7 @@ metadata:
 ### 基本用法
 
 ```bash
-uv run python skills/invest-a-gap-scan/scripts/scan.py
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py
 ```
 
 ### 参数表
@@ -88,22 +88,22 @@ uv run python skills/invest-a-gap-scan/scripts/scan.py
 
 ```bash
 # 提高缺口阈值
-uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
 
 # 要求放量缺口
-uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
 
 # 强制 baostock (无 Tushare token)
-uv run python skills/invest-a-gap-scan/scripts/scan.py --source baostock
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --source baostock
 
 # 调试: 只扫前 30 只
-uv run python skills/invest-a-gap-scan/scripts/scan.py --universe-limit 30
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --universe-limit 30
 
 # JSON 输出 (供脚本消费)
-uv run python skills/invest-a-gap-scan/scripts/scan.py --json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --json
 
 # 全量刷新
-uv run python skills/invest-a-gap-scan/scripts/scan.py --no-cache
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --no-cache
 ```
 
 ## 算法详解

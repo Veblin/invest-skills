@@ -3,7 +3,7 @@
 
 name: invest-a-pulse
 version: "0.2.4"
-description: "市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。"
+description: "市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。触发词：市场情绪/大盘/市场脉搏"
 argument-hint: "/invest-a-pulse"
 allowed-tools: Bash, Read
 user-invocable: true
@@ -35,16 +35,16 @@ metadata:
        ↓
 采集（Bash 并行调用）:
   # 1. 当日快照 + 引擎标签
-  cd skills/invest-a-journal/scripts/lib && \
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import snapshot; import json; print(json.dumps(snapshot(), ensure_ascii=False))" 2>/dev/null
 
   # 2. 表内历史（分位辅助；积累不足时标注）
-  cd skills/invest-a-journal/scripts/lib && \
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import load_history; import json; print(json.dumps(load_history(60), ensure_ascii=False))" 2>/dev/null
 
   # 3. 长序列历史（分析必需 — 估值分位 + 杠杆趋势）
   # ⚠️ 两融窗口禁止硬编码日期（曾冻结在 2026-08-02 过期 6 天）——end=今天、start=120 天前动态计算
-  uv run python -c "import akshare as ak, bisect, datetime as _dt
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python -c "import akshare as ak, bisect, datetime as _dt
 def pct(vals, v): vals=sorted(vals); return round(bisect.bisect_left(vals,v)/len(vals)*100,1)
 pe=ak.stock_index_pe_lg(symbol='沪深300').dropna(subset=['滚动市盈率'])
 pv=pe['滚动市盈率'].astype(float).tolist(); print('PE', pv[-1], '250d', pct(pv[-250:],pv[-1]), '5y', pct(pv[-1250:],pv[-1]))
@@ -56,15 +56,15 @@ mz=m['融资余额'].astype(float); print('SSE_margin', round(mz.iloc[-1]/1e8,2)
 " 2>/dev/null
 
   # 4. 涨停行业轮动（东财可用时必做；极端情绪/广度维度的行业视角）
-  cd skills/invest-a-journal/scripts/lib && \
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import zt_industry_flow; import json; print(json.dumps(zt_industry_flow(10), ensure_ascii=False))" 2>/dev/null
 
   # 5. 跷跷板检验（东财可用时；板块簇资金对立参考）
-  cd skills/invest-a-journal/scripts/lib && \
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import zt_seesaw; import json; print(json.dumps(zt_seesaw(30), ensure_ascii=False))" 2>/dev/null
 
   # 6. 筹码出清度四信号（D3 引擎；状态描述，非择时信号）
-  cd skills/invest-a-journal/scripts/lib && \
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import compute_chip_clearance; import json; print(json.dumps(compute_chip_clearance(), ensure_ascii=False))" 2>/dev/null
        ↓
 Claude: 按输出模板合成「分析版」报告
