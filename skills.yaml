@@ -16,6 +16,11 @@ skills:
     repo: Veblin/invest-skills
     skill: invest-a-limit-up
 
+  - name: invest-a-pulse
+    description: 市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。
+    repo: Veblin/invest-skills
+    skill: invest-a-pulse
+
   - name: invest-a-gap-scan
     description: A股跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）。研究工具，非决策工具。
     repo: Veblin/invest-skills
