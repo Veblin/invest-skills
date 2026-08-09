@@ -62,10 +62,14 @@ mz=m['融资余额'].astype(float); print('SSE_margin', round(mz.iloc[-1]/1e8,2)
   # 5. 跷跷板检验（东财可用时；板块簇资金对立参考）
   cd skills/invest-a-journal/scripts/lib && \
   uv run python -c "from market_microstructure import zt_seesaw; import json; print(json.dumps(zt_seesaw(30), ensure_ascii=False))" 2>/dev/null
+
+  # 6. 筹码出清度四信号（D3 引擎；状态描述，非择时信号）
+  cd skills/invest-a-journal/scripts/lib && \
+  uv run python -c "from market_microstructure import compute_chip_clearance; import json; print(json.dumps(compute_chip_clearance(), ensure_ascii=False))" 2>/dev/null
        ↓
 Claude: 按输出模板合成「分析版」报告
        ↓
-输出: 市场情绪脉搏 Markdown（5 维度分析 + 交叉验证结论 + 声明）
+输出: 市场情绪脉搏 Markdown（6 维度分析 + 交叉验证结论 + 声明）
 ```
 
 ---
@@ -80,6 +84,7 @@ Claude: 按输出模板合成「分析版」报告
 | `load_history(60)` | 近 60 交易日历史快照 | list[dict]（按 date ASC） |
 | `zt_industry_flow(days=10)` | 🆕 涨停行业轮动（东财涨停池按行业聚合，近 N 交易日） | dict（Top5 + 全行业 N 日趋势 + 前后半段拆分；`return_daily=True` 返回每日矩阵供二次分析；东财失败 `available: false` 不阻断） |
 | `zt_seesaw(days=30)` | 🆕 涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比） | dict（seesaw_pairs 显著负相关 / sync_pairs 显著正相关 / half_split Δpp；样本 <10 日或东财失败返回 `available: false`） |
+| `compute_chip_clearance()` | 🆕 筹码出清度四信号 + 阶段判定（v0.2.5 D3：去杠杆幅度/换手温度/割肉盘代理/磨底时长+企稳确认；状态描述，非择时信号；不落库） | dict（date / available / stage / signals / calc_notes / _errors） |
 
 ### snapshot() 关键字段
 
@@ -96,7 +101,7 @@ Claude: 按输出模板合成「分析版」报告
 | `limit_up_count` | 涨停家数 | 家 |
 | `limit_down_count` | 跌停家数 | 家 |
 | `limit_down_20d_pct` | 跌停 20 日分位 | % |
-| `total_turnover` | 全市场成交额 | 亿元 |
+| `total_turnover` | 全市场成交额（⚠️ 深交所口径；全市场估算 = ×1.9 不入库） | 亿元 |
 | `erp` | 股权风险溢价 | % |
 | `pcr` | 50ETF 认沽/认购比 | — |
 | `below_book_pct` | 破净率 | % |
@@ -191,6 +196,23 @@ Claude: 按输出模板合成「分析版」报告
 
 ---
 
+## 🩸 筹码出清度（状态描述，非择时信号）
+
+**[事实]**
+- 阶段判定：{stage — 数据不足 / 去杠杆中 / 磨底中 / 企稳确认} [来源: compute_chip_clearance.stage]
+- 去杠杆幅度：融资余额距近 120 日峰值回撤 {deleveraging_pct}% [来源: compute_chip_clearance.signals.deleveraging_pct]
+- 换手温度：成交额 60 日分位 {turnover_60d_pct}%（缺失时标注原因） [来源: compute_chip_clearance.signals.turnover_60d_pct]
+- 割肉盘代理：近 30 日放量下跌日 {down_volume_days_30d} 日 | 跌停 20 日分位 {limit_down_20d_pct}% [来源: compute_chip_clearance.signals]
+- 磨底时长：距杠杆峰值 {days_since_margin_peak} 个交易日 [来源: compute_chip_clearance.signals.days_since_margin_peak]
+- 企稳确认：{confirmation — True / False / None} [来源: compute_chip_clearance.signals.confirmation]
+- 引擎标注：{calc_notes 关键项 — 降级口径 / 数据不足} [来源: compute_chip_clearance.calc_notes]
+
+**[分析]**
+出清阶段定位（描述性，非预测）：{去杠杆中 / 磨底中 / 企稳确认；四信号间关系与背离；确认字段缺席（None/False）时的含义；证据强度标注学术支持成分（杠杆/恐慌反转）vs 从业者惯例成分（换手阈值/磨底时长）}
+[证据强度: ...]
+
+---
+
 ## ⚖️ 跷跷板观察（参考，不构成投资决策）
 
 > 基于涨停热度占比的板块簇相关性检验（zt_seesaw），描述**资金在簇间的腾挪结构**，
@@ -234,7 +256,7 @@ Claude: 按输出模板合成「分析版」报告
 |------|------|------|
 | 趋势参考 | 资金流方向（两融 20 日趋势、北向方向）、杠杆周期位置、板块资金轮动方向 | [来源: 杠杆/资金面/行业维度 — stock_margin_sse / northbound / zt_industry_flow] |
 | 区间参考 | 估值温度分位（PE/PB 分位 + 中位数）、价格相对位置 | [来源: 估值温度维度 — stock_index_pe_lg / stock_market_pb_lg] |
-| 状态参考 | 筹码出清度阶段（D3 落地后随 D3 提交填充） | [来源: compute_chip_clearance（D3）] |
+| 状态参考 | 筹码出清度阶段（数据不足 / 去杠杆中 / 磨底中 / 企稳确认） | [来源: compute_chip_clearance（D3）] |
 | 核对参考 | 决策理由质量（提问式，journal 卖出评估） | [来源: invest-a-journal 卖出评估] |
 
 > 只描述市场客观状态，不含任何动作建议；执行由你依据自身纪律决定。
@@ -276,7 +298,9 @@ Claude: 按输出模板合成「分析版」报告
 输出报告前必须逐项检查：
 
 - [ ] 无「建议买入/卖出/加仓/减仓/止损/抄底/逃顶」
-- [ ] 覆盖 5 个维度（杠杆 / 广度 / 情绪 / 资金 / 估值），每维有 [事实]+[分析]
+- [ ] 覆盖 6 个维度（杠杆 / 广度 / 情绪 / 资金 / 估值 / 筹码出清度），每维有 [事实]+[分析]
+- [ ] 筹码出清度输出含企稳确认字段（confirmation：True/False/None，缺失时标注原因）
+- [ ] 筹码出清度四信号每项有来源标注（compute_chip_clearance 字段路径或降级口径）
 - [ ] 每个数字有来源标注；Python calc 结果标注公式来源
 - [ ] 引擎标签与趋势/分位矛盾时已指出并说明取舍
 - [ ] 涨停行业轮动已尝试（zt_industry_flow 可用时），输出为分析结论（Top5 集中度 + 轮入/轮出方向）而非行业数据表；不可用时标注「行业维度数据缺口」
