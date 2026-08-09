@@ -5,6 +5,7 @@
 
 
 
+
 name: invest-a-journal
 version: "0.2.4"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。"
@@ -552,6 +553,8 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 ---
 
 ## 评估输出模板
+
+> 本评估的卖出路径含四类参考之核对参考（report-conventions §8）。
 
 ```markdown
 🔍 invest-a-journal v0.2.1 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
