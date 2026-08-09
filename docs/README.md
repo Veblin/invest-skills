@@ -16,6 +16,19 @@
 | [CONTRIBUTORS.md](../CONTRIBUTORS.md) | 贡献指南 |
 | [AGENTS.md](../AGENTS.md) | AI 协作规则与设计约束 |
 
+## 示例报告（docs/demos/）
+
+真实运行产出，类型覆盖个股深度/复盘/ETF/市场情绪：
+
+| Demo | 类型 | 来源 skill |
+|------|------|-----------|
+| [000338-潍柴动力-2026-07-21](demos/000338-潍柴动力-2026-07-21.md) | 个股九模块研究备忘录 | invest-a-stock |
+| [300308-中际旭创-复盘-2026-08-04](demos/300308-中际旭创-复盘-2026-08-04.md) | 多报告对比复盘 | invest-a-stock（复盘） |
+| [588000-科创50ETF-2026-08-08](demos/588000-科创50ETF-2026-08-08.md) | ETF 研究备忘录 | invest-a-etf |
+| [market-pulse-2026-08-03](demos/market-pulse-2026-08-03.md) | 市场情绪脉搏 | invest-a-pulse |
+
+> 精选示例，随版本维护；日常运行产出的全部报告保存在本地 `reports/`（不纳入版本库）。
+
 ## invest-a-stock 运行时规格
 
 | 文档 | 内容 |
