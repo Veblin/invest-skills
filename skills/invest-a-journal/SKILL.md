@@ -6,8 +6,9 @@
 
 
 
+
 name: invest-a-journal
-version: "0.2.4"
+version: "0.2.5"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
 allowed-tools: Bash, Read, Write
@@ -17,7 +18,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-journal v0.2.1
+# invest-a-journal v0.2.5
 
 ## 概述
 
@@ -144,7 +145,7 @@ metadata:
 每个评估输出第一行固定格式：
 
 ```
-🔍 invest-a-journal v0.2.1 · {date} · {环境标签}
+🔍 invest-a-journal v0.2.5 · {date} · {环境标签}
 ```
 
 环境标签从 `market_microstructure.snapshot()` 读取：
@@ -156,7 +157,7 @@ metadata:
 示例：
 
 ```
-🔍 invest-a-journal v0.2.1 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
+🔍 invest-a-journal v0.2.5 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
 ```
 
 ---
@@ -171,7 +172,7 @@ metadata:
 4. ✅ 检查 LAW 8：无综合评分数字（7/10、65 分等）
 5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
 6. ✅ 检查 LAW 10：末尾有免责声明
-7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.1` badge
+7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.5` badge
 8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
 9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
 
@@ -557,7 +558,7 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 > 本评估的卖出路径含四类参考之核对参考（report-conventions §8）。
 
 ```markdown
-🔍 invest-a-journal v0.2.1 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
+🔍 invest-a-journal v0.2.5 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
 
 ## {方向}: {标的} ({代码}) — {资产类型}
 

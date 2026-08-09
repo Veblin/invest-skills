@@ -20,7 +20,11 @@
 
 | 版本 | 主题 |
 |------|------|
-| **v0.1.4**（当前） | 九模块研究备忘录、机构研报数据采集、措辞规范、模块 4/5/7 模板升级 |
-| **v0.1.4**（规划） | 报告质量与 SKILL 工作流打磨（层叠输出、引用规范等） |
+| **v0.2.5**（当前） | 交易纪律框架（D1-D8）+ WorkBuddy 兼容 |
+| **v0.2.4** | 方法论引擎 R1-R12h 落地 + 事实边界规范 + 多轮 /code-review 修复 |
+| **v0.2.3** | 数据桥接层（data_bridge）落地 + 采集管线性能与健壮性优化（socket 超时/K 线缓存/慢源降级） |
+| **v0.2.2** | 市场微观结构指标体系 + invest-a-pulse 新 Skill + 共用函数层/TTL 缓存 + invest-a-etf 行业基础设施 |
+| **v0.2.1** | invest-a-etf / invest-a-journal / invest-a-gap-scan 新 Skill + 宏观扩展（VIX/SOX）+ slash 连字符统一 |
+| **v0.2.0** | 多 Skill 组合（invest: 命名空间）+ 科学估值计算器 + 多 Agent 并行深度分析 |
 
 具体任务以各版本 CHANGELOG 与 Skill 规格为准。
