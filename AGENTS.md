@@ -184,7 +184,6 @@ code/
       references/                 ← 数据源参考文档
     invest-a-etf/               ← ETF 研究（slash: /invest-a-etf；数据层供 journal 共用）
     invest-a-journal/           ← 交易方案评估（slash: /invest-a-journal）
-    invest-a-limit-up/          ← 涨停板扫描（slash: /invest-a-limit-up）
     invest-a-gap-scan/          ← 跳空缺口扫描（slash: /invest-a-gap-scan）
   .claude-plugin/               ← Claude Code 插件注册
   .agents/                      ← Agent Skills 通用注册

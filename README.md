@@ -94,7 +94,6 @@ Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 | **invest-a-journal** | 交易方案四维评估（逻辑/盲点/仓位/风险收益） | `/invest-a-journal` |
 | **invest-a-pulse** | 市场情绪全景（杠杆/广度/情绪/资金/估值） | `/invest-a-pulse` |
 | **invest-a-gap-scan** | 跳空缺口扫描（向上缺口+MA60 上方+未回补） | `/invest-a-gap-scan` |
-| ~~invest-a-limit-up~~ | ~~涨停扫描~~（已废弃，核心功能合入 pulse） | — |
 
 ## 一张图：流程如何固化到 Python
 
@@ -214,7 +213,6 @@ skills/
     scripts/lib/
       market_microstructure.py  ← 市场微观结构管道（17 指标）
   invest-a-pulse/          ← 市场情绪全景
-  invest-a-limit-up/       ← 涨停数据管道（已废弃用户入口）
   invest-a-gap-scan/       ← 跳空缺口扫描
 .claude-plugin/            ← Claude Code 插件
 ```

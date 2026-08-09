@@ -5,6 +5,7 @@
 
 
 
+
 name: invest-a-etf
 version: "0.2.4"
 description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。"
@@ -248,7 +249,7 @@ uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动�
 |-------|------|
 | **invest-a-journal** | 方案四维评估；ETF 数据经 shim 调用本模块 |
 | **invest-a-stock** | 个股深研；本 Skill 不替代。主题逻辑可引用龙头个股报告 |
-| **invest-a-gap-scan / limit-up** | 市场扫描；无关 |
+| **invest-a-gap-scan** | 市场扫描；无关 |
 
 ---
 

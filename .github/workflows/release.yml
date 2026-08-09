@@ -26,7 +26,6 @@ jobs:
             hooks \
             skills/lib \
             skills/invest-a-stock \
-            skills/invest-a-limit-up \
             skills/invest-a-gap-scan \
             skills/invest-a-journal \
             skills/invest-a-etf \
@@ -48,7 +47,6 @@ jobs:
           rm -rf \
             dist/pkg/lib/__pycache__ \
             dist/pkg/invest-a-stock/__pycache__ \
-            dist/pkg/invest-a-limit-up/__pycache__ \
             dist/pkg/invest-a-gap-scan/__pycache__ \
             dist/pkg/invest-a-journal/__pycache__ \
             dist/pkg/invest-a-etf/__pycache__ \

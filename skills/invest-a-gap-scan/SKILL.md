@@ -6,6 +6,7 @@
 
 
 
+
 name: invest-a-gap-scan
 version: "0.2.4"
 description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）"

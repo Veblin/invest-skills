@@ -22,7 +22,6 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     and output generation pass.
     """
     (root / "skills" / "invest-a-stock").mkdir(parents=True)
-    (root / "skills" / "invest-a-limit-up").mkdir(parents=True)
     (root / "skills" / "invest-a-gap-scan").mkdir(parents=True)
     (root / "skills" / "invest-a-journal").mkdir(parents=True)
     (root / "skills" / "invest-a-etf").mkdir(parents=True)
@@ -36,10 +35,6 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     )
     (root / "skills" / "invest-a-stock" / "SKILL.md").write_text(
         f'---\nname: invest:a-stock\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-limit-up" / "SKILL.md").write_text(
-        f'---\nname: invest:a-limit-up\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
     (root / "skills" / "invest-a-gap-scan" / "SKILL.md").write_text(
@@ -114,7 +109,6 @@ class TestSyncVersionBump:
             for p in (
                 "pyproject.toml",
                 "skills/invest-a-stock/SKILL.md",
-                "skills/invest-a-limit-up/SKILL.md",
                 ".claude-plugin/plugin.json",
                 ".claude-plugin/marketplace.json",
                 "gemini-extension.json",
