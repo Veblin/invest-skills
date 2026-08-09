@@ -90,6 +90,29 @@ class TestReportAudit:
         assert v["verdict"] == "FAIL"
         assert v["failed"] >= 1
 
+    def test_verdict_fail_precedes_pending(self, tmp_path: Path):
+        """已确认数字错误（failed）必须优先于未核验项（pending）判 FAIL."""
+        from lib.report_audit import verdict_report
+        import json
+
+        p = tmp_path / "report.md"
+        p.write_text("# 报告\n", encoding="utf-8")
+        checklist = p.with_suffix(".audit_checklist.json")
+        checklist.write_text(json.dumps({
+            "checks": [
+                {"id": 1, "label": "营收", "reported_value": 100.0,
+                 "fetched_value": 90.0, "reported_unit": "亿元",
+                 "context": "测试", "fetched_source": "test"},  # 10% 偏差 → FAIL
+                {"id": 2, "label": "ROE", "reported_value": 12.5,
+                 "fetched_value": None, "reported_unit": "%",
+                 "context": "测试", "fetched_source": None},  # 未核验 → pending
+            ]
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        v = verdict_report(p)
+        assert v["verdict"] == "FAIL"
+        assert v["failed"] >= 1
+        assert v["pending"] >= 1
+
     def test_verdict_pass_when_all_verified(self, tmp_path: Path):
         """全部核验通过 → verdict PASS，pending=0."""
         from lib.report_audit import extract_report, verdict_report

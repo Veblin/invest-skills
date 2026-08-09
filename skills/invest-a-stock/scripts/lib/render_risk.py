@@ -22,9 +22,6 @@ from .render_utils import (
     _v3_trend_stage_hints,
     _v3_valuation_percentiles,
     _fmt_v2,
-    _fmt_num,
-    _get_safe,
-    _coalesce_fin_field,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,6 +153,24 @@ def _section_bull_bear(
         _ocf_raw = latest_fin.get("n_cashflow_act")
     ocf = _safe_num(_ocf_raw)
     np_v = _safe_num(latest_fin.get("net_profit"))
+    # 当前市值（亿元）— valuation 维度 total_mv（Tushare daily_basic 已归一为亿元，
+    # 与腾讯快照同口径）。隐含市值一律用「市值 × PE 比值」的市值比例法，避免
+    # 累计 YTD 净利 × TTM PE 的口径错配（0331/0630/0930 报告期会低估 2-4 倍）。
+    # 列表按 trade_date 升序（cff62c3 统一 data[-1]=最新约定）——取**最新**一行
+    # 的 total_mv（reversed 迭代首个非 None；此前 for+break 取首行 = 锚定约
+    # 5 年前市值，review #3；与 render_dcf.py:202 的 [-1] 语义对齐）。
+    mcap_v = None
+    val_data = _get_dim_data(dims, "valuation")
+    if isinstance(val_data, dict):
+        mcap_v = _safe_num(val_data.get("total_mv"))
+    elif isinstance(val_data, list):
+        for rec in reversed(val_data):
+            if not isinstance(rec, dict):
+                continue
+            mv = _safe_num(rec.get("total_mv"))
+            if mv is not None:
+                mcap_v = mv
+                break
     ig, cagr, np_cagr = _v3_bull_bear_implied_growth(dims, market_structure)
     ref_cagr = cagr if cagr is not None else np_cagr
     ref_label = "营收 CAGR" if cagr is not None else ("净利润 CAGR" if np_cagr is not None else None)
@@ -196,19 +211,19 @@ def _section_bull_bear(
         if latest_pe is not None:
             chain["numbers"].append(f"- 当前 PE: {latest_pe:.1f}x")
         chain["strength"] = "✅ 强" if (pe_pct is not None and pe_pct < 10) else "⚠️ 中"
-        # implied market cap — PE 中位数来自 valuation 历史序列
-        if np_v is not None and np_v > 0 and latest_pe is not None:
-            current_mc = np_v * latest_pe
+        # implied market cap — 市值比例法（当前市值 × PE 比值，净利润口径抵消；
+        # 不再用累计 YTD 净利 × TTM PE，避免 0331/0630/0930 报告期低估 2-4 倍）
+        if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 以净利润 {_fmt_v2(np_v)} × 当前 PE {latest_pe:.1f}x = 隐含市值 "
-                f"{_fmt_v2(current_mc)}"
+                f"- 当前市值 {_fmt_v2(mcap_v * 1e8)}，当前 PE {latest_pe:.1f}x"
+                "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0:
-                implied_mc = np_v * median_pe
+                implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
                     f"- 若 PE 修复至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
-                    f"对应市值约 {_fmt_v2(implied_mc)}"
+                    f"对应市值约 {_fmt_v2(implied_mc * 1e8)}"
                 )
             else:
                 chain["numbers"].append(
@@ -247,7 +262,7 @@ def _section_bull_bear(
         }
         if latest_pe is not None and np_v is not None and np_v > 0:
             chain["numbers"].append(
-                f"- 当前 PE {latest_pe:.1f}x，净利润 {_fmt_v2(np_v)}，"
+                f"- 当前 PE {latest_pe:.1f}x，最新报告期净利润（累计口径）{_fmt_v2(np_v)}，"
                 f"资金流入行为可能加速估值回归"
             )
         bull_chains.append(chain)
@@ -279,7 +294,7 @@ def _section_bull_bear(
             "strength": "✅ 强" if (roe is not None and roe >= 22) else "⚠️ 中",
         }
         if np_v is not None and np_v > 0:
-            chain["numbers"].append(f"- 当期净利润: {_fmt_v2(np_v)}")
+            chain["numbers"].append(f"- 最新报告期净利润（累计口径）: {_fmt_v2(np_v)}")
         if roe is not None:
             chain["numbers"].append(f"- ROE: {roe:.1f}%（≥18% 视为高质量门槛）")
         bull_chains.append(chain)
@@ -331,18 +346,17 @@ def _section_bull_bear(
             "numbers": [],
             "strength": "✅ 强" if (pe_pct is not None and pe_pct > 90) else "⚠️ 中",
         }
-        if latest_pe is not None and np_v is not None and np_v > 0:
-            current_mc = np_v * latest_pe
+        if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 当前 PE: {latest_pe:.1f}x；以净利润 {_fmt_v2(np_v)} 计，隐含市值 "
-                f"{_fmt_v2(current_mc)}"
+                f"- 当前 PE: {latest_pe:.1f}x；当前市值 {_fmt_v2(mcap_v * 1e8)}"
+                "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0 and median_pe < latest_pe:
-                implied_mc = np_v * median_pe
+                implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
                     f"- 若 PE 回落至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
-                    f"市值约 {_fmt_v2(implied_mc)}"
+                    f"市值约 {_fmt_v2(implied_mc * 1e8)}"
                 )
             elif median_pe is None:
                 chain["numbers"].append(
@@ -380,7 +394,7 @@ def _section_bull_bear(
             "strength": "⚠️ 中",
         }
         if np_v is not None and np_v > 0:
-            chain["numbers"].append(f"- 当期净利润: {_fmt_v2(np_v)}")
+            chain["numbers"].append(f"- 最新报告期净利润（累计口径）: {_fmt_v2(np_v)}")
         bear_chains.append(chain)
 
     # Bear chain 4: 现金流质量弱
@@ -622,11 +636,16 @@ def _section_bull_bear(
 
 
 # --- _generate_custom_unknowns ---
-def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[tuple[str, str]]:
+def _generate_custom_unknowns(
+    collection: dict, dims: dict[str, dict], val_cache: dict | None = None,
+) -> list[tuple[str, str]]:
     """v0.1.8 A-3: 根据标的行业/估值历史位置/内部人行为特征生成定制化待验证问题。
 
     返回 `(问题, 为什么重要)` 元组列表；规则命中的数据字段不可得时跳过该规则，
     不编造问题所需的数据支撑（AGENTS.md 约束 3）。
+
+    val_cache 由 _section_risk_uncertainty 透传，与报告其他模块共享分位缓存，
+    避免全量重算 5 年 PE/PB/PS 分位（此前传 None 每次都重算）。
     """
     result: list[tuple[str, str]] = []
     if not isinstance(dims, dict):
@@ -652,7 +671,7 @@ def _generate_custom_unknowns(collection: dict, dims: dict[str, dict]) -> list[t
 
     # 规则 2: PE 历史位置极端值
     try:
-        pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, None)
+        pe_pct, _pb_pct, _zone = _v3_valuation_percentiles(dims, val_cache)
     except Exception:
         pe_pct = None
     if pe_pct is not None:
@@ -696,6 +715,8 @@ def _section_risk_uncertainty(
     dims: dict[str, dict],
     market_structure: dict,
     risk_data: dict[str, Any],
+    *,
+    val_cache: dict | None = None,
 ) -> str:
     """模块 7：三层结构风险信号表 + Known Unknowns。
 
@@ -722,18 +743,22 @@ def _section_risk_uncertainty(
     _TIME_WINDOW_MAP = {"高": "1-3 个月", "中": "3-6 个月", "低": "6-12 个月", "参考": "视条件触发"}
 
     # LAW 17: 构建含风险统计数据的标题
-    risk_signals_n = (risk_data.get("coverage") or {}).get("auto", 0) if isinstance(risk_data, dict) else 0
+    # 覆盖总数取自 risk_scanner 返回结构 coverage["total"]（当前 17，随扫描器演变），
+    # 不硬编码幻数（code-review: 分母 17 硬编码缺陷）。
+    coverage = (risk_data.get("coverage") or {}) if isinstance(risk_data, dict) else {}
+    risk_signals_n = coverage.get("auto", 0)
+    risk_total_n = coverage.get("total") or risk_signals_n
     triggered_n = risk_data.get("triggered_count", 0) if isinstance(risk_data, dict) else 0
     title_suffix = f"触发 {triggered_n}/{risk_signals_n} 项风险信号" if risk_signals_n else "风险与不确定性"
-    judgment = f"自动判定覆盖 {risk_signals_n}/17 信号，当前触发 {triggered_n} 项，详见下方三层风险结构。" if risk_signals_n else "以下为三层风险信号与已知未知分析。"
+    judgment = f"自动判定覆盖 {risk_signals_n}/{risk_total_n} 信号，当前触发 {triggered_n} 项，详见下方三层风险结构。" if risk_signals_n else "以下为三层风险信号与已知未知分析。"
 
     lines = [f"## 7. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
     lines.append("")
-    coverage = risk_data.get("coverage") or {}
     auto_n = coverage.get("auto", 0)
+    total_n = coverage.get("total") or auto_n
     lines.append(
-        f"自动判定覆盖：**{auto_n}/17** 信号；"
+        f"自动判定覆盖：**{auto_n}/{total_n}** 信号；"
         f"当前触发 **{risk_data.get('triggered_count', 0)}** 项。"
     )
     lines.append("")
@@ -814,7 +839,7 @@ def _section_risk_uncertainty(
         lines.append(f"{slot_idx}. **{slot_name}：** {default_hint}")
 
     # ---- v0.1.8 A-3: 标的定制化待验证问题 ----
-    custom_unknowns = _generate_custom_unknowns(collection, dims)
+    custom_unknowns = _generate_custom_unknowns(collection, dims, val_cache=val_cache)
     for question, why_it_matters in custom_unknowns:
         slot_idx += 1
         lines.append(f"{slot_idx}. **{question}** — {why_it_matters}")
@@ -849,7 +874,11 @@ def _section_risk_uncertainty(
         _evidence_conclusion_block(
             f"{symbol} 风险扫描呈现报表/商业/市场三层定量信号",
             [
-                ("✅" if auto_n >= 15 else "⚠️", f"自动判定 {auto_n}/17 项"),
+                # auto ≥ total-2（原 17 中 ≥15）≈ 自动判定接近全覆盖；阈值随 total 缩放
+                (
+                    "✅" if auto_n >= max(total_n - 2, 0) else "⚠️",
+                    f"自动判定 {auto_n}/{total_n} 项",
+                ),
                 (
                     "⚠️" if risk_data.get("triggered_count", 0) > 0 else "✅",
                     f"触发 {risk_data.get('triggered_count', 0)} 项定量风险信号",

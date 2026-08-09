@@ -52,6 +52,15 @@ def detect_suspensions(
     list_dates = list_dates or {}
     result: dict[str, list[str]] = {}
 
+    # 数据缺口日判定：批量日线逐日拉取（pro.daily 按日独立请求）失败会
+    # 静默跳过失败日期（design），该日在 daily_by_date 中完全缺失 ——
+    # 全 universe 缺失 ≠ 全市场停牌（rate-limit 一次失败 → 99/100 日全
+    # 标停牌，真实缺口降级为"跨停牌"且豁免 _MAX_GAP_PCT 过滤）。
+    # 对完全缺失的日期不判停牌（宁可漏报，不可污染整次扫描）。
+    # 仅"键不存在"（该日 daily_raw 无任何行 → 整批逐日拉取失败）视为数据
+    # 缺口；空 set 键是显式数据（该日全停牌），仍按停牌处理
+    gap_dates: set[str] = {d for d in trade_cal if d not in daily_by_date}
+
     for ts_code in universe:
         if ts_code not in appeared:
             # Never had any data at all — not suspension, just no data
@@ -59,6 +68,8 @@ def detect_suspensions(
         list_date = (list_dates.get(ts_code) or "").strip()
         susp_dates: list[str] = []
         for trade_date in trade_cal:
+            if trade_date in gap_dates:
+                continue  # 数据缺口日：无法区分停牌与拉取失败
             if list_date and trade_date < list_date:
                 continue
             present = daily_by_date.get(trade_date, set())

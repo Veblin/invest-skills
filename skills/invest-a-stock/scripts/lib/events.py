@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import parse_date, shanghai_now as _shanghai_now
 
 logger = logging.getLogger(__name__)
 
@@ -420,39 +420,9 @@ def _clean_title(raw: str) -> str:
 
 
 def _normalize_date(raw: str) -> str | None:
-    """将多种日期格式标准化为 YYYY-MM-DD。
-
-    支持: 2026-06-15, 20260615, 2026/06/15, 2026年06月15日
-    """
-    if not raw or raw in ("--", "N/A", "", "—"):
-        return None
-
-    raw = raw.strip()
-    # 已为标准格式
-    if re.match(r'^\d{4}-\d{2}-\d{2}$', raw):
-        return raw
-
-    # YYYYMMDD
-    if re.match(r'^\d{8}$', raw):
-        return _to_iso_date(raw)
-
-    # YYYY/MM/DD
-    m = re.match(r'^(\d{4})/(\d{1,2})/(\d{1,2})$', raw)
-    if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-
-    # YYYY年MM月DD日
-    m = re.match(r'^(\d{4})年(\d{1,2})月(\d{1,2})日$', raw)
-    if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-
-    # 如果包含日期模式但长度不对，尝试提取
-    m = re.search(r'(\d{4})-(\d{2})-(\d{2})', raw)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
-    logger.debug("events: could not parse date '%s'", raw)
-    return None
+    """将多种日期格式标准化为 YYYY-MM-DD（委托 shared_dates.parse_date）。"""
+    d = parse_date(raw)
+    return d.isoformat() if d else None
 
 
 def _normalize_title_for_dedup(title: str) -> str:
@@ -506,7 +476,7 @@ def _filter_by_days(events: list[dict], days: int) -> list[dict]:
     if days <= 0:
         return []
 
-    cutoff_date = date.today() - timedelta(days=days)
+    cutoff_date = _shanghai_now().date() - timedelta(days=days)
     out: list[dict] = []
     for e in events:
         date_str = str(e.get("date", ""))

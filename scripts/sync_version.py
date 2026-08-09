@@ -4,9 +4,14 @@
 Canonical source: pyproject.toml [project].version
 
 Commands:
-  bump 0.3.0   Write pyproject.toml → sync SKILL.md × 2 → generate 3 JSON from templates
-  sync          Read pyproject.toml → sync SKILL.md × 2 → generate 3 JSON
+  bump 0.3.0   Write pyproject.toml → sync all SKILL.md targets → generate JSON manifests from templates
+  sync          Read pyproject.toml → sync all SKILL.md targets → generate JSON manifests
   check         Verify pyproject.toml / SKILL.md / JSON are all consistent (exit 1 if drift)
+
+JSON manifest outputs (.claude-plugin/plugin.json, .claude-plugin/marketplace.json,
+.agents/plugins/marketplace.json, gemini-extension.json) are all generated from
+their *.json.in templates — the .agents copy shares the .claude-plugin marketplace
+template so both marketplace listings stay byte-identical.
 
 Usage:
   uv run python scripts/sync_version.py bump 0.3.0
@@ -29,6 +34,7 @@ VERSION_PLACEHOLDER_TYPO = "{{VERSION}}"  # no spaces — reject so typo cannot 
 JSON_TEMPLATES: tuple[tuple[str, str], ...] = (
     (".claude-plugin/plugin.json.in", ".claude-plugin/plugin.json"),
     (".claude-plugin/marketplace.json.in", ".claude-plugin/marketplace.json"),
+    (".claude-plugin/marketplace.json.in", ".agents/plugins/marketplace.json"),
     ("gemini-extension.json.in", "gemini-extension.json"),
 )
 
@@ -45,6 +51,7 @@ SKILL_TARGETS: tuple[SkillTarget, ...] = (
     SkillTarget("skills/invest-a-gap-scan/SKILL.md", "invest:a-gap-scan"),
     SkillTarget("skills/invest-a-journal/SKILL.md", "invest:a-journal"),
     SkillTarget("skills/invest-a-etf/SKILL.md", "invest:a-etf"),
+    SkillTarget("skills/invest-a-pulse/SKILL.md", "invest:a-pulse"),
 )
 
 

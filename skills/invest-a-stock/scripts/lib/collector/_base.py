@@ -4,9 +4,10 @@
   每个维度下，对所有可用源并行查询 → SourceResult 归一化 → DimensionResult 合并。
   失败不阻塞，选取最优源为主数据。
 
-数据源策略（v0.3+ 并行取证）：
-  有 Token: Tushare ∥ akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
-  无 Token: akshare ∥ baostock ∥ 腾讯 → 各渠道并行查询 → 独立记录 → 汇总为证
+数据源策略（v0.2.4 R12h 降级链）：
+  行情类（kline/quote/basic_info/shareholders/northbound）经 _run_sources_cascade：
+    首选源单发（有 Token: Tushare；无 Token: akshare），失败按序降级，未尝试源不计降级
+  财务类（financials/valuation）经 _run_sources_parallel：并行双源先到先用；industry/holder_changes 互补数据并行
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import redirect_stdout
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from io import StringIO
 from typing import Any, Callable
 
@@ -29,6 +30,7 @@ from ..proxy import (
     EASTMONEY_FAILURE_TUN_MARKER,
     akshare_direct_session,
     akshare_push2_available,
+    em_request_with_retry,
     no_proxy_session,
     proxy_bypass,
 )
@@ -278,18 +280,123 @@ def _annotate_query_params(result_map: dict[str, SourceResult],
             result_map[name].query_params = qp
 
 
-def _run_one_source(name: str, fn: Callable[[], Any], dimension: str) -> SourceResult:
-    """包装单个源查询为 SourceResult。"""
+def _run_sources_cascade(tasks: list[tuple[str, Callable[[], Any]]],
+                         dimension: str,
+                         always_attempt: set[str] | None = None,
+                         deadline_sec: float | None = None) -> list[SourceResult]:
+    """按优先级顺序执行源查询（R12h：首选源单发，失败才启动下一源）。
+
+    与 _run_sources_parallel 语义对齐：结果按任务索引顺序排列；
+    未执行的后续源标记「未尝试」（data=None 且无 error，attempted=False →
+    渲染层显示"未尝试"，且不计入降级统计）。
+
+    always_attempt：无论链内是否已成功都并行独立尝试的源名集合（如腾讯实时快照——
+    实时字段不依赖首选源成功）。其成功/失败不影响降级链的启动顺序；链内某源
+    成功 → 其后的链源「未尝试」（与 always 源成功与否无关，保持纯级联语义）。
+
+    deadline_sec：单源 deadline（None 时用 env.SOURCE_DEADLINE_SEC，0=不设限）。
+    与 _run_sources_parallel 对齐：串行链内的每个源都走 daemon 线程超时机制，
+    挂起的首选源不再按 socket 默认 30s 串行阻塞——最坏链长 N 源 × 单源 deadline
+    受控（此前无 deadline，首选源挂起会拖住整个降级链）。
+
+    耗时：首选源成功 → max(always 并行, 单源耗时)（验收基准：非 L2 单源 ≤ 旧全量双源）。
+    """
+    if deadline_sec is None:
+        deadline_sec = env.SOURCE_DEADLINE_SEC
+    if deadline_sec is not None and deadline_sec <= 0:
+        deadline_sec = None  # 0 = 不设限（与 _run_sources_parallel 一致）
+
+    always = always_attempt or set()
+    always_results: dict[str, SourceResult] = {}
+    if always:
+        always_results = {
+            r.source: r
+            for r in _run_sources_parallel(
+                [t for t in tasks if t[0] in always], dimension)
+        }
+
+    results: list[SourceResult] = []
+    succeeded = False
+    for name, fn in tasks:
+        if name in always:
+            # always 源成功**不**标记链完成（docstring：其成功/失败与降级链
+            # 无关，保持纯级联语义）——否则 quote 场景（tushare 失败、腾讯
+            # 实时快照成功）会跳过后续 akshare K 线回退（review #8 第二轮）
+            results.append(always_results[name])
+            continue
+        if succeeded:
+            results.append(SourceResult(name, None, dimension, attempted=False))  # 未尝试
+            continue
+        res = _run_one_source(name, fn, dimension, deadline_sec=deadline_sec)
+        results.append(res)
+        if res.data is not None:
+            succeeded = True
+    return results
+
+
+def _run_in_thread(
+    fn: Callable[[], Any], timeout_sec: float, label: str,
+) -> tuple[Any, Exception | None]:
+    """daemon 线程中执行阻塞调用，超时受控返回 (data, error)。
+
+    统一 helper（C6 收敛 _run_source_with_deadline 与 _orchestrate._run_with_timeout）：
+    超时置 TimeoutError（error 含 "timeout after Xs"），挂起线程不 join（daemon），
+    解释器退出时被杀。异常照常捕获返回，不吞消息——错误处理策略由调用方包装。
+
+    超时同时给线程对象置 `abandoned` 标记：写缓存路径（如 _kline_cache）在
+    落盘前检查该标记并跳过——僵尸线程的迟到结果不得写进同日 pickle 缓存
+    （否则「已超时源」会在同日稍后的采集中被缓存复活）。
+    """
+    box: dict[str, Any] = {"data": None, "error": None}
+    done = threading.Event()
+
+    def _target() -> None:
+        try:
+            box["data"] = fn()
+        except Exception as exc:
+            box["error"] = exc
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_target, name=f"timeout:{label}", daemon=True)
+    t.start()
+    if not done.wait(timeout=timeout_sec):
+        box["error"] = TimeoutError(f"timeout after {timeout_sec:.1f}s")
+        t.abandoned = True  # 调用方已放弃本次结果：写缓存前须检查（见 _kline_cache）
+    return box["data"], box["error"]
+
+
+def _run_source_with_deadline(
+    fn: Callable[[], Any], timeout_sec: float, label: str,
+) -> tuple[Any, Exception | None]:
+    """daemon 线程中执行单源查询，超时受控返回 (data, exc)。
+
+    对齐 _run_sources_parallel 的 deadline 语义：超时源返回 TimeoutError
+    （error 含 "timeout after Xs"），立即让出降级链；挂起线程不 join（daemon），
+    解释器退出时被杀。异常照常捕获返回，不吞消息（与 _run_one_source 无
+    deadline 路径的 error 可追溯性一致）。
+    """
+    return _run_in_thread(fn, timeout_sec, label)
+
+
+def _run_one_source(name: str, fn: Callable[[], Any], dimension: str,
+                    deadline_sec: float | None = None) -> SourceResult:
+    """包装单个源查询为 SourceResult；deadline_sec 提供时挂起查询受控超时。"""
     start = time.time()
-    try:
-        data = fn()
-    except Exception as e:
-        elapsed = (time.time() - start) * 1000
-        logger.warning("Source %s failed: %s", name, e)
-        res = SourceResult(name, None, dimension, error=str(e),
+    if deadline_sec is not None:
+        data, error = _run_source_with_deadline(fn, deadline_sec, name)
+    else:
+        data, error = None, None
+        try:
+            data = fn()
+        except Exception as e:
+            error = e
+    elapsed = (time.time() - start) * 1000
+    if error is not None:
+        logger.warning("Source %s failed: %s", name, error)
+        res = SourceResult(name, None, dimension, error=str(error),
                            latency_ms=elapsed)
     else:
-        elapsed = (time.time() - start) * 1000
         if data is not None:
             res = SourceResult(name, data, dimension, latency_ms=elapsed)
         else:

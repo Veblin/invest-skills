@@ -4,14 +4,11 @@ from __future__ import annotations
 import html as _html_mod
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
-from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 
-from . import render_utils as _u
 from .shared_dates import yyyymmdd_to_iso as _to_iso_date
 from .render_utils import (
     ENGINE_VERSION,
@@ -22,7 +19,6 @@ from .render_utils import (
     _index_dims,
     sanitize_error,
 )
-from .version import get_package_version
 
 logger = logging.getLogger(__name__)
 

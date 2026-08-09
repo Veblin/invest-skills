@@ -250,7 +250,7 @@ class TestRenderFundamentals:
             ms_mock.side_effect = lambda coll, sym: coll.update({"market_structure": {}}) or {}
             ip_mock.side_effect = lambda coll, sym: coll.update({"industry_peers": {}}) or {}
             pb_mock.return_value = {"n_samples": 0}
-            render(c, "600176", "md")
+            render(c, "600176", "md", attach_extras=True)
         ip_mock.assert_called_once()
         pb_mock.assert_called_once()
 

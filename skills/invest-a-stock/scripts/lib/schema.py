@@ -6,20 +6,31 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 # 跨源差异阈值（交叉验证与融合共用）
-CROSS_SOURCE_DIFF_THRESHOLD = 0.01
+# R12h（决策 C5）：1% → 5%——全量双源假警报洪水（沃格 PE 2548.1% 类噪音）无决策价值，
+# 差异标注仅对 L2 关键字段生效（见 _CV_L2_FIELDS）；fusion 共识带已解耦为自有常量
+# （fusion._FUSION_STRONG_MAX / _FUSION_MODERATE_MAX），不随本阈值漂移。
+CROSS_SOURCE_DIFF_THRESHOLD = 0.05
 _SCALAR_EPSILON = 1e-9
 
 # 按维度指定提取字段，确保跨源比较的是同一语义量
 # 优先级从左到右递减；取第一个可用且非零（零值仅在 _ZERO_OK_KEYS 中放行）
 _DIM_SCALAR_KEYS: dict[str, tuple[str, ...]] = {
     "kline":       ("close",),
-    "valuation":   ("pe_ttm", "pe", "pb"),
-    "financials":  ("roe", "eps"),
+    # R12h：估值维度增加市值字段（L2 抽查成员）；PE/PB 属比率/分位类不参与差异标注
+    "valuation":   ("pe_ttm", "pe", "pb", "total_mv", "total_mv_yi", "market_cap"),
+    "financials":  ("roe", "eps", "grossprofit_margin", "revenue", "net_profit"),
     "quote":       ("close", "price", "change_pct"),
     "basic_info":  (),   # 无标量可比，不参与跨源融合
     "shareholders": (),
     "northbound":  ("net_mf_vol",),
     "holder_changes": ("change_ratio", "change_pct"),
+}
+
+# R12h（决策 C5）：跨源差异标注仅对 L2 关键字段生效——营收/净利/市值/ROE/毛利率。
+# 比率/分位类（PE/PB）与行情/资金类差异不再标注（亏损公司 PE 假警报，无决策价值——沃格 2548.1% 实证）。
+_CV_L2_FIELDS: dict[str, tuple[str, ...]] = {
+    "financials": ("roe", "grossprofit_margin", "revenue", "net_profit"),
+    "valuation": ("total_mv", "total_mv_yi", "market_cap"),
 }
 # 其他维度回退到此序列
 _DEFAULT_SCALAR_KEYS = (
@@ -43,13 +54,6 @@ DIMENSIONS = {
     "holder_changes": "股东增减持",
     "industry_pricing": "行业定价",
 }
-
-# research 维度在 to_legacy_dict 之外附加的汇总字段（collect_research）
-RESEARCH_SUMMARY_KEYS = (
-    "status", "source", "summary_text", "latest_ratings",
-    "target_price_range", "eps_forecasts", "profit_forecasts", "company_guidance",
-)
-
 
 def source_confidence(source: str, dimension: str) -> str:
     """按维度与渠道返回置信度，用于主源选择。"""
@@ -87,12 +91,56 @@ def _scalar_key_usable(key: str, v: float) -> bool:
     return v != 0.0 or key in _ZERO_OK_KEYS
 
 
-def _extract_scalar(data: Any, dimension: str = "") -> float | None:
+def _rows_newest_last(rows: list[Any]) -> list[Any]:
+    """显式按日期升序排列（最新=最后一行），不依赖生产者的隐式行序。
+
+    Tushare daily_basic 等源返回最新在前（降序），此前取 data[-1] 实为最旧行
+    → 跨源校验取到最旧一期数据（缺陷修复）。委托 lib.technical.sort_kline_asc
+    （共享约定：trade_date/end_date 混合格式归一化 8 位比较，无日期行置尾——
+    快照行通常最新）。非 dict 行无日期语义：不足 2 个 dict 行时保留原位置；
+    排序仅对 dict 行进行（≥2 个 dict 行时非 dict 行被剔除）。
+    """
+    dict_rows = [r for r in rows if isinstance(r, dict)]
+    if len(dict_rows) < 2:
+        return rows
+    from lib.technical import sort_kline_asc
+
+    return sort_kline_asc(dict_rows)
+
+
+def _scan_usable_scalar(
+    rows: list[Any], keys: tuple[str, ...], *, latest_only: bool = False,
+) -> float | None:
+    """反向扫描（最新在前）跳过非 dict 行，找第一个可用标量。
+
+    latest_only=True：仅检查最后一行（与 _extract_scalar list 分支语义等价——
+    最后一行非 dict 或无可用键即返回 None，不回退旧行）；False：全列表扫描
+    （与 _extract_l2_scalar 语义等价，取「最新可用行」）。
+    """
+    for r in reversed(_rows_newest_last(rows)):
+        if not isinstance(r, dict):
+            if latest_only:
+                break
+            continue
+        for key in keys:
+            v = _numeric_scalar(r.get(key))
+            if v is not None and _scalar_key_usable(key, v):
+                return v
+        if latest_only:
+            break
+    return None
+
+
+def _extract_scalar(
+    data: Any, dimension: str = "", *, keys: tuple[str, ...] | None = None,
+) -> float | None:
     """从可能的格式（dict/list/scalar）中提取标量用于比较/融合。
 
-    按维度选择语义正确的字段（``_DIM_SCALAR_KEYS``），避免跨源比较不同量纲。
+    按维度选择语义正确的字段（``_DIM_SCALAR_KEYS``），避免跨源比较不同量纲；
+    keys 显式传入时优先（fusion 对 valuation 维度传市值键，与差异标注口径一致）。
     """
-    keys = _DIM_SCALAR_KEYS.get(dimension, _DEFAULT_SCALAR_KEYS)
+    if keys is None:
+        keys = _DIM_SCALAR_KEYS.get(dimension, _DEFAULT_SCALAR_KEYS)
     num = _numeric_scalar(data)
     if num is not None:
         return num
@@ -102,14 +150,27 @@ def _extract_scalar(data: Any, dimension: str = "") -> float | None:
             if v is not None and _scalar_key_usable(key, v):
                 return v
     if isinstance(data, (list, tuple)) and len(data) == 1:
-        return _extract_scalar(data[0], dimension)
+        return _extract_scalar(data[0], dimension, keys=keys)
     if isinstance(data, list) and data:
-        last = data[-1]
-        if isinstance(last, dict):
-            for key in keys:
-                v = _numeric_scalar(last.get(key))
-                if v is not None and _scalar_key_usable(key, v):
-                    return v
+        # 显式升序：最新=最后一行（见 _rows_newest_last），不假设生产者行序
+        return _scan_usable_scalar(data, keys, latest_only=True)
+    return None
+
+
+def _extract_l2_scalar(data: Any, keys: tuple[str, ...]) -> float | None:
+    """按 L2 白名单字段提取标量（dict 或 list[dict]，取最新行）。
+
+    与 _extract_scalar 的区别：只认白名单字段，避免非白名单字段（如 pe_ttm）优先命中。
+    """
+    if isinstance(data, dict):
+        for key in keys:
+            v = _numeric_scalar(data.get(key))
+            if v is not None and _scalar_key_usable(key, v):
+                return v
+    elif isinstance(data, list):
+        # 显式升序后再从尾部回溯：最新=最后一行（Tushare daily_basic 返回
+        # 降序，隐式 reversed(data) 会先取到最旧行 — 缺陷修复）
+        return _scan_usable_scalar(data, keys, latest_only=False)
     return None
 
 
@@ -135,6 +196,7 @@ class SourceResult:
         "latency_ms",   # float
         "error",        # str | None
         "fetched_at",   # str
+        "attempted",    # bool: 是否实际尝试过（False = 级联链跳过未执行，非失败）
     )
 
     def __init__(
@@ -147,15 +209,17 @@ class SourceResult:
         latency_ms: float = 0,
         error: str | None = None,
         fetched_at: str | None = None,
+        attempted: bool = True,
     ):
         self.source = source
         self.data = data
         self.dimension = dimension
         self.query_params = query_params
         self.confidence = confidence if confidence is not None else source_confidence(source, dimension)
-        self.success = data is not None and error is None
+        self.success = attempted and data is not None and error is None
         self.latency_ms = latency_ms
         self.error = error
+        self.attempted = attempted
         from datetime import datetime, timezone
         self.fetched_at = fetched_at or datetime.now(timezone.utc).isoformat()
 
@@ -171,6 +235,7 @@ class SourceResult:
             "data": self.data,
             "error": self.error,
             "latency_ms": self.latency_ms,
+            "attempted": self.attempted,
         }
 
 
@@ -216,7 +281,8 @@ class DimensionResult:
             self.primary_data = primary.data
             self.primary_source = primary.source
             self.multi_source = sum(1 for s in all_sources if s.data is not None) > 1
-            failures = sum(1 for s in all_sources if not s.success)
+            # 「未尝试」源（级联链首选成功后的占位）不是失败：不计入降级统计
+            failures = sum(1 for s in all_sources if s.attempted and not s.success)
             self.status = "available" if failures == 0 else "partial"
         else:
             self.primary_data = None
@@ -298,15 +364,26 @@ class DimensionResult:
 # ---- R-01: 自动交叉验证 ----
 
 def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossValidation | None:
-    """自动检测多源数据差异。 >1% 差异 → divergence，否则 → convergence。
+    """自动检测多源数据差异。 >5% 差异 → divergence，否则 → convergence。
 
-    只对数值型维度做检测。返回 None 表示不适合交叉验证（如非数值维度）。
+    R12h（决策 C5）：差异标注仅对 L2 关键字段（营收/净利/市值/ROE/毛利率）生效——
+    比率/分位类（PE/PB）与行情/资金类不再标注（亏损公司 PE 假警报，沃格 2548.1% 实证）；
+    原始数值（无字段语义的 raw scalar）仍参与。返回 None 表示不适合交叉验证。
     """
     values = []
     for s in sources:
         if s.data is None:
             continue
-        v = _extract_scalar(s.data, dimension)
+        raw = _numeric_scalar(s.data)
+        if raw is not None:
+            # raw scalar 无字段语义，保留参与（测试与构造输入）
+            values.append((s.source, raw))
+            continue
+        # dict/list 数据：仅按 L2 白名单字段提取（避免 pe_ttm 优先于 total_mv 的错配）
+        keys = _CV_L2_FIELDS.get(dimension)
+        if not keys:
+            continue
+        v = _extract_l2_scalar(s.data, keys)
         if v is not None:
             values.append((s.source, v))
     if len(values) < 2:
@@ -394,16 +471,6 @@ class ProbabilityStructure:
 
 
 @dataclass
-class ScenarioAssumption:
-    """DCF 三情景假设（V-3 scenario_fcff 消费）。"""
-    name: Literal["bear", "base", "bull"]
-    revenue_growth: float
-    margin_assumption: float
-    capex_intensity: float
-    probability: float = 1 / 3  # V-5 概率权重，默认均等
-
-
-@dataclass
 class ManagementTimelineEntry:
     """管理层关键决策时间线条目（A-5 消费）。"""
     date: str
@@ -411,16 +478,6 @@ class ManagementTimelineEntry:
     category: Literal["capital_allocation", "capex", "buyback", "ma", "personnel"]
     source: str
     rating: int | None = None  # Claude report 阶段填充 1-5，None 表示未评级
-
-
-@dataclass
-class ScoringResult:
-    """scoring.py 各函数统一返回结构的类型标注（供 render.py 类型提示，非强制运行时校验）。"""
-    score: float | None
-    partial: bool
-    insufficient_data: list[str]
-    sources: list[str]
-    detail: dict[str, Any]
 
 
 def index_dimensions(collection: dict) -> dict[str, dict]:

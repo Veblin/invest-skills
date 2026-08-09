@@ -43,7 +43,7 @@ def scan_market(days: int = 10) -> dict:
 
     策略：
     1. push2 / akshare 预检
-    2. Tushare trade_cal 优先取交易日，降级 days*1.4 自然日
+    2. Tushare trade_cal 优先取交易日，降级 last_trade_dates 的 1.6×+3 采样
     3. 顺序调用 stock_zt_pool_em + 辅池（strong/previous/zbgc）
     4. 按 symbol 去重合并，排除退市股（名称含"退"）
     5. Tushare L2 增强（有 Token 时：ST/市场/股价/流通市值）
@@ -178,9 +178,16 @@ def quality_filter(
             reasons["market_cap"] += 1
             continue
 
-        if exclude_st and s.get("is_st") is True:
-            reasons["exclude_st"] += 1
-            continue
+        if exclude_st:
+            is_st = s.get("is_st")
+            if is_st is None:
+                # is_st 仅由 Tushare L2 填充；无 TUSHARE_TOKEN 时缺失 →
+                # 名称启发式补判（*ST/ST 名称含 'ST'；退市股已在上方
+                # delisting 规则剔除，不会误伤）。显式 False 仍被尊重。
+                is_st = "ST" in name.upper()
+            if is_st:
+                reasons["exclude_st"] += 1
+                continue
 
         # 股价：L2 close → L1 appearance.close（涨停池最新价）；有阈值但缺价 → 剔除
         close = s.get("close")
@@ -194,10 +201,15 @@ def quality_filter(
                 reasons["min_price"] += 1
                 continue
 
-        float_mcap = s.get("float_mkt_cap")
+        # 流通市值：股票级 → 最新 appearance；与总市值 M9 同承诺——
+        # 「有阈值但缺市值 → 剔除」（此前 float cap 缺失会静默跳过门槛）
+        float_mcap = _as_positive_float(s.get("float_mkt_cap"))
         if float_mcap is None and latest:
-            float_mcap = latest.get("float_mkt_cap")
-        if float_mcap is not None and min_float_mkt_cap > 0 and float_mcap < min_float_mkt_cap:
+            float_mcap = _as_positive_float(latest.get("float_mkt_cap"))
+        if min_float_mkt_cap > 0 and float_mcap is None:
+            reasons["float_mcap_unknown"] += 1
+            continue
+        if float_mcap is not None and float_mcap < min_float_mkt_cap:
             reasons["min_float_mkt_cap"] += 1
             continue
 
@@ -221,54 +233,6 @@ def quality_filter(
     return out
 
 
-def filter_stocks(
-    result: dict,
-    *,
-    min_consecutive: int = 0,
-    sectors: list[str] | None = None,
-    exclude_names_contain: list[str] | None = None,
-    min_market_cap: float = 0,
-    max_market_cap: float = float("inf"),
-) -> dict:
-    """从扫描结果筛选股票（兼容入口，lightweight）。
-
-    始终排除名称含「退」的标的。exclude_names_contain 为额外名称关键词（加法），
-    其中的「退」可省略（与默认退市规则重复）。
-    """
-    out = quality_filter(
-        result,
-        filter_mode="lightweight",
-        min_consecutive=min_consecutive,
-        sectors=sectors,
-        exclude_delisting=True,
-        min_market_cap=min_market_cap,
-        max_market_cap=max_market_cap,
-    )
-    if exclude_names_contain:
-        extra = [kw for kw in exclude_names_contain if kw != "退"]
-        if extra:
-            kept = []
-            excluded = 0
-            for s in out["stocks"]:
-                name = str(s.get("name", ""))
-                if any(kw in name for kw in extra):
-                    excluded += 1
-                    continue
-                kept.append(s)
-            daily = _daily_counts_from_stocks(
-                kept, calendar=result.get("market_breadth", {}).get("daily_counts", {}),
-            )
-            out["stocks"] = kept
-            out["market_breadth"] = _compute_breadth(kept, daily)
-            stats = out.setdefault("filter_stats", {})
-            reasons = dict(stats.get("filtered_reasons") or {})
-            if excluded:
-                reasons["name_exclude"] = reasons.get("name_exclude", 0) + excluded
-            stats["filtered_reasons"] = reasons
-            stats["output_count"] = len(kept)
-    return out
-
-
 def format_market_brief(result: dict) -> str:
     """Markdown 市场宽度简报。"""
     b = result.get("market_breadth", {})
@@ -277,7 +241,7 @@ def format_market_brief(result: dict) -> str:
     enrichment = result.get("enrichment", {})
 
     lines = [
-        f"## 涨停扫描 — {_fmt_date(result.get('scan_date', ''))}",
+        f"## 涨停扫描 — {yyyymmdd_to_iso(result.get('scan_date', ''))}",
         "",
         f"扫描交易日: {result.get('trading_days_scanned', 0)} 天"
         f" | 有涨停日: {b.get('days_with_limit_ups', 0)} 天"
@@ -318,7 +282,7 @@ def format_market_brief(result: dict) -> str:
         lines.append("|------|----------|")
         for date, count in sorted(daily.items(), reverse=True):
             bar = "█" * min(int(count / 10), 15) if count else ""
-            lines.append(f"| {_fmt_date(date)} | {bar} {count} |")
+            lines.append(f"| {yyyymmdd_to_iso(date)} | {bar} {count} |")
         lines.append("")
 
     consec = b.get("consecutive_dist", {})
@@ -799,6 +763,12 @@ def _latest_appearance(stock: dict) -> dict | None:
     return apps[-1] if apps else None
 
 
+def _as_positive_float(val: Any) -> float | None:
+    """None/NaN/非正数 → None（市值必须为正才有意义；0.0 视为缺失）。"""
+    f = safe_float(val)
+    return f if f is not None and f > 0 else None
+
+
 def _latest_market_cap(stock: dict) -> float | None:
     latest = _latest_appearance(stock)
     if not latest:
@@ -835,6 +805,3 @@ def _fmt_yi(val: Any) -> str:
     return f"{v / 1e8:.1f}" if abs(v) > 1e-9 else "-"
 
 
-def _fmt_date(yyyymmdd: str) -> str:
-    """YYYYMMDD → ISO; thin wrapper over skills/lib/dates.yyyymmdd_to_iso."""
-    return yyyymmdd_to_iso(yyyymmdd)

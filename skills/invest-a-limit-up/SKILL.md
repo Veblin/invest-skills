@@ -3,8 +3,9 @@
 
 
 
+
 name: invest-a-limit-up
-version: "0.2.3"
+version: "0.2.4"
 description: "涨停板数据管道 — 供 market_microstructure / invest-a-pulse 调用，非用户入口"
 argument-hint: "[已废弃用户入口]"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch

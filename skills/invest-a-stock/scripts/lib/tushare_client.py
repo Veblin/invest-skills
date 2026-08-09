@@ -94,7 +94,16 @@ class TushareClient:
         rate_limit_per_minute: int | None = None,
         daily_call_limit: int | None = None,
     ):
+        # 三级降级：显式 token → 环境变量 → .env 文件（env.get_config 惰性加载）。
+        # .env 不会自动注入 os.environ，裸 TushareClient() 此前在该场景静默
+        # 缺 token、is_available 恒 False（universe.py 3342bf6 同型修复下沉到此处）。
         self._token = token or os.environ.get("TUSHARE_TOKEN")
+        if self._token is None:
+            try:
+                from lib import env
+                self._token = env.get_config().get("TUSHARE_TOKEN")
+            except Exception:
+                self._token = None
         self._timeout = timeout
         self._rate_limit_per_minute = (
             RATE_LIMIT_PER_MINUTE if rate_limit_per_minute is None else rate_limit_per_minute

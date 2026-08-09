@@ -186,12 +186,18 @@ class TestRenderPhase3:
 
         status_30, _ = _v3_cv7_assessment(30.0, -1.0)
         status_70, _ = _v3_cv7_assessment(70.0, 1.0)
-        assert status_30 != "convergence"
-        assert status_70 != "divergence"
-        conv, _ = _v3_cv7_assessment(29.9, -1.0)
-        div, _ = _v3_cv7_assessment(70.1, 1.0)
-        assert conv == "convergence"
-        assert div == "divergence"
+        assert status_30 == "gap"
+        assert status_70 == "gap"
+        # 估值极值 + 资金反向 → divergence（镜像分支同判）
+        div_low, _ = _v3_cv7_assessment(29.9, -1.0)
+        div_high, _ = _v3_cv7_assessment(70.1, 1.0)
+        assert div_low == "divergence"
+        assert div_high == "divergence"
+        # 方向一致 → convergence（低估+流入 / 高估+流出）
+        conv_low, _ = _v3_cv7_assessment(29.9, 1.0)
+        conv_high, _ = _v3_cv7_assessment(70.1, -1.0)
+        assert conv_low == "convergence"
+        assert conv_high == "convergence"
 
     def test_risk_scanner_fin_stable_sort(self):
         from lib.risk_scanner import scan_financial_risks

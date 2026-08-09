@@ -38,6 +38,7 @@ from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 ensure_invest_a_scripts_on_path()
 
 from lib.proxy import akshare_direct_session  # noqa: E402
+from lib.technical import boll_latest, rsi_series, sma  # noqa: E402
 
 
 # ── 1. 宏观偏置（基于跨资产信号） ──────────────────────────
@@ -114,8 +115,13 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
         return 12, {"error": "无数据"}
 
     closes = df["收盘"].astype(float)
+    if len(closes) < 2:
+        # 单根 K 线无法计算日涨跌/RSI/MA，中性回退而非 IndexError 崩溃
+        return 12, {"error": "K线不足 2 根"}
+
     latest = closes.iloc[-1]
     prev = closes.iloc[-2]
+    closes_list = closes.tolist()
 
     info = {
         "latest": round(latest, 3),
@@ -125,13 +131,10 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
 
     score = 15  # 中性起点
 
-    # RSI(6)
-    delta = closes.diff()
-    gain = delta.clip(lower=0).rolling(6).mean()
-    loss = (-delta.clip(upper=0)).rolling(6).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi6 = 100 - (100 / (1 + rs))
-    rsi_val = float(rsi6.iloc[-1]) if not pd.isna(rsi6.iloc[-1]) else 50
+    # RSI(6) — 共享引擎 Wilder 平滑（全涨 RSI=100 / 全跌 RSI=0，不丢超买信号）
+    rsi6_list = rsi_series(closes_list, 6)
+    rsi_last = _safe_float(rsi6_list[-1], None) if rsi6_list else None
+    rsi_val = float(rsi_last) if rsi_last is not None else 50
     info["rsi6"] = round(rsi_val, 1)
 
     if rsi_val > 75:
@@ -149,9 +152,10 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
     else:
         info["rsi_zone"] = "中性"
 
-    # MA 偏离
-    ma20 = closes.rolling(20).mean().iloc[-1]
-    if not pd.isna(ma20):
+    # MA 偏离 — 共享引擎 sma
+    ma20_list = sma(closes_list, 20)
+    ma20 = _safe_float(ma20_list[-1], None) if ma20_list else None
+    if ma20 is not None:
         dev = (latest / ma20 - 1) * 100
         info["ma20_dev"] = f"{dev:+.1f}%"
         if dev > 15:
@@ -176,12 +180,14 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
         elif chg20 < -10:
             score += 2
 
-    # BOLL 位置
-    std20 = closes.rolling(20).std().iloc[-1]
-    if not pd.isna(std20) and not pd.isna(ma20):
-        boll_upper = ma20 + 2 * std20
-        boll_lower = ma20 - 2 * std20
-        boll_pos = (latest - boll_lower) / (boll_upper - boll_lower)
+    # BOLL 位置 — 共享引擎 boll_latest（总体标准差，与引擎口径一致）
+    boll = boll_latest(closes_list, 20, 2.0)
+    if (
+        boll["upper"] is not None
+        and boll["lower"] is not None
+        and boll["upper"] > boll["lower"]
+    ):
+        boll_pos = (latest - boll["lower"]) / (boll["upper"] - boll["lower"])
         info["boll_pos"] = f"{boll_pos:.0%}"
         if boll_pos > 0.9:
             score -= 3
@@ -192,6 +198,23 @@ def _technical_score(symbol: str) -> tuple[int, dict]:
 
 
 # ── 3. 资金行为（当日 + 近期资金流） ───────────────────────
+
+def _safe_float(value, default: Optional[float] = 0.0) -> Optional[float]:
+    """NaN 安全取值：None/缺失/NaN → default；合法数值 → float。
+
+    akshare 空值常为 np.nan，而 `bool(nan)` 为 True，原 `float(x or 0)` 会把
+    NaN 透传 → 输出 '+nan亿' / 'nan%'，且缺失资金流被误判为"平衡"。
+    """
+    if value is None:
+        return default
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if np.isnan(v):
+        return default
+    return v
+
 
 def _flow_score(symbol: str) -> tuple[int, dict]:
     """资金流向评分 (0-25)：描述净流入/流出状态。"""
@@ -207,19 +230,31 @@ def _flow_score(symbol: str) -> tuple[int, dict]:
         row = spot[spot["代码"] == symbol]
         if not row.empty:
             r = row.iloc[0]
-            # 超大单净流入
-            super_large = float(r.get("超大单净流入-净额", 0) or 0)
-            large = float(r.get("大单净流入-净额", 0) or 0)
-            mid = float(r.get("中单净流入-净额", 0) or 0)
-            small = float(r.get("小单净流入-净额", 0) or 0)
+            # NaN 安全取值：缺失/NaN → None → 标注 not available（而非误判"平衡"）
+            super_large = _safe_float(r.get("超大单净流入-净额"), default=None)
+            large = _safe_float(r.get("大单净流入-净额"), default=None)
+            mid = _safe_float(r.get("中单净流入-净额"), default=None)
+            small = _safe_float(r.get("小单净流入-净额"), default=None)
 
             # Keep raw 亿元 floats for scoring; format only for display
-            super_large_yi = super_large / 1e8
-            large_yi = large / 1e8
-            info["超大单"] = f"{super_large_yi:+.2f}亿"
-            info["大单"] = f"{large_yi:+.2f}亿"
-            info["中单"] = f"{mid/1e8:+.2f}亿"
-            info["小单"] = f"{small/1e8:+.2f}亿"
+            if super_large is not None:
+                super_large_yi = super_large / 1e8
+                info["超大单"] = f"{super_large_yi:+.2f}亿"
+            else:
+                info["超大单"] = "not available"
+            if large is not None:
+                large_yi = large / 1e8
+                info["大单"] = f"{large_yi:+.2f}亿"
+            else:
+                info["大单"] = "not available"
+            if mid is not None:
+                info["中单"] = f"{mid/1e8:+.2f}亿"
+            else:
+                info["中单"] = "not available"
+            if small is not None:
+                info["小单"] = f"{small/1e8:+.2f}亿"
+            else:
+                info["小单"] = "not available"
     except Exception:
         pass
 
@@ -247,16 +282,16 @@ def _flow_score(symbol: str) -> tuple[int, dict]:
 
     # 换手率异常（依赖上方 spot 查询成功且命中标的）
     if row is not None and not row.empty:
-        try:
-            turnover = float(row.iloc[0].get("换手率", 0) or 0)
+        turnover = _safe_float(row.iloc[0].get("换手率"), default=None)
+        if turnover is not None:
             info["换手率"] = f"{turnover:.1f}%"
             if turnover > 15:
                 score -= 3
                 info["换手率异常"] = "过高(>15%)"
             elif turnover > 10:
                 score -= 1
-        except Exception:
-            pass
+        else:
+            info["换手率"] = "not available"
 
     return max(0, min(25, score)), info
 

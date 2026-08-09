@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from lib.nums import safe_float as _safe_num
 from lib.technical import sort_kline_asc
 from lib.stats import calc_beta
 from lib.financial_rigor import _merge_share_fields, _parse_share_count
 
-from .render_utils import _compute_metric_cagr, _get_dim_data, _fmt_v2
+from .render_utils import _compute_metric_cagr, _get_dim_data
 
 logger = logging.getLogger(__name__)
 
@@ -192,18 +191,16 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
             return shares_wan * 1e4, "akshare stock_individual_info_em \"总股本\" (万股→股)"
 
     # Source 2: total_mv / price 推导
-    # total_mv 单位: valuation 列表 = Tushare daily_basic(万元)；dict = 腾讯快照(亿元)
+    # total_mv 单位: 双源均已归一化为亿元 — tushare daily_basic 采集端 万元→亿元
+    # （_q_tushare_daily_basic），腾讯快照原生亿元（field45）
     val_dim = dims.get("valuation") or {}
     val_data = val_dim.get("data")
     latest_mv: float | None = None
-    mv_unit = ""
     if isinstance(val_data, list) and val_data:
         val_sorted = sort_kline_asc(val_data)
         latest_mv = val_sorted[-1].get("total_mv") if val_sorted else None
-        mv_unit = "万元"
     elif isinstance(val_data, dict):
         latest_mv = val_data.get("total_mv")
-        mv_unit = "亿元"
     if latest_mv is not None and _safe_num(latest_mv) and _safe_num(latest_mv) > 0:
         latest_mv = float(latest_mv)
         kline_dim = _get_dim_data(dims, "kline")
@@ -212,12 +209,9 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
             price = k_sorted[-1].get("close") if k_sorted else None
             if price is not None and _safe_num(price) and float(price) > 0:
                 price = float(price)
-                if mv_unit == "亿元":
-                    shares = latest_mv * 1e8 / price
-                    return shares, "total_mv (亿元) / 当前股价 推导"
-                # 万元 × 1e4 = 元；元 / (元/股) = 股
-                shares = latest_mv * 1e4 / price
-                return shares, "total_mv (万元) / 当前股价 推导"
+                # 亿元 × 1e8 = 元；元 / (元/股) = 股
+                shares = latest_mv * 1e8 / price
+                return shares, "total_mv (亿元) / 当前股价 推导"
 
     return None, "不可得"
 

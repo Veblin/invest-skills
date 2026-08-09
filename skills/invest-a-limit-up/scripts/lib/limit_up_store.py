@@ -14,16 +14,18 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 from _invest_path import ensure_invest_a_scripts_on_path
+
+from db_util import connect_db, safe_close  # noqa: E402 — canonical（C9 收敛）
 
 ensure_invest_a_scripts_on_path()
 
 from dates import shanghai_days_ago  # noqa: E402
 from lib import env  # noqa: E402
 from lib import store as store_mod  # noqa: E402
-from lib.json_util import dumps_json  # noqa: E402
+from lib.json_util import dumps_json, json_default  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -44,20 +46,14 @@ def _get_path() -> Path:
 
 
 def _conn() -> sqlite3.Connection:
-    p = _get_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(p))
-    c.row_factory = sqlite3.Row
-    # Required for REFERENCES ... ON DELETE CASCADE to take effect.
-    c.execute("PRAGMA foreign_keys=ON")
-    return c
+    # C9 收敛：委托 canonical db_util（connect_db 与旧实现逐行为等价）。
+    # 注意不可改用 store_mod._conn——那会丢掉本地 _db_override 优先权
+    # （test_limit_up_store.py:71-88 显式保护该优先权）。
+    return connect_db(_get_path())
 
 
 def _safe_close(c: sqlite3.Connection) -> None:
-    try:
-        c.close()
-    except Exception:
-        logger.debug("sqlite close failed", exc_info=True)
+    safe_close(c, logger=logger)
 
 
 @contextmanager
@@ -85,7 +81,11 @@ def _like_contains(needle: str) -> str:
 
 
 def init_limit_up_db() -> None:
-    """建表（幂等）。由本模块在首次持久化时调用；store.py init_db() 不包含这些表。"""
+    """建表（幂等）。由本模块在首次持久化时调用；store.py init_db() 不包含这些表。
+
+    同日全市场与过滤子集（--sector/--quality-filter）按 filter_key 分行并存：
+    唯一键为 (scan_date, filter_key)，旧库自动迁移（补列 + 替换旧单日期唯一索引）。
+    """
     path_key = str(_get_path())
     if path_key in _initialized_paths:
         return
@@ -96,6 +96,7 @@ def init_limit_up_db() -> None:
             CREATE TABLE IF NOT EXISTS limit_up_scans (
                 id INTEGER PRIMARY KEY,
                 scan_date TEXT NOT NULL,
+                filter_key TEXT NOT NULL DEFAULT 'all',
                 trading_days_scanned INTEGER DEFAULT 0,
                 total_unique_stocks INTEGER DEFAULT 0,
                 avg_daily_count REAL DEFAULT 0,
@@ -106,7 +107,6 @@ def init_limit_up_db() -> None:
                 filter_params_json TEXT,
                 created_at TEXT DEFAULT (datetime('now'))
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_lus_date ON limit_up_scans(scan_date);
 
             CREATE TABLE IF NOT EXISTS limit_up_stocks (
                 id INTEGER PRIMARY KEY,
@@ -133,14 +133,43 @@ def init_limit_up_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_lust_sector ON limit_up_stocks(sector);
             CREATE INDEX IF NOT EXISTS idx_lust_consec ON limit_up_stocks(max_consecutive);
         """)
+        # 迁移：旧库无 filter_key 列 → 补列（默认 'all'，历史记录归属全市场范围）
+        cols = {row[1] for row in c.execute("PRAGMA table_info(limit_up_scans)").fetchall()}
+        if "filter_key" not in cols:
+            c.execute(
+                "ALTER TABLE limit_up_scans "
+                "ADD COLUMN filter_key TEXT NOT NULL DEFAULT 'all'"
+            )
+        # 同日多行（全市场 + 各过滤子集）共存：移除旧单日期唯一索引
+        c.execute("DROP INDEX IF EXISTS idx_lus_date")
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lus_scope "
+            "ON limit_up_scans(scan_date, filter_key)"
+        )
         c.commit()
         _initialized_paths.add(path_key)
 
 
 # ---- 写入 ----
 
+def _scope_key(filter_params: dict | None) -> str:
+    """同日区分记录范围的稳定键：None → 'all'；过滤参数 → 规范化 JSON。
+
+    全市场扫描（filter_params=None）恒为 'all'，过滤重跑（--sector/
+    --quality-filter）按其参数生成独立键，避免覆盖全市场记录。
+    """
+    if not filter_params:
+        return "all"
+    return json.dumps(filter_params, sort_keys=True, ensure_ascii=False,
+                      default=json_default)
+
+
 def save_scan(result: dict, filter_params: dict | None = None) -> int:
-    """保存一次扫描结果。同一天重复扫描会覆盖旧记录（UPSERT）。
+    """保存一次扫描结果。
+
+    唯一键 (scan_date, filter_key)：同日同过滤范围重复扫描会覆盖旧记录（UPSERT）；
+    同日全市场与过滤子集（--sector/--quality-filter）分行并存，过滤重跑不得
+    覆盖全市场记录。
 
     Args:
         result: scan_market() 或 quality_filter() 的返回 dict
@@ -163,17 +192,18 @@ def save_scan(result: dict, filter_params: dict | None = None) -> int:
             f"(scan_date={scan_date!r}, trading_days_scanned=0, stocks=[])"
         )
 
+    scope = _scope_key(filter_params)
     init_limit_up_db()
     with _connection() as c:
         breadth = result.get("market_breadth", {}) or {}
 
         c.execute(
             """INSERT INTO limit_up_scans
-               (scan_date, trading_days_scanned, total_unique_stocks,
+               (scan_date, filter_key, trading_days_scanned, total_unique_stocks,
                 avg_daily_count, days_with_limit_ups,
                 breadth_json, enrichment_json, errors_json, filter_params_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(scan_date) DO UPDATE SET
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(scan_date, filter_key) DO UPDATE SET
                 trading_days_scanned = excluded.trading_days_scanned,
                 total_unique_stocks = excluded.total_unique_stocks,
                 avg_daily_count = excluded.avg_daily_count,
@@ -184,6 +214,7 @@ def save_scan(result: dict, filter_params: dict | None = None) -> int:
                 filter_params_json = excluded.filter_params_json""",
             (
                 scan_date,
+                scope,
                 trading_days,
                 breadth.get("total_unique_stocks", 0),
                 breadth.get("avg_daily_count", 0),
@@ -195,7 +226,8 @@ def save_scan(result: dict, filter_params: dict | None = None) -> int:
             ),
         )
         row = c.execute(
-            "SELECT id FROM limit_up_scans WHERE scan_date = ?", (scan_date,)
+            "SELECT id FROM limit_up_scans WHERE scan_date = ? AND filter_key = ?",
+            (scan_date, scope),
         ).fetchone()
         scan_id = row["id"]
 
@@ -260,7 +292,10 @@ def list_scans(limit: int = 20) -> list[dict]:
 
 
 def get_scan(scan_id: int | None = None, scan_date: str | None = None) -> dict | None:
-    """获取单次扫描完整记录（含股票列表）。"""
+    """获取单次扫描完整记录（含股票列表）。
+
+    按 scan_date 查询且同日存在多行（全市场 + 过滤子集）时，优先返回全市场行。
+    """
     init_limit_up_db()
     with _connection() as c:
         if scan_id is not None:
@@ -269,7 +304,10 @@ def get_scan(scan_id: int | None = None, scan_date: str | None = None) -> dict |
             ).fetchone()
         elif scan_date is not None:
             row = c.execute(
-                "SELECT * FROM limit_up_scans WHERE scan_date = ?", (scan_date,)
+                """SELECT * FROM limit_up_scans
+                   WHERE scan_date = ?
+                   ORDER BY CASE WHEN filter_key = 'all' THEN 0 ELSE 1 END, id""",
+                (scan_date,),
             ).fetchone()
         else:
             return None
@@ -300,7 +338,7 @@ def get_stock_history(symbol: str, limit: int = 30) -> list[dict]:
                LIMIT ?""",
             (symbol, limit),
         ).fetchall()
-        return [_stock_row_to_dict(r, include_scan_date=True) for r in rows]
+        return [_stock_row_to_dict(r) for r in rows]
 
 
 def get_sector_top(sector: str, days: int = 30, top_n: int = 20) -> list[dict]:
@@ -326,7 +364,10 @@ def get_sector_top(sector: str, days: int = 30, top_n: int = 20) -> list[dict]:
 
 
 def get_breadth_trend(days: int = 30) -> list[dict]:
-    """获取市场宽度趋势（日历天数 cutoff，与 get_sector_top 一致）。"""
+    """获取市场宽度趋势（日历天数 cutoff，与 get_sector_top 一致）。
+
+    只聚合全市场记录（filter_key='all'）：同日过滤子集行不混入市场趋势。
+    """
     init_limit_up_db()
     cutoff = _cutoff_yyyymmdd(days)
     with _connection() as c:
@@ -336,7 +377,7 @@ def get_breadth_trend(days: int = 30) -> list[dict]:
                     json_extract(breadth_json, '$.consecutive_dist') as consecutive_dist_json,
                     json_extract(breadth_json, '$.seal_quality') as seal_quality_json
                FROM limit_up_scans
-               WHERE scan_date >= ?
+               WHERE scan_date >= ? AND filter_key = 'all'
                ORDER BY scan_date DESC""",
             (cutoff,),
         ).fetchall()
@@ -376,18 +417,11 @@ def get_stats() -> dict:
 
 
 def delete_scan(scan_date: str) -> bool:
-    """删除指定日期的扫描记录（含关联股票）。"""
+    """删除指定日期的所有扫描记录（含关联股票，子表经 ON DELETE CASCADE 级联删除）。"""
     init_limit_up_db()
     with _connection() as c:
-        row = c.execute(
-            "SELECT id FROM limit_up_scans WHERE scan_date = ?", (scan_date,)
-        ).fetchone()
-        if not row:
-            return False
-        scan_id = row["id"]
-        c.execute("DELETE FROM limit_up_stocks WHERE scan_id = ?", (scan_id,))
         cur = c.execute(
-            "DELETE FROM limit_up_scans WHERE id = ?", (scan_id,)
+            "DELETE FROM limit_up_scans WHERE scan_date = ?", (scan_date,)
         )
         c.commit()
         return cur.rowcount > 0
@@ -409,7 +443,7 @@ def _scan_row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
-def _stock_row_to_dict(row: sqlite3.Row, include_scan_date: bool = False) -> dict:
+def _stock_row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     for key in ("flags_json", "appearances_json"):
         raw = d.pop(key, None)
@@ -420,6 +454,4 @@ def _stock_row_to_dict(row: sqlite3.Row, include_scan_date: bool = False) -> dic
                 d[key.replace("_json", "")] = None
         else:
             d[key.replace("_json", "")] = raw
-    if include_scan_date and "scan_date" in d:
-        pass
     return d

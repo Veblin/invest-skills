@@ -91,14 +91,6 @@ class StockInfo:
 # ---------------------------------------------------------------------------
 
 
-def _filter_st_and_delist(name: str) -> bool:
-    """Check whether a stock name indicates ST or delisting status.
-
-    Delegates to shared ``codes.is_st_or_delisted`` (skills/lib/codes.py).
-    """
-    return is_st_or_delisted(name)
-
-
 # ---------------------------------------------------------------------------
 # Cache functions
 # ---------------------------------------------------------------------------
@@ -488,7 +480,8 @@ def build_universe(
             return cached
 
     # ---- Prepare Tushare client ----
-    client = TushareClient(token=None)
+    # 显式传 config token（.env 不会自动进 os.environ；token=None 时 is_available 恒 False）
+    client = TushareClient(token=env.get_config().get("TUSHARE_TOKEN"))
     tushare_available = client.is_available()
 
     # ---- Fetch index constituents ----
@@ -561,7 +554,7 @@ def build_universe(
     result: list[StockInfo] = []
     for info in stock_map.values():
         name = info.get("name", "")
-        if _filter_st_and_delist(name):
+        if is_st_or_delisted(name):
             continue
 
         board = classify_board(info["ts_code"], info.get("market", ""))

@@ -42,9 +42,8 @@ from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
 ensure_invest_a_scripts_on_path()
 
-from dates import shanghai_now, shanghai_today  # noqa: E402
+from dates import shanghai_now  # noqa: E402
 from lib import env  # noqa: E402
-from lib.tushare_client import TushareClient  # noqa: E402
 
 # ---- 本 skill 的 lib 模块（top-level import 通过 _LIB_DIR） ----
 from gap_scanner import scan_all  # noqa: E402
@@ -62,6 +61,16 @@ _KLINE_CACHE = KlineTTLCache(lambda: env.STORE_DIR / "gap_scan_cache", 3 * 86400
 def _cache_parts(ts_code: str, source_name: str | None) -> tuple[str, ...]:
     """缓存键：{source}/{ts_code}（无源时仅 {ts_code}）— 与旧 kline_cache 键布局一致。"""
     return (source_name, ts_code) if source_name else (ts_code,)
+
+
+def _report_path_for_now(now: datetime | None = None) -> Path:
+    """详文档路径：reports/gap-scan/{YYYY-MM-DD-HH-MM-SS}.md（report-conventions.md §1.2）。
+
+    汇总式扫描无单一 {symbol}-{name}，目录保留 gap-scan；文件名必须带
+    实际北京时间（含时分秒）——曾用 %Y%m%d 无时分秒导致同日二次运行覆盖历史。
+    """
+    stamp = (now or shanghai_now()).strftime("%Y-%m-%d-%H-%M-%S")
+    return Path("reports/gap-scan") / f"{stamp}.md"
 
 # ---- 由并行代理创建的模块 ----
 try:
@@ -149,41 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _fetch_trade_cal(start_date: str, end_date: str) -> tuple[list[str], bool]:
-    """获取交易日列表，返回 (trade_dates, is_estimated)。
+    """获取交易日列表（C8 收敛：委托 skills/lib/trade_cal.fetch_trade_cal）。"""
+    from trade_cal import fetch_trade_cal as _fetch
 
-    优先使用 Tushare trade_cal API，失败时用自然日估算（is_estimated=True）。
-    """
-    config = env.get_config()
-    client = TushareClient(token=config.get("TUSHARE_TOKEN"), timeout=15)
-
-    try:
-        cal = client.query(
-            "trade_cal", exchange="SSE", is_open="1",
-            start_date=start_date, end_date=end_date,
-        )
-    except Exception as exc:
-        logger.warning("Tushare trade_cal 请求失败: %s", exc)
-        return _estimate_trade_dates(start_date, end_date), True
-
-    if cal is None or cal.empty:
-        logger.warning("Tushare trade_cal 返回空，使用自然日估算")
-        return _estimate_trade_dates(start_date, end_date), True
-
-    date_col = "cal_date" if "cal_date" in cal.columns else "trade_date"
-    return sorted(cal[date_col].astype(str).tolist()), False
-
-
-def _estimate_trade_dates(start_date: str, end_date: str) -> list[str]:
-    """粗略估算交易日（仅用作兜底）。"""
-    start = datetime.strptime(start_date, "%Y%m%d")
-    end = datetime.strptime(end_date, "%Y%m%d")
-    dates: list[str] = []
-    current = start
-    while current <= end:
-        if current.weekday() < 5:
-            dates.append(current.strftime("%Y%m%d"))
-        current += timedelta(days=1)
-    return dates
+    return _fetch(start_date, end_date)
 
 
 def _build_daily_by_date(
@@ -462,6 +440,9 @@ def _run_scan(
         params,
         trade_cal=trade_dates,
         already_qfq=already_qfq,
+        # 收盘后（上海时间 ≥15:00）日线 bar 完整：最新 bar 缺口 low>gap_high
+        # 可直接确认未回补，不再标 GAP_UNCONFIRMED 假阴性
+        after_close=shanghai_now().hour >= 15,
     )
 
     elapsed = time.time() - start_wall
@@ -483,10 +464,8 @@ def _run_scan(
 
     # ---- Step 9: 保存详文档 ----
     if not args.no_save_report:
-        date_str = shanghai_today()
-        report_dir = Path("reports/gap-scan")
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"{date_str}.md"
+        report_path = _report_path_for_now()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         format_markdown_report(result, str(report_path))
         print(f"\n详文档: {report_path.resolve()}", file=sys.stderr)
 

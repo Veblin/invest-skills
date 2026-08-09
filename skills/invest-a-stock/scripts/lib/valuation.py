@@ -17,7 +17,7 @@ from datetime import date
 from typing import Any
 
 from lib.financials import parse_end_date as _parse_end_date
-from lib.nums import safe_float as _safe_float
+from lib.nums import coalesce_field as _coalesce_field, safe_float as _safe_float
 from lib.stats import calc_beta, median, percentile_rank  # re-exported for BC
 
 from .shared_dates import shanghai_days_ago
@@ -92,17 +92,25 @@ def valuation_summary(
     if pe_seq_clean and current_pe is not None:
         pe_pct = percentile_rank(pe_seq_clean, current_pe)
         pe_median = _median(pe_seq_clean)
+        # R12c: 亏损期占比结构化暴露（P0-2 规则：>30% 亏损交易日 → 分位仅作位置参考）
+        # 分母 = 总交易日数（含亏损日）；分子 = 亏损日数（pe 为 None 或 <=0，
+        # 与 valuation_calc.calc_historical_percentile 的「None+<=0 计数」语义对齐）
+        pe_total = len(pe_ttm_seq)
+        pe_loss = len([v for v in pe_ttm_seq if v is None or v <= 0])
         result["pe"] = {
             "current": round(current_pe, 2),
             "pct": round(pe_pct, 2) if pe_pct is not None else None,
             "median": round(pe_median, 2) if pe_median is not None else None,
             "zone": zone_label(pe_pct) if pe_pct is not None else "未知",
             "n_valid": len(pe_seq_clean),
+            "loss_days": pe_loss,
+            "loss_ratio": round(pe_loss / pe_total, 4) if pe_total else 0.0,
         }
     else:
         result["pe"] = {"current": None, "pct": None, "median": None,
                         "zone": "未知", "n_valid": 0,
-                        "reason": "PE 数据为空或无正值"}
+                        "reason": "PE 数据为空或无正值",
+                        "loss_days": 0, "loss_ratio": 0.0}
 
     # PB
     if pb_seq_clean and current_pb is not None:
@@ -150,12 +158,12 @@ def valuation_summary(
     if not result["sufficient"]:
         result["warnings"].append("样本不足30个交易日，分位计算结果仅供参考")
 
-    # 检查亏损期（负 PE/PB）是否被过滤
-    pe_total = len([v for v in pe_ttm_seq if v is not None])
+    # 检查亏损期（PE None/<=0，Tushare daily_basic 对亏损期返回 None）是否被过滤
+    pe_total = len(pe_ttm_seq)
     pe_pos = len(pe_seq_clean)
     if pe_total > pe_pos:
         result["warnings"].append(
-            f"PE 历史序列中有 {pe_total - pe_pos} 个交易日为亏损期（负值），"
+            f"PE 历史序列中有 {pe_total - pe_pos} 个交易日为亏损期（PE 不可得或非正），"
             f"已从历史样本中排除，分位计算可能偏高")
 
     # 摘要文本（渲染用）
@@ -540,8 +548,11 @@ def _latest_financial_row(rows: list[dict]) -> dict | None:
 
 
 def _infer_tax_rate(row: dict) -> float:
-    tax = _safe_float(row.get("income_tax") or row.get("tax"))
-    profit = _safe_float(row.get("total_profit") or row.get("ebit"))
+    # D1: 0.0 是合法值（免税/亏损抵免期 income_tax=0 → 税率 0%，total_profit=0 → 盈亏平衡），
+    # 不得用 `or` 链（0.0 判为 falsy 降级到备用 key/None → 默认 0.25 系统性误算）。
+    # coalesce_field 按 key 存在性取值：0.0 保留，仅缺失/None/NaN 才 fallback 下一 key。
+    tax = _coalesce_field(row, "income_tax", "tax")
+    profit = _coalesce_field(row, "total_profit", "ebit")
     if tax is not None and profit is not None and profit > 0:
         return max(0.0, min(0.35, tax / profit))
     return 0.25

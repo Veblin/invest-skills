@@ -38,7 +38,7 @@ from _invest_path import ensure_invest_a_scripts_on_path
 ensure_invest_a_scripts_on_path()
 
 from codes import is_st_or_delisted  # noqa: E402
-from lib.technical import sma  # noqa: E402
+from lib.technical import limit_pct_for_symbol, sma  # noqa: E402
 
 # Sibling modules (found via _LIB_DIR on sys.path)
 from skip_reasons import ExcludeReason, NonHitReason  # noqa: E402
@@ -118,12 +118,17 @@ _MAX_GAP_PCT_BSE = 95.0      # 北交所（4/8/920 前缀）
 
 
 def _max_gap_pct_for_code(ts_code: str) -> float:
-    """按代码前缀返回毛刺过滤上限（%）；未知前缀按主板。"""
-    if ts_code.startswith(("300", "301", "688")):
-        return _MAX_GAP_PCT_CN_CYB
-    if ts_code.startswith(("4", "8", "920")):
-        return _MAX_GAP_PCT_BSE
-    return _MAX_GAP_PCT
+    """按板块涨跌停推导毛刺过滤上限（%）；未知前缀按主板。
+
+    涨跌停阈值表唯一权威：lib.technical.limit_pct_for_symbol（跨 skill 共享，
+    不在此维护第二份前缀表）。此处仅把涨跌停阈值映射为「涨停价/跌停价 - 1」
+    的极端跳空上限并加裕度（涨停价四舍五入裕度）：
+    10% → 1.1/0.9-1 = 22.2% → 30%；20% → 1.2/0.8-1 = 50% → 60%；
+    30% → 1.3/0.7-1 = 85.7% → 95%。
+    """
+    symbol = str(ts_code).split(".")[0]
+    thr = limit_pct_for_symbol(symbol)
+    return {10.0: _MAX_GAP_PCT, 20.0: _MAX_GAP_PCT_CN_CYB, 30.0: _MAX_GAP_PCT_BSE}[thr]
 
 
 def _find_candidate_gaps(
@@ -242,21 +247,49 @@ def _check_ma60_streak(closes: list[float], ma60: list[float | None],
             valid_count += 1
             if not (closes[t] >= m or math.isclose(closes[t], m, rel_tol=1e-5, abs_tol=0.01)):
                 return False
-    if total_count > 0 and valid_count / total_count < min_valid_ratio:
+    # 仅 gap bar 自身（无后续数据）：强度验证无意义，放行交由调用方的
+    # GAP_UNCONFIRMED / after_close 分支决定（不被绝对下限误拒）
+    if total_count == 1:
+        return True
+    # 绝对下限（防短历史标的比例被稀释）：MA60 从 bar 59 起有效，61-bar
+    # 标的前期缺口只有 1-2 个真实 MA60 值，比例 50% 仍过 25% 门槛 ——
+    # 需要同时满足 min_valid_ratio 比例与至少 3 个有效 bar。
+    # min(3, total_count)：total==2（缺口在倒数第二根 bar = 昨日缺口）时
+    # 绝对下限 3 不可满足会恒拒——退化为比例门槛（2 根 bar 需 2 个有效，
+    # 历史充足标的天然满足）；total>=3 行为与绝对下限 3 完全一致。
+    min_valid_bars = max(math.ceil(total_count * min_valid_ratio),
+                         min(3, total_count))
+    if total_count > 0 and valid_count < min_valid_bars:
         return False  # too few valid MA60 bars for a meaningful check
     return True
 
 
 def _check_unfilled(lows: list[float], gap_idx: int,
-                    gap_high: float) -> bool:
+                    gap_high: float, after_close: bool = False,
+                    gap_low: float | None = None) -> bool:
     """Return True if the gap has never been filled (partially or fully).
 
     A gap is unfilled when ``min(low[gap_idx+1:]) > gap_high``
     (touching the upper edge counts as filled).
-    If *gap_idx* is the last bar, the condition is vacuously true.
+    最新 bar（gap_idx == len(lows)-1，无后续数据）：盘中无法确认回补，
+    恒返回 False（由调用方以 GAP_UNCONFIRMED 区分「待收盘确认」与
+    「已回补」）；收盘后（after_close=True）日线 bar 完整，缺口未回补
+    的充要条件是 ``lows[gap_idx] > highs[gap_idx-1] == gap_low``（检测
+    谓词已保证成立）。注意不能用 ``lows[gap_idx] > gap_high``：gap_high
+    就是该 bar 自身的 low，自比较恒 False（38a7e1e 回归，review #1）。
     """
     if gap_idx >= len(lows) - 1:
-        return True
+        if after_close:
+            # 调用点恒传 gap_low（GapInfo.gap_low = highs[gap_idx-1]）；
+            # 检测谓词已保证 lows[gap_idx] > gap_low（缺口未回补）。
+            # None 显式拒绝（review 第三轮 #2：签名不得宣称 None 合法——
+            # 裸比较会抛 TypeError，显式 ValueError 契约清晰）。
+            if gap_low is None:
+                raise ValueError(
+                    "after_close=True 时必须提供 gap_low（缺口下沿 = 前一日 high）"
+                )
+            return lows[gap_idx] > gap_low
+        return False
     return min(lows[gap_idx + 1:]) > gap_high
 
 
@@ -317,6 +350,7 @@ def _scan_stock(
     suspension_map: dict[str, list[str]],
     params: dict,
     trade_cal: list[str] | None,
+    after_close: bool = False,
 ) -> tuple[ScanHit | None, ExcludeReason | None, NonHitReason | None]:
     """Scan a single stock for qualifying gaps.
 
@@ -378,6 +412,7 @@ def _scan_stock(
     any_passed_ma60 = False
     any_unfilled = False
     any_vol_ratio_fail = False
+    any_unconfirmed = False
 
     for gap_idx, gap in qualified_desc:
         if not _check_ma60_streak(closes, ma60_list, gap_idx):
@@ -385,7 +420,16 @@ def _scan_stock(
 
         any_passed_ma60 = True
 
-        if not _check_unfilled(lows, gap_idx, gap.gap_high):
+        # 最新 bar 的跳空无后续数据：盘中无法确认是否回补——不判 unfilled
+        # （否则最新 bar 跳空恒为「未回补」→ 恒命中），标「待收盘确认」
+        # 并回退到更早的已确认缺口。收盘后（after_close）日线完整，
+        # lows[gap_idx] > highs[gap_idx-1]（gap_low）已证明未回补，直接放行。
+        if gap_idx >= len(lows) - 1 and not after_close:
+            any_unconfirmed = True
+            continue
+
+        if not _check_unfilled(lows, gap_idx, gap.gap_high,
+                               after_close=after_close, gap_low=gap.gap_low):
             continue  # filled — try older gap (never promote filled+across to hit)
 
         any_unfilled = True
@@ -426,6 +470,8 @@ def _scan_stock(
     # --- No hit after tolerance rule ---
     if not any_passed_ma60:
         return None, None, NonHitReason.MA60_BROKEN
+    if not any_unfilled and any_unconfirmed:
+        return None, None, NonHitReason.GAP_UNCONFIRMED
     if not any_unfilled:
         return None, None, NonHitReason.GAP_FILLED
     if any_vol_ratio_fail:
@@ -459,6 +505,7 @@ def scan_all(
     params: dict,
     trade_cal: list[str] | None = None,
     already_qfq: bool = False,
+    after_close: bool = False,
 ) -> ScanResult:
     """Run gap scan over the full universe.
 
@@ -553,6 +600,7 @@ def scan_all(
         try:
             hit, excl_reason, non_reason = _scan_stock(
                 stock, kline, suspension_map, params, trade_cal,
+                after_close=after_close,
             )
         except Exception:
             # 逐股隔离防整池中断，但异常需带追溯栈（不静默掩盖代码缺陷）

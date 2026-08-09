@@ -9,23 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
-from lib.technical import compute, sort_kline_asc
+from lib.technical import sort_kline_asc
 
 from .shared_dates import yyyymmdd_to_iso as _to_iso_date
-from lib.participant_scan import (
-    build_participant_behavior_section,
-    moneyflow_cv_window,
-    moneyflow_signal_label,
-    northbound_label,
-    resolve_moneyflow,
-)
-
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
     EASTMONEY_FAILURE_TUN_MARKER,
 )
-from .schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_ICONS, _CV_LABELS, index_dimensions
+from .schema import CrossValidation, _CV_ICONS, _CV_LABELS, index_dimensions
 from .version import get_package_version
 
 logger = logging.getLogger(__name__)
@@ -218,6 +210,10 @@ def _v3_cv7_assessment(
     """CV-7：PE 分位 vs 主力资金方向。
 
     分位边界与 valuation.ZONE_LOW/HIGH_THRESHOLD 一致（严格 <30 / >70）。
+
+    收敛/分歧语义（方向一致 = convergence）：
+    - 估值低位 + 资金净流入 / 估值高位 + 资金净流出 → convergence（共振）
+    - 估值低位 + 资金净流出 / 估值高位 + 资金净流入 → divergence（背离）
     """
     from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
 
@@ -225,9 +221,13 @@ def _v3_cv7_assessment(
         return None
     mf_f = float(mf_out)
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f < 0:
-        return "convergence", f"PE 低位（{pe_pct:.1f}%）且主力资金净流出"
+        return "divergence", f"PE 低位（{pe_pct:.1f}%）但主力资金净流出"
     if pe_pct > ZONE_HIGH_THRESHOLD and mf_f > 0:
         return "divergence", f"PE 高位（{pe_pct:.1f}%）但主力资金净流入"
+    if pe_pct < ZONE_LOW_THRESHOLD and mf_f > 0:
+        return "convergence", f"PE 低位（{pe_pct:.1f}%）且主力资金净流入"
+    if pe_pct > ZONE_HIGH_THRESHOLD and mf_f < 0:
+        return "convergence", f"PE 高位（{pe_pct:.1f}%）且主力资金净流出"
     return "gap", "估值与资金流向未呈现典型背离/共振"
 
 
@@ -587,3 +587,79 @@ def _data_fields(dimension: str, data: Any) -> str:
         return f"{len(data)}条记录"
     return "有数据"
 
+
+
+# --- material_gap_report (R12c) ---
+_MATERIAL_QUESTION_FIELDS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
+    ("A-① 行业景气", "market_structure.sw_index"),
+    ("A-② 竞争位置", "peer"),          # 无采集维度 → 需 R12a 同行挖掘
+    ("A-③ 毛利率 vs 行业", "financials.grossprofit_margin"),
+    ("B-① 护城河（ROE）", "financials.roe"),
+    ("B-② 增长驱动（营收）", "financials.revenue"),
+    ("B-③ 现金流模式", "financials.n_cashflow_act"),
+    ("C-① 营收 CAGR（≥3 期）", "financials.revenue"),
+    ("C-② 杜邦拆解", "financials.netprofit_margin"),
+    ("C-③ 应收/存货", "financials.accounts_receiv"),
+    ("C-④ 扣非/净利润", "financials.profit_dedt"),
+    ("D-① PE/PB 历史分位", "valuation.pe_ttm"),
+    ("D-② PE vs 行业中位", "peer"),    # 无采集维度 → 需 R12a 同行挖掘
+    ("D-③ 隐含预期（LAW15）", "valuation.pe_ttm"),
+)
+
+
+def _material_field_available(collection: dict, dims: dict[str, dict], path: str) -> bool:
+    """检查 collection 中某字段是否有非 None 数据（按 维度.字段 路径）。
+
+    market_structure 是 collection 顶层键（非 dimensions 维度，见
+    _orchestrate.collect_all），A-① 行业景气须从顶层取值——此前走 dims 查询
+    恒 None，12 题检查器每份报告误报 1 题「引擎缺口」。
+    """
+    dim_key, _, field = path.partition(".")
+    if dim_key == "market_structure":
+        data = collection.get("market_structure")
+    else:
+        data = _get_dim_data(dims, dim_key)
+    if not data:
+        return False
+    if field:
+        if isinstance(data, list):
+            for row in reversed(data):
+                if isinstance(row, dict) and row.get(field) is not None:
+                    return True
+            return False
+        if isinstance(data, dict):
+            return data.get(field) is not None
+        return False
+    return True
+
+
+def material_gap_report(collection: dict) -> dict:
+    """R12c: 12 题数据缺口检查器（--material-gap）。
+
+    返回 {question: {available, requires}}：
+    - available=True  有引擎数据支撑
+    - available=False + requires="r12a" → 需关联数据挖掘（同行/事件）
+    - available=False + requires="engine" → 引擎维度缺口
+    """
+    dims = _index_dims(collection)
+    out: dict[str, dict] = {}
+    for q, path in _MATERIAL_QUESTION_FIELDS:
+        ok = _material_field_available(collection, dims, path)
+        if not ok and path in ("peer",):
+            out[q] = {"available": False, "requires": "r12a"}
+        else:
+            out[q] = {"available": ok, "requires": "engine" if not ok else ""}
+    return out
+
+
+def format_material_gap(gap: dict) -> str:
+    """缺口清单渲染（CLI --material-gap 输出）。"""
+    missing = [q for q, st in gap.items() if not st["available"]]
+    if not missing:
+        return "✅ 12 题数据无缺口，可直接生成报告"
+    lines = [f"⚠️ 12 题数据缺口 {len(missing)}/{len(gap)}："]
+    for q in missing:
+        req = "R12a 关联挖掘" if gap[q]["requires"] == "r12a" else "引擎维度补查"
+        lines.append(f"  - {q}（{req}）")
+    lines.append("建议：先执行 R12a 关联数据挖掘回填后再出报告；无法回填的项保留「数据不足+原因」标注。")
+    return "\n".join(lines)

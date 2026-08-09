@@ -148,6 +148,39 @@ class TestSaveAndUpsert:
         assert again["created_at"] == created
         assert {s["symbol"] for s in again["stocks"]} == {"000001"}
 
+    def test_same_day_filtered_run_keeps_full_market_row(self, lus):
+        """C3: 同日带过滤重跑不得覆盖全市场记录——两行并存，趋势仍报全市场行。"""
+        date = _today_yyyymmdd()
+        sid_full = lus.save_scan(_result(date, [_stock("600000"), _stock("600001")]))
+        sid_filt = lus.save_scan(
+            _result(date, [_stock("600000")]),
+            filter_params={"sectors": ["银行"], "filter_mode": "lightweight"},
+        )
+
+        # 两条记录并存（全市场 + 过滤子集）
+        assert sid_full != sid_filt
+        assert lus.get_stats()["total_scans"] == 2
+        assert len(lus.list_scans(limit=10)) == 2
+
+        # 趋势只聚合全市场行
+        trend = lus.get_breadth_trend(days=10)
+        assert len(trend) == 1
+        assert trend[0]["total_unique_stocks"] == 2
+
+        # 过滤行仍可经 scan_id 取回，filter_params 完整保留
+        got = lus.get_scan(scan_id=sid_filt)
+        assert got is not None
+        assert got["filter_params"] == {"sectors": ["银行"], "filter_mode": "lightweight"}
+        assert len(got["stocks"]) == 1
+
+        # 同日同过滤范围重跑仍覆盖自身（UPSERT 语义不变）
+        sid_rerun = lus.save_scan(
+            _result(date, [_stock("600000", name="浦发银行A")]),
+            filter_params={"sectors": ["银行"], "filter_mode": "lightweight"},
+        )
+        assert sid_rerun == sid_filt
+        assert lus.get_stats()["total_scans"] == 2
+
 
 class TestDeleteScan:
     def test_delete_removes_child_stocks(self, lus):

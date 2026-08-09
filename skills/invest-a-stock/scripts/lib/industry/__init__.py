@@ -24,21 +24,10 @@ from .base import (
 
     # 快捷方法
     get_sector_group,
-    get_valuation_metrics,
-    get_operational_metrics,
     get_quality_overrides,
     get_unknown_rules,
-    get_risk_signals,
-    get_fast_veto_skips,
-
-    # 行业类型判断
-    is_financial_sector,
-    is_tech_sector,
-    is_consumer_sector,
-    is_cyclical_sector,
-
-    # 工具
-    list_registered_industries,
+    validate_success_factors,
+    get_success_factors,
 )
 
 # 子模块（导入即注册到 _REGISTRY）
@@ -51,15 +40,8 @@ __all__ = [
     "register_profile",
     "resolve_industry_profile",
     "get_sector_group",
-    "get_valuation_metrics",
-    "get_operational_metrics",
     "get_quality_overrides",
     "get_unknown_rules",
-    "get_risk_signals",
-    "get_fast_veto_skips",
-    "is_financial_sector",
-    "is_tech_sector",
-    "is_consumer_sector",
-    "is_cyclical_sector",
-    "list_registered_industries",
+    "validate_success_factors",
+    "get_success_factors",
 ]

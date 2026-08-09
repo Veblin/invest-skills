@@ -15,7 +15,6 @@ import json
 import logging
 import math
 from collections import Counter
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +26,6 @@ from lib.nums import fmt_amount
 logger = logging.getLogger(__name__)
 
 # ── Version (canonical source: pyproject.toml [project].version) ──
-_VERSION = "0.0.0"
 
 
 def _read_project_version() -> str:
@@ -281,6 +279,7 @@ _NON_HIT_LABELS: dict[str, str] = {
     "ma60_broken": "MA60破",
     "gap_filled": "缺口回补",
     "vol_ratio_low": "量比低",
+    "gap_unconfirmed": "最新bar待收盘确认",
 }
 
 

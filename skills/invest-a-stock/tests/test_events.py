@@ -272,13 +272,42 @@ class TestFilterByDays:
         result = _filter_by_days(events, 30)
         assert result == []
 
-    def test_boundary_exact_cutoff(self):
-        cutoff_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    def test_boundary_exact_cutoff(self, monkeypatch):
+        """恰好落在 cutoff 当日的事件保留（>= cutoff，含当日）。
+
+        事件日期必须与实现同口径（上海时钟）：UTC 主机在 16:00-24:00
+        运行时上海已翻日，host 时钟算出的"30 日前"落在上海 30 日窗口
+        之外一天，会被误丢弃（CI 时区失败，本机 CST 与上海同日期不触发）。
+        """
+        fake_shanghai = datetime(2026, 8, 9, 12, 0, 0)
+        monkeypatch.setattr("lib.events._shanghai_now", lambda: fake_shanghai)
+        cutoff_str = (fake_shanghai - timedelta(days=30)).strftime("%Y-%m-%d")
+        before_str = (fake_shanghai - timedelta(days=31)).strftime("%Y-%m-%d")
         events = [
+            {"date": before_str, "title": "Before boundary", "type": "other"},
             {"date": cutoff_str, "title": "Boundary", "type": "other"},
         ]
         result = _filter_by_days(events, 30)
-        assert len(result) == 1
+        assert [e["title"] for e in result] == ["Boundary"]
+
+    def test_cutoff_uses_shanghai_date_not_host_local(self, monkeypatch):
+        """UTC 主机已过上海零点（上海日期 = host 日期 + 1）→ cutoff 必须按上海口径。
+
+        host 视角 30 日前事件 = 上海视角 31 日前 → 落在上海 30 日窗口之下，必须被丢弃；
+        host 口径（cutoff=host-30）会错误保留它。
+        """
+        host_today = date.today()
+        fake_shanghai = datetime.now() + timedelta(days=1)  # 模拟上海已翻日
+        monkeypatch.setattr("lib.events._shanghai_now", lambda: fake_shanghai)
+
+        events = [
+            {"date": (host_today - timedelta(days=30)).isoformat(),
+             "title": "Host boundary", "type": "other"},
+            {"date": fake_shanghai.date().isoformat(),
+             "title": "Shanghai today", "type": "other"},
+        ]
+        result = _filter_by_days(events, 30)
+        assert [e["title"] for e in result] == ["Shanghai today"]
 
 
 # ── _dedup_events ──

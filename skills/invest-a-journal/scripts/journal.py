@@ -45,16 +45,6 @@ def _prompt(label: str, default: str = "") -> str:
     return val if val else default
 
 
-def cmd_add() -> int:
-    """Shell add 已移除 — 引导至 /invest-a-journal。"""
-    print(
-        "Shell 交互式 add 已停用。\n"
-        "请在 Claude Code / Hermes 中运行 /invest-a-journal 完成四维评估后落库。\n"
-        "查看已有日志可用：list / show / search / stats。"
-    )
-    return 1
-
-
 # ---------------------------------------------------------------------------
 # list / show / delete / stats / search
 # ---------------------------------------------------------------------------
@@ -194,11 +184,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="action")
 
-    sub.add_parser(
-        "add",
-        help="已停用：请使用 /invest-a-journal（Claude 四维评估后落库）",
-    )
-
     p_list = sub.add_parser("list", help="列出最近日志")
     p_list.add_argument("--limit", type=int, default=20)
     p_list.add_argument("--stats", action="store_true", help="显示统计信息")
@@ -225,9 +210,7 @@ def main() -> int:
         parser.print_help()
         return 0
 
-    if args.action == "add":
-        return cmd_add()
-    elif args.action == "list":
+    if args.action == "list":
         if getattr(args, "stats", False):
             return cmd_stats()
         return cmd_list(args.limit)

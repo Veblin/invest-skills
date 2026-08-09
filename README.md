@@ -4,10 +4,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.3" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.4" alt="Release" /></a>
 </p>
 
 A 股投研技能集，面向 **Claude Code** 和 **Hermes Agent**。输入代码，自动采集多维数据，产出带来源追溯的结构化研究备忘录。学习工具，非决策工具。
+
+---
+
+## 项目背景
+
+在A股赚钱太难，亏钱却很容易。我希望能够多赚少亏，本项目集成了一直以来我的复盘经验，争取让大家少亏。这个项目是学习工具，不是决策工具。它不会替我赚钱，但它把我踩过的每一个坑固化成规则，让 AI 下次绕开。坑只踩一次，剩下的交给引擎和你。
 
 ---
 
@@ -24,11 +30,11 @@ uv sync
 cp .env.example .env   # 编辑填入 TUSHARE_TOKEN 等
 ```
 
-| Key | 作用 | 获取 |
-|-----|------|------|
-| `TUSHARE_TOKEN` | 财务/估值/资金/股东 | [tushare.pro](https://tushare.pro) 注册即送 |
-| `FRED_API_KEY` | 美国 10Y 国债（DCF WACC） | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) 免费 |
-| `TAVILY_API_KEY` | 新闻搜索补充 | [tavily.com](https://tavily.com) 免费 |
+| Key              | 作用                      | 获取                                                                          |
+| ---------------- | ------------------------- | ----------------------------------------------------------------------------- |
+| `TUSHARE_TOKEN`  | 财务/估值/资金/股东       | [tushare.pro](https://tushare.pro) 注册即送                                   |
+| `FRED_API_KEY`   | 美国 10Y 国债（DCF WACC） | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) 免费 |
+| `TAVILY_API_KEY` | 新闻搜索补充              | [tavily.com](https://tavily.com) 免费                                         |
 
 ```bash
 uv run python skills/invest-a-stock/scripts/invest.py diagnose   # 验证
@@ -82,6 +88,7 @@ uv run python skills/invest-a-stock/scripts/invest.py diff 600176
 # 市场情绪
 uv run python skills/invest-a-stock/scripts/invest.py market-status       # 当日市场快照
 uv run python skills/invest-a-stock/scripts/invest.py market-status --save  # 采集并保存
+uv run python skills/invest-a-stock/scripts/invest.py market-status --industry  # 行业景气状态卡（R5）
 
 # 涨停扫描
 uv run python skills/invest-a-limit-up/scripts/scan.py --quality-filter
@@ -94,6 +101,7 @@ uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
 
 # ETF 研究
 uv run python skills/invest-a-etf/scripts/etf.py report 563300
+uv run python skills/invest-a-etf/scripts/etf.py report 588000 --history --playbook   # 历史深度 + 情景预案（R11）
 uv run python skills/invest-a-etf/scripts/etf.py diagnose
 uv run python skills/invest-a-etf/scripts/etf.py industry-pe              # 31 行业 PE 排名
 ```
@@ -123,16 +131,16 @@ Phase 3: 主编合成 → .md 报告
 
 多源并行采集，单源失败不阻塞，差异标注跨源分歧。
 
-| 维度 | 内容 | 源 |
-|------|------|------|
-| 基本信息 | 公司概况、行业 | Tushare ∥ akshare |
-| 财务 | ROE/EPS/毛利率/OCF/杜邦 | Tushare ∥ akshare |
-| 行情 | OHLCV | Tushare ∥ 腾讯 |
-| 估值 | PE/PB 序列、分位、PE Band | Tushare |
-| K 线 | 日线 + MA/MACD/RSI（统一前复权） | Tushare(adj_factor 自算) ∥ akshare ∥ baostock(无 Token 时兜底) [+tickflow 可选] |
-| 股东 | 十大流通股东 + 增减持 | Tushare ∥ akshare |
-| 资金 | 北向/主力/融资/融券 | Tushare ∥ akshare |
-| 市场 | 行业指数、ERP、PCR | Tushare + FRED |
+| 维度     | 内容                             | 源                                                                              |
+| -------- | -------------------------------- | ------------------------------------------------------------------------------- |
+| 基本信息 | 公司概况、行业                   | Tushare ∥ akshare                                                               |
+| 财务     | ROE/EPS/毛利率/OCF/杜邦          | Tushare ∥ akshare                                                               |
+| 行情     | OHLCV                            | Tushare ∥ 腾讯                                                                  |
+| 估值     | PE/PB 序列、分位、PE Band        | Tushare                                                                         |
+| K 线     | 日线 + MA/MACD/RSI（统一前复权） | Tushare(adj_factor 自算) ∥ akshare ∥ baostock(无 Token 时兜底) [+tickflow 可选] |
+| 股东     | 十大流通股东 + 增减持            | Tushare ∥ akshare                                                               |
+| 资金     | 北向/主力/融资/融券              | Tushare ∥ akshare                                                               |
+| 市场     | 行业指数、ERP、PCR               | Tushare + FRED                                                                  |
 
 结果自动存入 SQLite（`~/.local/share/investment/research.db`），支持历史回溯。详见 [CONFIGURATION.md](CONFIGURATION.md)。
 
@@ -147,6 +155,10 @@ Phase 3: 主编合成 → .md 报告
 - 禁止买卖建议；允许多情景估值（须假设前提 + 概率 + 免责）
 - Bull/Bear 须含数值场景化传导链
 - 左/右概率并列，禁止单一方向结论
+
+### 方法论引擎（v0.2.4）
+
+报告不再一套模板打天下：R1-R12h 先做框架匹配——行业景气状态卡（R5）、行业关键因素（R4）、成长股四分类分流（R7）、趋势/价值双路径分流（R12g）、数据源降级链（R12h）。AI 先确认「该用哪套框架」，再按框架产出，最后以事实边界 §2.3 约束（禁止猜测/推断，冲突并列不裁决）。
 
 ---
 
@@ -168,7 +180,7 @@ skills/
   invest-a-journal/        ← 交易方案评估
     scripts/lib/
       market_microstructure.py  ← 市场微观结构管道（17 指标）
-  invest-a-pulse/          ← 市场情绪全景（杠杆/广度/情绪/资金/估值）
+  invest-a-pulse/          ← 市场情绪全景（杠杆/广度/情绪/资金/估值 + 行业轮动/跷跷板观察）
   invest-a-limit-up/       ← 涨停数据管道（已废弃用户入口）
   invest-a-gap-scan/       ← 跳空缺口扫描
 .claude-plugin/            ← Claude Code 插件

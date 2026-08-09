@@ -113,13 +113,24 @@ class TestParticipantBehaviorScan:
     def test_turnover_margin_and_pcr_rows_render(self):
         ms = {
             "margin": {"change_pct": 2.5, "source": "tushare.margin_detail"},
-            "turnover": {"percentile_1y": 87.4, "source": "market.turnover"},
+            "turnover": {"percentile_60d": 87.4, "source": "market.turnover"},
             "put_call_ratio": {"ratio": 1.18, "source": "market.pcr"},
         }
         text = build_participant_behavior_section({}, "600176", ms, _dims(holder_changes={"data": []}))
         assert "杠杆资金" in text
         assert "换手（散户活跃度代理）" in text
         assert "期权情绪代理（PCR）" in text
+
+    def test_turnover_row_uses_percentile_60d(self):
+        """生产者 _ms_fetch_turnover 写入 percentile_60d（近60交易日分位），
+        消费端必须读同一 key，该行才真实出现在 participant 表中。"""
+        ms = {
+            "turnover": {"percentile_60d": 87.4, "source": "market.turnover"},
+        }
+        text = build_participant_behavior_section({}, "600176", ms, _dims(holder_changes={"data": []}))
+        assert "换手（散户活跃度代理）" in text
+        assert "近60日换手历史位置 87%" in text
+        assert "近一年换手历史位置" not in text
 
 
 class TestParticipantScanRenderIntegration:

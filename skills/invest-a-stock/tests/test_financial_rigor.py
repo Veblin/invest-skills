@@ -88,3 +88,29 @@ class TestFinancialRigor:
         pe = next(r for r in reports if r.field == "pe_ttm")
         assert pe.computed_value is not None
         assert pe.status in ("pass", "warn", "fail")
+
+
+class TestCalcDivisionByZero:
+    """缺陷3: Decimal 除零（DivisionByZero，InvalidOperation 的兄弟类）→ fail 报告而非崩溃 CLI。"""
+
+    def test_direct_division_by_zero(self):
+        from lib.financial_rigor import calc
+
+        r = calc("5/0")
+        assert r.status == "fail"
+        assert r.computed_value is None
+        assert "Division" in r.detail
+
+    def test_compound_division_by_zero(self):
+        from lib.financial_rigor import calc
+
+        r = calc("1/(5-5)")
+        assert r.status == "fail"
+        assert r.computed_value is None
+
+    def test_normal_division_still_passes(self):
+        from lib.financial_rigor import calc
+
+        r = calc("10/4")
+        assert r.status == "pass"
+        assert float(r.computed_value) == 2.5

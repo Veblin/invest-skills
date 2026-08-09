@@ -126,6 +126,28 @@ tech_hardware_profile = IndustryProfile(
 
     # 快速否决不适用的项
     fast_veto_skips=[],
+
+    # 行业成功关键因素（R4）— 报告先答这 3 问，再进通用 12 题
+    success_factors=[
+        {
+            "question": "当前处于产能周期什么位置？Capex 扩张与折旧的匹配度（Capex/折旧比）如何？",
+            "data_fields": ["capex_to_revenue", "depreciation_to_revenue"],
+            "sources": ["tushare cashflow: cap_ex（R12b 接入）", "tushare fina_indicator: 折旧科目"],
+            "answer_template": "引用 Capex/营收 与 折旧/营收 → 判断扩产期（Capex/折旧>1.5）还是收缩期（<1）→ 下游需求能否消化产能 → 结论：产能周期定位",
+        },
+        {
+            "question": "所处技术路线（SiC/GaN/Chiplet/RISC-V 等）是否面临替代风险？研发投入的转化效率如何？",
+            "data_fields": ["rd_expense_ratio"],
+            "sources": ["tushare fina_indicator: rd_expense_ratio", "行业技术会议/客户认证（引擎外，需 AI 补查）"],
+            "answer_template": "引用研发费用率 → 判断投入强度 vs 转化（新品收入占比需 AI 补查）→ 技术替代风险需 AI 补查行业动态 → 结论：技术护城河评估",
+        },
+        {
+            "question": "客户集中度与下游需求结构如何？大客户依赖是否存在风险？",
+            "data_fields": [],
+            "sources": ["年报/公告（引擎外字段，需 AI 补查）"],
+            "answer_template": "前五大客户占比需 AI 补查年报 → 判断客户集中度风险 → 下游景气传导路径 → 结论：客户结构评估",
+        },
+    ],
 )
 
 # 注册

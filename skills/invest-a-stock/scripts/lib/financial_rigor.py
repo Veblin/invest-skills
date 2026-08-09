@@ -9,7 +9,7 @@ import ast
 import operator
 import re
 from dataclasses import asdict, dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DivisionByZero, InvalidOperation
 from typing import Any
 
 from .data_util import merge_first_non_empty
@@ -356,7 +356,9 @@ def calc(expression: str) -> RigorReport:
             status="pass",
             detail=f"{expression} = {result}",
         )
-    except (InvalidOperation, ValueError, SyntaxError) as exc:
+    except (InvalidOperation, DivisionByZero, ValueError, SyntaxError) as exc:
+        # DivisionByZero 是 InvalidOperation 的兄弟类（均 DecimalException 子类），
+        # 必须显式捕获：`rigor calc "5/0"` 否则会以未捕获异常中止整个 CLI。
         return RigorReport(
             command="calc",
             field="expression",

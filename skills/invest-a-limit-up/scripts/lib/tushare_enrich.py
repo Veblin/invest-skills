@@ -15,7 +15,6 @@ from _invest_path import ensure_invest_a_scripts_on_path
 ensure_invest_a_scripts_on_path()
 
 from codes import is_st_or_delisted, market_label, symbol_to_ts_code  # noqa: E402
-from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.tushare_client import TushareClient  # noqa: E402
@@ -40,7 +39,7 @@ def _get_client() -> TushareClient | None:
         config = env.get_config()
         if not env.is_tushare_available(config):
             return None
-        client = TushareClient()
+        client = TushareClient(token=config.get("TUSHARE_TOKEN"))
         if not client.is_available():
             return None
         _tushare = client
@@ -54,31 +53,12 @@ def _get_client() -> TushareClient | None:
 def get_trade_dates(n: int) -> list[str]:
     """获取最近 N 个交易日（YYYYMMDD 降序）。
 
-    Tushare trade_cal 优先，降级到 n*1.4 自然日覆盖。
+    C8 收敛：委托 skills/lib/trade_cal.last_trade_dates（Tushare trade_cal
+    优先；降级到自然日去周末——节假日无法由日期推断，属已知近似）。
     """
-    client = _get_client()
-    if client:
-        try:
-            end = shanghai_today()
-            start = shanghai_days_ago(max(n * 2, 14))
-            cal = client.query(
-                "trade_cal", exchange="SSE",
-                start_date=start, end_date=end,
-                fields="cal_date,is_open",
-            )
-            if cal is not None and len(cal) > 0:
-                open_days = sorted(
-                    cal[cal["is_open"] == 1]["cal_date"].tolist(),
-                    reverse=True,
-                )
-                if open_days:
-                    return [str(d) for d in open_days[:n]]
-        except Exception as e:
-            logger.warning("Tushare trade_cal 失败: %s，降级到自然日覆盖", e)
+    from trade_cal import last_trade_dates
 
-    # 降级：自然日覆盖
-    count = max(int(n * 1.4), 1)
-    return [shanghai_days_ago(i) for i in range(count)]
+    return last_trade_dates(n)
 
 
 def enrich_stock_info(symbols: list[str]) -> dict[str, dict]:

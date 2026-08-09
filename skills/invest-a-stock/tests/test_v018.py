@@ -17,7 +17,6 @@ from __future__ import annotations
 import pytest
 
 from lib.scoring import (
-    confidence_matrix,
     customer_lockin_score,
     insider_signal,
     management_ability_proxy,
@@ -284,11 +283,15 @@ class TestManagementAbilityProxy:
         _check_no_forbidden_words(result)
 
     def test_roe_fallback_when_roic_fields_missing(self):
-        """ebit/total_assets/total_cur_liab 缺失时应回退到 roe 代理指标，而非抛异常或虚构 ROIC。"""
+        """ebit/total_assets/total_cur_liab 缺失时应回退到 roe 代理指标，而非抛异常或虚构 ROIC。
+
+        R12 修复后 roe 同样要求跨年同类型可比序列（roe 为财年累计口径），
+        测试数据改用 3 个跨年年报期（2023/2024/2025 年报）。
+        """
         rows = []
-        for i, q in enumerate(("0331", "0630", "0930", "1231")):
+        for i, year in enumerate((2023, 2024, 2025)):
             rows.append({
-                "end_date": f"2025{q}",
+                "end_date": f"{year}1231",
                 "revenue": 100.0 + i * 10,
                 "net_profit": 10.0,
                 "grossprofit_margin": 40.0,
@@ -300,51 +303,159 @@ class TestManagementAbilityProxy:
         _check_no_forbidden_words(result)
 
 
-class TestConfidenceMatrix:
-    def _dim(self, status: str, multi_source: bool = False) -> dict:
-        return {"status": status, "_meta": {"multi_source": multi_source}}
+class TestRoicTrendComparability:
+    """R12 修复：ROIC/ROE 趋势必须基于可比口径（跨年同周期类型）。
 
-    def test_normal_path(self):
-        collection = {
-            "financials": self._dim("available", multi_source=True),
-            "holder_changes": self._dim("available"),
-            "research": self._dim("partial"),
-            "industry": self._dim("missing"),
-            "northbound": self._dim("available", multi_source=True),
-            "kline": self._dim("available"),
-        }
-        result = confidence_matrix(collection)
-        assert len(result["rows"]) == 8
-        modules = {r["module"]: r["confidence"] for r in result["rows"]}
-        assert modules["财务数据分析"] == "高"
-        assert modules["行业与产业链分析"] == "低"
-        assert modules["估值判断"] == "中/低"
-        assert modules["周期拐点判断"] == "低"
-        _check_no_forbidden_words(result)
+    背景：fina_indicator 的 ebit/roe 为财年累计口径（Q1→H1→3Q→年报 单调累加），
+    旧实现把累计 ebit 除以近常量的资本基数 → 同财年最近 3 期必然递增 → 25 分白送。
+    """
 
-    def test_empty_collection_does_not_raise(self):
-        result = confidence_matrix({})
-        assert len(result["rows"]) == 8
-        for r in result["rows"]:
-            assert r["confidence"] in ("高", "中", "低", "中/低")
-        # 全部维度缺失 → 除固定项外均应为低置信度
-        modules = {r["module"]: r["confidence"] for r in result["rows"]}
-        assert modules["财务数据分析"] == "低"
-        assert modules["周期拐点判断"] == "低"
-        _check_no_forbidden_words(result)
+    def _row(self, end_date: str, ebit: float, *, roe: float | None = None) -> dict:
+        row = {"end_date": end_date, "ebit": ebit, "total_assets": 200.0, "total_cur_liab": 50.0}
+        if roe is not None:
+            row["roe"] = roe
+        return row
 
-    def test_none_input_does_not_raise(self):
-        result = confidence_matrix(None)  # type: ignore[arg-type]
-        assert len(result["rows"]) == 8
+    def test_same_fiscal_year_cumulative_series_gets_no_score(self):
+        """同财年 Q1→H1→3Q 累计 ebit 递增（旧实现必给 25 分）→ 修复后标不可得。"""
+        from lib.scoring import _score_roic_trend
 
-    def test_valuation_never_high_confidence(self):
-        """估值判断/周期拐点判断固定为中低置信度，不随数据完整性提升（学术共识）。"""
-        collection = {k: self._dim("available", multi_source=True) for k in
-                      ("financials", "holder_changes", "research", "industry", "northbound", "kline")}
-        result = confidence_matrix(collection)
-        modules = {r["module"]: r["confidence"] for r in result["rows"]}
-        assert modules["估值判断"] != "高"
-        assert modules["周期拐点判断"] != "高"
+        rows = [
+            self._row("20250331", ebit=10.0),
+            self._row("20250630", ebit=22.0),
+            self._row("20250930", ebit=35.0),
+        ]
+        score, detail, _, missing = _score_roic_trend(rows)
+        assert score is None
+        assert detail["score"] is None
+        assert "可比" in missing  # 明确标注不可比原因
+
+    def test_six_quarter_rows_last3_in_same_fiscal_year_gets_no_score(self):
+        """6+ 季度行且最近 3 期同属一个财年（缺陷原文场景）→ 不得 25 分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20240331", ebit=8.0),
+            self._row("20240630", ebit=18.0),
+            self._row("20240930", ebit=30.0),
+            self._row("20241231", ebit=45.0),
+            self._row("20250331", ebit=10.0),
+            self._row("20250630", ebit=22.0),
+        ]
+        score, detail, _, _ = _score_roic_trend(rows)
+        assert score is None  # 同类型（各年 H1）仅 2 期，不可比 → 不得分
+        assert detail["score"] is None
+
+    def test_roe_fallback_same_fiscal_year_cumulative_gets_no_score(self):
+        """ROE 回退同样受累计口径影响：同财年累计递增的 roe 不得给分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20250331", ebit=None, roe=8.0),
+            self._row("20250630", ebit=None, roe=9.5),
+            self._row("20250930", ebit=None, roe=11.0),
+        ]
+        score, detail, _, _ = _score_roic_trend(rows)
+        assert score is None
+        assert detail["score"] is None
+
+    def test_cross_year_same_type_increasing_scores_full(self):
+        """跨年同类型期（各年 Q1）真实递增 → 正常给 25 分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20230331", ebit=10.0),
+            self._row("20240331", ebit=22.0),
+            self._row("20250331", ebit=35.0),
+        ]
+        score, detail, sources, missing = _score_roic_trend(rows)
+        assert score == 25.0
+        assert detail["score"] == 25.0
+        assert detail["period"] == "0331"
+        assert "可比口径" in detail["note"]
+        assert missing == ""
+        assert "ebit" in sources
+
+    def test_roe_fallback_cross_year_same_type_increasing_scores_full(self):
+        """跨年年报 ROE 真实递增 → 回退代理指标正常给 25 分。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20231231", ebit=None, roe=8.0),
+            self._row("20241231", ebit=None, roe=9.5),
+            self._row("20251231", ebit=None, roe=11.0),
+        ]
+        score, detail, sources, _ = _score_roic_trend(rows)
+        assert score == 25.0
+        assert detail["metric"] == "代理指标: ROE"
+        assert detail["period"] == "1231"
+        assert sources == ["roe"]
+
+    def test_cross_year_mixed_periods_uses_latest_type_series(self):
+        """多财年混合期数据（含年报+次年 Q1）→ 与最新期同类型的跨年序列可比。"""
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20231231", ebit=30.0),
+            self._row("20240331", ebit=10.0),
+            self._row("20241231", ebit=45.0),
+            self._row("20250331", ebit=22.0),
+            self._row("20251231", ebit=60.0),
+            self._row("20260331", ebit=35.0),
+        ]
+        score, detail, _, _ = _score_roic_trend(rows)
+        assert score == 25.0  # 各年 Q1: 10→22→35 真实递增
+        assert detail["period"] == "0331"
+
+    def test_latest_period_missing_value_does_not_slide_to_old_period(self):
+        """#10：最新报告期指标缺失（低积分档过滤）→ 不静默滑期，标不可得。
+
+        旧实现锚定「有指标值的最新行」（computed[-1]）：最新期 2026H1 ebit 缺失
+        时滑到 2025Q1 年报期序列（10→22→35 递增）白给 25 分且无陈旧标注。
+        """
+        from lib.scoring import _score_roic_trend
+
+        rows = [
+            self._row("20230331", ebit=10.0),
+            self._row("20240331", ebit=22.0),
+            self._row("20250331", ebit=35.0),
+            self._row("20260630", ebit=None),  # 最新报告期 ebit 缺失
+        ]
+        score, detail, _, missing = _score_roic_trend(rows)
+        assert score is None
+        assert detail["score"] is None
+        assert "可比" in missing
+
+
+class TestConfidenceMatrixRemoved:
+    """A-2 置信度矩阵死代码删除验证（CHANGELOG v0.2.1「报告精简」意图性移除）。
+
+    confidence_matrix / _dimension_confidence 于 2026-08-06 code-review 确认
+    全仓零调用者后删除；本测试防止复活死代码，并确保渲染层无残留引用。
+    """
+
+    def test_functions_removed_and_intent_documented(self):
+        import inspect
+
+        import lib.scoring as scoring
+        import lib.render_markdown._concise as concise
+
+        assert not hasattr(scoring, "confidence_matrix")
+        assert not hasattr(scoring, "_dimension_confidence")
+        # 意图注释保留在删除位置，说明移除原因与 CHANGELOG 依据
+        src = inspect.getsource(scoring)
+        assert "CHANGELOG v0.2.1「报告精简」" in src
+        assert "AI 分析置信度矩阵（已移除" in src
+        # 渲染层无任何引用（facade 延迟解析也不应解析出该名）
+        assert not hasattr(concise, "confidence_matrix")
+        for module in (
+            concise,
+            __import__("lib.render", fromlist=["x"]),
+            __import__("lib.render_risk", fromlist=["x"]),
+            __import__("lib.render_utils", fromlist=["x"]),
+            __import__("lib.render_html", fromlist=["x"]),
+        ):
+            assert not hasattr(module, "confidence_matrix")
 
 
 # ═══════════════════════════════════════════════════════════════

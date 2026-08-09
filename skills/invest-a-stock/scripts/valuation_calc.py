@@ -19,6 +19,7 @@
     3. 获取 PE/PB 历史序列，计算历史分位
     4. 获取中国 10Y 国债收益率作为 Rf
     5. 盈利收益率框架 (Rf + ERP)
+    5b. 机会成本行 (R8): E/P vs 10Y 国债利差（估值机会成本代理，不称 ERP）
     6. 反推市场隐含 g
     7. ROE-PB 理论匹配
     8. 多情景（乐观/中性/悲观）× 多方法估值区间
@@ -30,9 +31,7 @@ import argparse
 import json
 import logging
 import os
-import statistics
 import sys
-import time
 import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -46,12 +45,13 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from lib.env import get_config, ensure_env_loaded, PROJECT_ROOT
-from lib.nums import safe_float, coalesce_field
-from lib.financials import normalize_end_date, parse_end_date
+from lib.env import ensure_env_loaded
+from lib.nums import safe_float
+from lib.financials import normalize_end_date
 from lib.shared_codes import symbol_to_ts_code
 from lib.shared_dates import shanghai_days_ago, shanghai_today
-from lib.stats import median, percentile_rank
+# NOTE: median / percentile_rank 原为 calc_historical_percentile 本地使用，
+# 该函数现已委托 lib.valuation.valuation_summary（缺陷4 单公式源），此处不再直接调用。
 from lib.tushare_client import TushareClient
 
 # ---------------------------------------------------------------------------
@@ -219,6 +219,339 @@ def get_financials(ts: TushareClient, ts_code: str) -> list[dict]:
         return []
 
 
+def get_annual_net_profit(ts: TushareClient, ts_code: str, years: int = 10) -> list[dict]:
+    """R2: 近 N 年年度净利润（income 表 n_income_attr_p，年报期 1231 结尾）。
+
+    income 表为累计口径：年报期即全年净利。fina_indicator 的 net_profit 字段
+    在低积分档被过滤（R12b 实测 2000 分档返回 None），故稳态盈利一律走 income 表。
+    返回 [{year: "YYYY1231", net_profit: float}] 升序。
+    """
+    start_date = shanghai_days_ago(years * 365)
+    end_date = shanghai_today()
+    try:
+        result = ts.query(
+            "income", ts_code=ts_code,
+            start_date=start_date, end_date=end_date,
+            fields="end_date,n_income_attr_p",
+        )
+        if result is None or (hasattr(result, "empty") and result.empty):
+            return []
+        rows = result.to_dict(orient="records") if hasattr(result, "to_dict") else list(result)
+        annual: dict[str, float] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            ed = str(r.get("end_date", ""))
+            if not ed.endswith("1231"):
+                continue
+            npv = r.get("n_income_attr_p")
+            if npv is None:
+                continue
+            try:
+                v = float(npv)
+                if v != v:  # NaN 等同缺失（calc_steady_earnings 中位数污染防护）
+                    continue
+                annual[ed] = v  # 同一年重复行取最后一条（后覆盖前）
+            except (TypeError, ValueError):
+                continue
+        return [{"year": ed, "net_profit": v} for ed, v in sorted(annual.items())]
+    except Exception:
+        logger.warning("Tushare income 年度净利查询失败", exc_info=True)
+        return []
+
+
+def calc_steady_earnings(
+    annual_rows: list[dict],
+    *,
+    cycle_start: str | None = None,
+    cycle_end: str | None = None,
+    method: str = "median",
+    min_years: int = 5,
+) -> dict:
+    """R2: 稳态盈利估算（穿越周期视角）。
+
+    method:
+      median  — 年度净利润中位数（默认）
+      trimmed — 截尾均值（去最高最低年）
+      range   — 用户定义周期区间（cycle_start/cycle_end）内的均值
+    样本 < min_years → 返回不可得（避免用 2-3 年数据冒充稳态——海力士式
+    "周期高点低 PE 陷阱"的识别前提是足够长的周期样本）。
+    """
+    rows = [r for r in annual_rows if r.get("net_profit") is not None]
+    if cycle_start:
+        rows = [r for r in rows if r["year"] >= cycle_start]
+    if cycle_end:
+        rows = [r for r in rows if r["year"] <= cycle_end]
+    if len(rows) < min_years:
+        return {
+            "available": False,
+            "reason": f"年度样本 {len(rows)} < {min_years} 年，稳态盈利不可得",
+            "n_years": len(rows),
+        }
+    vals = sorted(float(r["net_profit"]) for r in rows)
+    if method == "median":
+        n = len(vals)
+        mid = n // 2
+        steady = vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2
+    elif method == "trimmed":
+        if len(vals) <= 2:
+            steady = sum(vals) / len(vals)
+        else:
+            steady = sum(vals[1:-1]) / (len(vals) - 2)
+    elif method == "range":
+        steady = sum(vals) / len(vals)
+    else:
+        raise ValueError(f"未知 method: {method}")
+    return {
+        "available": True,
+        "method": method,
+        "steady_earnings": round(steady, 2),
+        "n_years": len(vals),
+        "period": f"{rows[0]['year']}~{rows[-1]['year']}",
+        "min": vals[0],
+        "max": vals[-1],
+        "latest": vals[-1],
+    }
+
+
+# 周期中枢 PE 兜底配置（钢铁/化工/有色等周期行业历史常见中枢——经验估计值，逐项来源待补；
+# 规范：R4 行业模块化后迁入 lib/industry/ 并逐项标注参数来源与适用期间，当前为过渡兜底）
+_CYCLE_PE_DEFAULT = 12.0
+_CYCLE_PE_BY_INDUSTRY: dict[str, float] = {
+    "钢铁": 8.0,
+    "煤炭": 9.0,
+    "石油石化": 10.0,
+    "化工": 12.0,
+    "有色金属": 15.0,
+    "小金属": 15.0,
+    "建筑材料": 12.0,
+}
+
+
+def calc_cycle_pe(industry: str | None = None, user_pe: float | None = None) -> float:
+    """R2: 周期中枢 PE。优先级：用户覆盖 > 行业配置 > 默认 12。"""
+    if user_pe is not None:
+        return float(user_pe)
+    if industry:
+        for key, val in _CYCLE_PE_BY_INDUSTRY.items():
+            if key in industry:
+                return val
+    return _CYCLE_PE_DEFAULT
+
+
+def steady_valuation_band(
+    steady: dict, cycle_pe: float, *, band_pct: float = 0.25,
+) -> dict | None:
+    """R2: 稳态盈利 × 周期中枢 PE → 穿越周期估值区间（±band_pct 带宽）。
+
+    输出为多情景参考（乐观=中枢 PE 上沿 / 悲观=下沿），非单一目标价。
+    """
+    if not steady.get("available"):
+        return None
+    if not (steady.get("steady_earnings", 0) > 0):
+        # 亏损期（或 NaN）→ 稳态带无意义（镜像 Step 10 takeover 的 >0 守卫）
+        return None
+    mid = steady["steady_earnings"] * cycle_pe
+    return {
+        "low": round(mid * (1 - band_pct), 2),
+        "mid": round(mid, 2),
+        "high": round(mid * (1 + band_pct), 2),
+        "cycle_pe": cycle_pe,
+        "band_pct": band_pct,
+    }
+
+
+# 金融业豁免关键词（EV/EBITDA 对银行/保险无意义）
+_FINANCIAL_INDUSTRY_KEYWORDS = ("银行", "保险", "证券", "多元金融", "非银")
+
+
+def is_financial_industry(industry: str | None) -> bool:
+    """R3: 金融业判定（EV/EBITDA 不适用）。"""
+    if not industry:
+        return False
+    return any(k in industry for k in _FINANCIAL_INDUSTRY_KEYWORDS)
+
+
+def _nan_to_none(v: Any) -> float | None:
+    """NaN → None（income 表 ebitda 等字段可能返回 NaN，须与缺失同等对待）。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    import math
+    return None if math.isnan(f) else f
+
+
+def calc_ev_ebitda(
+    *,
+    total_mv_yi: float | None,
+    cash: float | None,
+    st_loan: float | None = None,
+    lt_loan: float | None = None,
+    bond_payable: float | None = None,
+    ebitda: float | None = None,
+    ebitda_period: str | None = None,
+    industry: str | None = None,
+) -> dict:
+    """R3: EV/EBITDA 可审计桥接表。
+
+    口径：EV = 市值 + 有息负债（短贷+长贷+应付债券） - 现金
+          EBITDA = fina_indicator.ebitda（**年报期 1231，全年口径**）
+    注意：fina_indicator.ebitda 为累计 YTD 口径，仅 1231 年报期为全年数；
+    非年报期（0331/0630/0930）累计值会使 EV/EBITDA 高估（如 Q1 累计仅约
+    全年 1/4）。调用方必须只传 1231 年报期的 EBITDA，并可通过 ebitda_period
+    标注实际使用的报告期。
+    可审计性：逐项标注可得/缺失；有息负债全缺失时降级为
+    「净现金口径 EV = 市值 - 现金」，并提示方向偏差。
+    金融业 → 不适用（EBITDA 无意义）。
+    """
+    if is_financial_industry(industry):
+        return {"available": False, "reason": "不适用（金融业，EBITDA 无意义）",
+                "exempt": True}
+    total_mv_yi = _nan_to_none(total_mv_yi)
+    cash = _nan_to_none(cash)
+    st_loan = _nan_to_none(st_loan)
+    lt_loan = _nan_to_none(lt_loan)
+    bond_payable = _nan_to_none(bond_payable)
+    ebitda = _nan_to_none(ebitda)
+    # ebitda_period 是报告期字符串（如 "20251231"），不做数值转换
+    missing: list[str] = []
+    if cash is None:
+        missing.append("cash")
+    if st_loan is None:
+        missing.append("short_loan")
+    if lt_loan is None:
+        missing.append("long_loan")
+    if bond_payable is None:
+        missing.append("bond_payable")
+    if ebitda is None:
+        missing.append("ebitda")
+
+    debt = None
+    if st_loan is not None or lt_loan is not None or bond_payable is not None:
+        debt = (st_loan or 0.0) + (lt_loan or 0.0) + (bond_payable or 0.0)
+    ev = None
+    if total_mv_yi is not None and cash is not None:
+        ev = total_mv_yi * 1e8 - (cash or 0.0)
+        if debt is not None:
+            ev += debt
+    ratio = None
+    if ev is not None and ebitda not in (None, 0.0):
+        ratio = round(ev / ebitda, 2)
+
+    # 有息负债部分缺失（2000 分档过滤单个科目）时，缺失分量被按 0 计 →
+    # EV 被低估且无提示。note 三分支：全缺失 → 净现金口径；部分缺失 →
+    # 显式降级说明（review #11）；完整 → None。
+    missing_debt = [
+        label for label, v in (("短贷", st_loan), ("长贷", lt_loan),
+                               ("应付债券", bond_payable))
+        if v is None
+    ]
+    # 实际可得分量标签（引擎预计算，供渲染行精确标注构成；缺失分量
+    # 按 0 计但不得出现在标签里，否则行内口径误导 —— batch-test P1-2）
+    debt_parts = [label for label, v in (("短贷", st_loan), ("长贷", lt_loan),
+                                         ("应付债券", bond_payable))
+                  if v is not None]
+    if debt is None:
+        note = ("有息负债不可得（低积分档字段过滤），EV 为净现金口径近似，"
+                "若公司有负债则实际 EV 更高")
+    elif missing_debt:
+        note = (
+            f"有息负债部分缺失（{', '.join(missing_debt)} 不可得），EV 按可得"
+            "分量计算，若缺失项实际存在则 EV 被低估"
+        )
+    else:
+        note = None
+
+    return {
+        "available": ev is not None and ebitda is not None,
+        "exempt": False,
+        "bridge": {
+            "mv_yi": round(total_mv_yi, 2) if total_mv_yi is not None else None,
+            "cash_yi": round(cash / 1e8, 2) if cash is not None else None,
+            "interest_debt_yi": round(debt / 1e8, 2) if debt is not None else None,
+            "ev_yi": round(ev / 1e8, 2) if ev is not None else None,
+        },
+        "ebitda_yi": round(ebitda / 1e8, 2) if ebitda is not None else None,
+        "ebitda_period": ebitda_period,
+        "ev_ebitda": ratio,
+        "debt_available": debt is not None,
+        "debt_label": "+".join(debt_parts) if debt_parts else None,
+        "missing": missing,
+        "note": note,
+    }
+
+
+def _latest_annual_ebitda(fin_rows: list[dict]) -> tuple[float | None, str | None, str | None]:
+    """从 fina_indicator 行中取**最近年报期（1231）**的 EBITDA。
+
+    fina_indicator.ebitda 为累计 YTD 口径，仅 1231 年报期为全年数。
+    用最新非年报期（如 2026Q1 累计）会静默高估 EV/EBITDA 约 4 倍，
+    故必须限定年报期；若 3 年内无 1231 行 → 明确降级（返回不可得 + 口径说明），
+    绝不静默使用累计期。
+
+    Returns:
+        (ebitda, period, note)：note 非 None 表示降级/不可得说明。
+    """
+    annual = [
+        r for r in fin_rows
+        if normalize_end_date(str(r.get("end_date", ""))).endswith("1231")
+    ]
+    for r in reversed(annual):
+        try:
+            v = float(r["ebitda"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if v != v:  # NaN 等同缺失（与 _latest_annual_ebitda_from_income 同型）
+            continue
+        return v, str(r.get("end_date", "")), None
+    latest_ed = str(fin_rows[-1].get("end_date", "")) if fin_rows else "?"
+    return None, None, (
+        f"EBITDA 不可得：3 年内无 1231 年报期（最新期 {latest_ed} 为累计口径，"
+        "不可换算为全年 EBITDA，EV/EBITDA 不计算）"
+    )
+
+
+def _latest_annual_ebitda_from_income(
+    ts: TushareClient, ts_code: str
+) -> tuple[float | None, str | None]:
+    """income 表 ebitda 兜底（fina_indicator 2000 分档过滤 ebitda 时，R12b 同型）。
+
+    同口径纪律：income.ebitda 同为累计口径，仅取最近 1231 年报期（全年数）；
+    3 年内无年报期或查询失败 → (None, None)，由调用方走「不可得」降级。
+    """
+    try:
+        df = ts.query(
+            "income", ts_code=ts_code,
+            start_date=shanghai_days_ago(3 * 365), end_date=shanghai_today(),
+            fields="end_date,ebitda",
+        )
+        if df is None or (hasattr(df, "empty") and df.empty):
+            return None, None
+        rows = df.to_dict(orient="records") if hasattr(df, "to_dict") else list(df)
+    except Exception as exc:
+        logger.warning("Tushare income ebitda 查询失败（R3 兜底）: %s", exc)
+        return None, None
+    annual = [
+        r for r in rows
+        if isinstance(r, dict)
+        and normalize_end_date(str(r.get("end_date", ""))).endswith("1231")
+    ]
+    # 取最近 1231 期（升序 + reverse），与 _latest_annual_ebitda 的
+    # reversed 语义一致——此前升序取第一个 = 3 年窗口内最旧一期（review #2）
+    for r in sorted(annual, key=lambda x: str(x.get("end_date", "")), reverse=True):
+        try:
+            v = float(r["ebitda"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if v != v:  # NaN 等同缺失
+            continue
+        return v, str(r.get("end_date", ""))
+    return None, None
+
+
 def get_daily_basic_history(
     ts: TushareClient, ts_code: str, years: int = 5
 ) -> list[dict]:
@@ -332,9 +665,13 @@ def _standalone_quarterly_eps(fin_rows: list[dict]) -> list[dict]:
 
 
 def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) -> dict[str, Any]:
-    """计算 TTM EPS：最近 4 个单季 EPS 之和。
+    """计算 TTM EPS：最近 **连续** 4 个单季 EPS 之和（不允许断档季）。
 
     使用 fina_indicator 的 eps（累计值），转为单季后求和。
+    与 calc_ocf_quality 对齐：经 _latest_contiguous_ttm_dates 校验连续性。
+    缺季/断档时降级：最新期无法构成连续窗口 → 回退更早连续窗口并标注陈旧；
+    无任何连续 4 期 → 标不可得。绝不静默混入过期季度（混入会污染
+    当前 PE、隐含增长 g 及全部多情景估值）。
 
     Args:
         fin_rows: 财务行列表（按 end_date 升序且已去重）
@@ -348,7 +685,21 @@ def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) ->
             "quarterly_eps": standalone,
         }
 
-    last4 = standalone[-4:]
+    dates = [q["end_date"] for q in standalone]
+    contiguous = _latest_contiguous_ttm_dates(dates)
+    if contiguous is None:
+        return {
+            "ttm_eps": None,
+            "error": (
+                "无连续 4 个报告期单季 EPS（最近期序 "
+                f"{', '.join(dates[-4:])} 存在断档/空洞），"
+                "TTM EPS 标为不可得，避免混入过期季度"
+            ),
+            "quarterly_eps": standalone,
+        }
+    by_date = {q["end_date"]: q for q in standalone}
+    last4 = [by_date[d] for d in contiguous]
+    stale = contiguous[-1] != dates[-1]
     ttm_eps = sum(q["eps_standalone"] for q in last4)
 
     # 净利润绝对值
@@ -361,10 +712,17 @@ def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) ->
         "ttm_net_profit_yi": round(net_profit_ttm / 1e8, 2) if net_profit_ttm else None,
         "quarterly_eps": last4,
         "n_quarters": len(last4),
-        "method": "fina_indicator eps 累计 → 单季差 → TTM=Σ(最近4个单季)",
+        "stale": stale,
+        "stale_note": (
+            f"最新期 {dates[-1]} 无法构成连续 TTM，回退至截至 "
+            f"{contiguous[-1]} 的连续窗口（陈旧 TTM，含缺季断档）"
+            if stale else None
+        ),
+        "method": "fina_indicator eps 累计 → 单季差 → TTM=Σ(最近连续4个单季)",
         "note": (
             "fina_indicator 的 eps 为年度累计值（0331=Q1, 0630=H1, 0930=前3Q, 1231=全年），"
-            "单季 EPS = 本期累计 − 前期累计。TTM = Σ(最近4个单季)。"
+            "单季 EPS = 本期累计 − 前期累计。TTM = Σ(最近连续4个单季)；"
+            "断档时降级为不可得或陈旧标注。"
         ),
     }
 
@@ -532,6 +890,10 @@ def calc_historical_percentile(
 
     Tushare daily_basic 对亏损期返回 None/null PE（非负值），
     无法直接计为负值天数。通过 daily_rows 总数 vs PE 有效样本数的差值推断。
+
+    核心统计（当前值/分位/中位数）委托 lib.valuation.valuation_summary——
+    权威引擎单一公式源（缺陷4：消除脚本路径与 lib 路径双份公式漂移）。
+    脚本侧仅保留 rows→序列数据预处理、±1σ Band（lib 无对应）与输出 schema 映射。
     """
     pe_seq = []
     pb_seq = []
@@ -551,24 +913,27 @@ def calc_historical_percentile(
     if not pe_seq and not pb_seq:
         return {"error": "PE/PB 历史数据不足"}
 
-    total_daily = len(daily_rows)
-    result: dict[str, Any] = {"n_samples": total_daily, "warnings": []}
+    from lib.valuation import valuation_summary as _lib_valuation_summary
+    vs = _lib_valuation_summary(pe_seq, pb_seq, window_label="近5年")
 
-    if pe_seq:
-        current_pe = pe_seq[-1]
-        pe_pct = percentile_rank(pe_seq, current_pe)
+    total_daily = len(daily_rows)
+    result: dict[str, Any] = {"n_samples": total_daily, "warnings": list(vs.get("warnings") or [])}
+
+    pe = vs.get("pe") or {}
+    if pe.get("current") is not None:
+        current_pe = pe["current"]
         n = len(pe_seq)
         mu = sum(pe_seq) / n
         sigma = math.sqrt(sum((v - mu) ** 2 for v in pe_seq) / n)
         pe_neg_inferred = pe_none_count
         pe_neg_pct = pe_neg_inferred / total_daily if total_daily > 0 else 0.0
         result.update({
-            "pe_valid": len(pe_seq),
+            "pe_valid": n,
             "pe_none_or_neg": pe_neg_inferred,
             "pe_neg_pct": round(pe_neg_pct, 4),
-            "pe_current": round(current_pe, 2),
-            "pe_pct": round(pe_pct, 1),
-            "pe_median": round(median(pe_seq), 2),
+            "pe_current": current_pe,
+            "pe_pct": round(pe["pct"], 1) if pe.get("pct") is not None else None,
+            "pe_median": pe.get("median"),
             "pe_mean": round(mu, 2),
             "pe_sigma": round(sigma, 2) if sigma else None,
             "pe_plus_1sigma": round(mu + sigma, 2) if sigma else None,
@@ -580,13 +945,12 @@ def calc_historical_percentile(
                 f"PE 分位数仅作位置参考，不反映估值贵贱。PB 分位更有参考价值。"
             )
 
-    if pb_seq:
-        current_pb = pb_seq[-1]
-        pb_pct = percentile_rank(pb_seq, current_pb)
+    pb = vs.get("pb") or {}
+    if pb.get("current") is not None:
         result.update({
-            "pb_current": round(current_pb, 2),
-            "pb_pct": round(pb_pct, 1),
-            "pb_median": round(median(pb_seq), 2),
+            "pb_current": pb["current"],
+            "pb_pct": round(pb["pct"], 1) if pb.get("pct") is not None else None,
+            "pb_median": pb.get("median"),
         })
 
     return result
@@ -601,13 +965,20 @@ def implied_growth_detailed(
 
     g_implied = r - E/P = (rf + erp) - 1/pe
     fair_pe(g) = 1 / (rf + erp - g)
-    """
-    if pe <= 0:
-        return {"error": "PE 非正"}
 
-    r = rf + erp
+    核心计算（PE 非正检查 / r / g_implied / PE>50 提示）委托
+    lib.valuation.implied_growth——权威引擎（缺陷4：消除脚本路径与 lib 路径
+    双份公式漂移）。fair_pe_by_g 表与 note 为脚本侧特有展示（lib 无对应），保留本地。
+    """
+    from lib.valuation import implied_growth as _lib_implied_growth
+
+    core = _lib_implied_growth(pe, rf, erp)
+    if core.get("error"):
+        return {"error": core["error"]}
+
+    r = core["r"]
     earnings_yield = 1.0 / pe
-    g_implied = r - earnings_yield
+    g_implied = core["g_implied"]
 
     # 不同 g 下的合理 PE
     fair_pe_table = []
@@ -630,13 +1001,48 @@ def implied_growth_detailed(
     return {
         "rf": round(rf, 4),
         "erp": erp,
-        "r_required": round(r, 4),
+        "r_required": r,
         "earnings_yield": round(earnings_yield, 4),
-        "g_implied": round(g_implied, 4),
+        "g_implied": g_implied,
         "fair_pe_by_g": fair_pe_table,
         "note": (
             f"当前 PE {pe:.2f}x 隐含永续增长率 {g_implied * 100:.2f}%。"
             f"若 g_implied < 0，市场定价了盈利萎缩预期。"
+        ),
+    }
+
+
+def calc_opportunity_cost(pe: float | None, rf_10y: float | None) -> dict:
+    """R8: 估值机会成本行 — 盈利收益率 (E/P) vs 中国 10Y 国债收益率。
+
+    earnings_yield = 1/pe（pe>0 时），ey_minus_10y = E/P − 10Y（利差）。
+    利差是"持有一单位盈利收益 vs 无风险收益"的机会成本代理——**不称 ERP**
+    （ERP 另有含权益风险溢价的定义口径）。E/P 高于 10Y 越多，估值相对债券
+    越便宜；倒挂（利差 < 0）说明市场把大部分收益押注在增长预期上。
+
+    pe<=0（亏损期）或 rf 缺失 → available=False，标注不可得。
+    """
+    if pe is None or pe <= 0 or rf_10y is None:
+        reasons: list[str] = []
+        if pe is None or pe <= 0:
+            reasons.append("PE 非正（亏损期或无有效 PE）")
+        if rf_10y is None:
+            reasons.append("中国 10Y 国债收益率不可得")
+        return {
+            "available": False,
+            "reason": "；".join(reasons),
+        }
+    earnings_yield = 1.0 / pe
+    ey_minus_10y = earnings_yield - rf_10y
+    return {
+        "available": True,
+        "pe": round(pe, 2),
+        "earnings_yield_pct": round(earnings_yield * 100, 2),
+        "rf_10y_pct": round(rf_10y * 100, 2),
+        "ey_minus_10y_pp": round(ey_minus_10y * 100, 2),
+        "note": (
+            "口径：盈利收益率 E/P = 1/PE（TTM），对比中国 10Y 国债收益率；"
+            "利差 (E/P − 10Y) 为估值机会成本代理，不称 ERP。"
         ),
     }
 
@@ -729,9 +1135,11 @@ def multi_scenario_valuation(
     def _calc_methods(
         eps_fwd: float, pe_mult: float, pb_mult: float, g_assume: float,
     ) -> dict:
-        price_pe = round(eps_fwd * pe_mult, 2)
+        # 亏损期（eps_fwd<=0）：PE 法/盈利收益法无意义，仅 PB 法产出；
+        # 负价格区间会误导"综合区间/处于中性偏低"判断
+        price_pe = round(eps_fwd * pe_mult, 2) if eps_fwd > 0 else None
         price_pb = round(bvps * pb_mult, 2)
-        if r > g_assume:
+        if eps_fwd > 0 and r > g_assume:
             fair_pe_ey = 1.0 / (r - g_assume)
             price_ey = round(eps_fwd * fair_pe_ey, 2)
         else:
@@ -813,6 +1221,12 @@ class ValuationResult:
     implied_growth: dict = field(default_factory=dict)
     roe_pb_match: dict = field(default_factory=dict)
     scenarios: dict = field(default_factory=dict)
+    # R2: 稳态盈利估值（穿越周期视角）
+    steady: dict = field(default_factory=dict)
+    # R3: EV/EBITDA 企业价值桥接
+    ev_ebitda: dict = field(default_factory=dict)
+    # R8: 机会成本行（盈利收益率 vs 10Y 国债利差）
+    opportunity_cost: dict = field(default_factory=dict)
     # 获取来源
     sources: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -826,6 +1240,14 @@ def run_valuation(
     symbol: str,
     rf_override: float | None = None,
     erp_override: float | None = None,
+    *,
+    steady: bool = False,
+    cycle_start: str | None = None,
+    cycle_end: str | None = None,
+    cycle_method: str = "median",
+    cycle_pe: float | None = None,
+    ev_ebitda: bool = False,
+    ev_ebitda_industry: str | None = None,
 ) -> ValuationResult:
     """执行完整估值计算流程。
 
@@ -833,6 +1255,10 @@ def run_valuation(
         symbol: 股票代码 (如 "002466")
         rf_override: 手动指定无风险利率（小数）
         erp_override: 手动指定 ERP（小数）
+        steady: R2 — 追加稳态盈利估值（穿越周期视角）
+        cycle_start/cycle_end: 用户定义周期区间（cycle_method="range" 时生效）
+        cycle_method: median / trimmed / range
+        cycle_pe: 周期中枢 PE（默认行业配置/12）
 
     Returns:
         ValuationResult
@@ -925,6 +1351,11 @@ def run_valuation(
     else:
         result.implied_growth = {"error": "PE/Rf 不可得"}
 
+    # ---- Step 6b (R8): 机会成本行（盈利收益率 vs 10Y 国债利差）----
+    # pe 用 Step 6 同源的 current_pe（实时价格/TTM EPS，回退 daily_basic），
+    # rf 用 Step 5 取得的中国 10Y 国债；亏损或无 rf 时返回不可得标注。
+    result.opportunity_cost = calc_opportunity_cost(current_pe, rf)
+
     # ---- Step 7: ROE-PB 匹配 ----
     bvps = result.bvps_data.get("bvps")
     roe_ann = result.roe_data.get("roe_annualized")
@@ -947,6 +1378,81 @@ def run_valuation(
         )
     else:
         result.scenarios = {"error": "基础数据不足"}
+
+    # ---- Step 9 (R2): 稳态盈利估值（value --steady）----
+    if steady:
+        annual = get_annual_net_profit(ts, ts_code)
+        ste = calc_steady_earnings(
+            annual,
+            cycle_start=cycle_start, cycle_end=cycle_end, method=cycle_method,
+        )
+        block = {"steady": ste, "annual": annual}
+        if ste.get("available"):
+            cyc_pe = calc_cycle_pe(industry=None, user_pe=cycle_pe)
+            band = steady_valuation_band(ste, cyc_pe)
+            block["cycle_pe"] = cyc_pe
+            block["band"] = band
+            # 当期市值 vs 稳态估值对照（海力士式"周期高点低 PE 陷阱"识别）
+            # steady_earnings 为全公司净利（元）× PE → 稳态市值（元），转亿元对照。
+            if result.total_mv_yi and band:
+                block["mv_vs_steady"] = {
+                    "total_mv_yi": result.total_mv_yi,
+                    "steady_mv_low_yi": round(band["low"] / 1e8, 2),
+                    "steady_mv_mid_yi": round(band["mid"] / 1e8, 2),
+                    "steady_mv_high_yi": round(band["high"] / 1e8, 2),
+                }
+        result.steady = block
+
+    # ---- Step 10 (R3): EV/EBITDA 桥接（value --ev-ebitda）----
+    if ev_ebitda:
+        # fina_indicator.ebitda 为累计 YTD 口径，仅年报期（1231）为全年数；
+        # 必须取年报期，无年报期时明确降级（_latest_annual_ebitda 返回口径说明）
+        ebitda_v, ebitda_period, ebitda_note = _latest_annual_ebitda(fin_rows)
+        if ebitda_v is None:
+            # R12b 同型兜底：fina_indicator 2000 分档过滤 ebitda → income 表补齐
+            inc_ebitda, inc_period = _latest_annual_ebitda_from_income(ts, ts_code)
+            if inc_ebitda is not None:
+                ebitda_v, ebitda_period = inc_ebitda, inc_period
+                ebitda_note = (
+                    f"EBITDA 取自 income 表（fina_indicator 积分过滤兜底），"
+                    f"报告期 {inc_period}，年报口径"
+                )
+        cash = st_loan = lt_loan = bond_payable = None
+        try:
+            bs_df = ts.query(
+                "balancesheet", ts_code=ts_code,
+                start_date=shanghai_days_ago(2 * 365), end_date=shanghai_today(),
+                fields="end_date,money_cap,short_loan,long_loan,bond_payable",
+            )
+            if bs_df is not None and not (hasattr(bs_df, "empty") and bs_df.empty):
+                bs_rows = bs_df.to_dict(orient="records") if hasattr(bs_df, "to_dict") else list(bs_df)
+                latest = None
+                for r in sorted(bs_rows, key=lambda x: str(x.get("end_date", ""))):
+                    latest = r
+                if latest:
+                    cash = safe_float(latest.get("money_cap"))
+                    st_loan = safe_float(latest.get("short_loan"))
+                    lt_loan = safe_float(latest.get("long_loan"))
+                    bond_payable = safe_float(latest.get("bond_payable"))
+        except Exception:
+            logger.warning("Tushare balancesheet 查询失败（R3 EV 桥接）", exc_info=True)
+        ev_block = calc_ev_ebitda(
+            total_mv_yi=result.total_mv_yi,
+            cash=cash, st_loan=st_loan, lt_loan=lt_loan, bond_payable=bond_payable,
+            ebitda=ebitda_v, ebitda_period=ebitda_period, industry=ev_ebitda_industry,
+        )
+        if ebitda_note:
+            ev_block["ebitda_note"] = ebitda_note
+        # 私有化检验（研究问题，非结论）：市值 / 稳态盈利 → 回本年限
+        ste = (result.steady or {}).get("steady")
+        if (ev_block.get("available") and ste and ste.get("available")
+                and result.total_mv_yi and ste.get("steady_earnings", 0) > 0):
+            payback = result.total_mv_yi / (ste["steady_earnings"] / 1e8)
+            ev_block["takeover_payback_years"] = round(payback, 1)
+            ev_block["takeover_note"] = (
+                "研究问题（非结论）：在稳态盈利假设下当前市值的回本年限；"
+                "不构成买入/目标价判断")
+        result.ev_ebitda = ev_block
 
     return result
 
@@ -1002,6 +1508,8 @@ def format_output(result: ValuationResult) -> str:
         if result.price and ttm['ttm_eps'] > 0:
             current_pe_calc = result.price / ttm['ttm_eps']
             lines.append(f"  TTM PE (实时)      {current_pe_calc:.1f}x (= {result.price:.2f} / {ttm['ttm_eps']:.4f})")
+        if ttm.get("stale"):
+            lines.append(f"  ⚠️ 陈旧标注        {ttm.get('stale_note', 'TTM 非最新期（缺季断档回退）')}")
         lines.append(f"  计算方法           {ttm.get('method', '')}")
         lines.append(f"  计算范围           {ttm.get('n_quarters', '?')} 个单季（累计→差→求和）")
         if ttm.get("quarterly_eps"):
@@ -1107,6 +1615,19 @@ def format_output(result: ValuationResult) -> str:
     else:
         lines.append(f"  计算不可得 ({ig.get('error', '')})")
 
+    # ---- R8: 机会成本行（估值段落末尾）----
+    oc = result.opportunity_cost or {}
+    if oc.get("available"):
+        lines.append("")
+        lines.append(
+            f"  机会成本          盈利收益率 E/P = {oc['earnings_yield_pct']:.2f}%"
+            f" vs 10Y 国债 {oc['rf_10y_pct']:.2f}%"
+            f" → 利差 (E/P−10Y) = {oc['ey_minus_10y_pp']:.2f}pp"
+        )
+    elif oc:
+        lines.append("")
+        lines.append(f"  机会成本          不可得（{oc.get('reason', 'PE/Rf 不可得')}）")
+
     # ==== 5. ROE-PB 匹配 ====
     lines.append("")
     lines.append("━" * 60)
@@ -1151,13 +1672,16 @@ def format_output(result: ValuationResult) -> str:
             m = cfg["methods"]
             lines.append(f"  ┌─ {cfg['label']}情景（概率 {cfg['probability']}）")
             lines.append(f"  │  假设前瞻 EPS: {cfg['eps_forward']:.4f} 元/股")
-            lines.append(f"  │  PE 法 ({m['pe_multiple']:.1f}x):         {m['price_pe']:.2f} 元")
+            pe_price_s = (f"{m['price_pe']:.2f} 元" if m["price_pe"] is not None
+                          else "N/A (亏损期)")
+            lines.append(f"  │  PE 法 ({m['pe_multiple']:.1f}x):         {pe_price_s}")
             lines.append(f"  │  PB 法 ({m['pb_multiple']:.2f}x):         {m['price_pb']:.2f} 元")
             pey = m.get("price_earnings_yield", "∞")
             if isinstance(pey, (int, float)) and pey < 99999:
                 lines.append(f"  │  盈利收益法 (PE={m.get('fair_pe_ey', '?')}x): {pey:.2f} 元")
             else:
-                lines.append(f"  │  盈利收益法: N/A (g≥r)")
+                why = "亏损期" if m["price_pe"] is None else "g≥r"
+                lines.append(f"  │  盈利收益法: N/A ({why})")
             prices_valid = [
                 p for p in [m["price_pe"], m["price_pb"], pey]
                 if isinstance(p, (int, float)) and p < 99999

@@ -95,6 +95,17 @@ def _merge_income_into_financials(
                 val = inc.get(key)
                 if val is not None:
                     merged[key] = val
+            # R12b: revenue/net_profit 兜底 — fina_indicator 的这两个字段可能被
+            # Tushare 积分档过滤（实测 2000 分档返回 None），由 income 表补齐。
+            # 修复现象：业绩全景表营收/净利润列长期为 "-"（宜安 300328 实测）。
+            if merged.get("revenue") is None:
+                rev = inc.get("revenue") or inc.get("total_revenue")
+                if rev is not None:
+                    merged["revenue"] = rev
+            if merged.get("net_profit") is None:
+                np_attr = inc.get("n_income_attr_p")
+                if np_attr is not None:
+                    merged["net_profit"] = np_attr
             # 别名映射（与计划一致）
             tax = inc.get("income_tax")
             if tax is not None:
@@ -154,7 +165,9 @@ def _merge_balancesheet_into_financials(
 def _q_tushare_financials(symbol: str) -> list[dict] | None:
     config, tc = _require_tushare()
     ts = _ts_code(symbol)
-    lookback = _days_ago(730)
+    # R1 验收修正（C12）：730 自然日仅约 2 个年报期，classify 需 ≥3 个年报 →
+    # 扩窗至 1460 自然日（4 年），R1 收益驱动假设在实时路径可渲染
+    lookback = _days_ago(1460)
     end = _today()
     df = tc.query(
         "fina_indicator", ts_code=ts,
@@ -182,7 +195,8 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
                       fields=(
                           "ts_code,end_date,ebit,ebitda,fin_exp,income_tax,"
                           "sell_exp,admin_exp,invest_income,"
-                          "total_profit,n_income_attr_p"
+                          "total_profit,n_income_attr_p,"
+                          "revenue,total_revenue,operate_profit"
                       ),
                       start_date=lookback, end_date=end)
     if inc_df is not None and not inc_df.empty:
@@ -387,7 +401,7 @@ def _q_akshare_financials(symbol: str) -> list[dict] | None:
 
 
 def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
-    """akshare K线来源（东方财富 push2 API）。"""
+    """akshare K线来源（东方财富 push2 API）。R12h：指数退避重试（1s→2s→4s，max 3）。"""
     with akshare_direct_session():
         import akshare as ak
         sd = start_date or _days_ago(365)
@@ -395,12 +409,15 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
         sd_fmt = _to_iso_date(sd)
         ed_fmt = _to_iso_date(ed)
         try:
-            result = ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                        period="daily",
-                                        start_date=sd_fmt,
-                                        end_date=ed_fmt,
-                                        adjust="qfq",  # 前复权：统一复权语义
-                                        timeout=10)
+            def _fetch() -> Any:
+                return ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
+                                          period="daily",
+                                          start_date=sd_fmt,
+                                          end_date=ed_fmt,
+                                          adjust="qfq",  # 前复权：统一复权语义
+                                          timeout=10)
+            # deadline 30s：与 timeout=10 × 3 次退避预算匹配，超时后不再后台重试
+            result = em_request_with_retry(_fetch, deadline=time.monotonic() + 30)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:
@@ -411,10 +428,15 @@ def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> l
 
 
 def _q_akshare_northbound(symbol: str) -> list[dict] | None:
+    """akshare 北向资金（东方财富）。R12h：与 kline 路径同型指数退避重试（1s→2s→4s）。"""
     with akshare_direct_session():
         import akshare as ak
         try:
-            result = ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
+            def _fetch() -> Any:
+                return ak.stock_hsgt_individual_em(symbol=symbol.strip().zfill(6))
+            # akshare 该接口无 timeout 参数（依赖 socket 默认超时）；deadline
+            # 30s 确保超时后后台 daemon 线程不再发起重试
+            result = em_request_with_retry(_fetch, deadline=time.monotonic() + 30)
             if result is not None and hasattr(result, "to_dict"):
                 records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
                 if records:
@@ -733,12 +755,14 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
                 row = rs.get_row_data()
                 rows.append({
                     "trade_date": row[0].replace("-", ""),
-                    "open": float(row[1]) if row[1] else None,
-                    "high": float(row[2]) if row[2] else None,
-                    "low": float(row[3]) if row[3] else None,
-                    "close": float(row[4]) if row[4] else None,
-                    "vol": float(row[5]) if row[5] else 0,
-                    "amount": float(row[6]) if row[6] else 0,
+                    # safe_float：baostock 空字段返回字符串 "nan"（truthy），
+                    # 裸 float() 会穿透 NaN 污染下游（gap-scan 38a7e1e 同型先例）
+                    "open": safe_float(row[1]),
+                    "high": safe_float(row[2]),
+                    "low": safe_float(row[3]),
+                    "close": safe_float(row[4]),
+                    "vol": safe_float(row[5]) or 0,
+                    "amount": safe_float(row[6]) or 0,
                 })
             return rows if rows else None
         except Exception as e:
@@ -820,8 +844,24 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     return rows if rows else None
 
 
+def _is_tencent_unsupported(symbol: str) -> bool:
+    """北交所代码（4/8/920 前缀）→ 腾讯 qt.gtimg.cn 行情无覆盖。
+
+    与 codes.exchange_code 的北交所规则一致（4xxxxx/8xxxxx 老三板、920xxx
+    北交所新股）。此前市场启发式 'sh' if startswith(("6","9")) 会把 920xxx
+    路由到 sh920xxx（请求不存在）、把 8xxxxx 路由到 sz8xxxxx（可能命中旧
+    三板而返回**别家公司**的报价）——误路由数据比缺失数据危害更大，明确
+    跳过并标注不可得。
+    """
+    s = str(symbol or "").strip().split(".")[0]
+    return s.startswith(("4", "8", "920"))
+
+
 def _q_tencent_quote(symbol: str) -> dict | None:
-    """腾讯行情。"""
+    """腾讯行情。北交所（4/8/920 前缀）腾讯无覆盖 → 不请求、标注不可得。"""
+    if _is_tencent_unsupported(symbol):
+        logger.warning("tencent quote: 北交所代码 %s 腾讯行情无覆盖，跳过（不误路由）", symbol)
+        return None
     _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
 
     def _parse_tencent_float(val: str | None) -> float | None:
@@ -863,6 +903,8 @@ def _qp_akshare(name: str, symbol: str, **kw) -> str:
 
 
 def _qp_tencent(symbol: str) -> str:
+    if _is_tencent_unsupported(symbol):
+        return "qt.gtimg.cn: 北交所无覆盖（不请求）"
     market = "sh" if symbol.startswith(("6", "9")) else "sz"
     return f"qt.gtimg.cn/q={market}{symbol}"
 

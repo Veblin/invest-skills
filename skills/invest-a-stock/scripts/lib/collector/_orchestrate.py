@@ -2,6 +2,7 @@
 from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
 
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
@@ -28,11 +29,18 @@ def _collect_dimension(
     query_params: dict[str, str] | Callable[[list], dict[str, str]] | None = None,
     postprocess: Callable[[dict, list], dict] | None = None,
     empty_result: dict | None = None,
+    cascade: bool = False,
+    cascade_always: set[str] | None = None,
 ) -> dict:
-    """并行采集样板：tasks → _run_sources_parallel → annotate → legacy → postprocess。"""
+    """采集样板（R12h：cascade=True 时首选源单发、失败按序降级；L2 维度保持并行双源先到先用）。
+
+    tasks → _run_sources_parallel | _run_sources_cascade → annotate → legacy → postprocess。
+    cascade_always：cascade 模式下不随降级链跳过的源名集合（如 quote 的腾讯实时快照）。
+    """
     if not tasks and empty_result is not None:
         return empty_result
-    results = _run_sources_parallel(tasks, dimension)
+    results = (_run_sources_cascade(tasks, dimension, always_attempt=cascade_always)
+               if cascade else _run_sources_parallel(tasks, dimension))
     if query_params is not None:
         qp = query_params(results) if callable(query_params) else query_params
         _annotate_query_params({r.source: r for r in results}, qp)
@@ -41,7 +49,7 @@ def _collect_dimension(
 
 
 def collect_basic_info(symbol: str) -> dict:
-    """基本信息。并行：Tushare + akshare。"""
+    """基本信息。cascade 首选单发（R12h）：Tushare 失败 → akshare 按序降级。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.stock_basic", lambda: _q_tushare_basic(symbol)))
@@ -54,11 +62,13 @@ def collect_basic_info(symbol: str) -> dict:
             "tushare.stock_basic": _qp_tushare("stock_basic", symbol),
             "akshare.stock_individual_info_em": _qp_akshare("stock_individual_info_em", symbol),
         },
+        # R12h: 非 L2 维度首选源单发（tushare 失败 → akshare 降级）
+        cascade=True,
     )
 
 
 def collect_financials(symbol: str) -> dict:
-    """财务报告。并行：Tushare + akshare。"""
+    """财务报告。并行双源（L2 保持 _run_sources_parallel）：Tushare + akshare 先到先用。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.fina_indicator", lambda: _q_tushare_financials(symbol)))
@@ -79,7 +89,7 @@ def collect_financials(symbol: str) -> dict:
         query_params={
             "tushare.fina_indicator": _qp_tushare(
                 "fina_indicator", symbol,
-                start_date=_days_ago(730), end_date=_today()),
+                start_date=_days_ago(1460), end_date=_today()),  # ≥3 年报（R1 需）
             "akshare.stock_financial_abstract_ths": _qp_akshare(
                 "stock_financial_abstract_ths", symbol, indicator="按报告期"),
         },
@@ -102,6 +112,7 @@ def collect_shareholders(symbol: str) -> dict:
                 "top10_floatholders", symbol, period=_latest_quarter_end()),
             "akshare.stock_gdfx_top_10_em": _qp_akshare("stock_gdfx_top_10_em", symbol),
         },
+        cascade=True,  # R12h: tushare 首选，失败 → akshare
     )
 
 
@@ -116,9 +127,12 @@ def _apply_qfq_with_newest_raw_fallback(
     则最新日按 raw 价格原样保留。
 
     近似说明：最新日在自身锚定下 qfq==raw；若当日恰为除权日，锚点由 D
-    平移至 D-1，raw 值与真 qfq 值相差 f_D/f_{D-1} 量级（小近似，除权日
-    罕见且因子盘后即发布）。重试仍失败（因子整体缺失/中间日缺失）→ 返回
-    None，调用方沿用 raw 整串回退。
+    平移至 D-1，raw 值与真 qfq 值相差 f_D/f_{D-1} 量级——D-1(qfq) → D(raw)
+    边界会出现假价格跳变（如 10% 分红看似跌 10%）。因此 fallback 路径把
+    最新日标记 ``has_qfq_gap: True``：该行是 raw 而非与历史同标度的 qfq，
+    需要连续性的消费者（MA20 偏离、10 日趋势等）应排除/跳过标记行，不得
+    让假跳变进入 data[-1] 的连续性计算。重试仍失败（因子整体缺失/中间日
+    缺失）→ 返回 None，调用方沿用 raw 整串回退。
     """
     adjusted = _apply_qfq(rows, factors)
     if adjusted is not None:
@@ -132,7 +146,12 @@ def _apply_qfq_with_newest_raw_fallback(
     adjusted_rest = _apply_qfq(rest, factors)
     if adjusted_rest is None:
         return None
-    newest_rows = [r for r in rows if str(r.get("trade_date") or "") == newest_td]
+    # 最新日 raw 与历史 qfq 段不同标度：若当日为除权日，D-1(qfq)→D(raw) 边界
+    # 产生假跳变。标记 has_qfq_gap 而非静默混入，让连续性消费者显式排除。
+    newest_rows = [
+        dict(r, has_qfq_gap=True)
+        for r in rows if str(r.get("trade_date") or "") == newest_td
+    ]
     return adjusted_rest + newest_rows
 
 
@@ -164,15 +183,37 @@ def _quote_tushare_rows(symbol: str) -> list[dict] | None:
 
 
 def collect_quote(symbol: str) -> dict:
-    """实时行情。并行：Tushare + akshare + 腾讯。"""
+    """实时行情。R12h：Tushare 首选单发 → akshare（L3 行情类，EM 最后）；腾讯实时快照始终并行尝试。
+
+    腾讯实时快照（change_pct/turnover_rate/pe_ratio/total_mv）是 quote 维度最关键的
+    实时字段，不依赖 tushare 成功：无论链内是否已成功都独立尝试（失败不影响 tushare
+    结果）；成功后实时字段并入维度数据（主数据为 K 线 list 时 → 合并为 dict，K 线保留
+    在 kline 字段），tushare 健康时报告不再丢失实时涨跌/换手/市值。
+    """
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         # 统一前复权语义（与 akshare qfq 对齐，跨源校验不再因 raw/qfq 错配产生 divergence 噪音）
         tasks.append(("tushare.daily", lambda: _quote_tushare_rows(symbol)))
+    tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_zh_a_hist",
                       lambda: _q_akshare_kline(symbol, start_date=_days_ago(10), end_date=_today())))
-    tasks.append(("tencent_finance", lambda: _q_tencent_quote(symbol)))
+
+    def _merge_realtime(legacy: dict, results: list) -> dict:
+        """腾讯实时快照并入维度主数据（仅当快照含有效字段，全空快照不覆盖 K 线）。"""
+        tencent = next(
+            (r for r in results if r.source == "tencent_finance"), None)
+        if tencent is None or not isinstance(tencent.data, dict):
+            return legacy
+        if not any(v is not None for v in tencent.data.values()):
+            return legacy  # 休市/停牌全空快照：保留主数据原状
+        data = legacy.get("data")
+        if isinstance(data, list):
+            merged = dict(tencent.data)
+            merged["kline"] = data  # 保留 10 日 K 线（消费方按 dict 读实时字段）
+            legacy["data"] = merged
+        return legacy
+
     return _collect_dimension(
         "quote", tasks,
         query_params={
@@ -184,6 +225,9 @@ def collect_quote(symbol: str) -> dict:
                 start_date=_days_ago(10), end_date=_today()),
             "tencent_finance": _qp_tencent(symbol),
         },
+        cascade=True,           # kline 冗余链：tushare → akshare(EM 最后)
+        cascade_always={"tencent_finance"},  # 实时快照始终并行尝试
+        postprocess=_merge_realtime,
     )
 
 
@@ -203,6 +247,7 @@ def collect_northbound(symbol: str) -> dict:
             "akshare.stock_hsgt_individual_em": _qp_akshare(
                 "stock_hsgt_individual_em", symbol),
         },
+        cascade=True,  # R12h: tushare 首选，失败 → akshare
     )
 
 
@@ -230,19 +275,20 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
                 qfq: bool = True) -> list | None:
         return _kline_cache.load_or_fetch(symbol, source, sd, ed, fetch, qfq=qfq)
 
+    # R12h（L3 行情类：tushare → baostock → 腾讯类 → EM 最后）——cascade 首选源单发
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
         tasks.append(("tushare.daily", lambda: _cached("tushare.daily",
                       lambda: _q_tushare_daily_qfq(symbol, start_date=sd, end_date=ed))))
-    if env.is_akshare_available() and akshare_push2_available():
-        tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
-                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
     if env.baostock_kline_enabled():
         tasks.append(("baostock.kline", lambda: _cached("baostock.kline",
                       lambda: _q_baostock_kline(symbol, start_date=sd, end_date=ed))))
     if env.tickflow_kline_enabled():
         tasks.append(("tickflow.kline", lambda: _cached("tickflow.kline",
                       lambda: _q_tickflow_kline(symbol, start_date=sd, end_date=ed))))
+    if env.is_akshare_available() and akshare_push2_available():
+        tasks.append(("akshare.stock_zh_a_hist", lambda: _cached("akshare.stock_zh_a_hist",
+                      lambda: _q_akshare_kline(symbol, start_date=sd, end_date=ed))))
 
     def _kline_qp(_results: list) -> dict[str, str]:
         qp_map: dict[str, str] = {
@@ -258,7 +304,7 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
             qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
         return qp_map
 
-    return _collect_dimension("kline", tasks, query_params=_kline_qp)
+    return _collect_dimension("kline", tasks, query_params=_kline_qp, cascade=True)
 
 
 # ---- 估值维度 ----
@@ -268,13 +314,26 @@ def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
 
     API: pro.daily_basic(ts_code, start_date, end_date, fields=...)
     配额: 每股 1 次调用。
+
+    归一化（跨源校验 C5 缺陷修复）：
+    - 单位：total_mv 原始为万元 → 亿元（与腾讯快照 total_mv 亿元口径一致；
+      此前无换算 → 跨源校验恒差 ~200%，每份报告误标 divergence）。
+    - 行序：Tushare 返回最新在前（降序）→ 显式按 trade_date 升序，
+      data[-1] = 最新（共享 data[-1]-is-newest 约定，见 _quote_tushare_rows）。
     """
     config, tc = _require_tushare()
     df = tc.query("daily_basic", ts_code=_ts_code(symbol),
                   fields="trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,total_mv",
                   start_date=_days_ago(1825), end_date=_today())
     if df is not None and not df.empty:
-        return df.to_dict("records")
+        records = df.to_dict("records")
+        for rec in records:
+            mv = safe_float(rec.get("total_mv"))
+            if mv is not None:
+                rec["total_mv"] = mv / 10000.0  # 万元 → 亿元
+        from lib.technical import sort_kline_asc
+
+        return sort_kline_asc(records)
     return None
 
 
@@ -746,6 +805,7 @@ def collect_industry(symbol: str) -> dict:
 
     return _collect_dimension(
         dim_val, tasks, empty_result=empty, postprocess=_merge_industry,
+        # 注：本维度两个任务为互补数据（板块行情 + 行业 PE），非冗余备份——保持并行
     )
 
 
@@ -947,26 +1007,28 @@ def _run_with_timeout(fn: Callable[[], Any], timeout_sec: float, label: str) -> 
     用于 cninfo 全市场扫描等慢接口：超时后立即返回，挂起线程在解释器
     退出时被杀（边界由 env.configure_socket_timeout 兜底）。
     """
-    box: dict[str, Any] = {"result": None, "error": None}
-    box["done"] = threading.Event()
-
-    def _target() -> None:
-        try:
-            box["result"] = fn()
-        except Exception as exc:
-            box["error"] = exc
-        finally:
-            box["done"].set()
-
-    t = threading.Thread(target=_target, name=f"timeout:{label}", daemon=True)
-    t.start()
-    if not box["done"].wait(timeout=timeout_sec):
-        logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+    data, err = _run_in_thread(fn, timeout_sec, label)
+    if err is not None:
+        if isinstance(err, TimeoutError):
+            logger.warning("%s timed out after %.0fs, skipping", label, timeout_sec)
+        else:
+            logger.warning("%s failed: %s", label, err)
         return None
-    if box["error"] is not None:
-        logger.warning("%s failed: %s", label, box["error"])
-        return None
-    return box["result"]
+    return data
+
+
+# run 级缓存：cninfo 高管增减持是全市场接口（每次「增持/减持」各
+# ~9500/17300 行、单方向超时 45s），此前每符号重取 —— N 标的
+# watchlist/compare/portfolio 最多 ~7.5 分钟。缓存原始 DataFrame 按方向
+# 存一份，同 run（同日）内所有 symbol 复用；跨自然日自动失效重建。
+_cninfo_hold_cache: dict[str, object] = {}  # {direction: df|None}
+_cninfo_hold_cache_day: str = ""            # 缓存所属日期 YYYY-MM-DD
+
+
+def _cninfo_hold_cache_today() -> str:
+    # 上海时区（_today = shanghai_today，全模块统一口径）——date.today() 是
+    # 本机时区，非 UTC+8 主机上缓存键错位会跨日误复用（review #14 第二轮）
+    return _today()
 
 
 def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
@@ -980,46 +1042,68 @@ def _q_akshare_management_hold(symbol: str) -> list[dict] | None:
         return None
     import akshare as ak
 
+    global _cninfo_hold_cache_day
+    # 按日失效：跨日清空重建，同 run（同日）内只取一次全市场数据
+    day = _cninfo_hold_cache_today()
+    if _cninfo_hold_cache_day != day:
+        _cninfo_hold_cache.clear()
+        _cninfo_hold_cache_day = day
+
     sym = symbol.strip().zfill(6)
     records: list[dict] = []
     timeout_sec = float(env.CNINFO_HOLDER_TIMEOUT_SEC)
 
-    with akshare_direct_session():
-        for direction in ("增持", "减持"):
-            df = _run_with_timeout(
-                lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
-                timeout_sec,
-                f"akshare cninfo({direction})",
-            )
-            if df is None or getattr(df, "empty", True):
-                continue
-            # 过滤当前标的
-            code_col = "证券代码" if "证券代码" in df.columns else (
-                "股票代码" if "股票代码" in df.columns else None)
-            if code_col is None:
-                logger.warning(
-                    "akshare cninfo(%s): missing symbol column (%s), skip",
-                    direction, list(df.columns),
+    # 仅拉取未缓存的方向（缓存命中不再请求网络，也不再进入东财限流闸口）
+    missing = [d for d in ("增持", "减持") if d not in _cninfo_hold_cache]
+    if missing:
+        with akshare_direct_session():
+            for direction in missing:
+                df = _run_with_timeout(
+                    lambda d=direction: ak.stock_hold_management_detail_cninfo(symbol=d),
+                    timeout_sec,
+                    f"akshare cninfo({direction})",
                 )
-                continue
-            df = df[df[code_col].astype(str).str.contains(sym, na=False)]
-            if df.empty:
-                continue
-            for row in df.to_dict("records"):
-                change_vol_raw = _first_present(row, "变动数量", "变动股数")
-                parsed_vol = _parse_holder_change_vol(change_vol_raw)
-                records.append({
-                    "ann_date": _norm_date(
-                        row.get("公告日期") or row.get("变动日期") or ""),
-                    "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
-                    "position": row.get("董监高职务") or row.get("职务") or "",
-                    "direction": direction,
-                    "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
-                    "change_vol_raw": change_vol_raw,
-                    "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
-                    "reason": row.get("持股变动原因") or row.get("变动原因") or "",
-                    "source": "akshare cninfo",
-                })
+                if df is None:
+                    # 超时/异常不落缓存——否则整个 run 其余 symbol 都复用
+                    # None（该方向数据全缺失且不重试，review #14 第二轮）
+                    logger.warning(
+                        "akshare cninfo(%s) 超时/失败，本 symbol 跳过，"
+                        "后续 symbol 将独立重试", direction,
+                    )
+                    continue
+                _cninfo_hold_cache[direction] = df
+
+    for direction in ("增持", "减持"):
+        df = _cninfo_hold_cache.get(direction)
+        if df is None or getattr(df, "empty", True):
+            continue
+        # 过滤当前标的
+        code_col = "证券代码" if "证券代码" in df.columns else (
+            "股票代码" if "股票代码" in df.columns else None)
+        if code_col is None:
+            logger.warning(
+                "akshare cninfo(%s): missing symbol column (%s), skip",
+                direction, list(df.columns),
+            )
+            continue
+        df = df[df[code_col].astype(str).str.contains(sym, na=False)]
+        if df.empty:
+            continue
+        for row in df.to_dict("records"):
+            change_vol_raw = _first_present(row, "变动数量", "变动股数")
+            parsed_vol = _parse_holder_change_vol(change_vol_raw)
+            records.append({
+                "ann_date": _norm_date(
+                    row.get("公告日期") or row.get("变动日期") or ""),
+                "holder_name": row.get("董监高姓名") or row.get("高管姓名") or row.get("变动人") or "",
+                "position": row.get("董监高职务") or row.get("职务") or "",
+                "direction": direction,
+                "change_vol": parsed_vol if parsed_vol is not None else change_vol_raw,
+                "change_vol_raw": change_vol_raw,
+                "avg_price": _holder_avg_price(row, "成交均价", "交易均价"),
+                "reason": row.get("持股变动原因") or row.get("变动原因") or "",
+                "source": "akshare cninfo",
+            })
     return records or None
 
 
@@ -1124,6 +1208,8 @@ def collect_holder_changes(symbol: str) -> dict:
         tasks.append(("akshare.stock_shareholder_change_ths",
                       lambda: _q_akshare_shareholder_change_ths(symbol)))
 
+    # 注：tushare/ths 两源数据合并去重（互补），cninfo 兜底决策依赖双源数据——
+    # 保持并行（R12h 单源化仅适用于冗余同义源，此处不适用）
     results = _run_sources_parallel(tasks, "holder_changes")
 
     # cninfo 源（不可在线程中运行 — 内部使用 JS 引擎，且全市场数据极慢）
@@ -1153,24 +1239,6 @@ def collect_holder_changes(symbol: str) -> dict:
 
 
 # ---- 行业定价采集（P1-2 + P1-3 industry_pricing） ----
-
-def _calc_futures_trend(daily_df, days: int = 30) -> str:
-    """从 futures_spot_price_daily 的 DataFrame 计算近 N 日趋势（v0.1.8 扩展用）。"""
-    if daily_df is None or daily_df.empty:
-        return "数据不足"
-    tail = daily_df.tail(days)
-    prices = tail.get("spot_price") if "spot_price" in tail.columns else tail.get("sp")
-    if prices is None or len(prices) < 5:
-        return "数据不足"
-    try:
-        first = float(prices.iloc[0])
-        last = float(prices.iloc[-1])
-        pct = (last - first) / abs(first) * 100 if abs(first) > 1e-9 else 0
-        arrow = "↗" if pct > 0 else "↘" if pct < 0 else "→"
-        return f"{arrow} {pct:+.1f}%"
-    except (TypeError, ValueError, IndexError):
-        return "数据不足"
-
 
 def _calc_futures_trend_from_spot(spot_old, spot_new, code: str, code_col: str) -> str:
     """对比两日期货现货价，计算近 30 日趋势（2 次 API，不按品种循环）。"""
@@ -1621,16 +1689,6 @@ def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict
     )
     result.setdefault("_meta", {})["news_query_pack_path"] = str(pack_path)
     return news
-
-
-def collect_news_dim(symbol: str, days: int = 7) -> dict[str, Any]:
-    """Standalone news collection for CLI/testing."""
-    basic = collect_basic_info(symbol)
-    name = ""
-    if isinstance(basic.get("data"), dict):
-        name = basic["data"].get("name") or basic["data"].get("股票简称") or ""
-    from ..news_scanner import collect_news
-    return collect_news(symbol, name=name, days=days)
 
 
 # ---- 市场结构采集（v0.1.3 Phase 1） ----
@@ -2097,8 +2155,12 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
         if len(records_ak) < 2:
             return None
 
-        first_a = safe_float(records_ak[0].get("融资余额"))
-        last_a = safe_float(records_ak[-1].get("融资余额"))
+        # 窗口口径与 Tushare 主路径一致：change_pct 取最近 15 个交易日两端，
+        # 而非全历史（约 2 年）首尾——同字段两种窗口语义会让主/降级路径的
+        # 增速不可比（降级路径的增速被 2 年窗口摊薄）。
+        window_ak = records_ak[-15:]
+        first_a = safe_float(window_ak[0].get("融资余额"))
+        last_a = safe_float(window_ak[-1].get("融资余额"))
         if first_a is None or last_a is None or abs(first_a) < 1e-9:
             return None
 
@@ -2107,7 +2169,7 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
             "records": records_ak[-10:],
             "source": "akshare.margin_account",
             "change_pct": change_pct_ak,
-            "note": "全市场汇总，非个股数据；仅供方向性参考",
+            "note": "全市场汇总，非个股数据；15 日窗口（与主路径同口径）；仅供方向性参考",
         }
     except Exception as exc:
         logger.warning("margin akshare fallback failed: %s", exc)
@@ -2307,7 +2369,6 @@ _ETF_300_CODE = "510300.SH"
 _NEW_HIGH_SAMPLE = 30
 _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
-_PCR_MIN_5Y_TRADING_DAYS = 252
 # 5 年 PCR 历史分位：均匀降采样上限，避免逐日 opt_daily 风暴
 _PCR_MAX_DAILY_QUERIES = 80
 
@@ -2440,8 +2501,13 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
         "current_date": current_date,
         "history_days": len(ratios),
-        "partial": len(ratios) < _PCR_MIN_5Y_TRADING_DAYS
-        or raw_days > len(sampled) or stale,
+        # 降采样是设计内的（5 年窗口按 _PCR_MAX_DAILY_QUERIES 均匀采样）：
+        # partial 只在采样本身失败/缺失时置 True —— 实际取得的采样点数少于
+        # 计划点数（len(ratios) < len(sampled)），或最新采样日失败致 current
+        # 回退到旧样本（stale）。此前 raw_days > len(sampled) 在 5 年窗口
+        # （~1220 交易日 vs 上限 80）下恒 True → partial 永久 true → 报告恒
+        # 显示「历史样本不足」警告。
+        "partial": len(ratios) < len(sampled) or stale,
         "sampled": raw_days > len(sampled),
         "sample_points": len(fetch_dates),
         "calendar_days": raw_days,
@@ -2748,7 +2814,11 @@ def _detect_price_shock(symbol: str, kline_data: list) -> dict:
     if not kline_data:
         return {"has_shock": False, "shock_dates": []}
 
-    bars = kline_data[-61:] if len(kline_data) > 1 else kline_data
+    # 显式升序：tushare.daily 主源返回降序（无 pct_chg 字段，靠相邻 close 计算），
+    # 不排序会把 +10% 涨停算成 −10% 跌停（_bar_pct_chg 依赖相邻顺序）
+    from lib.technical import sort_kline_asc
+    sorted_bars = sort_kline_asc(kline_data)
+    bars = sorted_bars[-61:] if len(sorted_bars) > 1 else sorted_bars
     shocks = []
     for i in range(1, len(bars)):
         bar = bars[i]
@@ -2851,7 +2921,11 @@ def _ms_try_fetch(
         else:
             result["availability"][key] = "available"
     except Exception as exc:
-        _ms_set_unavailable(result["availability"], key, str(exc))
+        # 异常仅进日志；availability 用静态描述（str(exc) 会泄漏底层
+        # Python 异常文本到报告「不可得：{reason}」渲染，用户不可读，
+        # 且违反 R12h「不可得 + attempted sources」标注规范）
+        logger.warning("market_structure %s fetch failed: %s", key, exc)
+        _ms_set_unavailable(result["availability"], key, unavailable_msg)
 
 
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import math
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from limit_up_scanner import (
-    filter_stocks,
     format_market_brief,
     format_stock_table,
     quality_filter,
@@ -16,9 +15,7 @@ from limit_up_scanner import (
     _compute_breadth,
     _compute_seal_quality,
     _daily_counts_from_stocks,
-    get_trade_dates,
     _fmt_yi,
-    _fmt_date,
     _empty_breadth,
     _latest_market_cap,
     _normalize_seal_time,
@@ -71,60 +68,6 @@ def _make_result(stocks, trading_days=3, scan_date="20260713"):
 
 # ---- filter_stocks ----
 
-class TestFilterStocks:
-
-    def test_filter_by_min_consecutive(self):
-        s1 = _make_stock("000001", "A", "银行", max_consecutive=1)
-        s2 = _make_stock("000002", "B", "银行", max_consecutive=3)
-        r = _make_result([s1, s2])
-        f = filter_stocks(r, min_consecutive=2)
-        assert len(f["stocks"]) == 1
-        assert f["stocks"][0]["symbol"] == "000002"
-
-    def test_filter_by_sector(self):
-        s1 = _make_stock("000001", "A", "银行")
-        s2 = _make_stock("000002", "B", "半导体")
-        r = _make_result([s1, s2])
-        f = filter_stocks(r, sectors=["半导体"])
-        assert len(f["stocks"]) == 1
-        assert f["stocks"][0]["name"] == "B"
-
-    def test_filter_exclude_delisting(self):
-        s1 = _make_stock("000001", "国华退", "软件")
-        s2 = _make_stock("000002", "正常股", "软件")
-        r = _make_result([s1, s2])
-        f = filter_stocks(r)
-        assert len(f["stocks"]) == 1
-        assert f["stocks"][0]["name"] == "正常股"
-
-    def test_exclude_names_without_tui_keeps_delisting_rule(self):
-        """exclude_names_contain 不含「退」时，退市排除仍生效（加法而非替换）。"""
-        s1 = _make_stock("000001", "国华退", "软件", market_cap=5e10)
-        s2 = _make_stock("000002", "正常", "软件", market_cap=5e10)
-        s3 = _make_stock("000003", "风险股", "软件", market_cap=5e10)
-        r = _make_result([s1, s2, s3])
-        f = filter_stocks(r, exclude_names_contain=["风险"])
-        assert [s["symbol"] for s in f["stocks"]] == ["000002"]
-        assert f["filter_stats"]["filtered_reasons"].get("delisting") == 1
-        assert f["filter_stats"]["filtered_reasons"].get("name_exclude") == 1
-
-    def test_filter_by_market_cap(self):
-        s1 = _make_stock("000001", "小盘", "银行", market_cap=1e9)
-        s2 = _make_stock("000002", "中盘", "银行", market_cap=5e10)
-        r = _make_result([s1, s2])
-        f = filter_stocks(r, min_market_cap=2e10)
-        assert len(f["stocks"]) == 1
-        assert f["stocks"][0]["name"] == "中盘"
-
-    def test_filter_combined(self):
-        s1 = _make_stock("000001", "A", "半导体", max_consecutive=2, market_cap=5e10)
-        s2 = _make_stock("000002", "B", "银行", max_consecutive=1, market_cap=1e9)
-        s3 = _make_stock("000003", "ST退", "半导体", max_consecutive=2)
-        s4 = _make_stock("000004", "C", "半导体", max_consecutive=3, market_cap=3e10)
-        r = _make_result([s1, s2, s3, s4])
-        f = filter_stocks(r, sectors=["半导体"], min_consecutive=2, min_market_cap=2e10)
-        syms = {s["symbol"] for s in f["stocks"]}
-        assert syms == {"000001", "000004"}
 
 
 # ---- quality_filter ----
@@ -181,6 +124,46 @@ class TestQualityFilter:
         f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
         assert len(f["stocks"]) == 1
         assert f["stocks"][0]["symbol"] == "000001"
+
+    def test_float_mcap_unknown_when_constrained(self):
+        """有流通市值门槛但缺数据 → 剔除（缺陷 3：此前缺失会静默跳过门槛）。"""
+        s = _make_stock("000001", "无流通市值", "银行", market_cap=5e10)
+        r = _make_result([s])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert len(f["stocks"]) == 0
+        assert f["filter_stats"]["filtered_reasons"]["float_mcap_unknown"] == 1
+
+    def test_float_mcap_from_latest_appearance(self):
+        """股票级缺市值时回退 latest appearance 的流通市值。"""
+        s = _make_stock("000001", "A", "银行", market_cap=5e10)
+        s["appearances"][0]["float_mkt_cap"] = 30e8
+        r = _make_result([s])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert [x["symbol"] for x in f["stocks"]] == ["000001"]
+
+    def test_float_mcap_zero_means_unknown(self):
+        """0.0 流通市值视为缺失（东方财富缺失字段），有门槛时剔除。"""
+        s = _make_stock("000001", "零市值", "银行", market_cap=5e10, float_mkt_cap=0.0)
+        r = _make_result([s])
+        f = quality_filter(r, min_float_mkt_cap=20e8, min_price=0, exclude_st=False)
+        assert len(f["stocks"]) == 0
+        assert f["filter_stats"]["filtered_reasons"]["float_mcap_unknown"] == 1
+
+    def test_exclude_st_by_name_when_no_tushare(self):
+        """无 Tushare L2（is_st 字段缺失）时 *ST 名称启发式补判（缺陷 2）。"""
+        s1 = _make_stock("000001", "*ST风险", "银行", market_cap=5e10)
+        s2 = _make_stock("000002", "正常", "银行", market_cap=5e10)
+        r = _make_result([s1, s2])
+        f = quality_filter(r, exclude_st=True, min_price=0, min_float_mkt_cap=0)
+        assert [s["symbol"] for s in f["stocks"]] == ["000002"]
+        assert f["filter_stats"]["filtered_reasons"]["exclude_st"] == 1
+
+    def test_exclude_st_respects_explicit_is_st_false(self):
+        """Tushare 明确 is_st=False 时名称启发式不覆盖（仅补缺失）。"""
+        s1 = _make_stock("000001", "ST风险", "银行", market_cap=5e10, is_st=False)
+        r = _make_result([s1])
+        f = quality_filter(r, exclude_st=True, min_price=0, min_float_mkt_cap=0)
+        assert [s["symbol"] for s in f["stocks"]] == ["000001"]
 
     def test_exclude_delisting(self):
         s1 = _make_stock("000001", "国华退", "软件", market_cap=5e10)
@@ -264,16 +247,6 @@ class TestQualityFilter:
         f = quality_filter(r, filter_mode="lightweight")
         assert f["custom_meta"] == {"foo": 1}
 
-    def test_filter_stocks_name_exclude_reason(self):
-        s1 = _make_stock("000001", "正常", "软件", market_cap=5e10)
-        s2 = _make_stock("000002", "风险股", "软件", market_cap=5e10)
-        r = _make_result([s1, s2])
-        f = filter_stocks(r, exclude_names_contain=["退", "风险"])
-        assert len(f["stocks"]) == 1
-        assert f["filter_mode"] == "lightweight"
-        assert f["quality_filter_applied"] is False
-        assert f["filter_stats"]["filtered_reasons"].get("name_exclude") == 1
-        assert f["filter_stats"]["output_count"] == 1
 
 
 # ---- scan_market (mocked) ----
@@ -664,9 +637,6 @@ class TestUtilities:
         assert _fmt_yi(0) == "-"
         assert _fmt_yi(None) == "-"
 
-    def test_fmt_date(self):
-        assert _fmt_date("20260713") == "2026-07-13"
-        assert _fmt_date("abc") == "abc"
 
     def test_empty_breadth(self):
         b = _empty_breadth()
@@ -1021,6 +991,14 @@ class TestTushareEnrichDegradation:
         for d in dates:
             assert len(d) == 8
             assert d.isdigit()
+
+    def test_get_trade_dates_fallback_excludes_weekends(self):
+        """C2: 无 token 兜底只返回交易日——不得含周六/周日（周末当交易日污染广度统计）。"""
+        with patch("tushare_enrich._get_client", return_value=None):
+            dates = get_trade_dates(30)
+        assert len(dates) == 30
+        for d in dates:
+            assert datetime.strptime(d, "%Y%m%d").weekday() < 5, d
 
     def test_enrich_stock_info_no_tushare_token(self):
         """When _get_client returns None, enrich_stock_info returns {}."""

@@ -1,6 +1,9 @@
 """交易日志数据库层。表建在 invest-a-stock 的 research.db 中。
 
 v0.2.1: direction / linked_journal_id / evaluation_json 三字段。
+v0.2.4: attribution 复盘归因字段（环境/能力/运气三分归因）。
+v0.2.4: 时间戳统一 UTC 存储（曾误写上海墙钟，与 schema DEFAULT 混用时区，
+        导致 ORDER BY created_at 排序错误；写入侧一律 datetime('now') UTC）。
 """
 
 from __future__ import annotations
@@ -8,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from pathlib import Path
 
 from _invest_path import ensure_invest_a_scripts_on_path
 
@@ -35,7 +37,7 @@ def _safe_close(c: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """初始化表结构 + v0.2.1 字段迁移。"""
+    """初始化表结构 + v0.2.1 / v0.2.4 字段迁移。"""
     c = _conn()
     try:
         c.execute("PRAGMA journal_mode=WAL")
@@ -70,6 +72,8 @@ def init_db() -> None:
 
     # v0.2.1 migration（幂等）
     _migrate_v021()
+    # v0.2.4 migration（幂等）
+    _migrate_v024()
 
 
 def _migrate_v021() -> None:
@@ -90,6 +94,22 @@ def _migrate_v021() -> None:
         _safe_close(c)
 
 
+def _migrate_v024() -> None:
+    """添加 v0.2.4 字段：attribution（复盘归因：环境/能力/运气三分）。
+
+    幂等：列已存在时 duplicate column 错误静默忽略（与 _migrate_v021 同模式）。
+    """
+    c = _conn()
+    try:
+        try:
+            c.execute("ALTER TABLE trade_journals ADD COLUMN attribution TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+        c.commit()
+    finally:
+        _safe_close(c)
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -101,6 +121,7 @@ _ALLOWED_UPDATE_COLS: frozenset[str] = frozenset({
     "entry_price", "entry_date", "exit_price", "exit_date",
     "actual_result", "wrong_triggered", "lessons", "reviewed",
     "direction", "linked_journal_id", "evaluation_json",
+    "attribution",
 })
 
 
@@ -194,8 +215,8 @@ def save_journal(entry: dict) -> int:
                (symbol, asset_type, driver, hypothesis, wrong_conditions,
                 target_period, target_return, max_loss_amount, position_pct,
                 entry_price, entry_date,
-                direction, linked_journal_id, evaluation_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                direction, linked_journal_id, evaluation_json, attribution)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 symbol,
                 entry.get("asset_type", ""),
@@ -211,6 +232,7 @@ def save_journal(entry: dict) -> int:
                 entry.get("direction", "buy"),
                 link_id,
                 eval_raw,
+                entry.get("attribution", ""),
             ),
         )
         c.commit()

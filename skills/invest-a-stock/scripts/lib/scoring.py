@@ -1,4 +1,4 @@
-"""量化评分与置信度矩阵（v0.1.8 S-1）。
+"""量化评分（v0.1.8 S-1；置信度矩阵已于 v0.2.1 报告精简时移除，见文件内注释）。
 
 学术依据（详见 host-docs/v0.1.8/补充资料.md）：
   - Zha Giedt (2018), *Abacus* 54(4), 457-484 — 收入应计三组件模型（收入质量公开数据代理）
@@ -17,7 +17,7 @@ import statistics
 from datetime import date
 from typing import Any
 
-from lib.financials import find_yoy_row, parse_end_date
+from lib.financials import find_yoy_row, normalize_end_date, parse_end_date
 from lib.nums import coalesce_field
 from lib.technical import sort_kline_asc
 from lib.valuation import _infer_tax_rate
@@ -29,7 +29,6 @@ _field = coalesce_field
 
 _RECENT_MARGIN_PERIODS = 8
 _RECENT_OCF_PERIODS = 4
-_RECENT_ROIC_PERIODS = 6
 
 
 def _sorted_rows(financials: list[dict] | None) -> list[dict]:
@@ -414,28 +413,68 @@ def management_ability_proxy(financials: list[dict], holder_changes: dict) -> di
     }
 
 
+def _period_type_key(row: dict) -> str:
+    """报告期类型键：end_date 的月日（0331/0630/0930/1231）。
+
+    fina_indicator 的损益科目（ebit）为财年累计口径（Q1→H1→3Q→年报 单调累加），
+    同财年内不同期不可比；仅跨年同类型（各年 Q1 / 各年 H1 / 各年 3Q / 各年年报）可比。
+    """
+    norm = normalize_end_date(str(row.get("end_date") or ""))
+    if len(norm) == 8 and norm.isdigit():
+        return norm[4:8]
+    return ""
+
+
+_PERIOD_LABELS = {"0331": "各年一季报", "0630": "各年中报", "0930": "各年三季报", "1231": "各年年报"}
+
+
+def _latest_comparable_series(rows: list[dict], value_fn) -> tuple[list[float], str]:
+    """提取与最新报告期同周期类型（跨年可比口径）的数值序列。
+
+    返回 (series, period_key)；同类型记录不足 3 期 → ([], period_key)，由调用方标不可得。
+    锚定最新报告期（rows[-1]）而非「有指标值的最新行」：最新报告期指标缺失
+    （低积分档过滤 ebit/roe 等字段）时返回空系列，不得静默滑到旧期冒充当前趋势。
+    """
+    if not rows:
+        return [], ""
+    latest_key = _period_type_key(rows[-1])
+    computed = [
+        (_period_type_key(r), v) for r in rows
+        if (v := value_fn(r)) is not None
+    ]
+    # #10：最新报告期无值 → 空系列（不滑期），由调用方标不可得
+    if not any(k == latest_key for k, _ in computed):
+        return [], latest_key
+    series = [v for k, v in computed if k == latest_key]
+    return (series if len(series) >= 3 else []), latest_key
+
+
 def _score_roic_trend(rows: list[dict]) -> tuple[float | None, dict, list[str], str]:
-    series: list[float] = []
-    metric_label = "ROIC"
-    used_sources = ["ebit", "total_assets", "total_cur_liab"]
-    for r in rows[-_RECENT_ROIC_PERIODS:]:
+    """ROIC 近 3 期趋势（25/15/8/5 分）。
+
+    可比口径约束：ebit 为财年累计口径（Q1→H1→3Q→年报 单调累加），直接把同财年
+    最近 3 期累计值相除会构造性递增（ROE 回退同理）。因此仅使用与最新报告期同周期
+    类型的跨年序列（各年 Q1 对比、各年 H1 对比、各年年报对比）；不足 3 期则标不可得。
+    """
+
+    def _roic(r: dict) -> float | None:
         ebit = _field(r, "ebit")
         total_assets = _field(r, "total_assets")
         total_cur_liab = _field(r, "total_cur_liab")
-        if ebit is not None and total_assets is not None and total_cur_liab is not None:
-            denom = total_assets - total_cur_liab
-            if abs(denom) > 1e-9:
-                tax_rate = _infer_tax_rate(r)
-                series.append(ebit * (1 - tax_rate) / denom)
-                continue
-        series.append(None)
-    series = [v for v in series if v is not None]
+        if ebit is None or total_assets is None or total_cur_liab is None:
+            return None
+        denom = total_assets - total_cur_liab
+        if abs(denom) <= 1e-9:
+            return None
+        return ebit * (1 - _infer_tax_rate(r)) / denom
 
-    if len(series) < 3:
-        # 回退到 ROE 代理指标
-        roe_series = [v for v in (_field(r, "roe") for r in rows[-_RECENT_ROIC_PERIODS:]) if v is not None]
-        if len(roe_series) >= 3:
-            series = roe_series
+    series, period_key = _latest_comparable_series(rows, _roic)
+    metric_label = "ROIC"
+    used_sources = ["ebit", "total_assets", "total_cur_liab"]
+    if not series:
+        # 回退到 ROE 代理指标（同样要求跨年同类型可比序列，ROE 同为财年累计口径）
+        series, period_key = _latest_comparable_series(rows, lambda r: _field(r, "roe"))
+        if series:
             metric_label = "代理指标: ROE"
             used_sources = ["roe"]
         else:
@@ -443,19 +482,31 @@ def _score_roic_trend(rows: list[dict]) -> tuple[float | None, dict, list[str], 
                 None,
                 {"score": None, "note": "数据不足，跳过"},
                 [],
-                "roic_trend（ebit/total_assets/total_cur_liab 与 roe 均不足以判断近 3 期趋势）",
+                "roic_trend（ebit 为财年累计口径，需与最新报告期同类型（各年 Q1/H1/3Q/年报）记录 ≥3 期才可比；roe 同理）",
             )
 
+    period_label = _PERIOD_LABELS.get(period_key, f"周期 {period_key or '未知'}")
     last3 = series[-3:]
     if last3[0] < last3[1] < last3[2]:
-        score, note = 25.0, f"近 3 期{metric_label}连续上升"
+        score, note = 25.0, f"近 3 期{metric_label}连续上升（可比口径: {period_label}）"
     elif last3[-1] > last3[-2]:
-        score, note = 15.0, f"近 2 期{metric_label}上升，未满 3 期连续上升条件"
+        score, note = 15.0, f"近 2 期{metric_label}上升，未满 3 期连续上升条件（可比口径: {period_label}）"
     elif last3[-1] == last3[-2] == last3[0]:
-        score, note = 8.0, f"{metric_label}近期持平"
+        score, note = 8.0, f"{metric_label}近期持平（可比口径: {period_label}）"
     else:
-        score, note = 5.0, f"{metric_label}近期未见连续上升趋势"
-    return score, {"metric": metric_label, "series": [round(v, 4) for v in last3], "score": score, "note": note}, used_sources, ""
+        score, note = 5.0, f"{metric_label}近期未见连续上升趋势（可比口径: {period_label}）"
+    return (
+        score,
+        {
+            "metric": metric_label,
+            "period": period_key,
+            "series": [round(v, 4) for v in last3],
+            "score": score,
+            "note": note,
+        },
+        used_sources,
+        "",
+    )
 
 
 def _score_margin_trajectory(rows: list[dict]) -> tuple[float | None, dict, list[str], str]:
@@ -529,60 +580,11 @@ def _score_capex_efficiency(rows: list[dict]) -> tuple[float | None, dict, list[
     return score, {"ratio": round(ratio, 3), "score": score, "note": note}, ["revenue", "cap_ex"], ""
 
 
-# ---- AI 分析置信度矩阵 ----
-
-def _dimension_confidence(collection: dict, key: str, module_label: str) -> dict:
-    dim = collection.get(key) if isinstance(collection, dict) else None
-    if not isinstance(dim, dict):
-        return {
-            "module": module_label, "confidence": "低",
-            "reason": f"{key} 维度数据不可得（未采集或采集结果缺失）",
-        }
-    status = dim.get("status")
-    multi_source = bool((dim.get("_meta") or {}).get("multi_source"))
-    if status == "available" and multi_source:
-        return {"module": module_label, "confidence": "高", "reason": f"{key} 维度数据可得且多源交叉验证"}
-    if status == "available":
-        return {"module": module_label, "confidence": "中", "reason": f"{key} 维度数据可得，单源未交叉验证"}
-    if status == "partial":
-        return {"module": module_label, "confidence": "中", "reason": f"{key} 维度数据部分可得"}
-    return {"module": module_label, "confidence": "低", "reason": f"{key} 维度数据不可得（status={status!r}）"}
-
-
-def confidence_matrix(collection: dict) -> dict:
-    """AI 分析置信度矩阵：8 模块 × 高/中/低，由引擎根据数据可得性自动计算（非 LLM 主观判断）。
-
-    `collection` 为顶层采集结果，键为维度名（如 "financials"/"kline"），
-    值为该维度的 legacy dict（`schema.DimensionResult.to_legacy_dict()` 输出，
-    含 `status` 与 `_meta.multi_source` 字段）。
-
-    "估值判断"固定标注"中/低"、"周期拐点判断"固定标注"低"——这是学术共识（估值依赖
-    主观假设参数、周期拐点具有不可预测性），不由数据完整性决定，即使数据完整也不提升。
-    """
-    collection = collection if isinstance(collection, dict) else {}
-    rows = [
-        _dimension_confidence(collection, "financials", "财务数据分析"),
-        _dimension_confidence(collection, "holder_changes", "股东与内部人行为分析"),
-        _dimension_confidence(collection, "research", "机构预期与研报分析"),
-        _dimension_confidence(collection, "industry", "行业与产业链分析"),
-        _dimension_confidence(collection, "northbound", "资金流向分析"),
-        _dimension_confidence(collection, "kline", "技术走势分析"),
-        {
-            "module": "估值判断",
-            "confidence": "中/低",
-            "reason": "估值依赖增长率/贴现率等假设参数的主观选择，非单纯数据可得性问题，学术共识不给高置信度",
-        },
-        {
-            "module": "周期拐点判断",
-            "confidence": "低",
-            "reason": "周期拐点具有不可预测性（学术共识），无论数据完整度如何均固定为低置信度",
-        },
-    ]
-    insufficient_data = [
-        r["module"] for r in rows if r["confidence"] == "低" and r["module"] != "周期拐点判断"
-    ]
-    return {
-        "rows": rows,
-        "sources": ["collection[dim].status", "collection[dim]._meta.multi_source"],
-        "insufficient_data": insufficient_data,
-    }
+# ---- AI 分析置信度矩阵（已移除，CHANGELOG v0.2.1「报告精简」） ----
+# 原 v0.1.8 A-2 段在报告头部渲染 `scoring.confidence_matrix()` 的
+# 8 模块 × 高/中/低 数据可得性矩阵。v0.2.1 报告精简有意移除该冗余段落
+# （CHANGELOG.md「报告精简：移除报告头部冗余段落：AI 偏见声明、逆向思考、
+# Ichimoku/波动率锥、AI 置信度矩阵」）；模块可用性披露已由报告头部
+# [多源融合] / [证据可信度] 及各分析段 [证据强度] 四维标注取代。
+# 因此 confidence_matrix / _dimension_confidence 属无调用者死代码，
+# 2026-08-06 code-review 确认后删除（不得恢复该段，除非 CHANGELOG 撤销精简决定）。

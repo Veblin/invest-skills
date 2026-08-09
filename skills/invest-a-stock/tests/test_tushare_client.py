@@ -209,3 +209,41 @@ class TestConcurrentRateLimitCounters:
             list(ex.map(_mixed, range(64)))
         assert client._daily_calls == 64
         assert len(client._call_timestamps) == 64
+
+
+class TestTokenResolution:
+    """#15：token 三级降级（显式 → os.environ → .env 文件）。"""
+
+    def test_explicit_token_wins(self, monkeypatch):
+        from lib.tushare_client import TushareClient
+
+        monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+        client = TushareClient(token="b" * 32)
+        assert client._token == "b" * 32
+
+    def test_env_var_used_when_no_explicit_token(self, monkeypatch):
+        from lib.tushare_client import TushareClient
+
+        monkeypatch.setenv("TUSHARE_TOKEN", "c" * 32)
+        client = TushareClient()
+        assert client._token == "c" * 32
+
+    def test_env_file_fallback_when_no_env_var(self, monkeypatch):
+        """.env 文件 token（env.get_config 惰性加载）→ 裸 TushareClient() 不再静默缺 token。"""
+        from lib.tushare_client import TushareClient
+
+        monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+        # D13：patch 目标 = 消费方查找点（__init__ 内 `from lib import env` 经
+        # 包命名空间解析 → patch lib.env.get_config 有效）
+        with patch("lib.env.get_config", return_value={"TUSHARE_TOKEN": "d" * 32}):
+            client = TushareClient()
+        assert client._token == "d" * 32
+
+    def test_no_token_anywhere_stays_none(self, monkeypatch):
+        from lib.tushare_client import TushareClient
+
+        monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+        with patch("lib.env.get_config", return_value={}):
+            client = TushareClient()
+        assert client._token is None
+        assert client.is_available() is False  # 零网络快路径

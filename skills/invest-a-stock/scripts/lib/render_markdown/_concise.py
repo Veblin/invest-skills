@@ -250,16 +250,27 @@ def _has_price_signal(data: dict) -> bool:
 
 
 # --- _is_valuation_extreme ---
-def _is_valuation_extreme(data: dict, percentile: float = 80) -> bool:
-    """检查估值分位是否超过阈值（从 dimensions 读取，与报告其他模块一致）。"""
+def _is_valuation_extreme(
+    data: dict, percentile: float = 80, val_cache: dict | None = None,
+) -> bool:
+    """检查估值分位是否超过阈值（从 dimensions 读取，与报告其他模块一致）。
+
+    val_cache 与 render_report_v3 的缓存共享：增强器条件与风险报告使用同一份
+    val_cache，5 年 PE/PB/PS 分位序列只全量计算一次（此前传临时 dict 永不命中
+    备忘录，full 报告每次渲染全量重算两次）。
+    """
     dims = _index_dims(data)
-    pe_pct, _, _ = _v3_valuation_percentiles(dims, {})
+    pe_pct, _, _ = _v3_valuation_percentiles(dims, val_cache)
     return pe_pct is not None and pe_pct >= percentile
 
 
 # --- setup_default_enhancers ---
-def setup_default_enhancers(data: dict) -> ReportEnhancer:
-    """配置默认增强器集合。"""
+def setup_default_enhancers(data: dict, val_cache: dict | None = None) -> ReportEnhancer:
+    """配置默认增强器集合。
+
+    val_cache 由 render_report_v3 传入（先于增强器执行创建），
+    保证增强器条件与后续风险报告/各 section 共用同一份估值分位缓存。
+    """
     enhancer = ReportEnhancer(data)
 
     enhancer.register(
@@ -270,7 +281,7 @@ def setup_default_enhancers(data: dict) -> ReportEnhancer:
 
     enhancer.register(
         "valuation_high_alert",
-        lambda d: _is_valuation_extreme(d, percentile=80),
+        lambda d: _is_valuation_extreme(d, percentile=80, val_cache=val_cache),
         lambda d: {"triggered": True, "reason": "PE 历史位置≥80%，建议 B 类增强"},
     )
 
@@ -603,11 +614,13 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
 
+    # val_cache 先建：增强器条件 / 风险报告 / 各 section 共用同一缓存，
+    # 5 年 PE/PB/PS 分位序列只全量计算一次（code-review: 临时 dict 永不命中备忘录）
+    val_cache: dict = {}
     # P3-1: 统一增强触发器
-    enhancer = setup_default_enhancers(collection)
+    enhancer = setup_default_enhancers(collection, val_cache)
     collection["_enhancements"] = enhancer.apply()
 
-    val_cache: dict = {}
     risk_data = _v3_build_risk_report(
         collection, dims, market_structure, val_cache=val_cache,
     )
@@ -636,7 +649,10 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _wrap_details(
                 "展开：风险与不确定性",
-                _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
+                _section_risk_uncertainty(
+                    collection, symbol, dims, market_structure, risk_data,
+                    val_cache=val_cache,
+                ),
             ),
             _references_appendix(collection),
             _risk_footer(),
@@ -688,7 +704,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         if _extras:
             parts.append("\n\n".join(_extras))
         parts.extend([
-            _report_toc(),
+            _report_toc(collection),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
             _section_dynamic_drivers(
@@ -724,7 +740,10 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _wrap_details(
                 "展开：风险与不确定性",
-                _section_risk_uncertainty(collection, symbol, dims, market_structure, risk_data),
+                _section_risk_uncertainty(
+                    collection, symbol, dims, market_structure, risk_data,
+                    val_cache=val_cache,
+                ),
             ),
             _section_technical_brief(dims, val_cache=val_cache),
             _section_six_gates_scorecard(dims, collection, val_cache),

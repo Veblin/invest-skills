@@ -20,6 +20,21 @@ from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+def _pe_loss_flag(val_cache: dict | None) -> str:
+    """R12c: PE 亏损期占比 >30% 时标题层强制标注（P0-2 规则）。
+
+    仅在标题（模块 0/1）附加「PE分位失真·仅作位置参考」，提示分位不反映估值贵贱。
+    """
+    if not val_cache:
+        return ""
+    summary = val_cache.get("val_summary") or {}
+    pe = summary.get("pe") or {}
+    if (pe.get("loss_ratio") or 0) > 0.3:
+        return "PE分位失真·仅作位置参考"
+    return ""
+
+
 # --- _v3_law11_trigger_d ---
 def _v3_law11_trigger_d(dims: dict[str, dict]) -> bool:
     """LAW 11 触发源 D：52 周高低区间极端，或价格贴近 MA60 盘整。"""
@@ -367,6 +382,9 @@ def _section_research_question(
     # LAW 17: 构建含触发源数据的标题 + 段首主旨句
     chg_s = f"{chg:+.2f}%" if chg is not None else ""
     pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    loss_flag = _pe_loss_flag(val_cache)
+    if pe_s and loss_flag:
+        pe_s += f"（{loss_flag}）"
     title_parts = [p for p in [chg_s, pe_s] if p]
     title_suffix = " · ".join(title_parts) if title_parts else "核心问题"
     judgment = f"当前{title_suffix}，以下为激活的研究问题与触发源。"
@@ -462,6 +480,9 @@ def _section_snapshot(
     # LAW 17: 构建含数据的标题 + 段首主旨句
     price_s = f"{price}" if price is not None else ""
     pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    loss_flag = _pe_loss_flag(val_cache)
+    if pe_s and loss_flag:
+        pe_s += f"（{loss_flag}）"
     pb_s = f"PB {pb_pct:.1f}% 分位" if pb_pct is not None else ""
     title_parts = [p for p in [price_s, pe_s, pb_s] if p]
     title_suffix = " · ".join(title_parts) if title_parts else "当前状态快照"
@@ -531,7 +552,7 @@ def _section_snapshot(
 
     if key_diff is None:
         key_diff = _load_report_key_diff(symbol, collection)
-    if key_diff and key_diff.get("categories"):
+    if key_diff:  # 有历史快照即显示对比块（无显著变化时显示状态行，diff_key_snapshots 恒返回 old_at/new_at）
         lines.append(_snapshot_diff_block(key_diff))
 
     lines.append("")
@@ -2310,12 +2331,12 @@ def _section_fundamentals_layered(
     rev_yoy: float | None = None
     if rev_cur is not None and rev_prev is not None and rev_prev > 0:
         rev_yoy = (rev_cur - rev_prev) / rev_prev * 100
-    ar_cur = _safe_num(latest_fin.get("accounts_receiv") or latest_fin.get("ar"))
-    ar_prev = _safe_num(prev_fin.get("accounts_receiv") or prev_fin.get("ar"))
+    ar_cur = _fin_field_num(latest_fin, "accounts_receiv", "ar")
+    ar_prev = _fin_field_num(prev_fin, "accounts_receiv", "ar")
     ar_growth: float | None = None
     if ar_cur is not None and ar_prev is not None and ar_prev > 0:
         ar_growth = (ar_cur - ar_prev) / ar_prev * 100
-    inv_cur = _safe_num(latest_fin.get("inventory") or latest_fin.get("inventories"))
+    inv_cur = _fin_field_num(latest_fin, "inventory", "inventories")
     cagr, cagr_years_span = _compute_metric_cagr(fin_list, "revenue")
     np_cagr, np_cagr_years_span = _compute_metric_cagr(fin_list, "net_profit")
     fin_rev_list = [r for r in fin_list if _safe_num(r.get("revenue")) is not None]
@@ -2843,9 +2864,9 @@ def _section_fundamentals_layered(
     # C-② 杜邦拆解 ROE
     lines.append("#### C-② 杜邦拆解 ROE")
     roe_v = _safe_num(latest_fin.get("roe"))
-    npm = _safe_num(latest_fin.get("netprofit_margin") or latest_fin.get("np_margin"))
-    tat = _safe_num(latest_fin.get("asset_turnover") or latest_fin.get("assets_turn"))
-    em = _safe_num(latest_fin.get("equity_multiplier") or latest_fin.get("em"))
+    npm = _fin_field_num(latest_fin, "netprofit_margin", "np_margin")
+    tat = _fin_field_num(latest_fin, "asset_turnover", "assets_turn")
+    em = _fin_field_num(latest_fin, "equity_multiplier", "em")
     # 若杜邦字段不可得，尝试从已有数据计算
     if npm is None and np_cur is not None and rev_cur is not None and rev_cur > 0:
         npm = np_cur / rev_cur * 100
@@ -2893,10 +2914,10 @@ def _section_fundamentals_layered(
     else:
         lines.append("数据不足：[经营现金流或净利润字段不可得，无法计算覆盖比]")
     # 应收增速 vs 营收增速 (CV-2)
-    ar_cur = _safe_num(latest_fin.get("accounts_receiv") or latest_fin.get("ar"))
-    ar_prev = _safe_num(prev_fin.get("accounts_receiv") or prev_fin.get("ar"))
-    inv_cur = _safe_num(latest_fin.get("inventory") or latest_fin.get("inventories"))
-    inv_prev = _safe_num(prev_fin.get("inventory") or prev_fin.get("inventories"))
+    ar_cur = _fin_field_num(latest_fin, "accounts_receiv", "ar")
+    ar_prev = _fin_field_num(prev_fin, "accounts_receiv", "ar")
+    inv_cur = _fin_field_num(latest_fin, "inventory", "inventories")
+    inv_prev = _fin_field_num(prev_fin, "inventory", "inventories")
     rev_growth: float | None = rev_yoy
     ar_growth: float | None = None
     inv_growth: float | None = None
@@ -3315,9 +3336,9 @@ def _section_fundamentals_layered(
 
     # C-② 杜邦拆解 ROE（须净利率+周转+权益乘数）
     _c2_roe = _safe_num(latest_fin.get("roe"))
-    _c2_npm = _safe_num(latest_fin.get("netprofit_margin") or latest_fin.get("np_margin"))
-    _c2_tat = _safe_num(latest_fin.get("asset_turnover") or latest_fin.get("assets_turn"))
-    _c2_em = _safe_num(latest_fin.get("equity_multiplier") or latest_fin.get("em"))
+    _c2_npm = _fin_field_num(latest_fin, "netprofit_margin", "np_margin")
+    _c2_tat = _fin_field_num(latest_fin, "asset_turnover", "assets_turn")
+    _c2_em = _fin_field_num(latest_fin, "equity_multiplier", "em")
     _c2_ok = (
         _c2_roe is not None and _c2_npm is not None
         and _c2_tat is not None and _c2_em is not None
@@ -3329,8 +3350,8 @@ def _section_fundamentals_layered(
     lines.append(f"| C-② | 杜邦拆解ROE | {'✅' if _c2_ok else '❌'} | {_c2_s} |")
 
     # C-③ 现金流覆盖 + 应收/存货交叉验证
-    _c3_ar = _safe_num(latest_fin.get("accounts_receiv") or latest_fin.get("ar"))
-    _c3_inv = _safe_num(latest_fin.get("inventory") or latest_fin.get("inventories"))
+    _c3_ar = _fin_field_num(latest_fin, "accounts_receiv", "ar")
+    _c3_inv = _fin_field_num(latest_fin, "inventory", "inventories")
     _c3_ok = (
         ocf_val is not None and np_v is not None and np_v > 0
         and _c3_ar is not None and _c3_inv is not None
@@ -3407,6 +3428,13 @@ def _section_technical_brief(
 ) -> str:
     lines = ["## 8. 技术指标附录 · 均线/动量/波动率简报", ""]
     lines.append("**结论：** 以下为技术指标摘要，供交叉参考，不构成交易信号。")
+    # R6 学术纪律固定提示行（引擎/模板层，非 AI 撰写——与 SKILL.md:544 文本一致）
+    lines.append(
+        "> 技术指标仅用于描述市场状态（价格与均线位置关系、MACD 方向）与交叉验证"
+        "其他证据，不单独构成结论，也不构成任何操作依据。学术检验"
+        "（Chen, Zhou & Wang 2018, *Physica A*）：沪深 300 期指 279 个技术策略"
+        "计入交易成本后利润被完全消除。"
+    )
     lines.append("")
     pe_table = _pe_band_markdown_table(dims, val_cache)
     if pe_table:
@@ -3436,7 +3464,7 @@ def _section_technical_brief(
 
 
 # --- _report_toc ---
-def _report_toc() -> str:
+def _report_toc(collection: dict[str, Any] | None = None) -> str:
     # LAW 17: 标题动态包含数据，Markdown 锚点不可预测，TOC 仅作视觉目录
     entries = [
         "0. 核心问题与触发源",
@@ -3449,8 +3477,17 @@ def _report_toc() -> str:
         "7. 风险与不确定性",
         "8. 技术指标附录",
         "PE Band（5年轨道）",
-        "引用来源",
     ]
+    # R12g-A 头部区块（brief/concise/full 三模式 engine extras 均渲染）——
+    # 标签与渲染顺序单一来源 _base._R12G_HEADER_SECTIONS，禁止在此手写新增条目。
+    # 「连板结构」为条件渲染（近 5 日 ≥2 涨停触发，见 _limit_streak_section_active），
+    # 未触发时 TOC 不得列出不存在的章节（batch-test P1-3）。
+    collection = collection or {}
+    for label, _fn in _R12G_HEADER_SECTIONS:
+        if label == _LIMIT_STREAK_LABEL and not _limit_streak_section_active(collection):
+            continue
+        entries.append(label)
+    entries.append("引用来源")
     lines = ["## 目录", ""]
     lines.extend(f"- {label}" for label in entries)
     return "\n".join(lines)

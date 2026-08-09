@@ -3,12 +3,15 @@
 journal ETF 评估路径继续 `from etf_data import query_etf_data`；
 实现已迁至 skills/invest-a-etf/scripts/lib/etf_data.py。
 
-使用 importlib 按文件路径加载，避免与本 shim 模块名 ``etf_data`` 冲突。
+加载与 skills/lib/data_bridge._import_etf_attr 统一走
+invest_path.load_invest_a_etf_module()（v0.2.4 起共用同一加载器）：
+按文件路径显式加载 canonical，避免与本 shim 模块名 ``etf_data`` 冲突，
+且不依赖 sys.path 顺序（canonical 在任何 sys.path 布局下解析到同一
+sys.modules 实例）。
 """
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -16,22 +19,9 @@ _skills_lib = Path(__file__).resolve().parents[3] / "lib"
 if str(_skills_lib) not in sys.path:
     sys.path.insert(0, str(_skills_lib))
 
-from invest_path import invest_a_etf_lib_dir  # noqa: E402
+from invest_path import load_invest_a_etf_module  # noqa: E402
 
-_ETF_LIB = invest_a_etf_lib_dir()
-_ETF_LIB_S = str(_ETF_LIB)
-if _ETF_LIB_S not in sys.path:
-    sys.path.insert(0, _ETF_LIB_S)
-
-_spec = importlib.util.spec_from_file_location(
-    "invest_a_etf_etf_data",
-    _ETF_LIB / "etf_data.py",
-)
-if _spec is None or _spec.loader is None:
-    raise ImportError(f"cannot load invest-a-etf etf_data from {_ETF_LIB}")
-_mod = importlib.util.module_from_spec(_spec)
-sys.modules["invest_a_etf_etf_data"] = _mod
-_spec.loader.exec_module(_mod)
+_mod = load_invest_a_etf_module()
 
 CSINDEX_MAP = _mod.CSINDEX_MAP
 ETF_HEDGE_MAP = _mod.ETF_HEDGE_MAP
@@ -44,8 +34,11 @@ rollup_etf_quality_status = _mod.rollup_etf_quality_status
 etf_share_flow = _mod.etf_share_flow
 save_etf_share_snapshot = _mod.save_etf_share_snapshot
 
-# v0.2.3：data_bridge._import_etf_attr 在 journal 上下文解析到本 shim，
-# fetch_* 必须 re-export（否则 data_bridge getter 取不到函数）
+# 完整转发 canonical 导出（含测试辅助 clear_etf_spot_cache 与 fetch_*）——
+# shim 是 journal 上下文里 etf_data 的完整代理：pytest 会话中 journal lib
+# 可能遮蔽 canonical（conftest 顺序依赖），任一 `from etf_data import X`
+# 都必须可用，否则 etf 测试在 etf 目录在前的调用顺序下 collection 失败
+# （review 第三轮 #1，实证复现）。
 fetch_etf_spot_rows = _mod.fetch_etf_spot_rows
 fetch_etf_index_pe = _mod.fetch_etf_index_pe
 fetch_etf_nav = _mod.fetch_etf_nav

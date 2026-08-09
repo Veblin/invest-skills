@@ -15,6 +15,18 @@ def _minimal_with_events_and_cards() -> dict:
     return coll
 
 
+class TestR6AcademicDisciplineLine:
+    """R6 学术纪律补丁：技术指标附录固定提示行（引擎/模板层，验收 grep 断言）。"""
+
+    def test_technical_brief_contains_citation(self):
+        from lib.render_markdown._v3 import _section_technical_brief
+
+        out = _section_technical_brief({})
+        assert "Chen, Zhou & Wang 2018" in out
+        assert "279 个技术策略计入交易成本后利润被完全消除" in out
+        assert "不构成任何操作依据" in out
+
+
 class TestRenderAttachExtrasDedup:
     def test_skips_attach_events_when_events_present(self):
         from lib import render
@@ -27,7 +39,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_not_called()
         mock_cards.assert_not_called()
@@ -49,7 +61,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_not_called()
         mock_cards.assert_not_called()
@@ -67,7 +79,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_called_once()
         mock_cards.assert_called_once()
@@ -84,7 +96,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_called_once()
         mock_cards.assert_called_once()
@@ -102,7 +114,7 @@ class TestRenderAttachExtrasDedup:
             patch("lib.collector.attach_market_structure"),
             patch("lib.collector.attach_phase2_extras"),
         ):
-            render.render(coll, "600176", "compact")
+            render.render(coll, "600176", "compact", attach_extras=True)
 
         mock_attach.assert_called_once()
         mock_cards.assert_called_once()

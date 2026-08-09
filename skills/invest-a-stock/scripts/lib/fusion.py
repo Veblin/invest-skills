@@ -10,10 +10,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .schema import (
-    CROSS_SOURCE_DIFF_THRESHOLD,
+    _CV_L2_FIELDS,
     _extract_scalar,
     relative_diff_pct,
 )
+
+# R12h（决策 C5 影响面修正）：共识带判定不再共享 CROSS_SOURCE_DIFF_THRESHOLD——
+# 该阈值已放宽至 5%（跨源差异标注口径），若共用会把 strong 共识带拉宽至 5%、moderate 至 25%，
+# 击穿 test_fusion.py 存量语义。此处定义自有常量，保持报告「strong ≤1% / moderate ≤5%」语义不变。
+_FUSION_STRONG_MAX = 0.01
+_FUSION_MODERATE_MAX = 0.05
 
 
 RRF_K = 60
@@ -58,9 +64,9 @@ def _source_weight(source_name: str) -> float:
 
 
 def _consensus_from_diff(max_diff: float) -> str:
-    if max_diff <= CROSS_SOURCE_DIFF_THRESHOLD:
+    if max_diff <= _FUSION_STRONG_MAX:
         return "strong"
-    if max_diff <= CROSS_SOURCE_DIFF_THRESHOLD * 5:
+    if max_diff <= _FUSION_MODERATE_MAX:
         return "moderate"
     return "weak"
 
@@ -163,7 +169,14 @@ def fuse_from_source_results(
         for src in dim_result.all_sources:
             if src.data is None:
                 continue
-            v = _extract_scalar(src.data, dim_name)
+            # 融合值口径与跨源差异标注一致（C5）：估值维度用市值键——
+            # _DIM_SCALAR_KEYS 键序让 pe_ttm 先命中，而 _auto_cross_validate
+            # 用 _CV_L2_FIELDS 市值键，同一报告曾出现融合值=PE、差异标注=市值
+            if dim_name == "valuation":
+                v = _extract_scalar(src.data, dim_name,
+                                    keys=_CV_L2_FIELDS["valuation"])
+            else:
+                v = _extract_scalar(src.data, dim_name)
             if v is not None:
                 sources[src.source] = v
         if sources:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .financials import normalize_end_date
 from .industry import get_quality_overrides, get_sector_group
 from .nums import coalesce_field, safe_float
 from .risk_scanner import ocf_np_divergence_flag
@@ -12,7 +13,6 @@ from .valuation import extract_financial_rows
 
 
 def _sorted_fin_rows(collection: dict) -> list[dict]:
-    from .financials import normalize_end_date
     from .schema import index_dimensions
     dims = index_dimensions(collection)
     fin = dims.get("financials", {}).get("data")
@@ -92,25 +92,33 @@ def _metric_roic(rows: list[dict]) -> dict[str, Any]:
 
 
 def _metric_fcf_5y(rows: list[dict]) -> dict[str, Any]:
-    total = 0.0
-    count = 0
-    for r in rows[-5:]:
+    # n_cashflow_act 为财年累计口径（Q1→H1→3Q→年报 逐期累加），把重叠的累计期
+    # 直接相加会把同一财年时期重复计入（约 2.75x），季节负 Q1 的公司 5 行累计
+    # 还可能 <0 被误否决。仅取年报（1231）行求和，消除重叠；年报不足则标不可得。
+    annual_rows = [
+        r for r in rows[-20:]  # 季度数据时 20 行 ≈ 5 个财年
+        if normalize_end_date(str(r.get("end_date") or "")).endswith("1231")
+    ]
+    totals: list[float] = []
+    for r in annual_rows[-5:]:
         ocf = coalesce_field(r, "n_cashflow_act", "ocf")
         capex = coalesce_field(r, "cap_ex", "c_pay_acq_const_fiolta")
         if ocf is not None and capex is not None:
             # CapEx 字段约定：正数=资本支出金额。abs() 兼容少数来源返回负数的场景。
             # 若新来源使用不同约定（如负数=支出），需在此处显式判断符号。
-            fcf = ocf - abs(capex)
-            total += fcf
-            count += 1
-    if count == 0:
-        return {"id": 2, "name": "累计 FCF (5年)", "status": "skip", "detail": "无现金流数据"}
+            totals.append(ocf - abs(capex))
+    if len(totals) < 2:
+        return {
+            "id": 2, "name": "累计 FCF (5年)", "status": "skip",
+            "detail": f"无足够年度数据（n_cashflow_act 为累计口径，需 ≥2 个年报期去重求和，现有 {len(totals)} 期）",
+        }
+    total = sum(totals)
     total_yi = total / 1e8 if abs(total) > 1e6 else total
     fail = total_yi < 0
     return {
         "id": 2, "name": "累计 FCF (5年)", "value": round(total_yi, 2),
         "threshold": "< 0 否决", "status": "fail" if fail else "pass",
-        "type": "veto", "detail": f"{count} 期累计 {total_yi:.2f} 亿",
+        "type": "veto", "detail": f"{len(totals)} 个年报期累计 {total_yi:.2f} 亿",
     }
 
 

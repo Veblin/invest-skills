@@ -21,6 +21,7 @@ ensure_invest_a_scripts_on_path()
 from codes import etf_symbol_to_ts_code  # noqa: E402
 from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
+from lib.db_util import hist_ex_today  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
 from lib.technical import (  # noqa: E402
     annualized_volatility_from_returns,
@@ -257,6 +258,7 @@ def query_etf_data(
         "symbol": symbol,
         "category": query_etf_category(symbol),
         "index_pe": None,
+        "index_pe_pct": None,
         "index_pe_status": "unknown_etf",
         "industry_pe": None,
         "industry_pe_note": None,
@@ -328,8 +330,10 @@ def prefetch_etf_spot() -> bool:
 
 
 def clear_etf_spot_cache() -> None:
-    """清空**进程内**（L1）spot 缓存（测试用）。
+    """清空**进程内**（L1）spot 缓存。
 
+    测试隔离公共 API（test_etf_spot_cache/test_etf_cache_fixes 的 fixture
+    依赖它跨测试清 L1，保证 canonical 实例的缓存不跨用例泄漏）。
     L2（data_bridge 磁盘缓存）由 data_bridge.invalidate_symbol("market")
     或测试的 tmp cache_dir 隔离负责，此处不触碰。
     """
@@ -477,8 +481,8 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
             "status": "ok" if pe is not None else "missing",
             "index_pe": pe,
             "index_pe_note": (
-                f"来源: csindex {idx_code}，仅 {len(df)} 条历史，"
-                "无可靠分位；市盈率1=股本加权，市盈率2=流通加权"
+                f"来源: csindex {idx_code}，单窗 {len(df)} 条历史；"
+                "市盈率1=股本加权，市盈率2=流通加权（历史分位见 index_pe_pct）"
             ),
             "rows": df.to_dict("records"),
             "error": None,
@@ -719,9 +723,10 @@ def _set_index_pe_status(result: dict, symbol: str, idx_code: str) -> None:
 
 
 def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
-    """指数 PE（csindex，仅 20 条历史，不足以计算可靠分位）。
+    """指数 PE（csindex，单窗仅约 20 条历史）。
 
     v0.2.3：原始取数迁至 fetch_etf_index_pe，经 data_bridge L2 缓存（1d）。
+    v0.2.4：index_pe_history 表累积 ≥20 条时附加历史分位（best-effort）。
     """
     env = _bridge_get("get_etf_index_pe", idx_code)
     if env is None:
@@ -732,6 +737,42 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
         return
     result["index_pe"] = env.get("index_pe")
     result["index_pe_note"] = env.get("index_pe_note")
+    # 当前 PE 值所属日期 = 信封最新行日期（query-before-persist 仅单次 cmd_report
+    # 内成立；collect-weekly/早间 report 已持久化今日行时，分位须剔除今日自身，
+    # 同 journal market_microstructure.hist_ex_today 型防双计）
+    rows = env.get("rows") or []
+    current_date = str(rows[-1].get("日期")) if rows else None
+    result["index_pe_pct"] = _index_pe_percentile_from_db(
+        idx_code, env.get("index_pe"), current_date)
+
+
+def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
+                                 current_date: str | None = None) -> float | None:
+    """index_pe_history 累积 ≥20 条时计算当前 PE 历史分位；否则 None（数据不足）。
+
+    current_date 为当前 PE 值所属日期（csindex 信封最新行日期）：剔除
+    index_pe_history 中同日的已持久化行，防今日自投——collect-weekly/早间
+    report 已把今日行入库时，cmd_report 的 query-before-persist 保证失效，
+    今日值进入分位序列会把分位推向 100%/0% 假象；剔除后与 journal
+    market_microstructure.hist_ex_today（commit cd5e7a4）同型防双计。
+    历史中无该日行（当日尚未入库）时剔除为 no-op，行为与旧路径一致。
+
+    best-effort：任何异常返回 None，不阻断报告流程。
+    """
+    if current_pe is None:
+        return None
+    current = safe_float(current_pe)
+    if current is None:  # NaN/±inf/非数字 → 无分位（防 nan<=v 恒 False 的假 0%）
+        return None
+    try:
+        from index_pe_snapshot import get_index_pe_history, index_pe_percentile
+        rows = get_index_pe_history(idx_code)
+        if current_date is not None:
+            rows = hist_ex_today(rows, current_date)
+        return index_pe_percentile(rows, current)
+    except Exception as exc:  # DB 不可用等：分位缺失不阻断
+        logger.debug("index_pe_percentile(%s) failed: %s", idx_code, exc)
+        return None
 
 
 def _summarize_etf_data_quality(result: dict) -> dict[str, str]:
@@ -1130,13 +1171,16 @@ def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float]
             if adj_d and latest_adj > 0:
                 nav = nav * adj_d / latest_adj
         # 复权状态下：原始 日增长率 基于未复权净值，与调整后的 nav 不匹配
-        # 必须从调整后的 NAV 重新计算收益率，nav_history.change_pct 设为 None
+        # → 从调整后的 NAV 重新计算收益率并回写 change_pct（batch-test P1-5：
+        # 旧实现重算 ret 只进 returns，rows.change_pct 恒 None，字段语义与注释
+        # 承诺不符；下游 compute_history_stats/detect_big_move_days 虽防御性
+        # 自行重算，但统一回写使 nav 路径与 baostock 路径口径一致）
         if adj_map:
             if prev_nav is not None and prev_nav > 0:
                 ret = (nav / prev_nav) - 1.0
                 navs.append(nav)
                 returns.append(ret)
-                rows.append({"date": date_str, "change_pct": None})
+                rows.append({"date": date_str, "change_pct": round(ret * 100, 2)})
                 prev_nav = nav  # D15 fix: 更新 prev_nav 使下期收益率为单期而非累积
             else:
                 # 复权首行，无法计算收益率；保留 NAV 用于 MA/RSI 连续性
@@ -1709,6 +1753,31 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     else:
         trend = "数据不足"
 
+    # 近端（最后 5 日）方向：整体合计定性会掩盖近端转向（batch-test P1-4，
+    # 实例：588000 20 日 +326.92 亿但近 5 日连续净流出 -39.88 亿）。
+    # detail_rows 升序，最后 RECENT_FLOW_DAYS 行即最近窗口。
+    recent_n = 5
+    recent_flows = flows[-recent_n:]
+    recent_flow = round(sum(recent_flows), 2) if recent_flows else None
+    # 「近 N 日」实际跨度：flows 只含份额可算行（fund_share T+1 延迟使尾端
+    # 1-2 日无份额），最近 N 个可算行可能覆盖 >N 个交易日（batch-test P1-4
+    # 二次修复：trend 标注实际跨度，避免「近 5 日」实际跨 7 个交易日失真）。
+    recent_span = recent_n
+    if recent_flows:
+        target = max(len(flows) - recent_n + 1, 1)  # flows 中 recent 段首行序号（1-based）
+        seen = 0
+        for i, r in enumerate(detail_rows):
+            if r.get("flow_est") is not None:
+                seen += 1
+                if seen == target:
+                    recent_span = len(detail_rows) - i
+                    break
+    if recent_flow is not None and total_flow is not None:
+        if total_flow > 5 and recent_flow < 0:
+            trend = f"{trend}（近 {recent_span} 日转净流出 {recent_flow:+.2f} 亿）"
+        elif total_flow < -5 and recent_flow > 0:
+            trend = f"{trend}（近 {recent_span} 日转净流入 {recent_flow:+.2f} 亿）"
+
     # 交易量趋势
     amounts = [r["amount"] for r in detail_rows if r["amount"] is not None]
     avg_amount = round(sum(amounts) / len(amounts), 2) if amounts else None
@@ -1731,6 +1800,8 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             "avg_daily_flow_est": avg_daily,
             "trend": trend,
             "row_count": len(detail_rows),
+            "recent_flow_est": recent_flow,
+            "recent_flow_days": recent_span,
             "avg_amount_e": avg_amount,
             "max_amount_e": max_amount,
             "share_total_change": share_total_change,
@@ -1742,3 +1813,255 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             f"仅覆盖 {len(detail_rows)} 行，已按可用数据返回"
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# ETF 历史行情深度（R11a，v0.2.4）：baostock 双源回退 + 历史统计
+# ---------------------------------------------------------------------------
+
+# baostock 取数窗口自然日缓冲（节假日/周末），与 query_etf_kline 的
+# int(days * 365 / 250) + 15 口径对齐
+_BAOSTOCK_LOOKBACK_BUFFER = 15
+
+
+def baostock_code(symbol: str) -> str:
+    """ETF 代码 → baostock 证券代码（sh./sz. 前缀路由）。
+
+    交易所解析规则：51/56/58 开头 → 上交所（sh.{symbol}）；
+    15/16/18 开头 → 深交所（sz.{symbol}）；其余抛 ValueError。
+    """
+    if symbol.startswith(("51", "56", "58")):
+        return f"sh.{symbol}"
+    if symbol.startswith(("15", "16", "18")):
+        return f"sz.{symbol}"
+    raise ValueError(
+        f"无法映射交易所: {symbol!r}（ETF 代码须 51/56/58=沪 或 15/16/18=深）"
+    )
+
+
+def fetch_etf_kline_baostock(symbol: str, days: int = 250) -> dict:
+    """原始取数：baostock 日线（sh.588000 格式，R11a 备源）。
+
+    baostock 为一次性全局登录：bs.login() 后同一进程后续调用直接返回成功；
+    本函数异常安全（try/finally 内 logout）。失败返回 status="missing"
+    （不抛异常，与其它 fetch_* 信封一致），供查询侧降级。
+
+    rows 归一化为 [{date, open, close, high, low, volume, change_pct}]，
+    与现有 kline 结构对齐（nav 链路的 nav_history 为 {date, nav, change_pct}；
+    消费方 compute_history_stats 同时兼容 nav/close 键）。
+    """
+    code: str | None = None
+    try:
+        code = baostock_code(symbol)
+        import baostock as bs
+
+        login = bs.login()
+        try:
+            if login is None or login.error_code != "0":
+                return {"status": "missing", "source": "baostock", "code": code,
+                        "rows": [], "error": "baostock login failed"
+                        + (f": {login.error_msg}" if login is not None else "（无返回）")}
+            # baostock 要求 YYYY-MM-DD；shanghai_days_ago/shanghai_today 返回 YYYYMMDD
+            def _iso(yyyymmdd: str) -> str:
+                return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+            end_date = _iso(shanghai_today())
+            start_date = _iso(shanghai_days_ago(int(days * 365 / 250) + _BAOSTOCK_LOOKBACK_BUFFER))
+            rs = bs.query_history_k_data_plus(
+                code,
+                "date,open,high,low,close,volume",
+                start_date=start_date,
+                end_date=end_date,
+                frequency="d",
+                adjustflag="2",  # 前复权：与全仓统一复权语义（_sources.py / gap-scan 同款）
+                # 不复权（3）会使除息日出现假 ≥5% 大波动/假最大回撤（review #7）
+            )
+            if rs.error_code != "0":
+                return {"status": "missing", "source": "baostock", "code": code,
+                        "rows": [], "error": f"baostock query failed: {rs.error_msg}"}
+            raw = []
+            while rs.next():
+                raw.append(rs.get_row_data())
+        finally:
+            bs.logout()
+
+        rows = []
+        prev_close: float | None = None
+        for r in raw:
+            close = safe_float(r[4]) if len(r) > 4 else None
+            if close is None:
+                continue
+            chg = None
+            if prev_close is not None and prev_close > 0:
+                chg = round((close / prev_close - 1) * 100, 2)
+            prev_close = close
+            rows.append({
+                "date": str(r[0])[:10] if len(r) > 0 else "",
+                "open": safe_float(r[1]) if len(r) > 1 else None,
+                "close": close,
+                "high": safe_float(r[2]) if len(r) > 2 else None,
+                "low": safe_float(r[3]) if len(r) > 3 else None,
+                "volume": safe_float(r[5]) if len(r) > 5 else None,
+                "change_pct": chg,
+            })
+        if not rows:
+            return {"status": "missing", "source": "baostock", "code": code,
+                    "rows": [], "error": "baostock: 无有效 K 线行"}
+        return {"status": "ok", "source": "baostock", "code": code,
+                "rows": rows, "error": None}
+    except Exception as exc:
+        logger.warning("fetch_etf_kline_baostock(%s) failed: %s", symbol, exc)
+        return {"status": "missing", "source": "baostock", "code": code,
+                "rows": [], "error": str(exc)}
+
+
+def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
+    """ETF 历史行情深度（R11a）：nav 链路优先，失败/异常自动回退 baostock。
+
+    返回 dict 附 source 字段标注数据链路（"nav" / "baostock"）；
+    两条链路均不可用时 status="missing"（不抛异常）。
+
+    Returns
+    -------
+    dict
+        {symbol, source, status, rows, requested_days, note, error?}
+        rows 为 nav_history（{date, nav, change_pct}）或 baostock
+        K 线行（{date, open, close, high, low, volume, change_pct}）。
+    """
+    nav_kline = None
+    try:
+        nav_kline = query_etf_kline(symbol, days=days)
+    except Exception as exc:
+        logger.warning(
+            "etf_kline_history(%s): nav chain raised %r, falling back to baostock",
+            symbol, exc,
+        )
+    nav_rows = (nav_kline or {}).get("nav_history") or []
+    if nav_kline is not None and nav_kline.get("status") == "available" and nav_rows:
+        return {
+            "symbol": symbol,
+            "source": "nav",
+            "status": "available",
+            "rows": nav_rows,
+            "requested_days": days,
+            "note": "来源: 基金单位净值（fund_etf_fund_info_em，Tushare 复权）",
+        }
+
+    env = fetch_etf_kline_baostock(symbol, days=days)
+    if env.get("status") == "ok" and env.get("rows"):
+        return {
+            "symbol": symbol,
+            "source": "baostock",
+            "status": "available",
+            "rows": env["rows"],
+            "requested_days": days,
+            "note": "来源: baostock 日线（前复权 adjustflag=2）",
+        }
+    return {
+        "symbol": symbol,
+        "source": "none",
+        "status": "missing",
+        "rows": [],
+        "requested_days": days,
+        "error": (env.get("error") or (nav_kline or {}).get("_error")
+                  or "nav 与 baostock 均不可用"),
+    }
+
+
+def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
+    """历史统计（引擎计算，AI 不得心算；R11a）。
+
+    输入 nav_history（nav 链路 {date, nav, change_pct}）或 baostock K 线行
+    （{date, open, close, high, low, volume, change_pct}），两种键均可。
+
+    统计项（全部由引擎计算）：
+    - annual_high / annual_low：年度最高/最低收盘价 + 各自日期
+    - max_drawdown：最大回撤峰值/谷底 + 日期 + 幅度%（负数）
+    - big_move_days：|change_pct| >= 5% 的交易日清单（基于收盘价逐日计算）
+    - ma20 / ma60 / ma120：收盘价均线尾部值
+    - current_vs_high_pct / current_vs_low_pct：当前价 vs 历史高低点偏离%
+    """
+    dates: list[str] = []
+    closes: list[float] = []
+    for r in nav_history:
+        close = safe_float(r.get("nav", r.get("close")))
+        d = str(r.get("date", ""))[:10]
+        if close is not None and d:
+            dates.append(d)
+            closes.append(close)
+
+    stats: dict[str, Any] = {
+        "rows": len(closes),
+        "date_range": (
+            f"{dates[0]} ~ {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else None)
+        ),
+        "annual_high": None,
+        "annual_low": None,
+        "max_drawdown": None,
+        "big_move_days": [],
+        "ma20": None,
+        "ma60": None,
+        "ma120": None,
+        "current_vs_high_pct": None,
+        "current_vs_low_pct": None,
+        "status": "available" if len(closes) >= 2 else "insufficient",
+    }
+    if len(closes) < 2:
+        return stats
+
+    # 年度高低点（首次出现优先，序列首行持平不翻转）
+    high_i = low_i = 0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[high_i]:
+            high_i = i
+        if closes[i] < closes[low_i]:
+            low_i = i
+    stats["annual_high"] = {"date": dates[high_i], "close": closes[high_i]}
+    stats["annual_low"] = {"date": dates[low_i], "close": closes[low_i]}
+
+    # 最大回撤：运行峰值 → 谷底（峰值之后的最低收盘）。
+    # peak/trough 必须配对记录：trough 更新时快照当时的运行峰值，
+    # 否则循环结束后 peak_i 是"最后"一个运行峰值（可能晚于 trough），
+    # V 型反转窗口会输出自相矛盾的峰谷对（{peak:110, trough:90, dd:-10%}
+    # 实际是 110→90 = -18.18%）。
+    peak_i = 0
+    trough_i = 0
+    dd_peak_i = 0  # 与最大回撤配对的峰值索引
+    max_dd = 0.0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[peak_i]:
+            peak_i = i
+        dd = (closes[i] / closes[peak_i] - 1) * 100
+        if dd < max_dd:
+            max_dd = dd
+            trough_i = i
+            dd_peak_i = peak_i
+    stats["max_drawdown"] = {
+        "peak_date": dates[dd_peak_i],
+        "peak_close": closes[dd_peak_i],
+        "trough_date": dates[trough_i],
+        "trough_close": closes[trough_i],
+        "drawdown_pct": round(max_dd, 2),
+    }
+
+    # |change_pct| >= 5% 交易日清单（由收盘价重算，与 nav 源的日增长率口径解耦）
+    big: list[dict[str, Any]] = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] > 0:
+            chg = (closes[i] / closes[i - 1] - 1) * 100
+            if abs(chg) >= 5.0:
+                big.append({"date": dates[i], "change_pct": round(chg, 2)})
+    stats["big_move_days"] = big
+
+    for n, key in ((20, "ma20"), (60, "ma60"), (120, "ma120")):
+        series = sma(closes, n)
+        if series and series[-1] is not None:
+            stats[key] = round(series[-1], 4)
+
+    latest = closes[-1]
+    high = stats["annual_high"]["close"]
+    low = stats["annual_low"]["close"]
+    if high > 0:
+        stats["current_vs_high_pct"] = round((latest / high - 1) * 100, 2)
+    if low > 0:
+        stats["current_vs_low_pct"] = round((latest / low - 1) * 100, 2)
+    return stats

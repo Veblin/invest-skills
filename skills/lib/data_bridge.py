@@ -24,6 +24,11 @@ except ImportError:
     # 注意：此路径仅在 skills/lib/ 已在 sys.path 时有效
     from cache import DataCache, default_cache, _is_trading_hour  # noqa: F811
 
+try:
+    from .invest_path import load_invest_a_etf_module  # 同包相对导入（正常路径）
+except ImportError:
+    from invest_path import load_invest_a_etf_module  # noqa: F811  # sys.path 裸导入
+
 logger = logging.getLogger(__name__)
 
 _cache: DataCache = default_cache()
@@ -39,7 +44,6 @@ DEFAULT_TTL: dict[str, int] = {
     "valuation":     7 * 86400,    # 估值分析：7 天（独立维度，勿与 financials 共用槽位）
     "macro":         7 * 86400,    # 宏观指标：7 天（A 股交易时段 TTL 覆盖为 4h，见 get_macro）
     "basic_info":   30 * 86400,    # 基本信息：30 天
-    "northbound":    1 * 86400,    # 北向资金：1 天
     "margin":        1 * 86400,    # 两融余额：1 天
     "ad_ratio":      5 * 60,       # 涨跌比：5 分钟
     "lu_ld_ratio":   5 * 60,       # 涨跌停比：5 分钟
@@ -209,12 +213,6 @@ def get_valuation(symbol: str, *, force: bool = False, **kwargs: Any) -> dict | 
     return _fetch_dimension("valuation", symbol, collect_valuation, symbol, force=force)
 
 
-def get_northbound(symbol: str, *, force: bool = False) -> dict | None:
-    """北向资金（缓存 1d）。无生产调用方；保留（历史/兼容）。"""
-    collect_northbound = _import_lib_module_attr("collector", "collect_northbound")  # noqa: E402
-    return _fetch_dimension("northbound", symbol, collect_northbound, symbol, force=force)
-
-
 def get_macro(*, force: bool = False) -> dict | None:
     """宏观快照（缓存 7d；A 股交易时段 9:30-15:00 读路径新鲜度上限 4h）。
 
@@ -256,22 +254,23 @@ def get_microstructure(*, force: bool = False) -> dict | None:
 
 
 def _import_etf_attr(attr: str) -> Callable[..., Any] | None:
-    """Lazy-import *attr* from etf_data (invest-a-etf canonical / journal shim).
+    """Lazy-import *attr* from invest-a-etf canonical etf_data module.
 
-    上下文解析：
-    - journal：importlib 解析到 journal shim（re-export fetch_*，见
-      skills/invest-a-journal/scripts/lib/etf_data.py）
-    - invest-a-etf：解析到 canonical
-    - 其他上下文：ImportError/AttributeError → None + 日志警告（调用方需防 None）
+    解析（v0.2.4 修复）：显式经 invest_path.load_invest_a_etf_module()
+    按文件路径加载 canonical（invest-a-etf/scripts/lib/etf_data.py），与
+    journal shim 同一加载器、同一 sys.modules 实例——不再裸
+    ``import etf_data``（其解析依赖 sys.path 顺序：invest-a-etf lib 不在
+    首位/不在路径上时 ImportError → 静默 None）。
+    ImportError/AttributeError/OSError → None + 日志警告（调用方需防
+    None）；OSError：canonical 文件缺失时 spec 加载抛 FileNotFoundError
+    （非 ImportError 子类），同样按环境降级处理。
     """
     try:
-        mod = importlib.import_module("etf_data")
+        mod = load_invest_a_etf_module()
         return getattr(mod, attr)
     except (ImportError, AttributeError, OSError) as exc:
-        # OSError：shim exec canonical 时文件缺失抛 FileNotFoundError（非
-        # ImportError 子类），同样按环境降级处理（v0.2.3 补丁 #6）
         logger.warning(
-            "get_etf_*(%s) requires invest-a-etf etf_data on sys.path; "
+            "get_etf_*(%s) requires invest-a-etf etf_data; "
             "returning None — callers should guard against. %s", attr, exc)
         return None
 
@@ -359,11 +358,3 @@ def invalidate_symbol(symbol: str) -> int:
     return count
 
 
-def cache_stats() -> dict:
-    """查看缓存状态。仅测试（skills/lib/tests/test_data_bridge.py）使用；保留。"""
-    return _cache.stats()
-
-
-def cache_clear() -> int:
-    """清空全部缓存。仅测试（skills/lib/tests/test_data_bridge.py）使用；保留。"""
-    return _cache.invalidate(None, None)

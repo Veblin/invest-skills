@@ -25,7 +25,7 @@ from data_bridge import (  # noqa: E402
     get_quote,
     get_valuation,
 )
-from lib.nums import safe_float  # noqa: E402
+from lib.nums import coalesce_field, safe_float  # noqa: E402
 from lib.technical import compute, sort_kline_asc  # noqa: E402
 from lib.valuation import valuation_summary  # noqa: E402
 
@@ -134,16 +134,34 @@ def _safe_collect_quote(symbol: str) -> dict:
         elif not isinstance(data, dict):
             data = {}
 
-        return {
-            "price": safe_float(data.get("close")),
-            "change_pct": safe_float(data.get("pct_chg")),
-            "pe_ttm": safe_float(data.get("pe_ttm")),
+        # v0.2.4 起 quote 主数据在腾讯实时快照可用时被合并为 dict
+        # （collector/_orchestrate._merge_realtime）：字段为腾讯键 price /
+        # change_pct / pe_ratio / total_mv（+ kline 保留 10 日 K 线）；旧 dict
+        # 键（close/pct_chg/pe_ttm/pb）仅存在于历史缓存——新键优先、旧键兜底
+        # （pe_ratio→pe_ttm 映射与 _orchestrate._q_tencent_valuation_snapshot
+        # 一致；腾讯快照无 pb 字段 → 保持 None 并显式标注不可得）。
+        price = coalesce_field(data, "price", "close")
+        change_pct = coalesce_field(data, "change_pct", "pct_chg")
+        pe_ttm = coalesce_field(data, "pe_ratio", "pe_ttm")
+
+        result = {
+            "price": price,
+            "change_pct": change_pct,
+            "pe_ttm": pe_ttm,
             "pb": safe_float(data.get("pb")),
             "total_mv": safe_float(data.get("total_mv")),
             "source": meta.get("source", "unknown"),
             "status": _status_from_raw(raw),
             "_raw_status": raw.get("status"),
         }
+        # 字段级诚实标注：任一核心字段未填充（腾讯合并形状结构性无 pb、
+        # tushare.daily 行无 pe_ttm/pb/total_mv）→ 列出 missing_fields，
+        # 不得静默 None 冒充 data_quality 'available'；PE/PB 以 valuation 维度为准
+        missing = [k for k in ("price", "change_pct", "pe_ttm", "pb", "total_mv")
+                   if result[k] is None]
+        if missing:
+            result["missing_fields"] = missing
+        return result
     except Exception as exc:
         return {"_error": str(exc), "status": "missing"}
 
@@ -466,6 +484,13 @@ def _process_macro(result: dict) -> None:
         else:
             snap[key] = None
     result["macro_snapshot"] = snap
+    # v0.2.4: 宏观日快照入库（best-effort；journal 每次评估必经此处，天然 1 行/天幂等累积，
+    # 缓解 macro 缓存 TTL 7d 造成的断档，供宏观护栏历史分位消费）
+    try:
+        from lib.store import save_macro_snapshot
+        save_macro_snapshot(macro_raw)
+    except Exception:
+        logger.warning("macro snapshot persist failed", exc_info=True)
 
 
 def _summarize_quality(result: dict) -> None:

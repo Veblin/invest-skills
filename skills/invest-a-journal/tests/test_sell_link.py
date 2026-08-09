@@ -131,3 +131,25 @@ class TestSellAutoLink:
         sell = db.get_journal(sell_id)
         assert sell is not None
         assert sell["linked_journal_id"] is None
+
+
+class TestAttributionField:
+    """R9: attribution 复盘归因字段（环境/能力/运气三分）写读。"""
+
+    def test_attribution_save_roundtrip(self, tmp_db):
+        jid = db.save_journal({
+            "symbol": "510300",
+            "direction": "buy",
+            "attribution": "capability",
+        })
+        row = db.get_journal(jid)
+        assert row["attribution"] == "capability"
+
+    def test_attribution_update_via_allowlist(self, tmp_db):
+        jid = db.save_journal({"symbol": "510300", "direction": "buy"})
+        assert db.update_journal(jid, {"attribution": "environment"}) is True
+        assert db.get_journal(jid)["attribution"] == "environment"
+
+    def test_attribution_default_empty(self, tmp_db):
+        jid = db.save_journal({"symbol": "510300", "direction": "buy"})
+        assert db.get_journal(jid)["attribution"] == ""

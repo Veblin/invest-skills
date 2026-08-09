@@ -11,7 +11,7 @@ investment-learning CLI。
   uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858        # 对比
   uv run python skills/invest-a-stock/scripts/invest.py diagnose                     # 检查数据源
   uv run python skills/invest-a-stock/scripts/invest.py store list                   # 查看存储
-  uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --store       # 采集并存储
+  uv run python skills/invest-a-stock/scripts/invest.py collect 600176               # 采集（默认自动入库；--no-store 关闭）
   uv run python skills/invest-a-stock/scripts/invest.py watchlist 000001,600519 --outdir ./out  # 批量标的摘要
 """
 
@@ -281,7 +281,10 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("collect", help="采集多维度数据")
     pc.add_argument("symbol")
     pc.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
-    pc.add_argument("--store", action="store_true", help="存入持久化存储")
+    pc.add_argument("--store", action="store_true", default=True, dest="store",
+                   help="存入持久化存储（默认开启；--no-store 关闭）")
+    pc.add_argument("--no-store", action="store_false", dest="store",
+                   help="不存入持久化存储")
     pc.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
     pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
     pc.add_argument(
@@ -292,6 +295,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
+    pr.add_argument("--plan", default="", help="JSON 采集计划文件路径")
+    pr.add_argument("--mode", default="full", choices=["brief", "full", "concise"],
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pr.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
@@ -306,7 +312,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="严格验算：跨源差异 >5%% 时在报告中硬标注阻断提示",
     )
+    pr.add_argument(
+        "--material-gap",
+        action="store_true",
+        help="R12c：报告生成前输出 12 题数据缺口清单（先回填再出报告）",
+    )
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
+    pr.add_argument("--no-store", action="store_false", dest="store", default=True,
+                   help="不存入持久化存储（report 默认自动入库；--resume 恒不重复入库）")
 
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
@@ -371,6 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("--mode", default="full", choices=["brief", "full", "concise"])
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
+    psyn.add_argument("--no-store", action="store_false", dest="store", default=True,
+                      help="不存入持久化存储（synthesize 无 --input 时委托 report，默认自动入库；--input 分支不落库）")
     _add_collect_flags(psyn)
 
     pp = sub.add_parser(
@@ -443,17 +458,36 @@ def build_parser() -> argparse.ArgumentParser:
     pic.add_argument("--rf", type=float, help="无风险利率（小数），默认 2.5%%")
     pic.add_argument("--erp", type=float, help="股权风险溢价（默认 0.06）")
 
+    pcls = sub.add_parser("classify", help="R1: 收益驱动假设分类（研究路径分流）")
+    pcls.add_argument("symbol", help="股票代码，如 002466")
+    pcls.add_argument("--div-years", type=int, default=None, help="连续分红年数（未提供则标注证据缺失）")
+    pcls.add_argument("--div-yield", type=float, default=None, help="股息率（小数，如 0.03）")
+    pcls.add_argument("--refi-times", type=int, default=None, help="近 N 年再融资次数（未提供则标注证据缺失）")
+    pcls.add_argument("--emit", default="text", choices=["text", "json"])
+
     pval = sub.add_parser("value", help="科学估值：多方法交叉（PE/PB/盈利收益/隐含增长/ROE-PB匹配）")
     pval.add_argument("symbol", help="股票代码，如 002466")
     pval.add_argument("--rf", type=float, help="无风险利率（小数），默认自动获取中国10Y国债")
     pval.add_argument("--erp", type=float, default=0.06, help="股权风险溢价（默认 0.06）")
     pval.add_argument("--store", action="store_true", help="结果存入数据库便于回溯")
     pval.add_argument("--emit", default="text", choices=["text", "json"])
+    pval.add_argument("--steady", action="store_true",
+                      help="R2: 追加稳态盈利估值（穿越周期视角，识别周期高点低PE陷阱）")
+    pval.add_argument("--cycle-start", default=None, help="周期区间起点（YYYY1231）")
+    pval.add_argument("--cycle-end", default=None, help="周期区间终点（YYYY1231）")
+    pval.add_argument("--cycle-method", default="median", choices=["median", "trimmed", "range"],
+                      help="稳态盈利算法（默认 median）")
+    pval.add_argument("--cycle-pe", type=float, default=None, help="周期中枢 PE（默认 12）")
+    pval.add_argument("--ev-ebitda", action="store_true",
+                      help="R3: 追加 EV/EBITDA 企业价值桥接表（可审计逐项）+ 私有化检验研究问题")
+    pval.add_argument("--industry", default=None, help="行业名（用于 R3 金融业豁免判定）")
 
-    pms = sub.add_parser("market-status", help="市场微观结构快照：杠杆/广度/情绪/估值温度")
+    pms = sub.add_parser("market-status", help="市场微观结构快照：杠杆/广度/情绪/估值温度；或 R5 行业景气状态卡")
     pms.add_argument("--days", type=int, default=5, help="趋势表周期（默认 5 天）")
     pms.add_argument("--json", action="store_true", help="输出原始 JSON")
     pms.add_argument("--save", action="store_true", help="采集并保存当日快照（非交易时段跳过）")
+    pms.add_argument("--industry", type=str, default="", metavar="SW_NAME",
+                     help="R5 行业景气状态卡：指定申万一级行业名（如 半导体/消费/钢铁），输出五维状态卡")
 
     pef = sub.add_parser("etf-flow", help="ETF 份额变化趋势（需先 --save 积累历史）")
     pef.add_argument("symbol", help="6 位 ETF 代码（如 588000）")
@@ -521,7 +555,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.store and _HAS_STORE:
         store_mod.save_collection(result)
         print("💾 已存入持久化存储")
-    if _HAS_STORE:
+        _maybe_store_macro_snapshot(result, args)
+    if getattr(args, "store", True) and _HAS_STORE:
         store_mod.save_pipeline_step(
             args.symbol, "collect", _collect_pipeline_state(args, dims),
         )
@@ -534,6 +569,44 @@ def cmd_collect(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
     return 0
+
+
+def _maybe_store_macro_snapshot(result: dict, args: argparse.Namespace) -> None:
+    """--with-macro 采集成功后顺带写宏观日快照（best-effort，失败不阻断）。
+
+    与报告/采集入库同一 guard 域（--no-store / --resume 时不写）。
+    """
+    if not getattr(args, "with_macro", False) or not _HAS_STORE:
+        return
+    try:
+        store_mod.save_macro_snapshot(result.get("macro_context") or {})
+    except Exception as exc:
+        print(f"⚠️ 宏观快照入库失败: {exc}", file=sys.stderr)
+
+
+def _maybe_store_report_snapshot(
+    args: argparse.Namespace, result: dict, *, resumed: bool = False
+) -> None:
+    """report 默认自动入库；--resume（快照已恢复）与 --no-store 跳过。
+
+    必须在 render 之后调用：diff 渲染（_load_report_key_diff）读的是 store
+    最新快照，先入库会让「相对上次调研变化」退化为自比空 diff。
+
+    resumed 由 cmd_report 传入：仅当 --resume 实际恢复了兼容快照时为 True；
+    resume 被拒（快照不兼容）后重新采集的结果仍应入库（v0.2.4 review #3）。
+    """
+    if not _HAS_STORE:
+        return
+    if resumed or not getattr(args, "store", True):
+        return
+    try:
+        # kind='report'：与 collect 快照区分，diff 自动配对优先 collect
+        # （避免同会话两行互相比较，review #9 第二轮）
+        store_mod.save_collection(result, kind="report")
+        print("💾 已存入持久化存储")
+    except Exception as exc:
+        print(f"⚠️ 报告入库失败: {exc}", file=sys.stderr)
+    _maybe_store_macro_snapshot(result, args)
 
 
 def _report_basename(result: dict, symbol: str, ts: str) -> str:
@@ -559,6 +632,7 @@ def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = None
+    resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
     if args.resume and _HAS_STORE:
         progress = store_mod.get_pipeline_progress(args.symbol)
         completed_steps = [s for s, done in progress.items() if done]
@@ -566,6 +640,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"📋 已完成步骤: {', '.join(completed_steps)}")
         result = _try_resume_collection(args.symbol)
         if result and _resume_cache_compatible(args, dims, result):
+            resumed_from_store = True
             print("♻️ 从 store 恢复上次采集结果（--resume）", file=sys.stderr)
         elif result:
             result = None
@@ -584,13 +659,48 @@ def cmd_report(args: argparse.Namespace) -> int:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，渲染层标注「无行业成功因素定义」）
+    try:
+        from lib.render_utils import _get_dim_data, _index_dims
+        from lib.industry.base import get_success_factors
+        basic = _get_dim_data(_index_dims(result), "basic_info") or {}
+        industry = ""
+        if isinstance(basic, dict):
+            industry = str(basic.get("industry") or basic.get("行业") or "")
+        factors = get_success_factors(industry)
+        result["success_factors"] = {
+            "industry": industry,
+            "covered": bool(factors),
+            "factors": factors,
+        }
+    except Exception:  # 装配失败不阻断报告
+        result["success_factors"] = {"industry": "", "covered": False, "factors": []}
+    # R12g-A: 连板触发 → 龙虎榜/涨停池采集（仅触发时执行，未触发零额外网络调用）
+    try:
+        from lib.lhb import attach_limit_streak_dims
+        if attach_limit_streak_dims(result, args.symbol):
+            print("⚡ 近 5 日 ≥2 涨停，已附加连板结构数据（龙虎榜/涨停池）", file=sys.stderr)
+    except Exception:  # 采集失败不阻断报告
+        pass
+    # R10/R12g-B: 风格-标的匹配三态（风格档案 + 同标的 journal Q1 代理）
+    try:
+        from lib.style_match import assemble_style_match
+        result["style_match"] = assemble_style_match(result, args.symbol)
+    except Exception:  # 装配失败不阻断报告
+        pass
     if getattr(args, "strict_rigor", False):
         result.setdefault("_meta", {})["strict_rigor"] = True
     _warn_degraded_collection(result)
+    if getattr(args, "material_gap", False):
+        try:
+            from lib.render_utils import format_material_gap, material_gap_report
+            print(format_material_gap(material_gap_report(result)), file=sys.stderr)
+        except Exception as exc:  # 缺口检查失败不阻断报告
+            print(f"⚠️ material-gap 检查失败: {exc}", file=sys.stderr)
     if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成报告")
         return 1
-    if _HAS_STORE:
+    if _HAS_STORE and getattr(args, "store", True):
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
@@ -619,9 +729,16 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}")
         print(f"📝 Markdown 报告: {mdfile.resolve()}")
+        _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
         return 0
 
-    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'))
+    # attach_extras=True：cmd_report 非纯渲染（刚跑完 collect_all / resume 恢复），
+    # 补挂 market_structure/phase2 后再渲染与落库快照（98813b5 把 render 默认值
+    # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
+    # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
+    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
+                           attach_extras=True)
+    _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     if getattr(args, 'save_raw', False):
         try:
@@ -1328,14 +1445,30 @@ def _print_diff_dimension_supplement(diff: dict) -> None:
 
 
 def _watchlist_get_result(symbol: str) -> dict:
-    """优先读 store 最新快照，否则现场采集。"""
+    """优先读 store 最新快照，否则现场采集（结果自动入库，第三采集入口接入默认落库）。
+
+    全维度失败（_no_sources_responded）不入库——与 cmd_collect/cmd_report
+    同守卫，避免空快照被 list_collections 永久复用（review #5 第二轮）。
+    """
     if _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=symbol)
         if rows:
             rec = store_mod.get_collection(rows[0]["id"])
             if rec and rec.get("raw_json"):
                 return rec["raw_json"]
-    return collector.collect_all(symbol)
+    result = collector.collect_all(symbol)
+    if _HAS_STORE:
+        if _no_sources_responded(result.get("summary")):
+            print(
+                f"⚠️ {symbol} 全部数据源不可用，快照未入库（请运行 diagnose）",
+                file=sys.stderr,
+            )
+            return result
+        try:
+            store_mod.save_collection(result)
+        except Exception as exc:
+            print(f"⚠️ 快照入库失败（{symbol}）: {exc}", file=sys.stderr)
+    return result
 
 
 def _watchlist_summary_fields(result: dict) -> dict:
@@ -1427,8 +1560,8 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
     body: list[str] = [f"# 观察列表摘要 — {today}", "", f"> 共 {len(symbols)} 只标的"]
     if _watchlist_needs_live_collect(symbols):
         body.append(
-            "> ⚠️ 部分标的无 `--store` 历史快照，将触发现场采集（较慢）。"
-            "建议先执行 `invest.py collect SYMBOL --store`。"
+            "> ⚠️ 部分标的缺少历史快照，将触发现场采集（较慢）；"
+            "采集结果会自动入库，下次直接复用。"
         )
     body.append("")
     failures = 0
@@ -1795,6 +1928,121 @@ def cmd_ic(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_steady_block(steady: dict) -> str:
+    """R2: 稳态盈利估值块文本渲染（value --steady）。"""
+    ste = steady.get("steady") or {}
+    lines = ["", "【稳态盈利估值（R2 · 穿越周期视角）】"]
+    if not ste.get("available"):
+        lines.append(f"  ⚠️ {ste.get('reason', '稳态盈利不可得')}")
+        return "\n".join(lines)
+    lines.append(f"  年度净利样本: {ste.get('period')}（{ste.get('n_years')} 年, method={ste.get('method')}）")
+    steady_earnings = ste["steady_earnings"]
+    if steady_earnings <= 0:
+        lines.append(
+            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
+            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元，"
+            "亏损期——稳态估值带不适用）"
+        )
+    else:
+        lines.append(
+            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
+            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元）"
+        )
+    band = steady.get("band")
+    mv = steady.get("mv_vs_steady")
+    if band:
+        lines.append(
+            f"  周期中枢 PE: {band['cycle_pe']} | 稳态市值带:"
+            f" {band['low']/1e8:.0f}~{band['mid']/1e8:.0f}~{band['high']/1e8:.0f} 亿元（±{band['band_pct']*100:.0f}%）"
+        )
+    if mv and mv.get("total_mv_yi"):
+        if mv["steady_mv_high_yi"] and mv["total_mv_yi"] > mv["steady_mv_high_yi"]:
+            over = (mv["total_mv_yi"] / mv["steady_mv_high_yi"] - 1) * 100
+            pos = f"高于稳态上沿 {over:.0f}%——历史经验：周期股盈利高点常伴随低 PE 错觉（海力士式），但并非充分条件"
+        elif mv["steady_mv_low_yi"] and mv["total_mv_yi"] < mv["steady_mv_low_yi"]:
+            under = (mv["steady_mv_low_yi"] / mv["total_mv_yi"] - 1) * 100
+            pos = f"低于稳态下沿 {under:.0f}%——穿越周期视角存在低估"
+        else:
+            pos = "处于稳态市值带内"
+        lines.append(f"  当期市值 {mv['total_mv_yi']:.0f} 亿元 vs 稳态带: {pos}")
+    lines.append("  （稳态估值为多情景参考，非目标价；概率权重由用户自设）")
+    return "\n".join(lines)
+
+
+def _format_ev_ebitda_block(ev: dict) -> str:
+    """R3: EV/EBITDA 桥接表文本渲染（value --ev-ebitda）。"""
+    lines = ["", "【EV/EBITDA 企业价值桥接（R3）】"]
+    if ev.get("exempt"):
+        lines.append(f"  ⚠️ {ev.get('reason', '不适用')}")
+        return "\n".join(lines)
+    if not ev.get("available"):
+        lines.append(f"  ⚠️ 桥接数据不可得（缺失: {', '.join(ev.get('missing') or [])}）")
+        if ev.get("ebitda_note"):
+            lines.append(f"  · {ev['ebitda_note']}")
+        if ev.get("note"):
+            lines.append(f"  · {ev['note']}")
+        return "\n".join(lines)
+    b = ev["bridge"]
+    lines.append("  桥接表（逐项可审计）:")
+    lines.append(f"    - 市值: {b['mv_yi']} 亿元")
+    if b["interest_debt_yi"] is not None:
+        # 标签由引擎预计算（debt_label 仅含可得分量，缺失科目按 0 计但不出现在
+        # 标签，防行内口径误导，batch-test P1-2）；interest_debt_yi 非 None 时
+        # debt_label 必非 None（valuation_calc 同分支保证），无兜底
+        lines.append(f"    + 有息负债: {b['interest_debt_yi']} 亿元（{ev['debt_label']}）")
+    else:
+        lines.append(f"    + 有息负债: 不可得（降级净现金口径）")
+    lines.append(f"    - 现金: {b['cash_yi']} 亿元")
+    lines.append(f"    = EV: {b['ev_yi']} 亿元")
+    period_s = f"（{ev['ebitda_period']} 年报期）" if ev.get("ebitda_period") else ""
+    lines.append(f"  EBITDA: {ev['ebitda_yi']} 亿元{period_s} → EV/EBITDA = {ev['ev_ebitda']}x")
+    if ev.get("note"):
+        lines.append(f"  ⚠️ {ev['note']}")
+    if ev.get("takeover_payback_years"):
+        lines.append(f"  私有化检验（研究问题）: 回本年限 ≈ {ev['takeover_payback_years']} 年")
+        lines.append(f"    · {ev['takeover_note']}")
+    return "\n".join(lines)
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    """R1: 收益驱动假设分类（研究路径分流）。"""
+    try:
+        from lib.income_driver import classify_income_driver, format_classify_result
+        from valuation_calc import get_annual_net_profit
+        from lib.tushare_client import TushareClient
+    except ImportError as exc:
+        print(f"⚠️ classify 依赖模块不可用: {exc}", file=sys.stderr)
+        return 1
+    ts = TushareClient()
+    ts_code = _fmt_code(args.symbol) if "_fmt_code" in globals() else None
+    if ts_code is None:
+        from valuation_calc import _fmt_code
+        ts_code = _fmt_code(args.symbol)
+    annual = get_annual_net_profit(ts, ts_code)
+    if not annual:
+        print("⚠️ 年度净利序列不可得（income 表查询为空），无法分类", file=sys.stderr)
+        return 1
+    # fina_indicator（fcff 等）由 collector 同款查询补入
+    fin_rows: list[dict] = []
+    try:
+        from lib.collector import _q_tushare_financials
+        fin_rows = _q_tushare_financials(args.symbol) or []
+    except Exception:
+        pass
+    result = classify_income_driver(
+        annual, fin_rows,
+        div_years=args.div_years,
+        div_yield=args.div_yield,
+        refi_times=args.refi_times,
+    )
+    if args.emit == "json":
+        import json as _json
+        print(_json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(format_classify_result(result))
+    return 0
+
+
 def cmd_value(args: argparse.Namespace) -> int:
     """科学估值：多方法交叉估值（PE/PB/盈利收益/隐含增长/ROE-PB 匹配）。"""
     try:
@@ -1807,6 +2055,13 @@ def cmd_value(args: argparse.Namespace) -> int:
         symbol=args.symbol,
         rf_override=args.rf,
         erp_override=args.erp,
+        steady=getattr(args, "steady", False),
+        cycle_start=getattr(args, "cycle_start", None),
+        cycle_end=getattr(args, "cycle_end", None),
+        cycle_method=getattr(args, "cycle_method", "median"),
+        cycle_pe=getattr(args, "cycle_pe", None),
+        ev_ebitda=getattr(args, "ev_ebitda", False),
+        ev_ebitda_industry=getattr(args, "industry", None),
     )
 
     if args.emit == "json":
@@ -1814,6 +2069,10 @@ def cmd_value(args: argparse.Namespace) -> int:
         print(_json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
     else:
         print(format_output(result))
+        if result.steady:
+            print(_format_steady_block(result.steady))
+        if result.ev_ebitda:
+            print(_format_ev_ebitda_block(result.ev_ebitda))
 
     if args.store:
         if not _HAS_STORE:
@@ -1830,13 +2089,26 @@ def cmd_value(args: argparse.Namespace) -> int:
 
 
 def cmd_market_status(args: argparse.Namespace) -> int:
-    """市场微观结构快照：杠杆/广度/情绪/估值温度。
+    """市场微观结构快照：杠杆/广度/情绪/估值温度；或 R5 行业景气状态卡（--industry）。
 
     --save  采集并保存当日快照
     --days  趋势表周期（默认 5 天）
     --json  输出原始 JSON
+    --industry  输出行业景气状态卡（独立输出，不进入 snapshot 流程）
     """
     import json as _json
+    if getattr(args, "industry", ""):
+        try:
+            from lib.climate import build_industry_climate, format_climate_card
+            card = build_industry_climate(args.industry)
+            if args.json:
+                print(_json.dumps(card, ensure_ascii=False, indent=2, default=str))
+                return 0
+            print(format_climate_card(card))
+            return 0
+        except Exception as exc:
+            print(f"⚠️ 行业景气状态卡失败: {exc}", file=sys.stderr)
+            return 1
     try:
         from market_microstructure import snapshot, save_snapshot, latest_snapshot, load_history
     except ImportError:
@@ -2102,6 +2374,8 @@ def main() -> int:
         return cmd_ic(args)
     elif args.command == "value":
         return cmd_value(args)
+    elif args.command == "classify":
+        return cmd_classify(args)
     elif args.command == "market-status":
         return cmd_market_status(args)
     elif args.command == "etf-flow":

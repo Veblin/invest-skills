@@ -1,0 +1,272 @@
+[
+ {
+  "trade_date": "2026-01-01",
+  "open": 10.0,
+  "high": 10.2,
+  "low": 9.9,
+  "close": 10.1,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-02",
+  "open": 10.1,
+  "high": 10.3,
+  "low": 10.0,
+  "close": 10.2,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-03",
+  "open": 10.2,
+  "high": 10.4,
+  "low": 10.09,
+  "close": 10.3,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-04",
+  "open": 10.3,
+  "high": 10.5,
+  "low": 10.19,
+  "close": 10.4,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-05",
+  "open": 10.39,
+  "high": 10.61,
+  "low": 10.29,
+  "close": 10.5,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-06",
+  "open": 10.5,
+  "high": 10.72,
+  "low": 10.4,
+  "close": 10.61,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-07",
+  "open": 10.61,
+  "high": 10.83,
+  "low": 10.51,
+  "close": 10.72,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-08",
+  "open": 10.72,
+  "high": 10.94,
+  "low": 10.61,
+  "close": 10.83,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-09",
+  "open": 10.83,
+  "high": 11.05,
+  "low": 10.72,
+  "close": 10.94,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-10",
+  "open": 10.94,
+  "high": 11.16,
+  "low": 10.83,
+  "close": 11.05,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-11",
+  "open": 11.05,
+  "high": 11.27,
+  "low": 10.94,
+  "close": 11.16,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-12",
+  "open": 11.16,
+  "high": 11.38,
+  "low": 11.04,
+  "close": 11.27,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-13",
+  "open": 11.27,
+  "high": 11.49,
+  "low": 11.15,
+  "close": 11.38,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-14",
+  "open": 11.38,
+  "high": 11.6,
+  "low": 11.26,
+  "close": 11.49,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-15",
+  "open": 11.48,
+  "high": 11.72,
+  "low": 11.37,
+  "close": 11.6,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-16",
+  "open": 11.6,
+  "high": 11.84,
+  "low": 11.49,
+  "close": 11.72,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-17",
+  "open": 11.72,
+  "high": 11.96,
+  "low": 11.6,
+  "close": 11.84,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-18",
+  "open": 11.84,
+  "high": 12.08,
+  "low": 11.72,
+  "close": 11.96,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-19",
+  "open": 11.96,
+  "high": 12.2,
+  "low": 11.84,
+  "close": 12.08,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-20",
+  "open": 12.08,
+  "high": 12.32,
+  "low": 11.96,
+  "close": 12.2,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-21",
+  "open": 12.2,
+  "high": 12.44,
+  "low": 12.07,
+  "close": 12.32,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-22",
+  "open": 12.32,
+  "high": 12.56,
+  "low": 12.19,
+  "close": 12.44,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-23",
+  "open": 12.43,
+  "high": 12.69,
+  "low": 12.31,
+  "close": 12.56,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-24",
+  "open": 12.56,
+  "high": 12.82,
+  "low": 12.44,
+  "close": 12.69,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-25",
+  "open": 12.69,
+  "high": 12.95,
+  "low": 12.56,
+  "close": 12.82,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-26",
+  "open": 12.82,
+  "high": 13.08,
+  "low": 12.69,
+  "close": 12.95,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-27",
+  "open": 12.95,
+  "high": 13.21,
+  "low": 12.82,
+  "close": 13.08,
+  "vol": 1000000,
+  "change_pct": 1.0
+ },
+ {
+  "trade_date": "2026-01-28",
+  "open": 14.25,
+  "high": 14.53,
+  "low": 14.1,
+  "close": 14.39,
+  "vol": 1000000,
+  "change_pct": 10.0
+ },
+ {
+  "trade_date": "2026-01-29",
+  "open": 15.67,
+  "high": 15.99,
+  "low": 15.51,
+  "close": 15.83,
+  "vol": 1000000,
+  "change_pct": 10.0
+ },
+ {
+  "trade_date": "2026-01-30",
+  "open": 17.24,
+  "high": 17.58,
+  "low": 17.06,
+  "close": 17.41,
+  "vol": 1000000,
+  "change_pct": 10.0
+ }
+]

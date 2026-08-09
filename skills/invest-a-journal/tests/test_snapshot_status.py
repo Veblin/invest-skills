@@ -72,7 +72,7 @@ def test_all_failed_snapshot_not_cached_by_data_bridge(monkeypatch, tmp_path):
         ttl_override=300,
     )
     assert out["status"] == "all_failed"
-    assert data_bridge._cache.is_fresh("microstructure", "market") is False
+    assert data_bridge._cache.get("microstructure", "market") is None
 
 
 def test_ok_snapshot_cached_by_data_bridge(monkeypatch, tmp_path):
@@ -94,4 +94,4 @@ def test_ok_snapshot_cached_by_data_bridge(monkeypatch, tmp_path):
         ttl_override=300,
     )
     assert out["status"] == "ok"
-    assert data_bridge._cache.is_fresh("microstructure", "market") is True
+    assert data_bridge._cache.get("microstructure", "market") is not None

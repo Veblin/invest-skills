@@ -233,3 +233,94 @@ def test_share_history_within_window_no_note(monkeypatch):
     assert out["available"] is True
     assert "note" not in out
     assert out["summary"]["row_count"] == 5
+
+
+def _share_env_with_reversal(n_rows: int = 12) -> dict:
+    """前段净流入 + 近端 5 行净流出（份额转向，batch-test P1-4）。
+
+    份额单位万份：+20000 万份 × 均价 4 元 / 1e4 = +8 亿；-15000 → -6 亿。
+    前 6 行累计 +48 亿，后 5 行累计 -30 亿 → 整体净流入但近端转流出。
+    """
+    base = datetime.date(2026, 7, 1)
+    dates = [(base + datetime.timedelta(days=i)).strftime("%Y%m%d")
+             for i in range(n_rows)]
+    shares = []
+    s = 1_000_000.0
+    for i in range(n_rows):
+        s += 20000.0 if i < n_rows - 5 else -15000.0
+        shares.append(round(s, 2))
+    fund_share = [{"trade_date": d, "fd_share": sh} for d, sh in zip(dates, shares)]
+    fund_daily = [
+        {"trade_date": d, "open": 4.0, "high": 4.1, "low": 3.9,
+         "close": 4.0, "pre_close": 3.99, "pct_chg": 0.1,
+         "vol": 10000, "amount": 40000}
+        for d in dates
+    ]
+    return {"status": "ok", "fund_share": fund_share,
+            "fund_daily": fund_daily, "note": None}
+
+
+def test_share_history_trend_flags_recent_reversal(monkeypatch):
+    """batch-test P1-4：整体净流入但近 5 日净流出 → trend 附带近端提示，
+    不得仅按 20 日合计定性「持续净流入」。"""
+    def _bridge_reversal(getter, *a):
+        if getter == "get_etf_share_history":
+            return _share_env_with_reversal()
+        return None
+
+    monkeypatch.setattr("etf_data._bridge_get", _bridge_reversal)
+    out = query_etf_share_history("515050", days=12)
+    s = out["summary"]
+    assert s["total_flow_est"] > 5          # 整体净流入（>5 阈值）
+    assert s["recent_flow_est"] < 0         # 近端 5 日净流出
+    assert s["recent_flow_days"] == 5
+    assert "🟢" in s["trend"] and "转净流出" in s["trend"]
+
+
+def test_share_history_trend_span_counts_missing_share_days(monkeypatch):
+    """batch-test P1-4 二次修复：fund_share T+1 延迟使尾端 1-2 日无份额
+    → 「近 5 日」窗口实际跨 >5 个交易日，trend 标注必须用实际跨度。"""
+    n_rows = 12
+    base = datetime.date(2026, 7, 1)
+    dates = [(base + datetime.timedelta(days=i)).strftime("%Y%m%d")
+             for i in range(n_rows)]
+    # 份额：7/2~7/6 每行 +20000（+8 亿/日，前段大流入）→ 7/7~7/10 每行 -15000
+    # （-6 亿/日，近端净流出）；尾端 2 行（7/11、7/12）fund_share 缺失（T+1 延迟）
+    deltas = [20000.0] * 5 + [-15000.0] * 4  # 对应 7/2~7/6 与 7/7~7/10
+    shares = []
+    s = 1_000_000.0
+    shares.append(s)  # 7/1（首行，无 prev 不产生 flow）
+    for d in deltas:
+        s += d
+        shares.append(round(s, 2))
+    fund_share = [{"trade_date": d, "fd_share": sh}
+                  for d, sh in zip(dates[:10], shares)]
+    fund_share = [{"trade_date": d, "fd_share": sh}
+                  for d, sh in zip(dates[:-2], shares)]
+    fund_daily = [
+        {"trade_date": d, "open": 4.0, "high": 4.1, "low": 3.9,
+         "close": 4.0, "pre_close": 3.99, "pct_chg": 0.1,
+         "vol": 10000, "amount": 40000}
+        for d in dates
+    ]
+    env = {"status": "ok", "fund_share": fund_share,
+           "fund_daily": fund_daily, "note": None}
+
+    def _bridge_delayed(getter, *a):
+        if getter == "get_etf_share_history":
+            return env
+        return None
+
+    monkeypatch.setattr("etf_data._bridge_get", _bridge_delayed)
+    out = query_etf_share_history("515050", days=12)
+    s = out["summary"]
+    # rows=12 行，首行（7/1）无 prev_share → detail_rows=11 行（7/2~7/12）
+    # flows 只含 9 行（7/2~7/10；7/11、7/12 无份额被滤）：
+    #   7/2~7/6 流入（+8 亿×5）+ 7/7~7/10 流出（-6 亿×4）→ 合计 +16 亿 > 5 → 基础🟢
+    # recent_flows = flows[-5:] = 7/6~7/10 = +8-6-6-6-6 = -16 亿 → 转净流出
+    # 第 5 个可算行（7/6）在 detail 索引 4 → span = 11-4 = 7（非硬编码 5）
+    assert s["row_count"] == 11
+    assert s["total_flow_est"] > 5
+    assert s["recent_flow_est"] < 0
+    assert s["recent_flow_days"] == 7  # T+1 延迟：最近 5 个可算行实际跨 7 个交易日
+    assert "近 7 日转净流出" in s["trend"]

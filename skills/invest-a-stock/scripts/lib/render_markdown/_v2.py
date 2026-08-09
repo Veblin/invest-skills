@@ -10,96 +10,6 @@ del __base_ref, __base_n
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
-
-# --- render_compact ---
-def render_compact(collection: dict[str, Any], symbol: str) -> str:
-    """紧凑文本报告（已弃用，v0.1.2 起 render() 路由到 render_report_v2）。
-
-    保留供向后兼容；新代码应直接使用 render() 或 render_report_v2()。
-    """
-    lines = [
-        f"# {symbol} 采集报告",
-        f"采集时间: {collection.get('fetched_at','')[:19]}",
-        f"状态: {collection['summary']['available']}/{collection['summary']['total']} 维度有数据",
-        "",
-    ]
-    extras = _render_engine_extras(collection)
-    if extras:
-        lines.extend(extras)
-        lines.append("")
-
-    for dim in collection.get("dimensions", []):
-        dn, display = dim["dimension"], dim["display"]
-        data, meta = dim.get("data"), dim.get("_meta", {})
-        source = meta.get("source", "none")
-        all_src = meta.get("all_sources")
-        has_data = data is not None
-
-        # ---- 主数据区块 ----
-        if has_data:
-            xv = _source_status_block(all_src)
-            lines.append(f"## ✅ {display}")
-            lines.append(f"**主数据来源：** {source}")
-            if xv:
-                lines.append("")
-                lines.append("**各渠道取证状态：**")
-                lines.append(xv)
-                lines.append("")
-            cv_line = _meta_cv_line(meta)
-            if cv_line:
-                lines.append(cv_line)
-                lines.append("")
-            _render_dimension_data(dn, data, lines)
-        else:
-            lines.append(f"## ⚠️ {display}")
-            error = dim.get("error", "无可用数据源")
-            lines.append("")
-            lines.append(f"> **未获取到任何有效数据，无法判断。**")
-            lines.append(f"> 原因：{_sanitize_error(error, 80)}")
-            xv = _source_status_block(all_src)
-            if xv:
-                lines.append("")
-                lines.append("**已尝试的渠道：**")
-                lines.append(xv)
-        lines.append("")
-
-    # ---- 引用来源附录（类似论文 References） ----
-    lines.append("---")
-    lines.append("## 📚 引用来源（References）")
-    lines.append("")
-    lines.append("| 维度 | 渠道 | 追溯路径 | 数据状态 |")
-    lines.append("|------|------|----------|---------|")
-    for dim in collection.get("dimensions", []):
-        display = dim["display"]
-        all_src = dim.get("_meta", {}).get("all_sources")
-        if not all_src:
-            src_entry = dim.get("_meta", {})
-            icon = "✅" if dim.get("data") is not None else "❌"
-            qp = src_entry.get("query_params", "")
-            src_name = src_entry.get("source", "?")
-            status = "可用" if dim.get("data") is not None else "不可用"
-            lines.append(f"| {display} | {src_name} | `{qp}` | {icon} {status} |")
-            continue
-
-        first = True
-        for s in all_src:
-            src_name = s.get("source", "?")
-            avail = s.get("data_available", False)
-            error = s.get("error", "")
-            qp = s.get("query_params", "")
-            dim_label = display if first else ""
-            first = False
-            if avail:
-                lines.append(f"| {dim_label} | {src_name} | `{qp}` | ✅ 有数据 |")
-            elif error:
-                lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {_sanitize_error(error, 55)} |")
-            else:
-                lines.append(f"| {dim_label} | {src_name} | — | ⏭️ 未尝试 |")
-
-    return "\n".join(lines)
-
-
 # --- render_json ---
 def render_json(collection: dict[str, Any]) -> str:
     from ..json_util import dumps_json
@@ -108,7 +18,7 @@ def render_json(collection: dict[str, Any]) -> str:
 
 # --- render ---
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
-           mode: str = "full", *, attach_extras: bool = True) -> str:
+           mode: str = "full", *, attach_extras: bool = False) -> str:
     """统一渲染入口。支持 compact / json / md / html 格式。
 
     compact  — 紧凑文本报告（v0.1.2 八段 v2 模板）
@@ -117,13 +27,24 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
     html     — HTML 研究报告（v0.1.2 冻结模板）
 
     mode     — "full"（完整九模块）/"brief"（精简简报）/"concise"（对话场景精简）
-    attach_extras — False 时跳过 market_structure / phase2 补采（离线 synthesize）
+    attach_extras — 默认 False：纯渲染流程不发起任何网络调用。仅显式置 True 时
+                    联网补采 market_structure / phase2（如 synthesize 现场补齐）。
+                    联网路径任何异常（超时/挂起/权限）都快速降级：记日志 + 渲染
+                    缺失块标注（renderer 对缺失数据输出"未获取到任何有效数据"），
+                    绝不阻塞渲染。
     """
     if attach_extras:
         from lib import collector
         if not collection.get("market_structure"):
-            collector.attach_market_structure(collection, symbol)
-        collector.attach_phase2_extras(collection, symbol)
+            try:
+                collector.attach_market_structure(collection, symbol)
+            except Exception as exc:
+                logger.warning("attach_market_structure failed (non-fatal): %s", exc)
+                collection.setdefault("_meta", {})["market_structure_error"] = str(exc)
+        try:
+            collector.attach_phase2_extras(collection, symbol)
+        except Exception as exc:
+            logger.warning("attach_phase2_extras failed (non-fatal): %s", exc)
 
         # Events: backfill when never attached, or [] without events_summary (failed path).
         # Standard collect→report with events_summary already ran attach_events.

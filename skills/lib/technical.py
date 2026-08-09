@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from lib.nums import safe_float  # noqa: E402 — canonical（None/NaN/±inf → None）
+
 
 # ---- 内部辅助 ----
 
@@ -417,6 +419,8 @@ def _volume_ratio(vols: list[float], n: int = 5) -> list[float | None]:
 
 def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
     """N 日极值（最高/最低收盘价和日期）。"""
+    # 同 compute()：close None/NaN 行剔除（review #10 第二轮）
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
     closes = [r.get("close", 0) or 0 for r in rows]
     dates = [r.get("trade_date", "") for r in rows]
 
@@ -503,6 +507,11 @@ def compute(rows: list[dict]) -> dict[str, Any]:
         return {"error": "empty_kline_data", "message": "K 线数据为空，无法计算技术指标"}
 
     rows = sort_kline_asc(rows)
+    # close 为 None/NaN（停牌残留 bar/空值填充行）→ 整行剔除，不得 `or 0`
+    # 转 0.0 污染均线/RSI/MACD/BOLL 与 latest_close（review #10 第二轮）
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
+    if not rows:
+        return {"error": "empty_kline_data", "message": "K 线数据为空，无法计算技术指标"}
 
     closes = [r.get("close", 0) or 0 for r in rows]
     highs = [r.get("high", 0) or 0 for r in rows]
@@ -860,51 +869,135 @@ def relative_strength(
     }
 
 
-def rolling_beta(
-    stock_closes: list[float],
-    benchmark_closes: list[float],
-    windows: list[int] | None = None,
-) -> dict[str, Any]:
-    """Rolling beta via stats.calc_beta on return series.
-
-    仅测试（invest-a-stock/tests/test_technical_v019.py）使用；保留。
-    """
-    try:
-        from .stats import calc_beta  # 同包相对导入（正常路径）
-    except ImportError:
-        from stats import calc_beta  # sys.path 裸导入
-
-    if windows is None:
-        windows = [60, 120, 252]
-
-    n = min(len(stock_closes), len(benchmark_closes))
-    if n < 12:
-        return {"error": "数据不足", "windows": {}}
-
-    def _returns(closes: list[float]) -> list[float]:
-        out: list[float] = []
-        for i in range(1, len(closes)):
-            if closes[i - 1] > 0:
-                out.append(closes[i] / closes[i - 1] - 1)
-        return out
-
-    stock_rets = _returns(stock_closes[-n:])
-    bench_rets = _returns(benchmark_closes[-n:])
-
-    result_windows: dict[str, dict] = {}
-    for w in windows:
-        if len(stock_rets) < w or len(bench_rets) < w:
-            result_windows[str(w)] = {"beta": None, "error": f"需要 ≥{w} 日"}
-            continue
-        info = calc_beta(stock_rets[-w:], bench_rets[-w:])
-        result_windows[str(w)] = info
-
-    return {"windows": result_windows, "benchmark": "000300.SH"}
-
-
 def _last_valid(seq: list[float | None]) -> float | None:
     """返回序列最后一个非 None 值。"""
     for v in reversed(seq):
         if v is not None:
             return v
     return None
+
+
+# --- 近端价格结构检测（R12e: 涨跌停/连板/极端波动）---
+def limit_pct_for_symbol(symbol: str, name: str | None = None) -> float:
+    """板块涨跌停阈值（%）：主板 10 / 创业板(30x)科创板(68x) 20 / 北交所(4/8/920) 30。
+
+    全仓涨跌停阈值表的唯一权威（跨 skill 共享）：gap_scanner 等模块按板块
+    推导的阈值一律调用本函数，不得另维护一份前缀表（曾与
+    skills/invest-a-gap-scan 的 _max_gap_pct_for_code 发生两份表分歧）。
+    ST/*ST 股涨跌停 5% **仅限主板**（法定）：创业板/科创板/北交所 ST 的
+    涨跌幅仍为 20%/20%/30%（2020-08-24 注册制后创业板 ST 无 5% 限制）——
+    ST 规则放在板块判断之后作为主板兜底（review #13 第二轮）。需要名称
+    信息，调用方显式传 name 参数（kline 行无 name 字段时拿不到 → 按板块
+    阈值兜底）。
+    """
+    if symbol.startswith(("30", "68")):
+        return 20.0
+    if symbol.startswith(("4", "8", "920")):
+        return 30.0
+    if name and "ST" in str(name).upper():
+        return 5.0
+    return 10.0
+
+
+def detect_limit_streaks(
+    rows: list[dict],
+    *,
+    symbol: str = "",
+    lookback: int = 15,
+    limit_pct: float | None = None,
+    name: str | None = None,
+) -> dict:
+    """近端涨跌停/连板/极端波动结构检测（R12e）。
+
+    rows: kline 行（trade_date/open/high/low/close/vol 标准化字段）。
+    引擎计算——识别"跌停→连板"这类窗口累计数掩盖的近端结构
+    （沃格光电 603773 实证：20 日 -35.79% 掩盖了 7 月三跌停 → 8 月初
+    三连板反包的实际结构）。
+
+    name: 证券简称；传入时 ST/*ST 股阈值按 5% 判定（需外部提供）。
+
+    返回:
+      {
+        "available": bool,
+        "limit_threshold": 5.0/10.0/20.0/30.0,
+        "streaks": [{type: up/down, days, start_date, end_date, total_pct}],  # 仅 days>=2
+        "recent_limit_ups"/"recent_limit_downs": lookback 内涨跌停天数,
+        "window_pct": lookback 累计涨跌%,
+        "period_high"/"period_low": lookback 内高低点及日期,
+      }
+    """
+    thr = limit_pct if limit_pct is not None else limit_pct_for_symbol(symbol, name=name)
+    srows = sort_kline_asc(rows)
+    srows = [r for r in srows if safe_float(r.get("close")) is not None]  # 剥离 NaN/None（与 compute() 同型）
+    window = srows[-lookback:] if len(srows) > lookback else srows
+    if len(window) < 3:
+        return {"available": False, "reason": "kline 样本不足"}
+
+    closes: list[float] = []
+    dates: list[str] = []
+    pcts: list[float] = []
+    for i, r in enumerate(window):
+        try:
+            cur = float(r["close"])
+        except (TypeError, ValueError):
+            return {"available": False, "reason": "close 字段缺失"}
+        closes.append(cur)
+        dates.append(str(r.get("trade_date") or r.get("date") or ""))
+        cp = r.get("change_pct")
+        if cp is not None:
+            try:
+                pcts.append(float(cp))
+            except (TypeError, ValueError):
+                pcts.append(0.0)
+        elif i > 0 and closes[i - 1]:
+            pcts.append((cur / closes[i - 1] - 1) * 100)
+        else:
+            pcts.append(0.0)
+
+    def _is_limit(p: float) -> bool:
+        return abs(p) >= thr - 0.2  # 容忍四舍五入（9.99% vs 10.01%）
+
+    ups = [i for i, p in enumerate(pcts) if _is_limit(p) and p > 0]
+    downs = [i for i, p in enumerate(pcts) if _is_limit(p) and p < 0]
+
+    def _streak_groups(indices: list[int]) -> list[list[int]]:
+        out: list[list[int]] = []
+        for idx in indices:
+            if out and idx == out[-1][-1] + 1:
+                out[-1].append(idx)
+            else:
+                out.append([idx])
+        return out
+
+    streaks: list[dict] = []
+    for grp in _streak_groups(ups):
+        if len(grp) >= 2:
+            start, end = grp[0], grp[-1]
+            base = closes[start - 1] if start > 0 else None
+            streaks.append({
+                "type": "up", "days": len(grp),
+                "start_date": dates[start], "end_date": dates[end],
+                "total_pct": round((closes[end] / base - 1) * 100, 1) if base else None,
+            })
+    for grp in _streak_groups(downs):
+        if len(grp) >= 2:
+            start, end = grp[0], grp[-1]
+            base = closes[start - 1] if start > 0 else None
+            streaks.append({
+                "type": "down", "days": len(grp),
+                "start_date": dates[start], "end_date": dates[end],
+                "total_pct": round((closes[end] / base - 1) * 100, 1) if base else None,
+            })
+
+    hi, lo = max(closes), min(closes)
+    return {
+        "available": True,
+        "limit_threshold": thr,
+        "streaks": streaks,
+        "recent_limit_ups": len(ups),
+        "recent_limit_downs": len(downs),
+        "window_pct": round((closes[-1] / closes[0] - 1) * 100, 2) if closes[0] else None,
+        "period_high": {"value": round(hi, 2), "date": dates[closes.index(hi)]},
+        "period_low": {"value": round(lo, 2), "date": dates[closes.index(lo)]},
+        "lookback": len(window),
+    }

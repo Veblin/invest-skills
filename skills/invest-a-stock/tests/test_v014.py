@@ -127,15 +127,6 @@ class TestCollectorEdgeCases:
         assert "None" not in summary["summary_text"]
 
 
-class TestSchemaResearch:
-    def test_research_summary_keys(self):
-        from lib.schema import DIMENSIONS, RESEARCH_SUMMARY_KEYS
-
-        assert DIMENSIONS["research"] == "机构研报"
-        assert "status" in RESEARCH_SUMMARY_KEYS
-        assert "summary_text" in RESEARCH_SUMMARY_KEYS
-
-
 class TestRenderEdgeCases:
     def test_coalesce_fin_field_preserves_zero(self):
         from lib.render import _coalesce_fin_field
@@ -174,3 +165,27 @@ class TestRenderEdgeCases:
         assert _evidence_strength_label([]) == "数据不足"
         assert _evidence_strength_label([False, False]) == "❓ 弱"
         assert _evidence_strength_label([True, True]) == "✅ 强"
+
+
+class TestNetMarginZeroPreserved:
+    """缺陷2: 净利率 0.0（合法值）不得被 `or` 链降级到备用 key 或 None。"""
+
+    def test_net_margin_zero_rendered_as_zero(self):
+        from lib.render import _section_fundamentals_layered
+
+        c = _collection_phase3()
+        for dim in c["dimensions"]:
+            if dim["dimension"] == "financials":
+                rows = dim["data"]
+                rows[-1] = dict(rows[-1])  # 不污染 fixture
+                # netprofit_margin=0.0 合法（净利率 0%）；np_margin=0.05 是诱饵——
+                # 修复前 `or` 会把 0.0 判为缺失回退到 np_margin → 跨 key 混值
+                rows[-1]["netprofit_margin"] = 0.0
+                rows[-1]["np_margin"] = 0.05
+                rows[-1]["asset_turnover"] = 0.8
+                rows[-1]["equity_multiplier"] = 2.0
+        dims = {d["dimension"]: d for d in c["dimensions"]}
+        text = _section_fundamentals_layered(dims, c, "600176")
+        assert "- **净利润率：** 0.00%（" in text  # 净利率 0% 被如实渲染
+        assert "- **净利润率：** 0.05%（" not in text  # 未回退到 np_margin 诱饵值
+        assert "净利润率" in text  # 非"数据不足/未知"

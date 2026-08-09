@@ -50,6 +50,10 @@ class IndustryProfile:
     # 行业名（SW2021 分类）
     sw_name: str = ""
 
+    # 行业成功关键因素（R4）— 每项: {question, data_fields, sources, answer_template}
+    # 报告先答这些再进通用 12 题；无数据字段支撑的项 data_fields 可为空（引擎外，需 AI 补查）
+    success_factors: list[dict] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # 默认 Profile — 当前通用框架（行业中性）
@@ -140,16 +144,6 @@ def get_sector_group(industry: str) -> str:
     return resolve_industry_profile(industry).sector_group
 
 
-def get_valuation_metrics(industry: str) -> list[str]:
-    """快捷方法：获取行业应优先展示的估值指标。"""
-    return resolve_industry_profile(industry).primary_valuation_metrics
-
-
-def get_operational_metrics(industry: str) -> dict[str, dict[str, Any]]:
-    """快捷方法：获取行业特有运营指标定义。"""
-    return resolve_industry_profile(industry).operational_metrics
-
-
 def get_quality_overrides(industry: str) -> dict[str, str]:
     """快捷方法：获取质量检查覆盖规则。"""
     return resolve_industry_profile(industry).quality_overrides
@@ -160,69 +154,43 @@ def get_unknown_rules(industry: str) -> list[tuple[str, str]]:
     return resolve_industry_profile(industry).unknown_rules
 
 
-def get_risk_signals(industry: str) -> dict[str, dict[str, Any]]:
-    """快捷方法：获取行业特有风险信号。"""
-    return resolve_industry_profile(industry).risk_signals
+# --- 行业成功关键因素（R4） ---
+
+_SUCCESS_FACTOR_FIELDS = ("question", "data_fields", "sources", "answer_template")
 
 
-def get_fast_veto_skips(industry: str) -> list[str]:
-    """快捷方法：获取不适用的快速否决项。"""
-    return resolve_industry_profile(industry).fast_veto_skips
+def validate_success_factors(profile: IndustryProfile) -> list[str]:
+    """校验成功关键因素结构的完整性。
+
+    每项必须含 question / data_fields / sources / answer_template 四字段，
+    缺任一 → 返回该因素的问题清单（供测试与开发期自检，运行期不阻断）。
+    """
+    errors: list[str] = []
+    for idx, factor in enumerate(profile.success_factors):
+        if not isinstance(factor, dict):
+            errors.append(f"[{profile.sw_name or profile.sector_group}] 成功因素 #{idx} 非 dict")
+            continue
+        missing = [f for f in _SUCCESS_FACTOR_FIELDS if f not in factor]
+        if missing:
+            errors.append(
+                f"[{profile.sw_name or profile.sector_group}] 成功因素 #{idx} "
+                f"缺字段: {', '.join(missing)}"
+            )
+    return errors
 
 
-def is_financial_sector(industry: str) -> bool:
-    """是否是金融行业（银行/保险/券商）。"""
-    return get_sector_group(industry) == "financial"
+def get_success_factors(industry: str) -> list[dict]:
+    """获取行业成功关键因素清单（R4）。
 
-
-def is_tech_sector(industry: str) -> bool:
-    """是否是科技行业（硬件/软件）。"""
-    return get_sector_group(industry) in ("tech", "tech_hardware", "tech_software")
-
-
-def is_consumer_sector(industry: str) -> bool:
-    """是否是消费品行业。"""
-    return get_sector_group(industry) == "consumer"
-
-
-def is_cyclical_sector(industry: str) -> bool:
-    """是否是周期性行业（工业/能源/材料）。"""
-    return get_sector_group(industry) == "industrial"
-
-
-def list_registered_industries() -> list[str]:
-    """列出所有已注册的行业关键词。"""
-    return sorted(_REGISTRY.keys(), key=len, reverse=True)
+    未覆盖行业 → 返回空表（渲染层输出「无行业成功因素定义」标注，回退通用 12 题）。
+    """
+    profile = resolve_industry_profile(industry)
+    if profile is default_profile:
+        return []
+    return list(profile.success_factors)
 
 
 # ---------------------------------------------------------------------------
 # 预加载子模块（延迟导入以避免循环依赖）
-# ---------------------------------------------------------------------------
-
-_loaded = False
-
-
-def _ensure_loaded() -> None:
-    """确保所有行业子模块已加载到 _REGISTRY 中。"""
-    global _loaded
-    if _loaded:
-        return
-    # 按需导入子模块（副作用：调用 register_profile 填充 _REGISTRY）
-    from . import banks  # noqa: F401
-    from . import tech_hardware  # noqa: F401
-    # 后续迭代中取消注释：
-    # from . import insurance  # noqa: F401
-    # from . import securities  # noqa: F401
-    # from . import real_estate  # noqa: F401
-    # from . import tech_software  # noqa: F401
-    # from . import pharma  # noqa: F401
-    # from . import consumer  # noqa: F401
-    # from . import energy_materials  # noqa: F401
-    # from . import autos_new_energy  # noqa: F401
-    # from . import utilities  # noqa: F401
-    _loaded = True
-
-
-# 在 resolve_industry_profile 入口处确保已加载
-# （通过在函数内调用 _ensure_loaded）
-# 注：实际集成时在 resolve_industry_profile() 顶部加 _ensure_loaded()
+# 行业子模块注册：由 industry/__init__.py 的 `from . import banks/tech_hardware`
+# import 副作用调用 register_profile 填充 _REGISTRY，无需额外加载钩子。

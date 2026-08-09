@@ -12,16 +12,16 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
 from . import env
-from .db_util import connect_db, safe_close
+from .db_util import connect_db, load_recent_rows, safe_close, upsert_daily_rows
 from .json_util import dumps_json, json_default
 from .schema import index_dimensions
+from .shared_dates import shanghai_now  # 上海时区口径（曾用 UTC，跨时区偏移 8h）
 
 DB_PATH = env.STORE_DB
 SCHEMA_VERSION = 1
@@ -61,6 +61,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, name TEXT,
                 fetched_at TEXT NOT NULL, dimensions_total INTEGER DEFAULT 0,
                 dimensions_ok INTEGER DEFAULT 0, raw_json TEXT,
+                kind TEXT NOT NULL DEFAULT 'collect',
                 created_at TEXT DEFAULT (datetime('now')));
             CREATE INDEX IF NOT EXISTS idx_c_sym ON collections(symbol);
             CREATE INDEX IF NOT EXISTS idx_c_fa ON collections(fetched_at);
@@ -140,6 +141,24 @@ def init_db() -> None:
                 mkt_cap REAL,
                 PRIMARY KEY (index_code, date)
             );
+            CREATE TABLE IF NOT EXISTS index_pe_history (
+                index_code TEXT NOT NULL,
+                index_name TEXT NOT NULL DEFAULT '',
+                date TEXT NOT NULL,
+                pe REAL, pe_circulating REAL,
+                dividend_yield REAL, dividend_yield_circulating REAL,
+                source TEXT DEFAULT 'csindex',
+                collected_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (index_code, date)
+            );
+            CREATE TABLE IF NOT EXISTS macro_snapshots (
+                date TEXT PRIMARY KEY,
+                pmi REAL, cpi REAL, ppi REAL, lpr REAL,
+                money_supply REAL, loan REAL,
+                vix REAL, sox REAL,
+                raw_json TEXT,
+                collected_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [
@@ -154,13 +173,27 @@ def init_db() -> None:
                     pass  # 列已存在
                 else:
                     raise
+        # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
+        # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
+        try:
+            c.execute("ALTER TABLE collections ADD COLUMN kind TEXT NOT NULL DEFAULT 'collect'")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" in str(e).lower():
+                pass  # 列已存在
+            else:
+                raise
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
         c.commit()
 
 
-def save_collection(result: dict[str, Any]) -> int:
+def save_collection(result: dict[str, Any], kind: str = "collect") -> int:
+    """采集结果入库。kind: 'collect'（显式采集/现场采集）或 'report'（报告快照）。
+
+    kind 用于 diff 自动配对（get_latest_two 优先同 kind），避免同会话
+    report+collect 两行互相比较掩盖跨会话变化（review #9 第二轮）。
+    """
     init_db()
     symbol = result.get("symbol", "?")
     dims = result.get("dimensions")
@@ -177,9 +210,9 @@ def save_collection(result: dict[str, Any]) -> int:
     c = _conn()
     try:
         cur = c.execute(
-            "INSERT INTO collections (symbol,name,fetched_at,dimensions_total,dimensions_ok,raw_json) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO collections (symbol,name,fetched_at,dimensions_total,dimensions_ok,raw_json,kind) VALUES (?,?,?,?,?,?,?)",
             (symbol, name, result.get("fetched_at", ""), sm.get("total", 0), sm.get("available", 0),
-             dumps_json(result)))
+             dumps_json(result), kind))
         cid = cur.lastrowid
         for d in dims:
             data = d.get("data")
@@ -247,7 +280,7 @@ def save_pipeline_step(symbol: str, step: str, state: dict | None = None) -> Non
     init_db()
     c = _conn()
     try:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        now = shanghai_now().strftime("%Y-%m-%d %H:%M:%S")
         state_json = (
             json.dumps(state, ensure_ascii=False, default=json_default) if state else None
         )
@@ -298,17 +331,6 @@ def get_pipeline_progress(symbol: str) -> dict[str, bool]:
         _safe_close(c)
 
 
-def clear_pipeline_state(symbol: str) -> None:
-    """清除某 symbol 的全部流水线状态。"""
-    init_db()
-    c = _conn()
-    try:
-        c.execute("DELETE FROM pipeline_states WHERE symbol = ?", (symbol,))
-        c.commit()
-    finally:
-        _safe_close(c)
-
-
 # ---- Diff 快照对比 ----
 
 def get_collection(collection_id: int) -> dict | None:
@@ -338,6 +360,16 @@ def get_collection(collection_id: int) -> dict | None:
 def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     """获取指定股票最近两次采集记录。
 
+    优先比较两次 kind='collect' 的真实采集（report/watchlist 快照可能
+    与 collect 同会话、互相掩盖跨会话变化，review #9 第二轮）；仅当
+    symbol 无任何 collect 行（纯 report 用户）才回退全部 kind。
+
+    注意：collect 恰好 1 条时不再回退混入 report 行——新用户同会话
+    collect --store + report 会得到 [report, collect] 的同会话配对，
+    diff 恒显「几乎无变化」，掩盖真实跨会话变化（review #9 移除过的
+    自我比较问题在回退路径复现，code-review 第三轮）；须到第二次
+    collect 会话才有配对。
+
     Returns:
         (older, newer) tuple，仅 1 条记录时返回 None。
     """
@@ -346,8 +378,15 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     try:
         rows = c.execute(
             "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-            "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
+            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 2",
             (symbol,)).fetchall()
+        if len(rows) == 0:
+            # 旧库/纯 report 用户兼容：回退全部 kind（仅限无 collect 行，
+            # 1 条 collect + 同会话 report 混排会复现自我比较问题）
+            rows = c.execute(
+                "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
+                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
+                (symbol,)).fetchall()
         if len(rows) < 2:
             return None
         newer = dict(rows[0])
@@ -635,11 +674,21 @@ def format_key_diff_markdown_lines(key_diff: dict) -> list[str]:
 
 
 def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
-    """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。"""
-    rows = list_collections(limit=1, symbol=symbol)
-    if not rows:
-        return None
-    prev = get_collection(rows[0]["id"])
+    """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。
+
+    跳过 fetched_at 与当前采集相同的行（同会话刚写入的 collect 行）——
+    否则「相对上次调研变化」比较的是几分钟前的同会话快照，恒无变化
+    （review #9 第二轮）。fetched_at 精度为秒，跨会话不相等。
+    """
+    cur_ts = str(current.get("fetched_at", ""))
+    rows = list_collections(limit=20, symbol=symbol)
+    prev = None
+    for row in rows:
+        if str(row.get("fetched_at", "")) == cur_ts:
+            continue  # 同会话行
+        prev = get_collection(row["id"])
+        if prev:
+            break
     if not prev:
         return None
     return diff_key_snapshots(prev, current)
@@ -848,49 +897,6 @@ def get_valuation(valuation_id: int) -> dict | None:
         _safe_close(c)
 
 
-def compare_valuations(id1: int, id2: int) -> dict | None:
-    """对比两次估值快照。
-
-    Returns:
-        dict with old/new snapshots and key deltas, or None if either not found.
-    """
-    v1 = get_valuation(id1)
-    v2 = get_valuation(id2)
-    if v1 is None or v2 is None:
-        return None
-
-    def _delta(old, new):
-        if old is None or new is None:
-            return None
-        return round(new - old, 4)
-
-    return {
-        "symbol": v1.get("symbol", "?"),
-        "old": {
-            "id": id1, "created_at": v1.get("created_at", ""),
-            "price": v1.get("price"), "ttm_eps": v1.get("ttm_eps"),
-            "ttm_pe": v1.get("ttm_pe"), "pb": v1.get("pb"),
-            "base_low": v1.get("base_low"), "base_high": v1.get("base_high"),
-        },
-        "new": {
-            "id": id2, "created_at": v2.get("created_at", ""),
-            "price": v2.get("price"), "ttm_eps": v2.get("ttm_eps"),
-            "ttm_pe": v2.get("ttm_pe"), "pb": v2.get("pb"),
-            "base_low": v2.get("base_low"), "base_high": v2.get("base_high"),
-        },
-        "deltas": {
-            "price": _delta(v1.get("price"), v2.get("price")),
-            "ttm_eps": _delta(v1.get("ttm_eps"), v2.get("ttm_eps")),
-            "ttm_pe": _delta(v1.get("ttm_pe"), v2.get("ttm_pe")),
-            "pb": _delta(v1.get("pb"), v2.get("pb")),
-            "base_mid": _delta(
-                ((v1.get("base_low") or 0) + (v1.get("base_high") or 0)) / 2 if v1.get("base_low") is not None and v1.get("base_high") is not None else None,
-                ((v2.get("base_low") or 0) + (v2.get("base_high") or 0)) / 2 if v2.get("base_low") is not None and v2.get("base_high") is not None else None,
-            ),
-        },
-    }
-
-
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
     """递归对比两个维度的 data，返回变化列表。"""
     changes: list[dict] = []
@@ -1033,8 +1039,9 @@ def thesis_init(symbol: str) -> dict[str, Any]:
         c.execute(
             """INSERT OR REPLACE INTO thesis
                (symbol, assumptions_json, red_lines_json, health_score, state, updated_at)
-               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
-            (symbol, dumps_json(assumptions), dumps_json(red_lines), score, state),
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (symbol, dumps_json(assumptions), dumps_json(red_lines), score, state,
+             shanghai_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         c.commit()
     finally:
@@ -1084,10 +1091,117 @@ def thesis_update(symbol: str, assumptions: list[dict] | None = None,
     try:
         c.execute(
             """UPDATE thesis SET assumptions_json=?, red_lines_json=?,
-               health_score=?, state=?, updated_at=datetime('now') WHERE symbol=?""",
-            (dumps_json(a), dumps_json(r), score, state, symbol),
+               health_score=?, state=?, updated_at=? WHERE symbol=?""",
+            (dumps_json(a), dumps_json(r), score, state,
+             shanghai_now().strftime("%Y-%m-%d %H:%M:%S"), symbol),
         )
         c.commit()
     finally:
         _safe_close(c)
     return {"symbol": symbol, "health_score": score, "state": state, "action": "update"}
+
+
+# ---------------------------------------------------------------------------
+# 宏观日快照（macro_snapshots 表，v0.2.4）
+#
+# 放置于 store.py 而非 journal lib：journal 侧 db.py 直连 env.STORE_DB，
+# 不 honor _db_override，写入若在 journal 侧将无法测试隔离（污染真实库）。
+# 日期用上海口径（宏观指标无交易日概念，LPR/PMI 月度、VIX/SOX 日频，
+# 非交易日也写入，与 market_snapshots 的交易日跳过策略不同）。
+# ---------------------------------------------------------------------------
+
+_MACRO_INDICATOR_KEYS = ("pmi", "cpi", "ppi", "lpr", "money_supply", "loan", "vix", "sox")
+
+
+def _macro_safe_float(v: Any) -> float | None:
+    """宏观指标值转 float；dict 形态（{value, source, signal}）取 value。
+
+    None / NaN / ±inf / 非数字返回 None（对齐 lib.nums.safe_float 语义，
+    NaN 若写入 sqlite 会绑定为 NULL，穿透到分位计算会污染序列）。
+    """
+    if isinstance(v, dict):
+        v = v.get("value")
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):  # NaN / ±inf
+        return None
+    return f
+
+
+def _merge_macro_raw_json(c: sqlite3.Connection, date: str, indicators: dict) -> dict:
+    """同日 raw_json 按指标键粒度预合并：本次成功重取的键用新信封，
+    未成功（None/NaN/不可解析，与数值列 COALESCE 同判定）的键保留旧信封。
+
+    背景：dumps_json 对非空 indicators 恒返回非 NULL 字符串，upsert 的
+    COALESCE(excluded.raw_json, table.raw_json) 恒取新值——同日部分写入
+    （失败键为 None）会把完整溯源信封整块覆盖，vix/sox 的 source/signal
+    永久丢失（数值列因逐列 COALESCE 幸存）。此处按键合并使 raw_json 与
+    数值列保持一致（code-review 第三轮）。
+    """
+    merged = dict(indicators)
+    existing = c.execute(
+        "SELECT raw_json FROM macro_snapshots WHERE date=?", (date,)).fetchone()
+    if not existing or not existing["raw_json"]:
+        return merged
+    try:
+        old_raw = json.loads(existing["raw_json"])
+    except (json.JSONDecodeError, TypeError):
+        return merged
+    if not isinstance(old_raw, dict):
+        return merged
+    for k in _MACRO_INDICATOR_KEYS:
+        if _macro_safe_float(indicators.get(k)) is None and k in old_raw:
+            merged[k] = old_raw[k]
+    return merged
+
+
+def save_macro_snapshot(macro_context: dict) -> str | None:
+    """宏观指标日快照入库（by date 幂等，按指标键合并写）。
+
+    兼容两种形态：collector 结果 ``{"indicators": {...}}`` 或
+    ``collect_macro_context`` 原样 ``{key: {value, source, signal}}``。
+    全部指标无值 → 返回 None 不写。返回写入日期（上海口径 YYYYMMDD）。
+
+    合并语义：同一天第二次写入（部分指标 fetch 失败为 None、或 7d TTL
+    缓存旧值）不整行覆盖——新值非 NULL 覆盖，NULL 保留旧值，避免冲掉
+    早先写入的好值（v0.2.4 review #2）；raw_json 溯源信封按指标键同步
+    合并（_merge_macro_raw_json，code-review 第三轮）。
+    """
+    if not isinstance(macro_context, dict) or not macro_context:
+        return None
+    indicators = macro_context.get("indicators")
+    if not isinstance(indicators, dict) or not indicators:
+        indicators = macro_context
+    row = {k: _macro_safe_float(indicators.get(k)) for k in _MACRO_INDICATOR_KEYS}
+    if all(v is None for v in row.values()):
+        return None
+    date = shanghai_now().strftime("%Y%m%d")
+    init_db()  # 全新库/旧库上建表（review #1：此前缺失导致 journal 首启静默丢快照）
+    c = _conn()
+    try:
+        raw = _merge_macro_raw_json(c, date, indicators)
+        upsert_daily_rows(
+            c, "macro_snapshots",
+            [{"date": date, **row, "raw_json": dumps_json(raw)}],
+            pk=("date",), merge=True,
+        )
+        c.commit()
+    finally:
+        _safe_close(c)
+    return date
+
+
+def load_macro_history(days: int = 365) -> list[dict]:
+    """macro_snapshots 近 N 日记录，按 date ASC（供宏观护栏趋势/分位消费）。"""
+    init_db()
+    c = _conn()
+    try:
+        return load_recent_rows(c, "macro_snapshots", limit=int(days))
+    except sqlite3.OperationalError:
+        return []  # 表不可用（DB 被替换等）→ 空历史而非抛异常
+    finally:
+        _safe_close(c)

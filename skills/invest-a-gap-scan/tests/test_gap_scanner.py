@@ -11,7 +11,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gap_scanner import (GapInfo, _build_scan_hit, _check_unfilled, _find_candidate_gaps, scan_all)
+from gap_scanner import (
+    GapInfo,
+    _build_scan_hit,
+    _check_ma60_streak,
+    _check_unfilled,
+    _find_candidate_gaps,
+    scan_all,
+)
 from skip_reasons import ExcludeReason, NonHitReason
 
 
@@ -454,7 +461,11 @@ class TestHits:
         assert isinstance(hit.avg_amount_20d, float) and hit.avg_amount_20d > 0
 
     def test_gap_day_is_latest(self):
-        """Gap on the last bar -> vacuously unfilled -> hit."""
+        """Gap on the last bar -> 无后续数据无法确认回补 -> 不报命中。
+
+        缺陷 4 修复前：最新 bar 的跳空恒判「未回补」→ 盘中扫描恒命中，
+        每次扫描都会把当日所有跳空股报为命中。
+        """
         kline = _make_kline(n_bars=200, gap_at=199)
         result = scan_all(
             stocks=[STOCK],
@@ -463,11 +474,61 @@ class TestHits:
             suspension_map={},
             params=DEFAULT_PARAMS,
         )
+        assert len(result.hits) == 0
+        assert result.non_hit_reasons[NonHitReason.GAP_UNCONFIRMED] == 1
+
+    def test_check_unfilled_last_bar_returns_false(self):
+        """_check_unfilled 对最新 bar（无后续数据）返回 False，不做空洞真值。"""
+        assert _check_unfilled([10.0, 12.0], gap_idx=1, gap_high=11.0) is False
+
+    def test_check_unfilled_after_close_confirms_latest_gap(self):
+        """review #1：收盘后最新 bar 缺口未回补（lows[gap_idx] > gap_low）。
+
+        回归 38a7e1e：此前比较 lows[gap_idx] > gap_high（gap_high 即该 bar
+        自身 low）恒 False——收盘后扫描把最新 bar 缺口误判为已回补。
+        """
+        assert _check_unfilled([10.0, 12.0], gap_idx=1, gap_high=12.0,
+                               after_close=True, gap_low=11.0) is True
+
+    def test_gap_day_is_latest_after_close_hits(self):
+        """review #1：收盘后（after_close=True）最新 bar 缺口确认命中，
+        而非误判 GAP_FILLED（38a7e1e 回归前恒空命中名单）。"""
+        kline = _make_kline(n_bars=200, gap_at=199)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            after_close=True,
+        )
         assert len(result.hits) == 1
-        hit = result.hits[0]
-        assert hit.gap.gap_date == str(kline.iloc[199]["trade_date"])
-        # current_price should be the last close
-        assert hit.current_price == kline.iloc[199]["close_qfq"]
+        assert result.hits[0].gap.gap_date == str(kline.iloc[199]["trade_date"])
+        assert result.non_hit_reasons.get(NonHitReason.GAP_FILLED, 0) == 0
+
+    def test_ma60_streak_yesterday_gap_passes(self):
+        """review #4：缺口在倒数第二根 bar（total_count==2）时不得被
+        绝对下限 3 恒拒（MA60 全有效、close≥MA60 应通过）。"""
+        closes = [10.0 + i for i in range(60)] + [70.0, 72.0]
+        ma60 = [None] * 59 + [50.0] * 3  # 59-61 有效
+        assert _check_ma60_streak(closes, ma60, gap_idx=len(closes) - 2) is True
+
+    def test_latest_bar_gap_falls_back_to_older_confirmed(self):
+        """最新 bar 跳空待收盘确认，容错规则回退到更早的已确认未回补缺口。"""
+        kline = _make_two_gap_kline(
+            n_bars=200,
+            gaps=[(80, 1.5, False), (199, 1.5, False)],
+        )
+        params = {**DEFAULT_PARAMS, "gap_lookback": 150}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+        )
+        assert len(result.hits) == 1
+        assert result.hits[0].gap.gap_date == str(kline.iloc[80]["trade_date"])
 
     def test_tolerance_rule_older_gap_hits(self):
         """Two gaps: newer (idx 160) filled, older (idx 80) valid.

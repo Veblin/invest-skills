@@ -7,6 +7,8 @@ akshare 东方财富接口使用 akshare_direct_session() 强制直连。
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
 import threading
@@ -20,6 +22,8 @@ import requests
 
 from .shared_dates import shanghai_now
 import requests.utils as ru
+
+logger = logging.getLogger(__name__)
 
 # 东方财富 API 封锁/阻断标识（共享给 collector / render / schema）。
 EASTMONEY_BLOCKED_KEYWORDS = (
@@ -48,6 +52,63 @@ CLASH_DIRECT_RULES = (
 )
 
 _PROXY_IO_LOCK = threading.RLock()
+
+# ---------------------------------------------------------------------------
+# R12h 全局限流 + 指数退避重试（东财风控：降频后 30-60 分钟自动解除，社区实测）
+# ---------------------------------------------------------------------------
+
+# 东财调用最小间隔（INVEST_EM_INTERVAL_SEC 可覆盖；测试可 monkeypatch 常量）
+EM_REQUEST_INTERVAL_SEC = float(os.environ.get("INVEST_EM_INTERVAL_SEC", "0.5"))
+EM_MAX_RETRIES = 3
+EM_RETRY_BASE_DELAY = 1.0  # 指数退避 1s → 2s → 4s
+
+_em_throttle_lock = threading.Lock()
+_em_last_call = float("-inf")  # 首次调用不等待
+_em_now = time.monotonic  # 可 monkeypatch（测试用 mock 时钟）
+
+
+def throttle_eastmoney() -> None:
+    """全局限流：连续东财调用间隔 ≥ EM_REQUEST_INTERVAL_SEC（跨线程）。"""
+    global _em_last_call
+    with _em_throttle_lock:
+        now = _em_now()
+        wait = EM_REQUEST_INTERVAL_SEC - (now - _em_last_call)
+        if wait > 0:
+            time.sleep(wait)
+            now = _em_now()
+        _em_last_call = now
+
+
+def em_request_with_retry(
+    fn: Any,
+    *,
+    retries: int = EM_MAX_RETRIES,
+    deadline: float | None = None,
+    retry_exceptions: tuple[type[BaseException], ...] = (
+        requests.RequestException, json.JSONDecodeError,
+    ),
+) -> Any:
+    """指数退避重试（1s → 2s → 4s，max 3 次）：包裹东财接口调用。
+
+    仅对瞬态类异常（requests 网络/超时、JSON 解析错误）重试；
+    KeyError/TypeError/ValueError 等逻辑错误立即上抛不重试。
+    deadline（monotonic 截止时间）到期立即上抛：daemon 采集线程在每源
+    deadline 到期后不应继续发东财网络调用（防止重试链击穿超时语义）。
+    测试可 monkeypatch `time.sleep` / `_em_now` 加速。
+    """
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except retry_exceptions:
+            attempt += 1
+            if attempt > retries:
+                raise
+            if deadline is not None and _em_now() >= deadline:
+                raise
+            delay = EM_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning("eastmoney retry %d/%d after %.1fs", attempt, retries, delay)
+            time.sleep(delay)
 
 _env_bypass_depth = 0
 _env_bypass_saved: dict[str, str | None] = {}
@@ -482,7 +543,11 @@ def _akshare_direct_session_unlocked() -> Iterator[None]:
 
 @contextmanager
 def akshare_direct_session() -> Iterator[None]:
-    """akshare 东方财富调用：清除代理并 patch requests 为 trust_env=False（可并行 I/O）。"""
+    """akshare 东方财富调用：清除代理并 patch requests 为 trust_env=False（可并行 I/O）。
+
+    R12h：入口统一限流——连续东财调用间隔 ≥0.5s（INVEST_EM_INTERVAL_SEC 可覆盖）。
+    """
+    throttle_eastmoney()
     with _direct_scope(patch_requests=True):
         yield
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from typing import Any
 
@@ -45,7 +46,20 @@ _SNAPSHOT_DATA_KEYS = (
 # ---------------------------------------------------------------------------
 
 from db import _conn, _safe_close  # noqa: E402
+from db_util import hist_ex_today, load_recent_rows, upsert_daily_rows  # noqa: E402
 from lib.store import init_db  # noqa: E402  # 确保 market_snapshots 表存在
+
+# market_snapshots 表列（与 store.init_db schema 对齐；写入统一走 upsert_daily_rows）
+_MARKET_SNAPSHOT_COLUMNS = (
+    "date", "margin_balance", "margin_buy_amount", "ad_ratio",
+    "limit_up_count", "limit_down_count", "lu_ld_ratio", "total_turnover",
+    "sse_float_mcap", "szse_float_mcap",
+    "margin_to_mcap", "margin_buy_to_turnover", "margin_20d_change",
+    "ad_ratio_5d_ma", "limit_down_20d_pct",
+    "erp", "pcr", "below_book_pct",
+    "northbound_net_inflow", "northbound_direction", "northbound_source",
+    "env_label",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -164,34 +178,11 @@ def _auto_persist(snap: dict) -> None:
         init_db()
         c = _conn()
         try:
-            c.execute("""
-                INSERT OR REPLACE INTO market_snapshots
-                (date, margin_balance, margin_buy_amount, ad_ratio,
-                 limit_up_count, limit_down_count, lu_ld_ratio, total_turnover,
-                 sse_float_mcap, szse_float_mcap,
-                 margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
-                 ad_ratio_5d_ma, limit_down_20d_pct,
-                 erp, pcr, below_book_pct,
-                 northbound_net_inflow, northbound_direction, northbound_source,
-                 env_label)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                snap["date"],
-                snap.get("margin_balance"), snap.get("margin_buy_amount"),
-                snap.get("ad_ratio"),
-                snap.get("limit_up_count"), snap.get("limit_down_count"),
-                snap.get("lu_ld_ratio"),
-                snap.get("total_turnover"),
-                snap.get("sse_float_mcap"), snap.get("szse_float_mcap"),
-                snap.get("margin_to_mcap"), snap.get("margin_buy_to_turnover"),
-                snap.get("margin_20d_change"), snap.get("ad_ratio_5d_ma"),
-                snap.get("limit_down_20d_pct"),
-                snap.get("erp"), snap.get("pcr"), snap.get("below_book_pct"),
-                snap.get("northbound_net_inflow"),
-                snap.get("northbound_direction"),
-                snap.get("northbound_source"),
-                snap.get("env_label"),
-            ))
+            upsert_daily_rows(
+                c, "market_snapshots",
+                [{col: snap.get(col) for col in _MARKET_SNAPSHOT_COLUMNS}],
+                pk=("date",), merge=False,
+            )
             c.commit()
         except Exception:
             c.rollback()
@@ -240,7 +231,11 @@ def save_snapshot() -> dict[str, Any] | None:
     history = load_history(60)
     _compute_tier2(snap, history)
 
-    # 计算 Tier 1-2 历史分位标签（v0.2.2 升级）
+    # 计算 Tier 1-2 历史分位标签（v0.2.2 升级）。
+    # 注（C14）：缓存快照（get_microstructure / snapshot()）携带 v1 标签
+    # （_compute_labels，绝对值启发式，供 apply_env_guardrail 词表消费），
+    # 此处 v2 分位标签原地 REPLACE 四个 label_* 字段 + env_label，最终
+    # 落库行 = v2 标签——v1 与 v2 是兼容层 + 演进关系，非冗余。
     _compute_labels_v2(snap, history)
 
     # 确保 market_snapshots 表存在（独立调用时 init_db 可能未执行）
@@ -249,32 +244,11 @@ def save_snapshot() -> dict[str, Any] | None:
     # 写入
     c = _conn()
     try:
-        c.execute("""
-            INSERT OR REPLACE INTO market_snapshots
-            (date, margin_balance, margin_buy_amount, ad_ratio,
-             limit_up_count, limit_down_count, lu_ld_ratio, total_turnover,
-             sse_float_mcap, szse_float_mcap,
-             margin_to_mcap, margin_buy_to_turnover, margin_20d_change,
-             ad_ratio_5d_ma, limit_down_20d_pct,
-             erp, pcr, below_book_pct,
-             northbound_net_inflow, northbound_direction, northbound_source,
-             env_label)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            snap["date"],
-            snap["margin_balance"], snap["margin_buy_amount"], snap["ad_ratio"],
-            snap["limit_up_count"], snap["limit_down_count"], snap["lu_ld_ratio"],
-            snap["total_turnover"],
-            snap["sse_float_mcap"], snap["szse_float_mcap"],
-            snap["margin_to_mcap"], snap["margin_buy_to_turnover"],
-            snap["margin_20d_change"], snap["ad_ratio_5d_ma"],
-            snap["limit_down_20d_pct"],
-            snap["erp"], snap["pcr"], snap["below_book_pct"],
-            snap.get("northbound_net_inflow"),
-            snap.get("northbound_direction"),
-            snap.get("northbound_source"),
-            snap.get("env_label"),
-        ))
+        upsert_daily_rows(
+            c, "market_snapshots",
+            [{col: snap.get(col) for col in _MARKET_SNAPSHOT_COLUMNS}],
+            pk=("date",), merge=False,
+        )
         c.commit()
         logger.info("market_snapshot %s saved", snap["date"])
         return snap
@@ -296,11 +270,7 @@ def load_history(days: int = 60) -> list[dict]:
     """
     c = _conn()
     try:
-        rows = c.execute(
-            "SELECT * FROM market_snapshots ORDER BY date DESC LIMIT ?",
-            (days,),
-        ).fetchall()
-        return [dict(r) for r in reversed(rows)]
+        return load_recent_rows(c, "market_snapshots", limit=int(days))
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return []
@@ -348,25 +318,35 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
         snap["margin_buy_to_turnover"] = round(buy / turnover * 100, 2)
 
     # 9. 融资余额20日变化率
+    # 注意：与步骤 10/11 同型——history 已含今日刚持久化的行（snapshot→_auto_persist→load_history），
+    # 必须剔除今日，否则 20 日窗口实际只跨 19 个间隔、lookback[-20] 锚定 T-19 而非 T-20
+    # （与 cd5e7a4 修复的双计 bug 同类，此前遗漏本步骤）
     if margin is not None and len(history) >= 20:
-        lookback = [h for h in history if h.get("margin_balance") is not None]
+        snap_date_9 = snap.get("date")
+        hist_ex_today_9 = hist_ex_today(history, snap_date_9)
+        lookback = [h for h in hist_ex_today_9 if h.get("margin_balance") is not None]
         if len(lookback) >= 20:
             prev_margin = lookback[-20].get("margin_balance")
             if prev_margin and prev_margin > 0:
                 snap["margin_20d_change"] = round((margin - prev_margin) / prev_margin * 100, 2)
 
     # 10. 涨跌比N日均值（首次运行可能不足5日）
+    # 注意：history 已含今日刚持久化的行（snapshot→_auto_persist→load_history），
+    # 拼接前必须剔除今日，否则今日被双计（"5 日 MA"实际跨 4 个不同日、今日权重 40%）
     ad = snap.get("ad_ratio")
-    recent_ad = [h.get("ad_ratio") for h in history[-4:] if h.get("ad_ratio") is not None]
+    snap_date = snap.get("date")
+    hist_ex_today_v = hist_ex_today(history, snap_date)
+    recent_ad = [h.get("ad_ratio") for h in hist_ex_today_v[-4:]
+                 if h.get("ad_ratio") is not None]
     if ad is not None:
         recent_ad.append(ad)
         snap["ad_ratio_5d_ma"] = round(sum(recent_ad) / len(recent_ad), 4)
         snap["_ad_ma_window"] = len(recent_ad)  # 实际窗口大小，用于标签
 
-    # 11. 跌停家数20日分位
+    # 11. 跌停家数20日分位（同上，剔除今日避免窗口偏移）
     ld = snap.get("limit_down_count")
-    if ld is not None and len(history) >= 19:
-        ld_history = [h.get("limit_down_count") for h in history[-19:]
+    if ld is not None and len(hist_ex_today_v) >= 19:
+        ld_history = [h.get("limit_down_count") for h in hist_ex_today_v[-19:]
                       if h.get("limit_down_count") is not None]
         ld_history.append(ld)
         if ld_history:
@@ -386,8 +366,11 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     mtm = snap.get("margin_to_mcap")
     m20 = snap.get("margin_20d_change")
     if mtm is not None:
-        # 60日分位
-        mtm_hist = [h.get("margin_to_mcap") for h in history if h.get("margin_to_mcap") is not None]
+        # 60日分位（剔除 history 中今日已持久化行，与 _compute_tier2 同型防双计）
+        snap_date = snap.get("date")
+        hist_ex_today_v = hist_ex_today(history, snap_date)
+        mtm_hist = [h.get("margin_to_mcap") for h in hist_ex_today_v
+                    if h.get("margin_to_mcap") is not None]
         if len(mtm_hist) >= 20:
             mtm_hist.append(mtm)
             sorted_mtm = sorted(mtm_hist)
@@ -424,7 +407,13 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     ad = snap.get("ad_ratio")
     ad5 = snap.get("ad_ratio_5d_ma")
     if ad is not None:
-        ad_hist = [h.get("ad_ratio") for h in history if h.get("ad_ratio") is not None]
+        # 60日分位（剔除 history 中今日已持久化行——snapshot→_auto_persist→
+        # load_history 已含今日，双计会抬高约 2/(N+1) 个分位点、在 10/30/70/90
+        # 边界翻转冷暖标签；与杠杆分位/_compute_tier2 同型防双计，review #6）
+        snap_date = snap.get("date")
+        hist_ex_today_v = hist_ex_today(history, snap_date)
+        ad_hist = [h.get("ad_ratio") for h in hist_ex_today_v
+                   if h.get("ad_ratio") is not None]
         if len(ad_hist) >= 20:
             ad_hist.append(ad)
             sorted_ad = sorted(ad_hist)
@@ -705,7 +694,9 @@ def _fetch_turnover(result: dict) -> None:
         import akshare as ak
         with akshare_direct_session():
             sse = ak.stock_sse_summary()
-            szse = ak.stock_szse_summary()
+            # stock_szse_summary 不传日期时 akshare 硬编码默认 '20240830'，
+            # 会把流通市值/成交额冻结在 2 年前；必须显式传上海时区当日
+            szse = ak.stock_szse_summary(date=shanghai_today())
 
         # --- 流通市值 ---
         # SSE: 按「项目」列查找「流通市值」行，「股票」列为数值（亿元）
@@ -1052,3 +1043,220 @@ def apply_env_guardrail(evaluation_json: dict, snap: dict | None = None) -> dict
 
     evaluation_json["blind_spots"] = blind_spots
     return evaluation_json
+
+
+def zt_industry_flow(days: int = 10, return_daily: bool = False) -> dict[str, Any]:
+    """涨停行业轮动（近 N 交易日东财涨停池按行业聚合）。
+
+    分析时按需调用的补充材料（invest-a-pulse 极端情绪维度），**不进入
+    snapshot() 常规输出**。东财不可用时 available=False 降级，不阻断。
+
+    return_daily=True 时额外返回 daily（{日期: {行业: 涨停数}}），
+    供板块簇相关性/跷跷板检验等二次分析复用。
+
+    返回：
+    - covered_dates: 实际覆盖交易日（YYYYMMDD，非交易日/失败日跳过）
+    - latest_date / latest_total: 最新交易日及涨停家数
+    - top5: 最新日涨停家数 Top5（并列按 N 日累计），含 n_day_first_half/
+      n_day_second_half 前后半段拆分（轮动方向判断用）
+    - top5_share_pct: Top5 合计占当日涨停总数 %（Python 计算）
+    - industry_trend: 全行业 N 日聚合 {行业: {count, days_active, ...}}
+    - daily: return_daily=True 时返回 {日期: {行业: 涨停数}}
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "window_days": days,
+        "covered_dates": [],
+        "latest_date": None,
+        "latest_total": None,
+        "top5": [],
+        "top5_share_pct": None,
+        "industry_trend": {},
+        "_errors": [],
+    }
+    try:
+        import akshare as ak
+        today = shanghai_today()
+        with akshare_direct_session():
+            cal = ak.tool_trade_date_hist_sina()
+        cal_dates = [str(d).replace("-", "") for d in cal["trade_date"]]
+        dates = [d for d in cal_dates if d <= today][-days:]
+
+        daily: dict[str, dict[str, int]] = {}
+        for d in dates:
+            try:
+                with akshare_direct_session():
+                    df = ak.stock_zt_pool_em(date=d)
+                if df is None or df.empty or "所属行业" not in df.columns:
+                    result["_errors"].append(f"{d}: empty or no industry col")
+                    continue
+                daily[d] = df.groupby("所属行业").size().to_dict()
+            except Exception as exc:
+                logger.warning("zt_industry_flow %s fetch failed: %s", d, exc)
+                result["_errors"].append(f"{d}: {type(exc).__name__}")
+
+        if not daily:
+            return result
+
+        covered = sorted(daily)
+        result["available"] = True
+        result["covered_dates"] = covered
+        latest = covered[-1]
+        result["latest_date"] = latest
+        latest_counts = daily[latest]
+        result["latest_total"] = sum(latest_counts.values())
+
+        # 全行业聚合 + 前后半段拆分（轮动方向）
+        n = len(covered)
+        mid = n // 2
+        first_half = covered[:mid] or [covered[0]]
+        second_half = covered[mid:]
+        all_inds = {ind for dd in daily.values() for ind in dd}
+        trend: dict[str, Any] = {}
+        for ind in all_inds:
+            cnt = [daily[dd].get(ind, 0) for dd in covered]
+            trend[ind] = {
+                "count": sum(cnt),
+                "days_active": sum(1 for c in cnt if c > 0),
+                "first_half": sum(daily[dd].get(ind, 0) for dd in first_half),
+                "second_half": sum(daily[dd].get(ind, 0) for dd in second_half),
+                "latest": latest_counts.get(ind, 0),
+            }
+        result["industry_trend"] = trend
+
+        # Top5：最新日涨停数降序，并列按 N 日累计
+        top = sorted(latest_counts.items(),
+                     key=lambda kv: (-kv[1], -trend[kv[0]]["count"]))[:5]
+        result["top5"] = [
+            {"industry": ind, "count": c,
+             "n_day_total": trend[ind]["count"],
+             "n_day_days_active": trend[ind]["days_active"],
+             "n_day_first_half": trend[ind]["first_half"],
+             "n_day_second_half": trend[ind]["second_half"]}
+            for ind, c in top
+        ]
+        if result["latest_total"]:
+            result["top5_share_pct"] = round(
+                sum(x["count"] for x in result["top5"]) / result["latest_total"] * 100, 1)
+
+        if return_daily:
+            result["daily"] = daily
+    except Exception as exc:
+        logger.warning("zt_industry_flow failed: %s", exc)
+        result["_errors"].append(f"fatal: {type(exc).__name__}: {exc}")
+    return result
+
+
+# 板块簇映射（东财涨停池「所属行业」归并，研究假设非官方分类）
+_ZT_CLUSTERS: dict[str, tuple[str, ...]] = {
+    "电子/AI算力": ("元件", "半导体", "通信设备", "消费电子", "光学光电", "其他电子", "电子化学", "计算机设", "军工电子"),
+    "医药": ("医疗服务", "化学制药", "生物制品", "中药Ⅱ", "医疗器械", "医药商业"),
+    "TMT软/传媒": ("软件开发", "IT服务Ⅱ", "数字媒体", "互联网电", "游戏Ⅱ", "出版", "广告营销", "影视院线", "通信服务", "教育"),
+    "电力设备/新能源": ("电网设备", "电池", "光伏设备", "风电设备", "电机Ⅱ", "其他电源"),
+    "资源/周期": ("贵金属", "小金属", "工业金属", "煤炭开采", "普钢", "特钢Ⅱ", "化学原料", "化学制品", "化学纤维",
+                  "炼化及贸", "水泥", "玻璃玻纤", "非金属材", "农化制品", "能源金属"),
+    "地产链/建筑": ("房地产开", "房地产服", "装修装饰", "装修建材", "家居用品", "家电零部", "厨卫电器", "小家电",
+                   "专业工程", "基础建设", "工程咨询", "房屋建设"),
+    "消费": ("饮料乳品", "食品加工", "休闲食品", "白酒Ⅱ", "非白酒", "调味发酵", "农产品加", "养殖业", "种植业",
+             "化妆品", "个护用品", "服装家纺", "纺织制造", "饰品", "酒店餐饮", "旅游及景", "一般零售",
+             "文娱用品", "造纸", "包装印刷"),
+    "机械/交运": ("通用设备", "专用设备", "自动化设", "工程机械", "环保设备", "汽车零部", "商用车", "乘用车",
+                  "铁路公路", "物流", "航空装备", "航天装备", "地面兵装", "航海装备"),
+    "公用事业": ("电力", "燃气Ⅱ"),
+    "金融": ("证券Ⅱ", "多元金融"),
+}
+
+# Pearson 双尾 p<0.05 临界值查表（n → r_crit，保守取 ≤n 的最大临界）
+_PEARSON_CRIT = ((10, 0.632), (12, 0.576), (15, 0.514), (18, 0.468), (20, 0.444),
+                 (25, 0.396), (30, 0.361), (40, 0.316), (50, 0.279), (60, 0.254))
+
+
+def _pearson_crit(n: int) -> float:
+    for nn, c in _PEARSON_CRIT:
+        if n <= nn:
+            return c
+    return _PEARSON_CRIT[-1][1]
+
+
+def zt_seesaw(days: int = 30, min_days: int = 10) -> dict[str, Any]:
+    """涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比）。
+
+    **参考内容，不构成投资决策**：描述资金在板块簇间的腾挪结构，
+    帮助分析盘面强弱分化的来源，不输出任何方向性预测。
+
+    基于 zt_industry_flow(days, return_daily=True) 的 daily 矩阵：
+    - seesaw_pairs: 显著负相关对（|r| > 临界值，p<0.05 双尾），按 |r| 降序
+    - sync_pairs: 显著正相关对（同步资金池）
+    - half_split: 前后半段占比变化（Δpp），验证轮动方向
+    - 占比口径（簇涨停家数/当日涨停总数），控制总量波动
+    - 东财不可用或样本 <min_days 时 available=False 并说明原因
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "n_days": 0,
+        "dates": [],
+        "significance": None,
+        "seesaw_pairs": [],
+        "sync_pairs": [],
+        "half_split": [],
+        "_errors": [],
+    }
+    flow = zt_industry_flow(days=days, return_daily=True)
+    if not flow.get("available") or not flow.get("daily"):
+        result["_errors"] = flow.get("_errors", ["zt_industry_flow unavailable"])
+        result["_errors"].append("东财涨停池不可用，跷跷板检验跳过")
+        return result
+    daily: dict[str, dict[str, int]] = flow["daily"]
+    dates = sorted(daily)
+    n = len(dates)
+    result["n_days"] = n
+    result["dates"] = dates
+    if n < min_days:
+        result["_errors"].append(f"样本不足: {n} 日 < {min_days}，跳过")
+        return result
+
+    total_by_date = {d: sum(daily[d].values()) for d in dates}
+    cluster_names = list(_ZT_CLUSTERS)
+    share = {
+        c: [sum(daily[d].get(i, 0) for i in _ZT_CLUSTERS[c]) / total_by_date[d] * 100
+            for d in dates]
+        for c in cluster_names
+    }
+
+    def _pearson(x: list[float], y: list[float]) -> float:
+        mx, my = sum(x) / n, sum(y) / n
+        cov = sum((a - mx) * (b - my) for a, b in zip(x, y))
+        sx = math.sqrt(sum((a - mx) ** 2 for a in x))
+        sy = math.sqrt(sum((b - my) ** 2 for b in y))
+        return cov / (sx * sy) if sx and sy else 0.0
+
+    crit = _pearson_crit(n)
+    result["significance"] = {"n": n, "r_crit": crit, "note": f"双尾 p<0.05，|r|>{crit} 为显著"}
+    for i in range(len(cluster_names)):
+        for j in range(i + 1, len(cluster_names)):
+            a, b = cluster_names[i], cluster_names[j]
+            r = _pearson(share[a], share[b])
+            if r <= -crit:
+                result["seesaw_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
+            elif r >= crit:
+                result["sync_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
+    result["seesaw_pairs"].sort(key=lambda p: p["r"])
+    result["sync_pairs"].sort(key=lambda p: -p["r"])
+
+    # 前后半段占比均值差（Δpp）；share[c] 为按 dates 顺序的列表
+    mid = n // 2
+    h1, h2 = dates[:mid], dates[mid:]
+    if h1 and h2:
+        half = []
+        for c in cluster_names:
+            vals = share[c]
+            m1 = sum(vals[:mid]) / len(h1)
+            m2 = sum(vals[mid:]) / len(h2)
+            half.append({"cluster": c, "first_half_share": round(m1, 1),
+                         "second_half_share": round(m2, 1), "delta_pp": round(m2 - m1, 1)})
+        half.sort(key=lambda x: -x["delta_pp"])
+        result["half_split"] = {"first_half": [h1[0], h1[-1]], "second_half": [h2[0], h2[-1]],
+                                "rows": half}
+
+    result["available"] = True
+    return result

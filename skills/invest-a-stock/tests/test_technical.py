@@ -223,6 +223,43 @@ class TestEmptyInput:
         assert "error" in result
 
 
+class TestInvalidCloseRowsFiltered:
+    """review #10（第二轮）：close 为 None/NaN 的行必须剔除，
+    不得 `or 0` 转 0.0 污染均线/RSI/MACD 与 latest_close。"""
+
+    def test_close_none_rows_removed(self):
+        from lib.technical import compute
+
+        rows = _make_kline(30)
+        rows[10]["close"] = None  # 停牌残留 bar/空值填充行
+        result = compute(rows)
+        assert result["n_rows"] == 29
+        assert result["latest_close"] == pytest.approx(rows[-1]["close"])
+        # 均线序列不含 0.0 污染（latest MA5 应接近真实值而非被拉低）
+        ma5 = result["trend"]["ma"]["5"]
+        expected = sum(r["close"] for r in rows[-5:]) / 5
+        assert ma5[-1] == pytest.approx(expected)
+
+    def test_close_nan_rows_removed(self):
+        import math
+
+        from lib.technical import compute
+
+        rows = _make_kline(30)
+        rows[15]["close"] = float("nan")  # NaN 是 truthy，`or 0` 拦不住
+        result = compute(rows)
+        assert result["n_rows"] == 29
+        for v in (result["latest_close"], result["trend"]["ma"]["5"][-1]):
+            assert not (isinstance(v, float) and math.isnan(v))
+
+    def test_all_close_none_returns_error(self):
+        from lib.technical import compute
+
+        rows = [{"trade_date": "20260101", "close": None}] * 5
+        result = compute(rows)
+        assert "error" in result
+
+
 class TestKlineSortOrder:
     def test_descending_input_uses_latest_close(self):
         """Tushare 降序 K 线：compute 内部升序后 latest_close 为最新交易日。"""
@@ -285,3 +322,71 @@ class TestNoSignalWords:
         text = json.dumps(result, ensure_ascii=False, default=str)
         for word in self.FORBIDDEN:
             assert word not in text, f"输出含禁止词: {word}"
+
+
+class TestLimitPctTable:
+    """R12e 涨跌停阈值表（跨 skill 唯一权威）：北交所 30%、ST 5%。
+
+    修复前 _limit_pct_for_symbol 只认 30x/68x 为 20%（其余 10%），
+    北交所 4/8/920 前缀的 20-25% 涨幅会被误计为涨停。
+    """
+
+    def _kline(self, closes):
+        return [
+            {"trade_date": f"2026080{i+1:02d}", "close": float(c)}
+            for i, c in enumerate(closes)
+        ]
+
+    def test_limit_pct_table_values(self):
+        from lib.technical import limit_pct_for_symbol
+
+        assert limit_pct_for_symbol("600176") == 10.0
+        assert limit_pct_for_symbol("300328") == 20.0
+        assert limit_pct_for_symbol("301001") == 20.0
+        assert limit_pct_for_symbol("688001") == 20.0
+        assert limit_pct_for_symbol("430001") == 30.0
+        assert limit_pct_for_symbol("832001") == 30.0
+        assert limit_pct_for_symbol("920001") == 30.0
+        # ST/*ST 需名称信息；无名称按板块阈值兜底
+        assert limit_pct_for_symbol("600001", name="ST某某") == 5.0
+        assert limit_pct_for_symbol("600001", name="*ST某某") == 5.0
+        assert limit_pct_for_symbol("600001", name="正常公司") == 10.0
+        # review #13：ST 5% 仅限主板——创业板/科创板/北交所 ST 按板块阈值
+        # （2020-08-24 注册制后创业板 ST 涨跌幅 20%，非 5%）
+        assert limit_pct_for_symbol("300328", name="*ST某某") == 20.0
+        assert limit_pct_for_symbol("301001", name="ST某某") == 20.0
+        assert limit_pct_for_symbol("688001", name="ST某某") == 20.0
+        assert limit_pct_for_symbol("430001", name="ST某某") == 30.0
+        assert limit_pct_for_symbol("920001", name="ST某某") == 30.0
+
+    def test_bse_20pct_not_limit_up_30pct_is(self):
+        """北交所 30% 阈值：20-25% 涨幅不再被计为涨停（缺陷 1）。"""
+        from lib.technical import detect_limit_streaks
+
+        # 20% 连涨两天：北交所阈值 30% → 不算涨停
+        st = detect_limit_streaks(self._kline([10.0, 12.0, 14.4]), symbol="430001")
+        assert st["limit_threshold"] == 30.0
+        assert st["recent_limit_ups"] == 0
+        # 30% 连涨两天：算涨停
+        st2 = detect_limit_streaks(self._kline([10.0, 13.0, 16.9]), symbol="920001")
+        assert st2["limit_threshold"] == 30.0
+        assert st2["recent_limit_ups"] == 2
+        # 同一序列按主板 10% 阈值仍为涨停（对照，阈值表确实按代码前缀生效）
+        st3 = detect_limit_streaks(self._kline([10.0, 12.0, 14.4]), symbol="600001")
+        assert st3["limit_threshold"] == 10.0
+        assert st3["recent_limit_ups"] == 2
+
+    def test_st_name_5pct_threshold(self):
+        """ST/*ST 5% 阈值：传入名称后 5% 涨停被识别（缺陷 1）。"""
+        from lib.technical import detect_limit_streaks
+
+        # 5% 连涨两天 + ST 名称 → 涨停（阈值 5%）
+        st = detect_limit_streaks(
+            self._kline([10.0, 10.5, 11.02]), symbol="600001", name="*ST某某",
+        )
+        assert st["limit_threshold"] == 5.0
+        assert st["recent_limit_ups"] == 2
+        # 同一序列无名称信息 → 按主板 10% 兜底，5% 不算涨停
+        st2 = detect_limit_streaks(self._kline([10.0, 10.5, 11.02]), symbol="600001")
+        assert st2["limit_threshold"] == 10.0
+        assert st2["recent_limit_ups"] == 0

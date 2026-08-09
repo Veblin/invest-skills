@@ -139,10 +139,12 @@ def verdict_report(report_path: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
 
-    if pending > 0:
-        verdict = "REVISIONS_NEEDED"
-    elif failed > 0:
+    # 严重度序：已确认数字错误（failed）> 未填项（pending）> 全通过
+    # 报告里有已确认错误时，即使仍有未核验项也必须判 FAIL
+    if failed > 0:
         verdict = "FAIL"
+    elif pending > 0:
+        verdict = "REVISIONS_NEEDED"
     else:
         verdict = "PASS"
 

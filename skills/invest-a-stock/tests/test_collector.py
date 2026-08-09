@@ -506,3 +506,36 @@ class TestBuildSummary:
         assert s["sources_responded"] == 0
         assert s["missing"] == 2
         assert s["available"] == 0
+
+
+class TestIncomeRevenueFallback:
+    """R12b: income 表兜底 revenue/net_profit（fina_indicator 字段被积分过滤时）。"""
+
+    def test_revenue_fallback_from_income(self):
+        from lib.collector._sources import _merge_income_into_financials
+
+        fin = [
+            {"end_date": "20260331", "roe": -1.85},  # 无 revenue/net_profit（积分过滤）
+            {"end_date": "20251231", "revenue": 1.0, "net_profit": 0.2},  # 已有值不被覆盖
+        ]
+        income = [
+            {"end_date": "20260331", "revenue": 355088600.0,
+             "total_revenue": 355088600.0, "n_income_attr_p": -19178060.55},
+            {"end_date": "20251231", "revenue": 999.0, "n_income_attr_p": 999.0},
+        ]
+        out = _merge_income_into_financials(fin, income)
+        by_date = {r["end_date"]: r for r in out}
+        q1 = by_date["20260331"]
+        assert q1["revenue"] == 355088600.0  # income 表兜底
+        assert q1["net_profit"] == -19178060.55  # n_income_attr_p 兜底
+        q4 = by_date["20251231"]
+        assert q4["revenue"] == 1.0  # 已有值不被覆盖
+        assert q4["net_profit"] == 0.2
+
+    def test_revenue_fallback_absent_income_keeps_original(self):
+        from lib.collector._sources import _merge_income_into_financials
+
+        fin = [{"end_date": "20260331", "roe": -1.85}]
+        out = _merge_income_into_financials(fin, [])  # income 空
+        assert out[0].get("revenue") is None  # 无兜底来源则保持原样
+        assert out[0]["roe"] == -1.85
