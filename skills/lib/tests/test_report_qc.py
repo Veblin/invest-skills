@@ -216,6 +216,37 @@ class TestStructureChecks:
         assert structure.status == "warn"
         assert any(d["id"] == "journal-rr" for d in structure.details)
 
+    def test_journal_sell_path_four_dimensions_pass(self, tmp_path: Path):
+        """v0.2.5 缺陷 5 防回归：卖出路径四维（一致性/情绪化检测/
+        参考点独立性/机会成本）结构检查必须通过（report_qc 曾只认买入四维）。"""
+        text = """# 交易日志：588000 科创50ETF
+
+## 卖出: 科创50ETF (588000) — ETF
+
+### 方案摘要
+| 方向 | 标的 | 理由 | 重述后独立依据 |
+|------|------|------|------|
+| 卖出 | 588000 | 落袋为安 | 跌破前低 |
+
+### 1. 与入场逻辑的一致性（Consistency）
+评估文字
+
+### 2. 情绪化检测（Emotion Check）
+评估文字
+
+### 3. 参考点独立性核对（Reference-Point Check）
+- 关键问题：如果这笔交易不是你的持仓，你还会做这个决定吗？
+
+### 4. 机会成本（Opportunity Cost）
+评估文字
+
+> 本评估不构成投资建议。
+"""
+        p = _write(tmp_path, "journal", "2026-08-10-588000-卖出.md", text)
+        r = qc_file(p)
+        structure = next(l for l in r.layers if l.layer == "structure")
+        assert structure.status == "pass", structure.details
+
 
 # ── derived 层（ETF）──────────────────────────────────────────────────────
 
