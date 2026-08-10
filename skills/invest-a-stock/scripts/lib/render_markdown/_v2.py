@@ -98,8 +98,8 @@ def render_report_v2(collection: dict[str, Any], symbol: str) -> str:
         _section_flow(dims, collection),
         render_technical_section(dims, collection),
         (_c._section_research_summary)(collection, symbol, dims),
-        _section_events_placeholder(),
-        _section_thesis_placeholder(dims),
+        _section_events(collection),
+        _section_thesis(dims, collection),
         _references_appendix(collection),
         _risk_footer(),
     ]
@@ -576,56 +576,36 @@ def render_technical_section(dims: dict[str, dict], collection: dict = None) -> 
     return "\n".join(lines)
 
 
-# --- _section_events_placeholder ---
-def _section_events_placeholder() -> str:
-    """事件催化占位（v0.1.2 不实现自动分析）。"""
-    return """## 六、事件催化待 Claude 通过 WebSearch 补充近期公告与行业动态
+# --- _section_events ---
+def _section_events(collection: dict) -> str:
+    """事件催化：复用 V3 事件时间线真实渲染（替代 v0.1.2 死占位）。
 
-**结论：** 本节由分析阶段（Claude）根据公告、新闻、行业动态撰写，非引擎自动生成。
+    无 events 时降级输出标题 + 未采集说明（八段结构前缀恒在）。
+    """
+    import importlib as _il
+    _c = _il.import_module('lib.render_markdown._concise')  # deferred: avoid circular import
+    text = _c._section_events_timeline(collection)
+    if text:
+        # 与 V3 标题文本耦合（_v3.py _section_events_timeline）——V3 改标题需同步
+        return text.replace("## 3a. 事件时间线", "## 六、事件催化（事件时间线）", 1)
+    return ("## 六、事件催化\n\n"
+            "近期公告/事件数据未采集（引擎未附加 events）\n\n"
+            "🔍 **待独立验证:** 事件分析依赖 WebSearch 结果，应标注每条信息的 URL 来源。")
 
-> 本节由分析阶段（Claude）根据公告、新闻、行业动态撰写，非引擎自动生成。
-> v0.1.2 引擎仅提供数据卡片，Claude 应通过 WebSearch 补充近期事件。
 
-（待分析阶段填写）
+# --- _section_thesis ---
+def _section_thesis(dims: dict[str, dict], collection: dict) -> str:
+    """核心矛盾：复用 V3 引擎推理（替代 v0.1.2 死占位）。
 
-🔍 **待独立验证:** 事件分析依赖 WebSearch 结果，应标注每条信息的 URL 来源。"""
-
-
-# --- _section_thesis_placeholder ---
-def _section_thesis_placeholder(dims: dict[str, dict]) -> str:
-    """核心矛盾占位（v0.1.2 引擎只填数据卡片）。"""
-
-    # 尝试提取关键数据（统一升序后取末位）
-    fin_data = _get_dim_data(dims, "financials")
-    roe_str = "?"
-    if fin_data and isinstance(fin_data, list) and fin_data:
-        fin_sorted = sort_kline_asc(fin_data)
-        latest = fin_sorted[-1]
-        roe = latest.get("roe")
-        if roe is not None:
-            roe_str = f"{roe}%"
-
-    pe_str = "?"
-    val_data = _get_dim_data(dims, "valuation")
-    if val_data and isinstance(val_data, list) and val_data:
-        val_sorted = sort_kline_asc(val_data)
-        pe = val_sorted[-1].get("pe_ttm")
-        if pe is not None:
-            pe_str = f"{pe}x"
-
-    trend_str = "?"
-    kline_data = _get_dim_data(dims, "kline")
-    if kline_data and isinstance(kline_data, list) and len(kline_data) >= 20:
-        tech = compute(kline_data)
-        if "error" not in tech:
-            trend_str = tech["trend"]["alignment"].get("trend_label", "?")
-
-    return f"""## ⚡ 核心矛盾（当前最值得跟踪的问题）
-
-> 本节由分析阶段（Claude）根据上下文数据卡片撰写，非引擎自动生成。
-> 数据输入: 经营质量 ROE={roe_str} | 估值 PE={pe_str} | 技术趋势={trend_str}
-
-（待分析阶段填写）"""
+    V3 _executive_core_contradictions 恒返回 2 条（数据驱动，不足时填充
+    "独立维度交叉验证不足，需补充外部信源 [推测，待验证]"）。
+    """
+    import importlib as _il
+    _c = _il.import_module('lib.render_markdown._concise')  # deferred: avoid circular import
+    items = _c._executive_core_contradictions(collection, dims) or []
+    lines = ["## ⚡ 核心矛盾（当前最值得跟踪的问题）", ""]
+    lines.extend(f"- {item}" for item in items)
+    return "\n".join(lines)
 
 
 

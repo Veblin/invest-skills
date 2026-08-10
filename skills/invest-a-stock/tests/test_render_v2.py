@@ -105,16 +105,44 @@ class TestRenderReportV2Structure:
         if "偏高" in pe_section:
             assert "低于" not in pe_section
 
-    def test_thesis_placeholder_uses_latest_with_descending(self):
-        """降序数据时核心矛盾卡片应取最新值（排序后末位）。"""
+    def test_thesis_core_contradictions_rendered(self):
+        """核心矛盾节渲染 V3 引擎推理（数据不足时兜底文案，非死占位）。
+
+        原 test_thesis_placeholder_uses_latest_with_descending：占位符随 #9
+        清理移除，改为断言 V3 推理输出（fixture 数据不触发规则分支 →
+        恒有 2 条兜底子弹）。
+        """
         from lib.render import render_report_v2
 
         c = collection_v2_minimal(kline_descending=True)
         text = render_report_v2(c, "600176")
-        # ROE 应取 20.2%（最新），不是 18.5%（降序末位）
-        assert "ROE=20.2%" in text
-        # PE 应取 ~24.9x（最新），不是 20.0x（降序末位）
-        assert "PE=24.9x" in text
+        assert "## ⚡ 核心矛盾" in text
+        assert "- 独立维度交叉验证不足" in text
+        assert "（待分析阶段填写）" not in text
+
+    def test_compact_events_timeline_when_events_present(self):
+        """compact 事件催化节渲染 V3 事件时间线真实数据（#9 选项 A）。"""
+        from lib.render import render_report_v2
+
+        c = collection_v2_minimal()
+        c["events"] = [
+            {"date": "2026-08-08", "type": "公告", "title": "签订重大合同"},
+            {"date": "2026-08-05", "type": "公告", "title": "回购进展"},
+        ]
+        text = render_report_v2(c, "600176")
+        assert "## 六、事件催化（事件时间线）" in text
+        assert "| 日期 | 类型 | 公告标题 |" in text
+        assert "签订重大合同" in text
+
+    def test_compact_events_fallback_when_absent(self):
+        """无 events 时事件催化节降级输出标题 + 未采集说明（八段前缀恒在）。"""
+        from lib.render import render_report_v2
+
+        c = collection_v2_minimal()
+        assert "events" not in c
+        text = render_report_v2(c, "600176")
+        assert "## 六、事件催化" in text
+        assert "未采集" in text
 
 
 class TestRenderAttachExtras:
