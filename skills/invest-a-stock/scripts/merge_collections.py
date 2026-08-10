@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,8 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from lib.data_util import has_data, merge_first_non_empty  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 # 关键交叉验证字段（维度 → 比较字段列表）
 CRITICAL_FIELDS: dict[str, list[str]] = {
@@ -61,6 +64,12 @@ def _diff_pct(a: float, b: float) -> float:
     if d is None:
         return 0.0 if abs(a - b) < 1e-12 else 100.0
     return d * 100.0
+
+
+def _meta_of(dim) -> dict:
+    """维度 _meta 安全取值：缺失或非 dict（如 null）一律视为 {}。"""
+    m = dim.get("_meta") if isinstance(dim, dict) else None
+    return m if isinstance(m, dict) else {}
 
 
 def load_collection(path: str) -> dict:
@@ -211,6 +220,12 @@ def merge_collections(collections: list[dict]) -> dict:
     - 只出现在一个中 → 直接使用
     - 维度名冲突 → 重命名为 {dim}_{source}
     """
+    if not collections:
+        raise ValueError("merge_collections: collections 不能为空（至少需要一份 collection）")
+    for i, coll in enumerate(collections):
+        if not isinstance(coll, dict):
+            raise ValueError(f"merge_collections: collections[{i}] 不是 dict（{type(coll).__name__}）")
+
     merged_dims: dict[str, list[dict]] = {}
     sources: list[str] = []
 
@@ -222,6 +237,12 @@ def merge_collections(collections: list[dict]) -> dict:
             if dim_name not in merged_dims:
                 merged_dims[dim_name] = []
             merged_dims[dim_name].append(dim)
+
+    # 跨 collection symbol 不一致：取第一份（调用方应自检批次来源）
+    distinct_symbols = {s for s in sources if s}
+    if len(distinct_symbols) > 1:
+        logger.warning("merge_collections: 输入 symbol 不一致 %s，merged 取第一份",
+                       sorted(distinct_symbols))
 
     # 构建合并结果
     result_dimensions = []
@@ -242,8 +263,8 @@ def merge_collections(collections: list[dict]) -> dict:
             primary["_meta"] = dict(chosen.get("_meta") or {})
             alt_sources = [
                 {
-                    "source": d.get("_meta", {}).get("source", "unknown"),
-                    "fetched_at": d.get("_meta", {}).get("fetched_at", ""),
+                    "source": _meta_of(d).get("source", "unknown"),
+                    "fetched_at": _meta_of(d).get("fetched_at", ""),
                 }
                 for d in dims
                 if d is not chosen
@@ -261,15 +282,15 @@ def merge_collections(collections: list[dict]) -> dict:
             # primary.data 的真实验证——并集计数会虚增 rerank 的
             # MULTI_SOURCE_BONUS（+5）并跳过 SINGLE_SOURCE（-10）。
             seen: dict[str, dict] = {}
-            for s in chosen.get("_meta", {}).get("all_sources", []):
+            for s in _meta_of(chosen).get("all_sources", []):
                 seen.setdefault(s.get("source") or "unknown", s)
             for d in dims:
-                for s in d.get("_meta", {}).get("all_sources", []):
+                for s in _meta_of(d).get("all_sources", []):
                     name = s.get("source") or "unknown"
                     if name not in seen and has_data(s.get("data")):
                         seen[name] = s
             for d in dims:
-                for s in d.get("_meta", {}).get("all_sources", []):
+                for s in _meta_of(d).get("all_sources", []):
                     name = s.get("source") or "unknown"
                     if name not in seen:
                         seen[name] = s
@@ -296,10 +317,8 @@ def merge_collections(collections: list[dict]) -> dict:
                     dim_name,
                     data_bearing[0].get("data"),
                     data_bearing[1].get("data"),
-                    data_bearing[0].get("_meta", {}).get("source",
-                                                         str(data_bearing[0].get("_meta", {}))),
-                    data_bearing[1].get("_meta", {}).get("source",
-                                                         str(data_bearing[1].get("_meta", {}))),
+                    _meta_of(data_bearing[0]).get("source", "unknown"),
+                    _meta_of(data_bearing[1]).get("source", "unknown"),
                 )
                 if cv["max_diff_pct"] > 0:
                     cv_results.append(cv)
@@ -309,7 +328,11 @@ def merge_collections(collections: list[dict]) -> dict:
     multi_source_dims = [name for name, ds in merged_dims.items() if len(ds) >= 2]
 
     merged = {
-        "symbol": collections[0].get("symbol", "?"),
+        "symbol": next(
+            (c.get("symbol") for c in collections
+             if isinstance(c, dict) and c.get("symbol")),
+            "?",
+        ),
         "fetched_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "dimensions": result_dimensions,
         "summary": {
