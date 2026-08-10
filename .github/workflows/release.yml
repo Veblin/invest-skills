@@ -24,6 +24,8 @@ jobs:
             .claude-plugin \
             .agents \
             hooks \
+            docs \
+            .workbuddy \
             skills/lib \
             skills/invest-a-stock \
             skills/invest-a-gap-scan \

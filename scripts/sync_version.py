@@ -4,14 +4,20 @@
 Canonical source: pyproject.toml [project].version
 
 Commands:
-  bump 0.3.0   Write pyproject.toml → sync all SKILL.md targets → generate JSON manifests from templates
+  bump 0.3.0   Write pyproject.toml → sync all SKILL.md targets → generate JSON manifests
+               from templates → rewrite README release badge
   sync          Read pyproject.toml → sync all SKILL.md targets → generate JSON manifests
-  check         Verify pyproject.toml / SKILL.md / JSON are all consistent (exit 1 if drift)
+               → rewrite README release badge
+  check         Verify pyproject.toml / SKILL.md / JSON / README badge are all
+               consistent (exit 1 if drift)
 
 JSON manifest outputs (.claude-plugin/plugin.json, .claude-plugin/marketplace.json,
 .agents/plugins/marketplace.json, gemini-extension.json) are all generated from
 their *.json.in templates — the .agents copy shares the .claude-plugin marketplace
 template so both marketplace listings stay byte-identical.
+
+README.md release badge (label=vX.Y.Z) is rewritten in place by regex — the only
+arbitrary-string version surface not covered by frontmatter/placeholder templates.
 
 Usage:
   uv run python scripts/sync_version.py bump 0.3.0
@@ -30,6 +36,8 @@ from pathlib import Path
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 VERSION_PLACEHOLDER = "{{ VERSION }}"
 VERSION_PLACEHOLDER_TYPO = "{{VERSION}}"  # no spaces — reject so typo cannot silently pass
+# README 徽章 label（唯一版本面：label=v0.2.4 式 URL 参数，sync_version 原本不覆盖）
+README_BADGE_RE = re.compile(r"label=v[0-9]+\.[0-9]+\.[0-9]+")
 
 JSON_TEMPLATES: tuple[tuple[str, str], ...] = (
     (".claude-plugin/plugin.json.in", ".claude-plugin/plugin.json"),
@@ -124,28 +132,49 @@ def read_skill_version(path: Path) -> str:
 
 
 def write_skill_version(path: Path, version: str) -> bool:
-    """Return True if file was modified."""
+    """Return True if file was modified.
+
+    只重写 version: 行，其余字节（含空行）原样保留——保证幂等：
+    重复 sync/bump 不产生任何 diff（旧实现重建整个 frontmatter，
+    每次运行新增一个空行，SKILL.md 头部已积累 9 个空行）。
+    """
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
         raise ValueError(f"no YAML frontmatter in {path}")
-    end = text.find("\n---", 3)
-    if end == -1:
+    if text.find("\n---", 3) == -1:
         raise ValueError(f"unclosed YAML frontmatter in {path}")
-    frontmatter = text[3:end]
-    rest = text[end:]
-    lines = frontmatter.splitlines()
+    lines = text.splitlines(keepends=True)
     updated = False
-    new_lines: list[str] = []
-    for line in lines:
+    for i, line in enumerate(lines):
         if line.strip().startswith("version:"):
             indent = line[: len(line) - len(line.lstrip())]
-            new_lines.append(f'{indent}version: "{version}"')
+            lines[i] = f'{indent}version: "{version}"\n'
             updated = True
-        else:
-            new_lines.append(line)
     if not updated:
         raise ValueError(f"no version: in frontmatter ({path})")
-    new_text = "---\n" + "\n".join(new_lines) + rest
+    new_text = "".join(lines)
+    if new_text == text:
+        return False
+    path.write_text(new_text, encoding="utf-8")
+    return True
+
+
+# ── README badge ────────────────────────────────────────────
+
+
+def read_readme_badge(path: Path) -> str:
+    """Extract version from README release badge URL (label=vX.Y.Z)."""
+    text = path.read_text(encoding="utf-8")
+    m = README_BADGE_RE.search(text)
+    if not m:
+        raise ValueError(f"no release badge (label=vX.Y.Z) in {path}")
+    return m.group(0)[len("label=v"):]  # 徽章形如 label=v0.2.5 → 返回 0.2.5
+
+
+def write_readme_badge(path: Path, version: str) -> bool:
+    """Rewrite README release badge label (label=vX.Y.Z). Return True if modified."""
+    text = path.read_text(encoding="utf-8")
+    new_text = README_BADGE_RE.sub(f"label=v{version}", text, count=1)
     if new_text == text:
         return False
     path.write_text(new_text, encoding="utf-8")
@@ -226,6 +255,11 @@ def _do_sync(root: Path, version: str) -> int:
         changed += 1
     if not written:
         print("  ⚪ JSON manifests (unchanged)")
+    if write_readme_badge(root / "README.md", version):
+        print(f"  ✅ README.md badge → v{version}")
+        changed += 1
+    else:
+        print("  ⚪ README.md badge (unchanged)")
     return changed
 
 
@@ -234,6 +268,7 @@ def _derived_paths(root: Path) -> list[Path]:
     paths = [root / "pyproject.toml"]
     paths.extend(root / t.rel_path for t in SKILL_TARGETS)
     paths.extend(root / out_rel for _, out_rel in JSON_TEMPLATES)
+    paths.append(root / "README.md")
     return paths
 
 
@@ -246,6 +281,8 @@ def _preflight_derived(root: Path) -> list[str]:
     for tmpl_rel, _out_rel in JSON_TEMPLATES:
         if not (root / tmpl_rel).is_file():
             missing.append(tmpl_rel)
+    if not (root / "README.md").is_file():
+        missing.append("README.md")
     return missing
 
 
@@ -366,6 +403,18 @@ def cmd_check(root: Path) -> int:
         for d in drifts:
             print(d, file=sys.stderr)
         errors += len(drifts)
+
+    # 3. Check README release badge
+    try:
+        badge_ver = read_readme_badge(root / "README.md")
+    except (OSError, ValueError) as exc:
+        print(f"❌ README badge: {exc}", file=sys.stderr)
+        errors += 1
+    else:
+        if badge_ver != canonical:
+            print(f"❌ README badge: v{badge_ver} ≠ pyproject.toml ({canonical})",
+                  file=sys.stderr)
+            errors += 1
 
     if errors:
         print(f"\n❌ {errors} drift(s) found. Fix: uv run python scripts/sync_version.py sync",

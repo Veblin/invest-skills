@@ -1,5 +1,39 @@
 # Changelog — invest skills
 
+## v0.2.5 (2026-08-10)
+
+交易纪律框架（资金视角方法论）D1-D8 + WorkBuddy 平台兼容 + invest-a-limit-up 移除 + code-review 15 项修复。
+
+v0.2.5 把用户交易理念固化为 skill 纪律需求：资金选择优先、决策不受持仓盈亏影响、带血筹码分批买入、参考点独立性。纪律执行层（触发线/条件单/执行核对）经评审**不进入 skill 动作域**——skill 统一收敛为趋势/区间/状态/核对四类客观参考输出，决策动作全部留在用户侧。配套新增 WorkBuddy 平台兼容层（规则层本版落地，真机验证由用户后置执行）。
+
+### 交易纪律框架（D1-D8）
+
+- **统一参考输出层**：report-conventions §8 + pulse/journal 模板，四类参考（趋势/区间/状态/核对），无动作词
+- **journal 卖出评估四维度**：新增参考点独立性核对（浮盈目标/回本心理/亏损不甘/成本价锚定四问 + 关键问题 + 独立依据）；Q3 错误条件选项限定逻辑失效类（含估值触发）；浮盈目标类理由触发 Odean 1998 改述提示
+- **pulse 筹码出清度四信号**：去杠杆幅度/换手温度/割肉盘代理/磨底时长+企稳确认（含今日窗口），新增 `references/chip-clearance.md`
+- **trade-structure 入场区间 3 段参考**：悲观锚区/中性-悲观区/中性锚区 + 状态含义，不设触发条件/比例
+- **主线确认资金流优先**：两融趋势/板块轮动/ETF 份额为主证据，价格走势辅助（A 股无动量，Chui et al. 2022）
+- **止损定位与话术规范**：禁止"止损提高收益"话术，定位防呆风控（Kaminski & Lo 2014）
+- **观念修正内置**（C3/C5）："无低估价值股"类断言禁写；带血筹码信号强制含企稳确认字段
+- **新增 `references/capital-mechanisms.md`**：资金机制参考（反弹赎回/破净赎回/量化行为/散户割肉）
+
+### WorkBuddy 兼容
+
+- **W1 规则层适配（本版落地）**：5 个 SKILL.md description 中文触发词、引擎调用统一 `${INVEST_SKILLS_ROOT:-.}` cd 前缀、journal Q&A 分屏（≤4 选项）
+- **W2/W3 文档化交付**：`.env.example` 9 token 模板、`hooks/scripts/check-config.sh`、`.workbuddy/skills` symlink 副本、README WorkBuddy 章节（macOS + Windows）
+- 真机验证（T1-T12）与 hooks 官方背书验证由用户后置执行，不阻塞本版
+
+### invest-a-limit-up 移除
+
+- 全仓库 grep 实证无代码调用方（`_fetch_limit_pools` 自实现直调 akshare），skill 整体移除；marketplace/skills.yaml/sync_version/test fixtures 同步清理
+
+### code-review 修复
+
+- **引擎 6 项**（compute_chip_clearance/_auto_persist）：阶段判定急跌口径（峰值近 5 日 + 急跌 → 去杠杆中）、I-2 守卫补全（margin 缺失不得断言磨底）、信号③④窗口含今日、_auto_persist merge 防抹 Tier-2/env_label、days_since_margin_peak 口径统一（0=峰值在今天）、窗口收缩 calc_notes 标注
+- **pulse SKILL.md**：SSE 降级命令上海时区 + 长度守卫、step 1 走 data_bridge 缓存（消除 8 源双采）、规则 8 主证据路径可落地
+- **文档一致性**：CLAUDE.md 盈亏比表述与 trade-structure 3 段规范对齐、D 编号引用改描述性措辞、journal 卖出维度编号 1,2,3,4
+- **发布层**：CHANGELOG 补 v0.2.5 节、release tarball 补 docs/ + .workbuddy/、README 徽章纳入 sync_version
+
 ## v0.2.4 (2026-08-08)
 
 方法论引擎 R1-R12h 落地 + 事实边界规范 + 三轮 /code-review 修复 + 全域数值/口径安全加固。
@@ -136,7 +170,7 @@ v0.2.2 建设市场微观结构指标体系与平台化基础设施：新增市�
 
 - 用户入口下线：移除 `.claude/commands/invest-a-limit-up.md` 符号链接
 - SKILL.md 精简为数据管道说明（134→53 行），`user-invocable: false`
-- `limit_up_scanner.py` + `scan.py` CLI 保留为 `market_microstructure._fetch_limit_pools()` 的数据源
+- `limit_up_scanner.py` + `scan.py` CLI 保留为 `market_microstructure._fetch_limit_pools()` 的数据源（**v0.2.5 已整体移除**：grep 实证 `_fetch_limit_pools` 自实现直调 akshare，无任何代码调用方；本条为 v0.2.4 时点记录）
 
 ### Bug 修复
 

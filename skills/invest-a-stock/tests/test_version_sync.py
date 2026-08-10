@@ -68,6 +68,13 @@ def _write_fixture_tree(root: Path, version: str) -> None:
         encoding="utf-8",
     )
 
+    # README release badge（sync_version 现覆盖 README.md）
+    (root / "README.md").write_text(
+        "# test\n\n[![Release]"
+        f"(https://img.shields.io/github/v/release/Veblin/invest-skills?label=v{version})]\n",
+        encoding="utf-8",
+    )
+
 
 class TestSyncVersionCheck:
     def test_check_passes_in_repo(self):
