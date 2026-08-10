@@ -45,6 +45,40 @@ def test_kline_cache_roundtrip(tmp_path):
     assert (tmp_path / "gap_scan_cache" / "20260722" / "test" / "000001.SZ.pkl").is_file()
 
 
+def test_kline_cache_cross_day_hit(tmp_path):
+    """固定段键下文件级 mtime TTL 跨日生效：1 天前保存命中，超 3 天 miss。
+
+    缺陷 1 回归：旧实现把当日日期作键首段，次日查询必然 miss，TTL 退化为
+    "当日有效"；修复后键为固定段 kline/，文件级 mtime TTL 真正生效。
+    """
+    import os
+    import time
+
+    cache = KlineTTLCache(lambda: tmp_path / "gap_scan_cache", 3 * 86400)
+    df = pd.DataFrame({"close": [1.0, 2.0]})
+    parts = ("tushare", "000001.SZ")
+    path = tmp_path / "gap_scan_cache" / "kline" / "tushare" / "000001.SZ.pkl"
+    cache.save("kline", parts, df)
+    assert path.is_file()
+    # 拨回 1 天 → TTL 内，命中
+    one_day = time.time() - 86400
+    os.utime(path, (one_day, one_day))
+    loaded = cache.load("kline", parts)
+    assert loaded is not None
+    assert list(loaded["close"]) == [1.0, 2.0]
+    # 拨回 4 天 → 超 TTL，miss
+    four_days = time.time() - 4 * 86400
+    os.utime(path, (four_days, four_days))
+    assert cache.load("kline", parts) is None
+
+
+def test_scan_cache_segment_fixed():
+    """键首段为固定段而非当日日期（缺陷 1 回归：跨日缓存命中）。"""
+    mod = _load_scan_module()
+    assert mod._CACHE_DATE_SEGMENT
+    assert not (len(mod._CACHE_DATE_SEGMENT) == 8 and mod._CACHE_DATE_SEGMENT.isdigit())
+
+
 def test_scan_cli_help_exit_0():
     r = subprocess.run(
         [sys.executable, str(_SCAN_PY), "--help"],

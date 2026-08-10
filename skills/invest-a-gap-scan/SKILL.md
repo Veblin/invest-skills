@@ -144,7 +144,7 @@ for gap in qualified_gaps (newest first):
 - **Tushare 路径**: 原始价格 x `adj_factor / latest_adj_factor` -> 以最新日为基准的前复权价格
 - **Baostock 路径**: `adjustflag="2"` 直接返回前复权价格，无需额外计算
 
-两种路径的 QFQ 算法存在细微差异，因此缓存按数据源隔离 (`{date}/{source}/{ts_code}.pkl`)。
+两种路径的 QFQ 算法存在细微差异，因此缓存按数据源隔离 (`{kline}/{source}/{ts_code}.pkl`)。
 
 ## 数据流
 
@@ -232,20 +232,19 @@ for gap in qualified_gaps (newest first):
 ```
 ~/.local/share/investment/gap_scan_cache/
 |-- universe_20260719.pkl          (成分股列表, 28 KB)
-|-- 20260719/                       (按扫描日期)
-|   |-- tushare/                    (按数据源隔离)
+|-- kline/                         (固定段键目录, v0.2.5)
+|   |-- tushare/                   (按数据源隔离)
 |   |   |-- 000001.SZ.pkl
 |   |   `-- ...
 |   `-- baostock/
 |       |-- 000001.SZ.pkl
 |       `-- ...
-`-- 20260718/                       (历史缓存, >3 天自动清理)
 ```
 
 ### 缓存策略
 
-- **TTL**: 3 天 (基于文件 mtime + 目录级 `cleanup_old()`)
-- **Scope**: 按日期 + 数据源隔离，tushare/baostock 缓存互不污染
+- **TTL**: 3 天 (基于文件 mtime；固定段键使跨日命中生效，旧版 `{YYYYMMDD}` 日期目录随 v0.2.5 一次性清理)
+- **Scope**: 按数据源隔离，tushare/baostock 缓存互不污染
 - **格式**: Python pickle (pandas DataFrame)
 - **强制刷新**: `--no-cache` 跳过加载，重新拉取并覆盖
 
