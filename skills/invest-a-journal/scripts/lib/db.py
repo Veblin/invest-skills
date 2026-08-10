@@ -363,7 +363,8 @@ def search_by_symbol(symbol: str) -> list[dict]:
     c = _conn()
     try:
         rows = c.execute(
-            "SELECT id, symbol, entry_date, direction, driver, created_at "
+            "SELECT id, symbol, entry_date, direction, driver, created_at, "
+            "linked_journal_id "
             "FROM trade_journals WHERE UPPER(symbol)=? ORDER BY created_at DESC",
             (sym,),
         ).fetchall()
