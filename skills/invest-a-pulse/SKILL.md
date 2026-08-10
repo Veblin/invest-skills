@@ -35,9 +35,10 @@ metadata:
 用户: /invest-a-pulse
        ↓
 采集（Bash 并行调用）:
-  # 1. 当日快照 + 引擎标签
+  # 1. 当日快照 + 引擎标签（走 data_bridge 缓存：step 6 compute_chip_clearance
+  #    内部复用，避免 8 源双重采集；失败信封自动降级 snapshot()）
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
-  uv run python -c "from market_microstructure import snapshot; import json; print(json.dumps(snapshot(), ensure_ascii=False))" 2>/dev/null
+  uv run python -c "from data_bridge import get_microstructure; from market_microstructure import snapshot; import json; print(json.dumps(get_microstructure() or snapshot(), ensure_ascii=False))" 2>/dev/null
 
   # 2. 表内历史（分位辅助；积累不足时标注）
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
@@ -45,15 +46,20 @@ metadata:
 
   # 3. 长序列历史（分析必需 — 估值分位 + 杠杆趋势）
   # ⚠️ 两融窗口禁止硬编码日期（曾冻结在 2026-08-02 过期 6 天）——end=今天、start=120 天前动态计算
-  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python -c "import akshare as ak, bisect, datetime as _dt
+  # ⚠️ 日期用上海时区（_dt.date.today() 为本地时区，日期边界可能与 A 股交易日不一致，
+  #    同引擎降级路径 Minor 2 修复）；SSE 序列 <21 行时打印数据不足而非 iloc 越界
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python -c "import akshare as ak, bisect, datetime as _dt, zoneinfo
 def pct(vals, v): vals=sorted(vals); return round(bisect.bisect_left(vals,v)/len(vals)*100,1)
 pe=ak.stock_index_pe_lg(symbol='沪深300').dropna(subset=['滚动市盈率'])
 pv=pe['滚动市盈率'].astype(float).tolist(); print('PE', pv[-1], '250d', pct(pv[-250:],pv[-1]), '5y', pct(pv[-1250:],pv[-1]))
 pb=ak.stock_market_pb_lg(symbol='上证').dropna(subset=['市净率'])
 bv=pb['市净率'].astype(float).tolist(); print('PB', bv[-1], '250d', pct(bv[-250:],bv[-1]), '5y', pct(bv[-1250:],bv[-1]))
-_end=_dt.date.today().strftime('%Y%m%d'); _start=(_dt.date.today()-_dt.timedelta(days=120)).strftime('%Y%m%d')
+_today=_dt.datetime.now(zoneinfo.ZoneInfo('Asia/Shanghai')).date(); _end=_today.strftime('%Y%m%d'); _start=(_today-_dt.timedelta(days=120)).strftime('%Y%m%d')
 m=ak.stock_margin_sse(start_date=_start, end_date=_end).sort_values('信用交易日期')
-mz=m['融资余额'].astype(float); print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-1]/mz.iloc[-21]-1)*100,2))
+mz=m['融资余额'].astype(float)
+if len(mz) < 1: print('SSE_margin 无数据')
+elif len(mz) < 21: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '| 20d_chg% 不可计算（仅', len(mz), '行）')
+else: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-1]/mz.iloc[-21]-1)*100,2))
 " 2>/dev/null
 
   # 4. 涨停行业轮动（东财可用时必做；极端情绪/广度维度的行业视角）
@@ -85,7 +91,7 @@ Claude: 按输出模板合成「分析版」报告
 | `load_history(60)` | 近 60 交易日历史快照 | list[dict]（按 date ASC） |
 | `zt_industry_flow(days=10)` | 🆕 涨停行业轮动（东财涨停池按行业聚合，近 N 交易日） | dict（Top5 + 全行业 N 日趋势 + 前后半段拆分；`return_daily=True` 返回每日矩阵供二次分析；东财失败 `available: false` 不阻断） |
 | `zt_seesaw(days=30)` | 🆕 涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比） | dict（seesaw_pairs 显著负相关 / sync_pairs 显著正相关 / half_split Δpp；样本 <10 日或东财失败返回 `available: false`） |
-| `compute_chip_clearance()` | 🆕 筹码出清度四信号 + 阶段判定（v0.2.5 D3：去杠杆幅度/换手温度/割肉盘代理/磨底时长+企稳确认；状态描述，非择时信号；不落库） | dict（date / available / stage / signals / calc_notes / _errors） |
+| `compute_chip_clearance()` | 🆕 筹码出清度四信号 + 阶段判定（v0.2.5 D3：去杠杆幅度/换手温度/割肉盘代理/磨底时长+企稳确认；状态描述，非择时信号；不落库） | dict（date / available / stage / signals（deleveraging_pct / turnover_60d_pct / down_volume_days_30d / limit_down_20d_pct / days_since_margin_peak / confirmation / margin_20d_change）/ calc_notes / _errors） |
 
 ### snapshot() 关键字段
 
@@ -206,7 +212,7 @@ Claude: 按输出模板合成「分析版」报告
 - 割肉盘代理：近 30 日放量下跌日 {down_volume_days_30d} 日 | 跌停 20 日分位 {limit_down_20d_pct}% [来源: compute_chip_clearance.signals]
 - 磨底时长：距杠杆峰值 {days_since_margin_peak} 个交易日 [来源: compute_chip_clearance.signals.days_since_margin_peak]
 - 企稳确认：{confirmation — True / False / None} [来源: compute_chip_clearance.signals.confirmation]
-- 引擎标注：{calc_notes 关键项 — 降级口径 / 数据不足} [来源: compute_chip_clearance.calc_notes]
+- 引擎标注：{calc_notes 关键项 — 降级口径 / 数据不足 / 窗口不足} [来源: compute_chip_clearance.calc_notes]
 
 **[分析]**
 出清阶段定位（描述性，非预测）：{去杠杆中 / 磨底中 / 企稳确认；四信号间关系与背离；确认字段缺席（None/False）时的含义；证据强度标注学术支持成分（杠杆/恐慌反转）vs 从业者惯例成分（换手阈值/磨底时长）}
@@ -279,7 +285,7 @@ Claude: 按输出模板合成「分析版」报告
 5. **证据标签**：每段分析末尾附四维标注（强度/来源/时效/交叉），同 CLAUDE.md 规范。
 6. **推测标注**：无历史数据支撑的规律性表述（"历史上常出现…"）必须标注「待验证」或附案例。
 7. **跷跷板观察边界**：`zt_seesaw` 是**参考内容**（帮助分析盘面，不构成投资决策）。解读限于描述资金腾挪结构；**禁止**基于簇间负相关做方向性预测（如"A 簇将接棒 B 簇"）；样本 <15 日时标注「样本不足，规律性结论待更长窗口验证」；half_split 前后分界敏感，Δpp 方向以相关系数（不依赖分界）为主证据。
-8. **主线确认：资金流/拥挤度为主证据**（两融趋势 `margin_20d_change` / `margin_to_mcap` 历史分位、`zt_industry_flow` 板块轮动、ETF 份额）；价格走势为辅助确认；**禁止**单用"连续上涨/突破均线"断言主线（A 股散户主导市场无动量、仅月度反转——Chui et al. 2022）
+8. **主线确认：资金流/拥挤度为主证据**（两融趋势：`compute_chip_clearance().signals.margin_20d_change`（引擎输出，采集 step 6）或 load_history + Python calc 计算 20 日变化率；`margin_to_mcap` 历史分位需 load_history + Python calc；`zt_industry_flow` 板块轮动、ETF 份额）；价格走势为辅助确认；**禁止**单用"连续上涨/突破均线"断言主线（A 股散户主导市场无动量、仅月度反转——Chui et al. 2022）
 
 ---
 

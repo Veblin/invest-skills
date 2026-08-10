@@ -537,7 +537,7 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 - 卖出理由中是否有 "感觉" "害怕" "受不了" 等情绪词？
 - 卖出时市场涨跌比如何？（涨跌比 <0.4 + 跌停 >50 家 → 大概率恐慌性卖出）
 
-### 4. 参考点独立性核对（Reference-Point Check）
+### 3. 参考点独立性核对（Reference-Point Check）
 
 - 本次决策理由是否包含：浮盈目标 / 回本心理 / 亏损不甘 / 成本价锚定？
   （任一为是 → 标 ⚠️：该理由为参考点依赖，建议重述为独立依据。
@@ -545,7 +545,7 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 - 关键问题："如果这笔交易不是你的持仓，你还会做这个决定吗？"
 - 决策独立依据：{逻辑失效 / 估值触发 / 信号反转 / 资金面变化 / 其他}
 
-### 3. 机会成本（Opportunity Cost）
+### 4. 机会成本（Opportunity Cost）
 
 - 是否有明显的替代资产？
 - 当前市场环境下，这笔钱出来后去哪？
