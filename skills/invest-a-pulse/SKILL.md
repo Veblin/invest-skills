@@ -37,8 +37,10 @@ metadata:
 采集（Bash 并行调用）:
   # 1. 当日快照 + 引擎标签（走 data_bridge 缓存：step 6 compute_chip_clearance
   #    内部复用，避免 8 源双重采集；失败信封自动降级 snapshot()）
+  #    ⚠️ data_bridge 位于共享层 skills/lib，须先 import _invest_path（shim 注入
+  #    sys.path）否则裸 CLI 报 ModuleNotFoundError
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
-  uv run python -c "from data_bridge import get_microstructure; from market_microstructure import snapshot; import json; print(json.dumps(get_microstructure() or snapshot(), ensure_ascii=False))" 2>/dev/null
+  uv run python -c "import _invest_path; from data_bridge import get_microstructure; from market_microstructure import snapshot; import json; print(json.dumps(get_microstructure() or snapshot(), ensure_ascii=False))" 2>/dev/null
 
   # 2. 表内历史（分位辅助；积累不足时标注）
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
