@@ -884,7 +884,6 @@ def calc_ocf_quality(fin_rows: list[dict]) -> dict[str, Any]:
 
 def calc_historical_percentile(
     daily_rows: list[dict],
-    years: int = 5,
 ) -> dict[str, Any]:
     """PE/PB 历史分位计算。
 
@@ -894,6 +893,9 @@ def calc_historical_percentile(
     核心统计（当前值/分位/中位数）委托 lib.valuation.valuation_summary——
     权威引擎单一公式源（缺陷4：消除脚本路径与 lib 路径双份公式漂移）。
     脚本侧仅保留 rows→序列数据预处理、±1σ Band（lib 无对应）与输出 schema 映射。
+
+    窗口标签由样本行数经 lib.valuation.valuation_window_label 推断
+    （≥1250 交易日即"近5年"）——不再接受 years 参数（死参数，从未参与计算）。
     """
     pe_seq = []
     pb_seq = []
@@ -913,10 +915,14 @@ def calc_historical_percentile(
     if not pe_seq and not pb_seq:
         return {"error": "PE/PB 历史数据不足"}
 
-    from lib.valuation import valuation_summary as _lib_valuation_summary
-    vs = _lib_valuation_summary(pe_seq, pb_seq, window_label="近5年")
-
     total_daily = len(daily_rows)
+    from lib.valuation import (
+        valuation_summary as _lib_valuation_summary,
+        valuation_window_label,
+    )
+    vs = _lib_valuation_summary(
+        pe_seq, pb_seq, window_label=valuation_window_label(total_daily))
+
     result: dict[str, Any] = {"n_samples": total_daily, "warnings": list(vs.get("warnings") or [])}
 
     pe = vs.get("pe") or {}
