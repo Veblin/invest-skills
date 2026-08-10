@@ -125,6 +125,29 @@ class TestAutoCrossValidate:
         assert result is None  # only 1 valid value
 
 
+class TestAutoCrossValidateOppositeSign:
+    """缺陷 4: 异号对（带符号均值近抵消）→ 差异%有界，不再爆炸。"""
+
+    def test_opposite_sign_diff_bounded(self):
+        """5.0 vs -4.9：abs 均值分母 → 200% 有界（修复前带符号均值 0.05 → 19800%）。"""
+        s1 = SourceResult("tushare", 5.0, "financials")
+        s2 = SourceResult("ths", -4.9, "financials")
+        result = _auto_cross_validate("financials", [s1, s2])
+        assert result is not None
+        assert result.status == "divergence"
+        assert "200.0%" in result.detail
+        assert result.data_pair == "-4.90 vs 5.00"
+
+    def test_opposite_sign_l2_roe_bounded(self):
+        """L2 白名单异号（亏损期不同报告期 roe）→ 同样有界。"""
+        s1 = SourceResult("tushare", [{"roe": 5.0}], "financials")
+        s2 = SourceResult("ths", [{"roe": -4.9}], "financials")
+        result = _auto_cross_validate("financials", [s1, s2])
+        assert result is not None
+        assert result.status == "divergence"
+        assert "200.0%" in result.detail
+
+
 class TestDimensionResultCrossValidation:
     def _make_source(self, source, data):
         return SourceResult(source, data, "valuation")

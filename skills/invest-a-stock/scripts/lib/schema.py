@@ -390,7 +390,9 @@ def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossVa
         return None
 
     max_v, min_v = max(v for _, v in values), min(v for _, v in values)
-    avg = sum(v for _, v in values) / len(values)
+    # 绝对值均值（对齐 merge_collections._diff_pct 先例 a5f0f89）：异号对下
+    # 带符号均值近抵消会爆炸（5 vs -4.9 → 19800% 假 divergence），abs 均值有界
+    avg = sum(abs(v) for _, v in values) / len(values)
     diff_pct = relative_diff_pct(max_v, min_v, avg)
     if diff_pct is None:
         return None
