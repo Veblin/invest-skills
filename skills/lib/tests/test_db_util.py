@@ -72,7 +72,7 @@ class TestUpsertDailyRows:
         c = connect_db(tmp_path / "test.db")
         c.execute(
             "CREATE TABLE snaps (date TEXT PRIMARY KEY, a REAL, b REAL, "
-            "note TEXT DEFAULT 'x')"
+            "env_label TEXT, note TEXT DEFAULT 'x')"
         )
         return c
 
@@ -100,6 +100,36 @@ class TestUpsertDailyRows:
             row = dict(c.execute("SELECT * FROM snaps").fetchone())
             assert row["a"] == 9.0      # 非 NULL 覆盖
             assert row["b"] == 2.0      # NULL 保留旧值
+        finally:
+            c.close()
+
+    def test_merge_exclude_cols_preserves_table_value(self, tmp_path: Path):
+        """merge=True + exclude_cols：冲突时排除列整列保留表旧值；
+        全新行仍写入该列（F4：_auto_persist 的 v1 env_label 不覆盖 v2）。"""
+        c = self._table(tmp_path)
+        try:
+            # 全量行（模拟 save_snapshot 写 v2 标签）
+            upsert_daily_rows(c, "snaps",
+                              [{"date": "20260801", "a": 1.0, "b": 2.0,
+                                "env_label": '{"v": 2}'}],
+                              pk=("date",), merge=True)
+            # 轻量行（模拟 _auto_persist 写 v1 标签 + a 刷新 + b None）
+            upsert_daily_rows(c, "snaps",
+                              [{"date": "20260801", "a": 9.0, "b": None,
+                                "env_label": '{"v": 1}'}],
+                              pk=("date",), merge=True, exclude_cols=("env_label",))
+            row = dict(c.execute("SELECT * FROM snaps").fetchone())
+            assert row["a"] == 9.0               # 非排除列正常刷新
+            assert row["b"] == 2.0               # NULL 保留旧值
+            assert row["env_label"] == '{"v": 2}'   # 排除列保留表旧值（v2）
+            # 全新日期行：exclude_cols 不阻止写入
+            upsert_daily_rows(c, "snaps",
+                              [{"date": "20260802", "a": 1.0, "b": 1.0,
+                                "env_label": '{"v": 1}'}],
+                              pk=("date",), merge=True, exclude_cols=("env_label",))
+            row2 = dict(c.execute(
+                "SELECT * FROM snaps WHERE date='20260802'").fetchone())
+            assert row2["env_label"] == '{"v": 1}'
         finally:
             c.close()
 

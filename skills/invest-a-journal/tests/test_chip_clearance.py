@@ -5,6 +5,8 @@
 ④ 历史 <20 行 → 数据不足 + 降级标注 ⑤ 防双计 ⑥ 无动作词 ⑦ snap=None 降级 snapshot()
 ⑧ 修复回归：I-1 SSE 空值过滤 / I-2 空快照+足量历史→数据不足 / SSE 降级成功 /
    平局峰值（末次）/ 负去杠杆 / 恰 20 行主路径 / confirmation_window 断言
+⑨ code-review 修复回归：F1 急跌→去杠杆中 / F2 margin 缺失+换手在场→数据不足 /
+   F3 窗口含今日（反转日确认、今日割肉盘计数）/ F7 距峰值天数含今日
 
 口径锚点：
 - 信号②用 total_turnover（深交所口径，决策 D3-1），不用 total_turnover_est
@@ -38,9 +40,10 @@ def make_history(n=60, *, margin_base=20000.0, margin_step=-1,
     """n 日合成历史。默认模式为测试① 的手算锚点：
 
     - margin_balance[i] = margin_base + margin_step*i（默认 20000−i，峰值在首日 20000）
-    - total_turnover[i] = 5000+i（近 30 日窗口 i∈[30,59] 中位数 = (5044+5045)/2 = 5044.5）
+    - total_turnover[i] = 5000+i（近 30 日窗口 = 历史 i∈[31,59] + 今日 5050，
+      30 值中位数 = (5045+5046)/2 = 5045.5，F3 窗口含今日后）
     - 割肉盘日（ad_ratio=0.8 < 1.0）：i ∈ {32,35,37,40,41,44,45,48,50,53,56,58}，
-      其中放量（turnover ≥ 5044.5，即 i≥45）的为 {45,48,50,53,56,58} → 6 日
+      其中放量（turnover ≥ 5045.5，即 i≥48）的为 {48,50,53,56,58} → 5 日
     - limit_down_count：i∈[41,48) 为 40，其余 20；今日 30 → 20 日分位 (12+1)/20 = 65.0
     - confirm_idx 指定放量上涨日（ad_ratio=2.5）
     """
@@ -108,9 +111,9 @@ def test_four_signals_values(monkeypatch):
 
     deleveraging_pct    = (20000−15000)/20000×100 = 25.0
     turnover_60d_pct    = 51/60×100 = 85.0（今日 5050；历史末 59 日 5001..5059）
-    down_volume_days_30d= 6（ad<1.0 且放量≥5044.5 的 30 日窗口日数）
+    down_volume_days_30d= 5（ad<1.0 且放量≥5045.5 的 30 日窗口日数 {48,50,53,56,58}）
     limit_down_20d_pct  = 13/20×100 = 65.0
-    days_since_margin_peak = 59（峰值在首日，末次峰值距最新一行 59 行）
+    days_since_margin_peak = 60（含今日 61 值，峰值在首日，距最新一行 60 行）
     confirmation        = True（i=57 为 ad_ratio 2.5 的放量上涨日，窗口内）
     """
     _patch_history(monkeypatch, make_history(confirm_idx=57))
@@ -120,9 +123,9 @@ def test_four_signals_values(monkeypatch):
     assert out["available"] is True
     assert s["deleveraging_pct"] == 25.0
     assert s["turnover_60d_pct"] == 85.0
-    assert s["down_volume_days_30d"] == 6
+    assert s["down_volume_days_30d"] == 5
     assert s["limit_down_20d_pct"] == 65.0
-    assert s["days_since_margin_peak"] == 59
+    assert s["days_since_margin_peak"] == 60
     assert s["confirmation"] is True
     assert out["stage"] == "企稳确认"
     # D3-3：企稳确认口径标注必须存在
@@ -163,18 +166,19 @@ def test_stage_branches(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_confirmation_window_boundary(monkeypatch):
-    """窗口=5 时第 6 天（i=54）的放量上涨日不得触发 confirmation；窗口=6 则触发。"""
+    """窗口含今日（F3）：confirmation_window=5 时第 5 个交易日（i=56）触发、
+    第 6 个交易日（i=55）不触发。"""
     _patch_history(monkeypatch,
-                   make_history(margin_base=10000.0, margin_step=1, confirm_idx=54))
+                   make_history(margin_base=10000.0, margin_step=1, confirm_idx=56))
     snap = make_snap(margin_balance=10059.0, margin_20d_change=0.5)
 
     out5 = compute_chip_clearance(snap=snap, confirmation_window=5)
-    assert out5["signals"]["confirmation"] is False
-    assert out5["stage"] == "磨底中"
+    assert out5["signals"]["confirmation"] is True
+    assert out5["stage"] == "企稳确认"
 
-    out6 = compute_chip_clearance(snap=snap, confirmation_window=6)
-    assert out6["signals"]["confirmation"] is True
-    assert out6["stage"] == "企稳确认"
+    out4 = compute_chip_clearance(snap=snap, confirmation_window=4)
+    assert out4["signals"]["confirmation"] is False
+    assert out4["stage"] == "磨底中"
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +361,7 @@ def test_plateau_peak_uses_last_occurrence(monkeypatch):
 
     out = compute_chip_clearance(snap=make_snap(margin_balance=12000.0))
     s = out["signals"]
-    assert s["days_since_margin_peak"] == 2          # 25−1−22（末次峰值 idx 22）
+    assert s["days_since_margin_peak"] == 3          # 含今日 26 值：26−1−22（末次峰值 idx 22）
     assert s["deleveraging_pct"] == 40.0             # (20000−12000)/20000×100
 
 
@@ -378,9 +382,11 @@ def test_exactly_20_history_rows_uses_main_path(monkeypatch):
     out = compute_chip_clearance(snap=make_snap())
     s = out["signals"]
     assert s["deleveraging_pct"] == 25.0             # 主路径：peak=20000（首行）
-    assert s["days_since_margin_peak"] == 19         # 20−1−0
+    assert s["days_since_margin_peak"] == 20         # 含今日 21 值：21−1−0
     assert not any("stock_margin_sse" in n for n in out["calc_notes"])
     assert not any("margin_fallback" in e for e in out["_errors"])
+    # F12：历史窗口不足 120 日 → 标注实际窗口
+    assert any("历史窗口不足 120 日" in n and "20" in n for n in out["calc_notes"])
 
 
 def test_confirmation_window_zero_asserts(monkeypatch):
@@ -390,3 +396,69 @@ def test_confirmation_window_zero_asserts(monkeypatch):
         compute_chip_clearance(snap=make_snap(), confirmation_window=0)
     with pytest.raises(AssertionError):
         compute_chip_clearance(snap=make_snap(), confirmation_window=-1)
+
+
+# ---------------------------------------------------------------------------
+# ⑨ code-review 修复回归（F1/F2/F3/F7，review 直接执行复现场景）
+# ---------------------------------------------------------------------------
+
+def test_acute_deleveraging_recent_peak_is_deleveraging(monkeypatch):
+    """F1：峰值在近 5 日内 + 今日急跌 → 去杠杆中（旧代码落入磨底中，
+    与 deleveraging_pct 25% 并排输出的矛盾）。review 复现：平 15000 →
+    4 天前尖峰 20000 → 今日 15000，m20=0.0。"""
+    rows = make_history(margin_base=15000.0, margin_step=0)
+    rows[56]["margin_balance"] = 20000.0          # 4 个交易日前尖峰
+    _patch_history(monkeypatch, rows)
+    out = compute_chip_clearance(
+        snap=make_snap(margin_balance=15000.0, margin_20d_change=0.0))
+
+    assert out["signals"]["deleveraging_pct"] == 25.0
+    assert out["stage"] == "去杠杆中"                 # 与 -25% 去杠杆同框输出不再矛盾
+    assert out["signals"]["days_since_margin_peak"] == 4  # 61−1−56（含今日）
+
+
+def test_margin_missing_turnover_present_is_data_insufficient(monkeypatch):
+    """F2：margin 维度整体缺失（今日 margin 缺失 → deleveraging 不可算）但
+    换手在场 → 数据不足，不得凭换手断言磨底（旧代码此处磨底中 + available=True）。"""
+    _patch_history(monkeypatch, make_history())    # 60 行 margin 历史
+    out = compute_chip_clearance(
+        snap={"date": "20260730", "total_turnover": 5050.0, "ad_ratio": 1.2})
+
+    assert out["stage"] == "数据不足"
+    assert out["available"] is False
+    assert out["signals"]["deleveraging_pct"] is None
+    # 换手分位在场（证明不是 both-missing 分支，而是 I-2 补全分支）
+    assert out["signals"]["turnover_60d_pct"] == 85.0
+
+
+def test_today_reversal_day_confirms(monkeypatch):
+    """F3：反转日当天的放量上涨必须置位 confirmation（旧代码窗口剔今日，
+    stage 滞后一个交易日）。review 复现：全历史 ad=1.5，今日 ad=2.5 + 高分位成交额。"""
+    _patch_history(monkeypatch, make_history())    # 无历史确认日
+    out = compute_chip_clearance(
+        snap=make_snap(ad_ratio=2.5, total_turnover=5100.0))
+
+    assert out["signals"]["confirmation"] is True
+    assert out["stage"] == "企稳确认"
+
+
+def test_today_down_volume_day_counts(monkeypatch):
+    """F3：今日放量下跌日计入割肉盘计数（旧代码今日永不计数）。"""
+    _patch_history(monkeypatch, make_history())
+    out = compute_chip_clearance(
+        snap=make_snap(ad_ratio=0.8, total_turnover=5100.0))
+
+    # 历史 5 日（{48,50,53,56,58} ≥ med30 5045.5）+ 今日（0.8<1.0 且 5100≥5045.5）
+    assert out["signals"]["down_volume_days_30d"] == 6
+
+
+def test_peak_yesterday_days_since_is_one(monkeypatch):
+    """F7：峰值在昨日 + 今日下跌 → 距峰值 1 个交易日（旧代码 0 = 峰值在昨日，
+    报告读作"处于峰值"；新口径 0 = 峰值在今天，主/SSE 两路径一致）。"""
+    _patch_history(monkeypatch,
+                   make_history(margin_base=20000.0, margin_step=1))  # 峰值 20059 在末行
+    out = compute_chip_clearance(snap=make_snap(margin_balance=15000.0))
+
+    assert out["signals"]["days_since_margin_peak"] == 1
+    assert out["signals"]["deleveraging_pct"] == round(
+        (20059 - 15000) / 20059 * 100, 2)   # 峰值仍剔今日口径
