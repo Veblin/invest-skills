@@ -76,9 +76,13 @@ else: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import compute_chip_clearance; import json; print(json.dumps(compute_chip_clearance(), ensure_ascii=False))" 2>/dev/null
        ↓
-Claude: 按输出模板合成「分析版」报告
+Claude: 按输出模板合成「分析版」报告（主要结论前置）
        ↓
-输出: 市场情绪脉搏 Markdown（6 维度分析 + 交叉验证结论 + 声明）
+落盘: reports/market-pulse/{YYYY-MM-DD}.md（mkdir -p 后写入全文）
+       ↓
+复检: 三层复检（数字/合规/逻辑）通过后
+       ↓
+输出: 简报（主要结论摘要 + 报告文件路径）到对话
 ```
 
 ---
@@ -159,6 +163,17 @@ Claude: 按输出模板合成「分析版」报告
 
 > 快照日期 {snapshot_date}（最近交易日），采集于 {collected_at}。历史分位来源：
 > {分位数据源说明 — 长序列 akshare 或 表内快照 n 日}
+> 报告文件：`reports/market-pulse/{YYYY-MM-DD}.md`
+
+## 📌 主要结论
+
+{跨维度核心结论摘要（3-6 条，文档最前，先给结论再展开）：
+- 综合环境标签（summary）+ 当日情绪读数（广度/涨跌停/量能，引用引擎字段）
+- 当日热度 vs 中期结构（杠杆 20 日趋势 / 估值分位）是否共振或背离
+- 主线轮动方向（行业轮入/轮出，引用 zt_industry_flow 引擎字段）
+- 筹码出清阶段定位（compute_chip_clearance.stage + 关键信号）
+- 关键矛盾/风险点（引擎标签与趋势矛盾、数据缺口「无法定论」项）
+每条必须引用引擎字段或 [来源: Python calc: formula]，禁止 AI 心算}
 
 ## 📊 估值温度
 **[事实]**
@@ -342,6 +357,8 @@ Claude: 按输出模板合成「分析版」报告
 - [ ] 引擎标签与趋势/分位矛盾时已指出并说明取舍
 - [ ] 涨停行业轮动已尝试（zt_industry_flow 可用时），输出为分析结论（Top5 集中度 + 轮入/轮出方向）而非行业数据表；不可用时标注「行业维度数据缺口」
 - [ ] 跷跷板观察已尝试（zt_seesaw 可用时），输出标注「参考，不构成投资决策」，解读限于资金腾挪结构、无方向性预测；样本不足/东财不可用已标注
+- [ ] 报告已落盘 `reports/market-pulse/{YYYY-MM-DD}.md`，对话输出包含报告文件路径
+- [ ] 文档以「📌 主要结论」段开头（跨维度摘要前置，每条引用引擎字段或 Python calc 来源，非维度罗列）
 - [ ] 包含交叉验证结论表 + 综合判断段 + 综合环境标签 + 声明
 - [ ] 无单一目标价或仓位数字
 - [ ] 无 AI 心算数字（全部来自引擎字段或 Python calc）
