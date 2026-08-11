@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
@@ -480,7 +479,8 @@ def cmd_collect_sector_flow() -> int:
     """
     try:
         from sector_flow import (check_mapping_coverage, check_snapshot_drift,
-                                 fetch_sector_flow_snapshot, save_sector_flow_snapshot)
+                                 fetch_sector_flow_snapshot, load_drift_baseline,
+                                 save_drift_baseline, save_sector_flow_snapshot)
     except ImportError as exc:
         print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
         return 1
@@ -492,22 +492,32 @@ def cmd_collect_sector_flow() -> int:
         return 1
     if result.get("skipped"):
         print(f"跳过: {result['note']}")
-    else:
-        partial = "（部分窗口失败）" if errs else ""
-        print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
-              f"（日期 {result['date']}）{partial}")
+        return 0  # 快照为旧数据/非交易日，名单自检基于旧名单无意义（R16）
+    partial = "（部分窗口失败）" if errs else ""
+    print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
+          f"（日期 {result['date']}）{partial}")
     if errs:
         print(f"⚠ 部分窗口取数失败: {'; '.join(errs)}")
-        return 0
+        return 1  # 部分失败 → 非零退出码，cron 可按键告警（R16）
     # R15 C6：映射自检（部分窗口失败时名单不全，跳过防误报）
     missing = check_mapping_coverage(snapshot)
     if missing:
         print(f"⚠ 映射自检: 以下 THS 行业不在最新名单（SW_TO_THS_INDUSTRY 需核对）: "
               f"{', '.join(missing)}")
-    drift = check_snapshot_drift(snapshot)
-    if drift:
-        print(f"⚠ 映射自检（新增/未映射）: 共 {len(drift)} 个 THS 行业不在 "
-              f"SW_TO_THS_INDUSTRY（首次在线采集后核对，不阻断）: {', '.join(drift)}")
+    # 漂移自检（R16 基线制）：首次建立基线不告警，后续仅报告相对基线的新增
+    # 未映射行业（映射表仅 39/约 90 行业，全量告警每次必刷 ~50 条假警告）
+    baseline = load_drift_baseline()
+    if baseline is None:
+        n = save_drift_baseline(snapshot)
+        if n is None:
+            print("⚠ 漂移基线建立失败（跳过，下次采集重试，不阻断）")
+        else:
+            print(f"ℹ 已建立漂移基线（{n} 个未映射行业），后续仅报告新增（不阻断）")
+    else:
+        drift = check_snapshot_drift(snapshot, baseline=baseline)
+        if drift:
+            print(f"⚠ 映射自检（新增未映射行业）: 共 {len(drift)} 个不在 "
+                  f"SW_TO_THS_INDUSTRY: {', '.join(drift)}")
     return 0
 
 

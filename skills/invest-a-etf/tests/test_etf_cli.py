@@ -298,7 +298,8 @@ def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
 
     monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch)
     monkeypatch.setattr("sector_flow.check_mapping_coverage", lambda snap: [])
-    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap: [])
+    monkeypatch.setattr("sector_flow.load_drift_baseline", lambda: {"存储"})
+    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap, baseline=None: [])
 
     def fake_save(snapshot):
         assert snapshot["available"] is True
@@ -331,7 +332,7 @@ def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
     assert mod.cmd_collect_sector_flow() == 0
     assert "映射自检" in capsys.readouterr().out
 
-    # 部分窗口失败 → ⚠ 告警 + 跳过映射自检（名单不全防误报）
+    # 部分窗口失败 → ⚠ 告警 + 非零退出码（cron 可告警）+ 跳过映射自检（名单不全防误报）
     mapping_calls: list[str] = []
 
     def fake_fetch_partial():
@@ -345,9 +346,33 @@ def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
     monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch_partial)
     monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
     monkeypatch.setattr("sector_flow.check_mapping_coverage", fake_mapping)
-    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap: [])
-    assert mod.cmd_collect_sector_flow() == 0
+    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap, baseline=None: [])
+    assert mod.cmd_collect_sector_flow() == 1  # 部分失败 → 非零退出码（#5）
     out = capsys.readouterr().out
     assert "部分窗口取数失败" in out
     assert "部分窗口失败" in out
     assert mapping_calls == []  # 映射自检未执行
+
+    # 首次采集（无漂移基线）→ 建立基线 + 提示，不刷假警告
+    monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch)
+    monkeypatch.setattr("sector_flow.load_drift_baseline", lambda: None)
+    baseline_saved: list[dict] = []
+
+    def fake_save_baseline(snap):
+        baseline_saved.append(snap)
+        return 1
+
+    monkeypatch.setattr("sector_flow.save_drift_baseline", fake_save_baseline)
+    assert mod.cmd_collect_sector_flow() == 0
+    out = capsys.readouterr().out
+    assert "已建立漂移基线" in out
+    assert baseline_saved  # 基线已写入
+
+    # 基线已建 + 快照出现新增未映射行业 → 仅报新增（不再全量刷警告）
+    monkeypatch.setattr("sector_flow.load_drift_baseline", lambda: {"存储"})
+    monkeypatch.setattr("sector_flow.check_snapshot_drift",
+                        lambda snap, baseline=None: ["先进封装"])
+    assert mod.cmd_collect_sector_flow() == 0
+    out = capsys.readouterr().out
+    assert "先进封装" in out
+    assert "存储" not in out

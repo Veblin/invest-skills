@@ -593,3 +593,123 @@ def test_snapshot_drift_detects_unmapped():
         "industries": {"半导体": {}, "存储": {}, "军工电子": {}},
     })
     assert "存储" not in missing
+
+
+# ---------------------------------------------------------------------------
+# code-review 修复（v0.2.5 R16：C5 同日重试恢复 / 漂移基线 / 归零量级守卫 /
+# merge 陈旧值标记 / 部分失败退出码）
+# ---------------------------------------------------------------------------
+
+
+def test_save_retry_recovers_missing_window(isolated_store):
+    """#1 C5 门：run1 部分写入（10日窗口失败）→ run2 同日重试恢复 → 必须写入不得 skipped。
+
+    回归：修复前 `_same_as_latest` 对最近快照缺失的窗口返回 None（不可比），
+    其余窗口全等 → all(comparable) 跳过，恢复的 10日数据被静默丢弃。
+    """
+    day1 = _snapshot_without_windows(_snapshot(), wd_remove={10})
+    day1["date"] = "20260811"
+    r1 = sf.save_sector_flow_snapshot(day1, date="20260811")
+    assert r1["skipped"] is False
+    assert r1["rows_saved"] == 6  # 2 行业 × 3 窗口
+    # 同日重试：全窗口恢复，其余 3 窗口与 run1 写入全等
+    r2 = sf.save_sector_flow_snapshot(_snapshot(), date="20260811")
+    assert r2["skipped"] is False  # 恢复窗口不得被 C5 门判为「无变化」
+    # upsert 全 8 行执行（4 窗口 × 2 行业）；10日窗口为新增行，其余 merge 幂等
+    assert r2["rows_saved"] == 8
+    hist = sf.load_sector_flow_history("半导体", 10, 10)
+    assert hist and hist[-1]["net"] == pytest.approx(-249.76)
+
+
+def test_save_retry_still_missing_not_skipped(isolated_store):
+    """#1 同款缺陷的另一入口：最近快照即部分写入（缺 10日窗口）→ 次日重试不得全等跳过。
+
+    上次部分写入意味着「该日窗口集不完整」，C5 全等比较对其语义失效：
+    次日 3 窗口全等但 10日仍缺 → 判定有变化，正常写入（不静默丢数据）。
+    """
+    day1 = _snapshot_without_windows(_snapshot(), wd_remove={10})
+    day1["date"] = "20260811"
+    r1 = sf.save_sector_flow_snapshot(day1, date="20260811")
+    assert r1["rows_saved"] == 6  # 部分写入（缺 10日窗口）
+    day2 = _snapshot_without_windows(_snapshot(), wd_remove={10})
+    day2["date"] = "20260812"
+    r2 = sf.save_sector_flow_snapshot(day2, date="20260812")
+    assert r2["skipped"] is False
+    assert r2["rows_saved"] == 6
+
+
+def test_decompose_zero_branch_magnitude_guard():
+    """#3 近端归零/中段归零分支同样受 _FLOW_EPS 量级守卫（docstring「所有方向分支」）。"""
+    out = sf.decompose_flow(0.0, None, 2.0)  # mid 日均 0.29 亿 < 1.0
+    assert out["label"] == "近端归零"
+    assert "金额量级小" in out["label_detail"]
+    out = sf.decompose_flow(0.0, None, 30.0)  # mid 日均 4.29 亿 ≥ 1.0
+    assert out["label"] == "近端归零"
+    assert "金额量级小" not in out["label_detail"]
+    out = sf.decompose_flow(0.5, None, 0.5)  # d3 日均 0.17 亿 < 1.0
+    assert out["label"] == "持续净流入"
+    assert "金额量级小" in out["label_detail"]
+    out = sf.decompose_flow(5.0, None, 5.0)  # d3 日均 1.67 亿 ≥ 1.0（现行为保持）
+    assert "金额量级小" not in out["label_detail"]
+
+
+def test_save_null_marks_merged_net(isolated_store):
+    """#4 净额 None 由 merge 填充旧值 → net_merged=1 标记；新值覆盖后标记归零。"""
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260811")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    day2["industries"]["半导体"][3] = {"net": None, "chg": 2.5}
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is False
+    hist = sf.load_sector_flow_history("半导体", 3, 10)
+    assert hist[-1]["net"] == pytest.approx(-18.2)  # 旧值保留（merge COALESCE）
+    assert hist[-1]["net_merged"] == 1
+    # 后续真实值写入 → 覆盖旧值 + 标记归零
+    day3 = _snapshot()
+    day3["date"] = "20260811"
+    day3["industries"]["半导体"][3]["net"] = -88.0
+    sf.save_sector_flow_snapshot(day3, date="20260811")
+    hist2 = sf.load_sector_flow_history("半导体", 3, 10)
+    assert hist2[-1]["net"] == pytest.approx(-88.0)
+    assert hist2[-1]["net_merged"] == 0
+
+
+def test_sequence_trend_excludes_merged_net(isolated_store):
+    """#4 陈旧行（net_merged=1）不参与趋势：剔除后积累不足 → 诚实缺省而非凑数。"""
+    dates = [f"2026080{i}" for i in range(1, 8)]
+    vals = [-50.0, -40.0, -30.0, -20.0, -10.0, 5.0, 20.0]
+    for d, v in zip(dates, vals):
+        snap = {"date": d, "available": True,
+                "industries": {"军工电子": {
+                    1: {"net": v, "chg": 1.0}, 3: {"net": v, "chg": 1.0},
+                    5: {"net": v, "chg": 1.0}, 10: {"net": v, "chg": 1.0},
+                }},
+                "errors": []}
+        sf.save_sector_flow_snapshot(snap, date=d)
+    # 最新日净额同日重写为 None → merge 填充旧值 → merged=1
+    day2 = {"date": "20260807", "available": True,
+            "industries": {"军工电子": {
+                1: {"net": 20.0, "chg": 1.0}, 3: {"net": None, "chg": 1.0},
+                5: {"net": 20.0, "chg": 1.0}, 10: {"net": 20.0, "chg": 1.0},
+            }},
+            "errors": []}
+    sf.save_sector_flow_snapshot(day2, date="20260807")
+    trend = sf._sequence_trend("军工电子", 3)
+    assert trend["valid_days"] == 5  # 第 7 日陈旧行被剔除
+    assert trend["sufficient"] is False  # 不足 6 个真值快照 → 不输出变化率
+
+
+def test_drift_baseline_roundtrip(isolated_store):
+    """#2 漂移基线：首次建立 → 二次仅报新增未映射行业（真实改名/拆分可区分）。"""
+    snap = {"industries": {"半导体": {}, "存储": {}, "军工电子": {}, "银行": {}}}
+    assert sf.load_drift_baseline() is None
+    n = sf.save_drift_baseline(snap)
+    assert n == 1  # 仅「存储」未映射
+    assert sf.load_drift_baseline() == {"存储"}
+    # 相对基线检查：名单未变 → 空（不再全量刷 ~50 条假警告）
+    assert sf.check_snapshot_drift(snap, baseline={"存储"}) == []
+    # 新增未映射行业 → 仅报新增
+    snap2 = {"industries": {"半导体": {}, "存储": {}, "军工电子": {}, "先进封装": {}}}
+    drift = sf.check_snapshot_drift(snap2, baseline={"存储"})
+    assert "先进封装" in drift
+    assert "存储" not in drift

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sqlite3
@@ -61,8 +62,16 @@ CREATE TABLE IF NOT EXISTS sector_flow_snapshots (
     chg_pct REAL,
     leader TEXT,
     leader_chg REAL,
+    net_merged INTEGER NOT NULL DEFAULT 0,
     collected_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (date, industry, window_days)
+);"""
+
+# 模块级 kv 元数据（R16：漂移基线等）
+_META_DDL = """
+CREATE TABLE IF NOT EXISTS sector_flow_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
 );"""
 
 # 读侧高频查询索引（industry + window_days + date）——避免 WHERE industry 全表扫描
@@ -160,12 +169,21 @@ def fetch_sector_flow_snapshot() -> dict[str, Any]:
 
 
 def _ensure_table() -> None:
-    """自包含建表 + 读侧索引。仅写入路径调用；读路径按 OperationalError 降级。"""
+    """自包含建表 + 读侧索引 + meta 表。仅写入路径调用；读路径按 OperationalError 降级。"""
     from lib.store import _connection
 
     with _connection() as c:
         c.execute(_TABLE_DDL)
         c.execute(_IDX_DDL)
+        c.execute(_META_DDL)
+        # R16：net_merged 列（既有表幂等补列，不重建）
+        try:
+            c.execute(
+                "ALTER TABLE sector_flow_snapshots "
+                "ADD COLUMN net_merged INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass  # 列已存在（新库 DDL 已含）
         c.commit()
 
 
@@ -242,12 +260,15 @@ def _same_as_latest(
     -------
     bool | None
         True   当前窗口有数据、行业名单与最近快照完全一致且净额全部相等（容差内）；
-        False  名单增删、任一净额不等、或任一侧净额缺失（有变化，应写入）；
+        False  名单增删、任一净额不等、任一侧净额缺失、或最近快照缺本窗口
+              （上次部分写入 → 本次恢复/补齐必须写入，防 C5 门丢弃恢复数据）；
         None   当前快照本窗口无数据（取数失败）→ 不可比，不参与判定。
     """
     saved = saved_by_wd.get(wd)
     if not saved:
-        return None
+        # 最近快照缺本窗口（上次部分写入）→ 有变化，应写入。若判为 None（不可比），
+        # 其余窗口全等时 `all(comparable)` 会错误跳过，恢复的窗口数据被静默丢弃
+        return False
     cur = {
         ind: (windows.get(wd) or {}).get("net")
         for ind, windows in industries.items()
@@ -339,6 +360,28 @@ def save_sector_flow_snapshot(
         for ind, windows in industries.items()
         for wd, v in windows.items()
     ]
+    # R16 merge 陈旧值标记：净额解析失败（None）且同日已存行有非 None 净额
+    # → 该行将由 COALESCE 填充旧值，net_merged=1（趋势侧剔除，防陈旧值当
+    # 有效快照）。后写入真实值 → 探测不到填充 → 标记归零，净额与标记同源。
+    with _connection() as c:
+        try:
+            existing = {
+                (r["date"], r["industry"], r["window_days"]): r["net_flow"]
+                for r in c.execute(
+                    "SELECT date, industry, window_days, net_flow "
+                    "FROM sector_flow_snapshots WHERE date = ?",
+                    (d,),
+                ).fetchall()
+            }
+        except Exception as exc:
+            _read_log(exc)
+            existing = {}
+    for row in rows:
+        pk = (row["date"], row["industry"], row["window_days"])
+        row["net_merged"] = (
+            1 if row["net_flow"] is None and pk in existing and existing[pk] is not None
+            else 0
+        )
     with _connection() as c:
         try:
             saved = upsert_daily_rows(
@@ -378,7 +421,8 @@ def load_sector_flow_history(
             return []
     return [
         {"date": r["date"], "net": r["net_flow"], "in": r["in_flow"],
-         "out": r["out_flow"], "chg": r["chg_pct"]}
+         "out": r["out_flow"], "chg": r["chg_pct"],
+         "net_merged": r.get("net_merged", 0)}  # 旧库（未补列）读路径缺省 0
         for r in rows
     ]
 
@@ -402,9 +446,9 @@ def decompose_flow(d3: float | None, d5: float | None, d10: float | None) -> dic
       (-,+) → 近端退潮（近端转负，资金退潮）；detail=中段净流入 |mid| 亿
       (-,-) → 持续净流出；detail 强度规则同 (+,+)
       d3≈0 且 mid≈0 → 净额近零（两端均无方向，不做流入/流出断言）
-      d3≈0 且 |mid| 有量 → 近端归零（方向只由中段决定，标注零值边界）
-      mid≈0 且 |d3| 有量 → 中段归零：方向由近端决定（避免 (+,0) 误判「近端回流」）
-      任一日均强度 < _FLOW_EPS → 标注「金额量级小，强度不适用」（所有方向分支）
+      d3≈0 且 |mid| 有量 → 近端归零（方向只由中段决定，标注零值边界；量级守卫看中段日均）
+      mid≈0 且 |d3| 有量 → 中段归零：方向由近端决定（避免 (+,0) 误判「近端回流」；量级守卫看近端日均）
+      任一日均强度 < _FLOW_EPS → 标注「金额量级小，强度不适用」（所有方向分支，含两个归零分支）
       d3/d10 任一 None → 数据不足
     d5 仅作信息字段（消费方自 latest 行直取），本函数不参与判定也不回传。
     """
@@ -420,14 +464,16 @@ def decompose_flow(d3: float | None, d5: float | None, d10: float | None) -> dic
         return {"mid_7d": 0.0, "label": "净额近零",
                 "label_detail": "近端与中段净额均 ≈ 0"}
     if abs(d3) < _ZERO_EPS:
-        # 近端归零（d3 无方向，零值边界）：方向只由中段决定
+        # 近端归零（d3 无方向，零值边界）：方向只由中段决定；量级守卫看主导侧（中段）
         mid_dir = "净流入" if mid > 0 else "净流出"
+        note = "" if abs(mid) / 7 >= _FLOW_EPS else "（金额量级小，强度不适用）"
         return {"mid_7d": round(mid, 2), "label": "近端归零",
-                "label_detail": f"近端净额 ≈ 0（零值边界），中段{mid_dir} {abs(mid):.2f} 亿"}
+                "label_detail": f"近端净额 ≈ 0（零值边界），中段{mid_dir} {abs(mid):.2f} 亿{note}"}
     if abs(mid) < _ZERO_EPS:
         # 中段 7 日净额 ≈ 0：方向由近端决定；「回流/退潮」语义要求中段有方向，不适用
         label = "持续净流入" if d3 > 0 else "持续净流出"
-        detail = f"中段 7 日净额 ≈ 0.00 亿（近端 {d3:+.2f} 亿），近端主导"
+        note = "" if abs(d3) / 3 >= _FLOW_EPS else "（金额量级小，强度不适用）"
+        detail = f"中段 7 日净额 ≈ 0.00 亿（近端 {d3:+.2f} 亿），近端主导{note}"
         return {"mid_7d": 0.0, "label": label, "label_detail": detail}
     s3 = 1 if d3 > 0 else -1
     sm = 1 if mid > 0 else -1
@@ -467,13 +513,17 @@ def _sequence_trend(industry: str, window_days: int = 3) -> dict[str, Any]:
 
     change_5d = net[最新] - net[第 6 旧]（亿元）；turn_5d = 5 日前 vs 最新符号翻转。
     span_days = 基线快照至最新快照的自然日跨度（标准日采 6 快照 = 5 交易日
-    ≈ 7 自然日；≠7 说明有缺采/长假，报告层须标注）。valid_days = 剔除 NULL 后
-    的有效快照数（history_days 为含 NULL 的采集天数，两语义分离）。
+    ≈ 7 自然日；≠7 说明有缺采/长假，报告层须标注）。valid_days = 剔除 NULL 及
+    net_merged（merge 填充的陈旧值）后的有效快照数（history_days 为含 NULL 的
+    采集天数，两语义分离；R16 起陈旧值不参与趋势，剔除后不足则诚实缺省）。
     """
     from datetime import datetime
 
     hist = load_sector_flow_history(industry, window_days, days=_MIN_HISTORY)
-    valid = [(r["date"], r["net"]) for r in hist if r["net"] is not None]
+    valid = [
+        (r["date"], r["net"]) for r in hist
+        if r["net"] is not None and not r.get("net_merged")
+    ]
     nets = [net for _, net in valid]
     if len(nets) < _MIN_HISTORY:
         return {"change_5d": None, "turn_5d": None, "history_days": len(hist),
@@ -631,13 +681,68 @@ def check_mapping_coverage(snapshot: dict[str, Any]) -> list[str]:
     return sorted(wanted - have)
 
 
-def check_snapshot_drift(snapshot: dict[str, Any]) -> list[str]:
+def _unmapped_industries(snapshot: dict[str, Any]) -> set[str]:
+    """快照名单中不在 SW_TO_THS_INDUSTRY 的行业（漂移检测共同基）。"""
+    wanted = {ind for lst in SW_TO_THS_INDUSTRY.values() for ind in lst}
+    have = set(snapshot.get("industries") or {})
+    return have - wanted
+
+
+_DRIFT_BASELINE_KEY = "sector_flow_drift_baseline"
+
+
+def load_drift_baseline() -> set[str] | None:
+    """漂移基线（已确认的未映射行业集）；无基线/读取失败 → None（调用方重新建立）。"""
+    from lib.store import _connection
+
+    with _connection() as c:
+        try:
+            row = c.execute(
+                "SELECT value FROM sector_flow_meta WHERE key = ?",
+                (_DRIFT_BASELINE_KEY,),
+            ).fetchone()
+        except Exception as exc:
+            _read_log(exc)
+            return None
+    if not row or not row["value"]:
+        return None
+    return set(json.loads(row["value"]))
+
+
+def save_drift_baseline(snapshot: dict[str, Any]) -> int | None:
+    """建立/更新漂移基线 = 当前快照未映射行业全集；返回基线行业数，失败 → None。"""
+    from lib.store import _connection, init_db
+
+    baseline = sorted(_unmapped_industries(snapshot))
+    try:
+        init_db()
+        _ensure_table()
+        with _connection() as c:
+            c.execute(
+                "INSERT INTO sector_flow_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_DRIFT_BASELINE_KEY, json.dumps(baseline)),
+            )
+            c.commit()
+    except Exception as exc:
+        logger.warning("save_drift_baseline failed: %s", exc)
+        return None
+    return len(baseline)
+
+
+def check_snapshot_drift(
+    snapshot: dict[str, Any], baseline: set[str] | None = None
+) -> list[str]:
     """快照名单中不在 SW_TO_THS_INDUSTRY 的行业（THS 新增/改名/拆分，反向漂移）。
 
     与 check_mapping_coverage 互补：正向检查映射表行业是否缺采，本函数检查
-    THS 侧出现的新行业名。告警级（SW_TO_THS_INDUSTRY 仅 39 行业，THS 快照
-    约 90 → 正常即有大量未映射行业），不阻断采集。
+    THS 侧出现的新行业名。baseline 为 save_drift_baseline 建立的已知未映射集：
+    传 None → 返回全量未映射（一次性核对）；传基线 → 仅报告相对基线的**新增**
+    行业，使真实漂移（改名/拆分产生的新行业名）与设计内的大量未映射行业
+    （映射表仅 39 行业，THS 快照约 90）可区分，不再每次全量刷警告。
+    告警级，不阻断采集。
     """
-    wanted = {ind for lst in SW_TO_THS_INDUSTRY.values() for ind in lst}
-    have = set(snapshot.get("industries") or {})
-    return sorted(have - wanted)
+    drift = _unmapped_industries(snapshot)
+    if baseline:
+        drift -= set(baseline)
+    return sorted(drift)
