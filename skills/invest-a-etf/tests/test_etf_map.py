@@ -33,3 +33,35 @@ def test_hedge_mapped_cn_etfs_have_csindex_when_applicable():
             assert CSINDEX_MAP[code]
         # 至少 159845 / 主流宽基已覆盖
     assert "159845" in CSINDEX_MAP and "512100" in CSINDEX_MAP
+
+
+def test_159206_mapped_to_defense_satellite():
+    """v0.2.5 R14: 159206 补 ETF_TO_SW_INDUSTRY（国防军工/卫星）。"""
+    from etf_data import ETF_TO_SW_INDUSTRY
+
+    entry = ETF_TO_SW_INDUSTRY["159206"]
+    assert entry["sw_code"] == "801740"
+    assert entry["sw_name"] == "国防军工"
+    assert entry["sub"] == "卫星"
+
+
+def test_159206_cohort_members():
+    """peers 自动发现：159206 同 sw_code 成员 = 军工 ETF（512760 芯片已归电子）。"""
+    from etf_data import ETF_TO_SW_INDUSTRY
+
+    cohort = {
+        c for c, info in ETF_TO_SW_INDUSTRY.items()
+        if info["sw_code"] == "801740"
+    }
+    assert "159206" in cohort
+    assert {"512660", "512710"} <= cohort
+    assert "512760" not in cohort  # 芯片ETF国泰 → 801080 电子
+
+
+def test_512760_mapped_to_electronics():
+    """v0.2.5 R13 修正：512760 芯片ETF 原误映射国防军工 → 电子/芯片。"""
+    from etf_data import ETF_TO_SW_INDUSTRY
+
+    entry = ETF_TO_SW_INDUSTRY["512760"]
+    assert entry["sw_code"] == "801080"
+    assert entry["sub"] == "芯片"

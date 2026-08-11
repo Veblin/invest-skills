@@ -103,3 +103,109 @@ def test_spot_row_to_quote_maps_fields():
     assert q["change_pct"] == pytest.approx(-0.5)
     assert q["premium_discount"] == pytest.approx(-0.2)
     assert q["status"] == "available"
+
+
+# ---------------------------------------------------------------------------
+# R12 holdings / R13 peers CLI（D13: mock 打在 mod = etf.py 命名空间）
+# ---------------------------------------------------------------------------
+
+
+def _fake_holdings() -> dict:
+    return {
+        "symbol": "159206", "report_date": "2026-06-30", "quarter": "2026年2季度",
+        "status": "ok",
+        "rows": [
+            {"code": "688002", "name": "睿创微纳", "pct": 9.07,
+             "shares": 1036.01, "amount": 160260.70},
+            {"code": "600879", "name": "航天电子", "pct": 8.44,
+             "shares": 7004.94, "amount": 149135.26},
+        ],
+        "top1_pct": 9.07, "top5_sum_pct": 17.51, "top10_sum_pct": 17.51,
+        "note": "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；子环节聚类由报告层 AI 完成并标注「AI 归类」",
+        "source": "天天基金(东财 FundArchivesDatas jjcc)",
+    }
+
+
+def test_cli_holdings_invalid_symbol_exit_2():
+    main = _load_etf_main()
+    assert main(["holdings", "abc"]) == 2
+
+
+def test_cmd_holdings_json_contains_concentration(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(mod, "query_etf_holdings", lambda s: _fake_holdings())
+    assert mod.cmd_holdings("159206", as_json=True) == 0
+    out = capsys.readouterr().out
+    assert '"top5_sum_pct": 17.51' in out
+    assert '"symbol": "159206"' in out
+
+
+def test_cmd_holdings_human_readable_has_ai_hint(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(mod, "query_etf_holdings", lambda s: _fake_holdings())
+    assert mod.cmd_holdings("159206", as_json=False) == 0
+    out = capsys.readouterr().out
+    assert "集中度(引擎): top1 9.07%" in out
+    assert "AI 归类" in out
+    assert "睿创微纳" in out
+
+
+def test_cmd_holdings_missing_prints_note(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(
+        mod, "query_etf_holdings",
+        lambda s: {"symbol": s, "status": "missing", "note": "持仓数据不可用",
+                   "report_date": None, "quarter": None, "rows": []},
+    )
+    assert mod.cmd_holdings("159206", as_json=False) == 0
+    assert "持仓数据不可用" in capsys.readouterr().out
+
+
+def test_cmd_peers_unmapped_hints_explicit(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(
+        "etf_peers.query_etf_peers",
+        lambda s, peers: {
+            "symbol": s, "available": False, "peers": [],
+            "peer_source": "etf_to_sw_industry",
+            "note": "未映射申万行业（ETF_TO_SW_INDUSTRY 无此代码），请用 --peers 显式指定",
+            "flow": None, "rs": None, "names": {}, "notes": [],
+        },
+    )
+    assert mod.cmd_peers("512345", as_json=False, peers_str=None) == 0
+    assert "--peers" in capsys.readouterr().out
+
+
+def test_cmd_peers_table_and_rs(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "available": True, "peers": ["512660"],
+        "peer_source": "etf_to_sw_industry:801740 国防军工",
+        "flow": {"window_days": 20, "rows": [
+            {"symbol": "159206", "flow_20d_e": -31.45, "flow_5d_e": 0.99,
+             "share_change_pct": -16.93, "trend": "🔴 持续净流出", "note": None},
+        ]},
+        "rs": {"rs_latest": 94.27, "rs_window_start": 100.96,
+               "rs_change": -6.69,
+               "rank_20d": {"rank": 3, "total": 3}},
+        "names": {"159206": "卫星ETF永赢"}, "notes": [],
+    }
+    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
+    assert mod.cmd_peers("159206", as_json=False, peers_str=None) == 0
+    out = capsys.readouterr().out
+    assert "20日流" in out
+    assert "rs_latest 94.27" in out
+    assert "rs_window_start 100.96" in out
+    assert "20日收益排名 3/3" in out
+
+
+def test_cmd_peers_json_contains_flow(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "available": True, "peers": ["512660"],
+        "peer_source": "explicit", "flow": {"window_days": 20, "rows": []},
+        "rs": None, "names": {}, "notes": [],
+    }
+    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
+    assert mod.cmd_peers("159206", as_json=True, peers_str="512660") == 0
+    assert '"peer_source": "explicit"' in capsys.readouterr().out

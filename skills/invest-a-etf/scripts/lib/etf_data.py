@@ -22,7 +22,11 @@ from codes import etf_symbol_to_ts_code  # noqa: E402
 from dates import shanghai_days_ago, shanghai_today  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.db_util import hist_ex_today  # noqa: E402
-from lib.proxy import akshare_direct_session  # noqa: E402
+from lib.proxy import (  # noqa: E402
+    akshare_direct_session,
+    no_proxy_session,
+    throttle_eastmoney,
+)
 from lib.technical import (  # noqa: E402
     annualized_volatility_from_returns,
     boll_latest,
@@ -83,7 +87,7 @@ ETF_HEDGE_MAP: dict[str, dict[str, str | None]] = {
     # —— 行业/主题（无直接对冲工具） ——
     "512480": {"index": "半导体",       "futures": None, "options": None, "coverage": "none"},
     "159995": {"index": "国证芯片",     "futures": None, "options": None, "coverage": "none"},
-    "512760": {"index": "军工龙头",     "futures": None, "options": None, "coverage": "none"},
+    "512760": {"index": "CES半导体芯片", "futures": None, "options": None, "coverage": "none"},
     "512660": {"index": "军工ETF",      "futures": None, "options": None, "coverage": "none"},
     "512690": {"index": "中证酒",       "futures": None, "options": None, "coverage": "none"},
     "512010": {"index": "300医药",      "futures": None, "options": None, "coverage": "none"},
@@ -159,14 +163,15 @@ ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
     "515050": {"sw_code": "801770", "sw_name": "通信",       "sub": "5G"},
     "515880": {"sw_code": "801770", "sw_name": "通信",       "sub": "通信设备"},
     "512480": {"sw_code": "801080", "sw_name": "电子",       "sub": "半导体"},
+    "512760": {"sw_code": "801080", "sw_name": "电子",       "sub": "芯片"},  # 芯片ETF国泰（原误映射军工，v0.2.5 R13 修正）
     "159995": {"sw_code": "801080", "sw_name": "电子",       "sub": "芯片"},
     "512330": {"sw_code": "801750", "sw_name": "计算机",     "sub": "信息技术"},
     "515230": {"sw_code": "801750", "sw_name": "计算机",     "sub": "软件"},
     # 新能源/高端制造
     "515790": {"sw_code": "801730", "sw_name": "电力设备",   "sub": "光伏"},
     "516160": {"sw_code": "801730", "sw_name": "电力设备",   "sub": "新能源"},
-    "512760": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工"},
     "512660": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工"},
+    "159206": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "卫星"},
     "516970": {"sw_code": "801720", "sw_name": "建筑装饰",   "sub": "基建"},
     # 消费/医药
     "512690": {"sw_code": "801120", "sw_name": "食品饮料",   "sub": "白酒"},
@@ -666,6 +671,196 @@ def fetch_etf_industry_alloc(symbol: str) -> dict:
         return {"status": "missing", "allocation": [], "latest_date": None, "error": str(exc)}
 
 
+# ---------------------------------------------------------------------------
+# 前十大持仓（裸 HTTP：akshare fund_portfolio_hold_em 已坏 — EM 页面结构变更
+# → demjson JSONDecodeError，v0.2.5 R12 起自写 fetch）
+# ---------------------------------------------------------------------------
+
+_EM_F10_URL = "https://fundf10.eastmoney.com/FundArchivesDatas.aspx"
+_EM_F10_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
+    "Referer": "https://fundf10.eastmoney.com/ccmx_{symbol}.html",
+}
+
+
+def _decode_em_page(resp) -> str:
+    """utf-8 优先（实测 HTTPS 端点 charset=utf-8），失败回退 gbk（旧端点）。"""
+    try:
+        return resp.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return resp.content.decode("gbk", errors="replace")
+
+
+def _thead_column_indexes(table_block: str):
+    """表头列定位：归一化 th 文本 → {code/name/pct/shares/amount: 列索引}。
+
+    表头列历史上多次漂移（最新价/涨跌幅列曾增删、列序变化）→ 优先按表头名
+    定位；表头不可解析时返回 None（调用方回退负索引兜底）。
+    """
+    import html as _html
+    import re as _re
+
+    head_m = _re.search(r"<thead>(.*?)</thead>", table_block, _re.S)
+    if not head_m:
+        return None
+    ths = []
+    for t in _re.findall(r"<th[^>]*>(.*?)</th>", head_m.group(1), _re.S):
+        text = _re.sub(r"<[^>]+>", "", t)  # 去标签（含 <br />）
+        text = _html.unescape(text).replace(" ", " ").strip()
+        ths.append(text)
+    if not ths:
+        return None
+    idx: dict[str, int] = {}
+
+    def find(key: str) -> int | None:
+        for i, t in enumerate(ths):
+            if key in t:
+                return i
+        return None
+
+    for field, key in (
+        ("code", "股票代码"),
+        ("name", "股票名称"),
+        ("pct", "占净值"),
+        ("shares", "持股"),
+        ("amount", "持仓市值"),
+    ):
+        i = find(key)
+        if i is None:
+            return None
+        idx[field] = i
+    return idx
+
+
+def _parse_holdings_blocks(content: str) -> list[dict]:
+    """按 h4 块切分季度报告期，每块 = {report_date, quarter, rows:[...]}。
+
+    列定位仅依赖表头（_thead_column_indexes）——历史列序多次漂移，负索引在
+    「相关资讯列在末位」等旧布局下会静默错位（pct←持股、shares←市值），
+    因此表头不可解析时**跳过该块**（fail loud → 上层 missing 信封），
+    绝不猜测列位置；<td> 数 <6 的行跳过（thead 行、空行防御）。
+    """
+    import html as _html
+    import re as _re
+
+    blocks: list[dict] = []
+    for m in _re.finditer(
+        r"<h4[^>]*>(.*?)</h4>.*?<table.*?</table>", content, _re.S
+    ):
+        h4 = m.group(1)
+        date_m = _re.search(r"截止至：\s*<font[^>]*>([\d\-]+)</font>", h4)
+        if not date_m:
+            continue
+        q_m = _re.search(r"(\d{4}年\d季度)", h4)
+        col = _thead_column_indexes(m.group(0))
+        if col is None:
+            continue  # 表头不可解析 → 跳过该块（不猜测列位置）
+        rows: list[dict] = []
+        # 先在 tbody 内提取（<tbody><tr> 只出现一次；后续行是裸 <tr>，
+        # 直接 <tr> 匹配会误收 thead 行），再逐行解析
+        tbody_m = _re.search(r"<tbody>(.*?)</tbody>", m.group(0), _re.S)
+        for tr in _re.findall(r"<tr>(.*?)</tr>", tbody_m.group(1) if tbody_m else "", _re.S):
+            cells = [
+                _html.unescape(c).strip()
+                for c in _re.findall(r"<td[^>]*>(.*?)</td>", tr, _re.S)
+            ]
+            cells = [_re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+            if len(cells) < 6:
+                continue
+            rows.append(
+                {
+                    "code": cells[col["code"]],
+                    "name": cells[col["name"]],
+                    "pct": safe_float(cells[col["pct"]].rstrip("%").replace(",", "")),
+                    "shares": safe_float(cells[col["shares"]].replace(",", "")),
+                    "amount": safe_float(cells[col["amount"]].replace(",", "")),
+                }
+            )
+        if rows:
+            blocks.append(
+                {
+                    "report_date": date_m.group(1),
+                    "quarter": q_m.group(1) if q_m else "",
+                    "rows": rows,
+                }
+            )
+    return blocks
+
+
+def _holdings_missing(error: str) -> dict:
+    return {
+        "status": "missing",
+        "report_date": None,
+        "quarter": None,
+        "rows": [],
+        "error": error,
+    }
+
+
+def fetch_etf_holdings(symbol: str) -> dict:
+    """原始取数：天天基金前十大持仓（data_bridge etf_holdings 维度，季度报告期）。
+
+    裸 HTTP（akshare fund_portfolio_hold_em 已坏）。响应为
+    ``var apidata={content:"...html...",arryear:[...]}``（JS 字面量非严格 JSON），
+    content 内含多个季度块（h4+table），取「截止至」日期最大的一块。
+    失败返回 status="missing" 信封（data_bridge _FAILURE_STATUSES 不缓存语义生效）。
+    """
+    import html as _html
+    import random as _random
+    import re as _re
+
+    year = int(shanghai_today()[:4])
+    for attempt in range(2):  # year → year-1 回退（年初 Q4 报告未披露）
+        params = {
+            "type": "jjcc",
+            "code": symbol,
+            "topline": "10",
+            "year": str(year),
+            "month": "",
+            "rt": f"{_random.random():.13f}",
+        }
+        try:
+            throttle_eastmoney()  # 全局东财限流 ≥0.5s（与 akshare 调用共享槽）
+            with no_proxy_session() as sess:
+                sess.headers.update(
+                    {k.format(symbol=symbol): v.format(symbol=symbol)
+                     for k, v in _EM_F10_HEADERS.items()}
+                )
+                r = sess.get(_EM_F10_URL, params=params, timeout=15)
+                r.raise_for_status()
+            text = _decode_em_page(r)
+            m = _re.search(r'content:"(.*?)",arryear:', text, _re.S)
+            if not m:
+                return _holdings_missing("EM 响应无 apidata.content")
+            content = _html.unescape(m.group(1))
+            blocks = _parse_holdings_blocks(content)
+            if blocks:
+                latest = max(blocks, key=lambda b: b["report_date"])
+                return {
+                    "status": "ok",
+                    "report_date": latest["report_date"],
+                    "quarter": latest["quarter"],
+                    "rows": latest["rows"],
+                    "error": None,
+                }
+            if attempt == 0:
+                year -= 1
+                continue
+            return _holdings_missing("该年份无持仓数据（可能尚未披露）")
+        except Exception as exc:
+            logger.warning("fetch_etf_holdings(%s) failed: %s", symbol, exc)
+            # 异常也回退 year-1 重试一次（年初 Q4 未披露场景；限流/TLS
+            # 瞬态故障同样受益，避免 attempt 0 直接 missing）
+            if attempt == 0:
+                year -= 1
+                continue
+            return _holdings_missing(str(exc)[:200])
+    return _holdings_missing("取数失败")
+
+
 def fetch_etf_category_sina() -> dict:
     """原始取数：sina ETF 分类表（data_bridge etf_category_sina 维度，市场级）。"""
     try:
@@ -860,6 +1055,55 @@ def _lookup_hedge(symbol: str) -> dict:
 # ---------------------------------------------------------------------------
 # ETF 行情 + K 线（净值序列）
 # ---------------------------------------------------------------------------
+
+def query_etf_holdings(symbol: str) -> dict[str, Any]:
+    """前十大持仓 + 集中度统计（v0.2.5 R12；引擎计算，AI 不心算）。
+
+    Returns
+    -------
+    dict
+        {symbol, report_date, quarter, status: ok/missing,
+         rows: [{code, name, pct, shares, amount}],
+         top1_pct / top5_sum_pct / top10_sum_pct, note, source}。
+
+    口径：pct=占净值比例(%)；shares=持股数(万股)；amount=持仓市值(万元)；
+    top5/top10 合计 = 可用行占比之和（不足 N 行按可用行求和，pct None 不计）；
+    前十大合计可能 <100%（非前十大持仓未列），note 显式声明。
+    """
+    env = _bridge_get("get_etf_holdings", symbol)
+    ok = env is not None and env.get("status") == "ok" and env.get("rows")
+    if not ok:
+        return {
+            "symbol": symbol,
+            "report_date": None,
+            "quarter": None,
+            "status": "missing",
+            "rows": [],
+            "top1_pct": None,
+            "top5_sum_pct": None,
+            "top10_sum_pct": None,
+            "note": (env or {}).get("error") or "持仓数据不可用",
+            "source": "天天基金(东财 FundArchivesDatas jjcc)",
+        }
+    rows = env["rows"]
+    pcts = [r["pct"] for r in rows if r.get("pct") is not None]
+    return {
+        "symbol": symbol,
+        "report_date": env.get("report_date"),
+        "quarter": env.get("quarter"),
+        "status": "ok",
+        "rows": rows,
+        # top1 取 max（不假设页面按占比降序）；top10 截断 10 行
+        "top1_pct": round(max(pcts), 2) if pcts else None,
+        "top5_sum_pct": round(sum(pcts[:5]), 2) if pcts else None,
+        "top10_sum_pct": round(sum(pcts[:10]), 2) if pcts else None,
+        "note": (
+            "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；"
+            "子环节聚类由报告层 AI 完成并标注「AI 归类」"
+        ),
+        "source": "天天基金(东财 FundArchivesDatas jjcc)",
+    }
+
 
 def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
     """ETF 当前行情：价格、涨跌幅、折溢价（从 fund_etf_spot_em）。"""

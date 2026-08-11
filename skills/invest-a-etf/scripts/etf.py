@@ -26,6 +26,7 @@ from etf_data import (  # noqa: E402
     compute_history_stats,
     prefetch_etf_spot,
     query_etf_data,
+    query_etf_holdings,
     query_etf_kline,
     query_etf_kline_history,
     query_etf_quote,
@@ -296,6 +297,117 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     return 0
 
 
+def _validate_symbol(symbol: str) -> str | None:
+    """校验 6 位数字代码；非法时打印错误并返回 None。"""
+    symbol = symbol.strip()
+    if not symbol.isdigit() or len(symbol) != 6:
+        print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
+        return None
+    return symbol
+
+
+def cmd_holdings(symbol: str, *, as_json: bool) -> int:
+    """R12: 前十大持仓 + 集中度统计。"""
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    data = query_etf_holdings(symbol)
+    if as_json:
+        payload = {
+            "skill": "invest-a-etf",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "holdings": data,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    print(f"# holdings · {symbol}")
+    if data["status"] != "ok":
+        print(f"⏳ 持仓数据不可用: {data['note']}")
+        return 0
+    quarter = data.get("quarter") or ""
+    print(f"report_date: {data['report_date']} ({quarter})  source: {data['source']}")
+    print(f"  {'#':<3s} {'代码':<8s} {'名称':<10s} {'占比%':>7s} "
+          f"{'持股(万股)':>12s} {'市值(万元)':>14s}")
+    for i, r in enumerate(data["rows"], start=1):
+        pct = f"{r['pct']:.2f}" if r.get("pct") is not None else "-"
+        shares = f"{r['shares']:.2f}" if r.get("shares") is not None else "-"
+        amount = f"{r['amount']:.2f}" if r.get("amount") is not None else "-"
+        print(f"  {i:<3d} {r['code']:<8s} {r['name']:<10s} {pct:>7s} "
+              f"{shares:>12s} {amount:>14s}")
+    top1 = data.get("top1_pct")
+    top5 = data.get("top5_sum_pct")
+    top10 = data.get("top10_sum_pct")
+    t1 = f"{top1:.2f}" if top1 is not None else "-"
+    t5 = f"{top5:.2f}" if top5 is not None else "-"
+    t10 = f"{top10:.2f}" if top10 is not None else "-"
+    print(f"集中度(引擎): top1 {t1}% | top5 {t5}% | top10 {t10}%")
+    print(f"note: {data['note']}")
+    print("> 子环节聚类：由报告层 AI 基于名单归类，标注「AI 归类」（引擎不聚类）")
+    return 0
+
+
+def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
+    """R13: 赛道资金流对比 + 相对强弱。"""
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    peers_list = None
+    if peers_str:
+        peers_list = [p.strip() for p in peers_str.split(",") if p.strip()]
+    try:
+        from etf_peers import query_etf_peers
+    except ImportError as exc:
+        print(f"etf_peers 模块不可用: {exc}（请检查路径配置或 canonical 模块加载）")
+        return 1
+    data = query_etf_peers(symbol, peers_list)
+    if as_json:
+        payload = {
+            "skill": "invest-a-etf",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "peers": data,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    print(f"# peers · {symbol}")
+    print(f"peer_source: {data['peer_source']}")
+    if not data["available"]:
+        print(f"⏳ {data.get('note', '赛道不可用')}")
+        return 0
+    names = data.get("names") or {}
+    print("## 资金流对比 (Tushare fund_share · 20日窗口 · 亿元)")
+    print(f"  {'代码':<8s} {'名称':<14s} {'20日流':>8s} {'5日流':>7s} "
+          f"{'份额变化%':>9s} {'趋势'}")
+    for row in data["flow"]["rows"]:
+        code = row["symbol"]
+        name = names.get(code) or "-"
+        f20 = f"{row['flow_20d_e']:+.2f}" if row.get("flow_20d_e") is not None else "⏳"
+        f5 = f"{row['flow_5d_e']:+.2f}" if row.get("flow_5d_e") is not None else "⏳"
+        sp = f"{row['share_change_pct']:+.2f}" if row.get("share_change_pct") is not None else "⏳"
+        trend = row.get("trend") or "⏳"
+        note = row.get("note")
+        extra = f" ⚠ {note}" if note else ""
+        print(f"  {code:<8s} {name:<14s} {f20:>8s} {f5:>7s} {sp:>9s} {trend}{extra}")
+        span = row.get("share_change_span")
+        if span is not None and span < 19:
+            print(f"  ⚠ {code} 份额变化% 仅覆盖 {span} 个交易日间隔（份额历史不足 20 日）")
+    rs = data.get("rs")
+    if rs and "error" not in rs:
+        rank = rs.get("rank_20d") or {}
+        rank_str = f"{rank.get('rank', '-')}/{rank.get('total', '-')}" if rank else "-"
+        print("## 相对强弱 (基准=同赛道等权均值 · 20日)")
+        print(f"  rs_latest {rs['rs_latest']} | rs_window_start {rs['rs_window_start']} | "
+              f"rs_change {rs['rs_change']:+.2f} | 20日收益排名 {rank_str}")
+    elif rs:
+        print(f"## 相对强弱: ⏳ {rs['error']}")
+    for note in data.get("notes") or []:
+        print(f"note: {note}")
+    return 0
+
+
 def cmd_industry_pe() -> int:
     """打印申万一级行业 PE/PB 一览。"""
     try:
@@ -423,6 +535,20 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("industry-pe", help="申万一级行业 PE/PB 一览")
     sub.add_parser("collect-weekly", help="手动触发行业 PE 周度采集")
 
+    p_holdings = sub.add_parser("holdings", help="R12: 前十大持仓 + 集中度统计")
+    p_holdings.add_argument("symbol", help="6 位 ETF 代码")
+    p_holdings.add_argument("--json", action="store_true", help="输出完整 JSON")
+
+    p_peers = sub.add_parser("peers", help="R13: 赛道资金流对比 + 相对强弱")
+    p_peers.add_argument("symbol", help="6 位 ETF 代码")
+    p_peers.add_argument("--json", action="store_true", help="输出完整 JSON")
+    p_peers.add_argument(
+        "--peers",
+        metavar="CODES",
+        default=None,
+        help="显式赛道清单（逗号分隔，如 \"512660,512760\"）；缺省按 ETF_TO_SW_INDUSTRY 自动发现同行业",
+    )
+
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
@@ -434,6 +560,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_industry_pe()
     if args.cmd == "collect-weekly":
         return cmd_collect_weekly()
+    if args.cmd == "holdings":
+        return cmd_holdings(args.symbol, as_json=args.json)
+    if args.cmd == "peers":
+        return cmd_peers(args.symbol, as_json=args.json, peers_str=args.peers)
     return 1
 
 

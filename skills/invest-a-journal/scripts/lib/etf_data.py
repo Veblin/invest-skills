@@ -47,6 +47,8 @@ fetch_etf_adj_factor = _mod.fetch_etf_adj_factor
 fetch_etf_share_history = _mod.fetch_etf_share_history
 fetch_etf_industry_alloc = _mod.fetch_etf_industry_alloc
 fetch_etf_category_sina = _mod.fetch_etf_category_sina
+fetch_etf_holdings = _mod.fetch_etf_holdings
+query_etf_holdings = _mod.query_etf_holdings
 
 __all__ = [
     "CSINDEX_MAP",
