@@ -491,3 +491,52 @@ class TestMsTryFetchExceptionNotLeaked:
         )
         assert result["availability"]["pmi"] == (
             "unavailable: akshare macro_china_pmi unavailable")
+
+
+# ---------- 缺陷 8：new_high_ratio _map_parallel 双包装（600206 batch-test 实证） ----------
+
+class TestNewHighRatioPanel:
+    """_fetch_daily_panel_row 返回 (ts_code, records) 元组而 _map_parallel 契约
+    也返回 (item, result)——双重包装使 panel 值为元组，rows[0]=str(ts_code)，
+    _ms_new_high_ratio_from_panel 对其 .get("close") → AttributeError
+    （600206 实证：market_structure new_high_ratio fetch failed）。"""
+
+    def test_fetch_new_high_ratio_computes_ratio(self):
+        from lib.collector._orchestrate import _ms_fetch_new_high_ratio
+
+        import pandas as pd
+
+        class _FakeTC:
+            """stock_basic 全量 + daily 单标的 5 行样本（closes/highs 精心构造）。"""
+
+            def __init__(self):
+                self.daily_calls = 0
+
+            def query(self, api, **kw):
+                if api == "stock_basic":
+                    return pd.DataFrame(
+                        {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+                if api == "daily":
+                    self.daily_calls += 1
+                    code = kw["ts_code"]
+                    dates = ["20260805", "20260806", "20260807", "20260810", "20260811"]
+                    if code == "000001.SZ":
+                        # 收盘创新高：14 >= max(前 4 日高=13.5)
+                        close, high = [10, 11, 12, 13, 14], [10.5, 11.5, 12.5, 13.5, 15.0]
+                    elif code == "000002.SZ":
+                        # 非新高：16 < max(前 4 日高=21)
+                        close, high = [20, 19, 18, 17, 16], [21, 20, 19, 18, 17]
+                    else:
+                        # 平历史高（>=）算新高：5 >= 5
+                        close, high = [5, 5, 5, 5, 5], [5, 5, 5, 5, 5]
+                    return pd.DataFrame({
+                        "trade_date": dates, "close": close, "high": high,
+                    })
+                raise AssertionError(f"unexpected api: {api}")
+
+        tc = _FakeTC()
+        result = _ms_fetch_new_high_ratio(tc)
+        assert result is not None
+        assert result["sample_size"] == 3
+        assert result["ratio_pct"] == 66.67  # 2/3 创新高
+        assert result["sample_requested"] == 3

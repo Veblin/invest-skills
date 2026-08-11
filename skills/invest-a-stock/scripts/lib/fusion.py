@@ -11,6 +11,7 @@ from typing import Any
 
 from .schema import (
     _CV_L2_FIELDS,
+    _extract_l2_scalar,
     _extract_scalar,
     relative_diff_pct,
 )
@@ -171,10 +172,15 @@ def fuse_from_source_results(
                 continue
             # 融合值口径与跨源差异标注一致（C5）：估值维度用市值键——
             # _DIM_SCALAR_KEYS 键序让 pe_ttm 先命中，而 _auto_cross_validate
-            # 用 _CV_L2_FIELDS 市值键，同一报告曾出现融合值=PE、差异标注=市值
+            # 用 _CV_L2_FIELDS 市值键，同一报告曾出现融合值=PE、差异标注=市值。
+            # 必须用 _extract_l2_scalar 而非 _extract_scalar：后者对裸标量
+            # 短路（_numeric_scalar(data) 直接返回）绕过显式 keys——legacy 重建
+            # 路径（dimension_results_from_legacy）对非主源注入 scalar_value
+            # （to_dict 默认键序提取的 PE），会把 PE 混入市值融合
+            # （600206 实证：445.71 市值 vs 140.16 PE → 融合值 322.78 不可用）。
+            # _extract_l2_scalar 仅认白名单字段（dict/list），裸标量返回 None。
             if dim_name == "valuation":
-                v = _extract_scalar(src.data, dim_name,
-                                    keys=_CV_L2_FIELDS["valuation"])
+                v = _extract_l2_scalar(src.data, _CV_L2_FIELDS["valuation"])
             else:
                 v = _extract_scalar(src.data, dim_name)
             if v is not None:

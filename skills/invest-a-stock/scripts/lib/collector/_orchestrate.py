@@ -2567,8 +2567,13 @@ def _ms_new_high_ratio_from_panel(panel: dict[str, list[dict]]) -> float | None:
     for rows in panel.values():
         if len(rows) < 2:
             continue
-        closes = [safe_float(r.get("close")) for r in rows]
-        highs = [safe_float(r.get("high")) for r in rows]
+        # 防御：跳过非 dict 行（此前 _map_parallel 双包装注入 str 行崩溃；
+        # 与 schema._rows_newest_last 的非 dict 行剔除策略一致）
+        dict_rows = [r for r in rows if isinstance(r, dict)]
+        if len(dict_rows) < 2:
+            continue
+        closes = [safe_float(r.get("close")) for r in dict_rows]
+        highs = [safe_float(r.get("high")) for r in dict_rows]
         closes = [c for c in closes if c is not None]
         highs = [h for h in highs if h is not None]
         if not closes or len(highs) < 2:
@@ -2600,10 +2605,14 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     codes = rng.sample(codes_all, min(_NEW_HIGH_SAMPLE, len(codes_all)))
     if not codes:
         return None
-    def _fetch_daily_panel_row(ts_code: str) -> tuple[str, list[dict] | None]:
+    def _fetch_daily_panel_row(ts_code: str) -> list[dict] | None:
         # 单次 daily 查询加时限（与 _ms_pcr_on_date 同款 8s）：_map_parallel
         # 契约要求内部单次执行有超时兜底，否则挂起 socket 会拖住
         # with ThreadPoolExecutor 的 join，market_structure 整块阻塞数分钟
+        # ⚠️ 只返回 records（不得返回 (ts_code, records) 元组）——_map_parallel
+        # 本身返回 (item, result)，双重包装会使 panel 值为元组、rows[0] 为
+        # 字符串 ts_code，_ms_new_high_ratio_from_panel 对其 .get() 直接
+        # AttributeError（600206 实证：market_structure new_high_ratio fetch failed）
         df = _run_with_timeout(
             lambda: tc.query(
                 "daily", ts_code=ts_code,
@@ -2613,8 +2622,8 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
             8.0, f"daily:{ts_code}",
         )
         if df is None or df.empty:
-            return ts_code, None
-        return ts_code, df.sort_values("trade_date").to_dict("records")
+            return None
+        return df.sort_values("trade_date").to_dict("records")
 
     def _on_panel_error(ts_code: str, exc: Exception) -> None:
         logger.warning("new_high_ratio daily fetch failed for %s: %s", ts_code, exc)

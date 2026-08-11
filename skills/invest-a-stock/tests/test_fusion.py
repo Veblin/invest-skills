@@ -261,6 +261,54 @@ class TestFuseFromSourceResults:
         assert "valuation" in fused
         assert len(fused["valuation"].source_values) == 1
 
+    def test_legacy_rebuild_bare_scalar_does_not_mix_pe_into_market_cap(self):
+        """R12h C5 回归：legacy 重建路径（非主源注入裸 scalar_value）不得把 PE 混入市值融合。
+
+        真实复现（2026-08-11 600206 采集）：tushare 主源走原始数据 → total_mv
+        445.71；tencent 非主源 scalar_value=140.16（to_dict 默认键序 pe_ttm 先命中，
+        实为 PE）→ _extract_scalar 裸标量短路绕过显式市值键 → 融合出 322.78
+        （max_diff 104.31%，融合值不可用）。修复后 tencent 无市值数据 → 不进入融合。
+        """
+        from lib.fusion import dimension_results_from_legacy, fuse_from_source_results
+
+        dimensions = [
+            {
+                "dimension": "valuation",
+                "data": [
+                    {"trade_date": "20260811", "pe": 140.16,
+                     "pe_ttm": 140.1623, "total_mv": 445.71031245},
+                ],
+                "_meta": {
+                    "source": "tushare.daily_basic",
+                    "all_sources": [
+                        {
+                            "source": "tushare.daily_basic",
+                            "query_params": "pro.daily_basic(ts_code='600206.SH')",
+                            "confidence": "high",
+                            "scalar_value": 140.1623,
+                            "data": [
+                                {"trade_date": "20260811", "pe": 140.16,
+                                 "pe_ttm": 140.1623, "total_mv": 445.71031245},
+                            ],
+                        },
+                        {
+                            "source": "tencent_finance",
+                            "query_params": "qt.gtimg.cn/q=sh600206",
+                            "confidence": "medium",
+                            "scalar_value": 140.16,
+                        },
+                    ],
+                },
+            },
+        ]
+        fused = fuse_from_source_results(dimension_results_from_legacy(dimensions))
+        assert "valuation" in fused
+        fp = fused["valuation"]
+        # tencent 无市值数据 → 不得以 PE 混入市值融合（口径一致性优先，宁可单源）
+        assert fp.source_values == {"tushare.daily_basic": 445.71031245}
+        assert fp.fused_value == 445.71031245
+        assert fp.max_diff_pct == 0.0
+
 
 class TestFuseFromLegacyDicts:
     def test_legacy_dict_format_with_scalar_value(self):
