@@ -207,8 +207,9 @@ def test_decompose_four_quadrants():
 
 def test_decompose_boundary_and_missing():
     out = sf.decompose_flow(0.0, None, 10.0)
-    assert out["label"] == "近端退潮"  # 0 归负侧
+    assert out["label"] == "近端归零"  # d3≈0：方向只由中段决定，不归负侧
     assert "零值边界" in out["label_detail"]
+    assert "中段净流入 10.00 亿" in out["label_detail"]
     out = sf.decompose_flow(None, None, 10.0)
     assert out["label"] == "数据不足"
     out = sf.decompose_flow(1.0, None, None)
@@ -281,6 +282,7 @@ def test_query_sequence_trend_turn(isolated_store, monkeypatch):
     row = out["industries"][0]
     assert row["trend_5d"] == pytest.approx(60.0)  # 20 - (-40)，5 日变化（第 6 旧为基线）
     assert row["turn_5d"] == "转向流入"
+    assert row["trend_span_days"] == 5  # 基线=第 6 旧快照 08-02 → 08-07
     assert out["history_days"] == 7
 
 
@@ -408,3 +410,186 @@ def test_query_per_industry_insufficient_note(isolated_store, monkeypatch):
     row = out["industries"][0]  # 军工电子：0 行
     assert row["trend_5d"] is None
     assert any("军工电子」序列积累中" in n for n in out["notes"])
+
+
+# ---------------------------------------------------------------------------
+# 回归（code-review 修复：NULL 冻结/位漂移/日历/upsert/量级守卫/漂移检测）
+# ---------------------------------------------------------------------------
+
+
+def test_decompose_near_zero_labels():
+    """全零净额 → 净额近零（不做「持续净流出」断言）；d3≈0 有中段 → 近端归零。"""
+    out = sf.decompose_flow(1e-10, None, 1e-10)
+    assert out["label"] == "净额近零"
+    assert "≈ 0" in out["label_detail"]
+    out = sf.decompose_flow(-1e-10, None, -1e-10)
+    assert out["label"] == "净额近零"
+    out = sf.decompose_flow(0.0, None, -5.0)
+    assert out["label"] == "近端归零"
+    assert "中段净流出 5.00 亿" in out["label_detail"]
+
+
+def test_decompose_rebound_magnitude_guard():
+    """回流/退潮分支同样受 _FLOW_EPS 量级守卫（docstring 规则全覆盖）。"""
+    out = sf.decompose_flow(0.5, None, -2.0)  # mid=-2.5，日均 0.36 亿 < 1.0
+    assert out["label"] == "近端回流"
+    assert "金额量级小" in out["label_detail"]
+    out = sf.decompose_flow(15.0, None, -5.0)  # mid=-20，日均 2.86 亿 ≥ 1.0
+    assert out["label"] == "近端回流"
+    assert "金额量级小" not in out["label_detail"]
+    out = sf.decompose_flow(-0.5, None, 2.0)  # 近端退潮微量级
+    assert out["label"] == "近端退潮"
+    assert "金额量级小" in out["label_detail"]
+
+
+def test_str_col_guards_pd_na_and_nan():
+    """pd.NA/NaN/None/'' 不泄漏为字面量；正常值保留。"""
+    assert sf._str_col({"x": pd.NA}, "x") is None
+    assert sf._str_col({"x": float("nan")}, "x") is None
+    assert sf._str_col({"x": None}, "x") is None
+    assert sf._str_col({"x": ""}, "x") is None
+    assert sf._str_col({"x": "半导体"}, "x") == "半导体"
+
+
+def test_fetch_nan_industry_skipped(monkeypatch):
+    """「行业」单元格 NaN 的行不得以字面量 "nan" 行业入库（实测回归）。"""
+    import numpy as np
+
+    df = pd.DataFrame([
+        {"行业": np.nan, "阶段涨跌幅": "1.0%", "净额": 1.0},
+        {"行业": "半导体", "阶段涨跌幅": "2.0%", "净额": -18.2},
+    ])
+    _patch_ak(monkeypatch, windows={3: df})
+    s = sf.fetch_sector_flow_snapshot()
+    assert "nan" not in s["industries"]
+    assert "半导体" in s["industries"]
+
+
+def test_fetch_pdna_leader_guarded(monkeypatch):
+    """领涨股列 pd.NA → leader 字段 None 而非 "<NA>"。"""
+    df = pd.DataFrame([{
+        "行业": "半导体", "行业-涨跌幅": "1.0%", "净额": 1.0,
+        "领涨股": pd.NA, "领涨股-涨跌幅": 3.2,
+    }])
+    _patch_ak(monkeypatch, windows={1: df})
+    s = sf.fetch_sector_flow_snapshot()
+    assert s["industries"]["半导体"][1]["leader"] is None
+
+
+def test_save_null_does_not_freeze(isolated_store):
+    """窗口净额 NULL → 判定有变化写入（永不因 NULL 全等跳过，防序列冻结）。"""
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260810")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    day2["industries"]["半导体"][3] = {"net": None, "chg": 2.5}
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is False
+    assert r["rows_saved"] == 8
+
+
+def test_save_bit_drift_isclose_skip(isolated_store):
+    """浮点位漂移（1e-12）→ 全等跳过；真实差异（0.001）→ 写入。"""
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260810")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    day2["industries"]["半导体"][3]["net"] = -18.2 + 1e-12
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is True
+    day3 = _snapshot()
+    day3["date"] = "20260811"
+    day3["industries"]["半导体"][3]["net"] = -18.2 + 0.001
+    r2 = sf.save_sector_flow_snapshot(day3, date="20260811")
+    assert r2["skipped"] is False
+    assert r2["rows_saved"] == 8
+
+
+def test_save_calendar_nontrading_skipped(monkeypatch, isolated_store):
+    """权威日历非交易日 → 跳过，note 标注日历判定。"""
+    monkeypatch.setattr(sf, "_is_trading_day", lambda d: False)
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260810")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is True
+    assert "非交易日（日历判定）" in r["note"]
+
+
+def test_save_identical_trading_day_note(monkeypatch, isolated_store):
+    """交易日 + 数据全等 → 跳过，note 标注疑似盘前未刷新。"""
+    monkeypatch.setattr(sf, "_is_trading_day", lambda d: True)
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260810")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is True
+    assert "盘前未刷新" in r["note"]
+
+
+def test_save_calendar_unavailable_fallback(monkeypatch, isolated_store):
+    """日历不可用（None）→ 回退原全等跳过语义。"""
+    monkeypatch.setattr(sf, "_is_trading_day", lambda d: None)
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260810")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is True
+    assert "盘前未刷新" in r["note"]
+
+
+def test_save_upsert_preserves_values_on_null(isolated_store):
+    """同日重存：新净额 None 不覆盖旧值（COALESCE merge upsert）。"""
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260811")
+    day2 = _snapshot()
+    day2["date"] = "20260811"
+    day2["industries"]["半导体"][3] = {"net": None, "chg": 2.5}
+    r = sf.save_sector_flow_snapshot(day2, date="20260811")
+    assert r["skipped"] is False  # None → 判定有变化
+    hist = sf.load_sector_flow_history("半导体", 3, 10)
+    assert hist[-1]["net"] == pytest.approx(-18.2)  # 旧值保留
+
+
+def test_query_missing_latest_industry(isolated_store, monkeypatch):
+    """最新快照缺失的行业：net/趋势全 None + 明确提示（防与旧趋势混排）。"""
+    sf.save_sector_flow_snapshot(_snapshot(), date="20260811")
+    _patch_query_env(monkeypatch, {"159206": {"sw_code": "801080", "sw_name": "电子", "sub": "半导体"}})
+    out = sf.query_sector_flow("159206")
+    rows = {r["industry"]: r for r in out["industries"]}
+    assert "半导体" in rows  # 有最新快照
+    el = rows["元件"]
+    assert el["net_3d"] is None
+    assert el["trend_label"] == "数据不足"
+    assert el["trend_5d"] is None and el["turn_5d"] is None
+    assert el["trend_span_days"] is None
+    assert any("「元件」无最新快照" in n for n in out["notes"])
+
+
+def test_query_sequence_span_with_gap(isolated_store, monkeypatch):
+    """跨缺采段的 6 快照 → span_days 标注实际跨度（>7）。"""
+    dates = ["20260803", "20260804", "20260805", "20260806", "20260807", "20260814"]
+    for i, d in enumerate(dates):
+        v = float(i + 1)  # 逐日不同，规避 C5 全等跳过
+        snap = {"date": d, "available": True,
+                "industries": {"半导体": {
+                    1: {"net": v, "chg": 1.0}, 3: {"net": v, "chg": 1.0},
+                    5: {"net": v, "chg": 1.0}, 10: {"net": v, "chg": 1.0},
+                }},
+                "errors": []}
+        sf.save_sector_flow_snapshot(snap, date=d)
+    _patch_query_env(monkeypatch, {"159206": {"sw_code": "801080", "sw_name": "电子", "sub": "半导体"}})
+    out = sf.query_sector_flow("159206")
+    assert out["industries"][0]["trend_span_days"] == 11  # 08-03 → 08-14 缺采一周
+
+
+def test_snapshot_drift_detects_unmapped():
+    """快照名单不在 SW_TO_THS_INDUSTRY 的行业 → 反向漂移告警清单。"""
+    drift = sf.check_snapshot_drift({
+        "industries": {"半导体": {}, "存储": {}, "军工电子": {}},
+    })
+    assert "存储" in drift
+    assert "半导体" not in drift
+    assert "军工电子" not in drift
+    # 与正向 check_mapping_coverage 互补：未映射行业不在 wanted，不触发正向缺失
+    missing = sf.check_mapping_coverage({
+        "industries": {"半导体": {}, "存储": {}, "军工电子": {}},
+    })
+    assert "存储" not in missing

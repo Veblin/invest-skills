@@ -338,7 +338,8 @@ def get_etf_holdings(symbol: str, *, force: bool = False) -> dict | None:
 
     信封与 canonical query_etf_holdings 对齐：附加 clusters（HOLDINGS_CLUSTER_MAP
     聚合，etf_data._build_holdings_clusters）——直读本桥的路径（journal ETF 等）
-    不会退化回 AI 手算聚类（P0）。
+    不会退化回 AI 手算聚类（P0）。富化失败不静默：clusters=None + clusters_error
+    字段（与「合法未映射 → []」可区分），日志 warning。
     """
     fetch = _import_etf_attr("fetch_etf_holdings")
     if fetch is None:
@@ -349,8 +350,9 @@ def get_etf_holdings(symbol: str, *, force: bool = False) -> dict | None:
             etf_data = load_invest_a_etf_module()
             env["clusters"] = etf_data._build_holdings_clusters(env["rows"])
         except Exception as exc:
-            logger.debug("get_etf_holdings clusters enrich failed: %s", exc)
-            env["clusters"] = []
+            logger.warning("get_etf_holdings clusters enrich failed: %s", exc)
+            env["clusters"] = None
+            env["clusters_error"] = f"{type(exc).__name__}: {exc}"
     elif env is not None:
         env.setdefault("clusters", [])
     return env

@@ -255,7 +255,9 @@ def test_cmd_sector_flow_json(monkeypatch, capsys):
     }
     monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: fake)
     assert mod.cmd_sector_flow("159206", as_json=True) == 0
-    assert '"trend_label": "持续净流出"' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert '"trend_label": "持续净流出"' in out
+    assert "+08:00" in out  # generated_at 上海时区（与 as_of 同日，不跨 UTC）
 
 
 def test_cmd_sector_flow_human_and_unmapped(monkeypatch, capsys):
@@ -296,6 +298,7 @@ def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
 
     monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch)
     monkeypatch.setattr("sector_flow.check_mapping_coverage", lambda snap: [])
+    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap: [])
 
     def fake_save(snapshot):
         assert snapshot["available"] is True
@@ -327,3 +330,24 @@ def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
     monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
     assert mod.cmd_collect_sector_flow() == 0
     assert "映射自检" in capsys.readouterr().out
+
+    # 部分窗口失败 → ⚠ 告警 + 跳过映射自检（名单不全防误报）
+    mapping_calls: list[str] = []
+
+    def fake_fetch_partial():
+        return {"date": "20260813", "available": True,
+                "industries": {"半导体": {}}, "errors": ["10日排行: boom"]}
+
+    def fake_mapping(snap):
+        mapping_calls.append("mapping")
+        return ["银行"]
+
+    monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch_partial)
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
+    monkeypatch.setattr("sector_flow.check_mapping_coverage", fake_mapping)
+    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap: [])
+    assert mod.cmd_collect_sector_flow() == 0
+    out = capsys.readouterr().out
+    assert "部分窗口取数失败" in out
+    assert "部分窗口失败" in out
+    assert mapping_calls == []  # 映射自检未执行

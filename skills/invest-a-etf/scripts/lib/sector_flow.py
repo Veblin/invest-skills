@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from typing import Any
 
@@ -72,11 +73,15 @@ _IDX_DDL = (
 
 
 def _str_col(row: dict, *names: str) -> str | None:
-    """字符串列（含 ''/nan/'None' 守卫）。"""
+    """字符串列（含 ''/nan/'None'/pd.NA 守卫，大小写不敏感）。"""
     for name in names:
         v = row.get(name)
-        if v is not None and str(v).strip() not in ("", "nan", "None"):
-            return str(v).strip()
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s or s.lower() in ("nan", "-nan", "none", "<na>", "nat"):
+            continue
+        return s
     return None
 
 
@@ -127,7 +132,7 @@ def fetch_sector_flow_snapshot() -> dict[str, Any]:
                     errors.append(f"{symbol}: empty")
                     continue
                 for _, row in df.iterrows():
-                    name = str(row.get("行业") or "").strip()
+                    name = _str_col(row, "行业")
                     if not name:
                         continue
                     d = industries.setdefault(name, {})
@@ -206,6 +211,26 @@ def _rows_for_date(date: str) -> dict[int, dict[str, float | None]]:
     return out
 
 
+def _is_trading_day(d: str) -> bool | None:
+    """日历判定交易日（C5）：True=交易日 / False=权威日历非交易日 / None=日历不可用。
+
+    估算日历（无 token，is_estimated=True）对「非交易日」不信任 → None，
+    由调用方走原全等跳过（防调休工作日被估算误判为休市而丢数据）。
+    """
+    try:
+        from lib.trade_cal import fetch_trade_cal
+    except Exception:
+        return None
+    try:
+        dates, estimated = fetch_trade_cal(d, d)
+    except Exception as exc:
+        logger.warning("trade_cal 查询失败，回退全等判定: %s", exc)
+        return None
+    if d in dates:
+        return True
+    return None if estimated else False
+
+
 def _same_as_latest(
     industries: dict[str, dict],
     wd: int,
@@ -216,8 +241,8 @@ def _same_as_latest(
     Returns
     -------
     bool | None
-        True   当前窗口有数据、行业名单与最近快照完全一致且净额全部相等；
-        False  名单增删或任一净额不等（有变化，应写入）；
+        True   当前窗口有数据、行业名单与最近快照完全一致且净额全部相等（容差内）；
+        False  名单增删、任一净额不等、或任一侧净额缺失（有变化，应写入）；
         None   当前快照本窗口无数据（取数失败）→ 不可比，不参与判定。
     """
     saved = saved_by_wd.get(wd)
@@ -233,7 +258,14 @@ def _same_as_latest(
     # 名单增减（THS 行业改名/新增/消失）→ 有变化，保守不跳过（防数据丢失）
     if set(saved) != set(cur):
         return False
-    return all(saved[ind] == v for ind, v in cur.items())
+    # 任一侧净额缺失 → 视为有变化（永不因 NULL 跳过，防序列冻结）
+    if any(saved[ind] is None or v is None for ind, v in cur.items()):
+        return False
+    # 浮点位漂移容差（数据两位小数，1e-9 亿远低于显示精度）
+    return all(
+        math.isclose(saved[ind], v, rel_tol=1e-9, abs_tol=1e-9)
+        for ind, v in cur.items()
+    )
 
 
 def save_sector_flow_snapshot(
@@ -242,9 +274,11 @@ def save_sector_flow_snapshot(
     """采集 + 写库（信封缺省内部 fetch）。非交易日/无变化 → skipped。
 
     Returns {date, rows_saved, skipped, error, note}；
-    skipped=True 时 rows_saved=0（可比窗口全部与最近快照全等，疑似非交易日；
-    窗口取数失败 → 该窗口不可比；行业名单变化 → 判定不等 → 正常写入）。
+    skipped=True 时 rows_saved=0（可比窗口全部与最近快照全等：日历判定非交易日
+    或疑似盘前未刷新；窗口取数失败 → 该窗口不可比；行业名单变化/任一侧净额缺失
+    → 判定不等 → 正常写入）。
     """
+    from lib.db_util import upsert_daily_rows
     from lib.store import _connection, init_db
 
     if snapshot is None:
@@ -270,7 +304,7 @@ def save_sector_flow_snapshot(
                 "error": f"db init failed: {exc}", "note": None}
     industries: dict = snapshot["industries"]
 
-    # C5：可比窗口全部与最近已存日期全等 → 疑似非交易日，跳过写入
+    # C5：可比窗口全部与最近已存日期全等 → 疑似非交易日/盘前未刷新，跳过写入
     latest = _latest_saved_date()
     if latest:
         saved_by_wd = _rows_for_date(latest)
@@ -280,27 +314,37 @@ def save_sector_flow_snapshot(
         ]
         comparable = [r for r in results if r is not None]
         if comparable and all(comparable):
+            # 日历仅用于确认跳过（权威非交易日）；估算/不可用 → 原全等判定
+            if _is_trading_day(d) is False:
+                note = "非交易日（日历判定），跳过写入"
+            else:
+                note = f"数据与 {latest} 全等，无变化（疑似盘前未刷新），跳过写入"
             return {
                 "date": d,
                 "rows_saved": 0,
                 "skipped": True,
                 "error": None,
-                "note": f"数据与 {latest} 全等，疑似非交易日/无变化，跳过写入",
+                "note": note,
             }
 
-    saved = 0
+    # merge upsert：同日重跑时新值非 NULL 覆盖、NULL 保留旧值（防 NaN 解析
+    # 冲掉当日早先采集的有效值；collected_at 冲突时保留首写值）
+    rows: list[dict[str, Any]] = [
+        {
+            "date": d, "industry": ind, "window_days": wd,
+            "net_flow": v.get("net"), "in_flow": v.get("in"),
+            "out_flow": v.get("out"), "chg_pct": v.get("chg"),
+            "leader": v.get("leader"), "leader_chg": v.get("leader_chg"),
+        }
+        for ind, windows in industries.items()
+        for wd, v in windows.items()
+    ]
     with _connection() as c:
         try:
-            for ind, windows in industries.items():
-                for wd, v in windows.items():
-                    c.execute(
-                        "INSERT OR REPLACE INTO sector_flow_snapshots "
-                        "(date, industry, window_days, net_flow, in_flow, out_flow, "
-                        " chg_pct, leader, leader_chg) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (d, ind, wd, v.get("net"), v.get("in"), v.get("out"),
-                         v.get("chg"), v.get("leader"), v.get("leader_chg")),
-                    )
-                    saved += 1
+            saved = upsert_daily_rows(
+                c, "sector_flow_snapshots", rows,
+                pk=("date", "industry", "window_days"), merge=True,
+            )
             c.commit()
         except Exception as exc:
             c.rollback()
@@ -351,14 +395,16 @@ def _fmt_opt(v: float | None) -> str:
 def decompose_flow(d3: float | None, d5: float | None, d10: float | None) -> dict[str, Any]:
     """单时点窗口分解：近端=d3（近 3 日净额），中段=mid=d10-d3（第 4-10 日，7 日净额）。
 
-    判定规则（sign 组合 4 象限；d3 为 0 归负侧并标注零值边界）：
+    判定规则（sign 组合 4 象限；零值边界统一用 _ZERO_EPS）：
       (+,+) → 持续净流入；detail 按日均强度比 r=(d3/3)/(|mid|/7)：
               r≥1.2 近端加速 / r≤0.8 近端减速 / 否则 节奏平稳
       (+,-) → 近端回流（近端转正，资金回流）；detail=中段净流出 |mid| 亿
       (-,+) → 近端退潮（近端转负，资金退潮）；detail=中段净流入 |mid| 亿
       (-,-) → 持续净流出；detail 强度规则同 (+,+)
-      mid≈0 → 中段归零分支：方向由近端决定（避免 (+,0) 误判「近端回流」）
-      任一日均强度 < _FLOW_EPS → 标注「金额量级小，强度不适用」
+      d3≈0 且 mid≈0 → 净额近零（两端均无方向，不做流入/流出断言）
+      d3≈0 且 |mid| 有量 → 近端归零（方向只由中段决定，标注零值边界）
+      mid≈0 且 |d3| 有量 → 中段归零：方向由近端决定（避免 (+,0) 误判「近端回流」）
+      任一日均强度 < _FLOW_EPS → 标注「金额量级小，强度不适用」（所有方向分支）
       d3/d10 任一 None → 数据不足
     d5 仅作信息字段（消费方自 latest 行直取），本函数不参与判定也不回传。
     """
@@ -369,6 +415,15 @@ def decompose_flow(d3: float | None, d5: float | None, d10: float | None) -> dic
             "label_detail": f"缺 3 日({_fmt_opt(d3)})/10 日({_fmt_opt(d10)})窗口净额",
         }
     mid = d10 - d3
+    if abs(d3) < _ZERO_EPS and abs(mid) < _ZERO_EPS:
+        # 近端与中段均 ≈ 0：无方向事实，不做「流入/流出」断言
+        return {"mid_7d": 0.0, "label": "净额近零",
+                "label_detail": "近端与中段净额均 ≈ 0"}
+    if abs(d3) < _ZERO_EPS:
+        # 近端归零（d3 无方向，零值边界）：方向只由中段决定
+        mid_dir = "净流入" if mid > 0 else "净流出"
+        return {"mid_7d": round(mid, 2), "label": "近端归零",
+                "label_detail": f"近端净额 ≈ 0（零值边界），中段{mid_dir} {abs(mid):.2f} 亿"}
     if abs(mid) < _ZERO_EPS:
         # 中段 7 日净额 ≈ 0：方向由近端决定；「回流/退潮」语义要求中段有方向，不适用
         label = "持续净流入" if d3 > 0 else "持续净流出"
@@ -376,7 +431,6 @@ def decompose_flow(d3: float | None, d5: float | None, d10: float | None) -> dic
         return {"mid_7d": 0.0, "label": label, "label_detail": detail}
     s3 = 1 if d3 > 0 else -1
     sm = 1 if mid > 0 else -1
-    zero_note = "（零值边界：d3 为 0，归负侧处理）" if d3 == 0 else None
 
     def _strength() -> str:
         daily_mid = abs(mid) / 7
@@ -390,29 +444,40 @@ def decompose_flow(d3: float | None, d5: float | None, d10: float | None) -> dic
             return f"近端减速（日均强度 r={r:.2f}）"
         return f"节奏平稳（日均强度 r={r:.2f}）"
 
+    def _magnitude_note() -> str:
+        daily_mid = abs(mid) / 7
+        daily_d3 = abs(d3) / 3
+        if daily_mid < _FLOW_EPS or daily_d3 < _FLOW_EPS:
+            return "（金额量级小，强度不适用）"
+        return ""
+
     if s3 > 0 and sm > 0:
         label, detail = "持续净流入", _strength()
     elif s3 > 0 and sm < 0:
-        label, detail = "近端回流", f"中段净流出 {abs(mid):.2f} 亿"
+        label, detail = "近端回流", f"中段净流出 {abs(mid):.2f} 亿{_magnitude_note()}"
     elif s3 < 0 and sm > 0:
-        label, detail = "近端退潮", f"中段净流入 {abs(mid):.2f} 亿"
+        label, detail = "近端退潮", f"中段净流入 {abs(mid):.2f} 亿{_magnitude_note()}"
     else:
         label, detail = "持续净流出", _strength()
-    if zero_note:
-        detail = f"{detail} {zero_note}"
     return {"mid_7d": round(mid, 2), "label": label, "label_detail": detail}
 
 
 def _sequence_trend(industry: str, window_days: int = 3) -> dict[str, Any]:
-    """积累序列趋势：≥6 日 → {change_5d, turn_5d}；不足 → sufficient=False。
+    """积累序列趋势：≥6 日 → {change_5d, turn_5d, span_days}；不足 → sufficient=False。
 
     change_5d = net[最新] - net[第 6 旧]（亿元）；turn_5d = 5 日前 vs 最新符号翻转。
+    span_days = 基线快照至最新快照的自然日跨度（标准日采 6 快照 = 5 交易日
+    ≈ 7 自然日；≠7 说明有缺采/长假，报告层须标注）。valid_days = 剔除 NULL 后
+    的有效快照数（history_days 为含 NULL 的采集天数，两语义分离）。
     """
+    from datetime import datetime
+
     hist = load_sector_flow_history(industry, window_days, days=_MIN_HISTORY)
-    nets = [r["net"] for r in hist if r["net"] is not None]
+    valid = [(r["date"], r["net"]) for r in hist if r["net"] is not None]
+    nets = [net for _, net in valid]
     if len(nets) < _MIN_HISTORY:
-        return {"change_5d": None, "turn_5d": None,
-                "history_days": len(hist), "sufficient": False}
+        return {"change_5d": None, "turn_5d": None, "history_days": len(hist),
+                "valid_days": len(nets), "span_days": None, "sufficient": False}
     latest, older = nets[-1], nets[-_MIN_HISTORY]
     change_5d = round(latest - older, 2)
     if older > 0 and latest < 0:
@@ -421,8 +486,12 @@ def _sequence_trend(industry: str, window_days: int = 3) -> dict[str, Any]:
         turn = "转向流入"
     else:
         turn = "方向未变"
-    return {"change_5d": change_5d, "turn_5d": turn,
-            "history_days": len(hist), "sufficient": True}
+    span_days = (
+        datetime.strptime(valid[-1][0], "%Y%m%d")
+        - datetime.strptime(valid[-_MIN_HISTORY][0], "%Y%m%d")
+    ).days
+    return {"change_5d": change_5d, "turn_5d": turn, "history_days": len(hist),
+            "valid_days": len(nets), "span_days": span_days, "sufficient": True}
 
 
 def _history_days() -> int:
@@ -448,7 +517,8 @@ def query_sector_flow(symbol: str) -> dict[str, Any]:
     dict
         {symbol, sw_code, sw_name, available, as_of,
          industries: [{industry, net_1d, net_3d, net_5d, net_10d, chg_10d,
-                       trend_label, trend_detail, trend_5d, turn_5d}],
+                       trend_label, trend_detail, trend_5d, turn_5d,
+                       trend_span_days}],
          history_days, notes}
 
     ETF 未映射或 THS 行业映射缺失 → available=False + note；
@@ -510,19 +580,22 @@ def query_sector_flow(symbol: str) -> dict[str, Any]:
     industries: list[dict[str, Any]] = []
     for ind in ths:
         latest = latest_by_ind.get(ind)
-        dec = (
-            decompose_flow(
+        if latest:
+            dec = decompose_flow(
                 (latest.get(3) or {}).get("net"),
                 (latest.get(5) or {}).get("net"),
                 (latest.get(10) or {}).get("net"),
             )
-            if latest
-            else {"label": "数据不足", "label_detail": "无最新快照"}
-        )
+        else:
+            # 最新快照缺失（THS 改名/删行业等）→ 趋势字段缺省并提示，
+            # 不与旧历史趋势混排（防单行自相矛盾）
+            dec = {"label": "数据不足", "label_detail": "无最新快照"}
+            notes.append(f"「{ind}」无最新快照（可能映射漂移/改名），趋势缺省")
         seq = _sequence_trend(ind)
         if history_days >= _MIN_HISTORY and not seq["sufficient"]:
             notes.append(
-                f"「{ind}」序列积累中（{seq['history_days']} 日 < {_MIN_HISTORY}）"
+                f"「{ind}」序列积累中（{seq['valid_days']} 个有效快照 "
+                f"< {_MIN_HISTORY}，含缺失日）"
             )
         industries.append(
             {
@@ -534,8 +607,9 @@ def query_sector_flow(symbol: str) -> dict[str, Any]:
                 "chg_10d": (latest.get(10) or {}).get("chg") if latest else None,
                 "trend_label": dec["label"],
                 "trend_detail": dec["label_detail"],
-                "trend_5d": seq["change_5d"],
-                "turn_5d": seq["turn_5d"],
+                "trend_5d": seq["change_5d"] if latest else None,
+                "turn_5d": seq["turn_5d"] if latest else None,
+                "trend_span_days": seq.get("span_days") if latest else None,
             }
         )
     return {
@@ -555,3 +629,15 @@ def check_mapping_coverage(snapshot: dict[str, Any]) -> list[str]:
     wanted = {ind for lst in SW_TO_THS_INDUSTRY.values() for ind in lst}
     have = set(snapshot.get("industries") or {})
     return sorted(wanted - have)
+
+
+def check_snapshot_drift(snapshot: dict[str, Any]) -> list[str]:
+    """快照名单中不在 SW_TO_THS_INDUSTRY 的行业（THS 新增/改名/拆分，反向漂移）。
+
+    与 check_mapping_coverage 互补：正向检查映射表行业是否缺采，本函数检查
+    THS 侧出现的新行业名。告警级（SW_TO_THS_INDUSTRY 仅 39 行业，THS 快照
+    约 90 → 正常即有大量未映射行业），不阻断采集。
+    """
+    wanted = {ind for lst in SW_TO_THS_INDUSTRY.values() for ind in lst}
+    have = set(snapshot.get("industries") or {})
+    return sorted(have - wanted)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
@@ -142,9 +142,11 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     # R11c: 情景预案（回撤档位 σ 分级 + 三步核查 + LAW 6a 声明）
     playbook_block = _build_playbook_block(history_block, kline) if playbook else None
 
+    from dates import shanghai_now
+
     payload = {
         "skill": "invest-a-etf",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": shanghai_now().isoformat(),
         "symbol": symbol,
         "index_code": CSINDEX_MAP.get(symbol),
         "profile": profile,
@@ -313,9 +315,11 @@ def cmd_holdings(symbol: str, *, as_json: bool) -> int:
         return 2
     data = query_etf_holdings(symbol)
     if as_json:
+        from dates import shanghai_now
+
         payload = {
             "skill": "invest-a-etf",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": shanghai_now().isoformat(),
             "symbol": symbol,
             "holdings": data,
         }
@@ -371,9 +375,11 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
         return 1
     data = query_etf_peers(symbol, peers_list)
     if as_json:
+        from dates import shanghai_now
+
         payload = {
             "skill": "invest-a-etf",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": shanghai_now().isoformat(),
             "symbol": symbol,
             "peers": data,
         }
@@ -428,9 +434,11 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
         return 1
     data = query_sector_flow(symbol)
     if as_json:
+        from dates import shanghai_now
+
         payload = {
             "skill": "invest-a-etf",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": shanghai_now().isoformat(),
             "symbol": symbol,
             "sector_flow": data,
         }
@@ -451,6 +459,9 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
             return f"{v:+.2f}" if v is not None else "   ⏳"
         t5 = f"{r['trend_5d']:+.2f}" if r.get("trend_5d") is not None else "   —"
         turn = r.get("turn_5d") or ""
+        span = r.get("trend_span_days")
+        if span and span != 7:
+            turn = f"{turn}（跨度 {span} 日）"
         print(f"  {r['industry']:<8s} {f(r['net_1d']):>8s} {f(r['net_3d']):>8s} "
               f"{f(r['net_5d']):>8s} {f(r['net_10d']):>9s} {f(r['chg_10d']):>9s}  "
               f"{r['trend_label']} / {r['trend_detail']}  5日Δ {t5} {turn}")
@@ -463,16 +474,18 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
 def cmd_collect_sector_flow() -> int:
     """R15 每日采集：同花顺行业资金流 90 行业×4 窗口 → sector_flow_snapshots（幂等）。
 
-    采集后执行 SW_TO_THS_INDUSTRY 映射自检（check_mapping_coverage）：名单不在
-    最新快照的行业名输出警告，供映射表在线核对。
+    采集后执行 SW_TO_THS_INDUSTRY 映射自检（check_mapping_coverage + 反向
+    check_snapshot_drift）：名单不在最新快照的行业名 / 快照新增未映射行业名
+    输出警告，供映射表在线核对；单窗口取数失败告警且跳过自检（名单不全防误报）。
     """
     try:
-        from sector_flow import (check_mapping_coverage, fetch_sector_flow_snapshot,
-                                 save_sector_flow_snapshot)
+        from sector_flow import (check_mapping_coverage, check_snapshot_drift,
+                                 fetch_sector_flow_snapshot, save_sector_flow_snapshot)
     except ImportError as exc:
         print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
         return 1
     snapshot = fetch_sector_flow_snapshot()
+    errs = snapshot.get("errors") or []
     result = save_sector_flow_snapshot(snapshot)
     if result.get("error"):
         print(f"采集失败: {result['error']}")
@@ -480,12 +493,21 @@ def cmd_collect_sector_flow() -> int:
     if result.get("skipped"):
         print(f"跳过: {result['note']}")
     else:
-        print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots（日期 {result['date']}）")
-    # R15 C6：映射自检（SW_TO_THS_INDUSTRY 不在最新名单的行业名）
+        partial = "（部分窗口失败）" if errs else ""
+        print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
+              f"（日期 {result['date']}）{partial}")
+    if errs:
+        print(f"⚠ 部分窗口取数失败: {'; '.join(errs)}")
+        return 0
+    # R15 C6：映射自检（部分窗口失败时名单不全，跳过防误报）
     missing = check_mapping_coverage(snapshot)
     if missing:
         print(f"⚠ 映射自检: 以下 THS 行业不在最新名单（SW_TO_THS_INDUSTRY 需核对）: "
               f"{', '.join(missing)}")
+    drift = check_snapshot_drift(snapshot)
+    if drift:
+        print(f"⚠ 映射自检（新增/未映射）: 共 {len(drift)} 个 THS 行业不在 "
+              f"SW_TO_THS_INDUSTRY（首次在线采集后核对，不阻断）: {', '.join(drift)}")
     return 0
 
 
