@@ -64,6 +64,8 @@ Claude: 确认 6 位代码
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py industry-pe   （行业 ETF 时必须）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py holdings SYMBOL --json   （R12 持仓透视：行业/主题 ETF 必须）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers SYMBOL --json     （R13 赛道资金流对比：行业 ETF 必须；未映射时加 --peers "代码,代码"）
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow SYMBOL --json   （R15 行业资金流+趋势：行业 ETF 必须；同花顺 3/5/10 日净额，单时点分解+积累序列）
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         （R15 每日采集：盘后手动触发，幂等，非交易日自动跳过）
   cd "${INVEST_SKILLS_ROOT:-.}" && PYTHONPATH=... uv run python -c "from etf_data import etf_share_flow; ..."  （份额趋势）
        ↓
 Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
@@ -92,6 +94,8 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py holdings 159206 --json      # R12: 前十大持仓 + 集中度
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers 159206 --json          # R13: 赛道资金流对比 + RS（自动发现）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers 159206 --peers "512660,512760"   # R13: 显式赛道清单
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow 159206 --json   # R15: 行业资金流 + 趋势（同花顺）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         # R15: 每日采集（盘后，幂等）
 ```
 
 `report` 输出引擎数据快照（供 Claude 合成）；完整叙事由 Claude 按模板撰写。
@@ -109,17 +113,18 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 详见 [references/report-template.md](references/report-template.md)：
 
 1. 产品快照（价格 / 折溢价 / AUM / flags）
-2. **持仓透视**（🆕 R12，行业/主题 ETF 必须：`holdings` 前十大名单 + 集中度 top1/top5/top10（引擎计算）+ 子环节聚类（AI 归类，强制标注）——修正「名义主题 vs 实际暴露」偏差）
+2. **持仓透视**（🆕 R12，行业/主题 ETF 必须：`holdings` 前十大名单 + 集中度 top1/top5/top10（引擎计算）+ 子环节聚类合计 clusters（引擎按 HOLDINGS_CLUSTER_MAP 聚合，未映射归「未归类」；报告层补充归类须标注「AI 归类」）——修正「名义主题 vs 实际暴露」偏差）
 3. 指数估值（csindex PE + 历史深度限制 + `index_pe_pct` 历史分位）
 4. **估值框架**（🆕 行业 ETF 必须展开 `valuation_guide`，解释该行业应该怎么估值、PE 时机选择是否有效）
 5. **历史演变**（🆕 R11a/b，`--history`/`--events` 时必须有：阶段划分由 AI 合成、数字引用引擎统计；事件-价格对照表「同日事实」与「可能关联（待验证）」两列拆分，因果表述限于一手来源）
 6. **赛道资金流对比**（🆕 R13，行业 ETF 必须：`peers` 同赛道份额资金流对比 + RS 相对强弱（基准=同赛道等权均值，引擎计算）；未映射赛道且未用 `--peers` 时标注「未映射，请用 --peers 显式指定」）
-7. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
-8. 对冲覆盖（hedge-map）
-9. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
-10. 因子/主题逻辑（须可追溯来源，否则「待验证」）
-11. 多情景 / 交易结构（可选，LAW 6a）
-12. **情景预案**（🆕 R11c，`--playbook` 时必须有：回撤档位 σ 分级表 = 触发核验深度（例行记录→归因核查→三步全流程→框架重估），非操作阈值；三步核查固定模板；LAW 6a 声明；输出禁用「无动作/如何应对/建议卖出/止损」措辞）
+7. **资金流向与趋势**（🆕 R15，行业 ETF 必须：`sector-flow` 同花顺 THS 行业 3/5/10 日净额 + 单时点窗口分解（近端 vs 中段）+ 积累序列（≥6 日）；对照 pulse 涨停热度盘面结合；**证据非信号，趋势与日期配合**）
+8. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
+9. 对冲覆盖（hedge-map）
+10. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
+11. 因子/主题逻辑（须可追溯来源，否则「待验证」）
+12. 多情景 / 交易结构（可选，LAW 6a）
+13. **情景预案**（🆕 R11c，`--playbook` 时必须有：回撤档位 σ 分级表 = 触发核验深度（例行记录→归因核查→三步全流程→框架重估），非操作阈值；三步核查固定模板；LAW 6a 声明；输出禁用「无动作/如何应对/建议卖出/止损」措辞）
 
 **行业 ETF vs 宽基 ETF 的分析差异**：
 - 宽基 ETF：核心问题是"这个市场便宜吗？"→ 聚焦 PE 分位（如有）
@@ -141,9 +146,12 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | `etf_share_flow(symbol)` | 🆕 ETF 份额变化趋势 + 估算资金流 |
 | `query_etf_category(symbol)` | 🆕 ETF 类型标签 |
 | `query_sector_valuation_guide(sw_name)` | 🆕 行业特定估值指标指引 |
-| `query_etf_holdings(symbol)` | 🆕 R12 前十大持仓（裸 HTTP 天天基金 jjcc 页，季度报告期）+ 集中度 top1/top5/top10（引擎计算） |
+| `query_etf_holdings(symbol)` | 🆕 R12 前十大持仓（裸 HTTP 天天基金 jjcc 页，季度报告期）+ 集中度 top1/top5/top10（引擎计算）+ 子环节聚类合计 clusters（HOLDINGS_CLUSTER_MAP 聚合，未映射归「未归类」） |
 | `query_etf_peers(symbol, peers)` | 🆕 R13 赛道资金流对比（Tushare 份额 20 日窗口）+ RS（基准=同赛道等权均值）；`--peers` 显式或 ETF_TO_SW_INDUSTRY 自动发现 |
 | `etf_peer_rs(closes, bench, dates, window)` | 🆕 R13 RS 序列（同共享 relative_strength 口径：RS_t=(main/bench)×100×(b0/s0)），输出 rs_latest / rs_window_start / rs_change（三数字自洽）+ 末 20 点序列 |
+| `fetch_sector_flow_snapshot()` | 🆕 R15 同花顺行业资金流四窗口信封（即时/3/5/10 日，90 申万细分行业，大单口径亿元；东财断连独立源） |
+| `decompose_flow(d3, d5, d10)` | 🆕 R15 单时点窗口分解（近端 1-3 日 vs 中段 4-10 日，四象限标签：持续净流入/近端回流/近端退潮/持续净流出 + 强度；证据非信号） |
+| `query_sector_flow(symbol)` | 🆕 R15 ETF→THS 行业资金流 + 趋势（3/5/10 日净额 + 窗口分解 + 积累序列 5 日变化率/转向，≥6 日；未映射提示） |
 
 对冲表：[references/etf-hedge-map.md](references/etf-hedge-map.md)
 
@@ -176,7 +184,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 - 名义主题（如「卫星产业」）vs 实际暴露（前十大若 8 只集中于制造环节 → 实际是「军工制造」）
 - 集中度数字（top1/top5/top10，引擎计算）引用引擎字段，**AI 不得心算**
-- 子环节聚类为 AI 归类，**必须标注「AI 归类」**，不臆断权重口径
+- 聚类合计引用引擎 `clusters` 字段（HOLDINGS_CLUSTER_MAP 聚合，AI 不心算）；未映射股票归入「未归类」，报告层补充归类须标注「AI 归类」；行级细标签（光模块/存储芯片等）为 AI 标注，与聚合分组区分
 - 权重股事件风险快速筛查：前十大中是否有停牌/解禁/暴雷风险标的（无需深研基本面）
 
 ### 0b. 赛道资金流解读（R13，行业 ETF 必选）
@@ -187,6 +195,15 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - RS（基准=同赛道等权均值）仅作**状态参考**，非交易信号；20 日收益排名描述相对强弱，不构成「接棒」预测
 - 赛道口径（peer_source）含宽口径成员（如军工龙头）时注明，AI 可解释
 - 主标的份额流 vs 同行对比：背离（如同行流入、本标的流出）是值得展开的矛盾点
+
+### 0c. 资金流趋势解读（R15，行业 ETF 必选）
+
+`sector-flow` 数据（THS 行业 3/5/10 日净额 + 趋势）的解读边界：
+
+- **三源对照**：同花顺行业净额（大单口径）+ R13 ETF 份额流（配置口径）+ pulse 涨停热度（游资口径）——共振确认主线、背离展开矛盾（例：医药涨停第一热度但行业净额 -15 亿 + ETF 份额 -26 亿 → 题材短炒）
+- **证据非信号**：趋势标签（持续流入/近端回流/近端退潮/持续流出）只描述方向事实，**禁止**据此做方向性预测
+- **趋势与日期配合**：单时点窗口分解（近端 vs 中段）只判方向；5 日变化率/转向需积累序列（≥6 日快照），积累不足标注「积累中」不硬编
+- 口径声明：大单口径、日间净额噪声、THS 90 为权威（东财仅定性对照、差异名注明）
 
 ### 1. 估值框架展开（行业 ETF 必选，宽基 ETF 可选）
 
@@ -261,8 +278,10 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 行业 ETF：行业排名已引用（`industry-pe` 31 行业位置 + TMT 赛道位置）
 - [ ] 份额趋势已查询（`etf_share_flow`），有数据则展示，无数据则标注"积累中"
 - [ ] 持仓透视已查（R12 `holdings`，行业/主题 ETF），集中度数字引用引擎 top1/top5/top10 字段，AI 未心算
-- [ ] 子环节聚类已标注「AI 归类」，未把 AI 归类当作引擎数据；「名义主题 vs 实际暴露」偏差已解读
+- [ ] 聚类合计引用引擎 `clusters` 字段（AI 未心算）；未映射部分 AI 补充已标注「AI 归类」；「名义主题 vs 实际暴露」偏差已解读
 - [ ] 赛道资金流已对比（R13 `peers`，行业 ETF；未映射时标注「请用 --peers 显式指定」），RS/资金流数字引用引擎字段
+- [ ] 资金流向与趋势已查（R15 `sector-flow`，行业 ETF），3/5/10 日净额与趋势标签引用引擎字段，AI 未心算；单时点分解未作方向性预测（证据非信号）
+- [ ] 盘面结合已对照 pulse `zt_industry_flow`（同源行业直接对照、差异名已注明）；口径声明（大单/日间噪声/趋势需与日期配合）已写入
 - [ ] 对抗性假设检验：≥3 个关键假设有可证伪条件，核心假设被检验
 - [ ] 致命一击：一句话条件式风险归纳，指向可观测失效条件
 - [ ] 盲点检查：≥2 条盲点发现
@@ -282,6 +301,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | **invest-a-journal** | 方案四维评估；ETF 数据经 shim 调用本模块 |
 | **invest-a-stock** | 个股深研；本 Skill 不替代。主题逻辑可引用龙头个股报告 |
 | **invest-a-gap-scan** | 市场扫描；无关 |
+| **invest-a-pulse** | 涨停行业热度（zt_industry_flow）供 R15 盘面结合对照（三源之一：同花顺净额 + ETF 份额 + 涨停热度）；报告层引用，引擎不跨 skill 耦合 |
 
 ---
 

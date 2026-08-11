@@ -343,8 +343,16 @@ def cmd_holdings(symbol: str, *, as_json: bool) -> int:
     t5 = f"{top5:.2f}" if top5 is not None else "-"
     t10 = f"{top10:.2f}" if top10 is not None else "-"
     print(f"集中度(引擎): top1 {t1}% | top5 {t5}% | top10 {t10}%")
+    clusters = data.get("clusters") or []
+    if clusters:
+        print("子环节聚类合计(引擎):")
+        for c in clusters:
+            members = ", ".join(f"{m['name']} {m['pct']:.2f}" for m in c["members"])
+            print(f"  {c['cluster']} {c['sum_pct']:.2f}%: {members}")
     print(f"note: {data['note']}")
-    print("> 子环节聚类：由报告层 AI 基于名单归类，标注「AI 归类」（引擎不聚类）")
+    # 提示仅在存在未归类持仓时输出（全部映射时避免误导报告层重复「AI 归类」）
+    if any(c.get("cluster") == "未归类" for c in clusters):
+        print("> 未映射股票归入「未归类」；报告层如需补充归类须标注「AI 归类」")
     return 0
 
 
@@ -405,6 +413,79 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
         print(f"## 相对强弱: ⏳ {rs['error']}")
     for note in data.get("notes") or []:
         print(f"note: {note}")
+    return 0
+
+
+def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
+    """R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日，大单口径亿元）。"""
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    try:
+        from sector_flow import query_sector_flow
+    except ImportError as exc:
+        print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
+        return 1
+    data = query_sector_flow(symbol)
+    if as_json:
+        payload = {
+            "skill": "invest-a-etf",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "sector_flow": data,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    sw_name = data.get("sw_name") or "-"
+    sw_code = data.get("sw_code") or "-"
+    as_of = data.get("as_of") or "⏳"
+    print(f"# sector-flow · {symbol}  ({sw_name} {sw_code})  as_of={as_of}")
+    if not data["available"]:
+        print(f"⏳ {'; '.join(data.get('notes') or [])}")
+        return 0
+    print(f"  {'THS行业':<8s} {'今日':>8s} {'3日':>8s} {'5日':>8s} {'10日':>9s} "
+          f"{'10日涨跌%':>9s}  趋势标签 / 详情")
+    for r in data["industries"]:
+        def f(v):
+            return f"{v:+.2f}" if v is not None else "   ⏳"
+        t5 = f"{r['trend_5d']:+.2f}" if r.get("trend_5d") is not None else "   —"
+        turn = r.get("turn_5d") or ""
+        print(f"  {r['industry']:<8s} {f(r['net_1d']):>8s} {f(r['net_3d']):>8s} "
+              f"{f(r['net_5d']):>8s} {f(r['net_10d']):>9s} {f(r['chg_10d']):>9s}  "
+              f"{r['trend_label']} / {r['trend_detail']}  5日Δ {t5} {turn}")
+    print(f"history_days: {data['history_days']}")
+    for n in data.get("notes") or []:
+        print(f"note: {n}")
+    return 0
+
+
+def cmd_collect_sector_flow() -> int:
+    """R15 每日采集：同花顺行业资金流 90 行业×4 窗口 → sector_flow_snapshots（幂等）。
+
+    采集后执行 SW_TO_THS_INDUSTRY 映射自检（check_mapping_coverage）：名单不在
+    最新快照的行业名输出警告，供映射表在线核对。
+    """
+    try:
+        from sector_flow import (check_mapping_coverage, fetch_sector_flow_snapshot,
+                                 save_sector_flow_snapshot)
+    except ImportError as exc:
+        print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
+        return 1
+    snapshot = fetch_sector_flow_snapshot()
+    result = save_sector_flow_snapshot(snapshot)
+    if result.get("error"):
+        print(f"采集失败: {result['error']}")
+        return 1
+    if result.get("skipped"):
+        print(f"跳过: {result['note']}")
+    else:
+        print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots（日期 {result['date']}）")
+    # R15 C6：映射自检（SW_TO_THS_INDUSTRY 不在最新名单的行业名）
+    missing = check_mapping_coverage(snapshot)
+    if missing:
+        print(f"⚠ 映射自检: 以下 THS 行业不在最新名单（SW_TO_THS_INDUSTRY 需核对）: "
+              f"{', '.join(missing)}")
     return 0
 
 
@@ -549,6 +630,14 @@ def main(argv: list[str] | None = None) -> int:
         help="显式赛道清单（逗号分隔，如 \"512660,512760\"）；缺省按 ETF_TO_SW_INDUSTRY 自动发现同行业",
     )
 
+    p_sf = sub.add_parser("sector-flow", help="R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日）")
+    p_sf.add_argument("symbol", help="6 位 ETF 代码")
+    p_sf.add_argument("--json", action="store_true", help="输出完整 JSON")
+    sub.add_parser(
+        "collect-sector-flow",
+        help="R15: 手动触发行业资金流每日采集（幂等，非交易日跳过；盘后触发）",
+    )
+
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
@@ -564,6 +653,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_holdings(args.symbol, as_json=args.json)
     if args.cmd == "peers":
         return cmd_peers(args.symbol, as_json=args.json, peers_str=args.peers)
+    if args.cmd == "sector-flow":
+        return cmd_sector_flow(args.symbol, as_json=args.json)
+    if args.cmd == "collect-sector-flow":
+        return cmd_collect_sector_flow()
     return 1
 
 

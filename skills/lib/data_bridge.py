@@ -334,11 +334,26 @@ def get_etf_industry_alloc(symbol: str, *, force: bool = False) -> dict | None:
 
 
 def get_etf_holdings(symbol: str, *, force: bool = False) -> dict | None:
-    """ETF 前十大持仓（缓存 1d，季度报告期数据；裸 HTTP 天天基金 jjcc 页）。"""
+    """ETF 前十大持仓（缓存 1d，季度报告期数据；裸 HTTP 天天基金 jjcc 页）。
+
+    信封与 canonical query_etf_holdings 对齐：附加 clusters（HOLDINGS_CLUSTER_MAP
+    聚合，etf_data._build_holdings_clusters）——直读本桥的路径（journal ETF 等）
+    不会退化回 AI 手算聚类（P0）。
+    """
     fetch = _import_etf_attr("fetch_etf_holdings")
     if fetch is None:
         return None
-    return _fetch_dimension("etf_holdings", symbol, fetch, symbol, force=force)
+    env = _fetch_dimension("etf_holdings", symbol, fetch, symbol, force=force)
+    if env and env.get("status") == "ok" and env.get("rows"):
+        try:
+            etf_data = load_invest_a_etf_module()
+            env["clusters"] = etf_data._build_holdings_clusters(env["rows"])
+        except Exception as exc:
+            logger.debug("get_etf_holdings clusters enrich failed: %s", exc)
+            env["clusters"] = []
+    elif env is not None:
+        env.setdefault("clusters", [])
+    return env
 
 
 def get_etf_category_sina(*, force: bool = False) -> dict | None:

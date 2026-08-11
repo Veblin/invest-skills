@@ -121,7 +121,14 @@ def _fake_holdings() -> dict:
              "shares": 7004.94, "amount": 149135.26},
         ],
         "top1_pct": 9.07, "top5_sum_pct": 17.51, "top10_sum_pct": 17.51,
-        "note": "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；子环节聚类由报告层 AI 完成并标注「AI 归类」",
+        "clusters": [
+            {"cluster": "未归类", "sum_pct": 17.51,
+             "members": [
+                 {"code": "688002", "name": "睿创微纳", "pct": 9.07},
+                 {"code": "600879", "name": "航天电子", "pct": 8.44},
+             ]},
+        ],
+        "note": "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；子环节聚类由引擎按 HOLDINGS_CLUSTER_MAP 聚合，未映射股票归入「未归类」",
         "source": "天天基金(东财 FundArchivesDatas jjcc)",
     }
 
@@ -138,6 +145,8 @@ def test_cmd_holdings_json_contains_concentration(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert '"top5_sum_pct": 17.51' in out
     assert '"symbol": "159206"' in out
+    assert '"clusters"' in out
+    assert '"未归类"' in out
 
 
 def test_cmd_holdings_human_readable_has_ai_hint(monkeypatch, capsys):
@@ -146,8 +155,23 @@ def test_cmd_holdings_human_readable_has_ai_hint(monkeypatch, capsys):
     assert mod.cmd_holdings("159206", as_json=False) == 0
     out = capsys.readouterr().out
     assert "集中度(引擎): top1 9.07%" in out
-    assert "AI 归类" in out
+    assert "子环节聚类合计(引擎):" in out
+    assert "未归类 17.51%" in out
+    assert "AI 归类" in out  # 尾部提示仍含补充归类须标注「AI 归类」
     assert "睿创微纳" in out
+
+
+def test_cmd_holdings_no_hint_when_all_mapped(monkeypatch, capsys):
+    """全部持仓已映射（无「未归类」）→ 不打印补充归类提示（避免误导重复「AI 归类」）。"""
+    mod = _load_etf_module()
+    data = _fake_holdings()
+    data["clusters"] = [{"cluster": "光模块/光器件", "sum_pct": 100.0,
+                         "members": data["clusters"][0]["members"]}]
+    monkeypatch.setattr(mod, "query_etf_holdings", lambda s: data)
+    assert mod.cmd_holdings("159206", as_json=False) == 0
+    out = capsys.readouterr().out
+    assert "AI 归类" not in out
+    assert "光模块/光器件 100.00%" in out
 
 
 def test_cmd_holdings_missing_prints_note(monkeypatch, capsys):
@@ -209,3 +233,97 @@ def test_cmd_peers_json_contains_flow(monkeypatch, capsys):
     monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
     assert mod.cmd_peers("159206", as_json=True, peers_str="512660") == 0
     assert '"peer_source": "explicit"' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# R15 sector-flow / collect-sector-flow CLI（D13: mock 打定义模块）
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_sector_flow_json(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "sw_code": "801740", "sw_name": "国防军工",
+        "available": True, "as_of": "20260811", "history_days": 1,
+        "industries": [
+            {"industry": "军工电子", "net_1d": -2.91, "net_3d": -3.31,
+             "net_5d": 6.26, "net_10d": -20.86, "chg_10d": 8.78,
+             "trend_label": "持续净流出", "trend_detail": "近端减速",
+             "trend_5d": None, "turn_5d": None},
+        ],
+        "notes": ["序列积累中（1 日 < 6 日）"],
+    }
+    monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: fake)
+    assert mod.cmd_sector_flow("159206", as_json=True) == 0
+    assert '"trend_label": "持续净流出"' in capsys.readouterr().out
+
+
+def test_cmd_sector_flow_human_and_unmapped(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "sw_code": "801740", "sw_name": "国防军工",
+        "available": True, "as_of": "20260811", "history_days": 1,
+        "industries": [
+            {"industry": "军工电子", "net_1d": -2.91, "net_3d": -3.31,
+             "net_5d": 6.26, "net_10d": -20.86, "chg_10d": 8.78,
+             "trend_label": "持续净流出", "trend_detail": "近端减速（日均强度 r=-0.44）",
+             "trend_5d": None, "turn_5d": None},
+        ],
+        "notes": [],
+    }
+    monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: fake)
+    assert mod.cmd_sector_flow("159206", as_json=False) == 0
+    out = capsys.readouterr().out
+    assert "军工电子" in out
+    assert "持续净流出" in out
+
+    unmapped = {
+        "symbol": "510300", "sw_code": None, "sw_name": None,
+        "available": False, "as_of": None, "industries": [],
+        "history_days": 0, "notes": ["未映射申万行业（ETF_TO_SW_INDUSTRY 无此代码）"],
+    }
+    monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: unmapped)
+    assert mod.cmd_sector_flow("510300", as_json=False) == 0
+    assert "未映射" in capsys.readouterr().out
+
+
+def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
+    mod = _load_etf_module()
+
+    def fake_fetch():
+        return {"date": "20260811", "available": True,
+                "industries": {"半导体": {}}, "errors": []}
+
+    monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch)
+    monkeypatch.setattr("sector_flow.check_mapping_coverage", lambda snap: [])
+
+    def fake_save(snapshot):
+        assert snapshot["available"] is True
+        return {"date": "20260811", "rows_saved": 358, "skipped": False,
+                "error": None, "note": None}
+
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
+    assert mod.cmd_collect_sector_flow() == 0
+    assert "358 行" in capsys.readouterr().out
+
+    def fake_skip(snapshot):
+        return {"date": "20260812", "rows_saved": 0, "skipped": True,
+                "error": None, "note": "数据与 20260811 全等，疑似非交易日/无变化，跳过写入"}
+
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_skip)
+    assert mod.cmd_collect_sector_flow() == 0
+    assert "跳过" in capsys.readouterr().out
+
+    def fake_err(snapshot):
+        return {"date": "20260812", "rows_saved": 0, "skipped": False,
+                "error": "同花顺行业资金流不可用: boom", "note": None}
+
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_err)
+    assert mod.cmd_collect_sector_flow() == 1
+    assert "采集失败" in capsys.readouterr().out
+
+    # 映射自检路径：check_mapping_coverage 发现缺失行业 → 警告输出
+    monkeypatch.setattr("sector_flow.check_mapping_coverage", lambda snap: ["银行"])
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
+    assert mod.cmd_collect_sector_flow() == 0
+    assert "映射自检" in capsys.readouterr().out

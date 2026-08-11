@@ -10,6 +10,11 @@ def test_159845_in_csindex_map():
     assert CSINDEX_MAP["159845"] == CSINDEX_MAP["512100"]
 
 
+def test_515050_mapped_to_5g_communication_index():
+    """v0.2.5: 515050 补 CSINDEX_MAP — 中证5G通信主题指数（已核实 2026-08-11）。"""
+    assert CSINDEX_MAP.get("515050") == "931079"
+
+
 def test_588000_options_and_coverage():
     entry = ETF_HEDGE_MAP["588000"]
     assert entry["options"] == "科创50ETF期权"
@@ -65,3 +70,21 @@ def test_512760_mapped_to_electronics():
     entry = ETF_TO_SW_INDUSTRY["512760"]
     assert entry["sw_code"] == "801080"
     assert entry["sub"] == "芯片"
+
+
+def test_562590_mapped_to_electronics_equipment():
+    """v0.2.5 R15 补全：562590 半导体设备ETF华夏 → 电子/半导体设备。"""
+    from etf_data import ETF_TO_SW_INDUSTRY
+
+    entry = ETF_TO_SW_INDUSTRY["562590"]
+    assert entry["sw_code"] == "801080"
+    assert entry["sub"] == "半导体设备"
+
+
+def test_159992_mapped_to_pharma_innovative():
+    """v0.2.5 R15 补全：159992 创新药ETF银华 → 医药生物/创新药。"""
+    from etf_data import ETF_TO_SW_INDUSTRY
+
+    entry = ETF_TO_SW_INDUSTRY["159992"]
+    assert entry["sw_code"] == "801150"
+    assert entry["sub"] == "创新药"

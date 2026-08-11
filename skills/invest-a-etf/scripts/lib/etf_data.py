@@ -120,6 +120,7 @@ CSINDEX_MAP: dict[str, str] = {
     "588000": "000688",   # 科创50
     "159915": "399006",   # 创业板指
     "159949": "399673",   # 创业板50
+    "515050": "931079",   # 中证5G通信主题指数（已核实 2026-08-11）
 }
 
 
@@ -165,6 +166,7 @@ ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
     "512480": {"sw_code": "801080", "sw_name": "电子",       "sub": "半导体"},
     "512760": {"sw_code": "801080", "sw_name": "电子",       "sub": "芯片"},  # 芯片ETF国泰（原误映射军工，v0.2.5 R13 修正）
     "159995": {"sw_code": "801080", "sw_name": "电子",       "sub": "芯片"},
+    "562590": {"sw_code": "801080", "sw_name": "电子",       "sub": "半导体设备"},  # R15 补全：半导体设备ETF华夏
     "512330": {"sw_code": "801750", "sw_name": "计算机",     "sub": "信息技术"},
     "515230": {"sw_code": "801750", "sw_name": "计算机",     "sub": "软件"},
     # 新能源/高端制造
@@ -176,6 +178,7 @@ ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
     # 消费/医药
     "512690": {"sw_code": "801120", "sw_name": "食品饮料",   "sub": "白酒"},
     "512010": {"sw_code": "801150", "sw_name": "医药生物",   "sub": "医药"},
+    "159992": {"sw_code": "801150", "sw_name": "医药生物",   "sub": "创新药"},  # R15 补全：创新药ETF银华
     "512200": {"sw_code": "801180", "sw_name": "房地产",     "sub": "地产"},
     # 金融
     "512800": {"sw_code": "801780", "sw_name": "银行",       "sub": "银行"},
@@ -183,6 +186,28 @@ ETF_TO_SW_INDUSTRY: dict[str, dict[str, str]] = {
     # 资源/周期
     "512400": {"sw_code": "801050", "sw_name": "有色金属",   "sub": "有色"},
     "512710": {"sw_code": "801740", "sw_name": "国防军工",   "sub": "军工龙头"},
+}
+
+
+# ---------------------------------------------------------------------------
+# 股票 → 子环节聚类映射（R12 holdings.clusters）
+# ---------------------------------------------------------------------------
+# 子环节聚类本质是股票属性（新易盛=光模块对任何 ETF 成立），故用股票代码静态映射。
+# 仅覆盖已研究 ETF 前十大；未覆盖股票由引擎归入「未归类」，报告层可 AI 补充并标注。
+# 修改映射先改此处（聚合口径见 _build_holdings_clusters）。
+
+HOLDINGS_CLUSTER_MAP: dict[str, str] = {
+    # —— 515050 通信ETF华夏 前十大（2026-06-30）——
+    "300502": "光模块/光器件",  # 新易盛
+    "300394": "光模块/光器件",  # 天孚通信
+    "300308": "光模块/光器件",  # 中际旭创
+    "002384": "PCB/覆铜板",     # 东山精密
+    "600183": "PCB/覆铜板",     # 生益科技
+    "002463": "PCB/覆铜板",     # 沪电股份
+    "002475": "终端/服务器代工",  # 立讯精密
+    "601138": "终端/服务器代工",  # 工业富联
+    "603986": "存储/光缆",      # 兆易创新
+    "600487": "存储/光缆",      # 亨通光电
 }
 
 
@@ -1056,19 +1081,50 @@ def _lookup_hedge(symbol: str) -> dict:
 # ETF 行情 + K 线（净值序列）
 # ---------------------------------------------------------------------------
 
+def _build_holdings_clusters(rows: list[dict]) -> list[dict]:
+    """按 HOLDINGS_CLUSTER_MAP 聚合持仓为子环节聚类合计（引擎计算，AI 不心算）。
+
+    口径：pct 为 None 的行不计（与 topN 集中度口径一致）；未映射股票归入「未归类」；
+    sum_pct 先累加后 round(2)；排序：未归类恒排最后，其余按 sum_pct 降序；
+    members 按 pct 降序。rows 为空 → 返回 []。
+    """
+    groups: dict[str, dict] = {}
+    for r in rows:
+        pct = r.get("pct")
+        if pct is None:
+            continue
+        label = HOLDINGS_CLUSTER_MAP.get(str(r.get("code")), "未归类")
+        g = groups.setdefault(label, {"cluster": label, "sum_pct": 0.0, "members": []})
+        g["sum_pct"] += pct
+        g["members"].append({"code": r["code"], "name": r.get("name"), "pct": pct})
+    out = [
+        {
+            **g,
+            "sum_pct": round(g["sum_pct"], 2),
+            "members": sorted(g["members"], key=lambda m: -(m["pct"] or 0)),
+        }
+        for g in groups.values()
+    ]
+    out.sort(key=lambda c: (c["cluster"] == "未归类", -c["sum_pct"]))
+    return out
+
+
 def query_etf_holdings(symbol: str) -> dict[str, Any]:
-    """前十大持仓 + 集中度统计（v0.2.5 R12；引擎计算，AI 不心算）。
+    """前十大持仓 + 集中度统计 + 子环节聚类合计（v0.2.5 R12；引擎计算，AI 不心算）。
 
     Returns
     -------
     dict
         {symbol, report_date, quarter, status: ok/missing,
          rows: [{code, name, pct, shares, amount}],
-         top1_pct / top5_sum_pct / top10_sum_pct, note, source}。
+         top1_pct / top5_sum_pct / top10_sum_pct,
+         clusters: [{cluster, sum_pct, members: [{code, name, pct}]}],
+         note, source}。
 
     口径：pct=占净值比例(%)；shares=持股数(万股)；amount=持仓市值(万元)；
     top5/top10 合计 = 可用行占比之和（不足 N 行按可用行求和，pct None 不计）；
-    前十大合计可能 <100%（非前十大持仓未列），note 显式声明。
+    前十大合计可能 <100%（非前十大持仓未列），note 显式声明；
+    clusters = HOLDINGS_CLUSTER_MAP 聚合合计，未映射股票归入「未归类」。
     """
     env = _bridge_get("get_etf_holdings", symbol)
     ok = env is not None and env.get("status") == "ok" and env.get("rows")
@@ -1082,24 +1138,27 @@ def query_etf_holdings(symbol: str) -> dict[str, Any]:
             "top1_pct": None,
             "top5_sum_pct": None,
             "top10_sum_pct": None,
+            "clusters": [],
             "note": (env or {}).get("error") or "持仓数据不可用",
             "source": "天天基金(东财 FundArchivesDatas jjcc)",
         }
     rows = env["rows"]
     pcts = [r["pct"] for r in rows if r.get("pct") is not None]
+    # 统一口径：topN 均按占比降序取（不假设页面行序），与 top1 的 max 语义一致
+    ranked = sorted(pcts, reverse=True)
     return {
         "symbol": symbol,
         "report_date": env.get("report_date"),
         "quarter": env.get("quarter"),
         "status": "ok",
         "rows": rows,
-        # top1 取 max（不假设页面按占比降序）；top10 截断 10 行
-        "top1_pct": round(max(pcts), 2) if pcts else None,
-        "top5_sum_pct": round(sum(pcts[:5]), 2) if pcts else None,
-        "top10_sum_pct": round(sum(pcts[:10]), 2) if pcts else None,
+        "top1_pct": round(ranked[0], 2) if ranked else None,
+        "top5_sum_pct": round(sum(ranked[:5]), 2) if ranked else None,
+        "top10_sum_pct": round(sum(ranked[:10]), 2) if ranked else None,
+        "clusters": _build_holdings_clusters(rows),
         "note": (
             "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；"
-            "子环节聚类由报告层 AI 完成并标注「AI 归类」"
+            "子环节聚类由引擎按 HOLDINGS_CLUSTER_MAP 聚合，未映射股票归入「未归类」"
         ),
         "source": "天天基金(东财 FundArchivesDatas jjcc)",
     }

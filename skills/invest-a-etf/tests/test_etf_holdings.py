@@ -13,6 +13,7 @@ from etf_data import (
     _parse_holdings_blocks,
     fetch_etf_holdings,
     query_etf_holdings,
+    HOLDINGS_CLUSTER_MAP,
 )
 
 # 实测 2026-06-30 前十大权重（天天基金 jjcc 页）
@@ -259,7 +260,7 @@ def test_query_concentration_engine_calculated(monkeypatch):
     assert out["top1_pct"] == 9.07
     assert out["top5_sum_pct"] == pytest.approx(32.72)
     assert out["top10_sum_pct"] == pytest.approx(49.15)
-    assert "AI 归类" in out["note"]
+    assert "未归类" in out["note"]
 
 
 def test_query_missing_envelope(monkeypatch):
@@ -269,3 +270,102 @@ def test_query_missing_envelope(monkeypatch):
     assert out["top1_pct"] is None
     assert out["top5_sum_pct"] is None
     assert out["rows"] == []
+    assert out["clusters"] == []
+
+
+# ---------------------------------------------------------------------------
+# query 层（R12 holdings.clusters 聚类合计，引擎聚合 AI 不心算）
+# ---------------------------------------------------------------------------
+
+
+# 515050 通信ETF华夏 前十大（2026-06-30，全部在 HOLDINGS_CLUSTER_MAP 内）
+_W10_515050 = [
+    ("300502", "新易盛", "9.91"),
+    ("603986", "兆易创新", "9.91"),
+    ("300308", "中际旭创", "9.29"),
+    ("002475", "立讯精密", "6.55"),
+    ("002384", "东山精密", "6.13"),
+    ("601138", "工业富联", "5.22"),
+    ("600183", "生益科技", "4.60"),
+    ("600487", "亨通光电", "3.93"),
+    ("002463", "沪电股份", "3.75"),
+    ("300394", "天孚通信", "3.61"),
+]
+
+
+def _ok_env_515050() -> dict:
+    rows = [
+        {"code": c, "name": n, "pct": float(p), "shares": 0.0, "amount": 0.0}
+        for c, n, p in _W10_515050
+    ]
+    return {"status": "ok", "report_date": "2026-06-30", "quarter": "2026年2季度",
+            "rows": rows, "error": None}
+
+
+def test_query_clusters_all_mapped(monkeypatch):
+    monkeypatch.setattr("etf_data._bridge_get", lambda *a: _ok_env_515050())
+    out = query_etf_holdings("515050")
+    clusters = out["clusters"]
+    assert len(clusters) == 4  # 全部映射，无「未归类」
+    by_name = {c["cluster"]: c for c in clusters}
+    assert by_name["光模块/光器件"]["sum_pct"] == pytest.approx(22.81)
+    assert by_name["PCB/覆铜板"]["sum_pct"] == pytest.approx(14.48)
+    assert by_name["终端/服务器代工"]["sum_pct"] == pytest.approx(11.77)
+    assert by_name["存储/光缆"]["sum_pct"] == pytest.approx(13.84)
+    # 排序：未归类最后，其余按 sum_pct 降序
+    sums = [c["sum_pct"] for c in clusters]
+    assert sums == sorted(sums, reverse=True)
+    # members 内 pct 降序
+    members = by_name["光模块/光器件"]["members"]
+    m_pcts = [m["pct"] for m in members]
+    assert m_pcts == sorted(m_pcts, reverse=True)
+    assert [m["code"] for m in members] == ["300502", "300308", "300394"]
+
+
+def test_query_clusters_sum_cross_check(monkeypatch):
+    """四组合计与 top10_sum_pct 交叉验证（62.90）。"""
+    monkeypatch.setattr("etf_data._bridge_get", lambda *a: _ok_env_515050())
+    out = query_etf_holdings("515050")
+    assert sum(c["sum_pct"] for c in out["clusters"]) == pytest.approx(
+        out["top10_sum_pct"]
+    )
+    assert out["top10_sum_pct"] == pytest.approx(62.90)
+
+
+def test_query_clusters_unmapped_to_uncategorized(monkeypatch):
+    """未映射股票归入「未归类」单组（159206 前十全未映射）。"""
+    monkeypatch.setattr("etf_data._bridge_get", lambda *a: _ok_env())
+    out = query_etf_holdings("159206")
+    clusters = out["clusters"]
+    assert len(clusters) == 1
+    assert clusters[0]["cluster"] == "未归类"
+    assert clusters[0]["sum_pct"] == pytest.approx(49.15)
+    assert len(clusters[0]["members"]) == 10
+
+
+def test_query_clusters_empty_rows_missing(monkeypatch):
+    """空 rows 走 missing 分支（ok 判定含 rows truthy），clusters 为空。"""
+    env = {"status": "ok", "report_date": None, "quarter": None,
+           "rows": [], "error": None}
+    monkeypatch.setattr("etf_data._bridge_get", lambda *a: env)
+    out = query_etf_holdings("515050")
+    assert out["status"] == "missing"
+    assert out["clusters"] == []
+
+
+def test_query_clusters_pct_none_skipped(monkeypatch):
+    env = {"status": "ok", "report_date": None, "quarter": None,
+           "rows": [{"code": "300502", "name": "新易盛", "pct": None}],
+           "error": None}
+    monkeypatch.setattr("etf_data._bridge_get", lambda *a: env)
+    out = query_etf_holdings("515050")
+    assert out["clusters"] == []  # pct None 不计入任何聚类（与 topN 口径一致）
+
+
+def test_holdings_cluster_map_integrity():
+    """映射表完整性：键 6 位数字、值非空、无重复键。"""
+    assert HOLDINGS_CLUSTER_MAP
+    for code, label in HOLDINGS_CLUSTER_MAP.items():
+        assert len(code) == 6 and code.isdigit()
+        assert isinstance(label, str) and label.strip()
+    assert len(HOLDINGS_CLUSTER_MAP) == len(set(HOLDINGS_CLUSTER_MAP))
