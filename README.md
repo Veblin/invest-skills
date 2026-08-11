@@ -89,9 +89,18 @@ Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 WorkBuddy 与 Claude Code 共享同一套 SKILL.md 格式（同源同构），引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀，双 harness 兼容。3 步安装：
 
-1. **安装 WorkBuddy 桌面版**（macOS / Windows）并登录（新用户 14 天全功能试用；免费版并行上限 2，付费版 8）
+1. **安装 WorkBuddy 桌面版**（macOS / Windows）并登录（官方流程见下节；新用户 14 天全功能试用；免费版并行上限 2，付费版 8）
 2. **拷贝或 symlink skills**：将本仓库 `skills/invest-a-{stock,etf,journal,pulse,gap-scan}` 放入技能目录（macOS 推荐 symlink：`ln -sfn <repo>/skills/invest-a-pulse ~/.workbuddy/skills/invest-a-pulse`，仓库已预置 `.workbuddy/skills/` 下 5 个 symlink 可直接 `ln -sfn` 链接；Windows 见下方专节）
 3. **配置环境**：export `INVEST_SKILLS_ROOT=<repo 绝对路径>`（macOS 写 `~/.zshrc`；Windows 设用户级环境变量）+ 写全局 token 文件 `~/.config/investment/.env`（9 个 token 清单与写入说明见 [docs/workbuddy/env-template.md](docs/workbuddy/env-template.md)）
+
+#### 官方安装流程（App 本体，约 10 分钟）
+
+1. **下载**：官网 [codebuddy.cn](https://www.codebuddy.cn) → 下载页（`/work`）自动识别系统，安装包约 150-180MB；系统要求 Windows 10+ / macOS 12+（内存建议 ≥8GB）
+2. **Mac 芯片版本**：M 系列芯片选 **ARM64**，Intel 芯片选 **X64**（「关于本机」查看芯片型号）
+3. **安装**：macOS 双击 `.dmg` 拖入 Applications（提示无法打开 → 系统设置 → 隐私与安全 → 允许）；Windows 双击 `WorkBuddySetup.exe`（建议右键管理员运行，**安装路径用英文**）
+4. **登录**：微信扫码或手机号（账号即腾讯云账号；建议与腾讯云社区账号一致，积分互通）
+5. **首次授权**：授权文件夹访问（桌面/文档/下载即可，不必全盘）
+6. **领新人礼包**：头像 → 个人中心 → 使用量（约 5000 积分，90 天有效；免费版每月 500 积分 + 每日签到）
 
 **权限模式**：建议在 WorkBuddy 中使用 Craft 模式（免确认执行）——本套技能需频繁调用 Bash 引擎命令，逐条确认体验差。
 

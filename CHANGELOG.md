@@ -34,6 +34,19 @@ v0.2.5 把用户交易理念固化为 skill 纪律需求：资金选择优先、
 - **文档一致性**：CLAUDE.md 盈亏比表述与 trade-structure 3 段规范对齐、D 编号引用改描述性措辞、journal 卖出维度编号 1,2,3,4
 - **发布层**：CHANGELOG 补 v0.2.5 节、release tarball 补 docs/ + .workbuddy/、README 徽章纳入 sync_version
 
+### 2026-08-11 修订
+
+- **WorkBuddy 安装支持**：README 补官方安装流程（下载渠道 codebuddy.cn/work、系统要求 Windows 10+ / macOS 12+、Mac 芯片版本选择 ARM64/X64、安装与登录步骤、首次文件夹授权、新人积分礼包）；本机前置条件核对——`~/.config/investment/.env`（9 token）与 WorkBuddy 桌面版均未就位，T1-T12 真机验收仍为用户后置执行
+- **new_high_ratio 双包装**：`_fetch_daily_panel_row` 返回 `(ts_code, records)` 元组，与 `_map_parallel` 契约（`(item, result)`）双重包装使 panel 值为元组、`rows[0]=str(ts_code)`，`_ms_new_high_ratio_from_panel` 对其 `.get()` 抛 AttributeError（报告采集中实证）；修复为 fetcher 只返回 records + 非 dict 行防御过滤
+- **valuation fusion 口径混合**：legacy 重建路径对非主源注入 scalar_value（默认键序 pe_ttm 先命中=PE），`_extract_scalar` 裸标量短路绕过显式市值键 → 市值 445.71 与 PE 140.16 混合融合（322.78、max_diff 104% 不可用）；修复为 valuation 维度改用 `_extract_l2_scalar`（仅认白名单字段），口径一致性优先宁可单源
+- 回归测试 2 项（真实复现路径，全 mock）；全量 1267 passed
+
+### 2026-08-12 修订
+
+- **valuation 口径混合收口（/code-review #1-#4）**：审查实证 08-11 修复仅覆盖融合槽——legacy 重建的 `DimensionResult.cross_validation` 裸标量短路仍将 PE 140.16 与市值 445.71 混合（divergence 104.3%）。三处收口：`SourceResult.to_dict` 对 L2 维度（financials/valuation）按白名单键提取（根因，兼修证据表 PE/市值混排）、`dimension_results_from_legacy` 非主源只接受白名单数据（不注入旧 PE scalar）、`fuse_from_legacy_dicts` 优先白名单提取（无 data 才回退 scalar_value 兼容旧快照）；无市值数据宁可单源
+- **new_high_ratio 面板守卫补测**：空 df → None → `if records:` 过滤、`_map_parallel` on_error 占位 `(item, None)` 过滤两条路径（停牌/异常不崩溃）
+- 回归测试 9 项（to_dict 4 + 重建 cross_validation 2 + legacy 融合 2 + 面板 2，含 1 项改写，全 mock）；全量 1276 passed
+
 ## v0.2.4 (2026-08-08)
 
 方法论引擎 R1-R12h 落地 + 事实边界规范 + 三轮 /code-review 修复 + 全域数值/口径安全加固。

@@ -540,3 +540,61 @@ class TestNewHighRatioPanel:
         assert result["sample_size"] == 3
         assert result["ratio_pct"] == 66.67  # 2/3 创新高
         assert result["sample_requested"] == 3
+
+    def test_empty_daily_df_filtered_from_panel(self):
+        """审查 finding #4 守卫 1：daily 返回空 df → _fetch_daily_panel_row
+        返回 None → 面板 `if records:` 过滤，样本不含该标的（停牌/权限不足
+        场景），不崩溃、比率基于剩余样本。"""
+        from lib.collector._orchestrate import _ms_fetch_new_high_ratio
+
+        import pandas as pd
+
+        class _FakeTC:
+            def query(self, api, **kw):
+                if api == "stock_basic":
+                    return pd.DataFrame(
+                        {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+                if api == "daily":
+                    code = kw["ts_code"]
+                    dates = ["20260805", "20260806", "20260807", "20260810", "20260811"]
+                    if code == "000003.SZ":
+                        # 停牌/权限不足：空 df
+                        return pd.DataFrame()
+                    # 两只均创新高
+                    close, high = [10, 11, 12, 13, 14], [10.5, 11.5, 12.5, 13.5, 15.0]
+                    return pd.DataFrame({
+                        "trade_date": dates, "close": close, "high": high,
+                    })
+                raise AssertionError(f"unexpected api: {api}")
+
+        result = _ms_fetch_new_high_ratio(_FakeTC())
+        assert result is not None
+        assert result["sample_size"] == 2  # 空 df 标的被过滤
+        assert result["ratio_pct"] == 100.0  # 2/2 创新高
+        assert result["sample_requested"] == 3
+
+    def test_panel_error_placeholder_filtered(self, caplog):
+        """审查 finding #4 守卫 2：_fetch_daily_panel_row 异常逃出超时包装
+        （如 df 缺 trade_date 列 → sort_values KeyError）→ _map_parallel
+        on_error 记日志并返回 (item, None) 占位 → 面板 `if records:` 过滤
+        None，不崩溃、返回 None（无有效样本）。"""
+        from lib.collector._orchestrate import _ms_fetch_new_high_ratio
+
+        import pandas as pd
+
+        class _FakeTC:
+            def query(self, api, **kw):
+                if api == "stock_basic":
+                    return pd.DataFrame(
+                        {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"]})
+                if api == "daily":
+                    # 缺 trade_date 列：sort_values 在超时包装外抛 KeyError
+                    return pd.DataFrame({"close": [1.0], "high": [1.0]})
+                raise AssertionError(f"unexpected api: {api}")
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="lib.collector._orchestrate"):
+            result = _ms_fetch_new_high_ratio(_FakeTC())
+        assert result is None
+        assert "new_high_ratio daily fetch failed" in caplog.text

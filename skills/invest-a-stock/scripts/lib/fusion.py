@@ -140,6 +140,13 @@ def dimension_results_from_legacy(dimensions: list[dict]) -> dict[str, Any]:
                 continue
             if primary_source and src_name == primary_source and primary_data is not None:
                 data = primary_data
+            elif name in _CV_L2_FIELDS:
+                # R12h（决策 C5）：L2 维度非主源只接受原始 data 的白名单
+                # 提取。存储的 scalar_value 可能是旧 to_dict 键序提取的 PE
+                # （600206 实证 140.16），注入后经 _auto_cross_validate 裸
+                # 标量短路混入市值交叉验证（divergence 104.3%）；无白名单
+                # 数据 → 不注入（口径一致性优先，宁可单源）。
+                data = _extract_l2_scalar(s.get("data"), _CV_L2_FIELDS[name])
             elif s.get("scalar_value") is not None:
                 data = s["scalar_value"]
             else:
@@ -174,11 +181,12 @@ def fuse_from_source_results(
             # _DIM_SCALAR_KEYS 键序让 pe_ttm 先命中，而 _auto_cross_validate
             # 用 _CV_L2_FIELDS 市值键，同一报告曾出现融合值=PE、差异标注=市值。
             # 必须用 _extract_l2_scalar 而非 _extract_scalar：后者对裸标量
-            # 短路（_numeric_scalar(data) 直接返回）绕过显式 keys——legacy 重建
-            # 路径（dimension_results_from_legacy）对非主源注入 scalar_value
-            # （to_dict 默认键序提取的 PE），会把 PE 混入市值融合
-            # （600206 实证：445.71 市值 vs 140.16 PE → 融合值 322.78 不可用）。
-            # _extract_l2_scalar 仅认白名单字段（dict/list），裸标量返回 None。
+            # 短路（_numeric_scalar(data) 直接返回）绕过显式 keys，会把 PE
+            # 混入市值融合（600206 实证：445.71 市值 vs 140.16 PE → 融合值
+            # 322.78 不可用）。源头已封堵：SourceResult.to_dict 对 L2 维度
+            # 按白名单提取，dimension_results_from_legacy 只接受白名单数据；
+            # 此处兜底防裸标量绕过。_extract_l2_scalar 仅认白名单字段
+            # （dict/list），裸标量返回 None。
             if dim_name == "valuation":
                 v = _extract_l2_scalar(src.data, _CV_L2_FIELDS["valuation"])
             else:
@@ -206,7 +214,15 @@ def fuse_from_legacy_dicts(dimensions: list[dict]) -> dict[str, FusedDataPoint]:
         sources: dict[str, float | None] = {}
         for s in all_src:
             src_name = s.get("source", "")
-            sv = s.get("scalar_value")
+            l2_keys = _CV_L2_FIELDS.get(dim_name)
+            if l2_keys is not None and s.get("data") is not None:
+                # R12h（决策 C5）：L2 维度优先按原始 data 白名单提取，口径
+                # 与 fuse_from_source_results 一致——忽略存储的旧 scalar_value
+                # （旧 to_dict 键序提取的 PE 140.16）；无 data 时回退
+                # scalar_value（兼容手写/旧快照格式，to_dict 修复后已口径正确）。
+                sv = _extract_l2_scalar(s["data"], l2_keys)
+            else:
+                sv = s.get("scalar_value")
             if sv is None:
                 continue
             try:
