@@ -38,6 +38,7 @@ def upsert_daily_rows(
     *,
     pk: tuple[str, ...],
     merge: bool = False,
+    exclude_cols: tuple[str, ...] = (),
 ) -> int:
     """日快照批量写入（合并 macro_snapshots / market_snapshots / index_pe_history 三处拷贝）。
 
@@ -47,6 +48,10 @@ def upsert_daily_rows(
       新值 NULL 保留旧值。防同一天第二次写入（部分指标 fetch 失败为 None、
       或 7d TTL 缓存旧值）冲掉早先写入的好值。冲突时不更新 PK 列，
       ``collected_at`` 类时间戳列保留首次写入值。
+    - ``exclude_cols``：仅 merge=True 时生效——这些列不进入 DO UPDATE SET
+      子句（冲突时整列保留表的旧值），但仍参与 INSERT 的 VALUES（全新行写入
+      这些列的值）。用于"冲突时保留表中更完整的衍生值、全新行仍写本行值"
+      的场景（如 _auto_persist 的 v1 env_label 不覆盖 save_snapshot 的 v2）。
 
     rows 为 dict 列表，键即列名（各 row 键必须一致）；返回写入行数。
     table/pk 必须为代码控制的字面量，不拼接外部输入。
@@ -62,7 +67,7 @@ def upsert_daily_rows(
         assign = ",".join(
             f"{col}=COALESCE(excluded.{col}, {table}.{col})"
             for col in columns
-            if col not in pk
+            if col not in pk and col not in exclude_cols
         )
         sql = (
             f"INSERT INTO {table} ({cols_sql}) VALUES ({ph}) "

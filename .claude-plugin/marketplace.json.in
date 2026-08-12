@@ -22,19 +22,6 @@
       "tags": ["investment", "stock-analysis", "china-stock", "equity-research", "financial-analysis", "a-share", "claude-code", "learning"]
     },
     {
-      "name": "invest:a-limit-up",
-      "description": "A股涨停板全市场扫描+交互式深挖。盘面宽度/板块轮动/涨停归因，支持质量过滤与交互筛选。学习工具，非决策工具。",
-      "version": "{{ VERSION }}",
-      "author": {
-        "name": "Veblin",
-        "url": "https://github.com/Veblin"
-      },
-      "source": "./",
-      "category": "finance",
-      "homepage": "https://github.com/Veblin/invest-skills",
-      "tags": ["investment", "stock-analysis", "china-stock", "limit-up", "market-scan", "a-share", "claude-code", "learning"]
-    },
-    {
       "name": "invest:a-gap-scan",
       "description": "A股跳空缺口扫描。向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）。学习工具，非决策工具。",
       "version": "{{ VERSION }}",

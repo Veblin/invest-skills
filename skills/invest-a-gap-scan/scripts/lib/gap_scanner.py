@@ -11,7 +11,7 @@ GapInfo / ScanHit / ScanResult — documented inline in their dataclass docstrin
 
 Import conventions
 ------------------
-Follows the invest-a-limit-up pattern: sibling modules in ``scripts/lib/`` are
+Follows the sibling-module import pattern: modules in ``scripts/lib/`` are
 imported as top-level names (this file is found via ``_LIB_DIR`` on ``sys.path``,
 so relative imports would fail).  invest-a-stock modules use
 ``ensure_invest_a_scripts_on_path()`` then ``from lib.technical import sma``.

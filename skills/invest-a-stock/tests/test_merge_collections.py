@@ -191,3 +191,53 @@ class TestAllSourcesUnion:
         # 同名去重：chosen（a）的 payload 优先，不被 b 的同名条目覆盖
         td = [s for s in meta["all_sources"] if s["source"] == "tushare.daily"][0]
         assert td["data"] == a_srcs[0]["data"]
+
+
+class TestMetaNull:
+    """缺陷 2: 维度 _meta 为 null 时不得崩溃（None.get 防护）。"""
+
+    def test_meta_null_no_crash(self):
+        """两份 _meta: null 的 financials → 合并成功，交叉验证不抛异常。"""
+        a = _dim("financials", data={"roe": 5.0, "eps": 1.0}, source="tushare")
+        b = _dim("financials", data={"roe": 5.1, "eps": 1.0}, source="akshare")
+        a["_meta"] = None
+        b["_meta"] = None
+        merged = merge_collections([_collection([a]), _collection([b])])
+        r = {d["dimension"]: d for d in merged["dimensions"]}["financials"]
+        assert r["_meta"]["multi_source_count"] == 2
+        assert merged["_cross_validation"]["results"]
+        # 无来源信息时标记 unknown
+        assert merged["_cross_validation"]["results"][0]["source_a"] == "unknown"
+
+    def test_meta_null_mixed_with_normal(self):
+        """_meta: null 的源在 alternative_sources 中记录 source unknown。"""
+        a = _dim("quote", data={"close": 10.0}, source="tushare.daily")
+        b = _dim("quote", data={"close": 10.1}, source="akshare")
+        b["_meta"] = None
+        merged = merge_collections([_collection([a]), _collection([b])])
+        r = {d["dimension"]: d for d in merged["dimensions"]}["quote"]
+        # chosen 是正常 meta 的 a；alt 仅含 b（_meta: null）→ source unknown
+        assert r["_meta"]["alternative_sources"] == [
+            {"source": "unknown", "fetched_at": ""}
+        ]
+
+
+class TestCollectionGuards:
+    """缺陷 3: 空/非法输入守卫 + symbol 不一致告警。"""
+
+    def test_empty_collections_raises(self):
+        with pytest.raises(ValueError, match="不能为空"):
+            merge_collections([])
+
+    def test_non_dict_element_raises(self):
+        with pytest.raises(ValueError, match=r"collections\[1\] 不是 dict"):
+            merge_collections([_collection([]), "junk"])
+
+    def test_symbol_mismatch_warns_and_uses_first(self, caplog):
+        a = _dim("quote", data={"close": 10.0})
+        b = _dim("quote", data={"close": 10.1})
+        merged = merge_collections(
+            [_collection([a], symbol="600176"), _collection([b], symbol="000001")]
+        )
+        assert merged["symbol"] == "600176"
+        assert "symbol 不一致" in caplog.text

@@ -5,9 +5,11 @@
 
 
 
+
+
 name: invest-a-journal
-version: "0.2.4"
-description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。"
+version: "0.2.5"
+description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
 allowed-tools: Bash, Read, Write
 user-invocable: true
@@ -16,7 +18,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-journal v0.2.1
+# invest-a-journal v0.2.5
 
 ## 概述
 
@@ -65,7 +67,7 @@ metadata:
 
 ### JOURNAL-LAW 4：四维分离
 
-买入四个评估维度（逻辑/盲点/仓位匹配/风险收益）独立呈现，每个维度 ✅/⚠️/❌ + 文字。卖出三维度（一致性/情绪检测/机会成本）。不可合并杂糅。
+买入四个评估维度（逻辑/盲点/仓位匹配/风险收益）独立呈现，每个维度 ✅/⚠️/❌ + 文字。卖出四维度（一致性/情绪检测/参考点独立性/机会成本）。不可合并杂糅。
 
 ```
 ❌ 违规：把逻辑和仓位写在一起，只给出一个综合判断。
@@ -143,7 +145,7 @@ metadata:
 每个评估输出第一行固定格式：
 
 ```
-🔍 invest-a-journal v0.2.1 · {date} · {环境标签}
+🔍 invest-a-journal v0.2.5 · {date} · {环境标签}
 ```
 
 环境标签从 `market_microstructure.snapshot()` 读取：
@@ -155,7 +157,7 @@ metadata:
 示例：
 
 ```
-🔍 invest-a-journal v0.2.1 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
+🔍 invest-a-journal v0.2.5 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
 ```
 
 ---
@@ -164,14 +166,15 @@ metadata:
 
 在发出评估之前，逐条检查：
 
-1. ✅ 扫描禁止词：不含 "建议买入/卖出/持有/减仓/加仓/止损/止盈"、崩盘、极度高估/低估
+1. ✅ 扫描禁止词：不含 "建议买入/卖出/持有/减仓/加仓/止损/止盈"、"止损提高收益"、崩盘、极度高估/低估
 2. ✅ 检查择时：不含 "等回调再买"、"建议减仓"、"目标价 XX 元"
 3. ✅ 检查趋势：每个数据点有分位或趋势，纯绝对值已补全
 4. ✅ 检查 LAW 8：无综合评分数字（7/10、65 分等）
 5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
 6. ✅ 检查 LAW 10：末尾有免责声明
-7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.1` badge
+7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.5` badge
 8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
+9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
 
 ---
 
@@ -214,8 +217,8 @@ Claude: "是否确认保存？"
 用户确认 → save_journal（含 evaluation_json；卖出自动关联买入）
 ```
 
-> **AskUserQuestion 说明**：`allowed-tools` 仅列出 Bash/Read/Write（与 invest-a-limit-up 一致）。
-> AskUserQuestion 是 Claude Code 原生交互能力，不是 Bash 工具，不必写入 frontmatter。
+> **AskUserQuestion 说明**：`allowed-tools` 仅列出 Bash/Read/Write。
+> AskUserQuestion 是 harness 原生交互能力（AskUserQuestion 或对话提问），不是 Bash 工具，不必写入 frontmatter。
 > 运行时优先用 AskUserQuestion 做点选；若当前 harness 不可用，改用普通对话提问，勿阻塞流程。
 
 ### Q&A 点选规范
@@ -228,25 +231,25 @@ Q0 交易三要素:
 |----------|--------|---------|:----------:|
 | 买入还是卖出？ | 方向 | A. 买入 / B. 卖出 | false |
 | ETF 还是个股？ | 类型 | A. ETF / B. 个股 | false |
-| 哪只标的？输入代码 | 代码 | A. 沪深300(510300) / B. 科创50(588000) / C. 中证2000(563300) / D. 创业板(159915) / E. 中证500(510500) / F. 中证1000(512100) / G. 其他（自定义输入） | false |
+| 哪只标的？输入代码 | 代码 | A. 沪深300(510300) / B. 科创50(588000) / C. 中证2000(563300) / D. 其他（自定义输入） | false |
 
-> 代码题选了 A-F 直接用对应代码；选了 G（其他）则通过 "Other" 输入任意 6 位代码。
+> 代码题选了 A-C 直接用对应代码；选了 D（其他）则通过 "Other" 输入任意 6 位代码。
 
 **第二步：数据采集**（在后续 Q&A 前并行查询，确保评估有数据支撑）
 
 ```bash
 # ETF 路径（必须从 scripts/lib 目录运行，否则 import 失败）
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from query_data import query_for_evaluation; import json; print(json.dumps(query_for_evaluation('SYMBOL', 'etf'), ensure_ascii=False))" 2>/dev/null
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from market_microstructure import snapshot; import json; print(json.dumps(snapshot(), ensure_ascii=False))" 2>/dev/null
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from db import search_by_symbol; import json; print(json.dumps(search_by_symbol('SYMBOL'), ensure_ascii=False))" 2>/dev/null
 
 # 个股路径
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from query_data import query_for_evaluation; import json; print(json.dumps(query_for_evaluation('SYMBOL', 'stock'), ensure_ascii=False))" 2>/dev/null
-cd skills/invest-a-journal/scripts/lib && \
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
 uv run python -c "from db import search_by_symbol; import json; print(json.dumps(search_by_symbol('SYMBOL'), ensure_ascii=False))" 2>/dev/null
 ```
 
@@ -274,10 +277,14 @@ Q3 错误条件（可多选）:
 
 | header: "错误条件" | question: "什么情况下判断错了？" | multiSelect: true |
 |------|------|
-| A | 跌破关键支撑位/前低 |
-| B | 基本面恶化 — 经营数据连续低于预期 |
+| A | 逻辑失效（含跌破关键位/信号反转） |
+| B | 估值触发 |
 | C | 宏观/政策逆转 — 利率、汇率、地缘政治突变 |
 | D | 流动性危机 — 成交萎缩、跌停潮、无法止损 |
+
+> 用户提交浮盈目标类理由（"涨到 X% 就卖"）时提示：
+> ⚠️ 锚定浮盈目标可能复制过早卖盈偏误（Odean 1998：卖出的盈利股次年跑赢持有的亏损股 3.4%；Fischbacher et al. 2017：自动止损/止盈单整体可显著降低处置效应，但效应来自强制实现亏损而非锁定浮盈——单纯设定浮盈目标本身不构成该机制）。请改述为逻辑失效条件：什么情况下你原来的买入假设不成立了？
+> — 决策质量核对，非操作信号
 
 Q4 持有周期（单选）:
 
@@ -314,7 +321,7 @@ Q7 入场价格（单选）:
 | B | 等待回调至均线附近 |
 | C | 自定义价格 |
 
-**注意**：每题最多 4 个选项。需要自定义数值（如 25% 仓位、7% 止损、自定义代码）时，用户使用 AskUserQuestion 的 "Other" 机制直接输入（若 AskUserQuestion 不可用，在对话中请用户输入）。multiSelect 仅用于 Q2、Q3。Q1-Q4 一屏，Q5-Q7+入场价 一屏。
+**注意**：每题最多 4 个选项。需要自定义数值（如 25% 仓位、7% 止损、自定义代码）时，用户使用 AskUserQuestion 的 "Other" 机制直接输入（若 AskUserQuestion 不可用，在对话中请用户输入）。multiSelect 仅用于 Q2、Q3。Q0 一屏（3 问）、Q1-Q4 一屏（4 问）、Q5-Q7+入场价 一屏（4 问）。WorkBuddy 下按此分屏；AskUserQuestion 不可用则对话回退。
 
 ---
 
@@ -329,13 +336,14 @@ Q7 入场价格（单选）:
 - `direction=sell` 且未传 `linked_journal_id` → 自动查找同标的**最近一条 buy**，写入 `linked_journal_id`
 - 已显式传入 `linked_journal_id` → 不覆盖
 - `search_by_symbol` / 关联查找对 symbol **大小写不敏感**（统一 upper）
+- 卖出路径：情绪化检测后执行参考点独立性核对
 
 也可先手动解析再保存：`from db import find_latest_buy, resolve_sell_link`。
 
 ### 调用示例
 
 ```bash
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from db import save_journal
 from datetime import datetime, timezone
 import json
@@ -409,7 +417,7 @@ Shell CLI 的 `journal.py add` **已移除**（v0.2.4 清理，无调用方）�
 
 ```bash
 # 主查询（所有评估）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from query_data import query_for_evaluation
 import json
 r = query_for_evaluation('600988', 'stock')
@@ -417,7 +425,7 @@ print(json.dumps(r, ensure_ascii=False, indent=2))
 "
 
 # 市场微观结构（个股/ETF 均可；query_for_evaluation 已自动附带）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from market_microstructure import snapshot, apply_env_guardrail
 import json
 snap = snapshot()
@@ -425,17 +433,17 @@ print('SNAPSHOT:', json.dumps(snap, ensure_ascii=False))
 "
 
 # ETF 专属数据（journal shim → invest-a-etf；亦可直接 etf.py report）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from etf_data import query_etf_data
 import json
 r = query_etf_data('563300')
 print(json.dumps(r, ensure_ascii=False, indent=2))
 "
-# 等价：uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
+# 等价：cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
 
 
 # 历史日志查询（卖出时）
-cd skills/invest-a-journal/scripts/lib && uv run python -c "
+cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from db import search_by_symbol
 import json
 print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
@@ -509,7 +517,11 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 
 ---
 
-## 卖出评估维度（3 维）
+## 卖出评估维度（4 维）
+
+> 用户提交浮盈目标类理由（"涨到 X% 就卖"）时提示：
+> ⚠️ 锚定浮盈目标可能复制过早卖盈偏误（Odean 1998：卖出的盈利股次年跑赢持有的亏损股 3.4%；Fischbacher et al. 2017：自动止损/止盈单整体可显著降低处置效应，但效应来自强制实现亏损而非锁定浮盈——单纯设定浮盈目标本身不构成该机制）。请改述为逻辑失效条件：什么情况下你原来的买入假设不成立了？
+> — 决策质量核对，非操作信号
 
 ### 1. 与入场逻辑的一致性（Consistency）
 
@@ -525,7 +537,15 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 - 卖出理由中是否有 "感觉" "害怕" "受不了" 等情绪词？
 - 卖出时市场涨跌比如何？（涨跌比 <0.4 + 跌停 >50 家 → 大概率恐慌性卖出）
 
-### 3. 机会成本（Opportunity Cost）
+### 3. 参考点独立性核对（Reference-Point Check）
+
+- 本次决策理由是否包含：浮盈目标 / 回本心理 / 亏损不甘 / 成本价锚定？
+  （任一为是 → 标 ⚠️：该理由为参考点依赖，建议重述为独立依据。
+   实证锚：Kahneman & Tversky 1979 参考点依赖；Odean 1998 处置效应）
+- 关键问题："如果这笔交易不是你的持仓，你还会做这个决定吗？"
+- 决策独立依据：{逻辑失效 / 估值触发 / 信号反转 / 资金面变化 / 其他}
+
+### 4. 机会成本（Opportunity Cost）
 
 - 是否有明显的替代资产？
 - 当前市场环境下，这笔钱出来后去哪？
@@ -535,8 +555,10 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 
 ## 评估输出模板
 
+> 本评估的卖出路径含四类参考之核对参考（report-conventions §8）。
+
 ```markdown
-🔍 invest-a-journal v0.2.1 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
+🔍 invest-a-journal v0.2.5 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
 
 ## {方向}: {标的} ({代码}) — {资产类型}
 
@@ -574,6 +596,14 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 
 ## 风险收益比: {✅/⚠️/❌}
 {文字}
+
+## 参考点独立性核对（卖出路径必填；买入路径跳过）
+
+- 本次决策理由是否包含：浮盈目标 / 回本心理 / 亏损不甘 / 成本价锚定？
+  （任一为是 → 标 ⚠️：该理由为参考点依赖，建议重述为独立依据。
+   实证锚：Kahneman & Tversky 1979 参考点依赖；Odean 1998 处置效应）
+- 关键问题："如果这笔交易不是你的持仓，你还会做这个决定吗？"
+- 决策独立依据：{逻辑失效 / 估值触发 / 信号反转 / 资金面变化 / 其他}
 
 ### 环境盲点提示（护栏 v1）
 {从 apply_env_guardrail 追加的 blind_spots 列表}
@@ -661,9 +691,16 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
     "两融余额是否止跌",
     "涨跌停比是否回到 3:1 以下"
   ],
-  "followup_questions": ["你考虑过中证1000期货做对冲吗？"]
+  "followup_questions": ["你考虑过中证1000期货做对冲吗？"],
+  "reference_point_check": {
+    "anchored_to": ["浮盈目标"],
+    "independent_basis": "逻辑失效"
+  }
 }
 ```
+
+> `reference_point_check`：卖出路径文档级字段（仅文档说明，无 DB 变更 — evaluation_json 为 TEXT 列原样透传）。
+> `anchored_to`：命中的参考点（浮盈目标 / 回本心理 / 亏损不甘 / 成本价锚定，可为空数组）；`independent_basis`：独立依据五选一（逻辑失效 / 估值触发 / 信号反转 / 资金面变化 / 其他）。
 
 ---
 

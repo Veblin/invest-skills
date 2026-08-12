@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
@@ -26,6 +25,7 @@ from etf_data import (  # noqa: E402
     compute_history_stats,
     prefetch_etf_spot,
     query_etf_data,
+    query_etf_holdings,
     query_etf_kline,
     query_etf_kline_history,
     query_etf_quote,
@@ -141,9 +141,11 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     # R11c: 情景预案（回撤档位 σ 分级 + 三步核查 + LAW 6a 声明）
     playbook_block = _build_playbook_block(history_block, kline) if playbook else None
 
+    from dates import shanghai_now
+
     payload = {
         "skill": "invest-a-etf",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": shanghai_now().isoformat(),
         "symbol": symbol,
         "index_code": CSINDEX_MAP.get(symbol),
         "profile": profile,
@@ -296,6 +298,229 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     return 0
 
 
+def _validate_symbol(symbol: str) -> str | None:
+    """校验 6 位数字代码；非法时打印错误并返回 None。"""
+    symbol = symbol.strip()
+    if not symbol.isdigit() or len(symbol) != 6:
+        print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
+        return None
+    return symbol
+
+
+def cmd_holdings(symbol: str, *, as_json: bool) -> int:
+    """R12: 前十大持仓 + 集中度统计。"""
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    data = query_etf_holdings(symbol)
+    if as_json:
+        from dates import shanghai_now
+
+        payload = {
+            "skill": "invest-a-etf",
+            "generated_at": shanghai_now().isoformat(),
+            "symbol": symbol,
+            "holdings": data,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    print(f"# holdings · {symbol}")
+    if data["status"] != "ok":
+        print(f"⏳ 持仓数据不可用: {data['note']}")
+        return 0
+    quarter = data.get("quarter") or ""
+    print(f"report_date: {data['report_date']} ({quarter})  source: {data['source']}")
+    print(f"  {'#':<3s} {'代码':<8s} {'名称':<10s} {'占比%':>7s} "
+          f"{'持股(万股)':>12s} {'市值(万元)':>14s}")
+    for i, r in enumerate(data["rows"], start=1):
+        pct = f"{r['pct']:.2f}" if r.get("pct") is not None else "-"
+        shares = f"{r['shares']:.2f}" if r.get("shares") is not None else "-"
+        amount = f"{r['amount']:.2f}" if r.get("amount") is not None else "-"
+        print(f"  {i:<3d} {r['code']:<8s} {r['name']:<10s} {pct:>7s} "
+              f"{shares:>12s} {amount:>14s}")
+    top1 = data.get("top1_pct")
+    top5 = data.get("top5_sum_pct")
+    top10 = data.get("top10_sum_pct")
+    t1 = f"{top1:.2f}" if top1 is not None else "-"
+    t5 = f"{top5:.2f}" if top5 is not None else "-"
+    t10 = f"{top10:.2f}" if top10 is not None else "-"
+    print(f"集中度(引擎): top1 {t1}% | top5 {t5}% | top10 {t10}%")
+    clusters = data.get("clusters") or []
+    if clusters:
+        print("子环节聚类合计(引擎):")
+        for c in clusters:
+            members = ", ".join(f"{m['name']} {m['pct']:.2f}" for m in c["members"])
+            print(f"  {c['cluster']} {c['sum_pct']:.2f}%: {members}")
+    print(f"note: {data['note']}")
+    # 提示仅在存在未归类持仓时输出（全部映射时避免误导报告层重复「AI 归类」）
+    if any(c.get("cluster") == "未归类" for c in clusters):
+        print("> 未映射股票归入「未归类」；报告层如需补充归类须标注「AI 归类」")
+    return 0
+
+
+def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
+    """R13: 赛道资金流对比 + 相对强弱。"""
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    peers_list = None
+    if peers_str:
+        peers_list = [p.strip() for p in peers_str.split(",") if p.strip()]
+    try:
+        from etf_peers import query_etf_peers
+    except ImportError as exc:
+        print(f"etf_peers 模块不可用: {exc}（请检查路径配置或 canonical 模块加载）")
+        return 1
+    data = query_etf_peers(symbol, peers_list)
+    if as_json:
+        from dates import shanghai_now
+
+        payload = {
+            "skill": "invest-a-etf",
+            "generated_at": shanghai_now().isoformat(),
+            "symbol": symbol,
+            "peers": data,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    print(f"# peers · {symbol}")
+    print(f"peer_source: {data['peer_source']}")
+    if not data["available"]:
+        print(f"⏳ {data.get('note', '赛道不可用')}")
+        return 0
+    names = data.get("names") or {}
+    print("## 资金流对比 (Tushare fund_share · 20日窗口 · 亿元)")
+    print(f"  {'代码':<8s} {'名称':<14s} {'20日流':>8s} {'5日流':>7s} "
+          f"{'份额变化%':>9s} {'趋势'}")
+    for row in data["flow"]["rows"]:
+        code = row["symbol"]
+        name = names.get(code) or "-"
+        f20 = f"{row['flow_20d_e']:+.2f}" if row.get("flow_20d_e") is not None else "⏳"
+        f5 = f"{row['flow_5d_e']:+.2f}" if row.get("flow_5d_e") is not None else "⏳"
+        sp = f"{row['share_change_pct']:+.2f}" if row.get("share_change_pct") is not None else "⏳"
+        trend = row.get("trend") or "⏳"
+        note = row.get("note")
+        extra = f" ⚠ {note}" if note else ""
+        print(f"  {code:<8s} {name:<14s} {f20:>8s} {f5:>7s} {sp:>9s} {trend}{extra}")
+        span = row.get("share_change_span")
+        if span is not None and span < 19:
+            print(f"  ⚠ {code} 份额变化% 仅覆盖 {span} 个交易日间隔（份额历史不足 20 日）")
+    rs = data.get("rs")
+    if rs and "error" not in rs:
+        rank = rs.get("rank_20d") or {}
+        rank_str = f"{rank.get('rank', '-')}/{rank.get('total', '-')}" if rank else "-"
+        print("## 相对强弱 (基准=同赛道等权均值 · 20日)")
+        print(f"  rs_latest {rs['rs_latest']} | rs_window_start {rs['rs_window_start']} | "
+              f"rs_change {rs['rs_change']:+.2f} | 20日收益排名 {rank_str}")
+    elif rs:
+        print(f"## 相对强弱: ⏳ {rs['error']}")
+    for note in data.get("notes") or []:
+        print(f"note: {note}")
+    return 0
+
+
+def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
+    """R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日，大单口径亿元）。"""
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    try:
+        from sector_flow import query_sector_flow
+    except ImportError as exc:
+        print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
+        return 1
+    data = query_sector_flow(symbol)
+    if as_json:
+        from dates import shanghai_now
+
+        payload = {
+            "skill": "invest-a-etf",
+            "generated_at": shanghai_now().isoformat(),
+            "symbol": symbol,
+            "sector_flow": data,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    sw_name = data.get("sw_name") or "-"
+    sw_code = data.get("sw_code") or "-"
+    as_of = data.get("as_of") or "⏳"
+    print(f"# sector-flow · {symbol}  ({sw_name} {sw_code})  as_of={as_of}")
+    if not data["available"]:
+        print(f"⏳ {'; '.join(data.get('notes') or [])}")
+        return 0
+    print(f"  {'THS行业':<8s} {'今日':>8s} {'3日':>8s} {'5日':>8s} {'10日':>9s} "
+          f"{'10日涨跌%':>9s}  趋势标签 / 详情")
+    for r in data["industries"]:
+        def f(v):
+            return f"{v:+.2f}" if v is not None else "   ⏳"
+        t5 = f"{r['trend_5d']:+.2f}" if r.get("trend_5d") is not None else "   —"
+        turn = r.get("turn_5d") or ""
+        span = r.get("trend_span_days")
+        if span and span != 7:
+            turn = f"{turn}（跨度 {span} 日）"
+        print(f"  {r['industry']:<8s} {f(r['net_1d']):>8s} {f(r['net_3d']):>8s} "
+              f"{f(r['net_5d']):>8s} {f(r['net_10d']):>9s} {f(r['chg_10d']):>9s}  "
+              f"{r['trend_label']} / {r['trend_detail']}  5日Δ {t5} {turn}")
+    print(f"history_days: {data['history_days']}")
+    for n in data.get("notes") or []:
+        print(f"note: {n}")
+    return 0
+
+
+def cmd_collect_sector_flow() -> int:
+    """R15 每日采集：同花顺行业资金流 90 行业×4 窗口 → sector_flow_snapshots（幂等）。
+
+    采集后执行 SW_TO_THS_INDUSTRY 映射自检（check_mapping_coverage + 反向
+    check_snapshot_drift）：名单不在最新快照的行业名 / 快照新增未映射行业名
+    输出警告，供映射表在线核对；单窗口取数失败告警且跳过自检（名单不全防误报）。
+    """
+    try:
+        from sector_flow import (check_mapping_coverage, check_snapshot_drift,
+                                 fetch_sector_flow_snapshot, load_drift_baseline,
+                                 save_drift_baseline, save_sector_flow_snapshot)
+    except ImportError as exc:
+        print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
+        return 1
+    snapshot = fetch_sector_flow_snapshot()
+    errs = snapshot.get("errors") or []
+    result = save_sector_flow_snapshot(snapshot)
+    if result.get("error"):
+        print(f"采集失败: {result['error']}")
+        return 1
+    if result.get("skipped"):
+        print(f"跳过: {result['note']}")
+        return 0  # 快照为旧数据/非交易日，名单自检基于旧名单无意义（R16）
+    partial = "（部分窗口失败）" if errs else ""
+    print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
+          f"（日期 {result['date']}）{partial}")
+    if errs:
+        print(f"⚠ 部分窗口取数失败: {'; '.join(errs)}")
+        return 1  # 部分失败 → 非零退出码，cron 可按键告警（R16）
+    # R15 C6：映射自检（部分窗口失败时名单不全，跳过防误报）
+    missing = check_mapping_coverage(snapshot)
+    if missing:
+        print(f"⚠ 映射自检: 以下 THS 行业不在最新名单（SW_TO_THS_INDUSTRY 需核对）: "
+              f"{', '.join(missing)}")
+    # 漂移自检（R16 基线制）：首次建立基线不告警，后续仅报告相对基线的新增
+    # 未映射行业（映射表仅 39/约 90 行业，全量告警每次必刷 ~50 条假警告）
+    baseline = load_drift_baseline()
+    if baseline is None:
+        n = save_drift_baseline(snapshot)
+        if n is None:
+            print("⚠ 漂移基线建立失败（跳过，下次采集重试，不阻断）")
+        else:
+            print(f"ℹ 已建立漂移基线（{n} 个未映射行业），后续仅报告新增（不阻断）")
+    else:
+        drift = check_snapshot_drift(snapshot, baseline=baseline)
+        if drift:
+            print(f"⚠ 映射自检（新增未映射行业）: 共 {len(drift)} 个不在 "
+                  f"SW_TO_THS_INDUSTRY: {', '.join(drift)}")
+    return 0
+
+
 def cmd_industry_pe() -> int:
     """打印申万一级行业 PE/PB 一览。"""
     try:
@@ -423,6 +648,28 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("industry-pe", help="申万一级行业 PE/PB 一览")
     sub.add_parser("collect-weekly", help="手动触发行业 PE 周度采集")
 
+    p_holdings = sub.add_parser("holdings", help="R12: 前十大持仓 + 集中度统计")
+    p_holdings.add_argument("symbol", help="6 位 ETF 代码")
+    p_holdings.add_argument("--json", action="store_true", help="输出完整 JSON")
+
+    p_peers = sub.add_parser("peers", help="R13: 赛道资金流对比 + 相对强弱")
+    p_peers.add_argument("symbol", help="6 位 ETF 代码")
+    p_peers.add_argument("--json", action="store_true", help="输出完整 JSON")
+    p_peers.add_argument(
+        "--peers",
+        metavar="CODES",
+        default=None,
+        help="显式赛道清单（逗号分隔，如 \"512660,512760\"）；缺省按 ETF_TO_SW_INDUSTRY 自动发现同行业",
+    )
+
+    p_sf = sub.add_parser("sector-flow", help="R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日）")
+    p_sf.add_argument("symbol", help="6 位 ETF 代码")
+    p_sf.add_argument("--json", action="store_true", help="输出完整 JSON")
+    sub.add_parser(
+        "collect-sector-flow",
+        help="R15: 手动触发行业资金流每日采集（幂等，非交易日跳过；盘后触发）",
+    )
+
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
@@ -434,6 +681,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_industry_pe()
     if args.cmd == "collect-weekly":
         return cmd_collect_weekly()
+    if args.cmd == "holdings":
+        return cmd_holdings(args.symbol, as_json=args.json)
+    if args.cmd == "peers":
+        return cmd_peers(args.symbol, as_json=args.json, peers_str=args.peers)
+    if args.cmd == "sector-flow":
+        return cmd_sector_flow(args.symbol, as_json=args.json)
+    if args.cmd == "collect-sector-flow":
+        return cmd_collect_sector_flow()
     return 1
 
 

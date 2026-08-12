@@ -25,7 +25,7 @@ LLM 存在幻觉问题——在专业金融领域，这些幻觉极难被非专�
 
 ### 约束 5：先服务于自己的学习需求，但以可分发标准设计
 
-项目源于作者自身的 A 股/港股投资学习实践。功能迭代以解决自己遇到的真问题为导向，不追求覆盖所有假想需求。同时，项目按 Agent Skills 开放格式构建，面向 Claude Code / Hermes 等多平台分发——配置步骤须有文档、数据源须有 fallback、关键路径须在无 Python 环境（MCP 模式）下同样可用。
+项目源于作者自身的 A 股/港股投资学习实践。功能迭代以解决自己遇到的真问题为导向，不追求覆盖所有假想需求。同时，项目按 Agent Skills 开放格式构建，面向 Claude Code / Hermes / WorkBuddy 等多平台分发——配置步骤须有文档、数据源须有 fallback、关键路径须在无 Python 环境（MCP 模式）下同样可用。WorkBuddy 分发通道（3 步安装 / token 配置 / 用户级 AGENTS 与 MEMORY 模板 / 真机验收表）见 [docs/workbuddy/](docs/workbuddy/) 与 README「WorkBuddy 安装」节。
 
 ---
 
@@ -184,7 +184,6 @@ code/
       references/                 ← 数据源参考文档
     invest-a-etf/               ← ETF 研究（slash: /invest-a-etf；数据层供 journal 共用）
     invest-a-journal/           ← 交易方案评估（slash: /invest-a-journal）
-    invest-a-limit-up/          ← 涨停板扫描（slash: /invest-a-limit-up）
     invest-a-gap-scan/          ← 跳空缺口扫描（slash: /invest-a-gap-scan）
   .claude-plugin/               ← Claude Code 插件注册
   .agents/                      ← Agent Skills 通用注册

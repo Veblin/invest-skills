@@ -6,9 +6,11 @@
 
 
 
+
+
 name: invest-a-gap-scan
-version: "0.2.4"
-description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）"
+version: "0.2.5"
+description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）触发词：缺口/跳空扫描"
 argument-hint: "/invest-a-gap-scan [--gap-min-pct 1.5] [--gap-min-vol-ratio 1.5]"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
@@ -63,7 +65,7 @@ metadata:
 ### 基本用法
 
 ```bash
-uv run python skills/invest-a-gap-scan/scripts/scan.py
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py
 ```
 
 ### 参数表
@@ -87,22 +89,22 @@ uv run python skills/invest-a-gap-scan/scripts/scan.py
 
 ```bash
 # 提高缺口阈值
-uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-pct 2.0
 
 # 要求放量缺口
-uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --gap-min-vol-ratio 1.5
 
 # 强制 baostock (无 Tushare token)
-uv run python skills/invest-a-gap-scan/scripts/scan.py --source baostock
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --source baostock
 
 # 调试: 只扫前 30 只
-uv run python skills/invest-a-gap-scan/scripts/scan.py --universe-limit 30
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --universe-limit 30
 
 # JSON 输出 (供脚本消费)
-uv run python skills/invest-a-gap-scan/scripts/scan.py --json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --json
 
 # 全量刷新
-uv run python skills/invest-a-gap-scan/scripts/scan.py --no-cache
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/scan.py --no-cache
 ```
 
 ## 算法详解
@@ -142,7 +144,7 @@ for gap in qualified_gaps (newest first):
 - **Tushare 路径**: 原始价格 x `adj_factor / latest_adj_factor` -> 以最新日为基准的前复权价格
 - **Baostock 路径**: `adjustflag="2"` 直接返回前复权价格，无需额外计算
 
-两种路径的 QFQ 算法存在细微差异，因此缓存按数据源隔离 (`{date}/{source}/{ts_code}.pkl`)。
+两种路径的 QFQ 算法存在细微差异，因此缓存按数据源隔离 (`{kline}/{source}/{ts_code}.pkl`)。
 
 ## 数据流
 
@@ -190,7 +192,7 @@ for gap in qualified_gaps (newest first):
 
 ```
 ========================================================================
-  invest-a-gap-scan v0.2.1 -- 跳空缺口扫描
+  invest-a-gap-scan v0.2.5 -- 跳空缺口扫描
 ========================================================================
 池构成: 沪深300(300) + 中证A500(500) + 科创50(50) -> 去重 478 只
 数据源: baostock (前复权 adjustflag=2) (前复权)
@@ -230,20 +232,19 @@ for gap in qualified_gaps (newest first):
 ```
 ~/.local/share/investment/gap_scan_cache/
 |-- universe_20260719.pkl          (成分股列表, 28 KB)
-|-- 20260719/                       (按扫描日期)
-|   |-- tushare/                    (按数据源隔离)
+|-- kline/                         (固定段键目录, v0.2.5)
+|   |-- tushare/                   (按数据源隔离)
 |   |   |-- 000001.SZ.pkl
 |   |   `-- ...
 |   `-- baostock/
 |       |-- 000001.SZ.pkl
 |       `-- ...
-`-- 20260718/                       (历史缓存, >3 天自动清理)
 ```
 
 ### 缓存策略
 
-- **TTL**: 3 天 (基于文件 mtime + 目录级 `cleanup_old()`)
-- **Scope**: 按日期 + 数据源隔离，tushare/baostock 缓存互不污染
+- **TTL**: 3 天 (基于文件 mtime；固定段键使跨日命中生效，旧版 `{YYYYMMDD}` 日期目录随 v0.2.5 一次性清理)
+- **Scope**: 按数据源隔离，tushare/baostock 缓存互不污染
 - **格式**: Python pickle (pandas DataFrame)
 - **强制刷新**: `--no-cache` 跳过加载，重新拉取并覆盖
 

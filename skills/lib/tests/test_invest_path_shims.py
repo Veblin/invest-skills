@@ -1,4 +1,4 @@
-"""Tests for 5 个 skill 的 _invest_path.py 引导 shim — 逐字节一致 + 导出面。
+"""Tests for 4 个 skill 的 _invest_path.py 引导 shim — 逐字节一致 + 导出面。
 
 Batch D / X-02：shim 形状必须保持统一，防止再次分叉（曾有 _skills_lib_path
 26 行变体）。加载各 shim 验证 ensure_* 函数行为。
@@ -12,14 +12,14 @@ from pathlib import Path
 _SKILLS = Path(__file__).resolve().parents[2]
 
 _SKILL_NAMES = ("invest-a-etf", "invest-a-gap-scan", "invest-a-journal",
-                "invest-a-limit-up", "invest-a-stock")
+                "invest-a-stock")
 
 
 def _shim_path(skill: str) -> Path:
     return _SKILLS / skill / "scripts" / "lib" / "_invest_path.py"
 
 
-def test_all_five_shims_byte_identical() -> None:
+def test_all_four_shims_byte_identical() -> None:
     contents = {skill: _shim_path(skill).read_text(encoding="utf-8")
                 for skill in _SKILL_NAMES}
     reference = contents[_SKILL_NAMES[0]]

@@ -77,6 +77,24 @@ class TestSellAutoLink:
         assert len(hits) == 1
         assert len(hits_lower) == 1
 
+    def test_search_returns_linked_journal_id(self, tmp_db):
+        """v0.2.5 缺陷 5 防回归：search_by_symbol 必须返回 linked_journal_id
+        （卖出关联验证读侧；SKILL.md L124/L338 依赖该函数展示关联）。"""
+        buy_id = db.save_journal({
+            "symbol": "563300",
+            "direction": "buy",
+            "entry_date": "2026-01-01",
+        })
+        db.save_journal({
+            "symbol": "563300",
+            "direction": "sell",
+            "entry_date": "2026-02-01",
+        })
+        hits = db.search_by_symbol("563300")
+        assert any("linked_journal_id" in h for h in hits), "search_by_symbol 缺少 linked_journal_id 列"
+        sell_hits = [h for h in hits if h["direction"] == "sell"]
+        assert sell_hits and sell_hits[0]["linked_journal_id"] == buy_id
+
     def test_empty_string_link_triggers_auto_link(self, tmp_db):
         buy_id = db.save_journal({"symbol": "563300", "direction": "buy"})
         sell_id = db.save_journal({

@@ -261,6 +261,135 @@ class TestFuseFromSourceResults:
         assert "valuation" in fused
         assert len(fused["valuation"].source_values) == 1
 
+    def test_legacy_rebuild_bare_scalar_does_not_mix_pe_into_market_cap(self):
+        """R12h C5 回归：legacy 重建路径（非主源注入裸 scalar_value）不得把 PE 混入市值融合。
+
+        真实复现（2026-08-11 600206 采集）：tushare 主源走原始数据 → total_mv
+        445.71；tencent 非主源 scalar_value=140.16（to_dict 默认键序 pe_ttm 先命中，
+        实为 PE）→ _extract_scalar 裸标量短路绕过显式市值键 → 融合出 322.78
+        （max_diff 104.31%，融合值不可用）。修复后 tencent 无市值数据 → 不进入融合。
+        """
+        from lib.fusion import dimension_results_from_legacy, fuse_from_source_results
+
+        dimensions = [
+            {
+                "dimension": "valuation",
+                "data": [
+                    {"trade_date": "20260811", "pe": 140.16,
+                     "pe_ttm": 140.1623, "total_mv": 445.71031245},
+                ],
+                "_meta": {
+                    "source": "tushare.daily_basic",
+                    "all_sources": [
+                        {
+                            "source": "tushare.daily_basic",
+                            "query_params": "pro.daily_basic(ts_code='600206.SH')",
+                            "confidence": "high",
+                            "scalar_value": 140.1623,
+                            "data": [
+                                {"trade_date": "20260811", "pe": 140.16,
+                                 "pe_ttm": 140.1623, "total_mv": 445.71031245},
+                            ],
+                        },
+                        {
+                            "source": "tencent_finance",
+                            "query_params": "qt.gtimg.cn/q=sh600206",
+                            "confidence": "medium",
+                            "scalar_value": 140.16,
+                        },
+                    ],
+                },
+            },
+        ]
+        fused = fuse_from_source_results(dimension_results_from_legacy(dimensions))
+        assert "valuation" in fused
+        fp = fused["valuation"]
+        # tencent 无市值数据 → 不得以 PE 混入市值融合（口径一致性优先，宁可单源）
+        assert fp.source_values == {"tushare.daily_basic": 445.71031245}
+        assert fp.fused_value == 445.71031245
+        assert fp.max_diff_pct == 0.0
+
+    def test_legacy_rebuild_cross_validation_does_not_mix_pe_into_market_cap(self):
+        """R12h C5 回归（审查 finding #1）：dimension_results_from_legacy 重建的
+        DimensionResult，其 cross_validation 不得再混合 PE 与市值——审查实证：
+        PR fixture（tencent scalar_value=140.16 即 PE，无原始 data）重建后
+        cross_validation 曾为 'divergence'、data_pair='140.16 vs 445.71'
+        (104.3%)。修复后 tencent 无市值数据 → 不进入交叉验证 → 单源无标注。
+        """
+        from lib.fusion import dimension_results_from_legacy
+
+        dimensions = [
+            {
+                "dimension": "valuation",
+                "data": [
+                    {"trade_date": "20260811", "pe": 140.16,
+                     "pe_ttm": 140.1623, "total_mv": 445.71031245},
+                ],
+                "_meta": {
+                    "source": "tushare.daily_basic",
+                    "all_sources": [
+                        {
+                            "source": "tushare.daily_basic",
+                            "query_params": "pro.daily_basic(ts_code='600206.SH')",
+                            "confidence": "high",
+                            "scalar_value": 140.1623,
+                            "data": [
+                                {"trade_date": "20260811", "pe": 140.16,
+                                 "pe_ttm": 140.1623, "total_mv": 445.71031245},
+                            ],
+                        },
+                        {
+                            "source": "tencent_finance",
+                            "query_params": "qt.gtimg.cn/q=sh600206",
+                            "confidence": "medium",
+                            "scalar_value": 140.16,
+                        },
+                    ],
+                },
+            },
+        ]
+        rebuilt = dimension_results_from_legacy(dimensions)
+        dr = rebuilt["valuation"]
+        # tencent 无原始 data 且 scalar_value 为旧键序提取的 PE → 不得注入
+        assert dr.cross_validation is None
+
+    def test_legacy_rebuild_cross_validation_ignores_stale_scalar(self):
+        """R12h C5 回归（审查 finding #1）：非主源即使携带旧 scalar_value（PE），
+        只要原始 data 有市值键，重建必须按白名单键取市值——双源市值收敛而非
+        PE/市值 divergence。"""
+        from lib.fusion import dimension_results_from_legacy
+
+        dimensions = [
+            {
+                "dimension": "valuation",
+                "data": {"pe_ttm": 140.1623, "total_mv": 445.71031245},
+                "_meta": {
+                    "source": "tushare.daily_basic",
+                    "all_sources": [
+                        {
+                            "source": "tushare.daily_basic",
+                            "confidence": "high",
+                            "scalar_value": 140.1623,
+                            "data": {"pe_ttm": 140.1623, "total_mv": 445.71031245},
+                        },
+                        {
+                            "source": "tencent_finance",
+                            "confidence": "medium",
+                            # 旧 to_dict 产物：scalar_value 为 PE，data 含市值
+                            "scalar_value": 140.16,
+                            "data": {"total_mv": 445.7},
+                        },
+                    ],
+                },
+            },
+        ]
+        rebuilt = dimension_results_from_legacy(dimensions)
+        dr = rebuilt["valuation"]
+        assert dr.cross_validation is not None
+        assert dr.cross_validation.status == "convergence"
+        # 双源市值收敛：avg=(445.71+445.70)/2 → "445.71"
+        assert dr.cross_validation.data_pair == "445.71"
+
 
 class TestFuseFromLegacyDicts:
     def test_legacy_dict_format_with_scalar_value(self):
@@ -336,14 +465,103 @@ class TestFuseFromLegacyDicts:
         fused = fuse_from_legacy_dicts(dimensions)
         assert fused == {}
 
+    def test_legacy_dict_valuation_prefers_data_whitelist_over_stale_scalar(self):
+        """R12h C5 回归（审查 finding #3）：fuse_from_legacy_dicts 对估值维度
+        不得直接融合存储的 scalar_value（旧 to_dict 键序提取的 PE 140.16）——
+        原始 data 有市值键时必须按白名单取市值，与修复后的
+        fuse_from_source_results 语义一致。"""
+        from lib.fusion import fuse_from_legacy_dicts
+
+        dimensions = [
+            {
+                "dimension": "valuation",
+                "data": {"pe_ttm": 140.1623, "total_mv": 445.71031245},
+                "_meta": {
+                    "all_sources": [
+                        {
+                            "source": "tushare.daily_basic",
+                            "confidence": "high",
+                            "scalar_value": 140.1623,
+                            "data": {"pe_ttm": 140.1623, "total_mv": 445.71031245},
+                        },
+                        {
+                            "source": "tencent_finance",
+                            "confidence": "medium",
+                            # 旧 to_dict 产物：scalar_value 为 PE，data 含市值
+                            "scalar_value": 140.16,
+                            "data": {"total_mv": 445.7},
+                        },
+                    ],
+                },
+            },
+        ]
+        fused = fuse_from_legacy_dicts(dimensions)
+        assert "valuation" in fused
+        fp = fused["valuation"]
+        # 双源均按市值融合，PE scalar 被忽略
+        assert fp.source_values == {
+            "tushare.daily_basic": 445.71031245,
+            "tencent_finance": 445.7,
+        }
+        assert fp.fused_value > 445.7 and fp.fused_value < 445.71031245
+
+    def test_legacy_dict_valuation_no_data_falls_back_to_scalar_value(self):
+        """兼容旧契约：all_sources 条目无原始 data 时回退 scalar_value
+        （to_dict 修复后新产物已口径正确；此处为手写/旧快照格式）。"""
+        from lib.fusion import fuse_from_legacy_dicts
+
+        dimensions = [
+            {
+                "dimension": "valuation",
+                "data": {"pe_ttm": 15.0},
+                "_meta": {
+                    "all_sources": [
+                        {"source": "tushare.daily_basic", "scalar_value": 15.0,
+                         "data_available": True},
+                        {"source": "akshare.snapshot", "scalar_value": 15.5,
+                         "data_available": True},
+                    ],
+                },
+            },
+        ]
+        fused = fuse_from_legacy_dicts(dimensions)
+        assert "valuation" in fused
+        assert len(fused["valuation"].source_values) == 2
+
 
 class TestSchemaScalarValue:
     """Verify that SourceResult.to_dict() now includes scalar_value."""
 
-    def test_to_dict_includes_scalar_from_dict_data(self):
-        sr = SourceResult("tushare.daily_basic", {"pe_ttm": 15.5}, "valuation")
+    def test_to_dict_valuation_uses_market_cap_whitelist(self):
+        """R12h C5 回归（审查 finding #2）：估值维度 scalar_value 必须用市值
+        白名单键（_CV_L2_FIELDS），不得因 _DIM_SCALAR_KEYS 键序让 pe_ttm
+        先命中（600206 实证：PE 140.16 混入市值 445.71 的融合/差异标注）。"""
+        sr = SourceResult(
+            "tushare.daily_basic",
+            [{"trade_date": "20260811", "pe_ttm": 140.1623, "total_mv": 445.71031245}],
+            "valuation",
+        )
         d = sr.to_dict()
-        assert d.get("scalar_value") == 15.5
+        assert d.get("scalar_value") == 445.71031245
+
+    def test_to_dict_valuation_without_market_cap_yields_none(self):
+        """估值维度仅有 PE 数据 → scalar_value None（宁可无标量，不得 PE/市值混排）。"""
+        sr = SourceResult("tencent_finance", {"pe_ttm": 140.16}, "valuation")
+        d = sr.to_dict()
+        assert d.get("scalar_value") is None
+
+    def test_to_dict_financials_uses_l2_whitelist(self):
+        """财务维度同样走 L2 白名单：eps 不在白名单（_CV_L2_FIELDS 无 eps），
+        仅有 eps 时 scalar_value None，避免 eps/roe 口径混排。"""
+        sr = SourceResult("tushare.fina_indicator", {"eps": 1.2}, "financials")
+        d = sr.to_dict()
+        assert d.get("scalar_value") is None
+
+    def test_to_dict_non_l2_keeps_dimension_keys(self):
+        """非 L2 维度保持原 _DIM_SCALAR_KEYS 提取（quote 用 price）。"""
+        sr = SourceResult("tencent_finance", {"price": 100.0}, "quote")
+        d = sr.to_dict()
+        assert d.get("scalar_value") == 100.0
 
     def test_to_dict_includes_scalar_from_list_data(self):
         sr = SourceResult("akshare.kline", [{"close": 100.0}], "kline")

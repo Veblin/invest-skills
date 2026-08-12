@@ -57,6 +57,7 @@ DEFAULT_TTL: dict[str, int] = {
                                       #   7d 时除息后 stale 因子 + 日更 NAV 会跨断点算收益率 → 假跳价）
     "etf_share_history":  1 * 86400,  # Tushare 份额 + fund_daily
     "etf_industry_alloc": 1 * 86400,  # 行业配置（季度报告期，1d 保证新报告 1d 内可见；7d/盘后×2=14d 曾让新季度配置滞后近两周）
+    "etf_holdings":       1 * 86400,  # 前十大持仓（季度报告期，1d 保证新季度 1d 内可见；与 etf_industry_alloc 同惯例）
     "etf_category_sina":  7 * 86400,  # sina 分类表（低频）
 }
 
@@ -330,6 +331,31 @@ def get_etf_industry_alloc(symbol: str, *, force: bool = False) -> dict | None:
     if fetch is None:
         return None
     return _fetch_dimension("etf_industry_alloc", symbol, fetch, symbol, force=force)
+
+
+def get_etf_holdings(symbol: str, *, force: bool = False) -> dict | None:
+    """ETF 前十大持仓（缓存 1d，季度报告期数据；裸 HTTP 天天基金 jjcc 页）。
+
+    信封与 canonical query_etf_holdings 对齐：附加 clusters（HOLDINGS_CLUSTER_MAP
+    聚合，etf_data._build_holdings_clusters）——直读本桥的路径（journal ETF 等）
+    不会退化回 AI 手算聚类（P0）。富化失败不静默：clusters=None + clusters_error
+    字段（与「合法未映射 → []」可区分），日志 warning。
+    """
+    fetch = _import_etf_attr("fetch_etf_holdings")
+    if fetch is None:
+        return None
+    env = _fetch_dimension("etf_holdings", symbol, fetch, symbol, force=force)
+    if env and env.get("status") == "ok" and env.get("rows"):
+        try:
+            etf_data = load_invest_a_etf_module()
+            env["clusters"] = etf_data._build_holdings_clusters(env["rows"])
+        except Exception as exc:
+            logger.warning("get_etf_holdings clusters enrich failed: %s", exc)
+            env["clusters"] = None
+            env["clusters_error"] = f"{type(exc).__name__}: {exc}"
+    elif env is not None:
+        env.setdefault("clusters", [])
+    return env
 
 
 def get_etf_category_sina(*, force: bool = False) -> dict | None:

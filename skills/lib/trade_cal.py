@@ -1,8 +1,8 @@
-"""交易日历共享模块（C8 收敛 gap-scan scan._fetch_trade_cal + limit-up tushare_enrich.get_trade_dates）。
+"""交易日历共享模块（C8 收敛 gap-scan scan._fetch_trade_cal 的交易日获取逻辑）。
 
 两种语义：
 - ``fetch_trade_cal(start, end) -> (list[str], bool)``：区间交易日 + is_estimated（gap-scan）
-- ``last_trade_dates(n) -> list[str]``：最近 N 个交易日 YYYYMMDD 降序（limit-up，复用 fetch_trade_cal）
+- ``last_trade_dates(n) -> list[str]``：最近 N 个交易日 YYYYMMDD 降序（复用 fetch_trade_cal）
 
 Tushare trade_cal 优先；无 token/不可用/失败 → 自然日去周末估算（节假日无法由
 日期推断，属已知近似——估算路径显式标注 is_estimated / 不静默）。
@@ -39,7 +39,7 @@ _CLIENT: Any | None = None  # 模块级缓存（对齐旧 tushare_enrich._get_cl
 def _client() -> Any | None:
     """获取可用的 TushareClient；无 token/不可用 → None（零网络快路径）。
 
-    review 第三轮 #5：旧 limit-up 路径有 is_tushare_available 探测 +
+    review 第三轮 #5：旧 tushare_enrich 路径有 is_tushare_available 探测 +
     模块级缓存——无 token 部署零网络。重构后必须保持该快路径。
     """
     global _CLIENT

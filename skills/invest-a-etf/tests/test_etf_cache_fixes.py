@@ -32,6 +32,25 @@ def _reset_spot_cache():
     clear_etf_spot_cache()
 
 
+@pytest.fixture(autouse=True)
+def _pin_shanghai_today(monkeypatch):
+    """固定"今日"，使窗口切片与真实墙钟解耦。
+
+    fixture 日期固定（2026-05-01 起），而 query_etf_kline 的窗口起点 =
+    今日 - N 自然日，随真实日期漂移：2026-08-12 起窗口起点越过 fixture 首行，
+    裁剪分支（aligned_rows 切片）首次被执行，暴露了未复权路径的 j+1 越界
+    （list index out of range）。钉住今日保证裁剪分支每次都执行——这正是
+    该缺陷逃逸时未被覆盖的路径。
+    """
+    import etf_data as _ed
+
+    fixed_today = datetime.date(2026, 8, 12)
+    monkeypatch.setattr(
+        _ed, "shanghai_days_ago",
+        lambda n: (fixed_today - datetime.timedelta(days=n)).strftime("%Y%m%d"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # #5: prefetch_etf_spot 空表/失败语义（[] is not None → 曾误报成功）
 # ---------------------------------------------------------------------------

@@ -388,3 +388,26 @@ def test_macro_trading_hour_read_path_refetches(fake_bridge, monkeypatch):
     monkeypatch.setattr(data_bridge, "_is_trading_hour", lambda: False)
     data_bridge.get_macro()          # 盘后读取 → 7d TTL → 命中缓存不回源
     assert calls["n"] == 1
+
+
+def test_get_etf_holdings_clusters_enrich_failure_sets_error(monkeypatch, tmp_path):
+    """clusters 富化失败 → clusters=None + clusters_error（不静默为 []，P0 可观测）。"""
+    monkeypatch.setattr(data_bridge, "_cache", DataCache(cache_dir=tmp_path / "cache"))
+    monkeypatch.setattr(
+        data_bridge, "_import_etf_attr",
+        lambda attr: lambda *a, **k: {
+            "status": "ok",
+            "rows": [{"code": "300750", "name": "宁德时代", "pct": 4.2}],
+            "report_date": "2026-06-30", "quarter": "2026Q2",
+        },
+    )
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(data_bridge, "load_invest_a_etf_module", boom)
+    env = data_bridge.get_etf_holdings("159206")
+    assert env is not None
+    assert env["status"] == "ok"
+    assert env["clusters"] is None
+    assert env["clusters_error"] == "RuntimeError: boom"

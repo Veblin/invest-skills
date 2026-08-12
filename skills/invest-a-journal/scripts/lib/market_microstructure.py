@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import sqlite3
+import statistics
 from typing import Any
 
 from _invest_path import ensure_invest_a_scripts_on_path
@@ -136,8 +137,12 @@ def _auto_persist(snap: dict) -> None:
     """snapshot() 调用后自动将 Tier 1 + Tier 3 写入 market_snapshots。
 
     非交易日（成交额 + 涨跌比均缺失）跳过写入。
-    save_snapshot() 后续调用会通过 INSERT OR REPLACE 补全 Tier 2 + v2 标签，
-    二者无冲突。
+    写入为 merge=True 逐列合并：Tier-1 字段刷新（新值非 NULL 覆盖）、
+    Tier-2 字段（轻量路径恒 None）保留表中已有值——当日 save_snapshot()
+    先写入的 margin_20d_change / margin_to_mcap / limit_down_20d_pct
+    不会被轻量快照抹成 NULL。env_label 冲突时保留表中原值（save_snapshot
+    的 v2 标签不被本函数的 v1 JSON 覆盖）；全新行仍写入 v1。
+    save_snapshot() 自身仍以 INSERT OR REPLACE 补全 Tier 2 + v2 标签。
 
     此函数静默失败：持久化异常不阻塞 snapshot() 正常返回。
     """
@@ -181,7 +186,7 @@ def _auto_persist(snap: dict) -> None:
             upsert_daily_rows(
                 c, "market_snapshots",
                 [{col: snap.get(col) for col in _MARKET_SNAPSHOT_COLUMNS}],
-                pk=("date",), merge=False,
+                pk=("date",), merge=True, exclude_cols=("env_label",),
             )
             c.commit()
         except Exception:
@@ -1259,4 +1264,248 @@ def zt_seesaw(days: int = 30, min_days: int = 10) -> dict[str, Any]:
                                 "rows": half}
 
     result["available"] = True
+    return result
+
+
+# ---------------------------------------------------------------------------
+# v0.2.5 D3 — 筹码出清度四信号 + 阶段判定（状态描述，非择时信号；不落库）
+# ---------------------------------------------------------------------------
+
+def compute_chip_clearance(
+    snap: dict[str, Any] | None = None,
+    history_days: int = 120,
+    confirmation_window: int = 5,
+) -> dict[str, Any]:
+    """筹码出清度四信号 + 阶段判定（v0.2.5 D3）。状态描述，非择时信号。
+    返回: date, available, stage, signals{deleveraging_pct, turnover_60d_pct,
+    down_volume_days_30d, limit_down_20d_pct, days_since_margin_peak,
+    confirmation, margin_20d_change}, calc_notes: list[str], _errors: list[str]
+    """
+    # Minor 5：confirmation_window 必须 > 0（传 0/负数时 hist_rows[-0:] 会扩至全历史）
+    assert confirmation_window > 0, "confirmation_window 必须 > 0"
+    result: dict[str, Any] = {
+        "date": None,
+        "available": False,
+        "stage": None,
+        "signals": {
+            "deleveraging_pct": None,
+            "turnover_60d_pct": None,
+            "down_volume_days_30d": None,
+            "limit_down_20d_pct": None,
+            "days_since_margin_peak": None,
+            "confirmation": None,
+        },
+        "calc_notes": [],
+        "_errors": [],
+    }
+    signals = result["signals"]
+    calc_notes = result["calc_notes"]
+
+    # 当日快照：未显式传入时先走 data_bridge 缓存，缓存不可用降级直采
+    # snapshot()（同 save_snapshot 的 L213-221 降级模式）
+    if snap is None:
+        try:
+            from data_bridge import get_microstructure  # noqa: PLC0415
+            snap = get_microstructure()
+        except Exception:
+            snap = None
+        if snap is None:
+            snap = snapshot()
+    if not isinstance(snap, dict):
+        snap = {}
+
+    date = snap.get("date") or shanghai_today()
+    result["date"] = date
+    result["_errors"].extend(snap.get("_errors") or [])
+
+    # 历史序列：剔除与当日同日的行防双计（snapshot→_auto_persist→
+    # load_history 已含今日，同 _compute_tier2 模式）
+    history = load_history(history_days)
+    hist_rows = hist_ex_today(history, date)
+
+    # --- 信号① 去杠杆幅度 + 信号④ 磨底时长（共用 margin 序列） ---
+    # margin_peak = 剔今日 history 中 margin_balance 最大值
+    margin_now = snap.get("margin_balance")
+    margin_series = [h.get("margin_balance") for h in hist_rows
+                     if h.get("margin_balance") is not None]
+
+    def _days_since_peak(vals: list[float]) -> int:
+        """距最近一次 margin 峰值的天数（峰值在最新一行 = 0，取末次峰值）。"""
+        # 调用方已过滤 None/""/NaN（主路径 is not None、降级路径 notna+strip），
+        # 不会出现 nan==nan 为 False 导致 next() StopIteration 的情况
+        peak = max(vals)
+        return next(i for i, v in enumerate(reversed(vals)) if v == peak)
+
+    if len(margin_series) >= 20:
+        margin_peak = max(margin_series)
+        if margin_now is not None and margin_peak and margin_peak > 0:
+            signals["deleveraging_pct"] = round(
+                (margin_peak - margin_now) / margin_peak * 100, 2)
+        # F7 口径统一：距峰值天数含今日（0 = 峰值在今天，主/SSE 两路径一致；
+        # SSE 序列天然含今日，此处仅主路径 append）。deleveraging_pct 的
+        # margin_peak 保持剔今日口径——新高日保留负值（高于旧峰值的扩张幅度）；
+        # SSE 路径新高 → 0.0（序列含今日），跨路径差异为既有行为
+        if margin_now is not None:
+            signals["days_since_margin_peak"] = _days_since_peak(
+                margin_series + [margin_now])
+        else:
+            signals["days_since_margin_peak"] = _days_since_peak(margin_series)
+        if len(margin_series) < history_days:
+            calc_notes.append(
+                f"信号①：历史窗口不足 {history_days} 日（实际 {len(margin_series)} 行），"
+                "峰值口径为近 N 日")
+    else:
+        # 历史 <20 行 → akshare stock_margin_sse 降级（SSE 口径，calc_notes 注明）
+        try:
+            import datetime as _dt
+            import akshare as ak
+            from dates import shanghai_now  # noqa: PLC0415
+            # Minor 2：降级路径日期必须用上海时区（_dt.date.today() 为本地时区，
+            # 日期边界可能与 A 股交易日不一致）
+            _today = shanghai_now().date()
+            _start = (_today - _dt.timedelta(days=history_days)).strftime("%Y%m%d")
+            _end = _today.strftime("%Y%m%d")
+            with akshare_direct_session():
+                df = ak.stock_margin_sse(start_date=_start, end_date=_end)
+            df = df.sort_values("信用交易日期")
+            # I-1：SSE 原始数据可能出现 "" / NaN 空值行（akshare 侧已用
+            # pd.to_numeric(errors="coerce") 防御，但字符串残留仍存在），转换前
+            # 过滤，否则 float("") 抛 ValueError 使整个降级作废
+            df = df[df["融资余额"].notna()
+                    & (df["融资余额"].astype(str).str.strip() != "")]
+            if df.empty:
+                raise ValueError("stock_margin_sse 过滤后无有效融资余额行")
+            margin_series = [float(v) / 1e8 for v in df["融资余额"]]  # 元 → 亿
+            margin_peak = max(margin_series)
+            margin_now = margin_series[-1]
+            if margin_peak and margin_peak > 0:
+                signals["deleveraging_pct"] = round(
+                    (margin_peak - margin_now) / margin_peak * 100, 2)
+            signals["days_since_margin_peak"] = _days_since_peak(margin_series)
+            calc_notes.append(
+                "信号①：历史 margin 序列 <20 行，降级 akshare stock_margin_sse"
+                "（SSE 口径，与全市场口径存在差异）")
+        except Exception as exc:
+            result["_errors"].append(f"margin_fallback: {exc}")
+            calc_notes.append(
+                "信号①：历史 margin 序列 <20 行且 akshare stock_margin_sse"
+                "降级失败，去杠杆信号不可用")
+            margin_peak = None
+            margin_series = []
+
+    # --- 信号② 换手温度（60 日窗口含边界分位） ---
+    # ⚠️ 口径硬约束（决策 D3-1）：用 total_turnover（深交所口径），
+    # 不得用 total_turnover_est（×1.9 估算，不入库）
+    turnover_now = snap.get("total_turnover")
+    if turnover_now is not None:
+        turnover_seq = [h.get("total_turnover") for h in hist_rows[-59:]
+                        if h.get("total_turnover") is not None]
+        turnover_seq.append(turnover_now)
+        if len(turnover_seq) >= 20:
+            signals["turnover_60d_pct"] = percentile_rank_inclusive(
+                turnover_seq, turnover_now, round_to=1)
+            if len(turnover_seq) < 60:
+                calc_notes.append(
+                    f"信号②：实际窗口不足 60 日（{len(turnover_seq)} 行），"
+                    "分位口径为近 N 日")
+        else:
+            calc_notes.append(
+                f"信号②：近 60 日换手序列不足 20 日（{len(turnover_seq)}），"
+                "分位不可计算")
+    else:
+        calc_notes.append(
+            "信号②：当日成交额缺失（深交所口径 total_turnover），换手分位不可计算")
+
+    # --- 信号③ 割肉盘代理（近 30 日 ad_ratio<1.0 且放量 ≥ 同窗口中位数） ---
+    # F3：窗口含今日（hist_ex_today 已剔 DB 今日行，snap 今日行补入，对称防双计）；
+    # 仅今日有数据（len<2）时保持"数据不足"，防单样本中位数退化
+    today_row = {"ad_ratio": snap.get("ad_ratio"),
+                 "total_turnover": snap.get("total_turnover")}
+    window30 = hist_rows[-29:] + [today_row]
+    turn30 = [h.get("total_turnover") for h in window30
+              if h.get("total_turnover") is not None]
+    if len(turn30) < 2:
+        signals["down_volume_days_30d"] = None
+        calc_notes.append("信号③：近 30 日窗口无有效成交额数据，割肉盘计数不可计算")
+    else:
+        med30 = statistics.median(turn30)
+        signals["down_volume_days_30d"] = sum(
+            1 for h in window30
+            if h.get("ad_ratio") is not None and h.get("ad_ratio") < 1.0
+            and h.get("total_turnover") is not None
+            and h.get("total_turnover") >= med30)
+        if len(window30) < 30:
+            calc_notes.append(f"信号③：近 30 日窗口实际 {len(window30)} 行")
+
+    # limit_down_20d_pct：复用 snap 已有值，否则按 _compute_tier2 步骤 11 逻辑
+    if snap.get("limit_down_20d_pct") is not None:
+        signals["limit_down_20d_pct"] = snap.get("limit_down_20d_pct")
+    elif snap.get("limit_down_count") is not None and len(hist_rows) >= 19:
+        ld_seq = [h.get("limit_down_count") for h in hist_rows[-19:]
+                  if h.get("limit_down_count") is not None]
+        ld_seq.append(snap.get("limit_down_count"))
+        if ld_seq:
+            signals["limit_down_20d_pct"] = percentile_rank_inclusive(
+                ld_seq, snap.get("limit_down_count"), round_to=1)
+
+    # --- 信号④ 企稳确认（最近 confirmation_window 日内放量上涨日，含今日） ---
+    # 窗口 = 前 (confirmation_window-1) 个历史交易日 + 今日（F3：反转日当天
+    # 的放量上涨必须能置位 confirmation；第 confirmation_window+1 日不算）
+    win = ([today_row] if confirmation_window <= 1
+           else hist_rows[-(confirmation_window - 1):] + [today_row])
+    evaluable = any(
+        h.get("ad_ratio") is not None and h.get("total_turnover") is not None
+        for h in win)
+    if len(turn30) < 2 or not evaluable:
+        signals["confirmation"] = None
+        calc_notes.append("信号④：企稳确认窗口数据不足，无法判定")
+    else:
+        signals["confirmation"] = any(
+            h.get("ad_ratio") is not None and h.get("ad_ratio") >= 2.0
+            and h.get("total_turnover") is not None
+            and h.get("total_turnover") >= med30
+            for h in win)
+        calc_notes.append(
+            "信号④：企稳确认 = 从业者惯例代理（ad_ratio≥2.0 且放量≥30日中位数），"
+            "非严格 90% Upside Day")
+
+    # --- 阶段判定（状态描述，无动作词） ---
+    # margin_20d_change 复用 snap 已有值，否则按 _compute_tier2 步骤 9 逻辑计算
+    m20 = snap.get("margin_20d_change")
+    if m20 is None and margin_now is not None and len(margin_series) >= 20:
+        prev_margin = margin_series[-20]
+        if prev_margin and prev_margin > 0:
+            m20 = round((margin_now - prev_margin) / prev_margin * 100, 2)
+    # F13：m20 已计算 → 输出到 signals，供主线资金流确认引用
+    if m20 is not None:
+        signals["margin_20d_change"] = m20
+
+    # I-2：margin 维度可用 = 必须含今日 margin（deleveraging_pct 可计算）。
+    # days_since_margin_peak 仅由剔今日历史得出，单独存在不足以支撑阶段判定 —
+    # 今日快照全缺失 + 足量历史时，不得凭历史峰值位置断言"磨底/去杠杆"
+    margin_dim = signals["deleveraging_pct"] is not None
+    if not margin_dim and signals["turnover_60d_pct"] is None:
+        result["stage"] = "数据不足"
+    elif signals["confirmation"] is True:
+        if not margin_dim:
+            calc_notes.append(
+                "信号④：margin 维度缺失，企稳确认仅基于换手/涨跌比证据")
+        result["stage"] = "企稳确认"
+    elif m20 is not None and m20 < -1:
+        result["stage"] = "去杠杆中"
+    elif (margin_now is not None and margin_peak is not None
+          and margin_now < margin_peak
+          and margin_now < max(margin_series[-5:] or [0])):
+        # F1：今日 margin 低于历史峰值且低于自身近 5 日水平 = 下行延续
+        # （含峰值刚落急跌：峰值在近 5 日内 + 今日大幅低于峰值 → 去杠杆中；
+        # 长期平底低于旧峰值时 max(近5日)==now，落入磨底中）
+        result["stage"] = "去杠杆中"
+    elif not margin_dim:
+        # I-2 补全：margin 维度缺失但换手在场时，不得凭换手断言磨底
+        # （零 margin 证据的正面对底断言）
+        result["stage"] = "数据不足"
+    else:
+        result["stage"] = "磨底中"
+
+    result["available"] = result["stage"] != "数据不足"
     return result

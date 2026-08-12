@@ -224,6 +224,16 @@ class SourceResult:
         self.fetched_at = fetched_at or datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> dict:
+        # R12h（决策 C5）口径一致性：L2 维度（financials/valuation）的
+        # scalar_value 必须按白名单键提取（_extract_l2_scalar），与
+        # _auto_cross_validate 差异标注口径一致——_extract_scalar 的
+        # _DIM_SCALAR_KEYS 键序让 pe_ttm 先于 total_mv 命中，legacy
+        # 重建/证据表会把 PE 混入市值（600206 实证：140.16 vs 445.71）。
+        l2_keys = _CV_L2_FIELDS.get(self.dimension)
+        if l2_keys is not None:
+            scalar_value = _extract_l2_scalar(self.data, l2_keys)
+        else:
+            scalar_value = _extract_scalar(self.data, self.dimension)
         return {
             "source": self.source,
             "query_params": self.query_params,
@@ -231,7 +241,7 @@ class SourceResult:
             "success": self.success,
             "fetched_at": self.fetched_at,
             "data_available": self.data is not None,
-            "scalar_value": _extract_scalar(self.data, self.dimension),
+            "scalar_value": scalar_value,
             "data": self.data,
             "error": self.error,
             "latency_ms": self.latency_ms,
@@ -390,7 +400,9 @@ def _auto_cross_validate(dimension: str, sources: list[SourceResult]) -> CrossVa
         return None
 
     max_v, min_v = max(v for _, v in values), min(v for _, v in values)
-    avg = sum(v for _, v in values) / len(values)
+    # 绝对值均值（对齐 merge_collections._diff_pct 先例 a5f0f89）：异号对下
+    # 带符号均值近抵消会爆炸（5 vs -4.9 → 19800% 假 divergence），abs 均值有界
+    avg = sum(abs(v) for _, v in values) / len(values)
     diff_pct = relative_diff_pct(max_v, min_v, avg)
     if diff_pct is None:
         return None

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 import time
 from datetime import datetime, timedelta
@@ -57,10 +58,30 @@ from kline_cache import KlineTTLCache  # noqa: E402（canonical: skills/lib）
 
 _KLINE_CACHE = KlineTTLCache(lambda: env.STORE_DIR / "gap_scan_cache", 3 * 86400)
 
+# 固定缓存键首段（v0.2.5）：文件级 mtime TTL（3 天）据此真正生效。旧实现把当日
+# 日期作键首段，次日查询新日期目录必然 miss，TTL 退化为"当日有效"（缺陷修复）。
+_CACHE_DATE_SEGMENT = "kline"
+
 
 def _cache_parts(ts_code: str, source_name: str | None) -> tuple[str, ...]:
     """缓存键：{source}/{ts_code}（无源时仅 {ts_code}）— 与旧 kline_cache 键布局一致。"""
     return (source_name, ts_code) if source_name else (ts_code,)
+
+
+def _prune_legacy_date_dirs() -> None:
+    """一次性迁移：删除旧版 {YYYYMMDD} 日期目录。
+
+    不能复用 KlineTTLCache.cleanup_old()：固定段键下 "kline" 目录的文件被原地
+    覆写（open(path, "wb")）时不更新目录 mtime，cleanup_old() 会按目录 mtime
+    误删仍新鲜的数据（约每 4 天一次全量重拉）。旧版日期目录的数据对新布局恒为
+    死数据，直接删除；"kline" 目录内文件按 mtime 自过期，磁盘占用有界。
+    """
+    root = env.STORE_DIR / "gap_scan_cache"
+    if not root.exists():
+        return
+    for entry in root.iterdir():
+        if entry.is_dir() and entry.name.isdigit() and len(entry.name) == 8:
+            shutil.rmtree(entry, ignore_errors=True)
 
 
 def _report_path_for_now(now: datetime | None = None) -> Path:
@@ -228,11 +249,12 @@ def main() -> int:
     start_wall = time.time()
     logger.info("开始扫描 (universe=%s)", args.universe)
 
-    # Expire old K-line cache directories
+    # 一次性迁移：清理旧版 {YYYYMMDD} 日期目录（v0.2.5 起键为固定段 kline/）。
+    # 不复用 cleanup_old()：目录 mtime 不随文件原地覆写更新，会误删新鲜数据。
     try:
-        _KLINE_CACHE.cleanup_old()
+        _prune_legacy_date_dirs()
     except Exception as exc:
-        logger.warning("kline_cache.cleanup_old failed: %s", exc)
+        logger.warning("kline_cache legacy dir pruning failed: %s", exc)
 
     # ---- Step 1: 构建成分股并集 ----
     try:
@@ -298,7 +320,8 @@ def _run_scan(
     trade_dates = sorted(td for td in trade_dates if td <= end_date)
     logger.info("交易日: %d 日 (%s ~ %s)", len(trade_dates), trade_dates[0], trade_dates[-1])
 
-    cache_date = now.strftime("%Y%m%d")
+    # 固定段键：文件级 mtime TTL 跨日生效（旧实现按当日日期建键，次日必然 miss）
+    cache_date = _CACHE_DATE_SEGMENT
 
     # ---- Step 4/5: 缓存 + 日线 / 前复权 ----
     stock_kline_map: dict[str, pd.DataFrame] = {}

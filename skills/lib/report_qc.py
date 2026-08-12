@@ -141,10 +141,12 @@ _STRUCTURE_REQUIREMENTS: dict[str, list[tuple[str, str, str, str]]] = {
         ("structure-risk-statement", r"不构成投资建议", "warn", "报告应包含风险声明（不构成投资建议）"),
     ],
     "journal": [
-        ("journal-logic", r"逻辑完整性", "warn", "journal 应包含逻辑完整性评估"),
-        ("journal-blindspot", r"数据盲点", "warn", "journal 应包含数据盲点评估"),
-        ("journal-position", r"仓位匹配", "warn", "journal 应包含仓位匹配评估"),
-        ("journal-rr", r"风险收益比", "warn", "journal 应包含风险收益比评估"),
+        # 买入路径四维（逻辑完整性/数据盲点/仓位匹配/风险收益比）与
+        # 卖出路径四维（一致性/情绪化检测/参考点独立性/机会成本，v0.2.5 D2）双支持
+        ("journal-logic", r"逻辑完整性|一致性", "warn", "journal 应包含评估维度（逻辑完整性或一致性）"),
+        ("journal-blindspot", r"数据盲点|情绪化检测|情绪检测", "warn", "journal 应包含评估维度（数据盲点或情绪化检测）"),
+        ("journal-position", r"仓位匹配|参考点独立性", "warn", "journal 应包含评估维度（仓位匹配或参考点独立性）"),
+        ("journal-rr", r"风险收益比|机会成本", "warn", "journal 应包含评估维度（风险收益比或机会成本）"),
     ],
     "gap_scan": [
         ("gap-title", r"跳空缺口", "warn", "gap-scan 报告应包含'跳空缺口'标题"),

@@ -103,3 +103,276 @@ def test_spot_row_to_quote_maps_fields():
     assert q["change_pct"] == pytest.approx(-0.5)
     assert q["premium_discount"] == pytest.approx(-0.2)
     assert q["status"] == "available"
+
+
+# ---------------------------------------------------------------------------
+# R12 holdings / R13 peers CLI（D13: mock 打在 mod = etf.py 命名空间）
+# ---------------------------------------------------------------------------
+
+
+def _fake_holdings() -> dict:
+    return {
+        "symbol": "159206", "report_date": "2026-06-30", "quarter": "2026年2季度",
+        "status": "ok",
+        "rows": [
+            {"code": "688002", "name": "睿创微纳", "pct": 9.07,
+             "shares": 1036.01, "amount": 160260.70},
+            {"code": "600879", "name": "航天电子", "pct": 8.44,
+             "shares": 7004.94, "amount": 149135.26},
+        ],
+        "top1_pct": 9.07, "top5_sum_pct": 17.51, "top10_sum_pct": 17.51,
+        "clusters": [
+            {"cluster": "未归类", "sum_pct": 17.51,
+             "members": [
+                 {"code": "688002", "name": "睿创微纳", "pct": 9.07},
+                 {"code": "600879", "name": "航天电子", "pct": 8.44},
+             ]},
+        ],
+        "note": "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；子环节聚类由引擎按 HOLDINGS_CLUSTER_MAP 聚合，未映射股票归入「未归类」",
+        "source": "天天基金(东财 FundArchivesDatas jjcc)",
+    }
+
+
+def test_cli_holdings_invalid_symbol_exit_2():
+    main = _load_etf_main()
+    assert main(["holdings", "abc"]) == 2
+
+
+def test_cmd_holdings_json_contains_concentration(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(mod, "query_etf_holdings", lambda s: _fake_holdings())
+    assert mod.cmd_holdings("159206", as_json=True) == 0
+    out = capsys.readouterr().out
+    assert '"top5_sum_pct": 17.51' in out
+    assert '"symbol": "159206"' in out
+    assert '"clusters"' in out
+    assert '"未归类"' in out
+
+
+def test_cmd_holdings_human_readable_has_ai_hint(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(mod, "query_etf_holdings", lambda s: _fake_holdings())
+    assert mod.cmd_holdings("159206", as_json=False) == 0
+    out = capsys.readouterr().out
+    assert "集中度(引擎): top1 9.07%" in out
+    assert "子环节聚类合计(引擎):" in out
+    assert "未归类 17.51%" in out
+    assert "AI 归类" in out  # 尾部提示仍含补充归类须标注「AI 归类」
+    assert "睿创微纳" in out
+
+
+def test_cmd_holdings_no_hint_when_all_mapped(monkeypatch, capsys):
+    """全部持仓已映射（无「未归类」）→ 不打印补充归类提示（避免误导重复「AI 归类」）。"""
+    mod = _load_etf_module()
+    data = _fake_holdings()
+    data["clusters"] = [{"cluster": "光模块/光器件", "sum_pct": 100.0,
+                         "members": data["clusters"][0]["members"]}]
+    monkeypatch.setattr(mod, "query_etf_holdings", lambda s: data)
+    assert mod.cmd_holdings("159206", as_json=False) == 0
+    out = capsys.readouterr().out
+    assert "AI 归类" not in out
+    assert "光模块/光器件 100.00%" in out
+
+
+def test_cmd_holdings_missing_prints_note(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(
+        mod, "query_etf_holdings",
+        lambda s: {"symbol": s, "status": "missing", "note": "持仓数据不可用",
+                   "report_date": None, "quarter": None, "rows": []},
+    )
+    assert mod.cmd_holdings("159206", as_json=False) == 0
+    assert "持仓数据不可用" in capsys.readouterr().out
+
+
+def test_cmd_peers_unmapped_hints_explicit(monkeypatch, capsys):
+    mod = _load_etf_module()
+    monkeypatch.setattr(
+        "etf_peers.query_etf_peers",
+        lambda s, peers: {
+            "symbol": s, "available": False, "peers": [],
+            "peer_source": "etf_to_sw_industry",
+            "note": "未映射申万行业（ETF_TO_SW_INDUSTRY 无此代码），请用 --peers 显式指定",
+            "flow": None, "rs": None, "names": {}, "notes": [],
+        },
+    )
+    assert mod.cmd_peers("512345", as_json=False, peers_str=None) == 0
+    assert "--peers" in capsys.readouterr().out
+
+
+def test_cmd_peers_table_and_rs(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "available": True, "peers": ["512660"],
+        "peer_source": "etf_to_sw_industry:801740 国防军工",
+        "flow": {"window_days": 20, "rows": [
+            {"symbol": "159206", "flow_20d_e": -31.45, "flow_5d_e": 0.99,
+             "share_change_pct": -16.93, "trend": "🔴 持续净流出", "note": None},
+        ]},
+        "rs": {"rs_latest": 94.27, "rs_window_start": 100.96,
+               "rs_change": -6.69,
+               "rank_20d": {"rank": 3, "total": 3}},
+        "names": {"159206": "卫星ETF永赢"}, "notes": [],
+    }
+    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
+    assert mod.cmd_peers("159206", as_json=False, peers_str=None) == 0
+    out = capsys.readouterr().out
+    assert "20日流" in out
+    assert "rs_latest 94.27" in out
+    assert "rs_window_start 100.96" in out
+    assert "20日收益排名 3/3" in out
+
+
+def test_cmd_peers_json_contains_flow(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "available": True, "peers": ["512660"],
+        "peer_source": "explicit", "flow": {"window_days": 20, "rows": []},
+        "rs": None, "names": {}, "notes": [],
+    }
+    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
+    assert mod.cmd_peers("159206", as_json=True, peers_str="512660") == 0
+    assert '"peer_source": "explicit"' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# R15 sector-flow / collect-sector-flow CLI（D13: mock 打定义模块）
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_sector_flow_json(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "sw_code": "801740", "sw_name": "国防军工",
+        "available": True, "as_of": "20260811", "history_days": 1,
+        "industries": [
+            {"industry": "军工电子", "net_1d": -2.91, "net_3d": -3.31,
+             "net_5d": 6.26, "net_10d": -20.86, "chg_10d": 8.78,
+             "trend_label": "持续净流出", "trend_detail": "近端减速",
+             "trend_5d": None, "turn_5d": None},
+        ],
+        "notes": ["序列积累中（1 日 < 6 日）"],
+    }
+    monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: fake)
+    assert mod.cmd_sector_flow("159206", as_json=True) == 0
+    out = capsys.readouterr().out
+    assert '"trend_label": "持续净流出"' in out
+    assert "+08:00" in out  # generated_at 上海时区（与 as_of 同日，不跨 UTC）
+
+
+def test_cmd_sector_flow_human_and_unmapped(monkeypatch, capsys):
+    mod = _load_etf_module()
+    fake = {
+        "symbol": "159206", "sw_code": "801740", "sw_name": "国防军工",
+        "available": True, "as_of": "20260811", "history_days": 1,
+        "industries": [
+            {"industry": "军工电子", "net_1d": -2.91, "net_3d": -3.31,
+             "net_5d": 6.26, "net_10d": -20.86, "chg_10d": 8.78,
+             "trend_label": "持续净流出", "trend_detail": "近端减速（日均强度 r=-0.44）",
+             "trend_5d": None, "turn_5d": None},
+        ],
+        "notes": [],
+    }
+    monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: fake)
+    assert mod.cmd_sector_flow("159206", as_json=False) == 0
+    out = capsys.readouterr().out
+    assert "军工电子" in out
+    assert "持续净流出" in out
+
+    unmapped = {
+        "symbol": "510300", "sw_code": None, "sw_name": None,
+        "available": False, "as_of": None, "industries": [],
+        "history_days": 0, "notes": ["未映射申万行业（ETF_TO_SW_INDUSTRY 无此代码）"],
+    }
+    monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: unmapped)
+    assert mod.cmd_sector_flow("510300", as_json=False) == 0
+    assert "未映射" in capsys.readouterr().out
+
+
+def test_cmd_collect_sector_flow_paths(monkeypatch, capsys):
+    mod = _load_etf_module()
+
+    def fake_fetch():
+        return {"date": "20260811", "available": True,
+                "industries": {"半导体": {}}, "errors": []}
+
+    monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch)
+    monkeypatch.setattr("sector_flow.check_mapping_coverage", lambda snap: [])
+    monkeypatch.setattr("sector_flow.load_drift_baseline", lambda: {"存储"})
+    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap, baseline=None: [])
+
+    def fake_save(snapshot):
+        assert snapshot["available"] is True
+        return {"date": "20260811", "rows_saved": 358, "skipped": False,
+                "error": None, "note": None}
+
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
+    assert mod.cmd_collect_sector_flow() == 0
+    assert "358 行" in capsys.readouterr().out
+
+    def fake_skip(snapshot):
+        return {"date": "20260812", "rows_saved": 0, "skipped": True,
+                "error": None, "note": "数据与 20260811 全等，疑似非交易日/无变化，跳过写入"}
+
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_skip)
+    assert mod.cmd_collect_sector_flow() == 0
+    assert "跳过" in capsys.readouterr().out
+
+    def fake_err(snapshot):
+        return {"date": "20260812", "rows_saved": 0, "skipped": False,
+                "error": "同花顺行业资金流不可用: boom", "note": None}
+
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_err)
+    assert mod.cmd_collect_sector_flow() == 1
+    assert "采集失败" in capsys.readouterr().out
+
+    # 映射自检路径：check_mapping_coverage 发现缺失行业 → 警告输出
+    monkeypatch.setattr("sector_flow.check_mapping_coverage", lambda snap: ["银行"])
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
+    assert mod.cmd_collect_sector_flow() == 0
+    assert "映射自检" in capsys.readouterr().out
+
+    # 部分窗口失败 → ⚠ 告警 + 非零退出码（cron 可告警）+ 跳过映射自检（名单不全防误报）
+    mapping_calls: list[str] = []
+
+    def fake_fetch_partial():
+        return {"date": "20260813", "available": True,
+                "industries": {"半导体": {}}, "errors": ["10日排行: boom"]}
+
+    def fake_mapping(snap):
+        mapping_calls.append("mapping")
+        return ["银行"]
+
+    monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch_partial)
+    monkeypatch.setattr("sector_flow.save_sector_flow_snapshot", fake_save)
+    monkeypatch.setattr("sector_flow.check_mapping_coverage", fake_mapping)
+    monkeypatch.setattr("sector_flow.check_snapshot_drift", lambda snap, baseline=None: [])
+    assert mod.cmd_collect_sector_flow() == 1  # 部分失败 → 非零退出码（#5）
+    out = capsys.readouterr().out
+    assert "部分窗口取数失败" in out
+    assert "部分窗口失败" in out
+    assert mapping_calls == []  # 映射自检未执行
+
+    # 首次采集（无漂移基线）→ 建立基线 + 提示，不刷假警告
+    monkeypatch.setattr("sector_flow.fetch_sector_flow_snapshot", fake_fetch)
+    monkeypatch.setattr("sector_flow.load_drift_baseline", lambda: None)
+    baseline_saved: list[dict] = []
+
+    def fake_save_baseline(snap):
+        baseline_saved.append(snap)
+        return 1
+
+    monkeypatch.setattr("sector_flow.save_drift_baseline", fake_save_baseline)
+    assert mod.cmd_collect_sector_flow() == 0
+    out = capsys.readouterr().out
+    assert "已建立漂移基线" in out
+    assert baseline_saved  # 基线已写入
+
+    # 基线已建 + 快照出现新增未映射行业 → 仅报新增（不再全量刷警告）
+    monkeypatch.setattr("sector_flow.load_drift_baseline", lambda: {"存储"})
+    monkeypatch.setattr("sector_flow.check_snapshot_drift",
+                        lambda snap, baseline=None: ["先进封装"])
+    assert mod.cmd_collect_sector_flow() == 0
+    out = capsys.readouterr().out
+    assert "先进封装" in out
+    assert "存储" not in out

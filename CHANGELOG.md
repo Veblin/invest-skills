@@ -1,5 +1,52 @@
 # Changelog — invest skills
 
+## v0.2.5 (2026-08-10)
+
+交易纪律框架（资金视角方法论）D1-D8 + WorkBuddy 平台兼容 + invest-a-limit-up 移除 + code-review 15 项修复。
+
+v0.2.5 把用户交易理念固化为 skill 纪律需求：资金选择优先、决策不受持仓盈亏影响、带血筹码分批买入、参考点独立性。纪律执行层（触发线/条件单/执行核对）经评审**不进入 skill 动作域**——skill 统一收敛为趋势/区间/状态/核对四类客观参考输出，决策动作全部留在用户侧。配套新增 WorkBuddy 平台兼容层（规则层本版落地，真机验证由用户后置执行）。
+
+### 交易纪律框架（D1-D8）
+
+- **统一参考输出层**：report-conventions §8 + pulse/journal 模板，四类参考（趋势/区间/状态/核对），无动作词
+- **journal 卖出评估四维度**：新增参考点独立性核对（浮盈目标/回本心理/亏损不甘/成本价锚定四问 + 关键问题 + 独立依据）；Q3 错误条件选项限定逻辑失效类（含估值触发）；浮盈目标类理由触发 Odean 1998 改述提示
+- **pulse 筹码出清度四信号**：去杠杆幅度/换手温度/割肉盘代理/磨底时长+企稳确认（含今日窗口），新增 `references/chip-clearance.md`
+- **trade-structure 入场区间 3 段参考**：悲观锚区/中性-悲观区/中性锚区 + 状态含义，不设触发条件/比例
+- **主线确认资金流优先**：两融趋势/板块轮动/ETF 份额为主证据，价格走势辅助（A 股无动量，Chui et al. 2022）
+- **止损定位与话术规范**：禁止"止损提高收益"话术，定位防呆风控（Kaminski & Lo 2014）
+- **观念修正内置**（C3/C5）："无低估价值股"类断言禁写；带血筹码信号强制含企稳确认字段
+- **新增 `references/capital-mechanisms.md`**：资金机制参考（反弹赎回/破净赎回/量化行为/散户割肉）
+
+### WorkBuddy 兼容
+
+- **W1 规则层适配（本版落地）**：5 个 SKILL.md description 中文触发词、引擎调用统一 `${INVEST_SKILLS_ROOT:-.}` cd 前缀、journal Q&A 分屏（≤4 选项）
+- **W2/W3 文档化交付**：`.env.example` 9 token 模板、`hooks/scripts/check-config.sh`、`.workbuddy/skills` symlink 副本、README WorkBuddy 章节（macOS + Windows）
+- 真机验证（T1-T12）与 hooks 官方背书验证由用户后置执行，不阻塞本版
+
+### invest-a-limit-up 移除
+
+- 全仓库 grep 实证无代码调用方（`_fetch_limit_pools` 自实现直调 akshare），skill 整体移除；marketplace/skills.yaml/sync_version/test fixtures 同步清理
+
+### code-review 修复
+
+- **引擎 6 项**（compute_chip_clearance/_auto_persist）：阶段判定急跌口径（峰值近 5 日 + 急跌 → 去杠杆中）、I-2 守卫补全（margin 缺失不得断言磨底）、信号③④窗口含今日、_auto_persist merge 防抹 Tier-2/env_label、days_since_margin_peak 口径统一（0=峰值在今天）、窗口收缩 calc_notes 标注
+- **pulse SKILL.md**：SSE 降级命令上海时区 + 长度守卫、step 1 走 data_bridge 缓存（消除 8 源双采）、规则 8 主证据路径可落地
+- **文档一致性**：CLAUDE.md 盈亏比表述与 trade-structure 3 段规范对齐、D 编号引用改描述性措辞、journal 卖出维度编号 1,2,3,4
+- **发布层**：CHANGELOG 补 v0.2.5 节、release tarball 补 docs/ + .workbuddy/、README 徽章纳入 sync_version
+
+### 2026-08-11 修订
+
+- **WorkBuddy 安装支持**：README 补官方安装流程（下载渠道 codebuddy.cn/work、系统要求 Windows 10+ / macOS 12+、Mac 芯片版本选择 ARM64/X64、安装与登录步骤、首次文件夹授权、新人积分礼包）；本机前置条件核对——`~/.config/investment/.env`（9 token）与 WorkBuddy 桌面版均未就位，T1-T12 真机验收仍为用户后置执行
+- **new_high_ratio 双包装**：`_fetch_daily_panel_row` 返回 `(ts_code, records)` 元组，与 `_map_parallel` 契约（`(item, result)`）双重包装使 panel 值为元组、`rows[0]=str(ts_code)`，`_ms_new_high_ratio_from_panel` 对其 `.get()` 抛 AttributeError（报告采集中实证）；修复为 fetcher 只返回 records + 非 dict 行防御过滤
+- **valuation fusion 口径混合**：legacy 重建路径对非主源注入 scalar_value（默认键序 pe_ttm 先命中=PE），`_extract_scalar` 裸标量短路绕过显式市值键 → 市值 445.71 与 PE 140.16 混合融合（322.78、max_diff 104% 不可用）；修复为 valuation 维度改用 `_extract_l2_scalar`（仅认白名单字段），口径一致性优先宁可单源
+- 回归测试 2 项（真实复现路径，全 mock）；全量 1267 passed
+
+### 2026-08-12 修订
+
+- **valuation 口径混合收口（/code-review #1-#4）**：审查实证 08-11 修复仅覆盖融合槽——legacy 重建的 `DimensionResult.cross_validation` 裸标量短路仍将 PE 140.16 与市值 445.71 混合（divergence 104.3%）。三处收口：`SourceResult.to_dict` 对 L2 维度（financials/valuation）按白名单键提取（根因，兼修证据表 PE/市值混排）、`dimension_results_from_legacy` 非主源只接受白名单数据（不注入旧 PE scalar）、`fuse_from_legacy_dicts` 优先白名单提取（无 data 才回退 scalar_value 兼容旧快照）；无市值数据宁可单源
+- **new_high_ratio 面板守卫补测**：空 df → None → `if records:` 过滤、`_map_parallel` on_error 占位 `(item, None)` 过滤两条路径（停牌/异常不崩溃）
+- 回归测试 9 项（to_dict 4 + 重建 cross_validation 2 + legacy 融合 2 + 面板 2，含 1 项改写，全 mock）；全量 1276 passed
+
 ## v0.2.4 (2026-08-08)
 
 方法论引擎 R1-R12h 落地 + 事实边界规范 + 三轮 /code-review 修复 + 全域数值/口径安全加固。
@@ -136,7 +183,7 @@ v0.2.2 建设市场微观结构指标体系与平台化基础设施：新增市�
 
 - 用户入口下线：移除 `.claude/commands/invest-a-limit-up.md` 符号链接
 - SKILL.md 精简为数据管道说明（134→53 行），`user-invocable: false`
-- `limit_up_scanner.py` + `scan.py` CLI 保留为 `market_microstructure._fetch_limit_pools()` 的数据源
+- `limit_up_scanner.py` + `scan.py` CLI 保留为 `market_microstructure._fetch_limit_pools()` 的数据源（**v0.2.5 已整体移除**：grep 实证 `_fetch_limit_pools` 自实现直调 akshare，无任何代码调用方；本条为 v0.2.4 时点记录）
 
 ### Bug 修复
 

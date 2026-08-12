@@ -11,11 +11,6 @@ skills:
     repo: Veblin/invest-skills
     skill: invest-a-stock
 
-  - name: invest-a-limit-up
-    description: A股涨停板全市场扫描 + 交互式深挖 — 盘面宽度 / 板块轮动 / 涨停归因，支持质量过滤与交互筛选。研究工具，非决策工具。
-    repo: Veblin/invest-skills
-    skill: invest-a-limit-up
-
   - name: invest-a-pulse
     description: 市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。
     repo: Veblin/invest-skills
