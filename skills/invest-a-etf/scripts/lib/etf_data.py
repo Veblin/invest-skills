@@ -1291,13 +1291,21 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 
         navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
         # 裁剪上下文行（date < start）：仅当上下文切片实际生效（非兜底）时执行，
-        # 保持 navs/returns/rows 三者对齐（returns 索引 j 对应 navs[j+1] 的收益）
+        # 保持 navs/returns/rows 三者对齐。returns 与行的对应关系取决于数据形态：
+        # 复权路径首行无收益 → returns[j] 对应 rows[j+1]；未复权路径每行带日增长率
+        # → returns[j] 对应 rows[j]（错位量见下方 first_ret_row 推导）。
         if used_ctx:
             keep = [i for i, r in enumerate(aligned_rows)
                     if str(r["date"]).replace("-", "")[:8] >= start]
             if keep and len(keep) < len(navs):
+                # 错位量 = 序列首部无收益的行数（len(navs) - len(returns)）。
+                # 旧实现硬编码 rows[j+1]，在未复权路径（每行一个日增长率，
+                # len(returns) == len(navs)）下访问 aligned_rows[len(navs)] 越界
+                # （list index out of range，2026-08-12 窗口起点越过数据首行后
+                # 由回归测试复现；首部多行无收益时还会静默错位）。
+                first_ret_row = len(navs) - len(returns)
                 ret_keep = [j for j in range(len(returns))
-                            if str(aligned_rows[j + 1]["date"]).replace("-", "")[:8] >= start]
+                            if str(aligned_rows[first_ret_row + j]["date"]).replace("-", "")[:8] >= start]
                 navs = [navs[i] for i in keep]
                 returns = [returns[j] for j in ret_keep]
                 aligned_rows = [aligned_rows[i] for i in keep]
