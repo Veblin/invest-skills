@@ -3453,10 +3453,24 @@ def _section_technical_brief(
         lines.append("- 支撑阻力：—")
         return "\n".join(lines)
     trend = tech["trend"]["alignment"].get("trend_label", "—")
-    sentences = tech["trend"].get("summary_sentences", [])
-    vol_s = sentences[1] if len(sentences) > 1 else "量价关系见完整 K 线"
-    sup = tech.get("support_resistance", {})
-    sr = sup.get("summary", "—") if isinstance(sup, dict) else "—"
+    # 量行：引擎真实成交量状态（technical._volume_ratio 产出「量比 x.xx（…）」；
+    # 原绑 summary_sentences[1] 实为 MA60 句，错绑修复）
+    vol_s = (tech.get("volume", {}) or {}).get("status") or "—"
+    # 支撑阻力行：structure.extremes 的 20/60/120 日最高/最低收盘价+日期
+    # （technical._n_day_extremes 产出；原 support_resistance 键全仓无产出方，
+    # 恒 "—" 死行）。数值全部直引引擎字段。
+    ext = (tech.get("structure", {}) or {}).get("extremes", {})
+    parts = []
+    for n in (20, 60, 120):
+        e = ext.get(n) or {}
+        if e.get("available") and e.get("max") is not None and e.get("min") is not None:
+            parts.append(
+                f"{n}日高/低: {e['max']:.2f}@{e['max_date']} / {e['min']:.2f}@{e['min_date']}")
+        elif e.get("available"):
+            parts.append(f"{n}日: 极值不可用")
+        else:
+            parts.append(f"{n}日: {e.get('reason', '—')}")
+    sr = "；".join(parts) or "—"
     lines.append(f"- **趋势:** {trend}")
     lines.append(f"- **量:** {vol_s}")
     lines.append(f"- **支撑阻力:** {sr}")

@@ -598,3 +598,150 @@ class TestNewHighRatioPanel:
             result = _ms_fetch_new_high_ratio(_FakeTC())
         assert result is None
         assert "new_high_ratio daily fetch failed" in caplog.text
+
+
+# ---------- code-review 清理：industry PE 空名守卫（P0 静默数据错误） ----------
+
+
+class TestIndustryPeEmptyNameGuard:
+    @staticmethod
+    def _fake_akshare():
+        import pandas as pd
+
+        class _FakeAk:
+            @staticmethod
+            def stock_board_industry_pe_ratio_cninfo():
+                return pd.DataFrame([{
+                    "行业名称": "银行", "市盈率中位数": 5.0,
+                    "市盈率平均值": 5.5, "公司数量": 42,
+                }])
+
+        return _FakeAk()
+
+    def test_empty_industry_name_returns_none(self, monkeypatch):
+        """行业字段缺失（预取失败 → 空名）必须返回 None。
+
+        修复前：`str.contains("")` 全表匹配 → matched=整个巨潮 PE 表 →
+        matched.iloc[0] 把首行（如「银行 5.5x」）静默当作本股行业 PE。
+        """
+        import sys
+
+        from lib.collector import _sources as src
+
+        monkeypatch.setitem(sys.modules, "akshare", self._fake_akshare())
+        monkeypatch.setattr(src, "akshare_direct_session", lambda: _null_ctx())
+        monkeypatch.setattr(src.env, "is_akshare_available", lambda: True)
+        monkeypatch.setattr(src, "akshare_push2_available", lambda: True)
+        monkeypatch.setattr(src, "_q_akshare_basic", lambda s: None)  # 预取失败
+        assert src._q_akshare_industry_pe("600176", industry_name="") is None
+
+    def test_valid_industry_name_still_matches(self, monkeypatch):
+        """守卫不破坏正常路径：非空名照常匹配。"""
+        import sys
+
+        from lib.collector import _sources as src
+
+        monkeypatch.setitem(sys.modules, "akshare", self._fake_akshare())
+        monkeypatch.setattr(src, "akshare_direct_session", lambda: _null_ctx())
+        monkeypatch.setattr(src.env, "is_akshare_available", lambda: True)
+        monkeypatch.setattr(src, "akshare_push2_available", lambda: True)
+        result = src._q_akshare_industry_pe("600176", industry_name="银行")
+        assert result is not None
+        assert result["industry_name"] == "银行"
+        assert result["industry_pe_median"] == 5.0
+
+
+# ---------- code-review 清理 D3：sw_index 单遍拉表（6 次 API → 3 次） ----------
+
+
+class TestMsLookupAkshareSwCodeSingleLoad:
+    def test_loaders_each_called_once_and_substring_fallback(self, monkeypatch):
+        import sys
+
+        import pandas as pd
+
+        from lib.collector import _orchestrate as orch
+
+        calls = {"third": 0, "second": 0, "first": 0}
+
+        def _table(rows):
+            return pd.DataFrame([{"行业名称": n, "行业代码": c} for n, c in rows])
+
+        class _FakeAk:
+            @staticmethod
+            def sw_index_third_info():
+                calls["third"] += 1
+                return _table([("电子", "801080")])
+
+            @staticmethod
+            def sw_index_second_info():
+                calls["second"] += 1
+                return _table([("半导体", "801081")])
+
+            @staticmethod
+            def sw_index_first_info():
+                calls["first"] += 1
+                return _table([("电子元件", "801083")])
+
+        monkeypatch.setitem(sys.modules, "akshare", _FakeAk())
+        monkeypatch.setattr(orch, "akshare_direct_session", lambda: _null_ctx())
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: True)
+
+        # exact 命中（third 表首行）→ 短路返回：仅 third 拉 1 次
+        # （code-review：修复前先拉全 3 表，常见精确命中场景 1 次调用退化为 3 次）
+        assert orch._ms_lookup_akshare_sw_code("电子") == "801080"
+        assert calls == {"third": 1, "second": 0, "first": 0}
+
+        # exact 命中（second 表）→ 短路：third 拉 1 次无命中，second 命中
+        assert orch._ms_lookup_akshare_sw_code("半导体") == "801081"
+        assert calls == {"third": 2, "second": 1, "first": 0}
+
+        # substring 命中：exact 全 miss → 复用本调用已拉表做 substring（各多 1 次）
+        assert orch._ms_lookup_akshare_sw_code("元件") == "801083"
+        assert calls == {"third": 3, "second": 2, "first": 1}
+
+        # 空名直接返回 None（不拉表）
+        assert orch._ms_lookup_akshare_sw_code("  ") is None
+        assert calls == {"third": 3, "second": 2, "first": 1}
+
+    def test_loader_failure_does_not_discard_other_table_matches(self, monkeypatch):
+        """表 2 拉取抛异常：跳过继续，其余表仍可匹配（修复前 blanket except
+        让表 1 已找到的匹配整体返回 None，行业指数数据静默缺失）。"""
+        import sys
+
+        import pandas as pd
+
+        from lib.collector import _orchestrate as orch
+
+        calls = {"third": 0, "second": 0, "first": 0}
+
+        def _table(rows):
+            return pd.DataFrame([{"行业名称": n, "行业代码": c} for n, c in rows])
+
+        class _FakeAk:
+            @staticmethod
+            def sw_index_third_info():
+                calls["third"] += 1
+                return _table([("电子", "801080")])
+
+            @staticmethod
+            def sw_index_second_info():
+                calls["second"] += 1
+                raise RuntimeError("rate limited")
+
+            @staticmethod
+            def sw_index_first_info():
+                calls["first"] += 1
+                return _table([("电子元件", "801083")])
+
+        monkeypatch.setitem(sys.modules, "akshare", _FakeAk())
+        monkeypatch.setattr(orch, "akshare_direct_session", lambda: _null_ctx())
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: True)
+
+        # exact 命中在表 2 之前 → 表 2 根本不被调用
+        assert orch._ms_lookup_akshare_sw_code("电子") == "801080"
+        assert calls == {"third": 1, "second": 0, "first": 0}
+
+        # 表 2 抛异常 → 跳过，表 1/3 substring 扫描仍命中
+        assert orch._ms_lookup_akshare_sw_code("元件") == "801083"
+        assert calls == {"third": 2, "second": 1, "first": 1}

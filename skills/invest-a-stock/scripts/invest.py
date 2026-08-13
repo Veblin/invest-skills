@@ -266,6 +266,12 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
         "--deep", action="store_true",
         help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
+    # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值
+    parser.add_argument("--plan", default=argparse.SUPPRESS, help="JSON 采集计划文件路径")
+    parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
+                        help="从上次中断的步骤继续")
+    parser.add_argument("--save-raw", action="store_true", default=argparse.SUPPRESS,
+                        help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -285,8 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="存入持久化存储（默认开启；--no-store 关闭）")
     pc.add_argument("--no-store", action="store_false", dest="store",
                    help="不存入持久化存储")
-    pc.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
-    pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
+    _add_collect_flags(pc)
     pc.add_argument(
         "--with-news-pack",
         action="store_true",
@@ -1200,10 +1205,10 @@ def cmd_diff(args: argparse.Namespace) -> int:
         return 0
 
     if args.emit == "md":
-        _print_diff_md(key_diff, diff_result)
+        _print_diff_text(key_diff, diff_result)
         return 0
 
-    _print_diff_compact(key_diff, diff_result)
+    _print_diff_text(key_diff, diff_result)
     return 0
 
 
@@ -1353,30 +1358,12 @@ def _print_diff_events(key_diff: dict) -> None:
         print()
 
 
-def _print_diff_md(key_diff: dict, diff: dict) -> None:
-    """Markdown 格式 diff 输出（按类别分组）。"""
-    old_at = key_diff.get("old_at", diff.get("old_at", ""))[:19]
-    new_at = key_diff.get("new_at", diff.get("new_at", ""))[:19]
-    interval = _diff_interval_str(old_at, new_at)
-    symbol = key_diff.get("symbol", diff.get("symbol", "?"))
+def _print_diff_text(key_diff: dict, diff: dict) -> None:
+    """diff 文本输出（按类别分组）。
 
-    print(f"# {symbol} 变化摘要")
-    print(f"采集间隔: {old_at} → {new_at}{interval}")
-    print()
-
-    if not _print_key_changes(key_diff):
-        print("关键字段无显著变化。")
-        print()
-
-    _print_diff_events(key_diff)
-
-    _print_source_changes(diff.get("source_changes"))
-
-    _print_diff_dimension_supplement(diff)
-
-
-def _print_diff_compact(key_diff: dict, diff: dict) -> None:
-    """compact 格式 diff 输出。"""
+    md 与 compact 两个 --emit 选项共用同一输出（历史实现 _print_diff_md /
+    _print_diff_compact 函数体逐字节相同，已合并）；json 走独立分支。
+    """
     old_at = key_diff.get("old_at", diff.get("old_at", ""))[:19]
     new_at = key_diff.get("new_at", diff.get("new_at", ""))[:19]
     interval = _diff_interval_str(old_at, new_at)

@@ -419,10 +419,12 @@ def _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cac
                     ocf_divergence = True
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
-        # 毛利率趋势
+        # 毛利率趋势（字段优先级同 _concise_financial_snapshot）
         if len(fin_sorted) >= 2:
-            gm_curr = latest.get("gross_profit_margin") if latest.get("gross_profit_margin") is not None else latest.get("grossprofit_margin")
-            gm_prev = fin_sorted[-2].get("gross_profit_margin") if fin_sorted[-2].get("gross_profit_margin") is not None else fin_sorted[-2].get("grossprofit_margin")
+            gm_curr = _coalesce_fin_field(
+                [latest], "grossprofit_margin", "gross_margin", "gross_profit_margin")
+            gm_prev = _coalesce_fin_field(
+                [fin_sorted[-2]], "grossprofit_margin", "gross_margin", "gross_profit_margin")
             if gm_curr is not None and gm_prev is not None:
                 try:
                     if float(gm_curr) < float(gm_prev) - 1:
@@ -504,9 +506,12 @@ def _concise_financial_snapshot(dims, val_cache=None):
     end_date = latest.get("end_date", "?")
     roe = latest.get("roe")
     eps = latest.get("eps")
-    gross_margin = latest.get("gross_profit_margin") if latest.get("gross_profit_margin") is not None else latest.get("grossprofit_margin")
+    # 字段优先级同 render_utils._coalesce_fin_field（_v3 同源）：grossprofit_margin
+    # （tushare 真名）→ gross_margin → gross_profit_margin（拼错旧键，兜底兼容老快照）
+    gross_margin = _coalesce_fin_field(
+        [latest], "grossprofit_margin", "gross_margin", "gross_profit_margin")
     np_v = latest.get("net_profit")
-    ocf = latest.get("ocf") or latest.get("n_cashflow_act")
+    ocf = latest.get("ocf") if latest.get("ocf") is not None else latest.get("n_cashflow_act")
 
     lines = [
         f"| 指标 | 报告期 {end_date} |",
@@ -520,7 +525,8 @@ def _concise_financial_snapshot(dims, val_cache=None):
         lines.append(f"| 毛利率 | {float(gross_margin):.2f}% |")
     if np_v is not None and ocf is not None:
         try:
-            ratio = float(ocf) / float(np_v) if float(np_v) != 0 else None
+            # np > 0 守卫：亏损期不渲染负比率（对齐 _concise_bear 与 _v3 口径）
+            ratio = float(ocf) / float(np_v) if float(np_v) > 0 else None
             if ratio is not None:
                 lines.append(f"| OCF/净利润 | {ratio:.2f} |")
         except (TypeError, ValueError, ZeroDivisionError):

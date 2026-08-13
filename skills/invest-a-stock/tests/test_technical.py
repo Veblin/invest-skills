@@ -186,6 +186,24 @@ class TestVolume:
 
 
 class TestStructure:
+    def test_compute_coerces_string_closes(self):
+        """字符串 close（object-dtype 源）经 safe_float 过滤后仍是 str：修复前
+        MA 求和 int+str 抛 TypeError、极值 str 毒化渲染 f'{e["max"]:.2f}' 崩溃。"""
+        from lib.technical import compute
+
+        rows = [
+            {"trade_date": f"202608{1 + i:02d}", "open": "10.0", "high": "10.5",
+             "low": "9.8", "close": str(10.0 + i), "vol": "100.0"}
+            for i in range(20)
+        ]
+        result = compute(rows)
+        e = result["structure"]["extremes"][20]
+        assert e["available"] is True
+        assert isinstance(e["max"], float) and e["max"] == 29.0
+        assert isinstance(e["min"], float) and e["min"] == 10.0
+        assert isinstance(e["is_n_day_high"], bool)
+        assert result["latest_close"] == 29.0
+
     def test_n_day_extremes(self):
         """N 日极值。"""
         from lib.technical import compute

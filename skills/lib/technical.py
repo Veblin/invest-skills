@@ -421,7 +421,7 @@ def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
     """N 日极值（最高/最低收盘价和日期）。"""
     # 同 compute()：close None/NaN 行剔除（review #10 第二轮）
     rows = [r for r in rows if safe_float(r.get("close")) is not None]
-    closes = [r.get("close", 0) or 0 for r in rows]
+    closes = [safe_float(r.get("close")) for r in rows]  # 过滤后必可转，str 须数值化
     dates = [r.get("trade_date", "") for r in rows]
 
     result: dict[int, dict] = {}
@@ -513,11 +513,14 @@ def compute(rows: list[dict]) -> dict[str, Any]:
     if not rows:
         return {"error": "empty_kline_data", "message": "K 线数据为空，无法计算技术指标"}
 
-    closes = [r.get("close", 0) or 0 for r in rows]
-    highs = [r.get("high", 0) or 0 for r in rows]
-    lows = [r.get("low", 0) or 0 for r in rows]
-    opens = [r.get("open", 0) or 0 for r in rows]
-    vols = [r.get("vol", 0) or 0 for r in rows]
+    # 数值化：object-dtype 源的 str 值过 safe_float 过滤后仍是 str，直接参与
+    # 算术（sma 求和 int+str）或渲染 .2f 会 TypeError（code-review）。close 已
+    # 由上方过滤保证可转；其余列保留 `or 0` 兜底语义。
+    closes = [safe_float(r.get("close")) or 0 for r in rows]
+    highs = [safe_float(r.get("high")) or 0 for r in rows]
+    lows = [safe_float(r.get("low")) or 0 for r in rows]
+    opens = [safe_float(r.get("open")) or 0 for r in rows]
+    vols = [safe_float(r.get("vol")) or 0 for r in rows]
     dates = [r.get("trade_date", "") for r in rows]
 
     n_rows = len(rows)

@@ -235,7 +235,7 @@ def collect_northbound(symbol: str) -> dict:
     """北向资金。并行：Tushare hsgt_top10 + akshare 个股持股变动。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.hsgt_top10", lambda: _q_tushare_hsgt_top10(symbol)))
+        tasks.append(("tushare.hsgt_top10", lambda: _hsgt_top10_cached(symbol)))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
@@ -1808,7 +1808,14 @@ def _ms_sw_numeric_code(index_code: str) -> str:
 
 
 def _ms_lookup_akshare_sw_code(industry: str) -> str | None:
-    """按申万行业名在 akshare 行业列表中匹配指数代码（L3→L2→L1）。"""
+    """按申万行业名在 akshare 行业列表中匹配指数代码（L3→L2→L1）。
+
+    逐表拉取并立即 exact 扫描，命中即短路返回（常见第一表命中 1 次 API
+    调用；修复前先拉全 3 表，精确命中场景 1 次调用退化为 3 次）。exact
+    全 miss 再对已拉表做 substring 扫描（不重拉，最坏 3 次调用）。单表
+    拉取失败跳过继续——其余表已找到的匹配不因限流整体丢失（修复前
+    blanket except 让表 1 已命中的结果也返回 None）。
+    """
     if not env.is_akshare_available():
         return None
     name = industry.strip()
@@ -1817,21 +1824,23 @@ def _ms_lookup_akshare_sw_code(industry: str) -> str | None:
     try:
         import akshare as ak
         loaders = (ak.sw_index_third_info, ak.sw_index_second_info, ak.sw_index_first_info)
+        tables: list = []
         with akshare_direct_session():
             for loader in loaders:
-                df = loader()
+                try:
+                    df = loader()
+                except Exception as exc:
+                    logger.debug("akshare sw index loader failed: %s", exc)
+                    continue
                 if df is None or df.empty:
                     continue
-                for _, row in df.iterrows():
+                tables.append(df)
+                for _, row in df.iterrows():  # exact 扫描：命中即返回
                     idx_name = str(row.get("行业名称", "")).strip()
                     code = str(row.get("行业代码", "")).strip()
                     if name == idx_name and code:
                         return code
-        with akshare_direct_session():
-            for loader in loaders:
-                df = loader()
-                if df is None or df.empty:
-                    continue
+            for df in tables:  # substring 扫描：复用已拉表
                 for _, row in df.iterrows():
                     idx_name = str(row.get("行业名称", "")).strip()
                     code = str(row.get("行业代码", "")).strip()
@@ -2048,6 +2057,28 @@ def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
 
 _MIN_NORTHBOUND_DAYS = 5
 
+# 同 run 按日缓存（仿 _cninfo_hold_cache 模式）：collect_northbound 与
+# _ms_fetch_northbound_stock 以相同参数（30 日窗口）重复拉取 hsgt_top10。
+# 缓存原始 rows（稀疏判定在消费方 _MIN_NORTHBOUND_DAYS，语义不变）；
+# None 不落缓存；跨日自动失效。
+_hsgt_top10_cache: dict[str, list[dict]] = {}
+_hsgt_top10_cache_day: str = ""
+
+
+def _hsgt_top10_cached(symbol: str) -> list[dict] | None:
+    global _hsgt_top10_cache_day
+    day = _today()
+    if _hsgt_top10_cache_day != day:
+        _hsgt_top10_cache.clear()
+        _hsgt_top10_cache_day = day
+    if symbol in _hsgt_top10_cache:
+        # 副本：调用方 mutate 不污染缓存对象（对齐 _run_kline_quote_cache）
+        return [dict(r) for r in _hsgt_top10_cache[symbol]]
+    rows = _q_tushare_hsgt_top10(symbol)  # 模块全局名：测试 patch 命名空间仍可拦截
+    if rows:
+        _hsgt_top10_cache[symbol] = [dict(r) for r in rows]
+    return rows
+
 
 def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     """个股北向近 10 个交易日净额（元）。
@@ -2057,15 +2088,16 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
     """
     try:
-        records = _q_tushare_hsgt_top10(symbol)
+        records = _hsgt_top10_cached(symbol)
         if records:
             recent = _recent_flow_records(records, limit=10)
-            if len(recent) >= _MIN_NORTHBOUND_DAYS:
-                net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+            valued = [r for r in recent if _flow_amount_yuan(r) is not None]
+            if len(valued) >= _MIN_NORTHBOUND_DAYS:
+                net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
                 return {
                     "records": recent,
                     "net_sum_10d": net_sum,
-                    "days": len(recent),
+                    "days": len(valued),
                     "source": "tushare.hsgt_top10",
                 }
     except Exception as exc:
@@ -2075,11 +2107,16 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     if not records:
         return None
     recent = _recent_flow_records(records, limit=10)
-    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+    # 与 tushare 分支同守卫：只数有值行（无值行计入会让 N 日合计被误标为
+    # 10 日合计——akshare 映射不预滤无值行，code-review）
+    valued = [r for r in recent if _flow_amount_yuan(r) is not None]
+    if len(valued) < _MIN_NORTHBOUND_DAYS:
+        return None
+    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
     return {
         "records": recent,
         "net_sum_10d": net_sum,
-        "days": len(recent),
+        "days": len(valued),
         "source": "akshare.stock_hsgt_individual_em",
     }
 

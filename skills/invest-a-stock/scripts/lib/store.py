@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 from . import env
 from .db_util import connect_db, load_recent_rows, safe_close, upsert_daily_rows
 from .json_util import dumps_json, json_default
+from .nums import safe_float
 from .schema import index_dimensions
 from .shared_dates import shanghai_now  # 上海时区口径（曾用 UTC，跨时区偏移 8h）
 
@@ -1116,20 +1117,12 @@ _MACRO_INDICATOR_KEYS = ("pmi", "cpi", "ppi", "lpr", "money_supply", "loan", "vi
 def _macro_safe_float(v: Any) -> float | None:
     """宏观指标值转 float；dict 形态（{value, source, signal}）取 value。
 
-    None / NaN / ±inf / 非数字返回 None（对齐 lib.nums.safe_float 语义，
+    数值语义委托 lib.nums.safe_float（None / NaN / ±inf / 非数字 → None；
     NaN 若写入 sqlite 会绑定为 NULL，穿透到分位计算会污染序列）。
     """
     if isinstance(v, dict):
         v = v.get("value")
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    if f != f or f in (float("inf"), float("-inf")):  # NaN / ±inf
-        return None
-    return f
+    return safe_float(v)
 
 
 def _merge_macro_raw_json(c: sqlite3.Connection, date: str, indicators: dict) -> dict:
@@ -1196,7 +1189,7 @@ def save_macro_snapshot(macro_context: dict) -> str | None:
 
 
 def load_macro_history(days: int = 365) -> list[dict]:
-    """macro_snapshots 近 N 日记录，按 date ASC（供宏观护栏趋势/分位消费）。"""
+    """macro_snapshots 近 N 日记录，按 date ASC（宏快照的读路径，供调用方按需消费）。"""
     init_db()
     c = _conn()
     try:

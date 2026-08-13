@@ -1741,7 +1741,7 @@ def _attach_valuation_guide(result: dict) -> None:
     sw_info = ETF_TO_SW_INDUSTRY.get(symbol)
     if not sw_info:
         return
-    guide = SECTOR_VALUATION_MAP.get(sw_info["sw_name"])
+    guide = query_sector_valuation_guide(sw_info["sw_name"])
     if guide:
         result["valuation_guide"] = {
             "industry": sw_info["sw_name"],

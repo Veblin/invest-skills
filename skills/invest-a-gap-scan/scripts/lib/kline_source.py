@@ -658,6 +658,10 @@ def build_stock_kline(
             return None
 
     # Apply qfq or copy prices
+    # 孪生实现：invest-a-stock lib/collector/_sources._apply_qfq（apply_qfq_rows，
+    # round 4 位 + check_finite）。批量扫描语义要求整股 isna 拒绝（否则 NaN 穿透
+    # sma 污染 MA60）；单标的 collector 在源层做逐字段 safe_float。语义差异
+    # 合理，勿互走。契约测试：skills/lib/tests/test_qfq_contract.py。
     if already_qfq:
         # Prices are already qfq-adjusted; copy to *_qfq columns
         for col in price_cols:
