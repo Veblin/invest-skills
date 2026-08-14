@@ -94,6 +94,20 @@ def cmd_show(journal_id: int) -> int:
     if e.get("entry_price") is not None:
         print(f"  入场价:     {e['entry_price']}")
     print(f"  入场日期:   {e.get('entry_date', '')}")
+    # v0.2.6 §4.3 结构化字段（止损/提取/卖出去向）
+    if e.get("stop_price") is not None:
+        line = f"  止损位:     {e['stop_price']}"
+        if e.get("expected_loss_pct") is not None:
+            line += f"（预期亏损 {e['expected_loss_pct']}%）"
+        print(line)
+    if e.get("stop_moved_count"):
+        print(f"  ⚠️ 止损位被移动 {e['stop_moved_count']} 次（承诺失效审计信号）")
+    if e.get("stop_hit_count"):
+        print(f"  止损触发:   {e['stop_hit_count']} 次")
+    if e.get("proceeds_destination"):
+        print(f"  卖出款去向: {e['proceeds_destination']}")
+    if e.get("extracted_amount") is not None:
+        print(f"  已提取金额: {e['extracted_amount']}")
 
     if e.get("reviewed"):
         print(f"\n  --- 复盘 ---")

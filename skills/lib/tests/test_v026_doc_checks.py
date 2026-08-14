@@ -253,3 +253,29 @@ def test_journal_scenario_closed_loop():
     assert "命中率 < 50%" in sec
     assert "禁止凭空造预案" in sec
     assert "scenario-plans.md" in sec
+
+
+# ---------------------------------------------------------------- M6 journal 结构化字段
+
+def test_journal_v026_structured_fields():
+    journal = _read(_JOURNAL)
+    # DB 列与 evaluation_json 键均文档化
+    for key in ("stop_price", "expected_loss_pct", "proceeds_destination",
+                "stop_moved_count", "extracted_amount", "falsifiable_conditions",
+                "trigger_source", "emotion_level", "commitment_level"):
+        assert key in journal, f"journal SKILL.md 缺字段 {key}"
+    # LAW 6 协调措辞：字段完整性要求 ≠ 交易指令
+    assert "字段完整性要求" in journal
+    assert "不输出止损位建议数字" in journal
+
+
+def test_evaluation_criteria_four_dimensions():
+    criteria = _read("skills/invest-a-journal/references/evaluation-criteria.md")
+    assert "卖出四维评估细则" in criteria
+    assert "参考点独立性核对（Reference-Point Check）" in criteria
+    assert "机会成本（Opportunity Cost）" in criteria
+    # 顺序：参考点独立性在机会成本之前
+    assert criteria.index("参考点独立性核对") < criteria.index("机会成本（Opportunity Cost）")
+    # 旧"三维"表述清除
+    assert "卖出三维" not in criteria
+    assert "其他三维" not in criteria

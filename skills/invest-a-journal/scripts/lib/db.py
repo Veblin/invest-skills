@@ -74,6 +74,8 @@ def init_db() -> None:
     _migrate_v021()
     # v0.2.4 migration（幂等）
     _migrate_v024()
+    # v0.2.6 migration（幂等，§4.3 结构化字段）
+    _migrate_v026()
 
 
 def _migrate_v021() -> None:
@@ -110,6 +112,37 @@ def _migrate_v024() -> None:
         _safe_close(c)
 
 
+def _migrate_v026() -> None:
+    """v0.2.6 结构化字段（ABCD §4.3 全量）：
+
+    - stop_price REAL：买入止损位（用户填写）
+    - expected_loss_pct REAL：预期亏损%（引擎计算 = |stop/entry − 1|）
+    - proceeds_destination TEXT：卖出款去向（转出/换仓/空仓，Odean 1999 审计）
+    - stop_moved_count INTEGER：止损位被移动次数（Fischbacher 2017 承诺失效审计）
+    - stop_hit_count INTEGER：止损触发次数
+    - extracted_amount REAL：已提取金额（利润提取纪律，house money 切断）
+
+    幂等：列已存在时 duplicate column 错误静默忽略（与 _migrate_v021 同模式）。
+    """
+    c = _conn()
+    try:
+        for col, col_def in [
+            ("stop_price", "REAL"),
+            ("expected_loss_pct", "REAL"),
+            ("proceeds_destination", "TEXT DEFAULT ''"),
+            ("stop_moved_count", "INTEGER DEFAULT 0"),
+            ("stop_hit_count", "INTEGER DEFAULT 0"),
+            ("extracted_amount", "REAL"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE trade_journals ADD COLUMN {col} {col_def}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+        c.commit()
+    finally:
+        _safe_close(c)
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -122,6 +155,8 @@ _ALLOWED_UPDATE_COLS: frozenset[str] = frozenset({
     "actual_result", "wrong_triggered", "lessons", "reviewed",
     "direction", "linked_journal_id", "evaluation_json",
     "attribution",
+    "stop_price", "expected_loss_pct", "proceeds_destination",
+    "stop_moved_count", "stop_hit_count", "extracted_amount",
 })
 
 
@@ -210,13 +245,17 @@ def save_journal(entry: dict) -> int:
         if _link_is_unset(link_id):
             link_id = None
 
+        # expected_loss_pct：引擎计算（|stop/entry − 1|×100）——用户填 stop_price 后
+        # 由保存方（或调用方）算好传入；未提供时留 NULL（P0：不在此处心算）
         cur = c.execute(
             """INSERT INTO trade_journals
                (symbol, asset_type, driver, hypothesis, wrong_conditions,
                 target_period, target_return, max_loss_amount, position_pct,
                 entry_price, entry_date,
-                direction, linked_journal_id, evaluation_json, attribution)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                direction, linked_journal_id, evaluation_json, attribution,
+                stop_price, expected_loss_pct, proceeds_destination,
+                stop_moved_count, stop_hit_count, extracted_amount)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 symbol,
                 entry.get("asset_type", ""),
@@ -233,6 +272,12 @@ def save_journal(entry: dict) -> int:
                 link_id,
                 eval_raw,
                 entry.get("attribution", ""),
+                entry.get("stop_price"),
+                entry.get("expected_loss_pct"),
+                entry.get("proceeds_destination", ""),
+                entry.get("stop_moved_count", 0),
+                entry.get("stop_hit_count", 0),
+                entry.get("extracted_amount"),
             ),
         )
         c.commit()
@@ -393,6 +438,90 @@ def journal_stats() -> dict:
             "buy": buy_cnt,
             "sell": sell_cnt,
             "reviewed": reviewed,
+        }
+    finally:
+        _safe_close(c)
+
+
+def stop_audit_stats() -> dict:
+    """止损纪律聚合（v0.2.6 §4.3 审计信号，仿 journal_stats 跨行聚合）。
+
+    返回 {sells_total, stop_hit_sells, stop_moved_sells, buys_with_stop,
+          buys_without_stop}——卖出路径一致性核对用（Fischbacher 2017：
+    止损移动 = 承诺失效审计信号）。
+    """
+    init_db()
+    c = _conn()
+    try:
+        sells = c.execute("SELECT COUNT(*) FROM trade_journals WHERE direction='sell'").fetchone()[0]
+        hits = c.execute(
+            "SELECT COUNT(*) FROM trade_journals WHERE direction='sell' AND stop_hit_count > 0"
+        ).fetchone()[0]
+        moved = c.execute(
+            "SELECT COUNT(*) FROM trade_journals WHERE direction='sell' AND stop_moved_count > 0"
+        ).fetchone()[0]
+        with_stop = c.execute(
+            "SELECT COUNT(*) FROM trade_journals WHERE direction='buy' AND stop_price IS NOT NULL"
+        ).fetchone()[0]
+        without_stop = c.execute(
+            "SELECT COUNT(*) FROM trade_journals WHERE direction='buy' AND stop_price IS NULL"
+        ).fetchone()[0]
+        return {
+            "sells_total": sells,
+            "stop_hit_sells": hits,
+            "stop_moved_sells": moved,
+            "buys_with_stop": with_stop,
+            "buys_without_stop": without_stop,
+        }
+    finally:
+        _safe_close(c)
+
+
+def extracted_amount_mtd(month: str | None = None) -> dict:
+    """当月利润提取聚合（v0.2.6 纪律③：提取 ≠ 止盈，house money 切断）。
+
+    month: 'YYYY-MM'（默认当前月，上海口径）。返回
+    {month, sum_extracted, n_records, cooldown_violations}。
+    cooldown_violations：提取后 10 个自然日内同标的出现新 buy 的次数
+    （日历日粗算 + 注记——设计 §4.2 ③ 的冷静期审计，D4 标注口径）。
+    """
+    from dates import shanghai_today  # noqa: E402 — 共享 skills/lib 口径（同 market_microstructure）
+
+    if month is None:
+        month = shanghai_today().strftime("%Y-%m")
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT symbol, entry_date, extracted_amount FROM trade_journals "
+            "WHERE extracted_amount IS NOT NULL AND substr(entry_date, 1, 7)=?",
+            (month,),
+        ).fetchall()
+        if not rows:
+            return {"month": month, "sum_extracted": 0.0, "n_records": 0, "cooldown_violations": 0}
+        total = sum(float(r["extracted_amount"] or 0) for r in rows)
+        violations = 0
+        import datetime as dt
+
+        for r in rows:
+            if not r["symbol"] or not r["entry_date"]:
+                continue
+            try:
+                d = dt.datetime.strptime(r["entry_date"], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            rebuys = c.execute(
+                "SELECT COUNT(*) FROM trade_journals WHERE direction='buy' "
+                "AND UPPER(symbol)=? AND entry_date>? AND entry_date<=?",
+                (str(r["symbol"]).upper(), d.isoformat(), (d + dt.timedelta(days=10)).isoformat()),
+            ).fetchone()[0]
+            violations += rebuys
+        return {
+            "month": month,
+            "sum_extracted": round(total, 2),
+            "n_records": len(rows),
+            "cooldown_violations": violations,
+            "note": "冷却期口径为日历日粗算（10 个自然日），交易日口径待校准",
         }
     finally:
         _safe_close(c)

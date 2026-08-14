@@ -428,6 +428,11 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 
 ### 4. 风险收益比（Risk/Reward）
 
+> **v0.2.6 止损位必填（字段完整性要求，非交易指令）**：买入评估须引导用户填写
+> `stop_price`（用户自己设定）；引擎计算 `expected_loss_pct = |stop/entry − 1|×100`
+> 并对照用户自报的 `max_loss_amount`（差异即风险认知检查点）。评估只提示补全、
+> 不阻止保存；**不输出止损位建议数字**（LAW 6/6a 边界不变——填写 ≠ 给建议）。
+
 - 下方风险 vs 上方空间的非对称性
 - 是否存在"赚小钱冒大险"的结构？
 
@@ -472,6 +477,14 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 ## 评估输出模板
 
 > 本评估的卖出路径含四类参考之核对参考（report-conventions §8）。
+
+> **v0.2.6 结构化字段**（ABCD §4.3）：DB 列 `stop_price`/`expected_loss_pct`/
+> `proceeds_destination`/`stop_moved_count`/`stop_hit_count`/`extracted_amount`
+> 经 save_journal/update_journal 落库（cmd_show 渲染）；evaluation_json 新增键：
+> `falsifiable_conditions`（可证伪清单 3 条，买入当日写，卖出时 diff 对照）、
+> `trigger_source`（attention|analysis|scheduled，注意力偏差检查）、
+> `holding_period_class`（持有期分类）、`emotion_level`（卖出三档自报）、
+> `commitment_level`（结构性承诺>计划性承诺>提醒）。
 
 ```markdown
 🔍 invest-a-journal v0.2.6 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
