@@ -2,6 +2,26 @@
 
 ## v0.2.6 (2026-08-14)
 
+8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。
+
+### 第二阶段：code-review 修复 + P1/P2（同日续）
+
+**code-review 修复（PR #19 审查）**：CLAUDE.md 违规模式计数统一（11 条）；H5 JSON 入库 docs/data/ 恢复可复现引用；journal/预案库数字按 Python 复算修正；lint 规则 3 处正则缺陷（不必然回补豁免/整数关口补「将」/斐波否定式豁免）；北向标签 days 感知（D4）；backtest_calendar 末段年份剔除 + 双源 fail loud；hsgt 缓存加锁（D8）；ps1 删除保护；docstring 批修。
+
+**M1 全市场分位数据层**：market_daily 表（date×ts_code，2021-01 起 1361 交易日 × 5544 只回填）+ backfill CLI（断点续跑）+ market_pctile 横截面分位 + journal query_data distances 透传/分位注入（compute 保持纯函数）。
+
+**M2 SPA/FDR**：multiple_testing.py（White 2000 Reality Check 块 bootstrap + H0 重定心 + BH-FDR + bootstrap CI）；修复 CBS 单起点退化与 RC 未重定心两个统计缺陷。
+
+**M3 H4 金价 beta + H3 材料设备 RS**：backtest.py 扩展（OLS/Newey-West/regime/RS/binomial，stdlib-only）；H4：9 只黄金股 5 年——日频 β≈0、月度 β 全负（GC -1.23 / AU0 -1.58），样本期与 Tufano/Baur 正向先验相反；H3：RS 动量不成立，L60 显著反转（-3.07）——与 A 股动量弱反转强一致。
+
+**M4 H2 大跌低吸 + H1 见底日**：H2：32177 起全市场大跌事件分层（封死/开板/未触及）× 成交假设双口径——事件级 tradable +1 +0.23%（t=3.11）但 **calendar-time 校正后全层全窗口显著为负**（tradable +5 -2.78% t=-8.58），低吸假设被拒绝；H1：三见底日分组「7/20 最强」未获支持（8/3 组 +5 最强 p<0.001，强时序混杂，描述性）。
+
+**M5 形态扫描器 MVP**：新 skill invest-a-pattern-scan + skills/lib/lmw.py（因果核平滑/双底 1.5% 容差/三角底 5 极值模板）+ 18 规则宇宙 Reality Check 防护；真数据 csi300 扫描命中 21，RC p=0.9498（无统计增量信息，命中仅观察清单）。
+
+**M6 journal §4.3 结构化字段**：6 个 DB 列（止损位/预期亏损/卖出去向/止损移动与触发计数/提取金额）+ 聚合审计函数（stop_audit_stats/extracted_amount_mtd 含冷静期违规）+ evaluation_json 5 个新键 + evaluation-criteria 卖出三维→四维债修复。
+
+### 第一阶段：P0 落地
+
 8.11 直播量化指标体系调研（ABCD）P0 落地：H5 日历效应回测裁决、D 类引擎字段、A 类点位红线、Windows 技能链接重建脚本、情景预案库。
 
 ### H5 日历效应回测（8 月中旬谨慎裁决）
