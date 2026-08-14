@@ -169,6 +169,7 @@ def init_db() -> None:
                 PRIMARY KEY (date, ts_code)
             );
             CREATE INDEX IF NOT EXISTS idx_market_daily_date ON market_daily(date);
+            CREATE INDEX IF NOT EXISTS idx_market_daily_code ON market_daily(ts_code);
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [

@@ -26,13 +26,20 @@ _MD_COLUMNS = (
 
 
 def _make_client() -> TushareClient:
+    import os
+
     from . import env  # 惰性导入：无 token 环境（D13 测试）不触发配置加载
 
     cfg = env.get_config()
     token = cfg.get("TUSHARE_TOKEN")
     if not token:
         raise RuntimeError("TUSHARE_TOKEN 未配置（env.get_config 无 token）")
-    return TushareClient(token=token)
+    # 回填场景可经 env 抬高限额（Tushare 2000 积分档 daily 类接口 500/min）：
+    # TUSHARE_DAILY_CALL_LIMIT=5000 TUSHARE_RATE_LIMIT_PER_MINUTE=300
+    daily = cfg.get("TUSHARE_DAILY_CALL_LIMIT")  # env.py 已解析（默认 None → 客户端默认 500）
+    rate_raw = os.environ.get("TUSHARE_RATE_LIMIT_PER_MINUTE")
+    rate = int(rate_raw) if rate_raw and rate_raw.strip().isdigit() else 80
+    return TushareClient(token=token, daily_call_limit=daily, rate_limit_per_minute=rate)
 
 
 def fetch_market_day(date: str) -> list[dict]:

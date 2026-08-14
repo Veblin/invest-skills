@@ -286,3 +286,19 @@ class TestBinomial:
             binomial_test(3, 2)
         with pytest.raises(ValueError):
             binomial_test(1, 0)
+
+
+class TestEventStudy:
+    def test_market_adjusted(self):
+        from backtest import market_adjusted
+
+        assert market_adjusted([3.0, -1.0], [1.0, 0.5]) == [2.0, -1.5]
+        with pytest.raises(ValueError):
+            market_adjusted([1.0], [1.0, 2.0])
+
+    def test_calendar_time(self):
+        from backtest import calendar_time_portfolio
+
+        by_date = {D(2026, 8, 3): [2.0, 4.0], D(2026, 8, 2): [1.0, None]}
+        out = calendar_time_portfolio(by_date)
+        assert out == [1.0, 3.0]  # 按日期升序：8/2 均值 1.0、8/3 均值 3.0

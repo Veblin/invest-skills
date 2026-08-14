@@ -450,3 +450,27 @@ def _normal_cdf(z: float) -> float:
     poly = ((((1.330274429 * t - 1.821255978) * t + 1.781477937) * t - 0.356563782) * t + 0.319381530) * t
     cdf = 1.0 - pdf * poly
     return cdf if z >= 0 else 1.0 - cdf
+
+
+# ---- M4: 事件研究（H2/H1） ----
+
+
+def market_adjusted(ev_returns: list[float], market_returns: list[float]) -> list[float]:
+    """市场调整超额：逐事件相减（两组等长，长度不一致抛 ValueError）。"""
+    if len(ev_returns) != len(market_returns):
+        raise ValueError(f"事件收益与市场收益长度必须一致，实际 {len(ev_returns)}/{len(market_returns)}")
+    return [e - m for e, m in zip(ev_returns, market_returns)]
+
+
+def calendar_time_portfolio(ev_rets_by_date: dict, sort_key=None) -> list[float]:
+    """事件聚类防护：同日多事件先按日聚合（等权），再输出日级收益序列。
+
+    ev_rets_by_date: {date: [收益, ...]}。日级收益 = 当日事件等权均值
+    （ABCD §3.1 第 1 条：事件聚类使同日事件 t 虚高，calendar-time portfolio 校正）。
+    """
+    out: list[float] = []
+    for d in sorted(ev_rets_by_date, key=sort_key):
+        vals = [v for v in ev_rets_by_date[d] if v is not None]
+        if vals:
+            out.append(_mean(vals))
+    return out
