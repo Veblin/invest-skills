@@ -209,6 +209,10 @@ def test_compute_history_stats_known_series():
     assert got["2026-01-09"] == pytest.approx(14.29, abs=0.01)
     assert got["2026-01-12"] == pytest.approx(-25.0)
     assert got["2026-01-13"] == pytest.approx(31.11, abs=0.01)
+    # 计数聚合（引擎字段——报告层禁止对清单目视计数）
+    assert s["big_move_days_count"] == 5
+    assert s["big_move_up_days"] == 3      # +15.79 / +14.29 / +31.11
+    assert s["big_move_down_days"] == 2    # -5.0 / -25.0
     # 当前价 vs 高低点
     assert s["current_vs_high_pct"] == pytest.approx(-1.67, abs=0.01)
     assert s["current_vs_low_pct"] == pytest.approx(31.11, abs=0.01)

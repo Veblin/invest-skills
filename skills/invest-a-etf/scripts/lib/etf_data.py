@@ -1778,6 +1778,11 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
 
     数据源：akshare ``fund_etf_spot_em`` 的 ``最新份额`` 列。
 
+    注意：date 为采集日墙钟日期；akshare fund_etf_spot_em spot 行
+    无 trade_date 字段，最新份额披露存在 T+1 延迟，shares 实际对应
+    交易日未知。该语义由读取侧 etf_share_flow 的 lag_note 标注，
+    写入侧不推算实际交易日（已否决 trade_cal 推算方案）。
+
     Parameters
     ----------
     symbol : str
@@ -1807,7 +1812,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         return None
 
     aum = round(shares * price / 1e8, 2)
-    today = shanghai_today()
+    today = shanghai_today()  # 采集日墙钟；spot 行无 trade_date，份额披露 T+1（实际对应交易日未知）
 
     snap = {
         "date": today,
@@ -1852,7 +1857,11 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         {symbol, date, shares_current, aum_current,
          share_change_5d/20d/60d (份),
          flow_est_5d/20d/60d (亿元),
-         history_count}
+         history_count, lag_note}
+
+    date 为采集日墙钟日期；shares/price/aum 为采集时 akshare
+    fund_etf_spot_em 最新披露值（份额披露 T+1 延迟，实际对应交易日
+    未知），该语义由 lag_note 在返回结构中如实标注。
     """
     import sqlite3
 
@@ -1903,6 +1912,10 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         "share_change_60d": _change(60)["share_change"],
         "flow_est_60d": _change(60)["flow_est"],
         "history_count": len(history),
+        "lag_note": (
+            "date 为采集日墙钟日期；shares/price/aum 为采集时 akshare 最新披露值，"
+            "份额披露存在 T+1 延迟，实际对应交易日未知"
+        ),
     }
 
 
@@ -1978,8 +1991,6 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     rows = []
     prev_share = None
     prev_price = None
-    latest_shares = None
-    earliest_shares = None
 
     import math as _math
 
@@ -2041,9 +2052,6 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
         })
 
         if shares_val is not None:
-            if earliest_shares is None:
-                earliest_shares = shares_val
-            latest_shares = shares_val
             prev_share = shares_val
             prev_price = close_val  # 仅当份额有效时更新，保持 prev_share/prev_price 窗口一致
 
@@ -2094,10 +2102,14 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     avg_amount = round(sum(amounts) / len(amounts), 2) if amounts else None
     max_amount = max(amounts) if amounts else None
 
-    # 份额总变化
+    # 份额总变化：与 detail_rows/date_range 同口径——r0 无 prev_share、已被
+    # rows[1:] 丢弃，旧行为 latest-earliest 取自 merged 全量，会把 date_range
+    # 之外的首个间隔计入（与 etf_peers._flow_row 从 rows 首尾非 None shares
+    # 自算 share_change_pct 的口径对齐）。
+    detail_shares = [r["shares"] for r in detail_rows if r["shares"] is not None]
     share_total_change = None
-    if latest_shares is not None and earliest_shares is not None:
-        share_total_change = round(latest_shares - earliest_shares, 2)
+    if len(detail_shares) >= 2:
+        share_total_change = round(detail_shares[-1] - detail_shares[0], 2)
 
     date_range = f"{detail_rows[0]['date']} ~ {detail_rows[-1]['date']}" if detail_rows else ""
 
@@ -2116,6 +2128,12 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             "avg_amount_e": avg_amount,
             "max_amount_e": max_amount,
             "share_total_change": share_total_change,
+            # 正/负/平流日计数与合计（P0：报告层引用引擎字段，禁止对 rows 目视计数）
+            "inflow_days": len([f for f in flows if f > 0]),
+            "outflow_days": len([f for f in flows if f < 0]),
+            "flat_days": len([f for f in flows if f == 0]),
+            "inflow_sum_est": round(sum(f for f in flows if f > 0), 2) if flows else None,
+            "outflow_sum_est": round(sum(f for f in flows if f < 0), 2) if flows else None,
         },
     }
     if clipped:
@@ -2288,6 +2306,8 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
     - annual_high / annual_low：年度最高/最低收盘价 + 各自日期
     - max_drawdown：最大回撤峰值/谷底 + 日期 + 幅度%（负数）
     - big_move_days：|change_pct| >= 5% 的交易日清单（基于收盘价逐日计算）
+    - big_move_days_count / big_move_up_days / big_move_down_days：±5% 日计数
+      （聚合由引擎完成——报告层引用 count 字段，禁止对清单目视计数）
     - ma20 / ma60 / ma120：收盘价均线尾部值
     - current_vs_high_pct / current_vs_low_pct：当前价 vs 历史高低点偏离%
     """
@@ -2309,6 +2329,9 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
         "annual_low": None,
         "max_drawdown": None,
         "big_move_days": [],
+        "big_move_days_count": 0,
+        "big_move_up_days": 0,
+        "big_move_down_days": 0,
         "ma20": None,
         "ma60": None,
         "ma120": None,
@@ -2362,6 +2385,10 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
             if abs(chg) >= 5.0:
                 big.append({"date": dates[i], "change_pct": round(chg, 2)})
     stats["big_move_days"] = big
+    # 计数聚合（P0：清单目视计数违规——报告层必须引用引擎 count 字段）
+    stats["big_move_days_count"] = len(big)
+    stats["big_move_up_days"] = sum(1 for r in big if r["change_pct"] > 0)
+    stats["big_move_down_days"] = sum(1 for r in big if r["change_pct"] < 0)
 
     for n, key in ((20, "ma20"), (60, "ma60"), (120, "ma120")):
         series = sma(closes, n)

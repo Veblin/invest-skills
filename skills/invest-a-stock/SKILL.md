@@ -1,13 +1,5 @@
 ---
 
-
-
-
-
-
-
-
-
 name: invest-a-stock
 version: "0.2.5"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。触发词：个股投研/估值/财报"
@@ -78,26 +70,17 @@ metadata:
 
 **LAW 16** — 左/右概率并列呈现，禁止单一「左侧/右侧」结论。
 
-**LAW 17** — **结论先行（金字塔结构）**：简报和报告均采用结论→论据→细节的倒金字塔结构。
-- 简报首屏必须有核心结论和逻辑链（数据→推理→判断），不得以"模块1/模块2"等流程性标题开头
-- 每个模块标题必须传递信息量（完整判断句，禁止名词短语如"估值位置"）
-- 每个分析段落第一句必须是加粗主旨句（读者只读主旨句就能理解全文逻辑）
-- 看摘要等于看全文：简报本身是完整判断，.md 文件是详细论证
+**LAW 17** — **结论先行（金字塔结构）**：简报和报告均采用结论→论据→细节倒金字塔——首屏核心结论+逻辑链、标题传递信息量（完整判断句）、段首加粗主旨句、看摘要等于看全文（完整铁律见 [report-conventions.md §1.1](../../../skills/lib/references/report-conventions.md)）。
 
 ### 常见违规模式
 
+> 通用违规模式（左侧/右侧、买卖建议、目标价、往往/通常、PE 分位、极度高估、K 线断言主线等）见 [report-conventions.md §3.2](../../../skills/lib/references/report-conventions.md)。以下为 stock 特有项：
+
 | # | 违规 | 规则 | 正确写法 |
 |---|------|------|---------|
-| 1 | "当前处于左侧/右侧" | LAW 16 | "左侧特征更强：…；右侧支撑：…" |
-| 2 | "建议买入/卖出/持有" | LAW 6 | 永远不给买卖建议。可输出入场区间（基于情景锚定+假设前提），但不是建议 |
-| 3 | 无假设的"目标价 XX 元" | LAW 6 | 多情景估值参考价+假设 |
 | 3a | "止损设在 85 元"/"建议在 95 元买入" | LAW 6a | 改为"悲观情景估值下限 80 元，跌破意味市场定价比悲观更差"+"中性情景锚定区间 95-120 元" |
-| 4 | 无来源的"往往/通常" | LAW 3 | 标注待补或案例 |
-| 5 | 亏损期 PE 分位当贵贱 | P0-2 | 标注仅作位置参考 |
-| 6 | "极度高估/低估" | 措辞 | 用数值比较 |
 | 7 | "模块1：当前状态快照"等流程性标题 | LAW 17 | 标题改为结论句，如 "PE 36.5x 处 98% 分位，已定价乐观预期" |
 | 8 | 段落无段首主旨句，直接展开数据 | LAW 17 | 每段第一句加粗概括核心判断 |
-| 9 | 单用 K 线形态（连续上涨/突破均线）断言主线 | 违反主线资金流确认规则（A 股无动量） | 改为资金流/拥挤度为主证据 + Chui et al. 2022 |
 
 ### 措辞规范
 
@@ -257,48 +240,18 @@ PE / PB / PS
 
 > **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + stock 专项）。
 
-措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条，详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
+措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、**数字（P0 铁律：全部经 Python——引擎字段直引或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/清单目测/未实跑标注；计数断言 `len()` 聚合，见共享规范 §2.3 强制行为 5-6）**、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条，详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
 
 ---
 
 ### 分析合成三步（所有模式强制）
 
-> **Canonical 定义**：[report-conventions.md §4](../../../skills/lib/references/report-conventions.md) 分析合成框架。以下为 stock 视角摘要，完整规则见共享规范。
+> **Canonical 定义**：[report-conventions.md §4](../../../skills/lib/references/report-conventions.md) 分析合成框架。完整表格/示例/硬约束见共享规范 §4，此处仅列 stock 硬约束行：
 
-简报和完整报告均须包含以下三步。不可跳过。
-
-#### 1. 对抗性假设检验
-
-对核心判断依赖的关键假设，逐一找**可证伪条件**。
-
-| 关键假设 | 可证伪条件 | 观测窗口 |
-|----------|----------|:---:|
-| "毛利率改善可持续" | 下季毛利率环比回落 >2pp | 下份季报 |
-| "行业景气度上行" | 行业 PMI/订单指数连续 2 月回落 | 月度 |
-| ... | ... | ... |
-
-**硬约束**：≥3 个关键假设，每个必须有可观测证伪条件。不可证伪的假设标注「不可验证，置信度降级」。观测窗口须为具体时间或事件节点。
-
-#### 2. 「致命一击」归纳
-
-一句话回答：**如果这个分析错了，最可能是因为什么？**
-
-> 若 [X 可观测条件] 发生，当前核心判断 [Y] 失效。
-
-**硬约束**：必须是条件句（若…则…）。指向具体可观测的失效条件，不是「市场风险」「政策不确定性」等标签。
-
-#### 3. 盲点检查
-
-Final pass 自问：
-1. 有什么重要变量完全没有被讨论？
-2. 当前共识最可能忽略什么风险？
-3. 如果一段时间后回头看，今天最明显的盲点会是什么？
-
-🔍 盲点发现:
-- [盲点 1] — 当前: [未知/数据不可得/未覆盖]
-- [盲点 2] — 当前: [未知/数据不可得/未覆盖]
-
-**硬约束**：≥2 条。不能输出空集。
+简报和完整报告均须包含以下三步，不可跳过：
+1. **对抗性假设检验**：≥3 个关键假设（攻击最核心判断），每项必须带可观测证伪条件 + 具体观测窗口（时间/事件节点）；不可证伪标注「不可验证，置信度降级」
+2. **「致命一击」归纳**：一句话条件句（若 [X 可观测] 发生，则 [Y 判断] 失效），禁止「市场风险」等标签式罗列
+3. **盲点检查**：≥2 条，格式 `🔍 盲点发现: - [盲点] — 当前: [未知/数据不可得/未覆盖]`
 
 ### SOP-EV 证据强度
 
@@ -345,25 +298,10 @@ Final pass 自问：
 采集完成后、合成报告前，**必须**执行以下四步（每步 ≤2 次查询新闻/研报——WebSearch / web-search 技能 / /web，视 harness 而定；遵守 agent-prompts.md 搜索纪律——并行批搜 + search_cache）：
 
 ```
-STEP 1 公司画像锚定（必做）
-  ├─ 主营构成/收入分项（修正引擎行业标签——如"小金属"实为汽车/消费电子/医疗器械）
-  ├─ 客户结构与依赖（前五大客户占比）
-  └─ 技术路线/商业模式一句话（标注来源）
-  → 产出: 「公司画像锚定」小节（来源 + SOP-EV）
-
-STEP 2 数据缺口回填（对 classify / --material-gap / 12 题缺口项）
-  ├─ 营收/净利序列 → 财报摘要源/业绩快报
-  ├─ 现金流与应收/存货 → 年报附注口径
-  ├─ 分红/再融资历史 → 公告（classify 的 dividend/refi 证据）
-  └─ 每项回填标注来源；回填不到 → 「数据不足 + 原因 + 建议补查路径」
-
-STEP 3 可比公司挖掘（12 题 D-②/A-③ 触发时）
-  ├─ 同行 3-5 家（同主营/同赛道）
-  └─ 相对指标：毛利率/ROE/PE 对比（引擎算，AI 引用）
-
-STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）
-  ├─ 事件-价格对照（里程碑日期 × 价格反应）
-  └─ 事件兑现的可观测节点 → 观察节点表
+STEP 1 公司画像锚定（必做）：主营构成/收入分项（修正引擎行业标签）+ 客户结构 + 技术路线一句话 → 「公司画像锚定」小节（来源 + SOP-EV）
+STEP 2 数据缺口回填（classify / --material-gap / 12 题缺口项）：营收净利→财报摘要源；现金流应收存货→年报附注；分红再融资→公告；每项带来源，回填不到 → 「数据不足 + 原因 + 建议补查路径」
+STEP 3 可比公司挖掘（12 题 D-②/A-③ 触发时）：同行 3-5 家 + 毛利率/ROE/PE 相对对比（引擎算，AI 引用）
+STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：事件-价格对照 + 可观测节点 → 观察节点表
 ```
 
 **硬约束**：
@@ -393,7 +331,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）
 
 ## R4 行业成功关键因素（v0.2.4，行业洞见层）
 
-> 动机：通用 12 题是兜底清单，不是行业洞见——"每个行业都有 3-5 个决定成败的问题，答不出等于研究等于没研究"（白酒=品牌、啤酒=渠道、零售=便宜）。
+> 动机：通用 12 题是兜底清单，不是行业洞见——"每个行业都有 3-5 个决定成败的问题，答不出等于研究等于没研究"。
 
 **执行**：报告头部 `[行业成功关键因素（R4）]` 块先答行业关键问题（引擎按行业路由，数据字段值从财务最新期取值），**每项回答后再进通用 12 题**。
 
@@ -509,28 +447,21 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）
 ## CLI 命令
 
 ```bash
-# 生成采集计划（intent: deep_analysis | quick_check | catalyst_monitor | compare
-#   | sentiment_deep | financials_deep | game_theory）
+# 按计划采集（intent: deep_analysis | quick_check | catalyst_monitor | compare | sentiment_deep | financials_deep | game_theory）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent game_theory
-
-# 按计划采集 + 证据表 + 报告
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full
-
-# 常用
+# 常用（collect 默认自动入库；--no-store 关闭；--mode: brief|full|concise）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --outdir=./reports/
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --deep
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 [--outdir=./reports/] [--deep]
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py diagnose
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py diff 600176
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py store list
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --no-store   # 默认自动入库，--no-store 关闭
 ```
 
-> 运行目录：`code/`。必须用 `uv run python`（所有引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀）。`--mode`：`brief` | `full` | `concise`。
+> 运行目录：`code/`。必须用 `uv run python`（所有引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀）。子命令全清单见 CLAUDE.md「运行命令」。
 
 ## 代理 / VPN
 
@@ -556,176 +487,39 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ## 采集顺序
 
+`diagnose` → `plan`/`collect` → `evidence`（专项推荐）→ `report` → `store`（可选）
+
 ### SOP-M1 宏观情景（`--with-macro`）
 
-简报首行：`[宏观情景] PMI + CPI + LPR → 政策方向 | VIX + 波动等级 + SOX + 费城半导体指数`
-
-示例：`[宏观情景] PMI 50.2 + CPI +0.3% + LPR 3.45% →偏宽松 | VIX 18.5 正常 SOX 6,850`
-
-1. `diagnose` → 2. `plan`/`collect` → 3. `evidence`（专项推荐）→ 4. `report` → 5. `store`（可选）
+> 完整指标清单与输出格式见 CLAUDE.md「宏观情景」。要点：简报首行 `[宏观情景] PMI + CPI + LPR → 政策方向 | VIX + 波动等级 + SOX`，各指标带引擎来源标注。
 
 ---
 
-## v0.1.9 CLI 扩展
+## CLI 扩展命令
 
 ```bash
-# 质量门
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py rigor 600176 --verify-all [--strict]
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py audit report.md --extract
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py audit report.md --verdict
-
-# 质地检查 / 组合 / 假设追踪
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py check 600176
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py portfolio holdings.json [--stress]
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py thesis 600176 --init|--update|--status
-
-# 价格冲击插值（非风险中性概率）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py shock 300274 \
-  --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 \
-  --pe-normal 27 --pe-stressed 20
-
-# 新闻包（公告 + 查询包 + 可选 Tavily）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py rigor 600176 --verify-all [--strict]   # 质量门
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py audit report.md --extract|--verdict  # 报告审计
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py check 600176                          # 质地 7 指标
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py portfolio holdings.json [--stress]    # 组合
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py thesis 600176 --init|--update|--status # 假设追踪
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py shock 300274 --pre-price 163.46 --post-price 140 --eps-base 6.55 --eps-hit 1.64 --pe-normal 27 --pe-stressed 20
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack       # 新闻包
 ```
 
 `TAVILY_API_KEY` 可选；无 Key 时 Layer3 静默跳过，Layer1+2 仍产出。
 
 ### SOP-DEEP（四视角并行）
 
-完整 `--deep` 报告时分两阶段并行：**采集（3 Agent）→ 分析（4 Agent）**。
+> 完整流程（Phase 1 采集 3 Agent / Phase 2 分析 4 Agent / Phase 3 合成模板 / 四视角覆盖内容 / 交叉验证规则）见 [references/deep-sop.md](references/deep-sop.md)。**`report --deep` 时主编 Claude 必须先 Read 该文件**，其余流程不读。
 
----
-
-**Phase 1 — 并行采集 + 交叉验证（3 Agent 同时启动）：**
-
-```
-┌─ Collector A: 财务主线（Tushare）─────────────────────┐
-│  invest.py collect SYMBOL --deep                       │
-│    --dims "financials,valuation,basic_info"            │
-│  产出: /tmp/{symbol}_collect_A.json                    │
-└───────────────────────────────────────────────────────┘
-
-┌─ Collector B: 行情+资金+财务交叉验证（akshare主）─────┐
-│  invest.py collect SYMBOL --deep                       │
-│    --dims "financials,quote,kline,valuation"           │
-│  financials 用 akshare 做主源，与 A 的 Tushare 交叉    │
-│  产出: /tmp/{symbol}_collect_B.json                    │
-└───────────────────────────────────────────────────────┘
-
-┌─ Collector C: 补充数据（股东/研报/事件/行业）─────────┐
-│  invest.py collect SYMBOL --deep                       │
-│    --dims "shareholders,research,events"               │
-│  产出: /tmp/{symbol}_collect_C.json                    │
-└───────────────────────────────────────────────────────┘
-```
-
-**验证规则：**
-- financials 维度：A（Tushare）vs B（akshare），关键字段（ROE/EPS/毛利率）差异 <5% → 通过
-- 差异 ≥5% → 触发 Tie-breaker（第三源三方投票）：另采一份第三方 collection
-  `invest.py collect SYMBOL --dims "financials" --deep`（换批次/时点），
-  与 A/B 一起跑 `scripts/merge_collections.py`
-- 三取二投票决定最终值，无法决定则保留差异并标注"跨源分歧"
-- 合并 3-4 份 JSON → 完整 collection（用 `scripts/merge_collections.py`）
-
-**Phase 1 耗时：** 3 Agent 并行 ≈ 30-40s（vs 串行 80s）
-
----
-
-**Phase 2 — 四视角并行分析（4 Agent 同时启动）：**
-
-```
-同时启动 4 个 Agent（用 references/agent-prompts.md 的模板，替换变量）：
-  Agent A: 生意质量 → section_1_business.md
-  Agent B: 财务与估值 → section_2_financials.md
-  Agent C: 行业与竞争 → section_3_industry.md
-  Agent D: 风险与治理 → section_4_risk.md
-
-每个 Agent 的参数: {collection_json_path} = 合并后的 JSON 路径,
-  {symbol} = 标的代码, {output_dir} = reports/{symbol}-{name}/
-```
-
----
-
-**Phase 3 — 合成（主编 Claude）：**
-1. 等待 4 个分析 Agent 全部完成
-2. 读取 4 个 section 文件 + 合并后的 collection JSON
-3. 运行 `valuation_calc.py SYMBOL` 嵌入估值数据（DCF/多情景/预期差）
-4. 合成完整报告 → `reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`，采用以下 LAW 17 金字塔结构。
-> **模板使用说明：** 以下 `##` 标题为结构占位符，实际输出时须替换为传递信息量的完整判断句（LAW 17）。段首必须加粗主旨句。
-
-```markdown
-# {name} ({symbol}) — 深度研究备忘录 {date}
-
-## 核心结论
-（从 4 Agent section 提炼，≤5 句，每条携带数据+逻辑链）
-[证据强度]
-
-## 位置感
-周期位置 / 估值位置 / 市场态度 — 三句话定位当前状态
-
-## 模块结论速览
-| 维度 | 结论 | 关键数据 | 逻辑链 | 置信度 |
-|------|------|---------|--------|:------:|
-
-## 论证展开
-（每节标题为完整判断句，段首加粗主旨句，数据→推理→判断一行闭环）
-
-## 多情景参考
-（表格：情景 | 假设 | 传导 | 估值区间 | 概率）
-
-## 观察节点
-（表格：时间 | 事件 | 验证什么 | 如何修正判断）
-
-## 主要风险
-（3-5 条，标注严重度 + 缓解因素）
-
-## 致命风险
-> 若 [X 可观测条件] 发生，当前核心判断 [Y] 失效。
-
-## 对抗性假设检验
-| 关键假设 | 可证伪条件 | 观测窗口 | 状态 |
-|----------|----------|:---:|:---:|
-| ... | ... | ... | ✅/⚠️/❓ |
-
-## 盲点扫描
-🔍 盲点发现:
-- [盲点 1] — 当前: [未知/数据不可得/未覆盖]
-- [盲点 2] — 当前: [未知/数据不可得/未覆盖]
-
-## References
-（保持现有 LAW 7 格式）
-```
-
-3b. 执行分析合成三步（详见 SOP-QC 上方「分析合成三步」章节）：
-   - 对抗性假设检验：从 4 Agent section 提炼 ≥5 个关键假设，逐一找可证伪条件
-   - 致命一击：一句话条件句归纳最大风险
-   - 盲点扫描：检查四视角是否有遗漏维度
-
-5. 输出 Claude 对话简报（按第一层模板，一屏内）
-6. QC 自检：LAW 1-17 逐条验证 + 分析合成三步完整性（对抗性假设检验 ≥5 假设、致命一击条件句、盲点 ≥2 条），尤其 LAW 17（标题是否传递信息量、段首是否有主旨句、简报首屏是否有核心结论）
-
----
-
-四视角覆盖内容：
-
-1. **生意质量**：商业模式 / 护城河 / 管理层 / 价值链
-2. **财务与估值**：DCF 三情景 / 财务健康 / 盈利质量 / 估值位置
-3. **行业与竞争**：波特五力 / 竞争格局 / 产业链利润池
-4. **风险与治理**：快速否决 / 风险信号 / 公司治理 / Known Unknowns
-
-> Agent prompt 模板详见 [references/agent-prompts.md](references/agent-prompts.md)。
-> 采集/分析阶段的所有 Agent 只调 Bash（invest.py/merge_collections.py），不调 Tushare/akshare API — 不触发限流。
+要点：采集 3 Agent（财务 Tushare / 行情+财务交叉 akshare / 股东研报事件）并行 ≈ 30-40s；financials 跨源差异 ≥5% 触发第三源投票；分析 4 Agent 用 [agent-prompts.md](references/agent-prompts.md) 模板；Agent 只调 Bash 不直连 API（防限流）；合成阶段执行分析合成三步（≥5 假设）。
 
 ### SOP earnings-review（季报/年报后）
 
-- [ ] 对比指引 vs 实际（营收/净利/毛利率）
-- [ ] OCF/净利润是否背离（阈值 0.6）
-- [ ] 资本开支与产能叙事是否一致
-- [ ] 更新 thesis `--update` 假设状态
+- [ ] 对比指引 vs 实际（营收/净利/毛利率）；OCF/净利润背离（阈值 0.6）；资本开支与产能叙事一致；`thesis --update` 更新假设状态
 
 ### SOP industry-research / news-pulse
 
-- [ ] `collect --with-news-pack` 获取公告 + 查询包
-- [ ] 对 `query_pack` 查询新闻/研报（WebSearch / web-search 技能 / /web，视 harness 而定；Tavily 可选），回填 NewsCard
-- [ ] 外生冲击假说⑥段：方向 + 可信度 + 来源
-- [ ] 重大波动时用 `shock` CLI 计算价格冲击插值比例（附学术声明）
+- [ ] `collect --with-news-pack` → 对 `query_pack` 查询新闻/研报（WebSearch / web-search / /web；Tavily 可选）回填 NewsCard
+- [ ] 外生冲击假说⑥段：方向 + 可信度 + 来源；重大波动用 `shock` CLI 计算价格冲击插值比例（附学术声明）

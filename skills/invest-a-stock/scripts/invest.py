@@ -2287,6 +2287,10 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
             fe_str = f"{fe:+.2f} 亿" if fe is not None else "待积累"
             print(f"  {label:<8} {sc_str:>14}  {fe_str:>14}")
 
+        lag_note = flow.get("lag_note")
+        if lag_note:
+            print(f"\n  ⚠️ {lag_note}")
+
     return 0
 
 

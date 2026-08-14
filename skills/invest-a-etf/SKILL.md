@@ -1,12 +1,5 @@
 ---
 
-
-
-
-
-
-
-
 name: invest-a-etf
 version: "0.2.5"
 description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
@@ -288,6 +281,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 关键矛盾已识别（如 CAPEX 总量降 vs 算力增），不是数据点的罗列
 - [ ] 文件名包含实际北京时间（非硬编码）
 - [ ] 极值断言（峰值/最大/最低）基于全量序列 Python 聚合，非打印子集（R1）
+- [ ] 无「Python calc 视角」类未实跑标注——来源标注仅两种：引擎字段 / `[来源: Python calc: formula]`（共享规范 §2.3 强制行为 5）
 - [ ] 检索/新闻口径数字带「检索摘要口径，出处待核实」标注，未归因到未读原文的媒体（R2）
 - [ ] 计数经 Python（`len()`），无目视计数（R3）
 - [ ] **报告复检流程已执行**（CLAUDE.md「报告复检流程」三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果

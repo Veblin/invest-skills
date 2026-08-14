@@ -1,12 +1,5 @@
 ---
 
-
-
-
-
-
-
-
 name: invest-a-journal
 version: "0.2.5"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
@@ -43,8 +36,7 @@ metadata:
 每次评估开始必须确认可交易的标的代码。用户只说"买一点 ETF"时追问具体代码。
 
 ```
-❌ 违规：用户说"我想买入一点小盘 ETF"，不追问代码就直接开始评估。
-✅ 正确："你指的是哪只 ETF？比如中证 2000 ETF（563300）？请确认代码。"
+❌ "我想买入一点小盘 ETF" 不追问代码 → ✅ 追问："你指的是哪只 ETF？比如中证 2000 ETF（563300）？请确认代码。"
 ```
 
 ### JOURNAL-LAW 2：资产类型分流
@@ -52,8 +44,7 @@ metadata:
 第二步必须明确 ETF 或个股，分支不可默认合并。ETF 使用指数级数据（csindex PE、折溢价、AUM、跟踪误差、对冲覆盖）；个股使用公司级数据。
 
 ```
-❌ 违规：用户说"563300"，按个股流程走，跳过折溢价和对冲工具检查。
-✅ 正确："563300 是中证 2000 ETF。作为 ETF，我会检查指数 PE、折溢价、规模和可用对冲工具。"
+❌ 把 "563300" 按个股流程走、跳过折溢价检查 → ✅ "563300 是中证 2000 ETF，我会检查指数 PE、折溢价、规模和可用对冲工具。"
 ```
 
 ### JOURNAL-LAW 3：数据驱动
@@ -61,8 +52,7 @@ metadata:
 每项评估必须有 Python 引擎输出的数据支撑。PE/波动率/两融/涨跌比/涨跌停比等数据必须通过调用引擎脚本获取，不得凭记忆猜测。
 
 ```
-❌ 违规："估值偏高，PE 大概 40 多倍吧" — 没有调 query_data 就估值。
-✅ 正确：先调 query_data 引擎 → 读取 pe_current → "PE 36.5x，近 4 年 84% 分位（中位数 32.2x）。"
+❌ "估值偏高，PE 大概 40 多倍吧"（未调引擎）→ ✅ 调 query_data → "PE 36.5x，近 4 年 84% 分位（中位数 32.2x）。"
 ```
 
 ### JOURNAL-LAW 4：四维分离
@@ -70,8 +60,7 @@ metadata:
 买入四个评估维度（逻辑/盲点/仓位匹配/风险收益）独立呈现，每个维度 ✅/⚠️/❌ + 文字。卖出四维度（一致性/情绪检测/参考点独立性/机会成本）。不可合并杂糅。
 
 ```
-❌ 违规：把逻辑和仓位写在一起，只给出一个综合判断。
-✅ 正确：每个维度独立标题、独立评级、独立文字。
+❌ 逻辑与仓位合并写、只给一个综合判断 → ✅ 每维度独立标题、独立评级、独立文字。
 ```
 
 ### JOURNAL-LAW 5：禁止数值建议
@@ -96,9 +85,7 @@ metadata:
 数据缺失必须用降级矩阵标注，不可静默跳过。每个数据字段标注 8 态：`available` / `partial` / `degraded` / `stale` / `insufficient` / `inconsistent` / `not_applicable` / `missing`。
 
 ```
-❌ 违规：PE 数据取不到就不提 PE 分位，好像这个问题不存在。
-✅ 正确：在数据盲点维度标注 "PE 分位: missing（Tushare 不可用），仅腾讯行情当前 PE 36.5x
-   ——无历史分位，无法判断当前估值在历史中的位置"。
+❌ PE 取不到就不提分位 → ✅ 盲点维度标注 "PE 分位: missing（Tushare 不可用），仅腾讯行情当前 PE 36.5x ——无历史分位，无法判断当前估值在历史中的位置"。
 ```
 
 ### JOURNAL-LAW 7：趋势 > 绝对值
@@ -106,8 +93,7 @@ metadata:
 每个数据点必须附带趋势或分位。纯绝对值（如"PE 36x"）不构成有效信息。
 
 ```
-❌ 违规："PE 36x" — 没有任何上下文。
-✅ 正确："PE 36.5x，近 4 年 84% 分位（中位数 32.2x），较 1 月前的 42x 下降 13%。"
+❌ "PE 36x"（无上下文）→ ✅ "PE 36.5x，近 4 年 84% 分位（中位数 32.2x），较 1 月前的 42x 下降 13%。"
 ```
 
 ### JOURNAL-LAW 8：禁止综合评分
@@ -115,8 +101,7 @@ metadata:
 四维各自 ✅/⚠️/❌，不打综合分。每个维度的评级独立、理由独立。
 
 ```
-❌ 违规："综合评分 7/10" 或 "总分 65 分"。
-✅ 正确：四个维度各自给出 ✅/⚠️/❌，没有总分。
+❌ "综合评分 7/10" → ✅ 四维各自 ✅/⚠️/❌，没有总分。
 ```
 
 ### JOURNAL-LAW 9：卖出一致性
@@ -137,6 +122,8 @@ metadata:
 > ⚠️ 本评估由 AI 生成，不构成投资建议。数据来源见正文标注。
 > 所有评级（✅/⚠️/❌）为方案质量评估，非买卖方向建议。
 ```
+
+（JOURNAL-LAW 5/9 示例含实盘案例，保留完整示例。）
 
 ---
 
@@ -172,6 +159,7 @@ metadata:
 4. ✅ 检查 LAW 8：无综合评分数字（7/10、65 分等）
 5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
 6. ✅ 检查 LAW 10：末尾有免责声明
+6b. ✅ 检查 P0 数字铁律：每个数字来自引擎字段或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/「Python calc 视角」类未实跑标注（共享规范 §2.3 强制行为 5-6）
 7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.5` badge
 8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
 9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
@@ -181,40 +169,14 @@ metadata:
 ## 交互流程
 
 ```
-用户: /invest-a-journal
-       ↓
-Claude: 交互式提问（一次 3 题；AskUserQuestion 若可用，否则对话提问）
-  Q0a. 买入还是卖出？ → 买入 / 卖出
-  Q0b. ETF 还是个股？ → ETF / 个股
-  Q0c. 哪只标的？    → 常用ETF点选 / 其他(自定义输入代码)
-       ↓
-  ┌─ ETF 路径 ─────────────────────────────────────┐
-  │  调 etf_data shim → invest-a-etf query_etf_data │
-  │  检查：指数 PE、折溢价、AUM、跟踪误差、对冲覆盖   │
-  │  深研备忘录 → 引导 /invest-a-etf {代码}          │
-  └────────────────────────────────────────────────┘
-  ┌─ 个股路径 ─────────────────────────────────────┐
-  │  调 query_data.py query_for_evaluation(代码)    │
-  │  检查：PE 分位、波动率、宏观                     │
-  └────────────────────────────────────────────────┘
-       ↓
-Claude: 并行查数据（query_data + snapshot + search_by_symbol）
-       ↓
-Claude: 逐项 Q&A — 优先使用交互式提问（AskUserQuestion 若可用，否则对话提问）
-       ↓
-  数据查询（并行）：query_for_evaluation + snapshot + search_by_symbol
-       ↓
-Claude: 输出 badge + 四维评估
-       ↓
-Claude: 调护栏 → apply_env_guardrail(evaluation_json, snapshot) → 追加 blind_spots
-       ↓
-Claude: 对 ⚠️/❌ 项追问用户、收集更多信息
-       ↓
-用户: 补充信息 → Claude 重新评估 → 更新评级
-       ↓
-Claude: "是否确认保存？"
-       ↓
-用户确认 → save_journal（含 evaluation_json；卖出自动关联买入）
+/invest-a-journal → Q0 三问（方向/类型/代码，AskUserQuestion 一次 3 题）
+  → ETF 路径：etf_data shim → query_etf_data（指数 PE/折溢价/AUM/对冲；深研引导 /invest-a-etf）
+  → 个股路径：query_data.py query_for_evaluation（PE 分位/波动率/宏观）
+  → 并行查数据（query_for_evaluation + snapshot + search_by_symbol）
+  → 逐项 Q&A（Q1-Q7，分屏）→ 输出 badge + 四维评估
+  → apply_env_guardrail → 追加 blind_spots
+  → 对 ⚠️/❌ 追问用户、更新评级 → "是否确认保存？"
+  → 用户确认 → save_journal（卖出自动关联买入）
 ```
 
 > **AskUserQuestion 说明**：`allowed-tools` 仅列出 Bash/Read/Write。
@@ -356,45 +318,19 @@ evaluation_json = {
         'position_sizing': {'level': '⚠️', 'notes': '...'},
         'risk_reward': {'level': '⚠️', 'notes': '...'},
     },
-    'blind_spots': [
-        {'rule': 'deleveraging', 'note': '...'},
-    ],
+    'blind_spots': [{'rule': 'deleveraging', 'note': '...'}],
     'data_quality': {'overall': 'partial'},
-    'market_phase_at_eval': {
-        'leverage_cycle': '中性 去杠杆',
-        'breadth': '正常',
-        'extreme_sentiment': '极端亢奋',
-    },
+    'market_phase_at_eval': {'leverage_cycle': '中性 去杠杆', 'breadth': '正常', 'extreme_sentiment': '极端亢奋'},
 }
-
 # 买入
-jid = save_journal({
-    'symbol': '563300',
-    'direction': 'buy',
-    'asset_type': 'ETF/指数',
-    'driver': '均值回归',
-    'hypothesis': '估值修复',
+jid = save_journal({'symbol': '563300', 'direction': 'buy', 'asset_type': 'ETF/指数',
+    'driver': '均值回归', 'hypothesis': '估值修复',
     'wrong_conditions': json.dumps(['跌破前低'], ensure_ascii=False),
-    'target_period': '半年',
-    'position_pct': 8.0,
-    'entry_price': 1.08,
-    'entry_date': '2026-07-21',
-    'max_loss_amount': '10%',
-    'evaluation_json': evaluation_json,
-})
-print('saved buy', jid)
-
-# 卖出：可不传 linked_journal_id，save_journal 会自动挂最近同标的 buy
-jid2 = save_journal({
-    'symbol': '563300',
-    'direction': 'sell',
-    'asset_type': 'ETF/指数',
-    'driver': '错误条件触发',
-    'entry_date': '2026-07-22',
-    'evaluation_json': evaluation_json,
-    # 'linked_journal_id': jid,  # 可选；省略则自动关联
-})
-print('saved sell', jid2)
+    'target_period': '半年', 'position_pct': 8.0, 'entry_price': 1.08,
+    'entry_date': '2026-07-21', 'max_loss_amount': '10%', 'evaluation_json': evaluation_json})
+# 卖出：不传 linked_journal_id 自动挂最近同标的 buy
+jid2 = save_journal({'symbol': '563300', 'direction': 'sell', 'asset_type': 'ETF/指数',
+    'driver': '错误条件触发', 'entry_date': '2026-07-22', 'evaluation_json': evaluation_json})
 "
 ```
 
@@ -416,37 +352,17 @@ Shell CLI 的 `journal.py add` **已移除**（v0.2.4 清理，无调用方）�
 ### 调用示例
 
 ```bash
-# 主查询（所有评估）
+# 主查询（所有评估；microstructure/snapshot 已内嵌，search_by_symbol 卖出时用）
 cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from query_data import query_for_evaluation
 import json
-r = query_for_evaluation('600988', 'stock')
-print(json.dumps(r, ensure_ascii=False, indent=2))
+print(json.dumps(query_for_evaluation('600988', 'stock'), ensure_ascii=False, indent=2))
 "
-
-# 市场微观结构（个股/ETF 均可；query_for_evaluation 已自动附带）
-cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
-from market_microstructure import snapshot, apply_env_guardrail
-import json
-snap = snapshot()
-print('SNAPSHOT:', json.dumps(snap, ensure_ascii=False))
-"
-
-# ETF 专属数据（journal shim → invest-a-etf；亦可直接 etf.py report）
+# ETF 专属（shim → invest-a-etf；等价 etf.py report 563300 --json）
 cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
 from etf_data import query_etf_data
 import json
-r = query_etf_data('563300')
-print(json.dumps(r, ensure_ascii=False, indent=2))
-"
-# 等价：cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
-
-
-# 历史日志查询（卖出时）
-cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && uv run python -c "
-from db import search_by_symbol
-import json
-print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
+print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 "
 ```
 
@@ -599,11 +515,7 @@ print(json.dumps(search_by_symbol('563300'), ensure_ascii=False))
 
 ## 参考点独立性核对（卖出路径必填；买入路径跳过）
 
-- 本次决策理由是否包含：浮盈目标 / 回本心理 / 亏损不甘 / 成本价锚定？
-  （任一为是 → 标 ⚠️：该理由为参考点依赖，建议重述为独立依据。
-   实证锚：Kahneman & Tversky 1979 参考点依赖；Odean 1998 处置效应）
-- 关键问题："如果这笔交易不是你的持仓，你还会做这个决定吗？"
-- 决策独立依据：{逻辑失效 / 估值触发 / 信号反转 / 资金面变化 / 其他}
+> 完整四问 + 实证锚见「卖出评估维度 3. 参考点独立性核对」——此处引用同一模板：浮盈目标/回本心理/亏损不甘/成本价锚定任一为是 → ⚠️；关键问题："如果这笔交易不是你的持仓，你还会做这个决定吗？"；决策独立依据：{逻辑失效 / 估值触发 / 信号反转 / 资金面变化 / 其他}
 
 ### 环境盲点提示（护栏 v1）
 {从 apply_env_guardrail 追加的 blind_spots 列表}

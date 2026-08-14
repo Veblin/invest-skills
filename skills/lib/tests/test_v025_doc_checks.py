@@ -204,7 +204,11 @@ def test_d5_no_overdecomposed_wording():
 
 def test_d6_stock_skill_violation_row9():
     stock = _read(_STOCK)
-    assert "| 9 | 单用 K 线形态（连续上涨/突破均线）断言主线 | 违反主线资金流确认规则（A 股无动量） | 改为资金流/拥挤度为主证据 + Chui et al. 2022 |" in stock
+    conv = _read(_CONVENTIONS)
+    # 2026-08-14 上下文精简：stock SKILL.md 违规表仅留 stock 特有项（3a/7/8），
+    # 通用项（含第 9 行 K 线断言）指针化至 report-conventions §3.2
+    assert "通用违规模式（左侧/右侧、买卖建议、目标价、往往/通常、PE 分位、极度高估、K 线断言主线等）见 [report-conventions.md §3.2]" in stock
+    assert "单用 K 线形态（连续上涨/突破均线）断言主线" in conv
 
 
 def test_d6_pulse_and_conventions():
