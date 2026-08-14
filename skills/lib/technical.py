@@ -1061,3 +1061,67 @@ def detect_limit_streaks(
         "period_low": {"value": round(lo, 2), "date": dates[closes.index(lo)]},
         "lookback": len(window),
     }
+
+
+# ---- ADX（v0.2.6 H6 做T 分层：震荡/趋势市判定） ----
+
+def adx(highs: list[float], lows: list[float], closes: list[float], n: int = 14) -> list[float | None]:
+    """Wilder (1978) 平均趋向指数 ADX。
+
+    标准序列：TR / +DM / −DM → Wilder 平滑（首值 = 前 n 项和，后续
+    prev×(n−1)/n + curr）→ ±DI → DX → ADX（DX 再 Wilder 平滑）。
+    前 2n−1 位为 None（DI 需 n 项、ADX 再需 n 项 DX）。
+    长度 < 2n 返回全 None（数据不足，不抛异常——对齐模块原则）。
+    """
+    m = len(closes)
+    out: list[float | None] = [None] * m
+    if m < 2 * n:
+        return out
+
+    def _wilder(vals: list[float]) -> list[float]:
+        """Wilder 平滑：首值 = 前 n 项和，后续 = prev×(n−1)/n + curr。"""
+        sm: list[float] = []
+        for i, v in enumerate(vals):
+            if i < n:
+                sm.append(sum(vals[: i + 1]))
+            else:
+                sm.append(sm[-1] * (n - 1) / n + v)
+        return sm
+
+    tr: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(m):
+        if i == 0:
+            tr.append(0.0)
+            plus_dm.append(0.0)
+            minus_dm.append(0.0)
+            continue
+        h_l = highs[i] - lows[i]
+        h_pc = abs(highs[i] - closes[i - 1])
+        l_pc = abs(lows[i] - closes[i - 1])
+        tr.append(max(h_l, h_pc, l_pc))
+        up = highs[i] - highs[i - 1]
+        dn = lows[i - 1] - lows[i]
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+
+    tr_s = _wilder(tr)
+    plus_s = _wilder(plus_dm)
+    minus_s = _wilder(minus_dm)
+
+    dx: list[float] = []
+    for i in range(m):
+        if tr_s[i] > 0:
+            pdi = 100 * plus_s[i] / tr_s[i]
+            mdi = 100 * minus_s[i] / tr_s[i]
+            denom = pdi + mdi
+            dx.append(100 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
+        else:
+            dx.append(0.0)
+
+    # ADX = DX 的 Wilder 平滑，有效起始 = n−1（DX 首值）+ n → 2n−1
+    adx_s = _wilder(dx)
+    for i in range(2 * n - 1, m):
+        out[i] = round(adx_s[i], 2)
+    return out

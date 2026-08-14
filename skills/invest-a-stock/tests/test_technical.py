@@ -493,3 +493,36 @@ class TestV026Distances:
         assert result["volatility"]["atr"]["value"] is None
         assert result["volatility"]["atr"]["pct"] is None
         assert result["volatility"]["atr"]["reason"]
+
+
+class TestADX:
+    def test_adx_known_series(self):
+        """手算对照：单调上升序列（+DM 恒正）→ ADX 应收敛到 100 附近。"""
+        from lib.technical import adx
+
+        n = 14
+        closes = [100.0 + i for i in range(60)]
+        highs = [c + 1.0 for c in closes]
+        lows = [c - 1.0 for c in closes]
+        vals = adx(highs, lows, closes, n=n)
+        # 前 2n-1 = 27 位 None
+        assert vals[:27] == [None] * 27
+        # 单边上涨：−DM 恒 0 → −DI=0，DX=100 → ADX 收敛 100
+        assert vals[-1] == pytest.approx(100.0, abs=0.01)
+        assert vals[27] is not None
+
+    def test_adx_flat_series_low(self):
+        """横盘序列（TR≈0 处理 + 方向交替）→ ADX 低。"""
+        from lib.technical import adx
+
+        closes = [100.0] * 60
+        highs = [100.5] * 60
+        lows = [99.5] * 60
+        vals = adx(highs, lows, closes)
+        assert vals[-1] is not None and vals[-1] < 10.0
+
+    def test_adx_insufficient(self):
+        from lib.technical import adx
+
+        vals = adx([1.0] * 10, [0.9] * 10, [0.95] * 10)
+        assert all(v is None for v in vals)
