@@ -393,8 +393,9 @@ def _concise_bull(collection, symbol, dims, market_structure, val_cache=None):
         ms = collection.get("market_structure") or {}
         nb = ms.get("northbound") or {}
         net10 = nb.get("net_sum_10d")
+        nb_days = int(nb.get("days") or 10)
         if net10 is not None and float(net10) > 0:
-            points.append(f"北向近 10 日净流入 {float(net10):+.0f}，资金面偏向积极")
+            points.append(f"北向近 {nb_days} 日净流入 {float(net10):+.0f}，资金面偏向积极")
         if not points:
             points.append("当前缺乏明确的 Bull Case 数据支撑 [推测，待验证]")
 
@@ -458,8 +459,9 @@ def _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cac
         ms = collection.get("market_structure") or {}
         nb = ms.get("northbound") or {}
         net10 = nb.get("net_sum_10d")
+        nb_days = int(nb.get("days") or 10)
         if net10 is not None and float(net10) < 0:
-            points.append(f"北向近 10 日净流出 {float(net10):+.0f}，资金面偏谨慎")
+            points.append(f"北向近 {nb_days} 日净流出 {float(net10):+.0f}，资金面偏谨慎")
         if not points:
             points.append("当前缺乏明确的 Bear Case 触发信号 [推测，待验证]")
 
@@ -587,7 +589,8 @@ def _concise_capital_flow(dims, collection):
     if net10 is not None:
         try:
             direction = "净流入" if float(net10) > 0 else ("持平" if float(net10) == 0 else "净流出")
-            points.append(f"- 北向近 10 日{direction} {abs(float(net10)):.0f}")
+            nb_days = int(nb.get("days") or 10)
+            points.append(f"- 北向近 {nb_days} 日{direction} {abs(float(net10)):.0f}")
         except (TypeError, ValueError):
             pass
 

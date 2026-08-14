@@ -59,3 +59,11 @@ last = df.iloc[-1]
 print(f"\n== 当前 ==")
 print(f"最新收盘 {last['close']:.2f} ({last['date'].date()}), 距 4050: {(last['close']/4050-1)*100:+.2f}%")
 print(f"距关口带下沿 {band_lo:.2f}: {(last['close']/band_lo-1)*100:+.2f}%")
+
+# 7. 无条件基线（E-001 对照基准：全样本 5 日持有收益）
+#    scenario-plans.md E-001 基线「胜率 55.18% / 均值 +0.26%」来源
+fwd5 = [df.iloc[i + 5]["close"] / df.iloc[i]["close"] - 1 for i in range(len(df) - 5)]
+fwd5_s = pd.Series(fwd5)
+print(f"\n== 无条件基线（5 日持有，n={len(fwd5)}）==")
+print(f"  均值 {fwd5_s.mean()*100:+.2f}%  胜率 {(fwd5_s>0).mean()*100:.2f}%")
+print(f"  收盘入带后 5 日差 = 入带均值 - 基线均值（与 E-001 对照口径一致）")

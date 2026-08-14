@@ -53,14 +53,21 @@ foreach ($l in $DirLinks) {
         continue
     }
 
-    # 已是 junction 则跳过（幂等）；文本文件/真实目录/损坏链接一律先清
+    # 已是 junction 则跳过（幂等）；文本文件/损坏链接先清。
+    # 防护：SymbolicLink（开发者模式 checkout）同样跳过——PS 5.1 下
+    # Remove-Item -Recurse 作用于 junction/symlink 会删除目标内容；
+    # 真实目录拒绝删除（可能是用户手建的真实技能目录，宁报错不误删）。
     $item = Get-Item -LiteralPath $linkPath -Force -ErrorAction SilentlyContinue
-    if ($null -ne $item -and $item.LinkType -eq "Junction") {
-        Write-Host "OK(skip): $($l.Name) 已是 <JUNCTION>"
+    if ($null -ne $item -and ($item.LinkType -eq "Junction" -or $item.LinkType -eq "SymbolicLink")) {
+        Write-Host "OK(skip): $($l.Name) 已是 <$($item.LinkType)>"
         continue
     }
     if ($null -ne $item) {
-        Remove-Item -LiteralPath $linkPath -Force -Recurse
+        if ($item.PSIsContainer) {
+            Write-Warning "跳过 $($l.Name)：存在真实目录（非链接），拒绝删除以防误删真实文件——请人工处理后重跑"
+            continue
+        }
+        Remove-Item -LiteralPath $linkPath -Force
     }
     New-Item -ItemType Junction -Path $linkPath -Target $targetPath | Out-Null
     Write-Host "OK: $($l.Name) -> $($l.Target)"

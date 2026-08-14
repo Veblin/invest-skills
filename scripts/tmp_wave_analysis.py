@@ -1,5 +1,5 @@
 """沪指波浪回撤位分析 — 验证直播总结"4258→3927 为一浪"的量化锚点
-数据: akshare 东财日线; zigzag 摆动点 + 斐波那契回撤位 + 缺口/均线
+数据: 腾讯行情日线（web.ifzq.gtimg.cn，urllib 直连）; zigzag 摆动点 + 斐波那契回撤位 + 缺口/均线
 """
 import sys
 import akshare as ak

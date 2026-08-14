@@ -5,7 +5,8 @@
 
 原则:
   - 纯函数，无副作用，不依赖外部 API（random.Random 显式 seed 保证可复现）
-  - 样本 < 2 时抛 ValueError（D5 fail loud——回测脚本调用方负责数据完整性）
+  - 统计量函数（welch_t/describe/cohen_d 等）样本不足时抛 ValueError（D5 fail loud——回测脚本
+    调用方负责数据完整性）；daily_returns 对 <2 行返回空列表（无收益可算，非错误）
   - 统计口径: ABCD 设计 §3.2 统一显著性分级（✅ t≥3.0 / ⚠️ 2.0≤t<3.0 / ❌ t<2.0）
 
 参考:
@@ -191,7 +192,8 @@ def rolling_span_effects(
 ) -> list[dict]:
     """滚动 N 年窗效应（AMH：效应时变性检查）→ [{span, n_in, mean_in_pct, n_out, mean_out_pct, diff_pct}]。
 
-    按交易日而非日历年滚动：将全序列按年份切块后逐 5 年滑窗聚合。
+    按年份切块后逐 N 年滑窗聚合。注意：逐年效应会剔除窗口内外样本不全的年份，
+    因此 span 标签可能覆盖少于标签所示数量的完整年份（如中间年份被剔除）。
     """
     yearly = yearly_effects(rets, start, end)
     if len(yearly) < span_years:

@@ -281,6 +281,7 @@ def _executive_core_contradictions(
     ms = collection.get("market_structure") or {}
     nb = ms.get("northbound") or dims.get("northbound", {}).get("data") or {}
     net10 = nb.get("net_sum_10d") if isinstance(nb, dict) else None
+    nb_days = int(nb.get("days") or 10) if isinstance(nb, dict) else 10
     quote = dims.get("quote", {}).get("data") or {}
     chg = quote.get("change_pct") if isinstance(quote, dict) else None
     if net10 is not None and chg is not None:
@@ -288,12 +289,12 @@ def _executive_core_contradictions(
             net_f, chg_f = float(net10), float(chg)
             if net_f > 0 and chg_f < -2:
                 items.append(
-                    f"北向近10日净流入 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
+                    f"北向近{nb_days}日净流入 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
                     f"[来源: northbound+quote]"
                 )
             elif net_f < 0 and chg_f > 2:
                 items.append(
-                    f"北向近10日净流出 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
+                    f"北向近{nb_days}日净流出 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
                     f"[来源: northbound+quote]"
                 )
         except (TypeError, ValueError):

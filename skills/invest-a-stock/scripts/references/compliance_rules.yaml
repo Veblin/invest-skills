@@ -405,7 +405,7 @@ rules:
     pattern: "(将回补缺口|必将回补|必然回补|回补是必然|必回补)"
     severity: "error"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|\\[来源:|⚠️)"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
     message: "禁止断言'缺口将/必然回补'（JBEF 2020：缺口后沿缺口方向延续；A 股一字板缺口结构性不回补）。允许：'缺口带未回补已 N 日（记录性事实；回补非必然）'"
     law_ref: "report-conventions §2.4 — 点位红线"
 
@@ -413,7 +413,7 @@ rules:
     pattern: "(将回踩|必回踩|将测试(MA|均线)|必测试(MA|均线))"
     severity: "error"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|\\[来源:|⚠️)"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
     message: "禁止断言'价格将回踩/测试 MA20'（STW 1999 Reality Check 校正后消失；PBFJ 2024 中国样本外转负）。允许：'当前价 vs MA20 偏离 X%'状态描述"
     law_ref: "report-conventions §2.4 — 点位红线"
 
@@ -421,7 +421,7 @@ rules:
     pattern: "(BOLL[^。\\n]{0,8}上轨[^。\\n]{0,10}(将|必(然)?)回调|上轨将回调)"
     severity: "error"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|\\[来源:|⚠️)"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
     message: "禁止断言'触及 BOLL 上轨将回调'（Taiwan 50 实证：上轨应追势非反转，Physica A 2020）。允许：boll_position_pct 位置描述"
     law_ref: "report-conventions §2.4 — 点位红线"
 
@@ -429,15 +429,15 @@ rules:
     pattern: "((斐波|黄金分割)位[^。\\n]{0,12}(有)?(支撑|压力|阻力)|\\d+(\\.\\d+)?%\\s*回撤位[^。\\n]{0,12}(有)?(支撑|压力|阻力))"
     severity: "error"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|无预测性|无实证|\\[来源:|⚠️)"
+    skip_if_pattern: "(风险提示|免责声明|不构成|无预测性|无实证|无支撑|没有支撑|无压力|没有压力|无阻力|没有阻力|\\[来源:|⚠️)"
     message: "禁止断言'斐波回撤位有支撑/压力'（Tsinaslanidis 2022：与随机位点统计不可区分，L3 习俗）。允许：并列展示 + 强制 L3 习俗标签"
     law_ref: "report-conventions §2.4 — 点位红线"
 
   - id: "wording-level-round-number"
-    pattern: "(整数关口[^。\\n]{0,10}(必然|必定|必)(受阻|突破|失守|支撑)|关口(必然|必定)受阻)"
+    pattern: "(整数关口[^。\\n]{0,10}(将|必(然)?|必定)(受阻|突破|失守|支撑)|关口(将|必(然)?|必定)(受阻|突破|失守|支撑))"
     severity: "error"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|\\[来源:|⚠️)"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
     message: "禁止断言'整数关口必然受阻/突破'（自我实现机制：有效但非决定性，Frankel & Froot 1990）。允许：'4000 为市场关注位（中国实证：熊市效应最强）[证据: L1-2]'"
     law_ref: "report-conventions §2.4 — 点位红线"
 

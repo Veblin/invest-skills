@@ -1,6 +1,7 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
 import math
+import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-import）
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
 
@@ -2063,21 +2064,23 @@ _MIN_NORTHBOUND_DAYS = 5
 # None 不落缓存；跨日自动失效。
 _hsgt_top10_cache: dict[str, list[dict]] = {}
 _hsgt_top10_cache_day: str = ""
+_hsgt_top10_cache_lock = threading.Lock()  # D8：多线程 + 可变状态必须加锁（对齐 _run_kline_quote_cache）
 
 
 def _hsgt_top10_cached(symbol: str) -> list[dict] | None:
     global _hsgt_top10_cache_day
     day = _today()
-    if _hsgt_top10_cache_day != day:
-        _hsgt_top10_cache.clear()
-        _hsgt_top10_cache_day = day
-    if symbol in _hsgt_top10_cache:
-        # 副本：调用方 mutate 不污染缓存对象（对齐 _run_kline_quote_cache）
-        return [dict(r) for r in _hsgt_top10_cache[symbol]]
-    rows = _q_tushare_hsgt_top10(symbol)  # 模块全局名：测试 patch 命名空间仍可拦截
-    if rows:
-        _hsgt_top10_cache[symbol] = [dict(r) for r in rows]
-    return rows
+    with _hsgt_top10_cache_lock:
+        if _hsgt_top10_cache_day != day:
+            _hsgt_top10_cache.clear()
+            _hsgt_top10_cache_day = day
+        if symbol in _hsgt_top10_cache:
+            # 副本：调用方 mutate 不污染缓存对象（对齐 _run_kline_quote_cache）
+            return [dict(r) for r in _hsgt_top10_cache[symbol]]
+        rows = _q_tushare_hsgt_top10(symbol)  # 模块全局名：测试 patch 命名空间仍可拦截
+        if rows:
+            _hsgt_top10_cache[symbol] = [dict(r) for r in rows]
+        return rows
 
 
 def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:

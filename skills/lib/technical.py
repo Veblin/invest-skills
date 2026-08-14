@@ -453,7 +453,7 @@ def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
 
 
 def _ytd_low(rows: list[dict]) -> dict[str, Any]:
-    """年内低点（当前年 1/1 至今的最低收盘价）→ {available, low, low_date, current, dist_pct}。
+    """年内低点（末行数据所在年份 1/1 至今的最低收盘价）→ {available, low, low_date, current, dist_pct}。
 
     供 v0.2.6 四不原则 ①-b（不在低位做短线，De Bondt & Thaler 1985 长期反转锚）。
     dist_pct = (current - low) / low * 100，有符号（正 = 高于年内低点）。

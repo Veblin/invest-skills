@@ -85,16 +85,24 @@ def fetch_index_baostock(bs_symbol: str) -> list[dict]:
 
 
 def fetch_index(symbol: str) -> tuple[list[dict], str]:
-    """主源 akshare → 降级 baostock。返回 (rows, 实际来源标注)。"""
+    """主源 akshare → 降级 baostock。返回 (rows, 实际来源标注)。
+
+    两个源都失败时抛出带双因的 RuntimeError（fail loud，不静默降级）。
+    """
     try:
         rows = fetch_index_akshare(symbol)
         if len(rows) >= 100:
             return rows, f"akshare stock_zh_index_daily({symbol})"
         raise RuntimeError(f"akshare 仅返回 {len(rows)} 行")
     except Exception as exc:  # noqa: BLE001 — 降级链：任何失败都尝试 baostock
-        bs_symbol = f"{symbol[:2]}.{symbol[2:]}"
-        rows = fetch_index_baostock(bs_symbol)
-        return rows, f"baostock({bs_symbol}) [降级原因: {exc}]"
+        try:
+            bs_symbol = f"{symbol[:2]}.{symbol[2:]}"
+            rows = fetch_index_baostock(bs_symbol)
+            return rows, f"baostock({bs_symbol}) [降级原因: {exc}]"
+        except Exception as exc2:  # noqa: BLE001
+            raise RuntimeError(
+                f"两个数据源均失败（akshare: {exc}; baostock: {exc2}）——请检查网络/代理后重试"
+            ) from exc2
 
 
 def _window_result(rets: list, start: tuple[int, int], end: tuple[int, int]) -> dict:
@@ -127,17 +135,37 @@ def run_symbol(rows: list[dict], source: str, min_year: int | None = None) -> di
     if len(all_rets) < 250:
         return {"error": f"有效收益样本仅 {len(all_rets)} 日", "source": source}
 
+    def _drop_partial_last_year(rets: list) -> tuple[list, str | None]:
+        """末段年份不完整（数据止于 12/31 前）→ 从汇总样本剔除，防窗口内重跑污染。
+
+        例：8/15-8/31 窗口内重跑时，当年只贡献已过天数，与其他完整年份窗口
+        长度不一致会偏置 Welch t 与逐年效应。剔除后输出注记。
+        """
+        if not rets:
+            return rets, None
+        last_date = rets[-1][0]
+        if last_date >= dt.date(last_date.year, 12, 31):
+            return rets, None
+        partial_year = last_date.year
+        kept = [(d, r) for d, r in rets if d.year != partial_year]
+        note = f"末段年份 {partial_year} 可能不完整（数据止于 {last_date.isoformat()}），已从汇总样本剔除"
+        return kept, note
+
     def _sample(from_year: int | None) -> dict:
         rets = all_rets if from_year is None else [(d, r) for d, r in all_rets if d.year >= from_year]
+        rets, partial_note = _drop_partial_last_year(rets)
         if len(rets) < 250:
             return {"error": f"min_year={from_year} 样本仅 {len(rets)} 日"}
-        return {
+        result = {
             "n_returns": len(rets),
             "window_8_15_8_31": _window_result(rets, WINDOW_START, WINDOW_END),
             "window_8_11_8_31": _window_result(rets, SECONDARY_WINDOW_START, WINDOW_END),
             "yearly_effects": yearly_effects(rets),
             "rolling_5y": rolling_span_effects(rets, span_years=5),
         }
+        if partial_note:
+            result["partial_year_note"] = partial_note
+        return result
 
     subsamples: dict = {"all": _sample(None)}
     if min_year is not None:
@@ -154,19 +182,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="H5 日历效应回测（8/15-8/31 vs 全年）")
     parser.add_argument("--symbol", default="sh000001", help="指数代码（默认 sh000001 上证指数）")
     parser.add_argument("--min-year", type=int, default=DEFAULT_MIN_YEAR, help="附样本起点年份")
-    parser.add_argument("--out", default=str(_ROOT / "host-docs" / "v0.2.6" / "H5_backtest_result.json"))
+    parser.add_argument("--out", default=str(_ROOT / "docs" / "data" / "H5_backtest_result.json"))
     args = parser.parse_args()
-
-    rows, source = fetch_index(args.symbol)
-    result = run_symbol(rows, source, min_year=args.min_year)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
-    print(f"✅ 已写入 {out_path}")
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000])
-    return 0
+    try:
+        rows, source = fetch_index(args.symbol)
+        result = run_symbol(rows, source, min_year=args.min_year)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+        print(f"✅ 已写入 {out_path}")
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str)[:2000])
+        return 0
+    except Exception as exc:  # noqa: BLE001 — fail loud：错误 JSON + 非零退出
+        error_result = {"error": str(exc)}
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(error_result, f, ensure_ascii=False, indent=2, default=str)
+        print(f"❌ 回测失败，错误已写入 {out_path}: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

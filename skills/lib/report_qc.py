@@ -8,7 +8,7 @@
 分层：
     lint      全部      措辞合规（复用 invest-a-stock lib/lint.py + YAML 规则）
     structure 全部      报告类型特定结构校验（章节/标签存在性）
-    derived   etf only  8 个 derived 字段合理性（值域 + 小数位）
+    derived   etf only  10 个 derived 字段合理性（值域 + 小数位）
     audit     stock     数据点抽取 + 偏差判定（--verify-data）
     quality   stock     7 指标质地检查（--verify-data）
     rigor     stock     市值/估值/跨源验算（--verify-data）
@@ -172,7 +172,7 @@ def _check_structure(text: str, report_type: str) -> LayerResult:
 
 # ── ETF derived 字段校验 ─────────────────────────────────────────────────
 
-# 8 个引擎 derived 字段的值域（宽松，避免误报；主要抓数量级错误/全零/位数异常）
+# 10 个引擎 derived 字段的值域（宽松，避免误报；主要抓数量级错误/全零/位数异常）
 _ETF_DERIVED_RANGES: dict[str, tuple[float, float]] = {
     "nav_vs_ma20_pct": (-60.0, 60.0),
     "nav_vs_ma60_pct": (-60.0, 60.0),

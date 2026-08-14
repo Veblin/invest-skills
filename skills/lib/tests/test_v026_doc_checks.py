@@ -83,6 +83,8 @@ def test_redline_rules_registered():
 # ---------------------------------------------------------------- 红线双向行为
 
 # (规则, 命中样本, 不误伤样本)
+# 判定语义 = lint._lint_line_scope：pattern 命中 且 skip_if 不豁免 → 记为违规。
+# 「不误伤」样本含两类：pattern 不命中；pattern 命中但 skip_if 豁免（如否定式事实句）。
 _REDLINE_CASES = [
     (
         "wording-level-gap-fill",
@@ -91,6 +93,7 @@ _REDLINE_CASES = [
             "缺口带 3983~4015 未回补已 3 日（记录性事实；回补非必然）",
             "该缺口 7 月已回补",
             "后续是否回补需观察",
+            "缺口带不必然回补（记录性事实）",
         ],
     ),
     (
@@ -106,11 +109,12 @@ _REDLINE_CASES = [
     (
         "wording-level-fib-support",
         ["38.2% 回撤位有支撑", "斐波位 0.618 构成压力"],
-        ["50% 位 3960.26", "斐波回撤位无预测性证据（L3 习俗）", "4050 ≈ 0.382 回撤位 4054.30（L3 习俗）"],
+        ["50% 位 3960.26", "斐波回撤位无预测性证据（L3 习俗）", "4050 ≈ 0.382 回撤位 4054.30（L3 习俗）",
+         "斐波位无支撑（事实陈述）", "38.2% 回撤位没有压力"],
     ),
     (
         "wording-level-round-number",
-        ["整数关口 4000 必然受阻", "4000 整数关口必定突破"],
+        ["整数关口 4000 必然受阻", "4000 整数关口必定突破", "整数关口将受阻", "4000 关口将突破"],
         ["整数关口 4000 为市场关注位（中国实证：熊市效应最强）[证据: L1-2]"],
     ),
     (
@@ -126,12 +130,15 @@ def test_redline_hits_assertions_not_facts(rule_id, should_hit, should_not_hit):
     rule = _rules()[rule_id]
     regex = re.compile(rule["pattern"])
     skip = re.compile(rule["skip_if_pattern"]) if rule.get("skip_if_pattern") else None
+
+    def _lint_flags(text: str) -> bool:
+        """与 lint._lint_line_scope 同语义：pattern 命中且 skip_if 不豁免。"""
+        return bool(regex.search(text)) and not (skip and skip.search(text))
+
     for text in should_hit:
-        assert regex.search(text), f"应命中 {rule_id}: {text!r}"
-        if skip and skip.search(text):
-            pytest.fail(f"命中样本不应被 skip_if 放过: {text!r}")
+        assert _lint_flags(text), f"应命中 {rule_id}: {text!r}"
     for text in should_not_hit:
-        assert not regex.search(text), f"不应命中 {rule_id}: {text!r}"
+        assert not _lint_flags(text), f"不应命中 {rule_id}: {text!r}"
 
 
 def test_redline_not_fire_on_abcd_doc_allowed_rows():
@@ -177,8 +184,8 @@ def test_exec_plan_exists():
 # ---------------------------------------------------------------- 版本头（防漂移预留）
 
 def test_v026_version_headers_pending_bump():
-    """v0.2.6 内容已落、版本号待 bump：当前 pyproject 为 0.2.5 时此测试只断言
-    文档内容存在性（版本一致性由 test_v025_doc_checks.py::test_doc_versions_match_pyproject 统一守护）。"""
+    """v0.2.6 内容已落（pyproject 已 bump 至 0.2.6）；版本一致性由
+    test_v025_doc_checks.py::test_doc_versions_match_pyproject 统一守护。"""
     conv = _read(_CONVENTIONS)
     assert "v0.2.6 新增" in conv
 
