@@ -2310,15 +2310,23 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
       （聚合由引擎完成——报告层引用 count 字段，禁止对清单目视计数）
     - ma20 / ma60 / ma120：收盘价均线尾部值
     - current_vs_high_pct / current_vs_low_pct：当前价 vs 历史高低点偏离%
+      （窗口 = 250 日时为 52 周距离等价量，v0.2.6 不重复造同名字段）
+    - dist_to_ytd_low_pct / ytd_low：年内低点偏离%（v0.2.6 D 类字段，四不原则 ①-b）
+    - atr14 / atr14_pct：ATR14 及其占价格%（v0.2.6 D 类字段；仅 OHLC 路径，
+      纯 NAV 链路无 high/low → None + atr14_note）
     """
     dates: list[str] = []
     closes: list[float] = []
+    highs: list[float | None] = []
+    lows: list[float | None] = []
     for r in nav_history:
         close = safe_float(r.get("nav", r.get("close")))
         d = str(r.get("date", ""))[:10]
         if close is not None and d:
             dates.append(d)
             closes.append(close)
+            highs.append(safe_float(r.get("high")))
+            lows.append(safe_float(r.get("low")))
 
     stats: dict[str, Any] = {
         "rows": len(closes),
@@ -2337,6 +2345,11 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
         "ma120": None,
         "current_vs_high_pct": None,
         "current_vs_low_pct": None,
+        "dist_to_ytd_low_pct": None,
+        "ytd_low": None,
+        "atr14": None,
+        "atr14_pct": None,
+        "atr14_note": None,
         "status": "available" if len(closes) >= 2 else "insufficient",
     }
     if len(closes) < 2:
@@ -2402,4 +2415,31 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
         stats["current_vs_high_pct"] = round((latest / high - 1) * 100, 2)
     if low > 0:
         stats["current_vs_low_pct"] = round((latest / low - 1) * 100, 2)
+
+    # v0.2.6 D 类字段：年内低点偏离%（有符号，正 = 高于年内低点）
+    year = dates[-1][:4]
+    ytd_idx = min(
+        (i for i in range(len(closes)) if dates[i][:4] == year),
+        key=lambda i: closes[i],
+        default=None,
+    )
+    if ytd_idx is not None and closes[ytd_idx] > 0:
+        stats["ytd_low"] = {"date": dates[ytd_idx], "close": closes[ytd_idx]}
+        stats["dist_to_ytd_low_pct"] = round((latest / closes[ytd_idx] - 1) * 100, 2)
+
+    # v0.2.6 D 类字段：ATR14（仅 OHLC 路径）
+    ohlc_available = bool(highs) and all(h is not None and l is not None for h, l in zip(highs, lows))
+    if ohlc_available and len(closes) >= 15:
+        tr_sum = sum(
+            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            for i in range(1, 15)
+        )
+        atr = tr_sum / 14
+        for i in range(15, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            atr = (atr * 13 + tr) / 14
+        stats["atr14"] = round(atr, 4)
+        stats["atr14_pct"] = round(atr / latest * 100, 2) if latest else None
+    elif not ohlc_available:
+        stats["atr14_note"] = "纯 NAV 链路无 OHLC，ATR14 不可得"
     return stats

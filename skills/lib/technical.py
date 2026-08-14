@@ -452,6 +452,35 @@ def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
     return result
 
 
+def _ytd_low(rows: list[dict]) -> dict[str, Any]:
+    """年内低点（当前年 1/1 至今的最低收盘价）→ {available, low, low_date, current, dist_pct}。
+
+    供 v0.2.6 四不原则 ①-b（不在低位做短线，De Bondt & Thaler 1985 长期反转锚）。
+    dist_pct = (current - low) / low * 100，有符号（正 = 高于年内低点）。
+    """
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
+    closes = [safe_float(r.get("close")) for r in rows]  # 过滤后必可转
+    dates = [str(r.get("trade_date", "")) for r in rows]
+    if not rows:
+        return {"available": False, "reason": "数据为空"}
+    year = dates[-1][:4]
+    if not year.isdigit():
+        return {"available": False, "reason": f"末行日期不可解析: {dates[-1]!r}"}
+    ytd = [(c, d) for c, d in zip(closes, dates) if str(d)[:4] == year]
+    if not ytd:
+        return {"available": False, "reason": f"年内（{year}）无数据"}
+    low, low_date = min(ytd, key=lambda cd: cd[0])
+    current = closes[-1]
+    dist_pct = (current - low) / low * 100 if low else None
+    return {
+        "available": True,
+        "low": low,
+        "low_date": low_date,
+        "current": current,
+        "dist_pct": round(dist_pct, 2) if dist_pct is not None else None,
+    }
+
+
 def _drawdown(closes: list[float], dates: list[str], n: int = 60) -> dict[str, Any]:
     """N 日最大回撤：(max_{-N} - P_now) / max_{-N} * 100。"""
     if len(closes) < n:
@@ -652,6 +681,8 @@ def compute(rows: list[dict]) -> dict[str, Any]:
     atr_latest = atr_vals[-1] if atr_vals else None
     result["volatility"]["atr"] = {
         "value": round(atr_latest, 2) if atr_latest is not None else None,
+        # v0.2.6 D 类字段：ATR14 占价格百分比（动态止损波动自适应，ABCD §4.4）
+        "pct": round(atr_latest / closes[-1] * 100, 2) if atr_latest is not None and closes[-1] else None,
         "available": atr_latest is not None,
     }
     if atr_latest is None and n_rows < 15:
@@ -688,12 +719,38 @@ def compute(rows: list[dict]) -> dict[str, Any]:
     }
 
     # --- 结构 ---
-    extremes = _n_day_extremes(rows, (20, 60, 120))
+    extremes = _n_day_extremes(rows, (20, 60, 120, 250))
     dd = _drawdown(closes, dates, 60)
     result["structure"] = {
         "extremes": extremes,
         "drawdown_60d": dd,
     }
+
+    # --- 位置距离（v0.2.6 D 类字段，服务四不原则 ①-a/①-b）---
+    # 有符号百分比：负 = 低于该位。52 周高低点来自 extremes[250]（George & Hwang 2004）；
+    # 年内低点来自 _ytd_low（De Bondt & Thaler 1985）。数据不足时 None + reason（D5 降级先例）。
+    distances: dict[str, Any] = {}
+    ext_250 = extremes.get(250, {})
+    if ext_250.get("available") and closes[-1]:
+        h52, l52 = ext_250["max"], ext_250["min"]
+        distances["dist_to_52w_high_pct"] = round((closes[-1] - h52) / h52 * 100, 2) if h52 else None
+        distances["dist_to_52w_low_pct"] = round((closes[-1] - l52) / l52 * 100, 2) if l52 else None
+    else:
+        distances["dist_to_52w_high_pct"] = None
+        distances["dist_to_52w_low_pct"] = None
+        distances["reason_52w"] = ext_250.get("reason") or "52 周数据不可得"
+    ytd = _ytd_low(rows)
+    distances["dist_to_ytd_low_pct"] = ytd.get("dist_pct")
+    distances["ytd_low"] = ytd.get("low")
+    distances["ytd_low_date"] = ytd.get("low_date")
+    if not ytd.get("available"):
+        distances["reason_ytd"] = ytd.get("reason")
+    # 全市场分位字段（四不原则 ①-c/①-d）：per-symbol 全市场 amount/换手分布数据层未落地，
+    # 硬算分位违反 D4 覆盖范围标注规则 → 占位 None + note（D12 WONTFIX，P1 排期）。
+    distances["amount_pctile_20d"] = None
+    distances["turnover_pctile_20d"] = None
+    distances["pctile_note"] = "全市场分位数据层未落地（P1 排期）"
+    result["distances"] = distances
 
     # --- v0.1.9 extensions ---
     ich = ichimoku_summary(highs, lows, closes)

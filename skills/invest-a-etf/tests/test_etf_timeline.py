@@ -253,6 +253,51 @@ def test_compute_history_stats_insufficient():
     assert s2["date_range"] is None
 
 
+def test_compute_history_stats_v026_fields_nav_only():
+    """v0.2.6 D 类字段：nav 链路（无 OHLC）→ ytd_low 可算、ATR 降级 None + note。"""
+    rows = [
+        {"date": "2026-01-05", "close": 100.0},
+        {"date": "2026-01-06", "close": 95.0},
+        {"date": "2026-01-07", "close": 110.0},
+        {"date": "2026-01-08", "close": 105.0},
+        {"date": "2026-01-09", "close": 120.0},
+        {"date": "2026-01-12", "close": 90.0},
+        {"date": "2026-01-13", "close": 118.0},
+    ]
+    s = compute_history_stats(rows)
+    # 年内低点：90 @ 01-12；(118-90)/90*100 = 31.11
+    assert s["ytd_low"] == {"date": "2026-01-12", "close": 90.0}
+    assert s["dist_to_ytd_low_pct"] == pytest.approx(31.11, abs=0.01)
+    # 纯 nav/close 行无 OHLC → ATR 降级
+    assert s["atr14"] is None
+    assert s["atr14_pct"] is None
+    assert "OHLC" in s["atr14_note"]
+
+
+def test_compute_history_stats_v026_fields_ohlc():
+    """v0.2.6 D 类字段：OHLC 路径 ATR14 确定性计算（恒定 TR=2 → atr14=2.0）。"""
+    rows = [
+        {"date": f"2026-01-{i + 1:02d}", "close": 100.0, "high": 101.0, "low": 99.0}
+        for i in range(15)
+    ]
+    s = compute_history_stats(rows)
+    assert s["atr14"] == pytest.approx(2.0)
+    assert s["atr14_pct"] == pytest.approx(2.0)
+    assert s["atr14_note"] is None
+
+
+def test_compute_history_stats_v026_ytd_crosses_years():
+    """年内低点只统计末行所在年份：2025 的 80 不参与。"""
+    rows = [
+        {"date": "2025-12-31", "close": 80.0},
+        {"date": "2026-01-05", "close": 100.0},
+        {"date": "2026-01-06", "close": 95.0},
+    ]
+    s = compute_history_stats(rows)
+    assert s["ytd_low"] == {"date": "2026-01-06", "close": 95.0}
+    assert s["dist_to_ytd_low_pct"] == pytest.approx(0.0)
+
+
 # ---------------------------------------------------------------------------
 # ④ nav 序列 vs baostock 构造序列：交易日序列一致（各源内统计，不做数值级交叉）
 # ---------------------------------------------------------------------------

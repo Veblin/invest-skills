@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-journal
-version: "0.2.5"
+version: "0.2.6"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
 allowed-tools: Bash, Read, Write
@@ -11,7 +11,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-journal v0.2.5
+# invest-a-journal v0.2.6
 
 ## 概述
 
@@ -132,7 +132,7 @@ metadata:
 每个评估输出第一行固定格式：
 
 ```
-🔍 invest-a-journal v0.2.5 · {date} · {环境标签}
+🔍 invest-a-journal v0.2.6 · {date} · {环境标签}
 ```
 
 环境标签从 `market_microstructure.snapshot()` 读取：
@@ -144,7 +144,7 @@ metadata:
 示例：
 
 ```
-🔍 invest-a-journal v0.2.5 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
+🔍 invest-a-journal v0.2.6 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
 ```
 
 ---
@@ -160,7 +160,7 @@ metadata:
 5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
 6. ✅ 检查 LAW 10：末尾有免责声明
 6b. ✅ 检查 P0 数字铁律：每个数字来自引擎字段或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/「Python calc 视角」类未实跑标注（共享规范 §2.3 强制行为 5-6）
-7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.5` badge
+7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.6` badge
 8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
 9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
 
@@ -474,7 +474,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > 本评估的卖出路径含四类参考之核对参考（report-conventions §8）。
 
 ```markdown
-🔍 invest-a-journal v0.2.5 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
+🔍 invest-a-journal v0.2.6 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
 
 ## {方向}: {标的} ({代码}) — {资产类型}
 
@@ -563,6 +563,34 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 
 - 复盘中逐笔填写；`capability` 归因必须对应至少一条 `lessons`
 - 通过 `save_journal` 或 `update_journal` 写入（update 白名单已含 `attribution`）
+
+---
+
+## 日历效应建议（H5 回测裁决）
+
+> v0.2.6 新增 — ABCD 调研 §4.2 ④「8 月中旬-8 月底特别谨慎」经 H5 回测裁决后**降级为建议**。
+> 回测报告：`host-docs/v0.2.6/H5日历效应回测报告_20260814.md`
+
+- **裁决**：❌ 不显著。上证指数 1990-2026 全历史 + 2006+ 双样本 × 8/15-8/31 与 8/11-8/31 双窗口共 4 组合，Welch t 全部 |t|<2、permutation p 全部 >0.05（[来源: H5_backtest_result.json]）
+- **方向性**：窗口内日均收益为负差（-0.11 ~ -0.15pp/日），方向一致但效应量小（|Cohen's d|<0.08）且时变（滚动 5 年窗符号翻转，AMH 检查）
+- **降级后的建议（非硬约束）**：
+  - 8/31 中报披露截止前，业绩预告/快报未覆盖标的保留风险提示，标注「❓弱证据（结构性推断）」
+  - 不设置「窗口内新开仓额外理由」「禁追高」等强制要求（原设计 §4.2 ④ 的硬约束不落地）
+- **复检**：每年 8 月窗口后重跑 `uv run python scripts/backtest_calendar.py` 更新样本；若未来 3 年内出现 t≥3.0 的显著负效应，重新升格为纪律
+
+---
+
+## 情景预案闭环（scenario-plans）
+
+> v0.2.6 新增 — 预案库见 [scenario-plans.md](../../lib/references/scenario-plans.md)（模板 + E-001 + 候选 E-002~E-007 + 闭环机制）。
+> 预案为**研究流程规则，非交易指令**：触发 = 启动重新评估流程（检查什么、哪个假设被证伪），动作由用户决定（LAW 6/6a）。
+
+**评估流程要求**：
+
+1. **触发即记录**：评估时若标的价格满足任一已激活预案的触发条件（如 E-001：收盘进入 4050±0.5% 关口带），按预案检查清单逐项核对，复盘字段必填：触发日期 / 实际路径 / 判断对错 / 错在哪条 / 修订内容
+2. **命中率统计**：每季度对各类预案做方向判断命中率聚合（Python 计算，禁止目视计数）；命中率 < 50% 的预案降级或修订参数
+3. **版本化**：修订 = 新版本 + 修订理由；候选预案（E-002~E-007）启用前须补触发基线统计
+4. **新预案只来自复盘**：复盘发现"没想到的场景"→ 补充进预案库，禁止凭空造预案
 
 ---
 

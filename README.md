@@ -4,7 +4,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.5" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.6" alt="Release" /></a>
 </p>
 
 **A 股投研助手：把数小时的手工研究压缩到几分钟。** 输入代码，自动采集多源数据、以科学方法计算、按学术框架分析，产出带来源追溯的研究备忘录。学习工具，非决策工具。
@@ -130,6 +130,16 @@ ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/invest-a-gap-scan" ~/.workbuddy/s
 - **ACP 安全策略可能拦截 python.exe 启动**（社区实测；Shell 子系统有间歇性静默失败报告）——若 Bash 不可用，转 MCP 包装（FastMCP stdio 包 invest.py 子命令）
 - **环境变量**：用户级环境变量（注册表）设置后必须**完全重启客户端**才生效；`~/.config/investment/.env` 方案与平台无关（引擎原生加载），**推荐优先**
 - **权限**：默认执行脚本需逐条确认；Full Access 模式免确认
+
+**git symlink 物化修复（clone 后一次性）**：Windows 默认 `core.symlinks=false` 会把仓库 14 条技能链接物化成文本文件，技能发现失效。运行重建脚本（NTFS junction 重建 9 个目录链接 + 硬链接重建 5 个 commands 文件，无需管理员/开发者模式，幂等）：
+
+```powershell
+git config core.symlinks true        # 可选但推荐（避免再物化）
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # 若策略拦截 .ps1
+.\scripts\setup_workbuddy_windows.ps1
+```
+
+验证：`cmd /c dir .workbuddy\skills` 应显示 `<JUNCTION>`。方案规格与 T1-T5 验收见 [host-docs/v0.2.6/Windows_workbuddy_symlink兼容方案_20260812.md](host-docs/v0.2.6/Windows_workbuddy_symlink兼容方案_20260812.md)。
 
 #### T1-T12 真机验收表（用户后置执行）
 

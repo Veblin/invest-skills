@@ -1,5 +1,43 @@
 # Changelog — invest skills
 
+## v0.2.6 (2026-08-14)
+
+8.11 直播量化指标体系调研（ABCD）P0 落地：H5 日历效应回测裁决、D 类引擎字段、A 类点位红线、Windows 技能链接重建脚本、情景预案库。
+
+### H5 日历效应回测（8 月中旬谨慎裁决）
+
+- **新增 `skills/lib/backtest.py`**：回测纯函数库（Welch t / permutation 标签洗牌 / 逐年效应 / 滚动 5 年窗 AMH / 统一显著性分级 ✅ t≥3 ⚠️ 2≤t<3 ❌ t<2），供后续 H1/H2 复用
+- **新增 `scripts/backtest_calendar.py`**：上证指数 1990-2026 全历史（akshare sina 主源 → baostock 降级链），8/15-8/31 主窗口 + 8/11-8/31 附窗口 × 全历史/2006+ 双样本
+- **裁决 ❌ 不显著**：4 组合 Welch t 全部 |t|<2、permutation p 全部 >0.05（方向负差一致但效应量小、滚动 5 年符号翻转）→「8 月中旬-8 月底谨慎」**降级为建议**（journal SKILL.md 日历效应建议节），不设硬约束；8/31 中报结构性风险提示保留但标注 ❓ 弱证据
+- 产出：`host-docs/v0.2.6/H5日历效应回测报告_20260814.md` + `H5_backtest_result.json`
+
+### D 类引擎字段（四不原则可计算化）
+
+- **`skills/lib/technical.py`**：extreme 窗口扩 (20,60,120,250)；新增 `_ytd_low` 年内低点；ATR14 暴露 `pct`；`compute()` 输出 `distances`（dist_to_52w_high/low_pct、dist_to_ytd_low_pct，数据不足 None + reason）
+- **`etf_data.py compute_history_stats`**：新增 `dist_to_ytd_low_pct`/`ytd_low`/`atr14`/`atr14_pct`（纯 NAV 链路无 OHLC → None + note）；`current_vs_high_pct` 与 52 周距离等价不重复造
+- **`report_qc.py`**：新字段进 derived 白名单与中文标签
+- **决策（D12 WONTFIX）**：`amount_pctile_20d`/`turnover_pctile_20d` 全市场分位数据层本轮不建——schema 占位 None + note，P1 排期
+
+### A 类点位红线（证据等级 + 自动拦截）
+
+- **report-conventions §2.4**：L1-L4 点位证据等级定义 + 禁止断言表（将回踩 MA/缺口必然回补/BOLL 上轨将回调/斐波支撑/整数关口必然/X 浪将止于）+ 允许表述形式
+- **compliance_rules.yaml 6 条 error 级规则**（wording-level-*）：只拦断言式，不误伤"已回补/未回补/回补非必然"事实句
+- CLAUDE.md 点位引用规范节 + journal SKILL.md 日历效应裁决节
+
+### Windows 技能链接重建（WorkBuddy 兼容）
+
+- **新增 `scripts/setup_workbuddy_windows.ps1`**：仓库 14 条技能链接的 Windows 重建（9 个目录 junction + 5 个 commands 文件硬链接，均免管理员/开发者模式，幂等）；修正方案文档"9 条"计数遗漏（`.claude/commands/*.md` 5 条文件级链接）
+- README WorkBuddy 安装节加 Windows 重建指引；T1-T5 真机验收由用户后置执行
+
+### 情景预案库（references）
+
+- **新增 `skills/lib/references/scenario-plans.md`**：预案模板 + E-001（4050 关口带，基线数字 Python 复跑确认）+ 候选 E-002~E-007 + 闭环迭代机制（触发即记录/季度命中率/版本化）+ LAW 6/6a 边界
+- journal SKILL.md 情景预案闭环节（研究流程规则，非交易指令）
+
+### 测试
+
+- 新增 `skills/lib/tests/test_backtest.py`（19 例）、`test_v026_doc_checks.py`（16 例文档级断言 + 红线双向行为）；test_technical.py/test_etf_timeline.py 补 v0.2.6 字段用例
+
 ## v0.2.5 (2026-08-10)
 
 交易纪律框架（资金视角方法论）D1-D8 + WorkBuddy 平台兼容 + invest-a-limit-up 移除 + code-review 15 项修复。
