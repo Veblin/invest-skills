@@ -160,6 +160,15 @@ def init_db() -> None:
                 raw_json TEXT,
                 collected_at TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS market_daily (
+                date TEXT NOT NULL,
+                ts_code TEXT NOT NULL,
+                open REAL, high REAL, low REAL, close REAL,
+                pre_close REAL, pct_chg REAL, vol REAL, amount REAL,
+                turnover_rate REAL,
+                PRIMARY KEY (date, ts_code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_daily_date ON market_daily(date);
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [
@@ -1196,5 +1205,68 @@ def load_macro_history(days: int = 365) -> list[dict]:
         return load_recent_rows(c, "macro_snapshots", limit=int(days))
     except sqlite3.OperationalError:
         return []  # 表不可用（DB 被替换等）→ 空历史而非抛异常
+    finally:
+        _safe_close(c)
+
+
+def save_market_daily(rows: list[dict]) -> int:
+    """market_daily 批量写入（v0.2.6 全市场分位数据层）。
+
+    rows: [{date, ts_code, open, high, low, close, pre_close, pct_chg, vol, amount, turnover_rate}]
+    merge=True：同日二次写入非 NULL 覆盖、NULL 保留旧值（对齐日快照三件套）。
+    """
+    if not rows:
+        return 0
+    init_db()
+    c = _conn()
+    try:
+        n = upsert_daily_rows(c, "market_daily", rows, pk=("date", "ts_code"), merge=True)
+        c.commit()
+        return n
+    finally:
+        _safe_close(c)
+
+
+def latest_market_daily_date() -> str | None:
+    """market_daily 最新交易日（无数据返回 None）。"""
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute("SELECT MAX(date) AS d FROM market_daily").fetchone()
+        return row["d"] if row and row["d"] else None
+    finally:
+        _safe_close(c)
+
+
+def market_daily_dates() -> set[str]:
+    """market_daily 已有交易日集合（用于增量缺日计算）。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute("SELECT DISTINCT date FROM market_daily").fetchall()
+        return {str(r["date"]) for r in rows}
+    finally:
+        _safe_close(c)
+
+
+def load_market_daily(days: int | None = None, dates: list[str] | None = None) -> list[dict]:
+    """market_daily 明细行读取。
+
+    days=N → 最近 N 个交易日全市场行；dates=[...] → 指定交易日全市场行（date ASC）。
+    两参数互斥；均缺省时返回最近 20 个交易日（分位默认窗）。
+    """
+    init_db()
+    c = _conn()
+    try:
+        if dates is not None:
+            if not dates:
+                return []
+            ph = ",".join("?" * len(dates))
+            rows = c.execute(
+                f"SELECT * FROM market_daily WHERE date IN ({ph}) ORDER BY date ASC", tuple(dates)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        limit = int(days) if days is not None else 20
+        return load_recent_rows(c, "market_daily", limit=limit * 6000, order_col="date")
     finally:
         _safe_close(c)

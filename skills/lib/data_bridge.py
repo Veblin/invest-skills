@@ -48,6 +48,7 @@ DEFAULT_TTL: dict[str, int] = {
     "ad_ratio":      5 * 60,       # 涨跌比：5 分钟
     "lu_ld_ratio":   5 * 60,       # 涨跌停比：5 分钟
     "microstructure": 5 * 60,      # 市场微观结构快照：5 分钟
+    "market_daily_pctiles": 4 * 3600,  # 全市场分位横截面（v0.2.6）：4 小时
     # ETF 维度（invest-a-etf canonical；L1=引擎内进程缓存，L2=本缓存层）
     "etf_spot":           60,      # ETF 全市场现价表（L1 30s 进程内，L2 跨进程）
     "etf_index_pe":       1 * 86400,  # csindex 指数 PE（日频）
@@ -230,6 +231,39 @@ def get_macro(*, force: bool = False) -> dict | None:
         "macro", "all", collect_macro_context, "",
         force=force,
         max_age_seconds=4 * 3600 if _is_trading_hour() else None,
+    )
+
+
+def get_market_daily_pctiles(*, force: bool = False) -> dict | None:
+    """全市场 20 日均值横截面（v0.2.6 分位数据层，缓存 4h）。
+
+    返回 {ts_code: {avg_amount, avg_turnover, n_days}} | None（不可得）。
+    fetch = 惰性增量回填最近 25 个交易日（只补缺失日）→ market_pctile.build_cross_section。
+    依赖 invest-a-stock 的 market_daily/store，仅在路径可用时工作。
+    """
+    try:
+        from lib.market_daily import pctile_as_of_rows  # noqa: E402 — invest-a-stock 路径引导
+        from market_pctile import build_cross_section  # noqa: E402 — skills/lib
+    except ImportError:
+        logger.warning(
+            "get_market_daily_pctiles() requires invest-a-stock lib on sys.path; "
+            "Returning None — callers should guard against."
+        )
+        return None
+
+    def _collect() -> dict | None:
+        try:
+            from lib.market_daily import ensure_market_daily  # noqa: E402
+
+            ensure_market_daily(max_missing=25)
+        except Exception:  # noqa: BLE001 — 增量失败不阻塞读缓存旧数据
+            logger.debug("market_daily ensure failed; falling back to stored rows", exc_info=True)
+        rows = pctile_as_of_rows(days=25)
+        return build_cross_section(rows) or None
+
+    return _fetch_dimension(
+        "market_daily_pctiles", "market", _collect,
+        force=force,
     )
 
 

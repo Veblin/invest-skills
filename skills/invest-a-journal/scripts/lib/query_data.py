@@ -389,6 +389,9 @@ def _compute_technical(result: dict) -> None:
         "boll_upper": None,
         "boll_mid": None,
         "boll_lower": None,
+        # v0.2.6 四不原则位置字段（technical.compute 的 distances 透传 + 全市场分位注入）
+        "distances": None,
+        "atr14_pct": None,
         "kline_days": len(rows) if isinstance(rows, list) else 0,
         "status": "missing",
     }
@@ -441,6 +444,23 @@ def _compute_technical(result: dict) -> None:
         return
 
     result["technical"]["latest_close"] = tech.get("latest_close")
+
+    # v0.2.6 D 类字段：distances 透传（52 周高低/年内低点）+ 全市场分位注入
+    distances = tech.get("distances")
+    if isinstance(distances, dict):
+        try:
+            from data_bridge import get_market_daily_pctiles  # noqa: E402
+            from market_pctile import inject_distances_pctiles  # noqa: E402
+
+            cross = get_market_daily_pctiles()
+            inject_distances_pctiles(tech, result.get("symbol", ""), cross)
+            distances = tech.get("distances")
+        except Exception:  # noqa: BLE001 — 分位不可得时保留 engine 原始占位（None+note）
+            logger.debug("market pctile injection failed; keeping engine placeholder", exc_info=True)
+        result["technical"]["distances"] = distances
+    atr = tech.get("volatility", {}).get("atr", {})
+    if atr.get("available"):
+        result["technical"]["atr14_pct"] = atr.get("pct")
 
     vc = tech.get("volatility_cone", {})
     if vc:
