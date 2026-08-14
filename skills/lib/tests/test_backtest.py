@@ -175,3 +175,114 @@ class TestGrade:
         assert significance_grade(2.0) == "⚠️"
         assert significance_grade(1.99) == "❌"
         assert significance_grade(-3.5) == "❌"
+
+class TestOLS:
+    def test_ols_matches_numpy(self):
+        """ols_multi 与 numpy.linalg.lstsq 对照。"""
+        import random as _r
+        from backtest import ols_multi
+
+        rng = _r.Random(11)
+        n = 120
+        x1 = [rng.gauss(0, 1) for _ in range(n)]
+        x2 = [rng.gauss(0, 2) for _ in range(n)]
+        y = [2.0 + 0.5 * x1[i] - 0.3 * x2[i] + rng.gauss(0, 0.5) for i in range(n)]
+
+        import numpy as np
+
+        X = np.column_stack([np.ones(n), x1, x2])
+        b_np, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+
+        r = ols_multi(y, [x1, x2])
+        assert r["intercept"] == pytest.approx(b_np[0], abs=1e-6)
+        assert r["coefs"][0] == pytest.approx(b_np[1], abs=1e-6)
+        assert r["coefs"][1] == pytest.approx(b_np[2], abs=1e-6)
+        assert 0.0 <= r["r_squared"] <= 1.0
+
+    def test_ols_fail_loud(self):
+        from backtest import ols_multi
+
+        with pytest.raises(ValueError):
+            ols_multi([1.0, 2.0], [[1.0, 2.0]])
+        with pytest.raises(ValueError):
+            ols_multi([1.0, 2.0, 3.0], [[1.0, 2.0]])
+
+
+class TestHAC:
+    def test_hac_matches_ols_on_iid(self):
+        """i.i.d. 残差下 HAC SE ≈ OLS SE（差异 <15%）。"""
+        import random as _r
+        from backtest import hac_t_stats
+
+        rng = _r.Random(13)
+        n = 200
+        x = [rng.gauss(0, 1) for _ in range(n)]
+        y = [0.4 * x[i] + rng.gauss(0, 0.8) for i in range(n)]
+        r = hac_t_stats(y, [x])
+        assert r["hac_se"][1] == pytest.approx(r["se"][1], rel=0.15)
+        assert abs(r["hac_t_stats"][1]) > 2.0  # 真系数 0.4 应显著
+
+
+class TestRegimeSplit:
+    def test_split(self):
+        from backtest import regime_split
+
+        up, down = regime_split([1.0, 2.0, 3.0, 4.0], [True, False, True, False])
+        assert up == [1.0, 3.0]
+        assert down == [2.0, 4.0]
+
+    def test_length_mismatch(self):
+        from backtest import regime_split
+
+        with pytest.raises(ValueError):
+            regime_split([1.0, 2.0], [True])
+
+
+class TestSpreadAndRS:
+    def test_spread(self):
+        from backtest import spread_series
+
+        s = spread_series([100.0, 110.0, 99.0], [100.0, 100.0, 100.0])
+        assert s[0] is None
+        assert s[1] == pytest.approx(0.09531017980, abs=1e-6)  # ln(1.1)
+        assert s[2] == pytest.approx(-0.10536051565, abs=1e-6)  # ln(0.9)
+
+    def test_rs_momentum(self):
+        from backtest import rs_momentum
+
+        s = rs_momentum([0.1, 0.2, 0.3, None, 0.4], 3)
+        assert s[0] is None and s[1] is None
+        assert s[2] == pytest.approx(0.6)
+        # None 不打断窗口
+        assert s[3] == pytest.approx(0.6)
+        assert s[4] == pytest.approx(0.9)
+
+    def test_rs_invalid_lookback(self):
+        from backtest import rs_momentum
+
+        with pytest.raises(ValueError):
+            rs_momentum([0.1], 0)
+
+
+class TestBinomial:
+    def test_known_exact(self):
+        from backtest import binomial_test
+
+        # n=10, k=9, p0=0.5：双侧精确 p = 2*P(X≥9) = 2*(0.00977+0.00098) ≈ 0.0215
+        r = binomial_test(9, 10)
+        assert r["p_value"] == pytest.approx(0.02148, abs=0.001)
+
+    def test_large_n_normal(self):
+        from backtest import binomial_test
+
+        r = binomial_test(600, 1000)
+        assert r["proportion"] == 0.6
+        assert r["p_value"] < 1e-9  # 6.3σ
+
+    def test_bounds(self):
+        from backtest import binomial_test
+
+        with pytest.raises(ValueError):
+            binomial_test(3, 2)
+        with pytest.raises(ValueError):
+            binomial_test(1, 0)

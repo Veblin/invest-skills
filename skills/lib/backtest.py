@@ -225,3 +225,228 @@ def significance_grade(t: float) -> str:
     if t >= 2.0:
         return "⚠️"
     return "❌"
+
+
+# ---- M3: 回归 / 事件 / RS（v0.2.6 P1） ----
+
+
+def _solve_normal(xtx: list[list[float]], xty: list[float]) -> list[float]:
+    """正规方程求解 X'X b = X'y（Gauss 消元 + 回代，K ≤ 4 够用）。"""
+    n = len(xtx)
+    a = [row[:] + [xty[i]] for i, row in enumerate(xtx)]  # 增广矩阵
+    for col in range(n):
+        # 部分主元
+        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
+        a[col], a[pivot] = a[pivot], a[col]
+        if abs(a[col][col]) < 1e-14:
+            raise ValueError("正规方程奇异（设计矩阵列线性相关）")
+        for r in range(col + 1, n):
+            f = a[r][col] / a[col][col]
+            for c in range(col, n + 1):
+                a[r][c] -= f * a[col][c]
+    b = [0.0] * n
+    for r in range(n - 1, -1, -1):
+        b[r] = (a[r][n] - sum(a[r][c] * b[c] for c in range(r + 1, n))) / a[r][r]
+    return b
+
+
+def ols_multi(y: list[float], xs: list[list[float]], names: list[str] | None = None) -> dict:
+    """多元 OLS（含截距，normal equations + 高斯消元，stdlib-only）。
+
+    y: 因变量；xs: 自变量列（各列与 y 等长）；names: 因子名（可选）。
+    返回 {intercept, coefs, se, t_stats, r_squared, n, k, residual_sigma}。
+    样本 < 3 或列长不一致抛 ValueError。
+    """
+    n = len(y)
+    if n < 3:
+        raise ValueError(f"OLS 需要 n≥3，实际 {n}")
+    k = len(xs) + 1  # 含截距
+    if any(len(col) != n for col in xs):
+        raise ValueError("y 与 xs 各列长度必须一致")
+
+    design = [[1.0] * n] + [list(col) for col in xs]
+    xtx = [[sum(design[i][t] * design[j][t] for t in range(n)) for j in range(k)] for i in range(k)]
+    xty = [sum(design[i][t] * y[t] for t in range(n)) for i in range(k)]
+    beta = _solve_normal(xtx, xty)
+
+    fitted = [sum(design[i][t] * beta[i] for i in range(k)) for t in range(n)]
+    resid = [y[t] - fitted[t] for t in range(n)]
+    rss = sum(r * r for r in resid)
+    tss = sum((v - _mean(y)) ** 2 for v in y)
+    r_squared = 1.0 - rss / tss if tss > 0 else 0.0
+    dof = n - k
+    if dof < 1:
+        raise ValueError(f"自由度不足（n={n}, k={k}）")
+    sigma2 = rss / dof
+    # (X'X)^-1 同样高斯消元（k 阶单位矩阵右端）
+    inv = []
+    for i in range(k):
+        e = [0.0] * k
+        e[i] = 1.0
+        inv.append(_solve_normal(xtx, e))
+    se = [math.sqrt(sigma2 * inv[i][i]) for i in range(k)]
+    t_stats = [beta[i] / se[i] if se[i] > 0 else 0.0 for i in range(k)]
+    return {
+        "intercept": beta[0],
+        "coefs": beta[1:],
+        "names": names or [f"x{i + 1}" for i in range(len(xs))],
+        "se": se,
+        "t_stats": t_stats,
+        "r_squared": r_squared,
+        "n": n,
+        "k": k,
+        "residual_sigma": math.sqrt(sigma2),
+    }
+
+
+def _hac_lag(n: int) -> int:
+    """Newey-West 默认滞后：min(n-1, floor(1 + 4*(n/100)^(2/9)))。"""
+    return max(1, min(n - 1, int(1 + 4 * (n / 100.0) ** (2.0 / 9.0))))
+
+
+def hac_t_stats(
+    y: list[float],
+    xs: list[list[float]],
+    names: list[str] | None = None,
+    lag: int | None = None,
+) -> dict:
+    """Newey-West HAC t 统计量（Bartlett 核，重叠样本/自相关稳健）。
+
+    基于 ols_multi 的残差构造 HAC 协方差：V = (X'X)^-1 S (X'X)^-1，
+    S = Σ w_l (Σ x_t e_t x_{t-l}' e_{t-l})。lag 默认 NW 规则。
+    返回 ols 结果 + {hac_se, hac_t_stats, lag}。
+    """
+    ols = ols_multi(y, xs, names)
+    n = len(y)
+    k = len(xs) + 1
+    L = lag if lag is not None else _hac_lag(n)
+    design = [[1.0] * n] + [list(col) for col in xs]
+    beta = [ols["intercept"]] + ols["coefs"]
+    resid = [y[t] - sum(design[i][t] * beta[i] for i in range(k)) for t in range(n)]
+
+    xtx = [[sum(design[i][t] * design[j][t] for t in range(n)) for j in range(k)] for i in range(k)]
+    xtx_inv = [_solve_normal(xtx, [1.0 if i == j else 0.0 for j in range(k)]) for i in range(k)]
+
+    s = [[0.0] * k for _ in range(k)]
+    for i in range(k):
+        for j in range(k):
+            for l in range(L + 1):
+                w = 1.0 - l / (L + 1)  # Bartlett
+                cross = 0.0
+                for t in range(l, n):
+                    cross += design[i][t] * resid[t] * design[j][t - l] * resid[t - l]
+                s[i][j] += w * cross
+    # V = inv(X'X) S inv(X'X)
+    v = [[0.0] * k for _ in range(k)]
+    for i in range(k):
+        for j in range(k):
+            acc = 0.0
+            for p in range(k):
+                for q in range(k):
+                    acc += xtx_inv[i][p] * s[p][q] * xtx_inv[q][j]
+            v[i][j] = acc
+    hac_se = [math.sqrt(max(v[i][i], 0.0)) for i in range(k)]
+    hac_t = [beta[i] / hac_se[i] if hac_se[i] > 0 else 0.0 for i in range(k)]
+    ols["hac_se"] = hac_se
+    ols["hac_t_stats"] = hac_t
+    ols["lag"] = L
+    return ols
+
+
+def regime_split(
+    stock_rets: list[float],
+    gold_up: list[bool],
+) -> tuple[list[float], list[float]]:
+    """Baur (2014) 非对称分桶：金价上涨期/下跌期内的个股日收益。
+
+    gold_up: 与 stock_rets 等长的日级布尔序列（True = 当日金价月/日方向为涨）。
+    长度不一致抛 ValueError。返回 (up_rets, down_rets)。
+    """
+    if len(stock_rets) != len(gold_up):
+        raise ValueError("stock_rets 与 gold_up 长度必须一致")
+    up: list[float] = []
+    down: list[float] = []
+    for r, g in zip(stock_rets, gold_up):
+        if g:
+            up.append(r)
+        else:
+            down.append(r)
+    return up, down
+
+
+def spread_series(a: list[float], b: list[float]) -> list[float | None]:
+    """对数收益差（材料 − 设备）：rs_t = ln(a_t/a_{t-1}) − ln(b_t/b_{t-1})。"""
+    if len(a) != len(b) or len(a) < 2:
+        raise ValueError("a/b 须等长且 ≥2")
+    out: list[float | None] = [None]
+    for i in range(1, len(a)):
+        if a[i - 1] > 0 and b[i - 1] > 0 and a[i] > 0 and b[i] > 0:
+            out.append(math.log(a[i] / a[i - 1]) - math.log(b[i] / b[i - 1]))
+        else:
+            out.append(None)
+    return out
+
+
+def rs_momentum(spread: list[float | None], lookback: int) -> list[float | None]:
+    """RS 动量信号：近 L 日对数差累计（前 L-1 位为 None）。"""
+    if lookback < 1:
+        raise ValueError(f"lookback 须 ≥1，实际 {lookback}")
+    out: list[float | None] = []
+    window: list[float] = []
+    for v in spread:
+        if v is not None:
+            window.append(v)
+            if len(window) > lookback:
+                window.pop(0)
+        if len(window) == lookback:
+            out.append(sum(window))
+        else:
+            out.append(None)
+    return out
+
+
+def binomial_test(k_success: int, n: int, p0: float = 0.5) -> dict:
+    """双侧二项检验（H0: 成功概率 = p0）。
+
+    小样本用精确二项累积，大样本（n≥30 且 np(1-p)≥5）用正态近似 + 连续性校正。
+    返回 {p_value, z, proportion, k, n, p0}。n<1 或 k 越界抛 ValueError。
+    """
+    if n < 1:
+        raise ValueError(f"二项检验需要 n≥1，实际 {n}")
+    if not 0 <= k_success <= n:
+        raise ValueError(f"k={k_success} 越界（0≤k≤{n}）")
+    prop = k_success / n
+
+    def _binom_cdf(limit: int) -> float:
+        # P(X ≤ limit) 精确累积（n 较小时）
+        import math as _m
+
+        total = 0.0
+        for x in range(limit + 1):
+            total += _m.comb(n, x) * (p0**x) * ((1 - p0) ** (n - x))
+        return total
+
+    if n < 30 or n * p0 * (1 - p0) < 5:
+        # 双侧精确：min 侧概率 ×2（截断到 1）
+        if prop <= p0:
+            p = min(1.0, 2 * _binom_cdf(k_success))
+        else:
+            p = min(1.0, 2 * (1 - _binom_cdf(k_success - 1)))
+        z = (prop - p0) / math.sqrt(p0 * (1 - p0) / n) if p0 * (1 - p0) > 0 else 0.0
+    else:
+        z = (prop - p0) / math.sqrt(p0 * (1 - p0) / n)
+        p = 2 * (1.0 - _normal_cdf(abs(z)))
+    return {"p_value": p, "z": z, "proportion": prop, "k": k_success, "n": n, "p0": p0}
+
+
+def _normal_cdf(z: float) -> float:
+    """标准正态 CDF（Abramowitz-Stegun 7.1.26 近似，|z|≤8 精度 ~1e-7）。"""
+    if z < -8.0:
+        return 0.0
+    if z > 8.0:
+        return 1.0
+    t = 1.0 / (1.0 + 0.2316419 * abs(z))
+    pdf = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+    poly = ((((1.330274429 * t - 1.821255978) * t + 1.781477937) * t - 0.356563782) * t + 0.319381530) * t
+    cdf = 1.0 - pdf * poly
+    return cdf if z >= 0 else 1.0 - cdf
