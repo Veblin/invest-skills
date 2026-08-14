@@ -72,6 +72,7 @@ def main() -> int:
             {
                 "ts_code": h.ts_code, "pattern": h.pattern,
                 "bandwidth": h.bandwidth, "endpoint_idx": h.endpoint_idx,
+                "retest_status": h.retest_status, "retest_day": h.retest_day,
                 **h.detail,
             }
             for h in hits

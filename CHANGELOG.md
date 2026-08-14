@@ -20,6 +20,13 @@
 
 **M6 journal §4.3 结构化字段**：6 个 DB 列（止损位/预期亏损/卖出去向/止损移动与触发计数/提取金额）+ 聚合审计函数（stop_audit_stats/extracted_amount_mtd 含冷静期违规）+ evaluation_json 5 个新键 + evaluation-criteria 卖出三维→四维债修复。
 
+### 补漏（2026-08-14 续）：H6 回测 + 回踩分类 + 候选预案基线
+
+- **H6 做T 支撑位反弹**（ABCD §3.2 H6 行，排期表遗漏补录）：新增 `technical.adx`（Wilder 14 日，含 DX 有效窗口与均值初始化两处数值修复）+ `scripts/backtest_h6.py`（抽样 800+沪深300 共 1060 只，MA20/BOLL 下轨/缺口回探三类支撑事件 × ADX 震荡/趋势分层）。**裁决：预注册预期（仅震荡市正超额）方向相反**——震荡市支撑位触及后超额显著为负（-0.11%~-0.40%），趋势市 BOLL 下轨为唯一正超额层（+0.07%~+0.17%）；缺口回探两类均为负（与 JBEF 2020 延续一致）
+- **回踩状态分类落地**：`lmw.classify_retest`（no_retest/clean_retest/deep_retest + retest_day，窗口 3-10 日）+ 扫描器 ScanHit 字段 + SKILL.md C 级标注；csi300 实测 21 命中 → no_retest 11/clean 1/deep 9
+- **E-002~E-007 候选预案基线**：`scripts/scenario_baselines.py`（六条触发定义写死，E-001 同口径）+ scenario-plans 候选表补基线栏。关键发现：E-002~E-004 绝对点位在 35 年历史中处常态区（触达 8000+ 次，基线≈全样本、信息含量低）；E-006 BOLL 上轨触达 +5 日 +2.11%（胜率 62%）显著强于无条件基线（追势延续）
+- 测试新增 14 例（ADX 手算对照/H6 事件检测/回踩三态/触发判定）；报告 1 份 + JSON 存档 docs/data/
+
 ### 第一阶段：P0 落地
 
 8.11 直播量化指标体系调研（ABCD）P0 落地：H5 日历效应回测裁决、D 类引擎字段、A 类点位红线、Windows 技能链接重建脚本、情景预案库。

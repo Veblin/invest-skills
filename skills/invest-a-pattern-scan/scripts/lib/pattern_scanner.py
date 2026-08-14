@@ -30,7 +30,8 @@ class ScanHit:
     endpoint_idx: int
     bandwidth: float
     detail: dict = field(default_factory=dict)
-    retest_status: str | None = None  # P2 回踩分类占位（本轮不实现）
+    retest_status: str | None = None  # v0.2.6 补漏：classify_retest 落地（C 级实操统计）
+    retest_day: int | None = None     # endpoint 后第几天发生回踩（no_retest 为 None）
 
 
 def fetch_daily_and_adj(dates: list[str]):
@@ -53,7 +54,7 @@ def scan_universe(
     每列对应一条「规则」（形态×带宽×窗口）在全部命中上的 forward 收益；
     未命中股票的规则列以 0 填充（已扣无条件基线语义：命中 vs 全池均值）。
     """
-    from lmw import detect_patterns, pattern_forward_stats  # noqa: E402
+    from lmw import classify_retest, detect_patterns, pattern_forward_stats  # noqa: E402
 
     kline_source = load_gap_scan_module("kline_source")
     source, daily, adj = fetch_daily_and_adj(dates)
@@ -76,12 +77,16 @@ def scan_universe(
                     ep = p["endpoint_idx"]
                     if ep >= len(closes) - 1:
                         continue
+                    pat_name = "double_bottom" if pat_kind == "double_bottoms" else "triangle_bottom"
+                    ret = classify_retest(closes, {**p, "pattern": pat_name})
                     hits.append(ScanHit(
                         ts_code=code,
-                        pattern="double_bottom" if pat_kind == "double_bottoms" else "triangle_bottom",
+                        pattern=pat_name,
                         endpoint_idx=ep,
                         bandwidth=bw,
                         detail=p,
+                        retest_status=ret["status"],
+                        retest_day=ret["retest_day"],
                     ))
         # 每只股票每种形态×带宽的 forward 收益（取首个命中；无命中 None）
         for bw in bandwidths:

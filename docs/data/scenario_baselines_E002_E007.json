@@ -1,0 +1,164 @@
+{
+  "meta": {
+    "date_range": [
+      "1990-12-19",
+      "2026-08-14"
+    ],
+    "n_days": 8704,
+    "baseline": {
+      "n": 8699,
+      "mean_5d_pct": 0.3428,
+      "win_rate_5d": 0.5266
+    }
+  },
+  "scenarios": {
+    "E-002": {
+      "label": "弱势情景切换",
+      "kind": "close_below",
+      "level": 3909.5,
+      "n_hits": 8270,
+      "+1": {
+        "n": 8270,
+        "mean_pct": 0.0742,
+        "median_pct": 0.0521,
+        "win_rate": 0.5255
+      },
+      "+3": {
+        "n": 8270,
+        "mean_pct": 0.2251,
+        "median_pct": 0.0995,
+        "win_rate": 0.521
+      },
+      "+5": {
+        "n": 8270,
+        "mean_pct": 0.3866,
+        "median_pct": 0.2067,
+        "win_rate": 0.5271
+      }
+    },
+    "E-003": {
+      "label": "生死线失守",
+      "kind": "close_below",
+      "level": 3741.11,
+      "n_hits": 8157,
+      "+1": {
+        "n": 8157,
+        "mean_pct": 0.071,
+        "median_pct": 0.0498,
+        "win_rate": 0.5237
+      },
+      "+3": {
+        "n": 8157,
+        "mean_pct": 0.2203,
+        "median_pct": 0.0917,
+        "win_rate": 0.5193
+      },
+      "+5": {
+        "n": 8157,
+        "mean_pct": 0.3775,
+        "median_pct": 0.188,
+        "win_rate": 0.5247
+      }
+    },
+    "E-004": {
+      "label": "五浪目标跟踪",
+      "kind": "close_below",
+      "level": 3745.17,
+      "n_hits": 8159,
+      "+1": {
+        "n": 8159,
+        "mean_pct": 0.0717,
+        "median_pct": 0.0499,
+        "win_rate": 0.5238
+      },
+      "+3": {
+        "n": 8159,
+        "mean_pct": 0.221,
+        "median_pct": 0.0923,
+        "win_rate": 0.5194
+      },
+      "+5": {
+        "n": 8159,
+        "mean_pct": 0.379,
+        "median_pct": 0.1881,
+        "win_rate": 0.5248
+      },
+      "touch_wave_target_60d": {
+        "n": 7590,
+        "ratio": 0.9303
+      }
+    },
+    "E-005": {
+      "label": "缺口带突破确认",
+      "kind": "close_above_3d",
+      "level": 4015.0,
+      "n_hits": 322,
+      "+1": {
+        "n": 322,
+        "mean_pct": -0.0961,
+        "median_pct": 0.1602,
+        "win_rate": 0.5404
+      },
+      "+3": {
+        "n": 322,
+        "mean_pct": -0.3469,
+        "median_pct": 0.0607,
+        "win_rate": 0.5155
+      },
+      "+5": {
+        "n": 322,
+        "mean_pct": -0.6829,
+        "median_pct": 0.0118,
+        "win_rate": 0.5031
+      }
+    },
+    "E-006": {
+      "label": "BOLL 上轨触达",
+      "kind": "boll_position",
+      "level": 95.0,
+      "n_hits": 795,
+      "+1": {
+        "n": 795,
+        "mean_pct": 0.5289,
+        "median_pct": 0.1806,
+        "win_rate": 0.5811
+      },
+      "+3": {
+        "n": 795,
+        "mean_pct": 1.4709,
+        "median_pct": 0.54,
+        "win_rate": 0.6289
+      },
+      "+5": {
+        "n": 795,
+        "mean_pct": 2.1068,
+        "median_pct": 0.7605,
+        "win_rate": 0.6189
+      }
+    },
+    "E-007": {
+      "label": "反弹触及 50% 位",
+      "kind": "close_near",
+      "level": 3960.26,
+      "n_hits": 26,
+      "+1": {
+        "n": 26,
+        "mean_pct": 0.0741,
+        "median_pct": 0.2507,
+        "win_rate": 0.6538
+      },
+      "+3": {
+        "n": 26,
+        "mean_pct": -0.6021,
+        "median_pct": 0.2522,
+        "win_rate": 0.5769
+      },
+      "+5": {
+        "n": 26,
+        "mean_pct": -0.0305,
+        "median_pct": 0.6627,
+        "win_rate": 0.6154
+      }
+    }
+  }
+}

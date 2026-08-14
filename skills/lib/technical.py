@@ -1085,7 +1085,8 @@ def adx(highs: list[float], lows: list[float], closes: list[float], n: int = 14)
             if i < n:
                 sm.append(sum(vals[: i + 1]))
             else:
-                sm.append(sm[-1] * (n - 1) / n + v)
+                # Wilder 递推：(prev×(n−1) + curr) / n —— curr 也要 /n
+                sm.append(sm[-1] * (n - 1) / n + v / n)
         return sm
 
     tr: list[float] = []
@@ -1110,18 +1111,26 @@ def adx(highs: list[float], lows: list[float], closes: list[float], n: int = 14)
     plus_s = _wilder(plus_dm)
     minus_s = _wilder(minus_dm)
 
-    dx: list[float] = []
-    for i in range(m):
+    # DX 仅从 TR>0 的索引起有效（i=0 的 dx=0 为无效值，混入会拖低初值、
+    # 拖慢收敛）；均值初始化（首个 = 前 n 个有效 DX 均值）+ Wilder 递推；
+    # 发布从 2n−1 起（对齐主流 ADX 惯例的输出起始）。
+    dx_idx: list[int] = []
+    dx_vals: list[float] = []
+    for i in range(1, m):
         if tr_s[i] > 0:
             pdi = 100 * plus_s[i] / tr_s[i]
             mdi = 100 * minus_s[i] / tr_s[i]
             denom = pdi + mdi
-            dx.append(100 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
-        else:
-            dx.append(0.0)
+            dx_vals.append(100 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
+            dx_idx.append(i)
 
-    # ADX = DX 的 Wilder 平滑，有效起始 = n−1（DX 首值）+ n → 2n−1
-    adx_s = _wilder(dx)
-    for i in range(2 * n - 1, m):
-        out[i] = round(adx_s[i], 2)
+    adx_s: list[float] = []
+    for j, v in enumerate(dx_vals):
+        if j < n:
+            adx_s.append(sum(dx_vals[: j + 1]) / (j + 1))
+        else:
+            adx_s.append(adx_s[-1] * (n - 1) / n + v / n)
+    for j in range(n - 1, len(adx_s)):
+        if dx_idx[j] >= 2 * n - 1:
+            out[dx_idx[j]] = round(adx_s[j], 2)
     return out

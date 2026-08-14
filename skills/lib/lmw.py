@@ -255,3 +255,48 @@ def pattern_forward_stats(
             if ep + h < len(closes) and closes[ep + h] > 0:
                 out[f"+{h}"].append((closes[ep + h] / closes[ep] - 1) * 100.0)
     return out
+
+
+def classify_retest(
+    closes: list[float],
+    pattern: dict,
+    window: tuple[int, int] = (3, 10),
+) -> dict:
+    """回踩状态分类（v0.2.6 P2 落地，实操统计 C 级——非学术）。
+
+    突破（endpoint）后 window 日内首次 low ≤ reference 的日子：
+      - no_retest：窗口内从未回踩（最强形态，实操统计：无回踩突破后续表现最好）
+      - clean_retest：首次回踩日 close ≥ reference（收盘不破）
+      - deep_retest：首次回踩日 close < reference（收盘跌破）
+    reference 位：double_bottom 用形态中间峰 peak；triangle_bottom 用
+    smoothed[peak2_idx]（match_triangle_bottom 已保存索引——为保持
+    classify_retest 纯函数、只依赖 closes+pattern，reference 由调用方
+    在 pattern 中提供 `reference` 键；缺失时 double_bottom 用 peak、
+    triangle_bottom 用 peak2_idx 映射到 closes（原形态的 smoothed 峰位
+    与 closes 原始价近似，容差内可用））。
+
+    返回 {status, retest_day}（retest_day = endpoint 后第几天，no_retest 为 None）。
+    """
+    ep = pattern.get("endpoint_idx")
+    if ep is None or ep >= len(closes) - 1:
+        return {"status": "insufficient", "retest_day": None}
+    ref = pattern.get("reference")
+    if ref is None:
+        if pattern.get("pattern") == "double_bottom":
+            ref = pattern.get("peak")
+        elif pattern.get("pattern") == "triangle_bottom":
+            p2 = pattern.get("peak2_idx")
+            ref = closes[p2] if p2 is not None and 0 <= p2 < len(closes) else None
+    if ref is None:
+        return {"status": "insufficient", "retest_day": None}
+    lo, hi = window
+    for offset in range(lo, hi + 1):
+        day = ep + offset
+        if day >= len(closes):
+            break
+        if closes[day] <= ref:
+            status = "clean_retest" if closes[day] >= ref else "deep_retest"
+            if closes[day] == ref:
+                status = "clean_retest"
+            return {"status": status, "retest_day": offset}
+    return {"status": "no_retest", "retest_day": None}
