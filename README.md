@@ -169,6 +169,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # 若策略拦截 .ps1
 | **invest-a-journal** | 交易方案四维评估（逻辑/盲点/仓位/风险收益） | `/invest-a-journal` |
 | **invest-a-pulse** | 市场情绪全景（杠杆/广度/情绪/资金/估值） | `/invest-a-pulse` |
 | **invest-a-gap-scan** | 跳空缺口扫描（向上缺口+MA60 上方+未回补） | `/invest-a-gap-scan` |
+| **invest-a-pattern-scan** | 底部形态扫描（LMW 双底/三角形底 + Reality Check 防护） | `/invest-a-pattern-scan` |
 
 ## 一张图：流程如何固化到 Python
 
