@@ -106,7 +106,7 @@ def detect_events(df: pd.DataFrame) -> list[dict]:
             events.append({"idx": i, "type": "boll_lower", "regime": regime})
         # 缺口支撑：近 60 日向上缺口首次回探（倒序扫描，认最近的未回探缺口；
         # 已回探的缺口跳过继续向更老缺口找——break 只在事件实际生成时）
-        for g in range(i - 2, max(0, i - GAP_LOOKBACK) - 1, -1):
+        for g in range(i - 2, max(1, i - GAP_LOOKBACK) - 1, -1):
             if lows[g] > highs[g - 1]:
                 g_lo = highs[g - 1]
                 if lows[i] <= g_lo:

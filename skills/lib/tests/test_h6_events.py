@@ -110,3 +110,20 @@ class TestDetectEvents:
         df = h6.compute_indicators(_frame(closes, highs, lows))
         events = h6.detect_events(df)
         assert all(e["regime"] in ("ranging", "trending") for e in events)
+
+    def test_no_phantom_gap_at_series_start(self):
+        """回归（finding #6）：i=60 扫描 g 不得下探到 0（highs[-1] 是未来数据）。
+
+        高位平台后崩盘：lows[0]=99.6 > highs[-1]=50.4、lows[60]=49.6 <= 50.4、
+        全程无真实向上缺口。旧实现以 highs[-1]（末日高点）为下沿在 i=60
+        伪造 gap 事件（已实测复现 [(60, 0, 50.4)]）；修复后必须 0 事件。
+        """
+        closes = [100.0] * 60 + [50.0] * 20
+        highs = [c + 0.4 for c in closes]
+        lows = [c - 0.4 for c in closes]
+        df = _frame(closes, highs, lows)
+        df["adx14"] = 30.0
+        df["ma20"] = float("nan")
+        df["boll_lower"] = float("nan")
+        gap_events = [e for e in h6.detect_events(df) if e["type"] == "gap"]
+        assert gap_events == []
