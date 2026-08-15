@@ -1248,6 +1248,18 @@ def save_futures_daily(rows: list[dict]) -> int:
         _safe_close(c)
 
 
+def clear_futures_daily() -> int:
+    """清空 futures_daily（--force 全量重建用）。返回删除行数。"""
+    init_db()
+    c = _conn()
+    try:
+        n = c.execute("DELETE FROM futures_daily").rowcount
+        c.commit()
+        return n
+    finally:
+        _safe_close(c)
+
+
 def load_futures_daily(symbol: str | None = None, limit: int = 5000) -> list[dict]:
     """futures_daily 读取（symbol=None 全品种，date ASC）。"""
     init_db()

@@ -27,10 +27,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="futures_daily 股指期货回填")
     parser.add_argument("--start", default="2015-04", help="起始月 YYYY-MM")
     parser.add_argument("--max", dest="max_contracts", type=int, default=600)
+    parser.add_argument("--force", action="store_true",
+                        help="清空 futures_daily 后全量重建（数据口径修复用）")
     args = parser.parse_args()
 
     store.init_db()
-    result = ensure_futures_daily(start_month=args.start, max_contracts=args.max_contracts)
+    result = ensure_futures_daily(start_month=args.start, max_contracts=args.max_contracts,
+                                  force=args.force)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     print(f"latest date: {store.latest_futures_date()}")
     return 1 if result["failed"] else 0

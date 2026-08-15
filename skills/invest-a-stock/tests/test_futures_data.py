@@ -27,7 +27,7 @@ class _FakeClient:
                 "ts_code": ["IF2608.CFX", "IF2609.CFX", "IC2608.CFX", "IM2608.CFX"],
                 "list_date": ["20260701"] * 4,
                 "delist_date": ["20260831"] * 4,
-                "last_ddate": ["20260821"] * 4,
+                "last_trade_date": ["20260821", "20260918", "20260821", "20260821"],
             })
         if api_name == "fut_daily":
             code = kwargs["ts_code"]
@@ -41,13 +41,52 @@ class _FakeClient:
         return pd.DataFrame()
 
 
+class _WindowFakeClient(_FakeClient):
+    def query(self, api_name, **kwargs):
+        if api_name == "fut_daily":
+            return pd.DataFrame({
+                "trade_date": ["20260825", "20260814", "20260725", "20260710"],
+                "settle": [4652.4, 4650.0, 4600.0, 4590.0],
+                "open": [1, 1, 1, 1], "high": [1, 1, 1, 1], "low": [1, 1, 1, 1],
+                "close": [4648.4, 4646.0, 4596.0, 4586.0],
+                "oi": [33117.0] * 4, "oi_chg": [-100.0] * 4,
+            })
+        return super().query(api_name, **kwargs)
+
+
+class _FullFakeClient(_FakeClient):
+    """每合约返回 2026-06-01..2026-09-30 全部工作日行（模拟完整生命周期）。"""
+    def query(self, api_name, **kwargs):
+        if api_name == "fut_daily":
+            import datetime
+            dates = []
+            d0 = datetime.date(2026, 6, 1)
+            while d0 <= datetime.date(2026, 9, 30):
+                if d0.weekday() < 5:
+                    dates.append(d0.isoformat().replace("-", ""))
+                d0 += datetime.timedelta(days=1)
+            n = len(dates)
+            return pd.DataFrame({
+                "trade_date": dates,
+                "settle": [4600.0] * n, "open": [1.0] * n, "high": [1.0] * n,
+                "low": [1.0] * n, "close": [4596.0] * n, "oi": [30000.0] * n,
+                "oi_chg": [0.0] * n,
+            })
+        return super().query(api_name, **kwargs)
+
+
 class TestContractSeries:
     def test_series_from_codes(self):
         client = _FakeClient()
         series = fd.contract_series(client)
-        assert series["IF"] == ["IF2608.CFX", "IF2609.CFX"]
+        assert series["IF"] == [("IF2608.CFX", "2026-08-21"), ("IF2609.CFX", "2026-09-18")]
         assert "IC" in series and "IM" in series
         assert "T1" not in series
+
+    def test_expiry_fallback_third_friday(self):
+        # fut_basic 无 last_trade_date/last_ddate → 兜底计算该月第三个周五
+        assert fd._third_friday("2608") == "2026-08-21"
+        assert fd._third_friday("1504") == "2015-04-17"  # IF1504 真实到期日
 
 
 class TestComputeBasis:
@@ -69,13 +108,31 @@ class TestComputeBasis:
         assert fd.compute_basis(rows, {}) == []
 
 
-class TestFetchContractMonthlyUniqueness:
-    def test_only_expiry_month_rows(self, monkeypatch):
-        client = _FakeClient()
-        rows = fd.fetch_contract(client, "IF2608.CFX")
-        # fake 返回 202608 数据 → 保留；跨月行应被滤除（此处 fake 同月，验证路径）
-        assert all(r["date"][:7] == "2026-08" for r in rows)
-        assert rows[0]["symbol"] == "IF"
+class TestFetchContractWindow:
+    def test_window_partition(self):
+        rows = fd.fetch_contract(_FakeClient(), "IF2608.CFX", "2026-07-17", "2026-08-21")
+        assert all("2026-07-17" < r["date"] <= "2026-08-21" for r in rows)
+        assert all(r["symbol"] == "IF" for r in rows)
+        assert len(rows) == 2
+
+    def test_window_excludes_outside_rows(self):
+        rows = fd.fetch_contract(_WindowFakeClient(), "IF2608.CFX", "2026-07-17", "2026-08-21")
+        assert [r["date"] for r in rows] == ["2026-08-14", "2026-07-25"]
+
+    def test_front_month_series_no_gap(self):
+        """回归（finding #1）：月内到期日→月末的交易日必须由下一合约补齐。"""
+        all_rows = []
+        contracts = [("IF2607.CFX", "2026-07-17"), ("IF2608.CFX", "2026-08-21"),
+                     ("IF2609.CFX", "2026-09-18")]
+        client = _FullFakeClient()
+        prev = "2026-05-31"
+        for code, expiry in contracts:
+            rows = fd.fetch_contract(client, code, prev, expiry)
+            all_rows.extend(rows)
+            prev = expiry
+        dates = sorted(r["date"] for r in all_rows)
+        assert len(dates) == len(all_rows)  # 相邻合约重叠日只归一份（无重复）
+        assert any("2026-07-18" <= d <= "2026-07-31" for d in dates)  # 旧实现此处为洞
 
 
 class TestStoreRoundtrip:
@@ -93,6 +150,20 @@ class TestStoreRoundtrip:
         assert loaded[0]["basis_pct"] == pytest.approx(-0.2889)
         assert store.latest_futures_date() == "2026-08-14"
         assert store.futures_contracts() == {"IF2608.CFX"}
+
+
+class TestClearFuturesDaily:
+    def test_clear(self, isolated_store):
+        rows = [{
+            "date": "2026-08-14", "symbol": "IF", "contract": "IF2608.CFX",
+            "open": 1, "high": 1, "low": 1, "close": 4648.4, "settle": 4652.4,
+            "oi": 33117.0, "oi_chg": -1316.0,
+            "basis_pts": -13.48, "basis_pct": -0.2889, "oi_change_pct": -3.82,
+            "source": "tushare",
+        }]
+        store.save_futures_daily(rows)
+        assert store.clear_futures_daily() == 1
+        assert store.load_futures_daily(symbol="IF") == []
 
 
 class TestCompoundOiChange:

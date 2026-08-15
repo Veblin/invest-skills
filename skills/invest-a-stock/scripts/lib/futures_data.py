@@ -42,39 +42,64 @@ def _make_client() -> TushareClient:
     return TushareClient(token=token, daily_call_limit=daily, rate_limit_per_minute=rate)
 
 
-def contract_series(client: TushareClient) -> dict[str, list[str]]:
-    """fut_basic 元数据 → {IF: [IF1504.CFX, IF1505.CFX, ...]}（当月合约序列）。
+def _third_friday(ym: str) -> str:
+    """'2608' → 该月第三个周五 'YYYY-MM-DD'（CFFEX 到期日兜底计算）。"""
+    import datetime
 
-    CFFEX 合约代码即到期月（IF2608.CFX = 2026-08 到期）——每个月恰好一个
-    当月合约；季月合约（IF2609/IF2612）在其到期月自然成为当月合约，
-    序列按代码排序即按月连续。同月不可能出现两个同品种合约代码。
+    y, m = 2000 + int(ym[:2]), int(ym[2:4])
+    first = datetime.date(y, m, 1)
+    fri = first + datetime.timedelta(days=(4 - first.weekday()) % 7)
+    return (fri + datetime.timedelta(days=14)).isoformat()
+
+
+def contract_series(client: TushareClient) -> dict[str, list[tuple[str, str]]]:
+    """fut_basic 元数据 → {IF: [(IF1504.CFX, '2015-04-17'), ...]}（按代码升序）。
+
+    到期日取 last_trade_date；缺失退 last_ddate（金融期货最后交易日=最后交割日）；
+    再缺失按 CFFEX 规则兜底计算该合约月第三个周五。当月合约序列据此划分
+    窗口：前合约到期日 < date <= 本合约到期日（相邻合约重叠日按到期日
+    边界划分，不再按月划分——月内到期日→月末的交易日归下一合约）。
     """
     df = client.query("fut_basic", exchange="CFFEX")
     if df is None or df.empty:
         raise RuntimeError("fut_basic(CFFEX) 无数据")
-    series: dict[str, set[str]] = {}
+    series: dict[str, set[tuple[str, str]]] = {}
     for _, r in df.iterrows():
         code = str(r.get("ts_code", ""))
         if len(code) != 10 or code[6:] != ".CFX" or code[:2] not in INDEX_MAP:
             continue
-        series.setdefault(code[:2], set()).add(code)
+        lt = str(r.get("last_trade_date") or r.get("last_ddate") or "")
+        if len(lt) == 8:
+            expiry = f"{lt[:4]}-{lt[4:6]}-{lt[6:8]}"
+        else:
+            expiry = _third_friday(code[2:6])
+        series.setdefault(code[:2], set()).add((code, expiry))
     return {sym: sorted(codes) for sym, codes in series.items()}
 
 
-def fetch_contract(client: TushareClient, contract: str) -> list[dict]:
-    """单合约全生命周期 fut_daily → 标准化 rows（date ISO）。"""
+def fetch_contract(
+    client: TushareClient, contract: str,
+    window_start: str, window_end: str,
+) -> list[dict]:
+    """单合约 fut_daily → 当月窗口内 rows（window_start < date <= window_end）。
+
+    window_end = 本合约到期日（last_trade_date）；window_start = 前一合约到期日
+    （序列首合约传 start_month 月初前一日，使月初含入）。当月口径唯一性由
+    到期日边界保证：相邻合约重叠交易日的行按边界划分，每月 40% 交易日
+    不再丢失（原按月过滤：到期日→月末的行属于下月合约却未被下月窗口收留）。
+    """
     df = client.query("fut_daily", ts_code=contract)
     rows: list[dict] = []
-    exp_month = f"20{contract[2:6]}"  # "2608" → "202608"
     for _, r in df.iterrows():
         d = str(r.get("trade_date", ""))
         settle = safe_float(r.get("settle"))
         if len(d) != 8 or settle is None:
             continue
-        if d[:6] != exp_month:
-            continue  # 当月口径唯一性：只保留到期月内数据（相邻合约重叠日按月划分）
+        iso = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        if not (window_start < iso <= window_end):
+            continue
         rows.append({
-            "date": f"{d[:4]}-{d[4:6]}-{d[6:8]}",
+            "date": iso,
             "symbol": contract[:2],
             "contract": contract,
             "open": safe_float(r.get("open")),
@@ -182,16 +207,29 @@ def fetch_sina_fallback() -> list[dict]:
     return rows
 
 
-def ensure_futures_daily(start_month: str = "2015-04", max_contracts: int = 200) -> dict:
+def ensure_futures_daily(
+    start_month: str = "2015-04", max_contracts: int = 200, *, force: bool = False,
+) -> dict:
     """回填/增量：已入库合约跳过（断点续跑）。返回 {fetched, failed, skipped}。
+
+    force=True：先清空 futures_daily 再全量重建（finding #1 数据修复用——
+    旧表按月划分含每月 40% 交易日洞，必须重建）。
 
     Tushare 主源失败 → sina 降级（fill-only：仅补缺失日期，绝不覆盖已有行，
     source='sina' 标注——merge COALESCE 逐列覆盖会把 close 口径的基差写进
     settle 口径的 tushare 行，杂交口径必须禁止）。
     """
-    existing = store.futures_contracts()
+    import datetime
+
+    if force:
+        store.clear_futures_daily()
+        existing: set[str] = set()
+    else:
+        existing = store.futures_contracts()
     # start_month "2015-04" → "1504"（与合约代码月份段同格式，字符串可比）
     start_ym = start_month.replace("-", "")[2:]
+    first_start = (datetime.date.fromisoformat(f"{start_month}-01")
+                   - datetime.timedelta(days=1)).isoformat()
     try:
         client = _make_client()
         series = contract_series(client)
@@ -199,15 +237,17 @@ def ensure_futures_daily(start_month: str = "2015-04", max_contracts: int = 200)
         fetched: list[str] = []
         failed: dict[str, str] = {}
         for sym, contracts in series.items():
-            for contract in contracts:
+            prev_lt = first_start  # 首合约窗口起点 = 起始月月初前一日（月初含入）
+            for contract, expiry in contracts:
                 if contract[2:6] < start_ym:
                     continue
                 if contract in existing:
+                    prev_lt = expiry
                     continue
                 if len(fetched) >= max_contracts:
                     break
                 try:
-                    rows = fetch_contract(client, contract)
+                    rows = fetch_contract(client, contract, prev_lt, expiry)
                     rows = compute_basis(rows, index_closes.get(sym, {}))
                     if rows:
                         store.save_futures_daily(rows)
@@ -215,6 +255,7 @@ def ensure_futures_daily(start_month: str = "2015-04", max_contracts: int = 200)
                 except Exception as exc:  # noqa: BLE001 — 逐合约容错
                     failed[contract] = str(exc)
                     logger.warning("futures fetch failed %s: %s", contract, exc)
+                prev_lt = expiry
         return {"fetched": fetched, "failed": failed, "skipped": len(existing),
                 "source": "tushare"}
     except Exception as exc:  # noqa: BLE001 — 主源整体失败 → sina 降级
