@@ -32,7 +32,6 @@ for _p in (
 from backtest import describe, permutation_test, significance_grade, welch_t  # noqa: E402
 from multiple_testing import bootstrap_ci  # noqa: E402
 from stats import expanding_percentile_rank  # noqa: E402
-from lib.futures_data import compound_oi_change  # noqa: E402
 
 INDEX_SYMBOL = {"IF": "sh000300", "IH": "sh000016", "IC": "sh000905", "IM": "sh000852"}
 ETF_MAP = {"IC": ["510500"], "IM": ["512100", "159845"]}  # 基差品种 → ETF
@@ -211,6 +210,7 @@ def _basis_state_after(
 
 def run_f3(out_path: Path) -> dict:
     """持仓量 20 日变化方向 → 后 20 日基差演变 × 指数收益联合分布 + Granger 方向检验。"""
+    from lib.futures_data import compound_oi_change  # noqa: E402 — 惰性导入（invest-a-stock 路径，与 load_futures_df 同模式）
     results = {"hypothesis": "F3", "scenarios": {}, "granger": {}}
     for sym, idx_code in INDEX_SYMBOL.items():
         fdf = load_futures_df(sym)
