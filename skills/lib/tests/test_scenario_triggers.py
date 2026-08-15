@@ -65,3 +65,37 @@ class TestTriggers:
         flags = sb.trigger_flags(df, {"kind": "boll_position", "level": 95.0})
         # 急涨段 BOLL 位置应 ≥95（上轨附近）
         assert any(flags.tolist()[20:])
+
+    def test_close_below_no_phantom_at_series_start(self):
+        # 回归（finding #4）：序列起点即处于跌破状态 → 首行不得计"跌破首日"
+        # below=[T,T,F,F,T]；起点前状态视为已存在 → idx0 抑制；idx4 再入计事件
+        df = _frame([98.0, 97.0, 99.0, 101.0, 98.5])
+        flags = sb.trigger_flags(df, {"kind": "close_below", "level": 99.0})
+        assert flags.tolist() == [False, False, False, False, True]
+
+    def test_close_near_once_per_state(self):
+        # 回归（finding #3）：连续在带内 → 仅段首日计事件
+        # near=[F,T,T,F,T] → 去重后 [F,T,F,F,T]
+        df = _frame([4000.0, 3960.0, 3959.0, 4000.0, 3960.0])
+        flags = sb.trigger_flags(df, {"kind": "close_near", "level": 3960.26, "tol_pct": 0.3})
+        assert flags.tolist() == [False, True, False, False, True]
+
+    def test_boll_position_once_per_state(self):
+        # 回归（finding #3）：急涨段连续 4 日 pos>=95 → 仅段首日计事件
+        df = _frame([100.0] * 20 + [130.0] * 5)
+        flags = sb.trigger_flags(df, {"kind": "boll_position", "level": 95.0})
+        assert flags.sum() == 1
+        assert flags.tolist().index(True) == 20
+
+    def test_touch_window_includes_day_60(self):
+        # 回归（finding #5）：第 60 日（i+60）触达目标位必须计入（旧切片漏第 60 日）
+        closes = [100.0] * 80
+        closes[10] = 90.0   # 事件日 i=10
+        closes[70] = 50.0   # i+60 触达目标 60
+        r = sb.touch_within(closes, [10], [60.0])
+        assert r == {"n": 1, "ratio": 1.0}
+
+    def test_touch_truncated_window_excluded(self):
+        # 窗口被序列末尾截断（不足 60 日）→ 事件不入分母（对齐 lmw truncated 语义）
+        r = sb.touch_within([100.0] * 30, [10], [60.0])
+        assert r is None

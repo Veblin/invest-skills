@@ -46,28 +46,56 @@ def fetch_index() -> pd.DataFrame:
 
 
 def trigger_flags(df: pd.DataFrame, spec: dict) -> pd.Series:
-    """触发日布尔序列（按 kind 分派）。"""
+    """触发日布尔序列（按 kind 分派）。
+
+    事件日 = 状态段首日（每段仅计一次，避免 forward 窗口重叠自相关）；
+    数据起点前状态视为已存在（fill_value=True）——序列起点即处于某状态
+    时首行不计事件（1990-12-19 起即低于各触发位 → 不产生"跌破首日"幻影）。
+    """
     closes = df["close"].astype(float)
     kind = spec["kind"]
     level = spec["level"]
     if kind == "close_below":
-        # 事件日 = 跌破状态首日（每段状态仅计一次，避免 forward 窗口重叠自相关）
         below = closes < level
-        return below & ~below.shift(1, fill_value=False)
+        return below & ~below.shift(1, fill_value=True)
     if kind == "close_above_3d":
-        # 连续 3 日站稳，事件日 = 第 3 日（每段仅计一次，避免滑窗重叠）
+        # 连续 3 日站稳，事件日 = 第 3 日（rolling 首两行 NaN 天然保护起点）
         above3 = (closes > level).rolling(3).sum() == 3
         return above3 & ~above3.shift(1, fill_value=False)
     if kind == "close_near":
-        return (closes - level).abs() / level * 100 <= spec["tol_pct"]
+        near = (closes - level).abs() / level * 100 <= spec["tol_pct"]
+        return near & ~near.shift(1, fill_value=True)
     if kind == "boll_position":
         mid = closes.rolling(20).mean()
         std = closes.rolling(20).std()
         upper = mid + 2 * std
         lower = mid - 2 * std
         pos = (closes - lower) / (upper - lower) * 100
-        return pos >= level
+        hi = pos >= level
+        return hi & ~hi.shift(1, fill_value=True)
     raise ValueError(f"未知触发类型: {kind}")
+
+
+def touch_within(
+    closes: list[float], hit_idx: list[int], targets: list[float], *,
+    horizon: int = 60, n: int | None = None,
+) -> dict | None:
+    """事件后 horizon 日内（i+1..i+horizon，含第 horizon 日）触及任一目标位的
+    事件占比。窗口不足 horizon 日（被序列末尾截断）的事件不入分母
+    （对齐 lmw truncated 语义：不完整窗口不判"未触及"）。
+    无完整窗口事件 → None。"""
+    n = len(closes) if n is None else n
+    touched = complete = 0
+    for i in hit_idx:
+        if i + horizon + 1 > n:
+            continue
+        window = closes[i + 1 : i + horizon + 1]
+        complete += 1
+        if any(c <= t for c in window for t in targets):
+            touched += 1
+    if not complete:
+        return None
+    return {"n": touched, "ratio": round(touched / complete, 4)}
 
 
 def main() -> int:
@@ -114,18 +142,8 @@ def main() -> int:
                     "win_rate": round(float((s > 0).mean()), 4),
                 }
         if spec.get("track"):
-            # E-004：跌破后 60 日内触及任一五浪目标位的比例
-            targets = spec["track"]
-            touched = 0
-            for i in hit_idx:
-                lo = min(i + 60, n)
-                window = closes[i + 1 : lo]
-                if any(c <= t for c in window for t in targets):
-                    touched += 1
-            entry["touch_wave_target_60d"] = (
-                {"n": touched, "ratio": round(touched / len(hit_idx), 4)}
-                if hit_idx else None
-            )
+            # E-004：跌破后 60 日内（含第 60 日）触及任一五浪目标位的比例
+            entry["touch_wave_target_60d"] = touch_within(closes, hit_idx, spec["track"])
         results["scenarios"][sid] = entry
         print(f"{sid} {spec['label']}: n={entry['n_hits']}", end="")
         for h in (1, 3, 5):
