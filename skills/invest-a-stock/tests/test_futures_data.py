@@ -93,3 +93,23 @@ class TestStoreRoundtrip:
         assert loaded[0]["basis_pct"] == pytest.approx(-0.2889)
         assert store.latest_futures_date() == "2026-08-14"
         assert store.futures_contracts() == {"IF2608.CFX"}
+
+
+class TestCompoundOiChange:
+    def test_all_valid_20(self):
+        assert fd.compound_oi_change([1.0] * 20) == pytest.approx(22.019004, abs=1e-4)
+
+    def test_masked_and_none_excluded_from_count_and_product(self):
+        # 18 个 +1% + 1 个 -100（到期塌缩掩码）+ 1 个 None → 有效 18 ≥ 18 → 18 日复利
+        assert fd.compound_oi_change([1.0] * 18 + [-100.0, None]) == pytest.approx(19.614748, abs=1e-4)
+
+    def test_below_min_valid_returns_none(self):
+        assert fd.compound_oi_change([1.0] * 17 + [None] * 3) is None
+
+    def test_window_trims_to_tail(self):
+        assert fd.compound_oi_change([5.0] * 5 + [1.0] * 15) == pytest.approx(48.172327, abs=1e-4)
+
+    def test_nan_excluded(self):
+        # DB 经 DataFrame 读取时 None 变 NaN——NaN 与 None 同等待遇：
+        # 2 个 NaN 不计入 → 18 个有效 +1% 因子 → 18 日复利
+        assert fd.compound_oi_change([float("nan")] * 2 + [1.0] * 18) == pytest.approx(19.614748, abs=1e-4)

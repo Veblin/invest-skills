@@ -132,6 +132,28 @@ def compute_basis(rows: list[dict], index_closes: dict[str, float]) -> list[dict
     return out
 
 
+def compound_oi_change(
+    vals: list[float | None], *, window: int = 20, min_valid: int = 18,
+) -> float | None:
+    """尾部 window 个日环比（oi_change_pct）复利合成 N 日持仓变化。
+
+    口径唯一实现（run_f3 / 各消费方共用，禁止复制粘贴）：
+    None 或 <= -99（到期日 OI 归零机械塌缩掩码）不计入因子也不计入有效数；
+    有效因子数 < min_valid → None（防全缺失窗口伪造 0 变化）。
+    返回原始百分比（不 round；调用方按需 round）。
+    """
+    w = vals[-window:]
+    prod = 1.0
+    cnt = 0
+    for v in w:
+        if v is not None and v > -99.0:  # NaN 比较恒 False → 自然排除
+            prod *= 1.0 + v / 100.0
+            cnt += 1
+    if cnt < min_valid:
+        return None
+    return (prod - 1.0) * 100.0
+
+
 def fetch_sina_fallback() -> list[dict]:
     """降级：sina 主力连续（close 口径，无结算价/换月标注——source 字段标记）。"""
     import akshare as ak
