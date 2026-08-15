@@ -438,8 +438,6 @@ def cmd_futures_basis(symbol: str, *, as_json: bool) -> int:
     print(f"=== {symbol} 动态基差（{result['futures_symbol']}，{result['date']}）===")
     print(f"  当前基差: {result['current_basis_pct']}%（{result['current_basis_pts']} 点，合约 {result['contract']}）")
     print(f"  历史分位: {result['percentile']}%（中位数 {result['median_basis_pct']}%，n={result['n_history']}）")
-    if result.get("oi_20d_chg_pct") is not None:
-        print(f"  持仓量 20 日变化: {result['oi_20d_chg_pct']:+.2f}%")
     print(f"  演变分布参照: {result['distribution_ref']}")
     print(f"  ⚠️ {result['note']}")
     return 0

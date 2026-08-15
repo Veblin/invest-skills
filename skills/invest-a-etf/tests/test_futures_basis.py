@@ -19,11 +19,13 @@ from futures_basis import futures_symbol_for_etf, query_futures_basis  # noqa: E
 
 
 def _fake_rows(n: int = 100) -> list[dict]:
+    # oi_change_pct 补齐：使回归用例在旧实现下也会产出 oi_20d_chg_pct 键
+    # （判别力保证——finding #2 移除前该键存在，移除后必须不存在）
     return [
         {
             "date": f"2026-08-{i % 28 + 1:02d}", "symbol": "IC", "contract": "IC2608.CFX",
             "basis_pct": round(-0.5 + (i - 50) * 0.01, 4), "basis_pts": -40.0,
-            "oi": 30000.0 + i * 10, "source": "tushare",
+            "oi": 30000.0 + i * 10, "oi_change_pct": 1.0, "source": "tushare",
         }
         for i in range(n)
     ]
@@ -65,3 +67,12 @@ class TestQuery:
         r = query_futures_basis("510500")
         assert r["available"] is False
         assert "历史数据不足" in r["note"]
+
+    def test_no_oi_field_in_output(self, monkeypatch):
+        """回归（finding #2）：OI 20 日变化已从用户输出移除。"""
+        import lib.store as store_mod  # noqa: E402
+
+        monkeypatch.setattr(store_mod, "load_futures_daily", lambda symbol=None, limit=1000: _fake_rows(100))
+        r = query_futures_basis("510500")
+        assert r["available"] is True
+        assert "oi_20d_chg_pct" not in r

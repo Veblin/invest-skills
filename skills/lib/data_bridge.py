@@ -273,6 +273,8 @@ def get_futures_basis(*, force: bool = False) -> dict | None:
 
     返回 {IF|IH|IC|IM: {date, contract, basis_pct, oi_change_pct, source}}
     最新一日的四品种状态 | None（不可得）。依赖 invest-a-stock 的 store/futures_data。
+    注：oi_change_pct 为单日日环比（非 20 日复利变化）；20 日口径见
+    futures_data.compound_oi_change（v0.2.6 起 20 日口径已从用户标签移除）。
     """
     try:
         from lib import store as _store  # noqa: E402 — invest-a-stock 路径引导

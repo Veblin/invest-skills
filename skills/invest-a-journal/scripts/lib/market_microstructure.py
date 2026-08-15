@@ -39,7 +39,7 @@ _SNAPSHOT_DATA_KEYS = (
     "total_turnover", "sse_float_mcap", "szse_float_mcap",
     "erp", "pcr", "below_book_pct",
     "northbound_net_inflow", "northbound_market_value",
-    "futures_basis_pct", "futures_oi_change_pct",
+    "futures_basis_pct",
 )
 
 
@@ -60,7 +60,7 @@ _MARKET_SNAPSHOT_COLUMNS = (
     "ad_ratio_5d_ma", "limit_down_20d_pct",
     "erp", "pcr", "below_book_pct",
     "northbound_net_inflow", "northbound_direction", "northbound_source",
-    "futures_basis_pct", "futures_oi_change_pct",
+    "futures_basis_pct",
     "env_label",
 )
 
@@ -104,7 +104,6 @@ def snapshot() -> dict[str, Any]:
         "northbound_source": None,           # "direct" | "derived" | None
         # 资金面 — 股指期货（v0.2.6 F 系列：机构对冲行为，状态度量非预测）
         "futures_basis_pct": None,           # IC 当月基差%（负 = 贴水）
-        "futures_oi_change_pct": None,       # IC 持仓量 20 日变化%
         # 标签
         "label_leverage": None,
         "label_breadth": None,
@@ -504,9 +503,6 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     basis = snap.get("futures_basis_pct")
     if basis is not None:
         parts.append(f"IC 基差 {basis:+.2f}%")
-        oi_chg = snap.get("futures_oi_change_pct")
-        if oi_chg is not None:
-            parts.append(f"IC 持仓 20 日 {oi_chg:+.1f}%")
     snap["label_capital_flow"] = "；".join(parts)
 
     # --- 综合环境标签（JSON，供 journal 注入） ---
@@ -614,9 +610,6 @@ def _compute_labels(result: dict) -> None:
     basis = result.get("futures_basis_pct")
     if basis is not None:
         parts.append(f"IC 基差 {basis:+.2f}%")
-        oi_chg = result.get("futures_oi_change_pct")
-        if oi_chg is not None:
-            parts.append(f"IC 持仓 20 日 {oi_chg:+.1f}%")
     if parts:
         result["label_capital_flow"] = "；".join(parts)
 
@@ -921,11 +914,12 @@ def _fetch_below_book_pct(result: dict) -> None:
 
 
 def _fetch_futures(result: dict) -> None:
-    """股指期货基差/持仓（v0.2.6 F 系列）——机构对冲行为状态度量，非预测。
+    """股指期货基差（v0.2.6 F 系列）——机构对冲成本状态度量，非预测。
 
-    读 futures_daily 最新一行（IC 为主品种，代表中小盘对冲成本）；
-    oi_change_pct 由 oi_chg 计算 20 日变化（futures_daily 已预计算 oi_change_pct
-    为日环比——此处取 20 日窗口变化）。
+    读 futures_daily 最新一行（IC 为主品种，代表中小盘对冲成本）。
+    注：持仓量 20 日变化已由 F3 实证裁定为展期节奏主导（不可刻画持仓
+    状态），本修订起不再输出到用户标签；字段与 compound_oi_change
+    helper 保留于数据层供后续研究。
     """
     try:
         from lib import store as _store  # noqa: E402 — 惰性导入
@@ -936,19 +930,6 @@ def _fetch_futures(result: dict) -> None:
         latest = rows[-1]
         if latest.get("basis_pct") is not None:
             result["futures_basis_pct"] = latest["basis_pct"]
-        # 20 日持仓变化：用入库的日环比 oi_change_pct 复利合成——每行是当月
-        # 合约，直接对 oi 水平做 21 行差会在换月处跳变失真；到期日 OI 归零的
-        # 机械塌缩（≤−99%）按 0 变化计（复利链不被清零），窗口内至少 18 个
-        # 有效日环比才输出（防全缺失窗口）
-        valid = [r for r in rows[-20:]
-                 if r.get("oi_change_pct") is not None and float(r["oi_change_pct"]) > -99]
-        if len(valid) >= 18:
-            prod = 1.0
-            for r in rows[-20:]:
-                v = r.get("oi_change_pct")
-                if v is not None and float(v) > -99:
-                    prod *= 1.0 + float(v) / 100.0
-            result["futures_oi_change_pct"] = round((prod - 1.0) * 100, 2)
     except Exception:  # noqa: BLE001 — 单维度失败不阻塞
         result["_errors"].append("futures 读取失败（降级：资金面缺期货维度）")
 

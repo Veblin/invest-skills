@@ -2,7 +2,7 @@
 
 定位（用户定稿）：**状态度量与历史演变分布参照，不做市场预测**。
 输出 = 该 ETF 对应股指期货品种的当前基差水平 + 历史分位（伴随中位数，
-估值分位规则同款）+ 持仓量 20 日变化 + 历史演变分布参照（条件句，非必然）。
+估值分位规则同款）+ 历史演变分布参照（条件句，非必然）。
 
 品种映射：复用 etf_data.ETF_HEDGE_MAP 的 futures 字段（510300→IF、510500→IC、
 512100/159845→IM、510050→IH）；无期货品种的 ETF 返回 available=False。
@@ -81,19 +81,6 @@ def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
         "n_history": len(basis_vals),
         "source": latest.get("source"),
     })
-    # 持仓量 20 日变化：用入库的日环比 oi_change_pct 复利合成——每行是当月
-    # 合约，直接对 oi 水平做 21 行差会在换月处跳变失真；到期日 OI 归零的
-    # 机械塌缩（≤−99%）按 0 变化计（复利链不被清零），窗口内至少 18 个
-    # 有效日环比才输出（防全缺失窗口）
-    valid = [r for r in rows[-20:]
-             if r.get("oi_change_pct") is not None and float(r["oi_change_pct"]) > -99]
-    if len(valid) >= 18:
-        prod = 1.0
-        for r in rows[-20:]:
-            v = r.get("oi_change_pct")
-            if v is not None and float(v) > -99:
-                prod *= 1.0 + float(v) / 100.0
-        result["oi_20d_chg_pct"] = round((prod - 1.0) * 100, 2)
     # 历史演变分布参照（描述性，非预测）：当前分位 ±10 邻域内的历史事件 → 其后 20 日收益分布
     # 由 F2 报告表提供（此处仅给出引用锚点，不在查询时实时计算——P0 数字须预计算）
     result["distribution_ref"] = "docs/data/F2_backtest_result.json（状态-演变分布，报告引用）"

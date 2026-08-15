@@ -203,7 +203,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 **[事实]**
 - 北向 {northbound_direction} {northbound_net_inflow} 亿（{northbound_source}口径，持股市值 {northbound_market_value} 亿）
 - 融资余额趋势（见杠杆节）— 两路资金方向对照
-- IC 股指期货基差 {futures_basis_pct}%（负 = 贴水 = 对冲成本高）+ 持仓量 20 日变化 {futures_oi_change_pct}%——机构对冲盘行为状态（v0.2.6 F 系列；状态度量，非预测；分红期基差假收窄口径注记）
+- IC 股指期货基差 {futures_basis_pct}%（负 = 贴水 = 对冲成本高）——机构对冲盘行为状态（v0.2.6 F 系列；状态度量，非预测；分红期基差假收窄口径注记）
 **[分析]**
 不同资金主体（外资/杠杆/量能/机构对冲盘）行为是否分化：{同向 = 共识；背离 = 结构分歧，标注各自口径与局限}
 [证据强度: ...]
