@@ -22,18 +22,35 @@
 
 ### F 系列（2026-08-15）：股指期货数据全量接入
 
-- **数据层**：futures_daily 表（当月合约 settle 口径，IF/IH/IC 2015-04 起、IM 2022-07 起，458 合约）+ futures_data.py（fut_basic 合约序列 + fut_daily 逐合约 + 现货对齐预计算 basis/oi_change）+ backfill CLI（断点续跑）+ data_bridge.get_futures_basis；sina 主力连续降级链（source 标注）；口径验证与调研文档 8/14 样例一致（IC -0.5072%）
-- **F1-F3 历史演变分布刻画**（预注册冻结；定位 = 状态度量与历史演变参照，非预测）：F1 基差深度四分位 → IC/IM ETF 收益分布（份额流不可得降级价格口径；Q1 vs Q4 差异不显著）；F2 贴水极值 → 指数 20 日收益分布（升水极值后系统性强于深度贴水后：IF 升水 +5 胜率 62.8% vs 深度贴水 +10 均值 -0.39%）；F3 持仓量 20 日变化 → 基差/收益联合演变（区分度弱）+ Granger 检验（收益不领先持仓，解读约束解除）
+- **数据层**：futures_daily 表（当月合约 settle 口径，IF/IH/IC 2015-04 起、IM 2022-07 起，458 合约）+ futures_data.py（fut_basic 合约序列 + fut_daily 逐合约 + 现货对齐预计算 basis/oi_change）+ backfill CLI（断点续跑）+ data_bridge.get_futures_basis；sina 主力连续降级链（source 标注）；口径验证与调研文档 8/14 样例一致（IC -0.5072%）。**修复（2026-08-15）**：sina 降级改 fill-only（不覆盖已有 tushare 行、失败非零退出）；oi_change_pct 到期日机械塌缩（≤−99%）掩码
+- **F1-F3 历史演变分布刻画**（预注册冻结；定位 = 状态度量与历史演变参照，非预测）：F1 基差深度四分位 → IC/IM ETF 收益分布（份额流不可得降级价格口径；Q1 vs Q4 差异不显著）；F2 贴水极值 → 指数 20 日收益分布（**2026-08-15 修复重跑：深度贴水极值后强于升水极值后——IF 深度贴水 +5 胜率 69.2% vs 升水 47.8%；修复前标签反转 + 前向窗口 off-by-one 的旧版本作废**）；F3 持仓量 20 日变化 → 基差/收益联合演变（当月合约口径下状态不成立，降级为不可刻画）+ Granger 检验（收益不领先持仓，解读约束解除）
 - **ETF skill**：futures_basis.py（query_futures_basis：当前基差 + 历史分位伴随中位数 + 持仓量 20 日变化）+ report-template 模块 7.5「动态基差与持仓」+ etf.py futures-basis CLI + SKILL.md 章节
 - **pulse**：_fetch_futures（IC 基差/持仓进快照）+ market_snapshots 2 列迁移 + label_capital_flow 扩展（北向 + IC 基差 + 持仓三视角）
 - 报告：host-docs/v0.2.6/F系列期货状态刻画报告_20260815.md + F1/F2/F3 JSON 存档；测试新增 14 例（数据层 5/ETF 4/触发 4/snapshot fixture 更新）
 
 ### 补漏（2026-08-14 续）：H6 回测 + 回踩分类 + 候选预案基线
 
-- **H6 做T 支撑位反弹**（ABCD §3.2 H6 行，排期表遗漏补录）：新增 `technical.adx`（Wilder 14 日，含 DX 有效窗口与均值初始化两处数值修复）+ `scripts/backtest_h6.py`（抽样 800+沪深300 共 1060 只，MA20/BOLL 下轨/缺口回探三类支撑事件 × ADX 震荡/趋势分层）。**裁决：预注册预期（仅震荡市正超额）方向相反**——震荡市支撑位触及后超额显著为负（-0.11%~-0.40%），趋势市 BOLL 下轨为唯一正超额层（+0.07%~+0.17%）；缺口回探两类均为负（与 JBEF 2020 延续一致）
-- **回踩状态分类落地**：`lmw.classify_retest`（no_retest/clean_retest/deep_retest + retest_day，窗口 3-10 日）+ 扫描器 ScanHit 字段 + SKILL.md C 级标注；csi300 实测 21 命中 → no_retest 11/clean 1/deep 9
-- **E-002~E-007 候选预案基线**：`scripts/scenario_baselines.py`（六条触发定义写死，E-001 同口径）+ scenario-plans 候选表补基线栏。关键发现：E-002~E-004 绝对点位在 35 年历史中处常态区（触达 8000+ 次，基线≈全样本、信息含量低）；E-006 BOLL 上轨触达 +5 日 +2.11%（胜率 62%）显著强于无条件基线（追势延续）
+- **H6 做T 支撑位反弹**（ABCD §3.2 H6 行，排期表遗漏补录）：新增 `technical.adx`（Wilder 14 日，含 DX 有效窗口与均值初始化两处数值修复）+ `scripts/backtest_h6.py`（抽样 800+沪深300 共 1060 只，MA20/BOLL 下轨/缺口回探三类支撑事件 × ADX 震荡/趋势分层）。**裁决：预注册预期（仅震荡市正超额）方向相反**——震荡市支撑位触及后超额显著为负（-0.11%~-0.36%），趋势市 BOLL 下轨为唯一正超额层（+0.07%~+0.17%）；缺口回探两类均为负（与 JBEF 2020 延续一致）。**修复重跑（2026-08-15）**：ADX 种子口径 + 缺口扫描漏计修复（事件数 8892/12629 → 11166/15866，趋势市缺口 t 升至 ≥3），裁决方向不变
+- **回踩状态分类落地**：`lmw.classify_retest`（no_retest/clean_retest/deep_retest + retest_day，窗口 3-10 日）+ 扫描器 ScanHit 字段 + SKILL.md C 级标注；csi300 实测 21 命中 → no_retest 11/clean 1/deep 9。**修复（2026-08-15）**：判据改 low 口径（原 close 口径 clean 几乎不可达）+ 截断窗口独立 truncated 状态；csi300 重扫 21 命中（RC p=0.9498 不变）→ no_retest 11/clean 4/deep 6
+- **E-002~E-007 候选预案基线**：`scripts/scenario_baselines.py`（六条触发定义写死，E-001 同口径）+ scenario-plans 候选表补基线栏。关键发现（**2026-08-15 事件首日口径修复重跑**；修复前"触达 8000+ 次"为滑窗重叠口径，作废）：E-002~E-005 为全史罕见切换事件（n=9~21，仅观察不作推断）；E-006 BOLL 上轨触达 +5 日 +2.11%（胜率 62%）显著强于无条件基线（追势延续）
 - 测试新增 14 例（ADX 手算对照/H6 事件检测/回踩三态/触发判定）；报告 1 份 + JSON 存档 docs/data/
+
+### 修复（2026-08-15）：/code-review max 确认级发现修复（10 项，全部 Python 复算验证）
+
+F 系列 / H6 / 回踩分类 / 情景基线的实现缺陷修复，全部回测 JSON 重跑重生成，报告与 CHANGELOG 结论同步更正：
+
+1. **F2 状态标签反转**（`backtest_futures.py`）：percentile 升序语义下 deep_discount 应为 p<10、premium p>90——修复前结论"升水后强于深贴水后"建立在互换的桶上；修复后 IF 深度贴水 +5 胜率 69.2% vs 升水 47.8%，方向反转
+2. **F1/F2 前向收益 off-by-one**：`keys[h]` 实为第 h+1 日（F1 '+1' n 1674→1675 复算证实），三处改 `keys[h-1]` + guard `len(keys) < h`
+3. **F3 收敛/走扩判据错误**：|Δbasis| 与 |basis| 比较改为 |basis[fi+20]| < |basis[fi]|；删除完全重复行
+4. **Sina 降级混口径**：merge COALESCE 逐列覆盖会把 close 口径写进 settle 口径行——改 fill-only（仅补缺失日期，`futures_dates_by_symbol` 判定），失败计入 `failed` → backfill 非零退出
+5. **H6 缺口扫描漏计**：最近缺口已回探时 break 阻断更老未回探缺口——break 移至事件实际生成处；gap 层事件数 8892/12629 → 11166/15866
+6. **E-005/close_below 滑窗重叠**：事件日改状态首日（E-005 = 完成站稳第 3 日），每段仅计一次——E-002~E-005 n 由 8270/8157/8159/322 → 21/12/12/9
+7. **classify_retest 收盘判据**：改 low 口径（签名接入 lows），删除死代码，截断窗口返回 truncated 而非 no_retest；扫描器传 low_qfq；csi300 重扫 21 命中 → no_retest 11/clean 4/deep 6（修复前 11/1/9，clean 由 1→4）
+8. **E-004 任一目标位**：`min(track)` 只测最深位 → `any(c <= t for t in track)`；60 日触达比例 93.0%（3209.60）→ 83.3%（任一，10/12）
+9. **持仓 20 日变化跨换月**：F3 与 journal/ETF 两消费方改日环比 oi_change_pct 复利合成（含到期日 ≤−99% 机械塌缩掩码）；**数据实证裁定**：当月（到期）合约 OI 月度内单调衰减（day1=100→day15=0 中位数路径），20 日变化被展期节奏主导（掩码后 98.9% 窗口 ≤−5%）→ F3 状态 up=0/down=1，**该口径下状态度量不成立，降级为不可刻画**（需主连/总持仓口径数据层改造，另行决策）
+10. **Wilder ADX 种子口径**：求和种子 + 平均递推混用（前 ~30-50 根偏高最多 ~53 点）→ 种子改累计均值；新增参考实现对照测试锁定
+
+回归测试新增：test_technical_adx.py 5 例（参考实现逐条对照/发布范围/稳定趋势不变量）、H6 已回探缺口跳过 1 例、触发滑窗 2 例、回踩 low 口径/截断 2 例；全量 skills/lib/tests 通过。JSON 重生成：F1/F2/F3/H6/scenario_baselines（pattern_scan_result 重扫）。
 
 ### 第一阶段：P0 落地
 

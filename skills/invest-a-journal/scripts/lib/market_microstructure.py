@@ -936,10 +936,19 @@ def _fetch_futures(result: dict) -> None:
         latest = rows[-1]
         if latest.get("basis_pct") is not None:
             result["futures_basis_pct"] = latest["basis_pct"]
-        oi_vals = [float(r["oi"]) for r in rows if r.get("oi") is not None]
-        if len(oi_vals) >= 21 and oi_vals[0]:
-            result["futures_oi_change_pct"] = round(
-                (oi_vals[-1] - oi_vals[0]) / oi_vals[0] * 100, 2)
+        # 20 日持仓变化：用入库的日环比 oi_change_pct 复利合成——每行是当月
+        # 合约，直接对 oi 水平做 21 行差会在换月处跳变失真；到期日 OI 归零的
+        # 机械塌缩（≤−99%）按 0 变化计（复利链不被清零），窗口内至少 18 个
+        # 有效日环比才输出（防全缺失窗口）
+        valid = [r for r in rows[-20:]
+                 if r.get("oi_change_pct") is not None and float(r["oi_change_pct"]) > -99]
+        if len(valid) >= 18:
+            prod = 1.0
+            for r in rows[-20:]:
+                v = r.get("oi_change_pct")
+                if v is not None and float(v) > -99:
+                    prod *= 1.0 + float(v) / 100.0
+            result["futures_oi_change_pct"] = round((prod - 1.0) * 100, 2)
     except Exception:  # noqa: BLE001 — 单维度失败不阻塞
         result["_errors"].append("futures 读取失败（降级：资金面缺期货维度）")
 

@@ -118,9 +118,14 @@ def compute_basis(rows: list[dict], index_closes: dict[str, float]) -> list[dict
         r = dict(r)
         r["basis_pts"] = round(price - idx, 2)
         r["basis_pct"] = round((price - idx) / idx * 100, 4) if idx > 0 else None
-        if r.get("oi_chg") is not None and r.get("oi") is not None and r["oi"] - r["oi_chg"] != 0:
+        if r.get("oi_chg") is not None and r.get("oi") is not None and r["oi"] > 0:
             prev_oi = r["oi"] - r["oi_chg"]
-            r["oi_change_pct"] = round(r["oi_chg"] / prev_oi * 100, 4) if prev_oi else None
+            if prev_oi > 0:
+                pct = r["oi_chg"] / prev_oi * 100
+                # 到期日 OI 归零的机械塌缩（≤−99%）不计入持仓变化（复利链会被清零）
+                r["oi_change_pct"] = round(pct, 4) if pct > -99 else None
+            else:
+                r["oi_change_pct"] = None
         else:
             r["oi_change_pct"] = None
         out.append(r)
@@ -158,7 +163,9 @@ def fetch_sina_fallback() -> list[dict]:
 def ensure_futures_daily(start_month: str = "2015-04", max_contracts: int = 200) -> dict:
     """回填/增量：已入库合约跳过（断点续跑）。返回 {fetched, failed, skipped}。
 
-    Tushare 主源失败 → sina 降级（全量替换入库，source='sina' 标注）。
+    Tushare 主源失败 → sina 降级（fill-only：仅补缺失日期，绝不覆盖已有行，
+    source='sina' 标注——merge COALESCE 逐列覆盖会把 close 口径的基差写进
+    settle 口径的 tushare 行，杂交口径必须禁止）。
     """
     existing = store.futures_contracts()
     # start_month "2015-04" → "1504"（与合约代码月份段同格式，字符串可比）
@@ -191,6 +198,9 @@ def ensure_futures_daily(start_month: str = "2015-04", max_contracts: int = 200)
     except Exception as exc:  # noqa: BLE001 — 主源整体失败 → sina 降级
         logger.warning("Tushare futures failed (%s), falling back to sina", exc)
         rows = fetch_sina_fallback()
+        if not rows:
+            return {"fetched": [], "failed": {"tushare_all": str(exc), "sina_all": "降级亦无数据"},
+                    "skipped": len(existing), "source": "sina", "error": str(exc)}
         # sina 降级：现货对齐逐品种（close 口径）
         idx_all = fetch_index_close_map()
         combined: list[dict] = []
@@ -204,6 +214,11 @@ def ensure_futures_daily(start_month: str = "2015-04", max_contracts: int = 200)
                 r2["basis_pts"] = round(price - idx, 2)
                 r2["basis_pct"] = round((price - idx) / idx * 100, 4)
                 combined.append(r2)
-        store.save_futures_daily(combined)
-        return {"fetched": ["sina_all"], "failed": {}, "skipped": len(existing),
-                "source": "sina", "error": str(exc)}
+        # fill-only：已有日期的 tushare 行保持不动，sina 仅补缺（逐行口径自洽）
+        existing_by_sym = store.futures_dates_by_symbol()
+        combined = [r for r in combined
+                    if r["date"] not in existing_by_sym.get(r["symbol"], set())]
+        if combined:
+            store.save_futures_daily(combined)
+        return {"fetched": [f"sina_fill:{len(combined)}"], "failed": {"tushare_all": str(exc)},
+                "skipped": len(existing), "source": "sina", "error": str(exc)}

@@ -51,9 +51,13 @@ def trigger_flags(df: pd.DataFrame, spec: dict) -> pd.Series:
     kind = spec["kind"]
     level = spec["level"]
     if kind == "close_below":
-        return closes < level
+        # 事件日 = 跌破状态首日（每段状态仅计一次，避免 forward 窗口重叠自相关）
+        below = closes < level
+        return below & ~below.shift(1, fill_value=False)
     if kind == "close_above_3d":
-        return (closes > level).rolling(3).sum() == 3  # 连续 3 日，事件日 = 第 3 日
+        # 连续 3 日站稳，事件日 = 第 3 日（每段仅计一次，避免滑窗重叠）
+        above3 = (closes > level).rolling(3).sum() == 3
+        return above3 & ~above3.shift(1, fill_value=False)
     if kind == "close_near":
         return (closes - level).abs() / level * 100 <= spec["tol_pct"]
     if kind == "boll_position":
@@ -111,11 +115,12 @@ def main() -> int:
                 }
         if spec.get("track"):
             # E-004：跌破后 60 日内触及任一五浪目标位的比例
+            targets = spec["track"]
             touched = 0
             for i in hit_idx:
                 lo = min(i + 60, n)
                 window = closes[i + 1 : lo]
-                if any(c <= min(spec["track"]) for c in window):
+                if any(c <= t for c in window for t in targets):
                     touched += 1
             entry["touch_wave_target_60d"] = (
                 {"n": touched, "ratio": round(touched / len(hit_idx), 4)}

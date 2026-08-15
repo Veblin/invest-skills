@@ -1068,8 +1068,9 @@ def detect_limit_streaks(
 def adx(highs: list[float], lows: list[float], closes: list[float], n: int = 14) -> list[float | None]:
     """Wilder (1978) 平均趋向指数 ADX。
 
-    标准序列：TR / +DM / −DM → Wilder 平滑（首值 = 前 n 项和，后续
-    prev×(n−1)/n + curr）→ ±DI → DX → ADX（DX 再 Wilder 平滑）。
+    标准序列：TR / +DM / −DM → Wilder 平滑（平均口径：首段 = 累计均值，
+    后续 prev×(n−1)/n + curr/n——种子与递推同口径，早期条数不被放大 n 倍）
+    → ±DI → DX → ADX（DX 再 Wilder 平滑，均值种子 + 平均递推）。
     前 2n−1 位为 None（DI 需 n 项、ADX 再需 n 项 DX）。
     长度 < 2n 返回全 None（数据不足，不抛异常——对齐模块原则）。
     """
@@ -1079,13 +1080,17 @@ def adx(highs: list[float], lows: list[float], closes: list[float], n: int = 14)
         return out
 
     def _wilder(vals: list[float]) -> list[float]:
-        """Wilder 平滑：首值 = 前 n 项和，后续 = prev×(n−1)/n + curr。"""
+        """Wilder 平滑（平均口径）：首段 = 累计均值，后续 = prev×(n−1)/n + v/n。
+
+        种子与递推必须同口径：递推是平均形式（curr 除 n），种子若是前 n 项
+        和（求和口径），早期条数会被放大 ~n 倍、再按 (n−1)/n 缓慢衰减，
+        前 ~30-50 根 ADX 显著偏高。
+        """
         sm: list[float] = []
         for i, v in enumerate(vals):
             if i < n:
-                sm.append(sum(vals[: i + 1]))
+                sm.append(sum(vals[: i + 1]) / (i + 1))
             else:
-                # Wilder 递推：(prev×(n−1) + curr) / n —— curr 也要 /n
                 sm.append(sm[-1] * (n - 1) / n + v / n)
         return sm
 

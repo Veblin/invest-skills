@@ -180,46 +180,68 @@ class TestForwardStats:
 
 class TestClassifyRetest:
     def test_clean_retest(self):
-        """突破后回踩参考位但收盘站回 → clean_retest。"""
+        """盘中 low 回踩参考位但收盘站回 → clean_retest（low 口径）。"""
         from lmw import classify_retest
 
-        closes = [100.0, 105.0, 110.0, 108.0, 104.0, 103.0, 106.0, 110.0]
+        closes = [100.0, 105.0, 110.0, 108.0, 104.0, 104.5, 106.0, 110.0]
+        lows = [99.0, 104.0, 109.0, 107.0, 105.0, 103.5, 105.0, 109.0]
         p = {"pattern": "double_bottom", "endpoint_idx": 2, "peak": 104.0}
-        r = classify_retest(closes, p)
-        # 窗口 3-10：endpoint=2 → 第 5 日（idx 5, close 103 < 104 但 low 未知——
-        # classify 用 close 判定）idx 4 close=104 ≥ 104 → clean at day 4? 
-        # 实际 idx 4 (offset 2) 不在窗口（3-10）；offset 3 → idx 5 close 103 < 104 → deep
-        # 修正：让回踩日 close ≥ ref
-        r2 = classify_retest(closes, p, window=(3, 10))
-        assert r2["status"] in ("clean_retest", "deep_retest", "no_retest")
+        # 窗口 3-10：endpoint=2 → offset 3 = idx 5：low 103.5 ≤ 104（首次回踩）、
+        # close 104.5 ≥ 104（收盘不破）→ clean_retest，retest_day 3
+        r = classify_retest(closes, lows, p)
+        assert r["status"] == "clean_retest" and r["retest_day"] == 3
 
     def test_clean_vs_deep_boundary(self):
-        """收盘 ≥ 参考位 = clean；收盘 < 参考位 = deep。"""
+        """收盘 ≥ 参考位 = clean；收盘 < 参考位 = deep（回踩判定用 low）。"""
         from lmw import classify_retest
 
         ref = 100.0
         base = [100.0] * 12  # endpoint=2 → offsets 3..10 即 idx 5..12
         base[5] = 100.5  # offset 3 高于 ref → 不回踩
         base[6] = 99.5  # offset 4 首次回踩且 close < ref → deep_retest
-        r = classify_retest(base, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": ref})
+        lows = [99.0] * 12
+        lows[5] = 101.0  # offset 3 low 高于 ref → 不回踩
+        lows[6] = 99.5
+        r = classify_retest(base, lows, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": ref})
         assert r["status"] == "deep_retest" and r["retest_day"] == 4
         base2 = [100.0] * 12
         base2[5] = 100.5
         base2[6] = 100.0  # 首次回踩 close == ref → clean
-        r2 = classify_retest(base2, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": ref})
+        r2 = classify_retest(base2, lows, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": ref})
         assert r2["status"] == "clean_retest" and r2["retest_day"] == 4
 
     def test_no_retest(self):
-        """窗口内始终高于参考位 → no_retest。"""
+        """窗口内 low 始终高于参考位 → no_retest。"""
         from lmw import classify_retest
 
         closes = [100.0, 101.0, 102.0] + [103.0] * 20
-        r = classify_retest(closes, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": 101.0})
+        lows = [99.0, 100.0, 101.0] + [102.0] * 20
+        r = classify_retest(closes, lows, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": 101.0})
         assert r["status"] == "no_retest" and r["retest_day"] is None
+
+    def test_truncated_window(self):
+        """窗口未走完序列即结束 → truncated（不得误判为 no_retest）。"""
+        from lmw import classify_retest
+
+        closes = [100.0, 101.0, 102.0] + [103.0] * 5  # len 8：offset 6 起越界
+        lows = [99.0, 100.0, 101.0] + [102.0] * 5
+        r = classify_retest(closes, lows, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": 101.0})
+        assert r["status"] == "truncated" and r["retest_day"] is None
+
+    def test_low_based_detection_regression(self):
+        """回归：盘中跌破参考位、收盘每日站回 → 必须 clean_retest 而非 no_retest。"""
+        from lmw import classify_retest
+
+        closes = [100.0, 102.0, 103.0] + [103.0] * 10
+        lows = [99.0, 101.0, 102.0] + [103.0] * 4 + [100.5] + [103.0] * 5
+        # endpoint=2、ref=101：offset 5（idx 7）low 100.5 ≤ 101 首次回踩，
+        # close 103 ≥ 101 → clean_retest
+        r = classify_retest(closes, lows, {"pattern": "double_bottom", "endpoint_idx": 2, "peak": 101.0})
+        assert r["status"] == "clean_retest" and r["retest_day"] == 5
 
     def test_insufficient(self):
         from lmw import classify_retest
 
-        assert classify_retest([100.0], {"endpoint_idx": 0})["status"] == "insufficient"
-        assert classify_retest([100.0] * 5, {"endpoint_idx": 4})["status"] == "insufficient"
-        assert classify_retest([100.0] * 10, {"endpoint_idx": 1, "pattern": "x"})["status"] == "insufficient"
+        assert classify_retest([100.0], [99.0], {"endpoint_idx": 0})["status"] == "insufficient"
+        assert classify_retest([100.0] * 5, [99.0] * 5, {"endpoint_idx": 4})["status"] == "insufficient"
+        assert classify_retest([100.0] * 10, [99.0] * 10, {"endpoint_idx": 1, "pattern": "x"})["status"] == "insufficient"

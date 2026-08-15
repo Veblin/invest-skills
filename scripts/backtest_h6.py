@@ -104,7 +104,8 @@ def detect_events(df: pd.DataFrame) -> list[dict]:
             events.append({"idx": i, "type": "ma20", "regime": regime})
         if boll_l is not None and not pd.isna(boll_l) and lows[i] <= boll_l:
             events.append({"idx": i, "type": "boll_lower", "regime": regime})
-        # 缺口支撑：近 60 日向上缺口首次回探（倒序找最近的未回探缺口）
+        # 缺口支撑：近 60 日向上缺口首次回探（倒序扫描，认最近的未回探缺口；
+        # 已回探的缺口跳过继续向更老缺口找——break 只在事件实际生成时）
         for g in range(i - 2, max(0, i - GAP_LOOKBACK) - 1, -1):
             if lows[g] > highs[g - 1]:
                 g_lo = highs[g - 1]
@@ -113,7 +114,7 @@ def detect_events(df: pd.DataFrame) -> list[dict]:
                     prior_touch = any(lows[j] <= g_lo for j in range(g + 1, i))
                     if not prior_touch:
                         events.append({"idx": i, "type": "gap", "regime": regime})
-                break  # 只认最近的未回探缺口
+                        break  # 只认最近的未回探缺口
     return events
 
 

@@ -36,8 +36,9 @@ uv run python ../scan.py --universe csi300 a500 star50 --days 150
 2. 因果滚动平滑（防 look-ahead）；终点 = 突破确认
 3. **数据窥探防护不是选项**（全市场扫描 = 数千股票 × 多形态 × 多带宽 = 数十万检验）——RC p 必须随结果输出
 4. 回踩状态分类（v0.2.6 补漏落地）：`classify_retest` 对每个命中输出
-   `retest_status` ∈ {no_retest, clean_retest, deep_retest} + `retest_day`
-   （突破后 3-10 日首次回踩参考位、收盘是否站回）。**C 级实操统计，非学术**
+   `retest_status` ∈ {no_retest, clean_retest, deep_retest, truncated} + `retest_day`
+   （突破后 3-10 日首次 **low** 触及参考位、按收盘是否站回分 clean/deep；
+   窗口未走完序列即结束记 truncated——不得与 no_retest 混淆）。**C 级实操统计，非学术**
    ——锚点：无回踩突破后续表现最好、clean retest 优于 deep retest（ABCD B 类 §2.1）；
    仅作形态质量标注，不构成任何操作含义
 5. 报告数字全部引用 `pattern_scan_result.json` 字段（P0 数字纪律）；形态几何值来自引擎计算

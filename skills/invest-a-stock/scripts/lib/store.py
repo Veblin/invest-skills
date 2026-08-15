@@ -1289,6 +1289,20 @@ def futures_contracts() -> set[str]:
         _safe_close(c)
 
 
+def futures_dates_by_symbol() -> dict[str, set[str]]:
+    """{symbol: {date}} 已入库日期集合（sina 降级 fill-only 判定）。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute("SELECT symbol, date FROM futures_daily").fetchall()
+        out: dict[str, set[str]] = {}
+        for r in rows:
+            out.setdefault(str(r["symbol"]), set()).add(str(r["date"]))
+        return out
+    finally:
+        _safe_close(c)
+
+
 def save_market_daily(rows: list[dict]) -> int:
     """market_daily 批量写入（v0.2.6 全市场分位数据层）。
 

@@ -39,6 +39,19 @@ class TestTriggers:
         # >10.5 标志 [F,T,T,T,F]；rolling(3).sum()==3 仅在 11,12,13 齐全的 idx3
         assert flags.tolist() == [False, False, False, True, False]
 
+    def test_close_above_3d_once_per_streak(self):
+        # 10 日连破 → 仅第 3 日计一次事件（滑窗不重复计，避免 forward 重叠）
+        df = _frame([9.0] + [11.0] * 10 + [9.0])
+        flags = sb.trigger_flags(df, {"kind": "close_above_3d", "level": 10.5})
+        assert flags.sum() == 1
+        assert flags.tolist().index(True) == 3
+
+    def test_close_below_once_per_state(self):
+        # 连续 3 日跌破 → 仅状态首日计事件
+        df = _frame([100.0, 98.0, 97.0, 96.0, 101.0])
+        flags = sb.trigger_flags(df, {"kind": "close_below", "level": 99.0})
+        assert flags.tolist() == [False, True, False, False, False]
+
     def test_close_near(self):
         # tol 0.3% × 3960.26 ≈ ±11.88：3940 差 20.26（0.51%）→ False；3990 差 29.74（0.75%）→ False
         df = _frame([100.0, 3960.26, 3940.0, 3990.0])

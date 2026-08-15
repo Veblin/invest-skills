@@ -79,6 +79,28 @@ class TestDetectEvents:
         assert 72 in [e["idx"] for e in gap_events]
         assert not any(e["idx"] > 72 for e in gap_events)
 
+    def test_gap_skips_retested_nearer_gap(self):
+        """回归：最近的缺口已回探时不得 break，须继续向更老缺口找。
+
+        g1（较新，idx 90，下沿 107）在 idx 95 已回探；g2（较老，idx 65，下沿 102）
+        未回探。idx 100 首次触及 g2 下沿 → 必须计事件（旧实现 break 在 g1 上漏计）。
+        直接置 ADX/指标列，只测缺口扫描逻辑。
+        """
+        closes = [100.0] * 65 + [105.0] * 25 + [110.0] * 5 + [108.0] * 5 + [102.0] * 11
+        highs = [c + 2 for c in closes]
+        lows = [c - 2 for c in closes]
+        lows[65] = 104.0   # 缺口 g2：low 104 > highs[64] 102 → g_lo2 = 102
+        lows[90] = 109.0   # 缺口 g1：low 109 > highs[89] 107 → g_lo1 = 107
+        lows[95] = 106.0   # g1 首次回探（≤ 107）
+        lows[100] = 100.0  # g2 首次触及（≤ 102）
+        df = _frame(closes, highs, lows)
+        df["adx14"] = 30.0
+        df["ma20"] = float("nan")
+        df["boll_lower"] = float("nan")
+        gap_events = [e for e in h6.detect_events(df) if e["type"] == "gap"]
+        assert 95 in [e["idx"] for e in gap_events]   # g1 首次回探
+        assert 100 in [e["idx"] for e in gap_events]  # g2 首次回探（旧实现漏计）
+
     def test_middle_band_excluded(self):
         # ADX 中间带（20-25）不分组：用横盘 + 微趋势序列使 ADX 落中间带难以精确构造，
         # 此处只验证 detect_events 输出的 regime 仅含 ranging/trending

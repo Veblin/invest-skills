@@ -259,23 +259,25 @@ def pattern_forward_stats(
 
 def classify_retest(
     closes: list[float],
+    lows: list[float],
     pattern: dict,
     window: tuple[int, int] = (3, 10),
 ) -> dict:
     """回踩状态分类（v0.2.6 P2 落地，实操统计 C 级——非学术）。
 
-    突破（endpoint）后 window 日内首次 low ≤ reference 的日子：
-      - no_retest：窗口内从未回踩（最强形态，实操统计：无回踩突破后续表现最好）
+    突破（endpoint）后 window 日内首次 low ≤ reference 的日子（low 口径，
+    与规范一致——收盘口径会让盘中回踩收盘站回的形态漏判）：
+      - no_retest：完整窗口内从未回踩（最强形态，实操统计：无回踩突破后续表现最好）
+      - truncated：窗口未走完序列即结束（不足 hi 个交易日），无法判定是否回踩
       - clean_retest：首次回踩日 close ≥ reference（收盘不破）
       - deep_retest：首次回踩日 close < reference（收盘跌破）
     reference 位：double_bottom 用形态中间峰 peak；triangle_bottom 用
-    smoothed[peak2_idx]（match_triangle_bottom 已保存索引——为保持
-    classify_retest 纯函数、只依赖 closes+pattern，reference 由调用方
+    smoothed[peak2_idx]（match_triangle_bottom 已保存索引——reference 由调用方
     在 pattern 中提供 `reference` 键；缺失时 double_bottom 用 peak、
     triangle_bottom 用 peak2_idx 映射到 closes（原形态的 smoothed 峰位
     与 closes 原始价近似，容差内可用））。
 
-    返回 {status, retest_day}（retest_day = endpoint 后第几天，no_retest 为 None）。
+    返回 {status, retest_day}（retest_day = endpoint 后第几天，no_retest/truncated 为 None）。
     """
     ep = pattern.get("endpoint_idx")
     if ep is None or ep >= len(closes) - 1:
@@ -293,10 +295,8 @@ def classify_retest(
     for offset in range(lo, hi + 1):
         day = ep + offset
         if day >= len(closes):
-            break
-        if closes[day] <= ref:
+            return {"status": "truncated", "retest_day": None}
+        if lows[day] <= ref:
             status = "clean_retest" if closes[day] >= ref else "deep_retest"
-            if closes[day] == ref:
-                status = "clean_retest"
             return {"status": status, "retest_day": offset}
     return {"status": "no_retest", "retest_day": None}

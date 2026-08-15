@@ -31,7 +31,7 @@ class ScanHit:
     bandwidth: float
     detail: dict = field(default_factory=dict)
     retest_status: str | None = None  # v0.2.6 补漏：classify_retest 落地（C 级实操统计）
-    retest_day: int | None = None     # endpoint 后第几天发生回踩（no_retest 为 None）
+    retest_day: int | None = None     # endpoint 后第几天发生回踩（no_retest/truncated 为 None）
 
 
 def fetch_daily_and_adj(dates: list[str]):
@@ -70,6 +70,7 @@ def scan_universe(
         if kline is None or kline.empty:
             continue
         closes = [float(v) for v in kline["close_qfq"].tolist()]
+        lows = [float(v) for v in kline["low_qfq"].tolist()]
         for bw in bandwidths:
             res = detect_patterns(closes, bandwidth=bw, min_bars=MIN_BARS)
             for pat_kind in ("double_bottoms", "triangle_bottoms"):
@@ -78,7 +79,7 @@ def scan_universe(
                     if ep >= len(closes) - 1:
                         continue
                     pat_name = "double_bottom" if pat_kind == "double_bottoms" else "triangle_bottom"
-                    ret = classify_retest(closes, {**p, "pattern": pat_name})
+                    ret = classify_retest(closes, lows, {**p, "pattern": pat_name})
                     hits.append(ScanHit(
                         ts_code=code,
                         pattern=pat_name,

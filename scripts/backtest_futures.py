@@ -95,11 +95,12 @@ def run_f1(out_path: Path) -> dict:
                 d = row["date"]
                 q = str(row["quartile"])
                 for h in (1, 5):
-                    # ETF 未来收益：按交易日序列（closes 有序）
+                    # ETF 未来收益：按交易日序列（closes 有序）；keys[0] 为 d 后
+                    # 第 1 个交易日 → h 日收益取 keys[h-1]
                     keys = [k for k in closes if k > d]
-                    if len(keys) <= h:
+                    if len(keys) < h:
                         continue
-                    fwd = (closes[keys[h]] / closes[d] - 1) * 100
+                    fwd = (closes[keys[h - 1]] / closes[d] - 1) * 100
                     entry["quartiles"].setdefault(q, defaultdict(list))[h].append(fwd)
                     all_fwd[h].append(fwd)
             for q, by_h in entry["quartiles"].items():
@@ -120,10 +121,10 @@ def run_f1(out_path: Path) -> dict:
                 for _, row in fdf_etf.iterrows():
                     d = row["date"]
                     keys = [k for k in closes if k > d]
-                    if len(keys) <= 5:
+                    if len(keys) < 5:
                         continue
                     fwd_by_q[str(row["quartile"])].append(
-                        (closes[keys[5]] / closes[d] - 1) * 100)
+                        (closes[keys[4]] / closes[d] - 1) * 100)
                 t, _ = welch_t(fwd_by_q.get("Q1_深贴水", []), fwd_by_q.get("Q4_浅贴水升水", []))
                 perm = permutation_test(fwd_by_q.get("Q1_深贴水", []),
                                         fwd_by_q.get("Q4_浅贴水升水", []), n_perm=2000, seed=42)
@@ -138,7 +139,7 @@ def run_f1(out_path: Path) -> dict:
 
 
 def run_f2(out_path: Path) -> dict:
-    """贴水极值（分位 >90%/<10%）→ 指数 +5/+10/+20 收益分布。"""
+    """贴水极值（分位 <10%）/ 升水极值（分位 >90%）→ 指数 +5/+10/+20 收益分布。"""
     results = {"hypothesis": "F2", "scenarios": {}, "baseline": {}}
     for sym, idx_code in INDEX_SYMBOL.items():
         fdf = load_futures_df(sym)
@@ -150,8 +151,9 @@ def run_f2(out_path: Path) -> dict:
         closes = load_index_closes(idx_code)
         all_dates = sorted(closes)
         entry = {"deep_discount": {}, "premium": {}, "n_events": {}}
-        # 事件首日（连续极值只计首日）
-        for state, cond in (("deep_discount", lambda p: p > 90), ("premium", lambda p: p < 10)):
+        # 事件首日（连续极值只计首日）；percentile_rank_inclusive 为升序分位，
+        # 基差负值 = 贴水 → 分位越低贴水越深：deep_discount = p<10，premium = p>90
+        for state, cond in (("deep_discount", lambda p: p < 10), ("premium", lambda p: p > 90)):
             ev_dates = []
             prev_state = False
             for _, row in fdf.iterrows():
@@ -163,9 +165,9 @@ def run_f2(out_path: Path) -> dict:
             for d in ev_dates:
                 keys = [k for k in all_dates if k > d]
                 for h in (5, 10, 20):
-                    if len(keys) <= h:
+                    if len(keys) < h:
                         continue
-                    fwd[h].append((closes[keys[h]] / closes[d] - 1) * 100)
+                    fwd[h].append((closes[keys[h - 1]] / closes[d] - 1) * 100)
             for h, vals in fwd.items():
                 if len(vals) >= 3:
                     entry[state][f"+{h}"] = _describe_group(vals)
@@ -189,7 +191,15 @@ def run_f3(out_path: Path) -> dict:
         if fdf.empty:
             results["scenarios"][sym] = {"error": "futures 数据缺失"}
             continue
-        fdf["oi_20d_chg"] = fdf["oi"].pct_change(20) * 100
+        # 20 日持仓变化：用入库的日环比 oi_change_pct 复利合成。每行是当月合约，
+        # 直接 pct_change(20) 会在换月处跳变失真；日环比是合约自身日内变化，
+        # 复利合成不携带换月水平跳变。缺失日环比按 0 计；到期日 OI 归零的
+        # 机械塌缩（≤−99%）同样按 0 计（否则复利链被清零）
+        daily_raw = pd.to_numeric(fdf["oi_change_pct"], errors="coerce")
+        daily_chg = daily_raw.where(daily_raw > -99.0).fillna(0.0) / 100.0
+        fdf["oi_20d_chg"] = (
+            (1.0 + daily_chg).rolling(20, min_periods=20).apply(lambda w: w.prod(), raw=True) - 1.0
+        ) * 100.0
         closes = load_index_closes(idx_code)
         all_dates = sorted(closes)
         entry = {"up": {}, "down": {}, "n_events": {}}
@@ -216,13 +226,13 @@ def run_f3(out_path: Path) -> dict:
                 fi = fut_dates.index(d)
                 if fi + 20 >= len(fut_dates):
                     continue
-                basis_change = fdf["basis_pct"].iloc[fi + 20] - fdf["basis_pct"].iloc[fi]
                 idx_chg = (closes[all_dates[idx0 + 20]] / closes[d] - 1) * 100 if idx0 + 20 < len(all_dates) else None
                 if idx_chg is None:
                     continue
-                basis_dir = "converge" if abs(basis_change) < abs(fdf["basis_pct"].iloc[fi]) else "diverge"
-                # 收敛 = |basis| 变小（贴水收窄）
-                basis_dir = "converge" if abs(basis_change) < abs(fdf["basis_pct"].iloc[fi]) else "diverge"
+                # 收敛 = |basis| 变小（贴水收窄）：对比 20 日后的 |basis| 与当日 |basis|
+                basis_dir = ("converge"
+                             if abs(float(fdf["basis_pct"].iloc[fi + 20])) < abs(float(fdf["basis_pct"].iloc[fi]))
+                             else "diverge")
                 idx_dir = "up" if idx_chg > 0 else "down"
                 cross[(basis_dir, idx_dir)] += 1
             entry[state] = {"cross_tab": {f"{k[0]}|{k[1]}": v for k, v in sorted(cross.items())},

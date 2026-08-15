@@ -16,100 +16,100 @@
       "label": "弱势情景切换",
       "kind": "close_below",
       "level": 3909.5,
-      "n_hits": 8270,
+      "n_hits": 21,
       "+1": {
-        "n": 8270,
-        "mean_pct": 0.0742,
-        "median_pct": 0.0521,
-        "win_rate": 0.5255
+        "n": 21,
+        "mean_pct": 0.5815,
+        "median_pct": 0.6286,
+        "win_rate": 0.7143
       },
       "+3": {
-        "n": 8270,
-        "mean_pct": 0.2251,
-        "median_pct": 0.0995,
-        "win_rate": 0.521
+        "n": 21,
+        "mean_pct": 1.31,
+        "median_pct": 0.3896,
+        "win_rate": 0.619
       },
       "+5": {
-        "n": 8270,
-        "mean_pct": 0.3866,
-        "median_pct": 0.2067,
-        "win_rate": 0.5271
+        "n": 21,
+        "mean_pct": 1.9026,
+        "median_pct": 1.4004,
+        "win_rate": 0.619
       }
     },
     "E-003": {
       "label": "生死线失守",
       "kind": "close_below",
       "level": 3741.11,
-      "n_hits": 8157,
+      "n_hits": 12,
       "+1": {
-        "n": 8157,
-        "mean_pct": 0.071,
-        "median_pct": 0.0498,
-        "win_rate": 0.5237
+        "n": 12,
+        "mean_pct": -0.1132,
+        "median_pct": -0.3998,
+        "win_rate": 0.5
       },
       "+3": {
-        "n": 8157,
-        "mean_pct": 0.2203,
-        "median_pct": 0.0917,
-        "win_rate": 0.5193
+        "n": 12,
+        "mean_pct": 0.7277,
+        "median_pct": 2.4252,
+        "win_rate": 0.5833
       },
       "+5": {
-        "n": 8157,
-        "mean_pct": 0.3775,
-        "median_pct": 0.188,
-        "win_rate": 0.5247
+        "n": 12,
+        "mean_pct": 2.365,
+        "median_pct": 2.0534,
+        "win_rate": 0.5
       }
     },
     "E-004": {
       "label": "五浪目标跟踪",
       "kind": "close_below",
       "level": 3745.17,
-      "n_hits": 8159,
+      "n_hits": 12,
       "+1": {
-        "n": 8159,
-        "mean_pct": 0.0717,
-        "median_pct": 0.0499,
-        "win_rate": 0.5238
+        "n": 12,
+        "mean_pct": -0.1132,
+        "median_pct": -0.3998,
+        "win_rate": 0.5
       },
       "+3": {
-        "n": 8159,
-        "mean_pct": 0.221,
-        "median_pct": 0.0923,
-        "win_rate": 0.5194
+        "n": 12,
+        "mean_pct": 0.7277,
+        "median_pct": 2.4252,
+        "win_rate": 0.5833
       },
       "+5": {
-        "n": 8159,
-        "mean_pct": 0.379,
-        "median_pct": 0.1881,
-        "win_rate": 0.5248
+        "n": 12,
+        "mean_pct": 2.365,
+        "median_pct": 2.0534,
+        "win_rate": 0.5
       },
       "touch_wave_target_60d": {
-        "n": 7590,
-        "ratio": 0.9303
+        "n": 10,
+        "ratio": 0.8333
       }
     },
     "E-005": {
       "label": "缺口带突破确认",
       "kind": "close_above_3d",
       "level": 4015.0,
-      "n_hits": 322,
+      "n_hits": 9,
       "+1": {
-        "n": 322,
-        "mean_pct": -0.0961,
-        "median_pct": 0.1602,
-        "win_rate": 0.5404
+        "n": 9,
+        "mean_pct": -0.2084,
+        "median_pct": -0.0684,
+        "win_rate": 0.4444
       },
       "+3": {
-        "n": 322,
-        "mean_pct": -0.3469,
-        "median_pct": 0.0607,
-        "win_rate": 0.5155
+        "n": 9,
+        "mean_pct": 0.6498,
+        "median_pct": 1.9377,
+        "win_rate": 0.8889
       },
       "+5": {
-        "n": 322,
-        "mean_pct": -0.6829,
-        "median_pct": 0.0118,
-        "win_rate": 0.5031
+        "n": 9,
+        "mean_pct": 1.1788,
+        "median_pct": 0.9869,
+        "win_rate": 0.8889
       }
     },
     "E-006": {
