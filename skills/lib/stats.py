@@ -84,6 +84,21 @@ def percentile_rank_mid(
     return round(pct, round_to) if round_to is not None else pct
 
 
+def expanding_percentile_rank(seq: list[float]) -> list[float | None]:
+    """截至当日的历史分位（expanding window）——每个元素的分位只依赖它
+    自己及之前的序列，杜绝事件标签中的未来信息泄漏（look-ahead）。
+    None/NaN 元素输出 None（NaN 不参与分母，与含边界分位语义一致）。"""
+    out: list[float | None] = []
+    seen: list[float] = []
+    for v in seq:
+        if v is None or (isinstance(v, float) and v != v):
+            out.append(None)
+        else:
+            seen.append(v)
+            out.append(percentile_rank_inclusive(seen, v))
+    return out
+
+
 def calc_beta(
     stock_returns: list[float],
     market_returns: list[float],

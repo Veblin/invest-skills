@@ -31,7 +31,8 @@ for _p in (
 
 from backtest import describe, permutation_test, significance_grade, welch_t  # noqa: E402
 from multiple_testing import bootstrap_ci  # noqa: E402
-from stats import percentile_rank_inclusive  # noqa: E402
+from stats import expanding_percentile_rank  # noqa: E402
+from lib.futures_data import compound_oi_change  # noqa: E402
 
 INDEX_SYMBOL = {"IF": "sh000300", "IH": "sh000016", "IC": "sh000905", "IM": "sh000852"}
 ETF_MAP = {"IC": ["510500"], "IM": ["512100", "159845"]}  # 基差品种 → ETF
@@ -78,11 +79,10 @@ def run_f1(out_path: Path) -> dict:
         if fdf.empty:
             results["etfs"][sym] = {"error": "futures 数据缺失"}
             continue
-        # 基差历史分位（自身历史，≥30 日）
+        # 基差历史分位：expanding window（截至当日——全序列分位把未来
+        # 信息泄漏进当日标签，look-ahead 修复）
         basis = fdf["basis_pct"].astype(float)
-        fdf["depth_pctile"] = [
-            percentile_rank_inclusive(basis.tolist(), v) for v in basis.tolist()
-        ]
+        fdf["depth_pctile"] = expanding_percentile_rank(basis.tolist())
         fdf["quartile"] = pd.cut(fdf["depth_pctile"], [0, 25, 50, 75, 100],
                                  labels=["Q1_深贴水", "Q2", "Q3", "Q4_浅贴水升水"], include_lowest=True)
         for etf in etfs:
@@ -147,11 +147,12 @@ def run_f2(out_path: Path) -> dict:
             results["scenarios"][sym] = {"error": "futures 数据缺失"}
             continue
         basis = fdf["basis_pct"].astype(float).tolist()
-        fdf["pctile"] = [percentile_rank_inclusive(basis, v) for v in basis]
+        # expanding 分位（无未来信息；升序分位：p<10 深贴水 / p>90 升水）
+        fdf["pctile"] = expanding_percentile_rank(basis)
         closes = load_index_closes(idx_code)
         all_dates = sorted(closes)
         entry = {"deep_discount": {}, "premium": {}, "n_events": {}}
-        # 事件首日（连续极值只计首日）；percentile_rank_inclusive 为升序分位，
+        # 事件首日（连续极值只计首日）；expanding_percentile_rank 为升序分位，
         # 基差负值 = 贴水 → 分位越低贴水越深：deep_discount = p<10，premium = p>90
         for state, cond in (("deep_discount", lambda p: p < 10), ("premium", lambda p: p > 90)):
             ev_dates = []
@@ -163,6 +164,8 @@ def run_f2(out_path: Path) -> dict:
                 prev_state = cur
             fwd: dict[int, list[float]] = defaultdict(list)
             for d in ev_dates:
+                if d not in closes:
+                    continue  # 期货交易日不在指数收盘日历（补班/数据缺口）→ 跳过
                 keys = [k for k in all_dates if k > d]
                 for h in (5, 10, 20):
                     if len(keys) < h:
@@ -183,6 +186,29 @@ def run_f2(out_path: Path) -> dict:
     return results
 
 
+def _basis_state_after(
+    basis_map: dict[str, float], closes: dict[str, float],
+    all_dates: list[str], d: str, *, horizon: int = 20,
+) -> tuple[str, float] | None:
+    """事件日 d 后 horizon 个指数交易日的（基差方向, 指数收益%）。
+
+    基差与收益共用指数交易日历（原实现期货行号 fi+20 vs 指数行号 idx0+20
+    错位，且每月数据洞放大错位——finding #7）；
+    事件日不在指数日历 / 目标日不在期货日历 / 任一端基差缺失 → None。
+    """
+    idx0 = all_dates.index(d) if d in all_dates else None
+    if idx0 is None or idx0 + horizon >= len(all_dates):
+        return None
+    tgt = all_dates[idx0 + horizon]
+    b0 = basis_map.get(d)
+    b1 = basis_map.get(tgt)
+    if b0 is None or b1 is None or pd.isna(b0) or pd.isna(b1):
+        return None
+    basis_dir = "converge" if abs(b1) < abs(b0) else "diverge"
+    idx_chg = (closes[tgt] / closes[d] - 1) * 100
+    return basis_dir, idx_chg
+
+
 def run_f3(out_path: Path) -> dict:
     """持仓量 20 日变化方向 → 后 20 日基差演变 × 指数收益联合分布 + Granger 方向检验。"""
     results = {"hypothesis": "F3", "scenarios": {}, "granger": {}}
@@ -191,48 +217,31 @@ def run_f3(out_path: Path) -> dict:
         if fdf.empty:
             results["scenarios"][sym] = {"error": "futures 数据缺失"}
             continue
-        # 20 日持仓变化：用入库的日环比 oi_change_pct 复利合成。每行是当月合约，
-        # 直接 pct_change(20) 会在换月处跳变失真；日环比是合约自身日内变化，
-        # 复利合成不携带换月水平跳变。缺失日环比按 0 计；到期日 OI 归零的
-        # 机械塌缩（≤−99%）同样按 0 计（否则复利链被清零）
-        daily_raw = pd.to_numeric(fdf["oi_change_pct"], errors="coerce")
-        daily_chg = daily_raw.where(daily_raw > -99.0).fillna(0.0) / 100.0
-        fdf["oi_20d_chg"] = (
-            (1.0 + daily_chg).rolling(20, min_periods=20).apply(lambda w: w.prod(), raw=True) - 1.0
-        ) * 100.0
+        # 20 日持仓变化：共享 helper（口径与消费方一致——掩码/有效数阈值
+        # 单份实现；finding #10）。定位为展期节奏度量（F3 结论已降级为
+        # "不可刻画持仓状态"，此处仅保留历史演变刻画用）
+        oi_list = fdf["oi_change_pct"].tolist()
+        fdf["oi_20d_chg"] = [
+            compound_oi_change(oi_list[max(0, i - 19) : i + 1]) for i in range(len(oi_list))
+        ]
         closes = load_index_closes(idx_code)
         all_dates = sorted(closes)
         entry = {"up": {}, "down": {}, "n_events": {}}
+        basis_map = dict(zip(fdf["date"], fdf["basis_pct"].astype(float)))
         for state, cond in (("up", lambda v: v >= 5.0), ("down", lambda v: v <= -5.0)):
             ev_dates = []
             prev_state = False
             for _, row in fdf.iterrows():
-                cur = cond(row["oi_20d_chg"]) if pd.notna(row["oi_20d_chg"]) else False
+                cur = cond(row["oi_20d_chg"]) if row["oi_20d_chg"] is not None else False
                 if cur and not prev_state:
                     ev_dates.append(row["date"])
                 prev_state = cur
             cross: dict[tuple[str, str], int] = defaultdict(int)
             for d in ev_dates:
-                keys = [k for k in all_dates if k > d]
-                if len(keys) <= 20:
+                st = _basis_state_after(basis_map, closes, all_dates, d)
+                if st is None:
                     continue
-                idx0 = all_dates.index(d) if d in all_dates else None
-                if idx0 is None:
-                    continue
-                # 后 20 日基差变化（收敛/走扩）+ 指数涨跌
-                fut_dates = fdf["date"].tolist()
-                if d not in fut_dates:
-                    continue
-                fi = fut_dates.index(d)
-                if fi + 20 >= len(fut_dates):
-                    continue
-                idx_chg = (closes[all_dates[idx0 + 20]] / closes[d] - 1) * 100 if idx0 + 20 < len(all_dates) else None
-                if idx_chg is None:
-                    continue
-                # 收敛 = |basis| 变小（贴水收窄）：对比 20 日后的 |basis| 与当日 |basis|
-                basis_dir = ("converge"
-                             if abs(float(fdf["basis_pct"].iloc[fi + 20])) < abs(float(fdf["basis_pct"].iloc[fi]))
-                             else "diverge")
+                basis_dir, idx_chg = st
                 idx_dir = "up" if idx_chg > 0 else "down"
                 cross[(basis_dir, idx_dir)] += 1
             entry[state] = {"cross_tab": {f"{k[0]}|{k[1]}": v for k, v in sorted(cross.items())},

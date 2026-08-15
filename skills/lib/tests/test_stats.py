@@ -12,7 +12,12 @@ from pathlib import Path
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
-from stats import median, percentile_rank, percentile_rank_inclusive  # noqa: E402
+from stats import (  # noqa: E402
+    expanding_percentile_rank,
+    median,
+    percentile_rank,
+    percentile_rank_inclusive,
+)
 
 
 class TestMedian:
@@ -66,3 +71,22 @@ class TestPercentileRankRegression:
 
     def test_all_non_positive_returns_none(self):
         assert percentile_rank([-1.0, -2.0], 1.0) is None
+
+
+class TestExpandingPercentileRank:
+    def test_no_lookahead(self):
+        vals = [10.0, 5.0, 8.0, 6.0, 4.0]
+        got = expanding_percentile_rank(vals)
+        assert got == [100.0, 50.0, 66.66666666666666, 50.0, 20.0]
+
+    def test_differs_from_full_series(self):
+        # 全序列分位（含未来）与 expanding 分位不同——look-ahead 修复的判别点
+        vals = [10.0, 5.0, 8.0, 6.0, 4.0]
+        full = [percentile_rank_inclusive(vals, v) for v in vals]
+        assert full == [100.0, 40.0, 80.0, 60.0, 20.0]
+        assert expanding_percentile_rank(vals) != full
+
+    def test_none_and_nan_passthrough(self):
+        got = expanding_percentile_rank([1.0, None, 2.0])
+        assert got[1] is None
+        assert got[2] == 100.0
