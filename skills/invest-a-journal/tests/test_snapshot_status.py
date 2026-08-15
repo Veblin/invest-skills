@@ -25,6 +25,7 @@ _FETCHERS = (
     "_fetch_margin", "_fetch_ad_ratio", "_fetch_limit_pools",
     "_fetch_turnover", "_fetch_erp", "_fetch_pcr",
     "_fetch_below_book_pct", "_fetch_northbound",
+    "_fetch_futures",
 )
 
 

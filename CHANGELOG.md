@@ -20,6 +20,14 @@
 
 **M6 journal §4.3 结构化字段**：6 个 DB 列（止损位/预期亏损/卖出去向/止损移动与触发计数/提取金额）+ 聚合审计函数（stop_audit_stats/extracted_amount_mtd 含冷静期违规）+ evaluation_json 5 个新键 + evaluation-criteria 卖出三维→四维债修复。
 
+### F 系列（2026-08-15）：股指期货数据全量接入
+
+- **数据层**：futures_daily 表（当月合约 settle 口径，IF/IH/IC 2015-04 起、IM 2022-07 起，458 合约）+ futures_data.py（fut_basic 合约序列 + fut_daily 逐合约 + 现货对齐预计算 basis/oi_change）+ backfill CLI（断点续跑）+ data_bridge.get_futures_basis；sina 主力连续降级链（source 标注）；口径验证与调研文档 8/14 样例一致（IC -0.5072%）
+- **F1-F3 历史演变分布刻画**（预注册冻结；定位 = 状态度量与历史演变参照，非预测）：F1 基差深度四分位 → IC/IM ETF 收益分布（份额流不可得降级价格口径；Q1 vs Q4 差异不显著）；F2 贴水极值 → 指数 20 日收益分布（升水极值后系统性强于深度贴水后：IF 升水 +5 胜率 62.8% vs 深度贴水 +10 均值 -0.39%）；F3 持仓量 20 日变化 → 基差/收益联合演变（区分度弱）+ Granger 检验（收益不领先持仓，解读约束解除）
+- **ETF skill**：futures_basis.py（query_futures_basis：当前基差 + 历史分位伴随中位数 + 持仓量 20 日变化）+ report-template 模块 7.5「动态基差与持仓」+ etf.py futures-basis CLI + SKILL.md 章节
+- **pulse**：_fetch_futures（IC 基差/持仓进快照）+ market_snapshots 2 列迁移 + label_capital_flow 扩展（北向 + IC 基差 + 持仓三视角）
+- 报告：host-docs/v0.2.6/F系列期货状态刻画报告_20260815.md + F1/F2/F3 JSON 存档；测试新增 14 例（数据层 5/ETF 4/触发 4/snapshot fixture 更新）
+
 ### 补漏（2026-08-14 续）：H6 回测 + 回踩分类 + 候选预案基线
 
 - **H6 做T 支撑位反弹**（ABCD §3.2 H6 行，排期表遗漏补录）：新增 `technical.adx`（Wilder 14 日，含 DX 有效窗口与均值初始化两处数值修复）+ `scripts/backtest_h6.py`（抽样 800+沪深300 共 1060 只，MA20/BOLL 下轨/缺口回探三类支撑事件 × ADX 震荡/趋势分层）。**裁决：预注册预期（仅震荡市正超额）方向相反**——震荡市支撑位触及后超额显著为负（-0.11%~-0.40%），趋势市 BOLL 下轨为唯一正超额层（+0.07%~+0.17%）；缺口回探两类均为负（与 JBEF 2020 延续一致）

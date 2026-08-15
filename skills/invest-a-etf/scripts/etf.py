@@ -421,6 +421,30 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
     return 0
 
 
+def cmd_futures_basis(symbol: str, *, as_json: bool) -> int:
+    """ETF 股指期货动态基差状态（F 系列，状态度量非预测）。"""
+    from dates import shanghai_now  # noqa: E402
+    from futures_basis import query_futures_basis  # noqa: E402
+
+    result = query_futures_basis(symbol)
+    payload = {"skill": "invest:a-etf", "generated_at": shanghai_now().isoformat(),
+               "symbol": symbol, "futures_basis": result}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, default=str))
+        return 0
+    if not result.get("available"):
+        print(f"⚠️ {symbol} 期货基差不可得：{result.get('note', '')}")
+        return 1
+    print(f"=== {symbol} 动态基差（{result['futures_symbol']}，{result['date']}）===")
+    print(f"  当前基差: {result['current_basis_pct']}%（{result['current_basis_pts']} 点，合约 {result['contract']}）")
+    print(f"  历史分位: {result['percentile']}%（中位数 {result['median_basis_pct']}%，n={result['n_history']}）")
+    if result.get("oi_20d_chg_pct") is not None:
+        print(f"  持仓量 20 日变化: {result['oi_20d_chg_pct']:+.2f}%")
+    print(f"  演变分布参照: {result['distribution_ref']}")
+    print(f"  ⚠️ {result['note']}")
+    return 0
+
+
 def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
     """R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日，大单口径亿元）。"""
     symbol = _validate_symbol(symbol)
@@ -669,6 +693,9 @@ def main(argv: list[str] | None = None) -> int:
         "collect-sector-flow",
         help="R15: 手动触发行业资金流每日采集（幂等，非交易日跳过；盘后触发）",
     )
+    p_fb = sub.add_parser("futures-basis", help="F 系列: ETF 股指期货动态基差状态（状态度量，非预测）")
+    p_fb.add_argument("symbol", help="6 位 ETF 代码")
+    p_fb.add_argument("--json", action="store_true", help="输出完整 JSON")
 
     args = parser.parse_args(argv)
     if args.cmd == "report":
@@ -689,6 +716,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_sector_flow(args.symbol, as_json=args.json)
     if args.cmd == "collect-sector-flow":
         return cmd_collect_sector_flow()
+    if args.cmd == "futures-basis":
+        return cmd_futures_basis(args.symbol, as_json=args.json)
     return 1
 
 

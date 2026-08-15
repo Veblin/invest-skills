@@ -49,6 +49,7 @@ DEFAULT_TTL: dict[str, int] = {
     "lu_ld_ratio":   5 * 60,       # 涨跌停比：5 分钟
     "microstructure": 5 * 60,      # 市场微观结构快照：5 分钟
     "market_daily_pctiles": 4 * 3600,  # 全市场分位横截面（v0.2.6）：4 小时
+    "futures_basis": 4 * 3600,          # 股指期货基差/持仓（v0.2.6 F 系列）：盘中 4h、盘后日更
     # ETF 维度（invest-a-etf canonical；L1=引擎内进程缓存，L2=本缓存层）
     "etf_spot":           60,      # ETF 全市场现价表（L1 30s 进程内，L2 跨进程）
     "etf_index_pe":       1 * 86400,  # csindex 指数 PE（日频）
@@ -265,6 +266,41 @@ def get_market_daily_pctiles(*, force: bool = False) -> dict | None:
         "market_daily_pctiles", "market", _collect,
         force=force,
     )
+
+
+def get_futures_basis(*, force: bool = False) -> dict | None:
+    """股指期货最新基差/持仓状态（v0.2.6 F 系列，缓存 4h）。
+
+    返回 {IF|IH|IC|IM: {date, contract, basis_pct, oi_change_pct, source}}
+    最新一日的四品种状态 | None（不可得）。依赖 invest-a-stock 的 store/futures_data。
+    """
+    try:
+        from lib import store as _store  # noqa: E402 — invest-a-stock 路径引导
+    except ImportError:
+        logger.warning(
+            "get_futures_basis() requires invest-a-stock lib on sys.path; "
+            "Returning None — callers should guard against."
+        )
+        return None
+
+    def _collect() -> dict | None:
+        try:
+            _store.init_db()
+            rows = _store.load_futures_daily(limit=200)  # 全品种近 200 行 → 各品种最新行
+        except Exception:  # noqa: BLE001
+            return None
+        latest: dict[str, dict] = {}
+        for r in rows:
+            latest[r["symbol"]] = {
+                "date": r["date"], "contract": r["contract"],
+                "basis_pct": r.get("basis_pct"),
+                "basis_pts": r.get("basis_pts"),
+                "oi_change_pct": r.get("oi_change_pct"),
+                "source": r.get("source"),
+            }
+        return latest or None
+
+    return _fetch_dimension("futures_basis", "market", _collect, force=force)
 
 
 def get_microstructure(*, force: bool = False) -> dict | None:

@@ -39,6 +39,7 @@ _SNAPSHOT_DATA_KEYS = (
     "total_turnover", "sse_float_mcap", "szse_float_mcap",
     "erp", "pcr", "below_book_pct",
     "northbound_net_inflow", "northbound_market_value",
+    "futures_basis_pct", "futures_oi_change_pct",
 )
 
 
@@ -59,6 +60,7 @@ _MARKET_SNAPSHOT_COLUMNS = (
     "ad_ratio_5d_ma", "limit_down_20d_pct",
     "erp", "pcr", "below_book_pct",
     "northbound_net_inflow", "northbound_direction", "northbound_source",
+    "futures_basis_pct", "futures_oi_change_pct",
     "env_label",
 )
 
@@ -100,6 +102,9 @@ def snapshot() -> dict[str, Any]:
         "northbound_market_value": None,     # 北向持股市值（亿元）
         "northbound_direction": None,        # "流入" | "流出" | None
         "northbound_source": None,           # "direct" | "derived" | None
+        # 资金面 — 股指期货（v0.2.6 F 系列：机构对冲行为，状态度量非预测）
+        "futures_basis_pct": None,           # IC 当月基差%（负 = 贴水）
+        "futures_oi_change_pct": None,       # IC 持仓量 20 日变化%
         # 标签
         "label_leverage": None,
         "label_breadth": None,
@@ -116,6 +121,7 @@ def snapshot() -> dict[str, Any]:
     _fetch_pcr(result)
     _fetch_below_book_pct(result)
     _fetch_northbound(result)
+    _fetch_futures(result)
     _compute_labels(result)
     _auto_persist(result)
 
@@ -482,20 +488,26 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
         elif lr is not None:
             snap["label_sentiment"] = f"偏热（涨跌停比{lr:.1f}:1）"
 
-    # --- 资金面标签 ---
+    # --- 资金面标签（北向 + 股指期货双视角；v0.2.6 F 系列扩展） ---
     nb_net = snap.get("northbound_net_inflow")
     nb_dir = snap.get("northbound_direction")
     nb_mv = snap.get("northbound_market_value")
+    parts: list[str] = []
     if nb_mv is not None:
         mv_str = f"持股市值 {nb_mv:.0f}亿"
         if nb_net is not None and nb_dir is not None:
-            snap["label_capital_flow"] = (
-                f"北向 {nb_dir} {abs(nb_net):.0f}亿（季度环比，{mv_str}）"
-            )
+            parts.append(f"北向 {nb_dir} {abs(nb_net):.0f}亿（季度环比，{mv_str}）")
         else:
-            snap["label_capital_flow"] = f"北向 {mv_str}（季度快照，日频不可得）"
+            parts.append(f"北向 {mv_str}（季度快照，日频不可得）")
     else:
-        snap["label_capital_flow"] = "北向数据暂不可用"
+        parts.append("北向数据暂不可用")
+    basis = snap.get("futures_basis_pct")
+    if basis is not None:
+        parts.append(f"IC 基差 {basis:+.2f}%")
+        oi_chg = snap.get("futures_oi_change_pct")
+        if oi_chg is not None:
+            parts.append(f"IC 持仓 20 日 {oi_chg:+.1f}%")
+    snap["label_capital_flow"] = "；".join(parts)
 
     # --- 综合环境标签（JSON，供 journal 注入） ---
     env = {
@@ -588,18 +600,25 @@ def _compute_labels(result: dict) -> None:
         elif lr is not None:
             result["label_sentiment"] = "偏热"
 
-    # 资金面标签（v0.2.2）
+    # 资金面标签（v0.2.2；v0.2.6 F 系列扩展：北向 + 股指期货双视角）
     nb_net = result.get("northbound_net_inflow")
     nb_dir = result.get("northbound_direction")
     nb_mv = result.get("northbound_market_value")
+    parts: list[str] = []
     if nb_mv is not None:
         mv_str = f"持股市值 {nb_mv:.0f}亿"
         if nb_net is not None and nb_dir is not None:
-            result["label_capital_flow"] = (
-                f"北向 {nb_dir} {abs(nb_net):.0f}亿（季度环比，{mv_str}）"
-            )
+            parts.append(f"北向 {nb_dir} {abs(nb_net):.0f}亿（季度环比，{mv_str}）")
         else:
-            result["label_capital_flow"] = f"北向 {mv_str}（季度快照，日频不可得）"
+            parts.append(f"北向 {mv_str}（季度快照，日频不可得）")
+    basis = result.get("futures_basis_pct")
+    if basis is not None:
+        parts.append(f"IC 基差 {basis:+.2f}%")
+        oi_chg = result.get("futures_oi_change_pct")
+        if oi_chg is not None:
+            parts.append(f"IC 持仓 20 日 {oi_chg:+.1f}%")
+    if parts:
+        result["label_capital_flow"] = "；".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +918,30 @@ def _fetch_below_book_pct(result: dict) -> None:
             hint = ""
         logger.warning("below_book fetch failed: %s%s", exc, f" {hint}" if hint else "")
         result["_errors"].append(f"below_book: {exc}{hint}")
+
+
+def _fetch_futures(result: dict) -> None:
+    """股指期货基差/持仓（v0.2.6 F 系列）——机构对冲行为状态度量，非预测。
+
+    读 futures_daily 最新一行（IC 为主品种，代表中小盘对冲成本）；
+    oi_change_pct 由 oi_chg 计算 20 日变化（futures_daily 已预计算 oi_change_pct
+    为日环比——此处取 20 日窗口变化）。
+    """
+    try:
+        from lib import store as _store  # noqa: E402 — 惰性导入
+        _store.init_db()
+        rows = _store.load_futures_daily(symbol="IC", limit=21)
+        if not rows:
+            return
+        latest = rows[-1]
+        if latest.get("basis_pct") is not None:
+            result["futures_basis_pct"] = latest["basis_pct"]
+        oi_vals = [float(r["oi"]) for r in rows if r.get("oi") is not None]
+        if len(oi_vals) >= 21 and oi_vals[0]:
+            result["futures_oi_change_pct"] = round(
+                (oi_vals[-1] - oi_vals[0]) / oi_vals[0] * 100, 2)
+    except Exception:  # noqa: BLE001 — 单维度失败不阻塞
+        result["_errors"].append("futures 读取失败（降级：资金面缺期货维度）")
 
 
 def _fetch_northbound(result: dict) -> None:

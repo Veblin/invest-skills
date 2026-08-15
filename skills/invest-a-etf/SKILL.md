@@ -114,6 +114,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 7. **资金流向与趋势**（🆕 R15，行业 ETF 必须：`sector-flow` 同花顺 THS 行业 3/5/10 日净额 + 单时点窗口分解（近端 vs 中段）+ 积累序列（≥6 日）；对照 pulse 涨停热度盘面结合；**证据非信号，趋势与日期配合**）
 8. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
 9. 对冲覆盖（hedge-map）
+9b. 动态基差与持仓（F 系列：futures_basis 状态度量 + 历史演变分布参照，非预测）
 10. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
 11. 因子/主题逻辑（须可追溯来源，否则「待验证」）
 12. 多情景 / 交易结构（可选，LAW 6a）

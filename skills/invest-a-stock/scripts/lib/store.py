@@ -170,12 +170,36 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_market_daily_date ON market_daily(date);
             CREATE INDEX IF NOT EXISTS idx_market_daily_code ON market_daily(ts_code);
+            CREATE TABLE IF NOT EXISTS futures_daily (
+                date TEXT NOT NULL,
+                symbol TEXT NOT NULL,          -- IF / IH / IC / IM
+                contract TEXT NOT NULL,        -- 当月合约（IF2608.CFX）或 main_continuous（sina 降级）
+                open REAL, high REAL, low REAL, close REAL, settle REAL,
+                oi REAL, oi_chg REAL,
+                basis_pts REAL, basis_pct REAL, oi_change_pct REAL,
+                source TEXT DEFAULT 'tushare',
+                collected_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (date, symbol)
+            );
+            CREATE INDEX IF NOT EXISTS idx_futures_daily_symbol ON futures_daily(symbol);
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [
             ("northbound_net_inflow", "REAL"),
             ("northbound_direction", "TEXT"),
             ("northbound_source", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass  # 列已存在
+                else:
+                    raise
+        # v0.2.6 迁移：futures 资金面维度（F 系列）
+        for col, col_type in [
+            ("futures_basis_pct", "REAL"),
+            ("futures_oi_change_pct", "REAL"),
         ]:
             try:
                 c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
@@ -1206,6 +1230,61 @@ def load_macro_history(days: int = 365) -> list[dict]:
         return load_recent_rows(c, "macro_snapshots", limit=int(days))
     except sqlite3.OperationalError:
         return []  # 表不可用（DB 被替换等）→ 空历史而非抛异常
+    finally:
+        _safe_close(c)
+
+
+def save_futures_daily(rows: list[dict]) -> int:
+    """futures_daily 批量写入（v0.2.6 F 系列数据层）。merge=True 幂等。"""
+    if not rows:
+        return 0
+    init_db()
+    c = _conn()
+    try:
+        n = upsert_daily_rows(c, "futures_daily", rows, pk=("date", "symbol"), merge=True)
+        c.commit()
+        return n
+    finally:
+        _safe_close(c)
+
+
+def load_futures_daily(symbol: str | None = None, limit: int = 5000) -> list[dict]:
+    """futures_daily 读取（symbol=None 全品种，date ASC）。"""
+    init_db()
+    c = _conn()
+    try:
+        if symbol:
+            rows = c.execute(
+                "SELECT * FROM futures_daily WHERE symbol=? ORDER BY date DESC LIMIT ?",
+                (symbol.upper(), int(limit)),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM futures_daily ORDER BY date DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+    finally:
+        _safe_close(c)
+
+
+def latest_futures_date() -> str | None:
+    """futures_daily 最新交易日。"""
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute("SELECT MAX(date) AS d FROM futures_daily").fetchone()
+        return row["d"] if row and row["d"] else None
+    finally:
+        _safe_close(c)
+
+
+def futures_contracts() -> set[str]:
+    """已入库合约集合（断点续跑判定）。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute("SELECT DISTINCT contract FROM futures_daily").fetchall()
+        return {str(r["contract"]) for r in rows}
     finally:
         _safe_close(c)
 
