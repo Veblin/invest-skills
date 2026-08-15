@@ -2,7 +2,9 @@
 
 背景（2026-08-15 /code-review #10）：_wilder 曾用「前 n 项和」种子配合
 平均形式递推（v/n），早期条数被放大 ~n 倍后缓慢衰减，趋势反转序列上
-前 ~30-50 根 ADX 最多偏高 ~53 点。参考实现锁定正确口径，防止回退。
+前 ~30-50 根 ADX 最多偏高 ~53 点。镜像测试锁定该口径、防止回退
+（约定锁定，非独立 oracle）；真 oracle 见 TestAdxGoldenFixture——
+期望值由独立手算推导、硬编码，不经过生产实现任何代码路径。
 """
 
 from __future__ import annotations
@@ -31,7 +33,11 @@ def _wilder_avg(vals: list[float], n: int) -> list[float]:
 
 
 def _adx_ref(highs: list[float], lows: list[float], closes: list[float], n: int = 14):
-    """教科书 Wilder ADX（独立参考实现）：TR/±DM 平滑 → DI → DX → ADX。"""
+    """镜像实现（约定锁定用）：与生产逐行同构，仅防 seed/递推回退。
+
+    注意：同构代码不构成独立 oracle——共享的系统性错误两侧一致、
+    测试照绿；独立校验见 TestAdxGoldenFixture。
+    """
     m = len(closes)
     out: list[float | None] = [None] * m
     if m < 2 * n:
@@ -77,6 +83,39 @@ def _uptrend_then_reverse(n_each: int = 60):
     highs = [c + 1.5 for c in closes]
     lows = [c - 1.5 for c in closes]
     return highs, lows, closes
+
+
+# 独立手算固件（n=3 短窗，推导不经过生产实现）：
+# closes=[100,101,100.5,102,101,100,99.5,98,99,97]
+# highs =[100.8,101.6,101.4,102.6,101.8,100.9,100.2,99.2,99.8,98.4]
+# lows  =[99.6,100.4,100.0,101.2,100.4,99.2,98.8,97.2,98.0,96.4]
+# TR=[0,1.6,1.4,2.1,1.6,1.8,1.4,2.3,1.8,2.6]
+# +DM=[0,.8,0,1.2,0,0,0,0,.6,0]  −DM=[0,0,.4,0,.8,1.2,.4,1.6,0,1.6]
+# Wilder(n=3)（累计均值种子 + prev*2/3+v/3）→ DX@idx:
+# {1:100, 2:33.33, 3:73.33, 4:8.33, 5:41.24, 6:52.18, 7:77.42, 8:36.81, 9:67.01}
+# ADX 再平滑（同口径），2n−1=5 起发布：
+GOLDEN_FIXTURE = {
+    "closes": [100.0, 101.0, 100.5, 102.0, 101.0, 100.0, 99.5, 98.0, 99.0, 97.0],
+    "highs": [100.8, 101.6, 101.4, 102.6, 101.8, 100.9, 100.2, 99.2, 99.8, 98.4],
+    "lows": [99.6, 100.4, 100.0, 101.2, 100.4, 99.2, 98.8, 97.2, 98.0, 96.4],
+    "expected": [None, None, None, None, None, 46.22, 48.21, 57.94, 50.9, 56.27],
+}
+
+
+class TestAdxGoldenFixture:
+    def test_golden_values(self):
+        """独立手算固件逐条精确匹配——真 oracle（非镜像）。"""
+        h = GOLDEN_FIXTURE["highs"]
+        l = GOLDEN_FIXTURE["lows"]
+        c = GOLDEN_FIXTURE["closes"]
+        got = adx(h, l, c, n=3)
+        assert got == GOLDEN_FIXTURE["expected"]
+
+    def test_golden_steady_trend(self):
+        """纯单边趋势 n=3：+DM/TR 恒比 → DX=100 → 5 位起全 100。"""
+        closes = [100.0 + 0.5 * i for i in range(10)]
+        got = adx([c + 0.4 for c in closes], [c - 0.4 for c in closes], closes, n=3)
+        assert got[5:] == [100.0] * 5
 
 
 class TestAdxWilderConsistency:
