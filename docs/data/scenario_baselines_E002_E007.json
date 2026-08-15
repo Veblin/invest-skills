@@ -16,76 +16,76 @@
       "label": "弱势情景切换",
       "kind": "close_below",
       "level": 3909.5,
-      "n_hits": 21,
+      "n_hits": 20,
       "+1": {
-        "n": 21,
-        "mean_pct": 0.5815,
-        "median_pct": 0.6286,
-        "win_rate": 0.7143
+        "n": 20,
+        "mean_pct": 0.3901,
+        "median_pct": 0.5439,
+        "win_rate": 0.7
       },
       "+3": {
-        "n": 21,
-        "mean_pct": 1.31,
-        "median_pct": 0.3896,
-        "win_rate": 0.619
+        "n": 20,
+        "mean_pct": 0.6469,
+        "median_pct": 0.2602,
+        "win_rate": 0.6
       },
       "+5": {
-        "n": 21,
-        "mean_pct": 1.9026,
-        "median_pct": 1.4004,
-        "win_rate": 0.619
+        "n": 20,
+        "mean_pct": 0.733,
+        "median_pct": 1.0885,
+        "win_rate": 0.6
       }
     },
     "E-003": {
       "label": "生死线失守",
       "kind": "close_below",
       "level": 3741.11,
-      "n_hits": 12,
+      "n_hits": 11,
       "+1": {
-        "n": 12,
-        "mean_pct": -0.1132,
-        "median_pct": -0.3998,
-        "win_rate": 0.5
+        "n": 11,
+        "mean_pct": -0.5244,
+        "median_pct": -0.8941,
+        "win_rate": 0.4545
       },
       "+3": {
-        "n": 12,
-        "mean_pct": 0.7277,
-        "median_pct": 2.4252,
-        "win_rate": 0.5833
+        "n": 11,
+        "mean_pct": -0.5309,
+        "median_pct": 1.3703,
+        "win_rate": 0.5455
       },
       "+5": {
-        "n": 12,
-        "mean_pct": 2.365,
-        "median_pct": 2.0534,
-        "win_rate": 0.5
+        "n": 11,
+        "mean_pct": 0.2804,
+        "median_pct": -1.0706,
+        "win_rate": 0.4545
       }
     },
     "E-004": {
       "label": "五浪目标跟踪",
       "kind": "close_below",
       "level": 3745.17,
-      "n_hits": 12,
+      "n_hits": 11,
       "+1": {
-        "n": 12,
-        "mean_pct": -0.1132,
-        "median_pct": -0.3998,
-        "win_rate": 0.5
+        "n": 11,
+        "mean_pct": -0.5244,
+        "median_pct": -0.8941,
+        "win_rate": 0.4545
       },
       "+3": {
-        "n": 12,
-        "mean_pct": 0.7277,
-        "median_pct": 2.4252,
-        "win_rate": 0.5833
+        "n": 11,
+        "mean_pct": -0.5309,
+        "median_pct": 1.3703,
+        "win_rate": 0.5455
       },
       "+5": {
-        "n": 12,
-        "mean_pct": 2.365,
-        "median_pct": 2.0534,
-        "win_rate": 0.5
+        "n": 11,
+        "mean_pct": 0.2804,
+        "median_pct": -1.0706,
+        "win_rate": 0.4545
       },
       "touch_wave_target_60d": {
-        "n": 10,
-        "ratio": 0.8333
+        "n": 9,
+        "ratio": 0.8182
       }
     },
     "E-005": {
@@ -116,48 +116,48 @@
       "label": "BOLL 上轨触达",
       "kind": "boll_position",
       "level": 95.0,
-      "n_hits": 795,
+      "n_hits": 300,
       "+1": {
-        "n": 795,
-        "mean_pct": 0.5289,
-        "median_pct": 0.1806,
-        "win_rate": 0.5811
+        "n": 300,
+        "mean_pct": 0.3735,
+        "median_pct": 0.2258,
+        "win_rate": 0.6067
       },
       "+3": {
-        "n": 795,
-        "mean_pct": 1.4709,
-        "median_pct": 0.54,
-        "win_rate": 0.6289
+        "n": 300,
+        "mean_pct": 1.0554,
+        "median_pct": 0.5615,
+        "win_rate": 0.6333
       },
       "+5": {
-        "n": 795,
-        "mean_pct": 2.1068,
-        "median_pct": 0.7605,
-        "win_rate": 0.6189
+        "n": 300,
+        "mean_pct": 1.404,
+        "median_pct": 0.7539,
+        "win_rate": 0.64
       }
     },
     "E-007": {
       "label": "反弹触及 50% 位",
       "kind": "close_near",
       "level": 3960.26,
-      "n_hits": 26,
+      "n_hits": 18,
       "+1": {
-        "n": 26,
-        "mean_pct": 0.0741,
-        "median_pct": 0.2507,
-        "win_rate": 0.6538
+        "n": 18,
+        "mean_pct": 0.2325,
+        "median_pct": 0.3891,
+        "win_rate": 0.6667
       },
       "+3": {
-        "n": 26,
-        "mean_pct": -0.6021,
+        "n": 18,
+        "mean_pct": -0.6117,
         "median_pct": 0.2522,
-        "win_rate": 0.5769
+        "win_rate": 0.5556
       },
       "+5": {
-        "n": 26,
-        "mean_pct": -0.0305,
-        "median_pct": 0.6627,
-        "win_rate": 0.6154
+        "n": 18,
+        "mean_pct": 0.1967,
+        "median_pct": 0.4967,
+        "win_rate": 0.6111
       }
     }
   }
