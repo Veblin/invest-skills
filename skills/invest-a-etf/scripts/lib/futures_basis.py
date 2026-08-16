@@ -17,7 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 def futures_symbol_for_etf(symbol: str) -> str | None:
-    """ETF → 期货品种（IF/IH/IC/IM）；无 → None。"""
+    """ETF → 期货品种（IF/IH/IC/IM）；有映射但数据层未覆盖的品种
+    （如科创50期货）返回品种名（"科创50"），无映射 → None。
+
+    F1-4 修复：hedge-map 记录了「科创50期货(2025上线)」，旧实现只认
+    IF/IH/IC/IM 四个品种 → 返回 None → 提示「无映射」，与 hedge-map
+    自相矛盾。现在区分「无映射」与「有映射但数据层未覆盖」。
+    """
     from etf_data import ETF_HEDGE_MAP  # noqa: E402
 
     entry = ETF_HEDGE_MAP.get(str(symbol))
@@ -27,6 +33,8 @@ def futures_symbol_for_etf(symbol: str) -> str | None:
     for sym in ("IM", "IC", "IF", "IH"):
         if sym in futures_name:
             return sym
+    if "科创50" in futures_name:
+        return "科创50"
     return None
 
 
@@ -51,6 +59,14 @@ def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
     fsym = futures_symbol_for_etf(symbol)
     if fsym is None:
         result["note"] = "该 ETF 无股指期货对冲品种（hedge-map 无 futures 映射）"
+        return result
+    if fsym not in ("IF", "IH", "IC", "IM"):
+        # F1-4: 品种映射存在但 futures_daily 数据层仅覆盖 IF/IH/IC/IM
+        result["futures_symbol"] = fsym
+        result["note"] = (
+            f"品种映射存在（{fsym}期货，hedge-map），但 futures_daily 数据层"
+            "仅覆盖 IF/IH/IC/IM，基差状态不可得（非「无对冲品种」）"
+        )
         return result
     result["futures_symbol"] = fsym
 

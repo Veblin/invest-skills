@@ -118,10 +118,13 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     # 自投成 100%/5% 假象），与 journal 路径（不 persist-first）语义一致；写库放
     # 查询后，下次报告的分位即含今日（幂等，失败不阻断报告）
     idx = CSINDEX_MAP.get(symbol)
-    if idx:
-        res = _persist_index_pe([idx])
-        if res.get("error"):
-            print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
+    # F1-6 修复：report 路径幂等回填 CSINDEX_MAP 全部指数（不再只回填本标的），
+    # 自愈「上证50/中证500/中证1000 自 08-06 停更」类停滞——任何一次 ETF
+    # 报告都会刷新全部宽基指数的 20 日滚动窗口。开销 ~6 次 csindex 请求
+    # （data_bridge 1d 缓存内仅首报触发）。
+    res = _persist_index_pe(None) if idx else {"error": None}
+    if res.get("error"):
+        print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
     quote = query_etf_quote(symbol)
     kline = query_etf_kline(symbol)
     share_history = query_etf_share_history(symbol, days=20)

@@ -2503,6 +2503,22 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
     recent_dates = [d for d in dates if d >= cutoff]
     fetch_dates = sorted(set(sampled) | set(recent_dates))
 
+    # F1-5 修复：批量取数前单点预检——端点整体挂起/限流时（实测 56 天 × 8s
+    # 超时风暴，单次报告拖慢数分钟），一次 8s 探针即整体降级跳过，
+    # 不逐日空转。端点正常时仅多一次 <1s 查询。
+    if fetch_dates:
+        probe_df = _run_with_timeout(
+            lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
+            8.0, f"opt_daily-probe:{fetch_dates[-1]}",
+        )
+        if probe_df is None:
+            logger.warning(
+                "opt_daily endpoint timed out on probe (%s); "
+                "skipping PCR fetch storm (%d dates)",
+                fetch_dates[-1], len(fetch_dates),
+            )
+            return None
+
     def _on_pcr_error(td: str, exc: Exception) -> None:
         logger.debug("opt_daily %s failed: %s", td, exc)
 

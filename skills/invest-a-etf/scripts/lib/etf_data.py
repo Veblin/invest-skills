@@ -208,6 +208,28 @@ HOLDINGS_CLUSTER_MAP: dict[str, str] = {
     "601138": "终端/服务器代工",  # 工业富联
     "603986": "存储/光缆",      # 兆易创新
     "600487": "存储/光缆",      # 亨通光电
+    # —— 512660 军工ETF 前十大（2026-06-30；F1-2 修复）——
+    "600150": "船舶总装",        # 中国船舶
+    "002179": "军工连接器",      # 中航光电
+    "688002": "红外/光电",       # 睿创微纳
+    "600879": "航天电子/无人系统",  # 航天电子
+    "300395": "军工新材料",      # 菲利华
+    "002625": "军工新材料",      # 光启技术（超材料）
+    "600893": "航空发动机",      # 航发动力
+    "600118": "卫星/航天",       # 中国卫星
+    "600760": "航空整机",        # 中航沈飞
+    "601698": "卫星/航天",       # 中国卫通
+    # —— 588000 科创50ETF 前十大（2026-06-30；F1-2 修复）——
+    "688256": "AI 芯片",        # 寒武纪
+    "688041": "AI 芯片",        # 海光信息
+    "688981": "晶圆代工",       # 中芯国际
+    "688347": "晶圆代工",       # 华虹宏力
+    "688012": "半导体设备",     # 中微公司
+    "688072": "半导体设备",     # 拓荆科技
+    "688008": "互连/接口芯片",  # 澜起科技
+    "688498": "光芯片",         # 源杰科技
+    "688525": "存储",           # 佰维存储
+    "688521": "IP/设计服务",    # 芯原股份
 }
 
 
@@ -1164,8 +1186,38 @@ def query_etf_holdings(symbol: str) -> dict[str, Any]:
     }
 
 
+def _q_tencent_etf_quote(symbol: str) -> dict[str, Any] | None:
+    """腾讯行情回退（F1-1）：东财 spot 不可达（代理/限流）时提供
+    价/涨跌幅/成交量/成交额；折溢价腾讯无字段，标注不可得。
+
+    ETF 代码市场映射：51xxxx=沪市(sh)，15xxxx=深市(sz)。
+    """
+    try:
+        from lib.proxy import no_proxy_session  # invest-a-stock 路径引导
+        market = "sh" if str(symbol).startswith(("5", "6", "9")) else "sz"
+        with no_proxy_session() as sess:
+            r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
+        if r.status_code != 200 or "~" not in r.text:
+            return None
+        p = r.text.split("~")
+        if len(p) <= 45:
+            return None
+        out: dict[str, Any] = {}
+        for key, idx in (("price", 3), ("change_pct", 32), ("volume", 6), ("amount", 37)):
+            try:
+                out[key] = safe_float(p[idx])
+            except (ValueError, TypeError, IndexError):
+                out[key] = None
+        if out.get("price") is None:
+            return None
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tencent etf quote fallback failed: %s", exc)
+        return None
+
+
 def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
-    """ETF 当前行情：价格、涨跌幅、折溢价（从 fund_etf_spot_em）。"""
+    """ETF 当前行情：价格、涨跌幅、折溢价（从 fund_etf_spot_em；失败回退腾讯）。"""
     result: dict[str, Any] = {
         "symbol": symbol,
         "price": None,
@@ -1180,11 +1232,19 @@ def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
         if spot_row is not None:
             return _spot_row_to_quote(symbol, spot_row)
         row, err = _lookup_etf_spot_row(symbol)
-        if err:
-            result["_error"] = err.replace("etf_spot: ", "", 1)
-            return result
-        if row is None:
-            result["_error"] = "empty response"
+        if err or row is None:
+            # F1-1: spot 源失败 → 腾讯行情回退（折溢价不可得，不整列缺失）
+            fallback = _q_tencent_etf_quote(symbol)
+            if fallback:
+                result.update(fallback)
+                result["status"] = "available"
+                result["premium_discount"] = None
+                result["_error"] = (
+                    f"spot 源不可用（{err or 'empty response'}），"
+                    "已回退腾讯行情；折溢价不可得"
+                )
+                return result
+            result["_error"] = (err or "empty response").replace("etf_spot: ", "", 1)
             return result
         return _spot_row_to_quote(symbol, row)
     except Exception as exc:

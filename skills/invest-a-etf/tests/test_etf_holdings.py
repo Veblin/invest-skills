@@ -333,14 +333,24 @@ def test_query_clusters_sum_cross_check(monkeypatch):
 
 
 def test_query_clusters_unmapped_to_uncategorized(monkeypatch):
-    """未映射股票归入「未归类」单组（159206 前十全未映射）。"""
-    monkeypatch.setattr("etf_data._bridge_get", lambda *a: _ok_env())
-    out = query_etf_holdings("159206")
+    """未映射股票归入「未归类」单组（合成代码，全部未映射）。
+
+    注：159206 真实前十中 688002/600879/600118 已被 F1-2 军工映射覆盖，
+    改用合成代码保持测试意图（未映射 → 未归类）。
+    """
+    synth_rows = [
+        {"code": f"9{i:05d}", "name": f"合成{i}", "pct": 10.0 - i}
+        for i in range(1, 6)
+    ]
+    env = {"status": "ok", "report_date": "2026-06-30", "quarter": "2026年2季度",
+           "rows": synth_rows, "error": None}
+    monkeypatch.setattr("etf_data._bridge_get", lambda *a: env)
+    out = query_etf_holdings("999999")
     clusters = out["clusters"]
     assert len(clusters) == 1
     assert clusters[0]["cluster"] == "未归类"
-    assert clusters[0]["sum_pct"] == pytest.approx(49.15)
-    assert len(clusters[0]["members"]) == 10
+    assert clusters[0]["sum_pct"] == pytest.approx(sum(r["pct"] for r in synth_rows))
+    assert len(clusters[0]["members"]) == 5
 
 
 def test_query_clusters_empty_rows_missing(monkeypatch):
