@@ -143,6 +143,8 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 输出格式（简报首行）：
 [宏观情景] PMI XX.X + CPI +X.X% + LPR X.X% →偏宽松/中性/偏紧 | VIX XX.X 正常 SOX X,XXX
 
+**标签生成责任**（F2-7）：当前引擎自动生成宏观标签并写入报告头部。Claude 须核验标签数字为**最新期**（akshare PMI/CPI 序列最新在前，引擎曾取 2008-01 旧行，F0-4 已修）；发现非当期数字时按正确值改写标签并标注来源。
+
 ## 关键架构
 
 - **多源降级链（R12h）**：L3 行情类（kline/quote/basic_info/shareholders/northbound）经 `_run_sources_cascade` 首选源单发、失败按序降级（防东财限流/首选源挂死）；L2 财务类（financials/valuation）经 `_run_sources_parallel` 并行双源先到先用；industry/holder_changes 互补数据并行

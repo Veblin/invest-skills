@@ -374,6 +374,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("symbol")
     pe.add_argument("--emit", default="md", choices=["md", "json"])
     pe.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
+    pe.add_argument(
+        "--from-store", action="store_true",
+        help="F2-3: 复用 store 最近一次 collect 快照（dims/flags 兼容时），"
+             "跳过重复现场采集",
+    )
     _add_collect_flags(pe)
 
     pa = sub.add_parser("analyze", help="分析采集结果（输出中间分析 JSON）")
@@ -755,8 +760,10 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
 
     if fmt == "md" and args.outdir:
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        # F2-4: 报告文件名时间戳显式北京时（ZoneInfo Asia/Shanghai），
+        # 不再依赖机器本地时区。
+        from lib.dates import shanghai_now
+        ts = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
         subdir = _report_basename(result, args.symbol, ts)
         outdir = Path(args.outdir).resolve()
         mdpath = _report_filepath(outdir, subdir, ts)
@@ -882,7 +889,16 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         return 1
     env.print_missing_token_warnings()
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
-    result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    # F2-3: --from-store 复用 collect 快照（兼容性校验同 --resume），
+    # 避免 evidence 与 collect 双重现场采集（实测两轮合计 ~2 倍网络负载）。
+    result: dict | None = None
+    if getattr(args, "from_store", False) and _HAS_STORE:
+        cached = _try_resume_collection(args.symbol)
+        if cached and _resume_cache_compatible(args, dims, cached):
+            print("♻️ 复用 store 采集快照（--from-store），跳过现场采集")
+            result = cached
+    if result is None:
+        result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
     if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成证据表")
@@ -2016,11 +2032,21 @@ def cmd_classify(args: argparse.Namespace) -> int:
         fin_rows = _q_tushare_financials(args.symbol) or []
     except Exception:
         pass
+    # F2-1: 行业传入（金融行业成长分支减权）；查询失败不影响分类
+    industry: str | None = None
+    try:
+        from lib.collector import _q_tushare_basic
+        basic = _q_tushare_basic(args.symbol)
+        if basic:
+            industry = str(basic.get("industry") or "") or None
+    except Exception:
+        pass
     result = classify_income_driver(
         annual, fin_rows,
         div_years=args.div_years,
         div_yield=args.div_yield,
         refi_times=args.refi_times,
+        industry=industry,
     )
     if args.emit == "json":
         import json as _json

@@ -124,10 +124,20 @@ def _driver_from_collection(collection: dict) -> str | None:
         from lib.income_driver import classify_income_driver
         fin = (collection.get("dimensions") or [])
         rows = []
+        industry: str | None = None
         for dim in fin:
-            if dim.get("dimension") == "financials" and isinstance(dim.get("data"), list):
+            name = dim.get("dimension")
+            if name == "financials" and isinstance(dim.get("data"), list):
                 rows = dim["data"]
-                break
+            if name == "basic_info" and industry is None:
+                bdata = dim.get("data")
+                if isinstance(bdata, list):
+                    for br in bdata:
+                        if isinstance(br, dict) and br.get("industry"):
+                            industry = str(br.get("industry"))
+                            break
+                elif isinstance(bdata, dict) and bdata.get("industry"):
+                    industry = str(bdata.get("industry"))
         annual: list[dict] = []
         for r in rows:
             ed = str(r.get("end_date", ""))
@@ -136,7 +146,7 @@ def _driver_from_collection(collection: dict) -> str | None:
                 annual.append({"year": ed, "net_profit": float(npv)})
         if len(annual) < 3:
             return None
-        result = classify_income_driver(annual, rows)
+        result = classify_income_driver(annual, rows, industry=industry)
         return result.get("driver") or None
     except Exception:
         return None

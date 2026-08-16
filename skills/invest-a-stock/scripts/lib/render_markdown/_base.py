@@ -190,7 +190,18 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
         from lib.income_driver import classify_income_driver
     except ImportError:
         return []
-    result = classify_income_driver(annual, fin)
+    # F2-1: 行业传入（金融行业成长分支减权）
+    industry: str | None = None
+    basic_dim = dims.get("basic_info") or {}
+    bdata = basic_dim.get("data") if isinstance(basic_dim, dict) else None
+    if isinstance(bdata, list):
+        for br in bdata:
+            if isinstance(br, dict) and br.get("industry"):
+                industry = str(br.get("industry"))
+                break
+    elif isinstance(bdata, dict) and bdata.get("industry"):
+        industry = str(bdata.get("industry"))
+    result = classify_income_driver(annual, fin, industry=industry)
     driver = result.get("driver", "")
     conf = result.get("confidence", "")
     lines = [f"**[收益驱动假设（R1）]** {driver}（置信度: {conf}）— 研究路径分流依据，决定模块权重（R12d）"]

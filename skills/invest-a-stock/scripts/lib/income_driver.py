@@ -144,6 +144,7 @@ def classify_income_driver(
     div_years: int | None = None,
     div_yield: float | None = None,
     refi_times: int | None = None,
+    industry: str | None = None,
 ) -> dict:
     """R1: 收益驱动假设分类。
 
@@ -152,7 +153,9 @@ def classify_income_driver(
         fin_rows: financials 记录（含 fcff/fcfe/ocf/cap_ex）
         div_years: 连续分红年数（None = 未提供 → 证据缺失标注）
         div_yield: 当前股息率（小数，None = 未提供）
-        refi_times: 近 N 年再融资次数（None = 未提供）
+        refi_times: 近 5 年再融资次数（None = 未提供）
+        industry: 行业名（银行/非银金融等金融行业对成长分支减权——银行
+            年年名义正增长但增速个位数，非"成长兑现"逻辑）
 
     Returns:
         {
@@ -191,13 +194,30 @@ def classify_income_driver(
                and k in ("dividend", "refi")]
 
     # 各分支证据强度（引擎规则，非 AI 定性）
+    # F2-1: 成长分支加入增速量级约束——银行等「年年正增长但增速个位数」
+    # 的标的，正增长年占比的证据贡献按近年年化净利增速缩放（年化 <8% 时
+    # 衰减；下限 0.15 防全灭）。窗口取最近 3 年（全窗口 CAGR 会被早年
+    # 高增长抬高，招行 2015→2025 全窗口 ~10% 但近 3 年 ~3%）。
+    _cagr_window = annual[-4:] if len(annual) >= 4 else annual
+    annual_cagr_pct: float | None = None
+    if len(_cagr_window) >= 2 and _cagr_window[0] > 0:
+        _years = len(_cagr_window) - 1
+        if _years >= 1:
+            annual_cagr_pct = ((_cagr_window[-1] / _cagr_window[0]) ** (1 / _years) - 1) * 100
+    growth_scale = 1.0
+    if annual_cagr_pct is not None:
+        growth_scale = min(1.0, max(0.15, annual_cagr_pct / 8.0))
+
     growth_score = 0.0
     if ev_growth.get("available"):
-        growth_score += ev_growth["positive_year_ratio"]
+        growth_score += ev_growth["positive_year_ratio"] * growth_scale
         if ev_growth.get("last_two_direction") == "up":
             growth_score += 0.2
     if ev_fcf.get("available"):
         growth_score += ev_fcf["positive_ratio"] * 0.3
+    # F2-1: 金融行业成长分支减权——银行名义正增长≠成长兑现驱动
+    if industry in ("银行", "非银金融", "保险", "证券", "多元金融"):
+        growth_score *= 0.5
 
     value_score = 0.0
     if ev_cycle.get("available"):
@@ -206,6 +226,9 @@ def classify_income_driver(
             value_score += 0.2
     if ev_div.get("available"):
         if (ev_div.get("div_years") or 0) >= _DIV_YEARS_MIN:
+            value_score += 0.3
+        # F2-1: 高股息率（≥4%）给股息回归分支额外加权（红利型标的）
+        if (ev_div.get("div_yield") or 0) >= 0.04:
             value_score += 0.3
     if ev_fcf.get("available"):
         value_score += ev_fcf["positive_ratio"] * 0.2
@@ -242,7 +265,7 @@ def classify_income_driver(
     if driver == DRIVER_GROWTH and ev_fcf.get("available") and ev_fcf["positive_ratio"] < 0.4:
         counter.append(f"FCF 为正占比 {ev_fcf['positive_ratio']:.0%}，成长含金量存疑（利润先行现金流滞后）")
     if driver == DRIVER_GROWTH and (ev_refi.get("refi_times") or 0) >= 2:
-        counter.append(f"近 N 年再融资 {ev_refi['refi_times']} 次，增长依赖外部融资稀释")
+        counter.append(f"近 5 年再融资 {ev_refi['refi_times']} 次（应为近 5 年口径），增长依赖外部融资稀释")
     if driver == DRIVER_VALUE and ev_cycle.get("available") and ev_cycle["cv"] >= _CYCLE_CV_THRESHOLD:
         counter.append(f"净利变异系数 {ev_cycle['cv']:.2f} 偏高，'价值'特征可能实为周期")
     if driver == DRIVER_CYCLE and ev_growth.get("available") and ev_growth["positive_year_ratio"] >= _GROWTH_POSITIVE_YEAR_RATIO:

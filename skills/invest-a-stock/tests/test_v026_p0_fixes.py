@@ -279,6 +279,49 @@ class TestLatestMonthRow:
 
 
 # ---------------------------------------------------------------------------
+# F2-1: R1 classify 金融行业感知
+# ---------------------------------------------------------------------------
+class TestClassifyBankIndustry:
+    _bank_annual = [
+        {"year": f"{y}1231", "net_profit": v} for y, v in [
+            (2018, 805.60), (2019, 928.67), (2020, 973.42), (2021, 1199.22),
+            (2022, 1380.12), (2023, 1466.02), (2024, 1483.91), (2025, 1501.81),
+        ]
+    ]
+    _bank_fin = [{"end_date": "20251231", "fcff": 100.0, "fcfe": 90.0}]
+
+    def test_bank_with_dividend_evidence_classifies_value(self):
+        from lib.income_driver import classify_income_driver
+        result = classify_income_driver(
+            self._bank_annual, self._bank_fin,
+            div_years=10, div_yield=0.052, refi_times=0, industry="银行",
+        )
+        assert result["driver"] == "估值股息回归"
+
+    def test_bank_without_evidence_not_growth(self):
+        """银行无分红证据时不应再判「成长兑现」（招行年增速 ~3%）。"""
+        from lib.income_driver import classify_income_driver
+        result = classify_income_driver(
+            self._bank_annual, self._bank_fin, industry="银行",
+        )
+        assert result["driver"] in ("暂无法判定", "估值股息回归")
+
+    def test_growth_stock_unaffected(self):
+        """宁德 30%+ 增速不受影响，仍成长兑现。"""
+        from lib.income_driver import classify_income_driver
+        annual = [
+            {"year": f"{y}1231", "net_profit": v} for y, v in [
+                (2021, 159.31), (2022, 307.29), (2023, 441.21),
+                (2024, 507.45), (2025, 722.01),
+            ]
+        ]
+        result = classify_income_driver(
+            annual, [{"end_date": "20251231", "fcff": 100.0}], industry="电气设备",
+        )
+        assert result["driver"] == "成长兑现"
+
+
+# ---------------------------------------------------------------------------
 # F0-3: lint 新规则（占位符/异常泄漏 error 级）
 # ---------------------------------------------------------------------------
 class TestNewLintRules:
