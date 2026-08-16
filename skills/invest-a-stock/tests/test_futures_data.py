@@ -116,8 +116,10 @@ class TestFetchContractWindow:
         assert len(rows) == 2
 
     def test_window_excludes_outside_rows(self):
+        # fetch_contract 不排序（保留供应商行序）——断言窗口内容而非行序，
+        # 避免与 tushare DESC-by-trade_date 约定耦合
         rows = fd.fetch_contract(_WindowFakeClient(), "IF2608.CFX", "2026-07-17", "2026-08-21")
-        assert [r["date"] for r in rows] == ["2026-08-14", "2026-07-25"]
+        assert sorted(r["date"] for r in rows) == ["2026-07-25", "2026-08-14"]
 
     def test_front_month_series_no_gap(self):
         """回归（finding #1）：月内到期日→月末的交易日必须由下一合约补齐。"""
@@ -131,7 +133,9 @@ class TestFetchContractWindow:
             all_rows.extend(rows)
             prev = expiry
         dates = sorted(r["date"] for r in all_rows)
-        assert len(dates) == len(all_rows)  # 相邻合约重叠日只归一份（无重复）
+        # 相邻合约重叠日只归一份：日期集合去重后长度不变（sorted 不改变
+        # 长度，len(dates)==len(all_rows) 恒真——重复日必须用 set 判定）
+        assert len(dates) == len(set(dates))
         assert any("2026-07-18" <= d <= "2026-07-31" for d in dates)  # 旧实现此处为洞
 
 
@@ -184,3 +188,117 @@ class TestCompoundOiChange:
         # DB 经 DataFrame 读取时 None 变 NaN——NaN 与 None 同等待遇：
         # 2 个 NaN 不计入 → 18 个有效 +1% 因子 → 18 日复利
         assert fd.compound_oi_change([float("nan")] * 2 + [1.0] * 18) == pytest.approx(19.614748, abs=1e-4)
+
+
+def _seed_row(date: str, symbol: str, contract: str) -> dict:
+    return {"date": date, "symbol": symbol, "contract": contract,
+            "open": 1, "high": 1, "low": 1, "close": 100.0, "settle": 101.0,
+            "oi": 1000.0, "oi_chg": 10.0, "source": "tushare",
+            "basis_pts": 1.0, "basis_pct": 1.0, "oi_change_pct": 1.0}
+
+
+def _idx_map() -> dict[str, dict[str, float]]:
+    """compute_basis 用现货收盘：08-13/08-14/08-17 全品种。"""
+    closes = {"2026-08-13": 100.0, "2026-08-14": 100.0, "2026-08-17": 100.0}
+    return {sym: dict(closes) for sym in ("IF", "IH", "IC", "IM")}
+
+
+def _daily_row(trade_date: str) -> dict:
+    return {"trade_date": trade_date, "settle": 101.0, "open": 1, "high": 1,
+            "low": 1, "close": 100.0, "oi": 1000.0, "oi_chg": 10.0}
+
+
+class _EnsureClient(_FakeClient):
+    """ensure_futures_daily 专用：fut_daily 按 ts_code 返回，可指定失败合约。"""
+    def __init__(self, daily: dict[str, list[dict]] | None = None,
+                 fail: set[str] | None = None):
+        super().__init__()
+        self.daily = daily or {}
+        self.fail = fail or set()
+
+    def query(self, api_name, **kwargs):
+        self.queries.append((api_name, kwargs))
+        if api_name == "fut_daily":
+            code = kwargs["ts_code"]
+            if code in self.fail:
+                raise RuntimeError(f"boom {code}")
+            rows = self.daily.get(code, [])
+            return pd.DataFrame(rows) if rows else pd.DataFrame()
+        return super().query(api_name, **kwargs)
+
+
+class TestEnsureFuturesDaily:
+    """ensure_futures_daily 重构回归（findings #1/#2/#5/#6）。"""
+
+    def test_force_tushare_failure_preserves_existing(self, isolated_store, monkeypatch):
+        """回归（finding #2）：force 先清库后验源 → tushare 全挂时 9258 行
+        settle 口径数据被毁。修复：取数成功前不清空，旧数据保留。"""
+        store.save_futures_daily([_seed_row("2026-08-14", "IF", "IF2608.CFX")])
+
+        def boom():
+            raise RuntimeError("TUSHARE_TOKEN 未配置")
+
+        monkeypatch.setattr(fd, "_make_client", boom)
+        monkeypatch.setattr(fd, "fetch_sina_fallback", lambda: [])  # 免联网
+        result = fd.ensure_futures_daily(force=True)
+        assert result["failed"]
+        assert store.load_futures_daily()  # 旧数据未被清空
+
+    def test_force_cap_below_needed_aborts_without_clear(self, isolated_store, monkeypatch):
+        """回归（finding #1）：force + max_contracts 不足 → 旧实现静默截断
+        （尾部品种表已清空却 0 合约入库，failed={} 退出码 0）。修复：清空前
+        报 error 中止。"""
+        store.save_futures_daily([_seed_row("2026-08-14", "IF", "IF2608.CFX")])
+        monkeypatch.setattr(fd, "_make_client", lambda: _FakeClient())
+        monkeypatch.setattr(fd, "fetch_sina_fallback", lambda: [])
+        result = fd.ensure_futures_daily(force=True, max_contracts=3)  # 需要 4
+        assert result.get("error")
+        assert store.load_futures_daily()  # 未清空
+
+    def test_force_success_clears_and_writes(self, isolated_store, monkeypatch):
+        """force 成功路径：取数暂存 → clear → 写回；旧脏行清除。"""
+        store.save_futures_daily([_seed_row("2026-01-01", "IF", "IF2608.CFX")])
+        monkeypatch.setattr(fd, "_make_client", lambda: _FakeClient())
+        monkeypatch.setattr(fd, "fetch_index_close_map", lambda: _idx_map())
+        result = fd.ensure_futures_daily(force=True, max_contracts=10)
+        assert result["failed"] == {}
+        dates = {r["date"] for r in store.load_futures_daily(limit=100)}
+        assert "2026-01-01" not in dates  # 旧行已清
+        assert "2026-08-14" in dates  # 新行已写
+
+    def test_incremental_backfills_front_contract_tail(self, isolated_store, monkeypatch):
+        """回归（finding #6）：已入库前端合约被整体跳过 → 到期日前新增
+        交易日永久缺失。修复：existing 合约仅回填尾部窗口（入库最新日, 到期日]。"""
+        store.save_futures_daily([_seed_row("2026-08-14", "IF", "IF2608.CFX")])
+        client = _EnsureClient(daily={"IF2608.CFX": [_daily_row("20260817")]})
+        monkeypatch.setattr(fd, "_make_client", lambda: client)
+        monkeypatch.setattr(fd, "fetch_index_close_map", lambda: _idx_map())
+        fd.ensure_futures_daily(max_contracts=10)
+        dates = [r["date"] for r in store.load_futures_daily(symbol="IF", limit=100)]
+        assert "2026-08-17" in dates  # 尾部回填
+
+    def test_incremental_skips_complete_existing_contracts(self, isolated_store, monkeypatch):
+        """设计约束：已入库至到期日的合约不再发 fut_daily 请求（增量快速路径）。"""
+        store.save_futures_daily([
+            _seed_row("2026-08-14", "IF", "IF2608.CFX"),
+            _seed_row("2026-08-21", "IF", "IF2608.CFX"),
+        ])
+        client = _EnsureClient()
+        monkeypatch.setattr(fd, "_make_client", lambda: client)
+        monkeypatch.setattr(fd, "fetch_index_close_map", lambda: _idx_map())
+        fd.ensure_futures_daily(max_contracts=10)
+        called = [q[1].get("ts_code") for q in client.queries if q[0] == "fut_daily"]
+        assert "IF2608.CFX" not in called
+
+    def test_force_failed_contract_gap_covered_by_next(self, isolated_store, monkeypatch):
+        """回归（finding #5）：逐合约失败仍推进 prev_lt → 失败合约窗口成洞。
+        修复：不推进 prev_lt，下一合约窗口覆盖失败合约缺口。"""
+        client = _EnsureClient(
+            daily={"IF2609.CFX": [_daily_row("20260814"), _daily_row("20260813")]},
+            fail={"IF2608.CFX"})
+        monkeypatch.setattr(fd, "_make_client", lambda: client)
+        monkeypatch.setattr(fd, "fetch_index_close_map", lambda: _idx_map())
+        result = fd.ensure_futures_daily(force=True, max_contracts=10)
+        assert "IF2608.CFX" in result["failed"]
+        dates = {r["date"] for r in store.load_futures_daily(symbol="IF", limit=100)}
+        assert "2026-08-14" in dates  # 失败合约窗口由 IF2609 覆盖

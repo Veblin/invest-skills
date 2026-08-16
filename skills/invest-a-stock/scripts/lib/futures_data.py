@@ -210,60 +210,100 @@ def fetch_sina_fallback() -> list[dict]:
 def ensure_futures_daily(
     start_month: str = "2015-04", max_contracts: int = 200, *, force: bool = False,
 ) -> dict:
-    """回填/增量：已入库合约跳过（断点续跑）。返回 {fetched, failed, skipped}。
+    """回填/增量：已入库合约仅回填尾部缺失窗口（断点续跑）。返回
+    {fetched, failed, skipped, source}。
 
-    force=True：先清空 futures_daily 再全量重建（finding #1 数据修复用——
-    旧表按月划分含每月 40% 交易日洞，必须重建）。
+    force=True 全量重建（finding #1 数据修复用——旧表按月划分含每月 40%
+    交易日洞，必须重建）：逐合约取数暂存内存，取数全部结束后才
+    clear + 写回——tushare 主源不可用、或 max_contracts < 所需合约数时
+    **清空前即中止**，旧数据保留（先清库后验源的旧实现会把 9258 行
+    settle 口径数据毁掉）。
 
-    Tushare 主源失败 → sina 降级（fill-only：仅补缺失日期，绝不覆盖已有行，
-    source='sina' 标注——merge COALESCE 逐列覆盖会把 close 口径的基差写进
-    settle 口径的 tushare 行，杂交口径必须禁止）。
+    逐合约失败不推进窗口起点：同品种下一合约上市早于前合约到期，
+    其窗口覆盖失败合约缺口（失败记录 failed，后续增量运行重试）。
+
+    Tushare 主源整体失败 → sina 降级（fill-only：仅补缺失日期，绝不覆盖
+    已有行，source='sina' 标注——merge COALESCE 逐列覆盖会把 close 口径的
+    基差写进 settle 口径的 tushare 行，杂交口径必须禁止）。
     """
     import datetime
 
-    if force:
-        store.clear_futures_daily()
-        existing: set[str] = set()
-    else:
-        existing = store.futures_contracts()
     # start_month "2015-04" → "1504"（与合约代码月份段同格式，字符串可比）
     start_ym = start_month.replace("-", "")[2:]
     first_start = (datetime.date.fromisoformat(f"{start_month}-01")
                    - datetime.timedelta(days=1)).isoformat()
+    existing: set[str] = set() if force else store.futures_contracts()
+    skipped = 0
+    last_seen: dict[str, str] = {}
+    if not force:
+        dates_by_sym = store.futures_dates_by_symbol()
+        last_seen = {sym: max(ds) for sym, ds in dates_by_sym.items() if ds}
     try:
         client = _make_client()
         series = contract_series(client)
+        if force:
+            # 清空前预检：force + cap 不足会静默截断（尾部品种表已清空却
+            # 0 合约入库，failed={} 退出码 0）→ 必须中止并保留旧数据
+            needed = sum(1 for contracts in series.values()
+                         for c, _e in contracts if c[2:6] >= start_ym)
+            if max_contracts < needed:
+                return {"fetched": [], "failed": {}, "skipped": 0, "source": "tushare",
+                        "error": (f"force 重建需要 {needed} 个合约 > "
+                                  f"max_contracts={max_contracts}，未清空现有数据")}
         index_closes = fetch_index_close_map()
         fetched: list[str] = []
         failed: dict[str, str] = {}
+        staged: list[dict] = []  # force：暂存内存，全部取数成功后 clear + 写
+        capped = False
         for sym, contracts in series.items():
             prev_lt = first_start  # 首合约窗口起点 = 起始月月初前一日（月初含入）
             for contract, expiry in contracts:
                 if contract[2:6] < start_ym:
                     continue
+                ws = prev_lt
                 if contract in existing:
+                    # 已入库合约仅回填尾部：窗口起点 = max(前合约到期日,
+                    # 该品种最新入库日)——到期日前新增交易日不再永久缺失
+                    ws = max(prev_lt, last_seen.get(sym, ""))
+                if ws >= expiry:
+                    skipped += 1
                     prev_lt = expiry
                     continue
                 if len(fetched) >= max_contracts:
+                    capped = True
                     break
                 try:
-                    rows = fetch_contract(client, contract, prev_lt, expiry)
+                    rows = fetch_contract(client, contract, ws, expiry)
                     rows = compute_basis(rows, index_closes.get(sym, {}))
-                    if rows:
-                        store.save_futures_daily(rows)
-                        fetched.append(contract)
                 except Exception as exc:  # noqa: BLE001 — 逐合约容错
                     failed[contract] = str(exc)
                     logger.warning("futures fetch failed %s: %s", contract, exc)
+                    continue  # 不推进 prev_lt：下一合约窗口覆盖失败合约缺口
+                if rows:
+                    if force:
+                        staged.extend(rows)
+                    else:
+                        store.save_futures_daily(rows)
+                    fetched.append(contract)
+                    last_seen[sym] = max(last_seen.get(sym, ""),
+                                         max(r["date"] for r in rows))
+                else:
+                    skipped += 1
                 prev_lt = expiry
-        return {"fetched": fetched, "failed": failed, "skipped": len(existing),
+            if capped:
+                break
+        if force and staged:
+            store.clear_futures_daily()
+            store.save_futures_daily(staged)
+        return {"fetched": fetched, "failed": failed, "skipped": skipped,
                 "source": "tushare"}
     except Exception as exc:  # noqa: BLE001 — 主源整体失败 → sina 降级
+        # force 清空只在取数成功后执行——此处旧数据完整保留
         logger.warning("Tushare futures failed (%s), falling back to sina", exc)
         rows = fetch_sina_fallback()
         if not rows:
             return {"fetched": [], "failed": {"tushare_all": str(exc), "sina_all": "降级亦无数据"},
-                    "skipped": len(existing), "source": "sina", "error": str(exc)}
+                    "skipped": skipped, "source": "sina", "error": str(exc)}
         # sina 降级：现货对齐逐品种（close 口径）
         idx_all = fetch_index_close_map()
         combined: list[dict] = []
@@ -284,4 +324,4 @@ def ensure_futures_daily(
         if combined:
             store.save_futures_daily(combined)
         return {"fetched": [f"sina_fill:{len(combined)}"], "failed": {"tushare_all": str(exc)},
-                "skipped": len(existing), "source": "sina", "error": str(exc)}
+                "skipped": skipped, "source": "sina", "error": str(exc)}

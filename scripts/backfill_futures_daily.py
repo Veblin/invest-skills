@@ -36,7 +36,8 @@ def main() -> int:
                                   force=args.force)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     print(f"latest date: {store.latest_futures_date()}")
-    return 1 if result["failed"] else 0
+    # force 预检中止（error 无 failed）也须非零退出——静默截断曾是 exit 0
+    return 1 if result["failed"] or result.get("error") else 0
 
 
 if __name__ == "__main__":
