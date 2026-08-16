@@ -90,3 +90,15 @@ class TestExpandingPercentileRank:
         got = expanding_percentile_rank([1.0, None, 2.0])
         assert got[1] is None
         assert got[2] == 100.0
+
+    def test_min_history_warmup(self):
+        # 回归（finding #3）：首行 inclusive 分位恒为 100——无暖机会在序列
+        # 首日产生幻影"升水"事件；有效样本数（含当日）< min_history → None
+        vals = [10.0, 5.0, 8.0, 6.0, 4.0]
+        assert expanding_percentile_rank(vals, min_history=3) == [
+            None, None, 66.66666666666666, 50.0, 20.0]
+
+    def test_min_history_none_not_counted(self):
+        # NaN/None 不进入有效样本数，也不计入暖机长度
+        got = expanding_percentile_rank([1.0, None, 2.0, 3.0], min_history=3)
+        assert got == [None, None, None, 100.0]

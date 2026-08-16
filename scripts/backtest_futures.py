@@ -79,9 +79,11 @@ def run_f1(out_path: Path) -> dict:
             results["etfs"][sym] = {"error": "futures 数据缺失"}
             continue
         # 基差历史分位：expanding window（截至当日——全序列分位把未来
-        # 信息泄漏进当日标签，look-ahead 修复）
+        # 信息泄漏进当日标签，look-ahead 修复）；min_history=30 暖机
+        # （首行 inclusive 分位恒 100 → 无暖机会在序列首日产生幻影极值）
         basis = fdf["basis_pct"].astype(float)
-        fdf["depth_pctile"] = expanding_percentile_rank(basis.tolist())
+        fdf["depth_pctile"] = expanding_percentile_rank(basis.tolist(), min_history=30)
+        fdf["depth_pctile"] = fdf["depth_pctile"].astype(float)  # 暖机期 None → NaN
         fdf["quartile"] = pd.cut(fdf["depth_pctile"], [0, 25, 50, 75, 100],
                                  labels=["Q1_深贴水", "Q2", "Q3", "Q4_浅贴水升水"], include_lowest=True)
         for etf in etfs:
@@ -92,7 +94,11 @@ def run_f1(out_path: Path) -> dict:
             all_fwd: dict[int, list[float]] = defaultdict(list)
             for _, row in fdf_etf.iterrows():
                 d = row["date"]
-                q = str(row["quartile"])
+                # 暖机期/NaN 基差 → 分位 NaN → 无四分位，不入任何桶
+                # （str(NaN)='nan' 会产生幻影桶）
+                if not isinstance(row["quartile"], str):
+                    continue
+                q = row["quartile"]
                 for h in (1, 5):
                     # ETF 未来收益：按交易日序列（closes 有序）；keys[0] 为 d 后
                     # 第 1 个交易日 → h 日收益取 keys[h-1]
@@ -119,10 +125,12 @@ def run_f1(out_path: Path) -> dict:
                 fwd_by_q: dict[str, list[float]] = defaultdict(list)
                 for _, row in fdf_etf.iterrows():
                     d = row["date"]
+                    if not isinstance(row["quartile"], str):
+                        continue  # 暖机期/NaN 基差无四分位
                     keys = [k for k in closes if k > d]
                     if len(keys) < 5:
                         continue
-                    fwd_by_q[str(row["quartile"])].append(
+                    fwd_by_q[row["quartile"]].append(
                         (closes[keys[4]] / closes[d] - 1) * 100)
                 t, _ = welch_t(fwd_by_q.get("Q1_深贴水", []), fwd_by_q.get("Q4_浅贴水升水", []))
                 perm = permutation_test(fwd_by_q.get("Q1_深贴水", []),
@@ -146,8 +154,9 @@ def run_f2(out_path: Path) -> dict:
             results["scenarios"][sym] = {"error": "futures 数据缺失"}
             continue
         basis = fdf["basis_pct"].astype(float).tolist()
-        # expanding 分位（无未来信息；升序分位：p<10 深贴水 / p>90 升水）
-        fdf["pctile"] = expanding_percentile_rank(basis)
+        # expanding 分位（无未来信息；升序分位：p<10 深贴水 / p>90 升水）；
+        # min_history=30 暖机（首行 inclusive 分位恒 100 → 幻影升水事件修复）
+        fdf["pctile"] = expanding_percentile_rank(basis, min_history=30)
         closes = load_index_closes(idx_code)
         all_dates = sorted(closes)
         entry = {"deep_discount": {}, "premium": {}, "n_events": {}}
@@ -157,30 +166,36 @@ def run_f2(out_path: Path) -> dict:
             ev_dates = []
             prev_state = False
             for _, row in fdf.iterrows():
-                cur = cond(row["pctile"])
+                p = row["pctile"]
+                # 暖机期/NaN 基差 → 分位 None → 不入事件（None < 10 抛 TypeError）
+                cur = cond(p) if p is not None else False
                 if cur and not prev_state:
                     ev_dates.append(row["date"])
                 prev_state = cur
             fwd: dict[int, list[float]] = defaultdict(list)
+            used = 0  # 进入前向统计的事件数（与 +5 n 一致）
             for d in ev_dates:
                 if d not in closes:
                     continue  # 期货交易日不在指数收盘日历（补班/数据缺口）→ 跳过
                 keys = [k for k in all_dates if k > d]
+                if len(keys) < 5:
+                    continue  # 尾部事件无 5 日前向 → 不计入 n_events
                 for h in (5, 10, 20):
                     if len(keys) < h:
                         continue
                     fwd[h].append((closes[keys[h - 1]] / closes[d] - 1) * 100)
+                used += 1
             for h, vals in fwd.items():
                 if len(vals) >= 3:
                     entry[state][f"+{h}"] = _describe_group(vals)
-            entry["n_events"][state] = len(ev_dates)
+            entry["n_events"][state] = used
         # 无条件基线
         for h in (5, 10, 20):
             vals = [(closes[all_dates[i + h]] / closes[all_dates[i]] - 1) * 100
                     for i in range(len(all_dates) - h)]
             results["baseline"].setdefault(f"+{h}", _describe_group(vals))
         results["scenarios"][sym] = entry
-    results["meta"] = {"note": "事件首日口径；calendar-time 见分组 n"}
+    results["meta"] = {"note": "事件首日口径；n_events = 进入前向统计的事件数（+5 口径，日历守卫/尾部跳过不计）"}
     out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return results
 
@@ -208,9 +223,21 @@ def _basis_state_after(
     return basis_dir, idx_chg
 
 
+def _oi_20d_series(oi_list: list) -> list[float | None]:
+    """20 日持仓复利变化序列（run_f3 事件循环用）。
+
+    前 19 行无满 20 日窗口 → None（对齐旧 rolling(20, min_periods=20) 语义——
+    18-19 因子的短窗口不得冒充 20 日变化）；有效因子阈值见
+    lib.futures_data.compound_oi_change（口径单份实现）。
+    """
+    from lib.futures_data import compound_oi_change  # noqa: E402 — 惰性导入（invest-a-stock 路径）
+
+    return [compound_oi_change(oi_list[max(0, i - 19) : i + 1]) if i >= 19 else None
+            for i in range(len(oi_list))]
+
+
 def run_f3(out_path: Path) -> dict:
     """持仓量 20 日变化方向 → 后 20 日基差演变 × 指数收益联合分布 + Granger 方向检验。"""
-    from lib.futures_data import compound_oi_change  # noqa: E402 — 惰性导入（invest-a-stock 路径，与 load_futures_df 同模式）
     results = {"hypothesis": "F3", "scenarios": {}, "granger": {}}
     for sym, idx_code in INDEX_SYMBOL.items():
         fdf = load_futures_df(sym)
@@ -220,10 +247,7 @@ def run_f3(out_path: Path) -> dict:
         # 20 日持仓变化：共享 helper（口径与消费方一致——掩码/有效数阈值
         # 单份实现；finding #10）。定位为展期节奏度量（F3 结论已降级为
         # "不可刻画持仓状态"，此处仅保留历史演变刻画用）
-        oi_list = fdf["oi_change_pct"].tolist()
-        fdf["oi_20d_chg"] = [
-            compound_oi_change(oi_list[max(0, i - 19) : i + 1]) for i in range(len(oi_list))
-        ]
+        fdf["oi_20d_chg"] = _oi_20d_series(fdf["oi_change_pct"].tolist())
         closes = load_index_closes(idx_code)
         all_dates = sorted(closes)
         entry = {"up": {}, "down": {}, "n_events": {}}
