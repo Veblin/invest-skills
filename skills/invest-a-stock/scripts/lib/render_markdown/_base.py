@@ -47,6 +47,7 @@ from ..render_utils import (
     _wrap_details,
     _source_status_block,
     _compute_metric_cagr,
+    cagr_period_rows,
     _periods_per_year,
     _historical_pe_median,
     _bull_bear_valuation_divergence_text,

@@ -290,6 +290,22 @@ rules:
     message: "报告中存在待补充字段，请补充完整"
     law_ref: "SOP-QC — 占位残留"
 
+  # F0-3 修复：引擎占位符与异常泄漏直出报告是 P0 级问题（半成品/错误信息
+  # 直接面向用户），error 级拦截——未人工加工的报告无法通过任何准出门。
+  - id: "placeholder-engine-slot"
+    pattern: "(\\[待 Claude|\\[待填充|Claude report 阶段|Claude 填写)"
+    severity: "error"
+    scope: "line"
+    message: "引擎占位符未填（Claude 加工未完成），禁止直出报告"
+    law_ref: "SOP-QC — 占位残留（F0-3）"
+
+  - id: "error-leakage"
+    pattern: "(has no attribute|AttributeError|TypeError|Traceback \\(most recent call last\\)|KeyError:)"
+    severity: "error"
+    scope: "line"
+    message: "异常/错误信息泄漏进报告正文，需删除或替换为「不可得（原因）」"
+    law_ref: "SOP-QC — 异常泄漏（F0-3）"
+
   # ==========================================================================
   # 绝对化表述检查（原 check_report.sh 检查项 5）
   # ==========================================================================

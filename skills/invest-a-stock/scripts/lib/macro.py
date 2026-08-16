@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 from .shared_dates import (  # noqa: E402
+    latest_month_row as _latest_month_row,
     shanghai_days_ago as _days_ago,
     shanghai_now as _shanghai_now,
     shanghai_today as _today,
@@ -165,7 +166,9 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 
                 df = ak.macro_china_pmi()
                 if df is not None and not df.empty:
-                    row = df.iloc[-1]
+                    # F0-4: akshare 序列最新在前，iloc[-1] 会取到 2008 年最旧行；
+                    # 按「月份」列取最新期行。
+                    row = _latest_month_row(df.to_dict("records"))
                     pmi_val = None
                     for col in ["制造业-指数", "制造业"]:
                         v = row.get(col)
@@ -195,7 +198,7 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 
                 df = ak.macro_china_cpi()
                 if df is not None and not df.empty:
-                    row = df.iloc[-1]
+                    row = _latest_month_row(df.to_dict("records"))
                     cpi_val = None
                     for col in ["全国-当月", "全国"]:
                         v = row.get(col)
@@ -231,7 +234,7 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 
                 df = ak.macro_china_ppi()
                 if df is not None and not df.empty:
-                    row = df.iloc[-1]
+                    row = _latest_month_row(df.to_dict("records"))
                     ppi_val = None
                     for col in ["全国-当月", "全国"]:
                         v = row.get(col)

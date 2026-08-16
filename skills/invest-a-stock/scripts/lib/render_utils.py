@@ -523,18 +523,58 @@ def _periods_per_year(fin_list: list[dict]) -> int:
 def _compute_metric_cagr(
     fin_list: list[dict], field: str,
 ) -> tuple[float | None, float | None]:
-    """从已排序财务列表计算 CAGR（%）及年跨度。"""
-    rows = [r for r in fin_list if _safe_num(r.get(field)) is not None]
+    """从财务列表计算同报告期 CAGR（%）及年跨度。
+
+    F0-8 修复：财务序列混合了季度累计行与年报行（如 Q1 累计 869 亿 vs
+    全年 3375 亿），跨期混比会产出荒谬 CAGR（招行 -19.97%）。此处按
+    「同月日报告期」分组，优先年报行（MMDD=1231），否则取样本最多的
+    同报告期组，做跨年对比。
+    """
+    rows = [
+        r for r in fin_list if _safe_num(r.get(field)) is not None
+        and str(r.get("end_date") or "").isdigit() and len(str(r.get("end_date"))) == 8
+    ]
     if len(rows) < 2:
         return None, None
-    first_v = _safe_num(rows[0].get(field))
-    last_v = _safe_num(rows[-1].get(field))
+    rows_sorted = sorted(rows, key=lambda r: str(r.get("end_date")))
+    groups: dict[str, list[dict]] = {}
+    for r in rows_sorted:
+        ed = str(r.get("end_date"))
+        groups.setdefault(ed[4:], []).append(r)
+    cand = groups.get("1231")
+    if cand is None or len(cand) < 2:
+        cand = max(groups.values(), key=len)
+    if len(cand) < 2:
+        return None, None
+    first_v = _safe_num(cand[0].get(field))
+    last_v = _safe_num(cand[-1].get(field))
     if first_v is None or last_v is None or first_v <= 0:
         return None, None
-    span = max(1, (len(rows) - 1) / _periods_per_year(rows))
-    if span >= 0.5:
-        return ((last_v / first_v) ** (1 / span) - 1) * 100, span
-    return (last_v - first_v) / first_v * 100, span
+    years = int(str(cand[-1].get("end_date"))[:4]) - int(str(cand[0].get("end_date"))[:4])
+    if years < 1:
+        return None, None
+    span = float(years)
+    return ((last_v / first_v) ** (1 / span) - 1) * 100, span
+
+
+def cagr_period_rows(fin_list: list[dict], field: str) -> list[dict]:
+    """返回 CAGR 实际采用的同报告期行组（与 _compute_metric_cagr 同口径），
+    供展示层标注正确的日期范围（F0-8 配套）。"""
+    rows = [
+        r for r in fin_list if _safe_num(r.get(field)) is not None
+        and str(r.get("end_date") or "").isdigit() and len(str(r.get("end_date"))) == 8
+    ]
+    if len(rows) < 2:
+        return []
+    rows_sorted = sorted(rows, key=lambda r: str(r.get("end_date")))
+    groups: dict[str, list[dict]] = {}
+    for r in rows_sorted:
+        ed = str(r.get("end_date"))
+        groups.setdefault(ed[4:], []).append(r)
+    cand = groups.get("1231")
+    if cand is None or len(cand) < 2:
+        cand = max(groups.values(), key=len)
+    return cand if len(cand) >= 2 else []
 
 
 # --- _wrap_details ---

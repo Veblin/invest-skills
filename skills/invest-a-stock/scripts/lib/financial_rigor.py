@@ -167,12 +167,23 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
 
     pe_reported = coalesce_field(quote, "pe_ratio", "pe_ttm")
     if pe_reported is None and isinstance(val_data, list) and val_data:
-        last = val_data[-1] if isinstance(val_data[-1], dict) else {}
+        # F0-7: valuation/financials 行序最新在前（data[0] 最新），直接 [-1] 取到最旧行。
+        # 按 trade_date 排序后取最新。
+        val_sorted = sorted(
+            [r for r in val_data if isinstance(r, dict)],
+            key=lambda r: str(r.get("trade_date") or r.get("date") or ""),
+        )
+        last = val_sorted[-1] if val_sorted else {}
         pe_reported = coalesce_field(last, "pe_ttm", "pe")
 
     latest_fin: dict = {}
     if isinstance(fin_data, list) and fin_data:
-        latest_fin = fin_data[-1] if isinstance(fin_data[-1], dict) else {}
+        # F0-7: 按 end_date 排序取最新行，不依赖采集行序。
+        fin_sorted = sorted(
+            [r for r in fin_data if isinstance(r, dict)],
+            key=lambda r: str(r.get("end_date") or ""),
+        )
+        latest_fin = fin_sorted[-1] if fin_sorted else {}
 
     net_income = coalesce_field(
         latest_fin, "n_income_attr_p", "net_profit", "netprofit",

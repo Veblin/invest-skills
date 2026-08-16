@@ -143,6 +143,18 @@ def _section_bull_bear(
     if _roe_raw is None:
         _roe_raw = target.get("roe")
     roe = _safe_num(_roe_raw)
+    # F0-8 修复：非年报期用最近年报 ROE 参与多空链判断——银行 Q1 单季累计
+    # ROE 2.96% 触发"ROE 偏低"空头链是期口径伪信号（2025 全年 12.02%）。
+    roe_judge = roe
+    if fin and isinstance(fin, list):
+        _annual_rows = [
+            r for r in sort_kline_asc(fin)
+            if str(r.get("end_date") or "").endswith("1231")
+        ]
+        if _annual_rows:
+            _ann_roe = _safe_num(_annual_rows[-1].get("roe"))
+            if _ann_roe is not None:
+                roe_judge = _ann_roe
     roe_rank_pct = rankings.get("roe_pct")
     rev_yoy_pct = rankings.get("revenue_yoy_pct")
     svi = sw.get("stock_vs_industry_pct")
@@ -268,16 +280,23 @@ def _section_bull_bear(
         bull_chains.append(chain)
 
     # Bull chain 4: 盈利质量链
-    fund_quality = roe is not None and roe >= 18
+    fund_quality = roe_judge is not None and roe_judge >= 18
     peer_roe = roe_rank_pct is not None and roe_rank_pct >= 60
     peer_rev = rev_yoy_pct is not None and rev_yoy_pct >= 60
     cf_quality = ocf is not None and np_v is not None and np_v > 0 and (ocf / np_v) >= 0.6
     if fund_quality or peer_roe or peer_rev or cf_quality:
         quality_items = []
-        if roe is not None and roe >= 18:
-            quality_items.append(f"ROE {roe:.1f}%")
+        if roe_judge is not None and roe_judge >= 18:
+            quality_items.append(f"ROE {roe_judge:.1f}%")
         if roe_rank_pct is not None and roe_rank_pct >= 60:
-            quality_items.append(f"ROE 同行分位 {roe_rank_pct:.1f}%")
+            # 100.0% 分位 = 排名 1/N（引擎同行池粗分类），补充排名口径说明。
+            _roe_total = rankings.get("roe_total")
+            _rank_note = (
+                f"ROE 同行排名 1/{_roe_total}（同行池为 Tushare 粗分类，仅供参考）"
+                if roe_rank_pct >= 99.5 and _roe_total
+                else f"ROE 同行分位 {roe_rank_pct:.1f}%"
+            )
+            quality_items.append(_rank_note)
         if rev_yoy_pct is not None and rev_yoy_pct >= 60:
             quality_items.append(f"营收增速同行分位 {rev_yoy_pct:.1f}%")
         if cf_quality:
@@ -291,12 +310,13 @@ def _section_bull_bear(
                 "支撑当前股价甚至推动上行。"
             ),
             "numbers": [],
-            "strength": "✅ 强" if (roe is not None and roe >= 22) else "⚠️ 中",
+            "strength": "✅ 强" if (roe_judge is not None and roe_judge >= 22) else "⚠️ 中",
         }
         if np_v is not None and np_v > 0:
             chain["numbers"].append(f"- 最新报告期净利润（累计口径）: {_fmt_v2(np_v)}")
-        if roe is not None:
-            chain["numbers"].append(f"- ROE: {roe:.1f}%（≥18% 视为高质量门槛）")
+        if roe_judge is not None:
+            _roe_suffix = "（年报口径）" if roe_judge != roe else ""
+            chain["numbers"].append(f"- ROE: {roe_judge:.1f}%{_roe_suffix}（≥18% 视为高质量门槛）")
         bull_chains.append(chain)
 
     # Bull chain 5: 技术动量链
@@ -381,16 +401,17 @@ def _section_bull_bear(
         }
         bear_chains.append(chain)
 
-    # Bear chain 3: 盈利弱链
-    if roe is not None and roe < 10:
+    # Bear chain 3: 盈利弱链（F0-8：用年报 ROE 判断，单季累计 ROE 不再触发）
+    if roe_judge is not None and roe_judge < 10:
+        _roe_suffix = "（年报口径）" if roe_judge != roe else ""
         chain = {
             "title": "ROE 偏低",
-            "assumption": f"最近 ROE 为 {roe:.1f}%，低于 10% 的盈利效率门槛。",
+            "assumption": f"最近年报 ROE 为 {roe_judge:.1f}%，低于 10% 的盈利效率门槛。",
             "transmission": (
                 "低 ROE → 资本回报效率不足 → 企业内生增长动力有限 → "
                 "市场对其给予估值折价 → 压制股价。"
             ),
-            "numbers": [f"- ROE: {roe:.1f}%（<10% 视为偏低）"],
+            "numbers": [f"- ROE: {roe_judge:.1f}%{_roe_suffix}（<10% 视为偏低）"],
             "strength": "⚠️ 中",
         }
         if np_v is not None and np_v > 0:

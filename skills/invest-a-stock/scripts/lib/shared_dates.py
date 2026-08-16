@@ -11,6 +11,7 @@ from ._invest_path import ensure_skills_lib_on_path
 ensure_skills_lib_on_path()
 
 from dates import (  # noqa: E402
+    latest_month_row,
     normalize_end_date,
     parse_date,
     shanghai_days_ago,
@@ -26,4 +27,5 @@ __all__ = [
     "shanghai_today",
     "shanghai_days_ago",
     "normalize_end_date",
+    "latest_month_row",
 ]

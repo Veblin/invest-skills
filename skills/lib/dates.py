@@ -14,6 +14,7 @@ __all__ = [
     "shanghai_today",
     "shanghai_days_ago",
     "normalize_end_date",
+    "latest_month_row",
 ]
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -116,3 +117,26 @@ def shanghai_today() -> str:
 def shanghai_days_ago(n: int) -> str:
     """上海时区 N 天前的日期，YYYYMMDD。"""
     return (shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
+
+
+def latest_month_row(rows: list) -> Any:
+    """从 akshare 宏观序列行中取「月份」最新的一行。
+
+    akshare macro_china_pmi/cpi/ppi 返回的序列**最新在前**（首行为最新期、
+    末行为 2008 年），直接 `iloc[-1]` 会取到最旧行（F0-4 缺陷根因）。
+    此处按「YYYY年MM月份」解析后取最大 (年, 月)，与行序无关。
+
+    全部解析失败时回退首行（akshare 序列约定最新在前）。
+    """
+    best_row: Any = None
+    best_key: tuple[int, int] | None = None
+    for row in rows:
+        m = re.search(r"(\d{4})年(\d{1,2})月", str(row.get("月份", "")))
+        if not m:
+            continue
+        key = (int(m.group(1)), int(m.group(2)))
+        if best_key is None or key > best_key:
+            best_key, best_row = key, row
+    if best_row is None and rows:
+        best_row = rows[0]
+    return best_row

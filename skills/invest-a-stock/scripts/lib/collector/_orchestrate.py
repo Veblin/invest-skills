@@ -1770,7 +1770,11 @@ def _ms_fetch_pmi() -> dict[str, Any] | None:
             df = ak.macro_china_pmi()
         if df is None or df.empty:
             return None
-        row = df.iloc[-1]
+        # F0-4: akshare 序列最新在前，iloc[-1] 会取到 2008 年最旧行；
+        # 按「月份」列取最新期行。
+        from ..shared_dates import latest_month_row as _latest_month_row
+
+        row = _latest_month_row(df.to_dict("records"))
         raw_month = row.get("月份")
         if raw_month is not None:
             month = str(raw_month)
