@@ -46,8 +46,7 @@
       "up": {
         "cross_tab": {
           "converge|down": 3,
-          "converge|up": 1,
-          "diverge|up": 1
+          "diverge|up": 2
         },
         "n": 5
       },
