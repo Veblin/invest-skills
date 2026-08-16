@@ -93,7 +93,7 @@ class TestTriggers:
         closes[10] = 90.0   # 事件日 i=10
         closes[70] = 50.0   # i+60 触达目标 60
         r = sb.touch_within(closes, [10], [60.0])
-        assert r == {"n": 1, "ratio": 1.0}
+        assert r == {"touched": 1, "ratio": 1.0}
 
     def test_touch_truncated_window_excluded(self):
         # 窗口被序列末尾截断（不足 60 日）→ 事件不入分母（对齐 lmw truncated 语义）

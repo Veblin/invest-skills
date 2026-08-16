@@ -84,7 +84,7 @@
         "win_rate": 0.4545
       },
       "touch_wave_target_60d": {
-        "n": 9,
+        "touched": 9,
         "ratio": 0.8182
       }
     },

@@ -78,13 +78,13 @@ def trigger_flags(df: pd.DataFrame, spec: dict) -> pd.Series:
 
 def touch_within(
     closes: list[float], hit_idx: list[int], targets: list[float], *,
-    horizon: int = 60, n: int | None = None,
+    horizon: int = 60,
 ) -> dict | None:
     """事件后 horizon 日内（i+1..i+horizon，含第 horizon 日）触及任一目标位的
     事件占比。窗口不足 horizon 日（被序列末尾截断）的事件不入分母
     （对齐 lmw truncated 语义：不完整窗口不判"未触及"）。
     无完整窗口事件 → None。"""
-    n = len(closes) if n is None else n
+    n = len(closes)
     touched = complete = 0
     for i in hit_idx:
         if i + horizon + 1 > n:
@@ -95,7 +95,7 @@ def touch_within(
             touched += 1
     if not complete:
         return None
-    return {"n": touched, "ratio": round(touched / complete, 4)}
+    return {"touched": touched, "ratio": round(touched / complete, 4)}
 
 
 def main() -> int:

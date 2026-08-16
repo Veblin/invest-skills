@@ -31,8 +31,9 @@ def futures_symbol_for_etf(symbol: str) -> str | None:
 
 
 def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
-    """ETF 的期货基差状态 → {available, futures_symbol, current, percentile,
-    median, oi_20d_chg, distribution_ref, source, note}。
+    """ETF 的期货基差状态 → {available, futures_symbol, current_basis_pct,
+    current_basis_pts, percentile, median_basis_pct, n_history,
+    distribution_ref, source, note}。
 
     days: 分位与中位数所用的历史窗口（futures_daily 按 symbol 加载上限）。
     """
