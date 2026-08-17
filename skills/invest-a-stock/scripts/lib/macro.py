@@ -25,6 +25,7 @@ from .shared_dates import (  # noqa: E402
     shanghai_today as _today,
     yyyymmdd_to_iso as _to_iso_date,
 )
+from lib.nums import row_value_or_last  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +176,11 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
                         if v is not None:
                             pmi_val = float(v)
                             break
-                    if pmi_val is None and len(row) > 1:
-                        pmi_val = float(row.iloc[-1])
+                    if pmi_val is None:
+                        # row 已由 df.to_dict("records") 转为 dict（F0-4），
+                        # iloc 是 Series 专属 API——取末列值兜底
+                        # （review 二轮 R-13：收敛到 nums.row_value_or_last 可单测）
+                        pmi_val = row_value_or_last(row)
                     if pmi_val is not None:
                         context["pmi"] = {
                             "value": round(pmi_val, 2),

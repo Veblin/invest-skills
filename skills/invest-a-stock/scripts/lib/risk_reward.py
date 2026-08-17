@@ -138,7 +138,9 @@ def compute_dcf_risk_reward(
         probabilities: 三情景概率权重 {"bear":0.3, "base":0.4, "bull":0.3}
 
     Returns:
-        dict with calc_risk_reward() 的输出 + _meta（假设、数据来源）
+        dict with calc_risk_reward() 的输出 + _meta（假设、数据来源）。
+        净债务不可得（非有息口径）时返回 {"error": "…每股换算已抑制…"}
+        （F0-1 与 render_dcf 同口径），不输出每股目标价。
     """
     from lib.schema import index_dimensions
     from lib.valuation import scenario_fcff, calc_ev_to_equity
@@ -196,6 +198,18 @@ def compute_dcf_risk_reward(
     terminal_g = terminal_g_override if terminal_g_override is not None else 0.025
 
     # ---- Step 5: 三情景 FCFF → DCF → 每股目标价 ----
+    if net_debt is None:
+        # F0-1 同口径：净债务（有息负债 − 货币资金）不可得时，每股价值
+        # = (EV − ND)/shares 无法计算——不得用 0 替代（否则目标价被整个
+        # 净债务抬高：300750 实测 3528.7 亿 / 24.6 亿股 = 143.44 元/股虚高
+        # [来源: Python calc: 3528.7/24.6]）。
+        # 与 render_dcf「每股换算已抑制」一致，显式失败而非静默错数。
+        return {
+            "error": "净债务不可得（有息负债字段未采集），每股换算已抑制——"
+            "与 render_dcf 同口径，不输出每股目标价",
+            "_meta": {"net_debt_source": nd_source},
+        }
+
     scenarios: dict[str, float] = {}
     scenario_details: dict[str, dict] = {}
 
@@ -217,7 +231,10 @@ def compute_dcf_risk_reward(
             return {"error": f"{scenario_name} 情景 DCF 折现失败（wacc={wacc}, g={terminal_g}）"}
 
         ev = dcf["enterprise_value"]
-        per_share = calc_ev_to_equity(ev, net_debt if net_debt is not None else 0, shares)
+        # net_debt 恒非 None（Step 5 前已对 None 显式失败）——不再保留
+        # `else 0` 兜底：0 是合法金融值，静默替代会复活「目标价被整个
+        # 净债务抬高」的错数模式（D1 家族）
+        per_share = calc_ev_to_equity(ev, net_debt, shares)
         if "error" in per_share:
             return {"error": f"{scenario_name} 情景 EV→每股 转换失败: {per_share['error']}"}
 
@@ -243,8 +260,7 @@ def compute_dcf_risk_reward(
     )
 
     # ---- Step 7: 附加元数据 ----
-    if net_debt is None:
-        wacc_missing.append("净债务 (net_debt): 无数据，假设为 0，DCF 估值可能偏高")
+    # 注：net_debt None 已在 Step 5 前显式失败，此路径恒有净债务
     result["_meta"] = {
         "method": "DCF two-stage with scenario_fcff",
         "wacc": round(wacc, 4),

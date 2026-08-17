@@ -97,6 +97,90 @@ class TestPcrPartialFlag:
         assert r["history_days"] < len(sampled)
 
 
+# ---------- R-14：PCR 探针重试/复用（review 二轮） ----------
+
+
+class TestPcrProbeRetry:
+    """F1-5 探针：单次超时不得抹掉整个 PCR 维度；探针结果复用不重复取数。"""
+
+    @staticmethod
+    def _counting_fake_tc(cal: list[str]):
+        import pandas as pd
+
+        class FakeTC:
+            def __init__(self, cal):
+                self.cal = cal
+                self.opt_daily_calls = 0
+
+            def query(self, api, **kw):
+                if api == "opt_basic":
+                    return pd.DataFrame([
+                        {"ts_code": "10004567.SH", "name": "50ETF购2601", "call_put": "C"},
+                        {"ts_code": "10004568.SH", "name": "50ETF沽2601", "call_put": "P"},
+                    ])
+                if api == "trade_cal":
+                    return pd.DataFrame({"cal_date": self.cal})
+                if api == "opt_daily":
+                    self.opt_daily_calls += 1
+                    return pd.DataFrame({"ts_code": ["10004567.SH", "10004568.SH"],
+                                         "vol": [100.0, 50.0]})  # put/call = 0.5
+                return pd.DataFrame()
+
+        return FakeTC(cal)
+
+    @staticmethod
+    def _short_cal(n: int = 5) -> list[str]:
+        import pandas as pd
+
+        dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=n)
+        return [d.strftime("%Y%m%d") for d in dates]
+
+    def test_probe_retry_then_result_reuse(self, monkeypatch):
+        """首次探针超时 → 重试成功 → 不整体降级；探针结果复用，
+        最新日不重复取（opt_daily 总调用 == fetch_dates 数，修复前多 1 次）。"""
+        from lib.collector import _orchestrate
+        from lib.collector._orchestrate import (
+            _PCR_MAX_DAILY_QUERIES, _ms_subsample_trade_dates,
+        )
+
+        cal = self._short_cal()
+        fake = self._counting_fake_tc(cal)
+        probe_states = iter([None, "ok"])
+
+        def _fake_run(fn, timeout, label):
+            if label.startswith("opt_daily-probe"):
+                state = next(probe_states, "ok")
+                return None if state is None else fn()
+            return fn()
+
+        monkeypatch.setattr(_orchestrate, "_run_with_timeout", _fake_run)
+        r = _orchestrate._ms_fetch_put_call_ratio(fake)
+        assert r is not None
+        assert r["ratio"] == 0.5
+        fetch_dates = sorted(
+            set(_ms_subsample_trade_dates(cal, _PCR_MAX_DAILY_QUERIES))
+        )
+        # 探针日 1 次（probe2 成功那次）+ 其余 N-1 日各 1 次
+        assert fake.opt_daily_calls == len(fetch_dates)
+
+    def test_probe_double_failure_drops_dimension(self, monkeypatch):
+        """两次探针均失败 → 整体降级 return None，不逐日空转。"""
+        from lib.collector import _orchestrate
+
+        cal = self._short_cal()
+        fake = self._counting_fake_tc(cal)
+
+        def _fake_run(fn, timeout, label):
+            if label.startswith("opt_daily-probe"):
+                return None
+            return fn()
+
+        monkeypatch.setattr(_orchestrate, "_run_with_timeout", _fake_run)
+        r = _orchestrate._ms_fetch_put_call_ratio(fake)
+        assert r is None
+        assert fake.opt_daily_calls == 0  # 未进入逐日取数
+
+
 # ---------- 缺陷 2：margin 降级路径 15 日窗口 ----------
 
 

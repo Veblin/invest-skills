@@ -5,6 +5,8 @@ import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-imp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
 
+from lib.nums import row_value_or_last  # review 二轮 R-13：dict 行末列兜底（可单测）
+
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
     if not __base_n.startswith("__"):
@@ -1782,9 +1784,7 @@ def _ms_fetch_pmi() -> dict[str, Any] | None:
             month = str(row.name)
         else:
             month = ""
-        pmi = safe_float(row.get("制造业-指数", row.get("制造业", None)))
-        if pmi is None and len(row) > 1:
-            pmi = safe_float(row.iloc[-1])
+        pmi = row_value_or_last(row, "制造业-指数", "制造业")
         if pmi is None:
             return None
         return {
@@ -2449,15 +2449,8 @@ def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
     return sorted(set(sampled))
 
 
-def _ms_pcr_on_date(
-    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
-) -> float | None:
-    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
-    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
-    df = _run_with_timeout(
-        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
-        8.0, f"opt_daily:{trade_date}",
-    )
+def _ms_pcr_from_df(df: Any, put_codes: set[str], call_codes: set[str]) -> float | None:
+    """从单日 opt_daily DataFrame 计算 PCR（_ms_pcr_on_date 与探针共用）。"""
     if df is None or getattr(df, "empty", True):
         return None
     put_vol = call_vol = 0.0
@@ -2478,6 +2471,18 @@ def _ms_pcr_on_date(
     if call_vol <= 0:
         return None
     return put_vol / call_vol
+
+
+def _ms_pcr_on_date(
+    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
+) -> float | None:
+    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
+    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
+    df = _run_with_timeout(
+        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
+        8.0, f"opt_daily:{trade_date}",
+    )
+    return _ms_pcr_from_df(df, put_codes, call_codes)
 
 
 def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
@@ -2503,30 +2508,47 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
     recent_dates = [d for d in dates if d >= cutoff]
     fetch_dates = sorted(set(sampled) | set(recent_dates))
 
+    ratio_by_date: dict[str, float] = {}
     # F1-5 修复：批量取数前单点预检——端点整体挂起/限流时（实测 56 天 × 8s
-    # 超时风暴，单次报告拖慢数分钟），一次 8s 探针即整体降级跳过，
-    # 不逐日空转。端点正常时仅多一次 <1s 查询。
+    # 超时风暴，单次报告拖慢数分钟），8s 探针失败重试一次、两次均败才整体
+    # 降级跳过（单次网络抖动不抹掉整个 PCR 维度）。端点正常时探针结果直接
+    # 复用（不再重复取 fetch_dates[-1]），净额外查询为 0。
     if fetch_dates:
         probe_df = _run_with_timeout(
             lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
             8.0, f"opt_daily-probe:{fetch_dates[-1]}",
         )
         if probe_df is None:
-            logger.warning(
-                "opt_daily endpoint timed out on probe (%s); "
-                "skipping PCR fetch storm (%d dates)",
-                fetch_dates[-1], len(fetch_dates),
+            # 探针失败不整体丢弃：单次网络抖动/慢查询不应抹掉整个 PCR
+            # 维度（旧实现单日失败仅跳过当日并带 stale/partial 标志）。
+            # 重试一次，仍失败才整体降级。
+            probe_df = _run_with_timeout(
+                lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
+                8.0, f"opt_daily-probe2:{fetch_dates[-1]}",
             )
-            return None
+            if probe_df is None:
+                logger.warning(
+                    "opt_daily probe failed twice (%s); "
+                    "skipping PCR fetch storm (%d dates)",
+                    fetch_dates[-1], len(fetch_dates),
+                )
+                return None
+        # 探针结果直接计入（不再重复取 fetch_dates[-1]）；当日无期权成交
+        # 未命中代码集时留空，由主循环重取。
+        probe_ratio = _ms_pcr_from_df(probe_df, put_set, call_set)
+        if probe_ratio is not None:
+            ratio_by_date[fetch_dates[-1]] = probe_ratio
+        else:
+            logger.debug("opt_daily probe %s: no usable PCR row", fetch_dates[-1])
 
     def _on_pcr_error(td: str, exc: Exception) -> None:
         logger.debug("opt_daily %s failed: %s", td, exc)
 
     # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
     # _base._map_parallel）：~123 次串行最坏 16 分钟
-    ratio_by_date: dict[str, float] = {}
+    remaining = [d for d in fetch_dates if d not in ratio_by_date]
     for td, r in _map_parallel(
-        fetch_dates,
+        remaining,
         lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
         on_error=_on_pcr_error,
     ):

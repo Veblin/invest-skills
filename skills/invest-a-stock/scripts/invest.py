@@ -761,8 +761,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     if fmt == "md" and args.outdir:
         # F2-4: 报告文件名时间戳显式北京时（ZoneInfo Asia/Shanghai），
-        # 不再依赖机器本地时区。
-        from lib.dates import shanghai_now
+        # 不再依赖机器本地时区。shared_dates 是 scripts/lib 的引导 re-export
+        # 模块（lib.dates 不存在，直接 import 会 ModuleNotFoundError 崩掉
+        # 整个 report --outdir 主流程）。
+        from lib.shared_dates import shanghai_now
         ts = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
         subdir = _report_basename(result, args.symbol, ts)
         outdir = Path(args.outdir).resolve()

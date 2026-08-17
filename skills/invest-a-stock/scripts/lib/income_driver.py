@@ -199,14 +199,30 @@ def classify_income_driver(
     # 衰减；下限 0.15 防全灭）。窗口取最近 3 年（全窗口 CAGR 会被早年
     # 高增长抬高，招行 2015→2025 全窗口 ~10% 但近 3 年 ~3%）。
     _cagr_window = annual[-4:] if len(annual) >= 4 else annual
+    _has_loss_year = any(v <= 0 for v in _cagr_window)
     annual_cagr_pct: float | None = None
-    if len(_cagr_window) >= 2 and _cagr_window[0] > 0:
-        _years = len(_cagr_window) - 1
-        if _years >= 1:
-            annual_cagr_pct = ((_cagr_window[-1] / _cagr_window[0]) ** (1 / _years) - 1) * 100
+    if len(_cagr_window) >= 2:
+        if not _has_loss_year:
+            # 全窗口 CAGR：全程盈利才可算——任一端亏损时负数底数的
+            # 小数次幂返回复数，min/max 比较直接 TypeError 崩掉整个渲染链
+            # （亏损期标的走 report/classify 即炸）。
+            _years = len(_cagr_window) - 1
+            if _years >= 1:
+                annual_cagr_pct = ((_cagr_window[-1] / _cagr_window[0]) ** (1 / _years) - 1) * 100
+        elif len(_cagr_window) >= 3 and _cagr_window[-2] > 0:
+            # 窗口含亏损年：全窗口 CAGR 不可算。用最近一年增速近似增速量级
+            # （分母须为正；终点亏损时增速为负 → 落 scale 下限 0.15）——
+            # 否则"亏损恢复"标的拿全权重、稳健正增长标的反而被 F2-1 衰减
+            # （不对称：恢复≠成长兑现）。
+            annual_cagr_pct = (_cagr_window[-1] / _cagr_window[-2] - 1) * 100
     growth_scale = 1.0
     if annual_cagr_pct is not None:
         growth_scale = min(1.0, max(0.15, annual_cagr_pct / 8.0))
+    if _has_loss_year:
+        # 「恢复≠成长兑现」：窗口含亏损年时再封顶 0.5——高增速恢复年
+        # （如 -50→200→210→600，单年 185.7%）按 /8 会 cap 到 1.0 满权重，
+        # 绕过量级约束（review 二轮 live repro）。
+        growth_scale = min(growth_scale, 0.5)
 
     growth_score = 0.0
     if ev_growth.get("available"):
@@ -265,7 +281,7 @@ def classify_income_driver(
     if driver == DRIVER_GROWTH and ev_fcf.get("available") and ev_fcf["positive_ratio"] < 0.4:
         counter.append(f"FCF 为正占比 {ev_fcf['positive_ratio']:.0%}，成长含金量存疑（利润先行现金流滞后）")
     if driver == DRIVER_GROWTH and (ev_refi.get("refi_times") or 0) >= 2:
-        counter.append(f"近 5 年再融资 {ev_refi['refi_times']} 次（应为近 5 年口径），增长依赖外部融资稀释")
+        counter.append(f"再融资 {ev_refi['refi_times']} 次，增长依赖外部融资稀释（窗口口径见 --refi-times 传入值）")
     if driver == DRIVER_VALUE and ev_cycle.get("available") and ev_cycle["cv"] >= _CYCLE_CV_THRESHOLD:
         counter.append(f"净利变异系数 {ev_cycle['cv']:.2f} 偏高，'价值'特征可能实为周期")
     if driver == DRIVER_CYCLE and ev_growth.get("available") and ev_growth["positive_year_ratio"] >= _GROWTH_POSITIVE_YEAR_RATIO:

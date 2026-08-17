@@ -15,7 +15,10 @@ for __v2_n in dir(__v2_ref):
         globals()[__v2_n] = getattr(__v2_ref, __v2_n)
 del __v2_ref, __v2_n
 
-from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+from ..shared_dates import (  # noqa: E402
+    normalize_end_date as _norm_ed,
+    yyyymmdd_to_iso as _to_iso_date,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -324,7 +327,7 @@ def _section_executive_summary(collection, symbol, dims, val_cache=None):
     industry = ""
     if isinstance(basic, dict):
         name = basic.get("name", "") or basic.get("股票简称", "")
-        industry = basic.get("industry", "")
+    industry = _extract_industry(basic)
 
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
 
@@ -1153,17 +1156,10 @@ def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
     }
 
     # F0-8 修复：金融行业豁免——银行/非银的 90%+ 资产负债率与单季累计
-    # ROE 是经营模式常态，不是否决信号。
-    industry = ""
+    # ROE 是经营模式常态，不是否决信号。行业键双兼容见 _extract_industry。
     basic_dim = (dims or {}).get("basic_info") or {}
     basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
-    if isinstance(basic_data, list):
-        for r in basic_data:
-            if isinstance(r, dict) and r.get("industry"):
-                industry = str(r.get("industry"))
-                break
-    elif isinstance(basic_data, dict):
-        industry = str(basic_data.get("industry") or "")
+    industry = _extract_industry(basic_data)
     financial_industry = industry in ("银行", "非银金融", "保险", "证券", "多元金融")
 
     fin_dim = (dims or {}).get("financials") or (collection or {}).get("financials") or {}
@@ -2306,14 +2302,47 @@ def _prior_year_row(fin_list: list[dict], latest: dict) -> dict | None:
     同比基期必须是同月日的上年报告期（如 20260630 → 20250630）；
     找不到 → None（同比不可比）。
     """
-    ed = str(latest.get("end_date") or "")
-    if len(ed) != 8 or not ed.isdigit():
+    ed = _norm_ed(str(latest.get("end_date") or ""))
+    if len(ed) != 8:
         return None
     target = f"{int(ed[:4]) - 1}{ed[4:]}"
     for r in fin_list:
-        if str(r.get("end_date") or "") == target:
+        if _norm_ed(str(r.get("end_date") or "")) == target:
             return r
     return None
+
+
+def _roe_trend_anchors(
+    fin_list: list[dict], latest_fin: dict,
+) -> tuple[float | None, float | None, int]:
+    """护城河 ROE 趋势锚点：(起点 ROE, 末年报 ROE, 年报行数)。
+
+    年报 ≥2 期 → 首尾年报 ROE；否则与最新行同 MMDD 的最老行做起点
+    （避免「年报 ROE vs 季累计 ROE」跨期混比出伪"侵蚀"）。
+    end_date 不可解析 → 无锚点（review 二轮：normalize 返回空串时
+    ""[4:]=="" 会把所有不可解析行归入同组，静默混比）。
+    """
+    annual_rows = [
+        r for r in fin_list
+        if _norm_ed(str(r.get("end_date") or "")).endswith("1231")
+    ]
+    n_annual = len(annual_rows)
+    if n_annual >= 2:
+        return (
+            _safe_num(annual_rows[0].get("roe")),
+            _safe_num(annual_rows[-1].get("roe")),
+            n_annual,
+        )
+    latest_mmdd = _norm_ed(str(latest_fin.get("end_date") or ""))[4:]
+    if not latest_mmdd:
+        return None, None, n_annual
+    same_period = [
+        r for r in fin_list
+        if _norm_ed(str(r.get("end_date") or ""))[4:] == latest_mmdd
+    ]
+    if len(same_period) >= 2:
+        return _safe_num(same_period[0].get("roe")), None, n_annual
+    return None, None, n_annual
 
 
 def _section_fundamentals_layered(
@@ -2414,10 +2443,10 @@ def _section_fundamentals_layered(
     # 展示仍用报告期原始值并标注口径。
     roe_judge = roe_val
     roe_label = "ROE(TTM)"
-    latest_ed = str(latest_fin.get("end_date") or "")
+    latest_ed = _norm_ed(str(latest_fin.get("end_date") or ""))
     if latest_ed and not latest_ed.endswith("1231"):
         roe_label = f"ROE（{latest_ed} 报告期累计）"
-        annual_rows = [r for r in fin_list if str(r.get("end_date") or "").endswith("1231")]
+        annual_rows = [r for r in fin_list if _norm_ed(str(r.get("end_date") or "")).endswith("1231")]
         if annual_rows:
             ann_roe = _safe_num(annual_rows[-1].get("roe"))
             if ann_roe is not None:
@@ -2747,20 +2776,15 @@ def _section_fundamentals_layered(
     lines.append("#### B-① 护城河来源")
     roe_now = _safe_num(latest_fin.get("roe"))
     # F0-8 修复：ROE 趋势用年报行（1231）对比，避免季度累计 ROE 混比
-    # （招行 12.03% 全年 vs 2.96% Q1 被误判为"侵蚀"）。
-    annual_rows = [r for r in fin_list if str(r.get("end_date") or "").endswith("1231")]
-    if len(annual_rows) >= 2:
-        roe_first = _safe_num(annual_rows[0].get("roe"))
-        roe_ann_last = _safe_num(annual_rows[-1].get("roe"))
-    else:
-        roe_first = _safe_num(first_fin.get("roe"))
-        roe_ann_last = None
+    # （招行 12.03% 全年 vs 2.96% Q1 被误判为"侵蚀"）。锚点计算收敛到
+    # _roe_trend_anchors（review 二轮补：可解析守卫 + 可单测）。
+    roe_first, roe_ann_last, n_annual_rows = _roe_trend_anchors(fin_list, latest_fin)
     if roe_now is not None:
         lines.append(f"当前 ROE：**{roe_now:.2f}%**（报告期累计口径，最新年报 {roe_ann_last:.2f}%）" if roe_ann_last is not None else f"当前 ROE：**{roe_now:.2f}%**。")
         if roe_first is not None and roe_ann_last is not None:
             trend = "强化" if roe_ann_last > roe_first + 2 else (
                 "侵蚀" if roe_ann_last < roe_first - 2 else "稳定")
-            lines.append(f"近 {len(annual_rows)} 个年报 ROE 趋势：{roe_first:.2f}% → {roe_ann_last:.2f}%（{trend}）。")
+            lines.append(f"近 {n_annual_rows} 个年报 ROE 趋势：{roe_first:.2f}% → {roe_ann_last:.2f}%（{trend}）。")
         elif roe_first is not None and len(fin_list) >= 4:
             trend = "强化" if roe_now > roe_first + 2 else (
                 "侵蚀" if roe_now < roe_first - 2 else "稳定")

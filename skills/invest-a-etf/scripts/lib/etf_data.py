@@ -1203,11 +1203,19 @@ def _q_tencent_etf_quote(symbol: str) -> dict[str, Any] | None:
         if len(p) <= 45:
             return None
         out: dict[str, Any] = {}
-        for key, idx in (("price", 3), ("change_pct", 32), ("volume", 6), ("amount", 37)):
+        for key, idx in (("price", 3), ("change_pct", 32), ("volume", 6)):
             try:
                 out[key] = safe_float(p[idx])
             except (ValueError, TypeError, IndexError):
                 out[key] = None
+        # F1-1 单位对齐：qt.gtimg.cn 字段 37 为成交额（万元），主路径
+        # fund_etf_spot_em「成交额」为元——统一转元，否则同一字段随
+        # 数据源不同差 10⁴ 倍（实测 p[37]=323831 vs spot 3,238,306,187）。
+        try:
+            _amt_wan = safe_float(p[37])
+            out["amount"] = _amt_wan * 1e4 if _amt_wan is not None else None
+        except (ValueError, TypeError, IndexError):
+            out["amount"] = None
         if out.get("price") is None:
             return None
         return out

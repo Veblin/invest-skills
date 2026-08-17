@@ -162,6 +162,27 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
 
 
 # --- _render_income_driver (R1) ---
+def _extract_industry(basic_data: Any) -> str:
+    """从 basic_info 维度数据提取行业，兼容 tushare「industry」与 akshare「行业」键。
+
+    basic_info 可来自 tushare stock_basic（键 industry）或 akshare
+    stock_individual_info_em（键「行业」）——只查一个键会在另一源下静默失配
+    （金融行业豁免 F0-8 / 成长分支减权 F2-1 被跳过）。F0-8/F2-1 引入的
+    多处手写循环统一收敛到此。
+    """
+    if isinstance(basic_data, list):
+        for r in basic_data:
+            if isinstance(r, dict):
+                v = r.get("industry") or r.get("行业")
+                if v:
+                    return str(v)
+    elif isinstance(basic_data, dict):
+        v = basic_data.get("industry") or basic_data.get("行业")
+        if v:
+            return str(v)
+    return ""
+
+
 def _render_income_driver(collection: dict[str, Any]) -> list[str]:
     """R1: 报告头部「收益驱动假设」块（研究路径分流）。
 
@@ -190,17 +211,11 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
         from lib.income_driver import classify_income_driver
     except ImportError:
         return []
-    # F2-1: 行业传入（金融行业成长分支减权）
+    # F2-1: 行业传入（金融行业成长分支减权）——双键兼容见 _extract_industry
     industry: str | None = None
     basic_dim = dims.get("basic_info") or {}
     bdata = basic_dim.get("data") if isinstance(basic_dim, dict) else None
-    if isinstance(bdata, list):
-        for br in bdata:
-            if isinstance(br, dict) and br.get("industry"):
-                industry = str(br.get("industry"))
-                break
-    elif isinstance(bdata, dict) and bdata.get("industry"):
-        industry = str(bdata.get("industry"))
+    industry = _extract_industry(bdata) or None
     result = classify_income_driver(annual, fin, industry=industry)
     driver = result.get("driver", "")
     conf = result.get("confidence", "")

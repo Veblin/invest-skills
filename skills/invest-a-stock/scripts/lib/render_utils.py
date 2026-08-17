@@ -11,7 +11,7 @@ from typing import Any
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import sort_kline_asc
 
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import normalize_end_date as _norm_ed, yyyymmdd_to_iso as _to_iso_date
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
@@ -532,15 +532,14 @@ def _compute_metric_cagr(
     """
     rows = [
         r for r in fin_list if _safe_num(r.get(field)) is not None
-        and str(r.get("end_date") or "").isdigit() and len(str(r.get("end_date"))) == 8
+        and _norm_ed(str(r.get("end_date") or ""))
     ]
     if len(rows) < 2:
         return None, None
-    rows_sorted = sorted(rows, key=lambda r: str(r.get("end_date")))
+    rows_sorted = sorted(rows, key=lambda r: _norm_ed(str(r.get("end_date") or "")))
     groups: dict[str, list[dict]] = {}
     for r in rows_sorted:
-        ed = str(r.get("end_date"))
-        groups.setdefault(ed[4:], []).append(r)
+        groups.setdefault(_norm_ed(str(r.get("end_date") or ""))[4:], []).append(r)
     cand = groups.get("1231")
     if cand is None or len(cand) < 2:
         cand = max(groups.values(), key=len)
@@ -548,9 +547,12 @@ def _compute_metric_cagr(
         return None, None
     first_v = _safe_num(cand[0].get(field))
     last_v = _safe_num(cand[-1].get(field))
-    if first_v is None or last_v is None or first_v <= 0:
+    # 终点亏损（last_v <= 0）与起点亏损同样拒绝：负数底数小数次幂产出
+    # 复数，报告会渲染出 "净利润 CAGR：-70.76+50.65j%" 式垃圾数字。
+    if first_v is None or last_v is None or first_v <= 0 or last_v <= 0:
         return None, None
-    years = int(str(cand[-1].get("end_date"))[:4]) - int(str(cand[0].get("end_date"))[:4])
+    years = int(_norm_ed(str(cand[-1].get("end_date") or ""))[:4]) - int(
+        _norm_ed(str(cand[0].get("end_date") or ""))[:4])
     if years < 1:
         return None, None
     span = float(years)
@@ -562,15 +564,14 @@ def cagr_period_rows(fin_list: list[dict], field: str) -> list[dict]:
     供展示层标注正确的日期范围（F0-8 配套）。"""
     rows = [
         r for r in fin_list if _safe_num(r.get(field)) is not None
-        and str(r.get("end_date") or "").isdigit() and len(str(r.get("end_date"))) == 8
+        and _norm_ed(str(r.get("end_date") or ""))
     ]
     if len(rows) < 2:
         return []
-    rows_sorted = sorted(rows, key=lambda r: str(r.get("end_date")))
+    rows_sorted = sorted(rows, key=lambda r: _norm_ed(str(r.get("end_date") or "")))
     groups: dict[str, list[dict]] = {}
     for r in rows_sorted:
-        ed = str(r.get("end_date"))
-        groups.setdefault(ed[4:], []).append(r)
+        groups.setdefault(_norm_ed(str(r.get("end_date") or ""))[4:], []).append(r)
     cand = groups.get("1231")
     if cand is None or len(cand) < 2:
         cand = max(groups.values(), key=len)

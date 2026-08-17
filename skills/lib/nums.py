@@ -32,6 +32,20 @@ def coalesce_field(row: dict, *keys: str) -> float | None:
     return None
 
 
+def row_value_or_last(row: dict, *keys: str) -> float | None:
+    """从 dict 行取第一个非 None 的列值，全部缺省时回退末列值。
+
+    宏观采集行经 df.to_dict("records") 转 dict 后（F0-4），iloc 是 Series
+    专属 API——dict 上 iloc[-1] 是 AttributeError（review 二轮 R-13）。
+    指标列缺失/改名时取末列兜底（旧 Series.iloc[-1] 语义的 dict 等价）。
+    """
+    v = coalesce_field(row, *keys)
+    if v is not None:
+        return v
+    vals = list(row.values())
+    return safe_float(vals[-1]) if vals else None
+
+
 def fmt_amount(v: Any, unit: str = "", precision: int = 2) -> str:
     """格式化数值为 亿/万 可读形式，供渲染与标签使用。
 

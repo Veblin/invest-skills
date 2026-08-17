@@ -139,6 +139,42 @@ class TestTencentEtfFallback:
         assert q["premium_discount"] is None
         assert "回退腾讯" in q["_error"]
 
+    def test_tencent_amount_wan_to_yuan(self, monkeypatch):
+        """腾讯 qt.gtimg.cn 字段 37 是成交额（万元），主路径东财
+        fund_etf_spot_em「成交额」是元——回退值必须 ×1e4 统一单位
+        （修复前同一字段随数据源不同差 10⁴ 倍：323831 vs 3,238,306,187）。"""
+        import etf_data
+        import lib.proxy as _proxy
+
+        p = [""] * 50
+        p[3] = "1.152"      # 价格
+        p[6] = "1768251"    # 成交量（手）
+        p[32] = "0.35"      # 涨跌幅
+        p[37] = "323831"    # 成交额（万元）
+        payload = 'v_sh512660="' + "~".join(p) + '"'
+
+        class _FakeResp:
+            status_code = 200
+            text = payload
+
+        class _FakeSess:
+            def get(self, url, timeout=None):
+                assert url.startswith("http://qt.gtimg.cn/q=sh512660")
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = etf_data._q_tencent_etf_quote("512660")
+        assert out is not None
+        assert out["price"] == 1.152
+        assert out["amount"] == pytest.approx(323831 * 1e4)
+
 
 # ---------------------------------------------------------------------------
 # F1-3: events/512660.json

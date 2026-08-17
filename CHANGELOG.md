@@ -4,6 +4,74 @@
 
 8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。
 
+### 修复（2026-08-17）：工作流评估分级修复 — P0 数字口径（F0-1~F0-9）+ P1 ETF 数据层（F1-1~F1-7）+ P2 流程工程（F2-1~F2-7）
+
+**P0 数字口径修复**（`test_v026_p0_fixes.py` 19→22 用例全绿）：
+
+- **F0-1 DCF 净债务口径**：total_liab 含经营负债不再参与每股换算；有息负债字段未采集时抑制每股输出并显式说明（render_dcf + valuation method 标记）
+- **F0-2 同比基期同报告期匹配**：`_prior_year_row` 替代相邻行混比（修复 Q1 vs 全年、累计环比误标同比）
+- **F0-4 宏观取最新月行**：akshare PMI/CPI/PPI 序列最新在前，iloc[-1] 取到 2008-01 旧行（PMI 53.0→49.2、CPI 7.08→0.5），改为按月份列取最大期
+- **F0-5 β 默认值明示参与计算影响** + FRED.DGS10 重复标签拼接修复
+- **F0-6 F-4 风险计数**：coverage auto/total 求和成 33 的伪口径统一为 16/17
+- **F0-7 rigor/verify_valuation 按 end_date 排序取最新行**（原 data[-1] 取最旧行致 PB 偏差 80.7% 误报）
+- **F0-8 银行财务期口径**：盈利结构/护城河趋势/多空链用年报 ROE 判断；同季度 CAGR；画布增长驱动同比化；F-3 负债率>90%/ROE<5% 金融业豁免；DCF 金融业豁免消息
+- **F0-9 业绩全景同报告期去重**（600036 20250630 重复行）
+- **F0-3 QC 新 error 规则**：占位符未填（`[待 Claude` 等）与异常泄漏（AttributeError 等）直出报告即 FAIL
+
+回归：重跑 300750/600036 报告验证（同比 +54.80%/+3.81%、DCF 每股抑制、金融业豁免、宏观 49.2/+0.5%）+ report_qc PASS + 全量 pytest 绿。
+
+**P1 ETF 数据层修复**（`test_v026_p1_fixes.py` 9 用例全绿）：
+
+- **F1-2 HOLDINGS_CLUSTER_MAP 补 512660/588000 前十大**（军工 10 只 + 科创50 10 只）→ 聚类未归类从 100%/62% 降至 0%
+- **F1-1 spot 失败回退腾讯行情**（价/涨跌/量额），折溢价标注不可得——东财不可达时不再整列缺失
+- **F1-4 futures-basis 识别科创50 期货品种映射**，note 区分「无映射」与「映射存在但 futures_daily 数据层未覆盖」（与 hedge-map 矛盾消除）
+- **F1-6 report 路径幂等回填 CSINDEX_MAP 全部指数**（原仅回填本标的）——一次报告运行自愈全部宽基指数停更（上证50/中证500/中证1000 08-06 起停更）
+- **F1-5 PCR opt_daily 批量前单点预检**：端点挂起时一次 8s 探针即整体降级（原 56 天 × 8s 超时风暴）
+- **F1-3 events/512660.json 新建**（6 条事件，4 条与 ±5% 大波动日对齐，二手置信度）
+- **F1-7 SKILL.md 命名规则**：同 symbol 单目录，512660 → 512660-军工ETF
+
+回归：512660/588000 报告 report_qc PASS；旧 test_etf_holdings 未归类用例改合成代码（真实持仓 3 只已被新映射覆盖）。
+
+**P2 流程/工程修复**：
+
+- **F2-1 classify 金融行业感知**：银行/非银成长分支减权（×0.5）+ 近年 3 年年化增速量级约束 + 股息率 ≥4% 加权 → 600036 带证据判「估值股息回归」（原误判成长兑现）、无证据判「暂无法判定」；300750 不受影响
+- **F2-3 evidence --from-store**：复用 collect 快照（兼容性校验同 --resume），实测 14.5s → 0.125s；SKILL.md 标准链更新为 collect + evidence --from-store + report --resume
+- **F2-4 报告文件名时间戳显式北京时**（lib.dates.shanghai_now，不再依赖机器 TZ）
+- **F2-6 report-template.md 预案模板「买入/卖出/持有」→「交易动作」**（与自家 law6-*-standalone lint 对齐，模板不再触发拦截）
+- **F2-7 CLAUDE.md 宏观标签生成责任**：引擎自动生成，Claude 核验最新期（akshare 序列最新在前，F0-4 已修）
+
+回归：evidence --from-store 端到端验证 + 全量 pytest 绿。
+
+### 修复（2026-08-17 二轮）：/code-review max 15 项确认级发现修复（2 项崩溃级 live repro + 13 项数字/静默回归）
+
+上一轮 P0/P1/P2 修复自身的缺陷（15 项发现 → 12 条修复条目，R-2/R-3 与 R-4/R-5 各合并 2-3 项；回归测试 `test_v026_review_fixes.py` 23 例 + `test_v026_p1_fixes.py` 腾讯单位用例 1 例，全量 pytest 绿）：
+
+- **R-1 F2-4 import 崩溃（崩溃级）**：`invest.py report --outdir` 写 `from lib.dates import shanghai_now`——scripts/lib 无 dates.py（只有 shared_dates 引导 re-export），渲染完整个报告后 ModuleNotFoundError，.md 不落盘。改为 `lib.shared_dates`
+- **R-2/R-3 F2-1 CAGR 守卫（崩溃级）**：窗口终点亏损时 `(_cagr_window[-1]/_cagr_window[0]) ** (1/_years)` 负数底数小数次幂 → 复数 → `min()` TypeError 崩掉整个渲染链（亏损期标的跑 report/classify 即炸）；起点亏损时守卫跳过致「亏损恢复」标的全权重、稳健正增长标的反而被衰减（不对称）。任一端亏损 → 用最近一年增速近似量级（恢复≠成长兑现）；反例字符串删除泄漏的实现注记「（应为近 5 年口径）」
+- **R-4/R-5 F0-8 CAGR 日期格式与复数**：`_compute_metric_cagr`/`cagr_period_rows` 只认 8 位数字日期——akshare `stock_financial_abstract_ths` 报告期为 "2025-12-31" dash 格式时全部行被滤、CAGR 静默消失；统一 normalize 后分组（years 计算同样修复 int("1996-12-31"[:4]) 崩溃面）；终点亏损守卫 `last_v <= 0` → 返回 None（修复前渲染 "净利润 CAGR：-70.76+50.65j%" 垃圾数字）
+- **R-6 F0-2 同比基期 dash 匹配**：`_prior_year_row` 只认 8 位数字 → normalize 后匹配（dash/混合格式均可找同比基期）
+- **R-7 F0-8/F2-1 行业提取双键**：新增 `_extract_industry`（tushare「industry」+ akshare「行业」）收敛 3 处手写循环——无 Tushare Token 环境下金融豁免/成长减权此前被静默跳过
+- **R-8 F0-7 PB 取行对称**：F0-7 只修了 PE 按 trade_date 排序，PB 仍 `val_data[-1]` 取最旧行（最新在前行序下 PB 恒与最新净资产错配、伪偏差误报）；排序 key 空日期排最后（原始字符串排序会让无日期行抢占「最新」）
+- **R-9 F0-1 risk_reward net_debt 抑制**：net_debt None 时不再用 0 替代——每股目标价被整个净债务抬高（300750 实测 3528.7 亿 / 24.6 亿股 = 143.44 元/股虚高 [来源: Python calc: 3528.7/24.6]），与 render_dcf「每股换算已抑制」同口径显式失败
+- **R-10 F0-4 latest_month_row 显式告警**：首行（最新，akshare 约定最新在前）「月份」列解析失败时静默取上一期——新增 logger 告警（F2-7「核验最新期」需要知道取到的可能非当期）
+- **R-11 F1-1 腾讯金额单位**：qt.gtimg.cn 字段 37 为成交额（万元）vs 东财 spot「成交额」元——回退路径 ×1e4 统一（实测 323831 vs 3,238,306,187 差 10⁴ 倍；新测试用真实 payload 格式 mock 锁定）
+- **R-12 F0-8 护城河 ROE 同口径**：年报不足 2 期时（新上市 4 季度 + 1 年报）elif 用 `first_fin`（可能恰为年报行）对比最新季度累计 ROE → 跨期「侵蚀」误报；起点改为与最新行同 MMDD 的最老行
+- **R-13 F0-4 macro dict 残留 iloc**：行已 `to_dict("records")` 转 dict 后 `row.iloc[-1]` AttributeError（macro.py PMI 与 _orchestrate 两处）→ 取末列值
+- **R-14 F1-5 PCR 探针容错**：单次 8s 探针超时即丢弃整个 PCR 维度（网络抖动不应抹掉维度）；失败重试一次仍失败才整体降级、探针结果直接复用（不再重复取 fetch_dates[-1]）、日志不再误标 "timed out"
+
+### 修复（2026-08-17 三轮）：发布前 /code-review max 复核 — 二轮修复自身的 6 处缺陷（评分 100×1 + 75×5）
+
+5 路并行审查（CLAUDE.md 合规/浅层 bug/git 历史/既往缺陷模式/注释一致性）+ 逐项置信度评分，二轮修复中发现 6 处自身缺陷（含 1 处三路独立 live repro 的取行回归）：
+
+- **T-1 `_val_sort_key` 反转（最重要，回归级）**：二轮把无日期行排到末尾、`[-1]` 恒选中它——三路审查各自 live repro（pb fail 9.9 vs 3.5 dev 95.52%，旧纯字符串排序反在该场景正确）。改回正确语义：**有日期行中取日期最大者，全部无日期才回退原始行序**；日期比较统一 normalize（dash 与 8 位混合不误排）；PE/PB 共用单次排序（消除 D10 双排序）；弱断言测试（`!= "warn"` 放过 "fail"）改强断言 `== "pass"` + 新增 dash 混排用例
+- **T-2 F2-1 衰减只修了一半**：终点亏损窗口（[100,120,140,-20]）两分支都不进 → growth_scale=1.0 满权重、driver 实判「成长兑现」（review live repro 0.67）；高增速恢复年（-50→200→210→600，单年 185.7%）按 /8 cap 到 1.0 满权重。修复：elif 分母条件放宽（终点亏损 → 负增速落入下限 0.15）+ 含亏损年窗口再封顶 0.5（恢复≠成长兑现）；新增 2 例断言权重的回归测试
+- **T-3 R-12 same_period 空串分组**：end_date 不可解析时 normalize → `""`，`""[4:]==""` 把所有不可解析行归入同组静默混比。锚点计算收敛到 `_roe_trend_anchors`（年报优先/同 MMDD 兜底/不可解析守卫）+ 4 例单测
+- **T-4 R-13 收敛到可测 helper**：macro/_orchestrate 的 dict 行末列兜底收敛到 `nums.row_value_or_last`（可单测）+ 3 例；PCR 探针重试/复用补 2 例（首探超时重试成功不降级 + 复用后 opt_daily 调用数 == fetch_dates 数；双败整体降级）
+- **T-5 risk_reward 残留 else-0 + docstring**：第 231 行 `net_debt if ... else 0` 死代码（与新注释自相矛盾的 D1 模式残留）→ 改为裸 `net_debt`；docstring 补 net_debt 缺失 error 返回路径
+- **T-6 数字/注释合规**：CHANGELOG「33 例」实为 23 例（P0 目视计数，--collect-only 复核）；「15 项 vs R-1~R-14」枚举口径澄清；注释与 CHANGELOG 心算除法改为 `[来源: Python calc: 3528.7/24.6]`（143.44）；PCR 探针注释与重试/复用行为对齐
+
+回归：`test_v026_review_fixes.py` 23→33 例、`test_collector_fixes.py` +2 例 PCR 探针，全量 pytest 绿。
+
 ### 修复（2026-08-16 二轮）：/code-review max 13 项修复（force 重建安全 + F 系列幻影事件剔除）
 
 - **数据层 force 重建安全（findings #1/#2/#5/#6）**：`ensure_futures_daily` 重构——force 先逐合约取数暂存内存、全部结束后才 clear+写回（tushare 主源不可用时**清空前中止**，旧 9258 行 settle 口径数据保留；旧实现先清库后验源，全挂时被 sina close 口径整表覆盖）；force + max_contracts 不足 → 清空前报 error 中止（旧实现静默截断：尾部品种表已清空却 0 合约入库、failed={} 退出码 0，backfill 退出码同步修正）；逐合约失败不推进窗口起点（同品种下一合约窗口覆盖失败合约缺口）；增量模式已入库合约仅回填尾部窗口（修复前端合约到期日前新增交易日永久缺失——旧实现整体跳过 existing 合约）

@@ -10,6 +10,8 @@ from lib.participant_scan import resolve_moneyflow
 from lib.schema import ProbabilityStructure
 from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
 
+from .shared_dates import normalize_end_date as _norm_ed
+
 from .render_utils import (
     _bull_bear_valuation_divergence_text,
     _compute_metric_cagr,
@@ -147,9 +149,12 @@ def _section_bull_bear(
     # ROE 2.96% 触发"ROE 偏低"空头链是期口径伪信号（2025 全年 12.02%）。
     roe_judge = roe
     if fin and isinstance(fin, list):
+        # 日期先 normalize：akshare 源 end_date 为 "2025-12-31" dash 格式，
+        # 直接 endswith("1231") 恒 False → 年报行永远找不到（银行 Q1 累计
+        # ROE 2.96% 误触发空头链的问题在 akshare 源下原样存在）
         _annual_rows = [
             r for r in sort_kline_asc(fin)
-            if str(r.get("end_date") or "").endswith("1231")
+            if _norm_ed(str(r.get("end_date") or "")).endswith("1231")
         ]
         if _annual_rows:
             _ann_roe = _safe_num(_annual_rows[-1].get("roe"))
