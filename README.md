@@ -5,11 +5,22 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
   <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.6" alt="Release" /></a>
+  <a href="#workbuddy-安装"><img src="https://img.shields.io/badge/WorkBuddy-零终端安装-2b7fff.svg" alt="WorkBuddy 零终端安装" /></a>
 </p>
 
 **A 股投研助手：把数小时的手工研究压缩到几分钟。** 输入代码，自动采集多源数据、以科学方法计算、按学术框架分析，产出带来源追溯的研究备忘录。学习工具，非决策工具。
 
 > 普通 AI 给你「看起来对的分析」；invest-skills 给你「能拿来做决策的研究备忘录」。
+
+---
+
+## 支持平台
+
+| 平台 | 安装方式 | 状态 |
+|:---|:---|:---|
+| **Claude Code** | `git clone` + symlink（或插件 marketplace） | ✅ 主开发平台 |
+| **WorkBuddy**（腾讯桌面版） | **零终端**：GitHub Release 下载 zip → `专家·技能·连接器 > 技能 > 添加技能 > 上传技能` 上传即用，无需打开终端 | ✅ 真机验证通过（2026-08-17，详见 [WorkBuddy 安装](#workbuddy-安装)） |
+| Hermes / Gemini CLI / 其他 SKILL.md 平台 | marketplace / gemini-extension 分发 | 📦 打包就绪，待真机验证 |
 
 ---
 
@@ -87,11 +98,24 @@ Tushare 积分档位与功能对照见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 ### WorkBuddy 安装
 
-WorkBuddy 与 Claude Code 共享同一套 SKILL.md 格式（同源同构），引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀，双 harness 兼容。3 步安装：
+WorkBuddy 与 Claude Code 共享同一套 SKILL.md 格式（同源同构），引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀，双 harness 兼容。**2026-08-17 起已在 WorkBuddy 桌面版真机验证通过**（技能上传/唤起/引擎采集/报告落盘全链路）。
+
+**方式一：Release 压缩包（推荐，零终端）**
 
 1. **安装 WorkBuddy 桌面版**（macOS / Windows）并登录（官方流程见下节；新用户 14 天全功能试用；免费版并行上限 2，付费版 8）
-2. **拷贝或 symlink skills**：将本仓库 `skills/invest-a-{stock,etf,journal,pulse,gap-scan}` 放入技能目录（macOS 推荐 symlink：`ln -sfn <repo>/skills/invest-a-pulse ~/.workbuddy/skills/invest-a-pulse`，仓库已预置 `.workbuddy/skills/` 下 5 个 symlink 可直接 `ln -sfn` 链接；Windows 见下方专节）
-3. **配置环境**：export `INVEST_SKILLS_ROOT=<repo 绝对路径>`（macOS 写 `~/.zshrc`；Windows 设用户级环境变量）+ 写全局 token 文件 `~/.config/investment/.env`（9 个 token 清单与写入说明见 [docs/workbuddy/env-template.md](docs/workbuddy/env-template.md)）
+2. **下载技能包**：GitHub Release 页面下载资产 `invest-skills-wb-vX.Y.Z.zip`（发布时由 CI 自动构建，与源码包并列附带）
+3. **WorkBuddy 内添加技能**：`专家·技能·连接器 > 技能 > 添加技能 > 上传技能` → 选择下载的压缩包 → 系统自动完成技能添加及初始化
+4. **首次使用**：在对话中说「检查 invest-skills 环境」——技能自动检测并安装 Python 环境（**首次约 1-3 分钟，属正常**）；0 token 即可用（akshare 免费数据源），进阶 token 见 [docs/workbuddy/env-template.md](docs/workbuddy/env-template.md)
+
+**方式二：开发者路径（symlink，实时同步仓库改动）**
+
+```bash
+git clone https://github.com/Veblin/invest-skills.git && cd invest-skills && uv sync
+export INVEST_SKILLS_ROOT="$PWD"          # 追加到 ~/.zshrc
+for s in invest-a-stock invest-a-etf invest-a-journal invest-a-pulse invest-a-gap-scan invest-a-pattern-scan; do
+  ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/$s" ~/.workbuddy/skills/$s
+done
+```
 
 #### 官方安装流程（App 本体，约 10 分钟）
 
@@ -111,18 +135,6 @@ WorkBuddy 与 Claude Code 共享同一套 SKILL.md 格式（同源同构），�
 - **marketplace vs SkillHub**：marketplace 插件仅 4 个（invest:a-stock / etf / journal / gap-scan，模板缺 invest-a-pulse，既有缺口）；SkillHub 上架 5 个 skill（含 invest-a-pulse，中文 description 已带触发词）
 - **`.workbuddy/skills` symlink 解析**：仓库已提交 git symlink，WorkBuddy 是否解析 symlink 需真机验证；若不解析，备选方案为 lean copy 脚本（只拷贝 SKILL.md + references/，引擎经 `INVEST_SKILLS_ROOT` 调用，体积约 KB 级，不推荐整目录 copy ~12MB）
 
-#### macOS
-
-```bash
-export INVEST_SKILLS_ROOT="/path/to/invest-skills"   # 追加到 ~/.zshrc
-mkdir -p ~/.workbuddy/skills
-ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/invest-a-stock" ~/.workbuddy/skills/invest-a-stock
-ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/invest-a-etf"   ~/.workbuddy/skills/invest-a-etf
-ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/invest-a-journal" ~/.workbuddy/skills/invest-a-journal
-ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/invest-a-pulse"  ~/.workbuddy/skills/invest-a-pulse
-ln -sfn "$INVEST_SKILLS_ROOT/.workbuddy/skills/invest-a-gap-scan" ~/.workbuddy/skills/invest-a-gap-scan
-```
-
 #### Windows
 
 - **技能目录路径社区有分歧**（`.workbuddy\skills` vs `WorkBuddy\Claw\skills`），**须真机实测**后选择
@@ -141,13 +153,13 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # 若策略拦截 .ps1
 
 验证：`cmd /c dir .workbuddy\skills` 应显示 `<JUNCTION>`。方案规格与 T1-T5 验收见 [host-docs/v0.2.6/Windows_workbuddy_symlink兼容方案_20260812.md](host-docs/v0.2.6/Windows_workbuddy_symlink兼容方案_20260812.md)。
 
-#### T1-T12 真机验收表（用户后置执行）
+#### 真机验收状态（2026-08-17 更新）
 
-> 阻塞项：WorkBuddy 安装（由用户后置执行）。判定标准：同一输入，WorkBuddy 输出与 Claude Code 逐项一致（含数据值、格式、落盘位置）。
+> **T0 安装链路已真机验证通过** ✅：GUI 上传 zip → 技能初始化 → 首次唤起 → uv 惰性建环境（Python 3.12.13，与系统/WB 自带 Python 隔离）→ 引擎全量采集 → 报告落盘（588000 科创50ETF 实测，三层复检数字层 47/48 一致）。下表 T1-T12 为功能级用例，仍待逐一验证。判定标准：同一输入，WorkBuddy 输出与 Claude Code 逐项一致（含数据值、格式、落盘位置）。
 
 | # | 用例 | 通过标准 | 阻塞项 |
 |---|------|---------|--------|
-| T1 | `/invest-a-pulse` 全流程 | 5 维分析 + market_snapshots 入库 | WB 安装 |
+| T1 | `/invest-a-pulse` 全流程 | 5 维分析 + market_snapshots 入库 | — |
 | T2 | `collect 600176 --with-macro --with-news-pack` | 11 维度采集 + 新闻三层 | token .env、120s 超时 |
 | T3 | `report 600176 --mode brief` | reports/ 落盘、模板一致 | — |
 | T4 | journal Q&A 全流程 | ≤4 问×4 选项、两轮分拆、save_journal 落库 | AskUserQuestion 实测 |

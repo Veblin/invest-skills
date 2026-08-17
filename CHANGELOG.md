@@ -4,6 +4,14 @@
 
 8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。
 
+### 新增（2026-08-17）：WorkBuddy 零终端分发 — 真机验证通过 + 发布集成
+
+- **WB bundle 发布包**：`scripts/build_wb_package.sh` 产出 `dist/invest-skills-wb-vX.Y.Z.zip`（944K/210 文件）——完整仓库布局 6 技能 + 入口 SKILL.md（`agent_created: true`、6 技能全触发词路由表、install_root 环境约定）+ `scripts/bootstrap.sh` 环境自举（检测/代装 uv → `uv sync --frozen` → 冒烟测试，幂等）+ `README-安装.md` 普通用户指南；剔除 invest-a-limit-up/tests/缓存
+- **真机验证（T0 全链路通过）**：WorkBuddy 桌面版实测——GUI `专家·技能·连接器 > 技能 > 添加技能 > 上传技能` 导入 zip → 技能唤起（`/invest-a-etf 588000`）→ uv 惰性建 .venv（Python 3.12.13，与系统 3.14.6 / WB 自带 Python 三方隔离）→ 引擎全量采集 → 报告落盘会话目录；bootstrap/install_root 未运行也不阻塞（uv 惰性同步兜底）
+- **发布集成**：release.yml 新增 WB zip 构建步骤 + **tag 一致性安全闸**（pyproject 版本 ≠ tag 即 FAIL）；GitHub Release 改为双资产（源码 tarball + WB zip）；release 归档补漏带 invest-a-pattern-scan（v0.2.6 新增技能此前未入源码包）；AGENTS.md 发布清单 +1
+- **真机报告三层复检**：588000 报告 48 项数字 Python 对照 47 项一致（AUM 一项为东财 spot「最新份额」盘后多次更新所致，报告时点值无法复现亦无法证伪，非报告错误）；合规层 4× [分析] 前缺 [事实] 块（ETF 模板层问题）+ 2 小瑕疵；逻辑层全过。已登记待办：① ETF 模板补 [事实] 块要求 ② 引擎 AUM 改用流通市值字段 ③ ETF 路径 PE 分位补中位数
+- README 新增「支持平台」节 + WorkBuddy 零终端安装主路径（Release zip → GUI 上传，不再要求终端操作），WorkBuddy 徽章
+
 ### 修复（2026-08-17）：工作流评估分级修复 — P0 数字口径（F0-1~F0-9）+ P1 ETF 数据层（F1-1~F1-7）+ P2 流程工程（F2-1~F2-7）
 
 **P0 数字口径修复**（`test_v026_p0_fixes.py` 19→22 用例全绿）：

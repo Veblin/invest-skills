@@ -32,6 +32,7 @@ jobs:
             skills/invest-a-journal \
             skills/invest-a-etf \
             skills/invest-a-pulse \
+            skills/invest-a-pattern-scan \
             skills.yaml \
             gemini-extension.json \
             pyproject.toml \
@@ -53,11 +54,20 @@ jobs:
             dist/pkg/invest-a-journal/__pycache__ \
             dist/pkg/invest-a-etf/__pycache__ \
             dist/pkg/invest-a-pulse/__pycache__ \
+            dist/pkg/invest-a-pattern-scan/__pycache__ \
             dist/pkg/.venv
           find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete
           cd dist && tar -czf invest-skills-${{ github.ref_name }}.tar.gz -C pkg .
           rm -rf dist/pkg
           echo "Archive created: dist/invest-skills-${{ github.ref_name }}.tar.gz"
+
+      - name: Build WorkBuddy bundle zip
+        run: |
+          bash scripts/build_wb_package.sh
+          # 安全闸：zip 名须与 tag 一致（防止 pyproject 版本与 tag 漂移）
+          test -f "dist/invest-skills-wb-${{ github.ref_name }}.zip" \
+            || { echo "❌ WB zip 名与 tag 不一致（pyproject 版本 ≠ ${{ github.ref_name }}）"; exit 1; }
+          echo "Bundle created: dist/invest-skills-wb-${{ github.ref_name }}.zip"
 
       - name: Extract release notes from CHANGELOG
         id: notes
@@ -70,7 +80,9 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/invest-skills-${{ github.ref_name }}.tar.gz
+          files: |
+            dist/invest-skills-${{ github.ref_name }}.tar.gz
+            dist/invest-skills-wb-${{ github.ref_name }}.zip
           body_path: release-notes.md
           generate_release_notes: false
           draft: false
