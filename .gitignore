@@ -27,6 +27,9 @@ htmlcov/
 host-docs/
 .coverage
 *_review.md
+# AI code review 输出物（CI 生成，不入库）
+review.md
+review_verdict.txt
 
 # Build / release artifacts
 dist/
