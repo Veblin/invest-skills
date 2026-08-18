@@ -583,7 +583,9 @@ def qc_latest(
     candidates = [p for p in root.rglob("*.md") if ".audit_checklist" not in p.name]
     if not candidates:
         return None
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    # mtime 相同（同秒写入/粗粒度文件系统）时按文件名取新，避免 max 平局由
+    # rglob 迭代序决定（跨环境不确定，CI 曾取到旧报告）
+    latest = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
     return qc_file(latest, profile=profile, fail_on=fail_on, verify_data=verify_data)
 
 

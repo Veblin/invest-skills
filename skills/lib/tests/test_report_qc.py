@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -426,8 +427,20 @@ class TestQcLatest:
     def test_finds_latest_by_mtime(self, tmp_path: Path):
         older = _write(tmp_path, "600176-中国巨石", "2026-08-01-10-00-00.md", COMPLIANT_STOCK)
         newer = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
-        # 显式设置 mtime 保证顺序（macOS tmp 可能同秒）
-        older.touch(); newer.touch()
+        # 固定 epoch mtime（差 1h）：touch() 在 CI 粗粒度文件系统下两次可能同秒，
+        # max 平局时取 rglob 迭代序首个（CI 曾取到 08-01 导致误报）
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_003_600, 1_700_003_600))
+        r = qc_latest(tmp_path)
+        assert r is not None
+        assert r.report_path.endswith("2026-08-02-10-00-00.md")
+
+    def test_mtime_tie_breaks_by_report_name(self, tmp_path: Path):
+        """同 mtime（同秒写入/粗粒度文件系统）时按文件名取新，结果确定。"""
+        older = _write(tmp_path, "600176-中国巨石", "2026-08-01-10-00-00.md", COMPLIANT_STOCK)
+        newer = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_000_000, 1_700_000_000))
         r = qc_latest(tmp_path)
         assert r is not None
         assert r.report_path.endswith("2026-08-02-10-00-00.md")

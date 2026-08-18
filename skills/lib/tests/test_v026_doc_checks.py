@@ -4,7 +4,7 @@
 - A 类点位红线：report-conventions §2.4 存在 + compliance_rules.yaml 6 条 wording-level-* 规则
 - 红线规则双向行为：断言式命中 / 事实句（已回补/未回补/回补非必然/位置描述）不误伤
 - H5 裁决落点：journal SKILL.md 日历效应建议节存在
-- 执行计划文档存在（host-docs/v0.2.6/execution-plan.md）
+- 执行计划文档存在（host-docs/v0.2.6/execution-plan.md；CI checkout 无 host-docs 时跳过）
 """
 
 from __future__ import annotations
@@ -175,6 +175,10 @@ def test_journal_calendar_section():
 
 
 def test_exec_plan_exists():
+    if not (_REPO_ROOT / _EXEC_PLAN).exists():
+        # host-docs 为独立嵌套 git 仓库，不入主仓库 checkout（git ls-files 为空）；
+        # 执行计划存在性仅在本地验证，CI 跳过
+        pytest.skip("host-docs/v0.2.6/execution-plan.md 不在 CI checkout 中（嵌套仓库）")
     plan = _read(_EXEC_PLAN)
     assert "# v0.2.6 执行计划" in plan
     for key in ("H5 日历效应回测", "D 类引擎字段", "点位红线", "Windows", "预案库"):
