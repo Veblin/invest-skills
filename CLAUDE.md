@@ -1,5 +1,13 @@
 # CLAUDE.md — invest:a-stock 投研助手
 
+## 底座准则（复杂度控制）
+
+本仓库是多个下游项目的底座（skillhub 镜像、WorkBuddy 分发、跨 harness 兼容等均依赖其既有约定）。因此：
+
+- **兼容性不可轻动**：frontmatter 格式、SKILL.md 结构、多 harness 兼容性是对下游项目的承诺，任何改动须先评估对全部下游项目的影响
+- **目录结构不可轻动**：`skills/` 布局与路径约定是既有契约
+- **复杂度受控**：新能力优先落在下游项目（如 invest-skills-skillhub），底座只收共享核心；改动从简，不叠架构
+
 ## 版本规则
 
 - 最多三位：`v{major}.{minor}.{patch}`
