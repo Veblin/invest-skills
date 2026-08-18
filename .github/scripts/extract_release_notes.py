@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""从 CHANGELOG.md 提取指定版本的 Release Notes（供 GitHub Actions 使用）。"""
+"""从 CHANGELOG.md 提取指定版本的 Release Notes（供 GitHub Actions 使用）。
+
+默认输出精简正文：引言段 + 各 `###` 小节标题（「主要修改」清单），全文经
+Release 正文末尾的 Full Changelog 链接指向 CHANGELOG.md（tag 锚定）。无 `###`
+小节的旧版本章节自动回退全文。`--full` 可显式输出全文。
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import tomllib
@@ -62,19 +68,83 @@ def changelog_has_section(version: str, changelog_path: Path) -> bool:
     return extract_changelog_section(text, version_to_tag(version)) is not None
 
 
-def build_release_notes(version: str, changelog_path: Path) -> str | None:
+def condense_section(section: str) -> str:
+    """Release 正文精简：引言段 + 各 `###` 小节标题（主要修改清单）。
+
+    `###` 小节标题即各主要修改的摘要行；无 `###` 小节时返回全文（旧版本兼容）。
+    """
+    lines = section.splitlines()
+    headers = [ln.strip()[4:].strip() for ln in lines if ln.strip().startswith("### ")]
+    if not headers:
+        return section
+
+    intro_lines: list[str] = []
+    for ln in lines:
+        if ln.strip().startswith("### "):
+            break
+        intro_lines.append(ln)
+    while intro_lines and not intro_lines[-1].strip():
+        intro_lines.pop()
+
+    intro = "\n".join(intro_lines).strip()
+    bullets = "\n".join(f"- {h}" for h in headers)
+    return "\n\n".join(p for p in [intro, bullets] if p)
+
+
+def _repo_slug() -> str:
+    """owner/repo：优先 GITHUB_REPOSITORY（CI），其次 git remote，最后默认值。"""
+    env = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if env and "/" in env:
+        return env
+    import subprocess
+
+    try:
+        out = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "Veblin/invest-skills"
+    if out.endswith(".git"):
+        out = out[:-4]
+    for sep in ("github.com:", "github.com/"):
+        if sep in out:
+            out = out.split(sep, 1)[1]
+            break
+    if out and "/" in out and " " not in out and not out.startswith("git@"):
+        return out
+    return "Veblin/invest-skills"
+
+
+def _full_changelog_line(tag: str, changelog_name: str, repo: str, prev_tag: str | None) -> str:
+    """Release 正文末尾：全文链接（CHANGELOG.md tag 锚定）+ 提交对比链接。"""
+    base = f"https://github.com/{repo}"
+    line = f"**Full Changelog**: [{changelog_name}]({base}/blob/{tag}/{changelog_name})"
+    if prev_tag:
+        line += f" · [{prev_tag}...{tag}]({base}/compare/{prev_tag}...{tag})"
+    return line
+
+
+def build_release_notes(
+    version: str,
+    changelog_path: Path,
+    full: bool = False,
+    repo: str | None = None,
+) -> str | None:
     tag = version_to_tag(version)
     text = changelog_path.read_text(encoding="utf-8")
     section = extract_changelog_section(text, tag)
     if not section:
         return None
 
+    body = section if full else condense_section(section)
     prev_tag = _previous_tag(tag)
-    compare = f"**Full Changelog**: {prev_tag}...{tag}" if prev_tag else ""
+    tail = _full_changelog_line(tag, changelog_path.name, repo or _repo_slug(), prev_tag)
 
-    parts = [f"## {tag}", "", section.strip()]
-    if compare:
-        parts.extend(["", "---", "", compare])
+    parts = [f"## {tag}", "", body.strip()]
+    if prev_tag:
+        parts.extend(["", "---", "", tail])
     return "\n".join(parts) + "\n"
 
 
@@ -141,6 +211,11 @@ def main() -> int:
         action="store_true",
         help="仅输出 tag 名（如 v0.1.4），供 workflow 使用",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="输出 CHANGELOG 章节全文（默认精简：引言段 + ### 小节标题）",
+    )
     args = parser.parse_args()
 
     root = _repo_root()
@@ -170,7 +245,7 @@ def main() -> int:
         print(tag)
         return 0
 
-    notes = build_release_notes(version, changelog)
+    notes = build_release_notes(version, changelog, full=args.full)
     if notes is None:
         if args.strict:
             print(

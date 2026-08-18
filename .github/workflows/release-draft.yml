@@ -1,6 +1,8 @@
 name: Release Draft Notes
 
-# PR 合并到 main 后：按 pyproject.toml 版本从 CHANGELOG 生成 Draft Release 正文。
+# PR 合并到 main 后：按 pyproject.toml 版本从 CHANGELOG 生成 Release 正文。
+# 流程：无 release → 建 Draft；有 Draft → 更新 Draft；已发布且仍是当前版本 → 重同步正文
+#（幂等，正文与 CHANGELOG 单源一致；旧版本已发布的 release 不会被触碰）。
 # 正式发布仍由 push tag 触发 release.yml（打包 + 发布）。
 
 on:
@@ -10,6 +12,7 @@ on:
     paths:
       - CHANGELOG.md
       - pyproject.toml
+      - .github/scripts/extract_release_notes.py
 
 permissions:
   contents: write
@@ -40,7 +43,7 @@ jobs:
             echo "No CHANGELOG section for ${{ steps.ver.outputs.tag }} — skip draft release"
           fi
 
-      - name: Skip if release already published
+      - name: Resolve release state
         id: published
         if: steps.changelog.outputs.ready == 'true'
         env:
@@ -48,20 +51,21 @@ jobs:
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "state=none" >> "$GITHUB_OUTPUT"
+            echo "No release yet for ${TAG} — will create draft"
             exit 0
           fi
           IS_DRAFT=$(gh release view "$TAG" --json isDraft -q .isDraft)
           if [ "$IS_DRAFT" = "true" ]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Updating existing draft for ${TAG}"
+            echo "state=draft" >> "$GITHUB_OUTPUT"
+            echo "Draft exists for ${TAG} — will update draft"
           else
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Published release ${TAG} exists — skip"
+            echo "state=published" >> "$GITHUB_OUTPUT"
+            echo "Published release ${TAG} exists — will resync body"
           fi
 
-      - name: Create or update draft release
-        if: steps.changelog.outputs.ready == 'true' && steps.published.outputs.skip != 'true'
+      - name: Create draft release
+        if: steps.changelog.outputs.ready == 'true' && steps.published.outputs.state == 'none'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
@@ -71,3 +75,11 @@ jobs:
           draft: true
           prerelease: ${{ contains(steps.ver.outputs.tag, '-') }}
           generate_release_notes: false
+
+      # gh release edit 不改变 release 的 draft/published 状态，仅替换正文
+      - name: Update draft or resync published release body
+        if: steps.changelog.outputs.ready == 'true' && steps.published.outputs.state != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ steps.ver.outputs.tag }}" --notes-file release-notes.md
