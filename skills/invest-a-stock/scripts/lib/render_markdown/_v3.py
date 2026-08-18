@@ -15,7 +15,10 @@ for __v2_n in dir(__v2_ref):
         globals()[__v2_n] = getattr(__v2_ref, __v2_n)
 del __v2_ref, __v2_n
 
-from ..shared_dates import yyyymmdd_to_iso as _to_iso_date  # noqa: E402
+from ..shared_dates import (  # noqa: E402
+    normalize_end_date as _norm_ed,
+    yyyymmdd_to_iso as _to_iso_date,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -281,6 +284,7 @@ def _executive_core_contradictions(
     ms = collection.get("market_structure") or {}
     nb = ms.get("northbound") or dims.get("northbound", {}).get("data") or {}
     net10 = nb.get("net_sum_10d") if isinstance(nb, dict) else None
+    nb_days = int(nb.get("days") or 10) if isinstance(nb, dict) else 10
     quote = dims.get("quote", {}).get("data") or {}
     chg = quote.get("change_pct") if isinstance(quote, dict) else None
     if net10 is not None and chg is not None:
@@ -288,12 +292,12 @@ def _executive_core_contradictions(
             net_f, chg_f = float(net10), float(chg)
             if net_f > 0 and chg_f < -2:
                 items.append(
-                    f"北向近10日净流入 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
+                    f"北向近{nb_days}日净流入 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
                     f"[来源: northbound+quote]"
                 )
             elif net_f < 0 and chg_f > 2:
                 items.append(
-                    f"北向近10日净流出 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
+                    f"北向近{nb_days}日净流出 {net_f:+.0f} 与股价 {chg_f:+.1f}% 背离"
                     f"[来源: northbound+quote]"
                 )
         except (TypeError, ValueError):
@@ -323,7 +327,7 @@ def _section_executive_summary(collection, symbol, dims, val_cache=None):
     industry = ""
     if isinstance(basic, dict):
         name = basic.get("name", "") or basic.get("股票简称", "")
-        industry = basic.get("industry", "")
+    industry = _extract_industry(basic)
 
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
 
@@ -1151,12 +1155,24 @@ def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
         "display_lines": [],
     }
 
+    # F0-8 修复：金融行业豁免——银行/非银的 90%+ 资产负债率与单季累计
+    # ROE 是经营模式常态，不是否决信号。行业键双兼容见 _extract_industry。
+    basic_dim = (dims or {}).get("basic_info") or {}
+    basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
+    industry = _extract_industry(basic_data)
+    financial_industry = industry in ("银行", "非银金融", "保险", "证券", "多元金融")
+
     fin_dim = (dims or {}).get("financials") or (collection or {}).get("financials") or {}
     fin_list = fin_dim.get("data") if isinstance(fin_dim, dict) else None
     if not isinstance(fin_list, list) or not fin_list:
         return result
 
     rows = sort_kline_asc(fin_list)
+    if financial_industry:
+        result["display_lines"].append(
+            "- ℹ️ 金融行业豁免：资产负债率 >90% 与近 3 期 ROE <5% 两条阈值"
+            "对银行/非银金融不适用（高杠杆与单季累计 ROE 为经营常态），已跳过。"
+        )
 
     def _append(level: str, line: str) -> None:
         result[level].append(line)
@@ -1195,39 +1211,41 @@ def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
                 "[来源: financials.n_cashflow_act]"
             )
 
-    # 3. 资产负债率 >90% 且未见改善
-    debt_ratios = []
-    for row in rows:
-        total_liab = _fin_field_num(row, "total_liab")
-        total_assets = _fin_field_num(row, "total_assets")
+    # 3. 资产负债率 >90% 且未见改善（金融行业豁免）
+    if not financial_industry:
+        debt_ratios = []
+        for row in rows:
+            total_liab = _fin_field_num(row, "total_liab")
+            total_assets = _fin_field_num(row, "total_assets")
+            if total_liab is not None and total_assets:
+                debt_ratios.append(total_liab / total_assets * 100)
+        latest = rows[-1]
+        total_liab = _fin_field_num(latest, "total_liab")
+        total_assets = _fin_field_num(latest, "total_assets")
         if total_liab is not None and total_assets:
-            debt_ratios.append(total_liab / total_assets * 100)
-    latest = rows[-1]
-    total_liab = _fin_field_num(latest, "total_liab")
-    total_assets = _fin_field_num(latest, "total_assets")
-    if total_liab is not None and total_assets:
-        ratio = total_liab / total_assets * 100
-        prev_ratio = debt_ratios[-2] if len(debt_ratios) >= 2 else None
-        if ratio > 90 and (prev_ratio is None or ratio >= prev_ratio):
-            detail = f"⚠️ 最新报告期资产负债率 {ratio:.1f}%（>90%）"
-            if prev_ratio is not None:
-                detail += f"，前一期 {prev_ratio:.1f}%"
-            detail += "[来源: financials.total_liab/total_assets]"
-            _append(
-                "hard_triggers",
-                detail,
-            )
+            ratio = total_liab / total_assets * 100
+            prev_ratio = debt_ratios[-2] if len(debt_ratios) >= 2 else None
+            if ratio > 90 and (prev_ratio is None or ratio >= prev_ratio):
+                detail = f"⚠️ 最新报告期资产负债率 {ratio:.1f}%（>90%）"
+                if prev_ratio is not None:
+                    detail += f"，前一期 {prev_ratio:.1f}%"
+                detail += "[来源: financials.total_liab/total_assets]"
+                _append(
+                    "hard_triggers",
+                    detail,
+                )
 
-    # 4. 近 3 期 ROE 连续 <5%
-    roe_series = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
-    if len(roe_series) >= 3:
-        last3 = roe_series[-3:]
-        if all(v < 5 for v in last3):
-            _append(
-                "soft_triggers",
-                f"⚠️ 近 3 期 ROE 连续低于 5%（{', '.join(f'{v:.2f}%' for v in last3)}）"
-                "[来源: financials.roe]"
-            )
+    # 4. 近 3 期 ROE 连续 <5%（金融行业豁免——单季累计 ROE 早期季度天然 <5%）
+    if not financial_industry:
+        roe_series = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
+        if len(roe_series) >= 3:
+            last3 = roe_series[-3:]
+            if all(v < 5 for v in last3):
+                _append(
+                    "soft_triggers",
+                    f"⚠️ 近 3 期 ROE 连续低于 5%（{', '.join(f'{v:.2f}%' for v in last3)}）"
+                    "[来源: financials.roe]"
+                )
 
     # 5. 商誉/净资产 >50%（字段可得时检查）
     bs_dim = (dims or {}).get("balancesheet") or (collection or {}).get("balancesheet") or {}
@@ -1348,12 +1366,18 @@ def _section_six_gates_scorecard(
         val_desc, val_grade = "PE/PB 历史位置不可得", "数据不足"
 
     # 风险：复用 risk_data 触发数量
+    # F0-6 修复：coverage = {"auto": N, "total": 17}，旧实现 sum() 得 16+17=33
+    # 与 §7 的「自动判定覆盖 16/17」口径矛盾；统一为 auto/total 两数字。
     risk_data = _v3_build_risk_report(collection, dims, market_structure, val_cache=val_cache)
     triggered = risk_data.get("triggered_count", 0) or 0
     coverage = risk_data.get("coverage") or {}
-    total_signals = sum(v for v in coverage.values() if isinstance(v, (int, float))) if isinstance(coverage, dict) else 0
-    if total_signals:
-        risk_desc = f"触发 {triggered}/{total_signals} 项定量风险信号 [来源: lib.risk_scanner.risk_report]"
+    if isinstance(coverage, dict) and coverage.get("total"):
+        total_signals = coverage["total"]
+        auto_covered = coverage.get("auto", total_signals)
+        risk_desc = (
+            f"触发 {triggered} 项定量风险信号（自动判定覆盖 {auto_covered}/{total_signals}）"
+            " [来源: lib.risk_scanner.risk_report]"
+        )
     else:
         risk_desc = f"触发 {triggered} 项定量风险信号 [来源: lib.risk_scanner.risk_report]"
     if triggered == 0:
@@ -1872,7 +1896,17 @@ def _financial_panorama_table(fin_list: list[dict]) -> list[str]:
     """模块4 业绩全景表（P1b：含 EPS 列）。"""
     if not fin_list:
         return []
-    rows = sort_kline_asc(fin_list)[-8:]
+    sorted_rows = sort_kline_asc(fin_list)
+    # F0-9 修复：同报告期去重（多源/重复行），保留先出现的行（EPS 非空优先）。
+    deduped: dict[str, dict] = {}
+    for r in sorted_rows:
+        ed = str(r.get("end_date") or "")
+        if ed not in deduped:
+            deduped[ed] = r
+        elif r.get("eps") is not None and r.get("eps") != deduped[ed].get("eps") \
+                and deduped[ed].get("eps") is None:
+            deduped[ed] = r
+    rows = list(deduped.values())[-8:]
     lines = [
         "### 业绩全景（近8期）",
         "",
@@ -1985,26 +2019,30 @@ def _canvas_cyclicality(fin_list: list[dict]) -> tuple[float | None, str, list[s
 
 # --- _canvas_growth_driver ---
 def _canvas_growth_driver(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
-    """增长驱动：数据不支持精细量/价拆分，用营收增速绝对水平粗略映射。"""
+    """增长驱动：数据不支持精细量/价拆分，用营收增速绝对水平粗略映射。
+
+    F0-8 修复：改用「最近报告期 vs 同报告期上年」同比，禁止跨期混比
+    （旧实现取近 5 期首尾差，Q1 累计 vs 全年会算出 -74% 的荒谬"下滑"）。
+    """
     if not fin_list:
         return None, "数据不足：缺少财务数据，无法判断增长驱动", []
-    rows = sort_kline_asc(fin_list)[-5:]
-    revs = [_fin_field_num(r, "revenue") for r in rows]
-    revs = [v for v in revs if v is not None]
-    if len(revs) < 2:
-        return None, "数据不足：营收至少需 2 期数据", []
-    if not revs[0]:
-        return None, "数据不足：起始期营收为 0，无法计算增速", []
-    growth = (revs[-1] - revs[0]) / abs(revs[0]) * 100
-    note_suffix = "（数据不支持量/价精细拆分，以营收增速绝对水平粗略映射）"
+    rows = sort_kline_asc(fin_list)
+    latest = rows[-1]
+    prev = _prior_year_row(rows, latest)
+    rev_cur = _fin_field_num(latest, "revenue")
+    rev_prev = _fin_field_num(prev, "revenue") if prev else None
+    if rev_cur is None or rev_prev is None or not rev_prev:
+        return None, "数据不足：缺少同报告期上年基期，营收同比不可比", []
+    growth = (rev_cur - rev_prev) / abs(rev_prev) * 100
+    note_suffix = "（数据不支持量/价精细拆分，以营收同比绝对水平粗略映射）"
     if growth >= 30:
-        score, note = 85.0, f"近 {len(revs)} 期营收累计增长 {growth:+.1f}%，增长动能强{note_suffix}"
+        score, note = 85.0, f"最近报告期营收同比 {growth:+.1f}%，增长动能强{note_suffix}"
     elif growth >= 10:
-        score, note = 55.0, f"近 {len(revs)} 期营收累计增长 {growth:+.1f}%，增长动能中等{note_suffix}"
+        score, note = 55.0, f"最近报告期营收同比 {growth:+.1f}%，增长动能中等{note_suffix}"
     elif growth >= 0:
-        score, note = 30.0, f"近 {len(revs)} 期营收累计增长 {growth:+.1f}%，增长动能偏弱{note_suffix}"
+        score, note = 30.0, f"最近报告期营收同比 {growth:+.1f}%，增长动能偏弱{note_suffix}"
     else:
-        score, note = 10.0, f"近 {len(revs)} 期营收累计下滑 {growth:+.1f}%{note_suffix}"
+        score, note = 10.0, f"最近报告期营收同比 {growth:+.1f}%，增长动能弱{note_suffix}"
     return score, note, ["revenue"]
 
 
@@ -2256,6 +2294,57 @@ def _section_management_assessment(
 
 
 # --- _section_fundamentals_layered ---
+def _prior_year_row(fin_list: list[dict], latest: dict) -> dict | None:
+    """找同报告期上年行（同比基期）。
+
+    F0-2 修复：财务序列混合季度累计行与年报行，直接取前一行会把
+    「Q1 累计 vs 上年全年」或「半年累计环比」误标为同比。
+    同比基期必须是同月日的上年报告期（如 20260630 → 20250630）；
+    找不到 → None（同比不可比）。
+    """
+    ed = _norm_ed(str(latest.get("end_date") or ""))
+    if len(ed) != 8:
+        return None
+    target = f"{int(ed[:4]) - 1}{ed[4:]}"
+    for r in fin_list:
+        if _norm_ed(str(r.get("end_date") or "")) == target:
+            return r
+    return None
+
+
+def _roe_trend_anchors(
+    fin_list: list[dict], latest_fin: dict,
+) -> tuple[float | None, float | None, int]:
+    """护城河 ROE 趋势锚点：(起点 ROE, 末年报 ROE, 年报行数)。
+
+    年报 ≥2 期 → 首尾年报 ROE；否则与最新行同 MMDD 的最老行做起点
+    （避免「年报 ROE vs 季累计 ROE」跨期混比出伪"侵蚀"）。
+    end_date 不可解析 → 无锚点（review 二轮：normalize 返回空串时
+    ""[4:]=="" 会把所有不可解析行归入同组，静默混比）。
+    """
+    annual_rows = [
+        r for r in fin_list
+        if _norm_ed(str(r.get("end_date") or "")).endswith("1231")
+    ]
+    n_annual = len(annual_rows)
+    if n_annual >= 2:
+        return (
+            _safe_num(annual_rows[0].get("roe")),
+            _safe_num(annual_rows[-1].get("roe")),
+            n_annual,
+        )
+    latest_mmdd = _norm_ed(str(latest_fin.get("end_date") or ""))[4:]
+    if not latest_mmdd:
+        return None, None, n_annual
+    same_period = [
+        r for r in fin_list
+        if _norm_ed(str(r.get("end_date") or ""))[4:] == latest_mmdd
+    ]
+    if len(same_period) >= 2:
+        return _safe_num(same_period[0].get("roe")), None, n_annual
+    return None, None, n_annual
+
+
 def _section_fundamentals_layered(
     dims: dict[str, dict], collection: dict, symbol: str, *, val_cache: dict | None = None,
 ) -> str:
@@ -2310,7 +2399,8 @@ def _section_fundamentals_layered(
         fin_list = sort_kline_asc(fin)
 
     latest_fin = fin_list[-1] if fin_list else {}
-    prev_fin = fin_list[-2] if len(fin_list) >= 2 else {}
+    # F0-2: 同比基期取同报告期上年行；无基期 → 同比不可比（禁止跨期混比）。
+    prev_fin = _prior_year_row(fin_list, latest_fin) or {}
     first_fin = fin_list[0] if fin_list else {}
 
     # =================================================================
@@ -2348,12 +2438,28 @@ def _section_fundamentals_layered(
     lines.append("\n### 核心判断摘要\n")
 
     # 判断1: 盈利结构
+    # F0-8 修复：最新报告期非年报期时（如 Q1 累计 ROE 2.96%），判断改用工
+    # 最近年报 ROE（银行等季节性行业单季累计 ROE 不可与 TTM 门槛直接比较）；
+    # 展示仍用报告期原始值并标注口径。
+    roe_judge = roe_val
+    roe_label = "ROE(TTM)"
+    latest_ed = _norm_ed(str(latest_fin.get("end_date") or ""))
+    if latest_ed and not latest_ed.endswith("1231"):
+        roe_label = f"ROE（{latest_ed} 报告期累计）"
+        annual_rows = [r for r in fin_list if _norm_ed(str(r.get("end_date") or "")).endswith("1231")]
+        if annual_rows:
+            ann_roe = _safe_num(annual_rows[-1].get("roe"))
+            if ann_roe is not None:
+                roe_judge = ann_roe
     lines.append("#### 盈利结构")
-    lines.append(f"[结论] {_conclude_profit_structure(roe_val, gm_val, debt_ratio)}")
+    lines.append(f"[结论] {_conclude_profit_structure(roe_judge, gm_val, debt_ratio)}")
     lines.append("")
     lines.append("[事实]")
     if roe_val is not None:
-        lines.append(f"- ROE(TTM) = {_fmt_num(roe_val)}%")
+        label_line = f"- {roe_label} = {_fmt_num(roe_val)}%"
+        if roe_judge is not None and roe_judge != roe_val:
+            label_line += f"（判断用最近年报 ROE {roe_judge:.2f}%）"
+        lines.append(label_line)
     if gm_val is not None:
         lines.append(f"- 毛利率 = {_fmt_num(gm_val)}%")
     if debt_ratio is not None:
@@ -2365,14 +2471,14 @@ def _section_fundamentals_layered(
     lines.append("[分析]")
     analysis_parts = []
     if roe_val is not None and gm_val is not None:
-        if roe_val >= 15 and gm_val >= 40:
+        if roe_judge >= 15 and gm_val >= 40:
             analysis_parts.append("高 ROE × 高毛利率组合，盈利模式具备结构优势")
-        elif roe_val >= 15 and gm_val < 20:
+        elif roe_judge >= 15 and gm_val < 20:
             analysis_parts.append("ROE 虽然较高但毛利率偏低，盈利依赖高周转或高杠杆驱动，需警惕可持续性")
-        elif roe_val < 10 and gm_val >= 40:
+        elif roe_judge < 10 and gm_val >= 40:
             analysis_parts.append("高毛利率但低 ROE，可能费用率偏高或资产周转效率不足")
         else:
-            analysis_parts.append(f"ROE={roe_val:.1f}%、毛利率={gm_val:.1f}%，盈利模式处于行业常见区间，需持续跟踪变化趋势")
+            analysis_parts.append(f"ROE={roe_judge:.1f}%（判断口径）、毛利率={gm_val:.1f}%，盈利模式处于行业常见区间，需持续跟踪变化趋势")
     if debt_ratio is not None and debt_ratio > 70:
         analysis_parts.append("资产负债率偏高，需关注偿债风险与财务费用对利润的侵蚀")
     if profit_dedt is not None and np_v is not None and np_v > 0:
@@ -2669,10 +2775,17 @@ def _section_fundamentals_layered(
     # B-① 护城河来源
     lines.append("#### B-① 护城河来源")
     roe_now = _safe_num(latest_fin.get("roe"))
-    roe_first = _safe_num(first_fin.get("roe"))
+    # F0-8 修复：ROE 趋势用年报行（1231）对比，避免季度累计 ROE 混比
+    # （招行 12.03% 全年 vs 2.96% Q1 被误判为"侵蚀"）。锚点计算收敛到
+    # _roe_trend_anchors（review 二轮补：可解析守卫 + 可单测）。
+    roe_first, roe_ann_last, n_annual_rows = _roe_trend_anchors(fin_list, latest_fin)
     if roe_now is not None:
-        lines.append(f"当前 ROE：**{roe_now:.2f}%**。")
-        if roe_first is not None and len(fin_list) >= 4:
+        lines.append(f"当前 ROE：**{roe_now:.2f}%**（报告期累计口径，最新年报 {roe_ann_last:.2f}%）" if roe_ann_last is not None else f"当前 ROE：**{roe_now:.2f}%**。")
+        if roe_first is not None and roe_ann_last is not None:
+            trend = "强化" if roe_ann_last > roe_first + 2 else (
+                "侵蚀" if roe_ann_last < roe_first - 2 else "稳定")
+            lines.append(f"近 {n_annual_rows} 个年报 ROE 趋势：{roe_first:.2f}% → {roe_ann_last:.2f}%（{trend}）。")
+        elif roe_first is not None and len(fin_list) >= 4:
             trend = "强化" if roe_now > roe_first + 2 else (
                 "侵蚀" if roe_now < roe_first - 2 else "稳定")
             lines.append(f"近 {len(fin_list)} 期 ROE 趋势：{roe_first:.2f}% → {roe_now:.2f}%（{trend}）。")
@@ -2685,13 +2798,15 @@ def _section_fundamentals_layered(
     else:
         lines.append("数据不足：[缺少 ROE 数据，无法评估护城河]")
     lines.append("")
+    _hint_first = roe_first if roe_ann_last is not None else None
+    _hint_now = roe_ann_last if roe_ann_last is not None else roe_now
     lines.append(_law10_hint(
-        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度可能快于预期（待补案例）。",
+        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度可能快于预期。",
         (
-            f"本次 ROE {roe_now:.2f}%"
-            + (f"（{roe_first:.2f}% → {roe_now:.2f}%）" if roe_first is not None else "")
+            f"本次 ROE {_hint_now:.2f}%"
+            + (f"（{_hint_first:.2f}% → {_hint_now:.2f}%，年报口径）" if _hint_first is not None else "")
             + "，若直接等同于强护城河，可能忽略高杠杆或周期高点的一次性贡献（见 C-② 杜邦）。"
-            if roe_now is not None else
+            if _hint_now is not None else
             "本次 ROE 不可得，不宜用营收增速或 PE 分位间接替代护城河判断。"
         ),
         [
@@ -2720,14 +2835,19 @@ def _section_fundamentals_layered(
     lines.append("#### B-② 增长驱动力")
     if rev_cur is not None and rev_prev is not None and rev_prev > 0:
         lines.append(f"最近一期营收同比：**{rev_yoy:+.2f}%**。")
+    elif rev_cur is not None:
+        # F0-2: 无同报告期上年基期 → 同比不可比，禁止跨期混比
+        lines.append("最近一期营收同比：**不可比**（无同报告期上年基期，跨期混比已禁用）。")
     if np_cur is not None and np_prev is not None and np_prev > 0:
         np_yoy = (np_cur - np_prev) / np_prev * 100
         lines.append(f"最近一期净利润同比：**{np_yoy:+.2f}%**。")
+    elif np_cur is not None:
+        lines.append("最近一期净利润同比：**不可比**（无同报告期上年基期，跨期混比已禁用）。")
     if not (rev_cur and rev_prev) and not (np_cur and np_prev):
         lines.append("数据不足：[缺少两期以上可比营收/净利润数据]")
     elif cagr is not None and cagr_years_span is not None:
         lines.append(
-            f"近 {cagr_years_span:.1f} 年营收 CAGR：**{cagr:+.2f}%**（多年增长趋势锚点）。"
+            f"近 {cagr_years_span:.0f} 年同报告期营收 CAGR：**{cagr:+.2f}%**（多年增长趋势锚点）。"
         )
         if rev_yoy is not None:
             if rev_yoy > cagr + 3:
@@ -2833,9 +2953,16 @@ def _section_fundamentals_layered(
     # C-① 近 3 年营收 CAGR
     lines.append("#### C-① 近 3 年营收 CAGR")
     if len(fin_rev_list) >= 2 and cagr is not None and cagr_years_span is not None:
-        d0 = _fmt_end_date(fin_rev_list[0].get("end_date")) or "首期"
-        d1 = _fmt_end_date(fin_rev_list[-1].get("end_date")) or "末期"
-        lines.append(f"近 {cagr_years_span:.1f} 年营收 CAGR：**{cagr:+.2f}%**（{d0} → {d1}）。")
+        # F0-8 配套：日期范围标注 CAGR 实际采用的同报告期行组，
+        # 而非全序列首尾（避免"2022-09-30 → 2026-06-30"误导）。
+        cagr_rows = cagr_period_rows(fin_list, "revenue")
+        if cagr_rows:
+            d0 = _fmt_end_date(cagr_rows[0].get("end_date")) or "首期"
+            d1 = _fmt_end_date(cagr_rows[-1].get("end_date")) or "末期"
+        else:
+            d0 = _fmt_end_date(fin_rev_list[0].get("end_date")) or "首期"
+            d1 = _fmt_end_date(fin_rev_list[-1].get("end_date")) or "末期"
+        lines.append(f"近 {cagr_years_span:.0f} 年营收 CAGR：**{cagr:+.2f}%**（{d0} → {d1}，同报告期口径）。")
         if rev_yoy is not None:
             recent_trend = "加速" if rev_yoy > cagr + 3 else (
                 "减速" if rev_yoy < cagr - 3 else "持平")
@@ -3157,10 +3284,17 @@ def _section_fundamentals_layered(
         ig = implied_growth(current_pe, risk_free, erp=0.06)
         if ig.get("g_implied") is not None:
             lines.append(f"- 当前 PE(TTM)：**{ig['pe']}x**")
+            # F0-5 配套：y10_source 已含 FRED.DGS10 前缀时不再拼接（旧逻辑
+            # 输出 "FRED.DGS10 +FRED.DGS10" 重复标签）。
+            y10_label = (
+                y10_source
+                if not y10_source or (y10_source or "").startswith("FRED.DGS10")
+                else f"FRED.DGS10 +{y10_source}"
+            )
             rf_label = (
                 f"{ig['risk_free_rate'] * 100:.2f}% [推测，待验证：{y10_source}]"
                 if risk_free_is_default else
-                f"{ig['risk_free_rate'] * 100:.2f}%（{'FRED.DGS10 +' + y10_source if y10_source else y10_source}）"
+                f"{ig['risk_free_rate'] * 100:.2f}%（{y10_label}）"
             )
             lines.append(f"- 10Y 国债收益率：**{rf_label}**")
             lines.append(f"- ERP 假设：**6%**（保守基准）")
@@ -3453,10 +3587,24 @@ def _section_technical_brief(
         lines.append("- 支撑阻力：—")
         return "\n".join(lines)
     trend = tech["trend"]["alignment"].get("trend_label", "—")
-    sentences = tech["trend"].get("summary_sentences", [])
-    vol_s = sentences[1] if len(sentences) > 1 else "量价关系见完整 K 线"
-    sup = tech.get("support_resistance", {})
-    sr = sup.get("summary", "—") if isinstance(sup, dict) else "—"
+    # 量行：引擎真实成交量状态（technical._volume_ratio 产出「量比 x.xx（…）」；
+    # 原绑 summary_sentences[1] 实为 MA60 句，错绑修复）
+    vol_s = (tech.get("volume", {}) or {}).get("status") or "—"
+    # 支撑阻力行：structure.extremes 的 20/60/120 日最高/最低收盘价+日期
+    # （technical._n_day_extremes 产出；原 support_resistance 键全仓无产出方，
+    # 恒 "—" 死行）。数值全部直引引擎字段。
+    ext = (tech.get("structure", {}) or {}).get("extremes", {})
+    parts = []
+    for n in (20, 60, 120):
+        e = ext.get(n) or {}
+        if e.get("available") and e.get("max") is not None and e.get("min") is not None:
+            parts.append(
+                f"{n}日高/低: {e['max']:.2f}@{e['max_date']} / {e['min']:.2f}@{e['min_date']}")
+        elif e.get("available"):
+            parts.append(f"{n}日: 极值不可用")
+        else:
+            parts.append(f"{n}日: {e.get('reason', '—')}")
+    sr = "；".join(parts) or "—"
     lines.append(f"- **趋势:** {trend}")
     lines.append(f"- **量:** {vol_s}")
     lines.append(f"- **支撑阻力:** {sr}")

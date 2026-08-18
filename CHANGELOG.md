@@ -1,5 +1,189 @@
 # Changelog — invest skills
 
+## v0.2.6 (2026-08-14)
+
+8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。
+
+### 新增（2026-08-17）：WorkBuddy 零终端分发 — 真机验证通过 + 发布集成
+
+- **WB bundle 发布包**：`scripts/build_wb_package.sh` 产出 `dist/invest-skills-wb-vX.Y.Z.zip`（944K/210 文件）——完整仓库布局 6 技能 + 入口 SKILL.md（`agent_created: true`、6 技能全触发词路由表、install_root 环境约定）+ `scripts/bootstrap.sh` 环境自举（检测/代装 uv → `uv sync --frozen` → 冒烟测试，幂等）+ `README-安装.md` 普通用户指南；剔除 invest-a-limit-up/tests/缓存
+- **真机验证（T0 全链路通过）**：WorkBuddy 桌面版实测——GUI `专家·技能·连接器 > 技能 > 添加技能 > 上传技能` 导入 zip → 技能唤起（`/invest-a-etf 588000`）→ uv 惰性建 .venv（Python 3.12.13，与系统 3.14.6 / WB 自带 Python 三方隔离）→ 引擎全量采集 → 报告落盘会话目录；bootstrap/install_root 未运行也不阻塞（uv 惰性同步兜底）
+- **发布集成**：release.yml 新增 WB zip 构建步骤 + **tag 一致性安全闸**（pyproject 版本 ≠ tag 即 FAIL）；GitHub Release 改为双资产（源码 tarball + WB zip）；release 归档补漏带 invest-a-pattern-scan（v0.2.6 新增技能此前未入源码包）；AGENTS.md 发布清单 +1
+- **真机报告三层复检**：588000 报告 48 项数字 Python 对照 47 项一致（AUM 一项为东财 spot「最新份额」盘后多次更新所致，报告时点值无法复现亦无法证伪，非报告错误）；合规层 4× [分析] 前缺 [事实] 块（ETF 模板层问题）+ 2 小瑕疵；逻辑层全过。已登记待办：① ETF 模板补 [事实] 块要求 ② 引擎 AUM 改用流通市值字段 ③ ETF 路径 PE 分位补中位数
+- README 新增「支持平台」节 + WorkBuddy 零终端安装主路径（Release zip → GUI 上传，不再要求终端操作），WorkBuddy 徽章
+
+### 修复（2026-08-17）：工作流评估分级修复 — P0 数字口径（F0-1~F0-9）+ P1 ETF 数据层（F1-1~F1-7）+ P2 流程工程（F2-1~F2-7）
+
+**P0 数字口径修复**（`test_v026_p0_fixes.py` 19→22 用例全绿）：
+
+- **F0-1 DCF 净债务口径**：total_liab 含经营负债不再参与每股换算；有息负债字段未采集时抑制每股输出并显式说明（render_dcf + valuation method 标记）
+- **F0-2 同比基期同报告期匹配**：`_prior_year_row` 替代相邻行混比（修复 Q1 vs 全年、累计环比误标同比）
+- **F0-4 宏观取最新月行**：akshare PMI/CPI/PPI 序列最新在前，iloc[-1] 取到 2008-01 旧行（PMI 53.0→49.2、CPI 7.08→0.5），改为按月份列取最大期
+- **F0-5 β 默认值明示参与计算影响** + FRED.DGS10 重复标签拼接修复
+- **F0-6 F-4 风险计数**：coverage auto/total 求和成 33 的伪口径统一为 16/17
+- **F0-7 rigor/verify_valuation 按 end_date 排序取最新行**（原 data[-1] 取最旧行致 PB 偏差 80.7% 误报）
+- **F0-8 银行财务期口径**：盈利结构/护城河趋势/多空链用年报 ROE 判断；同季度 CAGR；画布增长驱动同比化；F-3 负债率>90%/ROE<5% 金融业豁免；DCF 金融业豁免消息
+- **F0-9 业绩全景同报告期去重**（600036 20250630 重复行）
+- **F0-3 QC 新 error 规则**：占位符未填（`[待 Claude` 等）与异常泄漏（AttributeError 等）直出报告即 FAIL
+
+回归：重跑 300750/600036 报告验证（同比 +54.80%/+3.81%、DCF 每股抑制、金融业豁免、宏观 49.2/+0.5%）+ report_qc PASS + 全量 pytest 绿。
+
+**P1 ETF 数据层修复**（`test_v026_p1_fixes.py` 9 用例全绿）：
+
+- **F1-2 HOLDINGS_CLUSTER_MAP 补 512660/588000 前十大**（军工 10 只 + 科创50 10 只）→ 聚类未归类从 100%/62% 降至 0%
+- **F1-1 spot 失败回退腾讯行情**（价/涨跌/量额），折溢价标注不可得——东财不可达时不再整列缺失
+- **F1-4 futures-basis 识别科创50 期货品种映射**，note 区分「无映射」与「映射存在但 futures_daily 数据层未覆盖」（与 hedge-map 矛盾消除）
+- **F1-6 report 路径幂等回填 CSINDEX_MAP 全部指数**（原仅回填本标的）——一次报告运行自愈全部宽基指数停更（上证50/中证500/中证1000 08-06 起停更）
+- **F1-5 PCR opt_daily 批量前单点预检**：端点挂起时一次 8s 探针即整体降级（原 56 天 × 8s 超时风暴）
+- **F1-3 events/512660.json 新建**（6 条事件，4 条与 ±5% 大波动日对齐，二手置信度）
+- **F1-7 SKILL.md 命名规则**：同 symbol 单目录，512660 → 512660-军工ETF
+
+回归：512660/588000 报告 report_qc PASS；旧 test_etf_holdings 未归类用例改合成代码（真实持仓 3 只已被新映射覆盖）。
+
+**P2 流程/工程修复**：
+
+- **F2-1 classify 金融行业感知**：银行/非银成长分支减权（×0.5）+ 近年 3 年年化增速量级约束 + 股息率 ≥4% 加权 → 600036 带证据判「估值股息回归」（原误判成长兑现）、无证据判「暂无法判定」；300750 不受影响
+- **F2-3 evidence --from-store**：复用 collect 快照（兼容性校验同 --resume），实测 14.5s → 0.125s；SKILL.md 标准链更新为 collect + evidence --from-store + report --resume
+- **F2-4 报告文件名时间戳显式北京时**（lib.dates.shanghai_now，不再依赖机器 TZ）
+- **F2-6 report-template.md 预案模板「买入/卖出/持有」→「交易动作」**（与自家 law6-*-standalone lint 对齐，模板不再触发拦截）
+- **F2-7 CLAUDE.md 宏观标签生成责任**：引擎自动生成，Claude 核验最新期（akshare 序列最新在前，F0-4 已修）
+
+回归：evidence --from-store 端到端验证 + 全量 pytest 绿。
+
+### 修复（2026-08-17 二轮）：/code-review max 15 项确认级发现修复（2 项崩溃级 live repro + 13 项数字/静默回归）
+
+上一轮 P0/P1/P2 修复自身的缺陷（15 项发现 → 12 条修复条目，R-2/R-3 与 R-4/R-5 各合并 2-3 项；回归测试 `test_v026_review_fixes.py` 23 例 + `test_v026_p1_fixes.py` 腾讯单位用例 1 例，全量 pytest 绿）：
+
+- **R-1 F2-4 import 崩溃（崩溃级）**：`invest.py report --outdir` 写 `from lib.dates import shanghai_now`——scripts/lib 无 dates.py（只有 shared_dates 引导 re-export），渲染完整个报告后 ModuleNotFoundError，.md 不落盘。改为 `lib.shared_dates`
+- **R-2/R-3 F2-1 CAGR 守卫（崩溃级）**：窗口终点亏损时 `(_cagr_window[-1]/_cagr_window[0]) ** (1/_years)` 负数底数小数次幂 → 复数 → `min()` TypeError 崩掉整个渲染链（亏损期标的跑 report/classify 即炸）；起点亏损时守卫跳过致「亏损恢复」标的全权重、稳健正增长标的反而被衰减（不对称）。任一端亏损 → 用最近一年增速近似量级（恢复≠成长兑现）；反例字符串删除泄漏的实现注记「（应为近 5 年口径）」
+- **R-4/R-5 F0-8 CAGR 日期格式与复数**：`_compute_metric_cagr`/`cagr_period_rows` 只认 8 位数字日期——akshare `stock_financial_abstract_ths` 报告期为 "2025-12-31" dash 格式时全部行被滤、CAGR 静默消失；统一 normalize 后分组（years 计算同样修复 int("1996-12-31"[:4]) 崩溃面）；终点亏损守卫 `last_v <= 0` → 返回 None（修复前渲染 "净利润 CAGR：-70.76+50.65j%" 垃圾数字）
+- **R-6 F0-2 同比基期 dash 匹配**：`_prior_year_row` 只认 8 位数字 → normalize 后匹配（dash/混合格式均可找同比基期）
+- **R-7 F0-8/F2-1 行业提取双键**：新增 `_extract_industry`（tushare「industry」+ akshare「行业」）收敛 3 处手写循环——无 Tushare Token 环境下金融豁免/成长减权此前被静默跳过
+- **R-8 F0-7 PB 取行对称**：F0-7 只修了 PE 按 trade_date 排序，PB 仍 `val_data[-1]` 取最旧行（最新在前行序下 PB 恒与最新净资产错配、伪偏差误报）；排序 key 空日期排最后（原始字符串排序会让无日期行抢占「最新」）
+- **R-9 F0-1 risk_reward net_debt 抑制**：net_debt None 时不再用 0 替代——每股目标价被整个净债务抬高（300750 实测 3528.7 亿 / 24.6 亿股 = 143.44 元/股虚高 [来源: Python calc: 3528.7/24.6]），与 render_dcf「每股换算已抑制」同口径显式失败
+- **R-10 F0-4 latest_month_row 显式告警**：首行（最新，akshare 约定最新在前）「月份」列解析失败时静默取上一期——新增 logger 告警（F2-7「核验最新期」需要知道取到的可能非当期）
+- **R-11 F1-1 腾讯金额单位**：qt.gtimg.cn 字段 37 为成交额（万元）vs 东财 spot「成交额」元——回退路径 ×1e4 统一（实测 323831 vs 3,238,306,187 差 10⁴ 倍；新测试用真实 payload 格式 mock 锁定）
+- **R-12 F0-8 护城河 ROE 同口径**：年报不足 2 期时（新上市 4 季度 + 1 年报）elif 用 `first_fin`（可能恰为年报行）对比最新季度累计 ROE → 跨期「侵蚀」误报；起点改为与最新行同 MMDD 的最老行
+- **R-13 F0-4 macro dict 残留 iloc**：行已 `to_dict("records")` 转 dict 后 `row.iloc[-1]` AttributeError（macro.py PMI 与 _orchestrate 两处）→ 取末列值
+- **R-14 F1-5 PCR 探针容错**：单次 8s 探针超时即丢弃整个 PCR 维度（网络抖动不应抹掉维度）；失败重试一次仍失败才整体降级、探针结果直接复用（不再重复取 fetch_dates[-1]）、日志不再误标 "timed out"
+
+### 修复（2026-08-17 三轮）：发布前 /code-review max 复核 — 二轮修复自身的 6 处缺陷（评分 100×1 + 75×5）
+
+5 路并行审查（CLAUDE.md 合规/浅层 bug/git 历史/既往缺陷模式/注释一致性）+ 逐项置信度评分，二轮修复中发现 6 处自身缺陷（含 1 处三路独立 live repro 的取行回归）：
+
+- **T-1 `_val_sort_key` 反转（最重要，回归级）**：二轮把无日期行排到末尾、`[-1]` 恒选中它——三路审查各自 live repro（pb fail 9.9 vs 3.5 dev 95.52%，旧纯字符串排序反在该场景正确）。改回正确语义：**有日期行中取日期最大者，全部无日期才回退原始行序**；日期比较统一 normalize（dash 与 8 位混合不误排）；PE/PB 共用单次排序（消除 D10 双排序）；弱断言测试（`!= "warn"` 放过 "fail"）改强断言 `== "pass"` + 新增 dash 混排用例
+- **T-2 F2-1 衰减只修了一半**：终点亏损窗口（[100,120,140,-20]）两分支都不进 → growth_scale=1.0 满权重、driver 实判「成长兑现」（review live repro 0.67）；高增速恢复年（-50→200→210→600，单年 185.7%）按 /8 cap 到 1.0 满权重。修复：elif 分母条件放宽（终点亏损 → 负增速落入下限 0.15）+ 含亏损年窗口再封顶 0.5（恢复≠成长兑现）；新增 2 例断言权重的回归测试
+- **T-3 R-12 same_period 空串分组**：end_date 不可解析时 normalize → `""`，`""[4:]==""` 把所有不可解析行归入同组静默混比。锚点计算收敛到 `_roe_trend_anchors`（年报优先/同 MMDD 兜底/不可解析守卫）+ 4 例单测
+- **T-4 R-13 收敛到可测 helper**：macro/_orchestrate 的 dict 行末列兜底收敛到 `nums.row_value_or_last`（可单测）+ 3 例；PCR 探针重试/复用补 2 例（首探超时重试成功不降级 + 复用后 opt_daily 调用数 == fetch_dates 数；双败整体降级）
+- **T-5 risk_reward 残留 else-0 + docstring**：第 231 行 `net_debt if ... else 0` 死代码（与新注释自相矛盾的 D1 模式残留）→ 改为裸 `net_debt`；docstring 补 net_debt 缺失 error 返回路径
+- **T-6 数字/注释合规**：CHANGELOG「33 例」实为 23 例（P0 目视计数，--collect-only 复核）；「15 项 vs R-1~R-14」枚举口径澄清；注释与 CHANGELOG 心算除法改为 `[来源: Python calc: 3528.7/24.6]`（143.44）；PCR 探针注释与重试/复用行为对齐
+
+回归：`test_v026_review_fixes.py` 23→33 例、`test_collector_fixes.py` +2 例 PCR 探针，全量 pytest 绿。
+
+### 修复（2026-08-16 二轮）：/code-review max 13 项修复（force 重建安全 + F 系列幻影事件剔除）
+
+- **数据层 force 重建安全（findings #1/#2/#5/#6）**：`ensure_futures_daily` 重构——force 先逐合约取数暂存内存、全部结束后才 clear+写回（tushare 主源不可用时**清空前中止**，旧 9258 行 settle 口径数据保留；旧实现先清库后验源，全挂时被 sina close 口径整表覆盖）；force + max_contracts 不足 → 清空前报 error 中止（旧实现静默截断：尾部品种表已清空却 0 合约入库、failed={} 退出码 0，backfill 退出码同步修正）；逐合约失败不推进窗口起点（同品种下一合约窗口覆盖失败合约缺口）；增量模式已入库合约仅回填尾部窗口（修复前端合约到期日前新增交易日永久缺失——旧实现整体跳过 existing 合约）
+- **F1/F2 分位 30 日暖机（finding #3）**：`expanding_percentile_rank` 增加 `min_history` 参数（默认 1 不改变既有行为）——首行 inclusive 分位恒 100 的幻影首日升水事件剔除（F2 升水事件数 IF 198→194、IH 149→147、IC 236→230、IM 65→60；深贴水 22→21、55→52、17→17、62→61）；F1 暖机期不入四分位桶
+- **F1/F2/F3 守卫与口径（findings #4/#7/#9/#10）**：F2 pctile None 守卫（NaN 基差行不再 TypeError 中止整个 F2）；F1 NaN 基差日无四分位（幻影 'nan' 桶消除）；F3 前 19 行无满 20 日窗口 → None（对齐旧 rolling(20, min_periods=20)，短窗口不再冒充 20 日变化）；F2 n_events 只计入进入前向统计的事件（+5 口径，日历守卫/尾部跳过不计）
+- **F 系列重跑与数字同步**：F1/F2/F3 JSON 全部重生成；F 系列报告 + CHANGELOG 数字同步（IF 深贴/升水 +5 胜率 57.1% n=21 vs 56.2% n=194——两桶趋同，"深贴水后偏强"方向性结论仍不成立；F1 三只 ETF Q1vsQ4 p=0.4135/0.233/0.582 均不显著，159845 名义显著消失）
+- **测试（findings #8/#13）**：futures 窗口唯一性断言去 tautology（set 判定，验证可检出重复日）；窗口测试与供应商行序解耦（sorted 比较）；新增回归测试 13 例（ensure 重构 6 + F1/F2/F3 修复 5 + 暖机参数 2）；全量 pytest 2139 passed / 12 skipped
+- **杂项（findings #11/#12）**：futures_basis docstring 移除已删除的 oi_20d_chg 返回键；touch_within 删除死参数 n、返回键 "n"→"touched"（消除同名遮蔽；scenario JSON 重生成，E 系列数字不变）
+
+### 修复（2026-08-16）：/code-review max 10 项修复（数据层重建 + 全量重跑）
+
+- **数据层（finding #1）**：futures_daily 当月窗口按月划分 → 按前合约到期日划分，修复每月约 40% 交易日缺失；`--force` 全量重建（458 合约 9258 行，完整性验证通过：月中位数 13→21 行、>3 日缺口全部为法定长假）
+- **口径（finding #10/#2）**：compound_oi_change 共享 helper（掩码/有效数阈值单份实现，三处调用方统一）；OI 20 日变化从 journal/ETF/pulse 用户标签移除（与 F3 裁定一致；数据层字段保留）
+- **F 系列完整序列重跑**（+ expanding 分位 look-ahead 修复 + F2 日期守卫 finding #8 + F3 指数日历对齐 finding #7）：F2「深贴水后偏强」方向性结论不再成立（IF 深贴 +5 胜率 54.5% n=22 vs 升水 56.6% n=198；08-15 的 69.2%/47.8% 作废；2026-08-16 二次修复后：57.1% n=21 vs 56.2% n=194——两桶胜率趋同，见下）；F3 up/down 事件 = 2/2/5/0 与 6/12/6/1（IF/IH/IC/IM），降级裁定保留；F1 Q1vsQ4 仅描述性（p=0.0375 名义显著不裁决；二次修复后三只 p=0.4135/0.233/0.582 均不显著）
+- **E 系列（finding #3/#4/#5）**：事件日统一状态段首日（幻影首行抑制、close_near/boll_position 去重）；E-004 60 日窗口含第 60 日 + 截断窗口不入分母；重跑：E-002~E-004 n=20/11/11、E-004 触达 9/11=81.8%、E-006 795→300（重裁仍显著 t=3.57）、E-007 18；scenario-plans 表来源标注合规化
+- **H6（finding #6）**：缺口扫描 g≥1 钳制消除 highs[-1] 未来数据泄漏；重跑输出与修复前逐字节一致（g=0 路径仅 i=60 可达且样本未触发），裁决不变，钳制作为防泄漏守卫保留（回归测试锁定）
+- **测试（finding #9）**：ADX 独立手算 golden oracle（镜像测试降级为约定锁定）；本轮新增回归测试 28 例；全量 pytest 2126 passed / 12 skipped
+
+### 第二阶段：code-review 修复 + P1/P2（同日续）
+
+**code-review 修复（PR #19 审查）**：CLAUDE.md 违规模式计数统一（11 条）；H5 JSON 入库 docs/data/ 恢复可复现引用；journal/预案库数字按 Python 复算修正；lint 规则 3 处正则缺陷（不必然回补豁免/整数关口补「将」/斐波否定式豁免）；北向标签 days 感知（D4）；backtest_calendar 末段年份剔除 + 双源 fail loud；hsgt 缓存加锁（D8）；ps1 删除保护；docstring 批修。
+
+**M1 全市场分位数据层**：market_daily 表（date×ts_code，2021-01 起 1361 交易日 × 5544 只回填）+ backfill CLI（断点续跑）+ market_pctile 横截面分位 + journal query_data distances 透传/分位注入（compute 保持纯函数）。
+
+**M2 SPA/FDR**：multiple_testing.py（White 2000 Reality Check 块 bootstrap + H0 重定心 + BH-FDR + bootstrap CI）；修复 CBS 单起点退化与 RC 未重定心两个统计缺陷。
+
+**M3 H4 金价 beta + H3 材料设备 RS**：backtest.py 扩展（OLS/Newey-West/regime/RS/binomial，stdlib-only）；H4：9 只黄金股 5 年——日频 β≈0、月度 β 全负（GC -1.23 / AU0 -1.58），样本期与 Tufano/Baur 正向先验相反；H3：RS 动量不成立，L60 显著反转（-3.07）——与 A 股动量弱反转强一致。
+
+**M4 H2 大跌低吸 + H1 见底日**：H2：32177 起全市场大跌事件分层（封死/开板/未触及）× 成交假设双口径——事件级 tradable +1 +0.23%（t=3.11）但 **calendar-time 校正后全层全窗口显著为负**（tradable +5 -2.78% t=-8.58），低吸假设被拒绝；H1：三见底日分组「7/20 最强」未获支持（8/3 组 +5 最强 p<0.001，强时序混杂，描述性）。
+
+**M5 形态扫描器 MVP**：新 skill invest-a-pattern-scan + skills/lib/lmw.py（因果核平滑/双底 1.5% 容差/三角底 5 极值模板）+ 18 规则宇宙 Reality Check 防护；真数据 csi300 扫描命中 21，RC p=0.9498（无统计增量信息，命中仅观察清单）。
+
+**M6 journal §4.3 结构化字段**：6 个 DB 列（止损位/预期亏损/卖出去向/止损移动与触发计数/提取金额）+ 聚合审计函数（stop_audit_stats/extracted_amount_mtd 含冷静期违规）+ evaluation_json 5 个新键 + evaluation-criteria 卖出三维→四维债修复。
+
+### F 系列（2026-08-15）：股指期货数据全量接入
+
+- **数据层**：futures_daily 表（当月合约 settle 口径，IF/IH/IC 2015-04 起、IM 2022-07 起，458 合约）+ futures_data.py（fut_basic 合约序列 + fut_daily 逐合约 + 现货对齐预计算 basis/oi_change）+ backfill CLI（断点续跑）+ data_bridge.get_futures_basis；sina 主力连续降级链（source 标注）；口径验证与调研文档 8/14 样例一致（IC -0.5072%）。**修复（2026-08-15）**：sina 降级改 fill-only（不覆盖已有 tushare 行、失败非零退出）；oi_change_pct 到期日机械塌缩（≤−99%）掩码。**重建（2026-08-16）**：按月划分 → 按前合约到期日划分全量重建（修复每月约 40% 交易日缺失，9258 行完整性验证通过，缺口全部为法定长假）
+- **F1-F3 历史演变分布刻画**（预注册冻结；定位 = 状态度量与历史演变参照，非预测）：F1 基差深度四分位 → IC/IM ETF 收益分布（份额流不可得降级价格口径；Q1 vs Q4 差异仅描述性：510500 welch_t -1.11/p=0.292、512100 +0.80/p=0.4735、159845 -2.11/p=0.0375 名义显著但不裁决；**2026-08-16 二次修复后：-0.83/p=0.4135、-1.21/p=0.233、-0.55/p=0.582——159845 名义显著消失，三只方向统一为负**）；F2 贴水极值 → 指数 20 日收益分布（**2026-08-16 完整序列重跑：IF 深度贴水 +5 胜率 54.5%（n=22）vs 升水 56.6%（n=198）——"深贴水后偏强"方向性结论不再成立；08-15 的 69.2%/47.8% 作废；二次修复后 57.1%（n=21）vs 56.2%（n=194），两桶胜率趋同**）；F3 持仓量 20 日变化 → 基差/收益联合演变（当月合约口径下状态不成立，降级为不可刻画；完整序列重跑 up 事件 IF/IH/IC/IM=2/2/5/0、down=6/12/6/1，交叉表仍无意义，降级保留）+ Granger 检验（|t| 最大 1.54，收益不领先持仓）
+- **ETF skill**：futures_basis.py（query_futures_basis：当前基差 + 历史分位伴随中位数）+ report-template 模块 7.5「动态基差与持仓」+ etf.py futures-basis CLI + SKILL.md 章节（2026-08-16 起持仓量 20 日变化从用户输出移除，见修复 9）
+- **pulse**：_fetch_futures（IC 基差进快照）+ market_snapshots 迁移 + label_capital_flow 扩展（北向 + IC 基差双视角；持仓视角 2026-08-16 移除）
+- 报告：host-docs/v0.2.6/F系列期货状态刻画报告_20260815.md + F1/F2/F3 JSON 存档；测试新增 14 例（数据层 5/ETF 4/触发 4/snapshot fixture 更新）
+
+### 补漏（2026-08-14 续）：H6 回测 + 回踩分类 + 候选预案基线
+
+- **H6 做T 支撑位反弹**（ABCD §3.2 H6 行，排期表遗漏补录）：新增 `technical.adx`（Wilder 14 日，含 DX 有效窗口与均值初始化两处数值修复）+ `scripts/backtest_h6.py`（抽样 800+沪深300 共 1060 只，MA20/BOLL 下轨/缺口回探三类支撑事件 × ADX 震荡/趋势分层）。**裁决：预注册预期（仅震荡市正超额）方向相反**——震荡市支撑位触及后超额显著为负（-0.11%~-0.36%），趋势市 BOLL 下轨为唯一正超额层（+0.07%~+0.17%）；缺口回探两类均为负（与 JBEF 2020 延续一致）。**修复重跑（2026-08-15）**：ADX 种子口径 + 缺口扫描漏计修复（事件数 8892/12629 → 11166/15866，趋势市缺口 t 升至 ≥3），裁决方向不变
+- **回踩状态分类落地**：`lmw.classify_retest`（no_retest/clean_retest/deep_retest + retest_day，窗口 3-10 日）+ 扫描器 ScanHit 字段 + SKILL.md C 级标注；csi300 实测 21 命中 → no_retest 11/clean 1/deep 9。**修复（2026-08-15）**：判据改 low 口径（原 close 口径 clean 几乎不可达）+ 截断窗口独立 truncated 状态；csi300 重扫 21 命中（RC p=0.9498 不变）→ no_retest 11/clean 4/deep 6
+- **E-002~E-007 候选预案基线**：`scripts/scenario_baselines.py`（六条触发定义写死，E-001 同口径）+ scenario-plans 候选表补基线栏。关键发现（**2026-08-15 事件首日口径修复重跑**；修复前"触达 8000+ 次"为滑窗重叠口径，作废）：E-002~E-005 为全史罕见切换事件（n=9~21，仅观察不作推断）；E-006 BOLL 上轨触达 +5 日 +2.11%（胜率 62%）显著强于无条件基线（追势延续）
+- 测试新增 14 例（ADX 手算对照/H6 事件检测/回踩三态/触发判定）；报告 1 份 + JSON 存档 docs/data/
+
+### 修复（2026-08-15）：/code-review max 确认级发现修复（10 项，全部 Python 复算验证）
+
+F 系列 / H6 / 回踩分类 / 情景基线的实现缺陷修复，全部回测 JSON 重跑重生成，报告与 CHANGELOG 结论同步更正：
+
+1. **F2 状态标签反转**（`backtest_futures.py`）：percentile 升序语义下 deep_discount 应为 p<10、premium p>90——修复前结论"升水后强于深贴水后"建立在互换的桶上；修复后 IF 深度贴水 +5 胜率 69.2% vs 升水 47.8%，方向反转（2026-08-16 完整序列重跑后该方向性结论不再成立：54.5% vs 56.6%；二次修复后 57.1% vs 56.2%，见 F 系列节）
+2. **F1/F2 前向收益 off-by-one**：`keys[h]` 实为第 h+1 日（F1 '+1' n 1674→1675 复算证实），三处改 `keys[h-1]` + guard `len(keys) < h`；完整序列重建后 F1 n_aligned_days：510500=2754、IM=985-986
+3. **F3 收敛/走扩判据错误**：|Δbasis| 与 |basis| 比较改为 |basis[fi+20]| < |basis[fi]|；删除完全重复行
+4. **Sina 降级混口径**：merge COALESCE 逐列覆盖会把 close 口径写进 settle 口径行——改 fill-only（仅补缺失日期，`futures_dates_by_symbol` 判定），失败计入 `failed` → backfill 非零退出
+5. **H6 缺口扫描漏计**：最近缺口已回探时 break 阻断更老未回探缺口——break 移至事件实际生成处；gap 层事件数 8892/12629 → 11166/15866
+6. **E-005/close_below 滑窗重叠**：事件日改状态首日（E-005 = 完成站稳第 3 日），每段仅计一次——E-002~E-005 n 由 8270/8157/8159/322 → 21/12/12/9
+7. **classify_retest 收盘判据**：改 low 口径（签名接入 lows），删除死代码，截断窗口返回 truncated 而非 no_retest；扫描器传 low_qfq；csi300 重扫 21 命中 → no_retest 11/clean 4/deep 6（修复前 11/1/9，clean 由 1→4）
+8. **E-004 任一目标位**：`min(track)` 只测最深位 → `any(c <= t for t in track)`；60 日触达比例 93.0%（3209.60）→ 83.3%（任一，10/12）
+9. **持仓 20 日变化跨换月**：F3 与 journal/ETF 两消费方改日环比 oi_change_pct 复利合成（含到期日 ≤−99% 机械塌缩掩码）；**数据实证裁定（2026-08-16 完整序列重跑更新）**：当月（到期）合约 OI 月度内单调衰减（窗口内 day15 中位数为 day1 的 77.3%~85.6%——day15=0 为旧按月划分伪影），20 日变化被展期节奏主导（oi_20d ≤−5% 窗口占比 99.1%~99.9%，掩码日占比 0%）→ F3 状态 up=2/2/5/0、down=6/12/6/1（IF/IH/IC/IM），交叉表仍无意义，**该口径下状态度量不成立，降级为不可刻画**（需主连/总持仓口径数据层改造，另行决策）
+10. **Wilder ADX 种子口径**：求和种子 + 平均递推混用（前 ~30-50 根偏高最多 ~53 点）→ 种子改累计均值；新增参考实现对照测试锁定
+
+回归测试新增：test_technical_adx.py 5 例（参考实现逐条对照/发布范围/稳定趋势不变量）、H6 已回探缺口跳过 1 例、触发滑窗 2 例、回踩 low 口径/截断 2 例；全量 skills/lib/tests 通过。JSON 重生成：F1/F2/F3/H6/scenario_baselines（pattern_scan_result 重扫）；2026-08-16 F1/F2/F3 在完整序列（到期日边界重建 + expanding 分位）上再次重跑重生成，E 系列事件首日语义统一后重跑。
+
+### 第一阶段：P0 落地
+
+8.11 直播量化指标体系调研（ABCD）P0 落地：H5 日历效应回测裁决、D 类引擎字段、A 类点位红线、Windows 技能链接重建脚本、情景预案库。
+
+### H5 日历效应回测（8 月中旬谨慎裁决）
+
+- **新增 `skills/lib/backtest.py`**：回测纯函数库（Welch t / permutation 标签洗牌 / 逐年效应 / 滚动 5 年窗 AMH / 统一显著性分级 ✅ t≥3 ⚠️ 2≤t<3 ❌ t<2），供后续 H1/H2 复用
+- **新增 `scripts/backtest_calendar.py`**：上证指数 1990-2026 全历史（akshare sina 主源 → baostock 降级链），8/15-8/31 主窗口 + 8/11-8/31 附窗口 × 全历史/2006+ 双样本
+- **裁决 ❌ 不显著**：4 组合 Welch t 全部 |t|<2、permutation p 全部 >0.05（方向负差一致但效应量小、滚动 5 年符号翻转）→「8 月中旬-8 月底谨慎」**降级为建议**（journal SKILL.md 日历效应建议节），不设硬约束；8/31 中报结构性风险提示保留但标注 ❓ 弱证据
+- 产出：`host-docs/v0.2.6/H5日历效应回测报告_20260814.md` + `H5_backtest_result.json`
+
+### D 类引擎字段（四不原则可计算化）
+
+- **`skills/lib/technical.py`**：extreme 窗口扩 (20,60,120,250)；新增 `_ytd_low` 年内低点；ATR14 暴露 `pct`；`compute()` 输出 `distances`（dist_to_52w_high/low_pct、dist_to_ytd_low_pct，数据不足 None + reason）
+- **`etf_data.py compute_history_stats`**：新增 `dist_to_ytd_low_pct`/`ytd_low`/`atr14`/`atr14_pct`（纯 NAV 链路无 OHLC → None + note）；`current_vs_high_pct` 与 52 周距离等价不重复造
+- **`report_qc.py`**：新字段进 derived 白名单与中文标签
+- **决策（D12 WONTFIX）**：`amount_pctile_20d`/`turnover_pctile_20d` 全市场分位数据层本轮不建——schema 占位 None + note，P1 排期
+
+### A 类点位红线（证据等级 + 自动拦截）
+
+- **report-conventions §2.4**：L1-L4 点位证据等级定义 + 禁止断言表（将回踩 MA/缺口必然回补/BOLL 上轨将回调/斐波支撑/整数关口必然/X 浪将止于）+ 允许表述形式
+- **compliance_rules.yaml 6 条 error 级规则**（wording-level-*）：只拦断言式，不误伤"已回补/未回补/回补非必然"事实句
+- CLAUDE.md 点位引用规范节 + journal SKILL.md 日历效应裁决节
+
+### Windows 技能链接重建（WorkBuddy 兼容）
+
+- **新增 `scripts/setup_workbuddy_windows.ps1`**：仓库 14 条技能链接的 Windows 重建（9 个目录 junction + 5 个 commands 文件硬链接，均免管理员/开发者模式，幂等）；修正方案文档"9 条"计数遗漏（`.claude/commands/*.md` 5 条文件级链接）
+- README WorkBuddy 安装节加 Windows 重建指引；T1-T5 真机验收由用户后置执行
+
+### 情景预案库（references）
+
+- **新增 `skills/lib/references/scenario-plans.md`**：预案模板 + E-001（4050 关口带，基线数字 Python 复跑确认）+ 候选 E-002~E-007 + 闭环迭代机制（触发即记录/季度命中率/版本化）+ LAW 6/6a 边界
+- journal SKILL.md 情景预案闭环节（研究流程规则，非交易指令）
+
+### 测试
+
+- 新增 `skills/lib/tests/test_backtest.py`（19 例）、`test_v026_doc_checks.py`（16 例文档级断言 + 红线双向行为）；test_technical.py/test_etf_timeline.py 补 v0.2.6 字段用例
+
 ## v0.2.5 (2026-08-10)
 
 交易纪律框架（资金视角方法论）D1-D8 + WorkBuddy 平台兼容 + invest-a-limit-up 移除 + code-review 15 项修复。

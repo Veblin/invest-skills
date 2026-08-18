@@ -26,6 +26,97 @@ def _tushare_client(config: dict) -> Any:
     return _tc_local.instance
 
 
+# ---- run 级覆盖缓存（kline/quote 跨维度去重） ----
+# quote 维度（近实时 10 日）与 kline 维度（400 日）同 run 跨线程并行拉取同一
+# 接口，10 日窗口 ⊂ 400 日窗口——按 (source, symbol) 存最宽窗口的 raw 行，
+# 命中（cached 覆盖请求窗口）时切片返回，最坏每标的省 2 次 tushare + 1 次
+# akshare HTTP 调用（冷缓存下 quote/kline 并行同发时两者都会 fetch、无节省，
+# 仅较宽窗口落地后同一进程后续同参调用复用）。按日失效（_today 上海口径），
+# 仿 _orchestrate._cninfo_hold_cache 模式：dict + day key + 线程锁（跨维度
+# 并行采集）+ None 不落缓存。
+# 已知边界：长驻进程（webapp）同日多次采集时，缓存为当日首个 fetch 的快照，
+# 开盘后当日 bar 出现不会自动追新（quote 有意近实时，本缓存仅去重不追新）；
+# CLI 单进程单报告不受影响。
+# 与磁盘 _kline_cache 的职责边界：本缓存管「同 run 内存去重」（quote 有意
+# 不进磁盘缓存）；_kline_cache 管「跨 run 落盘复用」。互不干扰。
+# INVEST_QUOTE_CACHE=0 禁用（逃生口，对齐 INVEST_KLINE_CACHE=0 命名）。
+_run_kline_quote_cache: dict[tuple[str, str], tuple[str, str, Any]] = {}
+_run_kline_quote_cache_day: str = ""
+_run_kline_quote_cache_lock = threading.Lock()
+
+
+def _date8(d: Any) -> str:
+    """日期归一化为 8 位 YYYYMMDD（tushare 8 位 / akshare YYYY-MM-DD）。
+
+    兼容斜杠（YYYY/MM/DD）、Timestamp 字符串（YYYY-MM-DD HH:MM:SS）、
+    float-str（20260813.0）：只去横杠会把 8 位边界行词法比较排除（code-review）。
+    """
+    s = str(d or "").strip()
+    if not s:
+        return s
+    return s.replace("-", "").replace("/", "").split(" ")[0].split("T")[0][:8]
+
+
+def _slice_cached_rows(rows: Any, req_sd: str, req_ed: str) -> Any:
+    """按窗口切片并返回新对象（list[dict] / dict 两种形态），不 mutate 缓存。"""
+    sd8, ed8 = _date8(req_sd), _date8(req_ed)
+    if isinstance(rows, dict):
+        return {k: v for k, v in rows.items() if sd8 <= _date8(k) <= ed8}
+    return [dict(r) for r in rows if sd8 <= _date8(r.get("trade_date", "")) <= ed8]
+
+
+def _copy_cached_rows(rows: Any) -> Any:
+    """副本（list[dict] / dict）：调用方 mutate 不污染缓存对象。"""
+    if isinstance(rows, dict):
+        return dict(rows)
+    return [dict(r) for r in rows]
+
+
+def _run_kline_quote_cached(source: str, symbol: str, req_sd: str, req_ed: str,
+                            fetch: Callable[[], Any],
+                            *, require_ed_equal: bool = False) -> Any:
+    """覆盖缓存读取：cached 窗口覆盖请求窗口 → 切片；否则锁外 fetch，更宽窗口替换。
+
+    require_ed_equal=True（akshare qfq 路径）：qfq 以窗口最新日锚定，仅当缓存
+    与请求结束日相同才可切片（否则锚定日不同、数值不可比）。
+    """
+    global _run_kline_quote_cache_day
+    if os.environ.get("INVEST_QUOTE_CACHE", "1") == "0":
+        return fetch()
+    day = _today()
+    key = (source, symbol)
+    with _run_kline_quote_cache_lock:
+        if _run_kline_quote_cache_day != day:
+            _run_kline_quote_cache.clear()
+            _run_kline_quote_cache_day = day
+        cached = _run_kline_quote_cache.get(key)
+    if cached is not None:
+        c_sd, c_ed, rows = cached
+        if (_date8(c_sd) <= _date8(req_sd) and _date8(c_ed) >= _date8(req_ed)
+                and (not require_ed_equal or _date8(c_ed) == _date8(req_ed))):
+            sliced = _slice_cached_rows(rows, req_sd, req_ed)
+            if sliced:
+                return sliced
+            return None  # 0 行切片 → None（对齐直连空窗口语义，不判成功）
+    rows = fetch()
+    if not rows:
+        return rows  # None/空不落缓存（对齐 _cninfo_hold_cache）
+    with _run_kline_quote_cache_lock:
+        cur = _run_kline_quote_cache.get(key)
+        if cur is None:
+            _run_kline_quote_cache[key] = (req_sd, req_ed, rows)
+        else:
+            # 仅「超集」替换：任一边更宽就替换会驱逐另一侧更宽的缓存
+            # （历史窗口丢掉含最新日的覆盖 → 宽窗口又得重拉，code-review）
+            covers = (_date8(req_sd) <= _date8(cur[0])
+                      and _date8(req_ed) >= _date8(cur[1]))
+            wider = (_date8(req_sd) < _date8(cur[0])
+                     or _date8(req_ed) > _date8(cur[1]))
+            if covers and wider:
+                _run_kline_quote_cache[key] = (req_sd, req_ed, rows)
+    return _copy_cached_rows(rows)  # 副本：调用方 mutate 不污染缓存对象
+
+
 # ---- 单个源查询函数 ----
 
 
@@ -242,38 +333,55 @@ def _q_tushare_shareholders(symbol: str) -> list[dict] | None:
 
 
 def _q_tushare_daily(symbol: str, **kwargs) -> list[dict] | None:
-    config, tc = _require_tushare()
-    df = tc.query("daily", ts_code=_ts_code(symbol),
-                  fields="trade_date,open,high,low,close,vol,amount",
-                  **kwargs)
-    if df is not None and not df.empty:
-        return df.to_dict("records")
-    return None
+    req_sd = kwargs.get("start_date")
+    req_ed = kwargs.get("end_date")
+
+    def _fetch() -> list[dict] | None:
+        config, tc = _require_tushare()
+        df = tc.query("daily", ts_code=_ts_code(symbol),
+                      fields="trade_date,open,high,low,close,vol,amount",
+                      **kwargs)
+        if df is not None and not df.empty:
+            return df.to_dict("records")
+        return None
+
+    if not req_sd or not req_ed:
+        return _fetch()  # 未显式给窗口（_q_tushare_daily_qfq 默认空串）不缓存
+    return _run_kline_quote_cached("tushare.daily", symbol, req_sd, req_ed, _fetch)
 
 
 def _q_tushare_adj_factor(symbol: str, start_date: str = "",
                           end_date: str = "") -> dict[str, float] | None:
     """Tushare 复权因子，返回 {trade_date: adj_factor}（前复权计算基础）。"""
-    config, tc = _require_tushare()
-    df = tc.query("adj_factor", ts_code=_ts_code(symbol),
-                  start_date=start_date or _days_ago(400),
-                  end_date=end_date or _today())
-    if df is None or df.empty:
-        return None
-    factors: dict[str, float] = {}
-    for r in df.to_dict("records"):
-        td = str(r.get("trade_date") or "")
-        f = r.get("adj_factor")
-        if td and f is not None:
-            try:
-                factors[td] = float(f)
-            except (TypeError, ValueError):
-                pass
-    return factors or None
+    sd = start_date or _days_ago(400)
+    ed = end_date or _today()
+
+    def _fetch() -> dict[str, float] | None:
+        config, tc = _require_tushare()
+        df = tc.query("adj_factor", ts_code=_ts_code(symbol),
+                      start_date=sd, end_date=ed)
+        if df is None or df.empty:
+            return None
+        factors: dict[str, float] = {}
+        for r in df.to_dict("records"):
+            td = str(r.get("trade_date") or "")
+            f = r.get("adj_factor")
+            if td and f is not None:
+                try:
+                    factors[td] = float(f)
+                except (TypeError, ValueError):
+                    pass
+        return factors or None
+
+    return _run_kline_quote_cached("tushare.adj_factor", symbol, sd, ed, _fetch)
 
 
 def _apply_qfq(rows: list[dict], factors: dict[str, float]) -> list[dict] | None:
     """前复权（list[dict] 版）——委托 skills/lib/qfq.apply_qfq_rows（round_prices=True）。
+
+    孪生实现：gap-scan kline_source.build_stock_kline（apply_qfq DataFrame 版，
+    整股 isna 拒绝、不 rounding）——批量扫描 vs 单标的的语义差异合理，勿互走；
+    契约测试：skills/lib/tests/test_qfq_contract.py。
 
     公式与语义同 canonical：qfq_price = raw_price × factor / latest_factor（以
     最新日为基准）；vol/amount 不变；复权因子缺失/非法 → 整体拒绝（返回 None）。
@@ -402,29 +510,35 @@ def _q_akshare_financials(symbol: str) -> list[dict] | None:
 
 def _q_akshare_kline(symbol: str, start_date: str = "", end_date: str = "") -> list[dict] | None:
     """akshare K线来源（东方财富 push2 API）。R12h：指数退避重试（1s→2s→4s，max 3）。"""
-    with akshare_direct_session():
-        import akshare as ak
-        sd = start_date or _days_ago(365)
-        ed = end_date or _today()
-        sd_fmt = _to_iso_date(sd)
-        ed_fmt = _to_iso_date(ed)
-        try:
-            def _fetch() -> Any:
-                return ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
-                                          period="daily",
-                                          start_date=sd_fmt,
-                                          end_date=ed_fmt,
-                                          adjust="qfq",  # 前复权：统一复权语义
-                                          timeout=10)
-            # deadline 30s：与 timeout=10 × 3 次退避预算匹配，超时后不再后台重试
-            result = em_request_with_retry(_fetch, deadline=time.monotonic() + 30)
-            if result is not None and hasattr(result, "to_dict"):
-                records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
-                if records:
-                    return [_map_akshare_kline_keys(r) for r in records]
-            return None
-        except Exception as e:
-            _reraise_eastmoney_api_error(e)
+    sd = start_date or _days_ago(365)
+    ed = end_date or _today()
+
+    def _fetch() -> list[dict] | None:
+        with akshare_direct_session():
+            import akshare as ak
+            sd_fmt = _to_iso_date(sd)
+            ed_fmt = _to_iso_date(ed)
+            try:
+                def _fetch_once() -> Any:
+                    return ak.stock_zh_a_hist(symbol=symbol.strip().zfill(6),
+                                              period="daily",
+                                              start_date=sd_fmt,
+                                              end_date=ed_fmt,
+                                              adjust="qfq",  # 前复权：统一复权语义
+                                              timeout=10)
+                # deadline 30s：与 timeout=10 × 3 次退避预算匹配，超时后不再后台重试
+                result = em_request_with_retry(_fetch_once, deadline=time.monotonic() + 30)
+                if result is not None and hasattr(result, "to_dict"):
+                    records = result.to_dict("records") if callable(result.to_dict) else result.to_dict
+                    if records:
+                        return [_map_akshare_kline_keys(r) for r in records]
+                return None
+            except Exception as e:
+                _reraise_eastmoney_api_error(e)
+
+    # require_ed_equal：qfq 以窗口最新日锚定，仅同结束日才可切片复用
+    return _run_kline_quote_cached("akshare.kline", symbol, sd, ed, _fetch,
+                                   require_ed_equal=True)
 
 
 def _q_akshare_northbound(symbol: str) -> list[dict] | None:
@@ -667,6 +781,10 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
                 if not info:
                     return None
                 industry_name = info.get("行业") or info.get("industry", "")
+            # P0：空名守卫（对齐孪生函数 _q_akshare_industry_board）——行业字段缺失时
+            # str.contains("") 全表匹配会静默取巨潮 PE 表首行作为本股行业 PE（数据错误）
+            if not industry_name:
+                return None
 
             # 匹配行业PE
             matched = df[df["行业名称"].str.contains(industry_name, na=False)]
@@ -756,7 +874,10 @@ def _q_baostock_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
                 rows.append({
                     "trade_date": row[0].replace("-", ""),
                     # safe_float：baostock 空字段返回字符串 "nan"（truthy），
-                    # 裸 float() 会穿透 NaN 污染下游（gap-scan 38a7e1e 同型先例）
+                    # 裸 float() 会穿透 NaN 污染下游（gap-scan 38a7e1e 同型先例；
+                    # 孪生实现 kline_source.build_stock_kline 用 to_numeric+
+                    # 整股 isna 拒绝——单标的逐字段 guard vs 批量整股拒绝，
+                    # 契约测试 skills/lib/tests/test_qfq_contract.py）
                     "open": safe_float(row[1]),
                     "high": safe_float(row[2]),
                     "low": safe_float(row[3]),

@@ -186,6 +186,24 @@ class TestVolume:
 
 
 class TestStructure:
+    def test_compute_coerces_string_closes(self):
+        """字符串 close（object-dtype 源）经 safe_float 过滤后仍是 str：修复前
+        MA 求和 int+str 抛 TypeError、极值 str 毒化渲染 f'{e["max"]:.2f}' 崩溃。"""
+        from lib.technical import compute
+
+        rows = [
+            {"trade_date": f"202608{1 + i:02d}", "open": "10.0", "high": "10.5",
+             "low": "9.8", "close": str(10.0 + i), "vol": "100.0"}
+            for i in range(20)
+        ]
+        result = compute(rows)
+        e = result["structure"]["extremes"][20]
+        assert e["available"] is True
+        assert isinstance(e["max"], float) and e["max"] == 29.0
+        assert isinstance(e["min"], float) and e["min"] == 10.0
+        assert isinstance(e["is_n_day_high"], bool)
+        assert result["latest_close"] == 29.0
+
     def test_n_day_extremes(self):
         """N 日极值。"""
         from lib.technical import compute
@@ -390,3 +408,121 @@ class TestLimitPctTable:
         st2 = detect_limit_streaks(self._kline([10.0, 10.5, 11.02]), symbol="600001")
         assert st2["limit_threshold"] == 10.0
         assert st2["recent_limit_ups"] == 0
+
+
+class TestV026Distances:
+    """v0.2.6 D 类字段：52 周/年内低点偏离 + ATR 占比 + 分位占位降级。"""
+
+    @staticmethod
+    def _iso_kline(n: int, base: float = 100.0, step: float = 1.0) -> list[dict]:
+        """ISO 日期（零填充）线性上升序列——_make_kline 的可变长度日号会破坏字符串排序。"""
+        rows = []
+        for i in range(n):
+            close = base + i * step
+            rows.append({
+                "trade_date": f"2026-{1 + i // 31:02d}-{1 + i % 31:02d}",
+                "open": close - 0.5,
+                "high": close + 1.0,
+                "low": close - 1.0,
+                "close": close,
+                "vol": 1000000.0,
+            })
+        return rows
+
+    def test_distances_full_history(self):
+        """300 行上升序列（确定性）：52 周窗口 = 末 250 行。"""
+        from lib.technical import compute
+
+        result = compute(self._iso_kline(300))
+        dist = result["distances"]
+        # 52 周高 = 最后一行（上升序列），距离 0
+        assert dist["dist_to_52w_high_pct"] == pytest.approx(0.0, abs=0.01)
+        # 52 周低 = 第 51 行 close=150（窗口首行），(399-150)/150*100 = 166.0
+        assert dist["dist_to_52w_low_pct"] == pytest.approx(166.0, abs=0.01)
+        # 年内低点 = 序列首行 close=100（全部同一年），(399-100)/100*100 = 299.0
+        assert dist["dist_to_ytd_low_pct"] == pytest.approx(299.0, abs=0.01)
+        assert dist["ytd_low"] == pytest.approx(100.0)
+        # ATR 占比存在且为正
+        assert result["volatility"]["atr"]["pct"] > 0
+        # extremes 含 250 窗口
+        assert result["structure"]["extremes"][250]["available"] is True
+        # 全市场分位占位降级（P1 排期）
+        assert dist["amount_pctile_20d"] is None
+        assert dist["turnover_pctile_20d"] is None
+        assert "P1" in dist["pctile_note"]
+
+    def test_distances_insufficient_52w(self):
+        """不足 250 行 → 52 周字段 None + reason，年内字段仍可用。"""
+        from lib.technical import compute
+
+        result = compute(self._iso_kline(60))
+        dist = result["distances"]
+        assert dist["dist_to_52w_high_pct"] is None
+        assert dist["dist_to_52w_low_pct"] is None
+        assert dist["reason_52w"]
+        assert result["structure"]["extremes"][250]["available"] is False
+        # 60 行同一年 → 年内低点可算
+        assert dist["dist_to_ytd_low_pct"] == pytest.approx(59.0, abs=0.01)
+
+    def test_ytd_low_only_current_year(self):
+        """年内低点只统计末行所在年份：2025 更低也不计入。"""
+        from lib.technical import _ytd_low
+
+        rows = [
+            {"trade_date": "20251231", "close": 80.0},
+            {"trade_date": "20260811", "close": 100.0},
+            {"trade_date": "20260812", "close": 95.0},
+        ]
+        ytd = _ytd_low(rows)
+        assert ytd["available"] is True
+        assert ytd["low"] == pytest.approx(95.0)
+        assert ytd["low_date"] == "20260812"
+        # (95-95)/95*100 = 0.0（现价即年内低点）
+        assert ytd["dist_pct"] == pytest.approx(0.0)
+
+    def test_ytd_low_empty(self):
+        from lib.technical import _ytd_low
+
+        assert _ytd_low([])["available"] is False
+
+    def test_atr_pct_insufficient(self):
+        """15 行以内 ATR 不可得 → pct None。"""
+        from lib.technical import compute
+
+        result = compute(_make_kline(10, noise=0.0))
+        assert result["volatility"]["atr"]["value"] is None
+        assert result["volatility"]["atr"]["pct"] is None
+        assert result["volatility"]["atr"]["reason"]
+
+
+class TestADX:
+    def test_adx_known_series(self):
+        """手算对照：单调上升序列（+DM 恒正）→ ADX 应收敛到 100 附近。"""
+        from lib.technical import adx
+
+        n = 14
+        closes = [100.0 + i for i in range(60)]
+        highs = [c + 1.0 for c in closes]
+        lows = [c - 1.0 for c in closes]
+        vals = adx(highs, lows, closes, n=n)
+        # 前 2n-1 = 27 位 None
+        assert vals[:27] == [None] * 27
+        # 单边上涨：−DM 恒 0 → −DI=0，DX=100 → ADX 收敛 100
+        assert vals[-1] == pytest.approx(100.0, abs=0.01)
+        assert vals[27] is not None
+
+    def test_adx_flat_series_low(self):
+        """横盘序列（TR≈0 处理 + 方向交替）→ ADX 低。"""
+        from lib.technical import adx
+
+        closes = [100.0] * 60
+        highs = [100.5] * 60
+        lows = [99.5] * 60
+        vals = adx(highs, lows, closes)
+        assert vals[-1] is not None and vals[-1] < 10.0
+
+    def test_adx_insufficient(self):
+        from lib.technical import adx
+
+        vals = adx([1.0] * 10, [0.9] * 10, [0.95] * 10)
+        assert all(v is None for v in vals)

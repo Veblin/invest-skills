@@ -11,7 +11,7 @@ from typing import Any
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import sort_kline_asc
 
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import normalize_end_date as _norm_ed, yyyymmdd_to_iso as _to_iso_date
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
@@ -523,18 +523,59 @@ def _periods_per_year(fin_list: list[dict]) -> int:
 def _compute_metric_cagr(
     fin_list: list[dict], field: str,
 ) -> tuple[float | None, float | None]:
-    """从已排序财务列表计算 CAGR（%）及年跨度。"""
-    rows = [r for r in fin_list if _safe_num(r.get(field)) is not None]
+    """从财务列表计算同报告期 CAGR（%）及年跨度。
+
+    F0-8 修复：财务序列混合了季度累计行与年报行（如 Q1 累计 869 亿 vs
+    全年 3375 亿），跨期混比会产出荒谬 CAGR（招行 -19.97%）。此处按
+    「同月日报告期」分组，优先年报行（MMDD=1231），否则取样本最多的
+    同报告期组，做跨年对比。
+    """
+    rows = [
+        r for r in fin_list if _safe_num(r.get(field)) is not None
+        and _norm_ed(str(r.get("end_date") or ""))
+    ]
     if len(rows) < 2:
         return None, None
-    first_v = _safe_num(rows[0].get(field))
-    last_v = _safe_num(rows[-1].get(field))
-    if first_v is None or last_v is None or first_v <= 0:
+    rows_sorted = sorted(rows, key=lambda r: _norm_ed(str(r.get("end_date") or "")))
+    groups: dict[str, list[dict]] = {}
+    for r in rows_sorted:
+        groups.setdefault(_norm_ed(str(r.get("end_date") or ""))[4:], []).append(r)
+    cand = groups.get("1231")
+    if cand is None or len(cand) < 2:
+        cand = max(groups.values(), key=len)
+    if len(cand) < 2:
         return None, None
-    span = max(1, (len(rows) - 1) / _periods_per_year(rows))
-    if span >= 0.5:
-        return ((last_v / first_v) ** (1 / span) - 1) * 100, span
-    return (last_v - first_v) / first_v * 100, span
+    first_v = _safe_num(cand[0].get(field))
+    last_v = _safe_num(cand[-1].get(field))
+    # 终点亏损（last_v <= 0）与起点亏损同样拒绝：负数底数小数次幂产出
+    # 复数，报告会渲染出 "净利润 CAGR：-70.76+50.65j%" 式垃圾数字。
+    if first_v is None or last_v is None or first_v <= 0 or last_v <= 0:
+        return None, None
+    years = int(_norm_ed(str(cand[-1].get("end_date") or ""))[:4]) - int(
+        _norm_ed(str(cand[0].get("end_date") or ""))[:4])
+    if years < 1:
+        return None, None
+    span = float(years)
+    return ((last_v / first_v) ** (1 / span) - 1) * 100, span
+
+
+def cagr_period_rows(fin_list: list[dict], field: str) -> list[dict]:
+    """返回 CAGR 实际采用的同报告期行组（与 _compute_metric_cagr 同口径），
+    供展示层标注正确的日期范围（F0-8 配套）。"""
+    rows = [
+        r for r in fin_list if _safe_num(r.get(field)) is not None
+        and _norm_ed(str(r.get("end_date") or ""))
+    ]
+    if len(rows) < 2:
+        return []
+    rows_sorted = sorted(rows, key=lambda r: _norm_ed(str(r.get("end_date") or "")))
+    groups: dict[str, list[dict]] = {}
+    for r in rows_sorted:
+        groups.setdefault(_norm_ed(str(r.get("end_date") or ""))[4:], []).append(r)
+    cand = groups.get("1231")
+    if cand is None or len(cand) < 2:
+        cand = max(groups.values(), key=len)
+    return cand if len(cand) >= 2 else []
 
 
 # --- _wrap_details ---

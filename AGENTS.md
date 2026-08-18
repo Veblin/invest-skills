@@ -139,6 +139,7 @@ Tavily → Bocha → WebSearch（Claude 内置）
 - [ ] `CHANGELOG.md` 已更新
 - [ ] `uv run pytest` 通过
 - [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
+- [ ] `bash scripts/build_wb_package.sh` 可运行，`dist/invest-skills-wb-vX.Y.Z.zip` 内容完整（发布时由 release.yml 自动构建并随 Release 附带，此条为本地预检）
 - [ ] 无 API Key 或敏感信息泄露（`validate.yml` Security scan 内联 secrets grep 已验证）
 
 ### 版本号规范

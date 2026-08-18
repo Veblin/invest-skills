@@ -290,6 +290,22 @@ rules:
     message: "报告中存在待补充字段，请补充完整"
     law_ref: "SOP-QC — 占位残留"
 
+  # F0-3 修复：引擎占位符与异常泄漏直出报告是 P0 级问题（半成品/错误信息
+  # 直接面向用户），error 级拦截——未人工加工的报告无法通过任何准出门。
+  - id: "placeholder-engine-slot"
+    pattern: "(\\[待 Claude|\\[待填充|Claude report 阶段|Claude 填写)"
+    severity: "error"
+    scope: "line"
+    message: "引擎占位符未填（Claude 加工未完成），禁止直出报告"
+    law_ref: "SOP-QC — 占位残留（F0-3）"
+
+  - id: "error-leakage"
+    pattern: "(has no attribute|AttributeError|TypeError|Traceback \\(most recent call last\\)|KeyError:)"
+    severity: "error"
+    scope: "line"
+    message: "异常/错误信息泄漏进报告正文，需删除或替换为「不可得（原因）」"
+    law_ref: "SOP-QC — 异常泄漏（F0-3）"
+
   # ==========================================================================
   # 绝对化表述检查（原 check_report.sh 检查项 5）
   # ==========================================================================
@@ -396,3 +412,55 @@ rules:
     scope: "file"
     message: "报告中缺少数据→推理→判断逻辑链标注（**逻辑链：**）（LAW 17）"
     law_ref: "LAW 17"
+
+  # ==========================================================================
+  # 点位证据等级红线（v0.2.6，来源 ABCD 调研 §1.3 红线表 + report-conventions §2.4）
+  # 只拦断言式（将/必/必然 + 点位动作），不拦事实句（"已回补/未回补/回补非必然"）
+  # ==========================================================================
+  - id: "wording-level-gap-fill"
+    pattern: "(将回补缺口|必将回补|必然回补|回补是必然|必回补)"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
+    message: "禁止断言'缺口将/必然回补'（JBEF 2020：缺口后沿缺口方向延续；A 股一字板缺口结构性不回补）。允许：'缺口带未回补已 N 日（记录性事实；回补非必然）'"
+    law_ref: "report-conventions §2.4 — 点位红线"
+
+  - id: "wording-level-ma-retest"
+    pattern: "(将回踩|必回踩|将测试(MA|均线)|必测试(MA|均线))"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
+    message: "禁止断言'价格将回踩/测试 MA20'（STW 1999 Reality Check 校正后消失；PBFJ 2024 中国样本外转负）。允许：'当前价 vs MA20 偏离 X%'状态描述"
+    law_ref: "report-conventions §2.4 — 点位红线"
+
+  - id: "wording-level-boll-rebound"
+    pattern: "(BOLL[^。\\n]{0,8}上轨[^。\\n]{0,10}(将|必(然)?)回调|上轨将回调)"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
+    message: "禁止断言'触及 BOLL 上轨将回调'（Taiwan 50 实证：上轨应追势非反转，Physica A 2020）。允许：boll_position_pct 位置描述"
+    law_ref: "report-conventions §2.4 — 点位红线"
+
+  - id: "wording-level-fib-support"
+    pattern: "((斐波|黄金分割)位[^。\\n]{0,12}(有)?(支撑|压力|阻力)|\\d+(\\.\\d+)?%\\s*回撤位[^。\\n]{0,12}(有)?(支撑|压力|阻力))"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|无预测性|无实证|无支撑|没有支撑|无压力|没有压力|无阻力|没有阻力|\\[来源:|⚠️)"
+    message: "禁止断言'斐波回撤位有支撑/压力'（Tsinaslanidis 2022：与随机位点统计不可区分，L3 习俗）。允许：并列展示 + 强制 L3 习俗标签"
+    law_ref: "report-conventions §2.4 — 点位红线"
+
+  - id: "wording-level-round-number"
+    pattern: "(整数关口[^。\\n]{0,10}(将|必(然)?|必定)(受阻|突破|失守|支撑)|关口(将|必(然)?|必定)(受阻|突破|失守|支撑))"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|非必然|不必然|\\[来源:|⚠️)"
+    message: "禁止断言'整数关口必然受阻/突破'（自我实现机制：有效但非决定性，Frankel & Froot 1990）。允许：'4000 为市场关注位（中国实证：熊市效应最强）[证据: L1-2]'"
+    law_ref: "report-conventions §2.4 — 点位红线"
+
+  - id: "wording-level-wave-stop"
+    pattern: "([0-9一二三四五六七八九十]+浪[^。\\n]{0,10}(回撤|调整)将止于|波浪[^。\\n]{0,10}将止于)"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|\\[来源:|⚠️)"
+    message: "禁止断言'X 浪回撤将止于 Y%'（波浪理论不可证伪，Energy Policy 2018；L3 习俗仅展示）"
+    law_ref: "report-conventions §2.4 — 点位红线"

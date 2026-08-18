@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "parse_date",
@@ -14,6 +17,7 @@ __all__ = [
     "shanghai_today",
     "shanghai_days_ago",
     "normalize_end_date",
+    "latest_month_row",
 ]
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -116,3 +120,45 @@ def shanghai_today() -> str:
 def shanghai_days_ago(n: int) -> str:
     """上海时区 N 天前的日期，YYYYMMDD。"""
     return (shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
+
+
+def latest_month_row(rows: list) -> Any:
+    """从 akshare 宏观序列行中取「月份」最新的一行。
+
+    akshare macro_china_pmi/cpi/ppi 返回的序列**最新在前**（首行为最新期、
+    末行为 2008 年），直接 `iloc[-1]` 会取到最旧行（F0-4 缺陷根因）。
+    此处按「YYYY年MM月份」解析后取最大 (年, 月)，与行序无关。
+
+    全部解析失败时回退首行（akshare 序列约定最新在前）。
+    """
+    best_row: Any = None
+    best_key: tuple[int, int] | None = None
+    first_row = rows[0] if rows else None
+    first_parse_ok = False
+    for row in rows:
+        m = re.search(r"(\d{4})年(\d{1,2})月", str(row.get("月份", "")))
+        if not m:
+            continue
+        key = (int(m.group(1)), int(m.group(2)))
+        if best_key is None or key > best_key:
+            best_key, best_row = key, row
+        if row is first_row:
+            first_parse_ok = True
+    if best_row is None and rows:
+        # 全部行解析失败（akshare 改了月份列格式等）：显式告警而非静默回退
+        # 首行——宏观标签若用了旧期数字，CLAUDE.md F2-7「核验最新期」需要
+        # 知道这里发生了什么。
+        logger.warning(
+            "latest_month_row: 全部 %d 行「月份」列解析失败（期望「YYYY年M月」），"
+            "回退首行——可能非最新期，宏观标签需人工核验", len(rows),
+        )
+        best_row = rows[0]
+    elif first_row is not None and not first_parse_ok and best_key is not None:
+        # 最新行（首行，akshare 约定最新在前）解析失败而选中了更早行：
+        # 同样显式告警，避免把上一期 PMI/CPI/PPI 静默当作当期。
+        logger.warning(
+            "latest_month_row: 首行「月份」不可解析（%r），取到 %04d-%02d 期行——"
+            "可能非最新期，宏观标签需人工核验",
+            first_row.get("月份"), best_key[0], best_key[1],
+        )
+    return best_row

@@ -165,14 +165,44 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
     price = coalesce_field(quote, "price", "close")
     reported_mv = coalesce_field(quote, "total_mv")
 
+    from .financials import normalize_end_date
+
+    def _val_date(r: dict) -> str:
+        # 统一 normalize 后再比：tushare 8 位与 akshare dash 格式混合时，
+        # '-'(0x2D) < '0'(0x30) 的词法序会把 dash 日期排到 8 位日期之前
+        return normalize_end_date(str(r.get("trade_date") or r.get("date") or ""))
+
+    def _val_rows(val_list: list) -> list[dict]:
+        """valuation 取行口径：只保留有可解析 trade_date 的行。
+
+        review 二轮二次回归（R-8 修复自身的反转）：上一版把无日期行排到
+        末尾再取 [-1]——只要存在无日期行它必被选中（live repro: pb fail
+        9.9 vs 3.5，旧纯字符串排序反在该场景正确）。正确语义 = 在有日期行
+        中取日期最大者；全部无日期才回退原始行序。
+        """
+        rows = [r for r in val_list if isinstance(r, dict)]
+        dated = [r for r in rows if _val_date(r)]
+        return dated if dated else rows
+
+    val_rows = _val_rows(val_data) if isinstance(val_data, list) else []
+    # 单次排序，PE/PB 共用（D10：相同输入计算一次，复用）
+    val_sorted = sorted(val_rows, key=_val_date)
+    last_val = val_sorted[-1] if val_sorted else {}
+
     pe_reported = coalesce_field(quote, "pe_ratio", "pe_ttm")
-    if pe_reported is None and isinstance(val_data, list) and val_data:
-        last = val_data[-1] if isinstance(val_data[-1], dict) else {}
-        pe_reported = coalesce_field(last, "pe_ttm", "pe")
+    if pe_reported is None and last_val:
+        # F0-7: valuation/financials 行序最新在前（data[0] 最新），直接 [-1] 取到最旧行。
+        # 按 trade_date 排序后取最新。
+        pe_reported = coalesce_field(last_val, "pe_ttm", "pe")
 
     latest_fin: dict = {}
     if isinstance(fin_data, list) and fin_data:
-        latest_fin = fin_data[-1] if isinstance(fin_data[-1], dict) else {}
+        # F0-7: 按 end_date 排序取最新行，不依赖采集行序。
+        fin_sorted = sorted(
+            [r for r in fin_data if isinstance(r, dict)],
+            key=lambda r: str(r.get("end_date") or ""),
+        )
+        latest_fin = fin_sorted[-1] if fin_sorted else {}
 
     net_income = coalesce_field(
         latest_fin, "n_income_attr_p", "net_profit", "netprofit",
@@ -212,9 +242,10 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
                 ))
 
     pb_reported = None
-    if isinstance(val_data, list) and val_data:
-        last = val_data[-1] if isinstance(val_data[-1], dict) else {}
-        pb_reported = coalesce_field(last, "pb")
+    if last_val:
+        # F0-7 只修了 PE 的取行，PB 仍 val_data[-1] 取最旧行（最新在前行序下
+        # PB 恒比最新净资产错配）——与 PE 共用同一次排序取最新。
+        pb_reported = coalesce_field(last_val, "pb")
     if pb_reported is not None and reported_mv is not None and equity is not None:
         eq_yi = equity / 1e8 if abs(equity) > 1e6 else equity
         if eq_yi and eq_yi > 0:

@@ -144,3 +144,33 @@ class TestAkshareKeyMapping:
     def test_baostock_code_bshare(self):
         from lib.collector import _baostock_code
         assert _baostock_code("900901") == "sh.900901"
+
+
+class TestExtractL2ScalarOrFallback:
+    """fusion 三形态统一 helper（code-review 清理）：五分支语义。"""
+
+    def _helper(self, data, scalar_value, dim_name, allow):
+        from lib.schema import _extract_l2_scalar_or_fallback
+        return _extract_l2_scalar_or_fallback(
+            data, scalar_value, dim_name, allow_scalar_fallback=allow)
+
+    def test_l2_with_data_whitelist_extract(self):
+        v = self._helper({"total_mv": 100.0, "pe_ttm": 5.0}, 999.0, "valuation", False)
+        assert v == 100.0
+
+    def test_l2_no_data_allow_false_returns_none(self):
+        """形态 1：L2 维度 data 缺失绝不回退 scalar（600206 修复语义）。"""
+        assert self._helper(None, 999.0, "valuation", False) is None
+
+    def test_l2_no_data_allow_true_falls_back_scalar(self):
+        """形态 3：无 data 时回退 scalar_value（兼容手写/旧快照）。"""
+        assert self._helper(None, 999.0, "valuation", True) == 999.0
+
+    def test_l2_data_present_but_no_whitelist_key_no_fallback(self):
+        """L2 且 data 存在但无白名单键 → None，即使 allow=True 也不回退。"""
+        v = self._helper({"pe_ttm": 5.0}, 999.0, "valuation", True)
+        assert v is None
+
+    def test_non_l2_returns_scalar_value(self):
+        assert self._helper({"close": 10.0}, 888.0, "quote", False) == 888.0
+        assert self._helper(None, None, "quote", False) is None

@@ -1,14 +1,7 @@
 ---
 
-
-
-
-
-
-
-
 name: invest-a-etf
-version: "0.2.5"
+version: "0.2.6"
 description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
 argument-hint: "/invest-a-etf 563300 | /invest-a-etf 515790"
 allowed-tools: Bash, Read, Write, WebSearch
@@ -75,6 +68,8 @@ Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symb
 - `{name}` = ETF 简称（如 `科创50ETF`、`通信ETF`、`卫星ETF`）
 - 示例：`reports/588000-科创50ETF/2026-07-27-19-40-00.md`
 - 写入文件前必须获取当前实际时间，禁止使用硬编码时间戳
+- **同 symbol 只允许一个报告目录**（F1-7）：名称以 hedge-map `ETF_HEDGE_MAP[symbol]["index"]` 为准——
+  512660 → `512660-军工ETF`（旧目录 `512660-军工ETF国泰/` 已废弃，勿再写入）
        ↓
 引导: 若用户有仓位方案要评估 → /invest-a-journal
 ```
@@ -121,6 +116,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 7. **资金流向与趋势**（🆕 R15，行业 ETF 必须：`sector-flow` 同花顺 THS 行业 3/5/10 日净额 + 单时点窗口分解（近端 vs 中段）+ 积累序列（≥6 日）；对照 pulse 涨停热度盘面结合；**证据非信号，趋势与日期配合**）
 8. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
 9. 对冲覆盖（hedge-map）
+9b. 动态基差与持仓（F 系列：futures_basis 状态度量 + 历史演变分布参照，非预测）
 10. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
 11. 因子/主题逻辑（须可追溯来源，否则「待验证」）
 12. 多情景 / 交易结构（可选，LAW 6a）
@@ -288,6 +284,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 关键矛盾已识别（如 CAPEX 总量降 vs 算力增），不是数据点的罗列
 - [ ] 文件名包含实际北京时间（非硬编码）
 - [ ] 极值断言（峰值/最大/最低）基于全量序列 Python 聚合，非打印子集（R1）
+- [ ] 无「Python calc 视角」类未实跑标注——来源标注仅两种：引擎字段 / `[来源: Python calc: formula]`（共享规范 §2.3 强制行为 5）
 - [ ] 检索/新闻口径数字带「检索摘要口径，出处待核实」标注，未归因到未读原文的媒体（R2）
 - [ ] 计数经 Python（`len()`），无目视计数（R3）
 - [ ] **报告复检流程已执行**（CLAUDE.md「报告复检流程」三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果

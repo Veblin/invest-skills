@@ -1,8 +1,11 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
 import math
+import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-import）
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
+
+from lib.nums import row_value_or_last  # review 二轮 R-13：dict 行末列兜底（可单测）
 
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
@@ -235,7 +238,7 @@ def collect_northbound(symbol: str) -> dict:
     """北向资金。并行：Tushare hsgt_top10 + akshare 个股持股变动。"""
     tasks: list[tuple[str, Callable]] = []
     if env.is_tushare_available(env.get_config()):
-        tasks.append(("tushare.hsgt_top10", lambda: _q_tushare_hsgt_top10(symbol)))
+        tasks.append(("tushare.hsgt_top10", lambda: _hsgt_top10_cached(symbol)))
     if env.is_akshare_available() and akshare_push2_available():
         tasks.append(("akshare.stock_hsgt_individual_em",
                       lambda: _q_akshare_northbound(symbol)))
@@ -1769,7 +1772,11 @@ def _ms_fetch_pmi() -> dict[str, Any] | None:
             df = ak.macro_china_pmi()
         if df is None or df.empty:
             return None
-        row = df.iloc[-1]
+        # F0-4: akshare 序列最新在前，iloc[-1] 会取到 2008 年最旧行；
+        # 按「月份」列取最新期行。
+        from ..shared_dates import latest_month_row as _latest_month_row
+
+        row = _latest_month_row(df.to_dict("records"))
         raw_month = row.get("月份")
         if raw_month is not None:
             month = str(raw_month)
@@ -1777,9 +1784,7 @@ def _ms_fetch_pmi() -> dict[str, Any] | None:
             month = str(row.name)
         else:
             month = ""
-        pmi = safe_float(row.get("制造业-指数", row.get("制造业", None)))
-        if pmi is None and len(row) > 1:
-            pmi = safe_float(row.iloc[-1])
+        pmi = row_value_or_last(row, "制造业-指数", "制造业")
         if pmi is None:
             return None
         return {
@@ -1808,7 +1813,14 @@ def _ms_sw_numeric_code(index_code: str) -> str:
 
 
 def _ms_lookup_akshare_sw_code(industry: str) -> str | None:
-    """按申万行业名在 akshare 行业列表中匹配指数代码（L3→L2→L1）。"""
+    """按申万行业名在 akshare 行业列表中匹配指数代码（L3→L2→L1）。
+
+    逐表拉取并立即 exact 扫描，命中即短路返回（常见第一表命中 1 次 API
+    调用；修复前先拉全 3 表，精确命中场景 1 次调用退化为 3 次）。exact
+    全 miss 再对已拉表做 substring 扫描（不重拉，最坏 3 次调用）。单表
+    拉取失败跳过继续——其余表已找到的匹配不因限流整体丢失（修复前
+    blanket except 让表 1 已命中的结果也返回 None）。
+    """
     if not env.is_akshare_available():
         return None
     name = industry.strip()
@@ -1817,21 +1829,23 @@ def _ms_lookup_akshare_sw_code(industry: str) -> str | None:
     try:
         import akshare as ak
         loaders = (ak.sw_index_third_info, ak.sw_index_second_info, ak.sw_index_first_info)
+        tables: list = []
         with akshare_direct_session():
             for loader in loaders:
-                df = loader()
+                try:
+                    df = loader()
+                except Exception as exc:
+                    logger.debug("akshare sw index loader failed: %s", exc)
+                    continue
                 if df is None or df.empty:
                     continue
-                for _, row in df.iterrows():
+                tables.append(df)
+                for _, row in df.iterrows():  # exact 扫描：命中即返回
                     idx_name = str(row.get("行业名称", "")).strip()
                     code = str(row.get("行业代码", "")).strip()
                     if name == idx_name and code:
                         return code
-        with akshare_direct_session():
-            for loader in loaders:
-                df = loader()
-                if df is None or df.empty:
-                    continue
+            for df in tables:  # substring 扫描：复用已拉表
                 for _, row in df.iterrows():
                     idx_name = str(row.get("行业名称", "")).strip()
                     code = str(row.get("行业代码", "")).strip()
@@ -2048,6 +2062,30 @@ def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
 
 _MIN_NORTHBOUND_DAYS = 5
 
+# 同 run 按日缓存（仿 _cninfo_hold_cache 模式）：collect_northbound 与
+# _ms_fetch_northbound_stock 以相同参数（30 日窗口）重复拉取 hsgt_top10。
+# 缓存原始 rows（稀疏判定在消费方 _MIN_NORTHBOUND_DAYS，语义不变）；
+# None 不落缓存；跨日自动失效。
+_hsgt_top10_cache: dict[str, list[dict]] = {}
+_hsgt_top10_cache_day: str = ""
+_hsgt_top10_cache_lock = threading.Lock()  # D8：多线程 + 可变状态必须加锁（对齐 _run_kline_quote_cache）
+
+
+def _hsgt_top10_cached(symbol: str) -> list[dict] | None:
+    global _hsgt_top10_cache_day
+    day = _today()
+    with _hsgt_top10_cache_lock:
+        if _hsgt_top10_cache_day != day:
+            _hsgt_top10_cache.clear()
+            _hsgt_top10_cache_day = day
+        if symbol in _hsgt_top10_cache:
+            # 副本：调用方 mutate 不污染缓存对象（对齐 _run_kline_quote_cache）
+            return [dict(r) for r in _hsgt_top10_cache[symbol]]
+        rows = _q_tushare_hsgt_top10(symbol)  # 模块全局名：测试 patch 命名空间仍可拦截
+        if rows:
+            _hsgt_top10_cache[symbol] = [dict(r) for r in rows]
+        return rows
+
 
 def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     """个股北向近 10 个交易日净额（元）。
@@ -2057,15 +2095,16 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
     """
     try:
-        records = _q_tushare_hsgt_top10(symbol)
+        records = _hsgt_top10_cached(symbol)
         if records:
             recent = _recent_flow_records(records, limit=10)
-            if len(recent) >= _MIN_NORTHBOUND_DAYS:
-                net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+            valued = [r for r in recent if _flow_amount_yuan(r) is not None]
+            if len(valued) >= _MIN_NORTHBOUND_DAYS:
+                net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
                 return {
                     "records": recent,
                     "net_sum_10d": net_sum,
-                    "days": len(recent),
+                    "days": len(valued),
                     "source": "tushare.hsgt_top10",
                 }
     except Exception as exc:
@@ -2075,11 +2114,16 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     if not records:
         return None
     recent = _recent_flow_records(records, limit=10)
-    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent) if v is not None)
+    # 与 tushare 分支同守卫：只数有值行（无值行计入会让 N 日合计被误标为
+    # 10 日合计——akshare 映射不预滤无值行，code-review）
+    valued = [r for r in recent if _flow_amount_yuan(r) is not None]
+    if len(valued) < _MIN_NORTHBOUND_DAYS:
+        return None
+    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
     return {
         "records": recent,
         "net_sum_10d": net_sum,
-        "days": len(recent),
+        "days": len(valued),
         "source": "akshare.stock_hsgt_individual_em",
     }
 
@@ -2405,15 +2449,8 @@ def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
     return sorted(set(sampled))
 
 
-def _ms_pcr_on_date(
-    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
-) -> float | None:
-    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
-    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
-    df = _run_with_timeout(
-        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
-        8.0, f"opt_daily:{trade_date}",
-    )
+def _ms_pcr_from_df(df: Any, put_codes: set[str], call_codes: set[str]) -> float | None:
+    """从单日 opt_daily DataFrame 计算 PCR（_ms_pcr_on_date 与探针共用）。"""
     if df is None or getattr(df, "empty", True):
         return None
     put_vol = call_vol = 0.0
@@ -2434,6 +2471,18 @@ def _ms_pcr_on_date(
     if call_vol <= 0:
         return None
     return put_vol / call_vol
+
+
+def _ms_pcr_on_date(
+    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
+) -> float | None:
+    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
+    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
+    df = _run_with_timeout(
+        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
+        8.0, f"opt_daily:{trade_date}",
+    )
+    return _ms_pcr_from_df(df, put_codes, call_codes)
 
 
 def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
@@ -2459,14 +2508,47 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
     recent_dates = [d for d in dates if d >= cutoff]
     fetch_dates = sorted(set(sampled) | set(recent_dates))
 
+    ratio_by_date: dict[str, float] = {}
+    # F1-5 修复：批量取数前单点预检——端点整体挂起/限流时（实测 56 天 × 8s
+    # 超时风暴，单次报告拖慢数分钟），8s 探针失败重试一次、两次均败才整体
+    # 降级跳过（单次网络抖动不抹掉整个 PCR 维度）。端点正常时探针结果直接
+    # 复用（不再重复取 fetch_dates[-1]），净额外查询为 0。
+    if fetch_dates:
+        probe_df = _run_with_timeout(
+            lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
+            8.0, f"opt_daily-probe:{fetch_dates[-1]}",
+        )
+        if probe_df is None:
+            # 探针失败不整体丢弃：单次网络抖动/慢查询不应抹掉整个 PCR
+            # 维度（旧实现单日失败仅跳过当日并带 stale/partial 标志）。
+            # 重试一次，仍失败才整体降级。
+            probe_df = _run_with_timeout(
+                lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
+                8.0, f"opt_daily-probe2:{fetch_dates[-1]}",
+            )
+            if probe_df is None:
+                logger.warning(
+                    "opt_daily probe failed twice (%s); "
+                    "skipping PCR fetch storm (%d dates)",
+                    fetch_dates[-1], len(fetch_dates),
+                )
+                return None
+        # 探针结果直接计入（不再重复取 fetch_dates[-1]）；当日无期权成交
+        # 未命中代码集时留空，由主循环重取。
+        probe_ratio = _ms_pcr_from_df(probe_df, put_set, call_set)
+        if probe_ratio is not None:
+            ratio_by_date[fetch_dates[-1]] = probe_ratio
+        else:
+            logger.debug("opt_daily probe %s: no usable PCR row", fetch_dates[-1])
+
     def _on_pcr_error(td: str, exc: Exception) -> None:
         logger.debug("opt_daily %s failed: %s", td, exc)
 
     # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
     # _base._map_parallel）：~123 次串行最坏 16 分钟
-    ratio_by_date: dict[str, float] = {}
+    remaining = [d for d in fetch_dates if d not in ratio_by_date]
     for td, r in _map_parallel(
-        fetch_dates,
+        remaining,
         lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
         on_error=_on_pcr_error,
     ):

@@ -16,7 +16,6 @@ BASE_SCORE = 50.0
 
 CROSS_SOURCE_MATCH = +15.0     # 多源一致
 PAID_SOURCE = +10.0            # Tushare 付费/签名数据
-PRIMARY_SOURCE = +5.0          # 被选为主源的渠道
 RECENT_DATA = +5.0             # 近 30 日数据（vs 滞后）
 MULTI_SOURCE_BONUS = +5.0      # 有 ≥2 个有效源
 
@@ -145,17 +144,3 @@ def to_credibility_label(score: float) -> str:
     if score >= 40:
         return "🟠 低可信"
     return "🔴 极低可信"
-
-
-def render_credibility_table(scores: dict[str, float]) -> str:
-    """渲染可信度评分为 Markdown 表格。"""
-    lines = [
-        "## 证据可信度评分",
-        "",
-        "| 维度 | 分数 | 可信度 |",
-        "|------|------|--------|",
-    ]
-    for dim, score in sorted(scores.items(), key=lambda x: -x[1]):
-        label = to_credibility_label(score)
-        lines.append(f"| {dim} | {score:.0f} | {label} |")
-    return "\n".join(lines)

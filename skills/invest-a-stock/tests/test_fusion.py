@@ -237,6 +237,28 @@ class TestFuseFromSourceResults:
         fused = fuse_from_source_results(dim_results)
         assert "valuation" not in fused
 
+    def test_l2_special_case_only_valuation_immune_to_whitelist_growth(self, monkeypatch):
+        """L2 白名单路径仅对 valuation 生效：白名单新增第三维时，该维度的提取
+        路径不得被静默切换到 _extract_l2_scalar 全扫描口径（code-review）。"""
+        import lib.fusion as fusion_mod
+        from lib.schema import DimensionResult
+
+        monkeypatch.setattr(fusion_mod, "_CV_L2_FIELDS", {
+            "financials": ("roe", "grossprofit_margin", "revenue", "net_profit"),
+            "valuation": ("total_mv", "total_mv_yi", "market_cap"),
+            "northbound": ("net_mf_vol",),  # 第三维：不得改变 northbound 提取路径
+        })
+        # 最新行无值：_extract_scalar（latest_only）→ None；_extract_l2_scalar
+        # （全扫描）→ 100.0。若 northbound 被查表误切入 L2 路径会静默产出融合值。
+        sr = SourceResult(
+            "tushare.test",
+            [{"net_mf_vol": 100.0}, {"net_mf_vol": None}],
+            "northbound",
+        )
+        dims = {"northbound": DimensionResult("northbound", [sr])}
+        fused = fusion_mod.fuse_from_source_results(dims)
+        assert "northbound" not in fused
+
     def test_with_missing_dimension_result(self):
         """DimensionResult not passed → skipped."""
         from lib.fusion import fuse_from_source_results

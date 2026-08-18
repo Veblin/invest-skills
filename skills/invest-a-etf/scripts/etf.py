@@ -118,10 +118,13 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     # 自投成 100%/5% 假象），与 journal 路径（不 persist-first）语义一致；写库放
     # 查询后，下次报告的分位即含今日（幂等，失败不阻断报告）
     idx = CSINDEX_MAP.get(symbol)
-    if idx:
-        res = _persist_index_pe([idx])
-        if res.get("error"):
-            print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
+    # F1-6 修复：report 路径幂等回填 CSINDEX_MAP 全部指数（不再只回填本标的），
+    # 自愈「上证50/中证500/中证1000 自 08-06 停更」类停滞——任何一次 ETF
+    # 报告都会刷新全部宽基指数的 20 日滚动窗口。开销 ~6 次 csindex 请求
+    # （data_bridge 1d 缓存内仅首报触发）。
+    res = _persist_index_pe(None) if idx else {"error": None}
+    if res.get("error"):
+        print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
     quote = query_etf_quote(symbol)
     kline = query_etf_kline(symbol)
     share_history = query_etf_share_history(symbol, days=20)
@@ -421,6 +424,28 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
     return 0
 
 
+def cmd_futures_basis(symbol: str, *, as_json: bool) -> int:
+    """ETF 股指期货动态基差状态（F 系列，状态度量非预测）。"""
+    from dates import shanghai_now  # noqa: E402
+    from futures_basis import query_futures_basis  # noqa: E402
+
+    result = query_futures_basis(symbol)
+    payload = {"skill": "invest:a-etf", "generated_at": shanghai_now().isoformat(),
+               "symbol": symbol, "futures_basis": result}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, default=str))
+        return 0
+    if not result.get("available"):
+        print(f"⚠️ {symbol} 期货基差不可得：{result.get('note', '')}")
+        return 1
+    print(f"=== {symbol} 动态基差（{result['futures_symbol']}，{result['date']}）===")
+    print(f"  当前基差: {result['current_basis_pct']}%（{result['current_basis_pts']} 点，合约 {result['contract']}）")
+    print(f"  历史分位: {result['percentile']}%（中位数 {result['median_basis_pct']}%，n={result['n_history']}）")
+    print(f"  演变分布参照: {result['distribution_ref']}")
+    print(f"  ⚠️ {result['note']}")
+    return 0
+
+
 def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
     """R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日，大单口径亿元）。"""
     symbol = _validate_symbol(symbol)
@@ -669,6 +694,9 @@ def main(argv: list[str] | None = None) -> int:
         "collect-sector-flow",
         help="R15: 手动触发行业资金流每日采集（幂等，非交易日跳过；盘后触发）",
     )
+    p_fb = sub.add_parser("futures-basis", help="F 系列: ETF 股指期货动态基差状态（状态度量，非预测）")
+    p_fb.add_argument("symbol", help="6 位 ETF 代码")
+    p_fb.add_argument("--json", action="store_true", help="输出完整 JSON")
 
     args = parser.parse_args(argv)
     if args.cmd == "report":
@@ -689,6 +717,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_sector_flow(args.symbol, as_json=args.json)
     if args.cmd == "collect-sector-flow":
         return cmd_collect_sector_flow()
+    if args.cmd == "futures-basis":
+        return cmd_futures_basis(args.symbol, as_json=args.json)
     return 1
 
 

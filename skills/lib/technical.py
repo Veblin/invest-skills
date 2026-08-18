@@ -421,7 +421,7 @@ def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
     """N 日极值（最高/最低收盘价和日期）。"""
     # 同 compute()：close None/NaN 行剔除（review #10 第二轮）
     rows = [r for r in rows if safe_float(r.get("close")) is not None]
-    closes = [r.get("close", 0) or 0 for r in rows]
+    closes = [safe_float(r.get("close")) for r in rows]  # 过滤后必可转，str 须数值化
     dates = [r.get("trade_date", "") for r in rows]
 
     result: dict[int, dict] = {}
@@ -450,6 +450,35 @@ def _n_day_extremes(rows: list[dict], ns: tuple[int, ...]) -> dict[int, dict]:
             "is_n_day_low": is_low_today,
         }
     return result
+
+
+def _ytd_low(rows: list[dict]) -> dict[str, Any]:
+    """年内低点（末行数据所在年份 1/1 至今的最低收盘价）→ {available, low, low_date, current, dist_pct}。
+
+    供 v0.2.6 四不原则 ①-b（不在低位做短线，De Bondt & Thaler 1985 长期反转锚）。
+    dist_pct = (current - low) / low * 100，有符号（正 = 高于年内低点）。
+    """
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
+    closes = [safe_float(r.get("close")) for r in rows]  # 过滤后必可转
+    dates = [str(r.get("trade_date", "")) for r in rows]
+    if not rows:
+        return {"available": False, "reason": "数据为空"}
+    year = dates[-1][:4]
+    if not year.isdigit():
+        return {"available": False, "reason": f"末行日期不可解析: {dates[-1]!r}"}
+    ytd = [(c, d) for c, d in zip(closes, dates) if str(d)[:4] == year]
+    if not ytd:
+        return {"available": False, "reason": f"年内（{year}）无数据"}
+    low, low_date = min(ytd, key=lambda cd: cd[0])
+    current = closes[-1]
+    dist_pct = (current - low) / low * 100 if low else None
+    return {
+        "available": True,
+        "low": low,
+        "low_date": low_date,
+        "current": current,
+        "dist_pct": round(dist_pct, 2) if dist_pct is not None else None,
+    }
 
 
 def _drawdown(closes: list[float], dates: list[str], n: int = 60) -> dict[str, Any]:
@@ -513,11 +542,14 @@ def compute(rows: list[dict]) -> dict[str, Any]:
     if not rows:
         return {"error": "empty_kline_data", "message": "K 线数据为空，无法计算技术指标"}
 
-    closes = [r.get("close", 0) or 0 for r in rows]
-    highs = [r.get("high", 0) or 0 for r in rows]
-    lows = [r.get("low", 0) or 0 for r in rows]
-    opens = [r.get("open", 0) or 0 for r in rows]
-    vols = [r.get("vol", 0) or 0 for r in rows]
+    # 数值化：object-dtype 源的 str 值过 safe_float 过滤后仍是 str，直接参与
+    # 算术（sma 求和 int+str）或渲染 .2f 会 TypeError（code-review）。close 已
+    # 由上方过滤保证可转；其余列保留 `or 0` 兜底语义。
+    closes = [safe_float(r.get("close")) or 0 for r in rows]
+    highs = [safe_float(r.get("high")) or 0 for r in rows]
+    lows = [safe_float(r.get("low")) or 0 for r in rows]
+    opens = [safe_float(r.get("open")) or 0 for r in rows]
+    vols = [safe_float(r.get("vol")) or 0 for r in rows]
     dates = [r.get("trade_date", "") for r in rows]
 
     n_rows = len(rows)
@@ -649,6 +681,8 @@ def compute(rows: list[dict]) -> dict[str, Any]:
     atr_latest = atr_vals[-1] if atr_vals else None
     result["volatility"]["atr"] = {
         "value": round(atr_latest, 2) if atr_latest is not None else None,
+        # v0.2.6 D 类字段：ATR14 占价格百分比（动态止损波动自适应，ABCD §4.4）
+        "pct": round(atr_latest / closes[-1] * 100, 2) if atr_latest is not None and closes[-1] else None,
         "available": atr_latest is not None,
     }
     if atr_latest is None and n_rows < 15:
@@ -685,12 +719,38 @@ def compute(rows: list[dict]) -> dict[str, Any]:
     }
 
     # --- 结构 ---
-    extremes = _n_day_extremes(rows, (20, 60, 120))
+    extremes = _n_day_extremes(rows, (20, 60, 120, 250))
     dd = _drawdown(closes, dates, 60)
     result["structure"] = {
         "extremes": extremes,
         "drawdown_60d": dd,
     }
+
+    # --- 位置距离（v0.2.6 D 类字段，服务四不原则 ①-a/①-b）---
+    # 有符号百分比：负 = 低于该位。52 周高低点来自 extremes[250]（George & Hwang 2004）；
+    # 年内低点来自 _ytd_low（De Bondt & Thaler 1985）。数据不足时 None + reason（D5 降级先例）。
+    distances: dict[str, Any] = {}
+    ext_250 = extremes.get(250, {})
+    if ext_250.get("available") and closes[-1]:
+        h52, l52 = ext_250["max"], ext_250["min"]
+        distances["dist_to_52w_high_pct"] = round((closes[-1] - h52) / h52 * 100, 2) if h52 else None
+        distances["dist_to_52w_low_pct"] = round((closes[-1] - l52) / l52 * 100, 2) if l52 else None
+    else:
+        distances["dist_to_52w_high_pct"] = None
+        distances["dist_to_52w_low_pct"] = None
+        distances["reason_52w"] = ext_250.get("reason") or "52 周数据不可得"
+    ytd = _ytd_low(rows)
+    distances["dist_to_ytd_low_pct"] = ytd.get("dist_pct")
+    distances["ytd_low"] = ytd.get("low")
+    distances["ytd_low_date"] = ytd.get("low_date")
+    if not ytd.get("available"):
+        distances["reason_ytd"] = ytd.get("reason")
+    # 全市场分位字段（四不原则 ①-c/①-d）：per-symbol 全市场 amount/换手分布数据层未落地，
+    # 硬算分位违反 D4 覆盖范围标注规则 → 占位 None + note（D12 WONTFIX，P1 排期）。
+    distances["amount_pctile_20d"] = None
+    distances["turnover_pctile_20d"] = None
+    distances["pctile_note"] = "全市场分位数据层未落地（P1 排期）"
+    result["distances"] = distances
 
     # --- v0.1.9 extensions ---
     ich = ichimoku_summary(highs, lows, closes)
@@ -1001,3 +1061,81 @@ def detect_limit_streaks(
         "period_low": {"value": round(lo, 2), "date": dates[closes.index(lo)]},
         "lookback": len(window),
     }
+
+
+# ---- ADX（v0.2.6 H6 做T 分层：震荡/趋势市判定） ----
+
+def adx(highs: list[float], lows: list[float], closes: list[float], n: int = 14) -> list[float | None]:
+    """Wilder (1978) 平均趋向指数 ADX。
+
+    标准序列：TR / +DM / −DM → Wilder 平滑（平均口径：首段 = 累计均值，
+    后续 prev×(n−1)/n + curr/n——种子与递推同口径，早期条数不被放大 n 倍）
+    → ±DI → DX → ADX（DX 再 Wilder 平滑，均值种子 + 平均递推）。
+    前 2n−1 位为 None（DI 需 n 项、ADX 再需 n 项 DX）。
+    长度 < 2n 返回全 None（数据不足，不抛异常——对齐模块原则）。
+    """
+    m = len(closes)
+    out: list[float | None] = [None] * m
+    if m < 2 * n:
+        return out
+
+    def _wilder(vals: list[float]) -> list[float]:
+        """Wilder 平滑（平均口径）：首段 = 累计均值，后续 = prev×(n−1)/n + v/n。
+
+        种子与递推必须同口径：递推是平均形式（curr 除 n），种子若是前 n 项
+        和（求和口径），早期条数会被放大 ~n 倍、再按 (n−1)/n 缓慢衰减，
+        前 ~30-50 根 ADX 显著偏高。
+        """
+        sm: list[float] = []
+        for i, v in enumerate(vals):
+            if i < n:
+                sm.append(sum(vals[: i + 1]) / (i + 1))
+            else:
+                sm.append(sm[-1] * (n - 1) / n + v / n)
+        return sm
+
+    tr: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(m):
+        if i == 0:
+            tr.append(0.0)
+            plus_dm.append(0.0)
+            minus_dm.append(0.0)
+            continue
+        h_l = highs[i] - lows[i]
+        h_pc = abs(highs[i] - closes[i - 1])
+        l_pc = abs(lows[i] - closes[i - 1])
+        tr.append(max(h_l, h_pc, l_pc))
+        up = highs[i] - highs[i - 1]
+        dn = lows[i - 1] - lows[i]
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+
+    tr_s = _wilder(tr)
+    plus_s = _wilder(plus_dm)
+    minus_s = _wilder(minus_dm)
+
+    # DX 仅从 TR>0 的索引起有效（i=0 的 dx=0 为无效值，混入会拖低初值、
+    # 拖慢收敛）；均值初始化（首个 = 前 n 个有效 DX 均值）+ Wilder 递推；
+    # 发布从 2n−1 起（对齐主流 ADX 惯例的输出起始）。
+    dx_idx: list[int] = []
+    dx_vals: list[float] = []
+    for i in range(1, m):
+        if tr_s[i] > 0:
+            pdi = 100 * plus_s[i] / tr_s[i]
+            mdi = 100 * minus_s[i] / tr_s[i]
+            denom = pdi + mdi
+            dx_vals.append(100 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
+            dx_idx.append(i)
+
+    adx_s: list[float] = []
+    for j, v in enumerate(dx_vals):
+        if j < n:
+            adx_s.append(sum(dx_vals[: j + 1]) / (j + 1))
+        else:
+            adx_s.append(adx_s[-1] * (n - 1) / n + v / n)
+    for j in range(n - 1, len(adx_s)):
+        if dx_idx[j] >= 2 * n - 1:
+            out[dx_idx[j]] = round(adx_s[j], 2)
+    return out

@@ -29,6 +29,40 @@ def invest_a_etf_lib_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "invest-a-etf" / "scripts" / "lib"
 
 
+def gap_scan_lib_dir() -> Path:
+    """skills/invest-a-gap-scan/scripts/lib — canonical gap-scan data pipeline."""
+    return Path(__file__).resolve().parent.parent / "invest-a-gap-scan" / "scripts" / "lib"
+
+
+# 固定模块注册名：pattern-scan shim 与调用方共用同一 canonical 实例
+_GAP_SCAN_KLINE_SOURCE_NAME = "gap_scan_kline_source"
+
+
+def load_gap_scan_module(module_file: str = "kline_source"):
+    """按显式路径加载 gap-scan canonical 模块（仿 load_invest_a_etf_module）。
+
+    返回 sys.modules 缓存的模块实例；canonical 文件缺失抛 ImportError。
+    module_file: "kline_source" 或 "universe"。
+    """
+    mod_name = f"{_GAP_SCAN_KLINE_SOURCE_NAME}_{module_file}"
+    mod = sys.modules.get(mod_name)
+    if mod is not None:
+        return mod
+    lib = gap_scan_lib_dir()
+    s = str(lib)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+    import importlib.util as _ilu
+
+    spec = _ilu.spec_from_file_location(mod_name, lib / f"{module_file}.py")
+    if spec is None or spec.loader is None:
+        raise ImportError(f"gap-scan canonical {module_file}.py missing at {lib}")
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def ensure_invest_a_scripts_on_path() -> Path:
     """Insert invest-a-stock/scripts on sys.path (idempotent). Returns the path."""
     scripts = invest_a_scripts_dir()

@@ -19,11 +19,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 from .shared_dates import (  # noqa: E402
+    latest_month_row as _latest_month_row,
     shanghai_days_ago as _days_ago,
     shanghai_now as _shanghai_now,
     shanghai_today as _today,
     yyyymmdd_to_iso as _to_iso_date,
 )
+from lib.nums import row_value_or_last  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -165,15 +167,20 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 
                 df = ak.macro_china_pmi()
                 if df is not None and not df.empty:
-                    row = df.iloc[-1]
+                    # F0-4: akshare 序列最新在前，iloc[-1] 会取到 2008 年最旧行；
+                    # 按「月份」列取最新期行。
+                    row = _latest_month_row(df.to_dict("records"))
                     pmi_val = None
                     for col in ["制造业-指数", "制造业"]:
                         v = row.get(col)
                         if v is not None:
                             pmi_val = float(v)
                             break
-                    if pmi_val is None and len(row) > 1:
-                        pmi_val = float(row.iloc[-1])
+                    if pmi_val is None:
+                        # row 已由 df.to_dict("records") 转为 dict（F0-4），
+                        # iloc 是 Series 专属 API——取末列值兜底
+                        # （review 二轮 R-13：收敛到 nums.row_value_or_last 可单测）
+                        pmi_val = row_value_or_last(row)
                     if pmi_val is not None:
                         context["pmi"] = {
                             "value": round(pmi_val, 2),
@@ -195,7 +202,7 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 
                 df = ak.macro_china_cpi()
                 if df is not None and not df.empty:
-                    row = df.iloc[-1]
+                    row = _latest_month_row(df.to_dict("records"))
                     cpi_val = None
                     for col in ["全国-当月", "全国"]:
                         v = row.get(col)
@@ -231,7 +238,7 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 
                 df = ak.macro_china_ppi()
                 if df is not None and not df.empty:
-                    row = df.iloc[-1]
+                    row = _latest_month_row(df.to_dict("records"))
                     ppi_val = None
                     for col in ["全国-当月", "全国"]:
                         v = row.get(col)

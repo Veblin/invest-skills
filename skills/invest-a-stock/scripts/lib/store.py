@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 from . import env
 from .db_util import connect_db, load_recent_rows, safe_close, upsert_daily_rows
 from .json_util import dumps_json, json_default
+from .nums import safe_float
 from .schema import index_dimensions
 from .shared_dates import shanghai_now  # 上海时区口径（曾用 UTC，跨时区偏移 8h）
 
@@ -159,12 +160,46 @@ def init_db() -> None:
                 raw_json TEXT,
                 collected_at TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS market_daily (
+                date TEXT NOT NULL,
+                ts_code TEXT NOT NULL,
+                open REAL, high REAL, low REAL, close REAL,
+                pre_close REAL, pct_chg REAL, vol REAL, amount REAL,
+                turnover_rate REAL,
+                PRIMARY KEY (date, ts_code)
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_daily_date ON market_daily(date);
+            CREATE INDEX IF NOT EXISTS idx_market_daily_code ON market_daily(ts_code);
+            CREATE TABLE IF NOT EXISTS futures_daily (
+                date TEXT NOT NULL,
+                symbol TEXT NOT NULL,          -- IF / IH / IC / IM
+                contract TEXT NOT NULL,        -- 当月合约（IF2608.CFX）或 main_continuous（sina 降级）
+                open REAL, high REAL, low REAL, close REAL, settle REAL,
+                oi REAL, oi_chg REAL,
+                basis_pts REAL, basis_pct REAL, oi_change_pct REAL,
+                source TEXT DEFAULT 'tushare',
+                collected_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (date, symbol)
+            );
+            CREATE INDEX IF NOT EXISTS idx_futures_daily_symbol ON futures_daily(symbol);
         """)
         # v0.2.2 迁移：为已有表添加北向资金列
         for col, col_type in [
             ("northbound_net_inflow", "REAL"),
             ("northbound_direction", "TEXT"),
             ("northbound_source", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    pass  # 列已存在
+                else:
+                    raise
+        # v0.2.6 迁移：futures 资金面维度（F 系列）
+        for col, col_type in [
+            ("futures_basis_pct", "REAL"),
+            ("futures_oi_change_pct", "REAL"),
         ]:
             try:
                 c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
@@ -1116,20 +1151,12 @@ _MACRO_INDICATOR_KEYS = ("pmi", "cpi", "ppi", "lpr", "money_supply", "loan", "vi
 def _macro_safe_float(v: Any) -> float | None:
     """宏观指标值转 float；dict 形态（{value, source, signal}）取 value。
 
-    None / NaN / ±inf / 非数字返回 None（对齐 lib.nums.safe_float 语义，
+    数值语义委托 lib.nums.safe_float（None / NaN / ±inf / 非数字 → None；
     NaN 若写入 sqlite 会绑定为 NULL，穿透到分位计算会污染序列）。
     """
     if isinstance(v, dict):
         v = v.get("value")
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    if f != f or f in (float("inf"), float("-inf")):  # NaN / ±inf
-        return None
-    return f
+    return safe_float(v)
 
 
 def _merge_macro_raw_json(c: sqlite3.Connection, date: str, indicators: dict) -> dict:
@@ -1196,12 +1223,156 @@ def save_macro_snapshot(macro_context: dict) -> str | None:
 
 
 def load_macro_history(days: int = 365) -> list[dict]:
-    """macro_snapshots 近 N 日记录，按 date ASC（供宏观护栏趋势/分位消费）。"""
+    """macro_snapshots 近 N 日记录，按 date ASC（宏快照的读路径，供调用方按需消费）。"""
     init_db()
     c = _conn()
     try:
         return load_recent_rows(c, "macro_snapshots", limit=int(days))
     except sqlite3.OperationalError:
         return []  # 表不可用（DB 被替换等）→ 空历史而非抛异常
+    finally:
+        _safe_close(c)
+
+
+def save_futures_daily(rows: list[dict]) -> int:
+    """futures_daily 批量写入（v0.2.6 F 系列数据层）。merge=True 幂等。"""
+    if not rows:
+        return 0
+    init_db()
+    c = _conn()
+    try:
+        n = upsert_daily_rows(c, "futures_daily", rows, pk=("date", "symbol"), merge=True)
+        c.commit()
+        return n
+    finally:
+        _safe_close(c)
+
+
+def clear_futures_daily() -> int:
+    """清空 futures_daily（--force 全量重建用）。返回删除行数。"""
+    init_db()
+    c = _conn()
+    try:
+        n = c.execute("DELETE FROM futures_daily").rowcount
+        c.commit()
+        return n
+    finally:
+        _safe_close(c)
+
+
+def load_futures_daily(symbol: str | None = None, limit: int = 5000) -> list[dict]:
+    """futures_daily 读取（symbol=None 全品种，date ASC）。"""
+    init_db()
+    c = _conn()
+    try:
+        if symbol:
+            rows = c.execute(
+                "SELECT * FROM futures_daily WHERE symbol=? ORDER BY date DESC LIMIT ?",
+                (symbol.upper(), int(limit)),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM futures_daily ORDER BY date DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+    finally:
+        _safe_close(c)
+
+
+def latest_futures_date() -> str | None:
+    """futures_daily 最新交易日。"""
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute("SELECT MAX(date) AS d FROM futures_daily").fetchone()
+        return row["d"] if row and row["d"] else None
+    finally:
+        _safe_close(c)
+
+
+def futures_contracts() -> set[str]:
+    """已入库合约集合（断点续跑判定）。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute("SELECT DISTINCT contract FROM futures_daily").fetchall()
+        return {str(r["contract"]) for r in rows}
+    finally:
+        _safe_close(c)
+
+
+def futures_dates_by_symbol() -> dict[str, set[str]]:
+    """{symbol: {date}} 已入库日期集合（sina 降级 fill-only 判定）。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute("SELECT symbol, date FROM futures_daily").fetchall()
+        out: dict[str, set[str]] = {}
+        for r in rows:
+            out.setdefault(str(r["symbol"]), set()).add(str(r["date"]))
+        return out
+    finally:
+        _safe_close(c)
+
+
+def save_market_daily(rows: list[dict]) -> int:
+    """market_daily 批量写入（v0.2.6 全市场分位数据层）。
+
+    rows: [{date, ts_code, open, high, low, close, pre_close, pct_chg, vol, amount, turnover_rate}]
+    merge=True：同日二次写入非 NULL 覆盖、NULL 保留旧值（对齐日快照三件套）。
+    """
+    if not rows:
+        return 0
+    init_db()
+    c = _conn()
+    try:
+        n = upsert_daily_rows(c, "market_daily", rows, pk=("date", "ts_code"), merge=True)
+        c.commit()
+        return n
+    finally:
+        _safe_close(c)
+
+
+def latest_market_daily_date() -> str | None:
+    """market_daily 最新交易日（无数据返回 None）。"""
+    init_db()
+    c = _conn()
+    try:
+        row = c.execute("SELECT MAX(date) AS d FROM market_daily").fetchone()
+        return row["d"] if row and row["d"] else None
+    finally:
+        _safe_close(c)
+
+
+def market_daily_dates() -> set[str]:
+    """market_daily 已有交易日集合（用于增量缺日计算）。"""
+    init_db()
+    c = _conn()
+    try:
+        rows = c.execute("SELECT DISTINCT date FROM market_daily").fetchall()
+        return {str(r["date"]) for r in rows}
+    finally:
+        _safe_close(c)
+
+
+def load_market_daily(days: int | None = None, dates: list[str] | None = None) -> list[dict]:
+    """market_daily 明细行读取。
+
+    days=N → 最近 N 个交易日全市场行；dates=[...] → 指定交易日全市场行（date ASC）。
+    两参数互斥；均缺省时返回最近 20 个交易日（分位默认窗）。
+    """
+    init_db()
+    c = _conn()
+    try:
+        if dates is not None:
+            if not dates:
+                return []
+            ph = ",".join("?" * len(dates))
+            rows = c.execute(
+                f"SELECT * FROM market_daily WHERE date IN ({ph}) ORDER BY date ASC", tuple(dates)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        limit = int(days) if days is not None else 20
+        return load_recent_rows(c, "market_daily", limit=limit * 6000, order_col="date")
     finally:
         _safe_close(c)

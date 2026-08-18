@@ -220,32 +220,34 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
 def _dcf_extract_net_debt(financials: dict) -> tuple[float | None, str]:
     """从 financials dcf_preprocess 提取净债务。
 
+    F0-1 修复：净债务口径必须是有息负债 − 货币资金。当前采集字段只有
+    total_liab（含应付账款等经营负债）与 money_cap，无有息负债明细——
+    total_liab 口径会系统性高估净债务（300750 实测 3528.7 亿 vs 有息口径
+    远低于此），导致每股价值荒谬（14.73 元 vs 现价 393.93）。
+    有息负债字段不可得时返回 (None, 原因)，下游抑制每股换算并说明，
+    不再用 total_liab 替代。
+
     Returns:
         (net_debt: float | None, source_description: str)
     """
     dcf_pre = financials.get("dcf_preprocess") or {}
     net_debt_info = dcf_pre.get("net_debt") or {}
+    method = net_debt_info.get("method") or ""
+    # 只有显式标记为有息负债口径的净债务才可用于每股换算；
+    # total_liab 口径与无标记的旧快照一律抑制（注意「非有息口径」
+    # 包含「有息口径」子串，须先排除）。
+    if "非有息口径" in method or (
+        "有息口径" not in method and not method.startswith("interest")
+    ):
+        return None, (
+            "不可得（净债务需有息负债口径，采集字段仅有 total_liab 含经营负债，"
+            "不用于每股换算）"
+        )
     nd = net_debt_info.get("net_debt")
     if nd is not None and isinstance(nd, (int, float)):
-        return float(nd), "valuation.calc_net_debt（最新财报）"
-    # 降级：自己从 financials 行计算
-    from lib.valuation import extract_financial_rows, _latest_financial_row
-    rows = extract_financial_rows(financials)
-    latest = _latest_financial_row(rows)
-    if latest:
-        _raw_debt = latest.get("total_liab")
-        if _raw_debt is None:
-            _raw_debt = latest.get("debt_total")
-        debt = _safe_num(_raw_debt)
-
-        _raw_cash = latest.get("money_cap")
-        if _raw_cash is None:
-            _raw_cash = latest.get("cash")
-        cash = _safe_num(_raw_cash)
-        if debt is not None and cash is not None:
-            nd = debt - cash
-            return nd, "总负债 - 货币资金（最新财报，近似）"
-    return None, "net debt 数据不可得，DCF 估值可能偏高"
+        return float(nd), "valuation.calc_net_debt（有息负债口径）"
+    # 降级路径：同样只接受有息负债口径，total_liab 不再替代
+    return None, "net debt 数据不可得（有息负债字段未采集），每股换算已抑制"
 
 
 # --- _aggregate_scenario_dcf ---
@@ -333,6 +335,26 @@ def _section_dcf_valuation(
     只输出企业价值区间 + 三情景假设 + 概率权重，并注明仅供参考。
     """
     header = "## D. DCF 估值区间与三角对照"
+
+    # F0-8 修复：金融行业 DCF 不适用（银行/非银豁免）——输出明确的框架切换
+    # 说明，而不是 F-3 负债率误触发的"研究终止条件触发"。
+    industry = ""
+    basic_dim = (dims or {}).get("basic_info") or {}
+    basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
+    if isinstance(basic_data, list):
+        for r in basic_data:
+            if isinstance(r, dict) and r.get("industry"):
+                industry = str(r.get("industry"))
+                break
+    elif isinstance(basic_data, dict):
+        industry = str(basic_data.get("industry") or "")
+    if industry in ("银行", "非银金融", "保险", "证券", "多元金融"):
+        return "\n".join([
+            header, "",
+            "**DCF 对金融行业不适用（金融业豁免），估值框架切换为 PB-ROE/股息贴现视角。**",
+            "> 银行/非银的资产负债率为经营常态、FCFF 口径不适用，DCF 段落按行业豁免跳过，不输出估值数字。",
+        ])
+
     if veto_triggered:
         return "\n".join([header, "", "**研究终止条件触发，估值段落已跳过。**"])
 
@@ -420,6 +442,9 @@ def _section_dcf_valuation(
     else:
         beta_note_parts.append(f"[{beta_source}]")
     beta_note = "，".join(beta_note_parts)
+    if wacc_result.get("beta_is_default"):
+        # F0-5: β 为默认值时明示对估值量级的影响，不静默参与输出。
+        beta_note += "（默认值参与计算，企业价值仅作量级参考）"
 
     lines.append(
         f"- WACC：**{wacc_label}**（cost_of_equity 近似，因债务成本/权重数据不可得；"
@@ -474,6 +499,14 @@ def _section_dcf_valuation(
                 f"{ev['enterprise_value']:,.0f} |"
             )
     lines.append("")
+    if not can_compute_per_share:
+        # F0-1: 净债务口径不可得（有息负债字段未采集）时显式说明，
+        # 三情景仅输出企业价值，禁止用 total_liab 口径凑每股参考价。
+        lines.append(
+            f"> ⚠️ 每股换算已抑制：{nd_source}。三情景仅输出企业价值（元），"
+            "不输出每股参考价与安全边际——避免净债务口径错误导致的荒谬每股值。"
+        )
+        lines.append("")
 
     def _assump_text(sc: str) -> str:
         a = scenario_results[sc]["assumptions"]
@@ -605,8 +638,14 @@ def _section_dcf_valuation(
             )
             lines.append(f"| {wl} | {cells} |")
         lines.append("")
+        dcf_pre = (financials.get("dcf_preprocess") or {})
+        fcff_base_ed = str(dcf_pre.get("end_date") or "")
+        fcff_period_note = ""
+        if dcf_pre.get("fcff") is not None and fcff_base_ed and not fcff_base_ed.endswith("1231"):
+            # F0-1: FCFF 基期非年报期（如半年报）时标注未年化，防误读量级。
+            fcff_period_note = f"（基期 {fcff_base_ed} 非年报期，未年化）"
         lines.append(
-            f"基准：FCFF={fcff_base:,.0f} 元（{'最新一期实际值' if ((financials.get('dcf_preprocess') or {}).get('fcff') or {}).get('fcff') is not None else '基情景首年预测值'}），"
+            f"基准：FCFF={fcff_base:,.0f} 元（{'最新一期实际值' if ((financials.get('dcf_preprocess') or {}).get('fcff') or {}).get('fcff') is not None else '基情景首年预测值'}）{fcff_period_note}，"
             f"显式期增速={growth_s1*100:.1f}%（基情景），预测年数=5。{sensitivity['note']}"
         )
         lines.append("")

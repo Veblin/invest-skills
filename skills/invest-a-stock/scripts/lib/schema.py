@@ -174,6 +174,26 @@ def _extract_l2_scalar(data: Any, keys: tuple[str, ...]) -> float | None:
     return None
 
 
+def _extract_l2_scalar_or_fallback(
+    data: Any, scalar_value: Any, dim_name: str, *, allow_scalar_fallback: bool,
+) -> Any:
+    """fusion 三形态统一入口（形态 1/3 调用点语义保持不变，code-review 收口）。
+
+    形态 1（dimension_results_from_legacy，allow_scalar_fallback=False）：
+        L2 维度只接受白名单提取，data 缺失也返回 None、绝不回退 scalar_value
+        （600206 修复：旧 to_dict 键序提取的 PE 注入市值交叉验证）。
+    形态 3（fuse_from_legacy_dicts，allow_scalar_fallback=True）：
+        L2 且 data 存在 → 白名单提取（提取不到也不回退）；L2 且 data 缺失 →
+        回退 scalar_value（兼容手写/旧快照格式）。非 L2 维度 → scalar_value。
+    """
+    l2_keys = _CV_L2_FIELDS.get(dim_name)
+    if l2_keys is not None and data is not None:
+        return _extract_l2_scalar(data, l2_keys)
+    if l2_keys is not None and not allow_scalar_fallback:
+        return None
+    return scalar_value
+
+
 def relative_diff_pct(max_v: float, min_v: float, avg: float) -> float | None:
     """相对差异比例 |max-min|/|avg|；avg 近零时返回 None。"""
     if abs(avg) < _SCALAR_EPSILON:

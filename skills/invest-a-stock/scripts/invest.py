@@ -266,6 +266,12 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
         "--deep", action="store_true",
         help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
+    # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值
+    parser.add_argument("--plan", default=argparse.SUPPRESS, help="JSON 采集计划文件路径")
+    parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
+                        help="从上次中断的步骤继续")
+    parser.add_argument("--save-raw", action="store_true", default=argparse.SUPPRESS,
+                        help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -285,8 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="存入持久化存储（默认开启；--no-store 关闭）")
     pc.add_argument("--no-store", action="store_false", dest="store",
                    help="不存入持久化存储")
-    pc.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
-    pc.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
+    _add_collect_flags(pc)
     pc.add_argument(
         "--with-news-pack",
         action="store_true",
@@ -369,6 +374,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("symbol")
     pe.add_argument("--emit", default="md", choices=["md", "json"])
     pe.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
+    pe.add_argument(
+        "--from-store", action="store_true",
+        help="F2-3: 复用 store 最近一次 collect 快照（dims/flags 兼容时），"
+             "跳过重复现场采集",
+    )
     _add_collect_flags(pe)
 
     pa = sub.add_parser("analyze", help="分析采集结果（输出中间分析 JSON）")
@@ -750,8 +760,12 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
 
     if fmt == "md" and args.outdir:
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        # F2-4: 报告文件名时间戳显式北京时（ZoneInfo Asia/Shanghai），
+        # 不再依赖机器本地时区。shared_dates 是 scripts/lib 的引导 re-export
+        # 模块（lib.dates 不存在，直接 import 会 ModuleNotFoundError 崩掉
+        # 整个 report --outdir 主流程）。
+        from lib.shared_dates import shanghai_now
+        ts = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
         subdir = _report_basename(result, args.symbol, ts)
         outdir = Path(args.outdir).resolve()
         mdpath = _report_filepath(outdir, subdir, ts)
@@ -877,7 +891,16 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         return 1
     env.print_missing_token_warnings()
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
-    result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    # F2-3: --from-store 复用 collect 快照（兼容性校验同 --resume），
+    # 避免 evidence 与 collect 双重现场采集（实测两轮合计 ~2 倍网络负载）。
+    result: dict | None = None
+    if getattr(args, "from_store", False) and _HAS_STORE:
+        cached = _try_resume_collection(args.symbol)
+        if cached and _resume_cache_compatible(args, dims, cached):
+            print("♻️ 复用 store 采集快照（--from-store），跳过现场采集")
+            result = cached
+    if result is None:
+        result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
     if _no_sources_responded(result["summary"]):
         print("⚠️ 所有维度均不可用，无法生成证据表")
@@ -1200,10 +1223,10 @@ def cmd_diff(args: argparse.Namespace) -> int:
         return 0
 
     if args.emit == "md":
-        _print_diff_md(key_diff, diff_result)
+        _print_diff_text(key_diff, diff_result)
         return 0
 
-    _print_diff_compact(key_diff, diff_result)
+    _print_diff_text(key_diff, diff_result)
     return 0
 
 
@@ -1353,30 +1376,12 @@ def _print_diff_events(key_diff: dict) -> None:
         print()
 
 
-def _print_diff_md(key_diff: dict, diff: dict) -> None:
-    """Markdown 格式 diff 输出（按类别分组）。"""
-    old_at = key_diff.get("old_at", diff.get("old_at", ""))[:19]
-    new_at = key_diff.get("new_at", diff.get("new_at", ""))[:19]
-    interval = _diff_interval_str(old_at, new_at)
-    symbol = key_diff.get("symbol", diff.get("symbol", "?"))
+def _print_diff_text(key_diff: dict, diff: dict) -> None:
+    """diff 文本输出（按类别分组）。
 
-    print(f"# {symbol} 变化摘要")
-    print(f"采集间隔: {old_at} → {new_at}{interval}")
-    print()
-
-    if not _print_key_changes(key_diff):
-        print("关键字段无显著变化。")
-        print()
-
-    _print_diff_events(key_diff)
-
-    _print_source_changes(diff.get("source_changes"))
-
-    _print_diff_dimension_supplement(diff)
-
-
-def _print_diff_compact(key_diff: dict, diff: dict) -> None:
-    """compact 格式 diff 输出。"""
+    md 与 compact 两个 --emit 选项共用同一输出（历史实现 _print_diff_md /
+    _print_diff_compact 函数体逐字节相同，已合并）；json 走独立分支。
+    """
     old_at = key_diff.get("old_at", diff.get("old_at", ""))[:19]
     new_at = key_diff.get("new_at", diff.get("new_at", ""))[:19]
     interval = _diff_interval_str(old_at, new_at)
@@ -2029,11 +2034,21 @@ def cmd_classify(args: argparse.Namespace) -> int:
         fin_rows = _q_tushare_financials(args.symbol) or []
     except Exception:
         pass
+    # F2-1: 行业传入（金融行业成长分支减权）；查询失败不影响分类
+    industry: str | None = None
+    try:
+        from lib.collector import _q_tushare_basic
+        basic = _q_tushare_basic(args.symbol)
+        if basic:
+            industry = str(basic.get("industry") or "") or None
+    except Exception:
+        pass
     result = classify_income_driver(
         annual, fin_rows,
         div_years=args.div_years,
         div_yield=args.div_yield,
         refi_times=args.refi_times,
+        industry=industry,
     )
     if args.emit == "json":
         import json as _json
@@ -2299,6 +2314,10 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
             sc_str = f"{sc:+.0f}" if sc is not None else "待积累"
             fe_str = f"{fe:+.2f} 亿" if fe is not None else "待积累"
             print(f"  {label:<8} {sc_str:>14}  {fe_str:>14}")
+
+        lag_note = flow.get("lag_note")
+        if lag_note:
+            print(f"\n  ⚠️ {lag_note}")
 
     return 0
 

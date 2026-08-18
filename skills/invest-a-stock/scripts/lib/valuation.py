@@ -587,7 +587,11 @@ def build_dcf_preprocess(financials: dict) -> dict | None:
     debt_total = _safe_float(row.get("total_liab"))
     money_cap = _safe_float(row.get("money_cap"))
     if debt_total is not None and money_cap is not None:
-        out["net_debt"] = calc_net_debt(debt_total, money_cap)
+        # F0-1: total_liab 含经营负债（应付账款等），非有息负债口径——
+        # 显式标记 method，下游每股换算消费方据此抑制（render_dcf）。
+        net_debt_out = calc_net_debt(debt_total, money_cap)
+        net_debt_out["method"] = "total_liab - money_cap（含经营负债，非有息口径）"
+        out["net_debt"] = net_debt_out
         computed.append("net_debt")
 
     if not computed:

@@ -343,3 +343,72 @@ def test_share_history_trend_span_counts_missing_share_days(monkeypatch):
     assert s["recent_flow_est"] < 0
     assert s["recent_flow_days"] == 7  # T+1 延迟：最近 5 个可算行实际跨 7 个交易日
     assert "近 7 日转净流出" in s["trend"]
+
+
+def test_share_history_total_change_matches_detail_rows(monkeypatch):
+    """份额总变化与 detail_rows/date_range 同口径：r0（无 prev、被 rows[1:]
+    丢弃）不得计入。修复前 latest-earliest 取自 merged 全量（含 r0→r1 首间隔
+    +200000），days=5 时 6 行→5 行 detail，虚增恰为该首间隔。"""
+    n_rows = 6
+    base = datetime.date(2026, 7, 1)
+    dates = [(base + datetime.timedelta(days=i)).strftime("%Y%m%d")
+             for i in range(n_rows)]
+    fund_share = [{"trade_date": d, "fd_share": sh} for d, sh in zip(
+        dates, [1_000_000.0, 1_200_000.0, 1_210_000.0,
+                1_220_000.0, 1_230_000.0, 1_240_000.0])]
+    fund_daily = [
+        {"trade_date": d, "open": 4.0, "high": 4.1, "low": 3.9,
+         "close": 4.0, "pre_close": 3.99, "pct_chg": 0.1,
+         "vol": 10000, "amount": 40000}
+        for d in dates
+    ]
+    env = {"status": "ok", "fund_share": fund_share,
+           "fund_daily": fund_daily, "note": None}
+
+    def _bridge(getter, *a):
+        if getter == "get_etf_share_history":
+            return env
+        return None
+
+    monkeypatch.setattr("etf_data._bridge_get", _bridge)
+    out = query_etf_share_history("515050", days=5)
+    s = out["summary"]
+    assert s["row_count"] == 5                      # 6 行 - r0 = 5 行 detail
+    assert out["date_range"] == f"{dates[1]} ~ {dates[-1]}"
+    assert s["share_total_change"] == 40_000.0      # 1_240_000 - 1_200_000
+    # 修复前该值 = 1_240_000 - 1_000_000 = 240_000.0（虚含被丢弃的首间隔）
+    # 正/负流日计数聚合（引擎字段——报告层禁止对 rows 目视计数）
+    assert s["inflow_days"] == 5                   # 份额单调递增 → 全为流入
+    assert s["outflow_days"] == 0
+    assert s["flat_days"] == 0
+    # 5 行 flow：首行 +200000 万份×4 元=80 亿，后 4 行各 +10000 万份×4 元=4 亿 → 96 亿
+    assert s["inflow_sum_est"] == pytest.approx(96.0)
+    assert s["outflow_sum_est"] == 0.0
+
+
+def test_share_history_total_change_none_when_single_share_row(monkeypatch):
+    """边界：detail_rows 内有效份额行 <2 时 share_total_change=None
+    （旧行为返回 0.0，渲染端 etf.py 已占位 '-'）。"""
+    n_rows = 3
+    base = datetime.date(2026, 7, 1)
+    dates = [(base + datetime.timedelta(days=i)).strftime("%Y%m%d")
+             for i in range(n_rows)]
+    # 份额仅首行有效，其余缺失（T+1 尾端延迟）
+    fund_share = [{"trade_date": dates[0], "fd_share": 1_000_000.0}]
+    fund_daily = [
+        {"trade_date": d, "open": 4.0, "high": 4.1, "low": 3.9,
+         "close": 4.0, "pre_close": 3.99, "pct_chg": 0.1,
+         "vol": 10000, "amount": 40000}
+        for d in dates
+    ]
+    env = {"status": "ok", "fund_share": fund_share,
+           "fund_daily": fund_daily, "note": None}
+
+    def _bridge(getter, *a):
+        if getter == "get_etf_share_history":
+            return env
+        return None
+
+    monkeypatch.setattr("etf_data._bridge_get", _bridge)
+    out = query_etf_share_history("515050", days=5)
+    assert out["summary"]["share_total_change"] is None

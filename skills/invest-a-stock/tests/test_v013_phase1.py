@@ -231,6 +231,91 @@ class TestCollectorHelpers:
         assert result is not None
         assert result["source"] == "akshare.stock_hsgt_individual_em"
 
+    def test_ms_fetch_northbound_akshare_too_sparse_returns_none(self):
+        """akshare 兜底同样受 _MIN_NORTHBOUND_DAYS=5 守卫（code-review：原仅
+        tushare 分支有校验，akshare 1-4 天记录会把 1-4 日合计误标为 10 日合计）。"""
+        from lib import collector
+
+        sparse_ak = [
+            {"trade_date": "20260610", "net_mf_vol": 100.0},
+            {"trade_date": "20260609", "net_mf_vol": 80.0},   # 2 天 < 5
+        ]
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10", return_value=None), patch(
+            "lib.collector._orchestrate._q_akshare_northbound", return_value=sparse_ak
+        ):
+            result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
+
+        assert result is None
+
+    def test_ms_fetch_northbound_akshare_value_less_rows_do_not_count(self):
+        """akshare 10 行仅 2 行有值：守卫与 days 只数有值行（code-review：
+        无值行会让 2 日合计被误标为 10 日合计）。"""
+        from lib import collector
+
+        rows = [
+            {"trade_date": f"202606{10 - i:02d}",
+             "net_mf_vol": 100.0 if i < 2 else None}
+            for i in range(10)
+        ]
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10", return_value=None), patch(
+            "lib.collector._orchestrate._q_akshare_northbound", return_value=rows
+        ):
+            result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
+
+        assert result is None  # 2 个有值日 < _MIN_NORTHBOUND_DAYS=5（修复前 days=10 判通过）
+
+    def test_ms_fetch_northbound_akshare_days_counts_valued_rows_only(self):
+        """10 行 6 行有值 → days=6（有值行数），净额只对有值行求和。"""
+        from lib import collector
+
+        rows = [
+            {"trade_date": f"202606{10 - i:02d}",
+             "net_mf_vol": 100.0 if i < 6 else None}
+            for i in range(10)
+        ]
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10", return_value=None), patch(
+            "lib.collector._orchestrate._q_akshare_northbound", return_value=rows
+        ):
+            result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
+
+        assert result is not None
+        assert result["days"] == 6  # 修复前 10（无值行计入）
+        assert result["net_sum_10d"] == 600.0
+
+    def test_hsgt_top10_cache_returns_copy(self):
+        """缓存命中返回副本（code-review：按引用返回，调用方 mutate 污染缓存）。"""
+        from lib import collector
+
+        rows = [{"trade_date": "20260610", "net_mf_amount": 100.0}]
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10", return_value=rows):
+            first = collector._hsgt_top10_cached("600176")
+            first.append({"trade_date": "20260611", "net_mf_amount": 5.0})
+            second = collector._hsgt_top10_cached("600176")
+
+        assert len(second) == 1  # 修复前 2（同一 list 对象）
+
+    def test_northbound_hsgt_fetched_once_per_run(self):
+        """collect_northbound 与 market_structure 共享 run 级 hsgt_top10 缓存
+        （code-review D2：原同参双发，批量场景线性放大）。"""
+        from lib import collector
+
+        mock_records = [
+            {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(100 - i * 10)}
+            for i in range(6)
+        ]
+        with patch("lib.collector._orchestrate._q_tushare_hsgt_top10") as mock_q, patch(
+            "lib.collector._orchestrate._q_akshare_northbound", return_value=None
+        ), patch.object(collector.env, "is_tushare_available", return_value=True), patch.object(
+            collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
+        ), patch.object(collector._orchestrate, "_tushare_client", return_value=MagicMock()):
+            mock_q.return_value = mock_records
+            collector.collect_northbound("600176")
+            result = collector._ms_fetch_northbound_stock(MagicMock(), "600176")
+            mock_q.assert_called_once_with("600176")
+
+        assert result is not None
+        assert result["source"] == "tushare.hsgt_top10"
+
     def test_northbound_and_moneyflow_sources_distinct(self):
         from lib import collector
 

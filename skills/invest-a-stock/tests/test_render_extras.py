@@ -26,6 +26,36 @@ class TestR6AcademicDisciplineLine:
         assert "279 个技术策略计入交易成本后利润被完全消除" in out
         assert "不构成任何操作依据" in out
 
+    def test_technical_brief_uses_real_volume_and_extremes(self):
+        """code-review C2：量行绑真实 volume.status、支撑阻力行绑 structure.extremes
+        （原支撑阻力键全仓无产出方恒 "—"，量行实为 MA60 句错绑）。"""
+        from fixtures.collections import make_kline_rows
+
+        from lib.render_markdown._v3 import _section_technical_brief
+
+        rows = make_kline_rows(130)
+        rows[-1]["vol"] = rows[-1]["vol"] * 10  # 放量脉冲 → 量比 > 1.5
+        out = _section_technical_brief({"kline": {"data": rows}})
+        assert "量比" in out
+        assert "高于近5日均量" in out
+        # 支撑阻力：20/60/120 日极值均可用（130 ≥ 120），带具体日期（@）
+        assert "20日高/低:" in out
+        assert "60日高/低:" in out
+        assert "120日高/低:" in out
+        assert "@" in out
+        assert "- **支撑阻力:** —" not in out
+
+    def test_technical_brief_insufficient_days_shows_reason(self):
+        """数据不足 N 日 → 渲染 reason 而非静默 "—"。"""
+        from fixtures.collections import make_kline_rows
+
+        from lib.render_markdown._v3 import _section_technical_brief
+
+        dims = {"kline": {"data": make_kline_rows(5)}}
+        out = _section_technical_brief(dims)
+        assert "数据不足 20 日" in out
+        assert "20日高/低:" not in out
+
 
 class TestRenderAttachExtrasDedup:
     def test_skips_attach_events_when_events_present(self):

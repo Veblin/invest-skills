@@ -481,3 +481,23 @@ class TestQuoteTencentRealtimeIndependent:
         srcs = {s.get("source"): s for s in meta.get("all_sources", [])}
         assert srcs["tencent_finance"]["data_available"] is False
         assert srcs["tencent_finance"].get("error")  # 失败原因可追溯
+
+
+class TestHsgtRunCacheResetPerTest:
+    """hsgt_top10 run 级缓存必须每测试重置（conftest autouse fixture）——
+    修复前仅 test_v013_phase1 局部重置，test_r12h 写入的假行会跨测试/
+    跨文件串味（code-review）。"""
+
+    def test_a_populates_hsgt_cache(self, monkeypatch):
+        from lib.collector import _orchestrate as orch
+
+        monkeypatch.setattr(orch, "_q_tushare_hsgt_top10",
+                            lambda s: [{"trade_date": "20260813", "net_mf_amount": 1.0}])
+        assert orch._hsgt_top10_cached("600000") is not None
+        assert orch._hsgt_top10_cache  # 本测试内已写入
+
+    def test_b_cache_empty_at_test_start(self):
+        from lib.collector import _orchestrate as orch
+
+        assert orch._hsgt_top10_cache == {}
+        assert orch._hsgt_top10_cache_day == ""

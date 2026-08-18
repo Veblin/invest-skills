@@ -208,6 +208,28 @@ HOLDINGS_CLUSTER_MAP: dict[str, str] = {
     "601138": "终端/服务器代工",  # 工业富联
     "603986": "存储/光缆",      # 兆易创新
     "600487": "存储/光缆",      # 亨通光电
+    # —— 512660 军工ETF 前十大（2026-06-30；F1-2 修复）——
+    "600150": "船舶总装",        # 中国船舶
+    "002179": "军工连接器",      # 中航光电
+    "688002": "红外/光电",       # 睿创微纳
+    "600879": "航天电子/无人系统",  # 航天电子
+    "300395": "军工新材料",      # 菲利华
+    "002625": "军工新材料",      # 光启技术（超材料）
+    "600893": "航空发动机",      # 航发动力
+    "600118": "卫星/航天",       # 中国卫星
+    "600760": "航空整机",        # 中航沈飞
+    "601698": "卫星/航天",       # 中国卫通
+    # —— 588000 科创50ETF 前十大（2026-06-30；F1-2 修复）——
+    "688256": "AI 芯片",        # 寒武纪
+    "688041": "AI 芯片",        # 海光信息
+    "688981": "晶圆代工",       # 中芯国际
+    "688347": "晶圆代工",       # 华虹宏力
+    "688012": "半导体设备",     # 中微公司
+    "688072": "半导体设备",     # 拓荆科技
+    "688008": "互连/接口芯片",  # 澜起科技
+    "688498": "光芯片",         # 源杰科技
+    "688525": "存储",           # 佰维存储
+    "688521": "IP/设计服务",    # 芯原股份
 }
 
 
@@ -1164,8 +1186,46 @@ def query_etf_holdings(symbol: str) -> dict[str, Any]:
     }
 
 
+def _q_tencent_etf_quote(symbol: str) -> dict[str, Any] | None:
+    """腾讯行情回退（F1-1）：东财 spot 不可达（代理/限流）时提供
+    价/涨跌幅/成交量/成交额；折溢价腾讯无字段，标注不可得。
+
+    ETF 代码市场映射：51xxxx=沪市(sh)，15xxxx=深市(sz)。
+    """
+    try:
+        from lib.proxy import no_proxy_session  # invest-a-stock 路径引导
+        market = "sh" if str(symbol).startswith(("5", "6", "9")) else "sz"
+        with no_proxy_session() as sess:
+            r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
+        if r.status_code != 200 or "~" not in r.text:
+            return None
+        p = r.text.split("~")
+        if len(p) <= 45:
+            return None
+        out: dict[str, Any] = {}
+        for key, idx in (("price", 3), ("change_pct", 32), ("volume", 6)):
+            try:
+                out[key] = safe_float(p[idx])
+            except (ValueError, TypeError, IndexError):
+                out[key] = None
+        # F1-1 单位对齐：qt.gtimg.cn 字段 37 为成交额（万元），主路径
+        # fund_etf_spot_em「成交额」为元——统一转元，否则同一字段随
+        # 数据源不同差 10⁴ 倍（实测 p[37]=323831 vs spot 3,238,306,187）。
+        try:
+            _amt_wan = safe_float(p[37])
+            out["amount"] = _amt_wan * 1e4 if _amt_wan is not None else None
+        except (ValueError, TypeError, IndexError):
+            out["amount"] = None
+        if out.get("price") is None:
+            return None
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tencent etf quote fallback failed: %s", exc)
+        return None
+
+
 def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
-    """ETF 当前行情：价格、涨跌幅、折溢价（从 fund_etf_spot_em）。"""
+    """ETF 当前行情：价格、涨跌幅、折溢价（从 fund_etf_spot_em；失败回退腾讯）。"""
     result: dict[str, Any] = {
         "symbol": symbol,
         "price": None,
@@ -1180,11 +1240,19 @@ def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
         if spot_row is not None:
             return _spot_row_to_quote(symbol, spot_row)
         row, err = _lookup_etf_spot_row(symbol)
-        if err:
-            result["_error"] = err.replace("etf_spot: ", "", 1)
-            return result
-        if row is None:
-            result["_error"] = "empty response"
+        if err or row is None:
+            # F1-1: spot 源失败 → 腾讯行情回退（折溢价不可得，不整列缺失）
+            fallback = _q_tencent_etf_quote(symbol)
+            if fallback:
+                result.update(fallback)
+                result["status"] = "available"
+                result["premium_discount"] = None
+                result["_error"] = (
+                    f"spot 源不可用（{err or 'empty response'}），"
+                    "已回退腾讯行情；折溢价不可得"
+                )
+                return result
+            result["_error"] = (err or "empty response").replace("etf_spot: ", "", 1)
             return result
         return _spot_row_to_quote(symbol, row)
     except Exception as exc:
@@ -1741,7 +1809,7 @@ def _attach_valuation_guide(result: dict) -> None:
     sw_info = ETF_TO_SW_INDUSTRY.get(symbol)
     if not sw_info:
         return
-    guide = SECTOR_VALUATION_MAP.get(sw_info["sw_name"])
+    guide = query_sector_valuation_guide(sw_info["sw_name"])
     if guide:
         result["valuation_guide"] = {
             "industry": sw_info["sw_name"],
@@ -1778,6 +1846,11 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
 
     数据源：akshare ``fund_etf_spot_em`` 的 ``最新份额`` 列。
 
+    注意：date 为采集日墙钟日期；akshare fund_etf_spot_em spot 行
+    无 trade_date 字段，最新份额披露存在 T+1 延迟，shares 实际对应
+    交易日未知。该语义由读取侧 etf_share_flow 的 lag_note 标注，
+    写入侧不推算实际交易日（已否决 trade_cal 推算方案）。
+
     Parameters
     ----------
     symbol : str
@@ -1807,7 +1880,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         return None
 
     aum = round(shares * price / 1e8, 2)
-    today = shanghai_today()
+    today = shanghai_today()  # 采集日墙钟；spot 行无 trade_date，份额披露 T+1（实际对应交易日未知）
 
     snap = {
         "date": today,
@@ -1852,7 +1925,11 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         {symbol, date, shares_current, aum_current,
          share_change_5d/20d/60d (份),
          flow_est_5d/20d/60d (亿元),
-         history_count}
+         history_count, lag_note}
+
+    date 为采集日墙钟日期；shares/price/aum 为采集时 akshare
+    fund_etf_spot_em 最新披露值（份额披露 T+1 延迟，实际对应交易日
+    未知），该语义由 lag_note 在返回结构中如实标注。
     """
     import sqlite3
 
@@ -1903,6 +1980,10 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         "share_change_60d": _change(60)["share_change"],
         "flow_est_60d": _change(60)["flow_est"],
         "history_count": len(history),
+        "lag_note": (
+            "date 为采集日墙钟日期；shares/price/aum 为采集时 akshare 最新披露值，"
+            "份额披露存在 T+1 延迟，实际对应交易日未知"
+        ),
     }
 
 
@@ -1978,8 +2059,6 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     rows = []
     prev_share = None
     prev_price = None
-    latest_shares = None
-    earliest_shares = None
 
     import math as _math
 
@@ -2041,9 +2120,6 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
         })
 
         if shares_val is not None:
-            if earliest_shares is None:
-                earliest_shares = shares_val
-            latest_shares = shares_val
             prev_share = shares_val
             prev_price = close_val  # 仅当份额有效时更新，保持 prev_share/prev_price 窗口一致
 
@@ -2094,10 +2170,14 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     avg_amount = round(sum(amounts) / len(amounts), 2) if amounts else None
     max_amount = max(amounts) if amounts else None
 
-    # 份额总变化
+    # 份额总变化：与 detail_rows/date_range 同口径——r0 无 prev_share、已被
+    # rows[1:] 丢弃，旧行为 latest-earliest 取自 merged 全量，会把 date_range
+    # 之外的首个间隔计入（与 etf_peers._flow_row 从 rows 首尾非 None shares
+    # 自算 share_change_pct 的口径对齐）。
+    detail_shares = [r["shares"] for r in detail_rows if r["shares"] is not None]
     share_total_change = None
-    if latest_shares is not None and earliest_shares is not None:
-        share_total_change = round(latest_shares - earliest_shares, 2)
+    if len(detail_shares) >= 2:
+        share_total_change = round(detail_shares[-1] - detail_shares[0], 2)
 
     date_range = f"{detail_rows[0]['date']} ~ {detail_rows[-1]['date']}" if detail_rows else ""
 
@@ -2116,6 +2196,12 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             "avg_amount_e": avg_amount,
             "max_amount_e": max_amount,
             "share_total_change": share_total_change,
+            # 正/负/平流日计数与合计（P0：报告层引用引擎字段，禁止对 rows 目视计数）
+            "inflow_days": len([f for f in flows if f > 0]),
+            "outflow_days": len([f for f in flows if f < 0]),
+            "flat_days": len([f for f in flows if f == 0]),
+            "inflow_sum_est": round(sum(f for f in flows if f > 0), 2) if flows else None,
+            "outflow_sum_est": round(sum(f for f in flows if f < 0), 2) if flows else None,
         },
     }
     if clipped:
@@ -2288,17 +2374,27 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
     - annual_high / annual_low：年度最高/最低收盘价 + 各自日期
     - max_drawdown：最大回撤峰值/谷底 + 日期 + 幅度%（负数）
     - big_move_days：|change_pct| >= 5% 的交易日清单（基于收盘价逐日计算）
+    - big_move_days_count / big_move_up_days / big_move_down_days：±5% 日计数
+      （聚合由引擎完成——报告层引用 count 字段，禁止对清单目视计数）
     - ma20 / ma60 / ma120：收盘价均线尾部值
     - current_vs_high_pct / current_vs_low_pct：当前价 vs 历史高低点偏离%
+      （窗口 = 250 日时为 52 周距离等价量，v0.2.6 不重复造同名字段）
+    - dist_to_ytd_low_pct / ytd_low：年内低点偏离%（v0.2.6 D 类字段，四不原则 ①-b）
+    - atr14 / atr14_pct：ATR14 及其占价格%（v0.2.6 D 类字段；仅 OHLC 路径，
+      纯 NAV 链路无 high/low → None + atr14_note）
     """
     dates: list[str] = []
     closes: list[float] = []
+    highs: list[float | None] = []
+    lows: list[float | None] = []
     for r in nav_history:
         close = safe_float(r.get("nav", r.get("close")))
         d = str(r.get("date", ""))[:10]
         if close is not None and d:
             dates.append(d)
             closes.append(close)
+            highs.append(safe_float(r.get("high")))
+            lows.append(safe_float(r.get("low")))
 
     stats: dict[str, Any] = {
         "rows": len(closes),
@@ -2309,11 +2405,19 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
         "annual_low": None,
         "max_drawdown": None,
         "big_move_days": [],
+        "big_move_days_count": 0,
+        "big_move_up_days": 0,
+        "big_move_down_days": 0,
         "ma20": None,
         "ma60": None,
         "ma120": None,
         "current_vs_high_pct": None,
         "current_vs_low_pct": None,
+        "dist_to_ytd_low_pct": None,
+        "ytd_low": None,
+        "atr14": None,
+        "atr14_pct": None,
+        "atr14_note": None,
         "status": "available" if len(closes) >= 2 else "insufficient",
     }
     if len(closes) < 2:
@@ -2362,6 +2466,10 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
             if abs(chg) >= 5.0:
                 big.append({"date": dates[i], "change_pct": round(chg, 2)})
     stats["big_move_days"] = big
+    # 计数聚合（P0：清单目视计数违规——报告层必须引用引擎 count 字段）
+    stats["big_move_days_count"] = len(big)
+    stats["big_move_up_days"] = sum(1 for r in big if r["change_pct"] > 0)
+    stats["big_move_down_days"] = sum(1 for r in big if r["change_pct"] < 0)
 
     for n, key in ((20, "ma20"), (60, "ma60"), (120, "ma120")):
         series = sma(closes, n)
@@ -2375,4 +2483,31 @@ def compute_history_stats(nav_history: list[dict]) -> dict[str, Any]:
         stats["current_vs_high_pct"] = round((latest / high - 1) * 100, 2)
     if low > 0:
         stats["current_vs_low_pct"] = round((latest / low - 1) * 100, 2)
+
+    # v0.2.6 D 类字段：年内低点偏离%（有符号，正 = 高于年内低点）
+    year = dates[-1][:4]
+    ytd_idx = min(
+        (i for i in range(len(closes)) if dates[i][:4] == year),
+        key=lambda i: closes[i],
+        default=None,
+    )
+    if ytd_idx is not None and closes[ytd_idx] > 0:
+        stats["ytd_low"] = {"date": dates[ytd_idx], "close": closes[ytd_idx]}
+        stats["dist_to_ytd_low_pct"] = round((latest / closes[ytd_idx] - 1) * 100, 2)
+
+    # v0.2.6 D 类字段：ATR14（仅 OHLC 路径）
+    ohlc_available = bool(highs) and all(h is not None and l is not None for h, l in zip(highs, lows))
+    if ohlc_available and len(closes) >= 15:
+        tr_sum = sum(
+            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            for i in range(1, 15)
+        )
+        atr = tr_sum / 14
+        for i in range(15, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            atr = (atr * 13 + tr) / 14
+        stats["atr14"] = round(atr, 4)
+        stats["atr14_pct"] = round(atr / latest * 100, 2) if latest else None
+    elif not ohlc_available:
+        stats["atr14_note"] = "纯 NAV 链路无 OHLC，ATR14 不可得"
     return stats

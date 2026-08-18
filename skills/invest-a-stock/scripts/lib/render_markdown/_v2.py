@@ -185,12 +185,12 @@ def _section_quality(dims: dict[str, dict]) -> str:
 
     data = sort_kline_asc(data)  # end_date 与 trade_date 同格式可复用
 
-    # LAW 17: 标题含最新 ROE + 趋势
-    latest_roe = data[-1].get("roe") if data else None
+    # LAW 17: 标题含最新 ROE + 趋势（_safe_num 守卫：None/"nan" 字符串走 "?" 兜底）
+    latest_roe = _safe_num(data[-1].get("roe")) if data else None
     roe_title = f"ROE {latest_roe}%" if latest_roe is not None else "?"
     trend_str = ""
     if len(data) >= 2 and latest_roe is not None:
-        prev_roe = data[-2].get("roe")
+        prev_roe = _safe_num(data[-2].get("roe"))
         if prev_roe is not None:
             trend_str = "↑" if latest_roe > prev_roe else ("↓" if latest_roe < prev_roe else "→")
     lines = [f"## 二、{roe_title} {trend_str} · 近 8 期财务趋势", ""]

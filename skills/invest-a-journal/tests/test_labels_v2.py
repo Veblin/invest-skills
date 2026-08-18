@@ -49,3 +49,15 @@ class TestBreadthLabelTodayExclusion:
         _compute_labels_v2(snap, history)
         # 剔除今日后仅 18 个 → 阈值表：ad 0.5 < 0.6 → 极冷
         assert "极冷" in snap["label_breadth"]
+
+
+class TestCapitalFlowNoOiSegment:
+    def test_capital_flow_has_no_oi_segment(self):
+        """回归（finding #2）：资金面标签不再输出 OI 20 日变化段（F3 已裁定
+        该口径为展期节奏主导、不可刻画持仓状态）。"""
+        from market_microstructure import _compute_labels_v2
+
+        snap = {"date": "20260807", "futures_basis_pct": -8.5, "futures_oi_change_pct": -74.5}
+        _compute_labels_v2(snap, [])
+        assert "持仓" not in snap["label_capital_flow"]
+        assert "基差 -8.50%" in snap["label_capital_flow"]

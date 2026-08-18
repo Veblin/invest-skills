@@ -12,6 +12,7 @@ from typing import Any
 from .schema import (
     _CV_L2_FIELDS,
     _extract_l2_scalar,
+    _extract_l2_scalar_or_fallback,
     _extract_scalar,
     relative_diff_pct,
 )
@@ -140,17 +141,15 @@ def dimension_results_from_legacy(dimensions: list[dict]) -> dict[str, Any]:
                 continue
             if primary_source and src_name == primary_source and primary_data is not None:
                 data = primary_data
-            elif name in _CV_L2_FIELDS:
-                # R12h（决策 C5）：L2 维度非主源只接受原始 data 的白名单
-                # 提取。存储的 scalar_value 可能是旧 to_dict 键序提取的 PE
-                # （600206 实证 140.16），注入后经 _auto_cross_validate 裸
-                # 标量短路混入市值交叉验证（divergence 104.3%）；无白名单
-                # 数据 → 不注入（口径一致性优先，宁可单源）。
-                data = _extract_l2_scalar(s.get("data"), _CV_L2_FIELDS[name])
-            elif s.get("scalar_value") is not None:
-                data = s["scalar_value"]
             else:
-                data = None
+                # R12h（决策 C5）：L2 维度非主源只接受原始 data 的白名单
+                # 提取（allow_scalar_fallback=False，绝不回退存储的 scalar_value
+                # ——可能是旧 to_dict 键序提取的 PE，600206 实证 140.16，注入后
+                # 经 _auto_cross_validate 裸标量短路混入市值交叉验证 divergence
+                # 104.3%；无白名单数据 → 不注入，口径一致性优先，宁可单源）。
+                data = _extract_l2_scalar_or_fallback(
+                    s.get("data"), s.get("scalar_value"), name,
+                    allow_scalar_fallback=False)
             src_list.append(SourceResult(
                 src_name, data, name,
                 query_params=s.get("query_params", ""),
@@ -188,7 +187,12 @@ def fuse_from_source_results(
             # 此处兜底防裸标量绕过。_extract_l2_scalar 仅认白名单字段
             # （dict/list），裸标量返回 None。
             if dim_name == "valuation":
-                v = _extract_l2_scalar(src.data, _CV_L2_FIELDS["valuation"])
+                # 显式枚举而非 `dim_name in _CV_L2_FIELDS`：白名单新增第三维时
+                # 不得被静默切换到 L2 全扫描口径（code-review）。financials
+                # 必须走 _extract_scalar：_DIM_SCALAR_KEYS["financials"] 含 eps
+                # 且 latest_only 口径，与 _CV_L2_FIELDS["financials"]（无 eps、
+                # 全表扫描）不同（见 test_fusion.py 存量语义），不可改查表。
+                v = _extract_l2_scalar(src.data, _CV_L2_FIELDS[dim_name])
             else:
                 v = _extract_scalar(src.data, dim_name)
             if v is not None:
@@ -214,15 +218,12 @@ def fuse_from_legacy_dicts(dimensions: list[dict]) -> dict[str, FusedDataPoint]:
         sources: dict[str, float | None] = {}
         for s in all_src:
             src_name = s.get("source", "")
-            l2_keys = _CV_L2_FIELDS.get(dim_name)
-            if l2_keys is not None and s.get("data") is not None:
-                # R12h（决策 C5）：L2 维度优先按原始 data 白名单提取，口径
-                # 与 fuse_from_source_results 一致——忽略存储的旧 scalar_value
-                # （旧 to_dict 键序提取的 PE 140.16）；无 data 时回退
-                # scalar_value（兼容手写/旧快照格式，to_dict 修复后已口径正确）。
-                sv = _extract_l2_scalar(s["data"], l2_keys)
-            else:
-                sv = s.get("scalar_value")
+            # R12h（决策 C5）：L2 维度优先按原始 data 白名单提取（忽略存储的
+            # 旧 scalar_value，旧 to_dict 键序提取的 PE 140.16）；无 data 时
+            # 回退 scalar_value（兼容手写/旧快照格式，to_dict 修复后已口径正确）。
+            sv = _extract_l2_scalar_or_fallback(
+                s.get("data"), s.get("scalar_value"), dim_name,
+                allow_scalar_fallback=True)
             if sv is None:
                 continue
             try:

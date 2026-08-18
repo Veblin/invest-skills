@@ -8,7 +8,7 @@
 分层：
     lint      全部      措辞合规（复用 invest-a-stock lib/lint.py + YAML 规则）
     structure 全部      报告类型特定结构校验（章节/标签存在性）
-    derived   etf only  8 个 derived 字段合理性（值域 + 小数位）
+    derived   etf only  10 个 derived 字段合理性（值域 + 小数位）
     audit     stock     数据点抽取 + 偏差判定（--verify-data）
     quality   stock     7 指标质地检查（--verify-data）
     rigor     stock     市值/估值/跨源验算（--verify-data）
@@ -172,7 +172,7 @@ def _check_structure(text: str, report_type: str) -> LayerResult:
 
 # ── ETF derived 字段校验 ─────────────────────────────────────────────────
 
-# 8 个引擎 derived 字段的值域（宽松，避免误报；主要抓数量级错误/全零/位数异常）
+# 10 个引擎 derived 字段的值域（宽松，避免误报；主要抓数量级错误/全零/位数异常）
 _ETF_DERIVED_RANGES: dict[str, tuple[float, float]] = {
     "nav_vs_ma20_pct": (-60.0, 60.0),
     "nav_vs_ma60_pct": (-60.0, 60.0),
@@ -182,12 +182,16 @@ _ETF_DERIVED_RANGES: dict[str, tuple[float, float]] = {
     "nav_to_boll_upper_pct": (-60.0, 60.0),
     "boll_bandwidth_pct": (0.0, 100.0),
     "daily_volatility_pct": (0.0, 20.0),
+    # v0.2.6 D 类字段（compute_history_stats 输出）：年内低点偏离可高可负、ATR 占比上限宽松
+    "dist_to_ytd_low_pct": (-100.0, 500.0),
+    "atr14_pct": (0.0, 60.0),
 }
 
 # 报告文本中形如 "nav_vs_ma20_pct: -15.36" 或 "nav_vs_ma20_pct: -15.36%" 的引用
 _DERIVED_PATTERN = re.compile(
     r"(nav_vs_ma20_pct|nav_vs_ma60_pct|nav_vs_boll_mid_pct|boll_position_pct|"
-    r"nav_to_boll_lower_pct|nav_to_boll_upper_pct|boll_bandwidth_pct|daily_volatility_pct)"
+    r"nav_to_boll_lower_pct|nav_to_boll_upper_pct|boll_bandwidth_pct|daily_volatility_pct|"
+    r"dist_to_ytd_low_pct|atr14_pct)"
     r"[：:]\s*([+-]?\d+\.?\d*)%?"
 )
 
@@ -208,6 +212,8 @@ _DERIVED_CN_LABELS: dict[str, str] = {
     "距 BOLL 上轨": "nav_to_boll_upper_pct",
     "BOLL 带宽": "boll_bandwidth_pct",
     "日均波动率": "daily_volatility_pct",
+    "距年内低点": "dist_to_ytd_low_pct",
+    "ATR14 占比": "atr14_pct",
 }
 # 仅匹配表格行（以 | 开头、数值后跟 | 收尾）：衍生值只在模板表格渲染，
 # 散文中的指标名词（如 "距 BOLL 下轨仅 6.41%，BOLL 带宽 54%"）天然排除。
@@ -219,7 +225,7 @@ _DERIVED_CN_PATTERN = re.compile(
     r"NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|"
     r"NAV vs MA20|NAV vs MA60|NAV vs BOLL 中轨|"
     r"NAV 距 BOLL 下轨|NAV 距 BOLL 上轨|BOLL 位置|距 BOLL 下轨|距 BOLL 上轨|"
-    r"BOLL 带宽|日均波动率)"
+    r"BOLL 带宽|日均波动率|距年内低点|ATR14 占比)"
     r"(?:[^|\d\-+.\n]*?\|)?[^|\d\-+.\n]*?([+-]?\d+\.?\d*)%?[^|\d\n]*?\|"
 )
 # 已知标签行检测（值可缺失）：标签命中即算「措辞正常」——
@@ -229,11 +235,11 @@ _DERIVED_CN_LABEL_ONLY = re.compile(
     r"NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|"
     r"NAV vs MA20|NAV vs MA60|NAV vs BOLL 中轨|"
     r"NAV 距 BOLL 下轨|NAV 距 BOLL 上轨|BOLL 位置|距 BOLL 下轨|距 BOLL 上轨|"
-    r"BOLL 带宽|日均波动率)[^|\n]*\|"
+    r"BOLL 带宽|日均波动率|距年内低点|ATR14 占比)[^|\n]*\|"
 )
 # 存在性检测：表格行出现衍生指标名词（已知或未知标签）→ 用于漂移判定
 _DERIVED_CN_ROW_PRESENT = re.compile(
-    r"\|[^|\n]*(NAV vs MA|BOLL 位置|BOLL 带宽|日均波动率|距 BOLL)[^|\n]*\|"
+    r"\|[^|\n]*(NAV vs MA|BOLL 位置|BOLL 带宽|日均波动率|距 BOLL|距年内低点|ATR14)[^|\n]*\|"
 )
 
 
@@ -577,7 +583,9 @@ def qc_latest(
     candidates = [p for p in root.rglob("*.md") if ".audit_checklist" not in p.name]
     if not candidates:
         return None
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    # mtime 相同（同秒写入/粗粒度文件系统）时按文件名取新，避免 max 平局由
+    # rglob 迭代序决定（跨环境不确定，CI 曾取到旧报告）
+    latest = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
     return qc_file(latest, profile=profile, fail_on=fail_on, verify_data=verify_data)
 
 

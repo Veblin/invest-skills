@@ -68,6 +68,40 @@ class TestParserDefaults:
         assert parser.parse_args(["synthesize", "600176"]).store is True
         assert parser.parse_args(["synthesize", "600176", "--no-store"]).store is False
 
+    def test_collect_flags_after_subcommand(self):
+        """code-review：--plan/--resume/--save-raw 子命令后置可用（原仅主 parser
+        注册，`collect 600176 --plan x` 曾 argparse exit(2)）。"""
+        import invest
+
+        parser = invest.build_parser()
+        args = parser.parse_args(
+            ["collect", "600176", "--plan", "/tmp/x.json", "--resume", "--save-raw"])
+        assert args.plan == "/tmp/x.json"
+        assert args.resume is True
+        assert args.save_raw is True
+        # 未给出时主 parser 默认值不被子 parser SUPPRESS 覆盖
+        plain = parser.parse_args(["collect", "600176"])
+        assert plain.plan == ""
+        assert plain.resume is False
+        assert plain.save_raw is False
+
+    def test_collect_flags_on_other_subcommands(self):
+        """evidence/analyze/synthesize 经 _add_collect_flags 获得后置旗标。"""
+        import invest
+
+        parser = invest.build_parser()
+        for cmd, flag, value in (
+            ("evidence", "--plan", "/tmp/e.json"),
+            ("analyze", "--resume", None),
+            ("synthesize", "--save-raw", None),
+        ):
+            argv = [cmd, "600176", flag] + ([value] if value else [])
+            args = parser.parse_args(argv)
+            if value:
+                assert args.plan == value
+            else:
+                assert getattr(args, flag.lstrip("-").replace("-", "_")) is True
+
 
 class TestCollectDefaultStore:
     def test_collect_default_stores(self, isolated_store, monkeypatch):
