@@ -1,0 +1,64 @@
+name: Publish to SkillHub
+
+# 触发：推送 v* tag（主仓库 bump 后由构建脚本生成内容 → commit → tag）
+# 前置：仓库 Settings → Secrets → SKILLHUB_TOKEN = skillhub.cn API key（skh_xxx）
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: "发布说明（默认自动发布）"
+        required: false
+        default: "自动发布"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SkillHub CLI
+        run: |
+          curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Login to SkillHub
+        env:
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_TOKEN }}
+        run: |
+          if [ -z "$SKILLHUB_KEY" ]; then
+            echo "::error::SKILLHUB_TOKEN secret 未配置（仓库 Settings → Secrets）"
+            exit 1
+          fi
+          skillhub login --key "$SKILLHUB_KEY" --host https://api.skillhub.cn
+          skillhub auth whoami
+
+      - name: Dry-run all skills
+        run: |
+          for d in skills/*/; do
+            [ -f "$d/SKILL.md" ] || continue
+            echo "== dry-run: $d =="
+            skillhub publish "$d" --dry-run || exit 1
+          done
+
+      - name: Publish all skills
+        env:
+          CHANGELOG: ${{ github.event.inputs.changelog || format('自动发布 {0}', github.ref_name) }}
+        run: |
+          for d in skills/*/; do
+            [ -f "$d/SKILL.md" ] || continue
+            echo "== publish: $d =="
+            skillhub publish "$d" --changelog "$CHANGELOG" || exit 1
+          done
+
+      - name: Summary
+        run: |
+          echo "## ✅ SkillHub 发布完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 触发: ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 发布后进入 pending_review，请在 skillhub.cn 个人中心跟进审核" >> "$GITHUB_STEP_SUMMARY"

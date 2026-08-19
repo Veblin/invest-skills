@@ -41,6 +41,12 @@
 | [references-format.md](../skills/invest-a-stock/references/references-format.md) | 引用来源表规范 |
 | [source-guide.md](../skills/invest-a-stock/references/source-guide.md) | 数据源优先级、代理说明 |
 
+## 架构与实现
+
+| 文档 | 内容 |
+|------|------|
+| [architecture.md](architecture.md) | 已完成功能与实现逻辑总览（三层架构、6 skills、多源降级链、渲染管线、版本演进、工程设施） |
+
 ## 路线图
 
 | 文档 | 内容 |
