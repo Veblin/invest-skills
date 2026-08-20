@@ -4,7 +4,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=release" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.2.6" alt="Release" /></a>
   <a href="#workbuddy"><img src="https://img.shields.io/badge/WorkBuddy-零终端安装-2b7fff.svg" alt="WorkBuddy 零终端安装" /></a>
 </p>
 
@@ -95,6 +95,16 @@ flowchart TB
 ### WorkBuddy
 
 从 [GitHub Release](https://github.com/Veblin/invest-skills/releases) 下载 `invest-skills-wb-vX.Y.Z.zip`，在 WorkBuddy 的「专家·技能·连接器 > 技能 > 添加技能 > 上传技能」导入即可，无需打开终端。安装后填写 Token 的方式见 [docs/workbuddy/](docs/workbuddy/)。
+
+Windows 用户若改用 `git clone`：默认 `core.symlinks=false` 会把仓库 14 条技能链接物化成文本文件，导致技能发现失效。运行重建脚本（NTFS junction 重建 9 个目录链接 + 硬链接重建 5 个 commands 文件，无需管理员权限，幂等）：
+
+```powershell
+git config core.symlinks true        # 可选但推荐（避免再物化）
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # 若策略拦截 .ps1
+.\scripts\setup_workbuddy_windows.ps1
+```
+
+验证：`cmd /c dir .workbuddy\skills` 应显示 `<JUNCTION>`。
 
 ## 开发与项目资料
 

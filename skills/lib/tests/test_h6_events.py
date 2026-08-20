@@ -17,7 +17,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT / "skills"))
 sys.path.insert(0, str(_REPO_ROOT / "skills" / "lib"))
 
-_spec = importlib.util.spec_from_file_location("backtest_h6", _REPO_ROOT / "scripts" / "backtest_h6.py")
+_spec = importlib.util.spec_from_file_location(
+    "backtest_h6", _REPO_ROOT / "scripts" / "archive" / "backtest_h6.py")
 h6 = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(h6)

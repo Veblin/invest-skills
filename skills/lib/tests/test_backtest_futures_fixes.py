@@ -36,7 +36,7 @@ if _lib is None or not hasattr(_lib, "__file__") \
     _pkg_spec.loader.exec_module(_pkg)
 
 _spec = importlib.util.spec_from_file_location(
-    "backtest_futures", _REPO_ROOT / "scripts" / "backtest_futures.py")
+    "backtest_futures", _REPO_ROOT / "scripts" / "archive" / "backtest_futures.py")
 bt = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(bt)
