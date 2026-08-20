@@ -161,6 +161,93 @@ def test_redline_not_fire_on_abcd_doc_allowed_rows():
             assert not regex.search(s), f"允许表述不应命中 {rule_id}: {s!r}"
 
 
+# ---------------------------------------------------------------- v0.2.7 E5 宏观外推红线
+
+_V027_MACRO_RULE_IDS = (
+    "wording-macro-all-time-high",
+    "wording-macro-no-top",
+    "wording-macro-fundamentals",
+    "wording-macro-distance-no-criterion",
+    "wording-macro-chain-evidence",
+    "wording-staleness-monthly-overseas",
+)
+
+
+def test_v027_macro_redline_rules_registered():
+    """E5 六条新禁止的 lint 规则必须存在且为 error 级拦截（验收硬要求）。"""
+    rules = _rules()
+    for rule_id in _V027_MACRO_RULE_IDS:
+        assert rule_id in rules, f"规则缺失: {rule_id}"
+        assert rules[rule_id]["severity"] == "error", f"{rule_id} 应为 error 级拦截"
+        assert rules[rule_id]["scope"] == "line"
+
+
+def test_conventions_32_numbering_continuous():
+    """§3.2 已知违规模式编号须从 1 连续到最新上限（11 旧 + 6 新 = 17）。"""
+    conv = _read(_CONVENTIONS)
+    sec = _section(conv, "### 3.2 已知违规模式")
+    numbers = [int(m) for m in re.findall(r"^(\d+)\. ", sec, flags=re.M)]
+    assert numbers == list(range(1, len(numbers) + 1)), f"§3.2 编号不连续: {numbers}"
+    assert len(numbers) >= 17, f"§3.2 应至少 17 条（11 旧 + 6 新），当前 {len(numbers)}"
+
+
+# (规则, 命中样本, 不误伤样本) — 与 _REDLINE_CASES 同语义
+_MACRO_CASES = [
+    (
+        "wording-macro-all-time-high",
+        ["美英德法日 10Y/30Y 收益率全线创出近 18-20 年新高", "四国整体创新高", "全部主权债收益率创新高"],
+        ["4 项中 1 项创 2006 年来新高（JP 2.67；GB/DE/FR 均低于 2007-2008 峰值）",
+         "并非全线创新高", "日本 10Y 创出 2006 年来新高"],
+    ),
+    (
+        "wording-macro-no-top",
+        ["黄金长期上涨方向不变，理论上无价格顶部", "长期方向不变", "理论上无顶部"],
+        ["央行结构性购金提供长期需求支撑，但金价高位后均值回归显著（Erb & Harvey 2013）",
+         "不代表长期方向不变", "不存在'无顶部'特例"],
+    ),
+    (
+        "wording-macro-fundamentals",
+        ["板块同涨同跌，不纠结个股短期基本面", "个股 α 被 β 淹没", "短期基本面不重要", "基本面意义有限"],
+        ["在高同步性板块+短窗口+高波动市态下收益方差由板块成分主导；基本面在中长期恢复意义",
+         "卖方基于订单而非股价定价 — 基本面解释"],
+    ),
+    (
+        "wording-macro-distance-no-criterion",
+        ["中国 30 年国债距前高仅 3-5%", "中国 30 年国债收益率距前高仅 3-5%", "距历史高点 2.4%", "较前高 -10.07%"],
+        ["距前高 -10.07%（收益率口径，2025-11 至 2026-06 窗口）",
+         "距前高 -0.15%（价格口径，806 日窗口）",
+         "距离区间高点 8%（截至 2026-06 窗口）"],
+    ),
+    (
+        "wording-macro-chain-evidence",
+        ["中东 → 美债信用 → AI 融资环境 → 资产价格", "美债利率上行 → 高久期股承压 → 资金再配置"],
+        ["中东→美债：A 级（Weber 2018 JFE）；美债→AI 融资：C/D 级（无同行评审证据）；最弱环节不作核心论证",
+         "AI 融资渠道仅作边际补充（证据等级更低）"],
+    ),
+    (
+        "wording-staleness-monthly-overseas",
+        ["日本 10Y 收益率 2.67%", "英德法日 10Y 收益率升至 2.67%"],
+        ["英德法日 10Y 收益率（截至 2026-06，滞后约 2.5 个月）：JP 2.67% 为 2006 年来最高",
+         "美债 10Y 收益率 4.2%（日频，最新交易日）"],
+    ),
+]
+
+
+@pytest.mark.parametrize("rule_id,should_hit,should_not_hit", _MACRO_CASES)
+def test_v027_macro_rules_hits_assertions_not_facts(rule_id, should_hit, should_not_hit):
+    rule = _rules()[rule_id]
+    regex = re.compile(rule["pattern"])
+    skip = re.compile(rule["skip_if_pattern"]) if rule.get("skip_if_pattern") else None
+
+    def _lint_flags(text: str) -> bool:
+        return bool(regex.search(text)) and not (skip and skip.search(text))
+
+    for text in should_hit:
+        assert _lint_flags(text), f"应命中 {rule_id}: {text!r}"
+    for text in should_not_hit:
+        assert not _lint_flags(text), f"不应命中 {rule_id}: {text!r}"
+
+
 # ---------------------------------------------------------------- H5 裁决落点
 
 def test_journal_calendar_section():

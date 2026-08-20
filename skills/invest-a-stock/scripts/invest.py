@@ -68,13 +68,6 @@ except ImportError:
     _HAS_EVIDENCE = False
 
 try:
-    from lib import archiver as archiver_mod
-    _HAS_ARCHIVER = True
-except ImportError:
-    archiver_mod = None
-    _HAS_ARCHIVER = False
-
-try:
     from lib import lint as lint_mod
     _HAS_LINT = True
 except ImportError:
@@ -1698,6 +1691,45 @@ def cmd_portfolio(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_thesis_status(t: dict) -> str:
+    """thesis --status 人读输出（E4）：失效/触发日期戳展示。
+
+    日期存于 assumptions_json[i].invalidated_at / red_lines_json[i].triggered_at
+    （YYYY-MM-DD，上海口径）。存量数据无这些字段时展示「日期未记录」，读取不得报错
+    （E4 验收标准 2）。
+    """
+    lines = [f"# thesis: {t['symbol']}", ""]
+    lines.append(f"健康度 {t['health_score']} · 状态 {t['state']}")
+    lines.append(
+        f"创建 {t.get('created_at') or '未记录'} · 更新 {t.get('updated_at') or '未记录'}")
+    lines.append("")
+    lines.append("假设 (assumptions):")
+    for a in t.get("assumptions") or []:
+        aid = a.get("id") or "?"
+        stmt = a.get("statement") or ""
+        conf = a.get("confidence")
+        conf_s = f"{conf:.2f}" if isinstance(conf, (int, float)) else "-"
+        last = a.get("last_check_date") or "-"
+        if a.get("valid", True):
+            tag = "有效"
+        else:
+            inv = a.get("invalidated_at")
+            tag = f"失效于 {inv}" if inv else "失效 · 日期未记录"
+        lines.append(f"- {aid} {stmt} | 置信 {conf_s} | 上次检查 {last} | {tag}")
+    lines.append("")
+    lines.append("红线 (red_lines):")
+    for r in t.get("red_lines") or []:
+        rid = r.get("id") or "?"
+        cond = r.get("condition") or ""
+        if r.get("triggered"):
+            trig = r.get("triggered_at")
+            tag = f"触发于 {trig}" if trig else "触发 · 日期未记录"
+        else:
+            tag = "未触发"
+        lines.append(f"- {rid} {cond} | {tag}")
+    return "\n".join(lines)
+
+
 def cmd_thesis(args: argparse.Namespace) -> int:
     if not _HAS_STORE:
         print("❌ store 模块不可用", file=sys.stderr)
@@ -1714,14 +1746,20 @@ def cmd_thesis(args: argparse.Namespace) -> int:
             existing = store_mod.thesis_get(args.symbol)
         assumptions = list(existing.get("assumptions") or [])
         red_lines = list(existing.get("red_lines") or [])
+        # E4: --invalidate / --trigger-redline 写入时打日期戳（上海口径 YYYY-MM-DD）
+        from lib.shared_dates import shanghai_now
+
+        today = shanghai_now().strftime("%Y-%m-%d")
         for aid in getattr(args, "invalidate", None) or []:
             for a in assumptions:
                 if a.get("id") == aid:
                     a["valid"] = False
+                    a["invalidated_at"] = today
         for rid in getattr(args, "trigger_redline", None) or []:
             for rline in red_lines:
                 if rline.get("id") == rid:
                     rline["triggered"] = True
+                    rline["triggered_at"] = today
         r = store_mod.thesis_update(args.symbol, assumptions=assumptions, red_lines=red_lines)
         print(f"✅ 已更新 thesis: {args.symbol} · 健康度 {r['health_score']} · {r['state']}")
         return 0
@@ -1730,7 +1768,7 @@ def cmd_thesis(args: argparse.Namespace) -> int:
         if not t:
             print(f"⚠️ 未找到 {args.symbol} 的 thesis 记录，请先 --init")
             return 1
-        print(json.dumps(t, ensure_ascii=False, indent=2))
+        print(_format_thesis_status(t))
         return 0
     return 0
 

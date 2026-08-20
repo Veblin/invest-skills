@@ -911,27 +911,6 @@ def list_valuations(symbol: str | None = None, limit: int = 20) -> list[dict]:
         _safe_close(c)
 
 
-def get_valuation(valuation_id: int) -> dict | None:
-    """获取单条估值记录（含完整 result_json）。"""
-    init_db()
-    c = _conn()
-    try:
-        row = c.execute(
-            "SELECT * FROM valuations WHERE id=?", (valuation_id,)
-        ).fetchone()
-        if row is None:
-            return None
-        d = dict(row)
-        if d.get("result_json"):
-            try:
-                d["result"] = json.loads(d["result_json"])
-            except (json.JSONDecodeError, TypeError):
-                d["result"] = None
-        return d
-    finally:
-        _safe_close(c)
-
-
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
     """递归对比两个维度的 data，返回变化列表。"""
     changes: list[dict] = []
@@ -1035,15 +1014,18 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
 
 # ---- v0.1.9: thesis tracker ----
 
+# E4 (v0.2.7): invalidated_at / triggered_at 为 CLI --invalidate / --trigger-redline
+# 写入时的日期戳（YYYY-MM-DD，上海口径），存放于 JSON 结构内（schema 无独立列）。
+# 存量数据可能缺该字段，读取方必须 .get() 防御，展示为「日期未记录」。
 _DEFAULT_ASSUMPTIONS = [
-    {"id": "a1", "statement": "盈利增速可持续", "confidence": 0.7, "last_check_date": None, "valid": True},
-    {"id": "a2", "statement": "行业景气维持", "confidence": 0.6, "last_check_date": None, "valid": True},
-    {"id": "a3", "statement": "估值溢价有基本面支撑", "confidence": 0.5, "last_check_date": None, "valid": True},
+    {"id": "a1", "statement": "盈利增速可持续", "confidence": 0.7, "last_check_date": None, "valid": True, "invalidated_at": None},
+    {"id": "a2", "statement": "行业景气维持", "confidence": 0.6, "last_check_date": None, "valid": True, "invalidated_at": None},
+    {"id": "a3", "statement": "估值溢价有基本面支撑", "confidence": 0.5, "last_check_date": None, "valid": True, "invalidated_at": None},
 ]
 
 _DEFAULT_RED_LINES = [
-    {"id": "r1", "condition": "单季营收同比 < -10%", "triggered": False},
-    {"id": "r2", "condition": "毛利率同比降 > 5pp", "triggered": False},
+    {"id": "r1", "condition": "单季营收同比 < -10%", "triggered": False, "triggered_at": None},
+    {"id": "r2", "condition": "毛利率同比降 > 5pp", "triggered": False, "triggered_at": None},
 ]
 
 
