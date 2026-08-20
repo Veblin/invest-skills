@@ -35,7 +35,6 @@ from ..render_utils import (
     _missing_section,
     _references_appendix,
     _risk_footer,
-    _meta_cv_line,
     _cv,
     _fmt,
     _fmt_v2,
@@ -45,21 +44,15 @@ from ..render_utils import (
     _coalesce_fin_field,
     _fin_field_num,
     _wrap_details,
-    _source_status_block,
     _compute_metric_cagr,
     cagr_period_rows,
-    _periods_per_year,
     _historical_pe_median,
     _bull_bear_valuation_divergence_text,
     _evidence_conclusion_block,
     _v3_cv7_assessment,
     _v3_cv7_block,
-    _v3_cv8_assessment,
-    _v3_cv8_block,
-    _v3_trend_stage_hints,
     _v3_price_change,
     _v3_price_window_label,
-    _data_fields,
 )
 from ..render_dcf import _section_dcf_valuation
 from ..render_risk import (
@@ -494,42 +487,3 @@ def _render_enhancement_hints(collection: dict[str, Any]) -> list[str]:
         lines.append(f"- 近 60 日价格异常（{shock_type}）: {date_s or '—'}")
 
     return lines if len(lines) > 1 else []
-
-
-# --- _render_dimension_data ---
-def _render_dimension_data(dn: str, data: Any, lines: list[str]) -> None:
-    """渲染维度主数据内容（不含来源标注）。"""
-    if dn == "basic_info" and isinstance(data, dict):
-        for k, v in data.items():
-            lines.append(f"- {k}: {v}")
-    elif dn == "financials" and isinstance(data, list):
-        lines.append("| 期间 | ROE | EPS | 扣非净利润 |\n|------|-----|-----|-----------|")
-        for r in data[:5]:
-            lines.append(f"| {r.get('end_date','?')} | {_fmt(r.get('roe'),'%')} | {_fmt(r.get('eps'))} | {_fmt(r.get('profit_dedt'))} |")
-    elif dn == "quote":
-        if isinstance(data, dict):
-            for k, v in data.items():
-                lines.append(f"- {k}: {v}")
-        elif isinstance(data, list) and data:
-            # Tushare/akshare 日线数据：取最新一条展示
-            r = data[-1]
-            lines.append(f"- 日期: {r.get('trade_date', '?')}")
-            lines.append(f"- 开盘: {_fmt(r.get('open'))}")
-            lines.append(f"- 最高: {_fmt(r.get('high'))}")
-            lines.append(f"- 最低: {_fmt(r.get('low'))}")
-            lines.append(f"- 收盘: {_fmt(r.get('close'))}")
-            lines.append(f"- 成交量: {_fmt(r.get('vol'))}")
-    elif dn == "shareholders" and isinstance(data, list):
-        lines.append("| 股东 | 持股比例 |\n|------|---------|")
-        for r in data[:10]:
-            lines.append(f"| {r.get('holder_name','?')} | {_fmt(r.get('hold_ratio'),'%')} |")
-    elif dn == "northbound" and isinstance(data, list):
-        lines.append("| 日期 | 净流向 |\n|------|-------|")
-        for r in data[:7]:
-            lines.append(f"| {r.get('trade_date','?')} | {_fmt(r.get('net_mf_vol'))} |")
-    elif dn == "kline" and isinstance(data, list):
-        lines.append("| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|")
-        for r in data[-10:]:
-            lines.append(f"| {r.get('trade_date','?')} | {_fmt(r.get('open'))} | {_fmt(r.get('high'))} | {_fmt(r.get('low'))} | {_fmt(r.get('close'))} | {_fmt(r.get('vol'))} |")
-
-

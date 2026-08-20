@@ -423,15 +423,6 @@ def akshare_push2_available(*, force_probe: bool = False) -> bool:
     return bool(detail.get("reachable"))
 
 
-def get_push2_cache_detail() -> dict[str, Any] | None:
-    """返回最近一次 push2 探测详情（供 diagnose）。"""
-    with _PROXY_IO_LOCK:
-        detail = _push2_cache.get("detail")
-        if isinstance(detail, dict):
-            return dict(detail)
-        return None
-
-
 def proxy_status(*, probe: bool = False) -> dict[str, Any]:
     """汇总代理环境：是否检测到代理、绕过是否生效、是否需要用户操作。"""
     info = detect_proxy()
@@ -526,19 +517,6 @@ def no_proxy_session() -> Iterator[requests.Session]:
         yield sess
     finally:
         sess.close()
-
-
-@contextmanager
-def _akshare_direct_session_unlocked() -> Iterator[None]:
-    """兼容测试 mock：acquires _PROXY_IO_LOCK internally, then enter/exit synchronously."""
-    with _PROXY_IO_LOCK:
-        _env_bypass_enter()
-        _requests_direct_enter()
-        try:
-            yield
-        finally:
-            _requests_direct_exit()
-            _env_bypass_exit()
 
 
 @contextmanager

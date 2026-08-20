@@ -23,8 +23,6 @@ logger = logging.getLogger(__name__)
 
 # 品种 → 现货指数（akshare stock_zh_index_daily 代码）
 INDEX_MAP = {"IF": "sh000300", "IH": "sh000016", "IC": "sh000905", "IM": "sh000852"}
-# 各品种当月合约序列起始月（上市时间）
-SYMBOL_START = {"IF": "2015-04", "IH": "2015-04", "IC": "2015-04", "IM": "2022-07"}
 
 
 def _make_client() -> TushareClient:

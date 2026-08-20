@@ -3585,7 +3585,3 @@ def collect_peer_comparison(
             "请运行 `invest.py diagnose` 检查数据源可用性。"
         ),
     }
-
-
-# 测试与旧代码兼容别名
-_safe_float_val = safe_float

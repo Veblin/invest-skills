@@ -58,7 +58,6 @@ from lib.tushare_client import TushareClient
 # 常量
 # ---------------------------------------------------------------------------
 DEFAULT_ERP = 0.060          # A 股 ERP 默认 6%
-DEFAULT_TERMINAL_G = 0.025   # 永续增长率默认 2.5%
 CHINA_BOND_DAYS = 2000       # 中国国债收益率回溯天数
 
 # 情景定义

@@ -22,13 +22,9 @@ DRIVER_VALUE = "估值股息回归"     # 估值修复 + 股息分红（粮）
 DRIVER_CYCLE = "周期均值回归"     # 周期波动中盈利均值回归
 DRIVER_UNKNOWN = "暂无法判定"     # 证据不足或矛盾
 
-_ALL_DRIVERS = (DRIVER_GROWTH, DRIVER_VALUE, DRIVER_CYCLE, DRIVER_UNKNOWN)
-
 # 判定阈值（引擎规则，集中可调）
 _GROWTH_POSITIVE_YEAR_RATIO = 0.6   # 正增长年占比 ≥60% → 成长倾向
-_VALUE_POSITIVE_YEAR_RATIO = 0.8    # 盈利稳定年占比 ≥80% → 价值倾向
 _CYCLE_CV_THRESHOLD = 0.5           # 年度净利变异系数 ≥0.5 → 周期特征
-_FCF_POSITIVE_RATIO = 0.5           # FCF 为正年占比
 _DIV_YEARS_MIN = 3                  # 连续分红年数 ≥3 → 股息回归证据
 _CONF_HIGH_EVIDENCE = 3             # 有效证据 ≥3 → 高置信度
 

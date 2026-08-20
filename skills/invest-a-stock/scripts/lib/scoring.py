@@ -270,8 +270,6 @@ def customer_lockin_score(financials: list[dict]) -> dict:
 
 # ---- 内部人买卖一致性信号 ----
 
-_INSIDER_LABELS = ("强正向", "正向", "分歧", "负向", "强负向")
-
 
 def insider_signal(holder_changes: dict) -> str:
     """内部人买卖一致性信号: "强正向"|"正向"|"分歧"|"负向"|"强负向"|"数据不足"。
