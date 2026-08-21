@@ -27,10 +27,6 @@ def _ocf(row: dict) -> float | None:
     return coalesce_field(row, "n_cashflow_act", "ocf")
 
 
-def _gross_margin(row: dict) -> float | None:
-    return coalesce_field(row, "grossprofit_margin", "gross_margin")
-
-
 def _signal(
     id: str,
     name: str,

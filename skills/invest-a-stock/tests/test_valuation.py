@@ -966,3 +966,147 @@ class TestDualEngineParity:
         result = calc_historical_percentile(rows)
         assert result["pe_neg_pct"] == pytest.approx(0.4)
         assert any("仅作位置参考" in w for w in result["warnings"])
+
+
+class TestTencentQuoteFallback:
+    """v0.2.7：_get_quote_tencent 收敛至 skills/lib/quote_tencent 后契约回归。
+
+    返回键集与失败契约（{"price": None, "source": "failed: tencent", ...}）
+    保持逐字不变；路由/解析/单位换算由共享模块测试覆盖。
+    """
+
+    def test_parses_fields_and_maps_keys(self, monkeypatch):
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        p = [""] * 50
+        p[3] = "18.52"      # 价格
+        p[32] = "-1.23"     # 涨跌幅
+        p[39] = "25.1"      # 市盈率（TTM）
+        p[45] = "952.734"   # 总市值（亿元）
+        p[46] = "3.05"      # 市净率
+        payload = 'v_sh600519="' + "~".join(p) + '"'
+
+        captured: dict = {}
+
+        class _FakeResp:
+            status_code = 200
+            text = payload
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                captured["url"] = url
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = _get_quote_tencent("600519")
+        assert captured["url"] == "http://qt.gtimg.cn/q=sh600519"
+        assert out["price"] == 18.52
+        assert out["change_pct"] == -1.23
+        assert out["pe_dynamic"] == 25.1
+        assert out["total_mv_yi"] == pytest.approx(952.73)  # round 2 位（旧实现保留）
+        assert out["pb"] == 3.05
+        assert out["source"] == "tencent.qt.gtimg.cn"
+
+    def test_network_failure_contract_unchanged(self, monkeypatch):
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        def _boom():
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", _boom)
+        out = _get_quote_tencent("600519")
+        assert out["price"] is None
+        assert out["source"] == "failed: tencent"
+        assert "connection refused" in out.get("error", "")
+
+    def test_invalid_payload_contract(self, monkeypatch):
+        """字段不足/价格缺失 → 与网络失败同契约（error dict，不抛异常）。"""
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        class _FakeResp:
+            status_code = 200
+            text = "v_sh600519=no~tilde~here"
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = _get_quote_tencent("600519")
+        assert out["price"] is None
+        assert out["source"] == "failed: tencent"
+
+    def test_bj_symbol_failure_contract(self, monkeypatch):
+        """北交所代码（4/8/920）→ 不请求，直接失败契约（不误路由）。"""
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        requested: list[str] = []
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                requested.append(url)
+                raise AssertionError("北交所代码不应发起腾讯请求")
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = _get_quote_tencent("920001")
+        assert out["price"] is None
+        assert out["source"] == "failed: tencent"
+        assert requested == []
+
+    def test_tencent_used_when_akshare_fails(self, monkeypatch):
+        """get_quote_ak 的 akshare 失败 → 腾讯兜底路径保持接通。"""
+        import akshare as ak
+        from valuation_calc import get_quote_ak
+        import lib.proxy as _proxy
+
+        monkeypatch.setattr(ak, "stock_zh_a_spot_em", lambda: (_ for _ in ()).throw(RuntimeError("ak failed")))
+
+        p = [""] * 50
+        p[3] = "18.52"
+        p[32] = "0.5"
+        payload = 'v_sh600519="' + "~".join(p) + '"'
+
+        class _FakeResp:
+            status_code = 200
+            text = payload
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = get_quote_ak("600519")
+        assert out["source"] == "tencent.qt.gtimg.cn"
+        assert out["price"] == 18.52

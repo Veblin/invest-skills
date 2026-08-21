@@ -148,6 +148,21 @@ ln -sfn "$PWD/skills/invest-a-stock" ~/.agents/skills/invest-a-stock
 
 仓库根目录提供 `gemini-extension.json`，按 Gemini CLI 扩展安装流程配置环境变量（`TUSHARE_TOKEN` 等）。
 
+### DSH（豆包编程助手 / `.agents/skills` 扫描型平台）
+
+DSH 从 `.agents/skills/` 目录发现技能。本仓库已内置该目录下 6 个 `invest-a-*` symlink（相对路径 `../../skills/<name>`），clone 后即可用：
+
+```bash
+git clone https://github.com/Veblin/invest-skills.git && cd invest-skills
+# .agents/skills/ 已就位，DSH 直接发现 6 个 invest-a-* skill
+# 若链接损坏（个别平台解压不保留 symlink），用幂等脚本重建：
+bash scripts/link-skills.sh
+```
+
+- **Windows**：symlink 需开发者模式；仓库提供 junction 重建脚本 `.\scripts\setup_workbuddy_windows.ps1`（同时重建 `.agents\skills` 与 `.workbuddy\skills`，无需管理员权限）。
+- **工具约束**：`SKILL.md` 的 `allowed-tools` 是 Claude Code 约定，DSH 不读取该字段——工具可用范围由 DSH 自身沙箱控制，各 SKILL.md 正文已注明。
+- 兼容平台：DSH / Qoder / Trae / Kimi CLI（均支持 Agent Skills 目录约定）。
+
 ---
 
 ## Dependency Management

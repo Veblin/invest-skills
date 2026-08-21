@@ -1,9 +1,11 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
 import math
+import sys
 import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-import）
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
+from pathlib import Path
 
 from lib.nums import row_value_or_last  # review 二轮 R-13：dict 行末列兜底（可单测）
 
@@ -1456,11 +1458,183 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
                  "northbound", "valuation", "kline", "holder_changes"]
 
 
+# ---- E1 板块同步性引擎（v0.2.7） ----
+
+_SECTOR_SYNC_MODULE = "lib_sector_sync"
+# 与 skills/lib/sector_sync.SECTOR_SYNC_FIELDS 同步（仅作模块加载失败时的
+# 字面 fallback；正常路径骨架 fields 取 mod.SECTOR_SYNC_FIELDS）
+_SECTOR_SYNC_FIELD_NAMES = (
+    "sector_beta_60d",
+    "sector_r2_60d",
+    "idio_var_share",
+    "sector_dispersion",
+    "csad_gamma2",
+    "downside_corr_gap",
+)
+
+
+def _sector_sync_skeleton(symbol: str, *, reason: str,
+                          industry: str | None = None,
+                          n_constituents: int = 0,
+                          n_constituents_with_kline: int = 0,
+                          error: str = "") -> dict:
+    """板块同步性不可得骨架（统一 13 键 schema，fields 全 None）。
+
+    akshare 不可用 / 冷缓存跳过 / probe 无锚定 / collect_all 异常兜底四条
+    路径共用同一形状——存储/渲染消费者按统一 schema 读取不 KeyError。
+    fields 键名取已加载模块的 SECTOR_SYNC_FIELDS（模块加载失败时退回内联
+    副本，即 _SECTOR_SYNC_FIELD_NAMES）。``error`` 仅异常兜底路径使用
+    （额外键，供排障）。
+    """
+    mod = sys.modules.get(_SECTOR_SYNC_MODULE)
+    field_names = getattr(mod, "SECTOR_SYNC_FIELDS", None) or _SECTOR_SYNC_FIELD_NAMES
+    out = {
+        "symbol": symbol,
+        "available": False,
+        "provider": None,
+        "industry": industry,
+        "index_code": None,
+        "n_constituents": n_constituents,
+        "n_constituents_with_kline": n_constituents_with_kline,
+        "window_days": 0,
+        "window_start": None,
+        "window_end": None,
+        "fields": {f: None for f in field_names},
+        "meta": {},
+        "reasons": {"_all": reason},
+    }
+    if error:
+        out["error"] = error
+    return out
+
+
+def _load_sector_sync_module():
+    """加载 skills/lib/sector_sync.py（显式路径 + 固定模块名）。
+
+    scripts/lib 无 sector_sync shim（sector_sync 为 v0.2.7 新增，落 skills/lib），
+    直接 ``from lib.sector_sync import ...`` 在 scripts/lib 包内会 ImportError——
+    仿 invest_path.load_invest_a_etf_module：按文件路径加载并注册固定模块名，
+    测试按同名 patch（D13：patch 目标 = 定义模块命名空间）。
+    """
+    mod = sys.modules.get(_SECTOR_SYNC_MODULE)
+    if mod is not None:
+        return mod
+    try:
+        from lib._invest_path import ensure_skills_lib_on_path  # scripts/lib shim
+    except ImportError:  # pragma: no cover — skills/lib 独立上下文
+        from invest_path import ensure_shared_lib_on_path as ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from invest_path import invest_a_scripts_dir
+    import importlib.util as _ilu
+
+    skills_lib = Path(invest_a_scripts_dir()).parent.parent / "lib"
+    spec = _ilu.spec_from_file_location(_SECTOR_SYNC_MODULE, skills_lib / "sector_sync.py")
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise ImportError(f"cannot load skills/lib/sector_sync.py from {skills_lib}")
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[_SECTOR_SYNC_MODULE] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        # F5：exec 失败会留下残破的部分模块，被 sys.modules 永久缓存——后续
+        # 每次 collect_all 都短路返回它（AttributeError 恒现）。清理后重抛。
+        sys.modules.pop(_SECTOR_SYNC_MODULE, None)
+        raise
+    return mod
+
+
+def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict,
+                        *, force: bool = False) -> None:
+    """E1：板块同步性 6 字段 — 计算并写入 collection['sector_sync'] + kline derived。
+
+    - industry_hint 取自 basic_info 的「行业」字段（缺失 → sector_sync 内
+      fail loud「行业分类缺失」，不静默）。
+    - kline 已采集数据直接复用（不再二次抓取个股日线）。
+    - F1 冷缓存门控：成分股日线逐只抓取 5-10 分钟，默认采集不得被阻塞——
+      锚定板块成分股缓存缺口 ≤ 预算才实际计算，否则标注「缓存未预热」跳过；
+      force=True（CLI --force-sector-sync）绕过门控强制计算（首次预热路径）。
+    - probe → compute 锚定共享：probe 解析出的锚定板块经 anchor_override 直接
+      复用，compute 不二次解析（数据源可达性在两次解析间翻转时不再退化为
+      全量冷抓）；probe 无锚定（全解析失败/行业分类缺失）→ 跳过 compute
+      fail-fast，下一次采集自然重试。
+    - F4 derived 合并：仅 available=True 时并入——部分失败时 1-5 个有效字段
+      保留在 collection['sector_sync']，kline.derived 不写入，两视图对同一
+      快照的解读一致（部分数据可区分于「无数据」）。
+    """
+    basic = dim_results.get("basic_info") or {}
+    basic_data = basic.get("data") if isinstance(basic, dict) else None
+    industry_hint = ""
+    if isinstance(basic_data, dict):
+        industry_hint = str(basic_data.get("行业") or basic_data.get("industry") or "")
+    kline_dim = dim_results.get("kline") or {}
+    kline_bars = kline_dim.get("data") if isinstance(kline_dim, dict) else None
+    if not isinstance(kline_bars, list):
+        kline_bars = None
+
+    # 先加载模块（exec 不依赖 akshare——akshare 为函数内懒导入）：骨架 fields
+    # 取模块常量，无 akshare 环境同样得到 13 键统一 schema（不含内联副本漂移）
+    try:
+        mod = _load_sector_sync_module()
+    except Exception as exc:
+        logger.warning("sector_sync module load failed for %s: %s", symbol, exc)
+        collection["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 模块加载失败: {exc}", error=str(exc))
+        return
+
+    # sector_sync 全部数据源均经 akshare（东财 BK / 申万 / sina）——无 akshare
+    # 环境直接标注不可得（fail loud），避免空转与无谓网络尝试。
+    if not env.is_akshare_available():
+        collection["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason="akshare 数据源不可用，板块同步性不可得")
+        return
+
+    # F1 冷缓存门控：成分股日线全量抓取 5-10 分钟，默认采集跳过冷缓存计算。
+    if not force:
+        probe = mod.probe_sector_cache_warmth(industry_hint)
+        anchor = probe.get("anchor")
+        if not probe.get("warm"):
+            collection["sector_sync"] = _sector_sync_skeleton(
+                symbol, reason=probe.get("reason") or "板块同步性缓存未预热",
+                industry=industry_hint or None,
+                n_constituents=int(probe.get("total", 0)),
+                n_constituents_with_kline=int(probe.get("valid", 0)))
+            return
+        # probe 无锚定（全解析失败 / 行业分类缺失）：fail-fast 跳过 compute——
+        # 不给二次解析全量冷抓的机会（probe 与 compute 之间数据源可达性翻转
+        # 时，compute 会现场抓取 185 只成分股）；下一次采集自然重试
+        if not anchor:
+            collection["sector_sync"] = _sector_sync_skeleton(
+                symbol, reason=probe.get("reason") or "板块指数不可得",
+                industry=industry_hint or None,
+                n_constituents=int(probe.get("total", 0)))
+            return
+        ss = mod.compute_sector_sync(
+            symbol, industry_hint=industry_hint, stock_kline=kline_bars,
+            anchor_override=anchor)
+    else:
+        ss = mod.compute_sector_sync(
+            symbol, industry_hint=industry_hint, stock_kline=kline_bars)
+    collection["sector_sync"] = ss
+
+    # F4：字段并入 kline derived 以 available=True 为门槛（None 不写入）
+    if ss.get("available") and isinstance(kline_dim, dict):
+        derived = dict(kline_dim.get("derived") or {})
+        merged = False
+        for f in mod.SECTOR_SYNC_FIELDS:
+            v = (ss.get("fields") or {}).get(f)
+            if v is not None:
+                derived[f] = v
+                merged = True
+        if merged:
+            kline_dim["derived"] = derived
+
+
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
                 with_chain: bool = False,
-                with_news_pack: bool = False) -> dict[str, Any]:
+                with_news_pack: bool = False,
+                force_sector_sync: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
@@ -1473,6 +1647,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         with_macro: 采集中国宏观指标（PMI/CPI/PPI/LPR）
         with_chain: 采集产业链上下文（复用已采集的 basic_info）
         with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
+        force_sector_sync: 绕过 F1 冷缓存门控强制计算板块同步性（首次预热，
+            成分股日线全量抓取约 5-10 分钟；默认冷缓存时跳过并标注原因）
     """
     if dims is None:
         dims = list(_DEFAULT_DIMS)
@@ -1611,6 +1787,18 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         "chain_context": chain_context,  # R-12
         "summary": _build_summary(dimensions),
     }
+    # E1: 板块同步性引擎（v0.2.7）— 6 个 derived 字段 + collection['sector_sync'] 详情。
+    # 依赖 kline + basic_info；板块指数/成分股不可得时内部 fail loud（输出「不可得」，
+    # 不给默认值）。F1 冷缓存门控：成分股逐只首跑 5-10 分钟，默认冷缓存跳过；
+    # --force-sector-sync 强制预热，之后经 DataCache 缓存同板块多标的秒级复用。
+    try:
+        _attach_sector_sync(result, symbol, dim_results, force=force_sector_sync)
+    except Exception as exc:
+        logger.warning("sector_sync attach failed for %s: %s", symbol, exc)
+        # 异常兜底同样走 13 键统一骨架（含 fields/meta），消费者按统一 schema
+        # 读取不 KeyError；error 键供排障
+        result["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 采集异常: {exc}", error=str(exc))
     try:
         attach_phase2_extras(result, symbol)
     except Exception as exc:
@@ -3585,7 +3773,3 @@ def collect_peer_comparison(
             "请运行 `invest.py diagnose` 检查数据源可用性。"
         ),
     }
-
-
-# 测试与旧代码兼容别名
-_safe_float_val = safe_float

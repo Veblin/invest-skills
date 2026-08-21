@@ -2,7 +2,7 @@
 """候选预案触发基线统计（v0.2.6 补漏 #3）——E-002~E-007，E-001 同口径。
 
 用法:
-  uv run python scripts/scenario_baselines.py      # 输出 docs/data/scenario_baselines_E002_E007.json
+  uv run python scripts/archive/scenario_baselines.py      # 输出 docs/data/scenario_baselines_E002_E007.json
 
 口径（与 tmp_4050_band.py 的 E-001 基线一致）：
 - 数据：上证指数全历史日线（akshare stock_zh_index_daily，降级 baostock）
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (str(_ROOT / "skills" / "lib"), str(_ROOT / "skills")):
     if _p not in sys.path:
         sys.path.insert(0, _p)

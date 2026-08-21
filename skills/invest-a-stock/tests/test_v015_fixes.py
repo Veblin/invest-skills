@@ -139,6 +139,24 @@ class TestResumeCompatibility:
         args = argparse.Namespace(symbol="600176", with_macro=True, deep=False)
         assert invest._resume_cache_compatible(args, ["quote"], cached) is True
 
+    def test_resume_force_sector_sync_rejects_cache(self, isolated_store):
+        """--force-sector-sync 是「强制现场计算」：恢复兼容快照（可能含冷缓存
+        『未预热』骨架）会丢弃用户请求的预热——必须拒绝恢复走真实采集。"""
+        import argparse
+        import invest
+
+        isolated_store.save_pipeline_step("600176", "collect", {
+            "dims": ["quote"], "with_macro": False, "deep": False,
+        })
+        cached = {
+            "symbol": "600176",
+            "dimensions": [{"dimension": "quote", "data": {}}],
+            "macro_context": {},
+        }
+        args = argparse.Namespace(symbol="600176", with_macro=False, deep=False,
+                                  force_sector_sync=True)
+        assert invest._resume_cache_compatible(args, ["quote"], cached) is False
+
 
 class TestFusionSerialization:
     def test_fused_to_dict_json_roundtrip(self):

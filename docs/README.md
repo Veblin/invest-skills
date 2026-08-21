@@ -41,11 +41,31 @@
 | [references-format.md](../skills/invest-a-stock/references/references-format.md) | 引用来源表规范 |
 | [source-guide.md](../skills/invest-a-stock/references/source-guide.md) | 数据源优先级、代理说明 |
 
+## 架构与实现
+
+| 文档 | 内容 |
+|------|------|
+| [architecture.md](architecture.md) | 已完成功能与实现逻辑总览（三层架构、6 skills、多源降级链、渲染管线、版本演进、工程设施） |
+
 ## 路线图
 
 | 文档 | 内容 |
 |------|------|
 | [roadmap.md](roadmap.md) | 计划接入的数据源与版本方向 |
+
+## 回测与基线数据（docs/data/）
+
+事件研究回测的结果存档（JSON，随版本库发布）；生成脚本已归档至 `scripts/archive/`（登记表见其 README）：
+
+| 数据文件 | 生成脚本 | 说明 |
+|---------|---------|------|
+| `F1/F2/F3_backtest_result.json` | `scripts/archive/backtest_futures.py`（+ `backfill_futures_daily.py` 回填数据） | 期货基差事件研究（F 系列） |
+| `H1/H2/H3/H4/H6_backtest_result.json` | `scripts/archive/backtest_h1~h6.py` | 见底/低吸/金价 beta/缺口/日历事件研究（H 系列） |
+| `H5_backtest_result.json` | `scripts/archive/backtest_calendar.py` | H5 日历效应回测（8/15-8/31 窗口 vs 全年） |
+| `scenario_baselines_E002_E007.json` | `scripts/archive/scenario_baselines.py` | E-002~E-007 预案基线 |
+| `pattern_scan_result.json` | invest-a-pattern-scan skill（非 archive 脚本） | 形态扫描结果存档 |
+
+各回测的假设冻结与预注册见 [architecture.md §references 的 backtest_prereg 条目](architecture.md)。
 
 ---
 

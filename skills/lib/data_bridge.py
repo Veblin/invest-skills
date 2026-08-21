@@ -268,43 +268,6 @@ def get_market_daily_pctiles(*, force: bool = False) -> dict | None:
     )
 
 
-def get_futures_basis(*, force: bool = False) -> dict | None:
-    """股指期货最新基差/持仓状态（v0.2.6 F 系列，缓存 4h）。
-
-    返回 {IF|IH|IC|IM: {date, contract, basis_pct, oi_change_pct, source}}
-    最新一日的四品种状态 | None（不可得）。依赖 invest-a-stock 的 store/futures_data。
-    注：oi_change_pct 为单日日环比（非 20 日复利变化）；20 日口径见
-    futures_data.compound_oi_change（v0.2.6 起 20 日口径已从用户标签移除）。
-    """
-    try:
-        from lib import store as _store  # noqa: E402 — invest-a-stock 路径引导
-    except ImportError:
-        logger.warning(
-            "get_futures_basis() requires invest-a-stock lib on sys.path; "
-            "Returning None — callers should guard against."
-        )
-        return None
-
-    def _collect() -> dict | None:
-        try:
-            _store.init_db()
-            rows = _store.load_futures_daily(limit=200)  # 全品种近 200 行 → 各品种最新行
-        except Exception:  # noqa: BLE001
-            return None
-        latest: dict[str, dict] = {}
-        for r in rows:
-            latest[r["symbol"]] = {
-                "date": r["date"], "contract": r["contract"],
-                "basis_pct": r.get("basis_pct"),
-                "basis_pts": r.get("basis_pts"),
-                "oi_change_pct": r.get("oi_change_pct"),
-                "source": r.get("source"),
-            }
-        return latest or None
-
-    return _fetch_dimension("futures_basis", "market", _collect, force=force)
-
-
 def get_microstructure(*, force: bool = False) -> dict | None:
     """市场微观结构快照（缓存 5min）。
 

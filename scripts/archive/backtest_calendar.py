@@ -2,9 +2,9 @@
 """H5 日历效应回测 — 8/15-8/31 窗口 vs 全年（上证指数 + 附中证全指）。
 
 用法:
-  uv run python scripts/backtest_calendar.py                     # 默认上证指数，全历史 + 2006+ 双样本
-  uv run python scripts/backtest_calendar.py --min-year 2010     # 样本起点
-  uv run python scripts/backtest_calendar.py --out /tmp/h5.json  # 输出路径
+  uv run python scripts/archive/backtest_calendar.py                     # 默认上证指数，全历史 + 2006+ 双样本
+  uv run python scripts/archive/backtest_calendar.py --min-year 2010     # 样本起点
+  uv run python scripts/archive/backtest_calendar.py --out /tmp/h5.json  # 输出路径
 
 数据源: akshare stock_zh_index_daily（sina 全历史）→ 降级 baostock sh.000001
 统计口径: ABCD 设计 §3.2 H5 行 — Welch t + permutation + 逐年效应 + 滚动 5 年窗（AMH 时变检查）
@@ -19,7 +19,7 @@ import json
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 if str(_ROOT / "skills") not in sys.path:
     sys.path.insert(0, str(_ROOT / "skills"))
 

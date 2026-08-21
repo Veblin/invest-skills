@@ -1,9 +1,10 @@
 # setup_workbuddy_windows.ps1 — Windows 上重建仓库技能链接（方案 B 落地）
 #
-# 背景：仓库用 git 符号链接发布技能入口（14 条）。Windows 上 core.symlinks=false
+# 背景：仓库用 git 符号链接发布技能入口（23 条）。Windows 上 core.symlinks=false
 # （默认）会把链接物化为文本文件；即使开开发者模式，clone 静默降级也难排查。
 # 本脚本用 NTFS junction（目录，无需管理员/开发者模式）+ 硬链接（文件，同卷无权限）
-# 重建全部 14 条入口，幂等可重跑。macOS 零影响（脚本只在 Windows 上跑）。
+# 重建全部 23 条入口（17 junction + 6 hardlink），幂等可重跑。macOS 零影响
+# （脚本只在 Windows 上跑；macOS/Linux 的 .agents\skills 对应入口见 link-skills.sh）。
 #
 # 用法（clone 后一次性）：
 #   git config core.symlinks true        # 可选：避免 git 再物化（需开发者模式）
@@ -21,25 +22,36 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 # 目录入口：junction（Target 相对仓库根；Junction 目标参数用绝对路径最稳）
+# 17 条 = .workbuddy\skills 6 + .claude\skills 5 + .agents\skills 6（DSH 发现路径）
 $DirLinks = @(
-    @{ Name = ".workbuddy\skills\invest-a-stock";    Target = "skills\invest-a-stock" },
-    @{ Name = ".workbuddy\skills\invest-a-etf";      Target = "skills\invest-a-etf" },
-    @{ Name = ".workbuddy\skills\invest-a-journal";  Target = "skills\invest-a-journal" },
-    @{ Name = ".workbuddy\skills\invest-a-pulse";    Target = "skills\invest-a-pulse" },
-    @{ Name = ".workbuddy\skills\invest-a-gap-scan"; Target = "skills\invest-a-gap-scan" },
-    @{ Name = ".claude\skills\invest-a-stock";    Target = "skills\invest-a-stock" },
-    @{ Name = ".claude\skills\invest-a-etf";      Target = "skills\invest-a-etf" },
-    @{ Name = ".claude\skills\invest-a-journal";  Target = "skills\invest-a-journal" },
-    @{ Name = ".claude\skills\invest-a-gap-scan"; Target = "skills\invest-a-gap-scan" }
+    @{ Name = ".workbuddy\skills\invest-a-stock";       Target = "skills\invest-a-stock" },
+    @{ Name = ".workbuddy\skills\invest-a-etf";         Target = "skills\invest-a-etf" },
+    @{ Name = ".workbuddy\skills\invest-a-journal";     Target = "skills\invest-a-journal" },
+    @{ Name = ".workbuddy\skills\invest-a-pulse";       Target = "skills\invest-a-pulse" },
+    @{ Name = ".workbuddy\skills\invest-a-gap-scan";    Target = "skills\invest-a-gap-scan" },
+    @{ Name = ".workbuddy\skills\invest-a-pattern-scan"; Target = "skills\invest-a-pattern-scan" },
+    @{ Name = ".claude\skills\invest-a-stock";       Target = "skills\invest-a-stock" },
+    @{ Name = ".claude\skills\invest-a-etf";         Target = "skills\invest-a-etf" },
+    @{ Name = ".claude\skills\invest-a-journal";     Target = "skills\invest-a-journal" },
+    @{ Name = ".claude\skills\invest-a-gap-scan";    Target = "skills\invest-a-gap-scan" },
+    @{ Name = ".claude\skills\invest-a-pattern-scan"; Target = "skills\invest-a-pattern-scan" },
+    @{ Name = ".agents\skills\invest-a-stock";       Target = "skills\invest-a-stock" },
+    @{ Name = ".agents\skills\invest-a-etf";         Target = "skills\invest-a-etf" },
+    @{ Name = ".agents\skills\invest-a-journal";     Target = "skills\invest-a-journal" },
+    @{ Name = ".agents\skills\invest-a-pulse";       Target = "skills\invest-a-pulse" },
+    @{ Name = ".agents\skills\invest-a-gap-scan";    Target = "skills\invest-a-gap-scan" },
+    @{ Name = ".agents\skills\invest-a-pattern-scan"; Target = "skills\invest-a-pattern-scan" }
 )
 
 # 文件入口：硬链接（junction 不支持文件；硬链接同卷免权限，编辑 SKILL.md 两端同步）
+# 6 条 = .claude\commands 全部（invest-a-stock/etf/journal/pulse/gap-scan/pattern-scan）
 $FileLinks = @(
-    @{ Name = ".claude\commands\invest-a-stock.md";    Target = "skills\invest-a-stock\SKILL.md" },
-    @{ Name = ".claude\commands\invest-a-etf.md";      Target = "skills\invest-a-etf\SKILL.md" },
-    @{ Name = ".claude\commands\invest-a-journal.md";  Target = "skills\invest-a-journal\SKILL.md" },
-    @{ Name = ".claude\commands\invest-a-pulse.md";    Target = "skills\invest-a-pulse\SKILL.md" },
-    @{ Name = ".claude\commands\invest-a-gap-scan.md"; Target = "skills\invest-a-gap-scan\SKILL.md" }
+    @{ Name = ".claude\commands\invest-a-stock.md";       Target = "skills\invest-a-stock\SKILL.md" },
+    @{ Name = ".claude\commands\invest-a-etf.md";         Target = "skills\invest-a-etf\SKILL.md" },
+    @{ Name = ".claude\commands\invest-a-journal.md";     Target = "skills\invest-a-journal\SKILL.md" },
+    @{ Name = ".claude\commands\invest-a-pulse.md";       Target = "skills\invest-a-pulse\SKILL.md" },
+    @{ Name = ".claude\commands\invest-a-gap-scan.md";    Target = "skills\invest-a-gap-scan\SKILL.md" },
+    @{ Name = ".claude\commands\invest-a-pattern-scan.md"; Target = "skills\invest-a-pattern-scan\SKILL.md" }
 )
 
 Write-Host "== invest:a-stock 技能链接重建（junction + hardlink，幂等）=="
@@ -103,4 +115,4 @@ foreach ($l in $FileLinks) {
 }
 
 Write-Host ""
-Write-Host "完成。验证：cmd /c dir .workbuddy\skills   # 应显示 <JUNCTION>"
+Write-Host "完成。验证：cmd /c dir .workbuddy\skills   # 应显示 <JUNCTION>（.claude\skills 与 .agents\skills 同理）"
