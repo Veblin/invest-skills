@@ -13,6 +13,8 @@ metadata:
 
 # invest-a-pattern-scan v0.2.6
 
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
+
 底部反转形态扫描器（MVP：双底 + 三角形底）。方法学：Lo-Mamaysky-Wang (2000, JF) 核平滑 + 5 极值模板；参数表与证据分级见 `skills/lib/references/scenario-plans.md` 同源设计（ABCD 设计 §2.3）。
 
 **定位：研究信号，非决策。** 检出 = "该标的历史价格符合双底/三角形底的客观形态定义"，不构成任何交易建议（LAW 6）。

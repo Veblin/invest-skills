@@ -16,6 +16,8 @@ metadata:
 
 # invest-a-gap-scan 跳空缺口扫描
 
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
+
 ## 概述
 
 扫描**沪深300 + 中证A500 + 科创50 成分股并集**（去重后约 450~500 只），找出同时满足：
