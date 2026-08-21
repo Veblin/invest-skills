@@ -463,8 +463,9 @@ class TestComputeSectorSync:
         beta_exp = np.cov(s_rets[-60:], i_rets[-60:])[0, 1] / np.var(i_rets[-60:], ddof=1)
         r2_exp = np.corrcoef(s_rets[-60:], i_rets[-60:])[0, 1] ** 2
         assert abs(out["fields"]["sector_beta_60d"] - round(beta_exp, 2)) < 1e-9
-        assert abs(out["fields"]["sector_r2_60d"] - round(r2_exp, 2)) < 1e-9
-        assert abs(out["fields"]["idio_var_share"] - round(1.0 - r2_exp, 2)) < 1e-9
+        # r2 / 特质方差 / γ2 用 4 位精度（2 位会把微弱信号归零丢符号）
+        assert abs(out["fields"]["sector_r2_60d"] - round(r2_exp, 4)) < 1e-9
+        assert abs(out["fields"]["idio_var_share"] - round(1.0 - r2_exp, 4)) < 1e-9
 
         # 离散度：末日横截面 std（成分收益 = r_idx + e_it，r_idx 为常数 → std 仅来自 e_it）
         last_r = i_rets[-1]
@@ -481,7 +482,9 @@ class TestComputeSectorSync:
             for t in range(250)])
         A = np.vstack([np.ones(250), np.abs(rm_win), rm_win ** 2]).T
         coef = np.linalg.lstsq(A, csad, rcond=None)[0]
-        assert abs(out["fields"]["csad_gamma2"] - round(float(coef[2]), 2)) < 1e-9
+        assert abs(out["fields"]["csad_gamma2"] - round(float(coef[2]), 4)) < 1e-9
+        # 正常路径（成分股与指数同日）横截面日期 = window_end
+        assert out["meta"]["sector_dispersion"]["date"] == dates[-1]
 
         # 下行相关（独立复算，含 FR 校正）
         sigma = float(np.std(rm_win, ddof=1))
@@ -652,6 +655,128 @@ class TestComputeSectorSync:
 
 
 # ---------------------------------------------------------------------------
+# compute anchor_override（probe → compute 锚定共享）
+# ---------------------------------------------------------------------------
+
+class TestComputeAnchor:
+    def test_anchor_override_skips_resolution_network(self, tmp_path, monkeypatch):
+        """anchor_override：跳过候选解析（板块表零网络），直接抓取锚定板块。"""
+        dates = _make_weekdays(340)
+        idx_closes = _index_closes(dates)
+        n_cons = 30
+        calls: list[str] = []
+        cons_codes = [f"6000{i:02d}" for i in range(1, n_cons + 1)]
+        hist_df = pd.DataFrame({"日期": dates, "收盘": idx_closes})
+
+        def _fn(name, *a, **k):
+            calls.append(name)
+            if name in ("stock_board_industry_name_em", "sw_index_third_info",
+                        "sw_index_second_info", "sw_index_first_info"):
+                raise AssertionError(f"anchor_override 下不应解析板块表: {name}")
+            if name == "index_hist_sw":
+                return hist_df
+            if name == "index_component_sw":
+                return pd.DataFrame({"证券代码": cons_codes})
+            if name == "stock_zh_a_hist":
+                i = cons_codes.index(str(k.get("symbol")))
+                return pd.DataFrame(
+                    {"日期": dates, "收盘": _cons_closes(dates, idx_closes, i, n_cons)})
+            raise AssertionError(f"未预期调用: {name}")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        out = ss.compute_sector_sync(
+            "600176", industry_hint="玻璃玻纤",
+            stock_kline=_stock_kline(dates, idx_closes), cache=_make_cache(tmp_path),
+            anchor_override={"provider": "sw", "index_name": "建筑材料",
+                             "index_code": "801060"})
+        assert out["available"], out["reasons"]
+        assert out["provider"] == "sw"
+        assert out["index_code"] == "801060"
+        for name in ("stock_board_industry_name_em", "sw_index_third_info",
+                     "sw_index_second_info", "sw_index_first_info"):
+            assert name not in calls
+
+    def test_anchor_override_insufficient_cons_fails_loud(self, tmp_path, monkeypatch):
+        """anchor_override 锚定板块成分 < 20 → 不可得（验收 #2 仍生效）。"""
+        dates = _make_weekdays(340)
+        idx_closes = _index_closes(dates)
+        hist_df = pd.DataFrame({"日期": dates, "收盘": idx_closes})
+
+        def _fn(name, *a, **k):
+            if name == "index_hist_sw":
+                return hist_df
+            if name == "index_component_sw":
+                return pd.DataFrame({"证券代码": [f"6000{i:02d}" for i in range(1, 6)]})
+            raise AssertionError(f"未预期调用: {name}")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        out = ss.compute_sector_sync(
+            "600176", industry_hint="玻璃玻纤",
+            stock_kline=_stock_kline(dates, idx_closes), cache=_make_cache(tmp_path),
+            anchor_override={"provider": "sw", "index_name": "建筑材料",
+                             "index_code": "801060"})
+        assert not out["available"]
+        assert "不可得" in out["reasons"]["_all"]
+        assert all(v is None for v in out["fields"].values())
+
+
+# ---------------------------------------------------------------------------
+# 零尺度守卫 / 逐字段 fail loud / 离散度日期
+# ---------------------------------------------------------------------------
+
+class TestOlsZeroScale:
+    def test_zero_scale_raises_value_error(self):
+        """零范数列（窗口内板块收益恒 0 → |R_m|、R_m² 全零）→ ValueError，
+        而非 ZeroDivisionError 穿透 csad_regression 的捕获。"""
+        xs = [[1.0, 0.0, 0.0]] * 30
+        ys = [0.02] * 30
+        with pytest.raises(ValueError, match="零范数"):
+            ss._ols_with_se(xs, ys)
+
+    def test_csad_zero_market_fails_loud(self):
+        """板块指数窗口内收益恒 0：CSAD 回归不可辨识 → available=False，
+        绝不抛 ZeroDivisionError 击穿整个 sector_sync。"""
+        dates = _make_weekdays(41)
+        idx_ret_by_date = {d: 0.0 for d in dates[1:]}
+        by_day = {d: [0.0] * 30 for d in dates[1:]}
+        res = ss.csad_regression(idx_ret_by_date, by_day)
+        assert not res["available"]
+        assert "奇异" in res["reason"]
+
+    def test_guarded_metric_value_error_becomes_unavailable(self):
+        """_guarded_metric：ValueError → 该字段 available=False + reason。"""
+        def _boom():
+            raise ValueError("boom")
+
+        res = ss._guarded_metric("CSAD 回归", _boom)
+        assert res == {"available": False, "reason": "CSAD 回归 计算异常: boom"}
+
+
+class TestDispersionMetaDate:
+    def test_meta_date_is_last_cross_section_day(self, tmp_path, monkeypatch):
+        """盘中形态（成分股日线滞后指数一日）：离散度按昨日横截面计算，
+        meta.date 标注昨日而非 window_end（不把昨日数据标成当日）。"""
+        dates = _make_weekdays(340)
+        idx_closes = _index_closes(dates)
+        n_cons = 30
+        fetch = _make_ak_fetch(dates, idx_closes, n_cons)
+
+        def _lagged(name, *a, **k):
+            df = fetch(name, *a, **k)
+            if name == "stock_zh_a_hist":
+                return df.iloc[:-1]  # 成分股日线止于昨日
+            return df
+
+        monkeypatch.setattr(ss, "_ak_fetch", _lagged)
+        out = ss.compute_sector_sync(
+            "600176", industry_hint="玻璃玻纤",
+            stock_kline=_stock_kline(dates, idx_closes), cache=_make_cache(tmp_path))
+        assert out["available"], out["reasons"]
+        assert out["window_end"] == dates[-1]
+        assert out["meta"]["sector_dispersion"]["date"] == dates[-2]
+
+
+# ---------------------------------------------------------------------------
 # C7 措辞约束
 # ---------------------------------------------------------------------------
 
@@ -696,8 +821,10 @@ class TestProbeCacheWarmth:
         res = ss.probe_sector_cache_warmth("玻璃玻纤", cache=cache)
         assert res["warm"] is False
         assert res["miss"] == 25
+        assert res["valid"] == 0
         assert "未预热" in res["reason"]
         assert "--force-sector-sync" in res["reason"]
+        assert res["anchor"]["index_code"] == "BK1071"  # 锚定随探测结果返回
 
     def test_warm_cache_within_budget(self, monkeypatch, tmp_path):
         """F1：缺口 ≤ 预算（24/25 已缓存）→ warm=True，现场补抓有界。"""
@@ -711,14 +838,68 @@ class TestProbeCacheWarmth:
         res = ss.probe_sector_cache_warmth("玻璃玻纤", cache=cache)
         assert res["warm"] is True
         assert res["miss"] == 1
+        assert res["valid"] == 24
+        assert res["anchor"]["index_code"] == "BK1071"
+
+    def test_miss_counts_invalid_and_tombstone(self, monkeypatch, tmp_path):
+        """miss 判定与 compute 读取校验同口径：结构损坏条目计 miss、
+        墓碑既非 miss 也非 valid（compute 侧不会为其发网络）。"""
+        cache = _make_cache(tmp_path)
+        monkeypatch.setattr(ss, "_ak_fetch", _probe_ak_fetch)
+        dates = _make_weekdays(30)
+        closes = _index_closes(dates)
+        for code in [f"6000{i:02d}" for i in range(20)]:  # 20 只有效缓存
+            cache.set("sector_cons_kline", code, list(zip(dates, closes)),
+                      ttl_seconds=86400, source="test")
+        cache.set("sector_cons_kline", "600020", {"failed": True},  # 2 只墓碑
+                  ttl_seconds=ss._TOMBSTONE_TTL_SECONDS, source="failed")
+        cache.set("sector_cons_kline", "600021", {"failed": True},
+                  ttl_seconds=ss._TOMBSTONE_TTL_SECONDS, source="failed")
+        cache.set("sector_cons_kline", "600022", [["垃圾条目"]],  # 1 只损坏
+                  ttl_seconds=86400, source="test")
+        # 600023/600024 未缓存
+        res = ss.probe_sector_cache_warmth("玻璃玻纤", cache=cache)
+        assert res["warm"] is True
+        assert res["miss"] == 3          # 损坏 1 + 未缓存 2（墓碑不计）
+        assert res["valid"] == 20        # 只计通过校验的条目
+        assert res["total"] == 25
 
     def test_no_anchor_does_not_block(self, monkeypatch, tmp_path):
-        """F1：行业无锚定板块 → 不拦截（交给 compute fail loud 给出真实原因）。"""
+        """F1：行业无锚定板块 → anchor=None + 真实 reason（调用方据此跳过
+        compute，不再二次解析；下一次采集自然重试）。"""
         cache = _make_cache(tmp_path)
         monkeypatch.setattr(ss, "_ak_fetch",
                             lambda *a, **k: pd.DataFrame())  # 全部空表
         res = ss.probe_sector_cache_warmth("不存在的行业", cache=cache)
         assert res["warm"] is True
+        assert res["anchor"] is None
+        assert "不可得" in res["reason"]
+
+    def test_empty_hint_reason_and_no_anchor(self, monkeypatch, tmp_path):
+        """行业分类缺失：anchor=None + 明确原因（验收 #4 措辞）。"""
+        cache = _make_cache(tmp_path)
+
+        def _forbid(*a, **k):
+            raise AssertionError("空行业提示不应有网络调用")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _forbid)
+        res = ss.probe_sector_cache_warmth("", cache=cache)
+        assert res["warm"] is True
+        assert res["anchor"] is None
+        assert "行业分类缺失" in res["reason"]
+
+    def test_parse_failure_reason_and_no_anchor(self, monkeypatch, tmp_path):
+        """全部板块表解析失败：anchor=None + 真实 reason（fail-fast 契约）。"""
+        cache = _make_cache(tmp_path)
+
+        def _fn(name, *a, **k):
+            raise ConnectionError("mock 全挂")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        res = ss.probe_sector_cache_warmth("玻璃玻纤", cache=cache)
+        assert res["warm"] is True
+        assert res["anchor"] is None
+        assert "不可得" in res["reason"]
 
 
 class TestFetchIndexHistory:
@@ -736,3 +917,153 @@ class TestFetchIndexHistory:
             {"provider": "sw", "index_name": "建筑材料", "index_code": "801010"},
             cache=cache, days=2)
         assert out == [("20200102", 99.0), ("20200103", 100.0)]  # 排序后取最近 2 日
+
+    def test_cached_read_sorts_and_clips(self, monkeypatch, tmp_path):
+        """缓存读同现场路径：排序 + 尾部裁剪（幂等修复修复前写入的乱序/超窗条目）。"""
+        cache = _make_cache(tmp_path)
+        cache.set("sector_index_hist", "801010",
+                  [("2020-01-03", 100.0), ("2020-01-02", 99.0), ("1999-12-31", 1.0)],
+                  ttl_seconds=86400, source="test")
+
+        def _forbid(*a, **k):
+            raise AssertionError("缓存命中后不应走网络")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _forbid)
+        out = ss._fetch_index_history(
+            {"provider": "sw", "index_name": "建筑材料", "index_code": "801010"},
+            cache=cache, days=2)
+        assert out == [("20200102", 99.0), ("20200103", 100.0)]
+        # sorted() 返回新列表：缓存对象本身不被污染
+        raw = cache.get("sector_index_hist", "801010")
+        assert raw[0] == ["2020-01-03", 100.0]
+
+
+class TestSectorTableCache:
+    def test_table_cached_second_call_no_network(self, monkeypatch, tmp_path):
+        """板块表解析走缓存：二次解析零网络（probe/compute 共享同一份表）。"""
+        cache = _make_cache(tmp_path)
+        calls: list[str] = []
+
+        def _fn(name, *a, **k):
+            calls.append(name)
+            return _em_board_rows()
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        expected = {"provider": "em_bk", "index_name": "玻璃玻纤", "index_code": "BK9999"}
+        assert ss._resolve_em_board("玻璃玻纤", cache=cache) == expected
+        assert ss._resolve_em_board("玻璃玻纤", cache=cache) == expected
+        assert calls == ["stock_board_industry_name_em"]
+
+    def test_empty_table_not_cached(self, monkeypatch, tmp_path):
+        """空表不缓存（D6）：每次解析都重新抓取，不把空结果钉死在缓存里。"""
+        cache = _make_cache(tmp_path)
+        calls: list[str] = []
+
+        def _fn(name, *a, **k):
+            calls.append(name)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        assert ss._resolve_em_board("玻璃玻纤", cache=cache) is None
+        assert ss._resolve_em_board("玻璃玻纤", cache=cache) is None
+        assert len(calls) == 2
+        assert cache.get("sector_tables", "stock_board_industry_name_em") is None
+
+
+class TestSinaFallback:
+    def _kline_mock(self, em_rows: dict, sina_rows: dict | None = None,
+                    sina_raises: bool = False):
+        def _fn(name, *a, **k):
+            if name == "stock_zh_a_hist":
+                return pd.DataFrame(em_rows)
+            if name == "stock_zh_a_daily":
+                if sina_raises:
+                    raise ConnectionError("mock sina 拒连")
+                return pd.DataFrame(sina_rows or {})
+            raise AssertionError(f"未预期调用: {name}")
+
+        return _fn
+
+    def test_em_short_series_triggers_sina_pick_longer(self, monkeypatch, tmp_path):
+        """截断 EM 响应（3 行，限流形态）→ 触发 sina 兜底，取较长者。"""
+        dates = _make_weekdays(60)
+        closes = _index_closes(dates)
+        em_rows = {"日期": dates[:3], "收盘": [10.0, 10.1, 10.2]}
+        sina_rows = {"date": dates, "close": closes}
+        monkeypatch.setattr(ss, "_ak_fetch",
+                            self._kline_mock(em_rows, sina_rows))
+        cache = _make_cache(tmp_path)
+        out = ss._fetch_constituent_kline("600001", cache=cache)
+        assert len(out) == 60
+        assert out[0] == (dates[0], 1000.0)
+        raw = cache.get("sector_cons_kline", "600001")
+        assert raw == [list(p) for p in zip(dates, closes)]
+
+    def test_em_short_sina_missing_uses_em(self, monkeypatch, tmp_path):
+        """EM 截断且 sina 也挂：仍缓存较长的 EM 序列（最佳可用信息）。"""
+        dates = _make_weekdays(60)
+        em_rows = {"日期": dates[:3], "收盘": [10.0, 10.1, 10.2]}
+        monkeypatch.setattr(ss, "_ak_fetch",
+                            self._kline_mock(em_rows, sina_raises=True))
+        cache = _make_cache(tmp_path)
+        out = ss._fetch_constituent_kline("600001", cache=cache)
+        assert out == [("20250102", 10.0), ("20250103", 10.1), ("20250106", 10.2)]
+
+    def test_fetch_uses_shanghai_dates(self, monkeypatch, tmp_path):
+        """抓取窗口用上海时区（非本机 date.today()）——UTC 机器上滞后一天的根因。"""
+        dates = _make_weekdays(60)
+        monkeypatch.setattr(ss, "_shanghai_today", lambda: "20260821")
+        monkeypatch.setattr(ss, "_shanghai_days_ago", lambda n: "20250701")
+        seen: dict = {}
+
+        def _fn(name, *a, **k):
+            if name == "stock_zh_a_hist":
+                seen.update(k)
+                return pd.DataFrame({"日期": dates, "收盘": _index_closes(dates)})
+            raise AssertionError(f"未预期调用: {name}")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        cache = _make_cache(tmp_path)
+        assert len(ss._fetch_constituent_kline("600001", cache=cache)) == 60
+        assert seen["start_date"] == "20250701"
+        assert seen["end_date"] == "20260821"
+
+
+class TestTombstone:
+    def test_double_fail_writes_tombstone(self, monkeypatch, tmp_path):
+        """EM + sina 双挂 → 写失败墓碑（短 TTL），近期 collect 不再重试。"""
+        def _fn(name, *a, **k):
+            raise ConnectionError("mock 全挂")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        cache = _make_cache(tmp_path)
+        assert ss._fetch_constituent_kline("600001", cache=cache) is None
+        raw = cache.get("sector_cons_kline", "600001")
+        assert isinstance(raw, dict) and raw.get("failed") is True
+
+    def test_fresh_tombstone_skips_network(self, monkeypatch, tmp_path):
+        """墓碑未过期：读取直接返回 None，零网络（不再重试同一批失败代码）。"""
+        cache = _make_cache(tmp_path)
+        cache.set("sector_cons_kline", "600001", {"failed": True},
+                  ttl_seconds=ss._TOMBSTONE_TTL_SECONDS, source="failed")
+
+        def _forbid(*a, **k):
+            raise AssertionError("墓碑未过期时不应有网络调用")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _forbid)
+        assert ss._fetch_constituent_kline("600001", cache=cache) is None
+
+    def test_bj_code_double_fail_writes_tombstone(self, monkeypatch, tmp_path):
+        """北交所代码（无 sina 日线）：EM 失败也写墓碑，不再每次白试。"""
+        calls: list[str] = []
+
+        def _fn(name, *a, **k):
+            calls.append(name)
+            raise ConnectionError("mock EM 拒连")
+
+        monkeypatch.setattr(ss, "_ak_fetch", _fn)
+        cache = _make_cache(tmp_path)
+        assert ss._fetch_constituent_kline("830001", cache=cache) is None
+        assert calls == ["stock_zh_a_hist"]  # 北交所无 sina：只试 EM
+        raw = cache.get("sector_cons_kline", "830001")
+        assert isinstance(raw, dict) and raw.get("failed") is True

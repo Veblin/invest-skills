@@ -183,6 +183,11 @@ def _resume_cache_compatible(
     issues: list[str] = []
     symbol = getattr(args, "symbol", cached.get("symbol", ""))
 
+    if getattr(args, "force_sector_sync", False):
+        # force 语义是「强制现场计算」：恢复兼容快照（可能含冷缓存『未预热』
+        # 骨架）会丢弃用户请求的预热，且无任何提示——直接判不兼容走真实采集
+        issues.append("--force-sector-sync 已启用，跳过快照恢复")
+
     if getattr(args, "with_macro", False):
         macro = cached.get("macro_context") or {}
         indicators = macro.get("indicators") or {}
@@ -252,6 +257,13 @@ def _no_sources_responded(summary: dict | None) -> bool:
     return (s.get("sources_responded", s.get("available", 0)) or 0) == 0
 
 
+def _add_force_sector_sync_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--force-sector-sync", action="store_true",
+        help="绕过 F1 冷缓存门控强制计算板块同步性 6 字段（首次预热：成分股日线全量抓取约 5-10 分钟，之后同板块多标的秒级复用缓存）",
+    )
+
+
 def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--with-macro", action="store_true",
@@ -261,10 +273,7 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
         "--deep", action="store_true",
         help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
-    parser.add_argument(
-        "--force-sector-sync", action="store_true",
-        help="绕过 F1 冷缓存门控强制计算板块同步性 6 字段（首次预热：成分股日线全量抓取约 5-10 分钟，之后同板块多标的秒级复用缓存）",
-    )
+    _add_force_sector_sync_flag(parser)
     # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值
     parser.add_argument("--plan", default=argparse.SUPPRESS, help="JSON 采集计划文件路径")
     parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
@@ -306,10 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pr.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
     pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
-    pr.add_argument(
-        "--force-sector-sync", action="store_true",
-        help="绕过 F1 冷缓存门控强制计算板块同步性 6 字段（首次预热：成分股日线全量抓取约 5-10 分钟，之后同板块多标的秒级复用缓存）",
-    )
+    _add_force_sector_sync_flag(pr)
     pr.add_argument(
         "--with-news-pack",
         action="store_true",
@@ -333,6 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     pcomp.add_argument("symbol_a")
     pcomp.add_argument("symbol_b")
     pcomp.add_argument("--emit", default="compact", choices=["compact", "json"])
+    _add_force_sector_sync_flag(pcomp)
 
     pdiff = sub.add_parser("diff", help="对比两次快照变化")
     pdiff.add_argument("symbol")
@@ -346,6 +353,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pw.add_argument("symbols", help="逗号分隔股票代码（≥2）")
     pw.add_argument("--outdir", default="", help="输出目录（指定则写 watchlist_YYYY-MM-DD.md；默认 stdout）")
+    _add_force_sector_sync_flag(pw)
 
     pd = sub.add_parser("diagnose", help="检查数据源")
     pd.add_argument("--json", action="store_true")
@@ -420,6 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
     prigor.add_argument("--verify-all", action="store_true", help="运行全部验算命令")
     prigor.add_argument("--strict", action="store_true", help="严格模式：>5%% 差异视为阻断")
     prigor.add_argument("--calc", default="", help="Decimal 精确计算表达式")
+    _add_force_sector_sync_flag(prigor)
 
     paudit = sub.add_parser("audit", help="报告审计：抽取数据点 / 准出判决")
     paudit.add_argument("report")
@@ -431,6 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="单标的质地检查（非全市场筛选；全市场扫描 → v0.2.0）",
     )
     pcheck.add_argument("symbol")
+    _add_force_sector_sync_flag(pcheck)
 
     pport = sub.add_parser("portfolio", help="组合风险特征（行业集中度/相关性/压力测试）")
     pport.add_argument("holdings", help="holdings.json 路径")
@@ -465,9 +475,11 @@ def build_parser() -> argparse.ArgumentParser:
     prr.add_argument("--erp", type=float, help="股权风险溢价（默认 0.06）")
     prr.add_argument("--terminal-g", type=float, default=0.025, help="终端增长率（默认 0.025）")
     prr.add_argument("--store", action="store_true", help="从 store 读取最近采集结果")
+    _add_force_sector_sync_flag(prr)
 
     pic = sub.add_parser("ic", help="投资委员会决策框架")
     pic.add_argument("symbol", help="股票代码，如 600176")
+    _add_force_sector_sync_flag(pic)
     pic.add_argument("--rf", type=float, help="无风险利率（小数），默认 2.5%%")
     pic.add_argument("--erp", type=float, help="股权风险溢价（默认 0.06）")
 
@@ -783,8 +795,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
-    ra = collector.collect_all(args.symbol_a)
-    rb = collector.collect_all(args.symbol_b)
+    ra = collector.collect_all(args.symbol_a,
+                               force_sector_sync=getattr(args, "force_sector_sync", False))
+    rb = collector.collect_all(args.symbol_b,
+                               force_sector_sync=getattr(args, "force_sector_sync", False))
     da = {d["dimension"]: d for d in ra["dimensions"]}
     db = {d["dimension"]: d for d in rb["dimensions"]}
     lines = [f"# 对比: {args.symbol_a} vs {args.symbol_b}", ""]
@@ -1452,7 +1466,7 @@ def _print_diff_dimension_supplement(diff: dict) -> None:
         print()
 
 
-def _watchlist_get_result(symbol: str) -> dict:
+def _watchlist_get_result(symbol: str, *, force_sector_sync: bool = False) -> dict:
     """优先读 store 最新快照，否则现场采集（结果自动入库，第三采集入口接入默认落库）。
 
     全维度失败（_no_sources_responded）不入库——与 cmd_collect/cmd_report
@@ -1464,7 +1478,7 @@ def _watchlist_get_result(symbol: str) -> dict:
             rec = store_mod.get_collection(rows[0]["id"])
             if rec and rec.get("raw_json"):
                 return rec["raw_json"]
-    result = collector.collect_all(symbol)
+    result = collector.collect_all(symbol, force_sector_sync=force_sector_sync)
     if _HAS_STORE:
         if _no_sources_responded(result.get("summary")):
             print(
@@ -1527,8 +1541,8 @@ def _watchlist_needs_live_collect(symbols: list[str]) -> bool:
     return False
 
 
-def _watchlist_symbol_section(symbol: str) -> list[str]:
-    result = _watchlist_get_result(symbol)
+def _watchlist_symbol_section(symbol: str, *, force_sector_sync: bool = False) -> list[str]:
+    result = _watchlist_get_result(symbol, force_sector_sync=force_sector_sync)
     info = _watchlist_summary_fields(result)
     title = f"## {symbol}"
     if info["name"]:
@@ -1575,7 +1589,8 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
     failures = 0
     for sym in symbols:
         try:
-            body.extend(_watchlist_symbol_section(sym))
+            body.extend(_watchlist_symbol_section(
+                sym, force_sector_sync=getattr(args, "force_sector_sync", False)))
         except Exception as exc:
             failures += 1
             body.extend([f"## {sym} ❌ 采集失败", "", f"> {exc}", ""])
@@ -1644,7 +1659,8 @@ def cmd_rigor(args: argparse.Namespace) -> int:
 
     env.print_missing_token_warnings()
     dims = _CLI_DEFAULT_DIMS.split(",")
-    result = collector.collect_all(args.symbol, [d.strip() for d in dims if d.strip()])
+    result = collector.collect_all(args.symbol, [d.strip() for d in dims if d.strip()],
+                                   force_sector_sync=getattr(args, "force_sector_sync", False))
     cmds: list[str] = []
     if args.verify_all or not args.calc:
         cmds.extend(["verify-market-cap", "verify-valuation", "cross-validate"])
@@ -1685,7 +1701,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     env.print_missing_token_warnings()
     dims = ["basic_info", "financials", "quote", "valuation", "kline"]
-    result = collector.collect_all(args.symbol, dims)
+    result = collector.collect_all(args.symbol, dims,
+                                   force_sector_sync=getattr(args, "force_sector_sync", False))
     qc = run_quality_check(result)
     print(format_quality_check(qc))
     return 1 if qc["summary"]["overall"] == "fail" else 0
@@ -1822,7 +1839,8 @@ def cmd_risk_reward(args: argparse.Namespace) -> int:
         from lib.collector import collect_all
         print(f"采集 {args.symbol} 数据...", file=sys.stderr)
         collection = collect_all(args.symbol, dims=["kline", "financials", "basic_info",
-                                                      "valuation"])
+                                                      "valuation"],
+                                 force_sector_sync=getattr(args, "force_sector_sync", False))
         if _no_sources_responded(collection.get("summary")):
             print("❌ 采集失败，无可用数据", file=sys.stderr)
             return 1
@@ -1858,7 +1876,8 @@ def cmd_ic(args: argparse.Namespace) -> int:
         print(f"采集 {args.symbol} 数据...", file=sys.stderr)
         collection = collect_all(args.symbol, dims=["kline", "financials",
                                                       "basic_info", "valuation",
-                                                      "quote"])
+                                                      "quote"],
+                                 force_sector_sync=getattr(args, "force_sector_sync", False))
 
     if (collection.get("summary") or {}).get("available", 0) == 0:
         print("❌ 采集失败，无可用数据", file=sys.stderr)

@@ -102,6 +102,23 @@ class TestParserDefaults:
             else:
                 assert getattr(args, flag.lstrip("-").replace("-", "_")) is True
 
+    @pytest.mark.parametrize("cmd,argv", [
+        ("compare", ["compare", "600176", "000858", "--force-sector-sync"]),
+        ("watchlist", ["watchlist", "600176,000858", "--force-sector-sync"]),
+        ("rigor", ["rigor", "600176", "--force-sector-sync"]),
+        ("check", ["check", "600176", "--force-sector-sync"]),
+        ("risk-reward", ["risk-reward", "600176", "--force-sector-sync"]),
+        ("ic", ["ic", "600176", "--force-sector-sync"]),
+    ])
+    def test_force_sector_sync_flag_accepted(self, cmd, argv):
+        """会触发 collect_all 的子命令均可注册 --force-sector-sync（冷缓存
+        预热入口；此前 argparse 直接报错，用户无法从这些命令预热）。"""
+        import invest
+
+        parser = invest.build_parser()
+        args = parser.parse_args(argv)
+        assert args.force_sector_sync is True
+
 
 class TestCollectDefaultStore:
     def test_collect_default_stores(self, isolated_store, monkeypatch):

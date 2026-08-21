@@ -48,8 +48,10 @@
 - 成分股日线：``stock_zh_a_hist``（东财，主）→ ``stock_zh_a_daily``（sina，降级）—— sina 实测可用。
 
 缓存（DataCache，skills/lib/cache.py）：dimension 约定
-``sector_index_hist`` / ``sector_cons`` / ``sector_cons_kline``，TTL 1 天
-（盘中自动 ×0.8 收紧、盘后 ×2 放宽）。
+``sector_tables``（板块表解析，TTL 1 天）/ ``sector_index_hist`` / ``sector_cons`` /
+``sector_cons_kline``（TTL 1 天，盘中自动 ×0.8 收紧、盘后 ×2 放宽）。
+``sector_cons_kline`` 另存失败墓碑（双源全挂的代码，短 TTL），防每次采集
+重试同一批不可抓代码。
 """
 
 from __future__ import annotations
@@ -59,7 +61,6 @@ import logging
 import math
 import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,8 @@ _KLINE_FETCH_DAYS = 400     # 成分股日线抓取窗口（自然日，覆盖 ~
 _CACHE_TTL_SECONDS = 86400  # 1 天（日频数据；盘中 TTL ×0.8 由 DataCache 处理）
 _MAX_WORKERS = 8            # 成分股日线抓取并发数
 _WARMUP_FETCH_BUDGET = 20   # F1 冷缓存门控：成分股日线现场补抓预算（只），缺口 > 预算视为冷缓存
+_MIN_KLINE_ROWS = 30        # 成分股日线最少可信行数：EM 非空但少于此 → 触发 sina 兜底（截断响应/新股）
+_TOMBSTONE_TTL_SECONDS = 1800  # 失败墓碑 TTL（30 分钟）：不可抓代码短期内不再重试，过期自然恢复
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +149,50 @@ def _norm_date(raw: Any) -> str:
     return s[:8] if len(s) >= 8 and s[:8].isdigit() else ""
 
 
+def _default_cache() -> Any:
+    """DataCache 默认单例（lib.cache → 裸 cache 降级，与既有懒导入模式一致）。"""
+    try:
+        from lib.cache import default_cache  # type: ignore
+    except ImportError:
+        from cache import default_cache  # type: ignore
+    return default_cache()
+
+
+def _shanghai_today() -> str:
+    """上海时区今日（YYYYMMDD）——采集管线统一口径；date.today() 是本机时区。"""
+    try:
+        from lib.dates import shanghai_today  # type: ignore
+    except ImportError:
+        from dates import shanghai_today  # type: ignore
+    return shanghai_today()
+
+
+def _shanghai_days_ago(n: int) -> str:
+    """上海时区 N 天前（YYYYMMDD）。"""
+    try:
+        from lib.dates import shanghai_days_ago  # type: ignore
+    except ImportError:
+        from dates import shanghai_days_ago  # type: ignore
+    return shanghai_days_ago(n)
+
+
+def _cached_sector_table(name: str, fetch_fn: Callable[[], Any], *, cache: Any) -> list[dict]:
+    """板块表（行业名→代码映射）缓存：dimension ``sector_tables``，TTL 1 天。
+
+    probe 与 compute 各自解析锚定板块时共用同一份表——首次抓取后 1 天内
+    （含跨进程）零重复网络；失败/空表不缓存（D6）。
+    """
+    cached = cache.get("sector_tables", name)
+    if isinstance(cached, list) and cached:
+        return cached
+    rows = _ak_df_rows(fetch_fn())
+    if not rows:
+        return []
+    cache.set("sector_tables", name, rows, ttl_seconds=_CACHE_TTL_SECONDS,
+              source=f"akshare.{name}")
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # 行业 → 板块指数解析（东财 BK 主口径 → 申万行业指数降级）
 # ---------------------------------------------------------------------------
@@ -162,10 +209,14 @@ def _match_name(names: list[str], hint: str) -> str | None:
     return None
 
 
-def _resolve_em_board(industry_hint: str) -> dict[str, str] | None:
+def _resolve_em_board(industry_hint: str, *, cache: Any = None) -> dict[str, str] | None:
     """东财 BK 板块：stock_board_industry_name_em → {provider, index_name, index_code}。"""
+    if cache is None:
+        cache = _default_cache()
     try:
-        rows = _ak_df_rows(_ak_fetch("stock_board_industry_name_em"))
+        rows = _cached_sector_table(
+            "stock_board_industry_name_em",
+            lambda: _ak_fetch("stock_board_industry_name_em"), cache=cache)
     except Exception as exc:
         logger.info("sector_sync: EM board list unavailable: %s", exc)
         return None
@@ -187,7 +238,7 @@ _SW_LEVEL_FUNCS = (
 _SW_LEVEL_ORDER = ("L3", "L2", "L1")
 
 
-def _resolve_sw_candidates(industry_hint: str) -> list[dict[str, str]]:
+def _resolve_sw_candidates(industry_hint: str, *, cache: Any = None) -> list[dict[str, str]]:
     """申万行业指数候选：L3 → L2 → L1 逐级（exact 全级优先 → substring 全级）。
 
     返回最细粒度的命中 + 其祖先链（L2 的「上级行业」→ L1 等，递归向上）：
@@ -199,11 +250,14 @@ def _resolve_sw_candidates(industry_hint: str) -> list[dict[str, str]]:
     hint = (industry_hint or "").strip()
     if not hint:
         return []
-    # 逐级拉表（失败跳过——其余表已找到的匹配不因限流整体丢失）
+    if cache is None:
+        cache = _default_cache()
+    # 逐级拉表（走表缓存；失败跳过——其余表已找到的匹配不因限流整体丢失）
     levels: dict[str, list[dict]] = {}
     for func, level in _SW_LEVEL_FUNCS:
         try:
-            rows = _ak_df_rows(_ak_fetch(func))
+            rows = _cached_sector_table(
+                func, lambda f=func: _ak_fetch(f), cache=cache)
         except Exception as exc:
             logger.info("sector_sync: %s unavailable: %s", func, exc)
             continue
@@ -258,7 +312,7 @@ def _resolve_sw_candidates(industry_hint: str) -> list[dict[str, str]]:
     return candidates
 
 
-def _resolve_provider_candidates(industry_hint: str) -> list[dict[str, str]]:
+def _resolve_provider_candidates(industry_hint: str, *, cache: Any = None) -> list[dict[str, str]]:
     """行业提示 → 候选板块指数（按主口径优先，成分不足时自动落到上级行业）。
 
     顺序：东财 BK（若匹配）→ 申万 L3/L2/L1 命中（最细优先）→ 申万祖先链。
@@ -267,11 +321,13 @@ def _resolve_provider_candidates(industry_hint: str) -> list[dict[str, str]]:
     hint = (industry_hint or "").strip()
     if not hint:
         return []
+    if cache is None:
+        cache = _default_cache()
     candidates: list[dict[str, str]] = []
-    em = _resolve_em_board(hint)
+    em = _resolve_em_board(hint, cache=cache)
     if em is not None:
         candidates.append(em)
-    for cand in _resolve_sw_candidates(hint):
+    for cand in _resolve_sw_candidates(hint, cache=cache):
         if cand not in candidates:
             candidates.append(cand)
     return candidates
@@ -322,10 +378,12 @@ def _fetch_index_history(provider: dict[str, str], *, cache: Any,
     if cached is not None:
         out = _validated_dated_closes(cached)
         if out is not None:
-            return out
+            # 缓存读同现场路径：排序 + 尾部裁剪（sorted() 不污染缓存对象——
+            # DataCache 对 list 返回引用；幂等修复修复前写入的乱序/超窗条目）
+            return sorted(out)[-days:]
     if provider["provider"] == "em_bk":
-        sd = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
-        ed = date.today().strftime("%Y%m%d")
+        sd = _shanghai_days_ago(days)
+        ed = _shanghai_today()
         df = _ak_fetch("stock_board_industry_hist_em",
                        symbol=provider["index_name"], period="日k",
                        start_date=sd, end_date=ed, adjust="")
@@ -337,6 +395,7 @@ def _fetch_index_history(provider: dict[str, str], *, cache: Any,
             if d8 and c is not None:
                 closes.append((d8, c))
         closes.sort()
+        closes = closes[-days:]
     else:
         df = _ak_fetch("index_hist_sw", symbol=key, period="day")
         rows = _ak_df_rows(df)
@@ -399,16 +458,19 @@ def _fetch_constituent_kline(code: str, *, cache: Any,
     降级链：stock_zh_a_hist（东财）→ stock_zh_a_daily（sina）。
     缓存 dimension ``sector_cons_kline``，TTL 1 天——185 只成分股逐只抓取
     5-10 分钟，必须走缓存（同板块多标的复用同一份矩阵）。
+    双源全挂写失败墓碑（短 TTL）：近期重复 collect 不再重试同一批失败代码
+    （东财拒连 + 北交所无 sina 日线是常态组合），过期后自然恢复重试。
     """
     cached = cache.get("sector_cons_kline", code)
+    if isinstance(cached, dict) and cached.get("failed"):
+        return None  # 失败墓碑未过期：本次跳过（不发网络）
     if cached is not None:
         out = _validated_dated_closes(cached)
         if out is not None:
-            return out
-    sd = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
-    ed = date.today().strftime("%Y%m%d")
-    closes: list[tuple[str, float]] = []
-    source = ""
+            return sorted(out)[-days:]
+    sd = _shanghai_days_ago(days)
+    ed = _shanghai_today()
+    em_closes: list[tuple[str, float]] = []
     try:
         df = _ak_fetch("stock_zh_a_hist", symbol=code, period="daily",
                        start_date=sd, end_date=ed, adjust="qfq")
@@ -417,29 +479,37 @@ def _fetch_constituent_kline(code: str, *, cache: Any,
             d8 = _norm_date(r.get("日期") or r.get("trade_date") or r.get("date"))
             c = _to_float(r.get("收盘") or r.get("close"))
             if d8 and c is not None:
-                closes.append((d8, c))
-        source = "akshare.stock_zh_a_hist"
+                em_closes.append((d8, c))
     except Exception as exc:
         logger.debug("sector_sync cons %s EM kline failed: %s", code, exc)
-    if not closes:
+    # 截断响应（限流只回少数几行）同样不可信：非空但行数不足也走 sina 兜底
+    em_ok = len(em_closes) >= _MIN_KLINE_ROWS
+    sina_closes: list[tuple[str, float]] = []
+    if not em_ok:
         prefix = _sina_symbol_prefix(code)
         if not prefix:
             logger.info("sector_sync cons %s: 北交所代码无 sina 日线，跳过", code)
-            return None
-        try:
-            df = _ak_fetch("stock_zh_a_daily", symbol=f"{prefix}{code}",
-                           start_date=sd, end_date=ed, adjust="qfq")
-            rows = _ak_df_rows(df)
-            for r in rows:
-                d8 = _norm_date(r.get("date") or r.get("trade_date") or r.get("日期"))
-                c = _to_float(r.get("close") or r.get("收盘"))
-                if d8 and c is not None:
-                    closes.append((d8, c))
-            source = "akshare.stock_zh_a_daily"
-        except Exception as exc:
-            logger.debug("sector_sync cons %s sina kline failed: %s", code, exc)
+        else:
+            try:
+                df = _ak_fetch("stock_zh_a_daily", symbol=f"{prefix}{code}",
+                               start_date=sd, end_date=ed, adjust="qfq")
+                rows = _ak_df_rows(df)
+                for r in rows:
+                    d8 = _norm_date(r.get("date") or r.get("trade_date") or r.get("日期"))
+                    c = _to_float(r.get("close") or r.get("收盘"))
+                    if d8 and c is not None:
+                        sina_closes.append((d8, c))
+            except Exception as exc:
+                logger.debug("sector_sync cons %s sina kline failed: %s", code, exc)
+    # 取较长者（EM 健康时不发多余 sina 请求；EM 截断时 sina 更长则用 sina）
+    if len(sina_closes) > len(em_closes):
+        closes, source = sina_closes, "akshare.stock_zh_a_daily"
+    else:
+        closes, source = em_closes, "akshare.stock_zh_a_hist"
     if not closes:
-        return None  # D6：空结果不缓存
+        cache.set("sector_cons_kline", code, {"failed": True},
+                  ttl_seconds=_TOMBSTONE_TTL_SECONDS, source="failed")
+        return None  # D6：空结果不缓存（失败墓碑除外，见 docstring）
     closes.sort()
     cache.set("sector_cons_kline", code, closes, ttl_seconds=_CACHE_TTL_SECONDS, source=source)
     return closes
@@ -462,6 +532,15 @@ def _returns(dates: list[str], closes_by_date: dict[str, float]) -> list[float |
         else:
             out.append(cur / prev - 1.0)
     return out
+
+
+def _guarded_metric(name: str, fn: Callable[[], dict]) -> dict:
+    """数学字段调用守卫：ValueError → 该字段 available=False（D5 逐字段
+    fail loud），其余已算好的字段保留——异常不再击穿整个 sector_sync。"""
+    try:
+        return fn()
+    except ValueError as exc:
+        return {"available": False, "reason": f"{name} 计算异常: {exc}"}
 
 
 def _paired(a: list[float | None], b: list[float | None]) -> tuple[list[float], list[float]]:
@@ -548,6 +627,11 @@ def _ols_with_se(x_rows: list[list[float]], y: list[float]) -> dict:
     n = len(y)
     k = len(x_rows[0])
     scales = [math.sqrt(sum(x_rows[i][j] ** 2 for i in range(n))) for j in range(k)]
+    if any(s == 0 for s in scales):
+        # 零范数列（如窗口内板块收益恒 0 → |R_m|、R_m² 两列全零）不可缩放：
+        # 除零会抛 ZeroDivisionError 穿透 csad_regression 的 ValueError 捕获，
+        # 击穿整个 sector_sync——归为奇异输入（ValueError），逐字段 fail loud
+        raise ValueError("X 含零范数列（列全为 0），回归不可辨识")
     xs = [[x_rows[i][j] / scales[j] for j in range(k)] for i in range(n)]
     xtx = [[sum(xs[i][a] * xs[i][b] for i in range(n)) for b in range(k)] for a in range(k)]
     xty = [sum(xs[i][a] * y[i] for i in range(n)) for a in range(k)]
@@ -733,7 +817,8 @@ def _empty_success_skeleton(symbol: str) -> dict[str, Any]:
 def compute_sector_sync(symbol: str, *, industry_hint: str = "",
                         stock_kline: list[dict] | None = None,
                         cache: Any = None,
-                        max_workers: int = _MAX_WORKERS) -> dict[str, Any]:
+                        max_workers: int = _MAX_WORKERS,
+                        anchor_override: dict | None = None) -> dict[str, Any]:
     """对单个标的计算 6 个板块同步性字段。
 
     Args:
@@ -744,17 +829,16 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
             由调用方（collector）传入已采集数据。
         cache: DataCache 实例；None → 模块默认缓存。
         max_workers: 成分股日线抓取并发数。
+        anchor_override: probe 解析出的锚定板块（{provider, index_name,
+            index_code}）；给定则跳过候选解析——probe 与 compute 之间数据源
+            可达性翻转时不再二次解析触发全量冷抓。
 
     Returns:
         dict：见 _unavailable() 骨架 + available 时填充 fields/meta/reasons。
         任一字段不可得时为 None + reasons 说明，**绝不给默认值/0/NaN**。
     """
     if cache is None:
-        try:
-            from lib.cache import default_cache  # type: ignore
-        except ImportError:
-            from cache import default_cache  # type: ignore
-        cache = default_cache()
+        cache = _default_cache()
 
     out = _empty_success_skeleton(symbol)
     reasons = out["reasons"]
@@ -768,8 +852,12 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
     stock_by_date = dict(stock_closes)
     stock_dates = set(stock_by_date)
 
-    # 2. 行业 → 板块指数（东财 BK → 申万 L1）
-    candidates = _resolve_provider_candidates(industry_hint)
+    # 2. 行业 → 板块指数（东财 BK → 申万 L1；表解析走缓存，probe 同享；
+    #    probe 已解析出锚定时直接复用，不二次解析）
+    if anchor_override is not None:
+        candidates = [anchor_override]
+    else:
+        candidates = _resolve_provider_candidates(industry_hint, cache=cache)
     if not candidates:
         if not (industry_hint or "").strip():
             reasons["_all"] = "行业分类缺失（basic_info 无行业字段），无法锚定板块指数"
@@ -815,11 +903,14 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
     beta_dates = common[-_BETA_WINDOW_DAYS - 1:]
     stock_rets, idx_rets = _paired(
         _returns(beta_dates, stock_by_date), _returns(beta_dates, idx_by_date))
-    beta_res = sector_beta_stats(stock_rets, idx_rets)
+    beta_res = _guarded_metric("beta 回归",
+                               lambda: sector_beta_stats(stock_rets, idx_rets))
     if beta_res["available"]:
         out["fields"]["sector_beta_60d"] = round(beta_res["beta"], 2)
-        out["fields"]["sector_r2_60d"] = round(beta_res["r_squared"], 2)
-        out["fields"]["idio_var_share"] = round(1.0 - beta_res["r_squared"], 2)
+        # r2 / 特质方差互补（和恒为 1），同用 4 位精度——2 位会把 0.996→1.0、
+        # 0.004→0.0，把真实微弱信号归零（fail loud 契约：0.0 必须是真的 0）
+        out["fields"]["sector_r2_60d"] = round(beta_res["r_squared"], 4)
+        out["fields"]["idio_var_share"] = round(1.0 - beta_res["r_squared"], 4)
         out["meta"]["sector_beta_60d"] = {"observations": beta_res["observations"]}
     else:
         reason = beta_res["reason"]
@@ -870,20 +961,26 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
     out["n_constituents_with_kline"] = n_with_kline
 
     # 6a. 板块内离散度（%）
-    disp_res = cross_sectional_dispersion_pct(returns_by_day)
+    disp_res = _guarded_metric(
+        "板块离散度", lambda: cross_sectional_dispersion_pct(returns_by_day))
     if disp_res["available"]:
         out["fields"]["sector_dispersion"] = disp_res["dispersion_pct"]
         out["meta"]["sector_dispersion"] = {
             "n_constituents": disp_res["n_constituents"],
-            "date": long_dates[-1],
+            # 横截面实际日期（= 末日有效成分股所在交易日）：盘中采集时成分股
+            # 日线常滞后指数一日，标注当日会错标——与 window_end 分开报告
+            "date": max(returns_by_day) if returns_by_day else long_dates[-1],
         }
     else:
         reasons["sector_dispersion"] = disp_res["reason"]
 
     # 6b. CSAD 回归（γ2）
-    csad_res = csad_regression(idx_ret_by_date, returns_by_day)
+    csad_res = _guarded_metric(
+        "CSAD 回归", lambda: csad_regression(idx_ret_by_date, returns_by_day))
     if csad_res["available"]:
-        out["fields"]["csad_gamma2"] = round(csad_res["gamma2"], 2)
+        # 4 位精度：γ2 量级 ~1e-2~1e-3，2 位会把 ±0.003 归零丢符号（下游以
+        # gamma2<0 判羊群，-0.0 会误读为无羊群）
+        out["fields"]["csad_gamma2"] = round(csad_res["gamma2"], 4)
         t_val = csad_res.get("t_stat")
         out["meta"]["csad_gamma2"] = {
             "n_days": csad_res["n_days"],
@@ -893,9 +990,10 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
         reasons["csad_gamma2"] = csad_res["reason"]
 
     # 6c. 下行相关差（Forbes-Rigobon 校正）
-    down_res = downside_correlation_gap(stock_rets_long, idx_rets_long)
+    down_res = _guarded_metric(
+        "下行相关", lambda: downside_correlation_gap(stock_rets_long, idx_rets_long))
     if down_res["available"]:
-        out["fields"]["downside_corr_gap"] = round(down_res["gap"], 2)
+        out["fields"]["downside_corr_gap"] = round(down_res["gap"], 4)
         out["meta"]["downside_corr_gap"] = {
             "n_down": down_res["n_down"],
             "n_up": down_res["n_up"],
@@ -915,20 +1013,20 @@ def probe_sector_cache_warmth(industry_hint: str, *, cache: Any = None) -> dict:
     """F1 冷缓存门控探测：锚定板块成分股日线的缓存覆盖缺口。
 
     默认采集不得被成分股逐只抓取（5-10 分钟）阻塞：本探测先解析锚定板块
-    （解析本身走缓存，1 天 TTL；网络调用 ≤ 2 个），再统计成分股 kline 缓存
-    缺口。缺口 ≤ _WARMUP_FETCH_BUDGET 视为温热（现场补抓成本有界）；否则
-    cold + reason，由调用方跳过计算并 fail loud。
+    （板块表走 ``sector_tables`` 缓存 1 天 TTL；指数历史/成分列表各走缓存——
+    暖缓存下探测 0 网络），再统计成分股 kline 缓存缺口。缺口 ≤
+    _WARMUP_FETCH_BUDGET 视为温热（现场补抓成本有界）；否则 cold + reason，
+    由调用方跳过计算并 fail loud。
 
-    探测的解析结果同步进缓存，实际计算时零重复网络。无锚定板块 / 解析失败 →
-    返回 warm=True（让 compute 自己 fail loud 给出真实原因，探测不吞错误）。
+    返回值含 ``anchor``（解析出的锚定板块）：compute 以 anchor_override 直接
+    复用，不再二次解析——probe 与 compute 之间数据源可达性翻转（东财拒连是
+    文档化常态）时不会退化为全量冷抓。miss 判定与 compute 的读取校验
+    （_validated_dated_closes）同口径：结构损坏/短序列条目同样计 miss；
+    失败墓碑既非 miss 也非 valid（compute 侧不会为其发网络）。
     """
     if cache is None:
-        try:
-            from lib.cache import default_cache  # type: ignore
-        except ImportError:
-            from cache import default_cache  # type: ignore
-        cache = default_cache()
-    candidates = _resolve_provider_candidates(industry_hint)
+        cache = _default_cache()
+    candidates = _resolve_provider_candidates(industry_hint, cache=cache)
     for cand in candidates:
         try:
             idx = _fetch_index_history(cand, cache=cache)
@@ -939,16 +1037,35 @@ def probe_sector_cache_warmth(industry_hint: str, *, cache: Any = None) -> dict:
             continue
         if not (idx and cons and len(cons) >= _MIN_CONSTITUENTS):
             continue
-        miss = sum(1 for c in cons if cache.get("sector_cons_kline", c) is None)
+        miss = valid = 0
+        for c in cons:
+            raw = cache.get("sector_cons_kline", c)
+            if isinstance(raw, dict) and raw.get("failed"):
+                continue  # 失败墓碑：非 miss 非 valid
+            if _validated_dated_closes(raw) is not None:
+                valid += 1
+            else:
+                miss += 1
         if miss <= _WARMUP_FETCH_BUDGET:
-            return {"warm": True, "miss": miss, "total": len(cons), "reason": None}
+            return {"warm": True, "miss": miss, "total": len(cons),
+                    "valid": valid, "reason": None, "anchor": cand}
         return {
             "warm": False,
             "miss": miss,
             "total": len(cons),
-            "reason": (f"板块成分股日线缓存未预热（{len(cons) - miss}/{len(cons)} 只已缓存，"
+            "valid": valid,
+            "reason": (f"板块成分股日线缓存未预热（{valid}/{len(cons)} 只已缓存，"
                        f"需现场补抓 {miss} 只 > 预算 {_WARMUP_FETCH_BUDGET} 只），默认采集跳过；"
                        f"首次请用 --force-sector-sync 强制预热（约 5-10 分钟）"),
+            "anchor": cand,
         }
-    # 无锚定板块 / 全部候选解析失败：不拦截（compute 会快速 fail loud，无成分股循环）
-    return {"warm": True, "miss": 0, "total": 0, "reason": None}
+    # 无锚定板块 / 全部候选解析失败：anchor=None + 真实 reason。调用方据此
+    # 跳过 compute（fail-fast，不再给二次解析冷抓机会），下一次采集自然重试。
+    hint = (industry_hint or "").strip()
+    if not hint:
+        reason = "行业分类缺失（basic_info 无行业字段），无法锚定板块指数"
+    else:
+        reason = (f"板块指数不可得（行业「{industry_hint}」未匹配到"
+                  f"东财 BK 板块或申万 L1 行业，或板块列表源不可达）")
+    return {"warm": True, "miss": 0, "total": 0, "valid": 0,
+            "reason": reason, "anchor": None}

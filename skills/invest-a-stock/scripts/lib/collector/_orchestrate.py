@@ -1461,8 +1461,8 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
 # ---- E1 板块同步性引擎（v0.2.7） ----
 
 _SECTOR_SYNC_MODULE = "lib_sector_sync"
-# 与 skills/lib/sector_sync.SECTOR_SYNC_FIELDS 同步（本模块在无 akshare 环境
-# 的不可得骨架中内联使用；避免为失败路径做模块级加载）
+# 与 skills/lib/sector_sync.SECTOR_SYNC_FIELDS 同步（仅作模块加载失败时的
+# 字面 fallback；正常路径骨架 fields 取 mod.SECTOR_SYNC_FIELDS）
 _SECTOR_SYNC_FIELD_NAMES = (
     "sector_beta_60d",
     "sector_r2_60d",
@@ -1471,6 +1471,41 @@ _SECTOR_SYNC_FIELD_NAMES = (
     "csad_gamma2",
     "downside_corr_gap",
 )
+
+
+def _sector_sync_skeleton(symbol: str, *, reason: str,
+                          industry: str | None = None,
+                          n_constituents: int = 0,
+                          n_constituents_with_kline: int = 0,
+                          error: str = "") -> dict:
+    """板块同步性不可得骨架（统一 13 键 schema，fields 全 None）。
+
+    akshare 不可用 / 冷缓存跳过 / probe 无锚定 / collect_all 异常兜底四条
+    路径共用同一形状——存储/渲染消费者按统一 schema 读取不 KeyError。
+    fields 键名取已加载模块的 SECTOR_SYNC_FIELDS（模块加载失败时退回内联
+    副本，即 _SECTOR_SYNC_FIELD_NAMES）。``error`` 仅异常兜底路径使用
+    （额外键，供排障）。
+    """
+    mod = sys.modules.get(_SECTOR_SYNC_MODULE)
+    field_names = getattr(mod, "SECTOR_SYNC_FIELDS", None) or _SECTOR_SYNC_FIELD_NAMES
+    out = {
+        "symbol": symbol,
+        "available": False,
+        "provider": None,
+        "industry": industry,
+        "index_code": None,
+        "n_constituents": n_constituents,
+        "n_constituents_with_kline": n_constituents_with_kline,
+        "window_days": 0,
+        "window_start": None,
+        "window_end": None,
+        "fields": {f: None for f in field_names},
+        "meta": {},
+        "reasons": {"_all": reason},
+    }
+    if error:
+        out["error"] = error
+    return out
 
 
 def _load_sector_sync_module():
@@ -1518,6 +1553,10 @@ def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict,
     - F1 冷缓存门控：成分股日线逐只抓取 5-10 分钟，默认采集不得被阻塞——
       锚定板块成分股缓存缺口 ≤ 预算才实际计算，否则标注「缓存未预热」跳过；
       force=True（CLI --force-sector-sync）绕过门控强制计算（首次预热路径）。
+    - probe → compute 锚定共享：probe 解析出的锚定板块经 anchor_override 直接
+      复用，compute 不二次解析（数据源可达性在两次解析间翻转时不再退化为
+      全量冷抓）；probe 无锚定（全解析失败/行业分类缺失）→ 跳过 compute
+      fail-fast，下一次采集自然重试。
     - F4 derived 合并：仅 available=True 时并入——部分失败时 1-5 个有效字段
       保留在 collection['sector_sync']，kline.derived 不写入，两视图对同一
       快照的解读一致（部分数据可区分于「无数据」）。
@@ -1532,47 +1571,49 @@ def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict,
     if not isinstance(kline_bars, list):
         kline_bars = None
 
+    # 先加载模块（exec 不依赖 akshare——akshare 为函数内懒导入）：骨架 fields
+    # 取模块常量，无 akshare 环境同样得到 13 键统一 schema（不含内联副本漂移）
+    try:
+        mod = _load_sector_sync_module()
+    except Exception as exc:
+        logger.warning("sector_sync module load failed for %s: %s", symbol, exc)
+        collection["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 模块加载失败: {exc}", error=str(exc))
+        return
+
     # sector_sync 全部数据源均经 akshare（东财 BK / 申万 / sina）——无 akshare
     # 环境直接标注不可得（fail loud），避免空转与无谓网络尝试。
     if not env.is_akshare_available():
-        collection["sector_sync"] = {
-            "symbol": symbol,
-            "available": False,
-            "fields": {f: None for f in _SECTOR_SYNC_FIELD_NAMES},
-            "meta": {},
-            "reasons": {"_all": "akshare 数据源不可用，板块同步性不可得"},
-        }
+        collection["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason="akshare 数据源不可用，板块同步性不可得")
         return
 
-    mod = _load_sector_sync_module()
-
     # F1 冷缓存门控：成分股日线全量抓取 5-10 分钟，默认采集跳过冷缓存计算。
-    # 探测的板块解析结果同步进缓存，force 路径零重复网络。
     if not force:
         probe = mod.probe_sector_cache_warmth(industry_hint)
+        anchor = probe.get("anchor")
         if not probe.get("warm"):
-            miss = int(probe.get("miss", 0))
-            total = int(probe.get("total", 0))
-            collection["sector_sync"] = {
-                "symbol": symbol,
-                "available": False,
-                "provider": None,
-                "industry": industry_hint or None,
-                "index_code": None,
-                "n_constituents": total,
-                "n_constituents_with_kline": total - miss,
-                "window_days": 0,
-                "window_start": None,
-                "window_end": None,
-                "fields": {f: None for f in _SECTOR_SYNC_FIELD_NAMES},
-                "meta": {},
-                "reasons": {"_all": probe.get("reason") or "板块同步性缓存未预热"},
-            }
+            collection["sector_sync"] = _sector_sync_skeleton(
+                symbol, reason=probe.get("reason") or "板块同步性缓存未预热",
+                industry=industry_hint or None,
+                n_constituents=int(probe.get("total", 0)),
+                n_constituents_with_kline=int(probe.get("valid", 0)))
             return
-
-    ss = mod.compute_sector_sync(
-        symbol, industry_hint=industry_hint, stock_kline=kline_bars,
-    )
+        # probe 无锚定（全解析失败 / 行业分类缺失）：fail-fast 跳过 compute——
+        # 不给二次解析全量冷抓的机会（probe 与 compute 之间数据源可达性翻转
+        # 时，compute 会现场抓取 185 只成分股）；下一次采集自然重试
+        if not anchor:
+            collection["sector_sync"] = _sector_sync_skeleton(
+                symbol, reason=probe.get("reason") or "板块指数不可得",
+                industry=industry_hint or None,
+                n_constituents=int(probe.get("total", 0)))
+            return
+        ss = mod.compute_sector_sync(
+            symbol, industry_hint=industry_hint, stock_kline=kline_bars,
+            anchor_override=anchor)
+    else:
+        ss = mod.compute_sector_sync(
+            symbol, industry_hint=industry_hint, stock_kline=kline_bars)
     collection["sector_sync"] = ss
 
     # F4：字段并入 kline derived 以 available=True 为门槛（None 不写入）
@@ -1754,11 +1795,10 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         _attach_sector_sync(result, symbol, dim_results, force=force_sector_sync)
     except Exception as exc:
         logger.warning("sector_sync attach failed for %s: %s", symbol, exc)
-        result["sector_sync"] = {
-            "available": False,
-            "error": f"sector_sync 采集异常: {exc}",
-            "reasons": {"_all": str(exc)},
-        }
+        # 异常兜底同样走 13 键统一骨架（含 fields/meta），消费者按统一 schema
+        # 读取不 KeyError；error 键供排障
+        result["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 采集异常: {exc}", error=str(exc))
     try:
         attach_phase2_extras(result, symbol)
     except Exception as exc:
