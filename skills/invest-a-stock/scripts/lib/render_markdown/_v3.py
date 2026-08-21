@@ -2579,35 +2579,19 @@ def _section_fundamentals_layered(
     lines.append("")
     lines.extend(_financial_panorama_table(fin_list))
 
-    val_data = _get_dim_data(dims, "valuation")
-    pe_seq: list[float] = []
-    pb_seq: list[float] = []
-    ps_seq: list[float] = []
-    val_sorted: list[dict] = []
-    dv_ratio: float | None = None
-    val_window_label = "历史"
-    current_pe: float | None = None
-    current_pb: float | None = None
-    if val_data and isinstance(val_data, list):
-        from lib.valuation import valuation_window_label
-
-        val_sorted = sort_kline_asc(val_data)
-        pe_seq = [r.get("pe_ttm") for r in val_sorted if r.get("pe_ttm") is not None]
-        pb_seq = [r.get("pb") for r in val_sorted if r.get("pb") is not None]
-        ps_seq = [
-            r.get("ps_ttm") or r.get("ps")
-            for r in val_sorted
-            if (r.get("ps_ttm") is not None or r.get("ps") is not None)
-        ]
-        for r in reversed(val_sorted):
-            if r.get("dv_ratio") is not None:
-                dv_ratio = _safe_num(r.get("dv_ratio"))
-                break
-        val_window_label = valuation_window_label(len(val_sorted))
-        if pe_seq:
-            current_pe = pe_seq[-1]
-        if pb_seq:
-            current_pb = pb_seq[-1]
+    # C6 v0.2.7：估值预取收敛到 canonical _v3_load_valuation_summary（原为手工
+    # 重算 pe/pb/ps 序列，与 D-① 的 canonical 取值路径并存）。canonical 在
+    # valuation_summary 内滤 None+≤0 并补亏损期警告；边界变化：current_pe 从
+    # 「最后非 None」变为「最后正值」——全亏损窗口股票由渲染负 PE 变为「数据不足」。
+    vs = _v3_load_valuation_summary(dims, val_cache)
+    val_rows = _get_dim_data(dims, "valuation")
+    pe_avail = (
+        bool(val_rows)
+        and isinstance(val_rows, list)
+        and any(r.get("pe_ttm") is not None for r in val_rows)
+    )
+    current_pe = (vs.get("pe") or {}).get("current") if vs else None
+    val_window_label = vs.get("window_label", "历史") if vs else "历史"
 
     # 行业同行数据
     industry_peers = collection.get("industry_peers") or {}
@@ -3148,8 +3132,7 @@ def _section_fundamentals_layered(
 
     # D-① PE/PB 5 年历史位置
     lines.append("#### D-① PE/PB 历史位置")
-    if pe_seq and current_pe is not None:
-        vs = _v3_load_valuation_summary(dims, val_cache)
+    if vs is not None and pe_avail:
         if not vs:
             lines.append("数据不足：[估值历史序列不可得，建议配置 Tushare Token 获取 daily_basic]")
         else:
@@ -3502,7 +3485,7 @@ def _section_fundamentals_layered(
 
     # D-① PE/PB 历史位置（须含历史位置百分比与中位数）
     _d1_pe_median = _historical_pe_median(val_cache, dims)
-    _d1_ok = bool(pe_seq) and current_pe is not None and pe_pct is not None
+    _d1_ok = pe_avail and current_pe is not None and pe_pct is not None
     if _d1_ok and _d1_pe_median is not None:
         _d1_s = f"PE={current_pe:.2f}x，历史位置{pe_pct:.1f}%（中位数 {_d1_pe_median:.2f}x）"
     elif _d1_ok:
