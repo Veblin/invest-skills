@@ -1,9 +1,11 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
 import math
+import sys
 import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-import）
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
+from pathlib import Path
 
 from lib.nums import row_value_or_last  # review 二轮 R-13：dict 行末列兜底（可单测）
 
@@ -1456,6 +1458,99 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
                  "northbound", "valuation", "kline", "holder_changes"]
 
 
+# ---- E1 板块同步性引擎（v0.2.7） ----
+
+_SECTOR_SYNC_MODULE = "lib_sector_sync"
+# 与 skills/lib/sector_sync.SECTOR_SYNC_FIELDS 同步（本模块在无 akshare 环境
+# 的不可得骨架中内联使用；避免为失败路径做模块级加载）
+_SECTOR_SYNC_FIELD_NAMES = (
+    "sector_beta_60d",
+    "sector_r2_60d",
+    "idio_var_share",
+    "sector_dispersion",
+    "csad_gamma2",
+    "downside_corr_gap",
+)
+
+
+def _load_sector_sync_module():
+    """加载 skills/lib/sector_sync.py（显式路径 + 固定模块名）。
+
+    scripts/lib 无 sector_sync shim（sector_sync 为 v0.2.7 新增，落 skills/lib），
+    直接 ``from lib.sector_sync import ...`` 在 scripts/lib 包内会 ImportError——
+    仿 invest_path.load_invest_a_etf_module：按文件路径加载并注册固定模块名，
+    测试按同名 patch（D13：patch 目标 = 定义模块命名空间）。
+    """
+    mod = sys.modules.get(_SECTOR_SYNC_MODULE)
+    if mod is not None:
+        return mod
+    try:
+        from lib._invest_path import ensure_skills_lib_on_path  # scripts/lib shim
+    except ImportError:  # pragma: no cover — skills/lib 独立上下文
+        from invest_path import ensure_shared_lib_on_path as ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from invest_path import invest_a_scripts_dir
+    import importlib.util as _ilu
+
+    skills_lib = Path(invest_a_scripts_dir()).parent.parent / "lib"
+    spec = _ilu.spec_from_file_location(_SECTOR_SYNC_MODULE, skills_lib / "sector_sync.py")
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise ImportError(f"cannot load skills/lib/sector_sync.py from {skills_lib}")
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[_SECTOR_SYNC_MODULE] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict) -> None:
+    """E1：板块同步性 6 字段 — 计算并写入 collection['sector_sync'] + kline derived。
+
+    - industry_hint 取自 basic_info 的「行业」字段（缺失 → sector_sync 内
+      fail loud「行业分类缺失」，不静默）。
+    - kline 已采集数据直接复用（不再二次抓取个股日线）。
+    - 6 个字段并入 kline 维度的 derived dict（ETF 侧 derived 输出形态，v0.2.7 E1）。
+    """
+    basic = dim_results.get("basic_info") or {}
+    basic_data = basic.get("data") if isinstance(basic, dict) else None
+    industry_hint = ""
+    if isinstance(basic_data, dict):
+        industry_hint = str(basic_data.get("行业") or basic_data.get("industry") or "")
+    kline_dim = dim_results.get("kline") or {}
+    kline_bars = kline_dim.get("data") if isinstance(kline_dim, dict) else None
+    if not isinstance(kline_bars, list):
+        kline_bars = None
+
+    # sector_sync 全部数据源均经 akshare（东财 BK / 申万 / sina）——无 akshare
+    # 环境直接标注不可得（fail loud），避免空转与无谓网络尝试。
+    if not env.is_akshare_available():
+        collection["sector_sync"] = {
+            "symbol": symbol,
+            "available": False,
+            "fields": {f: None for f in _SECTOR_SYNC_FIELD_NAMES},
+            "meta": {},
+            "reasons": {"_all": "akshare 数据源不可用，板块同步性不可得"},
+        }
+        return
+
+    mod = _load_sector_sync_module()
+    ss = mod.compute_sector_sync(
+        symbol, industry_hint=industry_hint, stock_kline=kline_bars,
+    )
+    collection["sector_sync"] = ss
+
+    # 字段并入 kline derived（可用即并入，不要求全 6 字段；None 不写入）
+    if isinstance(kline_dim, dict):
+        derived = dict(kline_dim.get("derived") or {})
+        merged = False
+        for f in mod.SECTOR_SYNC_FIELDS:
+            v = (ss.get("fields") or {}).get(f)
+            if v is not None:
+                derived[f] = v
+                merged = True
+        if merged:
+            kline_dim["derived"] = derived
+
+
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
@@ -1611,6 +1706,18 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         "chain_context": chain_context,  # R-12
         "summary": _build_summary(dimensions),
     }
+    # E1: 板块同步性引擎（v0.2.7）— 6 个 derived 字段 + collection['sector_sync'] 详情。
+    # 依赖 kline + basic_info；板块指数/成分股不可得时内部 fail loud（输出「不可得」，
+    # 不给默认值）。逐成分股首跑 5-10 分钟，经 DataCache 缓存后同板块多标的秒级复用。
+    try:
+        _attach_sector_sync(result, symbol, dim_results)
+    except Exception as exc:
+        logger.warning("sector_sync attach failed for %s: %s", symbol, exc)
+        result["sector_sync"] = {
+            "available": False,
+            "error": f"sector_sync 采集异常: {exc}",
+            "reasons": {"_all": str(exc)},
+        }
     try:
         attach_phase2_extras(result, symbol)
     except Exception as exc:
