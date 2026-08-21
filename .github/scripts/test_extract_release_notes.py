@@ -151,3 +151,56 @@ def test_full_flag_keeps_full_section():
     )
     assert "F0-1" in out
     assert "### " in out
+
+
+def test_truncate_chars_codepoint_safe():
+    """截断按字符（code point）而非字节：多字节中文边界不产生非法 UTF-8。"""
+    from extract_release_notes import truncate_chars
+
+    # 全是多字节字符：字节截断（head -c）在任意奇数位置都会切断字符
+    text = "基" * 100
+    out = truncate_chars(text, 10)
+    assert out == "基" * 9 + "…"
+    assert len(out) == 10
+    out.encode("utf-8")  # 合法 UTF-8（截断字符会在此抛 UnicodeEncodeError）
+
+
+def test_truncate_chars_noop_when_short():
+    from extract_release_notes import truncate_chars
+
+    text = "短文本"
+    assert truncate_chars(text, 100) == text
+
+
+def test_truncate_chars_emoji_kept_whole():
+    """code point 切片不会切开 emoji：边界处完整保留 + 省略号。"""
+    from extract_release_notes import truncate_chars
+
+    text = "前缀🚀🚀🚀🚀"
+    out = truncate_chars(text, 5)
+    assert out == "前缀🚀🚀…"
+    out.encode("utf-8")
+    assert len(out) == 5
+
+
+def test_truncate_chars_drops_lone_surrogate():
+    """孤立代理项（异常输入防御）：encode('utf-8','ignore') 往返丢弃，
+    输出仍为合法 UTF-8。"""
+    from extract_release_notes import truncate_chars
+
+    text = "abc\ud800def"
+    out = truncate_chars(text, 5)
+    assert out == "abc…"
+    out.encode("utf-8")
+
+
+def test_max_chars_flag_end_to_end():
+    """CLI --max-chars：输出 ≤ N 字符且合法 UTF-8（镜像 commit 消息场景）。"""
+    out = subprocess.check_output(
+        [sys.executable, str(SCRIPT), "--from-pyproject", "--max-chars", "800"],
+        text=True,
+        cwd=ROOT,
+    )
+    assert len(out) <= 800
+    out.encode("utf-8")
+    assert out.endswith("…")

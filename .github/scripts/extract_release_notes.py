@@ -185,6 +185,19 @@ def _version_key(tag: str) -> tuple:
     return tuple(nums)
 
 
+def truncate_chars(text: str, n: int) -> str:
+    """字符级截断（code point 安全，截断时附省略号）。
+
+    字节级截断（head -c）会切断多字节 UTF-8 字符产生非法字节流——本函数
+    截断后经 encode('utf-8', 'ignore') 往返，丢弃边界处被切开的孤立代理项
+    （emoji 代理对的一半），保证输出恒为合法 UTF-8。
+    """
+    if len(text) <= n:
+        return text
+    out = text[: n - 1].encode("utf-8", "ignore").decode("utf-8")
+    return out + "…"
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -215,6 +228,12 @@ def main() -> int:
         "--full",
         action="store_true",
         help="输出 CHANGELOG 章节全文（默认精简：引言段 + ### 小节标题）",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=0,
+        help="输出截断到 N 字符（code point 安全，截断时附 …；0 = 不截断）",
     )
     args = parser.parse_args()
 
@@ -259,6 +278,8 @@ def main() -> int:
             "请补充 CHANGELOG 后重新发布。_\n"
         )
 
+    if args.max_chars > 0:
+        notes = truncate_chars(notes, args.max_chars)
     sys.stdout.write(notes)
     return 0
 

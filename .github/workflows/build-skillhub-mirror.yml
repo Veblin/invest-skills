@@ -76,7 +76,9 @@ jobs:
             exit 1
           fi
           # commit 消息 = sync <tag> + CHANGELOG 条目（镜像 CI 取 head commit 消息作为 publish --changelog）
-          python3 .github/scripts/extract_release_notes.py "${{ github.ref_name }}" > /tmp/release-notes.md
+          # --max-chars 字符级截断（code point 安全）：head -c 字节截断会切断
+          # 多字节 UTF-8 产生非法字节流，经镜像 publish --changelog 输出乱码
+          python3 .github/scripts/extract_release_notes.py "${{ github.ref_name }}" --max-chars 800 > /tmp/release-notes.md
           git clone --depth 1 \
             "https://x-access-token:${MIRROR_TOKEN}@github.com/Veblin/invest-skills-skillhub.git" \
             /tmp/invest-skills-skillhub
@@ -93,7 +95,7 @@ jobs:
           {
             echo "sync ${{ github.ref_name }}"
             echo
-            head -c 800 /tmp/release-notes.md
+            cat /tmp/release-notes.md
           } > /tmp/commit-msg.txt
           git add -A
           git commit -F /tmp/commit-msg.txt
