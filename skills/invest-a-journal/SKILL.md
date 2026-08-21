@@ -587,12 +587,12 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > v0.2.6 新增 — ABCD 调研 §4.2 ④「8 月中旬-8 月底特别谨慎」经 H5 回测裁决后**降级为建议**。
 > 回测报告：`host-docs/v0.2.6/H5日历效应回测报告_20260814.md`
 
-- **裁决**：❌ 不显著。上证指数 1990-2026 全历史 + 2006+ 双样本 × 8/15-8/31 与 8/11-8/31 双窗口共 4 组合，Welch t 全部 |t|<2、permutation p 全部 >0.05（[来源: Python calc: scripts/backtest_calendar.py（输出存档 docs/data/H5_backtest_result.json）]）
+- **裁决**：❌ 不显著。上证指数 1990-2026 全历史 + 2006+ 双样本 × 8/15-8/31 与 8/11-8/31 双窗口共 4 组合，Welch t 全部 |t|<2、permutation p 全部 >0.05（[来源: Python calc: scripts/archive/backtest_calendar.py（输出存档 docs/data/H5_backtest_result.json）]）
 - **方向性**：窗口内日均收益为负差（-0.108 ~ -0.147pp/日），方向一致但效应量小（|Cohen's d| 0.049 ~ 0.084）且时变（滚动 5 年窗符号翻转，AMH 检查）[来源: Python calc: docs/data/H5_backtest_result.json 四组合 max/min]
 - **降级后的建议（非硬约束）**：
   - 8/31 中报披露截止前，业绩预告/快报未覆盖标的保留风险提示，标注「❓弱证据（结构性推断）」
   - 不设置「窗口内新开仓额外理由」「禁追高」等强制要求（原设计 §4.2 ④ 的硬约束不落地）
-- **复检**：每年 8 月窗口后重跑 `uv run python scripts/backtest_calendar.py` 更新样本；若未来 3 年内出现 t≥3.0 的显著负效应，重新升格为纪律
+- **复检**：每年 8 月窗口后重跑 `uv run python scripts/archive/backtest_calendar.py` 更新样本；若未来 3 年内出现 t≥3.0 的显著负效应，重新升格为纪律
 
 ---
 

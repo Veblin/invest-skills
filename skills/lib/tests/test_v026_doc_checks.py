@@ -256,7 +256,7 @@ def test_journal_calendar_section():
     assert "降级为建议" in sec
     assert "不显著" in sec
     assert "非硬约束" in sec
-    assert "scripts/backtest_calendar.py" in sec
+    assert "scripts/archive/backtest_calendar.py" in sec
     # 负断言：原设计的硬约束不得落地
     assert "窗口内新开仓额外理由" not in journal or "不设置" in sec
 

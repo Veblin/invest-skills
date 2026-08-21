@@ -99,6 +99,8 @@ NAV 1.676 vs MA20 1.9802，偏离 -15.36% [来源: kline.derived.nav_vs_ma20_pct
 - `boll_bandwidth_pct` — BOLL 带宽%
 - `daily_volatility_pct` — 日均波动率（年化/√252）
 
+**E1 板块同步性字段**（v0.2.7，collect 时随 kline.derived 输出；首跑须 `--force-sector-sync` 预热板块成分股缓存，冷缓存默认跳过并标注）：`sector_beta_60d` / `sector_r2_60d` / `idio_var_share` / `sector_dispersion` / `csad_gamma2` / `downside_corr_gap`（值域与中文标签见 report_qc）
+
 **引擎未覆盖的计算**：先用 Python 脚本计算，将结果写入报告时标注 `[来源: Python calc: formula]`。
 
 ### 新闻采集（--with-news-pack）

@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills"),
     str(_ROOT / "skills" / "invest-a-stock" / "scripts"),

@@ -61,7 +61,7 @@
 |---------|---------|------|
 | `F1/F2/F3_backtest_result.json` | `scripts/archive/backtest_futures.py`（+ `backfill_futures_daily.py` 回填数据） | 期货基差事件研究（F 系列） |
 | `H1/H2/H3/H4/H6_backtest_result.json` | `scripts/archive/backtest_h1~h6.py` | 见底/低吸/金价 beta/缺口/日历事件研究（H 系列） |
-| `H5_backtest_result.json` | 无对应脚本（v0.2.6 起仅入库恢复可复现引用，见 CHANGELOG） | H5 回测结果存档 |
+| `H5_backtest_result.json` | `scripts/archive/backtest_calendar.py` | H5 日历效应回测（8/15-8/31 窗口 vs 全年） |
 | `scenario_baselines_E002_E007.json` | `scripts/archive/scenario_baselines.py` | E-002~E-007 预案基线 |
 | `pattern_scan_result.json` | invest-a-pattern-scan skill（非 archive 脚本） | 形态扫描结果存档 |
 

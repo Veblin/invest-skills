@@ -3,8 +3,8 @@
 skills/lib/references/backtest_prereg/H4_预注册.md）。
 
 用法:
-  uv run python scripts/backtest_h4.py                # 全量 9 只，输出 docs/data/H4_backtest_result.json
-  uv run python scripts/backtest_h4.py --out /tmp/h4.json
+  uv run python scripts/archive/backtest_h4.py                # 全量 9 只，输出 docs/data/H4_backtest_result.json
+  uv run python scripts/archive/backtest_h4.py --out /tmp/h4.json
 
 数据: 个股 Tushare daily+adj_factor 前复权 5 年；市场 000300.SH index_daily；
 金价 COMEX GC（T-1 对齐）主因子 + 沪金 AU0 稳健性对照。
@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills" / "lib"),
     str(_ROOT / "skills"),

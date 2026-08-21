@@ -342,9 +342,9 @@ def _concise_positioning(collection, symbol, dims, val_cache=None):
         qualitative_map = {"偏贵区": "估值偏高", "合理区": "估值合理", "偏低区": "估值偏低"}
         qualitative = f" — {qualitative_map.get(pe_zone, '')}"
     elif pe_pct is not None:
-        if pe_pct >= 80:
+        if pe_pct >= EXTREME_HIGH_THRESHOLD:
             qualitative = " — 估值偏高"
-        elif pe_pct <= 20:
+        elif pe_pct <= EXTREME_LOW_THRESHOLD:
             qualitative = " — 估值偏低"
 
     return f"**{name_str}**{industry_str} — {position}{qualitative}"

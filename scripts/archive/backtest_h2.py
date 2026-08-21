@@ -3,7 +3,7 @@
 skills/lib/references/backtest_prereg/H2_预注册.md）。
 
 用法:
-  uv run python scripts/backtest_h2.py                # 输出 docs/data/H2_backtest_result.json
+  uv run python scripts/archive/backtest_h2.py                # 输出 docs/data/H2_backtest_result.json
 
 数据: market_daily（Tushare pro.daily 全市场，2021-01 起回填）；
 事件 pct_chg ≤ -10%，分层（封死/开板/未触及）× 成交假设双口径；
@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills" / "lib"),
     str(_ROOT / "skills"),

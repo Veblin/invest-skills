@@ -18,7 +18,7 @@ metadata:
 
 # invest-a-stock 投研助手
 
-> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能主体操作为本地数据采集与计算（Bash/Python 引擎）；新闻、研报与政策证据检索经 WebSearch/WebFetch 补充（平台不可用时标注数据缺口）
 
 ## OUTPUT CONTRACT（LAWs）
 
