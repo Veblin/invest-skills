@@ -120,13 +120,14 @@ class TestDispersion:
     def test_dispersion_known_std(self):
         # pstdev([0.01, 0.02, 0.03]×10) = 0.008165 → 0.82%（末日 ≥ 20 只成分股）
         last_day = [0.01, 0.02, 0.03] * 10
-        res = ss.cross_sectional_dispersion_pct({0: [0.01] * 25, 1: last_day})
+        res = ss.cross_sectional_dispersion_pct(
+            {"20250102": [0.01] * 25, "20250103": last_day})  # F3：交易日键
         assert res["available"]
         assert res["n_constituents"] == 30
         assert res["dispersion_pct"] == round(float(np.std(last_day)) * 100, 2)
 
     def test_dispersion_insufficient_constituents(self):
-        rets = {0: [0.01] * 19}
+        rets = {"20250102": [0.01] * 19}
         res = ss.cross_sectional_dispersion_pct(rets)
         assert not res["available"]
         assert "成分股不足" in res["reason"]
@@ -137,67 +138,105 @@ class TestDispersion:
 
 
 # ---------------------------------------------------------------------------
+# 收益序列（F2：零收盘守卫）
+# ---------------------------------------------------------------------------
+
+class TestReturns:
+    def test_zero_close_current_injected_as_none(self):
+        """F2：cur==0 不得注入 -100% 收益（0/prev − 1 污染 OLS/CSAD/下行相关）。"""
+        dates = ["20250101", "20250102", "20250103"]
+        by_date = {"20250101": 10.0, "20250102": 0.0, "20250103": 12.0}
+        rets = ss._returns(dates, by_date)
+        assert rets == [None, None]  # cur==0 与 prev==0 均拒绝
+
+    def test_zero_close_prev_injected_as_none(self):
+        dates = ["20250101", "20250102", "20250103"]
+        by_date = {"20250101": 0.0, "20250102": 10.0, "20250103": 11.0}
+        rets = ss._returns(dates, by_date)
+        assert rets[0] is None
+        assert rets[1] == pytest.approx(0.1)
+
+    def test_normal_returns_unchanged(self):
+        dates = ["20250101", "20250102", "20250103"]
+        by_date = {"20250101": 10.0, "20250102": 10.5, "20250103": 11.0}
+        rets = ss._returns(dates, by_date)
+        assert rets[0] == pytest.approx(0.05)
+        assert rets[1] == pytest.approx(11.0 / 10.5 - 1.0)
+
+
+# ---------------------------------------------------------------------------
 # CSAD 回归（CCK 2000）
 # ---------------------------------------------------------------------------
 
 class TestCsad:
     def _herding_dataset(self, n_days: int = 120, gamma2: float = -0.5):
-        """构造 CSAD_t = 0.02 − 0.005·|Rm| + gamma2·Rm² 的精确样本。"""
-        idx_rets = [0.0005 + 0.01 * math.sin(t / 7.0) for t in range(n_days)]
-        returns_by_day: dict[int, list[float]] = {}
-        for t, rm in enumerate(idx_rets):
+        """构造 CSAD_t = 0.02 − 0.005·|Rm| + gamma2·Rm² 的精确样本（交易日键）。"""
+        dates = _make_weekdays(n_days + 1)
+        idx_ret_by_date: dict[str, float] = {}
+        returns_by_day: dict[str, list[float]] = {}
+        for t in range(n_days):
+            rm = 0.0005 + 0.01 * math.sin(t / 7.0)
+            d = dates[t + 1]  # 结束交易日（F3：CSAD 以交易日对齐）
+            idx_ret_by_date[d] = rm
             csad_t = 0.02 - 0.005 * abs(rm) + gamma2 * rm * rm
             # 30 只成分股：20 只 = Rm + CSAD_t，10 只 = Rm − CSAD_t → mean|dev| = CSAD_t
-            returns_by_day[t] = [rm + csad_t] * 20 + [rm - csad_t] * 10
-        return idx_rets, returns_by_day
+            returns_by_day[d] = [rm + csad_t] * 20 + [rm - csad_t] * 10
+        return idx_ret_by_date, returns_by_day
 
     def test_herding_gamma2_recovered(self):
-        idx_rets, by_day = self._herding_dataset()
-        res = ss.csad_regression(idx_rets, by_day)
+        idx_ret_by_date, by_day = self._herding_dataset()
+        res = ss.csad_regression(idx_ret_by_date, by_day)
         assert res["available"]
         assert abs(res["gamma2"] - (-0.5)) < 1e-9
-        assert res["n_days"] == len(idx_rets)
+        assert res["n_days"] == len(idx_ret_by_date)
 
     def test_gamma2_matches_numpy_independent(self):
         """验收 #1 单元层：与 numpy lstsq 独立复算一致。"""
-        idx_rets, by_day = self._herding_dataset(n_days=150, gamma2=-0.8)
-        res = ss.csad_regression(idx_rets, by_day)
-        rm = np.array(idx_rets)
-        csad = np.array([sum(abs(r - rm[t]) for r in by_day[t]) / len(by_day[t])
-                         for t in range(len(idx_rets))])
+        idx_ret_by_date, by_day = self._herding_dataset(n_days=150, gamma2=-0.8)
+        res = ss.csad_regression(idx_ret_by_date, by_day)
+        dts = sorted(idx_ret_by_date)
+        rm = np.array([idx_ret_by_date[d] for d in dts])
+        csad = np.array([sum(abs(r - idx_ret_by_date[d]) for r in by_day[d]) / len(by_day[d])
+                         for d in dts])
         A = np.vstack([np.ones_like(rm), np.abs(rm), rm ** 2]).T
         coef = np.linalg.lstsq(A, csad, rcond=None)[0]
         assert abs(res["gamma2"] - float(coef[2])) < 1e-9
 
     def test_herding_positive_gamma2_no_herding(self):
         """γ2 > 0（发散型）也能正确恢复——引擎不自带方向假设。"""
-        idx_rets, by_day = self._herding_dataset(gamma2=0.7)
-        res = ss.csad_regression(idx_rets, by_day)
+        idx_ret_by_date, by_day = self._herding_dataset(gamma2=0.7)
+        res = ss.csad_regression(idx_ret_by_date, by_day)
         assert abs(res["gamma2"] - 0.7) < 1e-9
 
     def test_csad_insufficient_fails_loud(self):
-        idx_rets = [0.01] * 10
-        by_day = {t: [0.01] * 30 for t in range(10)}
-        res = ss.csad_regression(idx_rets, by_day)
+        dates = _make_weekdays(11)
+        idx_ret_by_date = {d: 0.01 for d in dates[1:]}
+        by_day = {d: [0.01] * 30 for d in dates[1:]}
+        res = ss.csad_regression(idx_ret_by_date, by_day)
         assert not res["available"]
         assert "样本不足" in res["reason"]
 
     def test_t_stat_matches_numpy_ill_conditioned(self):
         """SE 路径回归：|Rm| 与 Rm² 高度共线（实盘形态，未缩放 X'X 条件数 ~1e10）
         时 t 统计量必须与 numpy 独立复算一致（曾因 RHS 构造错误塌成 None）。"""
-        idx_rets = [0.0005 + 0.01 * math.sin(t / 7.0) for t in range(250)]
-        returns_by_day: dict[int, list[float]] = {}
-        for t, rm in enumerate(idx_rets):
+        dates = _make_weekdays(251)
+        idx_ret_by_date: dict[str, float] = {}
+        returns_by_day: dict[str, list[float]] = {}
+        for t in range(250):
+            rm = 0.0005 + 0.01 * math.sin(t / 7.0)
+            d = dates[t + 1]
+            idx_ret_by_date[d] = rm
             csad_t = (0.02 - 0.005 * abs(rm) - 0.5 * rm * rm
                       + 1e-4 * math.sin(3 * t))  # 加入噪声使 RSS > 0
-            returns_by_day[t] = [rm + csad_t] * 20 + [rm - csad_t] * 10
-        res = ss.csad_regression(idx_rets, returns_by_day)
+            returns_by_day[d] = [rm + csad_t] * 20 + [rm - csad_t] * 10
+        res = ss.csad_regression(idx_ret_by_date, returns_by_day)
         assert res["available"]
         assert res["t_stat"] is not None, "t 统计量不得为 None"
 
-        rm = np.array(idx_rets)
-        csad = np.array([sum(abs(r - rm[t]) for r in returns_by_day[t]) / 30
-                         for t in range(250)])
+        dts = sorted(idx_ret_by_date)
+        rm = np.array([idx_ret_by_date[d] for d in dts])
+        csad = np.array([sum(abs(r - idx_ret_by_date[d]) for r in returns_by_day[d]) / 30
+                         for d in dts])
         A = np.vstack([np.ones_like(rm), np.abs(rm), rm ** 2]).T
         coef = np.linalg.lstsq(A, csad, rcond=None)[0]
         resid = csad - A @ coef
@@ -210,11 +249,28 @@ class TestCsad:
 
     def test_thin_days_excluded(self):
         """D4：每日 < 20 只成分股的交易日不参与 CSAD（覆盖范围标注）。"""
-        idx_rets, by_day = self._herding_dataset(n_days=60)
-        by_day[10] = [0.01] * 5  # 当日仅 5 只 → 剔除
-        res = ss.csad_regression(idx_rets, by_day)
+        idx_ret_by_date, by_day = self._herding_dataset(n_days=60)
+        drop_day = sorted(idx_ret_by_date)[10]
+        by_day[drop_day] = [0.01] * 5  # 当日仅 5 只 → 剔除
+        res = ss.csad_regression(idx_ret_by_date, by_day)
         assert res["available"]
         assert res["n_days"] == 59
+
+    def test_dropped_day_no_misalignment(self):
+        """F3：任一侧缺日不得错位——删除一日后其余天仍按交易日与当日指数收益配对。"""
+        idx_ret_by_date, by_day = self._herding_dataset(n_days=60, gamma2=-0.5)
+        drop = sorted(idx_ret_by_date)[15]
+        del by_day[drop]  # 当日无成分股数据 → 仅该日 CSAD 观察剔除
+        res = ss.csad_regression(idx_ret_by_date, by_day)
+        assert res["available"]
+        assert res["n_days"] == 59
+        keep = [d for d in sorted(idx_ret_by_date) if d != drop]
+        rm = np.array([idx_ret_by_date[d] for d in keep])
+        csad = np.array([sum(abs(r - idx_ret_by_date[d]) for r in by_day[d]) / len(by_day[d])
+                         for d in keep])
+        A = np.vstack([np.ones_like(rm), np.abs(rm), rm ** 2]).T
+        coef = np.linalg.lstsq(A, csad, rcond=None)[0]
+        assert abs(res["gamma2"] - float(coef[2])) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -614,3 +670,69 @@ class TestC7Wording:
         if "基本面不重要" in doc:
             assert "禁止写成「基本面不重要」" in doc
         assert "基本面在" in doc  # 条件限定句（C7 修正表述）存在
+
+
+# ---------------------------------------------------------------------------
+# F1 冷缓存门控探测 / F6 申万指数先排序再切片
+# ---------------------------------------------------------------------------
+
+def _probe_ak_fetch(func_name, *a, **k):
+    """F1 探测用 akshare 桩：EM 板块名 → 指数历史 → 成分股（D13 唯一标记）。"""
+    if func_name == "stock_board_industry_name_em":
+        return pd.DataFrame([{"板块名称": "玻璃玻纤", "板块代码": "BK1071"}])
+    if func_name == "stock_board_industry_hist_em":
+        dates = _make_weekdays(30)
+        return pd.DataFrame({"日期": dates, "收盘": _index_closes(dates)})
+    if func_name == "stock_board_industry_cons_em":
+        return pd.DataFrame({"代码": [f"6000{i:02d}" for i in range(25)]})  # 6 位补零
+    raise AssertionError(f"unexpected akshare fetch: {func_name}")
+
+
+class TestProbeCacheWarmth:
+    def test_cold_cache_reports_cold(self, monkeypatch, tmp_path):
+        """F1：成分股 kline 全冷（缺口 > 预算）→ warm=False，默认采集跳过。"""
+        cache = _make_cache(tmp_path)
+        monkeypatch.setattr(ss, "_ak_fetch", _probe_ak_fetch)
+        res = ss.probe_sector_cache_warmth("玻璃玻纤", cache=cache)
+        assert res["warm"] is False
+        assert res["miss"] == 25
+        assert "未预热" in res["reason"]
+        assert "--force-sector-sync" in res["reason"]
+
+    def test_warm_cache_within_budget(self, monkeypatch, tmp_path):
+        """F1：缺口 ≤ 预算（24/25 已缓存）→ warm=True，现场补抓有界。"""
+        cache = _make_cache(tmp_path)
+        monkeypatch.setattr(ss, "_ak_fetch", _probe_ak_fetch)
+        dates = _make_weekdays(30)
+        closes = _index_closes(dates)
+        for code in [f"6000{i:02d}" for i in range(24)]:
+            cache.set("sector_cons_kline", code, list(zip(dates, closes)),
+                      ttl_seconds=86400, source="test")
+        res = ss.probe_sector_cache_warmth("玻璃玻纤", cache=cache)
+        assert res["warm"] is True
+        assert res["miss"] == 1
+
+    def test_no_anchor_does_not_block(self, monkeypatch, tmp_path):
+        """F1：行业无锚定板块 → 不拦截（交给 compute fail loud 给出真实原因）。"""
+        cache = _make_cache(tmp_path)
+        monkeypatch.setattr(ss, "_ak_fetch",
+                            lambda *a, **k: pd.DataFrame())  # 全部空表
+        res = ss.probe_sector_cache_warmth("不存在的行业", cache=cache)
+        assert res["warm"] is True
+
+
+class TestFetchIndexHistory:
+    def test_sw_sorts_before_slice(self, monkeypatch, tmp_path):
+        """F6：申万全历史先排序再取尾部（防御接口乱序返回）。"""
+        cache = _make_cache(tmp_path)
+        rows = [
+            {"日期": "2020-01-03", "收盘": 100.0},
+            {"日期": "2020-01-02", "收盘": 99.0},   # 乱序：较新日期在前
+            {"日期": "1999-12-31", "收盘": 1.0},    # 全历史起点
+        ]
+        monkeypatch.setattr(ss, "_ak_fetch",
+                            lambda *a, **k: pd.DataFrame(rows))
+        out = ss._fetch_index_history(
+            {"provider": "sw", "index_name": "建筑材料", "index_code": "801010"},
+            cache=cache, days=2)
+        assert out == [("20200102", 99.0), ("20200103", 100.0)]  # 排序后取最近 2 日

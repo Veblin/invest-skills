@@ -92,6 +92,7 @@ _MIN_CORR_DAYS = 30         # 下行相关窗口最少样本日
 _KLINE_FETCH_DAYS = 400     # 成分股日线抓取窗口（自然日，覆盖 ~270 交易日）
 _CACHE_TTL_SECONDS = 86400  # 1 天（日频数据；盘中 TTL ×0.8 由 DataCache 处理）
 _MAX_WORKERS = 8            # 成分股日线抓取并发数
+_WARMUP_FETCH_BUDGET = 20   # F1 冷缓存门控：成分股日线现场补抓预算（只），缺口 > 预算视为冷缓存
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +336,7 @@ def _fetch_index_history(provider: dict[str, str], *, cache: Any,
             c = _to_float(r.get("收盘") or r.get("close"))
             if d8 and c is not None:
                 closes.append((d8, c))
+        closes.sort()
     else:
         df = _ak_fetch("index_hist_sw", symbol=key, period="day")
         rows = _ak_df_rows(df)
@@ -344,8 +346,10 @@ def _fetch_index_history(provider: dict[str, str], *, cache: Any,
             c = _to_float(r.get("收盘") or r.get("close"))
             if d8 and c is not None:
                 closes.append((d8, c))
-        closes = closes[-days:]  # 申万接口返回全历史（1999 起），取尾部
-    closes.sort()
+        # F6：先排序再取尾部——申万返回全历史（1999 起），且接口不保证升序
+        # （同仓 _orchestrate.py:1976 也防御性先排），乱序时尾部切片才有效
+        closes.sort()
+        closes = closes[-days:]
     if not closes:
         return None
     cache.set("sector_index_hist", key, closes, ttl_seconds=_CACHE_TTL_SECONDS,
@@ -451,7 +455,9 @@ def _returns(dates: list[str], closes_by_date: dict[str, float]) -> list[float |
     for i in range(1, len(dates)):
         prev = closes_by_date.get(dates[i - 1])
         cur = closes_by_date.get(dates[i])
-        if prev is None or cur is None or prev == 0:
+        # F2：prev==0 与 cur==0 均拒绝——零收盘不是「停牌」，是数据异常，
+        # cur==0 会注入 -100% 收益（0/prev−1）污染 OLS/CSAD/下行相关
+        if prev is None or cur is None or prev == 0 or cur == 0:
             out.append(None)
         else:
             out.append(cur / prev - 1.0)
@@ -487,11 +493,12 @@ def sector_beta_stats(stock_returns: list[float], sector_returns: list[float]) -
     }
 
 
-def cross_sectional_dispersion_pct(returns_by_day: dict[int, list[float]]) -> dict:
+def cross_sectional_dispersion_pct(returns_by_day: dict[str, list[float]]) -> dict:
     """板块内成分股当日收益横截面标准差（%）。
 
-    returns_by_day: 窗口日索引 → 当日成分股收益（小数）列表。取窗口末日横截面；
-    总体标准差（pstdev）：板块成分即全体。末日有效成分 < 20 → 不可得。
+    returns_by_day: 结束交易日（YYYYMMDD）→ 当日成分股收益（小数）列表。
+    取窗口末日横截面；总体标准差（pstdev）：板块成分即全体。末日有效成分
+    < 20 → 不可得。ISO 日期串 max() 即窗口末日（F3 起以交易日为键）。
     """
     if not returns_by_day:
         return {"available": False, "reason": "成分股收益矩阵为空"}
@@ -562,18 +569,23 @@ def _ols_with_se(x_rows: list[list[float]], y: list[float]) -> dict:
     return {"coef": coef, "se": se, "rss": rss, "n": n}
 
 
-def csad_regression(index_returns: list[float],
-                    returns_by_day: dict[int, list[float]]) -> dict:
+def csad_regression(index_returns: dict[str, float],
+                    returns_by_day: dict[str, list[float]]) -> dict:
     """CSAD 回归（CCK 2000，板块口径）。
 
     ``CSAD_t = γ0 + γ1·|R_m,t| + γ2·R_m,t² + ε``，R_m 取行业指数收益。
     每日有效成分 < 20 的交易日剔除（D4：聚合标注覆盖范围）；样本 < 30 → 不可得。
     输出 γ2 + 标准 OLS t 统计量（列归一化 OLS，见 _ols_with_se）。
+
+    F3 对齐：两侧均以**结束交易日**（YYYYMMDD）为键——指数收益与被解释的
+    成分股横截面天然按交易日配对，任一缺失的交易日只剔除自身观察，不位移
+    后续样本（旧实现按压缩后位置枚举，缺一日即全局错位）。
     """
     xs: list[list[float]] = []
     ys: list[float] = []
-    for t, rm in enumerate(index_returns):
-        rets = returns_by_day.get(t)
+    for d in sorted(index_returns):
+        rm = index_returns[d]
+        rets = returns_by_day.get(d)
         if rets is None or len(rets) < _MIN_CONSTITUENTS:
             continue
         csad = sum(abs(r - rm) for r in rets) / len(rets)
@@ -824,8 +836,17 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
     stock_rets_long, idx_rets_long = _paired(
         _returns(long_dates, stock_by_date), _returns(long_dates, idx_by_date))
 
+    # 指数收益按结束交易日索引（F3：CSAD 以交易日对齐——压缩后位置会错位）
+    idx_ret_by_date: dict[str, float] = {}
+    for t in range(1, len(long_dates)):
+        prev_d, cur_d = long_dates[t - 1], long_dates[t]
+        p, c = idx_by_date.get(prev_d), idx_by_date.get(cur_d)
+        if p is not None and c is not None and p != 0 and c != 0:
+            idx_ret_by_date[cur_d] = c / p - 1.0
+
     # 成分股收益矩阵（逐股抓取 + 缓存；D10 一次抓取服务三个字段）
-    returns_by_day: dict[int, list[float]] = {}
+    # F3：与指数同以结束交易日为键；F2：零收盘（cur==0）一并拒绝
+    returns_by_day: dict[str, list[float]] = {}
     n_with_kline = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_fetch_constituent_kline, c, cache=cache): c for c in codes}
@@ -843,9 +864,9 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
             for t in range(1, len(long_dates)):
                 prev_d, cur_d = long_dates[t - 1], long_dates[t]
                 p, c = cmap.get(prev_d), cmap.get(cur_d)
-                if p is None or c is None or p == 0:
+                if p is None or c is None or p == 0 or c == 0:
                     continue
-                returns_by_day.setdefault(t - 1, []).append(c / p - 1.0)
+                returns_by_day.setdefault(cur_d, []).append(c / p - 1.0)
     out["n_constituents_with_kline"] = n_with_kline
 
     # 6a. 板块内离散度（%）
@@ -860,7 +881,7 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
         reasons["sector_dispersion"] = disp_res["reason"]
 
     # 6b. CSAD 回归（γ2）
-    csad_res = csad_regression(idx_rets_long, returns_by_day)
+    csad_res = csad_regression(idx_ret_by_date, returns_by_day)
     if csad_res["available"]:
         out["fields"]["csad_gamma2"] = round(csad_res["gamma2"], 2)
         t_val = csad_res.get("t_stat")
@@ -888,3 +909,46 @@ def compute_sector_sync(symbol: str, *, industry_hint: str = "",
 
     out["available"] = all(out["fields"][f] is not None for f in SECTOR_SYNC_FIELDS)
     return out
+
+
+def probe_sector_cache_warmth(industry_hint: str, *, cache: Any = None) -> dict:
+    """F1 冷缓存门控探测：锚定板块成分股日线的缓存覆盖缺口。
+
+    默认采集不得被成分股逐只抓取（5-10 分钟）阻塞：本探测先解析锚定板块
+    （解析本身走缓存，1 天 TTL；网络调用 ≤ 2 个），再统计成分股 kline 缓存
+    缺口。缺口 ≤ _WARMUP_FETCH_BUDGET 视为温热（现场补抓成本有界）；否则
+    cold + reason，由调用方跳过计算并 fail loud。
+
+    探测的解析结果同步进缓存，实际计算时零重复网络。无锚定板块 / 解析失败 →
+    返回 warm=True（让 compute 自己 fail loud 给出真实原因，探测不吞错误）。
+    """
+    if cache is None:
+        try:
+            from lib.cache import default_cache  # type: ignore
+        except ImportError:
+            from cache import default_cache  # type: ignore
+        cache = default_cache()
+    candidates = _resolve_provider_candidates(industry_hint)
+    for cand in candidates:
+        try:
+            idx = _fetch_index_history(cand, cache=cache)
+            cons = _fetch_constituents(cand, cache=cache) if idx else None
+        except Exception as exc:
+            logger.warning("sector_sync warmth probe %s failed: %s",
+                           cand.get("provider"), exc)
+            continue
+        if not (idx and cons and len(cons) >= _MIN_CONSTITUENTS):
+            continue
+        miss = sum(1 for c in cons if cache.get("sector_cons_kline", c) is None)
+        if miss <= _WARMUP_FETCH_BUDGET:
+            return {"warm": True, "miss": miss, "total": len(cons), "reason": None}
+        return {
+            "warm": False,
+            "miss": miss,
+            "total": len(cons),
+            "reason": (f"板块成分股日线缓存未预热（{len(cons) - miss}/{len(cons)} 只已缓存，"
+                       f"需现场补抓 {miss} 只 > 预算 {_WARMUP_FETCH_BUDGET} 只），默认采集跳过；"
+                       f"首次请用 --force-sector-sync 强制预热（约 5-10 分钟）"),
+        }
+    # 无锚定板块 / 全部候选解析失败：不拦截（compute 会快速 fail loud，无成分股循环）
+    return {"warm": True, "miss": 0, "total": 0, "reason": None}

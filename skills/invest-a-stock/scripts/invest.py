@@ -118,6 +118,8 @@ def _collect_kwargs(args: argparse.Namespace) -> dict:
         "with_macro": with_macro,
         "with_chain": with_macro or deep,
         "with_news_pack": getattr(args, "with_news_pack", False),
+        # E1 F1：冷缓存门控绕过（--force-sector-sync 首跑预热板块成分股缓存）
+        "force_sector_sync": getattr(args, "force_sector_sync", False),
     }
 
 
@@ -259,6 +261,10 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
         "--deep", action="store_true",
         help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
+    parser.add_argument(
+        "--force-sector-sync", action="store_true",
+        help="绕过 F1 冷缓存门控强制计算板块同步性 6 字段（首次预热：成分股日线全量抓取约 5-10 分钟，之后同板块多标的秒级复用缓存）",
+    )
     # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值
     parser.add_argument("--plan", default=argparse.SUPPRESS, help="JSON 采集计划文件路径")
     parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
@@ -300,6 +306,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pr.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
     pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
+    pr.add_argument(
+        "--force-sector-sync", action="store_true",
+        help="绕过 F1 冷缓存门控强制计算板块同步性 6 字段（首次预热：成分股日线全量抓取约 5-10 分钟，之后同板块多标的秒级复用缓存）",
+    )
     pr.add_argument(
         "--with-news-pack",
         action="store_true",

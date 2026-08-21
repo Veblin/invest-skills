@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,8 +37,15 @@ def _fake_sector_sync_module(**overrides) -> SimpleNamespace:
             "meta": {},
             "reasons": {},
         }
-    return SimpleNamespace(SECTOR_SYNC_FIELDS=_FAKE_FIELDS,
-                           compute_sector_sync=_compute, **overrides)
+
+    def _probe(industry_hint="", *, cache=None):
+        # F1 门控默认放行（测试聚焦合并/传递；门控行为由专门用例覆盖）
+        return {"warm": True, "miss": 0, "total": 0, "reason": None}
+
+    kw = {"SECTOR_SYNC_FIELDS": _FAKE_FIELDS, "compute_sector_sync": _compute,
+          "probe_sector_cache_warmth": _probe}
+    kw.update(overrides)
+    return SimpleNamespace(**kw)
 
 
 class TestAttachSectorSync:
@@ -76,8 +84,7 @@ class TestAttachSectorSync:
                 symbol, industry_hint=industry_hint, stock_kline=stock_kline)
 
         monkeypatch.setattr(orch, "_load_sector_sync_module",
-                            lambda: SimpleNamespace(SECTOR_SYNC_FIELDS=_FAKE_FIELDS,
-                                                    compute_sector_sync=_fake))
+                            lambda: _fake_sector_sync_module(compute_sector_sync=_fake))
         bars = [{"trade_date": "20260101", "close": 1.0}]
         orch._attach_sector_sync({}, "600176", {
             "basic_info": {"data": {"行业": "玻璃玻纤"}},
@@ -116,8 +123,7 @@ class TestAttachSectorSync:
             return _fake_sector_sync_module().compute_sector_sync(symbol)
 
         monkeypatch.setattr(orch, "_load_sector_sync_module",
-                            lambda: SimpleNamespace(SECTOR_SYNC_FIELDS=_FAKE_FIELDS,
-                                                    compute_sector_sync=_fake))
+                            lambda: _fake_sector_sync_module(compute_sector_sync=_fake))
         orch._attach_sector_sync({}, "600176", {"basic_info": {"data": {"行业": "玻璃玻纤"}}})
         assert seen["kline"] is None
 
@@ -161,3 +167,112 @@ class TestCollectAllSectorSyncGuard:
         ss_out = result.get("sector_sync") or {}
         assert ss_out["available"] is False
         assert "boom" in ss_out["reasons"]["_all"]
+
+
+class TestF1ColdCacheGate:
+    def test_cold_cache_skips_compute_and_force_bypasses(self, monkeypatch):
+        """F1：冷缓存跳过 compute（fail loud 标注未预热）；force=True 强制计算。"""
+        from lib.collector import _orchestrate as orch
+
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: True)
+        called = {"compute": 0}
+        mod = _fake_sector_sync_module()
+        orig_compute = mod.compute_sector_sync
+        mod.probe_sector_cache_warmth = lambda hint="", cache=None: {
+            "warm": False, "miss": 185, "total": 185,
+            "reason": "板块成分股日线缓存未预热（0/185 只已缓存，需现场补抓 185 只 > 预算 20 只），默认采集跳过；首次请用 --force-sector-sync 强制预热（约 5-10 分钟）",
+        }
+
+        def _compute(symbol, *, industry_hint="", stock_kline=None, cache=None,
+                     max_workers=8):
+            called["compute"] += 1
+            return orig_compute(symbol, industry_hint=industry_hint,
+                                stock_kline=stock_kline)
+
+        mod.compute_sector_sync = _compute
+        monkeypatch.setattr(orch, "_load_sector_sync_module", lambda: mod)
+        collection: dict = {}
+        dim_results = {
+            "basic_info": {"data": {"行业": "玻璃玻纤"}},
+            "kline": {"data": [{"trade_date": "20260101", "close": 1.0}]},
+        }
+        orch._attach_sector_sync(collection, "600176", dim_results)
+        assert called["compute"] == 0
+        ss_out = collection["sector_sync"]
+        assert ss_out["available"] is False
+        assert "未预热" in ss_out["reasons"]["_all"]
+        assert all(v is None for v in ss_out["fields"].values())
+        # kline derived 不得有 sector 字段（无计算即无合并）
+        assert "derived" not in dim_results["kline"]
+
+        # force 绕过门控：compute 被调用、available=True 且字段并入 derived
+        orch._attach_sector_sync(collection, "600176", dim_results, force=True)
+        assert called["compute"] == 1
+        assert collection["sector_sync"]["available"] is True
+        assert dim_results["kline"]["derived"]["sector_beta_60d"] == 1.23
+
+
+class TestF4PartialMergeGate:
+    def test_partial_failure_does_not_merge_into_derived(self, monkeypatch):
+        """F4：available=False（部分字段不可得）时 kline.derived 不并入——两视图一致。"""
+        from lib.collector import _orchestrate as orch
+
+        monkeypatch.setattr(orch.env, "is_akshare_available", lambda: True)
+        mod = _fake_sector_sync_module()
+        partial = mod.compute_sector_sync("600176")
+        partial["available"] = False
+        partial["reasons"] = {"sector_dispersion": "成分股不足（< 20）"}
+        partial["fields"]["sector_dispersion"] = None  # 其余 5 字段仍有效
+
+        def _compute(symbol, *, industry_hint="", stock_kline=None, cache=None,
+                     max_workers=8):
+            return partial
+
+        mod.compute_sector_sync = _compute
+        monkeypatch.setattr(orch, "_load_sector_sync_module", lambda: mod)
+        collection: dict = {}
+        dim_results = {
+            "basic_info": {"data": {"行业": "玻璃玻纤"}},
+            "kline": {"dimension": "kline",
+                      "data": [{"trade_date": "20260101", "close": 1.0}]},
+        }
+        orch._attach_sector_sync(collection, "600176", dim_results)
+        assert collection["sector_sync"]["available"] is False
+        # 部分字段保留在 collection['sector_sync']，但不得进 kline.derived
+        assert collection["sector_sync"]["fields"]["sector_beta_60d"] == 1.23
+        assert "derived" not in dim_results["kline"]
+
+
+class TestF5ModuleLoadCleanup:
+    def test_exec_failure_cleans_sys_modules(self, monkeypatch):
+        """F5：exec 失败后 sys.modules 不残留残破模块；下次加载重新 exec。"""
+        from lib.collector import _orchestrate as orch
+        import importlib.util as _ilu
+
+        orch.sys.modules.pop(orch._SECTOR_SYNC_MODULE, None)
+        real_spec_from = _ilu.spec_from_file_location
+        exec_count = {"n": 0}
+
+        class _BoomLoader:
+            def create_module(self, spec):
+                # importlib 要求：定义 exec_module 的 loader 必须能创建模块
+                return types.ModuleType(spec.name)
+
+            def exec_module(self, mod):
+                exec_count["n"] += 1
+                raise RuntimeError("boom exec")
+
+        def _spec(*a, **k):
+            spec = real_spec_from(*a, **k)
+            spec.loader = _BoomLoader()
+            return spec
+
+        monkeypatch.setattr(_ilu, "spec_from_file_location", _spec)
+        with pytest.raises(RuntimeError, match="boom exec"):
+            orch._load_sector_sync_module()
+        assert orch._SECTOR_SYNC_MODULE not in orch.sys.modules
+        # 第二次加载：不再短路返回残破模块，而是重新走完整 exec（计数 +1）
+        with pytest.raises(RuntimeError, match="boom exec"):
+            orch._load_sector_sync_module()
+        assert exec_count["n"] == 2
+        assert orch._SECTOR_SYNC_MODULE not in orch.sys.modules
