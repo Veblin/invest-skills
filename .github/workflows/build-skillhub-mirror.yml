@@ -1,0 +1,101 @@
+name: Build SkillHub Mirror
+
+# 触发：主仓库 push v* tag（bash scripts/bump-version.sh 后打 tag）→ 构建 stock+etf 两包 →
+#       push 镜像仓库 Veblin/invest-skills-skillhub 的 main 分支（幂等：产物与镜像 HEAD
+#       无差异时跳过 push）→ 镜像仓库 CI 收到 skills/** 变更自动发布到 skillhub.cn
+# 前置：主仓库 Settings → Secrets → Actions → SKILLHUB_REPO_TOKEN =
+#       PAT（仅 invest-skills-skillhub 仓库 contents:write 权限）
+# 对应设计：host-docs/v0.2.7/skillhub-mirror-publish-design.md §6/§8/§9
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      # 安全闸（参照 release.yml 的 tag 一致性做法）：pyproject 版本 ≠ tag 即 FAIL
+      - name: Verify tag matches pyproject version
+        run: |
+          VERSION="$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "v${VERSION}" != "${{ github.ref_name }}" ]; then
+            echo "::error::pyproject 版本 v${VERSION} 与 tag ${{ github.ref_name }} 不一致（版本漂移，请先 bash scripts/bump-version.sh）"
+            exit 1
+          fi
+          echo "✅ pyproject 版本与 tag 一致: v${VERSION}"
+
+      # 构建 stock + etf 两包。构建脚本内置 >200 文件守卫（超限退出码非零）→ 本步骤失败 → workflow 失败
+      - name: Build skillhub packages
+        run: |
+          uv run python scripts/build_skillhub_packages.py \
+            --out dist/skillhub-mirror/skills \
+            --skills invest-a-stock invest-a-etf
+
+      # 防御性二次守卫：每包 ≤200 文件、无 tests/__pycache__/pyc 残留
+      - name: Verify package guards
+        run: |
+          for d in dist/skillhub-mirror/skills/*/; do
+            n="$(find "$d" -type f | wc -l | tr -d ' ')"
+            if [ "$n" -gt 200 ]; then
+              echo "::error::${d} 文件数 ${n} 超 200 上限"
+              exit 1
+            fi
+            if find "$d" \( -name '__pycache__' -o -name '*.pyc' \) | grep -q .; then
+              echo "::error::${d} 含 __pycache__/pyc 残留"
+              exit 1
+            fi
+          done
+          echo "✅ 包守卫通过（文件数 ≤200、无 tests/__pycache__/pyc）"
+
+      - name: Sync to mirror repository
+        env:
+          MIRROR_TOKEN: ${{ secrets.SKILLHUB_REPO_TOKEN }}
+        run: |
+          if [ -z "$MIRROR_TOKEN" ]; then
+            echo "::error::SKILLHUB_REPO_TOKEN secret 未配置（主仓库 Settings → Secrets → Actions）"
+            exit 1
+          fi
+          # commit 消息 = sync <tag> + CHANGELOG 条目（镜像 CI 取 head commit 消息作为 publish --changelog）
+          python3 .github/scripts/extract_release_notes.py "${{ github.ref_name }}" > /tmp/release-notes.md
+          git clone --depth 1 \
+            "https://x-access-token:${MIRROR_TOKEN}@github.com/Veblin/invest-skills-skillhub.git" \
+            /tmp/invest-skills-skillhub
+          # 只替换 skills/（镜像仓库 .github/workflows 与 README 为首次 seed，不经主仓库同步）
+          rm -rf /tmp/invest-skills-skillhub/skills
+          cp -r dist/skillhub-mirror/skills /tmp/invest-skills-skillhub/skills
+          cd /tmp/invest-skills-skillhub
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "✅ 构建产物与镜像仓库 HEAD 无差异，跳过 push（幂等）"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          {
+            echo "sync ${{ github.ref_name }}"
+            echo
+            head -c 800 /tmp/release-notes.md
+          } > /tmp/commit-msg.txt
+          git add -A
+          git commit -F /tmp/commit-msg.txt
+          git push origin HEAD:main
+          echo "✅ 已推送镜像仓库 main（commit: $(git rev-parse --short HEAD)）"
