@@ -53,6 +53,20 @@
 |------|------|
 | [roadmap.md](roadmap.md) | 计划接入的数据源与版本方向 |
 
+## 回测与基线数据（docs/data/）
+
+事件研究回测的结果存档（JSON，随版本库发布）；生成脚本已归档至 `scripts/archive/`（登记表见其 README）：
+
+| 数据文件 | 生成脚本 | 说明 |
+|---------|---------|------|
+| `F1/F2/F3_backtest_result.json` | `scripts/archive/backtest_futures.py`（+ `backfill_futures_daily.py` 回填数据） | 期货基差事件研究（F 系列） |
+| `H1/H2/H3/H4/H6_backtest_result.json` | `scripts/archive/backtest_h1~h6.py` | 见底/低吸/金价 beta/缺口/日历事件研究（H 系列） |
+| `H5_backtest_result.json` | 无对应脚本（v0.2.6 起仅入库恢复可复现引用，见 CHANGELOG） | H5 回测结果存档 |
+| `scenario_baselines_E002_E007.json` | `scripts/archive/scenario_baselines.py` | E-002~E-007 预案基线 |
+| `pattern_scan_result.json` | invest-a-pattern-scan skill（非 archive 脚本） | 形态扫描结果存档 |
+
+各回测的假设冻结与预注册见 [architecture.md §references 的 backtest_prereg 条目](architecture.md)。
+
 ---
 
 > 内部迭代蓝图、执行计划、评审稿等存放在本地 `host-docs/`（不纳入版本库），避免对外文档冗长。

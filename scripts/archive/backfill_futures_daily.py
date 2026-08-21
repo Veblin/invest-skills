@@ -2,9 +2,9 @@
 """futures_daily 股指期货回填 CLI（v0.2.6 F 系列数据层）。
 
 用法:
-  uv run python scripts/backfill_futures_daily.py                 # 回填 2015-04 起当月合约
-  uv run python scripts/backfill_futures_daily.py --start 2022-07 # 仅 IM
-  uv run python scripts/backfill_futures_daily.py --max 10        # 单次最多 10 合约（测试用）
+  uv run python scripts/archive/backfill_futures_daily.py                 # 回填 2015-04 起当月合约
+  uv run python scripts/archive/backfill_futures_daily.py --start 2022-07 # 仅 IM
+  uv run python scripts/archive/backfill_futures_daily.py --max 10        # 单次最多 10 合约（测试用）
 """
 
 from __future__ import annotations

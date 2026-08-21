@@ -2,10 +2,10 @@
 """market_daily 全市场日线回填 CLI（v0.2.6 全市场分位数据层）。
 
 用法:
-  uv run python scripts/backfill_market_daily.py                # 补最近 25 个交易日
-  uv run python scripts/backfill_market_daily.py --days 60      # 补最近 60 日
-  uv run python scripts/backfill_market_daily.py --until 20260814 --max-missing 100
-  uv run python scripts/backfill_market_daily.py --dry-run      # 只列缺日不拉取
+  uv run python scripts/archive/backfill_market_daily.py                # 补最近 25 个交易日
+  uv run python scripts/archive/backfill_market_daily.py --days 60      # 补最近 60 日
+  uv run python scripts/archive/backfill_market_daily.py --until 20260814 --max-missing 100
+  uv run python scripts/archive/backfill_market_daily.py --dry-run      # 只列缺日不拉取
 
 配额：每交易日 2 次调用（daily + daily_basic），80/min 自节流；默认单次
 最多补 25 日（50 调用，500 日配额内）。断点续跑：已入库日自动跳过。
