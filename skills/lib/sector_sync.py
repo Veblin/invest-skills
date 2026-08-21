@@ -624,9 +624,12 @@ def downside_correlation_gap(stock_returns: list[float],
     （σ = 窗口内板块收益样本标准差，两档之外的日子不参与）。
     Forbes-Rigobon 异方差校正（剔除高波市态机械性高相关）：
 
-        ρ_corr = ρ* / sqrt(1 + δ·(1 − ρ*²))，δ = Var(R_m|下行)/Var(R_m|上行) − 1
+        ρ_corr = ρ* / sqrt(1 + δ·(1 − ρ*²))，δ = Var(R_i|下行)/Var(R_i|上行) − 1
 
-    其中 ρ* 为下行档原始相关（高波档），上行档方差为参照。δ>0 时校正值 < 原始值。
+    其中 ρ* 为下行档原始相关（高波档），上行档方差为参照；δ 用**个股自身**收益
+    的档内方差比（教科书口径：FR 校正目标是剔除「个股自身高波动造成的高相关
+    假象」，市场波动聚类不是该资产的异方差；2026-08-21 用户裁决，指数口径
+    gap 与个股口径差距可达 250 倍）。δ>0 时校正值 < 原始值。
     任一侧样本 < 20 日 / 方差为零 → 不可得（fail loud，不给默认值）。
     """
     n = min(len(stock_returns), len(index_returns))
@@ -648,10 +651,10 @@ def downside_correlation_gap(stock_returns: list[float],
     if rho_minus is None or rho_plus is None:
         return {"available": False,
                 "reason": "某档收益零方差，相关系数不可得（下行或上行档无波动）"}
-    var_down = statistics.variance([mrets[i] for i in down_idx])
-    var_up = statistics.variance([mrets[i] for i in up_idx])
+    var_down = statistics.variance([srets[i] for i in down_idx])
+    var_up = statistics.variance([srets[i] for i in up_idx])
     if var_up <= 0 or var_down <= 0:
-        return {"available": False, "reason": "档内板块收益方差为零，FR 校正不可用"}
+        return {"available": False, "reason": "档内个股收益方差为零，FR 校正不可用"}
     delta = var_down / var_up - 1.0
     # Forbes-Rigobon 校正：ρ*² = (1+δ)ρ²/(1+δρ²) 的反解
     # ρ_corr = ρ*/sqrt(1 + δ(1 − ρ*²))（δ > −1 恒成立：两方差均为正）

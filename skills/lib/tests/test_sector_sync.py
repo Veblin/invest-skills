@@ -268,7 +268,7 @@ class TestDownsideCorr:
         up = m >= sigma
         rho_m = float(np.corrcoef(s[down], m[down])[0, 1])
         rho_p = float(np.corrcoef(s[up], m[up])[0, 1])
-        delta = float(np.var(m[down], ddof=1) / np.var(m[up], ddof=1) - 1.0)
+        delta = float(np.var(s[down], ddof=1) / np.var(s[up], ddof=1) - 1.0)
         corr = rho_m / math.sqrt(1.0 + delta * (1.0 - rho_m ** 2))
         assert abs(res["rho_minus_raw"] - rho_m) < 1e-12
         assert abs(res["rho_plus"] - rho_p) < 1e-12
