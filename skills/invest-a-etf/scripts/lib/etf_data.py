@@ -14,9 +14,13 @@ import time
 from datetime import datetime
 from typing import Any
 
-from _invest_path import ensure_invest_a_scripts_on_path
+from _invest_path import (  # noqa: E402
+    ensure_invest_a_scripts_on_path,
+    ensure_skills_lib_on_path,
+)
 
 ensure_invest_a_scripts_on_path()
+ensure_skills_lib_on_path()
 
 from codes import etf_symbol_to_ts_code  # noqa: E402
 from dates import shanghai_days_ago, shanghai_today  # noqa: E402
@@ -27,6 +31,7 @@ from lib.proxy import (  # noqa: E402
     no_proxy_session,
     throttle_eastmoney,
 )
+from quote_tencent import fetch_tencent_quote  # noqa: E402 — skills/lib 共享库（v0.2.7 腾讯行情唯一实现）
 from lib.technical import (  # noqa: E402
     annualized_volatility_from_returns,
     boll_latest,
@@ -1190,35 +1195,22 @@ def _q_tencent_etf_quote(symbol: str) -> dict[str, Any] | None:
     """腾讯行情回退（F1-1）：东财 spot 不可达（代理/限流）时提供
     价/涨跌幅/成交量/成交额；折溢价腾讯无字段，标注不可得。
 
-    ETF 代码市场映射：51xxxx=沪市(sh)，15xxxx=深市(sz)。
+    v0.2.7 起委托 skills/lib/quote_tencent 唯一实现（统一路由/解析/单位换算），
+    本层只保留返回契约：price/change_pct/volume/amount（amount 已转元）。
     """
     try:
-        from lib.proxy import no_proxy_session  # invest-a-stock 路径引导
-        market = "sh" if str(symbol).startswith(("5", "6", "9")) else "sz"
+        # 惰性导入：测试 patch lib.proxy.no_proxy_session 时须在调用时重新解析
+        from lib.proxy import no_proxy_session
         with no_proxy_session() as sess:
-            r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
-        if r.status_code != 200 or "~" not in r.text:
+            q = fetch_tencent_quote(symbol, session=sess)
+        if q is None:
             return None
-        p = r.text.split("~")
-        if len(p) <= 45:
-            return None
-        out: dict[str, Any] = {}
-        for key, idx in (("price", 3), ("change_pct", 32), ("volume", 6)):
-            try:
-                out[key] = safe_float(p[idx])
-            except (ValueError, TypeError, IndexError):
-                out[key] = None
-        # F1-1 单位对齐：qt.gtimg.cn 字段 37 为成交额（万元），主路径
-        # fund_etf_spot_em「成交额」为元——统一转元，否则同一字段随
-        # 数据源不同差 10⁴ 倍（实测 p[37]=323831 vs spot 3,238,306,187）。
-        try:
-            _amt_wan = safe_float(p[37])
-            out["amount"] = _amt_wan * 1e4 if _amt_wan is not None else None
-        except (ValueError, TypeError, IndexError):
-            out["amount"] = None
-        if out.get("price") is None:
-            return None
-        return out
+        return {
+            "price": q["price"],
+            "change_pct": q["change_pct"],
+            "volume": q["volume"],
+            "amount": q["amount"],
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("tencent etf quote fallback failed: %s", exc)
         return None

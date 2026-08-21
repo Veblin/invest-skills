@@ -1834,6 +1834,7 @@ def cmd_ic(args: argparse.Namespace) -> int:
     from lib.quality_check import run_quality_check, format_quality_check
     from lib.risk_scanner import risk_report
     from lib.collector import collect_all
+    from lib.version import get_package_version  # canonical 源 pyproject.toml（v0.2.7 review：去掉硬编码版本）
     from datetime import datetime
 
     # 采集数据
@@ -1903,7 +1904,7 @@ def cmd_ic(args: argparse.Namespace) -> int:
         veto_reason = ""
 
     print(f"# 投资委员会决策备忘录 — {name} ({args.symbol})")
-    print(f"> 决策日期: {date_str} | 引擎: invest-a-stock v0.2.3")
+    print(f"> 决策日期: {date_str} | 引擎: invest-a-stock v{get_package_version()}")
     print(f"> ⚠️ 本备忘录为自动化引擎输出，不构成投资建议。")
     print()
 
@@ -2051,16 +2052,15 @@ def cmd_classify(args: argparse.Namespace) -> int:
     """R1: 收益驱动假设分类（研究路径分流）。"""
     try:
         from lib.income_driver import classify_income_driver, format_classify_result
-        from valuation_calc import get_annual_net_profit
+        from valuation_calc import _fmt_code, get_annual_net_profit
         from lib.tushare_client import TushareClient
     except ImportError as exc:
         print(f"⚠️ classify 依赖模块不可用: {exc}", file=sys.stderr)
         return 1
     ts = TushareClient()
-    ts_code = _fmt_code(args.symbol) if "_fmt_code" in globals() else None
-    if ts_code is None:
-        from valuation_calc import _fmt_code
-        ts_code = _fmt_code(args.symbol)
+    # v0.2.7 review：`if "_fmt_code" in globals()` 恒 False（该名从未在
+    # invest.py 模块级定义），首分支是死代码——直接走 valuation_calc 导入。
+    ts_code = _fmt_code(args.symbol)
     annual = get_annual_net_profit(ts, ts_code)
     if not annual:
         print("⚠️ 年度净利序列不可得（income 表查询为空），无法分类", file=sys.stderr)

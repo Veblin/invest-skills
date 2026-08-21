@@ -54,6 +54,12 @@ from lib.shared_dates import shanghai_days_ago, shanghai_today
 # 该函数现已委托 lib.valuation.valuation_summary（缺陷4 单公式源），此处不再直接调用。
 from lib.tushare_client import TushareClient
 
+from lib._invest_path import ensure_skills_lib_on_path
+
+ensure_skills_lib_on_path()
+
+from quote_tencent import fetch_tencent_quote  # noqa: E402 — skills/lib 共享库（v0.2.7 腾讯行情唯一实现）
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
@@ -114,30 +120,27 @@ def get_quote_ak(symbol: str) -> dict[str, Any]:
 
 
 def _get_quote_tencent(symbol: str) -> dict[str, Any]:
-    """腾讯行情兜底。"""
-    import requests
+    """腾讯行情兜底。
+
+    v0.2.7 起委托 skills/lib/quote_tencent 唯一实现（统一路由/解析/单位换算），
+    本层只保留返回契约：price/change_pct/total_mv_yi（亿元，round 2 位）/
+    pe_dynamic/pb/source；失败返回 {"price": None, "source": "failed: tencent",
+    "error": ...}（get_quote_ak 直传调用方，契约不变）。
+    """
     code = _fmt_code_ak(symbol)
-    mkt = "sh" if code.startswith(("6", "68")) else "sz"
-    url = f"http://qt.gtimg.cn/q={mkt}{code}"
     try:
-        r = requests.get(url, timeout=5)
-        r.raise_for_status()
-        raw = r.text
-        # 腾讯格式: v_<code>="...~...~..."
-        fields = raw.split("~")
-        if len(fields) < 45:
-            raise ValueError(f"腾讯行情字段不足: {len(fields)}")
-        price = safe_float(fields[3])
-        change_pct = safe_float(fields[32])
-        pe = safe_float(fields[39])
-        pb = safe_float(fields[46]) if len(fields) > 46 else None
-        total_mv = safe_float(fields[45]) if len(fields) > 45 else None
+        # 惰性导入 lib.proxy：与 etf/_sources 行为一致（强制直连，测试可 patch）
+        from lib.proxy import no_proxy_session
+        with no_proxy_session() as sess:
+            q = fetch_tencent_quote(code, session=sess)
+        if q is None:
+            raise ValueError("腾讯行情字段不足或价格缺失")
         return {
-            "price": price,
-            "change_pct": change_pct,
-            "total_mv_yi": round(total_mv, 2) if total_mv is not None else None,  # 腾讯 field45 返回亿元，无需转换
-            "pe_dynamic": pe,
-            "pb": pb,
+            "price": q["price"],
+            "change_pct": q["change_pct"],
+            "total_mv_yi": round(q["total_mv_yi"], 2) if q["total_mv_yi"] is not None else None,
+            "pe_dynamic": q["pe_ratio"],
+            "pb": q["pb"],
             "source": "tencent.qt.gtimg.cn",
         }
     except Exception as exc:
@@ -585,13 +588,21 @@ def get_daily_basic_history(
 def get_china_bond_yield() -> tuple[float | None, str]:
     """获取中国 10 年期国债收益率。
 
-    尝试顺序：akshare → Web 兜底。
-    返回 (yield_decimal, source_description)。
+    尝试 akshare；失败标注「不可得」（v0.2.7 起无静态近似兜底——硬编码
+    近似值会随日期过期，违反数据可追溯原则，AGENTS.md 约束 2/3）。
+    返回 (yield_decimal, source_description)；调用方对 None 均已有降级
+    （run_valuation 的 implied_growth / opportunity_cost / roe_pb / scenarios
+    全部 guard rf is None）。
     """
-    # 方法 1: akshare
     try:
         import akshare as ak
-        df = ak.bond_china_yield(start_date="20260101")
+        # v0.2.7 review：start_date 硬编码 "20260101" 是时间炸弹；且
+        # ak.bond_china_yield 要求窗口 < 1 年、默认 end_date="20210124" 已过期
+        # （start > end 会恒空）。动态取最近 360 天（严格小于一年上限）；
+        # 返回序列按日期升序（akshare 内 sort_values），iloc[-1] 为最新。
+        end_date = shanghai_today()
+        start_date = shanghai_days_ago(360)
+        df = ak.bond_china_yield(start_date=start_date, end_date=end_date)
         if df is not None and not df.empty:
             col_10y = None
             for col in df.columns:
@@ -606,9 +617,7 @@ def get_china_bond_yield() -> tuple[float | None, str]:
     except Exception:
         logger.debug("akshare 国债收益率失败", exc_info=True)
 
-    # 方法 2: 用已知近期值作为合理默认值（标注为"近似值"）
-    # 2026-07-14 中国 10Y 约 1.73%
-    return 0.0173, "default (~1.73%, 2026-07-14 近似)"
+    return None, "不可得：akshare.bond_china_yield 无数据（已移除静态近似兜底）"
 
 
 # ---------------------------------------------------------------------------
