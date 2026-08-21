@@ -2345,6 +2345,93 @@ def _roe_trend_anchors(
     return None, None, n_annual
 
 
+# --- _FundamentalsContext ---
+class _FundamentalsContext:
+    """C4 v0.2.7：_section_fundamentals_layered 块②数据预取 + C6 估值派生的封装。
+
+    构造入参 (dims, collection, val_cache)，一次性预取 12 题分层所需的全部
+    财务/估值/同行/宏观派生值，供 ③-⑩ 各块共享引用。消除无意义重命名
+    （np_cur→np_v 式）与块⑩ 对 _a3_gm/杜邦三字段/_b3_r/cagr 的重复计算；
+    gross_margin 走 _coalesce_gross_margin 单点 walk-back，A-③ 正文与
+    状态行天然同源（清单任务 4 的 A-③ 状态行 bug 由此修复）。
+    """
+
+    def __init__(
+        self,
+        dims: dict[str, dict],
+        collection: dict,
+        val_cache: dict | None = None,
+    ):
+        # --- 财务序列（原块②）---
+        fin = _get_dim_data(dims, "financials")
+        self.fin_list: list[dict] = []
+        if fin and isinstance(fin, list):
+            self.fin_list = sort_kline_asc(fin)
+        self.latest_fin: dict = self.fin_list[-1] if self.fin_list else {}
+        # F0-2: 同比基期取同报告期上年行；无基期 → 同比不可比（禁止跨期混比）。
+        self.prev_fin: dict = _prior_year_row(self.fin_list, self.latest_fin) or {}
+        self.first_fin: dict = self.fin_list[0] if self.fin_list else {}
+
+        self.roe_val = _get_safe(self.fin_list, "roe")
+        self.gm_val = _coalesce_fin_field(self.fin_list, "grossprofit_margin", "gross_margin")
+        self.np_v = _safe_num(self.latest_fin.get("net_profit"))
+        self.profit_dedt = _safe_num(self.latest_fin.get("profit_dedt"))
+        self.debt_ratio = _coalesce_fin_field(self.fin_list, "debt_ratio", "debt_to_assets")
+        self.em_val = _coalesce_fin_field(self.fin_list, "equity_multiplier", "em")
+        self.ocf_val = _coalesce_fin_field(self.fin_list, "ocf", "n_cashflow_act")
+        self.cf_ratio_val: float | None = None
+        if self.ocf_val is not None and self.np_v is not None and self.np_v > 0:
+            self.cf_ratio_val = self.ocf_val / self.np_v
+        self.rev_cur = _safe_num(self.latest_fin.get("revenue"))
+        self.rev_prev = _safe_num(self.prev_fin.get("revenue"))
+        self.rev_yoy: float | None = None
+        if self.rev_cur is not None and self.rev_prev is not None and self.rev_prev > 0:
+            self.rev_yoy = (self.rev_cur - self.rev_prev) / self.rev_prev * 100
+        self.ar_cur = _fin_field_num(self.latest_fin, "accounts_receiv", "ar")
+        self.ar_prev = _fin_field_num(self.prev_fin, "accounts_receiv", "ar")
+        self.ar_growth: float | None = None
+        if self.ar_cur is not None and self.ar_prev is not None and self.ar_prev > 0:
+            self.ar_growth = (self.ar_cur - self.ar_prev) / self.ar_prev * 100
+        self.inv_cur = _fin_field_num(self.latest_fin, "inventory", "inventories")
+        self.cagr, self.cagr_years_span = _compute_metric_cagr(self.fin_list, "revenue")
+        self.np_cagr, self.np_cagr_years_span = _compute_metric_cagr(self.fin_list, "net_profit")
+        self.fin_rev_list = [
+            r for r in self.fin_list if _safe_num(r.get("revenue")) is not None
+        ]
+        # 最新行原始值（B-① 护城河 / C-② 杜邦正文与状态行共用；C-② 正文对
+        # npm 另有 np/rev 派生回退，状态行不派生，数据完整性判定口径不变）
+        self.roe_latest = _safe_num(self.latest_fin.get("roe"))
+        self.npm_latest = _fin_field_num(self.latest_fin, "netprofit_margin", "np_margin")
+        self.tat_latest = _fin_field_num(self.latest_fin, "asset_turnover", "assets_turn")
+        self.em_latest = _fin_field_num(self.latest_fin, "equity_multiplier", "em")
+        # 毛利率 walk-back 单点（A-③ 正文与状态行同源）
+        self.gross_margin = _coalesce_gross_margin(self.fin_list)
+
+        # --- 估值派生（原块④，C6 v0.2.7 已收敛到 canonical）---
+        # canonical _v3_load_valuation_summary 在 valuation_summary 内滤
+        # None+≤0 并补亏损期警告；边界变化：current_pe 从「最后非 None」变为
+        # 「最后正值」——全亏损窗口股票由渲染负 PE 变为「数据不足」。
+        self.vs = _v3_load_valuation_summary(dims, val_cache)
+        val_rows = _get_dim_data(dims, "valuation")
+        self.pe_avail = (
+            bool(val_rows)
+            and isinstance(val_rows, list)
+            and any(r.get("pe_ttm") is not None for r in val_rows)
+        )
+        self.current_pe = (self.vs.get("pe") or {}).get("current") if self.vs else None
+        self.val_window_label = self.vs.get("window_label", "历史") if self.vs else "历史"
+        self.pe_pct, self.pb_pct_ext, _ = _v3_valuation_percentiles(dims, val_cache)
+        self.hist_pe_median = _historical_pe_median(val_cache, dims)
+
+        # --- 行业同行 / 市场结构（原块④余量）---
+        self.industry_peers = collection.get("industry_peers") or {}
+        ms = collection.get("market_structure") or {}
+        self.ms = ms
+        self.sw = ms.get("sw_index") or {}
+        self.pmi_data = ms.get("pmi") or {}
+        self.trigger_c = _v3_trigger_c_active(ms)
+
+
 def _section_fundamentals_layered(
     dims: dict[str, dict], collection: dict, symbol: str, *, val_cache: dict | None = None,
 ) -> str:
@@ -2393,47 +2480,48 @@ def _section_fundamentals_layered(
             lines.append(f"> - 叙事解读: {ns}")
         lines.append("")
 
-    fin = _get_dim_data(dims, "financials")
-    fin_list: list[dict] = []
-    if fin and isinstance(fin, list):
-        fin_list = sort_kline_asc(fin)
-
-    latest_fin = fin_list[-1] if fin_list else {}
-    # F0-2: 同比基期取同报告期上年行；无基期 → 同比不可比（禁止跨期混比）。
-    prev_fin = _prior_year_row(fin_list, latest_fin) or {}
-    first_fin = fin_list[0] if fin_list else {}
-
-    # =================================================================
-    # 核心判断摘要（P0-3 升级）
-    # =================================================================
-    roe_val = _get_safe(fin_list, "roe")
-    gm_val = _coalesce_fin_field(fin_list, "grossprofit_margin", "gross_margin")
-    np_v = _safe_num(latest_fin.get("net_profit"))
-    profit_dedt = _safe_num(latest_fin.get("profit_dedt"))
-    debt_ratio = _coalesce_fin_field(fin_list, "debt_ratio", "debt_to_assets")
-    em_val = _coalesce_fin_field(fin_list, "equity_multiplier", "em")
-    ocf_val = _coalesce_fin_field(fin_list, "ocf", "n_cashflow_act")
-    cf_ratio_val: float | None = None
-    if ocf_val is not None and np_v is not None and np_v > 0:
-        cf_ratio_val = ocf_val / np_v
-    rev_cur = _safe_num(latest_fin.get("revenue"))
-    rev_prev = _safe_num(prev_fin.get("revenue"))
-    rev_yoy: float | None = None
-    if rev_cur is not None and rev_prev is not None and rev_prev > 0:
-        rev_yoy = (rev_cur - rev_prev) / rev_prev * 100
-    ar_cur = _fin_field_num(latest_fin, "accounts_receiv", "ar")
-    ar_prev = _fin_field_num(prev_fin, "accounts_receiv", "ar")
-    ar_growth: float | None = None
-    if ar_cur is not None and ar_prev is not None and ar_prev > 0:
-        ar_growth = (ar_cur - ar_prev) / ar_prev * 100
-    inv_cur = _fin_field_num(latest_fin, "inventory", "inventories")
-    cagr, cagr_years_span = _compute_metric_cagr(fin_list, "revenue")
-    np_cagr, np_cagr_years_span = _compute_metric_cagr(fin_list, "net_profit")
-    fin_rev_list = [r for r in fin_list if _safe_num(r.get("revenue")) is not None]
-    np_cur = np_v
-    np_prev = _safe_num(prev_fin.get("net_profit"))
-    ocf = ocf_val
-    cf_ratio = cf_ratio_val
+    # C4 v0.2.7：块②全部预取与 C6 估值派生封装进 _FundamentalsContext；
+    # 以下局部别名供未拆分块（③-⑨）沿用，随 C4-2/3 块搬运逐个消除。
+    ctx = _FundamentalsContext(dims, collection, val_cache)
+    fin_list = ctx.fin_list
+    latest_fin = ctx.latest_fin
+    prev_fin = ctx.prev_fin
+    first_fin = ctx.first_fin
+    roe_val = ctx.roe_val
+    gm_val = ctx.gm_val
+    np_v = ctx.np_v
+    profit_dedt = ctx.profit_dedt
+    debt_ratio = ctx.debt_ratio
+    em_val = ctx.em_val
+    ocf_val = ctx.ocf_val
+    cf_ratio_val = ctx.cf_ratio_val
+    rev_cur = ctx.rev_cur
+    rev_prev = ctx.rev_prev
+    rev_yoy = ctx.rev_yoy
+    ar_cur = ctx.ar_cur
+    ar_prev = ctx.ar_prev
+    ar_growth = ctx.ar_growth
+    inv_cur = ctx.inv_cur
+    cagr = ctx.cagr
+    cagr_years_span = ctx.cagr_years_span
+    np_cagr = ctx.np_cagr
+    np_cagr_years_span = ctx.np_cagr_years_span
+    fin_rev_list = ctx.fin_rev_list
+    np_cur = ctx.np_v
+    np_prev = _safe_num(ctx.prev_fin.get("net_profit"))
+    ocf = ctx.ocf_val
+    cf_ratio = ctx.cf_ratio_val
+    vs = ctx.vs
+    pe_avail = ctx.pe_avail
+    current_pe = ctx.current_pe
+    val_window_label = ctx.val_window_label
+    industry_peers = ctx.industry_peers
+    ms = ctx.ms
+    sw = ctx.sw
+    pmi_data = ctx.pmi_data
+    pe_pct = ctx.pe_pct
+    pb_pct_ext = ctx.pb_pct_ext
+    trigger_c = ctx.trigger_c
 
     lines.append("\n### 核心判断摘要\n")
 
@@ -2578,28 +2666,6 @@ def _section_fundamentals_layered(
     lines.append("---")
     lines.append("")
     lines.extend(_financial_panorama_table(fin_list))
-
-    # C6 v0.2.7：估值预取收敛到 canonical _v3_load_valuation_summary（原为手工
-    # 重算 pe/pb/ps 序列，与 D-① 的 canonical 取值路径并存）。canonical 在
-    # valuation_summary 内滤 None+≤0 并补亏损期警告；边界变化：current_pe 从
-    # 「最后非 None」变为「最后正值」——全亏损窗口股票由渲染负 PE 变为「数据不足」。
-    vs = _v3_load_valuation_summary(dims, val_cache)
-    val_rows = _get_dim_data(dims, "valuation")
-    pe_avail = (
-        bool(val_rows)
-        and isinstance(val_rows, list)
-        and any(r.get("pe_ttm") is not None for r in val_rows)
-    )
-    current_pe = (vs.get("pe") or {}).get("current") if vs else None
-    val_window_label = vs.get("window_label", "历史") if vs else "历史"
-
-    # 行业同行数据
-    industry_peers = collection.get("industry_peers") or {}
-    ms = collection.get("market_structure") or {}
-    sw = ms.get("sw_index") or {}
-    pmi_data = ms.get("pmi") or {}
-    pe_pct, pb_pct_ext, _ = _v3_valuation_percentiles(dims, val_cache)
-    trigger_c = _v3_trigger_c_active(ms)
 
     # =================================================================
     # 4a. 行业位置（3 题）
@@ -3404,56 +3470,56 @@ def _section_fundamentals_layered(
     # =================================================================
     # 12题回答状态表（P0-3 升级）
     # =================================================================
-    lines.append("\n### 12题回答状态\n")
-    lines.append("| # | 问题 | 状态 | 回答摘要 |")
-    lines.append("|----|------|------|---------|")
+    # C4-1 去重：状态行数值全部引用 ctx/共享值（布尔表达式原样保留）；
+    # A-③ 由「仅最新行 _coalesce_gross_margin([latest_fin])」改为随正文的
+    # ctx.gross_margin walk-back（清单任务 4 指明要修的 bug）。
+    # status_rows 由 wrapper 持有，C4-2/3 随各题渲染处就地 append 迁移。
+    status_rows: list[tuple[str, str, bool, str]] = []
 
-    # Track question data availability at end of function
     # A-① 行业景气度
-    _a1_ok = bool(sw and sw.get("return_20d_pct") is not None)
-    _a1_s = f"申万板块近20日{sw['return_20d_pct']:+.2f}%" if _a1_ok else "数据不足"
-    lines.append(f"| A-① | 行业景气度 | {'✅' if _a1_ok else '❌'} | {_a1_s} |")
+    _a1_ok = bool(ctx.sw and ctx.sw.get("return_20d_pct") is not None)
+    _a1_s = f"申万板块近20日{ctx.sw['return_20d_pct']:+.2f}%" if _a1_ok else "数据不足"
+    status_rows.append(("A-①", "行业景气度", _a1_ok, _a1_s))
 
     # A-② 竞争位置
-    _a2_ok = bool(latest_fin.get("revenue") is not None and industry_peers.get("sufficient")
-                  and industry_peers.get("rankings", {}).get("revenue_yoy_pct") is not None)
-    _a2_ry_pct = industry_peers.get("rankings", {}).get("revenue_yoy_pct")
+    _a2_ok = bool(ctx.latest_fin.get("revenue") is not None and ctx.industry_peers.get("sufficient")
+                  and ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct") is not None)
+    _a2_ry_pct = ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct")
     _a2_s = f"营收增速分位{_a2_ry_pct:.1f}%" if _a2_ok else "数据不足"
-    lines.append(f"| A-② | 竞争位置 | {'✅' if _a2_ok else '❌'} | {_a2_s} |")
+    status_rows.append(("A-②", "竞争位置", _a2_ok, _a2_s))
 
     # A-③ 毛利率 vs 行业中位数
-    _a3_gm = _coalesce_gross_margin([latest_fin])
+    _a3_gm = ctx.gross_margin
     _a3_ok = _a3_gm is not None
     _a3_s = f"毛利率{_a3_gm:.2f}%" if _a3_ok else "数据不足"
-    lines.append(f"| A-③ | 毛利率 vs 行业中位数 | {'✅' if _a3_ok else '❌'} | {_a3_s} |")
+    status_rows.append(("A-③", "毛利率 vs 行业中位数", _a3_ok, _a3_s))
 
     # B-① 护城河来源
-    _b1_roe = _safe_num(latest_fin.get("roe"))
+    _b1_roe = ctx.roe_latest
     _b1_ok = _b1_roe is not None
     _b1_s = f"ROE={_b1_roe:.2f}%" if _b1_ok else "数据不足"
-    lines.append(f"| B-① | 护城河来源 | {'✅' if _b1_ok else '❌'} | {_b1_s} |")
+    status_rows.append(("B-①", "护城河来源", _b1_ok, _b1_s))
 
     # B-② 增长驱动力
-    _b2_ok = rev_cur is not None and rev_prev is not None and rev_prev > 0
-    _b2_s = f"营收同比{rev_yoy:+.2f}%" if _b2_ok else "数据不足"
-    lines.append(f"| B-② | 增长驱动力 | {'✅' if _b2_ok else '❌'} | {_b2_s} |")
+    _b2_ok = ctx.rev_cur is not None and ctx.rev_prev is not None and ctx.rev_prev > 0
+    _b2_s = f"营收同比{ctx.rev_yoy:+.2f}%" if _b2_ok else "数据不足"
+    status_rows.append(("B-②", "增长驱动力", _b2_ok, _b2_s))
 
-    # B-③ 现金流模式（与核心判断摘要一致：回溯 ocf_val）
-    _b3_ok = ocf_val is not None and np_v is not None and np_v > 0
-    _b3_r = ocf_val / np_v if _b3_ok else None
-    _b3_s = f"OCF/净利={_b3_r:.2f}" if _b3_ok else "数据不足"
-    lines.append(f"| B-③ | 现金流模式 | {'✅' if _b3_ok else '❌'} | {_b3_s} |")
+    # B-③ 现金流模式（与核心判断摘要一致：回溯 ocf_val → ctx.cf_ratio_val）
+    _b3_ok = ctx.ocf_val is not None and ctx.np_v is not None and ctx.np_v > 0
+    _b3_s = f"OCF/净利={ctx.cf_ratio_val:.2f}" if _b3_ok else "数据不足"
+    status_rows.append(("B-③", "现金流模式", _b3_ok, _b3_s))
 
     # C-① 近 3 年营收 CAGR
-    _c1_ok = len(fin_rev_list) >= 2 and cagr is not None
-    _c1_s = f"CAGR={cagr:+.2f}%" if _c1_ok else "数据不足"
-    lines.append(f"| C-① | 近3年营收CAGR | {'✅' if _c1_ok else '❌'} | {_c1_s} |")
+    _c1_ok = len(ctx.fin_rev_list) >= 2 and ctx.cagr is not None
+    _c1_s = f"CAGR={ctx.cagr:+.2f}%" if _c1_ok else "数据不足"
+    status_rows.append(("C-①", "近3年营收CAGR", _c1_ok, _c1_s))
 
-    # C-② 杜邦拆解 ROE（须净利率+周转+权益乘数）
-    _c2_roe = _safe_num(latest_fin.get("roe"))
-    _c2_npm = _fin_field_num(latest_fin, "netprofit_margin", "np_margin")
-    _c2_tat = _fin_field_num(latest_fin, "asset_turnover", "assets_turn")
-    _c2_em = _fin_field_num(latest_fin, "equity_multiplier", "em")
+    # C-② 杜邦拆解 ROE（须净利率+周转+权益乘数；最新行原始值，不派生）
+    _c2_roe = ctx.roe_latest
+    _c2_npm = ctx.npm_latest
+    _c2_tat = ctx.tat_latest
+    _c2_em = ctx.em_latest
     _c2_ok = (
         _c2_roe is not None and _c2_npm is not None
         and _c2_tat is not None and _c2_em is not None
@@ -3462,57 +3528,73 @@ def _section_fundamentals_layered(
         f"ROE={_c2_roe:.2f}%，npm×tat×em"
         if _c2_ok else "数据不足"
     )
-    lines.append(f"| C-② | 杜邦拆解ROE | {'✅' if _c2_ok else '❌'} | {_c2_s} |")
+    status_rows.append(("C-②", "杜邦拆解ROE", _c2_ok, _c2_s))
 
     # C-③ 现金流覆盖 + 应收/存货交叉验证
-    _c3_ar = _fin_field_num(latest_fin, "accounts_receiv", "ar")
-    _c3_inv = _fin_field_num(latest_fin, "inventory", "inventories")
+    _c3_ar = ctx.ar_cur
+    _c3_inv = ctx.inv_cur
     _c3_ok = (
-        ocf_val is not None and np_v is not None and np_v > 0
+        ctx.ocf_val is not None and ctx.np_v is not None and ctx.np_v > 0
         and _c3_ar is not None and _c3_inv is not None
     )
-    _c3_s = f"OCF/净利={_b3_r:.2f}，含应收+存货" if _c3_ok else "数据不足"
-    lines.append(f"| C-③ | 现金流覆盖+应收/存货 | {'✅' if _c3_ok else '❌'} | {_c3_s} |")
+    _c3_s = f"OCF/净利={ctx.cf_ratio_val:.2f}，含应收+存货" if _c3_ok else "数据不足"
+    status_rows.append(("C-③", "现金流覆盖+应收/存货", _c3_ok, _c3_s))
 
     # C-④ 扣非/净利润
-    _c4_pd = _safe_num(latest_fin.get("profit_dedt"))
-    _c4_ok = _c4_pd is not None and np_v is not None and np_v > 0
-    _c4_r = _c4_pd / np_v if _c4_ok else None
+    _c4_pd = ctx.profit_dedt
+    _c4_ok = _c4_pd is not None and ctx.np_v is not None and ctx.np_v > 0
+    _c4_r = _c4_pd / ctx.np_v if _c4_ok else None
     _c4_s = f"扣非/净利={_c4_r:.2f}" if _c4_ok else "数据不足"
-    lines.append(f"| C-④ | 扣非/净利润 | {'✅' if _c4_ok else '❌'} | {_c4_s} |")
+    status_rows.append(("C-④", "扣非/净利润", _c4_ok, _c4_s))
 
     # D-① PE/PB 历史位置（须含历史位置百分比与中位数）
-    _d1_pe_median = _historical_pe_median(val_cache, dims)
-    _d1_ok = pe_avail and current_pe is not None and pe_pct is not None
+    _d1_pe_median = ctx.hist_pe_median
+    _d1_ok = ctx.pe_avail and ctx.current_pe is not None and ctx.pe_pct is not None
     if _d1_ok and _d1_pe_median is not None:
-        _d1_s = f"PE={current_pe:.2f}x，历史位置{pe_pct:.1f}%（中位数 {_d1_pe_median:.2f}x）"
+        _d1_s = f"PE={ctx.current_pe:.2f}x，历史位置{ctx.pe_pct:.1f}%（中位数 {_d1_pe_median:.2f}x）"
     elif _d1_ok:
-        _d1_s = f"PE={current_pe:.2f}x，历史位置{pe_pct:.1f}%"
+        _d1_s = f"PE={ctx.current_pe:.2f}x，历史位置{ctx.pe_pct:.1f}%"
     else:
         _d1_s = "数据不足"
-    lines.append(f"| D-① | PE/PB历史分位 | {'✅' if _d1_ok else '❌'} | {_d1_s} |")
+    status_rows.append(("D-①", "PE/PB历史分位", _d1_ok, _d1_s))
 
     # D-② PE vs 行业中位数
-    _d2_ok = current_pe is not None and industry_peers.get("sufficient")
-    _d2_s = f"PE={current_pe:.2f}x" if _d2_ok else "数据不足"
-    lines.append(f"| D-② | PE vs行业中位数 | {'✅' if _d2_ok else '❌'} | {_d2_s} |")
+    _d2_ok = ctx.current_pe is not None and ctx.industry_peers.get("sufficient")
+    _d2_s = f"PE={ctx.current_pe:.2f}x" if _d2_ok else "数据不足"
+    status_rows.append(("D-②", "PE vs行业中位数", _d2_ok, _d2_s))
 
-    # D-③ 隐性预期差
+    # D-③ 隐性预期差（ig 为块⑧局部，C4-3 随 4d 函数迁入）
     _d3_implied = None
     try:
         _d3_implied = ig.get("g_implied")  # type: ignore[union-attr]
     except (NameError, AttributeError):
         pass
-    _d3_ok = current_pe is not None and current_pe > 0 and _d3_implied is not None
+    _d3_ok = ctx.current_pe is not None and ctx.current_pe > 0 and _d3_implied is not None
     _d3_s = f"g_implied={_d3_implied * 100:.2f}%" if _d3_ok else "数据不足"
-    lines.append(f"| D-③ | 隐性预期差(LAW15) | {'✅' if _d3_ok else '❌'} | {_d3_s} |")
+    status_rows.append(("D-③", "隐性预期差(LAW15)", _d3_ok, _d3_s))
 
-    lines.append("")
-    lines.append("> ✅ = 有可用数据，❌ = 数据不足。状态反映数据完整性，不反映结论正误。")
-
+    lines.extend(_section_12_question_table(status_rows))
     lines.append("")
     lines.append("🔍 **待独立验证:** 基本面分析基于第三方数据源（Tushare/akshare），应逐项与公司年报/季报原始数据交叉核对。行业分类可能因数据源口径不同存在差异。估值分位/隐含增长率不构成买卖判断。")
     return "\n".join(lines)
+
+
+def _section_12_question_table(
+    status_rows: list[tuple[str, str, bool, str]],
+) -> list[str]:
+    """12 题回答状态表（P0-3 升级）：纯消费 status_rows，不重推任何数值。
+
+    行序由各题渲染处（4a/4b/4c/4d）就地 append 保证；本函数只做
+    表头 + 行 + 脚注渲染。
+    """
+    lines = ["\n### 12题回答状态\n"]
+    lines.append("| # | 问题 | 状态 | 回答摘要 |")
+    lines.append("|----|------|------|---------|")
+    for qid, qtext, ok, summary in status_rows:
+        lines.append(f"| {qid} | {qtext} | {'✅' if ok else '❌'} | {summary} |")
+    lines.append("")
+    lines.append("> ✅ = 有可用数据，❌ = 数据不足。状态反映数据完整性，不反映结论正误。")
+    return lines
 
 
 # --- _law10_hint ---
