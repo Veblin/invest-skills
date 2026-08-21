@@ -14,6 +14,8 @@ metadata:
 
 # invest-a-pulse — 市场情绪脉搏
 
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
+
 ## 概述
 
 你是市场情绪分析助手。用户通过 `/invest-a-pulse` 请求当前市场情绪全景。你的职责：
@@ -74,6 +76,14 @@ else: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-
   # 6. 筹码出清度四信号（D3 引擎；状态描述，非择时信号）
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import compute_chip_clearance; import json; print(json.dumps(compute_chip_clearance(), ensure_ascii=False))" 2>/dev/null
+
+  # 7. 跨资产背景（E6 v0.2.7：data_bridge.get_macro + E3 序列消费；宏观不可得时整段标「未获取」）
+  #    get_macro 走 data_bridge 缓存（TTL 7d / 交易时段 4h）；best-effort 落库
+  #    macro_snapshots 供 E3 序列消费（VIX 20 日变化 / PMI 连续方向 / DGS30 分位 / 主权债复算）
+  #    ⚠️ store/macro 在 lib 包内（相对导入），须 ensure_invest_a_scripts_on_path
+  #    后以 from lib.store / from lib.macro 导入；裸 import store 会报 relative import 错误
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-stock/scripts/lib" && \
+  uv run python -c "import _invest_path, json; from _invest_path import ensure_invest_a_scripts_on_path; ensure_invest_a_scripts_on_path(); from data_bridge import get_macro; from lib.store import save_macro_snapshot; from lib.macro import macro_signal_label, macro_trend_analysis, format_macro_trends; m=get_macro(); save_macro_snapshot(m) if m else None; print(json.dumps({'label': macro_signal_label(m) if m else '宏观数据不可得', 'trends': format_macro_trends(macro_trend_analysis())}, ensure_ascii=False))" 2>/dev/null
        ↓
 Claude: 按输出模板合成「分析版」报告（主要结论前置）
        ↓
@@ -209,6 +219,19 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 不同资金主体（外资/杠杆/量能/机构对冲盘）行为是否分化：{同向 = 共识；背离 = 结构分歧，标注各自口径与局限}
 [证据强度: ...]
 
+## 🌐 跨资产背景（E6 v0.2.7）
+
+**[事实]**
+- {macro_signal_label 首行摘要——PMI/CPI/LPR/VIX/美 10Y/布油等锚点一句话；全部不可得时为「宏观数据不可得」}
+- {format_macro_trends 各行原样引用：VIX 20 日变化 / PMI 连续月方向 / DGS30 全序列分位与距高点（收益率口径）/ 英德法日 10Y 复算（月频自带「截至 YYYY-MM，滞后约 N 个月」staleness 标注，勿二次加工）}
+- 样本不足项按引擎输出的「样本不足 N 期」原样标注，不静默省略
+
+**[分析]**
+跨资产环境作为国内情绪维度的背景：{利率/美元/油价对资金面与风险偏好的背景含义；传导链逐环节标注证据等级 A/B/C/D（E5 规范），最弱环节不得作核心论证；只描述「当前处于何种环境」，不做「必然传导到 A 股」断言}
+[证据强度: ...]
+
+> **不可得规则（验收硬条）**：`macro_signal_label` 返回「宏观数据不可得」且全部趋势项 insufficient 时，本节保留但整段写「跨资产背景：未获取（data_bridge.get_macro 不可得）」——**不得省略本节**。
+
 ## ⚠️ 极端情绪
 **[事实]**
 - 涨跌停比 {lu_ld_ratio} | 跌停 20 日分位 {limit_down_20d_pct}%（缺失时标注原因）
@@ -322,7 +345,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 > 与 CLAUDE.md「报告复检流程」同构（WorkBuddy 环境无 CLAUDE.md，本规范自包含）。三层递进，全部通过才可发出；发现问题立即修正并标注修正项/降级项。
 
-**第 1 层：数字复检** — 关键数字按来源对照（引擎字段 ↔ 采集 JSON 的 `snapshot()`/`load_history()`/`compute_chip_clearance()` 字段，值/单位/口径一致；Python calc 标注公式）；**极值断言（峰值/最大/最低/首个/最长）必须基于全量序列 Python 聚合**（`max`/`min`/`len`），禁止目视子集断言。
+**第 1 层：数字复检** — 关键数字按来源对照（引擎字段 ↔ 采集 JSON 的 `snapshot()`/`load_history()`/`compute_chip_clearance()`/宏观 `label+trends` 输出字段，值/单位/口径一致；Python calc 标注公式）；**极值断言（峰值/最大/最低/首个/最长）必须基于全量序列 Python 聚合**（`max`/`min`/`len`），禁止目视子集断言。
 
 **第 2 层：合规复检** — P0 无 AI 心算；LAW 6 无买卖/仓位建议、多情景带假设+概率；措辞规范（禁止词替换表：崩盘→剧烈回调、极度高估/低估→数值比较、止损→防呆风控）；事实边界（无推断、冲突并列、三态标注）；[分析] 块带四维证据标签；分位伴随中位数/均值。
 
@@ -337,7 +360,8 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 输出报告前必须逐项检查：
 
 - [ ] 无「建议买入/卖出/加仓/减仓/止损/抄底/逃顶」
-- [ ] 覆盖 6 个维度（杠杆 / 广度 / 情绪 / 资金 / 估值 / 筹码出清度），每维有 [事实]+[分析]
+- [ ] 覆盖 6 个维度（杠杆 / 广度 / 情绪 / 资金 / 估值 / 筹码出清度）+ 跨资产背景段，每维有 [事实]+[分析]
+- [ ] 跨资产背景：macro_signal_label 与 format_macro_trends 行原样引用（未二次加工）；月频主权债带 staleness 标注；宏观不可得时整段标「未获取」而非省略
 - [ ] 筹码出清度输出含企稳确认字段（confirmation：True/False/None，缺失时标注原因）
 - [ ] 筹码出清度四信号每项有来源标注（compute_chip_clearance 字段路径或降级口径）
 - [ ] 每个数字有来源标注；Python calc 结果标注公式来源
