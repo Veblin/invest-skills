@@ -23,6 +23,7 @@
 | 叙事压过证据，只谈利好 | 16 条输出法则、事实/分析分离、Bull/Bear 数值化传导 | 每条判断必须关联事实、来源或标记为待验证 |
 | 同一问题每次得到不同话术 | 固定研究结构、科学计算和 SQLite 快照 | 历史结果可 diff 回溯，区分数据变化与观点变化 |
 | 只看标的，忽略市场环境 | 个股、ETF、市场脉搏、形态与方案评估共用数据层 | 同一套公开数据下比较估值、情绪、资金与风险 |
+| 不知道数据被送去了哪里 | 本地运行与可审计：数据不出机、不跟踪不上报、MIT 开源 | 代码可通读，SQLite 快照留在本地，支持 diff 回溯 |
 
 ## 研究链条
 
@@ -96,7 +97,7 @@ flowchart TB
 
 从 [GitHub Release](https://github.com/Veblin/invest-skills/releases) 下载 `invest-skills-wb-vX.Y.Z.zip`，在 WorkBuddy 的「专家·技能·连接器 > 技能 > 添加技能 > 上传技能」导入即可，无需打开终端。安装后填写 Token 的方式见 [docs/workbuddy/](docs/workbuddy/)。
 
-Windows 用户若改用 `git clone`：默认 `core.symlinks=false` 会把仓库 14 条技能链接物化成文本文件，导致技能发现失效。运行重建脚本（NTFS junction 重建 9 个目录链接 + 硬链接重建 5 个 commands 文件，无需管理员权限，幂等）：
+Windows 用户若改用 `git clone`：默认 `core.symlinks=false` 会把仓库 23 条技能链接物化成文本文件，导致技能发现失效。运行重建脚本（NTFS junction 重建 17 个目录链接 + 硬链接重建 6 个 commands 文件，无需管理员权限，幂等）：
 
 ```powershell
 git config core.symlinks true        # 可选但推荐（避免再物化）

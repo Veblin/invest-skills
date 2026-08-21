@@ -283,26 +283,37 @@ def test_v026_version_headers_pending_bump():
 
 # ---------------------------------------------------------------- Windows ps1 静态自查
 
-def test_ps1_covers_all_14_links():
-    """ps1 链接表须覆盖仓库全部 14 条技能链接（9 junction + 5 hardlink）。
+def test_ps1_covers_all_23_links():
+    """ps1 链接表须覆盖仓库全部 23 条技能链接（17 junction + 6 hardlink）。
 
+    17 junction = .workbuddy\\skills 6 + .claude\\skills 5 + .agents\\skills 6（DSH）；
+    6 hardlink = .claude\\commands 6（v0.2.6 补 pattern-scan、v0.2.7 补 .agents 后
+    Python 复算，2026-08-21）。
     macOS 无法执行 PowerShell——以链接名清单对照作静态验收（T1-T5 真机验收后置）。
     """
     ps1 = _read("scripts/setup_workbuddy_windows.ps1")
     expected_dirs = [
         ".workbuddy\\skills\\invest-a-stock", ".workbuddy\\skills\\invest-a-etf",
         ".workbuddy\\skills\\invest-a-journal", ".workbuddy\\skills\\invest-a-pulse",
-        ".workbuddy\\skills\\invest-a-gap-scan",
+        ".workbuddy\\skills\\invest-a-gap-scan", ".workbuddy\\skills\\invest-a-pattern-scan",
         ".claude\\skills\\invest-a-stock", ".claude\\skills\\invest-a-etf",
         ".claude\\skills\\invest-a-journal", ".claude\\skills\\invest-a-gap-scan",
+        ".claude\\skills\\invest-a-pattern-scan",
+        ".agents\\skills\\invest-a-stock", ".agents\\skills\\invest-a-etf",
+        ".agents\\skills\\invest-a-journal", ".agents\\skills\\invest-a-pulse",
+        ".agents\\skills\\invest-a-gap-scan", ".agents\\skills\\invest-a-pattern-scan",
     ]
     expected_files = [
         ".claude\\commands\\invest-a-stock.md", ".claude\\commands\\invest-a-etf.md",
         ".claude\\commands\\invest-a-journal.md", ".claude\\commands\\invest-a-pulse.md",
-        ".claude\\commands\\invest-a-gap-scan.md",
+        ".claude\\commands\\invest-a-gap-scan.md", ".claude\\commands\\invest-a-pattern-scan.md",
     ]
     for name in expected_dirs + expected_files:
         assert name in ps1, f"ps1 缺少链接: {name}"
+    # 数量断言：链接表条目恰为 23（17 + 6），无遗漏/重复
+    names = re.findall(r'Name = "([^"]+)"', ps1)
+    assert len(names) == 23, f"ps1 链接表应为 23 条，实际 {len(names)}"
+    assert len(set(names)) == 23, "ps1 链接表存在重复条目"
     # junction 用于目录、hardlink 用于文件（junction 不支持文件）
     assert "New-Item -ItemType Junction" in ps1
     assert "New-Item -ItemType HardLink" in ps1
@@ -314,7 +325,7 @@ def test_ps1_covers_all_14_links():
 def test_readme_windows_rebuild_section():
     readme = _read("README.md")
     assert "setup_workbuddy_windows.ps1" in readme
-    assert "14 条技能链接" in readme
+    assert "23 条技能链接" in readme
     assert "cmd /c dir .workbuddy\\skills" in readme or "cmd /c dir .workbuddy/skills" in readme
 
 
