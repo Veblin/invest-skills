@@ -10,8 +10,8 @@ invest-skills 的 [skillhub.cn](https://skillhub.cn) 分发镜像仓库——每
 
 ```
 skills/
-├── invest-a-stock/        # 个股投研（127 文件）
-└── invest-a-etf/          # ETF 研究（127 文件）
+├── invest-a-stock/        # 个股投研
+└── invest-a-etf/          # ETF 研究
 ```
 
 每个包自包含：`SKILL.md`（双格式 frontmatter）+ `scripts/`（引擎）+ `references/` + `lib/`（合并共享库）+ `requirements.txt`。
