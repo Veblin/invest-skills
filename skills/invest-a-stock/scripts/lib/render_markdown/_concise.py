@@ -416,16 +416,16 @@ def _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cac
         ocf = latest.get("ocf") if latest.get("ocf") is not None else latest.get("n_cashflow_act")
         if np_v is not None and ocf is not None:
             try:
-                if float(np_v) > 0 and float(ocf) / float(np_v) < 0.6:
+                if float(np_v) > 0 and float(ocf) / float(np_v) < OCF_COVERAGE_ALERT:
                     ocf_divergence = True
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
         # 毛利率趋势（字段优先级同 _concise_financial_snapshot）
         if len(fin_sorted) >= 2:
             gm_curr = _coalesce_fin_field(
-                [latest], "grossprofit_margin", "gross_margin", "gross_profit_margin")
+                [latest], *GROSS_MARGIN_FIELDS)
             gm_prev = _coalesce_fin_field(
-                [fin_sorted[-2]], "grossprofit_margin", "gross_margin", "gross_profit_margin")
+                [fin_sorted[-2]], *GROSS_MARGIN_FIELDS)
             if gm_curr is not None and gm_prev is not None:
                 try:
                     if float(gm_curr) < float(gm_prev) - 1:
@@ -443,7 +443,7 @@ def _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cac
             points.append(f"PE 处于历史偏高位置（{pe_pct:.1f}% 分位），存在估值收缩风险")
 
     if ocf_divergence:
-        points.append("经营现金流/净利润 < 0.6，利润质量需关注")
+        points.append(f"经营现金流/净利润 < {OCF_COVERAGE_ALERT}，利润质量需关注")
 
     if gross_margin_declining:
         points.append("毛利率连续下滑，竞争压力或成本上升")
@@ -511,7 +511,7 @@ def _concise_financial_snapshot(dims, val_cache=None):
     # 字段优先级同 render_utils._coalesce_fin_field（_v3 同源）：grossprofit_margin
     # （tushare 真名）→ gross_margin → gross_profit_margin（拼错旧键，兜底兼容老快照）
     gross_margin = _coalesce_fin_field(
-        [latest], "grossprofit_margin", "gross_margin", "gross_profit_margin")
+        [latest], *GROSS_MARGIN_FIELDS)
     np_v = latest.get("net_profit")
     ocf = latest.get("ocf") if latest.get("ocf") is not None else latest.get("n_cashflow_act")
 

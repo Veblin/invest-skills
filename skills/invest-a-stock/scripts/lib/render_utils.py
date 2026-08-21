@@ -408,6 +408,13 @@ def _coalesce_fin_field(rows: list[dict], *fields: str) -> float | None:
     return None
 
 
+# C5 v0.2.7: 毛利率字段单点合并（优先级见 lib.financials.GROSS_MARGIN_FIELDS）
+def _coalesce_gross_margin(rows: list[dict]) -> float | None:
+    from lib.financials import GROSS_MARGIN_FIELDS
+
+    return _coalesce_fin_field(rows, *GROSS_MARGIN_FIELDS)
+
+
 # --- _fmt_num ---
 def _fmt_num(v: Any, *, decimals: int = 2, suffix: str = "") -> str:
     """安全格式化数值（兼容 numpy / Decimal 等经 _safe_num 归一化后的类型）。"""

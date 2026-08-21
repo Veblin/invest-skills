@@ -24,6 +24,14 @@ from ..schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_IC
 from ..version import get_package_version
 
 from .. import render_utils as _ru
+from ..financials import (  # C5 v0.2.7: 语义常量（毛利率字段优先级 / OCF 覆盖比阈值）
+    GROSS_MARGIN_FIELDS,
+    OCF_COVERAGE_ALERT,
+    OCF_COVERAGE_EXCELLENT,
+    OCF_COVERAGE_GOOD,
+    OCF_COVERAGE_WEAK,
+)
+from ..valuation import EXTREME_HIGH_THRESHOLD, EXTREME_LOW_THRESHOLD  # C5 v0.2.7
 from ..render_utils import (
     ENGINE_VERSION,
     sanitize_error,
@@ -42,6 +50,7 @@ from ..render_utils import (
     _fmt_end_date,
     _get_safe,
     _coalesce_fin_field,
+    _coalesce_gross_margin,
     _fin_field_num,
     _wrap_details,
     _compute_metric_cagr,

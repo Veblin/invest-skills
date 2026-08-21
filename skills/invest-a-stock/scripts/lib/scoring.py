@@ -17,7 +17,7 @@ import statistics
 from datetime import date
 from typing import Any
 
-from lib.financials import find_yoy_row, normalize_end_date, parse_end_date
+from lib.financials import GROSS_MARGIN_FIELDS, find_yoy_row, normalize_end_date, parse_end_date
 from lib.nums import coalesce_field
 from lib.technical import sort_kline_asc
 from lib.valuation import _infer_tax_rate
@@ -115,7 +115,7 @@ def revenue_quality_score(financials: list[dict]) -> dict:
     # -- margin_stability --
     margin_detail: dict[str, Any] = {}
     margins = [
-        v for v in (_field(r, "grossprofit_margin", "gross_margin") for r in rows[-_RECENT_MARGIN_PERIODS:])
+        v for v in (_field(r, *GROSS_MARGIN_FIELDS) for r in rows[-_RECENT_MARGIN_PERIODS:])
         if v is not None
     ]
     if len(margins) >= 3:
@@ -214,7 +214,7 @@ def customer_lockin_score(financials: list[dict]) -> dict:
     # -- gross_margin_stability --
     stability_detail: dict[str, Any] = {}
     margins = [
-        v for v in (_field(r, "grossprofit_margin", "gross_margin") for r in rows[-_RECENT_MARGIN_PERIODS:])
+        v for v in (_field(r, *GROSS_MARGIN_FIELDS) for r in rows[-_RECENT_MARGIN_PERIODS:])
         if v is not None
     ]
     if len(margins) >= 3:
@@ -520,8 +520,8 @@ def _score_margin_trajectory(rows: list[dict]) -> tuple[float | None, dict, list
     else:
         return None, {"score": None, "note": "数据不足，跳过"}, [], "margin_trajectory（历史财报期数不足以比较）"
 
-    gm_latest = _field(latest, "grossprofit_margin", "gross_margin")
-    gm_prior = _field(yoy, "grossprofit_margin", "gross_margin")
+    gm_latest = _field(latest, *GROSS_MARGIN_FIELDS)
+    gm_prior = _field(yoy, *GROSS_MARGIN_FIELDS)
     nm_latest = _field(latest, "netprofit_margin", "net_margin")
     nm_prior = _field(yoy, "netprofit_margin", "net_margin")
 

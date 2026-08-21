@@ -154,16 +154,16 @@ def _v3_build_candidate_explanations(
             "❓",
         ))
 
-    if pe_pct is not None and (pe_pct >= 80 or pe_pct <= 20):
-        zone = "偏高" if pe_pct >= 80 else "偏低"
+    if pe_pct is not None and (pe_pct >= EXTREME_HIGH_THRESHOLD or pe_pct <= EXTREME_LOW_THRESHOLD):
+        zone = "偏高" if pe_pct >= EXTREME_HIGH_THRESHOLD else "偏低"
         explanations.append((
             "B",
             f"估值历史分位{zone}（PE {pe_pct:.1f}%）驱动定价预期重估",
             "valuation 历史分位",
             "⚠️",
         ))
-    elif pb_pct is not None and (pb_pct >= 80 or pb_pct <= 20):
-        zone = "偏高" if pb_pct >= 80 else "偏低"
+    elif pb_pct is not None and (pb_pct >= EXTREME_HIGH_THRESHOLD or pb_pct <= EXTREME_LOW_THRESHOLD):
+        zone = "偏高" if pb_pct >= EXTREME_HIGH_THRESHOLD else "偏低"
         explanations.append((
             "B",
             f"PB 历史分位{zone}（{pb_pct:.1f}%）或反映资产定价差异",
@@ -395,8 +395,8 @@ def _section_research_question(
     lines = [f"## 0. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
     lines.append("")
-    if (pe_pct is not None and (pe_pct >= 80 or pe_pct <= 20)) or (
-        pb_pct is not None and (pb_pct >= 80 or pb_pct <= 20)
+    if (pe_pct is not None and (pe_pct >= EXTREME_HIGH_THRESHOLD or pe_pct <= EXTREME_LOW_THRESHOLD)) or (
+        pb_pct is not None and (pb_pct >= EXTREME_HIGH_THRESHOLD or pb_pct <= EXTREME_LOW_THRESHOLD)
     ):
         triggers.append("B")
 
@@ -519,7 +519,7 @@ def _section_snapshot(
             np_f, ocf_f = float(np_v), float(ocf)
             if np_f > 0 and ocf_f > 0:
                 ratio = ocf_f / np_f
-                cv_status = "convergence" if ratio >= 0.5 else "divergence"
+                cv_status = "convergence" if ratio >= OCF_COVERAGE_WEAK else "divergence"
             elif np_f < 0 and ocf_f < 0:
                 cv_status = "divergence"
             elif np_f == 0 or ocf_f == 0:
@@ -1018,7 +1018,7 @@ def _section_market_structure(
     if isinstance(fin_rows, list) and fin_rows:
         fin_sorted = sort_kline_asc(fin_rows)
         if fin_sorted:
-            company_gm = _fin_field_num(fin_sorted[-1], "grossprofit_margin", "gross_margin")
+            company_gm = _fin_field_num(fin_sorted[-1], *GROSS_MARGIN_FIELDS)
     chain_section = _section_value_chain_position(
         collection.get("chain_context") or {},
         collection.get("industry_pricing") or {},
@@ -1820,11 +1820,11 @@ def _conclude_cash_flow_quality(
         if cf_ratio < 0:
             return "经营现金流/净利润覆盖比为负，比值不适用（利润与现金流方向不一致）"
         base = ""
-        if cf_ratio >= 1.0:
+        if cf_ratio >= OCF_COVERAGE_EXCELLENT:
             base = "现金流质量优秀，经营现金流充分覆盖净利润"
-        elif cf_ratio >= 0.8:
+        elif cf_ratio >= OCF_COVERAGE_GOOD:
             base = "现金流质量良好，经营现金流基本覆盖净利润"
-        elif cf_ratio >= 0.5:
+        elif cf_ratio >= OCF_COVERAGE_WEAK:
             base = "现金流质量偏弱，经营现金流与净利润存在一定背离"
         else:
             base = "现金流质量较差，经营现金流与净利润严重背离"
@@ -1964,7 +1964,7 @@ def _canvas_scale_effect(fin_list: list[dict]) -> tuple[float | None, str, list[
         return None, "数据不足：缺少财务数据，无法判断规模效应", []
     rows = sort_kline_asc(fin_list)[-5:]
     pairs = [
-        (_fin_field_num(r, "revenue"), _fin_field_num(r, "grossprofit_margin", "gross_margin"))
+        (_fin_field_num(r, "revenue"), _fin_field_num(r, *GROSS_MARGIN_FIELDS))
         for r in rows
     ]
     valid = [(rev, gm) for rev, gm in pairs if rev is not None and gm is not None]
@@ -2511,9 +2511,9 @@ def _section_fundamentals_layered(
     lines.append("[分析]")
     cf_analysis = []
     if cf_ratio_val is not None:
-        if cf_ratio_val >= 1.0:
+        if cf_ratio_val >= OCF_COVERAGE_EXCELLENT:
             cf_analysis.append("经营现金流充分覆盖净利润，利润含金量高")
-        elif cf_ratio_val >= 0.8:
+        elif cf_ratio_val >= OCF_COVERAGE_GOOD:
             cf_analysis.append("经营现金流基本覆盖净利润，利润质量良好")
         else:
             cf_analysis.append("经营现金流覆盖不足，利润质量存疑，需关注应收与存货变化")
@@ -2710,16 +2710,14 @@ def _section_fundamentals_layered(
 
     # A-③ 毛利率 vs 行业中位数
     lines.append("#### A-③ 毛利率 vs 行业中位数")
-    gross_margin = _fin_field_num(latest_fin, "gross_margin", "grossprofit_margin")
-    if gross_margin is None:
-        for r in reversed(fin_list):
-            gross_margin = _fin_field_num(r, "gross_margin", "grossprofit_margin")
-            if gross_margin is not None:
-                break
+    # C5 v0.2.7: 字段优先级统一 GROSS_MARGIN_FIELDS（grossprofit_margin 真名优先）；
+    # 手工逐行回退改为 _coalesce_gross_margin（_get_safe 逐行回退取最新非 None，
+    # 当前数据两 key 恒同写，语义等价）
+    gross_margin = _coalesce_gross_margin(fin_list)
     if gross_margin is not None:
         lines.append(f"最新报告期毛利率：**{gross_margin:.2f}%**。")
         peer_gms = [
-            _fin_field_num(p, "gross_margin", "grossprofit_margin")
+            _coalesce_gross_margin([p])
             for p in industry_peers.get("peers", [])
         ]
         peer_gms = [g for g in peer_gms if g is not None]
@@ -2843,10 +2841,10 @@ def _section_fundamentals_layered(
             lines.append(
                 f"驱动力持续性：**{sustain}**（最近同比 {rev_yoy:+.2f}% vs CAGR {cagr:+.2f}%）。"
             )
-        gm_first = _fin_field_num(first_fin, "gross_margin", "grossprofit_margin")
+        gm_first = _coalesce_gross_margin([first_fin])
         gm_latest = gross_margin
         if gm_latest is None:
-            gm_latest = _fin_field_num(latest_fin, "gross_margin", "grossprofit_margin")
+            gm_latest = _coalesce_gross_margin([latest_fin])
         if gm_first is not None and gm_latest is not None:
             gm_chg = gm_latest - gm_first
             if gm_chg > 1 and (cagr or 0) > 0:
@@ -2897,11 +2895,11 @@ def _section_fundamentals_layered(
     lines.append("#### B-③ 现金流模式")
     if ocf is not None and np_v is not None and np_v > 0:
         cf_ratio = ocf / np_v
-        quality = "健康" if cf_ratio >= 0.8 else (
-            "偏弱" if cf_ratio >= 0.5 else "严重背离")
+        quality = "健康" if cf_ratio >= OCF_COVERAGE_GOOD else (
+            "偏弱" if cf_ratio >= OCF_COVERAGE_WEAK else "严重背离")
         lines.append(f"经营现金流/净利润覆盖比：**{cf_ratio:.2f}**（{quality}）。")
-        if cf_ratio < 0.8:
-            lines.append("⚠️ 现金流覆盖比 < 0.8，建议扩展分析：收入确认质量、应收/存货变动（见 C-③ 交叉验证）。")
+        if cf_ratio < OCF_COVERAGE_GOOD:
+            lines.append(f"⚠️ 现金流覆盖比 < {OCF_COVERAGE_GOOD}，建议扩展分析：收入确认质量、应收/存货变动（见 C-③ 交叉验证）。")
     elif ocf is None:
         lines.append("数据不足：[经营现金流字段不可得]")
     elif np_v is None or np_v <= 0:
@@ -2922,7 +2920,7 @@ def _section_fundamentals_layered(
             "查看连续 4 期现金流覆盖比趋势方向",
         ],
     ))
-    if cf_ratio is not None and cf_ratio < 0.8:
+    if cf_ratio is not None and cf_ratio < OCF_COVERAGE_GOOD:
         lines.append("")
         lines.append("**[扩展激活 · 现金流覆盖 < 0.8]** 建议深度扫描收入确认质量："
                      "核对应收账龄、收入确认政策变更、大客户集中度变化。")
@@ -3163,13 +3161,13 @@ def _section_fundamentals_layered(
                 lines.append(f"⚠️ {w}")
     else:
         lines.append("数据不足：[估值历史序列不可得，建议配置 Tushare Token 获取 daily_basic]")
-    pe_extreme = pe_pct is not None and (pe_pct >= 80 or pe_pct <= 20)
-    pb_extreme = pb_pct_ext is not None and (pb_pct_ext >= 80 or pb_pct_ext <= 20)
+    pe_extreme = pe_pct is not None and (pe_pct >= EXTREME_HIGH_THRESHOLD or pe_pct <= EXTREME_LOW_THRESHOLD)
+    pb_extreme = pb_pct_ext is not None and (pb_pct_ext >= EXTREME_HIGH_THRESHOLD or pb_pct_ext <= EXTREME_LOW_THRESHOLD)
     if pe_extreme:
-        zone = "偏高（≥80% 分位）" if pe_pct >= 80 else "偏低（≤20% 分位）"
+        zone = "偏高（≥80% 分位）" if pe_pct >= EXTREME_HIGH_THRESHOLD else "偏低（≤20% 分位）"
         lines.append(f"⚠️ PE 处于历史 {zone}，建议触发完整预期差分析（见 D-③）。")
     if pb_extreme:
-        zone = "偏高（≥80% 分位）" if pb_pct_ext >= 80 else "偏低（≤20% 分位）"
+        zone = "偏高（≥80% 分位）" if pb_pct_ext >= EXTREME_HIGH_THRESHOLD else "偏低（≤20% 分位）"
         lines.append(f"⚠️ PB 处于历史 {zone}，建议结合 D-③ 与资产质量验证预期差。")
     if pe_extreme or pb_extreme:
         lines.append("**[扩展激活 · 估值极端]** 完整预期差分析：① 隐含 g vs 历史 CAGR；② 一致预期（若可得）；③ 增长拐点催化剂。")
@@ -3424,7 +3422,7 @@ def _section_fundamentals_layered(
     lines.append(f"| A-② | 竞争位置 | {'✅' if _a2_ok else '❌'} | {_a2_s} |")
 
     # A-③ 毛利率 vs 行业中位数
-    _a3_gm = _fin_field_num(latest_fin, "gross_margin", "grossprofit_margin")
+    _a3_gm = _coalesce_gross_margin([latest_fin])
     _a3_ok = _a3_gm is not None
     _a3_s = f"毛利率{_a3_gm:.2f}%" if _a3_ok else "数据不足"
     lines.append(f"| A-③ | 毛利率 vs 行业中位数 | {'✅' if _a3_ok else '❌'} | {_a3_s} |")
