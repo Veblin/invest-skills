@@ -1,16 +1,9 @@
 ---
 
-
-
-
-
-
-
-
-
 name: invest-a-gap-scan
 version: "0.2.6"
 description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）触发词：缺口/跳空扫描"
+whenToUse: "缺口/跳空扫描：向上跳空缺口 + MA60 上方 + 未回补的成分股筛选"
 argument-hint: "/invest-a-gap-scan [--gap-min-pct 1.5] [--gap-min-vol-ratio 1.5]"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
