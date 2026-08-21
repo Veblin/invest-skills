@@ -2432,6 +2432,528 @@ class _FundamentalsContext:
         self.trigger_c = _v3_trigger_c_active(ms)
 
 
+
+
+# --- _core_judgment_summary ---
+def _core_judgment_summary(ctx: _FundamentalsContext) -> list[str]:
+    """块③ 核心判断摘要（P0-3 升级；尾部业绩全景表随迁，test_v014 断言依赖）。"""
+    lines: list[str] = ["\n### 核心判断摘要\n"]
+
+    # 判断1: 盈利结构
+    # F0-8 修复：最新报告期非年报期时（如 Q1 累计 ROE 2.96%），判断改用工
+    # 最近年报 ROE（银行等季节性行业单季累计 ROE 不可与 TTM 门槛直接比较）；
+    # 展示仍用报告期原始值并标注口径。
+    roe_judge = ctx.roe_val
+    roe_label = "ROE(TTM)"
+    latest_ed = _norm_ed(str(ctx.latest_fin.get("end_date") or ""))
+    if latest_ed and not latest_ed.endswith("1231"):
+        roe_label = f"ROE（{latest_ed} 报告期累计）"
+        annual_rows = [r for r in ctx.fin_list if _norm_ed(str(r.get("end_date") or "")).endswith("1231")]
+        if annual_rows:
+            ann_roe = _safe_num(annual_rows[-1].get("roe"))
+            if ann_roe is not None:
+                roe_judge = ann_roe
+    lines.append("#### 盈利结构")
+    lines.append(f"[结论] {_conclude_profit_structure(roe_judge, ctx.gm_val, ctx.debt_ratio)}")
+    lines.append("")
+    lines.append("[事实]")
+    if ctx.roe_val is not None:
+        label_line = f"- {roe_label} = {_fmt_num(ctx.roe_val)}%"
+        if roe_judge is not None and roe_judge != ctx.roe_val:
+            label_line += f"（判断用最近年报 ROE {roe_judge:.2f}%）"
+        lines.append(label_line)
+    if ctx.gm_val is not None:
+        lines.append(f"- 毛利率 = {_fmt_num(ctx.gm_val)}%")
+    if ctx.debt_ratio is not None:
+        lines.append(f"- 资产负债率 = {_fmt_num(ctx.debt_ratio)}%")
+    if ctx.profit_dedt is not None and ctx.np_v is not None and ctx.np_v > 0:
+        c4_ratio = ctx.profit_dedt / ctx.np_v
+        lines.append(f"- 扣非/净利润 = {c4_ratio:.2f}")
+    lines.append("")
+    lines.append("[分析]")
+    analysis_parts = []
+    if ctx.roe_val is not None and ctx.gm_val is not None:
+        if roe_judge >= 15 and ctx.gm_val >= 40:
+            analysis_parts.append("高 ROE × 高毛利率组合，盈利模式具备结构优势")
+        elif roe_judge >= 15 and ctx.gm_val < 20:
+            analysis_parts.append("ROE 虽然较高但毛利率偏低，盈利依赖高周转或高杠杆驱动，需警惕可持续性")
+        elif roe_judge < 10 and ctx.gm_val >= 40:
+            analysis_parts.append("高毛利率但低 ROE，可能费用率偏高或资产周转效率不足")
+        else:
+            analysis_parts.append(f"ROE={roe_judge:.1f}%（判断口径）、毛利率={ctx.gm_val:.1f}%，盈利模式处于行业常见区间，需持续跟踪变化趋势")
+    if ctx.debt_ratio is not None and ctx.debt_ratio > 70:
+        analysis_parts.append("资产负债率偏高，需关注偿债风险与财务费用对利润的侵蚀")
+    if ctx.profit_dedt is not None and ctx.np_v is not None and ctx.np_v > 0:
+        c4_check = ctx.profit_dedt / ctx.np_v
+        if c4_check < 0.7:
+            analysis_parts.append("非经常性损益占比过大，净利润质量存疑")
+    if not analysis_parts:
+        analysis_parts.append("数据有限，无法进行充分的分析推理")
+    lines.append("；".join(analysis_parts))
+    lines.append("")
+    e1_items = [ctx.roe_val is not None, ctx.gm_val is not None, ctx.debt_ratio is not None,
+                ctx.profit_dedt is not None and ctx.np_v is not None and ctx.np_v > 0]
+    lines.append(f"[证据强度: {_evidence_strength_label(e1_items)}]")
+    lines.append("")
+
+    # 判断2: 现金流质量
+    lines.append("#### 现金流质量")
+    lines.append(f"[结论] {_conclude_cash_flow_quality(ctx.cf_ratio_val, ctx.ar_growth, ctx.rev_yoy, ctx.ocf_val, np_v=ctx.np_v)}")
+    lines.append("")
+    lines.append("[事实]")
+    if ctx.ocf_val is not None:
+        lines.append(f"- 经营现金流 = {_fmt_v2(ctx.ocf_val)}")
+    if ctx.np_v is not None:
+        lines.append(f"- 净利润 = {_fmt_v2(ctx.np_v)}")
+    if ctx.cf_ratio_val is not None:
+        lines.append(f"- 经营现金流/净利润 = {ctx.cf_ratio_val:.2f}")
+    if ctx.ar_growth is not None and ctx.rev_yoy is not None:
+        lines.append(f"- 应收增速 vs 营收增速：{ctx.ar_growth:+.2f}% vs {ctx.rev_yoy:+.2f}%")
+    lines.append("")
+    lines.append("[分析]")
+    cf_analysis = []
+    if ctx.cf_ratio_val is not None:
+        if ctx.cf_ratio_val >= OCF_COVERAGE_EXCELLENT:
+            cf_analysis.append("经营现金流充分覆盖净利润，利润含金量高")
+        elif ctx.cf_ratio_val >= OCF_COVERAGE_GOOD:
+            cf_analysis.append("经营现金流基本覆盖净利润，利润质量良好")
+        else:
+            cf_analysis.append("经营现金流覆盖不足，利润质量存疑，需关注应收与存货变化")
+    if ctx.ar_growth is not None and ctx.rev_yoy is not None:
+        if ctx.ar_growth > ctx.rev_yoy * 1.5:
+            cf_analysis.append(f"应收增速远超营收增速，存在赊销膨胀或回款恶化的风险")
+        elif ctx.ar_growth > ctx.rev_yoy:
+            cf_analysis.append("应收增速略高于营收增速，需关注回款节奏变化")
+        else:
+            cf_analysis.append("应收增速低于营收增速，收入增长质量较高")
+    if not cf_analysis:
+        cf_analysis.append("数据有限，无法进行充分的现金流分析")
+    lines.append("；".join(cf_analysis))
+    lines.append("")
+    e2_items = [ctx.ocf_val is not None, ctx.np_v is not None,
+                ctx.ar_growth is not None and ctx.rev_yoy is not None]
+    lines.append(f"[证据强度: {_evidence_strength_label(e2_items)}]")
+    lines.append("")
+
+    # 判断3: 资产负债与扩产路径
+    lines.append("#### 资产负债与扩产路径")
+    conclusion3 = _conclude_asset_liability(ctx.debt_ratio, ctx.em_val, ctx.ar_cur, ctx.inv_cur, ctx.rev_cur)
+    lines.append(f"[结论] {conclusion3}")
+    lines.append("")
+    lines.append("[事实]")
+    if ctx.debt_ratio is not None:
+        lines.append(f"- 资产负债率 = {ctx.debt_ratio:.2f}%")
+    if ctx.em_val is not None:
+        lines.append(f"- 权益乘数 = {ctx.em_val:.2f}")
+    if ctx.ar_cur is not None and ctx.inv_cur is not None and ctx.rev_cur is not None and ctx.rev_cur > 0:
+        wc_ratio = (ctx.ar_cur + ctx.inv_cur) / ctx.rev_cur * 100
+        lines.append(f"- (应收+存货)/营收 = {wc_ratio:.1f}%")
+    lines.append("")
+    lines.append("[分析]")
+    al_analysis = []
+    if ctx.debt_ratio is not None:
+        if ctx.debt_ratio >= 70:
+            al_analysis.append("资产负债率偏高，扩产主要依赖负债融资，财务风险较大")
+        elif ctx.debt_ratio >= 50:
+            al_analysis.append("资产负债率适中，扩产可在负债与权益间灵活选择")
+        else:
+            al_analysis.append("资产负债率较低，扩产空间充足，可使用合理杠杆加速发展")
+    if ctx.em_val is not None:
+        if ctx.em_val > 3:
+            al_analysis.append("权益乘数较高，扩产路径可能受限于融资能力")
+        elif ctx.em_val < 1.5:
+            al_analysis.append("权益乘数偏低，扩产路径可适度加杠杆")
+    if ctx.ar_cur is not None and ctx.inv_cur is not None and ctx.rev_cur is not None and ctx.rev_cur > 0:
+        wc_ratio_val = (ctx.ar_cur + ctx.inv_cur) / ctx.rev_cur
+        if wc_ratio_val > 0.5:
+            al_analysis.append("运营资金占用偏高，扩产时需关注现金流压力")
+        else:
+            al_analysis.append("运营资金占用较低，扩产的现金流压力较小")
+    if not al_analysis:
+        al_analysis.append("数据有限，无法进行充分的资产负债分析")
+    lines.append("；".join(al_analysis))
+    lines.append("")
+    e3_items = [ctx.debt_ratio is not None, ctx.em_val is not None,
+                ctx.ar_cur is not None and ctx.rev_cur is not None]
+    lines.append(f"[证据强度: {_evidence_strength_label(e3_items)}]")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.extend(_financial_panorama_table(ctx.fin_list))
+    return lines
+
+
+# --- _section_4a_industry_position ---
+def _section_4a_industry_position(
+    dims: dict[str, dict], ctx: _FundamentalsContext,
+    status_rows: list[tuple[str, str, bool, str]],
+) -> list[str]:
+    """4a. 行业位置（A-① 行业景气度 / A-② 竞争位置 / A-③ 毛利率 vs 行业中位数）。"""
+    lines: list[str] = ["### 4a. 行业位置", ""]
+
+    # A-① 行业景气度
+    lines.append("#### A-① 行业景气度")
+    if ctx.sw and ctx.sw.get("return_20d_pct") is not None:
+        lines.append(
+            f"申万行业指数 {ctx.sw.get('index_code', '?')}（{ctx.sw.get('industry', '?')}）"
+            f"近 20 日涨跌：**{ctx.sw['return_20d_pct']:+.2f}%**。"
+        )
+        rel = ctx.sw.get("relative_vs_benchmark_pct")
+        if rel is not None:
+            direction = "跑赢" if rel > 0 else "跑输"
+            lines.append(f"相对沪深 300：{rel:+.2f}%（{direction}大盘）。")
+        svi = ctx.sw.get("stock_vs_industry_pct")
+        if svi is not None:
+            direction = "跑赢" if svi > 0 else "跑输"
+            lines.append(f"个股相对行业：{svi:+.2f}%（{direction}行业板块）。")
+    else:
+        lines.append("数据不足：[申万行业指数不可得，无法判断行业景气度]")
+    if ctx.pmi_data.get("manufacturing_pmi") is not None:
+        lines.append(
+            f"制造业 PMI：**{ctx.pmi_data['manufacturing_pmi']:.1f}**（{ctx.pmi_data.get('month', '?')}，"
+            f"{ctx.pmi_data.get('signal', '?')}）[来源: {ctx.pmi_data.get('source', 'akshare')}]"
+        )
+    else:
+        lines.append("PMI/产量：数据不足：[宏观 PMI 数据源不可得；产量分项需行业数据库或 WebSearch 补充]")
+    lines.append("")
+    sw_ret = ctx.sw.get("return_20d_pct")
+    a1_pitfall = (
+        f"本次申万板块近 20 日涨跌为 {sw_ret:+.2f}%，若直接等同于公司经营改善，"
+        f"可能忽略板块内部分化——需核对本公司营收增速是否与板块同向。"
+        if sw_ret is not None else
+        "申万行业指数本次不可得，若仅凭个股涨跌判断行业景气，可能把公司特异性波动误判为行业趋势。"
+    )
+    lines.append(_law10_hint(
+        "行业景气度决定个股定价的贝塔部分，板块同向运动时个股 Alpha 的置信度更高。",
+        a1_pitfall,
+        [
+            "对比板块内市值相近公司涨跌幅离散度",
+            "查近期行业政策/供需公告（WebSearch）验证板块方向持续性",
+            "观察板块成交量是否放大（放量趋势 vs 缩量反弹）",
+        ],
+    ))
+    if ctx.trigger_c:
+        lines.append("")
+        lines.append("**[扩展激活 · 触发源 C]** 行业结构驱动：建议补充竞争格局变化分析——"
+                     "板块相对大盘偏离显著时，需区分行业景气 vs 估值重估 vs 政策预期。")
+        lines.append("**[扩展激活 · 行业政策]** 近 30 日行业政策/监管事件需 WebSearch 补充，"
+                     "并追溯政策传导至公司收入/成本的具体路径。")
+    lines.append("")
+
+    # A-① 行业景气度（状态行同源）
+    _a1_ok = bool(ctx.sw and ctx.sw.get("return_20d_pct") is not None)
+    _a1_s = f"申万板块近20日{ctx.sw['return_20d_pct']:+.2f}%" if _a1_ok else "数据不足"
+    status_rows.append(("A-①", "行业景气度", _a1_ok, _a1_s))
+
+    # A-② 竞争位置
+    lines.append("#### A-② 竞争位置")
+    basic = _get_dim_data(dims, "basic_info")
+    industry_name = ""
+    if isinstance(basic, dict):
+        industry_name = basic.get("industry", "") or basic.get("行业", "") or ""
+    rev = _safe_num(ctx.latest_fin.get("revenue"))
+    ry_pct = ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct")
+    ry_rank = ctx.industry_peers.get("rankings", {}).get("revenue_yoy_rank")
+    ry_total = ctx.industry_peers.get("rankings", {}).get("revenue_yoy_total")
+    target_ry = (ctx.industry_peers.get("target") or {}).get("revenue_yoy")
+    peer_source = ctx.industry_peers.get("peer_source")
+    if peer_source == "stock_basic_fallback":
+        warn = ctx.industry_peers.get("warning") or "非申万 L3 成分股"
+        lines.append(f"⚠️ {warn}")
+    if rev is not None and ctx.industry_peers.get("sufficient"):
+        lines.append(f"所属行业：{industry_name or ctx.industry_peers.get('industry_name') or '未知'}（申万分类）。")
+        if ry_pct is not None and ry_rank and ry_total:
+            pos = _competitive_position_label(ry_pct)
+            ry_s = f"{target_ry:+.2f}%" if target_ry is not None else "—"
+            lines.append(
+                f"竞争位置参考：**{pos}**（营收增速 {ry_s}，同行排名 {ry_rank}/{ry_total}，分位 {ry_pct:.1f}%）。"
+            )
+        else:
+            lines.append("数据不足：[同行营收增速排名字段不完整]")
+    else:
+        if industry_name:
+            lines.append(f"所属行业：{industry_name}。")
+        if peer_source == "stock_basic_fallback":
+            lines.append("数据不足：[同行池非申万 L3 成分，分位排名已降级]")
+        else:
+            err = ctx.industry_peers.get("error", "缺少同行营收对比数据")
+            lines.append(f"数据不足：[{err}]")
+    lines.append("")
+    a2_pitfall = (
+        f"本次营收增速同行分位为 {ry_pct:.1f}%（排名 {ry_rank}/{ry_total}），"
+        f"若据此直接认定竞争壁垒，可能忽略毛利率与 ROE 的转化效率。"
+        if ry_pct is not None and ry_rank and ry_total else
+        f"本次仅有行业名「{industry_name or '?'}」、缺少同行增速对比，"
+        "不宜仅凭营收规模推断龙头地位。"
+    )
+    lines.append(_law10_hint(
+        "竞争位置决定定价溢价/折价的合理性——龙头享有流动性溢价，追赶者需证明成长性。",
+        a2_pitfall,
+        [
+            "对比毛利率与行业均值差异（见 A-③）",
+            "查公司市占率数据（年报/行业报告）",
+            "关注近 3 年竞争位置是上升还是下降趋势",
+        ],
+    ))
+    lines.append("")
+
+    # A-② 竞争位置（状态行同源）
+    _a2_ok = bool(ctx.latest_fin.get("revenue") is not None and ctx.industry_peers.get("sufficient")
+                  and ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct") is not None)
+    _a2_ry_pct = ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct")
+    _a2_s = f"营收增速分位{_a2_ry_pct:.1f}%" if _a2_ok else "数据不足"
+    status_rows.append(("A-②", "竞争位置", _a2_ok, _a2_s))
+
+    # A-③ 毛利率 vs 行业中位数
+    lines.append("#### A-③ 毛利率 vs 行业中位数")
+    # C5 v0.2.7: 字段优先级统一 GROSS_MARGIN_FIELDS（grossprofit_margin 真名优先）；
+    # C4 v0.2.7: 取值收敛到 ctx.gross_margin（_coalesce_gross_margin walk-back 单点，
+    # 与 A-③ 状态行同源）
+    gross_margin = ctx.gross_margin
+    if gross_margin is not None:
+        lines.append(f"最新报告期毛利率：**{gross_margin:.2f}%**。")
+        peer_gms = [
+            _coalesce_gross_margin([p])
+            for p in ctx.industry_peers.get("peers", [])
+        ]
+        peer_gms = [g for g in peer_gms if g is not None]
+        if len(peer_gms) >= 3:
+            from lib.valuation import median_of
+            ind_med = median_of(peer_gms)
+            diff = gross_margin - ind_med
+            lines.append(f"同行毛利率中位数：**{ind_med:.2f}%**（样本 {len(peer_gms)} 家），差异 **{diff:+.2f}pp**。")
+        else:
+            lines.append("数据不足：[同行毛利率样本不足 3 家，需 income 表批量采集]")
+    else:
+        lines.append("数据不足：[毛利率字段不可得；需 fina_indicator.grossprofit_margin 或 income 表]")
+    lines.append("")
+    a3_pitfall = (
+        f"本次毛利率 {gross_margin:.2f}%，若仅因高于行业均值就认定定价权，"
+        "可能忽略销售费用率是否同步偏高（高毛利低净利模式）。"
+        if gross_margin is not None else
+        "本次毛利率不可得，不宜用 ROE 或营收增速间接替代毛利率做定价权判断。"
+    )
+    lines.append(_law10_hint(
+        "毛利率是定价权的第一道防线——高毛利率意味着客户对价格不敏感或产品有差异化壁垒。",
+        a3_pitfall,
+        [
+            "对比同行业公司毛利率离散度（若可得）",
+            "观察毛利率近 3 年趋势：下降可能暗示竞争加剧或成本上升",
+            "结合应收/现金流验证收入质量（见 C-③）",
+        ],
+    ))
+    lines.append("")
+
+    # A-③ 毛利率 vs 行业中位数（状态行同源：ctx.gross_margin walk-back）
+    _a3_gm = ctx.gross_margin
+    _a3_ok = _a3_gm is not None
+    _a3_s = f"毛利率{_a3_gm:.2f}%" if _a3_ok else "数据不足"
+    status_rows.append(("A-③", "毛利率 vs 行业中位数", _a3_ok, _a3_s))
+
+    return lines
+
+
+# --- _section_4b_business_quality ---
+def _section_4b_business_quality(
+    dims: dict[str, dict], collection: dict, ctx: _FundamentalsContext,
+    status_rows: list[tuple[str, str, bool, str]],
+) -> list[str]:
+    """4b. 商业质量（B-① 护城河 / 商业模式画布 / 管理层评估 / B-② 增长 / B-③ 现金流）。"""
+    lines: list[str] = ["### 4b. 商业质量", ""]
+    # C4 v0.2.7: np_cur/np_prev 原 wrapper 别名，此处仅 np_prev 需要本地化
+    np_prev = _safe_num(ctx.prev_fin.get("net_profit"))
+
+    # B-① 护城河来源
+    lines.append("#### B-① 护城河来源")
+    roe_now = _safe_num(ctx.latest_fin.get("roe"))
+    # F0-8 修复：ROE 趋势用年报行（1231）对比，避免季度累计 ROE 混比
+    # （招行 12.03% 全年 vs 2.96% Q1 被误判为"侵蚀"）。锚点计算收敛到
+    # _roe_trend_anchors（review 二轮补：可解析守卫 + 可单测）。
+    roe_first, roe_ann_last, n_annual_rows = _roe_trend_anchors(ctx.fin_list, ctx.latest_fin)
+    if roe_now is not None:
+        lines.append(f"当前 ROE：**{roe_now:.2f}%**（报告期累计口径，最新年报 {roe_ann_last:.2f}%）" if roe_ann_last is not None else f"当前 ROE：**{roe_now:.2f}%**。")
+        if roe_first is not None and roe_ann_last is not None:
+            trend = "强化" if roe_ann_last > roe_first + 2 else (
+                "侵蚀" if roe_ann_last < roe_first - 2 else "稳定")
+            lines.append(f"近 {n_annual_rows} 个年报 ROE 趋势：{roe_first:.2f}% → {roe_ann_last:.2f}%（{trend}）。")
+        elif roe_first is not None and len(ctx.fin_list) >= 4:
+            trend = "强化" if roe_now > roe_first + 2 else (
+                "侵蚀" if roe_now < roe_first - 2 else "稳定")
+            lines.append(f"近 {len(ctx.fin_list)} 期 ROE 趋势：{roe_first:.2f}% → {roe_now:.2f}%（{trend}）。")
+        lines.append("")
+        lines.append("护城河定性判断需结合以下维度（数据引擎提供定量基础，AI 做定性综合）：")
+        lines.append(f"- **利润转化效率：** ROE={roe_now:.2f}%、扣非/净利润比例见 C-④")
+        lines.append("- **现金流健康度：** 经营现金流/净利润覆盖比见 C-③")
+        lines.append("- **收入可持续性：** 近 3 年营收 CAGR 见 C-①")
+        lines.append("- **资产回报效率：** 杜邦拆解见 C-②")
+    else:
+        lines.append("数据不足：[缺少 ROE 数据，无法评估护城河]")
+    lines.append("")
+    _hint_first = roe_first if roe_ann_last is not None else None
+    _hint_now = roe_ann_last if roe_ann_last is not None else roe_now
+    lines.append(_law10_hint(
+        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度可能快于预期。",
+        (
+            f"本次 ROE {_hint_now:.2f}%"
+            + (f"（{_hint_first:.2f}% → {_hint_now:.2f}%，年报口径）" if _hint_first is not None else "")
+            + "，若直接等同于强护城河，可能忽略高杠杆或周期高点的一次性贡献（见 C-② 杜邦）。"
+            if _hint_now is not None else
+            "本次 ROE 不可得，不宜用营收增速或 PE 分位间接替代护城河判断。"
+        ),
+        [
+            "杜邦拆解 ROE 来源（见 C-②）",
+            "对比同行 ROE 中位数（见可比公司表）",
+            "查公司年报中「核心竞争力」部分与实际财务数据是否一致",
+        ],
+    ))
+    lines.append("")
+
+    # B-① 护城河来源（状态行同源：ctx.roe_latest 最新行 ROE）
+    _b1_roe = ctx.roe_latest
+    _b1_ok = _b1_roe is not None
+    _b1_s = f"ROE={_b1_roe:.2f}%" if _b1_ok else "数据不足"
+    status_rows.append(("B-①", "护城河来源", _b1_ok, _b1_s))
+
+    # A-4: 商业模式画布（v0.1.8 Step 6，紧接 B-① 护城河来源之后）
+    lines.append(_section_business_model_canvas(
+        ctx.fin_list,
+        dims.get("holder_changes") or {},
+        collection.get("chain_context") or {},
+    ))
+
+    # A-5: 管理层完整评估（v0.1.8 Step 6，与商业模式画布并列在 4b 商业质量段落）
+    lines.append(_section_management_assessment(
+        collection.get("events"),
+        dims.get("holder_changes") or {},
+        ctx.fin_list,
+    ))
+
+    # B-② 增长驱动力
+    lines.append("#### B-② 增长驱动力")
+    if ctx.rev_cur is not None and ctx.rev_prev is not None and ctx.rev_prev > 0:
+        lines.append(f"最近一期营收同比：**{ctx.rev_yoy:+.2f}%**。")
+    elif ctx.rev_cur is not None:
+        # F0-2: 无同报告期上年基期 → 同比不可比，禁止跨期混比
+        lines.append("最近一期营收同比：**不可比**（无同报告期上年基期，跨期混比已禁用）。")
+    if ctx.np_v is not None and np_prev is not None and np_prev > 0:
+        np_yoy = (ctx.np_v - np_prev) / np_prev * 100
+        lines.append(f"最近一期净利润同比：**{np_yoy:+.2f}%**。")
+    elif ctx.np_v is not None:
+        lines.append("最近一期净利润同比：**不可比**（无同报告期上年基期，跨期混比已禁用）。")
+    if not (ctx.rev_cur and ctx.rev_prev) and not (ctx.np_v and np_prev):
+        lines.append("数据不足：[缺少两期以上可比营收/净利润数据]")
+    elif ctx.cagr is not None and ctx.cagr_years_span is not None:
+        lines.append(
+            f"近 {ctx.cagr_years_span:.0f} 年同报告期营收 CAGR：**{ctx.cagr:+.2f}%**（多年增长趋势锚点）。"
+        )
+        if ctx.rev_yoy is not None:
+            if ctx.rev_yoy > ctx.cagr + 3:
+                sustain = "加速，驱动力仍在强化"
+            elif ctx.rev_yoy < ctx.cagr - 3:
+                sustain = "减速，需关注驱动力是否切换"
+            else:
+                sustain = "与多年趋势基本一致，驱动力仍在持续"
+            lines.append(
+                f"驱动力持续性：**{sustain}**（最近同比 {ctx.rev_yoy:+.2f}% vs CAGR {ctx.cagr:+.2f}%）。"
+            )
+        gm_first = _coalesce_gross_margin([ctx.first_fin])
+        gm_latest = ctx.gross_margin
+        if gm_latest is None:
+            gm_latest = _coalesce_gross_margin([ctx.latest_fin])
+        if gm_first is not None and gm_latest is not None:
+            gm_chg = gm_latest - gm_first
+            if gm_chg > 1 and (ctx.cagr or 0) > 0:
+                lines.append(
+                    f"价驱动信号：毛利率 {gm_first:.2f}% → {gm_latest:.2f}%（{gm_chg:+.2f}pp），"
+                    "收入增长可能含定价/结构升级贡献。"
+                )
+            elif abs(gm_chg) <= 1 and (ctx.cagr or 0) > 0:
+                lines.append(
+                    f"量驱动信号：毛利率基本稳定（{gm_first:.2f}% → {gm_latest:.2f}%），"
+                    "增长更多来自规模扩张或份额提升。"
+                )
+        roe_first_v = _safe_num(ctx.first_fin.get("roe"))
+        roe_latest_v = _safe_num(ctx.latest_fin.get("roe"))
+        if roe_first_v is not None and roe_latest_v is not None:
+            if roe_latest_v > roe_first_v + 3 and (ctx.cagr or 0) > 0:
+                lines.append(
+                    f"杠杆驱动警示：ROE {roe_first_v:.2f}% → {roe_latest_v:.2f}% 升幅较大，"
+                    "需结合 C-② 杜邦验证是否来自权益乘数。"
+                )
+    lines.append("")
+    lines.append("增长驱动力来源需结合以下判断：")
+    lines.append("- **量驱动：** 收入增速 > 行业均值 → 份额扩张（收入/应收见 C-③）")
+    lines.append("- **价驱动：** 毛利率扩张 + 收入增长 → 定价权提升（毛利率见 A-③）")
+    lines.append("- **杠杆驱动：** ROE 提升来自权益乘数 → 不可持续（杜邦见 C-②）")
+    lines.append("")
+    b2_pitfall = (
+        f"本次营收同比 {ctx.rev_yoy:+.2f}%，若等同于价值创造，可能忽略资本开支/ROIC——"
+        "低回报扩张反而摧毁股东价值。"
+        if ctx.rev_yoy is not None else
+        "本次缺少两期可比营收，不宜用单季利润波动推断增长驱动力类型。"
+    )
+    lines.append(_law10_hint(
+        "增长驱动力类型决定估值倍数——量价齐升（质量最高）vs 纯杠杆扩张（质量最低）。",
+        b2_pitfall,
+        [
+            "对比营收增速与行业均值（见可比公司表）",
+            "观察毛利率与营收增速方向是否一致（量价关系）",
+            "关注业绩预告/管理层指引中的增长驱动力表述",
+        ],
+    ))
+    lines.append("")
+    lines.append("**[扩展激活 · 业绩预告]** 数据不足：[业绩预告数据源未接入，需 Tushare forecast / WebSearch 补充]；"
+                 "若后续获取预告，应对比 B-② 驱动力是否发生转换。")
+    lines.append("")
+
+    # B-② 增长驱动力（状态行同源）
+    _b2_ok = ctx.rev_cur is not None and ctx.rev_prev is not None and ctx.rev_prev > 0
+    _b2_s = f"营收同比{ctx.rev_yoy:+.2f}%" if _b2_ok else "数据不足"
+    status_rows.append(("B-②", "增长驱动力", _b2_ok, _b2_s))
+
+    # B-③ 现金流模式
+    lines.append("#### B-③ 现金流模式")
+    if ctx.ocf_val is not None and ctx.np_v is not None and ctx.np_v > 0:
+        # C4: 覆盖比重推消除——ctx.cf_ratio_val 在 ctx 构造时已按同一公式计算
+        quality = "健康" if ctx.cf_ratio_val >= OCF_COVERAGE_GOOD else (
+            "偏弱" if ctx.cf_ratio_val >= OCF_COVERAGE_WEAK else "严重背离")
+        lines.append(f"经营现金流/净利润覆盖比：**{ctx.cf_ratio_val:.2f}**（{quality}）。")
+        if ctx.cf_ratio_val < OCF_COVERAGE_GOOD:
+            lines.append(f"⚠️ 现金流覆盖比 < {OCF_COVERAGE_GOOD}，建议扩展分析：收入确认质量、应收/存货变动（见 C-③ 交叉验证）。")
+    elif ctx.ocf_val is None:
+        lines.append("数据不足：[经营现金流字段不可得]")
+    elif ctx.np_v is None or ctx.np_v <= 0:
+        lines.append("数据不足：[净利润非正，无法计算覆盖比]")
+    lines.append("")
+    lines.append(_law10_hint(
+        "现金流是利润的「含金量」检验——利润好看但现金流持续弱于利润，"
+        "可能意味着应收膨胀、存货积压或收入确认激进（待补案例）。",
+        (
+            f"本次经营现金流/净利润 = {ctx.cf_ratio_val:.2f}，若仅看单期就认定利润质量差，"
+            "可能忽略季节性备货——应对比连续 4 期趋势。"
+            if ctx.cf_ratio_val is not None else
+            "本次现金流覆盖比不可得，不宜用净利润同比单独判断利润含金量。"
+        ),
+        [
+            "对比应收增速 vs 营收增速（CV-2）",
+            "对比存货增速 vs 营收增速",
+            "查看连续 4 期现金流覆盖比趋势方向",
+        ],
+    ))
+    if ctx.cf_ratio_val is not None and ctx.cf_ratio_val < OCF_COVERAGE_GOOD:
+        lines.append("")
+        lines.append("**[扩展激活 · 现金流覆盖 < 0.8]** 建议深度扫描收入确认质量："
+                     "核对应收账龄、收入确认政策变更、大客户集中度变化。")
+    lines.append("")
+
+    # B-③ 现金流模式（状态行同源：ctx.cf_ratio_val）
+    _b3_ok = ctx.ocf_val is not None and ctx.np_v is not None and ctx.np_v > 0
+    _b3_s = f"OCF/净利={ctx.cf_ratio_val:.2f}" if _b3_ok else "数据不足"
+    status_rows.append(("B-③", "现金流模式", _b3_ok, _b3_s))
+
+    return lines
+
+
 def _section_fundamentals_layered(
     dims: dict[str, dict], collection: dict, symbol: str, *, val_cache: dict | None = None,
 ) -> str:
@@ -2481,34 +3003,22 @@ def _section_fundamentals_layered(
         lines.append("")
 
     # C4 v0.2.7：块②全部预取与 C6 估值派生封装进 _FundamentalsContext；
-    # 以下局部别名供未拆分块（③-⑨）沿用，随 C4-2/3 块搬运逐个消除。
+    # 以下局部别名供未拆分块（⑦⑧⑨）沿用，随 C4-3 块搬运逐个消除。
     ctx = _FundamentalsContext(dims, collection, val_cache)
+    status_rows: list[tuple[str, str, bool, str]] = []
     fin_list = ctx.fin_list
     latest_fin = ctx.latest_fin
     prev_fin = ctx.prev_fin
-    first_fin = ctx.first_fin
-    roe_val = ctx.roe_val
-    gm_val = ctx.gm_val
     np_v = ctx.np_v
-    profit_dedt = ctx.profit_dedt
-    debt_ratio = ctx.debt_ratio
-    em_val = ctx.em_val
-    ocf_val = ctx.ocf_val
-    cf_ratio_val = ctx.cf_ratio_val
     rev_cur = ctx.rev_cur
     rev_prev = ctx.rev_prev
     rev_yoy = ctx.rev_yoy
-    ar_cur = ctx.ar_cur
-    ar_prev = ctx.ar_prev
-    ar_growth = ctx.ar_growth
-    inv_cur = ctx.inv_cur
     cagr = ctx.cagr
     cagr_years_span = ctx.cagr_years_span
     np_cagr = ctx.np_cagr
     np_cagr_years_span = ctx.np_cagr_years_span
     fin_rev_list = ctx.fin_rev_list
     np_cur = ctx.np_v
-    np_prev = _safe_num(ctx.prev_fin.get("net_profit"))
     ocf = ctx.ocf_val
     cf_ratio = ctx.cf_ratio_val
     vs = ctx.vs
@@ -2517,484 +3027,19 @@ def _section_fundamentals_layered(
     val_window_label = ctx.val_window_label
     industry_peers = ctx.industry_peers
     ms = ctx.ms
-    sw = ctx.sw
-    pmi_data = ctx.pmi_data
     pe_pct = ctx.pe_pct
     pb_pct_ext = ctx.pb_pct_ext
-    trigger_c = ctx.trigger_c
 
-    lines.append("\n### 核心判断摘要\n")
-
-    # 判断1: 盈利结构
-    # F0-8 修复：最新报告期非年报期时（如 Q1 累计 ROE 2.96%），判断改用工
-    # 最近年报 ROE（银行等季节性行业单季累计 ROE 不可与 TTM 门槛直接比较）；
-    # 展示仍用报告期原始值并标注口径。
-    roe_judge = roe_val
-    roe_label = "ROE(TTM)"
-    latest_ed = _norm_ed(str(latest_fin.get("end_date") or ""))
-    if latest_ed and not latest_ed.endswith("1231"):
-        roe_label = f"ROE（{latest_ed} 报告期累计）"
-        annual_rows = [r for r in fin_list if _norm_ed(str(r.get("end_date") or "")).endswith("1231")]
-        if annual_rows:
-            ann_roe = _safe_num(annual_rows[-1].get("roe"))
-            if ann_roe is not None:
-                roe_judge = ann_roe
-    lines.append("#### 盈利结构")
-    lines.append(f"[结论] {_conclude_profit_structure(roe_judge, gm_val, debt_ratio)}")
-    lines.append("")
-    lines.append("[事实]")
-    if roe_val is not None:
-        label_line = f"- {roe_label} = {_fmt_num(roe_val)}%"
-        if roe_judge is not None and roe_judge != roe_val:
-            label_line += f"（判断用最近年报 ROE {roe_judge:.2f}%）"
-        lines.append(label_line)
-    if gm_val is not None:
-        lines.append(f"- 毛利率 = {_fmt_num(gm_val)}%")
-    if debt_ratio is not None:
-        lines.append(f"- 资产负债率 = {_fmt_num(debt_ratio)}%")
-    if profit_dedt is not None and np_v is not None and np_v > 0:
-        c4_ratio = profit_dedt / np_v
-        lines.append(f"- 扣非/净利润 = {c4_ratio:.2f}")
-    lines.append("")
-    lines.append("[分析]")
-    analysis_parts = []
-    if roe_val is not None and gm_val is not None:
-        if roe_judge >= 15 and gm_val >= 40:
-            analysis_parts.append("高 ROE × 高毛利率组合，盈利模式具备结构优势")
-        elif roe_judge >= 15 and gm_val < 20:
-            analysis_parts.append("ROE 虽然较高但毛利率偏低，盈利依赖高周转或高杠杆驱动，需警惕可持续性")
-        elif roe_judge < 10 and gm_val >= 40:
-            analysis_parts.append("高毛利率但低 ROE，可能费用率偏高或资产周转效率不足")
-        else:
-            analysis_parts.append(f"ROE={roe_judge:.1f}%（判断口径）、毛利率={gm_val:.1f}%，盈利模式处于行业常见区间，需持续跟踪变化趋势")
-    if debt_ratio is not None and debt_ratio > 70:
-        analysis_parts.append("资产负债率偏高，需关注偿债风险与财务费用对利润的侵蚀")
-    if profit_dedt is not None and np_v is not None and np_v > 0:
-        c4_check = profit_dedt / np_v
-        if c4_check < 0.7:
-            analysis_parts.append("非经常性损益占比过大，净利润质量存疑")
-    if not analysis_parts:
-        analysis_parts.append("数据有限，无法进行充分的分析推理")
-    lines.append("；".join(analysis_parts))
-    lines.append("")
-    e1_items = [roe_val is not None, gm_val is not None, debt_ratio is not None,
-                profit_dedt is not None and np_v is not None and np_v > 0]
-    lines.append(f"[证据强度: {_evidence_strength_label(e1_items)}]")
-    lines.append("")
-
-    # 判断2: 现金流质量
-    lines.append("#### 现金流质量")
-    lines.append(f"[结论] {_conclude_cash_flow_quality(cf_ratio_val, ar_growth, rev_yoy, ocf_val, np_v=np_v)}")
-    lines.append("")
-    lines.append("[事实]")
-    if ocf_val is not None:
-        lines.append(f"- 经营现金流 = {_fmt_v2(ocf_val)}")
-    if np_v is not None:
-        lines.append(f"- 净利润 = {_fmt_v2(np_v)}")
-    if cf_ratio_val is not None:
-        lines.append(f"- 经营现金流/净利润 = {cf_ratio_val:.2f}")
-    if ar_growth is not None and rev_yoy is not None:
-        lines.append(f"- 应收增速 vs 营收增速：{ar_growth:+.2f}% vs {rev_yoy:+.2f}%")
-    lines.append("")
-    lines.append("[分析]")
-    cf_analysis = []
-    if cf_ratio_val is not None:
-        if cf_ratio_val >= OCF_COVERAGE_EXCELLENT:
-            cf_analysis.append("经营现金流充分覆盖净利润，利润含金量高")
-        elif cf_ratio_val >= OCF_COVERAGE_GOOD:
-            cf_analysis.append("经营现金流基本覆盖净利润，利润质量良好")
-        else:
-            cf_analysis.append("经营现金流覆盖不足，利润质量存疑，需关注应收与存货变化")
-    if ar_growth is not None and rev_yoy is not None:
-        if ar_growth > rev_yoy * 1.5:
-            cf_analysis.append(f"应收增速远超营收增速，存在赊销膨胀或回款恶化的风险")
-        elif ar_growth > rev_yoy:
-            cf_analysis.append("应收增速略高于营收增速，需关注回款节奏变化")
-        else:
-            cf_analysis.append("应收增速低于营收增速，收入增长质量较高")
-    if not cf_analysis:
-        cf_analysis.append("数据有限，无法进行充分的现金流分析")
-    lines.append("；".join(cf_analysis))
-    lines.append("")
-    e2_items = [ocf_val is not None, np_v is not None,
-                ar_growth is not None and rev_yoy is not None]
-    lines.append(f"[证据强度: {_evidence_strength_label(e2_items)}]")
-    lines.append("")
-
-    # 判断3: 资产负债与扩产路径
-    lines.append("#### 资产负债与扩产路径")
-    conclusion3 = _conclude_asset_liability(debt_ratio, em_val, ar_cur, inv_cur, rev_cur)
-    lines.append(f"[结论] {conclusion3}")
-    lines.append("")
-    lines.append("[事实]")
-    if debt_ratio is not None:
-        lines.append(f"- 资产负债率 = {debt_ratio:.2f}%")
-    if em_val is not None:
-        lines.append(f"- 权益乘数 = {em_val:.2f}")
-    if ar_cur is not None and inv_cur is not None and rev_cur is not None and rev_cur > 0:
-        wc_ratio = (ar_cur + inv_cur) / rev_cur * 100
-        lines.append(f"- (应收+存货)/营收 = {wc_ratio:.1f}%")
-    lines.append("")
-    lines.append("[分析]")
-    al_analysis = []
-    if debt_ratio is not None:
-        if debt_ratio >= 70:
-            al_analysis.append("资产负债率偏高，扩产主要依赖负债融资，财务风险较大")
-        elif debt_ratio >= 50:
-            al_analysis.append("资产负债率适中，扩产可在负债与权益间灵活选择")
-        else:
-            al_analysis.append("资产负债率较低，扩产空间充足，可使用合理杠杆加速发展")
-    if em_val is not None:
-        if em_val > 3:
-            al_analysis.append("权益乘数较高，扩产路径可能受限于融资能力")
-        elif em_val < 1.5:
-            al_analysis.append("权益乘数偏低，扩产路径可适度加杠杆")
-    if ar_cur is not None and inv_cur is not None and rev_cur is not None and rev_cur > 0:
-        wc_ratio_val = (ar_cur + inv_cur) / rev_cur
-        if wc_ratio_val > 0.5:
-            al_analysis.append("运营资金占用偏高，扩产时需关注现金流压力")
-        else:
-            al_analysis.append("运营资金占用较低，扩产的现金流压力较小")
-    if not al_analysis:
-        al_analysis.append("数据有限，无法进行充分的资产负债分析")
-    lines.append("；".join(al_analysis))
-    lines.append("")
-    e3_items = [debt_ratio is not None, em_val is not None,
-                ar_cur is not None and rev_cur is not None]
-    lines.append(f"[证据强度: {_evidence_strength_label(e3_items)}]")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.extend(_financial_panorama_table(fin_list))
+    # =================================================================
+    # 核心判断摘要（P0-3 升级）
+    # =================================================================
+    lines.extend(_core_judgment_summary(ctx))
 
     # =================================================================
     # 4a. 行业位置（3 题）
     # =================================================================
-    lines.append("### 4a. 行业位置")
-    lines.append("")
-
-    # A-① 行业景气度
-    lines.append("#### A-① 行业景气度")
-    if sw and sw.get("return_20d_pct") is not None:
-        lines.append(
-            f"申万行业指数 {sw.get('index_code', '?')}（{sw.get('industry', '?')}）"
-            f"近 20 日涨跌：**{sw['return_20d_pct']:+.2f}%**。"
-        )
-        rel = sw.get("relative_vs_benchmark_pct")
-        if rel is not None:
-            direction = "跑赢" if rel > 0 else "跑输"
-            lines.append(f"相对沪深 300：{rel:+.2f}%（{direction}大盘）。")
-        svi = sw.get("stock_vs_industry_pct")
-        if svi is not None:
-            direction = "跑赢" if svi > 0 else "跑输"
-            lines.append(f"个股相对行业：{svi:+.2f}%（{direction}行业板块）。")
-    else:
-        lines.append("数据不足：[申万行业指数不可得，无法判断行业景气度]")
-    if pmi_data.get("manufacturing_pmi") is not None:
-        lines.append(
-            f"制造业 PMI：**{pmi_data['manufacturing_pmi']:.1f}**（{pmi_data.get('month', '?')}，"
-            f"{pmi_data.get('signal', '?')}）[来源: {pmi_data.get('source', 'akshare')}]"
-        )
-    else:
-        lines.append("PMI/产量：数据不足：[宏观 PMI 数据源不可得；产量分项需行业数据库或 WebSearch 补充]")
-    lines.append("")
-    sw_ret = sw.get("return_20d_pct")
-    a1_pitfall = (
-        f"本次申万板块近 20 日涨跌为 {sw_ret:+.2f}%，若直接等同于公司经营改善，"
-        f"可能忽略板块内部分化——需核对本公司营收增速是否与板块同向。"
-        if sw_ret is not None else
-        "申万行业指数本次不可得，若仅凭个股涨跌判断行业景气，可能把公司特异性波动误判为行业趋势。"
-    )
-    lines.append(_law10_hint(
-        "行业景气度决定个股定价的贝塔部分，板块同向运动时个股 Alpha 的置信度更高。",
-        a1_pitfall,
-        [
-            "对比板块内市值相近公司涨跌幅离散度",
-            "查近期行业政策/供需公告（WebSearch）验证板块方向持续性",
-            "观察板块成交量是否放大（放量趋势 vs 缩量反弹）",
-        ],
-    ))
-    if trigger_c:
-        lines.append("")
-        lines.append("**[扩展激活 · 触发源 C]** 行业结构驱动：建议补充竞争格局变化分析——"
-                     "板块相对大盘偏离显著时，需区分行业景气 vs 估值重估 vs 政策预期。")
-        lines.append("**[扩展激活 · 行业政策]** 近 30 日行业政策/监管事件需 WebSearch 补充，"
-                     "并追溯政策传导至公司收入/成本的具体路径。")
-    lines.append("")
-
-    # A-② 竞争位置
-    lines.append("#### A-② 竞争位置")
-    basic = _get_dim_data(dims, "basic_info")
-    industry_name = ""
-    if isinstance(basic, dict):
-        industry_name = basic.get("industry", "") or basic.get("行业", "") or ""
-    rev = _safe_num(latest_fin.get("revenue"))
-    ry_pct = industry_peers.get("rankings", {}).get("revenue_yoy_pct")
-    ry_rank = industry_peers.get("rankings", {}).get("revenue_yoy_rank")
-    ry_total = industry_peers.get("rankings", {}).get("revenue_yoy_total")
-    target_ry = (industry_peers.get("target") or {}).get("revenue_yoy")
-    peer_source = industry_peers.get("peer_source")
-    if peer_source == "stock_basic_fallback":
-        warn = industry_peers.get("warning") or "非申万 L3 成分股"
-        lines.append(f"⚠️ {warn}")
-    if rev is not None and industry_peers.get("sufficient"):
-        lines.append(f"所属行业：{industry_name or industry_peers.get('industry_name') or '未知'}（申万分类）。")
-        if ry_pct is not None and ry_rank and ry_total:
-            pos = _competitive_position_label(ry_pct)
-            ry_s = f"{target_ry:+.2f}%" if target_ry is not None else "—"
-            lines.append(
-                f"竞争位置参考：**{pos}**（营收增速 {ry_s}，同行排名 {ry_rank}/{ry_total}，分位 {ry_pct:.1f}%）。"
-            )
-        else:
-            lines.append("数据不足：[同行营收增速排名字段不完整]")
-    else:
-        if industry_name:
-            lines.append(f"所属行业：{industry_name}。")
-        if peer_source == "stock_basic_fallback":
-            lines.append("数据不足：[同行池非申万 L3 成分，分位排名已降级]")
-        else:
-            err = industry_peers.get("error", "缺少同行营收对比数据")
-            lines.append(f"数据不足：[{err}]")
-    lines.append("")
-    a2_pitfall = (
-        f"本次营收增速同行分位为 {ry_pct:.1f}%（排名 {ry_rank}/{ry_total}），"
-        f"若据此直接认定竞争壁垒，可能忽略毛利率与 ROE 的转化效率。"
-        if ry_pct is not None and ry_rank and ry_total else
-        f"本次仅有行业名「{industry_name or '?'}」、缺少同行增速对比，"
-        "不宜仅凭营收规模推断龙头地位。"
-    )
-    lines.append(_law10_hint(
-        "竞争位置决定定价溢价/折价的合理性——龙头享有流动性溢价，追赶者需证明成长性。",
-        a2_pitfall,
-        [
-            "对比毛利率与行业均值差异（见 A-③）",
-            "查公司市占率数据（年报/行业报告）",
-            "关注近 3 年竞争位置是上升还是下降趋势",
-        ],
-    ))
-    lines.append("")
-
-    # A-③ 毛利率 vs 行业中位数
-    lines.append("#### A-③ 毛利率 vs 行业中位数")
-    # C5 v0.2.7: 字段优先级统一 GROSS_MARGIN_FIELDS（grossprofit_margin 真名优先）；
-    # 手工逐行回退改为 _coalesce_gross_margin（_get_safe 逐行回退取最新非 None，
-    # 当前数据两 key 恒同写，语义等价）
-    gross_margin = _coalesce_gross_margin(fin_list)
-    if gross_margin is not None:
-        lines.append(f"最新报告期毛利率：**{gross_margin:.2f}%**。")
-        peer_gms = [
-            _coalesce_gross_margin([p])
-            for p in industry_peers.get("peers", [])
-        ]
-        peer_gms = [g for g in peer_gms if g is not None]
-        if len(peer_gms) >= 3:
-            from lib.valuation import median_of
-            ind_med = median_of(peer_gms)
-            diff = gross_margin - ind_med
-            lines.append(f"同行毛利率中位数：**{ind_med:.2f}%**（样本 {len(peer_gms)} 家），差异 **{diff:+.2f}pp**。")
-        else:
-            lines.append("数据不足：[同行毛利率样本不足 3 家，需 income 表批量采集]")
-    else:
-        lines.append("数据不足：[毛利率字段不可得；需 fina_indicator.grossprofit_margin 或 income 表]")
-    lines.append("")
-    a3_pitfall = (
-        f"本次毛利率 {gross_margin:.2f}%，若仅因高于行业均值就认定定价权，"
-        "可能忽略销售费用率是否同步偏高（高毛利低净利模式）。"
-        if gross_margin is not None else
-        "本次毛利率不可得，不宜用 ROE 或营收增速间接替代毛利率做定价权判断。"
-    )
-    lines.append(_law10_hint(
-        "毛利率是定价权的第一道防线——高毛利率意味着客户对价格不敏感或产品有差异化壁垒。",
-        a3_pitfall,
-        [
-            "对比同行业公司毛利率离散度（若可得）",
-            "观察毛利率近 3 年趋势：下降可能暗示竞争加剧或成本上升",
-            "结合应收/现金流验证收入质量（见 C-③）",
-        ],
-    ))
-    lines.append("")
-
-    # =================================================================
-    # 4b. 商业质量（3 题）
-    # =================================================================
-    lines.append("### 4b. 商业质量")
-    lines.append("")
-
-    # B-① 护城河来源
-    lines.append("#### B-① 护城河来源")
-    roe_now = _safe_num(latest_fin.get("roe"))
-    # F0-8 修复：ROE 趋势用年报行（1231）对比，避免季度累计 ROE 混比
-    # （招行 12.03% 全年 vs 2.96% Q1 被误判为"侵蚀"）。锚点计算收敛到
-    # _roe_trend_anchors（review 二轮补：可解析守卫 + 可单测）。
-    roe_first, roe_ann_last, n_annual_rows = _roe_trend_anchors(fin_list, latest_fin)
-    if roe_now is not None:
-        lines.append(f"当前 ROE：**{roe_now:.2f}%**（报告期累计口径，最新年报 {roe_ann_last:.2f}%）" if roe_ann_last is not None else f"当前 ROE：**{roe_now:.2f}%**。")
-        if roe_first is not None and roe_ann_last is not None:
-            trend = "强化" if roe_ann_last > roe_first + 2 else (
-                "侵蚀" if roe_ann_last < roe_first - 2 else "稳定")
-            lines.append(f"近 {n_annual_rows} 个年报 ROE 趋势：{roe_first:.2f}% → {roe_ann_last:.2f}%（{trend}）。")
-        elif roe_first is not None and len(fin_list) >= 4:
-            trend = "强化" if roe_now > roe_first + 2 else (
-                "侵蚀" if roe_now < roe_first - 2 else "稳定")
-            lines.append(f"近 {len(fin_list)} 期 ROE 趋势：{roe_first:.2f}% → {roe_now:.2f}%（{trend}）。")
-        lines.append("")
-        lines.append("护城河定性判断需结合以下维度（数据引擎提供定量基础，AI 做定性综合）：")
-        lines.append(f"- **利润转化效率：** ROE={roe_now:.2f}%、扣非/净利润比例见 C-④")
-        lines.append("- **现金流健康度：** 经营现金流/净利润覆盖比见 C-③")
-        lines.append("- **收入可持续性：** 近 3 年营收 CAGR 见 C-①")
-        lines.append("- **资产回报效率：** 杜邦拆解见 C-②")
-    else:
-        lines.append("数据不足：[缺少 ROE 数据，无法评估护城河]")
-    lines.append("")
-    _hint_first = roe_first if roe_ann_last is not None else None
-    _hint_now = roe_ann_last if roe_ann_last is not None else roe_now
-    lines.append(_law10_hint(
-        "护城河是长期估值的锚——没有护城河的高增长公司，估值收缩速度可能快于预期。",
-        (
-            f"本次 ROE {_hint_now:.2f}%"
-            + (f"（{_hint_first:.2f}% → {_hint_now:.2f}%，年报口径）" if _hint_first is not None else "")
-            + "，若直接等同于强护城河，可能忽略高杠杆或周期高点的一次性贡献（见 C-② 杜邦）。"
-            if _hint_now is not None else
-            "本次 ROE 不可得，不宜用营收增速或 PE 分位间接替代护城河判断。"
-        ),
-        [
-            "杜邦拆解 ROE 来源（见 C-②）",
-            "对比同行 ROE 中位数（见可比公司表）",
-            "查公司年报中「核心竞争力」部分与实际财务数据是否一致",
-        ],
-    ))
-    lines.append("")
-
-    # A-4: 商业模式画布（v0.1.8 Step 6，紧接 B-① 护城河来源之后）
-    lines.append(_section_business_model_canvas(
-        fin_list,
-        dims.get("holder_changes") or {},
-        collection.get("chain_context") or {},
-    ))
-
-    # A-5: 管理层完整评估（v0.1.8 Step 6，与商业模式画布并列在 4b 商业质量段落）
-    lines.append(_section_management_assessment(
-        collection.get("events"),
-        dims.get("holder_changes") or {},
-        fin_list,
-    ))
-
-    # B-② 增长驱动力
-    lines.append("#### B-② 增长驱动力")
-    if rev_cur is not None and rev_prev is not None and rev_prev > 0:
-        lines.append(f"最近一期营收同比：**{rev_yoy:+.2f}%**。")
-    elif rev_cur is not None:
-        # F0-2: 无同报告期上年基期 → 同比不可比，禁止跨期混比
-        lines.append("最近一期营收同比：**不可比**（无同报告期上年基期，跨期混比已禁用）。")
-    if np_cur is not None and np_prev is not None and np_prev > 0:
-        np_yoy = (np_cur - np_prev) / np_prev * 100
-        lines.append(f"最近一期净利润同比：**{np_yoy:+.2f}%**。")
-    elif np_cur is not None:
-        lines.append("最近一期净利润同比：**不可比**（无同报告期上年基期，跨期混比已禁用）。")
-    if not (rev_cur and rev_prev) and not (np_cur and np_prev):
-        lines.append("数据不足：[缺少两期以上可比营收/净利润数据]")
-    elif cagr is not None and cagr_years_span is not None:
-        lines.append(
-            f"近 {cagr_years_span:.0f} 年同报告期营收 CAGR：**{cagr:+.2f}%**（多年增长趋势锚点）。"
-        )
-        if rev_yoy is not None:
-            if rev_yoy > cagr + 3:
-                sustain = "加速，驱动力仍在强化"
-            elif rev_yoy < cagr - 3:
-                sustain = "减速，需关注驱动力是否切换"
-            else:
-                sustain = "与多年趋势基本一致，驱动力仍在持续"
-            lines.append(
-                f"驱动力持续性：**{sustain}**（最近同比 {rev_yoy:+.2f}% vs CAGR {cagr:+.2f}%）。"
-            )
-        gm_first = _coalesce_gross_margin([first_fin])
-        gm_latest = gross_margin
-        if gm_latest is None:
-            gm_latest = _coalesce_gross_margin([latest_fin])
-        if gm_first is not None and gm_latest is not None:
-            gm_chg = gm_latest - gm_first
-            if gm_chg > 1 and (cagr or 0) > 0:
-                lines.append(
-                    f"价驱动信号：毛利率 {gm_first:.2f}% → {gm_latest:.2f}%（{gm_chg:+.2f}pp），"
-                    "收入增长可能含定价/结构升级贡献。"
-                )
-            elif abs(gm_chg) <= 1 and (cagr or 0) > 0:
-                lines.append(
-                    f"量驱动信号：毛利率基本稳定（{gm_first:.2f}% → {gm_latest:.2f}%），"
-                    "增长更多来自规模扩张或份额提升。"
-                )
-        roe_first_v = _safe_num(first_fin.get("roe"))
-        roe_latest_v = _safe_num(latest_fin.get("roe"))
-        if roe_first_v is not None and roe_latest_v is not None:
-            if roe_latest_v > roe_first_v + 3 and (cagr or 0) > 0:
-                lines.append(
-                    f"杠杆驱动警示：ROE {roe_first_v:.2f}% → {roe_latest_v:.2f}% 升幅较大，"
-                    "需结合 C-② 杜邦验证是否来自权益乘数。"
-                )
-    lines.append("")
-    lines.append("增长驱动力来源需结合以下判断：")
-    lines.append("- **量驱动：** 收入增速 > 行业均值 → 份额扩张（收入/应收见 C-③）")
-    lines.append("- **价驱动：** 毛利率扩张 + 收入增长 → 定价权提升（毛利率见 A-③）")
-    lines.append("- **杠杆驱动：** ROE 提升来自权益乘数 → 不可持续（杜邦见 C-②）")
-    lines.append("")
-    b2_pitfall = (
-        f"本次营收同比 {rev_yoy:+.2f}%，若等同于价值创造，可能忽略资本开支/ROIC——"
-        "低回报扩张反而摧毁股东价值。"
-        if rev_yoy is not None else
-        "本次缺少两期可比营收，不宜用单季利润波动推断增长驱动力类型。"
-    )
-    lines.append(_law10_hint(
-        "增长驱动力类型决定估值倍数——量价齐升（质量最高）vs 纯杠杆扩张（质量最低）。",
-        b2_pitfall,
-        [
-            "对比营收增速与行业均值（见可比公司表）",
-            "观察毛利率与营收增速方向是否一致（量价关系）",
-            "关注业绩预告/管理层指引中的增长驱动力表述",
-        ],
-    ))
-    lines.append("")
-    lines.append("**[扩展激活 · 业绩预告]** 数据不足：[业绩预告数据源未接入，需 Tushare forecast / WebSearch 补充]；"
-                 "若后续获取预告，应对比 B-② 驱动力是否发生转换。")
-    lines.append("")
-
-    # B-③ 现金流模式
-    lines.append("#### B-③ 现金流模式")
-    if ocf is not None and np_v is not None and np_v > 0:
-        cf_ratio = ocf / np_v
-        quality = "健康" if cf_ratio >= OCF_COVERAGE_GOOD else (
-            "偏弱" if cf_ratio >= OCF_COVERAGE_WEAK else "严重背离")
-        lines.append(f"经营现金流/净利润覆盖比：**{cf_ratio:.2f}**（{quality}）。")
-        if cf_ratio < OCF_COVERAGE_GOOD:
-            lines.append(f"⚠️ 现金流覆盖比 < {OCF_COVERAGE_GOOD}，建议扩展分析：收入确认质量、应收/存货变动（见 C-③ 交叉验证）。")
-    elif ocf is None:
-        lines.append("数据不足：[经营现金流字段不可得]")
-    elif np_v is None or np_v <= 0:
-        lines.append("数据不足：[净利润非正，无法计算覆盖比]")
-    lines.append("")
-    lines.append(_law10_hint(
-        "现金流是利润的「含金量」检验——利润好看但现金流持续弱于利润，"
-        "可能意味着应收膨胀、存货积压或收入确认激进（待补案例）。",
-        (
-            f"本次经营现金流/净利润 = {cf_ratio:.2f}，若仅看单期就认定利润质量差，"
-            "可能忽略季节性备货——应对比连续 4 期趋势。"
-            if cf_ratio is not None else
-            "本次现金流覆盖比不可得，不宜用净利润同比单独判断利润含金量。"
-        ),
-        [
-            "对比应收增速 vs 营收增速（CV-2）",
-            "对比存货增速 vs 营收增速",
-            "查看连续 4 期现金流覆盖比趋势方向",
-        ],
-    ))
-    if cf_ratio is not None and cf_ratio < OCF_COVERAGE_GOOD:
-        lines.append("")
-        lines.append("**[扩展激活 · 现金流覆盖 < 0.8]** 建议深度扫描收入确认质量："
-                     "核对应收账龄、收入确认政策变更、大客户集中度变化。")
-    lines.append("")
-
-    # =================================================================
-    # 4c. 财务质量（4 题）
-    # =================================================================
+    lines.extend(_section_4a_industry_position(dims, ctx, status_rows))
+    lines.extend(_section_4b_business_quality(dims, collection, ctx, status_rows))
     lines.append("### 4c. 财务质量")
     lines.append("")
 
@@ -3470,45 +3515,9 @@ def _section_fundamentals_layered(
     # =================================================================
     # 12题回答状态表（P0-3 升级）
     # =================================================================
-    # C4-1 去重：状态行数值全部引用 ctx/共享值（布尔表达式原样保留）；
-    # A-③ 由「仅最新行 _coalesce_gross_margin([latest_fin])」改为随正文的
-    # ctx.gross_margin walk-back（清单任务 4 指明要修的 bug）。
-    # status_rows 由 wrapper 持有，C4-2/3 随各题渲染处就地 append 迁移。
-    status_rows: list[tuple[str, str, bool, str]] = []
-
-    # A-① 行业景气度
-    _a1_ok = bool(ctx.sw and ctx.sw.get("return_20d_pct") is not None)
-    _a1_s = f"申万板块近20日{ctx.sw['return_20d_pct']:+.2f}%" if _a1_ok else "数据不足"
-    status_rows.append(("A-①", "行业景气度", _a1_ok, _a1_s))
-
-    # A-② 竞争位置
-    _a2_ok = bool(ctx.latest_fin.get("revenue") is not None and ctx.industry_peers.get("sufficient")
-                  and ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct") is not None)
-    _a2_ry_pct = ctx.industry_peers.get("rankings", {}).get("revenue_yoy_pct")
-    _a2_s = f"营收增速分位{_a2_ry_pct:.1f}%" if _a2_ok else "数据不足"
-    status_rows.append(("A-②", "竞争位置", _a2_ok, _a2_s))
-
-    # A-③ 毛利率 vs 行业中位数
-    _a3_gm = ctx.gross_margin
-    _a3_ok = _a3_gm is not None
-    _a3_s = f"毛利率{_a3_gm:.2f}%" if _a3_ok else "数据不足"
-    status_rows.append(("A-③", "毛利率 vs 行业中位数", _a3_ok, _a3_s))
-
-    # B-① 护城河来源
-    _b1_roe = ctx.roe_latest
-    _b1_ok = _b1_roe is not None
-    _b1_s = f"ROE={_b1_roe:.2f}%" if _b1_ok else "数据不足"
-    status_rows.append(("B-①", "护城河来源", _b1_ok, _b1_s))
-
-    # B-② 增长驱动力
-    _b2_ok = ctx.rev_cur is not None and ctx.rev_prev is not None and ctx.rev_prev > 0
-    _b2_s = f"营收同比{ctx.rev_yoy:+.2f}%" if _b2_ok else "数据不足"
-    status_rows.append(("B-②", "增长驱动力", _b2_ok, _b2_s))
-
-    # B-③ 现金流模式（与核心判断摘要一致：回溯 ocf_val → ctx.cf_ratio_val）
-    _b3_ok = ctx.ocf_val is not None and ctx.np_v is not None and ctx.np_v > 0
-    _b3_s = f"OCF/净利={ctx.cf_ratio_val:.2f}" if _b3_ok else "数据不足"
-    status_rows.append(("B-③", "现金流模式", _b3_ok, _b3_s))
+    # C4-1/2 去重：A/B 状态行已随 4a/4b 函数就地 append（各题渲染处）；
+    # 此处仅保留 C/D 行（C4-3 随 4c/4d 函数迁入）。状态行数值全部引用
+    # ctx/共享值，A-③ 为随正文的 ctx.gross_margin walk-back（清单任务 4 bug）。
 
     # C-① 近 3 年营收 CAGR
     _c1_ok = len(ctx.fin_rev_list) >= 2 and ctx.cagr is not None
