@@ -59,6 +59,32 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "etf", "china-stock", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-pattern-scan",
+      "description": "A股底部形态扫描。LMW 双底/三角形底全市场检出，附数据窥探防护（RC p）。研究信号，非决策工具。",
+      "version": "{{ VERSION }}",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "stock-analysis", "china-stock", "pattern-scan", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-pulse",
+      "description": "A股市场情绪脉搏。杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。",
+      "version": "{{ VERSION }}",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "market-sentiment", "china-stock", "a-share", "claude-code", "learning"]
     }
   ]
 }

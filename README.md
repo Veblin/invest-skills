@@ -90,6 +90,7 @@ flowchart TB
 |:---|:---|
 | Claude Code | `/plugin marketplace add Veblin/invest-skills`，随后使用相应 `/invest-a-*` 入口 |
 | Agent Skills 兼容平台 | `npx skills add Veblin/invest-skills` |
+| DSH / Qoder / Trae / Kimi CLI | `git clone` 后即可用——仓库内置 `.agents/skills/` 下 6 个 symlink，详见 [CONFIGURATION.md](CONFIGURATION.md) |
 | 本地命令行 | `git clone https://github.com/Veblin/invest-skills.git && cd invest-skills && uv sync`，然后运行 `uv run python skills/invest-a-stock/scripts/invest.py diagnose` |
 | Hermes / Gemini CLI | 通过对应 marketplace 或 extension 安装；兼容包已就绪 |
 
