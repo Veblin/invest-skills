@@ -640,8 +640,12 @@ def format_qc_result(result: QCResult, *, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _print_summary(results: list[QCResult], file=sys.stdout) -> int:
+def _print_summary(results: list[QCResult], file=None) -> int:
     """打印多个结果，返回退出码（0=PASS 1=WARN 2=FAIL）。"""
+    if file is None:
+        # def-time file=sys.stdout 会在 capsys 捕获期绑定临时流（lint.py 同族
+        # 缺陷，2026-08-23 code-review #14）——调用时解析避免写已关闭流
+        file = sys.stdout
     for r in results:
         print(format_qc_result(r), file=file)
     worst = max((r.overall for r in results), default="PASS",

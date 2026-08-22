@@ -46,7 +46,7 @@ if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from lib.env import ensure_env_loaded
-from lib.nums import safe_float
+from lib.nums import ONE_PER_WAN, ONE_PER_YI, parse_shares_wan, safe_float
 from lib.financials import normalize_end_date
 from lib.shared_codes import symbol_to_ts_code
 from lib.shared_dates import shanghai_days_ago, shanghai_today
@@ -109,7 +109,7 @@ def get_quote_ak(symbol: str) -> dict[str, Any]:
         return {
             "price": safe_float(r.get("最新价")),
             "change_pct": safe_float(r.get("涨跌幅")),
-            "total_mv_yi": mv_raw / 1e8 if mv_raw is not None else None,  # akshare 总市值单位: 元 → 亿元
+            "total_mv_yi": mv_raw / ONE_PER_YI if mv_raw is not None else None,  # akshare 总市值单位: 元 → 亿元
             "pe_dynamic": safe_float(r.get("市盈率-动态")),
             "pb": safe_float(r.get("市净率")),
             "source": "akshare.stock_zh_a_spot_em",
@@ -159,27 +159,10 @@ def get_total_shares_ak(symbol: str) -> float | None:
                 raw = row.get("value")
                 if raw is None:
                     continue
-                return _parse_shares(raw)
+                return parse_shares_wan(raw)
         return None
     except Exception:
         logger.warning("akshare 总股本获取失败", exc_info=True)
-        return None
-
-
-def _parse_shares(raw: str | float | int) -> float | None:
-    """解析总股本文本 → 万股。"""
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    s = str(raw).replace(",", "").strip()
-    mult = 1.0
-    if "亿" in s:
-        mult = 1e4
-        s = s.replace("亿", "")
-    elif "万" in s:
-        s = s.replace("万", "")
-    try:
-        return float(s) * mult
-    except ValueError:
         return None
 
 
@@ -436,7 +419,7 @@ def calc_ev_ebitda(
         debt = (st_loan or 0.0) + (lt_loan or 0.0) + (bond_payable or 0.0)
     ev = None
     if total_mv_yi is not None and cash is not None:
-        ev = total_mv_yi * 1e8 - (cash or 0.0)
+        ev = total_mv_yi * ONE_PER_YI -(cash or 0.0)
         if debt is not None:
             ev += debt
     ratio = None
@@ -472,11 +455,11 @@ def calc_ev_ebitda(
         "exempt": False,
         "bridge": {
             "mv_yi": round(total_mv_yi, 2) if total_mv_yi is not None else None,
-            "cash_yi": round(cash / 1e8, 2) if cash is not None else None,
-            "interest_debt_yi": round(debt / 1e8, 2) if debt is not None else None,
-            "ev_yi": round(ev / 1e8, 2) if ev is not None else None,
+            "cash_yi": round(cash / ONE_PER_YI, 2) if cash is not None else None,
+            "interest_debt_yi": round(debt / ONE_PER_YI, 2) if debt is not None else None,
+            "ev_yi": round(ev / ONE_PER_YI, 2) if ev is not None else None,
         },
-        "ebitda_yi": round(ebitda / 1e8, 2) if ebitda is not None else None,
+        "ebitda_yi": round(ebitda / ONE_PER_YI, 2) if ebitda is not None else None,
         "ebitda_period": ebitda_period,
         "ev_ebitda": ratio,
         "debt_available": debt is not None,
@@ -713,11 +696,11 @@ def calc_ttm_eps(fin_rows: list[dict], total_shares_wan: float | None = None) ->
     # 净利润绝对值
     net_profit_ttm = None
     if total_shares_wan:
-        net_profit_ttm = ttm_eps * total_shares_wan * 1e4
+        net_profit_ttm = ttm_eps * total_shares_wan * ONE_PER_WAN
 
     return {
         "ttm_eps": round(ttm_eps, 4),
-        "ttm_net_profit_yi": round(net_profit_ttm / 1e8, 2) if net_profit_ttm else None,
+        "ttm_net_profit_yi": round(net_profit_ttm / ONE_PER_YI, 2) if net_profit_ttm else None,
         "quarterly_eps": last4,
         "n_quarters": len(last4),
         "stale": stale,
@@ -1333,10 +1316,10 @@ def run_valuation(
         result.total_mv_yi = quote.get("total_mv_yi")
         # 如果 akshare 拿不到总股本，但 quote 有 市值/价格，反推总股本
         if shares_wan is None and price and result.total_mv_yi and result.total_mv_yi > 0:
-            shares_wan = round(result.total_mv_yi * 1e8 / (price * 1e4), 2)
+            shares_wan = round(result.total_mv_yi * ONE_PER_YI /(price * ONE_PER_WAN), 2)
             result.total_shares_wan = shares_wan
     elif price and shares_wan:
-        result.total_mv_yi = round(price * shares_wan * 1e4 / 1e8, 2)
+        result.total_mv_yi = round(price * shares_wan * ONE_PER_WAN / ONE_PER_YI, 2)
 
     if result.total_shares_wan is None:
         result.errors.append("总股本获取失败（akshare 不可用且行情无市值），部分计算将跳过")
@@ -1439,9 +1422,11 @@ def run_valuation(
             if result.total_mv_yi and band:
                 block["mv_vs_steady"] = {
                     "total_mv_yi": result.total_mv_yi,
-                    "steady_mv_low_yi": round(band["low"] / 1e8, 2),
-                    "steady_mv_mid_yi": round(band["mid"] / 1e8, 2),
-                    "steady_mv_high_yi": round(band["high"] / 1e8, 2),
+                    # 存储侧保留原精度：round(…, 2) 在带 <0.005 亿元时塌为 0.0，
+                    # 损坏落盘字段且渲染侧误报「数值不可得」；渲染侧自行舍入（review #8）
+                    "steady_mv_low_yi": band["low"] / ONE_PER_YI,
+                    "steady_mv_mid_yi": band["mid"] / ONE_PER_YI,
+                    "steady_mv_high_yi": band["high"] / ONE_PER_YI,
                 }
         result.steady = block
 
@@ -1471,7 +1456,7 @@ def run_valuation(
         ste = (result.steady or {}).get("steady")
         if (ev_block.get("available") and ste and ste.get("available")
                 and result.total_mv_yi and ste.get("steady_earnings", 0) > 0):
-            payback = result.total_mv_yi / (ste["steady_earnings"] / 1e8)
+            payback = result.total_mv_yi / (ste["steady_earnings"] / ONE_PER_YI)
             ev_block["takeover_payback_years"] = round(payback, 1)
             ev_block["takeover_note"] = (
                 "研究问题（非结论）：在稳态盈利假设下当前市值的回本年限；"
@@ -1812,29 +1797,35 @@ def _format_steady_block(steady: dict) -> str:
     steady_earnings = ste["steady_earnings"]
     if steady_earnings <= 0:
         lines.append(
-            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
-            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元，"
+            f"  稳态盈利: {steady_earnings/ONE_PER_YI:.2f} 亿元"
+            f"（年度区间 {ste['min']/ONE_PER_YI:.2f}~{ste['max']/ONE_PER_YI:.2f} 亿元，"
             "亏损期——稳态估值带不适用）"
         )
     else:
         lines.append(
-            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
-            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元）"
+            f"  稳态盈利: {steady_earnings/ONE_PER_YI:.2f} 亿元"
+            f"（年度区间 {ste['min']/ONE_PER_YI:.2f}~{ste['max']/ONE_PER_YI:.2f} 亿元）"
         )
     band = steady.get("band")
     mv = steady.get("mv_vs_steady")
     if band:
         lines.append(
             f"  周期中枢 PE: {band['cycle_pe']} | 稳态市值带:"
-            f" {band['low']/1e8:.0f}~{band['mid']/1e8:.0f}~{band['high']/1e8:.0f} 亿元（±{band['band_pct']*100:.0f}%）"
+            f" {band['low']/ONE_PER_YI:.0f}~{band['mid']/ONE_PER_YI:.0f}~{band['high']/ONE_PER_YI:.0f} 亿元（±{band['band_pct']*100:.0f}%）"
         )
     if mv and mv.get("total_mv_yi"):
-        if mv["steady_mv_high_yi"] and mv["total_mv_yi"] > mv["steady_mv_high_yi"]:
-            over = (mv["total_mv_yi"] / mv["steady_mv_high_yi"] - 1) * 100
+        # round(band/ONE_PER_YI, 2) 在带 <0.005 亿元时塌为 0.0（review #5）：
+        # truthiness 判断会误落「处于稳态市值带内」且除零——改为显式 None/0.0 判定
+        high_yi = mv.get("steady_mv_high_yi")
+        low_yi = mv.get("steady_mv_low_yi")
+        if high_yi not in (None, 0.0) and mv["total_mv_yi"] > high_yi:
+            over = (mv["total_mv_yi"] / high_yi - 1) * 100
             pos = f"高于稳态上沿 {over:.0f}%——历史经验：周期股盈利高点常伴随低 PE 错觉（海力士式），但并非充分条件"
-        elif mv["steady_mv_low_yi"] and mv["total_mv_yi"] < mv["steady_mv_low_yi"]:
-            under = (mv["steady_mv_low_yi"] / mv["total_mv_yi"] - 1) * 100
+        elif low_yi not in (None, 0.0) and mv["total_mv_yi"] < low_yi:
+            under = (low_yi / mv["total_mv_yi"] - 1) * 100
             pos = f"低于稳态下沿 {under:.0f}%——穿越周期视角存在低估"
+        elif high_yi in (None, 0.0) or low_yi in (None, 0.0):
+            pos = "稳态带数值不可得/过小（亿元口径舍入为 0），位置对照跳过"
         else:
             pos = "处于稳态市值带内"
         lines.append(f"  当期市值 {mv['total_mv_yi']:.0f} 亿元 vs 稳态带: {pos}")
@@ -1849,7 +1840,11 @@ def _format_ev_ebitda_block(ev: dict) -> str:
         lines.append(f"  ⚠️ {ev.get('reason', '不适用')}")
         return "\n".join(lines)
     if not ev.get("available"):
-        lines.append(f"  ⚠️ 桥接数据不可得（缺失: {', '.join(ev.get('missing') or [])}）")
+        if ev.get("exempt"):
+            # 金融业豁免：非「数据不可得」（review #8，否则输出空括号「缺失: 」）
+            lines.append(f"  ⚠️ EV/EBITDA 不适用（{ev.get('reason') or '行业豁免'}）")
+        else:
+            lines.append(f"  ⚠️ 桥接数据不可得（缺失: {', '.join(ev.get('missing') or [])}）")
         if ev.get("ebitda_note"):
             lines.append(f"  · {ev['ebitda_note']}")
         if ev.get("note"):
@@ -1868,7 +1863,21 @@ def _format_ev_ebitda_block(ev: dict) -> str:
     lines.append(f"    - 现金: {b['cash_yi']} 亿元")
     lines.append(f"    = EV: {b['ev_yi']} 亿元")
     period_s = f"（{ev['ebitda_period']} 年报期）" if ev.get("ebitda_period") else ""
-    lines.append(f"  EBITDA: {ev['ebitda_yi']} 亿元{period_s} → EV/EBITDA = {ev['ev_ebitda']}x")
+    ratio = ev.get("ev_ebitda")
+    ebitda_yi = ev.get("ebitda_yi")
+    if ratio is not None:
+        lines.append(f"  EBITDA: {ebitda_yi} 亿元{period_s} → EV/EBITDA = {ratio}x")
+    elif ebitda_yi is None:
+        # 防御：available=True 但 EBITDA 缺失（老信封/语义漂移）——缺失 ≠ 为 0，
+        # 不得断言「EBITDA 为 0」（review #8，事实性）
+        lines.append(f"  EBITDA: 不可得{period_s} → EV/EBITDA 不适用（EBITDA 缺失，比率无定义）")
+    elif ebitda_yi == 0:
+        # calc_ev_ebitda 仅 ebitda not in (None, 0.0) 时计算 ratio（review #4）
+        # ——EBITDA 恰为 0 时比率无定义，不渲染 Nonex
+        lines.append(f"  EBITDA: 0 亿元{period_s} → EV/EBITDA 不适用（EBITDA 为 0，比率无定义）")
+    else:
+        # EBITDA>0 但 ratio 未计算（理论不可达）：如实标注，不臆断原因
+        lines.append(f"  EBITDA: {ebitda_yi} 亿元{period_s} → EV/EBITDA 不适用（比率未计算）")
     if ev.get("note"):
         lines.append(f"  ⚠️ {ev['note']}")
     if ev.get("takeover_payback_years"):
