@@ -24,7 +24,12 @@ ensure_skills_lib_on_path()
 
 from codes import etf_symbol_to_ts_code  # noqa: E402
 from dates import shanghai_days_ago, shanghai_today  # noqa: E402
-from lib.nums import safe_float  # noqa: E402
+from lib.nums import (  # noqa: E402
+    ONE_PER_YI,
+    QIAN_PER_YI,
+    WAN_PER_YI,
+    safe_float,
+)
 from lib.db_util import hist_ex_today  # noqa: E402
 from lib.proxy import (  # noqa: E402
     akshare_direct_session,
@@ -64,12 +69,11 @@ _ADJ_NOTE = ("NAV 序列已通过 Tushare fund_adj 前复权（消除分红/拆�
              "nav_history.change_pct 基于复权 NAV 重新计算，"
              "原始 日增长率 不再适用")
 
-# 单位换算常量（spot AUM / 份额快照 / share_flow / share_history 共用）
-_YUAN_TO_YI = 1e8        # 元 → 亿元（份额 份 × 价 元）
-_WAN_YUAN_TO_YI = 1e4    # 万元 → 亿元（share_change 万份 × 均价 元 = 万元）
-_QIAN_YUAN_TO_YI = 1e5   # 千元 → 亿元（Tushare fund_daily.amount 单位千元）
+# 单位换算比率上提至 skills/lib/nums.py（两 skill 共用）：ONE_PER_YI / WAN_PER_YI /
+# QIAN_PER_YI / ONE_PER_WAN。此处经 import 使用（spot AUM / 份额快照 / share_flow /
+# share_history 共用），不再保留本文件私有常量（code-review #10）
 
-# query_etf_share_history 早退 note 文案（原内联字符串上提，逐字节不变）
+# 份额历史早退 note 文案（fetch / query 两层共用，逐字节一致）
 _NOTE_SHARE_HIST_UNAVAILABLE = "份额历史不可用"
 _NOTE_SHARE_NO_DATA = "fund_share 无数据（需 ≥2000 Tushare 积分）"
 _NOTE_DAILY_NO_DATA = "fund_daily 无数据"
@@ -552,6 +556,20 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
         if df is None or df.empty:
             return {"status": "missing", "index_pe": None, "index_pe_note": None,
                     "rows": [], "error": "csindex empty response"}
+        if "日期" in df.columns:
+            # csindex 返回新日期在前；显式按日期升序后取末行，不依赖返回顺序
+            # （2026-08-22 实测 iloc[-1] 取到最早行 → index_pe 滞后约 3.5 周）
+            # NaN 日期行先剔除（pandas 升序 NaN 置末，会污染 iloc[-1] 取行）
+            df = df.dropna(subset=["日期"]).sort_values("日期")
+            if df.empty:
+                return {"status": "missing", "index_pe": None, "index_pe_note": None,
+                        "rows": [], "error": "csindex rows empty after date dropna"}
+        else:
+            # 列名漂移守卫（review #3）：无「日期」列时无法排序，沿用原始行序取末行，
+            # 记录警告使取行偏移 fail-loud，不复现静默滞后
+            logger.warning(
+                "csindex_pe(%s): 无「日期」列（列名漂移?），沿用原始行序取末行，"
+                "可能存在取行偏移", idx_code)
         latest = df.iloc[-1]
         pe1 = safe_float(latest.get("市盈率1"))
         pe2 = safe_float(latest.get("市盈率2"))
@@ -703,12 +721,12 @@ def fetch_etf_share_history(symbol: str) -> dict:
                                  start_date=start_date, end_date=end_date)
         if shares_df is None or shares_df.empty:
             return {"status": "missing", "fund_share": [], "fund_daily": [],
-                    "note": "fund_share 无数据（需 ≥2000 Tushare 积分）"}
+                    "note": _NOTE_SHARE_NO_DATA}
         daily_df = client.query("fund_daily", ts_code=ts_code,
                                 start_date=start_date, end_date=end_date)
         if daily_df is None or daily_df.empty:
             return {"status": "missing", "fund_share": [], "fund_daily": [],
-                    "note": "fund_daily 无数据"}
+                    "note": _NOTE_DAILY_NO_DATA}
     except Exception as exc:
         return {"status": "missing", "fund_share": [], "fund_daily": [],
                 "note": f"Tushare 查询失败: {exc}"}
@@ -955,7 +973,7 @@ def _apply_spot_row_to_profile(result: dict, row: Any, symbol: str) -> None:
     shares = safe_float(row.get("最新份额"))
     price = safe_float(row.get("最新价"))
     if shares is not None and price is not None:
-        result["aum"] = round(shares * price / _YUAN_TO_YI, 2)
+        result["aum"] = round(shares * price / ONE_PER_YI, 2)
 
 
 def _spot_row_to_quote(symbol: str, row: Any) -> dict[str, Any]:
@@ -1010,7 +1028,9 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
     # 内成立；collect-weekly/早间 report 已持久化今日行时，分位须剔除今日自身，
     # 同 journal market_microstructure.hist_ex_today 型防双计）
     rows = env.get("rows") or []
-    current_date = str(rows[-1].get("日期")) if rows else None
+    # 最新行日期取 max 而非 rows[-1]（review #4）：修复前的 L2 缓存信封为降序
+    # rows，rows[-1] 是最早日期 → 分位防双计剔除错行；max 对任意行序稳健
+    current_date = str(max((r.get("日期") for r in rows), key=lambda d: str(d))) if rows else None
     result["index_pe_pct"] = _index_pe_percentile_from_db(
         idx_code, env.get("index_pe"), current_date)
 
@@ -1896,7 +1916,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         logger.info("etf share snapshot: %s 疑似非交易日（份额/价格缺失），跳过", symbol)
         return None
 
-    aum = round(shares * price / _YUAN_TO_YI, 2)
+    aum = round(shares * price / ONE_PER_YI, 2)
     today = shanghai_today()  # 采集日墙钟；spot 行无 trade_date，份额披露 T+1（实际对应交易日未知）
 
     snap = {
@@ -1979,7 +1999,7 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         prev = history[-(window + 1)]
         d_shares = latest["shares"] - prev["shares"]
         avg_price = (latest["price"] + prev["price"]) / 2
-        flow_est = round(d_shares * avg_price / _YUAN_TO_YI, 2) if avg_price > 0 else None
+        flow_est = round(d_shares * avg_price / ONE_PER_YI, 2) if avg_price > 0 else None
         return {
             "share_change": d_shares,
             "flow_est": flow_est,
@@ -2108,7 +2128,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
         if prev_share is not None and shares_val is not None:
             share_change = round(shares_val - prev_share, 2)  # 万份
             avg_price = (close_val + prev_price) / 2
-            flow_est = round(share_change * avg_price / _WAN_YUAN_TO_YI, 2)  # 亿元（万份×元=万元）
+            flow_est = round(share_change * avg_price / WAN_PER_YI, 2)  # 亿元（万份×元=万元）
             if abs(flow_est) < 0.3:
                 direction = "→ 持平"
             elif flow_est > 0:
@@ -2117,7 +2137,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
                 direction = "🔴 净流出" if abs(flow_est) >= 3 else "🔴→ 小幅流出"
 
         # 成交额格式化（亿元）。Tushare fund_daily.amount 单位为千元
-        amount_e = round(amount_val / _QIAN_YUAN_TO_YI, 2) if amount_val is not None else None
+        amount_e = round(amount_val / QIAN_PER_YI, 2) if amount_val is not None else None
 
         rows.append({
             "date": date_str,
