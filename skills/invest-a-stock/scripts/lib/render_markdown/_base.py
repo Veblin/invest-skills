@@ -15,13 +15,7 @@ from lib.participant_scan import (
     resolve_moneyflow,
 )
 
-from ..proxy import (
-    EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
-    EASTMONEY_FAILURE_PROXY_MARKER,
-    EASTMONEY_FAILURE_TUN_MARKER,
-)
-from ..schema import CrossValidation, DriverFactor, ProbabilityStructure, _CV_ICONS, _CV_LABELS, index_dimensions
-from ..version import get_package_version
+from ..schema import DriverFactor
 
 from .. import render_utils as _ru
 from ..financials import (  # C5 v0.2.7: 语义常量（毛利率字段优先级 / OCF 覆盖比阈值）
@@ -33,7 +27,6 @@ from ..financials import (  # C5 v0.2.7: 语义常量（毛利率字段优先级
 )
 from ..valuation import EXTREME_HIGH_THRESHOLD, EXTREME_LOW_THRESHOLD  # C5 v0.2.7
 from ..render_utils import (
-    ENGINE_VERSION,
     sanitize_error,
     _sanitize_error,
     _index_dims,
@@ -44,7 +37,6 @@ from ..render_utils import (
     _references_appendix,
     _risk_footer,
     _cv,
-    _fmt,
     _fmt_v2,
     _fmt_num,
     _fmt_end_date,
@@ -56,9 +48,7 @@ from ..render_utils import (
     _compute_metric_cagr,
     cagr_period_rows,
     _historical_pe_median,
-    _bull_bear_valuation_divergence_text,
     _evidence_conclusion_block,
-    _v3_cv7_assessment,
     _v3_cv7_block,
     _v3_price_change,
     _v3_price_window_label,

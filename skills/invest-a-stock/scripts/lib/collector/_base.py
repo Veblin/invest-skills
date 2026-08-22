@@ -17,13 +17,11 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import redirect_stdout
 from datetime import datetime
-from io import StringIO
 from typing import Any, Callable
 
 from .. import env
-from ..nums import coalesce_field, safe_float
+from ..nums import coalesce_field, safe_float  # _orchestrate 等兄弟模块经 dir()-copy 消费，勿删
 from ..proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
