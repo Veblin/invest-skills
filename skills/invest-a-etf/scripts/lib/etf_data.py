@@ -64,6 +64,20 @@ _ADJ_NOTE = ("NAV 序列已通过 Tushare fund_adj 前复权（消除分红/拆�
              "nav_history.change_pct 基于复权 NAV 重新计算，"
              "原始 日增长率 不再适用")
 
+# 单位换算常量（spot AUM / 份额快照 / share_flow / share_history 共用）
+_YUAN_TO_YI = 1e8        # 元 → 亿元（份额 份 × 价 元）
+_WAN_YUAN_TO_YI = 1e4    # 万元 → 亿元（share_change 万份 × 均价 元 = 万元）
+_QIAN_YUAN_TO_YI = 1e5   # 千元 → 亿元（Tushare fund_daily.amount 单位千元）
+
+# query_etf_share_history 早退 note 文案（原内联字符串上提，逐字节不变）
+_NOTE_SHARE_HIST_UNAVAILABLE = "份额历史不可用"
+_NOTE_SHARE_NO_DATA = "fund_share 无数据（需 ≥2000 Tushare 积分）"
+_NOTE_DAILY_NO_DATA = "fund_daily 无数据"
+_NOTE_NO_DATE_INTERSECT = "份额-价格日期无交集"
+
+# 近端流向窗口（行）：整体合计定性会掩盖近端转向（batch-test P1-4）
+RECENT_FLOW_DAYS = 5
+
 
 # ---------------------------------------------------------------------------
 # 对冲工具覆盖映射表
@@ -941,7 +955,7 @@ def _apply_spot_row_to_profile(result: dict, row: Any, symbol: str) -> None:
     shares = safe_float(row.get("最新份额"))
     price = safe_float(row.get("最新价"))
     if shares is not None and price is not None:
-        result["aum"] = round(shares * price / 1e8, 2)
+        result["aum"] = round(shares * price / _YUAN_TO_YI, 2)
 
 
 def _spot_row_to_quote(symbol: str, row: Any) -> dict[str, Any]:
@@ -1882,7 +1896,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         logger.info("etf share snapshot: %s 疑似非交易日（份额/价格缺失），跳过", symbol)
         return None
 
-    aum = round(shares * price / 1e8, 2)
+    aum = round(shares * price / _YUAN_TO_YI, 2)
     today = shanghai_today()  # 采集日墙钟；spot 行无 trade_date，份额披露 T+1（实际对应交易日未知）
 
     snap = {
@@ -1965,7 +1979,7 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         prev = history[-(window + 1)]
         d_shares = latest["shares"] - prev["shares"]
         avg_price = (latest["price"] + prev["price"]) / 2
-        flow_est = round(d_shares * avg_price / 1e8, 2) if avg_price > 0 else None
+        flow_est = round(d_shares * avg_price / _YUAN_TO_YI, 2) if avg_price > 0 else None
         return {
             "share_change": d_shares,
             "flow_est": flow_est,
@@ -2018,7 +2032,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     env = _bridge_get("get_etf_share_history", symbol)
     if env is None or env.get("status") != "ok":
         return {"symbol": symbol, "available": False,
-                "note": (env or {}).get("note") or "份额历史不可用"}
+                "note": (env or {}).get("note") or _NOTE_SHARE_HIST_UNAVAILABLE}
 
     import pandas as pd
 
@@ -2026,10 +2040,10 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     daily_df = pd.DataFrame(env.get("fund_daily") or [])
     if shares_df.empty:
         return {"symbol": symbol, "available": False,
-                "note": "fund_share 无数据（需 ≥2000 Tushare 积分）"}
+                "note": _NOTE_SHARE_NO_DATA}
     if daily_df.empty:
         return {"symbol": symbol, "available": False,
-                "note": "fund_daily 无数据"}
+                "note": _NOTE_DAILY_NO_DATA}
 
     try:
         # 合并：按 trade_date 对齐。left join → 确保 fund_daily 最新日期的 OHLCV
@@ -2045,7 +2059,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
         return {"symbol": symbol, "available": False,
                 "note": f"份额-价格合并失败: {exc}"}
     if merged.empty:
-        return {"symbol": symbol, "available": False, "note": "份额-价格日期无交集"}
+        return {"symbol": symbol, "available": False, "note": _NOTE_NO_DATE_INTERSECT}
 
     # 取最近 days 行（+1 用于计算第一行的变化）
     # 超窗检测：取数窗口（_SHARE_FETCH_NATURAL_DAYS 自然日）行数不足 days+1 时
@@ -2094,7 +2108,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
         if prev_share is not None and shares_val is not None:
             share_change = round(shares_val - prev_share, 2)  # 万份
             avg_price = (close_val + prev_price) / 2
-            flow_est = round(share_change * avg_price / 1e4, 2)  # 亿元
+            flow_est = round(share_change * avg_price / _WAN_YUAN_TO_YI, 2)  # 亿元（万份×元=万元）
             if abs(flow_est) < 0.3:
                 direction = "→ 持平"
             elif flow_est > 0:
@@ -2103,7 +2117,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
                 direction = "🔴 净流出" if abs(flow_est) >= 3 else "🔴→ 小幅流出"
 
         # 成交额格式化（亿元）。Tushare fund_daily.amount 单位为千元
-        amount_e = round(amount_val / 1e5, 2) if amount_val is not None else None
+        amount_e = round(amount_val / _QIAN_YUAN_TO_YI, 2) if amount_val is not None else None
 
         rows.append({
             "date": date_str,
@@ -2146,7 +2160,7 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     # 近端（最后 5 日）方向：整体合计定性会掩盖近端转向（batch-test P1-4，
     # 实例：588000 20 日 +326.92 亿但近 5 日连续净流出 -39.88 亿）。
     # detail_rows 升序，最后 RECENT_FLOW_DAYS 行即最近窗口。
-    recent_n = 5
+    recent_n = RECENT_FLOW_DAYS
     recent_flows = flows[-recent_n:]
     recent_flow = round(sum(recent_flows), 2) if recent_flows else None
     # 「近 N 日」实际跨度：flows 只含份额可算行（fund_share T+1 延迟使尾端
