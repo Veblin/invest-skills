@@ -17,7 +17,9 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import redirect_stdout  # _sources.py:941 经 dir()-copy 消费（tickflow 输出抑制），勿删
 from datetime import datetime
+from io import StringIO  # 同上
 from typing import Any, Callable
 
 from .. import env
