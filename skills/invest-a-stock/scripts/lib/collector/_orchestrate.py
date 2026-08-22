@@ -1696,6 +1696,92 @@ def _order_dimensions(dims: list[str], dim_results: dict) -> list:
     return [dim_results.get(d) for d in dims if d in COLLECTORS]
 
 
+def _fuse_dimensions(dimensions: list, symbol: str) -> dict[str, Any]:
+    """R-08: RRF 多源融合。"""
+    fusion_results: dict[str, Any] = {}
+    try:
+        from ..fusion import (
+            dimension_results_from_legacy,
+            fuse_from_legacy_dicts,
+            fuse_from_source_results,
+            fusion_results_to_dict,
+        )
+        dim_result_map = dimension_results_from_legacy(dimensions)
+        if dim_result_map:
+            fusion_raw = fuse_from_source_results(dim_result_map)
+        else:
+            fusion_raw = fuse_from_legacy_dicts(dimensions)
+        fusion_results = fusion_results_to_dict(fusion_raw)
+        if fusion_results:
+            logger.info(
+                "fusion: %d dimensions fused for %s",
+                len(fusion_results), symbol,
+            )
+    except Exception as exc:
+        logger.warning("fusion failed for %s: %s", symbol, exc)
+    return fusion_results
+
+
+def _score_credibility(dimensions: list, symbol: str) -> dict[str, float]:
+    """R-09: 证据可信度评分。"""
+    credibility_scores: dict[str, float] = {}
+    try:
+        from ..rerank import score_all_dimensions
+        credibility_scores = score_all_dimensions(dimensions)
+    except Exception as exc:
+        logger.warning("rerank scoring failed for %s: %s", symbol, exc)
+    return credibility_scores
+
+
+def _collect_macro_context_block(symbol: str, with_macro: bool) -> dict[str, Any]:
+    """R-12: 宏观数据采集（层5，opt-in）。"""
+    macro_context: dict[str, Any] = {}
+    if with_macro:
+        try:
+            from ..macro import collect_macro_context
+            macro_context = collect_macro_context(symbol)
+        except Exception as exc:
+            logger.warning("macro context collection failed for %s: %s", symbol, exc)
+            macro_context = {"status": "error", "error": str(exc)}
+    return macro_context
+
+
+def _collect_chain_context_block(symbol: str, with_chain: bool, dim_results: dict) -> dict[str, Any]:
+    """R-12: 产业链数据（层3+4，opt-in，复用已采集的 basic_info）。"""
+    chain_context: dict[str, Any] = {}
+    if with_chain:
+        try:
+            from ..chain import collect_chain_context
+            basic_dim = dim_results.get("basic_info") or {}
+            basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
+            industry = ""
+            if isinstance(basic_data, dict):
+                industry = basic_data.get("industry", "") or basic_data.get("行业", "")
+            chain_context = collect_chain_context(
+                symbol, industry=industry, basic_data=basic_data,
+            )
+        except Exception as exc:
+            logger.warning("chain context collection failed for %s: %s", symbol, exc)
+            chain_context = {"status": "error", "error": str(exc)}
+    return chain_context
+
+
+def _assemble_result(symbol: str, dimensions: list, fusion_results: dict,
+                     credibility_scores: dict, macro_context: dict,
+                     chain_context: dict) -> dict[str, Any]:
+    """装配采集结果主 dict。"""
+    return {
+        "symbol": symbol,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "dimensions": dimensions or [],
+        "fusion": fusion_results,  # R-08: RRF 多源融合
+        "credibility": credibility_scores,  # R-09: 证据可信度评分
+        "macro_context": macro_context,  # R-12
+        "chain_context": chain_context,  # R-12
+        "summary": _build_summary(dimensions),
+    }
+
+
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
@@ -1733,74 +1819,13 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     # 按输入顺序排列
     dimensions = _order_dimensions(dims, dim_results)
 
-    # R-08: RRF 多源融合
-    fusion_results: dict[str, Any] = {}
-    try:
-        from ..fusion import (
-            dimension_results_from_legacy,
-            fuse_from_legacy_dicts,
-            fuse_from_source_results,
-            fusion_results_to_dict,
-        )
-        dim_result_map = dimension_results_from_legacy(dimensions)
-        if dim_result_map:
-            fusion_raw = fuse_from_source_results(dim_result_map)
-        else:
-            fusion_raw = fuse_from_legacy_dicts(dimensions)
-        fusion_results = fusion_results_to_dict(fusion_raw)
-        if fusion_results:
-            logger.info(
-                "fusion: %d dimensions fused for %s",
-                len(fusion_results), symbol,
-            )
-    except Exception as exc:
-        logger.warning("fusion failed for %s: %s", symbol, exc)
+    fusion_results = _fuse_dimensions(dimensions, symbol)
+    credibility_scores = _score_credibility(dimensions, symbol)
+    macro_context = _collect_macro_context_block(symbol, with_macro)
+    chain_context = _collect_chain_context_block(symbol, with_chain, dim_results)
 
-    # R-09: 证据可信度评分
-    credibility_scores: dict[str, float] = {}
-    try:
-        from ..rerank import score_all_dimensions
-        credibility_scores = score_all_dimensions(dimensions)
-    except Exception as exc:
-        logger.warning("rerank scoring failed for %s: %s", symbol, exc)
-
-    # R-12: 宏观数据采集（层5，opt-in）
-    macro_context: dict[str, Any] = {}
-    if with_macro:
-        try:
-            from ..macro import collect_macro_context
-            macro_context = collect_macro_context(symbol)
-        except Exception as exc:
-            logger.warning("macro context collection failed for %s: %s", symbol, exc)
-            macro_context = {"status": "error", "error": str(exc)}
-
-    # R-12: 产业链数据（层3+4，opt-in）
-    chain_context: dict[str, Any] = {}
-    if with_chain:
-        try:
-            from ..chain import collect_chain_context
-            basic_dim = dim_results.get("basic_info") or {}
-            basic_data = basic_dim.get("data") if isinstance(basic_dim, dict) else None
-            industry = ""
-            if isinstance(basic_data, dict):
-                industry = basic_data.get("industry", "") or basic_data.get("行业", "")
-            chain_context = collect_chain_context(
-                symbol, industry=industry, basic_data=basic_data,
-            )
-        except Exception as exc:
-            logger.warning("chain context collection failed for %s: %s", symbol, exc)
-            chain_context = {"status": "error", "error": str(exc)}
-
-    result: dict[str, Any] = {
-        "symbol": symbol,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "dimensions": dimensions or [],
-        "fusion": fusion_results,  # R-08: RRF 多源融合
-        "credibility": credibility_scores,  # R-09: 证据可信度评分
-        "macro_context": macro_context,  # R-12
-        "chain_context": chain_context,  # R-12
-        "summary": _build_summary(dimensions),
-    }
+    result = _assemble_result(symbol, dimensions, fusion_results,
+                              credibility_scores, macro_context, chain_context)
     # E1: 板块同步性引擎（v0.2.7）— 6 个 derived 字段 + collection['sector_sync'] 详情。
     # 依赖 kline + basic_info；板块指数/成分股不可得时内部 fail loud（输出「不可得」，
     # 不给默认值）。F1 冷缓存门控：成分股逐只首跑 5-10 分钟，默认冷缓存跳过；
