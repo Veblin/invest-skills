@@ -264,7 +264,11 @@ def _add_force_sector_sync_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
+MODE_CHOICES = ["brief", "full", "concise"]  # --mode 三处共用（根/report/synthesize）
+
+
+def _add_collect_flags(parser: argparse.ArgumentParser, *, plan_default: str = argparse.SUPPRESS,
+                       with_resume: bool = True, with_save_raw: bool = True) -> None:
     parser.add_argument(
         "--with-macro", action="store_true",
         help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）",
@@ -275,17 +279,20 @@ def _add_collect_flags(parser: argparse.ArgumentParser) -> None:
     )
     _add_force_sector_sync_flag(parser)
     # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值
-    parser.add_argument("--plan", default=argparse.SUPPRESS, help="JSON 采集计划文件路径")
-    parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
-                        help="从上次中断的步骤继续")
-    parser.add_argument("--save-raw", action="store_true", default=argparse.SUPPRESS,
-                        help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
+    # report 例外：--plan default=""（非 SUPPRESS），且无 --resume/--save-raw（不触发恢复/落盘逻辑）
+    parser.add_argument("--plan", default=plan_default, help="JSON 采集计划文件路径")
+    if with_resume:
+        parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
+                            help="从上次中断的步骤继续")
+    if with_save_raw:
+        parser.add_argument("--save-raw", action="store_true", default=argparse.SUPPRESS,
+                            help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="A股个股调研数据采集与分析")
     p.add_argument("--plan", default="", help="JSON 采集计划文件路径")
-    p.add_argument("--mode", default="full", choices=["brief", "full", "concise"],
+    p.add_argument("--mode", default="full", choices=MODE_CHOICES,
                    help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     p.add_argument("--resume", action="store_true", help="从上次中断的步骤继续")
     p.add_argument("--save-raw", action="store_true",
@@ -308,14 +315,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--plan", default="", help="JSON 采集计划文件路径")
-    pr.add_argument("--mode", default="full", choices=["brief", "full", "concise"],
+    pr.add_argument("--mode", default="full", choices=MODE_CHOICES,
                    help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
-    pr.add_argument("--with-macro", action="store_true", help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）")
-    pr.add_argument("--deep", action="store_true", help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报")
-    _add_force_sector_sync_flag(pr)
+    _add_collect_flags(pr, plan_default="", with_resume=False, with_save_raw=False)
     pr.add_argument(
         "--with-news-pack",
         action="store_true",
@@ -402,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("symbol")
     psyn.add_argument("--input", default="", help="分析结果 JSON 文件路径")
     psyn.add_argument("--emit", default="md", choices=["md", "json"])
-    psyn.add_argument("--mode", default="full", choices=["brief", "full", "concise"])
+    psyn.add_argument("--mode", default="full", choices=MODE_CHOICES)
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     psyn.add_argument("--no-store", action="store_false", dest="store", default=True,
