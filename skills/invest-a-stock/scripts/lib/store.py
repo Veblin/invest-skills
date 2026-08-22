@@ -51,11 +51,7 @@ def _connection() -> Iterator[sqlite3.Connection]:
         _safe_close(c)
 
 
-def init_db() -> None:
-    with _connection() as c:
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA synchronous=NORMAL")
-        c.executescript("""
+_SCHEMA_DDL = """
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')));
             CREATE TABLE IF NOT EXISTS collections (
@@ -182,41 +178,46 @@ def init_db() -> None:
                 PRIMARY KEY (date, symbol)
             );
             CREATE INDEX IF NOT EXISTS idx_futures_daily_symbol ON futures_daily(symbol);
-        """)
-        # v0.2.2 迁移：为已有表添加北向资金列
-        for col, col_type in [
-            ("northbound_net_inflow", "REAL"),
-            ("northbound_direction", "TEXT"),
-            ("northbound_source", "TEXT"),
-        ]:
-            try:
-                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" in str(e).lower():
-                    pass  # 列已存在
-                else:
-                    raise
-        # v0.2.6 迁移：futures 资金面维度（F 系列）
-        for col, col_type in [
-            ("futures_basis_pct", "REAL"),
-            ("futures_oi_change_pct", "REAL"),
-        ]:
-            try:
-                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" in str(e).lower():
-                    pass  # 列已存在
-                else:
-                    raise
-        # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
-        # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
-        try:
-            c.execute("ALTER TABLE collections ADD COLUMN kind TEXT NOT NULL DEFAULT 'collect'")
-        except sqlite3.OperationalError as e:
-            if "duplicate column" in str(e).lower():
-                pass  # 列已存在
-            else:
-                raise
+"""
+
+
+def _add_column_if_missing(c: sqlite3.Connection, table: str, col: str, col_type: str) -> None:
+    """ALTER ADD COLUMN，duplicate column 幂等跳过（其余异常原样上抛）。"""
+    try:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" in str(e).lower():
+            pass  # 列已存在
+        else:
+            raise
+
+
+def _apply_migrations(c: sqlite3.Connection) -> None:
+    """历史 schema 迁移（v0.2.2/v0.2.4/v0.2.6），duplicate-column 守卫幂等。"""
+    # v0.2.2 迁移：为已有表添加北向资金列
+    for col, col_type in [
+        ("northbound_net_inflow", "REAL"),
+        ("northbound_direction", "TEXT"),
+        ("northbound_source", "TEXT"),
+    ]:
+        _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.2.6 迁移：futures 资金面维度（F 系列）
+    for col, col_type in [
+        ("futures_basis_pct", "REAL"),
+        ("futures_oi_change_pct", "REAL"),
+    ]:
+        _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
+    # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
+    _add_column_if_missing(c, "collections", "kind", "TEXT NOT NULL DEFAULT 'collect'")
+
+
+def init_db() -> None:
+    with _connection() as c:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.executescript(_SCHEMA_DDL)
+        _apply_migrations(c)
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
