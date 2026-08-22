@@ -21,6 +21,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # 确保从本项目的 lib/ 导入，排除旧归档路径
@@ -742,7 +743,6 @@ def cmd_report(args: argparse.Namespace) -> int:
         _ensure_render_ready(result, args.symbol)
         md_v2 = render.render_report_v2(result, args.symbol)
         output = render.render_html(result, args.symbol)
-        from datetime import datetime
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
 
@@ -897,8 +897,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         return 1
     plan = planner_mod.generate_plan(args.symbol, args.intent)
     if args.emit == "json":
-        import json as _json
-        print(_json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+        print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
         if _HAS_STORE:
             store_mod.save_pipeline_step(args.symbol, "plan", plan.to_dict())
         return 0
@@ -940,14 +939,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     v0.1.5 中为占位实现：输出采集 + 证据表 + 可信度评分的综合 JSON。
     完整分析由 Claude 在 Skill 调用时完成。
     """
-    import json as _json
 
     # 采集或加载
     if args.input:
         try:
             with open(args.input, "r", encoding="utf-8") as f:
-                result = _json.load(f)
-        except (FileNotFoundError, _json.JSONDecodeError) as exc:
+                result = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
             print(f"❌ 无法读取输入文件: {exc}", file=sys.stderr)
             return 1
     else:
@@ -1020,13 +1018,12 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
     若提供 --input（analyze 输出 JSON），从中恢复采集结果并渲染报告。
   否则等同于 report（现场采集+渲染）。
     """
-    import json as _json
 
     if args.input:
         try:
             with open(args.input, "r", encoding="utf-8") as f:
-                analysis = _json.load(f)
-        except (OSError, _json.JSONDecodeError) as exc:
+                analysis = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
             print(f"❌ 无法读取分析文件: {exc}", file=sys.stderr)
             return 1
         # analyze 输出不含完整 dimensions 时回退现场采集
@@ -1060,7 +1057,6 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             attach_extras=attach_extras,
         )
         if fmt == "md" and args.outdir:
-            from datetime import datetime
             ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
             subdir = _report_basename(result, args.symbol, ts)
             outdir = Path(args.outdir).resolve()
@@ -1335,7 +1331,6 @@ def _category_label(cat: str) -> str:
 
 
 def _diff_interval_str(old_at: str, new_at: str) -> str:
-    from datetime import datetime
     old_s, new_s = old_at[:19], new_at[:19]
     try:
         old_dt = datetime.fromisoformat(old_s.replace("Z", "+00:00"))
@@ -1581,7 +1576,6 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
         print("❌ watchlist 至少需要 2 只标的（逗号分隔）", file=sys.stderr)
         return 1
     warn_if_proxy_detected(probe=True)
-    from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     body: list[str] = [f"# 观察列表摘要 — {today}", "", f"> 共 {len(symbols)} 只标的"]
     if _watchlist_needs_live_collect(symbols):
@@ -1867,7 +1861,6 @@ def cmd_ic(args: argparse.Namespace) -> int:
     from lib.risk_scanner import risk_report
     from lib.collector import collect_all
     from lib.version import get_package_version  # canonical 源 pyproject.toml（v0.2.7 review：去掉硬编码版本）
-    from datetime import datetime
 
     # 采集数据
     collection = None
@@ -2046,8 +2039,7 @@ def cmd_classify(args: argparse.Namespace) -> int:
         industry=industry,
     )
     if args.emit == "json":
-        import json as _json
-        print(_json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     else:
         print(format_classify_result(result))
     return 0
@@ -2075,8 +2067,7 @@ def cmd_value(args: argparse.Namespace) -> int:
     )
 
     if args.emit == "json":
-        import json as _json
-        print(_json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
     else:
         print(format_output(result))
         if result.steady:
@@ -2106,13 +2097,12 @@ def cmd_market_status(args: argparse.Namespace) -> int:
     --json  输出原始 JSON
     --industry  输出行业景气状态卡（独立输出，不进入 snapshot 流程）
     """
-    import json as _json
     if getattr(args, "industry", ""):
         try:
             from lib.climate import build_industry_climate, format_climate_card
             card = build_industry_climate(args.industry)
             if args.json:
-                print(_json.dumps(card, ensure_ascii=False, indent=2, default=str))
+                print(json.dumps(card, ensure_ascii=False, indent=2, default=str))
                 return 0
             print(format_climate_card(card))
             return 0
@@ -2134,7 +2124,7 @@ def cmd_market_status(args: argparse.Namespace) -> int:
             print("⚠️ 非交易日或数据缺失，已跳过保存")
             return 0
         if args.json:
-            print(_json.dumps(snap, ensure_ascii=False, indent=2, default=str))
+            print(json.dumps(snap, ensure_ascii=False, indent=2, default=str))
             return 0
         print("✅ 市场快照已保存")
         _print_env_labels(snap)
@@ -2153,7 +2143,7 @@ def cmd_market_status(args: argparse.Namespace) -> int:
             print(f"⚠️ {e}", file=sys.stderr)
 
     if args.json:
-        print(_json.dumps(snap, ensure_ascii=False, indent=2, default=str))
+        print(json.dumps(snap, ensure_ascii=False, indent=2, default=str))
         return 1 if len(errors) >= 5 else 0
 
     # 环境标签
