@@ -1250,6 +1250,34 @@ class ValuationResult:
         return asdict(self)
 
 
+def _query_latest_balancesheet(ts, ts_code: str) -> tuple[float | None, float | None,
+                                                          float | None, float | None]:
+    """R3: 最新一期 balancesheet 的 money_cap/short_loan/long_loan/bond_payable（元）。
+
+    查询失败返回全 None（与 R12b 同型兜底）。
+    """
+    cash = st_loan = lt_loan = bond_payable = None
+    try:
+        bs_df = ts.query(
+            "balancesheet", ts_code=ts_code,
+            start_date=shanghai_days_ago(2 * 365), end_date=shanghai_today(),
+            fields="end_date,money_cap,short_loan,long_loan,bond_payable",
+        )
+        if bs_df is not None and not (hasattr(bs_df, "empty") and bs_df.empty):
+            bs_rows = bs_df.to_dict(orient="records") if hasattr(bs_df, "to_dict") else list(bs_df)
+            latest = None
+            for r in sorted(bs_rows, key=lambda x: str(x.get("end_date", ""))):
+                latest = r
+            if latest:
+                cash = safe_float(latest.get("money_cap"))
+                st_loan = safe_float(latest.get("short_loan"))
+                lt_loan = safe_float(latest.get("long_loan"))
+                bond_payable = safe_float(latest.get("bond_payable"))
+    except Exception:
+        logger.warning("Tushare balancesheet 查询失败（R3 EV 桥接）", exc_info=True)
+    return cash, st_loan, lt_loan, bond_payable
+
+
 def run_valuation(
     symbol: str,
     rf_override: float | None = None,
@@ -1431,25 +1459,7 @@ def run_valuation(
                     f"EBITDA 取自 income 表（fina_indicator 积分过滤兜底），"
                     f"报告期 {inc_period}，年报口径"
                 )
-        cash = st_loan = lt_loan = bond_payable = None
-        try:
-            bs_df = ts.query(
-                "balancesheet", ts_code=ts_code,
-                start_date=shanghai_days_ago(2 * 365), end_date=shanghai_today(),
-                fields="end_date,money_cap,short_loan,long_loan,bond_payable",
-            )
-            if bs_df is not None and not (hasattr(bs_df, "empty") and bs_df.empty):
-                bs_rows = bs_df.to_dict(orient="records") if hasattr(bs_df, "to_dict") else list(bs_df)
-                latest = None
-                for r in sorted(bs_rows, key=lambda x: str(x.get("end_date", ""))):
-                    latest = r
-                if latest:
-                    cash = safe_float(latest.get("money_cap"))
-                    st_loan = safe_float(latest.get("short_loan"))
-                    lt_loan = safe_float(latest.get("long_loan"))
-                    bond_payable = safe_float(latest.get("bond_payable"))
-        except Exception:
-            logger.warning("Tushare balancesheet 查询失败（R3 EV 桥接）", exc_info=True)
+        cash, st_loan, lt_loan, bond_payable = _query_latest_balancesheet(ts, ts_code)
         ev_block = calc_ev_ebitda(
             total_mv_yi=result.total_mv_yi,
             cash=cash, st_loan=st_loan, lt_loan=lt_loan, bond_payable=bond_payable,
