@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .nums import ONE_PER_YI
+
 # ---------------------------------------------------------------------------
 # 核心计算
 # ---------------------------------------------------------------------------
@@ -241,7 +243,7 @@ def compute_dcf_risk_reward(
         target = per_share["per_share"]
         scenarios[scenario_name] = target
         scenario_details[scenario_name] = {
-            "enterprise_value_yi": round(ev / 1e8, 2),
+            "enterprise_value_yi": round(ev / ONE_PER_YI, 2),
             "per_share": round(target, 2),
             "assumptions": fcff_result.get("assumptions", {}),
             "probability": fcff_result.get("probability", 1 / 3),
@@ -269,7 +271,7 @@ def compute_dcf_risk_reward(
         "terminal_g": terminal_g,
         "shares_source": shares_source,
         "shares": shares,
-        "net_debt_yi": round(net_debt / 1e8, 2) if net_debt is not None else None,
+        "net_debt_yi": round(net_debt / ONE_PER_YI, 2) if net_debt is not None else None,
         "net_debt_source": nd_source,
         "rf": rf_val,
         "erp": erp_val,

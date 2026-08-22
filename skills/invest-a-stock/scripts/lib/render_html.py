@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from lib.nums import ONE_PER_YI
 from lib.technical import compute, sort_kline_asc
 
 from .shared_dates import yyyymmdd_to_iso as _to_iso_date
@@ -603,7 +604,7 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
         eps_v = r.get("eps")
         eps_data.append(round(eps_v, 2) if eps_v is not None else None)
         pd_v = r.get("profit_dedt")
-        profit_data.append(round(pd_v / 1e8, 2) if pd_v is not None else None)
+        profit_data.append(round(pd_v / ONE_PER_YI, 2) if pd_v is not None else None)
 
     # 财务表格 HTML
     rows_html = ""

@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+# ── 中文数字单位换算比率（invest-a-stock / invest-a-etf 共用）──────────────
+# 方向由运算符决定：÷ 比率得亿/万单位，× 比率得原单位（个/元/股/份）。
+# 常见陷阱：万份×元=万元（÷WAN_PER_YI 才得亿元，勿误用 ONE_PER_YI）；
+#           千元→亿元 ÷QIAN_PER_YI；万股→股 ×ONE_PER_WAN（勿与 WAN_PER_YI 混淆）。
+ONE_PER_YI = 1e8    # 1 亿 = 1e8 个：元→亿元 ÷，亿→元 ×
+WAN_PER_YI = 1e4    # 1 亿 = 1e4 万：万元→亿元 ÷，亿→万 ×
+QIAN_PER_YI = 1e5   # 1 亿 = 1e5 千：千元→亿元 ÷，亿→千 ×
+ONE_PER_WAN = 1e4   # 1 万 = 1e4 个：万股→股 ×，股→万股 ÷
+
 
 def safe_float(v: Any) -> float | None:
     """安全转为 float；None / NaN / ±inf / 非数字返回 None。"""
@@ -18,6 +27,29 @@ def safe_float(v: Any) -> float | None:
         return f
     except (TypeError, ValueError):
         return None
+
+
+def parse_shares_wan(raw: Any) -> float | None:
+    """解析总股本文本 → 万股（亿股/万股 后缀 + 非数字回退）。
+
+    统一 valuation_calc._parse_shares 与 financial_rigor._parse_share_count
+    的漂移副本（review #10）：剥「亿股/万股」后缀、ValueError 回退 safe_float。
+    裸数字/整型直通（万股口径）。「股」后缀仅随 亿/万 一并剥离，不单独处理
+    （原始数据无裸「股」口径，误乘/误除 1e4 的风险大于收益）。
+    """
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).replace(",", "").strip()
+    mult = 1.0
+    if "亿" in s:
+        mult = WAN_PER_YI  # 亿股 → 万股
+        s = s.replace("亿股", "").replace("亿", "")
+    elif "万" in s:
+        s = s.replace("万股", "").replace("万", "")
+    try:
+        return float(s) * mult
+    except ValueError:
+        return safe_float(raw)
 
 
 def coalesce_field(row: dict, *keys: str) -> float | None:
@@ -57,8 +89,8 @@ def fmt_amount(v: Any, unit: str = "", precision: int = 2) -> str:
     f = safe_float(v)
     if f is None:
         return str(v)
-    if abs(f) >= 1e8:
-        return f"{f / 1e8:.{precision}f}亿"
-    if abs(f) >= 1e4:
-        return f"{f / 1e4:.{precision}f}万"
+    if abs(f) >= ONE_PER_YI:
+        return f"{f / ONE_PER_YI:.{precision}f}亿"
+    if abs(f) >= ONE_PER_WAN:
+        return f"{f / ONE_PER_WAN:.{precision}f}万"
     return f"{f:.{precision}f}{unit}" if unit else f"{f:.{precision}f}"

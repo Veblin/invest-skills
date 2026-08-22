@@ -1,15 +1,44 @@
 """Data source query functions — Tushare, akshare, baostock, TickFlow, Tencent."""
 from __future__ import annotations
-from . import _base as __base_ref
-for __base_n in dir(__base_ref):
-    if not __base_n.startswith("__"):
-        globals()[__base_n] = getattr(__base_ref, __base_n)
-del __base_ref, __base_n
+
+import logging
+import os
+import threading
+import time
+from contextlib import redirect_stdout  # :942 tickflow 输出抑制（code-review #9：直接 import，不再经 _base dir()-copy）
+from datetime import datetime
+from io import StringIO
+from typing import Any, Callable
+
+from .. import env
+from ..nums import safe_float
+from ..proxy import (
+    akshare_direct_session,
+    akshare_push2_available,
+    em_request_with_retry,
+    no_proxy_session,
+)
+from ..shared_codes import exchange_code as _exchange_code
+from ..shared_dates import (
+    shanghai_days_ago as _days_ago,
+    shanghai_today as _today,
+    yyyymmdd_to_iso as _to_iso_date,
+)
+from ._base import (
+    _BAOSTOCK_LOCK,
+    _baostock_code,
+    _is_eastmoney_blocked_error,
+    _latest_quarter_end,
+    _proxy_bypass,
+    _reraise_eastmoney_api_error,
+    _ts_code,
+)
 
 # v0.2.7：腾讯行情唯一实现收敛至 skills/lib/quote_tencent（本文件旧副本删除），
-# 本层只保留返回契约适配。_orchestrate 经 dir(_sources) star-copy 可见这些名字。
+# 本层只保留返回契约适配。
 from lib._invest_path import ensure_skills_lib_on_path  # noqa: E402
 ensure_skills_lib_on_path()  # noqa: E402
+from lib.nums import ONE_PER_WAN, ONE_PER_YI  # noqa: E402
 from quote_tencent import (  # noqa: E402
     fetch_tencent_quote,
     is_tencent_unsupported,
@@ -434,7 +463,7 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
     # 仅 moneyflow.net_mf_amount 为万元；hsgt_top10 / akshare 已是元。
     # moneyflow 的 net_mf_vol 是「手」量纲，禁止万元 scale 回落放大。
     is_moneyflow = source.startswith("tushare.moneyflow")
-    scale = 10000.0 if is_moneyflow else 1.0
+    scale = ONE_PER_WAN if is_moneyflow else 1.0
     out: list[dict] = []
     for r in records:
         row = dict(r)
@@ -599,10 +628,10 @@ def _parse_akshare_num(v) -> float | None:
             multiplier = 1e12
             s = s.replace("万亿", "")
         elif "亿" in s:
-            multiplier = 1e8
+            multiplier = ONE_PER_YI
             s = s.replace("亿", "")
         elif "万" in s:
-            multiplier = 1e4
+            multiplier = ONE_PER_WAN
             s = s.replace("万", "")
         if "%" in s:
             s = s.replace("%", "")
@@ -827,7 +856,6 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
 def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list[str]:
     """返回最近 count 个已结束季末日期（YYYYMMDD），用于股东多期查询。"""
     import calendar
-    from datetime import datetime
 
     now = as_of or datetime.now()
     dates: list[str] = []
@@ -928,7 +956,6 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     ed = end_date or _today()
 
     # TickFlow 使用毫秒级 Unix 时间戳
-    from datetime import datetime
     from zoneinfo import ZoneInfo
     sh = ZoneInfo("Asia/Shanghai")
     start_ms = int(datetime.strptime(sd, "%Y%m%d").replace(tzinfo=sh).timestamp() * 1000)

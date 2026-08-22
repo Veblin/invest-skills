@@ -268,8 +268,8 @@ def _add_force_sector_sync_flag(parser: argparse.ArgumentParser) -> None:
 MODE_CHOICES = ["brief", "full", "concise"]  # --mode 三处共用（根/report/synthesize）
 
 
-def _add_collect_flags(parser: argparse.ArgumentParser, *, plan_default: str = argparse.SUPPRESS,
-                       with_resume: bool = True, with_save_raw: bool = True) -> None:
+def _add_collect_flags(parser: argparse.ArgumentParser, *,
+                       with_news_pack: bool = False) -> None:
     parser.add_argument(
         "--with-macro", action="store_true",
         help="采集宏观指标（中国: PMI/CPI/PPI/LPR + 全球: VIX/SOX）",
@@ -279,15 +279,22 @@ def _add_collect_flags(parser: argparse.ArgumentParser, *, plan_default: str = a
         help="深度模式：K线窗口从默认 400 天（~1.1年）扩展至 730 天（2年），增加行业/产业链分析 + 自动采集机构研报",
     )
     _add_force_sector_sync_flag(parser)
-    # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值
-    # report 例外：--plan default=""（非 SUPPRESS），且无 --resume/--save-raw（不触发恢复/落盘逻辑）
-    parser.add_argument("--plan", default=plan_default, help="JSON 采集计划文件路径")
-    if with_resume:
-        parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
-                            help="从上次中断的步骤继续")
-    if with_save_raw:
-        parser.add_argument("--save-raw", action="store_true", default=argparse.SUPPRESS,
-                            help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
+    # SUPPRESS：子命令后置时值进同一 dest；未给出时不覆盖主 parser 默认值。
+    # 主 parser 已注册 --plan/--resume/--save-raw（默认值 ''/False），
+    # 根级前置（invest.py --plan x.json report SYM）与子命令后置形式等价。
+    # report 的 --resume/--save-raw 分支与 SKILL.md 文档形式一致（code-review #2/#3）
+    parser.add_argument("--plan", default=argparse.SUPPRESS, help="JSON 采集计划文件路径")
+    parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS,
+                        help="从上次中断的步骤继续")
+    parser.add_argument("--save-raw", action="store_true", default=argparse.SUPPRESS,
+                        help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
+    # 仅 collect/report 注册（review #12 去重；evidence/analyze/synthesize 表面不变）
+    if with_news_pack:
+        parser.add_argument(
+            "--with-news-pack",
+            action="store_true",
+            help="采集新闻包（公告 + 声明式查询包 + 可选 Tavily；无 Key 时 Layer3 静默跳过）",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -307,25 +314,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="存入持久化存储（默认开启；--no-store 关闭）")
     pc.add_argument("--no-store", action="store_false", dest="store",
                    help="不存入持久化存储")
-    _add_collect_flags(pc)
-    pc.add_argument(
-        "--with-news-pack",
-        action="store_true",
-        help="采集新闻包（公告 + 声明式查询包 + 可选 Tavily；无 Key 时 Layer3 静默跳过）",
-    )
+    _add_collect_flags(pc, with_news_pack=True)
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--mode", default="full", choices=MODE_CHOICES,
+    pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES,
                    help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
-    _add_collect_flags(pr, plan_default="", with_resume=False, with_save_raw=False)
-    pr.add_argument(
-        "--with-news-pack",
-        action="store_true",
-        help="采集新闻包（公告 + 声明式查询包 + 可选 Tavily；无 Key 时 Layer3 静默跳过）",
-    )
+    _add_collect_flags(pr, with_news_pack=True)
     pr.add_argument(
         "--strict-rigor",
         action="store_true",
@@ -407,7 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("symbol")
     psyn.add_argument("--input", default="", help="分析结果 JSON 文件路径")
     psyn.add_argument("--emit", default="md", choices=["md", "json"])
-    psyn.add_argument("--mode", default="full", choices=MODE_CHOICES)
+    psyn.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES)
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     psyn.add_argument("--no-store", action="store_false", dest="store", default=True,
@@ -559,6 +556,12 @@ def cmd_collect(args: argparse.Namespace) -> int:
                 "⚠️ --resume: 无 store 快照可恢复（需先 `collect SYMBOL --store`）",
                 file=sys.stderr,
             )
+    elif args.resume:
+        # review #3：store 模块不可用时 --resume 静默失效 → 显式警告
+        print(
+            "⚠️ --resume: store 模块不可用（导入失败），无法恢复快照，将执行全新采集",
+            file=sys.stderr,
+        )
     if args.with_macro and "kline" not in dims:
         dims.append("kline")
     if args.deep:
@@ -679,6 +682,12 @@ def cmd_report(args: argparse.Namespace) -> int:
                 "⚠️ --resume: 无 store 快照可恢复（需先 `collect SYMBOL --store`）",
                 file=sys.stderr,
             )
+    elif args.resume:
+        # review #3：store 模块不可用时 --resume 静默失效 → 显式警告
+        print(
+            "⚠️ --resume: store 模块不可用（导入失败），无法恢复快照，将执行全新采集",
+            file=sys.stderr,
+        )
     if args.with_macro and "kline" not in dims:
         dims.append("kline")
     if args.deep:
@@ -2340,11 +2349,6 @@ CMD_DISPATCH = {
 }
 
 
-def _cmd_unknown(args: argparse.Namespace) -> int:
-    """兜底分支（不可达：subparsers required=True 使未知命令在 parse_args 阶段 exit 2）。"""
-    return 1
-
-
 def main() -> int:
     env.ensure_env_loaded()
     # 全局 socket 兜底超时：必须在任何网络调用之前（.env 注入后读取才生效）。
@@ -2353,7 +2357,18 @@ def main() -> int:
     from lib.logutil import setup_logging
     setup_logging()  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     args = build_parser().parse_args()
-    return CMD_DISPATCH.get(args.command, _cmd_unknown)(args)
+    # 显式成员检查而非裸 KeyError（review #9）：与 build_parser 失步（新增子命令
+    # 只加一处）时打印指向 CMD_DISPATCH 的友好错误并 exit 1——开发者仍 fail-loud，
+    # 终端用户不再看到无指向的崩溃栈；也不用 try/except 包整个调用（避免掩盖
+    # cmd_* 内部的 KeyError）
+    if args.command not in CMD_DISPATCH:
+        print(
+            f"错误: 子命令 '{args.command}' 未注册 CMD_DISPATCH 分发表"
+            "（新增子命令须同步 build_parser 与 CMD_DISPATCH 两处）",
+            file=sys.stderr,
+        )
+        return 1
+    return CMD_DISPATCH[args.command](args)
 
 
 if __name__ == "__main__":

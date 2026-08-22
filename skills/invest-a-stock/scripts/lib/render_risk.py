@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from lib.nums import safe_float as _safe_num
+from lib.nums import ONE_PER_YI, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 from lib.participant_scan import resolve_moneyflow
 from lib.schema import ProbabilityStructure
@@ -233,14 +233,14 @@ def _section_bull_bear(
         if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 当前市值 {_fmt_v2(mcap_v * 1e8)}，当前 PE {latest_pe:.1f}x"
+                f"- 当前市值 {_fmt_v2(mcap_v * ONE_PER_YI)}，当前 PE {latest_pe:.1f}x"
                 "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0:
                 implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
                     f"- 若 PE 修复至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
-                    f"对应市值约 {_fmt_v2(implied_mc * 1e8)}"
+                    f"对应市值约 {_fmt_v2(implied_mc * ONE_PER_YI)}"
                 )
             else:
                 chain["numbers"].append(
@@ -374,14 +374,14 @@ def _section_bull_bear(
         if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 当前 PE: {latest_pe:.1f}x；当前市值 {_fmt_v2(mcap_v * 1e8)}"
+                f"- 当前 PE: {latest_pe:.1f}x；当前市值 {_fmt_v2(mcap_v * ONE_PER_YI)}"
                 "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0 and median_pe < latest_pe:
                 implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
                     f"- 若 PE 回落至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
-                    f"市值约 {_fmt_v2(implied_mc * 1e8)}"
+                    f"市值约 {_fmt_v2(implied_mc * ONE_PER_YI)}"
                 )
             elif median_pe is None:
                 chain["numbers"].append(

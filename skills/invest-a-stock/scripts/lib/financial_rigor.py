@@ -13,7 +13,7 @@ from decimal import Decimal, DivisionByZero, InvalidOperation
 from typing import Any
 
 from .data_util import merge_first_non_empty
-from .nums import coalesce_field, safe_float
+from .nums import ONE_PER_WAN, ONE_PER_YI, coalesce_field, parse_shares_wan
 from .schema import SourceResult, _auto_cross_validate, index_dimensions, relative_diff_pct
 
 FAIL_THRESHOLD_PCT = 5.0
@@ -73,7 +73,11 @@ def _quote_snapshot(quote_data: Any) -> dict:
 
 
 def _parse_share_count(basic: dict) -> float | None:
-    """Parse total shares from basic_info (万股 → 万股 float)."""
+    """Parse total shares from basic_info (万股 → 万股 float).
+
+    值解析委托 nums.parse_shares_wan（review #10 统一副本），本函数只做
+    多键查找（总股本 → total_share → float_share）。
+    """
     raw = basic.get("总股本")
     if raw is None:
         raw = basic.get("total_share")
@@ -81,19 +85,7 @@ def _parse_share_count(basic: dict) -> float | None:
         raw = basic.get("float_share")
     if raw is None:
         return None
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    s = str(raw).strip().replace(",", "")
-    mult = 1.0
-    if "亿" in s:
-        mult = 1e4  # 亿股 → 万股
-        s = s.replace("亿股", "").replace("亿", "")
-    elif "万" in s:
-        s = s.replace("万股", "").replace("万", "")
-    try:
-        return float(s) * mult
-    except ValueError:
-        return safe_float(raw)
+    return parse_shares_wan(raw)
 
 
 def _merge_share_fields(basic_dim: dict) -> dict:
@@ -140,8 +132,8 @@ def verify_market_cap(collection: dict) -> list[RigorReport]:
             detail="缺少 price/总股本/total_mv 之一，跳过验算",
         )]
 
-    # price 元/股 × 万股 × 1e4 / 1e8 = 亿元
-    computed_mv = price * shares_wan * 1e4 / 1e8
+    # price 元/股 × 万股 × ONE_PER_WAN / ONE_PER_YI = 亿元
+    computed_mv = price * shares_wan * ONE_PER_WAN / ONE_PER_YI
     dev = _deviation_pct(reported_mv, computed_mv)
     return [RigorReport(
         command="verify-market-cap",
@@ -227,7 +219,7 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
         else:
             # 单位推断：绝对值 >100万 → 视为"元"→ 转换为"亿"；≤100万 → 视为已是"亿"
             # 注意：微利公司（净利润<100万但以元计）会被误判，导致 PE 偏高
-            ni_yi = net_income / 1e8 if abs(net_income) > 1e6 else net_income
+            ni_yi = net_income / ONE_PER_YI if abs(net_income) > 1e6 else net_income
             if ni_yi and ni_yi > 0:
                 pe_calc = reported_mv / ni_yi
                 dev = _deviation_pct(pe_reported, pe_calc)
@@ -247,7 +239,7 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
         # PB 恒比最新净资产错配）——与 PE 共用同一次排序取最新。
         pb_reported = coalesce_field(last_val, "pb")
     if pb_reported is not None and reported_mv is not None and equity is not None:
-        eq_yi = equity / 1e8 if abs(equity) > 1e6 else equity
+        eq_yi = equity / ONE_PER_YI if abs(equity) > 1e6 else equity
         if eq_yi and eq_yi > 0:
             pb_calc = reported_mv / eq_yi
             dev = _deviation_pct(pb_reported, pb_calc)
@@ -276,7 +268,7 @@ def verify_valuation(collection: dict) -> list[RigorReport]:
         ))
 
     if reported_mv is not None and ocf is not None and reported_mv > 0:
-        ocf_yi = ocf / 1e8 if abs(ocf) > 1e6 else ocf
+        ocf_yi = ocf / ONE_PER_YI if abs(ocf) > 1e6 else ocf
         fcf_yield_calc = ocf_yi / reported_mv * 100
         reports.append(RigorReport(
             command="verify-valuation",

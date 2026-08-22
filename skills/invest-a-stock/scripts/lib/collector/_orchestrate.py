@@ -1,26 +1,74 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
+import logging
 import math
 import sys
-import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-import）
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
+import threading
+import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any, Callable
 
-from lib.nums import row_value_or_last  # review 二轮 R-13：dict 行末列兜底（可单测）
+from lib.nums import (  # review 二轮 R-13：dict 行末列兜底（可单测）
+    ONE_PER_WAN,
+    ONE_PER_YI,
+    WAN_PER_YI,
+    coalesce_field,
+    row_value_or_last,
+    safe_float,
+)
 
-from . import _base as __base_ref
-for __base_n in dir(__base_ref):
-    if not __base_n.startswith("__"):
-        globals()[__base_n] = getattr(__base_ref, __base_n)
-del __base_ref, __base_n
+# code-review #9：弃用 dir()-copy 隐式再导出，消费名全部显式导入
+from .. import env
+from ..proxy import akshare_direct_session, akshare_push2_available
+from ..schema import DimensionResult, SourceResult
+from ..shared_dates import (
+    shanghai_days_ago as _days_ago,
+    shanghai_today as _today,
+    yyyymmdd_to_iso as _to_iso_date,
+)
 
-
-from . import _sources as __sources_ref
-for __sources_n in dir(__sources_ref):
-    if not __sources_n.startswith("__"):
-        globals()[__sources_n] = getattr(__sources_ref, __sources_n)
-del __sources_ref, __sources_n
+from ._base import (
+    _annotate_query_params,
+    _fred_date,
+    _latest_quarter_end,
+    _map_parallel,
+    _proxy_bypass,
+    _run_in_thread,
+    _run_one_source,
+    _run_sources_cascade,
+    _run_sources_parallel,
+    _ts_code,
+)
+from ._sources import (
+    _apply_qfq,
+    _flow_amount_yuan,
+    _q_akshare_basic,
+    _q_akshare_financials,
+    _q_akshare_industry_board,
+    _q_akshare_industry_pe,
+    _q_akshare_kline,
+    _q_akshare_northbound,
+    _q_akshare_shareholders,
+    _q_baostock_kline,
+    _q_tencent_quote,
+    _q_tickflow_kline,
+    _q_tushare_adj_factor,
+    _q_tushare_basic,
+    _q_tushare_daily,
+    _q_tushare_daily_qfq,
+    _q_tushare_financials,
+    _q_tushare_hsgt_top10,
+    _q_tushare_moneyflow,
+    _q_tushare_shareholders,
+    _qp_akshare,
+    _qp_baostock,
+    _qp_tencent,
+    _qp_tickflow,
+    _qp_tushare,
+    _require_tushare,
+    _tushare_client,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -335,7 +383,7 @@ def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
         for rec in records:
             mv = safe_float(rec.get("total_mv"))
             if mv is not None:
-                rec["total_mv"] = mv / 10000.0  # 万元 → 亿元
+                rec["total_mv"] = mv / WAN_PER_YI  # 万元 → 亿元
         from lib.technical import sort_kline_asc
 
         return sort_kline_asc(records)
@@ -569,7 +617,7 @@ def _summarize_research(tushare_rc: list[dict] | None,
                     np_by_quarter[q] = []
                 np_by_quarter[q].append(np_val)
         summary["profit_forecasts"] = [
-            {"quarter": q, "avg_np_100m": round(sum(vs) / len(vs) / 10000, 2),
+            {"quarter": q, "avg_np_100m": round(sum(vs) / len(vs) / WAN_PER_YI, 2),
              "n_analysts": len(vs)}
             for q, vs in sorted(np_by_quarter.items())
         ]
@@ -612,12 +660,12 @@ def _summarize_research(tushare_rc: list[dict] | None,
                 "pct_change_max": p_max,
             }
             if profit_min is not None and profit_max is not None:
-                guidance["profit_min_100m"] = round(profit_min / 10000, 2)
-                guidance["profit_max_100m"] = round(profit_max / 10000, 2)
+                guidance["profit_min_100m"] = round(profit_min / WAN_PER_YI, 2)
+                guidance["profit_max_100m"] = round(profit_max / WAN_PER_YI, 2)
             elif last_net is not None and p_min is not None and p_max is not None:
-                guidance["profit_min_100m"] = round(last_net * (1 + p_min / 100) / 10000, 2)
-                guidance["profit_max_100m"] = round(last_net * (1 + p_max / 100) / 10000, 2)
-                guidance["last_parent_net_100m"] = round(last_net / 10000, 2)
+                guidance["profit_min_100m"] = round(last_net * (1 + p_min / 100) / WAN_PER_YI, 2)
+                guidance["profit_max_100m"] = round(last_net * (1 + p_max / 100) / WAN_PER_YI, 2)
+                guidance["last_parent_net_100m"] = round(last_net / WAN_PER_YI, 2)
             summary["company_guidance"] = guidance
             summary["source"] = "tushare.forecast"
             summary["status"] = "ok_guidance_only"
@@ -934,9 +982,9 @@ def _parse_holder_change_vol(raw) -> float | None:
     val = float(m.group(1))
     unit = m.group(2) or ""
     if unit == "万":
-        val *= 10000
+        val *= ONE_PER_WAN
     elif unit == "亿":
-        val *= 1e8
+        val *= ONE_PER_YI
     return val
 
 
@@ -945,7 +993,7 @@ def _holder_vol_key(raw) -> str:
     v = _parse_holder_change_vol(raw)
     if v is None:
         return str(raw or "")
-    return f"{round(v / 10000, 2)}"
+    return f"{round(v / ONE_PER_WAN, 2)}"
 
 
 def _normalize_holder_name(name: str) -> str:
@@ -1629,66 +1677,77 @@ def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict,
             kline_dim["derived"] = derived
 
 
-def _collect_dims_fanout(symbol: str, dims: list[str], kline_kwargs: dict) -> dict[str, dict]:
-    """跨维度并行扇出（ThreadPoolExecutor）。失败维度写 status=missing 骨架。"""
-    dim_results: dict[str, dict] = {}
-    dim_start: dict[str, float] = {}
-    with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
-        future_map = {}
-        for dim in dims:
-            if dim not in COLLECTORS:
-                logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
-                continue
-            if dim == "industry_pricing":
-                # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
-                continue
-            dim_start[dim] = time.time()
-            _, fn = COLLECTORS[dim]
-            if dim == "kline" and kline_kwargs:
-                future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
-            else:
-                future_map[executor.submit(fn, symbol)] = dim
+def _dimension_missing_skeleton(dim: str, exc: Exception, *,
+                                display: str | None = None) -> dict:
+    """维度采集失败骨架（status=missing 统一形状，review #8）。
 
-        for future in as_completed(future_map):
-            dim = future_map[future]
-            try:
-                dim_results[dim] = future.result()
-                logger.info("dimension=%s done in %.1fs", dim,
-                            time.time() - dim_start[dim])
-            except Exception as exc:
-                dim_results[dim] = {
-                    "dimension": dim,
-                    "display": COLLECTORS[dim][0] if dim in COLLECTORS else dim,
-                    "data": None,
-                    "status": "missing",
-                    "error": f"维度采集失败: {exc}",
-                    "_meta": {"source": "none", "success": False,
-                              "all_sources": [], "multi_source": False,
-                              "source_count": 0, "error": str(exc)},
-                }
+    fanout 失败维度与 _collect_industry_pricing_block 共用；display 缺省取
+    COLLECTORS[dim][0]，未知维度回退 dim 自身。
+    """
+    return {
+        "dimension": dim,
+        "display": display if display is not None
+        else (COLLECTORS[dim][0] if dim in COLLECTORS else dim),
+        "data": None,
+        "status": "missing",
+        "error": f"维度采集失败: {exc}",
+        "_meta": {"source": "none", "success": False,
+                  "all_sources": [], "multi_source": False,
+                  "source_count": 0, "error": str(exc)},
+    }
+
+
+def _collect_dims_fanout(symbol: str, dims: list[str], kline_kwargs: dict) -> dict[str, dict]:
+    """跨维度并行扇出。失败维度写 status=missing 骨架。
+
+    收敛共享 _base._map_parallel fan-out 样板（review #7）：worker 公式
+    max(1, min(n, _env_max_workers())) 尊重 INVEST_MAX_WORKERS 且空任务
+    提前返回（dims=[] 不再 max_workers=0 崩溃，review #2）。
+    """
+    tasks: list[tuple[str, Callable[[], Any]]] = []
+    for dim in dims:
+        if dim not in COLLECTORS:
+            logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
+            continue
+        if dim == "industry_pricing":
+            # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
+            continue
+        _, fn = COLLECTORS[dim]
+        if dim == "kline" and kline_kwargs:
+            # lambda 默认参数绑定，防循环变量晚绑定（fn/kw 逐维不同）
+            tasks.append((dim, lambda fn=fn, kw=kline_kwargs: fn(symbol, **kw)))
+        else:
+            tasks.append((dim, lambda fn=fn: fn(symbol)))
+
+    dim_results: dict[str, dict] = {}
+    dim_start = {dim: time.time() for dim, _ in tasks}
+
+    def _on_error(item: tuple[str, Callable], exc: Exception) -> None:
+        dim_results[item[0]] = _dimension_missing_skeleton(item[0], exc)
+
+    for (dim, _fn), value in _map_parallel(tasks, lambda item: item[1](),
+                                           on_error=_on_error):
+        if value is not None:
+            dim_results[dim] = value
+            logger.info("dimension=%s done in %.1fs", dim,
+                        time.time() - dim_start[dim])
     return dim_results
 
 
-def _collect_industry_pricing_block(symbol: str, dims: list[str], dim_results: dict) -> None:
-    """industry_pricing 依赖 industry 解析结果，扇出后顺序采集（原地变异 dim_results）。"""
+def _collect_industry_pricing_block(symbol: str, dims: list[str],
+                                    dim_results: dict) -> dict | None:
+    """industry_pricing 依赖 industry 解析结果，扇出后顺序采集。
+
+    与兄弟 helper（_fuse_dimensions/_score_credibility 等）对齐：返回结果、
+    调用方写入 dim_results；未请求该维度时返回 None。
+    """
     if "industry_pricing" not in dims:
-        return
+        return None
     try:
         industry = _resolve_industry_for_pricing(symbol, dim_results)
-        dim_results["industry_pricing"] = collect_industry_pricing(symbol, industry)
+        return collect_industry_pricing(symbol, industry)
     except Exception as exc:
-        dim_results["industry_pricing"] = {
-            "dimension": "industry_pricing",
-            "display": COLLECTORS["industry_pricing"][0],
-            "data": None,
-            "status": "missing",
-            "error": f"维度采集失败: {exc}",
-            "_meta": {
-                "source": "none", "success": False,
-                "all_sources": [], "multi_source": False,
-                "source_count": 0, "error": str(exc),
-            },
-        }
+        return _dimension_missing_skeleton("industry_pricing", exc)
 
 
 def _order_dimensions(dims: list[str], dim_results: dict) -> list:
@@ -1818,12 +1877,19 @@ def _attach_phase2_block(result: dict, symbol: str) -> None:
 
 
 def _attach_events_block(result: dict, symbol: str, deep: bool) -> None:
-    """Attach events (not a default dim, always runs)。"""
+    """Attach events (not a default dim, always runs)。
+
+    import 与调用失败均 non-fatal（code-review 2026-08-22 #1）：lib.events
+    附属组件链断裂时跳过 events、保留已采集结果，不让数分钟采集成果整锅丢弃。
+    report_qc 对 collect_all 是泛化 except（report_qc.py:463-480 任意异常 →
+    两层 fail），不依赖此处 raise；quality/rigor 层不消费 events。
+    meta["deep"] 在 import 之前绑定，失败时亦保证落盘。
+    """
+    meta = result.setdefault("_meta", {})
+    meta["deep"] = deep
+    event_days = 90 if deep else 30
     try:
         from lib.events import attach_events
-        meta = result.setdefault("_meta", {})
-        meta["deep"] = deep
-        event_days = 90 if deep else 30
         attach_events(result, symbol, days=event_days)
     except Exception as e:
         logger.warning("attach_events failed (non-fatal): %s", e)
@@ -1841,9 +1907,8 @@ def _attach_analysis_cards_block(result: dict) -> None:
 def _attach_manifest_block(result: dict) -> None:
     """Generate collection manifest (Task 9, P1)。
 
-    meta 经 result.setdefault 重取而非跨函数传引用；相对原内联版是边缘硬化：
-    lib.events import 失败时原版在 except 内 meta 未定义会 NameError 上抛，
-    现静默降级 manifest=None（正常路径行为零变化）。
+    生成失败 non-fatal：manifest=None（正常路径行为不变）。
+    events/analysis 块均为 non-fatal，meta 由各块 setdefault 自绑定。
     """
     try:
         from lib.manifest import generate_manifest
@@ -1889,7 +1954,10 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         force_sector_sync: 绕过 F1 冷缓存门控强制计算板块同步性（首次预热，
             成分股日线全量抓取约 5-10 分钟；默认冷缓存时跳过并标注原因）
     """
-    if dims is None:
+    # 空列表（如 CLI --dims "" 解析结果）视同 None 填默认维度；
+    # 显式语义 + 日志提示（review #2：不静默跑全量）
+    if not dims:
+        logger.warning("dims 为空（如 --dims \"\"），按默认维度采集: %s", list(_DEFAULT_DIMS))
         dims = list(_DEFAULT_DIMS)
 
     start_all = time.time()
@@ -1900,7 +1968,9 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         kline_kwargs["start_date"] = _days_ago(730)
 
     dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
-    _collect_industry_pricing_block(symbol, dims, dim_results)
+    industry_pricing = _collect_industry_pricing_block(symbol, dims, dim_results)
+    if industry_pricing is not None:
+        dim_results["industry_pricing"] = industry_pricing
 
     # 按输入顺序排列
     dimensions = _order_dimensions(dims, dim_results)
@@ -3046,7 +3116,7 @@ def _ms_fetch_etf_flow(tc: Any) -> dict | None:
         px = prices.get(str(last.get("trade_date", "")))
         if px is None or px <= 0:
             return None
-        return d_shares * 10000 * px, span  # fd_share 单位：万份
+        return d_shares * ONE_PER_WAN * px, span  # fd_share 单位：万份
 
     flow_5d = _net_flow(5)
     flow_10d = _net_flow(10)
@@ -3647,7 +3717,6 @@ def _safe_peer_num(v) -> float | None:
 def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
     """akshare 回退方案：使用东方财富行业板块成分股进行行业横向对比。"""
     import akshare as ak  # noqa: F811
-    from ..proxy import akshare_direct_session
 
     # 1. 获取基本信息和行业分类
     info = _q_akshare_basic(symbol)
@@ -3729,7 +3798,7 @@ def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
         # Normalize total_mv: akshare spot data returns 元 → 亿元
         mv_raw = entry.get("total_mv")
         if mv_raw is not None:
-            entry["total_mv"] = mv_raw / 1e8
+            entry["total_mv"] = mv_raw / ONE_PER_YI
 
         if code == target_code:
             target_entry = entry
@@ -3802,7 +3871,7 @@ def collect_peer_comparison(
                 for entry in ([target] if target else []) + peers:
                     mv = entry.get("total_mv")
                     if mv is not None:
-                        entry["total_mv"] = mv / 10000.0
+                        entry["total_mv"] = mv / WAN_PER_YI
 
                 return {
                     "symbol": symbol,
