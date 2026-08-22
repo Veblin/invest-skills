@@ -1801,6 +1801,82 @@ def format_output(result: ValuationResult) -> str:
     return "\n".join(lines)
 
 
+def _format_steady_block(steady: dict) -> str:
+    """R2: 稳态盈利估值块文本渲染（value --steady）。"""
+    ste = steady.get("steady") or {}
+    lines = ["", "【稳态盈利估值（R2 · 穿越周期视角）】"]
+    if not ste.get("available"):
+        lines.append(f"  ⚠️ {ste.get('reason', '稳态盈利不可得')}")
+        return "\n".join(lines)
+    lines.append(f"  年度净利样本: {ste.get('period')}（{ste.get('n_years')} 年, method={ste.get('method')}）")
+    steady_earnings = ste["steady_earnings"]
+    if steady_earnings <= 0:
+        lines.append(
+            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
+            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元，"
+            "亏损期——稳态估值带不适用）"
+        )
+    else:
+        lines.append(
+            f"  稳态盈利: {steady_earnings/1e8:.2f} 亿元"
+            f"（年度区间 {ste['min']/1e8:.2f}~{ste['max']/1e8:.2f} 亿元）"
+        )
+    band = steady.get("band")
+    mv = steady.get("mv_vs_steady")
+    if band:
+        lines.append(
+            f"  周期中枢 PE: {band['cycle_pe']} | 稳态市值带:"
+            f" {band['low']/1e8:.0f}~{band['mid']/1e8:.0f}~{band['high']/1e8:.0f} 亿元（±{band['band_pct']*100:.0f}%）"
+        )
+    if mv and mv.get("total_mv_yi"):
+        if mv["steady_mv_high_yi"] and mv["total_mv_yi"] > mv["steady_mv_high_yi"]:
+            over = (mv["total_mv_yi"] / mv["steady_mv_high_yi"] - 1) * 100
+            pos = f"高于稳态上沿 {over:.0f}%——历史经验：周期股盈利高点常伴随低 PE 错觉（海力士式），但并非充分条件"
+        elif mv["steady_mv_low_yi"] and mv["total_mv_yi"] < mv["steady_mv_low_yi"]:
+            under = (mv["steady_mv_low_yi"] / mv["total_mv_yi"] - 1) * 100
+            pos = f"低于稳态下沿 {under:.0f}%——穿越周期视角存在低估"
+        else:
+            pos = "处于稳态市值带内"
+        lines.append(f"  当期市值 {mv['total_mv_yi']:.0f} 亿元 vs 稳态带: {pos}")
+    lines.append("  （稳态估值为多情景参考，非目标价；概率权重由用户自设）")
+    return "\n".join(lines)
+
+
+def _format_ev_ebitda_block(ev: dict) -> str:
+    """R3: EV/EBITDA 桥接表文本渲染（value --ev-ebitda）。"""
+    lines = ["", "【EV/EBITDA 企业价值桥接（R3）】"]
+    if ev.get("exempt"):
+        lines.append(f"  ⚠️ {ev.get('reason', '不适用')}")
+        return "\n".join(lines)
+    if not ev.get("available"):
+        lines.append(f"  ⚠️ 桥接数据不可得（缺失: {', '.join(ev.get('missing') or [])}）")
+        if ev.get("ebitda_note"):
+            lines.append(f"  · {ev['ebitda_note']}")
+        if ev.get("note"):
+            lines.append(f"  · {ev['note']}")
+        return "\n".join(lines)
+    b = ev["bridge"]
+    lines.append("  桥接表（逐项可审计）:")
+    lines.append(f"    - 市值: {b['mv_yi']} 亿元")
+    if b["interest_debt_yi"] is not None:
+        # 标签由引擎预计算（debt_label 仅含可得分量，缺失科目按 0 计但不出现在
+        # 标签，防行内口径误导，batch-test P1-2）；interest_debt_yi 非 None 时
+        # debt_label 必非 None（valuation_calc 同分支保证），无兜底
+        lines.append(f"    + 有息负债: {b['interest_debt_yi']} 亿元（{ev['debt_label']}）")
+    else:
+        lines.append(f"    + 有息负债: 不可得（降级净现金口径）")
+    lines.append(f"    - 现金: {b['cash_yi']} 亿元")
+    lines.append(f"    = EV: {b['ev_yi']} 亿元")
+    period_s = f"（{ev['ebitda_period']} 年报期）" if ev.get("ebitda_period") else ""
+    lines.append(f"  EBITDA: {ev['ebitda_yi']} 亿元{period_s} → EV/EBITDA = {ev['ev_ebitda']}x")
+    if ev.get("note"):
+        lines.append(f"  ⚠️ {ev['note']}")
+    if ev.get("takeover_payback_years"):
+        lines.append(f"  私有化检验（研究问题）: 回本年限 ≈ {ev['takeover_payback_years']} 年")
+        lines.append(f"    · {ev['takeover_note']}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
