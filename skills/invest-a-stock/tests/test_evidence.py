@@ -1,6 +1,5 @@
 """Tests for evidence table generation (R-07)."""
 import json
-import pytest
 from lib.evidence import (
     EvidenceRow,
     build_evidence_table,

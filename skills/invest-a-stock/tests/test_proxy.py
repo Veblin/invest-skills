@@ -6,7 +6,6 @@ import os
 import threading
 import time
 
-import pytest
 
 
 class TestProxyDetection:

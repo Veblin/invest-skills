@@ -10,7 +10,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
 
 from lib.schema import SourceResult
 

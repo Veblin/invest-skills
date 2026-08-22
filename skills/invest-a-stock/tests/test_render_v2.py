@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
 
 from stock_testutil import FORBIDDEN_SIGNAL_WORDS
 from fixtures.collections import (

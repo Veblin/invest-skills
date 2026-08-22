@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from lib.schema import (
-    CrossValidation,
     DimensionResult,
     SourceResult,
     _auto_cross_validate,
