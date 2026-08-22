@@ -1782,6 +1782,92 @@ def _assemble_result(symbol: str, dimensions: list, fusion_results: dict,
     }
 
 
+def _attach_sector_sync_block(result: dict, symbol: str, dim_results: dict, force: bool) -> None:
+    """E1: 板块同步性引擎（v0.2.7）— 6 个 derived 字段 + collection['sector_sync'] 详情。
+
+    依赖 kline + basic_info；板块指数/成分股不可得时内部 fail loud（输出「不可得」，
+    不给默认值）。F1 冷缓存门控：成分股逐只首跑 5-10 分钟，默认冷缓存跳过；
+    --force-sector-sync 强制预热，之后经 DataCache 缓存同板块多标的秒级复用。
+    """
+    try:
+        _attach_sector_sync(result, symbol, dim_results, force=force)
+    except Exception as exc:
+        logger.warning("sector_sync attach failed for %s: %s", symbol, exc)
+        # 异常兜底同样走 13 键统一骨架（含 fields/meta），消费者按统一 schema
+        # 读取不 KeyError；error 键供排障
+        result["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 采集异常: {exc}", error=str(exc))
+
+
+def _attach_phase2_block(result: dict, symbol: str) -> None:
+    """Phase 2 同行采集（异常兜底行业骨架）。"""
+    try:
+        attach_phase2_extras(result, symbol)
+    except Exception as exc:
+        logger.warning("attach_phase2_extras failed for %s: %s", symbol, exc)
+        result.setdefault("phase2_extras_errors", []).append(str(exc))
+        if not result.get("industry_peers"):
+            result["industry_peers"] = {
+                "peers": [],
+                "target": None,
+                "rankings": {},
+                "industry_name": None,
+                "sufficient": False,
+                "error": f"Phase 2 同行采集异常: {exc}",
+            }
+
+
+def _attach_events_block(result: dict, symbol: str, deep: bool) -> None:
+    """Attach events (not a default dim, always runs)。"""
+    try:
+        from lib.events import attach_events
+        meta = result.setdefault("_meta", {})
+        meta["deep"] = deep
+        event_days = 90 if deep else 30
+        attach_events(result, symbol, days=event_days)
+    except Exception as e:
+        logger.warning("attach_events failed (non-fatal): %s", e)
+
+
+def _attach_analysis_cards_block(result: dict) -> None:
+    """Build analysis cards (Template A/B/C)。"""
+    try:
+        from lib.analysis_templates import build_analysis_cards
+        build_analysis_cards(result)
+    except Exception as e:
+        logger.warning("build_analysis_cards failed (non-fatal): %s", e)
+
+
+def _attach_manifest_block(result: dict) -> None:
+    """Generate collection manifest (Task 9, P1)。
+
+    meta 经 result.setdefault 重取而非跨函数传引用；相对原内联版是边缘硬化：
+    lib.events import 失败时原版在 except 内 meta 未定义会 NameError 上抛，
+    现静默降级 manifest=None（正常路径行为零变化）。
+    """
+    try:
+        from lib.manifest import generate_manifest
+        meta = result.setdefault("_meta", {})
+        meta["manifest"] = generate_manifest(result)
+    except Exception as e:
+        logger.warning("manifest generation failed (non-fatal): %s", e)
+        result.setdefault("_meta", {})["manifest"] = None
+
+
+def _attach_news_pack_block(result: dict, symbol: str, with_news_pack: bool) -> None:
+    """新闻包（公告 + 查询包 + 可选 Tavily，opt-in）。"""
+    if with_news_pack:
+        try:
+            attach_news_pack(result, symbol)
+        except Exception as exc:
+            logger.warning("attach_news_pack failed for %s: %s", symbol, exc)
+            result["news"] = {
+                "cards": [],
+                "query_pack": [],
+                "attempted_sources": {"error": str(exc)},
+            }
+
+
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
@@ -1826,68 +1912,12 @@ def collect_all(symbol: str, dims: list[str] | None = None,
 
     result = _assemble_result(symbol, dimensions, fusion_results,
                               credibility_scores, macro_context, chain_context)
-    # E1: 板块同步性引擎（v0.2.7）— 6 个 derived 字段 + collection['sector_sync'] 详情。
-    # 依赖 kline + basic_info；板块指数/成分股不可得时内部 fail loud（输出「不可得」，
-    # 不给默认值）。F1 冷缓存门控：成分股逐只首跑 5-10 分钟，默认冷缓存跳过；
-    # --force-sector-sync 强制预热，之后经 DataCache 缓存同板块多标的秒级复用。
-    try:
-        _attach_sector_sync(result, symbol, dim_results, force=force_sector_sync)
-    except Exception as exc:
-        logger.warning("sector_sync attach failed for %s: %s", symbol, exc)
-        # 异常兜底同样走 13 键统一骨架（含 fields/meta），消费者按统一 schema
-        # 读取不 KeyError；error 键供排障
-        result["sector_sync"] = _sector_sync_skeleton(
-            symbol, reason=f"sector_sync 采集异常: {exc}", error=str(exc))
-    try:
-        attach_phase2_extras(result, symbol)
-    except Exception as exc:
-        logger.warning("attach_phase2_extras failed for %s: %s", symbol, exc)
-        result.setdefault("phase2_extras_errors", []).append(str(exc))
-        if not result.get("industry_peers"):
-            result["industry_peers"] = {
-                "peers": [],
-                "target": None,
-                "rankings": {},
-                "industry_name": None,
-                "sufficient": False,
-                "error": f"Phase 2 同行采集异常: {exc}",
-            }
-
-    # Attach events (not a default dim, always runs)
-    try:
-        from lib.events import attach_events
-        meta = result.setdefault("_meta", {})
-        meta["deep"] = deep
-        event_days = 90 if deep else 30
-        attach_events(result, symbol, days=event_days)
-    except Exception as e:
-        logger.warning("attach_events failed (non-fatal): %s", e)
-
-    # Build analysis cards (Template A/B/C)
-    try:
-        from lib.analysis_templates import build_analysis_cards
-        build_analysis_cards(result)
-    except Exception as e:
-        logger.warning("build_analysis_cards failed (non-fatal): %s", e)
-
-    # Generate collection manifest (Task 9, P1)
-    try:
-        from lib.manifest import generate_manifest
-        meta["manifest"] = generate_manifest(result)
-    except Exception as e:
-        logger.warning("manifest generation failed (non-fatal): %s", e)
-        meta["manifest"] = None
-
-    if with_news_pack:
-        try:
-            attach_news_pack(result, symbol)
-        except Exception as exc:
-            logger.warning("attach_news_pack failed for %s: %s", symbol, exc)
-            result["news"] = {
-                "cards": [],
-                "query_pack": [],
-                "attempted_sources": {"error": str(exc)},
-            }
+    _attach_sector_sync_block(result, symbol, dim_results, force_sector_sync)
+    _attach_phase2_block(result, symbol)
+    _attach_events_block(result, symbol, deep)
+    _attach_analysis_cards_block(result)
+    _attach_manifest_block(result)
+    _attach_news_pack_block(result, symbol, with_news_pack)
 
     logger.info("collect_all total=%.1fs symbol=%s dims=%d",
                 time.time() - start_all, symbol, len(dims))
