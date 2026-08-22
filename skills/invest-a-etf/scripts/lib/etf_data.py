@@ -56,6 +56,14 @@ _NAV_FETCH_NATURAL_DAYS = 700
 # query_etf_share_history 请求；超窗在查询侧显式告警而非静默少返回
 _SHARE_FETCH_NATURAL_DAYS = 250
 
+# query_etf_kline 输出 note 文案（原内联字符串上提，逐字节不变）
+_RSI_NOTE = ("Wilder RSI on NAV closes，默认周期 24（ETF NAV 波动低于个股价格，"
+             "较标准 14 周期更平滑；数据不足时降级为 14），非交易信号")
+_ADJ_NOTE = ("NAV 序列已通过 Tushare fund_adj 前复权（消除分红/拆分造成的断点），"
+             "MA/波动率/RSI/BOLL 基于复权后序列计算；"
+             "nav_history.change_pct 基于复权 NAV 重新计算，"
+             "原始 日增长率 不再适用")
+
 
 # ---------------------------------------------------------------------------
 # 对冲工具覆盖映射表
@@ -1253,6 +1261,25 @@ def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
     return result
 
 
+def _fill_boll_band(result: dict, navs: list[float], symbol: str) -> None:
+    """D8: BOLL 布林带（基于 NAV 序列，SMA(20) ± 2×std，用于波动率区间判断）。
+
+    引擎统一计算（lib.technical.boll_latest，总体方差，Bollinger 定义）；
+    数据不足（<20 行）或计算失败静默跳过（形态对齐 _fetch_index_ma）。
+    """
+    if len(navs) >= 20:
+        try:
+            boll = boll_latest(navs)
+            if boll["mid"] is not None:
+                result["boll_mid"] = round(boll["mid"], 4)
+            if boll["upper"] is not None:
+                result["boll_upper"] = round(boll["upper"], 4)
+            if boll["lower"] is not None:
+                result["boll_lower"] = round(boll["lower"], 4)
+        except Exception as exc:
+            logger.info("boll(%s) skipped: %s", symbol, exc)
+
+
 def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
     """ETF 净值序列 + 年化波动率计算。
 
@@ -1274,7 +1301,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "adj_note": None,
         "rsi": None,
         "rsi_period": None,
-        "rsi_note": "Wilder RSI on NAV closes，默认周期 24（ETF NAV 波动低于个股价格，较标准 14 周期更平滑；数据不足时降级为 14），非交易信号",
+        "rsi_note": _RSI_NOTE,
         "ma20": None,
         "ma60": None,
         "index_ma20": None,
@@ -1342,12 +1369,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         adj_map = adj_env.get("adj_map") if adj_env and adj_env.get("status") == "ok" else None
         if adj_map:
             result["adj_applied"] = True
-            result["adj_note"] = (
-                "NAV 序列已通过 Tushare fund_adj 前复权（消除分红/拆分造成的断点），"
-                "MA/波动率/RSI/BOLL 基于复权后序列计算；"
-                "nav_history.change_pct 基于复权 NAV 重新计算，"
-                "原始 日增长率 不再适用"
-            )
+            result["adj_note"] = _ADJ_NOTE
 
         navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
         # 裁剪上下文行（date < start）：仅当上下文切片实际生效（非兜底）时执行，
@@ -1402,19 +1424,8 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             except Exception as exc:
                 logger.info("index_ma(%s/%s) skipped: %s", symbol, idx_code, exc)
 
-        # D8: BOLL 布林带（基于 NAV 序列，SMA(20) ± 2×std，用于波动率区间判断）
-        # 引擎统一计算（lib.technical.boll_latest，总体方差，Bollinger 定义）
-        if len(navs) >= 20:
-            try:
-                boll = boll_latest(navs)
-                if boll["mid"] is not None:
-                    result["boll_mid"] = round(boll["mid"], 4)
-                if boll["upper"] is not None:
-                    result["boll_upper"] = round(boll["upper"], 4)
-                if boll["lower"] is not None:
-                    result["boll_lower"] = round(boll["lower"], 4)
-            except Exception as exc:
-                logger.info("boll(%s) skipped: %s", symbol, exc)
+        # D8: BOLL 布林带（基于 NAV 序列）
+        _fill_boll_band(result, navs, symbol)
 
         period = 24 if len(navs) >= 25 else (14 if len(navs) >= 15 else None)
         if period is not None:
