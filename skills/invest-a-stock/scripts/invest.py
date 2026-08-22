@@ -2412,6 +2412,25 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
 
 
+# 命令分发表：与 build_parser 的 26 个 sub.add_parser 一一对应（新增子命令须同步两处）
+CMD_DISPATCH = {
+    "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
+    "diff": cmd_diff, "watchlist": cmd_watchlist, "diagnose": cmd_diagnose,
+    "lint": cmd_lint, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
+    "evidence": cmd_evidence, "analyze": cmd_analyze, "synthesize": cmd_synthesize,
+    "rigor": cmd_rigor, "audit": cmd_audit, "check": cmd_check,
+    "portfolio": cmd_portfolio, "thesis": cmd_thesis, "shock": cmd_shock,
+    "risk-reward": cmd_risk_reward, "ic": cmd_ic, "value": cmd_value,
+    "classify": cmd_classify, "market-status": cmd_market_status,
+    "etf-flow": cmd_etf_flow, "catalyst": cmd_catalyst,
+}
+
+
+def _cmd_unknown(args: argparse.Namespace) -> int:
+    """兜底分支（不可达：subparsers required=True 使未知命令在 parse_args 阶段 exit 2）。"""
+    return 1
+
+
 def main() -> int:
     env.ensure_env_loaded()
     # 全局 socket 兜底超时：必须在任何网络调用之前（.env 注入后读取才生效）。
@@ -2420,59 +2439,7 @@ def main() -> int:
     from lib.logutil import setup_logging
     setup_logging()  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     args = build_parser().parse_args()
-    if args.command == "collect":
-        return cmd_collect(args)
-    elif args.command == "report":
-        return cmd_report(args)
-    elif args.command == "compare":
-        return cmd_compare(args)
-    elif args.command == "diff":
-        return cmd_diff(args)
-    elif args.command == "watchlist":
-        return cmd_watchlist(args)
-    elif args.command == "diagnose":
-        return cmd_diagnose(args)
-    elif args.command == "lint":
-        return cmd_lint(args)
-    elif args.command == "peer":
-        return cmd_peer(args)
-    elif args.command == "store":
-        return cmd_store(args)
-    elif args.command == "plan":
-        return cmd_plan(args)
-    elif args.command == "evidence":
-        return cmd_evidence(args)
-    elif args.command == "analyze":
-        return cmd_analyze(args)
-    elif args.command == "synthesize":
-        return cmd_synthesize(args)
-    elif args.command == "rigor":
-        return cmd_rigor(args)
-    elif args.command == "audit":
-        return cmd_audit(args)
-    elif args.command == "check":
-        return cmd_check(args)
-    elif args.command == "portfolio":
-        return cmd_portfolio(args)
-    elif args.command == "thesis":
-        return cmd_thesis(args)
-    elif args.command == "shock":
-        return cmd_shock(args)
-    elif args.command == "risk-reward":
-        return cmd_risk_reward(args)
-    elif args.command == "ic":
-        return cmd_ic(args)
-    elif args.command == "value":
-        return cmd_value(args)
-    elif args.command == "classify":
-        return cmd_classify(args)
-    elif args.command == "market-status":
-        return cmd_market_status(args)
-    elif args.command == "etf-flow":
-        return cmd_etf_flow(args)
-    elif args.command == "catalyst":
-        return cmd_catalyst(args)
-    return 1
+    return CMD_DISPATCH.get(args.command, _cmd_unknown)(args)
 
 
 if __name__ == "__main__":
