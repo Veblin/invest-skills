@@ -11,7 +11,6 @@ _SKILLS_LIB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
 from report_qc import (  # noqa: E402
-    QCResult,
     detect_report_type,
     format_qc_result,
     qc_directory,

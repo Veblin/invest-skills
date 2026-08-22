@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 _LIB_DIR = _SCRIPT_DIR / "lib"
@@ -65,6 +64,7 @@ def _fake_kline_module(closes_map: dict[str, list[float]]):
             df = pd.DataFrame({
                 "trade_date": [f"2026{1 + i // 250:02d}{(i % 250) + 1:02d}" for i in range(len(closes))],
                 "close_qfq": closes,
+                "low_qfq": closes,  # 8dabc01 起 scanner 回踩口径读 low_qfq，合成数据用 closes 镜像
             })
             return df if len(df) >= min_bars else None
 

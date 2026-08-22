@@ -5,7 +5,6 @@ D13: mocks 一律打在定义模块（etf_peers）命名空间。
 
 from __future__ import annotations
 
-import copy
 
 import pytest
 

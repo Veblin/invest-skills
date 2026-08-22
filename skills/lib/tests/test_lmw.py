@@ -22,7 +22,6 @@ from lmw import (  # noqa: E402
     find_extrema,
     kernel_smooth,
     match_double_bottom,
-    match_triangle_bottom,
     pattern_forward_stats,
 )
 
