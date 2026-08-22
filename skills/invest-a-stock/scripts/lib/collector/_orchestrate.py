@@ -1629,6 +1629,73 @@ def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict,
             kline_dim["derived"] = derived
 
 
+def _collect_dims_fanout(symbol: str, dims: list[str], kline_kwargs: dict) -> dict[str, dict]:
+    """跨维度并行扇出（ThreadPoolExecutor）。失败维度写 status=missing 骨架。"""
+    dim_results: dict[str, dict] = {}
+    dim_start: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
+        future_map = {}
+        for dim in dims:
+            if dim not in COLLECTORS:
+                logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
+                continue
+            if dim == "industry_pricing":
+                # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
+                continue
+            dim_start[dim] = time.time()
+            _, fn = COLLECTORS[dim]
+            if dim == "kline" and kline_kwargs:
+                future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
+            else:
+                future_map[executor.submit(fn, symbol)] = dim
+
+        for future in as_completed(future_map):
+            dim = future_map[future]
+            try:
+                dim_results[dim] = future.result()
+                logger.info("dimension=%s done in %.1fs", dim,
+                            time.time() - dim_start[dim])
+            except Exception as exc:
+                dim_results[dim] = {
+                    "dimension": dim,
+                    "display": COLLECTORS[dim][0] if dim in COLLECTORS else dim,
+                    "data": None,
+                    "status": "missing",
+                    "error": f"维度采集失败: {exc}",
+                    "_meta": {"source": "none", "success": False,
+                              "all_sources": [], "multi_source": False,
+                              "source_count": 0, "error": str(exc)},
+                }
+    return dim_results
+
+
+def _collect_industry_pricing_block(symbol: str, dims: list[str], dim_results: dict) -> None:
+    """industry_pricing 依赖 industry 解析结果，扇出后顺序采集（原地变异 dim_results）。"""
+    if "industry_pricing" not in dims:
+        return
+    try:
+        industry = _resolve_industry_for_pricing(symbol, dim_results)
+        dim_results["industry_pricing"] = collect_industry_pricing(symbol, industry)
+    except Exception as exc:
+        dim_results["industry_pricing"] = {
+            "dimension": "industry_pricing",
+            "display": COLLECTORS["industry_pricing"][0],
+            "data": None,
+            "status": "missing",
+            "error": f"维度采集失败: {exc}",
+            "_meta": {
+                "source": "none", "success": False,
+                "all_sources": [], "multi_source": False,
+                "source_count": 0, "error": str(exc),
+            },
+        }
+
+
+def _order_dimensions(dims: list[str], dim_results: dict) -> list:
+    """按输入顺序排列维度结果。"""
+    return [dim_results.get(d) for d in dims if d in COLLECTORS]
+
+
 def collect_all(symbol: str, dims: list[str] | None = None,
                 deep: bool = False,
                 with_macro: bool = False,
@@ -1654,70 +1721,17 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         dims = list(_DEFAULT_DIMS)
 
     start_all = time.time()
-    dim_results: dict[str, dict] = {}
 
     # 深度模式：kline 用更长窗口
     kline_kwargs = {}
     if deep:
         kline_kwargs["start_date"] = _days_ago(730)
 
-    # 跨维度并行
-    dim_start: dict[str, float] = {}
-    with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
-        future_map = {}
-        for dim in dims:
-            if dim not in COLLECTORS:
-                logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
-                continue
-            if dim == "industry_pricing":
-                # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
-                continue
-            dim_start[dim] = time.time()
-            if dim == "kline" and kline_kwargs:
-                _, fn = COLLECTORS[dim]
-                future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
-            else:
-                _, fn = COLLECTORS[dim]
-                future_map[executor.submit(fn, symbol)] = dim
-
-        for future in as_completed(future_map):
-            dim = future_map[future]
-            try:
-                dim_results[dim] = future.result()
-                logger.info("dimension=%s done in %.1fs", dim,
-                            time.time() - dim_start[dim])
-            except Exception as exc:
-                dim_results[dim] = {
-                    "dimension": dim,
-                    "display": COLLECTORS[dim][0] if dim in COLLECTORS else dim,
-                    "data": None,
-                    "status": "missing",
-                    "error": f"维度采集失败: {exc}",
-                    "_meta": {"source": "none", "success": False,
-                              "all_sources": [], "multi_source": False,
-                              "source_count": 0, "error": str(exc)},
-                }
-
-    if "industry_pricing" in dims:
-        try:
-            industry = _resolve_industry_for_pricing(symbol, dim_results)
-            dim_results["industry_pricing"] = collect_industry_pricing(symbol, industry)
-        except Exception as exc:
-            dim_results["industry_pricing"] = {
-                "dimension": "industry_pricing",
-                "display": COLLECTORS["industry_pricing"][0],
-                "data": None,
-                "status": "missing",
-                "error": f"维度采集失败: {exc}",
-                "_meta": {
-                    "source": "none", "success": False,
-                    "all_sources": [], "multi_source": False,
-                    "source_count": 0, "error": str(exc),
-                },
-            }
+    dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
+    _collect_industry_pricing_block(symbol, dims, dim_results)
 
     # 按输入顺序排列
-    dimensions = [dim_results.get(d) for d in dims if d in COLLECTORS]
+    dimensions = _order_dimensions(dims, dim_results)
 
     # R-08: RRF 多源融合
     fusion_results: dict[str, Any] = {}
