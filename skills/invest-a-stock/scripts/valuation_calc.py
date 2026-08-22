@@ -1475,11 +1475,8 @@ def run_valuation(
 # 输出格式化
 # ---------------------------------------------------------------------------
 
-def format_output(result: ValuationResult) -> str:
-    """将 ValuationResult 格式化为可读文本输出。"""
-    lines: list[str] = []
-    sep = "─" * 72
-
+def _format_header(result: ValuationResult, lines: list[str], sep: str) -> None:
+    """标题 + 错误块。"""
     lines.append("")
     lines.append(sep)
     lines.append(f"  A 股科学估值计算 — {result.symbol} — {result.timestamp}")
@@ -1491,7 +1488,9 @@ def format_output(result: ValuationResult) -> str:
             lines.append(f"  ❌ {e}")
         lines.append(sep)
 
-    # ==== 1. 基础参数 ====
+
+def _format_section_basic_params(result: ValuationResult, lines: list[str]) -> None:
+    """一、基础参数。"""
     lines.append("")
     lines.append("━" * 60)
     # LAW 17: 标题含关键数据
@@ -1510,7 +1509,9 @@ def format_output(result: ValuationResult) -> str:
     lines.append(f"  要求回报率 r       {r_required * 100:.2f}% (= Rf + ERP)")
     lines.append(f"  行情来源           {result.sources.get('quote', '?')}")
 
-    # ==== 2. 财务数据 ====
+
+def _format_section_financials(result: ValuationResult, lines: list[str]) -> None:
+    """二、核心财务数据（TTM EPS · BVPS · ROE · OCF 质量）。"""
     lines.append("")
     lines.append("━" * 60)
     lines.append("  二、核心财务数据（TTM EPS · BVPS · ROE · OCF 质量）")
@@ -1559,7 +1560,9 @@ def format_output(result: ValuationResult) -> str:
         if ocf.get("note"):
             lines.append(f"    方法: {ocf['note']}")
 
-    # ==== 3. 历史分位 ====
+
+def _format_section_percentile(result: ValuationResult, lines: list[str]) -> None:
+    """三、历史估值位置（PE/PB 分位 · Band · 中位数对照）。"""
     lines.append("")
     lines.append("━" * 60)
     lines.append("  三、历史估值位置（PE/PB 分位 · Band · 中位数对照）")
@@ -1580,7 +1583,9 @@ def format_output(result: ValuationResult) -> str:
     if pct.get("error"):
         lines.append(f"  历史分位          不可得 ({pct['error']})")
 
-    # ==== 4. 隐含增长率 ====
+
+def _format_section_implied_growth(result: ValuationResult, lines: list[str]) -> None:
+    """四、盈利收益率 vs 要求回报率 · 隐含增长率 g_implied 对照（含 R8 机会成本行）。"""
     lines.append("")
     lines.append("━" * 60)
     lines.append("  四、盈利收益率 vs 要求回报率 · 隐含增长率 g_implied 对照")
@@ -1642,7 +1647,9 @@ def format_output(result: ValuationResult) -> str:
         lines.append("")
         lines.append(f"  机会成本          不可得（{oc.get('reason', 'PE/Rf 不可得')}）")
 
-    # ==== 5. ROE-PB 匹配 ====
+
+def _format_section_roe_pb(result: ValuationResult, lines: list[str]) -> None:
+    """五、ROE-PB 理论匹配。"""
     lines.append("")
     lines.append("━" * 60)
     lines.append("  五、ROE-PB 理论匹配")
@@ -1663,7 +1670,9 @@ def format_output(result: ValuationResult) -> str:
     else:
         lines.append(f"  计算不可得 ({rpm.get('error', '')})")
 
-    # ==== 6. 多情景综合 ====
+
+def _format_section_scenarios(result: ValuationResult, lines: list[str]) -> None:
+    """六、多情景 × 多方法 综合估值区间。"""
     lines.append("")
     lines.append("━" * 60)
     lines.append("  六、多情景 × 多方法 综合估值区间")
@@ -1706,12 +1715,15 @@ def format_output(result: ValuationResult) -> str:
     else:
         lines.append(f"  计算不可得 ({sc.get('error', '')})")
 
-    # ==== 7. 汇总 ====
+
+def _format_section_summary(result: ValuationResult, lines: list[str], sep: str) -> None:
+    """七、综合估值参考区间 + 质量预警 + OCF 预警 + 免责声明。"""
     lines.append("")
     lines.append("━" * 60)
     lines.append("  七、综合估值参考区间")
     lines.append("━" * 60)
 
+    sc = result.scenarios
     if sc.get("scenarios"):
         bull_m = sc["scenarios"]["bull"]["methods"]
         base_m = sc["scenarios"]["base"]["methods"]
@@ -1760,6 +1772,21 @@ def format_output(result: ValuationResult) -> str:
     lines.append("  目标价预测。周期股盈利波动极大，任何单点估值均有重大误差风险。")
     lines.append(sep)
     lines.append("")
+
+
+def format_output(result: ValuationResult) -> str:
+    """将 ValuationResult 格式化为可读文本输出。"""
+    lines: list[str] = []
+    sep = "─" * 72
+
+    _format_header(result, lines, sep)
+    _format_section_basic_params(result, lines)
+    _format_section_financials(result, lines)
+    _format_section_percentile(result, lines)
+    _format_section_implied_growth(result, lines)
+    _format_section_roe_pb(result, lines)
+    _format_section_scenarios(result, lines)
+    _format_section_summary(result, lines, sep)
 
     return "\n".join(lines)
 
