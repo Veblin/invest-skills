@@ -585,7 +585,11 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
             "error": None,
         }
     except Exception as exc:
-        logger.warning("csindex_pe(%s) failed: %s", idx_code, exc)
+        # 404 属确定性资源缺失（指数代码无 csindex PE 文件），且 missing 信封
+        # 不缓存 → 每次报告重复打印；debug 级静默降级（对齐同文件 silent degrade
+        # 惯例），调用方仍凭 status="missing" 判断
+        logger.debug("csindex_pe(%s) failed, silent degrade (fallback probe): %s",
+                     idx_code, exc)
         return {"status": "missing", "index_pe": None, "index_pe_note": None,
                 "rows": [], "error": str(exc)}
 

@@ -145,3 +145,27 @@ def test_index_pe_missing_date_col_warns(monkeypatch, caplog):
     assert out["status"] == "ok"
     assert out["index_pe"] == 103.37  # 原始行序（新在前）末行 = 最早行
     assert any("列名漂移" in rec.message for rec in caplog.records)
+
+
+def test_index_pe_404_logs_debug(monkeypatch, caplog):
+    """csindex 404 → missing 信封 + 仅 debug 级日志（v0.2.7 P2-4 降噪）。
+
+    404 属确定性资源缺失（指数代码无 csindex PE 文件），且 missing 信封
+    不缓存 → 每次报告重复打印；改 debug 级静默降级，调用方凭 status 判断。
+    """
+    import sys
+    import urllib.error
+
+    class _FakeAk404:
+        def stock_zh_index_value_csindex(self, symbol):
+            raise urllib.error.HTTPError(symbol, 404, "Not Found", None, None)
+
+    monkeypatch.setitem(sys.modules, "akshare", _FakeAk404())
+    with caplog.at_level("DEBUG", logger="etf_data"):
+        out = fetch_etf_index_pe("399006")
+    assert out["status"] == "missing"
+    assert "404" in out["error"]
+    # 无 WARNING/ERROR 级 csindex 记录（仅 debug）
+    assert not any(
+        rec.levelno >= 30 and "csindex" in rec.getMessage()
+        for rec in caplog.records)

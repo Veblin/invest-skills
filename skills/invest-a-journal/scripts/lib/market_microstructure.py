@@ -783,8 +783,14 @@ def _fetch_erp(result: dict) -> None:
                 logger.warning("erp: Tushare HS300 PE unavailable, falling back to akshare: %s", exc)
 
         if pe_hs300 is None:
-            with akshare_direct_session():
-                df = ak.stock_zh_index_value_csindex(symbol="000300")
+            # fallback 探测：csindex 404 属确定性缺失，静默降级不污染 _errors
+            #（原实现无保护，HTTPError 传播崩栈/注入「erp: HTTP Error 404」）
+            try:
+                with akshare_direct_session():
+                    df = ak.stock_zh_index_value_csindex(symbol="000300")
+            except Exception as exc:
+                logger.debug("erp: akshare csindex fallback failed, silent degrade: %s", exc)
+                df = None
             if df is not None and not df.empty:
                 pe_hs300 = safe_float(df.iloc[-1].get("市盈率1"))
 
@@ -805,8 +811,12 @@ def _fetch_erp(result: dict) -> None:
                 logger.warning("erp: FRED DGS10 unavailable, falling back to akshare: %s", exc)
 
         if y10 is None:
-            with akshare_direct_session():
-                df = ak.bond_zh_us_rate()
+            try:
+                with akshare_direct_session():
+                    df = ak.bond_zh_us_rate()
+            except Exception as exc:
+                logger.debug("erp: akshare bond fallback failed, silent degrade: %s", exc)
+                df = None
             if df is not None and not df.empty:
                 # 列名即为收益率名称，如「中国国债收益率10年」
                 col_10y = "中国国债收益率10年"
