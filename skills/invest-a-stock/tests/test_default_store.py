@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -422,18 +423,47 @@ class TestSnapshotKindDiff:
         assert rows[0]["kind"] == "report"
 
     def test_load_key_diff_skips_same_session_row(self, isolated_store):
-        """报告模块 1 的 diff 跳过同 fetched_at 的同会话行，比较上次会话。"""
-        s1 = _phase4_collection("600176", "2026-08-01T00:00:00Z")
-        same_session = _phase4_collection("600176", "2026-08-07T00:00:00Z")
-        current = _phase4_collection(
-            "600176", "2026-08-07T00:00:00Z", latest_roe=22.0)
+        """报告模块 1 的 diff 跳过 60 分钟窗口内的同会话行，比较上次会话。
 
-        isolated_store.save_collection(same_session)  # 同会话行（同 fetched_at）
+        v0.2.7 P2-1：原测试用相同 fetched_at 模拟同会话，但微秒精度下
+        同会话两次采集恒不相等——改为相对时间的 31 秒前行（真实场景）。
+        """
+        now = datetime.now(timezone.utc)
+        s1 = _phase4_collection("600176", (now - timedelta(days=7)).isoformat())
+        same_session = _phase4_collection(
+            "600176", (now - timedelta(seconds=31)).isoformat())
+        current = _phase4_collection(
+            "600176", (now - timedelta(seconds=10)).isoformat(), latest_roe=22.0)
+
+        isolated_store.save_collection(same_session)  # 同会话行（31 秒前）
         isolated_store.save_collection(s1)
 
         diff = isolated_store.load_key_diff_vs_stored("600176", current)
         assert diff is not None
-        assert diff.get("old_at", "").startswith("2026-08-01")  # 与上次会话比较
+        # 与上次会话（7 天前）比较，而非 31 秒前的同会话行
+        assert diff.get("old_at", "").startswith(
+            (now - timedelta(days=7)).strftime("%Y-%m-%d"))
+
+    def test_load_key_diff_all_rows_in_window_returns_none(self, isolated_store):
+        """窗口内无更早行 → None（不显示「相对上次调研变化」块）。"""
+        now = datetime.now(timezone.utc)
+        a = _phase4_collection("600176", (now - timedelta(minutes=10)).isoformat())
+        b = _phase4_collection("600176", (now - timedelta(minutes=5)).isoformat())
+        current = _phase4_collection("600176", now.isoformat(), latest_roe=22.0)
+        isolated_store.save_collection(a)
+        isolated_store.save_collection(b)
+        assert isolated_store.load_key_diff_vs_stored("600176", current) is None
+
+    def test_load_key_diff_window_boundary_excluded(self, isolated_store):
+        """61 分钟前的行在窗口外 → 被配对为上次调研。"""
+        now = datetime.now(timezone.utc)
+        old = _phase4_collection("600176", (now - timedelta(minutes=61)).isoformat())
+        current = _phase4_collection("600176", now.isoformat(), latest_roe=22.0)
+        isolated_store.save_collection(old)
+        diff = isolated_store.load_key_diff_vs_stored("600176", current)
+        assert diff is not None
+        assert diff.get("old_at", "").startswith(
+            (now - timedelta(minutes=61)).strftime("%Y-%m-%d"))
 
     def test_get_latest_two_no_fallback_mix_same_session(self, isolated_store):
         """新用户同会话 collect --store + report：仅 1 条 collect 时不

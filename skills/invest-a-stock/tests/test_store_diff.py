@@ -173,6 +173,25 @@ class TestGetLatestTwo:
     def test_non_existent_symbol(self, isolated_store):
         assert isolated_store.get_latest_two("NONEXIST") is None
 
+    def test_skips_same_session_rows(self, isolated_store):
+        """v0.2.7 P2-1：60 分钟窗口内的行跳过，配对窗口外最近两行。"""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        # 10 秒 / 31 秒前（同会话窗口内）、125 / 130 分钟前（窗口外）
+        ts_10s = (now - timedelta(seconds=10)).isoformat()
+        ts_31s = (now - timedelta(seconds=31)).isoformat()
+        ts_125m = (now - timedelta(minutes=125)).isoformat()
+        ts_130m = (now - timedelta(minutes=130)).isoformat()
+        for ts in (ts_10s, ts_31s, ts_125m, ts_130m):
+            isolated_store.save_collection(
+                make_store_collection(symbol="999995", fetched_at=ts))
+        pair = isolated_store.get_latest_two("999995")
+        assert pair is not None
+        older, newer = pair
+        assert older["fetched_at"] == ts_130m  # 窗口外最近两行
+        assert newer["fetched_at"] == ts_125m
+
 
 class TestGetCollection:
     def test_by_id(self, isolated_store):

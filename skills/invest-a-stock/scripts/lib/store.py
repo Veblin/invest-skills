@@ -12,6 +12,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -269,6 +270,44 @@ def save_collection(result: dict[str, Any], kind: str = "collect") -> int:
         _safe_close(c)
 
 
+# P2-1 v0.2.7: 同会话时间窗口。原实现只跳过 fetched_at 全等行——微秒精度
+# 下同会话 collect/report 恒不相等，31 秒前的快照被当「上次调研」
+# （batch-review P2-1）。fetched_at 距今 < 60 分钟视为同会话。
+SAME_SESSION_WINDOW_MINUTES = 60
+
+
+def _parse_fetched_at(raw: Any) -> datetime | None:
+    """解析 fetched_at ISO 串 → aware UTC；失败返回 None。
+
+    兼容历史变体：'Z' 后缀 / '+HH:MM' 偏移 / naive（按 UTC 假定——存量
+    数据全由 _assemble_result 以 UTC 生成，与 shared_dates.fmt_fetched_at
+    同一不变式）。SQLite 中 fetched_at 是字符串列，时间比较须在 Python 侧。
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
+    """fetched_at 距今是否处于同会话窗口；解析失败 → False（保守保留不跳过）。"""
+    dt = _parse_fetched_at(ts)
+    if dt is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - dt) < timedelta(minutes=SAME_SESSION_WINDOW_MINUTES)
+
+
 def list_collections(limit: int = 20, symbol: str | None = None) -> list[dict]:
     init_db()
     c = _conn()
@@ -406,6 +445,9 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     自我比较问题在回退路径复现，code-review 第三轮）；须到第二次
     collect 会话才有配对。
 
+    v0.2.7 P2-1：行序基础上再按 60 分钟同会话窗口过滤——同会话多次
+    collect（31 秒间隔）也会被配对，过滤后回到「上次调研会话」语义。
+
     Returns:
         (older, newer) tuple，仅 1 条记录时返回 None。
     """
@@ -414,15 +456,16 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     try:
         rows = c.execute(
             "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 2",
+            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 50",
             (symbol,)).fetchall()
         if len(rows) == 0:
             # 旧库/纯 report 用户兼容：回退全部 kind（仅限无 collect 行，
             # 1 条 collect + 同会话 report 混排会复现自我比较问题）
             rows = c.execute(
                 "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
+                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 50",
                 (symbol,)).fetchall()
+        rows = [r for r in rows if not _is_same_session(r["fetched_at"])]
         if len(rows) < 2:
             return None
         newer = dict(rows[0])
@@ -712,16 +755,15 @@ def format_key_diff_markdown_lines(key_diff: dict) -> list[str]:
 def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
     """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。
 
-    跳过 fetched_at 与当前采集相同的行（同会话刚写入的 collect 行）——
-    否则「相对上次调研变化」比较的是几分钟前的同会话快照，恒无变化
-    （review #9 第二轮）。fetched_at 精度为秒，跨会话不相等。
+    跳过 fetched_at 距今 60 分钟内的行（同会话窗口）——否则「相对上次调研
+    变化」比较的是几分钟前的同会话快照，恒无变化（review #9 第二轮残留：
+    原实现只跳过 fetched_at 全等行，微秒精度下同会话两次采集恒不相等）。
     """
-    cur_ts = str(current.get("fetched_at", ""))
     rows = list_collections(limit=20, symbol=symbol)
     prev = None
     for row in rows:
-        if str(row.get("fetched_at", "")) == cur_ts:
-            continue  # 同会话行
+        if _is_same_session(row.get("fetched_at")):
+            continue  # 同会话行（60 分钟窗口）
         prev = get_collection(row["id"])
         if prev:
             break
