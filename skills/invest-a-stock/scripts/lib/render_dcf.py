@@ -56,8 +56,10 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
     try:
         from lib.collector import _akshare_hs300_dated_closes
         bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
-    except Exception:
-        logger.warning("沪深300基准数据获取失败，Beta 使用默认值 1.0", exc_info=True)
+    except Exception as exc:
+        # 单行降级日志（不带 traceback，对齐 collector/_base 降级惯例；
+        # 东财不可达的 ConnectionError 链式栈会淹没真实错误）
+        logger.warning("沪深300基准数据获取失败（%s），Beta 使用默认值 1.0", exc)
         bench_dated = []
 
     if not bench_dated:
