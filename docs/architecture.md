@@ -1,6 +1,6 @@
 # invest-skills 功能与实现逻辑总览
 
-> 版本 v0.2.6 · 更新日期 2026-08-18
+> 版本 v0.2.7 · 更新日期 2026-08-23
 > 本文档总结仓库已完成的主要功能及实现逻辑，面向使用者与贡献者。运行时规格以各 SKILL.md / references 为准。
 
 ---
@@ -181,7 +181,7 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 | v0.2.5 | 08-10 | 交易纪律框架 D1-D8 + trade-structure、WorkBuddy 兼容层、移除 limit-up skill |
 | v0.2.6 | 08-14~17 | ABCD P0（H5 回测裁决、D 类引擎字段、点位红线 L1-L4）+ M 系列（market_daily 全市场分位 1361 交易日×5544 只、SPA/FDR 框架、pattern-scan、journal §4.3）+ F 系列（futures_daily 股指期货数据层）+ WorkBuddy 零终端分发 zip |
 
-**当前状态**：分支 `feat/v0.2.7`，版本号仍为 v0.2.6（曾 bump 至 v0.2.7 后回退，修复并入 v0.2.6 发布节）。未发布增量：release publish flow 增强（draft 幂等、release notes 提取器升级）、SkillHub 分发包构建（`scripts/build_skillhub_packages.py`，未跟踪）、一次性脚本归档。
+**当前状态**：分支 `feat/v0.2.7`，版本号已 bump 至 v0.2.7（本批 7 项 code-review 缺陷修复随 v0.2.7 发布）。未发布增量：release publish flow 增强（draft 幂等、release notes 提取器升级）、SkillHub 分发包构建（`scripts/build_skillhub_packages.py`，未跟踪）、一次性脚本归档。
 
 ## 8. 工程设施
 
