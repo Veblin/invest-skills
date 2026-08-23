@@ -658,7 +658,11 @@ def _section_dynamic_drivers(
             "资金（北向）", _v3_northbound_signal_label(nb), d, "⚠️", nb.get("source", ""),
         ))
     else:
-        factors.append(_v3_driver_unavailable("资金（北向）"))
+        # P0-1：源停更陈旧（staleness_note）时输出原因，区分「数据不足」与「停更」
+        stale_note = nb.get("staleness_note") if isinstance(nb, dict) else None
+        factors.append(_v3_driver_unavailable(
+            f"资金（北向）{('：' + stale_note) if stale_note else ''}"
+        ))
 
     mf = market_structure.get("moneyflow")
     mf_net, mf_key = resolve_moneyflow(mf)

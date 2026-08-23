@@ -131,3 +131,93 @@ def test_industry_pricing_block_not_requested_returns_none():
     out = orch._collect_industry_pricing_block("600176", ["basic_info"], dim_results)
     assert out is None
     assert dim_results == {}
+
+
+def test_northbound_stale_guard_degrades_old_data(monkeypatch):
+    """P0-1：北向记录停在两年前（2024-08）→ net_sum_10d 置 None + stale 标注。
+
+    2024-08 起北向个股披露规则变更，hsgt_top10 停更。守卫不得把两年前
+    的净额当「近 10 日」参与 CV-4 印证；records 保留供追溯。
+    """
+    from lib.collector import _orchestrate as orch
+    from datetime import datetime, timezone
+
+    # 6 条 ≥ _MIN_NORTHBOUND_DAYS(5)：守卫必须在数量守卫之后仍拦截陈旧数据
+    old_records = [
+        {"trade_date": "20240811", "net_mf_amount": 100.0},
+        {"trade_date": "20240812", "net_mf_amount": 200.0},
+        {"trade_date": "20240813", "net_mf_amount": 300.0},
+        {"trade_date": "20240814", "net_mf_amount": 400.0},
+        {"trade_date": "20240815", "net_mf_amount": 500.0},
+        {"trade_date": "20240816", "net_mf_amount": 600.0},
+    ]
+
+    def fake_recent(records, *, limit):
+        return sorted(records, key=lambda r: str(r.get("trade_date", "")), reverse=True)[:limit]
+
+    monkeypatch.setattr(orch, "_hsgt_top10_cached", lambda symbol: old_records)
+    monkeypatch.setattr(orch, "_recent_flow_records", fake_recent)
+    monkeypatch.setattr(orch, "_q_akshare_northbound", lambda symbol: None)
+
+    out = orch._ms_fetch_northbound_stock(None, "600176")
+    assert out is not None
+    assert out["net_sum_10d"] is None
+    assert out["stale"] is True
+    assert out["latest_trade_date"] == "20240816"
+    assert "停更" in out["staleness_note"]
+    # 原始记录保留（供追溯），但净额不可用
+    assert len(out["records"]) == 6
+
+
+def test_northbound_stale_guard_keeps_fresh_data(monkeypatch):
+    """P0-1 反例：最新记录距今 ≤90 天 → 净额照常可用。"""
+    from lib.collector import _orchestrate as orch
+    from datetime import datetime, timezone
+
+    from datetime import timedelta
+    fresh = datetime.now(timezone.utc).strftime("%Y%m%d")
+    # 6 条：5 条近期 + 1 条基准，全部 ≥ _MIN_NORTHBOUND_DAYS
+    records = [
+        {"trade_date": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y%m%d"), "net_mf_amount": 100.0},
+        {"trade_date": (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y%m%d"), "net_mf_amount": 200.0},
+        {"trade_date": (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d"), "net_mf_amount": 300.0},
+        {"trade_date": (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y%m%d"), "net_mf_amount": 400.0},
+        {"trade_date": (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d"), "net_mf_amount": 500.0},
+        {"trade_date": fresh, "net_mf_amount": 600.0},
+    ]
+
+    monkeypatch.setattr(orch, "_hsgt_top10_cached", lambda symbol: records)
+    monkeypatch.setattr(orch, "_recent_flow_records",
+                        lambda r, *, limit: sorted(r, key=lambda x: str(x.get("trade_date", "")))[-limit:])
+    monkeypatch.setattr(orch, "_q_akshare_northbound", lambda symbol: None)
+
+    out = orch._ms_fetch_northbound_stock(None, "600176")
+    assert out is not None
+    assert out["net_sum_10d"] == 2100.0
+    assert out.get("stale") is None
+
+
+def test_northbound_stale_guard_akshare_fallback_also_degrades(monkeypatch):
+    """P0-1：tushare 无数据回退 akshare 时，陈旧记录同样触发停更降级。"""
+    from lib.collector import _orchestrate as orch
+
+    old_records = [
+        {"trade_date": "20240811", "net_mf_amount": 100.0},
+        {"trade_date": "20240812", "net_mf_amount": 200.0},
+        {"trade_date": "20240813", "net_mf_amount": 300.0},
+        {"trade_date": "20240814", "net_mf_amount": 400.0},
+        {"trade_date": "20240815", "net_mf_amount": 500.0},
+        {"trade_date": "20240816", "net_mf_amount": 600.0},
+    ]
+
+    monkeypatch.setattr(orch, "_hsgt_top10_cached", lambda symbol: None)
+    monkeypatch.setattr(orch, "_recent_flow_records",
+                        lambda r, *, limit: sorted(r, key=lambda x: str(x.get("trade_date", "")))[-limit:])
+    monkeypatch.setattr(orch, "_q_akshare_northbound", lambda symbol: old_records)
+
+    out = orch._ms_fetch_northbound_stock(None, "600176")
+    assert out is not None
+    assert out["net_sum_10d"] is None
+    assert out["stale"] is True
+    assert out["source"] == "akshare.stock_hsgt_individual_em"
+    assert "20240816" in out["staleness_note"]

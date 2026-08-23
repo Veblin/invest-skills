@@ -94,6 +94,13 @@ def _scan_rows(
             "signal": northbound_label(nb),
             "source": str(nb.get("source") or "market_structure.northbound"),
         })
+    elif isinstance(nb, dict) and nb.get("staleness_note"):
+        # P0-1：源停更陈旧——保留一行说明，标注停更原因而非静默消失
+        rows.append({
+            "role": "北向（外资）",
+            "signal": nb["staleness_note"],
+            "source": str(nb.get("source") or "market_structure.northbound"),
+        })
 
     mf = ms.get("moneyflow")
     mf_net: float | None = None

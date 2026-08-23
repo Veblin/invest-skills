@@ -2405,6 +2405,10 @@ def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
 
 _MIN_NORTHBOUND_DAYS = 5
 
+# P0-1：北向个股披露源停更容忍窗口。最新有值记录距今超过该天数 → 净额
+# 视为陈旧（2024-08 起北向个股披露规则变更，源可能停在两年前）。
+_NORTHBOUND_STALE_DAYS = 90
+
 # 同 run 按日缓存（仿 _cninfo_hold_cache 模式）：collect_northbound 与
 # _ms_fetch_northbound_stock 以相同参数（30 日窗口）重复拉取 hsgt_top10。
 # 缓存原始 rows（稀疏判定在消费方 _MIN_NORTHBOUND_DAYS，语义不变）；
@@ -2436,7 +2440,38 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     Tushare hsgt_top10（仅上榜日有 net_amount）→ akshare 个股持股变动回退。
     hsgt_top10 上榜日过少时回退 akshare，避免稀疏序列误导汇总。
     不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
+
+    P0-1 时效守卫：2024-08 起北向个股披露规则变更，hsgt_top10/个股持股源
+    停更——records 可能停留在两年前（如最新 2024-08-16）。若最新有值记录
+    距今超过 _NORTHBOUND_STALE_DAYS（90 天），net_sum_10d 置 None 并附
+    staleness_note，渲染层自动降级为「数据不足」，禁止把陈旧净额标为
+    「近 10 日」参与 CV-4 印证。
     """
+    def _guard_staleness(result: dict | None) -> dict | None:
+        """对已聚合结果做时效校验；过期 → 净额置 None + 标注（保留 records 追溯）。"""
+        if not result:
+            return result
+        recent = result.get("records") or []
+        dates = [str(r.get("trade_date", "")) for r in recent if str(r.get("trade_date", ""))]
+        if not dates:
+            return result
+        try:
+            latest = max(dates)
+            latest_dt = datetime.strptime(latest, "%Y%m%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return result
+        age_days = (datetime.now(timezone.utc) - latest_dt).days
+        if age_days <= _NORTHBOUND_STALE_DAYS:
+            return result
+        result["net_sum_10d"] = None
+        result["stale"] = True
+        result["latest_trade_date"] = latest
+        result["staleness_note"] = (
+            f"北向个股披露源已停更：最新记录 {latest}，距今约 {age_days // 30} 个月，"
+            "净额不可用（2024-08 起北向个股披露规则变更）"
+        )
+        return result
+
     try:
         records = _hsgt_top10_cached(symbol)
         if records:
@@ -2444,12 +2479,12 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
             valued = [r for r in recent if _flow_amount_yuan(r) is not None]
             if len(valued) >= _MIN_NORTHBOUND_DAYS:
                 net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
-                return {
+                return _guard_staleness({
                     "records": recent,
                     "net_sum_10d": net_sum,
                     "days": len(valued),
                     "source": "tushare.hsgt_top10",
-                }
+                })
     except Exception as exc:
         logger.debug("tushare hsgt_top10 failed for %s: %s", symbol, exc)
 
@@ -2463,12 +2498,13 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     if len(valued) < _MIN_NORTHBOUND_DAYS:
         return None
     net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
-    return {
+    # P0-1：akshare 分支同样走时效守卫（源停更时降级而非误标「近 10 日」）
+    return _guard_staleness({
         "records": recent,
         "net_sum_10d": net_sum,
         "days": len(valued),
         "source": "akshare.stock_hsgt_individual_em",
-    }
+    })
 
 
 def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:

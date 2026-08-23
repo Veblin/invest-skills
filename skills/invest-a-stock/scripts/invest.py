@@ -788,7 +788,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
 
-    if fmt == "md" and args.outdir:
+    if fmt == "md":
         # F2-4: 报告文件名时间戳显式北京时（ZoneInfo Asia/Shanghai），
         # 不再依赖机器本地时区。shared_dates 是 scripts/lib 的引导 re-export
         # 模块（lib.dates 不存在，直接 import 会 ModuleNotFoundError 崩掉
@@ -796,10 +796,16 @@ def cmd_report(args: argparse.Namespace) -> int:
         from lib.shared_dates import shanghai_now
         ts = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
         subdir = _report_basename(result, args.symbol, ts)
-        outdir = Path(args.outdir).resolve()
+        # P1-2：无 --outdir 时默认落盘 ./reports/{symbol}-{name}/{ts}.md——
+        # 之前静默只 stdout + 入库，用户看不到报告文件（2026-08-23 现场）。
+        # 显式 --outdir 仍优先（兼容既有调用方与自定义路径）。
+        outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
+                  else (Path.cwd() / "reports").resolve())
         mdpath = _report_filepath(outdir, subdir, ts)
         mdpath.write_text(output, encoding="utf-8")
         print(f"📝 Markdown 报告: {mdpath.resolve()}")
+        if not getattr(args, "outdir", None):
+            print(output)  # 默认路径下保留 stdout 契约（skill 流程读 stdout）
         return 0
 
     print(output)
