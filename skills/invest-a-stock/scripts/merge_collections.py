@@ -25,7 +25,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -333,7 +333,9 @@ def merge_collections(collections: list[dict]) -> dict:
              if isinstance(c, dict) and c.get("symbol")),
             "?",
         ),
-        "fetched_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        # v0.2.7 P2-2：aware UTC（与 collector._assemble_result 同口径），
+        # 渲染侧按 UTC 假定转换北京时间——naive 本地时区会双重偏移
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
         "dimensions": result_dimensions,
         "summary": {
             "total": len(all_dim_names),

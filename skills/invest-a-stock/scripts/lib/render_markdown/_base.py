@@ -26,6 +26,7 @@ from ..financials import (  # C5 v0.2.7: 语义常量（毛利率字段优先级
     OCF_COVERAGE_WEAK,
 )
 from ..valuation import EXTREME_HIGH_THRESHOLD, EXTREME_LOW_THRESHOLD  # C5 v0.2.7
+from ..shared_dates import fmt_fetched_at  # P2-2 v0.2.7: 采集时间 UTC→北京时间
 from ..render_utils import (
     sanitize_error,
     _sanitize_error,

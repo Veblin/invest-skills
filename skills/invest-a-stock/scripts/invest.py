@@ -752,7 +752,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         _ensure_render_ready(result, args.symbol)
         md_v2 = render.render_report_v2(result, args.symbol)
         output = render.render_html(result, args.symbol)
-        now = datetime.now()
+        from lib.shared_dates import shanghai_now
+        now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
 
         subdir = _report_basename(result, args.symbol, ts)
@@ -1066,7 +1067,8 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             attach_extras=attach_extras,
         )
         if fmt == "md" and args.outdir:
-            ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+            from lib.shared_dates import shanghai_now
+            ts = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
             subdir = _report_basename(result, args.symbol, ts)
             outdir = Path(args.outdir).resolve()
             mdpath = _report_filepath(outdir, subdir, ts)

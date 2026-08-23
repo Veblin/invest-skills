@@ -10,7 +10,7 @@ from typing import Any
 from lib.nums import ONE_PER_YI
 from lib.technical import compute, sort_kline_asc
 
-from .shared_dates import yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import fmt_fetched_at, yyyymmdd_to_iso as _to_iso_date
 from .render_utils import (
     ENGINE_VERSION,
     _data_fields,
@@ -1017,7 +1017,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     dims = _index_dims(collection)
     basic = _get_dim_data(dims, "basic_info") or {}
     summary = collection.get("summary", {})
-    fetched_at = collection.get("fetched_at", "")[:19]
+    fetched_at = fmt_fetched_at(collection.get("fetched_at", ""))
 
     name = basic.get("name", "") or basic.get("股票简称", "")
     industry = basic.get("industry", "")

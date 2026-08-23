@@ -16,6 +16,7 @@ for __v2_n in dir(__v2_ref):
 del __v2_ref, __v2_n
 
 from ..shared_dates import (  # noqa: E402
+    fmt_fetched_at,
     normalize_end_date as _norm_ed,
     yyyymmdd_to_iso as _to_iso_date,
 )
@@ -599,7 +600,7 @@ def _section_dynamic_drivers(
     lines = [f"## 2. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
     lines.append("")
-    lines.append(f"{window_label}涨跌幅：**{chg_pct_s}**（采集: {collection.get('fetched_at', '')[:10]}）")
+    lines.append(f"{window_label}涨跌幅：**{chg_pct_s}**（采集: {fmt_fetched_at(collection.get('fetched_at', ''))[:10]}）")
     lines.append("")
     lines.append("### 候选解释（LAW 13，上限 5 条）")
     lines.append("")
@@ -1708,7 +1709,8 @@ def _render_pricing_futures_section(data: dict) -> str:
                 dom_n = _safe_num(info.get("dom_price"))
                 dom_s = f"{dom_n:,.0f}" if dom_n is not None else "—"
                 basis_n = _safe_num(info.get("dom_basis_rate"))
-                basis_s = f"{basis_n:.2f}%" if basis_n is not None else "—"
+                # akshare dom_basis_rate 为小数（-0.063 = -6.3%），×100 渲染
+                basis_s = f"{basis_n * 100:.2f}%" if basis_n is not None else "—"
                 trend = info.get("trend_30d", "—")
                 lines.append(f"| {name} | {code} | {spot_s} | {dom_s} | {basis_s} | {trend} |")
             lines.append("")
@@ -2964,7 +2966,8 @@ def _section_4_header_mda(collection: dict) -> list[str]:
     cards = _get_analysis_cards(collection)
     mda_card = cards.get("mda_narrative")
     if mda_card and isinstance(mda_card, dict):
-        gen_at = mda_card.get("generated_at", "")[:10] if mda_card.get("generated_at") else ""
+        # generated_at 由 analysis_templates 以 UTC 生成，渲染侧转北京时间
+        gen_at = fmt_fetched_at(mda_card.get("generated_at", ""))[:10] if mda_card.get("generated_at") else ""
         lines.append("> **MD&A 快速扫描** (自动计算) | 生成时间: " + gen_at)
         rg = mda_card.get("revenue_growth_yoy")
         pg = mda_card.get("profit_growth_yoy")

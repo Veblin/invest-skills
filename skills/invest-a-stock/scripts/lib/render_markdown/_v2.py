@@ -115,7 +115,7 @@ def _header_v2(collection: dict, symbol: str) -> str:
     title = f"# {symbol} {name} 研究快照"
     lines = [
         title.strip(),
-        f"采集时间: {collection.get('fetched_at', '')[:19]}",
+        f"采集时间: {fmt_fetched_at(collection.get('fetched_at', ''))}",
         f"维度: {collection['summary']['available']}/{collection['summary']['total']} 有数据"
         + (f"（{collection['summary']['degraded']} 降级）" if collection['summary'].get('degraded') else ""),
         "",
