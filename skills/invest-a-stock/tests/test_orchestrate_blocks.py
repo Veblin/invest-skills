@@ -221,3 +221,58 @@ def test_northbound_stale_guard_akshare_fallback_also_degrades(monkeypatch):
     assert out["stale"] is True
     assert out["source"] == "akshare.stock_hsgt_individual_em"
     assert "20240816" in out["staleness_note"]
+
+
+def test_northbound_stale_guard_handles_dashed_dates(monkeypatch):
+    """P0-1 修正（code-review 第四轮 DOA 回归）：akshare 持股日期为 'YYYY-MM-DD'
+    横线格式（live 复现 600176 最新 '2024-08-16'），守卫必须归一化后解析——
+    原实现 strptime('%Y%m%d') 恒 ValueError 静默跳过 → 陈旧净额继续以
+    「近 10 日」呈现，P0-1 等于没修。"""
+    from lib.collector import _orchestrate as orch
+
+    dashed_records = [
+        {"trade_date": "2024-08-11", "net_mf_amount": 100.0},
+        {"trade_date": "2024-08-12", "net_mf_amount": 200.0},
+        {"trade_date": "2024-08-13", "net_mf_amount": 300.0},
+        {"trade_date": "2024-08-14", "net_mf_amount": 400.0},
+        {"trade_date": "2024-08-15", "net_mf_amount": 500.0},
+        {"trade_date": "2024-08-16", "net_mf_amount": 600.0},
+    ]
+
+    monkeypatch.setattr(orch, "_hsgt_top10_cached", lambda symbol: None)
+    monkeypatch.setattr(orch, "_recent_flow_records",
+                        lambda r, *, limit: sorted(r, key=lambda x: str(x.get("trade_date", "")))[-limit:])
+    monkeypatch.setattr(orch, "_q_akshare_northbound", lambda symbol: dashed_records)
+
+    out = orch._ms_fetch_northbound_stock(None, "600176")
+    assert out is not None
+    assert out["net_sum_10d"] is None
+    assert out["stale"] is True
+    assert out["latest_trade_date"] == "2024-08-16"
+    assert "停更" in out["staleness_note"]
+
+
+def test_northbound_stale_guard_dashed_fresh_dates_keep_value(monkeypatch):
+    """P0-1 修正反例：横线格式但近期（≤90 天）→ 净额照常可用（归一化不误伤）。"""
+    from lib.collector import _orchestrate as orch
+    from datetime import datetime, timedelta, timezone
+
+    d_fmt = lambda delta: (datetime.now(timezone.utc) - timedelta(days=delta)).strftime("%Y-%m-%d")
+    records = [
+        {"trade_date": d_fmt(30), "net_mf_amount": 100.0},
+        {"trade_date": d_fmt(20), "net_mf_amount": 200.0},
+        {"trade_date": d_fmt(10), "net_mf_amount": 300.0},
+        {"trade_date": d_fmt(5), "net_mf_amount": 400.0},
+        {"trade_date": d_fmt(2), "net_mf_amount": 500.0},
+        {"trade_date": d_fmt(0), "net_mf_amount": 600.0},
+    ]
+
+    monkeypatch.setattr(orch, "_hsgt_top10_cached", lambda symbol: None)
+    monkeypatch.setattr(orch, "_recent_flow_records",
+                        lambda r, *, limit: sorted(r, key=lambda x: str(x.get("trade_date", "")))[-limit:])
+    monkeypatch.setattr(orch, "_q_akshare_northbound", lambda symbol: records)
+
+    out = orch._ms_fetch_northbound_stock(None, "600176")
+    assert out is not None
+    assert out["net_sum_10d"] == 2100.0
+    assert out.get("stale") is None

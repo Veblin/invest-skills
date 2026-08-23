@@ -877,8 +877,9 @@ def cmd_store(args: argparse.Namespace) -> int:
         print("⚠️ store 模块不可用")
         return 1
     if args.action == "list":
+        from lib.shared_dates import fmt_fetched_at  # P2-2 收尾：UTC → 北京时间+(北京时间)，同采集时间标注口径
         for r in store_mod.list_collections(20):
-            print(f"  #{r['id']}: {r['symbol']} | {r.get('fetched_at','')[:19]} | {r.get('dimensions_ok','?')}/{r.get('dimensions_total','?')}")
+            print(f"  #{r['id']}: {r['symbol']} | {fmt_fetched_at(r.get('fetched_at',''))} | {r.get('dimensions_ok','?')}/{r.get('dimensions_total','?')}")
         return 0
     if args.action == "stats":
         for k, v in store_mod.get_stats().items():

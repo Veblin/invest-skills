@@ -84,5 +84,8 @@ class TestReportDiffHistory:
 
         md = _render(current, "600176", "full")
         assert "相对上次调研变化" in md
-        # 对比区间起点为 7 天前会话，而非 31 秒前同会话行
-        assert (now - timedelta(days=7)).strftime("%Y-%m-%d") in md
+        # 对比区间起点为 7 天前会话，而非 31 秒前同会话行；渲染按 P2-2 转为
+        # 北京时间口径（code-review 第四轮收尾修正后不再打印 UTC ISO 日期）
+        from zoneinfo import ZoneInfo
+        bj_old = (now - timedelta(days=7)).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        assert bj_old in md

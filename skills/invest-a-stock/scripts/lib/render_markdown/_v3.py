@@ -449,11 +449,13 @@ def _load_report_key_diff(symbol: str, collection: dict) -> dict | None:
 def _snapshot_diff_block(key_diff: dict) -> str:
     from lib.store import format_key_diff_markdown_lines
 
-    old_at = key_diff.get("old_at", "")[:19]
-    new_at = key_diff.get("new_at", "")[:19]
+    old_at = key_diff.get("old_at", "")
+    new_at = key_diff.get("new_at", "")
     lines = ["", "### 相对上次调研变化", ""]
     if old_at and new_at:
-        lines.append(f"对比区间：{old_at} → {new_at}（本次采集）")
+        # P2-2 收尾（code-review 第四轮）：同报告不得混时区——头部已是
+        # 北京时间+(北京时间)，此处原样打印 UTC ISO 会让对比区间偏移 8h
+        lines.append(f"对比区间：{fmt_fetched_at(old_at)} → {fmt_fetched_at(new_at)}（本次采集）")
         lines.append("")
     lines.extend(format_key_diff_markdown_lines(key_diff))
     lines.append("")

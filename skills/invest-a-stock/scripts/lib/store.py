@@ -447,6 +447,8 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
 
     v0.2.7 P2-1：行序基础上再按 60 分钟同会话窗口过滤——同会话多次
     collect（31 秒间隔）也会被配对，过滤后回到「上次调研会话」语义。
+    P2-1 修正（code-review 第四轮）：窗口锚定最新行而非 now()——锚定 now()
+    时「采集后立即 diff」会把最新快照自身排除（配对退化/None），见函数内注释。
 
     Returns:
         (older, newer) tuple，仅 1 条记录时返回 None。
@@ -465,7 +467,23 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
                 "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
                 "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 50",
                 (symbol,)).fetchall()
-        rows = [r for r in rows if not _is_same_session(r["fetched_at"])]
+        # 60 分钟窗口锚定最新行而非 datetime.now()（code-review 第四轮修正）：
+        # 锚定 now() 时，「采集后立即 diff」会把最新快照自身排除 → 配对退化或
+        # None（实测场景：Tue 09:05 采集、09:06 diff，Tue 行被排 → cmd_diff
+        # 报「至少需要 2 次采集」，尽管已有 2 次跨会话采集）。锚定最新行仅剔除
+        # 其 60 分钟前的同会话重复行（同会话多次 collect 只留最后一条），
+        # 最新行恒为 newer 侧。
+        if rows:
+            anchor = _parse_fetched_at(rows[0]["fetched_at"])
+        else:
+            anchor = None
+        if anchor is not None:
+            kept = [rows[0]]
+            for r in rows[1:]:
+                dt_r = _parse_fetched_at(r["fetched_at"])
+                if dt_r is None or (anchor - dt_r) >= timedelta(minutes=SAME_SESSION_WINDOW_MINUTES):
+                    kept.append(r)
+            rows = kept
         if len(rows) < 2:
             return None
         newer = dict(rows[0])

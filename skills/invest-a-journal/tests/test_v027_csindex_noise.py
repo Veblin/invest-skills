@@ -70,3 +70,34 @@ def test_erp_pe_ok_bond_404_silent_degrade(monkeypatch, caplog):
     assert any("10Y yield unavailable" in e for e in result["_errors"])
     assert not any("404" in e for e in result["_errors"])
     assert not any(rec.levelno >= 30 for rec in caplog.records)
+
+
+def test_erp_csindex_newest_first_uses_latest_row(monkeypatch):
+    """csindex 真实返回序为新日期在前（与 etf_data.fetch_etf_index_pe 93264b0
+    同款缺陷的 journal twin）：按「日期」升序取末行，不得 iloc[-1] 取到
+    最早行 → HS300 PE 滞后约 3.5 周（code-review 第四轮，旧测试伪装升序掩盖）。
+
+    下面 fake 恒用新日期在前；修复前 pe 取 13.0、修复后取 13.2。
+    """
+    class _FakeAkCsindexNewestFirst:
+        def stock_zh_index_value_csindex(self, symbol):
+            import pandas as pd
+            return pd.DataFrame([
+                {"日期": "2026-08-22", "市盈率1": 13.2},  # 最新在前（真实返回序）
+                {"日期": "2026-08-21", "市盈率1": 13.0},  # 最早行
+            ])
+
+        def bond_zh_us_rate(self):
+            import pandas as pd
+            return pd.DataFrame([{"中国国债收益率10年": 1.6}])
+
+    monkeypatch.setitem(sys.modules, "akshare", _FakeAkCsindexNewestFirst())
+    monkeypatch.setattr(mm, "akshare_direct_session", nullcontext)
+    monkeypatch.setattr(mm.env, "is_tushare_available", lambda cfg: False)
+    monkeypatch.setattr(mm.env, "is_fred_available", lambda cfg: False)
+
+    result = {"_errors": [], "erp": None}
+    mm._fetch_erp(result)
+    assert result["erp"] == pytest.approx(round(100.0 / 13.2 - 1.6, 2))  # 取最新行
+    assert result["erp"] != round(100.0 / 13.0 - 1.6, 2)  # 未取到最早行
+    assert not result["_errors"]

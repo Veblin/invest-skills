@@ -2457,7 +2457,13 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
             return result
         try:
             latest = max(dates)
-            latest_dt = datetime.strptime(latest, "%Y%m%d").replace(tzinfo=timezone.utc)
+            # 归一化任意日期形态后解析：akshare 持股日期为 'YYYY-MM-DD'（实测
+            # 2026-08-24 live 复现 600176 最新 '2024-08-16'），tushare 为
+            # 'YYYYMMDD'——strptime('%Y%m%d') 在横线格式上恒 ValueError → 守卫
+            # 静默跳过、P0-1 失效（code-review 第四轮）。只留数字再截 8 位兼容
+            # 'YYYY-MM-DD HH:MM:SS' 等 TimeStamp 字符串形态。
+            digits = "".join(ch for ch in latest if ch.isdigit())[:8]
+            latest_dt = datetime.strptime(digits, "%Y%m%d").replace(tzinfo=timezone.utc)
         except ValueError:
             return result
         age_days = (datetime.now(timezone.utc) - latest_dt).days

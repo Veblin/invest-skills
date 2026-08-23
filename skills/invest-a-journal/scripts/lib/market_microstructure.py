@@ -792,7 +792,21 @@ def _fetch_erp(result: dict) -> None:
                 logger.debug("erp: akshare csindex fallback failed, silent degrade: %s", exc)
                 df = None
             if df is not None and not df.empty:
-                pe_hs300 = safe_float(df.iloc[-1].get("市盈率1"))
+                # 同 etf_data.fetch_etf_index_pe（93264b0）同款取行缺陷：csindex
+                # 新日期在前，iloc[-1] 取到最早行 → HS300 PE 滞后约 3.5 周
+                # （code-review 第四轮 journal twin）。按「日期」升序后取末行；
+                # NaN 行先剔除（日期/市盈率任一 NaN 均剔除，防排序污染取行）。
+                if "日期" in df.columns and "市盈率1" in df.columns:
+                    df2 = df.dropna(subset=["日期", "市盈率1"]).sort_values("日期")
+                    if not df2.empty:
+                        pe_hs300 = safe_float(df2.iloc[-1].get("市盈率1"))
+                else:
+                    # 列名漂移守卫（对齐 etf_data 惯例）：无「日期/市盈率1」列时
+                    # 沿用原始行序取末行并明确警告，fail-loud 不复现静默滞后
+                    logger.warning(
+                        "erp: csindex fallback column drift (需要 日期/市盈率1), "
+                        "沿用原始行序取末行，可能存在取行偏移")
+                    pe_hs300 = safe_float(df.iloc[-1].get("市盈率1"))
 
         if pe_hs300 is None or pe_hs300 <= 0:
             result["_errors"].append("erp: HS300 PE unavailable")
