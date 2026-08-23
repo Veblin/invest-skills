@@ -304,6 +304,19 @@ def collect_northbound(symbol: str) -> dict:
     )
 
 
+def _sort_kline_asc_postprocess(legacy: dict, _results: list) -> dict:
+    """P2-3 v0.2.7: kline 数据统一升序落库（data[-1]=最新，canonical 约定
+    skills/lib/technical.py sort_kline_asc）。Tushare daily 返回降序，此前
+    原序进 store raw_json——现有消费方显式排序未出错，但未排序消费方将
+    静默算错窗口（batch-review P2-3，复检脚本实证「近 20 日 -27.71%」误算）。
+    存量数据不回溯：读侧仍须显式排序或按日期取 max。"""
+    data = legacy.get("data")
+    if isinstance(data, list) and data:
+        from lib.technical import sort_kline_asc
+        legacy["data"] = sort_kline_asc([r for r in data if isinstance(r, dict)])
+    return legacy
+
+
 def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
     """日K线。并行：Tushare + akshare + baostock(兜底) [+ tickflow(可选)]。
 
@@ -357,7 +370,10 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
             qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
         return qp_map
 
-    return _collect_dimension("kline", tasks, query_params=_kline_qp, cascade=True)
+    return _collect_dimension(
+        "kline", tasks, query_params=_kline_qp, cascade=True,
+        postprocess=_sort_kline_asc_postprocess,
+    )
 
 
 # ---- 估值维度 ----
