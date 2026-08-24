@@ -535,10 +535,10 @@ def cmd_collect(args: argparse.Namespace) -> int:
         progress = store_mod.get_pipeline_progress(args.symbol)
         completed_steps = [s for s, done in progress.items() if done]
         if completed_steps:
-            print(f"📋 已完成步骤: {', '.join(completed_steps)}")
+            print(f"📋 已完成步骤: {', '.join(completed_steps)}", file=sys.stderr)
         cached = _try_resume_collection(args.symbol)
         if cached and _resume_cache_compatible(args, dims, cached):
-            print("♻️ 从 store 恢复上次采集结果（--resume）")
+            print("♻️ 从 store 恢复上次采集结果（--resume）", file=sys.stderr)
             result = cached
             _warn_degraded_collection(result)
             print(render.render(result, args.symbol, "compact"))
@@ -547,7 +547,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
                     from lib.archiver import archive_collection
                     filepath = archive_collection(args.symbol, result)
                     if filepath:
-                        print(f"📦 原始数据已存档: {filepath}")
+                        print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
                 except Exception as exc:
                     print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
             return 0
@@ -565,11 +565,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
     if args.with_macro and "kline" not in dims:
         dims.append("kline")
     if args.deep:
-        print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
+        print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）", file=sys.stderr)
     if args.with_macro:
-        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）")
+        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）", file=sys.stderr)
     if getattr(args, "with_news_pack", False):
-        print("📰 新闻包模式已启用（公告 + 查询包 + 可选 Tavily）")
+        print("📰 新闻包模式已启用（公告 + 查询包 + 可选 Tavily）", file=sys.stderr)
     env.print_missing_token_warnings()
     warn_if_proxy_detected(probe=True)
     if "kline" in dims:
@@ -582,12 +582,12 @@ def cmd_collect(args: argparse.Namespace) -> int:
     _warn_degraded_collection(result)
     if _no_sources_responded(result["summary"]):
         print(render.render(result, args.symbol, "compact"))
-        print("⚠️ 所有维度均不可用。请运行 diagnose。")
+        print("⚠️ 所有维度均不可用。请运行 diagnose。", file=sys.stderr)
         return 1
     print(render.render(result, args.symbol, "compact"))
     if args.store and _HAS_STORE:
         store_mod.save_collection(result)
-        print("💾 已存入持久化存储")
+        print("💾 已存入持久化存储", file=sys.stderr)
         _maybe_store_macro_snapshot(result, args)
     if getattr(args, "store", True) and _HAS_STORE:
         store_mod.save_pipeline_step(
@@ -598,7 +598,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
             from lib.archiver import archive_collection
             filepath = archive_collection(args.symbol, result)
             if filepath:
-                print(f"📦 原始数据已存档: {filepath}")
+                print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
         except Exception as exc:
             print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
     return 0
@@ -636,7 +636,7 @@ def _maybe_store_report_snapshot(
         # kind='report'：与 collect 快照区分，diff 自动配对优先 collect
         # （避免同会话两行互相比较，review #9 第二轮）
         store_mod.save_collection(result, kind="report")
-        print("💾 已存入持久化存储")
+        print("💾 已存入持久化存储", file=sys.stderr)
     except Exception as exc:
         print(f"⚠️ 报告入库失败: {exc}", file=sys.stderr)
     _maybe_store_macro_snapshot(result, args)
@@ -670,7 +670,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         progress = store_mod.get_pipeline_progress(args.symbol)
         completed_steps = [s for s, done in progress.items() if done]
         if completed_steps:
-            print(f"📋 已完成步骤: {', '.join(completed_steps)}")
+            print(f"📋 已完成步骤: {', '.join(completed_steps)}", file=sys.stderr)
         result = _try_resume_collection(args.symbol)
         if result and _resume_cache_compatible(args, dims, result):
             resumed_from_store = True
@@ -691,9 +691,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.with_macro and "kline" not in dims:
         dims.append("kline")
     if args.deep:
-        print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）")
+        print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）", file=sys.stderr)
     if args.with_macro:
-        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）")
+        print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）", file=sys.stderr)
     if result is None:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
@@ -737,7 +737,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         except Exception as exc:  # 缺口检查失败不阻断报告
             print(f"⚠️ material-gap 检查失败: {exc}", file=sys.stderr)
     if _no_sources_responded(result["summary"]):
-        print("⚠️ 所有维度均不可用，无法生成报告")
+        print("⚠️ 所有维度均不可用，无法生成报告", file=sys.stderr)
         return 1
     if _HAS_STORE and getattr(args, "store", True):
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
@@ -766,8 +766,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdfile.write_text(md_v2, encoding="utf-8")
 
         print(render.render(result, args.symbol, "compact"))
-        print(f"📄 HTML 报告: {htmlpath.resolve()}")
-        print(f"📝 Markdown 报告: {mdfile.resolve()}")
+        print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
+        print(f"📝 Markdown 报告: {mdfile.resolve()}", file=sys.stderr)
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
         return 0
 
@@ -803,7 +803,7 @@ def cmd_report(args: argparse.Namespace) -> int:
                   else (Path.cwd() / "reports").resolve())
         mdpath = _report_filepath(outdir, subdir, ts)
         mdpath.write_text(output, encoding="utf-8")
-        print(f"📝 Markdown 报告: {mdpath.resolve()}")
+        print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
         if not getattr(args, "outdir", None):
             print(output)  # 默认路径下保留 stdout 契约（skill 流程读 stdout）
         return 0
@@ -874,7 +874,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
 def cmd_store(args: argparse.Namespace) -> int:
     if not _HAS_STORE:
-        print("⚠️ store 模块不可用")
+        print("⚠️ store 模块不可用", file=sys.stderr)
         return 1
     if args.action == "list":
         from lib.shared_dates import fmt_fetched_at  # P2-2 收尾：UTC → 北京时间+(北京时间)，同采集时间标注口径
@@ -910,7 +910,7 @@ def cmd_store(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     """生成采集计划并输出 JSON。"""
     if not _HAS_PLANNER:
-        print("⚠️ planner 模块不可用")
+        print("⚠️ planner 模块不可用", file=sys.stderr)
         return 1
     plan = planner_mod.generate_plan(args.symbol, args.intent)
     if args.emit == "json":
@@ -924,7 +924,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 def cmd_evidence(args: argparse.Namespace) -> int:
     """生成结构化证据表。"""
     if not _HAS_EVIDENCE:
-        print("⚠️ evidence 模块不可用")
+        print("⚠️ evidence 模块不可用", file=sys.stderr)
         return 1
     env.print_missing_token_warnings()
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
@@ -934,13 +934,13 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     if getattr(args, "from_store", False) and _HAS_STORE:
         cached = _try_resume_collection(args.symbol)
         if cached and _resume_cache_compatible(args, dims, cached):
-            print("♻️ 复用 store 采集快照（--from-store），跳过现场采集")
+            print("♻️ 复用 store 采集快照（--from-store），跳过现场采集", file=sys.stderr)
             result = cached
     if result is None:
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
     _warn_degraded_collection(result)
     if _no_sources_responded(result["summary"]):
-        print("⚠️ 所有维度均不可用，无法生成证据表")
+        print("⚠️ 所有维度均不可用，无法生成证据表", file=sys.stderr)
         return 1
     rows = evidence_mod.build_evidence_table(result["dimensions"])
     output = evidence_mod.render_evidence_table(rows, args.emit)
@@ -1080,7 +1080,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             outdir = Path(args.outdir).resolve()
             mdpath = _report_filepath(outdir, subdir, ts)
             mdpath.write_text(output, encoding="utf-8")
-            print(f"📝 Markdown 报告: {mdpath.resolve()}")
+            print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
             return 0
         print(output)
         return 0
@@ -1208,7 +1208,7 @@ def cmd_peer(args: argparse.Namespace) -> int:
 def cmd_diff(args: argparse.Namespace) -> int:
     """对比同一股票两次快照的变化。"""
     if not _HAS_STORE:
-        print("⚠️ store 模块不可用，diff 功能无法执行")
+        print("⚠️ store 模块不可用，diff 功能无法执行", file=sys.stderr)
         return 1
 
     # 参数校验
@@ -1236,7 +1236,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
         # 确保 old 早于 new
         if (old.get("fetched_at", "") > new.get("fetched_at", "")):
             old, new = new, old
-            print(f"ⓘ 已自动交换顺序（#{args.to_id} → #{args.from_id}）")
+            print(f"ⓘ 已自动交换顺序（#{args.to_id} → #{args.from_id}）", file=sys.stderr)
     else:
         pair = store_mod.get_latest_two(args.symbol)
         if pair is None:
@@ -1616,7 +1616,7 @@ def cmd_watchlist(args: argparse.Namespace) -> int:
         outdir.mkdir(parents=True, exist_ok=True)
         mdpath = outdir / f"watchlist_{today}.md"
         mdpath.write_text(output, encoding="utf-8")
-        print(f"📝 Watchlist: {mdpath.resolve()}")
+        print(f"📝 Watchlist: {mdpath.resolve()}", file=sys.stderr)
         if failures:
             print(f"⚠️ {failures}/{len(symbols)} 只标的采集失败", file=sys.stderr)
         return 1 if failures == len(symbols) else 0
@@ -1809,7 +1809,7 @@ def cmd_thesis(args: argparse.Namespace) -> int:
     if args.status or not (args.init or args.update):
         t = store_mod.thesis_get(args.symbol)
         if not t:
-            print(f"⚠️ 未找到 {args.symbol} 的 thesis 记录，请先 --init")
+            print(f"⚠️ 未找到 {args.symbol} 的 thesis 记录，请先 --init", file=sys.stderr)
             return 1
         print(_format_thesis_status(t))
         return 0
@@ -2098,7 +2098,7 @@ def cmd_value(args: argparse.Namespace) -> int:
             print("⚠️ store 模块不可用，无法存储", file=sys.stderr)
         else:
             val_id = store_mod.save_valuation(result.to_dict())
-            print(f"💾 已存入估值记录 (id={val_id})")
+            print(f"💾 已存入估值记录 (id={val_id})", file=sys.stderr)
 
     if result.errors:
         critical = [e for e in result.errors if "失败" in e or "不可得" in e]
@@ -2139,7 +2139,7 @@ def cmd_market_status(args: argparse.Namespace) -> int:
             store_mod.init_db()
         snap = save_snapshot()
         if snap is None:
-            print("⚠️ 非交易日或数据缺失，已跳过保存")
+            print("⚠️ 非交易日或数据缺失，已跳过保存", file=sys.stderr)
             return 0
         if args.json:
             print(json.dumps(snap, ensure_ascii=False, indent=2, default=str))

@@ -150,4 +150,5 @@ class TestThesisStatusDisplay:
         import invest
 
         assert invest.cmd_thesis(_thesis_args(status=True)) == 1
-        assert "未找到" in capsys.readouterr().out
+        # 状态/错误行走 stderr（stdout 契约：命令正文；v0.2.7 code-review 第五轮）
+        assert "未找到" in capsys.readouterr().err

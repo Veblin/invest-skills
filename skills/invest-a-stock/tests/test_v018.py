@@ -1231,16 +1231,30 @@ class TestCheckFastVeto:
         assert any("资产负债率" in r for r in result["hard_triggers"])
 
     def test_fcff_cumulative_negative_triggers(self):
+        # fcff 为报告期累计（Q1→H1→3Q→FY 同一财年逐期叠加），仅年报（1231）
+        # 行参与求和（code-review 第五轮对齐 quality_check._metric_fcf_5y）
         rows = []
         for i, fcff in enumerate([-3.0, -4.0, -2.0]):
             rows.append({
-                "end_date": f"2025{['0331', '0630', '0930'][i]}",
+                "end_date": f"202{2+i}1231",
                 "fcff": fcff,
                 "revenue": 100.0,
             })
         dims = {"financials": {"data": rows, "status": "available"}}
         result = _check_fast_veto(dims, {})
         assert any("FCFF 累计为负" in r for r in result["hard_triggers"])
+
+    def test_quarterly_negative_fcff_annual_positive_not_triggers(self):
+        """季度单期为负但年报累计为正 → 不触发（期累计口径的防重叠回归）。"""
+        rows = [
+            {"end_date": "20250630", "fcff": -5.0, "revenue": 100.0},
+            {"end_date": "20251231", "fcff": 30.0, "revenue": 100.0},
+            {"end_date": "20241231", "fcff": 20.0, "revenue": 100.0},
+            {"end_date": "20231231", "fcff": 25.0, "revenue": 100.0},
+        ]
+        dims = {"financials": {"data": rows, "status": "available"}}
+        result = _check_fast_veto(dims, {})
+        assert not any("FCFF 累计为负" in r for r in result["hard_triggers"])
 
     def test_empty_financials_returns_empty_list(self):
         assert _check_fast_veto({}, {}) == {"hard_triggers": [], "soft_triggers": [], "display_lines": []}
@@ -1466,10 +1480,14 @@ class TestFastVetoDcfLinkage:
         for dim in c["dimensions"]:
             if dim["dimension"] == "financials":
                 rows = list(dim["data"])
-                # 强制近 3 期 FCFF 为负，触发硬否决
-                rows[-3] = {**rows[-3], "fcff": -1.0e7}
-                rows[-2] = {**rows[-2], "fcff": -2.0e7}
-                rows[-1] = {**rows[-1], "fcff": -3.0e7}
+                # 强制近 3 个年报期 FCFF 为负，触发硬否决（fcff 为报告期累计，
+                # 仅年报行参与求和——末 3 行中含季度行会与年报行重叠同一财年，
+                # code-review 第五轮口径）
+                n = 0
+                for i, r in enumerate(rows):
+                    if str(r.get("end_date", "")).endswith("1231"):
+                        rows[i] = {**r, "fcff": -1.0e7 * (1 + n)}
+                        n += 1
                 dim["data"] = rows
         return c
 

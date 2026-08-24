@@ -174,10 +174,12 @@ class TestGetLatestTwo:
         assert isolated_store.get_latest_two("NONEXIST") is None
 
     def test_skips_same_session_rows(self, isolated_store):
-        """v0.2.7 P2-1：60 分钟窗口剔除最新行之前的同会话重复行。
+        """v0.2.7 P2-1：10 分钟窗口剔除最新行之前的同会话重复行。
 
         P2-1 修正（code-review 第四轮）：窗口锚定最新行而非 now()——同会话
         多次 collect 只留最后一条，但最新行恒为 newer 保留。
+        新增回归（第五轮）：09:05/09:31 间隔 26 分钟的两次真实采集必须配对
+        ——窗宽 60→10 分钟,独立会话不再被误并入。
         """
         from datetime import datetime, timedelta, timezone
 
@@ -195,6 +197,27 @@ class TestGetLatestTwo:
         older, newer = pair
         assert older["fetched_at"] == ts_125m  # 窗口外最近行
         assert newer["fetched_at"] == ts_10s  # 最新行保留（锚定最新行修正）
+
+    def test_cross_session_pair_26min_kept(self, isolated_store):
+        """第五轮回归：09:05/09:31 两次独立会话（26 分钟）不得被窗口误并。
+
+        60 分钟窗曾丢弃 09:05 行 → diff 假报「至少需要 2 次采集」；窗宽
+        60→10 分钟后,26 分钟间隔视为真实跨会话,配对 (前次, 最新)。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        ts_early = (now - timedelta(minutes=26)).isoformat()
+        ts_late = now.isoformat()
+        isolated_store.save_collection(
+            make_store_collection(symbol="999991", fetched_at=ts_early))
+        isolated_store.save_collection(
+            make_store_collection(symbol="999991", fetched_at=ts_late))
+        pair = isolated_store.get_latest_two("999991")
+        assert pair is not None
+        older, newer = pair
+        assert older["fetched_at"] == ts_early
+        assert newer["fetched_at"] == ts_late
 
     def test_pair_keeps_newest_when_diff_immediately_after_collect(self, isolated_store):
         """code-review 第四轮：采集后立即 diff，最新快照不得被自身窗口排除。

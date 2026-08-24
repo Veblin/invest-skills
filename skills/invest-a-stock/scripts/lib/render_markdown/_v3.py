@@ -856,20 +856,27 @@ def _section_market_structure(
                 f"- 主力（moneyflow）{moneyflow_signal_label(mf_key)}: {fmt_amount(mf_net)}"
             )
         if nb and mf_net is not None:
-            n_v = float(nb.get("net_sum_10d") or 0)
-            m_v = mf_net
-            if n_v * m_v > 0:
-                cv4 = "convergence"
-                cv4d = "北向与主力净流入方向一致"
-            elif n_v == 0 and m_v == 0:
-                cv4 = "convergence"
-                cv4d = "北向与主力净流入方向一致"
-            elif n_v == 0 or m_v == 0:
-                cv4 = "gap"
-                cv4d = "资金数据不完整"
+            nb_net = nb.get("net_sum_10d")
+            if nb_net is not None:
+                n_v = float(nb_net)
+                m_v = mf_net
+                if n_v * m_v > 0:
+                    cv4 = "convergence"
+                    cv4d = "北向与主力净流入方向一致"
+                elif n_v == 0 and m_v == 0:
+                    cv4 = "convergence"
+                    cv4d = "北向与主力净流入方向一致"
+                elif n_v == 0 or m_v == 0:
+                    cv4 = "gap"
+                    cv4d = "资金数据不完整"
+                else:
+                    cv4 = "divergence"
+                    cv4d = "北向与主力净流入方向相反"
             else:
-                cv4 = "divergence"
-                cv4d = "北向与主力净流入方向相反"
+                # P0-1：净额被时效守卫置 None（源停更）——不得以 0.0 代替参与
+                # 「方向一致」判定（一致/相反均无数据可依，只能标数据不可用）
+                cv4 = "gap"
+                cv4d = "北向数据不可用（源停更），无法交叉验证"
             lines.append("")
             lines.append(_cv(cv4, "CV-4", "北向 vs 主力大单", cv4d, "中"))
 
@@ -1020,9 +1027,15 @@ def _section_market_structure(
 
     # ---- A-6: 价值链位置 + 利润池分布 ----
     company_gm: float | None = None
-    fin_dim = collection.get("financials") if isinstance(collection, dict) else None
-    fin_rows = fin_dim.get("data") if isinstance(fin_dim, dict) else None
-    if isinstance(fin_rows, list) and fin_rows:
+    # A-6（code-review 第五轮）：financials 不在 collection 顶层——须经 dims
+    # 索引（dimensions → _index_dims，同 _section_dynamic_drivers 511 行模式）。
+    # 顶层键从未被 _assemble_result 设置，此前恒 None → 「本公司数据不足」
+    # 永久污名（即便财务数据齐备）。
+    fin_rows = None
+    if isinstance(collection, dict):
+        fin_dim = _get_dim_data(_index_dims(collection), "financials")
+        fin_rows = fin_dim if isinstance(fin_dim, list) else None
+    if fin_rows:
         fin_sorted = sort_kline_asc(fin_rows)
         if fin_sorted:
             company_gm = _fin_field_num(fin_sorted[-1], *GROSS_MARGIN_FIELDS)
@@ -1170,7 +1183,7 @@ def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
     financial_industry = industry in ("银行", "非银金融", "保险", "证券", "多元金融")
 
     fin_dim = (dims or {}).get("financials") or (collection or {}).get("financials") or {}
-    fin_list = fin_dim.get("data") if isinstance(fin_dim, dict) else None
+    fin_list = fin_dim.get("data") if isinstance(fin_dim, dict) else fin_dim
     if not isinstance(fin_list, list) or not fin_list:
         return result
 
@@ -1187,24 +1200,33 @@ def _check_fast_veto(dims: dict, collection: dict) -> dict[str, list[str]]:
         result["display_lines"].append(f"- {tag}: {line}")
 
     # 1. FCF 累计为负（优先 fcff，字段不可得时退化为经营现金流）
-    fcff_vals = [v for v in (_fin_field_num(r, "fcff") for r in rows) if v is not None]
+    # 口径（code-review 第四轮）：fina_indicator 的 fcff / n_cashflow_act 为
+    # 报告期累计（Q1→H1→3Q→FY 逐期叠加同一财年）——全量求和重复计数且季度
+    # 单期为负可误否决；对齐 quality_check._metric_fcf_5y：仅取年报（1231）行。
+    annual_rows = [
+        r for r in rows if str(_norm_ed(str(r.get("end_date") or ""))).endswith("1231")
+    ]
+    fcff_vals = [
+        v for v in (_fin_field_num(r, "fcff") for r in annual_rows) if v is not None
+    ]
     if len(fcff_vals) >= 3:
         total = sum(fcff_vals)
         if total < 0:
             _append(
                 "hard_triggers",
-                f"⚠️ 近 {len(fcff_vals)} 期可得 FCFF 累计为负（合计 {total:.2f}）"
+                f"⚠️ 近 {len(fcff_vals)} 个年报期 FCFF 累计为负（合计 {total:.2f}）"
                 "[来源: financials.fcff]"
             )
     else:
         ocf_vals = [
-            v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in rows) if v is not None
+            v for v in (_fin_field_num(r, "n_cashflow_act", "ocf") for r in annual_rows)
+            if v is not None
         ]
         if len(ocf_vals) >= 3 and sum(ocf_vals) < 0:
             _append(
                 "hard_triggers",
-                f"⚠️ FCFF 字段不可得，退化以经营现金流近 {len(ocf_vals)} 期累计为负"
-                f"（合计 {sum(ocf_vals):.2f}）代理观察[来源: financials.n_cashflow_act]"
+                f"⚠️ FCFF 字段不可得，退化以经营现金流近 {len(ocf_vals)} 个年报期"
+                f"累计为负（合计 {sum(ocf_vals):.2f}）代理观察[来源: financials.n_cashflow_act]"
             )
 
     # 2. 连续 3 期经营性现金流为负

@@ -560,7 +560,15 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
             # csindex 返回新日期在前；显式按日期升序后取末行，不依赖返回顺序
             # （2026-08-22 实测 iloc[-1] 取到最早行 → index_pe 滞后约 3.5 周）
             # NaN 日期行先剔除（pandas 升序 NaN 置末，会污染 iloc[-1] 取行）
-            df = df.dropna(subset=["日期"]).sort_values("日期")
+            df = df.dropna(subset=["日期"])
+            # 双 PE 列均 NaN 的行同样剔除（csindex 当日 PE 未生成的瞬时缺口，
+            # 否则 iloc[-1] 取到 NaN 行 → 假 missing / 分位跳日；对齐 journal
+            # market_microstructure.py:800 已剔 PE 列的孪生逻辑）。任一列有效
+            # 即保留（市盈率2=流通加权在部分指数缺列不应连坐）。
+            pe_cols = [c for c in ("市盈率1", "市盈率2") if c in df.columns]
+            if pe_cols:
+                df = df.dropna(subset=pe_cols, how="all")
+            df = df.sort_values("日期")
             if df.empty:
                 return {"status": "missing", "index_pe": None, "index_pe_note": None,
                         "rows": [], "error": "csindex rows empty after date dropna"}

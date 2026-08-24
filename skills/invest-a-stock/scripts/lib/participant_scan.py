@@ -24,7 +24,15 @@ _DEFAULT_MF_KEYS = ("net_sum_5d", "net_sum_10d", "net_mf_amount")
 
 
 def northbound_label(nb: dict) -> str:
-    """北向净额标签：hsgt_top10 为上榜日累计，akshare 为连续交易日。"""
+    """北向净额标签：hsgt_top10 为上榜日累计，akshare 为连续交易日。
+
+    P0-1：net_sum_10d 被时效守卫置 None（源停更/时效不可确认）时输出
+    「数据不可用」+ 原因，禁止以 fmt_amount(None) 的占位渲染成
+    「上榜日累计净额 -（10 个上榜日）」暗示近期数据。
+    """
+    if nb.get("net_sum_10d") is None:
+        note = nb.get("staleness_note")
+        return f"（数据不可用）{note}" if note else "（数据不可用）"
     try:
         days = int(nb.get("days") or 0)
     except (TypeError, ValueError):

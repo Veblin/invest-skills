@@ -313,11 +313,14 @@ CNINFO_HOLDER_TIMEOUT_SEC = max(5, _cninfo_timeout_val)
 
 # 单源采集 deadline（秒）：超时未完成的源返回 timeout SourceResult（维度 partial）。
 # INVEST_SOURCE_TIMEOUT=0 表示不设限（等价旧行为）。下限 5s。
-_raw_src_timeout = os.environ.get("INVEST_SOURCE_TIMEOUT", "60")
+# 默认 120：旧值 60 曾静默丢弃慢而健康的并行源——_run_sources_parallel 在
+# v0.2.3 deadline 引入前是全部等待的，cutoff 后慢源整维 partial（code-review
+# 第四轮）。用户环境更慢可调 INVEST_SOURCE_TIMEOUT。
+_raw_src_timeout = os.environ.get("INVEST_SOURCE_TIMEOUT", "120")
 try:
     _src_timeout_val = float(_raw_src_timeout)
 except (ValueError, TypeError):
-    _src_timeout_val = 60.0
+    _src_timeout_val = 120.0
 SOURCE_DEADLINE_SEC = None if _src_timeout_val <= 0 else max(5.0, _src_timeout_val)
 
 

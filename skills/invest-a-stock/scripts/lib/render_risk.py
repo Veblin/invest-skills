@@ -1028,9 +1028,12 @@ def _section_left_right_probability(
         if rev_yoy_lr is not None and rev_yoy_lr > 100:
             continuation_hits.append(f"季度营收同比 {rev_yoy_lr:+.1f}%（>100%）")
     if tech and "error" not in tech:
-        ma60 = tech.get("trend", {}).get("ma60") or {}
-        if ma60.get("slope_pct") is not None and ma60["slope_pct"] > 0:
-            continuation_hits.append(f"MA60 斜率为正（{ma60['slope_pct']:+.2f}%/期）")
+        # 实际键：trend['slope']['60']（slope 为 {str(p): float|None}）——
+        # 曾读取不存在的 trend['ma60'],MA60 信号永不触发、分母虚报（code-review
+        # 第五轮）。后期斜率可能为 None（数据不足),仅正值计数。
+        ma60_slope = (tech.get("trend") or {}).get("slope", {}).get("60")
+        if ma60_slope is not None and ma60_slope > 0:
+            continuation_hits.append(f"MA60 斜率为正（{ma60_slope:+.2f}%/期）")
     mf_lr = market_structure.get("moneyflow") or {}
     nb_lr = market_structure.get("northbound") or {}
     _mf_raw = mf_lr.get("net_sum_10d")

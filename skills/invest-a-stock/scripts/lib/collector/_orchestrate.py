@@ -2434,6 +2434,30 @@ def _hsgt_top10_cached(symbol: str) -> list[dict] | None:
         return rows
 
 
+def _norm_trade_date(raw: Any) -> str | None:
+    """把多种形态的 trade_date 归一化为 'YYYYMMDD'；无法识别返回 None。
+
+    akshare 个股持股变动为 'YYYY-MM-DD'（实测 2026-08-24 live 复现 600176
+    最新 '2024-08-16'），tushare 为 'YYYYMMDD'，TimeStamp 字符串形态
+    'YYYY-MM-DD HH:MM:SS' 截前 8 位数字；NaN/None/'--'/'nan'/'2024-8-16'
+    等无法归一化返回 None——调用方须逐行剔除坏值，不能让单条坏行污染
+    max(dates) 使整个 P0-1 时效守卫静默失效（第五轮）。
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())[:8]
+    if len(digits) != 8:
+        return None
+    try:
+        datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return None
+    return digits
+
+
 def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     """个股北向近 10 个交易日净额（元）。
 
@@ -2452,28 +2476,36 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
         if not result:
             return result
         recent = result.get("records") or []
-        dates = [str(r.get("trade_date", "")) for r in recent if str(r.get("trade_date", ""))]
-        if not dates:
+        # 逐记录归一化后取 max：词法最大对坏行（'nan'/'--' 等垃圾字符串 > '2024...'）
+        # 会把 latest 选成垃圾值、strptime ValueError 静默跳过守卫——单条坏行即令
+        # 整个 P0-1 失效（第五轮）。归一化后全为 8 位数字，词法序 == 时间序。
+        normed: list[tuple[str, Any]] = []
+        for r in recent:
+            d = _norm_trade_date(r.get("trade_date"))
+            if d is not None:
+                normed.append((d, r.get("trade_date")))
+        if not normed:
+            # 时效不可确认：宁降级为「不可用」，不得以不可判断的日期冒充新鲜
+            # 数据（fail loud：日志可查，渲染层走数据不足降级）
+            logger.warning(
+                "northbound staleness guard(%s): %d 条记录 trade_date 均无法归一化，"
+                "净额时效不可确认 → 置 None", symbol, len(recent))
+            result["net_sum_10d"] = None
+            result["stale"] = True
+            result["staleness_note"] = (
+                "北向个股披露记录期无法解析，净额时效不可确认（源异常）"
+            )
             return result
-        try:
-            latest = max(dates)
-            # 归一化任意日期形态后解析：akshare 持股日期为 'YYYY-MM-DD'（实测
-            # 2026-08-24 live 复现 600176 最新 '2024-08-16'），tushare 为
-            # 'YYYYMMDD'——strptime('%Y%m%d') 在横线格式上恒 ValueError → 守卫
-            # 静默跳过、P0-1 失效（code-review 第四轮）。只留数字再截 8 位兼容
-            # 'YYYY-MM-DD HH:MM:SS' 等 TimeStamp 字符串形态。
-            digits = "".join(ch for ch in latest if ch.isdigit())[:8]
-            latest_dt = datetime.strptime(digits, "%Y%m%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            return result
+        latest, latest_raw = max(normed)
+        latest_dt = datetime.strptime(latest, "%Y%m%d").replace(tzinfo=timezone.utc)
         age_days = (datetime.now(timezone.utc) - latest_dt).days
         if age_days <= _NORTHBOUND_STALE_DAYS:
             return result
         result["net_sum_10d"] = None
         result["stale"] = True
-        result["latest_trade_date"] = latest
+        result["latest_trade_date"] = str(latest_raw) if latest_raw is not None else latest
         result["staleness_note"] = (
-            f"北向个股披露源已停更：最新记录 {latest}，距今约 {age_days // 30} 个月，"
+            f"北向个股披露源已停更：最新记录 {latest_raw}，距今约 {age_days // 30} 个月，"
             "净额不可用（2024-08 起北向个股披露规则变更）"
         )
         return result

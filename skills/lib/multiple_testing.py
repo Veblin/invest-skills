@@ -133,8 +133,13 @@ def bh_fdr(p_values: list[float], alpha: float = 0.05) -> dict:
         q = p * k / rank
         if max_q is None or q < max_q:
             max_q = q
-        q_raw.append((i, min(max_q, 1.0)))
-        if q <= alpha:
+        q_adj = min(max_q, 1.0)  # 单调化 q 值（BH 单调保持,与 q_values 输出一致）
+        q_raw.append((i, q_adj))
+        # 判定必须用单调化 q 值: q_values 暴露的是 q_adj——用 raw q 判定时
+        # 「存储的 q 值 ≤ α」与「拒绝集」脱节: 小 p 因前置大 p 折衷而 q_adj
+        # 小于 raw q 时 raw 判定漏拒,拒绝集不再嵌套（code-review 第五轮,
+        # 例: [0.02,0.033,0.049] α=0.05 标准 BH 全拒,raw 判定漏拒首项）。
+        if q_adj <= alpha:
             rejected.add(i)
     q_values: list[float | None] = [None] * m
     for i, q in q_raw:

@@ -272,8 +272,11 @@ def save_collection(result: dict[str, Any], kind: str = "collect") -> int:
 
 # P2-1 v0.2.7: 同会话时间窗口。原实现只跳过 fetched_at 全等行——微秒精度
 # 下同会话 collect/report 恒不相等，31 秒前的快照被当「上次调研」
-# （batch-review P2-1）。fetched_at 距今 < 60 分钟视为同会话。
-SAME_SESSION_WINDOW_MINUTES = 60
+# （batch-review P2-1）。fetched_at 距今 < 10 分钟视为同会话。
+# 窗宽权衡（code-review 第五轮）：60 分钟把 09:05/09:31 两次独立会话误并入
+# 「至少需要 2 次采集」假报；10 分钟保留重试级重复（秒~分钟）丢弃，跨越
+# 10 分钟的两次采集视为真实间隔会话。
+SAME_SESSION_WINDOW_MINUTES = 10
 
 
 def _parse_fetched_at(raw: Any) -> datetime | None:
@@ -456,39 +459,57 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     init_db()
     c = _conn()
     try:
-        rows = c.execute(
-            "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 50",
+        # 两阶段查询（code-review 第五轮）：先按轻量列（id/fetched_at）过滤
+        # 窗口——LIMIT 200 防窗口内密集行被 50 条截断；窗内只剩 ≤2 行后
+        # 才按 id 取 raw_json BLOB（原实现 LIMIT 50 × 全量 BLOB 反序列化）。
+        meta = c.execute(
+            "SELECT id, fetched_at FROM collections "
+            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 200",
             (symbol,)).fetchall()
-        if len(rows) == 0:
+        if len(meta) == 0:
             # 旧库/纯 report 用户兼容：回退全部 kind（仅限无 collect 行，
             # 1 条 collect + 同会话 report 混排会复现自我比较问题）
-            rows = c.execute(
-                "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 50",
+            meta = c.execute(
+                "SELECT id, fetched_at FROM collections "
+                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 200",
                 (symbol,)).fetchall()
-        # 60 分钟窗口锚定最新行而非 datetime.now()（code-review 第四轮修正）：
+        # 窗口锚定最新行而非 datetime.now()（code-review 第四轮修正）：
         # 锚定 now() 时，「采集后立即 diff」会把最新快照自身排除 → 配对退化或
         # None（实测场景：Tue 09:05 采集、09:06 diff，Tue 行被排 → cmd_diff
         # 报「至少需要 2 次采集」，尽管已有 2 次跨会话采集）。锚定最新行仅剔除
-        # 其 60 分钟前的同会话重复行（同会话多次 collect 只留最后一条），
+        # 其 10 分钟前的同会话重复行（同会话多次 collect 只留最后一条），
         # 最新行恒为 newer 侧。
-        if rows:
-            anchor = _parse_fetched_at(rows[0]["fetched_at"])
+        if meta:
+            anchor = _parse_fetched_at(meta[0]["fetched_at"])
         else:
             anchor = None
-        if anchor is not None:
-            kept = [rows[0]]
-            for r in rows[1:]:
+        if anchor is None:
+            if meta:
+                # 解析失败不静默：与 _parse_fetched_at 其它消费方一致，守卫
+                # 失效必须有日志（fetch 时间形态异常 = 数据层问题）
+                logger.warning(
+                    "get_latest_two(%s): 最新行 fetched_at 无法解析（%r），窗口过滤跳过",
+                    symbol, meta[0]["fetched_at"])
+            room = meta
+        else:
+            room = [meta[0]]
+            for r in meta[1:]:
                 dt_r = _parse_fetched_at(r["fetched_at"])
                 if dt_r is None or (anchor - dt_r) >= timedelta(minutes=SAME_SESSION_WINDOW_MINUTES):
-                    kept.append(r)
-            rows = kept
-        if len(rows) < 2:
+                    room.append(r)
+        if len(room) < 2:
             return None
-        newer = dict(rows[0])
-        older = dict(rows[1])
+
+        def _fetch_full(rid: int) -> dict | None:
+            row = c.execute("SELECT * FROM collections WHERE id=?", (rid,)).fetchone()
+            return dict(row) if row is not None else None
+
+        newer = _fetch_full(room[0]["id"])
+        older = _fetch_full(room[1]["id"])
         for d in (newer, older):
+            if d is None:
+                logger.warning("get_latest_two(%s): row vanished between queries", symbol)
+                return None
             raw = d.get("raw_json")
             if isinstance(raw, str):
                 try:
@@ -773,15 +794,21 @@ def format_key_diff_markdown_lines(key_diff: dict) -> list[str]:
 def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
     """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。
 
-    跳过 fetched_at 距今 60 分钟内的行（同会话窗口）——否则「相对上次调研
+    跳过 fetched_at 距今 10 分钟内的行（同会话窗口）——否则「相对上次调研
     变化」比较的是几分钟前的同会话快照，恒无变化（review #9 第二轮残留：
     原实现只跳过 fetched_at 全等行，微秒精度下同会话两次采集恒不相等）。
+    另一路跳过：fetched_at 与 current 全等（--resume 恢复的就是最新 stored
+    行，仅靠窗口守卫时该行陈旧到窗口外 → 自比较成幻影「无显著变化」，
+    code-review 第五轮恢复全等跳过）。
     """
     rows = list_collections(limit=20, symbol=symbol)
     prev = None
+    cur_at = current.get("fetched_at") if isinstance(current, dict) else None
     for row in rows:
+        if cur_at is not None and row.get("fetched_at") == cur_at:
+            continue  # 当前快照自身（--resume 恢复行的自比较防御）
         if _is_same_session(row.get("fetched_at")):
-            continue  # 同会话行（60 分钟窗口）
+            continue  # 同会话行（10 分钟窗口）
         prev = get_collection(row["id"])
         if prev:
             break
