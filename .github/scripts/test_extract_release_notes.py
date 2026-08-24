@@ -127,7 +127,7 @@ def test_condense_section_drops_details():
 
 
 def test_condensed_current_version_notes():
-    """当前版本（v0.2.6）默认输出精简正文：引言 + 主要修改清单，无深层细节。"""
+    """当前版本（v0.2.7）默认输出精简正文：引言 + 主要修改清单，无深层细节。"""
     out = subprocess.check_output(
         [sys.executable, str(SCRIPT), "--from-pyproject"],
         text=True,
@@ -135,7 +135,7 @@ def test_condensed_current_version_notes():
     )
     tag = f"v{_current_version()}"
     assert f"## {tag}" in out
-    assert "8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。" in out  # 引言
+    assert "四标的全链路报告执行工作流评估" in out  # 引言
     assert "- 新增（2026-08-17）：WorkBuddy 零终端分发" in out  # ### 标题即主要修改
     assert "WB bundle 发布包" not in out  # 深层细节已精简
     assert "**Full Changelog**" in out

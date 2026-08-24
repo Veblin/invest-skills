@@ -1,8 +1,8 @@
 # Changelog — invest skills
 
-## v0.2.6 (2026-08-14)
+## v0.2.7 (2026-08-23)
 
-8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。
+v0.2.7 对 512660/588000/300750/600036 四标的全链路报告执行工作流评估，并分级修复评估发现：P0 数字口径（F0-1~F0-9）、P1 ETF 数据层（F1-1~F1-7）、P2 流程工程（F2-1~F2-7）；WorkBuddy 零终端分发链路真机验证通过（可安装发布包 + Release 集成）；版本确立后经 code-review 三轮修复自身缺陷（初版 15 项确认级发现 + 二轮 6 处回归），并完成北向时效守卫等发布前加固。
 
 ### 新增（2026-08-17）：WorkBuddy 零终端分发 — 真机验证通过 + 发布集成
 
@@ -79,6 +79,18 @@
 - **T-6 数字/注释合规**：CHANGELOG「33 例」实为 23 例（P0 目视计数，--collect-only 复核）；「15 项 vs R-1~R-14」枚举口径澄清；注释与 CHANGELOG 心算除法改为 `[来源: Python calc: 3528.7/24.6]`（143.44）；PCR 探针注释与重试/复用行为对齐
 
 回归：`test_v026_review_fixes.py` 23→33 例、`test_collector_fixes.py` +2 例 PCR 探针，全量 pytest 绿。
+
+### 修复（2026-08-23/24）：发布前加固 — 北向时效守卫 + 落库/降噪 + code-review 第四轮
+
+- **P0-1 北向时效守卫**：net_sum_10d 取数前校验最新赋值交易日，距离当前超期即置 None + staleness_note——禁止停更源数据以「近 N 日净额」口径渲染，渲染与会话窗守卫配套
+- **P1-2~4 渲染/落盘修复**：报告渲染与默认落盘路径的 stdout 契约回归
+- **P2-3 store kline 升序落库**：collect_kline postprocess 归一，缓存路径与存储序列一致
+- **P2-4 csindex 404 降噪**：etf_data PE 404 降为 debug 级 + erp 双 fallback try/except 静默降级
+- **code-review 第四轮**：P0-1 守卫对横线日期失效的修正 + P2-1 配对锚点 + journal ERP 取行 + P2-2 遗留 UTC
+
+## v0.2.6 (2026-08-14)
+
+8.11 直播量化指标体系调研（ABCD）P0 + P1/P2 全量落地。
 
 ### 修复（2026-08-16 二轮）：/code-review max 13 项修复（force 重建安全 + F 系列幻影事件剔除）
 

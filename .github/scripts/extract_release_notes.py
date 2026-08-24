@@ -139,17 +139,22 @@ def build_release_notes(
         return None
 
     body = section if full else condense_section(section)
-    prev_tag = _previous_tag(tag)
+    prev_tag = _previous_tag(tag, changelog_text=text)
     tail = _full_changelog_line(tag, changelog_path.name, repo or _repo_slug(), prev_tag)
 
-    parts = [f"## {tag}", "", body.strip()]
-    if prev_tag:
-        parts.extend(["", "---", "", tail])
+    # Full Changelog 行恒输出（CHANGELOG.md 锚定与 compare 链接均指向公开仓库，
+    # 不应因本地无 git 标签而消失）；无前一版本时仅省略 compare 段。
+    parts = [f"## {tag}", "", body.strip(), "", "---", "", tail]
     return "\n".join(parts) + "\n"
 
 
-def _previous_tag(tag: str) -> str | None:
-    """尽力从同目录 git 标签推断上一版本（本地/CI 有 git 时可用）。"""
+def _previous_tag(tag: str, changelog_text: str | None = None) -> str | None:
+    """尽力推断上一版本（本地/CI 有 git 标签时）；否则按 CHANGELOG 段落顺序回退。
+
+    GitHub Actions checkout 默认浅克隆（fetch-depth=1，不带 tags），git tag 路径
+    为空——CHANGELOG.md 按版本从新到旧排列，段落头即版本序列的权威记录（与
+    发布 workflow 提取章节同一来源），据此恒可生成 compare 链接。
+    """
     import subprocess
 
     try:
@@ -159,17 +164,25 @@ def _previous_tag(tag: str) -> str | None:
             stderr=subprocess.DEVNULL,
         )
     except (OSError, subprocess.CalledProcessError):
-        return None
+        out = ""
     tags = [t.strip() for t in out.splitlines() if t.strip()]
-    if tag not in tags:
-        tags = sorted({tag, *tags}, key=_version_key, reverse=True)
-    try:
-        idx = tags.index(tag)
-    except ValueError:
-        return None
-    if idx + 1 >= len(tags):
-        return None
-    return tags[idx + 1]
+    if tags:
+        if tag not in tags:
+            tags = sorted({tag, *tags}, key=_version_key, reverse=True)
+        try:
+            idx = tags.index(tag)
+        except ValueError:
+            idx = None
+        if idx is not None and idx + 1 < len(tags):
+            return tags[idx + 1]
+    # git 标签不可用（浅克隆等）或 tag 落于列表末端 → CHANGELOG 段落序列回退
+    if changelog_text:
+        headers = re.findall(r"^##\s+(v\d+(?:\.\d+){2})\b", changelog_text, re.M)
+        if tag in headers:
+            i = headers.index(tag)
+            if i + 1 < len(headers):
+                return headers[i + 1]
+    return None
 
 
 def _version_key(tag: str) -> tuple:
