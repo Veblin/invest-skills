@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from lib.nums import safe_float as _safe_num
+from lib.financials import prior_year_end_date
+from lib.nums import ONE_PER_YI, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 from lib.participant_scan import resolve_moneyflow
 from lib.schema import ProbabilityStructure
@@ -33,6 +34,50 @@ _INDUSTRY_CUSTOM_UNKNOWN_RULES: tuple[tuple[tuple[str, ...], str, str], ...] = (
     # 此常量保留为空元组，实际规则由 _generate_custom_unknowns 从
     # lib.industry.get_unknown_rules() 动态获取。
 )
+
+
+def _single_quarter_revenue(rows: list[dict], end_date: str) -> float | None:
+    """报告期累计值差分得单季营收（Q2 = H1 − Q1；Q1 单季 = 累计本身）。
+
+    fina_indicator 的 revenue 为累计 YTD 口径；缺上期累计行或报告期
+    非 0331/0630/0930/1231 → None（不做跨期减法）。
+    """
+    norm = _norm_ed(end_date)
+    if len(norm) != 8 or norm[4:8] not in ("0331", "0630", "0930", "1231"):
+        return None
+    by_ed: dict[str, float] = {}
+    for r in rows:
+        ed = _norm_ed(str(r.get("end_date", "")))
+        v = _safe_num(r.get("revenue"))
+        if ed and v is not None:
+            by_ed[ed] = v  # 同报告期重复行后者覆盖（与 _orchestrate 反向扫描语义一致）
+    cum = by_ed.get(norm)
+    if cum is None:
+        return None
+    if norm[4:8] == "0331":
+        return cum  # Q1 单季 = 年初至今累计
+    prev_ed = norm[:4] + {"0630": "0331", "0930": "0630", "1231": "0930"}[norm[4:8]]
+    prev_cum = by_ed.get(prev_ed)
+    if prev_cum is None:
+        return None
+    return cum - prev_cum
+
+
+def _revenue_single_q_yoy_from_rows(rows: list[dict]) -> float | None:
+    """最新报告期单季营收同比（%）；任一必需行缺失 → None（不误报）。"""
+    if not rows:
+        return None
+    sorted_rows = sort_kline_asc([r for r in rows if isinstance(r, dict)])
+    ed = _norm_ed(str(sorted_rows[-1].get("end_date", "")))
+    if not ed:
+        return None
+    cur_single = _single_quarter_revenue(sorted_rows, ed)
+    if cur_single is None:
+        return None
+    yoy_single = _single_quarter_revenue(sorted_rows, prior_year_end_date(ed))
+    if yoy_single is None or yoy_single <= 0:
+        return None
+    return round((cur_single - yoy_single) / yoy_single * 100, 2)
 
 
 
@@ -233,14 +278,14 @@ def _section_bull_bear(
         if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 当前市值 {_fmt_v2(mcap_v * 1e8)}，当前 PE {latest_pe:.1f}x"
+                f"- 当前市值 {_fmt_v2(mcap_v * ONE_PER_YI)}，当前 PE {latest_pe:.1f}x"
                 "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0:
                 implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
                     f"- 若 PE 修复至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
-                    f"对应市值约 {_fmt_v2(implied_mc * 1e8)}"
+                    f"对应市值约 {_fmt_v2(implied_mc * ONE_PER_YI)}"
                 )
             else:
                 chain["numbers"].append(
@@ -374,14 +419,14 @@ def _section_bull_bear(
         if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 当前 PE: {latest_pe:.1f}x；当前市值 {_fmt_v2(mcap_v * 1e8)}"
+                f"- 当前 PE: {latest_pe:.1f}x；当前市值 {_fmt_v2(mcap_v * ONE_PER_YI)}"
                 "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0 and median_pe < latest_pe:
                 implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
                     f"- 若 PE 回落至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
-                    f"市值约 {_fmt_v2(implied_mc * 1e8)}"
+                    f"市值约 {_fmt_v2(implied_mc * ONE_PER_YI)}"
                 )
             elif median_pe is None:
                 chain["numbers"].append(
@@ -976,18 +1021,19 @@ def _section_left_right_probability(
     continuation_hits: list[str] = []
     fin_lr = _get_dim_data(dims, "financials")
     if fin_lr and isinstance(fin_lr, list):
-        fin_sorted = sort_kline_asc(fin_lr)
-        if len(fin_sorted) >= 2:
-            rev_now = _safe_num(fin_sorted[-1].get("revenue"))
-            rev_prev = _safe_num(fin_sorted[-2].get("revenue"))
-            if rev_now is not None and rev_prev is not None and rev_prev > 0:
-                rev_yoy_lr = (rev_now - rev_prev) / rev_prev * 100
-                if rev_yoy_lr > 100:
-                    continuation_hits.append(f"季度营收同比 {rev_yoy_lr:+.1f}%（>100%）")
+        # 单季同比口径（累计差分 + 去年同期对齐，P1-1 v0.2.7）：此前取
+        # 相邻报告期累计值相除标为「同比」，对同比/环比都不诚实
+        # （600176 +111.3% 实为累计序贯变化，真值 Q2 单季同比 +26.9%）。
+        rev_yoy_lr = _revenue_single_q_yoy_from_rows(fin_lr)
+        if rev_yoy_lr is not None and rev_yoy_lr > 100:
+            continuation_hits.append(f"季度营收同比 {rev_yoy_lr:+.1f}%（>100%）")
     if tech and "error" not in tech:
-        ma60 = tech.get("trend", {}).get("ma60") or {}
-        if ma60.get("slope_pct") is not None and ma60["slope_pct"] > 0:
-            continuation_hits.append(f"MA60 斜率为正（{ma60['slope_pct']:+.2f}%/期）")
+        # 实际键：trend['slope']['60']（slope 为 {str(p): float|None}）——
+        # 曾读取不存在的 trend['ma60'],MA60 信号永不触发、分母虚报（code-review
+        # 第五轮）。后期斜率可能为 None（数据不足),仅正值计数。
+        ma60_slope = (tech.get("trend") or {}).get("slope", {}).get("60")
+        if ma60_slope is not None and ma60_slope > 0:
+            continuation_hits.append(f"MA60 斜率为正（{ma60_slope:+.2f}%/期）")
     mf_lr = market_structure.get("moneyflow") or {}
     nb_lr = market_structure.get("northbound") or {}
     _mf_raw = mf_lr.get("net_sum_10d")

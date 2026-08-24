@@ -393,6 +393,9 @@ class TestIndustryPricingRender:
         })
         assert "### 原材料成本速览" in block
         assert "FG" in block
+        # v0.2.7 P2-5: dom_basis_rate 为小数（-0.02 = -2.00%），×100 渲染
+        assert "-2.00%" in block
+        assert "-0.02" not in block
 
     def test_futures_pd_na_renders_dash(self):
         import pandas as pd

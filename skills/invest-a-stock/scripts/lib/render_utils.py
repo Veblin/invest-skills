@@ -29,19 +29,6 @@ _fmt = fmt_amount
 _fmt_v2 = fmt_amount
 
 
-# --- _meta_cv_line ---
-def _meta_cv_line(meta: dict) -> str:
-    """从 legacy _meta 生成交叉验证行。"""
-    cv_status = meta.get("cross_validation")
-    if not cv_status:
-        return ""
-    detail = meta.get("cross_validation_detail") or ""
-    icon = _CV_ICONS.get(cv_status, "🔴")
-    label = _CV_LABELS.get(cv_status, cv_status)
-    default_detail = "多源数据一致" if cv_status == "convergence" else "多源数据存在差异"
-    return f"{icon} **{label}** — {detail or default_detail}"
-
-
 # --- sanitize_error ---
 def sanitize_error(error: str, max_len: int = 60) -> str:
     """将原始 Python 异常转为可读的简短说明，截断到 max_len。
@@ -70,24 +57,6 @@ def sanitize_error(error: str, max_len: int = 60) -> str:
     if len(cleaned) > max_len:
         cleaned = cleaned[: max_len - 3] + "..."
     return cleaned
-
-
-# --- _source_status_block ---
-def _source_status_block(all_sources: list[dict] | None) -> str:
-    """生成各渠道的独立取证状态块。"""
-    if not all_sources:
-        return ""
-    rows = []
-    for s in all_sources:
-        source = s.get("source", "?")
-        avail = s.get("data_available", False)
-        error = s.get("error") or ""
-        qp = s.get("query_params", "")
-        icon = "✅" if avail else ("❌" if error else "⏭️")
-        status = "成功" if avail else (f"失败: {_sanitize_error(error, 80)}" if error else "未尝试")
-        qp_str = f" `{qp}`" if qp else ""
-        rows.append(f"  - **{source}** {icon} — {status}{qp_str}")
-    return "\n".join(rows)
 
 
 # --- _index_dims ---
@@ -439,6 +408,13 @@ def _coalesce_fin_field(rows: list[dict], *fields: str) -> float | None:
     return None
 
 
+# C5 v0.2.7: 毛利率字段单点合并（优先级见 lib.financials.GROSS_MARGIN_FIELDS）
+def _coalesce_gross_margin(rows: list[dict]) -> float | None:
+    from lib.financials import GROSS_MARGIN_FIELDS
+
+    return _coalesce_fin_field(rows, *GROSS_MARGIN_FIELDS)
+
+
 # --- _fmt_num ---
 def _fmt_num(v: Any, *, decimals: int = 2, suffix: str = "") -> str:
     """安全格式化数值（兼容 numpy / Decimal 等经 _safe_num 归一化后的类型）。"""
@@ -488,35 +464,6 @@ def _bull_bear_valuation_divergence_text(
         f"Bull 认为营收同比 {rev_yoy:+.1f}% 与 PE 历史区间位置 {pe_pct:.1f}%"
         f"尚未完全定价；Bear 认为二者匹配度存疑，需观察增速能否维持。"
     )
-
-
-# --- _periods_per_year ---
-def _periods_per_year(fin_list: list[dict]) -> int:
-    """估算每年报告期数（4=季报，2=半年报，1=年报）。
-
-    通过统计 end_date 中出现的唯一月份数推断报告频率：
-    - 仅 12 月 → 年报（1）
-    - 6 + 12 月 → 半年报（2）
-    - ≥3 个不同月份 → 季报（4）
-    """
-    if len(fin_list) < 2:
-        return 4
-    months: set[int] = set()
-    for r in fin_list:
-        raw = str(r.get("end_date", ""))
-        if not raw:
-            continue
-        # Normalize: YYYY-MM-DD or YYYYMMDD → extract month
-        d = raw.replace("-", "").replace("/", "")
-        if len(d) >= 6 and d[4:6].isdigit():
-            months.add(int(d[4:6]))
-    if not months:
-        return 4  # no usable dates, assume quarterly
-    if len(months) == 1:
-        return 1  # annual
-    if len(months) == 2:
-        return 2  # semi-annual
-    return 4  # quarterly (3+ distinct months)
 
 
 # --- _compute_metric_cagr ---

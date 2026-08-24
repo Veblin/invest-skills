@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -101,6 +102,23 @@ class TestParserDefaults:
                 assert args.plan == value
             else:
                 assert getattr(args, flag.lstrip("-").replace("-", "_")) is True
+
+    @pytest.mark.parametrize("cmd,argv", [
+        ("compare", ["compare", "600176", "000858", "--force-sector-sync"]),
+        ("watchlist", ["watchlist", "600176,000858", "--force-sector-sync"]),
+        ("rigor", ["rigor", "600176", "--force-sector-sync"]),
+        ("check", ["check", "600176", "--force-sector-sync"]),
+        ("risk-reward", ["risk-reward", "600176", "--force-sector-sync"]),
+        ("ic", ["ic", "600176", "--force-sector-sync"]),
+    ])
+    def test_force_sector_sync_flag_accepted(self, cmd, argv):
+        """会触发 collect_all 的子命令均可注册 --force-sector-sync（冷缓存
+        预热入口；此前 argparse 直接报错，用户无法从这些命令预热）。"""
+        import invest
+
+        parser = invest.build_parser()
+        args = parser.parse_args(argv)
+        assert args.force_sector_sync is True
 
 
 class TestCollectDefaultStore:
@@ -405,18 +423,64 @@ class TestSnapshotKindDiff:
         assert rows[0]["kind"] == "report"
 
     def test_load_key_diff_skips_same_session_row(self, isolated_store):
-        """报告模块 1 的 diff 跳过同 fetched_at 的同会话行，比较上次会话。"""
-        s1 = _phase4_collection("600176", "2026-08-01T00:00:00Z")
-        same_session = _phase4_collection("600176", "2026-08-07T00:00:00Z")
-        current = _phase4_collection(
-            "600176", "2026-08-07T00:00:00Z", latest_roe=22.0)
+        """报告模块 1 的 diff 跳过 10 分钟窗口内的同会话行，比较上次会话。
 
-        isolated_store.save_collection(same_session)  # 同会话行（同 fetched_at）
+        v0.2.7 P2-1：原测试用相同 fetched_at 模拟同会话，但微秒精度下
+        同会话两次采集恒不相等——改为相对时间的 31 秒前行（真实场景）。
+        """
+        now = datetime.now(timezone.utc)
+        s1 = _phase4_collection("600176", (now - timedelta(days=7)).isoformat())
+        same_session = _phase4_collection(
+            "600176", (now - timedelta(seconds=31)).isoformat())
+        current = _phase4_collection(
+            "600176", (now - timedelta(seconds=10)).isoformat(), latest_roe=22.0)
+
+        isolated_store.save_collection(same_session)  # 同会话行（31 秒前）
         isolated_store.save_collection(s1)
 
         diff = isolated_store.load_key_diff_vs_stored("600176", current)
         assert diff is not None
-        assert diff.get("old_at", "").startswith("2026-08-01")  # 与上次会话比较
+        # 与上次会话（7 天前）比较，而非 31 秒前的同会话行
+        assert diff.get("old_at", "").startswith(
+            (now - timedelta(days=7)).strftime("%Y-%m-%d"))
+
+    def test_load_key_diff_all_rows_in_window_returns_none(self, isolated_store):
+        """窗口内无更早行 → None（不显示「相对上次调研变化」块）。"""
+        now = datetime.now(timezone.utc)
+        a = _phase4_collection("600176", (now - timedelta(minutes=6)).isoformat())
+        b = _phase4_collection("600176", (now - timedelta(minutes=3)).isoformat())
+        current = _phase4_collection("600176", now.isoformat(), latest_roe=22.0)
+        isolated_store.save_collection(a)
+        isolated_store.save_collection(b)
+        assert isolated_store.load_key_diff_vs_stored("600176", current) is None
+
+    def test_load_key_diff_window_boundary_excluded(self, isolated_store):
+        """窗口外 1 分钟的行（11 分钟前）→ 被配对为上次调研。"""
+        now = datetime.now(timezone.utc)
+        old = _phase4_collection("600176", (now - timedelta(minutes=11)).isoformat())
+        current = _phase4_collection("600176", now.isoformat(), latest_roe=22.0)
+        isolated_store.save_collection(old)
+        diff = isolated_store.load_key_diff_vs_stored("600176", current)
+        assert diff is not None
+        assert diff.get("old_at", "").startswith(
+            (now - timedelta(minutes=11)).strftime("%Y-%m-%d"))
+
+    def test_load_key_diff_skips_resume_self_row(self, isolated_store):
+        """第五轮回归：--resume 恢复行 = 最新 stored 行（fetched_at 与 current
+        全等）时,窗口守卫拦不住（陈旧到窗口外）→ 显式等值跳过须先行,
+        否则恒自比较成幻影「无显著变化」。"""
+        now = datetime.now(timezone.utc)
+        last = _phase4_collection("600176", (now - timedelta(days=9)).isoformat())
+        stored = _phase4_collection("600176", (now - timedelta(days=2)).isoformat())
+        current = _phase4_collection(
+            "600176", (now - timedelta(days=2)).isoformat(), latest_roe=22.0)
+        isolated_store.save_collection(last)
+        isolated_store.save_collection(stored)
+        diff = isolated_store.load_key_diff_vs_stored("600176", current)
+        assert diff is not None
+        # 与上次会话（9 天前）比较,而非与 2 天前的自身行自比较
+        assert diff.get("old_at", "").startswith(
+            (now - timedelta(days=9)).strftime("%Y-%m-%d"))
 
     def test_get_latest_two_no_fallback_mix_same_session(self, isolated_store):
         """新用户同会话 collect --store + report：仅 1 条 collect 时不

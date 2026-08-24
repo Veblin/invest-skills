@@ -1,0 +1,103 @@
+"""v0.2.7 P2-4：erp 双 fallback（csindex / bond）404 静默降级。
+
+batch-review：csindex 404 曾无保护传播（HTTPError 崩栈 invest.py
+cmd_market_status / 污染 query_data._error）；补 try/except 后仅 debug 级，
+真实缺失仍由「erp: HS300 PE unavailable」诚实上报（单行、无 traceback）。
+"""
+from __future__ import annotations
+
+import sys
+import urllib.error
+from contextlib import nullcontext
+
+import pytest
+
+import market_microstructure as mm  # noqa: E402
+
+
+class _FakeAk404:
+    """fake akshare：csindex 与 bond 接口均抛 404。"""
+
+    def stock_zh_index_value_csindex(self, symbol):
+        raise urllib.error.HTTPError(symbol, 404, "Not Found", None, None)
+
+    def bond_zh_us_rate(self):
+        raise urllib.error.HTTPError("bond", 404, "Not Found", None, None)
+
+
+@pytest.fixture
+def _erp_offline(monkeypatch):
+    """Tushare/FRED 不可用 + akshare 双接口 404。"""
+    monkeypatch.setitem(sys.modules, "akshare", _FakeAk404())
+    monkeypatch.setattr(mm, "akshare_direct_session", nullcontext)
+    monkeypatch.setattr(mm.env, "is_tushare_available", lambda cfg: False)
+    monkeypatch.setattr(mm.env, "is_fred_available", lambda cfg: False)
+
+
+def test_erp_akshare_fallback_404_silent_degrade(monkeypatch, caplog, _erp_offline):
+    """fallback 404 不传播、不注入「erp: HTTP Error 404」，仅诚实上报不可用。"""
+    result = {"_errors": [], "erp": None}
+    with caplog.at_level("DEBUG", logger="market_microstructure"):
+        mm._fetch_erp(result)
+    assert result.get("erp") is None
+    assert any("HS300 PE unavailable" in e for e in result["_errors"])
+    assert not any("404" in e for e in result["_errors"])
+    # 无 WARNING 及以上记录（静默降级）
+    assert not any(rec.levelno >= 30 for rec in caplog.records)
+
+
+def test_erp_pe_ok_bond_404_silent_degrade(monkeypatch, caplog):
+    """HS300 PE 正常、bond 404 → erp 照常计算，不因 fallback 探测失败中断。"""
+    class _FakeAkBond404:
+        def stock_zh_index_value_csindex(self, symbol):
+            import pandas as pd
+            return pd.DataFrame([
+                {"日期": "2026-08-21", "市盈率1": 13.0},
+                {"日期": "2026-08-22", "市盈率1": 13.2},
+            ])
+
+        def bond_zh_us_rate(self):
+            raise urllib.error.HTTPError("bond", 404, "Not Found", None, None)
+
+    monkeypatch.setitem(sys.modules, "akshare", _FakeAkBond404())
+    monkeypatch.setattr(mm, "akshare_direct_session", nullcontext)
+    monkeypatch.setattr(mm.env, "is_tushare_available", lambda cfg: False)
+    monkeypatch.setattr(mm.env, "is_fred_available", lambda cfg: False)
+
+    result = {"_errors": [], "erp": None}
+    with caplog.at_level("DEBUG", logger="market_microstructure"):
+        mm._fetch_erp(result)
+    assert any("10Y yield unavailable" in e for e in result["_errors"])
+    assert not any("404" in e for e in result["_errors"])
+    assert not any(rec.levelno >= 30 for rec in caplog.records)
+
+
+def test_erp_csindex_newest_first_uses_latest_row(monkeypatch):
+    """csindex 真实返回序为新日期在前（与 etf_data.fetch_etf_index_pe 93264b0
+    同款缺陷的 journal twin）：按「日期」升序取末行，不得 iloc[-1] 取到
+    最早行 → HS300 PE 滞后约 3.5 周（code-review 第四轮，旧测试伪装升序掩盖）。
+
+    下面 fake 恒用新日期在前；修复前 pe 取 13.0、修复后取 13.2。
+    """
+    class _FakeAkCsindexNewestFirst:
+        def stock_zh_index_value_csindex(self, symbol):
+            import pandas as pd
+            return pd.DataFrame([
+                {"日期": "2026-08-22", "市盈率1": 13.2},  # 最新在前（真实返回序）
+                {"日期": "2026-08-21", "市盈率1": 13.0},  # 最早行
+            ])
+
+        def bond_zh_us_rate(self):
+            import pandas as pd
+            return pd.DataFrame([{"中国国债收益率10年": 1.6}])
+
+    monkeypatch.setitem(sys.modules, "akshare", _FakeAkCsindexNewestFirst())
+    monkeypatch.setattr(mm, "akshare_direct_session", nullcontext)
+    monkeypatch.setattr(mm.env, "is_tushare_available", lambda cfg: False)
+    monkeypatch.setattr(mm.env, "is_fred_available", lambda cfg: False)
+
+    result = {"_errors": [], "erp": None}
+    mm._fetch_erp(result)
+    assert result["erp"] == pytest.approx(round(100.0 / 13.2 - 1.6, 2))  # 取最新行
+    assert result["erp"] != round(100.0 / 13.0 - 1.6, 2)  # 未取到最早行
+    assert not result["_errors"]

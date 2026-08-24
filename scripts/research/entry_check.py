@@ -15,8 +15,8 @@
   >75  : 多维同向偏松
 
 用法:
-  uv run python scripts/entry_check.py 588000
-  uv run python scripts/entry_check.py 588000 --events "长鑫科技IPO下周上市,虹吸效应"
+  uv run python scripts/research/entry_check.py 588000
+  uv run python scripts/research/entry_check.py 588000 --events "长鑫科技IPO下周上市,虹吸效应"
 """
 
 import argparse
@@ -29,7 +29,7 @@ import akshare as ak
 import numpy as np
 import pandas as pd
 
-_skills_lib = Path(__file__).resolve().parent.parent / "skills" / "lib"
+_skills_lib = Path(__file__).resolve().parents[2] / "skills" / "lib"
 if str(_skills_lib) not in sys.path:
     sys.path.insert(0, str(_skills_lib))
 

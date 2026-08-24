@@ -19,11 +19,6 @@ from .tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
-_MD_COLUMNS = (
-    "date", "ts_code", "open", "high", "low", "close",
-    "pre_close", "pct_chg", "vol", "amount", "turnover_rate",
-)
-
 
 def _make_client() -> TushareClient:
     import os

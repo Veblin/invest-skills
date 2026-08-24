@@ -3,7 +3,7 @@
 skills/lib/references/backtest_prereg/H3_预注册.md）。
 
 用法:
-  uv run python scripts/backtest_h3.py                # 输出 docs/data/H3_backtest_result.json
+  uv run python scripts/archive/backtest_h3.py                # 输出 docs/data/H3_backtest_result.json
 
 数据: akshare index_hist_sw（swsindex 直连）——850813.SI 材料 / 850818.SI 设备 /
 801081.SI 半导体二级背景。检验: spread_{t+1} ~ RS_t(20/60/120) NW t +
@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills" / "lib"),
     str(_ROOT / "skills"),

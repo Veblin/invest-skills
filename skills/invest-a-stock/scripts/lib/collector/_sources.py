@@ -1,10 +1,49 @@
 """Data source query functions — Tushare, akshare, baostock, TickFlow, Tencent."""
 from __future__ import annotations
-from . import _base as __base_ref
-for __base_n in dir(__base_ref):
-    if not __base_n.startswith("__"):
-        globals()[__base_n] = getattr(__base_ref, __base_n)
-del __base_ref, __base_n
+
+import logging
+import os
+import threading
+import time
+from contextlib import redirect_stdout  # :942 tickflow 输出抑制（code-review #9：直接 import，不再经 _base dir()-copy）
+from datetime import datetime
+from io import StringIO
+from typing import Any, Callable
+
+from .. import env
+from ..nums import safe_float
+from ..proxy import (
+    akshare_direct_session,
+    akshare_push2_available,
+    em_request_with_retry,
+    no_proxy_session,
+)
+from ..shared_codes import exchange_code as _exchange_code
+from ..shared_dates import (
+    shanghai_days_ago as _days_ago,
+    shanghai_today as _today,
+    yyyymmdd_to_iso as _to_iso_date,
+)
+from ._base import (
+    _BAOSTOCK_LOCK,
+    _baostock_code,
+    _is_eastmoney_blocked_error,
+    _latest_quarter_end,
+    _proxy_bypass,
+    _reraise_eastmoney_api_error,
+    _ts_code,
+)
+
+# v0.2.7：腾讯行情唯一实现收敛至 skills/lib/quote_tencent（本文件旧副本删除），
+# 本层只保留返回契约适配。
+from lib._invest_path import ensure_skills_lib_on_path  # noqa: E402
+ensure_skills_lib_on_path()  # noqa: E402
+from lib.nums import ONE_PER_WAN, ONE_PER_YI  # noqa: E402
+from quote_tencent import (  # noqa: E402
+    fetch_tencent_quote,
+    is_tencent_unsupported,
+    tencent_market,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -424,7 +463,7 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
     # 仅 moneyflow.net_mf_amount 为万元；hsgt_top10 / akshare 已是元。
     # moneyflow 的 net_mf_vol 是「手」量纲，禁止万元 scale 回落放大。
     is_moneyflow = source.startswith("tushare.moneyflow")
-    scale = 10000.0 if is_moneyflow else 1.0
+    scale = ONE_PER_WAN if is_moneyflow else 1.0
     out: list[dict] = []
     for r in records:
         row = dict(r)
@@ -589,10 +628,10 @@ def _parse_akshare_num(v) -> float | None:
             multiplier = 1e12
             s = s.replace("万亿", "")
         elif "亿" in s:
-            multiplier = 1e8
+            multiplier = ONE_PER_YI
             s = s.replace("亿", "")
         elif "万" in s:
-            multiplier = 1e4
+            multiplier = ONE_PER_WAN
             s = s.replace("万", "")
         if "%" in s:
             s = s.replace("%", "")
@@ -817,7 +856,6 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
 def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list[str]:
     """返回最近 count 个已结束季末日期（YYYYMMDD），用于股东多期查询。"""
     import calendar
-    from datetime import datetime
 
     now = as_of or datetime.now()
     dates: list[str] = []
@@ -918,7 +956,6 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
     ed = end_date or _today()
 
     # TickFlow 使用毫秒级 Unix 时间戳
-    from datetime import datetime
     from zoneinfo import ZoneInfo
     sh = ZoneInfo("Asia/Shanghai")
     start_ms = int(datetime.strptime(sd, "%Y%m%d").replace(tzinfo=sh).timestamp() * 1000)
@@ -968,47 +1005,36 @@ def _q_tickflow_kline(symbol: str, start_date: str = "", end_date: str = "") -> 
 def _is_tencent_unsupported(symbol: str) -> bool:
     """北交所代码（4/8/920 前缀）→ 腾讯 qt.gtimg.cn 行情无覆盖。
 
-    与 codes.exchange_code 的北交所规则一致（4xxxxx/8xxxxx 老三板、920xxx
-    北交所新股）。此前市场启发式 'sh' if startswith(("6","9")) 会把 920xxx
-    路由到 sh920xxx（请求不存在）、把 8xxxxx 路由到 sz8xxxxx（可能命中旧
-    三板而返回**别家公司**的报价）——误路由数据比缺失数据危害更大，明确
-    跳过并标注不可得。
+    保留兼容名（_orchestrate star-copy 消费方可能引用）；逻辑已收敛至
+    skills/lib/quote_tencent.is_tencent_unsupported（唯一实现）。
     """
-    s = str(symbol or "").strip().split(".")[0]
-    return s.startswith(("4", "8", "920"))
+    return is_tencent_unsupported(symbol)
 
 
 def _q_tencent_quote(symbol: str) -> dict | None:
-    """腾讯行情。北交所（4/8/920 前缀）腾讯无覆盖 → 不请求、标注不可得。"""
-    if _is_tencent_unsupported(symbol):
+    """腾讯行情。北交所（4/8/920 前缀）腾讯无覆盖 → 不请求、标注不可得。
+
+    v0.2.7 起委托 skills/lib/quote_tencent 唯一实现（统一路由/解析/单位换算），
+    本层只保留返回契约：映射 total_mv_yi → total_mv，且不引入 amount 等新键
+    （避免 _merge_realtime 把新键并入 legacy dict 造成行为漂移）。
+    """
+    if is_tencent_unsupported(symbol):
         logger.warning("tencent quote: 北交所代码 %s 腾讯行情无覆盖，跳过（不误路由）", symbol)
         return None
-    _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
-
-    def _parse_tencent_float(val: str | None) -> float | None:
-        """解析腾讯行情字段；不可用标记返回 None（与真实 0 区分），否则委托 safe_float。"""
-        if val is None or val in _UNAVAILABLE_MARKERS:
-            return None
-        return safe_float(val)
-
-    market = "sh" if symbol.startswith(("6", "9")) else "sz"
     with no_proxy_session() as sess:
-        r = sess.get(f"http://qt.gtimg.cn/q={market}{symbol}", timeout=5)
-    if r.status_code == 200 and "~" in r.text:
-        p = r.text.split("~")
-        if len(p) > 45:
-            mv = _parse_tencent_float(p[45])
-            return {
-                "price": _parse_tencent_float(p[3]),
-                "change_pct": _parse_tencent_float(p[32]),
-                "high": _parse_tencent_float(p[33]),
-                "low": _parse_tencent_float(p[34]),
-                "volume": _parse_tencent_float(p[6]),
-                "turnover_rate": _parse_tencent_float(p[38]),
-                "pe_ratio": _parse_tencent_float(p[39]),
-                "total_mv": mv if mv is not None else None,  # 腾讯 field45 返回亿元，无需转换
-            }
-    return None
+        q = fetch_tencent_quote(symbol, session=sess)
+    if q is None:
+        return None
+    return {
+        "price": q["price"],
+        "change_pct": q["change_pct"],
+        "high": q["high"],
+        "low": q["low"],
+        "volume": q["volume"],
+        "turnover_rate": q["turnover_rate"],
+        "pe_ratio": q["pe_ratio"],
+        "total_mv": q["total_mv_yi"],  # 亿元（单位语义见 quote_tencent 模块）
+    }
 
 
 # ---- 查询参数字符串生成 ----
@@ -1024,9 +1050,9 @@ def _qp_akshare(name: str, symbol: str, **kw) -> str:
 
 
 def _qp_tencent(symbol: str) -> str:
-    if _is_tencent_unsupported(symbol):
+    if is_tencent_unsupported(symbol):
         return "qt.gtimg.cn: 北交所无覆盖（不请求）"
-    market = "sh" if symbol.startswith(("6", "9")) else "sz"
+    market = tencent_market(symbol)
     return f"qt.gtimg.cn/q={market}{symbol}"
 
 

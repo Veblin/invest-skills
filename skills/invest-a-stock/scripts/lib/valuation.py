@@ -27,6 +27,10 @@ from .shared_dates import shanghai_days_ago
 ZONE_LOW_THRESHOLD = 30.0
 ZONE_HIGH_THRESHOLD = 70.0
 
+# C5 v0.2.7: 极端分位阈值（D-① 极端区间提示，原 _v3 硬编码 80/20 多处）
+EXTREME_LOW_THRESHOLD = 20.0
+EXTREME_HIGH_THRESHOLD = 80.0
+
 
 def zone_label(
     pct: float,

@@ -136,7 +136,7 @@ Tavily → Bocha → WebSearch（Claude 内置）
 - [ ] `.claude-plugin/marketplace.json` 描述准确
 - [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 描述同步
 - [ ] `gemini-extension.json.in` env vars 与 `.env.example` 一致
-- [ ] `CHANGELOG.md` 已更新
+- [ ] `CHANGELOG.md` 已更新（`###` 小节标题 = Release 正文「主要修改」清单，正文自动精简；全文经 Release 末尾 Full Changelog 链接指向本文件）
 - [ ] `uv run pytest` 通过
 - [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
 - [ ] `bash scripts/build_wb_package.sh` 可运行，`dist/invest-skills-wb-vX.Y.Z.zip` 内容完整（发布时由 release.yml 自动构建并随 Release 附带，此条为本地预检）

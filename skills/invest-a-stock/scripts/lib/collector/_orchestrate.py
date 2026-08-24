@@ -1,24 +1,74 @@
 """Collection orchestration — dimension collectors, market structure, industry peers."""
 from __future__ import annotations
+import logging
 import math
-import threading  # D8：_hsgt_top10_cached 缓存锁（不依赖 _base star-import）
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone, timedelta  # 显式导入（_base star-import 已不再提供）
+import sys
+import threading
+import time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Any, Callable
 
-from lib.nums import row_value_or_last  # review 二轮 R-13：dict 行末列兜底（可单测）
+from lib.nums import (  # review 二轮 R-13：dict 行末列兜底（可单测）
+    ONE_PER_WAN,
+    ONE_PER_YI,
+    WAN_PER_YI,
+    coalesce_field,
+    row_value_or_last,
+    safe_float,
+)
 
-from . import _base as __base_ref
-for __base_n in dir(__base_ref):
-    if not __base_n.startswith("__"):
-        globals()[__base_n] = getattr(__base_ref, __base_n)
-del __base_ref, __base_n
+# code-review #9：弃用 dir()-copy 隐式再导出，消费名全部显式导入
+from .. import env
+from ..proxy import akshare_direct_session, akshare_push2_available
+from ..schema import DimensionResult, SourceResult
+from ..shared_dates import (
+    shanghai_days_ago as _days_ago,
+    shanghai_today as _today,
+    yyyymmdd_to_iso as _to_iso_date,
+)
 
-
-from . import _sources as __sources_ref
-for __sources_n in dir(__sources_ref):
-    if not __sources_n.startswith("__"):
-        globals()[__sources_n] = getattr(__sources_ref, __sources_n)
-del __sources_ref, __sources_n
+from ._base import (
+    _annotate_query_params,
+    _fred_date,
+    _latest_quarter_end,
+    _map_parallel,
+    _proxy_bypass,
+    _run_in_thread,
+    _run_one_source,
+    _run_sources_cascade,
+    _run_sources_parallel,
+    _ts_code,
+)
+from ._sources import (
+    _apply_qfq,
+    _flow_amount_yuan,
+    _q_akshare_basic,
+    _q_akshare_financials,
+    _q_akshare_industry_board,
+    _q_akshare_industry_pe,
+    _q_akshare_kline,
+    _q_akshare_northbound,
+    _q_akshare_shareholders,
+    _q_baostock_kline,
+    _q_tencent_quote,
+    _q_tickflow_kline,
+    _q_tushare_adj_factor,
+    _q_tushare_basic,
+    _q_tushare_daily,
+    _q_tushare_daily_qfq,
+    _q_tushare_financials,
+    _q_tushare_hsgt_top10,
+    _q_tushare_moneyflow,
+    _q_tushare_shareholders,
+    _qp_akshare,
+    _qp_baostock,
+    _qp_tencent,
+    _qp_tickflow,
+    _qp_tushare,
+    _require_tushare,
+    _tushare_client,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -254,6 +304,19 @@ def collect_northbound(symbol: str) -> dict:
     )
 
 
+def _sort_kline_asc_postprocess(legacy: dict, _results: list) -> dict:
+    """P2-3 v0.2.7: kline 数据统一升序落库（data[-1]=最新，canonical 约定
+    skills/lib/technical.py sort_kline_asc）。Tushare daily 返回降序，此前
+    原序进 store raw_json——现有消费方显式排序未出错，但未排序消费方将
+    静默算错窗口（batch-review P2-3，复检脚本实证「近 20 日 -27.71%」误算）。
+    存量数据不回溯：读侧仍须显式排序或按日期取 max。"""
+    data = legacy.get("data")
+    if isinstance(data, list) and data:
+        from lib.technical import sort_kline_asc
+        legacy["data"] = sort_kline_asc([r for r in data if isinstance(r, dict)])
+    return legacy
+
+
 def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict:
     """日K线。并行：Tushare + akshare + baostock(兜底) [+ tickflow(可选)]。
 
@@ -307,7 +370,10 @@ def collect_kline(symbol: str, start_date: str = "", end_date: str = "") -> dict
             qp_map["tickflow.kline"] = _qp_tickflow(symbol, sd, ed)
         return qp_map
 
-    return _collect_dimension("kline", tasks, query_params=_kline_qp, cascade=True)
+    return _collect_dimension(
+        "kline", tasks, query_params=_kline_qp, cascade=True,
+        postprocess=_sort_kline_asc_postprocess,
+    )
 
 
 # ---- 估值维度 ----
@@ -333,7 +399,7 @@ def _q_tushare_daily_basic(symbol: str) -> list[dict] | None:
         for rec in records:
             mv = safe_float(rec.get("total_mv"))
             if mv is not None:
-                rec["total_mv"] = mv / 10000.0  # 万元 → 亿元
+                rec["total_mv"] = mv / WAN_PER_YI  # 万元 → 亿元
         from lib.technical import sort_kline_asc
 
         return sort_kline_asc(records)
@@ -567,7 +633,7 @@ def _summarize_research(tushare_rc: list[dict] | None,
                     np_by_quarter[q] = []
                 np_by_quarter[q].append(np_val)
         summary["profit_forecasts"] = [
-            {"quarter": q, "avg_np_100m": round(sum(vs) / len(vs) / 10000, 2),
+            {"quarter": q, "avg_np_100m": round(sum(vs) / len(vs) / WAN_PER_YI, 2),
              "n_analysts": len(vs)}
             for q, vs in sorted(np_by_quarter.items())
         ]
@@ -610,12 +676,12 @@ def _summarize_research(tushare_rc: list[dict] | None,
                 "pct_change_max": p_max,
             }
             if profit_min is not None and profit_max is not None:
-                guidance["profit_min_100m"] = round(profit_min / 10000, 2)
-                guidance["profit_max_100m"] = round(profit_max / 10000, 2)
+                guidance["profit_min_100m"] = round(profit_min / WAN_PER_YI, 2)
+                guidance["profit_max_100m"] = round(profit_max / WAN_PER_YI, 2)
             elif last_net is not None and p_min is not None and p_max is not None:
-                guidance["profit_min_100m"] = round(last_net * (1 + p_min / 100) / 10000, 2)
-                guidance["profit_max_100m"] = round(last_net * (1 + p_max / 100) / 10000, 2)
-                guidance["last_parent_net_100m"] = round(last_net / 10000, 2)
+                guidance["profit_min_100m"] = round(last_net * (1 + p_min / 100) / WAN_PER_YI, 2)
+                guidance["profit_max_100m"] = round(last_net * (1 + p_max / 100) / WAN_PER_YI, 2)
+                guidance["last_parent_net_100m"] = round(last_net / WAN_PER_YI, 2)
             summary["company_guidance"] = guidance
             summary["source"] = "tushare.forecast"
             summary["status"] = "ok_guidance_only"
@@ -932,9 +998,9 @@ def _parse_holder_change_vol(raw) -> float | None:
     val = float(m.group(1))
     unit = m.group(2) or ""
     if unit == "万":
-        val *= 10000
+        val *= ONE_PER_WAN
     elif unit == "亿":
-        val *= 1e8
+        val *= ONE_PER_YI
     return val
 
 
@@ -943,7 +1009,7 @@ def _holder_vol_key(raw) -> str:
     v = _parse_holder_change_vol(raw)
     if v is None:
         return str(raw or "")
-    return f"{round(v / 10000, 2)}"
+    return f"{round(v / ONE_PER_WAN, 2)}"
 
 
 def _normalize_holder_name(name: str) -> str:
@@ -1456,94 +1522,257 @@ _DEFAULT_DIMS = ["basic_info", "financials", "quote", "shareholders",
                  "northbound", "valuation", "kline", "holder_changes"]
 
 
-def collect_all(symbol: str, dims: list[str] | None = None,
-                deep: bool = False,
-                with_macro: bool = False,
-                with_chain: bool = False,
-                with_news_pack: bool = False) -> dict[str, Any]:
-    """全维度采集。
+# ---- E1 板块同步性引擎（v0.2.7） ----
 
-    last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
-    每个维度内部已在 collect_* 中并行查源。
+_SECTOR_SYNC_MODULE = "lib_sector_sync"
+# 与 skills/lib/sector_sync.SECTOR_SYNC_FIELDS 同步（仅作模块加载失败时的
+# 字面 fallback；正常路径骨架 fields 取 mod.SECTOR_SYNC_FIELDS）
+_SECTOR_SYNC_FIELD_NAMES = (
+    "sector_beta_60d",
+    "sector_r2_60d",
+    "idio_var_share",
+    "sector_dispersion",
+    "csad_gamma2",
+    "downside_corr_gap",
+)
 
-    Args:
-        symbol: 股票代码
-        dims: 维度列表，None 使用默认（含 valuation + kline）
-        deep: 深度模式，kline 扩大到 730 自然日
-        with_macro: 采集中国宏观指标（PMI/CPI/PPI/LPR）
-        with_chain: 采集产业链上下文（复用已采集的 basic_info）
-        with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
+
+def _sector_sync_skeleton(symbol: str, *, reason: str,
+                          industry: str | None = None,
+                          n_constituents: int = 0,
+                          n_constituents_with_kline: int = 0,
+                          error: str = "") -> dict:
+    """板块同步性不可得骨架（统一 13 键 schema，fields 全 None）。
+
+    akshare 不可用 / 冷缓存跳过 / probe 无锚定 / collect_all 异常兜底四条
+    路径共用同一形状——存储/渲染消费者按统一 schema 读取不 KeyError。
+    fields 键名取已加载模块的 SECTOR_SYNC_FIELDS（模块加载失败时退回内联
+    副本，即 _SECTOR_SYNC_FIELD_NAMES）。``error`` 仅异常兜底路径使用
+    （额外键，供排障）。
     """
-    if dims is None:
-        dims = list(_DEFAULT_DIMS)
+    mod = sys.modules.get(_SECTOR_SYNC_MODULE)
+    field_names = getattr(mod, "SECTOR_SYNC_FIELDS", None) or _SECTOR_SYNC_FIELD_NAMES
+    out = {
+        "symbol": symbol,
+        "available": False,
+        "provider": None,
+        "industry": industry,
+        "index_code": None,
+        "n_constituents": n_constituents,
+        "n_constituents_with_kline": n_constituents_with_kline,
+        "window_days": 0,
+        "window_start": None,
+        "window_end": None,
+        "fields": {f: None for f in field_names},
+        "meta": {},
+        "reasons": {"_all": reason},
+    }
+    if error:
+        out["error"] = error
+    return out
 
-    start_all = time.time()
+
+def _load_sector_sync_module():
+    """加载 skills/lib/sector_sync.py（显式路径 + 固定模块名）。
+
+    scripts/lib 无 sector_sync shim（sector_sync 为 v0.2.7 新增，落 skills/lib），
+    直接 ``from lib.sector_sync import ...`` 在 scripts/lib 包内会 ImportError——
+    仿 invest_path.load_invest_a_etf_module：按文件路径加载并注册固定模块名，
+    测试按同名 patch（D13：patch 目标 = 定义模块命名空间）。
+    """
+    mod = sys.modules.get(_SECTOR_SYNC_MODULE)
+    if mod is not None:
+        return mod
+    try:
+        from lib._invest_path import ensure_skills_lib_on_path  # scripts/lib shim
+    except ImportError:  # pragma: no cover — skills/lib 独立上下文
+        from invest_path import ensure_shared_lib_on_path as ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from invest_path import invest_a_scripts_dir
+    import importlib.util as _ilu
+
+    skills_lib = Path(invest_a_scripts_dir()).parent.parent / "lib"
+    spec = _ilu.spec_from_file_location(_SECTOR_SYNC_MODULE, skills_lib / "sector_sync.py")
+    if spec is None or spec.loader is None:  # pragma: no cover
+        raise ImportError(f"cannot load skills/lib/sector_sync.py from {skills_lib}")
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[_SECTOR_SYNC_MODULE] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        # F5：exec 失败会留下残破的部分模块，被 sys.modules 永久缓存——后续
+        # 每次 collect_all 都短路返回它（AttributeError 恒现）。清理后重抛。
+        sys.modules.pop(_SECTOR_SYNC_MODULE, None)
+        raise
+    return mod
+
+
+def _attach_sector_sync(collection: dict, symbol: str, dim_results: dict,
+                        *, force: bool = False) -> None:
+    """E1：板块同步性 6 字段 — 计算并写入 collection['sector_sync'] + kline derived。
+
+    - industry_hint 取自 basic_info 的「行业」字段（缺失 → sector_sync 内
+      fail loud「行业分类缺失」，不静默）。
+    - kline 已采集数据直接复用（不再二次抓取个股日线）。
+    - F1 冷缓存门控：成分股日线逐只抓取 5-10 分钟，默认采集不得被阻塞——
+      锚定板块成分股缓存缺口 ≤ 预算才实际计算，否则标注「缓存未预热」跳过；
+      force=True（CLI --force-sector-sync）绕过门控强制计算（首次预热路径）。
+    - probe → compute 锚定共享：probe 解析出的锚定板块经 anchor_override 直接
+      复用，compute 不二次解析（数据源可达性在两次解析间翻转时不再退化为
+      全量冷抓）；probe 无锚定（全解析失败/行业分类缺失）→ 跳过 compute
+      fail-fast，下一次采集自然重试。
+    - F4 derived 合并：仅 available=True 时并入——部分失败时 1-5 个有效字段
+      保留在 collection['sector_sync']，kline.derived 不写入，两视图对同一
+      快照的解读一致（部分数据可区分于「无数据」）。
+    """
+    basic = dim_results.get("basic_info") or {}
+    basic_data = basic.get("data") if isinstance(basic, dict) else None
+    industry_hint = ""
+    if isinstance(basic_data, dict):
+        industry_hint = str(basic_data.get("行业") or basic_data.get("industry") or "")
+    kline_dim = dim_results.get("kline") or {}
+    kline_bars = kline_dim.get("data") if isinstance(kline_dim, dict) else None
+    if not isinstance(kline_bars, list):
+        kline_bars = None
+
+    # 先加载模块（exec 不依赖 akshare——akshare 为函数内懒导入）：骨架 fields
+    # 取模块常量，无 akshare 环境同样得到 13 键统一 schema（不含内联副本漂移）
+    try:
+        mod = _load_sector_sync_module()
+    except Exception as exc:
+        logger.warning("sector_sync module load failed for %s: %s", symbol, exc)
+        collection["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 模块加载失败: {exc}", error=str(exc))
+        return
+
+    # sector_sync 全部数据源均经 akshare（东财 BK / 申万 / sina）——无 akshare
+    # 环境直接标注不可得（fail loud），避免空转与无谓网络尝试。
+    if not env.is_akshare_available():
+        collection["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason="akshare 数据源不可用，板块同步性不可得")
+        return
+
+    # F1 冷缓存门控：成分股日线全量抓取 5-10 分钟，默认采集跳过冷缓存计算。
+    if not force:
+        probe = mod.probe_sector_cache_warmth(industry_hint)
+        anchor = probe.get("anchor")
+        if not probe.get("warm"):
+            collection["sector_sync"] = _sector_sync_skeleton(
+                symbol, reason=probe.get("reason") or "板块同步性缓存未预热",
+                industry=industry_hint or None,
+                n_constituents=int(probe.get("total", 0)),
+                n_constituents_with_kline=int(probe.get("valid", 0)))
+            return
+        # probe 无锚定（全解析失败 / 行业分类缺失）：fail-fast 跳过 compute——
+        # 不给二次解析全量冷抓的机会（probe 与 compute 之间数据源可达性翻转
+        # 时，compute 会现场抓取 185 只成分股）；下一次采集自然重试
+        if not anchor:
+            collection["sector_sync"] = _sector_sync_skeleton(
+                symbol, reason=probe.get("reason") or "板块指数不可得",
+                industry=industry_hint or None,
+                n_constituents=int(probe.get("total", 0)))
+            return
+        ss = mod.compute_sector_sync(
+            symbol, industry_hint=industry_hint, stock_kline=kline_bars,
+            anchor_override=anchor)
+    else:
+        ss = mod.compute_sector_sync(
+            symbol, industry_hint=industry_hint, stock_kline=kline_bars)
+    collection["sector_sync"] = ss
+
+    # F4：字段并入 kline derived 以 available=True 为门槛（None 不写入）
+    if ss.get("available") and isinstance(kline_dim, dict):
+        derived = dict(kline_dim.get("derived") or {})
+        merged = False
+        for f in mod.SECTOR_SYNC_FIELDS:
+            v = (ss.get("fields") or {}).get(f)
+            if v is not None:
+                derived[f] = v
+                merged = True
+        if merged:
+            kline_dim["derived"] = derived
+
+
+def _dimension_missing_skeleton(dim: str, exc: Exception, *,
+                                display: str | None = None) -> dict:
+    """维度采集失败骨架（status=missing 统一形状，review #8）。
+
+    fanout 失败维度与 _collect_industry_pricing_block 共用；display 缺省取
+    COLLECTORS[dim][0]，未知维度回退 dim 自身。
+    """
+    return {
+        "dimension": dim,
+        "display": display if display is not None
+        else (COLLECTORS[dim][0] if dim in COLLECTORS else dim),
+        "data": None,
+        "status": "missing",
+        "error": f"维度采集失败: {exc}",
+        "_meta": {"source": "none", "success": False,
+                  "all_sources": [], "multi_source": False,
+                  "source_count": 0, "error": str(exc)},
+    }
+
+
+def _collect_dims_fanout(symbol: str, dims: list[str], kline_kwargs: dict) -> dict[str, dict]:
+    """跨维度并行扇出。失败维度写 status=missing 骨架。
+
+    收敛共享 _base._map_parallel fan-out 样板（review #7）：worker 公式
+    max(1, min(n, _env_max_workers())) 尊重 INVEST_MAX_WORKERS 且空任务
+    提前返回（dims=[] 不再 max_workers=0 崩溃，review #2）。
+    """
+    tasks: list[tuple[str, Callable[[], Any]]] = []
+    for dim in dims:
+        if dim not in COLLECTORS:
+            logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
+            continue
+        if dim == "industry_pricing":
+            # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
+            continue
+        _, fn = COLLECTORS[dim]
+        if dim == "kline" and kline_kwargs:
+            # lambda 默认参数绑定，防循环变量晚绑定（fn/kw 逐维不同）
+            tasks.append((dim, lambda fn=fn, kw=kline_kwargs: fn(symbol, **kw)))
+        else:
+            tasks.append((dim, lambda fn=fn: fn(symbol)))
+
     dim_results: dict[str, dict] = {}
+    dim_start = {dim: time.time() for dim, _ in tasks}
 
-    # 深度模式：kline 用更长窗口
-    kline_kwargs = {}
-    if deep:
-        kline_kwargs["start_date"] = _days_ago(730)
+    def _on_error(item: tuple[str, Callable], exc: Exception) -> None:
+        dim_results[item[0]] = _dimension_missing_skeleton(item[0], exc)
 
-    # 跨维度并行
-    dim_start: dict[str, float] = {}
-    with ThreadPoolExecutor(max_workers=min(len(dims), 6)) as executor:
-        future_map = {}
-        for dim in dims:
-            if dim not in COLLECTORS:
-                logger.warning("忽略未知维度 '%s'（有效维度: %s）", dim, list(COLLECTORS.keys()))
-                continue
-            if dim == "industry_pricing":
-                # industry_pricing 依赖 industry 解析结果，在并行扇出后单独采集
-                continue
-            dim_start[dim] = time.time()
-            if dim == "kline" and kline_kwargs:
-                _, fn = COLLECTORS[dim]
-                future_map[executor.submit(fn, symbol, **kline_kwargs)] = dim
-            else:
-                _, fn = COLLECTORS[dim]
-                future_map[executor.submit(fn, symbol)] = dim
+    for (dim, _fn), value in _map_parallel(tasks, lambda item: item[1](),
+                                           on_error=_on_error):
+        if value is not None:
+            dim_results[dim] = value
+            logger.info("dimension=%s done in %.1fs", dim,
+                        time.time() - dim_start[dim])
+    return dim_results
 
-        for future in as_completed(future_map):
-            dim = future_map[future]
-            try:
-                dim_results[dim] = future.result()
-                logger.info("dimension=%s done in %.1fs", dim,
-                            time.time() - dim_start[dim])
-            except Exception as exc:
-                dim_results[dim] = {
-                    "dimension": dim,
-                    "display": COLLECTORS[dim][0] if dim in COLLECTORS else dim,
-                    "data": None,
-                    "status": "missing",
-                    "error": f"维度采集失败: {exc}",
-                    "_meta": {"source": "none", "success": False,
-                              "all_sources": [], "multi_source": False,
-                              "source_count": 0, "error": str(exc)},
-                }
 
-    if "industry_pricing" in dims:
-        try:
-            industry = _resolve_industry_for_pricing(symbol, dim_results)
-            dim_results["industry_pricing"] = collect_industry_pricing(symbol, industry)
-        except Exception as exc:
-            dim_results["industry_pricing"] = {
-                "dimension": "industry_pricing",
-                "display": COLLECTORS["industry_pricing"][0],
-                "data": None,
-                "status": "missing",
-                "error": f"维度采集失败: {exc}",
-                "_meta": {
-                    "source": "none", "success": False,
-                    "all_sources": [], "multi_source": False,
-                    "source_count": 0, "error": str(exc),
-                },
-            }
+def _collect_industry_pricing_block(symbol: str, dims: list[str],
+                                    dim_results: dict) -> dict | None:
+    """industry_pricing 依赖 industry 解析结果，扇出后顺序采集。
 
-    # 按输入顺序排列
-    dimensions = [dim_results.get(d) for d in dims if d in COLLECTORS]
+    与兄弟 helper（_fuse_dimensions/_score_credibility 等）对齐：返回结果、
+    调用方写入 dim_results；未请求该维度时返回 None。
+    """
+    if "industry_pricing" not in dims:
+        return None
+    try:
+        industry = _resolve_industry_for_pricing(symbol, dim_results)
+        return collect_industry_pricing(symbol, industry)
+    except Exception as exc:
+        return _dimension_missing_skeleton("industry_pricing", exc)
 
-    # R-08: RRF 多源融合
+
+def _order_dimensions(dims: list[str], dim_results: dict) -> list:
+    """按输入顺序排列维度结果。"""
+    return [dim_results.get(d) for d in dims if d in COLLECTORS]
+
+
+def _fuse_dimensions(dimensions: list, symbol: str) -> dict[str, Any]:
+    """R-08: RRF 多源融合。"""
     fusion_results: dict[str, Any] = {}
     try:
         from ..fusion import (
@@ -1565,16 +1794,22 @@ def collect_all(symbol: str, dims: list[str] | None = None,
             )
     except Exception as exc:
         logger.warning("fusion failed for %s: %s", symbol, exc)
+    return fusion_results
 
-    # R-09: 证据可信度评分
+
+def _score_credibility(dimensions: list, symbol: str) -> dict[str, float]:
+    """R-09: 证据可信度评分。"""
     credibility_scores: dict[str, float] = {}
     try:
         from ..rerank import score_all_dimensions
         credibility_scores = score_all_dimensions(dimensions)
     except Exception as exc:
         logger.warning("rerank scoring failed for %s: %s", symbol, exc)
+    return credibility_scores
 
-    # R-12: 宏观数据采集（层5，opt-in）
+
+def _collect_macro_context_block(symbol: str, with_macro: bool) -> dict[str, Any]:
+    """R-12: 宏观数据采集（层5，opt-in）。"""
     macro_context: dict[str, Any] = {}
     if with_macro:
         try:
@@ -1583,8 +1818,11 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         except Exception as exc:
             logger.warning("macro context collection failed for %s: %s", symbol, exc)
             macro_context = {"status": "error", "error": str(exc)}
+    return macro_context
 
-    # R-12: 产业链数据（层3+4，opt-in）
+
+def _collect_chain_context_block(symbol: str, with_chain: bool, dim_results: dict) -> dict[str, Any]:
+    """R-12: 产业链数据（层3+4，opt-in，复用已采集的 basic_info）。"""
     chain_context: dict[str, Any] = {}
     if with_chain:
         try:
@@ -1600,8 +1838,14 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         except Exception as exc:
             logger.warning("chain context collection failed for %s: %s", symbol, exc)
             chain_context = {"status": "error", "error": str(exc)}
+    return chain_context
 
-    result: dict[str, Any] = {
+
+def _assemble_result(symbol: str, dimensions: list, fusion_results: dict,
+                     credibility_scores: dict, macro_context: dict,
+                     chain_context: dict) -> dict[str, Any]:
+    """装配采集结果主 dict。"""
+    return {
         "symbol": symbol,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "dimensions": dimensions or [],
@@ -1611,6 +1855,27 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         "chain_context": chain_context,  # R-12
         "summary": _build_summary(dimensions),
     }
+
+
+def _attach_sector_sync_block(result: dict, symbol: str, dim_results: dict, force: bool) -> None:
+    """E1: 板块同步性引擎（v0.2.7）— 6 个 derived 字段 + collection['sector_sync'] 详情。
+
+    依赖 kline + basic_info；板块指数/成分股不可得时内部 fail loud（输出「不可得」，
+    不给默认值）。F1 冷缓存门控：成分股逐只首跑 5-10 分钟，默认冷缓存跳过；
+    --force-sector-sync 强制预热，之后经 DataCache 缓存同板块多标的秒级复用。
+    """
+    try:
+        _attach_sector_sync(result, symbol, dim_results, force=force)
+    except Exception as exc:
+        logger.warning("sector_sync attach failed for %s: %s", symbol, exc)
+        # 异常兜底同样走 13 键统一骨架（含 fields/meta），消费者按统一 schema
+        # 读取不 KeyError；error 键供排障
+        result["sector_sync"] = _sector_sync_skeleton(
+            symbol, reason=f"sector_sync 采集异常: {exc}", error=str(exc))
+
+
+def _attach_phase2_block(result: dict, symbol: str) -> None:
+    """Phase 2 同行采集（异常兜底行业骨架）。"""
     try:
         attach_phase2_extras(result, symbol)
     except Exception as exc:
@@ -1626,31 +1891,52 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 "error": f"Phase 2 同行采集异常: {exc}",
             }
 
-    # Attach events (not a default dim, always runs)
+
+def _attach_events_block(result: dict, symbol: str, deep: bool) -> None:
+    """Attach events (not a default dim, always runs)。
+
+    import 与调用失败均 non-fatal（code-review 2026-08-22 #1）：lib.events
+    附属组件链断裂时跳过 events、保留已采集结果，不让数分钟采集成果整锅丢弃。
+    report_qc 对 collect_all 是泛化 except（report_qc.py:463-480 任意异常 →
+    两层 fail），不依赖此处 raise；quality/rigor 层不消费 events。
+    meta["deep"] 在 import 之前绑定，失败时亦保证落盘。
+    """
+    meta = result.setdefault("_meta", {})
+    meta["deep"] = deep
+    event_days = 90 if deep else 30
     try:
         from lib.events import attach_events
-        meta = result.setdefault("_meta", {})
-        meta["deep"] = deep
-        event_days = 90 if deep else 30
         attach_events(result, symbol, days=event_days)
     except Exception as e:
         logger.warning("attach_events failed (non-fatal): %s", e)
 
-    # Build analysis cards (Template A/B/C)
+
+def _attach_analysis_cards_block(result: dict) -> None:
+    """Build analysis cards (Template A/B/C)。"""
     try:
         from lib.analysis_templates import build_analysis_cards
         build_analysis_cards(result)
     except Exception as e:
         logger.warning("build_analysis_cards failed (non-fatal): %s", e)
 
-    # Generate collection manifest (Task 9, P1)
+
+def _attach_manifest_block(result: dict) -> None:
+    """Generate collection manifest (Task 9, P1)。
+
+    生成失败 non-fatal：manifest=None（正常路径行为不变）。
+    events/analysis 块均为 non-fatal，meta 由各块 setdefault 自绑定。
+    """
     try:
         from lib.manifest import generate_manifest
+        meta = result.setdefault("_meta", {})
         meta["manifest"] = generate_manifest(result)
     except Exception as e:
         logger.warning("manifest generation failed (non-fatal): %s", e)
-        meta["manifest"] = None
+        result.setdefault("_meta", {})["manifest"] = None
 
+
+def _attach_news_pack_block(result: dict, symbol: str, with_news_pack: bool) -> None:
+    """新闻包（公告 + 查询包 + 可选 Tavily，opt-in）。"""
     if with_news_pack:
         try:
             attach_news_pack(result, symbol)
@@ -1661,6 +1947,63 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 "query_pack": [],
                 "attempted_sources": {"error": str(exc)},
             }
+
+
+def collect_all(symbol: str, dims: list[str] | None = None,
+                deep: bool = False,
+                with_macro: bool = False,
+                with_chain: bool = False,
+                with_news_pack: bool = False,
+                force_sector_sync: bool = False) -> dict[str, Any]:
+    """全维度采集。
+
+    last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
+    每个维度内部已在 collect_* 中并行查源。
+
+    Args:
+        symbol: 股票代码
+        dims: 维度列表，None 使用默认（含 valuation + kline）
+        deep: 深度模式，kline 扩大到 730 自然日
+        with_macro: 采集中国宏观指标（PMI/CPI/PPI/LPR）
+        with_chain: 采集产业链上下文（复用已采集的 basic_info）
+        with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
+        force_sector_sync: 绕过 F1 冷缓存门控强制计算板块同步性（首次预热，
+            成分股日线全量抓取约 5-10 分钟；默认冷缓存时跳过并标注原因）
+    """
+    # 空列表（如 CLI --dims "" 解析结果）视同 None 填默认维度；
+    # 显式语义 + 日志提示（review #2：不静默跑全量）
+    if not dims:
+        logger.warning("dims 为空（如 --dims \"\"），按默认维度采集: %s", list(_DEFAULT_DIMS))
+        dims = list(_DEFAULT_DIMS)
+
+    start_all = time.time()
+
+    # 深度模式：kline 用更长窗口
+    kline_kwargs = {}
+    if deep:
+        kline_kwargs["start_date"] = _days_ago(730)
+
+    dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
+    industry_pricing = _collect_industry_pricing_block(symbol, dims, dim_results)
+    if industry_pricing is not None:
+        dim_results["industry_pricing"] = industry_pricing
+
+    # 按输入顺序排列
+    dimensions = _order_dimensions(dims, dim_results)
+
+    fusion_results = _fuse_dimensions(dimensions, symbol)
+    credibility_scores = _score_credibility(dimensions, symbol)
+    macro_context = _collect_macro_context_block(symbol, with_macro)
+    chain_context = _collect_chain_context_block(symbol, with_chain, dim_results)
+
+    result = _assemble_result(symbol, dimensions, fusion_results,
+                              credibility_scores, macro_context, chain_context)
+    _attach_sector_sync_block(result, symbol, dim_results, force_sector_sync)
+    _attach_phase2_block(result, symbol)
+    _attach_events_block(result, symbol, deep)
+    _attach_analysis_cards_block(result)
+    _attach_manifest_block(result)
+    _attach_news_pack_block(result, symbol, with_news_pack)
 
     logger.info("collect_all total=%.1fs symbol=%s dims=%d",
                 time.time() - start_all, symbol, len(dims))
@@ -2062,6 +2405,10 @@ def _recent_flow_records(records: list[dict], *, limit: int) -> list[dict]:
 
 _MIN_NORTHBOUND_DAYS = 5
 
+# P0-1：北向个股披露源停更容忍窗口。最新有值记录距今超过该天数 → 净额
+# 视为陈旧（2024-08 起北向个股披露规则变更，源可能停在两年前）。
+_NORTHBOUND_STALE_DAYS = 90
+
 # 同 run 按日缓存（仿 _cninfo_hold_cache 模式）：collect_northbound 与
 # _ms_fetch_northbound_stock 以相同参数（30 日窗口）重复拉取 hsgt_top10。
 # 缓存原始 rows（稀疏判定在消费方 _MIN_NORTHBOUND_DAYS，语义不变）；
@@ -2087,13 +2434,82 @@ def _hsgt_top10_cached(symbol: str) -> list[dict] | None:
         return rows
 
 
+def _norm_trade_date(raw: Any) -> str | None:
+    """把多种形态的 trade_date 归一化为 'YYYYMMDD'；无法识别返回 None。
+
+    akshare 个股持股变动为 'YYYY-MM-DD'（实测 2026-08-24 live 复现 600176
+    最新 '2024-08-16'），tushare 为 'YYYYMMDD'，TimeStamp 字符串形态
+    'YYYY-MM-DD HH:MM:SS' 截前 8 位数字；NaN/None/'--'/'nan'/'2024-8-16'
+    等无法归一化返回 None——调用方须逐行剔除坏值，不能让单条坏行污染
+    max(dates) 使整个 P0-1 时效守卫静默失效（第五轮）。
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())[:8]
+    if len(digits) != 8:
+        return None
+    try:
+        datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return None
+    return digits
+
+
 def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     """个股北向近 10 个交易日净额（元）。
 
     Tushare hsgt_top10（仅上榜日有 net_amount）→ akshare 个股持股变动回退。
     hsgt_top10 上榜日过少时回退 akshare，避免稀疏序列误导汇总。
     不使用 moneyflow（主力）或 moneyflow_hsgt（市场级汇总）。
+
+    P0-1 时效守卫：2024-08 起北向个股披露规则变更，hsgt_top10/个股持股源
+    停更——records 可能停留在两年前（如最新 2024-08-16）。若最新有值记录
+    距今超过 _NORTHBOUND_STALE_DAYS（90 天），net_sum_10d 置 None 并附
+    staleness_note，渲染层自动降级为「数据不足」，禁止把陈旧净额标为
+    「近 10 日」参与 CV-4 印证。
     """
+    def _guard_staleness(result: dict | None) -> dict | None:
+        """对已聚合结果做时效校验；过期 → 净额置 None + 标注（保留 records 追溯）。"""
+        if not result:
+            return result
+        recent = result.get("records") or []
+        # 逐记录归一化后取 max：词法最大对坏行（'nan'/'--' 等垃圾字符串 > '2024...'）
+        # 会把 latest 选成垃圾值、strptime ValueError 静默跳过守卫——单条坏行即令
+        # 整个 P0-1 失效（第五轮）。归一化后全为 8 位数字，词法序 == 时间序。
+        normed: list[tuple[str, Any]] = []
+        for r in recent:
+            d = _norm_trade_date(r.get("trade_date"))
+            if d is not None:
+                normed.append((d, r.get("trade_date")))
+        if not normed:
+            # 时效不可确认：宁降级为「不可用」，不得以不可判断的日期冒充新鲜
+            # 数据（fail loud：日志可查，渲染层走数据不足降级）
+            logger.warning(
+                "northbound staleness guard(%s): %d 条记录 trade_date 均无法归一化，"
+                "净额时效不可确认 → 置 None", symbol, len(recent))
+            result["net_sum_10d"] = None
+            result["stale"] = True
+            result["staleness_note"] = (
+                "北向个股披露记录期无法解析，净额时效不可确认（源异常）"
+            )
+            return result
+        latest, latest_raw = max(normed)
+        latest_dt = datetime.strptime(latest, "%Y%m%d").replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - latest_dt).days
+        if age_days <= _NORTHBOUND_STALE_DAYS:
+            return result
+        result["net_sum_10d"] = None
+        result["stale"] = True
+        result["latest_trade_date"] = str(latest_raw) if latest_raw is not None else latest
+        result["staleness_note"] = (
+            f"北向个股披露源已停更：最新记录 {latest_raw}，距今约 {age_days // 30} 个月，"
+            "净额不可用（2024-08 起北向个股披露规则变更）"
+        )
+        return result
+
     try:
         records = _hsgt_top10_cached(symbol)
         if records:
@@ -2101,12 +2517,12 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
             valued = [r for r in recent if _flow_amount_yuan(r) is not None]
             if len(valued) >= _MIN_NORTHBOUND_DAYS:
                 net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
-                return {
+                return _guard_staleness({
                     "records": recent,
                     "net_sum_10d": net_sum,
                     "days": len(valued),
                     "source": "tushare.hsgt_top10",
-                }
+                })
     except Exception as exc:
         logger.debug("tushare hsgt_top10 failed for %s: %s", symbol, exc)
 
@@ -2120,12 +2536,13 @@ def _ms_fetch_northbound_stock(tc: Any, symbol: str) -> dict | None:
     if len(valued) < _MIN_NORTHBOUND_DAYS:
         return None
     net_sum = sum(v for v in (_flow_amount_yuan(r) for r in valued))
-    return {
+    # P0-1：akshare 分支同样走时效守卫（源停更时降级而非误标「近 10 日」）
+    return _guard_staleness({
         "records": recent,
         "net_sum_10d": net_sum,
         "days": len(valued),
         "source": "akshare.stock_hsgt_individual_em",
-    }
+    })
 
 
 def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
@@ -2789,7 +3206,7 @@ def _ms_fetch_etf_flow(tc: Any) -> dict | None:
         px = prices.get(str(last.get("trade_date", "")))
         if px is None or px <= 0:
             return None
-        return d_shares * 10000 * px, span  # fd_share 单位：万份
+        return d_shares * ONE_PER_WAN * px, span  # fd_share 单位：万份
 
     flow_5d = _net_flow(5)
     flow_10d = _net_flow(10)
@@ -3390,7 +3807,6 @@ def _safe_peer_num(v) -> float | None:
 def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
     """akshare 回退方案：使用东方财富行业板块成分股进行行业横向对比。"""
     import akshare as ak  # noqa: F811
-    from ..proxy import akshare_direct_session
 
     # 1. 获取基本信息和行业分类
     info = _q_akshare_basic(symbol)
@@ -3472,7 +3888,7 @@ def _collect_peers_akshare(symbol: str, top_n: int, sort_by: str) -> dict:
         # Normalize total_mv: akshare spot data returns 元 → 亿元
         mv_raw = entry.get("total_mv")
         if mv_raw is not None:
-            entry["total_mv"] = mv_raw / 1e8
+            entry["total_mv"] = mv_raw / ONE_PER_YI
 
         if code == target_code:
             target_entry = entry
@@ -3545,7 +3961,7 @@ def collect_peer_comparison(
                 for entry in ([target] if target else []) + peers:
                     mv = entry.get("total_mv")
                     if mv is not None:
-                        entry["total_mv"] = mv / 10000.0
+                        entry["total_mv"] = mv / WAN_PER_YI
 
                 return {
                     "symbol": symbol,
@@ -3585,7 +4001,3 @@ def collect_peer_comparison(
             "请运行 `invest.py diagnose` 检查数据源可用性。"
         ),
     }
-
-
-# 测试与旧代码兼容别名
-_safe_float_val = safe_float

@@ -783,10 +783,30 @@ def _fetch_erp(result: dict) -> None:
                 logger.warning("erp: Tushare HS300 PE unavailable, falling back to akshare: %s", exc)
 
         if pe_hs300 is None:
-            with akshare_direct_session():
-                df = ak.stock_zh_index_value_csindex(symbol="000300")
+            # fallback 探测：csindex 404 属确定性缺失，静默降级不污染 _errors
+            #（原实现无保护，HTTPError 传播崩栈/注入「erp: HTTP Error 404」）
+            try:
+                with akshare_direct_session():
+                    df = ak.stock_zh_index_value_csindex(symbol="000300")
+            except Exception as exc:
+                logger.debug("erp: akshare csindex fallback failed, silent degrade: %s", exc)
+                df = None
             if df is not None and not df.empty:
-                pe_hs300 = safe_float(df.iloc[-1].get("市盈率1"))
+                # 同 etf_data.fetch_etf_index_pe（93264b0）同款取行缺陷：csindex
+                # 新日期在前，iloc[-1] 取到最早行 → HS300 PE 滞后约 3.5 周
+                # （code-review 第四轮 journal twin）。按「日期」升序后取末行；
+                # NaN 行先剔除（日期/市盈率任一 NaN 均剔除，防排序污染取行）。
+                if "日期" in df.columns and "市盈率1" in df.columns:
+                    df2 = df.dropna(subset=["日期", "市盈率1"]).sort_values("日期")
+                    if not df2.empty:
+                        pe_hs300 = safe_float(df2.iloc[-1].get("市盈率1"))
+                else:
+                    # 列名漂移守卫（对齐 etf_data 惯例）：无「日期/市盈率1」列时
+                    # 沿用原始行序取末行并明确警告，fail-loud 不复现静默滞后
+                    logger.warning(
+                        "erp: csindex fallback column drift (需要 日期/市盈率1), "
+                        "沿用原始行序取末行，可能存在取行偏移")
+                    pe_hs300 = safe_float(df.iloc[-1].get("市盈率1"))
 
         if pe_hs300 is None or pe_hs300 <= 0:
             result["_errors"].append("erp: HS300 PE unavailable")
@@ -805,8 +825,12 @@ def _fetch_erp(result: dict) -> None:
                 logger.warning("erp: FRED DGS10 unavailable, falling back to akshare: %s", exc)
 
         if y10 is None:
-            with akshare_direct_session():
-                df = ak.bond_zh_us_rate()
+            try:
+                with akshare_direct_session():
+                    df = ak.bond_zh_us_rate()
+            except Exception as exc:
+                logger.debug("erp: akshare bond fallback failed, silent degrade: %s", exc)
+                df = None
             if df is not None and not df.empty:
                 # 列名即为收益率名称，如「中国国债收益率10年」
                 col_10y = "中国国债收益率10年"
@@ -1214,90 +1238,6 @@ def _pearson_crit(n: int) -> float:
         if n <= nn:
             return c
     return _PEARSON_CRIT[-1][1]
-
-
-def zt_seesaw(days: int = 30, min_days: int = 10) -> dict[str, Any]:
-    """涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比）。
-
-    **参考内容，不构成投资决策**：描述资金在板块簇间的腾挪结构，
-    帮助分析盘面强弱分化的来源，不输出任何方向性预测。
-
-    基于 zt_industry_flow(days, return_daily=True) 的 daily 矩阵：
-    - seesaw_pairs: 显著负相关对（|r| > 临界值，p<0.05 双尾），按 |r| 降序
-    - sync_pairs: 显著正相关对（同步资金池）
-    - half_split: 前后半段占比变化（Δpp），验证轮动方向
-    - 占比口径（簇涨停家数/当日涨停总数），控制总量波动
-    - 东财不可用或样本 <min_days 时 available=False 并说明原因
-    """
-    result: dict[str, Any] = {
-        "available": False,
-        "n_days": 0,
-        "dates": [],
-        "significance": None,
-        "seesaw_pairs": [],
-        "sync_pairs": [],
-        "half_split": [],
-        "_errors": [],
-    }
-    flow = zt_industry_flow(days=days, return_daily=True)
-    if not flow.get("available") or not flow.get("daily"):
-        result["_errors"] = flow.get("_errors", ["zt_industry_flow unavailable"])
-        result["_errors"].append("东财涨停池不可用，跷跷板检验跳过")
-        return result
-    daily: dict[str, dict[str, int]] = flow["daily"]
-    dates = sorted(daily)
-    n = len(dates)
-    result["n_days"] = n
-    result["dates"] = dates
-    if n < min_days:
-        result["_errors"].append(f"样本不足: {n} 日 < {min_days}，跳过")
-        return result
-
-    total_by_date = {d: sum(daily[d].values()) for d in dates}
-    cluster_names = list(_ZT_CLUSTERS)
-    share = {
-        c: [sum(daily[d].get(i, 0) for i in _ZT_CLUSTERS[c]) / total_by_date[d] * 100
-            for d in dates]
-        for c in cluster_names
-    }
-
-    def _pearson(x: list[float], y: list[float]) -> float:
-        mx, my = sum(x) / n, sum(y) / n
-        cov = sum((a - mx) * (b - my) for a, b in zip(x, y))
-        sx = math.sqrt(sum((a - mx) ** 2 for a in x))
-        sy = math.sqrt(sum((b - my) ** 2 for b in y))
-        return cov / (sx * sy) if sx and sy else 0.0
-
-    crit = _pearson_crit(n)
-    result["significance"] = {"n": n, "r_crit": crit, "note": f"双尾 p<0.05，|r|>{crit} 为显著"}
-    for i in range(len(cluster_names)):
-        for j in range(i + 1, len(cluster_names)):
-            a, b = cluster_names[i], cluster_names[j]
-            r = _pearson(share[a], share[b])
-            if r <= -crit:
-                result["seesaw_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
-            elif r >= crit:
-                result["sync_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
-    result["seesaw_pairs"].sort(key=lambda p: p["r"])
-    result["sync_pairs"].sort(key=lambda p: -p["r"])
-
-    # 前后半段占比均值差（Δpp）；share[c] 为按 dates 顺序的列表
-    mid = n // 2
-    h1, h2 = dates[:mid], dates[mid:]
-    if h1 and h2:
-        half = []
-        for c in cluster_names:
-            vals = share[c]
-            m1 = sum(vals[:mid]) / len(h1)
-            m2 = sum(vals[mid:]) / len(h2)
-            half.append({"cluster": c, "first_half_share": round(m1, 1),
-                         "second_half_share": round(m2, 1), "delta_pp": round(m2 - m1, 1)})
-        half.sort(key=lambda x: -x["delta_pp"])
-        result["half_split"] = {"first_half": [h1[0], h1[-1]], "second_half": [h2[0], h2[-1]],
-                                "rows": half}
-
-    result["available"] = True
-    return result
 
 
 # ---------------------------------------------------------------------------

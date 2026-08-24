@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from lib.nums import safe_float as _safe_num
+from lib.nums import ONE_PER_WAN, ONE_PER_YI, safe_float as _safe_num
 from lib.technical import sort_kline_asc
 from lib.stats import calc_beta
 from lib.financial_rigor import _merge_share_fields, _parse_share_count
@@ -56,8 +56,10 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
     try:
         from lib.collector import _akshare_hs300_dated_closes
         bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
-    except Exception:
-        logger.warning("沪深300基准数据获取失败，Beta 使用默认值 1.0", exc_info=True)
+    except Exception as exc:
+        # 单行降级日志（不带 traceback，对齐 collector/_base 降级惯例；
+        # 东财不可达的 ConnectionError 链式栈会淹没真实错误）
+        logger.warning("沪深300基准数据获取失败（%s），Beta 使用默认值 1.0", exc)
         bench_dated = []
 
     if not bench_dated:
@@ -188,7 +190,7 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
     if merged:
         shares_wan = _parse_share_count(merged)
         if shares_wan is not None and shares_wan > 0:
-            return shares_wan * 1e4, "akshare stock_individual_info_em \"总股本\" (万股→股)"
+            return shares_wan * ONE_PER_WAN, "akshare stock_individual_info_em \"总股本\" (万股→股)"
 
     # Source 2: total_mv / price 推导
     # total_mv 单位: 双源均已归一化为亿元 — tushare daily_basic 采集端 万元→亿元
@@ -210,7 +212,7 @@ def _dcf_extract_shares(dims: dict) -> tuple[float | None, str]:
             if price is not None and _safe_num(price) and float(price) > 0:
                 price = float(price)
                 # 亿元 × 1e8 = 元；元 / (元/股) = 股
-                shares = latest_mv * 1e8 / price
+                shares = latest_mv * ONE_PER_YI / price
                 return shares, "total_mv (亿元) / 当前股价 推导"
 
     return None, "不可得"

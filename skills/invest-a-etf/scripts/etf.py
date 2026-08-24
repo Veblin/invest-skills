@@ -34,6 +34,19 @@ from etf_data import (  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 
 
+def _fmt4(v) -> str:
+    """渲染 round 4 位：NAV close 原始 float 直出会出现 1.4362000000000001
+    精度尾巴（P1-3，515050 annual_high 现场）。"""
+    f = safe_float(v)
+    return "—" if f is None else f"{f:.4f}"
+
+
+def _fmt2(v) -> str:
+    """渲染 round 2 位（百分比类字段）。"""
+    f = safe_float(v)
+    return "—" if f is None else f"{f:.2f}"
+
+
 def _kline_summary(kline: dict) -> dict:
     """Drop bulky nav_history for default stdout."""
     return {k: v for k, v in kline.items() if k != "nav_history"}
@@ -196,7 +209,12 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     print(f"  nav_rows:          {kline.get('nav_rows')}  status={kline.get('status')}")
     print(f"  latest_nav:        {kline.get('latest_nav')}  adj={kline.get('adj_applied')}")
     print(f"  ma20/ma60 (NAV):   {kline.get('ma20')} / {kline.get('ma60')}")
-    print(f"  ma20/ma60 (index): {kline.get('index_ma20')} / {kline.get('index_ma60')}")
+    idx_ma20, idx_ma60 = kline.get('index_ma20'), kline.get('index_ma60')
+    # P1-4：指数日 K 获取失败静默降级时，标注「不可得」而非裸 None
+    if idx_ma20 is None and idx_ma60 is None:
+        print(f"  ma20/ma60 (index): 不可得（指数日 K 获取失败，静默降级）")
+    else:
+        print(f"  ma20/ma60 (index): {idx_ma20} / {idx_ma60}")
     print(f"  boll (u/m/l):      {kline.get('boll_upper')} / {kline.get('boll_mid')} / {kline.get('boll_lower')}")
     print()
     print()
@@ -239,13 +257,15 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
             print(f"  source:            {hist['source']}  ({hist.get('note', '')})")
             print(f"  rows:              {stats['rows']}  ({stats['date_range']})")
             ah, al = stats["annual_high"], stats["annual_low"]
-            print(f"  annual_high/low:   {ah['close']} @ {ah['date']} / {al['close']} @ {al['date']}")
+            # P1-3：close 渲染 round 4 位——原始 float 直出出现过
+            # 1.4362000000000001 类精度尾巴（515050 现场）
+            print(f"  annual_high/low:   {_fmt4(ah['close'])} @ {ah['date']} / {_fmt4(al['close'])} @ {al['date']}")
             md = stats["max_drawdown"]
-            print(f"  max_drawdown:      {md['drawdown_pct']}%  "
-                  f"({md['peak_close']} @ {md['peak_date']} → {md['trough_close']} @ {md['trough_date']})")
+            print(f"  max_drawdown:      {_fmt2(md['drawdown_pct'])}%  "
+                  f"({_fmt4(md['peak_close'])} @ {md['peak_date']} → {_fmt4(md['trough_close'])} @ {md['trough_date']})")
             print(f"  big_move_days:     {len(stats['big_move_days'])} 个 |change_pct|≥5% 交易日")
             print(f"  ma20/60/120:       {stats['ma20']} / {stats['ma60']} / {stats['ma120']}")
-            print(f"  current_vs_high/low: {stats['current_vs_high_pct']}% / {stats['current_vs_low_pct']}%")
+            print(f"  current_vs_high/low: {_fmt2(stats['current_vs_high_pct'])}% / {_fmt2(stats['current_vs_low_pct'])}%")
         else:
             print(f"  不可用: {hist.get('error') or '历史行情获取失败'}")
     print()

@@ -1,0 +1,69 @@
+name: Publish to SkillHub
+
+# 触发：镜像仓库 main 分支收到主仓库同步的 skills/** 变更 → 自动发布到 skillhub.cn
+#       （工作流自身/README 等变更不触发——paths 过滤）；workflow_dispatch 为手动兜底
+# 前置：本仓库 Settings → Secrets → Actions → SKILLHUB_API_KEY = skillhub.cn API key（skh_xxx）
+# 对应设计：host-docs/v0.2.7/skillhub-mirror-publish-design.md §7/§8/§9
+# 平台注意：skillhub.cn（腾讯云，实名认证+审核）与 skillhub.club（GitHub 收录聚合站）是两个不同平台
+
+on:
+  push:
+    branches: [main]
+    paths: ["skills/**"]
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: "发布说明（默认自动发布；留空则取推送 commit 消息）"
+        required: false
+        default: "自动发布"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SkillHub CLI
+        run: |
+          curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Login to SkillHub
+        env:
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_API_KEY }}
+        run: |
+          if [ -z "$SKILLHUB_KEY" ]; then
+            echo "::error::SKILLHUB_API_KEY secret 未配置（仓库 Settings → Secrets → Actions）"
+            exit 1
+          fi
+          skillhub login --key "$SKILLHUB_KEY" --host https://api.skillhub.cn
+          skillhub auth whoami
+
+      - name: Dry-run all skills
+        run: |
+          for d in skills/*/; do
+            [ -f "$d/SKILL.md" ] || continue
+            echo "== dry-run: $d =="
+            skillhub publish "$d" --dry-run --host https://api.skillhub.cn || exit 1
+          done
+
+      - name: Publish all skills
+        env:
+          # push 事件取同步 commit 消息（= sync <tag> + CHANGELOG 条目）；手动触发用输入值
+          CHANGELOG: ${{ github.event.inputs.changelog || github.event.head_commit.message || '手动发布' }}
+        run: |
+          for d in skills/*/; do
+            [ -f "$d/SKILL.md" ] || continue
+            echo "== publish: $d =="
+            skillhub publish "$d" --host https://api.skillhub.cn --changelog "$CHANGELOG" || exit 1
+          done
+
+      - name: Summary
+        run: |
+          echo "## ✅ SkillHub 发布完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 触发: ${{ github.event_name }} (${{ github.ref_name }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 发布后进入 pending_review，请在 skillhub.cn 个人中心跟进审核" >> "$GITHUB_STEP_SUMMARY"

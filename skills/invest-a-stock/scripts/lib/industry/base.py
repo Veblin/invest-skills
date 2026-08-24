@@ -89,24 +89,6 @@ default_profile = IndustryProfile(
 
 _REGISTRY: dict[str, IndustryProfile] = {}
 
-# 关键词 → 模块名的映射（在子模块加载时填充）
-_KEYWORD_MODULE_MAP: list[tuple[list[str], str]] = [
-    (["银行"], "banks"),
-    (["保险"], "insurance"),
-    (["证券", "券商"], "securities"),
-    (["房地产", "地产"], "real_estate"),
-    (["半导体", "芯片", "集成电路", "电子"], "tech_hardware"),
-    (["计算机", "软件", "IT服务", "互联网"], "tech_software"),
-    (["医药", "生物", "制药", "医疗"], "pharma"),
-    (["白酒", "食品", "饮料", "乳业", "调味品"], "consumer"),
-    (["新能源汽车", "锂电", "光伏", "储能", "风电"], "autos_new_energy"),
-    (["汽车"], "autos_new_energy"),
-    (["化工", "钢铁", "有色", "煤炭", "石油", "金属", "建材"], "energy_materials"),
-    (["电力", "公用"], "utilities"),
-    (["军工", "国防"], "defense"),
-    (["通信", "5G"], "telecom"),
-]
-
 
 def register_profile(keywords: list[str], profile: IndustryProfile) -> None:
     """注册一个行业 Profile 到关键词列表。"""

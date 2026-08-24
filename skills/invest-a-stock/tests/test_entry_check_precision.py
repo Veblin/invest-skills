@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
+import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 
-_ENTRY = Path(__file__).resolve().parents[3] / "scripts" / "entry_check.py"
+_ENTRY = Path(__file__).resolve().parents[3] / "scripts" / "research" / "entry_check.py"
 
 
 def _load_entry_check():

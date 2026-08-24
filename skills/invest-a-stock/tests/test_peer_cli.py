@@ -7,7 +7,6 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:

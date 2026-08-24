@@ -2,9 +2,9 @@
 """F 系列历史演变分布刻画（v0.2.6，预注册见 backtest_prereg/F{1,2,3}_预注册.md）。
 
 用法:
-  uv run python scripts/backtest_futures.py --hypothesis F1     # 基差分位 → ETF 收益分布
-  uv run python scripts/backtest_futures.py --hypothesis F2     # 贴水极值 → 指数 20 日收益分布
-  uv run python scripts/backtest_futures.py --hypothesis F3     # 持仓量变化 → 基差/收益联合演变
+  uv run python scripts/archive/backtest_futures.py --hypothesis F1     # 基差分位 → ETF 收益分布
+  uv run python scripts/archive/backtest_futures.py --hypothesis F2     # 贴水极值 → 指数 20 日收益分布
+  uv run python scripts/archive/backtest_futures.py --hypothesis F3     # 持仓量变化 → 基差/收益联合演变
 
 定位（用户定稿）：状态度量与历史演变分布刻画，不做市场预测。
 输出: docs/data/F{1,2,3}_backtest_result.json（数字全部 Python 计算）。
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills" / "lib"),
     str(_ROOT / "skills"),

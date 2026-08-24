@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from etf_data import (
     ETF_TO_SW_INDUSTRY,

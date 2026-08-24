@@ -1,16 +1,9 @@
 ---
 
-
-
-
-
-
-
-
-
 name: invest-a-gap-scan
-version: "0.2.6"
+version: "0.2.7"
 description: "跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补，指数成分股池（沪深300+中证A500+科创50）触发词：缺口/跳空扫描"
+whenToUse: "缺口/跳空扫描：向上跳空缺口 + MA60 上方 + 未回补的成分股筛选"
 argument-hint: "/invest-a-gap-scan [--gap-min-pct 1.5] [--gap-min-vol-ratio 1.5]"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
@@ -22,6 +15,8 @@ metadata:
 ---
 
 # invest-a-gap-scan 跳空缺口扫描
+
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能主体操作为本地数据采集与计算（Bash/Python 引擎）；部分维度经 WebSearch/WebFetch 补充检索
 
 ## 概述
 
@@ -192,7 +187,7 @@ for gap in qualified_gaps (newest first):
 
 ```
 ========================================================================
-  invest-a-gap-scan v0.2.6 -- 跳空缺口扫描
+  invest-a-gap-scan v0.2.7 -- 跳空缺口扫描
 ========================================================================
 池构成: 沪深300(300) + 中证A500(500) + 科创50(50) -> 去重 478 只
 数据源: baostock (前复权 adjustflag=2) (前复权)

@@ -1,8 +1,9 @@
 ---
 
 name: invest-a-stock
-version: "0.2.6"
+version: "0.2.7"
 description: "A股多因子交叉验证的结构化投研助手 — 数据采集 + 学术级引用，产出带来源追溯的 Markdown 研究备忘录。研究工具，非决策工具。触发词：个股投研/估值/财报"
+whenToUse: "个股投研/估值/财报类问题：单个 A 股标的的九模块研究（公司、财务、估值、资金、技术状态、事件与风险）"
 argument-hint: "/invest-a-stock 600176 | /invest-a-stock 600176 --deep | /invest-a-stock 600176 --intent game_theory"
 allowed-tools: Bash, Read, Write, WebSearch, WebFetch
 user-invocable: true
@@ -16,6 +17,8 @@ metadata:
 ---
 
 # invest-a-stock 投研助手
+
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能主体操作为本地数据采集与计算（Bash/Python 引擎）；新闻、研报与政策证据检索经 WebSearch/WebFetch 补充（平台不可用时标注数据缺口）
 
 ## OUTPUT CONTRACT（LAWs）
 

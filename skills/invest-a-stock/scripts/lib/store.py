@@ -12,6 +12,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -51,11 +52,7 @@ def _connection() -> Iterator[sqlite3.Connection]:
         _safe_close(c)
 
 
-def init_db() -> None:
-    with _connection() as c:
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA synchronous=NORMAL")
-        c.executescript("""
+_SCHEMA_DDL = """
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')));
             CREATE TABLE IF NOT EXISTS collections (
@@ -182,41 +179,46 @@ def init_db() -> None:
                 PRIMARY KEY (date, symbol)
             );
             CREATE INDEX IF NOT EXISTS idx_futures_daily_symbol ON futures_daily(symbol);
-        """)
-        # v0.2.2 迁移：为已有表添加北向资金列
-        for col, col_type in [
-            ("northbound_net_inflow", "REAL"),
-            ("northbound_direction", "TEXT"),
-            ("northbound_source", "TEXT"),
-        ]:
-            try:
-                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" in str(e).lower():
-                    pass  # 列已存在
-                else:
-                    raise
-        # v0.2.6 迁移：futures 资金面维度（F 系列）
-        for col, col_type in [
-            ("futures_basis_pct", "REAL"),
-            ("futures_oi_change_pct", "REAL"),
-        ]:
-            try:
-                c.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" in str(e).lower():
-                    pass  # 列已存在
-                else:
-                    raise
-        # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
-        # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
-        try:
-            c.execute("ALTER TABLE collections ADD COLUMN kind TEXT NOT NULL DEFAULT 'collect'")
-        except sqlite3.OperationalError as e:
-            if "duplicate column" in str(e).lower():
-                pass  # 列已存在
-            else:
-                raise
+"""
+
+
+def _add_column_if_missing(c: sqlite3.Connection, table: str, col: str, col_type: str) -> None:
+    """ALTER ADD COLUMN，duplicate column 幂等跳过（其余异常原样上抛）。"""
+    try:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" in str(e).lower():
+            pass  # 列已存在
+        else:
+            raise
+
+
+def _apply_migrations(c: sqlite3.Connection) -> None:
+    """历史 schema 迁移（v0.2.2/v0.2.4/v0.2.6），duplicate-column 守卫幂等。"""
+    # v0.2.2 迁移：为已有表添加北向资金列
+    for col, col_type in [
+        ("northbound_net_inflow", "REAL"),
+        ("northbound_direction", "TEXT"),
+        ("northbound_source", "TEXT"),
+    ]:
+        _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.2.6 迁移：futures 资金面维度（F 系列）
+    for col, col_type in [
+        ("futures_basis_pct", "REAL"),
+        ("futures_oi_change_pct", "REAL"),
+    ]:
+        _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
+    # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
+    _add_column_if_missing(c, "collections", "kind", "TEXT NOT NULL DEFAULT 'collect'")
+
+
+def init_db() -> None:
+    with _connection() as c:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
+        c.executescript(_SCHEMA_DDL)
+        _apply_migrations(c)
         row = c.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
         if not row or not row["v"]:
             c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -266,6 +268,47 @@ def save_collection(result: dict[str, Any], kind: str = "collect") -> int:
         return cid
     finally:
         _safe_close(c)
+
+
+# P2-1 v0.2.7: 同会话时间窗口。原实现只跳过 fetched_at 全等行——微秒精度
+# 下同会话 collect/report 恒不相等，31 秒前的快照被当「上次调研」
+# （batch-review P2-1）。fetched_at 距今 < 10 分钟视为同会话。
+# 窗宽权衡（code-review 第五轮）：60 分钟把 09:05/09:31 两次独立会话误并入
+# 「至少需要 2 次采集」假报；10 分钟保留重试级重复（秒~分钟）丢弃，跨越
+# 10 分钟的两次采集视为真实间隔会话。
+SAME_SESSION_WINDOW_MINUTES = 10
+
+
+def _parse_fetched_at(raw: Any) -> datetime | None:
+    """解析 fetched_at ISO 串 → aware UTC；失败返回 None。
+
+    兼容历史变体：'Z' 后缀 / '+HH:MM' 偏移 / naive（按 UTC 假定——存量
+    数据全由 _assemble_result 以 UTC 生成，与 shared_dates.fmt_fetched_at
+    同一不变式）。SQLite 中 fetched_at 是字符串列，时间比较须在 Python 侧。
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
+    """fetched_at 距今是否处于同会话窗口；解析失败 → False（保守保留不跳过）。"""
+    dt = _parse_fetched_at(ts)
+    if dt is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - dt) < timedelta(minutes=SAME_SESSION_WINDOW_MINUTES)
 
 
 def list_collections(limit: int = 20, symbol: str | None = None) -> list[dict]:
@@ -405,28 +448,68 @@ def get_latest_two(symbol: str) -> tuple[dict, dict] | None:
     自我比较问题在回退路径复现，code-review 第三轮）；须到第二次
     collect 会话才有配对。
 
+    v0.2.7 P2-1：行序基础上再按 60 分钟同会话窗口过滤——同会话多次
+    collect（31 秒间隔）也会被配对，过滤后回到「上次调研会话」语义。
+    P2-1 修正（code-review 第四轮）：窗口锚定最新行而非 now()——锚定 now()
+    时「采集后立即 diff」会把最新快照自身排除（配对退化/None），见函数内注释。
+
     Returns:
         (older, newer) tuple，仅 1 条记录时返回 None。
     """
     init_db()
     c = _conn()
     try:
-        rows = c.execute(
-            "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 2",
+        # 两阶段查询（code-review 第五轮）：先按轻量列（id/fetched_at）过滤
+        # 窗口——LIMIT 200 防窗口内密集行被 50 条截断；窗内只剩 ≤2 行后
+        # 才按 id 取 raw_json BLOB（原实现 LIMIT 50 × 全量 BLOB 反序列化）。
+        meta = c.execute(
+            "SELECT id, fetched_at FROM collections "
+            "WHERE symbol=? AND kind='collect' ORDER BY fetched_at DESC LIMIT 200",
             (symbol,)).fetchall()
-        if len(rows) == 0:
+        if len(meta) == 0:
             # 旧库/纯 report 用户兼容：回退全部 kind（仅限无 collect 行，
             # 1 条 collect + 同会话 report 混排会复现自我比较问题）
-            rows = c.execute(
-                "SELECT id, symbol, name, fetched_at, raw_json FROM collections "
-                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 2",
+            meta = c.execute(
+                "SELECT id, fetched_at FROM collections "
+                "WHERE symbol=? ORDER BY fetched_at DESC LIMIT 200",
                 (symbol,)).fetchall()
-        if len(rows) < 2:
+        # 窗口锚定最新行而非 datetime.now()（code-review 第四轮修正）：
+        # 锚定 now() 时，「采集后立即 diff」会把最新快照自身排除 → 配对退化或
+        # None（实测场景：Tue 09:05 采集、09:06 diff，Tue 行被排 → cmd_diff
+        # 报「至少需要 2 次采集」，尽管已有 2 次跨会话采集）。锚定最新行仅剔除
+        # 其 10 分钟前的同会话重复行（同会话多次 collect 只留最后一条），
+        # 最新行恒为 newer 侧。
+        if meta:
+            anchor = _parse_fetched_at(meta[0]["fetched_at"])
+        else:
+            anchor = None
+        if anchor is None:
+            if meta:
+                # 解析失败不静默：与 _parse_fetched_at 其它消费方一致，守卫
+                # 失效必须有日志（fetch 时间形态异常 = 数据层问题）
+                logger.warning(
+                    "get_latest_two(%s): 最新行 fetched_at 无法解析（%r），窗口过滤跳过",
+                    symbol, meta[0]["fetched_at"])
+            room = meta
+        else:
+            room = [meta[0]]
+            for r in meta[1:]:
+                dt_r = _parse_fetched_at(r["fetched_at"])
+                if dt_r is None or (anchor - dt_r) >= timedelta(minutes=SAME_SESSION_WINDOW_MINUTES):
+                    room.append(r)
+        if len(room) < 2:
             return None
-        newer = dict(rows[0])
-        older = dict(rows[1])
+
+        def _fetch_full(rid: int) -> dict | None:
+            row = c.execute("SELECT * FROM collections WHERE id=?", (rid,)).fetchone()
+            return dict(row) if row is not None else None
+
+        newer = _fetch_full(room[0]["id"])
+        older = _fetch_full(room[1]["id"])
         for d in (newer, older):
+            if d is None:
+                logger.warning("get_latest_two(%s): row vanished between queries", symbol)
+                return None
             raw = d.get("raw_json")
             if isinstance(raw, str):
                 try:
@@ -711,16 +794,21 @@ def format_key_diff_markdown_lines(key_diff: dict) -> list[str]:
 def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
     """对比当前采集与 store 中最新快照的关键字段变化（供报告模块 1 使用）。
 
-    跳过 fetched_at 与当前采集相同的行（同会话刚写入的 collect 行）——
-    否则「相对上次调研变化」比较的是几分钟前的同会话快照，恒无变化
-    （review #9 第二轮）。fetched_at 精度为秒，跨会话不相等。
+    跳过 fetched_at 距今 10 分钟内的行（同会话窗口）——否则「相对上次调研
+    变化」比较的是几分钟前的同会话快照，恒无变化（review #9 第二轮残留：
+    原实现只跳过 fetched_at 全等行，微秒精度下同会话两次采集恒不相等）。
+    另一路跳过：fetched_at 与 current 全等（--resume 恢复的就是最新 stored
+    行，仅靠窗口守卫时该行陈旧到窗口外 → 自比较成幻影「无显著变化」，
+    code-review 第五轮恢复全等跳过）。
     """
-    cur_ts = str(current.get("fetched_at", ""))
     rows = list_collections(limit=20, symbol=symbol)
     prev = None
+    cur_at = current.get("fetched_at") if isinstance(current, dict) else None
     for row in rows:
-        if str(row.get("fetched_at", "")) == cur_ts:
-            continue  # 同会话行
+        if cur_at is not None and row.get("fetched_at") == cur_at:
+            continue  # 当前快照自身（--resume 恢复行的自比较防御）
+        if _is_same_session(row.get("fetched_at")):
+            continue  # 同会话行（10 分钟窗口）
         prev = get_collection(row["id"])
         if prev:
             break
@@ -911,27 +999,6 @@ def list_valuations(symbol: str | None = None, limit: int = 20) -> list[dict]:
         _safe_close(c)
 
 
-def get_valuation(valuation_id: int) -> dict | None:
-    """获取单条估值记录（含完整 result_json）。"""
-    init_db()
-    c = _conn()
-    try:
-        row = c.execute(
-            "SELECT * FROM valuations WHERE id=?", (valuation_id,)
-        ).fetchone()
-        if row is None:
-            return None
-        d = dict(row)
-        if d.get("result_json"):
-            try:
-                d["result"] = json.loads(d["result_json"])
-            except (json.JSONDecodeError, TypeError):
-                d["result"] = None
-        return d
-    finally:
-        _safe_close(c)
-
-
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
     """递归对比两个维度的 data，返回变化列表。"""
     changes: list[dict] = []
@@ -1035,15 +1102,18 @@ def _index_by_date(data: list[dict]) -> dict[str, dict]:
 
 # ---- v0.1.9: thesis tracker ----
 
+# E4 (v0.2.7): invalidated_at / triggered_at 为 CLI --invalidate / --trigger-redline
+# 写入时的日期戳（YYYY-MM-DD，上海口径），存放于 JSON 结构内（schema 无独立列）。
+# 存量数据可能缺该字段，读取方必须 .get() 防御，展示为「日期未记录」。
 _DEFAULT_ASSUMPTIONS = [
-    {"id": "a1", "statement": "盈利增速可持续", "confidence": 0.7, "last_check_date": None, "valid": True},
-    {"id": "a2", "statement": "行业景气维持", "confidence": 0.6, "last_check_date": None, "valid": True},
-    {"id": "a3", "statement": "估值溢价有基本面支撑", "confidence": 0.5, "last_check_date": None, "valid": True},
+    {"id": "a1", "statement": "盈利增速可持续", "confidence": 0.7, "last_check_date": None, "valid": True, "invalidated_at": None},
+    {"id": "a2", "statement": "行业景气维持", "confidence": 0.6, "last_check_date": None, "valid": True, "invalidated_at": None},
+    {"id": "a3", "statement": "估值溢价有基本面支撑", "confidence": 0.5, "last_check_date": None, "valid": True, "invalidated_at": None},
 ]
 
 _DEFAULT_RED_LINES = [
-    {"id": "r1", "condition": "单季营收同比 < -10%", "triggered": False},
-    {"id": "r2", "condition": "毛利率同比降 > 5pp", "triggered": False},
+    {"id": "r1", "condition": "单季营收同比 < -10%", "triggered": False, "triggered_at": None},
+    {"id": "r2", "condition": "毛利率同比降 > 5pp", "triggered": False, "triggered_at": None},
 ]
 
 

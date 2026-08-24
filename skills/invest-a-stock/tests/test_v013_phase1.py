@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from stock_testutil import FORBIDDEN_SIGNAL_WORDS
 from fixtures.collections import collection_v2_minimal, make_kline_rows

@@ -5,10 +5,25 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from lib.nums import safe_float
+from lib.nums import coalesce_field, safe_float
 
 # normalize_end_date 已提升至 skills/lib/dates.py（共用库提升），此处 re-export 保持 BC
 from .shared_dates import normalize_end_date  # noqa: E402, F401
+
+# --- C5 v0.2.7: 语义常量（全库统一，详见 host-docs python-code-review-checklist 任务 5）---
+
+# 毛利率字段优先级：grossprofit_margin（tushare 真名）→ gross_margin →
+# gross_profit_margin（拼错旧键，兜底兼容老快照）。全库唯一书面裁决见
+# render_markdown/_concise.py 注释；数据生产者（collector/_orchestrate.py
+# _peer_metrics_from_fina）恒同写前两 key，统一优先级不改变任何输出。
+GROSS_MARGIN_FIELDS = ("grossprofit_margin", "gross_margin", "gross_profit_margin")
+
+# OCF/NP 覆盖比判定阈值：EXCELLENT/GOOD/WEAK 为 _conclude_cash_flow_quality
+# 分级边界；ALERT 为 concise 摘要的二元关注告警（非分级边界，不并入梯级）。
+OCF_COVERAGE_EXCELLENT = 1.0
+OCF_COVERAGE_GOOD = 0.8
+OCF_COVERAGE_WEAK = 0.5
+OCF_COVERAGE_ALERT = 0.6
 
 
 def parse_end_date(raw: Any) -> date | None:
@@ -53,7 +68,7 @@ def gross_margin_annual_series(fin_rows: list[dict]) -> list[tuple[str, float]]:
     by_year: dict[str, float] = {}
     for r in fin_rows:
         y = normalize_end_date(str(r.get("end_date", "")))[:4]
-        gm = safe_float(r.get("grossprofit_margin") or r.get("gross_margin"))
+        gm = coalesce_field(r, *GROSS_MARGIN_FIELDS)
         if y and gm is not None:
             by_year[y] = gm
     return sorted(by_year.items())

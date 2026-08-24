@@ -3,7 +3,7 @@
 skills/lib/references/backtest_prereg/H6_预注册.md）。
 
 用法:
-  uv run python scripts/backtest_h6.py                # 输出 docs/data/H6_backtest_result.json
+  uv run python scripts/archive/backtest_h6.py                # 输出 docs/data/H6_backtest_result.json
 
 样本: market_daily 全市场随机抽样 800 只（seed=42）+ 沪深300 全成分（重点池代理）。
 事件: ① MA20 日内穿越 ② BOLL 下轨触及 ③ 近 60 日向上缺口首次回探；
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills" / "lib"),
     str(_ROOT / "skills"),

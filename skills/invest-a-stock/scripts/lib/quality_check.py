@@ -6,7 +6,7 @@ from typing import Any
 
 from .financials import normalize_end_date
 from .industry import get_quality_overrides, get_sector_group
-from .nums import coalesce_field, safe_float
+from .nums import ONE_PER_YI, coalesce_field, safe_float
 from .risk_scanner import ocf_np_divergence_flag
 from .scoring import _score_roic_trend
 from .valuation import extract_financial_rows
@@ -113,7 +113,7 @@ def _metric_fcf_5y(rows: list[dict]) -> dict[str, Any]:
             "detail": f"无足够年度数据（n_cashflow_act 为累计口径，需 ≥2 个年报期去重求和，现有 {len(totals)} 期）",
         }
     total = sum(totals)
-    total_yi = total / 1e8 if abs(total) > 1e6 else total
+    total_yi = total / ONE_PER_YI if abs(total) > 1e6 else total
     fail = total_yi < 0
     return {
         "id": 2, "name": "累计 FCF (5年)", "value": round(total_yi, 2),

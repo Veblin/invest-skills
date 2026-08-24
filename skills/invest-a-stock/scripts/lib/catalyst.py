@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
+from .nums import ONE_PER_YI
 from .shared_dates import parse_date as _parse_date, shanghai_now as _shanghai_now
 
 logger = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[Ca
 
             if today <= event_date <= cutoff:
                 shares = row.get("解禁数量") or 0
-                shares_yi = float(shares) / 1e8 if shares else 0
+                shares_yi = float(shares) / ONE_PER_YI if shares else 0
                 holder_count = _safe_int(row.get("解禁股东数", 0))
                 holder_label = f"{holder_count} 个股东" if holder_count is not None else "股东数不可得"
                 stock_type = row.get("限售股类型", "")

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from lib.events import (
     attach_events,

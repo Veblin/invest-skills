@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from lib.financials import find_yoy_row
-from lib.nums import coalesce_field, safe_float
+from lib.nums import ONE_PER_YI, coalesce_field, safe_float
 from lib.technical import compute, rsi_series, sort_kline_asc
 
 
@@ -25,10 +25,6 @@ def _fin(rows: list[dict]) -> list[dict]:
 
 def _ocf(row: dict) -> float | None:
     return coalesce_field(row, "n_cashflow_act", "ocf")
-
-
-def _gross_margin(row: dict) -> float | None:
-    return coalesce_field(row, "grossprofit_margin", "gross_margin")
 
 
 def _signal(
@@ -351,7 +347,7 @@ def scan_market_risks(
         nb_trig = nb_v < -500_000_000
         signals.append(_signal("northbound_outflow", "北向持续流出", "market",
                                  triggered=nb_trig, severity="低",
-                                 detail=f"近 10 日北向净额 {nb_v / 1e8:.2f} 亿元"
+                                 detail=f"近 10 日北向净额 {nb_v / ONE_PER_YI:.2f} 亿元"
                                  + ("（净流出超 5 亿）" if nb_trig else ""), auto=True))
     else:
         signals.append(_signal("northbound_outflow", "北向持续流出", "market",

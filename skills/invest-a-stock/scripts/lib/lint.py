@@ -488,13 +488,20 @@ def print_results(
     filename: str,
     findings: list[LintFinding],
     fail_on: str = "error",
-    file=sys.stdout,
+    file=None,
 ) -> int:
     """打印扫描结果并返回退出码。
+
+    ``file`` 默认 None 在调用时取 sys.stdout（而非定义时绑定）：本模块可能在
+    pytest capsys 激活期间被首次导入（如 test_cli_dispatch 首个用例 import
+    invest → _HAS_LINT 检查触发本模块加载），定义时绑定会捕获 capsys 的临时流，
+    该流在用例 teardown 后关闭 → 后续调用写已关闭流（full-suite 顺序性失败）。
 
     Returns:
         0 = 未达到失败阈值，1 = 存在达到阈值的发现
     """
+    if file is None:
+        file = sys.stdout
     output = format_results(filename, findings)
     print(output, file=file)
 

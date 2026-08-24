@@ -19,6 +19,12 @@ CODE = Path("/Users/veblin/Study/claude-bigA-financial/code")
 sys.path.insert(0, str(CODE / "skills/invest-a-stock/scripts"))   # lib 包 = invest-a-stock
 from lib import store as store_mod
 store_mod._db_override = Path(os.environ["SF_VERIFY_DB"])
+# P0-2 自检：override 未生效必须立即失败——静默写真实库曾造成
+# collections 记录被外部进程删除/污染（2026-08-23 现场：session 内
+# #48/#53/#54 消失，总行数 55→52）。
+assert store_mod._get_path() == Path(os.environ["SF_VERIFY_DB"]), (
+    "store override 未生效，禁止继续（会写真实 research.db）"
+)
 sys.argv = ["etf.py"] + sys.argv[1:]
 runpy.run_path(str(CODE / "skills/invest-a-etf/scripts/etf.py"), run_name="__main__")
 ```

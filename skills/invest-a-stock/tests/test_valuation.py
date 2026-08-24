@@ -966,3 +966,252 @@ class TestDualEngineParity:
         result = calc_historical_percentile(rows)
         assert result["pe_neg_pct"] == pytest.approx(0.4)
         assert any("仅作位置参考" in w for w in result["warnings"])
+
+
+class TestTencentQuoteFallback:
+    """v0.2.7：_get_quote_tencent 收敛至 skills/lib/quote_tencent 后契约回归。
+
+    返回键集与失败契约（{"price": None, "source": "failed: tencent", ...}）
+    保持逐字不变；路由/解析/单位换算由共享模块测试覆盖。
+    """
+
+    def test_parses_fields_and_maps_keys(self, monkeypatch):
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        p = [""] * 50
+        p[3] = "18.52"      # 价格
+        p[32] = "-1.23"     # 涨跌幅
+        p[39] = "25.1"      # 市盈率（TTM）
+        p[45] = "952.734"   # 总市值（亿元）
+        p[46] = "3.05"      # 市净率
+        payload = 'v_sh600519="' + "~".join(p) + '"'
+
+        captured: dict = {}
+
+        class _FakeResp:
+            status_code = 200
+            text = payload
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                captured["url"] = url
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = _get_quote_tencent("600519")
+        assert captured["url"] == "http://qt.gtimg.cn/q=sh600519"
+        assert out["price"] == 18.52
+        assert out["change_pct"] == -1.23
+        assert out["pe_dynamic"] == 25.1
+        assert out["total_mv_yi"] == pytest.approx(952.73)  # round 2 位（旧实现保留）
+        assert out["pb"] == 3.05
+        assert out["source"] == "tencent.qt.gtimg.cn"
+
+    def test_network_failure_contract_unchanged(self, monkeypatch):
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        def _boom():
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", _boom)
+        out = _get_quote_tencent("600519")
+        assert out["price"] is None
+        assert out["source"] == "failed: tencent"
+        assert "connection refused" in out.get("error", "")
+
+    def test_invalid_payload_contract(self, monkeypatch):
+        """字段不足/价格缺失 → 与网络失败同契约（error dict，不抛异常）。"""
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        class _FakeResp:
+            status_code = 200
+            text = "v_sh600519=no~tilde~here"
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = _get_quote_tencent("600519")
+        assert out["price"] is None
+        assert out["source"] == "failed: tencent"
+
+    def test_bj_symbol_failure_contract(self, monkeypatch):
+        """北交所代码（4/8/920）→ 不请求，直接失败契约（不误路由）。"""
+        from valuation_calc import _get_quote_tencent
+        import lib.proxy as _proxy
+
+        requested: list[str] = []
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                requested.append(url)
+                raise AssertionError("北交所代码不应发起腾讯请求")
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = _get_quote_tencent("920001")
+        assert out["price"] is None
+        assert out["source"] == "failed: tencent"
+        assert requested == []
+
+    def test_tencent_used_when_akshare_fails(self, monkeypatch):
+        """get_quote_ak 的 akshare 失败 → 腾讯兜底路径保持接通。"""
+        import akshare as ak
+        from valuation_calc import get_quote_ak
+        import lib.proxy as _proxy
+
+        monkeypatch.setattr(ak, "stock_zh_a_spot_em", lambda: (_ for _ in ()).throw(RuntimeError("ak failed")))
+
+        p = [""] * 50
+        p[3] = "18.52"
+        p[32] = "0.5"
+        payload = 'v_sh600519="' + "~".join(p) + '"'
+
+        class _FakeResp:
+            status_code = 200
+            text = payload
+
+        class _FakeSess:
+            def get(self, url, timeout):
+                return _FakeResp()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeSess()
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(_proxy, "no_proxy_session", lambda: _FakeCtx())
+        out = get_quote_ak("600519")
+        assert out["source"] == "tencent.qt.gtimg.cn"
+        assert out["price"] == 18.52
+
+
+class TestFormatSteadyBlock:
+    """_format_steady_block：round 塌 0.0 时不误判、不除零（review #5）。"""
+
+    @staticmethod
+    def _steady(mv_vs_steady):
+        return {
+            "steady": {
+                "available": True,
+                "period": "2019-2025",
+                "n_years": 7,
+                "method": "median",
+                "steady_earnings": 3.0e8,
+                "min": 1.0e8,
+                "max": 5.0e8,
+            },
+            "band": None,
+            "mv_vs_steady": mv_vs_steady,
+        }
+
+    def test_band_collapsed_to_zero_not_mislabelled(self):
+        """稳态带亿元口径舍入为 0.0 → 不误判「处于稳态市值带内」。"""
+        from valuation_calc import _format_steady_block
+
+        steady = self._steady({
+            "total_mv_yi": 1.0,
+            "steady_mv_low_yi": 0.0,
+            "steady_mv_mid_yi": 0.0,
+            "steady_mv_high_yi": 0.0,
+        })
+        out = _format_steady_block(steady)
+        assert "处于稳态市值带内" not in out
+        assert "位置对照跳过" in out
+
+    def test_above_band_normal(self):
+        """正常带：150 亿市值 vs 上沿 100 亿 → 高于上沿 50%。"""
+        from valuation_calc import _format_steady_block
+
+        steady = self._steady({
+            "total_mv_yi": 150.0,
+            "steady_mv_low_yi": 50.0,
+            "steady_mv_mid_yi": 75.0,
+            "steady_mv_high_yi": 100.0,
+        })
+        out = _format_steady_block(steady)
+        assert "高于稳态上沿 50%" in out
+
+    def test_below_band_normal(self):
+        """正常带：40 亿市值 vs 下沿 50 亿 → 低于下沿 25%。"""
+        from valuation_calc import _format_steady_block
+
+        steady = self._steady({
+            "total_mv_yi": 40.0,
+            "steady_mv_low_yi": 50.0,
+            "steady_mv_mid_yi": 75.0,
+            "steady_mv_high_yi": 100.0,
+        })
+        out = _format_steady_block(steady)
+        assert "低于稳态下沿 25%" in out
+
+    def test_within_band(self):
+        """正常带：带内市值 → 处于稳态市值带内。"""
+        from valuation_calc import _format_steady_block
+
+        steady = self._steady({
+            "total_mv_yi": 75.0,
+            "steady_mv_low_yi": 50.0,
+            "steady_mv_mid_yi": 75.0,
+            "steady_mv_high_yi": 100.0,
+        })
+        out = _format_steady_block(steady)
+        assert "处于稳态市值带内" in out
+
+
+class TestFormatEvEbitdaBlock:
+    """_format_ev_ebitda_block：EBITDA=0 时不渲染 Nonex（review #4）。"""
+
+    @staticmethod
+    def _ev(ev_ebitda):
+        return {
+            "available": True,
+            "bridge": {"mv_yi": 100.0, "interest_debt_yi": 20.0,
+                       "cash_yi": 10.0, "ev_yi": 110.0},
+            "debt_label": "有息负债",
+            "ebitda_yi": 22.0 if ev_ebitda is not None else 0.0,
+            "ebitda_period": "2025",
+            "ev_ebitda": ev_ebitda,
+        }
+
+    def test_ebitda_zero_not_nonex(self):
+        """available=True 但 EBITDA=0（ratio 无定义）→ 不渲染 Nonex。"""
+        from valuation_calc import _format_ev_ebitda_block
+
+        out = _format_ev_ebitda_block(self._ev(None))
+        assert "Nonex" not in out
+        assert "EV/EBITDA 不适用" in out
+        assert "EBITDA 为 0" in out
+
+    def test_normal_ratio(self):
+        """正常路径：EV/EBITDA = 5.0x。"""
+        from valuation_calc import _format_ev_ebitda_block
+
+        out = _format_ev_ebitda_block(self._ev(5.0))
+        assert "EV/EBITDA = 5.0x" in out

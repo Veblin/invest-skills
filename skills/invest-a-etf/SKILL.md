@@ -1,8 +1,9 @@
 ---
 
 name: invest-a-etf
-version: "0.2.6"
+version: "0.2.7"
 description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
+whenToUse: "ETF/指数基金类问题：指数估值、折溢价、AUM、跟踪质量、对冲覆盖的结构化研究"
 argument-hint: "/invest-a-etf 563300 | /invest-a-etf 515790"
 allowed-tools: Bash, Read, Write, WebSearch
 user-invocable: true
@@ -12,6 +13,8 @@ metadata:
 ---
 
 # invest-a-etf — ETF 研究助手
+
+> **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能主体操作为本地数据采集与计算（Bash/Python 引擎）；部分维度经 WebSearch 补充检索
 
 ## 概述
 

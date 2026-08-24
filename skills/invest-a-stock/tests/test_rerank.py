@@ -1,19 +1,9 @@
 """Tests for deterministic rerank credibility scoring (R-09)."""
-import pytest
 from lib.rerank import (
     score_evidence,
     score_from_dimension_meta,
     score_all_dimensions,
     to_credibility_label,
-    BASE_SCORE,
-    CROSS_SOURCE_MATCH,
-    DATA_CONFLICT,
-    PAID_SOURCE,
-    SINGLE_SOURCE,
-    WEBSEARCH_SOURCE,
-    RECENT_DATA,
-    OUTDATED_PER_YEAR,
-    MULTI_SOURCE_BONUS,
 )
 
 

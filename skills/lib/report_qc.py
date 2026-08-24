@@ -8,7 +8,8 @@
 分层：
     lint      全部      措辞合规（复用 invest-a-stock lib/lint.py + YAML 规则）
     structure 全部      报告类型特定结构校验（章节/标签存在性）
-    derived   etf only  10 个 derived 字段合理性（值域 + 小数位）
+    derived   etf+stock 16 个 derived 字段合理性（值域 + 小数位）；stock 报告
+                       仅当引用衍生字段（含 v0.2.7 E1 板块同步性 6 字段）时启用
     audit     stock     数据点抽取 + 偏差判定（--verify-data）
     quality   stock     7 指标质地检查（--verify-data）
     rigor     stock     市值/估值/跨源验算（--verify-data）
@@ -170,9 +171,9 @@ def _check_structure(text: str, report_type: str) -> LayerResult:
     return layer
 
 
-# ── ETF derived 字段校验 ─────────────────────────────────────────────────
+# ── ETF / 板块同步性 derived 字段校验 ─────────────────────────────────────
 
-# 10 个引擎 derived 字段的值域（宽松，避免误报；主要抓数量级错误/全零/位数异常）
+# 16 个引擎 derived 字段的值域（宽松，避免误报；主要抓数量级错误/全零/位数异常）
 _ETF_DERIVED_RANGES: dict[str, tuple[float, float]] = {
     "nav_vs_ma20_pct": (-60.0, 60.0),
     "nav_vs_ma60_pct": (-60.0, 60.0),
@@ -185,19 +186,31 @@ _ETF_DERIVED_RANGES: dict[str, tuple[float, float]] = {
     # v0.2.6 D 类字段（compute_history_stats 输出）：年内低点偏离可高可负、ATR 占比上限宽松
     "dist_to_ytd_low_pct": (-100.0, 500.0),
     "atr14_pct": (0.0, 60.0),
+    # v0.2.7 E1 板块同步性引擎（sector_sync.py）6 字段：
+    # β 对板块日收益（A 股涨跌停 ±20% 上限、小票可更宽）；R² 与特质方差占比 ∈ [0,1]；
+    # 板块内离散度为当日横截面收益标准差（%）；CSAD γ2 按小数收益回归（CCK 量级
+    # −0.3~−5，放宽防误报）；下行相关差为两相关系数之差（各 ∈ (−1,1)）。
+    "sector_beta_60d": (-5.0, 10.0),
+    "sector_r2_60d": (0.0, 1.0),
+    "idio_var_share": (0.0, 1.0),
+    "sector_dispersion": (0.0, 20.0),
+    "csad_gamma2": (-20.0, 20.0),
+    "downside_corr_gap": (-2.0, 2.0),
 }
 
 # 报告文本中形如 "nav_vs_ma20_pct: -15.36" 或 "nav_vs_ma20_pct: -15.36%" 的引用
 _DERIVED_PATTERN = re.compile(
     r"(nav_vs_ma20_pct|nav_vs_ma60_pct|nav_vs_boll_mid_pct|boll_position_pct|"
     r"nav_to_boll_lower_pct|nav_to_boll_upper_pct|boll_bandwidth_pct|daily_volatility_pct|"
-    r"dist_to_ytd_low_pct|atr14_pct)"
+    r"dist_to_ytd_low_pct|atr14_pct|"
+    r"sector_beta_60d|sector_r2_60d|idio_var_share|sector_dispersion|"
+    r"csad_gamma2|downside_corr_gap)"
     r"[：:]\s*([+-]?\d+\.?\d*)%?"
 )
 
 # 中文标签 → 字段名（ETF 报告模板表格行用 "| NAV vs MA20 偏离 | -15.36% |" 形式）。
 # 模板措辞存在漂移变体，均收录：无"偏离"（515880 式）、"NAV 距 BOLL 下轨"
-# （588000 式，带 "NAV " 前缀）。
+# （588000 式，带 "NAV " 前缀）。板块同步性标签（v0.2.7 E1）为 stock 报告模板。
 _DERIVED_CN_LABELS: dict[str, str] = {
     "NAV vs MA20 偏离": "nav_vs_ma20_pct",
     "NAV vs MA60 偏离": "nav_vs_ma60_pct",
@@ -214,6 +227,12 @@ _DERIVED_CN_LABELS: dict[str, str] = {
     "日均波动率": "daily_volatility_pct",
     "距年内低点": "dist_to_ytd_low_pct",
     "ATR14 占比": "atr14_pct",
+    "板块 Beta(60日)": "sector_beta_60d",
+    "板块 R²(60日)": "sector_r2_60d",
+    "特质方差占比": "idio_var_share",
+    "板块内离散度": "sector_dispersion",
+    "CSAD γ2": "csad_gamma2",
+    "下行相关差": "downside_corr_gap",
 }
 # 仅匹配表格行（以 | 开头、数值后跟 | 收尾）：衍生值只在模板表格渲染，
 # 散文中的指标名词（如 "距 BOLL 下轨仅 6.41%，BOLL 带宽 54%"）天然排除。
@@ -225,7 +244,8 @@ _DERIVED_CN_PATTERN = re.compile(
     r"NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|"
     r"NAV vs MA20|NAV vs MA60|NAV vs BOLL 中轨|"
     r"NAV 距 BOLL 下轨|NAV 距 BOLL 上轨|BOLL 位置|距 BOLL 下轨|距 BOLL 上轨|"
-    r"BOLL 带宽|日均波动率|距年内低点|ATR14 占比)"
+    r"BOLL 带宽|日均波动率|距年内低点|ATR14 占比|"
+    r"板块 Beta\(60日\)|板块 R²\(60日\)|特质方差占比|板块内离散度|CSAD γ2|下行相关差)"
     r"(?:[^|\d\-+.\n]*?\|)?[^|\d\-+.\n]*?([+-]?\d+\.?\d*)%?[^|\d\n]*?\|"
 )
 # 已知标签行检测（值可缺失）：标签命中即算「措辞正常」——
@@ -235,11 +255,13 @@ _DERIVED_CN_LABEL_ONLY = re.compile(
     r"NAV vs MA20 偏离|NAV vs MA60 偏离|NAV vs BOLL 中轨偏离|"
     r"NAV vs MA20|NAV vs MA60|NAV vs BOLL 中轨|"
     r"NAV 距 BOLL 下轨|NAV 距 BOLL 上轨|BOLL 位置|距 BOLL 下轨|距 BOLL 上轨|"
-    r"BOLL 带宽|日均波动率|距年内低点|ATR14 占比)[^|\n]*\|"
+    r"BOLL 带宽|日均波动率|距年内低点|ATR14 占比|"
+    r"板块 Beta\(60日\)|板块 R²\(60日\)|特质方差占比|板块内离散度|CSAD γ2|下行相关差)[^|\n]*\|"
 )
 # 存在性检测：表格行出现衍生指标名词（已知或未知标签）→ 用于漂移判定
 _DERIVED_CN_ROW_PRESENT = re.compile(
-    r"\|[^|\n]*(NAV vs MA|BOLL 位置|BOLL 带宽|日均波动率|距 BOLL|距年内低点|ATR14)[^|\n]*\|"
+    r"\|[^|\n]*(NAV vs MA|BOLL 位置|BOLL 带宽|日均波动率|距 BOLL|距年内低点|ATR14|"
+    r"板块 Beta|板块 R²|特质方差|板块内离散度|CSAD|下行相关)[^|\n]*\|"
 )
 
 
@@ -256,7 +278,7 @@ def _extract_derived_values(text: str) -> dict[str, str]:
 
 
 def _check_etf_derived(text: str) -> LayerResult:
-    """derived 层：ETF 报告中的 derived 字段值域合理性。"""
+    """derived 层：ETF/stock 报告中的 derived 字段值域合理性（v0.2.7 E1 板块同步性 6 字段入白名单）。"""
     layer = LayerResult(layer="derived", status="skip")
     found = _extract_derived_values(text)
     label_rows = _DERIVED_CN_LABEL_ONLY.findall(text)     # 已知标签行（含值缺失）
@@ -537,6 +559,13 @@ def qc_file(
     layers = [_run_lint_layer(path, profile, fail_on), _check_structure(text, report_type)]
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
+    elif report_type == "stock":
+        # v0.2.7 E1：stock 报告引用 derived 字段（板块同步性 6 字段等）时同样校验。
+        # 未引用时层为 skip → 不挂载（保持既有「stock 无 derived 层」行为，
+        # test_not_etf_report_skip 语义不变）。
+        derived_layer = _check_etf_derived(text)
+        if derived_layer.status != "skip":
+            layers.append(derived_layer)
     if verify_data:
         layers.extend(_run_verify_layers(path, report_type))
 
@@ -611,8 +640,12 @@ def format_qc_result(result: QCResult, *, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _print_summary(results: list[QCResult], file=sys.stdout) -> int:
+def _print_summary(results: list[QCResult], file=None) -> int:
     """打印多个结果，返回退出码（0=PASS 1=WARN 2=FAIL）。"""
+    if file is None:
+        # def-time file=sys.stdout 会在 capsys 捕获期绑定临时流（lint.py 同族
+        # 缺陷，2026-08-23 code-review #14）——调用时解析避免写已关闭流
+        file = sys.stdout
     for r in results:
         print(format_qc_result(r), file=file)
     worst = max((r.overall for r in results), default="PASS",

@@ -36,6 +36,31 @@ class TestParticipantBehaviorScan:
         text = build_participant_behavior_section({}, "600176", {}, {})
         assert "未获取到任何有效数据" in text
 
+    def test_stale_northbound_shows_staleness_note_not_net_amount(self):
+        """P0-1：北向源停更陈旧（net_sum_10d=None + staleness_note）时，
+        参与者扫描输出停更原因，不得把两年前净额标为「近10日」。"""
+        ms = {
+            "northbound": {
+                "net_sum_10d": None,
+                "days": 10,
+                "source": "tushare.hsgt_top10",
+                "stale": True,
+                "latest_trade_date": "20240816",
+                "staleness_note": (
+                    "北向个股披露源已停更：最新记录 20240816，"
+                    "距今约 24 个月，净额不可用（2024-08 起北向个股披露规则变更）"
+                ),
+            },
+            "moneyflow": {"net_sum_5d": 30_000_000, "source": "tushare.moneyflow"},
+        }
+        text = build_participant_behavior_section({}, "600176", ms, _dims())
+        assert "北向" in text
+        assert "停更" in text
+        assert "20240816" in text
+        # 陈旧数据不得以「近10日净额」形式出现
+        assert "近 10 日净额" not in text
+        assert "近10日" not in text
+
     def test_no_trading_advice_words(self):
         ms = {
             "northbound": {"net_sum_10d": -80_000_000, "days": 10, "source": "akshare"},

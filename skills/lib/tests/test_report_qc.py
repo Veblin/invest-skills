@@ -11,7 +11,6 @@ _SKILLS_LIB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
 from report_qc import (  # noqa: E402
-    QCResult,
     detect_report_type,
     format_qc_result,
     qc_directory,
@@ -344,6 +343,81 @@ class TestEtfDerived:
         p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", COMPLIANT_STOCK)
         r = qc_file(p)
         assert not any(l.layer == "derived" for l in r.layers)
+
+
+# ── derived 层（v0.2.7 E1 板块同步性 6 字段）───────────────────────────────
+
+
+class TestSectorSyncDerived:
+    def test_field_name_style_all_six(self):
+        text = "\n".join([
+            "sector_beta_60d: 1.23",
+            "sector_r2_60d: 0.81",
+            "idio_var_share: 0.19",
+            "sector_dispersion: 2.35",
+            "csad_gamma2: -1.42",
+            "downside_corr_gap: 0.08",
+        ])
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+        assert layer.findings_count == 0
+
+    def test_cn_label_rows_pass(self):
+        text = ("| 板块 Beta(60日) | 1.23 |\n"
+                "| 板块 R²(60日) | 0.81 |\n"
+                "| 特质方差占比 | 0.19 |\n"
+                "| 板块内离散度 | 2.35% |\n"
+                "| CSAD γ2 | -1.42 |\n"
+                "| 下行相关差 | 0.08 |")
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+        assert layer.findings_count == 0
+
+    def test_r2_out_of_range_warns(self):
+        # R² > 1 不可能 → 必须显式登记值域并拦截（不得靠默认域 (-1e9, 1e9) 蒙混）
+        text = "sector_r2_60d: 1.5 [来源: 引擎字段名]"
+        layer = _check_etf_derived(text)
+        assert layer.status == "warn"
+        assert any(d["id"] == "derived-sector_r2_60d" for d in layer.details)
+
+    def test_zero_values_valid(self):
+        # D1 相关：0.0 是合法值（β 可为 0、特质方差占比可为 0）
+        text = "sector_beta_60d: 0.00 [来源: 引擎字段名]"
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+
+    def test_csad_gamma2_negative_pass(self):
+        text = "csad_gamma2: -3.14 [来源: 引擎字段名]"
+        layer = _check_etf_derived(text)
+        assert layer.status == "pass"
+
+    def test_stock_report_with_sector_fields_checked(self, tmp_path: Path):
+        # 验收 #3：stock 报告引用板块同步性字段 → derived lint 识别并校验
+        p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md",
+                   COMPLIANT_STOCK + "| 板块 Beta(60日) | 1.23 |\n")
+        r = qc_file(p)
+        derived = next(l for l in r.layers if l.layer == "derived")
+        assert derived.status == "pass"
+
+    def test_stock_report_without_sector_fields_skips(self, tmp_path: Path):
+        # stock 报告未引用衍生字段 → derived 层不挂载（既有行为不变）
+        p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md",
+                   COMPLIANT_STOCK)
+        r = qc_file(p)
+        assert not any(l.layer == "derived" for l in r.layers)
+
+    def test_unknown_sector_label_drift_warns(self):
+        # 未登记标签（如 90 日窗口变体）→ present 命中、label 不命中 → drift warn
+        text = "| 板块 Beta(90日) | 1.23 |"
+        layer = _check_etf_derived(text)
+        assert layer.status == "warn"
+        assert any(d["id"] == "derived-template-drift" for d in layer.details)
+
+    def test_known_label_empty_value_not_drift(self):
+        text = "| 下行相关差 | — |"
+        layer = _check_etf_derived(text)
+        assert layer.status == "skip"
+        assert layer.findings_count == 0
 
 
 # ── 统一判定 ──────────────────────────────────────────────────────────────

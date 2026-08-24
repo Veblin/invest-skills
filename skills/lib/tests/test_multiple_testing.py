@@ -93,6 +93,18 @@ class TestBhFdr:
         assert r["q_values"][0] is None
         assert r["n_rejected"] == 1
 
+    def test_rejection_uses_monotone_q_value(self):
+        """第五轮回归：判定用单调化 q 值（与 q_values 输出一致）。
+
+        [0.02, 0.033, 0.049] α=0.05——标准 BH 单调化后 q_adj 为
+        [0.049, 0.049, 0.049]，三项全拒；旧实现用 raw q 判定时首项
+        (0.02*3/1=0.06 > 0.05) 被漏拒，拒绝集与 q_values 不一致、不再嵌套。
+        """
+        r = bh_fdr([0.02, 0.033, 0.049], alpha=0.05)
+        assert r["significant"] == [True, True, True]
+        assert r["n_rejected"] == 3
+        assert r["q_values"] == [pytest.approx(0.049) for _ in range(3)]
+
     def test_empty(self):
         r = bh_fdr([])
         assert r["significant"] == [] and r["n_rejected"] == 0

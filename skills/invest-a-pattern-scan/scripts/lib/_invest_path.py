@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_skills_lib = Path(__file__).resolve().parent.parent.parent.parent.parent / "lib"
+_skills_lib = Path(__file__).resolve().parent.parent.parent.parent / "lib"
 _s = str(_skills_lib)
 if _s not in sys.path:
     sys.path.insert(0, _s)

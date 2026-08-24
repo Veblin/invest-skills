@@ -3,7 +3,7 @@
 skills/lib/references/backtest_prereg/H1_预注册.md）。
 
 用法:
-  uv run python scripts/backtest_h1.py                # 输出 docs/data/H1_backtest_result.json
+  uv run python scripts/archive/backtest_h1.py                # 输出 docs/data/H1_backtest_result.json
 
 成分池：方案 A 申万三级成分（legulegu 直连：半导体材料 850813.SI / 设备 850818.SI；
 MLCC/PCB/机器人按 sw_index_third_info 名称匹配，失效退方案 B 人工清单）。
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from urllib.request import urlopen
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]  # C9a 归档后多一层 archive/
 for _p in (
     str(_ROOT / "skills" / "lib"),
     str(_ROOT / "skills"),

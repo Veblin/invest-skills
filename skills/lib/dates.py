@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,6 +18,8 @@ __all__ = [
     "shanghai_days_ago",
     "normalize_end_date",
     "latest_month_row",
+    "parse_utc_iso",
+    "fmt_fetched_at",
 ]
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -110,6 +112,37 @@ def normalize_end_date(ed: str) -> str:
 def shanghai_now() -> datetime:
     """当前上海时区时间（A 股工具统一时区）。"""
     return datetime.now(_SHANGHAI)
+
+
+def parse_utc_iso(raw: Any) -> datetime | None:
+    """解析 fetched_at ISO 串 → aware UTC datetime；失败返回 None。
+
+    兼容 'Z' 后缀 / '+HH:MM' 偏移 / naive（按 UTC 假定——存量数据全由
+    collector._assemble_result 以 UTC 生成，与 store._parse_fetched_at
+    同一不变式）。非 str / 空串 → None。
+    """
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def fmt_fetched_at(iso_str: Any, *, pattern: str = "%Y-%m-%d %H:%M") -> str:
+    """UTC ISO → 上海时区 'YYYY-MM-DD HH:MM (北京时间)'；解析失败回退原串截 16 字符。"""
+    dt = parse_utc_iso(iso_str)
+    if dt is None:
+        return str(iso_str)[:16] if iso_str else ""
+    return f"{dt.astimezone(_SHANGHAI).strftime(pattern)} (北京时间)"
 
 
 def shanghai_today() -> str:

@@ -115,7 +115,7 @@ def _header_v2(collection: dict, symbol: str) -> str:
     title = f"# {symbol} {name} 研究快照"
     lines = [
         title.strip(),
-        f"采集时间: {collection.get('fetched_at', '')[:19]}",
+        f"采集时间: {fmt_fetched_at(collection.get('fetched_at', ''))}",
         f"维度: {collection['summary']['available']}/{collection['summary']['total']} 有数据"
         + (f"（{collection['summary']['degraded']} 降级）" if collection['summary'].get('degraded') else ""),
         "",
@@ -251,7 +251,6 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
         return "\n".join(lines)
 
     # 判断数据来源
-    from lib.valuation import valuation_summary, valuation_window_label
     meta = _get_dim_meta(dims, "valuation")
     source = meta.get("source", "未知")
 
@@ -261,21 +260,11 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
 
     # 处理 Tushare daily_basic 序列
     if isinstance(val_data, list) and len(val_data) > 0:
-        val_sorted = sort_kline_asc(val_data)
-        pe_seq = [r.get("pe_ttm") for r in val_sorted]
-        pb_seq = [r.get("pb") for r in val_sorted]
-        ps_seq = [r.get("ps_ttm") or r.get("ps") for r in val_sorted]
-        dv = None
-        for r in reversed(val_sorted):
-            if r.get("dv_ratio") is not None:
-                dv = r.get("dv_ratio")
-                break
-
-        # 判断窗口（A 股 ~242 交易日/年，1250 ≈ 5 年）
-        window_label = valuation_window_label(len(val_sorted))
-
-        summary = valuation_summary(pe_seq, pb_seq, ps_seq=ps_seq,
-                                   dv_ratio=dv, window_label=window_label)
+        # C6 v0.2.7：数据层收敛到 canonical _v3_load_valuation_summary
+        # （与原手工代码同调 valuation_summary，仅 dv_ratio 经 _safe_num 归一；
+        # 输出逐字节不变。本函数仅 --emit html 使用，随 HTML 模板跨版本移除）
+        summary = _v3_load_valuation_summary(dims)
+        window_label = summary.get("window_label", "历史") if summary else "历史"
 
         # LAW 17: 构建含数据的标题 + 段首主旨句
         pe = summary["pe"]

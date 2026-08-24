@@ -10,7 +10,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -69,3 +68,24 @@ class TestReportDiffHistory:
 
         md = _render(s2, "600176", "concise")
         assert "相对上次调研变化" not in md
+
+    def test_diff_block_skips_same_session_snapshot(self, isolated_store):
+        """v0.2.7 P2-1：31 秒前的同会话快照不被当「上次调研」（时间窗口）。"""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        s_old = _phase4_collection("600176", (now - timedelta(days=7)).isoformat())
+        s_same = _phase4_collection(
+            "600176", (now - timedelta(seconds=31)).isoformat())
+        current = _phase4_collection(
+            "600176", (now - timedelta(seconds=10)).isoformat(), latest_roe=22.0)
+        isolated_store.save_collection(s_same)  # 同会话快照
+        isolated_store.save_collection(s_old)
+
+        md = _render(current, "600176", "full")
+        assert "相对上次调研变化" in md
+        # 对比区间起点为 7 天前会话，而非 31 秒前同会话行；渲染按 P2-2 转为
+        # 北京时间口径（code-review 第四轮收尾修正后不再打印 UTC ISO 日期）
+        from zoneinfo import ZoneInfo
+        bj_old = (now - timedelta(days=7)).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        assert bj_old in md

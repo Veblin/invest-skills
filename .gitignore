@@ -27,6 +27,9 @@ htmlcov/
 host-docs/
 .coverage
 *_review.md
+# AI code review 输出物（CI 生成，不入库）
+review.md
+review_verdict.txt
 
 # Build / release artifacts
 dist/
@@ -35,3 +38,6 @@ diagram/
 # invest.py report 
 reports/
 
+
+# v0.2.7 C14 定案：历史规划/评审稿保留本地、不随版本库分发（详见 host-docs 执行计划）
+docs/superpowers/
