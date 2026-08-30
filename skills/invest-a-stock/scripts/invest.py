@@ -321,6 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES,
                    help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
+    pr.add_argument("--analysis", default=None,
+                    help="analysis.json 路径（R-B1）；渲染期替换 [待 Claude report 阶段填充] 占位")
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(pr, with_news_pack=True)
     pr.add_argument(
@@ -702,6 +704,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    # R-B1: analysis.json 加载校验（fail-loud：校验失败 exit 2，不静默降级渲染）
+    analysis_payload: list[dict] | None = None
+    if getattr(args, "analysis", None):
+        from lib.analysis_schema import AnalysisSchemaError, load_analysis_json, validate_sections
+        try:
+            analysis_payload = load_analysis_json(Path(args.analysis))
+            errs = validate_sections(analysis_payload) if isinstance(analysis_payload, list) else ["analysis.json 顶层必须为数组"]
+            if errs:
+                raise AnalysisSchemaError("; ".join(errs[:5]))
+        except AnalysisSchemaError as exc:
+            print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
+            return 2
+        print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
     # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，渲染层标注「无行业成功因素定义」）
     try:
         from lib.render_utils import _get_dim_data, _index_dims
@@ -755,7 +770,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
         _ensure_render_ready(result, args.symbol)
         md_v2 = render.render_report_v2(result, args.symbol)
-        output = render.render_html(result, args.symbol)
+        output = render.render_html(result, args.symbol, analysis=analysis_payload)
         from lib.shared_dates import shanghai_now
         now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -780,7 +795,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
     # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
     output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
-                           attach_extras=True)
+                           attach_extras=True, analysis=analysis_payload)
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     if getattr(args, 'save_raw', False):

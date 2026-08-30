@@ -533,6 +533,28 @@ def _html_events() -> str:
 </section>'''
 
 
+def _html_analysis(analysis: list[dict]) -> str:
+    from lib.md_subset import MarkdownSubsetError, render_markdown
+
+    if not analysis:
+        return ""
+    cards = []
+    for sec in analysis:
+        try:
+            facts_html = render_markdown(sec.get("facts_md", ""))
+            ana_html = render_markdown(sec.get("analysis_md", ""))
+        except MarkdownSubsetError as exc:
+            ana_html = f'<div class="vnote">分析段 md 子集校验失败：{exc}</div>'
+            facts_html = ""
+        cards.append(
+            f'<section id="analysis-{_html_mod.escape(str(sec.get("module", "x")), quote=True)}" data-module="{_html_mod.escape(str(sec.get("module", "x")), quote=True)}">'
+            f'<div class="sh"><span class="st">{_html_mod.escape(str(sec.get("title", "分析")), quote=True)}</span>'
+            f'<span class="ss">证据：{_html_mod.escape(str(sec.get("evidence_tag", "")), quote=True)}</span></div>'
+            f'<div class="card">{facts_html}{ana_html}</div></section>'
+        )
+    return "\n".join(cards)
+
+
 # --- _html_refs ---
 def _html_refs(ref_rows_html: str) -> str:
     return f'''<section id="refs">
@@ -1002,7 +1024,8 @@ const trendLabel={trend_label_json};
 
 
 # --- render_html ---
-def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = None) -> str:
+def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = None,
+                analysis: list[dict] | None = None) -> str:
     """HTML 研究报告（新版模板）。
 
     直接构建结构化 HTML，匹配 host-docs/stock-report.html 模板样式和交互。
@@ -1012,6 +1035,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         collection: collector.collect_all() 的结果
         symbol: 股票代码（如 "600519"）
         md_text: 已弃用，保留仅为 CLI 向后兼容；HTML 仅读取 collection
+        analysis: analysis.json 段列表（R-B1），渲染为「分析」卡片段；无则跳过
     """
     del md_text  # stdout Markdown 由 invest.py 单独渲染
     dims = _index_dims(collection)
@@ -1146,6 +1170,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     research_md = _lazy_section_research_summary(collection, symbol, dims)
     research_sec = _html_research(research_md)
     events_sec = _html_events()
+    analysis_sec = _html_analysis(analysis)
     refs_sec = _html_refs(ref_rows)
     risk_banner = _html_risk_banner()
     disclaimer = _html_disclaimer()
@@ -1194,6 +1219,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 {holders_sec}
 {research_sec}
 {events_sec}
+{analysis_sec}
 {refs_sec}
 {disclaimer}
 </main>

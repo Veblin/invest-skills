@@ -108,3 +108,25 @@ class TestNorthboundNormalization:
         # no net_mf_amount → leave row alone (no invented yuan figure)
         assert out[0].get("net_mf_amount") is None
         assert out[0]["net_mf_vol"] == 100.0
+
+
+class TestAnalysisSection:
+    def test_html_analysis_sections_rendered(self):
+        from lib.render_html import render_html
+
+        analysis = [{
+            "module": "events", "title": "事件分层分析",
+            "facts_md": "近 30 日公告 3 条 [来源: akshare 公告]",
+            "analysis_md": "**观察**：回购成交价上限距现价 18%。（证据 B）",
+            "evidence_tag": "B", "position": "events",
+        }]
+        html = render_html(collection_v2_minimal(), "600176", analysis=analysis)
+        assert "事件分层分析" in html
+        assert "回购成交价上限距现价 18%" in html
+        assert "data-module=\"events\"" in html
+
+    def test_html_analysis_missing_facts_placeholder_kept(self):
+        from lib.render_html import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")  # 无 analysis
+        assert "待 Claude" in html  # 占位保留（F0-3 兜底：未填占位 qc FAIL）

@@ -2207,15 +2207,31 @@ def _mgmt_categorize_event(title: str) -> str | None:
 # --- _section_management_assessment ---
 def _section_management_assessment(
     events: list | None, holder_changes: dict, fin_list: list[dict],
+    analysis: list[dict] | None = None,
 ) -> str:
     """A-5: 管理层完整评估。
 
     合规: 仅陈述公开记录事实（决策日期/公告内容/行为统计），不推断管理层主观动机，
     不给"信赖/不信赖"二元结论。软维度（组织能力/企业文化/接班人风险）固定标注
     "[Claude report 阶段定性填充]"占位。
+
+    analysis（R-B1）: 命中 module/position == "events" 的段时，以 analysis_md
+    首行摘要替换决策时间线占位；无匹配段 → 保持 "[待 Claude report 阶段填充]"
+    （F0-3 qc 拦截未填占位）。
     """
     from lib.schema import ManagementTimelineEntry
     from lib.scoring import insider_signal, management_ability_proxy
+
+    ev_summary = ""
+    for sec in (analysis or []):
+        if not isinstance(sec, dict):
+            continue
+        if sec.get("module") == "events" or sec.get("position") == "events":
+            first_line = str(sec.get("analysis_md") or "").splitlines()
+            ev_summary = (first_line[0].strip() if first_line else "")
+            break
+    ev_cell = (f'<span data-module="events">**{ev_summary}**</span>'
+               if ev_summary else "[待 Claude report 阶段填充]")
 
     lines = ["#### 管理层完整评估（A-5）", ""]
 
@@ -2249,7 +2265,7 @@ def _section_management_assessment(
                 title_s = title_s[:47] + "..."
             lines.append(
                 f"| {e.date} | {_MGMT_CATEGORY_LABELS.get(e.category, e.category)} | {title_s} "
-                f"| [待 Claude report 阶段填充] |"
+                f"| {ev_cell} |"
             )
         hide = max(0, len(timeline) - 20)
         if hide:
@@ -2788,6 +2804,7 @@ def _section_4a_industry_position(
 def _section_4b_business_quality(
     dims: dict[str, dict], collection: dict, ctx: _FundamentalsContext,
     status_rows: list[tuple[str, str, bool, str]],
+    analysis: list[dict] | None = None,
 ) -> list[str]:
     """4b. 商业质量（B-① 护城河 / 商业模式画布 / 管理层评估 / B-② 增长 / B-③ 现金流）。"""
     lines: list[str] = ["### 4b. 商业质量", ""]
@@ -2857,6 +2874,7 @@ def _section_4b_business_quality(
         collection.get("events"),
         dims.get("holder_changes") or {},
         ctx.fin_list,
+        analysis=analysis,
     ))
 
     # B-② 增长驱动力
@@ -3580,6 +3598,7 @@ def _peer_comparison_table(industry_peers: dict) -> list[str]:
 
 def _section_fundamentals_layered(
     dims: dict[str, dict], collection: dict, symbol: str, *, val_cache: dict | None = None,
+    analysis: list[dict] | None = None,
 ) -> str:
     """v0.1.3 Phase 2：分层激活基本面 12 题 + LAW 10/14/15 完整框架。
 
@@ -3606,7 +3625,7 @@ def _section_fundamentals_layered(
     # 4a. 行业位置（3 题）
     # =================================================================
     lines.extend(_section_4a_industry_position(dims, ctx, status_rows))
-    lines.extend(_section_4b_business_quality(dims, collection, ctx, status_rows))
+    lines.extend(_section_4b_business_quality(dims, collection, ctx, status_rows, analysis=analysis))
     lines.extend(_section_4c_financial_quality(ctx, status_rows))
     lines.extend(_section_4d_valuation_expectation(ctx, status_rows))
     lines.extend(_peer_comparison_table(ctx.industry_peers))
@@ -3657,10 +3676,11 @@ def _law10_hint(why: str, pitfall: str, next_steps: list[str]) -> str:
 # --- _section_static_fundamentals ---
 def _section_static_fundamentals(
     dims: dict[str, dict], collection: dict, *, val_cache: dict | None = None,
+    analysis: list[dict] | None = None,
 ) -> str:
     # 委托给 Phase 2 分层基本面
     symbol = collection.get("symbol", "")
-    return _section_fundamentals_layered(dims, collection, symbol, val_cache=val_cache)
+    return _section_fundamentals_layered(dims, collection, symbol, val_cache=val_cache, analysis=analysis)
 
 
 # --- _section_technical_brief ---

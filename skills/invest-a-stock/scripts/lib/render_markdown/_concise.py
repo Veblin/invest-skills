@@ -618,8 +618,12 @@ def _concise_capital_flow(dims, collection):
 
 
 # --- render_report_v3 ---
-def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full") -> str:
-    """v0.2.0 九模块研究备忘录。mode="brief" 仅输出精简简报, mode="concise" 输出对话场景精简。"""
+def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full",
+                     analysis: list[dict] | None = None) -> str:
+    """v0.2.0 九模块研究备忘录。mode="brief" 仅输出精简简报, mode="concise" 输出对话场景精简。
+
+    analysis（R-B1）: analysis.json 段列表，渲染期替换 "[待 Claude report 阶段填充]" 占位。
+    """
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
 
@@ -730,7 +734,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_research_summary(collection, symbol, dims),
             _wrap_details(
                 "展开：静态基本面（12题）",
-                _section_static_fundamentals(dims, collection, val_cache=val_cache),
+                _section_static_fundamentals(dims, collection, val_cache=val_cache, analysis=analysis),
             ),
             "\n".join(
                 ["### 快速否决检测（F-3）", ""] + _fast_veto["display_lines"]

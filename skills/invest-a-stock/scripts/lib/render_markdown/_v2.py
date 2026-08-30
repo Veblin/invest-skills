@@ -18,7 +18,8 @@ def render_json(collection: dict[str, Any]) -> str:
 
 # --- render ---
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
-           mode: str = "full", *, attach_extras: bool = False) -> str:
+           mode: str = "full", *, attach_extras: bool = False,
+           analysis: list[dict] | None = None) -> str:
     """统一渲染入口。支持 compact / json / md / html 格式。
 
     compact  — 紧凑文本报告（v0.1.2 八段 v2 模板）
@@ -73,10 +74,10 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
     if fmt == "json":
         return render_json(collection)
     if fmt == "html":
-        return render_html(collection, symbol)
+        return render_html(collection, symbol, analysis=analysis)
     if fmt == "md":
         from ._concise import render_report_v3 as _v3  # deferred: avoid circular import
-        return _v3(collection, symbol, mode=mode)
+        return _v3(collection, symbol, mode=mode, analysis=analysis)
     return render_report_v2(collection, symbol)
 
 
