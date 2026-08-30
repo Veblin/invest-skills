@@ -337,6 +337,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--no-store", action="store_false", dest="store", default=True,
                    help="不存入持久化存储（report 默认自动入库；--resume 恒不重复入库）")
 
+    pqc = sub.add_parser("qc-report", help="报告质量门禁：可读性指标 + 结论段证据等级（R-A1/R-A2）")
+    pqc.add_argument("path", help="报告 md 路径")
+    pqc.add_argument("--fail-on", default="warning", choices=["info", "warning", "error"])
+
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
     pcomp.add_argument("symbol_b")
@@ -1670,6 +1674,21 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_qc_report(args: argparse.Namespace) -> int:
+    from lib.report_qc import format_report_qc, run_report_qc
+
+    p = Path(args.path).resolve()
+    if not p.exists():
+        print(f"❌ 文件不存在: {p}", file=sys.stderr)
+        return 1
+    text = p.read_text(encoding="utf-8")
+    findings = run_report_qc(text)
+    print(format_report_qc(findings))
+    rank = {"info": 0, "warning": 1, "error": 2}
+    threshold = rank.get(args.fail_on, 1)
+    return 1 if any(rank[f.severity] >= threshold for f in findings) else 0
+
+
 def cmd_rigor(args: argparse.Namespace) -> int:
     from lib.financial_rigor import has_blocking_failures, run_rigor
 
@@ -2344,11 +2363,11 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
 
 
-# 命令分发表：与 build_parser 的 26 个 sub.add_parser 一一对应（新增子命令须同步两处）
+# 命令分发表：与 build_parser 的 27 个 sub.add_parser 一一对应（新增子命令须同步两处）
 CMD_DISPATCH = {
     "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
     "diff": cmd_diff, "watchlist": cmd_watchlist, "diagnose": cmd_diagnose,
-    "lint": cmd_lint, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
+    "lint": cmd_lint, "qc-report": cmd_qc_report, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
     "evidence": cmd_evidence, "analyze": cmd_analyze, "synthesize": cmd_synthesize,
     "rigor": cmd_rigor, "audit": cmd_audit, "check": cmd_check,
     "portfolio": cmd_portfolio, "thesis": cmd_thesis, "shock": cmd_shock,
