@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-pulse
-version: "0.2.7"
+version: "0.2.8"
 description: "市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。触发词：市场情绪/大盘/市场脉搏"
 whenToUse: "市场情绪/大盘/市场脉搏：杠杆周期、市场广度、极端情绪、资金面与估值温度的交叉解读"
 argument-hint: "/invest-a-pulse"
