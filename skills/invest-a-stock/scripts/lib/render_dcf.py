@@ -16,6 +16,16 @@ _DCF_TERMINAL_G_DEFAULT = 0.025  # 与 D-③ 10Y 国债默认假设一致，作�
 
 
 
+def _scenario_evidence(scenario: dict, base: dict) -> str:
+    """按数据可得性为情景权重标注证据等级（R-A3 确定性规则，非人工评级）：
+    - 基期 FCFF 实值可得 且 显式期增速参数完整 → B（参数驱动，历史/当期实值锚定）
+    - 基期 FCFF 实值缺失 或 wacc 参数降级（__label 含"近似"/"缺失"） → C
+    """
+    fcff_ok = (base.get("fcff") or {}).get("fcff") is not None
+    wacc_ok = "近似" not in (base.get("wacc_label") or "") and "缺失" not in (base.get("wacc_label") or "")
+    return "B" if fcff_ok and wacc_ok else "C"
+
+
 # --- _dcf_compute_beta ---
 def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
     """从个股 K 线 + 沪深300 基准计算 Beta。
@@ -455,6 +465,18 @@ def _section_dcf_valuation(
     lines.append(f"- 永续增长率假设：**{terminal_g*100:.2f}%**[推测，待验证：长期宏观增长代理，与 D-③ 一致]")
     lines.append("")
 
+    # R-A3：WACC/基期 FCFF 可得性 → 三情景权重证据等级（_scenario_evidence 确定性规则）
+    wacc_state_parts = []
+    if wacc_result.get("risk_free_is_default"):
+        wacc_state_parts.append("无风险利率默认值（缺失）")
+    if wacc_result.get("beta_is_default"):
+        wacc_state_parts.append("Beta 默认值（近似）")
+    dcf_base = {
+        "fcff": (financials.get("dcf_preprocess") or {}).get("fcff"),
+        "wacc_label": "、".join(wacc_state_parts) or "实值参数",
+    }
+    sc_evidence = _scenario_evidence(scenario_results.get("base", {}), dcf_base)
+
     _sc_label = {"bear": "悲观情景", "base": "中性情景", "bull": "乐观情景"}
 
     # 提取总股本和净债务（用于每股换算）
@@ -489,14 +511,14 @@ def _section_dcf_valuation(
             per_share_results[sc] = eq
             ps_str = f"{eq['per_share']:.2f}" if eq.get("per_share") is not None else "N/A"
             lines.append(
-                f"| {_sc_label[sc]} | {res['probability']*100:.0f}% | "
+                f"| {_sc_label[sc]} | {res['probability']*100:.0f}%（证据 {sc_evidence}） | "
                 f"营收增速 {assump['revenue_growth']*100:+.1f}%，毛利率 {assump['gross_margin_assumption']:.1f}% | "
                 f"{ev['enterprise_value']:,.0f} | "
                 f"{ps_str} |"
             )
         else:
             lines.append(
-                f"| {_sc_label[sc]} | {res['probability']*100:.0f}% | "
+                f"| {_sc_label[sc]} | {res['probability']*100:.0f}%（证据 {sc_evidence}） | "
                 f"营收增速 {assump['revenue_growth']*100:+.1f}%，毛利率 {assump['gross_margin_assumption']:.1f}% | "
                 f"{ev['enterprise_value']:,.0f} |"
             )
