@@ -529,3 +529,21 @@ rules:
     skip_if_pattern: "(截至|滞后|据 FRED|据 akshare|风险提示|免责声明|\\[来源:)"
     message: "月频海外数据（英德法日 10Y 等）描述当期状况必须带 staleness 标注：'截至 YYYY-MM，滞后约 N 个月'（E5/E2，月频滞后约 2.5 个月）"
     law_ref: "report-conventions §3.2 #17（E5 staleness 强制）"
+
+  # ==========================================================================
+  # 负面信息淡化防规（v0.2.8，R-A5）——数据为负时禁止仅以正化表述
+  # ==========================================================================
+  - id: "wording-negative-softened-no-number"
+    pattern: "(净流出|亏损|负增长|净减少|失血|下滑|下跌|回撤)[^。\\n]{0,12}(收窄|放缓|企稳|回暖|改善|好转)"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|\\[来源:|⚠️|\\d|%|亿|万|—)"
+    message: "负面数据仅正化表述且无方向性数字——三态标注下负面信息必须带方向性数字（R-A5；王嘉鑫 2022：正面化语调与崩盘风险关联显著，deep-research 2.10）"
+    law_ref: "report-conventions §3 — 负面信息淡化"
+  - id: "wording-negative-softened-no-source"
+    pattern: "(跌幅|流出|减少|下滑)[^。\\n]{0,10}(收窄|放缓|企稳)"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(风险提示|免责声明|不构成|\\[来源:|⚠️)"
+    message: "负面改善表述无来源标注——须带 [来源: ...] 且数字为引擎/Python 计算（R-A5）"
+    law_ref: "report-conventions §3 — 负面信息淡化"

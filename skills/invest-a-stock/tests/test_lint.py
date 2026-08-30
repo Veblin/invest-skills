@@ -367,6 +367,35 @@ class TestConclusionEvidenceFallback:
         assert not any(f.rule_id == "wording-conclusion-evidence-fallback" for f in findings)
 
 
+class TestNegativeSoftenedRules:
+    """R-A5（v0.2.8）：负面数据仅正化表述 → 必须带方向性数字 + 来源。"""
+
+    def test_negative_softened_without_number_flagged(self, tmp_path):
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text("净流出规模收窄，市场情绪回暖。\n", encoding="utf-8")
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report)
+        lint_mod._RULES_CACHE = None
+        assert any(
+            f.rule_id == "wording-negative-softened-no-number" and f.severity == "error"
+            for f in findings
+        )
+
+    def test_negative_softened_with_number_passes(self, tmp_path):
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text("净流出收窄至 -12.3%，较上月改善 5.1 亿。\n", encoding="utf-8")
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report)
+        lint_mod._RULES_CACHE = None
+        assert not any(
+            f.rule_id == "wording-negative-softened-no-number" for f in findings
+        )
+
+
 class TestFilenameFormatLint:
     def test_recommended_datetime_filename_has_no_filename_findings(self, tmp_path):
         from lib import lint as lint_mod
