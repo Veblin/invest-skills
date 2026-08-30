@@ -334,6 +334,39 @@ class TestLintBehaviorParity:
         assert any(f.rule_id == "structure-analysis-without-fact" for f in findings)
 
 
+class TestConclusionEvidenceFallback:
+    """R-A2 兜底（v0.2.8）：结论断言行前 60 行无证据标签 → error。
+
+    引擎为行级 lookback（无 forward/section scope）：本规则拦截「主要结论：…」
+    这类裸断言行（非 `## 标题`、非 `**结论：**` 行——后两者由 Python 侧
+    report_qc.conclusion_evidence_findings 承担结构级检查）。
+    """
+
+    def test_conclusion_line_without_nearby_evidence_flagged(self, tmp_path):
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text("主要结论：公司增长稳健，估值处于历史高位。\n", encoding="utf-8")
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report)
+        lint_mod._RULES_CACHE = None
+        assert any(f.rule_id == "wording-conclusion-evidence-fallback" for f in findings)
+
+    def test_conclusion_line_with_evidence_pass(self, tmp_path):
+        from lib import lint as lint_mod
+
+        report = tmp_path / "report.md"
+        report.write_text(
+            "- 营收 +12.3% [来源: engine financials]\n"
+            "主要结论：公司增长稳健。\n",
+            encoding="utf-8",
+        )
+        lint_mod._RULES_CACHE = None
+        findings = lint_mod.lint_file(report)
+        lint_mod._RULES_CACHE = None
+        assert not any(f.rule_id == "wording-conclusion-evidence-fallback" for f in findings)
+
+
 class TestFilenameFormatLint:
     def test_recommended_datetime_filename_has_no_filename_findings(self, tmp_path):
         from lib import lint as lint_mod
