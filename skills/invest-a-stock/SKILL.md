@@ -447,6 +447,27 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 
 详见 [references/source-guide.md](references/source-guide.md)。
 
+## 报告产物协议（v0.2.8）
+
+### 分析协议（analysis.json，v0.2.8）
+
+报告步骤产出三类产物，同目录并存：`md + analysis.json + html`（html 仅在 `--emit html` 时）。
+
+1. **先出 md**：`report SYMBOL` → `reports/{symbol}-{name}/{ts}.md`（分析段以占位符保留，qc 的 F0-3 会拦截未填占位——**正文写完立刻填写**）
+2. **再写分析协议**：`reports/{symbol}-{name}/{ts}.analysis.json`，段结构：
+   `[{module, title, facts_md, analysis_md, evidence_tag, position}]`
+   - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（带 [证据: X] / [证据强度: ...]）
+   - `evidence_tag`：A-D 或 L1-L4；`position` ∈ events/valuation/financials/northbound/holders/refs/conclusion
+   - 校验：`uv run python skills/invest-a-stock/scripts/invest.py ... --analysis <path>`（校验失败 fail-loud 退出）
+3. **复合重渲**：`report SYMBOL --analysis <path>`（或 `--resume`）→ 分析段替换占位 → md/html 同源消费
+
+### HTML 产物
+
+- 生成：`uv run python skills/invest-a-stock/scripts/invest.py report SYMBOL --emit html --outdir reports`
+  → `reports/{symbol}-{name}/{ts}.html`（单文件自包含，无 CDN，file:// 离线可用）
+- 若 `<script>` 未内联图表库（资产缺失）报告仍正常出稿（图表 disabled），语义同「数据缺失降级」
+- `--analysis <path>` 在 HTML 中同样生效（分析段渲染进页面）
+
 ## CLI 命令
 
 ```bash
