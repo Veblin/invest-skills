@@ -62,6 +62,8 @@
 | index_pe_note | … | 状态说明或数据来源备注 |
 | 历史深度 | … 条 | ⚠️ csindex 单窗仅约 20 条；历史分位见 index_pe_pct（index_pe_history 累积 ≥20 个有效 PE 值） |
 
+[事实] 数值引用上表引擎字段（如「指数 PE 18.5x ｜ 历史分位 76% [来源: engine index_pe_snapshot]」）；无法定论项三态标注。
+
 [分析] …
 [证据强度: …]
 

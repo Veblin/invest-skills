@@ -9,6 +9,7 @@ from lib.report_qc import (
     READABILITY_MAX_CHARS,
     READABILITY_LONG_SENT_CHARS,
     conclusion_evidence_findings,
+    fact_analysis_pair_findings,
     readability_metrics,
     run_report_qc,
 )
@@ -55,3 +56,34 @@ class TestConclusionEvidence:
 
     def test_sufficient_evidence_pass(self):
         assert conclusion_evidence_findings(_good_report()) == []
+
+
+class TestFactAnalysisPair:
+    """R-A6：[分析] 节段内须有前置 [事实] 块（50 行回溯 + ##/### 边界停止）。"""
+
+    def test_analysis_without_fact_flagged(self):
+        bad = """## 指数估值
+[结论] PE 处历史高位。
+[分析] 指数 PE 高企，需关注均值回归。
+"""
+        findings = fact_analysis_pair_findings(bad)
+        assert any(f.rule_id == "structure-fact-analysis-pair" and f.severity == "error"
+                   for f in findings)
+
+    def test_analysis_with_fact_passes(self):
+        good = """## 指数估值
+[事实] 指数 PE 18.5x [来源: engine index_pe_snapshot]
+[分析] 指数 PE 高企，需关注均值回归。
+"""
+        assert fact_analysis_pair_findings(good) == []
+
+    def test_fact_from_previous_section_not_counted(self):
+        """上一节段内的 [事实] 不满足本节的 [分析]（节段边界阻断）。"""
+        bad = """## 产品快照
+[事实] 最新价 1.23 [来源: engine]
+---
+## 指数估值
+[分析] 指数 PE 高企，需关注均值回归。
+"""
+        assert any(f.rule_id == "structure-fact-analysis-pair" for f in
+                   fact_analysis_pair_findings(bad))

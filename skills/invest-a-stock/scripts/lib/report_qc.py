@@ -29,6 +29,10 @@ _TERM_GLOSSARY = {
 _CONCLUSION_HEAD_RE = re.compile(r"^#{2,3}\s*(主要)?结论", re.M)
 _SENT_SPLIT_RE = re.compile(r"[。！？!?]")
 _EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度)\s*[:：]")
+_FACT_MARK_RE = re.compile(r"\[事实\]")
+_ANALYSIS_MARK_RE = re.compile(r"\[分析\]")
+_SECTION_HEAD_RE = re.compile(r"^#{2,3}\s")
+_FACT_LOOKBACK_LINES = 50   # 与 lint structure-analysis-without-fact 同规则
 
 _SUMMARY_ELEMS = {
     "数据": re.compile(r"[来源:|[-−]?\d+(\.\d+)?[%亿万元xX倍]?"),
@@ -126,6 +130,35 @@ def conclusion_evidence_findings(md: str) -> list[QcFinding]:
     return out
 
 
+def fact_analysis_pair_findings(md: str) -> list[QcFinding]:
+    """R-A6：[分析] 节段内须有前置 [事实] 块（对偶强制）。
+
+    与 lint `structure-analysis-without-fact` 同规则：50 行回溯、遇
+    ##/### 节段边界停止（跨节段的 [事实] 不满足本节的 [分析]）。
+    """
+    out: list[QcFinding] = []
+    lines = md.splitlines()
+    for i, ln in enumerate(lines):
+        if not _ANALYSIS_MARK_RE.search(ln):
+            continue
+        found = False
+        for j in range(i - 1, max(i - 1 - _FACT_LOOKBACK_LINES, -1), -1):
+            if _SECTION_HEAD_RE.match(lines[j]):
+                break
+            if _FACT_MARK_RE.search(lines[j]):
+                found = True
+                break
+        if not found:
+            out.append(QcFinding(
+                line=i + 1,
+                rule_id="structure-fact-analysis-pair",
+                severity="error",
+                message=f"[分析] 节段内缺少前置 [事实] 块（{_FACT_LOOKBACK_LINES} 行回溯）——[事实]→[分析] 对偶强制（R-A6）",
+                context=ln.strip()[:80],
+            ))
+    return out
+
+
 def readability_findings(md: str) -> list[QcFinding]:
     met = readability_metrics(md)
     out: list[QcFinding] = []
@@ -143,7 +176,7 @@ def readability_findings(md: str) -> list[QcFinding]:
 
 
 def run_report_qc(md: str) -> list[QcFinding]:
-    return readability_findings(md) + conclusion_evidence_findings(md)
+    return readability_findings(md) + conclusion_evidence_findings(md) + fact_analysis_pair_findings(md)
 
 
 def format_report_qc(findings: list[QcFinding]) -> str:
