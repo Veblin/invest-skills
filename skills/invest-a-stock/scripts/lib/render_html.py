@@ -215,39 +215,46 @@ document.querySelectorAll('.sbi').forEach(el=>el.addEventListener('click',()=>{
 const tl=document.getElementById('maTrendLabel');
 if(tl&&trendLabel) tl.textContent=trendLabel;
 
-// charts
-let charts={};
-function renderCharts(){
-  Object.values(charts).forEach(c=>c.destroy());charts={};
+// charts (ECharts 适配层：data-echart + data-opts 契约单点渲染，T3-1)
+let kChartInstances={};
+let kResizeBound=false;
+function applyChartTheme(chart){
   const isDark=document.documentElement.getAttribute('data-theme')!=='light';
-  const tc=isDark?'#8892a4':'#6b7a99',gc=isDark?'rgba(255,255,255,.06)':'rgba(0,0,0,.06)';
-  const tt={backgroundColor:isDark?'#1c2128':'#fff',titleColor:isDark?'#e2e8f0':'#1a2030',bodyColor:tc,borderColor:isDark?'rgba(255,255,255,.1)':'rgba(0,0,0,.1)',borderWidth:1};
-  const xs={ticks:{color:tc,font:{family:'IBM Plex Mono',size:10}},grid:{color:'transparent'}};
-  const ys={ticks:{color:tc,font:{family:'IBM Plex Mono',size:10}},grid:{color:gc}};
-
-  if(finLabels.length>0){
-    charts.roe=new Chart(document.getElementById('roeChart'),{type:'line',data:{labels:finLabels,datasets:[{label:'ROE(%)',data:roeData,borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.15)',fill:true,tension:.35,pointRadius:4,pointBackgroundColor:'#38bdf8'},{label:'EPS(元)',data:epsData,borderColor:'#818cf8',borderDash:[4,4],tension:.35,pointRadius:3,pointBackgroundColor:'#818cf8',yAxisID:'y2'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'top',labels:{color:tc,font:{size:11},boxWidth:10,padding:10}},tooltip:{...tt,mode:'index',intersect:false}},scales:{x:xs,y:ys,y2:{position:'right',ticks:{color:'#818cf8',font:{family:'IBM Plex Mono',size:10}},grid:{color:'transparent'}}}}});
-    const pVals=profitData.filter(v=>v!=null);
-    const pAvg=pVals.length?pVals.reduce((a,b)=>a+b,0)/pVals.length:0;
-    charts.profit=new Chart(document.getElementById('profitChart'),{type:'bar',data:{labels:finLabels,datasets:[{data:profitData,backgroundColor:profitData.map(v=>v==null?'rgba(128,128,128,.3)':(v<pAvg?'rgba(248,113,113,.5)':'rgba(52,211,153,.5)')),borderColor:profitData.map(v=>v==null?'#666':(v<pAvg?'#f87171':'#34d399')),borderWidth:1,borderRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{...tt}},scales:{x:xs,y:ys}}});
-  }
-
-  if(flowData.length>0){
-    const fLabels=flowData.map(d=>d[0]);
-    const fVals=flowData.map(d=>Math.round(d[1]/10000*100)/100);
-    const fClose=closePriceSeries.slice(-flowData.length);
-    charts.flow=new Chart(document.getElementById('flowChart'),{
-      type:'bar',
-      data:{labels:fLabels,datasets:[
-        {type:'bar',label:'日净流向(万)',data:fVals,backgroundColor:fVals.map(v=>v>0?'rgba(52,211,153,0.75)':'rgba(248,113,113,0.75)'),borderColor:fVals.map(v=>v>0?'#34d399':'#f87171'),borderWidth:1,borderRadius:3,yAxisID:'yFlow',order:2},
-        {type:'line',label:'收盘价',data:fClose,borderColor:isDark?'rgba(226,232,240,0.9)':'rgba(30,40,60,0.9)',borderWidth:1.5,pointRadius:3,pointBackgroundColor:isDark?'#e2e8f0':'#1e2840',tension:.3,yAxisID:'yPrice',order:1}
-      ]},
-      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},tooltip:{...tt,callbacks:{label:ctx=>{if(ctx.datasetIndex===0)return ' 净流向: '+(ctx.raw>0?'+':'')+ctx.raw.toFixed(2)+'万';return ' 收盘价: '+ctx.raw+'元';}}}},scales:{x:{...xs,grid:{color:'transparent'},ticks:{maxRotation:0}},yFlow:{...ys,position:'left',title:{display:true,text:'净流向(万)',color:tc,font:{size:10,family:'IBM Plex Mono'}}},yPrice:{position:'right',grid:{color:'transparent'},ticks:{color:tc,font:{family:'IBM Plex Mono',size:10}},title:{display:true,text:'收盘价(元)',color:tc,font:{size:10,family:'IBM Plex Mono'}}}}}
-    });
+  const tc=isDark?'#8892a4':'#6b7a99';
+  const gc=isDark?'rgba(255,255,255,.06)':'rgba(0,0,0,.06)';
+  chart.setOption({
+    textStyle:{color:tc},
+    legend:{textStyle:{color:tc}},
+    tooltip:{backgroundColor:isDark?'#1c2128':'#fff',borderColor:isDark?'rgba(255,255,255,.1)':'rgba(0,0,0,.1)',textStyle:{color:tc}},
+    xAxis:{axisLabel:{color:tc},axisLine:{lineStyle:{color:isDark?'rgba(255,255,255,.15)':'rgba(0,0,0,.15)'}}},
+    yAxis:{axisLabel:{color:tc},splitLine:{lineStyle:{color:gc}}}
+  });
+}
+function renderCharts(){
+  if(typeof echarts==='undefined')return;        // 资产缺失/加载失败 → 图表 disabled，页面完整（R-B4）
+  const els=document.querySelectorAll('[data-echart]');
+  els.forEach(el=>{
+    const raw=el.dataset.opts;if(!raw)return;    // 无 options → 空容器不渲染（T3-2/3/4 逐个接线）
+    try{
+      const prev=echarts.getInstanceByDom(el);if(prev)prev.dispose();
+      const chart=echarts.init(el,null,{renderer:'svg'});   // svg renderer 供打印（T3-5）
+      chart.setOption(JSON.parse(raw),true);
+      applyChartTheme(chart);
+      kChartInstances[el.id||'c-'+Math.random()]=chart;
+    }catch(e){console.warn('chart init fail',e);}   // 单个图表失败不阻塞页面
+  });
+  if(!kResizeBound){
+    window.addEventListener('resize',()=>Object.values(kChartInstances).forEach(c=>c.resize()));
+    kResizeBound=true;
   }
 }
-
-window.addEventListener('load',renderCharts);
+window.addEventListener('beforeprint',()=>{
+  if(typeof echarts==='undefined')return;
+  document.querySelectorAll('[data-echart]').forEach(el=>{
+    const c=echarts.getInstanceByDom(el);if(c)c.resize();
+  });
+});
+document.addEventListener('DOMContentLoaded',renderCharts);
 """
 
 
@@ -257,23 +264,28 @@ def _lazy_section_research_summary(*args, **kwargs):
 
 
 
-# --- _load_chart_js ---
-def _load_chart_js() -> str:
-    """读取本地 chart.umd.min.js。离线可用，避免 CDN 依赖。
+# --- _load_echarts_js ---
+# 与闭包构建契约对齐（scripts/build_skillhub_packages.py BFS 扫描 "assets/" 字符串字面量）
+_ECHARTS_REL = "assets/echarts.umd.min.js"   # 镜像闭包采集键，勿改形态
+_ECHARTS_JS_CACHE: str | None = None
 
-    优先从本地资产目录读取；回退为空字符串（图表不渲染，其余内容正常）。
+
+def _load_echarts_js() -> str:
+    """读取本地 echarts.umd.min.js。离线可用，避免 CDN 依赖。
+
+    优先从本地资产目录读取；回退为空字符串（图表 disabled，其余内容正常，R-B4）。
     """
-    global _CHART_JS_CACHE
-    if _CHART_JS_CACHE is not None:
-        return _CHART_JS_CACHE
+    global _ECHARTS_JS_CACHE
+    if _ECHARTS_JS_CACHE is not None:
+        return _ECHARTS_JS_CACHE
 
-    p = Path(__file__).resolve().parent / "assets" / "chart.umd.min.js"
+    p = Path(__file__).resolve().parent / "assets" / "echarts.umd.min.js"
     try:
-        _CHART_JS_CACHE = p.read_text(encoding="utf-8")
-        return _CHART_JS_CACHE
-    except Exception as e:
-        logger.warning("chart.umd.min.js not found at %s; charts will be disabled: %s", p, e)
-        _CHART_JS_CACHE = ""
+        _ECHARTS_JS_CACHE = p.read_text(encoding="utf-8")
+        return _ECHARTS_JS_CACHE
+    except Exception as e:  # pragma: no cover - 文件系统异常才走这里
+        logger.warning("echarts.umd.min.js not found at %s; charts will be disabled: %s", p, e)
+        _ECHARTS_JS_CACHE = ""
         return ""
 
 
@@ -422,17 +434,7 @@ def _html_valuation(
 def _html_financials(fin_table_html: str, fin_note: str) -> str:
     return f'''<section id="financials">
   <div class="sh"><span class="st">财务指标</span><div class="sd"></div><span class="ss">近8期季报</span></div>
-  <div class="g2">
-    <div class="card">
-      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">ROE / EPS 趋势</div>
-      <div class="cw"><canvas id="roeChart"></canvas></div>
-    </div>
-    <div class="card">
-      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">扣非净利润（亿元）</div>
-      <div class="cw"><canvas id="profitChart"></canvas></div>
-    </div>
-  </div>
-  <div class="card" style="margin-top:var(--space-4)">
+  <div class="card">
     {fin_table_html}
     <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>{_html_mod.escape(fin_note)}</div>
   </div>
@@ -1001,23 +1003,13 @@ def _extract_refs_data(collection: dict) -> list[tuple[str, str, bool, str]]:
 
 
 # --- _build_html_app_script ---
-def _build_html_app_script(
-    fin_labels_json: str,
-    fin_roe_json: str,
-    fin_eps_json: str,
-    fin_profit_json: str,
-    flow_data_json: str,
-    closep_series: str,
-    trend_label_json: str,
-) -> str:
-    """组装 HTML 内联脚本：数据行用 f-string 注入，逻辑块为普通字符串。"""
+def _build_html_app_script(trend_label_json: str) -> str:
+    """组装 HTML 内联脚本：数据行用 f-string 注入，逻辑块为普通字符串。
+
+    图表数据经 data-echart + data-opts 属性注入（T3-1 适配层契约），不再走
+    const 数据行；仅 trendLabel 保留（T3-1 A8：无消费方的 fin/flow 死数据行已删）。
+    """
     data_lines = f"""// data
-const finLabels={fin_labels_json};
-const roeData={fin_roe_json};
-const epsData={fin_eps_json};
-const profitData={fin_profit_json};
-const flowData={flow_data_json};
-const closePriceSeries={closep_series};
 const trendLabel={trend_label_json};
 """
     return data_lines + _HTML_APP_SCRIPT_LOGIC
@@ -1069,7 +1061,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     turnover_str = f"{turnover:.2f}%" if turnover is not None else "--"
 
     # ── 财务数据 ──
-    fin_labels, fin_roe, fin_eps, fin_profit, fin_table_html, fin_note = _extract_financials_data(dims)
+    _, _, _, _, fin_table_html, fin_note = _extract_financials_data(dims)
 
     # ── 估值数据 ──
     val = _extract_valuation_data(dims)
@@ -1095,7 +1087,6 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 
     # ── 北向资金 ──
     nb = _extract_northbound_data(dims)
-    flow_data_json = json.dumps(nb["flow_data"]) if nb["has_data"] else "[]"
     flow_total = nb.get("total_flow", 0)
     flow_pos = nb.get("pos_days", 0)
     flow_days = nb.get("total_days", 0)
@@ -1112,7 +1103,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         <div class="ipill" style="padding:4px 10px"><span style="font-size:var(--text-xs);color:var(--tx-f)">净入天数&nbsp;</span><span style="font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600">{flow_pos}/{flow_days}</span></div>
       </div>
     </div>
-    <div style="position:relative;height:240px"><canvas id="flowChart"></canvas></div>
+    <div id="flowChart" data-echart style="height:240px"></div>
     <div class="vnote" style="margin-top:var(--space-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>左轴：日净流向（万元）；右轴：收盘价（元）。北向资金为估算值，仅供参考。</div>'''
     else:
         nb_html = '<div style="padding:2rem;text-align:center;color:var(--tx-f)">北向资金数据不可得</div>'
@@ -1137,12 +1128,6 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         f'<td style="font-family:var(--font-mono);font-size:var(--text-xs);padding:8px 12px;border-bottom:1px solid var(--bdr)"><span class="{"ref-ok" if ok else "ref-err"}">{detail if ok else ("✗ " + "不可用")}</span></td></tr>'
         for d, a, ok, detail in refs_data
     )
-
-    # ── Chart.js 数据序列化 ──
-    fin_labels_json = json.dumps(fin_labels, ensure_ascii=False)
-    fin_roe_json = json.dumps(fin_roe, ensure_ascii=False)
-    fin_eps_json = json.dumps(fin_eps, ensure_ascii=False)
-    fin_profit_json = json.dumps(fin_profit, ensure_ascii=False)
 
     # ── 构建各模块 ──
     topbar = _html_topbar(symbol, name, price_str, change_str, price_color, chg_color, summary)
@@ -1177,14 +1162,6 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 
     # ── Trend label (filled by JS) ──
     trend_label_json = json.dumps(tech.get("trend_label", ""), ensure_ascii=False)
-
-    # ── Quote price series for flow chart ──
-    kd = _get_dim_data(dims, "kline")
-    closep_series = "[]"
-    if isinstance(kd, list) and kd:
-        kd = sort_kline_asc(kd)
-        recent_closes = [r.get("close") for r in kd[-14:]]
-        closep_series = json.dumps(recent_closes, ensure_ascii=False)
 
     # ── 构建完整 HTML ──
     html = f"""<!DOCTYPE html>
@@ -1226,13 +1203,10 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 </div>
 
 <script>
-{_load_chart_js()}
+{_load_echarts_js()}
 </script>
 <script>
-{_build_html_app_script(
-    fin_labels_json, fin_roe_json, fin_eps_json, fin_profit_json,
-    flow_data_json, closep_series, trend_label_json,
-)}
+{_build_html_app_script(trend_label_json)}
 </script>
 </body>
 </html>"""

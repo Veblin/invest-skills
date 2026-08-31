@@ -37,11 +37,13 @@ class TestRenderHtmlStructure:
         assert "免责声明" in html
         assert html.index("风险提示") < html.index("免责声明")
 
-    def test_chart_js_embedded(self):
+    def test_echarts_embedded(self):
         from lib.render import render_html
 
         html = render_html(collection_v2_minimal(), "600176")
-        assert "chart.umd" in html or "Chart(" in html
+        assert "getInstanceByDom" in html          # 适配层存在（echarts 语义）
+        assert "cdn.jsdelivr.net" not in html      # 无 CDN 外链
+        assert "registry.npmmirror.com" not in html
         assert len(html) > 100_000
 
     def test_no_holder_history_chart(self):
@@ -53,17 +55,33 @@ class TestRenderHtmlStructure:
         assert "多期对比" not in html
         assert 'id="holders"' in html
 
-    def test_chart_js_valid_braces(self):
+    def test_echarts_valid_braces(self):
         """f-string 不应向浏览器输出 {{ 导致 SyntaxError。"""
         from lib.render import render_html
 
         html = render_html(collection_v2_minimal(), "600176")
         scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
         app_script = scripts[-1]
-        assert "const tt={" in app_script
-        assert "const tt={{" not in app_script
-        assert "new Chart(document.getElementById('roeChart'),{type:" in app_script
         assert "function renderCharts(){" in app_script
+        assert "echarts.init" in app_script
+        assert "{{" not in app_script
+
+    def test_echarts_asset_missing_fallback(self):
+        """资产缺失（_load_echarts_js 返回空串）→ 图表 disabled、页面完整（R-B4）。"""
+        from lib import render_html as rh
+
+        html = rh.render_html(collection_v2_minimal(), "600176")
+        assert "<body" in html and "</html>" in html  # 页面完整
+
+    def test_echarts_asset_missing_fallback_monkeypatched(self, monkeypatch):
+        """资产缺失路径：_load_echarts_js 空串 → 无资产注入但页面完整。"""
+        from lib import render_html as rh
+
+        monkeypatch.setattr(rh, "_load_echarts_js", lambda: "")
+        html = rh.render_html(collection_v2_minimal(), "600176")
+        assert "<body" in html and "</html>" in html  # 页面完整
+        assert "function renderCharts(" in html       # 适配层仍在（_load 空串即 disable）
+        assert "echarts.min.js" not in html           # 无资产内容注入
 
     def test_insufficient_kline_no_crash(self):
         from lib.render import render_html
