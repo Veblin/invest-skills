@@ -699,6 +699,54 @@ def _fetch_limit_pools(result: dict) -> None:
     # 避免 API 失败被误判为"无跌停"极端看多信号
 
 
+def _finalize_szse_df(df: pd.DataFrame) -> pd.DataFrame:
+    """深交所总貌表容错数值化（与 akshare 库内 L41 的差异点）。
+
+    akshare 库内 `map(lambda x: x.replace(",", ""))` 假定「第 2 列后全为
+    字符串」；上游 xlsx 数值列被 pandas 推断为 float 后崩溃（'float' object
+    has no attribute 'replace'，2026-08-31 实证）。本函数列级
+    astype(str) 剥逗号 + to_numeric(errors="coerce")——字符串/数值形态
+    均容错，非法值落 NaN 而非抛异常。
+    """
+    import pandas as pd
+
+    df["证券类别"] = df["证券类别"].astype(str).str.strip()
+    df.columns = ["证券类别", "数量", "成交金额", "总市值", "流通市值"]
+    for col in ("数量", "成交金额", "总市值", "流通市值"):
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", ""), errors="coerce")
+    return df
+
+
+def _fetch_szse_summary_direct() -> pd.DataFrame:
+    """直连深交所总貌 API（akshare stock_szse_summary 解析崩溃时降级）。
+
+    URL/参数与 akshare 库内一致（SHOWTYPE=xlsx&CATALOGID=1803_sczm&
+    TABKEY=tab1&txtQueryDate=YYYY-MM-DD）；产出与其同构：
+    证券类别/数量/成交金额/总市值/流通市值（元），数值化经 _finalize_szse_df。
+    """
+    import io
+    import warnings
+
+    import pandas as pd
+    import requests
+
+    today = shanghai_today()
+    url = "http://www.szse.cn/api/report/ShowReport"
+    params = {
+        "SHOWTYPE": "xlsx",
+        "CATALOGID": "1803_sczm",
+        "TABKEY": "tab1",
+        "txtQueryDate": "-".join([today[:4], today[4:6], today[6:]]),
+        "random": "0.39339437497296137",
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = pd.read_excel(io.BytesIO(r.content), engine="openpyxl")
+    return _finalize_szse_df(df)
+
+
 def _fetch_turnover(result: dict) -> None:
     """全市场成交额 + 流通市值（上交所 + 深交所）。
 
@@ -706,6 +754,8 @@ def _fetch_turnover(result: dict) -> None:
     - stock_sse_summary: key-value 格式（「项目」列含「流通市值」行），无成交金额列
     - stock_szse_summary: 列式格式（含 成交金额/流通市值 列），第一行为「股票」类别
     - 单位差异: SSE 流通市值已是亿元，SZSE 为元须 /1e8
+    - 降级：akshare stock_szse_summary 库内解析崩溃（float.replace bug）时
+      直连 szse.cn 官方 API（_fetch_szse_summary_direct）
     """
     try:
         import akshare as ak
@@ -713,7 +763,11 @@ def _fetch_turnover(result: dict) -> None:
             sse = ak.stock_sse_summary()
             # stock_szse_summary 不传日期时 akshare 硬编码默认 '20240830'，
             # 会把流通市值/成交额冻结在 2 年前；必须显式传上海时区当日
-            szse = ak.stock_szse_summary(date=shanghai_today())
+            try:
+                szse = ak.stock_szse_summary(date=shanghai_today())
+            except (AttributeError, TypeError) as exc:
+                logger.warning("szse summary akshare 解析失败（%s），直连降级", exc)
+                szse = _fetch_szse_summary_direct()
 
         # --- 流通市值 ---
         # SSE: 按「项目」列查找「流通市值」行，「股票」列为数值（亿元）
