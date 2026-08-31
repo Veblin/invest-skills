@@ -192,9 +192,10 @@ def test_risk_banner_before_disclaimer(html_text):
 
 
 def test_canvases(html_text):
-    for cid in ("navChart", "historyChart", "shareFlowChart", "sectorFlowChart",
-                "clustersChart"):
+    # clustersChart 已移除：聚类占比与 gauge 横条重复，保留横条（簇名+数值并列可直读）
+    for cid in ("navChart", "historyChart", "shareFlowChart", "sectorFlowChart"):
         assert f'id="{cid}"' in html_text
+    assert 'id="clustersChart"' not in html_text
 
 
 def test_data_direct_mapping(html_text):

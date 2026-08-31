@@ -59,14 +59,15 @@ def _fmt_grouped(v, dash: str = "—") -> str:
 
 
 def _pos_var(v, neutral: str = "var(--tx)") -> str:
-    """正负 → 涨/跌色（0 → 中性）。仅颜色直映，非判断。"""
+    """正负 → 涨/跌色（0 → 中性）。A 股惯例：正=红（涨），负=绿（跌）。
+    仅颜色直映，非判断。"""
     f = safe_float(v)
     if f is None:
         return neutral
     if f > 0:
-        return "var(--up)"
+        return "var(--rise)"
     if f < 0:
-        return "var(--dn)"
+        return "var(--fall)"
     return neutral
 
 
@@ -129,6 +130,8 @@ _HTML_CSS = r"""
   --ac:#38bdf8;--ac-dim:rgba(56,189,248,.12);
   --up:#34d399;--up-d:rgba(52,211,153,.12);
   --dn:#f87171;--dn-d:rgba(248,113,113,.12);
+  --rise:#f87171;--rise-d:rgba(248,113,113,.14);
+  --fall:#34d399;--fall-d:rgba(52,211,153,.14);
   --wn:#fbbf24;--wn-d:rgba(251,191,36,.1);
   --c1:#38bdf8;--c2:#818cf8;--c3:#34d399;--c4:#f87171;--c5:#fb923c;
   --sh:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
@@ -140,6 +143,8 @@ _HTML_CSS = r"""
   --ac:#0284c7;--ac-dim:rgba(2,132,199,.08);
   --up:#059669;--up-d:rgba(5,150,105,.08);
   --dn:#dc2626;--dn-d:rgba(220,38,38,.08);
+  --rise:#dc2626;--rise-d:rgba(220,38,38,.1);
+  --fall:#059669;--fall-d:rgba(5,150,105,.1);
   --wn:#d97706;--wn-d:rgba(217,119,6,.08);
   --sh:0 1px 2px rgba(0,0,0,.06),0 4px 16px rgba(0,0,0,.06);
 }
@@ -184,7 +189,8 @@ a{color:var(--ac);text-decoration:none}
 .sd{flex:1;height:1px;background:var(--bdr)}
 
 /* card */
-.card{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r-lg);padding:var(--space-5);box-shadow:var(--sh)}
+.card{background:var(--sur);border:1px solid var(--bdr);border-radius:var(--r-lg);padding:var(--space-5);box-shadow:var(--sh);transition:border-color var(--trans)}
+.card:hover{border-color:var(--bdr-hi)}
 .card-sm{padding:var(--space-4)}
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--space-4)}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-4)}
@@ -211,7 +217,8 @@ a{color:var(--ac);text-decoration:none}
 .iname{font-size:var(--text-xs);color:var(--tx-f);text-transform:uppercase;letter-spacing:.06em;margin-bottom:var(--space-1)}
 .ival{font-family:var(--font-mono);font-size:var(--text-base);font-weight:600}
 .isig{font-size:var(--text-xs);margin-top:var(--space-1)}
-.sig-bear{color:var(--dn)}.sig-bull{color:var(--up)}.sig-neutral{color:var(--wn)}
+/* 强弱语义：A 股惯例 牛/强=红（涨色），熊/弱=绿（跌色） */
+.sig-bear{color:var(--fall)}.sig-bull{color:var(--rise)}.sig-neutral{color:var(--wn)}
 
 /* table (engine data / md-body) */
 .ft th{font-size:var(--text-xs);font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--tx-f);padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi);text-align:right;white-space:nowrap}
@@ -348,7 +355,7 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
     price_str = _fmt(price, 3) if price is not None else "—"
     price_color = _pos_var(chg) if chg is not None else "var(--tx)"
     chg_str = _fmt_signed(chg) + "%" if chg is not None else "—"
-    chg_color = "var(--dn)" if (chg is not None and chg < 0) else ("var(--up)" if (chg is not None and chg > 0) else "var(--tx-m)")
+    chg_color = "var(--fall)" if (chg is not None and chg < 0) else ("var(--rise)" if (chg is not None and chg > 0) else "var(--tx-m)")
 
     aum = profile.get("aum")
     pd = profile.get("premium_discount")
@@ -381,8 +388,8 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
 
     s20, c20 = pos_sig(nav_ma20)
     s60, c60 = pos_sig(nav_ma60)
-    bol_color = "var(--up)" if (safe_float(bol_pos) or 0) > 60 else (
-        "var(--dn)" if (safe_float(bol_pos) or 0) < 40 else "var(--tx)")
+    bol_color = "var(--rise)" if (safe_float(bol_pos) or 0) > 60 else (
+        "var(--fall)" if (safe_float(bol_pos) or 0) < 40 else "var(--tx)")
     bol_sig = f"带内位置 {_fmt(bol_pos)}%" if bol_pos is not None else "—"
 
     flags_html = _flags_badges(profile.get("flags"))
@@ -391,7 +398,7 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
   <div class="g4">
     {_kpi_card("最新价", price_str, f"较昨收 {chg_str}", price_color)}
     {_kpi_card("AUM（亿元）", _fmt(aum) if aum is not None else "—", "profile.aum")}
-    {_kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—", "profile.premium_discount")}
+    {_kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—", "profile.premium_discount", _pos_var(pd))}
     {_kpi_card("成交额（元）", _fmt_grouped(quote.get("amount")), "quote.amount")}
   </div>
   <div class="g3" style="margin-top:var(--space-4)">
@@ -428,7 +435,7 @@ def _section_valuation(profile: dict) -> str:
     pct_str = _fmt(pct, 1) if pct is not None else "0"
     pct_val = safe_float(pct)
     width = max(0.0, min(100.0, pct_val)) if pct_val is not None else 0.0
-    gauge_color = "var(--dn)" if (pct_val or 0) > 80 else ("var(--up)" if (pct_val or 0) < 20 else "var(--c1)")
+    gauge_color = "var(--rise)" if (pct_val or 0) > 80 else ("var(--fall)" if (pct_val or 0) < 20 else "var(--c1)")
     status_cls = "b-ok" if status == "mapped" else "b-wn"
 
     primary = vg.get("primary") if isinstance(vg, dict) else None
@@ -518,7 +525,6 @@ def _section_holdings(holdings: dict) -> str:
       <div style="display:flex;flex-direction:column">
         {cluster_li or '<div style="padding:1rem;text-align:center;color:var(--tx-f)">无聚类数据</div>'}
       </div>
-      <div class="cw-sm" style="margin-top:var(--space-4)"><canvas id="clustersChart"></canvas></div>
       {_vnote("未映射股票归入「未归类」；报告 layer 如有补充归类须标注「AI 归类」。成员: " + member_txt) if member_txt else ""}
       {_vnote(_esc(holdings.get("note", "")))}
     </div>
@@ -683,7 +689,7 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
     if share_history.get("available"):
         s = share_history.get("summary") or {}
         sh_row = (f'<div class="g4" style="margin-top:var(--space-4)">'
-                  f'{_kpi_card("份额流合计（亿）", _fmt_signed(s.get("total_flow_est"), 2), f"{_esc(s.get('trend', ''))}（引擎趋势标签）")}'
+                  f'{_kpi_card("份额流合计（亿）", _fmt_signed(s.get("total_flow_est"), 2), f"{_esc(s.get('trend', ''))}（引擎趋势标签）", _pos_var(s.get("total_flow_est")))}'
                   f'{_kpi_card("份额变化（万份）", _fmt_grouped(s.get("share_total_change")), "share_history.summary")}'
                   f'{_kpi_card("流入/流出天数", f"{s.get('inflow_days', '—')} / {s.get('outflow_days', '—')}", f"近端{s.get('recent_flow_days', '—')}日 {_fmt_signed(s.get('recent_flow_est'), 2)} 亿")}'
                   f'{_kpi_card("日均成交（亿）", _fmt(s.get("avg_amount_e")), f"峰值 {_fmt(s.get("max_amount_e"))}")}'
@@ -799,11 +805,24 @@ _HTML_APP_SCRIPT_LOGIC = r"""
   });
 })();
 
-// sidebar active
+// sidebar active（click + scroll 跟随）
 document.querySelectorAll('.sbi').forEach(el=>el.addEventListener('click',()=>{
   document.querySelectorAll('.sbi').forEach(e=>e.classList.remove('active'));
   el.classList.add('active');
 }));
+(function(){
+  if(!window.IntersectionObserver)return;
+  const spy=new IntersectionObserver(es=>{
+    es.forEach(en=>{
+      if(!en.isIntersecting)return;
+      const a=document.querySelector('.sbi[href="#'+en.target.id+'"]');
+      if(!a)return;
+      document.querySelectorAll('.sbi').forEach(e=>e.classList.remove('active'));
+      a.classList.add('active');
+    });
+  },{rootMargin:'-15% 0px -75% 0px'});
+  document.querySelectorAll('section[id]').forEach(s=>spy.observe(s));
+})();
 
 // charts
 let charts={};
@@ -812,22 +831,28 @@ function renderCharts(){
   if(typeof Chart==='undefined')return;
   const isDark=document.documentElement.getAttribute('data-theme')!=='light';
   const tc=isDark?'#8892a4':'#6b7a99',gc=isDark?'rgba(255,255,255,.06)':'rgba(0,0,0,.06)';
+  // 轴刻度用更高对比亮色（深色主题下刻度密度高，需比 tooltip 文字更亮一档）
+  const tcAxis=isDark?'#a9b4c7':'#526180';
   const tt={backgroundColor:isDark?'#1c2128':'#fff',titleColor:isDark?'#e2e8f0':'#1a2030',bodyColor:tc,borderColor:isDark?'rgba(255,255,255,.1)':'rgba(0,0,0,.1)',borderWidth:1};
-  const xs={ticks:{color:tc,font:{family:'IBM Plex Mono',size:10}},grid:{color:'transparent'}};
-  const ys={ticks:{color:tc,font:{family:'IBM Plex Mono',size:10}},grid:{color:gc}};
+  // A 股惯例：涨=红 跌=绿
+  const upBg=isDark?'rgba(248,113,113,.6)':'rgba(220,38,38,.6)',dnBg=isDark?'rgba(52,211,153,.6)':'rgba(5,150,105,.6)';
+  const upBd=isDark?'#f87171':'#dc2626',dnBd=isDark?'#34d399':'#059669';
+  const xs={ticks:{color:tcAxis,autoSkip:true,maxTicksLimit:10,font:{family:'IBM Plex Mono',size:11}},grid:{color:'transparent'}};
+  const ys={ticks:{color:tcAxis,font:{family:'IBM Plex Mono',size:11}},grid:{color:gc}};
+  const hoverCur=(evt,items)=>{if(evt&&evt.native){evt.native.target.style.cursor=items&&items.length?'pointer':'default';}};
   const byDate=(a,b)=>a.date<b.date?-1:1;
 
   // NAV 250d
   const hist=report.history&&report.history.history&&report.history.history.rows||[];
   if(hist.length>0){
     const rows=[...hist].sort(byDate);
-    charts.nav=new Chart(document.getElementById('navChart'),{type:'line',data:{labels:rows.map(r=>r.date),datasets:[{label:'NAV',data:rows.map(r=>r.nav),borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.12)',fill:true,tension:.25,pointRadius:0,borderWidth:1.5}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{...tt,mode:'index',intersect:false}},scales:{x:xs,y:ys}}});
+    charts.nav=new Chart(document.getElementById('navChart'),{type:'line',data:{labels:rows.map(r=>r.date),datasets:[{label:'NAV',data:rows.map(r=>r.nav),borderColor:'#38bdf8',backgroundColor:'rgba(56,189,248,.12)',fill:true,tension:.25,pointRadius:0,borderWidth:1.5}]},options:{responsive:true,maintainAspectRatio:false,onHover:hoverCur,plugins:{legend:{display:false},tooltip:{...tt,mode:'index',intersect:false}},scales:{x:xs,y:ys}}});
   }
 
   // big move days bars
   const mv=report.history&&report.history.stats&&report.history.stats.big_move_days||[];
   if(mv.length>0){
-    charts.mv=new Chart(document.getElementById('historyChart'),{type:'bar',data:{labels:mv.map(r=>r.date),datasets:[{label:'|涨跌幅|≥5%',data:mv.map(r=>r.change_pct),backgroundColor:mv.map(r=>r.change_pct>0?'rgba(52,211,153,.6)':'rgba(248,113,113,.6)'),borderColor:mv.map(r=>r.change_pct>0?'#34d399':'#f87171'),borderWidth:1,borderRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{...tt}},scales:{x:{...xs,ticks:{maxRotation:45,minRotation:0}},y:ys}}});
+    charts.mv=new Chart(document.getElementById('historyChart'),{type:'bar',data:{labels:mv.map(r=>r.date),datasets:[{label:'|涨跌幅|≥5%',data:mv.map(r=>r.change_pct),backgroundColor:mv.map(r=>r.change_pct>0?upBg:dnBg),borderColor:mv.map(r=>r.change_pct>0?upBd:dnBd),borderWidth:1,borderRadius:3}]},options:{responsive:true,maintainAspectRatio:false,onHover:hoverCur,plugins:{legend:{display:false},tooltip:{...tt}},scales:{x:xs,y:ys}}});
   }
 
   // share flow dual-axis
@@ -835,9 +860,9 @@ function renderCharts(){
   const sh=shRows.filter(r=>r.flow_est!=null);
   if(sh.length>0){
     charts.shareFlow=new Chart(document.getElementById('shareFlowChart'),{type:'bar',data:{labels:sh.map(r=>r.date),datasets:[
-      {type:'bar',label:'份额净流入(亿)',data:sh.map(r=>r.flow_est),backgroundColor:sh.map(r=>r.flow_est>0?'rgba(52,211,153,.7)':'rgba(248,113,113,.7)'),borderColor:sh.map(r=>r.flow_est>0?'#34d399':'#f87171'),borderWidth:1,borderRadius:3,yAxisID:'yFlow',order:2},
+      {type:'bar',label:'份额净流入(亿)',data:sh.map(r=>r.flow_est),backgroundColor:sh.map(r=>r.flow_est>0?upBg:dnBg),borderColor:sh.map(r=>r.flow_est>0?upBd:dnBd),borderWidth:1,borderRadius:3,yAxisID:'yFlow',order:2},
       {type:'line',label:'收盘价',data:sh.map(r=>r.close),borderColor:isDark?'rgba(226,232,240,.9)':'rgba(30,40,60,.9)',borderWidth:1.5,pointRadius:3,pointBackgroundColor:isDark?'#e2e8f0':'#1e2840',tension:.3,yAxisID:'yPrice',order:1}
-    ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:true,position:'top',labels:{color:tc,font:{size:11},boxWidth:10,padding:10}},tooltip:{...tt,callbacks:{label:ctx=>{if(ctx.datasetIndex===0)return ' 净流入: '+(ctx.raw>0?'+':'')+ctx.raw.toFixed(2)+'亿';return ' 收盘价: '+ctx.raw;}}}},scales:{x:{...xs,grid:{color:'transparent'},ticks:{maxRotation:0}},yFlow:{...ys,position:'left',title:{display:true,text:'净流入(亿)',color:tc,font:{size:10,family:'IBM Plex Mono'}}},yPrice:{position:'right',grid:{color:'transparent'},ticks:{color:tc,font:{family:'IBM Plex Mono',size:10}},title:{display:true,text:'收盘价',color:tc,font:{size:10,family:'IBM Plex Mono'}}}}}});
+    ]},options:{responsive:true,maintainAspectRatio:false,onHover:hoverCur,interaction:{mode:'index',intersect:false},plugins:{legend:{display:true,position:'top',labels:{color:tc,font:{size:11},boxWidth:10,padding:10}},tooltip:{...tt,callbacks:{label:ctx=>{if(ctx.datasetIndex===0)return ' 净流入: '+(ctx.raw>0?'+':'')+ctx.raw.toFixed(2)+'亿';return ' 收盘价: '+ctx.raw;}}}},scales:{x:{...xs,grid:{color:'transparent'}},yFlow:{...ys,position:'left',title:{display:true,text:'净流入(亿)',color:tc,font:{size:10,family:'IBM Plex Mono'}}},yPrice:{position:'right',grid:{color:'transparent'},ticks:{color:tcAxis,font:{family:'IBM Plex Mono',size:11}},title:{display:true,text:'收盘价',color:tc,font:{size:10,family:'IBM Plex Mono'}}}}}});
   }
 
   // sector flow grouped bars
@@ -848,15 +873,11 @@ function renderCharts(){
       {label:'1日',data:inds.map(r=>r.net_1d),backgroundColor:'rgba(56,189,248,.55)',borderColor:'#38bdf8',borderWidth:1,borderRadius:3},
       {label:'5日',data:inds.map(r=>r.net_5d),backgroundColor:'rgba(129,140,248,.55)',borderColor:'#818cf8',borderWidth:1,borderRadius:3},
       {label:'10日',data:inds.map(r=>r.net_10d),backgroundColor:'rgba(52,211,153,.55)',borderColor:'#34d399',borderWidth:1,borderRadius:3}
-    ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'top',labels:{color:tc,font:{size:11},boxWidth:10,padding:10}},tooltip:{...tt}},scales:{x:xs,y:ys}}});
+    ]},options:{responsive:true,maintainAspectRatio:false,onHover:hoverCur,plugins:{legend:{display:true,position:'top',labels:{color:tc,font:{size:11},boxWidth:10,padding:10}},tooltip:{...tt}},scales:{x:xs,y:ys}}});
   }
 
-  // clusters donut
-  const cls=(report.holdings&&report.holdings.clusters)||[];
-  if(cls.length>0){
-    charts.clusters=new Chart(document.getElementById('clustersChart'),{type:'doughnut',data:{labels:cls.map(c=>c.cluster),datasets:[{data:cls.map(c=>c.sum_pct),backgroundColor:['#38bdf8','#818cf8','#34d399','#fb923c','#f87171','#fbbf24','#a78bfa','#e879f9'],borderColor:isDark?'#111417':'#fff',borderWidth:2}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true,position:'bottom',labels:{color:tc,font:{size:10},boxWidth:10,padding:8}},tooltip:{...tt,callbacks:{label:ctx=>' '+(ctx.label||'')+': '+ctx.raw.toFixed(2)+'%'}}}}});
-  }
 }
+
 
 window.addEventListener('load',renderCharts);
 """
@@ -900,7 +921,7 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
     chg = safe_float(quote.get("change_pct"))
     chg_str = _fmt_signed(chg) + "%" if chg is not None else "—"
     price_color = _pos_var(chg) if chg is not None else "var(--tx)"
-    chg_color = "var(--dn)" if (chg is not None and chg < 0) else ("var(--up)" if (chg is not None and chg > 0) else "var(--tx-m)")
+    chg_color = "var(--fall)" if (chg is not None and chg < 0) else ("var(--rise)" if (chg is not None and chg > 0) else "var(--tx-m)")
 
     md_html = render_markdown(md_text) if md_text else ""
 
