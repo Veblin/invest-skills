@@ -375,7 +375,9 @@ def _html_valuation(
     pe_median: str, pb_median: str, zone_signal: str, zone_color: str,
     n_samples: int, window_label: str,
     pe_above_median: bool, pb_above_median: bool,
+    band_html: str = "",
 ) -> str:
+    band_block = f'<div class="card" style="margin-top:var(--space-4)">{band_html}</div>' if band_html else ""
     if not pe_val or pe_val == "--":
         return f'''<section id="valuation">
   <div class="sh"><span class="st">估值分析</span><div class="sd"></div><span class="ss">数据不可得</span></div>
@@ -427,6 +429,7 @@ def _html_valuation(
       </div>
     </div>
   </div>
+  {band_block}
 </section>'''
 
 
@@ -1135,6 +1138,22 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     overview = _html_overview(price_str, change_str, price_color, chg_color,
                               vol5d_str, turnover_str, atr_str, vol5d_str,
                               dv_str, ma250_str, ma250_pos, kline_days)
+    # ── 估值历史分位带图（R-B3①；val_data 已带 isinstance 守卫，A6） ──
+    band_html = ""
+    if isinstance(val_data, list) and val_data:
+        from lib.html_charts import build_valuation_band_options
+
+        band_opts = build_valuation_band_options(val_data)
+        if band_opts is not None:
+            band_html = (
+                '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
+                'PE(TTM) 历史分位带<span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
+                '近4年窗口 · 带内区间 P10~P90 · 虚线为中位数与当前值</span></div>'
+                f'<div id="valBand" data-echart style="height:320px" data-opts="{_html_mod.escape(json.dumps(band_opts, ensure_ascii=False), quote=True)}"></div>'
+            )
+        else:
+            band_html = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">PE 历史序列（窗口内有效正数不足 20 个交易日），分位带图未生成。</div>'
+
     valuation = _html_valuation(
         val.get("pe_pct") or "0", val.get("pe_val") or "--", val.get("pe_color", "var(--c1)"),
         val.get("pb_pct") or "0", val.get("pb_val") or "--", val.get("pb_color", "var(--c2)"),
@@ -1143,6 +1162,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         val.get("zone_signal", "--"), val.get("zone_color", "var(--tx-m)"),
         val.get("n_samples", 0), val.get("window_label", "近5年"),
         val.get("pe_above_median", False), val.get("pb_above_median", False),
+        band_html=band_html,
     )
     financials = _html_financials(fin_table_html, fin_note)
     technicals = _html_technicals(

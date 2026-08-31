@@ -1,0 +1,183 @@
+"""HTML 报告 ECharts options 构建（R-B3 图表三件套）。
+
+P0 红线：一切数值（分位/中位数/当前值/均线/MACD/偏离%）由本模块 Python 计算，
+输出到 data-opts（JSON）— 前端只渲染，不做二次加工；aria 关键数字亦由此合成。
+
+约定：
+- 所有 build_*_options 返回 dict[str, Any] 或 None（无法成图返回 None）；
+  结构含 ECharts option（xAxis/yAxis/series/dataZoom/tooltip/legend）
+  与键 annotation_payload（aria 合成数据源）。
+- 数据不足 / 无日期 / 无正数 → None，渲染侧输出占位。
+- lttb() 仅允许在 Python 侧对折线（MA/估值）降采样；ECharts option 内
+  **禁止** sampling:'lttb'（#18129/#20944 缺陷），K 线全量不降采样。
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Sequence
+
+from .technical import sma  # noqa: F401  — T3-4 K 线均线复用（sma 现算，禁前端算）
+
+
+def _pct_clamp(v: float) -> float:
+    """百分比截断到 [0, 100]；NaN/None 归 0（防注入非法 y 值）。"""
+    if v is None:
+        return 0.0
+    v = float(v)
+    if math.isnan(v) or math.isinf(v):
+        return 0.0
+    return max(0.0, min(100.0, v))
+
+
+def lttb(pts: Sequence[tuple[float, float]], target: int) -> list[tuple[float, float]]:
+    """Largest-Triangle-Three-Buckets 降采样（Python 侧折线用）。
+
+    保留首尾端点；target >= len 或 target < 3 时原样返回（list 副本）。
+    ECharts option 内不得出现 sampling:'lttb'（#18129/#20944）— 仅此处允许。
+    """
+    n = len(pts)
+    if target >= n or target < 3:
+        return list(pts)
+    sampled = [pts[0]]
+    every = (n - 2) / (target - 2)
+    a = 0
+    for i in range(target - 2):
+        bucket_start = int(1 + i * every)
+        bucket_end = int(1 + (i + 1) * every)
+        nxt_start = int(1 + (i + 1) * every)
+        nxt_end = min(int(1 + (i + 2) * every), n)
+        seg = pts[nxt_start:nxt_end] or [pts[-1]]
+        nxt_avg_x = sum(p[0] for p in seg) / len(seg)
+        nxt_avg_y = sum(p[1] for p in seg) / len(seg)
+        x0, y0 = pts[a]
+        best_j, best_area = bucket_start, -1.0
+        for j in range(bucket_start, bucket_end):
+            x1, y1 = pts[j]
+            area = abs((x0 - nxt_avg_x) * (y1 - y0) - (x0 - x1) * (nxt_avg_y - y0))
+            if area > best_area:
+                best_area, best_j = area, j
+        sampled.append(pts[best_j])
+        a = best_j
+    sampled.append(pts[-1])
+    return sampled
+
+
+# ── T3-2 估值历史分位带图 ──
+
+def build_valuation_band_options(
+    rows: Sequence[dict[str, Any]], window_days: int = 250 * 4
+) -> dict[str, Any] | None:
+    """估值历史分位带图：PE(TTM) 曲线 + 历史分位带（P10-P90）+ 中/现值线。
+
+    rows：valuation 维度数据（list[dict]，行含 trade_date/pe_ttm）。
+    先窗口（后 filter）：亏损期占比按窗口内全量（含 None/<=0）统计，
+    分位带按窗口内正数序列计算（D3/A4 修正）。
+    窗口内有效正数 < 20 → None（渲染侧占位）。
+    """
+    if not rows:
+        return None
+    pe = [(r.get("trade_date"), r.get("pe_ttm")) for r in rows]
+    pe = [x for x in pe if x[0]]
+    if len(pe) < 20:
+        return None
+    w_raw = pe[-window_days:]
+    if len(w_raw) < 20:
+        return None
+    loss_days = sum(1 for _, v in w_raw if v is None or float(v) <= 0)  # type: ignore[arg-type]
+    loss_ratio_pct = round(loss_days / len(w_raw) * 100.0, 1)
+    cx = [(d, float(v)) for d, v in w_raw if v is not None and float(v) > 0]
+    if len(cx) < 20:
+        return None
+    xs = [d for d, _ in cx]
+    ys = [v for _, v in cx]
+    srt = sorted(ys)
+    mid = len(srt) // 2
+    median = (srt[mid - 1] + srt[mid]) / 2.0 if len(srt) % 2 == 0 else srt[mid]
+    # 分位带：水平线（窗口内静态百分位），曲线全量 lttb 至 500 段（索引保真）
+    idx = lttb([(float(i), ys[i]) for i in range(len(ys))], 500)
+    idx = [(int(i), v) for i, v in idx]  # x=索引须 int（category 轴对位）
+    curve_xs = [xs[i] for i, _ in idx]
+    p10 = srt[int(len(srt) * 0.10)]
+    p90 = srt[int(len(srt) * 0.90)]
+    cur, cur_date = ys[-1], xs[-1]
+    note = ""
+    if loss_ratio_pct > 30.0:
+        note = (
+            f"该标的历史约 {loss_ratio_pct:.1f}% 时间处于亏损期（PE<=0），"
+            "PE 分位数仅作位置参考，不反映估值贵贱"
+        )
+    opts: dict[str, Any] = {
+        "xAxis": {"data": curve_xs, "axisLabel": {"rotate": 45}},
+        "yAxis": {"name": "PE(TTM)", "scale": True},
+        "dataZoom": [{"type": "inside"}, {"type": "slider", "height": 16}],
+        "tooltip": {"trigger": "axis"},
+        "legend": {"bottom": 28, "data": ["PE(TTM)", "P10 带", "P90 带"]},
+        "series": [
+            {
+                "name": "PE(TTM)",
+                "type": "line",
+                "showSymbol": False,
+                "data": [[i, v] for i, v in idx],
+                # xAxis.data 全量日期，series x=索引 → 重建 date 轴
+                "markLine": {
+                    "symbol": "none",
+                    "data": [
+                        {
+                            "name": "中位数",
+                            "yAxis": round(median, 3),
+                            "lineStyle": {"color": "#94a3b8", "type": "dashed"},
+                            "label": {"formatter": f"中位数 {median:.2f}x"},
+                        },
+                        {
+                            "name": "当前值",
+                            "yAxis": round(cur, 3),
+                            "lineStyle": {"color": "#f59e0b", "type": "dashed"},
+                            "label": {"formatter": f"当前 {cur:.2f}x"},
+                        },
+                    ],
+                },
+            },
+            # 历史分位带：P10 基线 + (P90-P10) 高度，stack 填充 P10~P90 区间
+            {
+                "name": "P10 带",
+                "type": "line",
+                "stack": "band",
+                "showSymbol": False,
+                "lineStyle": {"color": "#94a3b8", "type": "dashed", "width": 1},
+                "emphasis": {"disabled": True},
+                "data": [[i, p10] for i, _ in idx],
+            },
+            {
+                "name": "P90 带",
+                "type": "line",
+                "stack": "band",
+                "showSymbol": False,
+                "lineStyle": {"color": "#94a3b8", "type": "dashed", "width": 1},
+                "areaStyle": {"color": "rgba(148,163,184,0.18)"},
+                "emphasis": {"disabled": True},
+                "data": [[i, p90 - p10] for i, _ in idx],
+            },
+        ],
+        "annotation_payload": {
+            "cur": plain_num(cur),
+            "cur_date": cur_date,
+            "median": plain_num(median),
+            "p10": plain_num(p10),
+            "p90": plain_num(p90),
+            "loss_ratio_pct": loss_ratio_pct,
+            "note": note,
+        },
+    }
+    return opts
+
+
+def plain_num(v: float) -> float:
+    """JSON 安全化：NaN/None → None（NaN 非标准 JSON，避免 JSON.parse 失败）。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None  # type: ignore[return-value]
+    if math.isnan(f) or math.isinf(f):
+        return None  # type: ignore[return-value]
+    return round(f, 4)
