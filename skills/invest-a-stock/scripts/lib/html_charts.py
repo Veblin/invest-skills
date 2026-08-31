@@ -172,6 +172,117 @@ def build_valuation_band_options(
     return opts
 
 
+def _md(d: Any) -> str:
+    """日期字符串归一化为 MM-DD：兼容 8 位（'20260723'）、ISO（'2026-07-23'）、已 MM-DD（幂等）。
+
+    双端日期归一化（A5）：北向 flow_data md 与 margin trade_date 形态不一致 →
+    统一经 _md 后再对表。
+    """
+    s = str(d) if d is not None else ""
+    if len(s) >= 10:
+        return s[5:10]
+    if len(s) >= 8:
+        return s[4:6] + "-" + s[6:8]
+    return s
+
+
+def build_flow_options(
+    flow_data: Sequence[Sequence[Any]] | None,
+    margin_rows: Sequence[dict[str, Any]] | None,
+    price_rows: Sequence[Sequence[Any]] | None,
+) -> dict[str, Any] | None:
+    """资金流图：北向净流入（bar，万元）+ 融资余额（亿元）+ 收盘价（元，右轴）。
+
+    flow_data：_extract_northbound_data 产物 [[md, nv(元), td, None], ...]（md 已 MM-DD）；
+    margin_rows：collection 的 market_structure.margin（trade_date 8 位/ISO，金额单位元）；
+    price_rows：[(md 或 trade_date, close), ...]。
+    任一关键源为空 → None（渲染侧占位）；两融/价格缺席仅去系列。
+    """
+    if not flow_data:
+        return None
+    nb_dates = []
+    nb_series = []
+    for row in flow_data:
+        md = _md(row[0]) if len(row) else ""
+        if not md:
+            continue
+        nv = row[1] if len(row) > 1 else 0
+        nv_wan = (float(nv) if nv is not None else 0.0) / 1e4  # 元 → 万元
+        nb_dates.append(md)
+        nb_series.append([md, round(nv_wan, 2)])
+    if not nb_dates:
+        return None
+    margin_dates = set()
+    margin_by = {}
+    for r in margin_rows or []:
+        d = _md(r.get("trade_date"))
+        if not d or d in margin_by:
+            continue
+        raw = r.get("rzye")
+        if raw is None:
+            raw = r.get("rzrqye")
+        margin_by[d] = round(float(raw) / 1e8, 2) if raw is not None else None
+        margin_dates.add(d)
+    price_by = {}
+    for row in price_rows or []:
+        if len(row) < 2:
+            continue
+        d = _md(row[0])
+        if d and row[1] is not None:
+            price_by[d] = round(float(row[1]), 2)
+    xaxis = sorted(set(nb_dates) | margin_dates | set(price_by))
+    series = [
+        {
+            "name": "北向净买入(万元)",
+            "type": "bar",
+            "data": [[md, v, {"itemStyle": {"color": _c_hex(v)}}] for md, v in nb_series],
+            "yAxisIndex": 0,
+        },
+        {
+            "name": "融资余额(亿元)",
+            "type": "line",
+            "showSymbol": False,
+            "connectNulls": True,
+            "data": [[d, margin_by.get(d)] for d in xaxis],
+            "yAxisIndex": 2,
+        },
+        {
+            "name": "收盘价(元)",
+            "type": "line",
+            "showSymbol": False,
+            "connectNulls": True,
+            "data": [[d, price_by.get(d)] for d in xaxis],
+            "yAxisIndex": 1,
+        },
+    ]
+    total_wan = sum(v for _, v in nb_series)
+    pos = sum(1 for _, v in nb_series if v > 0)
+    payload = {
+        "net_total": plain_num(total_wan),
+        "pos_days": pos,
+        "close_latest": plain_num(price_by[xaxis[-1]]) if xaxis and price_by.get(xaxis[-1]) else None,
+        "margin_latest": plain_num(margin_by.get(xaxis[-1])) if xaxis else None,
+    }
+    return {
+        "xAxis": {"data": xaxis, "axisLabel": {"rotate": 45}},
+        "yAxis": [
+            {"name": "北向净买入(万元)", "scale": True},
+            {"name": "收盘价(元)", "scale": True, "position": "right", "offset": 48},
+            {"name": "融资余额(亿元)", "scale": True, "position": "right"},
+        ],
+        "dataZoom": [{"type": "inside"}, {"type": "slider", "height": 16}],
+        "tooltip": {"trigger": "axis"},
+        "legend": {"bottom": 28, "data": [s["name"] for s in series]},
+        "series": series,
+        "annotation_payload": payload,
+    }
+
+
+def _c_hex(v: float) -> str:
+    """A 股惯例：正值红、负值绿（图表 canvas 内不能引用 CSS 变量）。"""
+    return "#f87171" if v >= 0 else "#34d399"
+
+
 def plain_num(v: float) -> float:
     """JSON 安全化：NaN/None → None（NaN 非标准 JSON，避免 JSON.parse 失败）。"""
     try:

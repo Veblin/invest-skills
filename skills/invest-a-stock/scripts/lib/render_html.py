@@ -1097,6 +1097,25 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     flow_total_str = _fmt_v2(flow_total, "") if flow_total else "0"
     nb_html = ""
     if nb["has_data"]:
+        # ── 资金流图 options（R-B3②：北向/两融叠加价格；A5 双端日期归一化） ──
+        flow_data = nb.get("flow_data", [])
+        flow_opts = None
+        if flow_data:
+            from lib.html_charts import build_flow_options
+
+            ms = _get_dim_data(dims, "market_structure")
+            margin_rows = ms.get("margin", []) if isinstance(ms, dict) else None
+            kline_asc = sort_kline_asc(_get_dim_data(dims, "kline") or [])
+            price_rows = [
+                (r.get("trade_date"), r.get("close"))
+                for r in kline_asc[-len(flow_data):]
+                if r.get("close") is not None
+            ]
+            flow_opts = build_flow_options(flow_data, margin_rows, price_rows)
+        if flow_opts is not None:
+            flow_div = f'<div id="flowChart" data-echart style="height:240px" data-opts="{_html_mod.escape(json.dumps(flow_opts, ensure_ascii=False), quote=True)}"></div>'
+        else:
+            flow_div = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">北向资金序列不足，资金流图未生成。</div>'
         nb_html = f'''
     <div style="display:flex;align-items:center;gap:var(--space-4);margin-bottom:var(--space-3);flex-wrap:wrap">
       <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--up)"></span>净流入</div>
@@ -1106,8 +1125,8 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         <div class="ipill" style="padding:4px 10px"><span style="font-size:var(--text-xs);color:var(--tx-f)">净入天数&nbsp;</span><span style="font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600">{flow_pos}/{flow_days}</span></div>
       </div>
     </div>
-    <div id="flowChart" data-echart style="height:240px"></div>
-    <div class="vnote" style="margin-top:var(--space-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>左轴：日净流向（万元）；右轴：收盘价（元）。北向资金为估算值，仅供参考。</div>'''
+    {flow_div}
+    <div class="vnote" style="margin-top:var(--space-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>左轴：日净流向（万元）；右轴：收盘价（元）与融资余额（亿元）。北向资金为估算值，仅供参考。</div>'''
     else:
         nb_html = '<div style="padding:2rem;text-align:center;color:var(--tx-f)">北向资金数据不可得</div>'
 
