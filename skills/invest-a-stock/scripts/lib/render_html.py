@@ -191,6 +191,12 @@ code{font-family:var(--font-mono);font-size:.85em;background:var(--sur3);padding
   .g4{grid-template-columns:repeat(2,1fr)}
   .g3,.g2,.g21{grid-template-columns:1fr}
 }
+
+/* T3-5（R-B5）：打印首规则隐藏导航与工具栏，app 单列防 200px 侧栏留白 */
+@media print{.sidebar,.topbar{display:none}
+.app{grid-template-columns:1fr}
+.card{break-inside:avoid}
+}
 """
 
 _HTML_APP_SCRIPT_LOGIC = r"""
@@ -318,6 +324,9 @@ def _html_topbar(
   <span class="badge b-ok">{ver_badge}</span>
   <button class="tbtn" data-theme-toggle aria-label="切换主题">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+  </button>
+  <button class="tbtn" aria-label="打印报告" onclick="window.print()">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
   </button>
 </header>'''
 

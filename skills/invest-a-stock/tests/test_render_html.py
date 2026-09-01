@@ -115,6 +115,39 @@ class TestRenderHtmlStructure:
         assert "K 线序列不足" in html
         assert 'id="klineChart"' not in html
 
+    def test_print_css_first_rule_hides_chrome(self):
+        """T3-5（A13/D7）：@media print 块首条规则即 .sidebar,.topbar{display:none}，
+        且块内含 .app{grid-template-columns:1fr}（防 grid 200px 列打印留白）。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        start = html.index("@media print{") + len("@media print{")
+        depth = 1  # 外层 @media print{ 自身的花括号
+        j = start
+        while True:
+            ch = html[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        block = html[start:j]
+        assert block.startswith(".sidebar,.topbar{display:none}"), \
+            "print 首条规则必须是 .sidebar,.topbar{display:none}"
+        assert ".app{grid-template-columns:1fr}" in block
+
+    def test_print_button(self):
+        """T3-5：顶部工具栏打印按钮 → window.print() + aria-label 明确。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        assert 'aria-label="打印报告"' in html
+        assert "window.print()" in html
+        topbar = html[html.index('<header class="topbar"'):html.index("</header>")]
+        assert "打印报告" in topbar
+
 
 class TestRenderHtmlCompliance:
     def test_no_forbidden_words_in_body(self):
