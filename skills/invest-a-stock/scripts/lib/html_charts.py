@@ -66,8 +66,17 @@ def lttb(pts: Sequence[tuple[float, float]], target: int) -> list[tuple[float, f
 
 # ── T3-2 估值历史分位带图 ──
 
+def window_label(n_rows: int) -> str:
+    """估值窗口标签（与 render_html._extract_valuation_data 同一规则，D11 去重）。"""
+    if n_rows >= 1250:
+        return "近5年"
+    if n_rows >= 250:
+        return f"近{n_rows // 250}年"
+    return "上市以来（数据有限）"
+
+
 def build_valuation_band_options(
-    rows: Sequence[dict[str, Any]], window_days: int = 250 * 4
+    rows: Sequence[dict[str, Any]], window_days: int | None = None
 ) -> dict[str, Any] | None:
     """估值历史分位带图：PE(TTM) 曲线 + 历史分位带（P10-P90）+ 中/现值线。
 
@@ -75,6 +84,10 @@ def build_valuation_band_options(
     先窗口（后 filter）：亏损期占比按窗口内全量（含 None/<=0）统计，
     分位带按窗口内正数序列计算（D3/A4 修正）。
     窗口内有效正数 < 20 → None（渲染侧占位）。
+
+    window_days：窗口截止行数；None = 全量序列，与正文估值卡（valuation_summary）
+    同窗口口径（B3 冒烟回修：旧实现固定截 250*4=1000 行，与正文近 N 年窗口不一致
+    → 图内中位数与正文中位数对不上）。
     """
     if not rows:
         return None
@@ -82,7 +95,7 @@ def build_valuation_band_options(
     pe = [x for x in pe if x[0]]
     if len(pe) < 20:
         return None
-    w_raw = pe[-window_days:]
+    w_raw = pe if window_days is None else pe[-window_days:]
     if len(w_raw) < 20:
         return None
     loss_days = sum(1 for _, v in w_raw if v is None or float(v) <= 0)  # type: ignore[arg-type]
@@ -109,7 +122,9 @@ def build_valuation_band_options(
             "PE 分位数仅作位置参考，不反映估值贵贱"
         )
     opts: dict[str, Any] = {
-        "xAxis": {"data": curve_xs, "axisLabel": {"rotate": 45}},
+        # type=category：data 为日期标签数组，series x 用索引对位（
+        # 缺省 value 轴会丢弃 data 数组 → x 轴渲染 0..n-1 序号，B3 冒烟回修）
+        "xAxis": {"type": "category", "data": curve_xs, "axisLabel": {"rotate": 45}},
         "yAxis": {"name": "PE(TTM)", "scale": True},
         "dataZoom": [{"type": "inside"}, {"type": "slider", "height": 16}],
         "tooltip": {"trigger": "axis"},
@@ -167,6 +182,7 @@ def build_valuation_band_options(
             "p10": plain_num(p10),
             "p90": plain_num(p90),
             "loss_ratio_pct": loss_ratio_pct,
+            "window_label": window_label(len(w_raw)),
             "note": note,
         },
     }

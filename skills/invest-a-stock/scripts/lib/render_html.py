@@ -713,6 +713,7 @@ def _extract_valuation_data(dims: dict) -> dict:
     if not val_data or not isinstance(val_data, list) or not val_data:
         return result
 
+    from lib.html_charts import window_label
     from lib.valuation import valuation_summary
 
     vs = sort_kline_asc(val_data)
@@ -721,12 +722,7 @@ def _extract_valuation_data(dims: dict) -> dict:
     ps_seq = [r.get("ps_ttm") or r.get("ps") for r in vs]
     dv = next((r.get("dv_ratio") for r in reversed(vs) if r.get("dv_ratio") is not None), None)
 
-    if len(vs) >= 1250:
-        wl = "近5年"
-    elif len(vs) >= 250:
-        wl = f"近{len(vs) // 250}年"
-    else:
-        wl = "上市以来（数据有限）"
+    wl = window_label(len(vs))
 
     summary = valuation_summary(pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv, window_label=wl)
     result["window_label"] = wl
@@ -1245,9 +1241,10 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         band_opts = build_valuation_band_options(val_data)
         if band_opts is not None:
             p = band_opts["annotation_payload"]
+            wl_txt = p.get("window_label", "数据期")
             band_label = (
                 f"估值分析：PE(TTM) 历史分位带图。最新 PE {_fmt_aria_num(p.get('cur'))}"
-                f"（截至 {p.get('cur_date', '')}），近 4 年窗口分位带 "
+                f"（截至 {p.get('cur_date', '')}），{wl_txt}窗口分位带 "
                 f"P10={_fmt_aria_num(p.get('p10'))} 至 P90={_fmt_aria_num(p.get('p90'))}，"
                 f"中位数 {_fmt_aria_num(p.get('median'))}，亏损期占比 {_fmt_aria_num(p.get('loss_ratio_pct'))}%"
                 + (f"；{p.get('note')}" if p.get("note") else "")
@@ -1255,7 +1252,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
             band_html = _aria_wrap(
                 '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
                 'PE(TTM) 历史分位带<span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
-                '近4年窗口 · 带内区间 P10~P90 · 虚线为中位数与当前值</span></div>'
+                f'{wl_txt}窗口 · 带内区间 P10~P90 · 虚线为中位数与当前值</span></div>'
                 f'<div id="valBand" data-echart style="height:320px" data-opts="{_html_mod.escape(json.dumps(band_opts, ensure_ascii=False), quote=True)}"></div>',
                 band_label,
             )

@@ -59,6 +59,50 @@ class TestBandOptions:
         assert a["note"]  # >30% → note 非空
         assert a["cur"] == pytest.approx(a["cur"], abs=0.0001)      # 结构自检
 
+    def test_band_xaxis_is_category(self):
+        """B3 冒烟回修 Defect 1：xAxis 缺 type=category → ECharts 按 value 轴渲染，
+        data 日期数组被当作无效值丢弃，x 轴显示 0..n-1 序号而非日期。"""
+        from lib.html_charts import build_valuation_band_options
+
+        opts = build_valuation_band_options(make_daily_basic_series(120))
+        assert opts is not None
+        assert opts["xAxis"].get("type") == "category"
+        assert isinstance(opts["xAxis"]["data"], list) and len(opts["xAxis"]["data"]) > 0
+        # series x 必须为 int 索引（与 category data 对位），不得是日期字符串
+        curve = next(s for s in opts["series"] if s["name"] == "PE(TTM)")
+        assert all(isinstance(pt[0], int) for pt in curve["data"])
+        assert max(pt[0] for pt in curve["data"]) < len(opts["xAxis"]["data"])
+
+    def test_band_median_matches_valuation_summary(self):
+        """B3 冒烟回修 Defect 2：band 默认全量窗口 → median/window_label 与正文估值卡
+        （valuation_summary）同口径；旧实现截近 250*4=1000 行，300308（1210 行）
+        图内中位数 48.43x vs 正文 41.55x 不一致。"""
+        from lib.html_charts import build_valuation_band_options, window_label
+        from lib.valuation import valuation_summary
+
+        rows = make_daily_basic_series(1200)  # > 1000 → 旧实现被截断
+        opts = build_valuation_band_options(rows)
+        assert opts is not None
+        a = opts["annotation_payload"]
+        summary = valuation_summary(
+            [r["pe_ttm"] for r in rows], [r["pb"] for r in rows],
+            window_label=window_label(len(rows)),
+        )
+        assert a["median"] == pytest.approx(summary["pe"]["median"], abs=0.01)
+        assert a["window_label"] == summary["window_label"]
+        # P10/P90 基于全量样本，而非截断后的尾部 1000 行
+        srt = sorted(r["pe_ttm"] for r in rows)
+        assert a["p10"] == pytest.approx(srt[int(len(srt) * 0.10)], abs=1e-9)
+
+    def test_band_window_label_rule(self):
+        """窗口标签规则与正文一致：1250+ → 近5年；≥250 → 近N年；否则上市以来（数据有限）。"""
+        from lib.html_charts import window_label
+
+        assert window_label(1200) == "近4年"
+        assert window_label(1250) == "近5年"
+        assert window_label(300) == "近1年"
+        assert window_label(60) == "上市以来（数据有限）"
+
 
 class TestPctClamp:
     def test_pct_clamp(self):
