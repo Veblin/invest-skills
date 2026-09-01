@@ -453,6 +453,25 @@ def _html_financials(fin_table_html: str, fin_note: str) -> str:
 </section>'''
 
 
+# --- 图表无障碍（T3-6, R-B6） ---
+def _fmt_aria_num(v: Any) -> str:
+    """annotation_payload 数值 → aria 可读串（None → N/A；float 保留 2 位）。"""
+    if v is None:
+        return "N/A"
+    if isinstance(v, float):
+        return f"{v:.2f}"
+    return str(v)
+
+
+def _aria_wrap(inner_html: str, label: str) -> str:
+    """图表无障碍包裹：role=img + aria-label（关键数字 Python 合成）+ aria-describedby 引到 #refs。
+
+    A18：label 由本模块合成，禁含 金叉/死叉/买入/卖出/抄底/追涨/建仓/目标价。
+    """
+    return (f'<section role="img" aria-label="{_html_mod.escape(label, quote=True)}" '
+            f'aria-describedby="refs">{inner_html}</section>')
+
+
 # --- _html_technicals ---
 def _html_technicals(
     macd_html: str, rsi_kdj_html: str, boll_html: str, ma_grid_html: str,
@@ -952,12 +971,24 @@ def _extract_technical_html(dims: dict) -> dict:
         macd_series = tech_tail.get("momentum", {}).get("macd_series")
     kline_opts = build_kline_options(kd_tail, macd_series=macd_series)
     if kline_opts is not None:
-        result["kline_html"] = (
+        p = kline_opts["annotation_payload"]
+        kline_label = (
+            f"K 线图：近 {p.get('kline_days')} 交易日，最新收盘 {_fmt_aria_num(p.get('latest_close'))} 元，"
+            f"MA5 {_fmt_aria_num(p.get('ma5'))}、MA20 {_fmt_aria_num(p.get('ma20'))}、"
+            f"MA60 {_fmt_aria_num(p.get('ma60'))}"
+        )
+        if p.get("macd_dif") is not None:
+            kline_label += (
+                f"，MACD DIF {_fmt_aria_num(p.get('macd_dif'))}、"
+                f"DEA {_fmt_aria_num(p.get('macd_dea'))}、柱 {_fmt_aria_num(p.get('macd_hist'))}"
+            )
+        result["kline_html"] = _aria_wrap(
             '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
             'K 线图 <span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
             f'近 {len(kd_tail)} 交易日 · MA5/20/60 · MACD(12,26,9)</span></div>'
             f'<div id="klineChart" data-echart style="height:520px" '
-            f'data-opts="{_html_mod.escape(json.dumps(kline_opts, ensure_ascii=False), quote=True)}"></div>'
+            f'data-opts="{_html_mod.escape(json.dumps(kline_opts, ensure_ascii=False), quote=True)}"></div>',
+            kline_label,
         )
     else:
         result["kline_html"] = ('<div style="padding:1.5rem;text-align:center;color:var(--tx-f);'
@@ -1153,7 +1184,16 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
             ]
             flow_opts = build_flow_options(flow_data, margin_rows, price_rows)
         if flow_opts is not None:
-            flow_div = f'<div id="flowChart" data-echart style="height:240px" data-opts="{_html_mod.escape(json.dumps(flow_opts, ensure_ascii=False), quote=True)}"></div>'
+            p = flow_opts["annotation_payload"]
+            flow_label = (
+                f"资金流图：北向净流向合计 {_fmt_aria_num(p.get('net_total'))} 万元"
+                f"（净入 {p.get('pos_days')} 天），最新收盘 {_fmt_aria_num(p.get('close_latest'))} 元，"
+                f"融资余额 {_fmt_aria_num(p.get('margin_latest'))} 亿元"
+            )
+            flow_div = _aria_wrap(
+                f'<div id="flowChart" data-echart style="height:240px" data-opts="{_html_mod.escape(json.dumps(flow_opts, ensure_ascii=False), quote=True)}"></div>',
+                flow_label,
+            )
         else:
             flow_div = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">北向资金序列不足，资金流图未生成。</div>'
         nb_html = f'''
@@ -1204,11 +1244,20 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 
         band_opts = build_valuation_band_options(val_data)
         if band_opts is not None:
-            band_html = (
+            p = band_opts["annotation_payload"]
+            band_label = (
+                f"估值分析：PE(TTM) 历史分位带图。最新 PE {_fmt_aria_num(p.get('cur'))}"
+                f"（截至 {p.get('cur_date', '')}），近 4 年窗口分位带 "
+                f"P10={_fmt_aria_num(p.get('p10'))} 至 P90={_fmt_aria_num(p.get('p90'))}，"
+                f"中位数 {_fmt_aria_num(p.get('median'))}，亏损期占比 {_fmt_aria_num(p.get('loss_ratio_pct'))}%"
+                + (f"；{p.get('note')}" if p.get("note") else "")
+            )
+            band_html = _aria_wrap(
                 '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
                 'PE(TTM) 历史分位带<span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
                 '近4年窗口 · 带内区间 P10~P90 · 虚线为中位数与当前值</span></div>'
-                f'<div id="valBand" data-echart style="height:320px" data-opts="{_html_mod.escape(json.dumps(band_opts, ensure_ascii=False), quote=True)}"></div>'
+                f'<div id="valBand" data-echart style="height:320px" data-opts="{_html_mod.escape(json.dumps(band_opts, ensure_ascii=False), quote=True)}"></div>',
+                band_label,
             )
         else:
             band_html = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">PE 历史序列（窗口内有效正数不足 20 个交易日），分位带图未生成。</div>'

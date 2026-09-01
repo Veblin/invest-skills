@@ -148,6 +148,50 @@ class TestRenderHtmlStructure:
         topbar = html[html.index('<header class="topbar"'):html.index("</header>")]
         assert "打印报告" in topbar
 
+    def test_charts_aria_wrapped(self):
+        """T3-6：data-echart 容器外包 role="img" + aria-label（关键数字 Python 合成）+ aria-describedby="refs"。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        chart_ids = re.findall(r'id="(valBand|klineChart|flowChart)"[^>]*data-echart', html)
+        assert chart_ids, "最小 fixture 应含 valBand/klineChart"
+        for cid in chart_ids:
+            idx = html.index(f'id="{cid}"')
+            prev_sec = html.rindex("<section ", 0, idx)
+            sec_tag = html[prev_sec:html.index(">", prev_sec)]
+            assert 'role="img"' in sec_tag, f"{cid} 未包 role=img"
+            assert 'aria-describedby="refs"' in sec_tag, f"{cid} 缺 aria-describedby"
+            m = re.search(r'aria-label="([^"]*)"', sec_tag)
+            assert m and m.group(1).strip(), f"{cid} aria-label 为空"
+            # 图表 div 应位于该 section 内（紧随其后的第一个 section 边界是关闭）
+            after = html[idx:]
+            nxt_sec = after.find("<section ")
+            nxt_close = after.find("</section>")
+            assert nxt_close != -1 and (nxt_sec == -1 or nxt_close < nxt_sec), \
+                f"{cid} 不在 role=img section 内"
+
+    def test_flow_chart_aria_wrapped(self):
+        """T3-6：北向数据存在（真实报告形态）→ flowChart 同样包 role=img，label 含 资金流/万元。"""
+        from lib.render import render_html
+
+        c = collection_v2_minimal()
+        c["dimensions"].append({
+            "dimension": "northbound",
+            "display": "北向资金",
+            "data": [{"trade_date": f"202607{d:02d}", "net_mf_vol": 1000.0 * d}
+                     for d in range(13, 20)],
+            "status": "available",
+            "_meta": {"source": "test.fixture"},
+        })
+        c["summary"]["total"] += 1
+        c["summary"]["available"] += 1
+        html = render_html(c, "600176")
+        idx = html.index('id="flowChart"')
+        sec_tag = html[html.rindex("<section ", 0, idx):html.index(">", html.rindex("<section ", 0, idx))]
+        assert 'role="img"' in sec_tag and 'aria-describedby="refs"' in sec_tag
+        m = re.search(r'aria-label="([^"]*)"', sec_tag)
+        assert m and "资金流" in m.group(1) and "万元" in m.group(1)
+
 
 class TestRenderHtmlCompliance:
     def test_no_forbidden_words_in_body(self):
