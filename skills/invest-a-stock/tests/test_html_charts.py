@@ -6,6 +6,7 @@ P0 红线：分位/中位数/当前值等数值由 Python 计算进 options，�
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -157,3 +158,36 @@ class TestFlowOptions:
 
         assert build_flow_options([], None, []) is None
         assert build_flow_options(None, None, []) is None
+
+
+# ── T3-4 K 线图（OHLC + MA5/20/60 + 成交量 + MACD） ──
+
+class TestKlineOptions:
+    def test_kline_series_full_and_styles(self):
+        from lib.technical import compute
+        from lib.html_charts import build_kline_options
+
+        rows = make_kline_rows(120)
+        macd = compute(rows)["momentum"]["macd_series"]
+        opts = build_kline_options(rows, macd_series=macd)
+        assert opts is not None
+        names = {s["name"] for s in opts["series"]}
+        assert any(s["type"] == "candlestick" for s in opts["series"])
+        assert {"MA5", "MA20", "MA60"} <= names
+        assert any("成交量" in s["name"] for s in opts["series"])
+        assert any(s["name"] == "MACD" for s in opts["series"])
+        # A10：v6 默认主题重做 → candlestick 显式 itemStyle 涨红跌绿
+        c = next(s for s in opts["series"] if s["type"] == "candlestick")
+        assert c["itemStyle"]["color"] == "#ef4444"
+        assert c["itemStyle"]["color0"] == "#34d399"
+        # 三区 grid + MACD 键序（histogram 非 hist，A2）+ 禁 lttb option
+        assert len(opts["grid"]) == 3
+        assert "lttb" not in json.dumps(opts)
+        assert len(c["data"]) == 120          # 窗口内 K 线全量（不降采样）
+        assert c["data"][0][0] == rows[0]["open"]   # ECharts 序 [open, close, low, high]
+
+    def test_kline_insufficient_none(self):
+        from lib.html_charts import build_kline_options
+
+        assert build_kline_options([], None) is None
+        assert build_kline_options(make_kline_rows(20)) is None

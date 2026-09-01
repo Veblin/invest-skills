@@ -447,8 +447,11 @@ def _html_financials(fin_table_html: str, fin_note: str) -> str:
 # --- _html_technicals ---
 def _html_technicals(
     macd_html: str, rsi_kdj_html: str, boll_html: str, ma_grid_html: str,
-    tech_note: str, tech_source: str,
+    tech_note: str, tech_source: str, kline_html: str = "",
 ) -> str:
+    # T3-4：K 线图（data-echart 契约，A21）——MA grid card 后注入；空串则不渲染空外壳
+    kline_block = (f'<div class="card" style="margin-top:var(--space-4)">{kline_html}</div>'
+                   if kline_html else "")
     return f'''<section id="technicals">
   <div class="sh"><span class="st">技术指标</span><div class="sd"></div><span class="ss">{_html_mod.escape(tech_source)}</span></div>
   <div class="g3">
@@ -460,6 +463,7 @@ def _html_technicals(
     <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">均线排列 <span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2)" id="maTrendLabel"></span></div>
     {ma_grid_html}
   </div>
+  {kline_block}
 </section>'''
 
 
@@ -751,6 +755,7 @@ def _extract_technical_html(dims: dict) -> dict:
         "vol5d": None, "ma250_val": None, "ma250_pos": "",
         "kline_days": 0, "tech_source": "",
         "ma_20_slope": None, "ma_60_slope": None,
+        "kline_html": "",
     }
     if not kd or not isinstance(kd, list) or not kd:
         empty = '<div style="padding:2rem;text-align:center;color:var(--tx-f);grid-column:1/-1">K 线数据不可得</div>'
@@ -923,6 +928,32 @@ def _extract_technical_html(dims: dict) -> dict:
     if ma250_vals and ma250_vals[-1] is not None:
         result["ma250_val"] = f"{ma250_vals[-1]:.2f}"
         result["ma250_pos"] = "上方" if latest_close > ma250_vals[-1] else ("下方" if latest_close < ma250_vals[-1] else "附近")
+
+    # K 线图（R-B3③）：kd_tail 先切片再 compute（A3：derived 无 momentum，
+    # 全量算后切片会因停牌 bar 过滤索引错位；kd≤500 时复用现有 tech 免二次计算）
+    from lib.html_charts import build_kline_options
+
+    kd_tail = kd[-500:]
+    if len(kd_tail) == len(kd):
+        tech_tail = tech
+    else:
+        tech_tail = compute(kd_tail)
+    macd_series = None
+    if "error" not in tech_tail:
+        macd_series = tech_tail.get("momentum", {}).get("macd_series")
+    kline_opts = build_kline_options(kd_tail, macd_series=macd_series)
+    if kline_opts is not None:
+        result["kline_html"] = (
+            '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
+            'K 线图 <span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
+            f'近 {len(kd_tail)} 交易日 · MA5/20/60 · MACD(12,26,9)</span></div>'
+            f'<div id="klineChart" data-echart style="height:520px" '
+            f'data-opts="{_html_mod.escape(json.dumps(kline_opts, ensure_ascii=False), quote=True)}"></div>'
+        )
+    else:
+        result["kline_html"] = ('<div style="padding:1.5rem;text-align:center;color:var(--tx-f);'
+                                'font-size:var(--text-xs)">K 线序列不足（少于 30 个交易日），'
+                                'K 线图未生成。</div>')
 
     return result
 
@@ -1187,6 +1218,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     technicals = _html_technicals(
         tech.get("macd_html", ""), tech.get("rsi_kdj_html", ""), tech.get("boll_html", ""),
         tech.get("ma_grid_html", ""), "", tech.get("tech_source", ""),
+        tech.get("kline_html", ""),
     )
     northbound = _html_northbound(nb_html)
     holders_sec = _html_holders(holders_html)

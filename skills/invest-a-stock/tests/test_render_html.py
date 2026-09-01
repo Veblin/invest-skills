@@ -90,6 +90,31 @@ class TestRenderHtmlStructure:
         assert len(html) > 0
         assert "技术指标" in html
 
+    def test_kline_chart_wired(self):
+        """T3-4：≥30 日 kline → technicals 段 data-echart K 线 div + data-opts 解析含 candlestick。"""
+        import html as _h
+        import json
+
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        m = re.search(r'id="klineChart"[^>]*data-opts="([^"]*)"', html)
+        assert m is not None, "缺少 klineChart data-echart div"
+        opts = json.loads(_h.unescape(m.group(1)))
+        assert any(s.get("type") == "candlestick" for s in opts["series"])
+        assert {"MA5", "MA20", "MA60"} <= {s["name"] for s in opts["series"]}
+        assert any(s["name"] == "MACD" for s in opts["series"])
+        # K 线图注入在均线排列 card 之后
+        assert html.index("id=\"klineChart\"") > html.index("均线排列")
+
+    def test_kline_chart_insufficient_placeholder(self):
+        """15 行 fixture → K 线 options None → 占位注记，不渲染空图壳、不崩。"""
+        from lib.render import render_html
+
+        html = render_html(collection_kline_insufficient(), "600176")
+        assert "K 线序列不足" in html
+        assert 'id="klineChart"' not in html
+
 
 class TestRenderHtmlCompliance:
     def test_no_forbidden_words_in_body(self):

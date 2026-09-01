@@ -18,6 +18,7 @@ import math
 from typing import Any, Sequence
 
 from .technical import sma  # noqa: F401  — T3-4 K 线均线复用（sma 现算，禁前端算）
+from lib.nums import safe_float
 
 
 def _pct_clamp(v: float) -> float:
@@ -281,6 +282,160 @@ def build_flow_options(
 def _c_hex(v: float) -> str:
     """A 股惯例：正值红、负值绿（图表 canvas 内不能引用 CSS 变量）。"""
     return "#f87171" if v >= 0 else "#34d399"
+
+
+def build_kline_options(
+    rows: Sequence[dict[str, Any]] | None,
+    latest_n: int = 500,
+    macd_series: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """K 线图：candlestick + MA5/20/60 + 成交量 + MACD 面板（三区 grid）。
+
+    rows：kline 行（trade_date/open/high/low/close/vol），窗口内行数 < 30 → None。
+    K 线窗内全量（500 日不降采样，option 内禁 sampling:'lttb'）；MA 现算 sma
+    （窗口 ≤500 项，无需再 Python 降采样）。
+    macd_series：technical.compute 的 momentum.macd_series（dif/dea/histogram/dates）；
+    消费端须先截窗口再 compute（A3：停牌行过滤后索引对齐），None → 无 MACD 面板。
+    """
+    rows = [r for r in (rows or []) if r.get("trade_date")]
+    if len(rows) < 30:
+        return None
+    rows = rows[-latest_n:]
+    dates = [str(r.get("trade_date")) for r in rows]
+    closes: list[float] = []
+    for r in rows:
+        c = safe_float(r.get("close"))
+        closes.append(c if c is not None else float(r.get("close") or 0))
+    candles: list[list[Any]] = []
+    vols: list[list[Any]] = []
+    for r in rows:
+        o = safe_float(r.get("open")) or 0
+        c = safe_float(r.get("close")) or 0
+        h = safe_float(r.get("high")) or 0
+        l = safe_float(r.get("low")) or 0
+        candles.append([o, c, l, h])  # ECharts candlestick 序：open, close, low, high
+        v = safe_float(r.get("vol")) or 0
+        vols.append([_c_hex(c - o), v])
+    ma_series = []
+    for p in (5, 20, 60):
+        vals = sma(closes, p)
+        ma_series.append({
+            "name": f"MA{p}",
+            "type": "line",
+            "showSymbol": False,
+            "lineStyle": {"width": 1},
+            "data": [[d, v] for d, v in zip(dates, vals)],
+            "xAxisIndex": 0,
+            "yAxisIndex": 0,
+        })
+    xaxis: list[dict[str, Any]] = [
+        {"type": "category", "data": dates, "gridIndex": 0, "axisLabel": {"show": False}},
+        {"type": "category", "data": dates, "gridIndex": 1, "axisLabel": {"show": False}},
+        {"type": "category", "data": dates, "gridIndex": 2, "axisPointer": {"show": True}},
+    ]
+    series: list[dict[str, Any]] = [
+        {
+            "name": "K线",
+            "type": "candlestick",
+            "data": candles,
+            "xAxisIndex": 0,
+            "yAxisIndex": 0,
+            # v6 默认主题重做 → 显式涨红跌绿（A10/A11）
+            "itemStyle": {
+                "color": "#ef4444", "color0": "#34d399",
+                "borderColor": "#ef4444", "borderColor0": "#34d399",
+            },
+        },
+        *ma_series,
+        {
+            "name": "成交量",
+            "type": "bar",
+            "data": [[dates[i], v, {"itemStyle": {"color": col}}]
+                     for i, (col, v) in enumerate(vols)],
+            "xAxisIndex": 1,
+            "yAxisIndex": 1,
+            "barWidth": "60%",
+        },
+    ]
+    if macd_series and macd_series.get("histogram") is not None:
+        hist = macd_series["histogram"]
+        dif = macd_series["dif"]
+        dea = macd_series["dea"]
+        n = min(len(dates), len(hist), len(dif), len(dea))
+        hdata = [
+            [dates[i], (plain_num(hist[i]) or 0.0), {"itemStyle": {"color": _c_hex(hist[i])}}]
+            for i in range(n) if hist[i] is not None
+        ]
+        series.append({
+            "name": "MACD",
+            "type": "bar",
+            "data": hdata,
+            "xAxisIndex": 2,
+            "yAxisIndex": 2,
+            "barWidth": "50%",
+        })
+        series.append({
+            "name": "DIF",
+            "type": "line",
+            "showSymbol": False,
+            "data": [[dates[i], plain_num(dif[i])] for i in range(n)],
+            "xAxisIndex": 2,
+            "yAxisIndex": 2,
+            "connectNulls": True,
+        })
+        series.append({
+            "name": "DEA",
+            "type": "line",
+            "showSymbol": False,
+            "data": [[dates[i], plain_num(dea[i])] for i in range(n)],
+            "xAxisIndex": 2,
+            "yAxisIndex": 2,
+            "connectNulls": True,
+        })
+    ma5 = latest_non_none(ma_series[0]["data"])
+    ma20 = latest_non_none(ma_series[1]["data"])
+    ma60 = latest_non_none(ma_series[2]["data"])
+    payload = {
+        "kline_days": len(rows),
+        "latest_close": plain_num(closes[-1]),
+        "ma5": plain_num(ma5),
+        "ma20": plain_num(ma20),
+        "ma60": plain_num(ma60),
+    }
+    if macd_series:
+        h = plain_num(hist[-1]) if macd_series.get("histogram") and hist and hist[-1] is not None else None
+        payload["macd_dif"] = plain_num(dif[-1]) if macd_series.get("dif") and dif and dif[-1] is not None else None
+        payload["macd_dea"] = plain_num(dea[-1]) if macd_series.get("dea") and dea and dea[-1] is not None else None
+        payload["macd_hist"] = h
+    return {
+        "xAxis": xaxis,
+        "yAxis": [
+            {"name": "价格(元)", "scale": True, "gridIndex": 0},
+            {"name": "成交量", "scale": True, "gridIndex": 1},
+            {"name": "MACD", "scale": True, "gridIndex": 2},
+        ],
+        "grid": [
+            {"left": 48, "right": 12, "top": 24, "height": "52%"},
+            {"left": 48, "right": 12, "top": "62%", "height": "12%"},
+            {"left": 48, "right": 12, "top": "78%", "height": "14%"},
+        ],
+        "dataZoom": [
+            {"type": "inside", "xAxisIndex": [0, 1, 2]},
+            {"type": "slider", "xAxisIndex": [0, 1, 2], "height": 14, "bottom": 4},
+        ],
+        "tooltip": {"trigger": "axis", "axisPointer": {"type": "cross"}},
+        "legend": {"bottom": 22, "data": [s["name"] for s in series]},
+        "series": series,
+        "annotation_payload": payload,
+    }
+
+
+def latest_non_none(data: Sequence[list[Any]]) -> Any:
+    """取序列最后一个非 None 值（MA/MACD 前置 None 段）。"""
+    for item in reversed(data):
+        if isinstance(item, list) and len(item) >= 2 and item[1] is not None:
+            return item[1]
+    return None
 
 
 def plain_num(v: float) -> float:
