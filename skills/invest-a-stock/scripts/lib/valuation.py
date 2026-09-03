@@ -97,10 +97,15 @@ def valuation_summary(
         pe_pct = percentile_rank(pe_seq_clean, current_pe)
         pe_median = _median(pe_seq_clean)
         # R12c: 亏损期占比结构化暴露（P0-2 规则：>30% 亏损交易日 → 分位仅作位置参考）
-        # 分母 = 总交易日数（含亏损日）；分子 = 亏损日数（pe 为 None 或 <=0，
-        # 与 valuation_calc.calc_historical_percentile 的「None+<=0 计数」语义对齐）
+        # 分母 = 总交易日数（含亏损日）；分子 = 亏损日数（None/**NaN**/<=0——
+        # 全量审查 #3：真实 daily_basic 缺失行 pe_ttm 是 float('nan') 而非 None，
+        # `v is None or v <= 0` 对 NaN 双 false → 漏计（300981 实证 677/1210 行
+        # NaN 全漏，md loss 0.0 vs HTML band 56.0 同快照分歧）——与
+        # html_charts 的 safe_float 计数同口径）
         pe_total = len(pe_ttm_seq)
-        pe_loss = len([v for v in pe_ttm_seq if v is None or v <= 0])
+        pe_loss = len([
+            v for v in pe_ttm_seq
+            if v is None or (isinstance(v, float) and v != v) or v <= 0])
         result["pe"] = {
             "current": round(current_pe, 2),
             "pct": round(pe_pct, 2) if pe_pct is not None else None,

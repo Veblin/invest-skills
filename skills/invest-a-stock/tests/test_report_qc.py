@@ -87,3 +87,46 @@ class TestFactAnalysisPair:
 """
         assert any(f.rule_id == "structure-fact-analysis-pair" for f in
                    fact_analysis_pair_findings(bad))
+
+
+# ── 全量审查 P0-2：核心结论标题/结构行排除/D 级判定 ──
+
+class TestFullReviewConclusionGate:
+    def test_core_conclusion_heading_recognized(self):
+        """真实模板 `## 核心结论` 被识别——旧 regex 只匹配主要/结论 → 门禁
+        对 210/210 真实报告失效（误报缺要素且检不到结论段）。"""
+        from lib.report_qc import run_report_qc
+
+        md = ("## 核心结论\n"
+              "基本面数据稳健，净利同比 +5.6% [来源: engine]。\n"
+              "市场分歧在于估值消化节奏 [来源: engine]。\n"
+              "若需求放缓则存在下行风险 [来源: engine]。\n")
+        assert run_report_qc(md) == []
+
+    def test_structure_lines_not_assertions(self):
+        """表行/引用行不算断言（FP 源）；带 B 级证据断言通过。"""
+        from lib.report_qc import conclusion_evidence_findings
+
+        md = ("## 主要结论\n"
+              "| 指标 | 值 |\n|---|---|\n| 营收 | 382 亿 |\n"
+              "> 以上不构成投资建议\n"
+              "该标的有望走强 [证据: B]。\n")
+        assert conclusion_evidence_findings(md) == []
+
+    def test_d_grade_conclusion_reports_level_error(self):
+        """D 级断言触发 level error（旧死代码 tagged==0 分支不可达——D 级
+        全标 tagged 却零拦截）。"""
+        from lib.report_qc import conclusion_evidence_findings
+
+        md = "## 核心结论\n该标的有望走强 [证据: D 推测]。\n"
+        f = conclusion_evidence_findings(md)
+        assert any(x.rule_id == "wording-conclusion-evidence-level"
+                   for x in f)
+
+    def test_summary_elements_absent_when_no_conclusion_heading(self):
+        """无结论段标题 → 四要素不误报缺（对前置引擎输出）。"""
+        from lib.report_qc import readability_findings
+
+        md = "## 估值分析\n估值分位数据齐全。\n"
+        f = readability_findings(md)
+        assert not any(x.rule_id == "readability-summary-elements" for x in f)

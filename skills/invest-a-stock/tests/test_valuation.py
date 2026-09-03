@@ -1215,3 +1215,18 @@ class TestFormatEvEbitdaBlock:
 
         out = _format_ev_ebitda_block(self._ev(5.0))
         assert "EV/EBITDA = 5.0x" in out
+
+    def test_loss_ratio_counts_nan_rows(self):
+        """全量审查 #3：真实 daily_basic 缺失行 pe_ttm 是 float('nan') 而非
+        None——旧实现 `v is None or v <= 0` 对 NaN 双 false 漏计，md loss 0.0
+        vs HTML band 56.0 同快照分歧（300981 实证 677/1210）。"""
+        import math
+
+        from lib.valuation import valuation_summary
+
+        pe_seq = [20.0 + i for i in range(6)] + [float("nan")] * 14
+        result = valuation_summary(pe_seq, [2.0] * 20)
+        pe = result["pe"]
+        assert pe["loss_days"] == 14          # NaN 计入亏损/缺失组
+        assert pe["loss_ratio"] == round(14 / 20, 4)
+        assert pe["n_valid"] == 6             # 正数序列不受影响
