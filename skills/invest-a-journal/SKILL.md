@@ -12,7 +12,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-journal v0.2.7
+# invest-a-journal v0.2.8
 
 > **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
 
@@ -135,7 +135,7 @@ metadata:
 每个评估输出第一行固定格式：
 
 ```
-🔍 invest-a-journal v0.2.7 · {date} · {环境标签}
+🔍 invest-a-journal v0.2.8 · {date} · {环境标签}
 ```
 
 环境标签从 `market_microstructure.snapshot()` 读取：
@@ -147,7 +147,7 @@ metadata:
 示例：
 
 ```
-🔍 invest-a-journal v0.2.7 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
+🔍 invest-a-journal v0.2.8 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
 ```
 
 ---
@@ -163,7 +163,7 @@ metadata:
 5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
 6. ✅ 检查 LAW 10：末尾有免责声明
 6b. ✅ 检查 P0 数字铁律：每个数字来自引擎字段或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/「Python calc 视角」类未实跑标注（共享规范 §2.3 强制行为 5-6）
-7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.7` badge
+7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.8` badge
 8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
 9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
 
@@ -490,7 +490,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > `commitment_level`（结构性承诺>计划性承诺>提醒）。
 
 ```markdown
-🔍 invest-a-journal v0.2.7 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
+🔍 invest-a-journal v0.2.8 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
 
 ## {方向}: {标的} ({代码}) — {资产类型}
 

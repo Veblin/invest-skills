@@ -11,7 +11,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-pattern-scan v0.2.7
+# invest-a-pattern-scan v0.2.8
 
 > **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
 

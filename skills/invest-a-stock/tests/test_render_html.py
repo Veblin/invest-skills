@@ -384,3 +384,33 @@ class TestB3RLossPeriodBandNote:
         html = render_html(c, "600176")
         assert "数据不可得" in html
         assert "估值分位带图：数据不可得" in html
+
+
+# ── code-review #6: flow margin 窗口与北向对齐 ──
+
+class TestCodeReviewMarginWindow:
+    def test_flow_margin_window_aligned_to_northbound(self):
+        """margin records（collector 存 10 行）切片至北向窗口（7 行）→
+        x 轴不膨胀（7 槽），无孤立 margin 前段。"""
+        import html as _h
+        import json
+
+        from lib.render import render_html
+
+        c = _collection_with_market_structure()  # nb 7 行 + margin 3 行
+        # 生产形态：collector 存 margin 近 10 行（截止与 nb 同日 07-19）——
+        # 修复前 x 轴膨胀出 margin 窗口外独有日期（10-12）
+        c["market_structure"]["margin"]["records"] = [
+            {"trade_date": f"202607{d:02d}", "rzye": 1e10}
+            for d in range(10, 20)]
+        html = render_html(c, "600176")
+        m = __import__("re").search(
+            r'id="flowChart"[^>]*data-opts="([^"]*)"', html)
+        assert m is not None
+        opts = json.loads(_h.unescape(m.group(1)))
+        xaxis = opts["xAxis"]["data"]
+        # 修复语义：margin 切片至 nb 窗口（13-19）→ 窗口外独有日期不出现在轴
+        assert "2026-07-10" not in xaxis
+        assert "2026-07-11" not in xaxis
+        assert "2026-07-12" not in xaxis
+        assert "2026-07-13" in xaxis  # 窗口内首日保留

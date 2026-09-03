@@ -321,9 +321,12 @@ def test_dry_run_all_packages_within_200(tmp_path):
     for skill in b.PUBLISH_SKILLS:
         total = b.build_one(skill, b.project_version(), tmp_path, dry_run=True)
         assert 0 < total <= b.MAX_FILES, f"{skill}: {total} 超限"
-    # etf 闭包裁剪: 远低于 v0.2.7 的 129
+    # etf 闭包裁剪: 远低于 v0.2.7 的 129。
+    # 2026-09-03 实测 102（B3-R 后 render 共享面（html_charts/render_html）
+    # 随闭包并入 etf 包，文件数较 v0.2.7 时代断言 <70 时上升）——上限放宽
+    # 至 120 且仍显著低于旧版全量复制 129。
     etf_total = b.build_one("invest-a-etf", b.project_version(), tmp_path, dry_run=True)
-    assert etf_total < 70
+    assert etf_total < 120
 
 
 # ---- 主仓库源文件不得被回写 ----

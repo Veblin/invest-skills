@@ -91,17 +91,33 @@ def _excess_for(rec: dict, as_of_iso: str) -> dict | None:
 
 
 def stats_report(items: list[dict]) -> dict:
-    """主统计量（§6）：胜率符号检验 / 均值 t（uncorrected）/ 中位。"""
+    """主统计量（§6）：胜率符号检验 / 均值 t（uncorrected）/ 中位。
+
+    code-review #1：双侧符号检验委托共享 skills/lib/backtest.binomial_test
+    （min-tail 选择 + cap 1.0）——旧实现 2*P(X>=k) 在跑输月份输出 p>1
+    （k=0 时 2.0），恰好掩盖「策略失效」信号。
+    """
     n = len(items)
     ex = [it["excess"] for it in items]
     k = sum(1 for e in ex if e > 0)
-    p_single = sum(
-        math.comb(n, i) * 0.5 ** n for i in range(k, n + 1)) if n else 1.0
+    if n:
+        # 共享 skills/lib/backtest.binomial_test（code-review #1：min-tail +
+        # cap 1.0 语义）。importlib 文件加载——`lib` 包名在测试进程可能已被
+        # 其它 skill 的 lib 缓存（sys.path.insert 无法解除包缓存绑定）。
+        import importlib.util
+
+        _bt_path = Path(__file__).resolve().parents[2] / "lib" / "backtest.py"
+        _spec = importlib.util.spec_from_file_location("_shared_bt", _bt_path)
+        _bt = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_bt)  # type: ignore[union-attr]
+        p_two = round(_bt.binomial_test(k, n)["p_value"], 3)
+    else:
+        p_two = None
     mean = sum(ex) / n if n else 0.0
     sd = (sum((e - mean) ** 2 for e in ex) / (n - 1)) ** 0.5 if n > 1 else 0.0
     return {
         "n": n, "beat": k,
-        "p_two_sided": round(2 * p_single, 3),
+        "p_two_sided": p_two,
         "mean_excess": round(mean, 2),
         "t": round(mean / (sd / n ** 0.5), 2) if n > 1 and sd > 0 else None,
         "median_excess": round(statistics.median(ex), 2) if n else None,
@@ -189,7 +205,11 @@ def render_report(items: list[dict], stat: dict, groups: list[dict],
 
 
 def _margin_regime_label() -> str:
-    """环境二分：margin 20d 变化率 vs 自身 1 年分位（akshare SSE 全历史）。"""
+    """环境二分：margin 20d 变化率 vs 自身 1 年分位（akshare **沪市 SSE**）。
+
+    code-review：源为 stock_margin_sse（单市场），须显式标注口径——否则
+    「97% 分位 → 扩张」被读者当作全国两融状况（仓库两融惯例为沪深两市合计）。
+    """
     try:
         import akshare as ak
         import bisect
@@ -201,23 +221,30 @@ def _margin_regime_label() -> str:
         df = df.sort_values("信用交易日期")
         mz = df["融资余额"].astype(float)
         if len(mz) < 21:
-            return "环境不可判定（margin 序列不足 21 行）"
+            return "环境不可判定（沪市 SSE margin 序列不足 21 行）"
         today_val = (mz.iloc[-1] / mz.iloc[-21] - 1) * 100
         series = [
             (mz.iloc[i] / mz.iloc[i - 20] - 1) * 100
             for i in range(20, len(mz))]
         s = sorted(series)
         pct = bisect.bisect_left(s, today_val) / len(s)
-        return f"margin 20d 变化 {today_val:+.2f}%（1 年分位 {pct * 100:.0f}%）→ " \
-            f"{'扩张' if pct >= 0.5 else '去杠杆'}"
+        return f"沪市(SSE)融资余额 20d 变化 {today_val:+.2f}%（1 年分位 " \
+            f"{pct * 100:.0f}%）→ {'扩张' if pct >= 0.5 else '去杠杆'}"
     except Exception:
-        return "环境不可判定（margin 数据不可得）"
+        return "环境不可判定（沪市 SSE margin 数据不可得）"
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--hits", default="reports/gap-backtest/hits.jsonl")
-    p.add_argument("--out", default="reports/gap-backtest/YYYY-MM.md")
+    # code-review：--out 缺省 = 按当前月真实路径（原模板字面量 'YYYY-MM.md'
+    # 会生成同名垃圾文件并谎报成功）
+    import datetime as _dt
+
+    p.add_argument(
+        "--out",
+        default=f"reports/gap-backtest/{_dt.datetime.now():%Y-%m}.md",
+        help="输出报告路径（缺省按当月）")
     p.add_argument("--as-of", default=None, help="评估截至日 YYYYMMDD（缺省今天）")
     args = p.parse_args()
 
@@ -240,6 +267,13 @@ def main() -> int:
                 items.append(r)
     finally:
         bs.logout()
+
+    # code-review #7（D5 fail-loud）：全部拉价失败 → n=0 时不得覆写既有报告
+    # 并假装成功——输出错误并 exit 1（空月与全失败必须可区分）。
+    if not items:
+        print("eval_forward: 全部标的拉价失败/记录不可解析——未生成报告，exit 1",
+              file=sys.stderr)
+        return 1
 
     stat = stats_report(items)
     groups = window_split(items)

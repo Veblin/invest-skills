@@ -253,13 +253,25 @@ def build_flow_options(
         return None
     margin_dates = set()
     margin_by = {}
+    # 口径统一（code-review #13）：rzrqye（融资融券合计，≈2× 融资余额）与
+    # rzye（融资余额）不可行级混用——列级选择：全行有 rzye 用 rzye，
+    # 否则用 rzrqye 并标注（akshare 中文键降级亦在此归一，code-review #8）。
+    has_rzye = any(
+        r.get("rzye") is not None for r in (margin_rows or []))
+    margin_caliber = "rzye" if has_rzye else ("rzrqye" if any(
+        r.get("rzrqye") is not None for r in (margin_rows or [])) else None)
     for r in margin_rows or []:
-        d = _fd(r.get("trade_date"))
+        td_raw = r.get("trade_date") or r.get("信用交易日期")
+        d = _fd(td_raw)
         if not d or d in margin_by:
             continue
-        raw = r.get("rzye")
-        if raw is None:
+        raw = None
+        if margin_caliber == "rzye":
+            raw = r.get("rzye")
+        elif margin_caliber == "rzrqye":
             raw = r.get("rzrqye")
+        if raw is None:
+            raw = r.get("融资余额")  # akshare 全市场汇总降级（中文键）
         sf = safe_float(raw)
         margin_by[d] = round(sf / 1e8, 2) if sf is not None else None
         margin_dates.add(d)
@@ -302,11 +314,26 @@ def build_flow_options(
     ]
     total_wan = sum(v for _, v in nb_series)
     pos = sum(1 for _, v in nb_series if v > 0)
+
+    def _last_of(m: dict) -> Any:
+        """取序列最后非 None 值（code-review #10：xaxis[-1] 并集末位可能只有
+        单系列——某系列早一交易日结束时 aria 谎报 N/A）。"""
+        for k in reversed(xaxis):
+            v = m.get(k)
+            if v is not None:
+                return v
+        return None
+
     payload = {
         "net_total": plain_num(total_wan),
         "pos_days": pos,
-        "close_latest": plain_num(price_by[xaxis[-1]]) if xaxis and price_by.get(xaxis[-1]) else None,
-        "margin_latest": plain_num(margin_by.get(xaxis[-1])) if xaxis else None,
+        "close_latest": plain_num(_last_of(price_by)),
+        "margin_latest": plain_num(_last_of(margin_by)),
+        "margin_caliber": margin_caliber or "不可得",
+        "margin_caliber_note": (
+            "融资余额(亿元)" if margin_caliber == "rzye"
+            else ("融资融券合计(亿元)" if margin_caliber == "rzrqye"
+                  else "融资余额(亿元，akshare 中文键降级)")),
     }
     return {
         # A-2：type=category 缺失时 ECharts 按 value 轴处理字符串 data → 错位。
@@ -405,8 +432,10 @@ def build_kline_options(
                 "color": "#ef4444", "color0": "#34d399",
                 "borderColor": "#ef4444", "borderColor0": "#34d399",
             },
-            # B-F5：tooltip 口径（价格元）
-            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_YUAN}},
+            # B-F5 注：candlestick 不设 valueFormatter——ECharts 对 K 线系列
+            # 传多维 OHLC 数组给 tooltip valueFormatter，v.toFixed 抛 TypeError
+            # 使 tooltip 永不渲染（code-review #5，jsdom 实证）。MA/成交量
+            # 标量系列保留各自口径 formatter。
         },
         *ma_series,
         {

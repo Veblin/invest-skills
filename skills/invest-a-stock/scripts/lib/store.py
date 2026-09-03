@@ -119,7 +119,9 @@ _SCHEMA_DDL = """
                 northbound_net_inflow REAL, northbound_direction TEXT, northbound_source TEXT,
                 -- 环境标签（JSON）
                 env_label TEXT,
-                collected_at TEXT DEFAULT (datetime('now'))
+                collected_at TEXT DEFAULT (datetime('now')),
+                -- v0.2.8 数据新鲜度审计（W1/code-review #4）：上海时区采集时刻 + 口径注记
+                data_note TEXT
             );
             CREATE TABLE IF NOT EXISTS etf_share_snapshots (
                 date TEXT,
@@ -208,6 +210,8 @@ def _apply_migrations(c: sqlite3.Connection) -> None:
         ("futures_oi_change_pct", "REAL"),
     ]:
         _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.2.8 迁移：数据新鲜度审计列（W1/code-review #4）——collected_at 老库已有
+    _add_column_if_missing(c, "market_snapshots", "data_note", "TEXT")
     # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
     # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
     _add_column_if_missing(c, "collections", "kind", "TEXT NOT NULL DEFAULT 'collect'")

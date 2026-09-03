@@ -36,11 +36,14 @@ def record(json_output: dict, scan_date: str, state: Path) -> int:
         for ln in state.read_text(encoding="utf-8").splitlines():
             if not ln.strip():
                 continue
+            # code-review #14：损坏/截断行必须原样保留（append 到 keep）——
+            # 旧实现跳过且不保留 → 下次成功写盘即永久删除该历史及其去重键，
+            # 后续扫描会重复追加同一命中（eval 样本与真实历史悄然分叉）。
+            keep.append(ln)
             try:
                 rec = json.loads(ln)
             except json.JSONDecodeError:
                 continue
-            keep.append(ln)
             seen.add((str(rec.get("scan_date", "")), str(rec.get("ts_code", ""))))
 
     added = 0

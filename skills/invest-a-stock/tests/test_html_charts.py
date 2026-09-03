@@ -192,7 +192,8 @@ class TestFlowOptions:
         assert vals[0] == pytest.approx(100.0)          # rzye 1e10 元 → 100.0 亿元
 
     def test_flow_akshare_chinese_key_tolerated(self):
-        """akshare 中文键（融资余额/融资买入额）→ 无 rzye/rzrqye → 空槽 None 不崩。"""
+        """akshare 中文键降级（code-review #8）：无 rzye/rzrqye 时读取
+        「融资余额」中文键（collector 全市场汇总形态），不再静默空系列。"""
         from lib.html_charts import build_flow_options
 
         margin_cn = [
@@ -202,7 +203,11 @@ class TestFlowOptions:
         opts = build_flow_options(_flow_data_7d(), margin_cn, _price_rows_7d())
         assert opts is not None
         margin_series = {s["name"]: s for s in opts["series"]}["融资余额(亿元)"]
-        assert all(row[1] is None for row in margin_series["data"])
+        vals = [row[1] for row in margin_series["data"]
+                if isinstance(row, list) and row[1] is not None]
+        assert vals  # 中文键已被映射出值（不再全 None）
+        note = opts["annotation_payload"]["margin_caliber_note"]
+        assert "融资余额" in note and "亿元" in note
 
     def test_flow_no_data_returns_none(self):
         from lib.html_charts import build_flow_options
@@ -385,7 +390,9 @@ class TestB3RBandSortAndTooltip:
         assert fmt["收盘价(元)"].endswith("'元'")
 
     def test_kline_tooltip_units(self):
-        """B-F5：K 线 candlestick/成交量/MA 带口径。"""
+        """B-F5：MA/成交量带口径；candlestick **不得**设 valueFormatter
+        （code-review #5：ECharts 传多维 OHLC 数组 → v.toFixed TypeError，
+        tooltip 永不渲染）。"""
         from lib.html_charts import build_kline_options
         from lib.technical import compute
 
@@ -393,7 +400,7 @@ class TestB3RBandSortAndTooltip:
         opts = build_kline_options(rows, macd_series=compute(rows)["momentum"]["macd_series"])
         assert opts is not None
         by_name = {s["name"]: s for s in opts["series"]}
-        assert "'元'" in by_name["K线"]["tooltip"]["valueFormatter"]["_js"]
+        assert "tooltip" not in by_name["K线"]  # 多维数组值不适配标量 formatter
         assert "'手'" in by_name["成交量"]["tooltip"]["valueFormatter"]["_js"]
         assert "'元'" in by_name["MA5"]["tooltip"]["valueFormatter"]["_js"]
 

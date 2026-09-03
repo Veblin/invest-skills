@@ -20,6 +20,7 @@ ensure_invest_a_scripts_on_path()
 from dates import (  # noqa: E402
     shanghai_now,
     shanghai_session_date,
+    shanghai_session_date_degraded,
     shanghai_today,
 )
 from lib import env  # noqa: E402
@@ -66,6 +67,10 @@ _MARKET_SNAPSHOT_COLUMNS = (
     "northbound_net_inflow", "northbound_direction", "northbound_source",
     "futures_basis_pct",
     "env_label",
+    # v0.2.8 数据新鲜度审计（W1/code-review #4）：persist 列须含审计字段，
+    # 否则 collected_at 落库为 SQLite 默认 UTC、data_note 直接丢失
+    "collected_at",
+    "data_note",
 )
 
 
@@ -131,14 +136,18 @@ def snapshot() -> dict[str, Any]:
     _fetch_northbound(result)
     _fetch_futures(result)
     _compute_labels(result)
-    _auto_persist(result)
 
-    # v0.2.9 新鲜度审计字段：collected_at（上海时区）+ data_note（回拨场景说明）
+    # v0.2.8 新鲜度审计字段：collected_at（上海时区）+ data_note——须在
+    # _auto_persist 之前赋值（persist 列已含二者，code-review #4：此前后置
+    # 赋值导致审计链只存在于瞬态 dict，落库为 SQLite 默认 UTC/直接丢失）。
+    # degraded 门（code-review #3）：日历降级（无法区分工作日假日）时即便
+    # date == today 也必须标注口径——防止 2026-09-02 类误报在降级路径复发。
     result["collected_at"] = shanghai_now().strftime("%Y-%m-%d %H:%M:%S")
-    if result["date"] != shanghai_today():
+    if result["date"] != shanghai_today() or shanghai_session_date_degraded():
         result["data_note"] = (
-            f"开盘前/非交易日快照：盘面类字段（涨停/涨跌比/成交额）为 "
+            f"开盘前/非交易日或日历降级快照：盘面类字段（涨停/涨跌比/成交额）为 "
             f"{result['date']} 收盘数据")
+    _auto_persist(result)
 
     # 状态信封：全部数据维度失败 → "all_failed"，使 data_bridge 的失败
     # 不缓存语义（_FAILURE_STATUSES）生效。否则全 None 快照会被 5min 缓存

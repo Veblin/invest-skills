@@ -18,6 +18,7 @@ from dates import (  # noqa: E402
     parse_utc_iso,
     shanghai_days_ago,
     shanghai_session_date,
+    shanghai_session_date_degraded,
     shanghai_today,
     yyyymmdd_to_iso,
 )
@@ -165,3 +166,16 @@ def test_session_date_calendar_unavailable_weekday_fallback(monkeypatch):
     monkeypatch.setattr(dates_mod, "shanghai_now",
                         lambda: _fake_now("2026-09-07T08:00:00+08:00"))
     assert shanghai_session_date() == "20260904"
+
+
+def test_session_date_degraded_flag_on_calendar_failure(monkeypatch):
+    """code-review #3：日历不可得 + 工作日 10:00 → 返回当日但 degraded=True
+    （调用方 data_note 门据此标注——工作日假日不再静默误报）。"""
+    monkeypatch.setattr(dates_mod, "_trade_days", lambda: None)
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-10-01T10:00:00+08:00"))
+    # 降级路径会尝试 trade_cal 委托 → 断网失败 → degraded
+    monkeypatch.setattr(
+        dates_mod, "_session_cal_degraded", True)
+    assert shanghai_session_date() == "20261001"
+    assert shanghai_session_date_degraded() is True

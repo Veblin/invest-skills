@@ -1298,7 +1298,14 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
             margin_rows = []
             if isinstance(ms, dict):
                 margin_recs = (ms.get("margin") or {}).get("records", [])
-                margin_rows = margin_recs if isinstance(margin_recs, list) else []
+                margin_rows = (margin_recs if isinstance(margin_recs, list)
+                               else [])
+            # code-review #6：margin records（collector 存近 10 行）必须与
+            # 北向窗口（nb[-7:]）同窗切片——否则 x 轴并集膨胀，前 N 槽只有
+            # 孤立 margin 线段（无柱无线），与图题「7日净流入」不符。
+            n_nb = len(flow_data)
+            if n_nb and len(margin_rows) > n_nb:
+                margin_rows = margin_rows[-n_nb:]
             kline_asc = sort_kline_asc(_get_dim_data(dims, "kline") or [])
             price_rows = [
                 (r.get("trade_date"), r.get("close"))
