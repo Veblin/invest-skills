@@ -77,7 +77,7 @@ else: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-
   cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
   uv run python -c "from market_microstructure import compute_chip_clearance; import json; print(json.dumps(compute_chip_clearance(), ensure_ascii=False))" 2>/dev/null
 
-  # 7. 跨资产背景（E6 v0.2.8：data_bridge.get_macro + E3 序列消费；宏观不可得时整段标「未获取」）
+  # 7. 跨资产背景（E6 v0.2.7：data_bridge.get_macro + E3 序列消费；宏观不可得时整段标「未获取」）
   #    get_macro 走 data_bridge 缓存（TTL 7d / 交易时段 4h）；best-effort 落库
   #    macro_snapshots 供 E3 序列消费（VIX 20 日变化 / PMI 连续方向 / DGS30 分位 / 主权债复算）
   #    ⚠️ store/macro 在 lib 包内（相对导入），须 ensure_invest_a_scripts_on_path
@@ -219,7 +219,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 不同资金主体（外资/杠杆/量能/机构对冲盘）行为是否分化：{同向 = 共识；背离 = 结构分歧，标注各自口径与局限}
 [证据强度: ...]
 
-## 🌐 跨资产背景（E6 v0.2.8）
+## 🌐 跨资产背景（E6 v0.2.7）
 
 **[事实]**
 - {macro_signal_label 首行摘要——PMI/CPI/LPR/VIX/美 10Y/布油等锚点一句话；全部不可得时为「宏观数据不可得」}

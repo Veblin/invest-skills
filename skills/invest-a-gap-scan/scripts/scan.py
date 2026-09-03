@@ -183,20 +183,6 @@ def build_parser() -> argparse.ArgumentParser:
 # ======================================================================
 
 
-_SESSION_CLOSE = datetime.strptime("15:00", "%H:%M").time()
-
-
-def _prev_close_date(now: datetime) -> str:
-    """now 之前最近已收盘交易日（A 股收盘 15:00 后数据才含当日完整 bar）。
-
-    code-review #2：--record 的数据日期语义——盘前/盘中运行扫描数据只到
-    前一交易日（当日最后 bar 未确认、缺口不可判定），必须回拨。
-    """
-    from trade_cal import prev_trading_day  # noqa: PLC0415
-
-    return prev_trading_day(now.date()).strftime("%Y%m%d")
-
-
 def _fetch_trade_cal(start_date: str, end_date: str) -> tuple[list[str], bool]:
     """获取交易日列表（C8 收敛：委托 skills/lib/trade_cal.fetch_trade_cal）。"""
     from trade_cal import fetch_trade_cal as _fetch
@@ -508,16 +494,13 @@ def _run_scan(
     # W2/M2：--record → 命中落前瞻回测状态文件（幂等）
     if args.record:
         try:
-            from record_hits import DEFAULT_STATE, record
-            from dates import shanghai_now
+            from record_hits import DEFAULT_STATE, data_cutoff_date, record
 
-            # code-review #2：扫描 bars 只到最近已收盘交易日（当日 15:00 前
-            # 最后 bar 未确认、缺口不可判定）——记录日必须取**数据实际截止日**
-            # （盘前/盘中 = 前一交易日），否则幂等键锁死跨会话错位的记录，
-            # 且 eval 会以「信号发布时点不可观测的当日价」为进场锚。
-            now = shanghai_now()
-            data_date = now.strftime("%Y%m%d") \
-                if now.time() >= _SESSION_CLOSE else _prev_close_date(now)
+            # code-review 二轮 A：记录日 = 数据实际截止交易日（交易日 ≥15:00
+            # → 今日；盘前/盘中/周末/节假日 → prev_trading_day）。与独立 CLI
+            # 共用 data_cutoff_date——双入口日期语义必须一致（旧实现只比较
+            # 墙钟 15:00，周末盘后把非交易日标为 data_date → 幂等键复写）。
+            data_date = data_cutoff_date()
             added = record(json.loads(json_out or format_json(result)),
                            data_date, DEFAULT_STATE)
             logger.info("record_hits: %d 条新增（data_date=%s）→ %s",

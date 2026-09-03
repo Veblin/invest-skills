@@ -83,7 +83,7 @@ def snapshot() -> dict[str, Any]:
 
     每个指标独立采集，失败不阻塞其他维度。
 
-    v0.2.9 数据新鲜度审计（F-audit）：date 取 shanghai_session_date() —— 数据
+    v0.2.8 数据新鲜度审计（F-audit）：date 取 shanghai_session_date() —— 数据
     实际所属交易日。开盘前/非交易日采集时，盘面类字段（涨停池/涨跌比/成交额）
     实为上一交易日收盘数据，若按日历日标注会造成「当日标签 + 昨日数据」错位
     （2026-09-02 误报事故根因）；collected_at 与 data_note 供审计/呈现口径。
@@ -175,6 +175,12 @@ def _auto_persist(snap: dict) -> None:
     save_snapshot() 自身仍以 INSERT OR REPLACE 补全 Tier 2 + v2 标签。
 
     此函数静默失败：持久化异常不阻塞 snapshot() 正常返回。
+
+    审计字段语义（二轮 E）：collected_at/data_note 随 merge 覆盖为**最近采集
+    时刻/最新口径**（自 2026-09-03 起在 whitelist 内——审计意图 = 能追溯
+    「这条数据何时采的/是否降级」，非首次写入时间）；老库行 collected_at 为
+    SQLite UTC 默认值（datetime('now')），与新行上海时区混合——读取侧如做
+    时区解析需兼容两种形态（当前无 DB 读取消费方）。
     """
     try:
         # 非交易日检测

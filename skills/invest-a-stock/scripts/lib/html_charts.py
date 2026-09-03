@@ -253,25 +253,35 @@ def build_flow_options(
         return None
     margin_dates = set()
     margin_by = {}
-    # 口径统一（code-review #13）：rzrqye（融资融券合计，≈2× 融资余额）与
-    # rzye（融资余额）不可行级混用——列级选择：全行有 rzye 用 rzye，
-    # 否则用 rzrqye 并标注（akshare 中文键降级亦在此归一，code-review #8）。
+    # 口径统一（code-review #13 二轮 B）：rzrqye（融资融券合计 ≈2× 融资余额）
+    # 与 rzye（融资余额）不可行级混用——列级选择；**渲染层口径随 caliber
+    # 动态命名**（series/yAxis/aria），fallback 数值不得再标「融资余额」。
     has_rzye = any(
         r.get("rzye") is not None for r in (margin_rows or []))
-    margin_caliber = "rzye" if has_rzye else ("rzrqye" if any(
-        r.get("rzrqye") is not None for r in (margin_rows or [])) else None)
+    has_rzrqye = any(
+        r.get("rzrqye") is not None for r in (margin_rows or []))
+    has_cn = any(
+        r.get("融资余额") is not None for r in (margin_rows or []))
+    if has_rzye:
+        margin_caliber = "rzye"
+    elif has_rzrqye:
+        margin_caliber = "rzrqye"
+    elif has_cn:
+        margin_caliber = "akshare_cn"  # 全市场汇总（非个股，尺度不同）
+    else:
+        margin_caliber = None
     for r in margin_rows or []:
         td_raw = r.get("trade_date") or r.get("信用交易日期")
         d = _fd(td_raw)
         if not d or d in margin_by:
             continue
-        raw = None
-        if margin_caliber == "rzye":
-            raw = r.get("rzye")
-        elif margin_caliber == "rzrqye":
-            raw = r.get("rzrqye")
-        if raw is None:
-            raw = r.get("融资余额")  # akshare 全市场汇总降级（中文键）
+        # 收紧：caliber 选定后只取该键——行级缺键留 None（不再跨键混取不同
+        # 尺度值；akshare 中文键仅在无 tushare 键时整体启用）
+        raw = {
+            "rzye": r.get("rzye"),
+            "rzrqye": r.get("rzrqye"),
+            "akshare_cn": r.get("融资余额"),
+        }.get(margin_caliber or "")
         sf = safe_float(raw)
         margin_by[d] = round(sf / 1e8, 2) if sf is not None else None
         margin_dates.add(d)
@@ -284,6 +294,13 @@ def build_flow_options(
         if d and sf is not None:
             price_by[d] = round(sf, 2)
     xaxis = sorted(set(nb_dates) | margin_dates | set(price_by))
+    # 二轮 B：口径标签须在 series 构建前定（series/yAxis 名动态随 caliber）
+    _CALIBER_LABEL = {
+        "rzye": "融资余额(亿元)",
+        "rzrqye": "融资融券合计(亿元)",
+        "akshare_cn": "融资余额(亿元，全市场汇总)",
+    }
+    margin_label = _CALIBER_LABEL.get(margin_caliber or "", "融资余额(亿元)")
     series = [
         {
             "name": "北向净买入(万元)",
@@ -294,7 +311,9 @@ def build_flow_options(
             "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_WAN}},
         },
         {
-            "name": "融资余额(亿元)",
+            # 二轮 B：系列名随 caliber 动态（rzrqye ≈2× / akshare 全市场汇总
+            # 不得标「融资余额」——口径必须出现在用户可见层）
+            "name": margin_label,
             "type": "line",
             "showSymbol": False,
             "connectNulls": True,
@@ -330,10 +349,7 @@ def build_flow_options(
         "close_latest": plain_num(_last_of(price_by)),
         "margin_latest": plain_num(_last_of(margin_by)),
         "margin_caliber": margin_caliber or "不可得",
-        "margin_caliber_note": (
-            "融资余额(亿元)" if margin_caliber == "rzye"
-            else ("融资融券合计(亿元)" if margin_caliber == "rzrqye"
-                  else "融资余额(亿元，akshare 中文键降级)")),
+        "margin_caliber_note": margin_label,
     }
     return {
         # A-2：type=category 缺失时 ECharts 按 value 轴处理字符串 data → 错位。
@@ -349,7 +365,7 @@ def build_flow_options(
         "yAxis": [
             {"name": "北向净买入(万元)", "scale": True},
             {"name": "收盘价(元)", "scale": True, "position": "right", "offset": 48},
-            {"name": "融资余额(亿元)", "scale": True, "position": "right"},
+            {"name": margin_label, "scale": True, "position": "right"},
         ],
         "dataZoom": [{"type": "inside"}, {"type": "slider", "height": 16}],
         "tooltip": {"trigger": "axis"},
@@ -425,9 +441,10 @@ def build_kline_options(
             "data": candles,
             "xAxisIndex": 0,
             "yAxisIndex": 0,
-            # v6 默认主题重做 → 显式涨红跌绿（A10/A11；B3-R B-F7 已裁定：
-            # A 股惯例红涨 #ef4444 / 绿跌 #34d399，与全局 --up 主题（绿）有意
-            # 解耦——勿改回 CSS 变量、勿统一到 --up）
+            # A 股惯例红涨 #ef4444 / 绿跌 #34d399（B3-R B-F7 裁定）。
+            # 二轮 D：全局主题现亦红涨（--up #f87171）——canvas 常量无法引用
+            # CSS 变量，此处与 --up 同义不同值；改色时两处同步，勿再写「与
+            # 主题解耦」（前提已被 2026-09-03 全局统一移除）。
             "itemStyle": {
                 "color": "#ef4444", "color0": "#34d399",
                 "borderColor": "#ef4444", "borderColor0": "#34d399",

@@ -143,7 +143,9 @@ a{color:var(--ac);text-decoration:none}
 .ft td{font-family:var(--font-mono);font-size:var(--text-xs);padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr);text-align:right;color:var(--tx-m)}
 .ft td:first-child{text-align:left;color:var(--tx-f)}
 .ft tr:last-child td{border-bottom:none;font-weight:600;color:var(--tx)}
-.roe-hi{color:var(--up)!important}.roe-lo{color:var(--wn)!important}
+/* 二轮 C：ROE 高低是质量徽章（非涨跌方向）——高走 --ok（绿），与 .b-ok
+   同语义；翻色后留 var(--up) 会渲染红（同页「好」一红一绿矛盾） */
+.roe-hi{color:var(--ok)!important}.roe-lo{color:var(--wn)!important}
 
 /* flow（B3-R B-F4：.fl-in/.fl-out 等旧 Chart.js 残留类已死，删除） */
 
@@ -1325,13 +1327,16 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
             flow_opts = build_flow_options(flow_data, margin_rows, price_rows)
         if flow_opts is not None:
             p = flow_opts["annotation_payload"]
+            # 二轮 B：两融口径随 caliber 动态（rzrqye/全市场汇总不得标「融资余额」）
+            margin_note = (p.get("margin_caliber_note") or "融资余额(亿元)")
             flow_label = (
                 f"资金流图：北向净流向合计 {_fmt_aria_num(p.get('net_total'))} 万元"
                 f"（净入 {p.get('pos_days')} 天），最新收盘 {_fmt_aria_num(p.get('close_latest'))} 元，"
-                f"融资余额 {_fmt_aria_num(p.get('margin_latest'))} 亿元"
+                f"两融 {_fmt_aria_num(p.get('margin_latest'))} 亿元"
+                f"（口径：{margin_note.replace('(亿元)', '')}）"
             )
             flow_div = _chart_block(
-                "flowChart", "资金流（北向净买入 / 融资余额 / 收盘价）",
+                "flowChart", "资金流（北向净买入 / 两融余额 / 收盘价）",
                 flow_opts, flow_label, style="height:240px",
             )
         else:

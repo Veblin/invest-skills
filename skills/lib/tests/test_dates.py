@@ -126,7 +126,7 @@ def test_fmt_fetched_at_unparseable_fallback():
     assert fmt_fetched_at(None) == ""
 
 
-# --- v0.2.9 W1: shanghai_session_date（数据实际所属交易日，2026-09-02 误报根因） ---
+# --- v0.2.8 W1: shanghai_session_date（数据实际所属交易日，2026-09-02 误报根因） ---
 
 def test_session_date_session_day_after_open(monkeypatch):
     """交易日盘中（≥09:25）→ 当日。"""

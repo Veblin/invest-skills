@@ -192,8 +192,9 @@ class TestFlowOptions:
         assert vals[0] == pytest.approx(100.0)          # rzye 1e10 元 → 100.0 亿元
 
     def test_flow_akshare_chinese_key_tolerated(self):
-        """akshare 中文键降级（code-review #8）：无 rzye/rzrqye 时读取
-        「融资余额」中文键（collector 全市场汇总形态），不再静默空系列。"""
+        """akshare 中文键降级（code-review #8 + 二轮 B）：无 rzye/rzrqye 时读取
+        「融资余额」中文键（collector 全市场汇总形态）并**动态标注口径**——
+        系列名不得再伪装成个股融资余额。"""
         from lib.html_charts import build_flow_options
 
         margin_cn = [
@@ -202,12 +203,15 @@ class TestFlowOptions:
         ]
         opts = build_flow_options(_flow_data_7d(), margin_cn, _price_rows_7d())
         assert opts is not None
-        margin_series = {s["name"]: s for s in opts["series"]}["融资余额(亿元)"]
+        names = {s["name"] for s in opts["series"]}
+        assert "融资余额(亿元)" not in names  # 不再伪装个股口径
+        cn_name = next(n for n in names if "全市场汇总" in n)
+        margin_series = {s["name"]: s for s in opts["series"]}[cn_name]
         vals = [row[1] for row in margin_series["data"]
                 if isinstance(row, list) and row[1] is not None]
         assert vals  # 中文键已被映射出值（不再全 None）
         note = opts["annotation_payload"]["margin_caliber_note"]
-        assert "融资余额" in note and "亿元" in note
+        assert "全市场汇总" in note
 
     def test_flow_no_data_returns_none(self):
         from lib.html_charts import build_flow_options
@@ -407,8 +411,8 @@ class TestB3RBandSortAndTooltip:
 
 class TestKlineRedUpGreenDown:
     def test_kline_series_red_up_green_down_isolated_from_theme(self):
-        """B3-R ⑧（B-F7 已裁定 A 股红涨绿跌）：蜡烛红涨 #ef4444，options 内
-        不引用 CSS var(--up)（与主题绿涨有意解耦）。"""
+        """B3-R ⑧（B-F7 已裁定 A 股红涨绿跌）：蜡烛红涨 #ef4444（canvas 常量
+        无法引用 CSS 变量——与主题 --up 红涨同义不同值，二轮 D：非「解耦」）。"""
         from lib.html_charts import build_kline_options
 
         opts = build_kline_options(make_kline_rows(120))

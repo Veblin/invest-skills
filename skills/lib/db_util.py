@@ -46,8 +46,11 @@ def upsert_daily_rows(
     - ``merge=True``：``INSERT ... ON CONFLICT(pk) DO UPDATE SET``
       ``col=COALESCE(excluded.col, table.col)`` — 逐列合并：新值非 NULL 覆盖，
       新值 NULL 保留旧值。防同一天第二次写入（部分指标 fetch 失败为 None、
-      或 7d TTL 缓存旧值）冲掉早先写入的好值。冲突时不更新 PK 列，
-      ``collected_at`` 类时间戳列保留首次写入值。
+      或 7d TTL 缓存旧值）冲掉早先写入的好值。冲突时不更新 PK 列。
+      时间戳列语义由**调用方是否传入**决定：传入（如 market_snapshots 的
+      collected_at 自 2026-09-03 起在 journal 持久化 whitelist 内）→ 随合并
+      覆盖为「最近采集时刻」；不传入 → COALESCE 保留首次写入值。二轮 E：
+      db_util 不预设「时间戳列保留首写」——审计语义归调用方声明。
     - ``exclude_cols``：仅 merge=True 时生效——这些列不进入 DO UPDATE SET
       子句（冲突时整列保留表的旧值），但仍参与 INSERT 的 VALUES（全新行写入
       这些列的值）。用于"冲突时保留表中更完整的衍生值、全新行仍写本行值"

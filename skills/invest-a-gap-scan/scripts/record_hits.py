@@ -26,6 +26,39 @@ SCHEMA_FIELDS = (
 
 DEFAULT_STATE = Path("reports/gap-backtest/hits.jsonl")
 
+_SESSION_CLOSE = __import__("datetime").datetime.strptime(
+    "15:00", "%H:%M").time()
+
+
+def data_cutoff_date(now=None) -> str:
+    """扫描数据实际截止交易日（code-review 二轮 A，scan.py 与独立 CLI 共用）。
+
+    - 今日为交易日且上海 ≥15:00（日线已发布）→ 今日
+    - 其余（盘前/盘中/**周末/节假日 ≥15:00**——bars 只到前一交易日）→
+      prev_trading_day（SSE 交易日历，假日感知）
+
+    两入口（scan.py --record 与 record_hits.py 独立 CLI）必须共用同一 helper：
+    各自实现会导致同一 hits.jsonl 内日期语义分歧（旧 scan 门只比较墙钟 15:00
+    不查交易日——周末盘后运行把周六标为 data_date，幂等键复写重复记录）。
+    """
+    import datetime as _dt
+    from datetime import datetime as _now_dt
+    from zoneinfo import ZoneInfo
+
+    if now is None:
+        now = _now_dt.now(ZoneInfo("Asia/Shanghai"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+    from _invest_path import ensure_invest_a_scripts_on_path  # noqa: PLC0415
+
+    ensure_invest_a_scripts_on_path()
+    from trade_cal import fetch_trade_cal, prev_trading_day  # noqa: PLC0415
+
+    ymd = now.strftime("%Y%m%d")
+    days, _ = fetch_trade_cal(ymd, ymd)
+    if days and now.time() >= _SESSION_CLOSE:
+        return ymd
+    return prev_trading_day(now.date()).strftime("%Y%m%d")
+
 
 def record(json_output: dict, scan_date: str, state: Path) -> int:
     """追加命中到状态文件；返回新增行数。同 (scan_date, ts_code) 幂等跳过。"""
@@ -77,14 +110,9 @@ def record(json_output: dict, scan_date: str, state: Path) -> int:
 
 
 def _default_scan_date() -> str:
-    """默认扫描日 = 上海会话日（数据实际所属交易日，与 snapshot 同口径）。"""
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-    from _invest_path import ensure_invest_a_scripts_on_path
-
-    ensure_invest_a_scripts_on_path()
-    from dates import shanghai_session_date
-
-    return shanghai_session_date()
+    """默认扫描日 = 数据实际截止交易日（code-review 二轮 A：09:25 会话语义
+    会误标盘中扫描——与 scan.py --record 门共用 data_cutoff_date）。"""
+    return data_cutoff_date()
 
 
 def main() -> int:

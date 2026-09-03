@@ -268,11 +268,16 @@ def main() -> int:
     finally:
         bs.logout()
 
-    # code-review #7（D5 fail-loud）：全部拉价失败 → n=0 时不得覆写既有报告
-    # 并假装成功——输出错误并 exit 1（空月与全失败必须可区分）。
-    if not items:
-        print("eval_forward: 全部标的拉价失败/记录不可解析——未生成报告，exit 1",
+    # code-review #7（D5 fail-loud）+ 二轮 F：空月（hits 文件无记录，合法）
+    # 与全失败（有记录但拉价全挂，异常）必须可区分——
+    # 空月 → exit 0 不产报告不覆写；全失败 → exit 1。
+    if not recs:
+        print("eval_forward: hits.jsonl 无记录（空月），跳过——不生成报告",
               file=sys.stderr)
+        return 0
+    if not items:
+        print("eval_forward: 有记录但全部标的拉价失败/不可解析——"
+              "未生成报告（exit 1，勿覆写既有月报）", file=sys.stderr)
         return 1
 
     stat = stats_report(items)
