@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from lib.nums import ONE_PER_YI
+from lib.nums import ONE_PER_YI, safe_float
 from lib.technical import compute, sort_kline_asc
 
 from .shared_dates import fmt_fetched_at, yyyymmdd_to_iso as _to_iso_date
@@ -136,14 +136,7 @@ a{color:var(--ac);text-decoration:none}
 .ft tr:last-child td{border-bottom:none;font-weight:600;color:var(--tx)}
 .roe-hi{color:var(--up)!important}.roe-lo{color:var(--wn)!important}
 
-/* flow */
-.flr{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) 0;border-bottom:1px solid var(--bdr)}
-.flr:last-child{border-bottom:none}
-.fldate{font-family:var(--font-mono);font-size:var(--text-xs);color:var(--tx-f);width:48px}
-.flbar{height:6px;border-radius:3px;min-width:2px}
-.fl-in{background:var(--up)}.fl-out{background:var(--dn)}
-.flval{font-family:var(--font-mono);font-size:var(--text-xs);width:64px;text-align:right}
-.fp{color:var(--up)}.fn{color:var(--dn)}
+/* flow（B3-R B-F4：.fl-in/.fl-out 等旧 Chart.js 残留类已死，删除） */
 
 /* holder */
 .hlr{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) 0;border-bottom:1px solid var(--bdr)}
@@ -228,13 +221,33 @@ function applyChartTheme(chart){
   const isDark=document.documentElement.getAttribute('data-theme')!=='light';
   const tc=isDark?'#8892a4':'#6b7a99';
   const gc=isDark?'rgba(255,255,255,.06)':'rgba(0,0,0,.06)';
-  chart.setOption({
-    textStyle:{color:tc},
+  const o=chart.getOption();
+  const ax=(a)=>Object.assign({},a||{},
+    {axisLabel:Object.assign({},(a&&a.axisLabel)||{},{color:tc}),
+     axisLine:Object.assign({},(a&&a.axisLine)||{},{lineStyle:{color:isDark?'rgba(255,255,255,.15)':'rgba(0,0,0,.15)'}}),
+     splitLine:Object.assign({},(a&&a.splitLine)||{},{lineStyle:{color:gc}})});
+  const patch={
+    textStyle:{color:tc,fontFamily:'"Inter","PingFang SC","Noto Sans SC",system-ui,sans-serif'},  // B-F6：与 CSS --font-body 一致
     legend:{textStyle:{color:tc}},
-    tooltip:{backgroundColor:isDark?'#1c2128':'#fff',borderColor:isDark?'rgba(255,255,255,.1)':'rgba(0,0,0,.1)',textStyle:{color:tc}},
-    xAxis:{axisLabel:{color:tc},axisLine:{lineStyle:{color:isDark?'rgba(255,255,255,.15)':'rgba(0,0,0,.15)'}}},
-    yAxis:{axisLabel:{color:tc},splitLine:{lineStyle:{color:gc}}}
-  });
+    tooltip:{backgroundColor:isDark?'#1c2128':'#fff',borderColor:isDark?'rgba(255,255,255,.1)':'rgba(0,0,0,.1)',textStyle:{color:tc}}
+  };
+  // D-3：kline 3 grid / flow 3 yAxis 均为数组 → 逐轴合并（旧对象形态只合并 axis[0]）
+  if(Array.isArray(o.xAxis))patch.xAxis=o.xAxis.map(ax);else if(o.xAxis)patch.xAxis=ax(o.xAxis);
+  if(Array.isArray(o.yAxis))patch.yAxis=o.yAxis.map(ax);else if(o.yAxis)patch.yAxis=ax(o.yAxis);
+  chart.setOption(patch);
+}
+function revive(v){
+  // _js 适配器（B3-R B-F5）：单键 {"_js":"..."} 常量表达式 → Function。
+  // 仅引擎常量 lambda（tooltip/axis formatter），禁止数据插值（审计 ④）。
+  if(Array.isArray(v))return v.map(revive);
+  if(v&&typeof v==='object'){
+    const ks=Object.keys(v);
+    if(ks.length===1&&ks[0]==='_js'&&typeof v._js==='string'){
+      try{return new Function('return ('+v._js+')')();}catch(e){return undefined;}
+    }
+    const out={};for(const k in v)out[k]=revive(v[k]);return out;
+  }
+  return v;
 }
 function renderCharts(){
   if(typeof echarts==='undefined')return;        // 资产缺失/加载失败 → 图表 disabled，页面完整（R-B4）
@@ -244,7 +257,7 @@ function renderCharts(){
     try{
       const prev=echarts.getInstanceByDom(el);if(prev)prev.dispose();
       const chart=echarts.init(el,null,{renderer:'svg'});   // svg renderer 供打印（T3-5）
-      chart.setOption(JSON.parse(raw),true);
+      chart.setOption(revive(JSON.parse(raw)),true);
       applyChartTheme(chart);
       kChartInstances[el.id||'c-'+Math.random()]=chart;
     }catch(e){console.warn('chart init fail',e);}   // 单个图表失败不阻塞页面
@@ -388,11 +401,23 @@ def _html_valuation(
 ) -> str:
     band_block = f'<div class="card" style="margin-top:var(--space-4)">{band_html}</div>' if band_html else ""
     if not pe_val or pe_val == "--":
+        # B3-R ⑨：估值卡无数据（亏损期/PE 缺失）时不得静默丢弃分位带位——
+        # band 与 pe 卡独立构建：真图（历史正数足够）并入；否则给统一
+        # 「数据不可得」提示卡（不再重复显示构建侧占位文本）。
+        if "data-echart" in band_html:
+            band_out = band_block
+        else:
+            band_out = (
+                '<div class="card" style="margin-top:var(--space-4);padding:'
+                'var(--space-4);text-align:center;color:var(--tx-f);'
+                'font-size:var(--text-xs)">估值分位带图：数据不可得（亏损期/'
+                'PE 缺失或有效正数不足 20 日）</div>')
         return f'''<section id="valuation">
   <div class="sh"><span class="st">估值分析</span><div class="sd"></div><span class="ss">数据不可得</span></div>
   <div class="card" style="padding:var(--space-10);text-align:center">
-    <div style="font-size:var(--text-sm);color:var(--tx-f)">估值维度无数据，请配置 Tushare Token 获取历史估值序列。</div>
+    <div style="font-size:var(--text-sm);color:var(--tx-f)">估值维度无数据（亏损期/PE 缺失），请配置 Tushare Token 获取历史估值序列。</div>
   </div>
+  {band_out}
 </section>'''
     pe_pct_s = "0" if pe_pct is None else str(pe_pct)
     pb_pct_s = "0" if pb_pct is None else str(pb_pct)
@@ -443,9 +468,13 @@ def _html_valuation(
 
 
 # --- _html_financials ---
-def _html_financials(fin_table_html: str, fin_note: str) -> str:
+def _html_financials(fin_table_html: str, fin_note: str,
+                     fin_charts_html: str = "") -> str:
+    charts_block = (f'<div class="g2" style="margin-bottom:var(--space-4)">'
+                    f'{fin_charts_html}</div>') if fin_charts_html else ""
     return f'''<section id="financials">
   <div class="sh"><span class="st">财务指标</span><div class="sd"></div><span class="ss">近8期季报</span></div>
+  {charts_block}
   <div class="card">
     {fin_table_html}
     <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>{_html_mod.escape(fin_note)}</div>
@@ -470,6 +499,24 @@ def _aria_wrap(inner_html: str, label: str) -> str:
     """
     return (f'<section role="img" aria-label="{_html_mod.escape(label, quote=True)}" '
             f'aria-describedby="refs">{inner_html}</section>')
+
+
+def _chart_block(chart_id: str, title_html: str, opts: dict,
+                 aria_label: str, style: str = "height:320px") -> str:
+    """B3-R A-7：图表块统一构建（标题 + data-echart div + aria 包裹）。
+
+    转义语义单点：data-opts 属性 JSON 先 _json_safe 再 escape(quote=True)——
+    所有 data-echart 图表（kline/flow/band/财务×2）必须经此函数输出。
+    """
+    from lib.html_charts import _json_safe  # noqa: PLC0415
+
+    return _aria_wrap(
+        f'<div style="font-size:var(--text-sm);font-weight:600;'
+        f'margin-bottom:var(--space-3)">{title_html}</div>'
+        f'<div id="{chart_id}" data-echart style="{style}" '
+        f'data-opts="{_html_mod.escape(json.dumps(_json_safe(opts), ensure_ascii=False), quote=True)}"></div>',
+        aria_label,
+    )
 
 
 # --- _html_technicals ---
@@ -978,13 +1025,12 @@ def _extract_technical_html(dims: dict) -> dict:
                 f"，MACD DIF {_fmt_aria_num(p.get('macd_dif'))}、"
                 f"DEA {_fmt_aria_num(p.get('macd_dea'))}、柱 {_fmt_aria_num(p.get('macd_hist'))}"
             )
-        result["kline_html"] = _aria_wrap(
-            '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
-            'K 线图 <span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
-            f'近 {len(kd_tail)} 交易日 · MA5/20/60 · MACD(12,26,9)</span></div>'
-            f'<div id="klineChart" data-echart style="height:520px" '
-            f'data-opts="{_html_mod.escape(json.dumps(kline_opts, ensure_ascii=False), quote=True)}"></div>',
-            kline_label,
+        result["kline_html"] = _chart_block(
+            "klineChart",
+            'K 线图 <span style="font-size:var(--text-xs);font-weight:400;'
+            'margin-left:var(--space-2);color:var(--tx-f)">'
+            f'近 {len(kd_tail)} 交易日 · MA5/20/60 · MACD(12,26,9)</span>',
+            kline_opts, kline_label, style="height:520px",
         )
     else:
         result["kline_html"] = ('<div style="padding:1.5rem;text-align:center;color:var(--tx-f);'
@@ -1012,17 +1058,19 @@ def _extract_northbound_data(dims: dict) -> dict:
     pos = 0
     for r in recent:
         td = str(r.get("trade_date", ""))
-        if len(td) >= 10:
-            md = td[5:10]
-        elif len(td) >= 8:
-            md = td[4:6] + "-" + td[6:8]
+        # C-6/D-5：flow_data 轴槽位改全日期（携带年份，跨年不碰撞）；
+        # 前端 axisLabel formatter 只显 MM-DD。8 位 → YYYY-MM-DD。
+        if len(td) == 8 and td.isdigit():
+            fd = f"{td[0:4]}-{td[4:6]}-{td[6:8]}"
+        elif len(td) >= 10:
+            fd = td
         else:
-            md = td
-        nv = r.get("net_mf_vol", 0) or 0
+            fd = td
+        nv = safe_float(r.get("net_mf_vol")) or 0.0  # D-2：NaN/Inf 归 0
         flow_total += nv
         if nv > 0:
             pos += 1
-        result["flow_data"].append([md, round(nv, 2), td, None])
+        result["flow_data"].append([fd, round(nv, 2), td, None])
     result["total_flow"] = round(flow_total, 2)
     result["pos_days"] = pos
     result["has_data"] = True
@@ -1131,7 +1179,32 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     turnover_str = f"{turnover:.2f}%" if turnover is not None else "--"
 
     # ── 财务数据 ──
-    _, _, _, _, fin_table_html, fin_note = _extract_financials_data(dims)
+    # B3-R ④：恢复 pre-T3 被静默删除的 ROE/EPS 与扣非净利图（ECharts 版）
+    fin_labels, fin_roe, fin_eps, fin_profit, fin_table_html, fin_note = (
+        _extract_financials_data(dims))
+    fin_charts_html = ""
+    if fin_labels:
+        from lib.html_charts import (  # noqa: PLC0415
+            build_financial_profit_options, build_financial_roe_options,
+        )
+
+        roe_opts = build_financial_roe_options(fin_labels, fin_roe, fin_eps)
+        prof_opts = build_financial_profit_options(fin_labels, fin_profit)
+        if roe_opts is not None:
+            rp = roe_opts["annotation_payload"]
+            fin_charts_html += _chart_block(
+                "finRoeChart", "ROE / EPS 趋势", roe_opts,
+                f"财务趋势图：近8期 ROE {_fmt_aria_num(rp.get('latest_roe'))}%、"
+                f"EPS {_fmt_aria_num(rp.get('latest_eps'))} 元",
+                style="height:200px",
+            )
+        if prof_opts is not None:
+            pp = prof_opts["annotation_payload"]
+            fin_charts_html += _chart_block(
+                "finProfitChart", "扣非净利润（亿元）", prof_opts,
+                f"扣非净利润图：最新期 {_fmt_aria_num(pp.get('latest_profit_yi'))} 亿元",
+                style="height:200px",
+            )
 
     # ── 估值数据 ──
     val = _extract_valuation_data(dims)
@@ -1170,8 +1243,14 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         if flow_data:
             from lib.html_charts import build_flow_options
 
-            ms = _get_dim_data(dims, "market_structure")
-            margin_rows = ms.get("margin", []) if isinstance(ms, dict) else None
+            # B3-R ②：market_structure 是 collection 的 attach 容器（collector
+            # 直挂 collection["market_structure"]，不入 dimensions 注册表）→
+            # _get_dim_data 恒 None 致融资余额系列全空。直取容器。
+            ms = collection.get("market_structure") or {}
+            margin_rows = []
+            if isinstance(ms, dict):
+                margin_recs = (ms.get("margin") or {}).get("records", [])
+                margin_rows = margin_recs if isinstance(margin_recs, list) else []
             kline_asc = sort_kline_asc(_get_dim_data(dims, "kline") or [])
             price_rows = [
                 (r.get("trade_date"), r.get("close"))
@@ -1186,16 +1265,16 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
                 f"（净入 {p.get('pos_days')} 天），最新收盘 {_fmt_aria_num(p.get('close_latest'))} 元，"
                 f"融资余额 {_fmt_aria_num(p.get('margin_latest'))} 亿元"
             )
-            flow_div = _aria_wrap(
-                f'<div id="flowChart" data-echart style="height:240px" data-opts="{_html_mod.escape(json.dumps(flow_opts, ensure_ascii=False), quote=True)}"></div>',
-                flow_label,
+            flow_div = _chart_block(
+                "flowChart", "资金流（北向净买入 / 融资余额 / 收盘价）",
+                flow_opts, flow_label, style="height:240px",
             )
         else:
             flow_div = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">北向资金序列不足，资金流图未生成。</div>'
         nb_html = f'''
     <div style="display:flex;align-items:center;gap:var(--space-4);margin-bottom:var(--space-3);flex-wrap:wrap">
-      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--up)"></span>净流入</div>
-      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--dn)"></span>净流出</div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--dn)"></span>净流入</div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--up)"></span>净流出</div>
       <div style="margin-left:auto;display:flex;gap:var(--space-3)">
         <div class="ipill" style="padding:4px 10px"><span style="font-size:var(--text-xs);color:var(--tx-f)">7日净流入&nbsp;</span><span style="font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600;color:{flow_color}">{flow_total_str}</span></div>
         <div class="ipill" style="padding:4px 10px"><span style="font-size:var(--text-xs);color:var(--tx-f)">净入天数&nbsp;</span><span style="font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600">{flow_pos}/{flow_days}</span></div>
@@ -1249,12 +1328,12 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
                 f"中位数 {_fmt_aria_num(p.get('median'))}，亏损期占比 {_fmt_aria_num(p.get('loss_ratio_pct'))}%"
                 + (f"；{p.get('note')}" if p.get("note") else "")
             )
-            band_html = _aria_wrap(
-                '<div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">'
-                'PE(TTM) 历史分位带<span style="font-size:var(--text-xs);font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
-                f'{wl_txt}窗口 · 带内区间 P10~P90 · 虚线为中位数与当前值</span></div>'
-                f'<div id="valBand" data-echart style="height:320px" data-opts="{_html_mod.escape(json.dumps(band_opts, ensure_ascii=False), quote=True)}"></div>',
-                band_label,
+            band_html = _chart_block(
+                "valBand",
+                'PE(TTM) 历史分位带<span style="font-size:var(--text-xs);'
+                'font-weight:400;margin-left:var(--space-2);color:var(--tx-f)">'
+                f'{wl_txt}窗口 · 带内区间 P10~P90 · 虚线为中位数与当前值</span>',
+                band_opts, band_label,
             )
         else:
             band_html = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">PE 历史序列（窗口内有效正数不足 20 个交易日），分位带图未生成。</div>'
@@ -1269,7 +1348,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         val.get("pe_above_median", False), val.get("pb_above_median", False),
         band_html=band_html,
     )
-    financials = _html_financials(fin_table_html, fin_note)
+    financials = _html_financials(fin_table_html, fin_note, fin_charts_html)
     technicals = _html_technicals(
         tech.get("macd_html", ""), tech.get("rsi_kdj_html", ""), tech.get("boll_html", ""),
         tech.get("ma_grid_html", ""), "", tech.get("tech_source", ""),

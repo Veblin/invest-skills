@@ -61,10 +61,12 @@ class TestBandOptions:
 
     def test_band_xaxis_is_category(self):
         """B3 冒烟回修 Defect 1：xAxis 缺 type=category → ECharts 按 value 轴渲染，
-        data 日期数组被当作无效值丢弃，x 轴显示 0..n-1 序号而非日期。"""
+        data 日期数组被当作无效值丢弃，x 轴显示 0..n-1 序号而非日期。
+        B3-R A-1：用 >500 行（1210）样本真守卫——旧 lttb 采样只缩 xAxis.data
+        而 series x 保持全量索引 → 越界。"""
         from lib.html_charts import build_valuation_band_options
 
-        opts = build_valuation_band_options(make_daily_basic_series(120))
+        opts = build_valuation_band_options(make_daily_basic_series(1210))
         assert opts is not None
         assert opts["xAxis"].get("type") == "category"
         assert isinstance(opts["xAxis"]["data"], list) and len(opts["xAxis"]["data"]) > 0
@@ -72,6 +74,9 @@ class TestBandOptions:
         curve = next(s for s in opts["series"] if s["name"] == "PE(TTM)")
         assert all(isinstance(pt[0], int) for pt in curve["data"])
         assert max(pt[0] for pt in curve["data"]) < len(opts["xAxis"]["data"])
+        # 全量不降采样：轴与曲线均为 1210 段（lttb 已从 band 移除）
+        assert len(curve["data"]) == 1210
+        assert len(opts["xAxis"]["data"]) == 1210
 
     def test_band_median_matches_valuation_summary(self):
         """B3 冒烟回修 Defect 2：band 默认全量窗口 → median/window_label 与正文估值卡
@@ -131,7 +136,8 @@ class TestLttb:
 # ── T3-3 资金流图（北向 + 两融叠加价格） ──
 
 def _flow_data_7d() -> list[list]:
-    return [[f"07-{d:02d}", (1000.0 + d) * 10000, f"072907{d:02d}", None]
+    # C-6/D-5：生产形态 flow_data 槽位 0 为全日期 YYYY-MM-DD
+    return [[f"2026-07-{d:02d}", (1000.0 + d) * 10000, f"202607{d:02d}", None]
             for d in range(13, 20)][:7]
 
 
@@ -148,8 +154,9 @@ def _margin_rows_7d() -> list[dict]:
 
 
 def _price_rows_7d() -> list[tuple]:
-    return [("07-13", 150.0), ("07-14", 152.0), ("07-15", 149.0), ("07-16", 155.0),
-            ("07-17", 151.0), ("07-18", 153.0), ("07-19", 156.0)]
+    return [("2026-07-13", 150.0), ("2026-07-14", 152.0), ("2026-07-15", 149.0),
+            ("2026-07-16", 155.0), ("2026-07-17", 151.0), ("2026-07-18", 153.0),
+            ("2026-07-19", 156.0)]
 
 
 class TestFlowOptions:
@@ -203,6 +210,14 @@ class TestFlowOptions:
         assert build_flow_options([], None, []) is None
         assert build_flow_options(None, None, []) is None
 
+    def test_flow_xaxis_is_category(self):
+        """B3-R A-2：flow xAxis 缺 type=category → 字符串日期按 value 轴错位。"""
+        from lib.html_charts import build_flow_options
+
+        opts = build_flow_options(_flow_data_7d(), _margin_rows_7d(), _price_rows_7d())
+        assert opts is not None
+        assert opts["xAxis"].get("type") == "category"
+
 
 # ── T3-4 K 线图（OHLC + MA5/20/60 + 成交量 + MACD） ──
 
@@ -235,3 +250,163 @@ class TestKlineOptions:
 
         assert build_kline_options([], None) is None
         assert build_kline_options(make_kline_rows(20)) is None
+
+
+# ── B3-R ①/③: NaN/Infinity JSON 安全 ──
+
+class TestB3RJsonSafety:
+    """B3-R ①（D-1/D-2/D-4）：非有限值不得产生裸 token 使 JSON.parse 死亡。"""
+
+    def test_band_inf_and_nan_excluded(self):
+        from lib.html_charts import build_valuation_band_options
+
+        rows = make_daily_basic_series(120)
+        rows[10] = dict(rows[10], pe_ttm=float("inf"))
+        rows[20] = dict(rows[20], pe_ttm=float("nan"))
+        rows[30] = dict(rows[30], pe_ttm=None)
+        opts = build_valuation_band_options(rows)
+        assert opts is not None
+        raw = json.dumps(opts, ensure_ascii=False)
+        assert "Infinity" not in raw and "NaN" not in raw
+        assert json.loads(raw)  # JSON.parse 可存活
+
+    def test_kline_nan_close_row_dropped_and_json_safe(self):
+        from lib.html_charts import build_kline_options
+
+        rows = make_kline_rows(120)
+        rows[40] = dict(rows[40], close=float("nan"))
+        opts = build_kline_options(rows)
+        assert opts is not None
+        assert opts["annotation_payload"]["kline_days"] == 119  # NaN 行被滤
+        raw = json.dumps(opts, ensure_ascii=False)
+        assert "NaN" not in raw and "Infinity" not in raw
+        assert json.loads(raw)
+
+    def test_kline_macd_aligned_after_close_drop(self):
+        """C-3：compute 内部丢 NaN-close 行 → macd_series 短于 kline 行；
+        按 macd_series.dates 日期对位后 MACD 柱日期 ⊆ 图表 dates，无错位。"""
+        from lib.html_charts import build_kline_options
+        from lib.technical import compute
+
+        rows = make_kline_rows(120)
+        rows[55] = dict(rows[55], close=float("nan"))  # 中部停牌残留行
+        macd = compute(rows)["momentum"]["macd_series"]
+        opts = build_kline_options(rows, macd_series=macd)
+        assert opts is not None
+        dates_set = set(opts["xAxis"][0]["data"])
+        macd_bar = next(s for s in opts["series"] if s["name"] == "MACD")
+        assert macd_bar["data"]  # 有柱
+        for pt in macd_bar["data"]:
+            assert pt[0] in dates_set
+        raw = json.dumps(opts, ensure_ascii=False)
+        assert "NaN" not in raw
+
+    def test_flow_nan_values_json_safe(self):
+        from lib.html_charts import build_flow_options
+
+        flow = _flow_data_7d()
+        flow[2] = [flow[2][0], float("nan"), flow[2][2], None]
+        margin = _margin_rows_7d()
+        margin[1] = dict(margin[1], rzye=float("nan"))
+        price = [list(p) for p in _price_rows_7d()]
+        price[3][1] = float("inf")
+        opts = build_flow_options(flow, margin, price)
+        assert opts is not None
+        raw = json.dumps(opts, ensure_ascii=False)
+        assert "NaN" not in raw and "Infinity" not in raw
+        assert json.loads(raw)
+        nb = next(s for s in opts["series"] if s["name"] == "北向净买入(万元)")
+        assert all(isinstance(pt[1], (int, float)) for pt in nb["data"])
+
+
+# ── B3-R ④: 财务图（ROE/EPS 双轴 + 扣非柱） ──
+
+class TestFinancialOptions:
+    def test_roe_eps_options_dual_axis(self):
+        from lib.html_charts import build_financial_roe_options
+
+        opts = build_financial_roe_options(
+            ["26Q1", "26Q2"], [10.5, 12.3], [0.8, 1.1])
+        assert opts is not None
+        names = {s["name"] for s in opts["series"]}
+        assert names == {"ROE(%)", "EPS(元)"}
+        assert opts["yAxis"][1].get("position") == "right"
+        assert opts["annotation_payload"]["latest_roe"] == 12.3
+        assert json.loads(json.dumps(opts))  # JSON 安全
+
+    def test_financial_empty_labels_none(self):
+        from lib.html_charts import (build_financial_profit_options,
+                                      build_financial_roe_options)
+
+        assert build_financial_roe_options([], [], []) is None
+        assert build_financial_profit_options([], []) is None
+
+    def test_financial_profit_bar_colors_red_up_green_down(self):
+        """④/B-F4：扣非净利盈利（≥0）红 / 亏损（<0）绿。"""
+        from lib.html_charts import build_financial_profit_options
+
+        opts = build_financial_profit_options(
+            ["26Q1", "26Q2", "26Q3"], [12.5, -3.2, 8.1])
+        assert opts is not None
+        bar = next(s for s in opts["series"] if s["type"] == "bar")
+        colors = [pt[2]["itemStyle"]["color"] for pt in bar["data"]]
+        assert colors == ["#f87171", "#34d399", "#f87171"]
+        assert opts["annotation_payload"]["latest_profit_yi"] == 8.1
+
+
+# ── B3-R ⑤ C-2 / B-F5: band 排序 + tooltip 口径 ──
+
+class TestB3RBandSortAndTooltip:
+    def test_band_descending_input_uses_latest(self):
+        """C-2：Tushare daily_basic 最新在前 → band 内部升序后 cur 为最新点，
+        且与升序输入结果一致（单源）。"""
+        from lib.html_charts import build_valuation_band_options
+
+        asc = build_valuation_band_options(make_daily_basic_series(120))
+        desc = build_valuation_band_options(
+            make_daily_basic_series(120, descending=True))
+        assert asc is not None and desc is not None
+        # 升序序列最后一行 pe = 20 + 119*0.1 = 31.9
+        assert asc["annotation_payload"]["cur"] == pytest.approx(31.9, abs=0.01)
+        assert desc["annotation_payload"]["cur"] == asc["annotation_payload"]["cur"]
+        assert desc["annotation_payload"]["cur_date"] == asc["annotation_payload"]["cur_date"]
+
+    def test_flow_tooltip_carry_units(self):
+        """B-F5：flow 各系列 tooltip.valueFormatter 带口径（_js 常量）。"""
+        from lib.html_charts import build_flow_options
+
+        opts = build_flow_options(_flow_data_7d(), _margin_rows_7d(),
+                                  _price_rows_7d())
+        assert opts is not None
+        fmt = {s["name"]: s["tooltip"]["valueFormatter"]["_js"]
+               for s in opts["series"]}
+        assert "万元" in fmt["北向净买入(万元)"]
+        assert "亿元" in fmt["融资余额(亿元)"]
+        assert fmt["收盘价(元)"].endswith("'元'")
+
+    def test_kline_tooltip_units(self):
+        """B-F5：K 线 candlestick/成交量/MA 带口径。"""
+        from lib.html_charts import build_kline_options
+        from lib.technical import compute
+
+        rows = make_kline_rows(120)
+        opts = build_kline_options(rows, macd_series=compute(rows)["momentum"]["macd_series"])
+        assert opts is not None
+        by_name = {s["name"]: s for s in opts["series"]}
+        assert "'元'" in by_name["K线"]["tooltip"]["valueFormatter"]["_js"]
+        assert "'手'" in by_name["成交量"]["tooltip"]["valueFormatter"]["_js"]
+        assert "'元'" in by_name["MA5"]["tooltip"]["valueFormatter"]["_js"]
+
+
+class TestKlineRedUpGreenDown:
+    def test_kline_series_red_up_green_down_isolated_from_theme(self):
+        """B3-R ⑧（B-F7 已裁定 A 股红涨绿跌）：蜡烛红涨 #ef4444，options 内
+        不引用 CSS var(--up)（与主题绿涨有意解耦）。"""
+        from lib.html_charts import build_kline_options
+
+        opts = build_kline_options(make_kline_rows(120))
+        assert opts is not None
+        k = next(s for s in opts["series"] if s["type"] == "candlestick")
+        assert k["itemStyle"]["color"] == "#ef4444"       # 红涨
+        assert k["itemStyle"]["color0"] == "#34d399"      # 绿跌
+        assert "var(--up)" not in json.dumps(opts, ensure_ascii=False)

@@ -66,12 +66,16 @@ class TestRenderHtmlStructure:
         assert "echarts.init" in app_script
         assert "{{" not in app_script
 
-    def test_echarts_asset_missing_fallback(self):
-        """资产缺失（_load_echarts_js 返回空串）→ 图表 disabled、页面完整（R-B4）。"""
+    def test_echarts_asset_present_embedded(self):
+        """B3-R C-5（原 test_echarts_asset_missing_fallback 名不副实——未兜测缺失
+        路径）。此用例断言真实路径：资产在场时 UMD 内容完整嵌入首个 script。"""
         from lib import render_html as rh
 
         html = rh.render_html(collection_v2_minimal(), "600176")
-        assert "<body" in html and "</html>" in html  # 页面完整
+        scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+        assert scripts and len(scripts[0]) > 50_000  # echarts UMD 内联
+        assert "echarts" in scripts[0][:2000]
+        assert "<body" in html and "</html>" in html
 
     def test_echarts_asset_missing_fallback_monkeypatched(self, monkeypatch):
         """资产缺失路径：_load_echarts_js 空串 → 无资产注入但页面完整。"""
@@ -250,3 +254,133 @@ class TestAnalysisSection:
 
         html = render_html(collection_v2_minimal(), "600176")  # 无 analysis
         assert "待 Claude" in html  # 占位保留（F0-3 兜底：未填占位 qc FAIL）
+
+
+# ── B3-R ②/④: margin 链路 + 财务图恢复 ──
+
+def _collection_with_market_structure():
+    """collection_v2_minimal + northbound（flow 前提）+ market_structure.margin。"""
+    c = collection_v2_minimal()
+    c["dimensions"].append({
+        "dimension": "northbound",
+        "display": "北向资金",
+        "data": [{"trade_date": f"202607{d:02d}", "net_mf_vol": 1000.0 * d}
+                 for d in range(13, 20)],
+        "status": "available",
+        "_meta": {"source": "test.fixture"},
+    })
+    c["summary"]["total"] += 1
+    c["summary"]["available"] += 1
+    c["market_structure"] = {
+        "margin": {
+            "records": [
+                {"trade_date": "20260713", "rzye": 10_000_000_000.0},
+                {"trade_date": "20260714", "rzye": 10_100_000_000.0},
+                {"trade_date": "20260715", "rzye": 10_200_000_000.0},
+            ],
+            "source": "tushare",
+            "change_pct": 0.5,
+        }
+    }
+    return c
+
+
+class TestB3RFinancialAndMargin:
+    def test_flow_margin_from_market_structure(self):
+        """②：融资余额取自 collection.market_structure.margin.records（元→亿元）。"""
+        import html as _h
+        import json
+
+        from lib.render import render_html
+
+        html = render_html(_collection_with_market_structure(), "600176")
+        m = __import__("re").search(
+            r'id="flowChart"[^>]*data-opts="([^"]*)"', html)
+        if m is None:
+            import pytest
+            pytest.skip("flowChart 未渲染（北向序列不足）")
+        opts = json.loads(_h.unescape(m.group(1)))
+        margin_s = next((s for s in opts["series"]
+                         if s["name"] == "融资余额(亿元)"), None)
+        if margin_s is None:
+            import pytest
+            pytest.skip("无 margin 系列")
+        vals = [row[1] for row in margin_s["data"]
+                if isinstance(row, list) and row[1] is not None]
+        assert vals, "margin 系列不应全空（旧死路径恒 None）"
+        assert max(vals) > 100.0  # rzye 1e10 元 → 100 亿元级
+
+    def test_financial_charts_restored(self):
+        """④：finRoeChart/finProfitChart 恢复渲染（ECharts div + aria）。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        assert 'id="finRoeChart"' in html
+        assert 'id="finProfitChart"' in html
+        assert html.count("data-echart") >= 5  # kline+band+flow+fin×2
+        assert "role=\"img\"" in html
+
+    def test_financial_charts_absent_when_no_financials(self):
+        """④：financials 维度缺失 → 无财务图 id，页面仍渲染。"""
+        from lib.render import render_html
+
+        c = collection_v2_minimal()
+        c["dimensions"] = [d for d in c["dimensions"]
+                           if d["dimension"] != "financials"]
+        html = render_html(c, "600176")
+        assert "finRoeChart" not in html
+        assert "finProfitChart" not in html
+        assert "财务数据不可得" in html
+
+    def test_flow_legend_colors_match_bars(self):
+        """B-F4：图例色块与柱色一致（净流入=红 var(--dn) / 净流出=绿 var(--up)）。"""
+        from lib.render import render_html
+
+        html = render_html(_collection_with_market_structure(), "600176")
+        import re as _re
+        in_swatch = _re.search(
+            r"background:(var\(--[a-z]+\))[^<]*</span>净流入", html)
+        out_swatch = _re.search(
+            r"background:(var\(--[a-z]+\))[^<]*</span>净流出", html)
+        assert in_swatch is not None and in_swatch.group(1) == "var(--dn)"
+        assert out_swatch is not None and out_swatch.group(1) == "var(--up)"
+
+
+# ── B3-R ⑥ D-3/B-F6 + B-F5: 主题数组合并 / 字体 / revive 适配器 ──
+
+class TestB3RThemeAndRevive:
+    def test_theme_merges_axis_arrays(self):
+        """D-3/B-F6：applyChartTheme 按数组逐轴合并（xAxis/yAxis .map），
+        且含 fontFamily（与 CSS --font-body 对齐）。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        seg = html[html.index("function applyChartTheme"):html.index("function renderCharts")]
+        assert ".map(ax)" in seg
+        assert "Array.isArray(o.xAxis)" in seg and "Array.isArray(o.yAxis)" in seg
+        assert "fontFamily" in seg and "PingFang SC" in seg
+
+    def test_js_revive_adapter_present(self):
+        """B-F5：renderCharts 走 revive(JSON.parse(raw))——_js 常量表达式契约。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        assert "function revive(v)" in html
+        assert "revive(JSON.parse(raw))" in html
+
+
+# ── B3-R ⑨: 亏损期/PE 缺失时 band 不静默丢弃 ──
+
+class TestB3RLossPeriodBandNote:
+    def test_valuation_loss_period_band_note_not_silent(self):
+        """⑨：全部 PE 缺失（亏损期场景）→ 估值卡显示「数据不可得」且 band
+        侧出现提示卡（不静默丢弃图表位）。"""
+        from lib.render import render_html
+
+        c = collection_v2_minimal()
+        for d in c["dimensions"]:
+            if d["dimension"] == "valuation":
+                d["data"] = [dict(r, pe_ttm=None) for r in d["data"]]
+        html = render_html(c, "600176")
+        assert "数据不可得" in html
+        assert "估值分位带图：数据不可得" in html

@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from typing import Any, Sequence
 
-from .technical import sma  # noqa: F401  — T3-4 K 线均线复用（sma 现算，禁前端算）
+from .technical import sma, sort_kline_asc  # noqa: F401
 from lib.nums import safe_float
 
 
@@ -76,7 +76,7 @@ def window_label(n_rows: int) -> str:
 
 
 def build_valuation_band_options(
-    rows: Sequence[dict[str, Any]], window_days: int | None = None
+    rows: Sequence[dict[str, Any]]
 ) -> dict[str, Any] | None:
     """估值历史分位带图：PE(TTM) 曲线 + 历史分位带（P10-P90）+ 中/现值线。
 
@@ -85,22 +85,30 @@ def build_valuation_band_options(
     分位带按窗口内正数序列计算（D3/A4 修正）。
     窗口内有效正数 < 20 → None（渲染侧占位）。
 
-    window_days：窗口截止行数；None = 全量序列，与正文估值卡（valuation_summary）
-    同窗口口径（B3 冒烟回修：旧实现固定截 250*4=1000 行，与正文近 N 年窗口不一致
-    → 图内中位数与正文中位数对不上）。
+    窗口不变式（B3-R A-5/A-6，单源）：窗口 = 全量升序序列——内部先
+    sort_kline_asc（Tushare daily_basic 最新在前），与正文估值卡
+    （valuation_summary 对同一升序序列计算）同窗口口径；window_days 参数已
+    删除（无 caller 传值，属虚假承诺——旧实现固定截 250*4=1000 行与正文
+    近 N 年窗口不一致的历史缺陷由全量窗口修复）。
     """
     if not rows:
         return None
+    # C-2/A-4：Tushare daily_basic 最新在前 → 未排序时 ys[-1] 取到最旧点、
+    # aria「最新 PE（截至…）」谎报。内部先升序。
+    rows = sort_kline_asc(list(rows))
     pe = [(r.get("trade_date"), r.get("pe_ttm")) for r in rows]
     pe = [x for x in pe if x[0]]
     if len(pe) < 20:
         return None
-    w_raw = pe if window_days is None else pe[-window_days:]
+    w_raw = pe
     if len(w_raw) < 20:
         return None
-    loss_days = sum(1 for _, v in w_raw if v is None or float(v) <= 0)  # type: ignore[arg-type]
+    loss_days = sum(
+        1 for _, v in w_raw
+        if (f := safe_float(v)) is None or f <= 0)  # NaN/Inf 并入缺失组（D-4）
     loss_ratio_pct = round(loss_days / len(w_raw) * 100.0, 1)
-    cx = [(d, float(v)) for d, v in w_raw if v is not None and float(v) > 0]
+    cx = [(d, f) for d, v in w_raw
+          if (f := safe_float(v)) is not None and f > 0]
     if len(cx) < 20:
         return None
     xs = [d for d, _ in cx]
@@ -108,9 +116,10 @@ def build_valuation_band_options(
     srt = sorted(ys)
     mid = len(srt) // 2
     median = (srt[mid - 1] + srt[mid]) / 2.0 if len(srt) % 2 == 0 else srt[mid]
-    # 分位带：水平线（窗口内静态百分位），曲线全量 lttb 至 500 段（索引保真）
-    idx = lttb([(float(i), ys[i]) for i in range(len(ys))], 500)
-    idx = [(int(i), v) for i, v in idx]  # x=索引须 int（category 轴对位）
+    # 全量曲线（不降采样）。B3-R A-1 修复：lttb 只采样 xAxis.data（≤500 段）
+    # 而 series x=全量索引 → 索引越界（n>500 时 max(x) >= len(axis)）；
+    # band 窗口 ≤~1210 行，全量渲染无性能问题。
+    idx = [(i, ys[i]) for i in range(len(ys))]
     curve_xs = [xs[i] for i, _ in idx]
     p10 = srt[int(len(srt) * 0.10)]
     p90 = srt[int(len(srt) * 0.90)]
@@ -135,6 +144,8 @@ def build_valuation_band_options(
                 "type": "line",
                 "showSymbol": False,
                 "data": [[i, v] for i, v in idx],
+                # B-F5：tooltip 口径（PE 倍数）
+                "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_PEX}},
                 # xAxis.data 全量日期，series x=索引 → 重建 date 轴
                 "markLine": {
                     "symbol": "none",
@@ -203,6 +214,16 @@ def _md(d: Any) -> str:
     return s
 
 
+def _fd(d: Any) -> str:
+    """日期字符串归一化为 YYYY-MM-DD：8 位（'20260723'）转全日期，ISO 与
+    已全日期幂等（B3-R C-6/D-5：flow 轴改全日期携带年份，aria 不再跨年
+    MM-DD 碰撞；axisLabel 用 formatter 只显 MM-DD）。"""
+    s = str(d) if d is not None else ""
+    if len(s) == 8 and s.isdigit():
+        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+    return s
+
+
 def build_flow_options(
     flow_data: Sequence[Sequence[Any]] | None,
     margin_rows: Sequence[dict[str, Any]] | None,
@@ -210,9 +231,10 @@ def build_flow_options(
 ) -> dict[str, Any] | None:
     """资金流图：北向净流入（bar，万元）+ 融资余额（亿元）+ 收盘价（元，右轴）。
 
-    flow_data：_extract_northbound_data 产物 [[md, nv(元), td, None], ...]（md 已 MM-DD）；
+    flow_data：_extract_northbound_data 产物 [[fd, nv(元), td, None], ...]（fd 全日期
+    YYYY-MM-DD，B3-R C-6/D-5 改全日期携带年份）；
     margin_rows：collection 的 market_structure.margin（trade_date 8 位/ISO，金额单位元）；
-    price_rows：[(md 或 trade_date, close), ...]。
+    price_rows：[(fd 或 trade_date, close), ...]。
     任一关键源为空 → None（渲染侧占位）；两融/价格缺席仅去系列。
     """
     if not flow_data:
@@ -220,33 +242,35 @@ def build_flow_options(
     nb_dates = []
     nb_series = []
     for row in flow_data:
-        md = _md(row[0]) if len(row) else ""
-        if not md:
+        fd = _fd(row[0]) if len(row) else ""
+        if not fd:
             continue
         nv = row[1] if len(row) > 1 else 0
-        nv_wan = (float(nv) if nv is not None else 0.0) / 1e4  # 元 → 万元
-        nb_dates.append(md)
-        nb_series.append([md, round(nv_wan, 2)])
+        nv_wan = (safe_float(nv) or 0.0) / 1e4  # 元 → 万元（D-2：NaN/Inf 归 0）
+        nb_dates.append(fd)
+        nb_series.append([fd, round(nv_wan, 2)])
     if not nb_dates:
         return None
     margin_dates = set()
     margin_by = {}
     for r in margin_rows or []:
-        d = _md(r.get("trade_date"))
+        d = _fd(r.get("trade_date"))
         if not d or d in margin_by:
             continue
         raw = r.get("rzye")
         if raw is None:
             raw = r.get("rzrqye")
-        margin_by[d] = round(float(raw) / 1e8, 2) if raw is not None else None
+        sf = safe_float(raw)
+        margin_by[d] = round(sf / 1e8, 2) if sf is not None else None
         margin_dates.add(d)
     price_by = {}
     for row in price_rows or []:
         if len(row) < 2:
             continue
-        d = _md(row[0])
-        if d and row[1] is not None:
-            price_by[d] = round(float(row[1]), 2)
+        d = _fd(row[0])
+        sf = safe_float(row[1]) if d else None
+        if d and sf is not None:
+            price_by[d] = round(sf, 2)
     xaxis = sorted(set(nb_dates) | margin_dates | set(price_by))
     series = [
         {
@@ -254,6 +278,8 @@ def build_flow_options(
             "type": "bar",
             "data": [[md, v, {"itemStyle": {"color": _c_hex(v)}}] for md, v in nb_series],
             "yAxisIndex": 0,
+            # B-F5：tooltip 口径（_js 常量表达式经前端 revive 执行）
+            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_WAN}},
         },
         {
             "name": "融资余额(亿元)",
@@ -262,6 +288,7 @@ def build_flow_options(
             "connectNulls": True,
             "data": [[d, margin_by.get(d)] for d in xaxis],
             "yAxisIndex": 2,
+            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_YI}},
         },
         {
             "name": "收盘价(元)",
@@ -270,6 +297,7 @@ def build_flow_options(
             "connectNulls": True,
             "data": [[d, price_by.get(d)] for d in xaxis],
             "yAxisIndex": 1,
+            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_YUAN}},
         },
     ]
     total_wan = sum(v for _, v in nb_series)
@@ -281,7 +309,16 @@ def build_flow_options(
         "margin_latest": plain_num(margin_by.get(xaxis[-1])) if xaxis else None,
     }
     return {
-        "xAxis": {"data": xaxis, "axisLabel": {"rotate": 45}},
+        # A-2：type=category 缺失时 ECharts 按 value 轴处理字符串 data → 错位。
+        # C-6/D-5：轴数据全日期（跨年不碰撞），axisLabel formatter 只显 MM-DD。
+        "xAxis": {
+            "type": "category",
+            "data": xaxis,
+            "axisLabel": {
+                "rotate": 45,
+                "formatter": {"_js": _JS_AXIS_MMDD},
+            },
+        },
         "yAxis": [
             {"name": "北向净买入(万元)", "scale": True},
             {"name": "收盘价(元)", "scale": True, "position": "right", "offset": 48},
@@ -317,11 +354,14 @@ def build_kline_options(
     if len(rows) < 30:
         return None
     rows = rows[-latest_n:]
+    # D-1：过滤 close 非有限行（镜像 technical.compute 丢行语义 :541）。
+    # NaN 是真值，`float(v) or 0` 拦不住 → NaN 流入 sma → data-opts 裸 token。
+    rows = [r for r in rows if safe_float(r.get("close")) is not None]
+    if len(rows) < 30:
+        return None
     dates = [str(r.get("trade_date")) for r in rows]
-    closes: list[float] = []
-    for r in rows:
-        c = safe_float(r.get("close"))
-        closes.append(c if c is not None else float(r.get("close") or 0))
+    closes = [c for c in (safe_float(r.get("close")) for r in rows)
+              if c is not None]
     candles: list[list[Any]] = []
     vols: list[list[Any]] = []
     for r in rows:
@@ -343,6 +383,8 @@ def build_kline_options(
             "data": [[d, v] for d, v in zip(dates, vals)],
             "xAxisIndex": 0,
             "yAxisIndex": 0,
+            # B-F5：MA 价格口径（元）
+            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_YUAN}},
         })
     xaxis: list[dict[str, Any]] = [
         {"type": "category", "data": dates, "gridIndex": 0, "axisLabel": {"show": False}},
@@ -356,11 +398,15 @@ def build_kline_options(
             "data": candles,
             "xAxisIndex": 0,
             "yAxisIndex": 0,
-            # v6 默认主题重做 → 显式涨红跌绿（A10/A11）
+            # v6 默认主题重做 → 显式涨红跌绿（A10/A11；B3-R B-F7 已裁定：
+            # A 股惯例红涨 #ef4444 / 绿跌 #34d399，与全局 --up 主题（绿）有意
+            # 解耦——勿改回 CSS 变量、勿统一到 --up）
             "itemStyle": {
                 "color": "#ef4444", "color0": "#34d399",
                 "borderColor": "#ef4444", "borderColor0": "#34d399",
             },
+            # B-F5：tooltip 口径（价格元）
+            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_YUAN}},
         },
         *ma_series,
         {
@@ -371,17 +417,42 @@ def build_kline_options(
             "xAxisIndex": 1,
             "yAxisIndex": 1,
             "barWidth": "60%",
+            # B-F5：tooltip 口径（手）
+            "tooltip": {"valueFormatter": {"_js": _JS_TOOLTIP_SHOU}},
         },
     ]
     if macd_series and macd_series.get("histogram") is not None:
         hist = macd_series["histogram"]
         dif = macd_series["dif"]
         dea = macd_series["dea"]
-        n = min(len(dates), len(hist), len(dif), len(dea))
-        hdata = [
-            [dates[i], (plain_num(hist[i]) or 0.0), {"itemStyle": {"color": _c_hex(hist[i])}}]
-            for i in range(n) if hist[i] is not None
-        ]
+        mdates = macd_series.get("dates")
+        if mdates and len(mdates) == len(hist):
+            # C-3：technical.compute 内部丢停牌行（None close）→ 序列短于图表
+            # dates 且位置错位；macd_series 自带 dates（同源），按日期对位重建。
+            # 图表 dates 中缺失的键 → 柱跳过 / 线 None（connectNulls 衔接）。
+            hist_by = {str(d): v for d, v in zip(mdates, hist)}
+            dif_by = {str(d): v for d, v in zip(mdates, dif)}
+            dea_by = {str(d): v for d, v in zip(mdates, dea)}
+            hdata = []
+            dif_line = []
+            dea_line = []
+            for dd in dates:
+                hv = hist_by.get(dd)
+                if hv is not None:
+                    hdata.append([dd, (plain_num(hv) or 0.0),
+                                  {"itemStyle": {"color": _c_hex(hv)}}])
+                dif_line.append([dd, plain_num(dif_by.get(dd))])
+                dea_line.append([dd, plain_num(dea_by.get(dd))])
+        else:
+            # 回退：无 dates（旧形态）→ 位置截齐
+            n = min(len(dates), len(hist), len(dif), len(dea))
+            hdata = [
+                [dates[i], (plain_num(hist[i]) or 0.0),
+                 {"itemStyle": {"color": _c_hex(hist[i])}}]
+                for i in range(n) if hist[i] is not None
+            ]
+            dif_line = [[dates[i], plain_num(dif[i])] for i in range(n)]
+            dea_line = [[dates[i], plain_num(dea[i])] for i in range(n)]
         series.append({
             "name": "MACD",
             "type": "bar",
@@ -394,7 +465,7 @@ def build_kline_options(
             "name": "DIF",
             "type": "line",
             "showSymbol": False,
-            "data": [[dates[i], plain_num(dif[i])] for i in range(n)],
+            "data": dif_line,
             "xAxisIndex": 2,
             "yAxisIndex": 2,
             "connectNulls": True,
@@ -403,7 +474,7 @@ def build_kline_options(
             "name": "DEA",
             "type": "line",
             "showSymbol": False,
-            "data": [[dates[i], plain_num(dea[i])] for i in range(n)],
+            "data": dea_line,
             "xAxisIndex": 2,
             "yAxisIndex": 2,
             "connectNulls": True,
@@ -446,6 +517,87 @@ def build_kline_options(
     }
 
 
+def _fin_labels(labels: Sequence[str]) -> list[str]:
+    """财务短标签透传（'26Q2' 类），空/None 滤除。"""
+    return [str(x) for x in labels if x]
+
+
+def build_financial_roe_options(
+    labels: Sequence[str],
+    roe_data: Sequence[float | None],
+    eps_data: Sequence[float | None],
+) -> dict[str, Any] | None:
+    """财务趋势图一：ROE(%) + EPS(元，右轴) 双轴折线（近 8 期季报）。
+
+    B3-R ④ 回归恢复（pre-T3 roeChart 在 T3 迁移中被静默删除）——ECharts 版。
+    labels 空 → None（渲染侧占位，与 test_insufficient_kline_no_crash 同构）。
+    """
+    labs = _fin_labels(labels)
+    if not labs:
+        return None
+    roe = [plain_num(v) for v in roe_data]
+    eps = [plain_num(v) for v in eps_data]
+    payload = {
+        "latest_roe": next((v for v in reversed(roe) if v is not None), None),
+        "latest_eps": next((v for v in reversed(eps) if v is not None), None),
+        "unit_note": "ROE(%) / EPS(元)",
+    }
+    return {
+        "xAxis": {"type": "category", "data": labs},
+        "yAxis": [
+            {"name": "ROE(%)", "scale": True},
+            {"name": "EPS(元)", "scale": True, "position": "right"},
+        ],
+        "tooltip": {"trigger": "axis"},
+        "legend": {"bottom": 8, "data": ["ROE(%)", "EPS(元)"]},
+        "series": [
+            {"name": "ROE(%)", "type": "line", "showSymbol": False,
+             "connectNulls": True,
+             "data": [[i, roe[i]] for i in range(len(labs))],
+             "yAxisIndex": 0},
+            {"name": "EPS(元)", "type": "line", "showSymbol": False,
+             "connectNulls": True,
+             "data": [[i, eps[i]] for i in range(len(labs))],
+             "yAxisIndex": 1},
+        ],
+        "annotation_payload": payload,
+    }
+
+
+def build_financial_profit_options(
+    labels: Sequence[str],
+    profit_data: Sequence[float | None],
+) -> dict[str, Any] | None:
+    """财务趋势图二：扣非净利润（亿元）柱状（近 8 期季报）。
+
+    B3-R ④ 回归恢复（pre-T3 profitChart 被静默删除）——ECharts 版。
+    柱色 B-F4 约定：盈利（≥0）红 / 亏损（<0）绿（A 股惯例，与 _c_hex 一致）。
+    """
+    labs = _fin_labels(labels)
+    if not labs:
+        return None
+    prof = [plain_num(v) for v in profit_data]
+    bars = [
+        [i, v, {"itemStyle": {"color": _c_hex(v)}}]
+        for i, v in enumerate(prof) if v is not None
+    ]
+    payload = {
+        "latest_profit_yi": next((v for v in reversed(prof) if v is not None), None),
+        "unit_note": "扣非净利润(亿元)",
+    }
+    return {
+        "xAxis": {"type": "category", "data": labs},
+        "yAxis": [{"name": "扣非净利润(亿元)", "scale": True}],
+        "tooltip": {"trigger": "axis"},
+        "legend": {"bottom": 8, "data": ["扣非净利(亿元)"]},
+        "series": [
+            {"name": "扣非净利(亿元)", "type": "bar", "data": bars,
+             "barWidth": "50%"},
+        ],
+        "annotation_payload": payload,
+    }
+
+
 def latest_non_none(data: Sequence[list[Any]]) -> Any:
     """取序列最后一个非 None 值（MA/MACD 前置 None 段）。"""
     for item in reversed(data):
@@ -463,3 +615,29 @@ def plain_num(v: float) -> float:
     if math.isnan(f) or math.isinf(f):
         return None  # type: ignore[return-value]
     return round(f, 4)
+
+
+# B3-R B-F5：tooltip/axis formatter 常量表达式（_js 适配器约定——引擎只写常量
+# lambda，经前端 revive() 的 new Function 执行；禁止插值任何数据/用户串）
+_JS_AXIS_MMDD = "v => String(v).slice(5)"
+_JS_TOOLTIP_WAN = "v => v == null ? '-' : v.toFixed(0) + '万元'"
+_JS_TOOLTIP_YI = "v => v == null ? '-' : v.toFixed(2) + '亿元'"
+_JS_TOOLTIP_YUAN = "v => v == null ? '-' : v.toFixed(2) + '元'"
+_JS_TOOLTIP_PEX = "v => v == null ? '-' : v.toFixed(2) + 'x'"
+_JS_TOOLTIP_SHOU = "v => v == null ? '-' : v.toFixed(0) + '手'"
+
+
+def _json_safe(obj: Any) -> Any:
+    """递归 JSON 安全化：非有限 float（NaN/±Inf）→ None。
+
+    plain_num 只覆盖 annotation_payload；series data 数组（蜡烛/均线/带/资金流）
+    的兜底防线——dumps 前整体过一遍，杜绝 'NaN'/'Infinity' 裸 token 使
+    JSON.parse 死亡（B3-R ① D-1/D-2/D-4）。
+    """
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
