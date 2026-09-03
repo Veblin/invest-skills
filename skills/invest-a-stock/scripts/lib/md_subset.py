@@ -48,6 +48,18 @@ _INLINE_RE = re.compile(
     r"|`([^`]+)`"
 )
 
+_SAFE_SCHEMES = ("http://", "https://", "mailto:")
+
+
+def _is_safe_href(href: str) -> bool:
+    """T4-1（审计 ②）链接 scheme 白名单：http/https/mailto 显式放行；
+    其余（锚点/相对路径/裸域名）要求不含 ':'——防 javascript:/data:/
+    vbscript: 等可执行 scheme 进入 href。"""
+    low = (href or "").strip().lower()
+    if any(low.startswith(p) for p in _SAFE_SCHEMES):
+        return True
+    return ":" not in low and bool(low) and not low.startswith(("<", '"', "'"))
+
 
 def _inline(t: str) -> str:
     """行内语法：单遍 `finditer` 分段 — 未命中片段逐段 `escape(quote=False)`，
@@ -57,7 +69,16 @@ def _inline(t: str) -> str:
     for m in _INLINE_RE.finditer(t):
         parts.append(_html.escape(t[pos:m.start()], quote=False))
         if m.group(1) is not None:
-            parts.append(f'<a href="{_html.escape(m.group(2), quote=True)}">{_inline(m.group(1))}</a>')
+            href = m.group(2)
+            # T4-1（审计 ② URL 编码）：scheme 白名单校验——禁 javascript:/data:/
+            # vbscript: 等可执行 scheme；非法链接整体按字面文本渲染（fail-safe）
+            if _is_safe_href(href):
+                parts.append(
+                    f'<a href="{_html.escape(href, quote=True)}">'
+                    f"{_inline(m.group(1))}</a>")
+            else:
+                parts.append(_html.escape(
+                    f"[{m.group(1)}]({href})", quote=False))
         elif m.group(3) is not None:
             parts.append(f"<strong>{_html.escape(m.group(3), quote=False)}</strong>")
         else:

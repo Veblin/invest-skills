@@ -79,6 +79,7 @@ a{color:var(--ac);text-decoration:none}
 .tc{font-family:var(--font-mono);font-size:var(--text-xs);color:var(--tx-m);background:var(--sur3);padding:2px 8px;border-radius:var(--r-sm)}
 .tp{font-family:var(--font-mono);font-size:var(--text-lg);font-weight:600;margin-left:auto}
 .tch{font-family:var(--font-mono);font-size:var(--text-xs);padding:2px 8px;border-radius:var(--r-sm)}
+.tnotice{font-size:var(--text-xs);color:var(--tx-f);letter-spacing:.02em;white-space:nowrap}
 .badge{font-size:var(--text-xs);font-family:var(--font-mono);padding:2px 8px;border-radius:var(--r-sm);border:1px solid}
 .b-ok{color:var(--up);border-color:var(--up-d);background:var(--up-d)}
 .b-wn{color:var(--wn);border-color:var(--wn-d);background:var(--wn-d)}
@@ -329,6 +330,7 @@ def _html_topbar(
     invest:a-stock
   </div>
   <div class="td"></div>
+  <span class="tnotice">工具产出 · 个人研究 · 非持牌机构发布 · 仅限本人使用</span>
   <span class="tn">{_html_mod.escape(name or symbol)}</span>
   <span class="tc">{_html_mod.escape(symbol)}</span>
   <span class="tp" style="color:{price_color}">{price_str}</span>
@@ -419,9 +421,14 @@ def _html_valuation(
   </div>
   {band_out}
 </section>'''
+    # T4-1（审计 D）：gauge 宽度经 _pct_clamp 钳制 [0,100]（NaN/inf/越界 → 0/边界），
+    # 展示文本 pe_pct_s 保留原值（引擎 percentile 输出）
     pe_pct_s = "0" if pe_pct is None else str(pe_pct)
     pb_pct_s = "0" if pb_pct is None else str(pb_pct)
     ps_pct_s = "0" if ps_pct is None else str(ps_pct)
+    pe_w_s = _fmt_clamp_width(pe_pct)
+    pb_w_s = _fmt_clamp_width(pb_pct)
+    ps_w_s = _fmt_clamp_width(ps_pct)
     pe_v = "0" if pe_val is None else str(pe_val)
     pb_v = "0" if pb_val is None else str(pb_val)
     ps_v = "0" if ps_val is None else str(ps_val)
@@ -439,17 +446,17 @@ def _html_valuation(
       <div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:var(--space-4)">分位越低代表估值越便宜（相对{window_label}）</div>
       <div class="gr">
         <div class="gn">PE(TTM)</div>
-        <div class="gtrack"><div class="gfill" style="width:{pe_pct_s}%;background:var(--c1)"><div class="gmk" style="background:var(--c1)"></div></div></div>
+        <div class="gtrack"><div class="gfill" style="width:{pe_w_s}%;background:var(--c1)"><div class="gmk" style="background:var(--c1)"></div></div></div>
         <div class="gval">{pe_v}</div><div class="gpct" style="color:var(--c1)">{pe_pct_s}%</div>
       </div>
       <div class="gr">
         <div class="gn">PB</div>
-        <div class="gtrack"><div class="gfill" style="width:{pb_pct_s}%;background:var(--c2)"><div class="gmk" style="background:var(--c2)"></div></div></div>
+        <div class="gtrack"><div class="gfill" style="width:{pb_w_s}%;background:var(--c2)"><div class="gmk" style="background:var(--c2)"></div></div></div>
         <div class="gval">{pb_v}</div><div class="gpct" style="color:var(--c2)">{pb_pct_s}%</div>
       </div>
       <div class="gr">
         <div class="gn">PS(TTM)</div>
-        <div class="gtrack"><div class="gfill" style="width:{ps_pct_s}%;background:var(--wn)"><div class="gmk" style="background:var(--wn)"></div></div></div>
+        <div class="gtrack"><div class="gfill" style="width:{ps_w_s}%;background:var(--wn)"><div class="gmk" style="background:var(--wn)"></div></div></div>
         <div class="gval">{ps_v}</div><div class="gpct" style="color:var(--wn)">{ps_pct_s}%</div>
       </div>
       <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>PE 亏损期已剔除；行业相对估值 v0.1.2 未覆盖，分位不构成买卖判断。</div>
@@ -499,6 +506,34 @@ def _aria_wrap(inner_html: str, label: str) -> str:
     """
     return (f'<section role="img" aria-label="{_html_mod.escape(label, quote=True)}" '
             f'aria-describedby="refs">{inner_html}</section>')
+
+
+def _fmt_clamp_width(v: Any) -> str:
+    """⑤ gauge 宽度注入值：_pct_clamp 钳制 [0,100] 后格式化（0 → "0"）。
+
+    T4-1（审计 D）：style="width:{...}%" 是 CSS 注入面——数值虽为引擎
+    percentile 输出，仍统一钳制，防非法值进样式。
+    """
+    from lib.html_charts import _pct_clamp  # noqa: PLC0415
+
+    try:
+        f = float(v) if v not in (None, "", "--") else 0.0
+    except (TypeError, ValueError):
+        f = 0.0
+    w = _pct_clamp(f)
+    return "0" if w == 0 else f"{w:g}"
+
+
+def _json_js(obj: Any) -> str:
+    """③ script 上下文 JSON 安全序列化（T4-1，审计 E 行收尾）：
+    `</` → `<\\/` 阻断 `</script>` 截断 + U+2028/U+2029 转义（JS 字符串字面量
+    两字符会直接截断脚本）。仅用于内联 `<script>` 数据行（现仅 trendLabel）；
+    data-opts 属性上下文走 json.dumps(_json_safe(...))（属性转义已覆盖）。
+    """
+    return (json.dumps(obj, ensure_ascii=False)
+            .replace("</", "<\\/")
+            .replace(" ", "\\u2028")
+            .replace(" ", "\\u2029"))
 
 
 def _chart_block(chart_id: str, title_html: str, opts: dict,
@@ -676,11 +711,16 @@ def _html_risk_banner() -> str:
 
 # --- _html_disclaimer ---
 def _html_disclaimer() -> str:
+    """T4-2（O4=A）：免责三要素 + 声明区块固定不可折叠（data-no-collapse）。"""
     return (
-        f'<div class="disc"><strong>⚠ 免责声明</strong> — 本报告由 invest:a-stock v{ENGINE_VERSION} 自动化引擎生成，'
-        f'仅供学习研究参考，<strong>不构成任何投资建议、买卖指令或目标价预测</strong>。'
+        f'<div class="disc" data-no-collapse><strong>⚠ 免责声明</strong> — 本报告由 '
+        f'invest:a-stock v{ENGINE_VERSION} 自动化引擎生成，仅供学习研究参考，'
+        f'<strong>不构成任何投资建议、买卖指令或目标价预测</strong>。'
         f'所有技术指标均为市场状态描述，非交易信号。'
         f'数据来源见上文 References 表，可能与实际公告存在差异，请以公司公告和交易所数据为准。'
+        f'<br><strong>仅限个人研究使用，禁止传播、转载或用于任何商业用途</strong>；'
+        f'<strong>市场有风险，投资需谨慎</strong>；'
+        f'本报告数据来源不保证完整性与及时性。'
         f'</div>'
     )
 
@@ -733,7 +773,10 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
             if all_roe and roe_v is not None:
                 avg = sum(all_roe) / len(all_roe)
                 roe_cls = ' class="roe-hi"' if roe_v > avg * 1.1 else (' class="roe-lo"' if roe_v < avg * 0.9 else "")
-        rows_html += f"<tr><td>{qlabel}</td><td{roe_cls}>{roe_str}</td><td>{eps_str}</td><td>{pd_str}</td><td>{rev_str}</td><td>{np_str}</td></tr>\n"
+        rows_html += (f"<tr><td>{_html_mod.escape(qlabel, quote=True)}</td>"
+                      f"<td{roe_cls}>{roe_str}</td><td>{eps_str}</td>"
+                      f"<td>{pd_str}</td><td>{rev_str}</td>"
+                      f"<td>{np_str}</td></tr>\n")
 
     table_html = f'''<table class="ft">
       <thead><tr><th>报告期</th><th>ROE(%)</th><th>EPS(元)</th><th>扣非净利润</th><th>营收</th><th>净利润</th></tr></thead>
@@ -867,11 +910,11 @@ def _extract_technical_html(dims: dict) -> dict:
         <div class="ipill"><div class="iname">DEA</div><div class="ival" style="color:{macd_col}">{dea_v:.2f}</div></div>
         <div class="ipill"><div class="iname">柱</div><div class="ival" style="color:{macd_col}">{hist_v:.2f}</div></div>
       </div>
-      <div style="margin-top:var(--space-3);font-size:var(--text-xs);color:{macd_col}">{'▼' if has_bear else '▲'} {cross_desc}{(' · ' + hist_trend) if hist_trend else ''}</div>
+      <div style="margin-top:var(--space-3);font-size:var(--text-xs);color:{macd_col}">{'▼' if has_bear else '▲'} {_html_mod.escape(cross_desc, quote=True)}{(' · ' + _html_mod.escape(hist_trend, quote=True)) if hist_trend else ''}</div>
     </div>'''
     else:
         reason = macd.get("reason", "MACD 不可得")
-        result["macd_html"] = f'<div class="card"><div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">MACD</div><div style="font-size:var(--text-xs);color:var(--tx-f);padding:1rem 0;text-align:center">{reason}</div></div>'
+        result["macd_html"] = f'<div class="card"><div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">MACD</div><div style="font-size:var(--text-xs);color:var(--tx-f);padding:1rem 0;text-align:center">{_html_mod.escape(reason, quote=True)}</div></div>'
 
     # RSI / KDJ
     rsi = tech.get("overbought_oversold", {}).get("rsi", {})
@@ -956,7 +999,7 @@ def _extract_technical_html(dims: dict) -> dict:
     </div>'''
     else:
         reason = boll.get("reason", "BOLL 不可得")
-        result["boll_html"] = f'<div class="card"><div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">布林带</div><div style="font-size:var(--text-xs);color:var(--tx-f);padding:1rem 0;text-align:center">{reason}</div></div>'
+        result["boll_html"] = f'<div class="card"><div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">布林带</div><div style="font-size:var(--text-xs);color:var(--tx-f);padding:1rem 0;text-align:center">{_html_mod.escape(reason, quote=True)}</div></div>'
 
     # MA grid
     trend = tech.get("trend", {})
@@ -977,11 +1020,16 @@ def _extract_technical_html(dims: dict) -> dict:
             slp_color = "var(--up)" if slope and slope >= 0 else ("var(--dn)" if slope and slope < 0 else "var(--tx)")
             border_extra = ';border-color:rgba(56,189,248,.25)' if p == 250 else ''
             name_color = ' style="color:var(--ac)"' if p == 250 else ''
-            ma_pills += f'<div class="ipill" style="text-align:center{border_extra}"><div class="iname"{name_color}>MA{p}</div><div style="font-family:var(--font-mono);font-size:var(--text-sm);color:{pos_color}">{ma_v:.2f}</div><div style="font-size:var(--text-xs);color:{slp_color}">{pos_str} · {slope_str}</div></div>'
+            ma_pills += (f'<div class="ipill" style="text-align:center{border_extra}">'
+                         f'<div class="iname"{name_color}>MA{p}</div>'
+                         f'<div style="font-family:var(--font-mono);font-size:var(--text-sm);color:{pos_color}">{ma_v:.2f}</div>'
+                         f'<div style="font-size:var(--text-xs);color:{slp_color}">'
+                         f'{_html_mod.escape(pos_str, quote=True)} · '
+                         f'{_html_mod.escape(slope_str, quote=True)}</div></div>')
         else:
             avail = trend.get("ma_availability", {}).get(str(p), "")
             err_txt = avail or "数据不足"
-            ma_pills += f'<div class="ipill" style="text-align:center;opacity:.5"><div class="iname">MA{p}</div><div style="font-family:var(--font-mono);font-size:var(--text-xs);color:var(--tx-f)">{err_txt}</div></div>'
+            ma_pills += f'<div class="ipill" style="text-align:center;opacity:.5"><div class="iname">MA{p}</div><div style="font-family:var(--font-mono);font-size:var(--text-xs);color:var(--tx-f)">{_html_mod.escape(err_txt, quote=True)}</div></div>'
 
     result["ma_grid_html"] = f'<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:var(--space-3)">{ma_pills}</div>'
 
@@ -1302,7 +1350,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     ref_rows = "".join(
         f'<tr><td style="font-family:var(--font-mono);font-size:var(--text-xs);padding:8px 12px;border-bottom:1px solid var(--bdr);color:var(--tx-m)">{_html_mod.escape(d)}</td>'
         f'<td style="font-family:var(--font-mono);font-size:var(--text-xs);padding:8px 12px;border-bottom:1px solid var(--bdr)"><code>{_html_mod.escape(a)}</code></td>'
-        f'<td style="font-family:var(--font-mono);font-size:var(--text-xs);padding:8px 12px;border-bottom:1px solid var(--bdr)"><span class="{"ref-ok" if ok else "ref-err"}">{detail if ok else ("✗ " + "不可用")}</span></td></tr>'
+        f'<td style="font-family:var(--font-mono);font-size:var(--text-xs);padding:8px 12px;border-bottom:1px solid var(--bdr)"><span class="{"ref-ok" if ok else "ref-err"}">{_html_mod.escape(detail if ok else ("✗ " + "不可用"), quote=True)}</span></td></tr>'
         for d, a, ok, detail in refs_data
     )
 
@@ -1366,7 +1414,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     disclaimer = _html_disclaimer()
 
     # ── Trend label (filled by JS) ──
-    trend_label_json = json.dumps(tech.get("trend_label", ""), ensure_ascii=False)
+    trend_label_json = _json_js(tech.get("trend_label", ""))  # ③ script 上下文转义
 
     # ── 构建完整 HTML ──
     html = f"""<!DOCTYPE html>
