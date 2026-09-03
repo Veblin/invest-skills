@@ -454,3 +454,49 @@ class TestARedUpGreenDownGlobal:
             r"7日净流入&nbsp;</span><span style=\"[^\"]*?color:(var\(--[a-z]+\))",
             html)
         assert m is not None and m.group(1) == "var(--up)"
+
+
+# ── 全量审查 P0-3: analysis md/html 同源 + events 占位隐藏 ──
+
+class TestFullReviewAnalysisSameSource:
+    def test_md_and_html_both_render_all_analysis_sections(self):
+        """md 注记节 + html 卡均渲染全部 analysis 段（旧 md 只消费 events
+        首行——非 events 段在 md 静默消失）。"""
+        from lib.render import render_html, render_report_v3
+
+        analysis = [
+            {"module": "events", "title": "事件分层分析",
+             "facts_md": "近 30 日公告 3 条 [来源: akshare]",
+             "analysis_md": "事件影响有限（证据 B）", "evidence_tag": "B",
+             "position": "events"},
+            {"module": "thesis", "title": "投资假设检验",
+             "facts_md": "营收增速为正 [来源: engine]",
+             "analysis_md": "假设未见破坏（证据 B）", "evidence_tag": "B",
+             "position": "overview"},
+        ]
+        md = render_report_v3(collection_v2_minimal(), "600176",
+                              analysis=analysis)
+        assert "分析注记（analysis.json 注入）" in md
+        assert "投资假设检验" in md and "事件分层分析" in md
+        html = render_html(collection_v2_minimal(), "600176",
+                           analysis=analysis)
+        assert "投资假设检验" in html
+
+    def test_events_static_placeholder_hidden_when_analysis_provided(self):
+        """analysis 提供 events 段 → 静态「待填写」占位 section 隐藏（旧实现
+        死块永不填充与真卡并存）。"""
+        from lib.render import render_html
+
+        analysis = [{"module": "events", "title": "事件分层分析",
+                     "facts_md": "f", "analysis_md": "a", "evidence_tag": "B",
+                     "position": "events"}]
+        html = render_html(collection_v2_minimal(), "600176",
+                           analysis=analysis)
+        assert "待 Claude 分析阶段填写" not in html
+
+    def test_no_analysis_md_unchanged(self):
+        """无 analysis → md 无注记节（基线零增）。"""
+        from lib.render import render_report_v3
+
+        md = render_report_v3(collection_v2_minimal(), "600176")
+        assert "分析注记" not in md

@@ -1429,7 +1429,13 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 
     research_md = _lazy_section_research_summary(collection, symbol, dims)
     research_sec = _html_research(research_md)
-    events_sec = _html_events()
+    # 全量审查 P0-3：analysis 提供 events 段时隐藏静态「待填写」占位 section
+    # （旧实现静态块永不填充、与真卡并存）
+    has_events_analysis = any(
+        isinstance(s, dict) and (
+            s.get("module") == "events" or s.get("position") == "events")
+        for s in (analysis or []))
+    events_sec = "" if has_events_analysis else _html_events()
     analysis_sec = _html_analysis(analysis)
     refs_sec = _html_refs(ref_rows)
     risk_banner = _html_risk_banner()

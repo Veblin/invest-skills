@@ -770,7 +770,11 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     if fmt == "html":
         _ensure_render_ready(result, args.symbol)
-        md_v2 = render.render_report_v2(result, args.symbol)
+        # 全量审查 P0-3：伴随 .md 改九模块 v3（与 --emit md 同代）+ analysis
+        # 注入——旧实现 render_report_v2（v0.1.2 旧模板）与 html 侧 v3 结构
+        # 不同代，且 analysis 只进 html、md 静默缺失（同目录两代 md 产物）。
+        md_v2 = render.render_report_v3(
+            result, args.symbol, analysis=analysis_payload)
         output = render.render_html(result, args.symbol, analysis=analysis_payload)
         from lib.shared_dates import shanghai_now
         now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间

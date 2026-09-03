@@ -761,7 +761,40 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_technical_brief(dims, val_cache=val_cache),
             _section_six_gates_scorecard(dims, collection, val_cache),
             _references_appendix(collection),
+            _render_analysis_appendix(analysis),
             _risk_footer(),
         ])
     return "\n\n".join(p for p in parts if p)
+
+
+def _render_analysis_appendix(analysis: list[dict] | None) -> str:
+    """全量审查 P0-3：md 与 html 同源消费 analysis 段。
+
+    旧实现 md 侧只在 A-5 时间线消费 events 段首行——非 events 的
+    position（valuation/conclusion 等）在 html 渲染为完整卡、在 md 中
+    **静默消失**（「同源」协议仅对 events 成立）。此处将全部段渲染为
+    尾部注记节（facts/analysis/evidence 与 html 卡同构）；无 analysis →
+    返回空串（基线 md 零 diff 保持）。
+    """
+    if not analysis:
+        return ""
+    lines = ["## 分析注记（analysis.json 注入）", ""]
+    for i, sec in enumerate(analysis):
+        if not isinstance(sec, dict):
+            continue
+        mod = str(sec.get("module") or sec.get("position") or f"section-{i}")
+        title = str(sec.get("title") or mod).strip()
+        facts = str(sec.get("facts_md") or "").strip()
+        amd = str(sec.get("analysis_md") or "").strip()
+        ev = str(sec.get("evidence_tag") or "").strip()
+        lines.append(f"### {title}（{mod}）")
+        lines.append("")
+        if facts:
+            lines += [f"**[事实]**", "", facts, ""]
+        if amd:
+            lines += [f"**[分析]**", "", amd, ""]
+        if ev:
+            lines.append(f"**证据等级：** {ev}")
+            lines.append("")
+    return "\n".join(lines)
 
