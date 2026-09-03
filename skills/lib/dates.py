@@ -10,12 +10,16 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+# A 股开盘集合竞价结束、盘面类数据开始反映当日交易的时点
+_SESSION_OPEN_TIME = datetime.strptime("09:25", "%H:%M").time()
+
 __all__ = [
     "parse_date",
     "yyyymmdd_to_iso",
     "shanghai_now",
     "shanghai_today",
     "shanghai_days_ago",
+    "shanghai_session_date",
     "normalize_end_date",
     "latest_month_row",
     "parse_utc_iso",
@@ -153,6 +157,63 @@ def shanghai_today() -> str:
 def shanghai_days_ago(n: int) -> str:
     """上海时区 N 天前的日期，YYYYMMDD。"""
     return (shanghai_now() - timedelta(days=n)).strftime("%Y%m%d")
+
+
+# sina A 股交易日历模块级缓存：TTL 7 天（日历极少变动；网络失败由调用方降级）
+_trade_cal_cache: dict = {"fetched_at": None, "dates": None}
+
+
+def _trade_days() -> list[str] | None:
+    """sina 交易日历（yyyyMMdd 升序列表）；网络失败返回 None。"""
+    cached = _trade_cal_cache["dates"]
+    fetched = _trade_cal_cache["fetched_at"]
+    if cached and fetched and (shanghai_now() - fetched).days < 7:
+        return cached
+    try:
+        import akshare as ak  # 延迟导入：dates 是轻量共享层，避免强依赖
+
+        df = ak.tool_trade_date_hist_sina()
+        dates = sorted(str(d).replace("-", "") for d in df["trade_date"])
+        _trade_cal_cache["dates"] = dates
+        _trade_cal_cache["fetched_at"] = shanghai_now()
+        return dates
+    except Exception:
+        logger.warning(
+            "trade calendar fetch failed — session date falls back to "
+            "weekday approximation")
+        return None
+
+
+def shanghai_session_date() -> str:
+    """当前 A 股数据会话实际所属交易日（YYYYMMDD）。
+
+    盘面类接口（涨停池 / spot 涨跌比 / 成交额等）在开盘前（<09:25）或非交易日
+    返回**上一交易日**收盘数据——若按日历日标注会造成「当日标签 + 昨日数据」
+    错位（2026-09-02 微观结构快照 83 家涨停误报事故的根因，数据实为 9/1）。
+    规则：
+    - 当日为交易日且上海时间 ≥09:25 → 当日
+    - 否则（开盘前 / 周末 / 节假日）→ 最近一个已过去的交易日
+    交易日历取 sina（模块级缓存 7 天）；不可得时退化为工作日近似
+    （长假场景可能不准，调用方需在 data_note 中标注降级口径）。
+    """
+    now = shanghai_now()
+    today = now.strftime("%Y%m%d")
+    trade_days = _trade_days()
+    if trade_days:
+        is_session = now.time() >= _SESSION_OPEN_TIME and today in trade_days
+        if is_session:
+            return today
+        past = [d for d in trade_days if d < today]
+        if past:
+            return past[-1]
+        return today  # 极端：日历整体晚于今日（数据异常），退回今日
+    # 降级：工作日近似（周五收盘后的周末 → 上周五；开盘前 → 前一工作日）
+    day = now.date()
+    if not (now.time() >= _SESSION_OPEN_TIME and day.weekday() < 5):
+        day -= timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+    return day.strftime("%Y%m%d")
 
 
 def latest_month_row(rows: list) -> Any:

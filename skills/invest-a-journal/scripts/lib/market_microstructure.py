@@ -17,7 +17,11 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from dates import shanghai_today  # noqa: E402
+from dates import (  # noqa: E402
+    shanghai_now,
+    shanghai_session_date,
+    shanghai_today,
+)
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
@@ -73,9 +77,14 @@ def snapshot() -> dict[str, Any]:
     """采集 Tier 1-3 当日快照：两融、涨跌比、涨跌停比、成交额、ERP、PCR、破净率。
 
     每个指标独立采集，失败不阻塞其他维度。
+
+    v0.2.9 数据新鲜度审计（F-audit）：date 取 shanghai_session_date() —— 数据
+    实际所属交易日。开盘前/非交易日采集时，盘面类字段（涨停池/涨跌比/成交额）
+    实为上一交易日收盘数据，若按日历日标注会造成「当日标签 + 昨日数据」错位
+    （2026-09-02 误报事故根因）；collected_at 与 data_note 供审计/呈现口径。
     """
     result: dict[str, Any] = {
-        "date": shanghai_today(),
+        "date": shanghai_session_date(),
         # Tier 1
         "margin_balance": None,          # 融资余额（亿元）
         "margin_buy_amount": None,        # 融资买入额（亿元）
@@ -123,6 +132,13 @@ def snapshot() -> dict[str, Any]:
     _fetch_futures(result)
     _compute_labels(result)
     _auto_persist(result)
+
+    # v0.2.9 新鲜度审计字段：collected_at（上海时区）+ data_note（回拨场景说明）
+    result["collected_at"] = shanghai_now().strftime("%Y-%m-%d %H:%M:%S")
+    if result["date"] != shanghai_today():
+        result["data_note"] = (
+            f"开盘前/非交易日快照：盘面类字段（涨停/涨跌比/成交额）为 "
+            f"{result['date']} 收盘数据")
 
     # 状态信封：全部数据维度失败 → "all_failed"，使 data_bridge 的失败
     # 不缓存语义（_FAILURE_STATUSES）生效。否则全 None 快照会被 5min 缓存
