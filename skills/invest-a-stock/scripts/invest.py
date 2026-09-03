@@ -668,6 +668,11 @@ def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
     return report_dir / f"{ts}.md"
 
 
+def _html_report_path(outdir: Path, subdir: str, ts: str) -> Path:
+    """T5-1（R-B2）：html 产物路径 = md 路径换 .html 后缀（同目录约定）。"""
+    return _report_filepath(outdir, subdir, ts).with_suffix(".html")
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = None
@@ -764,10 +769,6 @@ def cmd_report(args: argparse.Namespace) -> int:
     fmt = args.emit
 
     if fmt == "html":
-        print(
-            "⚠️ HTML 为 v0.1.2 旧版模板，迭代期请使用默认 Markdown 输出（省略 --emit 或 --emit md）",
-            file=sys.stderr,
-        )
         _ensure_render_ready(result, args.symbol)
         md_v2 = render.render_report_v2(result, args.symbol)
         output = render.render_html(result, args.symbol, analysis=analysis_payload)
@@ -776,8 +777,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
 
         subdir = _report_basename(result, args.symbol, ts)
-        outdir = Path(args.outdir).resolve() if args.outdir else Path.cwd()
-        htmlpath = _report_filepath(outdir, subdir, ts).with_suffix(".html")
+        # T5-1：outdir 默认与 md 分支一致（cwd/reports），落 reports/{sym}/ 约定
+        outdir = Path(args.outdir).resolve() if args.outdir \
+            else (Path.cwd() / "reports").resolve()
+        htmlpath = _html_report_path(outdir, subdir, ts)
         htmlpath.parent.mkdir(parents=True, exist_ok=True)
         htmlpath.write_text(output, encoding="utf-8")
 
