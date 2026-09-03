@@ -345,7 +345,14 @@ def render_markdown(text: str) -> str:
 
 
 def _block_break_line(line: str) -> bool:
-    """段落的终止行（下一个块开始）。"""
+    """段落的终止行（下一个块开始）。
+
+    全量审查 P2（与 invest-a-stock md_subset 同补丁）：4 空格/tab 缩进续行
+    必须终止段落——否则被静默吸收为段落文本（缩进代码块在段首会 fail-loud、
+    段中却被吞——fail-loud 承诺破洞）。
+    """
+    if line.startswith(("    ", "\t")):
+        return True
     for pat in (_HEAD_RE, _HEAD_DEEP_RE, _FENCED_RE, _IMAGE_RE, _HTML_BLOCK_RE,
                 _HR_RE, _SETEXT_RE, _QR_RE, _OL_RE, _UL_RE, _TASK_RE):
         if pat.match(line):

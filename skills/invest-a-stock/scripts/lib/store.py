@@ -307,7 +307,14 @@ def _parse_fetched_at(raw: Any) -> datetime | None:
 
 
 def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
-    """fetched_at 距今是否处于同会话窗口；解析失败 → False（保守保留不跳过）。"""
+    """fetched_at 距今是否处于同会话窗口；解析失败 → False（保守保留不跳过）。
+
+    全量审查 P2（双锚点澄清）：本函数以 **now()** 为锚——语义 = 「跳过刚
+    写入的本次采集行」（load_key_diff_vs_stored 用）；配对路径 get_latest_two
+    以**最新行**为锚（剔除其窗口内的同会话重复、最新行恒为 newer 侧——
+    code-review 第四轮修正）。两者目的不同非矛盾：diff 需跳过「刚存行」，
+    pair 需取「最近两跨会话行」；stale 库（最新行 >10 分钟）下行为一致。
+    """
     dt = _parse_fetched_at(ts)
     if dt is None:
         return False

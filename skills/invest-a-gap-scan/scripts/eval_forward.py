@@ -63,7 +63,12 @@ def _fmt_iso(yyyymmdd: str) -> str:
 
 
 def _excess_for(rec: dict, as_of_iso: str) -> dict | None:
-    """扫描日收盘进场 → as_of 收盘；返回收益/基准/超额/会话数。"""
+    """扫描日收盘进场 → as_of 收盘；返回收益/基准/超额/会话数。
+
+    全量审查 P2（record 假日残余）：日历双源同时失败时 scan_date 可能为非
+    交易日（hits.jsonl 无 data_note 可标注）——rows[0] 将取下一交易日收盘
+    作进场（进场锚晚移）。此处显式校验并告警（不静默）。
+    """
     code6 = rec["ts_code"].split(".")[0]
     exch = "sh" if rec["ts_code"].endswith("SH") else "sz"
     start_iso = _fmt_iso(rec["scan_date"])
@@ -74,6 +79,9 @@ def _excess_for(rec: dict, as_of_iso: str) -> dict | None:
         return None
     if len(rows) < 2 or len(bench) < 2:
         return None
+    if rows[0][0] != start_iso:
+        print(f"⚠️ eval: {rec['ts_code']} scan_date {rec['scan_date']} 非交易日"
+              f"（进场锚 = {rows[0][0]}，非扫描日收盘）", file=sys.stderr)
     bmap = {r[0]: float(r[1]) for r in bench}
     s0, s1 = float(rows[0][1]), float(rows[-1][1])
     if rows[0][0] not in bmap or rows[-1][0] not in bmap:
@@ -126,14 +134,23 @@ def stats_report(items: list[dict]) -> dict:
 
 
 def window_split(items: list[dict], by_ret: bool = False) -> list[dict]:
-    """窗口分解（5/10/20/40 会话）——按每项 sessions 归类取对应窗口收益较复杂，
-    简化为持有期分组（≤5 / ≤10 / ≤20 / ≤40 会话）的中位超额。"""
+    """持有期分组（全量审查 P2 语义修正）。
+
+    旧实现为**累积重叠桶**（≤5/≤10/…每项出现在每个更大桶——桶间不可比）
+    且桶键为总行数（含进场 bar）。改为**不相交区间桶**（0-5 / 6-10 /
+    11-20 / 21-40 会话），每项只入一桶——各桶中位超额可横向比较；
+    标签注明「持有会话数」（进场 bar 计入行数，超额跨 sessions-1 区间——
+    语义为进场后持仓时长分组，非固定窗口收益）。
+    """
+    bounds = [(0, 5), (6, 10), (11, 20), (21, 40)]
     groups = []
-    for cap in (5, 10, 20, 40):
-        g = [it for it in items if it["sessions"] <= cap]
+    for lo, hi in bounds:
+        g = [it for it in items if lo <= it["sessions"] <= hi]
         if g:
             groups.append({
-                "cap_sessions": cap, "n": len(g),
+                "cap_sessions": hi,
+                "band": f"{lo}-{hi}",
+                "n": len(g),
                 "median_excess": round(
                     statistics.median(x["excess"] for x in g), 2),
             })
@@ -182,11 +199,13 @@ def render_report(items: list[dict], stat: dict, groups: list[dict],
         "",
         "## 持有期分组（中位超额）",
         "",
-        "| ≤N 会话 | n | 中位超额 |",
+        "| 持有会话区间 | n | 中位超额 |",
         "|---|---|---|",
     ]
     for g in groups:
-        lines.append(f"| {g['cap_sessions']} | {g['n']} | {g['median_excess']}% |")
+        lines.append(
+            f"| {g.get('band', '≤' + str(g['cap_sessions']))} 会话 "
+            f"| {g['n']} | {g['median_excess']}% |")
     lines += [
         "",
         f"## 环境（margin 20d 变化率自身分位二分）：{regime}",

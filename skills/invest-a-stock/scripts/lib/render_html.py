@@ -907,7 +907,7 @@ def _extract_technical_html(dims: dict) -> dict:
     tech = compute(kd)
     if "error" in tech:
         err = tech.get("message", "未知错误")
-        err_html = f'<div style="padding:2rem;text-align:center;color:var(--err);grid-column:1/-1">技术指标计算失败: {sanitize_error(err, 80)}</div>'
+        err_html = f'<div style="padding:2rem;text-align:center;color:var(--err);grid-column:1/-1">技术指标计算失败: {_html_mod.escape(sanitize_error(err, 80), quote=True)}</div>'
         result.update(macd_html=err_html, rsi_kdj_html="", boll_html="", ma_grid_html=err_html)
         return result
 

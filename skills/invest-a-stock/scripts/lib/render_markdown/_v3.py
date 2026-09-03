@@ -2229,6 +2229,9 @@ def _section_management_assessment(
         if sec.get("module") == "events" or sec.get("position") == "events":
             first_line = str(sec.get("analysis_md") or "").splitlines()
             ev_summary = (first_line[0].strip() if first_line else "")
+            # 全量审查 P2：analysis_md 首行入 A-5 表格单元格——须 | 转义 +
+            # 长度截断（仿事件标题处理；旧实现裸插，含 | 的摘要会拆裂表格列）
+            ev_summary = ev_summary.replace("|", "｜")[:47]
             break
     ev_cell = (f'<span data-module="events">**{ev_summary}**</span>'
                if ev_summary else "[待 Claude report 阶段填充]")

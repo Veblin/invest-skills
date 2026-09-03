@@ -548,7 +548,9 @@ def _section_quality(kline: dict, profile: dict) -> str:
   </div>
   <div class="card" style="margin-top:var(--space-4)">
     <div class="g3">
-      {_kpi_card("复权状态", str(adj) if adj is not None else "—", str(adj_note or ""))}
+      {_kpi_card("复权状态",
+                 ("已复权" if adj else "未复权") if adj is not None else "—",
+                 str(adj_note or ""))}
       {_kpi_card("年化波动（%）", _fmt(kline.get("volatility_annualized")), "kline.volatility_annualized")}
       {_kpi_card("跟踪误差", "—" if profile.get("tracking_error") is None else _fmt(profile.get("tracking_error"), 2), "引擎未实现；不得填写估算数字")}
     </div>
@@ -888,7 +890,10 @@ window.addEventListener('load',renderCharts);
 
 def _build_data_js(payload: dict) -> str:
     """报告 JSON 注入（</ 转义防 script 截断；数据行与逻辑分离）。"""
-    payload_json = json.dumps(payload, ensure_ascii=False, default=str).replace("</", "<\\/")
+    payload_json = (json.dumps(payload, ensure_ascii=False, default=str)
+                     .replace("</", "<\\/")
+                     .replace("\u2028", "\\u2028")
+                     .replace("\u2029", "\\u2029"))  # 全量审查 P2：U+2028/29 截断脚本
     return (
         "// data\nconst report=" + payload_json + ";\n"
         + _HTML_APP_SCRIPT_LOGIC
