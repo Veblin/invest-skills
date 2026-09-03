@@ -175,8 +175,18 @@ def render_markdown(md: str) -> str:
             raise MarkdownSubsetError(i + 1, "4 空格缩进代码块不在子集")
         if _HEAD6_RE.match(raw):
             raise MarkdownSubsetError(i + 1, "五级及以上标题不在子集")
-        # setext 标题：上一行是正文文本 + 本行 = --- / === （须先于 hr 判定）
-        if _SETEXT_RE.match(stripped) and i > 0 and lines[i - 1].strip():
+        if raw[:1] == "\t":
+            raise MarkdownSubsetError(i + 1, "tab 缩进不在子集（防段落循环）")
+        if re.match(r"^[*+]\s", raw):
+            raise MarkdownSubsetError(i + 1, "* / + bullet 不在子集（请用 - ）")
+        # setext 标题：上一行是正文文本 + 本行 = --- / === （须先于 hr 判定）。
+        # 全量审查 P1-4：上行是引用/列表/表格行时按 CommonMark 属 hr——
+        # 不得误判 setext（Blockquote 后 --- 是主题分隔）
+        prev_raw = lines[i - 1].strip() if i > 0 else ""
+        prev_struct = (prev_raw.startswith((">", "-", "*", "+", "|", "1."))
+                       or bool(_UL_RE.match(lines[i - 1]) if i > 0 else False))
+        if _SETEXT_RE.match(stripped) and i > 0 and prev_raw \
+                and not prev_struct:
             raise MarkdownSubsetError(i + 1, "setext 标题不在子集")
         m_head = _HEAD_RE.match(raw)
         if m_head:
@@ -200,11 +210,16 @@ def render_markdown(md: str) -> str:
             html, i, _ = _list_block(lines, i)
             out.append(html)
             continue
-        # 段落（连续非空、非结构行合并为一段）
+        # 段落（连续非空、非结构行合并为一段）。
+        # 全量审查 P1-4：段中遇 4 空格缩进 / 未支持 bullet / tab 即终止段落——
+        # 下一主循环轮次对这些行 fail-loud（此前 4 空格续行被静默吸收、
+        # 破坏 schema「不支持语法即 error」承诺）
         para: list[str] = []
         while i < n and lines[i].strip() and not _HEAD_RE.match(lines[i]) and not _QR_RE.match(lines[i]) \
                 and not _TB_ROW_RE.match(lines[i].strip()) and not _HR_RE.match(lines[i].strip()) \
-                and not _UL_RE.match(lines[i]) and not _OL_RE.match(lines[i]) and "\t" not in lines[i][:1]:
+                and not _UL_RE.match(lines[i]) and not _OL_RE.match(lines[i]) \
+                and "\t" not in lines[i][:1] \
+                and not re.match(r"^(?: {4}|[*+]\s)", lines[i]):
             para.append(_inline(lines[i].strip()))
             i += 1
         out.append("<p>" + " ".join(para) + "</p>" if para else "")

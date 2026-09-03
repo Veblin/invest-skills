@@ -424,10 +424,17 @@ def _html_valuation(
                 'var(--space-4);text-align:center;color:var(--tx-f);'
                 'font-size:var(--text-xs)">估值分位带图：数据不可得（亏损期/'
                 'PE 缺失或有效正数不足 20 日）</div>')
+        # 全量审查 P1-3：band 存在说明历史序列可用——「无数据/请配置 token」
+        # 文案自相矛盾（数据存在且 token 已配置）。区分两种缺失。
+        has_band = "data-echart" in band_html
+        na_msg = (
+            "当前期估值不可得（亏损期/最新 PE 缺失）——历史分位带见下图；"
+            "若配置 Tushare Token 可获取更完整序列。" if has_band
+            else "估值维度无数据，请配置 Tushare Token 获取历史估值序列。")
         return f'''<section id="valuation">
   <div class="sh"><span class="st">估值分析</span><div class="sd"></div><span class="ss">数据不可得</span></div>
   <div class="card" style="padding:var(--space-10);text-align:center">
-    <div style="font-size:var(--text-sm);color:var(--tx-f)">估值维度无数据（亏损期/PE 缺失），请配置 Tushare Token 获取历史估值序列。</div>
+    <div style="font-size:var(--text-sm);color:var(--tx-f)">{na_msg}</div>
   </div>
   {band_out}
 </section>'''
@@ -751,8 +758,12 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
     profit_data = []
     for r in recent:
         ed = str(r.get("end_date", ""))
-        if len(ed) >= 7:
-            labels.append(ed[2:4] + "Q" + str((int(ed[4:6]) - 1) // 3 + 1))
+        # 全量审查 P1-1：akshare 降级 end_date 为 ISO（2026-06-30）——旧实现
+        # 直接切片 ed[4:6]="-0" → int 0/-1 → Q0 垃圾标签（300308 实证
+        # '24Q0'×2…）。先归一 8 位（normalize_end_date）再切季度。
+        ed8 = _to_iso_date(ed).replace("-", "") if ed else ""
+        if len(ed8) == 8 and ed8.isdigit():
+            labels.append(ed8[2:4] + "Q" + str((int(ed8[4:6]) - 1) // 3 + 1))
         else:
             labels.append(ed)
         roe_v = r.get("roe")
