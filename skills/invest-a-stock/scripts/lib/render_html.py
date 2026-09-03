@@ -42,9 +42,14 @@ _HTML_CSS = r"""
   --bdr:rgba(255,255,255,.07);--bdr-hi:rgba(255,255,255,.12);
   --tx:#e2e8f0;--tx-m:#8892a4;--tx-f:#4a5568;
   --ac:#38bdf8;--ac-dim:rgba(56,189,248,.12);
-  --up:#34d399;--up-d:rgba(52,211,153,.12);
-  --dn:#f87171;--dn-d:rgba(248,113,113,.12);
+  /* A 股惯例统一（2026-09-03 裁决）：红=涨/正/看多，绿=跌/负/看空。
+     --up 语义 = 「涨方向显示色」= 红；--dn = 「跌方向显示色」= 绿。
+     非涨跌语义（OK/可用/错误）用独立 --ok/--err（勿复用 up/dn）。 */
+  --up:#f87171;--up-d:rgba(248,113,113,.12);
+  --dn:#34d399;--dn-d:rgba(52,211,153,.12);
   --wn:#fbbf24;--wn-d:rgba(251,191,36,.1);
+  --ok:#34d399;--ok-d:rgba(52,211,153,.12);
+  --err:#f87171;--err-d:rgba(248,113,113,.12);
   --c1:#38bdf8;--c2:#818cf8;--c3:#34d399;--c4:#f87171;--c5:#fb923c;
   --sh:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
 }
@@ -53,9 +58,12 @@ _HTML_CSS = r"""
   --bdr:rgba(0,0,0,.07);--bdr-hi:rgba(0,0,0,.12);
   --tx:#1a2030;--tx-m:#6b7a99;--tx-f:#a8b4cc;
   --ac:#0284c7;--ac-dim:rgba(2,132,199,.08);
-  --up:#059669;--up-d:rgba(5,150,105,.08);
-  --dn:#dc2626;--dn-d:rgba(220,38,38,.08);
+  /* A 股惯例（与 dark 同构）：--up=红涨 --dn=绿跌；--ok/--err 独立 */
+  --up:#dc2626;--up-d:rgba(220,38,38,.08);
+  --dn:#059669;--dn-d:rgba(5,150,105,.08);
   --wn:#d97706;--wn-d:rgba(217,119,6,.08);
+  --ok:#059669;--ok-d:rgba(5,150,105,.08);
+  --err:#dc2626;--err-d:rgba(220,38,38,.08);
   --sh:0 1px 2px rgba(0,0,0,.06),0 4px 16px rgba(0,0,0,.06);
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -81,7 +89,7 @@ a{color:var(--ac);text-decoration:none}
 .tch{font-family:var(--font-mono);font-size:var(--text-xs);padding:2px 8px;border-radius:var(--r-sm)}
 .tnotice{font-size:var(--text-xs);color:var(--tx-f);letter-spacing:.02em;white-space:nowrap}
 .badge{font-size:var(--text-xs);font-family:var(--font-mono);padding:2px 8px;border-radius:var(--r-sm);border:1px solid}
-.b-ok{color:var(--up);border-color:var(--up-d);background:var(--up-d)}
+.b-ok{color:var(--ok);border-color:var(--ok-d);background:var(--ok-d)}
 .b-wn{color:var(--wn);border-color:var(--wn-d);background:var(--wn-d)}
 .tbtn{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-md);color:var(--tx-m);transition:background var(--trans),color var(--trans)}
 .tbtn:hover{background:var(--sur3);color:var(--tx)}
@@ -153,7 +161,7 @@ a{color:var(--ac);text-decoration:none}
 .rtog:hover{background:var(--sur3)}
 .rbody{display:none;margin-top:var(--space-3)}
 .rbody.open{display:block}
-.ref-ok{color:var(--up)}.ref-err{color:var(--dn)}
+.ref-ok{color:var(--ok)}.ref-err{color:var(--err)}
 code{font-family:var(--font-mono);font-size:.85em;background:var(--sur3);padding:1px 5px;border-radius:var(--r-sm);color:var(--tx-m)}
 
 /* verify */
@@ -847,10 +855,12 @@ def _extract_valuation_data(dims: dict) -> dict:
         zones.append(pb["zone"])
     if any("偏" in z for z in zones):
         result["zone_signal"] = "偏低" if zones.count("偏低") > zones.count("偏高") else ("偏高" if zones.count("偏高") > zones.count("偏低") else "适中区间")
+        # 估值语境独立约定（非涨跌映射）：偏低/低估=绿（便宜），偏高/贵=红。
+        # 2026-09-03 翻值后 --dn=绿/--up=红——显式引用对应变量。
         if "偏低" in result["zone_signal"]:
-            result["zone_color"] = "var(--up)"
-        elif "偏高" in result["zone_signal"]:
             result["zone_color"] = "var(--dn)"
+        elif "偏高" in result["zone_signal"]:
+            result["zone_color"] = "var(--up)"
         else:
             result["zone_color"] = "var(--wn)"
     else:
@@ -884,7 +894,7 @@ def _extract_technical_html(dims: dict) -> dict:
     tech = compute(kd)
     if "error" in tech:
         err = tech.get("message", "未知错误")
-        err_html = f'<div style="padding:2rem;text-align:center;color:var(--dn);grid-column:1/-1">技术指标计算失败: {sanitize_error(err, 80)}</div>'
+        err_html = f'<div style="padding:2rem;text-align:center;color:var(--err);grid-column:1/-1">技术指标计算失败: {sanitize_error(err, 80)}</div>'
         result.update(macd_html=err_html, rsi_kdj_html="", boll_html="", ma_grid_html=err_html)
         return result
 
@@ -1328,8 +1338,8 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
             flow_div = '<div style="padding:1.5rem;text-align:center;color:var(--tx-f);font-size:var(--text-xs)">北向资金序列不足，资金流图未生成。</div>'
         nb_html = f'''
     <div style="display:flex;align-items:center;gap:var(--space-4);margin-bottom:var(--space-3);flex-wrap:wrap">
-      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--dn)"></span>净流入</div>
-      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--up)"></span>净流出</div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--up)"></span>净流入</div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:var(--text-xs);color:var(--tx-m)"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--dn)"></span>净流出</div>
       <div style="margin-left:auto;display:flex;gap:var(--space-3)">
         <div class="ipill" style="padding:4px 10px"><span style="font-size:var(--text-xs);color:var(--tx-f)">7日净流入&nbsp;</span><span style="font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600;color:{flow_color}">{flow_total_str}</span></div>
         <div class="ipill" style="padding:4px 10px"><span style="font-size:var(--text-xs);color:var(--tx-f)">净入天数&nbsp;</span><span style="font-family:var(--font-mono);font-size:var(--text-xs);font-weight:600">{flow_pos}/{flow_days}</span></div>

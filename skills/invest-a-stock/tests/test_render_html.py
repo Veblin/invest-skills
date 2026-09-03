@@ -333,7 +333,8 @@ class TestB3RFinancialAndMargin:
         assert "财务数据不可得" in html
 
     def test_flow_legend_colors_match_bars(self):
-        """B-F4：图例色块与柱色一致（净流入=红 var(--dn) / 净流出=绿 var(--up)）。"""
+        """B-F4 + A 股惯例统一（2026-09-03 裁决）：图例与柱色一致——
+        净流入（正）= 红 var(--up)（翻值后 --up=红）/ 净流出 = 绿 var(--dn)。"""
         from lib.render import render_html
 
         html = render_html(_collection_with_market_structure(), "600176")
@@ -342,8 +343,8 @@ class TestB3RFinancialAndMargin:
             r"background:(var\(--[a-z]+\))[^<]*</span>净流入", html)
         out_swatch = _re.search(
             r"background:(var\(--[a-z]+\))[^<]*</span>净流出", html)
-        assert in_swatch is not None and in_swatch.group(1) == "var(--dn)"
-        assert out_swatch is not None and out_swatch.group(1) == "var(--up)"
+        assert in_swatch is not None and in_swatch.group(1) == "var(--up)"
+        assert out_swatch is not None and out_swatch.group(1) == "var(--dn)"
 
 
 # ── B3-R ⑥ D-3/B-F6 + B-F5: 主题数组合并 / 字体 / revive 适配器 ──
@@ -414,3 +415,42 @@ class TestCodeReviewMarginWindow:
         assert "2026-07-11" not in xaxis
         assert "2026-07-12" not in xaxis
         assert "2026-07-13" in xaxis  # 窗口内首日保留
+
+
+# ── A 股红涨绿跌全局统一（2026-09-03 裁决） ──
+
+class TestARedUpGreenDownGlobal:
+    def test_css_vars_red_up_green_down(self):
+        """CSS 变量翻值：--up=红（涨方向）、--dn=绿（跌方向），dark/light 同构；
+        非涨跌语义 --ok（可用/正常）绿 / --err（错误）红独立。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        dark = html[html.index(":root {"):html.index("[data-theme=\"light\"]")]
+        assert "--up:#f87171" in dark and "--dn:#34d399" in dark
+        assert "--ok:#34d399" in dark and "--err:#f87171" in dark
+        light = html[html.index("[data-theme=\"light\"]{"):
+                     html.index("*,*::before")]
+        assert "--up:#dc2626" in light and "--dn:#059669" in light
+
+    def test_topbar_up_red_down_green(self):
+        """topbar 涨红跌绿（price_color 引用 var(--up)=红涨 / var(--dn)=绿跌）。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176")
+        # fixture quote change_pct=1.2 > 0 → 涨 → var(--up)（红）
+        seg = html[html.index("tch"):html.index("</span>", html.index("tch")) + 8]
+        assert "var(--up)" in seg
+        # CSS 层断言：--up 定义值 = 红
+        assert "--up:#f87171" in html
+
+    def test_flow_kpi_and_legend_same_convention(self):
+        """flow 卡内一致：KPI 正=红（var(--up)）与图例净流入=红同约定（裁决前
+        KPI 绿 vs 图例红的同一控件双语义已消除）。"""
+        from lib.render import render_html
+
+        html = render_html(_collection_with_market_structure(), "600176")
+        m = __import__("re").search(
+            r"7日净流入&nbsp;</span><span style=\"[^\"]*?color:(var\(--[a-z]+\))",
+            html)
+        assert m is not None and m.group(1) == "var(--up)"

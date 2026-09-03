@@ -128,8 +128,12 @@ _HTML_CSS = r"""
   --bdr:rgba(255,255,255,.07);--bdr-hi:rgba(255,255,255,.12);
   --tx:#e2e8f0;--tx-m:#8892a4;--tx-f:#4a5568;
   --ac:#38bdf8;--ac-dim:rgba(56,189,248,.12);
-  --up:#34d399;--up-d:rgba(52,211,153,.12);
-  --dn:#f87171;--dn-d:rgba(248,113,113,.12);
+  /* A 股惯例（与 stock render_html 同构 2026-09-03）：--up=红涨 --dn=绿跌；
+     非涨跌语义用 --ok/--err（.b-ok/.ref-ok 引用） */
+  --up:#f87171;--up-d:rgba(248,113,113,.12);
+  --dn:#34d399;--dn-d:rgba(52,211,153,.12);
+  --ok:#34d399;--ok-d:rgba(52,211,153,.12);
+  --err:#f87171;--err-d:rgba(248,113,113,.12);
   --rise:#f87171;--rise-d:rgba(248,113,113,.14);
   --fall:#34d399;--fall-d:rgba(52,211,153,.14);
   --wn:#fbbf24;--wn-d:rgba(251,191,36,.1);
@@ -141,8 +145,10 @@ _HTML_CSS = r"""
   --bdr:rgba(0,0,0,.07);--bdr-hi:rgba(0,0,0,.12);
   --tx:#1a2030;--tx-m:#6b7a99;--tx-f:#a8b4cc;
   --ac:#0284c7;--ac-dim:rgba(2,132,199,.08);
-  --up:#059669;--up-d:rgba(5,150,105,.08);
-  --dn:#dc2626;--dn-d:rgba(220,38,38,.08);
+  --up:#dc2626;--up-d:rgba(220,38,38,.08);
+  --dn:#059669;--dn-d:rgba(5,150,105,.08);
+  --ok:#059669;--ok-d:rgba(5,150,105,.08);
+  --err:#dc2626;--err-d:rgba(220,38,38,.08);
   --rise:#dc2626;--rise-d:rgba(220,38,38,.1);
   --fall:#059669;--fall-d:rgba(5,150,105,.1);
   --wn:#d97706;--wn-d:rgba(217,119,6,.08);
@@ -170,7 +176,7 @@ a{color:var(--ac);text-decoration:none}
 .tp{font-family:var(--font-mono);font-size:var(--text-lg);font-weight:600;margin-left:auto}
 .tch{font-family:var(--font-mono);font-size:var(--text-xs);padding:2px 8px;border-radius:var(--r-sm)}
 .badge{font-size:var(--text-xs);font-family:var(--font-mono);padding:2px 8px;border-radius:var(--r-sm);border:1px solid}
-.b-ok{color:var(--up);border-color:var(--up-d);background:var(--up-d)}
+.b-ok{color:var(--ok);border-color:var(--ok-d);background:var(--ok-d)}
 .b-wn{color:var(--wn);border-color:var(--wn-d);background:var(--wn-d)}
 .tbtn{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-md);color:var(--tx-m);transition:background var(--trans),color var(--trans)}
 .tbtn:hover{background:var(--sur3);color:var(--tx)}
@@ -232,7 +238,7 @@ a{color:var(--ac);text-decoration:none}
 .rtog:hover{background:var(--sur3)}
 .rbody{display:none;margin-top:var(--space-3)}
 .rbody.open{display:block}
-.ref-ok{color:var(--up)}.ref-err{color:var(--dn)}
+.ref-ok{color:var(--ok)}.ref-err{color:var(--err)}
 code{font-family:var(--font-mono);font-size:.85em;background:var(--sur3);padding:1px 5px;border-radius:var(--r-sm);color:var(--tx-m)}
 
 /* verify note */
