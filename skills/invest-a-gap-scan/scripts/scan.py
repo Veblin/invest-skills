@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import sys
@@ -169,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--json", action="store_true",
         help="stdout 输出 JSON 格式",
+    )
+    p.add_argument(
+        "--record", action="store_true",
+        help="命中追加到 reports/gap-backtest/hits.jsonl（W2/M2 前瞻回测状态）",
     )
     return p
 
@@ -479,11 +484,24 @@ def _run_scan(
     )
 
     # ---- Step 8: 输出 ----
+    json_out = format_json(result) if args.json else None
     if args.json:
-        print(format_json(result))
+        print(json_out)
     else:
         print()
         print(format_brief(result, top_n=args.top))
+
+    # W2/M2：--record → 命中落前瞻回测状态文件（幂等）
+    if args.record:
+        try:
+            from record_hits import DEFAULT_STATE, record
+            from dates import shanghai_session_date
+
+            added = record(json.loads(json_out or format_json(result)),
+                           shanghai_session_date(), DEFAULT_STATE)
+            logger.info("record_hits: %d 条新增 → %s", added, DEFAULT_STATE)
+        except Exception as exc:
+            logger.warning("record_hits failed: %s", exc)
 
     # ---- Step 9: 保存详文档 ----
     if not args.no_save_report:
