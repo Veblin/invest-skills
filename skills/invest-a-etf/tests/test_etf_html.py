@@ -18,6 +18,10 @@ MD_TEXT = """# 测试（600000）研究备忘
 
 > ⚠️ 此为渲染器离线测试 md，不含分析内容。**渲染唯一串**用于验证原样嵌入。
 
+## 目录
+
+- [产品快照](#1-产品快照)
+
 ## 1. 产品快照
 
 | 指标 | 值 | 来源 |
@@ -25,6 +29,12 @@ MD_TEXT = """# 测试（600000）研究备忘
 | 最新价 | 1.000（占位） | quote.price |
 
 仅供参考，不构成投资建议。概率为分析情景权重（假设≠预测）。
+
+## 2. 持仓透视（R12，`holdings`）
+
+### 表内细标题
+
+占位
 
 ## 风险声明（尾部）
 
@@ -56,7 +66,8 @@ def _fixture_payload() -> dict:
             "aum": 180.26,
             "tracking_error": None,
             "tracking_error_note": "跟踪误差需 ETF 净值与指数点位序列对比，当前引擎未实现；请勿填写估算数字",
-            "hedge_coverage": {"index": "931079", "futures": None, "options": None},
+            "hedge_coverage": {"index": "931079", "futures": None, "options": None,
+                               "coverage": "none"},
             "flags": ["⚠️ 该 ETF 无可用的期货/期权对冲工具"],
             "_errors": [],
         },
@@ -225,7 +236,7 @@ _FORBIDDEN = [
     "建议买入", "建议卖出", "建议持有", "建议加仓", "建议减仓", "建议止损",
     "止损", "目标价", "崩盘", "极度高估", "极度低估", "全线创新高", "整体创新高",
     "长期方向不变", "理论上无顶部", "强烈信号", "一致看多", "安全边际吃尽",
-    "无视风险", "满仓", "梭哈", "重仓出击",
+    "无视风险", "满仓", "梭哈", "重仓出击", "抄底", "逃顶", "看涨", "看跌",
 ]
 
 
@@ -238,10 +249,94 @@ def test_no_forbidden_words_outside_disc(html_text):
 
 
 def test_md_missing_null_safe():
-    # md_text=None：研究节为空但整体不崩溃
+    # md_text=None：研究节为空、无 h2 子项但整体不崩溃
     html = render_etf_html(_fixture_payload())
     assert '<article class="md-body">' in html
     assert "研究备忘" in html
+    assert 'class="sbi sbi-sub"' not in html  # 无 md → 无子项
+
+
+# ── 头部摘要 hero ──
+
+
+def _hero_slice(html: str) -> str:
+    start = html.index('id="hero-summary"')
+    end = html.index('<section id="overview"')
+    return html[start:end]
+
+
+def test_summary_hero_present(html_text):
+    hero = _hero_slice(html_text)
+    assert 'id="hero-summary"' in html_text
+    # 8 格关键数字直映 fixture 值（价格/AUM/PE+历史位置/回撤/份额流/RSI）
+    for v in ("1.036", "180.26", "54.58x", "历史位置 51.5%", "-38.5", "-7.17", "41.2"):
+        assert v in hero, f"hero 缺字段值: {v}"
+
+
+def test_summary_ks_field_sources(html_text):
+    hero = _hero_slice(html_text)
+    for k in ("profile.aum", "kline.volatility_annualized",
+              "history.stats.max_drawdown.drawdown_pct",
+              "share_history.summary.total_flow_est"):
+        assert k in hero, f"hero 缺来源标注: {k}"
+    assert "profile.index_pe_pct" in hero
+
+
+def test_summary_points_no_direction_words(html_text):
+    hero = _hero_slice(html_text)
+    assert "价格位置：" in hero and "份额流：" in hero and "对冲覆盖：" in hero
+    # 状态要点为引擎字段直映，禁用方向性措辞
+    for w in ("看涨", "看跌", "抄底", "逃顶", "低估", "高估", "超卖", "超买"):
+        assert w not in hero, f"hero 状态要点出现方向词: {w}"
+
+
+# ── 研究备忘 h2 子目录 ──
+
+
+def test_sidebar_subitems_present(html_text):
+    h2_ids = set(re.findall(r'<h2 id="([^"]+)">', html_text))
+    sub_hrefs = set(re.findall(r'class="sbi sbi-sub" href="#([^"]+)"', html_text))
+    assert sub_hrefs, "无子目录项"
+    # 子目录 = 渲染 h2 全集 − 「## 目录」（md 自带，非章节）
+    assert sub_hrefs == h2_ids - {"目录"}, (sub_hrefs, h2_ids)
+    assert 'href="#1-产品快照"' in html_text
+    assert 'href="#风险声明尾部"' in html_text
+
+
+def test_sidebar_subitems_exclude_dir_h3(html_text):
+    assert 'href="#目录"' not in html_text   # md 自带「## 目录」不进侧栏
+    assert 'href="#表内细标题"' not in html_text  # 只收 h2，h3 不纳入
+
+
+def test_sidebar_subitem_long_title(html_text):
+    # 长标题：行内 code 剥除后上 title 全文；CSS ellipsis 截断
+    assert 'title="2. 持仓透视（R12，holdings）"' in html_text
+    assert "text-overflow:ellipsis" in html_text
+
+
+# ── hero 降级 ──
+
+
+def test_summary_degrade_all_none():
+    payload = _fixture_payload()
+    payload["kline"]["rsi"] = None
+    payload["kline"]["rsi_period"] = None
+    payload["share_history"] = {"available": False, "note": "份额数据不可得"}
+    payload["history"] = {"history": {"status": "available", "rows": []}}
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    assert 'id="hero-summary"' in html  # 不崩
+    hero = _hero_slice(html)
+    assert "—" in hero  # 缺失字段降级为 '—'
+    # 任一引用字段缺失 → 整句丢弃，无空模板句
+    assert "价格位置：" not in hero
+    assert "份额流：" not in hero
+    assert "波动/回撤：" not in hero
+    assert "对冲覆盖：" in hero  # hedge_coverage 仍存在
+    assert "RSI(" not in hero or "RSI(14)" not in hero  # rsi_period=None → 不显示周期
+
+
+def test_script_observer_extended(html_text):
+    assert 'section[id], article.md-body h2[id]' in html_text
 
 
 def test_false_placeholder_sections():

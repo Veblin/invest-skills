@@ -16,6 +16,7 @@ from __future__ import annotations
 import html as _html_mod
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -242,6 +243,12 @@ code{font-family:var(--font-mono);font-size:.85em;background:var(--sur3);padding
 .vnote{display:flex;align-items:flex-start;gap:var(--space-2);padding:var(--space-2) var(--space-3);background:var(--wn-d);border-radius:var(--r-sm);border-left:2px solid var(--wn);font-size:var(--text-xs);color:var(--tx-m);margin-top:var(--space-3)}
 .vnote svg{flex-shrink:0;margin-top:2px}
 
+/* hero 状态要点行（引擎字段直映 + 来源标注） */
+.sp{display:flex;gap:var(--space-3);align-items:baseline;padding:var(--space-2) 0;border-bottom:1px solid var(--bdr)}
+.sp:last-child{border-bottom:none}
+.sp-t{font-size:var(--text-sm);color:var(--tx)}
+.sp-s{font-size:var(--text-xs);font-family:var(--font-mono);color:var(--tx-f);white-space:nowrap}
+
 /* chart */
 .cw{position:relative;height:220px}
 .cw-sm{position:relative;height:160px}
@@ -273,6 +280,12 @@ code{font-family:var(--font-mono);font-size:.85em;background:var(--sur3);padding
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bdr-hi);border-radius:3px}
+
+/* sidebar 二级子项（研究备忘 h2 大纲） */
+.sbi-sub{padding-left:calc(var(--space-4) + 12px);font-size:var(--text-xs);
+  color:var(--tx-f);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sbi-sub:hover{color:var(--tx)}
+.md-body h2{scroll-margin-top:64px}  /* 子项锚点跳转：顶栏 52px + 补偿 */
 
 @media(max-width:900px){
   .app{grid-template-columns:1fr}
@@ -307,8 +320,36 @@ def _html_topbar(symbol: str, name: str, price_str: str, change_str: str,
 </header>'''
 
 
-def _html_sidebar() -> str:
-    return '''<nav class="sidebar">
+_H2_RE = re.compile(r'<h2 id="([^"]+)">(.*?)</h2>', re.S)
+_MD_TOC_SKIP = "目录"  # md 自带「## 目录」非章节，排除
+
+
+def _md_h2_outline(md_html: str) -> list[tuple[str, str]]:
+    """从 md 渲染产物提取 h2 大纲 [(slug, 纯文本)]。
+
+    数据源用渲染产物而非 md 原文——保证侧栏 href 与最终输出 id 精确一致
+    （etf_md 的 GitHub slug 规则变化不失配）。只收 h2；重复 slug 仅收首个；
+    无 h2 返回空列表（降级为无子项）。
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for slug, raw in _H2_RE.findall(md_html or ""):
+        if slug in seen:
+            continue
+        seen.add(slug)
+        text = _html_mod.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
+        if not text or text == _MD_TOC_SKIP:
+            continue
+        out.append((slug, text))
+    return out
+
+
+def _html_sidebar(md_html: str = "") -> str:
+    sub_items = "".join(
+        f'<a class="sbi sbi-sub" href="#{slug}" title="{_esc(text)}">{_esc(text)}</a>'
+        for slug, text in _md_h2_outline(md_html)
+    )
+    return f'''<nav class="sidebar">
   <div class="sbl">概览</div>
   <a class="sbi active" href="#overview"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>产品快照</a>
   <div class="sbl">数据</div>
@@ -319,6 +360,7 @@ def _html_sidebar() -> str:
   <a class="sbi" href="#flows"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12l10-10 10 10"/></svg>资金流向</a>
   <div class="sbl">叙事</div>
   <a class="sbi" href="#research"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>研究备忘</a>
+{sub_items}
   <a class="sbi" href="#refs"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>数据来源</a>
 </nav>'''
 
@@ -350,6 +392,147 @@ def _vnote(text: str) -> str:
     return (f'<div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" '
             f'stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/>'
             f'<path d="M12 8v4m0 4h.01"/></svg>{_esc(text)}</div>')
+
+
+def _html_hero(profile: dict, quote: dict, kline: dict,
+               share_history: dict, history: dict) -> str:
+    """头部摘要（hero，首屏快览）。全部引擎字段直映，无跨字段计算。
+
+    每格/每句独立降级：字段缺失 → '—' 或整句丢弃。状态描述，非信号。
+    hero 不注册为 scroll-spy 目标（不带 <section> 标签，main 顶部插入）。
+    """
+    price = safe_float(quote.get("price"))
+    chg = safe_float(quote.get("change_pct"))
+    price_str = _fmt(price, 3) if price is not None else "—"
+    price_color = _pos_var(chg) if chg is not None else "var(--tx)"
+
+    cat = profile.get("category") or {}
+    vg = profile.get("valuation_guide") or {}
+
+    aum = profile.get("aum")
+    pd = profile.get("premium_discount")
+    pe = profile.get("index_pe")
+    pe_pct = profile.get("index_pe_pct")
+    vol_ann = kline.get("volatility_annualized")
+    rsi = kline.get("rsi")
+    rsi_period = kline.get("rsi_period")
+
+    sh_summary = share_history.get("summary") or {}
+    total_flow = sh_summary.get("total_flow_est")
+    flow_trend = sh_summary.get("trend")
+    recent_days = sh_summary.get("recent_flow_days")
+    recent_flow = sh_summary.get("recent_flow_est")
+    inflow_days = sh_summary.get("inflow_days")
+    outflow_days = sh_summary.get("outflow_days")
+
+    stats = history.get("stats") or {}
+    md_stat = stats.get("max_drawdown") or {}
+    ah = stats.get("annual_high") or {}
+
+    # ── 8 格 stat（.ks 小字 = 引擎字段路径，复测可溯源） ──
+    pe_sub = ""
+    if pe_pct is not None:
+        pe_sub = f"历史位置 {_fmt(pe_pct, 1)}%（引擎累积窗口） · "
+    pe_sub += "profile.index_pe_pct"
+
+    flow_sub = f"{_esc(flow_trend)} · " if flow_trend else ""
+    flow_sub += "share_history.summary.total_flow_est"
+
+    rsi_sub = (f"RSI({rsi_period}) · " if rsi_period else "") + "kline.rsi"
+
+    tiles = [
+        _kpi_card("最新价", price_str, "quote.price", price_color),
+        _kpi_card("AUM（亿元）", _fmt(aum) if aum is not None else "—", "profile.aum"),
+        _kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—",
+                  "profile.premium_discount", _pos_var(pd)),
+        _kpi_card("指数 PE", (_fmt(pe) if pe is not None else "—") + ("x" if pe is not None else ""), pe_sub),
+        _kpi_card("年化波动（%）", _fmt(vol_ann, 1) if vol_ann is not None else "—", "kline.volatility_annualized"),
+        _kpi_card("最大回撤（%）",
+                  (_fmt_signed(md_stat.get("drawdown_pct"), 1) if md_stat.get("drawdown_pct") is not None else "—"),
+                  "history.stats.max_drawdown.drawdown_pct", _pos_var(md_stat.get("drawdown_pct"))),
+        _kpi_card("20 日份额流（亿）", (_fmt_signed(total_flow, 2) if total_flow is not None else "—"), flow_sub,
+                  _pos_var(total_flow)),
+        _kpi_card("RSI", _fmt(rsi, 1) if rsi is not None else "—", rsi_sub),
+    ]
+
+    # ── 4 条状态要点（任一条件字段缺失 → 整句丢弃；无跨字段计算） ──
+    points = []
+    if price is not None and stats.get("current_vs_high_pct") is not None and ah.get("date") is not None:
+        points.append((f"价格位置：最新价 {price_str}，距窗口高点 {_fmt_signed(stats.get('current_vs_high_pct'))}%"
+                       f"（{_fmt(ah.get('close'), 3)} @ {_esc(ah.get('date'))}）",
+                       "history.stats.current_vs_high_pct"))
+    if total_flow is not None and flow_trend:
+        seg = f"20 日 {_fmt_signed(total_flow, 2)} 亿"
+        if recent_days is not None and recent_flow is not None:
+            seg += f"；近 {recent_days} 日 {_fmt_signed(recent_flow, 2)} 亿"
+        if inflow_days is not None and outflow_days is not None:
+            seg += f"；{inflow_days} 日流入 / {outflow_days} 日流出"
+        points.append((f"份额流：{seg}。引擎趋势标签：{_esc(flow_trend)}",
+                       "share_history.summary.total_flow_est"))
+    if vol_ann is not None and md_stat.get("drawdown_pct") is not None \
+            and md_stat.get("peak_date") is not None and md_stat.get("trough_date") is not None:
+        points.append((f"波动/回撤：年化波动 {_fmt(vol_ann, 1)}%；窗口最大回撤 {_fmt_signed(md_stat.get('drawdown_pct'), 1)}%"
+                       f"（{_esc(md_stat.get('peak_date'))} → {_esc(md_stat.get('trough_date'))}）",
+                       "kline.volatility_annualized · history.stats.max_drawdown"))
+    hc = profile.get("hedge_coverage") or {}
+    coverage = hc.get("coverage")
+    if coverage is None:  # 兼容缺 coverage 键的旧 payload（按期货/期权降级判断）
+        coverage = "partial" if (hc.get("futures") or hc.get("options")) else "unknown"
+    cov_map = {"none": "无", "low": "有限", "full": "完整", "high": "完整",
+               "partial": "部分", "unknown": "未核实"}
+    hedges = []
+    if hc.get("futures"):
+        hedges.append(f"期货 {_esc(hc.get('futures'))}")
+    if hc.get("options"):
+        hedges.append(f"期权 {_esc(hc.get('options'))}")
+    points.append((f"对冲覆盖：{_esc(cov_map.get(str(coverage), str(coverage)))}"
+                   + (f"（{' / '.join(hedges)}）" if hedges else ""),
+                   "profile.hedge_coverage.coverage"))
+
+    points_html = "".join(
+        f'<div class="sp"><div class="sp-t">{t}</div><span class="sp-s">{s}</span></div>'
+        for t, s in points
+    )
+
+    # ── 一句话总结（分段可选拼接；空字段不输出空段） ──
+    bits = []
+    if cat.get("label"):
+        bits.append(f"{_esc(cat.get('label'))}")
+    hc_index = hc.get("index")
+    if hc_index and str(hc_index) != "未知":
+        bits.append(f"跟踪 {_esc(hc_index)}")
+    if pe is not None:
+        s = f"指数 PE {_fmt(pe)}x"
+        if pe_pct is not None:
+            s += f"（历史位置 {_fmt(pe_pct, 1)}%）"
+        bits.append(s)
+    if total_flow is not None and flow_trend:
+        bits.append(f"20 日份额 {_esc(flow_trend)} {_fmt_signed(total_flow, 2)} 亿")
+    if vg.get("industry"):
+        s = f"聚焦 {_esc(vg.get('industry'))}"
+        if vg.get("sub_sector") and str(vg.get("sub_sector")) != str(vg.get("industry")):
+            s += f" / {_esc(vg.get('sub_sector'))}"
+        bits.append(s)
+    summary_html = f'<div class="sp-t" style="margin-top:var(--space-4)">{" · ".join(bits)}</div>' if bits else ""
+
+    flags_html = _flags_badges(profile.get("flags"))
+    flags_row = ""
+    if flags_html:
+        flags_row = (f'<div style="margin-top:var(--space-3);display:flex;gap:var(--space-2);'
+                     f'flex-wrap:wrap">{flags_html}</div>')
+
+    return f'''<div id="hero-summary" class="card">
+  <div class="sh"><span class="st">摘要</span><div class="sd"></div><span class="ss">引擎字段直映 · 状态描述，非信号</span></div>
+  <div class="g4">
+    {"".join(tiles[:4])}
+  </div>
+  <div class="g4" style="margin-top:var(--space-4)">
+    {"".join(tiles[4:])}
+  </div>
+  {summary_html}
+  {points_html}
+  {flags_row}
+</div>'''
 
 
 def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
@@ -826,7 +1009,7 @@ document.querySelectorAll('.sbi').forEach(el=>el.addEventListener('click',()=>{
       a.classList.add('active');
     });
   },{rootMargin:'-15% 0px -75% 0px'});
-  document.querySelectorAll('section[id]').forEach(s=>spy.observe(s));
+  document.querySelectorAll('section[id], article.md-body h2[id]').forEach(s=>spy.observe(s));
 })();
 
 // charts
@@ -934,7 +1117,9 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
     md_html = render_markdown(md_text) if md_text else ""
 
     topbar = _html_topbar(symbol, name, price_str, chg_str, price_color, chg_color)
-    sidebar = _html_sidebar()
+    sidebar = _html_sidebar(md_html)
+    hero_html = _html_hero(profile, quote, kline,
+                           payload.get("share_history") or {}, history)
     risk_banner = _html_risk_banner()
     disclaimer = _html_disclaimer()
 
@@ -971,6 +1156,7 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
 {sidebar}
 <main class="main">
 {risk_banner}
+{hero_html}
 {sections[0]}
 {sections[1]}
 {sections[2]}
