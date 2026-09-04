@@ -66,7 +66,7 @@ Claude: 确认 6 位代码
        ↓
 Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
        ↓
-可选: etf.py html SYMBOL --md <刚写好的 md>  → 生成交互式 HTML 并自动在浏览器打开（详见「HTML 产物」节）
+默认（报告落盘后必做）: etf.py html SYMBOL --md <刚写好的 md>  → 同目录生效交互式 HTML（--no-open 落盘；详见「HTML 产物」节）
 
 **报告文件命名规则**：
 - `{timestamp}` = 报告生成时的实际时间，格式 `YYYY-MM-DD-HH-MM-SS`（北京时间）
@@ -105,7 +105,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 **交互式 HTML 报告**（`html` 子命令）：引擎数据仪表盘（概览/持仓/估值/跟踪/历史/资金流等 8 节 + Chart.js 交互图表）+ 已过复检的报告 md 分析全文原样嵌入。单文件自包含（图表库内联），file:// 离线可用。
 
-- **推荐用法**：报告 md 写入后，显式传 `--md` 指向刚写的文件（本工作流下你掌握确切路径；不同 harness 下报告目录位置不必假设一致）：
+- **默认用法**：报告 md 写入后执行（默认动作），显式传 `--md` 指向刚写的文件——本工作流下你掌握确切路径；不同 harness 下报告目录位置不必假设一致
 
 ```bash
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md reports/515050-通信ETF/2026-08-28-22-47-25.md

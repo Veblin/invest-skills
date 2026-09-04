@@ -549,8 +549,8 @@ def _json_js(obj: Any) -> str:
     """
     return (json.dumps(obj, ensure_ascii=False)
             .replace("</", "<\\/")
-            .replace(" ", "\\u2028")
-            .replace(" ", "\\u2029"))
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
 
 
 def _chart_block(chart_id: str, title_html: str, opts: dict,
