@@ -33,6 +33,93 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# 主入口
+# ---------------------------------------------------------------------------
+
+def query_for_evaluation(symbol: str, asset_type: str = "stock") -> dict[str, Any]:
+    """为日志评估查询关键数据。
+
+    并行采集 quote + kline + macro + valuation，5-10 秒完成。
+    任一维度失败 → 部分返回 + data_quality 标注，不阻塞评估。
+
+    Parameters
+    ----------
+    symbol : str
+        6 位股票/ETF 代码（如 "600176"、"563300"）。
+    asset_type : str
+        "stock" | "etf"。
+
+    Returns
+    -------
+    dict
+        {symbol, asset_type, quote, valuation, technical, macro_snapshot,
+         market_microstructure, etf_data, data_quality}
+    """
+    t0 = time.monotonic()
+
+    if asset_type == "etf":
+        try:
+            from etf_data import prefetch_etf_spot
+            prefetch_etf_spot()
+        except Exception as exc:
+            logger.warning("etf spot prefetch failed: %s", exc)
+
+    result: dict[str, Any] = {
+        "symbol": symbol,
+        "asset_type": asset_type,
+        "quote": {},
+        "valuation": {},
+        "technical": {},
+        "macro_snapshot": {},
+        "market_microstructure": None,
+        "etf_data": None,
+        "data_quality": {},
+    }
+
+    # --- 并行采集 quote + kline + valuation + macro ---
+    futures: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        if asset_type == "etf":
+            futures["quote"] = ex.submit(_safe_etf_quote, symbol)
+            futures["kline"] = ex.submit(_safe_etf_kline, symbol)
+            futures["valuation"] = ex.submit(_safe_collect_valuation_skip, symbol)
+        else:
+            futures["quote"] = ex.submit(_safe_collect_quote, symbol)
+            futures["kline"] = ex.submit(_safe_collect_kline, symbol)
+            futures["valuation"] = ex.submit(_safe_collect_valuation, symbol)
+        futures["macro"] = ex.submit(_safe_collect_macro, symbol)
+
+        for key, fut in futures.items():
+            try:
+                result[key] = fut.result(timeout=30)
+            except Exception as exc:
+                logger.warning("%s collect failed: %s", key, exc)
+                result[key] = {"_error": str(exc)}
+
+    # --- 技术指标计算（基于 kline data） ---
+    _compute_technical(result)
+
+    # --- 宏观快照 ---
+    _process_macro(result)
+
+    # --- 市场微观结构：个股与 ETF 评估均注入（环境标签 / 护栏） ---
+    result["market_microstructure"] = _safe_collect_microstructure()
+
+    # --- ETF 专属 ---
+    if asset_type == "etf":
+        result["etf_data"] = _safe_collect_etf(symbol)
+
+    # --- 汇总 data_quality ---
+    _summarize_quality(result)
+
+    elapsed = time.monotonic() - t0
+    result["_elapsed_ms"] = round(elapsed * 1000)
+    logger.info("query_for_evaluation(%s) done in %.1fs", symbol, elapsed)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 子采集（safe wrappers）
 # ---------------------------------------------------------------------------
 

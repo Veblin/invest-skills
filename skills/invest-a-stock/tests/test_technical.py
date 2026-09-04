@@ -103,6 +103,20 @@ class TestMACD:
         macd = result["momentum"]["macd"]
         assert macd["available"] is False
 
+    def test_macd_series_output(self):
+        """T3-4（R-B3③）：compute 输出 macd_series（键 histogram 非 hist，A2）。
+
+        序列 length 与输入行数/日期对齐（停牌行过滤后同源 dates，A3 消费端先切片）。
+        """
+        from lib.technical import compute
+        rows = _make_kline(100)
+        result = compute(rows)
+        s = result["momentum"]["macd_series"]
+        assert set(s) == {"dif", "dea", "histogram", "dates"}
+        assert len(s["dif"]) == len(s["dates"]) == len(rows)
+        assert s["histogram"][-1] is not None
+        assert s["dates"][0] == rows[0]["trade_date"]
+
 
 class TestRSI:
     def test_rsi_basic(self):

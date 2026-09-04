@@ -321,6 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES,
                    help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
+    pr.add_argument("--analysis", default=None,
+                    help="analysis.json 路径（R-B1）；渲染期替换 [待 Claude report 阶段填充] 占位")
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(pr, with_news_pack=True)
     pr.add_argument(
@@ -336,6 +338,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--outdir", default="", help="报告输出目录（指定则写 .md 或 .html 文件；默认仅 stdout）")
     pr.add_argument("--no-store", action="store_false", dest="store", default=True,
                    help="不存入持久化存储（report 默认自动入库；--resume 恒不重复入库）")
+
+    pqc = sub.add_parser("qc-report", help="报告质量门禁：可读性指标 + 结论段证据等级（R-A1/R-A2）")
+    pqc.add_argument("path", help="报告 md 路径")
+    pqc.add_argument("--fail-on", default="warning", choices=["info", "warning", "error"])
 
     pcomp = sub.add_parser("compare", help="双标对比")
     pcomp.add_argument("symbol_a")
@@ -662,6 +668,11 @@ def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
     return report_dir / f"{ts}.md"
 
 
+def _html_report_path(outdir: Path, subdir: str, ts: str) -> Path:
+    """T5-1（R-B2）：html 产物路径 = md 路径换 .html 后缀（同目录约定）。"""
+    return _report_filepath(outdir, subdir, ts).with_suffix(".html")
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = None
@@ -698,6 +709,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    # R-B1: analysis.json 加载校验（fail-loud：校验失败 exit 2，不静默降级渲染）
+    analysis_payload: list[dict] | None = None
+    if getattr(args, "analysis", None):
+        from lib.analysis_schema import AnalysisSchemaError, load_analysis_json, validate_sections
+        try:
+            analysis_payload = load_analysis_json(Path(args.analysis))
+            errs = validate_sections(analysis_payload) if isinstance(analysis_payload, list) else ["analysis.json 顶层必须为数组"]
+            if errs:
+                raise AnalysisSchemaError("; ".join(errs[:5]))
+        except AnalysisSchemaError as exc:
+            print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
+            return 2
+        print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
     # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，渲染层标注「无行业成功因素定义」）
     try:
         from lib.render_utils import _get_dim_data, _index_dims
@@ -745,20 +769,22 @@ def cmd_report(args: argparse.Namespace) -> int:
     fmt = args.emit
 
     if fmt == "html":
-        print(
-            "⚠️ HTML 为 v0.1.2 旧版模板，迭代期请使用默认 Markdown 输出（省略 --emit 或 --emit md）",
-            file=sys.stderr,
-        )
         _ensure_render_ready(result, args.symbol)
-        md_v2 = render.render_report_v2(result, args.symbol)
-        output = render.render_html(result, args.symbol)
+        # 全量审查 P0-3：伴随 .md 改九模块 v3（与 --emit md 同代）+ analysis
+        # 注入——旧实现 render_report_v2（v0.1.2 旧模板）与 html 侧 v3 结构
+        # 不同代，且 analysis 只进 html、md 静默缺失（同目录两代 md 产物）。
+        md_v2 = render.render_report_v3(
+            result, args.symbol, analysis=analysis_payload)
+        output = render.render_html(result, args.symbol, analysis=analysis_payload)
         from lib.shared_dates import shanghai_now
         now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
 
         subdir = _report_basename(result, args.symbol, ts)
-        outdir = Path(args.outdir).resolve() if args.outdir else Path.cwd()
-        htmlpath = _report_filepath(outdir, subdir, ts).with_suffix(".html")
+        # T5-1：outdir 默认与 md 分支一致（cwd/reports），落 reports/{sym}/ 约定
+        outdir = Path(args.outdir).resolve() if args.outdir \
+            else (Path.cwd() / "reports").resolve()
+        htmlpath = _html_report_path(outdir, subdir, ts)
         htmlpath.parent.mkdir(parents=True, exist_ok=True)
         htmlpath.write_text(output, encoding="utf-8")
 
@@ -776,7 +802,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
     # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
     output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
-                           attach_extras=True)
+                           attach_extras=True, analysis=analysis_payload)
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     if getattr(args, 'save_raw', False):
@@ -1670,6 +1696,21 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_qc_report(args: argparse.Namespace) -> int:
+    from lib.report_qc import format_report_qc, run_report_qc
+
+    p = Path(args.path).resolve()
+    if not p.exists():
+        print(f"❌ 文件不存在: {p}", file=sys.stderr)
+        return 1
+    text = p.read_text(encoding="utf-8")
+    findings = run_report_qc(text)
+    print(format_report_qc(findings))
+    rank = {"info": 0, "warning": 1, "error": 2}
+    threshold = rank.get(args.fail_on, 1)
+    return 1 if any(rank[f.severity] >= threshold for f in findings) else 0
+
+
 def cmd_rigor(args: argparse.Namespace) -> int:
     from lib.financial_rigor import has_blocking_failures, run_rigor
 
@@ -2344,11 +2385,11 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
 
 
-# 命令分发表：与 build_parser 的 26 个 sub.add_parser 一一对应（新增子命令须同步两处）
+# 命令分发表：与 build_parser 的 27 个 sub.add_parser 一一对应（新增子命令须同步两处）
 CMD_DISPATCH = {
     "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
     "diff": cmd_diff, "watchlist": cmd_watchlist, "diagnose": cmd_diagnose,
-    "lint": cmd_lint, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
+    "lint": cmd_lint, "qc-report": cmd_qc_report, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
     "evidence": cmd_evidence, "analyze": cmd_analyze, "synthesize": cmd_synthesize,
     "rigor": cmd_rigor, "audit": cmd_audit, "check": cmd_check,
     "portfolio": cmd_portfolio, "thesis": cmd_thesis, "shock": cmd_shock,

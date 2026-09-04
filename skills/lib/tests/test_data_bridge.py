@@ -411,3 +411,33 @@ def test_get_etf_holdings_clusters_enrich_failure_sets_error(monkeypatch, tmp_pa
     assert env["status"] == "ok"
     assert env["clusters"] is None
     assert env["clusters_error"] == "RuntimeError: boom"
+
+
+def test_collector_legacy_reexports_full_contract() -> None:
+    """真实加载路径契约：data_bridge 经 _import_lib_module_attr 消费的
+    lib.collector 名字必须全部存在（不 mock _import_lib_module_attr）。
+
+    data_bridge 只捕获 ModuleNotFoundError，AttributeError 会直抛 → 消费方
+    500。曾因 C8 清理漏掉 collect_quote / collect_valuation 再导出（v0.2.7
+    e42f171），上游 CLI 走 collect_all 不受影响、测试全 mock 未抓到。
+    """
+    import invest_path  # noqa: F401 — 同 skills/lib 目录，模块级路径已就绪
+
+    # 复现生产解析（scripts 为 sys.path[0]）。ensure_invest_a_scripts_on_path
+    # 只在缺席时插 0——全量套件下 skills/ 常驻 path 前位（共享 skills/lib 有
+    # __init__.py 可被解析为顶层 lib 包，且无 collector 子包），stock scripts
+    # 在位即 no-op → 必须无条件把 canonical scripts 顶到 path[0]。
+    # 同时弹出全部 lib* 模块（父包 + 子模块），避免 importlib 命中先行导入的
+    # 旧绑定（test_backtest_futures_fixes 等重绑定过 sys.modules['lib']）。
+    saved_path = list(sys.path)
+    saved_lib = {k: sys.modules.pop(k) for k in list(sys.modules)
+                 if k == "lib" or k.startswith("lib.")}
+    sys.path.insert(0, str(invest_path.invest_a_scripts_dir()))
+    try:
+        for attr in ("collect_kline", "collect_quote", "collect_financials",
+                     "collect_basic_info", "collect_valuation"):
+            fn = data_bridge._import_lib_module_attr("collector", attr)
+            assert callable(fn), f"lib.collector.{attr} 应为 callable（实际: {fn!r}）"
+    finally:
+        sys.path[:] = saved_path
+        sys.modules.update(saved_lib)

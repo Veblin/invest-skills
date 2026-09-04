@@ -17,7 +17,12 @@ from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from dates import shanghai_today  # noqa: E402
+from dates import (  # noqa: E402
+    shanghai_now,
+    shanghai_session_date,
+    shanghai_session_date_degraded,
+    shanghai_today,
+)
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
@@ -62,6 +67,10 @@ _MARKET_SNAPSHOT_COLUMNS = (
     "northbound_net_inflow", "northbound_direction", "northbound_source",
     "futures_basis_pct",
     "env_label",
+    # v0.2.8 数据新鲜度审计（W1/code-review #4）：persist 列须含审计字段，
+    # 否则 collected_at 落库为 SQLite 默认 UTC、data_note 直接丢失
+    "collected_at",
+    "data_note",
 )
 
 
@@ -73,9 +82,14 @@ def snapshot() -> dict[str, Any]:
     """采集 Tier 1-3 当日快照：两融、涨跌比、涨跌停比、成交额、ERP、PCR、破净率。
 
     每个指标独立采集，失败不阻塞其他维度。
+
+    v0.2.8 数据新鲜度审计（F-audit）：date 取 shanghai_session_date() —— 数据
+    实际所属交易日。开盘前/非交易日采集时，盘面类字段（涨停池/涨跌比/成交额）
+    实为上一交易日收盘数据，若按日历日标注会造成「当日标签 + 昨日数据」错位
+    （2026-09-02 误报事故根因）；collected_at 与 data_note 供审计/呈现口径。
     """
     result: dict[str, Any] = {
-        "date": shanghai_today(),
+        "date": shanghai_session_date(),
         # Tier 1
         "margin_balance": None,          # 融资余额（亿元）
         "margin_buy_amount": None,        # 融资买入额（亿元）
@@ -122,6 +136,17 @@ def snapshot() -> dict[str, Any]:
     _fetch_northbound(result)
     _fetch_futures(result)
     _compute_labels(result)
+
+    # v0.2.8 新鲜度审计字段：collected_at（上海时区）+ data_note——须在
+    # _auto_persist 之前赋值（persist 列已含二者，code-review #4：此前后置
+    # 赋值导致审计链只存在于瞬态 dict，落库为 SQLite 默认 UTC/直接丢失）。
+    # degraded 门（code-review #3）：日历降级（无法区分工作日假日）时即便
+    # date == today 也必须标注口径——防止 2026-09-02 类误报在降级路径复发。
+    result["collected_at"] = shanghai_now().strftime("%Y-%m-%d %H:%M:%S")
+    if result["date"] != shanghai_today() or shanghai_session_date_degraded():
+        result["data_note"] = (
+            f"开盘前/非交易日或日历降级快照：盘面类字段（涨停/涨跌比/成交额）为 "
+            f"{result['date']} 收盘数据")
     _auto_persist(result)
 
     # 状态信封：全部数据维度失败 → "all_failed"，使 data_bridge 的失败
@@ -150,6 +175,12 @@ def _auto_persist(snap: dict) -> None:
     save_snapshot() 自身仍以 INSERT OR REPLACE 补全 Tier 2 + v2 标签。
 
     此函数静默失败：持久化异常不阻塞 snapshot() 正常返回。
+
+    审计字段语义（二轮 E）：collected_at/data_note 随 merge 覆盖为**最近采集
+    时刻/最新口径**（自 2026-09-03 起在 whitelist 内——审计意图 = 能追溯
+    「这条数据何时采的/是否降级」，非首次写入时间）；老库行 collected_at 为
+    SQLite UTC 默认值（datetime('now')），与新行上海时区混合——读取侧如做
+    时区解析需兼容两种形态（当前无 DB 读取消费方）。
     """
     try:
         # 非交易日检测
@@ -699,6 +730,54 @@ def _fetch_limit_pools(result: dict) -> None:
     # 避免 API 失败被误判为"无跌停"极端看多信号
 
 
+def _finalize_szse_df(df: pd.DataFrame) -> pd.DataFrame:
+    """深交所总貌表容错数值化（与 akshare 库内 L41 的差异点）。
+
+    akshare 库内 `map(lambda x: x.replace(",", ""))` 假定「第 2 列后全为
+    字符串」；上游 xlsx 数值列被 pandas 推断为 float 后崩溃（'float' object
+    has no attribute 'replace'，2026-08-31 实证）。本函数列级
+    astype(str) 剥逗号 + to_numeric(errors="coerce")——字符串/数值形态
+    均容错，非法值落 NaN 而非抛异常。
+    """
+    import pandas as pd
+
+    df["证券类别"] = df["证券类别"].astype(str).str.strip()
+    df.columns = ["证券类别", "数量", "成交金额", "总市值", "流通市值"]
+    for col in ("数量", "成交金额", "总市值", "流通市值"):
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",", ""), errors="coerce")
+    return df
+
+
+def _fetch_szse_summary_direct() -> pd.DataFrame:
+    """直连深交所总貌 API（akshare stock_szse_summary 解析崩溃时降级）。
+
+    URL/参数与 akshare 库内一致（SHOWTYPE=xlsx&CATALOGID=1803_sczm&
+    TABKEY=tab1&txtQueryDate=YYYY-MM-DD）；产出与其同构：
+    证券类别/数量/成交金额/总市值/流通市值（元），数值化经 _finalize_szse_df。
+    """
+    import io
+    import warnings
+
+    import pandas as pd
+    import requests
+
+    today = shanghai_today()
+    url = "http://www.szse.cn/api/report/ShowReport"
+    params = {
+        "SHOWTYPE": "xlsx",
+        "CATALOGID": "1803_sczm",
+        "TABKEY": "tab1",
+        "txtQueryDate": "-".join([today[:4], today[4:6], today[6:]]),
+        "random": "0.39339437497296137",
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = pd.read_excel(io.BytesIO(r.content), engine="openpyxl")
+    return _finalize_szse_df(df)
+
+
 def _fetch_turnover(result: dict) -> None:
     """全市场成交额 + 流通市值（上交所 + 深交所）。
 
@@ -706,6 +785,8 @@ def _fetch_turnover(result: dict) -> None:
     - stock_sse_summary: key-value 格式（「项目」列含「流通市值」行），无成交金额列
     - stock_szse_summary: 列式格式（含 成交金额/流通市值 列），第一行为「股票」类别
     - 单位差异: SSE 流通市值已是亿元，SZSE 为元须 /1e8
+    - 降级：akshare stock_szse_summary 库内解析崩溃（float.replace bug）时
+      直连 szse.cn 官方 API（_fetch_szse_summary_direct）
     """
     try:
         import akshare as ak
@@ -713,7 +794,11 @@ def _fetch_turnover(result: dict) -> None:
             sse = ak.stock_sse_summary()
             # stock_szse_summary 不传日期时 akshare 硬编码默认 '20240830'，
             # 会把流通市值/成交额冻结在 2 年前；必须显式传上海时区当日
-            szse = ak.stock_szse_summary(date=shanghai_today())
+            try:
+                szse = ak.stock_szse_summary(date=shanghai_today())
+            except (AttributeError, TypeError) as exc:
+                logger.warning("szse summary akshare 解析失败（%s），直连降级", exc)
+                szse = _fetch_szse_summary_direct()
 
         # --- 流通市值 ---
         # SSE: 按「项目」列查找「流通市值」行，「股票」列为数值（亿元）
@@ -1238,6 +1323,96 @@ def _pearson_crit(n: int) -> float:
         if n <= nn:
             return c
     return _PEARSON_CRIT[-1][1]
+
+
+# ---------------------------------------------------------------------------
+# 涨停热度板块簇跷跷板检验（恢复自 v0.2.4 94812d0，v0.2.7 C1 误删——
+# invest-a-pulse/SKILL.md 文档契约仍引用 zt_seesaw，属技能文档依赖的
+# 非 Python 调用图引用，C1 死代码判定未覆盖。参考内容，不构成投资决策。）
+# ---------------------------------------------------------------------------
+
+def zt_seesaw(days: int = 30, min_days: int = 10) -> dict[str, Any]:
+    """涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比）。
+
+    **参考内容，不构成投资决策**：描述资金在板块簇间的腾挪结构，
+    帮助分析盘面强弱分化的来源，不输出任何方向性预测。
+
+    基于 zt_industry_flow(days, return_daily=True) 的 daily 矩阵：
+    - seesaw_pairs: 显著负相关对（|r| > 临界值，p<0.05 双尾），按 |r| 降序
+    - sync_pairs: 显著正相关对（同步资金池）
+    - half_split: 前后半段占比变化（Δpp），验证轮动方向
+    - 占比口径（簇涨停家数/当日涨停总数），控制总量波动
+    - 东财不可用或样本 <min_days 时 available=False 并说明原因
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "n_days": 0,
+        "dates": [],
+        "significance": None,
+        "seesaw_pairs": [],
+        "sync_pairs": [],
+        "half_split": [],
+        "_errors": [],
+    }
+    flow = zt_industry_flow(days=days, return_daily=True)
+    if not flow.get("available") or not flow.get("daily"):
+        result["_errors"] = flow.get("_errors", ["zt_industry_flow unavailable"])
+        result["_errors"].append("东财涨停池不可用，跷跷板检验跳过")
+        return result
+    daily: dict[str, dict[str, int]] = flow["daily"]
+    dates = sorted(daily)
+    n = len(dates)
+    result["n_days"] = n
+    result["dates"] = dates
+    if n < min_days:
+        result["_errors"].append(f"样本不足: {n} 日 < {min_days}，跳过")
+        return result
+
+    total_by_date = {d: sum(daily[d].values()) for d in dates}
+    cluster_names = list(_ZT_CLUSTERS)
+    share = {
+        c: [sum(daily[d].get(i, 0) for i in _ZT_CLUSTERS[c]) / total_by_date[d] * 100
+            for d in dates]
+        for c in cluster_names
+    }
+
+    def _pearson(x: list[float], y: list[float]) -> float:
+        mx, my = sum(x) / n, sum(y) / n
+        cov = sum((a - mx) * (b - my) for a, b in zip(x, y))
+        sx = math.sqrt(sum((a - mx) ** 2 for a in x))
+        sy = math.sqrt(sum((b - my) ** 2 for b in y))
+        return cov / (sx * sy) if sx and sy else 0.0
+
+    crit = _pearson_crit(n)
+    result["significance"] = {"n": n, "r_crit": crit, "note": f"双尾 p<0.05，|r|>{crit} 为显著"}
+    for i in range(len(cluster_names)):
+        for j in range(i + 1, len(cluster_names)):
+            a, b = cluster_names[i], cluster_names[j]
+            r = _pearson(share[a], share[b])
+            if r <= -crit:
+                result["seesaw_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
+            elif r >= crit:
+                result["sync_pairs"].append({"a": a, "b": b, "r": round(r, 2)})
+    result["seesaw_pairs"].sort(key=lambda p: p["r"])
+    result["sync_pairs"].sort(key=lambda p: -p["r"])
+
+    # 前后半段占比均值差（Δpp）；share[c] 为按 dates 顺序的列表
+    mid = n // 2
+    h1, h2 = dates[:mid], dates[mid:]
+    if h1 and h2:
+        half = []
+        for c in cluster_names:
+            vals = share[c]
+            m1 = sum(vals[:mid]) / len(h1)
+            m2 = sum(vals[mid:]) / len(h2)
+            half.append({"cluster": c, "first_half_share": round(m1, 1),
+                         "second_half_share": round(m2, 1), "delta_pp": round(m2 - m1, 1)})
+        half.sort(key=lambda x: -x["delta_pp"])
+        result["half_split"] = {"first_half": [h1[0], h1[-1]], "second_half": [h2[0], h2[-1]],
+                                "rows": half}
+
+    result["available"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------

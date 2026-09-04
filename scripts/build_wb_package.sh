@@ -38,4 +38,16 @@ cp pyproject.toml uv.lock "$PKG/"
 rm -f "$ZIP"
 (cd "$STAGE" && zip -r -q "$OLDPWD/$ZIP" invest-skills)
 echo "✅ $ZIP ($(du -h "$ZIP" | cut -f1))"
+
+# T5-4 内容核验（R-B9）：HTML 渲染资产/渲染文件必须进包；禁止 pyc
+LIST="$(unzip -l "$ZIP")"
+echo "$LIST" | grep -q "assets/echarts.umd.min.js" \
+  && echo "✅ echarts 资产在包" || { echo "❌ 缺 echarts 资产"; exit 1; }
+echo "$LIST" | grep -q "lib/render_html.py" \
+  && echo "✅ render_html 在包" || { echo "❌ 缺 render_html"; exit 1; }
+if echo "$LIST" | grep -qE "__pycache__|\.pyc"; then
+  echo "❌ 包内含 pyc"; exit 1
+else
+  echo "✅ 无 pyc"
+fi
 unzip -l "$ZIP" | tail -3

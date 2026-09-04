@@ -237,7 +237,14 @@ def _lint_line_scope(
                     lookback_lines,
                     stop_at_section=stop_at_section,
                 )
-                if require_regex.search(previous_window):
+                # 全量审查 P1-2：require_allow_same_line 时检查窗口含当前行
+                # （结论断言行同线带 [来源: …] 是自然合规形态——旧实现只查
+                # 前文行，同线 tag 被误报）
+                if rule.get("require_allow_same_line"):
+                    check_window = line + "\n" + previous_window
+                else:
+                    check_window = previous_window
+                if require_regex.search(check_window):
                     continue
             findings.append(
                 LintFinding(

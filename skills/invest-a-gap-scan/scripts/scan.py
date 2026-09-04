@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import sys
@@ -169,6 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--json", action="store_true",
         help="stdout 输出 JSON 格式",
+    )
+    p.add_argument(
+        "--record", action="store_true",
+        help="命中追加到 reports/gap-backtest/hits.jsonl（W2/M2 前瞻回测状态）",
     )
     return p
 
@@ -479,11 +484,29 @@ def _run_scan(
     )
 
     # ---- Step 8: 输出 ----
+    json_out = format_json(result) if args.json else None
     if args.json:
-        print(format_json(result))
+        print(json_out)
     else:
         print()
         print(format_brief(result, top_n=args.top))
+
+    # W2/M2：--record → 命中落前瞻回测状态文件（幂等）
+    if args.record:
+        try:
+            from record_hits import DEFAULT_STATE, data_cutoff_date, record
+
+            # code-review 二轮 A：记录日 = 数据实际截止交易日（交易日 ≥15:00
+            # → 今日；盘前/盘中/周末/节假日 → prev_trading_day）。与独立 CLI
+            # 共用 data_cutoff_date——双入口日期语义必须一致（旧实现只比较
+            # 墙钟 15:00，周末盘后把非交易日标为 data_date → 幂等键复写）。
+            data_date = data_cutoff_date()
+            added = record(json.loads(json_out or format_json(result)),
+                           data_date, DEFAULT_STATE)
+            logger.info("record_hits: %d 条新增（data_date=%s）→ %s",
+                        added, data_date, DEFAULT_STATE)
+        except Exception as exc:
+            logger.warning("record_hits failed: %s", exc)
 
     # ---- Step 9: 保存详文档 ----
     if not args.no_save_report:

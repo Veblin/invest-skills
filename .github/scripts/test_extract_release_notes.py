@@ -127,7 +127,7 @@ def test_condense_section_drops_details():
 
 
 def test_condensed_current_version_notes():
-    """当前版本（v0.2.7）默认输出精简正文：引言 + 主要修改清单，无深层细节。"""
+    """当前版本（v0.2.8）默认输出精简正文：引言 + 主要修改清单，无深层细节。"""
     out = subprocess.check_output(
         [sys.executable, str(SCRIPT), "--from-pyproject"],
         text=True,
@@ -135,9 +135,10 @@ def test_condensed_current_version_notes():
     )
     tag = f"v{_current_version()}"
     assert f"## {tag}" in out
-    assert "四标的全链路报告执行工作流评估" in out  # 引言
-    assert "- 新增（2026-08-17）：WorkBuddy 零终端分发" in out  # ### 标题即主要修改
-    assert "WB bundle 发布包" not in out  # 深层细节已精简
+    assert "报告内容质量门禁（A 域）" in out  # 引言
+    assert "- 图表（B 域，ECharts 6.1.0）" in out  # ### 标题即主要修改
+    assert "- WorkBuddy / 工程" in out
+    assert "K 线红涨绿跌" not in out  # 深层细节已精简
     assert "**Full Changelog**" in out
     assert "CHANGELOG.md" in out
 
@@ -149,7 +150,7 @@ def test_full_flag_keeps_full_section():
         text=True,
         cwd=ROOT,
     )
-    assert "F0-1" in out
+    assert "图表三件套" in out  # ### 小节正文细节
     assert "### " in out
 
 
@@ -195,12 +196,22 @@ def test_truncate_chars_drops_lone_surrogate():
 
 
 def test_max_chars_flag_end_to_end():
-    """CLI --max-chars：输出 ≤ N 字符且合法 UTF-8（镜像 commit 消息场景）。"""
-    out = subprocess.check_output(
-        [sys.executable, str(SCRIPT), "--from-pyproject", "--max-chars", "800"],
+    """CLI --max-chars：输出 ≤ N 字符且合法 UTF-8（镜像 commit 消息场景）。
+
+    截断窗口取当前版本浓缩输出实际长度 -10，不硬编码数值（随 CHANGELOG 篇幅漂移不再假绿）。
+    """
+    base = subprocess.check_output(
+        [sys.executable, str(SCRIPT), "--from-pyproject"],
         text=True,
         cwd=ROOT,
     )
-    assert len(out) <= 800
+    limit = len(base) - 10
+    assert limit > 10  # 防御：浓缩输出本身过短时测试前提失效
+    out = subprocess.check_output(
+        [sys.executable, str(SCRIPT), "--from-pyproject", "--max-chars", str(limit)],
+        text=True,
+        cwd=ROOT,
+    )
+    assert len(out) <= limit
     out.encode("utf-8")
     assert out.endswith("…")

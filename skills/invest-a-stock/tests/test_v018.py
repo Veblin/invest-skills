@@ -1110,6 +1110,40 @@ class TestSectionManagementAssessment:
         assert "不值得信赖" not in text
         _check_no_forbidden_words(text)
 
+    def test_analysis_summary_replaces_placeholder(self):
+        """R-B1: 传入 events 段 analysis → 时间线占位替换为 analysis_md 首行摘要。"""
+        fin_list = _make_canvas_financials(6)
+        holder_changes = _make_holder_changes([
+            {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+        ])
+        events = [{"date": "2026-01-15", "title": "关于回购公司股份的公告"}]
+        analysis = [{
+            "module": "events", "title": "事件分层分析",
+            "facts_md": "近 30 日公告 3 条 [来源: akshare 公告]",
+            "analysis_md": "回购成交价上限距现价 18%，**观察**资金安排。",
+            "evidence_tag": "B", "position": "events",
+        }]
+        text = _section_management_assessment(events, holder_changes, fin_list, analysis=analysis)
+        assert "[待 Claude report 阶段填充]" not in text
+        assert "回购成交价上限距现价 18%" in text
+        assert 'data-module="events"' in text
+
+    def test_analysis_no_events_section_keeps_placeholder(self):
+        """R-B1: analysis 无 events 段 → 占位保持（F0-3 qc 拦截未填占位）。"""
+        fin_list = _make_canvas_financials(6)
+        holder_changes = _make_holder_changes([
+            {"ann_date": "20250101", "holder_name": "股东甲", "direction": "增持", "source": "tushare"},
+        ])
+        events = [{"date": "2026-01-15", "title": "关于回购公司股份的公告"}]
+        analysis = [{
+            "module": "valuation", "title": "估值观察",
+            "facts_md": "PE 18.5x [来源: engine]",
+            "analysis_md": "估值处于历史中位带。",
+            "evidence_tag": "C", "position": "valuation",
+        }]
+        text = _section_management_assessment(events, holder_changes, fin_list, analysis=analysis)
+        assert "[待 Claude report 阶段填充]" in text
+
 
 class TestSectionValueChainPosition:
     """A-6: 价值链位置 + 利润池分布。"""

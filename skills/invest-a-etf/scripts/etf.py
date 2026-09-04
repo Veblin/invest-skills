@@ -5,6 +5,7 @@
 
     uv run python skills/invest-a-etf/scripts/etf.py report 563300
     uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
+    uv run python skills/invest-a-etf/scripts/etf.py html 563300 --md reports/.../xxx.md
     uv run python skills/invest-a-etf/scripts/etf.py diagnose
 """
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import webbrowser
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
@@ -117,14 +119,10 @@ def _share_history_summary(sh: dict) -> dict:
     return {k: v for k, v in sh.items() if k != "rows"}
 
 
-def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
-               history: bool = False, history_days: int = 250,
-               events_path: str | None = None, playbook: bool = False) -> int:
-    symbol = symbol.strip()
-    if not symbol.isdigit() or len(symbol) != 6:
-        print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
-        return 2
-
+def _collect_report_payload(symbol: str, *, with_nav: bool,
+                            history: bool = False, history_days: int = 250,
+                            events_path: str | None = None, playbook: bool = False) -> dict:
+    """采集并组装 report 数据快照（cmd_report / cmd_html 共用；symbol 已校验）。"""
     prefetch_etf_spot()
     profile = query_etf_data(symbol)
     # 先查询再入库：index_pe_pct 分位只对「不含今日行」的历史序列计算（避免今日
@@ -159,7 +157,7 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
 
     from dates import shanghai_now
 
-    payload = {
+    return {
         "skill": "invest-a-etf",
         "generated_at": shanghai_now().isoformat(),
         "symbol": symbol,
@@ -167,12 +165,37 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         "profile": profile,
         "quote": quote,
         "kline": kline if with_nav else _kline_summary(kline),
-        "share_history": _share_history_summary(share_history) if not with_nav else share_history,
+        "share_history": share_history if with_nav else _share_history_summary(share_history),
         "history": history_block if history else None,
         "events": events_block,
         "playbook": playbook_block,
         "disclaimer": "研究数据快照，不构成投资建议。",
     }
+
+
+def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
+               history: bool = False, history_days: int = 250,
+               events_path: str | None = None, playbook: bool = False) -> int:
+    symbol = symbol.strip()
+    if not symbol.isdigit() or len(symbol) != 6:
+        print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
+        return 2
+
+    # compact 打印体始终读完整 share_history rows（HEAD 行为，与 with_nav 无关）；
+    # with_nav 仅塑造 JSON payload 形状（--with-nav 才保留全量）
+    payload = _collect_report_payload(
+        symbol, with_nav=True if not as_json else with_nav,
+        history=history, history_days=history_days,
+        events_path=events_path, playbook=playbook,
+    )
+    # 展开回局部变量：compact 打印体保持不变（零回归）
+    profile = payload["profile"]
+    quote = payload["quote"]
+    kline = payload["kline"]
+    share_history = payload["share_history"]
+    history_block = payload["history"]
+    events_block = payload["events"]
+    playbook_block = payload["playbook"]
 
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
@@ -466,6 +489,112 @@ def cmd_futures_basis(symbol: str, *, as_json: bool) -> int:
     return 0
 
 
+def _html_extra_dims(symbol: str) -> dict:
+    """HTML 追加三维度（R12 holdings / R13 peers / R15 sector_flow）。
+
+    单源失败 → {"available": False} 占位，不阻断渲染（与报告采集的独立记录约定一致）。
+    """
+    dims: dict[str, dict] = {}
+    for kind in ("holdings", "peers", "sector_flow"):
+        try:
+            if kind == "holdings":
+                dims[kind] = query_etf_holdings(symbol)
+            elif kind == "peers":
+                from etf_peers import query_etf_peers
+                dims[kind] = query_etf_peers(symbol, None)
+            else:
+                from sector_flow import query_sector_flow
+                dims[kind] = query_sector_flow(symbol)
+        except Exception as exc:
+            dims[kind] = {"available": False, "note": f"{kind} 采集失败: {exc}"}
+    return dims
+
+
+def _resolve_md_path(symbol: str, md_path: str | None) -> tuple[Path | None, str | None]:
+    """解析报告 md 路径：--md 显式校验存在；缺省 glob reports/{symbol}-*/*.md 取最新。
+
+    成功 → (Path, None)；失败 → (None, 错误信息)。
+    """
+    if md_path:
+        p = Path(md_path)
+        if not p.is_file():
+            return None, f"--md 指定的文件不存在: {p}"
+        return p, None
+    # 按文件名（时间戳 = 字典序 = 时间序）排序取全局最新；按完整路径排
+    # 序会受目录名干扰（F1-7 改名遗留目录「通信ETF华夏」字典序靠后但报告旧）
+    candidates: list[Path] = []
+    for d in Path("reports").glob(f"{symbol}-*"):
+        candidates.extend(d.glob("*.md"))
+    candidates.sort(key=lambda p: p.name)
+    if not candidates:
+        return None, (
+            f"未找到 {symbol} 的报告 md（reports/{symbol}-*/*.md）；"
+            "请先用 report 流程生成，或 --md 显式指定"
+        )
+    return candidates[-1], None
+
+
+def _resolve_out_path(md_path: Path, out_path: str | None) -> Path:
+    """HTML 输出路径：--out 显式；缺省与 md 同目录同名 .html。"""
+    return Path(out_path) if out_path else md_path.with_suffix(".html")
+
+
+def _open_browser(html_path: Path) -> bool:
+    """引擎进程内 webbrowser.open（stdlib，harness 无关；WB 缺 shell open 也一致）。
+
+    失败仅提示不阻断（路径已打印，rc 仍 0）。
+    """
+    try:
+        return bool(webbrowser.open(html_path.resolve().as_uri(), new=2))
+    except Exception as exc:
+        print(f"⚠️ 自动打开浏览器失败: {exc}", file=sys.stderr)
+        return False
+
+
+def cmd_html(symbol: str, *, md_path: str | None = None, out_path: str | None = None,
+             no_open: bool = False) -> int:
+    """生成交互式 HTML 报告：引擎数据仪表盘 + md 分析全文原样嵌入。
+
+    md 定位与写文件 fail-loud（rc 1）；数据采集单源失败降级为占位。
+    """
+    symbol = _validate_symbol(symbol)
+    if symbol is None:
+        return 2
+    md, err = _resolve_md_path(symbol, md_path)
+    if err:
+        print(f"错误: {err}", file=sys.stderr)
+        return 1
+
+    try:
+        from etf_html import render_etf_html  # noqa: E402
+    except ImportError as exc:
+        print(f"错误: etf_html 渲染模块不可用: {exc}", file=sys.stderr)
+        return 1
+
+    payload = _collect_report_payload(
+        symbol, with_nav=True, history=True, history_days=250, playbook=True,
+    )
+    # R12/R13/R15 追加维度：与报告采集一致，单源失败 → 占位不阻断
+    payload.update(_html_extra_dims(symbol))
+
+    md_text = md.read_text(encoding="utf-8")
+    try:
+        html_text = render_etf_html(payload, md_text=md_text)
+    except Exception as exc:
+        print(f"错误: HTML 渲染失败（md 语法可能超出渲染器子集）: {exc}", file=sys.stderr)
+        return 1
+
+    out = _resolve_out_path(md, out_path)
+    out.write_text(html_text, encoding="utf-8")
+    print(f"HTML 报告: {out}")
+
+    if no_open:
+        return 0
+    if not _open_browser(out):
+        print(f"请在浏览器手动打开: {out}", file=sys.stderr)
+    return 0
+
+
 def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
     """R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日，大单口径亿元）。"""
     symbol = _validate_symbol(symbol)
@@ -718,6 +847,15 @@ def main(argv: list[str] | None = None) -> int:
     p_fb.add_argument("symbol", help="6 位 ETF 代码")
     p_fb.add_argument("--json", action="store_true", help="输出完整 JSON")
 
+    p_html = sub.add_parser("html", help="生成交互式 HTML 报告（仪表盘 + 报告 md 原文嵌入）")
+    p_html.add_argument("symbol", help="6 位 ETF 代码")
+    p_html.add_argument("--md", metavar="PATH", default=None,
+                        help="报告 md 路径（缺省自动取 reports/{symbol}-* 最新）")
+    p_html.add_argument("--out", metavar="PATH", default=None,
+                        help="HTML 输出路径（缺省与 md 同目录同名 .html）")
+    p_html.add_argument("--no-open", action="store_true",
+                        help="不自动打开浏览器（仅生成文件）")
+
     args = parser.parse_args(argv)
     if args.cmd == "report":
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
@@ -739,6 +877,9 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_collect_sector_flow()
     if args.cmd == "futures-basis":
         return cmd_futures_basis(args.symbol, as_json=args.json)
+    if args.cmd == "html":
+        return cmd_html(args.symbol, md_path=args.md, out_path=args.out,
+                        no_open=args.no_open)
     return 1
 
 

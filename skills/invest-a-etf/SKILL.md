@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-etf
-version: "0.2.7"
+version: "0.2.8"
 description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
 whenToUse: "ETF/指数基金类问题：指数估值、折溢价、AUM、跟踪质量、对冲覆盖的结构化研究"
 argument-hint: "/invest-a-etf 563300 | /invest-a-etf 515790"
@@ -65,6 +65,8 @@ Claude: 确认 6 位代码
   cd "${INVEST_SKILLS_ROOT:-.}" && PYTHONPATH=... uv run python -c "from etf_data import etf_share_flow; ..."  （份额趋势）
        ↓
 Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
+       ↓
+可选: etf.py html SYMBOL --md <刚写好的 md>  → 生成交互式 HTML 并自动在浏览器打开（详见「HTML 产物」节）
 
 **报告文件命名规则**：
 - `{timestamp}` = 报告生成时的实际时间，格式 `YYYY-MM-DD-HH-MM-SS`（北京时间）
@@ -94,9 +96,26 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers 159206 --peers "512660,512760"   # R13: 显式赛道清单
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow 159206 --json   # R15: 行业资金流 + 趋势（同花顺）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         # R15: 每日采集（盘后，幂等）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md <报告md路径>   # 交互式 HTML 报告（写好后自动开浏览器）
 ```
 
 `report` 输出引擎数据快照（供 Claude 合成）；完整叙事由 Claude 按模板撰写。
+
+### HTML 产物
+
+**交互式 HTML 报告**（`html` 子命令）：引擎数据仪表盘（概览/持仓/估值/跟踪/历史/资金流等 8 节 + Chart.js 交互图表）+ 已过复检的报告 md 分析全文原样嵌入。单文件自包含（图表库内联），file:// 离线可用。
+
+- **推荐用法**：报告 md 写入后，显式传 `--md` 指向刚写的文件（本工作流下你掌握确切路径；不同 harness 下报告目录位置不必假设一致）：
+
+```bash
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md reports/515050-通信ETF/2026-08-28-22-47-25.md
+```
+
+- `--md` 缺省时引擎自动取 `reports/{symbol}-*/` 中时间戳最新的 md（仅为便捷路径）；显式传参更稳妥
+- `--out PATH`：自定义 HTML 输出路径（缺省与 md 同目录同名 `.html`）
+- `--no-open`：不自动打开浏览器（仅生成文件）
+- 自动打开：引擎进程内调用标准库 `webbrowser.open`（harness 无关，不依赖 shell `open`）；打开失败仅提示文件路径并以 0 退出，可按路径手动打开
+- md 分析全文原样嵌入（不重写不摘要）；渲染失败（md 语法超出子集）会 fail-loud 并提示行号，此时检查报告是否含表格/引用块之外的语法
 
 **R11 相关旗标**（`report` 子命令）：
 - `--history`：历史行情深度（nav 链路优先，失败自动回退 baostock `sh.{code}`）+ 年度高低点/最大回撤/±5% 交易日/MA20-60-120/偏离% 统计

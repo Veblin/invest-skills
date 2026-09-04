@@ -119,7 +119,9 @@ _SCHEMA_DDL = """
                 northbound_net_inflow REAL, northbound_direction TEXT, northbound_source TEXT,
                 -- 环境标签（JSON）
                 env_label TEXT,
-                collected_at TEXT DEFAULT (datetime('now'))
+                collected_at TEXT DEFAULT (datetime('now')),
+                -- v0.2.8 数据新鲜度审计（W1/code-review #4）：上海时区采集时刻 + 口径注记
+                data_note TEXT
             );
             CREATE TABLE IF NOT EXISTS etf_share_snapshots (
                 date TEXT,
@@ -208,6 +210,8 @@ def _apply_migrations(c: sqlite3.Connection) -> None:
         ("futures_oi_change_pct", "REAL"),
     ]:
         _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.2.8 迁移：数据新鲜度审计列（W1/code-review #4）——collected_at 老库已有
+    _add_column_if_missing(c, "market_snapshots", "data_note", "TEXT")
     # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
     # 旧库行默认 'collect'（report 自动入库前的历史行均为真实采集）
     _add_column_if_missing(c, "collections", "kind", "TEXT NOT NULL DEFAULT 'collect'")
@@ -303,7 +307,14 @@ def _parse_fetched_at(raw: Any) -> datetime | None:
 
 
 def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
-    """fetched_at 距今是否处于同会话窗口；解析失败 → False（保守保留不跳过）。"""
+    """fetched_at 距今是否处于同会话窗口；解析失败 → False（保守保留不跳过）。
+
+    全量审查 P2（双锚点澄清）：本函数以 **now()** 为锚——语义 = 「跳过刚
+    写入的本次采集行」（load_key_diff_vs_stored 用）；配对路径 get_latest_two
+    以**最新行**为锚（剔除其窗口内的同会话重复、最新行恒为 newer 侧——
+    code-review 第四轮修正）。两者目的不同非矛盾：diff 需跳过「刚存行」，
+    pair 需取「最近两跨会话行」；stale 库（最新行 >10 分钟）下行为一致。
+    """
     dt = _parse_fetched_at(ts)
     if dt is None:
         return False

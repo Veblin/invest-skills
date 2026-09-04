@@ -8,14 +8,30 @@ from pathlib import Path
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
+import datetime as _dt
+
+import dates as dates_mod  # noqa: E402 — monkeypatch 需模块对象
+
 from dates import (  # noqa: E402
     fmt_fetched_at,
     normalize_end_date,
     parse_utc_iso,
     shanghai_days_ago,
+    shanghai_session_date,
+    shanghai_session_date_degraded,
     shanghai_today,
     yyyymmdd_to_iso,
 )
+
+
+def _fake_now(iso: str):
+    """上海时区 fake clock（monkeypatch dates_mod.shanghai_now）。"""
+    return _dt.datetime.fromisoformat(iso)
+
+
+def _cal(monkeypatch, dates: list[str]) -> None:
+    """注入固定交易日历 + 7 天 TTL 内时间（防真实 sina 拉取）。"""
+    monkeypatch.setattr(dates_mod, "_trade_days", lambda: dates)
 
 
 def test_yyyymmdd_to_iso_basic():
@@ -108,3 +124,58 @@ def test_fmt_fetched_at_unparseable_fallback():
     """解析失败回退原串截 16 字符。"""
     assert fmt_fetched_at("") == ""
     assert fmt_fetched_at(None) == ""
+
+
+# --- v0.2.8 W1: shanghai_session_date（数据实际所属交易日，2026-09-02 误报根因） ---
+
+def test_session_date_session_day_after_open(monkeypatch):
+    """交易日盘中（≥09:25）→ 当日。"""
+    _cal(monkeypatch, ["20260901", "20260902"])
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-09-02T10:00:00+08:00"))
+    assert shanghai_session_date() == "20260902"
+
+
+def test_session_date_pre_open_prev_trade_day(monkeypatch):
+    """交易日开盘前（<09:25）→ 上一交易日（2026-09-02 08:01 事故场景）。"""
+    _cal(monkeypatch, ["20260901", "20260902"])
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-09-02T08:01:00+08:00"))
+    assert shanghai_session_date() == "20260901"
+
+
+def test_session_date_weekend_prev_friday(monkeypatch):
+    """周末任意时刻 → 上一交易日（周五）。"""
+    _cal(monkeypatch, ["20260901", "20260902", "20260903", "20260904"])
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-09-05T14:00:00+08:00"))
+    assert shanghai_session_date() == "20260904"
+
+
+def test_session_date_holiday_prev_trade_day(monkeypatch):
+    """节假日盘中 → 最近已过交易日（长假后首个交易日盘前语义同）。"""
+    _cal(monkeypatch, ["20260925", "20260928", "20260929", "20260930"])
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-10-01T10:00:00+08:00"))
+    assert shanghai_session_date() == "20260930"
+
+
+def test_session_date_calendar_unavailable_weekday_fallback(monkeypatch):
+    """日历不可得 → 工作日近似（周一盘前 → 上周五）。"""
+    monkeypatch.setattr(dates_mod, "_trade_days", lambda: None)
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-09-07T08:00:00+08:00"))
+    assert shanghai_session_date() == "20260904"
+
+
+def test_session_date_degraded_flag_on_calendar_failure(monkeypatch):
+    """code-review #3：日历不可得 + 工作日 10:00 → 返回当日但 degraded=True
+    （调用方 data_note 门据此标注——工作日假日不再静默误报）。"""
+    monkeypatch.setattr(dates_mod, "_trade_days", lambda: None)
+    monkeypatch.setattr(dates_mod, "shanghai_now",
+                        lambda: _fake_now("2026-10-01T10:00:00+08:00"))
+    # 降级路径会尝试 trade_cal 委托 → 断网失败 → degraded
+    monkeypatch.setattr(
+        dates_mod, "_session_cal_degraded", True)
+    assert shanghai_session_date() == "20261001"
+    assert shanghai_session_date_degraded() is True

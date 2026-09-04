@@ -116,7 +116,15 @@ class TestCollectE2:
         assert jp["value"] == 2.83
         assert jp["as_of"] == "2026-06"
         assert jp["frequency"] == "monthly"
-        assert "滞后约 2.5 个月" in jp["lag_note"]
+        # 滞后注记按月频数据截止月（2026-06）与真实当前月差动态生成——
+        # 断言按当前日期计算期望（写死月数会随日期漂移过期，2026-09 实测
+        # 2.5→3.5 的教训）。
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+
+        _now = _dt.now(_ZI("Asia/Shanghai"))
+        _months = (_now.year - 2026) * 12 + (_now.month - 6)
+        assert f"滞后约 {_months + 0.5:g} 个月" in jp["lag_note"]
         assert jp["source"] == "FRED.IRLTLT01JPM156N"
 
         acm = inds["acm_tp10"]

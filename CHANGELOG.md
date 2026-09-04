@@ -1,5 +1,38 @@
 # Changelog — invest skills
 
+## v0.2.8 (2026-09-03)
+
+v0.2.8 完成报告内容质量门禁（A 域）、可交互单文件 HTML 报告（B 域：ECharts 6.1.0 图表三件套 + 打印/无障碍/安全/合规）与 WorkBuddy 发布包 HTML 支持。渲染层经 code-review max 全量修复 21 条确认级 findings（B3-R），注入面五类系统加固（T4-1），产出流程落盘约定统一（T5-1），数据新鲜度审计修复开盘前快照日期误标（2026-09-02 误报事故根因）。
+
+**2026-09-04 增补**：HTML 报告首屏摘要 hero（8 格 KPI + 4 条状态要点 + 一句话总结，引擎字段直映零计算、逐格降级，合规禁方向性措辞）+ 左侧栏「研究备忘」h2 二级子目录（渲染产物大纲提取、GitHub slug 精确锚定、scroll-spy 透传、长标题 ellipsis + title 悬停、900px 以下折叠）。
+
+### 图表（B 域，ECharts 6.1.0）
+
+- **图表三件套**：估值历史分位带（PE 曲线 + P10-P90 带 + 中位数/当前值线，亏损期标注）、资金流图（北向净买入 + 融资余额 + 收盘价三轴，两融字段链路修复）、K 线图（OHLC + MA5/20/60 + MACD 三面板联动，500 日全量）；恢复被静默删除的 ROE/EPS 双轴与扣非净利柱图；K 线红涨绿跌（A 股惯例，与主题解耦）
+- **渲染层 21 条 findings 全量修复**（B3-R，G2=A 裁决）：NaN/Infinity 裸 token JSON 安全（三图 data-opts 兜底 `_json_safe`）、band lttb 采样越界（改全量渲染）、MACD 停牌行按日期对位、band 未排序致 aria「最新」谎报（内部升序单源）、flow 轴全日期跨年不碰撞、tooltip 逐系列口径（万元/亿元/元/x，`_js` 常量表达式适配器 + revive）、主题按数组逐轴合并（3 grid/3 yAxis）+ fontFamily 对齐、window_label 三拷贝去重、亏损期/PE 缺失时分位带不静默丢弃
+- **打印/无障碍**：@media print（侧栏隐藏 + SVG renderer）+ window.print 按钮；图表 role="img" + aria-label（关键数字 Python 合成）+ aria-describedby 追溯表
+
+### 安全与合规（R-B7/R-B8）
+
+- **注入点系统化加固**（T4-1，五类）：refs 详情/MACD/BOLL/MA 引擎字符串全量转义；script 上下文 `_json_js()`（`</`→`<\/` + U+2028/2029）；gauge 宽度 `_pct_clamp` 钳制；md 链接 scheme 白名单（禁 javascript:/data:）
+- **合规首屏/尾页**（O4=A）：首屏固定标注「工具产出 · 个人研究 · 非持牌机构发布 · 仅限本人使用」；免责声明三要素（禁止传播转载/市场有风险/来源不保证完整及时）+ 不可折叠
+
+### 数据质量与审计
+
+- **数据新鲜度审计**：snapshot 日期改用 `shanghai_session_date()`（开盘前/非交易日回拨上一交易日，sina 日历缓存 7d）+ `collected_at`/`data_note`——修复 2026-09-02 开盘前快照把 9/1 数据标为当日（涨停 83→真实 52）的误报根因
+- **gap-scan 前瞻评估**：24 样本基线 + 月度滚入机制文档（backtest-eval-plan）；记录器/评估器脚本（record_hits/eval_forward）就位
+- 宏观 E2E 滞后注记断言日期漂移修复（动态月差）
+
+### WorkBuddy / 工程
+
+- **WB 发布包 HTML 支持**：`dist/invest-skills-wb-v0.2.8.zip`（1.4M/241 文件）构建 + 内容 guard 硬编码（echarts 资产/render_html 在包、无 pyc）；包内离线自渲染验证 HTML 单文件自包含（file:// 打开即全图表渲染）
+- `--emit html` 默认落 `reports/{sym}/`（与 md 同目录约定），删除过期「旧版模板」警告
+- skillhub 镜像闭包本地 smoke 通过（echarts 资产随 BFS 采集键入包）
+- 测试 1602 passed / 12 skipped（invest-a-stock 全量，含新增 ~50 用例：注入防护 7、CLI 3、图表 JSON 安全/财务图等）
+- 版本 0.2.8 一致性 check 通过
+
+> 注：面基方法论提案（P-A~P-D：DCF 反算隐含叙事/景气度陷阱甄别/pulse 双通道/利率传导措辞）本版本仅记录，未实施（待下版本裁决）。
+
 ## v0.2.7 (2026-08-23)
 
 v0.2.7 对 512660/588000/300750/600036 四标的全链路报告执行工作流评估，并分级修复评估发现：P0 数字口径（F0-1~F0-9）、P1 ETF 数据层（F1-1~F1-7）、P2 流程工程（F2-1~F2-7）；WorkBuddy 零终端分发链路真机验证通过（可安装发布包 + Release 集成）；版本确立后经 code-review 三轮修复自身缺陷（初版 15 项确认级发现 + 二轮 6 处回归），并完成北向时效守卫等发布前加固。

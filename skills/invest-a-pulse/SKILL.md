@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-pulse
-version: "0.2.7"
+version: "0.2.8"
 description: "市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。触发词：市场情绪/大盘/市场脉搏"
 whenToUse: "市场情绪/大盘/市场脉搏：杠杆周期、市场广度、极端情绪、资金面与估值温度的交叉解读"
 argument-hint: "/invest-a-pulse"
@@ -293,7 +293,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 > 声明：本报告为市场环境快照，数据来源于 akshare/Tushare/FRED 等公开数据源。
 > 所有分位/变化率由 Python 引擎计算。环境标签为统计描述，不构成择时建议或买卖方向指引。
-> 数据采集时间：{collected_at} | invest-a-pulse v0.2.7
+> 数据采集时间：{collected_at} | invest-a-pulse v0.2.8
 
 ---
 

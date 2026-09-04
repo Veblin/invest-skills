@@ -625,7 +625,17 @@ def compute(rows: list[dict]) -> dict[str, Any]:
         else:
             macd_latest["histogram_trend"] = None
 
-    result["momentum"] = {"macd": macd_latest}
+    result["momentum"] = {
+        "macd": macd_latest,
+        # T3-4（R-B3③）：K 线 MACD 面板序列。closes/dates 同源（停牌行已过滤），
+        # 消费端须先截取目标窗口再 compute（A3：全量 compute 后切片会错位）。
+        "macd_series": {
+            "dif": macd_result["dif"],
+            "dea": macd_result["dea"],
+            "histogram": macd_result["histogram"],
+            "dates": dates,
+        },
+    }
 
     # --- 超买超卖 ---
     rsi_periods = (6, 12, 24)
