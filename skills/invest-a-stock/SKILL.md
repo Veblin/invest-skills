@@ -243,7 +243,7 @@ PE / PB / PS
 
 > **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + stock 专项）。
 
-措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、**数字（P0 铁律：全部经 Python——引擎字段直引或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/清单目测/未实跑标注；计数断言 `len()` 聚合，见共享规范 §2.3 强制行为 5-6）**、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条，详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
+措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、**数字（P0 铁律：全部经 Python——引擎字段直引或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/清单目测/未实跑标注；计数断言 `len()` 聚合，见共享规范 §2.3 强制行为 5-7；[分析] 事实性前提须带来源/「框架性陈述/待验证」标注（强制行为 7））**、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条，详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
 
 ---
 

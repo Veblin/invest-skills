@@ -28,7 +28,7 @@ from .shared_dates import shanghai_days_ago, shanghai_today
 
 logger = logging.getLogger(__name__)
 
-TUSHARE_API_URL = "http://api.tushare.pro"
+TUSHARE_API_URL = "https://api.tushare.pro"
 
 # Tushare 接口配额限制
 DAILY_CALL_LIMIT = 500

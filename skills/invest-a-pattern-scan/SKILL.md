@@ -27,6 +27,8 @@ uv run python ../scan.py --universe csi300 a500 star50 --days 150
 # 输出 docs/data/pattern_scan_result.json + stdout 摘要
 ```
 
+**落盘约定（每次运行必须）**：引擎 JSON 写入 `docs/data/pattern_scan_result.json`（覆写式，**本地文件不随 git 跟踪**——`.gitignore` 含 `docs/data/*_scan_result.json`；2026-09-08 用户裁决：个股级扫描命中属红线「个股产出不进公开仓库」，历史提交中旧版已接受不清洗）；运行后 Claude 必须将人类可读解读简报落盘 **`reports/pattern-scan/{YYYY-MM-DD}.md`**（gitignored 本地区），不得只在对话输出。
+
 ## 输出解读
 
 - `hits[]`：命中形态（ts_code / pattern / bandwidth / 形态几何详情）
@@ -59,3 +61,4 @@ uv run python ../scan.py --universe csi300 a500 star50 --days 150
 2. ✅ RC p 值已输出且与结论一致（p≥0.05 时明确写"无统计增量信息"）
 3. ✅ 无"双底=买入信号"类断言；形态名称后带几何数值与带宽档
 4. ✅ 命中列表为观察清单，附证据分级（LMW A 级模板 / 参数 C 级阈值）
+5. ✅ 解读简报已落盘 `reports/pattern-scan/{YYYY-MM-DD}.md`（每次运行必须）
