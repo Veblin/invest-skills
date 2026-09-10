@@ -36,11 +36,15 @@ import pathlib
 import sys
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parents[3]  # code/（repo root）
+# 共享路径引导（R1 审查 F3）：单体仓库取 skills/lib；包内运行取 <pkg>/scripts/lib
+for _cand in (pathlib.Path(__file__).resolve().parents[2] / "lib",
+              pathlib.Path(__file__).resolve().parents[1] / "scripts" / "lib"):
+    if _cand.is_dir():
+        sys.path.insert(0, str(_cand))
+        break
 
-# 共享路径引导统一走 skills/lib/invest_path.py（防手写 sys.path 造成 lib 包遮蔽）
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lib"))
 from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
+from skill_paths import default_out_dir  # noqa: E402
 
 ensure_invest_a_scripts_on_path()
 
@@ -287,7 +291,7 @@ def main() -> int:
     ap.add_argument("--ann-date", type=str, default="", help="指定单日 YYYYMMDD（与 --days 互斥）")
     ap.add_argument("--min-gain", type=float, default=30.0, help="预增阈值 p_change_max>=PCT（默认 30）")
     ap.add_argument("--no-out", action="store_true", help="不落盘仅打印")
-    ap.add_argument("--out-dir", type=str, default=str(ROOT / "reports/forecast-scan"))
+    ap.add_argument("--out-dir", type=str, default=default_out_dir(__file__, "forecast-scan"))
     args = ap.parse_args()
 
     # 参数校验（R0 审查尾部项）：--days 0 会在 window[0] 处 IndexError；

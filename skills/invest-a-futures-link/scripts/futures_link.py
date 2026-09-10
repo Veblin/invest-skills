@@ -33,7 +33,25 @@ import sys
 
 import yaml
 
-ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+def _ensure_lib_on_path() -> None:
+    """共享库引导（R1 审查 F3）：单体仓库取 skills/lib；包内运行取 <pkg>/scripts/lib。
+
+    包内共享模块会被 builder 重写为 ``lib.<name>`` 并拷入 ``scripts/lib``。
+    """
+    here = pathlib.Path(__file__).resolve()
+    for cand in (here.parents[2] / "lib", here.parents[1] / "scripts" / "lib"):
+        if cand.is_dir():
+            sys.path.insert(0, str(cand))
+            return
+
+
+_ensure_lib_on_path()
+from skill_paths import default_out_dir, default_reference  # noqa: E402
+
+# 默认 map：两种布局下均为 <skill>/references/commodity_map.yaml（原 parents[3]
+# 假设在包内运行时指向包外 → 首次运行 FATAL）
+_DEFAULT_MAP = default_reference(__file__, "references/commodity_map.yaml")
 
 # ---------- 纯计算 ----------
 
@@ -212,9 +230,9 @@ def _fmt(v: float | None) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--map", type=str, default=str(ROOT / "skills/invest-a-futures-link/references/commodity_map.yaml"))
+    ap.add_argument("--map", type=str, default=_DEFAULT_MAP)
     ap.add_argument("--no-out", action="store_true")
-    ap.add_argument("--out-dir", type=str, default=str(ROOT / "reports/commodity-link"))
+    ap.add_argument("--out-dir", type=str, default=default_out_dir(__file__, "commodity-link"))
     args = ap.parse_args()
 
     try:

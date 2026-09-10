@@ -1,0 +1,44 @@
+"""skill_paths 布局自适应测试（R1 审查 F3：单体仓库 vs skillhub 包内运行）。"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from skill_paths import (  # noqa: E402
+    default_out_dir,
+    default_reference,
+    is_installed_in_repo,
+    skill_root,
+)
+
+
+def _layout(tmp_path: Path, kind: str) -> Path:
+    if kind == "repo":
+        repo = tmp_path / "repo"
+        (repo / "skills").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("", encoding="utf-8")
+        f = repo / "skills" / "S" / "scripts" / "x.py"
+    else:  # skillhub 包：<pkg>/scripts/x.py（scripts 拍平一层）
+        f = tmp_path / "extract" / "S" / "scripts" / "x.py"
+    f.parent.mkdir(parents=True)
+    f.write_text("", encoding="utf-8")
+    return f
+
+
+def test_repo_layout(tmp_path):
+    f = _layout(tmp_path, "repo")
+    assert is_installed_in_repo(str(f)) is True
+    assert Path(default_out_dir(str(f), "n")) == tmp_path / "repo" / "reports" / "n"
+    assert (Path(default_reference(str(f), "references/a.yaml"))
+            == tmp_path / "repo" / "skills" / "S" / "references" / "a.yaml")
+    assert skill_root(str(f)) == tmp_path / "repo" / "skills" / "S"
+
+
+def test_package_layout(tmp_path):
+    f = _layout(tmp_path, "pkg")
+    assert is_installed_in_repo(str(f)) is False
+    assert Path(default_out_dir(str(f), "n")) == tmp_path / "extract" / "S" / "reports" / "n"
+    assert (Path(default_reference(str(f), "references/a.yaml"))
+            == tmp_path / "extract" / "S" / "references" / "a.yaml")
+    assert skill_root(str(f)) == tmp_path / "extract" / "S"

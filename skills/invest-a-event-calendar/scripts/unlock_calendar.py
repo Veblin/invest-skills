@@ -34,7 +34,18 @@ import datetime as _dt
 import pathlib
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+def _ensure_lib_on_path() -> None:
+    """共享库引导（R1 审查 F3）：单体仓库取 skills/lib；包内运行取 <pkg>/scripts/lib。"""
+    here = pathlib.Path(__file__).resolve()
+    for cand in (here.parents[2] / "lib", here.parents[1] / "scripts" / "lib"):
+        if cand.is_dir():
+            sys.path.insert(0, str(cand))
+            return
+
+
+_ensure_lib_on_path()
+from skill_paths import default_out_dir  # noqa: E402
 
 
 def fmt_date(d: _dt.date) -> str:
@@ -156,7 +167,7 @@ def main() -> int:
     ap.add_argument("--days-past", type=int, default=120, help="分位回看窗口（自然日，默认 120）")
     ap.add_argument("--days-future", type=int, default=30, help="展望窗口（自然日，默认 30）")
     ap.add_argument("--no-out", action="store_true")
-    ap.add_argument("--out-dir", type=str, default=str(ROOT / "reports/event-calendar"))
+    ap.add_argument("--out-dir", type=str, default=default_out_dir(__file__, "event-calendar"))
     args = ap.parse_args()
 
     if args.days_past < 1:
