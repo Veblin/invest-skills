@@ -106,27 +106,60 @@ def test_summary_nan_no_crash():
 
 
 class _FakeClient:
-    """最小 client 替身：query 返回 DataFrame；None 值日模拟取数异常。"""
+    """镜像真实 TushareClient 契约（R1 审查 F1）：query 失败**不抛异常**、返回空
+    DataFrame，并把原因写入 last_error——生产代码只能靠 last_error 区分失败与空窗。"""
 
     def __init__(self, per_day: dict[str, list | None], denied: bool = False):
         self.per_day = per_day
         self._permission_denied_apis = {"forecast"} if denied else set()
+        self.last_error: str | None = None
 
     def query(self, api: str, fields: str = "", **kwargs):
         d = kwargs.get("ann_date")
-        v = self.per_day.get(d)
-        if v is None:
-            raise RuntimeError("simulated network error")
+        v = self.per_day.get(d, [])
+        if v is None:                        # None 值日 = 模拟取数失败
+            self.last_error = "code=-2001 配额已用完"
+            return pd.DataFrame()
+        self.last_error = None
         return pd.DataFrame(v) if v else pd.DataFrame()
+
+    def is_available(self) -> bool:          # main() 流程用
+        return True
 
 
 def test_scan_window_tracks_failed_days():
-    """F4：取数失败日必须与空窗日区分（ok=False → failed_days）。"""
+    """F4/F1：取数失败日必须与空窗日区分（ok=False → failed_days）——依据 last_error。"""
     fc = _FakeClient({"20260909": [{"ts_code": "600001.SH"}], "20260908": None,
                       "20260907": []})
     rows, failed = scan_window(fc, ["20260909", "20260908", "20260907"], sleep_s=0)
     assert len(rows) == 1
-    assert failed == ["20260908"]      # 09 有数据、07 空窗（非失败）、08 异常
+    assert failed == ["20260908"]      # 09 有数据、07 空窗（非失败）、08 失败
+
+
+def test_fetch_day_uses_last_error_not_exceptions():
+    """F1 回归：真实客户端失败也不抛——fetch_day 必须读 last_error 判 ok=False。"""
+    from forecast_scan import fetch_day
+
+    fc = _FakeClient({"20260908": None})
+    rows, ok = fetch_day(fc, "20260908")
+    assert rows == [] and ok is False
+    fc2 = _FakeClient({"20260908": []})   # 合法空结果（last_error=None）
+    rows2, ok2 = fetch_day(fc2, "20260908")
+    assert rows2 == [] and ok2 is True
+
+
+def test_main_empty_window_with_partial_failure_exits_2(monkeypatch, capsys):
+    """F9 回归：窗口零披露 + 部分日期失败 → 不得冒充「已核验淡季」（exit 2）。"""
+    import forecast_scan as fs
+
+    fc = _FakeClient({"20260908": None, "20260907": [], "20260906": []})
+    monkeypatch.setattr(fs, "TushareClient", lambda: fc)
+    monkeypatch.setattr(fs, "trading_days_in_window", lambda n: ["20260908", "20260907", "20260906"])
+    monkeypatch.setattr(fs, "fetch_basic", lambda c: {"600001.SH": {"name": "甲", "industry": "x"}})
+    monkeypatch.setattr(sys, "argv", ["forecast_scan.py", "--days", "3", "--no-out"])
+    rc = fs.main()
+    assert rc == 2
+    assert "无法鉴别" in capsys.readouterr().err
 
 
 def test_render_md_shows_data_gap_warning():

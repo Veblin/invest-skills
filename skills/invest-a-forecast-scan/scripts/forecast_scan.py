@@ -60,18 +60,21 @@ def fetch_day(client: TushareClient, ann_date: str) -> tuple[list[dict], bool]:
 
     returns (rows, ok)：
       ok=True + 空 rows  = 当日确无披露（或非交易日）
-      ok=False          = 取数异常/接口拒绝（40401/40203/网络）—— 与空窗区分，
-                          供 scan_window 汇总 failed_days（R0 审查 F4：部分失败不得静默）
+      ok=False          = 取数异常/接口拒绝/网络（查 client.last_error 判定）
+
+    判定依据（R1 审查 F1）：TushareClient.query 契约 = 失败也返回空 DataFrame
+    且不抛异常 → 必须读 client.last_error 才能区分「真空窗」与「取数失败」；
+    try/except 仅作客户端行为回归的兜底。
     """
     try:
         df = client.query("forecast", fields=FIELDS, ann_date=ann_date)
-        if df is None:
-            return [], False
-        if df.empty:
-            return [], True
-        return df.to_dict("records"), True
     except Exception:
         return [], False
+    if getattr(client, "last_error", None):
+        return [], False
+    if df is None or df.empty:
+        return [], True
+    return df.to_dict("records"), True
 
 
 def scan_window(client: TushareClient, window: list[str], *, sleep_s: float = 0.3,
@@ -321,9 +324,12 @@ def main() -> int:
             print("forecast 接口权限/配额异常（40203/限额）——无法断言空窗，本次不落盘。",
                   file=sys.stderr)
             return 2
-        if failed_days and len(failed_days) == len(window):
-            print(f"窗口内全部 {len(window)} 个日期取数失败——无法鉴别真实空窗，本次不落盘。",
-                  file=sys.stderr)
+        if failed_days:
+            # R1 审查 F9：窗口零披露时有任一失败日 → 无法鉴别「真淡季」，
+            # 不得以失败日冒充「已核验的无披露」（原实现只拦全失败场景）
+            print(f"窗口内零披露但 {len(failed_days)}/{len(window)} 个日期取数失败"
+                  f"（{', '.join(failed_days[:5])}{'…' if len(failed_days) > 5 else ''}）"
+                  "——无法鉴别真实空窗，本次不落盘。", file=sys.stderr)
             return 2
         if not fetch_basic(client):
             print(

@@ -122,6 +122,11 @@ class TushareClient:
         # 当日结束时重置计数器（Tushare 日配额按北京时间 UTC+8 零点重置）
         self._daily_reset_at = _next_beijing_midnight_reset_at(time.time())
         self._permission_denied_apis: set[str] = set()
+        # 最近一次 query 的失败原因（None=成功，含合法空结果）。
+        # 失败路径一律返回空 DataFrame 不抛异常（本类契约）→ 调用方若要区分
+        # 「真空窗」与「取数失败」必须读此信号（R1 审查 F1：forecast 曾假设
+        # query 会抛/返回 None，导致失败检测永不触发）。
+        self.last_error: str | None = None
         # 在初始化时捕获代理设置，供显式传入 Session（trust_env=False）
         self._proxies: dict[str, str] = {}
         for key in ("http", "https"):
@@ -166,14 +171,18 @@ class TushareClient:
             **kwargs: 接口参数（如 ts_code="600519.SH"）
 
         Returns:
-            pd.DataFrame，失败时返回空 DataFrame
+            pd.DataFrame，失败时返回空 DataFrame（并置 ``last_error`` 说明原因；
+            合法空结果时 ``last_error`` 为 None）
         """
+        self.last_error = None
         if not self._token:
             logger.debug("Tushare: 无 Token，跳过 query(%s)", api_name)
+            self.last_error = "未配置 TUSHARE_TOKEN"
             return pd.DataFrame()
 
         if api_name in self._permission_denied_apis:
             logger.debug("Tushare: 跳过 %s（本会话已确认无接口权限）", api_name)
+            self.last_error = f"无接口权限（本会话已确认）: {api_name}"
             return pd.DataFrame()
 
         self._reset_daily_counter_if_needed()
@@ -222,6 +231,7 @@ class TushareClient:
                         "Tushare: %s 返回错误 code=%s msg=%s",
                         api_name, code, msg,
                     )
+                self.last_error = f"code={code} {msg[:80]}"
                 return pd.DataFrame()
 
             self._record_call()
@@ -247,9 +257,11 @@ class TushareClient:
 
         except requests.RequestException as e:
             logger.warning("Tushare: 网络请求失败 %s — %s", api_name, e)
+            self.last_error = f"{type(e).__name__}: {str(e)[:80]}"
             return pd.DataFrame()
         except Exception as e:
             logger.warning("Tushare: 查询 %s 异常 — %s", api_name, e)
+            self.last_error = f"{type(e).__name__}: {str(e)[:80]}"
             return pd.DataFrame()
 
     # ------------------------------------------------------------------
