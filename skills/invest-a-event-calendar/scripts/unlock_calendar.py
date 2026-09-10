@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
-"""限售解禁压力日历（invest-a-event-calendar v1）。
+"""限售解禁压力日历（invest-a-event-calendar v2）。
 
-全市场解禁日汇总（东财限售股解禁 summary_em）：回看近 120 日 + 展望未来 30 日，
-逐日解禁家数/解禁数量/实际解禁市值，未来压力日按「相对近 120 日分位」标注：
-≥80% 高压日 / ≥90% 极高压力日（回看窗口由 --days-past 决定，分位基准随之）。
+两种模式：
+  ① 池模式（v2 首选，--pool-file）：对清单内个股逐一下钻「个股解禁队列」，
+     输出提醒（未来 alert-days 内有解禁的标的）+ 变化检测（相较上次运行的新增/
+     消失/字段变化）+ 全池明细，落盘 {YYYYMMDD}-pool.md。状态私有存储，
+     只推「新增/临近」——不做每日全表。
+  ② 市场模式（v1 保留，低频参考）：全市场解禁日汇总（东财 summary_em）：
+     回看近 120 日 + 展望未来 30 日，压力日按「相对近 120 日分位」标注。
 
 用法：
-    cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py
-    # 输出 reports/event-calendar/{YYYYMMDD}.md（与脚本实际命名一致）
+    cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py --pool-file pool.txt
+    # 池模式 → reports/event-calendar/{YYYYMMDD}-pool.md
+    uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py
+    # 市场模式 → reports/event-calendar/{YYYYMMDD}.md
 
-参数：
-    --days-past N    回看窗口（自然日，默认 120——对齐 argparse 与 SKILL.md）
-    --days-future N  展望窗口（默认 30 自然日）
-    --no-out / --out-dir PATH
+参数（池模式）：
+    --pool-file PATH   清单文件（每行一个 6 位代码；# 注释）——池模式开关
+    --alert-days N     提醒窗（自然日，默认 30）；--lookahead N 拉取展望（默认 90）
+    --state-file PATH  状态文件（默认 ~/.local/share/investment/event_calendar_state.json）
+    --no-state         不读写状态（调试）
+参数（市场模式）：--days-past N（默认 120）/ --days-future N（默认 30）
+公共：--no-out / --out-dir PATH
 
 口径与边界：
-    - 数据源：akshare stock_restricted_release_summary_em（东财，symbol=全部股票）
-      ——代理环境若失败会报 ProxyError，输出「数据不可得」而非硬编
+    - 个股源：akshare stock_restricted_release_queue_em（东财，单标的，经 skills/lib/unlock_source.py）
+      ——失败**显式标注**（不静默当空）；市场源：stock_restricted_release_summary_em
     - 原始字段：解禁数量/实际解禁数量 = 股；实际解禁市值 = 元（python 换算为亿）
-    - 汇总口径缺失的日期 = 当日无解禁（东财页面语义），未来空窗日不列出
-    - 分位 = 该未来日解禁市值在近 120 日有解禁日市值序列中的位置（bisect，同 pulse 口径）
-    - 解禁 ≠ 减持：解禁是供给事件提示，不是方向信号（见 SKILL 分析纪律）
+    - 解禁 ≠ 减持：供给事件提示，非方向信号（见 SKILL 分析纪律）
     - P0：全部计算由 pandas/bisect 完成；研究工具，非决策工具
 
-退出码：0 正常；3 数据不可得（东财阻断/空返回——不硬编）。
+退出码：0 正常（含部分标的取数失败，报告内逐行标注）；2 参数/池文件错误；
+       3 数据不可得（市场空返回且窗口含交易日；或池模式全部标的失败）。
 """
 
 from __future__ import annotations
@@ -31,8 +39,10 @@ from __future__ import annotations
 import argparse
 import bisect
 import datetime as _dt
+import json
 import pathlib
 import sys
+import time
 
 
 def _ensure_lib_on_path() -> None:
@@ -46,6 +56,7 @@ def _ensure_lib_on_path() -> None:
 
 _ensure_lib_on_path()
 from skill_paths import default_out_dir  # noqa: E402
+from unlock_source import fetch_symbol_unlocks  # noqa: E402
 
 try:  # 交易日历（空窗鉴别用）；包内未携带 invest lib 时降级为 None（保守判不可得）
     from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
@@ -180,10 +191,281 @@ def render_md(result: dict, today: str, future_days: int) -> str:
     return "\n".join(lines)
 
 
+# ── v2 池模式：清单池下钻 + 变化检测 ─────────────────────────────────────
+
+_STATE_DEFAULT = pathlib.Path.home() / ".local" / "share" / "investment" / "event_calendar_state.json"
+
+
+def parse_pool(path: pathlib.Path) -> tuple[list[str], list[str]]:
+    """清单文件解析：每行一个 6 位代码（# 注释、空行跳过）；坏行收集返回（不中断）。"""
+    symbols: list[str] = []
+    bad: list[str] = []
+    for i, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if len(line) == 6 and line.isdigit():
+            if line not in symbols:
+                symbols.append(line)
+        else:
+            bad.append(f"L{i}: {raw.strip()[:40]}")
+    return symbols, bad
+
+
+def load_state(path: pathlib.Path) -> dict:
+    """状态文件读取；不存在视为首跑；损坏 → 按首跑处理并告警（不中断）。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("symbols"), dict):
+            return data
+        print(f"⚠ 状态文件结构异常（{path}）——按首跑处理", file=sys.stderr)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001 — 损坏不阻断排雷主流程
+        print(f"⚠ 状态文件不可读（{path}）：{exc}——按首跑处理", file=sys.stderr)
+    return {"updated": None, "symbols": {}}
+
+
+def save_state(path: pathlib.Path, state: dict) -> str | None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True),
+                        encoding="utf-8")
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _batch_equal(a: dict, b: dict) -> bool:
+    """批次字段全等（双侧 None 视为相等——区别于 freshness.values_equal 的 NULL 永不判等语义）。"""
+    from freshness import values_equal
+
+    for k in set(a) | set(b):
+        va, vb = a.get(k), b.get(k)
+        if va is None and vb is None:
+            continue
+        if not values_equal(va, vb):
+            return False
+    return True
+
+
+def diff_batches(old: dict, new: dict) -> dict:
+    """两批解禁批次（{date: {qty_yi, holders, kind}}）差异 → added/removed/changed。"""
+    added = sorted(d for d in new if d not in old)
+    removed = sorted(d for d in old if d not in new)
+    changed = sorted(d for d in new if d in old and not _batch_equal(old[d], new[d]))
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def collect_pool(symbols: list[str], *, lookahead_days: int, include_past_days: int = 0,
+                 sleep_s: float = 0.5) -> dict:
+    """逐标的拉取（串行 + 间隔）；{symbol: {"batches": {date: {...}}, "error": str|None}}。"""
+    out: dict[str, dict] = {}
+    for idx, sym in enumerate(symbols):
+        rows, err = fetch_symbol_unlocks(sym, lookahead_days=lookahead_days,
+                                         include_past_days=include_past_days)
+        out[sym] = {
+            "batches": {r["date"]: {"qty_yi": r["qty_yi"], "holders": r["holders"],
+                                    "kind": r["kind"]} for r in rows},
+            "error": err,
+        }
+        if sleep_s and idx < len(symbols) - 1:
+            time.sleep(sleep_s)
+    return out
+
+
+_FAR_FIELD_DAYS = 365  # 超过一年的解禁日：交易日历通常不覆盖 → 自然日粗判
+# （2026-09-10 实测：2028-2030 批次曾被截断显示为同一交易日数 318）
+
+
+def _trading_days_until(date_str: str, today: _dt.date) -> tuple[int | None, bool]:
+    """事件日距今距离。
+
+    近场（≤365 自然日）= 交易日数（freshness，长假口径安全）；
+    远场 / 日历不可用 = 自然日数 + degraded=True（渲染为「自然日粗判」，
+    防交易日历覆盖不足时给出被截断的错误交易日数）。
+    """
+    try:
+        dd = _dt.date.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return None, True
+    natural = (dd - today).days
+    if natural > _FAR_FIELD_DAYS:
+        return natural, True
+    from freshness import trading_day_lag
+
+    return trading_day_lag(fmt_date(today), date_str.replace("-", ""))
+
+
+def render_pool_md(collected: dict, *, today: _dt.date, alert_days: int, lookahead_days: int,
+                   pool_path: str, changes: dict | None,
+                   baseline_symbols: list[str], state_updated: str | None) -> str:
+    """池模式报告：提醒段 → 变化段 → 全池明细。数字全部引用采集结果（P0）。"""
+    ok_n = sum(1 for v in collected.values() if not v["error"])
+    fail_n = len(collected) - ok_n
+    lines = [
+        f"# 🔔 解禁排雷（池模式）— {fmt_date(today)}",
+        "",
+        f"> 池来源：{pool_path}（{len(collected)} 标的：成功 {ok_n} / 失败 {fail_n}）"
+        f"｜拉取展望 {lookahead_days} 日｜提醒窗 {alert_days} 自然日",
+        "> 解禁 ≠ 减持：本清单为供给事件提示；真减持须查减持预披露公告（双信号）。",
+        "> 研究工具，非决策工具，不含任何买卖建议。",
+        "",
+    ]
+
+    # ① 提醒段：提醒窗内有解禁批次的标的（距离按交易日计，升序）
+    alerts: list[tuple] = []
+    for sym, info in collected.items():
+        if info["error"]:
+            continue
+        for d, b in info["batches"].items():
+            dd = _dt.date.fromisoformat(d)
+            if today < dd <= today + _dt.timedelta(days=alert_days):
+                lag, degraded = _trading_days_until(d, today)
+                alerts.append((lag if lag is not None else 10**6, sym, d, b, degraded))
+    alerts.sort(key=lambda t: (t[0], t[1]))
+    lines.append(f"## 🔔 提醒（未来 {alert_days} 自然日内有解禁）")
+    lines.append("")
+    if not alerts:
+        lines.append(f"提醒窗内无解禁批次 ✅（{ok_n} 个标的成功拉取）")
+    else:
+        lines.append("| 代码 | 解禁日 | 距今(交易日) | 数量(亿股) | 股东数 | 类型 |")
+        lines.append("|------|--------|------------|-----------|--------|------|")
+        for lag, sym, d, b, degraded in alerts:
+            lag_txt = "-" if lag >= 10**6 else f"{lag}{'（自然日粗判）' if degraded else ''}"
+            qty = "-" if b.get("qty_yi") is None else f"{b['qty_yi']:.2f}"
+            holders = "-" if b.get("holders") is None else str(b["holders"])
+            lines.append(f"| {sym} | {d} | {lag_txt} | {qty} | {holders} | {b.get('kind') or '-'} |")
+    lines.append("")
+
+    # ② 变化段
+    lines.append("## 🆕 变化（相较上次运行）")
+    lines.append("")
+    if changes is None:
+        lines.append("状态未启用（--no-state）——跳过变化检测。")
+    else:
+        if baseline_symbols:
+            lines.append(f"> ℹ 首次建基线 {len(baseline_symbols)} 个标的"
+                         f"（{', '.join(baseline_symbols[:8])}{'…' if len(baseline_symbols) > 8 else ''}）"
+                         "——本次不产变化告警")
+            lines.append("")
+        body = [(sym, ch) for sym, ch in sorted(changes.items())
+                if ch["added"] or ch["removed"] or ch["changed"]]
+        if not body:
+            lines.append("无变化")
+        else:
+            lines.append("| 代码 | 变化 | 日期 | 详情 |")
+            lines.append("|------|------|------|------|")
+            for sym, ch in body:
+                for d in ch["added"]:
+                    b = collected[sym]["batches"][d]
+                    qty = "-" if b.get("qty_yi") is None else f"{b['qty_yi']:.2f} 亿股"
+                    lines.append(f"| {sym} | 🆕 新增 | {d} | {qty} |")
+                for d in ch["removed"]:
+                    lines.append(f"| {sym} | ❌ 消失 | {d} | 上次运行曾出现 |")
+                for d in ch["changed"]:
+                    lines.append(f"| {sym} | ✏️ 字段更新 | {d} | 数量/股东数/类型有变 |")
+        if state_updated:
+            lines.append("")
+            lines.append(f"> 状态已更新：{state_updated}")
+    lines.append("")
+
+    # ③ 全池明细
+    lines.append("## 📋 全池明细")
+    lines.append("")
+    lines.append("| 代码 | 解禁日 | 距今(交易日) | 数量(亿股) | 股东数 | 类型 | 备注 |")
+    lines.append("|------|--------|------------|-----------|--------|------|------|")
+    for sym in sorted(collected):
+        info = collected[sym]
+        if info["error"]:
+            lines.append(f"| {sym} | - | - | - | - | - | ⚠ 取数失败：{info['error']} |")
+            continue
+        if not info["batches"]:
+            lines.append(f"| {sym} | - | - | - | - | - | 无解禁记录（{lookahead_days} 日内） |")
+            continue
+        for d, b in sorted(info["batches"].items()):
+            lag, degraded = _trading_days_until(d, today)
+            lag_txt = "-" if lag is None else f"{lag}{'（自然日粗判）' if degraded else ''}"
+            qty = "-" if b.get("qty_yi") is None else f"{b['qty_yi']:.2f}"
+            holders = "-" if b.get("holders") is None else str(b["holders"])
+            note = "🔔 提醒窗内" if (_dt.date.fromisoformat(d) <= today + _dt.timedelta(days=alert_days) and _dt.date.fromisoformat(d) > today) else ""
+            lines.append(f"| {sym} | {d} | {lag_txt} | {qty} | {holders} "
+                         f"| {b.get('kind') or '-'} | {note} |")
+    lines.append("")
+    lines.append("> 声明：解禁为公开供给事件的事实清单，不构成投资建议。数据源东财（个股解禁队列）。")
+    return "\n".join(lines)
+
+
+def _run_pool(args: argparse.Namespace) -> int:
+    pf = pathlib.Path(args.pool_file)
+    if not pf.exists():
+        print(f"❌ 池文件不存在：{pf}", file=sys.stderr)
+        return 2
+    symbols, bad = parse_pool(pf)
+    if bad:
+        print(f"⚠ 池文件跳过 {len(bad)} 行：{'; '.join(bad[:5])}"
+              f"{'…' if len(bad) > 5 else ''}", file=sys.stderr)
+    if not symbols:
+        print("❌ 池文件无有效 6 位代码", file=sys.stderr)
+        return 2
+
+    today = _dt.date.today()
+    collected = collect_pool(symbols, lookahead_days=args.lookahead)
+    if all(v["error"] for v in collected.values()):
+        print("解禁数据不可得（池内全部标的取数失败）——不硬编。", file=sys.stderr)
+        return 3
+
+    changes: dict | None = None
+    baseline_symbols: list[str] = []
+    state_updated: str | None = None
+    if not args.no_state:
+        state_path = pathlib.Path(args.state_file)
+        state = load_state(state_path)
+        changes = {}
+        for sym, info in collected.items():
+            if info["error"]:
+                continue  # 失败标的保留旧状态（不覆盖）
+            old = (state["symbols"].get(sym) or {}).get("batches")
+            if old is None:
+                baseline_symbols.append(sym)
+            else:
+                changes[sym] = diff_batches(old, info["batches"])
+            state["symbols"][sym] = {"batches": info["batches"],
+                                     "last_run": fmt_date(today)}
+        from dates import shanghai_now  # 时间戳与项目惯例一致（上海时区）
+
+        state_updated = shanghai_now().strftime("%Y-%m-%d %H:%M")
+        state["updated"] = state_updated
+        err = save_state(state_path, state)
+        if err:
+            print(f"⚠ 状态写入失败（{err}）——下次运行将按首跑处理", file=sys.stderr)
+
+    md = render_pool_md(collected, today=today, alert_days=args.alert_days,
+                        lookahead_days=args.lookahead, pool_path=str(pf),
+                        changes=changes, baseline_symbols=baseline_symbols,
+                        state_updated=state_updated)
+    if args.no_out:
+        print(md)
+    else:
+        out_dir = pathlib.Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{fmt_date(today)}-pool.md"
+        path.write_text(md, encoding="utf-8")
+        print(md)
+        print(f"\n已落盘: {path}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days-past", type=int, default=120, help="分位回看窗口（自然日，默认 120）")
     ap.add_argument("--days-future", type=int, default=30, help="展望窗口（自然日，默认 30）")
+    ap.add_argument("--pool-file", type=str, default="", help="清单文件（池模式；每行一个 6 位代码，# 注释）")
+    ap.add_argument("--alert-days", type=int, default=30, help="提醒窗（自然日，默认 30；池模式）")
+    ap.add_argument("--lookahead", type=int, default=90, help="拉取展望（自然日，默认 90；池模式）")
+    ap.add_argument("--state-file", type=str, default=str(_STATE_DEFAULT),
+                    help="状态文件路径（池模式变化检测）")
+    ap.add_argument("--no-state", action="store_true", help="不读写状态（调试）")
     ap.add_argument("--no-out", action="store_true")
     ap.add_argument("--out-dir", type=str, default=default_out_dir(__file__, "event-calendar"))
     args = ap.parse_args()
@@ -192,6 +474,11 @@ def main() -> int:
         ap.error("--days-past 须 ≥ 1")
     if args.days_future < 0:
         ap.error("--days-future 须 ≥ 0")
+    if args.alert_days < 0 or args.lookahead < 0:
+        ap.error("--alert-days/--lookahead 须 ≥ 0")
+
+    if args.pool_file:
+        return _run_pool(args)
 
     import akshare as ak
 

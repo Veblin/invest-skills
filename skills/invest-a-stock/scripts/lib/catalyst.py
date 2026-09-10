@@ -102,55 +102,50 @@ def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEve
 
 
 def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
-    """从 akshare 限售解禁队列提取未来解禁事件。"""
+    """从个股解禁队列提取未来解禁事件。
+
+    源实现已收敛至共享模块 ``skills/lib/unlock_source.py``（invest-a-event-calendar v2
+    同源复用；失败以 (rows, error) 显式区分，不再静默空）。
+    """
     events: list[CatalystEvent] = []
     today = _shanghai_now().date()
-    cutoff = today + timedelta(days=lookahead_days)
 
     try:
         from lib.env import is_akshare_available
-        from lib.collector import akshare_direct_session
 
         if not is_akshare_available():
             return events
+    except Exception:  # env 判定失败不阻断（fetch 内部自会返回失败原因）
+        pass
 
-        with akshare_direct_session():
-            import akshare as ak
-            try:
-                df = ak.stock_restricted_release_queue_em(symbol=symbol)
-            except Exception as exc:
-                logger.info("restricted release API unavailable: %s", exc)
-                return events
+    try:  # 共享库引导（skills/lib；包内由 builder 重写为 lib.unlock_source）
+        from ._invest_path import ensure_skills_lib_on_path
 
-        if df is None or df.empty:
-            return events
+        ensure_skills_lib_on_path()
+    except Exception:  # pragma: no cover
+        pass
 
-        for _, row in df.iterrows():
-            raw_date = row.get("解禁时间") or ""
-            if not raw_date:
-                continue
-            try:
-                event_date = _parse_date(raw_date)
-                if event_date is None:
-                    continue
-            except Exception:
-                continue
+    from unlock_source import fetch_symbol_unlocks
 
-            if today <= event_date <= cutoff:
-                shares = row.get("解禁数量") or 0
-                shares_yi = float(shares) / ONE_PER_YI if shares else 0
-                holder_count = _safe_int(row.get("解禁股东数", 0))
-                holder_label = f"{holder_count} 个股东" if holder_count is not None else "股东数不可得"
-                stock_type = row.get("限售股类型", "")
-                events.append(CatalystEvent(
-                    symbol=symbol, date=event_date, event_type="restricted_unlock",
-                    title=f"限售解禁 {shares_yi:.2f} 亿股" if shares_yi > 0 else "限售解禁",
-                    detail=f"{holder_label}, {stock_type}",
-                    impact="高", source="akshare.stock_restricted_release_queue_em",
-                ))
-    except Exception as exc:
-        logger.warning("restricted unlock fetch failed: %s", exc)
+    rows, err = fetch_symbol_unlocks(symbol, lookahead_days=lookahead_days, today=today)
+    if err:
+        logger.info("restricted release API unavailable: %s", err)
+        return events
 
+    for r in rows:
+        try:
+            event_date = date.fromisoformat(r["date"])
+        except (ValueError, TypeError):
+            continue
+        shares_yi = r["qty_yi"] or 0
+        holder_count = r["holders"]
+        holder_label = f"{holder_count} 个股东" if holder_count is not None else "股东数不可得"
+        events.append(CatalystEvent(
+            symbol=symbol, date=event_date, event_type="restricted_unlock",
+            title=f"限售解禁 {shares_yi:.2f} 亿股" if shares_yi > 0 else "限售解禁",
+            detail=f"{holder_label}, {r['kind']}",
+            impact="高", source="akshare.stock_restricted_release_queue_em",
+        ))
     return events
 
 
