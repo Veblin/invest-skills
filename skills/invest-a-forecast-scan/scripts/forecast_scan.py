@@ -5,7 +5,8 @@
     cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-forecast-scan/scripts/forecast_scan.py
     # 扫最近 N 天披露的业绩预告（默认 10 自然日），正面清单落盘 reports/forecast-scan/
 
-退出码：0 正常（有披露或空窗已鉴别为真实淡季）；2 数据源不可用/无法鉴别（不落盘）；
+退出码：0 正常（有披露或空窗已鉴别为真实淡季）；1 部分日期取数失败
+      （报告已落盘、头部含「数据缺口」警示）；2 数据源不可用/无法鉴别（不落盘）；
       3 真实空窗（淡季，报告已落盘标注「无新披露」）。
 
 参数：
@@ -36,7 +37,12 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]  # code/（repo root）
-sys.path.insert(0, str(ROOT / "skills/invest-a-stock/scripts"))
+
+# 共享路径引导统一走 skills/lib/invest_path.py（防手写 sys.path 造成 lib 包遮蔽）
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lib"))
+from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
+
+ensure_invest_a_scripts_on_path()
 
 from lib.tushare_client import TushareClient  # noqa: E402
 
@@ -49,15 +55,44 @@ POSITIVE_TYPES = {"预增", "略增", "扭亏", "续盈", "减亏"}
 NEGATIVE_TYPES = {"预减", "首亏", "续亏", "略减", "增亏"}
 
 
-def fetch_day(client: TushareClient, ann_date: str) -> list[dict]:
-    """拉取单日全市场业绩预告；失败/空返回 []（服务器错误码已由 client 内部处理）。"""
+def fetch_day(client: TushareClient, ann_date: str) -> tuple[list[dict], bool]:
+    """拉取单日全市场业绩预告。
+
+    returns (rows, ok)：
+      ok=True + 空 rows  = 当日确无披露（或非交易日）
+      ok=False          = 取数异常/接口拒绝（40401/40203/网络）—— 与空窗区分，
+                          供 scan_window 汇总 failed_days（R0 审查 F4：部分失败不得静默）
+    """
     try:
         df = client.query("forecast", fields=FIELDS, ann_date=ann_date)
-        if df is None or df.empty:
-            return []
-        return df.to_dict("records")
+        if df is None:
+            return [], False
+        if df.empty:
+            return [], True
+        return df.to_dict("records"), True
     except Exception:
-        return []
+        return [], False
+
+
+def scan_window(client: TushareClient, window: list[str], *, sleep_s: float = 0.3,
+                log=print) -> tuple[list[dict], list[str]]:
+    """逐日拉取窗口；返回 (records, failed_days)。
+
+    failed_days = fetch_day ok=False 的日期列表——调用方必须区分「空窗」与
+    「取数失败」，并在报告/退出码中显式呈现（不得把故障静默记成淡季）。
+    """
+    records: list[dict] = []
+    failed: list[str] = []
+    for d in window:
+        day_rows, ok = fetch_day(client, d)
+        if not ok:
+            failed.append(d)
+        elif day_rows:
+            records.extend(day_rows)
+            log(f"  {d}: {len(day_rows)} 条")
+        if sleep_s:
+            time.sleep(sleep_s)
+    return records, failed
 
 
 def fetch_basic(client: TushareClient) -> dict[str, dict[str, str]]:
@@ -78,6 +113,17 @@ def trading_days_in_window(days: int) -> list[str]:
     """近 days 个自然日的日期串（倒序），含非交易日（当日调用返回空即跳过）。"""
     today = _dt.date.today()
     return [(today - _dt.timedelta(days=i)).strftime("%Y%m%d") for i in range(days)]
+
+
+def _summary_text(v) -> str:
+    """summary 安全截断（R0 审查 F1）：pandas 3 的 str dtype 会把 JSON null 变 NaN，
+    NaN 为真值（`nan or ""` 仍得 nan）→ `nan[:60]` TypeError 中止整个扫描。
+    None/NaN/非字符串一律返回 ''。"""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v != v:  # NaN
+        return ""
+    return str(v)[:60]
 
 
 def analyze(records: list[dict], basic: dict[str, dict[str, str]], min_gain: float) -> dict:
@@ -121,7 +167,7 @@ def analyze(records: list[dict], basic: dict[str, dict[str, str]], min_gain: flo
             "np_range": f"{npmin if npmin == npmin else '-'}~{npmax if npmax == npmax else '-'}"
             if pd.notna(npmin) or pd.notna(npmax) else "-",
             "np_max": float(npmax) if pd.notna(npmax) else None,
-            "summary": (r.get("summary") or "")[:60],
+            "summary": _summary_text(r.get("summary")),
         }
 
     gain = df[(df["type"] == "预增") & (df["p_change_max"].fillna(0) >= min_gain)]
@@ -148,7 +194,7 @@ def _cell(v) -> str:
     return str(v).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
-def render_md(result: dict, window: list[str]) -> str:
+def render_md(result: dict, window: list[str], failed_days: list[str] | None = None) -> str:
     """渲染 Markdown 报告（数字全部来自 analyze 的 pandas 输出，禁止手写）。"""
     lines: list[str] = []
     if len(window) > 1:
@@ -161,6 +207,10 @@ def render_md(result: dict, window: list[str]) -> str:
     lines.append(f"> 扫描窗口：近 {len(window)} 自然日（有数据交易日 {result['window_days']} 个）| 数据源：tushare forecast")
     lines.append("> 口径：公司自披露预告相对上年同期增减幅（无一致预期数据，「超预期」不作断言）")
     lines.append("> 报告文件：见对话输出 | 研究工具，非决策工具，不含任何买卖建议")
+    if failed_days:
+        shown = ", ".join(failed_days[:10]) + ("…" if len(failed_days) > 10 else "")
+        lines.append(f"> ⚠️ **数据缺口**：{len(failed_days)} 个日期取数失败（{shown}）"
+                     "——下方统计不含这些日期，结论请按缺口折减。")
     lines.append("")
     c = result["counts"]
     if not c:
@@ -185,6 +235,8 @@ def render_md(result: dict, window: list[str]) -> str:
         for r in g[:40]:
             lines.append(f"| {r['ts_code']} | {_cell(r['name'])} | {_cell(r['industry'])} | {r['ann_date']} "
                          f"| {r['end_date']} | {r['p_chg']} | {r['np_range']} | {_cell(r['summary'])} |")
+        if len(g) > 40:
+            lines.append(f"> 表内 {40}/{len(g)} 条（截断说明；其余见下方「披露明细」段）")
         lines.append("")
     if t:
         lines.append("## 🔄 扭亏（按净利上限降序）")
@@ -194,6 +246,8 @@ def render_md(result: dict, window: list[str]) -> str:
         for r in t[:30]:
             lines.append(f"| {r['ts_code']} | {_cell(r['name'])} | {_cell(r['industry'])} | {r['ann_date']} "
                          f"| {r['end_date']} | {r['np_range']} | {_cell(r['summary'])} |")
+        if len(t) > 30:
+            lines.append(f"> 表内 {30}/{len(t)} 条（截断说明；其余见下方「披露明细」段）")
         lines.append("")
     if n:
         lines.append("## ⚠️ 负面关注（首亏/预减 Top30，按降幅绝对值）")
@@ -217,6 +271,8 @@ def render_md(result: dict, window: list[str]) -> str:
                      f"{r['end_date']} | {r['type']} | {r['p_chg']} | {r['np_range']} | {_cell(r['summary'])} |")
     if not rest:
         lines.append("| — 全部条目已在上方清单中 — |")
+    elif len(rest) > 50:
+        lines.append(f"> 明细段表内 {50}/{len(rest)} 条（截断说明）")
     lines.append("")
     lines.append("> 声明：本报告为公开业绩预告的事实清单，数据源 tushare。不构成投资建议。")
     return "\n".join(lines)
@@ -231,6 +287,16 @@ def main() -> int:
     ap.add_argument("--out-dir", type=str, default=str(ROOT / "reports/forecast-scan"))
     args = ap.parse_args()
 
+    # 参数校验（R0 审查尾部项）：--days 0 会在 window[0] 处 IndexError；
+    # 非法 --ann-date 会生成 2026-09-.md 垃圾文件名并误报淡季
+    if args.ann_date:
+        try:
+            _dt.datetime.strptime(args.ann_date, "%Y%m%d")
+        except ValueError:
+            ap.error("--ann-date 须为合法 YYYYMMDD（如 20260715）")
+    elif args.days < 1:
+        ap.error("--days 须 ≥ 1")
+
     if args.ann_date:
         window = [args.ann_date]
     else:
@@ -243,27 +309,32 @@ def main() -> int:
 
     print(f"拉取 {len(window)} 个日期…（{window[0]} ~ {window[-1]}）")
     basic = fetch_basic(client)
-    records: list[dict] = []
-    for d in window:
-        day_rows = fetch_day(client, d)
-        if day_rows:
-            records.extend(day_rows)
-            print(f"  {d}: {len(day_rows)} 条")
-        time.sleep(0.3)
+    records, failed_days = scan_window(client, window)
 
-    # 空窗口鉴别（review F4）：query() 对配额/网络/权限错误全部静默返回空 DataFrame，
-    # records==[] 可能是真实淡季也可能整窗故障——用 stock_basic 连通性探测区分。
-    # probe 有数据 → 真实空窗 → 正常渲染落盘（exit 3）；probe 也失败 → 无法鉴别，不落盘 exit 2
-    if not records and not fetch_basic(client):
-        print(
-            "窗口内零披露且连通性探测失败（Tushare 配额/网络/权限异常）——"
-            "无法区分真实空窗与数据源故障，本次不落盘。",
-            file=sys.stderr,
-        )
-        return 2
+    # 空窗口鉴别：区分「真实淡季」与「取数故障」（R0 审查 F3/F4 修订）：
+    # ① forecast 权限/配额被拒（40203/限额，client 内部记录）→ 明确故障，不落盘 exit 2
+    #    （原实现用 stock_basic 探测——170 分接口可用而 forecast 被拒时会误报淡季）
+    # ② 窗口全部日期取数失败 → 无法鉴别，不落盘 exit 2
+    # ③ 其余空窗 → stock_basic 连通性兜底探测（同样失败 → exit 2）；通过 → 真实淡季 exit 3
+    if not records:
+        if "forecast" in getattr(client, "_permission_denied_apis", set()):
+            print("forecast 接口权限/配额异常（40203/限额）——无法断言空窗，本次不落盘。",
+                  file=sys.stderr)
+            return 2
+        if failed_days and len(failed_days) == len(window):
+            print(f"窗口内全部 {len(window)} 个日期取数失败——无法鉴别真实空窗，本次不落盘。",
+                  file=sys.stderr)
+            return 2
+        if not fetch_basic(client):
+            print(
+                "窗口内零披露且连通性探测失败（Tushare 配额/网络/权限异常）——"
+                "无法区分真实空窗与数据源故障，本次不落盘。",
+                file=sys.stderr,
+            )
+            return 2
 
     result = analyze(records, basic, args.min_gain)
-    md = render_md(result, window)
+    md = render_md(result, window, failed_days=failed_days)
 
     if args.no_out:
         print(md)
@@ -277,8 +348,11 @@ def main() -> int:
         path.write_text(md, encoding="utf-8")
         print(md[:600])
         print(f"\n已落盘: {path}")
-    # 空窗口（预告淡季，已鉴别）：无论是否落盘均退出码 3，供调用方判断「无新披露」
-    return 3 if not records else 0
+    # 空窗口（预告淡季，已鉴别）：返回 3 供调用方判断「无新披露」；
+    # 部分日期取数失败（有数据但含缺口）：返回 1（报告已含数据缺口警示，区别于正常 0）
+    if not records:
+        return 3
+    return 1 if failed_days else 0
 
 
 if __name__ == "__main__":

@@ -3,9 +3,12 @@
 import sys
 from pathlib import Path
 
+import pandas as pd
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from forecast_scan import _cell, analyze  # noqa: E402
+from forecast_scan import _cell, analyze, render_md, scan_window  # noqa: E402
 
 
 def _rec(ts, typ, pmin=None, pmax=None, npmin=None, npmax=None, ann="20260715", end="20260630"):
@@ -88,3 +91,67 @@ def test_cell_escape_pipe_and_newline():
     assert _cell("第一行\n第二行\r回车") == "第一行 第二行 回车"
     assert _cell(None) == "None"   # str(None) 语义；norm() 保证非 None，此处仅兜底防错
     assert _cell("") == ""
+
+
+# ── R0 审查修复回归（G1，2026-09-10）─────────────────────────────────────
+
+def test_summary_nan_no_crash():
+    """F1：pandas 3 str dtype 把 null summary 变 NaN；NaN 为真值 → 旧代码 nan[:60] 崩。"""
+    rows = [_rec("600001.SH", "预增", 50.0, 80.0, 1, 2)]
+    rows[0]["summary"] = float("nan")
+    out = analyze(rows, BASIC, min_gain=30.0)   # 不抛 TypeError
+    assert out["gainers"][0]["summary"] == ""
+    rows[0]["summary"] = None
+    assert analyze(rows, BASIC, min_gain=30.0)["gainers"][0]["summary"] == ""
+
+
+class _FakeClient:
+    """最小 client 替身：query 返回 DataFrame；None 值日模拟取数异常。"""
+
+    def __init__(self, per_day: dict[str, list | None], denied: bool = False):
+        self.per_day = per_day
+        self._permission_denied_apis = {"forecast"} if denied else set()
+
+    def query(self, api: str, fields: str = "", **kwargs):
+        d = kwargs.get("ann_date")
+        v = self.per_day.get(d)
+        if v is None:
+            raise RuntimeError("simulated network error")
+        return pd.DataFrame(v) if v else pd.DataFrame()
+
+
+def test_scan_window_tracks_failed_days():
+    """F4：取数失败日必须与空窗日区分（ok=False → failed_days）。"""
+    fc = _FakeClient({"20260909": [{"ts_code": "600001.SH"}], "20260908": None,
+                      "20260907": []})
+    rows, failed = scan_window(fc, ["20260909", "20260908", "20260907"], sleep_s=0)
+    assert len(rows) == 1
+    assert failed == ["20260908"]      # 09 有数据、07 空窗（非失败）、08 异常
+
+
+def test_render_md_shows_data_gap_warning():
+    """F4：部分失败 → 报告头部「数据缺口」段，缺口日列出。"""
+    out = analyze(RECORDS, BASIC, min_gain=30.0)
+    md = render_md(out, ["20260909", "20260908"], failed_days=["20260908"])
+    assert "数据缺口" in md and "20260908" in md
+    md_clean = render_md(out, ["20260909", "20260908"], failed_days=[])
+    assert "数据缺口" not in md_clean
+
+
+def test_gainers_truncation_note():
+    """尾部项：>40 条预增时表格须附截断说明（防「看到的就是全部」误读）。"""
+    rows = [_rec(f"6000{i:02d}.SH", "预增", 50.0, 60.0 + i, 1, 2) for i in range(45)]
+    md = render_md(analyze(rows, {}, min_gain=30.0), ["20260909"])
+    assert "表内 40/45 条" in md
+
+
+def test_arg_validation_days_zero_and_bad_ann_date(monkeypatch):
+    """尾部项：--days 0 不再 IndexError；非法 --ann-date 不再生成垃圾文件名。"""
+    import forecast_scan as fs
+
+    monkeypatch.setattr(sys, "argv", ["forecast_scan.py", "--days", "0"])
+    with pytest.raises(SystemExit):
+        fs.main()
+    monkeypatch.setattr(sys, "argv", ["forecast_scan.py", "--ann-date", "2026-09-10"])
+    with pytest.raises(SystemExit):
+        fs.main()
