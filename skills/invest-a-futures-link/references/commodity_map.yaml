@@ -1,0 +1,155 @@
+# 商品期货 → A股 联动映射表（invest-a-futures-link）
+#
+# 维护约定（2026-09-08 初版，待用户审核）：
+#   - 收录「公认有产业逻辑的联动链」——期货价格与公司基本面同源（收入/成本/
+#     库存周期），非统计相关性筛选结果
+#   - relation: positive = 期货涨利好公司（产品/收入端）；cost_inverse = 期货是
+#     公司成本端（期货涨利空，方向相反——扫描输出取反后标注）。
+#     当前 cost_inverse 仅豆粕链（海大集团/牧原为下游采购方）；尿素链华鲁恒升/
+#     云天化为尿素生产商（收入端），属 positive（2026-09-08 review F5 修正）
+#   - stocks 直接固化代码（运行时名称解析依赖深交所接口，2026-09-08 实测超时
+#     不可用，故弃用）；name 仅作展示。退市/重组时人工更新
+#   - symbol 为新浪主力连续代码（futures_main_sina），后缀 0 = 主力合约
+
+chains:
+  - id: sugar
+    label: 食糖链
+    symbol: SR0
+    commodity: 郑糖主力
+    relation: positive
+    stocks:
+      - {name: 中粮糖业, code: "600737"}
+      - {name: 广农糖业, code: "000911"}
+
+  - id: cu
+    label: 铜链
+    symbol: CU0
+    commodity: 沪铜主力
+    relation: positive
+    stocks:
+      - {name: 江西铜业, code: "600362"}
+      - {name: 铜陵有色, code: "000630"}
+      - {name: 紫金矿业, code: "601899"}
+
+  - id: au
+    label: 黄金链
+    symbol: AU0
+    commodity: 沪金主力
+    relation: positive
+    stocks:
+      - {name: 山东黄金, code: "600547"}
+      - {name: 中金黄金, code: "600489"}
+      - {name: 赤峰黄金, code: "600988"}
+
+  - id: sc
+    label: 原油炼化链
+    symbol: SC0
+    commodity: 原油主力
+    relation: positive
+    stocks:
+      - {name: 中国石油, code: "601857"}
+      - {name: 中国石化, code: "600028"}
+      - {name: 荣盛石化, code: "002493"}
+
+  - id: rb
+    label: 螺纹钢链
+    symbol: RB0
+    commodity: 螺纹钢主力
+    relation: positive
+    stocks:
+      - {name: 宝钢股份, code: "600019"}
+      - {name: 华菱钢铁, code: "000932"}
+      - {name: 重庆钢铁, code: "601005"}
+
+  - id: al
+    label: 电解铝链
+    symbol: AL0
+    commodity: 沪铝主力
+    relation: positive
+    stocks:
+      - {name: 中国铝业, code: "601600"}
+      - {name: 云铝股份, code: "000807"}
+      - {name: 神火股份, code: "000933"}
+
+  - id: jm
+    label: 焦煤链
+    symbol: JM0
+    commodity: 焦煤主力
+    relation: positive
+    stocks:
+      - {name: 山西焦煤, code: "000983"}
+      - {name: 平煤股份, code: "601666"}
+      - {name: 淮北矿业, code: "600985"}
+
+  - id: lc
+    label: 碳酸锂链
+    symbol: LC0
+    commodity: 碳酸锂主力
+    relation: positive
+    stocks:
+      - {name: 天齐锂业, code: "002466"}
+      - {name: 赣锋锂业, code: "002460"}
+      - {name: 盐湖股份, code: "000792"}
+
+  - id: ru
+    label: 天然橡胶链
+    symbol: RU0
+    commodity: 天然橡胶主力
+    relation: positive
+    stocks:
+      - {name: 玲珑轮胎, code: "601966"}
+      - {name: 赛轮轮胎, code: "601058"}
+
+  - id: ur
+    label: 尿素农化链
+    symbol: UR0
+    commodity: 尿素主力
+    relation: positive
+    stocks:
+      - {name: 华鲁恒升, code: "600426"}
+      - {name: 云天化, code: "600096"}
+
+  - id: lh
+    label: 生猪链
+    symbol: LH0
+    commodity: 生猪主力
+    relation: positive
+    stocks:
+      - {name: 牧原股份, code: "002714"}
+      - {name: 温氏股份, code: "300498"}
+      - {name: 新希望, code: "000876"}
+
+  - id: ta
+    label: PTA 聚酯链
+    symbol: TA0
+    commodity: PTA主力
+    relation: positive
+    stocks:
+      - {name: 桐昆股份, code: "601233"}
+      - {name: 恒力石化, code: "600346"}
+
+  - id: si
+    label: 工业硅链
+    symbol: SI0
+    commodity: 工业硅主力
+    relation: positive
+    stocks:
+      - {name: 合盛硅业, code: "603260"}
+      - {name: 大全能源, code: "688303"}
+
+  - id: m
+    label: 豆粕饲料链
+    symbol: M0
+    commodity: 豆粕主力
+    relation: cost_inverse
+    stocks:
+      - {name: 海大集团, code: "002311"}
+      - {name: 牧原股份, code: "002714"}
+
+  - id: y
+    label: 豆油油脂链
+    symbol: Y0
+    commodity: 豆油主力
+    relation: positive
+    stocks:
+      - {name: 金龙鱼, code: "300999"}
