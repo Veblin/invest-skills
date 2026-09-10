@@ -65,3 +65,5 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/sc
 | 对照参考 | 近 30 日回看（解禁市值 vs 当日沪深300） | [来源: 同上] |
 
 > 只描述供给事件事实，不含任何动作建议；执行由你依据自身纪律决定。
+
+> **机器层准出（报告类产出必跑，非可选）**：`uv run python skills/lib/report_qc.py <产出文件> --fail-on error` → 无 error 级发现（退出码 0/1）方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明。

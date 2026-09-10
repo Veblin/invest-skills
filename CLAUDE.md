@@ -217,7 +217,7 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 
 ### 第 0 层：机器准出（必跑，非可选自检）
 
-`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现（overall ≠ FAIL）方可进入以下三层人工复检；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）逐条复核后消除或说明。qc 规则细节见 `skills/lib/report_qc.py` 层说明。
+`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现方可进入以下三层人工复检（退出码 0=PASS / 1=WARN 均可交付，2=FAIL 不得交付）；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）逐条复核后消除或说明。qc 规则细节见 `skills/lib/report_qc.py` 层说明。
 
 ### 第 1 层：数字复检（准确性）— 独立重算，非重新目视
 

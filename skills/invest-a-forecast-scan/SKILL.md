@@ -58,7 +58,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-forecast-scan/scr
 3. **负面清单同权重要**：首亏/预减是持有池的排雷输入（配合 journal 卖出评估）
 4. **报告期注意**：`end_date` 指明预告所属报告期；窗口期（1/4/7/10 月）才有密集披露，淡季运行会输出「窗口内无新披露」（退出码 3，属正常）
 5. **退出码语义**：0 正常；1 = 部分日期取数失败（报告已落盘、头部含「数据缺口」警示，结论按缺口折减）；2 = 数据源/权限异常无法鉴别（不落盘；含**窗口零披露但存在失败日**——不得冒充已核验淡季）；3 = 真实淡季空窗（全部日期成功且确无披露）。forecast 权限被拒（40203/配额）显式报 2
-5. **与下游衔接**：候选池 → invest-a-stock 深研；持有池雷情 → journal；市场广度背景 → invest-a-pulse
+6. **与下游衔接**：候选池 → invest-a-stock 深研；持有池雷情 → journal；市场广度背景 → invest-a-pulse
 
 ## 参考输出层
 
@@ -69,3 +69,5 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-forecast-scan/scr
 | 风险雷达 | 首亏/预减 Top30 | [来源: forecast 引擎输出] |
 
 > 只描述客观披露事实，不含任何动作建议；执行由你依据自身纪律决定。
+
+> **机器层准出（报告类产出必跑，非可选）**：`uv run python skills/lib/report_qc.py <产出文件> --fail-on error` → 无 error 级发现（退出码 0/1）方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明。

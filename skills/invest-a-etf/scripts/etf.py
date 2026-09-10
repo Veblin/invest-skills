@@ -762,7 +762,8 @@ def cmd_collect_weekly() -> int:
         return 1
     print(f"完成: {result['industries_saved']} 个行业已写入 industry_weekly（日期 {result['date']}）")
     if weekly_unchanged_vs_previous(result["date"]):
-        print("⚠ 31 行业数值与上一期全同，疑数据源停更（写入已完成，请人工核对）")
+        print(f"⚠ {result['industries_saved']} 行业数值与上一期全同，"
+              "疑数据源停更（写入已完成，请人工核对）")
     # 顺带全量写指数 PE 历史（CSINDEX_MAP 全部代码，从 L2 缓存信封提取）
     pe_result = _persist_index_pe(None)
     if pe_result.get("error"):

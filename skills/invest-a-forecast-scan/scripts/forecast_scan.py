@@ -243,7 +243,8 @@ def render_md(result: dict, window: list[str], failed_days: list[str] | None = N
             lines.append(f"| {r['ts_code']} | {_cell(r['name'])} | {_cell(r['industry'])} | {r['ann_date']} "
                          f"| {r['end_date']} | {r['p_chg']} | {r['np_range']} | {_cell(r['summary'])} |")
         if len(g) > 40:
-            lines.append(f"> 表内 {40}/{len(g)} 条（截断说明；其余见下方「披露明细」段）")
+            lines.append(f"> 表内 {40}/{len(g)} 条；其余按排序优先出现在下方「披露明细」段"
+                         "（该段亦限 50 条，未列者仅存于引擎 JSON）")
         lines.append("")
     if t:
         lines.append("## 🔄 扭亏（按净利上限降序）")
@@ -254,7 +255,8 @@ def render_md(result: dict, window: list[str], failed_days: list[str] | None = N
             lines.append(f"| {r['ts_code']} | {_cell(r['name'])} | {_cell(r['industry'])} | {r['ann_date']} "
                          f"| {r['end_date']} | {r['np_range']} | {_cell(r['summary'])} |")
         if len(t) > 30:
-            lines.append(f"> 表内 {30}/{len(t)} 条（截断说明；其余见下方「披露明细」段）")
+            lines.append(f"> 表内 {30}/{len(t)} 条；其余按排序优先出现在下方「披露明细」段"
+                         "（该段亦限 50 条，未列者仅存于引擎 JSON）")
         lines.append("")
     if n:
         lines.append("## ⚠️ 负面关注（首亏/预减 Top30，按降幅绝对值）")
