@@ -47,6 +47,24 @@ def _ensure_lib_on_path() -> None:
 _ensure_lib_on_path()
 from skill_paths import default_out_dir  # noqa: E402
 
+try:  # 交易日历（空窗鉴别用）；包内未携带 invest lib 时降级为 None（保守判不可得）
+    from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
+
+    ensure_invest_a_scripts_on_path()
+except Exception:  # pragma: no cover
+    pass
+
+
+def _window_has_trading_day(start: str, end: str) -> bool | None:
+    """窗口 [start, end] 是否含交易日；日历不可用 → None（调用方保守处理，R1 审查 F8）。"""
+    try:
+        from lib.trade_cal import fetch_trade_cal
+
+        dates, _estimated = fetch_trade_cal(start, end)
+        return bool(dates)
+    except Exception:
+        return None
+
 
 def fmt_date(d: _dt.date) -> str:
     return d.strftime("%Y%m%d")
@@ -187,7 +205,12 @@ def main() -> int:
         print(f"解禁数据不可得（东财阻断/代理）：{type(exc).__name__}", file=sys.stderr)
         return 3
     if df is None or df.empty:
-        # F5：空返回 = 数据不可得（全市场 150+ 日窗口无解禁客观上不可能），不硬编为「无解禁」
+        # F5 + R1 审查 F8：空返回可能是「窗口内合法无解禁」（窄窗口/全非交易日），
+        # 也可能是数据不可得——先用交易日历鉴别；含交易日（或日历不可用）→ 判不可得
+        has_td = _window_has_trading_day(start, end)
+        if has_td is False:
+            print(f"解禁数据为空且窗口内无交易日（{start}~{end}）——无可报告内容（exit 0）")
+            return 0
         print("解禁数据不可得（东财空返回——疑代理阻断或接口变化），不硬编。", file=sys.stderr)
         return 3
 

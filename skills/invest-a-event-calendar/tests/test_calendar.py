@@ -17,6 +17,51 @@ def test_rank_in_sorted_empty_guard():
     assert rank_in_sorted([1.0, 2.0], 1.5) == 50.0
 
 
+def test_window_has_trading_day_helper(monkeypatch):
+    """R1 审查 F8：空返回鉴别依赖交易日历；三级降级语义。"""
+    import lib.trade_cal as tc
+
+    import unlock_calendar as uc
+
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: (["20260910"], False))
+    assert uc._window_has_trading_day("20260901", "20260910") is True
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: ([], False))
+    assert uc._window_has_trading_day("20260901", "20260910") is False
+
+    def boom(s, e):
+        raise RuntimeError("calendar offline")
+
+    monkeypatch.setattr(tc, "fetch_trade_cal", boom)
+    assert uc._window_has_trading_day("20260901", "20260910") is None
+
+
+def test_main_empty_window_no_trading_day_exit0(monkeypatch, capsys):
+    """窄窗口/全非交易日空返回 → 不再是误报「数据不可得」（exit 0）。"""
+    import akshare as ak
+
+    import unlock_calendar as uc
+
+    monkeypatch.setattr(ak, "stock_restricted_release_summary_em",
+                        lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(uc, "_window_has_trading_day", lambda s, e: False)
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--days-past", "1", "--no-out"])
+    assert uc.main() == 0
+    assert "无交易日" in capsys.readouterr().out
+
+
+def test_main_empty_window_with_trading_day_exit3(monkeypatch, capsys):
+    import akshare as ak
+
+    import unlock_calendar as uc
+
+    monkeypatch.setattr(ak, "stock_restricted_release_summary_em",
+                        lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(uc, "_window_has_trading_day", lambda s, e: True)
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--days-past", "5", "--no-out"])
+    assert uc.main() == 3
+    assert "不可得" in capsys.readouterr().err
+
+
 def test_percentile_rank():
     vals = [100.0, 200.0, 300.0, 400.0]
     assert percentile_rank(vals, 100.0) == 0.0

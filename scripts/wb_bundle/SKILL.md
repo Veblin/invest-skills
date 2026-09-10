@@ -19,6 +19,10 @@ user-invocable: true
 | 市场情绪 / 大盘 / 市场脉搏 | `skills/invest-a-pulse/SKILL.md` | 五维情绪 + 环境标签 |
 | 缺口扫描 / 跳空扫描 | `skills/invest-a-gap-scan/SKILL.md` | 成分股池缺口扫描 |
 | 双底 / 形态扫描 / 三角形底 / 底部形态 | `skills/invest-a-pattern-scan/SKILL.md` | LMW 双底/三角形底 |
+| 港股 / H股（5 位代码） | `skills/invest-hk-stock/SKILL.md` | 港股快照/估值位置/风险层（v1） |
+| 解禁日历 / 解禁压力 / 限售股解禁 | `skills/invest-a-event-calendar/SKILL.md` | 全市场解禁压力日历 + 高压日 |
+| 业绩预告 / 预增扫描 / 预告雷达 | `skills/invest-a-forecast-scan/SKILL.md` | 预增/扭亏/负面三清单 |
+| 期货联动 / 商品期货 / 期股联动 | `skills/invest-a-futures-link/SKILL.md` | 15 条产业链期股方向对照 |
 
 **执行约定**：识别意图后，先 Read 对应子技能 SKILL.md 并完整遵循其 SOP；子技能引用的 references/ 在其各自目录或 `skills/lib/references/` 下。
 
