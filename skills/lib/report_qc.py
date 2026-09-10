@@ -332,6 +332,57 @@ def _check_etf_derived(text: str) -> LayerResult:
     return layer
 
 
+# ── sourcing 层（v0.3.0 T6-2/T6-3）：F2 派生表述来源 + F4 §N 引用存在性 ────
+
+# F2：加工组派生表述词（倍数/百分点/个点/成数/约百分数）——命中行前 _F2_SOURCE_WINDOW
+# 行内无 [来源:] 即 warning（人工复核语义，非 error——D1=A 边界不破）。
+# 词表为最小集（R1 子计划 §2）：不含裸「%」以免海量误报；扩展词表须补测试。
+_F2_PATTERN = re.compile(
+    r"(?:[+-]?\d+(?:\.\d+)?\s*(?:倍|个百分点|个点|bp)|"
+    r"近?(?:六成|七成|八成|九成)|五成以上|过半|"
+    r"约\s*[+-]?\d+(?:\.\d+)?\s*%)"
+)
+_F2_SOURCE_WINDOW = 3  # 行内或前 N 行含 [来源: …] 即视为有源
+_SECTION_REF_RE = re.compile(r"§\s*(\d+(?:\.\d+)?)")
+_SECTION_HEAD_RE = re.compile(r"^#{2,4}\s*(\d+(?:\.\d+)?)[\s.、]")
+
+
+def _check_sourcing(text: str) -> LayerResult:
+    """sourcing 层：F2 派生词缺来源（warning）+ F4 §N 引用指向不存在节（warning）。"""
+    layer = LayerResult(layer="sourcing", status="pass")
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if not _F2_PATTERN.search(ln):
+            continue
+        window = "\n".join(lines[max(0, i - _F2_SOURCE_WINDOW): i + 1])
+        if re.search(r"\[来源\s*[:：]", window):
+            continue
+        layer.findings_count += 1
+        layer.details.append({
+            "id": "f2-derived-claim-no-source",
+            "severity": "warn",
+            "line": i + 1,
+            "message": f"派生表述疑似缺来源标注（前 {_F2_SOURCE_WINDOW} 行内无 [来源:]）："
+                       f"{ln.strip()[:60]}",
+        })
+    refs = {m.group(1) for m in _SECTION_REF_RE.finditer(text)}
+    heads = set()
+    for ln in lines:
+        m = _SECTION_HEAD_RE.match(ln)
+        if m:
+            heads.add(m.group(1))
+    for ref in sorted(refs - heads, key=lambda s: tuple(int(x) for x in s.split("."))):
+        layer.findings_count += 1
+        layer.details.append({
+            "id": "f4-section-ref-missing",
+            "severity": "warn",
+            "message": f"正文引用 §{ref} 但报告无对应标题节",
+        })
+    if layer.findings_count:
+        layer.status = "warn"
+    return layer
+
+
 # ── 主检查流程 ────────────────────────────────────────────────────────────
 
 
@@ -557,6 +608,9 @@ def qc_file(
     text = path.read_text(encoding="utf-8")
 
     layers = [_run_lint_layer(path, profile, fail_on), _check_structure(text, report_type)]
+    if report_type not in ("unknown", "pulse"):
+        # T6-2/T6-3（v0.3.0 R1）：F2 派生表述来源 / F4 §N 引用存在性——通用文本规则
+        layers.append(_check_sourcing(text))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
     elif report_type == "stock":
@@ -640,14 +694,14 @@ def format_qc_result(result: QCResult, *, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
-def _print_summary(results: list[QCResult], file=None) -> int:
+def _print_summary(results: list[QCResult], file=None, *, verbose: bool = False) -> int:
     """打印多个结果，返回退出码（0=PASS 1=WARN 2=FAIL）。"""
     if file is None:
         # def-time file=sys.stdout 会在 capsys 捕获期绑定临时流（lint.py 同族
         # 缺陷，2026-08-23 code-review #14）——调用时解析避免写已关闭流
         file = sys.stdout
     for r in results:
-        print(format_qc_result(r), file=file)
+        print(format_qc_result(r, verbose=verbose), file=file)
     worst = max((r.overall for r in results), default="PASS",
                 key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0))
     if len(results) > 1:
@@ -710,7 +764,7 @@ def main(argv: list[str] | None = None) -> int:
         worst = max((r.overall for r in results), default="PASS",
                     key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0))
         return {"PASS": 0, "WARN": 1, "FAIL": 2}.get(worst, 0)
-    return _print_summary(results)
+    return _print_summary(results, verbose=args.verbose)
 
 
 if __name__ == "__main__":
