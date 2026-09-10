@@ -312,6 +312,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 无「Python calc 视角/复算一致/自洽校验」类未实跑标注——来源标注仅两种：引擎字段 / `[来源: Python calc: formula]`（共享规范 §2.3 强制行为 5-7）
 - [ ] 检索/新闻口径数字带「检索摘要口径，出处待核实」标注，未归因到未读原文的媒体（R2）
 - [ ] 计数经 Python（`len()`），无目视计数（R3）
+- [ ] **机器层准出（写入后必跑，非可选）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明
 - [ ] **报告复检流程已执行**（CLAUDE.md「报告复检流程」三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果
 
 ---
