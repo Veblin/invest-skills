@@ -674,6 +674,69 @@ def query_sector_flow(symbol: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# R1/T7 预警：as_of 滞后 + 全同检测（停源识别）
+# ---------------------------------------------------------------------------
+
+SECTOR_FLOW_STALE_DAYS = 5  # as_of 距最近交易日滞后阈值（自然日，T7-1 可配）
+
+
+def sector_flow_stale_note(as_of: str | None) -> str | None:
+    """as_of（YYYYMMDD）距最近交易日的自然日滞后 > 阈值 → 提示文本；否则 None。
+
+    报告路径显式警告（stderr + JSON warnings）——防用过期资金流快照做当日对照。
+    """
+    if not as_of:
+        return None
+    try:
+        from datetime import datetime
+
+        from dates import shanghai_session_date
+
+        d_asof = datetime.strptime(str(as_of), "%Y%m%d").date()
+        d_sess = datetime.strptime(str(shanghai_session_date()), "%Y%m%d").date()
+    except Exception:
+        return None
+    lag = (d_sess - d_asof).days
+    if lag > SECTOR_FLOW_STALE_DAYS:
+        return (f"sector-flow as_of={as_of} 滞后 {lag} 天（阈值 {SECTOR_FLOW_STALE_DAYS} 天），"
+                "疑数据源停更或采集未跑——结论按滞后折减")
+    return None
+
+
+def snapshot_unchanged_vs_previous(date: str) -> bool | None:
+    """已写入日 date 与「上一已存日期」行集全同 → True（疑源停更）；否则 False / None。
+
+    None = 无上一日或任一侧无数据（不可比）；False = 有差异。
+    仅提示语义——写库幂等性不受影响（T7-2）。
+    """
+    from lib.store import _connection
+
+    with _connection() as c:
+        try:
+            rows = c.execute(
+                "SELECT DISTINCT date FROM sector_flow_snapshots ORDER BY date DESC LIMIT 2"
+            ).fetchall()
+        except Exception as exc:
+            _read_log(exc)
+            return None
+    dates = [r["date"] for r in rows]
+    if len(dates) < 2 or dates[0] != date:
+        return None
+    cur, old = _rows_for_date(date), _rows_for_date(dates[1])
+    if not cur or not old:
+        return None
+    for wd in set(cur) | set(old):
+        a, b = cur.get(wd) or {}, old.get(wd) or {}
+        if set(a) != set(b):
+            return False
+        for ind, v in a.items():
+            w = b[ind]
+            if v is None or w is None or not math.isclose(v, w, rel_tol=1e-9, abs_tol=1e-9):
+                return False
+    return True
+
+
 def check_mapping_coverage(snapshot: dict[str, Any]) -> list[str]:
     """SW_TO_THS_INDUSTRY 中不在最新快照名单的行业名（首次在线采集后自检）。"""
     wanted = {ind for lst in SW_TO_THS_INDUSTRY.values() for ind in lst}

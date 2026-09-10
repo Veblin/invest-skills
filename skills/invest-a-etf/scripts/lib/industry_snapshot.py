@@ -94,6 +94,71 @@ def collect_industry_weekly() -> dict[str, Any]:
 # 查询
 # ---------------------------------------------------------------------------
 
+WEEKLY_STALE_DAYS = 7  # 周频快照滞后阈值（自然日，T7-3）
+
+
+def weekly_unchanged_vs_previous(date: str) -> bool | None:
+    """date 与上一已存日期的行业行集 (pe,pb,chg_pct,turnover_pct) 全同 → True。
+
+    None = 无上一日/不可比；False = 有差异（或名单增删）。仅提示语义（T7-3）。
+    """
+    import math
+    import sqlite3
+
+    from lib.store import _conn, _safe_close
+
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT DISTINCT date FROM industry_weekly ORDER BY date DESC LIMIT 2"
+        ).fetchall()
+        dates = [r["date"] for r in rows]
+        if len(dates) < 2 or dates[0] != date:
+            return None
+        prev = dates[1]
+        cur = c.execute(
+            "SELECT index_code, pe, pb, chg_pct, turnover_pct FROM industry_weekly WHERE date = ?",
+            (date,),
+        ).fetchall()
+        old = c.execute(
+            "SELECT index_code, pe, pb, chg_pct, turnover_pct FROM industry_weekly WHERE date = ?",
+            (prev,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        _safe_close(c)
+    cmap = {r["index_code"]: (r["pe"], r["pb"], r["chg_pct"], r["turnover_pct"]) for r in cur}
+    omap = {r["index_code"]: (r["pe"], r["pb"], r["chg_pct"], r["turnover_pct"]) for r in old}
+    if not cmap or not omap or set(cmap) != set(omap):
+        return False
+    for k, vals in cmap.items():
+        for a, b in zip(vals, omap[k]):
+            if a is None or b is None or not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9):
+                return False
+    return True
+
+
+def industry_snapshot_stale_note(date: str | None) -> str | None:
+    """快照 date 距最近交易日滞后 > WEEKLY_STALE_DAYS → 提示文本；否则 None（T7-3）。"""
+    if not date:
+        return None
+    try:
+        from datetime import datetime
+
+        from dates import shanghai_session_date
+
+        d_snap = datetime.strptime(str(date), "%Y%m%d").date()
+        d_sess = datetime.strptime(str(shanghai_session_date()), "%Y%m%d").date()
+    except Exception:
+        return None
+    lag = (d_sess - d_snap).days
+    if lag > WEEKLY_STALE_DAYS:
+        return (f"行业 PE 快照日期 {date} 滞后 {lag} 天（阈值 {WEEKLY_STALE_DAYS} 天），"
+                "疑采集未跑/数据源停更——请先 collect-weekly")
+    return None
+
+
 def list_industry_snapshot() -> list[dict[str, Any]]:
     """返回所有 28 个申万一级行业的最新 PE/PB/涨跌幅快照（按 PE 降序）。"""
     import sqlite3

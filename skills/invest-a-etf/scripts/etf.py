@@ -601,11 +601,12 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
     if symbol is None:
         return 2
     try:
-        from sector_flow import query_sector_flow
+        from sector_flow import query_sector_flow, sector_flow_stale_note
     except ImportError as exc:
         print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
         return 1
     data = query_sector_flow(symbol)
+    stale = sector_flow_stale_note(data.get("as_of"))   # T7-1：as_of 滞后预警
     if as_json:
         from dates import shanghai_now
 
@@ -614,9 +615,12 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
             "generated_at": shanghai_now().isoformat(),
             "symbol": symbol,
             "sector_flow": data,
+            "warnings": [stale] if stale else [],
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return 0
+    if stale:
+        print(f"⚠ {stale}", file=sys.stderr)
 
     sw_name = data.get("sw_name") or "-"
     sw_code = data.get("sw_code") or "-"
@@ -654,7 +658,8 @@ def cmd_collect_sector_flow() -> int:
     try:
         from sector_flow import (check_mapping_coverage, check_snapshot_drift,
                                  fetch_sector_flow_snapshot, load_drift_baseline,
-                                 save_drift_baseline, save_sector_flow_snapshot)
+                                 save_drift_baseline, save_sector_flow_snapshot,
+                                 snapshot_unchanged_vs_previous)
     except ImportError as exc:
         print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
         return 1
@@ -670,6 +675,9 @@ def cmd_collect_sector_flow() -> int:
     partial = "（部分窗口失败）" if errs else ""
     print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
           f"（日期 {result['date']}）{partial}")
+    if not errs and snapshot_unchanged_vs_previous(result["date"]):
+        # T7-2：写入成功但数值与上一快照全同 → 疑源停更（幂等语义不变，仅提示）
+        print("⚠ 数值与上一快照全同，疑数据源停更（写入已完成，请人工核对源页面）")
     if errs:
         print(f"⚠ 部分窗口取数失败: {'; '.join(errs)}")
         return 1  # 部分失败 → 非零退出码，cron 可按键告警（R16）
@@ -698,7 +706,7 @@ def cmd_collect_sector_flow() -> int:
 def cmd_industry_pe() -> int:
     """打印申万一级行业 PE/PB 一览。"""
     try:
-        from industry_snapshot import list_industry_snapshot
+        from industry_snapshot import industry_snapshot_stale_note, list_industry_snapshot
     except ImportError:
         print("industry_snapshot 模块不可用（请检查路径配置）")
         return 1
@@ -707,6 +715,9 @@ def cmd_industry_pe() -> int:
         print("无行业 PE 数据。请先运行 `etf.py collect-weekly` 采集。")
         print("（首次采集后需等待每周五收盘后自动更新，或手动触发。）")
         return 0
+    stale = industry_snapshot_stale_note(rows[0].get("date")) if rows else None
+    if stale:
+        print(f"⚠ {stale}")   # T7-3：快照陈旧提示（输出在表前，防读到旧值不自知）
     print(f"{'行业':<10s} {'代码':<8s} {'PE':>8s} {'PB':>6s} {'涨跌%':>8s} {'换手%':>8s} {'日期':>10s}")
     print("-" * 62)
     for r in rows:
@@ -738,7 +749,7 @@ def _persist_index_pe(idx_codes: list[str] | None) -> dict:
 def cmd_collect_weekly() -> int:
     """手动触发行业 PE 周度采集 + 指数 PE 历史快照入库。"""
     try:
-        from industry_snapshot import collect_industry_weekly
+        from industry_snapshot import collect_industry_weekly, weekly_unchanged_vs_previous
     except ImportError:
         print("industry_snapshot 模块不可用（请检查路径配置）")
         return 1
@@ -748,6 +759,8 @@ def cmd_collect_weekly() -> int:
         print(f"采集失败: {result['error']}")
         return 1
     print(f"完成: {result['industries_saved']} 个行业已写入 industry_weekly（日期 {result['date']}）")
+    if weekly_unchanged_vs_previous(result["date"]):
+        print("⚠ 31 行业数值与上一期全同，疑数据源停更（写入已完成，请人工核对）")
     # 顺带全量写指数 PE 历史（CSINDEX_MAP 全部代码，从 L2 缓存信封提取）
     pe_result = _persist_index_pe(None)
     if pe_result.get("error"):
