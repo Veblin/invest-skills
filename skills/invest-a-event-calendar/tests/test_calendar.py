@@ -8,7 +8,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from unlock_calendar import percentile_rank, process  # noqa: E402
+from unlock_calendar import percentile_rank, process, render_md  # noqa: E402
 
 
 def test_percentile_rank():
@@ -16,7 +16,7 @@ def test_percentile_rank():
     assert percentile_rank(vals, 100.0) == 0.0
     assert percentile_rank(vals, 250.0) == 50.0
     assert percentile_rank(vals, 500.0) == 100.0
-    assert percentile_rank([], 1.0) == 100.0  # 空基准 → 保守 100
+    assert percentile_rank([], 1.0) is None  # R0 F6：空基准无分位（原哨兵 100 造伪「极高压力」）
 
 
 def _df():
@@ -74,3 +74,38 @@ def test_process_future_outside_window_excluded():
 def test_process_empty_df():
     out = process(pd.DataFrame(), _dt.date(2026, 9, 8), 120, 30)
     assert out["past"] == [] and out["future"] == [] and out["error"] is None
+    # R0 F5：空分支须与正常路径同构（render_md 无条件读 past_days，原缺键 → KeyError 崩溃）
+    assert out["past_days"] == 120 and out["past_recent"] == []
+    md = render_md(out, "20260908", 30)   # 不再 KeyError
+    assert "展望窗口内无解禁日" in md
+
+
+def test_empty_baseline_no_false_pressure():
+    """R0 F6：仅未来行、回看零样本 → 不输出分位/压力标注（无基准即无分位）。"""
+    today = _dt.date(2026, 9, 8)
+    only_future = pd.DataFrame([{
+        "解禁时间": (today + _dt.timedelta(days=3)).strftime("%Y-%m-%d"),
+        "当日解禁股票家数": 8, "解禁数量": 2e8, "实际解禁数量": 2e8,
+        "实际解禁市值": 30e9, "沪深300指数": 4500.0, "沪深300指数涨跌幅": None,
+    }])
+    out = process(only_future, today, past_days=120, future_days=30)
+    r = out["future"][0]
+    assert r["rank"] is None and r["flag"] == ""      # 不再伪造「100.0% 极高压力」
+    md = render_md(out, "20260908", 30)
+    assert "分位基准为空" in md and "极高压力" not in md
+
+
+def test_past_recent_is_calendar_window():
+    """R0 F12：「近 30 日回看」按日历窗口过滤（原实现取最后 30 行，语义不符）。"""
+    import pandas as _pd
+
+    today = _dt.date(2026, 9, 8)
+    rows = []
+    for days_ago in (5, 40):    # 一条在 30 日内、一条在外
+        rows.append({"解禁时间": (today - _dt.timedelta(days=days_ago)).strftime("%Y-%m-%d"),
+                     "当日解禁股票家数": 3, "解禁数量": 1e8, "实际解禁数量": 1e8,
+                     "实际解禁市值": 5e9, "沪深300指数": 4500.0, "沪深300指数涨跌幅": 0.1})
+    out = process(_pd.DataFrame(rows), today, past_days=120, future_days=30)
+    assert len(out["past"]) == 2                 # 全窗口回看仍含两条
+    assert len(out["past_recent"]) == 1          # 近 30 日只含 5 天前那条
+    assert out["past"][0]["rank"] is None        # 回看行不再计算分位（F12）

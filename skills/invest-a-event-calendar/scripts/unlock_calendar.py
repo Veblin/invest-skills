@@ -3,7 +3,7 @@
 
 全市场解禁日汇总（东财限售股解禁 summary_em）：回看近 120 日 + 展望未来 30 日，
 逐日解禁家数/解禁数量/实际解禁市值，未来压力日按「相对近 120 日分位」标注：
->80% 高压日 / >90% 极高压力日。
+≥80% 高压日 / ≥90% 极高压力日（回看窗口由 --days-past 决定，分位基准随之）。
 
 用法：
     cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py
@@ -23,7 +23,7 @@
     - 解禁 ≠ 减持：解禁是供给事件提示，不是方向信号（见 SKILL 分析纪律）
     - P0：全部计算由 pandas/bisect 完成；研究工具，非决策工具
 
-退出码：0 正常；3 数据不可得（东财阻断）。
+退出码：0 正常；3 数据不可得（东财阻断/空返回——不硬编）。
 """
 
 from __future__ import annotations
@@ -41,12 +41,20 @@ def fmt_date(d: _dt.date) -> str:
     return d.strftime("%Y%m%d")
 
 
-def percentile_rank(values: list[float], v: float) -> float:
-    """v 在 values 中的分位（0-100，bisect_left 口径）。"""
+def percentile_rank(values: list[float], v: float) -> float | None:
+    """v 在 values 中的分位（0-100，bisect_left 口径）；空基准返回 None。
+
+    R0 审查 F6：原实现对空基准返回哨兵 100.0，会把「零样本」渲染成
+    「100.0% 极高压力」的伪分类——无基准即无分位，None 语义。（审 2026-09-10）
+    """
     if not values:
-        return 100.0
-    s = sorted(values)
-    return round(bisect.bisect_left(s, v) / len(s) * 100, 1)
+        return None
+    return rank_in_sorted(sorted(values), v)
+
+
+def rank_in_sorted(sorted_values: list[float], v: float) -> float:
+    """v 在已排序序列中的分位（供批量行免重复排序）。"""
+    return round(bisect.bisect_left(sorted_values, v) / len(sorted_values) * 100, 1)
 
 
 def process(df, today: _dt.date, past_days: int, future_days: int) -> dict:
@@ -54,7 +62,9 @@ def process(df, today: _dt.date, past_days: int, future_days: int) -> dict:
     import pandas as pd
 
     if df is None or df.empty:
-        return {"past": [], "future": [], "hist_billion": [], "error": None}
+        # F5：空分支必须返回与正常路径同构的键（含 past_days）——render_md 无条件读取
+        return {"past": [], "future": [], "hist_billion": [], "past_recent": [],
+                "past_days": past_days, "error": None}
     df = df.copy()
     df["dt"] = pd.to_datetime(df["解禁时间"]).dt.date
     df["市值亿"] = pd.to_numeric(df["实际解禁市值"], errors="coerce") / 1e8
@@ -66,12 +76,13 @@ def process(df, today: _dt.date, past_days: int, future_days: int) -> dict:
     # 分位标注（回看窗口仅统计近 past_days 内分布用于对照；2026-09-08 review F12 删死变量 hist）
     cutoff = today - _dt.timedelta(days=past_days)
     hist_rank_base = [float(v) for v in past[past["dt"] >= cutoff]["市值亿"].dropna().tolist()]
+    hist_sorted = sorted(hist_rank_base)   # 排序一次，行内 bisect（F12：原实现每行重排）
 
-    def row(r):
+    def row(r, *, with_rank: bool):
         mv = float(r["市值亿"]) if pd.notna(r["市值亿"]) else None
-        rank = percentile_rank(hist_rank_base, mv) if mv is not None else None
+        rank = rank_in_sorted(hist_sorted, mv) if (with_rank and mv is not None and hist_sorted) else None
         flag = ""
-        if rank is not None and mv is not None:
+        if rank is not None:
             if rank >= 90:
                 flag = "🔴 极高压力"
             elif rank >= 80:
@@ -84,10 +95,14 @@ def process(df, today: _dt.date, past_days: int, future_days: int) -> dict:
             "hs300_chg": float(r["沪深300指数涨跌幅"]) if "沪深300指数涨跌幅" in df.columns and pd.notna(r["沪深300指数涨跌幅"]) else None,
         }
 
-    past_rows = [row(r) for r in past.to_dict("records")]
-    future_rows = [row(r) for r in future.to_dict("records")]
-    return {"past": past_rows, "future": future_rows,
-            "hist_billion": hist_rank_base, "past_days": past_days}
+    # 分位只对展望行计算（F12：回看行 rank 此前计算但从不渲染）
+    past_rows = [row(r, with_rank=False) for r in past.to_dict("records")]
+    future_rows = [row(r, with_rank=True) for r in future.to_dict("records")]
+    # 近 30 日回看 = 按日历窗口过滤（F12：原实现取「最后 30 行」，与标题语义不符）
+    recent_cutoff = fmt_date(today - _dt.timedelta(days=30))
+    past_recent = [r for r in past_rows if r["date"].replace("-", "") >= recent_cutoff]
+    return {"past": past_rows, "future": future_rows, "hist_billion": hist_rank_base,
+            "past_recent": past_recent, "past_days": past_days}
 
 
 def _fmt_v(v) -> str:
@@ -108,21 +123,24 @@ def render_md(result: dict, today: str, future_days: int) -> str:
     if not fut:
         lines.append("**展望窗口内无解禁日**（或东财数据不可得——确认输出非 ProxyError 降级）。")
     else:
+        if not result["hist_billion"]:
+            lines.append("> ⚠️ 分位基准为空（回看窗口内无样本日）——本次不输出压力标注（无基准即无分位）。")
+            lines.append("")
         lines.append("## 🔮 未来解禁日")
         lines.append("")
-        lines.append("| 日期 | 家数 | 解禁数量(亿股) | 实际解禁市值(亿) | 近120日分位 | 标注 |")
+        lines.append(f"| 日期 | 家数 | 解禁数量(亿股) | 实际解禁市值(亿) | 近{result['past_days']}日分位 | 标注 |")
         lines.append("|------|------|---------------|-----------------|------------|------|")
         for r in fut:
             rank = "-" if r["rank"] is None else f"{r['rank']}%"
             lines.append(f"| {r['date']} | {_fmt_v(r['家数'])} | {_fmt_v(r['数量亿股'])} "
                          f"| {_fmt_v(r['市值亿'])} | {rank} | {r['flag']} |")
-    p = result["past"]
+    p = result.get("past_recent", result["past"])
     lines.append("")
     lines.append("## 📜 近 30 日回看（含当日沪深300表现）")
     lines.append("")
     lines.append("| 日期 | 家数 | 解禁市值(亿) | 当日沪深300涨跌% |")
     lines.append("|------|------|-------------|----------------|")
-    for r in p[-30:]:
+    for r in p:
         hs = "-" if r["hs300_chg"] is None else f"{r['hs300_chg']:+.2f}"
         lines.append(f"| {r['date']} | {_fmt_v(r['家数'])} | {_fmt_v(r['市值亿'])} | {hs} |")
     lines.append("")
@@ -138,15 +156,25 @@ def main() -> int:
     ap.add_argument("--out-dir", type=str, default=str(ROOT / "reports/event-calendar"))
     args = ap.parse_args()
 
+    if args.days_past < 1:
+        ap.error("--days-past 须 ≥ 1")
+    if args.days_future < 0:
+        ap.error("--days-future 须 ≥ 0")
+
     import akshare as ak
 
     today = _dt.date.today()
-    start = fmt_date(today - _dt.timedelta(days=args.days_past * 2))
+    # F12：拉取窗口对齐参数（原实现固定 past_days*2，约 44% 行解析后废弃）
+    start = fmt_date(today - _dt.timedelta(days=args.days_past))
     end = fmt_date(today + _dt.timedelta(days=args.days_future))
     try:
         df = ak.stock_restricted_release_summary_em(symbol="全部股票", start_date=start, end_date=end)
     except Exception as exc:
         print(f"解禁数据不可得（东财阻断/代理）：{type(exc).__name__}", file=sys.stderr)
+        return 3
+    if df is None or df.empty:
+        # F5：空返回 = 数据不可得（全市场 150+ 日窗口无解禁客观上不可能），不硬编为「无解禁」
+        print("解禁数据不可得（东财空返回——疑代理阻断或接口变化），不硬编。", file=sys.stderr)
         return 3
 
     result = process(df, today, args.days_past, args.days_future)
