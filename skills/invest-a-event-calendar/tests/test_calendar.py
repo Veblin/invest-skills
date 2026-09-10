@@ -8,7 +8,13 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from unlock_calendar import percentile_rank, process, render_md  # noqa: E402
+from unlock_calendar import percentile_rank, process, rank_in_sorted, render_md  # noqa: E402
+
+
+def test_rank_in_sorted_empty_guard():
+    """R1 收尾项：空序列不得 ZeroDivisionError → None。"""
+    assert rank_in_sorted([], 1.0) is None
+    assert rank_in_sorted([1.0, 2.0], 1.5) == 50.0
 
 
 def test_percentile_rank():

@@ -345,6 +345,11 @@ _F2_PATTERN = re.compile(
 _F2_SOURCE_WINDOW = 3  # 行内或前 N 行含 [来源: …] 即视为有源
 _SECTION_REF_RE = re.compile(r"§\s*(\d+(?:\.\d+)?)")
 _SECTION_HEAD_RE = re.compile(r"^#{2,4}\s*(\d+(?:\.\d+)?)[\s.、]")
+# F4 豁免：指向**外部规范**的 §N（如「共享规范 report-conventions.md §2.3」）不是
+# 本文节号引用（R1 审查 F4：repo 内全部误报均为该形态）。前缀近距匹配，宁漏勿扰。
+_EXTERNAL_REF_PREFIX_RE = re.compile(
+    r"(?:规范|conventions\.md|\.md|说明|附件|参见|详见|遵循)\s*$"
+)
 
 
 def _check_sourcing(text: str) -> LayerResult:
@@ -365,7 +370,12 @@ def _check_sourcing(text: str) -> LayerResult:
             "message": f"派生表述疑似缺来源标注（前 {_F2_SOURCE_WINDOW} 行内无 [来源:]）："
                        f"{ln.strip()[:60]}",
         })
-    refs = {m.group(1) for m in _SECTION_REF_RE.finditer(text)}
+    refs: set[str] = set()
+    for m in _SECTION_REF_RE.finditer(text):
+        prefix = text[max(0, m.start() - 14):m.start()]
+        if _EXTERNAL_REF_PREFIX_RE.search(prefix):
+            continue  # 外部规范引用（report-conventions.md §N 等）不参与本文节号校验
+        refs.add(m.group(1))
     heads = set()
     for ln in lines:
         m = _SECTION_HEAD_RE.match(ln)
@@ -608,8 +618,10 @@ def qc_file(
     text = path.read_text(encoding="utf-8")
 
     layers = [_run_lint_layer(path, profile, fail_on), _check_structure(text, report_type)]
-    if report_type not in ("unknown", "pulse"):
-        # T6-2/T6-3（v0.3.0 R1）：F2 派生表述来源 / F4 §N 引用存在性——通用文本规则
+    if report_type != "pulse":
+        # T6-2/T6-3（v0.3.0 R1）：F2 派生表述来源 / F4 §N 引用存在性——通用文本规则。
+        # unknown 类型同样挂载（R1 审查 F13：event-calendar/forecast-scan/futures-link
+        # 等新技能的产出一律 type=unknown，若跳过则「必跑」的准出对它们形同虚设）
         layers.append(_check_sourcing(text))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))

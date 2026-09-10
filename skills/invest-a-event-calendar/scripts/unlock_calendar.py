@@ -7,7 +7,7 @@
 
 用法：
     cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py
-    # 输出 reports/event-calendar/{YYYY-MM-DD}.md
+    # 输出 reports/event-calendar/{YYYYMMDD}.md（与脚本实际命名一致）
 
 参数：
     --days-past N    回看窗口（自然日，默认 120——对齐 argparse 与 SKILL.md）
@@ -52,8 +52,10 @@ def percentile_rank(values: list[float], v: float) -> float | None:
     return rank_in_sorted(sorted(values), v)
 
 
-def rank_in_sorted(sorted_values: list[float], v: float) -> float:
-    """v 在已排序序列中的分位（供批量行免重复排序）。"""
+def rank_in_sorted(sorted_values: list[float], v: float) -> float | None:
+    """v 在已排序序列中的分位（供批量行免重复排序）；空序列 → None（防 ZeroDivision）。"""
+    if not sorted_values:
+        return None
     return round(bisect.bisect_left(sorted_values, v) / len(sorted_values) * 100, 1)
 
 
@@ -134,7 +136,8 @@ def render_md(result: dict, today: str, future_days: int) -> str:
             rank = "-" if r["rank"] is None else f"{r['rank']}%"
             lines.append(f"| {r['date']} | {_fmt_v(r['家数'])} | {_fmt_v(r['数量亿股'])} "
                          f"| {_fmt_v(r['市值亿'])} | {rank} | {r['flag']} |")
-    p = result.get("past_recent", result["past"])
+    # 显式条件取键（dict.get 默认值会被急切求值——R1 审查尾部项）
+    p = result["past_recent"] if "past_recent" in result else result["past"]
     lines.append("")
     lines.append("## 📜 近 30 日回看（含当日沪深300表现）")
     lines.append("")

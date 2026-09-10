@@ -6,8 +6,9 @@ T6-2/T6-3（v0.3.0 数据可信轮）：warning 语义（人工复核），不�
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))          # skills/lib
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))             # skills/
+# 只加 skills/lib（R1 审查 F12：再加 skills/ 会把 skills/lib 暴露为顶层包 lib，
+# 污染 pytest 同批其他用例的 lib.* 解析——路径污染型顺序依赖）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from report_qc import _check_sourcing, qc_file  # noqa: E402
 
@@ -59,11 +60,23 @@ def test_qc_file_overall_warn_not_fail(tmp_path):
     assert r.overall in ("WARN", "FAIL")  # FAIL 仅可能来自 lint 层既有规则；sourcing 自身不产 error
 
 
-def test_qc_file_unknown_type_skips_sourcing(tmp_path):
+def test_qc_file_unknown_type_still_gets_sourcing(tmp_path):
+    """F13 修正：unknown 类型（新技能产出）同样挂 sourcing——否则「必跑」形同虚设。"""
     report = tmp_path / "随手笔记.md"
     report.write_text("利润是去年的 2 倍。", encoding="utf-8")
     r = qc_file(report)
-    assert all(l.layer != "sourcing" for l in r.layers)
+    sourcing = [l for l in r.layers if l.layer == "sourcing"]
+    assert sourcing and sourcing[0].status == "warn"
+
+
+def test_f4_external_spec_citations_ignored():
+    """F4 豁免：指向外部规范（conventions.md §N）的引用不报「本文缺节」。"""
+    text = ("# 报告\n\n遵循共享规范 report-conventions.md §2.3 的口径。\n\n"
+            "另见 §9 不存在节。\n\n## 1 概况\n")
+    layer = _check_sourcing(text)
+    msgs = [d["message"] for d in layer.details]
+    assert len(msgs) == 1 and "§9" in msgs[0]           # 仅本文 §9 命中
+    assert all("§2.3" not in m for m in msgs)
 
 
 def test_cli_verbose_prints_details(tmp_path, capsys):
