@@ -40,3 +40,18 @@ skills:
     description: 港股数据引入与初步分析 — 腾讯/东财/百度三源快照、估值分位、财务摘要与港股风险层。研究工具，非决策工具。
     repo: Veblin/invest-skills
     skill: invest-hk-stock
+
+  - name: invest-a-event-calendar
+    description: 限售解禁压力日历 — 全市场逐日解禁家数/市值 + 未来 30 日高压日预警（近 120 日分位）。研究工具，非决策工具。
+    repo: Veblin/invest-skills
+    skill: invest-a-event-calendar
+
+  - name: invest-a-forecast-scan
+    description: 业绩预告雷达 — tushare forecast 全市场业绩预告扫描（预增/扭亏/首亏负面清单）。研究信号，非决策。
+    repo: Veblin/invest-skills
+    skill: invest-a-forecast-scan
+
+  - name: invest-a-futures-link
+    description: 商品期货→股票联动扫描 — 15 条产业链映射，期货与股票方向共振/背离对照。研究工具，非决策工具。
+    repo: Veblin/invest-skills
+    skill: invest-a-futures-link

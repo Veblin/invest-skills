@@ -90,6 +90,12 @@ def run_l1() -> int:
     import akshare as ak
 
     print(f"akshare {ak.__version__}")
+    try:
+        import tushare as ts
+
+        print(f"tushare {ts.__version__}")
+    except Exception:  # noqa: BLE001 — 版本打印失败不阻断 L1
+        print("tushare (版本不可得)")
     missing: list[str] = []
     for name in AK_INTERFACES:
         if hasattr(ak, name):
@@ -113,7 +119,12 @@ def run_l2() -> int:
             df = fn()
             ok = hasattr(df, "__len__") and len(df) > 0
             tag = f"{len(df)} 行" if ok else f"空结果({type(df).__name__})"
-            print(f"  ✓ {label} — {tag} ({time.time()-t0:.1f}s)")
+            if ok:
+                print(f"  ✓ {label} — {tag} ({time.time()-t0:.1f}s)")
+            else:
+                # 空结果 = 环境/反爬/权限失败的常见形态，不得记 ✓（假绿防护）
+                fails += 1
+                print(f"  ✗ {label} — {tag}（空结果视为失败：环境/反爬/权限）")
         except Exception as e:  # noqa: BLE001 — 冒烟脚本有意捕获全部
             fails += 1
             print(f"  ✗ {label} — {type(e).__name__}: {str(e)[:100]} ({time.time()-t0:.1f}s)")

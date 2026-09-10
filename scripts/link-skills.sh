@@ -24,6 +24,9 @@ SKILLS=(
     invest-a-gap-scan
     invest-a-pattern-scan
     invest-hk-stock
+    invest-a-event-calendar
+    invest-a-forecast-scan
+    invest-a-futures-link
 )
 
 mkdir -p "$LINK_DIR"

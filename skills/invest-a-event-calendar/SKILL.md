@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-event-calendar
-version: "0.3.0"
+version: "0.2.9"
 description: "限售解禁压力日历 — 全市场逐日解禁家数/市值 + 未来 30 日高压日预警（近 120 日分位>80%/90%）。研究工具非决策。触发词：解禁日历/解禁压力/限售股解禁"
 whenToUse: "用户询问'未来哪些日子解禁压力大''XX 周解禁情况'，或持仓/候选池排雷（解禁≠减持，与减持公告联动）"
 argument-hint: "/invest-a-event-calendar [--days-future 30]"

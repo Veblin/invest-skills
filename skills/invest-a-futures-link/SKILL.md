@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-futures-link
-version: "0.3.0"
+version: "0.2.9"
 description: "商品期货→股票联动扫描 — 15 条产业链映射（郑糖/铜/金/原油/黑色/铝/焦煤/碳酸锂/橡胶/尿素/生猪/PTA/工业硅/豆粕/豆油），期货与股票 20d/5d 方向共振/背离对照。研究工具非决策。触发词：期货联动/商品期货/期股联动"
 whenToUse: "用户询问'商品涨价对哪些股票有影响''期货与股票背离'，或周期/资源类行情复盘"
 argument-hint: "/invest-a-futures-link"

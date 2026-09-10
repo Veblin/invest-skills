@@ -62,6 +62,9 @@ PUBLISH_SKILLS = [
     "invest-a-gap-scan",
     "invest-a-pattern-scan",
     "invest-hk-stock",
+    "invest-a-event-calendar",
+    "invest-a-forecast-scan",
+    "invest-a-futures-link",
 ]
 
 # 包内排除的路径（tests/__pycache__ 等）
@@ -81,6 +84,9 @@ SKILL_META: dict[str, dict[str, str]] = {
     "invest-a-gap-scan": {"displayName": "invest:a-gap-scan 缺口扫描"},
     "invest-a-pattern-scan": {"displayName": "invest:a-pattern-scan 形态扫描"},
     "invest-hk-stock": {"displayName": "invest:a-hk 港股研究"},
+    "invest-a-event-calendar": {"displayName": "invest:a-event-calendar 解禁日历"},
+    "invest-a-forecast-scan": {"displayName": "invest:a-forecast-scan 业绩预告"},
+    "invest-a-futures-link": {"displayName": "invest:a-futures-link 期股联动"},
 }
 
 # 各 skill 的 CLI 入口脚本（SKILL.md 正文「见 CLAUDE.md」/「子命令全清单」改写目标；
@@ -93,6 +99,9 @@ ENTRY_SCRIPTS: dict[str, str | None] = {
     "invest-a-gap-scan": "scan.py",
     "invest-a-pattern-scan": "scan.py",
     "invest-hk-stock": "hk.py",
+    "invest-a-event-calendar": "unlock_calendar.py",
+    "invest-a-forecast-scan": "forecast_scan.py",
+    "invest-a-futures-link": "futures_link.py",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -111,6 +120,9 @@ LAYOUT: dict[str, str] = {
     "invest-a-gap-scan": "script",
     "invest-a-pattern-scan": "script",
     "invest-hk-stock": "script",
+    "invest-a-event-calendar": "script",
+    "invest-a-forecast-scan": "script",
+    "invest-a-futures-link": "script",
 }
 
 # 跨 skill lib 合并源（闭包解析优先级: 共享 skills/lib > cross 列表序 > 包自身 scripts/lib）
@@ -128,6 +140,11 @@ CROSS_LIBS: dict[str, list[str]] = {
     # sessions，hk.py:91/226）与 lib.tushare_client（hk_tushare._client，hk_tushare.py:21）；
     # 包内无该引导 → 一并闭包并入（technical 由共享 skills/lib 满足，无需计入）
     "invest-hk-stock": ["invest-a-stock"],
+    # forecast_scan / futures_link 经 ROOT/sys.path 或 ensure 引导从 invest-a-stock
+    # scripts/lib 解析 lib.tushare_client（forecast_scan.py:41；futures_link.py:116-117）
+    # → 包内无此引导，一并闭包并入
+    "invest-a-forecast-scan": ["invest-a-stock"],
+    "invest-a-futures-link": ["invest-a-stock"],
 }
 
 # SKILL.md 正文中的跨 skill 路径改写（包内副本）

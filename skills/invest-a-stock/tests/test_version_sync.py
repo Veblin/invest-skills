@@ -28,6 +28,9 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     (root / "skills" / "invest-a-pulse").mkdir(parents=True)
     (root / "skills" / "invest-a-pattern-scan").mkdir(parents=True)
     (root / "skills" / "invest-hk-stock").mkdir(parents=True)
+    (root / "skills" / "invest-a-event-calendar").mkdir(parents=True)
+    (root / "skills" / "invest-a-forecast-scan").mkdir(parents=True)
+    (root / "skills" / "invest-a-futures-link").mkdir(parents=True)
     (root / ".claude-plugin").mkdir(parents=True)
     (root / ".agents" / "plugins").mkdir(parents=True)
 
@@ -61,6 +64,18 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     )
     (root / "skills" / "invest-hk-stock" / "SKILL.md").write_text(
         f'---\nname: invest:a-hk\nversion: "{version}"\n---\n',
+        encoding="utf-8",
+    )
+    (root / "skills" / "invest-a-event-calendar" / "SKILL.md").write_text(
+        f'---\nname: invest:a-event-calendar\nversion: "{version}"\n---\n',
+        encoding="utf-8",
+    )
+    (root / "skills" / "invest-a-forecast-scan" / "SKILL.md").write_text(
+        f'---\nname: invest:a-forecast-scan\nversion: "{version}"\n---\n',
+        encoding="utf-8",
+    )
+    (root / "skills" / "invest-a-futures-link" / "SKILL.md").write_text(
+        f'---\nname: invest:a-futures-link\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
 

@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-forecast-scan
-version: "0.3.0"
+version: "0.2.9"
 description: "业绩预告雷达 — tushare forecast 全市场业绩预告扫描（预增≥阈值/扭亏/首亏负面清单），研究信号非决策。触发词：业绩预告/预增扫描/预告雷达"
 whenToUse: "业绩预告窗口期（1/4/7/10 月）或用户询问'最近哪些公司预告大增/扭亏/暴雷'"
 argument-hint: "/invest-a-forecast-scan [--days 10] [--min-gain 30]"
