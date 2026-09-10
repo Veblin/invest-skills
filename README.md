@@ -98,7 +98,7 @@ flowchart TB
 
 从 [GitHub Release](https://github.com/Veblin/invest-skills/releases) 下载 `invest-skills-wb-vX.Y.Z.zip`，在 WorkBuddy 的「专家·技能·连接器 > 技能 > 添加技能 > 上传技能」导入即可，无需打开终端。安装后填写 Token 的方式见 [docs/workbuddy/](docs/workbuddy/)。
 
-Windows 用户若改用 `git clone`：默认 `core.symlinks=false` 会把仓库 23 条技能链接物化成文本文件，导致技能发现失效。运行重建脚本（NTFS junction 重建 17 个目录链接 + 硬链接重建 6 个 commands 文件，无需管理员权限，幂等）：
+Windows 用户若改用 `git clone`：默认 `core.symlinks=false` 会把仓库 40 条技能链接物化成文本文件，导致技能发现失效。运行重建脚本（NTFS junction 重建 30 个目录链接 + 硬链接重建 10 个 commands 文件，无需管理员权限，幂等；数量与 `skills/` 目录一一对应）：
 
 ```powershell
 git config core.symlinks true        # 可选但推荐（避免再物化）
