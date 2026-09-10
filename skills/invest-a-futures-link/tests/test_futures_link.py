@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from futures_link import judge, series_stats  # noqa: E402
+from futures_link import judge, render_md, resolve_relation, series_stats  # noqa: E402
 
 
 def _s(last: float, ago5: float | None, ago20: float | None) -> dict:
@@ -71,3 +71,53 @@ def test_judge_flat_band_no_false_divergence():
     assert judge(_s(102, 100, 100), _s(9.97, 10, 10), inverse=False) == "分化"
     # 真实背离边界：期货 +2% / 股票 -3% → 背离
     assert judge(_s(102, 100, 100), _s(9.7, 10, 10), inverse=False) == "背离"
+
+
+# ── R0 审查修复回归（G2，2026-09-10）─────────────────────────────────────
+
+def test_series_stats_drops_nan_closes():
+    """停牌/缺行的 NaN 收盘不得渲染 +nan，dropna 后按有效样本计窗口。"""
+    closes = [10.0 + i * 0.1 for i in range(25)]
+    closes[5] = float("nan")
+    out = series_stats(closes)
+    assert out["last"] == out["last"]                     # 非 NaN
+    assert out["chg20_pct"] is not None
+    assert series_stats([float("nan")] * 3)["last"] is None   # 全 NaN → 空样本
+
+
+def test_resolve_relation_member_override():
+    """F11：成员级 relation 覆盖链默认（混合链：原油上游 vs 炼化）。"""
+    chain = {"relation": "positive"}
+    assert resolve_relation(chain, {"code": "601857"}) == "positive"
+    assert resolve_relation(chain, {"code": "600028", "relation": "cost_inverse"}) == "cost_inverse"
+    assert resolve_relation({}, {"code": "x"}) == "positive"       # 缺省兜底
+
+
+def test_commodity_map_relation_fixes():
+    """F11 回归：橡胶链链级反向 + 原油/工业硅链成员级覆盖（防回退误标）。"""
+    import yaml
+
+    p = Path(__file__).resolve().parent.parent / "references" / "commodity_map.yaml"
+    cfg = yaml.safe_load(p.read_text(encoding="utf-8"))
+    chains = {c["id"]: c for c in cfg["chains"]}
+    assert chains["ru"]["relation"] == "cost_inverse"
+    sc = {s["code"]: s for s in chains["sc"]["stocks"]}
+    assert sc["600028"].get("relation") == "cost_inverse"
+    assert sc["002493"].get("relation") == "cost_inverse"
+    assert sc["601857"].get("relation") is None            # 上游保持链默认
+    si = {s["code"]: s for s in chains["si"]["stocks"]}
+    assert si["688303"].get("relation") == "cost_inverse"
+    assert si["603260"].get("relation") is None
+
+
+def test_render_md_source_column_and_degraded_marker():
+    """F14/F15：逐行「股票源」列 + 股票 vs MA20 列 + 5 日降级标注 '*'。"""
+    rows = [{
+        "label": "铜链", "commodity": "沪铜主力", "fut": _s(110, 105, 100),
+        "stock": "江西铜业(600362)", "stk": _s(11, 10.5, None),
+        "judge": "共振↑", "rel": "", "stk_src": "tushare", "window5d": True,
+    }]
+    md = render_md(rows, [], "2026-09-10")
+    assert "股票源" in md and "股票vs MA20%" in md
+    assert "| tushare |" in md and "共振↑ *" in md
+    assert "降级为 5 日口径" in md

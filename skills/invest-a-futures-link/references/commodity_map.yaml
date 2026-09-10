@@ -7,6 +7,11 @@
 #     公司成本端（期货涨利空，方向相反——扫描输出取反后标注）。
 #     当前 cost_inverse 仅豆粕链（海大集团/牧原为下游采购方）；尿素链华鲁恒升/
 #     云天化为尿素生产商（收入端），属 positive（2026-09-08 review F5 修正）
+#   - 成员级覆盖（2026-09-10 R0 审查 F11）：个股可带 relation 覆盖链默认值——
+#     混合链成员方向相反时使用（原油链：上游中石油属收入端、炼化中石化/荣盛属
+#     成本端；工业硅链：合盛硅业为生产商、大全能源为下游采购方）。
+#     修正记录：橡胶链此前误标 positive（玲珑/赛轮为轮胎厂，橡胶是成本端）→
+#     链级改 cost_inverse
 #   - stocks 直接固化代码（运行时名称解析依赖深交所接口，2026-09-08 实测超时
 #     不可用，故弃用）；name 仅作展示。退市/重组时人工更新
 #   - symbol 为新浪主力连续代码（futures_main_sina），后缀 0 = 主力合约
@@ -45,11 +50,11 @@ chains:
     label: 原油炼化链
     symbol: SC0
     commodity: 原油主力
-    relation: positive
+    relation: positive          # 链默认=上游收入端；炼化成员成本端为负向，逐成员覆盖
     stocks:
-      - {name: 中国石油, code: "601857"}
-      - {name: 中国石化, code: "600028"}
-      - {name: 荣盛石化, code: "002493"}
+      - {name: 中国石油, code: "601857"}                                   # 上游（收入端）
+      - {name: 中国石化, code: "600028", relation: cost_inverse}          # 炼化（原油=成本端）
+      - {name: 荣盛石化, code: "002493", relation: cost_inverse}          # 炼化（原油=成本端）
 
   - id: rb
     label: 螺纹钢链
@@ -95,7 +100,7 @@ chains:
     label: 天然橡胶链
     symbol: RU0
     commodity: 天然橡胶主力
-    relation: positive
+    relation: cost_inverse      # 成员为轮胎厂：橡胶=成本端（2026-09-10 修正，原误标 positive）
     stocks:
       - {name: 玲珑轮胎, code: "601966"}
       - {name: 赛轮轮胎, code: "601058"}
@@ -132,10 +137,10 @@ chains:
     label: 工业硅链
     symbol: SI0
     commodity: 工业硅主力
-    relation: positive
+    relation: positive          # 链默认=生产商收入端；下游采购成员覆盖
     stocks:
-      - {name: 合盛硅业, code: "603260"}
-      - {name: 大全能源, code: "688303"}
+      - {name: 合盛硅业, code: "603260"}                                  # 工业硅生产商（收入端）
+      - {name: 大全能源, code: "688303", relation: cost_inverse}          # 多晶硅厂（工业硅=成本端）
 
   - id: m
     label: 豆粕饲料链

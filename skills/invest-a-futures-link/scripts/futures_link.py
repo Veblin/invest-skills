@@ -46,7 +46,9 @@ def series_stats(closes: list[float]) -> dict:
 
     if not closes:
         return {"last": None, "chg5_pct": None, "chg20_pct": None, "vs_ma20_pct": None}
-    s = pd.Series(closes, dtype=float)
+    s = pd.Series(closes, dtype=float).dropna()   # R0 审查：NaN 收盘（停牌/缺行）不得渲染 +nan
+    if s.empty:
+        return {"last": None, "chg5_pct": None, "chg20_pct": None, "vs_ma20_pct": None}
     out: dict = {"last": round(float(s.iloc[-1]), 2)}
     out["chg5_pct"] = round(float(s.iloc[-1] / s.iloc[-6] - 1) * 100, 2) if len(s) >= 6 else None
     out["chg20_pct"] = round(float(s.iloc[-1] / s.iloc[-21] - 1) * 100, 2) if len(s) >= 21 else None
@@ -91,15 +93,50 @@ def judge(fut: dict, stk: dict, inverse: bool) -> str:
 # ---------- 取数 ----------
 
 def fetch_futures(ak, symbol: str) -> list[float]:
-    df = ak.futures_main_sina(symbol=symbol)
-    if df is None or df.empty:
+    """新浪主力连续收盘近 45 点；取数异常（网络/限流 SSL EOF）返回 []——
+    单链失败不得中止全扫（R0 审查 F2：原实现无守卫，一条链异常裸崩全进程）。"""
+    try:
+        df = ak.futures_main_sina(symbol=symbol)
+        if df is None or df.empty:
+            return []
+        return [float(v) for v in df["收盘价"].tolist()[-45:]]
+    except Exception:  # noqa: BLE001 — 网络异常按空链降级，由 warnings 呈现
         return []
-    return [float(v) for v in df["收盘价"].tolist()[-45:]]
 
 
-def fetch_stock(ak, code: str) -> list[float]:
-    """新浪日线优先，失败降级 tushare daily（同口径不复权收盘；2026-09-08 新浪对
-    连续请求限流 SSL EOF，故加兜底 + 0.4s 间隔）。"""
+def resolve_relation(chain: dict, stock: dict) -> str:
+    """链内成员 relation 可覆盖链默认（R0 审查 F11）：原油链上游(中石油) vs
+    炼化(中石化/荣盛) 方向相反，单一链级 relation 无法表达混合成员。"""
+    return str(stock.get("relation") or chain.get("relation") or "positive")
+
+
+_TS_CLIENT = None  # 模块级缓存（R0 审查：原实现每次兜底调用新建 TushareClient）
+
+
+def _ts_client():
+    """惰性加载 TushareClient；不可用返回 None（哨兵 False 防重复尝试）。"""
+    global _TS_CLIENT
+    if _TS_CLIENT is None:
+        try:
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "lib"))
+            from invest_path import ensure_invest_a_scripts_on_path  # noqa: PLC0415
+
+            ensure_invest_a_scripts_on_path()
+            from lib.tushare_client import TushareClient  # noqa: PLC0415
+
+            _TS_CLIENT = TushareClient()
+        except Exception:  # noqa: BLE001
+            _TS_CLIENT = False
+    return _TS_CLIENT or None
+
+
+def fetch_stock(ak, code: str) -> tuple[list[float], str]:
+    """returns (closes, source)，source ∈ {"新浪", "tushare", "none"}。
+
+    新浪日线优先，失败降级 tushare daily（同口径不复权收盘；2026-09-08 新浪对
+    连续请求限流 SSL EOF，故加兜底 + 0.4s 间隔）。逐行标注实际数据源
+    （R0 审查 F14：降级 tushare 时报告不得仍署「新浪」）。
+    """
     import time
 
     sym = ("sz" if code.startswith(("0", "3")) else "sh") + code
@@ -109,23 +146,23 @@ def fetch_stock(ak, code: str) -> list[float]:
         closes = [float(v) for v in df["close"].tolist()[-45:]] if df is not None and not df.empty else []
         if len(closes) >= 6:
             time.sleep(0.4)
-            return closes
+            return closes, "新浪"
     except Exception:
         pass
+    client = _ts_client()
+    if client is None:
+        return [], "none"
     try:
-        sys.path.insert(0, str(ROOT / "skills/invest-a-stock/scripts"))
-        from lib.tushare_client import TushareClient
-
         ts_code = f"{code}.{'SH' if code.startswith('6') else 'SZ'}"
-        df = TushareClient().query("daily", fields="trade_date,close",
-                                   ts_code=ts_code,
-                                   start_date=(_dt.date.today() - _dt.timedelta(days=120)).strftime("%Y%m%d"),
-                                   end_date=_dt.date.today().strftime("%Y%m%d"))
+        df = client.query("daily", fields="trade_date,close",
+                          ts_code=ts_code,
+                          start_date=(_dt.date.today() - _dt.timedelta(days=120)).strftime("%Y%m%d"),
+                          end_date=_dt.date.today().strftime("%Y%m%d"))
         if df is None or df.empty:
-            return []
-        return [float(v) for v in df.sort_values("trade_date")["close"].tolist()[-45:]]
+            return [], "none"
+        return [float(v) for v in df.sort_values("trade_date")["close"].tolist()[-45:]], "tushare"
     except Exception:
-        return []
+        return [], "none"
 
 
 
@@ -135,22 +172,32 @@ def render_md(rows: list[dict], warnings: list[str], date: str) -> str:
     lines = [
         f"# 🔗 商品期货 → 股票联动扫描 — {date}",
         "",
-        "> 数据源：期货 futures_main_sina / 股票 stock_zh_a_daily（新浪），收盘口径。",
+        "> 数据源：期货 futures_main_sina（新浪）；股票 stock_zh_a_daily（新浪）为主、"
+        "tushare daily 兜底——实际源逐行在「股票源」列标注。",
         "> 变化率 = 最新收盘 vs 5/20 个交易日前收盘（pandas 计算）。",
-        "> 反向链（成本端）：期货涨对股票为负向，方向判定已取反标注。",
+        "> 反向链（成本端）：期货涨对股票为负向，方向判定已取反标注；混合链成员级覆盖。",
         "> 外盘层（ICE/LME/CMX）未接入——需外盘对照时用 L2 检索人工补。",
         "> 研究工具，非决策工具，不含任何买卖建议。",
         "",
-        "| 链 | 商品 | 期货20d% | 期货5d% | 期货vs MA20% | 股票 | 股票20d% | 股票5d% | 判定 |",
-        "|----|------|---------|---------|-------------|------|---------|---------|------|",
+        "| 链 | 商品 | 期货20d% | 期货5d% | 期货vs MA20% | 股票 | 股票20d% | 股票5d% "
+        "| 股票vs MA20% | 股票源 | 判定 |",
+        "|----|------|---------|---------|-------------|------|---------|---------|"
+        "-------------|--------|------|",
     ]
+    degraded = False
     for r in rows:
+        mark = " *" if r.get("window5d") else ""
+        degraded = degraded or bool(r.get("window5d"))
         lines.append(
             f"| {r['label']} | {r['commodity']} | {_fmt(r['fut']['chg20_pct'])} "
             f"| {_fmt(r['fut']['chg5_pct'])} | {_fmt(r['fut']['vs_ma20_pct'])} "
             f"| {r['stock']} | {_fmt(r['stk']['chg20_pct'])} | {_fmt(r['stk']['chg5_pct'])} "
-            f"| {r['judge']} |"
+            f"| {_fmt(r['stk']['vs_ma20_pct'])} | {r.get('stk_src', '-')} "
+            f"| {r['judge']}{mark} |"
         )
+    if degraded:
+        lines.append("")
+        lines.append("> 判定带 * = 该行样本不足 20 个交易日，降级为 5 日口径（已标注，非 20 日结论）。")
     if warnings:
         lines.append("")
         lines.append("**⚠️ 取数失败（需检查网络或更新 commodity_map.yaml）：** " + "、".join(warnings))
@@ -172,7 +219,7 @@ def main() -> int:
 
     try:
         return _run(args)
-    except (FileNotFoundError, yaml.YAMLError, KeyError, TypeError, ImportError) as exc:
+    except (FileNotFoundError, yaml.YAMLError, KeyError, TypeError, ImportError, OSError) as exc:
         # 致命错误（映射表缺失/损坏/结构错）：按 docstring 契约返回 2，不裸 traceback
         print(f"FATAL: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -188,17 +235,29 @@ def _run(args: argparse.Namespace) -> int:
     today = _dt.date.today().strftime("%Y-%m-%d")
     rows: list[dict] = []
     warnings: list[str] = []
+    stk_cache: dict[str, tuple[list[float], str]] = {}   # 同码跨链不重复取数（002714 等）
     for ch in chains:
-        fut = series_stats(fetch_futures(ak, ch["symbol"]))
+        try:
+            fut = series_stats(fetch_futures(ak, ch["symbol"]))
+        except Exception as exc:  # noqa: BLE001 — 双重保险：单链期货异常不阻断全扫（契约 0）
+            warnings.append(f"{ch['label']}（期货取数异常: {type(exc).__name__}）")
+            fut = series_stats([])
         for s in ch["stocks"]:
-            stk = series_stats(fetch_stock(ak, s["code"]))
-            inverse = ch.get("relation") == "cost_inverse"
+            if s["code"] not in stk_cache:
+                stk_cache[s["code"]] = fetch_stock(ak, s["code"])
+            closes, src = stk_cache[s["code"]]
+            stk = series_stats(closes)
+            inverse = resolve_relation(ch, s) == "cost_inverse"
             if fut["last"] is None or stk["last"] is None:
                 warnings.append(f"{ch['label']}-{s['name']}")
+            verd = judge(fut, stk, inverse)
+            degraded = verd != "样本不足" and (
+                fut["chg20_pct"] is None or stk["chg20_pct"] is None
+            )
             rows.append({
                 "label": ch["label"], "commodity": ch["commodity"], "fut": fut,
                 "stock": f"{s['name']}({s['code']})", "stk": stk,
-                "judge": judge(fut, stk, inverse),
+                "judge": verd, "stk_src": src, "window5d": degraded,
                 "rel": "反向链" if inverse else "",
             })
 
