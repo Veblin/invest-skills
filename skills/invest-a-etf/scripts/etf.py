@@ -658,8 +658,7 @@ def cmd_collect_sector_flow() -> int:
     try:
         from sector_flow import (check_mapping_coverage, check_snapshot_drift,
                                  fetch_sector_flow_snapshot, load_drift_baseline,
-                                 save_drift_baseline, save_sector_flow_snapshot,
-                                 snapshot_unchanged_vs_previous)
+                                 save_drift_baseline, save_sector_flow_snapshot)
     except ImportError as exc:
         print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
         return 1
@@ -670,14 +669,14 @@ def cmd_collect_sector_flow() -> int:
         print(f"采集失败: {result['error']}")
         return 1
     if result.get("skipped"):
-        print(f"跳过: {result['note']}")
+        # T7-2（R1 审查 F6 修正）：停更信号挂在跳过路径——权威交易日 + 全等 →
+        # stale_suspect=True（写前 C5 门已丢弃全等快照，写后比较永不触发）
+        mark = "⚠ " if result.get("stale_suspect") else ""
+        print(f"{mark}跳过: {result['note']}")
         return 0  # 快照为旧数据/非交易日，名单自检基于旧名单无意义（R16）
     partial = "（部分窗口失败）" if errs else ""
     print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
           f"（日期 {result['date']}）{partial}")
-    if not errs and snapshot_unchanged_vs_previous(result["date"]):
-        # T7-2：写入成功但数值与上一快照全同 → 疑源停更（幂等语义不变，仅提示）
-        print("⚠ 数值与上一快照全同，疑数据源停更（写入已完成，请人工核对源页面）")
     if errs:
         print(f"⚠ 部分窗口取数失败: {'; '.join(errs)}")
         return 1  # 部分失败 → 非零退出码，cron 可按键告警（R16）
@@ -715,9 +714,12 @@ def cmd_industry_pe() -> int:
         print("无行业 PE 数据。请先运行 `etf.py collect-weekly` 采集。")
         print("（首次采集后需等待每周五收盘后自动更新，或手动触发。）")
         return 0
-    stale = industry_snapshot_stale_note(rows[0].get("date")) if rows else None
+    # T7-3（R1 审查 F10/F2 修正）：日期取全表最大（原取 PE 最高行）；滞后按源发布日期判
+    latest_date = max((r.get("date") or "" for r in rows), default="")
+    latest_src = max((r.get("src_date") or "" for r in rows), default="")
+    stale = industry_snapshot_stale_note(latest_date or None, src_date=latest_src or None)
     if stale:
-        print(f"⚠ {stale}")   # T7-3：快照陈旧提示（输出在表前，防读到旧值不自知）
+        print(f"⚠ {stale}")   # 快照陈旧提示（输出在表前，防读到旧值不自知）
     print(f"{'行业':<10s} {'代码':<8s} {'PE':>8s} {'PB':>6s} {'涨跌%':>8s} {'换手%':>8s} {'日期':>10s}")
     print("-" * 62)
     for r in rows:
