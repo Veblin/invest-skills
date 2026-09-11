@@ -187,22 +187,13 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
     fin = _get_dim_data(dims, "financials")
     if not isinstance(fin, list) or not fin:
         return []
-    annual: list[dict] = []
-    for r in fin:
-        if not isinstance(r, dict):
-            continue
-        ed = str(r.get("end_date", ""))
-        npv = r.get("net_profit")
-        if ed.endswith("1231") and npv is not None:
-            try:
-                annual.append({"year": ed, "net_profit": float(npv)})
-            except (TypeError, ValueError):
-                continue
-    if len(annual) < 3:
-        return []
     try:
-        from lib.income_driver import classify_income_driver
+        from lib.income_driver import classify_income_driver, extract_annual_rows
     except ImportError:
+        return []
+    # 装配收敛到唯一实现（R2/T9-2）：与 style_match 侧共用，防两处漂移
+    annual = extract_annual_rows(fin)
+    if len(annual) < 3:
         return []
     # F2-1: 行业传入（金融行业成长分支减权）——双键兼容见 _extract_industry
     industry: str | None = None

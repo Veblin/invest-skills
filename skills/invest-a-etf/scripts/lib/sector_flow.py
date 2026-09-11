@@ -231,10 +231,11 @@ def _rows_for_date(date: str) -> dict[int, dict[str, float | None]]:
 
 
 def _is_trading_day(d: str) -> bool | None:
-    """日历判定交易日（C5）：True=交易日 / False=权威日历非交易日 / None=日历不可用。
+    """日历判定交易日（C5）：True=交易日 / False=权威日历非交易日 / None=日历不可信。
 
-    估算日历（无 token，is_estimated=True）对「非交易日」不信任 → None，
-    由调用方走原全等跳过（防调休工作日被估算误判为休市而丢数据）。
+    估算日历（无 token/取数失败，is_estimated=True）两个方向都不可信：既会把
+    调休工作日误判为休市（丢数据），也会把法定假日误判为交易日（放假日报出
+    「疑数据源停更」的假告警）→ 一律 None，由调用方走中性「疑似盘前未刷新」。
     """
     try:
         from lib.trade_cal import fetch_trade_cal
@@ -245,9 +246,9 @@ def _is_trading_day(d: str) -> bool | None:
     except Exception as exc:
         logger.warning("trade_cal 查询失败，回退全等判定: %s", exc)
         return None
-    if d in dates:
-        return True
-    return None if estimated else False
+    if estimated:
+        return None
+    return d in dates
 
 
 def _same_as_latest(

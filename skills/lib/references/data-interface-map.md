@@ -16,7 +16,7 @@
 
 ---
 
-## A. akshare 接口（50 行 / 62 个接口名，按能力簇；2026-09-10 脚本核对）
+## A. akshare 接口（51 行 / 63 个接口名，按能力簇；2026-09-10 脚本核对）
 
 > 「使用方」= 首个引用该接口的 skill（跨 skill 共用以逗号列全）；「风险」：🔥=高漂移/反爬易失效，⚠️=中，—=低。
 > 全部接口均在本仓库代码内被调用；另有少量**技能内联使用**的接口见 D 节。
@@ -29,7 +29,7 @@
 | `stock_zh_a_spot_em` | invest-a-stock | 🔥 | 东财全市场快照；2026-09-08 实测 ProxyError（环境相关，非版本） |
 | `stock_individual_info_em` | invest-a-stock | 🔥 | 东财个股基本信息；反爬环境不可用 |
 | `stock_zh_index_daily` | invest-a-etf, invest-a-stock | ⚠️ | 新浪指数日线（兜底/交叉验证） |
-| `stock_zh_a_daily` | invest-a-futures-link | ⚠️ | 新浪个股日线（futures-link 股票层主源；连续请求触发限流 SSL EOF → 脚本含 tushare daily 兜底，2026-09-08 实测） |
+| `stock_zh_a_daily` | —（登记未使用） | ⚠️ | 新浪个股日线；原唯一消费者 invest-a-futures-link 已于 v0.3.0 移除，本行保留备查（连续请求触发限流 SSL EOF → 原脚本含 tushare daily 兜底，2026-09-08 实测） |
 | `stock_zh_index_daily_em` | invest-a-stock | 🔥 | 东财指数日线 |
 | `stock_zh_index_value_csindex` | invest-a-etf, invest-a-journal | — | 中证指数官方估值（权威源） |
 | `tool_trade_date_hist_sina` | invest-a-journal, lib/dates | — | 新浪交易日历（日期工具依赖） |
@@ -103,6 +103,7 @@
 | `macro_china_pmi` / `macro_china_cpi` / `macro_china_ppi` / `macro_china_lpr` / `macro_china_money_supply` / `macro_rmb_loan` | invest-a-stock | — | 宏观标签锚点（pulse 消费） |
 | `bond_china_yield` | invest-a-stock | — | 中债收益率 |
 | `bond_zh_us_rate` | invest-a-journal, invest-a-stock | — | 中美利率对比（ERP 原料） |
+| `news_economic_baidu` | invest-a-event-calendar（v3 宏观日程） | 🔥 | 财经日历，**能返回未来日程**。2026-09-10 实测：前向窗 ≈30 天（10-16 起返回空）；窗口内**无美国 CPI**（103 条 CPI 全是其他国家的）；单次调用失败率 ≈12%；`重要性` 只有 1/2 两档且 str/float 混型（噪音行同样有值 → 不可作筛选器）；`cookie` 为空时每次调用多 2 个握手请求。走 `curl_cffi` → **不要**包 `akshare_direct_session`（那是东财 requests 直连+节流） |
 
 ### A10. 新闻 / 公告 / 研报
 
@@ -126,7 +127,7 @@
 
 | 接口 | 使用方 | 风险 | 注记 |
 |------|--------|------|------|
-| `futures_main_sina` | invest-a-stock（股指基差 F 系列）, invest-a-futures-link（15 链商品主力主消费者） | — | 主力连续；**商品主力亦可取**（2026-09-08 实测 SR0/AU0/SC0/RB0 全通，含当日） |
+| `futures_main_sina` | invest-a-stock（股指基差 F 系列） | — | 主力连续；商品主力亦可取（2026-09-08 实测 SR0/AU0/SC0/RB0 全通，含当日；原 futures-link 消费者已于 v0.3.0 移除，结论保留备查） |
 | `futures_spot_price` | invest-a-stock | — | 期货现货价格 |
 
 ### A13. 港股
@@ -173,6 +174,9 @@
 |----|------|--------------|------|
 | 腾讯行情 | `qt.gtimg.cn` HTTP | 实时报价（价格/成交量/PE/市值） | 2026-09-08 实测可用（600737 盘中 +9.99%） |
 | FRED | `fredapi` | 美 10Y/30Y/VIX/CPI/美元指数（宏观标签） | 需 FRED_API_KEY |
+| FRED `releases/dates` | `api.stlouisfed.org/fred/releases/dates` | 美国宏观**发布日程**（urllib 直取；fredapi 无该端点） | 需 FRED_API_KEY；前向 ≥3 个月；**无时刻字段**（不推测）；名为 `FOMC Press Release` 的 release 几乎每天一条，是日常新闻稿噪音，**不可**用作议息日程 |
+| FOMC 会议日程（策展表） | `skills/invest-a-event-calendar/references/fomc_meetings.yaml` | 议息会议日 | **无自动源**；人工誊录 federalreserve.gov，年度刷新；表过期/缺失时引擎显式告警（不渲染成「无议息」） |
+| 宏观事件白名单（策展表） | `skills/invest-a-event-calendar/references/macro_sources.yaml` | 中美事件白名单 + 噪音 pattern + FRED release 白名单 | 人工资产；`us_releases` 按 (id, name) 对匹配，name 不符报配置漂移 |
 | Yahoo | `query1.finance.yahoo.com` | SOX 费城半导体指数 | urllib 直连 |
 | baostock | `query_history_k_data_plus` | K 线兜底（无 tushare token 时 auto） | — |
 | TickFlow | `TickFlow.free()` | 可选 K 线源（默认关闭） | — |

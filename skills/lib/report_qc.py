@@ -85,12 +85,26 @@ def _classify_by_symbol(symbol: str) -> str:
     return "etf" if is_etf_symbol(symbol) else "stock"
 
 
+# 复盘纪要的文件名（**本工具生成的格式**：`{YYYYMMDD}-review.md`）。
+# ⚠️ 与 `skills/lib/decision_review.REVIEW_NAME_RE`（owner）保持一致；此处不 import
+# 是为了不让**被广泛打包**的 report_qc 多一个模块依赖——包内缺那个模块会让 QC 闸门
+# 整个不可用（正是 R0~R2 review 反复出现的那类分发形态缺陷）。
+# 用 `\d{8}` 而非裸 `-review.md`：后者**内容无关**，用户把真报告存成
+# `2026-09-10-review.md`（报告风格时间戳）就会被套上放宽档。
+_REVIEW_MEMO_RE = re.compile(r"^\d{8}-review\.md$")
+
+
 def detect_report_type(report_path: Path) -> str:
     """从路径推断报告类型。
 
     优先按目录名匹配（gap-scan / journal / pulse），再按
     `{6位代码}-{名称}` 目录或扁平文件名匹配代码前缀。
     """
+    # 复盘纪要（R2/T8-3）：落点在报告同目录，必须先于目录/代码前缀判定
+    # （否则会被认成标的研报）
+    if _REVIEW_MEMO_RE.match(report_path.name):
+        return "review"
+
     parts = report_path.parts
     if "gap-scan" in parts:
         return "gap_scan"
@@ -154,6 +168,13 @@ _STRUCTURE_REQUIREMENTS: dict[str, list[tuple[str, str, str, str]]] = {
         ("gap-summary", r"(扫描摘要|统计|命中)", "warn", "gap-scan 报告应包含扫描摘要/命中统计"),
     ],
     "pulse": [],
+    # 复盘纪要（R2/T8-3）：**按设计不含** [事实]/[分析]/[证据强度]——它明确不做
+    # 推演，只对照当时写下的假设与证伪条件的当前状态。故只要求风险声明；
+    # 若套用 etf/stock 的结构检查会稳定产出 4 条误报。
+    "review": [
+        ("structure-risk-statement", r"不构成投资建议", "warn",
+         "复盘纪要应包含风险声明（不构成投资建议）"),
+    ],
     "unknown": [],
 }
 
@@ -347,8 +368,11 @@ _SECTION_REF_RE = re.compile(r"§\s*(\d+(?:\.\d+)?)")
 _SECTION_HEAD_RE = re.compile(r"^#{2,4}\s*(\d+(?:\.\d+)?)[\s.、]")
 # F4 豁免：指向**外部规范**的 §N（如「共享规范 report-conventions.md §2.3」）不是
 # 本文节号引用（R1 审查 F4：repo 内全部误报均为该形态）。前缀近距匹配，宁漏勿扰。
+# 只认**文档指针**（.md 文件名 / 规范 / 附件）——通用引用动词（说明/参见/详见/遵循）
+# 不是外部线索：「详见 §5」是最惯用的本文交叉引用写法，豁免它会让 F4 恰好在最自然
+# 的措辞上失明（R1 审查 F4 二次收窄）。
 _EXTERNAL_REF_PREFIX_RE = re.compile(
-    r"(?:规范|conventions\.md|\.md|说明|附件|参见|详见|遵循)\s*$"
+    r"(?:规范|conventions\.md|\.md|附件)\s*$"
 )
 
 
@@ -620,7 +644,7 @@ def qc_file(
     layers = [_run_lint_layer(path, profile, fail_on), _check_structure(text, report_type)]
     if report_type != "pulse":
         # T6-2/T6-3（v0.3.0 R1）：F2 派生表述来源 / F4 §N 引用存在性——通用文本规则。
-        # unknown 类型同样挂载（R1 审查 F13：event-calendar/forecast-scan/futures-link
+        # unknown 类型同样挂载（R1 审查 F13：event-calendar 等附属技能
         # 等新技能的产出一律 type=unknown，若跳过则「必跑」的准出对它们形同虚设）
         layers.append(_check_sourcing(text))
     if report_type == "etf":
@@ -675,7 +699,11 @@ def qc_latest(
     root = Path(reports_dir)
     if not root.is_dir():
         return None
-    candidates = [p for p in root.rglob("*.md") if ".audit_checklist" not in p.name]
+    # 复盘纪要与审计清单**都不是研报**：混进来会让闸门在错的文档上给 PASS
+    # （纪要与报告同目录且 mtime 最新）
+    candidates = [p for p in root.rglob("*.md")
+                  if ".audit_checklist" not in p.name
+                  and not _REVIEW_MEMO_RE.match(p.name)]
     if not candidates:
         return None
     # mtime 相同（同秒写入/粗粒度文件系统）时按文件名取新，避免 max 平局由

@@ -70,6 +70,8 @@ from ._sources import (
     _tushare_client,
 )
 
+from lib.tushare_client import api_min_points  # noqa: E402 —— 权限提示要报积分门槛
+
 
 logger = logging.getLogger(__name__)
 
@@ -481,7 +483,58 @@ def _q_tushare_report_rc(symbol: str) -> list[dict] | None:
         return None
 
 
-def _q_tushare_forecast(symbol: str) -> list[dict] | None:
+def _classify_tushare_error(tc: Any, api_name: str) -> str:
+    """把 client 的失败信号归类成**用户可读的类别**（不回显异常原文，R12h）。
+
+    分类：``no_token`` / ``permission`` / ``quota`` / ``timeout`` / ``error`` /
+    ``empty``（无信号 = 接口正常返回空）。
+    """
+    try:
+        probe = getattr(tc, "is_permission_denied", None)
+        if callable(probe) and probe(api_name):
+            return "permission"
+        err = str(getattr(tc, "last_error", None) or "")
+    except Exception:  # noqa: BLE001 —— 归类失败不改变降级语义
+        return "error"
+    if "未配置 TUSHARE_TOKEN" in err:
+        return "no_token"
+    if "无接口权限" in err:
+        return "permission"
+    if ("配额" in err) or ("-2001" in err):
+        return "quota"
+    if any(k in err for k in ("Timeout", "timeout", "Connection", "Proxy",
+                              "SSLError", "timed out", "RemoteDisconnected")):
+        return "timeout"
+    return "error" if err else "empty"
+
+
+def _forecast_unavailable_reason(diag: dict | None = None) -> str:
+    """forecast 不可得的**原因分类**（R0~R2 review P2）。
+
+    回归：`_q_tushare_forecast` 不读 `tc.last_error`（该字段正是为「query 改返回空帧
+    而非抛异常」而加），所有失败都被报成「权限不足或无数据（需 Tushare 2000+积分）」
+    —— token 过期 / 配额用完 / 超时都**误导用户去买积分**，且「真空窗 vs 取数失败」
+    不可区分。
+    """
+    code = str((diag or {}).get("reason") or "")
+    points = api_min_points("forecast")
+    hint = f"（需 Tushare {points} 积分）" if points else ""
+    if code == "no_token":
+        return f"未配置 TUSHARE_TOKEN{hint}"
+    if code == "permission":
+        return f"接口无权限或积分不够{hint}"
+    if code == "quota":
+        return "当日 Tushare 配额已用完（非权限问题，次日恢复）"
+    if code == "timeout":
+        return "取数超时或网络异常（非权限问题，可重试）"
+    if code == "empty":
+        return "窗口内无业绩预告（接口正常返回空）"
+    if code == "error":
+        return "取数失败（数据源返回异常，非权限问题）"
+    return f"无数据或取数失败{hint}"
+
+
+def _q_tushare_forecast(symbol: str, *, diag: dict | None = None) -> list[dict] | None:
     """Tushare forecast：业绩预告（上市公司自行披露的盈利预测）。
 
     权限：2000 积分可用。
@@ -501,9 +554,15 @@ def _q_tushare_forecast(symbol: str) -> list[dict] | None:
             out = df.to_dict("records")
             logger.info("forecast: %d records for %s", len(out), ts)
             return out
+        # 空帧：读 client 信号区分「真空窗」与「取数失败」（query 契约是失败也返回空
+        # 帧且不抛，不读 last_error 就分不出来）
+        if diag is not None:
+            diag["reason"] = _classify_tushare_error(tc, "forecast")
         return None
     except Exception as exc:
         err = str(exc)
+        if diag is not None:
+            diag["reason"] = _classify_tushare_error(tc, "forecast")
         if "权限" in err or "40203" in err or "无权限" in err:
             logger.info("forecast 权限不足（需 2000+积分），降级: %s", err)
             return None
@@ -767,11 +826,12 @@ def collect_research(symbol: str) -> dict:
         ))
 
     fc_data: list[dict] | None = None
+    fc_diag: dict = {}   # forecast 取数的自身观测（供不可得原因取值）
     if not rc_data:
         try:
-            fc_data = _q_tushare_forecast(symbol)
+            fc_data = _q_tushare_forecast(symbol, diag=fc_diag)
         except RuntimeError:
-            pass
+            fc_diag["reason"] = "no_token"   # _require_tushare 抛的就是 token 缺失
         except Exception as exc:
             logger.warning("collect_research/forecast: %s", exc)
         if fc_data:
@@ -786,7 +846,7 @@ def collect_research(symbol: str) -> dict:
                 source="tushare.forecast",
                 data=None,
                 dimension=dim_val,
-                error="权限不足或无数据（需 Tushare 2000+积分）",
+                error=_forecast_unavailable_reason(fc_diag),
                 query_params=f"pro.forecast(ts_code='{ts}')",
             ))
 
@@ -838,19 +898,38 @@ def collect_industry(symbol: str) -> dict:
         if info:
             industry_name = info.get("行业") or info.get("industry", "") or ""
 
-    if env.is_akshare_available() and akshare_push2_available():
+    # T9-5 的显式不可得**不直接进 data**：`SourceResult.data is not None` 会被
+    # data_available / source_count / sources_ok 记为**成功源**（multi_source=true、
+    # 证据表把不可得当成可用来源）——那就从「键静默消失」变成「伪装成功」，更糟。
+    # 故此处把它还原为 None（计数正确），原因经闭包转交 _merge_industry 以
+    # `<key>_status/_note` 形式落进维度 data（值仍是空的，不冒充数据点）。
+    pe_unavailable: list[str] = []
+    if env.is_akshare_available():
         ind = industry_name
-        tasks.append(("akshare.stock_board_industry_hist_em",
-                      lambda i=ind: _q_akshare_industry_board(symbol, industry_name=i)))
-        tasks.append(("akshare.stock_board_industry_pe_ratio_cninfo",
-                      lambda i=ind: _q_akshare_industry_pe(symbol, industry_name=i)))
+        # **两个子源的可达面不同，守卫不能共用**：
+        #   板块行情 = 东财 push2 → 需 push2 可达；
+        #   行业 PE  = 巨潮 cninfo → 与东财无关。
+        # 实测：代理环境下 push2 探测失败而巨潮可达，共用守卫会把 PE 维度一起挡成
+        # 「akshare 不可用」→ 该维度永久不可得且**错误归因**（R0~R2 review 修复）。
+        if akshare_push2_available():
+            tasks.append(("akshare.stock_board_industry_hist_em",
+                          lambda i=ind: _q_akshare_industry_board(symbol, industry_name=i)))
+
+        def _pe_task(i: str = ind):
+            r = _q_akshare_industry_pe(symbol, industry_name=i)
+            if isinstance(r, dict) and r.get("status") == "unavailable":
+                pe_unavailable.append(str(r.get("note") or "行业 PE 不可得"))
+                return None
+            return r
+
+        tasks.append(("akshare.stock_industry_pe_ratio_cninfo", _pe_task))
 
     empty = {
         "dimension": dim_val,
         "display": "行业数据",
         "data": None,
         "status": "missing",
-        "error": "无可用行业数据源（需 akshare + 东方财富 push2 可用）",
+        "error": "无可用行业数据源（需 akshare；板块行情另需东方财富 push2 可达）",
         "_meta": {"source": "none", "success": False,
                   "all_sources": [], "multi_source": False,
                   "source_count": 0},
@@ -863,6 +942,10 @@ def collect_industry(symbol: str) -> dict:
             if r.data and isinstance(r.data, dict):
                 merged.update(r.data)
                 sources_ok.append(r.source)
+        if pe_unavailable and "industry_pe_median" not in merged:
+            # 显式三态（T9-5）：值仍为空，但**原因可见**，且不计入 sources_ok
+            merged["industry_pe_status"] = "unavailable"
+            merged["industry_pe_note"] = pe_unavailable[-1]
         if merged:
             dim_dict["data"] = merged
             if len(sources_ok) > 1:
@@ -2902,7 +2985,7 @@ def _ms_pcr_on_date(
     return _ms_pcr_from_df(df, put_codes, call_codes)
 
 
-def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
+def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | None:
     """50ETF 认沽认购比（opt_daily，需 5000 积分）。"""
     from lib.stats import percentile_rank
 
@@ -2949,6 +3032,10 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
                     "skipping PCR fetch storm (%d dates)",
                     fetch_dates[-1], len(fetch_dates),
                 )
+                if diag is not None:
+                    # 自身观测：超时时被丢弃的 daemon 线程从未返回，client 的
+                    # `last_error` 会**一直为 None** → 不看这里就会被记成「正常返回空」
+                    diag["reason"] = "probe_timeout"
                 return None
         # 探针结果直接计入（不再重复取 fetch_dates[-1]）；当日无期权成交
         # 未命中代码集时留空，由主循环重取。
@@ -2972,6 +3059,8 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         if r is not None:
             ratio_by_date[td] = r
     if not ratio_by_date:
+        if diag is not None:
+            diag["reason"] = "empty_rows"   # 探针成功了但无可用 PCR 行 → 合法空
         return None
     # 单次扫描按 sampled 顺序构建 (date, ratio) 对（此前两次同谓词扫描
     # 生成 ratios 与 ratio_dates，alignment 靠"同一谓词"隐含保证）
@@ -3410,30 +3499,94 @@ def attach_phase2_extras(collection: dict, symbol: str) -> None:
         logger.warning("attach_phase2_extras partial failure for %s: %s", symbol, errors)
 
 
+def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
+    """PCR 不可得的**原因分类**（D-H=H1：降级标注须显式 + 权限提示）。
+
+    修复前「空数据 / 无 50ETF 期权 / 权限不足」共用一句静态文案，用户无法判断
+    该去补积分、该重试、还是该接受空数据。
+
+    取值顺序：
+    1. **取数自身的观测**（``diag["reason"]``）——最可靠：超时场景下被丢弃的 daemon
+       线程从未返回，client 的 ``last_error`` 会**一直为 None**，不看这里就会把端点
+       故障记成「接口正常返回空」（R0~R2 review）。
+    2. client 信号（``is_permission_denied`` / ``last_error``）兜底——注意该槽被
+       trade_cal、探针与并行扇出**共享**，可能并非本接口所写。
+
+    ⚠️ 返回文本会**原样**进报告（``unavailable: {reason}`` →「（不可得：…）」），
+    故只做**分类映射**、不回显 ``last_error`` 的异常原文（那是
+    ``f"{type(e).__name__}: {str(e)[:80]}"``，属 R12h 禁用的不可读来源）。
+    """
+    try:
+        points = api_min_points("opt_daily")
+        hint = f"（Tushare opt_daily 需 {points} 积分）" if points else ""
+        code = str((diag or {}).get("reason") or "")
+        if code == "probe_timeout":
+            return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
+        if code == "empty_rows":
+            return "当日无 50ETF 期权成交（接口正常返回空）"
+        if tc is None:
+            return "Tushare client 不可用（未配置 token 或初始化失败）"
+        denied = False
+        probe = getattr(tc, "is_permission_denied", None)
+        if callable(probe):
+            denied = bool(probe("opt_daily"))
+        else:  # 兼容仅有私有集合的旧/假 client
+            denied = "opt_daily" in getattr(tc, "_permission_denied_apis", set())
+        if denied:
+            return f"权限不足：接口无权限或积分不够{hint}"
+        err = str(getattr(tc, "last_error", None) or "")
+        if "未配置 TUSHARE_TOKEN" in err:
+            return f"未配置 TUSHARE_TOKEN{hint}"
+        if "无接口权限" in err:
+            return f"权限不足：接口无权限或积分不够{hint}"
+        if any(k in err for k in ("Timeout", "timeout", "Connection", "Proxy",
+                                  "SSLError", "RemoteDisconnected", "timed out")):
+            return "取数超时或网络异常（非权限问题，可重试）"
+        if err:
+            return "数据源返回异常（非权限问题）"
+        return "当日无 50ETF 期权成交（接口正常返回空）"
+    except Exception:  # noqa: BLE001 —— 分类失败不改变降级语义
+        return "opt_daily 不可得"
+
+
 def _ms_try_fetch(
     result: dict[str, Any],
     key: str,
     fetch_fn: Callable[[], Any],
     *,
-    unavailable_msg: str,
+    unavailable_msg: str | Callable[[], str],
     on_success: Callable[[Any], str] | None = None,
 ) -> None:
-    """采集单个子源并写入 result / availability（统一 try/except 模式）。"""
+    """采集单个子源并写入 result / availability（统一 try/except 模式）。
+
+    ``unavailable_msg`` 可为**字符串或 callable**：callable 形式在**失败时刻**
+    求值——静态串在调用前就固定了，读不到本次查询刚写入的 client 信号
+    （如 ``is_permission_denied`` / ``last_error``）。
+    """
+    def _reason() -> str:
+        if callable(unavailable_msg):
+            try:
+                return str(unavailable_msg())
+            except Exception as exc:  # noqa: BLE001 —— 原因函数故障不得变成崩溃
+                logger.warning("market_structure %s reason fn failed: %s", key, exc)
+                return "不可得（原因分类失败）"
+        return str(unavailable_msg)
+
     try:
         value = fetch_fn()
         result[key] = value
         if value is None:
-            _ms_set_unavailable(result["availability"], key, unavailable_msg)
+            _ms_set_unavailable(result["availability"], key, _reason())
         elif on_success is not None:
             result["availability"][key] = on_success(value)
         else:
             result["availability"][key] = "available"
     except Exception as exc:
-        # 异常仅进日志；availability 用静态描述（str(exc) 会泄漏底层
+        # 异常仅进日志；availability 用**分类后**的描述（str(exc) 会泄漏底层
         # Python 异常文本到报告「不可得：{reason}」渲染，用户不可读，
         # 且违反 R12h「不可得 + attempted sources」标注规范）
         logger.warning("market_structure %s fetch failed: %s", key, exc)
-        _ms_set_unavailable(result["availability"], key, unavailable_msg)
+        _ms_set_unavailable(result["availability"], key, _reason())
 
 
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:
@@ -3508,10 +3661,15 @@ def collect_market_structure(symbol: str, *, industry: str | None = None) -> dic
         _ms_fetch_pmi,
         unavailable_msg="akshare macro_china_pmi unavailable",
     )
+    _pcr_diag: dict = {}   # PCR 取数的自身观测（供不可得原因取值，见下）
     _ms_try_fetch(
         result, "put_call_ratio",
-        lambda: _ms_fetch_put_call_ratio(tc),
-        unavailable_msg="opt_daily empty, no 50ETF options, or permission denied (5000 pts)",
+        # callable：原因在**失败时刻**求值——静态串在调用前就固定了，读不到本次
+        # 查询刚写入的 client 信号（is_permission_denied / last_error），
+        # 会把「权限不足/未配 token/超时/空数据」压成同一句话（R2/T9-1′）。
+        # diag 承载**取数自身的观测**（优先于被多处共写的 last_error 槽）。
+        lambda: _ms_fetch_put_call_ratio(tc, diag=_pcr_diag),
+        unavailable_msg=lambda: _ms_pcr_unavailable_reason(tc, _pcr_diag),
         on_success=lambda v: (
             f"partial: {v.get('history_days', 0)} days"
             if v.get("partial") else "available"

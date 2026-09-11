@@ -85,6 +85,32 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "market-sentiment", "china-stock", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-hk",
+      "description": "港股数据引入与初步分析。腾讯 r_hk 快照 / 腾讯 qfq K 线 / 东财港股财务 / 百度估值历史序列，附港股风险层。研究工具，非决策工具。",
+      "version": "{{ VERSION }}",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "hong-kong-stock", "hk-stock", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-event-calendar",
+      "description": "事件日历 — 定期事件前瞻：宏观数据发布日程（中美 CPI/社零/非农/议息）+ 限售解禁池扫描。研究工具，非决策工具。",
+      "version": "{{ VERSION }}",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "event-calendar", "macro-calendar", "unlock-calendar", "china-stock", "a-share", "claude-code", "learning"]
     }
   ]
 }

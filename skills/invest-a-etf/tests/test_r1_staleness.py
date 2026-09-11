@@ -54,6 +54,37 @@ def fake_calendar(monkeypatch):
     return state
 
 
+@pytest.fixture
+def estimated_calendar(monkeypatch):
+    """估算日历（无 token / 取数失败）→ fetch_trade_cal 返回 is_estimated=True。
+
+    上方 fake_calendar 恒返回 (dates, False)，估算路径无覆盖——而无 TUSHARE_TOKEN
+    部署下它是常态（trade_cal 文档：「无 token/不可用/失败 → 自然日去周末估算」）。
+    """
+    import lib.trade_cal as tc
+
+    state = {"n": 7}
+
+    def fake(start, end):
+        return ([f"2026{i:06d}" for i in range(1, state["n"] + 1)], True)
+
+    monkeypatch.setattr(tc, "fetch_trade_cal", fake)
+    return state
+
+
+def test_trading_day_lag_estimated_calendar_degraded(estimated_calendar):
+    """估算日历不是权威交易日历 → degraded=True 且滞后回退自然日。
+
+    回归：trading_day_lag('20260930','20261009') 曾返回 (7, False)——长假后真实
+    滞后 1-2 交易日，却被当作权威交易日数发布（估算值 7 还会跨过阈值告警）。
+    """
+    from freshness import trading_day_lag
+
+    lag, degraded = trading_day_lag("20260930", "20261009")
+    assert degraded is True, "估算日历必须降级（否则「日历不可用」标记永不出现）"
+    assert lag == 9, "降级后应为自然日差，不得让估算值 7 冒充交易日数"
+
+
 # ── T7-1：sector-flow as_of 滞后（交易日口径）─────────────────────────────
 
 def test_sector_stale_note_trading_day_caliber(fixed_session, fake_calendar):
@@ -75,6 +106,39 @@ def test_sector_stale_note_unparseable(fixed_session, fake_calendar):
     fake_calendar["n"] = 9
     assert sf.sector_flow_stale_note(None) is None
     assert sf.sector_flow_stale_note("bad-date") is None
+
+
+def test_is_trading_day_distrusts_estimated_calendar(monkeypatch):
+    """估算日历对两个方向都不可信 → None（不得把法定假日误判为交易日）。
+
+    回归：估算日历含 2026-10-01（国庆，周四）→ _is_trading_day 曾返回 True →
+    C5 全等跳过被归因「疑数据源停更」，法定假日发出源冻结告警。原实现只对
+    False 方向不信任（防调休工作日误判），True 方向同样不可信。
+    """
+    import lib.trade_cal as tc
+
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: (["20261001"], True))
+    assert sf._is_trading_day("20261001") is None      # 假日被估算当作工作日
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: ([], True))
+    assert sf._is_trading_day("20261003") is None      # 周末方向亦不可信
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: (["20261009"], False))
+    assert sf._is_trading_day("20261009") is True      # 权威日历：两方向均可用
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: ([], False))
+    assert sf._is_trading_day("20261001") is False
+
+
+def test_sector_stale_note_estimated_calendar_marked(fixed_session, estimated_calendar):
+    """估算日历 → 提示须带「粗判」标记，且数字为自然日差（不在阈值错侧给精确交易日数）。"""
+    note = sf.sector_flow_stale_note("20260904")     # 自然日差 6 > 阈值 3
+    assert note and "粗判" in note
+    assert "6 天(自然日粗判)" in note
+
+
+def test_weekly_stale_note_estimated_calendar_marked(fixed_session, estimated_calendar):
+    """degraded 分支曾为死代码——is_estimated 被丢弃 → 该分支永不进入。"""
+    note = inds.industry_snapshot_stale_note("20260901")   # 自然日差 9 > 阈值 7
+    assert note and "粗判" in note
+    assert "9 天(自然日粗判)" in note
 
 
 # ── T7-2（F6 修正）：skip 路径停更信号 ────────────────────────────────────
@@ -128,6 +192,25 @@ def test_sector_skip_path_stale_suspect(isolated_store, monkeypatch):
     assert "盘前" in out3["note"]
 
 
+def test_values_equal_nulls_equal_opt_in():
+    """nulls_equal=True：双侧同空视为相等（停更检测语义）；默认契约不变。
+
+    共享 helper 的「NULL 永不判等」来自写入门（任一侧缺失 → 保守判有变化 →
+    写入恢复数据），对**检测**语义恰好相反：源发布空单元格时判「有变化」，
+    冻结源不再告警。
+    """
+    from freshness import maps_equal, values_equal
+
+    assert values_equal(None, None) is False            # 默认契约（写入门）不变
+    assert values_equal((1.0, None), (1.0, None)) is False
+    assert values_equal(None, None, nulls_equal=True) is True
+    assert values_equal(None, 1.0, nulls_equal=True) is False
+    assert values_equal((1.0, None), (1.0, None), nulls_equal=True) is True
+    assert values_equal((1.0, None), (1.0, 2.0), nulls_equal=True) is False
+    assert maps_equal({"a": (1.0, None)}, {"a": (1.0, None)}, nulls_equal=True) is True
+    assert maps_equal({"a": (1.0, None)}, {"a": (1.0, 2.0)}, nulls_equal=True) is False
+
+
 # ── T7-3：weekly 全同 + 源日期滞后 ───────────────────────────────────────
 
 def _ensure_weekly_table(store_mod) -> None:
@@ -176,6 +259,30 @@ def test_weekly_unchanged_semantics(isolated_store):
     ])
     assert inds.weekly_unchanged_vs_previous("20260912") is False
     assert inds.weekly_unchanged_vs_previous("20260801") is None
+
+
+def test_weekly_unchanged_with_null_cells(isolated_store):
+    """双侧同为 NULL 的单元格不得让「全同」判定翻转为「有变化」。
+
+    回归：源长期冻结且在空单元格（涨跌幅/换手率）上发布 NULL 时，weekly 停更
+    检测返回 False → 「数值与上一期全同，疑数据源停更」告警静默消失。
+    """
+    _ensure_weekly_table(isolated_store)
+    _insert_weekly(isolated_store, [
+        ("801080", "电子", "20260904", "20220831", 30.0, 3.0, None, None),
+        ("801770", "通信", "20260904", "20220831", 40.0, 4.0, 1.5, None),
+    ])
+    _insert_weekly(isolated_store, [
+        ("801080", "电子", "20260911", "20220907", 30.0, 3.0, None, None),
+        ("801770", "通信", "20260911", "20220907", 40.0, 4.0, 1.5, None),
+    ])
+    assert inds.weekly_unchanged_vs_previous("20260911") is True
+    # 单侧 NULL（数据退化）→ 仍须判「有变化」，不得误报全同
+    _insert_weekly(isolated_store, [
+        ("801080", "电子", "20260912", "20220914", 30.0, 3.0, 1.2, None),
+        ("801770", "通信", "20260912", "20220914", 40.0, 4.0, 1.5, None),
+    ])
+    assert inds.weekly_unchanged_vs_previous("20260912") is False
 
 
 def test_weekly_stale_uses_src_date(fixed_session, fake_calendar):

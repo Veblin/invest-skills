@@ -135,3 +135,38 @@ class TestRestrictedUnlockFetch:
         assert len(events) == 2  # 单条 NaN 不整批丢失
         assert len([e for e in events if e.detail.startswith("股东数不可得")]) == 1
         assert len([e for e in events if "7 个股东" in e.detail]) == 1
+
+
+class TestRestrictedUnlockDegradation:
+    """解禁段失败须只降级本段——不得拖垮同批已采到的分红/公告事件。"""
+
+    def test_import_failure_degrades_only_this_section(self, monkeypatch):
+        """unlock_source 不可导入 → 返回空列表，不抛异常。
+
+        回归：函数级 `except Exception: logger.warning(...)` 被删后，import 留在
+        try 外（上方 bootstrap 仍是 best-effort `except Exception: pass`）→ bootstrap
+        静默失败或 skills/lib 不在 sys.path 时抛 ModuleNotFoundError。
+        """
+        import sys as _sys
+        import lib.env
+        from lib.catalyst import _fetch_restricted_unlock_events
+
+        monkeypatch.setattr(lib.env, "is_akshare_available", lambda: True)
+        monkeypatch.setitem(_sys.modules, "unlock_source", None)   # 模拟不可导入
+        assert _fetch_restricted_unlock_events("000001", lookahead_days=30) == []
+
+    def test_collect_keeps_other_event_sources(self, monkeypatch):
+        """整块采集：解禁段失败不得吞掉同一调用中已采到的分红/公告事件。"""
+        import sys as _sys
+        import lib.env
+        from datetime import date as _date
+        from lib import catalyst
+
+        monkeypatch.setattr(lib.env, "is_akshare_available", lambda: True)
+        monkeypatch.setitem(_sys.modules, "unlock_source", None)
+        monkeypatch.setattr(catalyst, "_fetch_dividend_events",
+                            lambda s, d: [catalyst.CatalystEvent(
+                                s, _date(2026, 10, 1), "dividend", "分红", impact="中")])
+        monkeypatch.setattr(catalyst, "_fetch_announcement_events", lambda s, d: [])
+        assert [e.event_type for e in catalyst.collect_catalyst_events("000001", days=90)] \
+            == ["dividend"]

@@ -50,6 +50,7 @@ TUSHARE_API_MIN_POINTS: dict[str, int] = {
     "index_dailybasic": 4000,
     "sw_daily": 5000,
     "opt_daily": 5000,
+    "forecast": 2000,   # 业绩预告（接口文档标注；_q_tushare_forecast docstring 同载）
 }
 
 
@@ -161,6 +162,15 @@ class TushareClient:
         """今日剩余配额（估估值）。"""
         self._reset_daily_counter_if_needed()
         return max(0, self._daily_call_limit - self._daily_calls)
+
+    def is_permission_denied(self, api_name: str) -> bool:
+        """该接口是否已被判定为**权限不足**（本会话内）。
+
+        调用方用它产出**用户可读的权限提示**（如「需 N 积分」），而不是把
+        「空数据 / 超时 / 权限不足」压成同一句文案。积分门槛见
+        ``api_min_points(api_name)``（TUSHARE_API_MIN_POINTS）。
+        """
+        return api_name in self._permission_denied_apis
 
     def query(self, api_name: str, fields: str = "", **kwargs: Any) -> pd.DataFrame:
         """统一查询入口。

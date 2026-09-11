@@ -62,8 +62,6 @@ SKILL_TARGETS: tuple[SkillTarget, ...] = (
     SkillTarget("skills/invest-a-pattern-scan/SKILL.md", "invest:a-pattern-scan"),
     SkillTarget("skills/invest-hk-stock/SKILL.md", "invest:a-hk"),
     SkillTarget("skills/invest-a-event-calendar/SKILL.md", "invest:a-event-calendar"),
-    SkillTarget("skills/invest-a-forecast-scan/SKILL.md", "invest:a-forecast-scan"),
-    SkillTarget("skills/invest-a-futures-link/SKILL.md", "invest:a-futures-link"),
 )
 
 

@@ -22,7 +22,7 @@
 
 ```
 ┌─ Skill 层（编排）───────────────────────────────────────────┐
-│ 10 个 skills，每个 = SKILL.md（LAWs 规则 + SOP + CLI 路由表） │
+│ 8 个 skills，每个 = SKILL.md（LAWs 规则 + SOP + CLI 路由表）  │
 │  触发词路由 → 对话简报 / Markdown 备忘录 / concise 三层输出   │
 └──────────────┬──────────────────────────────────────────────┘
                │ 调用 CLI（uv run python .../invest.py）
@@ -46,7 +46,7 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 
 ## 3. Skill 一览
 
-仓库共 **10 个 skills**（Python 计数 `len()` 验证：`skills/*/SKILL.md` = 10），另有 `.claude/skills/verify/` 为内部验证工具。`invest-a-limit-up` 已于 v0.2.5 移除（无代码调用方，涨停池逻辑并入 journal/pulse 的 market_microstructure）。
+仓库共 **8 个 skills**（Python 计数 `len()` 验证：`skills/*/SKILL.md` = 8），另有 `.claude/skills/verify/` 为内部验证工具。`invest-a-limit-up` 已于 v0.2.5 移除（无代码调用方，涨停池逻辑并入 journal/pulse 的 market_microstructure）；`invest-a-forecast-scan` / `invest-a-futures-link` 已于 v0.3.0 移除（必要性评估后暂缓，见 host-docs/v0.3.0 决策清单）。
 
 | Skill | 定位 | 入口 | 关键实现 |
 |-------|------|------|---------|
@@ -57,12 +57,10 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 | **invest-a-pattern-scan** | LMW 双底/三角形底形态扫描 | `scripts/pattern_scan.py` | Lo-Mamaysky-Wang (2000) 核平滑 + 5 极值模板；因果滚动防 look-ahead；White (2000) Reality Check 数据窥探防护（p<0.05 才声称统计增量） |
 | **invest-a-pulse** | 市场情绪脉搏（杠杆/广度/情绪/资金/估值五维 + 综合环境标签） | 纯编排（无自有脚本） | 完全复用 journal 的 `market_microstructure` 数据管道（经 data_bridge 缓存避免重复采集）；筹码出清度四信号；涨停行业轮动 + 跷跷板检验 |
 | **invest-hk-stock** | 港股数据引入与初步分析（v1） | `scripts/hk.py` | 腾讯 r_hk 快照/qfq K 线、东财港股财务、百度估值历史、tushare/yfinance 交叉；代码/币种纪律 + 港股风险层 |
-| **invest-a-event-calendar** | 限售解禁压力日历 | `scripts/unlock_calendar.py` | 东财全市场解禁 + 近 120 日分位高压日标注；分钟级参数化与空数据降级 |
-| **invest-a-forecast-scan** | 业绩预告雷达 | `scripts/forecast_scan.py` | tushare forecast 三清单（预增/扭亏/负面）；失败日追踪 + 权限/空窗鉴别 |
-| **invest-a-futures-link** | 商品期货→股票联动扫描 | `scripts/futures_link.py` | 15 条产业链映射（链级 + 成员级方向覆盖）；tushare 兜底源逐行标注 |
+| **invest-a-event-calendar** | 事件日历（解禁 + 宏观日程） | `scripts/unlock_calendar.py` | 池/市场/宏观三模式：清单池个股解禁下钻 + 全市场日级分位 + 定期宏观数据发布日程（中美）与议息会议；多源降级链与空窗鉴别 |
 | verify（内部） | 运行时验证三个 CLI 真实运行（非 mock） | `.claude/skills/verify/` | `store._db_override` 隔离真实 DB + `runpy.run_path` 执行真实命令行 |
 
-**注册与分发**：`skills.yaml`（antfu/skills-cli 清单，注册 10 个用户 skill——条目数与 `skills/*/SKILL.md` 一致）→ `sync_version.py` 同步生成 `.claude-plugin/`、`.agents/plugins/`、`gemini-extension.json` 三处 marketplace 清单。
+**注册与分发**：三处注册面须两两一致——`skills.yaml`（antfu/skills-cli 清单）、`sync_version.SKILL_TARGETS`（版本同步目标 + 插件标签）与 `.claude-plugin/marketplace.json.in` 模板的插件条目列表，均须覆盖 `skills/*/SKILL.md` 全集；一致性由 `test_version_sync.TestRegistrationParity` 强制（此前模板硬编码 6 条插件，新增技能不会进 marketplace 清单且无断言守护）。`sync_version.py sync` 从 `*.json.in` 模板生成 `.claude-plugin/`、`.agents/plugins/`、`gemini-extension.json` 三处清单（`.agents` 副本与 `.claude-plugin` 共用同一模板，字节一致）。
 
 ## 4. invest-a-stock 核心实现逻辑
 

@@ -17,6 +17,7 @@ from report_qc import (  # noqa: E402
     qc_file,
     qc_latest,
     _check_etf_derived,
+    _check_sourcing,
     _compute_overall,
     _run_verify_layers,
 )
@@ -526,6 +527,26 @@ class TestQcLatest:
 # ── 920xxx 北交所股票（F11）──────────────────────────────────────────────
 
 
+class TestSourcingLayer:
+    """F4 §N 交叉引用校验的豁免边界（R1 审查 F4 收窄）。"""
+
+    def test_generic_citation_verbs_not_exempt(self):
+        """通用引用动词（说明/参见/详见/遵循）不得豁免 §N 校验。
+
+        回归：豁免正则含这些通用动词 → 「详见 §5」被当作**外部规范**引用放行，
+        F4 恰好在最惯用措辞上失明——报告可用最自然的写法引用不存在的章节仍 PASS。
+        """
+        for text in ("详见 §5。", "参见 §3.2 的对照。", "遵循 §7 规范。", "说明 §9。"):
+            assert _check_sourcing(text).findings_count == 1, f"未拦截: {text!r}"
+
+    def test_external_spec_reference_still_exempt(self):
+        """指向外部规范的 §N 仍须豁免（repo 内误报均为该形态），且不引入本文误报。"""
+        for text in ("见 report-conventions.md §2.3。", "见共享规范 §2.3。", "见附件 §4。"):
+            assert _check_sourcing(text).findings_count == 0, f"误报: {text!r}"
+        # 本文存在对应标题节 → 不报
+        assert _check_sourcing("## 3 数据\n\n详见 §3。\n").findings_count == 0
+
+
 class TestBseStockClassification:
     def test_920_prefix_classified_as_stock(self, tmp_path: Path):
         p = _write(tmp_path, "920001-北交所公司", "2026-08-02-10-00-00.md", "# x\n")
@@ -595,3 +616,70 @@ class TestVerifyLayersFailOnException:
         assert by_layer["quality"].status == "fail"
         assert by_layer["rigor"].status == "pass"  # rigor 仍运行
         assert _compute_overall(layers) == "FAIL"
+
+
+class TestReviewArtifactType:
+    """复盘纪要是**独立产物类型**（R2/T8-3），不套用研报结构检查。
+
+    实测踩过：纪要落在 `reports/515050-通信ETF/` 下被识别成 `etf` →
+    structure 稳定产出 4 条误报（[事实]/[分析]/[证据强度]/风险声明）——
+    而该纪要**按设计就不含**前三者（它明确不做推演，只对照假设状态）。
+    """
+
+    def test_review_md_detected_as_review(self, tmp_path):
+        p = tmp_path / "reports" / "515050-通信ETF" / "20260911-review.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("# 🔍 复盘纪要\n\n> 不构成投资建议。\n", encoding="utf-8")
+        assert detect_report_type(p) == "review", "纪要须先于目录/代码前缀判定"
+
+    def test_review_structure_only_requires_risk_statement(self):
+        from report_qc import _check_structure
+
+        text = "# 🔍 复盘纪要 — 515050\n\n> 研究工具，非决策工具，不构成投资建议。\n"
+        assert _check_structure(text, "review").status == "pass"
+
+    def test_review_without_risk_statement_warns(self):
+        from report_qc import _check_structure
+
+        layer = _check_structure("# 复盘纪要\n\n没有声明\n", "review")
+        assert layer.findings_count == 1
+        assert layer.details[0]["id"] == "structure-risk-statement"
+
+
+class TestQcLatestSkipsReviewMemo:
+    """`--latest` 不得选中复盘纪要（R0~R2 review 修复）。
+
+    回归：`qc_latest` 只过滤 `.audit_checklist`，而 `etf.py review` 把纪要写进
+    **同一报告目录**且 mtime 最新 → 闸门在错的文档上给 PASS，最新真报告的 4 项
+    结构检查（[事实]/[分析]/[证据强度]/风险声明）不再执行。
+    """
+
+    @staticmethod
+    def _tree(tmp_path: Path) -> tuple[Path, Path]:
+        d = tmp_path / "reports" / "515050-通信ETF"
+        d.mkdir(parents=True)
+        report = d / "2026-09-10-22-50-00.md"
+        report.write_text(COMPLIANT_ETF, encoding="utf-8")
+        memo = d / "20260911-review.md"
+        memo.write_text("# 🔍 复盘纪要 — 515050\n\n> 不构成投资建议。\n", encoding="utf-8")
+        import os
+
+        os.utime(report, (1_600_000_000, 1_600_000_000))
+        os.utime(memo, (1_700_000_000, 1_700_000_000))     # 纪要更新
+        return report, memo
+
+    def test_latest_picks_real_report_not_memo(self, tmp_path: Path):
+        self._tree(tmp_path)
+        got = qc_latest(tmp_path / "reports")
+        assert got is not None
+        assert got.report_path.endswith("2026-09-10-22-50-00.md"), \
+            f"--latest 选中了复盘纪要: {got.report_path}"
+        assert got.report_type == "etf"
+
+    def test_report_style_timestamp_named_review_is_not_relaxed(self, tmp_path: Path):
+        """`-review.md` 规则不得**内容无关**：用户把真报告存成 `2026-09-10-review.md`
+        （报告风格时间戳，非本工具的 `YYYYMMDD-review.md`）时应仍按研报校验。"""
+        p = tmp_path / "reports" / "515050-通信ETF" / "2026-09-10-review.md"
+        p.parent.mkdir(parents=True)
+        p.write_text(COMPLIANT_ETF, encoding="utf-8")
+        assert detect_report_type(p) == "etf", "报告风格时间戳被误判为复盘纪要"

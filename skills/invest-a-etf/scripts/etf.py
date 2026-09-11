@@ -522,9 +522,14 @@ def _resolve_md_path(symbol: str, md_path: str | None) -> tuple[Path | None, str
         return p, None
     # 按文件名（时间戳 = 字典序 = 时间序）排序取全局最新；按完整路径排
     # 序会受目录名干扰（F1-7 改名遗留目录「通信ETF华夏」字典序靠后但报告旧）
+    # 复盘纪要自身落在同一目录，**不是报告**：不排除会让 review/--init 把上次
+    # 生成的纪要当成「最新报告」（实测踩过：report_ts 取成 20260911-review）
+    from decision_review import REVIEW_NAME_RE
+
     candidates: list[Path] = []
     for d in Path("reports").glob(f"{symbol}-*"):
-        candidates.extend(d.glob("*.md"))
+        candidates.extend(p for p in d.glob("*.md")
+                          if not REVIEW_NAME_RE.match(p.name))
     candidates.sort(key=lambda p: p.name)
     if not candidates:
         return None, (
@@ -798,6 +803,91 @@ def cmd_diagnose() -> int:
     return 0
 
 
+def cmd_decision(symbol: str, *, from_path: str | None, init: bool,
+                 md: str | None = None) -> int:
+    """复盘原料 sidecar（decision.json）：初始化模板 / 校验并落盘。
+
+    设计：host-docs/v0.3.0/review-material-design.md D1/D3（用户已批准）。
+    sidecar 与报告 md **同目录同 ts**——必须能配到某一份报告，否则 review 无法
+    把「当时的假设」和当时的报告对上。故没有报告 md 时**显式失败**，
+    不落一个无主的 sidecar。
+
+    校验 fail-loud（退出 2）：LAW 6 要求多情景参考价带假设前提 + 概率权重，
+    缺项不得静默落盘。
+    """
+    from decision_schema import DecisionSchemaError, load_decision_json, minimal_decision
+
+    md_path, err = _resolve_md_path(symbol, md)
+    if err:
+        print(f"❌ {err}", file=sys.stderr)
+        return 2
+    assert md_path is not None
+    ts = md_path.stem
+
+    if init:
+        from dates import shanghai_now  # noqa: E402
+
+        payload = minimal_decision(symbol=symbol, report_ts=ts,
+                                   as_of=shanghai_now().date().isoformat())
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if not from_path:
+        print("❌ 需指定 --from <path>（校验并落盘）或 --init（输出模板）",
+              file=sys.stderr)
+        return 2
+
+    try:
+        payload = load_decision_json(from_path)
+    except DecisionSchemaError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 2
+
+    # 配对守卫：symbol/report_ts 须与目标报告一致，防张冠李戴
+    mismatches: list[str] = []
+    if payload.get("symbol") != symbol:
+        mismatches.append(f"symbol: {payload.get('symbol')!r} ≠ {symbol!r}")
+    if payload.get("report_ts") != ts:
+        mismatches.append(f"report_ts: {payload.get('report_ts')!r} ≠ {ts!r}")
+    if mismatches:
+        print("❌ sidecar 与目标报告不配对：" + "；".join(mismatches), file=sys.stderr)
+        return 2
+
+    out = md_path.parent / f"{ts}.decision.json"
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    print(f"✅ 复盘原料已落盘: {out}")
+    return 0
+
+
+def cmd_review(symbol: str, *, out: str | None = None, md: str | None = None) -> int:
+    """复盘纪要：把该标的的报告序列 + 复盘原料（sidecar）对照成三段式纪要。
+
+    设计：host-docs/v0.3.0/review-material-design.md D3。
+    **只对照假设状态**——不评价该不该行动、不含买卖语义（LAW 6）。
+    产出后须过 `report_qc.py --fail-on error` 方可交付。
+    """
+    md_path, err = _resolve_md_path(symbol, md)
+    if err:
+        print(f"❌ {err}", file=sys.stderr)
+        return 2
+
+    from decision_review import collect_sidecars, render_review
+    from dates import shanghai_now
+
+    report_dir = md_path.parent
+    sidecars = collect_sidecars(report_dir)
+    today = shanghai_now().date()
+    body = render_review(symbol, sidecars=sidecars, today=today)
+
+    out_path = Path(out) if out else report_dir / f"{today:%Y%m%d}-review.md"
+    out_path.write_text(body, encoding="utf-8")
+    print(body)
+    print(f"\n已落盘: {out_path}")
+    print(f"> 交付前须跑：uv run python skills/lib/report_qc.py {out_path} --fail-on error")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="etf.py", description="invest-a-etf CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -863,6 +953,21 @@ def main(argv: list[str] | None = None) -> int:
     p_fb.add_argument("symbol", help="6 位 ETF 代码")
     p_fb.add_argument("--json", action="store_true", help="输出完整 JSON")
 
+    p_dec = sub.add_parser(
+        "decision", help="复盘原料 sidecar：初始化模板 / 校验并落盘（与报告 md 同 ts）")
+    p_dec.add_argument("symbol", help="6 位 ETF 代码")
+    p_dec.add_argument("--from", dest="from_path", default=None,
+                       help="待校验并落盘的 decision.json 路径")
+    p_dec.add_argument("--init", action="store_true",
+                       help="按最新报告 ts 输出最小 schema 模板（供填写）")
+    p_dec.add_argument("--md", default=None, help="显式指定配对报告 md 路径")
+
+    p_rev = sub.add_parser(
+        "review", help="复盘纪要：报告序列 + 复盘原料对照（只对照假设状态，非决策）")
+    p_rev.add_argument("symbol", help="6 位 ETF 代码")
+    p_rev.add_argument("--out", default=None, help="输出路径（缺省 报告目录/{YYYYMMDD}-review.md）")
+    p_rev.add_argument("--md", default=None, help="显式指定配对报告 md 路径")
+
     p_html = sub.add_parser("html", help="生成交互式 HTML 报告（仪表盘 + 报告 md 原文嵌入）")
     p_html.add_argument("symbol", help="6 位 ETF 代码")
     p_html.add_argument("--md", metavar="PATH", default=None,
@@ -893,6 +998,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_collect_sector_flow()
     if args.cmd == "futures-basis":
         return cmd_futures_basis(args.symbol, as_json=args.json)
+    if args.cmd == "decision":
+        return cmd_decision(args.symbol, from_path=args.from_path, init=args.init,
+                            md=args.md)
+    if args.cmd == "review":
+        return cmd_review(args.symbol, out=args.out, md=args.md)
     if args.cmd == "html":
         return cmd_html(args.symbol, md_path=args.md, out_path=args.out,
                         no_open=args.no_open)

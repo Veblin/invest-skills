@@ -315,6 +315,40 @@ def test_ps1_covers_all_skill_links():
     assert "LinkType -eq \"HardLink\"" in ps1
 
 
+def test_repo_link_surfaces_match_skills():
+    """三个发现面的链接须与 skills/ 一一对应——**文件系统级**，非文本级。
+
+    上方 test_ps1 / test_readme 只校验 ps1 与 README 的**文本**：动态化后二者与
+    计数断言可以互相自洽，而真实链接仍可缺条（H6b 后即如此——commands 少 4 条，
+    macOS/Linux 上 invest-hk-stock/event-calendar 等新技能的
+    slash command 无文件可加载；Windows 走 ps1 硬链接，故不复现）。
+    """
+    skills = sorted(p.parent.name for p in (_REPO_ROOT / "skills").glob("*/SKILL.md"))
+    assert skills, "未发现任何 skills/*/SKILL.md"
+    for surface in (".workbuddy/skills", ".claude/skills", ".agents/skills"):
+        for s in skills:
+            link = _REPO_ROOT / surface / s
+            assert link.is_symlink(), f"{surface}/{s} 应为 symlink"
+            assert link.resolve().is_dir(), f"{surface}/{s} 断链"
+    for s in skills:
+        link = _REPO_ROOT / ".claude" / "commands" / f"{s}.md"
+        assert link.is_symlink(), f".claude/commands/{s}.md 缺失（slash command 不可用）"
+        assert link.resolve().is_file(), f".claude/commands/{s}.md 断链"
+
+
+def test_link_skills_sh_covers_all_surfaces():
+    """macOS/Linux 修复脚本须覆盖四个发现面，且技能清单动态派生（不得手写枚举）。
+
+    此前只建 .agents 一面 + 手写 SKILLS 数组——新增技能时其余三面各自滞后
+    （commands 缺 4 条），而脚本自身无从发现该漂移。
+    """
+    sh = _read("scripts/link-skills.sh")
+    for surface in (".workbuddy/skills", ".claude/skills", ".agents/skills",
+                    ".claude/commands"):
+        assert surface in sh, f"link-skills.sh 未覆盖 {surface} 面"
+    assert "skills/*/SKILL.md" in sh, "技能清单应动态派生（skills/*/SKILL.md），防枚举漂移"
+
+
 def test_readme_windows_rebuild_section():
     readme = _read("README.md")
     assert "setup_workbuddy_windows.ps1" in readme

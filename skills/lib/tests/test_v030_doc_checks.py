@@ -142,6 +142,17 @@ def test_conventions_new_patterns_18_19_and_c10_template():
     assert "价格口径（NAV 前复权），窗口 2025-08-25 起 252 交易日" in sec, "#15 C10 标准模板缺失"
 
 
+def test_conventions_52_table_rows_wellformed():
+    """§5.2 四维标注表每行须为 3 列（曾因编辑丢单元格致整行损坏、单元格文字外溢）。"""
+    conv = _read(_CONVENTIONS)
+    sec = _section(conv, "### 5.2 四维标注")
+    rows = [ln for ln in sec.splitlines() if ln.strip().startswith("|")]
+    assert rows, "§5.2 表格缺失"
+    for ln in rows:
+        cells = ln.strip().strip("|").split("|")
+        assert len(cells) == 3, f"§5.2 行非 3 列（{len(cells)} 列）: {ln!r}"
+
+
 def test_etf_skill_selfcheck_synced():
     """ETF SKILL Self-Check 含 v0.3.0 三项（F1/F2+F3/F4）且引用强制行为 7。"""
     etf_skill = _read("skills/invest-a-etf/SKILL.md")

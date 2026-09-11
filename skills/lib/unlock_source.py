@@ -44,7 +44,16 @@ def _parse_unlock_date(raw: Any) -> _dt.date | None:
     if raw is None:
         return None
     if isinstance(raw, _dt.datetime):
-        return raw.date()
+        try:
+            d = raw.date()
+        except Exception:  # noqa: BLE001 —— 解析失败按不可用处理，不中断整次取数
+            return None
+        # pd.NaT 是 datetime **伪子类**：`NaT.date()` 返回 NaT 且不抛异常——必须在
+        # datetime 分支内显式判空，否则后续 `lo <= d <= hi` 抛
+        # `TypeError: Cannot compare NaT with datetime.date object`（东财含空解禁
+        # 时间的行即触发）。守卫口径与 `dates.parse_date` 一致
+        # （见 invest-a-stock/tests/test_catalyst.py::TestParseDate::test_pandas_nat）。
+        return None if str(d) == "NaT" else d
     if isinstance(raw, _dt.date):
         return raw
     s = _clean_str(raw)

@@ -125,9 +125,17 @@ def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[Ca
     except Exception:  # pragma: no cover
         pass
 
-    from unlock_source import fetch_symbol_unlocks
+    try:  # 导入在 try 内：上方 bootstrap 是 best-effort（except: pass），引导失败
+        # 或 skills/lib 不在 sys.path 时 import 会抛 ModuleNotFoundError——必须只
+        # 降级本段，否则 collect_catalyst_events 整块中止，同一调用中已采到的分红/
+        # 公告事件一并丢失。
+        from unlock_source import fetch_symbol_unlocks
 
-    rows, err = fetch_symbol_unlocks(symbol, lookahead_days=lookahead_days, today=today)
+        rows, err = fetch_symbol_unlocks(symbol, lookahead_days=lookahead_days,
+                                         today=today)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("restricted unlock fetch failed: %s", exc)
+        return events
     if err:
         logger.info("restricted release API unavailable: %s", err)
         return events

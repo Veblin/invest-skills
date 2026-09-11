@@ -158,7 +158,9 @@ def weekly_unchanged_vs_previous(date: str) -> bool | None:
     omap = {r["index_code"]: (r["pe"], r["pb"], r["chg_pct"], r["turnover_pct"]) for r in old}
     if not cmap or not omap:
         return None
-    return maps_equal(cmap, omap)
+    # nulls_equal=True（检测门语义）：源长期冻结时涨跌幅/换手率常为 NULL，双侧
+    # 同空即未变化；用写入门默认语义会让停更告警在任一同空单元格上静默失效。
+    return maps_equal(cmap, omap, nulls_equal=True)
 
 
 def industry_snapshot_stale_note(date: str | None, *, src_date: str | None = None) -> str | None:

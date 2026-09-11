@@ -51,6 +51,7 @@ AK_INTERFACES: list[str] = [
     # A9 宏观
     "macro_china_pmi", "macro_china_cpi", "macro_china_ppi", "macro_china_lpr",
     "macro_china_money_supply", "macro_rmb_loan", "bond_china_yield", "bond_zh_us_rate",
+    "news_economic_baidu",  # v3 宏观日程（invest-a-event-calendar；能返回未来日程）
     # A10 新闻/公告/研报
     "stock_notice_report", "stock_individual_notice_report", "stock_news_em",
     "stock_research_report_em",

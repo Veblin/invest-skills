@@ -35,8 +35,6 @@ jobs:
             skills/invest-a-pattern-scan \
             skills/invest-hk-stock \
             skills/invest-a-event-calendar \
-            skills/invest-a-forecast-scan \
-            skills/invest-a-futures-link \
             skills.yaml \
             gemini-extension.json \
             pyproject.toml \
@@ -61,8 +59,6 @@ jobs:
             dist/pkg/invest-a-pattern-scan/__pycache__ \
             dist/pkg/invest-hk-stock/__pycache__ \
             dist/pkg/invest-a-event-calendar/__pycache__ \
-            dist/pkg/invest-a-forecast-scan/__pycache__ \
-            dist/pkg/invest-a-futures-link/__pycache__ \
             dist/pkg/.venv
           find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete
           cd dist && tar -czf invest-skills-${{ github.ref_name }}.tar.gz -C pkg .

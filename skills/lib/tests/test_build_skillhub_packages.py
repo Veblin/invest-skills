@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -302,6 +303,122 @@ def test_pattern_package_gap_modules(tmp_path):
     # 包内 invest_path 提供 load_gap_scan_module
     ip = (dst / "scripts/lib/invest_path.py").read_text(encoding="utf-8")
     assert "import_module" in ip and "load_gap_scan_module" in ip
+
+
+# ---- (e2) 闭包自闭合（发布包不得有悬空 lib.X）----
+_GENERATED_MODULES = {"_invest_path", "invest_path"}
+
+
+def _dangling_lib_imports(skill: str) -> set[tuple[str, str]]:
+    """闭包文本中显式 `lib.X` 引用但 X 未入闭包 → {(来源, target)}。
+
+    生成模块（_invest_path/invest_path）由 plan() 单独落包，不在 included 内，豁免。
+    属性形式（from lib.X import func → target `lib.X.func`）以首段回溯判定归属。
+    """
+    c = b._Closure(skill)
+    src = b.SKILLS_DIR / skill
+    entries = [p for p in sorted((src / "scripts").glob("*.py")) if p.name != "__init__.py"]
+    md = ""
+    if c.layout in ("inline", "pulse"):
+        md = (src / "SKILL.md").read_text(encoding="utf-8")
+    c.compute(entries, md)
+    texts = [(p.name, p.read_text(encoding="utf-8")) for p in entries]
+    texts += [(n, f.read_text(encoding="utf-8")) for n, (_, f) in c.included.items()]
+    if md:
+        texts.append(("SKILL.md", md))
+    out: set[tuple[str, str]] = set()
+    for label, text in texts:
+        for target, level in b._parse_imports(text):
+            if level != 0 or not target.startswith("lib."):
+                continue
+            name = target[len("lib."):]
+            head = name.split(".")[0]
+            if name in c.included or head in c.included or head in _GENERATED_MODULES:
+                continue
+            out.add((label, target))
+    return out
+
+
+def test_published_packages_have_no_dangling_lib_imports():
+    """每个发布包的闭包必须自闭合：显式 lib.X 引用不得被 _resolve 静默丢弃。
+
+    R1 验收 H4/F3 的包内路径自适应只覆盖了路径解析，未覆盖 lib 闭包依赖——
+    event-calendar 的 lib/proxy（unlock_source 东财直连）因 CROSS_LIBS 缺条目
+    被丢弃，分发形态下池模式全部取数失败且错误归因到数据源，而仓库布局测试全绿。
+    """
+    for skill in b.PUBLISH_SKILLS:
+        dangling = _dangling_lib_imports(skill)
+        assert not dangling, f"{skill} 闭包悬空引用: {sorted(dangling)}"
+
+
+def test_event_calendar_package_build_closure(tmp_path):
+    """event-calendar 池模式的东财直连依赖（lib.proxy）与交易日历依赖必须进包。
+
+    无 lib.proxy → 池模式每次取数 ModuleNotFoundError（误报为数据源不可得）；
+    无 lib.tushare_client → trade_cal 恒走 except ImportError 估算分支（恒粗判）。
+    """
+    total = b.build_one("invest-a-event-calendar", b.project_version(), tmp_path, dry_run=False)
+    assert 0 < total <= b.MAX_FILES
+    dst = tmp_path / "invest-a-event-calendar"
+    assert (dst / "scripts/lib/proxy.py").is_file()
+    assert (dst / "scripts/lib/tushare_client.py").is_file()
+    assert (dst / "scripts/lib/unlock_source.py").is_file()
+    # v3 宏观日程：数据层模块与两份策展表须一并进包（否则 --macro 在分发包内不可用）
+    assert (dst / "scripts/macro_calendar.py").is_file()
+    assert (dst / "references/fomc_meetings.yaml").is_file()
+    assert (dst / "references/macro_sources.yaml").is_file()
+
+
+# ---- (e3) SKILL.md 强制工具（report_qc「机器层准出」）进包 ----
+def _mandating_skills() -> list[str]:
+    return sorted(p.parent.name for p in b.SKILLS_DIR.glob("*/SKILL.md")
+                  if "skills/lib/report_qc.py" in p.read_text(encoding="utf-8"))
+
+
+def test_mandated_tool_seeded_from_skill_md():
+    """强制工具须由 SKILL.md 引用驱动入闭包（含动态加载目标 lint）。
+
+    report_qc 经 importlib.import_module("_invest_lib.lint") 与 f-string 形式动态
+    加载，ast 与正则均无法静态解析 → 闭包 BFS 抓不到 lint，须显式 seed。
+    """
+    mandating = _mandating_skills()
+    assert mandating, "未发现任何强制 report_qc 的 SKILL.md"
+    for skill in mandating:
+        c = b._Closure(skill)
+        c.add_mandated_tools(
+            (b.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8"))
+        assert "report_qc" in c.included, f"{skill}: report_qc 未入闭包"
+        assert "lint" in c.included, f"{skill}: lint（动态加载目标）未入闭包"
+
+
+def test_mandated_qc_tool_packaged_and_runnable(tmp_path):
+    """「机器层准出（必跑）」命令须在包内真实可运行，而非指向不存在的仓库路径。
+
+    回归：包内既无 report_qc 也无路径改写 → 分发用户执行 SKILL.md 强制的命令直接
+    can't open file …/skills/lib/report_qc.py，闸门在大多数用户收到的形态下失效。
+    """
+    b.build_one("invest-a-event-calendar", b.project_version(), tmp_path, dry_run=False)
+    dst = tmp_path / "invest-a-event-calendar"
+    lib = dst / "scripts" / "lib"
+    assert (lib / "report_qc.py").is_file(), "report_qc 未进包"
+    assert (lib / "lint.py").is_file(), "lint（动态加载目标）未进包"
+    assert (lib / "codes.py").is_file(), "codes（report_qc 依赖）未进包"
+    assert (dst / "scripts/references/compliance_rules.yaml").is_file(), "规则数据未随包"
+
+    md = (dst / "SKILL.md").read_text(encoding="utf-8")
+    assert "skills/lib/report_qc.py" not in md, "SKILL.md 路径未改写"
+    assert "scripts/lib/report_qc.py" in md
+
+    # 包内真实跑通动态加载链：report_qc → _load_lint_module → compliance_rules.yaml
+    code = (
+        f"import sys; sys.path.insert(0, r'{lib}')\n"
+        "import report_qc\n"
+        "rules = report_qc._load_lint_module().load_rules()\n"
+        "print('OK', len(rules))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, f"包内动态加载失败:\n{proc.stderr[-2000:]}"
+    assert "OK" in proc.stdout
 
 
 # ---- (f) >200 守卫非零退出 + dry-run ----

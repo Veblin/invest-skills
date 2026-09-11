@@ -62,6 +62,39 @@ def test_main_empty_window_with_trading_day_exit3(monkeypatch, capsys):
     assert "不可得" in capsys.readouterr().err
 
 
+def test_market_mode_uses_akshare_direct_session(monkeypatch, capsys):
+    """市场模式须经 akshare_direct_session（东财直连 + ≥0.5s 节流）。
+
+    回归：市场模式直调东财端点、绕过 proxy 会话——池模式同环境可用而市场模式在
+    Clash/VPN 下 ProxyError（CLAUDE.md 记载东财 API 需直连），且以无限流方式打东财。
+    """
+    import contextlib
+
+    import akshare as ak
+    import lib.proxy as proxy_mod
+
+    import unlock_calendar as uc
+
+    entered: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_session():
+        entered.append("entered")
+        yield
+
+    monkeypatch.setattr(proxy_mod, "akshare_direct_session", fake_session)
+
+    def boom(**_kw):
+        raise RuntimeError("sentinel")
+
+    monkeypatch.setattr(ak, "stock_restricted_release_summary_em", boom)
+    monkeypatch.setattr(sys, "argv",
+                        ["unlock_calendar.py", "--days-past", "5", "--no-out"])
+    assert uc.main() == 3
+    assert entered, "市场模式未经 akshare_direct_session"
+    assert "不可得" in capsys.readouterr().err
+
+
 def test_percentile_rank():
     vals = [100.0, 200.0, 300.0, 400.0]
     assert percentile_rank(vals, 100.0) == 0.0
@@ -160,3 +193,37 @@ def test_past_recent_is_calendar_window():
     assert len(out["past"]) == 2                 # 全窗口回看仍含两条
     assert len(out["past_recent"]) == 1          # 近 30 日只含 5 天前那条
     assert out["past"][0]["rank"] is None        # 回看行不再计算分位（F12）
+
+
+def test_window_has_trading_day_distrusts_estimated_calendar(monkeypatch):
+    """估算日历（无 token → 工作日近似、节假日混入）**不得当权威**。
+
+    回归（R0~R2 review）：丢弃 `is_estimated` → 长假窗口下 has_td 为 True →
+    打印「解禁数据不可得（疑代理阻断或接口变化）」并 exit 3，把**窗口无交易日
+    误报成数据源故障**。同批给 `freshness.trading_day_lag` /
+    `sector_flow._is_trading_day` 立的估算日历纪律，此处漏了。
+    """
+    import lib.trade_cal as tc
+
+    import unlock_calendar as uc
+
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: (["20261001"], True))
+    assert uc._window_has_trading_day("20261001", "20261008") is None
+
+
+def test_main_empty_window_estimated_calendar_not_blamed_on_source(monkeypatch, capsys):
+    """日历不可信时空返回须说明「无法鉴别」，不得归因成「疑代理阻断」。"""
+    import akshare as ak
+    import lib.trade_cal as tc
+
+    import unlock_calendar as uc
+
+    monkeypatch.setattr(ak, "stock_restricted_release_summary_em",
+                        lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: (["20261001"], True))
+    monkeypatch.setattr(sys, "argv",
+                        ["unlock_calendar.py", "--days-past", "5", "--no-out"])
+    assert uc.main() == 3
+    err = capsys.readouterr().err
+    assert ("日历" in err) or ("无法鉴别" in err), f"未说明日历不可信: {err}"
+    assert "疑代理阻断" not in err, f"归因仍指向数据源: {err}"

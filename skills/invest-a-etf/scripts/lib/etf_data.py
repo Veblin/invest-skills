@@ -342,6 +342,8 @@ def query_etf_data(
         "symbol": symbol,
         "category": query_etf_category(symbol),
         "index_pe": None,
+        "index_pe_caliber": None,       # R2/T9-3：取值口径（股本加权/流通加权）
+        "index_pe_circulating": None,   # 另一口径的对照值（双字段显式）
         "index_pe_pct": None,
         "index_pe_status": "unknown_etf",
         "industry_pe": None,
@@ -544,6 +546,11 @@ def fetch_etf_spot_rows() -> list[dict] | None:
     return df.to_dict("records")
 
 
+# csindex 两个 PE 加权口径的展示名（R2/T9-3：口径须显式，不得混用后仍标 PE(1)）
+_PE_CALIBER_SHARE = "股本加权"        # 对应「市盈率1」
+_PE_CALIBER_CIRCULATING = "流通加权"  # 对应「市盈率2」
+
+
 def fetch_etf_index_pe(idx_code: str) -> dict:
     """原始取数：csindex 指数 PE（data_bridge etf_index_pe 维度）。
 
@@ -555,7 +562,8 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
         with akshare_direct_session():
             df = ak.stock_zh_index_value_csindex(symbol=idx_code)
         if df is None or df.empty:
-            return {"status": "missing", "index_pe": None, "index_pe_note": None,
+            return {"status": "missing", "index_pe": None, "index_pe_caliber": None,
+                    "index_pe_circulating": None, "index_pe_note": None,
                     "rows": [], "error": "csindex empty response"}
         if "日期" in df.columns:
             # csindex 返回新日期在前；显式按日期升序后取末行，不依赖返回顺序
@@ -571,7 +579,8 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
                 df = df.dropna(subset=pe_cols, how="all")
             df = df.sort_values("日期")
             if df.empty:
-                return {"status": "missing", "index_pe": None, "index_pe_note": None,
+                return {"status": "missing", "index_pe": None, "index_pe_caliber": None,
+                        "index_pe_circulating": None, "index_pe_note": None,
                         "rows": [], "error": "csindex rows empty after date dropna"}
         else:
             # 列名漂移守卫（review #3）：无「日期」列时无法排序，沿用原始行序取末行，
@@ -583,12 +592,20 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
         pe1 = safe_float(latest.get("市盈率1"))
         pe2 = safe_float(latest.get("市盈率2"))
         pe = pe1 if pe1 is not None else pe2
+        # 口径必须**显式**（R2/T9-3）：上方回落是静默的，若消费者按「PE(1) 股本加权」
+        # 标注就会误标——累积表 index_pe_history.pe 只存市盈率1，两处由此表现不一致
+        # （实测 58.49 vs 54.92，即为两种加权口径之差）。这里同时暴露两个口径。
+        caliber = (_PE_CALIBER_SHARE if pe1 is not None
+                   else (_PE_CALIBER_CIRCULATING if pe2 is not None else None))
         return {
             "status": "ok" if pe is not None else "missing",
             "index_pe": pe,
+            "index_pe_caliber": caliber,
+            "index_pe_circulating": pe2,
             "index_pe_note": (
                 f"来源: csindex {idx_code}，单窗 {len(df)} 条历史；"
-                "市盈率1=股本加权，市盈率2=流通加权（历史分位见 index_pe_pct）"
+                f"本次取值口径＝{caliber or '不可得'}"
+                "（市盈率1=股本加权；市盈率2=流通加权；历史分位见 index_pe_pct）"
             ),
             "rows": df.to_dict("records"),
             "error": None,
@@ -599,7 +616,8 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
         # 惯例），调用方仍凭 status="missing" 判断
         logger.debug("csindex_pe(%s) failed, silent degrade (fallback probe): %s",
                      idx_code, exc)
-        return {"status": "missing", "index_pe": None, "index_pe_note": None,
+        return {"status": "missing", "index_pe": None, "index_pe_caliber": None,
+                "index_pe_circulating": None, "index_pe_note": None,
                 "rows": [], "error": str(exc)}
 
 
@@ -1036,6 +1054,10 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
         result["_errors"].append(env.get("error") or "csindex_pe: empty response")
         return
     result["index_pe"] = env.get("index_pe")
+    # 口径须**随值一起**透传（R2/T9-3）：只传 index_pe 会让徽章拿不到口径，
+    # 只能回退到「未标注」——静默替换就仍然不可见
+    result["index_pe_caliber"] = env.get("index_pe_caliber")
+    result["index_pe_circulating"] = env.get("index_pe_circulating")
     result["index_pe_note"] = env.get("index_pe_note")
     # 当前 PE 值所属日期 = 信封最新行日期（query-before-persist 仅单次 cmd_report
     # 内成立；collect-weekly/早间 report 已持久化今日行时，分位须剔除今日自身，
@@ -1044,12 +1066,18 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
     # 最新行日期取 max 而非 rows[-1]（review #4）：修复前的 L2 缓存信封为降序
     # rows，rows[-1] 是最早日期 → 分位防双计剔除错行；max 对任意行序稳健
     current_date = str(max((r.get("日期") for r in rows), key=lambda d: str(d))) if rows else None
+    # 分位必须用**与当前值同口径**的历史列（R0~R2 review）：表内 pe=市盈率1（股本
+    # 加权）、pe_circulating=市盈率2（流通加权）。否则「PE(2) 流通加权口径」的徽章
+    # 旁边会是一个拿股本加权历史排出来的分位。
+    _pct_col = ("pe_circulating"
+                if result.get("index_pe_caliber") == _PE_CALIBER_CIRCULATING else "pe")
     result["index_pe_pct"] = _index_pe_percentile_from_db(
-        idx_code, env.get("index_pe"), current_date)
+        idx_code, env.get("index_pe"), current_date, column=_pct_col)
 
 
 def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
-                                 current_date: str | None = None) -> float | None:
+                                 current_date: str | None = None, *,
+                                 column: str = "pe") -> float | None:
     """index_pe_history 累积 ≥20 条时计算当前 PE 历史分位；否则 None（数据不足）。
 
     current_date 为当前 PE 值所属日期（csindex 信封最新行日期）：剔除
@@ -1071,7 +1099,7 @@ def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
         rows = get_index_pe_history(idx_code)
         if current_date is not None:
             rows = hist_ex_today(rows, current_date)
-        return index_pe_percentile(rows, current)
+        return index_pe_percentile(rows, current, column=column)
     except Exception as exc:  # DB 不可用等：分位缺失不阻断
         logger.debug("index_pe_percentile(%s) failed: %s", idx_code, exc)
         return None

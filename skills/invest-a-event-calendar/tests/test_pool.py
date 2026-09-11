@@ -50,6 +50,20 @@ def test_trading_days_until_far_field():
     assert bad_lag is None and bad_deg is True
 
 
+def test_trading_days_until_estimated_calendar_marked(monkeypatch):
+    """估算日历（无 token/取数失败）→ 距今列标「自然日粗判」，不得给精确交易日数。
+
+    降级标记依赖 freshness 透传 is_estimated（曾被丢弃）：否则「距今(交易日)」列
+    在无 token 部署下以估算值冒充交易日数且无任何标注。
+    """
+    import lib.trade_cal as tc
+
+    monkeypatch.setattr(tc, "fetch_trade_cal", lambda s, e: (["20260907"], True))
+    lag, degraded = uc._trading_days_until("2026-09-16", _dt.date(2026, 9, 10))
+    assert degraded is True
+    assert lag == 6          # 自然日差，非估算日历给出的交易日数
+
+
 def test_diff_batches_none_none_is_equal():
     """双侧 None（如股东数不可得）不得判为变化（区别于 freshness NULL 语义）。"""
     same = {"2026-11-05": {"qty_yi": 3.2, "holders": None, "kind": ""}}
@@ -57,6 +71,37 @@ def test_diff_batches_none_none_is_equal():
 
 
 # ── 状态读写 ─────────────────────────────────────────────────────────────
+
+def test_diff_batches_ignores_expired_past_batches():
+    """早于 not_before 的批次从（严格前向的）抓取窗消失属正常，不得报「消失」。
+
+    回归：解禁日过后的首次运行会把**真实发生过**的解禁渲染为「❌ 消失｜上次运行
+    曾出现」，读起来像记录被撤回，并淹没真正的新增/临近提醒。
+    """
+    old = {"2026-09-20": {"qty_yi": 3.2, "holders": 5, "kind": "定增"},
+           "2026-12-01": {"qty_yi": 1.0, "holders": None, "kind": "首发"}}
+    new = {"2026-12-01": {"qty_yi": 1.0, "holders": None, "kind": "首发"}}
+    assert uc.diff_batches(old, new, not_before="2026-09-25")["removed"] == []
+    # 仍在窗口内的批次消失才是真信号
+    assert uc.diff_batches(old, new, not_before="2026-09-01")["removed"] == ["2026-09-20"]
+
+
+def test_collect_pool_merges_same_day_batches(monkeypatch):
+    """同日多批解禁（定增 + 首发）须合并为日级总量，不得互相覆盖。
+
+    回归：按 date 建键的 dict 推导让后一批覆盖前一批，当日解禁数量被低估。
+    """
+    rows = [
+        {"date": "2026-11-05", "qty_yi": 3.2, "holders": 5, "kind": "定增"},
+        {"date": "2026-11-05", "qty_yi": 1.0, "holders": 2, "kind": "首发"},
+    ]
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", lambda s, **k: (rows, None))
+    out = uc.collect_pool(["600176"], lookahead_days=90, sleep_s=0)
+    b = out["600176"]["batches"]["2026-11-05"]
+    assert b["qty_yi"] == pytest.approx(4.2), "当日解禁数量须为各批之和"
+    assert b["holders"] == 7
+    assert b["kind"] == "定增+首发"
+
 
 def test_state_roundtrip_and_corrupt(tmp_path):
     sp = tmp_path / "state.json"
@@ -173,6 +218,49 @@ def test_cli_pool_all_failed_exit3(tmp_path, monkeypatch, capsys):
     assert "不可得" in capsys.readouterr().err
 
 
+def test_cli_rejects_alert_days_beyond_lookahead(tmp_path, monkeypatch, capsys):
+    """--alert-days > --lookahead 须在参数层拒绝（默认值下亦不得放行）。
+
+    否则提醒窗宽于任何被拉取过的窗口：窗内批次不在 batches 中，报告仍打印
+    「提醒窗内无解禁批次 ✅」——自述排雷首选的技能给出假全清结论。
+    """
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--alert-days", "120", "--lookahead", "90",
+                                      "--no-out", "--no-state"])
+    with pytest.raises(SystemExit) as exc:
+        uc.main()
+    assert exc.value.code == 2
+    assert "--alert-days" in capsys.readouterr().err
+
+
+def test_cli_pool_expired_batch_not_reported_as_removed(tmp_path, monkeypatch, capsys):
+    """解禁日过后首次运行：已发生的批次不得渲染为「❌ 消失」，真消失的仍须报出。"""
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n", encoding="utf-8")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "updated": "2026-09-10 10:00",
+        "symbols": {"600176": {"last_run": "20260910", "batches": {
+            "2020-01-15": {"qty_yi": 3.2, "holders": 5, "kind": "定增"},   # 已过期
+            "2030-11-11": {"qty_yi": 2.0, "holders": 3, "kind": "首发"},   # 真消失
+            "2030-12-01": {"qty_yi": 1.0, "holders": None, "kind": "首发"},  # 仍在
+        }}},
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks",
+                        lambda s, **k: ([{"date": "2030-12-01", "qty_yi": 1.0,
+                                          "holders": None, "kind": "首发"}], None))
+    monkeypatch.setattr(uc, "_trading_days_until", lambda d, t: (5, False))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--state-file", str(state), "--no-out"])
+    assert uc.main() == 0
+    out = capsys.readouterr().out
+    assert "2020-01-15" not in out, "过期批次不得出现（既非消失也非新增）"
+    assert "❌ 消失" in out and "2030-11-11" in out, "真消失的批次仍须报出"
+    assert "🆕 新增" not in out
+
+
 def test_cli_pool_missing_file_exit2(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file",
                                       str(tmp_path / "nope.txt"), "--no-out"])
@@ -196,3 +284,88 @@ def test_cli_pool_partial_failure_exit0_with_marker(tmp_path, monkeypatch, capsy
     assert uc.main() == 0
     out = capsys.readouterr().out
     assert "取数失败：timeout" in out and "失败 1" in out
+
+
+# ── P0-5：全池空返回（源侧空帧）不得当「无解禁」 ─────────────────────────
+
+def test_cli_pool_all_empty_is_unavailable_and_keeps_baseline(tmp_path, monkeypatch, capsys):
+    """全池**空返回且无错误** → 判不可得、**不落基线**（防假全清 + 防后续假变动）。
+
+    回归（R0~R2 review）：东财反爬/限流会返回**空帧而不抛异常** →
+    `fetch_symbol_unlocks` 返回 `([], None)` → 报告渲染「无解禁记录」= **假全清**，
+    且空批次写进状态文件当新基线 → 下次 API 恢复时所有真实批次被标 🆕 新增，
+    再抖动一次又被标 ❌ 消失——上游一次抽风引发大规模假变动告警。
+    """
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n002466\n600000\n", encoding="utf-8")
+    state = tmp_path / "state.json"
+    old = {"updated": "2026-09-01 10:00",
+           "symbols": {"600176": {"last_run": "20260901",
+                                  "batches": {"2026-11-05": {"qty_yi": 3.2, "holders": 5,
+                                                             "kind": "定增"}}}}}
+    state.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", lambda s, **k: ([], None))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--state-file", str(state), "--no-out"])
+    assert uc.main() == 3, "全池空返回须判不可得（不得渲染成无解禁）"
+    err = capsys.readouterr().err
+    assert "空" in err and "不可得" in err
+    # 基线不得被空集覆写
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert after["symbols"]["600176"]["batches"], "空返回污染了基线（真实批次被抹掉）"
+
+
+def test_cli_pool_partial_empty_still_reports(tmp_path, monkeypatch, capsys):
+    """只有部分标的空返回时照常出报告（守卫不得过度触发）。"""
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n600000\n", encoding="utf-8")
+
+    def fake(sym, **k):
+        if sym == "600176":
+            return ([{"date": "2026-11-05", "qty_yi": 3.2, "holders": 5,
+                     "kind": "定增"}], None)
+        return ([], None)
+
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", fake)
+    monkeypatch.setattr(uc, "_trading_days_until", lambda d, t: (5, False))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--no-out", "--no-state"])
+    assert uc.main() == 0
+    out = capsys.readouterr().out
+    assert "2026-11-05" in out
+
+
+# ── P2-3：报告日期须用北京时间，而非宿主机本地时区 ─────────────────────
+
+def test_pool_report_filename_uses_beijing_date(tmp_path, monkeypatch, capsys):
+    """报告文件名/标题须按**北京日期**（同文件的状态戳已用 shanghai_now）。
+
+    回归（R0~R2 review P2）：三处 `_dt.date.today()` 取**本地时区** → 美西机器在
+    北京上午运行时，文件名与窗口都比北京日期晚一天，与同报告内的时间戳、
+    以及仓库「文件名包含实际北京时间」的惯例自相矛盾。
+
+    用与宿主不同的北京日期（2026-12-25）才能判别——若代码仍读本地日期，
+    文件名会是宿主的今天。
+    """
+    import datetime as _d
+    from zoneinfo import ZoneInfo
+
+    import dates
+
+    beijing = _d.datetime(2026, 12, 25, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(dates, "shanghai_now", lambda: beijing)
+
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n", encoding="utf-8")
+    out = tmp_path / "out"
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks",
+                        lambda s, **k: ([{"date": "2026-11-05", "qty_yi": 1.0,
+                                          "holders": 1, "kind": ""}], None))
+    monkeypatch.setattr(uc, "_trading_days_until", lambda d, t: (5, False))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--state-file", str(tmp_path / "s.json"),
+                                      "--out-dir", str(out)])
+    assert uc.main() == 0
+    assert list(out.glob("20261225-pool.md")), \
+        f"文件名未用北京日期: {[p.name for p in out.iterdir()]}"

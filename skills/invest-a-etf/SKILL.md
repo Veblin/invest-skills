@@ -97,9 +97,28 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow 159206 --json   # R15: 行业资金流 + 趋势（同花顺）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         # R15: 每日采集（盘后，幂等）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md <报告md路径>   # 交互式 HTML 报告（写好后自动开浏览器）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision 515050 --init          # 复盘原料：输出最小 schema 模板
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision 515050 --from <填好的.json>   # 校验并落盘 sidecar
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py review 515050                   # 复盘纪要（只对照假设状态）
 ```
 
 `report` 输出引擎数据快照（供 Claude 合成）；完整叙事由 Claude 按模板撰写。
+
+### 复盘原料 sidecar（`decision` / `review`）
+
+设计：`host-docs/v0.3.0/review-material-design.md`（2026-09-10 用户批准）。
+
+报告只写一次就冻结，没有机器可读的东西记录「当时假设了什么、什么条件下算错、何时该回看」。
+sidecar 把这三样结构化落盘，使复盘可批量、到期可核验：
+
+- **落点**：与报告 md **同目录同 ts**——`reports/{symbol}-{name}/{ts}.decision.json`（**必须能配到某一份报告**；无报告时显式失败，不落无主的 sidecar）
+- **谁写**：**Claude 写**（情景假设与证伪条件是合成段），引擎只做**校验 + 消费**
+- **最小 schema**：只填 `schema_version/symbol/report_ts/as_of/disclaimer` 五键，`scenarios`/`falsifiers` 留空——无假设的报告**也要落盘**，否则「有/没有 sidecar」不可机器区分
+- **校验 fail-loud**（退出 2）：情景参考价**必须**带 `assumption`（假设前提）+ `weight`（概率权重），`disclaimer` 必填（LAW 6）；`falsifiers[].due` 必填且为 `YYYY-MM-DD`（到期清单靠它核验）
+- **`review <symbol>`** 产出**三段式复盘纪要**：① 报告序列 ② **证伪条件状态（按到期日排序，可机器核验）** ③ 假设对照
+  - 到期状态由 `due` 与生成日**推导**（`⏰ 已过期` / `🔔 临近 N 日`），**不依赖 sidecar 里手写的 status**
+  - 存量报告**无 sidecar 时显式列出**（不静默跳过）；纪要自身不参与报告序列（文件名 `-review.md`，防自我污染）
+  - **只对照假设状态，不产生建议**（LAW 6）；产出后须过 `report_qc.py --fail-on error`（纪要为独立产物类型 `review`，不套研报结构检查）
 
 ### HTML 产物
 

@@ -55,7 +55,16 @@ def _ensure_lib_on_path() -> None:
 
 
 _ensure_lib_on_path()
+
+# 策展表路径由**本脚本**计算后传入数据层——不放进共享 lib：那里按 parents[N]
+# 解析会指向 skills/ 而非本技能目录（仓库布局静默读错，包内才暴露）。
+# 仓库布局 = <skill>/references/，包内 = <pkg>/references/，同一相对关系。
+_REFS_DIR = pathlib.Path(__file__).resolve().parent.parent / "references"
+_FOMC_DEFAULT = _REFS_DIR / "fomc_meetings.yaml"
+_MACRO_RULES_DEFAULT = _REFS_DIR / "macro_sources.yaml"
+
 from skill_paths import default_out_dir  # noqa: E402
+import macro_calendar as macro_cal  # noqa: E402  宏观事件日历数据层（同目录模块）
 from unlock_source import fetch_symbol_unlocks  # noqa: E402
 
 try:  # 交易日历（空窗鉴别用）；包内未携带 invest lib 时降级为 None（保守判不可得）
@@ -67,11 +76,18 @@ except Exception:  # pragma: no cover
 
 
 def _window_has_trading_day(start: str, end: str) -> bool | None:
-    """窗口 [start, end] 是否含交易日；日历不可用 → None（调用方保守处理，R1 审查 F8）。"""
+    """窗口 [start, end] 是否含交易日；日历**不可信** → None（调用方保守处理）。
+
+    估算日历（无 token / 取数失败 → 工作日近似，**节假日混入**）不算权威：把它当
+    「有交易日」会让长假窗口的空返回被误判成数据源故障（R0~R2 review 修复）。
+    口径对齐 `freshness.trading_day_lag` 与 `sector_flow._is_trading_day`。
+    """
     try:
         from lib.trade_cal import fetch_trade_cal
 
-        dates, _estimated = fetch_trade_cal(start, end)
+        dates, estimated = fetch_trade_cal(start, end)
+        if estimated:
+            return None
         return bool(dates)
     except Exception:
         return None
@@ -79,6 +95,28 @@ def _window_has_trading_day(start: str, end: str) -> bool | None:
 
 def fmt_date(d: _dt.date) -> str:
     return d.strftime("%Y%m%d")
+
+
+def _beijing_today() -> _dt.date:
+    """北京时区今日——报告日期/文件名/窗口一律按此口径。
+
+    回归（R0~R2 review P2）：三种模式曾用 `date.today()`（**宿主机本地时区**），
+    而同文件的状态戳已用 `shanghai_now()` → 美西机器在北京上午运行时，报告文件名
+    与窗口都比北京日期晚一天，与同报告内的时间戳、以及仓库「文件名包含实际
+    北京时间」的惯例自相矛盾。
+    """
+    try:
+        from dates import shanghai_now
+
+        return shanghai_now().date()
+    except Exception:  # noqa: BLE001 —— 日历模块不可用不阻断，退回本地日期
+        return _dt.date.today()
+
+
+def _cell(v) -> str:
+    """Markdown 表格单元格转义：远端事件名/备注可能含 | 或换行，转义防拆列。"""
+    s = "" if v is None else str(v)
+    return s.replace("|", "\\|").replace("\n", " ").strip()
 
 
 def percentile_rank(values: list[float], v: float) -> float | None:
@@ -249,12 +287,46 @@ def _batch_equal(a: dict, b: dict) -> bool:
     return True
 
 
-def diff_batches(old: dict, new: dict) -> dict:
-    """两批解禁批次（{date: {qty_yi, holders, kind}}）差异 → added/removed/changed。"""
+def diff_batches(old: dict, new: dict, *, not_before: str | None = None) -> dict:
+    """两批解禁批次（{date: {qty_yi, holders, kind}}）差异 → added/removed/changed。
+
+    not_before（YYYY-MM-DD）：仅在该日及之后比较 removed。抓取窗口严格前向
+    （include_past_days=0），早于该日的批次从窗口消失属正常消化，不是记录被撤回
+    ——否则每个解禁日过后的首次运行都会把**已真实发生**的解禁渲染成「❌ 消失」，
+    淹没真正的新增/临近提醒。
+    """
     added = sorted(d for d in new if d not in old)
-    removed = sorted(d for d in old if d not in new)
+    removed = sorted(d for d in old
+                     if d not in new and (not_before is None or d >= not_before))
     changed = sorted(d for d in new if d in old and not _batch_equal(old[d], new[d]))
     return {"added": added, "removed": removed, "changed": changed}
+
+
+def merge_rows_by_date(rows: list[dict]) -> dict[str, dict]:
+    """同日多批解禁合并为一条日级总量（源按「解禁时间」逐条返回，同日可有多条）。
+
+    以日期为键直接建字典会让后一批覆盖前一批，低估当日解禁规模（排雷用途受损）。
+    口径：数量求和（全 None → None）、股东数求和（同）、类型去重后以 + 连接。
+    """
+    out: dict[str, dict] = {}
+    for r in rows:
+        d = r["date"]
+        cur = out.get(d)
+        if cur is None:
+            out[d] = {"qty_yi": r["qty_yi"], "holders": r["holders"], "kind": r["kind"]}
+            continue
+        q1, q2 = cur["qty_yi"], r["qty_yi"]
+        cur["qty_yi"] = (None if q1 is None and q2 is None
+                         else round((q1 or 0.0) + (q2 or 0.0), 4))
+        h1, h2 = cur["holders"], r["holders"]
+        cur["holders"] = (None if h1 is None and h2 is None
+                          else (h1 or 0) + (h2 or 0))
+        kinds: list[str] = []
+        for k in (cur["kind"], r["kind"]):
+            if k and k not in kinds:
+                kinds.append(k)
+        cur["kind"] = "+".join(kinds)
+    return out
 
 
 def collect_pool(symbols: list[str], *, lookahead_days: int, include_past_days: int = 0,
@@ -264,11 +336,7 @@ def collect_pool(symbols: list[str], *, lookahead_days: int, include_past_days: 
     for idx, sym in enumerate(symbols):
         rows, err = fetch_symbol_unlocks(sym, lookahead_days=lookahead_days,
                                          include_past_days=include_past_days)
-        out[sym] = {
-            "batches": {r["date"]: {"qty_yi": r["qty_yi"], "holders": r["holders"],
-                                    "kind": r["kind"]} for r in rows},
-            "error": err,
-        }
+        out[sym] = {"batches": merge_rows_by_date(rows), "error": err}
         if sleep_s and idx < len(symbols) - 1:
             time.sleep(sleep_s)
     return out
@@ -409,10 +477,18 @@ def _run_pool(args: argparse.Namespace) -> int:
         print("❌ 池文件无有效 6 位代码", file=sys.stderr)
         return 2
 
-    today = _dt.date.today()
+    today = _beijing_today()
     collected = collect_pool(symbols, lookahead_days=args.lookahead)
     if all(v["error"] for v in collected.values()):
         print("解禁数据不可得（池内全部标的取数失败）——不硬编。", file=sys.stderr)
+        return 3
+    # 全池**空返回且无错误** → 疑源侧空帧（东财反爬/限流会返回空而**不抛**）。
+    # 照常渲染即是**假全清**（排雷工具给出「无解禁记录」比不报告更危险），且空批次
+    # 会被写成新基线 → 下次 API 恢复时全部标 🆕 新增、再抖动一次又全标 ❌ 消失。
+    # 故判不可得并**跳过状态写入**（基线保留，避免后续大规模假变动告警）。
+    if collected and all(not v["error"] and not v["batches"] for v in collected.values()):
+        print(f"解禁数据不可得（{len(collected)} 个标的**全部返回空**——疑源侧空帧/限流，"
+              "不视为「无解禁」）——不硬编、不更新基线。", file=sys.stderr)
         return 3
 
     changes: dict | None = None
@@ -429,7 +505,8 @@ def _run_pool(args: argparse.Namespace) -> int:
             if old is None:
                 baseline_symbols.append(sym)
             else:
-                changes[sym] = diff_batches(old, info["batches"])
+                changes[sym] = diff_batches(old, info["batches"],
+                                            not_before=today.isoformat())
             state["symbols"][sym] = {"batches": info["batches"],
                                      "last_run": fmt_date(today)}
         from dates import shanghai_now  # 时间戳与项目惯例一致（上海时区）
@@ -456,11 +533,259 @@ def _run_pool(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── 第三模式（v3）：定期宏观事件日程 ─────────────────────────────────────
+#
+# 诚实的呈现是这一模式的核心难点：三个源的覆盖窗口不同（中国 ≈30 天 /
+# 美国 ≥3 个月 / 议息 人工表），且任一源都可能不可得。**「不可得」与「无事件」
+# 是两种不同的事实**，报告必须分开呈现——把取数失败渲染成「无日程」会让用户
+# 据一个错误的前提做判断（仓库历史缺陷模式 R1-F8 / R1-F13）。
+
+_MACRO_CN_MAX_DAYS = 30   # 百度源前向窗实测 ≈30 天；不作超出承诺
+_HIGHLIGHT_MAX_ITEMS = 6  # 重点段单日最多列几条（超出折叠为「…另 N 项」，完整日程不减）
+_REGION_FLAG = {"中国": "🇨🇳", "美国": "🇺🇸", "日本": "🇯🇵"}
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _weekday_cn(d: str) -> str:
+    try:
+        return _WEEKDAYS[_dt.date.fromisoformat(d).weekday()]
+    except (ValueError, TypeError):
+        return "—"
+
+
+def _timeline_item(e, *, today_iso: str = "", now_hm: str = "") -> str:
+    """时间轴上的一天里的一条事件：`<旗> 标题 <时刻>★ <已过时点?>`。
+
+    时刻为北京口径 → 用北京当前时刻比较。仅对**当天**且**有时刻**的条目标注
+    「✓已过时点」——否则读者分不清「今天这条出没出」（实测：报告生成于 22:50 时，
+    当日 20:30 的 PPI 已出、次日 20:30 的 CPI 未出，表上却看不出差别）。
+
+    措辞取「已过**时点**」而非「已公布」：这是按排期做的时间比较，不代表源侧
+    确实已发布（发布可能推迟）。
+    """
+    flag = _REGION_FLAG.get(e.region, e.region)
+    t = f" {e.time}" if e.time else ""
+    star = "★" if "SEP" in (e.note or "") else ""
+    mark = ""
+    if (today_iso and now_hm and e.date == today_iso and e.time
+            and e.time <= now_hm):
+        mark = " ✓已过时点"
+    return f"{flag} {_cell(e.title)}{t}{star}{mark}"
+
+
+def render_macro_md(view: dict, *, today: _dt.date, days: int,
+                    window: tuple[str, str], fomc_warnings: list[str]) -> str:
+    """宏观事件日历报告：源覆盖矩阵 → 分区段 → 降级项（数字全部引用引擎输出）。"""
+    w0, w1 = window
+    fmt = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}"          # noqa: E731
+    try:   # 时刻为北京口径 → 用上海时区当前时刻比较（同项目惯例）
+        from dates import shanghai_now
+
+        now_hm = shanghai_now().strftime("%H:%M")
+    except Exception:  # noqa: BLE001 —— 取不到当前时刻只放弃标注，不影响排期
+        now_hm = ""
+    today_iso = today.isoformat()
+    lines = [
+        f"# 🗓 宏观事件日历 — {today.isoformat()}",
+        "",
+        f"> 展望窗：{fmt(w0)} ~ {fmt(w1)}（{days} 自然日）"
+        f"｜中国区受源限制仅覆盖前 {_MACRO_CN_MAX_DAYS} 天",
+        "> 本表为**排定日程**（周期性、非突发）；公布值与市场反应不在此范围。",
+        "> 研究工具，非决策工具，不含任何买卖建议。",
+        "",
+    ]
+
+    # ⭐ 重点事件（头部速览）：只取策展档位「高」；完整日程见下节，全集不减
+    high_by_date: dict[str, list] = {}
+    for e in view["events"]:
+        if e.importance == "高":
+            high_by_date.setdefault(e.date, []).append(e)
+    lines += ["## ⭐ 重点事件（对市场影响较大）", ""]
+    if high_by_date:
+        lines += ["| 日期 | 星期 | 距今(交易日) | 事件 |",
+                  "|------|------|------------|------|"]
+        for d in sorted(high_by_date):
+            items = sorted(high_by_date[d], key=lambda e: (e.time or "99:99", e.region))
+            lag, degraded = _trading_days_until(d, today)
+            lag_txt = "-" if lag is None else f"{lag}{'（自然日粗判）' if degraded else ''}"
+            shown = items[:_HIGHLIGHT_MAX_ITEMS]
+            cell = " · ".join(_timeline_item(e, today_iso=today_iso, now_hm=now_hm)
+                              for e in shown)
+            if len(items) > len(shown):
+                # 兜底上限：源可能把一次发布拆成十几条，重点段必须保持可扫读；
+                # 被截断的部分在下方完整日程中仍可见（不丢信息）
+                cell += f" · …另 {len(items) - len(shown)} 项（见下节完整日程）"
+            lines.append(f"| {d} | {_weekday_cn(d)} | {lag_txt} | {cell} |")
+    else:
+        lines.append("— 本窗内无高影响事件 [来源: macro_calendar.build_view]")
+    lines += [
+        "",
+        "> 重点判定 = 策展档位「高」（见 `references/macro_sources.yaml`）——"
+        "是**影响量级**的判断，不是方向判断。完整日程（含中/低档）见下节。",
+        "> ⚠ **覆盖边界与降级项同样约束本节**：源不可得或窗口外的事件不会出现在这里，"
+        "见下方源覆盖矩阵。",
+        "",
+        "## 📡 源覆盖矩阵",
+        "",
+        "| 区域/类别 | 源 | 覆盖至 | 状态 |",
+        "|------|------|--------|------|",
+    ]
+    for r in view["results"]:
+        if r.error:
+            status = f"❌ 不可得：{r.error}"
+        elif r.failed_days:
+            status = f"⚠ 部分失败：{len(r.failed_days)} 天取数失败"
+        elif r.events:
+            status = "✅ 正常"
+        else:
+            status = "— 窗口内无排期"
+        regions = "、".join(sorted({e.region for e in r.events})) or "—"
+        lines.append(f"| {regions} | {r.name} | {r.coverage_end or '—'} | {status} |")
+    for w in fomc_warnings:
+        lines.append(f"| 🇺🇸 美国（议息） | 人工策展表 | — | ⚠ {w} |")
+    lines += [
+        "",
+        "> 覆盖列为**实测观测值**（最后一个有事件的日期），非承诺窗口；"
+        "「不可得」是取数失败，**不等于没有事件**。",
+        "> 事件按 `references/macro_sources.yaml` **策展白名单**收录——"
+        "源中未收录的条目不在表内（白名单是覆盖口径的一部分）。",
+        "",
+    ]
+
+    # 时间轴：**日期为统一尺度**，一天一行，格内含当日全部区域事件
+    by_date: dict[str, list] = {}
+    for e in view["events"]:
+        by_date.setdefault(e.date, []).append(e)
+    lines += [
+        "## 📅 日程（按**北京日期**归并）",
+        "",
+        f"> 窗口内 **{len(by_date)}** 天有排期（仅列有排期的日期）"
+        " [来源: macro_calendar.build_view]；区域标识：🇨🇳 中国 · 🇺🇸 美国 · 🇯🇵 日本",
+        "",
+        "| 日期 | 星期 | 事件 |",
+        "|------|------|------|",
+    ]
+    for d in sorted(by_date):
+        items = sorted(by_date[d], key=lambda e: (e.time or "99:99", e.region, e.title))
+        lines.append(f"| {d} | {_weekday_cn(d)} | "
+                     f"{' · '.join(_timeline_item(e, today_iso=today_iso, now_hm=now_hm)
+                                   for e in items)} |")
+    lines += [
+        "",
+        "> 时区口径：**表中「时刻」列一律为北京时间**（百度源实测：61/61 个美国事件的"
+        "时刻 = 公认美东发布时刻 +12h，即 8:30 ET → 20:30 北京；中国/日本同源同口径）。",
+        "> 美国（FRED）条目**无时刻**（源不提供，不推测），其日期为**美东日期口径**"
+        "——该类发布多在美东上午，对应北京时间当日；议息见下条。",
+        "> **✓已过时点** = 当天且该时刻已过（按北京时刻比较）。这只是按**排期**做的"
+        "时间比较，**不代表源侧确实已发布**（发布可能推迟）；无时刻的条目无法判断。",
+    ]
+    cov_cn = view["coverage"].get("中国")
+    if cov_cn:
+        lines.append(f"> ⚠ 中国区本次**事件覆盖至 {cov_cn}**；该日之后的本区日程"
+                     "**不可得（不等于没有事件）**——源前向窗有限（实测 ≈"
+                     f"{_MACRO_CN_MAX_DAYS} 天），需进入窗口后再看。")
+    if any(e.source == "fomc" for e in view["events"]):
+        lines.append("> 🏛 议息会议：决议为**美东 14:00**、表中日期已是**北京次日**；"
+                     "含 SEP（经济预测摘要/点阵图）者标 ★。官方注：会议日期在紧邻的"
+                     "上次会议确认前均为**暂定**。")
+    if fomc_warnings:
+        lines.append(f"> ❌ 议息：{fomc_warnings[0]}")
+    lines.append("")
+
+    # 降级与过滤留痕（过滤发生了必须让人知道，否则无法区分「源没有」与「被滤掉」）
+    lines += ["## 🧾 本次降级与过滤", ""]
+    if view["errors"]:
+        lines += [f"- ❌ {msg}" for msg in view["errors"]]
+    if view["filtered"]:
+        fams = "、".join(f[:28] for f in view["filtered_families"][:4])
+        lines.append(f"- 🧹 已过滤每日类噪音 **{view['filtered']}** 条"
+                     f"（{len(view['filtered_families'])} 类：{fams}…）"
+                     " [来源: macro_calendar.filter_noise]")
+    for n in view["notes"]:
+        lines.append(f"- ℹ {n}")
+    if len(lines) and lines[-1] == "":
+        lines.append("- 无")
+    lines += [
+        "",
+        "> 声明：宏观数据日程为公开信息（百度财经日历 / FRED / 联邦储备官网），"
+        "仅描述排期事实，不构成投资建议。",
+    ]
+    return "\n".join(lines)
+
+
+def _run_macro(args: argparse.Namespace) -> int:
+    today = _beijing_today()
+    days = args.macro_days
+    regions = [r.strip() for r in str(args.macro_regions).split(",") if r.strip()]
+    w_start, w_end = macro_cal.date_range(days, today=today)
+
+    rules = macro_cal.load_rules(getattr(args, "macro_rules_file", None) or None)
+    results: list[macro_cal.SourceResult] = []
+
+    baidu_regions = tuple(r for r in regions if r in _REGION_FLAG)
+    if baidu_regions:
+        baidu_end = macro_cal.date_range(min(days, _MACRO_CN_MAX_DAYS), today=today)[1]
+        results.append(macro_cal.fetch_baidu_calendar(
+            w_start, baidu_end, regions=baidu_regions, rules=rules,
+            cookie=getattr(args, "baidu_cookie", None) or None))
+    if "美国" in regions:
+        try:
+            from lib.env import get_config
+            fred_key = (get_config() or {}).get("FRED_API_KEY")
+        except Exception:  # noqa: BLE001 —— 配置不可读按未配置处理（显式降级）
+            fred_key = None
+        results.append(macro_cal.fetch_us_calendar(
+            w_start, w_end, fred_key=fred_key, rules=rules))
+
+    fomc_events, fomc_warnings = macro_cal.load_fomc_meetings(
+        args.fomc_file, today=today.strftime("%Y%m%d"))
+    fomc_events = [e for e in fomc_events if w_start <= e.date.replace("-", "") <= w_end]
+    if "美国" in regions or not results:
+        results.append(macro_cal.SourceResult(
+            "FOMC 策展表", fomc_events, coverage_end=max(
+                (e.date for e in fomc_events), default=None)))
+
+    view = macro_cal.build_view(results)
+    view["results"] = results
+
+    if not view["events"]:
+        print("宏观日程不可得（全部源失败或无内容）——不硬编。", file=sys.stderr)
+        for msg in view["errors"] or ["无可呈现的日程来源"]:
+            print(f"  {msg}", file=sys.stderr)
+        for w in fomc_warnings:
+            print(f"  {w}", file=sys.stderr)
+        return 3
+
+    md = render_macro_md(view, today=today, days=days, window=(w_start, w_end),
+                         fomc_warnings=fomc_warnings)
+    if getattr(args, "no_out", False):
+        print(md)
+    else:
+        out_dir = pathlib.Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{fmt_date(today)}-macro.md"
+        path.write_text(md, encoding="utf-8")
+        print(md)
+        print(f"\n已落盘: {path}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days-past", type=int, default=120, help="分位回看窗口（自然日，默认 120）")
     ap.add_argument("--days-future", type=int, default=30, help="展望窗口（自然日，默认 30）")
     ap.add_argument("--pool-file", type=str, default="", help="清单文件（池模式；每行一个 6 位代码，# 注释）")
+    ap.add_argument("--macro", action="store_true",
+                    help="宏观日程模式：定期宏观数据发布日程（中美 CPI/社零/非农）+ 议息会议")
+    ap.add_argument("--macro-days", type=int, default=90, help="宏观展望窗（自然日，默认 90）")
+    ap.add_argument("--macro-regions", type=str, default="中国,美国,日本",
+                    help="宏观区域（逗号分隔，默认 中国,美国,日本）")
+    ap.add_argument("--macro-rules-file", type=str, default=str(_MACRO_RULES_DEFAULT),
+                    help="宏观策展规则表（默认 references/macro_sources.yaml）")
+    ap.add_argument("--fomc-file", type=str, default=str(_FOMC_DEFAULT),
+                    help="FOMC 会议策展表（默认 references/fomc_meetings.yaml）")
+    ap.add_argument("--baidu-cookie", type=str, default="",
+                    help="百度财经日历 cookie（可选；复用可显著降低逐日失败率）")
     ap.add_argument("--alert-days", type=int, default=30, help="提醒窗（自然日，默认 30；池模式）")
     ap.add_argument("--lookahead", type=int, default=90, help="拉取展望（自然日，默认 90；池模式）")
     ap.add_argument("--state-file", type=str, default=str(_STATE_DEFAULT),
@@ -476,18 +801,38 @@ def main() -> int:
         ap.error("--days-future 须 ≥ 0")
     if args.alert_days < 0 or args.lookahead < 0:
         ap.error("--alert-days/--lookahead 须 ≥ 0")
+    if args.macro and args.pool_file:
+        # 互斥必须显式报错：下方 `if args.pool_file:` 在前，否则 --macro 会被静默忽略
+        ap.error("--macro 与 --pool-file 互斥（宏观日程 / 解禁池分属两种模式）")
+    if args.macro and args.macro_days < 1:
+        ap.error("--macro-days 须 ≥ 1")
+    if args.alert_days > args.lookahead:
+        # 提醒窗宽于拉取窗 → 窗内批次根本不在 batches 里，报告仍会打印
+        # 「提醒窗内无解禁批次 ✅」，即假全清。两者须同源可比。
+        ap.error(f"--alert-days({args.alert_days}) 不得大于 --lookahead({args.lookahead})"
+                 "：提醒窗宽于拉取窗会产出假「无解禁批次」结论")
+
+    if args.macro:
+        return _run_macro(args)      # 不触碰 event_calendar_state.json（解禁状态）
 
     if args.pool_file:
         return _run_pool(args)
 
     import akshare as ak
 
-    today = _dt.date.today()
+    today = _beijing_today()
     # F12：拉取窗口对齐参数（原实现固定 past_days*2，约 44% 行解析后废弃）
     start = fmt_date(today - _dt.timedelta(days=args.days_past))
     end = fmt_date(today + _dt.timedelta(days=args.days_future))
+    try:  # 东财直连 + ≥0.5s 节流（与 unlock_source 同一会话口径；CLAUDE.md：东财需直连）
+        from lib.proxy import akshare_direct_session
+    except Exception:  # 库引导不可用 → 无会话退化（不阻断取数，行为同修复前）
+        from contextlib import nullcontext as akshare_direct_session
+
     try:
-        df = ak.stock_restricted_release_summary_em(symbol="全部股票", start_date=start, end_date=end)
+        with akshare_direct_session():
+            df = ak.stock_restricted_release_summary_em(
+                symbol="全部股票", start_date=start, end_date=end)
     except Exception as exc:
         print(f"解禁数据不可得（东财阻断/代理）：{type(exc).__name__}", file=sys.stderr)
         return 3
@@ -498,6 +843,13 @@ def main() -> int:
         if has_td is False:
             print(f"解禁数据为空且窗口内无交易日（{start}~{end}）——无可报告内容（exit 0）")
             return 0
+        if has_td is None:
+            # 日历不可信（估算日历/不可用）→ **无法鉴别**「窗口无交易日」与「取数失败」。
+            # 不得归因成「疑代理阻断」：那是把日历缺失说成了数据源故障。
+            print(f"解禁数据为空，且交易日历不可信（估算日历/不可用）——"
+                  f"无法鉴别「窗口无交易日（{start}~{end}）」与「取数失败」；"
+                  f"配 TUSHARE_TOKEN 可消除该不确定性。不硬编。", file=sys.stderr)
+            return 3
         print("解禁数据不可得（东财空返回——疑代理阻断或接口变化），不硬编。", file=sys.stderr)
         return 3
 

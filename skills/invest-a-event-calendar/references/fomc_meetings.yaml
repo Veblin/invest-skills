@@ -1,0 +1,48 @@
+# FOMC 议息会议日程（invest-a-event-calendar v3）
+#
+# ⚠️ 本文件是**人工策展**资产，无自动源。原因（2026-09-10 实测）：
+#   - FRED 没有议息会议日程；名为「FOMC Press Release」的 release 几乎**每天**
+#     都有一条（是美联储日常新闻稿，不是 8 次/年的议息会议），不能用作日程源。
+#   - 自动抓取 federalreserve.gov 会引入 HTML 解析脆弱面，本期不做。
+#
+# 铁律：
+#   1. 日期**必须人工誊录**自下面 source_url 的官方页面 —— **禁止凭记忆或推测填写**。
+#      这与 P0「一切数字必须经 Python 计算」同源：不得编造事实。
+#   2. 每次誊录后更新 last_verified。
+#   3. 表内最近会议日全部过去后，引擎会打印「已过期」告警且**不含**议息会议
+#      （≠ 无议息会议）——此时必须刷新本表。
+#
+# 刷新节奏：美联储通常提前约一年公布次年全部 8 次会议日期 → **每年刷新一次**。
+#
+# 官方口径提示：会议为两日（本地时间）；**决议在第二日公布**（引擎以 end 为事件日）。
+# 页面原文注明：「Each meeting date is tentative until confirmed at the meeting
+# immediately preceding it」——日期在紧邻的上次会议确认前均为暂定，报告须标注。
+
+last_verified: "2026-09-10"
+source_url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+# 决议公布时刻的来源（勿凭印象改）：**fomccalendars.htm 日程页不公布时刻**——
+# 该值取自美联储新闻稿页头的 "For release at 2:00 p.m. EDT"，例：
+#   https://www.federalreserve.gov/newsevents/pressreleases/monetary20260429a.htm
+# 北京时间为**次日** 02:00（夏令时 EDT）/ 03:00（冬令时 EST）→ 引擎按北京日期 +1 天归并。
+note: "sep=true 表示该次会议附经济预测摘要（SEP）与点阵图；决议公布为美东 14:00（来源见上方注释）"
+
+meetings:
+  # ── 2026（官方页面已列全 8 次）──
+  - {start: "2026-01-27", end: "2026-01-28", sep: false}
+  - {start: "2026-03-17", end: "2026-03-18", sep: true}
+  - {start: "2026-04-28", end: "2026-04-29", sep: false}
+  - {start: "2026-06-16", end: "2026-06-17", sep: true}
+  - {start: "2026-07-28", end: "2026-07-29", sep: false}
+  - {start: "2026-09-15", end: "2026-09-16", sep: true}
+  - {start: "2026-10-27", end: "2026-10-28", sep: false}
+  - {start: "2026-12-08", end: "2026-12-09", sep: true}
+
+  # ── 2027（官方页面已列全 8 次）──
+  - {start: "2027-01-26", end: "2027-01-27", sep: false}
+  - {start: "2027-03-16", end: "2027-03-17", sep: true}
+  - {start: "2027-04-27", end: "2027-04-28", sep: false}
+  - {start: "2027-06-08", end: "2027-06-09", sep: true}
+  - {start: "2027-07-27", end: "2027-07-28", sep: false}
+  - {start: "2027-09-14", end: "2027-09-15", sep: true}
+  - {start: "2027-10-26", end: "2027-10-27", sep: false}
+  - {start: "2027-12-07", end: "2027-12-08", sep: true}

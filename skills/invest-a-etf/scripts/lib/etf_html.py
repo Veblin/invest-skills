@@ -669,7 +669,22 @@ def _section_valuation(profile: dict) -> str:
 
 
 def index_pe_note_short(profile: dict) -> str:
-    return "PE(1) 股本加权口径" if profile.get("index_pe") is not None else "指数 PE 不可得"
+    """PE 徽章文案——按**实际取值口径**出字（R2/T9-3）。
+
+    此前恒返回「PE(1) 股本加权口径」：当最新行「市盈率1」为 NaN、引擎静默回落到
+    「市盈率2」时，徽章与数值口径不符（误标）。口径未知时不再臆断为 PE(1)。
+    """
+    if profile.get("index_pe") is None:
+        return "指数 PE 不可得"
+    # 口径常量从 etf_data 导入（不复制字面量）：两处硬编码曾使改名的漂移无测试可捕获
+    from etf_data import _PE_CALIBER_CIRCULATING, _PE_CALIBER_SHARE
+
+    caliber = profile.get("index_pe_caliber")
+    if caliber == _PE_CALIBER_CIRCULATING:
+        return "PE(2) 流通加权口径"
+    if caliber == _PE_CALIBER_SHARE:
+        return "PE(1) 股本加权口径"
+    return "PE 加权口径未标注"
 
 
 def _section_holdings(holdings: dict) -> str:

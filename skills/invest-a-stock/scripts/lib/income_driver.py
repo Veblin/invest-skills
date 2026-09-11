@@ -89,6 +89,8 @@ def _fcf_evidence(fin_rows: list[dict]) -> dict:
     """
     by_year: dict[str, float] = {}
     for r in fin_rows:
+        if not isinstance(r, dict):   # 防御过滤（同 new_high_ratio 的脏行守卫）：
+            continue                  # 非 dict 行会让 .get 抛错并掀翻整个 R1 判定
         ed = str(r.get("end_date") or "")
         if not ed.endswith("1231"):
             continue
@@ -131,6 +133,31 @@ def _refinancing_evidence(refi_times: int | None) -> dict:
     if refi_times is None:
         return {"available": False, "reason": "再融资数据未提供"}
     return {"available": True, "refi_times": refi_times}
+
+
+def extract_annual_rows(rows: object) -> list[dict]:
+    """从 financials 维度行提取**年报期**净利序列（R1 证据装配的唯一实现）。
+
+    report 侧有两个装配点（`style_match._driver_from_collection` 与
+    `render_markdown/_base._render_income_driver`）此前各自复制同一套过滤
+    （`end_date` 以 1231 结尾 + `net_profit` 非空 + float 化）。任一处漂移
+    即造成「同一标的两个口径」——R2/T9-2 的根因之一，收敛到此处。
+
+    脏行**跳过而非中断**（两处原实现此处语义不一致：`_base` 有 try/except，
+    `style_match` 没有 → 一个脏行会让它整条返回 None，报告静默丢 R1 判定）。
+    """
+    out: list[dict] = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        ed = str(r.get("end_date", ""))
+        npv = r.get("net_profit")
+        if ed.endswith("1231") and npv is not None:
+            try:
+                out.append({"year": ed, "net_profit": float(npv)})
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 def classify_income_driver(
