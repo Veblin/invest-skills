@@ -28,6 +28,7 @@ from _invest_path import ensure_invest_a_scripts_on_path, ensure_skills_lib_on_p
 ensure_skills_lib_on_path()
 ensure_invest_a_scripts_on_path()
 
+import hk_ah  # noqa: E402
 import hk_codes  # noqa: E402
 import hk_financials  # noqa: E402
 import hk_kline  # noqa: E402
@@ -344,6 +345,97 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# cmd_ah（T11-4 / HK-2：A/H 比价）
+# ---------------------------------------------------------------------------
+
+def _parse_a_symbol(raw: str) -> str:
+    """A 股代码 → 6 位纯数字（接受 `600036` / `600036.SH`）；否则 ValueError。"""
+    digits = "".join(ch for ch in str(raw).strip() if ch.isdigit())
+    if len(digits) != 6:
+        raise ValueError(f"非法 A 股代码（需 6 位，可带 .SH/.SZ 后缀）：{raw!r}")
+    return digits
+
+
+def _a_quote_row(sym: str) -> dict:
+    """腾讯 A 股快照 —— 与 H 侧**同 provider**，使两侧快照时点可比。
+
+    失败 → 含 error 的 dict（三态由渲染层处理，与 `_snapshot_row` 同契约）。
+    """
+    try:
+        from quote_tencent import fetch_tencent_quote
+
+        return fetch_tencent_quote(sym) or {"error": "腾讯 A 股快照空返回"}
+    except Exception as exc:  # noqa: BLE001 —— 网络/解析失败须显式降级
+        return {"error": f"腾讯 A 股快照不可得: {type(exc).__name__}"}
+
+
+def cmd_ah(args: argparse.Namespace) -> int:
+    """A/H 比价（HK-2）：同公司两地价格关系 → 溢价率。
+
+    研究视角参考，**非套利信号**（requirements §3.2）；溢价率**全部由 Python 计算**（P0）。
+    三态：任一侧价格或汇率不可得 → 落盘说明并 return 1，**不出**伪造的中性值。
+    """
+    try:
+        a_code = _parse_a_symbol(args.a_symbol)
+        hk_code = hk_codes.parse_hk_symbol(args.hk_symbol)   # A 股码在此被拒（既有纪律）
+    except hk_codes.HkSymbolError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 2
+
+    lines = [f"# A/H 比价 — {a_code}(A) / {hk_code}(H) — {_today()}\n",
+             "> 研究视角参考，**非套利信号**；不含买卖建议（LAW 6）。口径见下方三件套。\n"]
+
+    h = _snapshot_row(hk_code)
+    a = _a_quote_row(a_code)
+    fx = hk_ah.fetch_fx_hkd_cny()
+    h_px, a_px = h.get("price"), a.get("price")
+    pct = hk_ah.premium_pct(a_px, h_px, fx.get("rate"))
+
+    def _cell(v, fmt):
+        return fmt(v) if v is not None else "—（不可得）"
+
+    lines.append("| 项 | 值 | 来源 / 时点 |")
+    lines.append("|---|---|---|")
+    lines.append(f"| A 价（CNY） | {_cell(a_px, lambda v: f'{v}')} | "
+                 f"{'腾讯 qt.gtimg.cn（抓取 ' + _now_shanghai() + ' 北京）' if a_px is not None else a.get('error') or '不可得'} |")
+    lines.append(f"| H 价（HKD） | {_cell(h_px, lambda v: f'{v}')} | "
+                 f"{'腾讯 r_hk ' + str(h.get('ts') or '') if h_px is not None else h.get('error') or '不可得'} |")
+    lines.append(f"| 汇率（CNY/HKD） | {_cell(fx.get('rate'), lambda v: f'{v:.5f}')} | "
+                 f"{fx.get('source') or '不可得'}{'（' + str(fx['date']) + '）' if fx.get('date') else ''} |")
+    lines.append(f"| **A/H 溢价率** | "
+                 f"{'**%+.2f%%**' % pct if pct is not None else '**—（不可得）**'} | "
+                 f"{'[来源: Python calc: A价/(H价×汇率)−1]' if pct is not None else '输入不可得，未计算'} |")
+    lines.append("")
+
+    lines.append("## 口径三件套（强制显式）\n")
+    lines.append("- **币种**：A 价 CNY（交易所本位币）/ H 价 HKD。东财 `CURRENCY` 字段对 A+H 公司"
+                 "**不可靠**（比亚迪 H 实测为 CNY 报表值而字段标 HKD），故本表不使用该字段。")
+    lines.append(f"- **汇率时点**：{fx.get('date') or '不可得'}，"
+                 f"{fx.get('source') or '—'}（汇率为 CNY per HKD）")
+    lines.append("- **复权**：两侧均为**行情快照现价（未复权）**，口径一致；"
+                 "若改用历史序列对照，须另行对齐复权口径。\n")
+    lines.append("> ⚠️ 两地交易时段不同（A 股 09:30–11:30 / 13:00–15:00 北京；"
+                 "港股 09:30–12:00 / 13:00–16:00 香港），同一时刻取到的两个价格可能分属"
+                 "不同时段或一方已收盘 → 属**快照时点差**，本表不裁决。")
+    if fx.get("note"):
+        lines.append(f"> ℹ️ 汇率口径：{fx['note']}")
+    if pct is None:
+        lines.append("> ⚠️ 本次**未得出溢价率**（上表标「不可得」）——"
+                     "不得读作「两地平价」（LAW 5：未获取到有效数据即无法判断）。")
+    lines.append("\n> 声明：本表为两地价格关系的研究视角记录，不构成投资建议，"
+                 "亦不构成任何套利信号。")
+
+    body = "\n".join(lines)
+    path = _write_report(args, a_code, f"{hk_code}-AH比价", body)
+    print(f"📝 报告: {path}\n")
+    print(body)
+    return 0 if pct is not None else 1
+
+
 def _pct(v):
     if v is None:
         return "—"
@@ -429,6 +521,11 @@ def build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("report", help="初步分析报告（快照/估值/财务/技术/港股风险层）")
     pr.add_argument("symbol")
     pr.add_argument("--outdir", default="", help="报告输出目录（默认 code/reports）")
+
+    pa = sub.add_parser("ah", help="A/H 比价（同公司两地价差 → 溢价率；研究视角，非套利信号）")
+    pa.add_argument("a_symbol", help="A 股代码（600036 或 600036.SH）")
+    pa.add_argument("hk_symbol", help="港股代码（5 位，如 03968）")
+    pa.add_argument("--outdir", default="", help="报告输出目录（默认 code/reports）")
     return p
 
 
@@ -436,6 +533,7 @@ CMD_DISPATCH = {
     "diagnose": cmd_diagnose,
     "snapshot": cmd_snapshot,
     "report": cmd_report,
+    "ah": cmd_ah,
 }
 
 
