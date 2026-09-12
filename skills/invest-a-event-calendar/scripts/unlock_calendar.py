@@ -254,7 +254,12 @@ def load_state(path: pathlib.Path) -> dict:
     """状态文件读取；不存在视为首跑；损坏 → 按首跑处理并告警（不中断）。"""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("symbols"), dict):
+        if isinstance(data, dict):
+            # ⚠️ 不得因「缺 symbols 键」就丢弃整份数据：本文件与题材模块**共用**，
+            # 只写过 themes 的文件在旧逻辑下被判「结构异常」→ save_state 整份覆写
+            # → themes 永久消失（R4 评审实跑复现）。缺键补齐即可。
+            if not isinstance(data.get("symbols"), dict):
+                data["symbols"] = {}
             return data
         print(f"⚠ 状态文件结构异常（{path}）——按首跑处理", file=sys.stderr)
     except FileNotFoundError:
@@ -804,6 +809,15 @@ def _run_theme(args) -> int:
     退出码：0 正常 / 2 参数或锚点来源非法（含「热度 ≠ 证实」拒绝）。
     """
     import theme_calendar as tc
+
+    if args.no_state:
+        # `--no-state`（help：不读写状态）必须在**所有**模式下生效；
+        # 此前仅池模式遵守（line 503），题材模式会照写共享状态文件，
+        # 且状态文件损坏时用户明确要求不碰状态仍被阻断（R4 评审）
+        print("⚠️ --no-state：本次不读写题材状态（登记未持久化）", file=sys.stderr)
+        print(tc.render_themes(state_file=args.state_file)
+              if not args.no_state else "（--no-state：跳过状态读取）")
+        return 0
 
     concepts = [c for c in (args.concepts or "").split(",") if c.strip()]
     try:

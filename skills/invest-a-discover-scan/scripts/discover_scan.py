@@ -19,9 +19,13 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _LIB_DIR = _SCRIPT_DIR / "lib"
-for _p in (str(_LIB_DIR), str(_SCRIPT_DIR)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# ⚠️ **只插 `scripts/lib`，不插 `scripts/` 根**：本 skill 的 lib 目录含 `__init__.py`
+# （包名 `lib`），一旦把 `scripts/` 放进 sys.path，`import lib` 会命中本 skill 的 lib
+# 而非 invest-a-stock 的 `lib` 包 → `lib.tushare_client` / `lib.trade_cal` 全部
+# ModuleNotFoundError（跨技能跑测时实测：event-calendar 的 `import lib.trade_cal` 被带崩）。
+# 本 skill 的模块按**顶层名**导入（`import lenses` 等），只需 `scripts/lib` 在路径上。
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
 
 from _invest_path import ensure_invest_a_scripts_on_path, ensure_skills_lib_on_path  # noqa: E402
 
@@ -36,7 +40,23 @@ import sources  # noqa: E402
 
 DEFAULT_OUT_DIR = "reports/discover-scan"
 DEFAULT_TOP = 15
-DRILL_CMD = "uv run python skills/invest-a-stock/scripts/invest.py report {code}"
+
+
+def _drill_cmd(code: str) -> str:
+    """下钻命令——**按当前运行形态自适应**。
+
+    单体仓库：`skills/invest-a-stock/scripts/invest.py` 存在 → 给出可直接粘贴的命令。
+    包内分发（skillhub/WorkBuddy 单包）：该路径不存在 → 给出**形态无关**的提示，
+    避免打印一条包内用户无法执行的命令（R4 评审：原实现为硬编码 monorepo 路径）。
+    """
+    from pathlib import Path as _P
+
+    # __file__ = skills/invest-a-discover-scan/scripts/discover_scan.py
+    # parents: [0]=scripts [1]=invest-a-discover-scan [2]=skills [3]=code
+    mono = _P(__file__).resolve().parents[2] / "invest-a-stock" / "scripts" / "invest.py"
+    if mono.exists():
+        return f"uv run python skills/invest-a-stock/scripts/invest.py report {code}"
+    return f"invest-a-stock 的 report 子命令（下钻 {code}）：详见其 SKILL.md 的 CLI 段"
 
 
 def _now_shanghai() -> str:
@@ -98,8 +118,15 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
     quality_warnings: list[str] = []
     for r in l1:
         fina = sources.fetch_fina_indicator(r["ts_code"])
-        fc = sources.fetch_forecast(r["ts_code"]) if not fina else []
-        q = quality.pass_quality(r, fina, fc)
+        # 降级链**按候选生效**（设计 §5：fina → 预告口径 → 跳过）。
+        # 原实现只在 fina 为空时取预告却又 `continue` 丢掉，使降级档永不生效、
+        # L3 增速子项恒 0（R4 评审实测复现）
+        if fina:
+            fc = []
+            q = quality.pass_quality(r, fina, fc, tier="fina")
+        else:
+            fc = sources.fetch_forecast(r["ts_code"])
+            q = quality.pass_quality(r, fina, fc, tier="forecast")
         if q.get("warning"):
             quality_warnings.append(q["warning"])
         if q["pass"] is None:
@@ -107,6 +134,10 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
             continue
         if not q["pass"]:
             continue
+        # L3 增速子项需预告增速——**在通过质量闸门之后**才取（候选已收敛到几十只，
+        # 调用量可控）；此前放在循环头部会让 403 只候选各多打一次接口
+        if not fc:
+            fc = sources.fetch_forecast(r["ts_code"])
         # ⚠️ 只用 `p_change_max`（净利**同比增速**上限，百分数）——可加总/可比。
         # **不得**回退到 `net_profit_max`：那是净利润的**绝对金额**，与
         # `g_implied`（百分比）相比是量纲错误，会得到一个恒真的假「满足」
@@ -152,8 +183,11 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
                        "calls": dict(sources.CALL_COUNT),
                        "empty_retries": sources.EMPTY_RETRY_COUNT},
         "warnings": merged_warnings,
+        # per_industry / with_bj 也是**规则参数**（rules.md §三.5）：缺了它们，
+        # 同一天不同规则的两次运行会产出无法归因的快照（回填裁决的锚点失效）
         "params": {"pe_grank_max": lenses.PE_GRANK_MAX, "ind_rank_max": lenses.IND_RANK_MAX,
-                   "roe_min": quality.ROE_MIN_PCT, "top_n": top},
+                   "roe_min": quality.ROE_MIN_PCT, "top_n": top,
+                   "per_industry": per_industry, "with_bj": with_bj},
         "trade_date": trade_date,
         "rf": {"pct": rf_pct, "source": rf_src},
         "market_context": sources.market_form_context(),
@@ -192,8 +226,12 @@ def render_report(scan: dict) -> str:
             f"（其中空返回重试 {ps.get('empty_retries', 0)} 次）——"
             f"fina_indicator 无全市场批量形态，按候选逐个取")
     rf = scan.get("rf") or {}
-    lines.append(f"- L3 利差口径：中国 10Y {rf['pct']}%"
-                 + (f" [来源: {rf['source']}]" if rf.get("pct") is not None else "（不可得 → 利差项降级）"))
+    # rf.get("pct") 为 None 时不得渲染成「中国 10Y None%」（把 Python None 当收益率）
+    if rf.get("pct") is not None:
+        lines.append(f"- L3 利差口径：中国 10Y {rf['pct']}% [来源: {rf.get('source')}]")
+    else:
+        lines.append("- L3 利差口径：中国 10Y **不可得** → 利差项降级"
+                     "（仅保留「隐含增速 vs 预告上限」子项）")
     if ctx.get("available"):
         lines.append(f"- L4 市场语境（**不进规则**）：{ctx.get('market_form')} —— {ctx.get('note')}")
     else:
@@ -223,16 +261,19 @@ def render_report(scan: dict) -> str:
         lines.append("### 逐只理由与下钻\n")
         for h in hits:
             flags = h["gap_flags"]
+            # 行业缺失的命中行 ind_rk/ind_n 均为 None——不得渲染成「None/None」
+            ind_txt = (f"行业内排名 {h['ind_rk']}/{h['ind_n']}；" if h.get("ind_rk")
+                       else "行业内排名：行业字段缺失，该条件已跳过（设计 §5 降级）；")
             lines.append(
                 f"**{h['ts_code']} {h['name']}** — 命中 L1 横截面便宜："
                 f"PE(TTM) {h['pe_ttm']}，EY {h['ey_pct']}%，全 A 正 PE 子总体分位 "
                 f"{h['pe_grank']:.1%}（≤{scan['params']['pe_grank_max']:.0%}），"
-                f"行业内排名 {h['ind_rk']}/{h['ind_n']}；"
-                f"L3 gap 标记 {sum(flags)}/2（利差{'>0' if flags[0] else '未满足'}、"
+                + ind_txt
+                + f"L3 gap 标记 {sum(flags)}/2（利差{'>0' if flags[0] else '未满足'}、"
                 f"隐含增速<预告上限{'满足' if flags[1] else '未满足/不可得'}）"
                 f" [来源: Python calc: EY=100/PE; 分位=percentile_rank_inclusive/100]"
             )
-            lines.append(f"  下钻：`{DRILL_CMD.format(code=h['ts_code'])}`")
+            lines.append(f"  下钻：`{_drill_cmd(h['ts_code'])}`")
         lines.append("")
 
     lines.append("> 声明：本清单为**研究观察起点**，不构成投资建议，不含买卖/仓位建议；"

@@ -60,11 +60,23 @@ def has_token() -> bool:
         return False
 
 
-def client():
-    """Tushare 客户端（复用 invest-a-stock 的 canonical 实现，不新建）。"""
-    from lib.tushare_client import TushareClient
+_CLIENT = None
 
-    return TushareClient()
+
+def client():
+    """Tushare 客户端**进程内单例**（复用 invest-a-stock 的 canonical 实现）。
+
+    ⚠️ 必须单例：`TushareClient.__init__` 会重置**实例级**限流状态
+    （`_call_timestamps` / `_daily_calls`），而 `query()` 的自节流正是读这两个字段。
+    每次新建实例 = 限流器清零 → 403 候选构造 400+ 实例 → 全速突发。
+    （R4 评审实测：这正是「连发空返回、单发正常」的根因。）
+    """
+    global _CLIENT
+    if _CLIENT is None:
+        from lib.tushare_client import TushareClient
+
+        _CLIENT = TushareClient()
+    return _CLIENT
 
 
 def latest_trade_date() -> str:
@@ -124,8 +136,22 @@ _RETRY_SLEEP_SEC = 0.6      # 突发限流后的退避（设计 §7：重试 ≤
 EMPTY_RETRY_COUNT = 0       # 因空返回触发的重试次数（诊断用）
 
 
-def fetch_fina_indicator(ts_code: str, *, start_date: str = "20240101",
-                         end_date: str = "20261231") -> list[dict]:
+def _rolling_window(years: int = 3) -> tuple[str, str]:
+    """滚动查询窗（近 N 年 → 今天）。**不硬编码年份**：窗口右端固定会让
+    「最近一期」随时间推移静默变陈旧，而质量闸门照常放行（陈旧与「确实没更新」
+    不可区分）。"""
+    import datetime as _dt
+
+    from dates import shanghai_today
+
+    t = shanghai_today()
+    today = _dt.date(int(t[:4]), int(t[4:6]), int(t[6:8]))
+    return ((today - _dt.timedelta(days=365 * years)).strftime("%Y%m%d"),
+            today.strftime("%Y%m%d"))
+
+
+def fetch_fina_indicator(ts_code: str, *, start_date: str | None = None,
+                         end_date: str | None = None) -> list[dict]:
     """单标的财务指标（只能按 ts_code——无全市场批量形态，见模块 docstring）。
 
     ⚠️ **空返回 ≠ 该标的无数据**：403 只候选连发时 tushare 会突发限流，
@@ -135,6 +161,8 @@ def fetch_fina_indicator(ts_code: str, *, start_date: str = "20240101",
     仍空则计入 ``EMPTY_RETRY_COUNT`` 供上层聚合报告（**不逐条刷 warning**）。
     """
     global EMPTY_RETRY_COUNT
+    if start_date is None or end_date is None:
+        start_date, end_date = _rolling_window()
     cli = client()
     for attempt in (0, 1):
         CALL_COUNT["fina_indicator"] += 1
@@ -227,12 +255,24 @@ def market_form_context() -> dict:
 
             try:
                 label = _json.loads(label)
-            except json.JSONDecodeError:
+            except _json.JSONDecodeError:
                 label = {}
-        form = (label or {}).get("market_form") if isinstance(label, dict) else None
-        if not form:
+        raw = (label or {}).get("market_form") if isinstance(label, dict) else None
+        if isinstance(raw, dict):
+            # env_label 里存的是完整 dict（form/sub_form/context/vector/kirby_note）——
+            # 取展示用的短标签，**不要把整个 dict 插进报告行**
+            label_txt = raw.get("form")
+            if raw.get("sub_form"):
+                label_txt = f"{label_txt}（{raw['sub_form']}）"
+            if raw.get("context"):
+                label_txt = f"{label_txt} · {raw['context']}"
+            if not label_txt:
+                return {"available": False, "note": "市场形态标签为空"}
+            return {"available": True, "market_form": label_txt,
+                    "note": "事后标注，不蕴含收益可预测性（Kirby 2023）"}
+        if not raw:
             return {"available": False, "note": "市场形态标签未落地（R-A01）或历史快照为空"}
-        return {"available": True, "market_form": form,
+        return {"available": True, "market_form": str(raw),
                 "note": "事后标注，不蕴含收益可预测性（Kirby 2023）"}
     except Exception as exc:  # noqa: BLE001 —— 注记项，失败不影响清单
         return {"available": False, "note": f"市场语境不可得（{type(exc).__name__}）"}

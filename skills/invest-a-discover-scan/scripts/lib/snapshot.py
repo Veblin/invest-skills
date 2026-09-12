@@ -16,7 +16,8 @@ RULES_VERSION = "0.1.0"        # 阈值/规则改动必须 bump（设计 §8-4�
 
 _REQUIRED_TOP = ("snapshot_ts", "rules_version", "trade_date", "pool", "params", "hits")
 _REQUIRED_POOL = ("market", "n_positive_pe", "n_pool")
-_REQUIRED_PARAMS = ("pe_grank_max", "ind_rank_max", "roe_min", "top_n")
+_REQUIRED_PARAMS = ("pe_grank_max", "ind_rank_max", "roe_min", "top_n",
+                    "per_industry", "with_bj")
 _REQUIRED_HIT = ("ts_code", "name", "industry", "pe_ttm", "ey_pct", "pe_grank",
                  "ind_rk", "ind_n", "gap_flags", "mv_yi", "close", "fillback")
 

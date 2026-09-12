@@ -8,7 +8,8 @@
   **无支持** → 多概念归属记作**拥挤度加总**，**不得**写成「托底」。
 
 硬约束（写进代码 + 测试）：
-1. **证实锚点 = 官方/权威来源确认**；「题材热度见顶」**不等于证实**（见 `_HEAT_WORDS`）。
+1. **证实锚点 = 官方/权威来源确认**；「题材热度见顶」与非官方渠道**均不等于证实**
+   （见 `_UNRELIABLE_WORDS`）。
 2. 阶段字段固定四值：首波 / 扩散 / 延伸 / 兑现；无「下一轮扩散方向」类字段。
 3. **消息方向语义不预设**（分类器验证前，见 C8）——记录里不含方向判断字段。
 4. 「证实」事件日入日历，供 journal / 复盘对照预期差。
@@ -41,7 +42,12 @@ STAGES: tuple[str, ...] = ("首波", "扩散", "延伸", "兑现")
 _STATE_DEFAULT = pathlib.Path.home() / ".local" / "share" / "investment" / "event_calendar_state.json"
 
 # 市场热度词——用作 `anchor_source` 时**不构成证实**（热度见顶 ≠ 证实，C9 裁决）
-_HEAT_WORDS = ("热度", "涨停家数", "涨幅榜", "龙虎榜", "成交额榜", "情绪", "人气", "关注度")
+# 不合格来源两类：① 市场热度描述（热度见顶 ≠ 证实）；
+# ② **非官方/不可溯源渠道**（传言类）——黑名单单独存在会放行「股吧传言」「微博热搜」
+# 「某自媒体爆料」这类来源，使「官方/权威来源」闸门形同虚设（R4 评审实跑复现）
+_UNRELIABLE_WORDS = ("热度", "涨停家数", "涨幅榜", "龙虎榜", "成交额榜", "情绪", "人气", "关注度",
+                     "传言", "传闻", "据传", "据说", "爆料", "热搜", "自媒体", "股吧", "微博",
+                     "微信", "小道消息", "网传", "消息人士")
 
 # 记录字段白名单（结构上杜绝「扩散路径预测」类字段混入）
 _RECORD_KEYS = ("theme", "stage", "anchor", "anchor_source", "confirmed_date",
@@ -79,7 +85,7 @@ def is_official_source(source: str) -> bool:
     s = str(source or "").strip()
     if not s:
         return False
-    return not any(w in s for w in _HEAT_WORDS)
+    return not any(w in s for w in _UNRELIABLE_WORDS)
 
 
 def load_themes(*, state_file: str | pathlib.Path | None = None) -> list[dict]:
@@ -105,8 +111,9 @@ def register_theme(theme: str, *, stage: str, anchor: str, anchor_source: str,
         raise ValueError("证实锚点不能为空（题材必须能指向一个可核验的事件）")
     if not is_official_source(anchor_source):
         raise ValueError(
-            f"证实锚点来源非法：{anchor_source!r}——须为官方/权威来源；"
-            f"市场热度类描述（{_HEAT_WORDS}）**不等于证实**（热度见顶 ≠ 证实）")
+            f"证实锚点来源非法：{anchor_source!r}——须为可溯源的官方/权威来源"
+            f"（部委/交易所/公司公告等）；市场热度描述（热度见顶 ≠ 证实）"
+            f"与非官方渠道（传言/热搜/自媒体）均不构成证实")
     if stage == "兑现" and not confirmed_date:
         raise ValueError("阶段「兑现」须给 confirmed_date（证实日入日历，供复盘对照预期差）")
 

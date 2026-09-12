@@ -22,7 +22,8 @@ def _rec(**over):
         "trade_date": "20260911",
         "rules_version": snapshot.RULES_VERSION,
         "pool": {"market": "主板+创业+科创", "n_positive_pe": 3603, "n_pool": 5010},
-        "params": {"pe_grank_max": 0.15, "ind_rank_max": 0.25, "roe_min": 8.0, "top_n": 15},
+        "params": {"pe_grank_max": 0.15, "ind_rank_max": 0.25, "roe_min": 8.0, "top_n": 15,
+                   "per_industry": 3, "with_bj": False},
         "hits": [dict(_HIT)],
         "warnings": [],
     }
@@ -38,13 +39,15 @@ def test_build_snapshot_has_all_design_fields():
     rec = snapshot.build_snapshot(
         scan_ts="2026-09-12T15:30:00+08:00", trade_date="20260911",
         pool={"market": "主板+创业+科创", "n_positive_pe": 3603, "n_pool": 5010},
-        params={"pe_grank_max": 0.15, "ind_rank_max": 0.25, "roe_min": 8.0, "top_n": 15},
+        params={"pe_grank_max": 0.15, "ind_rank_max": 0.25, "roe_min": 8.0, "top_n": 15,
+                "per_industry": 3, "with_bj": False},
         hits=[dict(_HIT)], warnings=[])
     for key in ("snapshot_ts", "rules_version", "pool", "params", "hits", "warnings", "trade_date"):
         assert key in rec, f"schema 缺字段 {key}"
     for key in ("market", "n_positive_pe", "n_pool"):
         assert key in rec["pool"]
-    for key in ("pe_grank_max", "ind_rank_max", "roe_min", "top_n"):
+    for key in ("pe_grank_max", "ind_rank_max", "roe_min", "top_n",
+                "per_industry", "with_bj"):
         assert key in rec["params"]
     hit = rec["hits"][0]
     for key in ("ts_code", "name", "industry", "pe_ttm", "ey_pct", "pe_grank",

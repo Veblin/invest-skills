@@ -232,3 +232,35 @@ def test_unlock_cli_theme_requires_anchor_fields(state, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         uc.main()
     assert exc.value.code == 2
+
+
+# ── R4 评审修复回归 ───────────────────────────────────────────────────────
+
+def test_pool_mode_preserves_themes(state, capsys, monkeypatch):
+    """池模式落盘不得清空 themes（共用状态文件；此前 `load_state` 因缺 symbols 键
+    判「结构异常」→ save_state 整份覆写 → themes 永久消失，已实跑复现）。"""
+    import unlock_calendar as uc
+
+    _reg(state, stage="兑现", anchor="官方确认", confirmed_date="2026-10-01")
+    st = uc.load_state(state)
+    uc.save_state(state, st)          # 模拟池模式落盘
+    assert tc.confirmed_event_days(state_file=state) == ["2026-10-01"], "themes 被池模式清空"
+    assert "symbols" in json.loads(state.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("bad", ["股吧传言", "微博热搜", "某自媒体爆料", "市场传闻", "板块热度见顶"])
+def test_unreliable_sources_rejected(state, bad):
+    """非官方渠道同样不构成证实——只做热度黑名单会放行「股吧传言」（R4 评审实跑复现）。"""
+    with pytest.raises(ValueError):
+        _reg(state, source=bad)
+
+
+def test_no_state_flag_respected_in_theme_mode(state, capsys, monkeypatch):
+    """`--no-state`（help：不读写状态）须在所有模式生效——此前仅池模式遵守。"""
+    import unlock_calendar as uc
+
+    monkeypatch.setattr(sys, "argv", [
+        "unlock_calendar.py", "--theme", "T", "--stage", "首波", "--anchor", "A",
+        "--anchor-source", "发改委公告", "--no-state", "--state-file", str(state)])
+    assert uc.main() == 0
+    assert not state.exists(), "--no-state 下不得写状态文件"

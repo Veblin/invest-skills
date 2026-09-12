@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
+
 from stats import percentile_rank_inclusive  # noqa: E402 —— 共享统计库
 
 import pool as pool_mod
@@ -91,26 +93,32 @@ def select_candidates(rows: list[dict], *, pe_grank_max: float = PE_GRANK_MAX,
     pos = [(r, pe) for r, pe in pos if pe is not None]
     if not pos:
         return []
-    universe = [pe for _r, pe in pos]
+    # D10：分位**一次排序 + bisect**，不要每只标的重扫全序列——
+    # 原实现是 O(N²)（实测 5000 行 1.5s，3× 输入 8.6× 耗时）。
+    # 口径与 `percentile_rank_inclusive` 一致：count(v <= x) / n（含边界）。
+    universe = sorted(pe for _r, pe in pos)
+    n_uni = len(universe)
 
     by_ind: dict[str, list[float]] = {}
     for r, pe in pos:
         by_ind.setdefault(str(r.get("industry") or pool_mod._MISSING_INDUSTRY), []).append(pe)
+    by_ind_sorted = {k: sorted(v) for k, v in by_ind.items()}
 
     out: list[dict] = []
     for r, pe in pos:
-        g = pe_grank(pe, universe)
+        g = bisect_right(universe, pe) / n_uni
         if g is None or g > pe_grank_max:
             continue
         industry = str(r.get("industry") or pool_mod._MISSING_INDUSTRY)
         missing = pool_mod.industry_missing(industry)
         rk, n = (None, None)
         if not missing:
-            ranked = industry_rank(pe, by_ind.get(industry, []))
-            if ranked is None:
+            peers = by_ind_sorted.get(industry) or []
+            if not peers:
                 continue
-            rk, n = ranked
-            if n and rk / n > ind_rank_max:
+            n = len(peers)
+            rk = bisect_left(peers, pe) + 1        # min-rank（并列取最小名次）
+            if rk / n > ind_rank_max:
                 continue
         out.append({**r, "ey_pct": ey_pct(pe), "pe_grank": g,
                     "ind_rk": rk, "ind_n": n, "industry_missing": missing})

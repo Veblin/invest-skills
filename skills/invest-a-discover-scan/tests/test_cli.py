@@ -229,3 +229,69 @@ def test_cli_snapshot_not_written_under_repo(monkeypatch, tmp_path):
     cli.main(_argv(tmp_path))
     import snapshot as snap_mod
     assert "code/skills" not in str(snap_mod.discovery_dir())
+
+
+# ── R4 评审修复回归 ───────────────────────────────────────────────────────
+
+def test_cli_forecast_is_actually_used(monkeypatch, tmp_path):
+    """预告数据须真进 L3 增速子项——此前只在 fina 为空时取、且该分支必 continue 丢弃，
+    使增速子项恒 0、降级档永不生效（R4 评审实跑复现）。"""
+    cli = load_scan_cli()
+    _stub(monkeypatch)
+    monkeypatch.setattr(sources, "fetch_forecast",
+                        lambda code: [{"p_change_max": 9999.0}])
+    snap = tmp_path / "2026.jsonl"
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: snap)
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path))
+    rec = json.loads(snap.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert rec["hits"], "应有命中"
+    # g_implied（≈16%）< 9999 → 第二项应记 1
+    assert all(h["gap_flags"][1] == 1 for h in rec["hits"]), "预告增速未被用于 L3"
+
+
+def test_cli_rf_none_not_rendered_as_number(monkeypatch, tmp_path):
+    """rf 不可得时不得渲染成「中国 10Y None%」（把 Python None 当收益率）。"""
+    cli = load_scan_cli()
+    _stub(monkeypatch, rf=None)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path))
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "None%" not in body
+    assert "不可得" in body
+
+
+def test_cli_snapshot_records_rule_params(monkeypatch, tmp_path):
+    """per_industry / with_bj 也是规则参数——缺了快照无法归因（回填裁决锚点失效）。"""
+    cli = load_scan_cli()
+    _stub(monkeypatch)
+    snap = tmp_path / "2026.jsonl"
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: snap)
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path, per_industry=5))
+    rec = json.loads(snap.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert rec["params"]["per_industry"] == 5
+    assert rec["params"]["with_bj"] is False
+
+
+def test_cli_l4_context_renders_short_label(monkeypatch, tmp_path):
+    """L4 行不得把 market_form 的整个 dict 插进报告。"""
+    cli = load_scan_cli()
+    _stub(monkeypatch)
+    monkeypatch.setattr(sources, "market_form_context", lambda: {
+        "available": True, "market_form": "宽幅震荡轮动（缩量电风扇）",
+        "note": "事后标注，不蕴含收益可预测性（Kirby 2023）"})
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path))
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "宽幅震荡轮动（缩量电风扇）" in body
+    assert "{'form'" not in body and "'kirby_note'" not in body
+
+
+def test_client_is_singleton(monkeypatch):
+    """客户端须单例：每次新建会重置实例级限流器 → 全速突发（空返回根因）。"""
+    import sources as src
+    monkeypatch.setattr(src, "_CLIENT", None)
+    assert src.client() is src.client()
