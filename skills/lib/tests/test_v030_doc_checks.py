@@ -160,3 +160,54 @@ def test_etf_skill_selfcheck_synced():
     assert "派生数字（倍数/比例/百分点/点位差）带 `[来源: Python calc: formula]`" in etf_skill
     assert "正文 §N 交叉引用指向节含被引内容" in etf_skill
     assert "强制行为 5-7" in etf_skill
+
+
+# ---------------------------------------------------------------- A1 登记义务（T11-6）
+
+_SMOKE_SCRIPT = "scripts/smoke_interfaces.py"
+_INTERFACE_MAP = "skills/lib/references/data-interface-map.md"
+
+
+def _smoke_l1_names() -> list[str]:
+    """冒烟 L1 清单的接口名字面量（纯文本解析，不导入模块——零依赖）。
+
+    锚定**赋值语句**而非裸 `AK_INTERFACES`：docstring 里也提到该名字，
+    按首次出现切分会切到注释区导致解析为空（实测踩坑）。
+    """
+    text = _read(_SMOKE_SCRIPT)
+    marker = "AK_INTERFACES: list[str] = ["
+    assert marker in text, "L1 清单赋值语句形态变化，请更新本解析"
+    block = text.split(marker, 1)[1].split("]", 1)[0]
+    return re.findall(r'"([a-z_][a-z0-9_]+)"', block)
+
+
+def test_smoke_l1_list_parses():
+    """前置自检：解析失败须显式红，不得因「解析到 0 项」而静默通过。"""
+    names = _smoke_l1_names()
+    assert len(names) >= 60, f"L1 清单解析异常，仅得 {len(names)} 项"
+    assert len(set(names)) == len(names), "L1 清单存在重复项"
+
+
+def test_data_interface_map_covers_smoke_l1():
+    """A1 义务：L1 清单每个接口名都必须在地图内有登记行（防地图与清单脱同步）。"""
+    text = _read(_INTERFACE_MAP)
+    missing = sorted(n for n in _smoke_l1_names() if f"`{n}`" not in text)
+    assert not missing, f"data-interface-map 缺登记（A1 义务）：{missing}"
+
+
+def test_new_sources_registered_with_caliber_notes():
+    """新增源须登记且**高危口径注记在位**——缺注记即回归为静默陷阱。"""
+    text = _read(_INTERFACE_MAP)
+    required = {
+        "stock_hsgt_fund_flow_summary_em": ["语义未核"],
+        "currency_boc_sina": ["每 100 港元"],
+        "moneyflow_hsgt": ["累计口径", "差分"],
+        "hk_tradecal": ["港股交易日历"],
+        "stock_hsgt_hist_em": ["港股通沪", "恒 NaN"],
+    }
+    for name, tokens in required.items():
+        assert f"`{name}`" in text, f"地图缺 {name} 登记行"
+        row = next(ln for ln in text.splitlines()
+                   if ln.startswith("|") and f"`{name}`" in ln)
+        for tok in tokens:
+            assert tok in row, f"{name} 登记行缺口径注记「{tok}」"

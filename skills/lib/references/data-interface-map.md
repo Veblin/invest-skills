@@ -16,7 +16,11 @@
 
 ---
 
-## A. akshare 接口（51 行 / 63 个接口名，按能力簇；2026-09-10 脚本核对）
+## A. akshare 接口（53 行 / 66 个接口名，按能力簇；2026-09-12 核算）
+
+> 计数口径：表格**首列**反引号内的接口名，单元格内以 `/` 分隔者逐个计；
+> 接口名一律写**全名**（缩写会让 `test_data_interface_map_covers_smoke_l1` 漏判——实测踩坑）。
+> 改表后请按同法重算本行。
 
 > 「使用方」= 首个引用该接口的 skill（跨 skill 共用以逗号列全）；「风险」：🔥=高漂移/反爬易失效，⚠️=中，—=低。
 > 全部接口均在本仓库代码内被调用；另有少量**技能内联使用**的接口见 D 节。
@@ -42,7 +46,7 @@
 | `index_hist_sw` | invest-a-stock | — | 申万行业日线（sw_daily 5000 分不足时降级目标） |
 | `index_analysis_weekly_sw` | invest-a-etf | — | 申万周度行业分析 |
 | `sw_index_first_info` / `sw_index_second_info` / `sw_index_third_info` | invest-a-stock | — | 申万一/二/三级行业信息 |
-| `stock_board_industry_name_em` / `cons_em` / `hist_em` | invest-a-stock | 🔥 | 东财板块行业成分/历史 |
+| `stock_board_industry_name_em` / `stock_board_industry_cons_em` / `stock_board_industry_hist_em` | invest-a-stock | 🔥 | 东财板块行业成分/历史 |
 | `stock_board_industry_pe_ratio_cninfo` | invest-a-stock | 🔥 | 巨潮行业 PE；**akshare 1.18.64 已改名 `stock_industry_pe_ratio_cninfo`**（L1 冒烟 2026-09-08 首发捕获）；新接口实测抛 pandas 列错误（上游未适配巨潮页面），该维已静默降级 → 见 E 节 |
 
 ### A3. 涨停 / 情绪 / 市场概况
@@ -60,7 +64,8 @@
 |------|--------|------|------|
 | `stock_margin_sse` | invest-a-journal, invest-a-gap-scan | — | 上交所两融日历史（pulse 长序列） |
 | `stock_margin_szse`* | invest-a-pulse（内联） | — | 深交所两融（*技能内联，见 D） |
-| `stock_hsgt_hist_em` | invest-a-journal | 🔥 | 北向历史（东财；2024-08 起日频净买入停披，季度口径） |
+| `stock_hsgt_hist_em` | invest-a-journal, **invest-hk-stock** | 🔥 | 北向历史（东财；2024-08 起日频净买入停披，季度口径）。**南向 symbol 实测（2026-09-12）**：`symbol="港股通沪"/"港股通深"`，2713 行日频至 2026-09-11；`当日成交净买额` 为**亿元**且是唯一可用净额列；⚠️ `当日资金流入`/`当日余额` 两列**恒 NaN 不可用**（不得渲染、不得填 0）；`历史累计净买额` 单位为**万亿元**（3.208912 → ×1e4 = 32089.12 亿元，与 tushare 同日 `ggt_ss` 精确吻合） |
+| `stock_hsgt_fund_flow_summary_em` | **invest-hk-stock** | ⚠️ | 沪深港通当日汇总 4 行（沪股通/深股通/港股通(沪)/港股通(深)）；南向行含 `成交净买额` + 涨跌家数 + 恒指涨跌幅。⚠️ **实测：沪/深两行的涨跌家数完全相同 → 是港股市场整体口径，不可拆成分通道**；`交易状态`/`资金净流入`/`当日资金余额` 三列**语义未核实**（`资金净流入` 实测恒 420.0，疑为每日额度而非净流入）→ 引擎登记为 unused_fields 不展示 |
 | `stock_hsgt_individual_em` | invest-a-stock | 🔥 | 北向个股持股 |
 | `stock_fund_flow_industry` | invest-a-etf, invest-a-stock | ⚠️ | 行业资金流 |
 
@@ -103,6 +108,7 @@
 | `macro_china_pmi` / `macro_china_cpi` / `macro_china_ppi` / `macro_china_lpr` / `macro_china_money_supply` / `macro_rmb_loan` | invest-a-stock | — | 宏观标签锚点（pulse 消费） |
 | `bond_china_yield` | invest-a-stock | — | 中债收益率 |
 | `bond_zh_us_rate` | invest-a-journal, invest-a-stock | — | 中美利率对比（ERP 原料） |
+| `currency_boc_sina` | **invest-hk-stock** | — | 中行外汇牌价（`symbol="港币"`）。⚠️ **每 100 港元计价**（86.384 → 0.86384 CNY/HKD），漏除 100 会把 A/H 溢价率放大近百倍；⚠️ **必须显式传日期区间**——不传时返回的默认窗口**不是最新数据**（2026-09-12 真机踩坑：取到 2023-11-10 的中间价，溢价率方向对但幅度差近一倍），消费方须按日期排序 + 陈旧分级（>10 天标注、>30 天不采用转降级） |
 | `news_economic_baidu` | invest-a-event-calendar（v3 宏观日程） | 🔥 | 财经日历，**能返回未来日程**。2026-09-10 实测：前向窗 ≈30 天（10-16 起返回空）；窗口内**无美国 CPI**（103 条 CPI 全是其他国家的）；单次调用失败率 ≈12%；`重要性` 只有 1/2 两档且 str/float 混型（噪音行同样有值 → 不可作筛选器）；`cookie` 为空时每次调用多 2 个握手请求。走 `curl_cffi` → **不要**包 `akshare_direct_session`（那是东财 requests 直连+节流） |
 
 ### A10. 新闻 / 公告 / 研报
@@ -139,7 +145,7 @@
 
 ---
 
-## B. tushare 接口（19 行 / 28 个接口名，实际调用；2026-09-10 脚本核对）
+## B. tushare 接口（21 行 / 29 个接口名，实际调用；2026-09-12 核算）
 
 > 门槛积分来自 `lib/tushare_client.py` 的 `TUSHARE_API_MIN_POINTS` 与 source-guide 积分表；积分不足时客户端静默降级（is_available=False 或降级链）。
 > **Tushare Pro API 面稳定（版本化），漂移风险低；真正会变的是账户积分档位。**
@@ -163,6 +169,8 @@
 | `income` | — | 利润表 |
 | `fund_share` / `fund_daily` / `fund_adj` | — | ETF 份额/净值/复权 |
 | `hk_daily` / `hk_basic` | — | 港股行情/基础 |
+| `hk_tradecal` | — | **港股交易日历**（`cal_date`/`is_open`/`pretrade_date`，22 行/月升序）。消费方 invest-hk-stock `hk_calendar.py`（假日变体：A 股开市而港股休市的日子须与 A 股日历区分） |
+| `moneyflow_hsgt` | — | 沪深港通资金流。⚠️ **累计口径**：`ggt_ss`（南向沪）/`ggt_sz`（南向深）/`south_money` 均为**累计值**，**必须差分**才是当日净额——直接引用是 **550 亿 vs 44 亿**的量级错误（2026-09-12 同日实测：`32089.12 − 32057.2 = 31.92` ↔ akshare 港股通沪当日 31.9191；`south_money = ggt_ss + ggt_sz`）。消费方 invest-hk-stock `hk_southbound.py` |
 | `fut_daily` / `fut_basic` | — | 期货日线/合约（股指 F 系列） |
 | `hsgt_top10` | — | 沪深港通十大成交 |
 

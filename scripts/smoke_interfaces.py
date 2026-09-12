@@ -2,8 +2,10 @@
 """数据接口冒烟检查（v0.1，2026-09-08）。
 
 分层：
-- L1（默认）：akshare 接口存在性检查（hasattr，零网络，秒级）——清单 67 项——检测版本漂移。
-  接口清单与 skills/lib/references/data-interface-map.md 同步维护。
+- L1（默认）：akshare 接口存在性检查（hasattr，零网络，秒级）——清单 70 项——检测版本漂移。
+  接口清单与 skills/lib/references/data-interface-map.md 同步维护（数量以运行期打印的
+  `len(AK_INTERFACES)` 为准，不手写）；**每个清单项都必须在地图内有登记行**，
+  由 `skills/lib/tests/test_v030_doc_checks.py::test_data_interface_map_covers_smoke_l1` 守卫。
 - L2（--live）：精选接口真实调用（网络）——检测环境/反爬/权限问题。
 
 用法：
@@ -38,6 +40,7 @@ AK_INTERFACES: list[str] = [
     # A4 杠杆/资金
     "stock_margin_sse", "stock_hsgt_hist_em", "stock_hsgt_individual_em",
     "stock_fund_flow_industry",
+    "stock_hsgt_fund_flow_summary_em",  # 南向当日汇总（invest-hk-stock）；见 map A4 语义未核注记
     # A5 龙虎榜
     "stock_lhb_detail_em", "stock_lhb_detail_daily_sina", "stock_lhb_stock_detail_em",
     # A6 股东/高管/解禁
@@ -52,6 +55,7 @@ AK_INTERFACES: list[str] = [
     "macro_china_pmi", "macro_china_cpi", "macro_china_ppi", "macro_china_lpr",
     "macro_china_money_supply", "macro_rmb_loan", "bond_china_yield", "bond_zh_us_rate",
     "news_economic_baidu",  # v3 宏观日程（invest-a-event-calendar；能返回未来日程）
+    "currency_boc_sina",  # 中行外汇牌价（A/H 比价汇率；⚠️ 每 100 港元计价，须显式传日期区间）
     # A10 新闻/公告/研报
     "stock_notice_report", "stock_individual_notice_report", "stock_news_em",
     "stock_research_report_em",
