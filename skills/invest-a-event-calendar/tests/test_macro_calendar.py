@@ -170,6 +170,32 @@ def test_cn_calendar_all_failed_reports_error_not_empty(monkeypatch):
     assert len(res.failed_days) == 2
 
 
+def test_cn_calendar_all_empty_days_is_explicit_unavailable(monkeypatch):
+    """整窗**每天都是合法空窗**（无一失败）→ 仍判不可得，不得渲染成「无排期」。
+
+    源侧空帧（反爬/限流）与「窗口内确实没有排期」在这一层不可区分；池模式对
+    同一风险已有同款守卫（全池空返回 → exit 3），本处补齐（R2 review P0）。
+    """
+    monkeypatch.setattr(mc, "_fetch_baidu_day", lambda date, cookie=None: _baidu_df([]))
+    res = mc.fetch_baidu_calendar("20260912", "20260914", retries=1)
+    assert res.events == []
+    assert res.error and "不等于" in res.error, f"整窗空须判不可得: {res.error!r}"
+    assert res.ok_days == 0 and res.empty_days == 3
+
+
+def test_cn_calendar_one_ok_day_not_judged_unavailable(monkeypatch):
+    """只要有一天取到数据 → 照常输出（守卫不得过度触发）。"""
+    def fake(date, cookie=None):
+        if date == "20260913":
+            return _baidu_df([])
+        return _baidu_df([["2026-09-12", "10:00", "中国", "中国8月CPI年率(%)",
+                           None, None, 0.5, 1]])
+
+    monkeypatch.setattr(mc, "_fetch_baidu_day", fake)
+    res = mc.fetch_baidu_calendar("20260912", "20260913", retries=1)
+    assert res.error is None and len(res.events) == 1 and res.empty_days == 1
+
+
 def test_cn_calendar_retries_transient_failure(monkeypatch):
     """单日失败须重试（实测失败率 ~12%）；重试成功则不计入 failed_days。"""
     attempts = {"n": 0}
@@ -236,6 +262,15 @@ def test_real_rules_table_is_wellformed():
             fam = str(spec.get("family") or "")
             assert fam.startswith(region), \
                 f"{region} 表的 {kw!r} family={fam!r} 指向了别的区域"
+
+
+def test_real_rules_noise_min_days_leaves_room_for_weekly():
+    """真表的阈值须**大于**窗内单星期几最大出现次数（31 天含端点 → 5），
+    否则周频（「初请」「EIA 周报」）会被当每日类噪音丢掉。"""
+    path = Path(__file__).resolve().parent.parent / "references" / "macro_sources.yaml"
+    data = _load_rules_strict(path)
+    assert int(data["noise_min_days"]) > 5, "阈值 ≤5 会误杀周频事件"
+    assert mc.DEFAULT_NOISE_MIN_DAYS > 5, "代码默认值同样须留余量"
 
 
 def test_region_keywords_apply_per_region(monkeypatch):
@@ -532,3 +567,75 @@ def test_us_calendar_non_numeric_release_id_is_explicit(monkeypatch):
     res = mc.fetch_us_calendar("2026-09-10", "2026-12-31", fred_key="x" * 32, rules=rules)
     assert [e.title for e in res.events] == ["美国CPI"], "合法条目不得连坐"
     assert any("id" in n for n in res.notes), f"非法 id 须显式报告: {res.notes}"
+
+
+# ── 策展表健壮性（R2 review P1）：手改 YAML 不得让整份 --macro 消失 ──────
+# 该表是**手工维护**资产，手误属预期内；本模块对坏 id 已有 fail-soft 先例，
+# 下列三条把同一标准补齐到 非映射行 / 坏正则 / 坏阈值。
+
+def test_us_calendar_scalar_entry_warns_instead_of_crashing(monkeypatch):
+    """`us_releases` 混入标量行 → 跳过 + 配置告警；不得 AttributeError 直穿 CLI。"""
+    monkeypatch.setattr(mc, "_get_fred_release_dates",
+                        lambda s, e, k: {"release_dates": []})
+    rules = {"us_releases": ["美国CPI",
+                             {"id": 10, "name": "Consumer Price Index", "label": "美国CPI"}]}
+    res = mc.fetch_us_calendar("20260901", "20261001", fred_key="k", rules=rules)
+    assert res.error is None
+    assert any("非映射" in n for n in res.notes), f"标量行须显式告警: {res.notes}"
+
+
+def test_baidu_bad_noise_rules_degrade_with_note(monkeypatch):
+    """坏 noise_patterns（正则不闭合）/ 坏 noise_min_days（非数字）→ 告警 + 降级，不崩。"""
+    def fake(date, cookie=None):
+        return _baidu_df([["2026-09-12", "10:00", "中国", "中国8月CPI年率(%)",
+                           None, None, 0.5, 1]])
+
+    monkeypatch.setattr(mc, "_fetch_baidu_day", fake)
+    rules = {"noise_patterns": ["上期所(每日"], "noise_min_days": "abc"}
+    res = mc.fetch_baidu_calendar("20260912", "20260912", retries=1, rules=rules)
+    assert res.error is None
+    assert any("noise_patterns" in n for n in res.notes), f"须报正则不可编译: {res.notes}"
+    assert any("noise_min_days" in n for n in res.notes), f"须报阈值不可解析: {res.notes}"
+    assert len(res.events) == 1, "配置降级后事件仍须照常输出"
+
+
+# ── 频率阈值须留余量（R2 review P1）─────────────────────────────────────
+# 窗口是 31 天**含端点**（date_range(30)），故某个星期几必然出现 5 次——
+# 阈值 5 会把标题/时刻稳定的**周频**序列当成每日类噪音丢弃，而白名单刻意
+# 保留「初请」「EIA 周报」。阈值须大于窗口内单星期几的最大出现次数。
+
+def test_weekly_series_with_five_occurrences_survives_frequency_check():
+    dates = ["2026-09-03", "2026-09-10", "2026-09-17", "2026-09-24", "2026-10-01"]
+    rows = _rows(name="美国截至当周初请失业金人数", dates=dates, region="美国", time="20:30")
+    kept, dropped, _ = mc.filter_noise(rows, patterns=[], min_days=mc.DEFAULT_NOISE_MIN_DAYS)
+    assert len(kept) == 5 and dropped == 0, "周频事件被当成每日类噪音丢弃"
+
+
+def test_daily_series_still_filtered_at_default_threshold():
+    """提高阈值不得放过真正的每日类噪音（31 天窗内工作日约 22 次）。"""
+    dates = [f"2026-09-{d:02d}" for d in range(1, 29)]
+    rows = _rows(name="中国9月15日上期所每日仓单变动-铜(吨)", dates=dates)
+    kept, dropped, families = mc.filter_noise(rows, patterns=[],
+                                              min_days=mc.DEFAULT_NOISE_MIN_DAYS)
+    assert kept == [] and dropped == 28 and families
+
+
+# ── 议息会议：北京日期口径下的退场时机（R2 review P1）──────────────────
+# 事件日 = 美东结束日 +1。过滤若拿**结束日**与 today 比，会议会在真正发生的
+# 那天（北京当日）从表里消失，并同时谎报「策展表已过期」——而表是最新的。
+
+def test_fomc_meeting_survives_on_its_beijing_day(tmp_path):
+    p = tmp_path / "fomc.yaml"
+    p.write_text(_FOMC_YAML, encoding="utf-8")
+    events, warnings = mc.load_fomc_meetings(p, today="2026-09-17")
+    assert [e.date for e in events] == ["2026-09-17", "2026-10-29", "2026-12-10"], \
+        "会议在其北京当日（09-17）须仍在表内"
+    assert not any("过期" in w for w in warnings), f"谎报策展表过期: {warnings}"
+
+
+def test_fomc_meeting_retires_after_its_beijing_day(tmp_path):
+    """北京日期已过 → 该会议退场（不得永久驻留）。"""
+    p = tmp_path / "fomc.yaml"
+    p.write_text(_FOMC_YAML, encoding="utf-8")
+    events, _ = mc.load_fomc_meetings(p, today="2026-09-18")
+    assert "2026-09-17" not in [e.date for e in events]

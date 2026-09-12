@@ -330,12 +330,18 @@ def merge_rows_by_date(rows: list[dict]) -> dict[str, dict]:
 
 
 def collect_pool(symbols: list[str], *, lookahead_days: int, include_past_days: int = 0,
-                 sleep_s: float = 0.5) -> dict:
-    """逐标的拉取（串行 + 间隔）；{symbol: {"batches": {date: {...}}, "error": str|None}}。"""
+                 sleep_s: float = 0.5, today: _dt.date | None = None) -> dict:
+    """逐标的拉取（串行 + 间隔）；{symbol: {"batches": {date: {...}}, "error": str|None}}。
+
+    ``today`` 须由调用方按**北京日期**传入（`_beijing_today`）：`fetch_symbol_unlocks`
+    的缺省是宿主本地 `date.today()`，与同一次运行的报告名/提醒窗/`diff_batches` 差一天
+    ——跨时区时窗口止于 host+90 而非北京+90，恰在边界的那批被静默滤掉，排雷工具
+    给出假「无解禁记录」（R2 review P2；`catalyst.py` 同版本已显式传今日，契约既定）。
+    """
     out: dict[str, dict] = {}
     for idx, sym in enumerate(symbols):
         rows, err = fetch_symbol_unlocks(sym, lookahead_days=lookahead_days,
-                                         include_past_days=include_past_days)
+                                         include_past_days=include_past_days, today=today)
         out[sym] = {"batches": merge_rows_by_date(rows), "error": err}
         if sleep_s and idx < len(symbols) - 1:
             time.sleep(sleep_s)
@@ -478,7 +484,7 @@ def _run_pool(args: argparse.Namespace) -> int:
         return 2
 
     today = _beijing_today()
-    collected = collect_pool(symbols, lookahead_days=args.lookahead)
+    collected = collect_pool(symbols, lookahead_days=args.lookahead, today=today)
     if all(v["error"] for v in collected.values()):
         print("解禁数据不可得（池内全部标的取数失败）——不硬编。", file=sys.stderr)
         return 3
@@ -498,9 +504,18 @@ def _run_pool(args: argparse.Namespace) -> int:
         state_path = pathlib.Path(args.state_file)
         state = load_state(state_path)
         changes = {}
+        # 本轮**存在**取数失败 → 空结果不可验证（源侧空帧与「确实无解禁」在本轮
+        # 不可区分）：空批次不得覆写基线，否则同一轮就渲染出「❌ 消失」、恢复后
+        # 又全标「🆕 新增」。全池空守卫要求池内无一失败，故部分限流会绕过它
+        # ——守卫须做到**每标的一粒度**（R2 review P1）。
+        degraded = any(v["error"] for v in collected.values())
+        unverified: list[str] = []
         for sym, info in collected.items():
             if info["error"]:
                 continue  # 失败标的保留旧状态（不覆盖）
+            if not info["batches"] and degraded:
+                unverified.append(sym)
+                continue  # 不改基线、不算变化（下轮干净时再落账）
             old = (state["symbols"].get(sym) or {}).get("batches")
             if old is None:
                 baseline_symbols.append(sym)
@@ -516,6 +531,10 @@ def _run_pool(args: argparse.Namespace) -> int:
         err = save_state(state_path, state)
         if err:
             print(f"⚠ 状态写入失败（{err}）——下次运行将按首跑处理", file=sys.stderr)
+        if unverified:
+            print(f"⚠ 本轮存在取数失败，{len(unverified)} 个标的返回空**不可验证**"
+                  f"——已跳过其状态更新（基线保留，避免假 🆕/❌ 告警）："
+                  f"{'、'.join(unverified)}", file=sys.stderr)
 
     md = render_pool_md(collected, today=today, alert_days=args.alert_days,
                         lookahead_days=args.lookahead, pool_path=str(pf),
@@ -637,6 +656,15 @@ def render_macro_md(view: dict, *, today: _dt.date, days: int,
             status = f"⚠ 部分失败：{len(r.failed_days)} 天取数失败"
         elif r.events:
             status = "✅ 正常"
+        elif r.ok_days:
+            # 源有返回、事件却为空 → 是**筛选**（区域/白名单）造成的，不是源里没有：
+            # 说成「窗口内无排期」会让用户以为无事可做，而真因要改配置。
+            status = f"— 筛选后无排期（源 {r.ok_days} 天有数据）"
+        elif r.empty_days:
+            # 契约守卫：源结果自述「整窗零成功日」时，渲染层**任何情况下**都不得
+            # 出「窗口内无排期」。百度源会先在源头判不可得（走上方 error 分支），
+            # 此分支覆盖其它来源/构造路径，避免同一误渲染再次出现。
+            status = f"⚠ 整窗 {r.empty_days} 天返回空（不可得，≠ 无事件）"
         else:
             status = "— 窗口内无排期"
         regions = "、".join(sorted({e.region for e in r.events})) or "—"

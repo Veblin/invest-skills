@@ -230,17 +230,28 @@ def group_events(events: Sequence[MacroEvent]) -> list[MacroEvent]:
     return sorted(out, key=lambda e: (e.date, e.time, e.region, e.title))
 
 
+# 频率检测默认阈值。**须大于窗口内单星期几的最大出现次数**：窗口是 31 天**含端点**
+# （`date_range(30)`），故某个星期几必然出现 5 次 → 阈值 5 会把标题/时刻稳定的
+# **周频**序列判为每日类噪音（白名单刻意保留「初请」「EIA 周报」）。
+# 真每日类（工作日）窗内约 22 次，取 8 给两侧都留余量。
+DEFAULT_NOISE_MIN_DAYS = 8
+
+
 def filter_noise(
-    rows: Sequence[dict], *, patterns: Sequence[str], min_days: int = 5
+    rows: Sequence[dict], *, patterns: Sequence[str], min_days: int = DEFAULT_NOISE_MIN_DAYS
 ) -> tuple[list[dict], int, list[str]]:
     """滤掉每日类噪音；返回 (保留行, 过滤条数, 命中族标签)。
 
     两条互补规则（缺一不可）：
     1. **频率检测**（结构性）：同一事件名在 ``≥min_days`` 个不同日期、且同一时刻
-       出现 → 判每日类。自然放过周频/月频（30 天窗内最多 1-2 次）。
+       出现 → 判每日类。阈值须**大于**窗口内单星期几的最大出现次数（见
+       ``DEFAULT_NOISE_MIN_DAYS``），否则周频会被误杀。
     2. **策展 pattern**（须极窄）：只匹配已实测的噪音族。
        ⚠️ 切勿写成宽泛的「库存」——会误杀「美国 EIA 原油库存」这类**真实**事件
        （它的公布会移动价格）。宁可少过滤。
+
+    ``patterns`` 须为**已校验可编译**的正则串（配置路径经
+    ``_sanitize_noise_patterns`` 过滤坏条目）。
     """
     pats = [re.compile(p) for p in patterns]
 
@@ -315,6 +326,43 @@ def _baidu_rows_to_dicts(df) -> list[dict]:
     return df.to_dict("records")
 
 
+def _sanitize_noise_patterns(patterns: Any) -> tuple[list[str], list[str]]:
+    """校验策展 pattern 均可编译 → (可用 pattern, 配置告警)。
+
+    规则表是**手工维护**资产，手误属预期内；本模块对坏 id 已是 fail-soft，
+    故坏正则同样只降级 + 告警，**不得**让 `re.error` 直穿 `_run_macro`
+    （那会让整份报告消失，且用户看不出是哪一条写坏了）。
+    """
+    good: list[str] = []
+    notes: list[str] = []
+    for p in patterns or []:
+        s = str(p)
+        try:
+            re.compile(s)
+        except re.error as exc:
+            notes.append(
+                f"配置告警：noise_patterns 含无法编译的正则（已跳过该条，请修正 "
+                f"references/macro_sources.yaml）：{s!r}（{exc.msg}）")
+            continue
+        good.append(s)
+    return good, notes
+
+
+def _coerce_noise_min_days(raw: Any) -> tuple[int, list[str]]:
+    """阈值转 int；不可解析/非正 → 回退 ``DEFAULT_NOISE_MIN_DAYS`` + 告警。"""
+    if raw is None:
+        return DEFAULT_NOISE_MIN_DAYS, []
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = None
+    if v is None or v < 1:
+        return DEFAULT_NOISE_MIN_DAYS, [
+            f"配置告警：noise_min_days 不是正整数（已回退默认 "
+            f"{DEFAULT_NOISE_MIN_DAYS}，请修正 references/macro_sources.yaml）：{raw!r}"]
+    return v, []
+
+
 def fetch_baidu_calendar(
     start: str,
     end: str,
@@ -336,8 +384,9 @@ def fetch_baidu_calendar(
     该区全收（档位记「—」），配置了的区只收命中项。
     """
     rules = rules or {}
-    pats = list(rules.get("noise_patterns") or [])
-    min_days = int(rules.get("noise_min_days", 5))
+    pats, pat_notes = _sanitize_noise_patterns(rules.get("noise_patterns"))
+    min_days, md_notes = _coerce_noise_min_days(rules.get("noise_min_days"))
+    rule_notes = pat_notes + md_notes
     region_kw: dict = rules.get("region_keywords") or {}
 
     ok_days = 0
@@ -413,10 +462,23 @@ def fetch_baidu_calendar(
     events = group_events(events)
     coverage = max((e.date for e in events), default=None)
 
+    # 整窗零成功日（每天都是**合法空窗**、无一失败）→ 判不可得，**不得**当「无排期」：
+    # 源侧空帧（反爬/限流）与「窗口内确实没有排期」在这一层不可区分，而排雷/日程
+    # 工具给出一句「窗口内无排期」比不报告更危险（模块 docstring 明令：源不可得 ≠
+    # 无事件）。池模式对同一风险已有同款守卫（全池空返回 → exit 3），此处补齐。
+    if not events and ok_days == 0 and empty_days > 0:
+        return SourceResult(
+            name="百度财经日历",
+            error=(f"整窗 {empty_days} 天均返回空（无一天取到数据）——疑源侧空帧/限流"
+                   "或区域白名单未命中，**不等于窗口内无事件**"),
+            ok_days=ok_days, empty_days=empty_days, failed_days=failed,
+            notes=rule_notes,
+        )
+
     return SourceResult(
         name="百度财经日历", events=events, coverage_end=coverage,
         ok_days=ok_days, empty_days=empty_days, failed_days=failed,
-        filtered=dropped, filtered_families=families,
+        filtered=dropped, filtered_families=families, notes=rule_notes,
     )
 
 
@@ -510,8 +572,15 @@ def fetch_us_calendar(
         ))
 
     seen_names = {e.title for e in events}
+    # 非映射行（`us_releases: ["美国CPI"]` 这类手误）须与坏 id 同等处置：跳过 + 告警。
+    # 此前构建循环跳过它、此处却仍对每行调 `e.get` → AttributeError 直穿 _run_macro，
+    # 一处手误让整份报告消失（模块对坏 id 是 fail-soft 的，标准须一致）。
+    malformed = [str(e)[:40] for e in entries if not isinstance(e, dict)]
+    if malformed:
+        notes.append("策展表 us_releases 含非映射条目（已跳过，请修正 "
+                     "references/macro_sources.yaml）：" + "、".join(malformed))
     missed = [str(e.get("label") or e.get("name")) for e in entries
-              if (e.get("label") or e.get("name")) not in seen_names]
+              if isinstance(e, dict) and (e.get("label") or e.get("name")) not in seen_names]
     if missed:
         notes.append("策展表条目未在返回集中出现（疑改名/暂无排期）：" + "、".join(missed))
 
@@ -569,7 +638,20 @@ def load_fomc_meetings(
             warns.append(f"FOMC 策展表日期已归一化：{raw_end!r} → {end}（建议手工补零）")
         rows.append((end, bool(m.get("sep"))))
 
-    future = [(d, sep) for d, sep in rows if d >= _norm_ymd(today)]
+    # 统一轴为北京日期：决议为美东 14:00（官方新闻稿页头「For release at 2:00 p.m.
+    # EDT」），+12/13h → **北京次日** 02:00/03:00。不换算会让用户按北京日期查看时
+    # 整整错过一天。
+    # ⚠️ 过滤必须按**事件日**（＝结束日 +1）比：拿结束日与 today 比会让会议在它真正
+    # 发生的那天从表里消失（09-16 的会在 09-17 被滤掉），并同时触发一句**假**的
+    # 「策展表已过期」——表其实是最新的，用户被叫去刷新一张不需要刷新的表。
+    def _beijing_event_date(end_ymd: str) -> _dt.date:
+        return _dt.date.fromisoformat(end_ymd) + _dt.timedelta(days=1)
+
+    # 比较口径统一为 `_norm_ymd` 的带连字符 ISO（两种入参都归一）——勿混用 %Y%m%d，
+    # 数字串与连字符串逐位比会恒真（'-' < '0'），等于把过滤变成空操作。
+    today_norm = _norm_ymd(today)
+    future = [(d, sep) for d, sep in rows
+              if _beijing_event_date(d).isoformat() >= today_norm]
     if not future:
         covered_to = max((d for d, _ in rows), default="—")
         return [], warns + [
@@ -578,10 +660,7 @@ def load_fomc_meetings(
 
     events = [
         MacroEvent(
-            # 统一轴为北京日期：决议为美东 14:00（官方新闻稿页头「For release at
-            # 2:00 p.m. EDT」），+12/13h → **北京次日** 02:00/03:00。不换算会让用户
-            # 按北京日期查看时整整错过一天。
-            date=(_dt.date.fromisoformat(d) + _dt.timedelta(days=1)).isoformat(),
+            date=_beijing_event_date(d).isoformat(),
             time="", region="美国", title="FOMC 议息会议",
             period="", importance="高", source="fomc",
             note="；".join(p for p in (

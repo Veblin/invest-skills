@@ -302,3 +302,28 @@ def test_normalize_src_date():
     assert inds._normalize_src_date("20221104") == "20221104"
     assert inds._normalize_src_date(None) is None
     assert inds._normalize_src_date("") is None
+
+
+# ── 源日期取值（R2 审查：真值陷阱致 src_date 恒 NULL）─────────────────────
+# 上游帧由 `pd.to_datetime(..., errors="coerce").dt.date` 产出 → 缺失值是 NaT/NaN
+# （**真值**），`row.get("发布日期") or row.get("日期")` 因此永不回落；pd.NA 更直接：
+# `bool(pd.NA)` 抛 TypeError。任一情形都会把 src_date 写成 NULL，使停更检测退化为
+# 按采集日算滞后 —— 源冻结数年也报「无异常」（R1-F2 的成果被静默回退）。
+
+def test_pick_src_date_falls_back_when_publish_date_is_nat():
+    import pandas as pd
+    row = {"发布日期": pd.NaT, "日期": "2022-11-04"}
+    assert inds._pick_src_date(row) == "20221104"
+
+
+def test_pick_src_date_treats_nan_and_na_as_missing():
+    import pandas as pd
+    assert inds._pick_src_date({"发布日期": float("nan"), "日期": pd.NaT}) is None
+    # bool(pd.NA) 抛 TypeError —— 判定不得让它冒出来（可空列会变硬失败）
+    assert inds._pick_src_date({"发布日期": pd.NA}) is None
+
+
+def test_pick_src_date_prefers_publish_date_and_tolerates_absence():
+    assert inds._pick_src_date({"发布日期": "2022-11-04", "日期": "2022-11-06"}) == "20221104"
+    assert inds._pick_src_date({"日期": "2022-11-06"}) == "20221106"
+    assert inds._pick_src_date({}) is None

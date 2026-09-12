@@ -81,7 +81,7 @@ def collect_industry_weekly() -> dict[str, Any]:
             turnover = _safe_col(row, "换手率", "turnover_pct")
             div_yield = _safe_col(row, "股息率", "dividend_yield")
             mkt_cap = _safe_col(row, "流通市值", "mkt_cap")
-            src_date = _normalize_src_date(row.get("发布日期") or row.get("日期"))
+            src_date = _pick_src_date(row)
 
             c.execute(
                 "INSERT OR REPLACE INTO industry_weekly "
@@ -109,6 +109,31 @@ def collect_industry_weekly() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 WEEKLY_STALE_DAYS = 7  # 源数据日期距最近交易日阈值（**交易日**口径，T7-3）
+
+
+def _pick_src_date(row: Any) -> str | None:
+    """按 发布日期 → 日期 取第一个**真实存在**的值，归一为 YYYYMMDD。
+
+    R2 审查：原写法 ``row.get("发布日期") or row.get("日期")`` **永不回落**——
+    上游帧由 ``pd.to_datetime(..., errors="coerce").dt.date`` 产出，缺失值是
+    ``NaT``/``NaN``（**真值**），故 发布日期 缺失时 src_date 直接写成 NULL，
+    停更检测退化为按采集日算滞后（源冻结数年也报「无异常」，R1-F2 成果被回退）。
+    ``pd.NA`` 更直接：``bool(pd.NA)`` 抛 TypeError，可空列会变成硬失败。
+    故一律用 ``pd.isna`` 判定（``lib.nums.coalesce_field`` 的 None/NaN 同款约定）。
+    """
+    import pandas as pd
+
+    for key in ("发布日期", "日期"):
+        raw = row.get(key)
+        if raw is None:
+            continue
+        try:
+            if pd.isna(raw):
+                continue
+        except (TypeError, ValueError):
+            pass  # 非标量（数组/列表）——不当缺失处理，交由归一化判定
+        return _normalize_src_date(raw)
+    return None
 
 
 def _normalize_src_date(raw: Any) -> str | None:

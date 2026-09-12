@@ -934,13 +934,16 @@ class TestIndustryPeExplicitUnavailable:
         from lib.collector import _sources as src
 
         class _EmptyAk:
+            # 须用**新接口名**：旧名在 akshare 1.18.64 已移除，用它只会走
+            # AttributeError 分支，测不到「逐日正常返回空」这条路径（R2 审查修正）
             @staticmethod
-            def stock_board_industry_pe_ratio_cninfo():
+            def stock_industry_pe_ratio_cninfo(symbol="证监会行业分类", date="20210910"):
                 return pd.DataFrame()
 
         self._patch_env(monkeypatch, src, _EmptyAk())
         r = src._q_akshare_industry_pe("600176", industry_name="银行")
         assert r is not None and r["status"] == "unavailable" and r["note"]
+        assert "均无数据" in r["note"] and "取数失败" not in r["note"]
 
     def test_no_match_is_explicit_unavailable(self, monkeypatch):
         import pandas as pd
@@ -949,12 +952,54 @@ class TestIndustryPeExplicitUnavailable:
 
         class _OtherAk:
             @staticmethod
-            def stock_board_industry_pe_ratio_cninfo():
-                return pd.DataFrame([{"行业名称": "煤炭", "市盈率中位数": 9.0}])
+            def stock_industry_pe_ratio_cninfo(symbol="证监会行业分类", date="20210910"):
+                return pd.DataFrame([{"行业名称": "煤炭", "静态市盈率-中位数": 9.0}])
 
         self._patch_env(monkeypatch, src, _OtherAk())
         r = src._q_akshare_industry_pe("600176", industry_name="银行")
         assert r is not None and r["status"] == "unavailable" and r["note"]
+        assert "未匹配" in r["note"]
+
+    def test_all_days_raising_is_fetch_failure_not_no_data(self, monkeypatch):
+        """逐日异常 ≠「近 7 日均无数据」——前者是**接口故障**，后者是对源内容的断言。
+
+        裸 `continue` 吞掉异常后只能报「均无数据」，用户会去核对源页面，而真因
+        （改名/签名变化/上游 5xx）要看 data-interface-map —— T9-5 要消除的误归因。
+        """
+        from lib.collector import _sources as src
+
+        class _BoomAk:
+            @staticmethod
+            def stock_industry_pe_ratio_cninfo(symbol="证监会行业分类", date="20210910"):
+                raise RuntimeError("cninfo 504 upstream down")
+
+        self._patch_env(monkeypatch, src, _BoomAk())
+        r = src._q_akshare_industry_pe("600176", industry_name="银行")
+        assert r["status"] == "unavailable"
+        assert "取数失败" in r["note"] and "均无数据" not in r["note"]
+        for leak in ("RuntimeError", "cninfo 504", "upstream down"):
+            assert leak not in r["note"], f"不得回显底层异常原文（R12h）: {leak}"
+
+    def test_partial_day_failure_discloses_both_causes(self, monkeypatch):
+        """部分日抛错 + 其余日正常空 → 两种成因都要说清（否则无法区分该修哪里）。"""
+        import pandas as pd
+
+        from lib.collector import _sources as src
+
+        calls = {"n": 0}
+
+        class _FlakyAk:
+            @staticmethod
+            def stock_industry_pe_ratio_cninfo(symbol="证监会行业分类", date="20210910"):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("boom")
+                return pd.DataFrame()
+
+        self._patch_env(monkeypatch, src, _FlakyAk())
+        r = src._q_akshare_industry_pe("600176", industry_name="银行")
+        assert r["status"] == "unavailable"
+        assert "无数据" in r["note"] and "1 天取数失败" in r["note"]
 
     def test_empty_name_guard_still_returns_none(self, monkeypatch):
         """空名守卫保持 `None`（**有意守卫**，非吞错）——既有契约见
@@ -1313,6 +1358,43 @@ class TestPcrReasonOwnObservation:
             _permission_denied_apis = {"opt_daily"}
         assert "权限" in orch._ms_pcr_unavailable_reason(TC(), {})
 
+    def test_permission_denied_beats_empty_rows_claim(self):
+        """权限被拒时**不得**报「接口正常返回空」（R2 review P0）。
+
+        积分不足/无权限时 `tc.query` 返回**空帧而不抛**（TushareClient 契约），
+        探针因此「成功」→ diag=empty_rows → 旧顺序（diag 优先）把权限失败报成合法
+        空结果，报告据此**断言「当日无 50ETF 期权成交」这一假市场事实**——比改动前
+        的静态文案更差（那句至少点了权限拒绝）。权限标记是**已确证的事实**，
+        故优先于「空返回」的成因推断。
+        """
+        from lib.collector import _orchestrate as orch
+
+        class TC:
+            last_error = "code=-2001 无接口权限: opt_daily"
+            _permission_denied_apis = {"opt_daily"}
+
+            def is_permission_denied(self, api):
+                return api in self._permission_denied_apis
+
+        reason = orch._ms_pcr_unavailable_reason(TC(), {"reason": "empty_rows"})
+        assert "权限" in reason, f"权限被拒仍被报成空返回: {reason!r}"
+        assert "正常返回空" not in reason
+
+    def test_invalid_token_named_in_pcr_too(self):
+        """PCR 侧同因同判：token 失效不得落进「数据源返回异常（非权限问题）」。"""
+        from lib.collector import _orchestrate as orch
+
+        class TC:
+            last_error = "code=-2002 您的token不对"
+            _permission_denied_apis: set = set()
+
+            def is_permission_denied(self, api):
+                return False
+
+        reason = orch._ms_pcr_unavailable_reason(TC(), {})
+        assert "TOKEN" in reason.upper(), f"token 失效未点名: {reason!r}"
+        assert "非权限问题" not in reason
+
 
 class TestForecastUnavailableReason:
     """forecast 不可得须**区分原因**（R0~R2 review P2）。
@@ -1349,6 +1431,27 @@ class TestForecastUnavailableReason:
     def test_empty_window_is_a_legit_empty(self):
         r = self._reason({"reason": "empty"})
         assert "空" in r and "无数据" not in r
+
+    def test_invalid_token_named_as_token_not_generic_error(self):
+        """token 失效（tushare code=-2002）须**点名 token**。
+
+        分类器只映射了 -2001（配额），-2002 落到兜底 `error` → 报「数据源返回异常
+        （非权限问题）」，把用户引离唯一有效的动作（重签 token）——正是本修复要消除
+        的误归因（R2 review P2）。
+        """
+        from lib.collector import _orchestrate as orch
+
+        class TC:
+            last_error = "code=-2002 您的token不对"
+            _permission_denied_apis: set = set()
+
+            def is_permission_denied(self, api):
+                return False
+
+        assert orch._classify_tushare_error(TC(), "forecast") == "token_invalid"
+        r = self._reason({"reason": "token_invalid"})
+        assert "TOKEN" in r.upper() and "无数据" not in r
+        assert "非权限问题" not in r
 
 
 class TestForecastReasonWiring:

@@ -72,6 +72,32 @@ def test_all_sources_unavailable_exits_3(stub_sources, monkeypatch, capsys):
     stub_sources["fomc"] = ([], ["FOMC 策展表不可得（文件缺失）"])
     rc, out = _run(monkeypatch, capsys)
     assert rc == 3
+
+
+def test_source_with_rows_but_filtered_out_is_labelled(stub_sources, monkeypatch, capsys):
+    """源有返回但筛选后为空 → 覆盖矩阵须说清成因（R2 review P0 的渲染侧）。
+
+    否则「白名单/区域过滤把条目全滤掉了」看起来与「源里没有排期」完全一样，
+    而前者要改配置、后者什么都不用做。
+    """
+    stub_sources["cn"] = mc.SourceResult("百度财经日历", [], ok_days=31, empty_days=0)
+    rc, out = _run(monkeypatch, capsys)
+    assert rc == 0
+    assert "筛选后无排期" in out and "源 31 天有数据" in out
+    assert "— 窗口内无排期" not in out, "不得把「被筛掉」渲染成「源里没有」"
+
+
+def test_all_empty_days_source_rendered_unavailable_not_no_schedule(stub_sources,
+                                                                    monkeypatch, capsys):
+    """整窗零成功日的源（自述 ok_days=0/empty_days=31）→ 覆盖矩阵不得出「窗口内无排期」。
+
+    渲染层契约：源结果自述没取到任何一天数据时，「无排期」这句话是**不可说**的。
+    """
+    stub_sources["cn"] = mc.SourceResult("百度财经日历", [], ok_days=0, empty_days=31)
+    rc, out = _run(monkeypatch, capsys)
+    assert rc == 0
+    assert "整窗 31 天返回空" in out and "≠ 无事件" in out
+    assert "— 窗口内无排期" not in out
     assert "不可得" in out
 
 
@@ -212,9 +238,10 @@ def test_today_events_past_their_time_are_marked(stub_sources, monkeypatch, caps
     实测触发场景：报告生成于北京 22:50 时，当日 20:30 的 PPI 已出、次日 20:30 的
     CPI 未出，但表上两者看起来一样。
     """
-    import datetime as _dt
-
-    today = _dt.date.today().isoformat()
+    # 桩数据的「今天」须与**被测 CLI** 同源（_beijing_today）：用宿主本地日期会在
+    # 本地日期 ≠ 北京日期的时段（UTC+13/+14，或 UTC 主机 16:00 后）必挂——本版
+    # 早前几笔提交清的正是这类时间炸弹（R2 review P2）。
+    today = uc._beijing_today().isoformat()
     stub_sources["cn"] = mc.SourceResult("百度财经日历", [
         _ev(today, "00:00", "中国", "中国8月社会消费品零售总额", "高"),   # 当日已过
         _ev(today, "23:59", "中国", "中国8月工业增加值", "高"),          # 当日未到

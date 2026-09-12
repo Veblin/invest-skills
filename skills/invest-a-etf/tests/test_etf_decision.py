@@ -125,6 +125,34 @@ def test_review_without_report_is_explicit(tmp_path, monkeypatch, capsys):
     assert "未找到" in capsys.readouterr().err
 
 
+def test_review_out_missing_parent_exits_2(tmp_path, monkeypatch, capsys):
+    """`--out` 父目录不存在 → 显式报错 + exit 2（与该命令其它路径参数一致）。
+
+    回归（R2 review P2）：直接 `write_text` 抛 FileNotFoundError traceback，
+    而 `--md` / `--from` 误用都是文档化的 exit 2。
+    """
+    monkeypatch.chdir(tmp_path)
+    _make_report(tmp_path, "515050", "2026-09-10-22-50-00")
+    target = tmp_path / "reports" / "515050-测试ETF" / "复盘" / "r.md"
+    assert etf_mod.cmd_review("515050", out=str(target)) == 2
+    err = capsys.readouterr().err
+    assert "父目录" in err and "不存在" in err
+    assert not target.exists(), "不得凭错路径创建目录（防手误留下垃圾目录树）"
+
+
+def test_review_printed_qc_command_is_runnable_in_both_layouts(tmp_path, monkeypatch, capsys):
+    """纪要尾部打印的准出命令须与**运行布局**匹配（仓内 skills/lib ↔ 包内 scripts/lib）。
+
+    打印固定仓内路径会让分发包里的 agent 执行必然失败，闸门形同不存在。
+    """
+    monkeypatch.chdir(tmp_path)
+    _make_report(tmp_path, "515050", "2026-09-10-22-50-00")
+    assert etf_mod.cmd_review("515050") == 0
+    out = capsys.readouterr().out
+    assert "report_qc.py" in out and "--fail-on error" in out
+    assert "skills/lib/report_qc.py" in out, "仓内布局须仍是仓内路径"
+
+
 def test_review_md_does_not_pollute_report_sequence(tmp_path, monkeypatch, capsys):
     """复盘纪要**自身不得被当成报告**（防自我污染）。
 

@@ -483,11 +483,20 @@ def _q_tushare_report_rc(symbol: str) -> list[dict] | None:
         return None
 
 
+def _is_token_invalid(err: str) -> bool:
+    """token 失效/过期信号（tushare ``code=-2002``；client 记「Token 无效」）。
+
+    -2002 与积分无关：报成「权限不足/非权限问题」会把用户引离唯一有效的动作
+    （重签 token），故单列一类。
+    """
+    return ("-2002" in err) or ("token 不对" in err) or ("Token 无效" in err)
+
+
 def _classify_tushare_error(tc: Any, api_name: str) -> str:
     """把 client 的失败信号归类成**用户可读的类别**（不回显异常原文，R12h）。
 
-    分类：``no_token`` / ``permission`` / ``quota`` / ``timeout`` / ``error`` /
-    ``empty``（无信号 = 接口正常返回空）。
+    分类：``no_token`` / ``token_invalid`` / ``permission`` / ``quota`` / ``timeout``
+    / ``error`` / ``empty``（无信号 = 接口正常返回空）。
     """
     try:
         probe = getattr(tc, "is_permission_denied", None)
@@ -498,6 +507,8 @@ def _classify_tushare_error(tc: Any, api_name: str) -> str:
         return "error"
     if "未配置 TUSHARE_TOKEN" in err:
         return "no_token"
+    if _is_token_invalid(err):
+        return "token_invalid"
     if "无接口权限" in err:
         return "permission"
     if ("配额" in err) or ("-2001" in err):
@@ -521,6 +532,8 @@ def _forecast_unavailable_reason(diag: dict | None = None) -> str:
     hint = f"（需 Tushare {points} 积分）" if points else ""
     if code == "no_token":
         return f"未配置 TUSHARE_TOKEN{hint}"
+    if code == "token_invalid":
+        return "TUSHARE_TOKEN 无效或已过期（请重签 token；与积分无关）"
     if code == "permission":
         return f"接口无权限或积分不够{hint}"
     if code == "quota":
@@ -3506,11 +3519,15 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
     该去补积分、该重试、还是该接受空数据。
 
     取值顺序：
-    1. **取数自身的观测**（``diag["reason"]``）——最可靠：超时场景下被丢弃的 daemon
-       线程从未返回，client 的 ``last_error`` 会**一直为 None**，不看这里就会把端点
+    1. **权限被拒**（``is_permission_denied``）——**已确证的事实**，优先于一切成因推断：
+       积分不足/无权限时 ``tc.query`` 返回**空帧而不抛**，探针因此「成功」并置
+       ``empty_rows``，若让 diag 先判就会把权限失败报成「当日无 50ETF 期权成交」
+       ——报告据此**断言了一个假的市场事实**（R2 review P0；原静态文案至少点了权限）。
+    2. **取数自身的观测**（``diag["reason"]``）——超时场景下被丢弃的 daemon 线程
+       从未返回，client 的 ``last_error`` 会**一直为 None**，不看这里就会把端点
        故障记成「接口正常返回空」（R0~R2 review）。
-    2. client 信号（``is_permission_denied`` / ``last_error``）兜底——注意该槽被
-       trade_cal、探针与并行扇出**共享**，可能并非本接口所写。
+    3. client 信号（``last_error``）兜底——注意该槽被 trade_cal、探针与并行扇出
+       **共享**，可能并非本接口所写。
 
     ⚠️ 返回文本会**原样**进报告（``unavailable: {reason}`` →「（不可得：…）」），
     故只做**分类映射**、不回显 ``last_error`` 的异常原文（那是
@@ -3520,23 +3537,27 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
         points = api_min_points("opt_daily")
         hint = f"（Tushare opt_daily 需 {points} 积分）" if points else ""
         code = str((diag or {}).get("reason") or "")
+        # 权限信号**先于**成因推断：见 docstring 取值顺序 1（空帧不抛 → 探针假成功）
+        denied = False
+        if tc is not None:
+            probe = getattr(tc, "is_permission_denied", None)
+            if callable(probe):
+                denied = bool(probe("opt_daily"))
+            else:  # 兼容仅有私有集合的旧/假 client
+                denied = "opt_daily" in getattr(tc, "_permission_denied_apis", set())
+        if denied:
+            return f"权限不足：接口无权限或积分不够{hint}"
         if code == "probe_timeout":
             return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
         if code == "empty_rows":
             return "当日无 50ETF 期权成交（接口正常返回空）"
         if tc is None:
             return "Tushare client 不可用（未配置 token 或初始化失败）"
-        denied = False
-        probe = getattr(tc, "is_permission_denied", None)
-        if callable(probe):
-            denied = bool(probe("opt_daily"))
-        else:  # 兼容仅有私有集合的旧/假 client
-            denied = "opt_daily" in getattr(tc, "_permission_denied_apis", set())
-        if denied:
-            return f"权限不足：接口无权限或积分不够{hint}"
         err = str(getattr(tc, "last_error", None) or "")
         if "未配置 TUSHARE_TOKEN" in err:
             return f"未配置 TUSHARE_TOKEN{hint}"
+        if _is_token_invalid(err):
+            return "TUSHARE_TOKEN 无效或已过期（请重签 token；与积分无关）"
         if "无接口权限" in err:
             return f"权限不足：接口无权限或积分不够{hint}"
         if any(k in err for k in ("Timeout", "timeout", "Connection", "Proxy",

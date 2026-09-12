@@ -339,7 +339,11 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     else:
         print(f"  不可用: {share_history.get('note', '未知')}")
     print()
-    print("> 完整叙事请按 skills/invest-a-etf/references/report-template.md 合成。")
+    # 路径须按运行布局打印（包内 references/ 就在包根下，没有 skills/ 目录）
+    from skill_paths import skill_relpath
+
+    _tpl = skill_relpath(__file__, "references/report-template.md")
+    print(f"> 完整叙事请按 {_tpl} 合成。")
     print("> ⚠️ 不构成投资建议。")
     return 0
 
@@ -881,10 +885,21 @@ def cmd_review(symbol: str, *, out: str | None = None, md: str | None = None) ->
     body = render_review(symbol, sidecars=sidecars, today=today)
 
     out_path = Path(out) if out else report_dir / f"{today:%Y%m%d}-review.md"
+    if out and not out_path.parent.is_dir():
+        # 与 --md / --from 的路径参数同口径：显式报错 + exit 2（此前是
+        # FileNotFoundError traceback）。**不代建目录**——手误路径不该留下垃圾目录树。
+        print(f"❌ --out 父目录不存在：{out_path.parent}", file=sys.stderr)
+        return 2
     out_path.write_text(body, encoding="utf-8")
     print(body)
     print(f"\n已落盘: {out_path}")
-    print(f"> 交付前须跑：uv run python skills/lib/report_qc.py {out_path} --fail-on error")
+    # 准出命令须**按运行布局**打印（仓内 skills/lib ↔ 包内 scripts/lib）：写死仓内
+    # 路径会让分发包里的 agent 照自己 CLI 的指示执行必然失败 →「机器层准出（必跑）」
+    # 在分发形态从未运行（R2 review P2，实测 builder 产物内无 skills/ 目录）。
+    from skill_paths import shared_tool_relpath
+
+    qc = shared_tool_relpath(__file__, "report_qc")
+    print(f"> 交付前须跑：uv run python {qc} {out_path} --fail-on error")
     return 0
 
 

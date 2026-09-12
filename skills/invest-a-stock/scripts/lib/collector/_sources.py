@@ -822,23 +822,38 @@ _CNINFO_PE_API = "stock_industry_pe_ratio_cninfo"
 _CNINFO_PE_LOOKBACK_DAYS = 7
 
 
-def _fetch_cninfo_industry_pe(ak: Any) -> Any:
-    """取巨潮行业市盈率表；近期各日均无数据 → None（调用方转显式不可得）。
+def _fetch_cninfo_industry_pe(ak: Any) -> tuple[Any, str | None]:
+    """取巨潮行业市盈率表 → ``(df, 失败原因)``。
 
     回溯是必需的：该接口按日期取，周末/假日无数据，而旧实现是「当前快照」语义。
+
+    三态分明（R2 审查 P0-3）：逐日异常与「逐日正常返回空」**不是一回事**——
+    前者是接口故障（改名/签名变化/上游 5xx），后者才是无数据。旧实现用裸
+    ``continue`` 吞掉异常后统一返回 None，调用方只能报「近 7 日均无数据」，
+    即把接口故障说成对源内容的断言（T9-5 要消除的误归因）。故此处只**分类**、
+    不回显异常原文（R12h：原因文本原样进报告）。
     """
     import datetime as _dt
 
     day = _dt.date.today()
+    errors = 0
     for back in range(_CNINFO_PE_LOOKBACK_DAYS):
         ds = (day - _dt.timedelta(days=back)).strftime("%Y%m%d")
         try:
             df = getattr(ak, _CNINFO_PE_API)(date=ds)
-        except Exception:  # noqa: BLE001 —— 单日无数据属常态，继续回溯
+        except Exception:  # noqa: BLE001 —— 单日失败继续回溯，但计数以区分成因
+            errors += 1
             continue
         if df is not None and not df.empty:
-            return df
-    return None
+            return df, None
+    if errors == 0:
+        return None, None
+    if errors == _CNINFO_PE_LOOKBACK_DAYS:
+        return None, (f"巨潮行业 PE 取数失败（近 {_CNINFO_PE_LOOKBACK_DAYS} 天调用均抛错，"
+                      "非「无数据」）——疑接口改名/签名变化或上游故障，"
+                      "请核对 data-interface-map")
+    return None, (f"巨潮行业 PE 接口近 {_CNINFO_PE_LOOKBACK_DAYS} 天均无数据"
+                  f"（其中 {errors} 天取数失败）")
 
 
 def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
@@ -859,10 +874,13 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
     try:
         with akshare_direct_session():
             import akshare as ak
-            df = _fetch_cninfo_industry_pe(ak)
+            df, fetch_err = _fetch_cninfo_industry_pe(ak)
             if df is None or df.empty:
+                if fetch_err:
+                    return _industry_pe_unavailable(fetch_err, industry_name=industry_name)
                 return _industry_pe_unavailable(
-                    f"巨潮行业 PE 接口近 {_CNINFO_PE_LOOKBACK_DAYS} 日均无数据")
+                    f"巨潮行业 PE 接口近 {_CNINFO_PE_LOOKBACK_DAYS} 日均无数据",
+                    industry_name=industry_name)
 
             # 获取个股行业（优先使用预取）
             if not industry_name:

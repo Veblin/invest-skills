@@ -103,6 +103,42 @@ def test_collect_pool_merges_same_day_batches(monkeypatch):
     assert b["kind"] == "定增+首发"
 
 
+def test_collect_pool_forwards_today(monkeypatch):
+    """取数窗口须按调用方给的日期（北京口径），不得回落宿主本地 `date.today()`。"""
+    seen = {}
+
+    def fake(sym, *, lookahead_days, include_past_days=0, today=None):
+        seen["today"] = today
+        return ([], None)
+
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", fake)
+    uc.collect_pool(["600176"], lookahead_days=90, sleep_s=0, today=_dt.date(2026, 12, 25))
+    assert seen["today"] == _dt.date(2026, 12, 25), "today 未透传 → 回落宿主本地日期"
+
+
+def test_cli_pool_fetches_by_beijing_date(tmp_path, monkeypatch, capsys):
+    """端到端：取数用的 today 须等于 `_beijing_today()`（与报告名/提醒窗同源）。
+
+    美西主机在「北京已是 09-12、宿主还是 09-11」时，窗口止于 host+90 而非
+    北京+90 → 恰在边界的那批被静默滤掉，排雷工具给出假「无解禁记录」。
+    """
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n", encoding="utf-8")
+    seen = {}
+
+    def fake(sym, **k):
+        seen.setdefault("today", k.get("today"))
+        return ([{"date": "2026-12-31", "qty_yi": 1.0, "holders": 1, "kind": "x"}], None)
+
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", fake)
+    monkeypatch.setattr(uc, "_beijing_today", lambda: _dt.date(2026, 12, 25))
+    monkeypatch.setattr(uc, "_trading_days_until", lambda d, t: (5, False))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--no-out", "--no-state"])
+    assert uc.main() == 0
+    assert seen["today"] == _dt.date(2026, 12, 25), "取数未按北京日期（窗口会差一天）"
+
+
 def test_state_roundtrip_and_corrupt(tmp_path):
     sp = tmp_path / "state.json"
     assert uc.load_state(sp) == {"updated": None, "symbols": {}}   # 不存在=首跑
@@ -117,7 +153,7 @@ def test_state_roundtrip_and_corrupt(tmp_path):
 # ── 采集信号（失败与空记录必须可区分）───────────────────────────────────
 
 def test_collect_pool_error_signal(monkeypatch):
-    def fake(sym, *, lookahead_days, include_past_days=0):
+    def fake(sym, *, lookahead_days, include_past_days=0, today=None):
         if sym == "600176":
             return ([{"date": "2026-10-01", "qty_yi": 1.5, "holders": 3,
                       "kind": "定增"}], None)
@@ -173,7 +209,7 @@ def test_render_pool_no_changes(monkeypatch):
 # ── CLI 端到端 ───────────────────────────────────────────────────────────
 
 def _fake_fetch_factory():
-    def fake(sym, *, lookahead_days, include_past_days=0):
+    def fake(sym, *, lookahead_days, include_past_days=0, today=None):
         if sym == "600176":
             return ([{"date": "2026-09-20", "qty_yi": 2.0, "holders": None,
                       "kind": ""}], None)
@@ -271,7 +307,7 @@ def test_cli_pool_partial_failure_exit0_with_marker(tmp_path, monkeypatch, capsy
     pool = tmp_path / "pool.txt"
     pool.write_text("600176\n600000\n", encoding="utf-8")
 
-    def fake(sym, *, lookahead_days, include_past_days=0):
+    def fake(sym, *, lookahead_days, include_past_days=0, today=None):
         if sym == "600176":
             return ([{"date": "2026-09-20", "qty_yi": 1.0, "holders": 1,
                       "kind": "x"}], None)
@@ -314,6 +350,67 @@ def test_cli_pool_all_empty_is_unavailable_and_keeps_baseline(tmp_path, monkeypa
     # 基线不得被空集覆写
     after = json.loads(state.read_text(encoding="utf-8"))
     assert after["symbols"]["600176"]["batches"], "空返回污染了基线（真实批次被抹掉）"
+
+
+def test_cli_pool_partial_failure_does_not_wipe_empty_symbols_baseline(tmp_path, monkeypatch, capsys):
+    """部分标的失败时，**空返回标的的基线不得被覆写**（R2 review P1）。
+
+    全池空守卫要求「池内无一失败」，故一个标的失败即让守卫失效；其余标的的空批次
+    照常写进状态文件 → 同一轮 `diff_batches` 就把旧基线里仍未来的批次渲染成
+    「❌ 消失」，API 恢复后又全标「🆕 新增」。**部分限流是常见情形**，
+    守卫须做到每标的一粒度：空结果不可验证时跳过状态写入（基线保留）。
+    """
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n002466\n", encoding="utf-8")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "updated": "2026-09-01 10:00",
+        "symbols": {"002466": {"last_run": "20260901",
+                               "batches": {"2026-11-05": {"qty_yi": 3.2, "holders": 5,
+                                                          "kind": "定增"}}}},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    def fake(sym, **k):
+        if sym == "600176":
+            return ([], "ProxyError: blocked")      # 部分限流：一个失败、一个空返回
+        return ([], None)
+
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", fake)
+    monkeypatch.setattr(uc, "_trading_days_until", lambda d, t: (5, False))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--state-file", str(state), "--no-out"])
+    assert uc.main() == 0, "非全失败 → 照常出报告（不因部分失败而 exit 3）"
+    cap = capsys.readouterr()
+    assert "❌ 消失" not in cap.out, "空返回标的的基线被覆写 → 渲染出假「消失」"
+    assert "跳过" in cap.err and "002466" in cap.err, "跳过的标的须显式披露"
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert after["symbols"]["002466"]["batches"], "空结果不可验证却覆写了基线"
+
+
+def test_cli_pool_clean_run_still_updates_empty_symbol(tmp_path, monkeypatch, capsys):
+    """**无失败**轮里空结果照常落账（守卫不得过度触发，真全清要能写进基线）。"""
+    pool = tmp_path / "pool.txt"
+    pool.write_text("600176\n002466\n", encoding="utf-8")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "updated": "2026-09-01 10:00",
+        "symbols": {"002466": {"last_run": "20260901",
+                               "batches": {"2026-11-05": {"qty_yi": 3.2, "holders": 5,
+                                                          "kind": "定增"}}}},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    def fake(sym, **k):
+        if sym == "600176":
+            return ([{"date": "2026-11-05", "qty_yi": 1.0, "holders": 1, "kind": "x"}], None)
+        return ([], None)
+
+    monkeypatch.setattr(uc, "fetch_symbol_unlocks", fake)
+    monkeypatch.setattr(uc, "_trading_days_until", lambda d, t: (5, False))
+    monkeypatch.setattr(sys, "argv", ["unlock_calendar.py", "--pool-file", str(pool),
+                                      "--state-file", str(state), "--no-out"])
+    assert uc.main() == 0
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert after["symbols"]["002466"]["batches"] == {}, "无失败轮的空结果须落账"
 
 
 def test_cli_pool_partial_empty_still_reports(tmp_path, monkeypatch, capsys):

@@ -129,6 +129,31 @@ def test_falsifier_unknown_status_rejected():
     assert any("status" in e for e in validate_decision(bad))
 
 
+def test_falsifier_impossible_calendar_date_rejected():
+    """形状合法但**日期不存在**（2 月 31 日）须被拒。
+
+    放行会让 `etf.py decision --from` 写入非法 sidecar，而 review 侧
+    `date.fromisoformat` 解析失败 → 该条落 unknown 桶、**永不进「已过期·该回看」清单**
+    ——「到期清单可机器核验」是 L4 的验收标准，静默丢项即验收失效。
+    """
+    bad = _full()
+    bad["falsifiers"][0]["due"] = "2026-02-31"
+    assert any("due" in e for e in validate_decision(bad))
+
+
+def test_falsifier_non_leap_feb_29_rejected():
+    bad = _full()
+    bad["falsifiers"][0]["due"] = "2027-02-29"
+    assert any("due" in e for e in validate_decision(bad))
+
+
+def test_falsifier_leap_day_accepted():
+    """实质校验不得误杀合法日期：2028 是闰年，2/29 存在。"""
+    ok = _full()
+    ok["falsifiers"][0]["due"] = "2028-02-29"
+    assert validate_decision(ok) == []
+
+
 def test_falsifier_without_condition_rejected():
     bad = _full()
     bad["falsifiers"][0]["condition"] = ""

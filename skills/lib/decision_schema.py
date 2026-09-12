@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import re
 from pathlib import Path
@@ -38,10 +39,20 @@ class DecisionSchemaError(ValueError):
 
 
 def _is_date(v: Any) -> bool:
+    """YYYY-MM-DD **且日期真实存在**。
+
+    仅校验形状与 ``1<=m<=12 / 1<=d<=31`` 会放行 2026-02-31 这类不存在的日期：
+    写侧（``decision --from``）收下并 exit 0，读侧 ``date.fromisoformat`` 解析失败
+    → 该条落 review 的 unknown 桶、**永不进「已过期·该回看」清单**——静默丢项
+    即「到期清单可机器核验」（L4 验收标准）失效。
+    """
     if not isinstance(v, str) or not _DATE_RE.match(v):
         return False
-    y, m, d = (int(x) for x in v.split("-"))
-    return 1 <= m <= 12 and 1 <= d <= 31
+    try:
+        _dt.date.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
 
 
 def _is_number(v: Any) -> bool:
