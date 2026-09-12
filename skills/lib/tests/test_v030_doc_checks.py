@@ -211,3 +211,56 @@ def test_new_sources_registered_with_caliber_notes():
                    if ln.startswith("|") and f"`{name}`" in ln)
         for tok in tokens:
             assert tok in row, f"{name} 登记行缺口径注记「{tok}」"
+
+
+# ---------------------------------------------------------------- R-E02 斐波/波浪否定注记
+
+_FIB_RULE = "wording-fib-no-negation"
+_WAVE_RULE = "wording-wave-no-negation"
+_TEMPLATE_KEYWORDS = ("市场习俗", "无样本外盈利证据", "Tsinaslanidis", "随机位点")
+
+
+def test_r_e02_rules_registered():
+    rules = _rules()
+    for rid in (_FIB_RULE, _WAVE_RULE):
+        rule = rules.get(rid)
+        assert rule, f"compliance_rules.yaml 缺 {rid}"
+        assert rule["severity"] == "error", f"{rid} 应为 error（引用习俗点位不给否定注记＝以实证面貌出现）"
+        assert rule["scope"] == "line"
+        assert rule.get("skip_if_pattern"), f"{rid} 须有豁免（否定式说明/免责行不应被拦）"
+        assert rule.get("law_ref")
+
+
+def test_r_e02_fib_template_present_in_conventions():
+    conv = _read(_CONVENTIONS)
+    assert "2.4.1" in conv and "斐波/波浪否定注记模板" in conv
+    for kw in _TEMPLATE_KEYWORDS:
+        assert kw in conv, f"§2.4.1 模板缺关键词：{kw}"
+    assert "仅作展示参照" in conv
+    assert "点位版本化" in conv, "模板须带快照日期 + 失效追踪（与 scenario-plans 对接）"
+
+
+def test_r_e02_rules_behave_bidirectionally():
+    """双向：引用习俗点位无注记 → 命中；带注记/否定式说明 → 不误伤。"""
+    rules = _rules()
+
+    def _flags(rid: str, text: str) -> bool:
+        rule = rules[rid]
+        if not re.search(rule["pattern"], text):
+            return False
+        skip = rule.get("skip_if_pattern")
+        return not (skip and re.search(skip, text))
+
+    for text in ("黄金分割 0.618 压力位在 3514", "38.2% 回撤位 3514", "斐波那契回撤 0.5"):
+        assert _flags(_FIB_RULE, text), f"应命中：{text}"
+    assert _flags(_WAVE_RULE, "三浪将止于 3514")
+    assert _flags(_WAVE_RULE, "当前处于第 3 浪")
+    assert _flags(_WAVE_RULE, "A浪结束")
+
+    clean = ("该点位属市场习俗（L3），无样本外盈利证据（Tsinaslanidis 2022 与随机位点无差异；"
+             "波浪不可证伪），仅作展示参照")
+    assert not _flags(_FIB_RULE, clean), "模板全句不得误伤"
+    assert not _flags(_WAVE_RULE, "波浪不可证伪，仅作展示参照")
+    for ok in ("本报告不使用斐波/波浪工具", "新浪财经报道", "海浪发电概念",
+               "收盘价 3514.20，成交额 5 亿 [来源: engine]"):
+        assert not _flags(_FIB_RULE, ok) and not _flags(_WAVE_RULE, ok), f"误伤：{ok}"

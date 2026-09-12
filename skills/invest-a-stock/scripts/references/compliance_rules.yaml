@@ -463,6 +463,25 @@ rules:
     message: "禁止断言'触及 BOLL 上轨将回调'（Taiwan 50 实证：上轨应追势非反转，Physica A 2020）。允许：boll_position_pct 位置描述"
     law_ref: "report-conventions §2.4 — 点位红线"
 
+  # R-E02（2026-09-12）：斐波/波浪**引用**须带否定注记模板（report-conventions §2.4.1）
+  # 与 wording-level-fib-support 的区别：该条拦「位有支撑/压力」这类**断言**；
+  # 本条拦「引用了习俗点位却不出否定证据」——只带 L3 标签不够，注记才是显式否定。
+  - id: "wording-fib-no-negation"
+    pattern: "(黄金分割|斐波那契|斐波|[0-9](\\.[0-9]+)?%\\s*回撤位)"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(市场习俗|无样本外盈利证据|Tsinaslanidis|随机位点|仅作展示参照|风险提示|免责声明|不构成|\\[来源:|⚠️|不使用)"
+    message: "引用黄金分割/斐波位须同行附否定注记模板：「该点位属市场习俗（L3），无样本外盈利证据（Tsinaslanidis 2022 与随机位点无差异；波浪不可证伪），仅作展示参照」+ 快照日期与失效追踪（report-conventions §2.4.1）"
+    law_ref: "report-conventions §2.4.1 — 斐波/波浪否定注记（R-E02）"
+
+  - id: "wording-wave-no-negation"
+    pattern: "(浪型|波浪理论|[一二三四五六七八九1-9]\\s*浪|[ABCabc]\\s*浪)"
+    severity: "error"
+    scope: "line"
+    skip_if_pattern: "(市场习俗|不可证伪|无样本外盈利证据|仅作展示参照|风险提示|免责声明|不构成|\\[来源:|⚠️|不使用)"
+    message: "引用波浪/浪型须同行附否定注记（波浪不可证伪，仅作展示参照；L3 习俗）+ 快照日期与失效追踪（report-conventions §2.4.1）"
+    law_ref: "report-conventions §2.4.1 — 斐波/波浪否定注记（R-E02）"
+
   - id: "wording-level-fib-support"
     pattern: "((斐波|黄金分割)位[^。\\n]{0,12}(有)?(支撑|压力|阻力)|\\d+(\\.\\d+)?%\\s*回撤位[^。\\n]{0,12}(有)?(支撑|压力|阻力))"
     severity: "error"

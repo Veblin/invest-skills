@@ -411,3 +411,61 @@ def test_evaluation_criteria_four_dimensions():
     # 旧"三维"表述清除
     assert "卖出三维" not in criteria
     assert "其他三维" not in criteria
+
+
+# ---------------------------------------------------------------- R-C01 / R-C02（2026-09-12）
+
+_JOURNAL_SKILL = "skills/invest-a-journal/SKILL.md"
+_JOURNAL_CRITERIA = "skills/invest-a-journal/references/evaluation-criteria.md"
+
+
+def test_r_c02_falsification_field_documented():
+    """买入评估「风险收益比」维须含失效条件预设，且四要素写全。"""
+    crit = _read(_JOURNAL_CRITERIA)
+    assert "失效条件预设（R-C02 必填）" in crit
+    for token in ("观测项", "阈值", "数据来源", "复核时点"):
+        assert token in crit, f"§4.1 缺要素：{token}"
+    assert "点位版本化" in crit, "须与 scenario-plans 的点位版本化对接"
+
+
+def test_r_c02_knowledge_frame_carries_literature_notes():
+    """止损知识框须带文献注记与条件限定。"""
+    crit = _read(_JOURNAL_CRITERIA)
+    for token in ("Kaminski", "Dolvin", "行为疫苗", "宽幅"):
+        assert token in crit, f"§4.2 缺：{token}"
+    assert "条件限定" in crit or "条件依赖" in crit
+
+
+def test_r_c02_has_no_stop_loss_percentage_advice():
+    """**不输出止损百分比建议**（LAW 6）——文中不得出现「止损 X%」式指令。"""
+    import re as _re
+
+    crit = _read(_JOURNAL_CRITERIA)
+    bad = _re.findall(r"止损\s*[-−]?\d+(\.\d+)?\s*%", crit)
+    assert not bad, f"出现止损百分比建议：{bad}"
+    assert "不输出止损百分比建议" in crit, "须显式写明该禁令"
+
+
+def test_r_c01_documented_in_journal_skill():
+    skill = _read(_JOURNAL_SKILL)
+    for token in ("错频", "个人自证数据", "非实证阈值", "结构化复盘"):
+        assert token in skill, f"journal SKILL 缺：{token}"
+    assert "journal.py stats" in skill, "须写明必跑命令"
+    # 冷却 = 流程而非禁止交易。
+    # ⚠️ 先剔除**否定式**行（「不得出现『必须停止交易』类指令」本身含该串）——
+    # 文档要禁止某措辞就必须引用它，直接子串扫描会把禁令自身判成违规
+    # 判据看**出现处前文**（禁止语常在前一行，行级扫描会漏）：
+    # 前 40 字内有否定词即视为「禁令引用」而非指令
+    bad = []
+    start = 0
+    while (idx := skill.find("必须停止交易", start)) != -1:
+        if not any(k in skill[max(0, idx - 40): idx] for k in ("不得", "禁止", "不是", "勿")):
+            bad.append(skill[max(0, idx - 40): idx + 12])
+        start = idx + 1
+    assert not bad, f"出现指令式措辞：{bad}"
+    assert "不是禁止交易" in skill
+
+
+def test_r_c01_self_check_has_new_items():
+    skill = _read(_JOURNAL_SKILL)
+    assert "R-C01" in skill and "R-C02" in skill

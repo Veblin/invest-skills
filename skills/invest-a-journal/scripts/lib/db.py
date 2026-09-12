@@ -443,6 +443,140 @@ def journal_stats() -> dict:
         _safe_close(c)
 
 
+# ---------------------------------------------------------------------------
+# R-C01 错频计数（连续亏损 + 个人自证数据）
+# ---------------------------------------------------------------------------
+
+DEFAULT_LOSS_STREAK_THRESHOLD = 3
+# 阈值语义：**纪律惯例**（直播建议值 2-3 次），**非实证阈值**——
+# 固定阈值与计时冷却均无学术证据支持（Hopfgartner et al. 2023：短期自排除无效）。
+_THRESHOLD_LABEL = "纪律惯例（直播建议值），非实证阈值；可配置"
+
+
+def _result_rows(*, asset_type: str | None = None, rows: list[dict] | None = None) -> list[dict]:
+    """ журнал 行（按时间升序）。``rows`` 显式传入时走离线路径（测试/回放）。"""
+    if rows is not None:
+        return sorted(rows, key=lambda r: str(r.get("created_at") or r.get("entry_date") or ""))
+    init_db()
+    c = _conn()
+    try:
+        sql = "SELECT symbol, actual_result, entry_date, created_at FROM trade_journals"
+        params: tuple = ()
+        if asset_type:
+            sql += " WHERE asset_type = ?"
+            params = (asset_type,)
+        sql += " ORDER BY created_at ASC"
+        return [dict(r) for r in c.execute(sql, params).fetchall()]
+    finally:
+        _safe_close(c)
+
+
+def _day_of(row: dict) -> str | None:
+    raw = str(row.get("entry_date") or row.get("created_at") or "")[:10]
+    return raw or None
+
+
+def _num(v) -> float | None:
+    """数值 → float；None / 非数值 / NaN → None（D1：0 是合法结果，不得被 falsy 吞）。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+def consecutive_loss_streak(*, asset_type: str | None = None,
+                            threshold: int = DEFAULT_LOSS_STREAK_THRESHOLD,
+                            rows: list[dict] | None = None) -> dict:
+    """连续亏损笔数（store 聚合，**严格 `actual_result < 0`**）。
+
+    ``actual_result is None`` 的行**剔除不计**——它不是一个结果（未平仓/未记录），
+    既不算亏损也不算盈利，也**不打断**连续亏损（否则「没记结果」会被读成「没事」）。
+    """
+    data = _result_rows(asset_type=asset_type, rows=rows)
+    resolved = [(r, _num(r.get("actual_result"))) for r in data]
+    resolved = [(r, v) for r, v in resolved if v is not None]
+    streak = 0
+    last_loss_at = None
+    for r, v in reversed(resolved):
+        if v < 0:
+            streak += 1
+            if last_loss_at is None:
+                last_loss_at = _day_of(r)
+        else:
+            break
+    return {"streak": streak, "last_loss_at": last_loss_at, "window_n": len(resolved),
+            "threshold": threshold, "threshold_label": _THRESHOLD_LABEL,
+            "triggered": streak >= threshold,
+            "basis": "actual_result < 0（严格小于；0/保本与 None 均不计）"}
+
+
+def loss_after_loss_evidence(*, lookback: int = 200,
+                             rows: list[dict] | None = None) -> dict:
+    """个人自证数据：「亏损后立即再交易 N 次、其中 M 次续亏」。
+
+    用**用户自己的** journal 数据校准自己的阈值（外部最优阈值无证据）。
+    分母 = 亏损后**仍有下一笔**的次数；None 行不构成「下一笔」。
+    """
+    data = _result_rows(rows=rows)[-lookback:]
+    seq = [(r, _num(r.get("actual_result"))) for r in data]
+    seq = [(r, v) for r, v in seq if v is not None]
+    n_after = n_continued = 0
+    gaps: list[float] = []
+    for i, (r, v) in enumerate(seq):
+        if v >= 0 or i + 1 >= len(seq):
+            continue
+        n_after += 1
+        nxt = seq[i + 1][1]
+        if nxt < 0:
+            n_continued += 1
+        d0, d1 = _day_of(r), _day_of(seq[i + 1][0])
+        if d0 and d1:
+            try:
+                import datetime as _dt
+
+                gaps.append((_dt.date.fromisoformat(d1) - _dt.date.fromisoformat(d0)).days)
+            except ValueError:
+                pass
+    median_gap = None
+    if gaps:
+        gaps.sort()
+        mid = len(gaps) // 2
+        median_gap = (gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2)
+    rate = (n_continued / n_after * 100) if n_after else None
+    return {"n_after_loss": n_after, "n_continued_loss": n_continued,
+            "rate_pct": rate, "median_gap_days": median_gap,
+            "sample": f"最近 {len(seq)} 笔已了结记录", "available": n_after > 0,
+            "note": "" if n_after else "样本不足：你的记录中尚无「亏损后继续交易」的完整配对"}
+
+
+def render_wrong_frequency(*, asset_type: str | None = None,
+                           threshold: int = DEFAULT_LOSS_STREAK_THRESHOLD,
+                           rows: list[dict] | None = None) -> str:
+    """错频提示（触发时）——**冷却 = 启动结构化复盘流程，不是禁止交易**。"""
+    st = consecutive_loss_streak(asset_type=asset_type, threshold=threshold, rows=rows)
+    if not st["triggered"]:
+        return (f"错频检查：当前连续亏损 {st['streak']} 笔（阈值 {st['threshold']}，"
+                f"{_THRESHOLD_LABEL}）——未触发。")
+    ev = loss_after_loss_evidence(rows=rows)
+    lines = [f"⚠️ 错频提示：当前连续亏损 {st['streak']} 笔"
+             f"（阈值 {st['threshold']}，{_THRESHOLD_LABEL}）。"]
+    if ev["available"]:
+        lines.append(
+            f"   个人自证数据：你历史上亏损后立即再交易 {ev['n_after_loss']} 次，"
+            f"其中 {ev['n_continued_loss']} 次续亏（{ev['rate_pct']:.0f}%）"
+            f" [来源: Python calc: {ev['n_continued_loss']}/{ev['n_after_loss']}]"
+            + (f"；两次之间中位间隔 {ev['median_gap_days']:.0f} 天" if ev["median_gap_days"] is not None else ""))
+    else:
+        lines.append(f"   个人自证数据：{ev['note']}")
+    lines.append("   建议动作（**流程**，非交易指令）：先完成一次结构化复盘"
+                 "（触发日期 / 实际路径 / 判断对错 / 错在哪条 / 修订内容，"
+                 "见 references/scenario-plans.md 复盘字段），再考虑下一笔。")
+    return "\n".join(lines)
+
+
 def stop_audit_stats() -> dict:
     """止损纪律聚合（v0.2.6 §4.3 审计信号，仿 journal_stats 跨行聚合）。
 

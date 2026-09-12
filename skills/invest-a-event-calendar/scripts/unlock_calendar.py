@@ -798,11 +798,41 @@ def _run_macro(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_theme(args) -> int:
+    """题材日历记账（R-D01）——转交 theme_calendar，**共用状态文件但只写 themes 键**。
+
+    退出码：0 正常 / 2 参数或锚点来源非法（含「热度 ≠ 证实」拒绝）。
+    """
+    import theme_calendar as tc
+
+    concepts = [c for c in (args.concepts or "").split(",") if c.strip()]
+    try:
+        rec = tc.register_theme(args.theme, stage=args.stage, anchor=args.anchor,
+                                anchor_source=args.anchor_source, concepts=concepts,
+                                confirmed_date=args.confirmed_date,
+                                note=args.theme_note, state_file=args.state_file)
+    except ValueError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 2
+    print(f"✅ 已登记题材：{rec['theme']} / {rec['stage']}"
+          f"（锚点来源 {rec['anchor_source']}）")
+    print(tc.render_themes(state_file=args.state_file))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days-past", type=int, default=120, help="分位回看窗口（自然日，默认 120）")
     ap.add_argument("--days-future", type=int, default=30, help="展望窗口（自然日，默认 30）")
     ap.add_argument("--pool-file", type=str, default="", help="清单文件（池模式；每行一个 6 位代码，# 注释）")
+    ap.add_argument("--theme", type=str, default="",
+                    help="题材日历记账（R-D01；与 --macro/--pool-file 三向互斥）")
+    ap.add_argument("--stage", type=str, default="", help="题材阶段（首波/扩散/延伸/兑现）")
+    ap.add_argument("--anchor", type=str, default="", help="证实锚点（可核验事件）")
+    ap.add_argument("--anchor-source", type=str, default="", help="锚点来源（须官方/权威）")
+    ap.add_argument("--concepts", type=str, default="", help="概念（逗号分隔）")
+    ap.add_argument("--confirmed-date", type=str, default=None, help="证实日（阶段=兑现时必填）")
+    ap.add_argument("--theme-note", type=str, default="", help="备注（描述性，勿写方向判断）")
     ap.add_argument("--macro", action="store_true",
                     help="宏观日程模式：定期宏观数据发布日程（中美 CPI/社零/非农）+ 议息会议")
     ap.add_argument("--macro-days", type=int, default=90, help="宏观展望窗（自然日，默认 90）")
@@ -832,6 +862,10 @@ def main() -> int:
     if args.macro and args.pool_file:
         # 互斥必须显式报错：下方 `if args.pool_file:` 在前，否则 --macro 会被静默忽略
         ap.error("--macro 与 --pool-file 互斥（宏观日程 / 解禁池分属两种模式）")
+    if args.theme and (args.macro or args.pool_file):
+        ap.error("--theme 与 --macro/--pool-file 互斥（题材记账 / 宏观日程 / 解禁池分属三种模式）")
+    if args.theme and not (args.stage and args.anchor and args.anchor_source):
+        ap.error("--theme 模式须同时给 --stage / --anchor / --anchor-source")
     if args.macro and args.macro_days < 1:
         ap.error("--macro-days 须 ≥ 1")
     if args.alert_days > args.lookahead:
@@ -839,6 +873,9 @@ def main() -> int:
         # 「提醒窗内无解禁批次 ✅」，即假全清。两者须同源可比。
         ap.error(f"--alert-days({args.alert_days}) 不得大于 --lookahead({args.lookahead})"
                  "：提醒窗宽于拉取窗会产出假「无解禁批次」结论")
+
+    if args.theme:
+        return _run_theme(args)
 
     if args.macro:
         return _run_macro(args)      # 不触碰 event_calendar_state.json（解禁状态）

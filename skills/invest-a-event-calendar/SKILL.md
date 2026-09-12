@@ -4,7 +4,7 @@ name: invest-a-event-calendar
 version: "0.2.9"
 description: "事件日历 v3 — 定期事件前瞻（宏观日程：中美 CPI/社零/非农/议息）+ 限售解禁排雷（池模式清单池下钻 + 市场模式日级分位）。研究工具非决策。触发词：事件日历/宏观日历/经济数据日程/CPI日程/议息会议/解禁日历/解禁压力/限售股解禁"
 whenToUse: "查未来一段时间有哪些定期事件（'下周有什么数据''什么时候议息'）、持仓/自选池排雷（'我的票哪天解禁'）、或低频查看全市场解禁压力分布（解禁≠减持，与减持公告联动）"
-argument-hint: "/invest-a-event-calendar --macro ｜ --pool-file pool.txt"
+argument-hint: "/invest-a-event-calendar --macro ｜ --pool-file pool.txt ｜ --theme <题材>"
 allowed-tools: Bash, Read, Write
 user-invocable: true
 metadata:
@@ -16,7 +16,7 @@ metadata:
 
 > **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作为本地数据采集与计算（Bash/Python 引擎）。
 
-## 概述（三模式）
+## 概述（四模式）
 
 **① 宏观日程模式（`--macro`）**：未来一段时间内**周期性、非突发**的定期事件日程 ——
 中美官方统计数据发布日（CPI/PPI/社零/工业增加值/非农/GDP/零售…）与美联储议息会议。产出：
@@ -70,9 +70,26 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/sc
 
 # 市场模式（低频）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py
+
+# 题材日历记账（R-D01；只记账不预测扩散路径）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-event-calendar/scripts/unlock_calendar.py \
+  --theme 示例题材 --stage 首波 --anchor "某规划正式发布" --anchor-source "发改委公告" --concepts 甲,乙
 ```
 
-三种模式**互斥**（`--macro` 与 `--pool-file` 同传会报参数错）。`--macro` 不读写解禁状态文件。
+四种模式**互斥**（`--theme` / `--macro` / `--pool-file` 两两同传会报参数错；三者都缺省为市场模式）。
+`--macro` 不读写状态文件；`--theme` 与解禁模块**共用**状态文件但只读写 `themes` 键（保留 `symbols`）。
+
+## 题材日历（`--theme`，R-D01）
+
+**定位：只记账，不预测扩散路径。** 源文档裁决（hypothesis-registry C9/C10）：
+
+- **阶段字段固定四值**：首波 / 扩散 / 延伸 / 兑现（无「下一轮扩散方向」类字段）
+- **证实锚点 = 官方/权威来源**确认；⚠️ **题材热度见顶 ≠ 证实**
+  （`热度`/`涨停家数`/`涨幅榜`/`情绪` 等市场热度描述会被**拒绝**为来源）
+- **「兑现」阶段须给 `--confirmed-date`**（证实日入日历，供 journal / 复盘对照预期差）
+- **多概念归属 = 拥挤度「加总」**，不输出「托底/更稳」语义（C10 后半无支持）
+- **消息方向语义不预设**（分类器验证前，见 C8）
+- 状态文件损坏时**拒绝写入**并报错（不静默清空既有记录）
 
 | 参数 | 默认 | 说明 |
 |------|------|------|

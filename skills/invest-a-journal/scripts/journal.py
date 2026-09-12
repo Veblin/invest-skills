@@ -27,6 +27,7 @@ from db import (  # noqa: E402
     get_journal,
     journal_stats,
     list_journals,
+    render_wrong_frequency,
     search_by_symbol,
 )
 
@@ -221,6 +222,9 @@ def cmd_stats() -> int:
     print(f"  已复盘: {stats['reviewed']}")
     if stats["total"] > 0:
         print(f"  复盘率: {stats['reviewed'] / stats['total'] * 100:.0f}%")
+    # R-C01 错频段：连续亏损 + 个人自证数据（冷却 = 强制结构化复盘，非禁止交易）
+    print()
+    print(render_wrong_frequency())
     return 0
 
 

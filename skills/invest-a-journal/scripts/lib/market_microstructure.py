@@ -400,6 +400,244 @@ def _compute_tier2(snap: dict, history: list[dict]) -> None:
 # 环境标签 v2（历史分位 + 趋势 + 交叉验证）
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# R-A01 市场形态三主态 / R-A02 分化度字段
+# ---------------------------------------------------------------------------
+#
+# 源文档裁决（hypothesis-registry C1/C2/C4）：
+# - C2：三分类与 regime 文献兼容，但「阻力最小 + 常伴杀跌」**无直接证据**
+#   → 第三类作**默认填充态**；形态**只作事后标注，禁止方向语义**（Kirby 2023：
+#     状态标签不蕴含收益可预测性）
+# - C1：状态识别可，「形态预示方向」不可 → 不做方向预测
+# - C4：「持续至中期选举」不支持 → 事件锚点只作风险窗口标签
+
+MARKET_FORMS: tuple[str, ...] = ("普涨共振", "宽幅震荡轮动", "突破选择期")
+
+# 阈值 = **从业者惯例**，无学术先验（C2 裁决：第三类无直接证据）。
+# 改动须记录理由并同步 hypothesis-registry。
+#
+# ⚠️ 判定用**绝对状态量**（ad_ratio / 涨跌停比），不用分位：
+# 历史序列全同（横盘）时 `percentile_rank_inclusive` 会返回 100，
+# 使「毫无变化的一天」被标成 100 分位的极端宽度——分位对平稳序列不可用。
+# 分位仅作 vector 里的辅助上下文（序列无离散度时为 None）。
+_FORM_AD_BROAD = 1.5           # 涨跌家数比 ≥ 此值 → 普涨共振
+_FORM_AD_NARROW = 0.5          # ≤ 此值 → 宽度极窄，方向未选
+_FORM_LULD_BROAD = 3.0         # 涨停/跌停比 ≥ 此值亦判普涨
+_FORM_TURNOVER_UP = 1.05       # 5 日均量 / 20 日均量
+_FORM_TURNOVER_DOWN = 0.95
+_FORM_MIN_HISTORY = 20
+_SELLOFF_TURNOVER_UP = 1.2     # 「杀跌后观察」条件之二：放量
+_FORM_HISTORY_MIN_DAYS = 20    # market_form_history 的最少样本
+
+_KIRBY_NOTE = ("状态标签不蕴含收益可预测性（Kirby 2023：Markov 切换模型的条件均值时变，"
+               "可能是负偏度 + 状态持续性的统计伪影，而非可交易的状态切换信号）")
+
+_DISPERSION_PROXY_NOTE = ("工程 proxy（指数级滚动相关）——与 Pollet-Wilson (2010) 的"
+                          "「个股日收益平均相关」口径**不同（非 Pollet-Wilson 口径）**；"
+                          "其作为状态量的有效性须独立回测验证，当前仅作描述性字段")
+
+
+def _pctile(values: list[float], v: float | None) -> float | None:
+    """历史分位（辅助上下文）。**序列无离散度 → None**：
+    全同序列下 ``percentile_rank_inclusive`` 恒返回 100，会把「没变化」标成极端。"""
+    if v is None:
+        return None
+    vals = [x for x in values if x is not None]
+    if not vals or len(set(vals)) < 2:
+        return None
+    return percentile_rank_inclusive(vals, v)
+
+
+def _turnover_trend(history: list[dict], snap: dict) -> float | None:
+    """成交额趋势 = 近 5 日均量 / 近 20 日均量（含当日）；不足 → None。"""
+    seq = [h.get("total_turnover") for h in history]
+    seq = [x for x in seq if x is not None]
+    if snap.get("total_turnover") is not None:
+        seq = seq + [snap["total_turnover"]]
+    if len(seq) < _FORM_MIN_HISTORY:
+        return None
+    short = seq[-5:]
+    long = seq[-_FORM_MIN_HISTORY:]
+    avg_s = sum(short) / len(short)
+    avg_l = sum(long) / len(long)
+    return (avg_s / avg_l) if avg_l else None
+
+
+def compute_market_form(snap: dict, history: list[dict]) -> dict:
+    """三主态事后标注（R-A01）。**只描述状态，不预测方向。**
+
+    返回 ``{form, sub_form, context, vector, available, missing, kirby_note}``。
+    - 宽度（``ad_ratio`` 分位 + 涨跌停比）→ 共振 / 轮动
+    - 成交额趋势（5d/20d）→ 放量 / 缩量
+    - 「杀跌后观察」= **突破选择期语境下的条件性上下文**，不是第四形态
+    - 数据不足 → ``available=False`` + ``missing``，form 仍取默认填充态（不臆造）
+    """
+    hist = history or []
+    ad_hist = [h.get("ad_ratio") for h in hist if h.get("ad_ratio") is not None]
+    ad = snap.get("ad_ratio")
+    ad_p = _pctile(ad_hist, ad) if ad is not None else None
+    trend = _turnover_trend(hist, snap)
+
+    missing: list[str] = []
+    if ad is None:
+        missing.append("ad_ratio（市场宽度）")
+    if len(ad_hist) < _FORM_MIN_HISTORY:
+        missing.append(f"历史宽度序列（{len(ad_hist)}/{_FORM_MIN_HISTORY} 日）")
+    if trend is None:
+        missing.append("成交额趋势（5d/20d）")
+    available = not missing
+
+    lu_ld = snap.get("lu_ld_ratio")
+    if not available:
+        form = "突破选择期"     # 数据不足的默认填充态（C2：第三类作默认填充）
+    elif (ad is not None and ad >= _FORM_AD_BROAD) or (lu_ld is not None and lu_ld >= _FORM_LULD_BROAD):
+        form = "普涨共振"
+    elif ad is not None and ad <= _FORM_AD_NARROW:
+        form = "突破选择期"     # 宽度极窄：方向未选
+    else:
+        form = "宽幅震荡轮动"
+
+    sub_form = None
+    if form == "宽幅震荡轮动" and trend is not None:
+        sub_form = "宽幅轮动" if trend >= _FORM_TURNOVER_UP else "缩量电风扇"
+
+    # 「杀跌后观察」：只在突破选择期语境下、且宽度极窄 + 放量时置上下文——
+    # **不是第四形态**（C2 裁决：突破选择期「常伴杀跌」无直接证据，只作观测上下文）
+    context = None
+    if (form == "突破选择期" and ad is not None and ad <= _FORM_AD_NARROW
+            and trend is not None and trend >= _SELLOFF_TURNOVER_UP):
+        context = "杀跌后观察"
+
+    return {
+        "form": form,
+        "sub_form": sub_form,
+        "context": context,
+        "vector": {"ad_ratio": ad, "ad_pctile": ad_p, "turnover_trend": trend,
+                   "lu_ld_ratio": snap.get("lu_ld_ratio"),
+                   "limit_up_count": snap.get("limit_up_count"),
+                   "limit_down_count": snap.get("limit_down_count")},
+        "available": available,
+        "missing": missing,
+        "kirby_note": _KIRBY_NOTE,
+    }
+
+
+def market_form_history(*, history: list[dict] | None = None,
+                        years: int = 5, min_days: int = _FORM_HISTORY_MIN_DAYS) -> dict:
+    """近 N 年形态**频次与持续期**分布（事后统计）。
+
+    ``caveat`` 强制标注：历史频次是事后统计，**不构成对未来的概率预期**。
+    """
+    hist = history if history is not None else load_history(days=years * 250)
+    rows = [h for h in (hist or []) if h.get("date")]
+    rows.sort(key=lambda h: str(h["date"]))
+
+    freq: dict[str, dict] = {f: {"days": 0, "pct": 0.0} for f in MARKET_FORMS}
+    durations: dict[str, dict] = {f: {} for f in MARKET_FORMS}
+    runs: dict[str, list[int]] = {f: [] for f in MARKET_FORMS}
+    prev_form = None
+    run_len = 0
+
+    for i, row in enumerate(rows):
+        prior = rows[:i]
+        form = compute_market_form(row, prior)["form"]
+        freq[form]["days"] += 1
+        if form == prev_form:
+            run_len += 1
+        else:
+            if prev_form is not None:
+                runs[prev_form].append(run_len)
+            prev_form, run_len = form, 1
+    if prev_form is not None:
+        runs[prev_form].append(run_len)
+
+    n = len(rows)
+    for f in MARKET_FORMS:
+        freq[f]["pct"] = (freq[f]["days"] / n * 100.0) if n else 0.0
+        lengths = sorted(runs[f])
+        if lengths:
+            mid = len(lengths) // 2
+            durations[f] = {"median": lengths[mid], "max": lengths[-1],
+                            "n_runs": len(lengths)}
+
+    return {"n_days": n, "freq": freq, "durations": durations,
+            "sample": f"最近 {n} 个交易日快照",
+            "available": n >= min_days,
+            "caveat": "历史频次与持续期为**事后统计**，不构成对未来的概率预期；"
+                      "状态标签不蕴含收益可预测性（Kirby 2023）"}
+
+
+def compute_dispersion(snap: dict, history: list[dict],
+                       index_series: dict[str, list[float]] | None = None) -> dict:
+    """分化度（R-A02）：``index_dispersion`` / ``rotation_speed`` / ``avg_correlation``。
+
+    **仅描述性 + 历史分位**，不产方向。
+    ``avg_correlation`` 是**指数级滚动相关的工程 proxy**，与 Pollet-Wilson (2010)
+    的个股日收益平均相关口径不同（``proxy_note`` 强制随字段走）。
+    """
+    hist = history or []
+    out: dict = {"available": True, "missing": [], "sample": f"{len(hist)} 个快照"}
+    out["index_dispersion"] = {"value": None, "pctile": None,
+                               "window": 20, "n_index": 0}
+    out["avg_correlation"] = {"value": None, "pctile": None, "window": 60,
+                              "proxy_note": _DISPERSION_PROXY_NOTE}
+
+    if not index_series:
+        out["missing"].append("指数收益序列（index_series）——指数间离散度/滚动相关不可得")
+        out["available"] = False
+    else:
+        import statistics as _st
+
+        rets = {k: [x for x in v if x is not None] for k, v in index_series.items()}
+        rets = {k: v for k, v in rets.items() if v}
+        if len(rets) < 2:
+            out["missing"].append("指数收益序列少于 2 条——无法计算横截面离散度")
+            out["available"] = False
+        else:
+            means = [sum(v) / len(v) for v in rets.values()]
+            out["index_dispersion"] = {"value": _st.pstdev(means), "pctile": None,
+                                       "window": 20, "n_index": len(rets)}
+            # 滚动相关（窗口 60）：两两指数收益的 Pearson r 均值
+            win = 60
+            pairs = list(rets.values())
+            rs: list[float] = []
+            for i in range(len(pairs)):
+                for j in range(i + 1, len(pairs)):
+                    a, b = pairs[i][-win:], pairs[j][-win:]
+                    if len(a) < 2 or len(b) < 2 or len(a) != len(b):
+                        continue
+                    ma, mb = sum(a) / len(a), sum(b) / len(b)
+                    va = sum((x - ma) ** 2 for x in a) ** 0.5
+                    vb = sum((x - mb) ** 2 for x in b) ** 0.5
+                    if va and vb:
+                        rs.append(sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (va * vb))
+            if rs:
+                out["avg_correlation"] = {"value": sum(rs) / len(rs), "pctile": None,
+                                          "window": win, "proxy_note": _DISPERSION_PROXY_NOTE}
+            else:
+                out["missing"].append("指数序列过短，滚动相关不可得")
+
+    # 轮动速度：涨停家数在历史中的分位切换频率（仅用快照历史，不依赖指数序列）
+    lu_hist = [h.get("limit_up_count") for h in hist if h.get("limit_up_count") is not None]
+    if len(lu_hist) >= _FORM_MIN_HISTORY:
+        cur = snap.get("limit_up_count")
+        if cur is not None:
+            lu_hist = lu_hist + [cur]
+        switches = sum(1 for k in range(1, len(lu_hist))
+                       if (lu_hist[k] > lu_hist[k - 1]) != (lu_hist[k - 1] > lu_hist[k - 2])
+                       if k >= 2)
+        out["rotation_speed"] = {"value": switches / max(1, len(lu_hist) - 1),
+                                 "pctile": None, "window": len(lu_hist),
+                                 "note": "涨停家数方向切换频率（快照历史口径）"}
+    else:
+        out["rotation_speed"] = {"value": None, "pctile": None, "window": 0,
+                                 "note": f"快照历史不足 {_FORM_MIN_HISTORY} 日"}
+        out["missing"].append("轮动速度（涨停家数历史不足）")
+
+    out["available"] = out["available"] and out["rotation_speed"]["value"] is not None
+    return out
+
+
 def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     """基于历史分位 + 趋势 + 交叉验证计算环境标签。"""
 
@@ -559,6 +797,11 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     env["summary"] = "偏谨慎" if len(warnings) >= 2 else (
         "⚠️ " + " + ".join(warnings) if len(warnings) == 1 else "正常"
     )
+
+    # R-A01/R-A02：形态与分化度（**事后标注，不进规则**；报告层只作注记）
+    env["market_form"] = compute_market_form(snap, history)
+    env["dispersion"] = compute_dispersion(snap, history)
+
     snap["env_label"] = json.dumps(env, ensure_ascii=False)
 
 
