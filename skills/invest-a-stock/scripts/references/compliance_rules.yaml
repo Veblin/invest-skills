@@ -466,6 +466,39 @@ rules:
   # R-E02（2026-09-12）：斐波/波浪**引用**须带否定注记模板（report-conventions §2.4.1）
   # 与 wording-level-fib-support 的区别：该条拦「位有支撑/压力」这类**断言**；
   # 本条拦「引用了习俗点位却不出否定证据」——只带 L3 标签不够，注记才是显式否定。
+  # ==========================================================================
+  # R-E01 / R-E03 / R-E04（v0.3.0 R5）：消息三态 · 从业者惯例标注 · 先验块级拦截
+  # ==========================================================================
+  # R-E03：惯例型表述无标注 → 提示补标注（warning：措辞提示，不是断言拦截）
+  - id: "wording-practitioner-convention"
+    pattern: "(缩量跌不动|回踩低吸|托底|洗盘|吸筹|出货|电风扇|右稳左可|必带止损)"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(从业者惯例|非学术验证|风险提示|免责声明|不构成|\\[来源:|⚠️|不使用)"
+    message: "惯例型表述须带固定标注「[从业者惯例，非学术验证：{出处}]」（report-conventions §3.5；R-E03）——惯例不可与学术证据同权重"
+    law_ref: "report-conventions §3.5 — 从业者惯例标注（R-E03）"
+
+  # R-E04：惯例型表述出现在 [事实] 块 → 块级 error（惯例是观察框架，不是事实）
+  # 段落级：`para_text` 以空格拼接，skip 为**行级**——同行带标注的行会被剔除，
+  # 故「词与标注同一行」自然豁免；跨行（[事实] 与惯例词分处两行）才命中。
+  - id: "structure-convention-in-fact-block"
+    pattern: "(?=.*\\[事实\\])(?=.*(?:缩量跌不动|回踩低吸|托底|洗盘|吸筹|出货|电风扇|右稳左可))"
+    severity: "error"
+    scope: "paragraph"
+    skip_if_pattern: "(从业者惯例|非学术验证|风险提示|免责声明|不构成|⚠️)"
+    message: "惯例型表述不得置于 [事实] 块（report-conventions §3.5 约束 1；R-E04）——放进 [事实] 块等于以事实面貌呈现未经检验的先验"
+    law_ref: "report-conventions §3.5 / §2.3 强制 7 延伸（R-E04）"
+
+  # R-E01：引用传闻类表述而无三态标注 → warning（只标状态与类型，不预设方向）
+  # pattern 限定在**传闻类**强词（不含「消息」——「消息面」等中性用法会海量误报）
+  - id: "wording-message-no-tristate"
+    pattern: "(传闻|传言|爆料|小作文)"
+    severity: "warning"
+    scope: "line"
+    skip_if_pattern: "(事实|传言|证实|官方|公告|披露|风险提示|免责声明|不构成|\\[来源:|⚠️)"
+    message: "引用消息/传闻须标三态（事实/传言/证实）+ 尽量带官方来源；**不预设方向语义**（report-conventions §2.3 强制 8；R-E01）。注意：本规则的 skip 含「传言」，故「标为传言」的行豁免；未标注的纯传闻会命中"
+    law_ref: "report-conventions §2.3 强制 8 — 消息三态（R-E01）"
+
   - id: "wording-fib-no-negation"
     pattern: "(黄金分割|斐波那契|斐波|[0-9](\\.[0-9]+)?%\\s*回撤位)"
     severity: "error"

@@ -125,6 +125,19 @@ def select_candidates(rows: list[dict], *, pe_grank_max: float = PE_GRANK_MAX,
     return out
 
 
+def universe_median_pe(rows: list[dict]) -> float | None:
+    """正 PE 子总体的**中位 PE**（分位参照系的中心）。
+
+    ⚠️ 报告里**不得只给分位**：CLAUDE.md 估值分位使用规则 3 要求分位数必须伴随
+    中位数或均值，否则读者无法判断「0.2% 分位」是相对什么分布而言的
+    （由 lint `percentile-without-median` 拦截）。
+    """
+    from stats import median as _median
+
+    vals = [v for v in (_pos(r.get("pe_ttm")) for r in rows) if v is not None]
+    return _median(vals)
+
+
 def gap_pct(ey: float | None, rf_pct: float | None,
             spread_pp: float = SPREAD_PP) -> float | None:
     """L3 利差（百分点）= ``EY − (rf + 2pp)``；任一输入缺失 → None。

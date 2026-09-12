@@ -106,6 +106,7 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         raise RuntimeError(f"池内标的在 daily_basic（{trade_date}）中无一匹配——数据口径异常")
 
     n_positive_pe = sum(1 for r in merged if lenses.ey_pct(r.get("pe_ttm")) is not None)
+    median_pe = lenses.universe_median_pe(merged)   # 分位的参照中心（规则 3 要求伴随）
 
     l1 = lenses.select_candidates(merged)
     missing_ind = sum(1 for r in l1 if r.get("industry_missing"))
@@ -185,6 +186,7 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         "pool_stats": {"market": "主板+创业+科创" if not with_bj else "主板+创业+科创+北交所",
                        "n_positive_pe": n_positive_pe, "n_pool": len(merged),
                        "n_l1": len(l1), "n_excluded_st": pool["n_excluded_st"],
+                       "median_pe": median_pe,
                        "n_unassessable": n_unassessable,
                        "calls": dict(sources.CALL_COUNT),
                        "empty_retries": sources.EMPTY_RETRY_COUNT},
@@ -217,7 +219,9 @@ def render_report(scan: dict) -> str:
         "",
         f"- 生成时间：{_now_shanghai()}（北京时间）｜数据日：{scan['trade_date']}",
         f"- 池口径：{ps['market']}，剔 ST/退市（剔除 {ps['n_excluded_st']} 只）；"
-        f"池内 {ps['n_pool']} 只，正 PE {ps['n_positive_pe']} 只，L1 命中 {ps['n_l1']} 只",
+        f"池内 {ps['n_pool']} 只，正 PE {ps['n_positive_pe']} 只，L1 命中 {ps['n_l1']} 只"
+        + (f"；正 PE 子总体**中位 PE {ps['median_pe']:.2f}x**"
+           f" [来源: Python calc: median(正 PE 序列)]" if ps.get("median_pe") else ""),
         f"- 规则版本：{snapshot.RULES_VERSION}；阈值 pe_grank ≤ {scan['params']['pe_grank_max']}、"
         f"行业内排名 ≤ {scan['params']['ind_rank_max']:.0%}、ROE(年化) ≥ {scan['params']['roe_min']}%",
         f"- 质量口径：ROE 用 `roe_yearly`（年化，跨期同口径）；净利用**扣非归母净利**"
@@ -270,11 +274,20 @@ def render_report(scan: dict) -> str:
             # 行业缺失的命中行 ind_rk/ind_n 均为 None——不得渲染成「None/None」
             ind_txt = (f"行业内排名 {h['ind_rk']}/{h['ind_n']}；" if h.get("ind_rk")
                        else "行业内排名：行业字段缺失，该条件已跳过（设计 §5 降级）；")
+            # 分位**必须伴随中位数**（CLAUDE.md 估值分位使用规则 3；
+            # lint `percentile-without-median` 拦截）。中位缺失时退回不给分位文本，
+            # 而不是只印分位
+            if ps.get("median_pe"):
+                pct_txt = (f"全 A 正 PE 子总体分位 {h['pe_grank']:.1%}"
+                           f"（≤{scan['params']['pe_grank_max']:.0%}；"
+                           f"该子总体中位 PE {ps['median_pe']:.2f}x）；")
+            else:
+                pct_txt = (f"全 A 正 PE 子总体分位 {h['pe_grank']:.1%}"
+                           f"（≤{scan['params']['pe_grank_max']:.0%}）；")
             lines.append(
                 f"**{h['ts_code']} {h['name']}** — 命中 L1 横截面便宜："
-                f"PE(TTM) {h['pe_ttm']}，EY {h['ey_pct']}%，全 A 正 PE 子总体分位 "
-                f"{h['pe_grank']:.1%}（≤{scan['params']['pe_grank_max']:.0%}），"
-                + ind_txt
+                f"PE(TTM) {h['pe_ttm']}，EY {h['ey_pct']}%，"
+                + pct_txt + ind_txt
                 + f"L3 gap 标记 {sum(flags)}/2（利差{'>0' if flags[0] else '未满足'}、"
                 f"隐含增速<预告上限{'满足' if flags[1] else '未满足/不可得'}）"
                 f" [来源: Python calc: EY=100/PE; 分位=percentile_rank_inclusive/100]"

@@ -264,3 +264,61 @@ def test_r_e02_rules_behave_bidirectionally():
     for ok in ("本报告不使用斐波/波浪工具", "新浪财经报道", "海浪发电概念",
                "收盘价 3514.20，成交额 5 亿 [来源: engine]"):
         assert not _flags(_FIB_RULE, ok) and not _flags(_WAVE_RULE, ok), f"误伤：{ok}"
+
+
+# ---------------------------------------------------------------- R-E01/E03/E04（v0.3.0 R5）
+
+_CONVENTION_RULES = ("wording-practitioner-convention",
+                     "structure-convention-in-fact-block",
+                     "wording-message-no-tristate")
+
+
+def test_r_e03_e04_rules_registered():
+    rules = _rules()
+    for rid in _CONVENTION_RULES:
+        rule = rules.get(rid)
+        assert rule, f"compliance_rules.yaml 缺 {rid}"
+        assert rule["severity"] in ("error", "warning")
+        assert rule.get("skip_if_pattern"), f"{rid} 须有豁免（标注/免责行不应被拦）"
+        assert rule.get("law_ref")
+
+
+def test_r_e04_fact_block_rule_is_error_and_paragraph_scoped():
+    """`[事实]` 块内出现惯例表述是**块级**问题——须 paragraph scope + error。"""
+    rule = _rules()["structure-convention-in-fact-block"]
+    assert rule["severity"] == "error", "惯例进 [事实] 块属事实性错误，须 error"
+    assert rule["scope"] == "paragraph", "块级拦截不能用 line scope（跨行场景会漏）"
+
+
+def test_r_e03_convention_template_documented():
+    conv = _read(_CONVENTIONS)
+    assert "3.5「从业者惯例」标注系统化" in conv or "### 3.5 「从业者惯例」标注系统化" in conv
+    assert "[从业者惯例，非学术验证：" in conv, "模板须逐字在位"
+    for token in ("不得置于 `[事实]` 块", "不得与学术证据同权重", "出处不可考"):
+        assert token in conv, f"§3.5 缺约束：{token}"
+
+
+def test_r_e01_message_tristate_documented():
+    conv = _read(_CONVENTIONS)
+    assert "消息三态与类型标注" in conv
+    for token in ("事实", "传言", "证实", "注意力情绪型", "基本面型"):
+        assert token in conv, f"强制 8 缺要素：{token}"
+    assert "不预设" in conv, "须显式禁止预设方向语义"
+    assert "热度见顶 ≠ 证实" in conv
+
+
+def test_r_e04_selfcheck_has_new_items():
+    conv = _read(_CONVENTIONS)
+    sec = _section(conv, "### 7.1 通用检查项")
+    for token in ("从业者惯例", "structure-convention-in-fact-block", "消息/传闻引用"):
+        assert token in sec, f"§7.1 缺检查项：{token}"
+
+
+def test_r_e01_prereg_registered():
+    """R-E01 的「分类器验证方案文档化」= 预注册文件就位（B1+B2 的验证方案注册）。"""
+    f = _REPO_ROOT / "skills/lib/references/backtest_prereg/C8_预注册.md"
+    assert f.exists(), "缺 C8 预注册"
+    text = f.read_text(encoding="utf-8")
+    for token in ("H0", "H1", "滚动", "禁止全样本一次性结论", "显著性判据", "稳健性"):
+        assert token in text, f"C8 预注册缺：{token}"
+    assert "不产出结论" in text, "须声明本轮不产出验证结论（B1+B2）"
