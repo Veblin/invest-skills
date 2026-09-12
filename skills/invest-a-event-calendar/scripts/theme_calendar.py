@@ -51,7 +51,20 @@ _UNRELIABLE_WORDS = ("热度", "涨停家数", "涨幅榜", "龙虎榜", "成交
 
 # 记录字段白名单（结构上杜绝「扩散路径预测」类字段混入）
 _RECORD_KEYS = ("theme", "stage", "anchor", "anchor_source", "confirmed_date",
-                "concepts", "note", "recorded_at")
+                "concepts", "note", "recorded_at", "demand_window", "hype_window")
+
+# --- R-D02 需求窗口 vs 炒作窗口 -------------------------------------------------
+# 动机（C9）：**基本面季节性有据**，而「股价提前数周布局」无直接证据——两者必须分字段。
+_HYPE_LABEL_PREFIX = "从业者惯例，非学术验证"
+# 炒作窗口**不得**带收益预期类表述（R-D02 验收：无「预期收益」类描述）
+_HYPE_BANNED = ("预期收益", "涨幅预期", "收益预测", "目标位", "目标价", "预期涨幅", "收益率预期")
+
+# --- R-D03 可跟踪度（替代「小作文干扰小」）-------------------------------------
+# 覆盖充分度 = 三类覆盖指标的**归一化均值**（归一化上限为工程近似，随 C12 预注册裁决）
+_COVERAGE_FULL_ANALYSTS = 10.0     # 研报覆盖数达到此值视为充分
+_COVERAGE_FULL_ANNOUNCE = 6.0      # 公告频率（次/月）
+_COVERAGE_FULL_MEDIA = 20.0        # 媒体提及条数
+_LOW_COVERAGE = 0.3                # 低于此值 → 低覆盖警示（对称风险提示）
 
 
 def _today() -> str:
@@ -88,6 +101,94 @@ def is_official_source(source: str) -> bool:
     return not any(w in s for w in _UNRELIABLE_WORDS)
 
 
+def make_demand_window(text: str, *, source: str, lit_note: str = "") -> dict:
+    """需求窗口（R-D02）：**基本面日期硬编码 + 来源 + 商品基本面文献注记**。
+
+    需求侧季节性是有据的基本面事实（与「股价提前布局」是两回事），故须带来源。
+    """
+    if not str(text or "").strip():
+        raise ValueError("需求窗口文本不能为空")
+    if not str(source or "").strip():
+        raise ValueError("需求窗口须带来源（基本面日期为硬编码事实，无来源即不可核）")
+    return {"text": str(text).strip(), "source": str(source).strip(),
+            "lit_note": str(lit_note or "").strip()}
+
+
+def make_hype_window(text: str, *, source: str = "") -> dict:
+    """炒作窗口（R-D02）：须带**「从业者惯例，非学术验证」**标注，且**不带收益预期权重**。
+
+    动机（C9）：「股价提前数周布局」**无直接证据**——炒作窗口只作从业者惯例的记录，
+    不得与需求窗口同权重，更不得承载任何收益预期。
+    """
+    t = str(text or "").strip()
+    if not t:
+        raise ValueError("炒作窗口文本不能为空")
+    hit = [w for w in _HYPE_BANNED if w in t]
+    if hit:
+        raise ValueError(
+            f"炒作窗口**不得带收益预期**（命中 {hit}）——R-D02 验收要求「无预期收益类描述」；"
+            f"预期类表述请移出本字段（本字段只记录从业者惯例的时间窗）")
+    src = str(source or "").strip() or "出处不可考"
+    return {"text": t, "source": src, "label": f"{_HYPE_LABEL_PREFIX}：{src}"}
+
+
+def tractability_field(*, hard_catalysts: int, total_catalysts: int,
+                       analyst_coverage: float | None,
+                       announcement_freq: float | None,
+                       media_mentions: float | None) -> dict:
+    """可跟踪度（R-D03）= **硬催化占比 × 覆盖充分度**，替代「小作文干扰小」。
+
+    动机（C12）：机制层有据（信息环境决定融入速度），而「小作文少可跟踪」**无直接检验**
+    → 改为可计算字段。**低覆盖给对称风险提示**——低覆盖意味着**坏消息消化可能更慢**
+    （Hou 2007 lead-lag 的反向警示），**不是**「干扰小所以好跟踪」。
+    """
+    total = int(total_catalysts or 0)
+    hard = int(hard_catalysts or 0)
+    if total <= 0:
+        raise ValueError("total_catalysts 须 > 0（空分母不得静默产出比率——D5）")
+    if hard < 0 or hard > total:
+        raise ValueError(f"hard_catalysts({hard}) 须在 [0, total_catalysts({total})] 内")
+
+    ratio = hard / total
+    norms: list[float] = []
+    for v, full in ((analyst_coverage, _COVERAGE_FULL_ANALYSTS),
+                    (announcement_freq, _COVERAGE_FULL_ANNOUNCE),
+                    (media_mentions, _COVERAGE_FULL_MEDIA)):
+        if v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f != f:          # NaN
+            continue
+        norms.append(min(1.0, max(0.0, f / full)))
+
+    missing: list[str] = []
+    if not norms:
+        missing.append("覆盖充分度三类输入（研报覆盖数/公告频率/媒体提及）全部缺失")
+    coverage = (sum(norms) / len(norms)) if norms else None
+    tract = (ratio * coverage) if coverage is not None else None
+    low = (coverage is not None and coverage < _LOW_COVERAGE)
+    return {
+        "hard_catalyst_ratio": ratio,
+        "coverage_sufficiency": coverage,
+        "tractability": tract,
+        "available": coverage is not None,
+        "low_coverage": low,
+        # 措辞刻意**不复现**被替代词（「干扰小」等）——禁令引用禁词会让「无主观措辞」
+        # 的扫描把免责句判成违规（本会话第三次同类）
+        "warning": ("⚠️ 覆盖不充分：坏消息消化可能**更慢**（信息环境决定融入速度；"
+                    "Hou 2007 lead-lag 的反向警示）——这是**对称**风险提示，"
+                    "不得读作「覆盖低 ⇒ 波动小」") if low else None,
+        "missing": missing,
+        "norms_used": len(norms),
+        "note": ("可跟踪度 = 硬催化占比 × 覆盖充分度（R-D03）；覆盖充分度为三类指标的"
+                 "归一化均值，归一化上限为**工程近似**，随 C12 预注册裁决（见 "
+                 "backtest_prereg/C12_预注册.md）"),
+    }
+
+
 def load_themes(*, state_file: str | pathlib.Path | None = None) -> list[dict]:
     """已登记的题材事件（按登记时间升序）。"""
     path = pathlib.Path(state_file) if state_file else _STATE_DEFAULT
@@ -98,7 +199,9 @@ def load_themes(*, state_file: str | pathlib.Path | None = None) -> list[dict]:
 
 def register_theme(theme: str, *, stage: str, anchor: str, anchor_source: str,
                    concepts: list[str] | None = None, confirmed_date: str | None = None,
-                   note: str = "", state_file: str | pathlib.Path | None = None) -> dict:
+                   note: str = "", demand_window: dict | None = None,
+                   hype_window: dict | None = None,
+                   state_file: str | pathlib.Path | None = None) -> dict:
     """登记一条题材事件（阶段 + 证实锚点 + 概念归属）。
 
     校验：阶段须属 ``STAGES``；``anchor_source`` 须为官方/权威来源
@@ -121,7 +224,8 @@ def register_theme(theme: str, *, stage: str, anchor: str, anchor_source: str,
     rec = {"theme": str(theme).strip(), "stage": stage, "anchor": str(anchor).strip(),
            "anchor_source": str(anchor_source).strip(),
            "confirmed_date": confirmed_date, "concepts": concepts,
-           "note": str(note or "").strip(), "recorded_at": _today()}
+           "note": str(note or "").strip(), "recorded_at": _today(),
+           "demand_window": demand_window, "hype_window": hype_window}
     assert set(rec) == set(_RECORD_KEYS), "记录字段集与白名单不符"
 
     path = pathlib.Path(state_file) if state_file else _STATE_DEFAULT
@@ -185,10 +289,33 @@ def render_themes(*, state_file: str | pathlib.Path | None = None) -> str:
             lines.append(f"| {t.get('theme')} | {t.get('stage')} | {t.get('anchor')} | "
                          f"{t.get('anchor_source')} | {t.get('confirmed_date') or '—'} | "
                          f"{'、'.join(t.get('concepts') or []) or '—'} | {t.get('recorded_at')} |")
+    # R-D02：需求窗口与炒作窗口**禁止合并输出**——分列 + 显式声明
+    win = [t for t in themes if t.get("demand_window") or t.get("hype_window")]
+    if win:
+        lines.append("")
+        lines.append("### 时间窗口（需求窗口与炒作窗口**禁止合并**——两者证据等级不同）")
+        lines.append("")
+        lines.append("| 题材 | 窗口类型 | 窗口 | 来源 / 标注 |")
+        lines.append("|---|---|---|---|")
+        for t_ in win:
+            dw, hw = t_.get("demand_window"), t_.get("hype_window")
+            if dw:
+                lit = f"；文献注记：{dw['lit_note']}" if dw.get("lit_note") else ""
+                lines.append(f"| {t_.get('theme')} | **需求窗口**（基本面季节性） | "
+                             f"{dw['text']} | {dw['source']}{lit} |")
+            if hw:
+                lines.append(f"| {t_.get('theme')} | 炒作窗口（**从业者惯例**） | "
+                             f"{hw['text']} | {hw['label']} |")
+        lines.append("")
+        lines.append("> ⚠️ **两类窗口不得合并**：需求窗口是**基本面事实**（须带来源）；"
+                     "炒作窗口是**从业者惯例**（标注「非学术验证」，"
+                     "**不带收益预期权重**）。合并输出等于让惯例借用事实的证据等级（C9）。")
     lines.append("")
     conf = confirmed_event_days(state_file=state_file)
     lines.append(f"- 已证实事件日：{'、'.join(conf) if conf else '—（无）'}")
-    lines.append("- 口径：证实锚点 = **官方/权威来源**确认；**题材热度见顶 ≠ 证实**；"
+    lines.append("- 口径：需求窗口与炒作窗口**分字段、禁合并**（R-D02）；"
+                 "可跟踪度 = 硬催化占比 × 覆盖充分度，低覆盖时给**对称**风险提示（R-D03）；"
+                 "证实锚点 = **官方/权威来源**确认；**题材热度见顶 ≠ 证实**；"
                  "引擎**只记账不预测扩散路径**；多概念归属记为**拥挤度加总**（不含「托底」语义）。")
     return "\n".join(lines)
 
@@ -202,6 +329,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--concepts", default="", help="概念（逗号分隔）")
     ap.add_argument("--confirmed-date", default=None)
     ap.add_argument("--note", default="")
+    # R-D02：需求窗口（须来源）与炒作窗口（强制惯例标注、禁收益预期）——**分列输出**
+    ap.add_argument("--demand-window", default="", help="需求窗口文本（基本面季节性）")
+    ap.add_argument("--demand-source", default="", help="需求窗口来源（缺失即拒绝）")
+    ap.add_argument("--demand-lit-note", default="", help="商品基本面文献注记（可选）")
+    ap.add_argument("--hype-window", default="", help="炒作窗口文本（从业者惯例）")
+    ap.add_argument("--hype-source", default="", help="炒作窗口出处（不可考写「出处不可考」）")
     ap.add_argument("--state-file", default=str(_STATE_DEFAULT))
     ap.add_argument("--no-out", action="store_true")
     ap.add_argument("--out-dir", default="")
@@ -209,9 +342,15 @@ def main(argv: list[str] | None = None) -> int:
 
     concepts = [c for c in (args.concepts or "").split(",") if c.strip()]
     try:
+        dw = (make_demand_window(args.demand_window, source=args.demand_source,
+                                 lit_note=args.demand_lit_note)
+              if args.demand_window else None)
+        hw = (make_hype_window(args.hype_window, source=args.hype_source)
+              if args.hype_window else None)
         rec = register_theme(args.theme, stage=args.stage, anchor=args.anchor,
                              anchor_source=args.anchor_source, concepts=concepts,
                              confirmed_date=args.confirmed_date, note=args.note,
+                             demand_window=dw, hype_window=hw,
                              state_file=args.state_file)
     except ValueError as exc:
         print(f"❌ {exc}", file=sys.stderr)

@@ -821,10 +821,16 @@ def _run_theme(args) -> int:
 
     concepts = [c for c in (args.concepts or "").split(",") if c.strip()]
     try:
+        dw = (tc.make_demand_window(args.demand_window, source=args.demand_source,
+                                    lit_note=args.demand_lit_note)
+              if args.demand_window else None)
+        hw = (tc.make_hype_window(args.hype_window, source=args.hype_source)
+              if args.hype_window else None)
         rec = tc.register_theme(args.theme, stage=args.stage, anchor=args.anchor,
                                 anchor_source=args.anchor_source, concepts=concepts,
                                 confirmed_date=args.confirmed_date,
-                                note=args.theme_note, state_file=args.state_file)
+                                note=args.theme_note, demand_window=dw, hype_window=hw,
+                                state_file=args.state_file)
     except ValueError as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
@@ -847,6 +853,11 @@ def main() -> int:
     ap.add_argument("--concepts", type=str, default="", help="概念（逗号分隔）")
     ap.add_argument("--confirmed-date", type=str, default=None, help="证实日（阶段=兑现时必填）")
     ap.add_argument("--theme-note", type=str, default="", help="备注（描述性，勿写方向判断）")
+    ap.add_argument("--demand-window", type=str, default="", help="需求窗口（基本面季节性；须 --demand-source）")
+    ap.add_argument("--demand-source", type=str, default="", help="需求窗口来源")
+    ap.add_argument("--demand-lit-note", type=str, default="", help="需求窗口文献注记")
+    ap.add_argument("--hype-window", type=str, default="", help="炒作窗口（从业者惯例；禁收益预期）")
+    ap.add_argument("--hype-source", type=str, default="", help="炒作窗口出处")
     ap.add_argument("--macro", action="store_true",
                     help="宏观日程模式：定期宏观数据发布日程（中美 CPI/社零/非农）+ 议息会议")
     ap.add_argument("--macro-days", type=int, default=90, help="宏观展望窗（自然日，默认 90）")

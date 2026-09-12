@@ -264,3 +264,95 @@ def test_no_state_flag_respected_in_theme_mode(state, capsys, monkeypatch):
         "--anchor-source", "发改委公告", "--no-state", "--state-file", str(state)])
     assert uc.main() == 0
     assert not state.exists(), "--no-state 下不得写状态文件"
+
+
+# ── R-D02 需求窗口 vs 炒作窗口（分字段，禁止合并）─────────────────────────
+
+def test_demand_window_requires_source():
+    w = tc.make_demand_window("欧洲冬季 10 月下旬–次年 2-3 月", source="WMO 季节划分",
+                              lit_note="商品基本面文献：取暖油季节性")
+    assert w["text"] and w["source"] and w["lit_note"]
+    with pytest.raises(ValueError):
+        tc.make_demand_window("某窗口", source="")      # 需求窗口须带来源
+    with pytest.raises(ValueError):
+        tc.make_demand_window("", source="某来源")
+
+
+def test_hype_window_always_carries_convention_label():
+    """标注由构造保证；**出处不可考也须写标签**而非省略（report-conventions §3.5 约束 3）。"""
+    w = tc.make_hype_window("每年 10 月启动", source="某直播")
+    assert "从业者惯例，非学术验证" in w["label"]
+    w2 = tc.make_hype_window("每年 10 月启动")           # 无 source
+    assert "从业者惯例，非学术验证" in w2["label"]
+    assert "出处不可考" in w2["label"], "无出处时须写「出处不可考」，不得省略标签"
+
+
+@pytest.mark.parametrize("bad", ["预期收益 20%", "目标位 15 元", "涨幅预期可观", "收益预测 +30%"])
+def test_hype_window_rejects_return_expectation(bad):
+    """炒作窗口**不带收益预期权重**（R-D02 验收：无「预期收益」类描述）。"""
+    with pytest.raises(ValueError) as exc:
+        tc.make_hype_window(f"每年 10 月启动，{bad}", source="某直播")
+    assert "收益" in str(exc.value) or "预期" in str(exc.value)
+
+
+def test_windows_never_merged_in_render(state):
+    """两者**禁止合并输出**——渲染须分节且显式声明不可合并。"""
+    _reg(state, demand_window=tc.make_demand_window("欧洲冬季", source="WMO"),
+         hype_window=tc.make_hype_window("每年 10 月启动", source="某直播"))
+    text = tc.render_themes(state_file=state)
+    assert "需求窗口" in text and "炒作窗口" in text
+    assert "禁止合并" in text or "不得合并" in text
+    # 两个窗口的文本须各自出现在**不同行**
+    lines = [l for l in text.splitlines() if "欧洲冬季" in l or "每年 10 月启动" in l]
+    assert len(lines) == 2, f"两个窗口被渲染到同一行（合并了）：{lines}"
+
+
+def test_windows_roundtrip_through_state(state):
+    _reg(state, demand_window=tc.make_demand_window("需求窗", source="来源A"),
+         hype_window=tc.make_hype_window("炒作窗", source="凭条B"))
+    rec = tc.load_themes(state_file=state)[0]
+    assert rec["demand_window"]["text"] == "需求窗"
+    assert rec["hype_window"]["text"] == "炒作窗"
+
+
+# ── R-D03 可跟踪度字段 ───────────────────────────────────────────────────
+
+def test_tractability_is_ratio_times_coverage():
+    out = tc.tractability_field(hard_catalysts=6, total_catalysts=10,
+                                analyst_coverage=10, announcement_freq=6.0, media_mentions=20)
+    assert out["hard_catalyst_ratio"] == pytest.approx(0.6)
+    assert out["coverage_sufficiency"] == pytest.approx(1.0)
+    assert out["tractability"] == pytest.approx(0.6)
+    assert out["available"] is True
+
+
+def test_low_coverage_emits_symmetric_warning():
+    """低覆盖须给**对称**风险提示（坏消息消化慢），而非「干扰小」类单向措辞。"""
+    out = tc.tractability_field(hard_catalysts=5, total_catalysts=10,
+                                analyst_coverage=0, announcement_freq=0.2, media_mentions=0)
+    assert out["low_coverage"] is True
+    assert "坏消息" in out["warning"] and "更慢" in out["warning"]
+    assert "干扰小" not in out["warning"]
+
+
+def test_tractability_has_no_subjective_wording():
+    for kw in (5, 10):
+        out = tc.tractability_field(hard_catalysts=kw, total_catalysts=10,
+                                    analyst_coverage=3, announcement_freq=2.0, media_mentions=2)
+        s = str(out)
+        for banned in ("干扰小", "小作文少", "易跟踪"):
+            assert banned not in s, f"含主观措辞：{banned}"
+
+
+def test_tractability_unavailable_without_coverage_inputs():
+    out = tc.tractability_field(hard_catalysts=3, total_catalysts=5,
+                                analyst_coverage=None, announcement_freq=None, media_mentions=None)
+    assert out["coverage_sufficiency"] is None
+    assert out["tractability"] is None
+    assert out["available"] is False and out["missing"]
+
+
+def test_tractability_zero_denominator_fails_loud():
+    with pytest.raises(ValueError):
+        tc.tractability_field(hard_catalysts=0, total_catalysts=0,
+                              analyst_coverage=1, announcement_freq=1.0, media_mentions=1)
