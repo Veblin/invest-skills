@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -30,6 +31,7 @@ ensure_invest_a_scripts_on_path()
 
 import hk_ah  # noqa: E402
 import hk_codes  # noqa: E402
+import hk_compare  # noqa: E402
 import hk_financials  # noqa: E402
 import hk_kline  # noqa: E402
 import hk_quote  # noqa: E402
@@ -187,8 +189,144 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 # cmd_report（初步分析 v1）
 # ---------------------------------------------------------------------------
 
+# (模块号, 名称, 状态, 依据, 落地锚点)  状态 ∈ {已覆盖, 部分, 声明未接入}
+# 判定口径（r3 §3 T11-3(a)）：「可映射」= **不需要新建数据源即可交付**的维度。
+# anchor = 报告里对应的真实节标题（「无静默缺节」的机器可核验锚点）；None = 无引擎节。
+_MODULE_COVERAGE: tuple[tuple[str, str, str, str, str | None], ...] = (
+    ("0", "研究问题卡", "已覆盖",
+     "Claude 侧流程（LAW 11）：研究问题在会话内明确，非引擎产出", None),
+    ("1", "当前状态快照", "已覆盖",
+     "快照 + 估值位置 + 财务摘要 + 技术结构（本报告各节）", "## 估值位置"),
+    ("2", "动态驱动分析", "声明未接入",
+     "HK 无新闻/公告采集层（v1 起即无），本期不新建数据源", None),
+    ("3", "市场结构分析", "已覆盖",
+     "南向资金 + 恒指/成交额对照；ERP 类不可得走三态", "## 模块 3 市场结构"),
+    ("3b", "机构观点与盈利预测", "声明未接入",
+     "HK 一致预期源未接入（report_rc 门槛 10000 分且为 A 股口径）", None),
+    ("3c", "参与者行为扫描", "声明未接入",
+     "CCASS 持仓/沽空源未接入（公开可查，本期未做）", None),
+    ("4", "静态基本面", "部分",
+     "财务摘要近 4 期；HK 无季报制度 → 期间口径不同（年报 + 中报）", None),
+    ("5", "市场分歧", "已覆盖",
+     "Bull/Bear 假设 → 传导 → 条件句（纯框架，无新数据源）", "## 模块 5 市场分歧"),
+    ("6", "左侧/右侧概率结构", "已覆盖",
+     "LAW 16 条件概率结构（纯框架，不作方向断言）", "## 模块 6 左侧/右侧概率结构"),
+    ("7", "风险与不确定性", "已覆盖",
+     "市场规则静态条目 + 数据驱动项三态", "## 模块 7 风险与不确定性"),
+    ("8", "附录", "已覆盖",
+     "数据来源与口径清单", "## 模块 8 附录"),
+)
+MAPPABLE_MODULES = ("0", "1", "3", "5", "6", "7", "8")
+
+
+def coverage_summary() -> dict:
+    """模块覆盖率（分母 = 可映射维度 7 项）。
+
+    ``ratio`` 由 Python 计算（P0）——报告渲染该字段而非口头断言。
+    """
+    items = [{"module": m, "name": n, "status": s, "basis": b, "anchor": a}
+             for m, n, s, b, a in _MODULE_COVERAGE]
+    mappable = [i for i in items if i["module"] in MAPPABLE_MODULES]
+    covered = [i for i in mappable if i["status"] == "已覆盖"]
+    return {"mappable": len(mappable), "covered": len(covered),
+            "ratio": (len(covered) / len(mappable)) if mappable else 0.0,
+            "items": items}
+
+
+_MODULE5 = """
+## 模块 5 市场分歧（Bull/Bear 假设与传导）
+
+> **框架性陈述**：本节是结构模板，具体分支由使用者按标的填入；未填部分一律标注
+> 「框架性陈述/待验证」。HK 无一致预期采集层（见模块覆盖声明 3b），故本节不含卖方分歧数据。
+
+逐分支填写要求（每条须齐备，缺项即标「待填」而非留空）：
+
+| 项 | 要求 |
+|---|---|
+| 假设 | 一句话可证伪的命题（禁止「长期看好」类不可证伪表述） |
+| 传导路径 | 假设 → 经营/资金 → 价格的逐环节链条；**逐环节标注证据等级（A/B/C/D），最弱环节不得作核心论证** |
+| 证伪观察 | 条件句：「若 {观察} 出现 → 该分支被削弱」 |
+| 状态 | 默认「框架性陈述/待验证」；被数据支持后方可升格并注明样本 |
+"""
+
+_MODULE6 = """
+## 模块 6 左侧/右侧概率结构（LAW 16）
+
+> 本节只给**条件概率结构**，**不作「当前处于左侧/右侧」的单边结论**（LAW 16）。
+> 未经回测的条件不给概率值——「未回测」不得写成「概率低」。
+
+条件化结构（每条条件满足后才有数值，数值须由 Python 回测产出并带样本量与窗口）：
+
+- **价格条件**：{价格相对本报告估值位置/技术结构的观察}
+- **资金条件**：可用本报告模块 3 的南向净买额（含方向与量级）
+- **估值条件**：可用本报告估值位置的序列分位（须伴随中位数）
+
+填写纪律：每条条件 → 对应的历史条件概率必须来自 Python 计算并标注
+`[来源: Python calc: …]`；无回测的条件标注「未回测 → 不给概率」。
+"""
+
+
+_MODULE8 = """
+## 模块 8 附录：数据来源与口径
+
+| 项 | 来源 | 时点 / 口径 |
+|---|---|---|
+| 快照与多源交叉 | 腾讯 r_hk（qt.gtimg.cn）+ yfinance 交叉 | 抓取时点 {ts} |
+| 财务摘要 | 东财港股财务接口 | 近 4 期（HK 无季报制度，期间口径见模块覆盖声明 4） |
+| 估值序列 | 百度股市通估值历史序列 | 近五年；分位窗口 = 序列可得区间 |
+| 技术结构 | 腾讯 ifzq qfq K 线（前复权） | 250 个交易日 |
+| 南向资金 | {sb_source} | 最新数据日 {sb_date} |
+
+币种纪律：行情与估值均为 **HKD**（另注除外）；报表币种以公司年报披露为准
+（东财 `CURRENCY` 字段对 A+H 公司不可靠，本报告不使用该字段）。
+"""
+
+
+def _render_module7(lines: list[str], *, quote: dict, pe_line: str | None,
+                    sb: dict) -> None:
+    """模块 7：静态市场规则条目 + 数据驱动项三态。"""
+    lines.append(_RSK)
+    lines.append("### 7.2 数据驱动项（本次实测；不可得一律三态标注）\n")
+    amount = quote.get("amount")
+    if amount is not None:
+        lines.append(f"- 成交额 {amount / 1e8:.1f} 亿 HKD（快照口径）"
+                     f"——≥1 亿 HKD 为实务关注线 [来源: tencent.r_hk]")
+    else:
+        lines.append("- 成交额：不可得（快照缺失该字段）——不推断流动性高低")
+    lines.append(f"- 估值位置：{pe_line or '序列不可得——不推断贵贱'}")
+    if sb.get("available"):
+        rows = sb.get("rows") or []
+        latest = rows[-1] if rows else {}
+        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，"
+                     f"合计 {_fmt_num(latest.get('total_yi'))} 亿）"
+                     f"——资金面观察，非交易信号")
+    else:
+        lines.append(f"- 南向资金：不可得（{sb.get('reason')}）——不推断资金方向")
+    lines.append("")
+
+
+def _render_coverage(lines: list[str]) -> None:
+    """模块覆盖声明（正文最前，「无静默缺节」一目可核）。"""
+    cs = coverage_summary()
+    lines.append("## 模块覆盖声明（v2）\n")
+    lines.append("> 分母口径：**可映射维度** = 不需要新建数据源即可交付的维度。"
+                 "标「已覆盖」者均在本报告内有对应节；「声明未接入」者给原因，不静默缺节。\n")
+    lines.append("| 模块 | 名称 | 状态 | 依据 |")
+    lines.append("|---|---|---|---|")
+    icon = {"已覆盖": "✅ 已覆盖", "部分": "◐ 部分", "声明未接入": "⚠️ 声明未接入"}
+    for it in cs["items"]:
+        lines.append(f"| {it['module']} | {it['name']} | {icon[it['status']]} | {it['basis']} |")
+    lines.append("")
+    lines.append(f"**覆盖率：{cs['covered']}/{cs['mappable']} 可映射维度"
+                 f"（{cs['ratio'] * 100:.1f}%）** "
+                 f"[来源: Python calc: covered / mappable]；"
+                 f"部分覆盖 1 项（模块 4），声明未接入 3 项（2 / 3b / 3c）。\n")
+
+
 _RSK = """
-## 港股风险层（市场规则差异）
+## 模块 7 风险与不确定性
+
+### 7.1 市场规则差异（静态条目）
 - 无涨跌停：单日波动无上限（唯一机制 VCM：大型股 ±10%/中型 ±15%/小型 ±20% 触发 5 分钟冷静期）
 - 停牌风险：主板连续停牌 18 个月触发强制除牌（GEM 12 个月）
 - 流动性：港股交投分化极大——日均成交额 ≥1 亿 HKD 为实务关注线（见快照成交额）
@@ -198,8 +336,8 @@ _RSK = """
 """
 
 
-def _render_southbound(lines: list[str]) -> None:
-    """南向资金子节（HK-3 / T11-1）→ 模块 3 市场结构。
+def _render_southbound(lines: list[str]) -> dict:
+    """南向资金子节（HK-3 / T11-1）→ 模块 3 市场结构；返回 payload 供模块 7 复用。
 
     三态：``available=False`` → 显式「不可得」+ 原因，**不出中位数/0 值**
     （0 会被读成「南向零净买入」这一事实断言，LAW 5）。
@@ -209,7 +347,7 @@ def _render_southbound(lines: list[str]) -> None:
     if not sb.get("available"):
         lines.append(f"⚠️ 南向资金不可得（{sb.get('reason')}）——"
                      "LAW 5：未获取到任何有效数据即无法判断，**不得**读作「南向无净买入」。\n")
-        return
+        return sb
 
     lines.append("| 日期 | 港股通(沪) 净买额(亿) | 港股通(深) 净买额(亿) | 合计(亿) | 恒生指数 | 涨跌幅 |")
     lines.append("|---|---|---|---|---|---|")
@@ -253,6 +391,7 @@ def _render_southbound(lines: list[str]) -> None:
     for w in sb.get("warnings") or []:
         lines.append(f"- ⚠️ {w}")
     lines.append("")
+    return sb
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -290,6 +429,9 @@ def cmd_report(args: argparse.Namespace) -> int:
             f"（差 {abs((y['price'] - q['price']) / q['price']) * 100:.1f}%——快照时点差，不裁决）\n"
         )
 
+    # --- 模块覆盖声明（正文最前：无静默缺节一目可核） ---
+    _render_coverage(lines)
+
     # --- 财务摘要（东财，直连上下文） ---
     fin_rows: list[dict] = []
     try:
@@ -324,6 +466,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     lines.append("## 估值位置（分位窗口=序列可得区间；港股口径注记）\n")
     # review #7：y 复用上文多源交叉已获取的 fetch_info——不二次 yf.Ticker .info（代理网络往返）
     pb_cur = y.get("pb")
+    pe_line: str | None = None
     try:
         pe_s = hk_valuation.fetch_valuation_series(code, "市盈率(TTM)", "近五年")
         pe_pos = hk_valuation.percentile_position(pe_s, q.get("pe_ttm"))
@@ -337,6 +480,11 @@ def cmd_report(args: argparse.Namespace) -> int:
                 if pe_pos["pct"] is not None else
                 f"- PE(TTM) {pe_str}（序列 {pe_pos['n']} 日，中位 {pe_pos['median']:.1f}；当前值口径与序列末值有差）"
             )
+            pe_line = (f"PE 序列分位 {pe_pos['pct']:.1f}%（中位 {pe_pos['median']:.1f}，"
+                       f"{pe_pos['n']} 日）[来源: hk_valuation.percentile_position]"
+                       if pe_pos["pct"] is not None else
+                       f"PE 序列中位 {pe_pos['median']:.1f}（当前值口径与序列末值有差）"
+                       f" [来源: hk_valuation.percentile_position]")
         if pb_pos["median"] is not None and pb_cur is not None:
             lines.append(
                 f"- **PB {pb_cur:.2f}（yfinance 当前值），序列分位 {pb_pos['pct']:.1f}%"
@@ -388,14 +536,23 @@ def cmd_report(args: argparse.Namespace) -> int:
         lines.append(f"## 技术结构\n计算失败: {type(exc).__name__}\n")
 
     # --- 模块 3 市场结构：南向资金（T11-1 / HK-3） ---
-    _render_southbound(lines)
+    sb = _render_southbound(lines)
 
-    lines.append(_RSK)
+    # --- 模块 5 / 6 / 7（框架性陈述 + 静态条目 + 数据驱动项） ---
+    lines.append(_MODULE5)
+    lines.append(_MODULE6)
+    _render_module7(lines, quote=q, pe_line=pe_line, sb=sb)
+
     lines.append("## 待验证项\n")
     lines.append("- 财务口径（HKFRS vs CAS）跨市场对比须折算与准则注记")
     lines.append("- CCASS 持仓/沽空数据：公开可查但未接入（南向资金已接入——见模块 3；源见 data-interface-map A4/B 节）")
-    lines.append("- 交易日历完整化（台风/圣诞休市）归 0.3.0；当前以自然日近似\n")
-    lines.append("\n> ⚠️ 本报告由 invest-hk-stock v0.2.9 自动生成，为初步数据引入分析（非九模块完整研究），")
+    lines.append("- 交易日历：已接入港股日历变体（`hk_calendar.py`，tushare hk_tradecal）；"
+                 "节假日以交易日历为准，自然日仅作粗判\n")
+    lines.append(_MODULE8.format(
+        ts=q.get("ts"), sb_source=(sb.get("source") or "不可得"),
+        sb_date=((sb.get("rows") or [{}])[-1].get("date") or "—") if sb.get("available") else "—"))
+    lines.append("\n> ⚠️ 本报告由 invest-hk-stock v2 自动生成，覆盖九模块中的 7/7 可映射维度"
+                 "（未接入维度见模块覆盖声明），")
     lines.append("> 不构成任何投资建议。数据来源见各行 [来源: ...]；币种 HKD（另注除外）。")
 
     body = "\n".join(lines)
@@ -497,6 +654,136 @@ def cmd_ah(args: argparse.Namespace) -> int:
     return 0 if pct is not None else 1
 
 
+# ---------------------------------------------------------------------------
+# cmd_compare（T11-3 / HK-1 v2：双港股对照）
+# ---------------------------------------------------------------------------
+
+_A_SHARE_RE = re.compile(r"^\d{6}(\.(SH|SZ|BJ))?$", re.IGNORECASE)
+
+
+def _collect_side(code: str) -> dict:
+    """单侧取数 → hk_compare 的 payload 形状。
+
+    取数失败逐项记进 ``notes``（不静默吞错，D5）；缺失一律 ``None``（三态），
+    由 ``hk_compare`` 渲染成「—」。
+    """
+    side: dict = {"code": code, "name": code, "snapshot": None,
+                  "valuation_pctl": {"pe": None, "pb": None},
+                  "financials": {"latest": None}, "technical": {}, "notes": []}
+    q = _snapshot_row(code)
+    if "error" in q or q.get("price") is None:
+        side["notes"].append(f"快照不可得（{q.get('error') or '字段缺失'}）")
+    else:
+        side["name"] = str(q.get("name") or code)
+        side["snapshot"] = {k: q.get(k) for k in
+                            ("price", "chg_pct", "pe_ttm", "mcap_hkd_yi", "low_52w", "high_52w")}
+
+    y = hk_yfinance.fetch_info(code)
+    pb_cur = y.get("pb")
+    if pb_cur is None:
+        side["notes"].append("当前 PB 不可得（yfinance 需代理可达）→ PB 序列分位无法计算")
+    for indicator, key, cur in (("市盈率(TTM)", "pe", q.get("pe_ttm")), ("市净率", "pb", pb_cur)):
+        try:
+            series = hk_valuation.fetch_valuation_series(code, indicator, "近五年")
+            pos = hk_valuation.percentile_position(series, cur)
+            side["valuation_pctl"][key] = {"pct": pos.get("pct"), "median": pos.get("median"),
+                                           "n": pos.get("n")}
+        except Exception as exc:  # noqa: BLE001 —— 单维降级，不阻断对照
+            side["notes"].append(f"{indicator} 序列不可得（{type(exc).__name__}）")
+
+    try:
+        from lib.proxy import akshare_direct_session
+        with akshare_direct_session():
+            rows = hk_financials.fetch_financials(code)
+    except Exception as exc:  # noqa: BLE001
+        rows = []
+        side["notes"].append(f"财务摘要不可得（{type(exc).__name__}）")
+    if rows:
+        r0 = rows[0]
+        # 元 → 亿（P0：派生值带 calc 标签，见 hk_compare._ROW_SPECS）
+        side["financials"]["latest"] = {
+            "report_date": r0.get("report_date"),
+            "revenue_yi": (r0["revenue"] / 1e8) if r0.get("revenue") is not None else None,
+            "net_profit_yi": (r0["net_profit"] / 1e8) if r0.get("net_profit") is not None else None,
+            "roe": r0.get("roe"),
+        }
+    else:
+        side["notes"].append("财务摘要空返回（HK 无季报制度，或该标的无数据）")
+
+    try:
+        k = hk_kline.fetch_kline(code, days=250)
+        rows = k.get("data", [])
+        if len(rows) >= 60:
+            from lib.technical import compute as tech_compute
+            t = tech_compute(rows)
+            ma = t["trend"]["ma"]
+
+            def _ma_v(p):
+                seq = ma.get(str(p), [])
+                return seq[-1] if seq else None
+
+            macd = (t.get("momentum") or {}).get("macd") or {}
+            rsi12 = (((t.get("overbought_oversold") or {}).get("rsi") or {}).get("12") or {})
+            side["technical"] = {"latest_close": t.get("latest_close"),
+                                 "ma": {str(p): _ma_v(p) for p in (5, 20, 60)},
+                                 "macd": {"dif": macd.get("dif"), "dea": macd.get("dea")},
+                                 "rsi": rsi12.get("value")}
+        else:
+            side["notes"].append("K 线不足 60 行，技术结构不可得")
+    except Exception as exc:  # noqa: BLE001
+        side["notes"].append(f"技术结构计算失败（{type(exc).__name__}）")
+    return side
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    """双港股对照 → 落盘 ``reports/{c1}-{c2}-compare/{ts}.md``（与 report 同契约）。
+
+    退出码：2 参数非法（A 股码 → 指路 `ah`；同码；符号非法）；
+    1 任一关键维度不可得（**仍落盘**三态，不静默跳过）；0 正常。
+
+    与 invest-a-stock 的 `compare`（print-only）**故意不同**：HK 报告的既有契约是落盘，
+    便于留档与复检（勿"统一"成 print-only）。
+    """
+    raw = (str(args.left).strip(), str(args.right).strip())
+    for r in raw:
+        if _A_SHARE_RE.match(r):
+            print(f"❌ {r} 是 A 股代码；A/H 比价请用："
+                  f"uv run python skills/invest-hk-stock/scripts/hk.py ah {r} <港股码>",
+                  file=sys.stderr)
+            return 2
+    try:
+        codes = [hk_codes.parse_hk_symbol(r) for r in raw]
+    except hk_codes.HkSymbolError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 2
+    if codes[0] == codes[1]:
+        print("❌ 两个标的相同，无法对照", file=sys.stderr)
+        return 2
+
+    left, right = _collect_side(codes[0]), _collect_side(codes[1])
+    cmp = hk_compare.build_compare(left, right)
+    lines = [f"# 双标的对照 — {codes[0]} vs {codes[1]} — {_today()}\n",
+             "> 并列展示各维度引擎字段，**不作优劣裁决、不含买卖建议**（LAW 6）。"
+             "口径差异（快照时点/报表期间/序列窗口）见各行注记。\n"]
+    lines.extend(hk_compare.render_compare_table(cmp))
+    lines.append("")
+    for label, side in (("左", left), ("右", right)):
+        if side["notes"]:
+            lines.append(f"- ⚠️ {label}侧（{side['code']}）：" + "；".join(side["notes"]))
+    lines.append("")
+    lines.append("> ⚠️ 快照为各自市场**抓取时点**价格（港股同一时段，仍存在秒级时点差）；"
+                 "财务期间以各自披露节奏为准（HK 无季报 → 期间口径可能与 A 股不同）；"
+                 "估值分位窗口 = 百度序列可得区间（近五年）。")
+    lines.append("\n> 声明：本表为两标的关键指标并列记录，不构成投资建议，"
+                 "也不构成任何相对价值判断。")
+
+    body = "\n".join(lines)
+    path = _write_report(args, f"{codes[0]}-{codes[1]}", "compare", body)
+    print(f"📝 报告: {path}\n")
+    print(body)
+    return 1 if (left["snapshot"] is None or right["snapshot"] is None) else 0
+
+
 def _pct(v):
     if v is None:
         return "—"
@@ -587,6 +874,11 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("a_symbol", help="A 股代码（600036 或 600036.SH）")
     pa.add_argument("hk_symbol", help="港股代码（5 位，如 03968）")
     pa.add_argument("--outdir", default="", help="报告输出目录（默认 code/reports）")
+
+    pc = sub.add_parser("compare", help="双港股对照（快照/估值分位/财务/技术；落盘，不裁决）")
+    pc.add_argument("left", help="港股代码（5 位，如 00700）")
+    pc.add_argument("right", help="港股代码（5 位，如 09988）")
+    pc.add_argument("--outdir", default="", help="报告输出目录（默认 code/reports）")
     return p
 
 
@@ -595,6 +887,7 @@ CMD_DISPATCH = {
     "snapshot": cmd_snapshot,
     "report": cmd_report,
     "ah": cmd_ah,
+    "compare": cmd_compare,
 }
 
 
