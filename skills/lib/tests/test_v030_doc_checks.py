@@ -18,6 +18,7 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -322,3 +323,37 @@ def test_r_e01_prereg_registered():
     for token in ("H0", "H1", "滚动", "禁止全样本一次性结论", "显著性判据", "稳健性"):
         assert token in text, f"C8 预注册缺：{token}"
     assert "不产出结论" in text, "须声明本轮不产出验证结论（B1+B2）"
+
+
+# ---------------------------------------------------------------- R5 预注册清单（B1+B2 验收）
+
+_PREREG_DIR = "skills/lib/references/backtest_prereg"
+# C 号 → 负责的档 B/C 条目。
+# ⚠️ 本表**随各批次落地追加**（本轮共 7 份：C3/C7/C8/C10/C11/C12/C17）——
+# 未落地前不入表，保证每个提交都是绿的；轮末门再核 7/7 齐备。
+_PREREG_REQUIRED = {
+    "C3": "R-A04 条件性反转观测窗",       # B5
+    "C7": "R-A03 量价观察特征",           # B5
+    "C8": "R-E01 消息三态分类器",         # B2
+    "C12": "R-D03 可跟踪度",              # B3
+    # B6 追加：C10（R-B03 多概念拥挤度）、C11（R-B01/B02 三特征 + 双组回测）
+    # B8 追加：C17（R-F02 配置方法回测）
+}
+
+
+@pytest.mark.parametrize("cid,item", sorted(_PREREG_REQUIRED.items()))
+def test_r5_prereg_registered(cid, item):
+    """每条涉及规则/阈值的档 B/C 条目须有**冻结的预注册文件**（B1+B2 的「验证方案注册」）。"""
+    f = _REPO_ROOT / f"{_PREREG_DIR}/{cid}_预注册.md"
+    assert f.exists(), f"缺 {cid} 预注册（对应 {item}）"
+    text = f.read_text(encoding="utf-8")
+    for token in ("H0", "显著性判据", "稳健性"):
+        assert token in text, f"{cid} 预注册缺「{token}」"
+    assert "不产出结论" in text, f"{cid} 须声明本轮不产出验证结论（B1+B2）"
+
+
+def test_r5_prereg_rows_backfilled_in_registry():
+    """预注册落地后须回写假设注册表状态（否则注册表与实物脱同步）。"""
+    reg = _read("skills/lib/references/hypothesis-registry.md")
+    for cid in _PREREG_REQUIRED:
+        assert f"backtest_prereg/{cid}_预注册.md" in reg, f"注册表 {cid} 行未回写预注册路径"
