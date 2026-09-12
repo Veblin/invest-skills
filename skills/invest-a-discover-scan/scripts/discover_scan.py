@@ -54,9 +54,15 @@ def _drill_cmd(code: str) -> str:
     # __file__ = skills/invest-a-discover-scan/scripts/discover_scan.py
     # parents: [0]=scripts [1]=invest-a-discover-scan [2]=skills [3]=code
     mono = _P(__file__).resolve().parents[2] / "invest-a-stock" / "scripts" / "invest.py"
+    # ⚠️ 必须传**纯 6 位数字**，不是 ts_code：invest.py 的 `exchange_code()` 要求
+    # `symbol.isdigit()`，带 `.SZ` 后缀会抛
+    # `Invalid symbol: '000612.SZ' (must be 1-6 digits)` 并让整个 report 失败
+    # （2026-09-12 真机实测：首版发出的命令跑不通——清单里附一条跑不通的命令
+    #  比不附更糟，它会让使用者以为「工具坏了」）
+    sym = str(code).split(".")[0].strip()
     if mono.exists():
-        return f"uv run python skills/invest-a-stock/scripts/invest.py report {code}"
-    return f"invest-a-stock 的 report 子命令（下钻 {code}）：详见其 SKILL.md 的 CLI 段"
+        return f"uv run python skills/invest-a-stock/scripts/invest.py report {sym}"
+    return f"invest-a-stock 的 report 子命令（下钻 {sym}）：详见其 SKILL.md 的 CLI 段"
 
 
 def _now_shanghai() -> str:

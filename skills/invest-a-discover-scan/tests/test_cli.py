@@ -295,3 +295,31 @@ def test_client_is_singleton(monkeypatch):
     import sources as src
     monkeypatch.setattr(src, "_CLIENT", None)
     assert src.client() is src.client()
+
+
+def test_drilldown_command_symbol_is_executable():
+    """下钻命令里的 symbol 必须是 invest.py 能接受的形态。
+
+    首版发出的是 ts_code（`000612.SZ`）→ `exchange_code()` 的 `isdigit()` 失败 →
+    整个 report 崩。仅断言「字符串里有 invest.py report」抓不到这个——
+    必须把 symbol 抽出来喂给真正的校验函数。
+    """
+    cli = load_scan_cli()
+    cmd = cli._drill_cmd("000612.SZ")
+    sym = cmd.split()[-1]
+    import sys as _sys
+    _sys.path.insert(0, "skills/lib")
+    from codes import exchange_code
+    assert sym.isdigit(), f"下钻命令的 symbol 非纯数字：{sym!r}"
+    assert exchange_code(sym)["tushare"] == "000612.SZ"   # 能被解析回来
+
+
+def test_drilldown_command_rendered_in_report(monkeypatch, tmp_path):
+    cli = load_scan_cli()
+    _stub(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path))
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "invest.py report 600000" in body, "报告内的下钻命令须用纯数字形态"
+    assert "invest.py report 600000.SH" not in body, "不得出现带后缀的形态"
