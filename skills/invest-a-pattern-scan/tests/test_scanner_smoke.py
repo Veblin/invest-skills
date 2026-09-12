@@ -109,8 +109,9 @@ def test_scanner_detects_synthetic_double_bottom(monkeypatch):
     # #5: 集成路径须触达 clean_retest 分支（修复前 low==close 镜像 + 窗口截断恒 truncated）
     statuses = {h.retest_status for h in hits}
     assert "clean_retest" in statuses, f"回踩分类应含 clean_retest，实际 {statuses}"
-    # 规则矩阵：2 形态 × 3 带宽 × 3 窗口 = 18 规则
-    assert len(rule_matrix) == 18, f"规则宇宙应 18 条，实际 {len(rule_matrix)}"
+    # 规则矩阵：2 形态 × 3 带宽 × 3 窗口 = 18，加 R-B01 三特征 × 3 窗口 = 9 → **27**
+    # （规则宇宙须全量物化，不随数据漂移——RC 口径要求）
+    assert len(rule_matrix) == 27, f"规则宇宙应 27 条，实际 {len(rule_matrix)}"
     for key, vals in rule_matrix.items():
         assert len(vals) == 2  # 每规则覆盖 2 只股票
 

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 
 from invest_path import load_gap_scan_module  # noqa: E402
 
+import feature_patterns  # noqa: E402 —— R-B01 C11 三特征模板
+
 logger = logging.getLogger(__name__)
 
 BANDWIDTHS = (0.3, 0.5, 1.0)
@@ -28,10 +30,11 @@ class ScanHit:
     ts_code: str
     pattern: str
     endpoint_idx: int
-    bandwidth: float
+    bandwidth: float | None            # None = 无带宽维度的特征模板（C11 三特征）
     detail: dict = field(default_factory=dict)
     retest_status: str | None = None  # v0.2.6 补漏：classify_retest 落地（C 级实操统计）
     retest_day: int | None = None     # endpoint 后第几天发生回踩（no_retest/truncated 为 None）
+    evidence_note: str | None = None  # R-B01：C11 三特征命中一律带证据注记
 
 
 def fetch_daily_and_adj(dates: list[str]):
@@ -89,6 +92,21 @@ def scan_universe(
                         retest_status=ret["status"],
                         retest_day=ret["retest_day"],
                     ))
+        # R-B01：C11 三特征——**每只股票只算一次**（D10），命中流与 forward 共用
+        vols_col = ([float(v) for v in kline["vol"].tolist()]
+                    if "vol" in kline.columns else [])
+        feat_hits = feature_patterns.detect_all(closes, vols_col)
+        for fh in feat_hits:
+            hits.append(ScanHit(
+                ts_code=code,
+                pattern=fh["detail"]["kind"],
+                endpoint_idx=fh["endpoint_idx"],
+                bandwidth=None,
+                detail=fh["detail"],
+                retest_status=None,          # 三特征不走 classify_retest（无 reference/peak2_idx）
+                retest_day=None,
+                evidence_note=fh.get("evidence_note"),
+            ))
         # 每只股票每种形态×带宽的 forward 收益（取首个命中；无命中 None）
         for bw in bandwidths:
             res = detect_patterns(closes, bandwidth=bw, min_bars=MIN_BARS)
@@ -100,6 +118,15 @@ def scan_universe(
                     for h in HORIZONS:
                         key = f"{pat_name}_bw{bw}_+{h}"
                         per_stock_fwd.setdefault(key, {})[code] = fwd[f"+{h}"][0] if fwd[f"+{h}"] else None
+        # R-B01：三特征的前向收益（每特征取**首个命中**，与既有形态同口径）
+        for feat in feature_patterns.FEATURES:
+            first = next((fh for fh in feat_hits if fh["detail"]["kind"] == feat), None)
+            if first is None:
+                continue
+            fwd = pattern_forward_stats(closes, [first], horizons=HORIZONS)
+            for h in HORIZONS:
+                key = f"{feat}_+{h}"
+                per_stock_fwd.setdefault(key, {})[code] = fwd[f"+{h}"][0] if fwd[f"+{h}"] else None
 
     rule_matrix: dict[str, list[float]] = {}
     # 全规则宇宙（2 形态 × 3 带宽 × 3 窗口 = 18）——无命中形态也必须占位，
@@ -116,6 +143,14 @@ def scan_universe(
                 rule_matrix[key] = [
                     (by_code.get(c, baseline) or baseline) - baseline for c in ts_codes
                 ]
+    # R-B01：9 条特征规则（3 特征 × 3 窗口）——同样全量物化，保证 RC 规则空间不随数据漂移
+    for key in feature_patterns.rule_keys(HORIZONS):
+        by_code = per_stock_fwd.get(key, {})
+        vals = [v for v in by_code.values() if v is not None]
+        baseline = sum(vals) / len(vals) if vals else 0.0
+        rule_matrix[key] = [
+            (by_code.get(c, baseline) or baseline) - baseline for c in ts_codes
+        ]
     return hits, rule_matrix
 
 

@@ -310,6 +310,28 @@ def render_themes(*, state_file: str | pathlib.Path | None = None) -> str:
         lines.append("> ⚠️ **两类窗口不得合并**：需求窗口是**基本面事实**（须带来源）；"
                      "炒作窗口是**从业者惯例**（标注「非学术验证」，"
                      "**不带收益预期权重**）。合并输出等于让惯例借用事实的证据等级（C9）。")
+    # R-B03：多题材拥挤度**反向字段**——消费 crowding_field（C10：多概念 = 多重暴露/拥挤加总，
+    # **不提供「托底」语义**）。此前该函数已实现但无消费方
+    if themes:
+        rows = []
+        for t_ in themes:
+            cf = crowding_field(t_.get("concepts") or [], themes)
+            rows.append((t_.get("theme"), cf))
+        if any(r[1]["crowding_sum"] for r in rows):
+            lines.append("")
+            lines.append("### 多题材拥挤度（加总口径，**不含托底语义**）")
+            lines.append("")
+            lines.append("| 题材 | 概念数 | 拥挤度加总 | 共享概念的其他题材 |")
+            lines.append("|---|---|---|---|")
+            for name, cf in rows:
+                others = [d for d in cf["matched_themes"] if not d.startswith(f"{name}（")]
+                lines.append(f"| {name} | {len(cf['concepts'])} | {cf['crowding_sum']} | "
+                             f"{'、'.join(others) or '—'} |")
+            lines.append("")
+            lines.append("> 口径：多概念 = **多重暴露 / 拥挤度加总**（C10）——只做加总，"
+                         "不加权、不推断方向；**不提供「托底/更稳」标签**"
+                         "（该说法无支持，见 hypothesis-registry C10）")
+
     lines.append("")
     conf = confirmed_event_days(state_file=state_file)
     lines.append(f"- 已证实事件日：{'、'.join(conf) if conf else '—（无）'}")
