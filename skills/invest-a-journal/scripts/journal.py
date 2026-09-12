@@ -191,6 +191,25 @@ def cmd_show(journal_id: int, portfolio: str | None = None) -> int:
                     level = dim_data.get("level", "?") if isinstance(dim_data, dict) else "?"
                     print(f"  {name}: {level}")
 
+            # R-C04 未行动观察（错过后悔侧）——「应做未做」与「不应做却做」的对照原料
+            watch = eval_json.get("inaction_watch")
+            if isinstance(watch, list) and watch:
+                print("\n  --- 未行动观察（错过后悔侧）---")
+                for w in watch:
+                    if not isinstance(w, dict):
+                        continue
+                    bf = w.get("backfill") or {}
+                    price_txt = (f"观察时 {w.get('price_at_observation')}"
+                                 if w.get("price_at_observation") is not None else "观察时 —")
+                    back_txt = (f"回填 {bf.get('as_of')} 价 {bf.get('price')}"
+                                f"（{bf.get('pct_change')}）"
+                                if bf else "回填：待补")
+                    print(f"  {w.get('symbol')}（{w.get('observed_at')}）"
+                          f"跳过理由：{w.get('skip_reason')}"
+                          f"｜类型：{w.get('skip_kind') or '—'}｜{price_txt}｜{back_txt}"
+                          f"｜复盘归类：{w.get('review_class') or '待复核'}")
+                print("  （归类口径：应做未做 = action bias 反侧；不应做却做 = 过度行动侧）")
+
     print(f"\n  创建时间:   {e.get('created_at', '')}")
 
     if portfolio:

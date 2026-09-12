@@ -469,3 +469,49 @@ def test_r_c01_documented_in_journal_skill():
 def test_r_c01_self_check_has_new_items():
     skill = _read(_JOURNAL_SKILL)
     assert "R-C01" in skill and "R-C02" in skill
+
+
+# ---------------------------------------------------------------- R-C03 / R-C04（v0.3.0 R5）
+
+def test_r_c03_disposition_hint_documented():
+    """R-C03：权重最大持仓的处置效应弱提示须在 portfolio 侧可渲染（代码 + 文案约束）。"""
+    src = _read("skills/invest-a-stock/scripts/lib/positions.py")
+    assert "def disposition_hint" in src, "缺 disposition_hint"
+    for token in ("Sui-Wang 2025", "相关非因果", "不泛化", "stakes 低 ≠ 无偏差"):
+        assert token in src, f"提示文案缺：{token}"
+    # 弱显著样式：不得用 ⚠️（强信号）
+    assert "弱显著样式：不用 ⚠️" in src
+
+
+def test_r_c03_hint_is_not_advice():
+    """文案合规（非建议）——不得含动作词。"""
+    src = _read("skills/invest-a-stock/scripts/lib/positions.py")
+    start = src.index("def disposition_hint")
+    body = src[start:start + 2000]
+    for banned in ("建议减持", "建议加仓", "应减仓", "应加仓"):
+        assert banned not in body
+
+
+def test_r_c04_inaction_watch_documented():
+    """R-C04：字段可用 + 复盘模板含该节。"""
+    skill = _read(_JOURNAL_SKILL)
+    crit = _read(_JOURNAL_CRITERIA)
+    for token in ("inaction_watch", "未行动观察", "应做未做", "不应做却做"):
+        assert token in skill, f"journal SKILL 缺：{token}"
+    assert "未行动观察复盘" in crit, "复盘模板缺「未行动观察复盘」节"
+    for token in ("skip_reason", "skip_kind", "price_at_observation", "backfill", "review_class"):
+        assert token in skill, f"字段未文档化：{token}"
+
+
+def test_r_c04_no_outcome_bias_wording():
+    """措辞纪律：不得用结果反推决策（「早该买/幸亏没买」）。"""
+    crit = _read(_JOURNAL_CRITERIA)
+    assert "不写**「早该买」「幸亏没买」**" in crit or "不写" in crit
+    assert "结果偏误" in crit
+
+
+def test_r_c04_show_renders_inaction_section():
+    """渲染侧须真读该字段（否则字段是死的）。"""
+    src = _read("skills/invest-a-journal/scripts/journal.py")
+    assert "inaction_watch" in src
+    assert "未行动观察（错过后悔侧）" in src

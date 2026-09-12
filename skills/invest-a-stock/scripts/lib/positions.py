@@ -235,6 +235,65 @@ def _fmt_weight(raw: Any) -> str:
     return f"{raw:.0%}"
 
 
+# --- R-C03 权重最大持仓的处置效应弱提示 ---------------------------------------
+# 证据边界（必须随文案走）：Sui-Wang 2025 的组合权重层证据**仅限处置效应**；
+# 权重非随机决定 → **相关非因果**，不得泛化到过度交易等其它偏差。
+_PAPER_KEYS = ("kind", "account", "asset_type", "tag", "type")
+_PAPER_TOKENS = ("模拟", "观察", "paper", "simulated", "watch")
+
+
+def _weight_num(v: Any) -> float | None:
+    """权重 → float（支持 0.4 / '40%' / '0.4'）；不可解析 → None。"""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        if s.endswith("%"):
+            try:
+                return float(s[:-1]) / 100.0
+            except ValueError:
+                return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_paper(row: dict) -> bool:
+    """模拟/观察仓判定（容错多键名）。"""
+    for k in _PAPER_KEYS:
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).lower()
+        if any(tok in s for tok in _PAPER_TOKENS):
+            return True
+    return False
+
+
+def disposition_hint(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """对**组合权重最大**持仓给处置效应**弱提示**（R-C03）。
+
+    权重全缺或全为 0 → ``None``（不给提示，也不臆造「最大」）。
+    返回 ``{symbol, name, weight, paper, note}``；``note`` 为合规文案（非建议）。
+    """
+    weighted = [(r, _weight_num(r.get("weight"))) for r in rows or []]
+    weighted = [(r, w) for r, w in weighted if w is not None and w > 0]
+    if not weighted:
+        return None
+    top, w = max(weighted, key=lambda x: x[1])
+    paper = _is_paper(top)
+    # 弱显著样式：不用 ⚠️（那是强信号），强调项用**加粗**
+    note = ("处置效应相关**弱提示**（Sui-Wang 2025：组合权重越大处置效应越强）。"
+            "权重非随机决定——**相关非因果**；本提示**不泛化**到过度交易等其它偏差，"
+            "也不构成任何操作建议。")
+    if paper:
+        note += (" 模拟/观察仓同样适用（Sui-Wang 2025 同文：模拟账户的偏差已存在）"
+                 "——**stakes 低 ≠ 无偏差**。")
+    return {"symbol": top.get("symbol"), "name": top.get("name"),
+            "weight": w, "paper": paper, "note": note}
+
+
 def position_table(rows: list[dict[str, Any]]) -> str:
     """渲染位置表（弱显著：档位中文 + 天数，不带盈亏数值与成本）。"""
     head = "| 标的 | 名称 | 档位 | 持有天数 | 持仓占比 | 备注 |"
@@ -250,4 +309,9 @@ def position_table(rows: list[dict[str, Any]]) -> str:
         )
     lines.append("")
     lines.append("*位置状态表仅描述持仓事实（档位/天数/占比），不构成任何操作建议。*")
+    # R-C03：权重最大持仓的处置效应**弱提示**——独立成行（不写进表格单元格），
+    # 弱显著样式（斜体，非 ⚠️ 强信号）
+    hint = disposition_hint(rows)
+    if hint:
+        lines.append(f"*{hint['note']}*")
     return "\n".join(lines)
