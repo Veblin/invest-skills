@@ -160,3 +160,20 @@ def test_top_n_slicing():
     rows = [{"ts_code": f"S{i:02d}", "industry": f"IN{i}", "pe_grank": 0.01 * i,
              "gap_flags": [0, 0], "ey_pct": 10.0} for i in range(1, 20)]
     assert len(lenses.rank_candidates(rows, per_industry=3)[:15]) == 15
+
+
+# ── PE 异常标注（真机实测：港股池前三名全是 PE<1 的困境房企）────────────────
+
+def test_pe_anomaly_flags_sub_one_pe():
+    """PE < 1 = 一年盈利超过整个市值 → 必然含一次性损益或数据异常，**不得静默排首位**。"""
+    msg = lenses.pe_anomaly(0.01)
+    assert msg and "极低 PE" in msg
+    assert "一次性损益" in msg
+    assert "不得直接读作「极度低估」" in msg
+
+
+def test_pe_anomaly_normal_values_are_none():
+    for ok in (1.0, 5.0, 20.0, 100.0):
+        assert lenses.pe_anomaly(ok) is None
+    assert lenses.pe_anomaly(None) is None
+    assert lenses.pe_anomaly(-3.0) is None      # 亏损期由 L1 直接排除，不算「异常」

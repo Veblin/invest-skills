@@ -225,6 +225,38 @@ def rf_10y_pct() -> tuple[float | None, str]:
         return None, ""
 
 
+def rf_10y_usd() -> tuple[float | None, str]:
+    """美国 10Y 国债收益率（**百分数**）→ ``(值, 来源)``——**港股池用**。
+
+    HKD 钉住美元，故港股池的无风险利率应取 US 10Y 而非中国 10Y（口径不当）。
+    取 FRED ``DGS10``（需 ``FRED_API_KEY``）；不可得 → ``(None, "")`` 并记 warning。
+    """
+    try:
+        import json as _json
+        import urllib.request
+
+        from lib.env import get_config
+
+        key = (get_config() or {}).get("FRED_API_KEY")
+        if not key:
+            raise RuntimeError("无 FRED_API_KEY")
+        url = (f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS10"
+               f"&api_key={key}&file_type=json&sort_order=desc&limit=5")
+        with urllib.request.urlopen(url, timeout=20) as resp:  # noqa: S310 固定官方主机
+            obs = _json.loads(resp.read().decode("utf-8")).get("observations") or []
+        for o in obs:
+            try:
+                f = float(o.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if f == f and f > 0:
+                return f, f"FRED.DGS10（US 10Y，{o.get('date')}）"
+        raise RuntimeError("DGS10 无有效观测")
+    except Exception as exc:  # noqa: BLE001
+        _note(f"US 10Y 不可得（{type(exc).__name__}）→ 港股池 L3 利差项降级")
+        return None, ""
+
+
 def market_form_context() -> dict:
     """L4 市场语境（pulse `market_form` 快照）——**不进规则**，仅作报告头注记。
 

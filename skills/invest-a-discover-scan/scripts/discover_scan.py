@@ -37,6 +37,7 @@ import pool as pool_mod  # noqa: E402
 import quality  # noqa: E402
 import snapshot  # noqa: E402
 import sources  # noqa: E402
+import sources_hk  # noqa: E402
 
 DEFAULT_OUT_DIR = "reports/discover-scan"
 DEFAULT_TOP = 15
@@ -60,6 +61,11 @@ def _drill_cmd(code: str) -> str:
     # （2026-09-12 真机实测：首版发出的命令跑不通——清单里附一条跑不通的命令
     #  比不附更糟，它会让使用者以为「工具坏了」）
     sym = str(code).split(".")[0].strip()
+    if str(code).endswith(".HK"):
+        hk_mono = _P(__file__).resolve().parents[2] / "invest-hk-stock" / "scripts" / "hk.py"
+        if hk_mono.exists():
+            return f"uv run python skills/invest-hk-stock/scripts/hk.py report {sym}"
+        return f"invest-hk-stock 的 report 子命令（下钻 {sym}）：详见其 SKILL.md 的 CLI 段"
     if mono.exists():
         return f"uv run python skills/invest-a-stock/scripts/invest.py report {sym}"
     return f"invest-a-stock 的 report 子命令（下钻 {sym}）：详见其 SKILL.md 的 CLI 段"
@@ -82,21 +88,24 @@ def _today_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
-             per_industry: int = 3) -> dict:
+             per_industry: int = 3, pool: str = "a") -> dict:
     """执行管线 → ``{"hits", "pool_stats", "warnings", "params", "trade_date"}``。
 
     失败语义：全市场源不可得 → raise ``RuntimeError``（由 CLI 转退出码 3）。
+    ``pool="hk"`` 走**港股分支**（见 `run_scan_hk`）。
     """
+    if pool == "hk":
+        return run_scan_hk(top=top, per_industry=per_industry)
     sources.reset_warnings()
     trade_date = sources.latest_trade_date()
 
     basic = sources.fetch_stock_basic()
-    pool = pool_mod.build_pool(basic, with_bj=with_bj)
+    pool_data = pool_mod.build_pool(basic, with_bj=with_bj)
 
     daily = sources.fetch_daily_basic(trade_date)
     by_code = {str(r.get("ts_code")): r for r in daily}
     merged: list[dict] = []
-    for r in pool["rows"]:
+    for r in pool_data["rows"]:
         d = by_code.get(r["ts_code"])
         if not d:
             continue
@@ -167,6 +176,7 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
             "gap_flags": flags,
             "mv_yi": round(float(mv) / 1e4, 2) if mv is not None else None,   # 万元 → 亿元
             "close": r.get("close"), "fillback": None,
+            "anomaly": lenses.pe_anomaly(r["pe_ttm"]),
         })
 
     if not hits and n_unassessable == 0 and l1:
@@ -185,7 +195,7 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         "hits": ranked,
         "pool_stats": {"market": "主板+创业+科创" if not with_bj else "主板+创业+科创+北交所",
                        "n_positive_pe": n_positive_pe, "n_pool": len(merged),
-                       "n_l1": len(l1), "n_excluded_st": pool["n_excluded_st"],
+                       "n_l1": len(l1), "n_excluded_st": pool_data["n_excluded_st"],
                        "median_pe": median_pe,
                        "n_unassessable": n_unassessable,
                        "calls": dict(sources.CALL_COUNT),
@@ -203,11 +213,101 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
 
 
 # ---------------------------------------------------------------------------
+# 港股池管线（T11-5 / HK-4）
+# ---------------------------------------------------------------------------
+
+def run_scan_hk(*, top: int = DEFAULT_TOP, per_industry: int = 3) -> dict:
+    """港股池粗筛（`--pool hk`）。
+
+    **可用性差异必须显式标注**（HK-4 验收：每透镜标可用性、**空透镜不冒充**）：
+    港股**无行业字段**（`ind_rk` 不可得）→ 逐条标跳过；**无业绩预告** → 增速子项不可得；
+    利差口径改 **US 10Y**（HKD 钉住美元）。
+    """
+    sources_hk.reset_warnings()
+    rf_pct, rf_src = sources.rf_10y_usd()      # HK 用 US 10Y（口径见 sources_hk）
+    universe = sources_hk.fetch_hk_universe()
+    quotes = sources_hk.fetch_hk_quote_batch([r["symbol"] for r in universe])
+
+    merged: list[dict] = []
+    for r in universe:
+        q = quotes.get(r["symbol"])
+        if not q or q.get("pe_ttm") is None:
+            continue
+        merged.append({**r, "pe_ttm": q.get("pe_ttm"),
+                       "close": q.get("price"), "total_mv_hkd_yi": q.get("mcap_hkd_yi")})
+    if not merged:
+        raise RuntimeError("港股行情横截面为空（腾讯 r_hk 批量全部失败？）")
+
+    n_positive_pe = sum(1 for r in merged if lenses.ey_pct(r.get("pe_ttm")) is not None)
+    median_pe = lenses.universe_median_pe(merged)
+    # L1：universe 重定义为「港股池正 PE 子总体」；**行业条件跳过**（无 industry）
+    l1 = lenses.select_candidates(merged, skip_industry=True)
+    sources_hk.warnings.append(
+        f"港股无行业分类字段（hk_basic 实测）→ **行业排名透镜不可得**，"
+        f"L1 仅按全池分位判定（{len(l1)} 只命中）")
+
+    hits: list[dict] = []
+    for r in l1:
+        fin = sources_hk.fetch_hk_financials(r["symbol"])
+        latest = fin[0] if fin else None
+        if latest is None:
+            continue
+        roe = latest.get("roe")
+        profit = latest.get("net_profit")
+        if roe is None or profit is None:
+            continue
+        try:
+            roe_f, profit_f = float(roe), float(profit)
+        except (TypeError, ValueError):
+            continue
+        if roe_f < quality.ROE_MIN_PCT or profit_f < 0:
+            continue
+        ey = lenses.ey_pct(r["pe_ttm"])
+        flags = lenses.gap_flags(ey=ey, rf_pct=rf_pct, pe_ttm=r["pe_ttm"],
+                                 forecast_growth_max_pct=None)   # 港股无预告 → 子项恒 0
+        mv = r.get("total_mv_hkd_yi")
+        hits.append({
+            "ts_code": r["ts_code"], "name": r["name"], "industry": "—（港股无行业字段）",
+            "pe_ttm": r["pe_ttm"], "ey_pct": round(ey, 2) if ey else None,
+            "pe_grank": round(r["pe_grank"], 4) if r["pe_grank"] is not None else None,
+            "ind_rk": None, "ind_n": None, "gap_flags": flags,
+            "mv_yi": round(float(mv), 2) if mv is not None else None,
+            "close": r.get("close"), "fillback": None,
+            "anomaly": lenses.pe_anomaly(r["pe_ttm"]),
+        })
+
+    ranked = lenses.rank_candidates(hits, per_industry=per_industry)[:top]
+    return {
+        "hits": ranked,
+        "pool": "hk",
+        "lenses": sources_hk.lens_availability(),
+        "pool_stats": {"market": "港股全市场（hk_basic 上市股，超集口径）",
+                       "n_positive_pe": n_positive_pe, "n_pool": len(merged),
+                       "n_l1": len(l1), "n_excluded_st": 0, "median_pe": median_pe,
+                       "n_unassessable": 0, "calls": {"hk_basic": 1},
+                       "empty_retries": 0},
+        "warnings": sources.aggregate_warnings(list(sources_hk.warnings)),
+        "params": {"pe_grank_max": lenses.PE_GRANK_MAX, "ind_rank_max": lenses.IND_RANK_MAX,
+                   "roe_min": quality.ROE_MIN_PCT, "top_n": top,
+                   "per_industry": per_industry, "with_bj": False, "pool": "hk"},
+        "trade_date": sources.latest_trade_date(),
+        "rf": {"pct": rf_pct, "source": rf_src, "caliber": "US 10Y（HKD 钉住美元）"},
+        "market_context": sources.market_form_context(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 渲染
 # ---------------------------------------------------------------------------
 
 def render_report(scan: dict) -> str:
-    """短清单 → markdown（报告头含生成日/数据日/池口径/规则版本/降级清单/免责）。"""
+    """短清单 → markdown（报告头含生成日/数据日/池口径/规则版本/降级清单/免责）。
+
+    **港股池（`pool="hk"`）额外强制输出「透镜可用性表」**（HK-4 验收：
+    每透镜标可用性、**空透镜不冒充**）——不可得项逐条给依据，不留白。
+    """
+    if scan.get("pool") == "hk":
+        return render_report_hk(scan)
     hits = scan["hits"]
     ps = scan["pool_stats"]
     ctx = scan.get("market_context") or {}
@@ -292,12 +392,94 @@ def render_report(scan: dict) -> str:
                 f"隐含增速<预告上限{'满足' if flags[1] else '未满足/不可得'}）"
                 f" [来源: Python calc: EY=100/PE; 分位=percentile_rank_inclusive/100]"
             )
+            # PE 异常须**显式呈现**（真机实测：港股池前三名全是 PE<1 的困境房企；
+            # 静默让它们排在榜首，等于把「困境股」当成「低估发现」报出去）
+            if h.get("anomaly"):
+                lines.append(f"  {h['anomaly']}")
             lines.append(f"  下钻：`{_drill_cmd(h['ts_code'])}`")
         lines.append("")
 
     lines.append("> 声明：本清单为**研究观察起点**，不构成投资建议，不含买卖/仓位建议；"
                  "阈值以**预注册草案**身份入库（`references/rules.md`），改动须 bump 规则版本"
                  "并记录原因。数据源：tushare（全链路）；降级项见上方清单。")
+    return "\n".join(lines)
+
+
+def render_report_hk(scan: dict) -> str:
+    """港股池报告——**透镜可用性表置顶**（HK-4 验收核心）。"""
+    hits = scan["hits"]
+    ps = scan["pool_stats"]
+    lines = [
+        f"# 低估发现扫描（港股池）— {_today_iso()}",
+        "",
+        "> **研究信号，非决策**：检出 = 「该标的符合**预注册规则定义**的客观条件」，"
+        "不构成任何交易建议（LAW 6）。",
+        "",
+        f"- 生成时间：{_now_shanghai()}（北京时间）｜数据日：{scan['trade_date']}",
+        f"- 池口径：{ps['market']}"
+        f"——⚠️ **口径偏离声明**：requirements 建议的「港股通/恒指成分」两个源"
+        f"一个需 push2 域（本 skill 刻意回避）一个无源，故改用**全部上市港股（超集）**，"
+        f"覆盖不失且零东财依赖",
+        f"- 池内 {ps['n_pool']} 只（有正 PE 者 {ps['n_positive_pe']} 只），"
+        f"L1 命中 {ps['n_l1']} 只"
+        + (f"；正 PE 子总体**中位 PE {ps['median_pe']:.2f}x**"
+           f" [来源: Python calc: median(正 PE 序列)]" if ps.get("median_pe") else ""),
+        f"- 规则版本：{snapshot.RULES_VERSION}（**港股池的 L1 universe 重定义"
+        f"（港股池正 PE 子总体，非全 A）→ 口径变更，须随 rules_version 记录**）",
+    ]
+    lines.append("")
+    # === 透镜可用性表（HK-4 验收：每透镜标可用性、空透镜不冒充）===
+    lines.append("## 透镜可用性（**空透镜不冒充**）\n")
+    lines.append("| 透镜 | 状态 | 依据 |")
+    lines.append("|---|---|---|")
+    for item in scan.get("lenses") or []:
+        lines.append(f"| {item['lens']} | {item['status']} | {item['basis']} |")
+    lines.append("")
+    rf = scan.get("rf") or {}
+    if rf.get("pct") is not None:
+        lines.append(f"- L3 利差口径：**{rf.get('caliber')}** = {rf['pct']}%"
+                     f" [来源: {rf.get('source')}]"
+                     f"——⚠️ 该值远高于中国 10Y（1.69%），故港股池的利差门槛更严，"
+                     f"**利差子项大概率恒 0**（须如实呈现，不得据此称「无便宜标的」）")
+    lines.append("")
+    lines.append("## 降级清单 / 警告\n")
+    if scan["warnings"]:
+        lines.extend(f"- ⚠️ {w}" for w in scan["warnings"])
+    else:
+        lines.append("- （无）")
+    lines.append("")
+    lines.append(f"## 短清单（{len(hits)} 只，上限 {scan['params']['top_n']}）\n")
+    if not hits:
+        lines.append("本次**无标的通过全部闸门**——这是过滤结果，不是「市场无机会」的事实断言。\n")
+    else:
+        lines.append("| # | 代码 | 名称 | PE(TTM) | EY% | 港股池分位 | gap | 市值(亿HKD) |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for i, h in enumerate(hits, 1):
+            lines.append(
+                f"| {i} | {h['ts_code']} | {h['name']} | {h['pe_ttm']} | {h['ey_pct']} | "
+                f"{h['pe_grank']:.1%} | {sum(h['gap_flags'])}/2 | {h['mv_yi']} |")
+        lines.append("")
+        lines.append("### 逐只理由与下钻\n")
+        for h in hits:
+            flags = h["gap_flags"]
+            lines.append(
+                f"**{h['ts_code']} {h['name']}** — 命中 L1 横截面便宜："
+                f"PE(TTM) {h['pe_ttm']}，EY {h['ey_pct']}%，**港股池**正 PE 子总体分位 "
+                f"{h['pe_grank']:.1%}（≤{scan['params']['pe_grank_max']:.0%}）；"
+                f"行业条件：**港股无行业字段，该条件已整体跳过**（透镜可用性表）；"
+                f"L3 gap 标记 {sum(flags)}/2（速报：港股**无业绩预告**，增速子项不可得）"
+                f" [来源: Python calc: EY=100/PE; 分位=percentile_rank_inclusive/100]"
+            )
+            # PE 异常须**显式呈现**（真机实测：港股池前三名全是 PE<1 的困境房企；
+            # 静默让它们排在榜首，等于把「困境股」当成「低估发现」报出去）
+            if h.get("anomaly"):
+                lines.append(f"  {h['anomaly']}")
+            lines.append(f"  下钻：`{_drill_cmd(h['ts_code'])}`")
+        lines.append("")
+    lines.append("> ⚠️ 港股池口径注记：净利用东财 `HOLDER_PROFIT`（归母）——**港股无扣非概念**；"
+                 "ROE 用 `ROE_AVG`（**期间 ROE，中报非年化**，与 A 侧 `roe_yearly` 不可直接比）；"
+                 "披露节奏为**年报+中报**（无季报、无业绩预告）。"
+                 "本清单为**研究观察起点**，不构成投资建议，不含买卖/仓位建议。")
     return "\n".join(lines)
 
 
@@ -310,6 +492,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="invest-a-discover-scan — 多透镜粗筛 → 研究观察短清单（研究信号，非决策）")
     p.add_argument("--top", type=int, default=DEFAULT_TOP, help=f"短清单上限（默认 {DEFAULT_TOP}）")
     p.add_argument("--with-bj", action="store_true", help="纳入北交所（默认排除）")
+    p.add_argument("--pool", default="a", choices=["a", "hk"],
+                   help="标的池：a=A 股主板+创业+科创（默认）｜hk=港股全市场")
     p.add_argument("--per-industry", type=int, default=3, help="同行业最多入选数（默认 3）")
     p.add_argument("--no-out", action="store_true", help="不落 md（快照仍写）")
     p.add_argument("--out-dir", default=DEFAULT_OUT_DIR, help=f"md 输出目录（默认 {DEFAULT_OUT_DIR}）")
@@ -328,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         scan = run_scan(top=args.top, with_bj=args.with_bj,
-                        per_industry=args.per_industry)
+                        per_industry=args.per_industry, pool=args.pool)
     except Exception as exc:  # noqa: BLE001 —— 数据不可得：退出 3，**不产空清单**
         print(f"❌ 数据不可得（{type(exc).__name__}: {exc}）——"
               f"不产出空清单（空清单会被误读为「市场无机会」这一事实断言）", file=sys.stderr)
@@ -338,7 +522,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_out:
         outdir = Path(args.out_dir)
         outdir.mkdir(parents=True, exist_ok=True)
-        path = outdir / f"{_today_iso()}.md"
+        # ⚠️ 文件名须含**池标识**：A 股与港股同日落盘时同名会互相覆盖
+        # （真机实测：港股池跑完把同日 A 股报告冲掉了）
+        suffix = "-hk" if args.pool == "hk" else ""
+        path = outdir / f"{_today_iso()}{suffix}.md"
         path.write_text(body, encoding="utf-8")
         print(f"📝 短清单: {path}\n")
     print(body)

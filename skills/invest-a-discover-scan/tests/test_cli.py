@@ -323,3 +323,124 @@ def test_drilldown_command_rendered_in_report(monkeypatch, tmp_path):
     body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
     assert "invest.py report 600000" in body, "报告内的下钻命令须用纯数字形态"
     assert "invest.py report 600000.SH" not in body, "不得出现带后缀的形态"
+
+
+# ── T11-5 港股池（--pool hk）────────────────────────────────────────────
+
+_HK_UNIVERSE = [
+    {"ts_code": "00700.HK", "symbol": "00700", "name": "腾讯控股", "market": "主板",
+     "currency": "HKD", "industry": None},
+    {"ts_code": "00005.HK", "symbol": "00005", "name": "汇丰控股", "market": "主板",
+     "currency": "HKD", "industry": None},
+] + [{"ts_code": f"{i:05d}.HK", "symbol": f"{i:05d}", "name": f"标的{i}",
+      "market": "主板", "currency": "HKD", "industry": None} for i in range(100, 114)]
+
+
+def _stub_hk(monkeypatch, *, pe=5.0, fin_roe=15.0, fin_profit=1.0e9):
+    cli = load_scan_cli()
+    import sources_hk
+    monkeypatch.setattr(sources_hk, "reset_warnings", lambda: None)
+    monkeypatch.setattr(sources_hk, "fetch_hk_universe", lambda: list(_HK_UNIVERSE))
+    # ⚠️ PE 必须有**梯度**：全部同 PE 时 bisect_right 给出分位 1.0 → L1 一只也命中不了
+    # （与 A 侧夹具同型的坑：过窄/过于均匀的夹具会让测试在空清单上空转）
+    def _quotes(syms):
+        return {s: {"price": 10.0, "pe_ttm": (pe if i < 2 else 30.0 + i),
+                    "mcap_hkd_yi": 1000.0} for i, s in enumerate(syms)}
+
+    monkeypatch.setattr(sources_hk, "fetch_hk_quote_batch", _quotes)
+    monkeypatch.setattr(sources_hk, "fetch_hk_financials",
+                        lambda sym: [{"report_date": "2026-06-30", "roe": fin_roe,
+                                      "net_profit": fin_profit}])
+    monkeypatch.setattr(sources_hk, "warnings", [])
+    monkeypatch.setattr(sources, "rf_10y_usd", lambda: (4.95, "FRED.DGS10"), raising=False)
+    monkeypatch.setattr(sources, "latest_trade_date", lambda: "20260911")
+    return cli
+
+
+def test_hk_pool_report_has_lens_availability_table(monkeypatch, tmp_path):
+    """HK-4 验收核心：**每透镜标可用性、空透镜不冒充**。"""
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    assert cli.main(_argv(tmp_path) + ["--pool", "hk"]) == 0
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "透镜可用性" in body and "空透镜不冒充" in body
+    for lens in ("L1 pe_grank", "L1 ind_rk", "L3 利差", "L3 预告增速", "L2 自身历史分位"):
+        assert lens in body, f"可用性表缺 {lens}"
+    assert "不可得" in body, "不可得透镜须显式标注"
+
+
+def test_hk_pool_declares_universe_deviation(monkeypatch, tmp_path):
+    """口径偏离（港股通/恒指 → 全部上市港股）须在报告头显式说明。"""
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "口径偏离声明" in body
+    assert "超集" in body
+
+
+def test_hk_pool_caliber_notes_present(monkeypatch, tmp_path):
+    """港股口径注记：无扣非 / ROE 非年化 / 无季报无预告。"""
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    for token in ("无扣非概念", "期间 ROE", "年报+中报"):
+        assert token in body, f"缺口径注记：{token}"
+
+
+def test_hk_drilldown_points_to_hk_cli(monkeypatch, tmp_path):
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "invest-hk-stock/scripts/hk.py report 00700" in body
+    assert "invest-a-stock/scripts/invest.py report 00700" not in body
+
+
+def test_hk_industry_gate_skipped_not_silent(monkeypatch, tmp_path):
+    """港股无行业字段 → 行业条件整体跳过，且**在报告中明示**（不静默）。"""
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "行业条件已整体跳过" in body or "行业条件：**港股无行业字段，该条件已整体跳过**" in body
+
+
+def test_hk_pool_snapshot_records_pool_kind(monkeypatch, tmp_path):
+    cli = _stub_hk(monkeypatch)
+    snap = tmp_path / "2026.jsonl"
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: snap)
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    rec = json.loads(snap.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert rec["params"]["pool"] == "hk"
+    assert rec["pool"]["market"].startswith("港股")
+
+
+def test_hk_and_a_reports_do_not_collide(monkeypatch, tmp_path):
+    """两个池同日落盘**不得互相覆盖**（真机实测：港股池曾冲掉当日 A 股报告）。"""
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    hk_files = {p.name for p in tmp_path.glob("*.md")}
+    assert any("-hk" in n for n in hk_files), f"港股报告名须含池标识：{hk_files}"
+
+
+def test_hk_report_renders_pe_anomaly(monkeypatch, tmp_path):
+    """真机实测：港股池前三名全是 PE<1 的困境房企 —— 异常必须**显式呈现**，
+    不得静默让它们以「低估」面貌排在榜首。"""
+    cli = _stub_hk(monkeypatch, pe=0.01)
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    cli.main(_argv(tmp_path) + ["--pool", "hk"])
+    body = list(tmp_path.glob("*-hk.md"))[0].read_text(encoding="utf-8")
+    assert "极低 PE" in body, "PE<1 的标的须带异常标注"
+    assert "一次性损益" in body
+    assert "不得直接读作「极度低估」" in body

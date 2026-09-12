@@ -24,6 +24,22 @@ import pool as pool_mod
 PE_GRANK_MAX = 0.15
 IND_RANK_MAX = 0.25
 SPREAD_PP = 2.0
+# PE 合理性下限：PE < 1 意味着「一年盈利 > 整个市值」——几乎必然含**一次性损益**
+# （债务重组收益、资产处置）或数据异常。此类值在横截面分位上**必然排第一**，
+# 静默排在榜首会把「困境股」当成「低估发现」（真机实测：港股池前三名全是 PE<1 的房企）
+PE_ANOMALY_MIN = 1.0
+
+
+def pe_anomaly(pe_ttm) -> str | None:
+    """PE 异常的显式标注（None = 正常）。**不剔除**（剔除即静默丢信息），只标注。"""
+    pe = _pos(pe_ttm)
+    if pe is None:
+        return None
+    if pe < PE_ANOMALY_MIN:
+        return (f"⚠️ **极低 PE（{pe:.2f}x < 1）**：一年盈利超过整个市值 →"
+                f"盈利可能含**一次性损益**（重组/处置收益）或数据异常 ——"
+                f"**须先核实利润构成**，不得直接读作「极度低估」")
+    return None
 
 
 def _pos(v) -> float | None:
@@ -82,7 +98,8 @@ def industry_rank(pe_ttm, peers: list[float]) -> tuple[int, int] | None:
 
 
 def select_candidates(rows: list[dict], *, pe_grank_max: float = PE_GRANK_MAX,
-                      ind_rank_max: float = IND_RANK_MAX) -> list[dict]:
+                      ind_rank_max: float = IND_RANK_MAX,
+                      skip_industry: bool = False) -> list[dict]:
     """L1 命中 = 全 A 分位门槛 ∧ 行业内排名门槛（两条均为 **≤**，含边界）。
 
     输入 ``[{ts_code, industry, pe_ttm}]``（已过池构建）。行业缺失 → **跳过行业条件**
@@ -111,6 +128,10 @@ def select_candidates(rows: list[dict], *, pe_grank_max: float = PE_GRANK_MAX,
             continue
         industry = str(r.get("industry") or pool_mod._MISSING_INDUSTRY)
         missing = pool_mod.industry_missing(industry)
+        if skip_industry:
+            # 港股池：universe 无行业字段（实测）→ **整条行业条件跳过**（walk-around 而非
+            # 逐只置 missing，避免把「市场级缺字段」写成「个别标的缺字段」）
+            missing = True
         rk, n = (None, None)
         if not missing:
             peers = by_ind_sorted.get(industry) or []
