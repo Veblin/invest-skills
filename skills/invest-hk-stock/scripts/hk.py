@@ -33,6 +33,7 @@ import hk_codes  # noqa: E402
 import hk_financials  # noqa: E402
 import hk_kline  # noqa: E402
 import hk_quote  # noqa: E402
+import hk_southbound  # noqa: E402
 import hk_tushare  # noqa: E402
 import hk_valuation  # noqa: E402
 import hk_yfinance  # noqa: E402
@@ -197,6 +198,63 @@ _RSK = """
 """
 
 
+def _render_southbound(lines: list[str]) -> None:
+    """南向资金子节（HK-3 / T11-1）→ 模块 3 市场结构。
+
+    三态：``available=False`` → 显式「不可得」+ 原因，**不出中位数/0 值**
+    （0 会被读成「南向零净买入」这一事实断言，LAW 5）。
+    """
+    sb = hk_southbound.fetch_southbound(20)
+    lines.append("## 模块 3 市场结构 — 南向资金（港股通沪/深）\n")
+    if not sb.get("available"):
+        lines.append(f"⚠️ 南向资金不可得（{sb.get('reason')}）——"
+                     "LAW 5：未获取到任何有效数据即无法判断，**不得**读作「南向无净买入」。\n")
+        return
+
+    lines.append("| 日期 | 港股通(沪) 净买额(亿) | 港股通(深) 净买额(亿) | 合计(亿) | 恒生指数 | 涨跌幅 |")
+    lines.append("|---|---|---|---|---|---|")
+    for r in sb["rows"]:
+        lines.append(
+            f"| {r['date']} | {_fmt_num(r.get('sh_yi'))} | {_fmt_num(r.get('sz_yi'))} | "
+            f"{_fmt_num(r.get('total_yi'))} | {_fmt_num(r.get('hsi'))} | {_pct(r.get('hsi_chg_pct'))} |"
+        )
+    lines.append(f"- 合计 = 港股通(沪) + 港股通(深) [来源: Python calc: sh_yi + sz_yi]；"
+                 f"缺失单元格为「—」表示该侧不可得（不填 0）")
+    lines.append(f"[来源: {sb['source']} / 最新 {sb['rows'][-1]['date']}]")
+    if sb.get("caliber_note"):
+        lines.append(f"> {sb['caliber_note']}")
+
+    latest = sb["rows"][-1]
+    if latest.get("buy_yi") is not None and latest.get("sell_yi") is not None:
+        lines.append(f"- 最新交易日成交额（沪+深合计）：买入 {_fmt_num(latest['buy_yi'])} 亿 / "
+                     f"卖出 {_fmt_num(latest['sell_yi'])} 亿 "
+                     f"[来源: Python calc: 沪向 + 深向，源列 买入成交额/卖出成交额]")
+    sm = sb.get("summary") or {}
+    if sm.get("available") and sm.get("sh"):
+        sh, sz = sm.get("sh") or {}, sm.get("sz") or {}
+        same = (sh.get("up"), sh.get("down")) == (sz.get("up"), sz.get("down"))
+        # 实测：源对沪/深两行返回**相同**的涨跌家数 → 是港股市场整体口径而非分通道，
+        # 分开渲染会暗示不存在的分通道粒度（D4：聚合数据必须标注覆盖范围）
+        scope = "港股市场整体（源对沪/深两行返回相同计数）" if same else "分通道"
+        body_txt = (f"涨 {_fmt_num(sh.get('up'), 0)} / 平 {_fmt_num(sh.get('flat'), 0)} / "
+                    f"跌 {_fmt_num(sh.get('down'), 0)}")
+        if not same:
+            body_txt = (f"沪通道 涨 {_fmt_num(sh.get('up'), 0)}/跌 {_fmt_num(sh.get('down'), 0)}；"
+                        f"深通道 涨 {_fmt_num(sz.get('up'), 0)}/跌 {_fmt_num(sz.get('down'), 0)}")
+        lines.append(f"- 当日涨跌家数（{scope}）：{body_txt} "
+                     f"[来源: {sm.get('source')} / {sm.get('date')}]")
+    cross = sb.get("cross") or {}
+    if cross.get("comparable"):
+        verdict = "一致" if cross.get("consistent") else "不一致（口径差异，不裁决）"
+        lines.append(f"- 双源交叉（tushare 累计口径差分，同日）：{verdict}"
+                     f"（差 {cross['delta_yi']:+.3f} 亿）[来源: Python calc: akshare 合计 − tushare 差分]")
+    elif cross:
+        lines.append(f"- 双源交叉：{cross.get('note')}")
+    for w in sb.get("warnings") or []:
+        lines.append(f"- ⚠️ {w}")
+    lines.append("")
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from lib.technical import compute as tech_compute
 
@@ -329,10 +387,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     except Exception as exc:
         lines.append(f"## 技术结构\n计算失败: {type(exc).__name__}\n")
 
+    # --- 模块 3 市场结构：南向资金（T11-1 / HK-3） ---
+    _render_southbound(lines)
+
     lines.append(_RSK)
     lines.append("## 待验证项\n")
     lines.append("- 财务口径（HKFRS vs CAS）跨市场对比须折算与准则注记")
-    lines.append("- 南向资金/CCASS 持仓/沽空数据：公开可查但 v0.2.9 未接入（0.3.0 范围）")
+    lines.append("- CCASS 持仓/沽空数据：公开可查但未接入（南向资金已接入——见模块 3；源见 data-interface-map A4/B 节）")
     lines.append("- 交易日历完整化（台风/圣诞休市）归 0.3.0；当前以自然日近似\n")
     lines.append("\n> ⚠️ 本报告由 invest-hk-stock v0.2.9 自动生成，为初步数据引入分析（非九模块完整研究），")
     lines.append("> 不构成任何投资建议。数据来源见各行 [来源: ...]；币种 HKD（另注除外）。")
