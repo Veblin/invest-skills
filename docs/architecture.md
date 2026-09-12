@@ -22,7 +22,7 @@
 
 ```
 ┌─ Skill 层（编排）───────────────────────────────────────────┐
-│ 8 个 skills，每个 = SKILL.md（LAWs 规则 + SOP + CLI 路由表）  │
+│ 9 个 skills，每个 = SKILL.md（LAWs 规则 + SOP + CLI 路由表）  │
 │  触发词路由 → 对话简报 / Markdown 备忘录 / concise 三层输出   │
 └──────────────┬──────────────────────────────────────────────┘
                │ 调用 CLI（uv run python .../invest.py）
@@ -46,7 +46,7 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 
 ## 3. Skill 一览
 
-仓库共 **8 个 skills**（Python 计数 `len()` 验证：`skills/*/SKILL.md` = 8），另有 `.claude/skills/verify/` 为内部验证工具。`invest-a-limit-up` 已于 v0.2.5 移除（无代码调用方，涨停池逻辑并入 journal/pulse 的 market_microstructure）；`invest-a-forecast-scan` / `invest-a-futures-link` 已于 v0.3.0 移除（必要性评估后暂缓，见 host-docs/v0.3.0 决策清单）。
+仓库共 **9 个 skills**（Python 计数 `len()` 验证：`skills/*/SKILL.md` = 9），另有 `.claude/skills/verify/` 为内部验证工具。`invest-a-limit-up` 已于 v0.2.5 移除（无代码调用方，涨停池逻辑并入 journal/pulse 的 market_microstructure）；`invest-a-forecast-scan` / `invest-a-futures-link` 已于 v0.3.0 移除（必要性评估后暂缓，见 host-docs/v0.3.0 决策清单）。
 
 | Skill | 定位 | 入口 | 关键实现 |
 |-------|------|------|---------|
@@ -58,6 +58,7 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 | **invest-a-pulse** | 市场情绪脉搏（杠杆/广度/情绪/资金/估值五维 + 综合环境标签） | 纯编排（无自有脚本） | 完全复用 journal 的 `market_microstructure` 数据管道（经 data_bridge 缓存避免重复采集）；筹码出清度四信号；涨停行业轮动 + 跷跷板检验 |
 | **invest-hk-stock** | 港股数据引入与初步分析（v1） | `scripts/hk.py` | 腾讯 r_hk 快照/qfq K 线、东财港股财务、百度估值历史、tushare/yfinance 交叉；代码/币种纪律 + 港股风险层 |
 | **invest-a-event-calendar** | 事件日历（解禁 + 宏观日程） | `scripts/unlock_calendar.py` | 池/市场/宏观三模式：清单池个股解禁下钻 + 全市场日级分位 + 定期宏观数据发布日程（中美）与议息会议；多源降级链与空窗鉴别 |
+| **invest-a-discover-scan** | 低估发现扫描（多透镜粗筛 → 观察短清单） | `scripts/discover_scan.py` | L1 横截面便宜（全 A 正 PE 分位 + 行业内排名）+ L3 定价-盈利 gap + 质量中过滤（`roe_yearly`/`profit_dedt`）+ 确定性排序；阈值预注册（`rules.md` + `rules_version` 随快照落盘）；快照 JSONL 落私有 store 供 v0.2 回填 |
 | verify（内部） | 运行时验证三个 CLI 真实运行（非 mock） | `.claude/skills/verify/` | `store._db_override` 隔离真实 DB + `runpy.run_path` 执行真实命令行 |
 
 **注册与分发**：三处注册面须两两一致——`skills.yaml`（antfu/skills-cli 清单）、`sync_version.SKILL_TARGETS`（版本同步目标 + 插件标签）与 `.claude-plugin/marketplace.json.in` 模板的插件条目列表，均须覆盖 `skills/*/SKILL.md` 全集；一致性由 `test_version_sync.TestRegistrationParity` 强制（此前模板硬编码 6 条插件，新增技能不会进 marketplace 清单且无断言守护）。`sync_version.py sync` 从 `*.json.in` 模板生成 `.claude-plugin/`、`.agents/plugins/`、`gemini-extension.json` 三处清单（`.agents` 副本与 `.claude-plugin` 共用同一模板，字节一致）。

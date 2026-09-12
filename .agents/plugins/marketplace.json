@@ -111,6 +111,19 @@
       "category": "finance",
       "homepage": "https://github.com/Veblin/invest-skills",
       "tags": ["investment", "event-calendar", "macro-calendar", "unlock-calendar", "china-stock", "a-share", "claude-code", "learning"]
+    },
+    {
+      "name": "invest:a-discover-scan",
+      "description": "低估发现扫描 — 多透镜粗筛（L1 横截面便宜 + L3 定价-盈利 gap + 质量中过滤）→ 研究观察短清单。阈值预注册，含降级清单。研究信号，非决策。",
+      "version": "0.2.9",
+      "author": {
+        "name": "Veblin",
+        "url": "https://github.com/Veblin"
+      },
+      "source": "./",
+      "category": "finance",
+      "homepage": "https://github.com/Veblin/invest-skills",
+      "tags": ["investment", "stock-screener", "valuation", "discovery", "china-stock", "a-share", "claude-code", "learning"]
     }
   ]
 }

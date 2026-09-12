@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
 # 目录入口：junction（Target 相对仓库根；Junction 目标参数用绝对路径最稳）
-# 24 条 = .workbuddy\skills 8 + .claude\skills 8 + .agents\skills 8（全量技能，
+# 27 条 = .workbuddy\skills 9 + .claude\skills 9 + .agents\skills 9（全量技能，
 # R1 验收 F15：新增技能须同步全部发现面——此前逐面枚举且各自滞后）
 $DirLinks = @(
     @{ Name = ".workbuddy\skills\invest-a-stock";          Target = "skills\invest-a-stock" },
@@ -33,6 +33,7 @@ $DirLinks = @(
     @{ Name = ".workbuddy\skills\invest-a-pattern-scan";   Target = "skills\invest-a-pattern-scan" },
     @{ Name = ".workbuddy\skills\invest-hk-stock";         Target = "skills\invest-hk-stock" },
     @{ Name = ".workbuddy\skills\invest-a-event-calendar"; Target = "skills\invest-a-event-calendar" },
+    @{ Name = ".workbuddy\skills\invest-a-discover-scan"; Target = "skills\invest-a-discover-scan" },
     @{ Name = ".claude\skills\invest-a-stock";          Target = "skills\invest-a-stock" },
     @{ Name = ".claude\skills\invest-a-etf";            Target = "skills\invest-a-etf" },
     @{ Name = ".claude\skills\invest-a-journal";        Target = "skills\invest-a-journal" },
@@ -41,6 +42,7 @@ $DirLinks = @(
     @{ Name = ".claude\skills\invest-a-pattern-scan";   Target = "skills\invest-a-pattern-scan" },
     @{ Name = ".claude\skills\invest-hk-stock";         Target = "skills\invest-hk-stock" },
     @{ Name = ".claude\skills\invest-a-event-calendar"; Target = "skills\invest-a-event-calendar" },
+    @{ Name = ".claude\skills\invest-a-discover-scan"; Target = "skills\invest-a-discover-scan" },
     @{ Name = ".agents\skills\invest-a-stock";          Target = "skills\invest-a-stock" },
     @{ Name = ".agents\skills\invest-a-etf";            Target = "skills\invest-a-etf" },
     @{ Name = ".agents\skills\invest-a-journal";        Target = "skills\invest-a-journal" },
@@ -48,11 +50,12 @@ $DirLinks = @(
     @{ Name = ".agents\skills\invest-a-gap-scan";       Target = "skills\invest-a-gap-scan" },
     @{ Name = ".agents\skills\invest-a-pattern-scan";   Target = "skills\invest-a-pattern-scan" },
     @{ Name = ".agents\skills\invest-hk-stock";         Target = "skills\invest-hk-stock" },
-    @{ Name = ".agents\skills\invest-a-event-calendar"; Target = "skills\invest-a-event-calendar" }
+    @{ Name = ".agents\skills\invest-a-event-calendar"; Target = "skills\invest-a-event-calendar" },
+    @{ Name = ".agents\skills\invest-a-discover-scan"; Target = "skills\invest-a-discover-scan" }
 )
 
 # 文件入口：硬链接（junction 不支持文件；硬链接同卷免权限，编辑 SKILL.md 两端同步）
-# 8 条 = .claude\commands 全部（与 skills/ 目录一一对应）
+# 9 条 = .claude\commands 全部（与 skills/ 目录一一对应）
 $FileLinks = @(
     @{ Name = ".claude\commands\invest-a-stock.md";          Target = "skills\invest-a-stock\SKILL.md" },
     @{ Name = ".claude\commands\invest-a-etf.md";            Target = "skills\invest-a-etf\SKILL.md" },
@@ -61,7 +64,8 @@ $FileLinks = @(
     @{ Name = ".claude\commands\invest-a-gap-scan.md";       Target = "skills\invest-a-gap-scan\SKILL.md" },
     @{ Name = ".claude\commands\invest-a-pattern-scan.md";   Target = "skills\invest-a-pattern-scan\SKILL.md" },
     @{ Name = ".claude\commands\invest-hk-stock.md";         Target = "skills\invest-hk-stock\SKILL.md" },
-    @{ Name = ".claude\commands\invest-a-event-calendar.md"; Target = "skills\invest-a-event-calendar\SKILL.md" }
+    @{ Name = ".claude\commands\invest-a-event-calendar.md"; Target = "skills\invest-a-event-calendar\SKILL.md" },
+    @{ Name = ".claude\commands\invest-a-discover-scan.md"; Target = "skills\invest-a-discover-scan\SKILL.md" }
 )
 
 Write-Host "== invest:a-stock 技能链接重建（junction + hardlink，幂等）=="

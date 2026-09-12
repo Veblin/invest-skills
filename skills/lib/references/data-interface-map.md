@@ -154,13 +154,13 @@
 |------|---------|--------------|
 | `daily` | 120 | K 线主源（+ `adj_factor` 自算前复权） |
 | `adj_factor` | — | 复权因子（唯一可靠复权来源） |
-| `stock_basic` | 120 | 股票基础信息 |
-| `daily_basic` | 2000 | **逐股逐日 PE/PB/股息率/市值**（个股估值历史；2026-09-08 实测 600737 311 行可用；T+1，当日盘中不可得） |
-| `fina_indicator` | 2000 | 财务指标 |
+| `stock_basic` | 120 | 股票基础信息（**invest-a-discover-scan**：池构建 + 行业分组；7d 缓存） |
+| `daily_basic` | 2000 | **逐股逐日 PE/PB/股息率/市值**（个股估值历史；2026-09-08 实测 600737 311 行可用；T+1，当日盘中不可得）。**invest-a-discover-scan**：`trade_date` 全市场 1 次调用（2026-09-12 实测 5550 行/0.30s）作 L1 横截面；亦为 v0.2 L2 历史分位的换源源（decision D-F=F1） |
+| `fina_indicator` | 2000 | 财务指标。**invest-a-discover-scan**：质量中过滤（ROE/净利）。⚠️ **只能按 `ts_code`**（`period=` 与日期区间均 `50101`，无全市场批量形态）→ 候选集逐个调用；⚠️ **无 `roe_ttm`**（用 `roe_yearly`）、**无原始 `netprofit`**（用 `profit_dedt` 扣非）；⚠️ 同 `end_date` 会返回**重复行**（取最近一期前须去重） |
 | `moneyflow` | 2000 | 资金流 |
 | `margin_detail` | 2000 | 个股两融明细 |
 | `margin` | — | 两融汇总 |
-| `forecast` | 2000 | **业绩预告（全市场可拉，业绩雷达原料）** |
+| `forecast` | 2000 | **业绩预告（业绩雷达原料）**。⚠️ 需 `ann_date` 或 `ts_code`——**日期区间查询被拒**（`50101`）；**invest-a-discover-scan** 按候选 ts_code 取（降级档用，不做全市场扫描） |
 | `index_daily` / `index_classify` / `index_weight` / `index_member` | 2000 | 指数行情/分类/权重/成分 |
 | `index_dailybasic` | 4000 | 指数每日指标（沪深300 PE→ERP；不足时 partial） |
 | `sw_daily` | 5000 | 申万行业日线（不足降级 akshare `index_hist_sw`） |

@@ -46,3 +46,8 @@ skills:
     repo: Veblin/invest-skills
     skill: invest-a-event-calendar
 
+  - name: invest-a-discover-scan
+    description: 低估发现扫描 — 多透镜粗筛（L1 横截面便宜 + L3 定价-盈利 gap + 质量中过滤）→ 研究观察短清单（≤15 只 + 逐只理由 + 下钻命令）。阈值预注册。研究信号，非决策。
+    repo: Veblin/invest-skills
+    skill: invest-a-discover-scan
+

@@ -63,6 +63,7 @@ PUBLISH_SKILLS = [
     "invest-a-pattern-scan",
     "invest-hk-stock",
     "invest-a-event-calendar",
+    "invest-a-discover-scan",
 ]
 
 # 包内排除的路径（tests/__pycache__ 等）
@@ -83,6 +84,7 @@ SKILL_META: dict[str, dict[str, str]] = {
     "invest-a-pattern-scan": {"displayName": "invest:a-pattern-scan 形态扫描"},
     "invest-hk-stock": {"displayName": "invest:a-hk 港股研究"},
     "invest-a-event-calendar": {"displayName": "invest:a-event-calendar 事件日历"},
+    "invest-a-discover-scan": {"displayName": "invest:a-discover-scan 低估发现"},
 }
 
 # 各 skill 的 CLI 入口脚本（SKILL.md 正文「见 CLAUDE.md」/「子命令全清单」改写目标；
@@ -96,6 +98,7 @@ ENTRY_SCRIPTS: dict[str, str | None] = {
     "invest-a-pattern-scan": "scan.py",
     "invest-hk-stock": "hk.py",
     "invest-a-event-calendar": "unlock_calendar.py",
+    "invest-a-discover-scan": "discover_scan.py",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -115,6 +118,7 @@ LAYOUT: dict[str, str] = {
     "invest-a-pattern-scan": "script",
     "invest-hk-stock": "script",
     "invest-a-event-calendar": "script",
+    "invest-a-discover-scan": "script",
 }
 
 # 跨 skill lib 合并源（闭包解析优先级: 共享 skills/lib > cross 列表序 > 包自身 scripts/lib）
@@ -138,6 +142,12 @@ CROSS_LIBS: dict[str, list[str]] = {
     # 缺 proxy → 池模式每次取数 ModuleNotFoundError（误报数据源不可得）；缺
     # tushare_client → trade_cal 恒走 except ImportError 估算分支（交易日恒粗判）。
     "invest-a-event-calendar": ["invest-a-stock"],
+    # discover-scan 经 _invest_path 从 invest-a-stock lib 解析 lib.tushare_client
+    # （sources.client）、lib.cache（DataCache）、lib.trade_cal、lib.proxy
+    # （rf_10y_pct 的 akshare 直连上下文）与 lib.env（token 读取）；包内无该引导
+    # → 一并闭包并入。缺 tushare_client → 全链路恒空返回（退 3）；
+    # 缺 cache → stock_basic 缓存失效（每次全量拉取）。
+    "invest-a-discover-scan": ["invest-a-stock"],
 }
 
 # SKILL.md 正文中的跨 skill 路径改写（包内副本）
