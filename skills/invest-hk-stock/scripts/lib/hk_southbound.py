@@ -72,18 +72,26 @@ def _to_float(v) -> float | None:
 
 
 def _norm_date(v) -> str | None:
-    """``YYYY-MM-DD`` / ``YYYYMMDD`` / date / datetime → ISO 日期串；不可解析 → None。"""
+    """``YYYY-MM-DD`` / ``YYYYMMDD`` / date / datetime → ISO 日期串；不可解析 → None。
+
+    ⚠️ 走共享 `dates.parse_date`，**不自实现 isinstance 分支**：pandas `NaT` 是
+    `datetime` 的伪子类，`NaT.strftime()` 会抛 `ValueError`——自实现时该异常会穿透
+    `southbound_summary()`（其 try 只包住取数）一路冒到 `cmd_report`，整份报告崩掉
+    且不留档。`parse_date` 在 datetime 分支内显式判 NaT。
+    """
     if v is None:
         return None
-    if isinstance(v, (_dt.datetime, _dt.date)):
-        return v.strftime("%Y-%m-%d")
-    s = str(v).strip()[:10]
-    for fmt in ("%Y-%m-%d", "%Y%m%d"):
-        try:
-            return _dt.datetime.strptime(s, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            continue
-    return None
+    try:
+        from _invest_path import ensure_invest_a_scripts_on_path
+
+        ensure_invest_a_scripts_on_path()
+        from dates import parse_date
+
+        d = parse_date(v)
+        return d.strftime("%Y-%m-%d") if d else None
+    except Exception:  # noqa: BLE001 —— 日期脏值不得崩报告：一律按不可解析处理
+        logger.warning("日期解析失败，按不可解析处理：%r", v)
+        return None
 
 
 def _cal_days(d0: str, d1: str) -> int | None:
@@ -237,6 +245,16 @@ def _fetch_tushare_df(days: int = 20):
     if df is None or getattr(df, "empty", True):
         raise RuntimeError(f"moneyflow_hsgt 空返回（last_error={client.last_error}）")
     return df
+
+
+def _latest_common(rows_a: list[dict], rows_b: list[dict]) -> tuple[dict | None, dict | None]:
+    """两序列中**共有的最新日期**那一对行；无交集 → ``(None, None)``。"""
+    b_by_date = {r.get("date"): r for r in rows_b if r.get("date")}
+    for r in sorted(rows_a, key=lambda x: str(x.get("date") or ""), reverse=True):
+        other = b_by_date.get(r.get("date"))
+        if other is not None:
+            return r, other
+    return None, None
 
 
 def _parse_tushare_rows(frame) -> list[dict]:
@@ -409,12 +427,22 @@ def fetch_southbound(days: int = 20) -> dict:
     if daily["available"]:
         rows, source = daily["rows"], daily["source"]
         if ts["available"] and rows:
-            cross = cross_check(rows[-1], ts["rows"][-1])
+            # 用**双方共有的最新日期**对照，而非各自末行——两源末行日期常不一致
+            # （tushare 交收/发布节奏与 akshare 不同），拿末行直接比会让
+            # cross_check 永久返回「不可比」，交叉核对形同虚设
+            a_row, t_row = _latest_common(rows, ts["rows"])
+            if a_row is not None:
+                cross = cross_check(a_row, t_row)
     elif ts["available"]:
         rows, source = ts["rows"], ts["source"]
         caliber_note = _CALIBER_NOTE
         warnings.append("akshare 日频不可得 → 降级 tushare 累计口径差分")
-    elif summary.get("available"):
+    elif summary.get("available") and (
+            (summary.get("sh") or {}).get("net_buy_yi") is not None
+            or (summary.get("sz") or {}).get("net_buy_yi") is not None):
+        # ⚠️ 汇总帧「有行」不等于「有净额」：净额列缺失时若照走此分支，
+        # 会产出 available=True 但全 None 的行 → 报告出现
+        # 「南向资金：可得（…合计 — 亿）」，反而**抑制了 LAW 5 的不可得标注**
         sh = (summary.get("sh") or {}).get("net_buy_yi")
         sz = (summary.get("sz") or {}).get("net_buy_yi")
         rows = [{"date": summary.get("date"), "sh_yi": sh, "sz_yi": sz,

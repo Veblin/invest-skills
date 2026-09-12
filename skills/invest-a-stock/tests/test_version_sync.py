@@ -23,51 +23,17 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     and the .agents/plugins/marketplace.json output dir) so sync/bump preflight
     and output generation pass.
     """
-    (root / "skills" / "invest-a-stock").mkdir(parents=True)
-    (root / "skills" / "invest-a-gap-scan").mkdir(parents=True)
-    (root / "skills" / "invest-a-journal").mkdir(parents=True)
-    (root / "skills" / "invest-a-etf").mkdir(parents=True)
-    (root / "skills" / "invest-a-pulse").mkdir(parents=True)
-    (root / "skills" / "invest-a-pattern-scan").mkdir(parents=True)
-    (root / "skills" / "invest-hk-stock").mkdir(parents=True)
-    (root / "skills" / "invest-a-event-calendar").mkdir(parents=True)
-    (root / ".claude-plugin").mkdir(parents=True)
-    (root / ".agents" / "plugins").mkdir(parents=True)
+    # ⚠️ 技能列表**从 SKILL_TARGETS 派生**，不逐个硬编码——否则新增技能时
+    # 夹具缺文件会让 preflight 假红（2026-09-12 新增 discover-scan 时实测踩坑）。
+    for _t in _sync.SKILL_TARGETS:
+        _p = root / _t.rel_path
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _p.write_text(f'---\nname: {_t.label}\nversion: "{version}"\n---\n', encoding="utf-8")
+    (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (root / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
 
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "test"\nversion = "{version}"\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-stock" / "SKILL.md").write_text(
-        f'---\nname: invest:a-stock\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-gap-scan" / "SKILL.md").write_text(
-        f'---\nname: invest:a-gap-scan\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-journal" / "SKILL.md").write_text(
-        f'---\nname: invest:a-journal\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-etf" / "SKILL.md").write_text(
-        f'---\nname: invest:a-etf\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-pulse" / "SKILL.md").write_text(
-        f'---\nname: invest:a-pulse\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-pattern-scan" / "SKILL.md").write_text(
-        f'---\nname: invest:a-pattern-scan\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-hk-stock" / "SKILL.md").write_text(
-        f'---\nname: invest:a-hk\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-event-calendar" / "SKILL.md").write_text(
-        f'---\nname: invest:a-event-calendar\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
 

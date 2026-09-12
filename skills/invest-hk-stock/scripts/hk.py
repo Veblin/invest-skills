@@ -223,14 +223,26 @@ def coverage_summary() -> dict:
     """模块覆盖率（分母 = 可映射维度 7 项）。
 
     ``ratio`` 由 Python 计算（P0）——报告渲染该字段而非口头断言。
+
+    ⚠️ 两个计数须分开看，否则「7/7」会变成装饰性声明：
+    ``covered`` = 标「已覆盖」的模块数；``engine_covered`` = 其中**有真实报告节
+    可核验**者（``anchor`` 非空）。模块 0（研究问题卡）是 **Claude 侧流程**、
+    无引擎节——它计入分母（判定口径如此）但**不计入 engine_covered**，
+    报告须显式说明这一区别（原先把它算进 7/7 会让「无静默缺节」不可证伪）。
     """
     items = [{"module": m, "name": n, "status": s, "basis": b, "anchor": a}
              for m, n, s, b, a in _MODULE_COVERAGE]
     mappable = [i for i in items if i["module"] in MAPPABLE_MODULES]
     covered = [i for i in mappable if i["status"] == "已覆盖"]
+    engine = [i for i in covered if i["anchor"]]
+    counts: dict[str, int] = {}
+    for i in items:
+        counts[i["status"]] = counts.get(i["status"], 0) + 1
     return {"mappable": len(mappable), "covered": len(covered),
+            "engine_covered": len(engine), "unanchored": [i["module"] for i in covered
+                                                          if not i["anchor"]],
             "ratio": (len(covered) / len(mappable)) if mappable else 0.0,
-            "items": items}
+            "status_counts": counts, "items": items}
 
 
 _MODULE5 = """
@@ -289,17 +301,23 @@ def _render_module7(lines: list[str], *, quote: dict, pe_line: str | None,
     lines.append("### 7.2 数据驱动项（本次实测；不可得一律三态标注）\n")
     amount = quote.get("amount")
     if amount is not None:
-        lines.append(f"- 成交额 {amount / 1e8:.1f} 亿 HKD（快照口径）"
-                     f"——≥1 亿 HKD 为实务关注线 [来源: tencent.r_hk]")
+        # 元 → 亿 是**派生**：源字段是元，报告写亿——标签必须写 Python calc，
+        # 否则复检按 [来源: tencent.r_hk] 回溯会落到一个 ×1e8 的数
+        lines.append(f"- 成交额 {_fmt_num(amount / 1e8, 1)} 亿 HKD（快照口径）"
+                     f"——≥1 亿 HKD 为实务关注线 "
+                     f"[来源: Python calc: tencent.r_hk.amount / 1e8]")
     else:
         lines.append("- 成交额：不可得（快照缺失该字段）——不推断流动性高低")
     lines.append(f"- 估值位置：{pe_line or '序列不可得——不推断贵贱'}")
     if sb.get("available"):
         rows = sb.get("rows") or []
         latest = rows[-1] if rows else {}
-        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，"
-                     f"合计 {_fmt_num(latest.get('total_yi'))} 亿）"
-                     f"——资金面观察，非交易信号")
+        total = latest.get("total_yi")
+        # 合计是派生值 —— 带 calc 标签；缺一侧时 total 为 None，不得裸出数字
+        total_txt = (f"合计 {_fmt_num(total)} 亿 [来源: Python calc: sh_yi + sz_yi]"
+                     if total is not None else "合计不可得（单侧缺失，不拿沪向冒充）")
+        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，{total_txt}）"
+                     f"——资金面观察，非交易信号 [来源: {sb.get('source')}]")
     else:
         lines.append(f"- 南向资金：不可得（{sb.get('reason')}）——不推断资金方向")
     lines.append("")
@@ -317,10 +335,18 @@ def _render_coverage(lines: list[str]) -> None:
     for it in cs["items"]:
         lines.append(f"| {it['module']} | {it['name']} | {icon[it['status']]} | {it['basis']} |")
     lines.append("")
+    sc = cs["status_counts"]
+    uncovered = [i["module"] for i in cs["items"] if i["status"] == "声明未接入"]
+    partial = [i["module"] for i in cs["items"] if i["status"] == "部分"]
     lines.append(f"**覆盖率：{cs['covered']}/{cs['mappable']} 可映射维度"
                  f"（{cs['ratio'] * 100:.1f}%）** "
                  f"[来源: Python calc: covered / mappable]；"
-                 f"部分覆盖 1 项（模块 4），声明未接入 3 项（2 / 3b / 3c）。\n")
+                 f"部分覆盖 {sc.get('部分', 0)} 项（{' / '.join(partial) or '—'}），"
+                 f"声明未接入 {sc.get('声明未接入', 0)} 项（{' / '.join(uncovered) or '—'}）。")
+    lines.append(f"其中**引擎侧 {cs['engine_covered']}/{cs['covered']} 项**在正文有对应节可逐条核验"
+                 f"（`## 模块 …` 标题）；无引擎节的模块 "
+                 f"{' / '.join(cs['unanchored']) or '—'} 为 Claude 侧流程项，"
+                 f"不计入引擎侧核验数。\n")
 
 
 _RSK = """
@@ -346,14 +372,20 @@ def _render_southbound(lines: list[str]) -> dict:
     lines.append("## 模块 3 市场结构 — 南向资金（港股通沪/深）\n")
     if not sb.get("available"):
         lines.append(f"⚠️ 南向资金不可得（{sb.get('reason')}）——"
-                     "LAW 5：未获取到任何有效数据即无法判断，**不得**读作「南向无净买入」。\n")
+                     "LAW 5：未获取到任何有效数据即无法判断，**不得**读作「南向无净买入」。")
+        # 逐源失败原因必须留在报告里（D5）：否则「限流 / 权限 / 源挂掉」无从区分，
+        # 而这个分支恰恰是最需要诊断信息的那一个
+        for w in sb.get("warnings") or []:
+            lines.append(f"- ⚠️ {w}")
+        lines.append("")
         return sb
 
     lines.append("| 日期 | 港股通(沪) 净买额(亿) | 港股通(深) 净买额(亿) | 合计(亿) | 恒生指数 | 涨跌幅 |")
     lines.append("|---|---|---|---|---|---|")
     for r in sb["rows"]:
+        span = f"（跨 {r['cal_days']} 日）" if (r.get("cal_days") or 1) > 1 else ""
         lines.append(
-            f"| {r['date']} | {_fmt_num(r.get('sh_yi'))} | {_fmt_num(r.get('sz_yi'))} | "
+            f"| {r['date']}{span} | {_fmt_num(r.get('sh_yi'))} | {_fmt_num(r.get('sz_yi'))} | "
             f"{_fmt_num(r.get('total_yi'))} | {_fmt_num(r.get('hsi'))} | {_pct(r.get('hsi_chg_pct'))} |"
         )
     lines.append(f"- 合计 = 港股通(沪) + 港股通(深) [来源: Python calc: sh_yi + sz_yi]；"
@@ -362,23 +394,47 @@ def _render_southbound(lines: list[str]) -> dict:
     if sb.get("caliber_note"):
         lines.append(f"> {sb['caliber_note']}")
 
+    # 跨停市日的差值是**区间累计**（tushare 降级链下才会出现）——必须在表内标出，
+    # 否则 4 天的净买入会被读成一天的数（数倍高估）
+    for r in sb["rows"]:
+        if (r.get("cal_days") or 1) > 1:
+            lines.append(
+                f"> ⚠️ 表中 {r['date']} 为**区间累计**（跨 {r['cal_days']} 自然日，含停市日）"
+                f"——不是单日净额 [来源: Python calc: 相邻可得行差分]")
+
     latest = sb["rows"][-1]
     if latest.get("buy_yi") is not None and latest.get("sell_yi") is not None:
-        lines.append(f"- 最新交易日成交额（沪+深合计）：买入 {_fmt_num(latest['buy_yi'])} 亿 / "
-                     f"卖出 {_fmt_num(latest['sell_yi'])} 亿 "
-                     f"[来源: Python calc: 沪向 + 深向，源列 买入成交额/卖出成交额]")
+        # 措辞用「买方/卖方成交额」而非「买入/卖出 X 亿」：后者会被 LAW 6 的
+        # `law6-sell-standalone`（error 级）命中——该规则拦的是建议措辞，
+        # 而这里只是成交结构事实。换词消除歧义，而不是放宽规则。
+        lines.append(f"- 最新交易日成交额（沪+深合计）：买方 {_fmt_num(latest['buy_yi'])} 亿 / "
+                     f"卖方 {_fmt_num(latest['sell_yi'])} 亿 "
+                     f"[来源: Python calc: 沪向 + 深向（源列：成交额的买方/卖方两列）]")
     sm = sb.get("summary") or {}
     if sm.get("available") and sm.get("sh"):
         sh, sz = sm.get("sh") or {}, sm.get("sz") or {}
-        same = (sh.get("up"), sh.get("down")) == (sz.get("up"), sz.get("down"))
-        # 实测：源对沪/深两行返回**相同**的涨跌家数 → 是港股市场整体口径而非分通道，
-        # 分开渲染会暗示不存在的分通道粒度（D4：聚合数据必须标注覆盖范围）
-        scope = "港股市场整体（源对沪/深两行返回相同计数）" if same else "分通道"
-        body_txt = (f"涨 {_fmt_num(sh.get('up'), 0)} / 平 {_fmt_num(sh.get('flat'), 0)} / "
-                    f"跌 {_fmt_num(sh.get('down'), 0)}")
-        if not same:
+        # 「两行计数相同」只有在**真取到计数**时才是关于源结构的断言；两侧皆 None
+        # 时 `(None, None) == (None, None)` 也为 True——会把「缺数据」说成
+        # 「源返回相同计数」（凭空断言源的行为）
+        counts_a = (sh.get("up"), sh.get("down"))
+        counts_b = (sz.get("up"), sz.get("down"))
+        has_counts = all(v is not None for v in counts_a + counts_b)
+        if not has_counts:
+            scope = "覆盖范围不可判（计数列缺失）"
+        elif counts_a == counts_b:
+            # 实测：源对沪/深两行返回**相同**的涨跌家数 → 是港股市场整体口径而非分通道，
+            # 分开渲染会暗示不存在的分通道粒度（D4：聚合数据必须标注覆盖范围）
+            scope = "港股市场整体（源对沪/深两行返回相同计数）"
+        else:
+            scope = "分通道"
+        if not has_counts:
+            body_txt = "涨/平/跌 计数列不可得（源结构漂移？）"
+        elif scope == "分通道":
             body_txt = (f"沪通道 涨 {_fmt_num(sh.get('up'), 0)}/跌 {_fmt_num(sh.get('down'), 0)}；"
                         f"深通道 涨 {_fmt_num(sz.get('up'), 0)}/跌 {_fmt_num(sz.get('down'), 0)}")
+        else:
+            body_txt = (f"涨 {_fmt_num(sh.get('up'), 0)} / 平 {_fmt_num(sh.get('flat'), 0)} / "
+                        f"跌 {_fmt_num(sh.get('down'), 0)}")
         lines.append(f"- 当日涨跌家数（{scope}）：{body_txt} "
                      f"[来源: {sm.get('source')} / {sm.get('date')}]")
     cross = sb.get("cross") or {}
@@ -546,8 +602,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     lines.append("## 待验证项\n")
     lines.append("- 财务口径（HKFRS vs CAS）跨市场对比须折算与准则注记")
     lines.append("- CCASS 持仓/沽空数据：公开可查但未接入（南向资金已接入——见模块 3；源见 data-interface-map A4/B 节）")
-    lines.append("- 交易日历：已接入港股日历变体（`hk_calendar.py`，tushare hk_tradecal）；"
-                 "节假日以交易日历为准，自然日仅作粗判\n")
+    lines.append("- 报告日/时间戳取自**自然日**口径（`dates.shanghai_today`）；港股交易日历变体"
+                 "（`hk_calendar.py`）已就位但**报告链路尚未调用**——节假日/休市日"
+                 "不能据本报告日期反推\n")
     lines.append(_MODULE8.format(
         ts=q.get("ts"), sb_source=(sb.get("source") or "不可得"),
         sb_date=((sb.get("rows") or [{}])[-1].get("date") or "—") if sb.get("available") else "—"))
@@ -559,7 +616,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     name = str(q.get("name") or code)
     path = _write_report(args, code, name, body)
     print(f"📝 报告: {path}\n")
-    print(body[:4000])
+    # 不再截断 stdout：v2 正文已超 4k，截断会把模块 6/7/8 与**免责声明**一起切掉
+    # （终端看到的版本比落盘版少一截，且被切处看起来像输出损坏）
+    print(body)
     return 0
 
 
@@ -679,15 +738,21 @@ def _collect_side(code: str) -> dict:
                             ("price", "chg_pct", "pe_ttm", "mcap_hkd_yi", "low_52w", "high_52w")}
 
     y = hk_yfinance.fetch_info(code)
-    pb_cur = y.get("pb")
+    # ⚠️ NaN 也要按「不可得」处理：`percentile_position` 的守卫是
+    # `cur is None or cur <= 0`，NaN 两个比较都为 False → 会算出一个
+    # **引擎从未产出过的 0.0 分位**并当作真实位置展示
+    pb_cur = _safe_num(y.get("pb"))
     if pb_cur is None:
         side["notes"].append("当前 PB 不可得（yfinance 需代理可达）→ PB 序列分位无法计算")
     for indicator, key, cur in (("市盈率(TTM)", "pe", q.get("pe_ttm")), ("市净率", "pb", pb_cur)):
         try:
             series = hk_valuation.fetch_valuation_series(code, indicator, "近五年")
             pos = hk_valuation.percentile_position(series, cur)
+            # n=0 表示「序列本身不可得」，不是「量到 0 个交易日」——必须转三态，
+            # 否则对照表会出现「PE 序列交易日数 0」这种把缺数据说成实测计数的行
+            n = pos.get("n")
             side["valuation_pctl"][key] = {"pct": pos.get("pct"), "median": pos.get("median"),
-                                           "n": pos.get("n")}
+                                           "n": None if not n else n}
         except Exception as exc:  # noqa: BLE001 —— 单维降级，不阻断对照
             side["notes"].append(f"{indicator} 序列不可得（{type(exc).__name__}）")
 
@@ -701,11 +766,14 @@ def _collect_side(code: str) -> dict:
     if rows:
         r0 = rows[0]
         # 元 → 亿（P0：派生值带 calc 标签，见 hk_compare._ROW_SPECS）
+        # ⚠️ 必须与 _yi/_self_yoy 同款容错：源是东财原值、**可能非数值**
+        # （占位串 / '1,234' / NaN），裸 `/1e8` 会让 compare 整条命令崩掉，
+        # 且 NaN 会穿过除法被渲染成字面 "nan"（展示为一个「算出来的」值）
         side["financials"]["latest"] = {
             "report_date": r0.get("report_date"),
-            "revenue_yi": (r0["revenue"] / 1e8) if r0.get("revenue") is not None else None,
-            "net_profit_yi": (r0["net_profit"] / 1e8) if r0.get("net_profit") is not None else None,
-            "roe": r0.get("roe"),
+            "revenue_yi": _safe_yi(r0.get("revenue")),
+            "net_profit_yi": _safe_yi(r0.get("net_profit")),
+            "roe": _safe_num(r0.get("roe")),
         }
     else:
         side["notes"].append("财务摘要空返回（HK 无季报制度，或该标的无数据）")
@@ -767,6 +835,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
              "口径差异（快照时点/报表期间/序列窗口）见各行注记。\n"]
     lines.extend(hk_compare.render_compare_table(cmp))
     lines.append("")
+    if cmp.get("unavailable"):
+        lines.append(f"⚠️ 不可得维度：{' / '.join(cmp['unavailable'])}"
+                     "（该维全部单元格为「—」）——不推断、不裁剪，按三态并列展示。")
+        lines.append("")
     for label, side in (("左", left), ("右", right)):
         if side["notes"]:
             lines.append(f"- ⚠️ {label}侧（{side['code']}）：" + "；".join(side["notes"]))
@@ -781,7 +853,29 @@ def cmd_compare(args: argparse.Namespace) -> int:
     path = _write_report(args, f"{codes[0]}-{codes[1]}", "compare", body)
     print(f"📝 报告: {path}\n")
     print(body)
-    return 1 if (left["snapshot"] is None or right["snapshot"] is None) else 0
+    # 「关键维度不可得」须由**维度级**信号决定：只看 snapshot 会让
+    # 「估值/财务/技术三维全空、20 个单元格 12 个是 —」仍返回 0（正常），
+    # 调用方据此以为跑完整了。cmp["unavailable"] 正是这个信号，必须消费。
+    degraded = (left["snapshot"] is None or right["snapshot"] is None
+                or bool(cmp.get("unavailable")))
+    return 1 if degraded else 0
+
+
+def _safe_num(v):
+    """数值 → float；None / 非数值 / NaN → None（三态，**不让 NaN 冒充数值**）。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+def _safe_yi(v):
+    """元 → 亿元；非数值 / NaN → None（与 `_yi` 同容错口径，但返回数值而非字符串）。"""
+    f = _safe_num(v)
+    return None if f is None else f / 1e8
 
 
 def _pct(v):

@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 
 import pytest
-from conftest import load_hk_cli
+from _hk_cli import load_hk_cli
 
 import hk_compare as hc
 
@@ -132,16 +132,33 @@ def test_compare_rejects_invalid_hk_symbol(monkeypatch, tmp_path, capsys):
     assert "❌" in capsys.readouterr().err
 
 
-def _stub_sides(monkeypatch, *, right_ok=True, pb=3.3):
+def _kline_rows(n=80):
+    """合成 K 线（≥60 行才能算出 MA60）——走真实 technical.compute，避免假形状。"""
+    return [{"trade_date": f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+             "open": 100.0 + i * 0.1, "close": 100.0 + i * 0.1,
+             "high": 101.0 + i * 0.1, "low": 99.0 + i * 0.1, "vol": 1.0e6}
+            for i in range(n)]
+
+
+_FIN_ROW = {"report_date": "2026-06-30", "revenue": 1.2e11, "net_profit": 3.4e10, "roe": 12.5}
+
+
+def _stub_sides(monkeypatch, *, right_ok=True, pb=3.3, fin=None, kline=True):
+    """默认**四维齐备**：维度全空会让 cmd_compare 正确地返回 1（关键维度不可得），
+    故需要 0 的用例必须显式给数据，而不是靠空桩碰巧通过。"""
     hk_mod = load_hk_cli()
     monkeypatch.setattr(hk_mod, "_snapshot_row", lambda s: dict(
         {"price": 600.0, "name": f"标的{s}", "ts": "20991231", "pe_ttm": 20.0,
          "chg_pct": 1.0, "mcap_hkd_yi": 50000.0, "low_52w": 400.0, "high_52w": 700.0})
         if (right_ok or s != "09988") else {"error": "快照不可得"})
     monkeypatch.setattr(hk_mod.hk_yfinance, "fetch_info", lambda s: ({"pb": pb} if pb else {}))
-    monkeypatch.setattr(hk_mod.hk_valuation, "fetch_valuation_series", lambda *a, **kw: [])
-    monkeypatch.setattr(hk_mod.hk_financials, "fetch_financials", lambda s: [])
-    monkeypatch.setattr(hk_mod.hk_kline, "fetch_kline", lambda *a, **kw: {"data": []})
+    monkeypatch.setattr(hk_mod.hk_valuation, "fetch_valuation_series",
+                        lambda *a, **kw: [{"date": f"2025-01-{i:02d}", "value": float(i)}
+                                          for i in range(1, 11)])
+    monkeypatch.setattr(hk_mod.hk_financials, "fetch_financials",
+                        lambda s: [dict(fin or _FIN_ROW)])
+    monkeypatch.setattr(hk_mod.hk_kline, "fetch_kline",
+                        lambda *a, **kw: {"data": _kline_rows() if kline else []})
     return hk_mod
 
 
@@ -149,7 +166,8 @@ def test_compare_writes_to_disk(monkeypatch, tmp_path, capsys):
     hk_mod = _stub_sides(monkeypatch)
     assert hk_mod.cmd_compare(_args(tmp_path)) == 0
     out = capsys.readouterr().out
-    assert "Python calc" in out or "口径" in out
+    # 断言须可失败：原先 `... or "口径" in out` 因静态免责句含「口径」而恒真
+    assert "Python calc" in out, "派生行须带公式标签"
     files = list(tmp_path.glob("00700-09988-compare/*.md"))
     assert files, "compare 须落盘（与 report 同契约）"
     body = files[0].read_text(encoding="utf-8")
@@ -161,20 +179,45 @@ def test_compare_writes_to_disk(monkeypatch, tmp_path, capsys):
 def test_compare_pb_percentile_uses_current_pb(monkeypatch, tmp_path):
     """PB 分位需要**当前 PB** 才能算——不提供当前值会让该行永远显示「—」（实测踩坑）。"""
     hk_mod = _stub_sides(monkeypatch)
-    monkeypatch.setattr(hk_mod.hk_valuation, "fetch_valuation_series",
-                        lambda *a, **kw: [{"date": f"2025-01-{i:02d}", "value": float(i)}
-                                          for i in range(1, 11)])
     assert hk_mod.cmd_compare(_args(tmp_path)) == 0
     body = list(tmp_path.glob("00700-09988-compare/*.md"))[0].read_text(encoding="utf-8")
     row = next(ln for ln in body.splitlines() if "PB 序列分位" in ln)
     assert "—" not in row, "当前 PB 已提供时分位不得为不可得"
 
 
+def test_compare_nan_pb_is_not_a_fabricated_percentile(monkeypatch, tmp_path):
+    """PB 为 NaN 时须三态：`percentile_position` 的守卫对 NaN 失效
+    （`cur is None or cur <= 0` 两个比较均为 False）→ 会算出**引擎从未产出过的 0.0 分位**。"""
+    hk_mod = _stub_sides(monkeypatch, pb=float("nan"))
+    assert hk_mod.cmd_compare(_args(tmp_path)) == 0
+    body = list(tmp_path.glob("00700-09988-compare/*.md"))[0].read_text(encoding="utf-8")
+    row = next(ln for ln in body.splitlines() if "PB 序列分位" in ln)
+    assert "+0.0%" not in row, "NaN 不得被算成 0 分位"
+    assert "当前 PB 不可得" in body
+
+
+def test_compare_non_numeric_financials_do_not_crash(monkeypatch, tmp_path):
+    """东财原值可能非数值（占位串/'1,234'）——裸 `/1e8` 会让整条命令崩且不落盘。"""
+    hk_mod = _stub_sides(monkeypatch, fin={"report_date": "2026-06-30", "revenue": "1,234",
+                                           "net_profit": "n/a", "roe": "—"})
+    assert hk_mod.cmd_compare(_args(tmp_path)) == 0
+    body = list(tmp_path.glob("00700-09988-compare/*.md"))[0].read_text(encoding="utf-8")
+    assert "nan" not in body.lower(), "NaN 不得渲染成字面 nan"
+    assert "n/a" not in body
+
+
+def test_compare_unavailable_dimension_returns_1(monkeypatch, tmp_path):
+    """维度全空（如估值/财务/技术均不可得）须返回 1——只看 snapshot 会让调用方以为跑完整了。"""
+    hk_mod = _stub_sides(monkeypatch, kline=False)
+    monkeypatch.setattr(hk_mod.hk_valuation, "fetch_valuation_series", lambda *a, **kw: [])
+    monkeypatch.setattr(hk_mod.hk_financials, "fetch_financials", lambda s: [])
+    assert hk_mod.cmd_compare(_args(tmp_path)) == 1
+    body = list(tmp_path.glob("00700-09988-compare/*.md"))[0].read_text(encoding="utf-8")
+    assert "不可得维度" in body, "报告须显式列出不可得维度"
+
+
 def test_compare_pb_unavailable_is_three_state_with_note(monkeypatch, tmp_path):
     hk_mod = _stub_sides(monkeypatch, pb=None)
-    monkeypatch.setattr(hk_mod.hk_valuation, "fetch_valuation_series",
-                        lambda *a, **kw: [{"date": f"2025-01-{i:02d}", "value": float(i)}
-                                          for i in range(1, 11)])
     assert hk_mod.cmd_compare(_args(tmp_path)) == 0
     body = list(tmp_path.glob("00700-09988-compare/*.md"))[0].read_text(encoding="utf-8")
     assert "当前 PB 不可得" in body, "缺当前值须显式说明，不静默留空"
@@ -199,14 +242,25 @@ def test_coverage_summary_is_7_of_7():
     assert {i["module"] for i in cs["items"]} >= {"0", "1", "2", "3b", "3c", "4", "5", "6", "7", "8"}
 
 
-@pytest.mark.parametrize("module", ["1", "3", "5", "6", "7", "8"])
-def test_report_renders_each_covered_module_section(monkeypatch, tmp_path, module):
-    """无静默缺节：标「已覆盖」的引擎侧模块必须有真实节标题落地。"""
+def test_coverage_anchors_are_all_rendered(monkeypatch, tmp_path):
+    """无静默缺节：**从 coverage_summary() 派生**待核清单（不硬编码模块号——
+    硬编码会恰好漏掉唯一不合格的那个模块，让声明不可证伪）。"""
     hk_mod = load_hk_cli()
     body = _render_report(hk_mod, monkeypatch, tmp_path)
-    item = next(i for i in hk_mod.coverage_summary()["items"] if i["module"] == module)
-    assert item["anchor"], f"模块 {module} 标已覆盖却无落地锚点"
-    assert item["anchor"] in body, f"模块 {module} 静默缺节（找不到 {item['anchor']}）"
+    anchors = [i for i in hk_mod.coverage_summary()["items"] if i["anchor"]]
+    assert len(anchors) >= 6, "引擎侧锚点数量异常"
+    for item in anchors:
+        assert item["anchor"] in body, f"模块 {item['module']} 静默缺节（找不到 {item['anchor']}）"
+
+
+def test_unanchored_covered_modules_are_declared_not_counted_as_engine():
+    """模块 0 无引擎节：须在报告里**显式说明**，且不计入「引擎侧可核验」数——
+    否则 7/7 会把「无节可核」的项也计入，使「无静默缺节」变成装饰性声明。"""
+    hk_mod = load_hk_cli()
+    cs = hk_mod.coverage_summary()
+    assert cs["unanchored"] == ["0"], "预期只有模块 0 无引擎节"
+    assert cs["engine_covered"] == cs["covered"] - 1
+    assert cs["engine_covered"] < cs["mappable"]
 
 
 def test_report_declares_uncovered_modules_with_reason(monkeypatch, tmp_path):

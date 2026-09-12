@@ -71,6 +71,65 @@ def test_parse_hist_rows_nan_net_is_none_not_zero():
     assert rows[1]["net_buy_yi"] is None, "缺失净额须三态（None），不得填 0.0"
 
 
+def test_parse_hist_rows_pandas_nat_does_not_crash():
+    """NaT 是 datetime 的伪子类，`NaT.strftime()` 抛 ValueError——
+    自实现 isinstance 分支会让日期脏值一路冒到 cmd_report 把整份报告打崩。"""
+    df = _hist_frame()
+    df.loc[0, "日期"] = pd.NaT
+    rows = sb.parse_hist_rows(df)
+    assert [r["date"] for r in rows] == ["2026-09-11"], "NaT 行按不可解析跳过"
+
+
+def test_summary_nat_date_is_none_not_crash(monkeypatch):
+    """NaT 是 datetime 的伪子类：`NaT.strftime()` 抛 ValueError。
+    自实现 isinstance 分支时该异常会穿透 southbound_summary（其 try 只包取数）
+    一路冒到 cmd_report——整份报告崩且不留档。"""
+    frame = _summary_frame()
+    frame["交易日"] = pd.NaT
+    monkeypatch.setattr(sb, "_fetch_summary_df", lambda: frame)
+    out = sb.southbound_summary()          # 不得抛
+    assert out["available"] is True, "净额仍可解析 → 仍算可得"
+    assert out["date"] is None, "NaT 日期须为 None（三态），不得崩溃"
+
+
+def test_cross_check_uses_latest_common_date(monkeypatch):
+    """两源末行日期常不一致 → 必须取**共有最新日**对照，
+    否则 cross_check 恒返回「不可比」，交叉核对形同虚设。"""
+    def _fake_hist(symbol):
+        base = _hist_frame()
+        if symbol == "港股通深":
+            base["当日成交净买额"] = [12.3868, 12.3911]
+        return base
+
+    monkeypatch.setattr(sb, "_fetch_hist_df", _fake_hist)
+    monkeypatch.setattr(sb, "_fetch_summary_df", _summary_frame)
+    # tushare 多出一行更晚的日期（09-12），末行日期与 akshare 不同
+    monkeypatch.setattr(sb, "_fetch_tushare_df", lambda days: pd.DataFrame([
+        {"trade_date": "20260909", "ggt_ss": 32014.6, "ggt_sz": 22918.14, "south_money": 54932.73},
+        {"trade_date": "20260910", "ggt_ss": 32057.2, "ggt_sz": 22921.04, "south_money": 54978.24},
+        {"trade_date": "20260911", "ggt_ss": 32089.12, "ggt_sz": 22933.43, "south_money": 55022.55},
+    ]))
+    out = sb.fetch_southbound(days=20)
+    assert out["cross"] is not None, "共有日期存在却未对照"
+    assert out["cross"]["comparable"] is True
+    assert out["cross"]["consistent"] is True
+
+
+def test_summary_only_fallback_requires_actual_net_values(monkeypatch):
+    """汇总帧有行但净额列全空 → 不得判 available=True（否则报告出
+    「可得（合计 — 亿）」并**抑制** LAW 5 的不可得标注）。"""
+    def _boom(*a, **kw):
+        raise RuntimeError("不可用")
+
+    frame = _summary_frame()
+    frame["成交净买额"] = None
+    monkeypatch.setattr(sb, "_fetch_hist_df", _boom)
+    monkeypatch.setattr(sb, "_fetch_tushare_df", _boom)
+    monkeypatch.setattr(sb, "_fetch_summary_df", lambda: frame)
+    out = sb.fetch_southbound(days=20)
+    assert out["available"] is False and out["reason"]
+
+
 def test_parse_hist_rows_sorted_ascending():
     df = _hist_frame().iloc[::-1]          # 倒序输入
     rows = sb.parse_hist_rows(df.reset_index(drop=True))
@@ -237,6 +296,10 @@ def test_degradation_chain_to_tushare_cross(monkeypatch):
         raise RuntimeError("akshare 不可用")
 
     monkeypatch.setattr(sb, "_fetch_hist_df", _boom)
+    # ⚠️ 三个叶子都必须注入：fetch_southbound 无条件调用三者，
+    # 漏掉任何一个都会让「离线单测」实际打真实网络（实测：漏 _fetch_summary_df 时
+    # 本测试向 datacenter-web.eastmoney.com 开 8 条连接）
+    monkeypatch.setattr(sb, "_fetch_summary_df", _summary_frame)
     monkeypatch.setattr(sb, "_fetch_tushare_df", lambda days: pd.DataFrame([
         {"trade_date": "20260910", "ggt_ss": 32057.2, "ggt_sz": 22921.04, "south_money": 54978.24},
         {"trade_date": "20260911", "ggt_ss": 32089.12, "ggt_sz": 22933.43, "south_money": 55022.55},

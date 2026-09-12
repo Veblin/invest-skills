@@ -17,22 +17,4 @@ for p in (_SKILLS_LIB, _LIB):
     if s not in sys.path:
         sys.path.insert(0, s)
 
-
-def load_hk_cli():
-    """按**文件路径**加载 CLI 模块（单例，跨测试文件共享）。
-
-    不能 `import hk`：conftest 只注入 lib 目录，且刻意不插 `scripts/` 根
-    （避免 `import lib` 抢先命中本 skill 而非共享层）。CLI 自身在 import 时
-    完成路径引导（_LIB + ensure_*），故用 importlib 按路径加载最干净。
-    """
-    import importlib.util
-
-    name = "hk_cli_under_test"
-    if name in sys.modules:
-        return sys.modules[name]
-    p = _SKILL_ROOT / "scripts" / "hk.py"
-    spec = importlib.util.spec_from_file_location(name, p)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+# CLI 加载器见 `_hk_cli.py`（唯一命名模块；conftest 同名跨技能会互相覆盖）。
