@@ -210,3 +210,37 @@ def test_dispersion_proxy_note_reaches_serialized_env():
     mm._compute_labels_v2(snap, _history())
     env = json.loads(snap["env_label"])
     assert "非 Pollet-Wilson 口径" in env["dispersion"]["avg_correlation"]["proxy_note"]
+
+
+# ── 自审三处（与评审同族缺陷）────────────────────────────────────────────
+
+def test_today_row_not_double_counted():
+    """历史含今日行时不得双计（模块既有 `hist_ex_today` 惯例）。
+    双计会让今日同时进「历史序列」与「当前值」，分位被自身拉偏。"""
+    snap = _snap(date="2026-08-30", ad_ratio=1.0, lu_ld_ratio=1.0)
+    hist = _history(30) + [_snap(date="2026-08-30", ad_ratio=1.0, lu_ld_ratio=1.0)]
+    trend_with_dup = mm.compute_market_form(snap, hist)["vector"]["turnover_trend"]
+    hist_clean = _history(30)
+    trend_clean = mm.compute_market_form(snap, hist_clean)["vector"]["turnover_trend"]
+    assert trend_with_dup == pytest.approx(trend_clean), "今日行被双计"
+
+
+def test_form_history_does_not_double_count_current_row():
+    """market_form_history 逐行用 `prior = rows[:i]`——自身不得出现在自己的历史里。"""
+    rows = _history(40)
+    out = mm.market_form_history(history=rows)
+    assert out["n_days"] == 40
+
+
+def test_rotation_speed_ignores_negative_index():
+    """轮动速度的窗口须从 k=2 起（`range(1,…)` + `k>=2` 会先算 lu_hist[-1]）。"""
+    # ⚠️ 序列须**真单调**：`[10…100]*3` 会在块边界回落（100→10），那是 4 次真实切换
+    hist = [{"date": f"2026-08-{i + 1:02d}", "limit_up_count": i + 1} for i in range(30)]
+    out = mm.compute_dispersion(_snap(limit_up_count=31), hist, index_series=None)
+    assert out["rotation_speed"]["value"] == 0.0, "单调序列不应有方向切换"
+
+    # 反向对照：锯齿序列应有切换（防「恒 0」假绿）
+    saw = [{"date": f"2026-08-{i + 1:02d}", "limit_up_count": 10 if i % 2 else 50}
+           for i in range(30)]
+    out2 = mm.compute_dispersion(_snap(limit_up_count=50), saw, index_series=None)
+    assert out2["rotation_speed"]["value"] > 0

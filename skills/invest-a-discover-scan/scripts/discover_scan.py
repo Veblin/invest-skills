@@ -107,16 +107,17 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
             continue
         if not q["pass"]:
             continue
+        # ⚠️ 只用 `p_change_max`（净利**同比增速**上限，百分数）——可加总/可比。
+        # **不得**回退到 `net_profit_max`：那是净利润的**绝对金额**，与
+        # `g_implied`（百分比）相比是量纲错误，会得到一个恒真的假「满足」
         peers_fc_max = None
         if fc:
-            for key in ("p_change_max", "net_profit_max"):
-                v = fc[0].get(key)
-                if v is not None:
-                    try:
-                        peers_fc_max = float(v)
-                    except (TypeError, ValueError):
-                        peers_fc_max = None
-                    break
+            v = fc[0].get("p_change_max")
+            if v is not None:
+                try:
+                    peers_fc_max = float(v)
+                except (TypeError, ValueError):
+                    peers_fc_max = None
         flags = lenses.gap_flags(ey=r["ey_pct"], rf_pct=rf_pct, pe_ttm=r["pe_ttm"],
                                  forecast_growth_max_pct=peers_fc_max)
         mv = r.get("total_mv")

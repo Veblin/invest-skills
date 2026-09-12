@@ -472,7 +472,9 @@ def compute_market_form(snap: dict, history: list[dict]) -> dict:
     - 「杀跌后观察」= **突破选择期语境下的条件性上下文**，不是第四形态
     - 数据不足 → ``available=False`` + ``missing``，form 仍取默认填充态（不臆造）
     """
-    hist = history or []
+    # ⚠️ 先剔除历史中**今日已持久化行**再算分位/趋势：load_history 含今日行时，
+    # 今日会被计两次（模块既有的「今日双计防回归」同型——见 _compute_labels_v2 用法）
+    hist = hist_ex_today(history or [], snap.get("date"))
     ad_hist = [h.get("ad_ratio") for h in hist if h.get("ad_ratio") is not None]
     ad = snap.get("ad_ratio")
     ad_p = _pctile(ad_hist, ad) if ad is not None else None
@@ -575,7 +577,7 @@ def compute_dispersion(snap: dict, history: list[dict],
     ``avg_correlation`` 是**指数级滚动相关的工程 proxy**，与 Pollet-Wilson (2010)
     的个股日收益平均相关口径不同（``proxy_note`` 强制随字段走）。
     """
-    hist = history or []
+    hist = hist_ex_today(history or [], snap.get("date"))
     out: dict = {"available": True, "missing": [], "sample": f"{len(hist)} 个快照"}
     out["index_dispersion"] = {"value": None, "pctile": None,
                                "window": 20, "n_index": 0}
@@ -623,9 +625,10 @@ def compute_dispersion(snap: dict, history: list[dict],
         cur = snap.get("limit_up_count")
         if cur is not None:
             lu_hist = lu_hist + [cur]
-        switches = sum(1 for k in range(1, len(lu_hist))
-                       if (lu_hist[k] > lu_hist[k - 1]) != (lu_hist[k - 1] > lu_hist[k - 2])
-                       if k >= 2)
+        # 从 k=2 起：需要 k-2 作比较基准；写作 `range(1, …)` + `if k>=2` 会让
+        # k=1 时先算 lu_hist[-1]（负索引取到末元素，语义错误只是碰巧不崩）
+        switches = sum(1 for k in range(2, len(lu_hist))
+                       if (lu_hist[k] > lu_hist[k - 1]) != (lu_hist[k - 1] > lu_hist[k - 2]))
         out["rotation_speed"] = {"value": switches / max(1, len(lu_hist) - 1),
                                  "pctile": None, "window": len(lu_hist),
                                  "note": "涨停家数方向切换频率（快照历史口径）"}
