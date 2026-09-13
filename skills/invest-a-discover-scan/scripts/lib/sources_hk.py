@@ -19,6 +19,7 @@ requirements §3.4 建议 universe 取「港股通/恒指成分 v0 口径」—�
 from __future__ import annotations
 
 import datetime as _dt
+import importlib
 import importlib.util
 import logging
 import math
@@ -52,15 +53,22 @@ def reset_warnings() -> None:
 
 
 def _load_hk_module(name: str):
-    """按**显式路径**加载 invest-hk-stock 的 lib 模块（复用其客户端与解析器）。
+    """加载 HK 复用模块，优先使用随 discover-scan 分发包携带的副本。
 
-    仿 `invest_path.load_gap_scan_module` 的既有惯例：不复制解析逻辑，
-    缺失时**显式抛错**而非静默降级（换源/搬迁时能立刻发现）。
+    主仓库中仍按显式路径复用 `invest-hk-stock` 的 canonical 实现，避免维护两份。
+    SkillHub 单包构建会把动态依赖及其闭包置于本目录；此时必须经包相对导入
+    取本地副本，不能再假定 sibling skill 存在。
     """
     mod_name = f"discover_hk_{name}"
     mod = sys.modules.get(mod_name)
     if mod is not None:
         return mod
+    local = Path(__file__).resolve().with_name(f"{name}.py")
+    if local.is_file() and __package__:
+        mod = importlib.import_module(f".{name}", package=__package__)
+        sys.modules[mod_name] = mod
+        return mod
+
     lib = Path(__file__).resolve().parents[3] / "invest-hk-stock" / "scripts" / "lib"
     spec = importlib.util.spec_from_file_location(mod_name, lib / f"{name}.py")
     if spec is None or spec.loader is None:

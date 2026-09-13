@@ -147,7 +147,22 @@ CROSS_LIBS: dict[str, list[str]] = {
     # （rf_10y_pct 的 akshare 直连上下文）与 lib.env（token 读取）；包内无该引导
     # → 一并闭包并入。缺 tushare_client → 全链路恒空返回（退 3）；
     # 缺 cache → stock_basic 缓存失效（每次全量拉取）。
-    "invest-a-discover-scan": ["invest-a-stock"],
+    # `sources_hk` loads three HK modules dynamically. Keep the HK source in the
+    # resolution universe as well as seeding those modules below, so their own
+    # imports (hk_codes / calendar dependencies) close transitively in the package.
+    "invest-a-discover-scan": ["invest-a-stock", "invest-hk-stock"],
+}
+
+# 运行时由 importlib/显式路径加载、因而无法从 AST import 边取得的模块。它们仍须
+# 进入单包的 scripts/lib/，否则包内 advertised 的路径会在首次 HK 调用时才失败。
+# discover-scan 的 loader 在包内优先用这些副本；主仓库继续指向 HK skill 的 canonical
+# 文件，故此列表同时是「动态跨 skill 依赖」的显式分发契约。
+DYNAMIC_MODULE_SEEDS: dict[str, list[tuple[str, str]]] = {
+    "invest-a-discover-scan": [
+        ("invest-hk-stock", "hk_quote"),
+        ("invest-hk-stock", "hk_financials"),
+        ("invest-hk-stock", "hk_calendar"),
+    ],
 }
 
 # SKILL.md 正文中的跨 skill 路径改写（包内副本）
@@ -474,6 +489,19 @@ class _Closure:
             r = self.resolve(target)
             if r:
                 self._enqueue(target, r)
+        # Dynamic loaders are intentionally explicit: a string/f-string module name cannot
+        # be reliably discovered from the import AST. Resolve from the named source rather
+        # than the general universe so a same-named local shim cannot replace canonical HK.
+        for source_key, target in DYNAMIC_MODULE_SEEDS.get(self.skill_name, []):
+            source = f"cross:{source_key}"
+            maps = self._by_source.get(source)
+            if maps is None:
+                raise SystemExit(f"{self.skill_name}: 动态依赖源不存在: {source_key}")
+            module_map, package_inits = maps
+            f = module_map.get(target) or package_inits.get(target)
+            if f is None:
+                raise SystemExit(f"{self.skill_name}: 动态依赖缺失: {source_key}/{target}.py")
+            self._enqueue(target, (source, f))
 
     def add_mandated_tools(self, md_text: str) -> None:
         """SKILL.md 以命令行形式强制的共享工具入闭包（含其动态依赖）。

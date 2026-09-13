@@ -65,6 +65,15 @@ def test_build_compare_none_is_dash_not_zero():
     assert "0" not in (rows["PE(TTM)"]["right"], rows["MA20"]["right"])
 
 
+def test_build_compare_dimension_available_when_a_later_metric_exists():
+    """可用性必须遍历整个维度，不能把第一条 PE 行当作维度哨兵。"""
+    left, right = _side("00700", "腾讯控股"), _side("09988", "阿里巴巴")
+    left["valuation_pctl"]["pe"] = None
+    right["valuation_pctl"]["pe"] = None
+    # PB 分位/中位仍有数据；此前实现只看「PE 序列分位」而误报整个估值位置不可得。
+    assert "估值位置" not in hc.build_compare(left, right)["unavailable"]
+
+
 def test_build_compare_records_derived_rows_with_formula():
     """派生项（元→亿）必须带 calc 公式标签，不得以「引擎字段」面貌出现。"""
     cmp = hc.build_compare(_side("00700", "腾讯控股"), _side("09988", "阿里巴巴"))

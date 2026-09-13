@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-event-calendar
-version: "0.2.9"
+version: "0.3.0"
 description: "事件日历 v3 — 定期事件前瞻（宏观日程：中美 CPI/社零/非农/议息）+ 限售解禁排雷（池模式清单池下钻 + 市场模式日级分位）。研究工具非决策。触发词：事件日历/宏观日历/经济数据日程/CPI日程/议息会议/解禁日历/解禁压力/限售股解禁"
 whenToUse: "查未来一段时间有哪些定期事件（'下周有什么数据''什么时候议息'）、持仓/自选池排雷（'我的票哪天解禁'）、或低频查看全市场解禁压力分布（解禁≠减持，与减持公告联动）"
 argument-hint: "/invest-a-event-calendar --macro ｜ --pool-file pool.txt ｜ --theme <题材>"

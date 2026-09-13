@@ -369,6 +369,28 @@ def test_event_calendar_package_build_closure(tmp_path):
     assert (dst / "references/macro_sources.yaml").is_file()
 
 
+def test_discover_package_bundles_dynamic_hk_modules(tmp_path):
+    """单独分发的 discover-scan 也必须能运行其 advertised 的 --pool hk。"""
+    total = b.build_one("invest-a-discover-scan", b.project_version(), tmp_path, dry_run=False)
+    assert 0 < total <= b.MAX_FILES
+    dst = tmp_path / "invest-a-discover-scan"
+    lib = dst / "scripts" / "lib"
+    for name in ("hk_quote", "hk_financials", "hk_calendar", "hk_codes"):
+        assert (lib / f"{name}.py").is_file(), f"动态 HK 依赖未随包: {name}"
+
+    # 以包内 import 形态加载，证明 loader 会选取本地副本而非解析不存在的 sibling skill。
+    code = (
+        f"import sys; sys.path.insert(0, r'{dst / 'scripts'}')\n"
+        "from lib import sources_hk\n"
+        "mod = sources_hk._load_hk_module('hk_quote')\n"
+        "assert str(mod.__file__).endswith('/scripts/lib/hk_quote.py')\n"
+        "print('OK')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, f"包内 HK loader 失败:\n{proc.stderr[-2000:]}"
+    assert "OK" in proc.stdout
+
+
 # ---- (e3) SKILL.md 强制工具（report_qc「机器层准出」）进包 ----
 def _mandating_skills() -> list[str]:
     return sorted(p.parent.name for p in b.SKILLS_DIR.glob("*/SKILL.md")

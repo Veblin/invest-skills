@@ -1,6 +1,6 @@
 ---
 name: invest-a-discover-scan
-version: "0.2.9"
+version: "0.3.0"
 description: "低估发现扫描 — 多透镜粗筛（L1 横截面便宜 + L3 定价-盈利 gap + 质量中过滤）→ 研究观察短清单（≤15 只，逐只理由 + 下钻命令）→ 私有快照留档供事后回填。研究信号，非决策。触发词：低估/发现/便宜/估值扫描/找机会/筛股"
 whenToUse: "低估/发现/便宜/估值扫描：从全 A（主板+创业+科创）粗筛出低估值候选短清单，再下钻 invest-a-stock 深判"
 argument-hint: "/invest-a-discover-scan [--top 15] [--with-bj] [--no-out]"

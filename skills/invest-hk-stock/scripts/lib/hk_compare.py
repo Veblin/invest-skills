@@ -88,18 +88,16 @@ def build_compare(left: dict, right: dict) -> dict:
         rows.append({"dimension": dimension, "metric": metric, "unit": unit, "calc": calc,
                      "left_raw": lv, "right_raw": rv,
                      "left": _fmt(lv, unit), "right": _fmt(rv, unit)})
+    # 一个维度的首行只是展示顺序，不是可用性哨兵。例如 PE 分位缺失而 PB 分位
+    # 已有值时，若只检查首行会把整块「估值位置」误标为不可得，并让 CLI 错退 1。
     unavailable = [d for d in DIMENSIONS
-                   if all(_dig(side, _first_path(d)) is None for side in (left, right))]
+                   if not any(row["dimension"] == d
+                              and (row["left_raw"] is not None
+                                   or row["right_raw"] is not None)
+                              for row in rows)]
     return {"left_code": left.get("code"), "right_code": right.get("code"),
             "left_name": left.get("name"), "right_name": right.get("name"),
             "rows": rows, "unavailable": unavailable}
-
-
-def _first_path(dimension: str) -> tuple[str, ...]:
-    for dim, _metric, path, _unit, _calc in _ROW_SPECS:
-        if dim == dimension:
-            return path
-    return ()
 
 
 def render_compare_table(cmp: dict) -> list[str]:
