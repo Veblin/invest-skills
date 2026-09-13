@@ -97,11 +97,20 @@ def test_shrink_semantics_restricted():
     assert "禁止" in sem, "须显式禁止映射「支撑成立/不会破位」"
 
 
-def test_shrink_pullback_without_volume_still_needs_depth():
-    """量能不可得时不冒充「缩量」——但仍须满足回踩幅度。"""
+def test_shrink_pullback_without_volume_emits_nothing():
+    """量能不可得 → **不发命中**（深度达标也一样）。
+
+    该特征的定义就是量能条件；缺量仍发命中会被 `pattern_scanner` 计入
+    `shrink_pullback_+h` 规则，等于用「从未观测到量能」的事件检验 C11 缩量假设。
+    """
+    closes = [100.0] + [100 + i * 0.5 for i in range(20)] + [110 - i * 0.9 for i in range(15)]
+    assert fp.detect_shrink_pullback(closes, [None] * len(closes)) == []
+
+
+def test_shrink_pullback_shallow_without_volume_still_empty():
+    """浅回踩 + 无量 → 同样空（两条闸门互不代偿）。"""
     closes = [100.0] + [100 + i * 0.5 for i in range(20)] + [110 - i * 0.1 for i in range(15)]
-    out = fp.detect_shrink_pullback(closes, [None] * len(closes))
-    assert out == [], "浅回踩不应命中（量能不可得也不放宽幅度条件）"
+    assert fp.detect_shrink_pullback(closes, [None] * len(closes)) == []
 
 
 # ── ③ 涨停站上中期均线 ───────────────────────────────────────────────────
@@ -229,15 +238,14 @@ def test_shrink_pullback_caps_and_keeps_most_recent_events():
 
 
 def test_shrink_pullback_nan_volume_is_not_shrink():
-    """量能全为 NaN 时**不得**冒充「缩量」——NaN 会穿过 `is not None` 让
-    `ratio > 阈值` 恒 False，老实现把放量踩踏报成缩量回踩并落盘 NaN。"""
+    """量能全为 NaN → **不得**报「缩量回踩」。
+
+    ⚠️ 两种错法都出现过：① NaN 穿过 `is not None` 让 `ratio > 阈值` 恒 False，
+    把放量踩踏报成缩量并落盘 NaN；② 把「量能不可得」当命中发出（`shrink_ratio=None`）
+    ——两者都会让该事件以 `shrink_pullback` 之名进入 RC 规则矩阵。
+    """
     closes = _lin(100.0, 120.0, 21) + _lin(120.0, 105.0, 15)[1:]
-    vols = [float("nan")] * len(closes)
-    out = fp.detect_shrink_pullback(closes, vols)
-    assert out, "幅度达标仍应命中（只是量能不可得）"
-    for e in out:
-        assert e["detail"]["shrink_ratio"] is None
-        assert e["detail"]["volume_available"] is False
+    assert fp.detect_shrink_pullback(closes, [float("nan")] * len(closes)) == []
 
 
 def test_shrink_pullback_vols_shorter_than_closes_does_not_crash():
@@ -245,3 +253,36 @@ def test_shrink_pullback_vols_shorter_than_closes_does_not_crash():
     closes = _lin(100.0, 120.0, 21) + _lin(120.0, 105.0, 15)[1:]
     out = fp.detect_shrink_pullback(closes, [1000.0] * 10)
     assert isinstance(out, list)
+
+
+# ── ③ 涨停站上均线：板块阈值（轮末评审修复 2026-09-13）──────────────────────
+
+def test_limit_up_detect_pct_derives_from_board_limit():
+    """判定阈值须由法定涨跌幅推导，而不是全池写死 9.8。"""
+    assert fp.limit_up_detect_pct(10.0) == 9.8          # 主板
+    assert fp.limit_up_detect_pct(20.0) == 19.8         # 创业板 / 科创板
+    assert fp.limit_up_detect_pct(30.0) == 29.8         # 北交所
+    assert fp.limit_up_detect_pct(5.0) == 4.8           # 主板 ST
+
+
+def test_detect_all_honours_board_specific_limit():
+    """20% 板的 +12% 不构成涨停——按主板阈值 9.8 会**误报**。
+
+    混用会把 10%+ 的创业板/科创板正常波动当成涨停（C11 预注册明示的坑），
+    并把这些伪事件计入 RC 规则矩阵 `limit_up_above_ma_+h`。
+    """
+    closes = [10.0] * 69 + [11.2]                       # 末根 +12%，且在 MA60 上方
+    def _hits(limit):
+        return [h for h in fp.detect_all(closes, [1000.0] * len(closes),
+                                         limit_up_pct=limit)
+                if h["detail"]["kind"] == "limit_up_above_ma"]
+    assert _hits(fp.limit_up_detect_pct(10.0)), "主板口径下 +12% 属涨停（对照组）"
+    assert not _hits(fp.limit_up_detect_pct(20.0)), "20% 板口径下不得判为涨停"
+
+
+def test_detect_all_accepts_limit_param_and_keeps_default():
+    """默认值保持主板口径（向后兼容），显式传参可覆盖。"""
+    closes = [10.0] * 69 + [11.2]
+    eff = [h for h in fp.detect_all(closes, [1000.0] * len(closes))
+           if h["detail"]["kind"] == "limit_up_above_ma"]
+    assert eff, "默认（主板 9.8）应命中"

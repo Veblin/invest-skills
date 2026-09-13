@@ -154,3 +154,55 @@ def test_scan_hit_retest_placeholder():
     h = ps.ScanHit(ts_code="600176.SH", pattern="double_bottom",
                    endpoint_idx=10, bandwidth=0.5)
     assert h.retest_status is None  # P2 占位
+
+
+# ── 轮末评审修复（2026-09-13）─────────────────────────────────────────────
+
+def test_limit_up_pct_is_board_specific():
+    """涨停阈值须按板块推导（权威表在 `technical.limit_pct_for_symbol`）。
+
+    老实现全池套主板 9.8 → 创业板/科创板（20%）的 10%+ 正常波动被当涨停，
+    伪事件还会进入 RC 规则矩阵 `limit_up_above_ma_+h`。
+    """
+    assert ps._limit_up_pct_for("600176.SH") == 9.8      # 主板
+    assert ps._limit_up_pct_for("300750.SZ") == 19.8     # 创业板
+    assert ps._limit_up_pct_for("688981.SH") == 19.8     # 科创板
+    assert ps._limit_up_pct_for("830799.BJ") == 29.8     # 北交所
+    assert ps._limit_up_pct_for("600176.SH", "*ST 某某") == 4.8   # 主板 ST
+
+
+def test_centered_keeps_legitimate_zero_return():
+    """**合法的 0.0 收益**不得被当成缺失（D1 falsy 陷阱）。
+
+    `(v or baseline) - baseline` 会把停牌/平收这类 0.0 命中记成「与基线持平」，
+    少扣基线 → `reality_check` 置换 p 值系统性偏移。
+    """
+    assert ps._centered(0.0, 0.05) == -0.05
+    assert ps._centered(0.10, 0.05) == 0.05
+    assert ps._centered(None, 0.05) == 0.0               # 缺数据 → 中性
+    assert ps._centered(0.05, 0.05) == 0.0
+
+
+def test_hit_to_dict_emits_evidence_note():
+    """C11 证据注记必须写进 JSON。
+
+    `evidence_note` 是 `detail` 的**兄弟键**（只在 ScanHit 字段里）；原序列化只展开
+    `**h.detail` → 注记永远进不了 `pattern_scan_result.json`，而 SKILL.md 承诺
+    「命中带 evidence_note」且要求报告只引 JSON 字段 → 合规注记在产出物里缺席。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pattern_scan_cli_under_test", _SCRIPT_DIR / "scan.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    hit = ps.ScanHit(ts_code="600176.SH", pattern="shrink_pullback", endpoint_idx=10,
+                     bandwidth=None, detail={"kind": "shrink_pullback", "shrink_ratio": 0.4},
+                     evidence_note="⚠️ 只作筛选，须自家样本后验")
+    row = mod._hit_to_dict(hit)
+    assert row["evidence_note"] == "⚠️ 只作筛选，须自家样本后验"
+    assert row["kind"] == "shrink_pullback", "detail 展开仍须在位"
+    # detail 同名键不得覆盖显式字段
+    hit2 = ps.ScanHit(ts_code="X", pattern="p", endpoint_idx=0, bandwidth=None,
+                      detail={"evidence_note": "伪造"}, evidence_note="真实")
+    assert mod._hit_to_dict(hit2)["evidence_note"] == "真实"

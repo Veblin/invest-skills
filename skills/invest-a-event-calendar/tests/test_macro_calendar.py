@@ -680,3 +680,57 @@ def test_political_table_rejects_rewritten_mechanism_note(tmp_path):
 def test_political_missing_table_is_three_state(tmp_path):
     out = mc.load_political_windows(tmp_path / "nope.yaml")
     assert out["available"] is False and "缺失" in out["reason"]
+
+
+# ── R-D04 政治窗口：fail-soft / 过期标注 / 接线（轮末评审修复 2026-09-13）─────
+
+def _pol(tmp_path, windows_yaml: str, *, note="不确定性窗口：机制证据，方向未知"):
+    p = tmp_path / "political.yaml"
+    p.write_text(f"mechanism_note: {note}\nwindows:\n{windows_yaml}", encoding="utf-8")
+    return p
+
+
+def test_political_malformed_entry_fails_soft(tmp_path):
+    """裸标量条目（YAML 把 `- 2026-11-03` 解析成 date）→ **available=False**，不得 traceback。
+
+    契约写的是「策展表解析失败 → available=False」，而 `w.get(...)` 原在 try 之外
+    → AttributeError 直接冒泡，调用方拿到的是异常而不是可渲染的降级结果。
+    断言须点名**条目结构异常**——泛化的「解析失败」会被 YAML 语法错误顶替，掩盖该分支。
+    """
+    p = _pol(tmp_path, "  - 2026-11-03\n")
+    out = mc.load_political_windows(p, today="2026-09-13")
+    assert out["available"] is False
+    assert "结构异常" in out["reason"], out["reason"]
+    assert out["windows"] == []
+
+
+def test_political_status_marks_expired_not_dropped(tmp_path):
+    """过期条目须**保留并标注**，不得静默消失（策展表自述的维护纪律）。"""
+    p = _pol(tmp_path, (
+        "  - name: 去年选举\n    region: 美国\n    type: 选举\n"
+        "    start: 2025-11-03\n    end: 2025-11-03\n"
+        "  - name: 今年选举\n    region: 美国\n    type: 选举\n"
+        "    start: 2026-11-03\n    end: 2026-11-03\n"
+        "  - name: 会议期\n    region: 中国\n    type: 政策\n"
+        "    start: 2026-09-01\n    end: 2026-09-30\n"))
+    out = mc.load_political_windows(p, today="2026-09-13")
+    assert out["available"] is True
+    st = {w["name"]: w["status"] for w in out["windows"]}
+    assert st == {"去年选举": "已过期", "今年选举": "未开始", "会议期": "进行中"}
+
+
+def test_political_render_shows_status_and_keeps_expired(tmp_path):
+    p = _pol(tmp_path, (
+        "  - name: 去年选举\n    region: 美国\n    type: 选举\n"
+        "    start: 2025-11-03\n    end: 2025-11-03\n"))
+    text = mc.render_political_windows(path=p, today="2026-09-13")
+    assert "状态" in text and "已过期" in text
+    assert "去年选举" in text, "过期窗口不得从输出中消失"
+    assert "方向未知" in text, "机制注记须随输出"
+
+
+def test_political_mechanism_note_without_direction_is_rejected(tmp_path):
+    """机制注记缺「方向未知」→ 拒绝输出（防被改写为方向性表述）。"""
+    p = _pol(tmp_path, "  - name: 甲\n    start: '2026-11-03'\n", note="'可能上涨'")
+    out = mc.load_political_windows(p, today="2026-09-13")
+    assert out["available"] is False and "方向未知" in out["reason"]

@@ -46,6 +46,28 @@ def fetch_daily_and_adj(dates: list[str]):
     return source, daily, adj
 
 
+def _limit_up_pct_for(symbol: str, name: str | None = None) -> float:
+    """按板块推导涨停**判定阈值**（主板 9.8 / 创业板·科创板 19.8 / 北交所 29.8）。
+
+    ⚠️ 阈值表的**唯一权威**是 `technical.limit_pct_for_symbol`（跨 skill 共享；明文禁止
+    另维护前缀表——曾与 gap-scan 出现两份表分歧）。本函数只在其上扣容差。
+    `ts_codes` 不含名称 → 主板 ST（5%）按 10% 兜底：偏保守，不会误报。
+    """
+    from technical import limit_pct_for_symbol  # noqa: PLC0415 —— lib 已在 sys.path
+
+    return feature_patterns.limit_up_detect_pct(limit_pct_for_symbol(symbol, name))
+
+
+def _centered(v, baseline: float) -> float:
+    """命中收益相对全池基线的**中心化**值；缺失/None → 0（中性）。
+
+    ⚠️ 不得写成 `(by_code.get(c, baseline) or baseline) - baseline`：该式（D1 falsy 陷阱）
+    把**合法的 0.0 收益**（停牌/平收这类真实事件）当成缺失、替换为基线 → 该样本
+    少扣基线，`reality_check` 的置换 p 值随之系统性偏移。
+    """
+    return 0.0 if v is None else float(v) - baseline
+
+
 def scan_universe(
     ts_codes: list[str],
     dates: list[str],
@@ -95,7 +117,9 @@ def scan_universe(
         # R-B01：C11 三特征——**每只股票只算一次**（D10），命中流与 forward 共用
         vols_col = ([float(v) for v in kline["vol"].tolist()]
                     if "vol" in kline.columns else [])
-        feat_hits = feature_patterns.detect_all(closes, vols_col)
+        # 涨停阈值须**按板块**给（全池套 9.8 会把创业板/科创板的 10%+ 正常波动当涨停）
+        feat_hits = feature_patterns.detect_all(
+            closes, vols_col, limit_up_pct=_limit_up_pct_for(code))
         for fh in feat_hits:
             hits.append(ScanHit(
                 ts_code=code,
@@ -140,17 +164,13 @@ def scan_universe(
                 baseline = sum(vals) / len(vals) if vals else 0.0
                 # 已扣基准：命中股票收益 − 全池该规则均值（RC 输入要求）；
                 # 无命中股票记 0（中性）
-                rule_matrix[key] = [
-                    (by_code.get(c, baseline) or baseline) - baseline for c in ts_codes
-                ]
+                rule_matrix[key] = [_centered(by_code.get(c), baseline) for c in ts_codes]
     # R-B01：9 条特征规则（3 特征 × 3 窗口）——同样全量物化，保证 RC 规则空间不随数据漂移
     for key in feature_patterns.rule_keys(HORIZONS):
         by_code = per_stock_fwd.get(key, {})
         vals = [v for v in by_code.values() if v is not None]
         baseline = sum(vals) / len(vals) if vals else 0.0
-        rule_matrix[key] = [
-            (by_code.get(c, baseline) or baseline) - baseline for c in ts_codes
-        ]
+        rule_matrix[key] = [_centered(by_code.get(c, baseline), baseline) for c in ts_codes]
     return hits, rule_matrix
 
 

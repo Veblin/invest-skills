@@ -51,7 +51,9 @@ PEAK_WINDOW = 20
 PULLBACK_MIN_PCT = 5.0
 SHRINK_MAX_RATIO = 0.7
 
-LIMIT_UP_PCT = 9.8
+LIMIT_UP_PCT = 9.8            # 主板判定阈值（= 10% 法定 − 容差）；其余板块用
+                              # `limit_up_detect_pct(technical.limit_pct_for_symbol(...))`
+LIMIT_UP_TOL_PCT = 0.2        # 法定涨跌幅 → 判定阈值的容差（最小变动单位四舍五入）
 MID_MA = 60
 
 
@@ -157,11 +159,16 @@ def detect_shrink_pullback(closes: list[float], vols: list[float | None], *,
             continue
         peak_vols = [v for v in vals[max(0, peak_i - 3): peak_i + 4] if v is not None]
         pull_vols = [v for v in vals[peak_i + 1: i + 1] if v is not None]
-        shrink_ratio = None
-        if peak_vols and pull_vols:
-            pv, cv = sum(peak_vols) / len(peak_vols), sum(pull_vols) / len(pull_vols)
-            shrink_ratio = (cv / pv) if pv else None
-        if shrink_ratio is not None and shrink_ratio > shrink_max_ratio:
+        # ⚠️ 量能**不可得 → 不构成「缩量回踩」**（该特征的定义就是量能条件）。
+        # 曾把「无量」当命中发出（`shrink_ratio=None` + `volume_available=False`）——
+        # 该命中会被 `pattern_scanner` 记为 `shrink_pullback` 并进入 RC 规则矩阵
+        # `shrink_pullback_+h`，等于拿**从未观测到量能**的事件去检验 C11 的缩量假设。
+        # 全 NaN 同理：NaN 会穿过闸门（`nan > 阈值` 恒 False）把放量踩踏报成缩量。
+        if not peak_vols or not pull_vols:
+            continue
+        pv, cv = sum(peak_vols) / len(peak_vols), sum(pull_vols) / len(pull_vols)
+        shrink_ratio = (cv / pv) if pv else None
+        if shrink_ratio is None or shrink_ratio > shrink_max_ratio:
             continue
         out.append({
             "endpoint_idx": i,
@@ -169,8 +176,8 @@ def detect_shrink_pullback(closes: list[float], vols: list[float | None], *,
                 "kind": "shrink_pullback",
                 "peak_idx": peak_i, "peak_price": round(peak_px, 4),
                 "pullback_pct": round(pullback_pct, 2),
-                "shrink_ratio": None if shrink_ratio is None else round(shrink_ratio, 3),
-                "volume_available": bool(peak_vols and pull_vols),
+                "shrink_ratio": round(shrink_ratio, 3) if shrink_ratio is not None else None,
+                "volume_available": True,     # 缺量/全 NaN 已在上方闸门拦下，不会再发命中
                 "semantics": ("缩量 = **低活动/信息真空态**；**禁止**映射「支撑成立/不会破位」"),
                 "params": {"peak_window": peak_window, "pullback_min_pct": pullback_min_pct,
                            "shrink_max_ratio": shrink_max_ratio},
@@ -223,11 +230,26 @@ EVIDENCE_NOTES: dict[str, str] = {
 }
 
 
-def detect_all(closes: list[float], vols: list[float | None] | None = None) -> list[dict]:
-    """三个 C11 特征模板一起跑；每条命中带 ``evidence_note``。"""
+def limit_up_detect_pct(limit_pct: float) -> float:
+    """法定涨跌幅（主板 10 / 创业板·科创板 20 / 北交所 30 / 主板 ST 5）→ **判定阈值**。
+
+    扣 `LIMIT_UP_TOL_PCT` 容差（涨跌停价按最小变动单位四舍五入，实际涨幅略低于法定值）。
+    **调用方须按板块传入**——全池套 9.8 会把 10%+ 的创业板/科创板正常波动当涨停
+    （C11 预注册明示的坑）。阈值表唯一权威见 `technical.limit_pct_for_symbol`。
+    """
+    return round(float(limit_pct) - LIMIT_UP_TOL_PCT, 4)
+
+
+def detect_all(closes: list[float], vols: list[float | None] | None = None, *,
+               limit_up_pct: float = LIMIT_UP_PCT) -> list[dict]:
+    """三个 C11 特征模板一起跑；每条命中带 ``evidence_note``。
+
+    ``limit_up_pct`` 须由调用方**按标的板块**给出（见 `limit_up_detect_pct`）；
+    默认值保留主板口径以兼容既有调用。
+    """
     out = detect_macd_divergence(closes)
     out += detect_shrink_pullback(closes, vols or [None] * len(closes))
-    out += detect_limit_up_above_ma(closes)
+    out += detect_limit_up_above_ma(closes, limit_up_pct=limit_up_pct)
     return out
 
 

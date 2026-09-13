@@ -99,3 +99,44 @@ def test_table_without_hint_still_renders():
     text = P.position_table([_row("600176", None)])
     assert "位置状态表仅描述持仓事实" in text
     assert "处置效应" not in text
+
+
+# ── 轮末评审修复（2026-09-13）─────────────────────────────────────────────
+
+def test_bare_integer_weight_uses_same_caliber_as_renderer():
+    """裸整数权重须与 `_fmt_weight` **同口径归一**（40 → 0.40）。
+
+    ⚠️ 原实现 `_weight_num` 直接 `float(v)` → 40.0，而渲染侧把 40 显示成 40%
+    → `disposition_hint` 会挑**错**「权重最大」持仓（拿 40.0 比 0.6），
+    并返回 100 倍权重（消费方 `{:.0%}` 会渲染成 4000%）。
+    """
+    h = P.disposition_hint([_row("600176", 40), _row("000612", 0.6)])
+    assert h["symbol"] == "000612", "40 是 40%，小于 60% —— 最大者应是 000612"
+    assert h["weight"] == 0.6, f"权重须为 fraction，实得 {h['weight']}"
+    assert P.disposition_hint([_row("600176", 40)])["weight"] == 0.4
+
+
+def test_weight_num_rejects_nonfinite():
+    """NaN/Inf 权重不得参与「最大」比较。"""
+    assert P._weight_num(float("nan")) is None
+    assert P._weight_num(float("inf")) is None
+    assert P._weight_num(True) is None
+
+
+def test_build_rows_carries_paper_keys():
+    """模拟/观察仓标识须**穿过行构造器**到达位置行（生产路径可达性）。
+
+    ⚠️ `build_position_row` 只输出 symbol/name/weight/pnl_pct/band/holding_days/note，
+    把 holdings 的 kind/account/asset_type/tag/type 全丢掉 → `_is_paper` 在**生产路径**
+    上恒 False，「模拟仓单独标注」的 R-C03 分支不可达（此前只有手工构造 row 的测试
+    能触发它，因此缺陷未被发现）。
+    夹具用 `cost=None` → 不触发任何取价网络调用。
+    """
+    # 模拟仓设为**权重最大**者——提示只针对权重最大持仓，否则测不到该分支
+    holdings = [{"symbol": "600176", "name": "中国巨石", "weight": 0.6, "kind": "模拟仓"},
+                {"symbol": "000612", "name": "焦作万方", "weight": 0.4, "kind": "实盘"}]
+    rows = P.build_position_rows_from_holdings(holdings, today="2026-09-13")
+    assert [r["symbol"] for r in rows] == ["600176", "000612"], "顺序须与 holdings 对齐"
+    assert rows[0]["kind"] == "模拟仓", "标识键须随行携带"
+    h = P.disposition_hint(rows)
+    assert h["symbol"] == "600176" and h["paper"] is True

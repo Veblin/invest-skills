@@ -739,7 +739,34 @@ _POLITICAL_DEFAULT = (Path(__file__).resolve().parent.parent
                       / "references" / "political_calendar.yaml")
 
 
-def load_political_windows(path=None) -> dict:
+def _shanghai_today_iso() -> str:
+    """上海时区今日（`YYYY-MM-DD`）；不可得 → 空串（状态记「日期不可得」）。"""
+    try:
+        from dates import shanghai_today
+
+        s = shanghai_today()
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) >= 8 else ""
+    except Exception:  # noqa: BLE001 —— 取不到日期不影响窗口本身
+        return ""
+
+
+def _window_status(start: str, end: str, today_iso: str) -> str:
+    """窗口状态（自然日）：已过期 / 进行中 / 未开始 / 日期不可得。
+
+    ⚠️ 过期条目**保留并标注**，不得静默消失（策展表自述的维护纪律
+    「过期条目按『不可得/已过期』呈现」——否则表里躺着去年选举窗口也看不出来）。
+    """
+    if not today_iso or not start:
+        return "日期不可得"
+    e = end or start
+    if e < today_iso:
+        return "已过期"
+    if start > today_iso:
+        return "未开始"
+    return "进行中"
+
+
+def load_political_windows(path=None, *, today: str | None = None) -> dict:
     """读取策展的政治/宏观不确定性窗口（R-D04）。
 
     **口径（写死，不得改写）**：每条窗口带**机制注记**——「不确定性窗口：波动与
@@ -760,33 +787,49 @@ def load_political_windows(path=None) -> dict:
         # 机制注记缺「方向未知」→ 拒绝输出（防被改写为方向性表述）
         return {"available": False, "windows": [],
                 "reason": "机制注记缺「方向未知」——R-D04 要求不得附方向语义"}
-    rows = []
-    for w in data.get("windows") or []:
+    today_iso = str(today or _shanghai_today_iso())
+    rows, malformed = [], []
+    for i, w in enumerate(data.get("windows") or []):
+        # ⚠️ 条目必须是映射——裸标量（YAML 把 `- 2026-11-03` 解析成 date）会让
+        # `w.get` 抛 AttributeError，而该循环原先在 try 之外 → 契约里写的
+        # 「策展表解析失败 → available=False」根本不可达，调用方收到的是 traceback。
+        if not isinstance(w, dict):
+            malformed.append(f"第 {i + 1} 条不是映射（{type(w).__name__}）")
+            continue
+        start = str(w.get("start") or "")
+        end = str(w.get("end") or start)
         rows.append({
             "name": w.get("name"), "region": w.get("region"), "type": w.get("type"),
-            "start": str(w.get("start") or ""), "end": str(w.get("end") or ""),
+            "start": start, "end": end,
             "tentative": bool(w.get("tentative")),
             "url": w.get("url"),
+            "status": _window_status(start, end, today_iso),
             "evidence_note": note,
         })
+    if malformed:
+        return {"available": False, "windows": [], "mechanism_note": note,
+                "last_verified": data.get("last_verified"),
+                "source": str(f),
+                "reason": "策展表条目结构异常（须修表，不静默跳过）：" + "；".join(malformed)}
     return {"available": True, "windows": rows, "mechanism_note": note,
             "last_verified": data.get("last_verified"),
             "source": str(f), "reason": None}
 
 
-def render_political_windows(*, path=None) -> str:
+def render_political_windows(*, path=None, today: str | None = None) -> str:
     """不确定性窗口渲染（**只标窗口与机制注记，不含方向**）。"""
-    out = load_political_windows(path)
+    out = load_political_windows(path, today=today)
     lines = ["## 政治/宏观不确定性窗口（R-D04）", ""]
     if not out["available"]:
         lines.append(f"⚠️ 不可得：{out['reason']}")
         return "\n".join(lines)
-    lines.append("| 窗口 | 区域 | 类型 | 起 | 止 | 备注 |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| 窗口 | 区域 | 类型 | 起 | 止 | 状态 | 备注 |")
+    lines.append("|---|---|---|---|---|---|---|")
     for w in out["windows"]:
+        # `tentative` 与「已过期」都要**显式**出现在表里（不静默消失）
         tag = "（暂定，须以官方公告为准）" if w["tentative"] else ""
         lines.append(f"| {w['name']} | {w['region']} | {w['type']} | {w['start']} | "
-                     f"{w['end']} | {tag} |")
+                     f"{w['end']} | {w.get('status') or '—'} | {tag} |")
     lines.append("")
     lines.append(f"> **机制注记（固定）**：{out['mechanism_note']}")
     lines.append(f"> 口径：策展表 `last_verified = {out.get('last_verified')}`；"

@@ -56,6 +56,8 @@ _RECORD_KEYS = ("theme", "stage", "anchor", "anchor_source", "confirmed_date",
 # --- R-D02 需求窗口 vs 炒作窗口 -------------------------------------------------
 # 动机（C9）：**基本面季节性有据**，而「股价提前数周布局」无直接证据——两者必须分字段。
 _HYPE_LABEL_PREFIX = "从业者惯例，非学术验证"
+# report-conventions §3.5 的**固定模板原文**（含方括号；§7.1 自检认这个形态）
+_HYPE_LABEL_TEMPLATE = "[从业者惯例，非学术验证：{src}]"
 # 炒作窗口**不得**带收益预期类表述（R-D02 验收：无「预期收益」类描述）
 _HYPE_BANNED = ("预期收益", "涨幅预期", "收益预测", "目标位", "目标价", "预期涨幅", "收益率预期")
 
@@ -129,7 +131,11 @@ def make_hype_window(text: str, *, source: str = "") -> dict:
             f"炒作窗口**不得带收益预期**（命中 {hit}）——R-D02 验收要求「无预期收益类描述」；"
             f"预期类表述请移出本字段（本字段只记录从业者惯例的时间窗）")
     src = str(source or "").strip() or "出处不可考"
-    return {"text": t, "source": src, "label": f"{_HYPE_LABEL_PREFIX}：{src}"}
+    # ⚠️ 标注须**逐字**用 report-conventions §3.5 的固定模板（含方括号）：
+    # 原实现产出无括号的「从业者惯例，非学术验证：X」，与条文模板不一致
+    # ——lint 的 skip 只匹配子串「从业者惯例」故照样放行，靠机器查不出来，
+    # 但 §7.1 自检要求的是模板原文。
+    return {"text": t, "source": src, "label": _HYPE_LABEL_TEMPLATE.format(src=src)}
 
 
 def tractability_field(*, hard_catalysts: int, total_catalysts: int,
@@ -245,17 +251,26 @@ def replay_theme(theme: str, *, state_file: str | pathlib.Path | None = None) ->
     return [t for t in load_themes(state_file=state_file) if t.get("theme") == str(theme).strip()]
 
 
-def crowding_field(concepts: list[str], all_themes: list[dict]) -> dict:
+def crowding_field(concepts: list[str], all_themes: list[dict], *,
+                   exclude_theme: str | None = None) -> dict:
     """多概念归属 → **拥挤度加总**字段。
 
     C10 裁决：可确认的仅是多概念 = 多重暴露 / 拥挤上升；
     「复合概念退潮时有另一逻辑托底」**无支持** → 本字段只做加总，
     **不输出任何「托底/更稳」语义**。
+
+    ⚠️ `exclude_theme` 须传**当前题材名**：C10 冻结口径是「Σ 概念在**其他已登记题材**
+    中的出现次数」（见 `backtest_prereg/C10_预注册.md`）。不排除自身时，单题材独自登记
+    就把加总顶起来（实测：`[甲,乙]` 独自登记 → 加总 2，按定义应为 0），
+    「无跨题材拥挤」这一状态永远表达不出来，且回填裁决检验的量与预注册口径不符。
     """
     wanted = {str(c).strip() for c in (concepts or []) if str(c).strip()}
+    skip = str(exclude_theme or "").strip() or None
     total = 0
     detail: list[str] = []
     for t in all_themes or []:
+        if skip is not None and str(t.get("theme") or "").strip() == skip:
+            continue
         hit = wanted & {str(c).strip() for c in (t.get("concepts") or [])}
         if hit:
             total += len(hit)
@@ -315,7 +330,8 @@ def render_themes(*, state_file: str | pathlib.Path | None = None) -> str:
     if themes:
         rows = []
         for t_ in themes:
-            cf = crowding_field(t_.get("concepts") or [], themes)
+            cf = crowding_field(t_.get("concepts") or [], themes,
+                                exclude_theme=t_.get("theme"))
             rows.append((t_.get("theme"), cf))
         if any(r[1]["crowding_sum"] for r in rows):
             lines.append("")
@@ -324,9 +340,10 @@ def render_themes(*, state_file: str | pathlib.Path | None = None) -> str:
             lines.append("| 题材 | 概念数 | 拥挤度加总 | 共享概念的其他题材 |")
             lines.append("|---|---|---|---|")
             for name, cf in rows:
-                others = [d for d in cf["matched_themes"] if not d.startswith(f"{name}（")]
+                # 自身已在 `crowding_field(exclude_theme=...)` 处排除——此处不得再用
+                # 名称前缀过滤（`startswith(f"{name}（")` 会把「AB（…）」误判为「A」自身）
                 lines.append(f"| {name} | {len(cf['concepts'])} | {cf['crowding_sum']} | "
-                             f"{'、'.join(others) or '—'} |")
+                             f"{'、'.join(cf['matched_themes']) or '—'} |")
             lines.append("")
             lines.append("> 口径：多概念 = **多重暴露 / 拥挤度加总**（C10）——只做加总，"
                          "不加权、不推断方向；**不提供「托底/更稳」标签**"

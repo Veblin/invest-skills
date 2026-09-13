@@ -255,3 +255,52 @@ def test_conditional_table_tolerates_small_benchmark_gap():
     out = vp.conditional_reversal_table(rows, benchmark_returns=bench)
     assert out["available"] is True
     assert out["benchmark_gap_pct"] <= 10.0
+
+
+def test_conditional_table_matches_events_by_index_without_trade_date():
+    """行缺 `trade_date` 时，事件仍须计入统计（按**下标**匹配）。
+
+    ⚠️ 原实现两处键不一致：事件侧 `str(rows[i].get("trade_date") or i)`（**退回整数下标**），
+    统计侧 `str(r.get("trade_date") or "")` —— 键永不匹配 → 所有事件被静默丢弃，
+    而输出仍是 `available=True` + 覆盖缺口 0%（覆盖闸门把 "" 从 need 里滤掉，
+    等于宣称「基准完整」却发布空事件统计，`min_events` 也拦不住——它在窗口循环之前）。
+    """
+    rows = _rows(500)
+    for i in (400, 410, 420):
+        rows[i]["close"] = rows[i - 1]["close"] * 0.92
+        rows[i]["vol"] = 8_000_000
+    for r in rows:
+        r.pop("trade_date", None)          # 行本身没有日期
+    out = vp.conditional_reversal_table(rows, benchmark_returns={"": 0.0002})
+    assert out["n_events"] > 0, "夹具须至少检出杀跌日"
+    assert out["horizons"]["20"]["n"] > 0, \
+        "事件未被计入任何期限（键错配导致静默丢弃）"
+    assert out["horizons"]["20"]["mean_excess_pct"] is not None
+
+
+def test_conditional_table_rejects_nonfinite_benchmark_values():
+    """基准值须是**有限数**：NaN/Inf/None 与缺失同视。
+
+    ⚠️ 只查「键存在」会让 NaN 通过：NaN 参与求和把整条统计污染成 NaN，
+    且 `ex < 0` / `e > 0` 对 NaN 恒 False → 胜率被报成**硬 0%**（把「未知」说成
+    「0% 胜率」）；传 `None` 还会在 `sum()` 里直接 TypeError。
+    """
+    rows = _rows(500)
+    for i in (400, 410, 420):
+        rows[i]["close"] = rows[i - 1]["close"] * 0.92
+        rows[i]["vol"] = 8_000_000
+    finite = _bench(rows)
+    for bad in (float("nan"), float("inf"), None):
+        out = vp.conditional_reversal_table(
+            rows, benchmark_returns={d: bad for d in finite})
+        assert out["available"] is False, f"{bad!r} 基准不得发布统计"
+        assert "有限数" in out["reason"] or "覆盖缺口" in out["reason"]
+    # 混合：仅个别日期非有限 → 计入缺口，缺口小则照发且不含 NaN
+    mixed = dict(finite)
+    for d in list(mixed)[:5]:
+        mixed[d] = float("nan")
+    out2 = vp.conditional_reversal_table(rows, benchmark_returns=mixed)
+    assert out2["available"] is True
+    for h in ("5", "10", "20"):
+        row = out2["horizons"][h]
+        assert all(v is None or v == v for v in row.values()), f"horizon {h} 含 NaN"

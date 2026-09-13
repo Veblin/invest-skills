@@ -570,3 +570,49 @@ class TestReview2Guardrail:
         lint_mod._RULES_CACHE = None
         p3 = [f for f in findings if f.rule_id.startswith("p3-")]
         assert not p3
+
+
+class TestV030ConventionRuleBehavior:
+    """R-E01/E03/E04 的**行为级**验证（2026-09-13 轮末评审补）。
+
+    ⚠️ 原测试只验「规则已注册 + 条文在文档里」，不跑引擎——于是两个缺陷静默通过：
+    ① R-E04 是 error 级块级拦截，却**不在 `precommit` profile 的放行清单**里，
+       而法定第 0 层正是 `report_qc.py <file> --fail-on error`（默认 profile=precommit）
+       → 承诺的拦截在强制流程里永不触发；
+    ② `wording-message-no-tristate` 的 skip 含「传言」，而不带标注的「市场传言…」
+       同样含该词 → 该规则存在的**唯一理由**（未标注传闻）永不命中。
+    """
+
+    @staticmethod
+    def _lint(tmp_path, body: str, profile: str = "claude"):
+        from lib.lint import lint_file
+
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        return {x.rule_id for x in lint_file(f, profile=profile)}
+
+    _FACT_BLOCK = "# 测试\n\n[事实] 本标的缩量跌不动，量能萎缩至 0.4 倍。\n"
+
+    def test_r_e04_fires_under_claude_profile(self, tmp_path):
+        assert "structure-convention-in-fact-block" in self._lint(tmp_path, self._FACT_BLOCK)
+
+    def test_r_e04_fires_under_precommit_profile(self, tmp_path):
+        """法定第 0 层跑的是 precommit —— 块级拦截须在此生效。"""
+        got = self._lint(tmp_path, self._FACT_BLOCK, profile="precommit")
+        assert "structure-convention-in-fact-block" in got, \
+            f"R-E04 在 precommit profile 下被跳过（承诺的 error 级拦截失效）：{got}"
+
+    def test_r_e04_covers_stop_loss_wording(self, tmp_path):
+        """词表须与 §3.5 / R-E03 同表——曾漏「必带止损」。"""
+        body = "# 测试\n\n[事实] 本次记录必带止损。\n"
+        assert "structure-convention-in-fact-block" in self._lint(tmp_path, body)
+
+    def test_tristate_rule_fires_on_unlabeled_rumor(self, tmp_path):
+        """不带三态标注的传闻是**该规则存在的唯一理由**，必须命中。"""
+        body = "# 测试\n\n市场传言公司将获注资。\n"
+        assert "wording-message-no-tristate" in self._lint(tmp_path, body)
+
+    def test_tristate_rule_exempts_labeled_rumor(self, tmp_path):
+        """已带三态标注（传言/事实/证实）的行须豁免，不得误伤。"""
+        body = "# 测试\n\n（传言）公司将获注资，尚未证实。\n"
+        assert "wording-message-no-tristate" not in self._lint(tmp_path, body)

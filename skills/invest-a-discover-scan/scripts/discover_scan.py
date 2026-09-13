@@ -275,6 +275,9 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
     # （实测：警告「写了但走不到」）。
     trade_date = _hk_trade_date()
     rf_pct, rf_src = sources.rf_10y_usd()      # HK 用 US 10Y（口径见 sources_hk）
+    # 中国 10Y 仅作**对比说明**（解释港股池利差门槛为何更严）——须实时取，
+    # 写死数值会让报告永久陈旧；不可得则不渲染对比句
+    cn_rf_pct, cn_rf_src = sources.rf_10y_pct()
     universe = sources_hk.fetch_hk_universe()
     quotes = sources_hk.fetch_hk_quote_batch([r["symbol"] for r in universe])
 
@@ -305,9 +308,11 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
         if latest is None:
             n_unassessable += 1          # ⚠️ 必须计数：否则「无标的通过」会被读成市场事实
             continue
-        # ⚠️ **ROE 口径**：东财 `ROE_AVG` 是**期间值**（中报为半年口径，非年化）。
-        # A 侧的 8% 阈值配的是 `roe_yearly`（年化）——直接套用会**严约一倍**，
-        # 把年化约 16%、本应通过的港股卡掉。此处按报告期年化后再比，并随报告标注。
+        # ⚠️ **ROE 口径**：东财该接口返回**年报行**（实测 108 行全为 `DATE_TYPE_CODE=001`），
+        # `ROE_AVG` 即年度 ROE，A 侧 8% 阈值配的 `roe_yearly` 同义 → 直接可比。
+        # **不得按 report_date 日历后缀判中报**：6 月财年公司（00016/00017/00083/00659）
+        # 的年报正是 06-30，×2 会把真实年度 ROE 翻倍而误过闸门（2026-09-13 实测纠错）。
+        # 判据见 `sources_hk.annualized_roe`（报告期类型 → 期长 → 不年化）。
         roe_f = sources_hk.annualized_roe(latest)
         profit_f = quality._num(latest.get("net_profit"))
         if roe_f is None or profit_f is None:
@@ -357,7 +362,11 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
                        # 头部曾渲染「通过 15 只」而实际过闸门 148 只（15 = --top）
                        # ——把「截断」读成「只有 N 只合格」是本 skill 的典型口径不实
                        "n_quality_passed": len(hits),
-                       "calls": {"hk_basic": 1}, "empty_retries": 0},
+                       # ⚠️ **实测计数**（原为硬编码 `{"hk_basic": 1}` / `0`）：
+                       # `pool_stats` 是回填裁决的锚点，写死字面量会让「实际打了几次源」
+                       # 无法从留档复原——HK 的 r_hk 是分批调用、财务是逐只调用。
+                       "calls": dict(sources_hk.CALL_COUNT),
+                       "empty_returns": sources_hk.EMPTY_RETURN_COUNT},
         # ⚠️ 两侧都要聚合：US 10Y 失败写在 `sources.warnings`（`rf_10y_usd` 内），
         # 只取 `sources_hk.warnings` 会让 L3 降级被静默吞掉、透镜表仍称「可用」
         "warnings": sources.aggregate_warnings(
@@ -368,6 +377,7 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
                    "per_industry": None, "with_bj": False, "pool": "hk"},
         "trade_date": trade_date,
         "rf": {"pct": rf_pct, "source": rf_src, "caliber": "US 10Y（HKD 钉住美元）"},
+        "rf_cn": {"pct": cn_rf_pct, "source": cn_rf_src},
         "market_context": sources.market_form_context(),
     }
 
@@ -519,10 +529,16 @@ def render_report_hk(scan: dict) -> str:
         lines.append("- L3 利差口径：**US 10Y 不可得（降级）**——利差子项全部记 0 且**不作数**；"
                      "透镜可用性表中的「可用（口径改 US 10Y）」**本次不成立**")
     if rf.get("pct") is not None:
+        # ⚠️ 对比基准也须是**实时引擎值**：曾写死「中国 10Y（1.69%）」——该字面量
+        # 会随每次渲染进入报告并永久陈旧（P0）。CN 10Y 不可得 → 只出 US 值、不做对比。
+        cn = scan.get("rf_cn") or {}
+        cmp_txt = ""
+        if cn.get("pct") is not None:
+            cmp_txt = (f"——⚠️ 该值远高于中国 10Y（{cn['pct']}%"
+                       f" [来源: {cn.get('source')}]），故港股池的利差门槛更严，"
+                       f"**利差子项大概率恒 0**（须如实呈现，不得据此称「无便宜标的」）")
         lines.append(f"- L3 利差口径：**{rf.get('caliber')}** = {rf['pct']}%"
-                     f" [来源: {rf.get('source')}]"
-                     f"——⚠️ 该值远高于中国 10Y（1.69%），故港股池的利差门槛更严，"
-                     f"**利差子项大概率恒 0**（须如实呈现，不得据此称「无便宜标的」）")
+                     f" [来源: {rf.get('source')}]{cmp_txt}")
     lines.append("")
     lines.append("## 降级清单 / 警告\n")
     if scan["warnings"]:
@@ -560,10 +576,11 @@ def render_report_hk(scan: dict) -> str:
         lines.append("")
     lines.append("> ⚠️ 港股池口径注记：净利用东财 `HOLDER_PROFIT`（归母）——**港股无扣非概念**"
                  "（相对 A 侧 `profit_dedt` 为口径放宽）；"
-                 "ROE 用 `ROE_AVG`（**期间 ROE，中报为半年口径**）——本引擎**已按报告期年化**"
-                 "（中报 ×2）后再与 8% 比较，故与 A 侧 `roe_yearly` **同义但来源不同**"
-                 "（见上方透镜可用性表）；"
-                 "披露节奏为**年报+中报**（无季报、无业绩预告）。"
+                 "ROE 用 `ROE_AVG`（东财该接口实测返回**年报行**，即**年度 ROE**）"
+                 "——与 A 侧 `roe_yearly` **同义但来源不同**；若出现中期行则按报告期"
+                 "年化后再比。**各公司财年不同**（6 月财年 00016 等 / 3 月财年 09988），"
+                 "故不按日历后缀判口径（见上方透镜可用性表）；"
+                 "披露节奏**以年报为主**（无季报、无强制业绩预告）。"
                  "本清单为**研究观察起点**，不构成投资建议，不含买卖/仓位建议。")
     return "\n".join(lines)
 

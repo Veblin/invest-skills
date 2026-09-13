@@ -271,3 +271,36 @@ def test_report_has_coverage_matrix_and_sections(stub_sources, monkeypatch, caps
     assert "议息" in out, "FOMC 须独立成段"
     # 三条呈现铁律之一：窗口外与不可得是两种不同文案
     assert "不等于无事件" in out or "≠ 无事件" in out or "不可得" in out
+
+
+# ── R-D04 政治窗口接线（轮末评审修复 2026-09-13）───────────────────────────
+
+def test_macro_report_includes_political_windows(stub_sources, monkeypatch, capsys, tmp_path):
+    """宏观报告须带**政治/宏观不确定性窗口**小节（R-D04 接线）。
+
+    ⚠️ `load_political_windows` / `render_political_windows` 此前**零调用方**
+    → 策展表里登记的 2026-11-03 美国中期选举窗口从未出现在任何输出里，
+    而 SKILL.md 把 R-D04 列为已交付能力。
+    """
+    pol = tmp_path / "political.yaml"
+    pol.write_text(
+        "mechanism_note: 不确定性窗口：风险溢价可能抬升，方向未知\n"
+        "windows:\n"
+        "  - name: 美国中期选举\n    region: 美国\n    type: 选举\n"
+        "    start: 2026-11-03\n    end: 2026-11-03\n", encoding="utf-8")
+    monkeypatch.setattr(mc, "_POLITICAL_DEFAULT", pol)
+    rc, out = _run(monkeypatch, capsys)
+    assert rc == 0
+    assert "政治/宏观不确定性窗口" in out
+    assert "美国中期选举" in out
+    assert "方向未知" in out, "机制注记须随输出（C4：只支持不确定性窗口，不支持方向）"
+    assert "状态" in out
+
+
+def test_macro_report_marks_political_unavailable_not_silent(
+        stub_sources, monkeypatch, capsys, tmp_path):
+    """策展表缺失 → 渲染「不可得」而非静默省略小节（维护纪律）。"""
+    monkeypatch.setattr(mc, "_POLITICAL_DEFAULT", tmp_path / "missing.yaml")
+    rc, out = _run(monkeypatch, capsys)
+    assert rc == 0
+    assert "政治/宏观不确定性窗口" in out and "不可得" in out

@@ -353,6 +353,8 @@ def _stub_hk(monkeypatch, *, pe=5.0, fin_roe=15.0, fin_profit=1.0e9):
                                       "net_profit": fin_profit}])
     monkeypatch.setattr(sources_hk, "warnings", [])
     monkeypatch.setattr(sources, "rf_10y_usd", lambda: (4.95, "FRED.DGS10"), raising=False)
+    # 中国 10Y 仅作对比说明，须实时取——测试里也要 stub，否则会走真网络
+    monkeypatch.setattr(sources, "rf_10y_pct", lambda: (1.73, "test.CN10Y"), raising=False)
     monkeypatch.setattr(sources, "latest_trade_date", lambda: "20260911")
     # ⚠️ 必须 stub has_token —— HK 夹具漏了它（A 股夹具 stub 了）会让测试**依赖环境**：
     # `sources.has_token()` 走 `from lib.env import get_config`，而跨目录跑测时
@@ -386,13 +388,17 @@ def test_hk_pool_declares_universe_deviation(monkeypatch, tmp_path):
 
 
 def test_hk_pool_caliber_notes_present(monkeypatch, tmp_path):
-    """港股口径注记：无扣非 / ROE 非年化 / 无季报无预告。"""
+    """港股口径注记：无扣非 / ROE 年度口径与财年差异 / 无季报无预告。
+
+    ⚠️ 注记文字须与**实测口径**一致：东财该接口返回年报行（`ROE_AVG` 即年度 ROE），
+    原注记「期间 ROE（中报非年化）」不实（2026-09-13 复核，108 行全为 001）。
+    """
     cli = _stub_hk(monkeypatch)
     monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
     monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
     cli.main(_argv(tmp_path) + ["--pool", "hk"])
     body = list(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
-    for token in ("无扣非概念", "期间 ROE", "年报+中报"):
+    for token in ("无扣非概念", "年度 ROE", "财年不同"):
         assert token in body, f"缺口径注记：{token}"
 
 
@@ -608,3 +614,44 @@ def test_hk_header_distinguishes_gate_passed_from_shortlist(monkeypatch, tmp_pat
     assert len(rec["hits"]) == 3, "短清单须受 --top 截断"
     assert "通过 6 只" in body, "头部须显示过闸门数 6"
     assert "短清单（3 只" in body
+
+
+def test_hk_report_has_no_hardcoded_market_levels(monkeypatch, tmp_path):
+    """报告中的行情数值必须来自引擎——不得写死探针值（P0 来源标注）。
+
+    ⚠️ 原实现两处写死：透镜表「实测 2026-09-10 4.95」、L3 行「中国 10Y（1.69%）」。
+    两者会随每次渲染进入报告并**永久陈旧**，且无 `[来源:]` 标签。
+    """
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    body, _ = _run_hk(cli, monkeypatch, tmp_path)
+    assert "2026-09-10" not in body, "透镜表残留探针日期字面量"
+    assert "1.69" not in body, "L3 行残留写死的中国 10Y"
+    # 实时值须带来源标签
+    assert "[来源: test.CN10Y]" in body, "对比基准须来自引擎并带来源"
+    # 静态可用性说明不得含**探针日期 / 百分数行情值**（写死即永久陈旧；
+    # 不拦普通小数——`v0.1` 这类版本号不是行情数据，拦了就是过度断言）
+    import re
+    for row in sources_hk.lens_availability():
+        assert not re.search(r"\d{4}-\d{2}-\d{2}", row["basis"]), f"含写死日期：{row}"
+        assert not re.search(r"\d+(?:\.\d+)?\s*%", row["basis"]), f"含写死百分数：{row}"
+
+
+def test_hk_snapshot_records_measured_call_counts(monkeypatch, tmp_path):
+    """快照 `pool_stats.calls` 须**读取实测计数器**，不是硬编码字面量。
+
+    ⚠️ 原实现写死 `{"hk_basic": 1}` / `empty_retries: 0`——`pool_stats` 是回填裁决的
+    锚点，写死会让「实际打了几次源」无法从留档复原（r_hk 分批、财务逐只）。
+    本用例把计数器预置成可辨识的值（并屏蔽 reset）来锁定接线；计数器**自身**是否
+    随调用递增由 `test_sources_hk.py` 的独立用例覆盖。
+    """
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    _widen_hk(monkeypatch, sources_hk, n_low=6)
+    monkeypatch.setattr(sources_hk, "reset_warnings", lambda: None)   # 保留预置值
+    monkeypatch.setattr(sources_hk, "CALL_COUNT",
+                        {"hk_basic": 1, "r_hk": 28, "hk_financials": 227})
+    monkeypatch.setattr(sources_hk, "EMPTY_RETURN_COUNT", 3)
+    _, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
+    assert rec["pool"]["calls"] == {"hk_basic": 1, "r_hk": 28, "hk_financials": 227}
+    assert rec["pool"]["empty_returns"] == 3

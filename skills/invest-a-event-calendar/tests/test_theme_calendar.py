@@ -104,11 +104,15 @@ def test_replay_returns_full_sequence(state):
 
 
 def test_crowding_is_a_sum_not_a_boost(state):
-    """多概念 = 拥挤度**加总**；不得出现「更强/托底」语义。"""
+    """多概念 = 拥挤度**加总**；不得出现「更强/托底」语义。
+
+    ⚠️ 口径以 C10 预注册为准：加总 = Σ 概念在**其他已登记题材**中的出现次数
+    → 查 A 时须 `exclude_theme="A"`（自身登记不计）。
+    """
     t1 = {"theme": "A", "stage": "首波", "concepts": ["甲", "乙"]}
     t2 = {"theme": "B", "stage": "扩散", "concepts": ["甲"]}
-    out = tc.crowding_field(["甲", "乙"], [t1, t2])
-    assert out["crowding_sum"] == 3, "加总：A 命中 2 + B 命中 1"
+    out = tc.crowding_field(["甲", "乙"], [t1, t2], exclude_theme="A")
+    assert out["crowding_sum"] == 1, "加总须只计**其他**题材：B 命中 1"
     # ⚠️ 只扫**结论性字段**：note 里必然出现「不含『托底』语义」这句禁令本身，
     # 整体子串扫描会把禁令判成违规（文档要禁止某措辞就必须引用它）
     claim_text = f"{out['matched_themes']}{out['concepts']}"
@@ -356,3 +360,63 @@ def test_tractability_zero_denominator_fails_loud():
     with pytest.raises(ValueError):
         tc.tractability_field(hard_catalysts=0, total_catalysts=0,
                               analyst_coverage=1, announcement_freq=1.0, media_mentions=1)
+
+
+# ── 拥挤度口径（轮末评审修复 2026-09-13）───────────────────────────────────
+
+def test_crowding_excludes_own_registration():
+    """自身登记**不得**计入加总（C10 冻结口径：只计「其他已登记题材」）。
+
+    ⚠️ 原实现把自己也算进去：单题材 [甲,乙] 单独登记 → 加总 2（按定义应为 0）。
+    后果：「无跨题材拥挤」这一状态永远表达不出来，且回填裁决检验的量与
+    `C10_预注册.md` 的口径不同（预注册写死的是「在其他题材中」）。
+    """
+    t1 = {"theme": "A", "stage": "首波", "concepts": ["甲", "乙"]}
+    out = tc.crowding_field(["甲", "乙"], [t1], exclude_theme="A")
+    assert out["crowding_sum"] == 0 and out["matched_themes"] == []
+
+
+def test_crowding_sums_across_other_themes():
+    t1 = {"theme": "A", "stage": "首波", "concepts": ["甲", "乙"]}
+    t2 = {"theme": "B", "stage": "扩散", "concepts": ["甲"]}
+    t3 = {"theme": "C", "stage": "延伸", "concepts": ["乙"]}
+    out = tc.crowding_field(["甲", "乙"], [t1, t2, t3], exclude_theme="A")
+    assert out["crowding_sum"] == 2, "B 命中甲 + C 命中乙"
+    assert out["matched_themes"] == ["B（扩散）", "C（延伸）"]
+
+
+def test_render_omits_crowding_section_without_cross_theme(state):
+    """无跨题材共享 → **不出拥挤度小节**（该节的存在本身就是信号）。"""
+    _reg(state, concepts=["甲", "乙"])
+    assert "多题材拥挤度" not in tc.render_themes(state_file=state)
+
+
+def test_render_crowding_section_excludes_self(state):
+    """出节时，加总与「其他题材」列都**不得**含自身。"""
+    _reg(state, theme="甲题材", concepts=["甲", "乙"])
+    _reg(state, theme="乙题材", concepts=["甲"])
+    text = tc.render_themes(state_file=state)
+    assert "### 多题材拥挤度" in text
+    sec = text.split("### 多题材拥挤度", 1)[1]
+    line = next(l for l in sec.splitlines() if l.startswith("| 甲题材 |"))
+    cells = [c.strip() for c in line.strip("|").split("|")]
+    assert cells[2] == "1", f"甲题材加总应为 1（仅乙题材共享「甲」），实得 {cells}"
+    assert "甲题材" not in cells[3], "「其他题材」列不得含自身"
+
+
+def test_hype_label_uses_verbatim_conventions_template():
+    """炒作窗口标注须**逐字**用 §3.5 固定模板（含方括号）。
+
+    ⚠️ 原实现产出无括号的「从业者惯例，非学术验证：X」——与条文模板不一致，
+    而 lint 的 skip 只匹配子串「从业者惯例」故照样放行（机器查不出来）。
+    """
+    w = tc.make_hype_window("会后两周", source="券商策略会")
+    assert w["label"] == "[从业者惯例，非学术验证：券商策略会]"
+    w2 = tc.make_hype_window("会后两周")
+    assert w2["label"] == "[从业者惯例，非学术验证：出处不可考]"
+
+
+def test_rendered_hype_label_keeps_brackets(state):
+    _reg(state, hype_window=tc.make_hype_window("会后两周", source="券商策略会"))
+    text = tc.render_themes(state_file=state)
+    assert "[从业者惯例，非学术验证：券商策略会]" in text

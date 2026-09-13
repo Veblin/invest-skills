@@ -250,12 +250,27 @@ def volume_price_features(rows: list[dict], *, window: int = DEFAULT_WINDOW,
 # R-A04 条件性反转观测窗（事后统计，非事前信号）
 # ---------------------------------------------------------------------------
 
+def _is_finite_ret(v) -> bool:
+    """基准收益值是否可用（有限数）——None / NaN / ±Inf / 非数值 → False。
+
+    ⚠️ 只查「键存在」不够：NaN 参与 `sum()` 会把整条统计污染成 NaN，而
+    `ex < 0` / `e > 0` 对 NaN 恒 False → 胜率被报成**硬 0%**（把「未知」说成
+    「0% 胜率」）；`None` 还会在 `sum()` 里直接 TypeError。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    return not (v != v or math.isinf(v))
+
+
 def panic_selloff_days(rows: list[dict], *, window: int = DEFAULT_WINDOW,
                        drop_pctile: float = 10.0,
                        vol_pctile: float = VOLUME_HIGH_PCTILE) -> list[dict]:
     """恐慌放量杀跌日 = **跌幅分位**（≤ `drop_pctile`）**× 量分位**（≥ `vol_pctile`）。
 
     两个条件**同时**满足才算——单看跌幅会漏掉「阴跌」，单看量会漏掉「缩量跌」。
+
+    每条事件含 `idx`（行李下标，消费方的**匹配键**）、`date`（可为空串）、
+    `ret_pct` / `drop_pctl` / `vol_pctl`。
     """
     closes = _vals(rows, "close")
     vols = _volume_series(rows)
@@ -276,7 +291,10 @@ def panic_selloff_days(rows: list[dict], *, window: int = DEFAULT_WINDOW,
         rp = percentile_rank_inclusive(base_r, r)
         vp_ = percentile_rank_inclusive(base_v, v)
         if rp <= drop_pctile and vp_ >= vol_pctile:
-            out.append({"date": str(rows[i].get("trade_date") or i),
+            # ⚠️ `idx` 是**消费方的匹配键**：`date` 允许为空串（如行情行无 trade_date），
+            # 而空串无法唯一匹配行 → 统计侧靠下标定位。原实现把下标塞进 `date`
+            # （`or i`），消费侧却按 `or ""` 建索引 → 键永不相等、事件被静默丢弃。
+            out.append({"idx": i, "date": str(rows[i].get("trade_date") or ""),
                         "ret_pct": round(r * 100, 3), "drop_pctl": round(rp, 2),
                         "vol_pctl": round(vp_, 2)})
     return out
@@ -295,7 +313,7 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
     dates = [str(r.get("trade_date") or "") for r in rows or []]
     closes = _vals(rows, "close")
 
-    # ⚠️ **基准覆盖度校验**：`benchmark_returns.get(d, 0.0)` 会把缺失日当 0% 收益，
+    # ⚠️ **基准覆盖度校验**：`bench_clean.get(d, 0.0)` 会把缺失日当 0% 收益，
     # 此时「超额」静默退化为原始收益且 available=True（实测：传 {} 也照发）。
     #
     # ⚠️ 覆盖集须 = **事件窗 ∪ 无条件基线窗**：基线遍历**全样本**前向窗（见下方基线循环），
@@ -309,7 +327,7 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
                            "（不得以 0 填充冒充）"),
                 "note": "事后统计、非预测；无单点事件信号"}
     need = {d for d in dates[1:] if d}
-    missing = sorted(d for d in need if d not in benchmark_returns)
+    missing = sorted(d for d in need if not _is_finite_ret(benchmark_returns.get(d)))
     # `need` 为空（序列不足 2 行）→ 缺口记 0，让判定落到下面的「样本不足」，
     # 不得误归因为「基准不可用」（实测：0 事件时曾报缺口 100%）。
     bm_gap_ratio = (len(missing) / len(need)) if need else 0.0
@@ -317,9 +335,10 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
         return {"available": False, "n_events": len(events), "events": events,
                 "benchmark_gap_pct": round(bm_gap_ratio * 100, 2),
                 "benchmark_missing": missing[:10],
-                "reason": (f"基准覆盖缺口 {bm_gap_ratio:.0%}（含无条件基线所需日期）——"
-                           f"缺失日按 0% 处理会让「超额收益」退化为原始收益、"
-                           f"基线系统性偏移，故**不发布**该统计（不得以 0 填充冒充）"),
+                "reason": (f"基准覆盖缺口 {bm_gap_ratio:.0%}（含无条件基线所需日期；"
+                           f"缺失或**非有限值**均计入缺口）——缺失日按 0% 处理会让"
+                           f"「超额收益」退化为原始收益、基线系统性偏移，故**不发布**"
+                           f"该统计（不得以 0 填充冒充）"),
                 "note": "事后统计、非预测；无单点事件信号"}
 
     if len(events) < min_events:
@@ -327,19 +346,26 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
                 "n_events": len(events), "events": events,
                 "note": "事后统计、非预测；无单点事件信号"}
 
-    idx_of = {d: i for i, d in enumerate(dates)}
+    # 缺口在容差内时照发，但**非有限值不得参与运算**：统一清成 0.0（与「缺失日按 0%」
+    # 的既有口径一致），缺口比例已随 `benchmark_gap_pct` 如实披露。
+    bench_clean = {d: (v if _is_finite_ret(v) else 0.0) for d, v in benchmark_returns.items()}
+
     horizons_out: dict[str, dict] = {}
     for h in horizons:
         excess, base_excess, cont = [], [], 0
         for ev in events:
-            i = idx_of.get(ev["date"])
+            # 按 `idx` 定位（行无 trade_date 时 `date` 为空串，按日期会全部漏掉）；
+            # 老结构（无 idx）回退日期匹配，保持兼容
+            i = ev.get("idx")
+            if i is None:
+                i = {d: k for k, d in enumerate(dates)}.get(ev.get("date") or "")
             if i is None or i + h >= len(closes):
                 continue
             a, b = closes[i + h], closes[i]
             if a is None or not b:
                 continue
             stock_ret = a / b - 1.0
-            bm = sum(benchmark_returns.get(d, 0.0) for d in dates[i + 1: i + h + 1])
+            bm = sum(bench_clean.get(d, 0.0) for d in dates[i + 1: i + h + 1])
             ex = stock_ret - bm
             excess.append(ex)
             if ex < 0:
@@ -349,7 +375,7 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
             a, b = closes[i + h], closes[i]
             if a is None or not b:
                 continue
-            bm = sum(benchmark_returns.get(d, 0.0) for d in dates[i + 1: i + h + 1])
+            bm = sum(bench_clean.get(d, 0.0) for d in dates[i + 1: i + h + 1])
             base_excess.append((a / b - 1.0) - bm)
         n = len(excess)
         horizons_out[str(h)] = {

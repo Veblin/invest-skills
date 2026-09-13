@@ -52,3 +52,30 @@
 | 行业字段 | 缺失 → L1 行业条件跳过 + warning |
 | `fina_indicator` | ① 预告口径（`forecast`）→ ② ROE 下限降级为「股息率>0 或预告净利>0」→ ③ 该项跳过并明示。三者均记 warning「质量过滤降级」 |
 | 10Y 利率 | 不可得 → L3 仅保留 `g_implied` 子项 + warning |
+
+## 五、港股池数据链路（`--pool hk`，T11-5 / HK-4）
+
+| 步骤 | 接口 | 调用量（实测计数入快照） | 失败处置 |
+|---|---|---|---|
+| ① universe | tushare `hk_basic`（`list_status=L`） | **1 次**（2785 行） | 空返回 → raise（池无法构建） |
+| ② 横截面 PE | 腾讯 `r_hk` **批量**（100 码/次） | **分批**（2785 只 ≈ 28 次） | 单批失败 → warning + 跳过该批 |
+| ③ 质量字段 | 东财港股财务（`hk_financials`，按只） | **逐只**（L1 命中数，实测 227 只 ≈ 2-3 min） | 单只失败 → 计 `unassessable`，不冒充已过滤 |
+| ④ 无风险利率 | FRED `DGS10`（US 10Y） | 1 次 | 不可得 → L3 利差子项恒 0 且**透镜表标「本次不成立」** |
+| ⑤ 中国 10Y（**仅对比说明**） | akshare `bond_zh_us_rate` | 1 次 | 不可得 → 不渲染对比句 |
+
+**calls / empty_returns**：快照 `pool_stats` 记录**实测计数**（`hk_basic` / `r_hk` /
+`hk_financials` 三项 + 空返回数）——不得写死字面量（该字段是回填裁决的锚点）。
+
+**universe 口径偏离**：requirements 建议的「港股通/恒指成分」两个源一个需 push2 域
+（本 skill 刻意零东财依赖）、一个无源 → 改用 `hk_basic` **全部上市港股（超集）**，
+覆盖不失。报告头显式声明该偏离。
+
+**港股特有口径**（须随报告标注）：
+
+- `ind_rk`：`hk_basic` **无 industry 字段** → 行业条件整体跳过 + warning
+- L3 利差：HKD 钉住美元 → 口径改 **US 10Y**（远高于中国 10Y，故利差门槛更严、子项大概率恒 0）
+- 质量门净利：东财 `HOLDER_PROFIT`（归母）；**港股无扣非概念** → 相对 A 侧口径放宽
+- 质量门 ROE：`ROE_AVG` 实测即**年度 ROE**（该接口返回年报行）；**财年各异**
+  （6 月财年 00016 等 / 3 月财年 09988）→ **不按日历后缀判中报**，判据见
+  `scripts/lib/sources_hk.py::annualized_roe`
+- 数据日：走**港股日历**（`hk_calendar`）；日历降级（周末近似）须显式标注

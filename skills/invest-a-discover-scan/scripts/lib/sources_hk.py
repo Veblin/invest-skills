@@ -18,6 +18,7 @@ requirements §3.4 建议 universe 取「港股通/恒指成分 v0 口径」—�
 """
 from __future__ import annotations
 
+import datetime as _dt
 import importlib.util
 import logging
 import math
@@ -30,6 +31,12 @@ BATCH_SIZE = 100          # 腾讯 r_hk 单次可拼的代码数（实测 100 �
 
 warnings: list[str] = []
 
+# 实测调用计数（照 A 侧 `sources.CALL_COUNT` 惯例）——**不得在报告/快照里写死字面量**：
+# 快照 `pool_stats` 是回填裁决的锚点，硬编码 `{"hk_basic": 1}` 会让「实际打了几次源」
+# 永远无法从留档里复原（HK 路径的 r_hk 是**分批**调用，财务是**逐只**调用）。
+CALL_COUNT = {"hk_basic": 0, "r_hk": 0, "hk_financials": 0}
+EMPTY_RETURN_COUNT = 0      # 空返回（源返回空表，非异常）——与「标的真的无数据」不可区分
+
 
 def _note(msg: str) -> None:
     warnings.append(msg)
@@ -37,7 +44,11 @@ def _note(msg: str) -> None:
 
 
 def reset_warnings() -> None:
+    global EMPTY_RETURN_COUNT
     warnings.clear()
+    EMPTY_RETURN_COUNT = 0
+    for k in CALL_COUNT:
+        CALL_COUNT[k] = 0
 
 
 def _load_hk_module(name: str):
@@ -79,9 +90,14 @@ def fetch_hk_universe() -> list[dict]:
     if hit and isinstance(hit.get("rows"), list) and hit["rows"]:
         return hit["rows"]
 
-    from lib.tushare_client import TushareClient
+    # ⚠️ 必须走 `sources.client()` 的**进程内单例**：`TushareClient.__init__` 会重置
+    # 实例级限流状态（`_call_timestamps`/`_daily_calls`），每次新建实例 = 限流器清零
+    # → 全速突发（**R4 评审实测的限流根因**，见 `sources.client()` docstring）。
+    # 同进程内 A 股管线先跑时尤其明显：HK 分支另起实例会绕开 A 侧已积累的节流状态。
+    import sources as _sources
 
-    df = TushareClient().query("hk_basic")
+    CALL_COUNT["hk_basic"] += 1
+    df = _sources.client().query("hk_basic")
     if df is None or df.empty:
         raise RuntimeError("hk_basic 空返回——港股 universe 不可得")
     rows: list[dict] = []
@@ -123,6 +139,7 @@ def fetch_hk_quote_batch(symbols: list[str]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for i in range(0, len(symbols), BATCH_SIZE):
         chunk = symbols[i: i + BATCH_SIZE]
+        CALL_COUNT["r_hk"] += 1
         url = "https://qt.gtimg.cn/q=" + ",".join(f"r_hk{s}" for s in chunk)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -152,15 +169,21 @@ def fetch_hk_financials(symbol: str) -> list[dict]:
 
     ⚠️ **口径**（与 A 侧不可直接比）：
     - **无扣非概念**（`hk_financials` docstring）→ 净利用 `HOLDER_PROFIT`（归母）
-    - `ROE_AVG` 是**期间 ROE**（中报值为半年 ROE，**非年化**）；A 侧用 `roe_yearly` 年化
-    - 披露节奏 = **年报 + 中报**（无季报、无强制业绩预告）
+    - `ROE_AVG` 实测为**年度 ROE**（该接口返回年报行，108 行全 `DATE_TYPE_CODE=001`）；
+      若出现中期行由 `annualized_roe` 按报告期年化后再比
+    - 披露节奏**以年报为主**（无季报、无强制业绩预告）
     """
+    global EMPTY_RETURN_COUNT
     hk_fin = _load_hk_module("hk_financials")
+    CALL_COUNT["hk_financials"] += 1
     try:
         from lib.proxy import akshare_direct_session
 
         with akshare_direct_session():
-            return hk_fin.fetch_financials(symbol) or []
+            rows = hk_fin.fetch_financials(symbol) or []
+            if not rows:
+                EMPTY_RETURN_COUNT += 1
+            return rows
     except Exception as exc:  # noqa: BLE001 —— 单标的降级
         _note(f"{symbol} 东财港股财务不可得（{type(exc).__name__}）")
         return []
@@ -175,25 +198,50 @@ LENS_AVAILABILITY: tuple[tuple[str, str, str], ...] = (
      "universe 重定义为**港股池正 PE 子总体**（非全 A）——口径已随 rules_version bump"),
     ("L1 ind_rk（行业内排名）", "不可得",
      "`hk_basic` **无 industry 字段**（实测）；港股无行业分类源已接入 → 条件跳过 + warning"),
+    # ⚠️ 本表是**静态可用性说明**，不得写死行情数值：曾在此写「实测 2026-09-10 4.95」，
+    # 该字面量会随每次渲染进入报告并**永久陈旧**（P0：报告数字须来自引擎字段或 calc）。
+    # 实时值由渲染侧的 L3 行给出（带 [来源:] 标签）。
     ("L3 利差（EY − rf）", "可用（口径改 US 10Y）",
-     "HKD 钉住美元 → 中国 10Y 口径不当；改用 FRED `DGS10`（实测 2026-09-10 4.95）"),
+     "HKD 钉住美元 → 中国 10Y 口径不当；改用 FRED `DGS10`（实时值见下方 L3 行）"),
     ("L3 预告增速", "不可得",
      "港股**无强制业绩预告**（`SKILL.md:74`）；tushare `forecast` 为 A 股专用"),
     ("质量门 净利 ≥ 0", "可用（口径放宽）",
      "东财 `HOLDER_PROFIT`（归母）；**港股无扣非概念** → 相对 A 侧为口径放宽"),
-    ("质量门 ROE ≥ 8%", "可用（**已按报告期年化后比较**）",
-     "东财 `ROE_AVG` 为**期间 ROE**（中报为半年口径）→ 本引擎按报告期年化（中报 ×2）"
-     "后再与 8% 比较；节奏为年报+中报，**与 A 侧 `roe_yearly` 同义但来源不同**"),
+    ("质量门 ROE ≥ 8%", "可用（**按报告期口径年化归一后比较**）",
+     "东财 `ROE_AVG` 即**年度 ROE**（实测该接口返回年报行，`DATE_TYPE_CODE=001`）；"
+     "若出现中期行（002）则按报告期年化 ×2 后再比。**财年各异**（6 月财年 00016 等、"
+     "3 月财年 09988）——故不按日历后缀判口径；**与 A 侧 `roe_yearly` 同义但来源不同**"),
     ("L2 自身历史分位", "不可得", "A 侧 v0.1 亦未接；港股序列源仅单标的（百度）"),
 )
 
 
-def annualized_roe(fin_row: dict) -> float | None:
-    """东财 `ROE_AVG`（**期间值**）→ 年化 ROE。
+def _period_months(fin_row: dict) -> float | None:
+    """报告期长度（月，按 30.44 天/月折算）；起止任一缺失或不可解析 → None。"""
+    start = str(fin_row.get("period_start") or "")[:10]
+    end = str(fin_row.get("report_date") or "")[:10]
+    if len(start) < 10 or len(end) < 10:
+        return None
+    try:
+        a = _dt.date.fromisoformat(start)
+        b = _dt.date.fromisoformat(end)
+    except ValueError:
+        return None
+    return (b - a).days / 30.44
 
-    ⚠️ **口径**：中报（`report_date` 以 `06-30` 结尾）的 ROE 是**半年**口径，年化 ≈ ×2；
-    年报（1231）已是年度口径，原值即可；季度报告港股不适用（无季报）。
-    不年化就直接套 A 侧的 8%（配 `roe_yearly`）会**严约一倍**（实测踩坑）。
+
+def annualized_roe(fin_row: dict) -> float | None:
+    """东财 `ROE_AVG` → **年化** ROE（与 A 侧 `roe_yearly` 同义）。
+
+    ⚠️ **判据是报告期，不是日历后缀**（2026-09-13 实测纠错）：
+    本 skill 用的东财接口返回**年报行**（12 只样本 × 9 期 = 108 行全为
+    `DATE_TYPE_CODE=001`），`ROE_AVG` 即年度 ROE。而各公司财年不同——
+    6 月财年（00016/00017/00083/00659）的年报 `report_date` 正是 `06-30`、
+    3 月财年（09988）是 `03-31`。**按日历后缀判中报会把它们的年度 ROE 翻倍**
+    （新地真实 3.42% → 误算 6.85%），反之 12 月财年公司不受影响——即错得**不对称**。
+
+    判据优先级：① `report_type`（`002` 中报 → ×2；`001` 年报 → 原值）；
+    ② 缺失时用**报告期长度**（≤7 个月 → ×2；≥9 个月 → 原值）；
+    ③ 两者都不可得 → **不年化**（宁可保守，也不按日历猜口径）。
 
     ⚠️ NaN / ±Inf 一律 → None（三态，见 `quality._num`）：Inf 会**恒 > 阈值**直接放行。
     """
@@ -206,8 +254,14 @@ def annualized_roe(fin_row: dict) -> float | None:
         return None
     if f is None or f != f or math.isinf(f):
         return None
-    end = str(fin_row.get("report_date") or "")
-    factor = 2.0 if end.endswith("06-30") else 1.0
+    rtype = str(fin_row.get("report_type") or "").strip()
+    if rtype == "002":
+        factor = 2.0
+    elif rtype == "001":
+        factor = 1.0
+    else:
+        months = _period_months(fin_row)
+        factor = 2.0 if (months is not None and months <= 7.0) else 1.0
     return f * factor
 
 

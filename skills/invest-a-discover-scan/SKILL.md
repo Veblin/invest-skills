@@ -36,8 +36,14 @@ uv run python skills/invest-a-discover-scan/scripts/discover_scan.py            
 uv run python skills/invest-a-discover-scan/scripts/discover_scan.py --top 15         # 上限（默认 15）
 uv run python skills/invest-a-discover-scan/scripts/discover_scan.py --with-bj        # 纳入北交所（默认排除）
 uv run python skills/invest-a-discover-scan/scripts/discover_scan.py --no-out         # 只出 stdout + 快照，不落 md
+uv run python skills/invest-a-discover-scan/scripts/discover_scan.py --pool hk        # 港股池（透镜可用性表置顶）
 uv run python skills/invest-a-discover-scan/scripts/discover_fillback.py --horizon 90 # v0.2 桩 → 退出码 2
 ```
+
+**港股池（`--pool hk`）**：universe = tushare `hk_basic` **全部上市港股（超集）**（口径偏离声明见
+`references/sources.md` §五）；报告落 `{date}-hk.md`（与 A 股报告**分开**，不互相覆盖）。
+港股**无行业字段** → `ind_rk` 透镜不可得、**不做行业分散**（`--per-industry` 对其无效）；
+L3 利差口径改 **US 10Y**；无业绩预告 → 增速子项恒 0。每透镜可用性逐条标注（空透镜不冒充）。
 
 **退出码**：`0` 正常 ｜ `3` 数据不可得（**不产空清单**——空清单会被读成
 「市场无机会」这一事实断言）｜ `4` 缺 token/权限 ｜ `2` 参数错误或功能未实现。

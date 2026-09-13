@@ -207,7 +207,8 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
             if stale_days > 3:
                 row["note"] = (row.get("note") or "").strip() + f"；现价截至 {pdate}（或停牌/数据陈旧）"
         rows.append(row)
-    return rows
+    # R-C03：模拟/观察仓标识须随行携带（否则 `_is_paper` 在生产路径恒 False）
+    return _carry_paper_keys(rows, holdings)
 
 
 def _fmt_weight(raw: Any) -> str:
@@ -243,8 +244,14 @@ _PAPER_TOKENS = ("模拟", "观察", "paper", "simulated", "watch")
 
 
 def _weight_num(v: Any) -> float | None:
-    """权重 → float（支持 0.4 / '40%' / '0.4'）；不可解析 → None。"""
-    if v is None:
+    """权重 → **归一化 fraction**（0–1）；不可解析 → None。
+
+    ⚠️ 归一化口径必须与 `_fmt_weight`（渲染侧）**逐字一致**：裸整数 >1 视为
+    百分数直觉写法（40 → 0.40）。原实现直接 `float(v)` 返回 40.0 → `disposition_hint`
+    会挑**错**「权重最大」持仓（40.0 > 0.6 假象），并把 100 倍权重交给消费方
+    （`{:.0%}` 渲染成 4000%）。
+    """
+    if v is None or isinstance(v, bool):
         return None
     if isinstance(v, str):
         s = v.strip()
@@ -253,10 +260,13 @@ def _weight_num(v: Any) -> float | None:
                 return float(s[:-1]) / 100.0
             except ValueError:
                 return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+    if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
         return None
+    return float(v) / 100.0 if v > 1.0 else float(v)
 
 
 def _is_paper(row: dict) -> bool:
@@ -269,6 +279,24 @@ def _is_paper(row: dict) -> bool:
         if any(tok in s for tok in _PAPER_TOKENS):
             return True
     return False
+
+
+def _carry_paper_keys(rows: list[dict[str, Any]],
+                      holdings: list[dict]) -> list[dict[str, Any]]:
+    """把 holdings 行中的**模拟/观察仓标识键**带进位置行（就地）。
+
+    ⚠️ `build_position_row` 只输出 symbol/name/weight/pnl_pct/band/holding_days/note，
+    把 holdings 的 `kind`/`account`/`asset_type`/`tag`/`type` 全部丢掉 → `_is_paper`
+    在**生产路径**上恒 False，「模拟/观察仓单独标注」的 R-C03 分支不可达
+    （此前只有手工构造 row 的测试能触发它）。按**下标**对齐（构造器逐行产出，顺序保持）。
+    """
+    for row, h in zip(rows, holdings or []):
+        if not isinstance(h, dict):
+            continue
+        for k in _PAPER_KEYS:
+            if h.get(k) is not None and row.get(k) is None:
+                row[k] = h[k]
+    return rows
 
 
 def disposition_hint(rows: list[dict[str, Any]]) -> dict[str, Any] | None:

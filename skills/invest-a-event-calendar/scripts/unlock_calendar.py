@@ -791,6 +791,10 @@ def _run_macro(args: argparse.Namespace) -> int:
 
     md = render_macro_md(view, today=today, days=days, window=(w_start, w_end),
                          fomc_warnings=fomc_warnings)
+    # R-D04：政治/宏观不确定性窗口——**接在宏观报告尾部**（此前 load/render 已实现但
+    # 零调用方 → 2026-11-03 美国中期选举窗口从未出现在任何输出里）。
+    # 不可得时渲染「⚠️ 不可得：…」而非静默省略（策展表维护纪律）。
+    md = md + "\n\n" + macro_cal.render_political_windows(today=today.isoformat())
     if getattr(args, "no_out", False):
         print(md)
     else:
