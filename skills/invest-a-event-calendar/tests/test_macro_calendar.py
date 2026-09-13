@@ -639,3 +639,44 @@ def test_fomc_meeting_retires_after_its_beijing_day(tmp_path):
     p.write_text(_FOMC_YAML, encoding="utf-8")
     events, _ = mc.load_fomc_meetings(p, today="2026-09-18")
     assert "2026-09-17" not in [e.date for e in events]
+
+
+# ── R-D04 政治/宏观不确定性窗口 ──────────────────────────────────────────
+
+def test_political_windows_load_from_curated_table():
+    out = mc.load_political_windows()
+    assert out["available"] is True, out.get("reason")
+    assert out["windows"], "策展表应有窗口条目"
+    for w in out["windows"]:
+        assert w["name"] and w["region"] and w["start"]
+        assert w["evidence_note"], "每条须带机制注记"
+
+
+def test_political_window_note_says_direction_unknown():
+    """C4 裁决：只支持「不确定性窗口」，**不支持方向** → 注记必须含「方向未知」。"""
+    out = mc.load_political_windows()
+    for w in out["windows"]:
+        assert "方向未知" in w["evidence_note"]
+        assert "机制证据" in w["evidence_note"]
+
+
+def test_political_render_has_no_direction_prediction():
+    text = mc.render_political_windows()
+    for banned in ("将上涨", "将下跌", "看多", "看空", "利好", "利空", "建议"):
+        assert banned not in text, f"政治窗口不得含方向/建议语义：{banned}"
+
+
+def test_political_table_rejects_rewritten_mechanism_note(tmp_path):
+    """机制注记被改写掉「方向未知」→ **拒绝输出**（防静默变成方向性表述）。"""
+    f = tmp_path / "p.yaml"
+    f.write_text("last_verified: '2026-09-12'\nmechanism_note: '不确定性抬升'\n"
+                 "windows:\n  - name: X\n    region: 美国\n    start: '2026-11-03'\n",
+                 encoding="utf-8")
+    out = mc.load_political_windows(f)
+    assert out["available"] is False
+    assert "方向未知" in out["reason"]
+
+
+def test_political_missing_table_is_three_state(tmp_path):
+    out = mc.load_political_windows(tmp_path / "nope.yaml")
+    assert out["available"] is False and "缺失" in out["reason"]

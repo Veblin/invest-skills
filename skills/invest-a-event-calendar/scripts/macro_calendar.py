@@ -730,3 +730,67 @@ def build_view(results: Sequence[SourceResult]) -> dict:
         "filtered": filtered,
         "filtered_families": families,
     }
+
+# ---------------------------------------------------------------------------
+# R-D04 政治/宏观不确定性窗口
+# ---------------------------------------------------------------------------
+
+_POLITICAL_DEFAULT = (Path(__file__).resolve().parent.parent
+                      / "references" / "political_calendar.yaml")
+
+
+def load_political_windows(path=None) -> dict:
+    """读取策展的政治/宏观不确定性窗口（R-D04）。
+
+    **口径（写死，不得改写）**：每条窗口带**机制注记**——「不确定性窗口：波动与
+    风险溢价可能抬升（机制证据），**方向未知**」。「方向未知」是 C4 裁决的硬要求
+    （Kelly-PV 2016 只支持不确定性窗口，不支持方向）。
+    """
+    import yaml
+
+    f = Path(path) if path else _POLITICAL_DEFAULT
+    if not f.exists():
+        return {"available": False, "windows": [], "reason": f"策展表缺失：{f}"}
+    try:
+        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "windows": [], "reason": f"策展表解析失败：{type(exc).__name__}"}
+    note = str(data.get("mechanism_note") or "")
+    if "方向未知" not in note:
+        # 机制注记缺「方向未知」→ 拒绝输出（防被改写为方向性表述）
+        return {"available": False, "windows": [],
+                "reason": "机制注记缺「方向未知」——R-D04 要求不得附方向语义"}
+    rows = []
+    for w in data.get("windows") or []:
+        rows.append({
+            "name": w.get("name"), "region": w.get("region"), "type": w.get("type"),
+            "start": str(w.get("start") or ""), "end": str(w.get("end") or ""),
+            "tentative": bool(w.get("tentative")),
+            "url": w.get("url"),
+            "evidence_note": note,
+        })
+    return {"available": True, "windows": rows, "mechanism_note": note,
+            "last_verified": data.get("last_verified"),
+            "source": str(f), "reason": None}
+
+
+def render_political_windows(*, path=None) -> str:
+    """不确定性窗口渲染（**只标窗口与机制注记，不含方向**）。"""
+    out = load_political_windows(path)
+    lines = ["## 政治/宏观不确定性窗口（R-D04）", ""]
+    if not out["available"]:
+        lines.append(f"⚠️ 不可得：{out['reason']}")
+        return "\n".join(lines)
+    lines.append("| 窗口 | 区域 | 类型 | 起 | 止 | 备注 |")
+    lines.append("|---|---|---|---|---|---|")
+    for w in out["windows"]:
+        tag = "（暂定，须以官方公告为准）" if w["tentative"] else ""
+        lines.append(f"| {w['name']} | {w['region']} | {w['type']} | {w['start']} | "
+                     f"{w['end']} | {tag} |")
+    lines.append("")
+    lines.append(f"> **机制注记（固定）**：{out['mechanism_note']}")
+    lines.append(f"> 口径：策展表 `last_verified = {out.get('last_verified')}`；"
+                 "与 `references/scenario-plans.md` 联动——**窗口进入即启动重评估**"
+                 "（预案触发=重评估，非交易指令）。")
+    return "\n".join(lines)
+
