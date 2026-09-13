@@ -353,6 +353,10 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
                        "n_positive_pe": n_positive_pe, "n_pool": len(merged),
                        "n_l1": len(l1), "n_excluded_st": 0, "median_pe": median_pe,
                        "n_unassessable": n_unassessable, "n_quality_rejected": n_rejected,
+                       # ⚠️ 过闸门数 ≠ 短清单长度：后者受 `--top` 截断。真机实测暴露
+                       # 头部曾渲染「通过 15 只」而实际过闸门 148 只（15 = --top）
+                       # ——把「截断」读成「只有 N 只合格」是本 skill 的典型口径不实
+                       "n_quality_passed": len(hits),
                        "calls": {"hk_basic": 1}, "empty_retries": 0},
         # ⚠️ 两侧都要聚合：US 10Y 失败写在 `sources.warnings`（`rf_10y_usd` 内），
         # 只取 `sources_hk.warnings` 会让 L3 降级被静默吞掉、透镜表仍称「可用」
@@ -493,8 +497,8 @@ def render_report_hk(scan: dict) -> str:
         f"一个需 push2 域（本 skill 刻意回避）一个无源，故改用**全部上市港股（超集）**，"
         f"覆盖不失且零东财依赖",
         f"- 池内 {ps['n_pool']} 只（有正 PE 者 {ps['n_positive_pe']} 只），"
-        f"L1 命中 {ps['n_l1']} 只；**质量闸门**：通过 {len(hits)} 只，"
-        f"被剔除 {ps.get('n_quality_rejected', 0)} 只，"
+        f"L1 命中 {ps['n_l1']} 只；**质量闸门**：通过 {ps.get('n_quality_passed', 0)} 只"
+        f"（计入短清单 {len(hits)} 只），被剔除 {ps.get('n_quality_rejected', 0)} 只，"
         f"**不可评估** {(ps.get('n_unassessable') or 0)} 只（财务不可得，未冒充已过滤）"
         + (f"；正 PE 子总体**中位 PE {ps['median_pe']:.2f}x**"
            f" [来源: Python calc: median(正 PE 序列)]" if ps.get("median_pe") else ""),

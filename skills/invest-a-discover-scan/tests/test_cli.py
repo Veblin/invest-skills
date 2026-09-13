@@ -591,3 +591,20 @@ def test_hk_report_footer_roe_caliber_matches_lens_table(monkeypatch, tmp_path):
     body, _ = _run_hk(cli, monkeypatch, tmp_path)
     assert "中报非年化" not in body, "页脚仍称「非年化」，与透镜表「已年化」矛盾"
     assert "年化" in body
+
+
+def test_hk_header_distinguishes_gate_passed_from_shortlist(monkeypatch, tmp_path):
+    """报告头的「通过 N 只」须是**过质量闸门数**，不是短清单长度。
+
+    真机实测暴露：`--top 15` 时头部渲染「通过 15 只」，而 `n_l1` 227、剔除 79 →
+    实际过闸门 **148** 只；15 只是截断后的短清单长度。两者混为一谈会把
+    「截断」读成「只有 15 只合格」——本 skill 的典型口径不实。
+    """
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    _widen_hk(monkeypatch, sources_hk, n_low=6)          # L1 恰好 6 只，全部过闸门
+    body, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "3"])
+    assert rec["pool"]["n_quality_passed"] == 6, rec["pool"]
+    assert len(rec["hits"]) == 3, "短清单须受 --top 截断"
+    assert "通过 6 只" in body, "头部须显示过闸门数 6"
+    assert "短清单（3 只" in body
