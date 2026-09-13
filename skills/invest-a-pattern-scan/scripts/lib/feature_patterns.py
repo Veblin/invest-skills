@@ -21,6 +21,7 @@
 | ② 缩量回踩 | `peak_window` | 20 | 前高回看窗 |
 | | `pullback_min_pct` | 5.0 | 回踩幅度下限（%） |
 | | `shrink_max_ratio` | 0.7 | 回踩期量能 / 前高期量能上限 |
+| | `max_pivots` | 4 | 保留**最近** N 次命中（模块常量 `MAX_PIVOTS`） |
 | ③ 涨停站上均线 | `limit_up_pct` | 9.8 | 涨停判定阈值（%，主板口径） |
 | | `ma` | 60 | 中期均线 |
 """
@@ -117,48 +118,66 @@ def detect_macd_divergence(closes: list[float], *, pivot_window: int = PIVOT_WIN
     return out
 
 
+def _f(v) -> float | None:
+    """数值化并**剔除 NaN/Inf**——NaN 会穿过 `is not None` 让比较恒为 False，
+    使闸门静默失效（实测量价：NaN 量能 → 放量回踩被报成「缩量回踩」，且 NaN 落盘）。"""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if (f != f or math.isinf(f)) else f
+
+
 def detect_shrink_pullback(closes: list[float], vols: list[float | None], *,
                            peak_window: int = PEAK_WINDOW,
                            pullback_min_pct: float = PULLBACK_MIN_PCT,
                            shrink_max_ratio: float = SHRINK_MAX_RATIO) -> list[dict]:
     """② 缩量回踩：自前高**回踩幅度** ≥ 阈值，且回踩期**量能收缩** ≤ 阈值。
 
+    **历史事件检测**（对每个 i 判定），不是「当前状态」判定：
+    终点若恒为最后一根 K，则前向收益窗口恒空 → 该规则在 RC 规则矩阵里恒为全 0 列
+    （实测：终点恒 35/35，三窗口前向全空；RC 实际只在 24 条而非 27 条规则上算）。
+
     ⚠️ 「缩量」语义限定为**低活动/信息真空态**，**禁止**映射「支撑成立/不会破位」。
     """
     n = len(closes)
     if n < peak_window + 5:
         return []
-    peak_i = max(range(n - peak_window - 1, n - 1), key=lambda i: closes[i])
-    peak_px = closes[peak_i]
-    now_i = n - 1
-    if peak_px <= 0:
-        return []
-    pullback_pct = (peak_px - closes[now_i]) / peak_px * 100.0
-    has_vol = any(v is not None for v in vols)
-    peak_vols = [v for v in vols[max(0, peak_i - 3): peak_i + 4] if v is not None]
-    pull_vols = [v for v in vols[peak_i + 1:] if v is not None]
-    shrink_ratio = None
-    if has_vol and peak_vols and pull_vols:
-        pv, cv = sum(peak_vols) / len(peak_vols), sum(pull_vols) / len(pull_vols)
-        shrink_ratio = (cv / pv) if pv else None
-    if pullback_pct < pullback_min_pct:
-        return []
-    if shrink_ratio is not None and shrink_ratio > shrink_max_ratio:
-        return []
-    return [{
-        "endpoint_idx": now_i,
-        "detail": {
-            "kind": "shrink_pullback",
-            "peak_idx": peak_i, "peak_price": round(peak_px, 4),
-            "pullback_pct": round(pullback_pct, 2),
-            "shrink_ratio": None if shrink_ratio is None else round(shrink_ratio, 3),
-            "volume_available": has_vol,
-            "semantics": ("缩量 = **低活动/信息真空态**；**禁止**映射「支撑成立/不会破位」"),
-            "params": {"peak_window": peak_window, "pullback_min_pct": pullback_min_pct,
-                       "shrink_max_ratio": shrink_max_ratio},
-        },
-        "evidence_note": EVIDENCE_NOTE_SHRINK,
-    }]
+    vals = [_f(v) for v in (vols or [])]
+    out: list[dict] = []
+    for i in range(peak_window, n - 1):        # 留 1 根：终点须可被后续确认
+        peak_i = max(range(i - peak_window, i + 1), key=lambda k: closes[k])
+        peak_px = closes[peak_i]
+        if peak_px <= 0 or peak_i >= i:        # 前高须早于当前点
+            continue
+        pullback_pct = (peak_px - closes[i]) / peak_px * 100.0
+        if pullback_pct < pullback_min_pct:
+            continue
+        peak_vols = [v for v in vals[max(0, peak_i - 3): peak_i + 4] if v is not None]
+        pull_vols = [v for v in vals[peak_i + 1: i + 1] if v is not None]
+        shrink_ratio = None
+        if peak_vols and pull_vols:
+            pv, cv = sum(peak_vols) / len(peak_vols), sum(pull_vols) / len(pull_vols)
+            shrink_ratio = (cv / pv) if pv else None
+        if shrink_ratio is not None and shrink_ratio > shrink_max_ratio:
+            continue
+        out.append({
+            "endpoint_idx": i,
+            "detail": {
+                "kind": "shrink_pullback",
+                "peak_idx": peak_i, "peak_price": round(peak_px, 4),
+                "pullback_pct": round(pullback_pct, 2),
+                "shrink_ratio": None if shrink_ratio is None else round(shrink_ratio, 3),
+                "volume_available": bool(peak_vols and pull_vols),
+                "semantics": ("缩量 = **低活动/信息真空态**；**禁止**映射「支撑成立/不会破位」"),
+                "params": {"peak_window": peak_window, "pullback_min_pct": pullback_min_pct,
+                           "shrink_max_ratio": shrink_max_ratio},
+            },
+            "evidence_note": EVIDENCE_NOTE_SHRINK,
+        })
+    return out[-MAX_PIVOTS:] if len(out) > MAX_PIVOTS else out
 
 
 def detect_limit_up_above_ma(closes: list[float], *, limit_up_pct: float = LIMIT_UP_PCT,

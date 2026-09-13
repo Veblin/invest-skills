@@ -177,3 +177,25 @@ def test_pe_anomaly_normal_values_are_none():
         assert lenses.pe_anomaly(ok) is None
     assert lenses.pe_anomaly(None) is None
     assert lenses.pe_anomaly(-3.0) is None      # 亏损期由 L1 直接排除，不算「异常」
+
+
+# ── 行业分散上限（轮末评审修复 2026-09-13）──────────────────────────────────
+
+def test_rank_candidates_none_disables_industry_cap():
+    """`per_industry=None` = **不做行业分散**（港股全部行同属一个「无行业」桶）。
+
+    实测缺陷：`--pool hk` 恒只出 3 只（第 4 名起被静默丢弃，与 `--top` 无关）。
+    """
+    rows = [{"ts_code": f"{i:06d}.HK", "industry": None, "pe_grank": i / 100.0,
+             "gap_flags": [], "ey_pct": 20.0 - i} for i in range(6)]
+    assert len(lenses.rank_candidates(rows, per_industry=None)) == 6
+    # 对照：默认上限仍生效
+    assert len(lenses.rank_candidates(rows)) == 3
+
+
+def test_rank_candidates_none_still_sorts_deterministically():
+    """去掉分散上限不得打乱既有排序（主键 pe_grank 升 → … → ts_code 兜底）。"""
+    rows = [{"ts_code": f"{i:06d}.HK", "industry": None, "pe_grank": (5 - i) / 100.0,
+             "gap_flags": [], "ey_pct": 1.0} for i in range(6)]
+    out = lenses.rank_candidates(rows, per_industry=None)
+    assert [r["ts_code"] for r in out] == [f"{i:06d}.HK" for i in range(5, -1, -1)]

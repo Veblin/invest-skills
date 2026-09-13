@@ -193,11 +193,15 @@ def gap_flags(*, ey, rf_pct, pe_ttm, forecast_growth_max_pct) -> list[int]:
     return [flag_gap, flag_growth]
 
 
-def rank_candidates(rows: list[dict], *, per_industry: int = 3) -> list[dict]:
+def rank_candidates(rows: list[dict], *, per_industry: int | None = 3) -> list[dict]:
     """确定性排序 + 行业分散。
 
     主键 ``pe_grank`` 升 → 次键 ``sum(gap_flags)`` 降 → 三级 ``ey_pct`` 降 →
     **``ts_code`` 兜底**；随后同行业最多 ``per_industry`` 只。
+
+    ⚠️ ``per_industry=None`` = **不做行业分散**（港股池必须用）：港股全部行同属
+    「—（港股无行业字段）」**一个桶**，若按默认 3 只封顶，第 4 名起会被静默丢弃
+    （实测：`--pool hk --top 15` 恒只出 3 只，与上限无关）。
 
     不就地修改入参（D7）；返回新 dict 列表。
     """
@@ -210,9 +214,10 @@ def rank_candidates(rows: list[dict], *, per_industry: int = 3) -> list[dict]:
     ordered = sorted((dict(r) for r in rows), key=_key)
     kept: list[dict] = []
     per_ind: dict[str, int] = {}
+    unlimited = per_industry is None
     for r in ordered:
         ind = str(r.get("industry") or pool_mod._MISSING_INDUSTRY)
-        if per_ind.get(ind, 0) >= per_industry:
+        if not unlimited and per_ind.get(ind, 0) >= per_industry:
             continue
         per_ind[ind] = per_ind.get(ind, 0) + 1
         kept.append(r)

@@ -32,7 +32,8 @@ def _rec(**over):
 
 
 def test_rules_version_pinned():
-    assert snapshot.RULES_VERSION == "0.1.0"
+    # 0.2.0（2026-09-13）：港股池 L1 universe 口径不同 → 必须与 A 股池区分锚点
+    assert snapshot.RULES_VERSION == "0.2.0"
 
 
 def test_build_snapshot_has_all_design_fields():

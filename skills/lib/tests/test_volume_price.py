@@ -198,5 +198,60 @@ def test_conditional_table_reports_continuation_submodel():
 
 
 def test_conditional_table_insufficient_sample():
-    out = vp.conditional_reversal_table(_rows(30), benchmark_returns={})
-    assert out["available"] is False and out["reason"]
+    """样本不足 → 理由须点名「**样本**」。
+
+    ⚠️ 该用例原先传 `benchmark_returns={}`，在新增基准覆盖闸门后**恒因「基准不可用」
+    而通过**——与用例本意（样本不足）脱节。故改为传**完整基准**，直取 `min_events` 分支。
+    （`_rows(30)` 实测 0 个杀跌日，正是样本不足形态。）
+    """
+    rows = _rows(30)
+    out = vp.conditional_reversal_table(rows, benchmark_returns=_bench(rows))
+    assert out["available"] is False
+    assert "样本" in out["reason"], f"须归因到样本不足，实得：{out['reason']}"
+
+
+def test_conditional_table_empty_benchmark_reason_names_benchmark():
+    """空基准 → 理由须点名「**基准**」（与样本不足区分开）。"""
+    out = vp.conditional_reversal_table(_rows(500), benchmark_returns={})
+    assert out["available"] is False
+    assert "基准" in out["reason"], out["reason"]
+
+
+def test_conditional_table_refuses_when_baseline_dates_uncovered():
+    """⚠️ 覆盖校验须**含无条件基线**所需日期，不能只核事件窗口。
+
+    基线遍历全样本前向窗（`volume_price.py` 基线循环），同样用
+    `benchmark_returns.get(d, 0.0)` 填 0。只核事件窗口时：基准仅覆盖事件后日期
+    → 事件窗无缺口（闸门放行）→ 基线相对全量基准系统性偏移却照发。
+    """
+    rows = _rows(500)
+    for i in (400, 410, 420):
+        rows[i]["close"] = rows[i - 1]["close"] * 0.92
+        rows[i]["vol"] = 8_000_000
+    # 基准**恰好覆盖全部事件窗口**（老闸门的 need），其余日期全缺 → 老实现放行、
+    # 基线大面积填 0；新实现须拒绝。（夹具由公开 API 反推事件窗口，非循环论证）
+    dates = [r["trade_date"] for r in rows]
+    idx = {d: i for i, d in enumerate(dates)}
+    covered: set[str] = set()
+    for ev in vp.panic_selloff_days(rows):
+        i = idx[ev["date"]]
+        covered.update(dates[i + 1: i + 21])
+    assert covered, "夹具须至少含一个事件窗"
+    out = vp.conditional_reversal_table(
+        rows, benchmark_returns={d: 0.0002 for d in covered})
+    assert out["available"] is False, "基线日期大面积缺基准时不得发布统计"
+    assert "覆盖缺口" in out["reason"] and out["benchmark_missing"]
+
+
+def test_conditional_table_tolerates_small_benchmark_gap():
+    """少量缺口（≤10%）不阻断——否则交易日历轻微不齐就永不发布。"""
+    rows = _rows(500)
+    for i in (400, 410, 420):
+        rows[i]["close"] = rows[i - 1]["close"] * 0.92
+        rows[i]["vol"] = 8_000_000
+    bench = _bench(rows)
+    for r in rows[:3]:
+        bench.pop(r["trade_date"])
+    out = vp.conditional_reversal_table(rows, benchmark_returns=bench)
+    assert out["available"] is True
+    assert out["benchmark_gap_pct"] <= 10.0

@@ -12,7 +12,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-RULES_VERSION = "0.1.0"        # 阈值/规则改动必须 bump（设计 §8-4）
+# ⚠️ **0.2.0（2026-09-13）**：港股池（`--pool hk`）的 L1 **universe 口径不同**——
+# 从「全 A 正 PE 子总体」变为「港股池正 PE 子总体」。两者共用同一 `rules_version`
+# 会让按「唯一锚点」分组的回填消费者把两个 universe 混算，故必须 bump。
+RULES_VERSION = "0.2.0"        # 阈值/规则/universe 口径改动必须 bump（设计 §8-4）
 
 _REQUIRED_TOP = ("snapshot_ts", "rules_version", "trade_date", "pool", "params", "hits")
 _REQUIRED_POOL = ("market", "n_positive_pe", "n_pool")

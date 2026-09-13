@@ -294,6 +294,34 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
     events = panic_selloff_days(rows, window=window)
     dates = [str(r.get("trade_date") or "") for r in rows or []]
     closes = _vals(rows, "close")
+
+    # ⚠️ **基准覆盖度校验**：`benchmark_returns.get(d, 0.0)` 会把缺失日当 0% 收益，
+    # 此时「超额」静默退化为原始收益且 available=True（实测：传 {} 也照发）。
+    #
+    # ⚠️ 覆盖集须 = **事件窗 ∪ 无条件基线窗**：基线遍历**全样本**前向窗（见下方基线循环），
+    # 同样用 `.get(d, 0.0)` 填 0。只核事件窗时，基准仅覆盖事件窗即可放行，而基线相对
+    # 全量基准系统性偏移（实测复现）。两者前向窗 `dates[i+1:i+h+1]` 的并集即 `dates[1:]`。
+    if not benchmark_returns:
+        return {"available": False, "n_events": len(events), "events": events,
+                "benchmark_gap_pct": None, "benchmark_missing": [],
+                "reason": ("**基准序列未提供**——缺失日按 0% 处理会让「超额收益」退化为"
+                           "原始收益、无条件基线系统性偏移，故**不发布**该统计"
+                           "（不得以 0 填充冒充）"),
+                "note": "事后统计、非预测；无单点事件信号"}
+    need = {d for d in dates[1:] if d}
+    missing = sorted(d for d in need if d not in benchmark_returns)
+    # `need` 为空（序列不足 2 行）→ 缺口记 0，让判定落到下面的「样本不足」，
+    # 不得误归因为「基准不可用」（实测：0 事件时曾报缺口 100%）。
+    bm_gap_ratio = (len(missing) / len(need)) if need else 0.0
+    if bm_gap_ratio > 0.1:
+        return {"available": False, "n_events": len(events), "events": events,
+                "benchmark_gap_pct": round(bm_gap_ratio * 100, 2),
+                "benchmark_missing": missing[:10],
+                "reason": (f"基准覆盖缺口 {bm_gap_ratio:.0%}（含无条件基线所需日期）——"
+                           f"缺失日按 0% 处理会让「超额收益」退化为原始收益、"
+                           f"基线系统性偏移，故**不发布**该统计（不得以 0 填充冒充）"),
+                "note": "事后统计、非预测；无单点事件信号"}
+
     if len(events) < min_events:
         return {"available": False, "reason": f"杀跌日样本 {len(events)} < {min_events}",
                 "n_events": len(events), "events": events,
@@ -339,6 +367,8 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
         "n_events": len(events),
         "horizons": horizons_out,
         "events": events,
+        # 实发覆盖度（含基线所需日期）：消费者据此判断「超额」含量，而非只看 available
+        "benchmark_gap_pct": round(bm_gap_ratio * 100, 2),
         "continuation": {
             "meaning": "「延续」= 杀跌日后 N 日超额仍为负（趋势延续而非反转）",
             "note": ("**Hurst 反证**：趋势延续与短期反转两股力量并存于文献——"

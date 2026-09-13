@@ -18,6 +18,8 @@ ROE 下限降级为「股息率>0 或预告净利>0」）/ `skipped`（该过滤
 """
 from __future__ import annotations
 
+import math
+
 QUALITY_TIER = "fina"
 ROE_MIN_PCT = 8.0
 ROE_FIELD = "roe_yearly"          # 见模块 docstring 第 1 条
@@ -26,13 +28,19 @@ _TIERS = ("fina", "forecast", "skipped")
 
 
 def _num(v) -> float | None:
+    """数值化；None / 非数值 / **NaN / ±Inf** → None（三态）。
+
+    ⚠️ 两者都必须剔除：NaN 会穿过 `is not None` 让比较**恒为 False**（闸门静默失效）；
+    Inf 则**恒 > 阈值**（`inf < 8.0` 为 False）→ 直接判「通过质量闸门」。
+    本 skill 的港股净利/ROE 与 A 股财务字段共用此入口（原 `discover_scan._to_num` 已并入）。
+    """
     if v is None:
         return None
     try:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return None if f != f else f
+    return None if (f != f or math.isinf(f)) else f
 
 
 def latest_report(fina_rows: list[dict] | None) -> dict | None:

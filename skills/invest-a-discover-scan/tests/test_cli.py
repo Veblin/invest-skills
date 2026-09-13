@@ -98,7 +98,7 @@ def test_cli_runs_and_writes_snapshot(monkeypatch, tmp_path):
     assert cli.main(_argv(tmp_path)) == 0
     recs = [json.loads(ln) for ln in snap.read_text(encoding="utf-8").strip().splitlines()]
     assert len(recs) == 1
-    assert recs[0]["rules_version"] == "0.1.0"
+    assert recs[0]["rules_version"] == "0.2.0"
 
 
 def test_cli_shortlist_within_cap_and_has_reason_fields(monkeypatch, tmp_path):
@@ -354,6 +354,10 @@ def _stub_hk(monkeypatch, *, pe=5.0, fin_roe=15.0, fin_profit=1.0e9):
     monkeypatch.setattr(sources_hk, "warnings", [])
     monkeypatch.setattr(sources, "rf_10y_usd", lambda: (4.95, "FRED.DGS10"), raising=False)
     monkeypatch.setattr(sources, "latest_trade_date", lambda: "20260911")
+    # ⚠️ 必须 stub has_token —— HK 夹具漏了它（A 股夹具 stub 了）会让测试**依赖环境**：
+    # `sources.has_token()` 走 `from lib.env import get_config`，而跨目录跑测时
+    # `lib` 的解析可能被其它技能影响 → 返回 False → CLI 退 4 → 用例以「无 token」失败
+    monkeypatch.setattr(sources, "has_token", lambda: True)
     return cli
 
 
@@ -444,3 +448,146 @@ def test_hk_report_renders_pe_anomaly(monkeypatch, tmp_path):
     assert "极低 PE" in body, "PE<1 的标的须带异常标注"
     assert "一次性损益" in body
     assert "不得直接读作「极度低估」" in body
+
+
+# ── 轮末评审修复的回归（2026-09-13）──────────────────────────────────────────
+
+class _FakeHkCalendar:
+    """假港股日历模块（替 `sources_hk._load_hk_module('hk_calendar')` 的产物）。"""
+
+    def __init__(self, date, *, degraded=False, exc=None):
+        self._date, self._degraded, self._exc = date, degraded, exc
+
+    def hk_session_date(self):
+        if self._exc:
+            raise self._exc
+        return self._date
+
+    def hk_calendar_degraded(self):
+        return self._degraded
+
+
+def _widen_hk(monkeypatch, sources_hk, n_low, n=45):
+    """放宽港股池夹具：`n_low` 只低 PE + `n - n_low` 只高 PE。
+
+    ⚠️ 必须同时拓宽 universe——L1 门槛是**全池分位 ≤15%**，`_HK_UNIVERSE` 只有 16 只，
+    低 PE 达 3 只时 3/16 = 18.8% 即已不达标。
+    `n=45` 使低 PE 者分位 6/45 = 13.3% 命中、紧邻的高 PE 者 7/45 = 15.6% 落榜
+    → L1 **恰好 6 只**（夹具边界刻意留出余量，不贴 15.0% 走钢丝）。
+    """
+    uni = [{"ts_code": f"{i:05d}.HK", "symbol": f"{i:05d}", "name": f"标的{i}",
+            "market": "主板", "currency": "HKD", "industry": None} for i in range(n)]
+    monkeypatch.setattr(sources_hk, "fetch_hk_universe", lambda: list(uni))
+    monkeypatch.setattr(sources_hk, "fetch_hk_quote_batch", lambda syms: {
+        s: {"price": 10.0, "pe_ttm": (5.0 if i < n_low else 30.0 + i),
+            "mcap_hkd_yi": 1000.0} for i, s in enumerate(syms)})
+
+
+def _run_hk(cli, monkeypatch, tmp_path, extra=()):
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    assert cli.main(_argv(tmp_path) + ["--pool", "hk", *extra]) == 0
+    body = list(tmp_path.glob("*-hk.md"))[0].read_text(encoding="utf-8")
+    rec = json.loads((tmp_path / "2026.jsonl").read_text(
+        encoding="utf-8").strip().splitlines()[0])
+    return body, rec
+
+
+def test_hk_calendar_degraded_is_annotated(monkeypatch, tmp_path):
+    """日历**内部降级**（不抛异常、退回周末近似）必须显式标注。
+
+    `hk_calendar.hk_session_date` 降级时**不抛异常**，只置 `hk_calendar_degraded()`；
+    只 catch 异常的实现会静默接受一个周末近似日当数据日，报告仍称数据日来自港股日历。
+    """
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    monkeypatch.setattr(sources_hk, "_load_hk_module",
+                        lambda name: _FakeHkCalendar("2026-09-12", degraded=True))
+    body, rec = _run_hk(cli, monkeypatch, tmp_path)
+    assert rec["trade_date"] == "20260912"
+    assert any("降级" in w for w in rec["warnings"]), rec["warnings"]
+    assert "周末近似" in body, "报告须披露数据日来自降级近似"
+
+
+def test_hk_calendar_failure_warning_reaches_report(monkeypatch, tmp_path):
+    """日历模块不可得 → 退回 A 股口径**且警告必须进报告/快照**。
+
+    ⚠️ 原实现把 `_hk_trade_date()` 放在 `warnings` 键**之后**求值（dict 字面量按序），
+    它追加的警告永远不会进聚合结果——警告「写了但走不到」，正是静默降级。
+    """
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+
+    def _boom(name):
+        raise ImportError("invest-hk-stock lib/hk_calendar.py 缺失")
+
+    monkeypatch.setattr(sources_hk, "_load_hk_module", _boom)
+    body, rec = _run_hk(cli, monkeypatch, tmp_path)
+    assert rec["trade_date"] == "20260911", "须退回 A 股口径桩值"
+    assert any("港股日历" in w for w in rec["warnings"]), rec["warnings"]
+    assert "港股日历" in body, "降级须出现在报告的降级清单里"
+
+
+def test_hk_shortlist_not_capped_by_single_industry_bucket(monkeypatch, tmp_path):
+    """港股全部行同属一个「无行业」桶 → 不得按 `per_industry=3` 封顶。
+
+    实测缺陷：`--pool hk --top 15` 恒只出 3 只（第 4 名起静默丢弃）。
+    """
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    _widen_hk(monkeypatch, sources_hk, n_low=6)
+    body, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
+    assert len(rec["hits"]) == 6, f"6 只通过闸门却只出 {len(rec['hits'])} 只"
+    assert "短清单（6 只" in body
+
+
+def test_hk_snapshot_params_record_actual_industry_cap(monkeypatch, tmp_path):
+    """快照 `params` 是回填裁决的锚点——须记录**实际行为**（不做行业分散），
+    而非 CLI 默认值 3（原实现记录 3、行为却是 None）。"""
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    _widen_hk(monkeypatch, sources_hk, n_low=6)
+    _, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
+    assert rec["params"]["per_industry"] is None
+
+
+def test_hk_pool_reports_unassessable_and_rejected_counts(monkeypatch, tmp_path):
+    """「无标的通过」须能区分「不可评估 / 被闸门剔除」——计数须入快照**并渲染**。"""
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    _widen_hk(monkeypatch, sources_hk, n_low=6)
+
+    def _fin(sym):
+        if sym == "00000":
+            return []                                   # 财务不可得 → 不可评估
+        if sym == "00001":
+            return [{"report_date": "2026-06-30", "roe": 1.0,   # 年化 2% < 8%
+                     "net_profit": 1.0e9}]                  # → 被质量闸门剔除
+        return [{"report_date": "2026-06-30", "roe": 15.0, "net_profit": 1.0e9}]
+
+    monkeypatch.setattr(sources_hk, "fetch_hk_financials", _fin)
+    body, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
+    assert rec["pool"]["n_unassessable"] == 1, rec["pool"]
+    assert rec["pool"]["n_quality_rejected"] == 1, rec["pool"]
+    assert len(rec["hits"]) == 4
+    assert "不可评估" in body and "质量闸门" in body, "计数须渲染，否则是死数据"
+
+
+def test_hk_no_pass_warning_distinguishes_data_from_market(monkeypatch, tmp_path):
+    """L1 命中但财务全不可得 → 「无标的通过」是**数据不可得**，不得读作市场事实。"""
+    cli = _stub_hk(monkeypatch)
+    import sources_hk
+    _widen_hk(monkeypatch, sources_hk, n_low=6)
+    monkeypatch.setattr(sources_hk, "fetch_hk_financials", lambda sym: [])
+    body, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
+    assert rec["hits"] == []
+    assert any("不可评估" in w and "市场" in w for w in rec["warnings"]), rec["warnings"]
+    assert "不可得" in body
+
+
+def test_hk_report_footer_roe_caliber_matches_lens_table(monkeypatch, tmp_path):
+    """页脚与透镜表口径说明不得互相矛盾（年化已实际生效）。"""
+    cli = _stub_hk(monkeypatch)
+    body, _ = _run_hk(cli, monkeypatch, tmp_path)
+    assert "中报非年化" not in body, "页脚仍称「非年化」，与透镜表「已年化」矛盾"
+    assert "年化" in body

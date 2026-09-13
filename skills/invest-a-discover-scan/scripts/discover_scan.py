@@ -27,10 +27,19 @@ _LIB_DIR = _SCRIPT_DIR / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
-from _invest_path import ensure_invest_a_scripts_on_path, ensure_skills_lib_on_path  # noqa: E402
+# ⚠️ **按显式路径加载本 skill 的 shim**，不要 `from _invest_path import …`：
+# `_invest_path.py` 是**每个技能各有一份**的同名模块，`sys.modules` 里只会缓存
+# 最先加载的那一份。跨技能同会话跑测时，若 pattern-scan 的 shim 先入缓存
+# （它只有 `ensure_shared_lib_on_path`、没有 `ensure_skills_lib_on_path` 别名），
+# 本文件就会 ImportError（实测：`pytest skills/invest-a-pattern-scan/tests
+# skills/invest-a-discover-scan/tests` 必现；全仓因 testpaths 顺序而侥幸不暴露）
+import importlib.util as _ilu  # noqa: E402
 
-ensure_skills_lib_on_path()
-ensure_invest_a_scripts_on_path()
+_spec = _ilu.spec_from_file_location("_discover_invest_path", _LIB_DIR / "_invest_path.py")
+_shim = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_shim)
+_shim.ensure_skills_lib_on_path()
+_shim.ensure_invest_a_scripts_on_path()
 
 import lenses  # noqa: E402
 import pool as pool_mod  # noqa: E402
@@ -95,7 +104,8 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
     ``pool="hk"`` 走**港股分支**（见 `run_scan_hk`）。
     """
     if pool == "hk":
-        return run_scan_hk(top=top, per_industry=per_industry)
+        # 港股不接受 per_industry（单桶下会静默截断，见 run_scan_hk docstring）
+        return run_scan_hk(top=top)
     sources.reset_warnings()
     trade_date = sources.latest_trade_date()
 
@@ -216,14 +226,54 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
 # 港股池管线（T11-5 / HK-4）
 # ---------------------------------------------------------------------------
 
-def run_scan_hk(*, top: int = DEFAULT_TOP, per_industry: int = 3) -> dict:
+def _hk_trade_date() -> str:
+    """港股池的数据日——**走港股日历**（`hk_calendar.hk_session_date`）。
+
+    ⚠️ 不能用 A 股 `latest_trade_date()`：港股开市而 A 股休市的日子（如 10-02 这类调休）
+    会把数据日错标成上一个 A 股交易日，连带 T+90/180 回填的裁决锚点一起错。
+
+    **两条降级路径都必须显式标注**（`hk_calendar` docstring 的明文契约）：
+    ① 模块/调用抛异常 → 退回 A 股口径；② **日历取数失败但不抛异常**——`hk_session_date`
+    内部会退回**周末近似日**并只置 `hk_calendar_degraded()`。只 catch 异常的写法会让
+    ②静默通过（报告仍称数据日取自港股日历），故须显式查 `hk_calendar_degraded()`。
+    """
+    try:
+        # 复用 sources_hk 的既有加载器（含 sys.modules 缓存与 sys.path 处理），
+        # 不另写一份 importlib 逻辑（两份加载会各自实例化模块，缓存互不相通）
+        cal = sources_hk._load_hk_module("hk_calendar")
+        d = cal.hk_session_date()
+        if d:
+            if cal.hk_calendar_degraded():
+                sources_hk.warnings.append(
+                    f"**港股日历降级**（hk_tradecal 取数失败，不抛异常）→ 数据日 {d} 为"
+                    f"**周末近似日**、非真实交易日；T+90/180 回填锚点须据此复核")
+            return d.replace("-", "")
+        sources_hk.warnings.append("港股日历返回空 → 数据日退回 A 股口径")
+    except Exception as exc:  # noqa: BLE001 —— 降级不阻断，但须标注
+        sources_hk.warnings.append(
+            f"港股日历模块不可得（{type(exc).__name__}: {exc}）→ 数据日退回 A 股口径")
+    return sources.latest_trade_date()
+
+
+def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
     """港股池粗筛（`--pool hk`）。
 
     **可用性差异必须显式标注**（HK-4 验收：每透镜标可用性、**空透镜不冒充**）：
     港股**无行业字段**（`ind_rk` 不可得）→ 逐条标跳过；**无业绩预告** → 增速子项不可得；
     利差口径改 **US 10Y**（HKD 钉住美元）。
+
+    ⚠️ 不接受 `per_industry`：港股全部行同属「—（港股无行业字段）」**一个桶**，
+    按 3 封顶会让第 4 名起被静默丢弃（实测 `--top 15` 恒只出 3 只）。快照 `params`
+    记 `per_industry=None` 以反映**实际行为**（该字段是回填裁决的锚点）。
     """
     sources_hk.reset_warnings()
+    # ⚠️ A 股分支在 run_scan 入口 reset；港股分支同样要 reset，否则同进程先跑 A
+    # 再跑 HK 时，A 侧残留降级消息会被聚合进港股报告/快照（库内二次调用泄漏）
+    sources.reset_warnings()
+    # ⚠️ **必须在聚合 warnings 之前求值**：`_hk_trade_date` 会往 `sources_hk.warnings`
+    # 追加降级标注，而 dict 字面量按序求值——放在 `warnings` 键之后就永远进不了报告
+    # （实测：警告「写了但走不到」）。
+    trade_date = _hk_trade_date()
     rf_pct, rf_src = sources.rf_10y_usd()      # HK 用 US 10Y（口径见 sources_hk）
     universe = sources_hk.fetch_hk_universe()
     quotes = sources_hk.fetch_hk_quote_batch([r["symbol"] for r in universe])
@@ -247,20 +297,24 @@ def run_scan_hk(*, top: int = DEFAULT_TOP, per_industry: int = 3) -> dict:
         f"L1 仅按全池分位判定（{len(l1)} 只命中）")
 
     hits: list[dict] = []
+    n_unassessable = 0
+    n_rejected = 0
     for r in l1:
         fin = sources_hk.fetch_hk_financials(r["symbol"])
         latest = fin[0] if fin else None
         if latest is None:
+            n_unassessable += 1          # ⚠️ 必须计数：否则「无标的通过」会被读成市场事实
             continue
-        roe = latest.get("roe")
-        profit = latest.get("net_profit")
-        if roe is None or profit is None:
-            continue
-        try:
-            roe_f, profit_f = float(roe), float(profit)
-        except (TypeError, ValueError):
+        # ⚠️ **ROE 口径**：东财 `ROE_AVG` 是**期间值**（中报为半年口径，非年化）。
+        # A 侧的 8% 阈值配的是 `roe_yearly`（年化）——直接套用会**严约一倍**，
+        # 把年化约 16%、本应通过的港股卡掉。此处按报告期年化后再比，并随报告标注。
+        roe_f = sources_hk.annualized_roe(latest)
+        profit_f = quality._num(latest.get("net_profit"))
+        if roe_f is None or profit_f is None:
+            n_unassessable += 1
             continue
         if roe_f < quality.ROE_MIN_PCT or profit_f < 0:
+            n_rejected += 1
             continue
         ey = lenses.ey_pct(r["pe_ttm"])
         flags = lenses.gap_flags(ey=ey, rf_pct=rf_pct, pe_ttm=r["pe_ttm"],
@@ -276,7 +330,21 @@ def run_scan_hk(*, top: int = DEFAULT_TOP, per_industry: int = 3) -> dict:
             "anomaly": lenses.pe_anomaly(r["pe_ttm"]),
         })
 
-    ranked = lenses.rank_candidates(hits, per_industry=per_industry)[:top]
+    # ⚠️ `per_industry=None`：港股全部行同属「—（港股无行业字段）」一个桶，
+    # 按默认 3 封顶会让第 4 名起被**静默丢弃**（实测：--top 15 恒只出 3 只）
+    ranked = lenses.rank_candidates(hits, per_industry=None)[:top]
+
+    # 「无标的通过」须可归因（同 A 股分支）：**数据不可得** ≠ **过滤结果** ≠ 市场事实
+    if not ranked and l1:
+        if n_unassessable == len(l1):
+            sources_hk.warnings.append(
+                f"L1 命中 {len(l1)} 只，但**全部 {n_unassessable} 只财务数据不可评估**——"
+                f"「无标的通过」是**数据不可得**结果，不得读作市场事实或「港股无机会」")
+        else:
+            sources_hk.warnings.append(
+                f"L1 命中 {len(l1)} 只但**无一通过质量闸门**（其中不可评估 {n_unassessable} 只、"
+                f"被闸门剔除 {n_rejected} 只）——是过滤结果，非「市场无机会」")
+
     return {
         "hits": ranked,
         "pool": "hk",
@@ -284,13 +352,17 @@ def run_scan_hk(*, top: int = DEFAULT_TOP, per_industry: int = 3) -> dict:
         "pool_stats": {"market": "港股全市场（hk_basic 上市股，超集口径）",
                        "n_positive_pe": n_positive_pe, "n_pool": len(merged),
                        "n_l1": len(l1), "n_excluded_st": 0, "median_pe": median_pe,
-                       "n_unassessable": 0, "calls": {"hk_basic": 1},
-                       "empty_retries": 0},
-        "warnings": sources.aggregate_warnings(list(sources_hk.warnings)),
+                       "n_unassessable": n_unassessable, "n_quality_rejected": n_rejected,
+                       "calls": {"hk_basic": 1}, "empty_retries": 0},
+        # ⚠️ 两侧都要聚合：US 10Y 失败写在 `sources.warnings`（`rf_10y_usd` 内），
+        # 只取 `sources_hk.warnings` 会让 L3 降级被静默吞掉、透镜表仍称「可用」
+        "warnings": sources.aggregate_warnings(
+            list(sources.warnings) + list(sources_hk.warnings)),
+        # `per_industry=None` = 不做行业分散（**实际行为**，非 CLI 默认值 3）
         "params": {"pe_grank_max": lenses.PE_GRANK_MAX, "ind_rank_max": lenses.IND_RANK_MAX,
                    "roe_min": quality.ROE_MIN_PCT, "top_n": top,
-                   "per_industry": per_industry, "with_bj": False, "pool": "hk"},
-        "trade_date": sources.latest_trade_date(),
+                   "per_industry": None, "with_bj": False, "pool": "hk"},
+        "trade_date": trade_date,
         "rf": {"pct": rf_pct, "source": rf_src, "caliber": "US 10Y（HKD 钉住美元）"},
         "market_context": sources.market_form_context(),
     }
@@ -421,11 +493,14 @@ def render_report_hk(scan: dict) -> str:
         f"一个需 push2 域（本 skill 刻意回避）一个无源，故改用**全部上市港股（超集）**，"
         f"覆盖不失且零东财依赖",
         f"- 池内 {ps['n_pool']} 只（有正 PE 者 {ps['n_positive_pe']} 只），"
-        f"L1 命中 {ps['n_l1']} 只"
+        f"L1 命中 {ps['n_l1']} 只；**质量闸门**：通过 {len(hits)} 只，"
+        f"被剔除 {ps.get('n_quality_rejected', 0)} 只，"
+        f"**不可评估** {(ps.get('n_unassessable') or 0)} 只（财务不可得，未冒充已过滤）"
         + (f"；正 PE 子总体**中位 PE {ps['median_pe']:.2f}x**"
            f" [来源: Python calc: median(正 PE 序列)]" if ps.get("median_pe") else ""),
-        f"- 规则版本：{snapshot.RULES_VERSION}（**港股池的 L1 universe 重定义"
-        f"（港股池正 PE 子总体，非全 A）→ 口径变更，须随 rules_version 记录**）",
+        f"- 规则版本：{snapshot.RULES_VERSION}（港股池的 L1 universe = **港股池正 PE 子总体**"
+        f"（非全 A）→ 与 A 股池**口径不同**，故 rules_version 已 bump，见 "
+        f"`references/rules.md` 修订记录）",
     ]
     lines.append("")
     # === 透镜可用性表（HK-4 验收：每透镜标可用性、空透镜不冒充）===
@@ -436,6 +511,9 @@ def render_report_hk(scan: dict) -> str:
         lines.append(f"| {item['lens']} | {item['status']} | {item['basis']} |")
     lines.append("")
     rf = scan.get("rf") or {}
+    if rf.get("pct") is None:
+        lines.append("- L3 利差口径：**US 10Y 不可得（降级）**——利差子项全部记 0 且**不作数**；"
+                     "透镜可用性表中的「可用（口径改 US 10Y）」**本次不成立**")
     if rf.get("pct") is not None:
         lines.append(f"- L3 利差口径：**{rf.get('caliber')}** = {rf['pct']}%"
                      f" [来源: {rf.get('source')}]"
@@ -476,8 +554,11 @@ def render_report_hk(scan: dict) -> str:
                 lines.append(f"  {h['anomaly']}")
             lines.append(f"  下钻：`{_drill_cmd(h['ts_code'])}`")
         lines.append("")
-    lines.append("> ⚠️ 港股池口径注记：净利用东财 `HOLDER_PROFIT`（归母）——**港股无扣非概念**；"
-                 "ROE 用 `ROE_AVG`（**期间 ROE，中报非年化**，与 A 侧 `roe_yearly` 不可直接比）；"
+    lines.append("> ⚠️ 港股池口径注记：净利用东财 `HOLDER_PROFIT`（归母）——**港股无扣非概念**"
+                 "（相对 A 侧 `profit_dedt` 为口径放宽）；"
+                 "ROE 用 `ROE_AVG`（**期间 ROE，中报为半年口径**）——本引擎**已按报告期年化**"
+                 "（中报 ×2）后再与 8% 比较，故与 A 侧 `roe_yearly` **同义但来源不同**"
+                 "（见上方透镜可用性表）；"
                  "披露节奏为**年报+中报**（无季报、无业绩预告）。"
                  "本清单为**研究观察起点**，不构成投资建议，不含买卖/仓位建议。")
     return "\n".join(lines)

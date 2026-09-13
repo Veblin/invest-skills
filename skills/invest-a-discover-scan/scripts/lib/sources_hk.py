@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import math
 import sys
 from pathlib import Path
 
@@ -180,10 +181,34 @@ LENS_AVAILABILITY: tuple[tuple[str, str, str], ...] = (
      "港股**无强制业绩预告**（`SKILL.md:74`）；tushare `forecast` 为 A 股专用"),
     ("质量门 净利 ≥ 0", "可用（口径放宽）",
      "东财 `HOLDER_PROFIT`（归母）；**港股无扣非概念** → 相对 A 侧为口径放宽"),
-    ("质量门 ROE ≥ 8%", "可用（口径注记）",
-     "东财 `ROE_AVG` 为**期间 ROE**（中报非年化），节奏为年报+中报 → **不可与 A 侧年化值直接比**"),
+    ("质量门 ROE ≥ 8%", "可用（**已按报告期年化后比较**）",
+     "东财 `ROE_AVG` 为**期间 ROE**（中报为半年口径）→ 本引擎按报告期年化（中报 ×2）"
+     "后再与 8% 比较；节奏为年报+中报，**与 A 侧 `roe_yearly` 同义但来源不同**"),
     ("L2 自身历史分位", "不可得", "A 侧 v0.1 亦未接；港股序列源仅单标的（百度）"),
 )
+
+
+def annualized_roe(fin_row: dict) -> float | None:
+    """东财 `ROE_AVG`（**期间值**）→ 年化 ROE。
+
+    ⚠️ **口径**：中报（`report_date` 以 `06-30` 结尾）的 ROE 是**半年**口径，年化 ≈ ×2；
+    年报（1231）已是年度口径，原值即可；季度报告港股不适用（无季报）。
+    不年化就直接套 A 侧的 8%（配 `roe_yearly`）会**严约一倍**（实测踩坑）。
+
+    ⚠️ NaN / ±Inf 一律 → None（三态，见 `quality._num`）：Inf 会**恒 > 阈值**直接放行。
+    """
+    if not isinstance(fin_row, dict):
+        return None
+    raw = fin_row.get("roe")
+    try:
+        f = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if f is None or f != f or math.isinf(f):
+        return None
+    end = str(fin_row.get("report_date") or "")
+    factor = 2.0 if end.endswith("06-30") else 1.0
+    return f * factor
 
 
 def lens_availability() -> list[dict]:

@@ -23,6 +23,22 @@ def _lin(a, b, n):
     return [a + (b - a) * i / (n - 1) for i in range(n)]
 
 
+def _sawtooth(*, cycles=8, up=10, down=5, lo=100.0, amp=0.10):
+    """「涨 up 根（放量）→ 跌 down 根（缩量）」锯齿——每轮产生一次缩量回踩候选。"""
+    closes, vols = [], []
+    px = lo
+    for _ in range(cycles):
+        for _i in range(up):
+            px *= 1 + amp / up
+            closes.append(px)
+            vols.append(1000.0)
+        for _i in range(down):
+            px *= 1 - (amp * 1.1) / down
+            closes.append(px)
+            vols.append(300.0)
+    return closes, vols
+
+
 def _divergence_series():
     """价更低 + 动能更弱：陡跌→反弹→慢跌（跌破前低）→回弹。
 
@@ -177,3 +193,55 @@ def test_left_right_backtest_forbids_preset_conclusion(banned):
 def test_left_right_backtest_insufficient_sample_no_conclusion():
     out = fp.left_right_backtest(right_returns=[], left_returns=[0.01], horizon=5)
     assert "样本不足" in out["wording_template"]
+
+
+# ── ② 缩量回踩：历史事件逐点检测（轮末评审修复 2026-09-13）───────────────────
+
+def test_shrink_pullback_finds_historical_event_after_full_recovery():
+    """回踩发生在**中段**、其后已收复并创新高 → 仍须检出。
+
+    ⚠️ 老实现只判「当前状态」（前高取最近 `peak_window+1` 根窗口内的最高价，
+    终点恒为最后一根 K）：价格收复后 pullback ≈ 0 → 恒不命中，且**终点恒为末根**
+    使前向收益窗恒空，该规则在 RC 规则矩阵里恒为全 0 列（实测 24/27 条有效）。
+    """
+    closes = _lin(100.0, 120.0, 21) + _lin(120.0, 110.0, 10)[1:] + _lin(110.0, 130.0, 30)[1:]
+    vols = [1000.0] * 21 + [400.0] * 9 + [1000.0] * (len(closes) - 30)
+    out = fp.detect_shrink_pullback(closes, vols)
+    assert out, "历史回踩被漏检（老实现的典型失败）"
+    assert all(e["endpoint_idx"] < len(closes) - 1 for e in out), \
+        "终点不得恒为最后一根 K（否则前向收益窗恒空）"
+    assert any(e["detail"]["peak_idx"] == 20 for e in out), "前高须落在中段峰值（i=20）"
+
+
+def test_shrink_pullback_caps_and_keeps_most_recent_events():
+    """命中数按 `MAX_PIVOTS` 截断，且保留**最近**的若干次而非最早的。
+
+    夹具：8 轮「涨 10 根 + 跌 5 根」锯齿（每轮末段构成一次缩量回踩）→ 检出数
+    远超上限；截断后须落在**尾部**（保留最早的实现会让「最近一次回踩」缺席）。
+    """
+    closes, vols = _sawtooth(cycles=8)
+    out = fp.detect_shrink_pullback(closes, vols)
+    eps = [e["endpoint_idx"] for e in out]
+    assert len(out) == fp.MAX_PIVOTS, f"须按 MAX_PIVOTS 截断，实得 {len(out)}"
+    assert eps == sorted(eps), "事件须按时间升序"
+    assert max(eps) >= len(closes) * 3 // 4, \
+        f"须保留尾部（最近）事件，实得末次 idx={max(eps)} / 共 {len(closes)} 根"
+
+
+def test_shrink_pullback_nan_volume_is_not_shrink():
+    """量能全为 NaN 时**不得**冒充「缩量」——NaN 会穿过 `is not None` 让
+    `ratio > 阈值` 恒 False，老实现把放量踩踏报成缩量回踩并落盘 NaN。"""
+    closes = _lin(100.0, 120.0, 21) + _lin(120.0, 105.0, 15)[1:]
+    vols = [float("nan")] * len(closes)
+    out = fp.detect_shrink_pullback(closes, vols)
+    assert out, "幅度达标仍应命中（只是量能不可得）"
+    for e in out:
+        assert e["detail"]["shrink_ratio"] is None
+        assert e["detail"]["volume_available"] is False
+
+
+def test_shrink_pullback_vols_shorter_than_closes_does_not_crash():
+    """量能序列短于价格（截断/停牌）→ 按缺量处理，不得 IndexError。"""
+    closes = _lin(100.0, 120.0, 21) + _lin(120.0, 105.0, 15)[1:]
+    out = fp.detect_shrink_pullback(closes, [1000.0] * 10)
+    assert isinstance(out, list)
