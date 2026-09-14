@@ -601,6 +601,51 @@ class TestBriefMode:
         assert "市场结构" in result or "核心矛盾" in result
 
 
+class TestFullModeIdentity:
+    """full 输出为审计底稿；只有分析注入后才可称分析合成已完成。"""
+
+    @staticmethod
+    def _collection():
+        from stock_testutil import make_store_collection
+
+        collection = make_store_collection("600176")
+        collection["market_structure"] = {}
+        collection["research_summary"] = {"status": "no_data", "summary_text": ""}
+        collection["risk_data"] = {"triggers": []}
+        return collection
+
+    @staticmethod
+    def _analysis():
+        return [{
+            "module": "research", "title": "研究发现",
+            "facts_md": "事实 [来源: engine]", "analysis_md": "推演 [证据: B]",
+            "evidence_tag": "B", "position": "research",
+        }]
+
+    def test_full_without_analysis_is_explicitly_unfinished_data_pack(self):
+        from lib.render import render_report_v3
+
+        text = render_report_v3(self._collection(), "600176", mode="full")
+        assert "数据底稿（分析合成未完成）" in text
+        assert "--analysis <analysis.json>" in text
+        assert text.index("## 产物状态") < text.index("## 目录")
+
+    def test_full_with_analysis_remains_evidence_pack_without_unfinished_claim(self):
+        from lib.render import render_report_v3
+
+        text = render_report_v3(self._collection(), "600176", mode="full",
+                                analysis=self._analysis())
+        assert "审计/证据数据底稿（分析合成已注入）" in text
+        assert "分析合成未完成" not in text
+
+    def test_brief_and_concise_do_not_receive_full_data_pack_status(self):
+        from lib.render import render_report_v3
+
+        collection = self._collection()
+        assert "## 产物状态" not in render_report_v3(collection, "600176", mode="brief")
+        assert "## 产物状态" not in render_report_v3(collection, "600176", mode="concise")
+
+
 class TestConciseMode:
     """--mode concise：对话场景结论速览 + details 展开块。"""
 

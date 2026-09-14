@@ -211,6 +211,26 @@ class TestCollectDefaultStore:
 
 
 class TestReportAutoStore:
+    def test_cli_full_without_analysis_writes_unfinished_data_pack_status(
+            self, tmp_path: Path, monkeypatch):
+        """CLI 默认 full 落盘必须保留 renderer 的底稿身份，而非伪装成研究成品。"""
+        import invest
+
+        original_render = invest.render.render
+        monkeypatch.setattr(invest, "_HAS_STORE", False)
+        monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
+
+        def _offline_render(*args, **kwargs):
+            kwargs["attach_extras"] = False
+            return original_render(*args, **kwargs)
+
+        monkeypatch.setattr(invest.render, "render", _offline_render)
+        outdir = tmp_path / "reports"
+        assert invest.cmd_report(_report_args(store=False, outdir=str(outdir), mode="full")) == 0
+        text = next(outdir.rglob("*.md")).read_text(encoding="utf-8")
+        assert "数据底稿（分析合成未完成）" in text
+        assert "--analysis <analysis.json>" in text
+
     @pytest.mark.parametrize("emit", ["md", "html"])
     def test_report_analysis_is_persisted_with_md_and_passes_shared_completion_qc(
             self, tmp_path: Path, monkeypatch, emit: str):
