@@ -291,6 +291,18 @@ def test_r_e04_fact_block_rule_is_error_and_paragraph_scoped():
     assert rule["scope"] == "paragraph", "块级拦截不能用 line scope（跨行场景会漏）"
 
 
+def test_r_e03_e04_share_source_exemption():
+    """两条兄弟规则须同表豁免来源标注行。
+
+    R-E04 曾缺 `\\[来源:`，把「带来源的可追溯事实陈述」判成「无标注惯例」
+    （reports/ 652 篇实测 20 条 error 级误报，直接阻断 precommit 交付门禁）。
+    """
+    rules = _rules()
+    for rid in ("wording-practitioner-convention", "structure-convention-in-fact-block"):
+        assert "\\[来源:" in rules[rid]["skip_if_pattern"], \
+            f"{rid} 须与兄弟规则同表豁免来源标注行"
+
+
 def test_r_e03_convention_template_documented():
     conv = _read(_CONVENTIONS)
     assert "3.5「从业者惯例」标注系统化" in conv or "### 3.5 「从业者惯例」标注系统化" in conv

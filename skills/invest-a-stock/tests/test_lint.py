@@ -607,6 +607,72 @@ class TestV030ConventionRuleBehavior:
         body = "# 测试\n\n[事实] 本次记录必带止损。\n"
         assert "structure-convention-in-fact-block" in self._lint(tmp_path, body)
 
+    # ── R-E04/R-E03 词义碰撞 FP 修复回归（reports/ 652 篇实测：20 → 0）────────
+    # 「出货」在产业文本中是「出货量」义，「托底」另有经济学义；两者都无市场主体
+    # 施动者。收窄为**要求施动者**，并让 R-E04 与兄弟规则同表豁免来源标注行。
+
+    def test_r_e04_exempts_sourced_fact_line(self, tmp_path):
+        """带 [来源:] 的 [事实] 行＝可追溯事实陈述 → 豁免（误报主源）。"""
+        body = ("# 测试\n\n**[事实]** 行业量价：高盛两度上修 800G 出货至 3350 万只"
+                " [来源: section_3]。\n")
+        assert "structure-convention-in-fact-block" not in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e04_exempts_sourced_convention_line(self, tmp_path):
+        """journal 实测 FP：`国家队托底 … [来源: 用户陈述]` 不得判为无标注惯例。"""
+        body = ("# 测试\n\n**[事实]** 用户驱动逻辑：(a) 国家队托底 + 科技战略定位 → 政策底"
+                "[来源: 用户陈述 / 2026-07-21]。\n")
+        assert "structure-convention-in-fact-block" not in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e04_shipment_wording_not_flagged(self, tmp_path):
+        """「出货」的产业义（无市场主体施动者）→ 不命中（单行与多行块都试）。"""
+        for body in ("# 测试\n\n[事实] 储能锂电池出货量同比 +139%。\n",
+                     "# 测试\n\n[事实]\n- 全球 AI 服务器出货量预计 370 万台\n"
+                     "- 800G 出货至 3350 万只\n"):
+            assert "structure-convention-in-fact-block" not in self._lint(
+                tmp_path, body, profile="precommit"), body
+
+    def test_r_e04_economics_floor_wording_not_flagged(self, tmp_path):
+        """「托底」的经济学义（结构性/高股息/政策）→ 不命中。"""
+        for body in ("# 测试\n\n[事实] ② 央行购金（结构性托底）。\n",
+                     "# 测试\n\n[事实] 高股息托底，但缺乏政策托底。\n"):
+            assert "structure-convention-in-fact-block" not in self._lint(
+                tmp_path, body, profile="precommit"), body
+
+    def test_r_e04_still_fires_on_unlabeled_convention(self, tmp_path):
+        """防失效：无来源标签的真惯例表述必须仍命中（按收窄后词表逐一核对）。"""
+        for c in ("[事实] 本标的缩量跌不动，量能萎缩至 0.4 倍。",
+                  "[事实] 本次记录必带止损。",
+                  "[事实] 回踩低吸区间已到。",
+                  "[事实] 明显洗盘。",
+                  "[事实] 主力吸筹。",
+                  "[事实] 主力出货迹象明显。",
+                  "[事实] 北向资金出货。",
+                  "[事实] 国家队托底形成政策底。",
+                  "[事实] 缩量电风扇行情。",
+                  "[事实] 右稳左可结构。"):
+            got = self._lint(tmp_path, "# 测试\n\n" + c + "\n", profile="precommit")
+            assert "structure-convention-in-fact-block" in got, f"漏拦：{c}"
+
+    def test_r_e04_multiline_source_on_other_line_still_fires(self, tmp_path):
+        """skip 是**行级**：来源标签在别的行时，惯例词行仍须命中（规则本意不受损）。"""
+        body = ("# 测试\n\n[事实]\n- 主力出货迹象明显\n- 尾盘放量\n"
+                "[来源: 龙虎榜 2026-08-05]\n")
+        assert "structure-convention-in-fact-block" in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e03_shipment_wording_not_flagged(self, tmp_path):
+        """R-E03（warning）与 R-E04 同词表：出货量义不再刷 warning。"""
+        assert "wording-practitioner-convention" not in self._lint(
+            tmp_path, "# 测试\n\n全球 AI 服务器出货量预计 370 万台。\n")
+
+    def test_r_e03_agent_convention_still_flagged(self, tmp_path):
+        """R-E03 收窄后仍拦真惯例语义（施动者形态）。"""
+        for body in ("# 测试\n\n估值透支 + 主力出货。\n",
+                     "# 测试\n\n国家队托底 + 国家科技战略。\n"):
+            assert "wording-practitioner-convention" in self._lint(tmp_path, body), body
+
     def test_tristate_rule_fires_on_unlabeled_rumor(self, tmp_path):
         """不带三态标注的传闻是**该规则存在的唯一理由**，必须命中。"""
         body = "# 测试\n\n市场传言公司将获注资。\n"
