@@ -249,6 +249,113 @@ class TestStructureChecks:
         assert structure.status == "pass", structure.details
 
 
+# ── 股票报告交付完成度（P0）──────────────────────────────────────────────
+
+
+_AUTOMATED_STOCK_SNAPSHOT = """# 600176 中国巨石 研究快照
+
+> ⚠️ 本报告由自动化引擎生成，仅供研究备忘录参考，不构成任何投资建议。
+
+## 研究摘要
+[事实] 财务数据来自引擎 [来源: engine]
+[分析] 已完成事实到结论的推演。
+[证据强度: ✅ 强]
+
+### 多头逻辑链
+- 盈利增长与现金流改善相互印证 [来源: engine]
+
+### 空头逻辑链
+- 需求波动可能压低利润率，需以下季财报验证 [来源: engine]
+
+### 左侧概率的主要支撑依据
+- 估值分位较低是条件性支撑 [来源: engine]
+
+### 右侧概率的主要支撑依据
+- 趋势仍弱，尚需价格结构确认 [来源: engine]
+"""
+
+_VALID_ANALYSIS_SIDECAR = json.dumps([{
+    "module": "research",
+    "title": "研究发现",
+    "facts_md": "财务事实 [来源: engine]",
+    "analysis_md": "分析结论 [证据: B]",
+    "evidence_tag": "B",
+    "position": "research",
+}], ensure_ascii=False)
+
+
+def _completion_layer(result):
+    return next(layer for layer in result.layers if layer.layer == "completion")
+
+
+class TestStockCompletionGate:
+    def test_automated_snapshot_without_same_generation_sidecar_fails(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        result = qc_file(report, fail_on="error")
+        completion = _completion_layer(result)
+        assert completion.status == "fail"
+        assert any(d["id"] == "completion-analysis-sidecar-missing"
+                   for d in completion.details)
+        assert result.overall == "FAIL"
+
+    def test_automated_snapshot_with_same_generation_sidecar_passes_completion(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert completion.status == "pass", completion.details
+
+    def test_explicit_template_markers_fail_even_with_sidecar(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "已完成事实到结论的推演。", "[待 Claude report 阶段填充]\n> [分析提示]"
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        marker_lines = [d["line"] for d in completion.details
+                        if d["id"] == "completion-template-placeholder"]
+        assert len(marker_lines) == 2
+        assert completion.status == "fail"
+
+    def test_empty_bear_and_left_basis_fail(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 需求波动可能压低利润率，需以下季财报验证 [来源: engine]",
+                "- 当前数据未形成明确空头逻辑链 [来源: engine]",
+            ).replace(
+                "- 估值分位较低是条件性支撑 [来源: engine]", ""
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        empties = [d for d in completion.details if d["id"] == "completion-empty-basis"]
+        assert {"Bear", "左侧"} <= {d["message"].split(" 依据节")[0] for d in empties}
+        assert completion.status == "fail"
+
+    def test_empty_or_invalid_sidecar_is_not_completed(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        report.with_suffix(".analysis.json").write_text("[]\n", encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert any(d["id"] == "completion-analysis-sidecar-invalid"
+                   for d in completion.details)
+        assert completion.status == "fail"
+
+    def test_manual_stock_and_other_report_types_do_not_require_sidecar(self, tmp_path: Path):
+        manual = _write(tmp_path, "600176-中国巨石", "2026-07-16.md", COMPLIANT_STOCK)
+        manual_completion = _completion_layer(qc_file(manual, fail_on="error"))
+        assert manual_completion.status == "skip"
+
+        etf = _write(tmp_path, "588000-科创50ETF", "2026-09-14.md",
+                     COMPLIANT_ETF + "\n[待 Claude report 阶段填充]\n")
+        etf_result = qc_file(etf, fail_on="error")
+        assert not any(layer.layer == "completion" for layer in etf_result.layers)
+
+
 # ── derived 层（ETF）──────────────────────────────────────────────────────
 
 

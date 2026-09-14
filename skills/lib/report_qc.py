@@ -8,6 +8,8 @@
 分层：
     lint      全部      措辞合规（复用 invest-a-stock lib/lint.py + YAML 规则）
     structure 全部      报告类型特定结构校验（章节/标签存在性）
+    completion stock    自动化研究快照的分析交付完成度（占位符/同代 analysis.json/
+                        Bull-Bear 与左-右依据不得为空）
     derived   etf+stock 16 个 derived 字段合理性（值域 + 小数位）；stock 报告
                        仅当引用衍生字段（含 v0.2.7 E1 板块同步性 6 字段）时启用
     audit     stock     数据点抽取 + 偏差判定（--verify-data）
@@ -189,6 +191,183 @@ def _check_structure(text: str, report_type: str) -> LayerResult:
         layer.details.append({"id": rule_id, "severity": severity, "message": message})
     if layer.findings_count:
         layer.status = "warn"
+    return layer
+
+
+# ── 股票报告交付完成度 ────────────────────────────────────────────────────
+
+# v0.2.8 起，标准的自动化股票报告使用「研究快照」标题；它不是最终研究成品，
+# 必须由同代 analysis.json 完成可追溯的分析合成。这里同时要求风险提示中的
+# 「自动化引擎生成」字样，避免把用户手写的研究备忘录误判为待合成快照。
+_AUTOMATED_STOCK_SNAPSHOT_RE = re.compile(
+    r"^#\s+\d{6}\s+.+?\s+研究快照\s*$", re.M
+)
+_AUTOMATED_ENGINE_NOTICE_RE = re.compile(r"本报告由自动化引擎生成")
+
+# 仅捕捉明确表示「尚待模型填写」的模板残留。不能把「待独立验证」「数据不可得」
+# 这类有意保留的不确定性误作未完成报告。
+_TEMPLATE_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\[\s*(?:待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"
+        r"(?:填充|填写|补充|验证)?|分析提示|待(?:填|填写|填充)|TODO|TBD|FIXME)\s*\]",
+        re.I,
+    ),
+    re.compile(r"分析提示\s*[（(]\s*(?:Claude|AI|LLM)[^）)]{0,24}[）)]", re.I),
+    re.compile(
+        r"待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"
+        r"(?:填充|填写|补充|验证)",
+        re.I,
+    ),
+)
+
+_MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
+_EMPTY_BASIS_RE = re.compile(
+    r"(?:当前数据)?\s*(?:未形成(?:明确)?|尚未形成|暂无|无|没有)\s*"
+    r"(?:明确)?\s*(?:多头|空头|bull|bear|左侧|右侧)?\s*"
+    r"(?:逻辑链|支撑依据|依据|证据|基础)",
+    re.I,
+)
+
+
+def _same_generation_analysis_path(report_path: Path) -> Path:
+    """返回 ``report.md`` 的同代 ``report.analysis.json`` 路径。"""
+    return report_path.with_suffix(".analysis.json")
+
+
+def _sidecar_validation_error(path: Path) -> str | None:
+    """返回侧车不合格原因；必须是有实际分析段的 JSON 数组。
+
+    完整 schema 在 ``report --analysis`` 注入时已 fail-loud 校验。共享 QC
+    不能重载其 Markdown 子集依赖（SkillHub 分发环境可能以不同包名加载），
+    因而这里只检查交付层必须成立的最小子集：合法 JSON、非空数组、每段有
+    非空事实与分析文本。这样 ``[]`` 或损坏文件不能伪装成已完成研究。
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"无法读取或解析 JSON（{exc}）"
+    if not isinstance(raw, list) or not raw:
+        return "顶层必须是至少含一个分析段的数组"
+    for index, section in enumerate(raw):
+        if not isinstance(section, dict):
+            return f"第 {index + 1} 段必须是对象"
+        if not isinstance(section.get("facts_md"), str) or not section["facts_md"].strip():
+            return f"第 {index + 1} 段缺少非空 facts_md"
+        if not isinstance(section.get("analysis_md"), str) or not section["analysis_md"].strip():
+            return f"第 {index + 1} 段缺少非空 analysis_md"
+    return None
+
+
+def _basis_section_kind(title: str) -> str | None:
+    """识别需要实际内容的多空/左-右依据小节；合并标题不作猜测。"""
+    lower = title.lower()
+    if "bull/bear" in lower or "多空" in title:
+        return None
+    if "多头" in title or "bull" in lower:
+        return "Bull"
+    if "空头" in title or "bear" in lower:
+        return "Bear"
+    if "左侧" in title and ("依据" in title or "概率" in title):
+        return "左侧"
+    if "右侧" in title and ("依据" in title or "概率" in title):
+        return "右侧"
+    return None
+
+
+def _section_body(lines: list[str], start: int, level: int) -> list[str]:
+    """提取标题后的正文，遇到同级或更高层级标题即停止。"""
+    body: list[str] = []
+    for line in lines[start + 1:]:
+        match = _MARKDOWN_HEADING_RE.match(line)
+        if match and len(match.group(1)) <= level:
+            break
+        body.append(line)
+    return body
+
+
+def _basis_is_empty(body: list[str]) -> bool:
+    """判断依据节是否没有实质内容或只写了明确的「没有逻辑链」占位句。"""
+    content = [line.strip() for line in body if line.strip() and line.strip() != "---"]
+    if not content:
+        return True
+    plain = " ".join(content)
+    # 明确的「当前数据未形成明确空头逻辑链」等不是反方/概率依据，不能让
+    # 完整报告冒充已完成分析。若同节还有其他实质内容，保守地不误报。
+    if _EMPTY_BASIS_RE.search(plain):
+        without_absence = re.sub(r"\[来源\s*[:：][^\]]*\]", "", plain)
+        without_absence = _EMPTY_BASIS_RE.sub("", without_absence)
+        without_absence = re.sub(r"[>\-*①②③④⑤⑥\s\[\]：:，,。.！!]+", "", without_absence)
+        return not without_absence
+    return False
+
+
+def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
+    """检查股票研究成品是否仍是未完成的自动化快照。
+
+    这是独立于 lint profile 的 error 级交付门禁：``--fail-on error`` 也不能
+    放过未填模板或缺少合成侧车的报告。手写/已完成的老式研究备忘录不以文件名
+    推断，只有标题和自动化声明同时出现才要求同代 sidecar。
+    """
+    layer = LayerResult(layer="completion", status="skip")
+    lines = text.splitlines()
+
+    for line_no, line in enumerate(lines, start=1):
+        if any(pattern.search(line) for pattern in _TEMPLATE_MARKER_PATTERNS):
+            layer.findings_count += 1
+            layer.details.append({
+                "id": "completion-template-placeholder",
+                "severity": "error",
+                "line": line_no,
+                "message": "报告保留了待模型填写的模板占位，分析合成尚未完成",
+            })
+
+    is_automated_snapshot = bool(
+        _AUTOMATED_STOCK_SNAPSHOT_RE.search(text)
+        and _AUTOMATED_ENGINE_NOTICE_RE.search(text)
+    )
+    if is_automated_snapshot:
+        sidecar = _same_generation_analysis_path(report_path)
+        if not sidecar.is_file():
+            layer.findings_count += 1
+            layer.details.append({
+                "id": "completion-analysis-sidecar-missing",
+                "severity": "error",
+                "message": f"自动化研究快照缺少同代分析侧车: {sidecar.name}",
+            })
+        else:
+            validation_error = _sidecar_validation_error(sidecar)
+            if validation_error:
+                layer.findings_count += 1
+                layer.details.append({
+                    "id": "completion-analysis-sidecar-invalid",
+                    "severity": "error",
+                    "message": f"自动化研究快照的同代分析侧车不合格: {validation_error}",
+                })
+
+    for index, line in enumerate(lines):
+        match = _MARKDOWN_HEADING_RE.match(line)
+        if not match:
+            continue
+        kind = _basis_section_kind(match.group(2))
+        if kind is None:
+            continue
+        body = _section_body(lines, index, len(match.group(1)))
+        if _basis_is_empty(body):
+            layer.findings_count += 1
+            layer.details.append({
+                "id": "completion-empty-basis",
+                "severity": "error",
+                "line": index + 1,
+                "message": f"{kind} 依据节为空或仅声明无逻辑链，不能作为完成的研究交付",
+            })
+
+    if layer.findings_count:
+        layer.status = "fail"
+    elif is_automated_snapshot or any(
+        _basis_section_kind(match.group(2))
+        for line in lines if (match := _MARKDOWN_HEADING_RE.match(line))
+    ):
+        layer.status = "pass"
     return layer
 
 
@@ -642,6 +821,8 @@ def qc_file(
     text = path.read_text(encoding="utf-8")
 
     layers = [_run_lint_layer(path, profile, fail_on), _check_structure(text, report_type)]
+    if report_type == "stock":
+        layers.append(_check_stock_completion(path, text))
     if report_type != "pulse":
         # T6-2/T6-3（v0.3.0 R1）：F2 派生表述来源 / F4 §N 引用存在性——通用文本规则。
         # unknown 类型同样挂载（R1 审查 F13：event-calendar 等附属技能
