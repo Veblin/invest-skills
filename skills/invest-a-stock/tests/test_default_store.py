@@ -7,6 +7,7 @@ report diff 对上次快照；--with-macro 宏观快照入库。
 
 from __future__ import annotations
 
+import json
 import sys
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,9 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
+_SHARED_LIB_DIR = _SCRIPTS_DIR.parent.parent / "lib"
+if str(_SHARED_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_LIB_DIR))
 
 from test_v013_phase4 import _phase4_collection  # noqa: E402
 
@@ -54,6 +58,38 @@ def _report_args(**overrides) -> Namespace:
                 strict_rigor=False, material_gap=False, with_news_pack=False)
     base.update(overrides)
     return Namespace(**base)
+
+
+_VALID_ANALYSIS = [{
+    "module": "research",
+    "title": "研究发现",
+    "facts_md": "财务事实 [来源: engine]",
+    "analysis_md": "分析结论 [证据: B]",
+    "evidence_tag": "B",
+    "position": "research",
+}]
+
+_COMPLETED_AUTOMATED_SNAPSHOT = """# 600176 测试股 研究快照
+
+> ⚠️ 本报告由自动化引擎生成，仅供研究备忘录参考，不构成任何投资建议。
+
+## 研究摘要
+[事实] 财务数据来自引擎 [来源: engine]
+[分析] 已完成事实到结论的推演。
+[证据强度: ✅ 强]
+
+### 多头逻辑链
+- 盈利增长与现金流改善相互印证 [来源: engine]
+
+### 空头逻辑链
+- 需求波动可能压低利润率，需以下季财报验证 [来源: engine]
+
+### 左侧概率的主要支撑依据
+- 估值分位较低是条件性支撑 [来源: engine]
+
+### 右侧概率的主要支撑依据
+- 趋势仍弱，尚需价格结构确认 [来源: engine]
+"""
 
 
 class TestParserDefaults:
@@ -175,6 +211,38 @@ class TestCollectDefaultStore:
 
 
 class TestReportAutoStore:
+    @pytest.mark.parametrize("emit", ["md", "html"])
+    def test_report_analysis_is_persisted_with_md_and_passes_shared_completion_qc(
+            self, tmp_path: Path, monkeypatch, emit: str):
+        """外部 analysis 输入必须随新生成 md 同代落盘，供共享 QC 审计。"""
+        import invest
+        from report_qc import qc_file
+
+        input_sidecar = tmp_path / "upstream.analysis.json"
+        input_sidecar.write_text(json.dumps(_VALID_ANALYSIS, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(invest, "_HAS_STORE", False)
+        monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
+        if emit == "html":
+            monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
+            monkeypatch.setattr(invest.render, "render_report_v3",
+                                lambda *a, **k: _COMPLETED_AUTOMATED_SNAPSHOT)
+            monkeypatch.setattr(invest.render, "render_html", lambda *a, **k: "<html></html>")
+            monkeypatch.setattr(invest.render, "render", lambda *a, **k: "compact")
+        else:
+            monkeypatch.setattr(invest.render, "render", lambda *a, **k: _COMPLETED_AUTOMATED_SNAPSHOT)
+
+        outdir = tmp_path / "reports"
+        assert invest.cmd_report(_report_args(
+            store=False, outdir=str(outdir), analysis=str(input_sidecar), emit=emit,
+        )) == 0
+
+        report = next(outdir.rglob("*.md"))
+        sidecar = report.with_suffix(".analysis.json")
+        assert json.loads(sidecar.read_text(encoding="utf-8")) == _VALID_ANALYSIS
+        result = qc_file(report, fail_on="error")
+        completion = next(layer for layer in result.layers if layer.layer == "completion")
+        assert completion.status == "pass", completion.details
+
     def test_report_default_stores_after_render(self, isolated_store, monkeypatch):
         """改动 1/2 顺序保护：render 必须先于 save（否则 diff 自比恒空）。"""
         import invest

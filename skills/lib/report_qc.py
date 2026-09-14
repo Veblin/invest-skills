@@ -224,7 +224,7 @@ _MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 _EMPTY_BASIS_RE = re.compile(
     r"(?:当前数据)?\s*(?:未形成(?:明确)?|尚未形成|暂无|无|没有)\s*"
     r"(?:明确)?\s*(?:多头|空头|bull|bear|左侧|右侧)?\s*"
-    r"(?:逻辑链|支撑依据|依据|证据|基础)",
+    r"(?:逻辑链|支撑依据|依据|证据|基础)|(?:左|右)侧参考指标数据不足",
     re.I,
 )
 
@@ -235,27 +235,47 @@ def _same_generation_analysis_path(report_path: Path) -> Path:
 
 
 def _sidecar_validation_error(path: Path) -> str | None:
-    """返回侧车不合格原因；必须是有实际分析段的 JSON 数组。
-
-    完整 schema 在 ``report --analysis`` 注入时已 fail-loud 校验。共享 QC
-    不能重载其 Markdown 子集依赖（SkillHub 分发环境可能以不同包名加载），
-    因而这里只检查交付层必须成立的最小子集：合法 JSON、非空数组、每段有
-    非空事实与分析文本。这样 ``[]`` 或损坏文件不能伪装成已完成研究。
-    """
+    """返回侧车不合格原因；复用正式 analysis schema 以避免协议漂移。"""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return f"无法读取或解析 JSON（{exc}）"
     if not isinstance(raw, list) or not raw:
         return "顶层必须是至少含一个分析段的数组"
-    for index, section in enumerate(raw):
-        if not isinstance(section, dict):
-            return f"第 {index + 1} 段必须是对象"
-        if not isinstance(section.get("facts_md"), str) or not section["facts_md"].strip():
-            return f"第 {index + 1} 段缺少非空 facts_md"
-        if not isinstance(section.get("analysis_md"), str) or not section["analysis_md"].strip():
-            return f"第 {index + 1} 段缺少非空 analysis_md"
+    try:
+        errors = _validate_analysis_sections_path_safe(raw)
+    except Exception as exc:  # pragma: no cover - 分发包缺模块时 fail-closed
+        return f"无法校验 analysis schema（{exc}）"
+    if errors:
+        return "; ".join(errors[:3])
     return None
+
+
+def _validate_analysis_sections_path_safe(raw: list[dict]) -> list[str]:
+    """以 canonical stock lib 的 schema 校验 sidecar，隔离 ``lib`` 名称冲突。
+
+    shared QC 在源码仓库中可作为顶层 ``report_qc`` 导入，某些 harness 又已将
+    ``skills.lib`` 注册成 ``lib``；而 stock 的 ``analysis_schema`` 依赖
+    ``lib.md_subset``。加载期间短暂把 canonical alias 暴露为 ``lib``，即可沿用
+    同一份 ``validate_sections``（包括 position/evidence_tag/Markdown 子集），
+    随后无条件恢复调用方的模块命名空间。
+    """
+    package = _load_invest_lib()
+    previous_lib = sys.modules.get("lib")
+    previous_md_subset = sys.modules.get("lib.md_subset")
+    sys.modules["lib"] = package
+    try:
+        analysis_schema = importlib.import_module("_invest_lib.analysis_schema")
+        return analysis_schema.validate_sections(raw)
+    finally:
+        if previous_lib is None:
+            sys.modules.pop("lib", None)
+        else:
+            sys.modules["lib"] = previous_lib
+        if previous_md_subset is None:
+            sys.modules.pop("lib.md_subset", None)
+        else:
+            sys.modules["lib.md_subset"] = previous_md_subset
 
 
 def _basis_section_kind(title: str) -> str | None:
@@ -290,15 +310,10 @@ def _basis_is_empty(body: list[str]) -> bool:
     content = [line.strip() for line in body if line.strip() and line.strip() != "---"]
     if not content:
         return True
-    plain = " ".join(content)
-    # 明确的「当前数据未形成明确空头逻辑链」等不是反方/概率依据，不能让
-    # 完整报告冒充已完成分析。若同节还有其他实质内容，保守地不误报。
-    if _EMPTY_BASIS_RE.search(plain):
-        without_absence = re.sub(r"\[来源\s*[:：][^\]]*\]", "", plain)
-        without_absence = _EMPTY_BASIS_RE.sub("", without_absence)
-        without_absence = re.sub(r"[>\-*①②③④⑤⑥\s\[\]：:，,。.！!]+", "", without_absence)
-        return not without_absence
-    return False
+    # 明确的「当前数据未形成明确空头逻辑链」与渲染器的
+    # 「左/右侧参考指标数据不足」都不是实际依据。只有这些 sentinel 时视为
+    # 空；同节若另有实质论据则保守放行，避免把数据缺口说明误报为全节为空。
+    return all(_EMPTY_BASIS_RE.search(line) for line in content)
 
 
 def _check_stock_completion(report_path: Path, text: str) -> LayerResult:

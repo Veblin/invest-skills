@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -680,6 +682,32 @@ def _html_report_path(outdir: Path, subdir: str, ts: str) -> Path:
     return _report_filepath(outdir, subdir, ts).with_suffix(".html")
 
 
+def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | None) -> Path | None:
+    """将已校验的分析段原样原子写到报告同代 sidecar。
+
+    ``report --analysis`` 的输入可在任意路径；成品必须复制一份到与 ``.md``
+    同目录、同时间戳的位置，供后续 QC 与审计追溯。临时文件与目标同目录，
+    ``replace`` 在同一文件系统中为原子替换，避免中断时留下半截 JSON。
+    """
+    if analysis_payload is None:
+        return None
+    sidecar = report_path.with_suffix(".analysis.json")
+    payload = json.dumps(analysis_payload, ensure_ascii=False, indent=2) + "\n"
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{sidecar.name}.", suffix=".tmp", dir=str(sidecar.parent), text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(temp_name).replace(sidecar)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return sidecar
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     result = None
@@ -797,10 +825,13 @@ def cmd_report(args: argparse.Namespace) -> int:
 
         mdfile = _report_filepath(outdir, subdir, ts)
         mdfile.write_text(md_v2, encoding="utf-8")
+        sidecar = _write_analysis_sidecar(mdfile, analysis_payload)
 
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
         print(f"📝 Markdown 报告: {mdfile.resolve()}", file=sys.stderr)
+        if sidecar:
+            print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
         return 0
 
@@ -836,7 +867,10 @@ def cmd_report(args: argparse.Namespace) -> int:
                   else (Path.cwd() / "reports").resolve())
         mdpath = _report_filepath(outdir, subdir, ts)
         mdpath.write_text(output, encoding="utf-8")
+        sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
         print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
+        if sidecar:
+            print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
         if not getattr(args, "outdir", None):
             print(output)  # 默认路径下保留 stdout 契约（skill 流程读 stdout）
         return 0
