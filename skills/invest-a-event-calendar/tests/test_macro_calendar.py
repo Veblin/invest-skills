@@ -227,6 +227,32 @@ def test_cn_calendar_region_fallback_and_period_passthrough(monkeypatch):
     assert res.events[0].period == "2026年8月"
 
 
+def test_cn_calendar_nan_region_falls_back_to_country(monkeypatch):
+    """DataFrame 补出的 NaN 是 truthy，仍须按国家列保留该事件。"""
+    def fake(date, cookie=None):
+        return pd.DataFrame([{
+            "日期": "2026-09-15", "时间": "10:00", "地区": float("nan"), "国家": "中国",
+            "事件": "中国8月社会消费品零售总额年率(%)", "前值": 0.6, "重要性": "2",
+        }])
+
+    monkeypatch.setattr(mc, "_fetch_baidu_day", fake)
+    res = mc.fetch_baidu_calendar("20260915", "20260915", retries=1)
+    assert [e.region for e in res.events] == ["中国"]
+
+
+@pytest.mark.parametrize("contents,needle", [
+    (None, "缺失"),
+    ("[broken", "解析失败"),
+    ("- not-a-mapping", "根节点须为映射"),
+])
+def test_load_rules_fails_loud_for_unusable_config(tmp_path, contents, needle):
+    path = tmp_path / "macro.yaml"
+    if contents is not None:
+        path.write_text(contents, encoding="utf-8")
+    with pytest.raises(ValueError, match=needle):
+        mc.load_rules(path)
+
+
 def _load_rules_strict(path: Path) -> dict:
     """按 YAML 加载策展表，**重复键即报错**（PyYAML 默认静默取后者）。"""
     import yaml
@@ -680,6 +706,15 @@ def test_political_table_rejects_rewritten_mechanism_note(tmp_path):
 def test_political_missing_table_is_three_state(tmp_path):
     out = mc.load_political_windows(tmp_path / "nope.yaml")
     assert out["available"] is False and "缺失" in out["reason"]
+
+
+@pytest.mark.parametrize("contents", ["- name: X", "just-a-scalar"])
+def test_political_nonmapping_root_is_explicit_unavailable(tmp_path, contents):
+    p = tmp_path / "political.yaml"
+    p.write_text(contents, encoding="utf-8")
+    out = mc.load_political_windows(p)
+    assert out["available"] is False
+    assert "根节点须为映射" in out["reason"]
 
 
 # ── R-D04 政治窗口：fail-soft / 过期标注 / 接线（轮末评审修复 2026-09-13）─────

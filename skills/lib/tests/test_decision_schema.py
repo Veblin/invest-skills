@@ -90,6 +90,17 @@ def test_scenario_without_valuation_ref_rejected():
     assert any("valuation_ref" in e for e in validate_decision(bad))
 
 
+@pytest.mark.parametrize("field,value", [
+    ("valuation_ref", float("nan")), ("valuation_ref", float("inf")),
+    ("valuation_ref", float("-inf")), ("weight", float("nan")),
+])
+def test_scenario_non_finite_numbers_rejected(field, value):
+    """JSON 的 NaN/Infinity 不是可呈现、可复核的情景参考数值。"""
+    bad = _full()
+    bad["scenarios"][0][field] = value
+    assert any(field in e for e in validate_decision(bad))
+
+
 def test_unknown_scenario_key_rejected():
     bad = _full()
     bad["scenarios"][0]["key"] = "target_price"

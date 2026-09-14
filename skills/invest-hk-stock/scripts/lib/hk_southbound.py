@@ -407,6 +407,13 @@ def fetch_tushare_cross(days: int = 20) -> dict:
             "span": (sh or sz or {}).get("span"),
             "hsi": None, "hsi_chg_pct": None, "cum_yi": None,
         })
+    if not rows:
+        # 帧可解析、日期也存在，但全部累计字段无法转成数值，通常是上游字段漂移。
+        # 若返回 reason=None，调用方会把这次交叉校验当作「未尝试」而静默略过。
+        reason = "tushare 累计字段无可用值（ggt_ss/ggt_sz 疑缺失或字段漂移）"
+        return {"available": False, "rows": [], "source": _TS_SOURCE,
+                "caliber_note": _CALIBER_NOTE, "reason": reason,
+                "warnings": [f"tushare 交叉源不可得：{reason}"]}
     return {"available": bool(rows), "rows": rows[-days:], "source": _TS_SOURCE,
             "caliber_note": _CALIBER_NOTE, "reason": None, "warnings": []}
 

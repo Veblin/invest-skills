@@ -2930,10 +2930,18 @@ _PCR_HISTORY_60D = 60
 _PCR_MAX_DAILY_QUERIES = 80
 
 
-def _ms_50etf_option_codes(tc: Any) -> tuple[list[str], list[str]]:
+def _ms_50etf_option_codes(
+    tc: Any, *, diag: dict | None = None,
+) -> tuple[list[str], list[str]]:
     """SSE 50ETF 期权合约代码（认沽/认购）。"""
     df = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
     if df is None or df.empty:
+        if diag is not None:
+            # PCR 的第一步实际调用的是 opt_basic。权限不足时 TushareClient
+            # 合约约定为返回空帧，若不留下接口名，后面的 opt_daily 探针永远
+            # 不会执行，错误会被误判为“非权限问题”。
+            diag["reason"] = "option_contracts_empty"
+            diag["api"] = "opt_basic"
         return [], []
     puts, calls = [], []
     for _, row in df.iterrows():
@@ -3002,7 +3010,7 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     """50ETF 认沽认购比（opt_daily，需 5000 积分）。"""
     from lib.stats import percentile_rank
 
-    puts, calls = _ms_50etf_option_codes(tc)
+    puts, calls = _ms_50etf_option_codes(tc, diag=diag)
     if not puts or not calls:
         return None
     put_set, call_set = set(puts), set(calls)
@@ -3534,19 +3542,25 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
     ``f"{type(e).__name__}: {str(e)[:80]}"``，属 R12h 禁用的不可读来源）。
     """
     try:
-        points = api_min_points("opt_daily")
-        hint = f"（Tushare opt_daily 需 {points} 积分）" if points else ""
-        code = str((diag or {}).get("reason") or "")
-        # 权限信号**先于**成因推断：见 docstring 取值顺序 1（空帧不抛 → 探针假成功）
-        denied = False
+        # PCR 先请求 opt_basic，再请求 opt_daily；两者任一被拒都意味着本
+        # 维度不可得。不能只探测 opt_daily，否则 opt_basic 被拒会在入口提前
+        # 返回并落入“数据源异常（非权限问题）”。
+        checked_apis = ("opt_basic", "opt_daily")
+        denied_api = ""
         if tc is not None:
             probe = getattr(tc, "is_permission_denied", None)
             if callable(probe):
-                denied = bool(probe("opt_daily"))
+                denied_api = next((api for api in checked_apis if probe(api)), "")
             else:  # 兼容仅有私有集合的旧/假 client
-                denied = "opt_daily" in getattr(tc, "_permission_denied_apis", set())
-        if denied:
-            return f"权限不足：接口无权限或积分不够{hint}"
+                denied_set = getattr(tc, "_permission_denied_apis", set())
+                denied_api = next((api for api in checked_apis if api in denied_set), "")
+        points = api_min_points(denied_api or "opt_daily")
+        hint = (f"（Tushare {denied_api or 'opt_daily'} 需 {points} 积分）"
+                if points else "")
+        code = str((diag or {}).get("reason") or "")
+        # 权限信号**先于**成因推断：见 docstring 取值顺序 1（空帧不抛 → 探针假成功）
+        if denied_api:
+            return f"权限不足：接口 {denied_api} 无权限或积分不够{hint}"
         if code == "probe_timeout":
             return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
         if code == "empty_rows":
@@ -3558,13 +3572,18 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
             return f"未配置 TUSHARE_TOKEN{hint}"
         if _is_token_invalid(err):
             return "TUSHARE_TOKEN 无效或已过期（请重签 token；与积分无关）"
-        if "无接口权限" in err:
-            return f"权限不足：接口无权限或积分不够{hint}"
+        if any(token in err for token in ("无接口权限", "访问权限", "没有接口", "权限不足")):
+            api = str((diag or {}).get("api") or "opt_basic")
+            points = api_min_points(api)
+            api_hint = f"（Tushare {api} 需 {points} 积分）" if points else ""
+            return f"权限不足：接口 {api} 无权限或积分不够{api_hint}"
         if any(k in err for k in ("Timeout", "timeout", "Connection", "Proxy",
                                   "SSLError", "RemoteDisconnected", "timed out")):
             return "取数超时或网络异常（非权限问题，可重试）"
         if err:
             return "数据源返回异常（非权限问题）"
+        if code == "option_contracts_empty":
+            return "50ETF 期权合约列表为空（opt_basic 正常返回空）"
         return "当日无 50ETF 期权成交（接口正常返回空）"
     except Exception:  # noqa: BLE001 —— 分类失败不改变降级语义
         return "opt_daily 不可得"

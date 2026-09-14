@@ -232,6 +232,10 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
     val_data = _get_dim_data(dims, "valuation")
 
     lines = []
+    industry_data = _get_dim_data(dims, "industry")
+    industry_pe_note = ""
+    if isinstance(industry_data, dict) and industry_data.get("industry_pe_status") == "unavailable":
+        industry_pe_note = str(industry_data.get("industry_pe_note") or "行业 PE 不可得")
     if collection:
         try:
             from ..render_extras import render_rigor_warnings
@@ -247,6 +251,8 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
         meta = _get_dim_meta(dims, "valuation")
         error = dims.get("valuation", {}).get("error", "估值维度无数据")
         lines.append(f"> **估值数据不可得。** 原因: {_sanitize_error(error, 80)}")
+        if industry_pe_note:
+            lines.append(f"> ⚠️ **行业 PE 不可得。** 原因: {_sanitize_error(industry_pe_note, 120)}")
         lines.append("")
         lines.append("🔍 **待独立验证:** 确认 Tushare Token 配置后重试，或手动查询 PE/PB 当前值。")
         return "\n".join(lines)
@@ -254,6 +260,9 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
     # 判断数据来源
     meta = _get_dim_meta(dims, "valuation")
     source = meta.get("source", "未知")
+    if industry_pe_note:
+        lines.append(f"⚠️ **行业 PE 不可得：** {_sanitize_error(industry_pe_note, 120)}")
+        lines.append("")
 
     # LAW 17: 提前计算标题后缀
     title_suffix = "估值位置"
@@ -596,7 +605,6 @@ def _section_thesis(dims: dict[str, dict], collection: dict) -> str:
     lines = ["## ⚡ 核心矛盾（当前最值得跟踪的问题）", ""]
     lines.extend(f"- {item}" for item in items)
     return "\n".join(lines)
-
 
 
 

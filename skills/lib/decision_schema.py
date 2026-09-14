@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,9 @@ def _is_date(v: Any) -> bool:
 
 
 def _is_number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """只接受有限实数，防止 NaN/Infinity 写入可复盘的参考价。"""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(float(v)))
 
 
 def _validate_scenario(sec: Any, idx: int) -> list[str]:
@@ -73,7 +76,7 @@ def _validate_scenario(sec: Any, idx: int) -> list[str]:
     if not _is_number(w) or not (0.0 <= float(w) <= 1.0):
         errs.append(f"scenarios[{idx}].weight 须为 0-1 的数值（概率权重）")
     if not _is_number(sec.get("valuation_ref")):
-        errs.append(f"scenarios[{idx}].valuation_ref 须为数值")
+        errs.append(f"scenarios[{idx}].valuation_ref 须为有限数值")
     return errs
 
 

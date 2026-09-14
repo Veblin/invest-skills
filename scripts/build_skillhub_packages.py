@@ -150,7 +150,7 @@ CROSS_LIBS: dict[str, list[str]] = {
     # `sources_hk` loads three HK modules dynamically. Keep the HK source in the
     # resolution universe as well as seeding those modules below, so their own
     # imports (hk_codes / calendar dependencies) close transitively in the package.
-    "invest-a-discover-scan": ["invest-a-stock", "invest-hk-stock"],
+    "invest-a-discover-scan": ["invest-a-stock", "invest-hk-stock", "invest-a-journal"],
 }
 
 # 运行时由 importlib/显式路径加载、因而无法从 AST import 边取得的模块。它们仍须
@@ -162,6 +162,7 @@ DYNAMIC_MODULE_SEEDS: dict[str, list[tuple[str, str]]] = {
         ("invest-hk-stock", "hk_quote"),
         ("invest-hk-stock", "hk_financials"),
         ("invest-hk-stock", "hk_calendar"),
+        ("invest-a-journal", "market_microstructure"),
     ],
 }
 

@@ -16,6 +16,11 @@ from typing import Any
 
 ONE_PER_YI = 1e8
 
+_DATE_COLS = ("解禁时间", "实际解禁日期")
+_QTY_COLS = ("解禁数量", "实际解禁数量")
+_HOLDER_COLS = ("解禁股东数", "股东数")
+_KIND_COLS = ("限售股类型", "解禁类型")
+
 
 def _clean_str(v: Any) -> str | None:
     """字符串清洗（None/NaN/空串 → None）。"""
@@ -68,6 +73,12 @@ def _parse_unlock_date(raw: Any) -> _dt.date | None:
         return None
 
 
+def _column(df: Any, names: tuple[str, ...]) -> str | None:
+    """返回首个实际存在的列名；关键列改名不能被当作合法空结果。"""
+    cols = set(getattr(df, "columns", []))
+    return next((name for name in names if name in cols), None)
+
+
 def fetch_symbol_unlocks(symbol: str, *, lookahead_days: int = 90,
                          today: _dt.date | None = None,
                          include_past_days: int = 0) -> tuple[list[dict], str | None]:
@@ -98,22 +109,32 @@ def fetch_symbol_unlocks(symbol: str, *, lookahead_days: int = 90,
     if df.empty:
         return [], None
 
+    date_col, qty_col = _column(df, _DATE_COLS), _column(df, _QTY_COLS)
+    if not date_col or not qty_col:
+        missing = []
+        if not date_col:
+            missing.append("解禁日期")
+        if not qty_col:
+            missing.append("解禁数量")
+        return [], f"接口字段缺失（{'、'.join(missing)}；疑接口改名），不可将其视为无解禁"
+    holder_col, kind_col = _column(df, _HOLDER_COLS), _column(df, _KIND_COLS)
+
     lo = today - _dt.timedelta(days=include_past_days)
     hi = today + _dt.timedelta(days=lookahead_days)
     rows: list[dict] = []
     for _, raw in df.iterrows():
-        d = _parse_unlock_date(raw.get("解禁时间"))
+        d = _parse_unlock_date(raw.get(date_col))
         if d is None or not (lo <= d <= hi):
             continue
         try:
-            shares = float(raw.get("解禁数量") or 0)
+            shares = float(raw.get(qty_col) or 0)
         except (TypeError, ValueError):
             shares = 0.0
         rows.append({
             "date": d.strftime("%Y-%m-%d"),
             "qty_yi": round(shares / ONE_PER_YI, 4) if shares > 0 else None,
-            "holders": _safe_int(raw.get("解禁股东数")),
-            "kind": _clean_str(raw.get("限售股类型")) or "",
+            "holders": _safe_int(raw.get(holder_col)) if holder_col else None,
+            "kind": _clean_str(raw.get(kind_col)) if kind_col else "",
         })
     rows.sort(key=lambda r: r["date"])
     return rows, None

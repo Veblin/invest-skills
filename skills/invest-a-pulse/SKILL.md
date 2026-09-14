@@ -293,7 +293,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 > 声明：本报告为市场环境快照，数据来源于 akshare/Tushare/FRED 等公开数据源。
 > 所有分位/变化率由 Python 引擎计算。环境标签为统计描述，不构成择时建议或买卖方向指引。
-> 数据采集时间：{collected_at} | invest-a-pulse v0.2.9
+> 数据采集时间：{collected_at} | invest-a-pulse v0.3.0
 
 ---
 

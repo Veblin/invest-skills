@@ -517,17 +517,21 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
     else:
         lines.append("## 财务摘要\n数据不可得（东财财务接口不可达或标的无财务数据）——三态标注。\n")
+    financial_available = bool(fin_rows)
 
     # --- 估值位置（百度序列 + 现价 PE/PB 交叉：yfinance 提供当前 PB 与股息率） ---
     lines.append("## 估值位置（分位窗口=序列可得区间；港股口径注记）\n")
     # review #7：y 复用上文多源交叉已获取的 fetch_info——不二次 yf.Ticker .info（代理网络往返）
     pb_cur = y.get("pb")
     pe_line: str | None = None
+    valuation_available = False
     try:
         pe_s = hk_valuation.fetch_valuation_series(code, "市盈率(TTM)", "近五年")
         pe_pos = hk_valuation.percentile_position(pe_s, q.get("pe_ttm"))
         pb_s = hk_valuation.fetch_valuation_series(code, "市净率", "近五年")
         pb_pos = hk_valuation.percentile_position(pb_s, pb_cur)
+        valuation_available = bool(pe_pos.get("median") is not None
+                                   or pb_pos.get("median") is not None)
         if pe_pos["median"] is not None:
             # review #8a：亏损标的腾讯 PE 为空（''/'-'）→ parse 得 None——渲染 — 而非字面 None
             pe_str = "—" if q.get("pe_ttm") is None else str(q.get("pe_ttm"))
@@ -562,11 +566,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     lines.append("")
 
     # --- 技术结构（technical.compute 复用） ---
+    technical_available = False
     try:
         k = hk_kline.fetch_kline(code, days=250)
         rows = k.get("data", [])
         if len(rows) >= 60:
             t = tech_compute(rows)
+            technical_available = True
             ma = t["trend"]["ma"]
             def _ma_v(p):
                 seq = ma.get(str(p), [])
@@ -619,7 +625,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 不再截断 stdout：v2 正文已超 4k，截断会把模块 6/7/8 与**免责声明**一起切掉
     # （终端看到的版本比落盘版少一截，且被切处看起来像输出损坏）
     print(body)
-    return 0
+    # 快照可得却所有分析维度都不可得时，正文只是骨架；调用方不可将其视为完整报告。
+    # 任一维度可用仍保留成功码，避免把明确标注的部分降级误判为整份失败。
+    analysis_available = (financial_available or valuation_available or technical_available
+                          or bool(sb.get("available")))
+    return 0 if analysis_available else 1
 
 
 # ---------------------------------------------------------------------------

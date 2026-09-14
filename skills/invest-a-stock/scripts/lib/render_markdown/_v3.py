@@ -2475,6 +2475,8 @@ class _FundamentalsContext:
 
         # --- 行业同行 / 市场结构（原块④余量）---
         self.industry_peers = collection.get("industry_peers") or {}
+        industry_data = _get_dim_data(dims, "industry")
+        self.industry_data = industry_data if isinstance(industry_data, dict) else {}
         ms = collection.get("market_structure") or {}
         self.ms = ms
         self.sw = ms.get("sw_index") or {}
@@ -3398,6 +3400,9 @@ def _section_4d_valuation_expectation(
         lines.append("数据不足：[同行数量不足 3 家或行业数据不可得，无法计算行业中位 PE]")
     else:
         lines.append("数据不足：[当前 PE 不可得]")
+    if ctx.industry_data.get("industry_pe_status") == "unavailable":
+        note = str(ctx.industry_data.get("industry_pe_note") or "行业 PE 不可得")
+        lines.append(f"⚠️ 巨潮行业 PE 不可得：{_sanitize_error(note, 120)}")
     lines.append("")
     d2_pitfall = (
         f"本次 PE {ctx.current_pe:.2f}x vs 行业中位 {ind_median:.2f}x（溢价 {premium:+.1f}%），"
@@ -3816,5 +3821,4 @@ def _pe_band_markdown_table(
         f"| 当前位置 | {_cell(band.get('current_position'))} |",
     ]
     return "\n".join(lines)
-
 

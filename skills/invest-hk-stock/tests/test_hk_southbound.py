@@ -167,6 +167,18 @@ def test_diff_cumulative_empty_fails_loud():
     assert sb.diff_cumulative([{"date": "2026-09-11", "v": 32089.12}], "v") == []
 
 
+def test_tushare_cross_all_unusable_fields_is_explicit_unavailable(monkeypatch):
+    """字段漂移后，交叉源不得以空 rows/reason=None 静默消失。"""
+    monkeypatch.setattr(sb, "_fetch_tushare_df", lambda days: pd.DataFrame([
+        {"trade_date": "20260910", "ggt_ss": None, "ggt_sz": None, "south_money": None},
+        {"trade_date": "20260911", "ggt_ss": None, "ggt_sz": None, "south_money": None},
+    ]))
+    out = sb.fetch_tushare_cross()
+    assert out["available"] is False and out["rows"] == []
+    assert out["reason"] and out["warnings"]
+    assert "字段" in out["reason"]
+
+
 # ── cross_check（tushare 差分 ↔ akshare 同日）────────────────────────────
 
 def _ts_row(date="2026-09-11", total=44.31, sh=31.92, sz=12.39):
@@ -420,11 +432,22 @@ def test_cli_report_southbound_unavailable_is_three_state(monkeypatch, tmp_path,
            "caliber_note": None, "summary": None, "cross": None}
     hk_mod = _stub_report(monkeypatch, bad)
     args = argparse.Namespace(symbol="00700", outdir=str(tmp_path))
-    assert hk_mod.cmd_report(args) == 0
+    assert hk_mod.cmd_report(args) == 1
     out = capsys.readouterr().out
     assert "南向资金不可得" in out
     assert "LAW 5" in out, "不可得须给三态说明（不得读作「南向无净买入」）"
     assert "44.31" not in out, "不可得时不得渲染数值（0 或沿用上次值都会被读成事实断言）"
+
+
+def test_cli_report_partial_analysis_remains_success(monkeypatch, tmp_path, capsys):
+    """任一分析维度可用时，局部不可得不应把完整运行误报为失败。"""
+    bad = {"available": False, "rows": [], "warnings": [],
+           "reason": "南向数据源全部不可得", "source": None,
+           "caliber_note": None, "summary": None, "cross": None}
+    hk_mod = _stub_report(monkeypatch, bad)
+    monkeypatch.setattr(hk_mod.hk_financials, "fetch_financials",
+                        lambda s: [{"report_date": "2025-12-31"}])
+    assert hk_mod.cmd_report(argparse.Namespace(symbol="00700", outdir=str(tmp_path))) == 0
 
 
 def test_cli_report_identical_channel_counts_are_market_scope(monkeypatch, tmp_path, capsys):

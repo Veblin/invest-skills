@@ -12,7 +12,10 @@ T0 勘察实测（2026-09-12，`round-plans/r4-20260912.md` §1）：
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
+import sys
+import types
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -264,22 +267,31 @@ def market_form_context() -> dict:
     `market_form` 由 R-A01 落地；未落地/不可得时返回 available=False（**不编造**）。
     """
     try:
-        import importlib.util
-        import sys as _sys
-
+        local = Path(__file__).resolve().with_name("market_microstructure.py")
         lib = Path(__file__).resolve().parents[3] / "invest-a-journal" / "scripts" / "lib"
         name = "discover_market_microstructure"
-        mod = _sys.modules.get(name)
+        mod = sys.modules.get(name)
         if mod is None:
-            s = str(lib)
-            if s not in _sys.path:
-                _sys.path.insert(0, s)
-            spec = importlib.util.spec_from_file_location(name, lib / "market_microstructure.py")
+            # SkillHub 分发包把这个动态依赖放在本目录。与 HK loader 一样，CLI
+            # 顶层导入时须人为建立包命名空间，才能让打包后模块的相对导入生效。
+            target = local if local.is_file() else lib / "market_microstructure.py"
+            mod_name = "discover_market_bundle.market_microstructure" if local.is_file() else name
+            if local.is_file() and "discover_market_bundle" not in sys.modules:
+                pkg = types.ModuleType("discover_market_bundle")
+                pkg.__path__ = [str(local.parent)]
+                pkg.__package__ = "discover_market_bundle"
+                sys.modules["discover_market_bundle"] = pkg
+            if not local.is_file():
+                s = str(lib)
+                if s not in sys.path:
+                    sys.path.insert(0, s)
+            spec = importlib.util.spec_from_file_location(mod_name, target)
             if spec is None or spec.loader is None:
                 raise ImportError("market_microstructure.py 缺失")
             mod = importlib.util.module_from_spec(spec)
-            _sys.modules[name] = mod
+            sys.modules[mod_name] = mod
             spec.loader.exec_module(mod)
+            sys.modules[name] = mod
         snap = mod.latest_snapshot()
         label = (snap or {}).get("env_label")
         if isinstance(label, str):

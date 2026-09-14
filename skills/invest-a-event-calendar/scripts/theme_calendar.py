@@ -21,8 +21,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
+import shutil
 import sys
+import tempfile
+import urllib.parse
 
 
 def _ensure_lib_on_path() -> None:
@@ -48,6 +52,13 @@ _STATE_DEFAULT = pathlib.Path.home() / ".local" / "share" / "investment" / "even
 _UNRELIABLE_WORDS = ("热度", "涨停家数", "涨幅榜", "龙虎榜", "成交额榜", "情绪", "人气", "关注度",
                      "传言", "传闻", "据传", "据说", "爆料", "热搜", "自媒体", "股吧", "微博",
                      "微信", "小道消息", "网传", "消息人士")
+
+# 「不在黑名单」不等于权威。只有明确机构名称/公告，或属于已登记权威域名的 URL
+# 才能把事件写入 confirmed_event_days；未知渠道保留在台账外等待独立核验。
+_AUTHORITY_WORDS = ("公告", "交易所", "证监会", "证监局", "发改委", "工信部", "财政部", "商务部",
+                    "国家统计局", "国务院", "人民银行", "央行", "政府", "官方", "公司官网")
+_AUTHORITY_DOMAINS = ("gov.cn", "gov.hk", "sse.com.cn", "szse.cn", "bjse.cn", "hkex.com.hk",
+                      "cninfo.com.cn", "sec.gov", "fed.gov")
 
 # 记录字段白名单（结构上杜绝「扩散路径预测」类字段混入）
 _RECORD_KEYS = ("theme", "stage", "anchor", "anchor_source", "confirmed_date",
@@ -91,16 +102,35 @@ def _read_raw(path: pathlib.Path) -> dict:
 
 
 def _write_raw(path: pathlib.Path, data: dict) -> None:
+    """原子覆盖共享状态，并保留上一个完整版本作恢复副本。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            pathlib.Path(tmp).unlink(missing_ok=True)
+        finally:
+            raise
 
 
 def is_official_source(source: str) -> bool:
     """证实锚点须为**官方/权威来源**；市场热度描述不算证实。"""
     s = str(source or "").strip()
-    if not s:
+    if not s or any(w in s for w in _UNRELIABLE_WORDS):
         return False
-    return not any(w in s for w in _UNRELIABLE_WORDS)
+    if any(w in s for w in _AUTHORITY_WORDS):
+        return True
+    parsed = urllib.parse.urlparse(s)
+    host = (parsed.hostname or "").lower()
+    return bool(host and any(host == d or host.endswith("." + d) for d in _AUTHORITY_DOMAINS))
 
 
 def make_demand_window(text: str, *, source: str, lit_note: str = "") -> dict:

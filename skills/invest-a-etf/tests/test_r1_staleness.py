@@ -327,3 +327,9 @@ def test_pick_src_date_prefers_publish_date_and_tolerates_absence():
     assert inds._pick_src_date({"发布日期": "2022-11-04", "日期": "2022-11-06"}) == "20221104"
     assert inds._pick_src_date({"日期": "2022-11-06"}) == "20221106"
     assert inds._pick_src_date({}) is None
+
+
+def test_pick_src_date_falls_through_when_first_present_value_is_unusable():
+    """首个字段存在但不能归一时，后续备用字段仍应参与选择。"""
+    assert inds._pick_src_date({"发布日期": "", "日期": "20221104"}) == "20221104"
+    assert inds._pick_src_date({"发布日期": "2022-1-4", "日期": "20221104"}) == "20221104"

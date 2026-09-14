@@ -123,10 +123,11 @@ def test_form_history_frequency_and_duration():
                      "total_turnover": 12000.0 if i < 30 else 9000.0,
                      "limit_up_count": 40, "limit_down_count": 5})
     out = mm.market_form_history(history=hist)
-    assert out["n_days"] == 60
+    # 前 20 行只产生显示用的默认态，缺少足够历史，不能充作已观测形态。
+    assert out["n_days"] == 40
     freq = out["freq"]
     assert pytest.approx(sum(v["pct"] for v in freq.values()), abs=0.1) == 100.0
-    assert sum(v["days"] for v in freq.values()) == 60
+    assert sum(v["days"] for v in freq.values()) == 40
     assert freq["普涨共振"]["days"] > 0 and freq["宽幅震荡轮动"]["days"] > 0
     assert "durations" in out and out["durations"]["普涨共振"]["median"] >= 1
 
@@ -229,7 +230,34 @@ def test_form_history_does_not_double_count_current_row():
     """market_form_history 逐行用 `prior = rows[:i]`——自身不得出现在自己的历史里。"""
     rows = _history(40)
     out = mm.market_form_history(history=rows)
-    assert out["n_days"] == 40
+    assert out["n_days"] == 20
+
+
+def test_form_history_excludes_insufficient_history_default_fill():
+    """暖机期默认的「突破选择期」不得伪造频次、持续期和可用样本数。"""
+    out = mm.market_form_history(history=_history(20), min_days=1)
+    assert out["n_days"] == 0
+    assert out["available"] is False
+    assert out["freq"]["突破选择期"]["days"] == 0
+    assert out["durations"]["突破选择期"] == {}
+
+
+def test_form_history_unavailable_day_breaks_same_form_run(monkeypatch):
+    """不可得日是运行区间断点，不能把两段相同形态连成一段。"""
+    rows = [
+        {"date": "2026-08-01", "available": True},
+        {"date": "2026-08-02", "available": False},
+        {"date": "2026-08-03", "available": True},
+    ]
+
+    def _computed(row, _prior):
+        return {"available": row["available"], "form": "普涨共振"}
+
+    monkeypatch.setattr(mm, "compute_market_form", _computed)
+    out = mm.market_form_history(history=rows, min_days=1)
+
+    assert out["freq"]["普涨共振"]["days"] == 2
+    assert out["durations"]["普涨共振"] == {"median": 1, "max": 1, "n_runs": 2}
 
 
 def test_rotation_speed_ignores_negative_index():

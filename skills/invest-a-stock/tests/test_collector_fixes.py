@@ -839,8 +839,8 @@ class TestIndustryPeEmptyNameGuard:
 
         return _FakeAk()
 
-    def test_empty_industry_name_returns_none(self, monkeypatch):
-        """行业字段缺失（预取失败 → 空名）必须返回 None。
+    def test_empty_industry_name_is_explicitly_unavailable(self, monkeypatch):
+        """行业字段缺失（预取失败 → 空名）必须保留三态原因。
 
         修复前：`str.contains("")` 全表匹配 → matched=整个巨潮 PE 表 →
         matched.iloc[0] 把首行（如「银行 5.5x」）静默当作本股行业 PE。
@@ -854,7 +854,9 @@ class TestIndustryPeEmptyNameGuard:
         monkeypatch.setattr(src.env, "is_akshare_available", lambda: True)
         monkeypatch.setattr(src, "akshare_push2_available", lambda: True)
         monkeypatch.setattr(src, "_q_akshare_basic", lambda s: None)  # 预取失败
-        assert src._q_akshare_industry_pe("600176", industry_name="") is None
+        result = src._q_akshare_industry_pe("600176", industry_name="")
+        assert result["status"] == "unavailable"
+        assert "行业名称" in result["note"]
 
     def test_valid_industry_name_still_matches(self, monkeypatch):
         """守卫不破坏正常路径：非空名照常匹配。"""
@@ -1001,14 +1003,15 @@ class TestIndustryPeExplicitUnavailable:
         assert r["status"] == "unavailable"
         assert "无数据" in r["note"] and "1 天取数失败" in r["note"]
 
-    def test_empty_name_guard_still_returns_none(self, monkeypatch):
-        """空名守卫保持 `None`（**有意守卫**，非吞错）——既有契约见
-        `TestIndustryPeEmptyNameGuard`，不在 T9-5 改动范围。"""
+    def test_empty_name_guard_is_explicitly_unavailable(self, monkeypatch):
+        """空名守卫既防全表误匹配，也必须保留可渲染的不可得原因。"""
         from lib.collector import _sources as src
 
         self._patch_env(monkeypatch, src, self._ok_ak())
         monkeypatch.setattr(src, "_q_akshare_basic", lambda s: None)
-        assert src._q_akshare_industry_pe("600176", industry_name="") is None
+        r = src._q_akshare_industry_pe("600176", industry_name="")
+        assert r["status"] == "unavailable"
+        assert "行业名称" in r["note"]
 
 
 # ---------- code-review 清理 D3：sw_index 单遍拉表（6 次 API → 3 次） ----------
@@ -1191,6 +1194,38 @@ class TestIndustryPeNotCountedAsSuccess:
         dim = orch.collect_industry("600176")
         assert (dim.get("data") or {}).get("industry_pe_median") == 5.0
         assert dim["_meta"].get("multi_source") is True
+
+    def test_unavailable_pe_note_is_consumed_by_report(self):
+        """不可得状态须进报告，不能只留在聚合 JSON 内。"""
+        from lib.render_markdown._v2 import render_valuation_section
+
+        text = render_valuation_section({
+            "valuation": {"data": None, "error": "估值维度无数据", "_meta": {}},
+            "industry": {"data": {
+                "industry_pe_status": "unavailable",
+                "industry_pe_note": "行业名称不可得，无法匹配巨潮口径",
+            }},
+        })
+        assert "行业 PE 不可得" in text
+        assert "行业名称不可得" in text
+
+    def test_unavailable_pe_note_is_consumed_by_v3_report(self):
+        """默认 Markdown 报告的 D-② 同样须呈现该三态原因。"""
+        from types import SimpleNamespace
+
+        from lib.render_markdown._v3 import _section_4d_valuation_expectation
+
+        ctx = SimpleNamespace(
+            vs=None, pe_avail=False, pe_pct=None, pb_pct_ext=None,
+            hist_pe_median=None, current_pe=None, industry_peers={},
+            industry_data={
+                "industry_pe_status": "unavailable",
+                "industry_pe_note": "行业名称不可得，无法匹配巨潮口径",
+            },
+        )
+        text = "\n".join(_section_4d_valuation_expectation(ctx, []))
+        assert "巨潮行业 PE 不可得" in text
+        assert "行业名称不可得" in text
 
 
 class TestIndustryPeCninfoRenamed:
@@ -1393,6 +1428,29 @@ class TestPcrReasonOwnObservation:
 
         reason = orch._ms_pcr_unavailable_reason(TC(), {})
         assert "TOKEN" in reason.upper(), f"token 失效未点名: {reason!r}"
+        assert "非权限问题" not in reason
+
+    def test_opt_basic_permission_denial_is_not_misclassified(self):
+        """PCR 在 opt_basic 被拒时不会走到 opt_daily，仍须报告权限不足。"""
+        import pandas as pd
+
+        from lib.collector import _orchestrate as orch
+
+        class TC:
+            last_error = "抱歉，您没有接口(opt_basic)访问权限"
+            _permission_denied_apis: set[str] = set()
+            queried: list[str] = []
+
+            def query(self, api, **kw):
+                self.queried.append(api)
+                return pd.DataFrame()
+
+        tc = TC()
+        diag: dict = {}
+        assert orch._ms_fetch_put_call_ratio(tc, diag=diag) is None
+        assert tc.queried == ["opt_basic"]
+        reason = orch._ms_pcr_unavailable_reason(tc, diag)
+        assert "权限" in reason and "opt_basic" in reason
         assert "非权限问题" not in reason
 
 

@@ -542,7 +542,17 @@ def market_form_history(*, history: list[dict] | None = None,
 
     for i, row in enumerate(rows):
         prior = rows[:i]
-        form = compute_market_form(row, prior)["form"]
+        computed = compute_market_form(row, prior)
+        # 数据不足时 ``compute_market_form`` 以「突破选择期」作**显示用**默认填充。
+        # 该填充值不是已观测到的市场形态，不能混进事后频次或持续期统计。
+        if not computed["available"]:
+            # 不可得记录同样是时间序列中的断点：若仅跳过它，
+            # ``A → 不可得 → A`` 会被误算成连续两日的 A 形态。
+            if prev_form is not None:
+                runs[prev_form].append(run_len)
+                prev_form, run_len = None, 0
+            continue
+        form = computed["form"]
         freq[form]["days"] += 1
         if form == prev_form:
             run_len += 1
@@ -553,7 +563,7 @@ def market_form_history(*, history: list[dict] | None = None,
     if prev_form is not None:
         runs[prev_form].append(run_len)
 
-    n = len(rows)
+    n = sum(v["days"] for v in freq.values())
     for f in MARKET_FORMS:
         freq[f]["pct"] = (freq[f]["days"] / n * 100.0) if n else 0.0
         lengths = sorted(runs[f])
@@ -563,7 +573,7 @@ def market_form_history(*, history: list[dict] | None = None,
                             "n_runs": len(lengths)}
 
     return {"n_days": n, "freq": freq, "durations": durations,
-            "sample": f"最近 {n} 个交易日快照",
+            "sample": f"最近 {n} 个具备形态判定所需历史的交易日快照",
             "available": n >= min_days,
             "caveat": "历史频次与持续期为**事后统计**，不构成对未来的概率预期；"
                       "状态标签不蕴含收益可预测性（Kirby 2023）"}

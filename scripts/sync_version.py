@@ -39,6 +39,17 @@ VERSION_PLACEHOLDER_TYPO = "{{VERSION}}"  # no spaces — reject so typo cannot 
 # README 徽章 label（唯一版本面：label=v0.2.4 式 URL 参数，sync_version 原本不覆盖）
 README_BADGE_RE = re.compile(r"label=v[0-9]+\.[0-9]+\.[0-9]+")
 
+# 可见报告版本锚点不在 frontmatter，必须与 canonical 版本一起同步；否则 sync check
+# 会绿、文档守卫却在随后失败，且新报告继续盖旧版本。
+VERSION_TEXT_TARGETS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("skills/lib/references/report-conventions.md",
+     re.compile(r"(?m)^> 版本：v[0-9]+\.[0-9]+\.[0-9]+"), "> 版本：v{version}"),
+    ("skills/invest-a-journal/SKILL.md",
+     re.compile(r"invest-a-journal v[0-9]+\.[0-9]+\.[0-9]+"), "invest-a-journal v{version}"),
+    ("skills/invest-a-pulse/SKILL.md",
+     re.compile(r"invest-a-pulse v[0-9]+\.[0-9]+\.[0-9]+"), "invest-a-pulse v{version}"),
+)
+
 JSON_TEMPLATES: tuple[tuple[str, str], ...] = (
     (".claude-plugin/plugin.json.in", ".claude-plugin/plugin.json"),
     (".claude-plugin/marketplace.json.in", ".claude-plugin/marketplace.json"),
@@ -185,6 +196,38 @@ def write_readme_badge(path: Path, version: str) -> bool:
     return True
 
 
+def sync_text_version_targets(root: Path, version: str) -> list[str]:
+    """同步正文的用户可见版本锚点。"""
+    changed: list[str] = []
+    for rel, pattern, template in VERSION_TEXT_TARGETS:
+        path = root / rel
+        text = path.read_text(encoding="utf-8")
+        updated, n = pattern.subn(template.format(version=version), text)
+        if n == 0:
+            raise ValueError(f"version text anchor missing: {rel}")
+        if updated != text:
+            path.write_text(updated, encoding="utf-8")
+            changed.append(rel)
+    return changed
+
+
+def check_text_version_targets(root: Path, version: str) -> list[str]:
+    """返回正文版本锚点的漂移。"""
+    drifts: list[str] = []
+    for rel, pattern, template in VERSION_TEXT_TARGETS:
+        path = root / rel
+        if not path.is_file():
+            drifts.append(f"  {rel}: missing")
+            continue
+        matches = pattern.findall(path.read_text(encoding="utf-8"))
+        expected = template.format(version=version)
+        if not matches:
+            drifts.append(f"  {rel}: version anchor missing")
+        elif any(match != expected for match in matches):
+            drifts.append(f"  {rel}: version text drift detected")
+    return drifts
+
+
 # ── JSON manifests ──────────────────────────────────────────
 
 
@@ -264,6 +307,9 @@ def _do_sync(root: Path, version: str) -> int:
         changed += 1
     else:
         print("  ⚪ README.md badge (unchanged)")
+    for rel in sync_text_version_targets(root, version):
+        print(f"  ✅ {rel} version anchors → {version}")
+        changed += 1
     return changed
 
 
@@ -273,6 +319,7 @@ def _derived_paths(root: Path) -> list[Path]:
     paths.extend(root / t.rel_path for t in SKILL_TARGETS)
     paths.extend(root / out_rel for _, out_rel in JSON_TEMPLATES)
     paths.append(root / "README.md")
+    paths.extend(root / rel for rel, _pattern, _template in VERSION_TEXT_TARGETS)
     return paths
 
 
@@ -287,6 +334,9 @@ def _preflight_derived(root: Path) -> list[str]:
             missing.append(tmpl_rel)
     if not (root / "README.md").is_file():
         missing.append("README.md")
+    for rel, _pattern, _template in VERSION_TEXT_TARGETS:
+        if not (root / rel).is_file():
+            missing.append(rel)
     return missing
 
 
@@ -419,6 +469,14 @@ def cmd_check(root: Path) -> int:
             print(f"❌ README badge: v{badge_ver} ≠ pyproject.toml ({canonical})",
                   file=sys.stderr)
             errors += 1
+
+    # 4. Check visible report/document version anchors.
+    drifts = check_text_version_targets(root, canonical)
+    if drifts:
+        print("❌ document version drift:", file=sys.stderr)
+        for d in drifts:
+            print(d, file=sys.stderr)
+        errors += len(drifts)
 
     if errors:
         print(f"\n❌ {errors} drift(s) found. Fix: uv run python scripts/sync_version.py sync",

@@ -19,11 +19,11 @@ requirements §3.4 建议 universe 取「港股通/恒指成分 v0 口径」—�
 from __future__ import annotations
 
 import datetime as _dt
-import importlib
 import importlib.util
 import logging
 import math
 import sys
+import types
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -56,16 +56,28 @@ def _load_hk_module(name: str):
     """加载 HK 复用模块，优先使用随 discover-scan 分发包携带的副本。
 
     主仓库中仍按显式路径复用 `invest-hk-stock` 的 canonical 实现，避免维护两份。
-    SkillHub 单包构建会把动态依赖及其闭包置于本目录；此时必须经包相对导入
-    取本地副本，不能再假定 sibling skill 存在。
+    SkillHub 单包构建会把动态依赖及其闭包置于本目录。CLI 以顶层模块加载本文件，
+    因而不能依赖 ``__package__``；本地副本以合成包名加载，保证其相对导入仍可解析。
     """
     mod_name = f"discover_hk_{name}"
     mod = sys.modules.get(mod_name)
     if mod is not None:
         return mod
     local = Path(__file__).resolve().with_name(f"{name}.py")
-    if local.is_file() and __package__:
-        mod = importlib.import_module(f".{name}", package=__package__)
+    if local.is_file():
+        bundle = "discover_hk_bundle"
+        if bundle not in sys.modules:
+            pkg = types.ModuleType(bundle)
+            pkg.__path__ = [str(local.parent)]
+            pkg.__package__ = bundle
+            sys.modules[bundle] = pkg
+        full_name = f"{bundle}.{name}"
+        spec = importlib.util.spec_from_file_location(full_name, local)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"包内 HK 模块无法加载: {local}")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[full_name] = mod
+        spec.loader.exec_module(mod)
         sys.modules[mod_name] = mod
         return mod
 

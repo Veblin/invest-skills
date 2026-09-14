@@ -84,3 +84,11 @@ def test_fetch_all_nat_rows_yields_legit_empty(fake_ak):
     ]))
     rows, err = us.fetch_symbol_unlocks("600176", lookahead_days=90)
     assert rows == [] and err is None
+
+
+def test_fetch_missing_required_columns_is_unavailable_not_empty(fake_ak):
+    """上游列名漂移时不能把含解禁行的帧渲染为「无解禁记录」。"""
+    fake_ak(pd.DataFrame([{"日期": "2026-12-01", "数量": 2e8}]))
+    rows, err = us.fetch_symbol_unlocks("600176", lookahead_days=365)
+    assert rows == []
+    assert err and "字段缺失" in err and "不可将其视为无解禁" in err

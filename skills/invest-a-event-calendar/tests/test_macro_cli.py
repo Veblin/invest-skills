@@ -74,6 +74,17 @@ def test_all_sources_unavailable_exits_3(stub_sources, monkeypatch, capsys):
     assert rc == 3
 
 
+def test_unusable_macro_rules_exit_3_explicitly(monkeypatch, capsys):
+    """规则表不可读时不能把其造成的空筛选说成无排期。"""
+    def _bad_rules(*args, **kwargs):
+        raise ValueError("宏观策展规则表缺失：/tmp/macro.yaml")
+
+    monkeypatch.setattr(mc, "load_rules", _bad_rules)
+    rc, out = _run(monkeypatch, capsys)
+    assert rc == 3
+    assert "策展规则不可用" in out and "缺失" in out
+
+
 def test_source_with_rows_but_filtered_out_is_labelled(stub_sources, monkeypatch, capsys):
     """源有返回但筛选后为空 → 覆盖矩阵须说清成因（R2 review P0 的渲染侧）。
 

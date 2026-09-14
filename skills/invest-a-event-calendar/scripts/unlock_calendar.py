@@ -40,8 +40,11 @@ import argparse
 import bisect
 import datetime as _dt
 import json
+import os
 import pathlib
+import shutil
 import sys
+import tempfile
 import time
 
 
@@ -251,7 +254,9 @@ def parse_pool(path: pathlib.Path) -> tuple[list[str], list[str]]:
 
 
 def load_state(path: pathlib.Path) -> dict:
-    """状态文件读取；不存在视为首跑；损坏 → 按首跑处理并告警（不中断）。"""
+    """状态文件读取；仅不存在视为首跑，损坏必须拒绝覆盖。"""
+    if not path.exists():
+        return {"updated": None, "symbols": {}}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -261,21 +266,28 @@ def load_state(path: pathlib.Path) -> dict:
             if not isinstance(data.get("symbols"), dict):
                 data["symbols"] = {}
             return data
-        print(f"⚠ 状态文件结构异常（{path}）——按首跑处理", file=sys.stderr)
-    except FileNotFoundError:
-        pass
+        raise ValueError(f"状态文件结构异常（{path}）：顶层不是对象")
     except Exception as exc:  # noqa: BLE001 — 损坏不阻断排雷主流程
-        print(f"⚠ 状态文件不可读（{path}）：{exc}——按首跑处理", file=sys.stderr)
-    return {"updated": None, "symbols": {}}
+        raise ValueError(f"状态文件不可读（{path}）：{type(exc).__name__}——拒绝覆盖既有记录") from exc
 
 
 def save_state(path: pathlib.Path, state: dict) -> str | None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True),
-                        encoding="utf-8")
+        if path.exists():
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         return None
     except Exception as exc:  # noqa: BLE001
+        try:
+            pathlib.Path(tmp).unlink(missing_ok=True)
+        except (NameError, OSError):
+            pass
         return f"{type(exc).__name__}: {exc}"
 
 
@@ -507,7 +519,11 @@ def _run_pool(args: argparse.Namespace) -> int:
     state_updated: str | None = None
     if not args.no_state:
         state_path = pathlib.Path(args.state_file)
-        state = load_state(state_path)
+        try:
+            state = load_state(state_path)
+        except ValueError as exc:
+            print(f"解禁状态不可得：{exc}——为保留题材/历史账本，本次不写入。", file=sys.stderr)
+            return 3
         changes = {}
         # 本轮**存在**取数失败 → 空结果不可验证（源侧空帧与「确实无解禁」在本轮
         # 不可区分）：空批次不得覆写基线，否则同一轮就渲染出「❌ 消失」、恢复后
@@ -752,7 +768,13 @@ def _run_macro(args: argparse.Namespace) -> int:
     regions = [r.strip() for r in str(args.macro_regions).split(",") if r.strip()]
     w_start, w_end = macro_cal.date_range(days, today=today)
 
-    rules = macro_cal.load_rules(getattr(args, "macro_rules_file", None) or None)
+    try:
+        rules = macro_cal.load_rules(getattr(args, "macro_rules_file", None) or None)
+    except ValueError as exc:
+        # 规则表决定区域白名单、影响档位与噪音过滤；不能在其不可读时输出
+        # 「无排期」或无标注的默认口径报告。
+        print(f"宏观日程不可得（策展规则不可用）：{exc}", file=sys.stderr)
+        return 3
     results: list[macro_cal.SourceResult] = []
 
     baidu_regions = tuple(r for r in regions if r in _REGION_FLAG)

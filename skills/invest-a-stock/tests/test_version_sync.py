@@ -58,6 +58,21 @@ def _write_fixture_tree(root: Path, version: str) -> None:
         encoding="utf-8",
     )
 
+    # 正文可见版本锚点：sync_version 现同步 report-conventions / journal / pulse 的
+    # 正文版本行，并把它列入 preflight 必需项。同上，**从 VERSION_TEXT_TARGETS 派生**
+    # 而非硬编码——其中 journal/pulse 的 SKILL.md 与上方 frontmatter 是同一文件，
+    # 故此处**追加**锚点行，不覆盖。
+    for _rel, _pattern, _template in _sync.VERSION_TEXT_TARGETS:
+        _p = root / _rel
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _anchor = _template.format(version=version)
+        _body = _p.read_text(encoding="utf-8") if _p.exists() else "# test fixture\n"
+        if _anchor not in _body:
+            _p.write_text(
+                _body + ("" if _body.endswith("\n") else "\n") + _anchor + "\n",
+                encoding="utf-8",
+            )
+
 
 class TestSyncVersionCheck:
     def test_check_passes_in_repo(self):

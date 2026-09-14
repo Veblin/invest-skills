@@ -378,10 +378,11 @@ def test_discover_package_bundles_dynamic_hk_modules(tmp_path):
     for name in ("hk_quote", "hk_financials", "hk_calendar", "hk_codes"):
         assert (lib / f"{name}.py").is_file(), f"动态 HK 依赖未随包: {name}"
 
-    # 以包内 import 形态加载，证明 loader 会选取本地副本而非解析不存在的 sibling skill。
+    # CLI 实际把 scripts/lib 插入 sys.path 后以**顶层**导入 sources_hk；不得只测
+    # ``from lib import`` 的包导入形态，否则 __package__ 非空会掩盖分发包故障。
     code = (
-        f"import sys; sys.path.insert(0, r'{dst / 'scripts'}')\n"
-        "from lib import sources_hk\n"
+        f"import sys; sys.path.insert(0, r'{lib}')\n"
+        "import sources_hk\n"
         "mod = sources_hk._load_hk_module('hk_quote')\n"
         "assert str(mod.__file__).endswith('/scripts/lib/hk_quote.py')\n"
         "print('OK')\n"

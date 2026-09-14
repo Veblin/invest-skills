@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import re
 import time as _time
 import urllib.parse
@@ -284,21 +285,41 @@ def filter_noise(
 
 
 def load_rules(path: Path | str | None) -> dict:
-    """读取策展规则 YAML；缺失/损坏 → {}（调用方据此走默认口径并标注）。"""
+    """读取策展规则 YAML。
+
+    指定的规则表是日历筛选与档位映射的口径资产；无法读取时不能回退为空
+    字典并把「未筛到任何事件」说成「无排期」。调用方须将 ``ValueError`` 渲染为
+    显式不可得。未指定 path 仅供直接调用数据适配器时使用默认空规则。
+    """
     if not path:
         return {}
     p = Path(path)
     if not p.is_file():
-        return {}
+        raise ValueError(f"宏观策展规则表缺失：{p}")
     try:
-        import yaml  # 惰性：无 yaml 环境下降级为默认口径而非崩
-    except ImportError:  # pragma: no cover
-        return {}
+        import yaml
+    except ImportError as exc:  # pragma: no cover
+        raise ValueError("宏观策展规则不可读：缺少 PyYAML") from exc
     try:
         data = yaml.safe_load(p.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 —— 规则表损坏不阻断取数
-        return {}
-    return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"宏观策展规则表解析失败：{type(exc).__name__}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"宏观策展规则表根节点须为映射，实际为 {type(data).__name__}")
+    return data
+
+
+def _present_text(value: Any) -> str:
+    """源单元格 → 文本；None/NaN/NaT/pandas.NA 都视作缺失。"""
+    if value is None:
+        return ""
+    try:
+        if math.isnan(float(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "nat", "<na>", "none"} else text
 
 
 # ── 源 1：百度财经日历（中国 + 美国近场）──────────────────────────────────
@@ -421,7 +442,8 @@ def fetch_baidu_calendar(
     # 地区过滤（地区缺失时回退 国家 列——实测额外列）
     picked: list[dict] = []
     for r in raw:
-        reg = str(r.get("地区") or r.get("国家") or "").strip()
+        # pandas 将缺失的「地区」补作 float NaN；NaN 是 truthy，不能用 ``or``。
+        reg = _present_text(r.get("地区")) or _present_text(r.get("国家"))
         if reg not in regions:
             continue
         picked.append({"日期": _iso(r.get("日期", "")), "时间": str(r.get("时间") or ""),
@@ -782,6 +804,9 @@ def load_political_windows(path=None, *, today: str | None = None) -> dict:
         data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "windows": [], "reason": f"策展表解析失败：{type(exc).__name__}"}
+    if not isinstance(data, dict):
+        return {"available": False, "windows": [],
+                "reason": f"策展表根节点须为映射，实际为 {type(data).__name__}"}
     note = str(data.get("mechanism_note") or "")
     if "方向未知" not in note:
         # 机制注记缺「方向未知」→ 拒绝输出（防被改写为方向性表述）
@@ -836,4 +861,3 @@ def render_political_windows(*, path=None, today: str | None = None) -> str:
                  "与 `references/scenario-plans.md` 联动——**窗口进入即启动重评估**"
                  "（预案触发=重评估，非交易指令）。")
     return "\n".join(lines)
-

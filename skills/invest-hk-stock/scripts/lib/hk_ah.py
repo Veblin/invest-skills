@@ -11,7 +11,7 @@
   计价（86.384 → 0.86384），漏除 100 会把溢价率放大近百倍；该列缺失时退
   ``中行折算价``（同为每 100 港元口径），并在 ``source`` 注明实际所用列。
 - 降级 FRED ``DEXCHUS / DEXHKUS`` 交叉（CNY per HKD = CNY per USD ÷ HKD per USD）——
-  日频序列**滞后约 1 周**（2026-09-12 实测最新 2026-09-04），故只作降级并标注滞后。
+  按两条序列中较早的实际观测日期计算滞后；超过陈旧阈值不用于计算溢价。
 
 币种纪律（v1 既有）：东财 CURRENCY 字段对 A+H 公司**不可靠**（比亚迪 H 实测为 CNY
 报表值而字段标 HKD）→ 本模块不依赖该字段，A 价与 H 价分别来自各自市场的行情源。
@@ -192,9 +192,21 @@ def fetch_fx_hkd_cny() -> dict:
 
     fred = _fetch_fred_cross()
     if fred:
-        fred["note"] = (f"中行牌价不可得，降级 FRED 交叉（{fred['date']} 口径，"
-                        "日频序列**滞后约 1 周**，非当日汇率）")
-        return fred
+        lag = _lag_days(fred.get("date"))
+        if lag is not None and lag > _FX_STALE_FAIL_DAYS:
+            logger.warning("FRED 汇率交叉最新观测 %s 滞后 %d 天，不采用",
+                           fred.get("date"), lag)
+        else:
+            note = f"中行牌价不可得，降级 FRED 交叉（{fred.get('date')} 口径"
+            if lag is None:
+                note += "，观测日期无法解析，无法计算滞后）"
+            else:
+                note += f"，日频序列滞后 {lag} 天，非当日汇率）"
+            if lag is not None and lag > _FX_STALE_WARN_DAYS:
+                note = (f"⚠️ 源数据陈旧：最新观测 {fred.get('date')}（滞后 {lag} 天）——"
+                        + note)
+            fred["note"] = note
+            return fred
 
     return {"rate": None, "date": None, "source": None,
             "note": "汇率不可得：中行牌价与 FRED 交叉均失败——本次不出溢价率"}

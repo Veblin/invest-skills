@@ -147,7 +147,8 @@ def test_state_roundtrip_and_corrupt(tmp_path):
     assert uc.save_state(sp, st) is None
     assert uc.load_state(sp)["symbols"]["600176"]["last_run"] == "20260910"
     sp.write_text("{broken", encoding="utf-8")
-    assert uc.load_state(sp)["symbols"] == {}                       # 损坏=首跑
+    with pytest.raises(ValueError, match="拒绝覆盖"):
+        uc.load_state(sp)  # 损坏不是首跑：不得以空状态覆写共用题材账本
 
 
 # ── 采集信号（失败与空记录必须可区分）───────────────────────────────────

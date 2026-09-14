@@ -68,6 +68,8 @@ def test_official_sources_accepted():
         assert tc.is_official_source(ok), f"应接受官方来源：{ok}"
     assert not tc.is_official_source("")
     assert not tc.is_official_source("题材热度第一")
+    assert not tc.is_official_source("论坛帖子"), "未知渠道不得被当作官方确认"
+    assert tc.is_official_source("https://www.gov.cn/zhengce/"), "权威域名 URL 应可用"
 
 
 def test_confirmed_stage_requires_date(state):

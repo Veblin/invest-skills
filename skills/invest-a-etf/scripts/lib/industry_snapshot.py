@@ -132,7 +132,13 @@ def _pick_src_date(row: Any) -> str | None:
                 continue
         except (TypeError, ValueError):
             pass  # 非标量（数组/列表）——不当缺失处理，交由归一化判定
-        return _normalize_src_date(raw)
+        # A present value is not necessarily a usable date (for example an empty
+        # string or a non-zero-padded ``2022-1-4``).  Keep trying the lower
+        # priority source rather than turning that malformed first value into a
+        # silent NULL ``src_date``.
+        normalized = _normalize_src_date(raw)
+        if normalized is not None:
+            return normalized
     return None
 
 

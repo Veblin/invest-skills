@@ -143,6 +143,31 @@ def test_fx_falls_back_to_fred_cross_with_lag_note(monkeypatch):
     assert "滞后" in fx["note"]
 
 
+def test_fx_fred_uses_actual_lag_and_marks_staleness(monkeypatch):
+    """FRED 降级源不能硬编码“约一周”，须按实际观测日判陈旧。"""
+    monkeypatch.setattr(hk_ah, "_fetch_boc_raw", lambda: None)
+    days = hk_ah._FX_STALE_WARN_DAYS + 2
+    monkeypatch.setattr(hk_ah, "_fetch_fred_cross",
+                        lambda: {"rate": 0.8637, "date": _days_ago_iso(days),
+                                 "source": "FRED DEXCHUS/DEXHKUS"})
+    fx = hk_ah.fetch_fx_hkd_cny()
+    assert fx["rate"] == 0.8637
+    assert f"滞后 {days} 天" in fx["note"]
+    assert "陈旧" in fx["note"]
+
+
+def test_fx_stale_fred_is_rejected(monkeypatch):
+    """FRED 超过同一失效阈值时不可继续用于 A/H 溢价计算。"""
+    monkeypatch.setattr(hk_ah, "_fetch_boc_raw", lambda: None)
+    days = hk_ah._FX_STALE_FAIL_DAYS + 1
+    monkeypatch.setattr(hk_ah, "_fetch_fred_cross",
+                        lambda: {"rate": 0.8637, "date": _days_ago_iso(days),
+                                 "source": "FRED DEXCHUS/DEXHKUS"})
+    fx = hk_ah.fetch_fx_hkd_cny()
+    assert fx["rate"] is None
+    assert "不可得" in fx["note"]
+
+
 def test_fx_all_sources_down_is_explicit(monkeypatch):
     monkeypatch.setattr(hk_ah, "_fetch_boc_raw", lambda: None)
     monkeypatch.setattr(hk_ah, "_fetch_fred_cross", lambda: None)

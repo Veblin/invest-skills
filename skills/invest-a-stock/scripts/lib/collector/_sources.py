@@ -856,14 +856,14 @@ def _fetch_cninfo_industry_pe(ak: Any) -> tuple[Any, str | None]:
                   f"（其中 {errors} 天取数失败）")
 
 
-def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
+def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict:
     """获取行业PE中位数（akshare/巨潮资讯）。
 
     Returns:
         dict with: industry_pe_median, industry_pe_avg, company_pe, relative_position,
-        **status**（available / unavailable）与 **note**（不可得原因）。
-        仅在**空名守卫**命中时返回 None（本函数对该标的不适用，非取数失败，
-        契约见 `tests/test_collector_fixes.py::TestIndustryPeEmptyNameGuard`）。
+        dict with **status**（available / unavailable）与 **note**（不可得原因）。
+        无论行业名预取、匹配还是取数失败，均返回显式三态；不得用裸 ``None``
+        让维度状态和报告静默消失。
     """
     # 只 gate 在 **akshare 可用性**上：本函数走巨潮 cninfo，与东财 push2 无关——
     # 用 push2 可达性 gate 它会让代理环境下的该维度永久不可得（且归因成
@@ -886,18 +886,20 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
             if not industry_name:
                 info = _q_akshare_basic(symbol)
                 if not info:
-                    # 与下方的空名守卫**同语义**：行业名不可得 → 本函数对该标的不适用
-                    # （契约见 TestIndustryPeEmptyNameGuard）。此处不可分辨「取数失败」
-                    # 与「该股无行业字段」，且返回 None 是防止全表误匹配的关键，
-                    # 故不纳入 T9-5 的三态改造范围。
-                    return None
+                    # 不可将空行业名用于 contains（会全表误匹配），但也不能把
+                    # 东财名称查询失败伪装成巨潮取数失败或静默吞掉。
+                    return _industry_pe_unavailable(
+                        "行业名称不可得，无法将个股与巨潮行业 PE 口径匹配",
+                        industry_name=industry_name)
                 industry_name = info.get("行业") or info.get("industry", "")
             # P0：空名守卫（对齐孪生函数 _q_akshare_industry_board）——行业字段缺失时
             # str.contains("") 全表匹配会静默取巨潮 PE 表首行作为本股行业 PE（数据错误）。
-            # 这是**有意守卫**而非吞错（语义＝本函数对该标的不适用），故仍返回 None；
-            # T9-5 的改动范围是取数失败路径。
+            # 这是防止全表误匹配的必要守卫；同时保留显式不可得状态，以免
+            # 该维度在聚合、引用附录和报告中静默消失。
             if not industry_name:
-                return None
+                return _industry_pe_unavailable(
+                    "行业名称为空，无法将个股与巨潮行业 PE 口径匹配",
+                    industry_name=industry_name)
 
             # 匹配行业PE
             matched = df[df["行业名称"].str.contains(industry_name, na=False)]
@@ -924,6 +926,11 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
             pe_avg = safe_float(row.get("静态市盈率-算术平均"))
             if pe_avg is None:
                 pe_avg = safe_float(row.get("市盈率平均值"))
+
+            if pe_median is None:
+                return _industry_pe_unavailable(
+                    "巨潮行业 PE 表未提供有效中位数（字段缺失或值为空）",
+                    industry_name=str(row.get("行业名称", "")))
 
             return {
                 "industry_name": str(row.get("行业名称", "")),
@@ -1161,5 +1168,4 @@ def _qp_tickflow(symbol: str, start_date: str, end_date: str) -> str:
         f"tf.TickFlow.free().klines.get(symbol='{code}', "
         f"start={start_date}, end={end_date}, adjust='forward')"
     )
-
 
