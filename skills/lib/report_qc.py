@@ -313,7 +313,18 @@ def _basis_is_empty(body: list[str]) -> bool:
     # 明确的「当前数据未形成明确空头逻辑链」与渲染器的
     # 「左/右侧参考指标数据不足」都不是实际依据。只有这些 sentinel 时视为
     # 空；同节若另有实质论据则保守放行，避免把数据缺口说明误报为全节为空。
-    return all(_EMPTY_BASIS_RE.search(line) for line in content)
+    if not all(_EMPTY_BASIS_RE.search(line) for line in content):
+        return False
+    for line in content:
+        # 同一行可以先声明部分指标不可得、再给出可用的事实依据；只剥离
+        # sentinel、来源标签、证据等级与 Markdown 装饰后仍有文字，就不是空节。
+        remaining = _EMPTY_BASIS_RE.sub("", line)
+        remaining = re.sub(r"\[来源\s*[:：][^\]]*\]", "", remaining)
+        remaining = re.sub(r"证据强度\s*[:：]\s*[✅⚠️❓]", "", remaining)
+        remaining = re.sub(r"[>\-*①②③④⑤⑥\s\[\]：:，,。.！!；;]+", "", remaining)
+        if remaining:
+            return False
+    return True
 
 
 def _check_stock_completion(report_path: Path, text: str) -> LayerResult:

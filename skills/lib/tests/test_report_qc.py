@@ -382,6 +382,20 @@ class TestStockCompletionGate:
                    for d in completion.details)
         assert completion.status == "fail"
 
+    def test_unavailable_sentinel_with_remaining_basis_is_not_empty(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 趋势仍弱，尚需价格结构确认 [来源: engine]",
+                "右侧参考指标数据不足，但 MA60 已转正 [来源: engine]",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert not any(d["id"] == "completion-empty-basis" and "右侧" in d["message"]
+                       for d in completion.details)
+        assert completion.status == "pass", completion.details
+
     def test_manual_stock_and_other_report_types_do_not_require_sidecar(self, tmp_path: Path):
         manual = _write(tmp_path, "600176-中国巨石", "2026-07-16.md", COMPLIANT_STOCK)
         manual_completion = _completion_layer(qc_file(manual, fail_on="error"))
