@@ -85,6 +85,7 @@ from ._orchestrate import (  # noqa: F401
     collect_peer_comparison,
     collect_quote,
     collect_research,
+    collect_segments,
     collect_valuation,
     extract_industry_from_basic_info,
 )

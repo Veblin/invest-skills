@@ -570,6 +570,12 @@ def _data_fields(dimension: str, data: Any) -> str:
                 "holder_name": "股东名称", "hold_ratio": "持股比例",
                 "net_mf_vol": "净流向",
             }
+            if dimension == "segments":
+                # 分部数据专用标签。刻意不做通用 type/item 映射——那两个键在
+                # events 等维度另有含义，通用映射会串味。
+                fin_keys = {**fin_keys, "type": "分部口径", "item": "分部名称",
+                            "sales": "分部收入", "profit": "分部利润",
+                            "margin_pct": "分部毛利率"}
             fields = [fin_keys.get(k, k) for k in first if first[k] is not None]
             return "、".join(fields) if fields else f"{len(data)}条记录"
         return f"{len(data)}条记录"

@@ -516,6 +516,60 @@ def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
     return _normalize_northbound_records(rows, "tushare.hsgt_top10")
 
 
+_MAINBZ_TYPES = {"P": "product", "D": "region"}
+
+
+def _dedupe_mainbz_rows(records: list[dict]) -> list[dict]:
+    """按 ``(bz_sales, bz_profit)`` 值对去重，别名取较短名（同长取先出现者）。
+
+    ``fina_mainbz`` 对同一分部会返回**别名重复行**——实测 300750 2026H1：按产品
+    同时给出「电池材料及回收、矿产资源」与「电池材料及回收」、按地区同时给出
+    「境外」与「国外」，两行数值完全相同。不去重会让分部合计虚高（实测 3489.89
+    亿 vs 真实营收 2769.17 亿）。
+    """
+    chosen: dict[tuple, dict] = {}
+    for row in records:
+        key = (row["bz_sales"], row["bz_profit"])
+        current = chosen.get(key)
+        if current is None or len(str(row["bz_item"])) < len(str(current["bz_item"])):
+            chosen[key] = row
+    return list(chosen.values())
+
+
+def _q_tushare_mainbz(symbol: str) -> list[dict] | None:
+    """Tushare fina_mainbz：主营构成（按产品 + 按地区）多期序列。
+
+    「按报告期对齐」的口径信息由 ``type`` 字段携带（product/region）；销售额与
+    分部利润原样保留，毛利率由本函数计算并标注为派生值。
+    """
+    config, tc = _require_tushare()
+    out: list[dict] = []
+    for bz_type, label in _MAINBZ_TYPES.items():
+        df = tc.query("fina_mainbz", ts_code=_ts_code(symbol), type=bz_type,
+                      start_date=_days_ago(730), end_date=_today())
+        if df is None or df.empty:
+            continue
+        records: list[dict] = []
+        for raw in df.to_dict("records"):
+            item = str(raw.get("bz_item") or "").strip()
+            end_date = str(raw.get("end_date") or "").strip()
+            sales = safe_float(raw.get("bz_sales"))
+            profit = safe_float(raw.get("bz_profit"))
+            # 「合计特别调整」等行 bz_sales 为 NaN——不是分部，剔除
+            if not item or not end_date or sales is None:
+                continue
+            records.append({"bz_item": item, "bz_sales": sales,
+                            "bz_profit": profit, "end_date": end_date})
+        for row in _dedupe_mainbz_rows(records):
+            out.append({
+                "end_date": row["end_date"], "type": label, "item": row["bz_item"],
+                "sales": row["bz_sales"], "profit": row["bz_profit"],
+                "margin_pct": (round(row["bz_profit"] / row["bz_sales"] * 100, 2)
+                               if row["bz_profit"] is not None and row["bz_sales"] else None),
+            })
+    return out or None
+
+
 def _q_akshare_basic(symbol: str) -> dict | None:
     """akshare 基本信息来源（东方财富 push2 API）。"""
     with akshare_direct_session():

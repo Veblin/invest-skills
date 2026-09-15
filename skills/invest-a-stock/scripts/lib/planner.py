@@ -66,6 +66,7 @@ INTENT_PRESETS: dict[str, AnalysisPlan] = {
             _m("quote", priority=1, weight=1.0, depth="quick", min_sources=1),
             _m("valuation", priority=1, weight=1.0, depth="deep", min_sources=2),
             _m("financials", priority=1, weight=1.0, depth="deep", min_sources=2),
+            _m("segments", priority=2, weight=0.7, depth="normal", min_sources=1),  # A2: 分部构成
             _m("kline", priority=1, weight=0.8, depth="deep", min_sources=2),
             _m("basic_info", priority=2, weight=0.5, depth="quick", min_sources=1),
             _m("shareholders", priority=2, weight=0.6, depth="normal", min_sources=1),
@@ -123,6 +124,7 @@ INTENT_PRESETS: dict[str, AnalysisPlan] = {
         intent="financials_deep",
         modules=[
             _m("financials", priority=1, weight=1.0, depth="deep", min_sources=2),
+            _m("segments", priority=2, weight=0.8, depth="normal", min_sources=1),  # A2: 分部构成
             _m("valuation", priority=1, weight=1.0, depth="deep", min_sources=2),
             _m("quote", priority=1, weight=0.6, depth="quick", min_sources=1),
             _m("holder_changes", priority=2, weight=0.7, depth="normal", min_sources=1),

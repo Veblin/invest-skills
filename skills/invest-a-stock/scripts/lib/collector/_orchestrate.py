@@ -59,6 +59,7 @@ from ._sources import (
     _q_tushare_daily_qfq,
     _q_tushare_financials,
     _q_tushare_hsgt_top10,
+    _q_tushare_mainbz,
     _q_tushare_moneyflow,
     _q_tushare_shareholders,
     _qp_akshare,
@@ -1598,11 +1599,33 @@ def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
     )
 
 
+def collect_segments(symbol: str) -> dict:
+    """分部数据（主营构成：按产品 + 按地区）。
+
+    此前报告把「分部数据不可得」写成已知缺口，实测为**误判**——Tushare
+    ``fina_mainbz`` 一直可用（300750 2026H1：动力电池 1921.25 亿 / 储能 532.61 亿
+    / 材料回收 188.11 亿；境内 1897.87 亿 / 境外 871.29 亿，合计与引擎营收吻合）。
+    本维度只做采集；是否进入 Finding 由分析层决定。
+    """
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.fina_mainbz", lambda: _q_tushare_mainbz(symbol)))
+    return _collect_dimension(
+        "segments", tasks,
+        query_params={
+            "tushare.fina_mainbz": _qp_tushare(
+                "fina_mainbz", symbol, type="P,D",
+                start_date=_days_ago(730), end_date=_today()),
+        },
+    )
+
+
 # ---- 全维度采集 ----
 
 COLLECTORS = {
     "basic_info": ("基本信息", collect_basic_info),
     "financials": ("财务报告", collect_financials),
+    "segments": ("分部数据", collect_segments),
     "quote": ("实时行情", collect_quote),
     "shareholders": ("十大股东", collect_shareholders),
     "northbound": ("北向资金", collect_northbound),
