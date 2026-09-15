@@ -184,6 +184,16 @@ _STRUCTURE_REQUIREMENTS: dict[str, list[tuple[str, str, str, str]]] = {
 def _check_structure(text: str, report_type: str) -> LayerResult:
     """结构层：按报告类型检查必备章节/标签存在性。"""
     layer = LayerResult(layer="structure", status="pass")
+    if report_type == "stock" and _is_insight_report(text):
+        required = ("可得结论", "核心矛盾", "观察节点与更新规则", "已知未知与补证路径", "不构成任何投资建议")
+        for label in required:
+            if label not in text:
+                layer.findings_count += 1
+                layer.details.append({"id": "insight-structure", "severity": "error",
+                                      "message": f"Insight 缺少必要区块: {label}"})
+        if layer.findings_count:
+            layer.status = "fail"
+        return layer
     for rule_id, pattern, severity, message in _STRUCTURE_REQUIREMENTS.get(report_type, []):
         if re.search(pattern, text):
             continue
@@ -398,6 +408,73 @@ def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
         for line in lines if (match := _MARKDOWN_HEADING_RE.match(line))
     ):
         layer.status = "pass"
+    return layer
+
+
+def _is_insight_report(text: str) -> bool:
+    """Insight has a compact, deliberate structure rather than legacy [事实]/[分析] blocks."""
+    return "— 研究要点" in text and "## 可得结论" in text and "## 证据底稿" in text
+
+
+def _check_insight_contract(report_path: Path, text: str) -> LayerResult:
+    """Validate the sidecars which make an Insight report auditable.
+
+    The manifest is intentionally checked without importing the stock renderer:
+    report_qc is shared by distributable packages and must remain usable when a
+    sibling skill is absent.
+    """
+    layer = LayerResult(layer="insight-contract", status="skip")
+    if not _is_insight_report(text):
+        return layer
+    layer.status = "pass"
+    expected = {
+        "facts": report_path.with_suffix(".facts.json"),
+        "insight": report_path.with_suffix(".insight.json"),
+        "manifest": report_path.with_suffix(".report.json"),
+    }
+    payloads: dict[str, dict] = {}
+    for kind, path in expected.items():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("顶层不是对象")
+            payloads[kind] = payload
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            layer.findings_count += 1
+            layer.details.append({"id": f"insight-{kind}-sidecar-invalid", "severity": "error",
+                                  "message": f"Insight 缺少或无法读取 {path.name}: {exc}"})
+    facts = payloads.get("facts", {}).get("facts")
+    insight = payloads.get("insight", {})
+    manifest = payloads.get("manifest", {})
+    if facts is not None and (not isinstance(facts, list) or any(
+            not isinstance(fact, dict) or not fact.get("id") or not fact.get("source_ids")
+            or not fact.get("as_of") for fact in facts)):
+        layer.findings_count += 1
+        layer.details.append({"id": "insight-facts-untraceable", "severity": "error",
+                              "message": "Insight Facts 必须包含 ID、来源和截至日期"})
+    if insight and (insight.get("mode") != "insight" or insight.get("completion") not in {"complete", "insufficient"}):
+        layer.findings_count += 1
+        layer.details.append({"id": "insight-status-invalid", "severity": "error",
+                              "message": "Insight sidecar 的 mode 或 completion 非法"})
+    if manifest and (manifest.get("mode") != "insight" or manifest.get("report") != report_path.name):
+        layer.findings_count += 1
+        layer.details.append({"id": "insight-manifest-mismatch", "severity": "error",
+                              "message": "Insight manifest 未绑定当前同代 Markdown"})
+    html_name = manifest.get("html") if manifest else None
+    if html_name:
+        html_path = report_path.parent / str(html_name)
+        try:
+            html_text = html_path.read_text(encoding="utf-8")
+            for finding in insight.get("findings") or []:
+                finding_id = finding.get("id") if isinstance(finding, dict) else None
+                if finding_id and f"evidence-{finding_id}" not in html_text:
+                    raise ValueError(f"HTML 缺少 Finding 锚点 {finding_id}")
+        except (OSError, ValueError) as exc:
+            layer.findings_count += 1
+            layer.details.append({"id": "insight-html-pair-mismatch", "severity": "error",
+                                  "message": f"Insight HTML 未与同代 Findings 配对: {exc}"})
+    if layer.findings_count:
+        layer.status = "fail"
     return layer
 
 
@@ -853,6 +930,7 @@ def qc_file(
     layers = [_run_lint_layer(path, profile, fail_on), _check_structure(text, report_type)]
     if report_type == "stock":
         layers.append(_check_stock_completion(path, text))
+        layers.append(_check_insight_contract(path, text))
     if report_type != "pulse":
         # T6-2/T6-3（v0.3.0 R1）：F2 派生表述来源 / F4 §N 引用存在性——通用文本规则。
         # unknown 类型同样挂载（R1 审查 F13：event-calendar 等附属技能

@@ -24,10 +24,12 @@ if str(_SHARED_LIB_DIR) not in sys.path:
 from lib.research_profile import (  # noqa: E402
     FOCUSES,
     HORIZONS,
+    MODES,
     SCHEMA_VERSION,
     build_profile,
     format_profile_html,
     format_profile_markdown_lines,
+    resolve_mode,
     validate_profile,
     write_profile_sidecar,
 )
@@ -42,8 +44,18 @@ def _args(**overrides) -> Namespace:
 # ── build_profile ─────────────────────────────────────────────────────────
 
 
-def test_no_flags_yields_no_profile() -> None:
-    """未传任何档案参数时必须返回 None——调用方据此保持零行为差异。"""
+def test_no_flags_yields_no_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未传任何档案参数时必须返回 None——调用方据此保持零行为差异。
+
+    须隔离风格档案：``build_profile`` 在 style 缺省时会回落到 STORE_DIR 下的
+    ``user_style.json``，若本机已存在该档案（正常使用后必然存在），未隔离的
+    断言会把「用户有风格档案」误判成「未传参数也产出档案」。2026-09-15 实测：
+    用户 00:04 的一次正常跑批落盘了该档案，本用例随即变红——属测试依赖环境
+    状态，非产品缺陷。同文件其余 style 用例均以 monkeypatch 隔离。
+    """
+    from lib import style_match
+
+    monkeypatch.setattr(style_match, "load_style", lambda: None)
     assert build_profile(_args()) is None
 
 
@@ -200,6 +212,93 @@ def test_no_profile_writes_no_sidecar(tmp_path: Path) -> None:
     report.write_text("# report\n", encoding="utf-8")
     assert write_profile_sidecar(report, None) is None
     assert not list(report.parent.glob("*.profile.json"))
+
+
+# ── 产物溯源：mode / mode_source（2026-09-15 误判事件回归） ────────────────
+#
+# 背景：2026-09-15 的 full 报告事后被误判为「因为 insight 模式当时还不存在」，
+# 真实原因只是「生成时选了 full」——产物本身没记录 mode，审计者只能倒推。
+# 以下用例锁住「mode 随产物落盘」且「显式性可判别」。
+
+
+def test_sidecar_records_generation_block(tmp_path: Path) -> None:
+    report = tmp_path / "600176-测试股份" / "2026-09-14-13-41-24.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("# report\n", encoding="utf-8")
+    sidecar = write_profile_sidecar(
+        report, _PROFILE, {"mode": "full", "mode_source": "cli"})
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["generation"] == {"mode": "full", "mode_source": "cli"}
+    # 溯源块与档案块并列，不并入 profile（profile 语义 = 用户研究档案）
+    assert "mode" not in payload["profile"]
+
+
+def test_sidecar_omits_generation_when_not_given(tmp_path: Path) -> None:
+    """未传 generation 时整个键省略，不落一个编造的默认值。"""
+    report = tmp_path / "600176-测试股份" / "2026-09-14-13-41-24.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("# report\n", encoding="utf-8")
+    payload = json.loads(
+        write_profile_sidecar(report, _PROFILE).read_text(encoding="utf-8"))
+    assert "generation" not in payload
+
+
+@pytest.mark.parametrize("mode,explicit,exp_mode,exp_source", [
+    ("full", False, "full", "default"),      # 未传 → 落默认
+    ("full", True, "full", "cli"),           # 显式选了 full（≠ 默认落到 full）
+    ("insight", True, "insight", "cli"),
+    ("brief", True, "brief", "cli"),
+    (None, False, "full", "default"),        # 属性缺失
+    ("bogus", True, "full", "default"),      # 非法值：归默认且不得标 cli
+])
+def test_resolve_mode_separates_choice_from_default(
+        mode, explicit, exp_mode, exp_source) -> None:
+    args = Namespace(mode=mode, _mode_explicit=explicit)
+    assert resolve_mode(args) == {"mode": exp_mode, "mode_source": exp_source}
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_mode_action_marks_explicit_every_position(mode: str) -> None:
+    """--mode 在根解析器与 report 子解析器两处都要能标出显式性。"""
+    import invest
+
+    parser = invest.build_parser()
+    after = parser.parse_args(["report", "600176", "--mode", mode])
+    assert after.mode == mode and after._mode_explicit is True
+    before = parser.parse_args(["--mode", mode, "report", "600176"])
+    assert before.mode == mode and before._mode_explicit is True
+
+
+def test_mode_default_contract_unchanged() -> None:
+    """不动既有契约：未传 --mode 时 args.mode 仍为 'full'，且标为默认。"""
+    import invest
+
+    args = invest.build_parser().parse_args(["report", "600176"])
+    assert args.mode == "full"
+    assert getattr(args, "_mode_explicit", False) is False
+    assert resolve_mode(args) == {"mode": "full", "mode_source": "default"}
+
+
+def test_cli_sidecar_carries_generation(tmp_path: Path,
+                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    import invest
+
+    monkeypatch.setattr(invest, "_HAS_STORE", False)
+    monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _RENDER_COLLECTION)
+    monkeypatch.setattr(invest.render, "render", lambda *a, **k: "# report\n")
+
+    outdir = tmp_path / "reports"
+    rc = invest.cmd_report(_report_args(
+        outdir=str(outdir), horizon="medium_term", focus=["valuation"],
+        goal="验证增长可持续性", style="价值", already_knows_price=True,
+        mode="brief"))
+    assert rc == 0
+    report = next(outdir.rglob("*.md"))
+    payload = json.loads(report.with_suffix(".profile.json").read_text(encoding="utf-8"))
+    assert payload["generation"]["mode"] == "brief"
+    # _report_args 构造的 Namespace 没有 _mode_explicit → 如实记为 default，
+    # 不把「测试没传」冒充成「用户显式选了 brief」。
+    assert payload["generation"]["mode_source"] == "default"
 
 
 # ── 渲染集成：只有 full 展示，且不动其他模式 ──────────────────────────────

@@ -31,3 +31,4 @@ def test_report_help_exposes_research_profile_flags():
     assert r.returncode == 0
     for flag in ("--horizon", "--focus", "--goal", "--style", "--already-knows-price"):
         assert flag in r.stdout, flag
+    assert "insight(研究要点)" in r.stdout

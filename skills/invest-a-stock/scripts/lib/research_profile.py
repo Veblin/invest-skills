@@ -28,6 +28,8 @@ SCHEMA_VERSION = 1
 HORIZONS: tuple[str, ...] = ("short_term", "medium_term", "long_term")
 FOCUSES: tuple[str, ...] = ("valuation", "event_catalyst", "capital_flow", "comprehensive")
 STYLES: tuple[str, ...] = ("价值", "成长", "趋势", "事件驱动", "混合")
+MODES: tuple[str, ...] = ("brief", "full", "concise", "insight")
+DEFAULT_MODE = "full"
 
 _HORIZON_LABELS = {
     "short_term": "短线（1-2 周）",
@@ -132,6 +134,27 @@ def build_profile(args: Any) -> dict[str, Any] | None:
     if goal:
         profile["report_goal"] = _clean_free_text(goal)
     return profile
+
+
+def resolve_mode(args: Any) -> dict[str, str]:
+    """产物溯源：本次报告用哪个 ``--mode``，以及它是显式传入还是落到默认值。
+
+    动机（2026-09-15 实测）：full 报告事后被误判为「因为 insight 模式当时
+    还不存在」，真实原因只是「生成时选了 full」——产物本身没记录 mode，
+    审计者只能倒推。把 mode 与显式性随产物落盘，这类误判即不可能发生。
+
+    ``args.mode`` 因根解析器 default='full' **恒存在**，``hasattr`` 无法判别
+    显式性；显式性由 ``invest.py`` 的 ``_ModeAction`` 记录到私有属性
+    ``_mode_explicit``（不改变任何既有默认值契约）。
+    """
+    raw = getattr(args, "mode", None)
+    # 非法值一律归默认，且来源记 "default"——否则会出现「mode=full 但标注
+    # 显式传入」这种自相矛盾的溯源（显式传的是别的值，不等于显式传了 full）。
+    explicit = raw in MODES and bool(getattr(args, "_mode_explicit", False))
+    return {
+        "mode": raw if raw in MODES else DEFAULT_MODE,
+        "mode_source": "cli" if explicit else "default",
+    }
 
 
 def validate_profile(profile: dict[str, Any]) -> list[str]:
@@ -260,8 +283,17 @@ def format_profile_html(profile: dict[str, Any] | None) -> str:
     )
 
 
-def write_profile_sidecar(report_path: Path, profile: dict[str, Any] | None) -> Path | None:
+def write_profile_sidecar(
+    report_path: Path,
+    profile: dict[str, Any] | None,
+    generation: dict[str, str] | None = None,
+) -> Path | None:
     """原子写同代侧车 ``<report>.profile.json``；无档案时返回 None。
+
+    ``generation``（``resolve_mode`` 的产物）作为**独立顶层块**落盘，不并入
+    ``profile``：``profile`` 的语义是用户研究档案（风格/周期/焦点/目标），
+    生成参数属于产物溯源，混入会污染该字段的读法。未提供时整个键省略——
+    caller 没传就不写，避免落一个编造的默认值。
 
     与 `invest.py:_write_analysis_sidecar` 同款：临时文件与目标同目录，
     ``replace`` 在同一文件系统内为原子替换，中断时不留半截 JSON。
@@ -269,16 +301,15 @@ def write_profile_sidecar(report_path: Path, profile: dict[str, Any] | None) -> 
     if not profile:
         return None
     sidecar = report_path.with_suffix(".profile.json")
-    payload = json.dumps(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "source": "cli:--profile",
-            "recorded_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
-            "profile": profile,
-        },
-        ensure_ascii=False,
-        indent=2,
-    ) + "\n"
+    body: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "source": "cli:--profile",
+        "recorded_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
+    }
+    if generation:
+        body["generation"] = generation
+    body["profile"] = profile
+    payload = json.dumps(body, ensure_ascii=False, indent=2) + "\n"
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{sidecar.name}.", suffix=".tmp", dir=str(sidecar.parent), text=True,
     )

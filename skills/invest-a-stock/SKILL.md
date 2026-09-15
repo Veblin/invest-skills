@@ -198,6 +198,8 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 
 **第二层（.md 文件）**：完整备忘录 + References（见 [references/references-format.md](references/references-format.md)），采用 LAW 17 金字塔结构。
 
+**Insight 层（`report --mode insight`，v0.3.0 MVP）**：面向阅读的研究要点，由确定性 Facts / Findings 模型生成。首层只给可追溯结论、核心矛盾、反证/关联边界、观察节点与补证路径；九模块原始表和公式继续留在 `full` 审计底稿。每次同时落盘 `.facts.json`、`.insight.json` 与 `.report.json`，Markdown 与 HTML 只能消费同一代 Finding。证据不足时明确标为「分析未完成」，不以空模板或数据罗列伪装完成。
+
 **第三层（concise 对话模式）**：Hermes/OpenClaw 等对话场景使用。结论先行 + 关键数据展开块。3-5 段核心结论直出，详细数据用 `<details>` 折叠。CLI 对应 `--mode concise`。
 
 ### Concise 输出契约
@@ -276,7 +278,7 @@ PE / PB / PS
 | 资金行为扫描 | [game-theory.md](references/game-theory.md) | `game_theory` |
 | 完整 report --deep | 全部专项 + modules.md | `deep_analysis` + `--deep` |
 
-**规则**：专项单独运行仍须 `evidence`；完整分析用 `report --mode full`（`--mode` 允许 `brief`/`full`/`concise`，不用 `--mode=sentiment`）。
+**规则**：专项单独运行仍须 `evidence`；完整分析用 `report --mode full`；读者优先的确定性研究要点用 `report --mode insight`（`--mode` 允许 `brief`/`full`/`concise`/`insight`，不用 `--mode=sentiment`）。
 
 九模块结构详见 [references/modules.md](references/modules.md)。财报 F 规范详见 [references/financials.md](references/financials.md)。
 
@@ -479,9 +481,10 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json --from-store  # F2-3: 复用 collect 快照，跳过重复现场采集
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --resume  # 复用采集
-# 常用（collect 默认自动入库；--no-store 关闭；--mode: brief|full|concise）
+# 常用（collect 默认自动入库；--no-store 关闭；--mode: brief|full|concise|insight）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 [--outdir=./reports/] [--deep]
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --mode insight --emit html  # 研究要点 MD+HTML+Facts/Findings 侧车
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py compare 600176 000858
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py diagnose
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py diff 600176

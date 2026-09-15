@@ -267,7 +267,21 @@ def _add_force_sector_sync_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
-MODE_CHOICES = ["brief", "full", "concise"]  # --mode 三处共用（根/report/synthesize）
+MODE_CHOICES = ["brief", "full", "concise", "insight"]  # --mode 三处共用（根/report/synthesize）
+
+
+class _ModeAction(argparse.Action):
+    """记录 ``--mode`` 是否被显式传入（``args._mode_explicit``）。
+
+    根解析器的 ``--mode`` 默认值恒为 'full'，使 ``args.mode`` **恒存在**——
+    ``hasattr`` 无法判别「显式选了 full」与「默认落到 full」，而二者对事后
+    审计含义完全不同（2026-09-15 实测：full 报告被误判为「当时 insight 还不
+    存在」）。此处只**旁记**一个私有标记，不动任何默认值契约。
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_mode_explicit", True)
 
 
 def _add_collect_flags(parser: argparse.ArgumentParser, *,
@@ -302,8 +316,8 @@ def _add_collect_flags(parser: argparse.ArgumentParser, *,
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="A股个股调研数据采集与分析")
     p.add_argument("--plan", default="", help="JSON 采集计划文件路径")
-    p.add_argument("--mode", default="full", choices=MODE_CHOICES,
-                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
+    p.add_argument("--mode", default="full", choices=MODE_CHOICES, action=_ModeAction,
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简) / insight(研究要点)")
     p.add_argument("--resume", action="store_true", help="从上次中断的步骤继续")
     p.add_argument("--save-raw", action="store_true",
                    help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
@@ -320,8 +334,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES,
-                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
+    pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES, action=_ModeAction,
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简) / insight(研究要点)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--analysis", default=None,
                     help="analysis.json 路径（R-B1）；渲染期替换 [待 Claude report 阶段填充] 占位")
@@ -430,7 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("symbol")
     psyn.add_argument("--input", default="", help="分析结果 JSON 文件路径")
     psyn.add_argument("--emit", default="md", choices=["md", "json"])
-    psyn.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES)
+    psyn.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES, action=_ModeAction)
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     psyn.add_argument("--no-store", action="store_false", dest="store", default=True,
@@ -675,6 +689,20 @@ def _maybe_store_report_snapshot(
     _maybe_store_macro_snapshot(result, args)
 
 
+def _insight_snapshot_diff(symbol: str, result: dict) -> tuple[dict | None, str]:
+    """Insight「本次新增发现」的数据来源：当前采集 vs store 上次快照。
+
+    与 `_maybe_store_report_snapshot` 共用同一条时序约束——**必须在入库之前读取**，
+    否则 diff 退化为自比空 diff。读取本身在 `lib.insight_model.load_snapshot_diff`
+    内做 try/except 降级，此处只补 store 模块整体不可用这一种情形。
+    """
+    if not _HAS_STORE:
+        return None, "store_unavailable"
+    from lib.insight_model import load_snapshot_diff
+
+    return load_snapshot_diff(symbol, result)
+
+
 def _report_basename(result: dict, symbol: str, ts: str) -> str:
     """生成报告子目录名：{symbol}-{name}（文件名用日期，如 2026-07-05.md）。"""
     name = ""
@@ -733,9 +761,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     from lib.research_profile import (
         ProfileSchemaError,
         build_profile,
+        resolve_mode,
         validate_profile,
         write_profile_sidecar,
     )
+    # 产物溯源：随档案侧车落盘「本次用哪个 --mode、是显式还是默认」
+    # （见 research_profile.resolve_mode 的动机说明）。
+    generation = resolve_mode(args)
     profile: dict | None = None
     try:
         profile = build_profile(args)
@@ -840,6 +872,53 @@ def cmd_report(args: argparse.Namespace) -> int:
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
+    # Insight 是 reader-first 的独立产物：不复用 full 模式九模块渲染器，避免
+    # Markdown/HTML 各自从 collection 推导一套结论。旧模式的输出契约不变。
+    if getattr(args, "mode", "full") == "insight":
+        from lib.insight_model import InsightSchemaError, build_report_model, write_sidecars
+        from lib.render_insight import render_insight_html, render_insight_markdown
+        # 必须在 _maybe_store_report_snapshot 之前读取，否则 diff 自比为空。
+        key_diff, diff_reason = _insight_snapshot_diff(args.symbol, result)
+        try:
+            insight_model = build_report_model(result, args.symbol, profile,
+                                               key_diff=key_diff, diff_reason=diff_reason)
+        except InsightSchemaError as exc:
+            print(f"❌ Insight 模型校验失败: {exc}", file=sys.stderr)
+            return 2
+        if fmt == "json":
+            print(json.dumps(insight_model, ensure_ascii=False, indent=2))
+            _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+            return 0
+        markdown = render_insight_markdown(insight_model)
+        if fmt == "compact":
+            print(markdown)
+            _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+            return 0
+        from lib.shared_dates import shanghai_now
+        timestamp = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
+        subdir = _report_basename(result, args.symbol, timestamp)
+        outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
+                  else (Path.cwd() / "reports").resolve())
+        report_dir = outdir / subdir
+        report_dir.mkdir(parents=True, exist_ok=True)
+        mdpath = report_dir / f"{timestamp}.insight.md"
+        mdpath.write_text(markdown, encoding="utf-8")
+        htmlpath = None
+        if fmt == "html":
+            htmlpath = mdpath.with_suffix(".html")
+            htmlpath.write_text(render_insight_html(insight_model), encoding="utf-8")
+            print(f"📄 Insight HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
+        sidecars = write_sidecars(mdpath, insight_model, html_path=htmlpath)
+        profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
+        print(f"📝 Insight Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
+        print(f"📋 Facts 侧车: {sidecars['facts'].resolve()}", file=sys.stderr)
+        print(f"📋 Findings 侧车: {sidecars['insight'].resolve()}", file=sys.stderr)
+        if profile_sidecar:
+            print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
+        if not getattr(args, "outdir", None) and fmt == "md":
+            print(markdown)
+        _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+        return 0
 
     if fmt == "html":
         _ensure_render_ready(result, args.symbol)
@@ -867,7 +946,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdfile = _report_filepath(outdir, subdir, ts)
         mdfile.write_text(md_v2, encoding="utf-8")
         sidecar = _write_analysis_sidecar(mdfile, analysis_payload)
-        profile_sidecar = write_profile_sidecar(mdfile, profile)
+        profile_sidecar = write_profile_sidecar(mdfile, profile, generation)
 
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
@@ -912,7 +991,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdpath = _report_filepath(outdir, subdir, ts)
         mdpath.write_text(output, encoding="utf-8")
         sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
-        profile_sidecar = write_profile_sidecar(mdpath, profile)
+        profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
         print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
         if sidecar:
             print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
@@ -1151,6 +1230,13 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
     """
 
     if args.input:
+        if getattr(args, "mode", "full") == "insight":
+            print(
+                "❌ synthesize --input 尚不生成 Insight 同代 sidecar；请使用 "
+                "`report SYMBOL --mode insight` 以保持 Facts/Findings 契约。",
+                file=sys.stderr,
+            )
+            return 2
         try:
             with open(args.input, "r", encoding="utf-8") as f:
                 analysis = json.load(f)
