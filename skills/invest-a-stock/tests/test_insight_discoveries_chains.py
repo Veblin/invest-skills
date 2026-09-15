@@ -208,11 +208,15 @@ def test_chains_are_deterministic_and_auditable() -> None:
 
     markdown = render_insight_markdown(model)
     html = render_insight_html(model)
-    body = _section(markdown, "分析链")
-    assert "只描述事实之间的同向/不同向关系" in body
+    body = _section(markdown, "研究问题与证伪条件")
     for chain in chains:
-        assert chain["id"] in body and chain["id"] in html
         assert chain["relation"] in body
+        # 首屏要回答「该研究什么」——问题必须排在事实之前
+        assert chain["question"] in body
+        assert body.index(chain["question"]) < body.index(chain["relation"])
+        assert "证伪条件与窗口" in body
+        # 链 ID 是工程标识符，与 note 同理不进读者报告
+        assert chain["id"] not in body and chain["id"] not in html
 
 
 def test_chains_skip_when_prerequisites_missing() -> None:
@@ -223,7 +227,7 @@ def test_chains_skip_when_prerequisites_missing() -> None:
     collection["dimensions"] = collection["dimensions"][:1]
     model = _model(collection)
     assert model["analysis_chains"] == []
-    assert "不足以构成可验证的分析链" in _section(render_insight_markdown(model), "分析链")
+    assert "不足以构成可验证的分析链" in _section(render_insight_markdown(model), "研究问题与证伪条件")
     # A1/A5 不得改变完成度判据
     assert model["completion"] == "insufficient"
 
@@ -248,6 +252,7 @@ def _base_model():
     (lambda m: m["analysis_chains"][0].update(fact_ids=["valuation.pe_ttm.latest"]), "两个事实"),
     (lambda m: m["analysis_chains"][0].update(fact_ids=["nope.1", "nope.2"]), "不存在的 Fact"),
     (lambda m: m["analysis_chains"][0].update(mechanism="这导致了后续变化。"), "因果断言"),
+    (lambda m: m["analysis_chains"][0].update(question=""), "研究问题"),
     (lambda m: m["analysis_chains"][0].update(
         fact_ids=["quote.change_pct.latest", "valuation.pe_ttm.latest"]), "价格反应"),
     (lambda m: m["analysis_chains"][0].update(verification={"event": "x"}), "验证动作"),

@@ -20,7 +20,8 @@ _CHAIN_STATUS_LABEL = {
     "consistent": "一致性证据（不代表因果）",
     "mechanism_unconfirmed": "机制未证实",
 }
-_CHAIN_SECTION_NOTE = "本节只描述事实之间的同向/不同向关系；一致不等于因果，机制未证实不等于机制不存在。"
+_CHAIN_SECTION_TITLE = "研究问题与证伪条件"
+_CHAIN_SECTION_NOTE = "每条给出一个当前证据尚不能回答的问题、竞争解释与可观测的证伪条件；一致不等于因果。"
 
 
 def _name(model: dict[str, Any]) -> str:
@@ -158,21 +159,24 @@ def _chain_lines(model: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     for chain in chains:
         status = _CHAIN_STATUS_LABEL.get(chain.get("association_status"), "关联边界未标注")
+        # 首屏先给「该研究什么」——问题 → 事实 → 机制 → 竞争解释 → 证伪条件。
+        # 原实现以链 ID 开头、以「方向不一致」这类工程陈述为主，读者看完
+        # 知道了一堆事实却不知道下一步该验证什么。
         lines += [
             "",
-            f"- **{chain.get('id')}** ｜ {status}",
-            f"  - 涉及事实：{'、'.join(f'`{fid}`' for fid in chain.get('fact_ids') or [])}",
-            f"  - 关系：{chain.get('relation')}",
+            f"- **待回答的问题：** {chain.get('question') or chain.get('relation')}",
+            f"  - 当前事实：{chain.get('relation')}（{status}）",
             f"  - {chain.get('mechanism')}",
         ]
         alternatives = chain.get("alternatives") or []
         if alternatives:
             marks = "①②③④⑤"
             joined = " ".join(f"{marks[i] if i < len(marks) else '-'} {text}" for i, text in enumerate(alternatives))
-            lines.append(f"  - 替代解释：{joined}")
+            lines.append(f"  - 竞争解释：{joined}")
         verification = chain.get("verification") or {}
         if verification:
-            lines.append(f"  - 验证动作：**{verification.get('event')}** — {verification.get('test')}")
+            lines.append(f"  - 证伪条件与窗口：**{verification.get('event')}** — {verification.get('test')}")
+        lines.append(f"  - 涉及事实：{'、'.join(f'`{fid}`' for fid in chain.get('fact_ids') or [])}")
         # chain["note"]（"本条为工程约定，无同行评审先例；不得作为核心论证。"）刻意
         # **不渲染**：它是给审计与维护者看的，属程序规则说明，对读者无信息量。
         # 该约束保留在 model 侧车与 insight_model 模块 docstring 中。
@@ -206,7 +210,7 @@ def render_insight_markdown(model: dict[str, Any]) -> str:
         lines.append(f"[来源: {_source_label(model, tension['fact_ids'])}]")
     lines += ["", "## 本次新增发现"]
     lines += _discovery_lines(model)
-    lines += ["", "## 分析链", _CHAIN_SECTION_NOTE]
+    lines += ["", f"## {_CHAIN_SECTION_TITLE}", _CHAIN_SECTION_NOTE]
     lines += _chain_lines(model)
     lines += ["", "## 支持、反证与关联边界"]
     lines.append("所有 Finding 仅描述可用 Facts 的位置或同向/不同向关系；未使用识别证据时不将关联表述为因果。")
@@ -263,7 +267,7 @@ def render_insight_html(model: dict[str, Any]) -> str:
 <p class="note">⚠️ 本页用于研究与数据核验，不构成任何投资建议、买卖指令或目标价预测。</p><section><h2>可得结论</h2>{cards}</section>
 <section><h2>核心矛盾</h2><div class="finding">{escape(model["core_tension"]["claim"])}</div></section>
 <section><h2>本次新增发现</h2><div class="finding"><pre class="plain">{discoveries_html}</pre></div></section>
-<section><h2>分析链</h2><div class="finding"><p class="note">{escape(_CHAIN_SECTION_NOTE)}</p><pre class="plain">{chains_html}</pre></div></section>
+<section><h2>{escape(_CHAIN_SECTION_TITLE)}</h2><div class="finding"><p class="note">{escape(_CHAIN_SECTION_NOTE)}</p><pre class="plain">{chains_html}</pre></div></section>
 <section><h2>证据与反证</h2>{evidence}</section>
 <section><h2>数据探索</h2><label>筛选事实维度 <select id="dimension"><option value="all">全部</option><option value="valuation">估值</option><option value="financials">财务</option><option value="technical">技术</option><option value="quote">行情</option><option value="basic">基本信息</option></select></label><p class="note">字段来源单元格可悬停查看公式；筛选状态始终可见，离线可用。</p><table><thead><tr><th>Fact</th><th>数值</th><th>口径</th><th>截至</th><th>来源 / 公式</th></tr></thead><tbody id="facts">{fact_rows}</tbody></table></section>
 <section><h2>已知未知与补证路径</h2><ul>{gaps}</ul></section><p class="note">免责声明：数据可能存在滞后、缺失或口径差异，请以公司公告及原始来源为准。</p></main><script>document.getElementById('dimension').addEventListener('change',function(){{for(const row of document.querySelectorAll('#facts tr'))row.hidden=this.value!=='all'&&row.dataset.group!==this.value;}});</script></body></html>'''

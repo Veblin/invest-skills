@@ -511,6 +511,13 @@ def _chain_valuation_vs_earnings(fx: dict[str, dict[str, Any]]) -> dict[str, Any
     return {
         "id": "chain.valuation-vs-earnings",
         "fact_ids": [pct["id"], chg["id"]],
+        # 首屏要回答的是「所以我该研究什么」——把分歧写成可证伪的问句，
+        # 而不是陈述「方向不一致」（后者是工程描述，读者无法据以行动）。
+        "question": (
+            "低估值定价的是「增长未被市场认可」，还是「市场已预判盈利下修」？"
+            if aligned else
+            "估值分位偏低与收入高增并存，孰为错价、孰为预警？"
+        ),
         "relation": (
             f"PE(TTM) 位于可用正 PE 序列的 {value:.1f}% 分位（{zone}），"
             f"营业收入同比为 {change:+.1f}%（{move}）；两者方向{'一致' if aligned else '不一致'}。"
@@ -546,6 +553,11 @@ def _chain_cash_conversion(fx: dict[str, dict[str, Any]]) -> dict[str, Any] | No
     return {
         "id": "chain.cash-conversion",
         "fact_ids": [ratio["id"], chg["id"]],
+        "question": (
+            "增长是否以营运资本占用为代价——利润的现金成色是否在下降？"
+            if weak else
+            "利润增长能否持续转化为现金——还是本期只是收款节奏的偶然？"
+        ),
         "relation": (
             f"最新披露期经营现金流/归母净利润为 {value:.3f}，"
             f"营业收入同比为 {change:+.1f}%；该比值{'低于' if weak else '不低于'} 0.6。"
@@ -582,6 +594,7 @@ def _chain_price_state_vs_valuation(fx: dict[str, dict[str, Any]]) -> dict[str, 
     return {
         "id": "chain.price-state-vs-valuation",
         "fact_ids": [ma["id"], pct["id"]],
+        "question": "价格走弱与估值分位偏低，是同一件事的两种说法，还是两个独立信号？",
         "relation": (
             f"最新收盘价相对 MA20 为 {value:+.2f}%（{'上方' if value >= 0 else '下方'}），"
             f"PE 分位为 {percentile:.1f}%（{zone}）。价格状态只用于提出需要区分的解释。"
@@ -726,6 +739,8 @@ def _validate_chains(chains: Any, fact_ids: set[Any]) -> list[str]:
             errors.append(f"分析链 {cid} 引用了不存在的 Fact")
         if not chain.get("relation") or not chain.get("mechanism"):
             errors.append(f"分析链 {cid} 必须含 relation 与 mechanism")
+        if not chain.get("question"):
+            errors.append(f"分析链 {cid} 必须含可证伪的研究问题（question）")
         alternatives = chain.get("alternatives")
         if not isinstance(alternatives, list) or len(alternatives) < 2 or any(not str(a).strip() for a in alternatives):
             errors.append(f"分析链 {cid} 至少须给出两条替代解释")
