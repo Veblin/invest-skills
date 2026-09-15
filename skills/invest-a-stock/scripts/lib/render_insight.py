@@ -40,6 +40,57 @@ def _beijing(timestamp: Any) -> str:
         return text[:16]
 
 
+# 审查意见 #7：`valuation.tushare.daily_basic` 这类 source ID 对系统有用、对读者无用。
+# 转为可读来源名；未收录的回退原始 ID（不隐藏，只是不美化）。
+_SOURCE_LABELS = {
+    "tushare.daily_basic": "Tushare·日线指标",
+    "tushare.daily": "Tushare·日线行情",
+    "tushare.fina_indicator": "Tushare·财务指标",
+    "tushare.fina_mainbz": "Tushare·主营构成",
+    "tushare.stock_basic": "Tushare·股票基础信息",
+    "tushare.top10_floatholders": "Tushare·十大流通股东",
+    "akshare.stock_individual_notice_report": "东财·个股公告",
+    "tencent_finance": "腾讯财经",
+    "test.fixture": "测试夹具",
+}
+# 按长度降序匹配，避免 "tushare.daily" 抢先命中 "tushare.daily_basic"
+_SOURCE_KEYS = sorted(_SOURCE_LABELS, key=len, reverse=True)
+
+
+def _source_human(source_id: str) -> str:
+    for key in _SOURCE_KEYS:
+        if key in source_id:
+            return _SOURCE_LABELS[key]
+    return source_id
+
+
+def _format_date(as_of: Any) -> str:
+    text = str(as_of or "")
+    if len(text) == 8 and text.isdigit():          # 20260630
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    return text[:10]
+
+
+def _format_value(fact: dict[str, Any]) -> str:
+    """按 unit 格式化数值——底稿里 276916580000.0 对读者没有意义。"""
+    value = fact.get("value")
+    unit = fact.get("unit")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if unit == "CNY/share":
+            return f"{value:,.2f} 元"
+        if unit == "CNY":
+            return f"{value / 1e8:,.2f} 亿元"
+        if unit == "percent":
+            return f"{value:.1f}%" if "分位" in str(fact.get("basis") or "") else f"{value:+.2f}%"
+        if unit == "ratio":
+            return f"{value:.3f}"
+        if unit == "x":
+            return f"{value:.2f}x"
+        if unit == "count":
+            return f"{int(value)} 条"
+    return str(value)
+
+
 def _source_label(model: dict[str, Any], fact_ids: list[str]) -> str:
     facts = {fact["id"]: fact for fact in model["facts"]}
     labels: list[str] = []
@@ -47,8 +98,8 @@ def _source_label(model: dict[str, Any], fact_ids: list[str]) -> str:
         fact = facts.get(fact_id)
         if not fact:
             continue
-        source = ", ".join(fact.get("source_ids") or ["unknown"])
-        labels.append(f"{fact_id} / {source} / {fact.get('as_of')}")
+        source = "、".join(_source_human(s) for s in (fact.get("source_ids") or ["unknown"]))
+        labels.append(f"{fact.get('basis') or fact_id}｜{source}｜{_format_date(fact.get('as_of'))}")
     return "；".join(labels) or "来源不可得"
 
 
@@ -176,7 +227,10 @@ def render_insight_markdown(model: dict[str, Any]) -> str:
     lines += ["", "## 证据底稿", "<details><summary>展开 Facts 与来源清单</summary>", ""]
     for fact in model["facts"]:
         formula = f"；公式: `{fact['formula']}`" if fact.get("formula") else ""
-        lines.append(f"- `{fact['id']}` = {fact['value']}（{fact['basis']}；截至 {fact['as_of']}；来源: {', '.join(fact['source_ids'])}{formula}）")
+        sources = "、".join(_source_human(s) for s in fact["source_ids"])
+        lines.append(
+            f"- **{fact['basis']}** = {_format_value(fact)}"
+            f"（`{fact['id']}`；截至 {_format_date(fact['as_of'])}；来源: {sources}{formula}）")
     lines += ["", "</details>", "", "> ⚠️ 免责声明：数据可能存在滞后、缺失或口径差异；请以公司公告和原始来源为准。本报告不构成投资建议。", ""]
     return "\n".join(lines)
 
@@ -190,7 +244,7 @@ def render_insight_html(model: dict[str, Any]) -> str:
         for finding in findings
     ) or '<article class="finding"><h3>暂无可交付结论</h3><p>当前证据不足，优先查看缺口与补证路径。</p></article>'
     fact_rows = "".join(
-        f'<tr data-group="{escape(fact["id"].split(".")[0])}"><td id="fact-{escape(fact["id"])}"><code>{escape(fact["id"])}</code></td><td>{escape(str(fact["value"]))}</td><td>{escape(fact["basis"])}</td><td>{escape(str(fact["as_of"]))}</td><td title="公式：{escape(str(fact.get("formula") or "原始字段"), quote=True)}">{escape(", ".join(fact["source_ids"]))}</td></tr>'
+        f'<tr data-group="{escape(fact["id"].split(".")[0])}"><td id="fact-{escape(fact["id"])}"><code>{escape(fact["id"])}</code></td><td>{escape(_format_value(fact))}</td><td>{escape(fact["basis"])}</td><td>{escape(_format_date(fact["as_of"]))}</td><td title="公式：{escape(str(fact.get("formula") or "原始字段"), quote=True)}">{escape("、".join(_source_human(s) for s in fact["source_ids"]))}</td></tr>'
         for fact in facts
     )
     evidence = "".join(

@@ -65,6 +65,16 @@ _CAUSAL_RE = re.compile(r"导致|引起|造成|致使|(?<!未)(?<!不)证实|证
 
 _CHAIN_NOTE = "本条为工程约定，无同行评审先例；不得作为核心论证。"
 
+# 事件类型 → 中文标签（引擎 events 维度）
+_EVENT_TYPE_LABELS = {
+    "buyback": "回购", "equity_incentive": "股权激励", "other": "其他公告",
+    "dividend": "分红", "warning": "业绩预警", "litigation": "诉讼",
+    "increase_holding": "增持", "decrease_holding": "减持", "merger": "并购",
+}
+
+# 当日异动阈值：|涨跌幅| ≥ 5% 视为异动，需做公告层排查
+_INTRADAY_MOVE_THRESHOLD_PCT = 5.0
+
 
 class InsightSchemaError(ValueError):
     """Raised when a generated or loaded insight model is not auditable."""
@@ -191,7 +201,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         sid = add_source("quote", quote)
         price = _number(data.get("price", data.get("close")))
         if price is not None:
-            facts.append(_fact("quote.price.latest", price, as_of=fetched_at, unit="CNY", basis="最新价", source_id=sid))
+            facts.append(_fact("quote.price.latest", price, as_of=fetched_at, unit="CNY/share", basis="最新价", source_id=sid))
         change = _number(data.get("change_pct"))
         if change is not None:
             facts.append(_fact("quote.change_pct.latest", change, as_of=fetched_at, unit="percent", basis="日涨跌幅", source_id=sid))
@@ -263,6 +273,41 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
             facts.append(_fact("technical.price_vs_ma20.latest", round((latest / ma20 - 1) * 100, 2),
                                as_of=_as_of(ordered[-1], fetched_at), unit="percent", basis="收盘价相对MA20",
                                source_id=sid, formula="(latest close/mean(last 20 closes)-1)*100"))
+
+    # 事件层（#5：此前完全没有事件事实，导致用户选择「事件催化」焦点时无对应 Finding）
+    events = collection.get("events")
+    if isinstance(events, list) and events:
+        summary = (collection.get("_meta") or {}).get("events_summary") or {}
+        sid = add_source("events", {"_meta": {"source": "akshare.stock_individual_notice_report"}})
+        window = summary.get("window_days")
+        count = summary.get("event_count")
+        if count is None:
+            count = len([e for e in events if isinstance(e, dict)])
+        latest_date = summary.get("latest_date") or _as_of(events[0] if isinstance(events[0], dict) else {}, fetched_at)
+        window = window if isinstance(window, int) and window > 0 else 30
+        facts.append(_fact("events.count", int(count), as_of=str(latest_date), unit="count",
+                           basis=f"近 {window} 日公告条数", source_id=sid))
+        types = summary.get("top_types") or []
+        if types:
+            named = "、".join(
+                f"{_EVENT_TYPE_LABELS.get(str(t.get('type')), str(t.get('type')))}×{t.get('count')}"
+                for t in types[:4] if isinstance(t, dict) and t.get("type")
+            )
+            if named:
+                facts.append(_fact("events.types", named, as_of=str(latest_date), unit="text",
+                                   basis="公告类型分布（近窗口）", source_id=sid))
+        # 公告层是否出现方向性条目——「当日大跌但公告全 neutral」是可核验的排除性证据。
+        # 只取 source == "notice" 的官方公告卡：Tavily/抓取类卡是网页快照，
+        # 其 direction 由规则从页面文本推断（实测把雪球行情页标成 bearish），
+        # 用作「公告层排查」会引入噪声。
+        news = collection.get("news")
+        cards = news.get("cards") if isinstance(news, dict) else news
+        directions = {str(c.get("direction")) for c in (cards or [])
+                      if isinstance(c, dict) and c.get("source") == "notice" and c.get("direction")}
+        if directions:
+            facts.append(_fact("news.notice_directions", "、".join(sorted(directions)), as_of=str(latest_date),
+                               unit="text", basis="公告层方向标注（引擎规则，仅官方公告卡）", source_id=sid,
+                               formula=None))
     return facts, sources, gaps
 
 
@@ -307,6 +352,36 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
         findings.append(_finding("technical-state", f"最新收盘价相对 MA20 为 {ma20['value']:+.2f}%，位于 MA20 {relation}；这是市场状态描述，不构成操作信号。",
                                  fact_ids=[ma20["id"]], strength="weak", relevance="secondary",
                                  verification={"event": "后续交易日", "test": "观察价格、成交量与基本面证据是否一致"}))
+    # 审查意见 #1：读者最常问的是「今天为什么跌」。此前首层全是指标状态，
+    # 没有一条回答异动归因。此处做**可核验的排除**：异动幅度 + 公告层方向，
+    # 给出「是否有公告级触发」的结论，并明确消息面/传闻需外部检索补充。
+    change_pct = _find(facts, "quote.change_pct.latest")
+    event_count = _find(facts, "events.count")
+    directions = _find(facts, "news.notice_directions")
+    if change_pct and abs(change_pct["value"]) >= _INTRADAY_MOVE_THRESHOLD_PCT:
+        move = "下跌" if change_pct["value"] < 0 else "上涨"
+        parts = [f"当日{move} {change_pct['value']:+.2f}%，达到异动阈值（±{_INTRADAY_MOVE_THRESHOLD_PCT:.0f}%）。"]
+        fact_ids = [change_pct["id"]]
+        if event_count:
+            fact_ids.append(event_count["id"])
+            parts.append(f"近窗口公告 {int(event_count['value'])} 条。")
+        if directions:
+            fact_ids.append(directions["id"])
+            only_neutral = set(str(directions["value"]).split("、")) == {"neutral"}
+            parts.append("公告层方向标注全部为中性，**未发现公告级触发**；"
+                         "跌幅的候选解释需从消息面与传闻层补充，"
+                         "该层数据不在本项目采集范围内，应作为外部检索项。"
+                         if only_neutral else
+                         "公告层存在非中性方向条目，需逐条核对。")
+        else:
+            parts.append("公告层方向标注不可得，无法排除公告级触发。")
+        findings.append(_finding(
+            "intraday-move-scan", "".join(parts),
+            fact_ids=fact_ids,
+            counter_fact_ids=[], unknown_ids=["gap.news_layer"],
+            strength="medium", status="mixed", relevance="primary",
+            verification={"event": "异动日次日起", "test": "回溯当日至次日的公告、交易所问询与权威媒体首发报道，确认是否存在未进入公告层的触发"}))
+
     if profile and "valuation" in (profile.get("focuses") or []):
         findings.sort(key=lambda item: (item["id"] != "valuation-position", item["profile_relevance"] != "primary"))
     elif profile and "capital_flow" in (profile.get("focuses") or []):
@@ -668,6 +743,30 @@ def _validate_chains(chains: Any, fact_ids: set[Any]) -> list[str]:
     return errors
 
 
+_TENSION_CHAIN_IDS = ("chain.valuation-vs-earnings", "chain.cash-conversion")
+
+
+def _derive_tension(chains: list[dict[str, Any]], fallback: dict[str, Any]) -> dict[str, Any]:
+    """核心矛盾 = 分析链中方向不一致的那一条。
+
+    审查意见 #2：原实现把核心矛盾做成独立硬编码规则（营收>0 且 OCF/净利<0.6），
+    命中不了就输出「尚不足以形成核心矛盾」——而报告里明明存在可陈述的分歧
+    （如估值分位偏低 vs 收入增长）。改为**从已有分析链派生**：链本身已经声明
+    了「方向不一致 / 机制未证实」，正是读者要的那个矛盾。
+
+    CH-3（价格状态×估值分位）恒为 mechanism_unconfirmed，属状态描述而非分歧，
+    故不参与派生。
+    """
+    for chain_id in _TENSION_CHAIN_IDS:
+        chain = next((c for c in chains
+                      if c.get("id") == chain_id
+                      and c.get("association_status") == "mechanism_unconfirmed"), None)
+        if chain:
+            return {"claim": chain["relation"], "fact_ids": list(chain.get("fact_ids") or []),
+                    "status": "mixed"}
+    return fallback
+
+
 def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[str, Any] | None = None,
                        *, key_diff: dict[str, Any] | None = None,
                        diff_reason: str = "no_history") -> dict[str, Any]:
@@ -678,14 +777,20 @@ def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[st
     """
     facts, sources, gaps = extract_facts(collection)
     findings, tension = build_findings(facts, gaps, profile)
-    completion = "complete" if len(findings) >= 2 else "insufficient"
+    analysis_chains = build_analysis_chains(facts)
+    tension = _derive_tension(analysis_chains, tension)
+    # 审查意见 #2：完成度不能只看结论条数。一份报告若连核心矛盾都形不成，
+    # 就不能自称「分析完成」——原实现 `len(findings) >= 2` 会让 4 条模板句
+    # 换得「分析完成」，而正文同时写着「尚不足以形成核心矛盾」，自相矛盾。
+    completion = ("complete" if len(findings) >= 2 and tension.get("status") != "insufficient"
+                  else "insufficient")
     model = {
         "report_contract_version": REPORT_CONTRACT_VERSION, "generator_version": GENERATOR_VERSION,
         "mode": "insight", "completion": completion, "symbol": symbol,
         "fetched_at": collection.get("fetched_at"), "profile": profile or {}, "facts": facts,
         "sources": list(sources.values()), "gaps": gaps, "findings": findings, "core_tension": tension,
         "discoveries": build_discoveries(key_diff, reason=diff_reason),
-        "analysis_chains": build_analysis_chains(facts),
+        "analysis_chains": analysis_chains,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     errors = validate_insight(model)

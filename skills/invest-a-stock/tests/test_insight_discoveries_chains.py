@@ -307,6 +307,125 @@ def test_discoveries_tolerate_value_becoming_unavailable() -> None:
     assert "18.35" in body and "-" in body
 
 
+# ── 审查意见 #1 / #5 / #7：异动排查、事件事实、可读来源 ──────────────────────
+
+
+def _with_events(collection: dict, *, notice_direction: str = "neutral") -> dict:
+    result = copy.deepcopy(collection)
+    result["events"] = [
+        {"date": "2026-09-15", "type": "buyback", "title": "回购公告"},
+        {"date": "2026-09-11", "type": "equity_incentive", "title": "股权激励"},
+    ]
+    result["_meta"] = {"events_summary": {
+        "event_count": 2, "window_days": 30, "latest_date": "2026-09-15",
+        "top_types": [{"type": "buyback", "count": 1}, {"type": "equity_incentive", "count": 1}],
+    }}
+    result["news"] = {"cards": [
+        {"source": "notice", "direction": notice_direction, "title": "回购公告"},
+        {"source": "tavily", "direction": "bearish", "title": "网页快照"},
+    ]}
+    return result
+
+
+def test_event_facts_are_extracted() -> None:
+    """#5：此前完全没有事件事实，用户选「事件催化」焦点时无对应 Finding。"""
+    model = _model(_with_events(collection_v2_minimal()))
+    ids = {f["id"]: f for f in model["facts"]}
+    assert ids["events.count"]["value"] == 2
+    assert "回购×1" in ids["events.types"]["value"]
+    assert ids["news.notice_directions"]["value"] == "neutral"
+
+
+def test_notice_directions_ignore_non_official_cards() -> None:
+    """#2 修复的配套：Tavily/抓取卡的 direction 是页面规则推断，不作公告层依据。"""
+    model = _model(_with_events(collection_v2_minimal()))
+    directions = next(f for f in model["facts"] if f["id"] == "news.notice_directions")
+    assert directions["value"] == "neutral"       # 不能混入 tavily 卡的 bearish
+    assert "bearish" not in directions["value"]
+
+
+def test_intraday_move_finding_answers_why_it_moved() -> None:
+    """#1：读者最常问「今天为什么跌」，首层必须有一条异动排查结论。"""
+    from lib.render_insight import render_insight_markdown
+
+    collection = _with_events(collection_v2_minimal())
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "quote":
+            dim["data"] = {**dim["data"], "change_pct": -6.16}
+    model = _model(collection)
+    finding = next((f for f in model["findings"] if f["id"] == "intraday-move-scan"), None)
+    assert finding is not None
+    assert "未发现公告级触发" in finding["claim"]
+    assert "外部检索项" in finding["claim"]        # 明确界定系统不知道的部分
+    assert finding["profile_relevance"] == "primary"
+    assert "当日下跌" in render_insight_markdown(model)
+
+
+def test_no_intraday_finding_below_threshold() -> None:
+    """异动未达阈值时不产出该结论——避免噪声进首层。"""
+    collection = _with_events(collection_v2_minimal())
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "quote":
+            dim["data"] = {**dim["data"], "change_pct": -1.2}
+    model = _model(collection)
+    assert not any(f["id"] == "intraday-move-scan" for f in model["findings"])
+
+
+def test_completion_requires_a_core_tension() -> None:
+    """#2：连核心矛盾都形不成，就不能自称「分析完成」。"""
+    from lib.insight_model import build_report_model
+
+    # 裁剪到只剩一个维度 → 既无 findings 也无链 → 必须 insufficient
+    collection = collection_v2_minimal()
+    collection["dimensions"] = collection["dimensions"][:1]
+    model = build_report_model(collection, "600176")
+    assert model["core_tension"]["status"] == "insufficient"
+    assert model["completion"] == "insufficient"
+
+
+def test_core_tension_is_derived_from_divergent_chain() -> None:
+    """#2：核心矛盾改为从分析链派生，不再依赖硬编码阈值。"""
+    from lib.insight_model import _derive_tension
+
+    chain = {"id": "chain.valuation-vs-earnings", "association_status": "mechanism_unconfirmed",
+             "relation": "分位偏低而收入增长，两者方向不一致。", "fact_ids": ["a", "b"]}
+    fallback = {"claim": "尚不足以形成核心矛盾", "fact_ids": [], "status": "insufficient"}
+    derived = _derive_tension([chain], fallback)
+    assert derived["status"] == "mixed"
+    assert derived["claim"] == chain["relation"]
+    assert derived["fact_ids"] == ["a", "b"]
+    # 状态描述链（CH-3）恒为 mechanism_unconfirmed，不得被当成核心矛盾
+    state_chain = {"id": "chain.price-state-vs-valuation",
+                   "association_status": "mechanism_unconfirmed",
+                   "relation": "价格在 MA20 下方。", "fact_ids": ["c", "d"]}
+    assert _derive_tension([state_chain], fallback) == fallback
+
+
+@pytest.mark.parametrize("unit,basis,value,expected", [
+    ("CNY/share", "最新价", 316.36, "316.36 元"),
+    ("CNY", "营业收入", 276916580000.0, "2,769.17 亿元"),
+    ("percent", "营业收入同比", 54.8, "+54.80%"),
+    ("percent", "正 PE 历史序列分位", 7.2, "7.2%"),
+    ("ratio", "经营现金流/归母净利润", 1.391, "1.391"),
+    ("x", "PE(TTM)", 17.2203, "17.22x"),
+    ("count", "近 30 日公告条数", 18, "18 条"),
+])
+def test_value_formatting_is_reader_facing(unit, basis, value, expected) -> None:
+    """#7：底稿里 276916580000.0 对读者没有意义；分位与同比不能用同一格式。"""
+    from lib.render_insight import _format_value
+
+    assert _format_value({"value": value, "unit": unit, "basis": basis}) == expected
+
+
+def test_source_ids_render_as_human_names() -> None:
+    """#7：source ID 对系统有用、对读者无用。"""
+    from lib.render_insight import _source_human
+
+    assert _source_human("valuation.tushare.daily_basic") == "Tushare·日线指标"
+    assert _source_human("financials.tushare.fina_mainbz") == "Tushare·主营构成"
+    assert _source_human("unknown.vendor") == "unknown.vendor"   # 未收录不隐藏
+
+
 def test_validate_accepts_models_without_new_blocks() -> None:
     """缺键视为合法——兼容旧/手写 model。"""
     from lib.insight_model import validate_insight
