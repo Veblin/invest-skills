@@ -3288,6 +3288,13 @@ def _section_4c_financial_quality(
 
 
 # --- _section_4d_valuation_expectation ---
+
+# D-③ 派生值（g_implied 族）的来源标签。措辞与 render_risk.py:685 的 5d 对照块一致，
+# 避免同一数值在模块 4 与模块 5 出现两套来源措辞。本函数此前零 [来源:] 标签，
+# 导致 `约 X%` 形态的行被 report_qc 的 F2 规则判为「派生表述缺来源」（warn）。
+_D3_SOURCE_LABEL = "[来源: lib.valuation.implied_growth / 模块 4 D-③]"
+
+
 def _section_4d_valuation_expectation(
     ctx: _FundamentalsContext,
     status_rows: list[tuple[str, str, bool, str]],
@@ -3466,7 +3473,10 @@ def _section_4d_valuation_expectation(
             lines.append(f"- 10Y 国债收益率：**{rf_label}**")
             lines.append(f"- ERP 假设：**6%**（保守基准）")
             lines.append(f"- 折现率 r：**{ig['r'] * 100:.2f}%**" if ig.get("r") else "- 折现率：不可得")
-            lines.append(f"- **市场隐含增长率 g_implied：约 {ig['g_implied'] * 100:.2f}%**")
+            lines.append(
+                f"- **市场隐含增长率 g_implied：约 {ig['g_implied'] * 100:.2f}%** "
+                f"{_D3_SOURCE_LABEL}"
+            )
             # V-2 r±1pp 带（code-review max F14）：r 为默认猜测值（FRED/akshare 不可得，
             # risk_free=0.025 兜底）时不渲染精确带——带围绕猜测中心、宽度恒 ±1pp 是固定
             # 偏移而非真实敏感性，猜测偏差 >1pp 时真实 g 在带外，渲染会造成"实测精度"假象
@@ -3474,15 +3484,17 @@ def _section_4d_valuation_expectation(
                 lines.append(
                     f"- g_implied 敏感性带（r±1pp）：{ig['g_band_down'] * 100:.2f}% ~ "
                     f"{ig['g_band_up'] * 100:.2f}%（对应 r={ig['r'] * 100:.2f}% ±1pp，"
-                    f"r 口径 = 10Y {rf_label} + ERP {ig['erp'] * 100:.0f}%）"
+                    f"r 口径 = 10Y {rf_label} + ERP {ig['erp'] * 100:.0f}%；与模块 4 D-③ 同源）"
                 )
             lines.append("")
             cagr_text = f"{ctx.cagr:+.2f}%" if ctx.cagr is not None else "不可得"
             cagr_years_label = f"{ctx.cagr_years_span:.1f}" if ctx.cagr_years_span is not None else "?"
             np_cagr_text = f"{ctx.np_cagr:+.2f}%" if ctx.np_cagr is not None else "不可得"
             np_cagr_years_label = f"{ctx.np_cagr_years_span:.1f}" if ctx.np_cagr_years_span is not None else "?"
-            lines.append(f"- 实际近 {cagr_years_label} 年营收 CAGR：{cagr_text}")
-            lines.append(f"- 实际近 {np_cagr_years_label} 年净利润 CAGR：{np_cagr_text}")
+            lines.append(f"- 实际近 {cagr_years_label} 年营收 CAGR：{cagr_text} [来源: financials]")
+            lines.append(
+                f"- 实际近 {np_cagr_years_label} 年净利润 CAGR：{np_cagr_text} [来源: financials]"
+            )
             lines.append("- 一致预期：无可靠数据，跳过")
             lines.append("")
             g_implied_pct = ig["g_implied"] * 100
@@ -3528,16 +3540,21 @@ def _section_4d_valuation_expectation(
         lines.append("数据不足：[PE 非正或不可得，无法计算隐含增长率]")
     lines.append("")
     g_implied = ig.get("g_implied")
+    # 前两个分支末尾各自内联来源标签：本行经 _law10_hint 渲染为独立 blockquote
+    # （「> - **常见分析误区：** …」），上方 3 行内没有任何 [来源:] 标签，F2 的
+    # 3 行窗口覆盖不到，必须在自身行内标注。第三分支无派生数字，不加标签。
     d3_pitfall = (
         f"本次 PE {ctx.current_pe:.2f}x → g_implied 约 {g_implied * 100:.2f}%，"
         f"营收 CAGR {ctx.cagr:+.2f}%"
         + (f"、净利润 CAGR {ctx.np_cagr:+.2f}%" if ctx.np_cagr is not None else "")
         + "；若把两者差距直接等同于「高估/低估」，"
         "可能忽略 ERP 假设（6%）与永续增长简化模型的局限。"
+        f" {_D3_SOURCE_LABEL}"
         if ctx.current_pe and g_implied is not None and ctx.cagr is not None else
         (
             f"本次 g_implied 约 {g_implied * 100:.2f}%，但缺少可比 CAGR，"
             "不宜单独用隐含增长率做方向性结论。"
+            f" {_D3_SOURCE_LABEL}"
             if ctx.current_pe and g_implied is not None else
             "本次 PE 或 g_implied 不可得，戈登反推不适用。"
         )

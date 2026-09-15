@@ -465,8 +465,12 @@ def test_dry_run_all_packages_within_200(tmp_path):
     # 2026-09-03 实测 102（B3-R 后 render 共享面（html_charts/render_html）
     # 随闭包并入 etf 包，文件数较 v0.2.7 时代断言 <70 时上升）——上限放宽
     # 至 120 且仍显著低于旧版全量复制 129。
+    # 2026-09-14 实测 121（P0-5 引入 lib/research_profile.py，被 _concise.py 与
+    # render_html.py 引用，随同一共享面并入 etf 闭包）——上限放宽至 125。
+    # 注意闭包扫描是 AST 全程遍历（build_skillhub_packages.py:279-286），
+    # 函数内 import 同样计入，改动态 import 只会让运行时 ImportError 而非省文件。
     etf_total = b.build_one("invest-a-etf", b.project_version(), tmp_path, dry_run=True)
-    assert etf_total < 120
+    assert etf_total < 125
 
 
 # ---- 主仓库源文件不得被回写 ----

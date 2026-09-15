@@ -325,6 +325,24 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--analysis", default=None,
                     help="analysis.json 路径（R-B1）；渲染期替换 [待 Claude report 阶段填充] 占位")
+    # P0-5 研究档案：记录 R12g-B 开场四问结果，落同代 profile 侧车并在 full 头部展示。
+    # 只改变阅读顺序与补证优先级，不做字段过滤（不隐藏反证/缺口/风险）。
+    pr.add_argument("--horizon", default=None,
+                    choices=["short_term", "medium_term", "long_term"],
+                    help="研究档案：持有周期（Q_周期）；落在 <report>.profile.json")
+    pr.add_argument("--focus", default=None, action="append",
+                    choices=["valuation", "event_catalyst", "capital_flow", "comprehensive"],
+                    help="研究档案：关注焦点（Q_焦点，可重复）")
+    pr.add_argument("--goal", default=None,
+                    help="研究档案：本次研究目标（自由文本，≤120 字）")
+    pr.add_argument("--style", default=None,
+                    help="研究档案：投资风格（Q_风格）；缺省读 user_style.json")
+    pr.add_argument("--already-knows-price", action="store_true",
+                    dest="already_knows_price", default=None,
+                    help="研究档案：已看过行情（Q_已看）")
+    pr.add_argument("--no-already-knows-price", action="store_false",
+                    dest="already_knows_price", default=None,
+                    help="研究档案：未看过行情")
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(pr, with_news_pack=True)
     pr.add_argument(
@@ -710,6 +728,26 @@ def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | No
 
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    # P0-5: ResearchProfile 校验（fail-loud，且在采集之前——参数拼错不该先跑一遍
+    # 联网采集才报错）。未传任何相关参数时 profile=None，行为与既有完全一致。
+    from lib.research_profile import (
+        ProfileSchemaError,
+        build_profile,
+        validate_profile,
+        write_profile_sidecar,
+    )
+    profile: dict | None = None
+    try:
+        profile = build_profile(args)
+        if profile is not None:
+            profile_errors = validate_profile(profile)
+            if profile_errors:
+                raise ProfileSchemaError("; ".join(profile_errors[:5]))
+    except ProfileSchemaError as exc:
+        print(f"❌ ResearchProfile 校验失败: {exc}", file=sys.stderr)
+        return 2
+    if profile is not None:
+        print(f"📐 研究档案已加载（{len(profile)} 字段）", file=sys.stderr)
     result = None
     resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
     if args.resume and _HAS_STORE:
@@ -809,8 +847,11 @@ def cmd_report(args: argparse.Namespace) -> int:
         # 注入——旧实现 render_report_v2（v0.1.2 旧模板）与 html 侧 v3 结构
         # 不同代，且 analysis 只进 html、md 静默缺失（同目录两代 md 产物）。
         md_v2 = render.render_report_v3(
-            result, args.symbol, analysis=analysis_payload)
-        output = render.render_html(result, args.symbol, analysis=analysis_payload)
+            result, args.symbol, mode=getattr(args, "mode", "full"),
+            analysis=analysis_payload, profile=profile)
+        output = render.render_html(
+            result, args.symbol, mode=getattr(args, "mode", "full"),
+            analysis=analysis_payload, profile=profile)
         from lib.shared_dates import shanghai_now
         now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -826,12 +867,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdfile = _report_filepath(outdir, subdir, ts)
         mdfile.write_text(md_v2, encoding="utf-8")
         sidecar = _write_analysis_sidecar(mdfile, analysis_payload)
+        profile_sidecar = write_profile_sidecar(mdfile, profile)
 
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
         print(f"📝 Markdown 报告: {mdfile.resolve()}", file=sys.stderr)
         if sidecar:
             print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
+        if profile_sidecar:
+            print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
         return 0
 
@@ -840,7 +884,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
     # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
     output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
-                           attach_extras=True, analysis=analysis_payload)
+                           attach_extras=True, analysis=analysis_payload, profile=profile)
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     if getattr(args, 'save_raw', False):
@@ -868,9 +912,12 @@ def cmd_report(args: argparse.Namespace) -> int:
         mdpath = _report_filepath(outdir, subdir, ts)
         mdpath.write_text(output, encoding="utf-8")
         sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
+        profile_sidecar = write_profile_sidecar(mdpath, profile)
         print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
         if sidecar:
             print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
+        if profile_sidecar:
+            print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
         if not getattr(args, "outdir", None):
             print(output)  # 默认路径下保留 stdout 契约（skill 流程读 stdout）
         return 0

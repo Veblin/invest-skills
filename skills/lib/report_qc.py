@@ -207,9 +207,13 @@ _AUTOMATED_ENGINE_NOTICE_RE = re.compile(r"本报告由自动化引擎生成")
 # 仅捕捉明确表示「尚待模型填写」的模板残留。不能把「待独立验证」「数据不可得」
 # 这类有意保留的不确定性误作未完成报告。
 _TEMPLATE_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # 包在方括号里的「待模型填写」残留。**不含**裸 `分析提示`：`> [分析提示]`
+    # 是 _law10_hint 的体例标签（_v3.py 的「每题末尾固定格式」），每份 full 报告
+    # 都带，命中它会让完成度门禁对任何报告恒 FAIL。真正的未填提示由下面第 2 条
+    # （`分析提示（Claude 填写）`）精确捕捉。
     re.compile(
         r"\[\s*(?:待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"
-        r"(?:填充|填写|补充|验证)?|分析提示|待(?:填|填写|填充)|TODO|TBD|FIXME)\s*\]",
+        r"(?:填充|填写|补充|验证)?|待(?:填|填写|填充)|TODO|TBD|FIXME)\s*\]",
         re.I,
     ),
     re.compile(r"分析提示\s*[（(]\s*(?:Claude|AI|LLM)[^）)]{0,24}[）)]", re.I),

@@ -309,6 +309,12 @@ class TestStockCompletionGate:
         assert completion.status == "pass", completion.details
 
     def test_explicit_template_markers_fail_even_with_sidecar(self, tmp_path: Path):
+        """真占位仍拦，LAW 10 体例标签不拦——两者在同一份报告里对照。
+
+        `> [分析提示]` 曾是误报来源（`_law10_hint` 的每题固定标签，每份 full
+        报告都带），命中它会让门禁对任何报告恒 FAIL。此处同时注入两种文本，
+        断言只有真占位被计入。
+        """
         report = _write(
             tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
             _AUTOMATED_STOCK_SNAPSHOT.replace(
@@ -319,7 +325,10 @@ class TestStockCompletionGate:
         completion = _completion_layer(qc_file(report, fail_on="error"))
         marker_lines = [d["line"] for d in completion.details
                         if d["id"] == "completion-template-placeholder"]
-        assert len(marker_lines) == 2
+        assert len(marker_lines) == 1, [d["message"] for d in completion.details]
+        flagged = report.read_text(encoding="utf-8").splitlines()[marker_lines[0] - 1]
+        assert "[待 Claude report 阶段填充]" in flagged
+        assert "分析提示" not in flagged
         assert completion.status == "fail"
 
     def test_empty_bear_and_left_basis_fail(self, tmp_path: Path):

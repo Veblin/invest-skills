@@ -619,10 +619,13 @@ def _concise_capital_flow(dims, collection):
 
 # --- render_report_v3 ---
 def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full",
-                     analysis: list[dict] | None = None) -> str:
+                     analysis: list[dict] | None = None,
+                     profile: dict[str, Any] | None = None) -> str:
     """v0.2.0 九模块数据底稿。mode="brief" 输出精简简报, mode="concise" 输出对话场景精简。
 
     analysis（R-B1）: analysis.json 段列表，渲染期替换 "[待 Claude report 阶段填充]" 占位。
+    profile（P0-5）: ResearchProfile 研究档案；仅 full 模式在产物状态块内展示，
+    不做字段过滤——偏好只改阅读顺序与补证优先级。
     """
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
@@ -709,7 +712,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _fast_veto = _check_fast_veto(dims, collection)
         parts: list[str] = [
             _header_v2(collection, symbol),
-            _full_mode_identity_status(symbol, analysis),
+            _full_mode_identity_status(symbol, analysis, profile),
         ]
         extras = _render_engine_extras(collection)
         if extras:
@@ -768,24 +771,45 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
     return "\n\n".join(p for p in parts if p)
 
 
-def _full_mode_identity_status(symbol: str, analysis: list[dict] | None) -> str:
-    """full 是可审计底稿；不得在缺少分析合成时伪装成研究成品。"""
-    if analysis:
-        return "\n".join([
+def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
+                               profile: dict[str, Any] | None = None) -> str:
+    """full 是可审计底稿；不得在缺少分析合成时伪装成研究成品。
+
+    profile（P0-5）：研究档案仅在提供时追加到同一「产物状态」块内，
+    不改变底稿身份判定，也不影响 brief/concise（该块本就不渲染）。
+    """
+    from lib.research_profile import format_profile_markdown_lines
+
+    if _has_valid_analysis_payload(analysis):
+        lines = [
             "## 产物状态",
             "",
             "> **产物定位：审计/证据数据底稿（分析合成已注入）。**",
             "> 本模式保留完整数据、来源与计算过程以供追溯；分析段已附在文末，"
             "但数据底稿本身不替代面向阅读的研究结论。",
-        ])
-    return "\n".join([
-        "## 产物状态",
-        "",
-        "> **产物定位：数据底稿（分析合成未完成）。**",
-        "> 本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。",
-        "> 完成方式：准备通过校验的 `analysis.json` 后重渲："
-        f"`uv run python skills/invest-a-stock/scripts/invest.py report {symbol} --mode full --analysis <analysis.json>`。",
-    ])
+        ]
+    else:
+        lines = [
+            "## 产物状态",
+            "",
+            "> **产物定位：数据底稿（分析合成未完成）。**",
+            "> 本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。",
+            "> 完成方式：准备通过校验的 `analysis.json` 后重渲："
+            f"`uv run python skills/invest-a-stock/scripts/invest.py report {symbol} --mode full --analysis <analysis.json>`。",
+        ]
+    return "\n".join(lines + format_profile_markdown_lines(profile))
+
+
+def _has_valid_analysis_payload(analysis: list[dict] | None) -> bool:
+    """只有非空且通过正式 schema 的分析段才可标示为「已注入」。"""
+    if not isinstance(analysis, list) or not analysis:
+        return False
+    try:
+        from lib.analysis_schema import validate_sections
+        return not validate_sections(analysis)
+    except Exception:
+        # 渲染状态 fail-closed：依赖异常或畸形 payload 不得伪装成合成已完成。
+        return False
 
 
 def _render_analysis_appendix(analysis: list[dict] | None) -> str:

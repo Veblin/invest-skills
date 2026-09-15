@@ -638,6 +638,19 @@ class TestFullModeIdentity:
         assert "审计/证据数据底稿（分析合成已注入）" in text
         assert "分析合成未完成" not in text
 
+    def test_full_with_empty_or_malformed_analysis_does_not_claim_injected(self):
+        from lib.render import render_report_v3
+
+        malformed = [{
+            "module": "research", "title": "研究发现",
+            "facts_md": "事实 [来源: engine]", "analysis_md": "```python\nx = 1\n```",
+            "evidence_tag": "B", "position": "research",
+        }]
+        for analysis in ([], [{"analysis_md": "只有分析字段"}], malformed):
+            text = render_report_v3(self._collection(), "600176", mode="full", analysis=analysis)
+            assert "数据底稿（分析合成未完成）" in text
+            assert "分析合成已注入" not in text
+
     def test_brief_and_concise_do_not_receive_full_data_pack_status(self):
         from lib.render import render_report_v3
 

@@ -1205,8 +1205,54 @@ const trendLabel={trend_label_json};
 
 
 # --- render_html ---
+def _has_valid_analysis_payload(analysis: list[dict] | None) -> bool:
+    """HTML 状态卡与 Markdown 共用正式 analysis 协议，不把畸形段当完成。"""
+    if not isinstance(analysis, list) or not analysis:
+        return False
+    try:
+        from lib.analysis_schema import validate_sections
+        return not validate_sections(analysis)
+    except Exception:
+        return False
+
+
+def _html_full_mode_identity_status(symbol: str, mode: str,
+                                    analysis: list[dict] | None,
+                                    profile: dict[str, Any] | None = None) -> str:
+    """仅 full HTML 说明其审计底稿身份，与 Markdown 的状态语义一致。
+
+    profile（P0-5）：研究档案，与 Markdown 侧共用 `research_profile` 的
+    同一份摘要文案，避免两处措辞漂移。
+    """
+    if mode != "full":
+        return ""
+    safe_symbol = _html_mod.escape(symbol)
+    if _has_valid_analysis_payload(analysis):
+        title = "审计/证据数据底稿（分析合成已注入）"
+        detail = "本模式保留完整数据、来源与计算过程以供追溯；分析段已注入，但数据底稿本身不替代面向阅读的研究结论。"
+    else:
+        title = "数据底稿（分析合成未完成）"
+        detail = (
+            "本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。"
+            "完成方式：准备通过校验的 analysis.json 后重渲："
+            f"uv run python skills/invest-a-stock/scripts/invest.py report {safe_symbol} --mode full --analysis &lt;analysis.json&gt;。"
+        )
+    from lib.research_profile import format_profile_html
+
+    return (
+        '<section style="margin:var(--space-5) 0;padding:var(--space-4);'
+        'border:1px solid var(--wn);border-radius:10px;background:var(--bg2)">'
+        '<div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:6px">产物状态</div>'
+        f'<strong style="color:var(--wn)">产物定位：{title}</strong>'
+        f'<p style="margin:8px 0 0;color:var(--tx-m);font-size:var(--text-sm)">{detail}</p>'
+        f'{format_profile_html(profile)}'
+        '</section>'
+    )
+
+
 def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = None,
-                analysis: list[dict] | None = None) -> str:
+                analysis: list[dict] | None = None, mode: str = "full",
+                profile: dict[str, Any] | None = None) -> str:
     """HTML 研究报告（新版模板）。
 
     直接构建结构化 HTML，匹配 host-docs/stock-report.html 模板样式和交互。
@@ -1217,6 +1263,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         symbol: 股票代码（如 "600519"）
         md_text: 已弃用，保留仅为 CLI 向后兼容；HTML 仅读取 collection
         analysis: analysis.json 段列表（R-B1），渲染为「分析」卡片段；无则跳过
+        mode: report 模式；仅 full 显示审计/证据数据底稿状态卡
     """
     del md_text  # stdout Markdown 由 invest.py 单独渲染
     dims = _index_dims(collection)
@@ -1448,6 +1495,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         for s in (analysis or []))
     events_sec = "" if has_events_analysis else _html_events()
     analysis_sec = _html_analysis(analysis)
+    identity_status = _html_full_mode_identity_status(symbol, mode, analysis, profile)
     refs_sec = _html_refs(ref_rows)
     risk_banner = _html_risk_banner()
     disclaimer = _html_disclaimer()
@@ -1480,6 +1528,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 </div>
 
 {risk_banner}
+{identity_status}
 {overview}
 {valuation}
 {financials}
@@ -1504,4 +1553,3 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 </html>"""
 
     return html
-

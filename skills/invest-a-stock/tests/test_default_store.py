@@ -231,6 +231,33 @@ class TestReportAutoStore:
         assert "数据底稿（分析合成未完成）" in text
         assert "--analysis <analysis.json>" in text
 
+    @pytest.mark.parametrize("mode", ["brief", "concise"])
+    def test_html_cli_preserves_requested_non_full_mode(
+            self, tmp_path: Path, monkeypatch, mode: str):
+        """HTML 分支的伴随 md 与 HTML 均须接收用户请求的 mode。"""
+        import invest
+
+        seen: dict[str, str] = {}
+        monkeypatch.setattr(invest, "_HAS_STORE", False)
+        monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
+        monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
+
+        def _md(*args, **kwargs):
+            seen["md"] = kwargs["mode"]
+            return "# companion markdown\n"
+
+        def _html(*args, **kwargs):
+            seen["html"] = kwargs["mode"]
+            return "<html><body>requested mode</body></html>"
+
+        monkeypatch.setattr(invest.render, "render_report_v3", _md)
+        monkeypatch.setattr(invest.render, "render_html", _html)
+        monkeypatch.setattr(invest.render, "render", lambda *a, **k: "compact")
+        assert invest.cmd_report(_report_args(
+            store=False, emit="html", mode=mode, outdir=str(tmp_path / "reports"),
+        )) == 0
+        assert seen == {"md": mode, "html": mode}
+
     @pytest.mark.parametrize("emit", ["md", "html"])
     def test_report_analysis_is_persisted_with_md_and_passes_shared_completion_qc(
             self, tmp_path: Path, monkeypatch, emit: str):

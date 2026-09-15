@@ -256,6 +256,39 @@ class TestAnalysisSection:
         assert "待 Claude" in html  # 占位保留（F0-3 兜底：未填占位 qc FAIL）
 
 
+class TestFullModeIdentityStatus:
+    @staticmethod
+    def _analysis():
+        return [{
+            "module": "research", "title": "研究发现",
+            "facts_md": "事实 [来源: engine]", "analysis_md": "推演 [证据: B]",
+            "evidence_tag": "B", "position": "research",
+        }]
+
+    def test_real_full_html_without_analysis_shows_unfinished_data_pack_status(self):
+        from lib.render_html import render_html
+
+        html = render_html(collection_v2_minimal(), "600176", mode="full")
+        assert "数据底稿（分析合成未完成）" in html
+        assert "--analysis &lt;analysis.json&gt;" in html
+
+    def test_real_full_html_with_valid_analysis_shows_injected_data_pack_status(self):
+        from lib.render_html import render_html
+
+        html = render_html(collection_v2_minimal(), "600176", mode="full",
+                           analysis=self._analysis())
+        assert "审计/证据数据底稿（分析合成已注入）" in html
+        assert "分析合成未完成" not in html
+
+    def test_brief_and_concise_html_do_not_show_full_data_pack_status(self):
+        from lib.render_html import render_html
+
+        for mode in ("brief", "concise"):
+            html = render_html(collection_v2_minimal(), "600176", mode=mode)
+            assert "数据底稿（分析合成未完成）" not in html
+            assert "审计/证据数据底稿（分析合成已注入）" not in html
+
+
 # ── B3-R ②/④: margin 链路 + 财务图恢复 ──
 
 def _collection_with_market_structure():
