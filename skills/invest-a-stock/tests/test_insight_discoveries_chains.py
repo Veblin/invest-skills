@@ -122,27 +122,68 @@ def test_discoveries_degrade_to_identical_fixed_state(isolated_store, monkeypatc
     body = _section(render_insight_markdown(_model(current, key_diff=key_diff,
                                                    diff_reason=reason)),
                     "本次新增发现")
-    assert "本次无新增研究发现" in body
-    assert "→" not in body          # 不得残留对比箭头
-    assert "不可得" not in body      # 不得暴露「不可得」
-    assert reason not in body        # reason 只进侧车，渲染器禁读
+    assert "无可对比的历史快照" in body   # 不假装「无变化」
+    assert "→" not in body               # 不得残留对比箭头
+    assert "不可得" not in body           # 不得暴露「不可得」
+    assert reason not in body             # reason 只进侧车，渲染器禁读
 
     # 与另一条降级路径逐字一致
     other = _section(render_insight_markdown(_model(current)), "本次新增发现")
     assert body.strip() == other.strip()
 
 
-def test_no_material_change_is_also_the_fixed_state() -> None:
-    """有 diff 但无显著变化 → 同一固定串（0914 判定规则 #6）。"""
+def test_no_material_change_shows_verifiable_baseline() -> None:
+    """有基线但无变化 → 必须给出对比窗口与无变化项数，读者可核验。
+
+    （审查意见 #6：只写「无新增发现」而无基线，是无法核验的系统文本。）
+    """
+    from lib.render_insight import render_insight_markdown
+
     empty_diff = {"old_at": "2026-06-04T12:00:00+00:00",
                   "new_at": "2026-06-11T12:00:00+00:00",
-                  "categories": {}, "unchanged": ["valuation.pe_ttm"], "events": None}
+                  "categories": {},
+                  "unchanged": ["valuation.pe_ttm", "financials.roe"], "events": None}
     model = _model(key_diff=empty_diff, diff_reason="ok")
     assert model["discoveries"]["status"] == "none"
     assert model["discoveries"]["reason"] == "no_material_change"
-    assert "本次无新增研究发现" in _section(
-        __import__("lib.render_insight", fromlist=["x"]).render_insight_markdown(model),
-        "本次新增发现")
+    body = _section(render_insight_markdown(model), "本次新增发现")
+    assert "2 项关键字段无显著变化" in body
+    assert "2026-06-04" in body and "北京时间" in body   # 基线窗口可见
+
+
+def test_chain_engineering_note_is_not_rendered() -> None:
+    """chain["note"] 属程序规则说明，只留侧车，不进读者报告（审查意见 #3）。"""
+    from lib.render_insight import render_insight_html, render_insight_markdown
+
+    model = _model(_with_prior_year(collection_v2_minimal()))
+    assert model["analysis_chains"], "前置条件：本 fixture 应产出分析链"
+    assert all(c["note"] for c in model["analysis_chains"])   # 侧车里保留
+    markdown = render_insight_markdown(model)
+    assert "无同行评审先例" not in markdown
+    assert "工程约定" not in markdown
+    assert "无同行评审先例" not in render_insight_html(model)
+
+
+@pytest.mark.parametrize("ratio,needle,anti", [
+    (1.391, "维持", "回升"),
+    (0.45, "回升", "维持"),
+])
+def test_cash_conversion_verification_matches_branch(ratio, needle, anti) -> None:
+    """验证动作必须与分支一致（审查意见 #4）。
+
+    原实现硬编码「确认比值是否回到 0.6 以上」——当比值本就高于 0.6 时该表述不成立。
+    """
+    from lib.insight_model import build_analysis_chains
+
+    facts = [
+        {"id": "financials.ocf_to_np.latest", "value": ratio, "as_of": "20260630",
+         "unit": "ratio", "basis": "x", "source_ids": ["s"], "formula": None},
+        {"id": "financials.revenue.change", "value": 54.8, "as_of": "20260630",
+         "unit": "percent", "basis": "x", "source_ids": ["s"], "formula": None},
+    ]
+    chain = next(c for c in build_analysis_chains(facts) if c["id"] == "chain.cash-conversion")
+    test = chain["verification"]["test"]
+    assert needle in test and anti not in test
 
 
 # ── A5：分析链 ──────────────────────────────────────────────────────────────

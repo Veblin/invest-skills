@@ -489,7 +489,9 @@ def _chain_cash_conversion(fx: dict[str, dict[str, Any]]) -> dict[str, Any] | No
         "association_status": "mechanism_unconfirmed" if weak else "consistent",
         "verification": {
             "event": "下一次定期报告",
-            "test": "核对经营现金流、应收账款与存货的同口径变化，确认比值是否回到 0.6 以上",
+            "test": ("核对经营现金流、应收账款与存货的同口径变化，确认比值是否回升至 0.6 以上"
+                     if weak else
+                     "核对经营现金流与利润的同口径增速差，确认比值是否维持在 0.6 以上"),
         },
         "note": _CHAIN_NOTE,
     }

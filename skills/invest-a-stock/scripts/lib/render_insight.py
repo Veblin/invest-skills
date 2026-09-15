@@ -8,7 +8,10 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
-_NO_DISCOVERY_LINE = "- 本次无新增研究发现。"
+# 「无新增发现」有两种情形，对读者含义不同，必须分开表述：
+#   · 有基线且无变化 → 给出对比窗口与无变化项数，**可核验**
+#   · 无基线（首次运行 / store 不可用）→ 说明「无可对比快照」，不假装「无变化」
+_NO_BASELINE_LINE = "- 本次无可对比的历史快照，未生成新增发现。"
 _NO_CHAIN_LINE = (
     "- 当前 Facts 不足以构成可验证的分析链（需两个以上事实并列出替代解释）；"
     "不预置机制叙述。"
@@ -57,9 +60,13 @@ def _discovery_lines(model: dict[str, Any]) -> list[str]:
     """「本次新增发现」的 markdown 行（不含章节标题）。"""
     block = model.get("discoveries") or {}
     if block.get("status") != "changed":
-        # 三条「无」路径（store 不可用 / 无历史 / 无显著变化）渲染同一固定串，
-        # 不暴露 reason，也不出现「不可得」——0914 判定规则 #6。
-        return [_NO_DISCOVERY_LINE]
+        if block.get("reason") == "no_material_change":
+            old_label = block.get("old_at_label")
+            unchanged = block.get("unchanged_count")
+            if old_label and isinstance(unchanged, int):
+                return [f"- 相对 {old_label} 快照，{unchanged} 项关键字段无显著变化。"]
+        # 无基线（无历史 / store 不可用）——不暴露内部 reason，也不声称「无变化」
+        return [_NO_BASELINE_LINE]
     lines: list[str] = []
     old_label, new_label = block.get("old_at_label"), block.get("new_at_label")
     if old_label and new_label:
@@ -115,8 +122,9 @@ def _chain_lines(model: dict[str, Any]) -> list[str]:
         verification = chain.get("verification") or {}
         if verification:
             lines.append(f"  - 验证动作：**{verification.get('event')}** — {verification.get('test')}")
-        if chain.get("note"):
-            lines.append(f"  - {chain['note']}")
+        # chain["note"]（"本条为工程约定，无同行评审先例；不得作为核心论证。"）刻意
+        # **不渲染**：它是给审计与维护者看的，属程序规则说明，对读者无信息量。
+        # 该约束保留在 model 侧车与 insight_model 模块 docstring 中。
     return lines
 
 
