@@ -1263,11 +1263,22 @@ class TestIndustryPeCninfoRenamed:
         monkeypatch.setattr(src.env, "is_akshare_available", lambda: True)
         monkeypatch.setattr(src, "akshare_push2_available", lambda: True)
 
+    @staticmethod
+    def _days_ago(n: int) -> str:
+        """相对今天的日期串（YYYYMMDD）。
+
+        窗口是 `_CNINFO_PE_LOOKBACK_DAYS=7` 天的滚动窗口（today-0 … today-6），
+        写死日期会在日历推进后落到窗外、用例随「今天」变成假失败——与本模块
+        逻辑无关的时效性炸弹。凡"最近 N 天内有数据"的夹具一律用本函数生成。
+        """
+        import datetime as _dt
+        return (_dt.date.today() - _dt.timedelta(days=n)).strftime("%Y%m%d")
+
     def test_uses_renamed_interface_and_new_columns(self, monkeypatch):
         from lib.collector import _sources as src
 
         calls: list[str] = []
-        ak = self._new_ak({"20260910": [
+        ak = self._new_ak({self._days_ago(2): [
             {"行业名称": "银行", "公司数量": 42, "静态市盈率-中位数": 5.0,
              "静态市盈率-算术平均": 5.5}]}, calls)
         self._patch(monkeypatch, src, ak)
@@ -1282,14 +1293,14 @@ class TestIndustryPeCninfoRenamed:
         from lib.collector import _sources as src
 
         calls: list[str] = []
-        ak = self._new_ak({"20260909": [
+        ak = self._new_ak({self._days_ago(3): [
             {"行业名称": "银行", "公司数量": 42, "静态市盈率-中位数": 5.0}]}, calls)
         self._patch(monkeypatch, src, ak)
 
         r = src._q_akshare_industry_pe("600176", industry_name="银行")
         assert r.get("status") == "available", f"未回溯取数: {r}"
         assert r["industry_pe_median"] == 5.0
-        assert len(calls) >= 2, "须尝试多个日期而非一次就放弃"
+        assert len(calls) >= 4, "数据落在 3 天前：须逐日回溯而非一次就放弃"
 
     def test_all_dates_empty_is_explicit_unavailable(self, monkeypatch):
         from lib.collector import _sources as src
@@ -1306,7 +1317,7 @@ class TestIndustryPeCninfoRenamed:
         from lib.collector import _sources as src
 
         calls: list[str] = []
-        ak = self._new_ak({"20260910": [
+        ak = self._new_ak({self._days_ago(2): [
             {"行业名称": "银行", "公司数量": 42, "市盈率中位数": 7.0,
              "市盈率平均值": 7.5}]}, calls)
         self._patch(monkeypatch, src, ak)
@@ -1324,7 +1335,7 @@ class TestIndustryPeCninfoRenamed:
         from lib.collector import _sources as src
 
         calls: list[str] = []
-        ak = self._new_ak({"20260910": [
+        ak = self._new_ak({self._days_ago(2): [
             {"行业名称": "银行", "静态市盈率-中位数": 5.0}]}, calls)
         self._patch(monkeypatch, src, ak)
         monkeypatch.setattr(src, "akshare_push2_available", lambda: False)

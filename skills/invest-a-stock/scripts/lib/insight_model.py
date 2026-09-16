@@ -13,11 +13,21 @@ the repository — the point is wiring, not new capability:
     本模块不重算任何变化量。读取由调用方（CLI）注入，见 ``load_snapshot_diff``。
 ``analysis_chains``
     事实之间的同向/不同向关系、可能机制与替代解释（上限 2 条）。
+``synthesis``
+    外部分析合成层（``analysis.json``，由 Claude 撰写）。**非确定性输入**，与
+    ``discoveries`` 同属「调用方注入」：本模块不读文件、不重算、不推断，只做
+    结构包装与校验。它不参与 findings / core_tension / analysis_chains /
+    discoveries / completion 的任何推导。
 
 ⚠️ ``analysis_chains`` 是本项目的**内部工程约定**，**无同行评审先例**（2026-09-15
 文献检索核实：text-as-data 方法族只做语气测度，不做叙事到链条的结构化）。因此
 它的规则集与环节语义不得声称有文献背书；所有关系陈述只为「一致性证据」或
 「机制未证实」，**不写因果**。
+
+⚠️ ``synthesis`` 的**已知局限**（渲染层须逐字告知读者）：``analysis.json`` 协议
+没有 fact_id 字段，因此合成层的可审计性止于「来源 + 同代侧车绑定 + 段级证据
+等级」，**不达逐条 claim 溯源**。它渲染为独立分区，绝不与 Finding 同卡片、不
+冒充引擎结论。
 """
 from __future__ import annotations
 
@@ -35,6 +45,13 @@ GENERATOR_VERSION = "0.3.1"
 
 MAX_DISCOVERIES = 3
 MAX_ANALYSIS_CHAINS = 2
+
+# 分析合成块的两种状态。与 completion 是**两条独立状态轴**，不得互相推导：
+#   completion（complete/insufficient） = 引擎自身证据是否足以形成可交付结论
+#   synthesis.status（injected/absent） = 外部合成层（analysis.json）是否在位
+# 让 analysis 参与 completion 会让 AI 散文把「证据不足」抬成「分析完成」——
+# 既违反诚实性，也会让未传 --analysis 时的既有输出发生变化。
+SYNTHESIS_STATUSES = ("injected", "absent")
 
 # 变化条目展示顺序：事件优先（时间性最强），其后按估值/财务/资金/技术/风险。
 _DISCOVERY_ORDER: tuple[str, ...] = (
@@ -670,6 +687,43 @@ def validate_insight(model: dict[str, Any]) -> list[str]:
             errors.append(f"Finding {finding.get('id')} 的关联边界非法")
     errors.extend(_validate_discoveries(model.get("discoveries")))
     errors.extend(_validate_chains(model.get("analysis_chains"), ids))
+    errors.extend(_validate_synthesis(model.get("synthesis")))
+    return errors
+
+
+def _validate_synthesis(block: Any) -> list[str]:
+    """校验分析合成块（缺键视为合法，兼容旧/手写 model）。
+
+    ``synthesis`` 与 findings/chains 的关键区别：其中的段**不引用 fact_id**
+    （analysis.json 协议无该字段），因此这里只校验结构与一致性，不校验溯源——
+    该局限写在 _synthesis_block 的 docstring 与模块 docstring 里。
+    """
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return ["synthesis 必须是对象"]
+    errors: list[str] = []
+    status = block.get("status")
+    if status not in SYNTHESIS_STATUSES:
+        return [f"synthesis.status 非法：{status!r}"]
+    sections = block.get("sections")
+    if not isinstance(sections, list):
+        return ["synthesis.sections 必须是列表"]
+    count = block.get("section_count")
+    if status == "absent":
+        if sections:
+            errors.append("synthesis.status 为 absent 时 sections 必须为空")
+        if count not in (0, None):
+            errors.append("synthesis.status 为 absent 时 section_count 必须为 0")
+        return errors
+    if not sections:
+        errors.append("synthesis.status 为 injected 时 sections 不得为空")
+    if count != len(sections):
+        errors.append("synthesis.section_count 与 sections 长度不一致")
+    for sec in sections:
+        if not isinstance(sec, dict) or not sec.get("title") or not sec.get("analysis_md"):
+            errors.append("synthesis 每段必须含非空 title 与 analysis_md")
+            break
     return errors
 
 
@@ -782,13 +836,44 @@ def _derive_tension(chains: list[dict[str, Any]], fallback: dict[str, Any]) -> d
     return fallback
 
 
+def _synthesis_block(analysis: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """把 CLI 已校验的 analysis.json 段包成「分析合成」块。
+
+    ``analysis`` 由调用方（CLI）加载、已过 ``lib.analysis_schema.validate_sections``；
+    本模块**不读文件、不重算、不推断**，只做结构包装——与 ``discoveries`` 同属
+    「调用方注入的非确定性输入」。
+
+    非空但未过 schema 的段属调用方违约：此处 **fail-loud raise**，不静默降级成
+    absent（否则一份自称「已注入」的产物可能带着畸形分析段出门）。
+    """
+    if not analysis:
+        return {"status": "absent", "source": None, "section_count": 0, "sections": []}
+    from lib.analysis_schema import validate_sections
+
+    errors = validate_sections(analysis)
+    if errors:
+        raise InsightSchemaError("分析合成段未通过 schema：" + "; ".join(errors))
+    sections = [dict(sec) for sec in analysis if isinstance(sec, dict)]
+    return {
+        "status": "injected",
+        "source": "cli:--analysis",
+        "section_count": len(sections),
+        "sections": sections,
+    }
+
+
 def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[str, Any] | None = None,
                        *, key_diff: dict[str, Any] | None = None,
-                       diff_reason: str = "no_history") -> dict[str, Any]:
+                       diff_reason: str = "no_history",
+                       analysis: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """组装 insight 报告模型。
 
-    ``key_diff`` / ``diff_reason`` 由调用方（CLI）注入——本函数**不做任何 I/O**，
-    见 ``load_snapshot_diff`` 的说明。
+    ``key_diff`` / ``diff_reason`` / ``analysis`` 由调用方（CLI）注入——本函数
+    **不做任何 I/O**，见 ``load_snapshot_diff`` 的说明。
+
+    ``analysis``：Claude 撰写的分析合成段。它是**并列分区**，不参与 findings /
+    core_tension / analysis_chains / discoveries / completion 的任何推导——
+    引擎的确定性结论不因注入了散文而改变。
     """
     facts, sources, gaps = extract_facts(collection)
     findings, tension = build_findings(facts, gaps, profile)
@@ -806,6 +891,7 @@ def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[st
         "sources": list(sources.values()), "gaps": gaps, "findings": findings, "core_tension": tension,
         "discoveries": build_discoveries(key_diff, reason=diff_reason),
         "analysis_chains": analysis_chains,
+        "synthesis": _synthesis_block(analysis),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     errors = validate_insight(model)
@@ -828,17 +914,28 @@ def _atomic_json(path: Path, payload: Any) -> None:
         raise
 
 
-def write_sidecars(report_path: Path, model: dict[str, Any], *, html_path: Path | None = None) -> dict[str, Path]:
-    """Write Facts and Findings first; publish the manifest last."""
+def write_sidecars(report_path: Path, model: dict[str, Any], *, html_path: Path | None = None,
+                   analysis_path: Path | None = None) -> dict[str, Path]:
+    """Write Facts and Findings first; publish the manifest last.
+
+    ``analysis_path``：同代分析侧车的落盘路径（由 CLI 先于 Markdown 写入）。
+    此处只在 manifest 里登记文件名——QC 据它把「已注入」的产物绑定到实际
+    存在的同代侧车，检出「声称注入但侧车缺失」。
+    """
     facts_path = report_path.with_suffix(".facts.json")
     insight_path = report_path.with_suffix(".insight.json")
     manifest_path = report_path.with_suffix(".report.json")
     _atomic_json(facts_path, {"report_contract_version": REPORT_CONTRACT_VERSION, "facts": model["facts"], "sources": model["sources"]})
-    _atomic_json(insight_path, {key: model[key] for key in ("report_contract_version", "mode", "completion", "symbol", "fetched_at", "profile", "findings", "gaps", "core_tension", "discoveries", "analysis_chains")})
+    insight_payload = {key: model[key] for key in ("report_contract_version", "mode", "completion", "symbol", "fetched_at", "profile", "findings", "gaps", "core_tension", "discoveries", "analysis_chains")}
+    # .get 而非 model[...]：手写/旧 model 可能无 synthesis 键，缺键须合法（见 _validate_synthesis）
+    insight_payload["synthesis"] = model.get("synthesis")
+    _atomic_json(insight_path, insight_payload)
     _atomic_json(manifest_path, {
         "report_contract_version": REPORT_CONTRACT_VERSION, "generator_version": model["generator_version"],
         "mode": "insight", "completion": model["completion"], "facts_manifest": facts_path.name,
         "insight": insight_path.name, "report": report_path.name,
         "html": html_path.name if html_path else None,
+        "analysis_sidecar": analysis_path.name if analysis_path else None,
     })
-    return {"facts": facts_path, "insight": insight_path, "manifest": manifest_path}
+    return {"facts": facts_path, "insight": insight_path, "manifest": manifest_path,
+            "analysis": analysis_path}

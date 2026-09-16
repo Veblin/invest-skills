@@ -72,13 +72,18 @@ def collect_sidecars(report_dir: Path | str) -> list[dict]:
     for ts in sorted(stems):
         p = d / f"{ts}{_SIDECAR_SUFFIX}"
         if not p.is_file():
-            out.append({"ts": ts, "payload": None,
+            # kind 区分「文件不在」（missing）与「文件在但内容不合规」（invalid）：
+            # 两者的读者动作完全不同（补落盘 vs 修内容），混为一态时渲染层只能
+            # 把校验失败误报成「早于 sidecar 协议或未落盘」。
+            out.append({"ts": ts, "payload": None, "kind": "missing",
                         "error": "无复盘原料（该报告早于 sidecar 协议，或未落盘）"})
             continue
         try:
-            out.append({"ts": ts, "payload": load_decision_json(p), "error": None})
+            out.append({"ts": ts, "payload": load_decision_json(p),
+                        "error": None, "kind": "ok"})
         except DecisionSchemaError as exc:
-            out.append({"ts": ts, "payload": None, "error": str(exc)})
+            out.append({"ts": ts, "payload": None, "kind": "invalid",
+                        "error": str(exc)})
     return out
 
 
@@ -112,16 +117,26 @@ def render_review(symbol: str, *, sidecars: list[dict], today: _dt.date) -> str:
                   "|------|------|----------|----------|"]
         for s in sidecars:
             if s["payload"] is None:
-                lines.append(f"| {s['ts']} | ❌ 无复盘原料 | — | — |")
+                # 渲染 error 原文：校验失败时它就是「该修什么」，写死「无复盘原料」
+                # 会让文件已落盘但内容不合规的侧车读起来像压根没写。
+                reason = str(s.get("error") or "无复盘原料")
+                lines.append(f"| {s['ts']} | ❌ {reason} | — | — |")
             else:
                 p = s["payload"]
                 lines.append(f"| {s['ts']} | ✅ | {len(p.get('scenarios') or [])} 条 "
                              f"| {len(p.get('falsifiers') or [])} 条 |")
-        missing = [s["ts"] for s in sidecars if s["payload"] is None]
-        if missing:
+        unusable = [s for s in sidecars if s["payload"] is None]
+        missing = [s["ts"] for s in unusable if s.get("kind") != "invalid"]
+        invalid = [s["ts"] for s in unusable if s.get("kind") == "invalid"]
+        if missing or invalid:
             lines.append("")
+        if missing:
             lines.append(f"> ⚠ {len(missing)} 份报告**无复盘原料**（早于 sidecar 协议或未落盘）："
                          + "、".join(missing[:5]) + ("…" if len(missing) > 5 else ""))
+        if invalid:
+            lines.append(f"> ⚠ {len(invalid)} 份报告的复盘原料**校验失败**"
+                         "（文件已落盘但内容不合规，原因见 ① 表）："
+                         + "、".join(invalid[:5]) + ("…" if len(invalid) > 5 else ""))
 
     # ② 证伪条件状态（到期清单——可机器核验）
     all_rows: list[tuple[str, dict]] = []
@@ -131,7 +146,14 @@ def render_review(symbol: str, *, sidecars: list[dict], today: _dt.date) -> str:
     all_rows.sort(key=lambda t: t[1]["due"])
     lines += ["", "## ② 证伪条件状态（按到期日排序）", ""]
     if not all_rows:
-        lines.append("— 无证伪条件可对照（无复盘原料，或 sidecar 未写证伪条件）")
+        # 三态：无原料 / 有原料但不可用（校验失败）/ 原料可用但未写证伪条件。
+        # 「不可用」与「未写」的读者动作不同，合并成一句等于把原因藏起来。
+        if not sidecars:
+            lines.append("— 无证伪条件可对照（该标的无复盘原料）")
+        elif any(s["payload"] is None for s in sidecars):
+            lines.append("— 无证伪条件可对照（复盘原料不可用，原因见 ①）")
+        else:
+            lines.append("— 无证伪条件可对照（sidecar 未写证伪条件）")
     else:
         lines += ["| 到期日 | 状态* | 距今 | 条件 | 来源报告 ts |",
                   "|--------|-------|------|------|--------------|"]

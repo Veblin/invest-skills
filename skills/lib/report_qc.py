@@ -238,7 +238,11 @@ _MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 _EMPTY_BASIS_RE = re.compile(
     r"(?:当前数据)?\s*(?:未形成(?:明确)?|尚未形成|暂无|无|没有)\s*"
     r"(?:明确)?\s*(?:多头|空头|bull|bear|左侧|右侧)?\s*"
-    r"(?:逻辑链|支撑依据|依据|证据|基础)|(?:左|右)侧参考指标数据不足",
+    r"(?:逻辑链|支撑依据|依据|证据|基础)|"
+    # 渲染器的「左/右侧参考指标数据不足」哨兵：尾缀「或未达到阈值」曾使
+    # remaining 判定为非空 → 无实质依据的节逃过 error 级 completion-empty-basis
+    # （左右两侧只差这 6 个字，同份输入左侧放行、右侧报错）。
+    r"(?:左|右)侧参考指标数据不足(?:或未达到阈值)?",
     re.I,
 )
 
@@ -456,6 +460,30 @@ def _check_insight_contract(report_path: Path, text: str) -> LayerResult:
         layer.findings_count += 1
         layer.details.append({"id": "insight-status-invalid", "severity": "error",
                               "message": "Insight sidecar 的 mode 或 completion 非法"})
+    # 分析合成层：产物自称「已注入」时，同代侧车必须存在且过正式 schema——
+    # 否则「已注入」只是一个无从追溯的字符串（缺键 = 旧产物，跳过）。
+    synthesis = insight.get("synthesis") if isinstance(insight, dict) else None
+    if isinstance(synthesis, dict) and synthesis.get("status") not in (None, "injected", "absent"):
+        layer.findings_count += 1
+        layer.details.append({"id": "insight-synthesis-status-invalid", "severity": "error",
+                              "message": f"Insight synthesis.status 非法：{synthesis.get('status')!r}"})
+    elif isinstance(synthesis, dict) and synthesis.get("status") == "injected":
+        sidecar = _same_generation_analysis_path(report_path)
+        if not sidecar.is_file():
+            layer.findings_count += 1
+            layer.details.append({"id": "insight-analysis-sidecar-missing", "severity": "error",
+                                  "message": f"声明「分析合成已注入」但同代侧车不存在：{sidecar.name}"})
+        else:
+            reason = _sidecar_validation_error(sidecar)
+            if reason:
+                layer.findings_count += 1
+                layer.details.append({"id": "insight-analysis-sidecar-invalid", "severity": "error",
+                                      "message": f"同代分析侧车不合格：{reason}"})
+    registered = manifest.get("analysis_sidecar") if isinstance(manifest, dict) else None
+    if registered and not (report_path.parent / str(registered)).is_file():
+        layer.findings_count += 1
+        layer.details.append({"id": "insight-manifest-analysis-mismatch", "severity": "error",
+                              "message": f"Manifest 登记的 analysis_sidecar {registered} 不存在"})
     if manifest and (manifest.get("mode") != "insight" or manifest.get("report") != report_path.name):
         layer.findings_count += 1
         layer.details.append({"id": "insight-manifest-mismatch", "severity": "error",
@@ -1054,8 +1082,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("target", nargs="*", help="报告文件路径（可多个）")
     parser.add_argument("--latest", action="store_true", help="检查 reports/ 下最新 .md")
     parser.add_argument("--dir", default="", help="批量检查目录下所有 .md")
+    # 默认 claude：CLAUDE.md 第 0 层「机器准出（必跑）」就是本 CLI 不带 --profile
+    # 的形式，故**默认值即合规门禁**。历史默认 precommit 对齐旧 check_report.sh
+    # 的阻断项，会跳过全部 law6-* / known-violation*（14 条 error 级），使 v0.3.0
+    # 注入报告首屏的模型撰写正文失去机器拦截。库函数默认值不动（保持对下游
+    # 程序化调用与 pre-commit hook 的兼容，hook 显式传 --profile precommit）。
     parser.add_argument("--profile", choices=["claude", "precommit", "engine"],
-                        default="precommit")
+                        default="claude",
+                        help="规则档位（默认 claude：全量规则，含 LAW 6 等红线）")
     parser.add_argument("--fail-on", choices=["error", "warning", "info"],
                         default="warning",
                         help="lint 违规阈值：达到该级别即 FAIL（默认 warning）")

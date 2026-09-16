@@ -84,6 +84,29 @@ def test_from_invalid_file_exits_2_and_writes_nothing(tmp_path, monkeypatch, cap
     assert not (md.parent / "2026-09-10-22-50-00.decision.json").exists()
 
 
+@pytest.mark.parametrize("mutate", [
+    lambda payload: payload.update({"schema_version": 2}),
+    lambda payload: payload.update({"scenarios": [
+        {"key": "optimistic", "assumption": "上修", "weight": 0.3, "valuation_ref": 1.2},
+        {"key": "neutral", "assumption": "持平", "weight": 0.3, "valuation_ref": 1.05},
+        {"key": "pessimistic", "assumption": "下修", "weight": 0.3, "valuation_ref": 0.9},
+    ]}),
+])
+def test_from_rejects_incompatible_version_or_probability_weights(
+        tmp_path, monkeypatch, capsys, mutate):
+    """`decision --from` 不得持久化不兼容 schema 或非概率分布。"""
+    monkeypatch.chdir(tmp_path)
+    md = _make_report(tmp_path, "515050", "2026-09-10-22-50-00")
+    bad = json.loads(json.dumps(_FULL))
+    mutate(bad)
+    src = tmp_path / "bad.json"
+    src.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+
+    assert etf_mod.cmd_decision("515050", from_path=str(src), init=False, md=None) == 2
+    assert "校验失败" in capsys.readouterr().err
+    assert not (md.parent / "2026-09-10-22-50-00.decision.json").exists()
+
+
 def test_no_report_md_is_explicit(tmp_path, monkeypatch, capsys):
     """没有报告 md → 显式失败，不静默生成一个无处配对的 sidecar。"""
     monkeypatch.chdir(tmp_path)

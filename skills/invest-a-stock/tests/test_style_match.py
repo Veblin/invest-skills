@@ -108,7 +108,7 @@ class TestRenderStyleMatch:
             "state": "匹配", "reason": "价值 × 估值股息回归", "hint": None,
         }))
         joined = "\n".join(lines)
-        assert "**[风格-标的匹配（R10）]** 匹配" in joined
+        assert "**[风格匹配]** 匹配" in joined
         assert "自评风格 价值" in joined
         assert "估值股息回归" in joined
 
@@ -190,13 +190,19 @@ class TestIncomeDriverEvidenceUnification:
         assert driver_a in lines[0], f"两处口径不一致：{driver_a} vs {lines[0]!r}"
 
     def test_report_block_discloses_missing_dividend_evidence(self):
-        """collection 无分红/再融资维度 → 证据缺失必须显式（差异不得静默）。"""
+        """collection 无分红/再融资维度 → 证据缺口必须显式（差异不得静默）。
+
+        2026-09-16：内部键名（dividend/refi）不再直接出口给读者——映射为中文
+        语义并说明缺了它影响哪个判断。披露不减，只改可读性。
+        """
         from lib.render_markdown._base import _render_income_driver
 
         lines = _render_income_driver(_collection(_ANNUAL_ROWS))
         joined = "\n".join(lines)
-        assert "证据缺失" in joined
-        assert "dividend" in joined and "refi" in joined
+        assert "证据缺口" in joined
+        assert "分红记录" in joined and "再融资" in joined
+        # 内部键名不得泄漏到读者可见文本
+        assert "dividend" not in joined and "refi" not in joined
 
     def test_style_match_no_longer_swallows_extraction_errors(self):
         """`_driver_from_collection` 不得再静默吞错（R2/T9-2 消除静默降级）。"""

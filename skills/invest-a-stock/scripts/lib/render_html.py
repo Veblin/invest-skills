@@ -1487,12 +1487,12 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 
     research_md = _lazy_section_research_summary(collection, symbol, dims)
     research_sec = _html_research(research_md)
-    # 全量审查 P0-3：analysis 提供 events 段时隐藏静态「待填写」占位 section
-    # （旧实现静态块永不填充、与真卡并存）
-    has_events_analysis = any(
-        isinstance(s, dict) and (
-            s.get("module") == "events" or s.get("position") == "events")
-        for s in (analysis or []))
+    # 全量审查 P0-3：analysis 提供事件分析段时隐藏静态「待填写」占位 section
+    # （旧实现静态块永不填充、与真卡并存）。判定键与 md 侧共用
+    # `analysis_schema.EVENTS_HOST_KEYS`——两处各写一份曾导致新槽位键
+    # `event_classification` 在 html 侧漏判（md 已替换、html 仍显静态块）。
+    from lib.analysis_schema import EVENTS_HOST_KEYS, find_section
+    has_events_analysis = find_section(analysis, EVENTS_HOST_KEYS) is not None
     events_sec = "" if has_events_analysis else _html_events()
     analysis_sec = _html_analysis(analysis)
     identity_status = _html_full_mode_identity_status(symbol, mode, analysis, profile)

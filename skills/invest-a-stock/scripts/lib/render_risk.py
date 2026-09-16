@@ -160,6 +160,7 @@ def _section_bull_bear(
     risk_data: dict[str, Any],
     *,
     val_cache: dict | None = None,
+    analysis: list[dict] | None = None,
 ) -> str:
     """模块 5：多空逻辑链、关键分歧点、预期差（LAW 15）。
 
@@ -167,6 +168,10 @@ def _section_bull_bear(
     - 多头/空头链改为「假设→传导→数字」结构
     - 每链包含: 核心假设, 传导链, 对应数字(利润预测表+隐含市值)
     - 末尾增加「关键分歧点」独立章节
+
+    analysis（v0.3.0 fix③）：引擎未生成空头链时，命中 bear_chain 槽位的段
+    取代「当前数据未形成明确空头逻辑链」——该串是 QC
+    `completion-empty-basis` 的 error 级命中项（空头依据节不得为空）。
     """
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
 
@@ -613,6 +618,15 @@ def _section_bull_bear(
 
     # ── 5b. Bear chain: 假设→传导→数字 ────────────────────────────
     lines.append("### 5b. 空头逻辑链")
+    from lib.analysis_schema import (
+        BEAR_CHAIN_KEYS,
+        find_section,
+        mark_inline_consumed,
+    )
+    _bear = find_section(analysis, BEAR_CHAIN_KEYS)
+    _bear_md = str((_bear or {}).get("analysis_md") or "").strip()
+    if _bear_md:
+        mark_inline_consumed(collection, _bear)
     if bear_chains:
         for idx, bc in enumerate(bear_chains, 1):
             lines.append(f"#### 空头逻辑 {idx}: {bc['title']}")
@@ -625,7 +639,19 @@ def _section_bull_bear(
                 lines.append("  - 数据不足，未生成量化估算")
             lines.append(f"- 证据强度: {bc['strength']}")
             lines.append("")
+        # 引擎已生成空头链时，槽位段仍须渲染（否则段内容静默丢失——
+        # is_inline_slotted 已把它排除出「分析详情」，无处可去）。追加而非
+        # 替换：引擎链是自动生成的独立内容，不是占位文本。
+        if _bear_md:
+            lines.append("**补充空头链（analysis.json 注入）**")
+            lines.append("")
+            lines.append(_bear_md)
+            lines.append("")
+    elif _bear_md:
+        lines.append(_bear_md)
+        lines.append("")
     else:
+        # 引擎无链且无分析段 → 保持空依据声明，completion 门禁照常拦截。
         lines.append("- 当前数据未形成明确空头逻辑链 [来源: 模块 2/4/6 + risk_scanner]")
         lines.append("")
 
@@ -666,15 +692,15 @@ def _section_bull_bear(
         bear_direction = "净流入" if m_v > 0 else "净流出"
         lines.append(
             f"{divergence_count}. **[资金流向背离]**：Bull 关注北向 {_fmt_v2(nb_v)} "
-            f"（{bull_direction}），认为外资流入是正面信号；Bear 关注主力 "
+            f"（{bull_direction}），认为外资流入是正面信号；Bear 关注全档资金 "
             f"{_fmt_v2(m_v)}（{bear_direction}），认为内资撤离是预警。"
         )
     if divergence_count == 0:
         lines.append("1. 关键变量数据不足，暂无法提炼定量分歧点 [来源: 多维度缺口]")
     lines.append("")
 
-    # ── 5d. 预期差（LAW 15） — unchanged ──────────────────────────
-    lines.append("### 5d. 预期差（LAW 15）")
+    # ── 5d. 预期差 — unchanged ──────────────────────────
+    lines.append("### 5d. 预期差")
     if ig.get("g_implied") is not None:
         g_pct = ig["g_implied"] * 100
         # review #13：r 为默认假设时在 label 上标注 [推测，待验证]（对齐 _v3.py rf_label）
@@ -1025,7 +1051,20 @@ def _section_left_right_probability(
     if erp and erp.get("percentile_5y") is not None and erp["percentile_5y"] >= 70:
         left_items.append(f"② ERP 5年区间位置偏高（{erp['percentile_5y']}%），证据强度：⚠️")
     if not left_items:
-        left_items.append("① 左侧参考指标数据不足或未达到阈值，证据强度：❓")
+        # 不写纯哨兵句：哨兵只能靠措辞躲过 QC 的 completion-empty-basis 判定，
+        # 而「这一节到底有没有依据」应由**信息量**决定。这里给出实测值与阈值，
+        # 读者知道差多少，门禁也按「有实质内容」正确放行。
+        _pe_s = f"PE 分位 {pe_pct:.1f}%" if pe_pct is not None else "PE 分位不可得"
+        _erp_p = erp.get("percentile_5y") if isinstance(erp, dict) else None
+        _erp_s = f"ERP 5年分位 {_erp_p}%" if _erp_p is not None else "ERP 5年分位不可得"
+        left_items.append(
+            f"① 左侧指标均未达阈：{_pe_s}（阈值 <{ZONE_LOW_THRESHOLD:.0f}%）、"
+            f"{_erp_s}（阈值 ≥70%），证据强度：❓"
+        )
+    # 修复：left_items 原先直到「右侧」标题之后才写入，导致「左侧」节恒为空、
+    # 内容全部落到「右侧」标题之下（qc completion-empty-basis 因此恒 FAIL）。
+    # 此处紧接左侧标题写入，右侧同理。
+    lines.extend(left_items)
     lines.append("")
     lines.append("### 右侧概率的主要支撑依据")
     right_items: list[str] = []
@@ -1063,7 +1102,7 @@ def _section_left_right_probability(
         _mf_raw = nb_lr.get("net_sum_10d")
     mf10 = _safe_num(_mf_raw)
     if mf10 is not None and mf10 > 0:
-        continuation_hits.append(f"主力资金/北向近10日净流入 {_fmt_v2(mf10)}")
+        continuation_hits.append(f"全档资金/北向近10日净流入 {_fmt_v2(mf10)}")
     if len(continuation_hits) >= 2:
         right_items.append(
             f"④ 趋势延续信号组合 {len(continuation_hits)}/3 项："
@@ -1084,8 +1123,6 @@ def _section_left_right_probability(
             "| 下季度财报期 | 业绩公布 | 净利润同比、经营现金流 |",
         ],
     )
-    lines.extend(prob.left_items)
-    lines.append("")
     lines.extend(prob.right_items)
     lines.append("")
     lines.append("### 走势转变的触发条件")

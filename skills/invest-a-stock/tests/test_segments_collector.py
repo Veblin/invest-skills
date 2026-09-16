@@ -47,6 +47,48 @@ def test_dedupe_keeps_shorter_alias_name() -> None:
     assert kept == {"电池材料及回收", "储能系统"}
 
 
+def test_total_and_adjustment_rows_are_excluded() -> None:
+    """合计/调整行的 bz_sales 时而 NaN、时而 1000.0、时而等于分部之和。
+
+    实测 20241231：type=P 多出一行「产品」、type=D 多出一行「地区」，其 bz_sales
+    恰为其余分部之和；同期的「合计特别调整」是 1000.0 而非 NaN——只靠 NaN 过滤
+    挡不住，按分部求和会虚高近一倍（7240.25 亿 vs 真实 3620.13 亿）。
+    """
+    for bad in ("产品", "地区", "合计", "合计特别调整", "  "):
+        assert not src._is_segment_item(bad), bad
+    for good in ("动力电池系统", "储能系统", "境内", "境外", "电池材料及回收"):
+        assert src._is_segment_item(good), good
+
+
+def test_mainbz_excludes_period_variant_total_rows(monkeypatch) -> None:
+    """20241231 那种「有合计行 + 调整行非 NaN」的报告期不得虚高。"""
+    _install(monkeypatch, {
+        "P": _mainbz_frame([
+            {"end_date": "20241231", "bz_item": "动力电池系统", "bz_sales": 2.53041337e11, "bz_profit": 6.06e10},
+            {"end_date": "20241231", "bz_item": "储能电池系统", "bz_sales": 5.7290460e10, "bz_profit": 1.54e10},
+            {"end_date": "20241231", "bz_item": "电池材料及回收", "bz_sales": 2.8699935e10, "bz_profit": 3.02e9},
+            {"end_date": "20241231", "bz_item": "其他业务", "bz_sales": 1.7487818e10, "bz_profit": 9.05e9},
+            {"end_date": "20241231", "bz_item": "电池矿产资源", "bz_sales": 5.493003e9, "bz_profit": 4.68e8},
+            {"end_date": "20241231", "bz_item": "合计特别调整", "bz_sales": 1000.0, "bz_profit": 1000.0},
+            {"end_date": "20241231", "bz_item": "产品", "bz_sales": 3.62012554e11, "bz_profit": 8.85e10},
+        ]),
+        "D": _mainbz_frame([
+            {"end_date": "20241231", "bz_item": "境内", "bz_sales": 2.51677045e11, "bz_profit": 5.60e10},
+            {"end_date": "20241231", "bz_item": "境外", "bz_sales": 1.10335509e11, "bz_profit": 3.25e10},
+            {"end_date": "20241231", "bz_item": "地区", "bz_sales": 3.62012554e11, "bz_profit": 8.85e10},
+        ]),
+    })
+    rows = src._q_tushare_mainbz("300750")
+    product = [r for r in rows if r["type"] == "product"]
+    region = [r for r in rows if r["type"] == "region"]
+    assert {r["item"] for r in product} == {
+        "动力电池系统", "储能电池系统", "电池材料及回收", "其他业务", "电池矿产资源"}
+    assert {r["item"] for r in region} == {"境内", "境外"}
+    # 按地区求和必须等于按产品求和，且等于真实营收 3620.13 亿
+    assert sum(r["sales"] for r in region) == pytest.approx(sum(r["sales"] for r in product))
+    assert sum(r["sales"] for r in region) / 1e8 == pytest.approx(3620.13, abs=1.0)
+
+
 def test_dedupe_keeps_distinct_segments() -> None:
     rows = [
         {"bz_item": "动力电池系统", "bz_sales": 1.921249e11, "bz_profit": 3.963278e10},

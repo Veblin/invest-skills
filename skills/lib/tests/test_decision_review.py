@@ -134,3 +134,51 @@ def test_render_has_three_sections_and_no_advice():
 def test_render_states_when_no_sidecar_at_all():
     md = render_review("515050", sidecars=[], today=_TODAY)
     assert "无复盘原料" in md or "无 sidecar" in md
+
+
+# ── 侧车「校验失败」不得与「文件缺失」混为一态 ──────────────────────────
+#
+# collect_sidecars 对两者给的是**不同**的 error 文本（缺失 = 无复盘原料；
+# 校验失败 = schema 报错原文），但渲染层只写死「❌ 无复盘原料」，且脚注把两种
+# 情况一律归因为「早于 sidecar 协议或未落盘」——文件在、内容不合规的侧车，
+# 读者既看不到原因，也不知道该修什么。
+
+def test_invalid_sidecar_error_text_is_rendered_in_sequence_table():
+    md = render_review(
+        "515050",
+        sidecars=[{"ts": "2026-09-10-22-50-00", "payload": None,
+                   "kind": "invalid",
+                   "error": "scenarios 权重之和须为 1（当前 1.1，容差 1e-06）"}],
+        today=_TODAY,
+    )
+    row = next(l for l in md.splitlines()
+               if l.startswith("|") and "2026-09-10-22-50-00" in l)
+    assert "权重之和须为 1" in row, f"校验失败原因未进表格：{row}"
+
+
+def test_footnote_separates_missing_from_invalid():
+    md = render_review(
+        "515050",
+        sidecars=[
+            {"ts": "OLD", "payload": None, "kind": "missing",
+             "error": "无复盘原料（该报告早于 sidecar 协议，或未落盘）"},
+            {"ts": "BAD", "payload": None, "kind": "invalid",
+             "error": "scenarios 权重之和须为 1（当前 1.1）"},
+        ],
+        today=_TODAY,
+    )
+    assert "早于 sidecar 协议" in md, "缺失类仍须说明协议/未落盘"
+    assert "权重之和" in md, "校验失败类须给出原因，不得归因为协议问题"
+
+
+def test_basis_section_distinguishes_unusable_from_no_falsifier():
+    """② 节的空态须区分「原料不可用」与「原料可用但未写证伪条件」。"""
+    unusable = render_review("515050", sidecars=[
+        {"ts": "T1", "payload": None, "kind": "invalid", "error": "权重之和须为 1"},
+    ], today=_TODAY)
+    assert "原料不可用" in unusable
+
+    no_falsifier = render_review("515050", sidecars=[
+        {"ts": "T2", "payload": _payload("T2", []), "error": None, "kind": "ok"},
+    ], today=_TODAY)
+    assert "未写证伪条件" in no_falsifier

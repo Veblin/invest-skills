@@ -190,7 +190,7 @@ class TestRenderFundamentals:
             "C-④ 扣非/净利润",
             "D-① PE/PB 历史位置",
             "D-② PE vs 行业中位数",
-            "D-③ 隐性预期差（LAW 15）",
+            "D-③ 隐性预期差",
         ]
         for heading in expected_headings:
             assert heading in text, f"Missing heading: {heading}"

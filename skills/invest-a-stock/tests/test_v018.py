@@ -1337,7 +1337,7 @@ class TestSectionSixGatesScorecard:
         for gate in ("生意", "护城河", "管理层", "财务", "估值", "风险"):
             assert f"| {gate} " in text
         assert "不构成投资建议" in text
-        assert "不代表买卖或持有的行动判断" in text
+        assert "不代表买卖或持仓的行动判断" in text
         _check_no_forbidden_words(text)
 
     def test_no_binary_pass_fail_or_action_words(self):

@@ -66,8 +66,19 @@ def section_exogenous_shock(collection: dict) -> str:
     if not cards:
         return ""
 
+    # 窗口是采集侧参数（`attach_news_pack(..., days=7)` 默认 7，news_scanner 按
+    # 该值真过滤），渲染不得硬编码——写「近 30 日」会把事实窗口夸大（[事实] 块
+    # 是后续 [分析] 的来源依据）。无 days 键（旧快照）时退化为「近期」，不编造数字。
+    _days = news.get("days")
+    window = f"近 {_days} 日" if isinstance(_days, int) and _days > 0 else "近期"
+
     lines = [
         "### 外生冲击假说⑥（新闻/公告归因）",
+        "",
+        # QC `structure-analysis-without-fact`：下方表格是本节的 [事实] 块，
+        # [分析] 须有同节段内前置的 [事实]（50 行回溯、遇标题停止）。缺此标签
+        # 时任何带新闻包的报告都会命中 error 级 lint。
+        f"**[事实]** {window}新闻/公告条目（公告源 + 检索源），来源与可信度分列：",
         "",
         "| 日期 | 方向 | 可信度 | 标题 | 来源 |",
         "|------|------|--------|------|------|",

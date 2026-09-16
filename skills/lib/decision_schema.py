@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+_WEIGHT_SUM_TOLERANCE = 1e-6
 
 REQUIRED_TOPLEVEL = ("schema_version", "symbol", "report_ts", "as_of", "disclaimer")
 SCENARIO_KEYS = ("optimistic", "neutral", "pessimistic")
@@ -106,12 +107,33 @@ def validate_decision(payload: Any) -> list[str]:
         if v is None or (isinstance(v, str) and not v.strip()):
             errs.append(f"missing:{k}")
 
+    # Sidecars are durable review material.  Presence alone is not compatible:
+    # accepting a newer/older/string version silently interprets another schema
+    # with today's rules and corrupts the review contract.
+    version = payload.get("schema_version")
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version != SCHEMA_VERSION):
+        errs.append(
+            f"schema_version 须为当前整数版本 {SCHEMA_VERSION}，得到 {version!r}"
+        )
+
     scenarios = payload.get("scenarios", [])
     if not isinstance(scenarios, list):
         errs.append("scenarios 须为数组")
     else:
         for i, s in enumerate(scenarios):
             errs.extend(_validate_scenario(s, i))
+        # A displayed ``weight`` represents a probability, not an independent
+        # confidence score.  Only calculate the total once every supplied value
+        # is finite; invalid individual weights already have precise errors.
+        weights = [s.get("weight") for s in scenarios if isinstance(s, dict)]
+        if scenarios and len(weights) == len(scenarios) and all(_is_number(w) for w in weights):
+            total = sum(float(w) for w in weights)
+            if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=_WEIGHT_SUM_TOLERANCE):
+                errs.append(
+                    "scenarios 权重之和须为 1"
+                    f"（当前 {total:.12g}，容差 {_WEIGHT_SUM_TOLERANCE:g}）"
+                )
 
     falsifiers = payload.get("falsifiers", [])
     if not isinstance(falsifiers, list):

@@ -102,12 +102,22 @@ def _completion_details(report_path: Path) -> list[dict]:
 # ── 三类缺陷态：全部由真实渲染器产出 ──────────────────────────────────────
 
 
-def test_minimal_render_trips_sidecar_and_left_basis(tmp_path: Path, minimal_text: str) -> None:
-    """缺同代 analysis.json + 左侧依据不可得。"""
+def test_minimal_render_trips_sidecar_and_left_section_populated(
+    tmp_path: Path, minimal_text: str,
+) -> None:
+    """缺同代 analysis.json 被检出；且左/右概率节各自有内容。
+
+    2026-09-16：原用例断言「左侧依据不可得」，而那是渲染器 bug 的产物——
+    left_items 直到「右侧」标题之后才写入，导致左侧节恒为空、内容全落到右侧
+    之下。修复后左侧至少带一条显式披露（「数据不足或未达到阈值」），且该句
+    含尾部定语，不再命中 `_EMPTY_BASIS_RE` 的空节判定。故此处改为结构断言。
+    """
     path = _write_report(tmp_path, minimal_text)
-    ids = _completion_ids(path)
-    assert "completion-analysis-sidecar-missing" in ids
-    assert "completion-empty-basis" in ids
+    assert "completion-analysis-sidecar-missing" in _completion_ids(path)
+    lines = minimal_text.splitlines()
+    i = lines.index("### 左侧概率的主要支撑依据")
+    assert lines[i + 1].strip(), "左侧节不得为空"
+    assert not lines[i + 1].startswith("### "), "左侧节不得直接紧跟下一个标题"
 
 
 def test_events_render_trips_template_placeholder(tmp_path: Path, events_text: str) -> None:
@@ -119,11 +129,19 @@ def test_events_render_trips_template_placeholder(tmp_path: Path, events_text: s
 
 
 def test_degraded_render_trips_both_directions(tmp_path: Path, degraded_text: str) -> None:
-    """反证不足：多空两侧与左侧依据同时为空（该口径由 owner 裁决沿用）。"""
+    """反证不足：多空两侧依据为空，且左/右概率节至少一侧以「数据不足」披露。
+
+    2026-09-16：修复左/右节写入时机后，退化 collection 下为空的一侧由
+    「左侧」变为「右侧」（左侧拿到 PE 低分位条目、右侧落到
+    「右侧参考指标数据不足」哨兵）。哪一侧为空取决于数据，故断言
+    Bull/Bear 必中 + 左/右至少一侧，而非钉死具体一侧。
+    """
     path = _write_report(tmp_path, degraded_text)
     details = _completion_details(path)
     empty = [d for d in details if d["id"] == "completion-empty-basis"]
-    assert {"Bull", "Bear", "左侧"} <= {d["message"].split(" 依据节")[0] for d in empty}
+    kinds = {d["message"].split(" 依据节")[0] for d in empty}
+    assert {"Bull", "Bear"} <= kinds
+    assert kinds & {"左侧", "右侧"}
 
 
 # ── sidecar 存在性：从「缺失」到「合格」再到「不合格」 ────────────────────
@@ -170,12 +188,15 @@ def test_renderer_sentinels_are_covered_by_qc(
     这条断言失败时错误信息直指「渲染器改了文案 / QC 正则该同步」，
     比 finding id 断言更易诊断——两边任一处漂移都会在这里先红。
     """
+    # 左侧无支撑时渲染器已改为**含实测值与阈值的实质句**（不再输出纯哨兵，
+    # 见 render_risk._section_left_right_probability），故这里只锁右侧哨兵；
+    # 旧左哨兵（含「或未达到阈值」尾缀）的正则覆盖由
+    # skills/lib/tests/test_report_qc.py 的左右对称用例锁定。
     sentinels = [
         ("- 当前数据未形成明确多头逻辑链", degraded_text),
         ("- 当前数据未形成明确空头逻辑链", degraded_text),
-        ("① 左侧参考指标数据不足", degraded_text),
+        ("① 右侧参考指标数据不足", degraded_text),
         ("[待 Claude report 阶段填充]", events_text),
-        ("① 左侧参考指标数据不足", minimal_text),
     ]
     for needle, text in sentinels:
         assert needle in text, f"渲染器不再产出该哨兵句：{needle}"
@@ -186,6 +207,20 @@ def test_renderer_sentinels_are_covered_by_qc(
     for line in events_text.splitlines():
         if "[待 Claude report 阶段填充]" in line:
             assert any(p.search(line) for p in _TEMPLATE_MARKER_PATTERNS), line
+
+
+def test_left_basis_without_support_is_substantive(minimal_text: str) -> None:
+    """左侧无支撑时给出实测值与阈值，而非靠措辞躲过门禁的纯哨兵句。
+
+    「有没有依据」应由**信息量**决定：该行含 PE 分位与两个阈值 → 不是空节；
+    旧哨兵（带「或未达到阈值」尾缀）则会被 QC 判为空节并拦下。
+    """
+    lines = minimal_text.splitlines()
+    i = lines.index("### 左侧概率的主要支撑依据")
+    left = lines[i + 1].strip()
+    assert left, "左侧节不得为空"
+    assert "阈值" in left, f"无支撑时须给出实测值与阈值: {left}"
+    assert not _EMPTY_BASIS_RE.search(left), "含实测值的实质句不得被当作哨兵"
 
 
 def test_structural_hint_block_is_not_a_placeholder(minimal_text: str) -> None:

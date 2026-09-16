@@ -176,7 +176,12 @@ def _evidence_conclusion_block(conclusion: str, evidences: list[tuple[str, str]]
 def _v3_cv7_assessment(
     pe_pct: float | None, mf_out: float | int | None,
 ) -> tuple[str, str] | None:
-    """CV-7：PE 分位 vs 主力资金方向。
+    """CV-7：PE 分位 vs 全档资金方向。
+
+    口径：传入的 mf_out 取自 Tushare moneyflow.net_mf_amount，是**全档**净额
+    （小+中+大+特大）。行情软件惯用的「主力」= 大单+特大单，二者方向可完全
+    相反（300750 2026-09-16 实测近 5 日 +17.96 亿 vs −15.24 亿）。故条目文案
+    写「全档资金」而非「主力资金」——后者会把全档值读成主力值。
 
     分位边界与 valuation.ZONE_LOW/HIGH_THRESHOLD 一致（严格 <30 / >70）。
 
@@ -190,13 +195,13 @@ def _v3_cv7_assessment(
         return None
     mf_f = float(mf_out)
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f < 0:
-        return "divergence", f"PE 低位（{pe_pct:.1f}%）但主力资金净流出"
+        return "divergence", f"PE 低位（{pe_pct:.1f}%）但全档资金净流出"
     if pe_pct > ZONE_HIGH_THRESHOLD and mf_f > 0:
-        return "divergence", f"PE 高位（{pe_pct:.1f}%）但主力资金净流入"
+        return "divergence", f"PE 高位（{pe_pct:.1f}%）但全档资金净流入"
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f > 0:
-        return "convergence", f"PE 低位（{pe_pct:.1f}%）且主力资金净流入"
+        return "convergence", f"PE 低位（{pe_pct:.1f}%）且全档资金净流入"
     if pe_pct > ZONE_HIGH_THRESHOLD and mf_f < 0:
-        return "convergence", f"PE 高位（{pe_pct:.1f}%）且主力资金净流出"
+        return "convergence", f"PE 高位（{pe_pct:.1f}%）且全档资金净流出"
     return "gap", "估值与资金流向未呈现典型背离/共振"
 
 

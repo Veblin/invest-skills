@@ -46,6 +46,7 @@ TUSHARE_API_MIN_POINTS: dict[str, int] = {
     "margin_detail": 2000,
     "hsgt_top10": 2000,
     "index_classify": 2000,
+    "index_member_all": 2000,  # 申万成分整表（CONFIGURATION.md 同载 2000 档）
     "index_daily": 2000,
     "index_dailybasic": 4000,
     "sw_daily": 5000,

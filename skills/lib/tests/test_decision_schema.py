@@ -113,6 +113,24 @@ def test_weight_out_of_range_rejected():
     assert any("weight" in e for e in validate_decision(bad))
 
 
+@pytest.mark.parametrize("weights", [[0.3], [0.3, 0.3, 0.3], [0.4, 0.4, 0.4]])
+def test_non_normalized_scenario_weights_rejected(weights):
+    """权重是概率分布，非空集合必须在容差内归一为 1。"""
+    bad = _full()
+    bad["scenarios"] = [
+        {"key": ("optimistic", "neutral", "pessimistic")[i],
+         "assumption": f"情景{i}", "weight": weight, "valuation_ref": 1 + i}
+        for i, weight in enumerate(weights)
+    ]
+    assert any("权重之和" in error for error in validate_decision(bad))
+
+
+def test_scenario_weights_allow_small_floating_point_rounding_error():
+    good = _full()
+    good["scenarios"][2]["weight"] = 0.2000000001
+    assert validate_decision(good) == []
+
+
 def test_disclaimer_required():
     bad = _full()
     del bad["disclaimer"]
@@ -178,6 +196,13 @@ def test_missing_required_toplevel_keys_rejected():
         bad = _full()
         del bad[key]
         assert any(key in e for e in validate_decision(bad)), f"缺 {key} 未报错"
+
+
+@pytest.mark.parametrize("version", [0, 2, "1", 1.0, True])
+def test_unsupported_or_non_integer_schema_version_rejected(version):
+    bad = _full()
+    bad["schema_version"] = version
+    assert any("schema_version" in error for error in validate_decision(bad))
 
 
 def test_wrong_type_rejected():

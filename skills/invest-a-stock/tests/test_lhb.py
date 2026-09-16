@@ -96,7 +96,7 @@ class TestRenderMaSystem:
         coll = _collection(_kline(60))  # 线性上行 → 多头排列
         lines = _render_ma_system(coll)
         joined = "\n".join(lines)
-        assert "**[均线系统表（R12g）]**" in joined
+        assert "**[均线系统表]**" in joined
         assert "MA5=" in joined and "MA10=" in joined and "MA20=" in joined and "MA60=" in joined
         assert "现价 " in joined
         assert "多头排列" in joined or "排列" in joined
@@ -189,7 +189,7 @@ class TestLimitStreakEndToEnd:
 
         from lib.render_markdown._base import _render_limit_streak_structure
         joined = "\n".join(_render_limit_streak_structure(coll))
-        assert "**[连板结构（R12g）]**" in joined
+        assert "**[连板结构]**" in joined
         assert "情绪周期: 涨停 103 家" in joined
         assert "梯队: 最高连板 6 板" in joined
         assert "龙虎榜席位: 买入榜 机构专用" in joined

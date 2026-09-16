@@ -124,11 +124,11 @@ def _validate_p1_fields(h: dict) -> tuple[dict, str | None]:
     bd = h.get("buy_date")
     if bd is not None:
         if not isinstance(bd, str):
-            return h, "buy_date 非字符串，本行持有天数不可判"
+            return h, "buy_date 非字符串，本行持仓天数不可判"
         try:
             _dt.date.fromisoformat(bd)
         except ValueError:
-            return h, f"buy_date 非真实日期（{bd}），本行持有天数不可判"
+            return h, f"buy_date 非真实日期（{bd}），本行持仓天数不可判"
     return h, None
 
 
@@ -324,7 +324,7 @@ def disposition_hint(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def position_table(rows: list[dict[str, Any]]) -> str:
     """渲染位置表（弱显著：档位中文 + 天数，不带盈亏数值与成本）。"""
-    head = "| 标的 | 名称 | 档位 | 持有天数 | 持仓占比 | 备注 |"
+    head = "| 标的 | 名称 | 档位 | 持仓天数 | 持仓占比 | 备注 |"
     sep = "|---|---|---|---|---|---|"
     lines = [head, sep]
     for r in rows:

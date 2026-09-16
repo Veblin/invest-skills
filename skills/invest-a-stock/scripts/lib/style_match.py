@@ -48,7 +48,7 @@ def format_match_hint(driver: str, journal_driver: str) -> str:
     """混搭提示固定模板（非 AI 撰写，R10 验收原文）。"""
     return (
         f"该标的收益驱动为「{driver}」（引擎），你的 journal 记录本次决策驱动逻辑为"
-        f"「{journal_driver}」——两者指向不同方法论，注意起念与持有论证的一致性"
+        f"「{journal_driver}」——两者指向不同方法论，注意起念与持仓论证的一致性"
         "（面基方法论：'不能把基本面的投资手册当成趋势投资的航海指南'）。"
     )
 

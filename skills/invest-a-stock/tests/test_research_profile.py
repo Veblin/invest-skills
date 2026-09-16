@@ -159,7 +159,7 @@ _PROFILE = {
 def test_markdown_lines_render_every_field() -> None:
     text = "\n".join(format_profile_markdown_lines(_PROFILE))
     assert "风格=成长" in text
-    assert "持有周期=长线（1 年+）" in text
+    assert "周期视角=长线（1 年+）" in text
     assert "关注焦点=估值" in text
     assert "已看过行情=否" in text
     assert "验证增长可持续性" in text
@@ -170,7 +170,7 @@ def test_markdown_and_html_carry_the_same_content() -> None:
     """两处头部是独立实现，文案同源是唯一防漂移手段。"""
     md = "\n".join(format_profile_markdown_lines(_PROFILE))
     html = format_profile_html(_PROFILE)
-    for fragment in ("风格=成长", "持有周期=长线（1 年+）", "验证增长可持续性", "偏好一手财报"):
+    for fragment in ("风格=成长", "周期视角=长线（1 年+）", "验证增长可持续性", "偏好一手财报"):
         assert fragment in md and fragment in html, fragment
 
 

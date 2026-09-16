@@ -338,7 +338,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简) / insight(研究要点)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--analysis", default=None,
-                    help="analysis.json 路径（R-B1）；渲染期替换 [待 Claude report 阶段填充] 占位")
+                    help="analysis.json 路径（R-B1）；full 替换 [待 Claude report 阶段填充] 占位，"
+                         "insight 注入「分析合成」独立分区并落同代侧车")
     # P0-5 研究档案：记录 R12g-B 开场四问结果，落同代 profile 侧车并在 full 头部展示。
     # 只改变阅读顺序与补证优先级，不做字段过滤（不隐藏反证/缺口/风险）。
     pr.add_argument("--horizon", default=None,
@@ -735,7 +736,11 @@ def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | No
     同目录、同时间戳的位置，供后续 QC 与审计追溯。临时文件与目标同目录，
     ``replace`` 在同一文件系统中为原子替换，避免中断时留下半截 JSON。
     """
-    if analysis_payload is None:
+    # 真值判断而非 `is not None`：空数组不携带任何分析段，正文会写「分析合成未完成」
+    # （render_markdown._has_valid_analysis_payload 按空=未注入处理，insight 分支同样
+    # 按真值判断）。用 `is not None` 会写出空侧车 + 正文说未注入 → 审计者按侧车回查
+    # 拿到自相矛盾的产物（QC 报 sidecar-invalid 而非可操作的 missing）。
+    if not analysis_payload:
         return None
     sidecar = report_path.with_suffix(".analysis.json")
     payload = json.dumps(analysis_payload, ensure_ascii=False, indent=2) + "\n"
@@ -827,7 +832,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
             return 2
         print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
-    # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，渲染层标注「无行业成功因素定义」）
+    # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，披露移入附录「覆盖缺口」）
     try:
         from lib.render_utils import _get_dim_data, _index_dims
         from lib.industry.base import get_success_factors
@@ -881,7 +886,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         key_diff, diff_reason = _insight_snapshot_diff(args.symbol, result)
         try:
             insight_model = build_report_model(result, args.symbol, profile,
-                                               key_diff=key_diff, diff_reason=diff_reason)
+                                               key_diff=key_diff, diff_reason=diff_reason,
+                                               analysis=analysis_payload)
         except InsightSchemaError as exc:
             print(f"❌ Insight 模型校验失败: {exc}", file=sys.stderr)
             return 2
@@ -902,17 +908,34 @@ def cmd_report(args: argparse.Namespace) -> int:
         report_dir = outdir / subdir
         report_dir.mkdir(parents=True, exist_ok=True)
         mdpath = report_dir / f"{timestamp}.insight.md"
+        # 分析侧车必须先于主体产物落盘：Markdown 一旦写出就「自称已注入」，
+        # 侧车若后写或写失败，会留下一个声称有合成、实际无从追溯的成品
+        # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
+        analysis_sidecar: Path | None = None
+        # 真值判断而非 `is not None`：空数组不携带任何分析段，insight_model 会判
+        # status=absent（full 的 _has_valid_analysis_payload 同样按空=未注入处理）。
+        # 若此处用 `is not None`，会写出空侧车 + 登记 manifest，而报告写着「未注入」
+        # ——审计者按 manifest 回查会拿到一份自相矛盾的产物。
+        if analysis_payload:
+            try:
+                analysis_sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
+            except OSError as exc:
+                print(f"❌ 分析侧车写入失败: {exc}", file=sys.stderr)
+                return 2
         mdpath.write_text(markdown, encoding="utf-8")
         htmlpath = None
         if fmt == "html":
             htmlpath = mdpath.with_suffix(".html")
             htmlpath.write_text(render_insight_html(insight_model), encoding="utf-8")
             print(f"📄 Insight HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
-        sidecars = write_sidecars(mdpath, insight_model, html_path=htmlpath)
+        sidecars = write_sidecars(mdpath, insight_model, html_path=htmlpath,
+                                  analysis_path=analysis_sidecar)
         profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
         print(f"📝 Insight Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
         print(f"📋 Facts 侧车: {sidecars['facts'].resolve()}", file=sys.stderr)
         print(f"📋 Findings 侧车: {sidecars['insight'].resolve()}", file=sys.stderr)
+        if analysis_sidecar:
+            print(f"📋 分析侧车: {analysis_sidecar.resolve()}", file=sys.stderr)
         if profile_sidecar:
             print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
         if not getattr(args, "outdir", None) and fmt == "md":
@@ -940,13 +963,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         outdir = Path(args.outdir).resolve() if args.outdir \
             else (Path.cwd() / "reports").resolve()
         htmlpath = _html_report_path(outdir, subdir, ts)
+        mdfile = _report_filepath(outdir, subdir, ts)
+        # 侧车必须先于主体产物落盘（同 insight 分支）：正文一旦写出就「自称已注入」，
+        # 侧车后写或写失败会留下一个声称有合成、实际无从追溯的孤儿成品
+        # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
+        try:
+            sidecar = _write_analysis_sidecar(mdfile, analysis_payload)
+            profile_sidecar = write_profile_sidecar(mdfile, profile, generation)
+        except OSError as exc:
+            print(f"❌ 侧车写入失败: {exc}", file=sys.stderr)
+            return 2
         htmlpath.parent.mkdir(parents=True, exist_ok=True)
         htmlpath.write_text(output, encoding="utf-8")
-
-        mdfile = _report_filepath(outdir, subdir, ts)
         mdfile.write_text(md_v2, encoding="utf-8")
-        sidecar = _write_analysis_sidecar(mdfile, analysis_payload)
-        profile_sidecar = write_profile_sidecar(mdfile, profile, generation)
 
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
@@ -989,9 +1018,14 @@ def cmd_report(args: argparse.Namespace) -> int:
         outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
                   else (Path.cwd() / "reports").resolve())
         mdpath = _report_filepath(outdir, subdir, ts)
+        # 侧车先于正文落盘（同 insight 分支）：见 html 分支同款说明。
+        try:
+            sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
+            profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
+        except OSError as exc:
+            print(f"❌ 侧车写入失败: {exc}", file=sys.stderr)
+            return 2
         mdpath.write_text(output, encoding="utf-8")
-        sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
-        profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
         print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
         if sidecar:
             print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
@@ -1385,6 +1419,9 @@ def cmd_peer(args: argparse.Namespace) -> int:
 
     # 数据来源标注
     source_labels = {
+        "tushare_sw_member_all": (
+            "Tushare index_member_all（申万成分整表，需2000+积分）"
+        ),
         "tushare_5000": "Tushare index_member（申万L3，需5000+积分）",
         "tushare_2000": (
             "Tushare stock_basic（申万粗分类，需2000+积分）"

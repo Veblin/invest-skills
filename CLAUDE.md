@@ -165,8 +165,14 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
    - 波动: VIX 恐慌指数 [来源: FRED VIXCLS] — 信号: <15 低波 / 15-25 正常 / 25-35 偏高 / >35 恐慌
    - 科技: SOX 费城半导体指数 [来源: Yahoo Finance] — AI/半导体需求领先指标
 
-输出格式（简报首行）：
-[宏观情景] PMI XX.X + CPI +X.X% + LPR X.X% →偏宽松/中性/偏紧 | VIX XX.X 正常 SOX X,XXX
+输出格式（简报首行，两段式——每段都必须带结论）：
+[宏观情景] 国内：PMI XX.X + CPI +X.X% + LPR X.X% + M2 X.X% →偏宽松/中性/偏紧 |
+  海外：VIX XX.X 正常 SOX X,XXX 美10Y X.XX% 高位 … →海外利率高位，外部估值压制未解除
+
+- **海外段指标集不可删减**：美10Y/美30Y/实际利率/期限利差/5Y盈亏/美元指数/布油/USDCNY/ACM10Y 由 `tests/test_macro_extended.py::TestLabelE2` 锁定（基线信号不显示，避免冗长）
+- **两段结论均由确定性规则生成**（`macro._global_conclusion`、国内段政策方向判定），不由 LLM 书写；海外规则输入是引擎已产出的 `signal` 字段，渲染层不引入新阈值
+- `|` 为 ASCII 分隔符且条件出现（无海外指标时不得出现）——`tests/test_v015_fixes.py::TestMacroLabel` 锁定
+- 溢出指标明细见报告附录「数据质量与引擎自检」
 
 **标签生成责任**（F2-7）：当前引擎自动生成宏观标签并写入报告头部。Claude 须核验标签数字为**最新期**（akshare PMI/CPI 序列最新在前，引擎曾取 2008-01 旧行，F0-4 已修）；发现非当期数字时按正确值改写标签并标注来源。
 

@@ -10,17 +10,25 @@ from typing import Any
 from lib.nums import fmt_amount
 from lib.scoring import insider_signal
 
+# 口径标签：net_sum_* 取自 Tushare moneyflow.net_mf_amount，是**全档**净额
+# （小单+中单+大单+特大单）。行情软件惯用的「主力」指大单+特大单，两者量纲
+# 口径不同且**方向可完全相反**（300750 2026-09-16 实测：近 5 日全档 +17.96 亿
+# vs 大单+特大单 −15.24 亿）。标签不得写「主力」——那会把全档值读成主力值。
 _MF_LABELS = {
-    "net_sum_5d": "近5日主力净额",
-    "net_sum_10d": "近10日主力净额",
-    "net_mf_amount": "主力净额",
+    "net_sum_5d": "近5日全档净额",
+    "net_sum_10d": "近10日全档净额",
+    "net_mf_amount": "全档净额",
 }
 _MF_CV_WINDOW = {
-    "net_sum_5d": "主力近5日",
-    "net_sum_10d": "主力近10日",
-    "net_mf_amount": "主力",
+    "net_sum_5d": "全档近5日",
+    "net_sum_10d": "全档近10日",
+    "net_mf_amount": "全档",
 }
 _DEFAULT_MF_KEYS = ("net_sum_5d", "net_sum_10d", "net_mf_amount")
+
+# 大单+特大单净额（「主力」的行情软件惯用口径）。缺失时不给该键，
+# 消费方须按 None 处理，禁止回落成全档值冒充。
+_MF_LG_ELG_KEY = "net_sum_5d_lg_elg"
 
 
 def northbound_label(nb: dict) -> str:
@@ -72,14 +80,17 @@ def resolve_moneyflow(mf: dict | None, *keys: str) -> tuple[float | None, str | 
 
 def moneyflow_signal_label(key: str | None) -> str:
     if key:
-        return _MF_LABELS.get(key, "主力净额")
-    return "主力净额"
+        return _MF_LABELS.get(key, "全档净额")
+    return "全档净额"
 
 
 def moneyflow_cv_window(key: str | None) -> str:
+    """CV 备注里的资金窗口标签。兜底也须写「全档」——调用方传入的键集
+    （_DEFAULT_MF_KEYS）全部是全档口径，未知键同样不得回落到「主力」。
+    """
     if key:
-        return _MF_CV_WINDOW.get(key, "主力")
-    return "主力"
+        return _MF_CV_WINDOW.get(key, "全档")
+    return "全档"
 
 
 def _table_cell(text: Any) -> str:
@@ -116,9 +127,16 @@ def _scan_rows(
     if isinstance(mf, dict):
         mf_net, mf_key = resolve_moneyflow(mf)
         if mf_net is not None:
+            # 两个口径并列输出：全档（net_mf_amount）与行情软件惯用的
+            # 大单+特大单。二者方向可完全相反，只报一个会把结论读反——
+            # 故这里不做取舍，两个都给，让读者自行对齐口径。
+            sig = f"{moneyflow_signal_label(mf_key)} {fmt_amount(mf_net)}"
+            lg_elg = mf.get(_MF_LG_ELG_KEY)
+            if isinstance(lg_elg, (int, float)):
+                sig += f"；大单+特大单近5日 {fmt_amount(lg_elg)}"
             rows.append({
-                "role": "主力（大单代理）",
-                "signal": f"{moneyflow_signal_label(mf_key)} {fmt_amount(mf_net)}",
+                "role": "资金流（moneyflow 全档）",
+                "signal": sig,
                 "source": str(mf.get("source") or "market_structure.moneyflow"),
             })
 
@@ -182,14 +200,14 @@ def _scan_rows(
     mf_window = moneyflow_cv_window(mf_key)
     if nb_net is not None and mf_net is not None:
         if nb_net * mf_net > 0:
-            cv_notes.append(f"北向与主力净流入方向一致（北向近10日 vs {mf_window}）")
+            cv_notes.append(f"北向与全档资金净流入方向一致（北向近10日 vs {mf_window}）")
         elif nb_net == 0 and mf_net == 0:
-            cv_notes.append(f"北向与主力净流入方向一致（北向近10日 vs {mf_window}）")
+            cv_notes.append(f"北向与全档资金净流入方向一致（北向近10日 vs {mf_window}）")
         elif nb_net == 0 or mf_net == 0:
             cv_notes.append(f"资金数据不完整（北向近10日 vs {mf_window}）")
         else:
             cv_notes.append(
-                f"北向与主力净流入方向相反（北向近10日 vs {mf_window}，可能存在参与者差异或滞后）"
+                f"北向与全档资金净流入方向相反（北向近10日 vs {mf_window}，可能存在参与者差异或滞后）"
             )
 
     quote = (dims.get("quote") or {}).get("data") or {}
@@ -216,8 +234,13 @@ def build_participant_behavior_section(
     symbol: str,
     market_structure: dict,
     dims: dict,
+    analysis: list[dict] | None = None,
 ) -> str:
-    """渲染「参与者行为扫描」Markdown 节。"""
+    """渲染「参与者行为扫描」Markdown 节。
+
+    analysis（v0.3.0 fix③）：命中 participant_scan 槽位的段替换
+    「分析提示（Claude 填写）」占位；无匹配段时保持占位不变。
+    """
     lines = [
         "## 参与者行为扫描",
         "",
@@ -237,6 +260,10 @@ def build_participant_behavior_section(
         ])
         return "\n".join(lines)
 
+    # QC `structure-analysis-without-fact`：本表是 [事实] 块，下方 [分析]
+    # 须有同节段内前置的 [事实]（50 行回溯、遇标题停止）。
+    lines.append("**[事实]** 各类参与者近期行为信号（口径与来源逐行标注）：")
+    lines.append("")
     lines.append("| 参与者类型 | 近期行为信号 | 来源 |")
     lines.append("|-----------|-------------|------|")
     for r in rows:
@@ -251,10 +278,22 @@ def build_participant_behavior_section(
             lines.append(f"- {note}")
         lines.append("")
 
-    lines.append(
-        "**分析提示（Claude 填写）：** 基于上表陈述行为一致性或分歧；"
-        "禁止输出操作建议或均衡推断。"
-    )
+    # v0.3.0 fix③：participant_scan 槽位的分析段替换「待 Claude 填写」占位
+    # （该串是 QC `completion-template-placeholder` 的 error 级命中项）。
+    # 无匹配段 → 保持原提示，完成度门禁照常拦截未填报告。
+    from lib.analysis_schema import PARTICIPANT_SCAN_KEYS, find_section, mark_inline_consumed
+    _sec = find_section(analysis, PARTICIPANT_SCAN_KEYS)
+    _amd = str((_sec or {}).get("analysis_md") or "").strip()
+    if _amd:
+        mark_inline_consumed(collection, _sec)
+        lines.append("**[分析]**")
+        lines.append("")
+        lines.append(_amd)
+    else:
+        lines.append(
+            "**分析提示（Claude 填写）：** 基于上表陈述行为一致性或分歧；"
+            "禁止输出操作建议或均衡推断。"
+        )
     lines.append("")
     lines.append("🔍 **待独立验证:** 主力/北向数据口径因源而异；内部人信号窗口为近12个月公告。")
     return "\n".join(lines)

@@ -15,6 +15,7 @@ sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录�
 from report_qc import (  # noqa: E402
     detect_report_type,
     format_qc_result,
+    main,
     qc_directory,
     qc_file,
     qc_latest,
@@ -388,6 +389,26 @@ class TestStockCompletionGate:
         report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
         completion = _completion_layer(qc_file(report, fail_on="error"))
         assert any(d["id"] == "completion-empty-basis" and "右侧" in d["message"]
+                   for d in completion.details)
+        assert completion.status == "fail"
+
+    def test_left_sentinel_with_suffix_is_also_empty_basis(self, tmp_path: Path):
+        """左哨兵带「或未达到阈值」尾缀时同样须判为空节（与右侧对称）。
+
+        同一份输入里左侧哨兵零告警、右侧哨兵告警，差异仅来自 6 个字的尾缀——
+        渲染器曾靠尾缀让「无实质依据」的节通过 error 级门禁。
+        """
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                # 替换**左侧**节的内容行（「### 左侧概率的主要支撑依据」之下）
+                "- 估值分位较低是条件性支撑 [来源: engine]",
+                "① 左侧参考指标数据不足或未达到阈值，证据强度：❓",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert any(d["id"] == "completion-empty-basis" and "左侧" in d["message"]
                    for d in completion.details)
         assert completion.status == "fail"
 
@@ -850,3 +871,32 @@ class TestQcLatestSkipsReviewMemo:
         p.parent.mkdir(parents=True)
         p.write_text(COMPLIANT_ETF, encoding="utf-8")
         assert detect_report_type(p) == "etf", "报告风格时间戳被误判为复盘纪要"
+
+
+# ── CLI 默认 profile：第 0 层门禁必须覆盖 LAW 6 ──────────────────────────────
+#
+# CLAUDE.md 第 0 层「机器准出（必跑）」就是 `report_qc.py <报告> --fail-on error`
+# 这条不带 --profile 的命令，因此 **CLI 默认值就是合规门禁本身**。
+# 历史默认 precommit 是对齐旧 check_report.sh 的阻断项，会跳过全部 law6-* 与
+# known-violation*（实测 73 条规则中 35 条被跳过，含 14 条 error 级）；v0.3.0 把
+# 模型撰写的 analysis 正文放进报告首屏后，这条命令便再也拦不住 LAW 6 违规。
+
+class TestCliDefaultProfileCoversLaw6:
+    def _report_with_law6_violation(self, tmp_path: Path) -> Path:
+        # 用干净合规样例只注入 LAW 6 违规：避免 completion 等其它层先 FAIL，
+        # 掩盖「默认 profile 是否拦得住 law6」这一被测结论。
+        text = COMPLIANT_STOCK.replace("不构成投资建议",
+                                       "建议买入并加仓，目标价 25.0 元")
+        return _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", text)
+
+    def test_cli_default_catches_law6_violation(self, tmp_path: Path):
+        """断言**行为**而非 profile 字符串：默认调用必须 FAIL。"""
+        report = self._report_with_law6_violation(tmp_path)
+        rc = main([str(report), "--fail-on", "error"])
+        assert rc == 2, "默认 profile 未拦截 LAW 6 违规 → 第 0 层门禁失效"
+
+    def test_explicit_precommit_profile_stays_lax(self, tmp_path: Path):
+        """显式 precommit 仍是宽松档：.pre-commit-config.yaml 依赖该语义。"""
+        report = self._report_with_law6_violation(tmp_path)
+        rc = main([str(report), "--fail-on", "error", "--profile", "precommit"])
+        assert rc != 2, "precommit 档不应拦截（提交期性能取舍，由 hook 显式声明）"

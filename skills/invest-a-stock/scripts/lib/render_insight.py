@@ -12,6 +12,12 @@ from typing import Any
 #   · 有基线且无变化 → 给出对比窗口与无变化项数，**可核验**
 #   · 无基线（首次运行 / store 不可用）→ 说明「无可对比快照」，不假装「无变化」
 _NO_BASELINE_LINE = "- 本次无可对比的历史快照，未生成新增发现。"
+# status=changed 但每条都被过滤掉时的兜底：**有**基线、**有**变化，只是无可渲染行。
+# 与 _NO_BASELINE_LINE 语义相反，不得混用（原实现引用了一个从未定义的
+# _NO_DISCOVERY_LINE，走到该分支即 NameError）。
+_NO_RENDERABLE_LINE = (
+    "- 本次记录到关键字段变化，但无可展示的变化条目（明细见同代 .insight.json）。"
+)
 _NO_CHAIN_LINE = (
     "- 当前 Facts 不足以构成可验证的分析链（需两个以上事实并列出替代解释）；"
     "不预置机制叙述。"
@@ -22,6 +28,20 @@ _CHAIN_STATUS_LABEL = {
 }
 _CHAIN_SECTION_TITLE = "研究问题与证伪条件"
 _CHAIN_SECTION_NOTE = "每条给出一个当前证据尚不能回答的问题、竞争解释与可观测的证伪条件；一致不等于因果。"
+
+# 分析合成（analysis.json 注入）：读者面向的最深内容，位置紧跟核心矛盾——
+# 引擎结论在前、合成在后，但不把价值埋进文末（2026-09-16 用户审阅：full 报告
+# 有价值段落落在 1156 行的第 940 行之后）。
+_SYNTHESIS_SECTION_TITLE = "分析合成（Claude 撰写）"
+# 纯文本，md/html 逐字共用：HTML 侧走 escape()，任何 markdown 标记都会显示成
+# 字面星号；两格式各写一份带标记的版本又会漂移（见下方同源注释）。
+_SYNTHESIS_SECTION_NOTE = (
+    "本节由 analysis.json 提供，属模型撰写的合成内容，非引擎确定性 Finding："
+    "其中的数字与判断未经引擎来源校验，也不参与本产物的完成度判定；"
+    "引用前请回查下方证据底稿与原始来源。"
+)
+_SYNTHESIS_LABEL_INJECTED = "已注入"
+_SYNTHESIS_LABEL_ABSENT = "未注入（仅引擎结论）"
 
 
 def _name(model: dict[str, Any]) -> str:
@@ -148,7 +168,7 @@ def _discovery_lines(model: dict[str, Any]) -> list[str]:
     unchanged = block.get("unchanged_count")
     if isinstance(unchanged, int) and unchanged > 0:
         lines.append(f"（另有 {unchanged} 项关键字段无显著变化）")
-    return lines or [_NO_DISCOVERY_LINE]
+    return lines or [_NO_RENDERABLE_LINE]
 
 
 def _chain_lines(model: dict[str, Any]) -> list[str]:
@@ -183,6 +203,81 @@ def _chain_lines(model: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _synthesis_label(model: dict[str, Any]) -> str:
+    """状态卡上的「分析合成」字段。与 completion 是两条独立状态轴，不互相推导。"""
+    block = model.get("synthesis") or {}
+    if block.get("status") == "injected":
+        count = block.get("section_count")
+        suffix = f"（{count} 段）" if isinstance(count, int) and count > 0 else ""
+        return f"{_SYNTHESIS_LABEL_INJECTED}{suffix}"
+    return _SYNTHESIS_LABEL_ABSENT
+
+
+def _synthesis_sections(model: dict[str, Any]) -> list[dict[str, Any]]:
+    """仅当 status 为 injected 时返回段列表；否则空列表（渲染层零 diff）。"""
+    block = model.get("synthesis") or {}
+    if block.get("status") != "injected":
+        return []
+    return [sec for sec in (block.get("sections") or []) if isinstance(sec, dict)]
+
+
+def _synthesis_lines(model: dict[str, Any]) -> list[str]:
+    """「分析合成」的 markdown 行（不含章节标题）。
+
+    体例与 full 侧 _render_analysis_appendix 逐字一致，避免两个消费同一份
+    analysis.json 的模式在措辞上漂移。
+    """
+    lines: list[str] = []
+    for i, sec in enumerate(_synthesis_sections(model)):
+        mod = str(sec.get("module") or sec.get("position") or f"section-{i}")
+        title = str(sec.get("title") or mod).strip()
+        facts = str(sec.get("facts_md") or "").strip()
+        amd = str(sec.get("analysis_md") or "").strip()
+        ev = str(sec.get("evidence_tag") or "").strip()
+        lines += [f"### {title}（{mod}）", ""]
+        if facts:
+            lines += ["**[事实]**", "", facts, ""]
+        if amd:
+            lines += ["**[分析]**", "", amd, ""]
+        if ev:
+            lines += [f"**证据等级：** {ev}", ""]
+    return lines
+
+
+def _html_synthesis(model: dict[str, Any]) -> str:
+    """分析合成的 HTML 分区。未注入 → 空串。
+
+    段内容走 lib.md_subset（analysis_schema 已保证 md 子集合法），与
+    render_html._html_analysis 同手法；卡片 id 用 synthesis- 前缀，与
+    Finding 的 evidence- 锚点互不干扰（report_qc 依赖后者做配对校验）。
+    """
+    sections = _synthesis_sections(model)
+    if not sections:
+        return ""
+    from lib.md_subset import MarkdownSubsetError, render_markdown
+
+    cards: list[str] = []
+    for i, sec in enumerate(sections):
+        mod = str(sec.get("module") or sec.get("position") or f"section-{i}")
+        try:
+            facts_html = render_markdown(str(sec.get("facts_md") or ""))
+            ana_html = render_markdown(str(sec.get("analysis_md") or ""))
+        except MarkdownSubsetError as exc:
+            ana_html = f'<div class="note">分析段 md 子集校验失败：{escape(str(exc))}</div>'
+            facts_html = ""
+        cards.append(
+            f'<article class="finding" id="synthesis-{escape(str(i))}">'
+            f'<h3>{escape(str(sec.get("title") or mod))}</h3>'
+            f'<p class="note">{escape(mod)} · 证据等级：{escape(str(sec.get("evidence_tag") or "—"))}</p>'
+            f"<div>{facts_html}{ana_html}</div></article>"
+        )
+    return (
+        f'<section id="synthesis"><h2>{escape(_SYNTHESIS_SECTION_TITLE)}</h2>'
+        f'<p class="note">{escape(_SYNTHESIS_SECTION_NOTE)}</p>'
+        + "".join(cards) + "</section>"
+    )
+
+
 def render_insight_markdown(model: dict[str, Any]) -> str:
     """Render concise analysis, never raw module tables as the reading surface."""
     title = f"# {_name(model)} ({model['symbol']}) — 研究要点"
@@ -192,7 +287,8 @@ def render_insight_markdown(model: dict[str, Any]) -> str:
     lines = [
         title, "",
         "> ⚠️ 风险提示：本报告是基于可追溯数据的研究整理，不构成任何投资建议、买卖指令或目标价预测。", "",
-        f"**产物状态：** {status} ｜ **数据时间：** {_beijing(model.get('fetched_at'))} ｜ **研究档案：** {profile_text}",
+        f"**产物状态：** {status} ｜ **分析合成：** {_synthesis_label(model)}"
+        f" ｜ **数据时间：** {_beijing(model.get('fetched_at'))} ｜ **研究档案：** {profile_text}",
         "",
         "## 可得结论",
     ]
@@ -208,6 +304,11 @@ def render_insight_markdown(model: dict[str, Any]) -> str:
     lines += ["", "## 核心矛盾", f"**{tension['claim']}**"]
     if tension["fact_ids"]:
         lines.append(f"[来源: {_source_label(model, tension['fact_ids'])}]")
+    # 分析合成紧跟核心矛盾：引擎结论（可得结论/核心矛盾）在前，人写合成在后，
+    # 但不落到文末——「有价值的内容必须在阅读面靠前」是本次改动的出发点。
+    if _synthesis_sections(model):
+        lines += ["", f"## {_SYNTHESIS_SECTION_TITLE}", _SYNTHESIS_SECTION_NOTE]
+        lines += _synthesis_lines(model)
     lines += ["", "## 本次新增发现"]
     lines += _discovery_lines(model)
     lines += ["", f"## {_CHAIN_SECTION_TITLE}", _CHAIN_SECTION_NOTE]
@@ -261,11 +362,14 @@ def render_insight_html(model: dict[str, Any]) -> str:
     discoveries_html = escape("\n".join(_discovery_lines(model)))
     chains_html = escape("\n".join(_chain_lines(model)))
     fetched_label = escape(_beijing(model.get("fetched_at")))
+    # 与 markdown 同位：核心矛盾之后、本次新增发现之前（两格式同序）
+    synthesis_html = _html_synthesis(model)
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(_name(model))} — 研究要点</title>
 <style>:root{{--bg:#10131a;--card:#171c26;--text:#e9edf5;--muted:#aeb9cc;--line:#303a4b;--accent:#7db1ff}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 system-ui,sans-serif}}main{{max-width:1120px;margin:auto;padding:24px}}section{{margin:24px 0}}.status,.finding,.evidence{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:10px 0}}.finding h3,.evidence h3{{margin:0 0 8px;font-size:16px}}a{{color:var(--accent)}}table{{border-collapse:collapse;width:100%;font-size:13px}}td,th{{border-bottom:1px solid var(--line);padding:9px;text-align:left;vertical-align:top}}select{{padding:7px;background:var(--card);color:var(--text);border:1px solid var(--line)}}.note{{color:var(--muted)}}.plain{{margin:0;white-space:pre-wrap;font:inherit;color:inherit}}@media print{{body{{background:white;color:black}}.status,.finding,.evidence{{border-color:#aaa;background:white}}}}</style></head><body><main>
-<h1>{escape(_name(model))} ({escape(model["symbol"])}) — 研究要点</h1><div class="status"><b>产物状态：</b>{status} ｜ <b>数据时间：</b>{fetched_label} ｜ <b>契约：</b>{escape(model["report_contract_version"])}</div>
+<h1>{escape(_name(model))} ({escape(model["symbol"])}) — 研究要点</h1><div class="status"><b>产物状态：</b>{status} ｜ <b>分析合成：</b>{escape(_synthesis_label(model))} ｜ <b>数据时间：</b>{fetched_label} ｜ <b>契约：</b>{escape(model["report_contract_version"])}</div>
 <p class="note">⚠️ 本页用于研究与数据核验，不构成任何投资建议、买卖指令或目标价预测。</p><section><h2>可得结论</h2>{cards}</section>
 <section><h2>核心矛盾</h2><div class="finding">{escape(model["core_tension"]["claim"])}</div></section>
+{synthesis_html}
 <section><h2>本次新增发现</h2><div class="finding"><pre class="plain">{discoveries_html}</pre></div></section>
 <section><h2>{escape(_CHAIN_SECTION_TITLE)}</h2><div class="finding"><p class="note">{escape(_CHAIN_SECTION_NOTE)}</p><pre class="plain">{chains_html}</pre></div></section>
 <section><h2>证据与反证</h2>{evidence}</section>

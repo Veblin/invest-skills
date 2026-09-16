@@ -479,19 +479,42 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
 
 
 def _flow_amount_yuan(record: dict) -> float | None:
-    """从归一化后的资金流记录读取净额（元），缺失时返回 None。"""
+    """从归一化后的资金流记录读取净额（元），缺失时返回 None。
+
+    缺失判定走 safe_float：pandas DataFrame 的缺失值是 NaN 而非 None，
+    `float(NaN)` 会成功返回 NaN 并一路穿透成报告字面量「nan」。
+    """
     val = record.get("net_mf_amount")
     if val is None:
         val = record.get("net_mf_vol")
-    if val is None:
+    return safe_float(val)
+
+
+def _flow_lg_elg_yuan(record: dict) -> float | None:
+    """大单+特大单净额（元）——行情软件惯用的「主力」口径。
+
+    Tushare moneyflow 的 buy/sell_lg_amount 与 buy/sell_elg_amount 单位**万元**
+    （与 net_mf_amount 同），故乘 ONE_PER_WAN。四个字段任一缺失 → None：不部分
+    求和，避免把残缺口径当成完整口径输出（宁缺勿错）。
+
+    缺失判定走 safe_float：DataFrame 的缺失值是 NaN 而非 None，
+    `any(v is None)` 拦不住它（float(NaN) 是合法 float），求和结果也会是 NaN。
+    """
+    keys = ("buy_lg_amount", "sell_lg_amount", "buy_elg_amount", "sell_elg_amount")
+    buy_lg, sell_lg, buy_elg, sell_elg = (safe_float(record.get(k)) for k in keys)
+    if buy_lg is None or sell_lg is None or buy_elg is None or sell_elg is None:
         return None
-    return float(val)
+    return (buy_lg + buy_elg - sell_lg - sell_elg) * ONE_PER_WAN
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
     config, tc = _require_tushare()
+    # 含大单/特大单分档金额：net_mf_amount 是**全档**净额，与「主力」口径
+    # 方向可相反（见 participant_scan._MF_LABELS 注释），需并列输出。
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,net_mf_amount,buy_sm_vol,sell_sm_vol,net_mf_vol",
+                  fields="ts_code,trade_date,net_mf_amount,"
+                         "buy_sm_vol,sell_sm_vol,net_mf_vol,"
+                         "buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount",
                   start_date=_days_ago(10), end_date=_today())
     if df is not None and not df.empty:
         return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
@@ -517,6 +540,20 @@ def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
 
 
 _MAINBZ_TYPES = {"P": "product", "D": "region"}
+
+# 非分部的行：接口会按报告期**变化地**返回这些合计/调整行，必须全部剔除。
+#   20241231 实测：type=P 多出一行名为「产品」、type=D 多出一行名为「地区」，
+#   其 bz_sales 恰为其余分部之和（362012554000）；同时「合计特别调整」的
+#   bz_sales 是 1000.0 —— 不是 NaN，**躲过了 NaN 过滤**。
+#   20260630 实测：无「产品」/「地区」行，「合计特别调整」为 NaN。
+# 若不剔除，按分部求和会虚高近一倍（7240.25 亿 vs 真实 3620.13 亿）。
+_MAINBZ_NON_SEGMENT_ITEMS = frozenset({"产品", "地区", "合计"})
+
+
+def _is_segment_item(item: str) -> bool:
+    """是否为真正的分部行（排除合计行与特别调整行）。"""
+    name = item.strip()
+    return bool(name) and name not in _MAINBZ_NON_SEGMENT_ITEMS and "合计" not in name
 
 
 def _dedupe_mainbz_rows(records: list[dict]) -> list[dict]:
@@ -555,8 +592,9 @@ def _q_tushare_mainbz(symbol: str) -> list[dict] | None:
             end_date = str(raw.get("end_date") or "").strip()
             sales = safe_float(raw.get("bz_sales"))
             profit = safe_float(raw.get("bz_profit"))
-            # 「合计特别调整」等行 bz_sales 为 NaN——不是分部，剔除
-            if not item or not end_date or sales is None:
+            # 合计/调整行一律剔除（见 _MAINBZ_NON_SEGMENT_ITEMS：其 bz_sales
+            # 时而为 NaN、时而为 1000.0、时而等于全部分部之和，只靠 NaN 挡不住）
+            if not _is_segment_item(item) or not end_date or sales is None:
                 continue
             records.append({"bz_item": item, "bz_sales": sales,
                             "bz_profit": profit, "end_date": end_date})

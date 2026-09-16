@@ -198,7 +198,9 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 
 **第二层（.md 文件）**：完整备忘录 + References（见 [references/references-format.md](references/references-format.md)），采用 LAW 17 金字塔结构。
 
-**Insight 层（`report --mode insight`，v0.3.0 MVP）**：面向阅读的研究要点，由确定性 Facts / Findings 模型生成。首层只给可追溯结论、核心矛盾、反证/关联边界、观察节点与补证路径；九模块原始表和公式继续留在 `full` 审计底稿。每次同时落盘 `.facts.json`、`.insight.json` 与 `.report.json`，Markdown 与 HTML 只能消费同一代 Finding。证据不足时明确标为「分析未完成」，不以空模板或数据罗列伪装完成。
+**Insight 层（`report --mode insight`，v0.3.0 MVP）**：面向阅读的研究要点，由确定性 Facts / Findings 模型生成。首层只给可追溯结论、核心矛盾、分析合成、反证/关联边界、观察节点与补证路径；九模块原始表和公式继续留在 `full` 审计底稿。每次同时落盘 `.facts.json`、`.insight.json` 与 `.report.json`，Markdown 与 HTML 只能消费同一代 Finding。证据不足时明确标为「分析未完成」，不以空模板或数据罗列伪装完成。
+
+**分析合成注入（`--analysis`）**：传入时把 analysis.json 渲染为「分析合成（Claude 撰写）」独立分区（置于核心矛盾之后），并落同代 `<ts>.insight.analysis.json` 侧车、在 manifest 登记 `analysis_sidecar`。该分区**不是 Finding**：不参与 findings / core_tension / analysis_chains / completion 的任何推导，段内数字未经引擎来源校验（`analysis.json` 协议无 fact_id 字段，可审计性止于「来源 + 同代绑定 + 段级证据等级」）。`completion` 与 `synthesis.status` 是两条独立状态轴——AI 散文不得把「证据不足」抬成「分析完成」。未传 `--analysis` 时**不渲染分析合成分区、不写分析侧车**；既有输出契约不变，但有两处**新增字段**（非逐字节一致）：状态卡多一段「分析合成：未注入（仅引擎结论）」，`.insight.json` 多一个 `synthesis` 键（`status="absent"`）。以逐字节基线验收的消费者需知悉。
 
 **第三层（concise 对话模式）**：Hermes/OpenClaw 等对话场景使用。结论先行 + 关键数据展开块。3-5 段核心结论直出，详细数据用 `<details>` 折叠。CLI 对应 `--mode concise`。
 
@@ -521,7 +523,7 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ### SOP-M1 宏观情景（`--with-macro`）
 
-> 完整指标清单与输出格式见 CLAUDE.md「宏观情景」。要点：简报首行 `[宏观情景] PMI + CPI + LPR → 政策方向 | VIX + 波动等级 + SOX`，各指标带引擎来源标注。
+> 完整指标清单与输出格式见 CLAUDE.md「宏观情景」。要点：简报首行 `[宏观情景]` 为**两段式、每段各带结论**——首行「国内：PMI + CPI + LPR + M2 →政策方向 |」，次行「海外：VIX + 波动等级 + SOX + 美 10Y/实际利率/期限利差/布油 →海外结论」。海外段指标集由 `TestLabelE2` 锁定，不得删减；两段结论均由确定性规则生成，不由 LLM 书写。
 
 ---
 

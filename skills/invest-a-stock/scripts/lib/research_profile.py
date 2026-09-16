@@ -213,7 +213,10 @@ def _format_horizon(profile: dict[str, Any]) -> str | None:
     horizon = profile.get("horizon")
     if not horizon:
         return None
-    return f"持有周期={_HORIZON_LABELS.get(horizon, horizon)}"
+    # 字段名避开「持有」二字：law6-hold-standalone 词规（error 级）会命中
+    # 「持有周期」，使任何带研究档案的报告无法通过第 0 层门禁——引擎自有固定
+    # 文案不得触发红线词规（改文案，而非放宽规则）。
+    return f"周期视角={_HORIZON_LABELS.get(horizon, horizon)}"
 
 
 def _format_focus(profile: dict[str, Any]) -> str | None:
