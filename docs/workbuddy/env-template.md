@@ -22,14 +22,13 @@ New-Item -ItemType Directory -Force -Path "$HOME\.config\investment"
 
 写入后**无需重启客户端**——引擎按需读取（仅设置环境变量需要完全重启客户端）。
 
-## 9 个 Token 清单（与 gemini-extension.json.in settings 一致）
+## 8 个 Token 清单（与 gemini-extension.json.in settings 一致）
 
 | Key | 用途 | 获取 |
 |-----|------|------|
 | `TUSHARE_TOKEN` | 财务/估值/资金/股东/K 线 | [tushare.pro](https://tushare.pro) 注册即送（积分档位见 README CONFIGURATION） |
 | `FRED_API_KEY` | 美国 10Y 国债（DCF WACC）、VIX | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) 免费 |
 | `TAVILY_API_KEY` | 新闻搜索 Layer3（可选，无 Key 静默降级） | [tavily.com](https://tavily.com) 免费 |
-| `BOCHA_API_KEY` | 研报/机构观点补充源 | 按服务方注册 |
 | `LONGBRIDGE_APP_KEY` | 长桥（港美股数据） | 长桥开放平台 |
 | `LONGBRIDGE_APP_SECRET` | 长桥 App Secret | 长桥开放平台 |
 | `LONGBRIDGE_ACCESS_TOKEN` | 长桥访问令牌 | 长桥开放平台 |

@@ -56,7 +56,6 @@
 | `TUSHARE_TOKEN` | 财务/估值/资金/股东/K线（补充源） | tushare.pro 注册即送 | 推荐 |
 | `FRED_API_KEY` | 美国 10Y 国债（DCF）、VIX | fred.stlouisfed.org 免费 | 可选 |
 | `TAVILY_API_KEY` | 新闻搜索第三层 | tavily.com 免费 | 可选 |
-| `BOCHA_API_KEY` | 研报/机构观点 | 按服务方注册 | 可选 |
 
 配置方法（任选）：
 1. **对话式（最简单）**：在对话中把 token 直接发给技能，说「帮我配置 TUSHARE_TOKEN=xxx」，技能会写入全局配置并限制权限

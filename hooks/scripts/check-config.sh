@@ -45,7 +45,7 @@ else
 fi
 
 # 检测可选 Token
-for token in TUSHARE_TOKEN FRED_API_KEY TAVILY_API_KEY BOCHA_API_KEY; do
+for token in TUSHARE_TOKEN FRED_API_KEY TAVILY_API_KEY; do
     if [ -n "${!token:-}" ]; then
         echo "✅ $token 已配置"
     else
