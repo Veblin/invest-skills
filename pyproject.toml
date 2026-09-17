@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["skills/invest-a-stock/tests", "skills/invest-a-gap-scan/tests", "skills/invest-a-journal/tests", "skills/invest-a-etf/tests", "skills/invest-hk-stock/tests", "skills/invest-a-pattern-scan/tests", "skills/invest-a-event-calendar/tests", "skills/invest-a-discover-scan/tests", "skills/lib/tests"]
+testpaths = ["skills/invest-a-stock/tests", "skills/invest-a-gap-scan/tests", "skills/invest-a-journal/tests", "skills/invest-a-etf/tests", "skills/invest-hk-stock/tests", "skills/invest-a-pattern-scan/tests", "skills/invest-a-event-calendar/tests", "skills/invest-a-discover-scan/tests", "skills/lib/tests", ".github/scripts"]
 python_files = ["test_*.py"]
 addopts = ["-q", "--tb=short"]
 markers = [

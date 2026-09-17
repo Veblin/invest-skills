@@ -126,32 +126,93 @@ def test_condense_section_drops_details():
     assert condense_section(plain) == plain
 
 
+def _current_section_expectations() -> tuple[str, list[str], list[str]]:
+    """从 CHANGELOG 的**当前版本段**推导期望值：``(引言块, [### 标题...], [正文细节行...])``。
+
+    期望值全部由 CHANGELOG 现文推导，**不锚具体版本的正文短语**。
+
+    历史缺陷（两次复发）：本文件原先硬编码当前版本的正文短语（v0.2.9 期锚
+    「拍卖机制观」/「Frydman & Wang 2020」），每次 bump 后必然失配。因本文件不在
+    `pyproject.toml` 的 testpaths 内，本机 `pytest` 恒不执行它 → 红灯只能在 CI
+    可见，而 CI 仅在水 PR/main 时触发 → 潜伏至合并才爆。
+    （同步记录：commit `3b4feeb` 曾同步过一次锚点；v0.3.0 再度失配。）
+    """
+    from extract_release_notes import extract_changelog_section
+
+    tag = f"v{_current_version()}"
+    changelog_text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    section = extract_changelog_section(changelog_text, tag)
+    assert section, f"CHANGELOG.md 缺 {tag} 段——发布链前提不成立"
+
+    lines = section.splitlines()
+    headers = [ln.strip()[4:].strip() for ln in lines if ln.strip().startswith("### ")]
+
+    intro_lines: list[str] = []
+    for ln in lines:
+        if ln.strip().startswith("### "):
+            break
+        intro_lines.append(ln)
+    while intro_lines and not intro_lines[-1].strip():
+        intro_lines.pop()
+    intro = "\n".join(intro_lines).strip()
+
+    # 小节正文细节行：位于 ### 之后、以 `- ` 开头、且足够长（避免通用短语误命中）
+    details: list[str] = []
+    in_body = False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("### "):
+            in_body = True
+            continue
+        if in_body and s.startswith("- ") and len(s) > 40:
+            details.append(s[2:].strip())
+
+    return intro, headers, details
+
+
 def test_condensed_current_version_notes():
-    """当前版本（v0.2.9）默认输出精简正文：引言 + 主要修改清单，无深层细节。"""
+    """当前版本默认输出精简正文：引言块 + 「### 标题」清单，且不含小节正文细节。
+
+    期望值由 `_current_section_expectations()` 从 CHANGELOG 现文推导，bump 版本不失配。
+    """
     out = subprocess.check_output(
         [sys.executable, str(SCRIPT), "--from-pyproject"],
         text=True,
         cwd=ROOT,
     )
     tag = f"v{_current_version()}"
+    intro, headers, details = _current_section_expectations()
+
     assert f"## {tag}" in out
-    assert "拍卖机制观" in out  # 引言
-    assert "- 持仓位置参考层（P 域）" in out  # ### 标题即主要修改
-    assert "- 质量与工程" in out
-    assert "Frydman" not in out  # 深层细节已精简
+    assert intro and intro in out, "引言块应原样保留"
+    assert headers, "当前版本段无 ### 小节——本测试前提不成立（应改用旧版本回退断言）"
+    for h in headers:
+        assert f"- {h}" in out, f"### 标题应以「- {h}」进入主要修改清单"
+    assert details, "当前版本段无可验证的长正文细节行——「细节已精简」无从断言"
+    for d in details:
+        assert d not in out, f"小节正文细节应被精简，却出现：{d[:30]}…"
     assert "**Full Changelog**" in out
     assert "CHANGELOG.md" in out
 
 
 def test_full_flag_keeps_full_section():
-    """--full 显式输出章节全文（供调试/其他用途）。"""
+    """--full 显式输出章节全文（供调试/其他用途）：小节正文细节**保留**。
+
+    与本文件上一条构成对照——同一条推导出的细节行，精简模式必须缺、全文模式必须在。
+    """
     out = subprocess.check_output(
         [sys.executable, str(SCRIPT), "--from-pyproject", "--full"],
         text=True,
         cwd=ROOT,
     )
-    assert "Frydman & Wang 2020" in out  # ### 小节正文细节
+    _, headers, details = _current_section_expectations()
+
     assert "### " in out
+    for h in headers:
+        assert h in out, f"小节标题应在全文模式保留：{h}"
+    assert details, "当前版本段无可验证的长正文细节行——「细节保留」无从断言"
+    for d in details:
+        assert d in out, f"小节正文细节应在全文模式保留，却缺失：{d[:30]}…"
 
 
 def test_truncate_chars_codepoint_safe():
