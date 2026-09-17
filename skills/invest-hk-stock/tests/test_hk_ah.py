@@ -210,12 +210,20 @@ def _cli():
     return _CLI
 
 
-def _stub_all(monkeypatch, *, a_price=36.42, h_price=42.15, fx=None):
+def _stub_all(monkeypatch, *, a_price=36.42, h_price=42.15, fx=None,
+              a_ts="20260912150000", h_ts="2026/09/12 16:08:06"):
+    """两侧报价 stub。
+
+    时间戳**必须给且同日**（2026-09-12 双侧已收盘）——真实持仓快照恒带下标 30
+    时间戳，缺 ts 会让交易日对齐判定判不可比（D1 修复后的新契约）。原 stub 只给
+    `"20260912"`（8 位日期、非实测格式），属 fixture 不真实，已按 2026-09-17
+    实测格式修正。
+    """
     hk_mod = _cli()
 
-    monkeypatch.setattr(hk_mod, "_a_quote_row", lambda s: {"price": a_price})
+    monkeypatch.setattr(hk_mod, "_a_quote_row", lambda s: {"price": a_price, "ts": a_ts})
     monkeypatch.setattr(hk_mod, "_snapshot_row",
-                        lambda s: {"price": h_price, "name": "招商银行", "ts": "20260912"})
+                        lambda s: {"price": h_price, "name": "招商银行", "ts": h_ts})
     monkeypatch.setattr(hk_mod.hk_ah, "fetch_fx_hkd_cny",
                         lambda: dict(fx if fx is not None else _FX_OK))
     return hk_mod
@@ -249,6 +257,16 @@ def test_cli_ah_missing_fx_is_explicit(monkeypatch, tmp_path, capsys):
     assert hk_mod.cmd_ah(_args(tmp_path)) == 1
     out = capsys.readouterr().out
     assert "汇率不可得" in out and "—（不可得）" in out
+
+
+def test_cli_ah_does_not_print_fallback_from_a_auction(monkeypatch, tmp_path, capsys):
+    """回退口径中的 A 价必须是已收盘价，不能把竞价指示价标作「A 的收盘」。"""
+    hk_mod = _stub_all(monkeypatch, a_ts="20260917092000",
+                       h_ts="2026/09/17 09:20:00")
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "—（不可比）" in out
+    assert "参考口径（**前提待验证，非本表结论**）" not in out
 
 
 def test_cli_ah_rejects_a_share_code_in_hk_slot(monkeypatch, tmp_path, capsys):

@@ -28,6 +28,171 @@ _BOC_LOOKBACK_DAYS = 30        # 显式回溯窗：不传日期时该接口返�
 _FX_STALE_WARN_DAYS = 10       # 源日期距今超过此值 → 标注「数据陈旧」
 _FX_STALE_FAIL_DAYS = 30       # 超过此值 → 视为不可得，转下一级源（防用 3 年前的汇率算溢价）
 
+# ---------------------------------------------------------------------------
+# 交易日对齐（HK-2 D1/D2 修复，2026-09-17）
+# ---------------------------------------------------------------------------
+# 缺陷记录（2026-09-17 实测）：cmd_ah 分别取 A 股快照与 H 股快照的「最新可得价」，
+# 无任何日期/市场状态校验 → 盘前跑出「A 9/16 收盘 vs H 9/15 收盘」的跨日错配
+# （-31.33%），7 分钟后再跑取到 H 竞价指示价（-27.68%），而正确值（双侧 9/16 收盘）
+# 是 -29.27%。原报告注记把跨日错配描述成「快照时点差」，掩盖了真实缺陷。
+# 纪律：溢价率仅在两侧 **同交易日** 且 **状态可比** 时计算；否则拒绝出数并显式
+# 输出两侧日期与状态。
+_STATE_UNKNOWN = "未知"
+_STATE_PREOPEN = "未开盘"
+_STATE_AUCTION = "竞价时段"
+_STATE_TRADING = "交易中"
+_STATE_LUNCH = "午间休市"
+_STATE_CLOSED = "已收盘"
+
+# (市场, [(起, 止, 状态)]) —— 半开区间 [起, 止)
+_SESSIONS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "A": (
+        ("09:15", "09:30", _STATE_AUCTION),
+        ("09:30", "11:30", _STATE_TRADING),
+        ("11:30", "13:00", _STATE_LUNCH),
+        ("13:00", "15:00", _STATE_TRADING),
+    ),
+    "HK": (
+        ("09:00", "09:30", _STATE_AUCTION),
+        ("09:30", "12:00", _STATE_TRADING),
+        ("12:00", "13:00", _STATE_LUNCH),
+        ("13:00", "16:00", _STATE_TRADING),
+    ),
+}
+
+
+# 市值口径警告（HK-2 D3，2026-09-17 实测）
+# 腾讯 r_hk 下标 44 的语义**随标的变化**：纯港股标的（00700 实测）为总市值
+# （40308.77 亿 HKD，与价×总股本自洽）；A+H 标的（03750 实测）为 **H 股部分**
+# 市值（≈1,070 亿 HKD，而 A 股口径总市值 14,135 亿 CNY）——两者不可跨市场并列。
+# 使用该字段处一律带此注（development-rules D4：聚合字段须标注覆盖范围）。
+MCAP_SCOPE_NOTE = (
+    "市值口径：腾讯 r_hk 下标 44。纯港股标的为**总市值**（00700 实测与价×股本自洽）；"
+    "A+H 标的实测为 **H 股部分市值**（03750 实测 ≈1,070 亿 HKD，同刻 A 股口径总市值 "
+    "14,135 亿 CNY）→ **不得与 A 股口径总市值并列或相加**。本引擎未采集股本结构字段，"
+    "无法自动判别标的属哪一类。"
+)
+
+
+def parse_quote_ts(raw) -> tuple[str | None, str | None]:
+    """腾讯行情时间戳 → ``(ISO 日期, "HH:MM")``；不可解析 → ``(None, None)``。
+
+    兼容两种实测格式：
+    - 港股 r_hk 下标 30：``"2026/09/04 16:08:06"``
+    - A 股 v_sz/sh 下标 30：``"20260916161421"``（YYYYMMDDHHMMSS）
+
+    ⚠️ 该字段是「最后一次行情更新时刻」，**不是交易推进信号**：A 股盘前实测仍为
+    前一交易日的 16:14，故其日期部分可直接用于「这份报价属于哪个交易日」的判定。
+    """
+    import re as _re
+
+    s = str(raw or "").strip()
+    if not s:
+        return (None, None)
+    m = _re.match(r"^(\d{4})[/-](\d{2})[/-](\d{2})[ T](\d{2}):(\d{2})", s)
+    if m:
+        y, mo, d, hh, mi = m.groups()
+        return (f"{y}-{mo}-{d}", f"{hh}:{mi}")
+    m = _re.match(r"^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})", s)
+    if m:
+        y, mo, d, hh, mi = m.groups()
+        return (f"{y}-{mo}-{d}", f"{hh}:{mi}")
+    return (None, None)
+
+
+def market_state(raw_ts, market: str) -> str:
+    """行情时间戳 + 市场（``"A"``/``"HK"``）→ 市场状态。
+
+    返回值 ∈ {未开盘, 竞价时段, 交易中, 午间休市, 已收盘, 未知}。
+    时间戳不可解析 → ``未知``（不猜、不当作已收盘）。
+    """
+    _, hm = parse_quote_ts(raw_ts)
+    if hm is None:
+        return _STATE_UNKNOWN
+    for start, end, state in _SESSIONS.get(market, ()):
+        if start <= hm < end:
+            return state
+    # 落在所有时段之外：早于首段 → 未开盘；晚于末段 → 已收盘
+    sessions = _SESSIONS.get(market)
+    if not sessions:
+        return _STATE_UNKNOWN
+    return _STATE_PREOPEN if hm < sessions[0][0] else _STATE_CLOSED
+
+
+def align_quotes(a_quote: dict, h_quote: dict) -> dict:
+    """两侧报价的**同日/同态**对齐判定（纯函数）。
+
+    返回::
+
+        {
+          "comparable": bool,          # 是否可直接计算溢价率
+          "basis": str,                # 口径说明（可比时）或不可比原因
+          "a_date"/"h_date": str|None, # 各侧报价所属交易日
+          "a_state"/"h_state": str,    # 各侧市场状态
+          "a_price"/"h_price": float|None,
+          "fallback": dict|None,       # 不可比时的回退口径（前提为待验证）
+        }
+
+    可比条件：**两侧报价日期相同** 且 **两侧状态都已产生今日成交价**
+    （状态 ∈ {交易中, 午间休市, 已收盘}）。
+
+    两条排除逻辑各有实测依据：
+    - **日期不同 → 排除**：D1 缺陷现场（A 取 9/16 收盘、H 取 9/15 收盘，引擎仍算出
+      -31.33%，正确值 -29.27%）。
+    - **任一侧处于 未开盘 / 竞价时段 → 排除**：D2 缺陷现场（09:00 港股未开盘，
+      r_hk 的 price 是跳动中的竞价参考：516.0 → 490.0 → 485.0 一分钟内）。
+      **同日两侧都在竞价时同样排除**——竞价价不是成交价。
+    - 午间休市（12:00–13:00）**可比**：两侧的上午成交价都是今日的，只是暂停撮合。
+
+    其余一律 ``comparable=False``——**不计算溢价率**（宁可不出数，不出误导数）。
+    """
+    a_ts = (a_quote or {}).get("ts")
+    h_ts = (h_quote or {}).get("ts")
+    a_date, _ = parse_quote_ts(a_ts)
+    h_date, _ = parse_quote_ts(h_ts)
+    a_state = market_state(a_ts, "A")
+    h_state = market_state(h_ts, "HK")
+    a_price = (a_quote or {}).get("price")
+    h_price = (h_quote or {}).get("price")
+
+    out: dict = {
+        "comparable": False, "basis": "", "a_date": a_date, "h_date": h_date,
+        "a_state": a_state, "h_state": h_state, "a_price": a_price,
+        "h_price": h_price, "fallback": None,
+    }
+
+    # 「已产生今日成交价」的状态族（竞价/未开盘不在其中：那还不是成交价）
+    _PRICED = {_STATE_TRADING, _STATE_LUNCH, _STATE_CLOSED}
+    if a_date and a_date == h_date and a_state in _PRICED and h_state in _PRICED:
+        if a_state == h_state:
+            label = {_STATE_CLOSED: "同一交易日收盘（双侧均已收盘）",
+                     _STATE_TRADING: "同一交易日盘中（双侧均在交易时段）",
+                     _STATE_LUNCH: "同一交易日午间休市（双侧上午价）"}[a_state]
+        else:
+            label = f"同一交易日混合状态（A: {a_state} / H: {h_state}，均为当日成交价）"
+        out.update(comparable=True, basis=label)
+        return out
+
+    # 不可比：给出可诊断的原因。只有 A 已收盘才能把其价格称为「A 的收盘」；
+    # 盘前/竞价报价即使带价格也只是指示价，绝不可据此计算回退参考。
+    if not a_date or not h_date:
+        out["basis"] = "两侧时间戳不可解析，无法判定是否为同一交易日"
+    elif a_date != h_date:
+        out["basis"] = (f"两侧交易日不一致（A: {a_date} / H: {h_date}），溢价率不可比")
+    else:
+        out["basis"] = (f"同日但状态不可比（A: {a_state} / H: {h_state}）"
+                        "——竞价参考价不是成交价，溢价率不可比")
+
+    h_prev = (h_quote or {}).get("prev_close")
+    if a_state == _STATE_CLOSED and h_prev is not None and a_price is not None:
+        out["fallback"] = {
+            "a_price": a_price, "h_price": h_prev,
+            "premise": ("以 H 最近已完成交易日收盘（昨收）对齐 A 的收盘。"
+                        "本工具无交易日历，**不代为断言**「H 昨收归属日 == A 交易日」——"
+                        "该前提须人工确认后此口径方可使用"),
+        }
+    return out
+
 
 def premium_pct(a_price, h_price, fx_cny_per_hkd) -> float | None:
     """A/H 溢价率（%）= ``A / (H × 汇率) − 1``；任一输入非正/非数值 → None。

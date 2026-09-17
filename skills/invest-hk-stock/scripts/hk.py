@@ -159,12 +159,14 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
               "（LAW 5：未获取到任何有效数据，无法判断）")
         return 1
     print(f"# {q.get('name') or code} ({code}) — {str(q.get('ts') or '')[:10]} 港股快照（币种 HKD）")
-    print(f"- 现价 {q['price']}（昨收 {_fmt_num(q.get('prev_close'))}，{_pct(q.get('chg_pct'))}）")
+    print(f"- 现价 {q['price']}（昨收 {_fmt_num(q.get('prev_close'))}，{_pct(q.get('chg_pct'))}）"
+          f" · 市场状态 {hk_ah.market_state(q.get('ts'), 'HK')}")
     print(f"- 区间 今 {_fmt_num(q.get('low'))}~{_fmt_num(q.get('high'))} | "
           f"52 周 {_fmt_num(q.get('low_52w'))}~{_fmt_num(q.get('high_52w'))}")
     if q.get("amount") is not None:
         print(f"- 成交额 {q['amount'] / 1e8:.1f} 亿 HKD（量 {_fmt_num(q.get('volume'), 0)} 股）")
-    print(f"- PE(TTM) {_fmt_num(q.get('pe_ttm'))} | 总市值 {_fmt_num(q.get('mcap_hkd_yi'), 0)} 亿 HKD")
+    print(f"- PE(TTM) {_fmt_num(q.get('pe_ttm'))} | 市值 {_fmt_num(q.get('mcap_hkd_yi'), 0)} 亿 HKD")
+    print(f"  ⚠️ {hk_ah.MCAP_SCOPE_NOTE}")
     print(f"[来源: tencent.r_hk qt.gtimg.cn/q=r_hk{code} / {q.get('ts')}]")
     y = hk_yfinance.fetch_info(code)
     if y.get("pb") is not None or y.get("div_yield_pct") is not None:
@@ -679,8 +681,14 @@ def cmd_ah(args: argparse.Namespace) -> int:
     h = _snapshot_row(hk_code)
     a = _a_quote_row(a_code)
     fx = hk_ah.fetch_fx_hkd_cny()
-    h_px, a_px = h.get("price"), a.get("price")
-    pct = hk_ah.premium_pct(a_px, h_px, fx.get("rate"))
+    al = hk_ah.align_quotes(a, h)
+    h_px, a_px = al.get("h_price"), al.get("a_price")
+    # 对齐纪律（D1/D2 修复）：跨交易日或状态不可比时**拒绝出溢价率**——
+    # 宁可标「不可比」，也不出一个混了两个交易日的数。
+    # 三态区分：输入缺失 → 「不可得」；输入齐但不可比 → 「不可比」。
+    inputs_ok = a_px is not None and h_px is not None and fx.get("rate") is not None
+    pct = (hk_ah.premium_pct(a_px, h_px, fx.get("rate"))
+           if inputs_ok and al.get("comparable") else None)
 
     def _cell(v, fmt):
         return fmt(v) if v is not None else "—（不可得）"
@@ -693,9 +701,38 @@ def cmd_ah(args: argparse.Namespace) -> int:
                  f"{'腾讯 r_hk ' + str(h.get('ts') or '') if h_px is not None else h.get('error') or '不可得'} |")
     lines.append(f"| 汇率（CNY/HKD） | {_cell(fx.get('rate'), lambda v: f'{v:.5f}')} | "
                  f"{fx.get('source') or '不可得'}{'（' + str(fx['date']) + '）' if fx.get('date') else ''} |")
-    lines.append(f"| **A/H 溢价率** | "
-                 f"{'**%+.2f%%**' % pct if pct is not None else '**—（不可得）**'} | "
-                 f"{'[来源: Python calc: A价/(H价×汇率)−1]' if pct is not None else '输入不可得，未计算'} |")
+    if pct is not None:
+        pct_cell, pct_src = f"**{pct:+.2f}%**", "[来源: Python calc: A价/(H价×汇率)−1]"
+    elif not inputs_ok:
+        pct_cell, pct_src = "**—（不可得）**", "一侧价格或汇率不可得，未计算"
+    else:
+        pct_cell, pct_src = "**—（不可比）**", (al.get("basis") or "两侧不可比，未计算")
+    lines.append(f"| **A/H 溢价率** | {pct_cell} | {pct_src} |")
+    lines.append("")
+
+    # --- 交易日对齐（D1/D2）：两侧日期与市场状态必须显式，读者才能判断这个数能不能用 ---
+    lines.append("## 交易日对齐（强制显式）\n")
+    lines.append("| 侧 | 报价日期 | 市场状态 |")
+    lines.append("|---|---|---|")
+    lines.append(f"| A {a_code} | {al.get('a_date') or '不可解析'} | {al.get('a_state')} |")
+    lines.append(f"| H {hk_code} | {al.get('h_date') or '不可解析'} | {al.get('h_state')} |")
+    lines.append("")
+    if pct is not None:
+        lines.append(f"✅ **可比**：{al.get('basis')}")
+    elif not inputs_ok:
+        lines.append("⚠️ **输入不可得**：一侧价格或汇率缺失，未进入可比性判定。")
+    else:
+        lines.append(f"❌ **不可比**：{al.get('basis')}——本表**不出溢价率**"
+                     "（跨交易日/跨状态的两个价格不存在可比关系，出一个数等于误导）。")
+        fb = al.get("fallback")
+        if fb and fx.get("rate"):
+            fb_pct = hk_ah.premium_pct(fb["a_price"], fb["h_price"], fx.get("rate"))
+            if fb_pct is not None:
+                lines.append("")
+                lines.append(f"> 参考口径（**前提待验证，非本表结论**）："
+                             f"以 H 昨收 {fb['h_price']} 对齐 A 的 {fb['a_price']} → "
+                             f"{fb_pct:+.2f}% [来源: Python calc: A价/(H昨收×汇率)−1]")
+                lines.append(f"> 该口径成立的前提：{fb['premise']}")
     lines.append("")
 
     lines.append("## 口径三件套（强制显式）\n")
@@ -706,13 +743,15 @@ def cmd_ah(args: argparse.Namespace) -> int:
     lines.append("- **复权**：两侧均为**行情快照现价（未复权）**，口径一致；"
                  "若改用历史序列对照，须另行对齐复权口径。\n")
     lines.append("> ⚠️ 两地交易时段不同（A 股 09:30–11:30 / 13:00–15:00 北京；"
-                 "港股 09:30–12:00 / 13:00–16:00 香港），同一时刻取到的两个价格可能分属"
-                 "不同时段或一方已收盘 → 属**快照时点差**，本表不裁决。")
+                 "港股 09:30–12:00 / 13:00–16:00 香港）。**注意区分两类情形**："
+                 "同一交易日内的时段差（如 A 已收盘、H 仍在交易）→ 溢价率仍可比，"
+                 "但属盘中-收盘混合口径；**跨交易日**（两侧报价日期不同）→ 不具可比性，"
+                 "本表拒绝出数（见上方「交易日对齐」节）。")
     if fx.get("note"):
         lines.append(f"> ℹ️ 汇率口径：{fx['note']}")
     if pct is None:
-        lines.append("> ⚠️ 本次**未得出溢价率**（上表标「不可得」）——"
-                     "不得读作「两地平价」（LAW 5：未获取到有效数据即无法判断）。")
+        lines.append("> ⚠️ 本次**未得出溢价率**——原因见上方「交易日对齐」节。"
+                     "**不得读作「两地平价」**（LAW 5：未获取到有效数据即无法判断）。")
     lines.append("\n> 声明：本表为两地价格关系的研究视角记录，不构成投资建议，"
                  "亦不构成任何套利信号。")
 
