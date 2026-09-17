@@ -175,3 +175,19 @@ def is_consumed_inline(collection: dict | None, sec: dict) -> bool:
     """该段本次已被某个宿主就地渲染（尾部注记须剔除，避免重复出现）。"""
     ids = collection.get(CONSUMED_IDS_KEY) if isinstance(collection, dict) else None
     return isinstance(ids, set) and id(sec) in ids
+
+
+def strip_render_state(collection: dict[str, Any] | None) -> dict[str, Any]:
+    """返回剔除渲染期登记键的浅拷贝，供**持久化前**使用。
+
+    id() 是 CPython 堆地址：登记键随 collection 落进 collections.raw_json 后，
+    字节相同的采集数据每跑一次都写出不同的整数列表（本地实证：report 行
+    116-119 各带一组互不相同的地址）。键本身在渲染内语义正确（见
+    mark_inline_consumed），故修法是在持久化边界剥离，而非改成取值键——
+    取值键会让「与已消费段同 module/position/title 的第二段」被误判为已渲染，
+    从主机位与尾部注记双双漏掉（v0.3.0 已修过该「零落点丢失」，见 _concise
+    的尾部注记构造注释）。
+    """
+    if not isinstance(collection, dict):
+        return {}
+    return {k: v for k, v in collection.items() if k != CONSUMED_IDS_KEY}

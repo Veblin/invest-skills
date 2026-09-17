@@ -94,7 +94,7 @@ def test_empty_analysis_array_is_treated_as_absent(_invest, tmp_path):
 
     曾用 `is not None` 判断：写出空侧车 + 登记 manifest，而报告写着「未注入」
     ——审计者按 manifest 回查会拿到一份自称未注入却挂着分析侧车的产物。
-    full 模式的 _has_valid_analysis_payload 一直按空=未注入处理，此处对齐。
+    full 模式的 analysis_payload_status 一直按空=未注入处理，此处对齐。
     """
     empty = tmp_path / "empty.analysis.json"
     empty.write_text("[]", encoding="utf-8")

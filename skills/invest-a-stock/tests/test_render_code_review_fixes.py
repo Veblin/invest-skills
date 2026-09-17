@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -286,6 +287,18 @@ class TestEngineSelfcheckAppendix:
         assert "亿元" in line, f"须显式声明单位: {line}"
         assert "3000" in line.replace(",", ""), f"引擎原值未原样出现: {line}"
 
+    def test_ma_table_labels_close_date_not_realtime_price(self):
+        """均线表须标明日线收盘口径与日期——与模块 1 实时价不是同一个数。
+
+        报告同时出现两个「现价」（quote 305.48 / kline 收盘 316.36）时，读者会
+        把技术段的口径当成实时价（review P1）。
+        """
+        from lib.render_markdown._base import _render_ma_system
+
+        out = "\n".join(_render_ma_system(_collection()))
+        assert "现价" not in out, f"仍以「现价」标注日线收盘值: {out}"
+        assert re.search(r"收盘 [\d.]+（\d{8}）", out), f"未标注收盘价与日期: {out}"
+
     def test_fused_value_is_formatted(self):
         from lib.render_markdown._base import _format_fused_value
 
@@ -478,3 +491,52 @@ class TestBullBearDefaultRAnnotation:
         text = _section_bull_bear({}, "600176", dims, {}, {"signals": []})
         assert "[推测，待验证" in text
         assert "方向仅供参考" in text
+
+
+class TestAnalysisStatusUnavailable:
+    """review C2：校验组件不可导入时不得写成「分析合成未完成」。
+
+    后者是关于报告内容的事实性断言；工具故障时它不成立——产物必须外显故障，
+    而不是断言内容缺失。absent / invalid 的既有文案被 5 处测试钉死，不得改动。
+    """
+
+    _VALID = [{
+        "module": "risk", "title": "风险提示", "position": "conclusion",
+        "facts_md": "近 30 日公告 3 条。", "analysis_md": "分类复核结论。",
+        "evidence_tag": "B",
+    }]
+
+    @staticmethod
+    def _force_unavailable():
+        # None in sys.modules → `from lib.analysis_schema import ...` 抛 ImportError
+        return patch.dict(sys.modules, {"lib.analysis_schema": None})
+
+    def test_markdown_card_reports_unavailable_not_content_absence(self):
+        from lib.render_markdown._concise import _full_mode_identity_status
+
+        with self._force_unavailable():
+            out = _full_mode_identity_status("600176", self._VALID)
+        assert "分析合成状态无法校验" in out, f"未外显工具故障: {out}"
+        assert "分析合成未完成" not in out, f"工具故障被写成内容缺失: {out}"
+
+    def test_html_card_reports_unavailable_not_content_absence(self):
+        from lib.render_html import _html_full_mode_identity_status
+
+        with self._force_unavailable():
+            out = _html_full_mode_identity_status("600176", "full", self._VALID)
+        assert "分析合成状态无法校验" in out, f"未外显工具故障: {out}"
+        assert "分析合成未完成" not in out, f"工具故障被写成内容缺失: {out}"
+
+    def test_valid_payload_still_reports_injected(self):
+        from lib.render_markdown._concise import _full_mode_identity_status
+
+        out = _full_mode_identity_status("600176", self._VALID)
+        assert "分析合成已注入" in out, out
+
+    def test_absent_and_invalid_keep_pinned_wording(self):
+        """空数组与畸形段仍按「未完成」——文案被 test_v015_fixes 等 5 处钉死。"""
+        from lib.render_markdown._concise import _full_mode_identity_status
+
+        for payload in ([], [{"analysis_md": "缺必填字段"}]):
+            out = _full_mode_identity_status("600176", payload)
+            assert "数据底稿（分析合成未完成）" in out, (payload, out)

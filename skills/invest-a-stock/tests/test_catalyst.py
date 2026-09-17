@@ -55,7 +55,22 @@ class TestFormatCalendar:
     def test_empty_events(self):
         from lib.catalyst import format_catalyst_calendar
         output = format_catalyst_calendar([], "000001")
-        assert "未发现已知催化剂" in output
+        assert "未检索到已知催化剂事件" in output
+
+    def test_empty_with_failed_source_is_not_a_clean_absence_claim(self):
+        """取数失败不得被写成干净的「未检索到」——那是关于报告内容的事实断言（review C3）。"""
+        from lib.catalyst import format_catalyst_calendar
+
+        clean = format_catalyst_calendar([], "000001", days=90)
+        assert "未检索到已知催化剂事件。" in clean
+
+        degraded = format_catalyst_calendar(
+            [], "000001", days=90, unavailable=["限售解禁（ProxyError: 连接被拒）"])
+        assert "取数失败" in degraded and "不可得 ≠ 无事件" in degraded
+        assert "ProxyError" in degraded, "须外显失败原因"
+        # 缺席断言不得单独成句——一旦独立成行，失败说明就被读者跳过
+        assert "未检索到已知催化剂事件。\n" not in degraded, \
+            f"缺席断言与失败说明被割裂: {degraded}"
 
     def test_with_events(self):
         from lib.catalyst import CatalystEvent, format_catalyst_calendar
@@ -108,7 +123,8 @@ class TestRestrictedUnlockFetch:
         monkeypatch.setattr("akshare.stock_restricted_release_queue_em",
                             lambda symbol: rows)
 
-        events = _fetch_restricted_unlock_events("000001", lookahead_days=30)
+        events, err = _fetch_restricted_unlock_events("000001", lookahead_days=30)
+        assert err is None
         assert [e.date for e in events] == [host_today + timedelta(days=31)]
 
     def test_nan_holder_count_does_not_drop_batch(self, monkeypatch):
@@ -131,7 +147,8 @@ class TestRestrictedUnlockFetch:
         monkeypatch.setattr("akshare.stock_restricted_release_queue_em",
                             lambda symbol: rows)
 
-        events = _fetch_restricted_unlock_events("000001", lookahead_days=30)
+        events, err = _fetch_restricted_unlock_events("000001", lookahead_days=30)
+        assert err is None
         assert len(events) == 2  # 单条 NaN 不整批丢失
         assert len([e for e in events if e.detail.startswith("股东数不可得")]) == 1
         assert len([e for e in events if "7 个股东" in e.detail]) == 1
@@ -153,7 +170,9 @@ class TestRestrictedUnlockDegradation:
 
         monkeypatch.setattr(lib.env, "is_akshare_available", lambda: True)
         monkeypatch.setitem(_sys.modules, "unlock_source", None)   # 模拟不可导入
-        assert _fetch_restricted_unlock_events("000001", lookahead_days=30) == []
+        events, err = _fetch_restricted_unlock_events("000001", lookahead_days=30)
+        assert events == []
+        assert err, "取数失败必须带出原因，不得静默返回空列表（review C3）"
 
     def test_collect_keeps_other_event_sources(self, monkeypatch):
         """整块采集：解禁段失败不得吞掉同一调用中已采到的分红/公告事件。"""
@@ -165,8 +184,10 @@ class TestRestrictedUnlockDegradation:
         monkeypatch.setattr(lib.env, "is_akshare_available", lambda: True)
         monkeypatch.setitem(_sys.modules, "unlock_source", None)
         monkeypatch.setattr(catalyst, "_fetch_dividend_events",
-                            lambda s, d: [catalyst.CatalystEvent(
-                                s, _date(2026, 10, 1), "dividend", "分红", impact="中")])
-        monkeypatch.setattr(catalyst, "_fetch_announcement_events", lambda s, d: [])
-        assert [e.event_type for e in catalyst.collect_catalyst_events("000001", days=90)] \
-            == ["dividend"]
+                            lambda s, d: ([catalyst.CatalystEvent(
+                                s, _date(2026, 10, 1), "dividend", "分红", impact="中")], None))
+        monkeypatch.setattr(catalyst, "_fetch_announcement_events", lambda s, d: ([], None))
+        events, unavailable = catalyst.collect_catalyst_events("000001", days=90)
+        assert [e.event_type for e in events] == ["dividend"]
+        assert len(unavailable) == 1 and "限售解禁" in unavailable[0], \
+            f"解禁腿失败须登记为不可用来源: {unavailable}"

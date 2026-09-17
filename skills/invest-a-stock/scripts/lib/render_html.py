@@ -1204,18 +1204,6 @@ const trendLabel={trend_label_json};
     return data_lines + _HTML_APP_SCRIPT_LOGIC
 
 
-# --- render_html ---
-def _has_valid_analysis_payload(analysis: list[dict] | None) -> bool:
-    """HTML 状态卡与 Markdown 共用正式 analysis 协议，不把畸形段当完成。"""
-    if not isinstance(analysis, list) or not analysis:
-        return False
-    try:
-        from lib.analysis_schema import validate_sections
-        return not validate_sections(analysis)
-    except Exception:
-        return False
-
-
 def _html_full_mode_identity_status(symbol: str, mode: str,
                                     analysis: list[dict] | None,
                                     profile: dict[str, Any] | None = None) -> str:
@@ -1226,10 +1214,22 @@ def _html_full_mode_identity_status(symbol: str, mode: str,
     """
     if mode != "full":
         return ""
+    from lib.analysis_status import (ANALYSIS_OK, ANALYSIS_UNAVAILABLE,
+                                     analysis_payload_status)
+
     safe_symbol = _html_mod.escape(symbol)
-    if _has_valid_analysis_payload(analysis):
+    status = analysis_payload_status(analysis)
+    if status == ANALYSIS_OK:
         title = "审计/证据数据底稿（分析合成已注入）"
         detail = "本模式保留完整数据、来源与计算过程以供追溯；分析段已注入，但数据底稿本身不替代面向阅读的研究结论。"
+    elif status == ANALYSIS_UNAVAILABLE:
+        # 工具故障 ≠ 内容缺失：不得断言「分析合成未完成」（review C2）。
+        title = "数据底稿（分析合成状态无法校验）"
+        detail = (
+            "分析校验组件本次不可用，无法确认分析段是否已注入——这是工具故障，"
+            "不是内容缺失的证据。"
+            "本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。"
+        )
     else:
         title = "数据底稿（分析合成未完成）"
         detail = (

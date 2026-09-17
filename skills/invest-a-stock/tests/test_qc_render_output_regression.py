@@ -234,3 +234,31 @@ def test_structural_hint_block_is_not_a_placeholder(minimal_text: str) -> None:
         if line.strip() == "> [分析提示]":
             for pattern in _TEMPLATE_MARKER_PATTERNS:
                 assert not pattern.search(line), line
+
+
+# ── review C6：insight 必需区块标题的渲染器↔QC 耦合守卫 ──────────────────────
+
+
+def test_insight_headings_stay_coupled_to_qc_structure_rule(tmp_path: Path) -> None:
+    """渲染器标题文案与 QC required 元组漂移时必须红。
+
+    `report_qc._check_structure` 的 insight 分支把「可得结论 / 核心矛盾 /
+    观察节点与更新规则 / 已知未知与补证路径」硬编码为子串，`render_insight`
+    在另一侧把同样的标题写成字面量——两侧只靠字符串相等耦合，且此前零测试
+    引用（review C6）。渲染器一改标题，error 级 insight-structure 就会在
+    **每一篇** insight 上报「缺少必要区块」，本用例即该耦合的守卫。
+    """
+    from lib.insight_model import build_report_model
+    from lib.render_insight import render_insight_markdown
+
+    model = build_report_model(collection_v2_minimal(), _SYMBOL, None)
+    text = render_insight_markdown(model)
+    path = tmp_path / _DIRNAME / "2026-09-14-13-41-24.insight.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+    layer = next(l for l in qc_file(path, fail_on="error").layers
+                 if l.layer == "structure")
+    assert layer.details == [] or all(
+        d["id"] != "insight-structure" for d in layer.details
+    ), f"渲染器标题与 QC 必需区块已漂移: {[d['message'] for d in layer.details]}"

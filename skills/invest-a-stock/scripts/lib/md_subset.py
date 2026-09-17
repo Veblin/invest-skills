@@ -115,7 +115,12 @@ def _table_block(lines: list[str], start: int) -> tuple[str, int]:
 
 
 def _list_block(lines: list[str], start: int) -> tuple[str, int, int]:
-    """无序(- )/有序(1.) 列表：嵌套列表不在子集；续行（>=2 空格起始）折进当前项。"""
+    """无序(- )/有序(1.) 列表：嵌套列表不在子集；续行（>=2 空格起始）折进当前项。
+
+    `cur` 存**原始文本**片段，`_inline` 仅在组装 `<li>` 时应用一次——
+    二次应用会把已生成的 `<strong>`/`<code>` 当作字面文本再转义（输出
+    `&lt;strong&gt;`），且 `"\\n".join(<str>)` 会逐字符拆行。
+    """
     first = _UL_RE.match(lines[start]) or _OL_RE.match(lines[start])
     if first is None:
         raise MarkdownSubsetError(start + 1, "列表起始行格式错误")
@@ -131,14 +136,14 @@ def _list_block(lines: list[str], start: int) -> tuple[str, int, int]:
         if m_ul or m_ol:
             m = m_ul or m_ol
             if cur:
-                items.append("\n".join("<li>" + _inline(" ".join(cur)) + "</li>"))
+                items.append("<li>" + _inline(" ".join(cur)) + "</li>")
                 cur = []
             if (m_ul and ordered) or (m_ol and not ordered):
                 raise MarkdownSubsetError(i + 1, "无序/有序列表混用不在子集")
-            cur.append(_inline(m.group(3)))
+            cur.append(m.group(3))
         elif lines[i].strip() and not lines[i].startswith(("\t", "    ")):
             if len(lines[i]) - len(lines[i].lstrip()) >= 2:
-                cur.append(_inline(lines[i].strip()))
+                cur.append(lines[i].strip())
             else:
                 break
         else:

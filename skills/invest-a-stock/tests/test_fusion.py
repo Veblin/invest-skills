@@ -81,6 +81,20 @@ class TestWeightedRRFSingleSource:
         assert result is not None
         assert result.fused_value == 42.5
 
+    def test_single_source_fused_value_is_rounded_like_multi_source(self):
+        """review C7：单源融合值须与多源分支同口径 round(...,4)。
+
+        原样透传会把浮点残渣写进 collections.raw_json 与 --save_raw 存档
+        （实测存量 report 行的 valuation.fused_value = 14135.275950600002）。
+        """
+        from lib.fusion import weighted_rrf_for_dimension
+
+        result = weighted_rrf_for_dimension(
+            "valuation", {"tushare.daily_basic": 14135.275950600002})
+        assert result is not None
+        assert result.fused_value == 14135.276
+        assert len(repr(result.fused_value).split(".")[-1]) <= 4
+
 
 class TestWeightedRRFMultiSource:
     def test_two_sources_agree_strong_consensus(self):
@@ -327,7 +341,8 @@ class TestFuseFromSourceResults:
         fp = fused["valuation"]
         # tencent 无市值数据 → 不得以 PE 混入市值融合（口径一致性优先，宁可单源）
         assert fp.source_values == {"tushare.daily_basic": 445.71031245}
-        assert fp.fused_value == 445.71031245
+        # 融合值与源值口径不同：源值原样保留，融合值按多源分支口径 round(...,4)
+        assert fp.fused_value == 445.7103
         assert fp.max_diff_pct == 0.0
 
     def test_legacy_rebuild_cross_validation_does_not_mix_pe_into_market_cap(self):

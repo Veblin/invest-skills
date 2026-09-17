@@ -98,7 +98,8 @@ class TestRenderMaSystem:
         joined = "\n".join(lines)
         assert "**[均线系统表]**" in joined
         assert "MA5=" in joined and "MA10=" in joined and "MA20=" in joined and "MA60=" in joined
-        assert "现价 " in joined
+        # 口径已改为日线收盘价 + 日期（review P1：与模块 1 实时价不是同一个数）
+        assert "收盘 " in joined and "（2026" in joined
         assert "多头排列" in joined or "排列" in joined
         assert "[来源: kline derived" in joined
 
@@ -333,9 +334,9 @@ class TestRenderMaSystemUnavailableClose:
             lines = _render_ma_system(coll)  # 修复前: None >= v → TypeError 逃出渲染
         joined = "\n".join(lines)
         assert joined
-        assert "现价下方" not in joined
-        assert "现价不可得" in joined  # 该行标不可得，而非错标
-        assert "现价 " not in joined or "现价 nan" not in joined
+        assert "收盘价下方" not in joined
+        assert "收盘价不可得" in joined  # 该行标不可得，而非错标
+        assert "现价" not in joined
 
     def test_nan_latest_close_marks_unavailable(self):
         from lib.render_markdown._base import _render_ma_system
@@ -345,8 +346,8 @@ class TestRenderMaSystemUnavailableClose:
             lines = _render_ma_system(coll)
         joined = "\n".join(lines)
         assert joined
-        assert "现价下方" not in joined  # NaN 参与比较恒 False → 修复前四根 MA 全误标
-        assert "现价不可得" in joined
+        assert "收盘价下方" not in joined  # NaN 参与比较恒 False → 修复前四根 MA 全误标
+        assert "收盘价不可得" in joined
 
     def test_nan_close_natural_path_no_crash(self):
         """review #10（第二轮）：close=NaN 行被 technical.compute 整行剔除——
@@ -361,3 +362,23 @@ class TestRenderMaSystemUnavailableClose:
         assert "现价下方" not in joined
         assert "MA5=" in joined  # 有效 MA5（NaN 行已剔除，非 'MA5: —'）
         assert "nan" not in joined
+
+    def test_nan_close_date_matches_valid_row(self):
+        """code-review P2：收盘价日期必须取自 compute **过滤后**的有效行。
+
+        修复前 `_kd` 从原始 kline 取 max(trade_date) —— 被剔除的 NaN 行（停牌
+        残留 bar）日期仍在列表里，于是把前一有效交易日的收盘价标注成该行日期，
+        技术段的数字失去可追溯性（AGENTS.md:20）。
+        """
+        from lib.render_markdown._base import _render_ma_system
+        from lib.technical import compute
+
+        rows = _kline(60)
+        newest = rows[-1]["trade_date"]
+        rows[-1]["close"] = float("nan")
+        tech = compute(rows)
+        joined = "\n".join(_render_ma_system(_collection(rows)))
+
+        assert tech["last_date"] != newest, "前提：NaN 行确被 compute 剔除"
+        assert f"收盘 {tech['latest_close']:.2f}（{tech['last_date']}）" in joined
+        assert f"（{newest}）" not in joined  # 修复前: 前一有效日收盘价配 NaN 行日期

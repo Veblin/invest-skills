@@ -664,10 +664,17 @@ def _section_dcf_valuation(
         lines.append("")
         dcf_pre = (financials.get("dcf_preprocess") or {})
         fcff_base_ed = str(dcf_pre.get("end_date") or "")
+        # review P0：基期已按报告期折算年化（旧文案「未年化」已不成立），此处披露
+        # 实际系数与口径，否则读者无法判断该 FCFF 与市值/企业价值是否可比。
+        _ann = ((dcf_pre.get("fcff") or {}).get("base_annualization")
+                or (scenario_results.get("base", {}).get("assumptions", {})
+                    .get("base_annualization")) or {})
         fcff_period_note = ""
-        if dcf_pre.get("fcff") is not None and fcff_base_ed and not fcff_base_ed.endswith("1231"):
-            # F0-1: FCFF 基期非年报期（如半年报）时标注未年化，防误读量级。
-            fcff_period_note = f"（基期 {fcff_base_ed} 非年报期，未年化）"
+        if _ann.get("applied"):
+            fcff_period_note = (f"（基期 {fcff_base_ed} 为 {_ann.get('months')} 个月"
+                                f"累计口径，已按 {_ann.get('factor'):g}× 折算年化）")
+        elif fcff_base_ed and not fcff_base_ed.endswith("1231"):
+            fcff_period_note = f"（基期 {fcff_base_ed} 非年报期，年化系数不可识别）"
         lines.append(
             f"基准：FCFF={fcff_base:,.0f} 元（{'最新一期实际值' if ((financials.get('dcf_preprocess') or {}).get('fcff') or {}).get('fcff') is not None else '基情景首年预测值'}）{fcff_period_note}，"
             f"显式期增速={growth_s1*100:.1f}%（基情景），预测年数=5。{sensitivity['note']}"

@@ -737,7 +737,7 @@ def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | No
     ``replace`` 在同一文件系统中为原子替换，避免中断时留下半截 JSON。
     """
     # 真值判断而非 `is not None`：空数组不携带任何分析段，正文会写「分析合成未完成」
-    # （render_markdown._has_valid_analysis_payload 按空=未注入处理，insight 分支同样
+    # （lib.analysis_status.analysis_payload_status 按空=未注入处理，insight 分支同样
     # 按真值判断）。用 `is not None` 会写出空侧车 + 正文说未注入 → 审计者按侧车回查
     # 拿到自相矛盾的产物（QC 报 sidecar-invalid 而非可操作的 missing）。
     if not analysis_payload:
@@ -913,7 +913,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
         analysis_sidecar: Path | None = None
         # 真值判断而非 `is not None`：空数组不携带任何分析段，insight_model 会判
-        # status=absent（full 的 _has_valid_analysis_payload 同样按空=未注入处理）。
+        # status=absent（full 的 analysis_payload_status 同样按空=未注入处理）。
         # 若此处用 `is not None`，会写出空侧车 + 登记 manifest，而报告写着「未注入」
         # ——审计者按 manifest 回查会拿到一份自相矛盾的产物。
         if analysis_payload:
@@ -2644,15 +2644,16 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
     print(f"采集 {args.symbol} 未来 {args.days} 天催化剂...", file=sys.stderr)
     try:
-        events = collect_catalyst_events(args.symbol, days=args.days)
+        events, unavailable = collect_catalyst_events(args.symbol, days=args.days)
     except Exception as e:
         print(f"❌ 催化剂采集失败: {e}", file=sys.stderr)
         return 1
 
-    if not events:
-        print("⚠️ 未获取到催化剂事件（可能数据源不可用）", file=sys.stderr)
+    if not events and unavailable:
+        print("⚠️ 未获取到催化剂事件——部分或全部数据源取数失败", file=sys.stderr)
 
-    print(format_catalyst_calendar(events, symbol=args.symbol))
+    print(format_catalyst_calendar(events, symbol=args.symbol, days=args.days,
+                                   unavailable=unavailable))
     return 0
 
 

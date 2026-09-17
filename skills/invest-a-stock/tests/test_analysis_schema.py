@@ -43,3 +43,41 @@ def test_markdown_subset_rejected(bad_md):
 def test_load_missing_file():
     with pytest.raises(AnalysisSchemaError):
         load_analysis_json("/tmp/does-not-exist-028.json")
+
+
+class TestStripRenderState:
+    """review C4：渲染期登记键（id() 堆地址）不得落进 collections.raw_json。"""
+
+    def test_strip_removes_key_without_mutating_caller(self):
+        from lib.analysis_schema import (CONSUMED_IDS_KEY, mark_inline_consumed,
+                                         strip_render_state)
+
+        c: dict = {}
+        mark_inline_consumed(c, {"module": "risk", "title": "t", "position": "conclusion"})
+        assert CONSUMED_IDS_KEY in c
+
+        out = strip_render_state(c)
+        assert CONSUMED_IDS_KEY not in out
+        assert CONSUMED_IDS_KEY in c, "不得就地修改调用方 collection（渲染仍要用）"
+
+    def test_identical_data_serializes_identically_after_strip(self):
+        """同一份数据的两次采集 → 剥离后 raw_json 必须逐字节相同。
+
+        前置断言（未剥离时确实不同）复现的是实测缺陷：report 行 116-119 各带
+        一组互不相同的堆地址。段对象须保活，否则地址可能被分配器复用。
+        """
+        from lib.analysis_schema import mark_inline_consumed, strip_render_state
+        from lib.json_util import dumps_json
+
+        def _collect():
+            c = {"symbol": "600176", "dimensions": []}
+            sec = {"module": "risk", "title": "t", "position": "conclusion"}
+            mark_inline_consumed(c, sec)
+            return c, sec  # 保活 sec，避免 id 复用
+
+        a, sec_a = _collect()
+        b, sec_b = _collect()
+        assert id(sec_a) != id(sec_b)
+
+        assert dumps_json(a) != dumps_json(b), "前置：未剥离时确实每次不同"
+        assert dumps_json(strip_render_state(a)) == dumps_json(strip_render_state(b))

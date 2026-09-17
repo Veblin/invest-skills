@@ -3057,11 +3057,12 @@ def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
     window = recent[:5]
     amounts = [_flow_amount_yuan(r) for r in window]
     out: dict[str, Any] = {"records": recent}
-    # 5 日窗口须**整窗有效**才给键：任一日缺失（含 DataFrame 的 NaN）时，
-    # 部分求和会把「4 日和」冒充成「近5日全档净额」；而整窗缺失时
-    # `sum([]) == 0.0` 更会被读成「零净流入」（同 P0-1：不得以 0.0 代替缺失
-    # 参与方向判定）。与 lg_elg 同一规则（宁缺勿错）。
-    if window and all(v is not None for v in amounts):
+    # 5 日窗口须**既满 5 日又整窗有效**才给键：
+    #   - 不足 5 日（新股/长期停牌）→ 3 日合计贴上「近5日」标签 = 口径撒谎；
+    #   - 任一日缺失（含 DataFrame 的 NaN）→ 部分求和同样冒充 5 日；
+    #   - 整窗缺失时 `sum([]) == 0.0` 更会被读成「零净流入」（同 P0-1）。
+    # 三者任一命中即不给键（宁缺勿错），与 lg_elg 同一规则。
+    if len(window) == 5 and all(v is not None for v in amounts):
         out["net_sum_5d"] = sum(v for v in amounts if v is not None)
     out["source"] = "tushare.moneyflow"
     # 口径并列：net_sum_5d 是**全档**净额（小+中+大+特大），行情软件惯用的
@@ -3069,7 +3070,7 @@ def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
     # 近 5 日 +17.96 亿 vs −15.24 亿）。窗口内任一日缺分档字段则不给该键——
     # 用部分窗口冒充 5 日会得出错误的第二口径。
     lg_elg = [_flow_lg_elg_yuan(r) for r in window]
-    if window and all(v is not None for v in lg_elg):
+    if len(window) == 5 and all(v is not None for v in lg_elg):
         out["net_sum_5d_lg_elg"] = sum(lg_elg)  # type: ignore[arg-type]
     return out
 

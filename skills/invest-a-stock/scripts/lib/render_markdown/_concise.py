@@ -818,15 +818,28 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
     profile（P0-5）：研究档案仅在提供时追加到同一「产物状态」块内，
     不改变底稿身份判定，也不影响 brief/concise（该块本就不渲染）。
     """
+    from lib.analysis_status import (ANALYSIS_OK, ANALYSIS_UNAVAILABLE,
+                                     analysis_payload_status)
     from lib.research_profile import format_profile_markdown_lines
 
-    if _has_valid_analysis_payload(analysis):
+    status = analysis_payload_status(analysis)
+    if status == ANALYSIS_OK:
         lines = [
             "## 产物状态",
             "",
             "> **产物定位：审计/证据数据底稿（分析合成已注入）。**",
             "> 本模式保留完整数据、来源与计算过程以供追溯；分析段已附在文末，"
             "但数据底稿本身不替代面向阅读的研究结论。",
+        ]
+    elif status == ANALYSIS_UNAVAILABLE:
+        # 工具故障 ≠ 内容缺失：不得断言「分析合成未完成」（review C2）。
+        lines = [
+            "## 产物状态",
+            "",
+            "> **产物定位：数据底稿（分析合成状态无法校验）。**",
+            "> 分析校验组件本次不可用，无法确认分析段是否已注入——这是工具故障，"
+            "**不是内容缺失的证据**。",
+            "> 本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。",
         ]
     else:
         lines = [
@@ -838,18 +851,6 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
             f"`uv run python skills/invest-a-stock/scripts/invest.py report {symbol} --mode full --analysis <analysis.json>`。",
         ]
     return "\n".join(lines + format_profile_markdown_lines(profile))
-
-
-def _has_valid_analysis_payload(analysis: list[dict] | None) -> bool:
-    """只有非空且通过正式 schema 的分析段才可标示为「已注入」。"""
-    if not isinstance(analysis, list) or not analysis:
-        return False
-    try:
-        from lib.analysis_schema import validate_sections
-        return not validate_sections(analysis)
-    except Exception:
-        # 渲染状态 fail-closed：依赖异常或畸形 payload 不得伪装成合成已完成。
-        return False
 
 
 def _render_analysis_overview(analysis: list[dict] | None,

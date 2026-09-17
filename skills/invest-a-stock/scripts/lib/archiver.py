@@ -46,7 +46,9 @@ def archive_collection(
         filepath = base / filename
 
         # 序列化为 JSON（处理 datetime 等不可序列化类型）
-        payload = dumps_json(result)
+        # 剥离渲染期登记键：id() 堆地址不该进存档（review C4）
+        from .analysis_schema import strip_render_state
+        payload = dumps_json(strip_render_state(result))
         filepath.write_text(payload, encoding="utf-8")
 
         return str(filepath)

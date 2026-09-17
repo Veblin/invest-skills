@@ -203,9 +203,10 @@ def _fusion_consensus_label(fp: dict, raw: str) -> str:
 def _format_fused_value(value: Any) -> str:
     """融合值按量级格式化。
 
-    fusion.weighted_rrf_for_dimension 的 round(fused_val, 4) 只覆盖该路径；
-    legacy 路径（fusion.dimension_results_from_legacy）未 round，曾渲染出
-    「融合值=14637.250837439999」。渲染层自行格式化，不依赖上游 round 是否到位。
+    未 round 的来源是 fusion.weighted_rrf_for_dimension 的**单源分支**（原样
+    透传取值；多源分支早已 round(...,4)）。该分支已补 round（review C7），但
+    存量 collection 里仍带旧值（曾渲染出「融合值=14637.250837439999」），故渲染
+    层继续自行格式化，不依赖上游 round 是否到位，也不依赖数据是否已重采。
     """
     if value is None:
         return "—"
@@ -535,13 +536,22 @@ def _render_ma_system(collection: dict[str, Any]) -> list[str]:
             parts.append(f"MA{p}: —")
             continue
         if closes is None:
-            pos = "（现价不可得）"
+            pos = "（收盘价不可得）"
         else:
-            pos = "（现价上方）" if closes >= v else "（现价下方）"
+            pos = "（收盘价上方）" if closes >= v else "（收盘价下方）"
         parts.append(f"MA{p}={v:.2f}{pos}")
     label = (t.get("alignment") or {}).get("trend_label", "—")
+    # 口径标注（review P1）：本表比较用的是**日线收盘价**，与模块 1 的实时价常
+    # 不同（300750 实测：实时 305.48 vs 09-15 收盘 316.36）。两处都写「现价」
+    # 会让读者把技术段口径当成实时价，故此处写明口径与日期。
+    # 日期必须与 latest_close 同源（code-review P2）：compute 已剔除 close 为
+    # None/NaN 的行（停牌残留 bar），并据此产出 last_date —— 对**原始**列表取
+    # max(trade_date) 会把被剔除行的日期配到前一有效交易日的收盘价上（实测
+    # 收盘 17.97（2026-03-01），17.97 实为 02-28 的价）。末行无 trade_date 时
+    # last_date 为空串 → 不显示日期（宁缺勿错配）。
+    _kd = str(tech.get("last_date") or "")
     if closes is not None:
-        parts.append(f"现价 {closes:.2f}")
+        parts.append(f"收盘 {closes:.2f}" + (f"（{_kd}）" if _kd else ""))
     lines = ["**[均线系统表]** " + " · ".join(parts)]
     lines.append(f"  排列: {label} [来源: kline derived（technical.compute）]")
     return lines

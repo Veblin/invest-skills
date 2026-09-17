@@ -381,6 +381,24 @@ def test_ms_fetch_moneyflow_rejects_partial_window():
     assert "net_sum_5d" not in out, "缺日窗口不得部分求和（与 lg_elg 同规则）"
 
 
+def test_ms_fetch_moneyflow_requires_full_five_day_window():
+    """窗口须**恰有 5 个交易日**：3 日合计不得标成「近5日」。
+
+    原实现只判窗口非空 + 值非 None：新股/停牌导致记录不足时，3 日合计会被
+    贴上「近 5 日全档净额」标签（数字本身正确、口径错误——是谓"标签撒谎"）。
+    """
+    from unittest.mock import MagicMock, patch
+
+    from lib.collector._orchestrate import _ms_fetch_moneyflow
+
+    rows = [{"trade_date": f"2026010{i}", "net_mf_amount": 100.0} for i in range(1, 4)]
+    with patch("lib.collector._orchestrate._q_tushare_moneyflow", return_value=rows):
+        out = _ms_fetch_moneyflow(MagicMock(), "600176")
+    assert "net_sum_5d" not in out, "3 日记录不足以支撑「近5日」口径"
+    assert "net_sum_5d_lg_elg" not in out
+    assert out["records"], "原始记录仍须保留供追溯"
+
+
 def test_moneyflow_labels_do_not_claim_main_force_caliber():
     """标签必须写「全档」，不得写「主力」——后者会把全档值读成主力值。"""
     from lib.participant_scan import moneyflow_signal_label
