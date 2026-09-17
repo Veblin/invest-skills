@@ -792,8 +792,12 @@ def _run_macro(args: argparse.Namespace) -> int:
         results.append(macro_cal.fetch_us_calendar(
             w_start, w_end, fred_key=fred_key, rules=rules))
 
-    fomc_events, fomc_warnings = macro_cal.load_fomc_meetings(
+    fomc_events, fomc_messages = macro_cal.load_fomc_meetings(
         args.fomc_file, today=today.strftime("%Y%m%d"))
+    # 2026-09-18 review #7：消息必须**分流**——只有「表本次不可用」才允许置 `error`。
+    # 原实现整列塞进 error= → 一张健康的策展表只要日期少补个零（归一化提示）就被
+    # 渲染成「❌ 不可得」，而该表的会议仍在日程区正常列出。提示类改走 `notes`。
+    fomc_errors, fomc_notices = macro_cal.split_fomc_messages(fomc_messages)
     fomc_events = [e for e in fomc_events if w_start <= e.date.replace("-", "") <= w_end]
     if "美国" in regions or not results:
         # v0.3.0 C3：策展表不可得（文件缺失/解析失败/已过期）时必须走 `error` 字段
@@ -802,7 +806,8 @@ def _run_macro(args: argparse.Namespace) -> int:
         # 「— 窗口内无排期」与「⚠ FOMC 策展表不可得」，把不可得写成无事件（LAW 5）。
         results.append(macro_cal.SourceResult(
             "FOMC 策展表", fomc_events,
-            error=("；".join(fomc_warnings) if fomc_warnings else None),
+            error=("；".join(fomc_errors) if fomc_errors else None),
+            notes=fomc_notices,
             coverage_end=max((e.date for e in fomc_events), default=None)))
 
     view = macro_cal.build_view(results)
@@ -812,12 +817,13 @@ def _run_macro(args: argparse.Namespace) -> int:
         print("宏观日程不可得（全部源失败或无内容）——不硬编。", file=sys.stderr)
         for msg in view["errors"] or ["无可呈现的日程来源"]:
             print(f"  {msg}", file=sys.stderr)
-        # v0.3.0 C3：fomc_warnings 已随 `error=` 进入 view["errors"]（build_view 收集
-        # r.error），此处不再单独打印，避免同一告警出现两次。
+        # v0.3.0 C3：fomc_errors 已随 `error=` 进入 view["errors"]（build_view 收集
+        # r.error），此处不再单独打印，避免同一告警出现两次。提示类（review #7 分流后）
+        # 不进 errors——它们不是不可得。
         return 3
 
     md = render_macro_md(view, today=today, days=days, window=(w_start, w_end),
-                         fomc_warnings=fomc_warnings)
+                         fomc_warnings=fomc_errors)
     # R-D04：政治/宏观不确定性窗口——**接在宏观报告尾部**（此前 load/render 已实现但
     # 零调用方 → 2026-11-03 美国中期选举窗口从未出现在任何输出里）。
     # 不可得时渲染「⚠️ 不可得：…」而非静默省略（策展表维护纪律）。

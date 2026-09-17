@@ -791,3 +791,100 @@ class TestV030Law6FalsePositiveFixes:
         assert "wording-macro-chain-evidence" in self._lint(
             tmp_path, "# 测试\n\n中东→美债→AI 融资→资产价格同向传导。\n"
         )
+
+
+class TestReview20260918Law6Bypass:
+    """2026-09-18 review #2/#11：law6 的**绕过**修复（区别于 U7 的误报收窄）。
+
+    与 TestV030Law6FalsePositiveFixes 的成对断言同款纪律：收窄豁免的同时必须证明
+    真违规仍被拦——只证前者会让规则变瞎。
+    """
+
+    @staticmethod
+    def _lint(tmp_path, body: str, profile: str = "claude"):
+        from lib import lint as lint_mod
+        from lib.lint import lint_file
+
+        lint_mod._RULES_CACHE = None
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        return {x.rule_id for x in lint_file(f, profile=profile)}
+
+    # ---- #2：law6-sell-standalone 的 skip 把内容词「净卖出」当豁免标记 ----
+
+    def test_net_sell_advice_is_flagged(self, tmp_path):
+        """「建议净卖出」是真实卖出建议，不得整体绕过。
+
+        原状态：law6-sell-standalone 因 skip 含裸 `净卖出` 而跳过，law6-sell-advice
+        又要求「建议卖出」严格相邻（「净」插在中间）→ 两通道 0 命中。
+        """
+        assert "law6-sell-advice" in self._lint(tmp_path, "# 测试\n\n建议净卖出。\n")
+
+    def test_bare_net_sell_without_advice_verb_flagged(self, tmp_path):
+        assert "law6-sell-standalone" in self._lint(tmp_path, "# 测试\n\n择机净卖出。\n")
+
+    def test_capital_flow_net_sell_still_exempt(self, tmp_path):
+        """资金流字段描述仍豁免（U7-2 的误报收窄不得回退）。"""
+        body = "# 测试\n\n- 6/17 主力资金净卖出 6330 万\n"
+        assert "law6-sell-standalone" not in self._lint(tmp_path, body)
+        assert "law6-sell-advice" not in self._lint(tmp_path, body)
+
+    def test_other_advice_modifiers_flagged(self, tmp_path):
+        for body in ("# 测试\n\n建议逢高卖出。\n", "# 测试\n\n建议立即卖出。\n"):
+            assert "law6-sell-advice" in self._lint(tmp_path, body), body
+
+    # ---- #11：error 级 law6-target-price 的表格行豁免过宽 ----
+
+    def test_self_issued_table_target_price_flagged(self, tmp_path):
+        """报告自身给出的单一目标价，写成表格行也必须被拦。
+
+        注：形态须是「目标价」与数字**相邻**（`| 目标价 25.5 元 |`）——规则 pattern
+        为 `目标价\\s*[：:]*\\s*\\d+`，分格写法（`| 目标价 | 25.5 元 |`）本就不匹配
+        pattern，与 skip 无关，不能用作本项的复现例。
+        """
+        for body in ("# 测试\n\n| 目标价 25.5 元 |\n", "# 测试\n\n| 目标价：25.5 元 | 备注 |\n"):
+            assert "law6-target-price" in self._lint(tmp_path, body), body
+
+    def test_third_party_rating_row_exempt(self, tmp_path):
+        """第三方评级表的目标价排在第 2 格之后 → 仍豁免（U7-2 收窄不得回退）。"""
+        body = "# 测试\n\n| 瑞银（港股） | — | 目标价 660 港元 |\n"
+        assert "law6-target-price" not in self._lint(tmp_path, body)
+
+
+class TestRaSectionBoundaryParity:
+    """2026-09-18 review #5：R-A6 与 lint `structure-analysis-without-fact`
+    必须对同一文本给**同一裁决**（两通道相反裁决正是 A3 合并要消灭的缺陷类别）。
+
+    同一文件经 `invest.py qc-report`（走共享 report_qc）与 lint 得到相反结论时，
+    用户无法判断该信哪个。核心回归 = 同文本两实现结论一致。
+    """
+
+    @staticmethod
+    def _pair(tmp_path, body: str):
+        from lib import lint as lint_mod
+        from lib.lint import lint_file
+        from report_qc import fact_analysis_pair_findings
+
+        lint_mod._RULES_CACHE = None
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        lint_hit = "structure-analysis-without-fact" in {
+            x.rule_id for x in lint_file(f, profile="claude")}
+        qc_hit = bool(fact_analysis_pair_findings(body))
+        return lint_hit, qc_hit
+
+    def test_h3_under_h2_agrees(self, tmp_path):
+        """`### ` 不再是节边界——lint 亦然（原实现两侧相反）。"""
+        lint_hit, qc_hit = self._pair(
+            tmp_path, "## 节\n\n[事实] 某事实。\n\n### 子节\n\n[分析] 推演。\n")
+        assert lint_hit == qc_hit == False, (lint_hit, qc_hit)  # noqa: E712
+
+    def test_h2_boundary_agrees(self, tmp_path):
+        """`## ` 是节边界——跨节的 [事实] 不满足本节 [分析]。"""
+        lint_hit, qc_hit = self._pair(
+            tmp_path, "## 节一\n\n[事实] 某事实。\n\n## 节二\n\n[分析] 推演。\n")
+        assert lint_hit == qc_hit == True, (lint_hit, qc_hit)  # noqa: E712
+
+    def test_missing_fact_agrees(self, tmp_path):
+        lint_hit, qc_hit = self._pair(tmp_path, "## 节\n\n[分析] 无前置事实。\n")
+        assert lint_hit == qc_hit == True, (lint_hit, qc_hit)  # noqa: E712

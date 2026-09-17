@@ -235,3 +235,60 @@ class TestCli:
         p.write_text(json.dumps(_coll(), ensure_ascii=False), encoding="utf-8")
         assert af.main([str(p), "--for", role]) == 0
         assert "禁止自行计算" in capsys.readouterr().out
+
+
+class TestReview20260918AgentFactsDefects:
+    """2026-09-18 review #6/#8/#15：agent_facts 三处缺陷。"""
+
+    # ---- #8：events 为真值但不含 dict 行 → IndexError 崩栈 ----
+
+    @pytest.mark.parametrize("ev", [["legacy string"], {"a": 1}, [None, "x"]])
+    def test_risk_survives_non_dict_events(self, ev):
+        """非 dict 行 / events 非 list 时不得崩——与本模块「不可得显式输出」的契约一致。"""
+        f = af.build_risk(_coll(events=ev))
+        labels = {it["label"]: it for it in f.items}
+        assert labels["事件总数"]["value"] == 0
+
+    def test_risk_still_counts_dict_rows(self):
+        ev = [{"date": "2026-09-01", "type": "buyback"},
+              "legacy string", None]
+        labels = {it["label"]: it for it in af.build_risk(_coll(events=ev)).items}
+        assert labels["事件总数"]["value"] == 1, "只数 dict 行，不把字符串行当事件"
+
+    # ---- #15：「近 N 条事件数」是不携带信息的伪事实 ----
+
+    def test_no_min_n_event_count_pseudo_fact(self):
+        """min(n, len(events)) 对任何 len≥n 的集合恒等于 n，与时间无关。
+
+        它在 Agent D 的强制引用清单里，读者极易读成「近 N 日发生 N 起」。
+        """
+        ev = [{"date": f"2026-08-{i:02d}", "type": "other"} for i in range(1, 31)]
+        labels = {it["label"] for it in af.build_risk(_coll(events=ev)).items}
+        for n in (5, 10, 20, 30):
+            assert f"近 {n} 条事件数" not in labels
+
+    # ---- #6：分位/中位数不得在含负值的全序列上算 ----
+
+    def test_negative_pe_excluded_from_percentile_and_median(self):
+        """亏损期 PE 为负：负值既不参与分位也不参与中位数（对齐 insight_model B3）。"""
+        val = [{"trade_date": f"2025{i:04d}", "pe_ttm": float(i)} for i in range(1, 21)]
+        val += [{"trade_date": f"2024{i:04d}", "pe_ttm": -float(i)} for i in range(1, 6)]
+        val.append({"trade_date": "20260916", "pe_ttm": 10.0})
+        coll = _coll()
+        coll["dimensions"].append({"dimension": "valuation", "data": val})
+        labels = {it["label"]: it for it in af.build_financial(coll).items}
+        assert labels["PE(TTM) 非正样本数"]["value"] == 5
+        # 正序列 = 1..20 + 10.0 → count(≤10) = 10 个（1..10）+ 自身 = 11
+        assert labels["PE(TTM) 历史分位(%)"]["value"] == pytest.approx(11 / 21 * 100, rel=1e-6)
+
+    def test_negative_latest_pe_emits_unavailable_not_zero_percentile(self):
+        """最新期 PE ≤ 0 时不得产出分位——否则 Agent 读成「历史偏低（便宜）」。"""
+        val = [{"trade_date": f"2025{i:04d}", "pe_ttm": float(i)} for i in range(1, 11)]
+        val.append({"trade_date": "20260916", "pe_ttm": -3.0})
+        coll = _coll()
+        coll["dimensions"].append({"dimension": "valuation", "data": val})
+        labels = {it["label"]: it for it in af.build_financial(coll).items}
+        pct = labels["PE(TTM) 历史分位(%)"]
+        assert pct["value"] is None
+        assert pct["source"].startswith("[不可得:")
+        assert "非正" in pct["source"]

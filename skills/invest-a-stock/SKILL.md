@@ -463,10 +463,19 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 
 1. **先出 md**：`report SYMBOL` → `reports/{symbol}-{name}/{ts}.md`（分析段以占位符保留，qc 的 F0-3 会拦截未填占位——**正文写完立刻填写**）
 2. **再写分析协议**：`reports/{symbol}-{name}/{ts}.analysis.json`，段结构：
-   `[{module, title, facts_md, analysis_md, evidence_tag, position}]`
+   `[{module, title, facts_md, analysis_md, evidence_tag, position, facts?}]`
    - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（带 [证据: X] / [证据强度: ...]）
    - `evidence_tag`：A-D 或 L1-L4；`position` ∈ events/valuation/financials/northbound/holders/refs/conclusion
+   - **`facts`（可选，但强烈建议——P0 数字纪律的机器保证只在带它时生效）**：
+     本段数值事实数组 `[{id: "F1", value: 12.5, formula: "…"}]`（或 `field: "引擎字段路径"`）。
+     一旦给出即强制：① `value` 必为数值；② 有 `formula` 时公式须能被安全求值**且算出该数**
+     （按书写精度判等——直接拦截「标了公式但公式算不出这个数」= report-conventions §2.3
+     强制 5 的未实跑标注）；③ `facts_md`/`analysis_md` 中的 `[事实: F1]` 引用须在本段
+     facts 内存在（防悬空）；④ 正文中每个**非结构性**数字（年份/日期/期数/序号/标的代码/
+     URL 内数字等豁免）必须对得上某个 fact 的 value
    - 校验：`uv run python skills/invest-a-stock/scripts/invest.py ... --analysis <path>`（校验失败 fail-loud 退出）
+   - **改动须知**：`facts` 契约与 `[事实: F{n}]` 引用语法由 `lib/analysis_schema.py` 单点定义，
+     文档/prompt/校验三处须同步改（2026-09-18 review #3 的教训：三处不一致 → 闸门空转）
 3. **复合重渲（默认出 html）**：`report SYMBOL --analysis <path> --emit html`（或 `--resume`）→ 分析段替换占位 → **html + 同代 md 同源落盘**（`--emit html` 分支同时写 md_v2，保证 md/html 同代；不重渲则以 md 为唯一产物，属例外情形）
 
 ### HTML 产物

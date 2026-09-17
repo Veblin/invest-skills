@@ -805,3 +805,85 @@ def test_cn_calendar_nan_time_not_rendered_as_literal_nan(monkeypatch):
     res = mc.fetch_baidu_calendar("20260915", "20260915", regions=("美国",), retries=1)
     assert res.events, "前置：该事件须被保留"
     assert res.events[0].time == "", f"NaN 时刻须归一为空串，实得 {res.events[0].time!r}"
+
+
+def test_cn_calendar_nan_event_and_period_not_rendered_as_literal_nan(monkeypatch):
+    """2026-09-18 review #9：D3 的 NaN 修复只落到同一句里的「时间」列。
+
+    同一 dict 字面量里「事件」「统计周期」仍是 `str(r.get(..) or "")` / `.. or ""`
+    ——NaN 是 truthy 使兜底失效 → 事件名与统计周期渲染成字面 "nan"，并**按该名**
+    进入区域关键词匹配、去噪过滤与渲染。diff 注释自承「上一行『地区』已用
+    _present_text 修过同类问题，此处漏改」，却只改了「时间」一处。
+    """
+    def fake(date, cookie=None):
+        return pd.DataFrame([{
+            "日期": "2026-09-15", "时间": "10:00", "地区": "美国", "国家": "美国",
+            "事件": float("nan"), "前值": 0.6, "重要性": "2",
+            "统计周期": float("nan"),
+        }])
+
+    monkeypatch.setattr(mc, "_fetch_baidu_day", fake)
+    res = mc.fetch_baidu_calendar("20260915", "20260915", regions=("美国",), retries=1)
+    assert res.events, "前置：该事件须被保留"
+    title, period = res.events[0].title, res.events[0].period
+    assert "nan" not in title.lower(), f"NaN 事件名须归一为空串，实得 {title!r}"
+    assert "nan" not in period.lower(), f"NaN 统计周期须归一为空串，实得 {period!r}"
+
+
+class TestReview20260918FomcMessageSplit:
+    """2026-09-18 review #7：FOMC 消息必须分流，提示类不得让源标成「不可得」。
+
+    SourceResult 的契约是「error 非空 = 该源**不可得**」，而 unlock_calendar 曾把
+    **整个** messages 列表塞进 error= —— 一张健康的策展表只要日期手工少补个零
+    （「2026-9-16」→ 归一化提示），就被渲染成「❌ 不可得」，同时该表的会议**仍在**
+    日程区正常列出：源可得却被标不可得，正是 C3 注释声称要修的 LAW 5 误标类别反了
+    过来。判据用前缀而非子串（提示消息里也可能出现「不可得」字样）。
+    """
+
+    def test_normalization_notice_is_not_fatal(self):
+        fatal, notices = mc.split_fomc_messages(
+            ["FOMC 策展表日期已归一化：'2026-9-16' → 2026-09-16（建议手工补零）"])
+        assert fatal == []
+        assert len(notices) == 1
+
+    def test_missing_file_is_fatal(self):
+        fatal, notices = mc.split_fomc_messages(
+            ["FOMC 策展表不可得（文件缺失）：x.yaml——本次**不含**议息会议"])
+        assert len(fatal) == 1 and notices == []
+
+    def test_expired_table_is_fatal(self):
+        fatal, _ = mc.split_fomc_messages(
+            ["FOMC 策展表已过期（覆盖至 2026-12-09，最后核对 2026-09-01）"])
+        assert len(fatal) == 1
+
+    def test_expired_with_notice_splits_both(self):
+        """已过期路径会把解析提示一并带出——两类须各归各位。"""
+        fatal, notices = mc.split_fomc_messages([
+            "FOMC 策展表有无法解析的日期（已跳过该条）：'x'",
+            "FOMC 策展表已过期（覆盖至 2026-12-09）",
+        ])
+        assert len(fatal) == 1 and "过期" in fatal[0]
+        assert len(notices) == 1 and "无法解析" in notices[0]
+
+    def test_notice_mentioning_unavailable_is_not_fatal(self):
+        """子串匹配会把含「不可得」字样的提示误升级 → 判据须是前缀。"""
+        fatal, notices = mc.split_fomc_messages(
+            ["FOMC 策展表有 1 条无法解析的日期已跳过（该条不可得）"])
+        assert fatal == [] and len(notices) == 1
+
+
+def test_healthy_table_with_notice_marked_available(tmp_path):
+    """健康表（仅归一化提示）→ 会议仍列出，且不得被当成不可得。"""
+    p = tmp_path / "fomc.yaml"
+    p.write_text(
+        "last_verified: '2026-09-01'\n"
+        "meetings:\n"
+        "  - start: '2026-9-16'\n"
+        "    end: '2026-9-16'\n",
+        encoding="utf-8",
+    )
+    events, messages = mc.load_fomc_meetings(p, today="2026-09-01")
+    assert events, "前置：归一化后该会议须仍可用"
+    fatal, notices = mc.split_fomc_messages(messages)
+    assert fatal == [], f"归一化提示不得被当作不可得：{messages}"
+    assert notices

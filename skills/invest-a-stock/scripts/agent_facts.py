@@ -286,14 +286,29 @@ def build_financial(coll: dict) -> Facts:
               field="valuation.trade_date（升序首/末行）")
         cur = val[-1]
         for label, key in (("PE(TTM)", "pe_ttm"), ("PB", "pb"), ("PS(TTM)", "ps_ttm")):
-            series = [r.get(key) for r in val if num(r.get(key)) is not None]
+            # 2026-09-18 review #6：分位与中位数只在**正**序列上有定义（对齐
+            # insight_model B3 的同日口径）。旧实现取全序列（含负值）：既让负 PE
+            # 参与中位数，又让 latest≤0 时恒得 ≈0% 分位——Agent B 会读成「历史偏低
+            # 位置（便宜）」，正是 B3 要拦的失真。「非正样本数」同时是 prompt 要求的
+            # 「PE 分位失真检测（亏损期占比）」的数据载体（否则 Agent 只能违反 P0 自算）。
+            nonnull = [num(r.get(key)) for r in val if num(r.get(key)) is not None]
+            series = [x for x in nonnull if x > 0]
+            nonpos = len(nonnull) - len(series)
             v = num(cur.get(key))
             f.add(f"{label} 当前", v, field=f"valuation.{key}（{date_key(cur)}）")
-            f.add(f"{label} 历史分位(%)", percentile_rank(series, v),
-                  formula=f"count(≤ {v}) / {len(series)} × 100")
-            if series:
-                f.add(f"{label} 中位数", round(statistics.median([num(x) for x in series]), 4),
-                      formula=f"median({key} 全序列，n={len(series)})")
+            f.add(f"{label} 非正样本数", nonpos,
+                  formula=f"count({key} ≤ 0) = {nonpos}（全序列 n={len(nonnull)}）")
+            if v is not None and v > 0:
+                f.add(f"{label} 历史分位(%)", percentile_rank(series, v),
+                      formula=f"count(≤ {v}) / {len(series)} × 100（**正序列** n={len(series)}）")
+                if series:
+                    f.add(f"{label} 中位数", round(statistics.median(series), 4),
+                          formula=f"median({key} > 0 序列，n={len(series)})")
+            else:
+                f.unavailable(
+                    f"{label} 历史分位(%)",
+                    f"当前值 {v} 非正或无正样本（n={len(series)}）——分位在非正序列上无定义"
+                    "（与 insight_model B3 同口径，不得用全序列近似）")
 
     kl = rows_asc(_data(coll, "kline") or [])
     if kl:
@@ -354,18 +369,29 @@ def build_industry(coll: dict) -> Facts:
 
 
 def build_risk(coll: dict) -> Facts:
-    """Agent D（风险与治理）：events 全量计数 + 内部人信号（**holder_changes 补入**）。"""
+    """Agent D（风险与治理）：events 全量计数 + 内部人信号（**holder_changes 补入**）。
+
+    2026-09-18 review #8/#15 修复：
+
+    - **#8 崩溃**：原 `ev = coll.get("events") or []` 后直接 `ev_sorted[0]`——
+      events 为真值但不含 dict 行时（`["legacy string"]`，或 events 是 dict），
+      过滤后 `ev_sorted` 为空 → IndexError 崩栈。与模块契约「取不到的项显式输出
+      不可得」不符。守卫照 render_risk.py:973 同款 `isinstance(list)` 惯例。
+    - **#15 伪事实**：原「近 N 条事件数 = min(n, len(events))」对任何 len≥n 的集合
+      恒等于 n，不携带任何信息，却在 Agent D 的强制引用清单里——读者极易读成
+      「近 N 日发生 N 起」（该字段与时间无关）。已删除；时间线信息由「事件日期区间」
+      + 「事件类型计数」承担（agent-prompts.md 对 Agent D 无「近 N 条」强制项）。
+    """
     f = Facts()
-    ev = coll.get("events") or []
-    f.add("事件总数", len(ev), formula=f"len(events) = {len(ev)}")
+    raw_ev = coll.get("events")
+    ev = [e for e in raw_ev if isinstance(e, dict)] if isinstance(raw_ev, list) else []
+    f.add("事件总数", len(ev),
+          formula=f"count(isinstance(e, dict) for e in events) = {len(ev)}")
     if ev:
-        ev_sorted = sorted([e for e in ev if isinstance(e, dict)], key=date_key)
+        ev_sorted = sorted(ev, key=date_key)
         f.add("事件日期区间",
               f"{date_key(ev_sorted[0])} ~ {date_key(ev_sorted[-1])}",
               field="events.date（排序后首/末行）")
-        for n in (5, 10, 20, 30):
-            f.add(f"近 {n} 条事件数", min(n, len(ev_sorted)),
-                  formula=f"min({n}, {len(ev_sorted)}) = {min(n, len(ev_sorted))}")
         counts: dict[str, int] = {}
         for e in ev_sorted:
             t = str(e.get("type") or e.get("event_type") or "unknown")

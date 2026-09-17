@@ -175,15 +175,15 @@ class TestFactsBinding:
     def test_dangling_fact_reference_is_error(self):
         errs = validate_sections(_with_facts(
             [{"id": "F1", "value": 1.0, "formula": "1.0"}],
-            analysis_md="见 [[F2]] 的推导。（证据 B）",
+            analysis_md="见 [事实: F2] 的推导。（证据 B）",
         ))
-        assert any("[[F2]]" in e for e in errs), errs
+        assert any("[事实: F2]" in e for e in errs), errs
 
     def test_resolvable_fact_reference_passes(self):
         errs = validate_sections(_with_facts(
             [{"id": "F1", "value": 1.0, "formula": "1.0"}],
             facts_md="事实 [来源: engine]",
-            analysis_md="见 [[F1]] 的推导。（证据 B）",
+            analysis_md="见 [事实: F1] 的推导。（证据 B）",
         ))
         assert errs == [], errs
 
@@ -202,13 +202,13 @@ class TestFactsBinding:
             [{"id": "F1", "value": 1.0, "formula": "1.0"},
              {"id": "F2", "value": 3, "formula": "3"},
              {"id": "F3", "value": 18, "formula": "18"}],
-            analysis_md="增长 18%。见 [[F1]]。（证据 B）",
+            analysis_md="增长 18%。见 [事实: F1]。（证据 B）",
         ))
         assert errs == [], errs
 
     def test_bracket_text_without_facts_is_not_checked(self):
-        """未声明 facts 的段不校验 [[..]]（可能是普通文本，向后兼容优先）。"""
-        errs = validate_sections(_with_facts(None, analysis_md="见 [[F9]]。（证据 B）"))
+        """未声明 facts 的段不校验 [事实: ..]（可能是普通文本，向后兼容优先）。"""
+        errs = validate_sections(_with_facts(None, analysis_md="见 [事实: F9]。（证据 B）"))
         assert errs == [], errs
 
     def test_validation_does_not_mutate_section(self):
@@ -301,3 +301,114 @@ class TestStructuralNumberExemption:
             analysis_md="回撤 -36.7%。（证据 B）",
         ))
         assert any("36.7" in e and "未绑定" in e for e in errs), errs
+
+
+class TestReview20260918StructuralNumberForms:
+    """2026-09-18 review #4：结构性数字豁免对常见中文书写形态有系统性缺口。
+
+    原实现只覆盖 ISO 形态（测试也只锁 ISO 日期与版本号），而中文财经写作的实际
+    形态是「2026年9月17日」「第 3 季度」「近 12 个月」「标的 600176」「09:30」
+    「2026H1」——任一被误判即 validate_sections 非空 → invest.py 直接 exit 2
+    （不得交付），共享 report_qc 还会转成 error 级 completion-analysis-sidecar-invalid。
+    成对断言：误报形态不再命中 + 真实量值仍须绑定。
+    """
+
+    @pytest.mark.parametrize("text", [
+        "截至 2026年9月17日收盘。",       # 中文日期
+        "第 3 季度营收环比改善。",          # 中文序数（原表缺「季」）
+        "近 12 个月数据完整。",            # 窗口量词（原表缺「个」）
+        "标的 600176 公告。",             # 标的代码（上下文锚定）
+        "09:30 开盘。",                  # 时刻
+        "2026H1 报告期。",               # 报告期
+        "2020-2024 年区间。",             # 年份区间（原被 ISO 分支吃成 2020-20，残留 24）
+    ])
+    def test_common_chinese_forms_are_structural(self, text):
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md=text + "（证据 B）",
+        )) == [], text
+
+    @pytest.mark.parametrize("text,token", [
+        ("营收增长 999%。（证据 B）", "999"),
+        ("成交量 600176 手。（证据 B）", "600176"),   # 无代码上下文 → 仍须绑定
+        ("本段只有 18 这一个数。（证据 B）", "18"),
+    ])
+    def test_real_numbers_still_must_bind(self, text, token):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md=text,
+        ))
+        assert any(token in e and "未绑定" in e for e in errs), errs
+
+
+class TestReview20260918UrlExemptionIsPerToken:
+    """2026-09-18 review #10：`if "http" in before` 让整行数字豁免。
+
+    与 _is_exempt_num 自身 docstring「仅豁免该 token，不能豁免整行」直接矛盾，
+    且放过的恰是 P0 要拦的编造数字。
+    """
+
+    def test_url_internal_digits_exempt(self):
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="来源 https://x.com/p/123 的公开页。（证据 B）",
+        )) == []
+
+    def test_other_digits_on_url_line_still_checked(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="来源 https://x.com/p/123 该季增长 999%。（证据 B）",
+        ))
+        assert any("999" in e for e in errs), errs
+
+
+class TestReview20260918FormulaStrictness:
+    """2026-09-18 review #13/#14：公式求值不得穿透异常，整数 fact 不得用取整窗口。"""
+
+    def test_oversized_integer_constant_raises_formula_error(self):
+        """#13：`float(超大 int)` 的 OverflowError 须转成 _FormulaError。
+
+        原实现只在 BinOp 分支兜 OverflowError，Constant 分支漏了 → 异常穿透
+        `except _FormulaError`，invest.py 只捕 AnalysisSchemaError → traceback。
+        """
+        from lib import analysis_schema as mod
+
+        with pytest.raises(mod._FormulaError):
+            mod._safe_eval_formula("9" * 400)
+
+    def test_oversized_constant_reports_as_validation_error(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "9" * 400}],
+            facts_md="事实 [来源: engine]",
+        ))
+        assert any("不可求值" in e for e in errs), errs
+
+    def test_integer_fact_rejects_off_by_slop_formula(self):
+        """#14：`value=18` + `formula="18.04"` 原被判为复算一致（±0.05 窗口）。
+
+        根因：`repr(float(18))` == '18.0' → 推出 1 位小数 → round(got,1) 判等。
+        整数书写（JSON int）的语义是**精确**。
+        """
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 18, "formula": "18.04"}],
+            facts_md="事实 [来源: engine]",
+        ))
+        assert any("算不出该数" in e for e in errs), errs
+
+    def test_integer_fact_accepts_exact_formula(self):
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 18, "formula": "9*2"}],
+            facts_md="事实 [来源: engine]",
+        )) == []
+
+    def test_decimal_fact_keeps_rounding_window(self):
+        """浮点书写仍按书写精度判等（否则所有正常四舍五入的数字都会被判错）。"""
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 36.7, "formula": "36.72"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="偏离 36.7%。（证据 B）",
+        )) == []

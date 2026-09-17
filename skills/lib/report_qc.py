@@ -767,9 +767,14 @@ _SENT_SPLIT_RE = re.compile(r"[。！？!?]")
 _EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度)\s*[:：]")
 _FACT_MARK_RE = re.compile(r"\[事实\]")
 _ANALYSIS_MARK_RE = re.compile(r"\[分析\]")
-# 节边界 = 任意 h2-h4 标题。注意与本文件 `_SECTION_HEAD_RE`（§N 编号节，见
-# sourcing 层）语义不同，故独立命名，勿合并。
-_RA_SECTION_BOUNDARY_RE = re.compile(r"^#{2,4}\s")
+# R-A6 节边界 = `## `，与 lint `_SECTION_HEADER_RE`（lint.py:98）**逐字对齐**：
+# 同一份报告在两通道必须给同一裁决。lint 走 `stop_at_section_header` + `^##\s`
+# 且**先 strip 再匹配**；原实现用 `^#{2,4}\s` 且不 strip → `### ` 下的 [分析]
+# 在 qc 侧报 error、lint 侧 0 命中（reports/ 全量实测 3 篇相反裁决）。
+# 注意 `### `/`#### ` 不再是本规则的节边界——与 lint 一致。
+# 另注：R-A2 `conclusion_evidence_findings` 仍用 `^#{2,4}`，那是**有意**含 ####
+# （乐观/悲观情景子标题不应被当结论断言扫描），语义不同，勿合并。
+_RA_SECTION_BOUNDARY_RE = re.compile(r"^##\s")
 _FACT_LOOKBACK_LINES = 50   # 与 lint structure-analysis-without-fact 同规则
 
 # 全量审查 #3（P0-2）：畸形字符类 [来源:|[-−]?… 修复（原内容意外跨越
@@ -896,8 +901,9 @@ def conclusion_evidence_findings(md: str) -> list[dict]:
 def fact_analysis_pair_findings(md: str) -> list[dict]:
     """R-A6：[分析] 节段内须有前置 [事实] 块（对偶强制）。
 
-    与 lint `structure-analysis-without-fact` 同规则：50 行回溯、遇
-    ##/### 节段边界停止（跨节段的 [事实] 不满足本节的 [分析]）。
+    与 lint `structure-analysis-without-fact` 同规则：50 行回溯、遇 `## ` 节段
+    边界停止（跨节段的 [事实] 不满足本节的 [分析]）。边界判定先 strip 再匹配，
+    与 lint `_previous_lines_window` 一致。
     """
     out: list[dict] = []
     lines = md.splitlines()
@@ -906,7 +912,7 @@ def fact_analysis_pair_findings(md: str) -> list[dict]:
             continue
         found = False
         for j in range(i - 1, max(i - 1 - _FACT_LOOKBACK_LINES, -1), -1):
-            if _RA_SECTION_BOUNDARY_RE.match(lines[j]):
+            if _RA_SECTION_BOUNDARY_RE.match(lines[j].strip()):
                 break
             if _FACT_MARK_RE.search(lines[j]):
                 found = True
@@ -1275,14 +1281,19 @@ def qc_file(
         # 等新技能的产出一律 type=unknown，若跳过则「必跑」的准出对它们形同虚设）
         layers.append(_check_sourcing(text))
     if report_type in {"stock", "etf"}:
-        # v0.3.0 A3：R-A* 指标组（R-A1 可读性 + R-A2 结论证据 + R-A6 对偶）。
-        # 仅挂研究备忘录类型——日历/扫描产物挂长句密度会批量制造无意义 WARN，
-        # unknown 类型已有 lint + sourcing 兜底。
+        # v0.3.0 A3：R-A1 可读性指标组**仅挂研究备忘录类型**——日历/扫描产物挂
+        # 长句密度会批量制造无意义 WARN。
         layers.append(_check_readability(text))
-        layers.append(_check_conclusion_evidence(text))
         # v0.3.0 全量重审 F-U7-5：LAW 6a 实质要件此前零实现（仅全文免责存在性）。
         # 合规机制靠「三情景区间 + 用户决策」，故该要件须有机器把关点。
+        # 三情景估值是研究备忘录概念，同类门控。
         layers.append(_check_law6a_scenarios(text))
+    # v0.3.0 A3 补（2026-09-18 review #12）：R-A2 结论段证据 / R-A6 [事实]→[分析]
+    # 对偶是**通用文本规则**，与产物类型无关——被删除的 stock 旧版
+    # `run_report_qc` 对**任意**文件跑这三项，故 A3 移植时把它们一并门控是**净移除**
+    # 了 journal/pulse/gap_scan/unknown 经 `invest.py qc-report` 的结论段门禁。
+    # 拆分依据：源代码注释只论证了 R-A1（长句密度噪音），未论证 R-A2/R-A6。
+    layers.append(_check_conclusion_evidence(text))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
     elif report_type == "stock":

@@ -1031,3 +1031,74 @@ class TestLaw6aScenarioContext:
         assert layer.layer == "law6a-scenarios"
         assert layer.status == "fail"
         assert layer.findings_count == 1
+
+
+class TestRaSectionBoundaryAlignment:
+    """2026-09-18 review #5：R-A6 节边界须与 lint 逐字对齐。
+
+    原实现 `_RA_SECTION_BOUNDARY_RE = ^#{2,4}\\s` 且不 strip，lint 侧为
+    `_SECTION_HEADER_RE = ^##\\s`（lint.py:98）+ 先 strip 再匹配（:202）。
+    后果：`### ` 下的 [分析] 在 qc 侧报 error、lint 侧 0 命中——同一份报告两通道
+    给相反裁决（reports/ 全量实测 3 篇）。`_check_conclusion_evidence` 的 docstring
+    还自称「与 lint structure-analysis-without-fact 同规则」，与实现不符。
+    """
+
+    def test_h3_heading_does_not_stop_lookback(self):
+        """### 不再是节边界——其上的 [事实] 仍满足本节 [分析]（与 lint 一致）。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节\n\n[事实] 某事实。\n\n### 子节\n\n[分析] 推演。\n"
+        assert fact_analysis_pair_findings(text) == []
+
+    def test_h2_heading_stops_lookback(self):
+        """## 是节边界——跨节段的 [事实] 不满足本节的 [分析]。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节一\n\n[事实] 某事实。\n\n## 节二\n\n[分析] 推演。\n"
+        findings = fact_analysis_pair_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["id"] == "structure-fact-analysis-pair"
+
+    def test_indented_heading_is_boundary(self):
+        """缩进标题也计节边界（对齐 lint 的 strip 后再匹配）。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节一\n\n[事实] 某事实。\n\n  ## 节二\n\n[分析] 推演。\n"
+        assert len(fact_analysis_pair_findings(text)) == 1
+
+    def test_matches_lint_on_the_same_text(self):
+        """同文本两通道裁决一致——跨通道断言见
+        invest-a-stock/tests/test_lint.py::TestRaSectionBoundaryParity
+        （lint 只在 invest-a-stock 侧可导入，故对照用例落那边）。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节\n\n[事实] 某事实。\n\n### 子节\n\n[分析] 推演。\n"
+        assert fact_analysis_pair_findings(text) == []
+
+
+class TestConclusionEvidenceAllTypes:
+    """2026-09-18 review #12：R-A2/R-A6 恢复全类型挂载，R-A1 保持门控。
+
+    被删除的 stock 旧版 `run_report_qc` 对**任意**文件跑 R-A1/R-A2/R-A6；A3 移植时
+    把三层一并门控到 stock+etf → journal/pulse/gap_scan/unknown 经
+    `invest.py qc-report` 的结论段门禁被静默净移除。源代码注释只论证了 R-A1
+    （长句密度会批量制造无意义 WARN），未论证 R-A2/R-A6。
+    """
+
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        p = tmp_path / "reports" / "x" / "note.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_conclusion_evidence_layer_present_for_non_stock(self, tmp_path):
+        p = self._write(tmp_path, "# 笔记\n\n> 不构成投资建议。\n\n## 主要结论\n\n该标的确定性高，估值仍有空间。\n")
+        assert detect_report_type(p) not in {"stock", "etf"}, "本用例须是非研究备忘录类型"
+        layers = {l.layer: l for l in qc_file(p).layers}
+        assert "conclusion-evidence" in layers, "非 stock/etf 产物也须挂 R-A2/R-A6"
+        assert layers["conclusion-evidence"].status == "fail"
+
+    def test_readability_layer_still_gated(self, tmp_path):
+        p = self._write(tmp_path, "# 笔记\n\n> 不构成投资建议。\n")
+        layers = {l.layer for l in qc_file(p).layers}
+        assert "readability" not in layers, "R-A1 保持门控（避免长句密度噪音）"

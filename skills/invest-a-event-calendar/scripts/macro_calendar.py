@@ -452,9 +452,9 @@ def fetch_baidu_calendar(
         # 渲染进时刻列，看起来像数据损坏而非「源不提供时刻」。上一行「地区」已用
         # _present_text 修过同类问题，此处漏改。
         picked.append({"日期": _iso(r.get("日期", "")), "时间": _present_text(r.get("时间")),
-                       "地区": reg, "事件": str(r.get("事件") or ""),
+                       "地区": reg, "事件": _present_text(r.get("事件")),
                        "前值": r.get("前值"), "重要性": r.get("重要性"),
-                       "统计周期": r.get("统计周期") or ""})
+                       "统计周期": _present_text(r.get("统计周期"))})
 
     if region_kw:
         annotated = []
@@ -700,6 +700,29 @@ def load_fomc_meetings(
         for d, sep in sorted(future)
     ]
     return events, warns
+
+
+# 致命消息前缀 = 「该表本次不可用」——只有这些才允许让消费方把源标成 `error`。
+# 单一真源：前缀在此定义，消息文本在 load_fomc_meetings 内生成。
+# 2026-09-18 review #7：unlock_calendar 曾把**整个** messages 列表塞进 `error=`，
+# 而 SourceResult 的契约是「error 非空 = 该源**不可得**」——于是一张健康的策展表
+# 只要日期手工少补个零（「2026-9-16」→ 归一化提示），就被渲染成「❌ 不可得」，
+# 同时该表的会议**仍在**日程区正常列出：源可得却被标不可得，正是 C3 注释声称要修的
+# LAW 5 误标类别反了过来。提示类消息改走 `notes`（不作不可得，只作留痕）。
+_FOMC_FATAL_PREFIXES = ("FOMC 策展表不可得", "FOMC 策展表已过期")
+
+
+def split_fomc_messages(messages: Sequence[str]) -> tuple[list[str], list[str]]:
+    """FOMC 消息分流 → ``(致命, 提示)``。
+
+    致命 = 表本次不可用（文件缺失/解析失败/结构异常/已过期）→ 消费方置 `error`；
+    提示 = 表可用但需人工修（日期未补零被归一化、个别行无法解析被跳过）→ 消费方置
+    `notes`。判据用**前缀**而非子串：提示类消息里也可能出现「不可得」字样，
+    子串匹配会把提示误升级成不可得。
+    """
+    fatal = [m for m in messages if m.startswith(_FOMC_FATAL_PREFIXES)]
+    notices = [m for m in messages if not m.startswith(_FOMC_FATAL_PREFIXES)]
+    return fatal, notices
 
 
 # ── 汇总视图 ─────────────────────────────────────────────────────────────

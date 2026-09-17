@@ -30,14 +30,19 @@ _EVIDENCE_RE = re.compile(r"^([A-Da-d]{1,2}|[Ll][1-4])")
 #   1. id 唯一非空；value 必为数值
 #   2. formula 若给出 → **必须能被安全求值，且结果等于 value**
 #      （直接拦截「标了公式但公式算不出这个数」= §2.3 强制 5 的「未实跑标注」）
-#   3. facts_md/analysis_md 中的 `[[F1]]` 引用必须在本段 facts 内存在（防悬空引用）
+#   3. facts_md/analysis_md 中的 `[事实: F1]` 引用必须在本段 facts 内存在（防悬空引用）
 #   4. facts_md/analysis_md 中出现的数字**必须**能对上某个 fact 的 value，
 #      或属于豁免集（年份/日期/期数/评级等结构性数字）
 #
 # 未覆盖的剩余缺口（如实记录，不假装已闭环）：facts **不校验** `[来源: 引擎字段]`
 # 标签指向的字段是否真实存在于当次采集——那需要 report 期把 collection 注入校验
 # （见 v0.3.1 requirements AH 后续项）。
-_FACT_REF_RE = re.compile(r"\[\[(F\d+)\]\]")
+#
+# 2026-09-18 review #3：本组闸门此前**在生产路径恒不触发**——schema 文档（SKILL.md）
+# 没有 facts 键、四个 agent prompt 教的是 `[事实: F{n}]` 而这里只认 `[[F{n}]]`、
+# 且没有任何生产者写 analysis.json 的 facts。三处不一致已统一为 prompt 的书写形态
+# `[事实: F1]`（报告中自解释；`[[F1]]` 对读者是不可读的）。改动须三处同步。
+_FACT_REF_RE = re.compile(r"\[事实\s*[:：]\s*(F\d+)\]")
 _FACT_TOL = 1e-6
 _MAX_FACTS = 200
 
@@ -52,10 +57,23 @@ _NUM_TOKEN_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
 # 校验。三个分支都要求「不可能与普通数值混淆」的形状：4 位年 + 月/日、带 v 的
 # 版本号、两段以上点号的版本号——`12.5` 只有一段点号，不受影响，仍须绑定。
 _MASKED_STRUCTURAL_RE = re.compile(
-    r"\d{4}-\d{2}(?:-\d{2})?"    # ISO 日期：2026-09-17 / 2026-09
+    # 年份区间须排在 ISO 之前：`2020-2024` 会被 ISO 分支吃成 `2020-20`，
+    # 残留 `24` 报未绑定（review #4 实测）。区间要求两侧各 4 位，故
+    # `9-10 倍` 这类数值区间不受影响。
+    r"\d{4}\s*[-–~]\s*\d{4}"     # 年份区间：2020-2024
+    r"|\d{4}-\d{2}(?:-\d{2})?"   # ISO 日期：2026-09-17 / 2026-09
+    r"|\d{4}年\d{1,2}月(?:\d{1,2}日)?"   # 中文日期：2026年9月17日 / 2026年9月
+    r"|\d{4}[Hh]\d"              # 报告期：2026H1
+    r"|\d{1,2}:\d{2}"            # 时刻：09:30
     r"|v\d+(?:\.\d+)+"           # v0.3.1
     r"|\d+(?:\.\d+){2,}"         # 0.3.1（无 v 前缀）
 )
+
+# URL 内的数字不要求绑定 fact——但**只豁免 URL 自身跨度内的 token**。
+# 早期实现写的是「该行出现过 http 即豁免整行」（review #10 实测：
+# `来源 https://x.com/p/123 该季增长 999%` 的 999 被整行放过，与本函数
+# docstring「不能豁免整行」自相矛盾，且放过的恰是 P0 要拦的编造数字）。
+_URL_RE = re.compile(r"https?://\S+")
 
 
 class _FormulaError(ValueError):
@@ -91,7 +109,15 @@ def _safe_eval_formula(expr: str) -> float:
         if isinstance(node, _ast.Constant):
             if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
                 raise _FormulaError("公式含非数值常量")
-            return _finite(float(node.value))
+            # review #13：超大整数字面量（`"9"*400`）在 float() 处抛 OverflowError，
+            # 而本分支原本不在 BinOp 的 except 覆盖内 → 异常穿透 _FormulaError，
+            # 调用方只捕 _FormulaError/AnalysisSchemaError → traceback 或
+            # error 级 completion-analysis-sidecar-invalid。同函数 Pow 分支有兜底，
+            # 此处漏了。
+            try:
+                return _finite(float(node.value))
+            except OverflowError as exc:
+                raise _FormulaError("公式常量超出浮点范围") from exc
         if isinstance(node, _ast.BinOp):
             a, b = _ev(node.left), _ev(node.right)
             op = node.op
@@ -130,27 +156,45 @@ def _as_number(v):
     return None
 
 
-def _written_decimals(value: float) -> int | None:
+def _written_decimals(value) -> int | None:
     """value 的**书写小数位数**（用于按精度判定公式复算是否一致）。
 
     报告里的数字是四舍五入后写出的（``-36.7`` 背后是 ``-36.7193…``），故要求
     公式结果与 value 在「书写精度」上相等，而不是要求逐位相等——后者会把所有
     正常四舍五入的数字判成错误。科学计数法（1e-07）无处谈精度 → None（回退到
     相对容差）。
+
+    **整数书写（JSON int）→ 0 位，含义是「精确」**（review #14）：原实现用
+    ``repr(float(18))`` == ``'18.0'`` 推精度，得到 1 位小数 → 取整窗口 ±0.05，
+    把「公式必须算出该数」放松成「公式落在该数附近」——`value=18` 配
+    `formula="18.04"` 会被判为复算一致，编造公式可过闸。
     """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return 0
     txt = repr(float(value))
     if "e" in txt or "E" in txt or "." not in txt:
         return None
     return len(txt.split(".")[1])
 
 
-def _formula_matches(value: float, got: float) -> bool:
-    """公式结果是否与 value 一致（按书写精度，回退相对容差）。"""
+def _formula_matches(value, got: float) -> bool:
+    """公式结果是否与 value 一致（按书写精度，回退相对容差）。
+
+    ``value`` 取 facts 里的**原始** JSON 值（不是 float 化后的），否则整数书写
+    的精度信息已丢失。
+    """
+    num = _as_number(value)
+    if num is None:
+        return False
     d = _written_decimals(value)
+    if d == 0:
+        # 整数书写 → 要求精确（相对容差），**不得**用 round(got, 0) 的 ±0.5 窗口
+        scale = max(abs(num), 1e-9)
+        return abs(got - num) / scale <= _FACT_TOL
     if d is not None:
-        return round(got, d) == round(value, d)
-    scale = max(abs(value), 1e-9)
-    return abs(got - value) / scale <= _FACT_TOL
+        return round(got, d) == round(num, d)
+    scale = max(abs(num), 1e-9)
+    return abs(got - num) / scale <= _FACT_TOL
 
 
 def _validate_facts(sec: dict) -> tuple[list[str], set[str]]:
@@ -181,7 +225,8 @@ def _validate_facts(sec: dict) -> tuple[list[str], set[str]]:
         else:
             seen.add(fid)
 
-        val = _as_number(fa.get("value"))
+        raw = fa.get("value")
+        val = _as_number(raw)
         if val is None:
             errs.append(f"facts[{i}]({fid or '?'}):value 必为数值（收到 {fa.get('value')!r}）")
         formula = fa.get("formula")
@@ -191,7 +236,8 @@ def _validate_facts(sec: dict) -> tuple[list[str], set[str]]:
             except _FormulaError as exc:
                 errs.append(f"facts[{i}]({fid or '?'}):formula 不可求值（{exc}）")
             else:
-                if val is not None and not _formula_matches(val, got):
+                # 传**原始**值：整数书写（JSON int）的精度语义在 float() 后丢失（#14）
+                if val is not None and not _formula_matches(raw, got):
                     errs.append(
                         f"facts[{i}]({fid or '?'}):formula 复算 {got!r} ≠ value {val!r}"
                         f"（公式 {formula!r} 算不出该数——禁止未实跑标注）")
@@ -199,9 +245,9 @@ def _validate_facts(sec: dict) -> tuple[list[str], set[str]]:
 
 
 def _validate_fact_refs(sec: dict, known: set[str]) -> list[str]:
-    """``[[F1]]`` 引用完整性：必须在本段 facts 内存在。
+    """``[事实: F1]`` 引用完整性：必须在本段 facts 内存在。
 
-    ``known`` 为空集（段未声明 facts）时**不校验**——正文里的 `[[F1]]` 可能是
+    ``known`` 为空集（段未声明 facts）时**不校验**——正文里的 `[事实: F1]` 可能是
     普通文本，向后兼容优先。
     """
     if not known:
@@ -210,7 +256,7 @@ def _validate_fact_refs(sec: dict, known: set[str]) -> list[str]:
     for field in ("facts_md", "analysis_md"):
         for m in _FACT_REF_RE.finditer(str(sec.get(field) or "")):
             if m.group(1) not in known:
-                errs.append(f"{field}:引用 [[{m.group(1)}]] 不存在于本段 facts")
+                errs.append(f"{field}:引用 [事实: {m.group(1)}] 不存在于本段 facts")
     return errs
 
 
@@ -239,15 +285,28 @@ def _is_exempt_num(text: str, match: re.Match[str]) -> bool:
     if (len(token) == 4 and token.isdigit()
             and 1900 <= int(token) <= 2200 and after.lstrip().startswith("年")):
         return True
-    if "http" in before.rsplit("\n", 1)[-1]:
-        return True
+    # URL 内跨度：只豁免**落在 URL 里**的 token，不是「本行出现过 URL」（review #10）。
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    line_end = len(text) if line_end == -1 else line_end
+    line = text[line_start:line_end]
+    for u in _URL_RE.finditer(line):
+        if u.start() <= start - line_start and end - line_start <= u.end():
+            return True
 
     # 报告结构：F1、L1、Q1、H1、v0.3、第 3 项、近 8 期、[1]。
     if prev in {"F", "f", "L", "l", "Q", "q", "H", "h", "v", "V"}:
         return True
-    if re.search(r"第\s*$|近\s*$", before) and re.match(r"\s*(期|项|条|章|节|次|名|日)", after):
+    # 序号/窗口量词：第 3 季度、第 3 项、近 12 个月、近 8 期（review #4：
+    # 原表缺 季/个/年/周 → 「第 3 季度」「近 12 个月」被判未绑定数字）。
+    if re.search(r"第\s*$|近\s*$", before) and re.match(
+            r"\s*(期|项|条|章|节|次|名|日|季|个|年|周|月)", after):
         return True
     if prev == "[" and nxt == "]":
+        return True
+    # 标的代码（6 位）——仅在**上下文指明是代码**时豁免，避免放过真实量值。
+    if (len(token) == 6 and token.isdigit()
+            and re.search(r"(标的|代码|股票|证券|简称|\(|（)\s*$", before)):
         return True
     return False
 
