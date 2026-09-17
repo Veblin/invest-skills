@@ -1109,7 +1109,24 @@ def _section_left_right_probability(
             + "；".join(continuation_hits) + "，证据强度：⚠️"
         )
     if not right_items:
-        right_items.append("① 右侧参考指标数据不足，证据强度：❓")
+        # 不给纯哨兵句（v0.3.0 A7）：哨兵只能靠措辞躲过 QC 的 completion-empty-basis
+        # 判定，而「这一节到底有没有依据」应由**信息量**决定。照左侧同款给出各项
+        # 实测值与阈值——读者知道差多少，门禁也按「有实质内容」正确放行。
+        # 左侧未改写前右侧单独告警，同数据下左右不对称。
+        if tech and "error" not in tech:
+            _ma_s = f"MA 排列 {label or '无明确多头结构'}"
+            _macd_s = (f"MACD DIF={macd.get('dif')} DEA={macd.get('dea')}"
+                       if macd.get("available") else "MACD 不可得")
+        else:
+            _ma_s, _macd_s = "MA 排列不可得", "MACD 不可得"
+        _sw_p = sw.get("stock_vs_industry_pct") if isinstance(sw, dict) else None
+        _sw_s = (f"个股相对行业 {_sw_p:+.2f}%" if _sw_p is not None
+                 else "个股相对行业不可得")
+        right_items.append(
+            f"① 右侧指标均未达阈：{_ma_s}（阈值：出现多头排列）、{_macd_s}"
+            f"（阈值：可计算）、{_sw_s}（阈值 >0%）、趋势延续信号组合 "
+            f"{len(continuation_hits)}/3 项（阈值 ≥2 项），证据强度：❓"
+        )
 
     prob = ProbabilityStructure(
         left_items=left_items,

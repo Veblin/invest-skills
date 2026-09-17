@@ -90,7 +90,9 @@ def tolerance_rebalance(prices: list[float], *, weights: tuple[float, float] = (
             cash = total - target_risk
             n_reb += 1
     final = units * p[-1] + cash
-    return {"available": True, **_stats(final, amount, len(p)), "n_rebalances": n_reb,
+    # v0.3.0 B4（顺带）：n_periods 原报 `len(p)`，但循环只走 `p[1:]`（len-1 次）
+    # ——三腿的 n_periods 口径须一致为「实际发生的期数」，否则对照表读数互相矛盾。
+    return {"available": True, **_stats(final, amount, len(p) - 1), "n_rebalances": n_reb,
             "band": band, "cash_rate": 0.0,
             "note": ("容忍带再平衡（现金端按 **0 利率**简化 → 低估其长期表现，"
                      "结论须带此限定）")}
@@ -98,12 +100,18 @@ def tolerance_rebalance(prices: list[float], *, weights: tuple[float, float] = (
 
 def config_backtest(prices: list[float], *, amount: float = 10000.0,
                     every: int = 20, band: float = 0.05) -> dict:
-    """三方法对照表（**同一价格序列**下的表现差异）。"""
+    """三方法对照表（**同一价格序列**下的表现差异，三腿本金相等）。"""
+    n = len(_clean(prices))
+    # v0.3.0 B4：DCA 的投入次数以 `dca` 自身循环边界为唯一权威 =
+    # len(range(0, n, every)) = ceil(n / every)。此前用 `n // every`（floor）做
+    # 分母 → 每期金额偏大、DCA 腿本金高于另两腿（len=252/every=20 → 13 vs 12 期
+    # = +8.33%；贴近边界时更夸张，len=21 时 2/1 = +100%），而本表宣称「同一价格
+    # 序列下的方法层对照」→ 实为不等本金对比。
+    n_periods = (n + every - 1) // every
     return {
-        "n_prices": len(_clean(prices)),
+        "n_prices": n,
         "methods": {
-            "dca": dca(prices, amount_per_period=amount / max(1, len(_clean(prices)) // every or 1),
-                       every=every),
+            "dca": dca(prices, amount_per_period=amount / max(1, n_periods), every=every),
             "lump_sum": lump_sum(prices, amount=amount),
             "tolerance_rebalance": tolerance_rebalance(prices, band=band, amount=amount),
         },

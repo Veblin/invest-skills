@@ -101,3 +101,21 @@ def test_three_methods_present_in_comparison():
     assert set(out["methods"]) == {"dca", "lump_sum", "tolerance_rebalance"}
     for k, v in out["methods"].items():
         assert "return_pct" in v, f"{k} 缺 return_pct"
+
+
+def test_dca_leg_funded_equally_with_other_methods():
+    """v0.3.0 B4：三腿本金须相等（本表宣称「同一价格序列下的方法层对照」）。
+
+    旧实现分母用 floor `len // every`（12），而 dca 的实际投入次数是
+    `len(range(0, n, every))` = ceil（13）→ DCA 腿本金 +8.33%；贴近边界更夸张
+    （len=21 时 2/1 = +100%）。不等本金使 final_value 对比失真。
+    """
+    from config_backtest import config_backtest
+
+    prices = [100.0 + i * 0.1 for i in range(252)]
+    m = config_backtest(prices)["methods"]
+    assert m["dca"]["n_periods"] == 13, "(252 + 20 - 1) // 20"
+    for leg in ("dca", "lump_sum", "tolerance_rebalance"):
+        assert abs(m[leg]["contributed"] - 10000.0) < 1e-6, (leg, m[leg])
+    # 顺带修：n_periods 口径统一为「实际发生期数」（容忍带循环只走 p[1:]）
+    assert m["tolerance_rebalance"]["n_periods"] == 251

@@ -31,8 +31,12 @@ def stub_sources(monkeypatch):
         "us": mc.SourceResult("FRED", [_ev("2026-10-14", "", "美国", "美国CPI",
                                            "高", "fred", "源不提供公布时刻")],
                               coverage_end="2026-12-31"),
-        "fomc": ([_ev("2026-09-16", "", "美国", "FOMC 议息会议", "高", "fomc",
-                      "官方注：暂定")], []),
+        # v0.3.0 D6：日期须与**被测 CLI** 同源（uc._beijing_today）。原先硬编码
+        # 2026-09-16，-macro 窗口是 [今天, 今天+days] 的**未来窗** → 该桩事件被滤掉
+        # → FOMC 行落到「— 窗口内无排期」分支，连带 3 个可用性用例误挂（另有
+        # test_fomc_appears_once_per_section 同因）。本文件 :253-255 已记录该修法。
+        "fomc": ([_ev(uc._beijing_today().isoformat(), "", "美国", "FOMC 议息会议",
+                      "高", "fomc", "官方注：暂定")], []),
     }
     monkeypatch.setattr(mc, "fetch_baidu_calendar", lambda *a, **k: state["cn"])
     monkeypatch.setattr(mc, "fetch_us_calendar", lambda *a, **k: state["us"])
@@ -315,3 +319,21 @@ def test_macro_report_marks_political_unavailable_not_silent(
     rc, out = _run(monkeypatch, capsys)
     assert rc == 0
     assert "政治/宏观不确定性窗口" in out and "不可得" in out
+
+
+def test_fomc_unavailable_rendered_as_unavailable_not_no_schedule(
+        stub_sources, monkeypatch, capsys):
+    """v0.3.0 C3：策展表不可得（文件缺失/解析失败/已过期）须走 error → ❌ 不可得。
+
+    旧实现丢弃 `load_fomc_meetings` 的 warnings、仍构造 error=None 的 SourceResult
+    → 覆盖矩阵同时渲染「— 窗口内无排期」与「⚠ FOMC 策展表不可得」，把**不可得**
+    写成**无事件**（LAW 5；与本文件 T1/T2/T3/T6 同族的历史缺陷模式）。
+    """
+    stub_sources["fomc"] = ([], ["FOMC 策展表不可得（文件缺失）"])
+    rc, out = _run(monkeypatch, capsys)
+    assert rc == 0, "其余源可用 → 部分降级不改变退出码"
+    assert "❌ FOMC 策展表：FOMC 策展表不可得（文件缺失）" in out
+    fomc_lines = [ln for ln in out.splitlines() if "FOMC 策展表" in ln]
+    assert fomc_lines, "FOMC 须出现在覆盖矩阵/降级清单"
+    for ln in fomc_lines:
+        assert "窗口内无排期" not in ln, f"不可得被渲染成无事件：{ln}"

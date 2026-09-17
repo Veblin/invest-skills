@@ -8,6 +8,7 @@ markdown 子集（复用 lib.md_subset 的 fail-loud 判定，不支持语法即
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,274 @@ MAX_LEN = {"module": 64, "title": 128, "facts_md": 20_000, "analysis_md": 40_000
 POSITION_ALLOWED = {"overview", "valuation", "financials", "technicals", "northbound",
                     "holders", "events", "refs", "research", "conclusion", "analysis"}
 _EVIDENCE_RE = re.compile(r"^([A-Da-d]{1,2}|[Ll][1-4])")
+
+# --- 事实绑定（v0.3.1 #4）------------------------------------------------------
+# 缺陷记录：此前 analysis.json **无 fact_id 字段**，段内数字未经任何来源校验
+# （SKILL.md 自认「可审计性止于『来源 + 同代绑定 + 段级证据等级』」）——Claude 写的
+# 任意数字可直接进入最终 MD/HTML，P0（一切数字经 Python）在协议层无技术保证。
+#
+# 本版引入**可选** `facts` 数组（向后兼容：不带 facts 的段照常通过），有 facts 时强制：
+#   1. id 唯一非空；value 必为数值
+#   2. formula 若给出 → **必须能被安全求值，且结果等于 value**
+#      （直接拦截「标了公式但公式算不出这个数」= §2.3 强制 5 的「未实跑标注」）
+#   3. facts_md/analysis_md 中的 `[[F1]]` 引用必须在本段 facts 内存在（防悬空引用）
+#   4. facts_md/analysis_md 中出现的数字**必须**能对上某个 fact 的 value，
+#      或属于豁免集（年份/日期/期数/评级等结构性数字）
+#
+# 未覆盖的剩余缺口（如实记录，不假装已闭环）：facts **不校验** `[来源: 引擎字段]`
+# 标签指向的字段是否真实存在于当次采集——那需要 report 期把 collection 注入校验
+# （见 v0.3.1 requirements AH 后续项）。
+_FACT_REF_RE = re.compile(r"\[\[(F\d+)\]\]")
+_FACT_TOL = 1e-6
+_MAX_FACTS = 200
+
+# 正文数字豁免：这些形态不是「加工出来的数值」，不该要求绑定 fact。
+# 年/月/日/期数/序号、百分比符号后的单位词等结构性数字。
+# 千分位书写（`12,345`）算**一个** token：它是实质量值，须照常绑定 fact——
+# 切碎成 "12"/"345" 会让两侧都匹配不上（v0.3.0 D2 误报根因）。
+_NUM_TOKEN_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+
+# 结构性形态的**整段**掩码（v0.3.0 A1）：逐 token 判断无法把 `2026-09-17` 的
+# 首/尾片段与 `9-10 倍` 这类数值区间区分开，故先把这些形态整体掩掉再逐 token
+# 校验。三个分支都要求「不可能与普通数值混淆」的形状：4 位年 + 月/日、带 v 的
+# 版本号、两段以上点号的版本号——`12.5` 只有一段点号，不受影响，仍须绑定。
+_MASKED_STRUCTURAL_RE = re.compile(
+    r"\d{4}-\d{2}(?:-\d{2})?"    # ISO 日期：2026-09-17 / 2026-09
+    r"|v\d+(?:\.\d+)+"           # v0.3.1
+    r"|\d+(?:\.\d+){2,}"         # 0.3.1（无 v 前缀）
+)
+
+
+class _FormulaError(ValueError):
+    pass
+
+
+def _safe_eval_formula(expr: str) -> float:
+    """仅允许 数字 + ``+ - * / ** ()`` 的算术表达式求值。
+
+    用 ``ast`` 白名单而非 ``eval``（禁属性访问/调用/下标/名字查找）。
+    越界 → ``_FormulaError``（fail-loud，由调用方转成校验错误）。
+    """
+    import ast as _ast
+
+    src = str(expr or "").strip()
+    if not src:
+        raise _FormulaError("公式为空")
+    try:
+        tree = _ast.parse(src, mode="eval")
+    except SyntaxError as exc:
+        raise _FormulaError(f"公式不可解析: {exc.msg}") from exc
+
+    def _finite(value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _FormulaError("公式结果非实数")
+        if not math.isfinite(value):
+            raise _FormulaError("公式结果非有限数")
+        return float(value)
+
+    def _ev(node):
+        if isinstance(node, _ast.Expression):
+            return _ev(node.body)
+        if isinstance(node, _ast.Constant):
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise _FormulaError("公式含非数值常量")
+            return _finite(float(node.value))
+        if isinstance(node, _ast.BinOp):
+            a, b = _ev(node.left), _ev(node.right)
+            op = node.op
+            try:
+                if isinstance(op, _ast.Add):
+                    return _finite(a + b)
+                if isinstance(op, _ast.Sub):
+                    return _finite(a - b)
+                if isinstance(op, _ast.Mult):
+                    return _finite(a * b)
+                if isinstance(op, _ast.Div):
+                    if b == 0:
+                        raise _FormulaError("公式除零")
+                    return _finite(a / b)
+                if isinstance(op, _ast.Pow):
+                    return _finite(a ** b)
+            except OverflowError as exc:
+                raise _FormulaError("公式算术溢出") from exc
+            except ArithmeticError as exc:
+                raise _FormulaError("公式算术错误") from exc
+            raise _FormulaError(f"不允许的运算符: {type(op).__name__}")
+        if isinstance(node, _ast.UnaryOp) and isinstance(node.op, (_ast.UAdd, _ast.USub)):
+            v = _ev(node.operand)
+            return v if isinstance(node.op, _ast.UAdd) else -v
+        raise _FormulaError(f"不允许的语法节点: {type(node).__name__}")
+
+    return _ev(tree)
+
+
+def _as_number(v):
+    """→ float；非数值 → None（不做 str→float 的宽松解析，防把 'F1' 当数字）。"""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    return None
+
+
+def _written_decimals(value: float) -> int | None:
+    """value 的**书写小数位数**（用于按精度判定公式复算是否一致）。
+
+    报告里的数字是四舍五入后写出的（``-36.7`` 背后是 ``-36.7193…``），故要求
+    公式结果与 value 在「书写精度」上相等，而不是要求逐位相等——后者会把所有
+    正常四舍五入的数字判成错误。科学计数法（1e-07）无处谈精度 → None（回退到
+    相对容差）。
+    """
+    txt = repr(float(value))
+    if "e" in txt or "E" in txt or "." not in txt:
+        return None
+    return len(txt.split(".")[1])
+
+
+def _formula_matches(value: float, got: float) -> bool:
+    """公式结果是否与 value 一致（按书写精度，回退相对容差）。"""
+    d = _written_decimals(value)
+    if d is not None:
+        return round(got, d) == round(value, d)
+    scale = max(abs(value), 1e-9)
+    return abs(got - value) / scale <= _FACT_TOL
+
+
+def _validate_facts(sec: dict) -> tuple[list[str], set[str]]:
+    """可选 ``facts`` 校验。无 facts → 无错（向后兼容）。
+
+    返回 ``(错误, 本段已声明 fact id 集合)``——**不写回 sec**（D7：不修改传入对象；
+    段字典来自 ``load_analysis_json`` 的共享结构）。
+    """
+    facts = sec.get("facts")
+    if facts is None:
+        return ([], set())
+    if not isinstance(facts, list):
+        return (["facts:必须为数组"], set())
+    if len(facts) > _MAX_FACTS:
+        return ([f"facts:条数 {len(facts)} 超过上限 {_MAX_FACTS}"], set())
+
+    errs: list[str] = []
+    seen: set[str] = set()
+    for i, fa in enumerate(facts):
+        if not isinstance(fa, dict):
+            errs.append(f"facts[{i}]:必须是对象")
+            continue
+        fid = str(fa.get("id") or "").strip()
+        if not fid:
+            errs.append(f"facts[{i}]:缺 id")
+        elif fid in seen:
+            errs.append(f"facts[{i}]:id 重复 {fid}")
+        else:
+            seen.add(fid)
+
+        val = _as_number(fa.get("value"))
+        if val is None:
+            errs.append(f"facts[{i}]({fid or '?'}):value 必为数值（收到 {fa.get('value')!r}）")
+        formula = fa.get("formula")
+        if formula is not None:
+            try:
+                got = _safe_eval_formula(str(formula))
+            except _FormulaError as exc:
+                errs.append(f"facts[{i}]({fid or '?'}):formula 不可求值（{exc}）")
+            else:
+                if val is not None and not _formula_matches(val, got):
+                    errs.append(
+                        f"facts[{i}]({fid or '?'}):formula 复算 {got!r} ≠ value {val!r}"
+                        f"（公式 {formula!r} 算不出该数——禁止未实跑标注）")
+    return (errs, seen)
+
+
+def _validate_fact_refs(sec: dict, known: set[str]) -> list[str]:
+    """``[[F1]]`` 引用完整性：必须在本段 facts 内存在。
+
+    ``known`` 为空集（段未声明 facts）时**不校验**——正文里的 `[[F1]]` 可能是
+    普通文本，向后兼容优先。
+    """
+    if not known:
+        return []
+    errs: list[str] = []
+    for field in ("facts_md", "analysis_md"):
+        for m in _FACT_REF_RE.finditer(str(sec.get(field) or "")):
+            if m.group(1) not in known:
+                errs.append(f"{field}:引用 [[{m.group(1)}]] 不存在于本段 facts")
+    return errs
+
+
+def _is_exempt_num(text: str, match: re.Match[str]) -> bool:
+    """结构性数字不要求事实绑定；仅豁免该 token，不能豁免整行。
+
+    特别地，不能因一行里有「2026 年」或「来源」就放过该行的其它数字：那会让
+    ``2026 年营收增长 999%`` 再次绕过事实校验。
+    """
+    token = match.group(0)
+    start, end = match.span()
+    before, after = text[:start], text[end:]
+    prev = before[-1:]
+    nxt = after[:1]
+
+    # 日期的年/月/日片段，以及 URL、版本号中的数字。
+    if (prev in {"-", "/", "."} and nxt in {"-", "/", "."}) or (
+        prev in {"-", "/", "."} and nxt.isdigit()
+    ) or (prev.isdigit() and nxt in {"-", "/", "."}):
+        return True
+    # `token.isdigit()` 先导：`_NUM_TOKEN_RE` 含小数，len==4 的 `12.5`/`36.7`
+    # 曾直接进 int() 抛未捕获 ValueError —— invest.py 只捕 AnalysisSchemaError
+    # → traceback；共享 report_qc 的 except Exception 把它转成 error 级
+    # completion-analysis-sidecar-invalid（合格报告 exit 2 不得交付）
+    # （v0.3.0 A1）。
+    if (len(token) == 4 and token.isdigit()
+            and 1900 <= int(token) <= 2200 and after.lstrip().startswith("年")):
+        return True
+    if "http" in before.rsplit("\n", 1)[-1]:
+        return True
+
+    # 报告结构：F1、L1、Q1、H1、v0.3、第 3 项、近 8 期、[1]。
+    if prev in {"F", "f", "L", "l", "Q", "q", "H", "h", "v", "V"}:
+        return True
+    if re.search(r"第\s*$|近\s*$", before) and re.match(r"\s*(期|项|条|章|节|次|名|日)", after):
+        return True
+    if prev == "[" and nxt == "]":
+        return True
+    return False
+
+
+def _fact_value_matches(token: str, facts: object) -> bool:
+    """正文 token 是否为本段一个数值事实的展示值。
+
+    精确 token 比较避免把 ``9`` 误认成 ``999``；浮点比较允许 ``-36.7`` 在正文中
+    写作 ``36.7%``（符号和百分号是文字格式，不改变该数的量级）。
+    """
+    try:
+        written = float(token.replace(",", ""))   # 千分位书写（D2）
+    except ValueError:
+        return False
+    for fact in facts if isinstance(facts, list) else ():
+        if not isinstance(fact, dict):
+            continue
+        value = _as_number(fact.get("value"))
+        if value is not None and math.isclose(abs(written), abs(value), rel_tol=_FACT_TOL,
+                                              abs_tol=_FACT_TOL):
+            return True
+    return False
+
+
+def _validate_fact_numbers(sec: dict) -> list[str]:
+    """有 ``facts`` 的段，其正文每一个非结构性数字都必须绑定一个事实值。"""
+    facts = sec.get("facts")
+    if not isinstance(facts, list):
+        return []
+    errs: list[str] = []
+    for field in ("facts_md", "analysis_md"):
+        raw = str(sec.get(field) or "")
+        # 等长空格替换 → 各 token 的 span 与原文一致，_is_exempt_num 的
+        # 前后文判断语义不变
+        text = _MASKED_STRUCTURAL_RE.sub(lambda m: " " * len(m.group(0)), raw)
+        for m in _NUM_TOKEN_RE.finditer(text):
+            if _is_exempt_num(text, m) or _fact_value_matches(m.group(0), facts):
+                continue
+            errs.append(f"{field}:数字 {m.group(0)!r} 未绑定本段 facts")
+    return errs
 
 
 class AnalysisSchemaError(ValueError):
@@ -46,11 +315,15 @@ def _validate_one(sec: dict) -> list[str]:
     if sec["position"] not in POSITION_ALLOWED:
         errs.append(f"position 不在允许集合: {sec['position']}")
     if not errs:
+        fact_errs, known_ids = _validate_facts(sec)
+        errs.extend(fact_errs)
         for k in ("facts_md", "analysis_md"):
             try:
                 render_markdown(sec[k])
             except MarkdownSubsetError as exc:
                 errs.append(f"markdown:{k}:{exc}")
+        errs.extend(_validate_fact_refs(sec, known_ids))
+        errs.extend(_validate_fact_numbers(sec))
     return errs
 
 

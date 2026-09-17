@@ -198,12 +198,19 @@ def cmd_show(journal_id: int, portfolio: str | None = None) -> int:
                 for w in watch:
                     if not isinstance(w, dict):
                         continue
-                    bf = w.get("backfill") or {}
+                    # `backfill` 是 TEXT 直通字段（SKILL.md 约定 null / 对象），无写入侧校验，
+                    # LLM 可能写成字符串等形态 → 形态异常须外显，且不得让 .get 中断整条渲染。
+                    bf = w.get("backfill")
                     price_txt = (f"观察时 {w.get('price_at_observation')}"
                                  if w.get("price_at_observation") is not None else "观察时 —")
-                    back_txt = (f"回填 {bf.get('as_of')} 价 {bf.get('price')}"
-                                f"（{bf.get('pct_change')}）"
-                                if bf else "回填：待补")
+                    if not isinstance(bf, dict):
+                        back_txt = ("回填：待补" if bf is None
+                                    else f"回填：格式异常（{type(bf).__name__}，非对象）")
+                    elif bf:
+                        back_txt = (f"回填 {bf.get('as_of')} 价 {bf.get('price')}"
+                                    f"（{bf.get('pct_change')}）")
+                    else:
+                        back_txt = "回填：待补"          # 空对象 = 尚未回填（既有语义）
                     print(f"  {w.get('symbol')}（{w.get('observed_at')}）"
                           f"跳过理由：{w.get('skip_reason')}"
                           f"｜类型：{w.get('skip_kind') or '—'}｜{price_txt}｜{back_txt}"

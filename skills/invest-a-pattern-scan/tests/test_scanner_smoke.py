@@ -129,7 +129,10 @@ def test_scanner_retest_deep_branch_reachable(monkeypatch):
     monkeypatch.setattr(ps, "load_gap_scan_module", _fake_load)
     monkeypatch.setattr(ps, "fetch_daily_and_adj", lambda dates: (fake, None, None))
 
-    dates = [f"2026{i:04d}" for i in range(1, 200)]
+    # 合法 YYYYMMDD 占位日（review #15：旧写法 f"2026{i:04d}" 产生 20260001/20260199
+    # 等非法日期，仅因 fetch 被 monkeypatch 才通过——姊妹测试已改，此处同步）
+    _start = datetime.date(2026, 1, 1)
+    dates = [(_start + datetime.timedelta(days=i)).strftime("%Y%m%d") for i in range(199)]
     hits, _ = ps.scan_universe(["600176.SH"], dates)
 
     statuses = {h.retest_status for h in hits}

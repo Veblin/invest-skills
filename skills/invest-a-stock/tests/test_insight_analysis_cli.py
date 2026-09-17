@@ -118,3 +118,36 @@ def test_insight_emit_json_and_compact_write_no_sidecars(_invest, tmp_path):
     reports = tmp_path / "reports"
     created = list(reports.rglob("*")) if reports.exists() else []
     assert created == []
+
+
+# ── v0.3.0 D5：--mode insight --save-raw 必须真的存档 ──────────────────────
+
+
+def test_insight_save_raw_archives(_invest, tmp_path, monkeypatch):
+    """旧实现把 `--save-raw` 的存档块只写在 full 分支尾部（render 之后），而
+    insight 分支在它之前就 `return 0`（json / compact 出口更早）→ 参数被解析、
+    被接受、然后**静默忽略**（最坏的一种失败：看起来生效了）。抽成
+    `_maybe_save_raw` 并在每个出口调用后修复。
+    """
+    import lib.archiver as archiver
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        archiver, "archive_collection",
+        lambda symbol, result: (seen.append(symbol), str(tmp_path / "raw.json"))[1])
+
+    assert _invest.cmd_report(_args(tmp_path, save_raw=True)) == 0
+    assert seen == ["600176"], "--mode insight 下 --save-raw 未触发存档"
+
+
+def test_insight_without_save_raw_does_not_archive(_invest, tmp_path, monkeypatch):
+    """对照：未传 --save-raw 不得存档。"""
+    import lib.archiver as archiver
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        archiver, "archive_collection",
+        lambda symbol, result: (seen.append(symbol), "x")[1])
+
+    assert _invest.cmd_report(_args(tmp_path)) == 0
+    assert seen == []

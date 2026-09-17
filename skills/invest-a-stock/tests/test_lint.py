@@ -609,19 +609,39 @@ class TestV030ConventionRuleBehavior:
 
     # ── R-E04/R-E03 词义碰撞 FP 修复回归（reports/ 652 篇实测：20 → 0）────────
     # 「出货」在产业文本中是「出货量」义，「托底」另有经济学义；两者都无市场主体
-    # 施动者。收窄为**要求施动者**，并让 R-E04 与兄弟规则同表豁免来源标注行。
+    # 施动者。收窄为**要求施动者**——这才是误报归零的真正原因，与来源标注无关
+    # （v0.3.0 A6 撤回了「来源标注豁免」，见下）。
 
-    def test_r_e04_exempts_sourced_fact_line(self, tmp_path):
-        """带 [来源:] 的 [事实] 行＝可追溯事实陈述 → 豁免（误报主源）。"""
-        body = ("# 测试\n\n**[事实]** 行业量价：高盛两度上修 800G 出货至 3350 万只"
-                " [来源: section_3]。\n")
-        assert "structure-convention-in-fact-block" not in self._lint(
-            tmp_path, body, profile="precommit")
+    def test_r_e04_sourced_shipment_line_not_a_convention(self, tmp_path):
+        """产业义「出货」（无市场主体施动者）不命中——带不带来源都一样。
 
-    def test_r_e04_exempts_sourced_convention_line(self, tmp_path):
-        """journal 实测 FP：`国家队托底 … [来源: 用户陈述]` 不得判为无标注惯例。"""
+        该行曾因带 [来源: section_3] 被豁免，掩盖了「pattern 本就不匹配」这一
+        真实原因；A6 撤回来源豁免后此对照用例说明豁免并非必要。
+        """
+        for src in (" [来源: section_3]", ""):
+            body = ("# 测试\n\n**[事实]** 行业量价：高盛两度上修 800G 出货至 3350 万只"
+                    + src + "。\n")
+            assert "structure-convention-in-fact-block" not in self._lint(
+                tmp_path, body, profile="precommit"), src
+
+    def test_r_e04_sourced_convention_line_now_flagged(self, tmp_path):
+        """v0.3.0 A6 语义变更：带 [来源:] **不再**豁免。
+
+        旧行为（2026-09-14 引入）：该行因带 `[来源: 用户陈述]` 被豁免。但 §3.5
+        约束 1 管的是**放置位置**——惯例型表述放进 [事实] 块即违规，与其是否带
+        来源无关；旧豁免还使「追加一个 [来源:]」成为绕过 error 级门禁的通用手法
+        （文档规定的门是 `--fail-on error`）。合法出路：补 §3.5 固定标注，或把
+        该表述移出 [事实] 块。
+        """
         body = ("# 测试\n\n**[事实]** 用户驱动逻辑：(a) 国家队托底 + 科技战略定位 → 政策底"
                 "[来源: 用户陈述 / 2026-07-21]。\n")
+        assert "structure-convention-in-fact-block" in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e04_convention_exempt_only_with_section35_tag(self, tmp_path):
+        """唯一合法豁免是 §3.5 固定标注「从业者惯例，非学术验证：{出处}」。"""
+        body = ("# 测试\n\n**[事实]** 用户驱动逻辑：(a) 国家队托底 + 科技战略定位 → 政策底"
+                "（从业者惯例，非学术验证：用户陈述 / 2026-07-21）。\n")
         assert "structure-convention-in-fact-block" not in self._lint(
             tmp_path, body, profile="precommit")
 
@@ -682,3 +702,92 @@ class TestV030ConventionRuleBehavior:
         """已带三态标注（传言/事实/证实）的行须豁免，不得误伤。"""
         body = "# 测试\n\n（传言）公司将获注资，尚未证实。\n"
         assert "wording-message-no-tristate" not in self._lint(tmp_path, body)
+
+
+class TestV030Law6FalsePositiveFixes:
+    """v0.3.0 全量重审 F-U7-1/2/4：law6 与宏观传导链规则的**误报收窄**。
+
+    每组断言都是成对的：**误报不再命中** + **真违规仍被拦**。
+    只证前者会让规则变瞎——收窄匹配精度不等于放宽红线（LAW 6 本身不变）。
+    全量语料实测背景：这 5 条规则贡献了 253 份报告中约 32% 的 FAIL，且以误报为主。
+    """
+
+    @staticmethod
+    def _lint(tmp_path, body: str, profile: str = "claude"):
+        from lib import lint as lint_mod
+        from lib.lint import lint_file
+
+        lint_mod._RULES_CACHE = None  # 保证读到当前 YAML，不吃上一次的缓存
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        return {x.rule_id for x in lint_file(f, profile=profile)}
+
+    # ---- F-U7-1：law6-hold-standalone 把**文档要求的合规写法**判为违规 ----
+
+    def test_hold_disclaimer_line_exempt(self, tmp_path):
+        """报告自带的强制免责句（含「…或持有的行动判断」）不应命中。"""
+        body = (
+            "# 测试\n\n> 本速览为多维度事实与量化评分的汇总呈现，"
+            "不构成投资建议，不代表买卖或持有的行动判断。\n"
+        )
+        assert "law6-hold-standalone" not in self._lint(tmp_path, body)
+
+    def test_hold_risk_template_line_exempt(self, tmp_path):
+        """致命一击模板句「N 个月持有的最大风险」不应命中。"""
+        body = "# 测试\n\n> **1 个月持有的最大风险**：修复段位于 BOLL 位置 83%。\n"
+        assert "law6-hold-standalone" not in self._lint(tmp_path, body)
+
+    def test_hold_shareholding_disclosure_exempt(self, tmp_path):
+        """持股披露「持有 N 万股」不应命中。"""
+        body = "# 测试\n\n- 2026 年 7 月：执行董事袁宏明退休（持有 100 万股）\n"
+        assert "law6-hold-standalone" not in self._lint(tmp_path, body)
+
+    def test_hold_advice_still_flagged(self, tmp_path):
+        """收窄后仍须拦真建议语义（否则规则变瞎）。"""
+        for body in ("# 测试\n\n持有该标的。\n", "# 测试\n\n长期持有。\n"):
+            assert "law6-hold-standalone" in self._lint(tmp_path, body), body
+
+    # ---- F-U7-2：law6-buy/sell/target-price 无归属/语境豁免 ----
+
+    def test_buy_institutional_rating_exempt(self, tmp_path):
+        """第三方机构评级归属非报告自身建议。"""
+        body = "# 测试\n\n- 22 家机构全部给予买入/增持/强推评级（一致看多）\n"
+        assert "law6-buy-standalone" not in self._lint(tmp_path, body)
+
+    def test_buy_advice_still_flagged(self, tmp_path):
+        assert "law6-buy-standalone" in self._lint(tmp_path, "# 测试\n\n买入该标的。\n")
+
+    def test_sell_fund_flow_and_source_exempt(self, tmp_path):
+        """引擎资金流字段与带 [来源:] 的引用非建议。"""
+        for body in (
+            "# 测试\n\n- 6/17 主力资金净卖出 6330 万\n",
+            "# 测试\n\n- 成交额：买入 499.62 亿 / 卖出 455.31 亿 "
+            "[来源: Python calc: 沪向 + 深向]\n",
+        ):
+            assert "law6-sell-standalone" not in self._lint(tmp_path, body), body
+
+    def test_sell_advice_still_flagged(self, tmp_path):
+        assert "law6-sell-standalone" in self._lint(tmp_path, "# 测试\n\n卖出该标的。\n")
+
+    def test_target_price_third_party_exempt(self, tmp_path):
+        """第三方研报目标价与检索 query 串非报告给出的单一目标价。"""
+        body = (
+            "# 测试\n\n| **美银研报（补充）** | WebSearch | "
+            '`query: "美银 中际旭创 目标价 1650"` | ✅ 有数据 |\n'
+        )
+        assert "law6-target-price" not in self._lint(tmp_path, body)
+
+    def test_target_price_still_flagged(self, tmp_path):
+        assert "law6-target-price" in self._lint(tmp_path, "# 测试\n\n目标价：25.5 元\n")
+
+    # ---- F-U7-4：wording-macro-chain-evidence 误伤产业毛利率表行 ----
+
+    def test_macro_chain_gross_margin_table_row_exempt(self, tmp_path):
+        """「毛利率」含「利率」子串 + 表格行箭头 → 曾被判为宏观传导链违规。"""
+        body = "# 测试\n\n| 商业 | 毛利率下降 | 未触发 | — | 毛利率 2025→2026: 42.04%→46.06% |\n"
+        assert "wording-macro-chain-evidence" not in self._lint(tmp_path, body)
+
+    def test_macro_chain_real_chain_still_flagged(self, tmp_path):
+        assert "wording-macro-chain-evidence" in self._lint(
+            tmp_path, "# 测试\n\n中东→美债→AI 融资→资产价格同向传导。\n"
+        )

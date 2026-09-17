@@ -437,6 +437,7 @@ def fetch_baidu_calendar(
         return SourceResult(
             name="百度财经日历", error=f"全部 {len(failed)} 天取数失败（疑源故障/网络）",
             ok_days=ok_days, empty_days=empty_days, failed_days=failed,
+            notes=rule_notes,     # 源故障路径同样携带配置告警（否则只在成功的跑次可见）
         )
 
     # 地区过滤（地区缺失时回退 国家 列——实测额外列）
@@ -446,7 +447,11 @@ def fetch_baidu_calendar(
         reg = _present_text(r.get("地区")) or _present_text(r.get("国家"))
         if reg not in regions:
             continue
-        picked.append({"日期": _iso(r.get("日期", "")), "时间": str(r.get("时间") or ""),
+        # v0.3.0 D3：「时间」曾写 str(r.get("时间") or "")——pandas 把缺失单元格补成
+        # float NaN，而 NaN 是 truthy，`or ""` 兜底不生效 → str(nan) == "nan" 直接
+        # 渲染进时刻列，看起来像数据损坏而非「源不提供时刻」。上一行「地区」已用
+        # _present_text 修过同类问题，此处漏改。
+        picked.append({"日期": _iso(r.get("日期", "")), "时间": _present_text(r.get("时间")),
                        "地区": reg, "事件": str(r.get("事件") or ""),
                        "前值": r.get("前值"), "重要性": r.get("重要性"),
                        "统计周期": r.get("统计周期") or ""})

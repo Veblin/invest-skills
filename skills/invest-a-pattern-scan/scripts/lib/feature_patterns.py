@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 
 # --- 证据注记（每特征一份，随命中输出）------------------------------------------
 EVIDENCE_NOTE_MACD = (
@@ -147,14 +148,21 @@ def detect_shrink_pullback(closes: list[float], vols: list[float | None], *,
     n = len(closes)
     if n < peak_window + 5:
         return []
+    # 价格侧与量能侧**同型守卫**：NaN 与任何数比较恒为 False，会同时穿过
+    # `peak_px <= 0` 与 `pullback_pct < 阈值` 两道闸门，发出 `pullback_pct=NaN`
+    # 的伪命中并落盘非法 JSON（`json.dumps` 输出字面 NaN）。
+    px = [_f(v) for v in closes]
     vals = [_f(v) for v in (vols or [])]
     out: list[dict] = []
     for i in range(peak_window, n - 1):        # 留 1 根：终点须可被后续确认
-        peak_i = max(range(i - peak_window, i + 1), key=lambda k: closes[k])
-        peak_px = closes[peak_i]
+        win = range(i - peak_window, i + 1)
+        if any(px[k] is None for k in win):    # 窗口含缺价/NaN → 本次判定不成立
+            continue
+        peak_i = max(win, key=lambda k: px[k])
+        peak_px = px[peak_i]
         if peak_px <= 0 or peak_i >= i:        # 前高须早于当前点
             continue
-        pullback_pct = (peak_px - closes[i]) / peak_px * 100.0
+        pullback_pct = (peak_px - px[i]) / peak_px * 100.0
         if pullback_pct < pullback_min_pct:
             continue
         peak_vols = [v for v in vals[max(0, peak_i - 3): peak_i + 4] if v is not None]
@@ -282,7 +290,8 @@ def group_stats(returns: list[float]) -> dict:
         "n": n,
         "win_rate_pct": round(sum(1 for r in vals if r > 0) / n * 100, 2),
         "mean_pct": round(sum(vals) / n * 100, 3),
-        "median_pct": round(srt[n // 2] * 100, 3),
+        # v0.3.0 B2：曾用 srt[n // 2]——偶数 n 取的是**上中位**而非中位数
+        "median_pct": round(statistics.median(srt) * 100, 3),
         "max_drawdown_pct": round(mdd * 100, 3),
     }
 

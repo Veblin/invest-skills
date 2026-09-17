@@ -176,6 +176,13 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
         price_by_sym[sym] = (price, pdate)
 
     rows: list[dict[str, Any]] = []
+    # v0.3.0 B1：与 rows **同步**收集对应 holding。此前 `_carry_paper_keys` 按
+    # 下标 zip 未过滤的 holdings，而下面遇到空 symbol 行就 `continue`（空 symbol
+    # 是 `load_holdings` 明确支持的形态：现金/占位/坏行）→ 从该行起全体错位，
+    # 后续每行继承**上一持仓**的 kind/account/tag，`_is_paper` 与
+    # `disposition_hint` 的 paper 结论随之出错。**不可改用 symbol 键**：journal
+    # 侧同 symbol 多批次（分批建仓），键不唯一。
+    paper_holdings: list[dict] = []
     for h, err in validated:
         sym = str(h.get("symbol", "")).strip()
         if not sym:
@@ -194,6 +201,7 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
             )
             row["note"] = note_pre
             rows.append(row)
+            paper_holdings.append(h)
             continue
         row = build_position_row(
             symbol=sym, price=price, cost=h.get("cost"), buy_date=h.get("buy_date"),
@@ -207,8 +215,9 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
             if stale_days > 3:
                 row["note"] = (row.get("note") or "").strip() + f"；现价截至 {pdate}（或停牌/数据陈旧）"
         rows.append(row)
+        paper_holdings.append(h)
     # R-C03：模拟/观察仓标识须随行携带（否则 `_is_paper` 在生产路径恒 False）
-    return _carry_paper_keys(rows, holdings)
+    return _carry_paper_keys(rows, paper_holdings)
 
 
 def _fmt_weight(raw: Any) -> str:

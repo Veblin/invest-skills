@@ -77,7 +77,14 @@ def _load_hk_module(name: str):
             raise ImportError(f"包内 HK 模块无法加载: {local}")
         mod = importlib.util.module_from_spec(spec)
         sys.modules[full_name] = mod
-        spec.loader.exec_module(mod)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            # v0.3.0 D4（照抄 collector/_orchestrate.py 的 F5 范式）：exec 失败会留下
+            # 残破的部分模块被 sys.modules 永久缓存，下次调用命中 :63-65 的缓存短路
+            # → 真实 import 错误被永久掩盖，报错变成远处难懂的 AttributeError。
+            sys.modules.pop(full_name, None)
+            raise
         sys.modules[mod_name] = mod
         return mod
 
@@ -90,7 +97,12 @@ def _load_hk_module(name: str):
     s = str(lib)
     if s not in sys.path:
         sys.path.insert(0, s)
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        # v0.3.0 D4：exec 失败须清理，否则残破模块被永久缓存（缓存短路见 :63-65）
+        sys.modules.pop(mod_name, None)
+        raise
     return mod
 
 

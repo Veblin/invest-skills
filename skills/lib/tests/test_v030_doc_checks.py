@@ -291,16 +291,26 @@ def test_r_e04_fact_block_rule_is_error_and_paragraph_scoped():
     assert rule["scope"] == "paragraph", "块级拦截不能用 line scope（跨行场景会漏）"
 
 
-def test_r_e03_e04_share_source_exemption():
-    """两条兄弟规则须同表豁免来源标注行。
+def test_r_e03_e04_no_longer_exempt_source_tag():
+    """v0.3.0 A6：两条规则均**不得**再豁免 `\\[来源:` 行。
 
-    R-E04 曾缺 `\\[来源:`，把「带来源的可追溯事实陈述」判成「无标注惯例」
-    （reports/ 652 篇实测 20 条 error 级误报，直接阻断 precommit 交付门禁）。
+    历史：R-E04 曾缺该豁免，把「带来源的可追溯事实陈述」判成惯例（reports/ 652 篇
+    实测 20 条 error 级误报），于是两条都补上了 `\\[来源:`；但补法本身把规则变成
+    可绕过的——给任一惯例性断言追加一个 `[来源: …]` 即让 error 级规则失效，而文档
+    规定的交付门是 `--fail-on error`。且 R-E04 注释把该残余漏洞标为「已接受、由
+    R-E03 兜底」，而 R-E03 带同一个 skip → 兜底实为空。
+
+    正确边界（report-conventions §3.5 约束 1）：惯例型表述**不得置于 [事实] 块**——
+    管的是放置位置，与其是否带来源无关。故唯一合法豁免是「从业者惯例/非学术验证」
+    标注本身，不是来源标注。
     """
     rules = _rules()
     for rid in ("wording-practitioner-convention", "structure-convention-in-fact-block"):
-        assert "\\[来源:" in rules[rid]["skip_if_pattern"], \
-            f"{rid} 须与兄弟规则同表豁免来源标注行"
+        skip = rules[rid]["skip_if_pattern"]
+        assert "\\[来源:" not in skip, (
+            f"{rid} 不得豁免来源标注行——补 [来源:] 即可绕过 error 级门禁")
+        assert "从业者惯例" in skip and "非学术验证" in skip, (
+            f"{rid} 仍须豁免 §3.5 的固定标注行")
 
 
 def test_r_e03_convention_template_documented():

@@ -233,12 +233,19 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         if latest_pe is not None:
             as_of = _as_of(latest, fetched_at)
             facts.append(_fact("valuation.pe_ttm.latest", latest_pe, as_of=as_of, unit="x", basis="PE(TTM)", source_id=sid))
-            series = [value for row in rows if (value := _number(row.get("pe_ttm"))) is not None and value > 0]
-            pct = _percentile(series, latest_pe)
-            if pct is not None:
-                facts.append(_fact("valuation.pe_ttm.percentile", pct, as_of=as_of, unit="percent",
-                                   basis="正 PE 历史序列分位", source_id=sid,
-                                   formula="count(PE<=latest positive PE)/count(positive PE)*100"))
+            # v0.3.0 B3：分位只在**正** PE 序列上有定义。latest_pe ≤ 0（亏损期）
+            # 时不产出 percentile fact——旧实现拿负值去比正值序列，恒得 0.0 分位，
+            # 下游据此写出「位于历史样本的偏低位置」（负 PE 被读成便宜）。口径
+            # 对齐 valuation_calc.py「PE 非正 → 标注不可得」；亏损期陈述由
+            # build_findings 的 valuation-pe-nonpositive 分支承担。
+            if latest_pe > 0:
+                series = [value for row in rows
+                          if (value := _number(row.get("pe_ttm"))) is not None and value > 0]
+                pct = _percentile(series, latest_pe)
+                if pct is not None:
+                    facts.append(_fact("valuation.pe_ttm.percentile", pct, as_of=as_of, unit="percent",
+                                       basis="正 PE 历史序列分位", source_id=sid,
+                                       formula="count(PE<=latest positive PE)/count(positive PE)*100"))
         latest_pb = _number(latest.get("pb"))
         if latest_pb is not None:
             facts.append(_fact("valuation.pb.latest", latest_pb, as_of=_as_of(latest, fetched_at), unit="x", basis="PB", source_id=sid))
@@ -349,6 +356,18 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
         findings.append(_finding("valuation-position", f"PE(TTM) 为 {pe['value']:.2f}x，位于可用正 PE 序列的 {pct['value']:.1f}% 分位，属于历史样本的{zone}位置；这只描述估值位置，不能单独解释未来表现。",
                                  fact_ids=[pe["id"], pct["id"]], relevance="primary",
                                  verification={"event": "下一报告期", "test": "核对盈利变化与估值口径是否同步更新"}))
+    elif pe and pe["value"] <= 0:
+        # v0.3.0 B3：亏损期（PE 非正）无分位可言 → 不给「位置」结论，改为显式
+        # 披露「分位不适用」，避免读者把负 PE 误读为低估（CLAUDE.md 估值分位
+        # 规则 2：亏损期标的须标注仅作位置参考、不反映估值贵贱）。
+        findings.append(_finding(
+            "valuation-pe-nonpositive",
+            f"PE(TTM) 为 {pe['value']:.2f}x，为负值（亏损期）；PE 历史分位仅在正 PE "
+            "序列上有定义，本次不计算分位——该标的历史大部分时间微利/亏损时，"
+            "PE 分位数仅作位置参考，不反映估值贵贱。",
+            fact_ids=[pe["id"]], relevance="primary",
+            verification={"event": "下一报告期",
+                          "test": "核对盈利是否转正及 PE 口径是否恢复"}))
     revenue_change = _find(facts, "financials.revenue.change")
     ocf_ratio = _find(facts, "financials.ocf_to_np.latest")
     if revenue_change:
@@ -525,16 +544,24 @@ def _chain_valuation_vs_earnings(fx: dict[str, dict[str, Any]]) -> dict[str, Any
     zone = "偏低" if value <= 20 else "偏高"
     move = "增长" if change > 0 else "下降"
     aligned = (value <= 20 and change < 0) or (value >= 80 and change > 0)
+    # v0.3.0 D1：question 必须按 (zone, move) **四象限**取模板。旧实现按 `aligned`
+    # 布尔取，而每个分支覆盖两个象限、文案只写死其中一个：(偏高, 下降) 时会写出
+    # 「估值分位偏低与收入高增并存」，与同一字典里 relation 明写的「80% 分位
+    # （偏高）…同比 -x%（下降）…不一致」直接矛盾——数字由 Python 生成是对的，
+    # 错的只有手写文案。四个键由上方 value/change 的取值域完全覆盖（zone ∈
+    # {偏低,偏高} × move ∈ {增长,下降}），不会 KeyError。
+    question = {
+        ("偏低", "下降"): "低估值定价的是「增长未被市场认可」，还是「市场已预判盈利下修」？",
+        ("偏低", "增长"): "估值分位偏低与收入增长并存，孰为错价、孰为预警？",
+        ("偏高", "增长"): "高估值是否已透支增长——定价领先于基本面，还是增长的可持续性被低估？",
+        ("偏高", "下降"): "高估值与收入下降并存：市场在定价「困境反转」，还是估值尚未消化盈利恶化？",
+    }[(zone, move)]
     return {
         "id": "chain.valuation-vs-earnings",
         "fact_ids": [pct["id"], chg["id"]],
         # 首屏要回答的是「所以我该研究什么」——把分歧写成可证伪的问句，
         # 而不是陈述「方向不一致」（后者是工程描述，读者无法据以行动）。
-        "question": (
-            "低估值定价的是「增长未被市场认可」，还是「市场已预判盈利下修」？"
-            if aligned else
-            "估值分位偏低与收入高增并存，孰为错价、孰为预警？"
-        ),
+        "question": question,
         "relation": (
             f"PE(TTM) 位于可用正 PE 序列的 {value:.1f}% 分位（{zone}），"
             f"营业收入同比为 {change:+.1f}%（{move}）；两者方向{'一致' if aligned else '不一致'}。"

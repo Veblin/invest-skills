@@ -15,6 +15,9 @@
     audit     stock     数据点抽取 + 偏差判定（--verify-data）
     quality   stock     7 指标质地检查（--verify-data）
     rigor     stock     市值/估值/跨源验算（--verify-data）
+    readability      stock+etf  R-A1 可读性指标组（篇幅/长句/术语密度/结论四要素）。
+                               §3.4 定义为软建议，状态封顶 warn（不阻断交付）
+    conclusion-evidence stock+etf R-A2 结论段证据等级 + R-A6 [事实]→[分析] 对偶。
 
 用法：
     uv run python skills/lib/report_qc.py <file>
@@ -145,36 +148,36 @@ def _extract_symbol(report_path: Path) -> str:
 # 每个条目: (rule_id, pattern, severity, message)；缺失即记 finding，层状态置 warn
 _STRUCTURE_REQUIREMENTS: dict[str, list[tuple[str, str, str, str]]] = {
     "stock": [
-        ("structure-fact", r"\[事实\]", "warn", "报告应包含 [事实] 块引用数据来源（SOP-QC）"),
-        ("structure-analysis", r"\[分析\]", "warn", "报告应包含 [分析] 块（基于事实的逻辑推演）"),
-        ("structure-evidence", r"\[证据强度", "warn", "报告应包含 [证据强度:] 四维标注（SOP-EV）"),
-        ("structure-source", r"\[来源:", "warn", "报告应标注 [来源:] 数据来源"),
-        ("structure-risk-statement", r"不构成投资建议", "warn", "报告应包含风险声明（不构成投资建议）"),
+        ("structure-fact", r"\[事实\]", "warning", "报告应包含 [事实] 块引用数据来源（SOP-QC）"),
+        ("structure-analysis", r"\[分析\]", "warning", "报告应包含 [分析] 块（基于事实的逻辑推演）"),
+        ("structure-evidence", r"\[证据强度", "warning", "报告应包含 [证据强度:] 四维标注（SOP-EV）"),
+        ("structure-source", r"\[来源:", "warning", "报告应标注 [来源:] 数据来源"),
+        ("structure-risk-statement", r"不构成投资建议", "warning", "报告应包含风险声明（不构成投资建议）"),
     ],
     "etf": [
-        ("structure-fact", r"\[事实\]", "warn", "报告应包含 [事实] 块引用数据来源（SOP-QC）"),
-        ("structure-analysis", r"\[分析\]", "warn", "报告应包含 [分析] 块（基于事实的逻辑推演）"),
-        ("structure-evidence", r"\[证据强度", "warn", "报告应包含 [证据强度:] 四维标注（SOP-EV）"),
-        ("structure-risk-statement", r"不构成投资建议", "warn", "报告应包含风险声明（不构成投资建议）"),
+        ("structure-fact", r"\[事实\]", "warning", "报告应包含 [事实] 块引用数据来源（SOP-QC）"),
+        ("structure-analysis", r"\[分析\]", "warning", "报告应包含 [分析] 块（基于事实的逻辑推演）"),
+        ("structure-evidence", r"\[证据强度", "warning", "报告应包含 [证据强度:] 四维标注（SOP-EV）"),
+        ("structure-risk-statement", r"不构成投资建议", "warning", "报告应包含风险声明（不构成投资建议）"),
     ],
     "journal": [
         # 买入路径四维（逻辑完整性/数据盲点/仓位匹配/风险收益比）与
         # 卖出路径四维（一致性/情绪化检测/参考点独立性/机会成本，v0.2.5 D2）双支持
-        ("journal-logic", r"逻辑完整性|一致性", "warn", "journal 应包含评估维度（逻辑完整性或一致性）"),
-        ("journal-blindspot", r"数据盲点|情绪化检测|情绪检测", "warn", "journal 应包含评估维度（数据盲点或情绪化检测）"),
-        ("journal-position", r"仓位匹配|参考点独立性", "warn", "journal 应包含评估维度（仓位匹配或参考点独立性）"),
-        ("journal-rr", r"风险收益比|机会成本", "warn", "journal 应包含评估维度（风险收益比或机会成本）"),
+        ("journal-logic", r"逻辑完整性|一致性", "warning", "journal 应包含评估维度（逻辑完整性或一致性）"),
+        ("journal-blindspot", r"数据盲点|情绪化检测|情绪检测", "warning", "journal 应包含评估维度（数据盲点或情绪化检测）"),
+        ("journal-position", r"仓位匹配|参考点独立性", "warning", "journal 应包含评估维度（仓位匹配或参考点独立性）"),
+        ("journal-rr", r"风险收益比|机会成本", "warning", "journal 应包含评估维度（风险收益比或机会成本）"),
     ],
     "gap_scan": [
-        ("gap-title", r"跳空缺口", "warn", "gap-scan 报告应包含'跳空缺口'标题"),
-        ("gap-summary", r"(扫描摘要|统计|命中)", "warn", "gap-scan 报告应包含扫描摘要/命中统计"),
+        ("gap-title", r"跳空缺口", "warning", "gap-scan 报告应包含'跳空缺口'标题"),
+        ("gap-summary", r"(扫描摘要|统计|命中)", "warning", "gap-scan 报告应包含扫描摘要/命中统计"),
     ],
     "pulse": [],
     # 复盘纪要（R2/T8-3）：**按设计不含** [事实]/[分析]/[证据强度]——它明确不做
     # 推演，只对照当时写下的假设与证伪条件的当前状态。故只要求风险声明；
     # 若套用 etf/stock 的结构检查会稳定产出 4 条误报。
     "review": [
-        ("structure-risk-statement", r"不构成投资建议", "warn",
+        ("structure-risk-statement", r"不构成投资建议", "warning",
          "复盘纪要应包含风险声明（不构成投资建议）"),
     ],
     "unknown": [],
@@ -210,7 +213,11 @@ def _check_structure(text: str, report_type: str) -> LayerResult:
 # 必须由同代 analysis.json 完成可追溯的分析合成。这里同时要求风险提示中的
 # 「自动化引擎生成」字样，避免把用户手写的研究备忘录误判为待合成快照。
 _AUTOMATED_STOCK_SNAPSHOT_RE = re.compile(
-    r"^#\s+\d{6}\s+.+?\s+研究快照\s*$", re.M
+    # 公司名允许为空（v0.3.0 A4）：basic_info 采集失败时渲染器输出
+    # `# 600176  研究快照`（双空格，render_markdown/_v2.py）。旧式 `\s+.+?\s+`
+    # 要求名字 ≥1 字符 → 该标题不命中 → _check_stock_completion 落 skip 分支 →
+    # 强制侧车闸门**静默失效**（fail-open），恰在数据覆盖最差时放行。
+    r"^#\s+\d{6}\s+.*?\s+研究快照\s*$", re.M
 )
 _AUTOMATED_ENGINE_NOTICE_RE = re.compile(r"本报告由自动化引擎生成")
 
@@ -628,7 +635,7 @@ def _check_etf_derived(text: str) -> LayerResult:
         layer.findings_count = 1
         layer.details.append({
             "id": "derived-template-drift",
-            "severity": "warn",
+            "severity": "warning",
             "message": "报告存在标签与引擎命名不匹配的衍生指标行，字段未被校验",
         })
 
@@ -642,7 +649,7 @@ def _check_etf_derived(text: str) -> LayerResult:
                 layer.findings_count += 1
                 layer.details.append({
                     "id": f"derived-{field_name}",
-                    "severity": "warn",
+                    "severity": "warning",
                     "message": f"字段 {field_name} 值 '{raw}' 无法解析为数值",
                 })
                 continue
@@ -651,7 +658,7 @@ def _check_etf_derived(text: str) -> LayerResult:
                 layer.findings_count += 1
                 layer.details.append({
                     "id": f"derived-{field_name}",
-                    "severity": "warn",
+                    "severity": "warning",
                     "message": f"字段 {field_name} 值 {value} 超出合理范围 [{lo}, {hi}]",
                 })
             elif abs(round(value, 2) - value) > 1e-6:
@@ -661,8 +668,8 @@ def _check_etf_derived(text: str) -> LayerResult:
                     "severity": "info",
                     "message": f"字段 {field_name} 值 {value} 未保留两位小数（引擎输出 round(…, 2)）",
                 })
-        # 仅 warn 级发现（超范围/无法解析/漂移）翻转状态；info 级（位数）不阻塞
-        if any(d["severity"] == "warn" for d in layer.details):
+        # 仅 warning 级发现（超范围/无法解析/漂移）翻转状态；info 级（位数）不阻塞
+        if any(d["severity"] == "warning" for d in layer.details):
             layer.status = "warn"
     elif not present_rows:
         return layer  # 报告未引用衍生字段 → skip
@@ -706,7 +713,7 @@ def _check_sourcing(text: str) -> LayerResult:
         layer.findings_count += 1
         layer.details.append({
             "id": "f2-derived-claim-no-source",
-            "severity": "warn",
+            "severity": "warning",
             "line": i + 1,
             "message": f"派生表述疑似缺来源标注（前 {_F2_SOURCE_WINDOW} 行内无 [来源:]）："
                        f"{ln.strip()[:60]}",
@@ -726,10 +733,303 @@ def _check_sourcing(text: str) -> LayerResult:
         layer.findings_count += 1
         layer.details.append({
             "id": "f4-section-ref-missing",
-            "severity": "warn",
+            "severity": "warning",
             "message": f"正文引用 §{ref} 但报告无对应标题节",
         })
     if layer.findings_count:
+        layer.status = "warn"
+    return layer
+
+
+# ── R-A1 / R-A2 / R-A6 指标组（v0.3.0 A3 移植） ─────────────────────────────
+# 自 invest-a-stock/scripts/lib/report_qc.py（旧 228 行模块）移植，使
+# `invest.py qc-report` 与第 0 层准出走同一实现——此前两条通道用的是两份
+# 实现，对同一文件可给出相反裁决（旧版完全没有第 0 层闸门）。
+#
+# 契约边界（report-conventions §3.4）：R-A1 可读性指标组是**软建议**——
+# 「不触发 lint error，不作合规阻断」。故 `_check_readability` 的状态
+# **封顶 warn**：即便 readability-length 等 finding 为 error 级，也不得让
+# `_compute_overall` 判 FAIL，否则会把软建议升级成交付阻断。R-A2 / R-A6 是
+# error 级实质缺陷，单独成层并保留 error→fail 映射。
+
+READABILITY_MAX_CHARS = 20_000         # 篇幅上限（字符）
+READABILITY_LONG_SENT_CHARS = 45       # 长句阈值（字符）
+READABILITY_LONG_RATIO_WARN = 0.30     # 长句占比告警阈值
+_TERM_GLOSSARY = {
+    "趋势", "动能", "资金流", "估值", "分位", "净利差", "毛利率", "净利率", "ROE",
+    "ROIC", "WACC", "FCF", "FCFF", "DCF", "同比", "环比", "汇率", "PMI", "CPI",
+    "PPI", "VIX", "SOX", "北向", "两融", "基差", "β", "beta", "复合增速",
+    "(EP|PE|PB|PS)(TTM)?", "折溢价", "席位", "龙虎榜", "胜率", "赔率",
+}
+
+_CONCLUSION_HEAD_RE = re.compile(r"^#{2,3}\s*(主要|核心)?结论", re.M)
+_SENT_SPLIT_RE = re.compile(r"[。！？!?]")
+_EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度)\s*[:：]")
+_FACT_MARK_RE = re.compile(r"\[事实\]")
+_ANALYSIS_MARK_RE = re.compile(r"\[分析\]")
+# 节边界 = 任意 h2-h4 标题。注意与本文件 `_SECTION_HEAD_RE`（§N 编号节，见
+# sourcing 层）语义不同，故独立命名，勿合并。
+_RA_SECTION_BOUNDARY_RE = re.compile(r"^#{2,4}\s")
+_FACT_LOOKBACK_LINES = 50   # 与 lint structure-analysis-without-fact 同规则
+
+# 全量审查 #3（P0-2）：畸形字符类 [来源:|[-−]?… 修复（原内容意外跨越
+# '['-'-' 码位区间——过宽）；词族与真实模板措辞对齐（含条件词「若…则」）
+_SUMMARY_ELEMS = {
+    "数据": re.compile(r"(?:来源|数据|数值|同比|环比)|[−-]?\d+(?:\.\d+)?(?:%|亿|万|元|倍|x|X)?"),
+    "逻辑": re.compile(r"因为|由于|因此|所以|分析|意味着|表明|映射|传导|解释|佐证|支撑|推断|归因|若|如果"),
+    "分歧": re.compile(r"分歧|争议|不同观点|不同解读|矛盾|相反|另类路径|不确定性来源"),
+    "风险": re.compile(r"风险|不确定性|警示|关注点|留意|注意|制约|下行|回撤|假设失效|承压"),
+}
+# 结论段结构行（表行/引用/分隔/标题/代码围栏）不算断言（全量审查：FP 源）
+_STRUCT_LINE_RE = re.compile(r"^(\||>|---|```|#{2,})")
+
+
+def _evidence_ge_c(ln: str) -> bool:
+    """断言证据等级 ≥C（全量审查 P0-2：死代码「tagged==0 且无 out」不可达——
+    tagged==0 时 out 必有内容。改为逐行判定：来源标注（可核验）或 [证据: A/B/C]
+    或四维强度 ✅ 视为 ≥C；[证据: D] / ❓ 强度为 <C）。"""
+    if re.search(r"\[来源\s*[:：]", ln):
+        return True
+    m = re.search(r"\[证据\s*[:：]\s*([A-Da-d])", ln)
+    if m:
+        return m.group(1).upper() in ("A", "B", "C")
+    if re.search(r"\[证据强度\s*[:：]\s*✅", ln):
+        return True
+    return False
+
+
+def _body_lines(md: str) -> list[str]:
+    """去掉命令/引用外的纯正文行（标题也算正文）。"""
+    return [ln for ln in md.splitlines()
+            if ln.strip() and not ln.lstrip().startswith(("#", ">", "|", "```"))]
+
+
+def readability_metrics(md: str) -> dict:
+    """可读性指标组（全 Python 引擎计算）。"""
+    body = "\n".join(_body_lines(md))
+    total_chars = len(body)
+
+    sentences = [s for s in _SENT_SPLIT_RE.split(body) if s.strip()]
+    if not sentences:
+        sentences = [body]
+    long_ratio = sum(
+        1 for s in sentences if len(s) > READABILITY_LONG_SENT_CHARS) / len(sentences)
+
+    term_hits = 0
+    for pat in _TERM_GLOSSARY:
+        term_hits += len(re.findall(pat, body, re.IGNORECASE))
+    term_density = round(term_hits / total_chars * 1000, 2) if total_chars else 0.0
+
+    # 结论摘要要素：在「主要/核心结论」段内查找；无结论段标题 → 不判缺
+    # （全量审查：旧实现无标题也报缺要素——对前置引擎输出假阳性）
+    summary_elements = {k: False for k in _SUMMARY_ELEMS}
+    m = _CONCLUSION_HEAD_RE.search(md)
+    if m:
+        tail = md[m.end():]
+        next_head = re.search(r"^#{2,4}\s", tail, re.M)
+        seg = tail if not next_head else tail[: next_head.start()]
+        for k, pat in _SUMMARY_ELEMS.items():
+            summary_elements[k] = bool(pat.search(seg))
+    else:
+        summary_elements = {k: None for k in _SUMMARY_ELEMS}  # 无结论段 → 未知
+
+    return {
+        "total_chars": total_chars,
+        "sentences": len(sentences),
+        "long_sentence_ratio": round(long_ratio, 4),
+        "term_density_permille": term_density,
+        "summary_elements": summary_elements,
+    }
+
+
+def conclusion_evidence_findings(md: str) -> list[dict]:
+    """R-A2：结论段逐条断言须带证据标签；<C 级证据的断言不得进入结论段。
+
+    - 标题支持「核心结论」（真实模板 `## 核心结论`——旧 regex 只匹配主要/结论
+      → 210/210 真实报告未检到结论段）
+    - 死代码移除：旧「tagged==0 且 not out」不可达（tagged==0 → out 必有行）——
+      改为逐行 _evidence_ge_c 判定，D 级/未达标行报 level error
+    - 结构行（| 表行/> 引用/---/#### 标题/```）排除——旧实现把表行/引用/
+      情景子标题当断言（FP 源）
+    - 段边界含 ####（乐观/悲观情景子标题内容不再误扫）
+    """
+    out: list[dict] = []
+    m = _CONCLUSION_HEAD_RE.search(md)
+    if not m:
+        return out
+    tail = md[m.end():]
+    nxt = re.search(r"^#{2,4}\s", tail, re.M)
+    seg = tail if not nxt else tail[: nxt.start()]
+    line_base = md[: m.end()].count("\n") + 1
+    lines = seg.splitlines()
+    weak_lines: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if not stripped or _STRUCT_LINE_RE.match(stripped):
+            continue
+        if _EVIDENCE_TAG_RE.search(ln):
+            if not _evidence_ge_c(ln):
+                weak_lines.append((line_base + i, stripped[:80]))
+        else:
+            out.append({
+                "id": "wording-conclusion-evidence",
+                "severity": "error",
+                "line": line_base + i,
+                "message": "结论段断言缺少证据标签（[来源: / [证据: / [证据强度:）"
+                           "——无 ≥C 级证据的断言不得进入结论段（R-A2）",
+                "context": stripped[:80],
+            })
+    if weak_lines:
+        lines_txt = "；".join(f"L{ln}: {ctx}" for ln, ctx in weak_lines[:3])
+        out.append({
+            "id": "wording-conclusion-evidence-level",
+            "severity": "error",
+            "line": weak_lines[0][0],
+            "message": ("结论段存在 <C 级证据断言（D 级/未标等级）——不满足"
+                        "「无 ≥C 级证据不入结论段」，标注「证据弱，仅作观察」（R-A2）"
+                        f"：{lines_txt}"),
+            "context": seg[:80],
+        })
+    return out
+
+
+def fact_analysis_pair_findings(md: str) -> list[dict]:
+    """R-A6：[分析] 节段内须有前置 [事实] 块（对偶强制）。
+
+    与 lint `structure-analysis-without-fact` 同规则：50 行回溯、遇
+    ##/### 节段边界停止（跨节段的 [事实] 不满足本节的 [分析]）。
+    """
+    out: list[dict] = []
+    lines = md.splitlines()
+    for i, ln in enumerate(lines):
+        if not _ANALYSIS_MARK_RE.search(ln):
+            continue
+        found = False
+        for j in range(i - 1, max(i - 1 - _FACT_LOOKBACK_LINES, -1), -1):
+            if _RA_SECTION_BOUNDARY_RE.match(lines[j]):
+                break
+            if _FACT_MARK_RE.search(lines[j]):
+                found = True
+                break
+        if not found:
+            out.append({
+                "id": "structure-fact-analysis-pair",
+                "severity": "error",
+                "line": i + 1,
+                "message": f"[分析] 节段内缺少前置 [事实] 块（{_FACT_LOOKBACK_LINES} 行回溯）"
+                           "——[事实]→[分析] 对偶强制（R-A6）",
+                "context": ln.strip()[:80],
+            })
+    return out
+
+
+def readability_findings(md: str) -> list[dict]:
+    met = readability_metrics(md)
+    out: list[dict] = []
+    if met["total_chars"] > READABILITY_MAX_CHARS:
+        out.append({"id": "readability-length", "severity": "error", "line": 0,
+                    "message": f"正文篇幅 {met['total_chars']} 字符超限"
+                               f"（>{READABILITY_MAX_CHARS}）"})
+    if met["long_sentence_ratio"] > READABILITY_LONG_RATIO_WARN:
+        out.append({"id": "readability-long-sentence", "severity": "warning", "line": 0,
+                    "message": f"长句占比 {met['long_sentence_ratio']:.1%}"
+                               f"（阈值 {READABILITY_LONG_RATIO_WARN:.0%}）"})
+    missing = [k for k, v in met["summary_elements"].items() if v is False]
+    if missing:
+        # 全量审查：真实模板措辞（如「…分歧…若…则…」条件结构）已纳入词族——
+        # 仍缺 1 项降 warning（可能为措辞风格而非结构缺失），缺 ≥2 项 error
+        sev = "warning" if len(missing) == 1 else "error"
+        out.append({"id": "readability-summary-elements", "severity": sev, "line": 0,
+                    "message": f"主要结论段缺少要素：{('、'.join(missing))}"
+                               "——要求'数据-逻辑-分歧-风险'四要素齐全"})
+    return out
+
+
+def _check_readability(text: str) -> LayerResult:
+    """R-A1 可读性指标组（report-conventions §3.4 的载体）。
+
+    **状态封顶 warn**：§3.4 明文「不触发 lint error，不作合规阻断」，
+    故 error 级 finding 亦只置 warn——软建议不得成为交付阻断。
+    """
+    layer = LayerResult(layer="readability", status="pass")
+    findings = readability_findings(text)
+    layer.details = findings
+    layer.findings_count = len(findings)
+    if findings:
+        layer.status = "warn"
+    return layer
+
+
+_SCENARIO_WORDS = ("乐观", "中性", "悲观")
+_ASSUMPTION_RE = re.compile(r"(假设|前提|情景设定|测算依据|参数设定)")
+_PROBABILITY_RE = re.compile(r"(概率|权重|可能性|概率权重)")
+
+
+def law6a_scenario_findings(text: str) -> list[dict]:
+    """LAW 6a：多情景估值参考价须附**假设前提** + **概率权重**。
+
+    v0.3.0 全量重审 F-U7-5：LAW 6a 的实质要件此前在规则引擎中**零实现**——
+    唯一机器机制只是全文级「不构成投资建议」存在性检查（warning、file scope），
+    既不校验概率权重也不校验假设前提。而 CLAUDE.md 明文规定：
+    「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
+    「**不允许不标注假设前提的单一目标价数字**」。
+
+    触发条件（保守，避免误伤普通叙述）：报告**同时**出现 乐观 + 中性 + 悲观
+    三个情景词——这是「三情景估值」的形态标记；缺任一即不触发。
+    通过条件：全文出现假设指示（假设/前提/情景设定…）**且**概率指示（概率/权重…）。
+    """
+    if not all(w in text for w in _SCENARIO_WORDS):
+        return []
+
+    missing: list[str] = []
+    if not _ASSUMPTION_RE.search(text):
+        missing.append("假设前提")
+    if not _PROBABILITY_RE.search(text):
+        missing.append("概率权重")
+    if not missing:
+        return []
+
+    line = next(
+        (i for i, ln in enumerate(text.splitlines(), 1) if "乐观" in ln),
+        1,
+    )
+    return [{
+        "id": "law6a-scenario-missing-context",
+        "severity": "error",
+        "line": line,
+        "message": (
+            f"多情景估值（乐观/中性/悲观）缺少「{'、'.join(missing)}」标注（LAW 6a）："
+            "须标注各情景的假设前提与概率权重，并注明「仅供参考，不构成投资建议」"
+        ),
+    }]
+
+
+def _check_law6a_scenarios(text: str) -> LayerResult:
+    """LAW 6a 三情景上下文层：见 ``law6a_scenario_findings``。"""
+    layer = LayerResult(layer="law6a-scenarios", status="pass")
+    findings = law6a_scenario_findings(text)
+    layer.details = findings
+    layer.findings_count = len(findings)
+    if any(d["severity"] == "error" for d in findings):
+        layer.status = "fail"
+    elif findings:
+        layer.status = "warn"
+    return layer
+
+
+def _check_conclusion_evidence(text: str) -> LayerResult:
+    """R-A2 结论段证据等级 + R-A6 [事实]→[分析] 对偶。
+
+    二者是 error 级实质缺陷（R-A6 与 lint structure-analysis-without-fact
+    同规则），故保留 error→fail 映射。
+    """
+    layer = LayerResult(layer="conclusion-evidence", status="pass")
+    findings = conclusion_evidence_findings(text) + fact_analysis_pair_findings(text)
+    layer.details = findings
+    layer.findings_count = len(findings)
+    if any(d["severity"] == "error" for d in findings):
+        layer.status = "fail"
+    elif findings:
         layer.status = "warn"
     return layer
 
@@ -762,7 +1062,14 @@ def _load_invest_lib():
     # 必须先把模块注册进 sys.modules，否则模块内 @dataclass / 相对导入
     # 会因查不到模块而失败（AttributeError: 'NoneType'）
     sys.modules[mod.__name__] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        # v0.3.0 D4（D11 同族清扫）：exec 失败时清掉残破别名包，避免其它按
+        # `_invest_lib.X` 取数的路径拿到半初始化模块（本函数自身下次调用会
+        # 重新注册，故此前不会永久缓存；清理使失败面收敛到本函数）。
+        sys.modules.pop(mod.__name__, None)
+        raise
     _INVEST_LIB_CACHE = mod
     return mod
 
@@ -967,6 +1274,15 @@ def qc_file(
         # unknown 类型同样挂载（R1 审查 F13：event-calendar 等附属技能
         # 等新技能的产出一律 type=unknown，若跳过则「必跑」的准出对它们形同虚设）
         layers.append(_check_sourcing(text))
+    if report_type in {"stock", "etf"}:
+        # v0.3.0 A3：R-A* 指标组（R-A1 可读性 + R-A2 结论证据 + R-A6 对偶）。
+        # 仅挂研究备忘录类型——日历/扫描产物挂长句密度会批量制造无意义 WARN，
+        # unknown 类型已有 lint + sourcing 兜底。
+        layers.append(_check_readability(text))
+        layers.append(_check_conclusion_evidence(text))
+        # v0.3.0 全量重审 F-U7-5：LAW 6a 实质要件此前零实现（仅全文免责存在性）。
+        # 合规机制靠「三情景区间 + 用户决策」，故该要件须有机器把关点。
+        layers.append(_check_law6a_scenarios(text))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
     elif report_type == "stock":
@@ -1049,7 +1365,13 @@ def format_qc_result(result: QCResult, *, verbose: bool = False) -> str:
         if verbose and layer.details:
             for d in layer.details:
                 sev = d.get("severity", "")
-                icon = "❌" if sev == "error" else ("⚠️" if sev == "warn" else "ℹ️")
+                # severity 词表权威定义见 invest-a-stock lib/lint.py:34 =
+                # error/warning/info。v0.3.0 A5 前本文件产出侧混用 "warn"/"warning"
+                # 两种拼写，而这里只认 "warn" → lint 层（发 "warning"）的全部
+                # warning 级 finding 被渲染成 ℹ️，与 info 无法区分，CLAUDE.md
+                # 要求的「逐条复核 sourcing warning」被静默跳过。产出侧已统一，
+                # 此处兼容两种拼写以防未来漂移再次静默降级为 info 外观。
+                icon = "❌" if sev == "error" else ("⚠️" if sev in ("warning", "warn") else "ℹ️")
                 lines.append(f"      {icon} [{d.get('id', '')}] {d.get('message', '')}")
     return "\n".join(lines)
 

@@ -432,6 +432,8 @@ _FORM_HISTORY_MIN_DAYS = 20    # market_form_history 的最少样本
 _KIRBY_NOTE = ("状态标签不蕴含收益可预测性（Kirby 2023：Markov 切换模型的条件均值时变，"
                "可能是负偏度 + 状态持续性的统计伪影，而非可交易的状态切换信号）")
 
+_DISPERSION_WINDOW = 20        # 横截面离散度的滚动窗（交易日）
+
 _DISPERSION_PROXY_NOTE = ("工程 proxy（指数级滚动相关）——与 Pollet-Wilson (2010) 的"
                           "「个股日收益平均相关」口径**不同（非 Pollet-Wilson 口径）**；"
                           "其作为状态量的有效性须独立回测验证，当前仅作描述性字段")
@@ -568,8 +570,9 @@ def market_form_history(*, history: list[dict] | None = None,
         freq[f]["pct"] = (freq[f]["days"] / n * 100.0) if n else 0.0
         lengths = sorted(runs[f])
         if lengths:
-            mid = len(lengths) // 2
-            durations[f] = {"median": lengths[mid], "max": lengths[-1],
+            # v0.3.0 B2：曾用 lengths[len//2]——偶数个 run 取的是**上中位**而非
+            # 中位数（本文件 :1865 的 turn30 用的是正确的 statistics.median）
+            durations[f] = {"median": statistics.median(lengths), "max": lengths[-1],
                             "n_runs": len(lengths)}
 
     return {"n_days": n, "freq": freq, "durations": durations,
@@ -584,19 +587,25 @@ def compute_dispersion(snap: dict, history: list[dict],
     """分化度（R-A02）：``index_dispersion`` / ``rotation_speed`` / ``avg_correlation``。
 
     **仅描述性 + 历史分位**，不产方向。
+    ``index_dispersion`` = 逐日横截面离散度（当日各指数收益 pstdev）在窗内的均值；
     ``avg_correlation`` 是**指数级滚动相关的工程 proxy**，与 Pollet-Wilson (2010)
     的个股日收益平均相关口径不同（``proxy_note`` 强制随字段走）。
+
+    三项**可用性各自独立**（逐字段 ``available``）：缺 ``index_series`` 时前两项
+    不可得，但 ``rotation_speed`` 仅依赖快照历史仍可用。块级 ``available`` 语义是
+    「三项全部可用」，部分可用时以 ``partial`` 标注——消费方须逐指标读可用性，
+    不要用块级布尔门控整体。
     """
     hist = hist_ex_today(history or [], snap.get("date"))
-    out: dict = {"available": True, "missing": [], "sample": f"{len(hist)} 个快照"}
-    out["index_dispersion"] = {"value": None, "pctile": None,
-                               "window": 20, "n_index": 0}
-    out["avg_correlation"] = {"value": None, "pctile": None, "window": 60,
-                              "proxy_note": _DISPERSION_PROXY_NOTE}
+    out: dict = {"available": True, "partial": False, "missing": [],
+                 "sample": f"{len(hist)} 个快照"}
+    out["index_dispersion"] = {"value": None, "pctile": None, "available": False,
+                               "window": _DISPERSION_WINDOW, "n_index": 0}
+    out["avg_correlation"] = {"value": None, "pctile": None, "available": False,
+                              "window": 60, "proxy_note": _DISPERSION_PROXY_NOTE}
 
     if not index_series:
         out["missing"].append("指数收益序列（index_series）——指数间离散度/滚动相关不可得")
-        out["available"] = False
     else:
         import statistics as _st
 
@@ -604,11 +613,25 @@ def compute_dispersion(snap: dict, history: list[dict],
         rets = {k: v for k, v in rets.items() if v}
         if len(rets) < 2:
             out["missing"].append("指数收益序列少于 2 条——无法计算横截面离散度")
-            out["available"] = False
         else:
-            means = [sum(v) / len(v) for v in rets.values()]
-            out["index_dispersion"] = {"value": _st.pstdev(means), "pctile": None,
-                                       "window": 20, "n_index": len(rets)}
+            # 逐日横截面离散度（当日各指数收益的 pstdev）→ 窗口内取均值。
+            # ⚠️ 旧实现取各指数**全序列均收益**的 pstdev：既无任何窗口（与窗长无关、
+            # 对快照日期恒同），又把日内横截面差异整个丢掉——「一条平 + 一条每日 ±1%
+            # 摆动」的两条均值同为 0 的序列会被报成**零分化**，而分化度度量的正是
+            # 日内横截面差异（同 `lib/sector_sync.py::cross_sectional_dispersion_pct` 口径）。
+            arrays = [v[-_DISPERSION_WINDOW:] for v in rets.values()]
+            n_days = min(len(a) for a in arrays)     # 对齐后的实际天数（覆盖范围）
+            if n_days < 2:
+                out["missing"].append("指数序列过短——横截面离散度不可得")
+            else:
+                day_disp = [_st.pstdev([a[k] for a in arrays])
+                            for k in range(-n_days, 0)]
+                out["index_dispersion"] = {
+                    "value": sum(day_disp) / len(day_disp), "pctile": None,
+                    "available": True,
+                    "window": _DISPERSION_WINDOW, "n_index": len(rets),
+                    "n_days": n_days,
+                }
             # 滚动相关（窗口 60）：两两指数收益的 Pearson r 均值
             win = 60
             pairs = list(rets.values())
@@ -625,7 +648,8 @@ def compute_dispersion(snap: dict, history: list[dict],
                         rs.append(sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (va * vb))
             if rs:
                 out["avg_correlation"] = {"value": sum(rs) / len(rs), "pctile": None,
-                                          "window": win, "proxy_note": _DISPERSION_PROXY_NOTE}
+                                          "available": True, "window": win,
+                                          "proxy_note": _DISPERSION_PROXY_NOTE}
             else:
                 out["missing"].append("指数序列过短，滚动相关不可得")
 
@@ -640,14 +664,21 @@ def compute_dispersion(snap: dict, history: list[dict],
         switches = sum(1 for k in range(2, len(lu_hist))
                        if (lu_hist[k] > lu_hist[k - 1]) != (lu_hist[k - 1] > lu_hist[k - 2]))
         out["rotation_speed"] = {"value": switches / max(1, len(lu_hist) - 1),
-                                 "pctile": None, "window": len(lu_hist),
+                                 "pctile": None, "available": True,
+                                 "window": len(lu_hist),
                                  "note": "涨停家数方向切换频率（快照历史口径）"}
     else:
-        out["rotation_speed"] = {"value": None, "pctile": None, "window": 0,
+        out["rotation_speed"] = {"value": None, "pctile": None, "available": False,
+                                 "window": 0,
                                  "note": f"快照历史不足 {_FORM_MIN_HISTORY} 日"}
         out["missing"].append("轮动速度（涨停家数历史不足）")
 
-    out["available"] = out["available"] and out["rotation_speed"]["value"] is not None
+    # 块级可用性由三项**各自**的 available 派生（单一真源）——不再用
+    # `rotation_speed is not None` 把可算字段连带判死。
+    flags = [bool(out[k]["available"])
+             for k in ("index_dispersion", "rotation_speed", "avg_correlation")]
+    out["available"] = all(flags)
+    out["partial"] = any(flags) and not out["available"]
     return out
 
 

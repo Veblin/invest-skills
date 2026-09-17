@@ -248,7 +248,13 @@ def _profile_segments(profile: dict[str, Any]) -> list[str]:
     segments: list[str] = []
     summary = _format_summary(profile)
     if summary:
-        segments.append(f"**研究档案（--profile）：** {summary}。{_DISCLAIMER}")
+        # v0.3.0 C2：此处曾写「研究档案（--profile）：」——`--profile` 是 **lint**
+        # 子命令的预设选择（claude/precommit/engine），report 子命令根本没有该参数
+        # （真实入口是 --horizon/--focus/--goal/--style/--already-knows-price），
+        # 照产物自述操作会 SystemExit: unrecognized arguments。读者面向的正文用
+        # 概念名（引擎自身在 invest.py 的注释里即称「R12g-B 开场四问」），
+        # 参数名归 --help。
+        segments.append(f"**研究档案（R12g-B 开场四问）：** {summary}。{_DISCLAIMER}")
     goal = profile.get("report_goal")
     if goal:
         segments.append(f"**研究目标：** {goal}")
@@ -306,7 +312,10 @@ def write_profile_sidecar(
     sidecar = report_path.with_suffix(".profile.json")
     body: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "source": "cli:--profile",
+        # v0.3.0 C2：原为 "cli:--profile"。同模块 resolve_mode 的取值约定是
+        # {"cli", "default"}，且 "cli:" 前缀全仓仅此一处；--profile 也不是本侧车
+        # 的真实来源参数。
+        "source": "cli",
         "recorded_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
     }
     if generation:

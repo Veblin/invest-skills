@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -237,6 +238,32 @@ def test_shrink_pullback_caps_and_keeps_most_recent_events():
         f"须保留尾部（最近）事件，实得末次 idx={max(eps)} / 共 {len(closes)} 根"
 
 
+def test_shrink_pullback_nan_close_is_not_shrink():
+    """收盘价含 NaN → **不得**产出命中，更不得输出非有限值。
+
+    ⚠️ 与量能侧同族（`_f` 注释）：NaN 与任何数比较恒为 False，`peak_px <= 0` 与
+    `pullback_pct < 阈值` 两道闸门**同时失效**，发出 `pullback_pct=NaN` 的伪命中；
+    `json.dumps` 默认输出字面 `NaN`，落盘即非法 JSON，且该事件以 `shrink_pullback`
+    之名进入 RC 规则矩阵。量能侧已有守卫，价格侧此前无。
+    """
+    closes = _lin(100.0, 120.0, 21) + _lin(120.0, 105.0, 15)[1:]
+    vols = [1000.0] * 21 + [400.0] * 14
+    base = fp.detect_shrink_pullback(closes, vols)
+    assert base, "夹具须先能产出命中，否则本测试空转"
+    # ① 终点缺价：该点不得成为命中，且整份输出须为有限值 + 合法 JSON
+    for tgt in [h["endpoint_idx"] for h in base]:
+        bad = list(closes)
+        bad[tgt] = float("nan")
+        out = fp.detect_shrink_pullback(bad, vols)
+        assert not any(h["endpoint_idx"] == tgt for h in out), \
+            f"NaN 收盘价 idx={tgt} 不得被报成缩量回踩"
+        json.dumps(out, allow_nan=False)      # 任一处非有限值 → ValueError
+    # ② 缺价落在前高窗口内（可被选为峰值）：同样不得输出非有限值
+    bad = list(closes)
+    bad[10] = float("nan")
+    json.dumps(fp.detect_shrink_pullback(bad, vols), allow_nan=False)
+
+
 def test_shrink_pullback_nan_volume_is_not_shrink():
     """量能全为 NaN → **不得**报「缩量回踩」。
 
@@ -286,3 +313,22 @@ def test_detect_all_accepts_limit_param_and_keeps_default():
     eff = [h for h in fp.detect_all(closes, [1000.0] * len(closes))
            if h["detail"]["kind"] == "limit_up_above_ma"]
     assert eff, "默认（主板 9.8）应命中"
+
+
+class TestMedianUsesEvenSampleAverage:
+    """v0.3.0 B2：中位数须取偶数样本的两中值平均。
+
+    旧实现 `srt[n // 2]` 取的是**上中位**——对称样本下可翻转符号，而该字段与
+    均值/胜率同表呈现给读者判断「杀跌后倾向」。同族修正在 volume_price /
+    market_microstructure / futures_basis 三处（同型改法）。
+    """
+
+    def test_even_n_median_averages_two_middle_values(self):
+        got = fp.group_stats([-0.10, -0.02, 0.01, 0.05])
+        assert got["n"] == 4
+        # 上中位写法会给 +0.01（符号翻转）；真值 = (-0.02 + 0.01) / 2
+        assert abs(got["median_pct"] - (-0.5)) < 1e-9, got
+
+    def test_odd_n_median_unchanged(self):
+        got = fp.group_stats([-0.10, -0.02, 0.05])
+        assert abs(got["median_pct"] - (-2.0)) < 1e-9, got

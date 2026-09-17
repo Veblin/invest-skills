@@ -186,7 +186,13 @@ CROSS_PATH_REWRITES: dict[str, list[tuple[str, str]]] = {
 #         与消费方按 <自身>/../references/ 的解析口径一致（lint._rules_path）。
 MANDATED_TOOLS: dict[str, dict[str, list[str]]] = {
     "report_qc": {
-        "deps": ["lint"],
+        # analysis_schema：report_qc 经 _load_invest_lib() 注册 `_invest_lib` 别名包后
+        # 按 `_invest_lib.analysis_schema` 动态加载（:284/:289），ast 与字符串正则
+        # 都只抓到 `_invest_lib.*` 形式 → 在只带 report_qc+lint 的包（etf /
+        # event-calendar）里静默丢包，导致 stock 型快照的合法侧车被误判
+        # completion-analysis-sidecar-invalid + exit 2。其静态依赖 md_subset
+        # 经 _scan_node 的 AST 闭包自动带入，无需单列。
+        "deps": ["lint", "analysis_schema"],
         "data": ["skills/invest-a-stock/scripts/references/compliance_rules.yaml"],
     },
 }

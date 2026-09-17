@@ -796,9 +796,14 @@ def _run_macro(args: argparse.Namespace) -> int:
         args.fomc_file, today=today.strftime("%Y%m%d"))
     fomc_events = [e for e in fomc_events if w_start <= e.date.replace("-", "") <= w_end]
     if "美国" in regions or not results:
+        # v0.3.0 C3：策展表不可得（文件缺失/解析失败/已过期）时必须走 `error` 字段
+        # ——SourceResult 的契约是「error 非空 = 该源**不可得**（≠ 无事件）」。旧实现
+        # 丢弃 fomc_warnings 构造出 error=None 的 SourceResult，覆盖矩阵于是同时渲染
+        # 「— 窗口内无排期」与「⚠ FOMC 策展表不可得」，把不可得写成无事件（LAW 5）。
         results.append(macro_cal.SourceResult(
-            "FOMC 策展表", fomc_events, coverage_end=max(
-                (e.date for e in fomc_events), default=None)))
+            "FOMC 策展表", fomc_events,
+            error=("；".join(fomc_warnings) if fomc_warnings else None),
+            coverage_end=max((e.date for e in fomc_events), default=None)))
 
     view = macro_cal.build_view(results)
     view["results"] = results
@@ -807,8 +812,8 @@ def _run_macro(args: argparse.Namespace) -> int:
         print("宏观日程不可得（全部源失败或无内容）——不硬编。", file=sys.stderr)
         for msg in view["errors"] or ["无可呈现的日程来源"]:
             print(f"  {msg}", file=sys.stderr)
-        for w in fomc_warnings:
-            print(f"  {w}", file=sys.stderr)
+        # v0.3.0 C3：fomc_warnings 已随 `error=` 进入 view["errors"]（build_view 收集
+        # r.error），此处不再单独打印，避免同一告警出现两次。
         return 3
 
     md = render_macro_md(view, today=today, days=days, window=(w_start, w_end),
@@ -837,13 +842,15 @@ def _run_theme(args) -> int:
     import theme_calendar as tc
 
     if args.no_state:
-        # `--no-state`（help：不读写状态）必须在**所有**模式下生效；
-        # 此前仅池模式遵守（line 503），题材模式会照写共享状态文件，
-        # 且状态文件损坏时用户明确要求不碰状态仍被阻断（R4 评审）
-        print("⚠️ --no-state：本次不读写题材状态（登记未持久化）", file=sys.stderr)
-        print(tc.render_themes(state_file=args.state_file)
-              if not args.no_state else "（--no-state：跳过状态读取）")
-        return 0
+        # v0.3.0 C4：`--theme` 与 `--no-state` 语义矛盾——`register_theme` 恒落盘
+        # （theme_calendar 无内存模式），故「不读写状态」下**无法**完成登记。
+        # 旧实现打印「登记未持久化」却零登记、退出码 0：读者被暗示「已登记，只是
+        # 没落盘」，复盘时该题材并不存在（静默空结果，违反 D5）。此处改为 fail-loud。
+        # 注：原三元表达式 `render_themes(...) if not args.no_state else …` 位于
+        # `if args.no_state:` 之内，条件恒假、只能走 else，属死分支。
+        print("❌ --no-state 下无法登记题材：登记需落盘状态文件（无内存模式）。"
+              "请去掉 --no-state，或改用只读模式查询台账。", file=sys.stderr)
+        return 2
 
     concepts = [c for c in (args.concepts or "").split(",") if c.strip()]
     try:

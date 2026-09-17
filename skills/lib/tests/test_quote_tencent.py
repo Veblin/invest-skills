@@ -24,6 +24,7 @@ from quote_tencent import (  # noqa: E402
     IDX_PE,
     IDX_PRICE,
     IDX_TOTAL_MV_YI,
+    IDX_TS,
     IDX_TURNOVER_RATE,
     IDX_VOLUME,
     build_tencent_quote_url,
@@ -209,3 +210,36 @@ class TestFetch:
 
         with pytest.raises(RuntimeError):
             fetch_tencent_quote("600000", session=_BoomSess())
+
+
+class TestTimestampField:
+    """下标 30 时间戳（2026-09-17 新增，服务 A/H 比价的交易日对齐判定 D1）。
+
+    语义要点：该字段是「最后一次行情更新时刻」，**非交易推进信号**——A 股盘前
+    实测仍为前一交易日的 16:14，故其日期部分可直接作为「这份报价属于哪个
+    交易日」的判据。
+    """
+
+    def test_ts_parsed_as_raw_string(self):
+        text = _payload({IDX_PRICE: "305.48", IDX_TS: "20260916161421"})
+        q = parse_tencent_quote(text)
+        assert q["ts"] == "20260916161421"
+
+    def test_ts_not_numeric_converted(self):
+        """不得转 float：会丢前导零且语义错误（YYYYMMDDHHMMSS）。"""
+        text = _payload({IDX_PRICE: "1.0", IDX_TS: "20260102030405"})
+        q = parse_tencent_quote(text)
+        assert isinstance(q["ts"], str)
+        assert q["ts"] == "20260102030405"
+
+    def test_ts_unavailable_markers_to_none(self):
+        for marker in ("", "-"):
+            text = _payload({IDX_PRICE: "1.0", IDX_TS: marker})
+            assert parse_tencent_quote(text)["ts"] is None, marker
+
+    def test_ts_absent_when_payload_short(self):
+        """下标 30 越界 → None（不虚构）。"""
+        p = [""] * 20
+        p[IDX_PRICE] = "1.0"
+        text = "v_sz000001=\"" + "~".join(p) + "\""
+        assert parse_tencent_quote(text) is None or parse_tencent_quote(text)["ts"] is None

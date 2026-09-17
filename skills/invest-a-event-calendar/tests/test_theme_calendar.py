@@ -262,13 +262,21 @@ def test_unreliable_sources_rejected(state, bad):
 
 
 def test_no_state_flag_respected_in_theme_mode(state, capsys, monkeypatch):
-    """`--no-state`（help：不读写状态）须在所有模式生效——此前仅池模式遵守。"""
+    """`--theme` + `--no-state` 须 fail-loud，且不得写状态文件。
+
+    v0.3.0 C4 语义变更：`register_theme` 恒落盘（theme_calendar 无内存模式），故
+    「不读写状态」下**无法**完成登记。旧实现打印「登记未持久化」却零登记、退出 0
+    ——用户被暗示「已登记，只是没落盘」，复盘时该题材并不存在（静默空结果，违反 D5）。
+    """
     import unlock_calendar as uc
 
     monkeypatch.setattr(sys, "argv", [
         "unlock_calendar.py", "--theme", "T", "--stage", "首波", "--anchor", "A",
         "--anchor-source", "发改委公告", "--no-state", "--state-file", str(state)])
-    assert uc.main() == 0
+    rc = uc.main()
+    err = capsys.readouterr().err
+    assert rc == 2, "语义矛盾组合须 fail-loud，不得静默零登记"
+    assert "无法登记题材" in err
     assert not state.exists(), "--no-state 下不得写状态文件"
 
 

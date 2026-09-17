@@ -469,3 +469,70 @@ def test_qc_accepts_insight_with_new_blocks(tmp_path: Path) -> None:
 
     payload = json.loads(report.with_suffix(".insight.json").read_text(encoding="utf-8"))
     assert "discoveries" in payload and "analysis_chains" in payload
+
+
+# ── v0.3.0 B3：亏损期（PE 非正）不得产出「分位」结论 ────────────────────────
+
+
+def _set_latest_pe(collection: dict, value: float) -> dict:
+    """改最新一期 pe_ttm（构造亏损期）。"""
+    result = copy.deepcopy(collection)
+    for dim in result["dimensions"]:
+        if dim["dimension"] == "valuation":
+            dim["data"][-1] = {**dim["data"][-1], "pe_ttm": value}
+    return result
+
+
+class TestLossPeriodPeHandling:
+    """旧实现拿负 latest_pe 去比**正值**序列 → count(positive <= negative) = 0 →
+    恒得 0.0 分位，下游据此写出「位于可用正 PE 序列的 0.0% 分位，属于历史样本的
+    偏低位置」——负 PE 被读成便宜，且缺 CLAUDE.md 估值分位规则 2 的亏损期标注。
+    口径对齐 valuation_calc「PE 非正 → 标注不可得」。
+    """
+
+    def test_negative_pe_produces_no_percentile_fact(self) -> None:
+        model = _model(_set_latest_pe(collection_v2_minimal(), -12.34))
+        ids = {f["id"] for f in model["facts"]}
+        assert "valuation.pe_ttm.latest" in ids, "前置：最新 PE 仍须如实披露"
+        assert "valuation.pe_ttm.percentile" not in ids, "亏损期不产出分位 fact"
+
+    def test_negative_pe_finding_says_percentile_not_applicable(self) -> None:
+        model = _model(_set_latest_pe(collection_v2_minimal(), -12.34))
+        found = [f for f in model["findings"] if f["id"] == "valuation-pe-nonpositive"]
+        assert found, [f["id"] for f in model["findings"]]
+        claim = found[0]["claim"]
+        assert "亏损" in claim and "不计算分位" in claim
+        assert "偏低位置" not in claim, "不得把负 PE 说成位置偏低"
+        assert not any(f["id"] == "valuation-position" for f in model["findings"])
+
+    def test_positive_pe_still_yields_valuation_position(self) -> None:
+        """对照：正 PE 路径不受影响。"""
+        model = _model(collection_v2_minimal())
+        assert any(f["id"] == "valuation-position" for f in model["findings"])
+        assert any(f["id"] == "valuation.pe_ttm.percentile" for f in model["facts"])
+
+
+# ── v0.3.0 D1：CH-1 问题文案须与所在象限一致 ────────────────────────────────
+
+
+@pytest.mark.parametrize("value,change,zone,needle,anti", [
+    (10.0, -5.0, "偏低", "增长未被市场认可", "高估值"),
+    (10.0, 5.0, "偏低", "孰为错价、孰为预警", "高估值"),
+    (90.0, 5.0, "偏高", "高估值是否已透支增长", "分位偏低"),
+    (90.0, -5.0, "偏高", "困境反转", "分位偏低"),
+])
+def test_chain_question_matches_quadrant(value, change, zone, needle, anti) -> None:
+    """旧实现按 `aligned` 布尔取文案，每个分支覆盖两个象限、只写死其中一个——
+    (偏高, 下降) 时会写出「估值分位偏低与收入高增并存」，与同一字典里 relation
+    明写的「偏高…下降…不一致」直接矛盾（数字是对的，错的只有手写文案）。
+    """
+    from lib.insight_model import _chain_valuation_vs_earnings
+
+    chain = _chain_valuation_vs_earnings({
+        "valuation.pe_ttm.percentile": {"id": "valuation.pe_ttm.percentile", "value": value},
+        "financials.revenue.change": {"id": "financials.revenue.change", "value": change},
+    })
+    assert chain is not None
+    assert zone in chain["relation"]
+    assert needle in chain["question"], chain["question"]
+    assert anti not in chain["question"], f"问题文案与象限矛盾：{chain['question']}"

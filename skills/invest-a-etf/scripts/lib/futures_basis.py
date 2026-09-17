@@ -84,7 +84,7 @@ def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
     if len(basis_vals) < 60:
         result["note"] = "有效基差样本不足"
         return result
-    from stats import percentile_rank_inclusive  # noqa: E402
+    from stats import median, percentile_rank_inclusive  # noqa: E402
 
     latest = rows[-1]
     result.update({
@@ -94,7 +94,8 @@ def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
         "current_basis_pct": latest.get("basis_pct"),
         "current_basis_pts": latest.get("basis_pts"),
         "percentile": percentile_rank_inclusive(basis_vals, latest.get("basis_pct")),
-        "median_basis_pct": sorted(basis_vals)[len(basis_vals) // 2],
+        # v0.3.0 B2：曾取 sorted(...)[len//2]——偶数样本得上中位而非中位数
+        "median_basis_pct": median(basis_vals),
         "n_history": len(basis_vals),
         "source": latest.get("source"),
     })

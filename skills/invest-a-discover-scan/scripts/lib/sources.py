@@ -290,7 +290,14 @@ def market_form_context() -> dict:
                 raise ImportError("market_microstructure.py 缺失")
             mod = importlib.util.module_from_spec(spec)
             sys.modules[mod_name] = mod
-            spec.loader.exec_module(mod)
+            try:
+                spec.loader.exec_module(mod)
+            except Exception:
+                # v0.3.0 D4（D11 同族清扫）：exec 失败留下的残破模块会被 sys.modules
+                # 永久缓存，后续调用短路返回它 → 真实 import 错误被掩盖。范式见
+                # invest-a-stock/scripts/lib/collector/_orchestrate.py 的 F5 处理。
+                sys.modules.pop(mod_name, None)
+                raise
             sys.modules[name] = mod
         snap = mod.latest_snapshot()
         label = (snap or {}).get("env_label")

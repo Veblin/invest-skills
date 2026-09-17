@@ -23,6 +23,8 @@ from report_qc import (  # noqa: E402
     _check_sourcing,
     _compute_overall,
     _run_verify_layers,
+    LayerResult,
+    QCResult,
 )
 
 # ── 可复用的合规样例（含 [事实]/[分析]/[证据强度] + 风险声明）──
@@ -900,3 +902,132 @@ class TestCliDefaultProfileCoversLaw6:
         report = self._report_with_law6_violation(tmp_path)
         rc = main([str(report), "--fail-on", "error", "--profile", "precommit"])
         assert rc != 2, "precommit 档不应拦截（提交期性能取舍，由 hook 显式声明）"
+
+
+# ── v0.3.0 A4：无公司名快照不得让强制侧车闸门静默 skip ──
+
+
+class TestNamelessSnapshotGate:
+    """basic_info 采集失败时渲染器输出 `# 600176  研究快照`（双空格，无公司名）。
+
+    旧正则 `\\s+.+?\\s+研究快照` 要求名字 ≥1 字符 → 该标题不命中 →
+    `_check_stock_completion` 落 else 分支返回 skip → 强制侧车闸门**静默失效**
+    （fail-open），恰在数据覆盖最差时放行。而 `_compute_overall` 明确
+    「skip 不参与」，故整体判定不受影响 → 不合格快照拿到 PASS。
+    """
+
+    _SNAPSHOT_NO_NAME = _AUTOMATED_STOCK_SNAPSHOT.replace(
+        "# 600176 中国巨石 研究快照", "# 600176  研究快照")
+
+    def test_nameless_snapshot_still_requires_sidecar(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-未知", "2026-09-14-13-41-24.md",
+                        self._SNAPSHOT_NO_NAME)
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert completion.status == "fail", "空公司名不得让闸门静默 skip（fail-open）"
+        assert any(d["id"] == "completion-analysis-sidecar-missing"
+                   for d in completion.details)
+        assert qc_file(report, fail_on="error").overall == "FAIL"
+
+    def test_nameless_snapshot_with_valid_sidecar_passes(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-未知", "2026-09-14-13-41-24.md",
+                        self._SNAPSHOT_NO_NAME)
+        report.with_suffix(".analysis.json").write_text(
+            _VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert completion.status == "pass", \
+            [(d["id"], d["message"]) for d in completion.details]
+
+
+# ── v0.3.0 A5：severity 词表统一（error / warning / info） ──
+
+
+class TestSeverityVocabularyUnified:
+    """权威词表见 invest-a-stock `lib/lint.py`（`severity: error / warning / info`）。
+
+    此前本文件产出侧混用 `"warn"` 与 `"warning"` 两种拼写，而详情图标只认
+    `"warn"` → lint 层（发 `"warning"`）的全部 warning 级 finding 被渲染成 ℹ️，
+    与 info 无法区分 → CLAUDE.md 第 0 层要求的「sourcing warning 逐条复核后
+    消除或说明」被静默跳过。
+    """
+
+    def test_all_finding_severities_are_canonical(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)   # 无侧车 → 至少 completion error
+        result = qc_file(report, fail_on="error")
+        sevs = {d["severity"] for l in result.layers for d in l.details}
+        assert sevs, "前置：本样例须产出 finding"
+        assert sevs <= {"error", "warning", "info"}, f"非规范 severity 拼写: {sevs}"
+
+    def test_warning_severity_renders_warning_icon(self):
+        result = QCResult(
+            report_path="x.md", report_type="stock", overall="WARN",
+            layers=[LayerResult(layer="sourcing", status="warn", findings_count=2,
+                                details=[
+                                    {"id": "w", "severity": "warning",
+                                     "message": "warn 级条目"},
+                                    {"id": "i", "severity": "info",
+                                     "message": "info 级条目"},
+                                ])],
+        )
+        out = format_qc_result(result, verbose=True)
+        assert "⚠️ [w] warn 级条目" in out, "warning 级须渲染 ⚠️（此前渲染成 ℹ️）"
+        assert "ℹ️ [i] info 级条目" in out, "info 级须渲染 ℹ️"
+
+
+class TestLaw6aScenarioContext:
+    """v0.3.0 全量重审 F-U7-5：LAW 6a 三情景上下文门禁（此前**零实现**）。
+
+    CLAUDE.md：「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
+    ——此前唯一机器机制只是全文级免责存在性检查，既不校验假设也不校验概率权重。
+    实测语料：253 份中 109 份含三情景词，108 份已合规，1 份真实缺概率权重。
+    """
+
+    def test_missing_probability_flags_error(self):
+        from report_qc import law6a_scenario_findings
+
+        text = (
+            "# 测试\n\n| 中性锚 | 1000-1200 |\n| 悲观锚 | 600-800 |\n| 乐观锚 | 1400-1700 |\n\n"
+            "假设：2027E 净利 520 亿。\n"
+        )
+        findings = law6a_scenario_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "error"
+        assert "概率权重" in findings[0]["message"]
+
+    def test_missing_assumption_flags_error(self):
+        from report_qc import law6a_scenario_findings
+
+        text = (
+            "# 测试\n\n中性锚 1000-1200（概率 50%）\n"
+            "悲观锚 600-800（概率 25%）\n乐观锚 1400-1700（概率 25%）\n"
+        )
+        findings = law6a_scenario_findings(text)
+        assert len(findings) == 1
+        assert "假设前提" in findings[0]["message"]
+
+    def test_complete_scenarios_pass(self):
+        from report_qc import law6a_scenario_findings
+
+        text = (
+            "# 测试\n\n假设：2027E 净利 520 亿。\n"
+            "中性锚 1000-1200（概率 50%）；悲观锚 600-800（概率 25%）；"
+            "乐观锚 1400-1700（概率 25%）。\n"
+        )
+        assert law6a_scenario_findings(text) == []
+
+    def test_two_scenario_words_not_triggered(self):
+        """缺任一情景词即不触发——避免误伤只提单一情景的普通叙述。"""
+        from report_qc import law6a_scenario_findings
+
+        text = "# 测试\n\n乐观情景与悲观情景的差异主要来自价格假设。\n"
+        assert law6a_scenario_findings(text) == []
+
+    def test_layer_status_fail_on_error(self):
+        from report_qc import _check_law6a_scenarios
+
+        layer = _check_law6a_scenarios(
+            "# 测试\n\n中性锚 1000-1200；悲观锚 600-800；乐观锚 1400-1700。假设：净利 520 亿。\n"
+        )
+        assert layer.layer == "law6a-scenarios"
+        assert layer.status == "fail"
+        assert layer.findings_count == 1

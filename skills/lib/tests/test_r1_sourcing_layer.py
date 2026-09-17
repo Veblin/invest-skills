@@ -94,15 +94,20 @@ def test_cli_verbose_prints_details(tmp_path, capsys):
 
 # T6-5 端到端正例（固化 2026-09-10 人工构造样例的全层 PASS 行为，
 # 防 sourcing/结构/lint 任一层在未来误伤合规输入）
+#
+# v0.3.0 A3：新增 readability / conclusion-evidence 两层后，本样例须继续满足
+# 全层 PASS——正例就该连 §3.4 的软指标（长句占比 ≤30%）也满足。句子已按
+# 中文句末符断为短句（原样例整段无句末符 → 单句 100% 长句占比 → WARN，
+# 属该指标的正确触发而非误伤；R-A1 是软建议，WARN 仍可交付）。
 _POSITIVE_SAMPLE = """# 样例ETF 研究报告（正例样例）
 
 > 本报告为研究工具输出，不构成投资建议。
 
 ## 1 概况
 
-[事实] 最新净值 1.0000，跟踪指数 PE 12.34x [来源: 引擎字段 nav / index_pe]
+[事实] 最新净值 1.0000 [来源: 引擎字段 nav]。跟踪指数 PE 12.34x [来源: 引擎字段 index_pe]。
 
-[分析] 折溢价约为 1.2 个百分点，处于常态区间 [来源: Python calc: (price-nav)/nav]
+[分析] 折溢价约 1.2 个百分点，处于常态区间 [来源: Python calc: (price-nav)/nav]。
 
 [证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源可验证]
 """

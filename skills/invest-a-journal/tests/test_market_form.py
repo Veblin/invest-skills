@@ -175,14 +175,58 @@ def test_dispersion_rotation_speed_from_snapshot_history():
     assert "rotation_speed" in out, "轮动速度可仅由快照历史得出"
 
 
+def test_dispersion_availability_is_per_metric():
+    """缺指数序列 → 两项不可得，但 `rotation_speed` 须自报**可用**。
+
+    块级 `available` 兼作「整块可用」时，会把仅依赖快照历史、**本可算出**的
+    轮动速度一并掩掉：消费方按 `available` 门控时该字段永远不可见（注册表 C4
+    「落地状态」明确 rotation_speed 由快照历史可算）。
+    """
+    out = mm.compute_dispersion(_snap(), _history(), index_series=None)
+    assert out["index_dispersion"]["available"] is False
+    assert out["avg_correlation"]["available"] is False
+    assert out["rotation_speed"]["available"] is True, "轮动速度可算，不得被连带判不可用"
+    assert out["available"] is False, "块级 available 语义保持「三项全部可用」"
+    assert out["partial"] is True, "部分可用须可辨识，消费方才知道去哪找可用项"
+
+
+def test_dispersion_all_available_with_index_series():
+    out = mm.compute_dispersion(_snap(), _history(), index_series=_index_series())
+    for key in ("index_dispersion", "rotation_speed", "avg_correlation"):
+        assert out[key]["available"] is True, f"{key} 可用性标注错误"
+    assert out["available"] is True and out["partial"] is False
+
+
 def test_dispersion_recomputable():
-    """P0：指数离散度须可由输入序列复算。"""
-    series = _index_series()
-    out = mm.compute_dispersion(_snap(), _history(), index_series=series)
+    """P0：指数离散度须可由输入序列复算——**逐日横截面**离散度的窗口均值。"""
     import statistics
 
-    expected = statistics.pstdev([sum(v) / len(v) for v in series.values()])
-    assert out["index_dispersion"]["value"] == pytest.approx(expected, rel=1e-6)
+    series = _index_series()
+    out = mm.compute_dispersion(_snap(), _history(), index_series=series)
+    field = out["index_dispersion"]
+    win = field["window"]
+    arrays = [v[-win:] for v in series.values()]
+    n_days = min(len(a) for a in arrays)
+    expected = sum(
+        statistics.pstdev([a[k] for a in arrays]) for k in range(-n_days, 0)
+    ) / n_days
+    assert field["value"] == pytest.approx(expected, rel=1e-6)
+    assert field["n_days"] == n_days, "须标注实际参与计算的对齐天数（覆盖范围）"
+
+
+def test_index_dispersion_captures_within_day_cross_section():
+    """口径澄清：**均值相同、日内分化不同**的两条序列 → 分化度须 > 0。
+
+    旧实现取各指数**全序列均收益**的 pstdev：一条平、一条每日 ±1% 摆动的两条
+    序列（均值同为 0）会被报成「零分化」——而分化度要度量的正是日内横截面差异
+    （与 `skills/lib/sector_sync.py::cross_sectional_dispersion_pct` 同口径）。
+    """
+    n = 40
+    flat = [0.0] * n
+    swing = [0.01 * (1 if i % 2 else -1) for i in range(n)]
+    out = mm.compute_dispersion(_snap(), _history(),
+                                index_series={"平": flat, "摆": swing})
+    assert out["index_dispersion"]["value"] > 0, "均值相同不等于零分化"
 
 
 # ── 落库联动：env_label 携带 market_form / dispersion ────────────────────

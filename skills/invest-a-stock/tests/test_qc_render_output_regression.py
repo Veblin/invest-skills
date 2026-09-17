@@ -129,19 +129,22 @@ def test_events_render_trips_template_placeholder(tmp_path: Path, events_text: s
 
 
 def test_degraded_render_trips_both_directions(tmp_path: Path, degraded_text: str) -> None:
-    """反证不足：多空两侧依据为空，且左/右概率节至少一侧以「数据不足」披露。
+    """反证不足：多空两侧**逻辑链**为空必须被拦（Bull/Bear）。
 
-    2026-09-16：修复左/右节写入时机后，退化 collection 下为空的一侧由
-    「左侧」变为「右侧」（左侧拿到 PE 低分位条目、右侧落到
-    「右侧参考指标数据不足」哨兵）。哪一侧为空取决于数据，故断言
-    Bull/Bear 必中 + 左/右至少一侧，而非钉死具体一侧。
+    v0.3.0 A7：左/右概率节此前至少一侧会输出哨兵句（「…参考指标数据不足」）
+    并被 QC 判为空节——哪一侧为空取决于数据，是 2026-09-16 修写入时机后留下的
+    偶然（左侧拿到 PE 低分位条目、右侧落到哨兵）。两侧现均给出**含实测值与
+    阈值的实质句**，故 completion-empty-basis 不再出现在左/右；该保证由
+    test_left/right_basis_without_support_is_substantive 正面锁定。
     """
     path = _write_report(tmp_path, degraded_text)
     details = _completion_details(path)
     empty = [d for d in details if d["id"] == "completion-empty-basis"]
     kinds = {d["message"].split(" 依据节")[0] for d in empty}
-    assert {"Bull", "Bear"} <= kinds
-    assert kinds & {"左侧", "右侧"}
+    assert {"Bull", "Bear"} <= kinds, "多空逻辑链为空必须被拦"
+    assert not (kinds & {"左侧", "右侧"}), (
+        "A7 后左/右概率节均给实质句，不应再被判为空节：" + str(sorted(kinds))
+    )
 
 
 # ── sidecar 存在性：从「缺失」到「合格」再到「不合格」 ────────────────────
@@ -188,14 +191,14 @@ def test_renderer_sentinels_are_covered_by_qc(
     这条断言失败时错误信息直指「渲染器改了文案 / QC 正则该同步」，
     比 finding id 断言更易诊断——两边任一处漂移都会在这里先红。
     """
-    # 左侧无支撑时渲染器已改为**含实测值与阈值的实质句**（不再输出纯哨兵，
-    # 见 render_risk._section_left_right_probability），故这里只锁右侧哨兵；
-    # 旧左哨兵（含「或未达到阈值」尾缀）的正则覆盖由
-    # skills/lib/tests/test_report_qc.py 的左右对称用例锁定。
+    # 左/右两侧无支撑时渲染器均已改为**含实测值与阈值的实质句**（不再输出纯
+    # 哨兵，见 render_risk._section_left_right_probability；v0.3.0 A7 收口右侧），
+    # 故此处只锁「多空逻辑链」与模板占位两类哨兵。旧左哨兵（含「或未达到阈值」
+    # 尾缀）与旧右哨兵的正则覆盖，由 skills/lib/tests/test_report_qc.py 的
+    # 左右对称用例锁定（旧右哨兵仍须被 QC 判为空节，存量报告复检依赖该分支）。
     sentinels = [
         ("- 当前数据未形成明确多头逻辑链", degraded_text),
         ("- 当前数据未形成明确空头逻辑链", degraded_text),
-        ("① 右侧参考指标数据不足", degraded_text),
         ("[待 Claude report 阶段填充]", events_text),
     ]
     for needle, text in sentinels:
@@ -221,6 +224,28 @@ def test_left_basis_without_support_is_substantive(minimal_text: str) -> None:
     assert left, "左侧节不得为空"
     assert "阈值" in left, f"无支撑时须给出实测值与阈值: {left}"
     assert not _EMPTY_BASIS_RE.search(left), "含实测值的实质句不得被当作哨兵"
+
+
+def test_right_basis_without_support_is_substantive(degraded_text: str) -> None:
+    """右侧无支撑时同样给出实测值与阈值（v0.3.0 A7）。
+
+    此前只有左侧被改写，右侧仍输出裸哨兵 `① 右侧参考指标数据不足` → 同一份
+    数据下左侧通过、右侧被 QC 判为空节并以 error 级 completion-empty-basis
+    拦下；而左/右侧均无 analysis.json 槽位（analysis_schema 只有 OVERVIEW /
+    BEAR_CHAIN / MDA_NARRATIVE / EVENT_CLASSIFICATION / PARTICIPANT_SCAN），
+    作者无法在不改引擎文本的情况下消除。
+    """
+    lines = degraded_text.splitlines()
+    i = lines.index("### 右侧概率的主要支撑依据")
+    body: list[str] = []
+    for ln in lines[i + 1:]:
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            break
+        body.append(ln.strip())
+    assert body, "右侧节不得为空"
+    right = " ".join(body)
+    assert "阈值" in right, f"无支撑时须给出实测值与阈值: {right}"
+    assert not _EMPTY_BASIS_RE.search(right), "含实测值的实质句不得被当作哨兵"
 
 
 def test_structural_hint_block_is_not_a_placeholder(minimal_text: str) -> None:

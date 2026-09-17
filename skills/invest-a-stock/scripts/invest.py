@@ -641,14 +641,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
         store_mod.save_pipeline_step(
             args.symbol, "collect", _collect_pipeline_state(args, dims),
         )
-    if getattr(args, 'save_raw', False):
-        try:
-            from lib.archiver import archive_collection
-            filepath = archive_collection(args.symbol, result)
-            if filepath:
-                print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
-        except Exception as exc:
-            print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
+    # v0.3.0 D5：原为内联块（且只写在 full 分支尾），现统一走 helper——见其说明
+    _maybe_save_raw(args, result)
     return 0
 
 
@@ -688,6 +682,25 @@ def _maybe_store_report_snapshot(
     except Exception as exc:
         print(f"⚠️ 报告入库失败: {exc}", file=sys.stderr)
     _maybe_store_macro_snapshot(result, args)
+
+
+def _maybe_save_raw(args: argparse.Namespace, result: dict) -> None:
+    """--save-raw：存档原始采集结果（best-effort，失败不阻断）。
+
+    v0.3.0 D5：这段原只写在 full 分支尾部（render 之后），而 insight 分支在它之前
+    就 `return 0`（json / compact 出口更早）→ `--mode insight --save-raw` 被**静默
+    忽略**，用户以为存了档而 archiver 从未调用。抽成 helper 并在每个出口调用，
+    与 `_maybe_store_report_snapshot` 同款惯例。
+    """
+    if not getattr(args, "save_raw", False):
+        return
+    try:
+        from lib.archiver import archive_collection
+        filepath = archive_collection(args.symbol, result)
+        if filepath:
+            print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
+    except Exception as exc:
+        print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
 
 
 def _insight_snapshot_diff(symbol: str, result: dict) -> tuple[dict | None, str]:
@@ -894,11 +907,13 @@ def cmd_report(args: argparse.Namespace) -> int:
         if fmt == "json":
             print(json.dumps(insight_model, ensure_ascii=False, indent=2))
             _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+            _maybe_save_raw(args, result)
             return 0
         markdown = render_insight_markdown(insight_model)
         if fmt == "compact":
             print(markdown)
             _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+            _maybe_save_raw(args, result)
             return 0
         from lib.shared_dates import shanghai_now
         timestamp = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -941,6 +956,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         if not getattr(args, "outdir", None) and fmt == "md":
             print(markdown)
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+        _maybe_save_raw(args, result)
         return 0
 
     if fmt == "html":
@@ -985,6 +1001,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         if profile_sidecar:
             print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+        _maybe_save_raw(args, result)
         return 0
 
     # attach_extras=True：cmd_report 非纯渲染（刚跑完 collect_all / resume 恢复），
@@ -995,14 +1012,8 @@ def cmd_report(args: argparse.Namespace) -> int:
                            attach_extras=True, analysis=analysis_payload, profile=profile)
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
-    if getattr(args, 'save_raw', False):
-        try:
-            from lib.archiver import archive_collection
-            filepath = archive_collection(args.symbol, result)
-            if filepath:
-                print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
-        except Exception as exc:
-            print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
+    # v0.3.0 D5：原为内联块（且只写在 full 分支尾），现统一走 helper——见其说明
+    _maybe_save_raw(args, result)
 
     if fmt == "md":
         # F2-4: 报告文件名时间戳显式北京时（ZoneInfo Asia/Shanghai），
@@ -1908,18 +1919,27 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
 
 def cmd_qc_report(args: argparse.Namespace) -> int:
-    from lib.report_qc import format_report_qc, run_report_qc
+    """统一 QC 入口——与第 0 层准出（skills/lib/report_qc.py）同实现。
+
+    v0.3.0 A3：此前这里走 `lib.report_qc`，而 `lib` 在本进程已绑定
+    invest-a-stock/scripts/lib → 解析到旧的 228 行模块（无 lint/completion/
+    derived/sourcing 任何闸门），与规范要求的第 0 层通道对同一文件可给出相反
+    裁决。现改为经 compat shim 把 skills/lib 入 sys.path 后按**顶层名**导入：
+    不能再写 `import lib.report_qc`——`lib` 的绑定已固定，插 path 不改变它。
+    """
+    from lib._invest_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from report_qc import format_qc_result, qc_file
 
     p = Path(args.path).resolve()
     if not p.exists():
         print(f"❌ 文件不存在: {p}", file=sys.stderr)
         return 1
-    text = p.read_text(encoding="utf-8")
-    findings = run_report_qc(text)
-    print(format_report_qc(findings))
-    rank = {"info": 0, "warning": 1, "error": 2}
-    threshold = rank.get(args.fail_on, 1)
-    return 1 if any(rank[f.severity] >= threshold for f in findings) else 0
+    result = qc_file(p, profile="claude", fail_on=args.fail_on)
+    print(format_qc_result(result, verbose=True))
+    # 退出码对齐 CLAUDE.md 第 0 层契约（0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）。
+    # 语义变更：旧实现对 FAIL 只返回 1，现按契约返回 2。
+    return {"PASS": 0, "WARN": 1, "FAIL": 2}[result.overall]
 
 
 def cmd_rigor(args: argparse.Namespace) -> int:

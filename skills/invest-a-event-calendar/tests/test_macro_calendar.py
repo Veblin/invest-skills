@@ -170,6 +170,23 @@ def test_cn_calendar_all_failed_reports_error_not_empty(monkeypatch):
     assert len(res.failed_days) == 2
 
 
+def test_cn_calendar_all_failed_still_reports_config_warnings(monkeypatch):
+    """全失败退出路径**同样**携带配置告警。
+
+    源整体故障正是运维排查的时刻，配置问题（坏正则/坏阈值）若只在该路径被吞掉，
+    就会一直不可见——与本模块 fail-soft 纪律（坏配置「只降级 + 告警」）相悖。
+    """
+    def boom(date, cookie=None):
+        raise RuntimeError("HTTPError 502")
+
+    monkeypatch.setattr(mc, "_fetch_baidu_day", boom)
+    rules = {"noise_patterns": ["上期所(每日"], "noise_min_days": "abc"}
+    res = mc.fetch_baidu_calendar("20260912", "20260913", retries=1, rules=rules)
+    assert res.error is not None
+    assert any("noise_patterns" in n for n in res.notes), f"须报正则不可编译: {res.notes}"
+    assert any("noise_min_days" in n for n in res.notes), f"须报阈值不可解析: {res.notes}"
+
+
 def test_cn_calendar_all_empty_days_is_explicit_unavailable(monkeypatch):
     """整窗**每天都是合法空窗**（无一失败）→ 仍判不可得，不得渲染成「无排期」。
 
@@ -769,3 +786,22 @@ def test_political_mechanism_note_without_direction_is_rejected(tmp_path):
     p = _pol(tmp_path, "  - name: 甲\n    start: '2026-11-03'\n", note="'可能上涨'")
     out = mc.load_political_windows(p, today="2026-09-13")
     assert out["available"] is False and "方向未知" in out["reason"]
+
+
+def test_cn_calendar_nan_time_not_rendered_as_literal_nan(monkeypatch):
+    """v0.3.0 D3：pandas 补出的 NaN 时刻不得渲染成字符串 "nan"。
+
+    相邻的「地区」列早已用 `_present_text` 修过同类问题（见上一用例），「时间」列
+    漏改：`str(r.get("时间") or "")` 对 NaN 无效（NaN 是 truthy，`or` 兜底不生效）
+    → 时刻列出现 "nan"，读者看到像数据损坏而非「该源不提供时刻」。
+    """
+    def fake(date, cookie=None):
+        return pd.DataFrame([{
+            "日期": "2026-09-15", "时间": float("nan"), "地区": "美国", "国家": "美国",
+            "事件": "美国8月CPI年率(%)", "前值": 0.6, "重要性": "2",
+        }])
+
+    monkeypatch.setattr(mc, "_fetch_baidu_day", fake)
+    res = mc.fetch_baidu_calendar("20260915", "20260915", regions=("美国",), retries=1)
+    assert res.events, "前置：该事件须被保留"
+    assert res.events[0].time == "", f"NaN 时刻须归一为空串，实得 {res.events[0].time!r}"

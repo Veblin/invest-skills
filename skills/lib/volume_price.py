@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 
 from backtest import ols_multi  # noqa: E402 —— 共享回归工具（含系数/标准误/t/n）
-from stats import percentile_rank_inclusive  # noqa: E402 —— 共享统计库
+from stats import median, percentile_rank_inclusive  # noqa: E402 —— 共享统计库
 
 # --- R-A03 阈值（样本内校准；改动须记录理由并同步 C7 预注册） -------------------
 VOLUME_HIGH_PCTILE = 90.0     # > 此分位 = 放量日
@@ -381,7 +381,9 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
         horizons_out[str(h)] = {
             "n": n,
             "mean_excess_pct": (round(sum(excess) / n * 100, 3) if n else None),
-            "median_excess_pct": (round(sorted(excess)[n // 2] * 100, 3) if n else None),
+            # v0.3.0 B2：曾用 `sorted(excess)[n // 2]`——偶数 n 取的是**上中位**
+            # 而非中位数（[-10,-2,+1,+5] → 报 +1.0，真值 -0.5，符号可翻转）。
+            "median_excess_pct": (round(median(excess) * 100, 3) if n else None),
             "win_rate_pct": (round(sum(1 for e in excess if e > 0) / n * 100, 2) if n else None),
             "baseline_excess_pct": (round(sum(base_excess) / len(base_excess) * 100, 3)
                                     if base_excess else None),
