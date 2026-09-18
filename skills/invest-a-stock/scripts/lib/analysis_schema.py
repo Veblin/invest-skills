@@ -472,6 +472,59 @@ def is_inline_slotted(sec: dict) -> bool:
     return bool(_keys_of(sec) & INLINE_SLOT_KEYS)
 
 
+# --- 首屏「判断索引」的共用判据与标签（md / html 单点定义）------------------------
+# 与 split_overview / EVENTS_HOST_KEYS 同源的理由一样：索引的成员判据和标签规则
+# 若在 md 与 html 各写一份，必然漂移（见上面 EVENTS_HOST_KEYS 的记录）。故集中在此，
+# 两个渲染器只做「怎么显示」，不做「谁入选、叫什么」。
+#
+# 排除 = overview 槽位（另有 5 分钟阅读区）+ 补充材料槽位（管理层叙事 / 参与方扫描
+# 不占首屏名额）；一律走 `_keys_of` 归一化比对，大小写与首尾空白变体同样命中。
+INDEX_EXCLUDED_KEYS = OVERVIEW_KEYS | MDA_NARRATIVE_KEYS | PARTICIPANT_SCAN_KEYS
+
+# 标签取值：`module` 是写作者自选的自由文本（schema 只校验长度 ≤64），实测语料里
+# 六成条目写成内部槽位键（bear_chain / financials / event_classification …），而
+# `position` 才是受校验枚举（POSITION_ALLOWED）。故**内部 slug 不出读者面**：
+# 纯 ASCII 标识符（含大小写混写，如 Capital_Flow）→ 回退 position 中文名；
+# 含中文的 module（事件归因 …）原样保留。
+_INDEX_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$", re.I)
+POSITION_LABELS = {
+    "overview": "总览",
+    "valuation": "估值",
+    "financials": "财务",
+    "technicals": "技术面",
+    "northbound": "北向资金",
+    "holders": "股东与筹码",
+    "events": "事件",
+    "refs": "参考资料",
+    "research": "研究",
+    "conclusion": "结论",
+    "analysis": "分析",
+}
+
+
+def index_entries(analysis: list[dict] | None) -> list[tuple[str, str]]:
+    """首屏判断索引的 ``(标签, 标题)`` 列表；md 与 html 共用同一份。
+
+    无标题的段跳过（没标题的索引条目没有信息量）；全部被跳过 → 空列表，
+    调用方据此让整节不渲染（避免只剩一个空标题）。
+    """
+    entries: list[tuple[str, str]] = []
+    for sec in (analysis or []):
+        if not isinstance(sec, dict) or _keys_of(sec) & INDEX_EXCLUDED_KEYS:
+            continue
+        title = str(sec.get("title") or "").strip()
+        if not title:
+            continue
+        module = str(sec.get("module") or "").strip()
+        if module and not _INDEX_SLUG_RE.match(module):
+            label = module
+        else:
+            label = POSITION_LABELS.get(
+                str(sec.get("position") or "").strip().lower(), "分析")
+        entries.append((label, title))
+    return entries
+
+
 # --- 就地消费登记（渲染期状态）--------------------------------------------------
 # is_inline_slotted 只说明「命中槽位则就地渲染」，回答不了「本次是否真的渲染了」：
 # 三个宿主都是条件渲染（participant_scan 无扫描行 / event_classification 无事件卡 /

@@ -254,7 +254,8 @@ def _profile_segments(profile: dict[str, Any]) -> list[str]:
         # 照产物自述操作会 SystemExit: unrecognized arguments。读者面向的正文用
         # 概念名（引擎自身在 invest.py 的注释里即称「R12g-B 开场四问」），
         # 参数名归 --help。
-        segments.append(f"**研究档案（R12g-B 开场四问）：** {summary}。{_DISCLAIMER}")
+        # R12g-B 是内部规格编号，不应泄漏到面向读者的报告。
+        segments.append(f"**研究偏好：** {summary}。{_DISCLAIMER}")
     goal = profile.get("report_goal")
     if goal:
         segments.append(f"**研究目标：** {goal}")

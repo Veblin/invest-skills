@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from lib.analysis_schema import AnalysisSchemaError, load_analysis_json, validate_sections
+from lib.analysis_schema import (
+    AnalysisSchemaError,
+    POSITION_ALLOWED,
+    POSITION_LABELS,
+    index_entries,
+    load_analysis_json,
+    validate_sections,
+)
 
 
 def _valid():
@@ -412,3 +419,44 @@ class TestReview20260918FormulaStrictness:
             facts_md="事实 [来源: engine]",
             analysis_md="偏离 36.7%。（证据 B）",
         )) == []
+
+
+# ── 首屏判断索引：标签与成员判据（2026-09-18 评审批次）────────────────────────
+
+def test_position_labels_cover_the_validated_enum():
+    """标签表须与受校验的 position 枚举一一对应——新增枚举值时此处 fail。"""
+    assert set(POSITION_LABELS) == POSITION_ALLOWED
+
+
+def test_index_entries_falls_back_to_position_for_slug_modules():
+    """module 是内部 slug → 用 position 中文名；slug 不得进入条目。"""
+    assert index_entries([
+        {"module": "bear_chain", "position": "conclusion", "title": "空头链条"},
+        {"module": "Capital_Flow", "position": "holders", "title": "两个资金口径反向"},
+    ]) == [("结论", "空头链条"), ("股东与筹码", "两个资金口径反向")]
+
+
+def test_index_entries_keeps_chinese_module_and_skips_untitled():
+    """含中文的 module 原样保留（比 position 枚举更贴切）；无标题条目无信息量。"""
+    assert index_entries([
+        {"module": "事件归因", "position": "events", "title": "下跌非公告驱动"},
+        {"module": "events", "position": "events", "title": "   "},
+    ]) == [("事件归因", "下跌非公告驱动")]
+
+
+@pytest.mark.parametrize("sec", [
+    {"module": "mda_narrative", "position": "analysis", "title": "管理层论述"},
+    {"module": "MDA_Narrative", "position": "analysis", "title": "管理层论述"},
+    {"module": "participant_scan", "position": "holders", "title": "参与方扫描"},
+    {"module": "overview", "position": "overview", "title": "首要判断"},
+    {"module": "thesis", "position": "overview", "title": "投资假设检验"},
+    {"module": "bear_chain", "position": "overview", "title": "空头链条"},
+])
+def test_index_entries_excludes_overview_and_supplementary_slots(sec: dict):
+    """排除判据走 `_keys_of` 归一化比对：module / position 两处键、大小写变体都命中。"""
+    assert index_entries([sec]) == []
+
+
+def test_index_entries_tolerates_empty_and_malformed_input():
+    assert index_entries(None) == []
+    assert index_entries(["x", None, {"module": "events", "title": ""}]) == []

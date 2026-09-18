@@ -399,8 +399,8 @@ Final pass 自问三个问题：
 
 - [ ] 用指数 PE / 行业 PE，非个股 PE 叙事
 - [ ] 行业 ETF：估值框架已展开（`valuation_guide` 不是一行标签）
-- [ ] 行业 ETF：行业排名已引用（`industry-pe` 31 行业位置 + TMT 赛道位置）
-- [ ] 份额趋势已查询（`etf_share_flow`），有数据则展示，无数据则标注"积累中"
+- [ ] 行业 ETF：行业排名已引用（`industry-pe` 31 行业位置；同赛道位置按**两档**——TMT 子组 / 仅全市场，非 TMT 未套用 TMT 口径、未自行编组）
+- [ ] 份额趋势已取（`report --json` 的 `share_history`），有数据则展示，无数据则标注「积累中」（本地快照口径 `etf_share_flow` 由 `invest-a-stock etf-flow --save` 盘后积累，不在本 skill 工作流内）
 - [ ] 技术指标仅描述状态（RSI 标注 `rsi_period`，MA 标注基于 NAV 或指数）
 - [ ] 输出是否只含四类参考、无任何动作词
 

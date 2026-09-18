@@ -65,13 +65,13 @@ metadata:
 
 **LAW 12** — 结论附带证据强度：✅ 强 / ⚠️ 中 / ❓ 弱。
 
-**LAW 13** — 动态驱动：最多 5 条候选解释 + 声明主导因子。
+**LAW 13** — 动态驱动：最多 5 条候选解释 + 声明主导因子；证据不足以识别主因时明确写「暂无法声明主导因子」（与引擎降级语一致），不得强行归因。
 
 **LAW 14** — 静态基本面 12 题 + 分层激活（见 [references/modules.md](references/modules.md)）。
 
 **LAW 15** — Bull/Bear 须含数值场景化链条。
 
-**LAW 16** — 左/右概率并列呈现，禁止单一「左侧/右侧」结论。
+**LAW 16** — 左/右概率并列呈现，禁止单一「左侧/右侧」结论；概率为主观估计时须标注「研究框架估计值（非统计频率）」（共享规范 §2.3 强制行为 5）。
 
 **LAW 17** — **结论先行（金字塔结构）**：简报和报告均采用结论→论据→细节倒金字塔——首屏核心结论+逻辑链、标题传递信息量（完整判断句）、段首加粗主旨句、看摘要等于看全文（完整铁律见 [report-conventions.md §1.1](../../../skills/lib/references/report-conventions.md)）。
 
@@ -99,7 +99,9 @@ metadata:
 
 ### 数据源策略
 
-v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/shareholders/northbound）首选源单发、失败按序降级（cascade）；L2 财务类（financials/valuation）并行双源先到先用。差异保留于 `_meta.all_sources`，由分析阶段标注。
+v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/shareholders/northbound）首选源单发、失败按序降级（cascade）；L2 财务类（financials/valuation）并行双源先到先用。
+
+**跨源差异的处置不是「事后靠 agent 发现」**：引擎在渲染层自动算跨源偏差并落「数据验算警示（financial_rigor）」段（`financial_rigor.py`：>5% 记 ❌ fail、>1% 记 ⚠️ warn，`--strict-rigor` 追加降级提示），差异明细同时保留于 `_meta.all_sources`。分析阶段只做两件事——**并列复述**（A 口径 X vs B 口径 Y）与**标注口径**，**不得自行裁决谁对**（共享规范 §2.3 强制行为 4）；警示段标 ❌ 时，相关估值段须按 `--strict-rigor` 的语义处理，标注「仅供参考，须独立核验原始数据源」（该提示由 `--strict-rigor` 渲染，未开该旗标时须由分析段自行补标）。
 
 ---
 
@@ -142,20 +144,22 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 周期位置: [...] / 估值位置: [...] / 市场态度: [...]
 
 ## 多模块结论速览
-| 维度 | 结论 | 关键数据 | 逻辑链 | 置信度 |
+> 模板表内每个数值都须带来源（P0）：占位处照写 `[来源: 引擎字段]` / `[来源: Python calc: formula]`，禁止留空来源。
+
+| 维度 | 结论 | 关键数据（逐项带来源） | 逻辑链 | 置信度 |
 |------|------|---------|--------|:------:|
-| 估值 | PE 38.5x, 92% 分位, 已定价乐观预期 | PE 38.5x vs 中位 18.2x | ... | ⚠️ |
-| 经营 | ... | ... | ... | ... |
-| 资金 | ... | ... | ... | ... |
-| 催化 | ... | ... | ... | ... |
-| 风险 | ... | ... | ... | ... |
+| 估值 | PE 38.5x, 92% 分位, 已定价乐观预期 | PE 38.5x [来源: valuation.pe_ttm] vs 中位 18.2x [来源: valuation.pe_median] | ... | ⚠️ |
+| 经营 | ... | ... [来源: …] | ... | ... |
+| 资金 | ... | ... [来源: …] | ... | ... |
+| 催化 | ... | ... [来源: …] | ... | ... |
+| 风险 | ... | ... [来源: …] | ... | ... |
 
 ## 多情景参考
-| 情景 | 核心假设 | 传导路径 | 估值区间 | 概率 |
+| 情景 | 核心假设 | 传导路径 | 估值区间 | 概率（研究框架估计值，非统计频率） |
 |------|---------|---------|:------:|:---:|
-| 乐观 | ... | A→B→C | XX~YY | 30% |
-| 中性 | ... | ... | ... | 40% |
-| 悲观 | ... | ... | ... | 30% |
+| 乐观 | ... | A→B→C | XX~YY [来源: Python calc: …] | 30% |
+| 中性 | ... | ... | ... [来源: …] | 40% |
+| 悲观 | ... | ... | ... [来源: …] | 30% |
 
 ## 关键观察节点
 | 时间 | 事件 | 验证什么 | 如何修正判断 |
@@ -181,7 +185,7 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 ### 操作纪律
 1. 定期检查（季报后 / 宏观重大变化 / 价格进入极端区间）
 2. 假设追踪（thesis --update 对照假设 vs 实际）
-3. 仓位匹配（基于情景概率 × 盈亏比，与个人风险承受能力匹配）
+3. 假设完整度（被弱化/推翻的假设 > 半数 → 启动全面重评估）；资金与仓位安排由用户按自身纪律决定，不在本研究输出范围内
 
 ## 主要风险
 [3-5 条，标注严重度 🔴/🟡/🟢]
@@ -200,7 +204,7 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 
 **Insight 层（`report --mode insight`，v0.3.0 MVP）**：面向阅读的研究要点，由确定性 Facts / Findings 模型生成。首层只给可追溯结论、核心矛盾、分析合成、反证/关联边界、观察节点与补证路径；九模块原始表和公式继续留在 `full` 审计底稿。每次同时落盘 `.facts.json`、`.insight.json` 与 `.report.json`，Markdown 与 HTML 只能消费同一代 Finding。证据不足时明确标为「分析未完成」，不以空模板或数据罗列伪装完成。
 
-**分析合成注入（`--analysis`）**：传入时把 analysis.json 渲染为「分析合成（Claude 撰写）」独立分区（置于核心矛盾之后），并落同代 `<ts>.insight.analysis.json` 侧车、在 manifest 登记 `analysis_sidecar`。该分区**不是 Finding**：不参与 findings / core_tension / analysis_chains / completion 的任何推导，段内数字未经引擎来源校验（`analysis.json` 协议无 fact_id 字段，可审计性止于「来源 + 同代绑定 + 段级证据等级」）。`completion` 与 `synthesis.status` 是两条独立状态轴——AI 散文不得把「证据不足」抬成「分析完成」。未传 `--analysis` 时**不渲染分析合成分区、不写分析侧车**；既有输出契约不变，但有两处**新增字段**（非逐字节一致）：状态卡多一段「分析合成：未注入（仅引擎结论）」，`.insight.json` 多一个 `synthesis` 键（`status="absent"`）。以逐字节基线验收的消费者需知悉。
+**分析合成注入（`--analysis`）**：传入时把 analysis.json 渲染为「分析合成（Claude 撰写）」独立分区（置于核心矛盾之后），并落同代 `<ts>.insight.analysis.json` 侧车、在 manifest 登记 `analysis_sidecar`。该分区**不是 Finding**：不参与 findings / core_tension / analysis_chains / completion 的任何推导。段内数字的机器保证来自段内 `facts` 数组（v0.3.1 #4：`[事实: F{n}]` 引用完整性 + formula 复算一致，见下节）；**未声明 `facts` 的段不触发校验**，其可审计性止于「来源 + 同代绑定 + 段级证据等级」——该缺口（`facts` 与**当次采集**的字段级比对）已在 `analysis_schema.py` 记录为后续项，文档不假装已闭环。`completion` 与 `synthesis.status` 是两条独立状态轴——AI 散文不得把「证据不足」抬成「分析完成」。未传 `--analysis` 时**不渲染分析合成分区、不写分析侧车**；既有输出契约不变，但有两处**新增字段**（非逐字节一致）：状态卡多一段「分析合成：未注入（仅引擎结论）」，`.insight.json` 多一个 `synthesis` 键（`status="absent"`）。以逐字节基线验收的消费者需知悉。
 
 **第三层（concise 对话模式）**：Hermes/OpenClaw 等对话场景使用。结论先行 + 关键数据展开块。3-5 段核心结论直出，详细数据用 `<details>` 折叠。CLI 对应 `--mode concise`。
 
@@ -245,7 +249,7 @@ PE / PB / PS
 
 ### SOP-QC 自检
 
-> **机器层准出（写入后必跑，非可选自检）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现（overall ≠ FAIL）方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明。
+> **机器层准出（写入后必跑，非可选自检）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现（overall ≠ FAIL）方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明。**这是「标准交付链」的第 4 步**（见下节 CLI 命令），不是事后补做的收尾动作——`--analysis` 注入与本次 QC 同属链上步骤。
 
 > **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + stock 专项）。
 
@@ -411,6 +415,8 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 
 > 用户风格决定分析主轴（趋势 = 常见情况：当前时点 + 过去数据，MA5/20/60 是常用指标；价值 = 判断数月-数年后的可能性）。**开场四问在 skill 会话起点执行**（AskUserQuestion 一次性，每题带默认值）。
 
+> **不必问的情形（共享规范 §1.3）**：调用参数/命令已给出答案、档案已有可用默认（`user_style.json` 有风格记录、Q_已看默认「是」）、或流程已固定时，**跳过对应问题直接开工**，不重复录入；harness 无 AskUserQuestion 时改用一次普通对话提问或按默认值执行，**不得因提问阻塞采集**。四问只影响阅读顺序与深化方向，不改变取证范围。
+
 | # | 问题 | 选项 | 分流 |
 |:---:|------|------|------|
 | Q_风格 | 投资风格？默认读「当前标的」最近 Q1 记录（无同标的记录则询问，**不得用其他标的记录替代**） | 价值/成长/趋势/事件驱动/混合 | 与 Q_周期互斥校验（趋势+长线 → 提示重确认；混合不拦截按周期分流） |
@@ -418,7 +424,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 | Q_焦点 | 关注焦点？（多选） | 估值/事件催化/资金行为/全面 | 决定深化方向（与 R1 冲突按 U1 仲裁） |
 | Q_已看 | 已看过行情？默认是 | 是/否 | 是 → 跳过基础行情罗列（R12f 契约） |
 
-> **四问结果的落点（v0.3.0 P0-5）**：把四问答案经 `report` 的 `--horizon`（Q_周期）/ `--focus`（Q_焦点，可重复）/ `--goal` / `--already-knows-price`（Q_已看）传入；`--style` 缺省读 `user_style.json`（Q_风格），无需重复录入。引擎写同代 `<report>.profile.json` 侧车，并在 full 模式报告头部的「产物状态」块内展示。**档案不是过滤器**：它只改变阅读顺序与补证优先级，不得隐藏反证、关键缺口与风险。
+> **四问结果的落点（v0.3.0 P0-5）**：把四问答案经 `report` 的 `--horizon`（Q_周期）/ `--focus`（Q_焦点，可重复）/ `--goal` / `--already-knows-price`（Q_已看）传入；`--style` 缺省读 `user_style.json`（Q_风格），无需重复录入。引擎写同代 `<report>.profile.json` 侧车，并在 full 模式报告头部的「报告说明」块内展示。**档案不是过滤器**：它只改变阅读顺序与补证优先级，不得隐藏反证、关键缺口与风险。
 
 **风格↔Q1 驱动逻辑显式映射表**（无对应项一律走中性，不自动推断）：
 
@@ -459,15 +465,24 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 
 ### 分析协议（analysis.json，v0.2.8）
 
-报告步骤产出三类产物，同目录并存：`md + analysis.json + html`（**html 为默认产物**，经 `--emit html` 与 md 同代重渲落盘）。
+报告步骤产出三类产物，同目录并存：`md + analysis.json + html`。
+
+**两处「默认」不是同一个口径，勿混用**：CLI 的 `report --emit` 默认值是 `md`（保持既有单命令行为，不隐式改写）；**本技能工作流的默认交付形态是 HTML**——走步骤 3 时须**显式**写 `--emit html`（该分支同时写 md_v2，保证 md/html 同代）。未执行步骤 3 时 md 为唯一产物，属例外情形。
+
+**首屏判断索引（full 模式，md 与 html 同一份条目）**：正文最前放「判断索引」层——分类标签 + 各分析段标题，判据与标签由 `analysis_schema.index_entries` 单点给出（两个渲染器只做排布，不各自筛选）。标签优先用**含中文**的 `module`（事件归因 / 估值与情景 …）；`module` 是写作者自由文本，实测语料六成写成内部槽位键（`bear_chain` / `valuation` / `event_classification` …），这类纯 ASCII slug **一律回退 `position` 中文名**——内部键不出读者面。overview 槽位（另有「重要发现（5 分钟阅读区）」）与管理层叙事 / 参与方扫描（补充材料）不占索引名额。
 
 1. **先出 md**：`report SYMBOL` → `reports/{symbol}-{name}/{ts}.md`（分析段以占位符保留，qc 的 F0-3 会拦截未填占位——**正文写完立刻填写**）
-2. **再写分析协议**：`reports/{symbol}-{name}/{ts}.analysis.json`，段结构：
+2. **再写分析协议**（输入路径任意；引擎会把已校验的段原样复制到 `<报告>.analysis.json` 同代侧车，故建议直接写在报告同目录），段结构：
    `[{module, title, facts_md, analysis_md, evidence_tag, position, facts?}]`
    - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（带 [证据: X] / [证据强度: ...]）
    - `evidence_tag`：A-D 或 L1-L4；`position` ∈ events/valuation/financials/northbound/holders/refs/conclusion
-   - **`facts`（可选，但强烈建议——P0 数字纪律的机器保证只在带它时生效）**：
-     本段数值事实数组 `[{id: "F1", value: 12.5, formula: "…"}]`（或 `field: "引擎字段路径"`）。
+   - **`facts`（协议层可选，交付路径必填——P0 数字纪律的机器保证只在带它时生效）**：
+     本段数值事实数组 `[{id: "F1", value: 12.5, formula: "…", field: "valuation.pe_ttm"}]`。
+     **`value` 必填且必为数值**（只写 `field` 不写 `value` 会 fail-loud：`value 必为数值`）；
+     `field`（来源标签）与 `formula` 均可选、不互斥，两者都省略时该 fact 无来源标签亦无复算。
+     不带 `facts` 的段照常通过（v0.3.1 #4 向后兼容契约，存量报告不受影响），但**本技能交付路径
+     要求含数字的分析段声明 `facts`**：未声明即视为「未审计研究注记」，其数字不得承载核心结论，
+     也不得据以给出证据强度标签。
      一旦给出即强制：① `value` 必为数值；② 有 `formula` 时公式须能被安全求值**且算出该数**
      （按书写精度判等——直接拦截「标了公式但公式算不出这个数」= report-conventions §2.3
      强制 5 的未实跑标注）；③ `facts_md`/`analysis_md` 中的 `[事实: F1]` 引用须在本段
@@ -479,19 +494,48 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
    - 校验：`uv run python skills/invest-a-stock/scripts/invest.py ... --analysis <path>`（校验失败 fail-loud 退出）
    - **改动须知**：`facts` 契约与 `[事实: F{n}]` 引用语法由 `lib/analysis_schema.py` 单点定义，
      文档/prompt/校验三处须同步改（2026-09-18 review #3 的教训：三处不一致 → 闸门空转）
-3. **复合重渲（默认出 html）**：`report SYMBOL --analysis <path> --emit html`（或 `--resume`）→ 分析段替换占位 → **html + 同代 md 同源落盘**（`--emit html` 分支同时写 md_v2，保证 md/html 同代；不重渲则以 md 为唯一产物，属例外情形）
+3. **复合重渲（工作流默认出 html；`--emit` 须显式写 html）**：`report SYMBOL --analysis <path> --emit html`（或 `--resume`）→ 分析段替换占位 → **html + 同代 md 同源落盘**（`--emit html` 分支同时写 md_v2，保证 md/html 同代；不重渲则以 md 为唯一产物，属例外情形）
 
 ### HTML 产物
 
-- 默认路径：步骤 3 的 `--emit html`（而非可选步骤），`reports/{symbol}-{name}/{ts}.html`（单文件自包含，无 CDN，file:// 离线可用）
+- 默认路径：步骤 3 的 `--emit html`（工作流默认步骤，非可选项；CLI 旗标默认值仍为 md，两者口径差异见上），`reports/{symbol}-{name}/{ts}.html`（单文件自包含，无 CDN，file:// 离线可用）
 - 若 `<script>` 未内联图表库（资产缺失）报告仍正常出稿（图表 disabled），语义同「数据缺失降级」
 - `--analysis <path>` 在 HTML 中同样生效（分析段渲染进页面）
+- full 模式 HTML 与 md 同源渲染「判断索引」首屏层（判据见上「首屏判断索引」；分析卡仍在页末，索引是它们的检索入口）
 
 ## CLI 命令
 
+### 标准交付链（唯一权威顺序 — 勿跳步，勿分散执行）
+
+> 交付一条完整研究产物只有这一条链。`--analysis` 注入与末步 `report_qc` 是**链上步骤**，不是可省略的收尾动作。任一步失败即停在该步，不带缺陷往下走。
+
+```bash
+# 1) 采集：plan → collect → evidence（--from-store 复用 collect 快照，跳过重复现场采集）
+#    ⚠️ plan 只把 JSON 打到 stdout，**必须重定向落盘**：漏了 `> /tmp/plan.json`，
+#    后续 `--plan` 读不到文件只会警告一行，然后**静默退回 CLI 默认维度**（丢 segments / research）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent deep_analysis > /tmp/plan.json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json --from-store
+# 2) 出 md（分析段为占位符；qc 的 F0-3 拦截未填占位）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --resume
+# 3) 写 analysis.json（含 facts 数组）→ 注入并出 html（同代 md_v2 一并落盘）
+#    输入路径任意；引擎会把已校验的段原样复制到 <报告>.analysis.json 同代侧车（勿手写侧车路径）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --resume \
+  --analysis /tmp/600176-analysis.json --emit html
+# 4) 机器准出（必跑；退出码 0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）
+#    目标 = **步骤 3 刚落盘的 md**：路径逐字取步骤 3 stderr 的「📝 Markdown 报告:」行。
+#    勿用 --latest——它按全局 mtime 取 reports/ 下最新 .md，并发或多标的时会复检到别的报告，
+#    当前产物反而漏检（闸门空转）。
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <步骤3 stderr 的 md 路径> --fail-on error
+```
+
+> 第 4 步之后仍须走共享规范 §7 Self-Check 与 CLAUDE.md「报告复检流程」的三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
+
+### 常用命令
+
 ```bash
 # 按计划采集（intent: deep_analysis | quick_check | catalyst_monitor | compare | sentiment_deep | financials_deep | game_theory）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent game_theory
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent game_theory > /tmp/plan.json  # 必须重定向，否则下一条 --plan 读不到文件（见「标准交付链」）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json --from-store  # F2-3: 复用 collect 快照，跳过重复现场采集
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --resume  # 复用采集
@@ -531,7 +575,7 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ## 采集顺序
 
-`diagnose` → `plan`/`collect` → `evidence`（专项推荐）→ `report` → `store`（可选）
+`diagnose` → `plan`/`collect` → `evidence`（专项推荐）→ `report` → `--analysis` 注入 + `--emit html` → `report_qc`（机器准出）→ `store`（可选）
 
 ### SOP-M1 宏观情景（`--with-macro`）
 

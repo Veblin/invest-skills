@@ -98,7 +98,7 @@ Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symb
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300        # 单 ETF 数据快照
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --history --playbook   # 历史深度 + 情景预案
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --events events/588000.json  # 指定事件文件
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --events events/588000.json --history  # 指定事件文件（须同带 --history 才有价格对齐）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py diagnose
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py industry-pe          # 31 行业 PE 排名
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动触发行业 PE 采集
@@ -166,7 +166,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | 2 | 持仓透视 | 行业 / 主题 ETF 必须 |
 | 3 | 指数估值（含 **3.1 估值框架**、**3.2 行业位置**） | §3 必须；§3.1 / §3.2 行业 ETF 必须 |
 | 4 | 跟踪质量（净值波动 / NAV+指数 MA / BOLL / RSI / 跟踪误差） | 必须 |
-| 5 | 历史演变 | `--history` / `--events` 时必须有 |
+| 5 | 历史演变 | `--history` 时必须有（事件-价格对照需拉历史行情：`--history` **或** `--playbook` 均可；仅传 `--events PATH` 时引擎不拉历史行情，对照为空） |
 | 6 | 赛道资金流对比 | 行业 ETF 必须 |
 | 7 | 资金流向与趋势 | 行业 ETF 必须 |
 | 7.5 | 动态基差与持仓 | 映射到可用期货时必须有；无映射时**显式写「该 ETF 无对应期货合约」**，不得省略不表 |
@@ -200,9 +200,9 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | R12 | 持仓透视 | `holdings SYMBOL --json` | 行业 / 主题 ETF | 前十大 + 集中度 top1/top5/top10 + 子环节聚类 `clusters` | 「分析合成」§0 |
 | R13 | 赛道资金流对比 | `peers SYMBOL --json`（未映射加 `--peers "代码,代码"`） | 行业 ETF | 同赛道份额流 + RS（基准 = 同赛道等权均值） | 「分析合成」§0b |
 | R15 | 行业资金流与趋势 | `sector-flow SYMBOL --json` | 行业 ETF | THS 3/5/10 日净额 + 窗口分解 + 积累序列（≥6 日） | 「分析合成」§0c |
-| — | 行业 PE 排名 | `industry-pe` | 行业 ETF | 31 申万行业 PE/PB 排名 | §3.2 三级顺序；代理值须标注 |
+| — | 行业 PE 排名 | `industry-pe` | 行业 ETF | 31 申万行业 PE/PB 排名 | §3.2 两档顺序；代理值须标注 |
 | — | 动态基差与持仓 | `futures-basis SYMBOL --json` | 映射到可用期货时 | 基差 / 历史分位 + 持仓变化 | 状态度量非预测 |
-| R11a/b | 历史深度 + 事件 | `report --history` / `--events PATH` | 出 §5 时 | 年度高低点 / 最大回撤 / MA / ±5% 交易日；事件-价格对照 | 阶段划分由 AI 合成、数字引用引擎 |
+| R11a/b | 历史深度 + 事件 | `report --history`（有事件文件再加 `--events PATH`） | 出 §5 时 | 年度高低点 / 最大回撤 / MA / ±5% 交易日；事件-价格对照（**对齐依赖历史行情**：未传 `--history`/`--playbook` 或历史行情源不可用时 `aligned` 为空） | 阶段划分由 AI 合成、数字引用引擎 |
 | R11c | 情景预案 | `report --playbook` | 出 §11 时 | 回撤档位 σ 分级 = 触发核验深度 | 非操作阈值；禁用「无动作/如何应对/建议卖出/止损」 |
 | — | 份额趋势 | `report --json` 的 `share_history` | 全部 ETF | 近 20 日份额 + 资金流估算 + OHLCV | 有数据则展示，无则「积累中」 |
 
@@ -296,7 +296,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 如果 `industry_pe` 存在，必须引用 `industry-pe` 命令输出的 31 行业排名：
 
-- 该行业 PE 在全市场排第几？同赛道相对位置按「必须覆盖」第 10 条的三级顺序取（TMT 子组 / 预定义可比组 / 仅全市场）——**非 TMT 行业不得套用 TMT 口径**
+- 该行业 PE 在全市场排第几？同赛道相对位置按模板 §3.2 的**两档**取（① TMT（电子/计算机/通信/传媒）→ 报 TMT 子组内位置；② 其余行业 → 只报全市场 31 行业排名）——**非 TMT 行业不得套用 TMT 口径，也不得自行编组**（引擎未定义可比行业组，编组即无来源方法论）
 - 这个位置的含义是什么？（如"TMT 中最便宜，但这不意味低估——通信天然比半导体估值低"）
 - ⚠️ 行业 PE 是代理值，非 ETF 精确 PE，必须标注
 
@@ -353,8 +353,9 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] [分析] 事实性前提带来源或「框架性陈述/待验证」标注，证据标签未覆盖无来源前提（共享规范 §2.3 强制行为 7）
 - [ ] 派生数字（倍数/比例/百分点/点位差）带 `[来源: Python calc: formula]`，无「复算一致/自洽校验」类未实跑字样
 - [ ] 正文 §N 交叉引用指向节含被引内容
-- [ ] 行业 ETF：§3.1 估值框架 / §3.2 行业位置已展开（`valuation_guide` 非一行标签；同赛道位置按三级顺序，非 TMT 未套用 TMT 口径）
+- [ ] 行业 ETF：§3.1 估值框架 / §3.2 行业位置已展开（`valuation_guide` 非一行标签；同赛道位置按两档，非 TMT 未套用 TMT 口径、未自行编组）
 - [ ] 份额趋势已取（`report --json` 的 `share_history`），无数据标注「积累中」
+- [ ] §5 历史演变：采集已传 `--history`（事件-价格对照另需 `--events PATH`，且须拉到历史行情）；引擎 `aligned` 为空（未传 `--history`/`--playbook`，或历史行情源不可用）时该列写「未对齐（需 `report --history` 且历史行情可用）」，未由 AI 手工补数
 - [ ] **「条件采集表」内条目已按各自适用条件执行**，解读纪律见「分析合成」§0 / §0b / §0c
 - [ ] 集中度与聚类数字引用引擎字段（AI 未心算）；未映射归类标注「AI 归类」；「名义主题 vs 实际暴露」偏差已解读
 - [ ] 盘面结合已对照 pulse `zt_industry_flow`（差异名已注明）；口径声明（大单 / 日间噪声 / 证据非信号）已写入

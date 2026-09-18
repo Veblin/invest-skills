@@ -624,7 +624,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
     """v0.2.0 九模块数据底稿。mode="brief" 输出精简简报, mode="concise" 输出对话场景精简。
 
     analysis（R-B1）: analysis.json 段列表，渲染期替换 "[待 Claude report 阶段填充]" 占位。
-    profile（P0-5）: ResearchProfile 研究档案；仅 full 模式在产物状态块内展示，
+    profile（P0-5）: ResearchProfile 研究档案；仅 full 模式在报告说明块内展示，
     不做字段过滤——偏好只改阅读顺序与补证优先级。
     """
     dims = _index_dims(collection)
@@ -739,7 +739,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _fast_veto = _check_fast_veto(dims, collection)
         parts: list[str] = [
             _header_v2(collection, symbol),
-            _full_mode_identity_status(symbol, analysis, profile),
+            _render_judgment_index(analysis),
         ]
         extras = _render_engine_extras(collection)
         if extras:
@@ -796,14 +796,16 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _references_appendix(collection),
             _risk_footer(),
         ]
-        # 方案 A：三层阅读结构——
-        #   ① 执行摘要（5 分钟判断区，overview 槽位）
-        #   ② 分析详情（其余分析段）
-        #   ③ 九模块数据底稿（以下各 section）
+        # 方案 A（v0.3.0，四层阅读结构）——
+        #   ① 判断索引（首屏索引，见 _render_judgment_index；在 parts 头部）
+        #   ② 报告说明（底稿身份 + 研究档案）
+        #   ③ 重要发现（5 分钟阅读区，overview 槽位正文）→ 分析详情（其余分析段）
+        #   ④ 九模块数据底稿（以下各 section）
         # 均置于目录之前，使「结论先行」不受导航块干扰；无 analysis
-        # 时两处均返回空串（基线零 diff 保持）。
+        # 时各层均返回空串（基线零 diff 保持）。
         # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值，再入列。
         parts.extend([
+            _full_mode_identity_status(symbol, analysis, profile),
             _render_analysis_overview(analysis, collection),
             _render_analysis_appendix(analysis, collection),
             *sections,
@@ -815,7 +817,7 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
                                profile: dict[str, Any] | None = None) -> str:
     """full 是可审计底稿；不得在缺少分析合成时伪装成研究成品。
 
-    profile（P0-5）：研究档案仅在提供时追加到同一「产物状态」块内，
+    profile（P0-5）：研究档案仅在提供时追加到同一「报告说明」块内，
     不改变底稿身份判定，也不影响 brief/concise（该块本就不渲染）。
     """
     from lib.analysis_status import (ANALYSIS_OK, ANALYSIS_UNAVAILABLE,
@@ -825,7 +827,7 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
     status = analysis_payload_status(analysis)
     if status == ANALYSIS_OK:
         lines = [
-            "## 产物状态",
+            "## 报告说明",
             "",
             "> **产物定位：审计/证据数据底稿（分析合成已注入）。**",
             "> 本模式保留完整数据、来源与计算过程以供追溯；分析段已附在文末，"
@@ -834,7 +836,7 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
     elif status == ANALYSIS_UNAVAILABLE:
         # 工具故障 ≠ 内容缺失：不得断言「分析合成未完成」（review C2）。
         lines = [
-            "## 产物状态",
+            "## 报告说明",
             "",
             "> **产物定位：数据底稿（分析合成状态无法校验）。**",
             "> 分析校验组件本次不可用，无法确认分析段是否已注入——这是工具故障，"
@@ -843,7 +845,7 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
         ]
     else:
         lines = [
-            "## 产物状态",
+            "## 报告说明",
             "",
             "> **产物定位：数据底稿（分析合成未完成）。**",
             "> 本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。",
@@ -855,7 +857,7 @@ def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
 
 def _render_analysis_overview(analysis: list[dict] | None,
                               collection: dict | None = None) -> str:
-    """方案 A：把 overview 槽位的分析段前置为「执行摘要（5 分钟阅读区）」。
+    """方案 A：把 overview 槽位的分析段前置为「重要发现（5 分钟阅读区）」。
 
     动机：full 底稿把最有价值的判断层放在文末，读者需读完全文才看到结论。
     前置后形成「5 分钟判断区 → 九模块数据底稿 → 其余分析注记」三层。
@@ -872,7 +874,7 @@ def _render_analysis_overview(analysis: list[dict] | None,
         return ""
     n = len(ov)
     lines = [
-        "## 执行摘要（5 分钟阅读区）",
+        "## 重要发现（5 分钟阅读区）",
         "",
         f"> 结论先行区：以下 {n} 段是本次分析的核心判断，数据底稿与其余分析注记见文末。",
     ]
@@ -892,6 +894,34 @@ def _render_analysis_overview(analysis: list[dict] | None,
         if ev:
             lines.append(f"**证据等级：** {ev}")
             lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _render_judgment_index(analysis: list[dict] | None) -> str:
+    """在完整底稿首屏列出本次分析的判断索引（分类标签 + 标题）。
+
+    分析段标题由研究阶段生成，已覆盖事件归因、经营质量、估值、行业/竞争、
+    资金与风险等判断。这里只做可追溯索引，不重新概括或改写分析结论；完整
+    事实、来源和证据强度仍以稍后的分析详情为准。
+
+    成员判据与标签**不在本层决定**——由 `analysis_schema.index_entries` 单点
+    给出（与 html 侧 `_html_judgment_index` 共用），本层只负责 md 排布。
+    无条目 → 空串（无 analysis 与「全部段都被排除」两种情况都不会留下空标题）。
+    """
+    from lib.analysis_schema import index_entries
+
+    entries = index_entries(analysis)
+    if not entries:
+        return ""
+    lines = [
+        "## 判断索引",
+        "",
+        "> 以下是本次研究最值得先看的判断索引；数字、事实来源和证据强度请展开对应分析段核验。",
+        "",
+    ]
+    lines.extend(
+        f"- **{label}**：{title}（详见下方对应分析段）" for label, title in entries
+    )
     return "\n".join(lines).rstrip()
 
 

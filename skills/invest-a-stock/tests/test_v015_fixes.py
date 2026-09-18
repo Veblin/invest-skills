@@ -628,7 +628,7 @@ class TestFullModeIdentity:
         text = render_report_v3(self._collection(), "600176", mode="full")
         assert "数据底稿（分析合成未完成）" in text
         assert "--analysis <analysis.json>" in text
-        assert text.index("## 产物状态") < text.index("## 目录")
+        assert text.index("## 报告说明") < text.index("## 目录")
 
     def test_full_with_analysis_remains_evidence_pack_without_unfinished_claim(self):
         from lib.render import render_report_v3
@@ -655,8 +655,8 @@ class TestFullModeIdentity:
         from lib.render import render_report_v3
 
         collection = self._collection()
-        assert "## 产物状态" not in render_report_v3(collection, "600176", mode="brief")
-        assert "## 产物状态" not in render_report_v3(collection, "600176", mode="concise")
+        assert "## 报告说明" not in render_report_v3(collection, "600176", mode="brief")
+        assert "## 报告说明" not in render_report_v3(collection, "600176", mode="concise")
 
 
 class TestConciseMode:

@@ -267,3 +267,43 @@ def test_cmd_attribution_rejects_symbol_mismatch(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "不符" in out and "拒绝" in out
+
+
+# ---- 2026-09-18 评审批次：交付链文档断言（#1/#2）----------------------------
+
+
+def _skill_md() -> str:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]      # skills/invest-a-stock/tests → 仓库根
+    return (root / "skills" / "invest-a-stock" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_skill_md_plan_command_redirects_to_file():
+    """#1：plan 只把 JSON 打到 stdout，文档里的 plan 必须重定向落盘。
+
+    漏 `> /tmp/plan.json` 时链上三条 `--plan` 全读不到文件，只打一行警告后
+    **静默退回 CLI 默认维度**（丢 segments/research）——采集不完整却不报错。
+    """
+    lines = [ln for ln in _skill_md().splitlines()
+             if "invest.py plan " in ln and "--intent" in ln]
+    assert lines, "SKILL.md 未文档化 plan 调用形式，请更新本解析"
+    offenders = [ln for ln in lines if "> /tmp/plan.json" not in ln]
+    assert not offenders, f"plan 命令未重定向落盘（--plan 将静默退回默认维度）: {offenders}"
+
+
+def test_skill_md_qc_targets_current_report():
+    """#2：交付链末步 qc 须点名本次产物，不得 `--latest`。
+
+    `--latest` 按全局 mtime 取 reports/ 下最新 .md：并发或多标的运行时会复检到
+    别的报告，本次产物反而漏检（闸门空转）。
+    """
+    text = _skill_md()
+    assert "### 标准交付链" in text, "标准交付链小节缺失或改名，请更新本解析"
+    chain = text.split("### 标准交付链", 1)[1].split("\n### ", 1)[0]
+    qc_lines = [ln for ln in chain.splitlines() if "report_qc.py" in ln]
+    assert len(qc_lines) == 1, f"交付链中 report_qc 命令数异常: {qc_lines}"
+    line = qc_lines[0]
+    assert "--latest" not in line, "交付链末步用 --latest：会复检 reports/ 下最新 .md（未必是本次产物）"
+    target = line.split("report_qc.py", 1)[1].strip().split(" ", 1)[0]
+    assert target and not target.startswith("--"), f"交付链末步未给 qc 显式目标路径: {line}"

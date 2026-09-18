@@ -7,8 +7,8 @@
 3. 四个就地槽位（participant_scan / event_classification / mda_narrative /
    bear_chain）替换引擎占位串 —— 该四处是 QC
    `completion-template-placeholder` / `completion-empty-basis` 的 error 级命中项。
-4. 方案 A：overview 槽位前置为「执行摘要（5 分钟阅读区）」，
-   其余段进「分析详情」，两层互斥不重复。
+4. 方案 A：首屏「判断索引」+ overview 槽位前置为「重要发现（5 分钟阅读区）」，
+   其余段进「分析详情」，各层互斥不重复。
 """
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ def _events_sec() -> dict:
 def test_overview_is_front_placed_before_toc_and_detail():
     md = render_report_v3(collection_v2_minimal(), "600176",
                           analysis=[_overview_sec(), _events_sec()])
-    i_front = md.index("执行摘要（5 分钟阅读区）")
+    i_front = md.index("重要发现（5 分钟阅读区）")
     i_toc = md.index("## 目录")
     i_detail = md.index("分析详情（analysis.json 注入）")
     assert i_front < i_detail, "5 分钟判断区须在分析详情之前"
@@ -131,10 +131,77 @@ def test_overview_content_appears_exactly_once():
 
 
 def test_no_analysis_means_no_reading_layer_headings():
-    """零回归：无 analysis → 两层标题都不出现。"""
+    """零回归：无 analysis → 各层标题都不出现。"""
     md = render_report_v3(collection_v2_minimal(), "600176")
-    assert "执行摘要（5 分钟阅读区）" not in md
+    assert "判断索引" not in md
+    assert "重要发现（5 分钟阅读区）" not in md
     assert "分析详情（analysis.json 注入）" not in md
+
+
+# ── 3b. 首屏「判断索引」（2026-09-18 评审批次：内部 slug 不得出读者面）──
+
+def _index_block(md: str) -> str:
+    """切出判断索引节正文（到下一个 `## ` 标题为止），用于避免整篇 substring 断言。"""
+    start = md.index("## 判断索引")
+    rest = md[start + len("## 判断索引"):]
+    end = rest.find("\n## ")
+    return rest if end < 0 else rest[:end]
+
+
+def _bear_sec() -> dict:
+    """管理阶段惯用内部槽位键当 module（本地语料实测：bear_chain 12/12 份报告）。"""
+    return {"module": "bear_chain", "position": "conclusion",
+            "title": "空头链条：量增依赖让利", "facts_md": "事实三 [来源: engine]",
+            "analysis_md": "判断三", "evidence_tag": "B"}
+
+
+def test_judgment_index_precedes_every_other_layer():
+    md = render_report_v3(collection_v2_minimal(), "600176",
+                          analysis=[_overview_sec(), _events_sec()])
+    i_index = md.index("## 判断索引")
+    assert i_index < md.index("## 报告说明")
+    assert i_index < md.index("重要发现（5 分钟阅读区）")
+    assert i_index < md.index("## 目录"), "首屏索引须在导航之前"
+
+
+def test_judgment_index_never_prints_internal_slot_slug():
+    """module 写成内部 slug 时，读者面只许出现 position 中文名（bear_chain → 结论）。"""
+    md = render_report_v3(collection_v2_minimal(), "600176",
+                          analysis=[_overview_sec(), _bear_sec()])
+    assert "bear_chain" not in md, "内部槽位键泄漏到读者面"
+    assert "- **结论**：空头链条：量增依赖让利" in _index_block(md)
+
+
+def test_judgment_index_keeps_chinese_module_label():
+    """写作者用中文概念名时原样保留（索引标签比 position 枚举更贴切）。"""
+    sec = {"module": "事件归因", "position": "events", "title": "下跌非公告驱动",
+           "facts_md": "事实 [来源: engine]", "analysis_md": "判断", "evidence_tag": "B"}
+    md = render_report_v3(collection_v2_minimal(), "600176", analysis=[sec])
+    assert "- **事件归因**：下跌非公告驱动" in _index_block(md)
+
+
+@pytest.mark.parametrize("module", ["mda_narrative", "MDA_Narrative", " participant_scan "])
+def test_judgment_index_excludes_supplementary_slots(module: str):
+    """补充材料槽位不占索引名额；判据走归一化 keys，大小写/空白变体同样命中。
+
+    手写排除集（`module in {...}`）会漏掉变体——本仓为「两处各写一份判据」付过
+    代价（见 analysis_schema.EVENTS_HOST_KEYS 的记录），故此处按变体固化为用例。
+    """
+    sup = {"module": module, "position": "analysis", "title": "补充材料标题",
+           "facts_md": "事实 [来源: engine]", "analysis_md": "判断", "evidence_tag": "B"}
+    md = render_report_v3(collection_v2_minimal(), "600176",
+                          analysis=[sup, _events_sec()])
+    assert "补充材料标题" not in _index_block(md)
+    assert "- **事件**：事件分析" in _index_block(md), "非补充材料段仍在索引内"
+
+
+def test_judgment_index_excludes_overview_slot_by_position():
+    """overview 判据看 position 也看 module（归一化），不只看 module。"""
+    ov = {"module": "thesis", "position": "overview", "title": "投资假设检验",
+          "facts_md": "事实 [来源: engine]", "analysis_md": "判断", "evidence_tag": "B"}
+    md = render_report_v3(collection_v2_minimal(), "600176",
+                          analysis=[ov, _events_sec()])
+    assert "投资假设检验" not in _index_block(md)
 
 
 # ── 4. brief 模式消费 analysis（此前完全忽略）──
@@ -142,7 +209,7 @@ def test_no_analysis_means_no_reading_layer_headings():
 def test_brief_mode_consumes_analysis_payload():
     md = render_report_v3(collection_v2_minimal(), "600176", mode="brief",
                           analysis=[_overview_sec(), _events_sec()])
-    assert "执行摘要（5 分钟阅读区）" in md
+    assert "重要发现（5 分钟阅读区）" in md
     assert "判断一" in md and "判断二" in md
 
 
@@ -153,7 +220,7 @@ def test_brief_mode_matches_full_for_analysis_layers():
                              analysis=payload)
     full = render_report_v3(collection_v2_minimal(), "600176", mode="full",
                             analysis=payload)
-    for probe in ("执行摘要（5 分钟阅读区）", "分析详情（analysis.json 注入）"):
+    for probe in ("重要发现（5 分钟阅读区）", "分析详情（analysis.json 注入）"):
         assert probe in brief and probe in full
 
 
@@ -500,7 +567,7 @@ def test_concise_mode_consumes_analysis():
     """
     md = render_report_v3(collection_v2_minimal(), "600176", mode="concise",
                           analysis=[_overview_sec(), _events_sec()])
-    assert "执行摘要（5 分钟阅读区）" in md, "overview 段未前置"
+    assert "重要发现（5 分钟阅读区）" in md, "overview 段未前置"
     assert "判断一" in md, "overview 段内容丢失"
     assert "判断二" in md, "非槽位段在 concise 下零落点丢失"
 
@@ -508,7 +575,7 @@ def test_concise_mode_consumes_analysis():
 def test_concise_without_analysis_stays_clean():
     """守卫：无 analysis 时 concise 基线不得出现两个分析层标记。"""
     md = render_report_v3(collection_v2_minimal(), "600176", mode="concise")
-    assert "执行摘要（5 分钟阅读区）" not in md
+    assert "重要发现（5 分钟阅读区）" not in md
     assert "分析详情（analysis.json 注入）" not in md
 
 

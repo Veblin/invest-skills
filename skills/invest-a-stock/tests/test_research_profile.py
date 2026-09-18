@@ -320,7 +320,7 @@ def test_profile_only_shows_in_full_mode(mode: str, expected: bool) -> None:
     from lib.render import render_report_v3
 
     text = render_report_v3(_RENDER_COLLECTION, "600176", mode=mode, profile=_PROFILE)
-    assert ("研究档案（R12g-B 开场四问）" in text) is expected
+    assert ("研究偏好：" in text) is expected
 
 
 def test_html_identity_card_only_shows_in_full_mode() -> None:
@@ -328,9 +328,9 @@ def test_html_identity_card_only_shows_in_full_mode() -> None:
 
     # v0.3.0 C2：标签曾写「（--profile）」——report 子命令没有该参数（它属于 lint
     # 子命令的预设选择），照产物自述操作会 unrecognized arguments。
-    assert "研究档案（R12g-B 开场四问）" in render_html(
+    assert "研究偏好：" in render_html(
         _RENDER_COLLECTION, "600176", mode="full", profile=_PROFILE)
-    assert "研究档案（R12g-B 开场四问）" not in render_html(
+    assert "研究偏好：" not in render_html(
         _RENDER_COLLECTION, "600176", mode="brief", profile=_PROFILE)
 
 

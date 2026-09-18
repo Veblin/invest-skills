@@ -511,13 +511,13 @@ class TestFullReviewAnalysisSameSource:
         ]
         md = render_report_v3(collection_v2_minimal(), "600176",
                               analysis=analysis)
-        # v0.3.0 方案 A：overview 槽位段前置为「执行摘要（5 分钟阅读区）」，
+        # v0.3.0 方案 A：overview 槽位段前置为「重要发现（5 分钟阅读区）」，
         # 其余段进「分析详情」；两层都必须在 md 中出现且各只出现一次。
         assert "分析详情（analysis.json 注入）" in md
-        assert "执行摘要（5 分钟阅读区）" in md
+        assert "重要发现（5 分钟阅读区）" in md
         assert md.count("投资假设检验") == 1, "overview 段不得同时出现在两层"
         assert "事件分层分析" in md
-        assert md.index("执行摘要（5 分钟阅读区）") < md.index("分析详情（analysis.json 注入）"), \
+        assert md.index("重要发现（5 分钟阅读区）") < md.index("分析详情（analysis.json 注入）"), \
             "5 分钟判断区必须排在分析详情之前"
         html = render_html(collection_v2_minimal(), "600176",
                            analysis=analysis)
@@ -577,4 +577,47 @@ class TestFullReviewAnalysisSameSource:
         from lib.render import render_report_v3
 
         md = render_report_v3(collection_v2_minimal(), "600176")
-        assert "分析详情" not in md and "执行摘要（5 分钟阅读区）" not in md
+        assert "分析详情" not in md and "重要发现（5 分钟阅读区）" not in md
+        assert "判断索引" not in md
+
+    # ---- 2026-09-18 评审批次：首屏判断索引 md/html 同源 ----
+
+    @staticmethod
+    def _index_payload() -> list[dict]:
+        return [
+            {"module": "bear_chain", "position": "conclusion",
+             "title": "空头链条：量增依赖让利", "facts_md": "f", "analysis_md": "a",
+             "evidence_tag": "B"},
+            {"module": "事件归因", "position": "events", "title": "下跌非公告驱动",
+             "facts_md": "f", "analysis_md": "a", "evidence_tag": "B"},
+        ]
+
+    def test_judgment_index_same_source_md_html(self):
+        """索引条目由 analysis_schema.index_entries 单点给出：md/html 同序同标签。"""
+        from lib.analysis_schema import index_entries
+        from lib.render import render_html, render_report_v3
+
+        payload = self._index_payload()
+        md = render_report_v3(collection_v2_minimal(), "600176", mode="full",
+                              analysis=payload)
+        html = render_html(collection_v2_minimal(), "600176", mode="full",
+                           analysis=payload)
+        entries = index_entries(payload)
+        assert entries == [("结论", "空头链条：量增依赖让利"),
+                           ("事件归因", "下跌非公告驱动")], "内部 slug 未回退 position 中文名"
+        last_md = last_html = -1
+        for label, title in entries:
+            i_md = md.index(f"- **{label}**：{title}")
+            i_html = html.index(f">{label}</strong>：{title}")
+            assert i_md > last_md and i_html > last_html, "md/html 索引次序不一致"
+            last_md, last_html = i_md, i_html
+        assert "bear_chain" not in md, "md 首屏泄漏内部槽位键"
+
+    def test_judgment_index_is_full_mode_only_in_html(self):
+        """与 md 侧同门槛：该层是 full 底稿的首屏索引，brief 不出（分析卡照常渲染）。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176", mode="brief",
+                           analysis=self._index_payload())
+        assert "判断索引" not in html
+        assert "空头链条：量增依赖让利" in html, "brief 的分析卡不受索引层影响"

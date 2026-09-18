@@ -1204,6 +1204,37 @@ const trendLabel={trend_label_json};
     return data_lines + _HTML_APP_SCRIPT_LOGIC
 
 
+def _html_judgment_index(analysis: list[dict] | None, mode: str) -> str:
+    """full HTML 首屏判断索引——与 Markdown「判断索引」同源同序。
+
+    成员判据与标签由 `analysis_schema.index_entries` 单点给出（md 侧
+    `_render_judgment_index` 共用），本层只负责 HTML 排布；两处各写一份判据
+    必然漂移，故这里**不做任何筛选**，只渲染拿到的条目。
+    """
+    if mode != "full":
+        return ""
+    from lib.analysis_schema import index_entries
+
+    entries = index_entries(analysis)
+    if not entries:
+        return ""
+    items = "".join(
+        f'<li style="margin:4px 0"><strong style="color:var(--tx)">'
+        f'{_html_mod.escape(label)}</strong>：{_html_mod.escape(title)}'
+        f'<span style="color:var(--tx-f)">（详见下方分析段）</span></li>'
+        for label, title in entries
+    )
+    return (
+        '<section style="margin:var(--space-5) 0;padding:var(--space-4);'
+        'border:1px solid var(--bdr);border-radius:10px;background:var(--bg2)">'
+        '<div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:6px">判断索引</div>'
+        '<p style="margin:0 0 6px;color:var(--tx-m);font-size:var(--text-sm)">'
+        '以下是本次研究最值得先看的判断索引；数字、事实来源和证据强度请展开对应分析段核验。</p>'
+        f'<ul style="margin:0;padding-left:1.2em;font-size:var(--text-sm)">{items}</ul>'
+        '</section>'
+    )
+
+
 def _html_full_mode_identity_status(symbol: str, mode: str,
                                     analysis: list[dict] | None,
                                     profile: dict[str, Any] | None = None) -> str:
@@ -1242,7 +1273,7 @@ def _html_full_mode_identity_status(symbol: str, mode: str,
     return (
         '<section style="margin:var(--space-5) 0;padding:var(--space-4);'
         'border:1px solid var(--wn);border-radius:10px;background:var(--bg2)">'
-        '<div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:6px">产物状态</div>'
+        '<div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:6px">报告说明</div>'
         f'<strong style="color:var(--wn)">产物定位：{title}</strong>'
         f'<p style="margin:8px 0 0;color:var(--tx-m);font-size:var(--text-sm)">{detail}</p>'
         f'{format_profile_html(profile)}'
@@ -1495,6 +1526,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     has_events_analysis = find_section(analysis, EVENTS_HOST_KEYS) is not None
     events_sec = "" if has_events_analysis else _html_events()
     analysis_sec = _html_analysis(analysis)
+    judgment_index = _html_judgment_index(analysis, mode)
     identity_status = _html_full_mode_identity_status(symbol, mode, analysis, profile)
     refs_sec = _html_refs(ref_rows)
     risk_banner = _html_risk_banner()
@@ -1528,6 +1560,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 </div>
 
 {risk_banner}
+{judgment_index}
 {identity_status}
 {overview}
 {valuation}
