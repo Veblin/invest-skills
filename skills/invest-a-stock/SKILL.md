@@ -472,7 +472,10 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
      （按书写精度判等——直接拦截「标了公式但公式算不出这个数」= report-conventions §2.3
      强制 5 的未实跑标注）；③ `facts_md`/`analysis_md` 中的 `[事实: F1]` 引用须在本段
      facts 内存在（防悬空）；④ 正文中每个**非结构性**数字（年份/日期/期数/序号/标的代码/
-     URL 内数字等豁免）必须对得上某个 fact 的 value
+     URL 内数字等豁免）必须对得上某个 fact 的 value。
+     ⚠️ `formula` 须是**可求值算术式**（仅数字与 `+ - * / ** ()`）；agent_facts 表的
+     `[来源: Python calc: …]` 是散文式说明（含 `≤ × （`），不可照抄当 `formula`
+     （实测 11/11 条不可求值，照抄会被 fail-loud 拦下）
    - 校验：`uv run python skills/invest-a-stock/scripts/invest.py ... --analysis <path>`（校验失败 fail-loud 退出）
    - **改动须知**：`facts` 契约与 `[事实: F{n}]` 引用语法由 `lib/analysis_schema.py` 单点定义，
      文档/prompt/校验三处须同步改（2026-09-18 review #3 的教训：三处不一致 → 闸门空转）

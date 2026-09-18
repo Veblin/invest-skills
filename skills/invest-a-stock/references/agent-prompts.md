@@ -53,13 +53,18 @@
 4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
    **不得自行补算**（该缺口由引擎补齐后重跑）
 5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
-   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "formula": "…"}` 放进该段
-   `facts`；`id` 与正文 `[事实: F1]` 一一对应。`formula` 原样照抄 facts 表该行
-   `[来源: Python calc: 式子]` 里的式子；来源是引擎字段的用 `field`（如
-   `"field": "valuation.pe_ttm"`）。
-   ⚠️ 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
-   不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
-   value 与 formula 对不上、正文出现未声明数字，都会被 `--analysis` 拦下并 fail-loud
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
 
 > 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
 > `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
@@ -145,13 +150,18 @@
 4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
    **不得自行补算**（该缺口由引擎补齐后重跑）
 5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
-   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "formula": "…"}` 放进该段
-   `facts`；`id` 与正文 `[事实: F1]` 一一对应。`formula` 原样照抄 facts 表该行
-   `[来源: Python calc: 式子]` 里的式子；来源是引擎字段的用 `field`（如
-   `"field": "valuation.pe_ttm"`）。
-   ⚠️ 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
-   不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
-   value 与 formula 对不上、正文出现未声明数字，都会被 `--analysis` 拦下并 fail-loud
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
 
 > 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
 > `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
@@ -236,13 +246,18 @@
 4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
    **不得自行补算**（该缺口由引擎补齐后重跑）
 5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
-   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "formula": "…"}` 放进该段
-   `facts`；`id` 与正文 `[事实: F1]` 一一对应。`formula` 原样照抄 facts 表该行
-   `[来源: Python calc: 式子]` 里的式子；来源是引擎字段的用 `field`（如
-   `"field": "valuation.pe_ttm"`）。
-   ⚠️ 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
-   不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
-   value 与 formula 对不上、正文出现未声明数字，都会被 `--analysis` 拦下并 fail-loud
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
 
 > 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
 > `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
@@ -325,13 +340,18 @@
 4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
    **不得自行补算**（该缺口由引擎补齐后重跑）
 5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
-   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "formula": "…"}` 放进该段
-   `facts`；`id` 与正文 `[事实: F1]` 一一对应。`formula` 原样照抄 facts 表该行
-   `[来源: Python calc: 式子]` 里的式子；来源是引擎字段的用 `field`（如
-   `"field": "valuation.pe_ttm"`）。
-   ⚠️ 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
-   不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
-   value 与 formula 对不上、正文出现未声明数字，都会被 `--analysis` 拦下并 fail-loud
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
 
 > 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
 > `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
