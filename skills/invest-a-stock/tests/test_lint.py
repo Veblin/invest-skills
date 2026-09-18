@@ -757,6 +757,31 @@ class TestV030Law6FalsePositiveFixes:
     def test_buy_advice_still_flagged(self, tmp_path):
         assert "law6-buy-standalone" in self._lint(tmp_path, "# 测试\n\n买入该标的。\n")
 
+    def test_buy_fund_flow_field_exempt(self, tmp_path):
+        """2026-09-18：引擎资金流字段描述非建议，与 law6-sell 的资金流主体锚定豁免对齐。
+
+        实测返工点：pulse 报告写「北向净买入自 2024-08-19 停止披露」被判为建议词，
+        该行实为数据序列披露（北向日频已停），非报告自身建议。
+        """
+        for body in (
+            "# 测试\n\n- 北向净买入自 2024-08-19 停止披露\n",
+            "# 测试\n\n- 融资净买入额 5 亿\n",
+        ):
+            assert "law6-buy-standalone" not in self._lint(tmp_path, body), body
+
+    def test_buy_anchor_exemption_not_a_backdoor(self, tmp_path):
+        """锚定豁免不得成为内容词后门——无具体资金流主体的建议仍须拦下。
+
+        对齐 law6-sell 2026-09-18 review #2 的教训：裸 `净卖出` 曾让真实建议整体绕过。
+        ⚠️ `建议资金净买入该标的。` 是对抗测试实证的绕过样本——泛化词「资金」不可作锚点。
+        """
+        for body in (
+            "# 测试\n\n择机净买入该标的。\n",
+            "# 测试\n\n建议净买入。\n",
+            "# 测试\n\n建议资金净买入该标的。\n",
+        ):
+            assert "law6-buy-standalone" in self._lint(tmp_path, body), body
+
     def test_sell_fund_flow_and_source_exempt(self, tmp_path):
         """引擎资金流字段与带 [来源:] 的引用非建议。"""
         for body in (
