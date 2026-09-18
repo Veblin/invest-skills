@@ -61,12 +61,23 @@ Claude: 确认 6 位代码
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py holdings SYMBOL --json   （R12 持仓透视：行业/主题 ETF 必须）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers SYMBOL --json     （R13 赛道资金流对比：行业 ETF 必须；未映射时加 --peers "代码,代码"）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow SYMBOL --json   （R15 行业资金流+趋势：行业 ETF 必须；同花顺 3/5/10 日净额，单时点分解+积累序列）
-  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         （R15 每日采集：盘后手动触发，幂等，非交易日自动跳过）
-  cd "${INVEST_SKILLS_ROOT:-.}" && PYTHONPATH=... uv run python -c "from etf_data import etf_share_flow; ..."  （份额趋势）
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py futures-basis SYMBOL --json  （F 系列：**映射到可用期货时必做**，无映射则跳过并在报告标注）
        ↓
 Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
        ↓
-默认（报告落盘后必做）: etf.py html SYMBOL --md <刚写好的 md>  → 同目录生效交互式 HTML（--no-open 落盘；详见「HTML 产物」节）
+机器层准出（**先于 HTML**）: cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <刚写的 md> --fail-on error
+       ↓
+复盘原料 sidecar（**必做**——无假设的报告也要落盘，否则「有/没有 sidecar」不可机器区分）:
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision SYMBOL --init > /tmp/{symbol}.decision.json   # ① 取最小 schema 模板
+  （② 填写 scenarios / falsifiers —— 情景假设与可证伪条件是合成段产物，只有你能写）
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision SYMBOL --from /tmp/{symbol}.decision.json   # ③ 校验并落盘（fail-loud 退出 2）
+       ↓
+默认（复检通过后必做）: etf.py html SYMBOL --md <已过复检的 md> --no-open  → 同目录交互式 HTML（详见「HTML 产物」节）
+
+**盘后预采集（不在本工作流内，报告只读其产物）**：
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow   # R15 快照：同花顺 90 行业×4 窗口 → sector_flow_snapshots（幂等，非交易日自动跳过）
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py etf-flow SYMBOL --save  # 份额快照：供 etf_share_flow 的本地序列（**invest-a-stock 命令**，需逐日积累）
+  两者都**写**快照表，不在报告流程内并行调用——否则读侧可能拿到旧快照（`sector-flow` 的积累序列 ≥6 日才成立）
 
 **报告文件命名规则**：
 - `{timestamp}` = 报告生成时的实际时间，格式 `YYYY-MM-DD-HH-MM-SS`（北京时间）
@@ -96,7 +107,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers 159206 --peers "512660,512760"   # R13: 显式赛道清单
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow 159206 --json   # R15: 行业资金流 + 趋势（同花顺）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         # R15: 每日采集（盘后，幂等）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md <报告md路径>   # 交互式 HTML 报告（写好后自动开浏览器）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md <报告md路径> --no-open   # 交互式 HTML 报告（研究流程中固定加 --no-open，不自动开浏览器）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision 515050 --init          # 复盘原料：输出最小 schema 模板
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision 515050 --from <填好的.json>   # 校验并落盘 sidecar
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py review 515050                   # 复盘纪要（只对照假设状态）
@@ -157,8 +168,8 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 7. **资金流向与趋势**（🆕 R15，行业 ETF 必须：`sector-flow` 同花顺 THS 行业 3/5/10 日净额 + 单时点窗口分解（近端 vs 中段）+ 积累序列（≥6 日）；对照 pulse 涨停热度盘面结合；**证据非信号，趋势与日期配合**）
 8. 跟踪质量（净值波动 / NAV MA+指数 MA / BOLL / RSI / 跟踪误差边界）
 9. 对冲覆盖（hedge-map）
-9b. 动态基差与持仓（F 系列：futures_basis 状态度量 + 历史演变分布参照，非预测）
-10. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置和 TMT 赛道内的相对位置）
+9b. 动态基差与持仓（F 系列：**仅当该 ETF 映射到可用股指期货时必须有**——`futures-basis` 状态度量 + 历史演变分布参照，非预测；无映射时在报告中显式写「该 ETF 无对应期货合约」，不得省略不表）
+10. **行业位置**（🆕 行业 ETF 必须引用 `industry-pe` 排名，说明在 31 个申万行业中的位置；**同赛道相对位置按以下顺序取**：① 属 TMT（电子/计算机/通信/传媒）→ 比较 TMT 子组；② 非 TMT 但有预定义可比行业组 → 比较该组；③ 两者皆无 → 只报全市场排名，不强行编组）
 11. 因子/主题逻辑（须可追溯来源，否则「待验证」）
 12. 多情景 / 交易结构（可选，LAW 6a）
 13. **情景预案**（🆕 R11c，`--playbook` 时必须有：回撤档位 σ 分级表 = 触发核验深度（例行记录→归因核查→三步全流程→框架重估），非操作阈值；三步核查固定模板；LAW 6a 声明；输出禁用「无动作/如何应对/建议卖出/止损」措辞）
@@ -180,7 +191,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | `query_etf_kline_history(symbol, days)` | 🆕 R11a 历史行情深度（nav 链路优先，失败回退 baostock；`source: nav/baostock`） |
 | `compute_history_stats(rows)` | 🆕 R11a 历史统计：年度高低点+日期、最大回撤（峰/谷日期）、±5% 交易日清单、MA20/60/120、当前 vs 高低点偏离% |
 | `list_industry_snapshot()` | 🆕 31 个申万行业 PE/PB 排名 |
-| `etf_share_flow(symbol)` | 🆕 ETF 份额变化趋势 + 估算资金流 |
+| `etf_share_flow(symbol, days)` | 读**本地快照表**的份额序列 + 估算资金流（T+1 lag 语义）。快照由 `invest-a-stock etf-flow SYMBOL --save` 逐日积累 → **不在本 skill 工作流内**；本 skill 的份额趋势走 `report --json` 的 `share_history` 字段（Tushare `fund_share`+`fund_daily`） |
 | `query_etf_category(symbol)` | 🆕 ETF 类型标签 |
 | `query_sector_valuation_guide(sw_name)` | 🆕 行业特定估值指标指引 |
 | `query_etf_holdings(symbol)` | 🆕 R12 前十大持仓（裸 HTTP 天天基金 jjcc 页，季度报告期）+ 集中度 top1/top5/top10（引擎计算）+ 子环节聚类合计 clusters（HOLDINGS_CLUSTER_MAP 聚合，未映射归「未归类」） |
@@ -202,9 +213,12 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 ### 自动 flags
 
-- AUM < 2 亿 → ❌ 清盘/流动性风险
-- 溢价 > 2% → ⚠️ 买入成本偏高
-- 折价 < -2% → ⚠️ 可能存在结构问题
+> ⚠️ 以下阈值为**本工具的筛查阈值**（工程取值，非来自监管标准或学术文献），
+> 用途是提示「值得看一眼」，**不是**对客观风险的断言。报告引用时须注明其筛查性质。
+
+- AUM < 2 亿 → ❌ 清盘/流动性风险筛查位
+- 溢价 > 2% → ⚠️ 交易价相对 NAV 偏离较大（同一时点买入成本高于净值）
+- 折价 < -2% → ⚠️ 交易价相对 NAV 偏离较大（方向相反）——偏离成因未知，不推断为「结构问题」
 - 对冲 coverage `none` → ⚠️ 无期货/期权对冲
 
 ---
@@ -237,10 +251,10 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 `sector-flow` 数据（THS 行业 3/5/10 日净额 + 趋势）的解读边界：
 
-- **三源对照**：同花顺行业净额（大单口径）+ R13 ETF 份额流（配置口径）+ pulse 涨停热度（游资口径）——共振确认主线、背离展开矛盾（例：医药涨停第一热度但行业净额 -15 亿 + ETF 份额 -26 亿 → 题材短炒）
+- **三源对照**：同花顺行业净额（大单口径）+ R13 ETF 份额流（配置口径）+ pulse 涨停热度（游资口径）——三源同向时只作**相互印证的事实陈述**（口径不同、不构成因果确认）；背离时作为**待验证的矛盾点**展开，**不得**给出「题材短炒/主力出货/资金进场」类动机或性质判定
 - **证据非信号**：趋势标签（持续流入/近端回流/近端退潮/持续流出）只描述引擎判定的方向/强度事实，**禁止**据此做方向性预测
 - **趋势与日期配合**：方向/强度标签一律引用引擎字段（近端加速/减速为引擎输出，受量级守卫约束），不做引擎之外的强度断言；5 日变化率/转向需积累序列（≥6 日快照），积累不足标注「积累中」不硬编，快照跨度 trend_span_days ≠7 日须标注
-- 口径声明：大单口径、日间净额噪声、THS 90 为权威（东财仅定性对照、差异名注明）
+- 口径声明：大单口径、日间净额噪声；THS 90 为该源**覆盖口径**（申万细分 90 行业），东财仅定性对照、差异名注明——两者口径不同，**不裁定谁更权威**
 
 ### 1. 估值框架展开（行业 ETF 必选，宽基 ETF 可选）
 
@@ -257,7 +271,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 如果 `industry_pe` 存在，必须引用 `industry-pe` 命令输出的 31 行业排名：
 
-- 该行业 PE 在全市场排第几？在 TMT 赛道（电子/计算机/通信/传媒）内排第几？
+- 该行业 PE 在全市场排第几？同赛道相对位置按「必须覆盖」第 10 条的三级顺序取（TMT 子组 / 预定义可比组 / 仅全市场）——**非 TMT 行业不得套用 TMT 口径**
 - 这个位置的含义是什么？（如"TMT 中最便宜，但这不意味低估——通信天然比半导体估值低"）
 - ⚠️ 行业 PE 是代理值，非 ETF 精确 PE，必须标注
 
@@ -270,7 +284,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | 关键假设 | 可证伪条件 | 观测窗口 |
 |----------|----------|:---:|
 | "CAPEX 结构转型利好通信 ETF" | 前十大权重中光模块/算力设备占比 <30% | 需核实持仓 |
-| "RSI 近超卖是短期超跌" | RSI 跌破 25 且持续 >5 个交易日 | ~2 周 |
+| "跟踪指数近 5 日回落幅度大于同类" | 同类等权均值同期回落幅度反超本标的 | 下一期 `peers` 快照 |
 | ... | ... | ... |
 
 **硬约束**：
@@ -315,8 +329,8 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 派生数字（倍数/比例/百分点/点位差）带 `[来源: Python calc: formula]`，无「复算一致/自洽校验」类未实跑字样
 - [ ] 正文 §N 交叉引用指向节含被引内容
 - [ ] 行业 ETF：估值框架已展开（`valuation_guide` 不是一行标签）
-- [ ] 行业 ETF：行业排名已引用（`industry-pe` 31 行业位置 + TMT 赛道位置）
-- [ ] 份额趋势已查询（`etf_share_flow`），有数据则展示，无数据则标注"积累中"
+- [ ] 行业 ETF：行业排名已引用（`industry-pe` 31 行业位置 + 同赛道位置，按三级顺序；非 TMT 未套用 TMT 口径）
+- [ ] 份额趋势已取（`report --json` 的 `share_history` 字段），有数据则展示，无数据则标注"积累中"
 - [ ] 持仓透视已查（R12 `holdings`，行业/主题 ETF），集中度数字引用引擎 top1/top5/top10 字段，AI 未心算
 - [ ] 聚类合计引用引擎 `clusters` 字段（AI 未心算）；未映射部分 AI 补充已标注「AI 归类」；「名义主题 vs 实际暴露」偏差已解读
 - [ ] 赛道资金流已对比（R13 `peers`，行业 ETF；未映射时标注「请用 --peers 显式指定」），RS/资金流数字引用引擎字段
@@ -332,6 +346,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 检索/新闻口径数字带「检索摘要口径，出处待核实」标注，未归因到未读原文的媒体（R2）
 - [ ] 计数经 Python（`len()`），无目视计数（R3）
 - [ ] **机器层准出（写入后必跑，非可选）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明
+- [ ] **复盘原料 sidecar 已落盘**：`decision SYMBOL --init` → 填写 `scenarios`/`falsifiers` → `--from`（退出 0）；**无假设的报告也要落盘**（最小 schema 五键），否则「有/没有 sidecar」不可机器区分
 - [ ] **报告复检流程已执行**（CLAUDE.md「报告复检流程」三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果
 
 ---
