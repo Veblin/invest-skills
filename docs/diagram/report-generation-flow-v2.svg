@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1280">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap');
+    text { font-family: 'JetBrains Mono','Noto Sans SC','PingFang SC',sans-serif; }
+    .title { fill:#f8fafc; font-size:22px; font-weight:700 } .sub { fill:#94a3b8; font-size:11px }
+    .lane { fill:#111c31; fill-opacity:.7; stroke:#334155; stroke-width:1; rx:14 }
+    .lane-title { fill:#cbd5e1; font-size:12px; font-weight:700; letter-spacing:1px }
+    .box { stroke-width:1.5; rx:8 } .name { fill:#f8fafc; font-size:12px; font-weight:700; text-anchor:middle }
+    .detail { fill:#cbd5e1; font-size:9px; text-anchor:middle } .tiny { fill:#94a3b8; font-size:8px; text-anchor:middle }
+    .process { fill:#083344; fill-opacity:.72; stroke:#22d3ee } .compute { fill:#064e3b; fill-opacity:.72; stroke:#34d399 }
+    .db { fill:#4c1d95; fill-opacity:.56; stroke:#a78bfa } .decision { fill:#78350f; fill-opacity:.63; stroke:#fbbf24 }
+    .external { fill:#1e293b; fill-opacity:.9; stroke:#94a3b8 } .human { fill:#831843; fill-opacity:.6; stroke:#fb7185 }
+    .output { fill:#1e3a8a; fill-opacity:.62; stroke:#60a5fa } .warning { fill:#fbbf24; font-size:8px; text-anchor:middle }
+    .line { fill:none; stroke:#64748b; stroke-width:1.5; marker-end:url(#arrow) } .line2 { fill:none; stroke:#34d399; stroke-width:1.5; marker-end:url(#arrow-green) }
+    .dash { fill:none; stroke:#fb7185; stroke-width:1.5; stroke-dasharray:5 4; marker-end:url(#arrow-rose) }
+    .backfill { fill:none; stroke:#fbbf24; stroke-width:1.5; marker-end:url(#arrow-amber) }
+    .label { fill:#cbd5e1; font-size:8px; text-anchor:middle }
+  </style>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0,0 10,3.5 0,7" fill="#64748b"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0,0 10,3.5 0,7" fill="#34d399"/></marker>
+    <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0,0 10,3.5 0,7" fill="#fb7185"/></marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0,0 10,3.5 0,7" fill="#fbbf24"/></marker>
+  </defs>
+  <rect width="1800" height="1280" fill="#0f172a"/><rect width="1800" height="1280" fill="url(#grid)"/>
+  <text x="45" y="42" class="title">invest-a-stock：真实报告生成主流程（v2 逐条核验修订）</text>
+  <text x="45" y="63" class="sub">依据 scripts/invest.py、lib/collector、store、render 对照工作区代码核验 ｜ 实线=引擎自动；虚线=研究执行者/Claude 补充；琥珀实线=渲染期联网补挂（回边）</text>
+
+  <!-- lanes -->
+  <rect class="lane" x="30" y="92" width="250" height="1090"/><text x="50" y="118" class="lane-title">① 指令 / 编排</text>
+  <rect class="lane" x="300" y="92" width="380" height="1090"/><text x="320" y="118" class="lane-title">② 采集与标准化</text>
+  <rect class="lane" x="700" y="92" width="360" height="1090"/><text x="720" y="118" class="lane-title">③ 计算 / 证据</text>
+  <rect class="lane" x="1080" y="92" width="350" height="1090"/><text x="1100" y="118" class="lane-title">④ 报告组装 / 渲染</text>
+  <rect class="lane" x="1450" y="92" width="320" height="1090"/><text x="1470" y="118" class="lane-title">⑤ 持久化 / 产物</text>
+
+  <!-- ① -->
+  <rect x="65" y="155" width="180" height="64" class="box process"/><text x="155" y="181" class="name">用户 / Skill 指令</text><text x="155" y="198" class="detail">report SYMBOL [flags]</text>
+  <rect x="65" y="288" width="180" height="80" class="box process"/><text x="155" y="315" class="name">CLI main() / argparse</text><text x="155" y="332" class="detail">加载 .env、socket 超时</text><text x="155" y="347" class="detail">CMD_DISPATCH → cmd_report</text>
+  <rect x="65" y="440" width="180" height="95" class="box decision"/><text x="155" y="466" class="name">--resume 可复用？</text><text x="155" y="484" class="detail">快照存在且 dims / deep /</text><text x="155" y="499" class="detail">macro / force-sector-sync 兼容</text><text x="155" y="515" class="tiny">不兼容 → 打印原因并重新采集</text>
+  <rect x="65" y="605" width="180" height="100" class="box process"/><text x="155" y="631" class="name">解析采集范围</text><text x="155" y="649" class="detail">默认 8 维度；--plan 覆盖</text><text x="155" y="664" class="detail">--deep 加 industry / research</text><text x="155" y="679" class="detail">（并补 kline）</text><text x="155" y="694" class="detail">--macro 强制含 kline</text>
+  <path d="M155 219V288" class="line"/><path d="M155 368V440" class="line"/><path d="M155 535V605" class="line"/><text x="168" y="572" class="label">否 / 不兼容</text>
+
+  <!-- ② external sources -->
+  <rect x="330" y="155" width="150" height="80" class="box external"/><text x="405" y="181" class="name">数据源</text><text x="405" y="199" class="detail">Tushare / akshare</text><text x="405" y="214" class="detail">腾讯 / Baostock / TickFlow</text>
+  <rect x="500" y="155" width="150" height="80" class="box external"/><text x="575" y="181" class="name">可选扩展</text><text x="575" y="199" class="detail">FRED / 新闻 / 公告</text><text x="575" y="214" class="detail">行业、同业、产业链</text>
+  <rect x="330" y="315" width="320" height="105" class="box process"/><text x="490" y="341" class="name">collect_all()：跨维度并发 fan-out</text><text x="490" y="359" class="detail">basic_info、financials、quote、shareholders</text><text x="490" y="374" class="detail">northbound、valuation、kline、holder_changes</text><text x="490" y="392" class="tiny">每维度内：L2 财务并行双源；行情类多走 cascade 降级</text><text x="490" y="407" class="tiny">超时写 SourceResult；单维失败不阻断整批</text>
+  <rect x="330" y="474" width="320" height="103" class="box process"/><text x="490" y="501" class="name">DimensionResult 标准化</text><text x="490" y="518" class="detail">选择最高置信度主源；保留 all_sources</text><text x="490" y="533" class="detail">status：available / partial / missing</text><text x="490" y="550" class="tiny">来源、query、时点、耗时、错误、attempted 全保留</text><text x="490" y="565" class="tiny">K 线升序 + 全源前复权；财务合并三大表字段</text>
+  <rect x="330" y="635" width="320" height="130" class="box compute"/><text x="490" y="661" class="name">Collection 采集快照组装</text><text x="490" y="679" class="detail">dimensions + summary + fusion + credibility</text><text x="490" y="694" class="detail">macro_context / chain_context（可选）</text><text x="490" y="711" class="detail">events、analysis_cards、manifest</text><text x="490" y="728" class="tiny">再补：sector_sync、同行 / PE Band / 行业定价、价格冲击</text><text x="490" y="745" class="tiny">附加模块失败写原因（phase2_extras_errors），不整体失败</text>
+  <path d="M405 235V315" class="line"/><path d="M575 235V315" class="line"/><path d="M490 420V474" class="line"/><path d="M490 577V635" class="line2"/>
+
+  <!-- ③ compute -->
+  <rect x="735" y="150" width="290" height="95" class="box compute"/><text x="880" y="174" class="name">融合、可信度与交叉验证</text><text x="880" y="191" class="detail">RRF fusion；源可信度评分</text><text x="880" y="206" class="detail">关键 L2 字段跨源差异 &gt;5% 标记</text><text x="880" y="224" class="tiny">比率 / 分位类（PE、PB）不参与比较，避免口径噪音</text><text x="880" y="239" class="tiny">输入：同一 collection 的各维度源结果</text>
+  <rect x="735" y="320" width="290" height="112" class="box compute"/><text x="880" y="346" class="name">确定性派生计算</text><text x="880" y="364" class="detail">估值历史分位 / 区间标签、同比、现金流 / 利润</text><text x="880" y="379" class="detail">DCF 预处理、风险、事件、市场结构、同业比较</text><text x="880" y="394" class="detail">技术指标只描述状态；失败 / 缺数据显式降级</text><text x="880" y="412" class="tiny">采集期 kline.derived 仅 E1 板块同步性 6 字段</text><text x="880" y="427" class="tiny">MA / BOLL / MACD / RSI 由 lib/technical.py 在渲染期算</text>
+  <rect x="735" y="505" width="290" height="95" class="box compute"/><text x="880" y="531" class="name">Evidence / Analyze（可拆分路径）</text><text x="880" y="549" class="detail">evidence：证据表（维度、渠道、取值、置信度）</text><text x="880" y="564" class="detail">analyze：collection + evidence + scores JSON</text><text x="880" y="581" class="tiny">analyze 是中间结构化输出（v0.1.5 占位），不生成深度观点</text>
+  <rect x="735" y="670" width="290" height="105" class="box human"/><text x="880" y="694" class="name">研究执行者 / Claude 分析</text><text x="880" y="712" class="detail">基于证据表写 facts_md / analysis_md</text><text x="880" y="727" class="detail">产出 analysis.json；CLI 仅做 schema 校验</text><text x="880" y="744" class="tiny">注入点仅 2 处：A-5 决策时间线单元格 + 文末「分析注记」附录</text><text x="880" y="761" class="warning">九模块正文的 [分析] 块由引擎规则生成</text>
+  <path d="M880 245V320" class="line2"/><path d="M880 432V505" class="line2"/><path d="M880 600V670" class="dash"/><path d="M650 700H735" class="line2"/>
+
+  <!-- ④ render -->
+  <rect x="1115" y="150" width="280" height="130" class="box process"/><text x="1255" y="176" class="name">report：预处理与校验</text><text x="1255" y="194" class="detail">ResearchProfile 校验（可选，采集前 fail-loud）</text><text x="1255" y="209" class="detail">--analysis 读入 + validate_sections</text><text x="1255" y="224" class="detail">--material-gap 先输出数据缺口</text><text x="1255" y="242" class="tiny">校验失败 exit 2；全源无响应则退出；resume 成功则跳过采集</text><text x="1255" y="257" class="tiny">渲染前仍联网补挂 extras（见琥珀色回边）</text>
+  <rect x="1115" y="320" width="280" height="175" class="box process"/><text x="1255" y="346" class="name">渲染分支（--mode × --emit 两个轴）</text><text x="1255" y="366" class="detail">mode=full / brief / concise → render_report_v3</text><text x="1255" y="383" class="detail">mode=insight → 独立 Insight 渲染器</text><text x="1255" y="400" class="detail">emit=md → 同代 Markdown</text><text x="1255" y="417" class="detail">emit=html → 自包含 HTML + 同代 md</text><text x="1255" y="434" class="detail">emit=compact → 旧 v0.1.2 八段模板</text><text x="1255" y="451" class="detail">emit=json → 原始 collection JSON</text><text x="1255" y="469" class="tiny">insight 模式下 compact / json 输出 Insight Markdown / model</text><text x="1255" y="484" class="tiny">分析 sidecar 替换占位符；同一 collection 为事实底座</text>
+  <rect x="1115" y="545" width="280" height="115" class="box output"/><text x="1255" y="571" class="name">Insight 专用确定性模型</text><text x="1255" y="589" class="detail">extract_facts → build_findings / analysis_chains</text><text x="1255" y="604" class="detail">证据不足标「分析未完成」（completion）</text><text x="1255" y="622" class="tiny">不依赖 analysis.json；只产可追溯 Facts / Findings</text><text x="1255" y="637" class="tiny">report --mode insight 分支</text>
+  <rect x="1115" y="720" width="280" height="95" class="box process"/><text x="1255" y="746" class="name">交付前质量门禁（运行协议）</text><text x="1255" y="764" class="detail">report_qc --fail-on error；lint / 人工三层复检</text><text x="1255" y="779" class="detail">cmd_report 内不会自动调用 qc-report</text><text x="1255" y="796" class="tiny">QC 是规范要求，非引擎自动执行</text>
+  <path d="M1025 200H1115" class="line2"/><path d="M1255 280V320" class="line"/><path d="M1255 495V545" class="line"/><path d="M1255 660V720" class="line"/>
+
+  <!-- ⑤ storage -->
+  <g transform="translate(1490,154)"><rect x="0" y="12" width="240" height="71" class="db"/><ellipse cx="120" cy="12" rx="120" ry="12" fill="#4c1d95" fill-opacity=".56" stroke="#a78bfa" stroke-width="1.5"/><ellipse cx="120" cy="83" rx="120" ry="12" fill="#4c1d95" fill-opacity=".56" stroke="#a78bfa" stroke-width="1.5"/><line x1="0" y1="12" x2="0" y2="83" stroke="#a78bfa" stroke-width="1.5"/><line x1="240" y1="12" x2="240" y2="83" stroke="#a78bfa" stroke-width="1.5"/><text x="120" y="47" class="name">research.db（SQLite / WAL）</text><text x="120" y="64" class="detail">~/.local/share/investment/</text></g>
+  <rect x="1490" y="295" width="240" height="150" class="box db"/><text x="1610" y="323" class="name">报告主路径会写的表</text><text x="1610" y="342" class="detail">collections：完整 raw_json 快照</text><text x="1610" y="358" class="detail">（kind=collect / report 区分）</text><text x="1610" y="374" class="detail">findings：每维度前 5 个 key 摘要</text><text x="1610" y="390" class="detail">pipeline_states：plan / collect 等</text><text x="1610" y="406" class="detail">macro_snapshots（--with-macro）</text><text x="1610" y="424" class="tiny">diff 先读历史快照、后入库，避免自比空 diff</text>
+  <rect x="1490" y="530" width="240" height="215" class="box output"/><text x="1610" y="556" class="name">文件产物：reports/{symbol}-{name}/</text><text x="1610" y="576" class="detail">{ts}.md（emit=md，CLI 默认）</text><text x="1610" y="592" class="detail">{ts}.html（emit=html，自包含）</text><text x="1610" y="608" class="detail">{ts}.analysis.json（若传入）</text><text x="1610" y="624" class="detail">{ts}.profile.json（若有档案）</text><text x="1610" y="644" class="tiny">Insight 同代产物（含 .insight 中缀）：</text><text x="1610" y="662" class="tiny">{ts}.insight.md / {ts}.insight.html</text><text x="1610" y="678" class="tiny">{ts}.insight.facts.json</text><text x="1610" y="694" class="tiny">{ts}.insight.insight.json</text><text x="1610" y="710" class="tiny">{ts}.insight.report.json</text><text x="1610" y="728" class="tiny">--save-raw → ~/.local/share/investment/raw/</text>
+  <rect x="1490" y="770" width="240" height="95" class="box db"/><text x="1610" y="798" class="name">与报告相关的其他历史表</text><text x="1610" y="816" class="detail">valuations、thesis、market_snapshots</text><text x="1610" y="836" class="tiny">ETF / industry / market_daily / futures_daily</text><text x="1610" y="850" class="tiny">等由独立命令写入</text>
+  <path d="M1395 370H1490" class="line"/><path d="M1395 600H1490" class="line"/><path d="M1610 237V295" class="line2"/><path d="M1610 445V530" class="line"/><path d="M1610 745V770" class="line"/>
+
+  <!-- resume path (是) -->
+  <path d="M245 487H290V250H1115" class="line"/>
+  <text x="700" y="264" class="label">是：load 最近一次 collections.raw_json → 兼容性校验 → 直接进入 report（跳过现场采集；成功 resume 不新增快照）</text>
+
+  <!-- Claude 分析 → 渲染期消费 -->
+  <path d="M1025 722H1064V272H1115" class="dash"/>
+  <text x="1052" y="640" class="label" style="text-anchor:end">analysis.json：渲染期替换占位 / 追加文末附录</text>
+
+  <!-- 渲染期联网补挂回边 -->
+  <path d="M1330 280V300H1078V960H290V700H330" class="backfill"/>
+  <text x="684" y="940" class="tiny" style="fill:#fbbf24">渲染前仍会联网补挂（attach_extras=True / _ensure_render_ready）：market_structure、phase2</text>
+  <text x="684" y="952" class="tiny" style="fill:#fbbf24">（同行 / PE Band / 行业定价 / 价格冲击）、events、analysis_cards → 直接写回同一 collection</text>
+
+  <!-- notes -->
+  <rect x="55" y="1000" width="1330" height="160" rx="10" fill="#172554" fill-opacity=".55" stroke="#60a5fa" stroke-width="1"/>
+  <text x="80" y="1027" fill="#93c5fd" font-size="12" font-weight="700">读取顺序与真实边界</text>
+  <text x="80" y="1053" class="sub">• 默认 report 会现场 collect（或 --resume 复用 store 快照）；collect → evidence --from-store → report --resume 是避免重复联网的推荐拆分链。</text>
+  <text x="80" y="1079" class="sub">• collection.raw_json 是可重放的事实快照；findings 表只是每维度前 5 个 key 的索引摘要（list 记条数），不是分析正文。</text>
+  <text x="80" y="1105" class="sub">• report --mode insight 走独立确定性模型；full 的 Claude 文本仅经 --analysis 注入（A-5 单元格 + 文末「分析注记」附录），</text>
+  <text x="80" y="1129" class="sub">　 九模块正文的 [分析] 块由引擎规则生成 —— 二者不是同一来源，勿混为一谈。</text>
+  <text x="80" y="1151" class="sub">• 另有未画入主流程的分支：近 5 日 ≥2 涨停 → 龙虎榜 / 涨停池补采；style_match 风格匹配 + success_factors 行业成功因素装配；synthesize --input 离线合成（等同 report，不产 Insight 同代 sidecar）。</text>
+
+  <!-- legend -->
+  <rect x="1450" y="1000" width="300" height="180" rx="10" fill="#1e293b" stroke="#64748b"/>
+  <text x="1470" y="1024" fill="#e2e8f0" font-size="10" font-weight="700">图例</text>
+  <rect x="1470" y="1036" width="13" height="13" class="process"/><text x="1492" y="1046" class="sub">输入 / 采集 / 渲染</text>
+  <rect x="1600" y="1036" width="13" height="13" class="external"/><text x="1622" y="1046" class="sub">外部数据源</text>
+  <rect x="1470" y="1060" width="13" height="13" class="compute"/><text x="1492" y="1070" class="sub">确定性计算</text>
+  <rect x="1600" y="1060" width="13" height="13" class="decision"/><text x="1622" y="1070" class="sub">判断 / 分支</text>
+  <rect x="1470" y="1084" width="13" height="13" class="db"/><text x="1492" y="1094" class="sub">持久化</text>
+  <rect x="1600" y="1084" width="13" height="13" class="output"/><text x="1622" y="1094" class="sub">产物文件</text>
+  <rect x="1470" y="1108" width="13" height="13" class="human"/><text x="1492" y="1118" class="sub">人工 / Claude</text>
+  <line x1="1470" y1="1138" x2="1514" y2="1138" class="dash"/><text x="1530" y="1141" class="sub">虚线：Claude 补充</text>
+  <line x1="1470" y1="1164" x2="1514" y2="1164" class="backfill"/><text x="1530" y="1167" class="sub">琥珀：渲染期回边</text>
+  <text x="1770" y="1268" class="tiny" style="text-anchor:end">修订 2026-09-16（v0.3.0）</text>
+</svg>
