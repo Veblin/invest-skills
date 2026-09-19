@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1280">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap');
+    /* 自包含：不引用任何外部资源（与报告 HTML 的「无 CDN、file:// 离线可用」一致）。
+       字体走系统栈，缺失时由 PingFang SC / sans-serif 兜底。 */
     text { font-family: 'JetBrains Mono','Noto Sans SC','PingFang SC',sans-serif; }
     .title { fill:#f8fafc; font-size:22px; font-weight:700 } .sub { fill:#94a3b8; font-size:11px }
     .lane { fill:#111c31; fill-opacity:.7; stroke:#334155; stroke-width:1; rx:14 }

@@ -147,6 +147,9 @@ flowchart LR
 | derived | 引擎衍生字段的值域与精度 |
 | conclusion-evidence | 结论段证据等级达标 |
 
+上述为默认检查面。加 `--verify-data` 可再叠加三层**联网数据核验**（个股）：`audit` 数据点抽取与裁决、
+`quality` 质地 7 指标、`rigor` 市值/估值跨源验算——这三层会独立给出 FAIL。
+
 **机器 PASS ≠ 可交付**：其后还有三层人工复检（数字重算 → 合规核对 → 逻辑自洽）。详细规则见 [invest-a-stock SKILL.md](skills/invest-a-stock/SKILL.md) 与[配置说明](CONFIGURATION.md)。
 
 ## 从真实产出看证据如何保留
