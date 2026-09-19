@@ -1,6 +1,6 @@
 # invest-skills 功能与实现逻辑总览
 
-> 版本 v0.2.7 · 更新日期 2026-08-23
+> 版本 v0.3.0 · 更新日期 2026-09-19
 > 本文档总结仓库已完成的主要功能及实现逻辑，面向使用者与贡献者。运行时规格以各 SKILL.md / references 为准。
 
 ---
@@ -183,8 +183,10 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 | v0.2.4 | 08-08 | 方法论引擎 R1-R12h（框架匹配/景气状态卡/多源降级链）、事实边界 §2.3 |
 | v0.2.5 | 08-10 | 交易纪律框架 D1-D8 + trade-structure、WorkBuddy 兼容层、移除 limit-up skill |
 | v0.2.6 | 08-14~17 | ABCD P0（H5 回测裁决、D 类引擎字段、点位红线 L1-L4）+ M 系列（market_daily 全市场分位 1361 交易日×5544 只、SPA/FDR 框架、pattern-scan、journal §4.3）+ F 系列（futures_daily 股指期货数据层）+ WorkBuddy 零终端分发 zip |
+| v0.2.7~v0.2.9 | 08-18~09-07 | 评审修复轮次、回归基线、交付链与文档收敛 |
+| **v0.3.0** | 09-14~19 | **报告读者面重构**（首屏判断索引 + 三层阅读结构 + 标准交付链固化）· **港股线 v2**（南向资金 / A-H 比价 / 交易日历变体）· **discover-scan v0.1**（多透镜粗筛 + 短清单）· **event-calendar v3**（宏观日程 + 解禁排雷）· **门禁误报治理**（R-E04/R-E03 词义碰撞在 652 篇语料上 20→0）· **模板分位补中位数**（此前个股报告结构性无法通过自家门禁）· 移除 forecast-scan / futures-link |
 
-**当前状态**：分支 `feat/v0.2.7`，版本号已 bump 至 v0.2.7（本批 7 项 code-review 缺陷修复随 v0.2.7 发布）。未发布增量：release publish flow 增强（draft 幂等、release notes 提取器升级）、SkillHub 分发包构建（`scripts/build_skillhub_packages.py`，未跟踪）、一次性脚本归档。
+**当前状态**：v0.3.0 已合并至 `main`（PR #31），定位为对外宣发的阶段性稳定版。本轮另有一批**文档面更新**（README 重写 + 工作流图入库 + v0.3.0 样例），其提交尚待合入 `main`——合入后本节描述才完全成立。
 
 ## 8. 工程设施
 
@@ -194,7 +196,7 @@ canonical 源 = `pyproject.toml [project].version`（运行时经 `skills/lib/ve
 
 ### 8.2 打包分发
 
-- **WorkBuddy**：`scripts/build_wb_package.sh` → `dist/invest-skills-wb-vX.Y.Z.zip`（自举 bootstrap.sh + 6 skills），Release 零终端安装（真机验证通过）
+- **WorkBuddy**：`scripts/build_wb_package.sh` → `dist/invest-skills-wb-vX.Y.Z.zip`（自举 bootstrap.sh + 9 skills），Release 零终端安装（真机验证通过）
 - **SkillHub**：`scripts/build_skillhub_packages.py` — 每 skill 一个自包含包（注入 frontmatter、合并 skills/lib 消除跨包依赖）
 - **Claude 插件**：`.claude-plugin/marketplace.json`（4 个 plugin）+ `.agents/` + Gemini 扩展清单
 

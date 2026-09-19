@@ -12,7 +12,7 @@
 | 腾讯行情 | ✅ | 实时报价兜底 |
 | FRED | ✅ | 美宏观（ERP 等） |
 | **efinance** | 🔜 | 无 Token 用户的并行免费源候选 |
-| **yfinance** | 🔜 | 港股 `.HK` 兜底（当前 Skill 聚焦 A 股） |
+| yfinance（Yahoo） | ✅ | 港股 PB / 股息率 / PE 交叉源（`invest-hk-stock`，`0700.HK` 4 位补零形态；**境外源须走代理**，与东财/腾讯 DIRECT 方向相反） |
 
 接入新数据源时需同步：`pyproject.toml`、`collector.py`、`env.py`、`source-guide.md`、`SKILL.md`。
 
@@ -20,7 +20,8 @@
 
 | 版本 | 主题 |
 |------|------|
-| **v0.2.5**（当前） | 交易纪律框架（D1-D8）+ WorkBuddy 兼容 |
+| **v0.3.0**（当前） | 报告读者面重构（首屏判断索引 + 三层阅读结构 + 标准交付链固化）+ 港股线 v2 + discover-scan / event-calendar + 门禁误报治理 |
+| **v0.2.5~v0.2.9** | 交易纪律框架、评审修复轮次、回归基线、交付链与文档收敛 |
 | **v0.2.4** | 方法论引擎 R1-R12h 落地 + 事实边界规范 + 多轮 /code-review 修复 |
 | **v0.2.3** | 数据桥接层（data_bridge）落地 + 采集管线性能与健壮性优化（socket 超时/K 线缓存/慢源降级） |
 | **v0.2.2** | 市场微观结构指标体系 + invest-a-pulse 新 Skill + 共用函数层/TTL 缓存 + invest-a-etf 行业基础设施 |

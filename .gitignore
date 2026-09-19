@@ -36,7 +36,8 @@ review_verdict.txt
 
 # Build / release artifacts
 dist/
-diagram/
+# 绘图工作区（锚定根目录：docs/diagram/ 存放对外发布的成品图，须可跟踪）
+/diagram/
 
 # invest.py report 
 reports/
