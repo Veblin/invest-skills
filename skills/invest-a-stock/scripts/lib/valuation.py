@@ -565,6 +565,30 @@ def _latest_financial_row(rows: list[dict]) -> dict | None:
     return max(rows, key=lambda r: str(r.get("end_date", "")))
 
 
+def _period_annualization(end_date: Any) -> tuple[float, dict[str, Any]]:
+    """报告期 → 年化系数 + 披露元数据。
+
+    A 股财报为**年内累计**口径：0331/0630/0930/1231 分别覆盖 3/6/9/12 个月，
+    故年化系数 = 12 / 月数（半年报 ×2、季报 ×4、三季报 ×4/3、年报 ×1）。
+    无法识别（end_date 缺失/格式异常）→ 系数 1.0 且 meta 标注未识别，
+    由渲染层如实披露，不做静默假设。
+    """
+    s = str(end_date or "").strip()
+    months = {"0331": 3, "0630": 6, "0930": 9, "1231": 12}.get(s[-4:])
+    if not months:
+        return 1.0, {"applied": False, "end_date": s or None, "months": None,
+                     "factor": 1.0, "reason": "报告期不可识别，未做年化"}
+    factor = 12.0 / months
+    return factor, {
+        "applied": months != 12,
+        "end_date": s,
+        "months": months,
+        "factor": round(factor, 4),
+        "reason": (f"基期 {s} 为 {months} 个月累计口径，按 {factor:g}× 折算年化"
+                   if months != 12 else f"基期 {s} 为年报口径，无需年化"),
+    }
+
+
 def _infer_tax_rate(row: dict) -> float:
     # D1: 0.0 是合法值（免税/亏损抵免期 income_tax=0 → 税率 0%，total_profit=0 → 盈亏平衡），
     # 不得用 `or` 链（0.0 判为 falsy 降级到备用 key/None → 默认 0.25 系统性误算）。
@@ -600,6 +624,13 @@ def build_dcf_preprocess(financials: dict) -> dict | None:
             depr=depr,
             cap_ex=cap_ex,
         )
+        # review P0：基期为半年/季报时，上述分量均为**期内累计**值，直接用作
+        # DCF 基准会得到半量纲的企业价值（与市值不可比）。calc_fcff 对四项
+        # （NOPAT/depr/cap_ex/ΔNWC）线性，故整体按 12/月数 折算年化即等价。
+        ann_factor, ann_meta = _period_annualization(row.get("end_date"))
+        if ann_factor != 1.0:
+            out["fcff"]["fcff"] = round(out["fcff"]["fcff"] * ann_factor, 2)
+        out["fcff"]["base_annualization"] = ann_meta
         computed.append("fcff")
 
     debt_total = _safe_float(row.get("total_liab"))
@@ -901,6 +932,15 @@ def scenario_fcff(
 
     revenue_latest = _safe_float(latest.get("revenue")) if latest else None
     ebit_latest = _safe_float(latest.get("ebit")) if latest else None
+    # 基期年化（review P0）：A 股财报为**年内累计**口径（Q1/H1/Q3/FY = 3/6/9/12
+    # 个月），以半年营收直接起复利会把整条预测序列建成半量纲，产出与市值不可比
+    # 的企业价值（300750 实测：半年 base FCFF 311.76 亿 → EV 2450~5687 亿，
+    # 而同期市值 14135 亿）。营收/EBIT/折旧按 12/月数 折算年化后再起算。
+    _annualize, _ann_meta = _period_annualization(latest.get("end_date") if latest else None)
+    if revenue_latest is not None:
+        revenue_latest = revenue_latest * _annualize
+    if ebit_latest is not None:
+        ebit_latest = ebit_latest * _annualize
     base_growth, growth_meta = _historical_revenue_cagr(rows)
     margins = [
         v for v in (_safe_float(r.get("grossprofit_margin")) for r in rows[-4:])
@@ -938,7 +978,7 @@ def scenario_fcff(
         }
 
     tax_rate = _infer_tax_rate(latest)
-    depr_latest = _safe_float(latest.get("depr_amort")) or 0.0
+    depr_latest = (_safe_float(latest.get("depr_amort")) or 0.0) * _annualize
     ebit_margin_latest = ebit_latest / revenue_latest if revenue_latest else 0.0
 
     growth = base_growth * _SCENARIO_GROWTH_MULTIPLIER[scenario]
@@ -972,6 +1012,8 @@ def scenario_fcff(
             "ebit_margin_assumption": round(scenario_ebit_margin, 4),
             "capex_intensity": round(base_capex_intensity, 4),
             "tax_rate": round(tax_rate, 4),
+            # 基期年化披露：渲染层据此标注口径（年报表时 factor=1.0，无缩放）
+            "base_annualization": _ann_meta,
             "note": (
                 "默认假设，非分析师预测；由历史统计规则外推生成（规则代理），"
                 "不代表对公司未来经营的判断性预测"

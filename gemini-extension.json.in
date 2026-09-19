@@ -28,12 +28,6 @@
       "sensitive": true
     },
     {
-      "name": "Bocha Search API Key",
-      "description": "Bocha 中文搜索 API Key（可选，免费试用）— https://open.bocha.cn",
-      "envVar": "BOCHA_API_KEY",
-      "sensitive": true
-    },
-    {
       "name": "Longbridge App Key",
       "description": "Longbridge OpenAPI App Key（可选，港股/美股兜底）— https://open.longbridge.com",
       "envVar": "LONGBRIDGE_APP_KEY",

@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import pytest
 
-from lib.analysis_schema import AnalysisSchemaError, load_analysis_json, validate_sections
+from lib.analysis_schema import (
+    AnalysisSchemaError,
+    POSITION_ALLOWED,
+    POSITION_LABELS,
+    index_entries,
+    load_analysis_json,
+    validate_sections,
+)
 
 
 def _valid():
@@ -43,3 +50,413 @@ def test_markdown_subset_rejected(bad_md):
 def test_load_missing_file():
     with pytest.raises(AnalysisSchemaError):
         load_analysis_json("/tmp/does-not-exist-028.json")
+
+
+class TestStripRenderState:
+    """review C4：渲染期登记键（id() 堆地址）不得落进 collections.raw_json。"""
+
+    def test_strip_removes_key_without_mutating_caller(self):
+        from lib.analysis_schema import (CONSUMED_IDS_KEY, mark_inline_consumed,
+                                         strip_render_state)
+
+        c: dict = {}
+        mark_inline_consumed(c, {"module": "risk", "title": "t", "position": "conclusion"})
+        assert CONSUMED_IDS_KEY in c
+
+        out = strip_render_state(c)
+        assert CONSUMED_IDS_KEY not in out
+        assert CONSUMED_IDS_KEY in c, "不得就地修改调用方 collection（渲染仍要用）"
+
+    def test_identical_data_serializes_identically_after_strip(self):
+        """同一份数据的两次采集 → 剥离后 raw_json 必须逐字节相同。
+
+        前置断言（未剥离时确实不同）复现的是实测缺陷：report 行 116-119 各带
+        一组互不相同的堆地址。段对象须保活，否则地址可能被分配器复用。
+        """
+        from lib.analysis_schema import mark_inline_consumed, strip_render_state
+        from lib.json_util import dumps_json
+
+        def _collect():
+            c = {"symbol": "600176", "dimensions": []}
+            sec = {"module": "risk", "title": "t", "position": "conclusion"}
+            mark_inline_consumed(c, sec)
+            return c, sec  # 保活 sec，避免 id 复用
+
+        a, sec_a = _collect()
+        b, sec_b = _collect()
+        assert id(sec_a) != id(sec_b)
+
+        assert dumps_json(a) != dumps_json(b), "前置：未剥离时确实每次不同"
+        assert dumps_json(strip_render_state(a)) == dumps_json(strip_render_state(b))
+
+
+# ── v0.3.1 #4：facts 绑定校验 ────────────────────────────────────────────────
+# 缺陷背景：此前 analysis.json 无 fact_id 字段，段内数字未经任何来源校验——
+# Claude 写的任意数字可直接进入最终 MD/HTML（SKILL.md 自认）。本组测试锁定
+# 新增的**可选** facts 契约：无 facts 向后兼容；有 facts 则公式必须复算得上。
+
+def _with_facts(facts, facts_md=None, analysis_md=None):
+    sec = _valid()[0]
+    if facts is not None:
+        sec["facts"] = facts
+    if facts_md is not None:
+        sec["facts_md"] = facts_md
+    if analysis_md is not None:
+        sec["analysis_md"] = analysis_md
+    return [sec]
+
+
+class TestFactsBinding:
+
+    def test_no_facts_still_valid(self):
+        """向后兼容：不声明 facts 的段照常通过（存量报告不受影响）。"""
+        assert validate_sections(_valid()) == []
+
+    def test_well_formed_facts_pass(self):
+        assert validate_sections(_with_facts([
+            {"id": "F1", "value": -36.7, "formula": "(16.6297/26.2793-1)*100"},
+            {"id": "F2", "value": 52.83, "formula": "8.02-(-44.81)"},
+            {"id": "F3", "value": 3, "formula": "3"},
+            {"id": "F4", "value": 1, "formula": "1"},
+            {"id": "F5", "value": 18, "formula": "18"},
+        ])) == []
+
+    def test_unit_mismatch_ratio_vs_percent_is_caught(self):
+        """单位错配也是「公式算不出这个数」——比值 vs 百分数必须一致。"""
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": -36.7, "formula": "16.6297/26.2793-1"},
+        ]))
+        assert any("复算" in e for e in errs), errs
+
+    def test_formula_not_matching_value_is_error(self):
+        """核心 P0 检查：标了公式但公式算不出这个数 → 未实跑标注，拦截。"""
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": -30.0, "formula": "16.6297/26.2793-1"},
+        ]))
+        assert any("复算" in e and "≠" in e for e in errs), errs
+
+    def test_formula_unevaluable_is_error(self):
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": 1.0, "formula": "调用外部接口()"},
+        ]))
+        assert any("不可求值" in e for e in errs), errs
+
+    def test_formula_division_by_zero_is_error(self):
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": 1.0, "formula": "1/0"},
+        ]))
+        assert any("除零" in e for e in errs), errs
+
+    def test_formula_overflow_is_validation_error(self):
+        """有效语法的数值溢出不得让 validate_sections 崩溃。"""
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": 1.0, "formula": "1e308 ** 2"},
+        ]))
+        assert any("溢出" in e for e in errs), errs
+
+    def test_formula_dunder_escape_is_rejected(self):
+        """ast 白名单：属性访问/调用/下标一律拒绝（不是 eval）。"""
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": 1.0, "formula": "__import__('os').getcwd()"},
+        ]))
+        assert any("不可求值" in e for e in errs), errs
+
+    def test_value_must_be_numeric(self):
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": "约 36%", "formula": "16.6297/26.2793-1"},
+        ]))
+        assert any("value 必为数值" in e for e in errs), errs
+
+    def test_duplicate_and_missing_id_are_errors(self):
+        errs = validate_sections(_with_facts([
+            {"id": "F1", "value": 1.0, "formula": "1.0"},
+            {"id": "F1", "value": 2.0, "formula": "2.0"},
+            {"value": 3.0, "formula": "3.0"},
+        ]))
+        assert any("id 重复" in e for e in errs) and any("缺 id" in e for e in errs)
+
+    def test_facts_must_be_list(self):
+        errs = validate_sections(_with_facts({"id": "F1"}))
+        assert any("必须为数组" in e for e in errs)
+
+    def test_dangling_fact_reference_is_error(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            analysis_md="见 [事实: F2] 的推导。（证据 B）",
+        ))
+        assert any("[事实: F2]" in e for e in errs), errs
+
+    def test_resolvable_fact_reference_passes(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="见 [事实: F1] 的推导。（证据 B）",
+        ))
+        assert errs == [], errs
+
+    def test_unbound_ordinary_number_is_error(self):
+        """有一个合法 F1 也不能让正文里的 999% 绕过绑定。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"},
+             {"id": "F2", "value": 3, "formula": "3"},
+             {"id": "F3", "value": 18, "formula": "18"}],
+            analysis_md="2026 年增长 999%。（证据 B）",
+        ))
+        assert any("999" in e and "未绑定" in e for e in errs), errs
+
+    def test_bound_ordinary_number_passes(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"},
+             {"id": "F2", "value": 3, "formula": "3"},
+             {"id": "F3", "value": 18, "formula": "18"}],
+            analysis_md="增长 18%。见 [事实: F1]。（证据 B）",
+        ))
+        assert errs == [], errs
+
+    def test_bracket_text_without_facts_is_not_checked(self):
+        """未声明 facts 的段不校验 [事实: ..]（可能是普通文本，向后兼容优先）。"""
+        errs = validate_sections(_with_facts(None, analysis_md="见 [事实: F9]。（证据 B）"))
+        assert errs == [], errs
+
+    def test_validation_does_not_mutate_section(self):
+        """D7：校验不得写回传入的段字典（来自共享的 load_analysis_json）。"""
+        sec = _with_facts([{"id": "F1", "value": 1.0, "formula": "1.0"}])
+        validate_sections(sec)
+        assert "_fact_ids" not in sec[0]
+
+
+# _valid() 自带的 facts_md 为「近 30 日公告 3 条：回购公告 1 条…」——其中 "30"
+# 由「近…日」结构性豁免，"1"/"3" 须由 facts 覆盖；否则报错来自被继承的 facts_md
+# 而非本用例的 analysis_md（既有用例同样以 F1/F2 覆盖）。
+_BASE_FACTS = [{"id": "F1", "value": 1.0, "formula": "1.0"},
+               {"id": "F2", "value": 3, "formula": "3"}]
+
+
+class TestStructuralNumberExemption:
+    """v0.3.0 A1/D2：结构性数字豁免族。
+
+    缺陷三连（同一函数）：
+      ① `len(token)==4` 分支直接 `int(token)` → 4 字符小数（`12.5`/`36.7`）
+         抛未捕获 ValueError —— invest.py 只捕 AnalysisSchemaError → traceback；
+         共享 report_qc 的 `except Exception` 转成 error 级
+         `completion-analysis-sidecar-invalid` → **合格报告 exit 2 不得交付**。
+      ② ISO 日期（`2026-09-17`）的首/尾片段报「未绑定」。
+      ③ 版本号（`v0.3.1`）末位片段报「未绑定」。
+      ④ 千分位（`12,345`）被切成 `12`/`345`，两侧都匹配不上事实值。
+    """
+
+    def test_four_char_decimal_does_not_raise(self):
+        """① 不得抛异常（此前的崩溃点）。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="PE 12.5 倍，处于常态。（证据 B）",
+        ))
+        assert isinstance(errs, list)
+
+    def test_four_char_decimal_still_must_be_bound(self):
+        """① 修的是崩溃，不是放宽——无对应事实值时仍须报未绑定。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="PE 12.5 倍，处于常态。（证据 B）",
+        ))
+        assert any("12.5" in e and "未绑定" in e for e in errs), errs
+
+    def test_iso_date_fully_exempt(self):
+        """② 年/月/日三段均不再报未绑定。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="截至 2026-09-17 披露完毕。（证据 B）",
+        ))
+        assert errs == [], errs
+
+    def test_version_string_fully_exempt(self):
+        """③ 含末位补丁号。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="口径见 v0.3.1 规范。（证据 B）",
+        ))
+        assert errs == [], errs
+
+    def test_thousand_separator_binds_to_fact(self):
+        """④ 千分位是**一个**量值 token → 照常绑定（而非被豁免）。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS + [{"id": "F3", "value": 12345, "formula": "12345"}],
+            analysis_md="成交额 12,345 万元。（证据 B）",
+        ))
+        assert errs == [], errs
+
+    def test_thousand_separator_unbound_is_error(self):
+        """④ 绑定语义未被放宽：无对应事实值仍报未绑定（且报整段而非碎片）。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="成交额 12,345 万元。（证据 B）",
+        ))
+        assert any("12,345" in e and "未绑定" in e for e in errs), errs
+
+    def test_numeric_range_is_not_masked(self):
+        """掩码只吃日期/版本号形态——`9-10 倍` 这类数值区间仍须绑定。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="增长 9-10 倍。（证据 B）",
+        ))
+        assert any("未绑定" in e for e in errs), errs
+
+    def test_negative_decimal_not_exempt(self):
+        """`-36.7%` 的 token 是 `36.7`（正则不含负号）→ 不得被豁免。"""
+        errs = validate_sections(_with_facts(
+            _BASE_FACTS,
+            analysis_md="回撤 -36.7%。（证据 B）",
+        ))
+        assert any("36.7" in e and "未绑定" in e for e in errs), errs
+
+
+class TestReview20260918StructuralNumberForms:
+    """2026-09-18 review #4：结构性数字豁免对常见中文书写形态有系统性缺口。
+
+    原实现只覆盖 ISO 形态（测试也只锁 ISO 日期与版本号），而中文财经写作的实际
+    形态是「2026年9月17日」「第 3 季度」「近 12 个月」「标的 600176」「09:30」
+    「2026H1」——任一被误判即 validate_sections 非空 → invest.py 直接 exit 2
+    （不得交付），共享 report_qc 还会转成 error 级 completion-analysis-sidecar-invalid。
+    成对断言：误报形态不再命中 + 真实量值仍须绑定。
+    """
+
+    @pytest.mark.parametrize("text", [
+        "截至 2026年9月17日收盘。",       # 中文日期
+        "第 3 季度营收环比改善。",          # 中文序数（原表缺「季」）
+        "近 12 个月数据完整。",            # 窗口量词（原表缺「个」）
+        "标的 600176 公告。",             # 标的代码（上下文锚定）
+        "09:30 开盘。",                  # 时刻
+        "2026H1 报告期。",               # 报告期
+        "2020-2024 年区间。",             # 年份区间（原被 ISO 分支吃成 2020-20，残留 24）
+    ])
+    def test_common_chinese_forms_are_structural(self, text):
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md=text + "（证据 B）",
+        )) == [], text
+
+    @pytest.mark.parametrize("text,token", [
+        ("营收增长 999%。（证据 B）", "999"),
+        ("成交量 600176 手。（证据 B）", "600176"),   # 无代码上下文 → 仍须绑定
+        ("本段只有 18 这一个数。（证据 B）", "18"),
+    ])
+    def test_real_numbers_still_must_bind(self, text, token):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md=text,
+        ))
+        assert any(token in e and "未绑定" in e for e in errs), errs
+
+
+class TestReview20260918UrlExemptionIsPerToken:
+    """2026-09-18 review #10：`if "http" in before` 让整行数字豁免。
+
+    与 _is_exempt_num 自身 docstring「仅豁免该 token，不能豁免整行」直接矛盾，
+    且放过的恰是 P0 要拦的编造数字。
+    """
+
+    def test_url_internal_digits_exempt(self):
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="来源 https://x.com/p/123 的公开页。（证据 B）",
+        )) == []
+
+    def test_other_digits_on_url_line_still_checked(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "1.0"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="来源 https://x.com/p/123 该季增长 999%。（证据 B）",
+        ))
+        assert any("999" in e for e in errs), errs
+
+
+class TestReview20260918FormulaStrictness:
+    """2026-09-18 review #13/#14：公式求值不得穿透异常，整数 fact 不得用取整窗口。"""
+
+    def test_oversized_integer_constant_raises_formula_error(self):
+        """#13：`float(超大 int)` 的 OverflowError 须转成 _FormulaError。
+
+        原实现只在 BinOp 分支兜 OverflowError，Constant 分支漏了 → 异常穿透
+        `except _FormulaError`，invest.py 只捕 AnalysisSchemaError → traceback。
+        """
+        from lib import analysis_schema as mod
+
+        with pytest.raises(mod._FormulaError):
+            mod._safe_eval_formula("9" * 400)
+
+    def test_oversized_constant_reports_as_validation_error(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "formula": "9" * 400}],
+            facts_md="事实 [来源: engine]",
+        ))
+        assert any("不可求值" in e for e in errs), errs
+
+    def test_integer_fact_rejects_off_by_slop_formula(self):
+        """#14：`value=18` + `formula="18.04"` 原被判为复算一致（±0.05 窗口）。
+
+        根因：`repr(float(18))` == '18.0' → 推出 1 位小数 → round(got,1) 判等。
+        整数书写（JSON int）的语义是**精确**。
+        """
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 18, "formula": "18.04"}],
+            facts_md="事实 [来源: engine]",
+        ))
+        assert any("算不出该数" in e for e in errs), errs
+
+    def test_integer_fact_accepts_exact_formula(self):
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 18, "formula": "9*2"}],
+            facts_md="事实 [来源: engine]",
+        )) == []
+
+    def test_decimal_fact_keeps_rounding_window(self):
+        """浮点书写仍按书写精度判等（否则所有正常四舍五入的数字都会被判错）。"""
+        assert validate_sections(_with_facts(
+            [{"id": "F1", "value": 36.7, "formula": "36.72"}],
+            facts_md="事实 [来源: engine]",
+            analysis_md="偏离 36.7%。（证据 B）",
+        )) == []
+
+
+# ── 首屏判断索引：标签与成员判据（2026-09-18 评审批次）────────────────────────
+
+def test_position_labels_cover_the_validated_enum():
+    """标签表须与受校验的 position 枚举一一对应——新增枚举值时此处 fail。"""
+    assert set(POSITION_LABELS) == POSITION_ALLOWED
+
+
+def test_index_entries_falls_back_to_position_for_slug_modules():
+    """module 是内部 slug → 用 position 中文名；slug 不得进入条目。"""
+    assert index_entries([
+        {"module": "bear_chain", "position": "conclusion", "title": "空头链条"},
+        {"module": "Capital_Flow", "position": "holders", "title": "两个资金口径反向"},
+    ]) == [("结论", "空头链条"), ("股东与筹码", "两个资金口径反向")]
+
+
+def test_index_entries_keeps_chinese_module_and_skips_untitled():
+    """含中文的 module 原样保留（比 position 枚举更贴切）；无标题条目无信息量。"""
+    assert index_entries([
+        {"module": "事件归因", "position": "events", "title": "下跌非公告驱动"},
+        {"module": "events", "position": "events", "title": "   "},
+    ]) == [("事件归因", "下跌非公告驱动")]
+
+
+@pytest.mark.parametrize("sec", [
+    {"module": "mda_narrative", "position": "analysis", "title": "管理层论述"},
+    {"module": "MDA_Narrative", "position": "analysis", "title": "管理层论述"},
+    {"module": "participant_scan", "position": "holders", "title": "参与方扫描"},
+    {"module": "overview", "position": "overview", "title": "首要判断"},
+    {"module": "thesis", "position": "overview", "title": "投资假设检验"},
+    {"module": "bear_chain", "position": "overview", "title": "空头链条"},
+])
+def test_index_entries_excludes_overview_and_supplementary_slots(sec: dict):
+    """排除判据走 `_keys_of` 归一化比对：module / position 两处键、大小写变体都命中。"""
+    assert index_entries([sec]) == []
+
+
+def test_index_entries_tolerates_empty_and_malformed_input():
+    assert index_entries(None) == []
+    assert index_entries(["x", None, {"module": "events", "title": ""}]) == []

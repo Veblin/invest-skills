@@ -1204,9 +1204,86 @@ const trendLabel={trend_label_json};
     return data_lines + _HTML_APP_SCRIPT_LOGIC
 
 
-# --- render_html ---
+def _html_judgment_index(analysis: list[dict] | None, mode: str) -> str:
+    """full HTML 首屏判断索引——与 Markdown「判断索引」同源同序。
+
+    成员判据与标签由 `analysis_schema.index_entries` 单点给出（md 侧
+    `_render_judgment_index` 共用），本层只负责 HTML 排布；两处各写一份判据
+    必然漂移，故这里**不做任何筛选**，只渲染拿到的条目。
+    """
+    if mode != "full":
+        return ""
+    from lib.analysis_schema import index_entries
+
+    entries = index_entries(analysis)
+    if not entries:
+        return ""
+    items = "".join(
+        f'<li style="margin:4px 0"><strong style="color:var(--tx)">'
+        f'{_html_mod.escape(label)}</strong>：{_html_mod.escape(title)}'
+        f'<span style="color:var(--tx-f)">（详见下方分析段）</span></li>'
+        for label, title in entries
+    )
+    return (
+        '<section style="margin:var(--space-5) 0;padding:var(--space-4);'
+        'border:1px solid var(--bdr);border-radius:10px;background:var(--bg2)">'
+        '<div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:6px">判断索引</div>'
+        '<p style="margin:0 0 6px;color:var(--tx-m);font-size:var(--text-sm)">'
+        '以下是本次研究最值得先看的判断索引；数字、事实来源和证据强度请展开对应分析段核验。</p>'
+        f'<ul style="margin:0;padding-left:1.2em;font-size:var(--text-sm)">{items}</ul>'
+        '</section>'
+    )
+
+
+def _html_full_mode_identity_status(symbol: str, mode: str,
+                                    analysis: list[dict] | None,
+                                    profile: dict[str, Any] | None = None) -> str:
+    """仅 full HTML 说明其审计底稿身份，与 Markdown 的状态语义一致。
+
+    profile（P0-5）：研究档案，与 Markdown 侧共用 `research_profile` 的
+    同一份摘要文案，避免两处措辞漂移。
+    """
+    if mode != "full":
+        return ""
+    from lib.analysis_status import (ANALYSIS_OK, ANALYSIS_UNAVAILABLE,
+                                     analysis_payload_status)
+
+    safe_symbol = _html_mod.escape(symbol)
+    status = analysis_payload_status(analysis)
+    if status == ANALYSIS_OK:
+        title = "审计/证据数据底稿（分析合成已注入）"
+        detail = "本模式保留完整数据、来源与计算过程以供追溯；分析段已注入，但数据底稿本身不替代面向阅读的研究结论。"
+    elif status == ANALYSIS_UNAVAILABLE:
+        # 工具故障 ≠ 内容缺失：不得断言「分析合成未完成」（review C2）。
+        title = "数据底稿（分析合成状态无法校验）"
+        detail = (
+            "分析校验组件本次不可用，无法确认分析段是否已注入——这是工具故障，"
+            "不是内容缺失的证据。"
+            "本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。"
+        )
+    else:
+        title = "数据底稿（分析合成未完成）"
+        detail = (
+            "本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。"
+            "完成方式：准备通过校验的 analysis.json 后重渲："
+            f"uv run python skills/invest-a-stock/scripts/invest.py report {safe_symbol} --mode full --analysis &lt;analysis.json&gt;。"
+        )
+    from lib.research_profile import format_profile_html
+
+    return (
+        '<section style="margin:var(--space-5) 0;padding:var(--space-4);'
+        'border:1px solid var(--wn);border-radius:10px;background:var(--bg2)">'
+        '<div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:6px">报告说明</div>'
+        f'<strong style="color:var(--wn)">产物定位：{title}</strong>'
+        f'<p style="margin:8px 0 0;color:var(--tx-m);font-size:var(--text-sm)">{detail}</p>'
+        f'{format_profile_html(profile)}'
+        '</section>'
+    )
+
+
 def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = None,
-                analysis: list[dict] | None = None) -> str:
+                analysis: list[dict] | None = None, mode: str = "full",
+                profile: dict[str, Any] | None = None) -> str:
     """HTML 研究报告（新版模板）。
 
     直接构建结构化 HTML，匹配 host-docs/stock-report.html 模板样式和交互。
@@ -1217,6 +1294,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
         symbol: 股票代码（如 "600519"）
         md_text: 已弃用，保留仅为 CLI 向后兼容；HTML 仅读取 collection
         analysis: analysis.json 段列表（R-B1），渲染为「分析」卡片段；无则跳过
+        mode: report 模式；仅 full 显示审计/证据数据底稿状态卡
     """
     del md_text  # stdout Markdown 由 invest.py 单独渲染
     dims = _index_dims(collection)
@@ -1440,14 +1518,16 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 
     research_md = _lazy_section_research_summary(collection, symbol, dims)
     research_sec = _html_research(research_md)
-    # 全量审查 P0-3：analysis 提供 events 段时隐藏静态「待填写」占位 section
-    # （旧实现静态块永不填充、与真卡并存）
-    has_events_analysis = any(
-        isinstance(s, dict) and (
-            s.get("module") == "events" or s.get("position") == "events")
-        for s in (analysis or []))
+    # 全量审查 P0-3：analysis 提供事件分析段时隐藏静态「待填写」占位 section
+    # （旧实现静态块永不填充、与真卡并存）。判定键与 md 侧共用
+    # `analysis_schema.EVENTS_HOST_KEYS`——两处各写一份曾导致新槽位键
+    # `event_classification` 在 html 侧漏判（md 已替换、html 仍显静态块）。
+    from lib.analysis_schema import EVENTS_HOST_KEYS, find_section
+    has_events_analysis = find_section(analysis, EVENTS_HOST_KEYS) is not None
     events_sec = "" if has_events_analysis else _html_events()
     analysis_sec = _html_analysis(analysis)
+    judgment_index = _html_judgment_index(analysis, mode)
+    identity_status = _html_full_mode_identity_status(symbol, mode, analysis, profile)
     refs_sec = _html_refs(ref_rows)
     risk_banner = _html_risk_banner()
     disclaimer = _html_disclaimer()
@@ -1480,6 +1560,8 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 </div>
 
 {risk_banner}
+{judgment_index}
+{identity_status}
 {overview}
 {valuation}
 {financials}
@@ -1504,4 +1586,3 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
 </html>"""
 
     return html
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 from unittest.mock import MagicMock, patch
 
@@ -198,7 +199,7 @@ class TestCollectorHelpers:
         from lib import collector
 
         mock_records = [
-            {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(100 - i * 10)}
+            {"trade_date": (_dt.date.today() - _dt.timedelta(days=i + 1)).strftime("%Y%m%d"), "net_mf_amount": float(100 - i * 10)}
             for i in range(6)
         ]
 
@@ -218,7 +219,7 @@ class TestCollectorHelpers:
 
         sparse = [{"trade_date": "20260610", "net_mf_amount": 100.0}]
         akshare_records = [
-            {"trade_date": f"202606{10 - i:02d}", "net_mf_vol": float(50 + i)}
+            {"trade_date": (_dt.date.today() - _dt.timedelta(days=i + 1)).strftime("%Y%m%d"), "net_mf_vol": float(50 + i)}
             for i in range(6)
         ]
 
@@ -252,7 +253,7 @@ class TestCollectorHelpers:
         from lib import collector
 
         rows = [
-            {"trade_date": f"202606{10 - i:02d}",
+            {"trade_date": (_dt.date.today() - _dt.timedelta(days=i + 1)).strftime("%Y%m%d"),
              "net_mf_vol": 100.0 if i < 2 else None}
             for i in range(10)
         ]
@@ -268,7 +269,7 @@ class TestCollectorHelpers:
         from lib import collector
 
         rows = [
-            {"trade_date": f"202606{10 - i:02d}",
+            {"trade_date": (_dt.date.today() - _dt.timedelta(days=i + 1)).strftime("%Y%m%d"),
              "net_mf_vol": 100.0 if i < 6 else None}
             for i in range(10)
         ]
@@ -299,7 +300,7 @@ class TestCollectorHelpers:
         from lib import collector
 
         mock_records = [
-            {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(100 - i * 10)}
+            {"trade_date": (_dt.date.today() - _dt.timedelta(days=i + 1)).strftime("%Y%m%d"), "net_mf_amount": float(100 - i * 10)}
             for i in range(6)
         ]
         with patch("lib.collector._orchestrate._q_tushare_hsgt_top10") as mock_q, patch(
@@ -324,7 +325,7 @@ class TestCollectorHelpers:
             collector.env, "get_config", return_value={"TUSHARE_TOKEN": "x" * 32}
         ), patch.object(collector._orchestrate, "_tushare_client", return_value=MagicMock()):
             mock_nb.return_value = [
-                {"trade_date": f"202606{10 - i:02d}", "net_mf_amount": float(i + 1)}
+                {"trade_date": (_dt.date.today() - _dt.timedelta(days=i + 1)).strftime("%Y%m%d"), "net_mf_amount": float(i + 1)}
                 for i in range(6)
             ]
             mock_mf.return_value = [{"trade_date": "20260610", "net_mf_amount": 10000.0}]

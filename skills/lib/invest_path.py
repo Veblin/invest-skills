@@ -59,7 +59,14 @@ def load_gap_scan_module(module_file: str = "kline_source"):
         raise ImportError(f"gap-scan canonical {module_file}.py missing at {lib}")
     mod = _ilu.module_from_spec(spec)
     sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        # v0.3.0 D4（D11 同族清扫）：exec 失败留下的残破模块会被 sys.modules 永久
+        # 缓存，后续 load_gap_scan_module 短路返回它 → 真实 import 错误被掩盖成
+        # 远处难懂的 AttributeError。范式见 collector/_orchestrate.py 的 F5 处理。
+        sys.modules.pop(mod_name, None)
+        raise
     return mod
 
 
@@ -119,5 +126,10 @@ def load_invest_a_etf_module():
         raise ImportError(f"cannot load invest-a-etf etf_data from {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[_INVEST_A_ETF_MODULE_NAME] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        # v0.3.0 D4（D11 同族清扫）：同上——残破模块不得留在 sys.modules
+        sys.modules.pop(_INVEST_A_ETF_MODULE_NAME, None)
+        raise
     return mod

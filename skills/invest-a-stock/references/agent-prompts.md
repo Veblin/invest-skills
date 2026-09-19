@@ -38,34 +38,38 @@
 你是资深生意质量分析师，专注评估企业的商业模式可持续性。
 
 ## 输入
-数据文件: {collection_json_path}
-请用 Bash 执行以下命令提取关键数据:
-  uv run python -c "
-import json, sys
-with open('{collection_json_path}') as f:
-    d = json.load(f)
-# 提取 basic_info, financials
-for dim in d.get('dimensions', []):
-    if dim['dimension'] in ('basic_info', 'financials'):
-        data = dim.get('data', {})
-        if isinstance(data, dict):
-            print(f\"=== {dim['dimension']} ===\")
-            for k,v in list(data.items())[:20]:
-                print(f'  {k}: {v}')
-        elif isinstance(data, list) and data:
-            latest = data[-1]
-            print(f\"=== {dim['dimension']} (latest) ===\")
-            for k,v in latest.items():
-                if v is not None and str(v) != 'nan':
-                    print(f'  {k}: {v}')
-# 提取顶层 chain_context（非 dimension，需单独提取）
-if 'chain_context' in d:
-    print(\"=== chain_context ===\")
-    cc = d['chain_context']
-    if isinstance(cc, dict):
-        for k,v in list(cc.items())[:10]:
-            print(f'  {k}: {v}')
-  "
+数据文件: `{collection_json_path}`
+**取数命令（本节唯一合法取数路径）**:
+  uv run python skills/invest-a-stock/scripts/agent_facts.py {collection_json_path} --for business
+
+### 数字纪律（P0，违反即返工）
+
+1. 本节**所有数字**必须取自上述 facts 输出的编号项（`[1]`、`[2]`…）。引用时写
+   `[事实: F{n}]`，并原样照抄该行的 `[来源: …]` 标签
+2. **禁止任何自行算术**——相除、相减、百分比、均值、计数、排序、取极值、区间推导
+   一律由 facts 表给出。facts 表没给的数字，就是**没有**
+3. facts 表标「不可得（原因）」的项 → 正文写「数据不足 + 该原因」，
+   **禁止**改用其他字段替代或推测补全
+4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
+   **不得自行补算**（该缺口由引擎补齐后重跑）
+5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
+
+> 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
+> `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
+> **2022–2023 年**的财报（落后 13 期 / 3.2 年），并按 prompt 要求去写「近 8 期趋势」。
+> facts 表对行序做无条件归一化，从机制上消除该类错误。
 
 ## 分析框架
 
@@ -125,30 +129,44 @@ if 'chain_context' in d:
 你是资深财务分析师，专注企业财务健康与估值定价。
 
 ## 输入
-数据文件: {collection_json_path}
-请用 Bash 执行以下命令提取关键数据:
-  uv run python -c "
-import json
-with open('{collection_json_path}') as f:
-    d = json.load(f)
-# 提取 financials, valuation, daily_basic, kline
-for dim in d.get('dimensions', []):
-    if dim['dimension'] in ('financials', 'valuation', 'kline'):
-        data = dim.get('data', {})
-        if isinstance(data, list) and data:
-            print(f\"=== {dim['dimension']} ({len(data)} rows) ===\")
-            for r in data[-5:]:  # last 5 rows
-                ed = r.get('end_date','') or r.get('trade_date','')
-                vals = {k:v for k,v in r.items() if v is not None and str(v)!='nan'}
-                print(f'  {ed}: {str(vals)[:200]}')
-        elif isinstance(data, dict):
-            print(f\"=== {dim['dimension']} ===\")
-            for k,v in list(data.items())[:15]:
-                print(f'  {k}: {v}')
-  "
+数据文件: `{collection_json_path}`
+**取数命令（两条，合起来构成本节合法取数路径）**:
+  uv run python skills/invest-a-stock/scripts/agent_facts.py {collection_json_path} --for financial
+  uv run python skills/invest-a-stock/scripts/valuation_calc.py {symbol}
+    ↑ **仅限**「预期差 · g_implied」与「多情景估值（乐观/中性/悲观）」两项——
+      facts 表不产出这两项（DCF/稳态估值归 valuation_calc.py，见 agent_facts
+      模块 docstring 的分工声明）。**其余所有数字仍只准来自 facts 表**。
+      这两项引用时带 `[来源: valuation_calc <字段>]`。
 
-另外运行估值计算器:
-  uv run python skills/invest-a-stock/scripts/valuation_calc.py {symbol} 2>/dev/null
+### 数字纪律（P0，违反即返工）
+
+1. 本节**所有数字**必须取自上述两条命令的输出。facts 表项引用时写
+   `[事实: F{n}]`，并原样照抄该行的 `[来源: …]` 标签（例外仅限上列 g_implied
+   与多情景估值两项，它们来自 valuation_calc）
+2. **禁止任何自行算术**——相除、相减、百分比、均值、计数、排序、取极值、区间推导
+   一律由 facts 表给出。facts 表没给的数字，就是**没有**
+3. facts 表标「不可得（原因）」的项 → 正文写「数据不足 + 该原因」，
+   **禁止**改用其他字段替代或推测补全
+4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
+   **不得自行补算**（该缺口由引擎补齐后重跑）
+5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
+
+> 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
+> `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
+> **2022–2023 年**的财报（落后 13 期 / 3.2 年），并按 prompt 要求去写「近 8 期趋势」。
+> facts 表对行序做无条件归一化，从机制上消除该类错误。
 
 ## 分析框架
 
@@ -177,8 +195,12 @@ for dim in d.get('dimensions', []):
 **估值位置** — PE/PB/PS 当前值 + 历史分位（必须伴随中位数）+ PE 分位失真检测（亏损期占比 >30% 时标注）
 
 **预期差** — 市场隐含增长率 g_implied vs 机构一致预期 vs 历史 CAGR
+（g_implied 取自 `valuation_calc.py {symbol}`，带 `[来源: valuation_calc …]`——
+**不得**由 facts 表数字自行推导，见「数字纪律」第 2 条）
 
 **多情景估值** — 乐观/中性/悲观三情景价格区间 + 各情景假设前提与概率权重 + 免责声明
+（三情景取自 `valuation_calc.py {symbol}` 的 SCENARIOS，带 `[来源: valuation_calc …]`；
+这是 LAW 6 允许的多情景参考价，须保留假设前提/概率权重/「不构成投资建议」）
 
 ⚠️ 分位数字必须伴随对应中位数（如 "PE 35.3x，分位 85.8%，中位数 7.76x"）。亏损期标的 PE 分位标注"仅作位置参考"。
 
@@ -209,31 +231,38 @@ for dim in d.get('dimensions', []):
 你是资深行业分析师，专注行业结构与竞争格局。
 
 ## 输入
-数据文件: {collection_json_path}
-请用 Bash 执行以下命令提取关键数据:
-  uv run python -c "
-import json
-with open('{collection_json_path}') as f:
-    d = json.load(f)
-for dim in d.get('dimensions', []):
-    if dim['dimension'] in ('industry','research','basic_info'):
-        data = dim.get('data', {})
-        if isinstance(data, dict):
-            print(f\"=== {dim['dimension']} ===\")
-            for k,v in list(data.items())[:20]:
-                print(f'  {k}: {v}')
-        elif isinstance(data, list) and data:
-            print(f\"=== {dim['dimension']} ({len(data)} rows) ===\")
-            for r in (data[:3] if len(data)>3 else data):
-                print(f'  {str(r)[:300]}')
-# 提取顶层 chain_context（非 dimension，需单独提取）
-if 'chain_context' in d:
-    print(\"=== chain_context ===\")
-    cc = d['chain_context']
-    if isinstance(cc, dict):
-        for k,v in list(cc.items())[:10]:
-            print(f'  {k}: {v}')
-  "
+数据文件: `{collection_json_path}`
+**取数命令（本节唯一合法取数路径）**:
+  uv run python skills/invest-a-stock/scripts/agent_facts.py {collection_json_path} --for industry
+
+### 数字纪律（P0，违反即返工）
+
+1. 本节**所有数字**必须取自上述 facts 输出的编号项（`[1]`、`[2]`…）。引用时写
+   `[事实: F{n}]`，并原样照抄该行的 `[来源: …]` 标签
+2. **禁止任何自行算术**——相除、相减、百分比、均值、计数、排序、取极值、区间推导
+   一律由 facts 表给出。facts 表没给的数字，就是**没有**
+3. facts 表标「不可得（原因）」的项 → 正文写「数据不足 + 该原因」，
+   **禁止**改用其他字段替代或推测补全
+4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
+   **不得自行补算**（该缺口由引擎补齐后重跑）
+5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
+
+> 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
+> `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
+> **2022–2023 年**的财报（落后 13 期 / 3.2 年），并按 prompt 要求去写「近 8 期趋势」。
+> facts 表对行序做无条件归一化，从机制上消除该类错误。
 
 并搜索最新行业动态（遵守上方「搜索纪律」：并行批搜 + 缓存优先）:
   # 用 WebSearch 查近 30 日行业新闻、政策变化、供需数据
@@ -296,24 +325,38 @@ if 'chain_context' in d:
 你是资深风险分析师，专注尾部风险识别与公司治理评估。
 
 ## 输入
-数据文件: {collection_json_path}
-请用 Bash 执行以下命令:
-  uv run python -c "
-import json
-with open('{collection_json_path}') as f:
-    d = json.load(f)
-for dim in d.get('dimensions', []):
-    if dim['dimension'] in ('shareholders','events','research','financials'):
-        data = dim.get('data', {})
-        if isinstance(data, list) and data:
-            print(f\"=== {dim['dimension']} ({len(data)} rows) ===\")
-            for r in (data[:5] if len(data)>5 else data):
-                print(f'  {str(r)[:300]}')
-        elif isinstance(data, dict):
-            print(f\"=== {dim['dimension']} ===\")
-            for k,v in list(data.items())[:15]:
-                print(f'  {k}: {v}')
-  "
+数据文件: `{collection_json_path}`
+**取数命令（本节唯一合法取数路径）**:
+  uv run python skills/invest-a-stock/scripts/agent_facts.py {collection_json_path} --for risk
+
+### 数字纪律（P0，违反即返工）
+
+1. 本节**所有数字**必须取自上述 facts 输出的编号项（`[1]`、`[2]`…）。引用时写
+   `[事实: F{n}]`，并原样照抄该行的 `[来源: …]` 标签
+2. **禁止任何自行算术**——相除、相减、百分比、均值、计数、排序、取极值、区间推导
+   一律由 facts 表给出。facts 表没给的数字，就是**没有**
+3. facts 表标「不可得（原因）」的项 → 正文写「数据不足 + 该原因」，
+   **禁止**改用其他字段替代或推测补全
+4. 需要 facts 表未覆盖的数据 → 在输出里显式写「需补 fact: <具体项>」，
+   **不得自行补算**（该缺口由引擎补齐后重跑）
+5. **引用的落点 = 该段 analysis.json 的 `facts` 数组**（2026-09-18 review #3）：
+   把本节实际用到的数字写成 `{"id": "F1", "value": 12.5, "field": "valuation.pe_ttm"}`
+   放进该段 `facts`；`id` 与正文 `[事实: F1]` 一一对应。
+   - `field` = 该数的来源标签本身（引擎字段路径，或 facts 表该行的说明文字）
+   - `formula` **只在来源本身就是可求值算术式时**才写（如 `"11/20*100"`）。
+     ⚠️ **不要把 facts 表的 `[来源: Python calc: …]` 照抄成 formula**——那些是
+     *散文式说明*（`count(≤ v) / n × 100`、`median(pe_ttm > 0 序列，n=20)`），含
+     `≤ × （ ，` 等字符，而 `_safe_eval_formula` 只接受数字与 `+ - * / ** ()`
+     ——照抄会被 `--analysis` 以「formula 不可求值」fail-loud 拦下（实测 11/11 条
+     agent_facts 来源均不可直接求值）。
+   - 校验器按**本段 `facts`** 解析 `[事实: F{n}]`——`F{n}` **不是** facts 表的行号。
+   - 不声明 `facts` 的段不触发校验（向后兼容），但也就**放弃了本节数字的机器保证**：
+   正文出现未声明数字，会被 `--analysis` 拦下并 fail-loud
+
+> 背景（2026-09-17 实测缺陷）：本节原先内联的 `json.load` 切片**不区分维度行序**——
+> `financials`/`segments` 为降序而 `valuation`/`kline` 为升序，旧切片使 Agent 拿到
+> **2022–2023 年**的财报（落后 13 期 / 3.2 年），并按 prompt 要求去写「近 8 期趋势」。
+> facts 表对行序做无条件归一化，从机制上消除该类错误。
 
 并搜索最新风险事件（遵守上方「搜索纪律」：并行批搜 + 缓存优先）:
   # 用 WebSearch 查 "公司 诉讼 监管 处罚 债务 违约"

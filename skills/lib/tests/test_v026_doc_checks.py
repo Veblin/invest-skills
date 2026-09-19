@@ -283,37 +283,30 @@ def test_v026_version_headers_pending_bump():
 
 # ---------------------------------------------------------------- Windows ps1 静态自查
 
-def test_ps1_covers_all_23_links():
-    """ps1 链接表须覆盖仓库全部 23 条技能链接（17 junction + 6 hardlink）。
+def test_ps1_covers_all_skill_links():
+    """ps1 链接表须覆盖 全量 skills/ 目录 × 三个发现面（junction）+ commands（hardlink）。
 
-    17 junction = .workbuddy\\skills 6 + .claude\\skills 5 + .agents\\skills 6（DSH）；
-    6 hardlink = .claude\\commands 6（v0.2.6 补 pattern-scan、v0.2.7 补 .agents 后
-    Python 复算，2026-08-21）。
-    macOS 无法执行 PowerShell——以链接名清单对照作静态验收（T1-T5 真机验收后置）。
+    动态口径（R1 验收 H6 泛化）：期望清单直接由 ``skills/*/SKILL.md`` 派生——
+    此前为手写枚举（v0.2.6/v0.2.7 各补一次），3 新技能加入时暴露固化缺陷。
+    macOS 无法执行 PowerShell——以链接名清单对照作静态验收（真机验收后置）。
     """
+    skills = sorted(p.parent.name for p in (_REPO_ROOT / "skills").glob("*/SKILL.md"))
+    assert skills, "未发现任何 skills/*/SKILL.md"
     ps1 = _read("scripts/setup_workbuddy_windows.ps1")
-    expected_dirs = [
-        ".workbuddy\\skills\\invest-a-stock", ".workbuddy\\skills\\invest-a-etf",
-        ".workbuddy\\skills\\invest-a-journal", ".workbuddy\\skills\\invest-a-pulse",
-        ".workbuddy\\skills\\invest-a-gap-scan", ".workbuddy\\skills\\invest-a-pattern-scan",
-        ".claude\\skills\\invest-a-stock", ".claude\\skills\\invest-a-etf",
-        ".claude\\skills\\invest-a-journal", ".claude\\skills\\invest-a-gap-scan",
-        ".claude\\skills\\invest-a-pattern-scan",
-        ".agents\\skills\\invest-a-stock", ".agents\\skills\\invest-a-etf",
-        ".agents\\skills\\invest-a-journal", ".agents\\skills\\invest-a-pulse",
-        ".agents\\skills\\invest-a-gap-scan", ".agents\\skills\\invest-a-pattern-scan",
-    ]
-    expected_files = [
-        ".claude\\commands\\invest-a-stock.md", ".claude\\commands\\invest-a-etf.md",
-        ".claude\\commands\\invest-a-journal.md", ".claude\\commands\\invest-a-pulse.md",
-        ".claude\\commands\\invest-a-gap-scan.md", ".claude\\commands\\invest-a-pattern-scan.md",
-    ]
+    expected_dirs = [f"{surface}\\skills\\{s}"
+                     for surface in (".workbuddy", ".claude", ".agents") for s in skills]
+    expected_files = [f".claude\\commands\\{s}.md" for s in skills]
     for name in expected_dirs + expected_files:
         assert name in ps1, f"ps1 缺少链接: {name}"
-    # 数量断言：链接表条目恰为 23（17 + 6），无遗漏/重复
+    # 数量断言：恰为 3×N 目录 + N 文件，无遗漏/重复
     names = re.findall(r'Name = "([^"]+)"', ps1)
-    assert len(names) == 23, f"ps1 链接表应为 23 条，实际 {len(names)}"
-    assert len(set(names)) == 23, "ps1 链接表存在重复条目"
+    expected_total = len(expected_dirs) + len(expected_files)
+    assert len(names) == expected_total, f"ps1 链接表应为 {expected_total} 条，实际 {len(names)}"
+    assert len(set(names)) == expected_total, "ps1 链接表存在重复条目"
+    # 三个目录面两两同集（防“只补一面”）
+    for surface in (".workbuddy", ".claude", ".agents"):
+        have = {n for n in names if n.startswith(f"{surface}\\skills\\")}
+        assert have == {f"{surface}\\skills\\{s}" for s in skills}, f"{surface} 面技能集不完整"
     # junction 用于目录、hardlink 用于文件（junction 不支持文件）
     assert "New-Item -ItemType Junction" in ps1
     assert "New-Item -ItemType HardLink" in ps1
@@ -322,10 +315,47 @@ def test_ps1_covers_all_23_links():
     assert "LinkType -eq \"HardLink\"" in ps1
 
 
+def test_repo_link_surfaces_match_skills():
+    """三个发现面的链接须与 skills/ 一一对应——**文件系统级**，非文本级。
+
+    上方 test_ps1 / test_readme 只校验 ps1 与 README 的**文本**：动态化后二者与
+    计数断言可以互相自洽，而真实链接仍可缺条（H6b 后即如此——commands 少 4 条，
+    macOS/Linux 上 invest-hk-stock/event-calendar 等新技能的
+    slash command 无文件可加载；Windows 走 ps1 硬链接，故不复现）。
+    """
+    skills = sorted(p.parent.name for p in (_REPO_ROOT / "skills").glob("*/SKILL.md"))
+    assert skills, "未发现任何 skills/*/SKILL.md"
+    for surface in (".workbuddy/skills", ".claude/skills", ".agents/skills"):
+        for s in skills:
+            link = _REPO_ROOT / surface / s
+            assert link.is_symlink(), f"{surface}/{s} 应为 symlink"
+            assert link.resolve().is_dir(), f"{surface}/{s} 断链"
+    for s in skills:
+        link = _REPO_ROOT / ".claude" / "commands" / f"{s}.md"
+        assert link.is_symlink(), f".claude/commands/{s}.md 缺失（slash command 不可用）"
+        assert link.resolve().is_file(), f".claude/commands/{s}.md 断链"
+
+
+def test_link_skills_sh_covers_all_surfaces():
+    """macOS/Linux 修复脚本须覆盖四个发现面，且技能清单动态派生（不得手写枚举）。
+
+    此前只建 .agents 一面 + 手写 SKILLS 数组——新增技能时其余三面各自滞后
+    （commands 缺 4 条），而脚本自身无从发现该漂移。
+    """
+    sh = _read("scripts/link-skills.sh")
+    for surface in (".workbuddy/skills", ".claude/skills", ".agents/skills",
+                    ".claude/commands"):
+        assert surface in sh, f"link-skills.sh 未覆盖 {surface} 面"
+    assert "skills/*/SKILL.md" in sh, "技能清单应动态派生（skills/*/SKILL.md），防枚举漂移"
+
+
 def test_readme_windows_rebuild_section():
     readme = _read("README.md")
     assert "setup_workbuddy_windows.ps1" in readme
-    assert "23 条技能链接" in readme
+    # 动态计数：链接总数 = 3 面 × N 目录 + N 文件 = 4N（R1 H6 泛化）
+    n = len(list((_REPO_ROOT / "skills").glob("*/SKILL.md")))
+    assert f"{4 * n} 条技能链接" in readme, f"README 应声明 {4 * n} 条技能链接"
+    assert f"{3 * n} 个目录链接" in readme and f"{n} 个 commands 文件" in readme
     assert "cmd /c dir .workbuddy\\skills" in readme or "cmd /c dir .workbuddy/skills" in readme
 
 
@@ -381,3 +411,107 @@ def test_evaluation_criteria_four_dimensions():
     # 旧"三维"表述清除
     assert "卖出三维" not in criteria
     assert "其他三维" not in criteria
+
+
+# ---------------------------------------------------------------- R-C01 / R-C02（2026-09-12）
+
+_JOURNAL_SKILL = "skills/invest-a-journal/SKILL.md"
+_JOURNAL_CRITERIA = "skills/invest-a-journal/references/evaluation-criteria.md"
+
+
+def test_r_c02_falsification_field_documented():
+    """买入评估「风险收益比」维须含失效条件预设，且四要素写全。"""
+    crit = _read(_JOURNAL_CRITERIA)
+    assert "失效条件预设（R-C02 必填）" in crit
+    for token in ("观测项", "阈值", "数据来源", "复核时点"):
+        assert token in crit, f"§4.1 缺要素：{token}"
+    assert "点位版本化" in crit, "须与 scenario-plans 的点位版本化对接"
+
+
+def test_r_c02_knowledge_frame_carries_literature_notes():
+    """止损知识框须带文献注记与条件限定。"""
+    crit = _read(_JOURNAL_CRITERIA)
+    for token in ("Kaminski", "Dolvin", "行为疫苗", "宽幅"):
+        assert token in crit, f"§4.2 缺：{token}"
+    assert "条件限定" in crit or "条件依赖" in crit
+
+
+def test_r_c02_has_no_stop_loss_percentage_advice():
+    """**不输出止损百分比建议**（LAW 6）——文中不得出现「止损 X%」式指令。"""
+    import re as _re
+
+    crit = _read(_JOURNAL_CRITERIA)
+    bad = _re.findall(r"止损\s*[-−]?\d+(\.\d+)?\s*%", crit)
+    assert not bad, f"出现止损百分比建议：{bad}"
+    assert "不输出止损百分比建议" in crit, "须显式写明该禁令"
+
+
+def test_r_c01_documented_in_journal_skill():
+    skill = _read(_JOURNAL_SKILL)
+    for token in ("错频", "个人自证数据", "非实证阈值", "结构化复盘"):
+        assert token in skill, f"journal SKILL 缺：{token}"
+    assert "journal.py stats" in skill, "须写明必跑命令"
+    # 冷却 = 流程而非禁止交易。
+    # ⚠️ 先剔除**否定式**行（「不得出现『必须停止交易』类指令」本身含该串）——
+    # 文档要禁止某措辞就必须引用它，直接子串扫描会把禁令自身判成违规
+    # 判据看**出现处前文**（禁止语常在前一行，行级扫描会漏）：
+    # 前 40 字内有否定词即视为「禁令引用」而非指令
+    bad = []
+    start = 0
+    while (idx := skill.find("必须停止交易", start)) != -1:
+        if not any(k in skill[max(0, idx - 40): idx] for k in ("不得", "禁止", "不是", "勿")):
+            bad.append(skill[max(0, idx - 40): idx + 12])
+        start = idx + 1
+    assert not bad, f"出现指令式措辞：{bad}"
+    assert "不是禁止交易" in skill
+
+
+def test_r_c01_self_check_has_new_items():
+    skill = _read(_JOURNAL_SKILL)
+    assert "R-C01" in skill and "R-C02" in skill
+
+
+# ---------------------------------------------------------------- R-C03 / R-C04（v0.3.0 R5）
+
+def test_r_c03_disposition_hint_documented():
+    """R-C03：权重最大持仓的处置效应弱提示须在 portfolio 侧可渲染（代码 + 文案约束）。"""
+    src = _read("skills/invest-a-stock/scripts/lib/positions.py")
+    assert "def disposition_hint" in src, "缺 disposition_hint"
+    for token in ("Sui-Wang 2025", "相关非因果", "不泛化", "stakes 低 ≠ 无偏差"):
+        assert token in src, f"提示文案缺：{token}"
+    # 弱显著样式：不得用 ⚠️（强信号）
+    assert "弱显著样式：不用 ⚠️" in src
+
+
+def test_r_c03_hint_is_not_advice():
+    """文案合规（非建议）——不得含动作词。"""
+    src = _read("skills/invest-a-stock/scripts/lib/positions.py")
+    start = src.index("def disposition_hint")
+    body = src[start:start + 2000]
+    for banned in ("建议减持", "建议加仓", "应减仓", "应加仓"):
+        assert banned not in body
+
+
+def test_r_c04_inaction_watch_documented():
+    """R-C04：字段可用 + 复盘模板含该节。"""
+    skill = _read(_JOURNAL_SKILL)
+    crit = _read(_JOURNAL_CRITERIA)
+    for token in ("inaction_watch", "未行动观察", "应做未做", "不应做却做"):
+        assert token in skill, f"journal SKILL 缺：{token}"
+    assert "未行动观察复盘" in crit, "复盘模板缺「未行动观察复盘」节"
+    for token in ("skip_reason", "skip_kind", "price_at_observation", "backfill", "review_class"):
+        assert token in skill, f"字段未文档化：{token}"
+
+
+def test_r_c04_no_outcome_bias_wording():
+    """措辞纪律：不得用结果反推决策（「早该买/幸亏没买」）。"""
+    crit = _read(_JOURNAL_CRITERIA)
+    assert "不写**「早该买」「幸亏没买」**" in crit or "不写" in crit
+    assert "结果偏误" in crit
+
+
+def test_r_c04_show_renders_inaction_section():
+    """渲染侧须真读该字段（否则字段是死的）。"""
+    src = _read("skills/invest-a-journal/scripts/journal.py")
+    assert "inaction_watch" in src
+    assert "未行动观察（错过后悔侧）" in src

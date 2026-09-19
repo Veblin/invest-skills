@@ -59,6 +59,7 @@ from ._sources import (
     _q_tushare_daily_qfq,
     _q_tushare_financials,
     _q_tushare_hsgt_top10,
+    _q_tushare_mainbz,
     _q_tushare_moneyflow,
     _q_tushare_shareholders,
     _qp_akshare,
@@ -69,6 +70,8 @@ from ._sources import (
     _require_tushare,
     _tushare_client,
 )
+
+from lib.tushare_client import api_min_points  # noqa: E402 —— 权限提示要报积分门槛
 
 
 logger = logging.getLogger(__name__)
@@ -481,7 +484,71 @@ def _q_tushare_report_rc(symbol: str) -> list[dict] | None:
         return None
 
 
-def _q_tushare_forecast(symbol: str) -> list[dict] | None:
+def _is_token_invalid(err: str) -> bool:
+    """token 失效/过期信号（tushare ``code=-2002``；client 记「Token 无效」）。
+
+    -2002 与积分无关：报成「权限不足/非权限问题」会把用户引离唯一有效的动作
+    （重签 token），故单列一类。
+    """
+    return ("-2002" in err) or ("token 不对" in err) or ("Token 无效" in err)
+
+
+def _classify_tushare_error(tc: Any, api_name: str) -> str:
+    """把 client 的失败信号归类成**用户可读的类别**（不回显异常原文，R12h）。
+
+    分类：``no_token`` / ``token_invalid`` / ``permission`` / ``quota`` / ``timeout``
+    / ``error`` / ``empty``（无信号 = 接口正常返回空）。
+    """
+    try:
+        probe = getattr(tc, "is_permission_denied", None)
+        if callable(probe) and probe(api_name):
+            return "permission"
+        err = str(getattr(tc, "last_error", None) or "")
+    except Exception:  # noqa: BLE001 —— 归类失败不改变降级语义
+        return "error"
+    if "未配置 TUSHARE_TOKEN" in err:
+        return "no_token"
+    if _is_token_invalid(err):
+        return "token_invalid"
+    if "无接口权限" in err:
+        return "permission"
+    if ("配额" in err) or ("-2001" in err):
+        return "quota"
+    if any(k in err for k in ("Timeout", "timeout", "Connection", "Proxy",
+                              "SSLError", "timed out", "RemoteDisconnected")):
+        return "timeout"
+    return "error" if err else "empty"
+
+
+def _forecast_unavailable_reason(diag: dict | None = None) -> str:
+    """forecast 不可得的**原因分类**（R0~R2 review P2）。
+
+    回归：`_q_tushare_forecast` 不读 `tc.last_error`（该字段正是为「query 改返回空帧
+    而非抛异常」而加），所有失败都被报成「权限不足或无数据（需 Tushare 2000+积分）」
+    —— token 过期 / 配额用完 / 超时都**误导用户去买积分**，且「真空窗 vs 取数失败」
+    不可区分。
+    """
+    code = str((diag or {}).get("reason") or "")
+    points = api_min_points("forecast")
+    hint = f"（需 Tushare {points} 积分）" if points else ""
+    if code == "no_token":
+        return f"未配置 TUSHARE_TOKEN{hint}"
+    if code == "token_invalid":
+        return "TUSHARE_TOKEN 无效或已过期（请重签 token；与积分无关）"
+    if code == "permission":
+        return f"接口无权限或积分不够{hint}"
+    if code == "quota":
+        return "当日 Tushare 配额已用完（非权限问题，次日恢复）"
+    if code == "timeout":
+        return "取数超时或网络异常（非权限问题，可重试）"
+    if code == "empty":
+        return "窗口内无业绩预告（接口正常返回空）"
+    if code == "error":
+        return "取数失败（数据源返回异常，非权限问题）"
+    return f"无数据或取数失败{hint}"
+
+
+def _q_tushare_forecast(symbol: str, *, diag: dict | None = None) -> list[dict] | None:
     """Tushare forecast：业绩预告（上市公司自行披露的盈利预测）。
 
     权限：2000 积分可用。
@@ -501,9 +568,15 @@ def _q_tushare_forecast(symbol: str) -> list[dict] | None:
             out = df.to_dict("records")
             logger.info("forecast: %d records for %s", len(out), ts)
             return out
+        # 空帧：读 client 信号区分「真空窗」与「取数失败」（query 契约是失败也返回空
+        # 帧且不抛，不读 last_error 就分不出来）
+        if diag is not None:
+            diag["reason"] = _classify_tushare_error(tc, "forecast")
         return None
     except Exception as exc:
         err = str(exc)
+        if diag is not None:
+            diag["reason"] = _classify_tushare_error(tc, "forecast")
         if "权限" in err or "40203" in err or "无权限" in err:
             logger.info("forecast 权限不足（需 2000+积分），降级: %s", err)
             return None
@@ -767,11 +840,12 @@ def collect_research(symbol: str) -> dict:
         ))
 
     fc_data: list[dict] | None = None
+    fc_diag: dict = {}   # forecast 取数的自身观测（供不可得原因取值）
     if not rc_data:
         try:
-            fc_data = _q_tushare_forecast(symbol)
+            fc_data = _q_tushare_forecast(symbol, diag=fc_diag)
         except RuntimeError:
-            pass
+            fc_diag["reason"] = "no_token"   # _require_tushare 抛的就是 token 缺失
         except Exception as exc:
             logger.warning("collect_research/forecast: %s", exc)
         if fc_data:
@@ -786,7 +860,7 @@ def collect_research(symbol: str) -> dict:
                 source="tushare.forecast",
                 data=None,
                 dimension=dim_val,
-                error="权限不足或无数据（需 Tushare 2000+积分）",
+                error=_forecast_unavailable_reason(fc_diag),
                 query_params=f"pro.forecast(ts_code='{ts}')",
             ))
 
@@ -838,19 +912,38 @@ def collect_industry(symbol: str) -> dict:
         if info:
             industry_name = info.get("行业") or info.get("industry", "") or ""
 
-    if env.is_akshare_available() and akshare_push2_available():
+    # T9-5 的显式不可得**不直接进 data**：`SourceResult.data is not None` 会被
+    # data_available / source_count / sources_ok 记为**成功源**（multi_source=true、
+    # 证据表把不可得当成可用来源）——那就从「键静默消失」变成「伪装成功」，更糟。
+    # 故此处把它还原为 None（计数正确），原因经闭包转交 _merge_industry 以
+    # `<key>_status/_note` 形式落进维度 data（值仍是空的，不冒充数据点）。
+    pe_unavailable: list[str] = []
+    if env.is_akshare_available():
         ind = industry_name
-        tasks.append(("akshare.stock_board_industry_hist_em",
-                      lambda i=ind: _q_akshare_industry_board(symbol, industry_name=i)))
-        tasks.append(("akshare.stock_board_industry_pe_ratio_cninfo",
-                      lambda i=ind: _q_akshare_industry_pe(symbol, industry_name=i)))
+        # **两个子源的可达面不同，守卫不能共用**：
+        #   板块行情 = 东财 push2 → 需 push2 可达；
+        #   行业 PE  = 巨潮 cninfo → 与东财无关。
+        # 实测：代理环境下 push2 探测失败而巨潮可达，共用守卫会把 PE 维度一起挡成
+        # 「akshare 不可用」→ 该维度永久不可得且**错误归因**（R0~R2 review 修复）。
+        if akshare_push2_available():
+            tasks.append(("akshare.stock_board_industry_hist_em",
+                          lambda i=ind: _q_akshare_industry_board(symbol, industry_name=i)))
+
+        def _pe_task(i: str = ind):
+            r = _q_akshare_industry_pe(symbol, industry_name=i)
+            if isinstance(r, dict) and r.get("status") == "unavailable":
+                pe_unavailable.append(str(r.get("note") or "行业 PE 不可得"))
+                return None
+            return r
+
+        tasks.append(("akshare.stock_industry_pe_ratio_cninfo", _pe_task))
 
     empty = {
         "dimension": dim_val,
         "display": "行业数据",
         "data": None,
         "status": "missing",
-        "error": "无可用行业数据源（需 akshare + 东方财富 push2 可用）",
+        "error": "无可用行业数据源（需 akshare；板块行情另需东方财富 push2 可达）",
         "_meta": {"source": "none", "success": False,
                   "all_sources": [], "multi_source": False,
                   "source_count": 0},
@@ -863,6 +956,10 @@ def collect_industry(symbol: str) -> dict:
             if r.data and isinstance(r.data, dict):
                 merged.update(r.data)
                 sources_ok.append(r.source)
+        if pe_unavailable and "industry_pe_median" not in merged:
+            # 显式三态（T9-5）：值仍为空，但**原因可见**，且不计入 sources_ok
+            merged["industry_pe_status"] = "unavailable"
+            merged["industry_pe_note"] = pe_unavailable[-1]
         if merged:
             dim_dict["data"] = merged
             if len(sources_ok) > 1:
@@ -1502,11 +1599,33 @@ def collect_industry_pricing(symbol: str, industry: str = "") -> dict:
     )
 
 
+def collect_segments(symbol: str) -> dict:
+    """分部数据（主营构成：按产品 + 按地区）。
+
+    此前报告把「分部数据不可得」写成已知缺口，实测为**误判**——Tushare
+    ``fina_mainbz`` 一直可用（300750 2026H1：动力电池 1921.25 亿 / 储能 532.61 亿
+    / 材料回收 188.11 亿；境内 1897.87 亿 / 境外 871.29 亿，合计与引擎营收吻合）。
+    本维度只做采集；是否进入 Finding 由分析层决定。
+    """
+    tasks: list[tuple[str, Callable]] = []
+    if env.is_tushare_available(env.get_config()):
+        tasks.append(("tushare.fina_mainbz", lambda: _q_tushare_mainbz(symbol)))
+    return _collect_dimension(
+        "segments", tasks,
+        query_params={
+            "tushare.fina_mainbz": _qp_tushare(
+                "fina_mainbz", symbol, type="P,D",
+                start_date=_days_ago(730), end_date=_today()),
+        },
+    )
+
+
 # ---- 全维度采集 ----
 
 COLLECTORS = {
     "basic_info": ("基本信息", collect_basic_info),
     "financials": ("财务报告", collect_financials),
+    "segments": ("分部数据", collect_segments),
     "quote": ("实时行情", collect_quote),
     "shareholders": ("十大股东", collect_shareholders),
     "northbound": ("北向资金", collect_northbound),
@@ -1832,8 +1951,22 @@ def _collect_chain_context_block(symbol: str, with_chain: bool, dim_results: dic
             industry = ""
             if isinstance(basic_data, dict):
                 industry = basic_data.get("industry", "") or basic_data.get("行业", "")
+            # 申万候选（深→浅）：让 L3/L2 申万名优先于 Tushare 粗分类名参与产业链匹配。
+            # 本块在 _attach_phase2_block 之前执行，不能读 industry_peers，故此处独立
+            # 解析；整表走 DataCache → 与同行池那次调用共享，零额外 API。
+            # 失败/不可用时 candidates=[] → 回落 industry 关键字匹配（既有行为）。
+            candidates: list[str] = []
+            try:
+                if env.is_tushare_available(env.get_config()):
+                    sw_tc = _tushare_client(env.get_config())
+                    candidates = list(
+                        _resolve_sw_context(sw_tc, symbol, industry).get("chain_names") or []
+                    )
+            except Exception as exc:
+                logger.debug("chain: sw candidates failed for %s: %s", symbol, exc)
             chain_context = collect_chain_context(
                 symbol, industry=industry, basic_data=basic_data,
+                chain_candidates=candidates,
             )
         except Exception as exc:
             logger.warning("chain context collection failed for %s: %s", symbol, exc)
@@ -2077,7 +2210,283 @@ def _ms_lookup_sw_index_code(tc: Any, industry: str | None) -> str | None:
     return None
 
 
+# ── 申万成分整表（index_member_all）────────────────────────────────────
+# 背景：Tushare stock_basic.industry 是 Tushare 自有粗分类，与申万2021 不对齐。
+# index_member_all 直接给出每只标的的 L1/L2/L3 申万归属，是权威映射；
+# 接口文档标注 2000 积分档（CONFIGURATION.md），但此前仓库零调用。
+_SW_MEMBER_DIM = "sw_member_all"
+_SW_MEMBER_KEY = "SW2021"
+_SW_MEMBER_TTL = 86400      # 1 天；成分仅调仓日变动
+_SW_MEMBER_PAGE = 3000      # 单页上限（实测）
+_SW_MEMBER_MAX_PAGES = 4    # 护栏：≤9000 行（全 A 实测约 5900；含 1 次空页确认）
+_SW_POOL_MIN = 5            # 某层当期成分 < 5 家 → 升层，保证分位有统计意义
+_SW_LEVELS = ("L3", "L2", "L1")
+
+
+def _sw_member_enabled() -> bool:
+    """INVEST_SW_MEMBER_ALL=0 关闭整表路径 → 回落既有行为（逐字不变）。"""
+    import os
+    return os.environ.get("INVEST_SW_MEMBER_ALL", "1") != "0"
+
+
+def _sw_cache() -> Any:
+    """DataCache 单例（测试可 patch 本函数注入 tmp_path 缓存）。"""
+    try:
+        from lib.cache import default_cache  # type: ignore
+    except ImportError:
+        from cache import default_cache  # type: ignore
+    return default_cache()
+
+
+def _sw_row_is_current(rec: dict) -> bool:
+    """当期成分判定：无 out_date 且 is_new 非否。
+
+    整表含历史行（5900+ 行 > 在上市 5564 家），不过滤会把已退市公司混进同行池。
+    """
+    out_date = str(rec.get("out_date") or "").strip()
+    if out_date and out_date.lower() not in ("nan", "none"):
+        return False
+    flag = str(rec.get("is_new") or "").strip().upper()
+    return flag not in ("N", "FALSE", "0")
+
+
+def _load_sw_member_table(tc: Any) -> list[dict]:
+    """拉取 index_member_all 整表（分页 + DataCache 1 天 TTL），返回当期成分。
+
+    不可用/无权限/空/异常 → []（永不抛出）；空结果不写缓存（D6），
+    使下次调用仍会重试网络，而非把「取不到」钉死一天。
+
+    **完整性是返回与写缓存的前提**：分页中途失败（异常）或服务端忽略
+    offset 时，循环里已累积的行只是整表的**前缀**。返回前缀会让后续页的
+    标的被当作「不在申万成分中」，同行池按残缺全域算分位，且结果以
+    source=sw_member_all 的权威名义输出；写缓存更会把残缺钉死一天。
+    故只有「干净结束」（空页 / 短页）才视为完整，其余一律 [] 回落既有路径。
+    """
+    if not _sw_member_enabled():
+        return []
+    try:
+        cached = _sw_cache().get(_SW_MEMBER_DIM, _SW_MEMBER_KEY)
+    except Exception as exc:
+        logger.debug("sw_member_all: cache get failed: %s", exc)
+        cached = None
+    if isinstance(cached, list) and cached:
+        return cached
+
+    rows: list[dict] = []
+    prev_first: str | None = None
+    complete = False
+    for page in range(_SW_MEMBER_MAX_PAGES):
+        try:
+            # offset 按**已累计行数**推进，而非固定页长：服务端单页上限若小于
+            # _SW_MEMBER_PAGE，固定步长会跳过中间行；按已取行数推进不会有空洞
+            # （代价是可能多一次请求，24h 缓存下每个交易日一次）。
+            # 不传 limit：接口未文档化该参数，页长以服务端实测上限为准。
+            df = tc.query("index_member_all", offset=len(rows))
+        except Exception as exc:
+            logger.warning("sw_member_all: page %d failed: %s", page, exc)
+            break
+        if df is None or df.empty:
+            # 「取完了」与「取数失败」必须分开判定：client 失败时返回**空帧且不抛**
+            # （信号在 last_error / is_permission_denied，见 _classify_tushare_error）。
+            # 只有**无失败信号**的空页才是可靠的末页判据。
+            reason = _classify_tushare_error(tc, "index_member_all")
+            if reason == "empty":
+                complete = True
+            else:
+                logger.warning(
+                    "sw_member_all: 第 %d 页空结果但含失败信号（%s）→ 整表不完整",
+                    page, reason,
+                )
+            break
+        recs = [r for r in df.to_dict("records") if isinstance(r, dict)]
+        if not recs:
+            break
+        first = str(recs[0].get("ts_code") or "").strip()
+        # 服务端忽略 offset 时该页会重复返回 → 就地停止，避免死循环
+        if page > 0 and first and first == prev_first:
+            logger.warning(
+                "sw_member_all: 服务端忽略 offset（第 %d 页重复首页），"
+                "整表完整性不可证 → 本次不使用", page,
+            )
+            break
+        prev_first = first
+        rows.extend(recs)
+    else:
+        # for-else：一直取到页数上限都没见到空页 → 整表超出护栏，完整性不可证
+        logger.warning("sw_member_all: 已达 %d 页上限（%d 行）仍未见末页，"
+                       "整表可能超出护栏", _SW_MEMBER_MAX_PAGES, len(rows))
+
+    if not complete:
+        # 前缀表按不可用处理：调用方回落既有路径（stock_basic 分类），
+        # 不用残缺成分冒充权威映射。
+        return []
+
+    current = [r for r in rows if _sw_row_is_current(r)]
+    if not current:
+        return []
+    try:
+        _sw_cache().set(_SW_MEMBER_DIM, _SW_MEMBER_KEY, current,
+                        ttl_seconds=_SW_MEMBER_TTL, source="tushare.index_member_all")
+    except Exception as exc:
+        logger.debug("sw_member_all: cache set failed: %s", exc)
+    return current
+
+
+def _resolve_sw_context(
+    tc: Any, symbol: str, industry_hint: str | None = None,
+) -> dict[str, Any]:
+    """一次解析出申万归属与同行池候选（供 A-① / 同行池 / 产业链共用）。
+
+    返回：source / industry_name / industry_code / level / hint_name /
+    chain_names（深→浅候选，供产业链匹配）/ pool / pool_level / pool_code。
+    任何一步失败都返回等价的空结构，调用方据此回落既有路径。
+    """
+    out: dict[str, Any] = {
+        "source": "none", "industry_name": None, "industry_code": None,
+        "level": None, "hint_name": (industry_hint or "").strip() or None,
+        "chain_names": [], "pool": [], "pool_level": None, "pool_code": None,
+    }
+    table = _load_sw_member_table(tc)
+    if not table:
+        return out
+    target = _ts_code(symbol)
+    row = next((r for r in table if str(r.get("ts_code") or "").strip() == target), None)
+    if row is None:
+        return out
+
+    # 逐层收集（深→浅）：名 + 代码 + 该层当期成分
+    levels: list[tuple[str, str, str, list[dict]]] = []
+    for lvl in _SW_LEVELS:
+        key = lvl.lower()
+        name = str(row.get(f"{key}_name") or "").strip()
+        code = str(row.get(f"{key}_code") or "").strip()
+        if not name or not code:
+            continue
+        members = [
+            {"ts_code": str(r.get("ts_code") or "").strip(),
+             "name": str(r.get("name") or "").strip()}
+            for r in table
+            if str(r.get(f"{key}_code") or "").strip() == code
+        ]
+        levels.append((lvl, name, code, members))
+
+    if not levels:
+        return out
+
+    out["source"] = "sw_member_all"
+    out["industry_name"] = levels[0][1]
+    out["industry_code"] = levels[0][2]
+    out["level"] = levels[0][0]
+    out["chain_names"] = [lv[1] for lv in levels]
+
+    # 同行池：首个成分数达标的层；全不达标则用最宽的 L1（避免小 L3 出无意义分位）
+    pick = next((lv for lv in levels if len(lv[3]) >= _SW_POOL_MIN), levels[-1])
+    out["pool"] = pick[3]
+    out["pool_level"] = pick[0]
+    out["pool_code"] = pick[2]
+    # 池名供渲染披露「分位分母是哪一层」——L3 过薄升层时展示名（L3）与实际
+    # 分母池（L2/L1）不同层，不披露则读者按所写行业重算会得到不同的 N。
+    out["pool_name"] = pick[1]
+    return out
+
+
+def _stock_basic_name_map(tc: Any) -> dict[str, str]:
+    """全市场 ts_code → name（1 次调用）；失败返回 {}。"""
+    try:
+        df = tc.query("stock_basic", fields="ts_code,name")
+    except Exception as exc:
+        logger.debug("stock_basic name map failed: %s", exc)
+        return {}
+    if df is None or df.empty:
+        return {}
+    out: dict[str, str] = {}
+    for _, r in df.iterrows():
+        code = str(r.get("ts_code") or "").strip()
+        if code:
+            out[code] = str(r.get("name") or "").strip()
+    return out
+
+
+def _peer_market_caps(tc: Any) -> dict[str, float]:
+    """全市场 ts_code → total_mv（万元），仅用于同行排序；失败返回 {}。
+
+    按**最近有数据的交易日**取整市场。交易日盘中当日 `daily_basic` 尚未发布
+    （`last_trade_dates` 是纯日历口径，不含「今日已收盘」语义），只试当日会拿到
+    空表 → 调用点 `if caps:` 为假 → 静默退回代码字母序选样（正是本模块修掉的
+    旧缺陷），且无日志、无告警。故按日历倒序试最近两个交易日，用第一个非空者；
+    缓存键即**实际使用**的日期，盘后自动切回当日、无脏读。
+    当日停牌股在 trade_date 口径下无行，结果**只用于排序**；展示用 PE/PB/市值
+    仍走既有的逐只 30 日窗查询，避免停牌股静默丢失当前值。
+    """
+    if not _sw_member_enabled():
+        return {}
+    try:
+        from lib.trade_cal import last_trade_dates  # type: ignore
+    except ImportError:  # pragma: no cover - 路径异常时降级
+        return {}
+    try:
+        days = last_trade_dates(2)
+    except Exception as exc:
+        logger.debug("peer_market_caps: trade cal failed: %s", exc)
+        return {}
+    if not days:
+        return {}
+
+    cache = _sw_cache()
+    for idx, trade_date in enumerate(days):
+        try:
+            cached = cache.get("daily_basic_all", trade_date)
+        except Exception:
+            cached = None
+        if isinstance(cached, dict) and cached:
+            return {str(k): float(v) for k, v in cached.items() if v is not None}
+        try:
+            df = tc.query("daily_basic", trade_date=trade_date,
+                          fields="ts_code,total_mv")
+        except Exception as exc:
+            logger.debug("peer_market_caps: daily_basic(%s) failed: %s",
+                         trade_date, exc)
+            continue
+        if df is None or df.empty:
+            continue
+        caps: dict[str, float] = {}
+        for _, r in df.iterrows():
+            code = str(r.get("ts_code") or "").strip()
+            mv = safe_float(r.get("total_mv"))
+            if code and mv is not None:
+                caps[code] = mv
+        if not caps:
+            continue
+        if idx > 0:
+            # 盘中回退：原实现此路径静默（无日志、无缓存），字母序选样无从察觉
+            logger.info("peer_market_caps: %s 无全市场数据（盘中未收盘？），"
+                        "改用 %s 的市值作同行排序", days[0], trade_date)
+        try:
+            cache.set("daily_basic_all", trade_date, caps,
+                      ttl_seconds=_SW_MEMBER_TTL, source="tushare.daily_basic")
+        except Exception as exc:
+            logger.debug("peer_market_caps: cache set failed: %s", exc)
+        return caps
+    return {}
+
+
 def _resolve_sw_industry_name(
+    tc: Any, symbol: str, industry_hint: str | None = None,
+) -> str | None:
+    """解析申万行业名：优先 collection 提示，再 stock_basic，再申万分类模糊匹配。
+
+    L0（新增）：index_member_all 直接给出标的的 L1/L2/L3 申万归属，优先采信——
+    Tushare stock_basic.industry 是自有粗分类，与申万2021 不对齐（实测 110 个粗名
+    仅 36 个精确命中申万名，覆盖 55.2% 的在上市公司），且部分粗名（如「电气设备」）
+    会因子串命中「电气」把标的错配到别的产业链。L0 不可用时完全保持既有行为。
+    """
+    ctx = _resolve_sw_context(tc, symbol, industry_hint)
+    if ctx.get("industry_name"):
+        return str(ctx["industry_name"])
+    return _resolve_sw_industry_name_legacy(tc, symbol, industry_hint)
+
+
+def _resolve_sw_industry_name_legacy(
     tc: Any, symbol: str, industry_hint: str | None = None,
 ) -> str | None:
     """解析申万行业名：优先 collection 提示，再 stock_basic，再申万分类模糊匹配。"""
@@ -2639,16 +3048,31 @@ def _ms_fetch_margin(tc: Any, symbol: str) -> dict | None:
 
 
 def _ms_fetch_moneyflow(tc: Any, symbol: str) -> dict | None:
+    from lib.collector._sources import _flow_lg_elg_yuan
+
     records = _q_tushare_moneyflow(symbol)
     if not records:
         return None
     recent = _recent_flow_records(records, limit=10)
-    net_sum = sum(v for v in (_flow_amount_yuan(r) for r in recent[:5]) if v is not None)
-    return {
-        "records": recent,
-        "net_sum_5d": net_sum,
-        "source": "tushare.moneyflow",
-    }
+    window = recent[:5]
+    amounts = [_flow_amount_yuan(r) for r in window]
+    out: dict[str, Any] = {"records": recent}
+    # 5 日窗口须**既满 5 日又整窗有效**才给键：
+    #   - 不足 5 日（新股/长期停牌）→ 3 日合计贴上「近5日」标签 = 口径撒谎；
+    #   - 任一日缺失（含 DataFrame 的 NaN）→ 部分求和同样冒充 5 日；
+    #   - 整窗缺失时 `sum([]) == 0.0` 更会被读成「零净流入」（同 P0-1）。
+    # 三者任一命中即不给键（宁缺勿错），与 lg_elg 同一规则。
+    if len(window) == 5 and all(v is not None for v in amounts):
+        out["net_sum_5d"] = sum(v for v in amounts if v is not None)
+    out["source"] = "tushare.moneyflow"
+    # 口径并列：net_sum_5d 是**全档**净额（小+中+大+特大），行情软件惯用的
+    # 「主力」指大单+特大单，二者方向可完全相反（300750 2026-09-16 实测
+    # 近 5 日 +17.96 亿 vs −15.24 亿）。窗口内任一日缺分档字段则不给该键——
+    # 用部分窗口冒充 5 日会得出错误的第二口径。
+    lg_elg = [_flow_lg_elg_yuan(r) for r in window]
+    if len(window) == 5 and all(v is not None for v in lg_elg):
+        out["net_sum_5d_lg_elg"] = sum(lg_elg)  # type: ignore[arg-type]
+    return out
 
 
 def _ms_fetch_turnover(tc: Any, symbol: str) -> dict | None:
@@ -2834,10 +3258,18 @@ _PCR_HISTORY_60D = 60
 _PCR_MAX_DAILY_QUERIES = 80
 
 
-def _ms_50etf_option_codes(tc: Any) -> tuple[list[str], list[str]]:
+def _ms_50etf_option_codes(
+    tc: Any, *, diag: dict | None = None,
+) -> tuple[list[str], list[str]]:
     """SSE 50ETF 期权合约代码（认沽/认购）。"""
     df = tc.query("opt_basic", exchange="SSE", fields="ts_code,call_put,name")
     if df is None or df.empty:
+        if diag is not None:
+            # PCR 的第一步实际调用的是 opt_basic。权限不足时 TushareClient
+            # 合约约定为返回空帧，若不留下接口名，后面的 opt_daily 探针永远
+            # 不会执行，错误会被误判为“非权限问题”。
+            diag["reason"] = "option_contracts_empty"
+            diag["api"] = "opt_basic"
         return [], []
     puts, calls = [], []
     for _, row in df.iterrows():
@@ -2902,11 +3334,11 @@ def _ms_pcr_on_date(
     return _ms_pcr_from_df(df, put_codes, call_codes)
 
 
-def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
+def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | None:
     """50ETF 认沽认购比（opt_daily，需 5000 积分）。"""
     from lib.stats import percentile_rank
 
-    puts, calls = _ms_50etf_option_codes(tc)
+    puts, calls = _ms_50etf_option_codes(tc, diag=diag)
     if not puts or not calls:
         return None
     put_set, call_set = set(puts), set(calls)
@@ -2949,6 +3381,10 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
                     "skipping PCR fetch storm (%d dates)",
                     fetch_dates[-1], len(fetch_dates),
                 )
+                if diag is not None:
+                    # 自身观测：超时时被丢弃的 daemon 线程从未返回，client 的
+                    # `last_error` 会**一直为 None** → 不看这里就会被记成「正常返回空」
+                    diag["reason"] = "probe_timeout"
                 return None
         # 探针结果直接计入（不再重复取 fetch_dates[-1]）；当日无期权成交
         # 未命中代码集时留空，由主循环重取。
@@ -2972,6 +3408,8 @@ def _ms_fetch_put_call_ratio(tc: Any) -> dict | None:
         if r is not None:
             ratio_by_date[td] = r
     if not ratio_by_date:
+        if diag is not None:
+            diag["reason"] = "empty_rows"   # 探针成功了但无可用 PCR 行 → 合法空
         return None
     # 单次扫描按 sampled 顺序构建 (date, ratio) 对（此前两次同谓词扫描
     # 生成 ratios 与 ratio_dates，alignment 靠"同一谓词"隐含保证）
@@ -3410,30 +3848,113 @@ def attach_phase2_extras(collection: dict, symbol: str) -> None:
         logger.warning("attach_phase2_extras partial failure for %s: %s", symbol, errors)
 
 
+def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
+    """PCR 不可得的**原因分类**（D-H=H1：降级标注须显式 + 权限提示）。
+
+    修复前「空数据 / 无 50ETF 期权 / 权限不足」共用一句静态文案，用户无法判断
+    该去补积分、该重试、还是该接受空数据。
+
+    取值顺序：
+    1. **权限被拒**（``is_permission_denied``）——**已确证的事实**，优先于一切成因推断：
+       积分不足/无权限时 ``tc.query`` 返回**空帧而不抛**，探针因此「成功」并置
+       ``empty_rows``，若让 diag 先判就会把权限失败报成「当日无 50ETF 期权成交」
+       ——报告据此**断言了一个假的市场事实**（R2 review P0；原静态文案至少点了权限）。
+    2. **取数自身的观测**（``diag["reason"]``）——超时场景下被丢弃的 daemon 线程
+       从未返回，client 的 ``last_error`` 会**一直为 None**，不看这里就会把端点
+       故障记成「接口正常返回空」（R0~R2 review）。
+    3. client 信号（``last_error``）兜底——注意该槽被 trade_cal、探针与并行扇出
+       **共享**，可能并非本接口所写。
+
+    ⚠️ 返回文本会**原样**进报告（``unavailable: {reason}`` →「（不可得：…）」），
+    故只做**分类映射**、不回显 ``last_error`` 的异常原文（那是
+    ``f"{type(e).__name__}: {str(e)[:80]}"``，属 R12h 禁用的不可读来源）。
+    """
+    try:
+        # PCR 先请求 opt_basic，再请求 opt_daily；两者任一被拒都意味着本
+        # 维度不可得。不能只探测 opt_daily，否则 opt_basic 被拒会在入口提前
+        # 返回并落入“数据源异常（非权限问题）”。
+        checked_apis = ("opt_basic", "opt_daily")
+        denied_api = ""
+        if tc is not None:
+            probe = getattr(tc, "is_permission_denied", None)
+            if callable(probe):
+                denied_api = next((api for api in checked_apis if probe(api)), "")
+            else:  # 兼容仅有私有集合的旧/假 client
+                denied_set = getattr(tc, "_permission_denied_apis", set())
+                denied_api = next((api for api in checked_apis if api in denied_set), "")
+        points = api_min_points(denied_api or "opt_daily")
+        hint = (f"（Tushare {denied_api or 'opt_daily'} 需 {points} 积分）"
+                if points else "")
+        code = str((diag or {}).get("reason") or "")
+        # 权限信号**先于**成因推断：见 docstring 取值顺序 1（空帧不抛 → 探针假成功）
+        if denied_api:
+            return f"权限不足：接口 {denied_api} 无权限或积分不够{hint}"
+        if code == "probe_timeout":
+            return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
+        if code == "empty_rows":
+            return "当日无 50ETF 期权成交（接口正常返回空）"
+        if tc is None:
+            return "Tushare client 不可用（未配置 token 或初始化失败）"
+        err = str(getattr(tc, "last_error", None) or "")
+        if "未配置 TUSHARE_TOKEN" in err:
+            return f"未配置 TUSHARE_TOKEN{hint}"
+        if _is_token_invalid(err):
+            return "TUSHARE_TOKEN 无效或已过期（请重签 token；与积分无关）"
+        if any(token in err for token in ("无接口权限", "访问权限", "没有接口", "权限不足")):
+            api = str((diag or {}).get("api") or "opt_basic")
+            points = api_min_points(api)
+            api_hint = f"（Tushare {api} 需 {points} 积分）" if points else ""
+            return f"权限不足：接口 {api} 无权限或积分不够{api_hint}"
+        if any(k in err for k in ("Timeout", "timeout", "Connection", "Proxy",
+                                  "SSLError", "RemoteDisconnected", "timed out")):
+            return "取数超时或网络异常（非权限问题，可重试）"
+        if err:
+            return "数据源返回异常（非权限问题）"
+        if code == "option_contracts_empty":
+            return "50ETF 期权合约列表为空（opt_basic 正常返回空）"
+        return "当日无 50ETF 期权成交（接口正常返回空）"
+    except Exception:  # noqa: BLE001 —— 分类失败不改变降级语义
+        return "opt_daily 不可得"
+
+
 def _ms_try_fetch(
     result: dict[str, Any],
     key: str,
     fetch_fn: Callable[[], Any],
     *,
-    unavailable_msg: str,
+    unavailable_msg: str | Callable[[], str],
     on_success: Callable[[Any], str] | None = None,
 ) -> None:
-    """采集单个子源并写入 result / availability（统一 try/except 模式）。"""
+    """采集单个子源并写入 result / availability（统一 try/except 模式）。
+
+    ``unavailable_msg`` 可为**字符串或 callable**：callable 形式在**失败时刻**
+    求值——静态串在调用前就固定了，读不到本次查询刚写入的 client 信号
+    （如 ``is_permission_denied`` / ``last_error``）。
+    """
+    def _reason() -> str:
+        if callable(unavailable_msg):
+            try:
+                return str(unavailable_msg())
+            except Exception as exc:  # noqa: BLE001 —— 原因函数故障不得变成崩溃
+                logger.warning("market_structure %s reason fn failed: %s", key, exc)
+                return "不可得（原因分类失败）"
+        return str(unavailable_msg)
+
     try:
         value = fetch_fn()
         result[key] = value
         if value is None:
-            _ms_set_unavailable(result["availability"], key, unavailable_msg)
+            _ms_set_unavailable(result["availability"], key, _reason())
         elif on_success is not None:
             result["availability"][key] = on_success(value)
         else:
             result["availability"][key] = "available"
     except Exception as exc:
-        # 异常仅进日志；availability 用静态描述（str(exc) 会泄漏底层
+        # 异常仅进日志；availability 用**分类后**的描述（str(exc) 会泄漏底层
         # Python 异常文本到报告「不可得：{reason}」渲染，用户不可读，
         # 且违反 R12h「不可得 + attempted sources」标注规范）
         logger.warning("market_structure %s fetch failed: %s", key, exc)
-        _ms_set_unavailable(result["availability"], key, unavailable_msg)
+        _ms_set_unavailable(result["availability"], key, _reason())
 
 
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:
@@ -3508,10 +4029,15 @@ def collect_market_structure(symbol: str, *, industry: str | None = None) -> dic
         _ms_fetch_pmi,
         unavailable_msg="akshare macro_china_pmi unavailable",
     )
+    _pcr_diag: dict = {}   # PCR 取数的自身观测（供不可得原因取值，见下）
     _ms_try_fetch(
         result, "put_call_ratio",
-        lambda: _ms_fetch_put_call_ratio(tc),
-        unavailable_msg="opt_daily empty, no 50ETF options, or permission denied (5000 pts)",
+        # callable：原因在**失败时刻**求值——静态串在调用前就固定了，读不到本次
+        # 查询刚写入的 client 信号（is_permission_denied / last_error），
+        # 会把「权限不足/未配 token/超时/空数据」压成同一句话（R2/T9-1′）。
+        # diag 承载**取数自身的观测**（优先于被多处共写的 last_error 槽）。
+        lambda: _ms_fetch_put_call_ratio(tc, diag=_pcr_diag),
+        unavailable_msg=lambda: _ms_pcr_unavailable_reason(tc, _pcr_diag),
         on_success=lambda v: (
             f"partial: {v.get('history_days', 0)} days"
             if v.get("partial") else "available"
@@ -3650,31 +4176,57 @@ def collect_industry_peers(
     tc = _tushare_client(config)
     target_sym = _ts_code(symbol)
 
-    industry = _resolve_sw_industry_name(tc, symbol, industry)
+    ctx = _resolve_sw_context(tc, symbol, industry)
+    industry = ctx.get("industry_name") or _resolve_sw_industry_name(tc, symbol, industry)
     if not industry:
         result["error"] = "无法确定行业分类"
         return result
 
     result["industry_name"] = industry
+    # 名称层（展示用）与池层（分位分母）分别透出：两者不同即发生升层，
+    # 渲染侧据此披露口径（见 _v3._section_4a_industry_position）。
+    result["industry_level"] = ctx.get("level")
+    result["pool_name"] = ctx.get("pool_name")
 
-    index_code = _ms_lookup_sw_index_code(tc, industry)
     members: list[dict] = []
     name_by_code: dict[str, str] = {}
     peer_source: str | None = None
+    peer_level: str | None = None
 
-    if index_code:
-        try:
-            member_df = tc.query("index_member", index_code=index_code)
-            if member_df is not None and not member_df.empty:
-                members = member_df.to_dict("records")
-                peer_source = "sw_index_member"
-                for m in members:
-                    code = str(m.get("ts_code", "")).strip()
-                    if code:
-                        name_by_code[code] = str(m.get("name", "")).strip()
-        except Exception as exc:
-            logger.debug("index_member failed for %s: %s", index_code, exc)
+    # L0：申万成分整表（权威 L1/L2/L3 归属，1 次调用 + 1 天缓存）
+    if ctx.get("source") == "sw_member_all" and ctx.get("pool"):
+        members = [{"ts_code": str(m.get("ts_code") or "").strip()}
+                   for m in ctx["pool"] if m.get("ts_code")]
+        name_by_code = {str(m.get("ts_code") or "").strip(): str(m.get("name") or "").strip()
+                        for m in ctx["pool"] if m.get("ts_code")}
+        peer_source = "sw_index_member"
+        peer_level = ctx.get("pool_level")
+        result["industry_code"] = ctx.get("pool_code")
 
+    # L1：index_classify 精确命中 → index_member 成分
+    # 注意 index_member 返回列是 con_code（且无 name 列）；早期实现读 ts_code/name，
+    # 于是成员恒为空、本分支形同死代码（且因 members 非空判定先置 peer_source，
+    # 还会静默产出「零同行且无降级警告」的结果）。
+    if not members:
+        index_code = _ms_lookup_sw_index_code(tc, industry)
+        if index_code:
+            try:
+                member_df = tc.query("index_member", index_code=index_code)
+                if member_df is not None and not member_df.empty:
+                    codes: set[str] = set()
+                    for m in member_df.to_dict("records"):
+                        code = str(m.get("con_code") or m.get("ts_code") or "").strip()
+                        if code:
+                            codes.add(code)
+                            name_by_code.setdefault(code, str(m.get("name") or "").strip())
+                    if codes:
+                        members = [{"ts_code": c} for c in sorted(codes)]
+                        peer_source = "sw_index_member"
+                        result["industry_code"] = index_code
+            except Exception as exc:
+                logger.debug("index_member failed for %s: %s", index_code, exc)
+
+    # L2：stock_basic 粗分类回退（既有行为，逐字保留）
     if not members:
         basic_all = tc.query("stock_basic", fields="ts_code,name,industry")
         if basic_all is not None and not basic_all.empty:
@@ -3697,15 +4249,41 @@ def collect_industry_peers(
         return result
 
     result["peer_source"] = peer_source
+    if peer_level:
+        result["peer_level"] = peer_level
+
+    # 在上市过滤：index_member_all 的 is_new/out_date 对已退市股不更新
+    # （实测 300116.SZ 名称已含「(退市)」，但表中仍是 out_date=None / is_new=Y），
+    # 故以 stock_basic 默认（list_status=L）的 universe 为准剔除，
+    # 避免退市股进入同行分位与可比公司表。stock_basic 不可得时不过滤（宁可多不可少）。
+    listed = _stock_basic_name_map(tc)
+    if listed:
+        members = [m for m in members if str(m.get("ts_code", "")).strip() in listed]
+        if not members:
+            result["error"] = f"「{industry}」成分股经在上市过滤后为空"
+            return result
 
     all_codes = sorted({str(m.get("ts_code", "")).strip() for m in members if m.get("ts_code")})
     if target_sym not in all_codes:
         all_codes.append(target_sym)
-        basic_one = tc.query("stock_basic", ts_code=target_sym, fields="ts_code,name")
-        if basic_one is not None and not basic_one.empty:
-            name_by_code[target_sym] = str(basic_one.iloc[0].get("name", "")).strip()
+        if target_sym in listed:
+            name_by_code[target_sym] = listed[target_sym]
+        else:
+            basic_one = tc.query("stock_basic", ts_code=target_sym, fields="ts_code,name")
+            if basic_one is not None and not basic_one.empty:
+                name_by_code[target_sym] = str(basic_one.iloc[0].get("name", "")).strip()
 
-    other_codes = sorted(c for c in all_codes if c != target_sym)[:max_peers]
+    # 补齐缺失名（L1 的 index_member 无 name 列）
+    if any(not name_by_code.get(c) for c in all_codes) and listed:
+        name_by_code.update(listed)
+
+    # 同行选取按市值降序（此前按代码字母序截断，等于随机取前 N 家）；
+    # 市值不可得时退回代码序，保证仍可用。
+    caps = _peer_market_caps(tc)
+    others = [c for c in all_codes if c != target_sym]
+    if caps:
+        others.sort(key=lambda c: (caps.get(c) is None, -(caps.get(c) or 0.0)))
+    other_codes = others[:max_peers]
     peer_codes = [target_sym, *other_codes]
 
     target_metrics: dict[str, Any] | None = None
@@ -3950,7 +4528,13 @@ def collect_peer_comparison(
                 target = ts_result.get("target")
 
                 src = ts_result.get("peer_source", "")
-                source_label = _SOURCE_LABEL_MAP.get(src, src)
+                # L0（index_member_all 整表）与 L1（index_member）共用
+                # peer_source="sw_index_member"，但所需积分档不同（2000 vs 5000）
+                # ——peer_level 仅由 L0 写入，据此给出准确来源标注。
+                if src == "sw_index_member" and ts_result.get("peer_level"):
+                    source_label = "tushare_sw_member_all"
+                else:
+                    source_label = _SOURCE_LABEL_MAP.get(src, src)
 
                 sf = _SORT_FIELD_MAP.get(sort_by, "total_mv")
                 peers.sort(key=lambda p: (

@@ -570,3 +570,346 @@ class TestReview2Guardrail:
         lint_mod._RULES_CACHE = None
         p3 = [f for f in findings if f.rule_id.startswith("p3-")]
         assert not p3
+
+
+class TestV030ConventionRuleBehavior:
+    """R-E01/E03/E04 的**行为级**验证（2026-09-13 轮末评审补）。
+
+    ⚠️ 原测试只验「规则已注册 + 条文在文档里」，不跑引擎——于是两个缺陷静默通过：
+    ① R-E04 是 error 级块级拦截，却**不在 `precommit` profile 的放行清单**里，
+       而法定第 0 层正是 `report_qc.py <file> --fail-on error`（默认 profile=precommit）
+       → 承诺的拦截在强制流程里永不触发；
+    ② `wording-message-no-tristate` 的 skip 含「传言」，而不带标注的「市场传言…」
+       同样含该词 → 该规则存在的**唯一理由**（未标注传闻）永不命中。
+    """
+
+    @staticmethod
+    def _lint(tmp_path, body: str, profile: str = "claude"):
+        from lib.lint import lint_file
+
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        return {x.rule_id for x in lint_file(f, profile=profile)}
+
+    _FACT_BLOCK = "# 测试\n\n[事实] 本标的缩量跌不动，量能萎缩至 0.4 倍。\n"
+
+    def test_r_e04_fires_under_claude_profile(self, tmp_path):
+        assert "structure-convention-in-fact-block" in self._lint(tmp_path, self._FACT_BLOCK)
+
+    def test_r_e04_fires_under_precommit_profile(self, tmp_path):
+        """法定第 0 层跑的是 precommit —— 块级拦截须在此生效。"""
+        got = self._lint(tmp_path, self._FACT_BLOCK, profile="precommit")
+        assert "structure-convention-in-fact-block" in got, \
+            f"R-E04 在 precommit profile 下被跳过（承诺的 error 级拦截失效）：{got}"
+
+    def test_r_e04_covers_stop_loss_wording(self, tmp_path):
+        """词表须与 §3.5 / R-E03 同表——曾漏「必带止损」。"""
+        body = "# 测试\n\n[事实] 本次记录必带止损。\n"
+        assert "structure-convention-in-fact-block" in self._lint(tmp_path, body)
+
+    # ── R-E04/R-E03 词义碰撞 FP 修复回归（reports/ 652 篇实测：20 → 0）────────
+    # 「出货」在产业文本中是「出货量」义，「托底」另有经济学义；两者都无市场主体
+    # 施动者。收窄为**要求施动者**——这才是误报归零的真正原因，与来源标注无关
+    # （v0.3.0 A6 撤回了「来源标注豁免」，见下）。
+
+    def test_r_e04_sourced_shipment_line_not_a_convention(self, tmp_path):
+        """产业义「出货」（无市场主体施动者）不命中——带不带来源都一样。
+
+        该行曾因带 [来源: section_3] 被豁免，掩盖了「pattern 本就不匹配」这一
+        真实原因；A6 撤回来源豁免后此对照用例说明豁免并非必要。
+        """
+        for src in (" [来源: section_3]", ""):
+            body = ("# 测试\n\n**[事实]** 行业量价：高盛两度上修 800G 出货至 3350 万只"
+                    + src + "。\n")
+            assert "structure-convention-in-fact-block" not in self._lint(
+                tmp_path, body, profile="precommit"), src
+
+    def test_r_e04_sourced_convention_line_now_flagged(self, tmp_path):
+        """v0.3.0 A6 语义变更：带 [来源:] **不再**豁免。
+
+        旧行为（2026-09-14 引入）：该行因带 `[来源: 用户陈述]` 被豁免。但 §3.5
+        约束 1 管的是**放置位置**——惯例型表述放进 [事实] 块即违规，与其是否带
+        来源无关；旧豁免还使「追加一个 [来源:]」成为绕过 error 级门禁的通用手法
+        （文档规定的门是 `--fail-on error`）。合法出路：补 §3.5 固定标注，或把
+        该表述移出 [事实] 块。
+        """
+        body = ("# 测试\n\n**[事实]** 用户驱动逻辑：(a) 国家队托底 + 科技战略定位 → 政策底"
+                "[来源: 用户陈述 / 2026-07-21]。\n")
+        assert "structure-convention-in-fact-block" in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e04_convention_exempt_only_with_section35_tag(self, tmp_path):
+        """唯一合法豁免是 §3.5 固定标注「从业者惯例，非学术验证：{出处}」。"""
+        body = ("# 测试\n\n**[事实]** 用户驱动逻辑：(a) 国家队托底 + 科技战略定位 → 政策底"
+                "（从业者惯例，非学术验证：用户陈述 / 2026-07-21）。\n")
+        assert "structure-convention-in-fact-block" not in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e04_shipment_wording_not_flagged(self, tmp_path):
+        """「出货」的产业义（无市场主体施动者）→ 不命中（单行与多行块都试）。"""
+        for body in ("# 测试\n\n[事实] 储能锂电池出货量同比 +139%。\n",
+                     "# 测试\n\n[事实]\n- 全球 AI 服务器出货量预计 370 万台\n"
+                     "- 800G 出货至 3350 万只\n"):
+            assert "structure-convention-in-fact-block" not in self._lint(
+                tmp_path, body, profile="precommit"), body
+
+    def test_r_e04_economics_floor_wording_not_flagged(self, tmp_path):
+        """「托底」的经济学义（结构性/高股息/政策）→ 不命中。"""
+        for body in ("# 测试\n\n[事实] ② 央行购金（结构性托底）。\n",
+                     "# 测试\n\n[事实] 高股息托底，但缺乏政策托底。\n"):
+            assert "structure-convention-in-fact-block" not in self._lint(
+                tmp_path, body, profile="precommit"), body
+
+    def test_r_e04_still_fires_on_unlabeled_convention(self, tmp_path):
+        """防失效：无来源标签的真惯例表述必须仍命中（按收窄后词表逐一核对）。"""
+        for c in ("[事实] 本标的缩量跌不动，量能萎缩至 0.4 倍。",
+                  "[事实] 本次记录必带止损。",
+                  "[事实] 回踩低吸区间已到。",
+                  "[事实] 明显洗盘。",
+                  "[事实] 主力吸筹。",
+                  "[事实] 主力出货迹象明显。",
+                  "[事实] 北向资金出货。",
+                  "[事实] 国家队托底形成政策底。",
+                  "[事实] 缩量电风扇行情。",
+                  "[事实] 右稳左可结构。"):
+            got = self._lint(tmp_path, "# 测试\n\n" + c + "\n", profile="precommit")
+            assert "structure-convention-in-fact-block" in got, f"漏拦：{c}"
+
+    def test_r_e04_multiline_source_on_other_line_still_fires(self, tmp_path):
+        """skip 是**行级**：来源标签在别的行时，惯例词行仍须命中（规则本意不受损）。"""
+        body = ("# 测试\n\n[事实]\n- 主力出货迹象明显\n- 尾盘放量\n"
+                "[来源: 龙虎榜 2026-08-05]\n")
+        assert "structure-convention-in-fact-block" in self._lint(
+            tmp_path, body, profile="precommit")
+
+    def test_r_e03_shipment_wording_not_flagged(self, tmp_path):
+        """R-E03（warning）与 R-E04 同词表：出货量义不再刷 warning。"""
+        assert "wording-practitioner-convention" not in self._lint(
+            tmp_path, "# 测试\n\n全球 AI 服务器出货量预计 370 万台。\n")
+
+    def test_r_e03_agent_convention_still_flagged(self, tmp_path):
+        """R-E03 收窄后仍拦真惯例语义（施动者形态）。"""
+        for body in ("# 测试\n\n估值透支 + 主力出货。\n",
+                     "# 测试\n\n国家队托底 + 国家科技战略。\n"):
+            assert "wording-practitioner-convention" in self._lint(tmp_path, body), body
+
+    def test_tristate_rule_fires_on_unlabeled_rumor(self, tmp_path):
+        """不带三态标注的传闻是**该规则存在的唯一理由**，必须命中。"""
+        body = "# 测试\n\n市场传言公司将获注资。\n"
+        assert "wording-message-no-tristate" in self._lint(tmp_path, body)
+
+    def test_tristate_rule_exempts_labeled_rumor(self, tmp_path):
+        """已带三态标注（传言/事实/证实）的行须豁免，不得误伤。"""
+        body = "# 测试\n\n（传言）公司将获注资，尚未证实。\n"
+        assert "wording-message-no-tristate" not in self._lint(tmp_path, body)
+
+
+class TestV030Law6FalsePositiveFixes:
+    """v0.3.0 全量重审 F-U7-1/2/4：law6 与宏观传导链规则的**误报收窄**。
+
+    每组断言都是成对的：**误报不再命中** + **真违规仍被拦**。
+    只证前者会让规则变瞎——收窄匹配精度不等于放宽红线（LAW 6 本身不变）。
+    全量语料实测背景：这 5 条规则贡献了 253 份报告中约 32% 的 FAIL，且以误报为主。
+    """
+
+    @staticmethod
+    def _lint(tmp_path, body: str, profile: str = "claude"):
+        from lib import lint as lint_mod
+        from lib.lint import lint_file
+
+        lint_mod._RULES_CACHE = None  # 保证读到当前 YAML，不吃上一次的缓存
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        return {x.rule_id for x in lint_file(f, profile=profile)}
+
+    # ---- F-U7-1：law6-hold-standalone 把**文档要求的合规写法**判为违规 ----
+
+    def test_hold_disclaimer_line_exempt(self, tmp_path):
+        """报告自带的强制免责句（含「…或持有的行动判断」）不应命中。"""
+        body = (
+            "# 测试\n\n> 本速览为多维度事实与量化评分的汇总呈现，"
+            "不构成投资建议，不代表买卖或持有的行动判断。\n"
+        )
+        assert "law6-hold-standalone" not in self._lint(tmp_path, body)
+
+    def test_hold_risk_template_line_exempt(self, tmp_path):
+        """致命一击模板句「N 个月持有的最大风险」不应命中。"""
+        body = "# 测试\n\n> **1 个月持有的最大风险**：修复段位于 BOLL 位置 83%。\n"
+        assert "law6-hold-standalone" not in self._lint(tmp_path, body)
+
+    def test_hold_shareholding_disclosure_exempt(self, tmp_path):
+        """持股披露「持有 N 万股」不应命中。"""
+        body = "# 测试\n\n- 2026 年 7 月：执行董事袁宏明退休（持有 100 万股）\n"
+        assert "law6-hold-standalone" not in self._lint(tmp_path, body)
+
+    def test_hold_advice_still_flagged(self, tmp_path):
+        """收窄后仍须拦真建议语义（否则规则变瞎）。"""
+        for body in ("# 测试\n\n持有该标的。\n", "# 测试\n\n长期持有。\n"):
+            assert "law6-hold-standalone" in self._lint(tmp_path, body), body
+
+    # ---- F-U7-2：law6-buy/sell/target-price 无归属/语境豁免 ----
+
+    def test_buy_institutional_rating_exempt(self, tmp_path):
+        """第三方机构评级归属非报告自身建议。"""
+        body = "# 测试\n\n- 22 家机构全部给予买入/增持/强推评级（一致看多）\n"
+        assert "law6-buy-standalone" not in self._lint(tmp_path, body)
+
+    def test_buy_advice_still_flagged(self, tmp_path):
+        assert "law6-buy-standalone" in self._lint(tmp_path, "# 测试\n\n买入该标的。\n")
+
+    def test_buy_fund_flow_field_exempt(self, tmp_path):
+        """2026-09-18：引擎资金流字段描述非建议，与 law6-sell 的资金流主体锚定豁免对齐。
+
+        实测返工点：pulse 报告写「北向净买入自 2024-08-19 停止披露」被判为建议词，
+        该行实为数据序列披露（北向日频已停），非报告自身建议。
+        """
+        for body in (
+            "# 测试\n\n- 北向净买入自 2024-08-19 停止披露\n",
+            "# 测试\n\n- 融资净买入额 5 亿\n",
+        ):
+            assert "law6-buy-standalone" not in self._lint(tmp_path, body), body
+
+    def test_buy_anchor_exemption_not_a_backdoor(self, tmp_path):
+        """锚定豁免不得成为内容词后门——无具体资金流主体的建议仍须拦下。
+
+        对齐 law6-sell 2026-09-18 review #2 的教训：裸 `净卖出` 曾让真实建议整体绕过。
+        ⚠️ `建议资金净买入该标的。` 是对抗测试实证的绕过样本——泛化词「资金」不可作锚点。
+        """
+        for body in (
+            "# 测试\n\n择机净买入该标的。\n",
+            "# 测试\n\n建议净买入。\n",
+            "# 测试\n\n建议资金净买入该标的。\n",
+        ):
+            assert "law6-buy-standalone" in self._lint(tmp_path, body), body
+
+    def test_sell_fund_flow_and_source_exempt(self, tmp_path):
+        """引擎资金流字段与带 [来源:] 的引用非建议。"""
+        for body in (
+            "# 测试\n\n- 6/17 主力资金净卖出 6330 万\n",
+            "# 测试\n\n- 成交额：买入 499.62 亿 / 卖出 455.31 亿 "
+            "[来源: Python calc: 沪向 + 深向]\n",
+        ):
+            assert "law6-sell-standalone" not in self._lint(tmp_path, body), body
+
+    def test_sell_advice_still_flagged(self, tmp_path):
+        assert "law6-sell-standalone" in self._lint(tmp_path, "# 测试\n\n卖出该标的。\n")
+
+    def test_target_price_third_party_exempt(self, tmp_path):
+        """第三方研报目标价与检索 query 串非报告给出的单一目标价。"""
+        body = (
+            "# 测试\n\n| **美银研报（补充）** | WebSearch | "
+            '`query: "美银 中际旭创 目标价 1650"` | ✅ 有数据 |\n'
+        )
+        assert "law6-target-price" not in self._lint(tmp_path, body)
+
+    def test_target_price_still_flagged(self, tmp_path):
+        assert "law6-target-price" in self._lint(tmp_path, "# 测试\n\n目标价：25.5 元\n")
+
+    # ---- F-U7-4：wording-macro-chain-evidence 误伤产业毛利率表行 ----
+
+    def test_macro_chain_gross_margin_table_row_exempt(self, tmp_path):
+        """「毛利率」含「利率」子串 + 表格行箭头 → 曾被判为宏观传导链违规。"""
+        body = "# 测试\n\n| 商业 | 毛利率下降 | 未触发 | — | 毛利率 2025→2026: 42.04%→46.06% |\n"
+        assert "wording-macro-chain-evidence" not in self._lint(tmp_path, body)
+
+    def test_macro_chain_real_chain_still_flagged(self, tmp_path):
+        assert "wording-macro-chain-evidence" in self._lint(
+            tmp_path, "# 测试\n\n中东→美债→AI 融资→资产价格同向传导。\n"
+        )
+
+
+class TestReview20260918Law6Bypass:
+    """2026-09-18 review #2/#11：law6 的**绕过**修复（区别于 U7 的误报收窄）。
+
+    与 TestV030Law6FalsePositiveFixes 的成对断言同款纪律：收窄豁免的同时必须证明
+    真违规仍被拦——只证前者会让规则变瞎。
+    """
+
+    @staticmethod
+    def _lint(tmp_path, body: str, profile: str = "claude"):
+        from lib import lint as lint_mod
+        from lib.lint import lint_file
+
+        lint_mod._RULES_CACHE = None
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        return {x.rule_id for x in lint_file(f, profile=profile)}
+
+    # ---- #2：law6-sell-standalone 的 skip 把内容词「净卖出」当豁免标记 ----
+
+    def test_net_sell_advice_is_flagged(self, tmp_path):
+        """「建议净卖出」是真实卖出建议，不得整体绕过。
+
+        原状态：law6-sell-standalone 因 skip 含裸 `净卖出` 而跳过，law6-sell-advice
+        又要求「建议卖出」严格相邻（「净」插在中间）→ 两通道 0 命中。
+        """
+        assert "law6-sell-advice" in self._lint(tmp_path, "# 测试\n\n建议净卖出。\n")
+
+    def test_bare_net_sell_without_advice_verb_flagged(self, tmp_path):
+        assert "law6-sell-standalone" in self._lint(tmp_path, "# 测试\n\n择机净卖出。\n")
+
+    def test_capital_flow_net_sell_still_exempt(self, tmp_path):
+        """资金流字段描述仍豁免（U7-2 的误报收窄不得回退）。"""
+        body = "# 测试\n\n- 6/17 主力资金净卖出 6330 万\n"
+        assert "law6-sell-standalone" not in self._lint(tmp_path, body)
+        assert "law6-sell-advice" not in self._lint(tmp_path, body)
+
+    def test_other_advice_modifiers_flagged(self, tmp_path):
+        for body in ("# 测试\n\n建议逢高卖出。\n", "# 测试\n\n建议立即卖出。\n"):
+            assert "law6-sell-advice" in self._lint(tmp_path, body), body
+
+    # ---- #11：error 级 law6-target-price 的表格行豁免过宽 ----
+
+    def test_self_issued_table_target_price_flagged(self, tmp_path):
+        """报告自身给出的单一目标价，写成表格行也必须被拦。
+
+        注：形态须是「目标价」与数字**相邻**（`| 目标价 25.5 元 |`）——规则 pattern
+        为 `目标价\\s*[：:]*\\s*\\d+`，分格写法（`| 目标价 | 25.5 元 |`）本就不匹配
+        pattern，与 skip 无关，不能用作本项的复现例。
+        """
+        for body in ("# 测试\n\n| 目标价 25.5 元 |\n", "# 测试\n\n| 目标价：25.5 元 | 备注 |\n"):
+            assert "law6-target-price" in self._lint(tmp_path, body), body
+
+    def test_third_party_rating_row_exempt(self, tmp_path):
+        """第三方评级表的目标价排在第 2 格之后 → 仍豁免（U7-2 收窄不得回退）。"""
+        body = "# 测试\n\n| 瑞银（港股） | — | 目标价 660 港元 |\n"
+        assert "law6-target-price" not in self._lint(tmp_path, body)
+
+
+class TestRaSectionBoundaryParity:
+    """2026-09-18 review #5：R-A6 与 lint `structure-analysis-without-fact`
+    必须对同一文本给**同一裁决**（两通道相反裁决正是 A3 合并要消灭的缺陷类别）。
+
+    同一文件经 `invest.py qc-report`（走共享 report_qc）与 lint 得到相反结论时，
+    用户无法判断该信哪个。核心回归 = 同文本两实现结论一致。
+    """
+
+    @staticmethod
+    def _pair(tmp_path, body: str):
+        from lib import lint as lint_mod
+        from lib.lint import lint_file
+        from report_qc import fact_analysis_pair_findings
+
+        lint_mod._RULES_CACHE = None
+        f = tmp_path / "probe.md"
+        f.write_text(body, encoding="utf-8")
+        lint_hit = "structure-analysis-without-fact" in {
+            x.rule_id for x in lint_file(f, profile="claude")}
+        qc_hit = bool(fact_analysis_pair_findings(body))
+        return lint_hit, qc_hit
+
+    def test_h3_under_h2_agrees(self, tmp_path):
+        """`### ` 不再是节边界——lint 亦然（原实现两侧相反）。"""
+        lint_hit, qc_hit = self._pair(
+            tmp_path, "## 节\n\n[事实] 某事实。\n\n### 子节\n\n[分析] 推演。\n")
+        assert lint_hit == qc_hit == False, (lint_hit, qc_hit)  # noqa: E712
+
+    def test_h2_boundary_agrees(self, tmp_path):
+        """`## ` 是节边界——跨节的 [事实] 不满足本节 [分析]。"""
+        lint_hit, qc_hit = self._pair(
+            tmp_path, "## 节一\n\n[事实] 某事实。\n\n## 节二\n\n[分析] 推演。\n")
+        assert lint_hit == qc_hit == True, (lint_hit, qc_hit)  # noqa: E712
+
+    def test_missing_fact_agrees(self, tmp_path):
+        lint_hit, qc_hit = self._pair(tmp_path, "## 节\n\n[分析] 无前置事实。\n")
+        assert lint_hit == qc_hit == True, (lint_hit, qc_hit)  # noqa: E712

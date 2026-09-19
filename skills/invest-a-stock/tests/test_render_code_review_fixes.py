@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -136,14 +137,13 @@ class TestR12gTocAndRegistry:
         from lib.render_markdown._v3 import _report_toc
 
         labels = [label for label, _fn in _R12G_HEADER_SECTIONS]
-        assert labels == ["均线系统表（R12g）", "连板结构（R12g）"]
-        # 连板结构触发时（zt_pool/lhb 存在）→ TOC 含两段
+        # 2026-09-16：均线系统表下沉 §8 技术指标附录（与 §8 既有「趋势」行重复），
+        # 不再占头部注册表条目；注册表只剩连板结构（条件渲染）。
+        assert labels == ["连板结构"]
         toc = _report_toc(_collection(with_zt_lhb=True))
         for label in labels:
             assert f"- {label}" in toc
-        # TOC 顺序与注册表一致（消除漂移）
-        idxs = [toc.index(f"- {label}") for label in labels]
-        assert idxs == sorted(idxs)
+        assert "- 均线系统表" not in toc
 
     def test_toc_omits_limit_streak_when_not_triggered(self):
         """batch-test P1-3：未触发连板（无 zt_pool/lhb）→ TOC 不得列出
@@ -151,33 +151,207 @@ class TestR12gTocAndRegistry:
         from lib.render_markdown._v3 import _report_toc
 
         toc = _report_toc(_collection(with_zt_lhb=False))
-        assert "- 均线系统表（R12g）" in toc
-        assert "- 连板结构（R12g）" not in toc
+        assert "- 连板结构" not in toc
+        # 均线系统表已不在头部/TOC，任何情况下都不应出现
+        assert "- 均线系统表" not in toc
 
-    def test_extras_rendered_from_registry(self):
-        from lib.render_markdown._base import _R12G_HEADER_SECTIONS, _render_engine_extras
+    def test_header_excludes_demoted_engine_sections(self):
+        """头部只放带结论的行（用户审阅 2026-09-16）。
+
+        无结论的引擎自检与纯描述性技术行必须离开头部：
+        多源融合/证据可信度 → 附录；均线系统表/近端价格结构 → §8。
+
+        注意 R4「未覆盖行业」披露**不在此列**：它是覆盖范围说明而非数据罗列，
+        且 brief/concise 无附录区承接（摘掉即删除），故保留在头部。
+        """
+        from lib.render_markdown._base import _render_engine_extras
 
         coll = _collection(with_zt_lhb=True)
         joined = "\n".join(_render_engine_extras(coll))
-        for label, _fn in _R12G_HEADER_SECTIONS:
-            assert label in joined  # 注册表标签即渲染输出前缀
-        assert "**[均线系统表（R12g）]**" in joined
-        assert "**[连板结构（R12g）]**" in joined
+        assert "**[连板结构]**" in joined
+        for banned in ("均线系统表", "近端价格结构", "多源融合", "证据可信度"):
+            assert banned not in joined, f"头部不得再出现「{banned}」"
+
+    def test_demoted_sections_still_present_in_full_report(self):
+        """下沉 ≠ 删除：均线表/近端结构必须真的出现在 §8，附录必须真的渲染。"""
+        from lib.render import render_report_v3
+        from lib.render_markdown._base import (
+            _ENGINE_SELFCHECK_LABEL,
+            _render_engine_selfcheck_appendix,
+            _render_ma_system,
+            _render_price_structure,
+        )
+
+        coll = _collection(with_zt_lhb=True)
+        text = render_report_v3(coll, "600176", mode="full")
+        assert "## 8. 技术指标附录" in text
+        appendix_section = text.split("## 8. 技术指标附录", 1)[1]
+        expected = _render_ma_system(coll) + _render_price_structure(coll)
+        assert expected, "fixture 应能产出均线表/近端结构，否则本测试空转"
+        for line in expected:
+            assert line in appendix_section, f"§8 缺少下沉内容: {line}"
+
+        # 附录：有内容时必须渲染；无内容时不得留空标题（TOC 与正文同判据）
+        heading = f"## {_ENGINE_SELFCHECK_LABEL}"
+        selfcheck = _render_engine_selfcheck_appendix(coll)
+        if selfcheck:
+            assert selfcheck in text
+        else:
+            assert heading not in text
 
     def test_full_report_toc_and_header_consistent(self):
         from test_v013_phase3 import _collection_phase3
         from lib.render import render_report_v3
 
-        # 未触发场景（phase3 fixture 无 zt_pool/lhb）：TOC 只有均线表，
-        # 无连板结构条目（batch-test P1-3）
+        # 未触发连板（phase3 fixture 无 zt_pool/lhb）：TOC 无该条目（batch-test P1-3）
         text = render_report_v3(_collection_phase3(), "600176", mode="full")
-        assert "- 均线系统表（R12g）" in text
-        assert "- 连板结构（R12g）" not in text
+        assert "- 连板结构" not in text
         # 触发场景：TOC 与头部区块均出现（全渲染输出中 TOC 位于 ## 目录 后）
         triggered = render_report_v3(
             _collection(with_zt_lhb=True), "600176", mode="full")
-        assert "- 均线系统表（R12g）" in triggered
-        assert "- 连板结构（R12g）" in triggered
+        assert "- 连板结构" in triggered
+
+
+class TestEngineSelfcheckAppendix:
+    """附录「数据质量与引擎自检」——头部下沉内容的落点。"""
+
+    @staticmethod
+    def _coll(**overrides):
+        coll = _collection()
+        coll.update(overrides)
+        return coll
+
+    def test_consensus_weak_is_single_source_not_disagreement(self):
+        """fusion 的 weak 是单源分支（max_diff 恒 0），不得渲染成「弱 + 零差异」。"""
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        out = _render_engine_selfcheck_appendix(self._coll(fusion={
+            "kline": {"fused_value": 316.36, "consensus": "weak", "max_diff_pct": 0.0},
+            "quote": {"fused_value": 316.36, "consensus": "strong", "max_diff_pct": 0.0},
+        }))
+        assert "单源，未做交叉验证" in out
+        assert "weak" not in out
+        assert "双源一致（≤1%）" in out
+        # 单源行的差异列必须是「—」，与 0.0% 并列会自相矛盾
+        row = next(l for l in out.splitlines() if l.startswith("| kline"))
+        assert row.rstrip().endswith("| — |")
+
+    def test_consensus_weak_multisource_shows_diff(self):
+        """多源分歧（weak 且 max_diff>0）不得渲染成「单源」，差异列不得清空。
+
+        fusion._consensus_from_diff 把「单源」与「源间差异 >5%」都编码成 weak，
+        渲染层若按 consensus 单值推断源数量，跨源冲突会被报告成「只有一个源」，
+        且唯一能区分的 max_diff_pct 被抹掉——违反 §2.3「数据冲突并列不裁决」。
+        生产存量库已实际发生（weak 且 max_diff>0 的维度行）。
+        """
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        out = _render_engine_selfcheck_appendix(self._coll(fusion={
+            "financials": {
+                "fused_value": 12.43, "consensus": "weak", "max_diff_pct": 117.89,
+                "source_values": {"tushare.fina_indicator": 12.4282,
+                                  "akshare.stock_financial_abstract_ths": 3.21},
+            },
+        }))
+        assert "多源分歧" in out
+        row = next(ln for ln in out.splitlines() if ln.startswith("| financials"))
+        assert "单源" not in row, f"多源分歧被误标为单源: {row}"
+        assert "117.89%" in row, "差异列被清空 → 冲突幅度不可见"
+
+    def test_consensus_weak_multisource_diff_without_source_values(self):
+        """旧数据无 source_values 键：有差异值即视为多源（保守，不误报单源）。"""
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        out = _render_engine_selfcheck_appendix(self._coll(fusion={
+            "kline": {"fused_value": 1.0, "consensus": "weak", "max_diff_pct": 16.05},
+        }))
+        row = next(ln for ln in out.splitlines() if ln.startswith("| kline"))
+        assert "16.05%" in row
+        assert "单源" not in row
+
+    def test_macro_detail_loan_is_not_unit_converted(self):
+        """附录列引擎原值：渲染层不得再做 亿→万亿 换算（P0）。
+
+        `_render_macro_detail_lines` 曾按本地阈值换算——3000（亿元）渲染成
+        「0.3万亿」、12000 渲染成「12000亿」，同一引擎字段两种单位，且仍挂
+        引擎来源标签，第 1 层复检无法与原始 JSON 对值对单位。
+        """
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        out = _render_engine_selfcheck_appendix(self._coll(macro_context={
+            "indicators": {"loan": {"value": 3000.0,
+                                    "source": "akshare.macro_rmb_loan"}},
+        }))
+        line = next(ln for ln in out.splitlines() if "新增信贷" in ln)
+        assert "万亿" not in line, f"渲染层仍在换算单位: {line}"
+        assert "亿元" in line, f"须显式声明单位: {line}"
+        assert "3000" in line.replace(",", ""), f"引擎原值未原样出现: {line}"
+
+    def test_ma_table_labels_close_date_not_realtime_price(self):
+        """均线表须标明日线收盘口径与日期——与模块 1 实时价不是同一个数。
+
+        报告同时出现两个「现价」（quote 305.48 / kline 收盘 316.36）时，读者会
+        把技术段的口径当成实时价（review P1）。
+        """
+        from lib.render_markdown._base import _render_ma_system
+
+        out = "\n".join(_render_ma_system(_collection()))
+        assert "现价" not in out, f"仍以「现价」标注日线收盘值: {out}"
+        assert re.search(r"收盘 [\d.]+（\d{8}）", out), f"未标注收盘价与日期: {out}"
+
+    def test_fused_value_is_formatted(self):
+        from lib.render_markdown._base import _format_fused_value
+
+        # legacy 路径未 round，曾渲染出 14637.250837439999
+        assert _format_fused_value(14637.250837439999) == "14,637.25"
+        assert _format_fused_value(316.36) == "316.36"
+        assert _format_fused_value(0.12345) == "0.1235"
+        assert _format_fused_value(None) == "—"
+        assert _format_fused_value(float("nan")) == "—"
+        assert _format_fused_value("x") == "x"
+
+    def test_appendix_carries_credibility_caliber_note(self):
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        out = _render_engine_selfcheck_appendix(self._coll(
+            credibility={"估值分析": 85, "日K线": 55}))
+        assert "证据可信度" in out
+        assert "非投资含义" in out      # 读者须知道 85 不是好消息也不是坏消息
+
+    def test_macro_detail_lists_values_with_sources(self):
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        out = _render_engine_selfcheck_appendix(self._coll(macro_context={
+            "status": "ok",
+            "indicators": {"dgs10": {"value": 4.96, "signal": "高位", "source": "FRED.DGS10"}},
+        }))
+        assert "美10Y: 4.96%" in out
+        assert "FRED.DGS10" in out
+        # 定性判断由头部标签的确定性规则统一给出，明细不得再挂无阈值的定性词
+        assert "高位" not in out
+
+    def test_empty_selfcheck_renders_nothing(self):
+        """无自检数据 → 空串（不留空标题，TOC 也不列）。"""
+        from lib.render_markdown._base import _render_engine_selfcheck_appendix
+
+        assert _render_engine_selfcheck_appendix(_collection()) == ""
+
+    def test_demoted_sections_render_in_all_three_modes_or_not_at_all(self):
+        """下沉内容只在 full 有承接方；brief/concise 无 §8/附录，属**删除**。
+
+        本测试把这个取舍显性化：如果将来要恢复 brief/concise 的均线信息，
+        必须显式改这里，而不是以为「下沉」在三模式都成立了。
+        """
+        from lib.render import render_report_v3
+
+        coll = _collection(with_zt_lhb=True)
+        coll["success_factors"] = {"industry": "电气设备", "covered": False, "factors": []}
+        for mode in ("brief", "concise"):
+            text = render_report_v3(coll, "600176", mode=mode)
+            for dropped in ("均线系统表", "近端价格结构", "多源融合", "证据可信度"):
+                assert dropped not in text, f"{mode} 不应有 {dropped}"
+            # 覆盖披露必须仍在——摘掉它等于删除信息，不是降噪
+            assert "无行业成功因素定义" in text, f"{mode} 丢了覆盖披露"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -317,3 +491,52 @@ class TestBullBearDefaultRAnnotation:
         text = _section_bull_bear({}, "600176", dims, {}, {"signals": []})
         assert "[推测，待验证" in text
         assert "方向仅供参考" in text
+
+
+class TestAnalysisStatusUnavailable:
+    """review C2：校验组件不可导入时不得写成「分析合成未完成」。
+
+    后者是关于报告内容的事实性断言；工具故障时它不成立——产物必须外显故障，
+    而不是断言内容缺失。absent / invalid 的既有文案被 5 处测试钉死，不得改动。
+    """
+
+    _VALID = [{
+        "module": "risk", "title": "风险提示", "position": "conclusion",
+        "facts_md": "近 30 日公告 3 条。", "analysis_md": "分类复核结论。",
+        "evidence_tag": "B",
+    }]
+
+    @staticmethod
+    def _force_unavailable():
+        # None in sys.modules → `from lib.analysis_schema import ...` 抛 ImportError
+        return patch.dict(sys.modules, {"lib.analysis_schema": None})
+
+    def test_markdown_card_reports_unavailable_not_content_absence(self):
+        from lib.render_markdown._concise import _full_mode_identity_status
+
+        with self._force_unavailable():
+            out = _full_mode_identity_status("600176", self._VALID)
+        assert "分析合成状态无法校验" in out, f"未外显工具故障: {out}"
+        assert "分析合成未完成" not in out, f"工具故障被写成内容缺失: {out}"
+
+    def test_html_card_reports_unavailable_not_content_absence(self):
+        from lib.render_html import _html_full_mode_identity_status
+
+        with self._force_unavailable():
+            out = _html_full_mode_identity_status("600176", "full", self._VALID)
+        assert "分析合成状态无法校验" in out, f"未外显工具故障: {out}"
+        assert "分析合成未完成" not in out, f"工具故障被写成内容缺失: {out}"
+
+    def test_valid_payload_still_reports_injected(self):
+        from lib.render_markdown._concise import _full_mode_identity_status
+
+        out = _full_mode_identity_status("600176", self._VALID)
+        assert "分析合成已注入" in out, out
+
+    def test_absent_and_invalid_keep_pinned_wording(self):
+        """空数组与畸形段仍按「未完成」——文案被 test_v015_fixes 等 5 处钉死。"""
+        from lib.render_markdown._concise import _full_mode_identity_status
+
+        for payload in ([], [{"analysis_md": "缺必填字段"}]):
+            out = _full_mode_identity_status("600176", payload)
+            assert "数据底稿（分析合成未完成）" in out, (payload, out)

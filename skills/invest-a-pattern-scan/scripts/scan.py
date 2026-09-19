@@ -34,6 +34,25 @@ ensure_shared_lib_on_path()
 from pattern_scanner import LOOKBACK_DAYS, reality_check_report, scan_universe  # noqa: E402
 
 
+def _hit_to_dict(h) -> dict:
+    """``ScanHit`` → JSON 行。
+
+    ⚠️ ``evidence_note`` 必须**显式**带上：它是 ``detail`` 的**兄弟键**（只在
+    ``ScanHit`` 字段里），C11 三特征的全部证据边界（「无顶级期刊直接检验」/
+    「Liu (2015) 待核验」/「样本期 2001-2003」）都在其中。原实现只展开
+    ``**h.detail`` → 注记**永远写不进** ``pattern_scan_result.json``，而
+    SKILL.md 承诺「命中带 evidence_note」且要求报告只引 JSON 字段。
+    放在 ``**h.detail`` **之后**：显式字段优先，防 detail 同名键覆盖。
+    """
+    return {
+        "ts_code": h.ts_code, "pattern": h.pattern,
+        "bandwidth": h.bandwidth, "endpoint_idx": h.endpoint_idx,
+        "retest_status": h.retest_status, "retest_day": h.retest_day,
+        **h.detail,
+        "evidence_note": h.evidence_note,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="invest-a-pattern-scan 形态扫描")
     parser.add_argument("--universe", nargs="+", default=None, help="指数成分池（默认 csi300 a500 star50）")
@@ -68,15 +87,7 @@ def main() -> int:
                  "date_range": [dates[0], dates[-1]],
                  "n_hits": len(hits), "n_rules": len(rule_matrix)},
         "reality_check": rc,
-        "hits": [
-            {
-                "ts_code": h.ts_code, "pattern": h.pattern,
-                "bandwidth": h.bandwidth, "endpoint_idx": h.endpoint_idx,
-                "retest_status": h.retest_status, "retest_day": h.retest_day,
-                **h.detail,
-            }
-            for h in hits
-        ],
+        "hits": [_hit_to_dict(h) for h in hits],
     }
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

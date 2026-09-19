@@ -18,9 +18,10 @@ import math
 import sqlite3
 from typing import Any
 
-from _invest_path import ensure_invest_a_scripts_on_path
+from _invest_path import ensure_invest_a_scripts_on_path, ensure_skills_lib_on_path
 
 ensure_invest_a_scripts_on_path()
+ensure_skills_lib_on_path()
 
 logger = logging.getLogger(__name__)
 
@@ -230,10 +231,11 @@ def _rows_for_date(date: str) -> dict[int, dict[str, float | None]]:
 
 
 def _is_trading_day(d: str) -> bool | None:
-    """日历判定交易日（C5）：True=交易日 / False=权威日历非交易日 / None=日历不可用。
+    """日历判定交易日（C5）：True=交易日 / False=权威日历非交易日 / None=日历不可信。
 
-    估算日历（无 token，is_estimated=True）对「非交易日」不信任 → None，
-    由调用方走原全等跳过（防调休工作日被估算误判为休市而丢数据）。
+    估算日历（无 token/取数失败，is_estimated=True）两个方向都不可信：既会把
+    调休工作日误判为休市（丢数据），也会把法定假日误判为交易日（放假日报出
+    「疑数据源停更」的假告警）→ 一律 None，由调用方走中性「疑似盘前未刷新」。
     """
     try:
         from lib.trade_cal import fetch_trade_cal
@@ -244,9 +246,9 @@ def _is_trading_day(d: str) -> bool | None:
     except Exception as exc:
         logger.warning("trade_cal 查询失败，回退全等判定: %s", exc)
         return None
-    if d in dates:
-        return True
-    return None if estimated else False
+    if estimated:
+        return None
+    return d in dates
 
 
 def _same_as_latest(
@@ -282,11 +284,11 @@ def _same_as_latest(
     # 任一侧净额缺失 → 视为有变化（永不因 NULL 跳过，防序列冻结）
     if any(saved[ind] is None or v is None for ind, v in cur.items()):
         return False
-    # 浮点位漂移容差（数据两位小数，1e-9 亿远低于显示精度）
-    return all(
-        math.isclose(saved[ind], v, rel_tol=1e-9, abs_tol=1e-9)
-        for ind, v in cur.items()
-    )
+    # 浮点位漂移容差（数据两位小数，1e-9 亿远低于显示精度）；
+    # 收敛到共享 freshness.values_equal（R1 审查 F15）
+    from freshness import values_equal
+
+    return all(values_equal(saved[ind], v) for ind, v in cur.items())
 
 
 def save_sector_flow_snapshot(
@@ -335,9 +337,18 @@ def save_sector_flow_snapshot(
         ]
         comparable = [r for r in results if r is not None]
         if comparable and all(comparable):
-            # 日历仅用于确认跳过（权威非交易日）；估算/不可用 → 原全等判定
-            if _is_trading_day(d) is False:
+            # 日历用于区分跳过原因（R1 审查 F6：停更信号挂在此跳过路径上）：
+            #   True（权威交易日）+ 全等 → 源停更嫌疑（旧值疑似冻结）
+            #   False（权威非交易日）→ 正常休市
+            #   None（日历不可用/估算）→ 原「疑似盘前未刷新」提示
+            trading = _is_trading_day(d)
+            stale_suspect = trading is True
+            if trading is False:
                 note = "非交易日（日历判定），跳过写入"
+            elif trading is True:
+                # 交易日全等 = 停更或盘前未刷新（两者都要求人工核对；保留原措辞）
+                note = (f"交易日但数据与 {latest} 全等——疑数据源停更或盘前未刷新，"
+                        "请人工核对源页面；写入按幂等语义跳过")
             else:
                 note = f"数据与 {latest} 全等，无变化（疑似盘前未刷新），跳过写入"
             return {
@@ -346,6 +357,7 @@ def save_sector_flow_snapshot(
                 "skipped": True,
                 "error": None,
                 "note": note,
+                "stale_suspect": stale_suspect,
             }
 
     # merge upsert：同日重跑时新值非 NULL 覆盖、NULL 保留旧值（防 NaN 解析
@@ -672,6 +684,44 @@ def query_sector_flow(symbol: str) -> dict[str, Any]:
         "history_days": history_days,
         "notes": notes,
     }
+
+
+# ---------------------------------------------------------------------------
+# R1/T7 预警：as_of 滞后 + 全同检测（停源识别）
+# ---------------------------------------------------------------------------
+
+SECTOR_FLOW_STALE_DAYS = 3  # as_of 距最近交易日滞后阈值（**交易日**口径，T7-1 可配）
+
+
+def sector_flow_stale_note(as_of: str | None) -> str | None:
+    """as_of（YYYYMMDD）距最近交易日滞后 > 阈值（交易日）→ 提示文本；否则 None。
+
+    交易日口径（R1 审查 F7）：长假后按自然日计必然误报「停更」；日历不可用
+    降级自然日时在文本中显式标注，不静默。
+    """
+    if not as_of:
+        return None
+    try:
+        from dates import shanghai_session_date
+
+        session = str(shanghai_session_date())
+    except Exception:
+        return None
+    from freshness import trading_day_lag
+
+    lag, degraded = trading_day_lag(str(as_of), session)
+    if lag is None or lag <= SECTOR_FLOW_STALE_DAYS:
+        return None
+    prefix = "（日历不可用，按自然日粗判）" if degraded else ""
+    unit = "天(自然日粗判)" if degraded else "个交易日"
+    return (f"sector-flow as_of={as_of} 滞后 {lag} {unit}"
+            f"（阈值 {SECTOR_FLOW_STALE_DAYS} 交易日）{prefix}，"
+            "疑数据源停更或采集未跑——结论按滞后折减")
+
+
+# snapshot_unchanged_vs_previous 已移除（R1 审查 F6：C5 门在写入前已丢弃全等快照，
+# 写入成功 ⇒ 必有差异 ⇒ 该辅助永不触发）。停更信号改挂在 _same_as_latest 跳过路径：
+# save_sector_flow_snapshot 在「权威交易日 + 全等跳过」时给出 stale_suspect 标记。
 
 
 def check_mapping_coverage(snapshot: dict[str, Any]) -> list[str]:

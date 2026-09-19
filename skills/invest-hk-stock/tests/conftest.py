@@ -16,3 +16,5 @@ for p in (_SKILLS_LIB, _LIB):
     s = str(p)
     if s not in sys.path:
         sys.path.insert(0, s)
+
+# CLI 加载器见 `_hk_cli.py`（唯一命名模块；conftest 同名跨技能会互相覆盖）。

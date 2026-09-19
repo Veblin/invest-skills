@@ -48,7 +48,7 @@ def format_match_hint(driver: str, journal_driver: str) -> str:
     """混搭提示固定模板（非 AI 撰写，R10 验收原文）。"""
     return (
         f"该标的收益驱动为「{driver}」（引擎），你的 journal 记录本次决策驱动逻辑为"
-        f"「{journal_driver}」——两者指向不同方法论，注意起念与持有论证的一致性"
+        f"「{journal_driver}」——两者指向不同方法论，注意起念与持仓论证的一致性"
         "（面基方法论：'不能把基本面的投资手册当成趋势投资的航海指南'）。"
     )
 
@@ -138,17 +138,18 @@ def _driver_from_collection(collection: dict) -> str | None:
                             break
                 elif isinstance(bdata, dict) and bdata.get("industry"):
                     industry = str(bdata.get("industry"))
-        annual: list[dict] = []
-        for r in rows:
-            ed = str(r.get("end_date", ""))
-            npv = r.get("net_profit")
-            if ed.endswith("1231") and npv is not None:
-                annual.append({"year": ed, "net_profit": float(npv)})
+        # 装配收敛到唯一实现（R2/T9-2）：此前本地复制同一套过滤且**无** try/except，
+        # 一个脏行即让整条链路静默返回 None → 报告 R1 块与 R10 行口径不一致
+        from lib.income_driver import extract_annual_rows
+
+        annual = extract_annual_rows(rows)
         if len(annual) < 3:
             return None
         result = classify_income_driver(annual, rows, industry=industry)
         return result.get("driver") or None
-    except Exception:
+    except Exception as exc:
+        # 不静默（R2/T9-2）：装配/判定失败须留痕，而不是让 R1 判定凭空消失
+        logger.warning("_driver_from_collection failed: %s", exc)
         return None
 
 

@@ -571,6 +571,34 @@ class TestTargetPriceRegex:
 
 
 class TestScenarioFcff:
+    def test_half_year_base_is_annualized(self):
+        """半年报基期须先折算年化：否则整条预测序列建成半量纲（review P0）。
+
+        A 股财报为年内累计口径（Q1/H1/Q3/FY = 3/6/9/12 个月）。以 20260630 的
+        半年营收直接起复利，得到的企业价值与市值量纲不可比（300750 实测：
+        base FCFF 311.76 亿 → EV 2450~5687 亿，而同期市值 14135 亿）。
+        """
+        rows = _make_dcf_financials_rows(3)          # 三份年报
+        h1 = dict(rows[-1])
+        h1["end_date"] = "20260630"
+        h1["revenue"] = h1["revenue"] / 2            # 半年实际确认额
+        h1["ebit"] = h1["ebit"] / 2
+        h1["depr_amort"] = h1["depr_amort"] / 2
+        rows = rows + [h1]
+        res = scenario_fcff({"data": rows}, scenario="base")
+        assert "error" not in res
+        g = res["assumptions"]["revenue_growth"]
+        y1 = res["yearly_fcff"][0]["revenue"]
+        # 首年营收应以「半年额 × 2 年化」为基再乘 (1+g)，而非直接以半年额起算
+        assert y1 == pytest.approx(h1["revenue"] * 2 * (1 + g), abs=0.02), \
+            f"基期未年化: y1={y1:.2f} 期望≈{h1['revenue'] * 2 * (1 + g):.2f}"
+        assert res["assumptions"]["base_annualization"]["factor"] == pytest.approx(2.0)
+
+    def test_year_end_base_is_not_scaled(self):
+        """年报表基期年化系数为 1（不得把年报表再乘 2）。"""
+        res = scenario_fcff(_make_dcf_financials(4), scenario="base")
+        assert res["assumptions"]["base_annualization"]["factor"] == pytest.approx(1.0)
+
     def test_base_scenario_normal_path(self):
         financials = _make_dcf_financials(4)
         result = scenario_fcff(financials, scenario="base")
@@ -1079,7 +1107,9 @@ class TestSectionManagementAssessment:
         assert "股东利益一致性" in text
         assert "强正向" in text
         assert "组织能力" in text
-        assert "[Claude report 阶段定性填充" in text
+        # 措辞已改为「引擎未采集 + 补证路径」：该行无注入机制，
+        # 按 error 级占位词规会被拦（见 _v3 软维度段注释）
+        assert "引擎未采集" in text
         _check_no_forbidden_words(text)
 
     def test_no_matching_events_marks_insufficient(self):
@@ -1337,7 +1367,7 @@ class TestSectionSixGatesScorecard:
         for gate in ("生意", "护城河", "管理层", "财务", "估值", "风险"):
             assert f"| {gate} " in text
         assert "不构成投资建议" in text
-        assert "不代表买卖或持有的行动判断" in text
+        assert "不代表买卖或持仓的行动判断" in text
         _check_no_forbidden_words(text)
 
     def test_no_binary_pass_fail_or_action_words(self):

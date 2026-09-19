@@ -404,6 +404,89 @@ class TestLabelE2:
 
 
 # ---------------------------------------------------------------------------
+# 海外段结论：确定性规则（2026-09-16）
+#
+# 原实现海外段只平铺「数值 + 单词标签」（高位/平坦/偏强），读者拿不到判断，
+# 而这段位于报告头部。规则输入一律是引擎已产出的 signal 字段，渲染层不引入
+# 新阈值——否则同一指标会出现两套口径。每条规则一例。
+# ---------------------------------------------------------------------------
+
+class TestGlobalConclusion:
+    def test_rate_rule_fires_on_either_signal(self):
+        from lib.macro import _global_conclusion
+
+        # 美10Y 高位 或 实际利率 高实际利率，任一命中即出结论（同一条规则只出一条）
+        assert _global_conclusion({"dgs10": {"signal": "高位"}}) == "海外利率高位，外部估值压制未解除"
+        assert _global_conclusion({"dfii10": {"signal": "高实际利率"}}) == "海外利率高位，外部估值压制未解除"
+        both = _global_conclusion({"dgs10": {"signal": "高位"},
+                                   "dfii10": {"signal": "高实际利率"}})
+        assert both.count("；") == 0, f"同一规则重复输出：{both}"
+
+    def test_single_condition_rules(self):
+        from lib.macro import _global_conclusion
+
+        cases = {
+            "t10y2y": ("倒挂", "海外收益率曲线倒挂"),
+            "t5yie": ("高通胀预期", "海外通胀预期偏高"),
+            "vix": ("恐慌", "海外风险偏好收缩"),
+            "dcoilbrenteu": ("高位", "油价高位，成本端压力"),
+            "dexchus": ("人民币偏弱", "人民币偏弱"),
+            "acm_tp10": ("偏高", "期限溢价偏高"),
+        }
+        for key, (sig, expected) in cases.items():
+            assert _global_conclusion({key: {"signal": sig}}) == expected, key
+        assert _global_conclusion({"vix": {"signal": "偏高"}}) == "海外波动偏高"
+
+    def test_baseline_signals_yield_explicit_no_anomaly_conclusion(self):
+        from lib.macro import _global_conclusion
+
+        # 全基线不得留空——「无异常」本身是结论，留空会让海外段退化成数值堆砌
+        assert _global_conclusion({}) == "海外未见异常信号"
+        assert _global_conclusion({"dgs10": {"signal": "中位"},
+                                   "vix": {"signal": "正常"}}) == "海外未见异常信号"
+
+    def test_clause_count_is_capped(self):
+        from lib.macro import _MAX_GLOBAL_CLAUSES, _global_conclusion
+
+        all_fire = {
+            "dgs10": {"signal": "高位"}, "t10y2y": {"signal": "倒挂"},
+            "t5yie": {"signal": "高通胀预期"}, "vix": {"signal": "恐慌"},
+            "dcoilbrenteu": {"signal": "高位"}, "dexchus": {"signal": "人民币偏弱"},
+            "acm_tp10": {"signal": "偏高"},
+        }
+        out = _global_conclusion(all_fire)
+        assert len(out.split("；")) == _MAX_GLOBAL_CLAUSES
+
+    def test_domestic_segment_also_carries_conclusion(self):
+        """结论不再被当作 part 用 " + " 拼接（曾渲染出「信贷 0.1万亿 + →偏宽松」）。"""
+        label = macro.macro_signal_label({
+            "indicators": {
+                "pmi": {"value": 49.8},
+                "lpr": {"value": 3.0, "signal": "偏宽松"},
+                "loan": {"value": 1000},
+            },
+        })
+        assert "+ →" not in label
+        assert "→偏宽松" in label
+
+    def test_two_segment_layout(self):
+        label = macro.macro_signal_label({
+            "indicators": {
+                "pmi": {"value": 49.8},
+                "lpr": {"value": 3.0, "signal": "偏宽松"},
+                "vix": {"value": 15.8, "signal": "正常"},
+                "sox": {"value": 11135.0},
+                "dgs10": {"value": 4.96, "signal": "高位"},
+            },
+        })
+        first, second = label.split("\n")
+        assert first.startswith("国内：") and "→偏宽松" in first
+        assert first.endswith("|"), "海外段存在时首行须以 ASCII | 结尾（TestMacroLabel 契约）"
+        assert second.startswith("  海外：")
+        assert "→海外利率高位，外部估值压制未解除" in second
+
+
+# ---------------------------------------------------------------------------
 # E3: 序列消费（VIX / PMI / DGS30 / C6 主权债）
 # ---------------------------------------------------------------------------
 

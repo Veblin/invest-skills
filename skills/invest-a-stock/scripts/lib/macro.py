@@ -845,12 +845,60 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
     }
 
 
-def macro_signal_label(macro: dict) -> str:
-    """从宏观数据生成情景标签字符串。
+# 海外段结论规则：按序求值，命中即记一条；同一条规则多指标命中只出一条。
+# 判定输入是**引擎已产出的 signal 字段**（macro._FRED_DAILY_SPECS 的阈值函数），
+# 渲染层不引入新阈值——否则同一指标会出现两套口径。
+# 词表来源：dgs10 高位≥4.5 / dfii10 高实际利率≥2.0 / t10y2y 倒挂<0 /
+#          t5yie 高通胀预期≥2.5 / vix 恐慌 / dcoilbrenteu 高位≥90 /
+#          dexchus 人民币偏弱>7.3 / acm_tp10 偏高≥1.0。
+_GLOBAL_CONCLUSION_RULES: tuple[tuple[tuple[tuple[str, str], ...], str], ...] = (
+    ((("dgs10", "高位"), ("dfii10", "高实际利率")), "海外利率高位，外部估值压制未解除"),
+    ((("t10y2y", "倒挂"),), "海外收益率曲线倒挂"),
+    ((("t5yie", "高通胀预期"),), "海外通胀预期偏高"),
+    ((("vix", "恐慌"),), "海外风险偏好收缩"),
+    ((("vix", "偏高"),), "海外波动偏高"),
+    ((("dcoilbrenteu", "高位"),), "油价高位，成本端压力"),
+    ((("dexchus", "人民币偏弱"),), "人民币偏弱"),
+    ((("acm_tp10", "偏高"),), "期限溢价偏高"),
+)
+# 结论条数上限：两段式首行的目的是「有结论」，不是把数据换个地方堆一遍
+_MAX_GLOBAL_CLAUSES = 2
+_NO_GLOBAL_SIGNAL = "海外未见异常信号"
 
-    格式: PMI X.X + CPI +X.X% + LPR X.X% →信号 | VIX X.X 等级 SOX X,XXX
-    左侧为国内宏观，右侧（| 之后）为全球风险/AI需求指标。
+
+def _global_conclusion(indicators: dict) -> str:
+    """海外段结论（确定性规则，非 LLM 撰写）。
+
+    全部指标均为基线信号时返回「海外未见异常信号」——基线本身就是结论，
+    不留空，避免海外段退化成无结论的数值堆砌。
     """
+    clauses: list[str] = []
+    for conditions, clause in _GLOBAL_CONCLUSION_RULES:
+        for key, sig in conditions:
+            ind = indicators.get(key)
+            if isinstance(ind, dict) and ind.get("signal") == sig:
+                clauses.append(clause)
+                break
+    return "；".join(clauses[:_MAX_GLOBAL_CLAUSES]) or _NO_GLOBAL_SIGNAL
+
+
+def macro_signal_label(macro: dict) -> str:
+    """从宏观数据生成情景标签字符串（两段式，每段各带结论）。
+
+    格式（首行国内 → 政策方向；次行海外 → 海外结论）::
+
+        国内：PMI 49.8 + CPI +0.8% + LPR 3.0% + M2 7.5% →偏宽松 |
+          海外：VIX 17.1 正常 SOX 11,176 美10Y 4.96% 高位 →海外利率高位，外部估值压制未解除
+
+    两段都给出结论是刻意设计：原实现海外段只平铺「数值 + 单词标签」
+    （高位/平坦/偏强），读者拿不到任何判断，而这段位于报告头部——
+    最高价值位置不应放无结论信息。
+
+    契约（tests/test_v015_fixes.py::TestMacroLabel 锁定）：
+      · 有海外指标时标签内必含 ASCII ``|``；无海外指标时不得含 ``|``
+      · 国内指标全缺但海外存在时，首行为「宏观数据不可得 |」
+    """
+
     indicators = macro.get("indicators", {})
     parts: list[str] = []
 
@@ -890,11 +938,12 @@ def macro_signal_label(macro: dict) -> str:
             policy_parts.append("CPI通缩压力")
         elif cpi_val > 3:
             policy_parts.append("CPI通胀压力")
+    # 结论单独成段拼接：原实现把「→偏宽松」当成一个 part 用 " + " 连接，
+    # 渲染出「信贷 0.1万亿 + →偏宽松」——分隔符语义错位（结论不是又一个指标）。
     if policy_parts:
-        if len(policy_parts) == 1:
-            parts.append(f"→{policy_parts[0]}")
-        else:
-            parts.append(f"→{'/'.join(p for p in policy_parts if p)}")
+        policy_conclusion = "/".join(p for p in policy_parts if p)
+    else:
+        policy_conclusion = ""
 
     # ---- 全球指标（｜分隔）----
     global_parts: list[str] = []
@@ -948,15 +997,22 @@ def macro_signal_label(macro: dict) -> str:
             token = f"{token} {sig}"
         global_parts.append(token)
 
-    china_part = " + ".join(parts) if parts else ""
-    global_part = " ".join(global_parts) if global_parts else ""
+    if not policy_conclusion and pmi and pmi.get("signal"):
+        # 无 LPR/CPI 时以 PMI 景气方向兜底，国内段同样不留无结论的数值堆砌
+        policy_conclusion = f"景气{pmi['signal']}"
 
-    if china_part and global_part:
-        return f"{china_part} | {global_part}"
-    elif global_part:
-        return f"宏观数据不可得 | {global_part}"
-    else:
-        return china_part if china_part else "宏观数据不可得"
+    china_part = " + ".join(parts) if parts else ""
+    china_line = f"国内：{china_part}" if china_part else "宏观数据不可得"
+    if policy_conclusion:
+        china_line = f"{china_line} →{policy_conclusion}"
+
+    global_part = " ".join(global_parts) if global_parts else ""
+    if not global_part:
+        return china_line
+    return (
+        f"{china_line} |\n"
+        f"  海外：{global_part} →{_global_conclusion(indicators)}"
+    )
 
 
 # ---------------------------------------------------------------------------

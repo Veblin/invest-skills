@@ -27,6 +27,7 @@ from db import (  # noqa: E402
     get_journal,
     journal_stats,
     list_journals,
+    render_wrong_frequency,
     search_by_symbol,
 )
 
@@ -190,6 +191,32 @@ def cmd_show(journal_id: int, portfolio: str | None = None) -> int:
                     level = dim_data.get("level", "?") if isinstance(dim_data, dict) else "?"
                     print(f"  {name}: {level}")
 
+            # R-C04 未行动观察（错过后悔侧）——「应做未做」与「不应做却做」的对照原料
+            watch = eval_json.get("inaction_watch")
+            if isinstance(watch, list) and watch:
+                print("\n  --- 未行动观察（错过后悔侧）---")
+                for w in watch:
+                    if not isinstance(w, dict):
+                        continue
+                    # `backfill` 是 TEXT 直通字段（SKILL.md 约定 null / 对象），无写入侧校验，
+                    # LLM 可能写成字符串等形态 → 形态异常须外显，且不得让 .get 中断整条渲染。
+                    bf = w.get("backfill")
+                    price_txt = (f"观察时 {w.get('price_at_observation')}"
+                                 if w.get("price_at_observation") is not None else "观察时 —")
+                    if not isinstance(bf, dict):
+                        back_txt = ("回填：待补" if bf is None
+                                    else f"回填：格式异常（{type(bf).__name__}，非对象）")
+                    elif bf:
+                        back_txt = (f"回填 {bf.get('as_of')} 价 {bf.get('price')}"
+                                    f"（{bf.get('pct_change')}）")
+                    else:
+                        back_txt = "回填：待补"          # 空对象 = 尚未回填（既有语义）
+                    print(f"  {w.get('symbol')}（{w.get('observed_at')}）"
+                          f"跳过理由：{w.get('skip_reason')}"
+                          f"｜类型：{w.get('skip_kind') or '—'}｜{price_txt}｜{back_txt}"
+                          f"｜复盘归类：{w.get('review_class') or '待复核'}")
+                print("  （归类口径：应做未做 = action bias 反侧；不应做却做 = 过度行动侧）")
+
     print(f"\n  创建时间:   {e.get('created_at', '')}")
 
     if portfolio:
@@ -221,6 +248,9 @@ def cmd_stats() -> int:
     print(f"  已复盘: {stats['reviewed']}")
     if stats["total"] > 0:
         print(f"  复盘率: {stats['reviewed'] / stats['total'] * 100:.0f}%")
+    # R-C01 错频段：连续亏损 + 个人自证数据（冷却 = 强制结构化复盘，非禁止交易）
+    print()
+    print(render_wrong_frequency())
     return 0
 
 

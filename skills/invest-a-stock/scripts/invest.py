@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -265,7 +267,21 @@ def _add_force_sector_sync_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
-MODE_CHOICES = ["brief", "full", "concise"]  # --mode 三处共用（根/report/synthesize）
+MODE_CHOICES = ["brief", "full", "concise", "insight"]  # --mode 三处共用（根/report/synthesize）
+
+
+class _ModeAction(argparse.Action):
+    """记录 ``--mode`` 是否被显式传入（``args._mode_explicit``）。
+
+    根解析器的 ``--mode`` 默认值恒为 'full'，使 ``args.mode`` **恒存在**——
+    ``hasattr`` 无法判别「显式选了 full」与「默认落到 full」，而二者对事后
+    审计含义完全不同（2026-09-15 实测：full 报告被误判为「当时 insight 还不
+    存在」）。此处只**旁记**一个私有标记，不动任何默认值契约。
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_mode_explicit", True)
 
 
 def _add_collect_flags(parser: argparse.ArgumentParser, *,
@@ -300,8 +316,8 @@ def _add_collect_flags(parser: argparse.ArgumentParser, *,
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="A股个股调研数据采集与分析")
     p.add_argument("--plan", default="", help="JSON 采集计划文件路径")
-    p.add_argument("--mode", default="full", choices=MODE_CHOICES,
-                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
+    p.add_argument("--mode", default="full", choices=MODE_CHOICES, action=_ModeAction,
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简) / insight(研究要点)")
     p.add_argument("--resume", action="store_true", help="从上次中断的步骤继续")
     p.add_argument("--save-raw", action="store_true",
                    help="保存原始采集 JSON 到 ~/.local/share/investment/raw/")
@@ -318,11 +334,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("report", help="生成分析报告")
     pr.add_argument("symbol")
-    pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES,
-                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简)")
+    pr.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES, action=_ModeAction,
+                   help="报告模式: brief(简报) / full(完整九模块) / concise(对话精简) / insight(研究要点)")
     pr.add_argument("--emit", default="md", choices=["compact", "json", "md", "html"])
     pr.add_argument("--analysis", default=None,
-                    help="analysis.json 路径（R-B1）；渲染期替换 [待 Claude report 阶段填充] 占位")
+                    help="analysis.json 路径（R-B1）；full 替换 [待 Claude report 阶段填充] 占位，"
+                         "insight 注入「分析合成」独立分区并落同代侧车")
+    # P0-5 研究档案：记录 R12g-B 开场四问结果，落同代 profile 侧车并在 full 头部展示。
+    # 只改变阅读顺序与补证优先级，不做字段过滤（不隐藏反证/缺口/风险）。
+    pr.add_argument("--horizon", default=None,
+                    choices=["short_term", "medium_term", "long_term"],
+                    help="研究档案：持有周期（Q_周期）；落在 <report>.profile.json")
+    pr.add_argument("--focus", default=None, action="append",
+                    choices=["valuation", "event_catalyst", "capital_flow", "comprehensive"],
+                    help="研究档案：关注焦点（Q_焦点，可重复）")
+    pr.add_argument("--goal", default=None,
+                    help="研究档案：本次研究目标（自由文本，≤120 字）")
+    pr.add_argument("--style", default=None,
+                    help="研究档案：投资风格（Q_风格）；缺省读 user_style.json")
+    pr.add_argument("--already-knows-price", action="store_true",
+                    dest="already_knows_price", default=None,
+                    help="研究档案：已看过行情（Q_已看）")
+    pr.add_argument("--no-already-knows-price", action="store_false",
+                    dest="already_knows_price", default=None,
+                    help="研究档案：未看过行情")
     pr.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     _add_collect_flags(pr, with_news_pack=True)
     pr.add_argument(
@@ -410,7 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
     psyn.add_argument("symbol")
     psyn.add_argument("--input", default="", help="分析结果 JSON 文件路径")
     psyn.add_argument("--emit", default="md", choices=["md", "json"])
-    psyn.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES)
+    psyn.add_argument("--mode", default=argparse.SUPPRESS, choices=MODE_CHOICES, action=_ModeAction)
     psyn.add_argument("--outdir", default="", help="报告输出目录")
     psyn.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     psyn.add_argument("--no-store", action="store_false", dest="store", default=True,
@@ -606,14 +641,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
         store_mod.save_pipeline_step(
             args.symbol, "collect", _collect_pipeline_state(args, dims),
         )
-    if getattr(args, 'save_raw', False):
-        try:
-            from lib.archiver import archive_collection
-            filepath = archive_collection(args.symbol, result)
-            if filepath:
-                print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
-        except Exception as exc:
-            print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
+    # v0.3.0 D5：原为内联块（且只写在 full 分支尾），现统一走 helper——见其说明
+    _maybe_save_raw(args, result)
     return 0
 
 
@@ -655,6 +684,39 @@ def _maybe_store_report_snapshot(
     _maybe_store_macro_snapshot(result, args)
 
 
+def _maybe_save_raw(args: argparse.Namespace, result: dict) -> None:
+    """--save-raw：存档原始采集结果（best-effort，失败不阻断）。
+
+    v0.3.0 D5：这段原只写在 full 分支尾部（render 之后），而 insight 分支在它之前
+    就 `return 0`（json / compact 出口更早）→ `--mode insight --save-raw` 被**静默
+    忽略**，用户以为存了档而 archiver 从未调用。抽成 helper 并在每个出口调用，
+    与 `_maybe_store_report_snapshot` 同款惯例。
+    """
+    if not getattr(args, "save_raw", False):
+        return
+    try:
+        from lib.archiver import archive_collection
+        filepath = archive_collection(args.symbol, result)
+        if filepath:
+            print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
+    except Exception as exc:
+        print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
+
+
+def _insight_snapshot_diff(symbol: str, result: dict) -> tuple[dict | None, str]:
+    """Insight「本次新增发现」的数据来源：当前采集 vs store 上次快照。
+
+    与 `_maybe_store_report_snapshot` 共用同一条时序约束——**必须在入库之前读取**，
+    否则 diff 退化为自比空 diff。读取本身在 `lib.insight_model.load_snapshot_diff`
+    内做 try/except 降级，此处只补 store 模块整体不可用这一种情形。
+    """
+    if not _HAS_STORE:
+        return None, "store_unavailable"
+    from lib.insight_model import load_snapshot_diff
+
+    return load_snapshot_diff(symbol, result)
+
+
 def _report_basename(result: dict, symbol: str, ts: str) -> str:
     """生成报告子目录名：{symbol}-{name}（文件名用日期，如 2026-07-05.md）。"""
     name = ""
@@ -680,8 +742,62 @@ def _html_report_path(outdir: Path, subdir: str, ts: str) -> Path:
     return _report_filepath(outdir, subdir, ts).with_suffix(".html")
 
 
+def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | None) -> Path | None:
+    """将已校验的分析段原样原子写到报告同代 sidecar。
+
+    ``report --analysis`` 的输入可在任意路径；成品必须复制一份到与 ``.md``
+    同目录、同时间戳的位置，供后续 QC 与审计追溯。临时文件与目标同目录，
+    ``replace`` 在同一文件系统中为原子替换，避免中断时留下半截 JSON。
+    """
+    # 真值判断而非 `is not None`：空数组不携带任何分析段，正文会写「分析合成未完成」
+    # （lib.analysis_status.analysis_payload_status 按空=未注入处理，insight 分支同样
+    # 按真值判断）。用 `is not None` 会写出空侧车 + 正文说未注入 → 审计者按侧车回查
+    # 拿到自相矛盾的产物（QC 报 sidecar-invalid 而非可操作的 missing）。
+    if not analysis_payload:
+        return None
+    sidecar = report_path.with_suffix(".analysis.json")
+    payload = json.dumps(analysis_payload, ensure_ascii=False, indent=2) + "\n"
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{sidecar.name}.", suffix=".tmp", dir=str(sidecar.parent), text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(temp_name).replace(sidecar)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return sidecar
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    # P0-5: ResearchProfile 校验（fail-loud，且在采集之前——参数拼错不该先跑一遍
+    # 联网采集才报错）。未传任何相关参数时 profile=None，行为与既有完全一致。
+    from lib.research_profile import (
+        ProfileSchemaError,
+        build_profile,
+        resolve_mode,
+        validate_profile,
+        write_profile_sidecar,
+    )
+    # 产物溯源：随档案侧车落盘「本次用哪个 --mode、是显式还是默认」
+    # （见 research_profile.resolve_mode 的动机说明）。
+    generation = resolve_mode(args)
+    profile: dict | None = None
+    try:
+        profile = build_profile(args)
+        if profile is not None:
+            profile_errors = validate_profile(profile)
+            if profile_errors:
+                raise ProfileSchemaError("; ".join(profile_errors[:5]))
+    except ProfileSchemaError as exc:
+        print(f"❌ ResearchProfile 校验失败: {exc}", file=sys.stderr)
+        return 2
+    if profile is not None:
+        print(f"📐 研究档案已加载（{len(profile)} 字段）", file=sys.stderr)
     result = None
     resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
     if args.resume and _HAS_STORE:
@@ -729,7 +845,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
             return 2
         print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
-    # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，渲染层标注「无行业成功因素定义」）
+    # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，披露移入附录「覆盖缺口」）
     try:
         from lib.render_utils import _get_dim_data, _index_dims
         from lib.industry.base import get_success_factors
@@ -774,6 +890,74 @@ def cmd_report(args: argparse.Namespace) -> int:
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
+    # Insight 是 reader-first 的独立产物：不复用 full 模式九模块渲染器，避免
+    # Markdown/HTML 各自从 collection 推导一套结论。旧模式的输出契约不变。
+    if getattr(args, "mode", "full") == "insight":
+        from lib.insight_model import InsightSchemaError, build_report_model, write_sidecars
+        from lib.render_insight import render_insight_html, render_insight_markdown
+        # 必须在 _maybe_store_report_snapshot 之前读取，否则 diff 自比为空。
+        key_diff, diff_reason = _insight_snapshot_diff(args.symbol, result)
+        try:
+            insight_model = build_report_model(result, args.symbol, profile,
+                                               key_diff=key_diff, diff_reason=diff_reason,
+                                               analysis=analysis_payload)
+        except InsightSchemaError as exc:
+            print(f"❌ Insight 模型校验失败: {exc}", file=sys.stderr)
+            return 2
+        if fmt == "json":
+            print(json.dumps(insight_model, ensure_ascii=False, indent=2))
+            _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+            _maybe_save_raw(args, result)
+            return 0
+        markdown = render_insight_markdown(insight_model)
+        if fmt == "compact":
+            print(markdown)
+            _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+            _maybe_save_raw(args, result)
+            return 0
+        from lib.shared_dates import shanghai_now
+        timestamp = shanghai_now().strftime("%Y-%m-%d-%H-%M-%S")
+        subdir = _report_basename(result, args.symbol, timestamp)
+        outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
+                  else (Path.cwd() / "reports").resolve())
+        report_dir = outdir / subdir
+        report_dir.mkdir(parents=True, exist_ok=True)
+        mdpath = report_dir / f"{timestamp}.insight.md"
+        # 分析侧车必须先于主体产物落盘：Markdown 一旦写出就「自称已注入」，
+        # 侧车若后写或写失败，会留下一个声称有合成、实际无从追溯的成品
+        # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
+        analysis_sidecar: Path | None = None
+        # 真值判断而非 `is not None`：空数组不携带任何分析段，insight_model 会判
+        # status=absent（full 的 analysis_payload_status 同样按空=未注入处理）。
+        # 若此处用 `is not None`，会写出空侧车 + 登记 manifest，而报告写着「未注入」
+        # ——审计者按 manifest 回查会拿到一份自相矛盾的产物。
+        if analysis_payload:
+            try:
+                analysis_sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
+            except OSError as exc:
+                print(f"❌ 分析侧车写入失败: {exc}", file=sys.stderr)
+                return 2
+        mdpath.write_text(markdown, encoding="utf-8")
+        htmlpath = None
+        if fmt == "html":
+            htmlpath = mdpath.with_suffix(".html")
+            htmlpath.write_text(render_insight_html(insight_model), encoding="utf-8")
+            print(f"📄 Insight HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
+        sidecars = write_sidecars(mdpath, insight_model, html_path=htmlpath,
+                                  analysis_path=analysis_sidecar)
+        profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
+        print(f"📝 Insight Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
+        print(f"📋 Facts 侧车: {sidecars['facts'].resolve()}", file=sys.stderr)
+        print(f"📋 Findings 侧车: {sidecars['insight'].resolve()}", file=sys.stderr)
+        if analysis_sidecar:
+            print(f"📋 分析侧车: {analysis_sidecar.resolve()}", file=sys.stderr)
+        if profile_sidecar:
+            print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
+        if not getattr(args, "outdir", None) and fmt == "md":
+            print(markdown)
+        _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+        _maybe_save_raw(args, result)
+        return 0
 
     if fmt == "html":
         _ensure_render_ready(result, args.symbol)
@@ -781,8 +965,11 @@ def cmd_report(args: argparse.Namespace) -> int:
         # 注入——旧实现 render_report_v2（v0.1.2 旧模板）与 html 侧 v3 结构
         # 不同代，且 analysis 只进 html、md 静默缺失（同目录两代 md 产物）。
         md_v2 = render.render_report_v3(
-            result, args.symbol, analysis=analysis_payload)
-        output = render.render_html(result, args.symbol, analysis=analysis_payload)
+            result, args.symbol, mode=getattr(args, "mode", "full"),
+            analysis=analysis_payload, profile=profile)
+        output = render.render_html(
+            result, args.symbol, mode=getattr(args, "mode", "full"),
+            analysis=analysis_payload, profile=profile)
         from lib.shared_dates import shanghai_now
         now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -792,16 +979,29 @@ def cmd_report(args: argparse.Namespace) -> int:
         outdir = Path(args.outdir).resolve() if args.outdir \
             else (Path.cwd() / "reports").resolve()
         htmlpath = _html_report_path(outdir, subdir, ts)
+        mdfile = _report_filepath(outdir, subdir, ts)
+        # 侧车必须先于主体产物落盘（同 insight 分支）：正文一旦写出就「自称已注入」，
+        # 侧车后写或写失败会留下一个声称有合成、实际无从追溯的孤儿成品
+        # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
+        try:
+            sidecar = _write_analysis_sidecar(mdfile, analysis_payload)
+            profile_sidecar = write_profile_sidecar(mdfile, profile, generation)
+        except OSError as exc:
+            print(f"❌ 侧车写入失败: {exc}", file=sys.stderr)
+            return 2
         htmlpath.parent.mkdir(parents=True, exist_ok=True)
         htmlpath.write_text(output, encoding="utf-8")
-
-        mdfile = _report_filepath(outdir, subdir, ts)
         mdfile.write_text(md_v2, encoding="utf-8")
 
         print(render.render(result, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
         print(f"📝 Markdown 报告: {mdfile.resolve()}", file=sys.stderr)
+        if sidecar:
+            print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
+        if profile_sidecar:
+            print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
         _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
+        _maybe_save_raw(args, result)
         return 0
 
     # attach_extras=True：cmd_report 非纯渲染（刚跑完 collect_all / resume 恢复），
@@ -809,17 +1009,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
     # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
     output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
-                           attach_extras=True, analysis=analysis_payload)
+                           attach_extras=True, analysis=analysis_payload, profile=profile)
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
-    if getattr(args, 'save_raw', False):
-        try:
-            from lib.archiver import archive_collection
-            filepath = archive_collection(args.symbol, result)
-            if filepath:
-                print(f"📦 原始数据已存档: {filepath}", file=sys.stderr)
-        except Exception as exc:
-            print(f"⚠️ 存档失败: {exc}", file=sys.stderr)
+    # v0.3.0 D5：原为内联块（且只写在 full 分支尾），现统一走 helper——见其说明
+    _maybe_save_raw(args, result)
 
     if fmt == "md":
         # F2-4: 报告文件名时间戳显式北京时（ZoneInfo Asia/Shanghai），
@@ -835,8 +1029,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
                   else (Path.cwd() / "reports").resolve())
         mdpath = _report_filepath(outdir, subdir, ts)
+        # 侧车先于正文落盘（同 insight 分支）：见 html 分支同款说明。
+        try:
+            sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
+            profile_sidecar = write_profile_sidecar(mdpath, profile, generation)
+        except OSError as exc:
+            print(f"❌ 侧车写入失败: {exc}", file=sys.stderr)
+            return 2
         mdpath.write_text(output, encoding="utf-8")
         print(f"📝 Markdown 报告: {mdpath.resolve()}", file=sys.stderr)
+        if sidecar:
+            print(f"📋 分析侧车: {sidecar.resolve()}", file=sys.stderr)
+        if profile_sidecar:
+            print(f"📐 研究档案侧车: {profile_sidecar.resolve()}", file=sys.stderr)
         if not getattr(args, "outdir", None):
             print(output)  # 默认路径下保留 stdout 契约（skill 流程读 stdout）
         return 0
@@ -1070,6 +1275,13 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
     """
 
     if args.input:
+        if getattr(args, "mode", "full") == "insight":
+            print(
+                "❌ synthesize --input 尚不生成 Insight 同代 sidecar；请使用 "
+                "`report SYMBOL --mode insight` 以保持 Facts/Findings 契约。",
+                file=sys.stderr,
+            )
+            return 2
         try:
             with open(args.input, "r", encoding="utf-8") as f:
                 analysis = json.load(f)
@@ -1218,6 +1430,9 @@ def cmd_peer(args: argparse.Namespace) -> int:
 
     # 数据来源标注
     source_labels = {
+        "tushare_sw_member_all": (
+            "Tushare index_member_all（申万成分整表，需2000+积分）"
+        ),
         "tushare_5000": "Tushare index_member（申万L3，需5000+积分）",
         "tushare_2000": (
             "Tushare stock_basic（申万粗分类，需2000+积分）"
@@ -1704,18 +1919,27 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
 
 def cmd_qc_report(args: argparse.Namespace) -> int:
-    from lib.report_qc import format_report_qc, run_report_qc
+    """统一 QC 入口——与第 0 层准出（skills/lib/report_qc.py）同实现。
+
+    v0.3.0 A3：此前这里走 `lib.report_qc`，而 `lib` 在本进程已绑定
+    invest-a-stock/scripts/lib → 解析到旧的 228 行模块（无 lint/completion/
+    derived/sourcing 任何闸门），与规范要求的第 0 层通道对同一文件可给出相反
+    裁决。现改为经 compat shim 把 skills/lib 入 sys.path 后按**顶层名**导入：
+    不能再写 `import lib.report_qc`——`lib` 的绑定已固定，插 path 不改变它。
+    """
+    from lib._invest_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from report_qc import format_qc_result, qc_file
 
     p = Path(args.path).resolve()
     if not p.exists():
         print(f"❌ 文件不存在: {p}", file=sys.stderr)
         return 1
-    text = p.read_text(encoding="utf-8")
-    findings = run_report_qc(text)
-    print(format_report_qc(findings))
-    rank = {"info": 0, "warning": 1, "error": 2}
-    threshold = rank.get(args.fail_on, 1)
-    return 1 if any(rank[f.severity] >= threshold for f in findings) else 0
+    result = qc_file(p, profile="claude", fail_on=args.fail_on)
+    print(format_qc_result(result, verbose=True))
+    # 退出码对齐 CLAUDE.md 第 0 层契约（0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）。
+    # 语义变更：旧实现对 FAIL 只返回 1，现按契约返回 2。
+    return {"PASS": 0, "WARN": 1, "FAIL": 2}[result.overall]
 
 
 def cmd_rigor(args: argparse.Namespace) -> int:
@@ -2440,15 +2664,16 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
     print(f"采集 {args.symbol} 未来 {args.days} 天催化剂...", file=sys.stderr)
     try:
-        events = collect_catalyst_events(args.symbol, days=args.days)
+        events, unavailable = collect_catalyst_events(args.symbol, days=args.days)
     except Exception as e:
         print(f"❌ 催化剂采集失败: {e}", file=sys.stderr)
         return 1
 
-    if not events:
-        print("⚠️ 未获取到催化剂事件（可能数据源不可用）", file=sys.stderr)
+    if not events and unavailable:
+        print("⚠️ 未获取到催化剂事件——部分或全部数据源取数失败", file=sys.stderr)
 
-    print(format_catalyst_calendar(events, symbol=args.symbol))
+    print(format_catalyst_calendar(events, symbol=args.symbol, days=args.days,
+                                   unavailable=unavailable))
     return 0
 
 

@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-journal
-version: "0.2.9"
+version: "0.3.0"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
 whenToUse: "交易日志/买入/卖出评估：对既有交易方案做逻辑、盲点、仓位匹配、风险收益四维检查"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
@@ -12,7 +12,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-journal v0.2.9
+# invest-a-journal v0.3.0
 
 > **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
 
@@ -135,7 +135,7 @@ metadata:
 每个评估输出第一行固定格式：
 
 ```
-🔍 invest-a-journal v0.2.9 · {date} · {环境标签}
+🔍 invest-a-journal v0.3.0 · {date} · {环境标签}
 ```
 
 环境标签从 `market_microstructure.snapshot()` 读取：
@@ -147,7 +147,7 @@ metadata:
 示例：
 
 ```
-🔍 invest-a-journal v0.2.9 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
+🔍 invest-a-journal v0.3.0 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
 ```
 
 ---
@@ -163,9 +163,11 @@ metadata:
 5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
 6. ✅ 检查 LAW 10：末尾有免责声明
 6b. ✅ 检查 P0 数字铁律：每个数字来自引擎字段或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/「Python calc 视角」类未实跑标注（共享规范 §2.3 强制行为 5-6）
-7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.2.9` badge
+7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.3.0` badge
 8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
 9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
+10. ✅ 检查 R-C02：买入评估**风险收益比维含「失效条件预设」**（观测项/阈值/来源/复核时点四要素齐备；不输出止损百分比建议）
+11. ✅ 检查 R-C01：买入评估前跑 `journal.py stats`——若显示错频触发，先完成结构化复盘再继续（冷却 = 流程，非禁止交易）
 
 ---
 
@@ -251,6 +253,19 @@ Q3 错误条件（可多选）:
 > ⚠️ 锚定浮盈目标可能复制过早卖盈偏误（Odean 1998：卖出的盈利股次年跑赢持有的亏损股 3.4%；Fischbacher et al. 2017：自动止损/止盈单整体可显著降低处置效应，但效应来自强制实现亏损而非锁定浮盈——单纯设定浮盈目标本身不构成该机制）。请改述为逻辑失效条件：什么情况下你原来的买入假设不成立了？
 > — 决策质量核对，非操作信号
 
+Q3b 失效条件预设（R-C02 必填，非多选）:
+
+| header: "失效条件预设" | question: "什么观察出现＝你的假设被证伪？（四要素：观测项/阈值+口径/数据来源/复核时点）" | multiSelect: false |
+|------|------|
+| A | 已按四要素写全（观测项 + 阈值 + 来源 + 复核时点） |
+| B | 只写了观测项，阈值/来源待补 → **不保存**，回到 A 补全 |
+| C | 写的是「跌到 X% 就走」→ 属**交易指令**（LAW 6 禁止）：请改述为逻辑失效条件 |
+| D | 暂无明确失效条件 → 记「**未预设**」并标注为盲点（不得留空冒充已预设） |
+
+> 该字段是处置效应疫苗：**入场时**写死证伪条件，避免事后用价格涨跌反推理由。
+> 写法与文献背景见 [references/evaluation-criteria.md](references/evaluation-criteria.md) §4.1/§4.2
+> （止损 = 行为疫苗非收益增强；机械止损在均值回归市有害；宽幅优于紧幅；**不给止损百分比建议**）。
+
 Q4 持有周期（单选）:
 
 | header: "持有周期" | question: "打算持有多久？" | multiSelect: false |
@@ -289,6 +304,54 @@ Q7 入场价格（单选）:
 **注意**：每题最多 4 个选项。需要自定义数值（如 25% 仓位、7% 止损、自定义代码）时，用户使用 AskUserQuestion 的 "Other" 机制直接输入（若 AskUserQuestion 不可用，在对话中请用户输入）。multiSelect 仅用于 Q2、Q3。Q0 一屏（3 问）、Q1-Q4 一屏（4 问）、Q5-Q7+入场价 一屏（4 问）。WorkBuddy 下按此分屏；AskUserQuestion 不可用则对话回退。
 
 ---
+
+## 未行动观察（R-C04，错过后悔侧）
+
+**动机（C14）**：Tykocinski「inaction inertia」——倡导「少动」就必须配套处理**错过的后悔**，
+否则纪律会退化为「事后诸葛亮」的单向记录。
+
+**规则**：评估买入时若**决定不行动**（跳过），除正常落库外，另记一条**未行动观察**到
+`evaluation_json.inaction_watch`（**TEXT 直通，无需迁移**）：
+
+```json
+"inaction_watch": [{
+  "symbol": "600176",
+  "observed_at": "YYYY-MM-DD",          // 做出「不行动」决定之日
+  "skip_reason": "……",                   // 跳过理由（当时的事实表述，不是事后叙事）
+  "skip_kind": "未研究 / 研究后放弃 / 纪律约束 / 资金约束",
+  "price_at_observation": 12.34,         // 观察时价格（回填的基线）
+  "backfill": null,                      // 复盘时回填 {"as_of","price","pct_change"}
+  "review_class": null                   // 复盘归类：应做未做 / 不应做却做
+}]
+```
+
+**复盘模板（必含该节）**：
+
+```
+## 未行动观察复盘
+- 观察 {N} 条，已回填 {M} 条
+- 归类：应做未做（action bias 反侧）{X} 条 ｜ 不应做却做（过度行动侧）{Y} 条 ｜ 待复核 {Z} 条
+- 归因（逐条）：跳过理由当时是否成立、事后价格事实是否支持
+```
+
+**纪律**：
+- **两个方向都要记**——只记「应做未做」会让记录系统性偏向 regret，
+  只记「不应做却做」则偏向 action；**对照才有意义**
+- 回填用**价格事实**（引擎可取），**不带方向判断**；归因写「理由当时是/否成立」，
+  不写「早该买/幸亏没买」
+- `journal.py show <id>` 会渲染该节；未回填的条目显示「待补」
+
+## 错频与失效条件（R-C01 / R-C02）
+
+- **买入评估前**：跑 `uv run python skills/invest-a-journal/scripts/journal.py stats`
+  → 末段输出错频检查。**连续亏损达阈值**时输出**个人自证数据**
+  （「你历史上亏损后立即再交易 N 次、其中 M 次续亏」`[来源: Python calc: M/N]`）
+  并提示先做结构化复盘。阈值默认 3、**可配置**，标注「纪律惯例（直播建议值），
+  **非实证阈值**」（固定阈值与计时冷却均无学术证据，见 hypothesis-registry C13）。
+  **冷却动作 = 启动结构化复盘流程，不是禁止交易**——评估输出**不得**出现
+  「必须停止交易」类指令。
+- **失效条件预设**（R-C02）：见 Q3b；写入既有 `wrong_conditions` 字段，
+  **不新增列**。四要素齐备才算已预设。
 
 ## 保存落库契约（用户确认后）
 
@@ -526,7 +589,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > `commitment_level`（结构性承诺>计划性承诺>提醒）。
 
 ```markdown
-🔍 invest-a-journal v0.2.9 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
+🔍 invest-a-journal v0.3.0 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
 
 ## {方向}: {标的} ({代码}) — {资产类型}
 
@@ -729,4 +792,3 @@ ETF 数据与对冲表的 **canonical** 拥有者。journal 的 `etf_data.py` �
 - `references/evaluation-criteria.md` — 评估细则 + 校准场景 + 边界条件示例
 - `../invest-a-etf/references/etf-hedge-map.md` — ETF 对冲覆盖表（canonical；本目录仅留指针）
 - [`../../host-docs/v0.2.1/calibration-case-july-2026.md`](../../host-docs/v0.2.1/calibration-case-july-2026.md) — 7 月校准案例（去杠杆 + V 型反弹）
-

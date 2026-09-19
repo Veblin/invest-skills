@@ -49,6 +49,9 @@ from ..render_utils import (
     _compute_metric_cagr,
     cagr_period_rows,
     _historical_pe_median,
+    _pct_medians,
+    _pct_median_suffix,
+    _pct_median_inline,
     _evidence_conclusion_block,
     _v3_cv7_block,
     _v3_price_change,
@@ -112,7 +115,29 @@ _v3_northbound_signal_label = northbound_label
 
 # --- _render_engine_extras ---
 def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
-    """渲染引擎层产出：宏观、融合、可信度、产业链。"""
+    """渲染报告头部：只放**带结论/判定**的引擎行。
+
+    头部是全报告最高价值的位置。本函数被 brief/concise/full 三模式共用
+    （_concise.render_report_v3），因此本函数里增删任何内容都会同时影响三种
+    交付形态——下沉前须确认每种模式都有承接方。
+
+    保留：宏观情景（国内/海外各带结论）、产业链位置、收益驱动假设（R1）、
+    风格匹配（R10）、行业成功关键因素（R4，含未覆盖行业的覆盖范围披露）、
+    连板结构（R12g，触发时）、报告增强触发（_render_enhancement_hints）。
+
+    已下沉（**仅 full 有承接方**——brief/concise 因此不再包含这些内容，
+    属删除而非搬迁，是有意的取舍：两模式定位为精简/对话产物）：
+      · 多源融合 / 证据可信度  → full 附录「数据质量与引擎自检」
+        （_render_engine_selfcheck_appendix）——引擎自检数据，读者无法据此判断
+      · 均线系统表（R12g）      → full §8 技术指标附录（_v3._section_technical_brief）
+      · 近端价格结构（R12e）    → full §8；二者与 §8 既有「趋势」「20/60/120 日高低」
+        本就重复，属放错位置而非多余内容
+
+    R4 的「未覆盖行业」披露**不在此列**：它是覆盖范围说明而非数据罗列，且
+    brief/concise 无附录区承接，摘掉即等于删除。
+
+    证据：用户审阅 2026-09-16 full 报告指出头部 4 项为无结论数据罗列。
+    """
     lines: list[str] = []
 
     macro = collection.get("macro_context") or {}
@@ -123,38 +148,206 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
     chain = collection.get("chain_context") or {}
     if chain.get("status") == "ok" and chain.get("industry"):
         pos = chain.get("chain_position") or "—"
-        lines.append(f"**[产业链]** {chain['industry']} · {pos}")
+        # 展示命中的申万名（chain_matched_on，如「锂电池」）而非 Tushare 粗分类名
+        # （如「电气设备」）——粗名会误导读者把电池厂读成输配电企业。
+        label = chain.get("chain_matched_on") or chain["industry"]
+        lines.append(f"**[产业链]** {label} · {pos}")
 
     lines.extend(_render_income_driver(collection))
     lines.extend(_render_style_match(collection))
     lines.extend(_render_success_factors(collection))
-    # R12g-A 两段由注册表驱动（标签与 TOC 单一来源，见 _R12G_HEADER_SECTIONS）
+    # R12g-A 注册表驱动（标签与 TOC 单一来源，见 _R12G_HEADER_SECTIONS）
     for _r12g_label, _r12g_fn in _R12G_HEADER_SECTIONS:
         lines.extend(_r12g_fn(collection))
-    lines.extend(_render_price_structure(collection))
-
-    fusion = collection.get("fusion") or {}
-    if fusion:
-        lines.append("**[多源融合]**")
-        for dim, fp in sorted(fusion.items()):
-            if isinstance(fp, dict):
-                fv = fp.get("fused_value")
-                consensus = fp.get("consensus", "?")
-                diff = fp.get("max_diff_pct", 0)
-                lines.append(f"  - {dim}: 融合值={fv} · {consensus} · 最大差异={diff}%")
-
-    cred = collection.get("credibility") or {}
-    if cred:
-        top = sorted(cred.items(), key=lambda x: -x[1])[:5]
-        cred_s = ", ".join(f"{k}={v:.0f}" for k, v in top)
-        lines.append(f"**[证据可信度]** {cred_s}")
 
     lines.extend(_render_enhancement_hints(collection))
 
     return lines
 
 
+# --- _render_engine_selfcheck_appendix (附录 D) ---
+_ENGINE_SELFCHECK_LABEL = "附录：数据质量与引擎自检"
+
+# consensus → 读者可用的措辞。fusion._consensus_from_diff 的 "weak" 有**两种来源**：
+#   (1) 单源分支（fusion.py:85-94，len(valid)==1，max_diff_pct 恒 0.0）
+#       → 语义是「无第二源可比对」；
+#   (2) 多源分歧（两源及以上返回数据但差异 >5%）
+#       → 语义是「源之间冲突」。
+# 只按 consensus 单值推断会把 (2) 误报成「只有一个源」，同时抹掉唯一能区分的
+# max_diff_pct——12% 的跨源冲突被读成单源，违反「数据冲突并列不裁决」。
+_CONSENSUS_LABELS = {
+    "strong": "双源一致（≤1%）",
+    "moderate": "双源接近（≤5%）",
+}
+_WEAK_SINGLE_LABEL = "单源，未做交叉验证"
+_WEAK_MULTI_LABEL = "多源分歧（>5%）"
+
+
+def _fusion_source_count(fp: dict) -> int:
+    """参与融合的源数量。
+
+    优先读 fusion 落库的 `source_values`（fusion.py 三个分支都会输出该键）；
+    键缺失的旧数据/夹具按 max_diff_pct 推断：weak 且无差异值 ⇒ 单源分支
+    （该分支 max_diff_pct 恒 0.0），否则视为多源。
+    """
+    sv = fp.get("source_values")
+    if isinstance(sv, dict):
+        return len(sv)
+    return 2 if fp.get("max_diff_pct") else 1
+
+
+def _fusion_consensus_label(fp: dict, raw: str) -> str:
+    """consensus 文案：weak 须按**源数量**分档，不得一律写「单源」。"""
+    if raw != "weak":
+        return _CONSENSUS_LABELS.get(raw, raw or "—")
+    return _WEAK_SINGLE_LABEL if _fusion_source_count(fp) <= 1 else _WEAK_MULTI_LABEL
+
+
+def _format_fused_value(value: Any) -> str:
+    """融合值按量级格式化。
+
+    未 round 的来源是 fusion.weighted_rrf_for_dimension 的**单源分支**（原样
+    透传取值；多源分支早已 round(...,4)）。该分支已补 round（review C7），但
+    存量 collection 里仍带旧值（曾渲染出「融合值=14637.250837439999」），故渲染
+    层继续自行格式化，不依赖上游 round 是否到位，也不依赖数据是否已重采。
+    """
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(num):
+        return "—"
+    if abs(num) >= 1000:
+        return f"{num:,.2f}"
+    if abs(num) >= 1:
+        return f"{num:.2f}"
+    return f"{num:.4f}"
+
+
+def _render_engine_selfcheck_appendix(collection: dict[str, Any]) -> str:
+    """附录 D：多源核验 + 证据可信度 + 宏观指标明细。
+
+    scope: 仅 full 模式装配（brief/concise 无附录区）。数据全部来自
+    collection 的引擎自检字段，不做任何重算。
+    """
+    lines: list[str] = [f"## {_ENGINE_SELFCHECK_LABEL}", ""]
+
+    fusion = collection.get("fusion") or {}
+    rows = [
+        (dim, fp) for dim, fp in sorted(fusion.items()) if isinstance(fp, dict)
+    ]
+    if rows:
+        lines += [
+            "### 多源核验",
+            "",
+            "| 维度 | 融合值 | 交叉验证 | 最大差异 |",
+            "|------|--------|---------|---------|",
+        ]
+        for dim, fp in rows:
+            raw_consensus = str(fp.get("consensus") or "")
+            consensus = _fusion_consensus_label(fp, raw_consensus)
+            raw_diff = fp.get("max_diff_pct")
+            # 单源分支的 max_diff_pct 恒为 0.0（fusion.py 单源早返回），与「无第二源
+            # 可比对」的语义矛盾，故显示「—」而非 0.0%；多源则一律照显差异值，
+            # 含 weak 分歧（清空等于把跨源冲突这一事实抹掉）。
+            diff = ("—" if _fusion_source_count(fp) <= 1 or raw_diff is None
+                    else f"{raw_diff}%")
+            lines.append(
+                f"| {dim} | {_format_fused_value(fp.get('fused_value'))} "
+                f"| {consensus} | {diff} |")
+        lines += [
+            "",
+            "> 「单源」= 该维度仅一个数据源返回数据，无法交叉验证，**不等于数据有误**。",
+            "> 「多源分歧」= 两个及以上源返回数据但差异 >5%，各源数值并列呈现，"
+            "不判定何者正确。",
+            "",
+        ]
+
+    cred = collection.get("credibility") or {}
+    if cred:
+        top = sorted(cred.items(), key=lambda x: -x[1])[:5]
+        cred_s = " / ".join(f"{k} {v:.0f}" for k, v in top)
+        lines += [
+            "### 证据可信度",
+            "",
+            f"{cred_s}",
+            "",
+            "> 引擎内部评分（0-100），衡量该维度证据的可得性与一致性，**非投资含义**。",
+            "",
+        ]
+
+    macro = collection.get("macro_context") or {}
+    detail = _render_macro_detail_lines(macro)
+    if detail:
+        lines += ["### 宏观指标明细", ""] + detail + [""]
+
+    if len(lines) <= 2:
+        return ""
+    return "\n".join(lines).rstrip()
+
+
+def _render_macro_detail_lines(macro: dict[str, Any]) -> list[str]:
+    """宏观指标明细：头部标签只保留规定格式的结论行，被移出的指标在此列全值。
+
+    仅列**数值与来源**，不挂「高位」「平坦」这类无阈值说明的定性单词——
+    定性判断在头部标签由确定性规则统一给出（macro._global_conclusion）。
+    """
+    indicators = macro.get("indicators") or {}
+    if not isinstance(indicators, dict) or not indicators:
+        return []
+    specs = (
+        ("money_supply", "M2 同比", "pct"),
+        ("loan", "新增信贷", "loan"),
+        ("dgs10", "美10Y", "pct"),
+        ("dgs30", "美30Y", "pct"),
+        ("dfii10", "美实际利率(10Y)", "pct"),
+        ("t10y2y", "美10Y-2Y 期限利差", "pct"),
+        ("t5yie", "美5Y 盈亏平衡通胀", "pct"),
+        ("dtwexbgs", "美元指数(广义)", "num"),
+        ("dcoilbrenteu", "布伦特原油", "num"),
+        ("dexchus", "USDCNY", "num"),
+        ("acm_tp10", "ACM 10Y 期限溢价", "num"),
+    )
+    out: list[str] = []
+    for key, disp, fmt in specs:
+        ind = indicators.get(key)
+        if not isinstance(ind, dict):
+            continue
+        val = ind.get("value")
+        if val is None:
+            continue
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(num):
+            continue
+        if fmt == "pct":
+            shown = f"{num:.2f}%"
+        elif fmt == "loan":
+            # 引擎原值 + 单位声明：渲染层**不做换算**（P0——本附录存在的意义就是
+            # 供第 1 层复检与原始 JSON 对值对单位）。此前按本地阈值把 3000（亿元）
+            # 写成「0.3万亿」、12000 写成「12000亿」，同一字段两种单位且仍挂引擎
+            # 来源标签，复检无法对账。
+            shown = f"{num:,.2f}亿元"
+        else:
+            shown = f"{num:,.2f}"
+        src = ind.get("source") or "—"
+        out.append(f"- {disp}: {shown} [来源: {src}]")
+    return out
+
+
 # --- _render_income_driver (R1) ---
+# income_driver.classify_income_driver 的 missing_evidence 键 → 读者可读的缺口说明。
+# 括号内是「缺了它会影响哪个判断」，不是装饰：R1 的置信度与该判断直接相关。
+_MISSING_EVIDENCE_LABELS = {
+    "dividend": "分红记录（影响分红连续性与股息回报的判断）",
+    "refi": "近 5 年再融资记录（影响增长是否依赖外部融资稀释的判断）",
+}
+
+
 def _extract_industry(basic_data: Any) -> str:
     """从 basic_info 维度数据提取行业，兼容 tushare「industry」与 akshare「行业」键。
 
@@ -187,22 +380,13 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
     fin = _get_dim_data(dims, "financials")
     if not isinstance(fin, list) or not fin:
         return []
-    annual: list[dict] = []
-    for r in fin:
-        if not isinstance(r, dict):
-            continue
-        ed = str(r.get("end_date", ""))
-        npv = r.get("net_profit")
-        if ed.endswith("1231") and npv is not None:
-            try:
-                annual.append({"year": ed, "net_profit": float(npv)})
-            except (TypeError, ValueError):
-                continue
-    if len(annual) < 3:
-        return []
     try:
-        from lib.income_driver import classify_income_driver
+        from lib.income_driver import classify_income_driver, extract_annual_rows
     except ImportError:
+        return []
+    # 装配收敛到唯一实现（R2/T9-2）：与 style_match 侧共用，防两处漂移
+    annual = extract_annual_rows(fin)
+    if len(annual) < 3:
         return []
     # F2-1: 行业传入（金融行业成长分支减权）——双键兼容见 _extract_industry
     industry: str | None = None
@@ -212,12 +396,20 @@ def _render_income_driver(collection: dict[str, Any]) -> list[str]:
     result = classify_income_driver(annual, fin, industry=industry)
     driver = result.get("driver", "")
     conf = result.get("confidence", "")
-    lines = [f"**[收益驱动假设（R1）]** {driver}（置信度: {conf}）— 研究路径分流依据，决定模块权重（R12d）"]
+    lines = [f"**[收益驱动假设]** {driver}（置信度: {conf}）— 研究路径分流依据，决定模块权重"]
     if result.get("counter_evidence"):
         for item in result["counter_evidence"][:2]:
             lines.append(f"  - ⚠️ 反例: {item}")
     if result.get("missing_evidence"):
-        lines.append("  - 🔍 证据缺失（需 WebSearch/公告补充）: " + "、".join(result["missing_evidence"]))
+        # income_driver.classify_income_driver 的 missing_evidence 返回**内部键名**
+        # （"dividend" / "refi"），直接出口读者只会看到两个英文单词。此处映射为
+        # 中文语义并带上「缺了它会影响什么判断」——否则读者无从判断该不该去补。
+        # 映射放渲染层：income_driver.py:217 的过滤逻辑与测试依赖原键名。
+        items = [
+            _MISSING_EVIDENCE_LABELS.get(str(key), str(key))
+            for key in result["missing_evidence"]
+        ]
+        lines.append("  - 🔍 证据缺口（需 WebSearch/公告补充）: " + "、".join(items))
     return lines
 
 
@@ -235,11 +427,15 @@ def _render_style_match(collection: dict[str, Any]) -> list[str]:
     state = cfg["state"]
     driver = str(cfg.get("driver") or "?")
     style = str(cfg.get("style") or "未填写")
-    lines = [f"**[风格-标的匹配（R10）]** {state}：自评风格 {style} × 收益驱动 {driver}"]
+    lines = [f"**[风格匹配]** {state}：自评风格 {style} × 收益驱动 {driver}"]
     if state == "混搭风险" and cfg.get("hint"):
         lines.append(f"  - ⚠️ {cfg['hint']}")
     elif cfg.get("reason"):
-        lines.append(f"  - {cfg['reason']}")
+        # 「匹配」态的 reason 由 style_match 置为 f"{style} × {driver}{note}"，与主行重复。
+        # 只保留有信息量的尾注（如趋势/事件驱动的信息深度提示），避免子行复读主行。
+        note = str(cfg["reason"]).replace(f"{style} × {driver}", "").strip()
+        if note:
+            lines.append(f"  - {note}")
     return lines
 
 
@@ -258,8 +454,11 @@ def _render_success_factors(collection: dict[str, Any]) -> list[str]:
     industry = str(cfg.get("industry") or "未知行业")
     factors = cfg.get("factors") or []
     if not cfg.get("covered") or not factors:
+        # 保留在头部（三模式共用）：这是「本报告的 12 题是通用兜底而非行业定制」的
+        # 覆盖范围披露，不是数据罗列。brief/concise 无附录区可承接，摘掉即等于删除，
+        # 读者将无从判断结论的适用范围。
         return [
-            f"**[行业成功关键因素（R4）]** {industry}：无行业成功因素定义"
+            f"**[行业成功关键因素]** {industry}：无行业成功因素定义"
             "（未覆盖行业，回退通用 12 题）"
         ]
     dims = _index_dims(collection)
@@ -269,7 +468,7 @@ def _render_success_factors(collection: dict[str, Any]) -> list[str]:
         rows = [r for r in fin if isinstance(r, dict) and r.get("end_date")]
         if rows:
             latest = max(rows, key=lambda r: str(r.get("end_date", "")))
-    lines = [f"**[行业成功关键因素（R4）]** {industry}"]
+    lines = [f"**[行业成功关键因素]** {industry}"]
     for i, factor in enumerate(factors, 1):
         if not isinstance(factor, dict):
             continue
@@ -340,14 +539,23 @@ def _render_ma_system(collection: dict[str, Any]) -> list[str]:
             parts.append(f"MA{p}: —")
             continue
         if closes is None:
-            pos = "（现价不可得）"
+            pos = "（收盘价不可得）"
         else:
-            pos = "（现价上方）" if closes >= v else "（现价下方）"
+            pos = "（收盘价上方）" if closes >= v else "（收盘价下方）"
         parts.append(f"MA{p}={v:.2f}{pos}")
     label = (t.get("alignment") or {}).get("trend_label", "—")
+    # 口径标注（review P1）：本表比较用的是**日线收盘价**，与模块 1 的实时价常
+    # 不同（300750 实测：实时 305.48 vs 09-15 收盘 316.36）。两处都写「现价」
+    # 会让读者把技术段口径当成实时价，故此处写明口径与日期。
+    # 日期必须与 latest_close 同源（code-review P2）：compute 已剔除 close 为
+    # None/NaN 的行（停牌残留 bar），并据此产出 last_date —— 对**原始**列表取
+    # max(trade_date) 会把被剔除行的日期配到前一有效交易日的收盘价上（实测
+    # 收盘 17.97（2026-03-01），17.97 实为 02-28 的价）。末行无 trade_date 时
+    # last_date 为空串 → 不显示日期（宁缺勿错配）。
+    _kd = str(tech.get("last_date") or "")
     if closes is not None:
-        parts.append(f"现价 {closes:.2f}")
-    lines = ["**[均线系统表（R12g）]** " + " · ".join(parts)]
+        parts.append(f"收盘 {closes:.2f}" + (f"（{_kd}）" if _kd else ""))
+    lines = ["**[均线系统表]** " + " · ".join(parts)]
     lines.append(f"  排列: {label} [来源: kline derived（technical.compute）]")
     return lines
 
@@ -367,7 +575,7 @@ def _limit_streak_section_active(collection: dict[str, Any]) -> bool:
 
 # R12g-A 连板结构区块标签：渲染前缀 + 注册表 + TOC 过滤三处共用单一常量
 # （code-review #2：此前三处字面量手写同步，任一处漂移即 TOC 与正文脱节）
-_LIMIT_STREAK_LABEL = "连板结构（R12g）"
+_LIMIT_STREAK_LABEL = "连板结构"
 
 
 def _render_limit_streak_structure(collection: dict[str, Any]) -> list[str]:
@@ -406,11 +614,14 @@ def _render_limit_streak_structure(collection: dict[str, Any]) -> list[str]:
 
 
 # --- R12g-A 头部区块注册表（单一来源） ---
-# 均线系统表 / 连板结构在 brief/concise/full 三种模式的 engine extras 头部均渲染；
+# 连板结构在 brief/concise/full 三种模式的 engine extras 头部渲染（触发时）；
 # TOC 标签（_v3._report_toc）与渲染顺序（_render_engine_extras）由此常量派生，
 # 杜绝 section 列表与静态 TOC 再次漂移（code-review: R12g-A 已渲染但缺失于 TOC）。
+#
+# 均线系统表（R12g）原在此表内、随头部渲染并占一条 TOC；已下沉至 §8 技术指标附录
+# （_v3._section_technical_brief），TOC 条目随之自动消失——本表是唯一来源，
+# 不要在 _v3 的静态 TOC 列表里手动增删它。
 _R12G_HEADER_SECTIONS: tuple[tuple[str, Callable[[dict], list[str]]], ...] = (
-    ("均线系统表（R12g）", _render_ma_system),
     (_LIMIT_STREAK_LABEL, _render_limit_streak_structure),
 )
 

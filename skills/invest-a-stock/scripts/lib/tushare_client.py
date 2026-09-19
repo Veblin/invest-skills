@@ -28,7 +28,7 @@ from .shared_dates import shanghai_days_ago, shanghai_today
 
 logger = logging.getLogger(__name__)
 
-TUSHARE_API_URL = "http://api.tushare.pro"
+TUSHARE_API_URL = "https://api.tushare.pro"
 
 # Tushare 接口配额限制
 DAILY_CALL_LIMIT = 500
@@ -46,10 +46,12 @@ TUSHARE_API_MIN_POINTS: dict[str, int] = {
     "margin_detail": 2000,
     "hsgt_top10": 2000,
     "index_classify": 2000,
+    "index_member_all": 2000,  # 申万成分整表（CONFIGURATION.md 同载 2000 档）
     "index_daily": 2000,
     "index_dailybasic": 4000,
     "sw_daily": 5000,
     "opt_daily": 5000,
+    "forecast": 2000,   # 业绩预告（接口文档标注；_q_tushare_forecast docstring 同载）
 }
 
 
@@ -122,6 +124,11 @@ class TushareClient:
         # 当日结束时重置计数器（Tushare 日配额按北京时间 UTC+8 零点重置）
         self._daily_reset_at = _next_beijing_midnight_reset_at(time.time())
         self._permission_denied_apis: set[str] = set()
+        # 最近一次 query 的失败原因（None=成功，含合法空结果）。
+        # 失败路径一律返回空 DataFrame 不抛异常（本类契约）→ 调用方若要区分
+        # 「真空窗」与「取数失败」必须读此信号（R1 审查 F1：forecast 曾假设
+        # query 会抛/返回 None，导致失败检测永不触发）。
+        self.last_error: str | None = None
         # 在初始化时捕获代理设置，供显式传入 Session（trust_env=False）
         self._proxies: dict[str, str] = {}
         for key in ("http", "https"):
@@ -157,6 +164,15 @@ class TushareClient:
         self._reset_daily_counter_if_needed()
         return max(0, self._daily_call_limit - self._daily_calls)
 
+    def is_permission_denied(self, api_name: str) -> bool:
+        """该接口是否已被判定为**权限不足**（本会话内）。
+
+        调用方用它产出**用户可读的权限提示**（如「需 N 积分」），而不是把
+        「空数据 / 超时 / 权限不足」压成同一句文案。积分门槛见
+        ``api_min_points(api_name)``（TUSHARE_API_MIN_POINTS）。
+        """
+        return api_name in self._permission_denied_apis
+
     def query(self, api_name: str, fields: str = "", **kwargs: Any) -> pd.DataFrame:
         """统一查询入口。
 
@@ -166,14 +182,18 @@ class TushareClient:
             **kwargs: 接口参数（如 ts_code="600519.SH"）
 
         Returns:
-            pd.DataFrame，失败时返回空 DataFrame
+            pd.DataFrame，失败时返回空 DataFrame（并置 ``last_error`` 说明原因；
+            合法空结果时 ``last_error`` 为 None）
         """
+        self.last_error = None
         if not self._token:
             logger.debug("Tushare: 无 Token，跳过 query(%s)", api_name)
+            self.last_error = "未配置 TUSHARE_TOKEN"
             return pd.DataFrame()
 
         if api_name in self._permission_denied_apis:
             logger.debug("Tushare: 跳过 %s（本会话已确认无接口权限）", api_name)
+            self.last_error = f"无接口权限（本会话已确认）: {api_name}"
             return pd.DataFrame()
 
         self._reset_daily_counter_if_needed()
@@ -222,6 +242,7 @@ class TushareClient:
                         "Tushare: %s 返回错误 code=%s msg=%s",
                         api_name, code, msg,
                     )
+                self.last_error = f"code={code} {msg[:80]}"
                 return pd.DataFrame()
 
             self._record_call()
@@ -247,9 +268,11 @@ class TushareClient:
 
         except requests.RequestException as e:
             logger.warning("Tushare: 网络请求失败 %s — %s", api_name, e)
+            self.last_error = f"{type(e).__name__}: {str(e)[:80]}"
             return pd.DataFrame()
         except Exception as e:
             logger.warning("Tushare: 查询 %s 异常 — %s", api_name, e)
+            self.last_error = f"{type(e).__name__}: {str(e)[:80]}"
             return pd.DataFrame()
 
     # ------------------------------------------------------------------

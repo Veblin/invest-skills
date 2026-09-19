@@ -109,8 +109,9 @@ def test_scanner_detects_synthetic_double_bottom(monkeypatch):
     # #5: 集成路径须触达 clean_retest 分支（修复前 low==close 镜像 + 窗口截断恒 truncated）
     statuses = {h.retest_status for h in hits}
     assert "clean_retest" in statuses, f"回踩分类应含 clean_retest，实际 {statuses}"
-    # 规则矩阵：2 形态 × 3 带宽 × 3 窗口 = 18 规则
-    assert len(rule_matrix) == 18, f"规则宇宙应 18 条，实际 {len(rule_matrix)}"
+    # 规则矩阵：2 形态 × 3 带宽 × 3 窗口 = 18，加 R-B01 三特征 × 3 窗口 = 9 → **27**
+    # （规则宇宙须全量物化，不随数据漂移——RC 口径要求）
+    assert len(rule_matrix) == 27, f"规则宇宙应 27 条，实际 {len(rule_matrix)}"
     for key, vals in rule_matrix.items():
         assert len(vals) == 2  # 每规则覆盖 2 只股票
 
@@ -128,7 +129,10 @@ def test_scanner_retest_deep_branch_reachable(monkeypatch):
     monkeypatch.setattr(ps, "load_gap_scan_module", _fake_load)
     monkeypatch.setattr(ps, "fetch_daily_and_adj", lambda dates: (fake, None, None))
 
-    dates = [f"2026{i:04d}" for i in range(1, 200)]
+    # 合法 YYYYMMDD 占位日（review #15：旧写法 f"2026{i:04d}" 产生 20260001/20260199
+    # 等非法日期，仅因 fetch 被 monkeypatch 才通过——姊妹测试已改，此处同步）
+    _start = datetime.date(2026, 1, 1)
+    dates = [(_start + datetime.timedelta(days=i)).strftime("%Y%m%d") for i in range(199)]
     hits, _ = ps.scan_universe(["600176.SH"], dates)
 
     statuses = {h.retest_status for h in hits}
@@ -153,3 +157,55 @@ def test_scan_hit_retest_placeholder():
     h = ps.ScanHit(ts_code="600176.SH", pattern="double_bottom",
                    endpoint_idx=10, bandwidth=0.5)
     assert h.retest_status is None  # P2 占位
+
+
+# ── 轮末评审修复（2026-09-13）─────────────────────────────────────────────
+
+def test_limit_up_pct_is_board_specific():
+    """涨停阈值须按板块推导（权威表在 `technical.limit_pct_for_symbol`）。
+
+    老实现全池套主板 9.8 → 创业板/科创板（20%）的 10%+ 正常波动被当涨停，
+    伪事件还会进入 RC 规则矩阵 `limit_up_above_ma_+h`。
+    """
+    assert ps._limit_up_pct_for("600176.SH") == 9.8      # 主板
+    assert ps._limit_up_pct_for("300750.SZ") == 19.8     # 创业板
+    assert ps._limit_up_pct_for("688981.SH") == 19.8     # 科创板
+    assert ps._limit_up_pct_for("830799.BJ") == 29.8     # 北交所
+    assert ps._limit_up_pct_for("600176.SH", "*ST 某某") == 4.8   # 主板 ST
+
+
+def test_centered_keeps_legitimate_zero_return():
+    """**合法的 0.0 收益**不得被当成缺失（D1 falsy 陷阱）。
+
+    `(v or baseline) - baseline` 会把停牌/平收这类 0.0 命中记成「与基线持平」，
+    少扣基线 → `reality_check` 置换 p 值系统性偏移。
+    """
+    assert ps._centered(0.0, 0.05) == -0.05
+    assert ps._centered(0.10, 0.05) == 0.05
+    assert ps._centered(None, 0.05) == 0.0               # 缺数据 → 中性
+    assert ps._centered(0.05, 0.05) == 0.0
+
+
+def test_hit_to_dict_emits_evidence_note():
+    """C11 证据注记必须写进 JSON。
+
+    `evidence_note` 是 `detail` 的**兄弟键**（只在 ScanHit 字段里）；原序列化只展开
+    `**h.detail` → 注记永远进不了 `pattern_scan_result.json`，而 SKILL.md 承诺
+    「命中带 evidence_note」且要求报告只引 JSON 字段 → 合规注记在产出物里缺席。
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "pattern_scan_cli_under_test", _SCRIPT_DIR / "scan.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    hit = ps.ScanHit(ts_code="600176.SH", pattern="shrink_pullback", endpoint_idx=10,
+                     bandwidth=None, detail={"kind": "shrink_pullback", "shrink_ratio": 0.4},
+                     evidence_note="⚠️ 只作筛选，须自家样本后验")
+    row = mod._hit_to_dict(hit)
+    assert row["evidence_note"] == "⚠️ 只作筛选，须自家样本后验"
+    assert row["kind"] == "shrink_pullback", "detail 展开仍须在位"
+    # detail 同名键不得覆盖显式字段
+    hit2 = ps.ScanHit(ts_code="X", pattern="p", endpoint_idx=0, bandwidth=None,
+                      detail={"evidence_note": "伪造"}, evidence_note="真实")
+    assert mod._hit_to_dict(hit2)["evidence_note"] == "真实"

@@ -1,0 +1,1 @@
+../../skills/invest-a-event-calendar/SKILL.md

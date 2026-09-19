@@ -29,6 +29,11 @@
   - 下标 45 总市值（**亿元**）→ total_mv_yi 保持亿元**不换算**（键名显式带单位，
     防与元口径混用；旧注释 "腾讯 field45 返回亿元，无需转换" 移入本模块）
   - 下标 46 市净率（仅 len > 46 时可用）
+  - 下标 30 行情时间戳（2026-09-17 实测补充：格式 ``YYYYMMDDHHMMSS``，如
+    ``20260916161421``）。**语义**：该字段是「最后一次行情更新时刻」，非交易日
+    推进——2026-09-17 盘前（09:0x）实测仍为 ``20260916161421``，即**前一交易日**
+    的时间戳。A/H 比价的对齐判定依赖此字段的日期部分，故以字符串原样透出
+    （不做数值转换），由消费方解析。
 """
 
 from __future__ import annotations
@@ -51,6 +56,7 @@ __all__ = [
     "IDX_PE",
     "IDX_TOTAL_MV_YI",
     "IDX_PB",
+    "IDX_TS",
     "is_tencent_unsupported",
     "tencent_market",
     "build_tencent_quote_url",
@@ -75,6 +81,7 @@ IDX_TURNOVER_RATE = 38
 IDX_PE = 39
 IDX_TOTAL_MV_YI = 45
 IDX_PB = 46
+IDX_TS = 30  # 行情时间戳（YYYYMMDDHHMMSS 字符串，原样透出）
 
 # 北交所/老三板：腾讯无覆盖，跳过（不误路由）
 _NORTH_EXCHANGE_PREFIXES = ("4", "8", "920")
@@ -83,6 +90,9 @@ _SH_MARKET_PREFIXES = ("5", "6", "9")
 
 # 腾讯「数据不可用」占位标记 → None（与真实 0 区分，D1：0.0 是合法值）
 _UNAVAILABLE_MARKERS = ("--", "N/A", "", "—")
+# 字符串字段（下标 30 时间戳）的占位集合：额外含单破折号 "-"
+# （港股 parse_tencent_hk 同口径：`val not in ("", "-")`）
+_TS_UNAVAILABLE_MARKERS = ("-", "--", "N/A", "", "—")
 
 # 有效载荷最少字段数：需覆盖下标 45（total_mv）；下标 46（pb）仅在更长时可用
 _MIN_FIELDS = 46
@@ -147,6 +157,24 @@ def _parse_amount_yuan(fields: list[str]) -> float | None:
     return amt_wan * AMOUNT_WAN_TO_YUAN
 
 
+def _parse_ts_field(fields: list[str]) -> str | None:
+    """行情时间戳（下标 30）→ 原始字符串；缺失/占位 → None。
+
+    不做数值转换（YYYYMMDDHHMMSS 转 float 会丢前导零且语义错误），
+    格式解析由消费方负责（见 ``hk_ah.parse_quote_ts``）。
+
+    ⚠️ 占位集合**含单破折号**（与港股的 ``parse_tencent_hk`` 对齐）：时间戳是
+    字符串字段，``-`` 是「无值」而非合法值；数值字段的 ``_UNAVAILABLE_MARKERS``
+    只有 ``--``（数值列不会用单 ``-`` 表示无值）。两者刻意不一致。
+    """
+    if len(fields) <= IDX_TS:
+        return None
+    val = fields[IDX_TS]
+    if val is None or val in _TS_UNAVAILABLE_MARKERS:
+        return None
+    return val
+
+
 def parse_tencent_quote(text: str) -> dict[str, Any] | None:
     """解析 qt.gtimg.cn 响应文本 → 超集字段 dict（纯函数，无网络）。
 
@@ -167,6 +195,7 @@ def parse_tencent_quote(text: str) -> dict[str, Any] | None:
         return None  # 无价格的快照不算有效行情（三份旧拷贝中两份以此为门槛）
     return {
         "price": price,
+        "ts": _parse_ts_field(fields),
         "change_pct": _parse_field(fields, IDX_CHANGE_PCT),
         "high": _parse_field(fields, IDX_HIGH),
         "low": _parse_field(fields, IDX_LOW),

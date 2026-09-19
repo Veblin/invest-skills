@@ -7,18 +7,24 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 
 from report_qc import (  # noqa: E402
     detect_report_type,
     format_qc_result,
+    main,
     qc_directory,
     qc_file,
     qc_latest,
     _check_etf_derived,
+    _check_sourcing,
     _compute_overall,
     _run_verify_layers,
+    LayerResult,
+    QCResult,
 )
 
 # ── 可复用的合规样例（含 [事实]/[分析]/[证据强度] + 风险声明）──
@@ -246,6 +252,191 @@ class TestStructureChecks:
         r = qc_file(p)
         structure = next(l for l in r.layers if l.layer == "structure")
         assert structure.status == "pass", structure.details
+
+
+# ── 股票报告交付完成度（P0）──────────────────────────────────────────────
+
+
+_AUTOMATED_STOCK_SNAPSHOT = """# 600176 中国巨石 研究快照
+
+> ⚠️ 本报告由自动化引擎生成，仅供研究备忘录参考，不构成任何投资建议。
+
+## 研究摘要
+[事实] 财务数据来自引擎 [来源: engine]
+[分析] 已完成事实到结论的推演。
+[证据强度: ✅ 强]
+
+### 多头逻辑链
+- 盈利增长与现金流改善相互印证 [来源: engine]
+
+### 空头逻辑链
+- 需求波动可能压低利润率，需以下季财报验证 [来源: engine]
+
+### 左侧概率的主要支撑依据
+- 估值分位较低是条件性支撑 [来源: engine]
+
+### 右侧概率的主要支撑依据
+- 趋势仍弱，尚需价格结构确认 [来源: engine]
+"""
+
+_VALID_ANALYSIS_SIDECAR = json.dumps([{
+    "module": "research",
+    "title": "研究发现",
+    "facts_md": "财务事实 [来源: engine]",
+    "analysis_md": "分析结论 [证据: B]",
+    "evidence_tag": "B",
+    "position": "research",
+}], ensure_ascii=False)
+
+
+def _completion_layer(result):
+    return next(layer for layer in result.layers if layer.layer == "completion")
+
+
+class TestStockCompletionGate:
+    def test_automated_snapshot_without_same_generation_sidecar_fails(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        result = qc_file(report, fail_on="error")
+        completion = _completion_layer(result)
+        assert completion.status == "fail"
+        assert any(d["id"] == "completion-analysis-sidecar-missing"
+                   for d in completion.details)
+        assert result.overall == "FAIL"
+
+    def test_automated_snapshot_with_same_generation_sidecar_passes_completion(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert completion.status == "pass", completion.details
+
+    def test_explicit_template_markers_fail_even_with_sidecar(self, tmp_path: Path):
+        """真占位仍拦，LAW 10 体例标签不拦——两者在同一份报告里对照。
+
+        `> [分析提示]` 曾是误报来源（`_law10_hint` 的每题固定标签，每份 full
+        报告都带），命中它会让门禁对任何报告恒 FAIL。此处同时注入两种文本，
+        断言只有真占位被计入。
+        """
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "已完成事实到结论的推演。", "[待 Claude report 阶段填充]\n> [分析提示]"
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        marker_lines = [d["line"] for d in completion.details
+                        if d["id"] == "completion-template-placeholder"]
+        assert len(marker_lines) == 1, [d["message"] for d in completion.details]
+        flagged = report.read_text(encoding="utf-8").splitlines()[marker_lines[0] - 1]
+        assert "[待 Claude report 阶段填充]" in flagged
+        assert "分析提示" not in flagged
+        assert completion.status == "fail"
+
+    def test_empty_bear_and_left_basis_fail(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 需求波动可能压低利润率，需以下季财报验证 [来源: engine]",
+                "- 当前数据未形成明确空头逻辑链 [来源: engine]",
+            ).replace(
+                "- 估值分位较低是条件性支撑 [来源: engine]", ""
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        empties = [d for d in completion.details if d["id"] == "completion-empty-basis"]
+        assert {"Bear", "左侧"} <= {d["message"].split(" 依据节")[0] for d in empties}
+        assert completion.status == "fail"
+
+    def test_empty_or_invalid_sidecar_is_not_completed(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        report.with_suffix(".analysis.json").write_text("[]\n", encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert any(d["id"] == "completion-analysis-sidecar-invalid"
+                   for d in completion.details)
+        assert completion.status == "fail"
+
+    @pytest.mark.parametrize("field,value", [
+        ("module", None),
+        ("evidence_tag", "未经分级的描述"),
+        ("position", "not-an-analysis-position"),
+        ("analysis_md", "```python\nx = 1\n```"),
+    ])
+    def test_sidecar_uses_full_analysis_schema(self, tmp_path: Path, field: str, value):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)
+        sidecar = json.loads(_VALID_ANALYSIS_SIDECAR)
+        if value is None:
+            del sidecar[0][field]
+        else:
+            sidecar[0][field] = value
+        report.with_suffix(".analysis.json").write_text(
+            json.dumps(sidecar, ensure_ascii=False), encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert any(d["id"] == "completion-analysis-sidecar-invalid"
+                   for d in completion.details)
+        assert completion.status == "fail"
+
+    def test_renderer_unavailable_right_basis_is_not_a_completed_basis(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 趋势仍弱，尚需价格结构确认 [来源: engine]",
+                "① 右侧参考指标数据不足，证据强度：❓",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert any(d["id"] == "completion-empty-basis" and "右侧" in d["message"]
+                   for d in completion.details)
+        assert completion.status == "fail"
+
+    def test_left_sentinel_with_suffix_is_also_empty_basis(self, tmp_path: Path):
+        """左哨兵带「或未达到阈值」尾缀时同样须判为空节（与右侧对称）。
+
+        同一份输入里左侧哨兵零告警、右侧哨兵告警，差异仅来自 6 个字的尾缀——
+        渲染器曾靠尾缀让「无实质依据」的节通过 error 级门禁。
+        """
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                # 替换**左侧**节的内容行（「### 左侧概率的主要支撑依据」之下）
+                "- 估值分位较低是条件性支撑 [来源: engine]",
+                "① 左侧参考指标数据不足或未达到阈值，证据强度：❓",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert any(d["id"] == "completion-empty-basis" and "左侧" in d["message"]
+                   for d in completion.details)
+        assert completion.status == "fail"
+
+    def test_unavailable_sentinel_with_remaining_basis_is_not_empty(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 趋势仍弱，尚需价格结构确认 [来源: engine]",
+                "右侧参考指标数据不足，但 MA60 已转正 [来源: engine]",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert not any(d["id"] == "completion-empty-basis" and "右侧" in d["message"]
+                       for d in completion.details)
+        assert completion.status == "pass", completion.details
+
+    def test_manual_stock_and_other_report_types_do_not_require_sidecar(self, tmp_path: Path):
+        manual = _write(tmp_path, "600176-中国巨石", "2026-07-16.md", COMPLIANT_STOCK)
+        manual_completion = _completion_layer(qc_file(manual, fail_on="error"))
+        assert manual_completion.status == "skip"
+
+        etf = _write(tmp_path, "588000-科创50ETF", "2026-09-14.md",
+                     COMPLIANT_ETF + "\n[待 Claude report 阶段填充]\n")
+        etf_result = qc_file(etf, fail_on="error")
+        assert not any(layer.layer == "completion" for layer in etf_result.layers)
 
 
 # ── derived 层（ETF）──────────────────────────────────────────────────────
@@ -526,6 +717,26 @@ class TestQcLatest:
 # ── 920xxx 北交所股票（F11）──────────────────────────────────────────────
 
 
+class TestSourcingLayer:
+    """F4 §N 交叉引用校验的豁免边界（R1 审查 F4 收窄）。"""
+
+    def test_generic_citation_verbs_not_exempt(self):
+        """通用引用动词（说明/参见/详见/遵循）不得豁免 §N 校验。
+
+        回归：豁免正则含这些通用动词 → 「详见 §5」被当作**外部规范**引用放行，
+        F4 恰好在最惯用措辞上失明——报告可用最自然的写法引用不存在的章节仍 PASS。
+        """
+        for text in ("详见 §5。", "参见 §3.2 的对照。", "遵循 §7 规范。", "说明 §9。"):
+            assert _check_sourcing(text).findings_count == 1, f"未拦截: {text!r}"
+
+    def test_external_spec_reference_still_exempt(self):
+        """指向外部规范的 §N 仍须豁免（repo 内误报均为该形态），且不引入本文误报。"""
+        for text in ("见 report-conventions.md §2.3。", "见共享规范 §2.3。", "见附件 §4。"):
+            assert _check_sourcing(text).findings_count == 0, f"误报: {text!r}"
+        # 本文存在对应标题节 → 不报
+        assert _check_sourcing("## 3 数据\n\n详见 §3。\n").findings_count == 0
+
+
 class TestBseStockClassification:
     def test_920_prefix_classified_as_stock(self, tmp_path: Path):
         p = _write(tmp_path, "920001-北交所公司", "2026-08-02-10-00-00.md", "# x\n")
@@ -595,3 +806,299 @@ class TestVerifyLayersFailOnException:
         assert by_layer["quality"].status == "fail"
         assert by_layer["rigor"].status == "pass"  # rigor 仍运行
         assert _compute_overall(layers) == "FAIL"
+
+
+class TestReviewArtifactType:
+    """复盘纪要是**独立产物类型**（R2/T8-3），不套用研报结构检查。
+
+    实测踩过：纪要落在 `reports/515050-通信ETF/` 下被识别成 `etf` →
+    structure 稳定产出 4 条误报（[事实]/[分析]/[证据强度]/风险声明）——
+    而该纪要**按设计就不含**前三者（它明确不做推演，只对照假设状态）。
+    """
+
+    def test_review_md_detected_as_review(self, tmp_path):
+        p = tmp_path / "reports" / "515050-通信ETF" / "20260911-review.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("# 🔍 复盘纪要\n\n> 不构成投资建议。\n", encoding="utf-8")
+        assert detect_report_type(p) == "review", "纪要须先于目录/代码前缀判定"
+
+    def test_review_structure_only_requires_risk_statement(self):
+        from report_qc import _check_structure
+
+        text = "# 🔍 复盘纪要 — 515050\n\n> 研究工具，非决策工具，不构成投资建议。\n"
+        assert _check_structure(text, "review").status == "pass"
+
+    def test_review_without_risk_statement_warns(self):
+        from report_qc import _check_structure
+
+        layer = _check_structure("# 复盘纪要\n\n没有声明\n", "review")
+        assert layer.findings_count == 1
+        assert layer.details[0]["id"] == "structure-risk-statement"
+
+
+class TestQcLatestSkipsReviewMemo:
+    """`--latest` 不得选中复盘纪要（R0~R2 review 修复）。
+
+    回归：`qc_latest` 只过滤 `.audit_checklist`，而 `etf.py review` 把纪要写进
+    **同一报告目录**且 mtime 最新 → 闸门在错的文档上给 PASS，最新真报告的 4 项
+    结构检查（[事实]/[分析]/[证据强度]/风险声明）不再执行。
+    """
+
+    @staticmethod
+    def _tree(tmp_path: Path) -> tuple[Path, Path]:
+        d = tmp_path / "reports" / "515050-通信ETF"
+        d.mkdir(parents=True)
+        report = d / "2026-09-10-22-50-00.md"
+        report.write_text(COMPLIANT_ETF, encoding="utf-8")
+        memo = d / "20260911-review.md"
+        memo.write_text("# 🔍 复盘纪要 — 515050\n\n> 不构成投资建议。\n", encoding="utf-8")
+        import os
+
+        os.utime(report, (1_600_000_000, 1_600_000_000))
+        os.utime(memo, (1_700_000_000, 1_700_000_000))     # 纪要更新
+        return report, memo
+
+    def test_latest_picks_real_report_not_memo(self, tmp_path: Path):
+        self._tree(tmp_path)
+        got = qc_latest(tmp_path / "reports")
+        assert got is not None
+        assert got.report_path.endswith("2026-09-10-22-50-00.md"), \
+            f"--latest 选中了复盘纪要: {got.report_path}"
+        assert got.report_type == "etf"
+
+    def test_report_style_timestamp_named_review_is_not_relaxed(self, tmp_path: Path):
+        """`-review.md` 规则不得**内容无关**：用户把真报告存成 `2026-09-10-review.md`
+        （报告风格时间戳，非本工具的 `YYYYMMDD-review.md`）时应仍按研报校验。"""
+        p = tmp_path / "reports" / "515050-通信ETF" / "2026-09-10-review.md"
+        p.parent.mkdir(parents=True)
+        p.write_text(COMPLIANT_ETF, encoding="utf-8")
+        assert detect_report_type(p) == "etf", "报告风格时间戳被误判为复盘纪要"
+
+
+# ── CLI 默认 profile：第 0 层门禁必须覆盖 LAW 6 ──────────────────────────────
+#
+# CLAUDE.md 第 0 层「机器准出（必跑）」就是 `report_qc.py <报告> --fail-on error`
+# 这条不带 --profile 的命令，因此 **CLI 默认值就是合规门禁本身**。
+# 历史默认 precommit 是对齐旧 check_report.sh 的阻断项，会跳过全部 law6-* 与
+# known-violation*（实测 73 条规则中 35 条被跳过，含 14 条 error 级）；v0.3.0 把
+# 模型撰写的 analysis 正文放进报告首屏后，这条命令便再也拦不住 LAW 6 违规。
+
+class TestCliDefaultProfileCoversLaw6:
+    def _report_with_law6_violation(self, tmp_path: Path) -> Path:
+        # 用干净合规样例只注入 LAW 6 违规：避免 completion 等其它层先 FAIL，
+        # 掩盖「默认 profile 是否拦得住 law6」这一被测结论。
+        text = COMPLIANT_STOCK.replace("不构成投资建议",
+                                       "建议买入并加仓，目标价 25.0 元")
+        return _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", text)
+
+    def test_cli_default_catches_law6_violation(self, tmp_path: Path):
+        """断言**行为**而非 profile 字符串：默认调用必须 FAIL。"""
+        report = self._report_with_law6_violation(tmp_path)
+        rc = main([str(report), "--fail-on", "error"])
+        assert rc == 2, "默认 profile 未拦截 LAW 6 违规 → 第 0 层门禁失效"
+
+    def test_explicit_precommit_profile_stays_lax(self, tmp_path: Path):
+        """显式 precommit 仍是宽松档：.pre-commit-config.yaml 依赖该语义。"""
+        report = self._report_with_law6_violation(tmp_path)
+        rc = main([str(report), "--fail-on", "error", "--profile", "precommit"])
+        assert rc != 2, "precommit 档不应拦截（提交期性能取舍，由 hook 显式声明）"
+
+
+# ── v0.3.0 A4：无公司名快照不得让强制侧车闸门静默 skip ──
+
+
+class TestNamelessSnapshotGate:
+    """basic_info 采集失败时渲染器输出 `# 600176  研究快照`（双空格，无公司名）。
+
+    旧正则 `\\s+.+?\\s+研究快照` 要求名字 ≥1 字符 → 该标题不命中 →
+    `_check_stock_completion` 落 else 分支返回 skip → 强制侧车闸门**静默失效**
+    （fail-open），恰在数据覆盖最差时放行。而 `_compute_overall` 明确
+    「skip 不参与」，故整体判定不受影响 → 不合格快照拿到 PASS。
+    """
+
+    _SNAPSHOT_NO_NAME = _AUTOMATED_STOCK_SNAPSHOT.replace(
+        "# 600176 中国巨石 研究快照", "# 600176  研究快照")
+
+    def test_nameless_snapshot_still_requires_sidecar(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-未知", "2026-09-14-13-41-24.md",
+                        self._SNAPSHOT_NO_NAME)
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert completion.status == "fail", "空公司名不得让闸门静默 skip（fail-open）"
+        assert any(d["id"] == "completion-analysis-sidecar-missing"
+                   for d in completion.details)
+        assert qc_file(report, fail_on="error").overall == "FAIL"
+
+    def test_nameless_snapshot_with_valid_sidecar_passes(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-未知", "2026-09-14-13-41-24.md",
+                        self._SNAPSHOT_NO_NAME)
+        report.with_suffix(".analysis.json").write_text(
+            _VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        completion = _completion_layer(qc_file(report, fail_on="error"))
+        assert completion.status == "pass", \
+            [(d["id"], d["message"]) for d in completion.details]
+
+
+# ── v0.3.0 A5：severity 词表统一（error / warning / info） ──
+
+
+class TestSeverityVocabularyUnified:
+    """权威词表见 invest-a-stock `lib/lint.py`（`severity: error / warning / info`）。
+
+    此前本文件产出侧混用 `"warn"` 与 `"warning"` 两种拼写，而详情图标只认
+    `"warn"` → lint 层（发 `"warning"`）的全部 warning 级 finding 被渲染成 ℹ️，
+    与 info 无法区分 → CLAUDE.md 第 0 层要求的「sourcing warning 逐条复核后
+    消除或说明」被静默跳过。
+    """
+
+    def test_all_finding_severities_are_canonical(self, tmp_path: Path):
+        report = _write(tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+                        _AUTOMATED_STOCK_SNAPSHOT)   # 无侧车 → 至少 completion error
+        result = qc_file(report, fail_on="error")
+        sevs = {d["severity"] for l in result.layers for d in l.details}
+        assert sevs, "前置：本样例须产出 finding"
+        assert sevs <= {"error", "warning", "info"}, f"非规范 severity 拼写: {sevs}"
+
+    def test_warning_severity_renders_warning_icon(self):
+        result = QCResult(
+            report_path="x.md", report_type="stock", overall="WARN",
+            layers=[LayerResult(layer="sourcing", status="warn", findings_count=2,
+                                details=[
+                                    {"id": "w", "severity": "warning",
+                                     "message": "warn 级条目"},
+                                    {"id": "i", "severity": "info",
+                                     "message": "info 级条目"},
+                                ])],
+        )
+        out = format_qc_result(result, verbose=True)
+        assert "⚠️ [w] warn 级条目" in out, "warning 级须渲染 ⚠️（此前渲染成 ℹ️）"
+        assert "ℹ️ [i] info 级条目" in out, "info 级须渲染 ℹ️"
+
+
+class TestLaw6aScenarioContext:
+    """v0.3.0 全量重审 F-U7-5：LAW 6a 三情景上下文门禁（此前**零实现**）。
+
+    CLAUDE.md：「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
+    ——此前唯一机器机制只是全文级免责存在性检查，既不校验假设也不校验概率权重。
+    实测语料：253 份中 109 份含三情景词，108 份已合规，1 份真实缺概率权重。
+    """
+
+    def test_missing_probability_flags_error(self):
+        from report_qc import law6a_scenario_findings
+
+        text = (
+            "# 测试\n\n| 中性锚 | 1000-1200 |\n| 悲观锚 | 600-800 |\n| 乐观锚 | 1400-1700 |\n\n"
+            "假设：2027E 净利 520 亿。\n"
+        )
+        findings = law6a_scenario_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "error"
+        assert "概率权重" in findings[0]["message"]
+
+    def test_missing_assumption_flags_error(self):
+        from report_qc import law6a_scenario_findings
+
+        text = (
+            "# 测试\n\n中性锚 1000-1200（概率 50%）\n"
+            "悲观锚 600-800（概率 25%）\n乐观锚 1400-1700（概率 25%）\n"
+        )
+        findings = law6a_scenario_findings(text)
+        assert len(findings) == 1
+        assert "假设前提" in findings[0]["message"]
+
+    def test_complete_scenarios_pass(self):
+        from report_qc import law6a_scenario_findings
+
+        text = (
+            "# 测试\n\n假设：2027E 净利 520 亿。\n"
+            "中性锚 1000-1200（概率 50%）；悲观锚 600-800（概率 25%）；"
+            "乐观锚 1400-1700（概率 25%）。\n"
+        )
+        assert law6a_scenario_findings(text) == []
+
+    def test_two_scenario_words_not_triggered(self):
+        """缺任一情景词即不触发——避免误伤只提单一情景的普通叙述。"""
+        from report_qc import law6a_scenario_findings
+
+        text = "# 测试\n\n乐观情景与悲观情景的差异主要来自价格假设。\n"
+        assert law6a_scenario_findings(text) == []
+
+    def test_layer_status_fail_on_error(self):
+        from report_qc import _check_law6a_scenarios
+
+        layer = _check_law6a_scenarios(
+            "# 测试\n\n中性锚 1000-1200；悲观锚 600-800；乐观锚 1400-1700。假设：净利 520 亿。\n"
+        )
+        assert layer.layer == "law6a-scenarios"
+        assert layer.status == "fail"
+        assert layer.findings_count == 1
+
+
+class TestRaSectionBoundaryAlignment:
+    """2026-09-18 review #5：R-A6 节边界须与 lint 逐字对齐。
+
+    原实现 `_RA_SECTION_BOUNDARY_RE = ^#{2,4}\\s` 且不 strip，lint 侧为
+    `_SECTION_HEADER_RE = ^##\\s`（lint.py:98）+ 先 strip 再匹配（:202）。
+    后果：`### ` 下的 [分析] 在 qc 侧报 error、lint 侧 0 命中——同一份报告两通道
+    给相反裁决（reports/ 全量实测 3 篇）。`_check_conclusion_evidence` 的 docstring
+    还自称「与 lint structure-analysis-without-fact 同规则」，与实现不符。
+    """
+
+    def test_h3_heading_does_not_stop_lookback(self):
+        """### 不再是节边界——其上的 [事实] 仍满足本节 [分析]（与 lint 一致）。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节\n\n[事实] 某事实。\n\n### 子节\n\n[分析] 推演。\n"
+        assert fact_analysis_pair_findings(text) == []
+
+    def test_h2_heading_stops_lookback(self):
+        """## 是节边界——跨节段的 [事实] 不满足本节的 [分析]。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节一\n\n[事实] 某事实。\n\n## 节二\n\n[分析] 推演。\n"
+        findings = fact_analysis_pair_findings(text)
+        assert len(findings) == 1
+        assert findings[0]["id"] == "structure-fact-analysis-pair"
+
+    def test_indented_heading_is_boundary(self):
+        """缩进标题也计节边界（对齐 lint 的 strip 后再匹配）。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节一\n\n[事实] 某事实。\n\n  ## 节二\n\n[分析] 推演。\n"
+        assert len(fact_analysis_pair_findings(text)) == 1
+
+    def test_matches_lint_on_the_same_text(self):
+        """同文本两通道裁决一致——跨通道断言见
+        invest-a-stock/tests/test_lint.py::TestRaSectionBoundaryParity
+        （lint 只在 invest-a-stock 侧可导入，故对照用例落那边）。"""
+        from report_qc import fact_analysis_pair_findings
+
+        text = "## 节\n\n[事实] 某事实。\n\n### 子节\n\n[分析] 推演。\n"
+        assert fact_analysis_pair_findings(text) == []
+
+
+class TestConclusionEvidenceAllTypes:
+    """2026-09-18 review #12：R-A2/R-A6 恢复全类型挂载，R-A1 保持门控。
+
+    被删除的 stock 旧版 `run_report_qc` 对**任意**文件跑 R-A1/R-A2/R-A6；A3 移植时
+    把三层一并门控到 stock+etf → journal/pulse/gap_scan/unknown 经
+    `invest.py qc-report` 的结论段门禁被静默净移除。源代码注释只论证了 R-A1
+    （长句密度会批量制造无意义 WARN），未论证 R-A2/R-A6。
+    """
+
+    def _write(self, tmp_path: Path, body: str) -> Path:
+        p = tmp_path / "reports" / "x" / "note.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_conclusion_evidence_layer_present_for_non_stock(self, tmp_path):
+        p = self._write(tmp_path, "# 笔记\n\n> 不构成投资建议。\n\n## 主要结论\n\n该标的确定性高，估值仍有空间。\n")
+        assert detect_report_type(p) not in {"stock", "etf"}, "本用例须是非研究备忘录类型"
+        layers = {l.layer: l for l in qc_file(p).layers}
+        assert "conclusion-evidence" in layers, "非 stock/etf 产物也须挂 R-A2/R-A6"
+        assert layers["conclusion-evidence"].status == "fail"
+
+    def test_readability_layer_still_gated(self, tmp_path):
+        p = self._write(tmp_path, "# 笔记\n\n> 不构成投资建议。\n")
+        layers = {l.layer for l in qc_file(p).layers}
+        assert "readability" not in layers, "R-A1 保持门控（避免长句密度噪音）"

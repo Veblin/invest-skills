@@ -27,6 +27,14 @@ _CHAIN_MAP: dict[str, dict[str, Any]] = {
     "计算机": {"position": "中游", "upstream": ["芯片", "软件"], "downstream": ["企业", "政府"]},
     "通信": {"position": "中游", "upstream": ["芯片", "光纤"], "downstream": ["运营商", "消费者"]},
     "电子": {"position": "中游制造", "upstream": ["硅", "稀土"], "downstream": ["手机", "汽车"]},
+    # 申万 电力设备链（L1 电力设备 / L2 电池 / L3 锂电池）。
+    # 此前无这些键：Tushare 粗分类名「电气设备」被子串命中了「电气」，
+    # 于是电池厂被套进输配电链条（上游铜铝稀土、下游电网）；而若行业名解析
+    # 为 L1「电力设备」，因「电气」不是其子串会完全无命中、产业链块整块消失。
+    "锂电池": {"position": "中游制造", "upstream": ["锂", "钴", "镍", "石墨", "电解液", "隔膜"], "downstream": ["动力电池", "储能", "电动车"]},
+    "电池": {"position": "中游制造", "upstream": ["锂", "钴", "镍", "正极材料", "负极材料", "电解液", "隔膜"], "downstream": ["电动车", "储能", "消费电子"]},
+    "电力设备": {"position": "中游制造", "upstream": ["铜", "铝", "硅钢", "稀土"], "downstream": ["电网", "新能源电站", "工业用电"]},
+    "光伏设备": {"position": "中游制造", "upstream": ["硅料", "硅片", "银浆", "光伏玻璃"], "downstream": ["光伏电站", "储能"]},
 }
 
 # P1-1: 行业 → 期货品种映射（复用 _match_chain_keyword 做长度降序匹配）
@@ -74,10 +82,16 @@ def collect_chain_context(
     *,
     industry: str = "",
     basic_data: dict | None = None,
+    chain_candidates: list[str] | None = None,
 ) -> dict[str, Any]:
     """采集产业链上下文数据。
 
     若已采集 basic_info，可通过 industry/basic_data 传入以避免重复请求。
+
+    chain_candidates：申万行业名候选（深→浅，如 [锂电池, 电池, 电力设备]）。
+    逐个尝试、首个命中即用；全不命中则回落 industry 的关键字匹配（既有行为）。
+    用于让 L3/L2 申万名优先于 Tushare 粗分类名参与产业链匹配——粗分类名
+    （如「电气设备」）会因子串命中「电气」把电池厂错配到输配电链条。
     """
     if not industry:
         if isinstance(basic_data, dict):
@@ -95,7 +109,18 @@ def collect_chain_context(
             if isinstance(data, dict):
                 industry = data.get("industry", "") or data.get("行业", "")
 
-    chain_info = _match_chain_keyword(industry, _CHAIN_MAP)
+    chain_info = None
+    matched_on: str | None = None
+    for cand in (chain_candidates or []):
+        if not cand:
+            continue
+        chain_info = _match_chain_keyword(cand, _CHAIN_MAP)
+        if chain_info:
+            matched_on = cand
+            break
+    if chain_info is None:
+        chain_info = _match_chain_keyword(industry, _CHAIN_MAP)
+        matched_on = industry if chain_info else None
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -104,9 +129,17 @@ def collect_chain_context(
         "upstream": chain_info["upstream"] if chain_info else [],
         "downstream": chain_info["downstream"] if chain_info else [],
         "global_peers": [],
+        "chain_matched_on": matched_on,
     }
 
-    peers = _match_chain_keyword(industry, _GLOBAL_PEER_MAP)
+    peers = None
+    for cand in (chain_candidates or []):
+        if cand:
+            peers = _match_chain_keyword(cand, _GLOBAL_PEER_MAP)
+            if peers:
+                break
+    if not peers:
+        peers = _match_chain_keyword(industry, _GLOBAL_PEER_MAP)
     if peers:
         result["global_peers"] = peers
 

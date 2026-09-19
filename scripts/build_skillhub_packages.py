@@ -62,6 +62,8 @@ PUBLISH_SKILLS = [
     "invest-a-gap-scan",
     "invest-a-pattern-scan",
     "invest-hk-stock",
+    "invest-a-event-calendar",
+    "invest-a-discover-scan",
 ]
 
 # 包内排除的路径（tests/__pycache__ 等）
@@ -81,6 +83,8 @@ SKILL_META: dict[str, dict[str, str]] = {
     "invest-a-gap-scan": {"displayName": "invest:a-gap-scan 缺口扫描"},
     "invest-a-pattern-scan": {"displayName": "invest:a-pattern-scan 形态扫描"},
     "invest-hk-stock": {"displayName": "invest:a-hk 港股研究"},
+    "invest-a-event-calendar": {"displayName": "invest:a-event-calendar 事件日历"},
+    "invest-a-discover-scan": {"displayName": "invest:a-discover-scan 低估发现"},
 }
 
 # 各 skill 的 CLI 入口脚本（SKILL.md 正文「见 CLAUDE.md」/「子命令全清单」改写目标；
@@ -93,6 +97,8 @@ ENTRY_SCRIPTS: dict[str, str | None] = {
     "invest-a-gap-scan": "scan.py",
     "invest-a-pattern-scan": "scan.py",
     "invest-hk-stock": "hk.py",
+    "invest-a-event-calendar": "unlock_calendar.py",
+    "invest-a-discover-scan": "discover_scan.py",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -111,6 +117,8 @@ LAYOUT: dict[str, str] = {
     "invest-a-gap-scan": "script",
     "invest-a-pattern-scan": "script",
     "invest-hk-stock": "script",
+    "invest-a-event-calendar": "script",
+    "invest-a-discover-scan": "script",
 }
 
 # 跨 skill lib 合并源（闭包解析优先级: 共享 skills/lib > cross 列表序 > 包自身 scripts/lib）
@@ -128,6 +136,34 @@ CROSS_LIBS: dict[str, list[str]] = {
     # sessions，hk.py:91/226）与 lib.tushare_client（hk_tushare._client，hk_tushare.py:21）；
     # 包内无该引导 → 一并闭包并入（technical 由共享 skills/lib 满足，无需计入）
     "invest-hk-stock": ["invest-a-stock"],
+    # event-calendar 的 unlock_source（东财直连，unlock_source.py:78 `from lib.proxy
+    # import akshare_direct_session`）与 trade_cal（:30-31 `from lib import env` /
+    # `lib.tushare_client`）从 invest-a-stock lib 解析；包内无该引导 → 一并闭包并入。
+    # 缺 proxy → 池模式每次取数 ModuleNotFoundError（误报数据源不可得）；缺
+    # tushare_client → trade_cal 恒走 except ImportError 估算分支（交易日恒粗判）。
+    "invest-a-event-calendar": ["invest-a-stock"],
+    # discover-scan 经 _invest_path 从 invest-a-stock lib 解析 lib.tushare_client
+    # （sources.client）、lib.cache（DataCache）、lib.trade_cal、lib.proxy
+    # （rf_10y_pct 的 akshare 直连上下文）与 lib.env（token 读取）；包内无该引导
+    # → 一并闭包并入。缺 tushare_client → 全链路恒空返回（退 3）；
+    # 缺 cache → stock_basic 缓存失效（每次全量拉取）。
+    # `sources_hk` loads three HK modules dynamically. Keep the HK source in the
+    # resolution universe as well as seeding those modules below, so their own
+    # imports (hk_codes / calendar dependencies) close transitively in the package.
+    "invest-a-discover-scan": ["invest-a-stock", "invest-hk-stock", "invest-a-journal"],
+}
+
+# 运行时由 importlib/显式路径加载、因而无法从 AST import 边取得的模块。它们仍须
+# 进入单包的 scripts/lib/，否则包内 advertised 的路径会在首次 HK 调用时才失败。
+# discover-scan 的 loader 在包内优先用这些副本；主仓库继续指向 HK skill 的 canonical
+# 文件，故此列表同时是「动态跨 skill 依赖」的显式分发契约。
+DYNAMIC_MODULE_SEEDS: dict[str, list[tuple[str, str]]] = {
+    "invest-a-discover-scan": [
+        ("invest-hk-stock", "hk_quote"),
+        ("invest-hk-stock", "hk_financials"),
+        ("invest-hk-stock", "hk_calendar"),
+        ("invest-a-journal", "market_microstructure"),
+    ],
 }
 
 # SKILL.md 正文中的跨 skill 路径改写（包内副本）
@@ -140,6 +176,29 @@ CROSS_PATH_REWRITES: dict[str, list[tuple[str, str]]] = {
         ("skills/invest-a-journal/scripts/lib", "scripts/lib"),
     ],
 }
+
+# SKILL.md 以**命令行形式**强制的共享工具（「机器层准出」等）：非 import 可达 →
+# 闭包 BFS 抓不到，须由 SKILL.md 引用驱动显式入包。
+#   deps: 该工具的**静态不可解析**动态依赖（report_qc 经
+#         importlib.import_module("_invest_lib.lint") 与 f-string 形式加载 →
+#         ast 与正则均抓不到，只能显式列出）
+#   data: 随工具落包的数据文件（仓库相对路径）。落点 = <lib_root>/../references/，
+#         与消费方按 <自身>/../references/ 的解析口径一致（lint._rules_path）。
+MANDATED_TOOLS: dict[str, dict[str, list[str]]] = {
+    "report_qc": {
+        # analysis_schema：report_qc 经 _load_invest_lib() 注册 `_invest_lib` 别名包后
+        # 按 `_invest_lib.analysis_schema` 动态加载（:284/:289），ast 与字符串正则
+        # 都只抓到 `_invest_lib.*` 形式 → 在只带 report_qc+lint 的包（etf /
+        # event-calendar）里静默丢包，导致 stock 型快照的合法侧车被误判
+        # completion-analysis-sidecar-invalid + exit 2。其静态依赖 md_subset
+        # 经 _scan_node 的 AST 闭包自动带入，无需单列。
+        "deps": ["lint", "analysis_schema"],
+        "data": ["skills/invest-a-stock/scripts/references/compliance_rules.yaml"],
+    },
+}
+
+# SKILL.md 中对共享工具的 CLI 引用（决定哪些包需要携带该工具）
+_MANDATED_TOOL_RE = re.compile(r"skills/lib/([A-Za-z_]\w*)\.py")
 
 
 def project_version() -> str:
@@ -179,6 +238,17 @@ def _collect_own(src: Path) -> list[Path]:
             continue
         files.append(rel)
     return files
+
+
+def _mandated_data_sources(md_text: str) -> list[Path]:
+    """SKILL.md 引用到的强制工具所需数据文件的仓库绝对路径（去重保序）。"""
+    out: list[Path] = []
+    for name in dict.fromkeys(_MANDATED_TOOL_RE.findall(md_text)):
+        for rel in MANDATED_TOOLS.get(name, {}).get("data", []):
+            p = ROOT / rel
+            if p not in out:
+                out.append(p)
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
@@ -296,6 +366,7 @@ class _Closure:
                     self.module_map[name] = (key, f)
         self.included: dict[str, tuple[str, Path]] = {}     # 闭包（含包节点与 __init__）
         self._assets: set[Path] = set()                     # 引用 assets/ 的模块所在源目录
+        self.mandated: set[str] = set()                     # SKILL.md 强制的 CLI 工具（脚本入口）
 
     # ---- 解析 ----
     def resolve(self, name: str) -> tuple[str, Path] | None:
@@ -425,6 +496,39 @@ class _Closure:
             r = self.resolve(target)
             if r:
                 self._enqueue(target, r)
+        # Dynamic loaders are intentionally explicit: a string/f-string module name cannot
+        # be reliably discovered from the import AST. Resolve from the named source rather
+        # than the general universe so a same-named local shim cannot replace canonical HK.
+        for source_key, target in DYNAMIC_MODULE_SEEDS.get(self.skill_name, []):
+            source = f"cross:{source_key}"
+            maps = self._by_source.get(source)
+            if maps is None:
+                raise SystemExit(f"{self.skill_name}: 动态依赖源不存在: {source_key}")
+            module_map, package_inits = maps
+            f = module_map.get(target) or package_inits.get(target)
+            if f is None:
+                raise SystemExit(f"{self.skill_name}: 动态依赖缺失: {source_key}/{target}.py")
+            self._enqueue(target, (source, f))
+
+    def add_mandated_tools(self, md_text: str) -> None:
+        """SKILL.md 以命令行形式强制的共享工具入闭包（含其动态依赖）。
+
+        引用驱动而非硬编码 skill 清单：新增 skill 只要在 SKILL.md 写了该命令，
+        工具即自动进包——防「文档要求必跑、包里却没有」再次发生。
+        """
+        for name in dict.fromkeys(_MANDATED_TOOL_RE.findall(md_text)):
+            spec = MANDATED_TOOLS.get(name)
+            if spec is None:
+                continue
+            r = self.resolve(name)
+            if r is None:
+                continue
+            self._enqueue(name, r)
+            self.mandated.add(name)
+            for dep in spec.get("deps", []):
+                dr = self.resolve(dep)
+                if dr is not None:
+                    self._enqueue(dep, dr)
 
     # ---- 复制计划 ----
     def plan(self) -> list[tuple[Path, Path, str]]:
@@ -441,7 +545,11 @@ class _Closure:
             key, f = self.included[name]
             rel = f.relative_to(src_by_key[key])
             depth = len(rel.parts) - 1
-            if self.layout == "inline":
+            if self.layout == "inline" or name in self.mandated:
+                # inline：包内保持裸导入；mandated：SKILL.md 以**脚本**方式调用
+                # （uv run python …/report_qc.py）→ __package__ 为空，相对导入会报
+                # "attempted relative import with no known parent package"，须保留
+                # 裸导入（消费方靠 sys.path[0]=lib 目录解析）。
                 kind = "none"
             else:
                 kind = "lib_root" if depth == 0 else "lib_sub"
@@ -831,6 +939,10 @@ def _rewrite_skill_md(text: str, skill_name: str,
     )
     for old, new in CROSS_PATH_REWRITES.get(skill_name, []):
         text = text.replace(old, new)
+    # 强制工具的 CLI 路径：skills/lib/<tool>.py → 包内落点（含 ../../../ 前缀形式）
+    lib_rel = "lib" if LAYOUT[skill_name] == "pulse" else "scripts/lib"
+    for tool in MANDATED_TOOLS:
+        text = re.sub(rf"(?:\.\./)*skills/lib/{tool}\.py", f"{lib_rel}/{tool}.py", text)
     if skill_name == "invest-a-pulse" and names:
         text = _rewrite_pulse_md(text, names)
     return text
@@ -876,10 +988,11 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
     closure = _Closure(skill_name)
     entry_files = sorted((src / "scripts").glob("*.py")) if (src / "scripts").is_dir() else []
     entry_files = [p for p in entry_files if p.name != "__init__.py"]
-    md_text = ""
-    if layout in ("inline", "pulse"):
-        md_text = (src / "SKILL.md").read_text(encoding="utf-8")
+    # SKILL.md 正文始终读取（script 布局亦需：强制工具的引用驱动入包）
+    skill_md_text = (src / "SKILL.md").read_text(encoding="utf-8")
+    md_text = skill_md_text if layout in ("inline", "pulse") else ""
     closure.compute(entry_files, md_text)
+    closure.add_mandated_tools(skill_md_text)
 
     # 2. 计数
     own = _collect_own(src)
@@ -887,11 +1000,19 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
     assets = closure.asset_files()
     n_generated = 2 if layout == "inline" else 1   # 生成 _invest_path.py（journal + scripts/ 引导）
     n_lib = len(lib_plan) + len(assets)
-    total = len(own) + n_lib + _N_SHARED_REFS + 1 + n_generated  # + requirements.txt
+    # 强制工具的随包数据文件（落点与消费方 <自身>/../references/ 口径一致）
+    data_rel_dir = (Path("references") if layout == "pulse"
+                    else Path("scripts") / "references")
+    mandated_data = [(s, data_rel_dir / s.name)
+                     for s in _mandated_data_sources(skill_md_text)]
+    n_mandated = sum(1 for _s, rel in mandated_data if rel not in set(own))
+    total = (len(own) + n_lib + _N_SHARED_REFS + n_mandated
+             + 1 + n_generated)  # + requirements.txt
 
     ok = total <= MAX_FILES
     print(f"\n=== {skill_name} ===")
     print(f"  自身文件: {len(own)} + lib 闭包: {n_lib} + references: {_N_SHARED_REFS}"
+          f" + 强制工具数据: {n_mandated}"
           f" + requirements/引导: {1 + n_generated} = {total} (≤{MAX_FILES}: {'✅' if ok else '❌ 超限'})")
     if dry_run:
         return total
@@ -931,6 +1052,14 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
     # 5. assets（闭包内模块引用 assets/ 时）
     for rel, src_path in assets:
         target = lib_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, target)
+
+    # 5b. 强制工具的随包数据文件（compliance_rules.yaml 等）
+    for src_path, rel in mandated_data:
+        if not src_path.is_file():
+            raise SystemExit(f"{skill_name}: 强制工具数据文件缺失 {src_path}")
+        target = dst / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_path, target)
 

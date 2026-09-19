@@ -124,11 +124,11 @@ def _validate_p1_fields(h: dict) -> tuple[dict, str | None]:
     bd = h.get("buy_date")
     if bd is not None:
         if not isinstance(bd, str):
-            return h, "buy_date 非字符串，本行持有天数不可判"
+            return h, "buy_date 非字符串，本行持仓天数不可判"
         try:
             _dt.date.fromisoformat(bd)
         except ValueError:
-            return h, f"buy_date 非真实日期（{bd}），本行持有天数不可判"
+            return h, f"buy_date 非真实日期（{bd}），本行持仓天数不可判"
     return h, None
 
 
@@ -176,6 +176,13 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
         price_by_sym[sym] = (price, pdate)
 
     rows: list[dict[str, Any]] = []
+    # v0.3.0 B1：与 rows **同步**收集对应 holding。此前 `_carry_paper_keys` 按
+    # 下标 zip 未过滤的 holdings，而下面遇到空 symbol 行就 `continue`（空 symbol
+    # 是 `load_holdings` 明确支持的形态：现金/占位/坏行）→ 从该行起全体错位，
+    # 后续每行继承**上一持仓**的 kind/account/tag，`_is_paper` 与
+    # `disposition_hint` 的 paper 结论随之出错。**不可改用 symbol 键**：journal
+    # 侧同 symbol 多批次（分批建仓），键不唯一。
+    paper_holdings: list[dict] = []
     for h, err in validated:
         sym = str(h.get("symbol", "")).strip()
         if not sym:
@@ -194,6 +201,7 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
             )
             row["note"] = note_pre
             rows.append(row)
+            paper_holdings.append(h)
             continue
         row = build_position_row(
             symbol=sym, price=price, cost=h.get("cost"), buy_date=h.get("buy_date"),
@@ -207,7 +215,9 @@ def build_position_rows_from_holdings(holdings: list[dict], today: str | None = 
             if stale_days > 3:
                 row["note"] = (row.get("note") or "").strip() + f"；现价截至 {pdate}（或停牌/数据陈旧）"
         rows.append(row)
-    return rows
+        paper_holdings.append(h)
+    # R-C03：模拟/观察仓标识须随行携带（否则 `_is_paper` 在生产路径恒 False）
+    return _carry_paper_keys(rows, paper_holdings)
 
 
 def _fmt_weight(raw: Any) -> str:
@@ -235,9 +245,95 @@ def _fmt_weight(raw: Any) -> str:
     return f"{raw:.0%}"
 
 
+# --- R-C03 权重最大持仓的处置效应弱提示 ---------------------------------------
+# 证据边界（必须随文案走）：Sui-Wang 2025 的组合权重层证据**仅限处置效应**；
+# 权重非随机决定 → **相关非因果**，不得泛化到过度交易等其它偏差。
+_PAPER_KEYS = ("kind", "account", "asset_type", "tag", "type")
+_PAPER_TOKENS = ("模拟", "观察", "paper", "simulated", "watch")
+
+
+def _weight_num(v: Any) -> float | None:
+    """权重 → **归一化 fraction**（0–1）；不可解析 → None。
+
+    ⚠️ 归一化口径必须与 `_fmt_weight`（渲染侧）**逐字一致**：裸整数 >1 视为
+    百分数直觉写法（40 → 0.40）。原实现直接 `float(v)` 返回 40.0 → `disposition_hint`
+    会挑**错**「权重最大」持仓（40.0 > 0.6 假象），并把 100 倍权重交给消费方
+    （`{:.0%}` 渲染成 4000%）。
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        if s.endswith("%"):
+            try:
+                return float(s[:-1]) / 100.0
+            except ValueError:
+                return None
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+    if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
+        return None
+    return float(v) / 100.0 if v > 1.0 else float(v)
+
+
+def _is_paper(row: dict) -> bool:
+    """模拟/观察仓判定（容错多键名）。"""
+    for k in _PAPER_KEYS:
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).lower()
+        if any(tok in s for tok in _PAPER_TOKENS):
+            return True
+    return False
+
+
+def _carry_paper_keys(rows: list[dict[str, Any]],
+                      holdings: list[dict]) -> list[dict[str, Any]]:
+    """把 holdings 行中的**模拟/观察仓标识键**带进位置行（就地）。
+
+    ⚠️ `build_position_row` 只输出 symbol/name/weight/pnl_pct/band/holding_days/note，
+    把 holdings 的 `kind`/`account`/`asset_type`/`tag`/`type` 全部丢掉 → `_is_paper`
+    在**生产路径**上恒 False，「模拟/观察仓单独标注」的 R-C03 分支不可达
+    （此前只有手工构造 row 的测试能触发它）。按**下标**对齐（构造器逐行产出，顺序保持）。
+    """
+    for row, h in zip(rows, holdings or []):
+        if not isinstance(h, dict):
+            continue
+        for k in _PAPER_KEYS:
+            if h.get(k) is not None and row.get(k) is None:
+                row[k] = h[k]
+    return rows
+
+
+def disposition_hint(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """对**组合权重最大**持仓给处置效应**弱提示**（R-C03）。
+
+    权重全缺或全为 0 → ``None``（不给提示，也不臆造「最大」）。
+    返回 ``{symbol, name, weight, paper, note}``；``note`` 为合规文案（非建议）。
+    """
+    weighted = [(r, _weight_num(r.get("weight"))) for r in rows or []]
+    weighted = [(r, w) for r, w in weighted if w is not None and w > 0]
+    if not weighted:
+        return None
+    top, w = max(weighted, key=lambda x: x[1])
+    paper = _is_paper(top)
+    # 弱显著样式：不用 ⚠️（那是强信号），强调项用**加粗**
+    note = ("处置效应相关**弱提示**（Sui-Wang 2025：组合权重越大处置效应越强）。"
+            "权重非随机决定——**相关非因果**；本提示**不泛化**到过度交易等其它偏差，"
+            "也不构成任何操作建议。")
+    if paper:
+        note += (" 模拟/观察仓同样适用（Sui-Wang 2025 同文：模拟账户的偏差已存在）"
+                 "——**stakes 低 ≠ 无偏差**。")
+    return {"symbol": top.get("symbol"), "name": top.get("name"),
+            "weight": w, "paper": paper, "note": note}
+
+
 def position_table(rows: list[dict[str, Any]]) -> str:
     """渲染位置表（弱显著：档位中文 + 天数，不带盈亏数值与成本）。"""
-    head = "| 标的 | 名称 | 档位 | 持有天数 | 持仓占比 | 备注 |"
+    head = "| 标的 | 名称 | 档位 | 持仓天数 | 持仓占比 | 备注 |"
     sep = "|---|---|---|---|---|---|"
     lines = [head, sep]
     for r in rows:
@@ -250,4 +346,9 @@ def position_table(rows: list[dict[str, Any]]) -> str:
         )
     lines.append("")
     lines.append("*位置状态表仅描述持仓事实（档位/天数/占比），不构成任何操作建议。*")
+    # R-C03：权重最大持仓的处置效应**弱提示**——独立成行（不写进表格单元格），
+    # 弱显著样式（斜体，非 ⚠️ 强信号）
+    hint = disposition_hint(rows)
+    if hint:
+        lines.append(f"*{hint['note']}*")
     return "\n".join(lines)

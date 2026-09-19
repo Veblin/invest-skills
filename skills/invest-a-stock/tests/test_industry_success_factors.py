@@ -101,7 +101,7 @@ class TestRenderSuccessFactors:
 
         lines = _render_success_factors(self._bank_collection())
         joined = "\n".join(lines)
-        assert "**[行业成功关键因素（R4）]** 银行" in joined
+        assert "**[行业成功关键因素]** 银行" in joined
         for factor in get_success_factors("银行"):
             assert factor["question"][:8] in joined
         # 最新期（20261231）字段值被引用
@@ -127,7 +127,11 @@ class TestRenderSuccessFactors:
         assert "客户集中度" in joined
 
     def test_unregistered_industry_annotation(self):
-        """未覆盖行业 → 「无行业成功因素定义」一行，不渲染因素列表。"""
+        """未覆盖行业 → 「无行业成功因素定义」一行，不渲染因素列表。
+
+        2026-09-16：曾一度下沉至 full 专属附录，但 brief/concise 无附录区承接、
+        摘掉即等于删除（读者无从判断结论适用范围），故保留在头部三模式共用。
+        """
         from lib.render_markdown._base import _render_success_factors
 
         coll = collection_v2_minimal()

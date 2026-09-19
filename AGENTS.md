@@ -103,7 +103,7 @@ FRED API（有 Key）→ akshare → 标注不可得
 ### 搜索/新闻源
 
 ```
-Tavily → Bocha → WebSearch（Claude 内置）
+Tavily → WebSearch（Claude 内置）
 ```
 
 ---

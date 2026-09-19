@@ -41,3 +41,26 @@ def _reset_hsgt_run_cache(monkeypatch: Any) -> Iterator[None]:
     monkeypatch.setattr(collector._orchestrate, "_hsgt_top10_cache", {})
     monkeypatch.setattr(collector._orchestrate, "_hsgt_top10_cache_day", "")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sw_member_cache(tmp_path: Path, monkeypatch: Any) -> Iterator[None]:
+    """申万成分整表（index_member_all）缓存：默认落真实 ~/.local/share/investment/cache。
+
+    不隔离则测试会读到**本机真实数据**——实测后果：本地跑过一次真实采集后，
+    test_v013_phase2 的 mock 用例被缓存短路，industry_name 由 fixture 的
+    「电气设备」变成真实申万名「玻纤制造」而失败。故每测试注入 tmp 缓存目录，
+    保证 hermetic（与 _reset_hsgt_run_cache 同型）。
+    """
+    from lib import collector
+
+    try:
+        from lib.cache import DataCache  # type: ignore
+    except ImportError:  # pragma: no cover - 共享 lib 以顶层 cache 暴露时
+        from cache import DataCache  # type: ignore
+
+    monkeypatch.setattr(
+        collector._orchestrate, "_sw_cache",
+        lambda: DataCache(cache_dir=tmp_path / "sw_member_cache"),
+    )
+    yield

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from stock_testutil import FORBIDDEN_SIGNAL_WORDS
 from fixtures.collections import collection_kline_insufficient, collection_v2_minimal
 
@@ -256,6 +258,39 @@ class TestAnalysisSection:
         assert "待 Claude" in html  # 占位保留（F0-3 兜底：未填占位 qc FAIL）
 
 
+class TestFullModeIdentityStatus:
+    @staticmethod
+    def _analysis():
+        return [{
+            "module": "research", "title": "研究发现",
+            "facts_md": "事实 [来源: engine]", "analysis_md": "推演 [证据: B]",
+            "evidence_tag": "B", "position": "research",
+        }]
+
+    def test_real_full_html_without_analysis_shows_unfinished_data_pack_status(self):
+        from lib.render_html import render_html
+
+        html = render_html(collection_v2_minimal(), "600176", mode="full")
+        assert "数据底稿（分析合成未完成）" in html
+        assert "--analysis &lt;analysis.json&gt;" in html
+
+    def test_real_full_html_with_valid_analysis_shows_injected_data_pack_status(self):
+        from lib.render_html import render_html
+
+        html = render_html(collection_v2_minimal(), "600176", mode="full",
+                           analysis=self._analysis())
+        assert "审计/证据数据底稿（分析合成已注入）" in html
+        assert "分析合成未完成" not in html
+
+    def test_brief_and_concise_html_do_not_show_full_data_pack_status(self):
+        from lib.render_html import render_html
+
+        for mode in ("brief", "concise"):
+            html = render_html(collection_v2_minimal(), "600176", mode=mode)
+            assert "数据底稿（分析合成未完成）" not in html
+            assert "审计/证据数据底稿（分析合成已注入）" not in html
+
+
 # ── B3-R ②/④: margin 链路 + 财务图恢复 ──
 
 def _collection_with_market_structure():
@@ -476,8 +511,14 @@ class TestFullReviewAnalysisSameSource:
         ]
         md = render_report_v3(collection_v2_minimal(), "600176",
                               analysis=analysis)
-        assert "分析注记（analysis.json 注入）" in md
-        assert "投资假设检验" in md and "事件分层分析" in md
+        # v0.3.0 方案 A：overview 槽位段前置为「重要发现（5 分钟阅读区）」，
+        # 其余段进「分析详情」；两层都必须在 md 中出现且各只出现一次。
+        assert "分析详情（analysis.json 注入）" in md
+        assert "重要发现（5 分钟阅读区）" in md
+        assert md.count("投资假设检验") == 1, "overview 段不得同时出现在两层"
+        assert "事件分层分析" in md
+        assert md.index("重要发现（5 分钟阅读区）") < md.index("分析详情（analysis.json 注入）"), \
+            "5 分钟判断区必须排在分析详情之前"
         html = render_html(collection_v2_minimal(), "600176",
                            analysis=analysis)
         assert "投资假设检验" in html
@@ -494,9 +535,89 @@ class TestFullReviewAnalysisSameSource:
                            analysis=analysis)
         assert "待 Claude 分析阶段填写" not in html
 
+    def test_event_classification_key_hides_html_placeholder(self):
+        """槽位键 `event_classification` 在 html 侧同样须隐藏静态占位。
+
+        md 侧 v0.3.0 已改用槽位键，html 侧谓词仍写死 `module == 'events'` →
+        按新键撰写时 md 替换占位、html 仍展示「待 Claude 分析阶段填写」。
+        """
+        from lib.render import render_html
+
+        analysis = [{"module": "event_classification", "title": "事件分类复核",
+                     "facts_md": "近 30 日公告 1 条 [来源: akshare]",
+                     "analysis_md": "分类复核结论", "evidence_tag": "B",
+                     "position": "analysis"}]
+        html = render_html(collection_v2_minimal(), "600176", analysis=analysis)
+        assert "待 Claude 分析阶段填写" not in html
+
+    @pytest.mark.parametrize("key", ["events", "event_classification"])
+    def test_events_host_keys_are_same_source(self, key: str):
+        """两键同源：不得出现「md 留占位」或「html 留静态块」的任一方向漂移。"""
+        from lib.render import render_html, render_report_v3
+
+        coll = collection_v2_minimal()
+        coll["events"] = [{"date": "2026-06-11", "type": "buyback",
+                           "title": "测试股份:关于回购公司A股股份的公告",
+                           "impact_dimension": "估值", "duration": "中长期变量"}]
+        coll["_meta"] = {"analysis_cards": {"event_classifications": [
+            {"event_type": "buyback", "event_label": "回购",
+             "events": [{"date": "2026-06-11"}]}]}}
+        analysis = [{"module": key, "title": "事件分类复核",
+                     "facts_md": "近 30 日公告 1 条 [来源: akshare]",
+                     "analysis_md": "分类复核结论XYZ", "evidence_tag": "B",
+                     "position": "analysis"}]
+        md = render_report_v3(coll, "600176", analysis=analysis)
+        assert "待 Claude 验证" not in md, f"{key}: md 仍渲染引擎占位（error 级门禁）"
+        assert "分类复核结论XYZ" in md
+        html = render_html(coll, "600176", analysis=analysis)
+        assert "待 Claude 分析阶段填写" not in html, f"{key}: html 仍渲染静态占位"
+
     def test_no_analysis_md_unchanged(self):
         """无 analysis → md 无注记节（基线零增）。"""
         from lib.render import render_report_v3
 
         md = render_report_v3(collection_v2_minimal(), "600176")
-        assert "分析注记" not in md
+        assert "分析详情" not in md and "重要发现（5 分钟阅读区）" not in md
+        assert "判断索引" not in md
+
+    # ---- 2026-09-18 评审批次：首屏判断索引 md/html 同源 ----
+
+    @staticmethod
+    def _index_payload() -> list[dict]:
+        return [
+            {"module": "bear_chain", "position": "conclusion",
+             "title": "空头链条：量增依赖让利", "facts_md": "f", "analysis_md": "a",
+             "evidence_tag": "B"},
+            {"module": "事件归因", "position": "events", "title": "下跌非公告驱动",
+             "facts_md": "f", "analysis_md": "a", "evidence_tag": "B"},
+        ]
+
+    def test_judgment_index_same_source_md_html(self):
+        """索引条目由 analysis_schema.index_entries 单点给出：md/html 同序同标签。"""
+        from lib.analysis_schema import index_entries
+        from lib.render import render_html, render_report_v3
+
+        payload = self._index_payload()
+        md = render_report_v3(collection_v2_minimal(), "600176", mode="full",
+                              analysis=payload)
+        html = render_html(collection_v2_minimal(), "600176", mode="full",
+                           analysis=payload)
+        entries = index_entries(payload)
+        assert entries == [("结论", "空头链条：量增依赖让利"),
+                           ("事件归因", "下跌非公告驱动")], "内部 slug 未回退 position 中文名"
+        last_md = last_html = -1
+        for label, title in entries:
+            i_md = md.index(f"- **{label}**：{title}")
+            i_html = html.index(f">{label}</strong>：{title}")
+            assert i_md > last_md and i_html > last_html, "md/html 索引次序不一致"
+            last_md, last_html = i_md, i_html
+        assert "bear_chain" not in md, "md 首屏泄漏内部槽位键"
+
+    def test_judgment_index_is_full_mode_only_in_html(self):
+        """与 md 侧同门槛：该层是 full 底稿的首屏索引，brief 不出（分析卡照常渲染）。"""
+        from lib.render import render_html
+
+        html = render_html(collection_v2_minimal(), "600176", mode="brief",
+                           analysis=self._index_payload())
+        assert "判断索引" not in html
+        assert "空头链条：量增依赖让利" in html, "brief 的分析卡不受索引层影响"

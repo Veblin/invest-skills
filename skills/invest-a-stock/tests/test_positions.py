@@ -254,3 +254,32 @@ class TestReview2Fixes:
             )
         assert m.call_count == 1
         assert rows[0]["band"] == "loss"     # 现价=成本 → 0% → loss 档？20/20-1=0 → loss
+
+
+def test_paper_keys_survive_empty_symbol_holding():
+    """v0.3.0 B1：holdings 中夹空 symbol 行不得让后续行的标识键错位。
+
+    空 symbol 是 `load_holdings` 明确支持的形态（现金/占位/坏行）。旧实现
+    `_carry_paper_keys(rows, holdings)` 按**下标** zip 未过滤的 holdings，而构造
+    循环遇空 symbol 就 `continue` → 从该行起全体错位，真实持仓继承**上一行**的
+    kind/account/tag，`disposition_hint` 随之输出「模拟/观察仓同样适用」的虚假陈述。
+    """
+    from unittest.mock import patch
+    from lib._invest_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from lib import collector as col
+    from lib.positions import build_position_rows_from_holdings, disposition_hint
+
+    holdings = [
+        {"symbol": "", "name": "现金", "kind": "观察仓", "weight": 0.1},
+        {"symbol": "600176", "name": "中国巨石", "weight": 0.6,
+         "cost": 10.0, "buy_date": "2026-01-05"},
+    ]
+    with patch.object(col, "collect_kline", side_effect=RuntimeError("offline")):
+        rows = build_position_rows_from_holdings(holdings, today="2026-09-05")
+
+    assert [r["symbol"] for r in rows] == ["600176"], "空 symbol 行不应产出位置行"
+    assert rows[0].get("kind") is None, "真实持仓不得继承上一行的 kind"
+    hint = disposition_hint(rows)
+    assert hint is not None and hint["paper"] is False, "真实持仓不得被判为模拟/观察仓"
+    assert "stakes 低 ≠ 无偏差" not in hint["note"]

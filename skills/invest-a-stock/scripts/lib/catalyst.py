@@ -8,8 +8,12 @@
 使用方式:
     from lib.catalyst import collect_catalyst_events, format_catalyst_calendar
 
-    events = collect_catalyst_events("600176", days=90)
-    print(format_catalyst_calendar(events))
+    events, unavailable = collect_catalyst_events("600176", days=90)
+    print(format_catalyst_calendar(events, symbol="600176", days=90,
+                                   unavailable=unavailable))
+
+取数失败以 ``unavailable`` 显式外显：三条腿任一失败时，产物必须写明
+「不可得 ≠ 无事件」，不得把失败渲染成「未检索到事件」（review C3）。
 """
 
 from __future__ import annotations
@@ -51,8 +55,12 @@ class CatalystEvent:
 # 数据源采集
 # ---------------------------------------------------------------------------
 
-def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
-    """从 akshare 分红数据提取未来除权日。"""
+def _fetch_dividend_events(symbol: str, lookahead_days: int) -> tuple[list[CatalystEvent], str | None]:
+    """从 akshare 分红数据提取未来除权日。
+
+    返回 ``(events, error)``：error=None 表示取数成功（含合法空结果），
+    否则为失败原因——调用方必须区分「无事件」与「取数失败」。
+    """
     events: list[CatalystEvent] = []
     today = _shanghai_now().date()
     cutoff = today + timedelta(days=lookahead_days)
@@ -63,7 +71,7 @@ def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEve
 
         if not is_akshare_available():
             logger.info("akshare unavailable, skip dividend events")
-            return events
+            return events, "akshare 不可用"
 
         with akshare_direct_session():
             import akshare as ak
@@ -74,7 +82,7 @@ def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEve
                 df = ak.stock_history_dividend_detail(symbol=symbol)
 
         if df is None or df.empty:
-            return events
+            return events, None
 
         for _, row in df.iterrows():
             raw_date = row.get("除权除息日") or row.get("date") or ""
@@ -97,65 +105,75 @@ def _fetch_dividend_events(symbol: str, lookahead_days: int) -> list[CatalystEve
                 ))
     except Exception as exc:
         logger.warning("dividend fetch failed: %s", exc)
+        return events, f"{type(exc).__name__}: {exc}"
 
-    return events
+    return events, None
 
 
-def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
-    """从 akshare 限售解禁队列提取未来解禁事件。"""
+def _fetch_restricted_unlock_events(symbol: str, lookahead_days: int) -> tuple[list[CatalystEvent], str | None]:
+    """从个股解禁队列提取未来解禁事件。
+
+    源实现已收敛至共享模块 ``skills/lib/unlock_source.py``（invest-a-event-calendar v2
+    同源复用；失败以 (rows, error) 显式区分，不再静默空）。
+
+    返回 ``(events, error)``；error 须原样透传给调用方，不得只记日志后丢弃——
+    否则取数失败会被产物写成「未检索到事件」这一事实性缺席断言。
+    """
     events: list[CatalystEvent] = []
     today = _shanghai_now().date()
-    cutoff = today + timedelta(days=lookahead_days)
 
     try:
         from lib.env import is_akshare_available
-        from lib.collector import akshare_direct_session
 
         if not is_akshare_available():
-            return events
+            return events, "akshare 不可用"
+    except Exception:  # env 判定失败不阻断（fetch 内部自会返回失败原因）
+        pass
 
-        with akshare_direct_session():
-            import akshare as ak
-            try:
-                df = ak.stock_restricted_release_queue_em(symbol=symbol)
-            except Exception as exc:
-                logger.info("restricted release API unavailable: %s", exc)
-                return events
+    try:  # 共享库引导（skills/lib；包内由 builder 重写为 lib.unlock_source）
+        from ._invest_path import ensure_skills_lib_on_path
 
-        if df is None or df.empty:
-            return events
+        ensure_skills_lib_on_path()
+    except Exception:  # pragma: no cover
+        pass
 
-        for _, row in df.iterrows():
-            raw_date = row.get("解禁时间") or ""
-            if not raw_date:
-                continue
-            try:
-                event_date = _parse_date(raw_date)
-                if event_date is None:
-                    continue
-            except Exception:
-                continue
+    try:  # 导入在 try 内：上方 bootstrap 是 best-effort（except: pass），引导失败
+        # 或 skills/lib 不在 sys.path 时 import 会抛 ModuleNotFoundError——必须只
+        # 降级本段，否则 collect_catalyst_events 整块中止，同一调用中已采到的分红/
+        # 公告事件一并丢失。
+        from unlock_source import fetch_symbol_unlocks
 
-            if today <= event_date <= cutoff:
-                shares = row.get("解禁数量") or 0
-                shares_yi = float(shares) / ONE_PER_YI if shares else 0
-                holder_count = _safe_int(row.get("解禁股东数", 0))
-                holder_label = f"{holder_count} 个股东" if holder_count is not None else "股东数不可得"
-                stock_type = row.get("限售股类型", "")
-                events.append(CatalystEvent(
-                    symbol=symbol, date=event_date, event_type="restricted_unlock",
-                    title=f"限售解禁 {shares_yi:.2f} 亿股" if shares_yi > 0 else "限售解禁",
-                    detail=f"{holder_label}, {stock_type}",
-                    impact="高", source="akshare.stock_restricted_release_queue_em",
-                ))
-    except Exception as exc:
+        rows, err = fetch_symbol_unlocks(symbol, lookahead_days=lookahead_days,
+                                         today=today)
+    except Exception as exc:  # noqa: BLE001
         logger.warning("restricted unlock fetch failed: %s", exc)
+        return events, f"{type(exc).__name__}: {exc}"
+    if err:
+        logger.info("restricted release API unavailable: %s", err)
+        return events, err
 
-    return events
+    for r in rows:
+        try:
+            event_date = date.fromisoformat(r["date"])
+        except (ValueError, TypeError):
+            continue
+        shares_yi = r["qty_yi"] or 0
+        holder_count = r["holders"]
+        holder_label = f"{holder_count} 个股东" if holder_count is not None else "股东数不可得"
+        events.append(CatalystEvent(
+            symbol=symbol, date=event_date, event_type="restricted_unlock",
+            title=f"限售解禁 {shares_yi:.2f} 亿股" if shares_yi > 0 else "限售解禁",
+            detail=f"{holder_label}, {r['kind']}",
+            impact="高", source="akshare.stock_restricted_release_queue_em",
+        ))
+    return events, None
 
 
-def _fetch_announcement_events(symbol: str, lookahead_days: int) -> list[CatalystEvent]:
-    """从公告中提取未来日期（如"定于 XXXX年XX月XX日 召开股东大会"）。"""
+def _fetch_announcement_events(symbol: str, lookahead_days: int) -> tuple[list[CatalystEvent], str | None]:
+    """从公告中提取未来日期（如"定于 XXXX年XX月XX日 召开股东大会"）。
+
+    返回 ``(events, error)``，语义同 ``_fetch_dividend_events``。
+    """
     events: list[CatalystEvent] = []
     today = _shanghai_now().date()
     cutoff = today + timedelta(days=lookahead_days)
@@ -165,7 +183,7 @@ def _fetch_announcement_events(symbol: str, lookahead_days: int) -> list[Catalys
         from lib.collector import akshare_direct_session
 
         if not is_akshare_available():
-            return events
+            return events, "akshare 不可用"
 
         with akshare_direct_session():
             import akshare as ak
@@ -177,10 +195,10 @@ def _fetch_announcement_events(symbol: str, lookahead_days: int) -> list[Catalys
                     df = ak.stock_notice_report(symbol=symbol)
                 except Exception as exc:
                     logger.warning("announcement NLP failed: %s", exc)
-                    return events
+                    return events, f"{type(exc).__name__}: {exc}"
 
         if df is None or df.empty:
-            return events
+            return events, None
 
         # NLP: extract future dates from announcement titles
         _DATE_PATTERNS = [
@@ -233,15 +251,16 @@ def _fetch_announcement_events(symbol: str, lookahead_days: int) -> list[Catalys
                     break  # 只取第一个日期
     except Exception as exc:
         logger.warning("announcement NLP failed: %s", exc)
+        return events, f"{type(exc).__name__}: {exc}"
 
-    return events
+    return events, None
 
 
 # ---------------------------------------------------------------------------
 # 聚合与格式化
 # ---------------------------------------------------------------------------
 
-def collect_catalyst_events(symbol: str, days: int = 90) -> list[CatalystEvent]:
+def collect_catalyst_events(symbol: str, days: int = 90) -> tuple[list[CatalystEvent], list[str]]:
     """采集未来 N 天的催化剂事件。
 
     Args:
@@ -249,13 +268,23 @@ def collect_catalyst_events(symbol: str, days: int = 90) -> list[CatalystEvent]:
         days: 前瞻天数（默认 90）
 
     Returns:
-        按日期升序排列的 CatalystEvent 列表
+        ``(events, unavailable)``：events 为按日期升序排列的 CatalystEvent 列表；
+        unavailable 为取数失败的来源说明（空列表 = 三条腿都成功）。调用方
+        **必须**把 unavailable 带进产物——取数失败 ≠ 没有事件（review C3）。
     """
     all_events: list[CatalystEvent] = []
+    unavailable: list[str] = []
 
-    all_events.extend(_fetch_dividend_events(symbol, days))
-    all_events.extend(_fetch_restricted_unlock_events(symbol, days))
-    all_events.extend(_fetch_announcement_events(symbol, days))
+    for label, fetch in (("分红除权", _fetch_dividend_events),
+                         ("限售解禁", _fetch_restricted_unlock_events),
+                         ("公告事件", _fetch_announcement_events)):
+        try:
+            events, err = fetch(symbol, days)
+        except Exception as exc:  # noqa: BLE001 —— 单腿异常不得中断整块采集
+            events, err = [], f"{type(exc).__name__}: {exc}"
+        all_events.extend(events)
+        if err:
+            unavailable.append(f"{label}（{err}）")
 
     # 去重（同日期 + 同标题）
     seen = set()
@@ -265,15 +294,32 @@ def collect_catalyst_events(symbol: str, days: int = 90) -> list[CatalystEvent]:
         if key not in seen:
             seen.add(key)
             unique.append(e)
-    return unique
+    return unique, unavailable
 
 
-def format_catalyst_calendar(events: list[CatalystEvent], symbol: str = "") -> str:
-    """格式化为 Markdown 日历表格。"""
+def format_catalyst_calendar(events: list[CatalystEvent], symbol: str = "",
+                             days: int = 90,
+                             unavailable: list[str] | None = None) -> str:
+    """格式化为 Markdown 日历表格。
+
+    ``unavailable`` 非空时必须在产物内明示：把取数失败写成「未检索到事件」
+    是关于报告内容的事实性断言，在源失败时不成立（review C3）。
+    """
+    degraded = list(unavailable or [])
+
     if not events:
-        return (f"## 催化剂日历 — {symbol}\n\n"
-                "> 未来 90 天内未发现已知催化剂事件。\n"
-                "> 财报日期需通过 akshare 财报预约披露接口获取（当前不可用）。")
+        if degraded:
+            # 与失败说明**同句**：单独的「未检索到」会把工具故障读成干净的缺席。
+            claim = (f"未来 {days} 天内未检索到已知催化剂事件；**但以下来源取数失败，"
+                     f"不可得 ≠ 无事件**：" + "；".join(degraded) + "。")
+        else:
+            claim = f"未来 {days} 天内未检索到已知催化剂事件。"
+        return "\n".join([
+            f"## 催化剂日历 — {symbol}",
+            "",
+            f"> {claim}",
+            "> 财报日期需通过 akshare 财报预约披露接口获取（当前不可用）。",
+        ])
 
     lines = [
         f"## 催化剂日历 — {symbol}",
@@ -297,6 +343,13 @@ def format_catalyst_calendar(events: list[CatalystEvent], symbol: str = "") -> s
             f"> 数据来源: {', '.join(sorted(sources))}",
             "> ⚠️ 财报发布日期需通过 akshare 财报预约披露获取（当前版本不可用）。"
             "行业事件（展会/会议等）不在当前覆盖范围。",
+        ])
+
+    if degraded:
+        lines.extend([
+            "",
+            "> ⚠️ 以下来源**取数失败**，相关事件可能缺失（不可得 ≠ 无事件）："
+            + "；".join(degraded) + "。",
         ])
 
     return "\n".join(lines)

@@ -42,6 +42,17 @@ class LintFinding:
 
 _RULES_CACHE: Optional[list[dict]] = None
 
+# `precommit` profile 的**结构类放行清单**（其余非 `wording-` 规则一律跳过）。
+#
+# ⚠️ 加规则时的判据：该规则是否属于旧 `check_report.sh` 的「[事实] 前置」阻断项语义。
+# 漏加后果是**静默失效**——法定第 0 层 `report_qc.py <报告> --fail-on error` 默认
+# `profile=precommit`（report_qc.py:768），未列入的 error 级规则在强制流程里永不触发，
+# 而文档仍对外承诺「error 级拦截」（R-E04 即曾如此，2026-09-13 轮末评审发现）。
+_PRECOMMIT_STRUCTURE_RULES = (
+    "structure-analysis-without-fact",
+    "structure-convention-in-fact-block",      # R-E04（v0.3.0 R5）
+)
+
 
 class RulesLoadError(RuntimeError):
     """合规规则无法加载（缺失依赖、文件或解析失败）。"""
@@ -111,7 +122,7 @@ def _should_skip_by_profile(rule: dict, profile: str) -> bool:
             return True
         if rule_id.startswith("law6-"):
             return True
-        if rule_id == "structure-analysis-without-fact":
+        if rule_id in _PRECOMMIT_STRUCTURE_RULES:
             return False
         return True
 

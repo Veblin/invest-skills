@@ -1,6 +1,6 @@
 {
   "name": "invest-skills",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "A股多因子投研助手 — 九模块研究备忘录，带数据引用的 Markdown 报告。研究工具，非决策工具。",
   "settings": [
     {
@@ -25,12 +25,6 @@
       "name": "Tavily Search API Key",
       "description": "Tavily AI 搜索 API Key（可选，免费 1000次/月）— https://tavily.com",
       "envVar": "TAVILY_API_KEY",
-      "sensitive": true
-    },
-    {
-      "name": "Bocha Search API Key",
-      "description": "Bocha 中文搜索 API Key（可选，免费试用）— https://open.bocha.cn",
-      "envVar": "BOCHA_API_KEY",
       "sensitive": true
     },
     {

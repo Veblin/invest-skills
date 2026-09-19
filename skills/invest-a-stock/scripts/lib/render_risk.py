@@ -20,6 +20,9 @@ from .render_utils import (
     _evidence_conclusion_block,
     _get_dim_data,
     _historical_pe_median,
+    _pct_medians,
+    _pct_median_suffix,
+    _pct_median_inline,
     _v3_cv7_block,
     _v3_cv8_block,
     _v3_trend_stage_hints,
@@ -94,8 +97,13 @@ def _v3_build_risk_report(
     pe_pct, _, _ = _v3_valuation_percentiles(dims, val_cache)
     val_payload: dict[str, Any] = {}
     if pe_pct is not None:
+        # 中位数随分位一并下发：风险信号 detail 含分位读数，须同行带中位数
+        # （CLAUDE.md 估值分位规则 3；见 risk_scanner._pe_median）
+        _pe_med_payload, _ = _pct_medians(val_cache, dims)
         val_payload["pe_percentile"] = pe_pct
-        val_payload["pe"] = {"pct": pe_pct}
+        val_payload["pe"] = {"pct": pe_pct, "median": _pe_med_payload}
+        if _pe_med_payload is not None:
+            val_payload["pe_median"] = _pe_med_payload
     industry_peers = collection.get("industry_peers") or {}
     peers = industry_peers.get("peers") or []
     debt_vals = [
@@ -160,6 +168,7 @@ def _section_bull_bear(
     risk_data: dict[str, Any],
     *,
     val_cache: dict | None = None,
+    analysis: list[dict] | None = None,
 ) -> str:
     """模块 5：多空逻辑链、关键分歧点、预期差（LAW 15）。
 
@@ -167,11 +176,16 @@ def _section_bull_bear(
     - 多头/空头链改为「假设→传导→数字」结构
     - 每链包含: 核心假设, 传导链, 对应数字(利润预测表+隐含市值)
     - 末尾增加「关键分歧点」独立章节
+
+    analysis（v0.3.0 fix③）：引擎未生成空头链时，命中 bear_chain 槽位的段
+    取代「当前数据未形成明确空头逻辑链」——该串是 QC
+    `completion-empty-basis` 的 error 级命中项（空头依据节不得为空）。
     """
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    pe_med, _pb_med5 = _pct_medians(val_cache, dims)
 
     # LAW 17: 构建含数据的标题 + 段首主旨句
-    pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    pe_s = f"PE {pe_pct:.1f}% 分位{_pct_median_suffix(pe_med)}" if pe_pct is not None else ""
     title_suffix = f"Bull/Bear 多空逻辑链 · {pe_s}" if pe_s else "Bull/Bear 多空逻辑链与情景估值"
     judgment = f"当前 {pe_s}，以下为 Bull/Bear 对称辩论与多情景估值参考。" if pe_s else "以下为 Bull/Bear 多空逻辑链与情景估值分析。"
 
@@ -264,7 +278,8 @@ def _section_bull_bear(
         chain: dict = {
             "title": "估值偏低 — 均值回归潜力",
             "assumption": (
-                f"当前 PE 处于历史 {pe_zone or '偏低区'}（{pe_pct:.1f}% 分位），"
+                f"当前 PE 处于历史 {pe_zone or '偏低区'}"
+                f"（分位 {pe_pct:.1f}%{_pct_median_inline(pe_med)}），"
                 f"低于历史上大多数时期的估值中枢。"
             ),
             "transmission": (
@@ -301,10 +316,13 @@ def _section_bull_bear(
     # Bull chain 2: Extremely low valuation signal (reverse risk)
     if risk_bull_signal is not None:
         chain = {
-            "title": "极端低估参考信号",
-            "assumption": f"{risk_bull_signal.get('detail', '估值处于极端低位')}",
+            # 2026-09-19：原为「极端低估参考信号」——「极端低估」属措辞规范禁止的
+            # 形容词式表述（须改数值比较）。改为位置描述；数值由 assumption 的
+            # detail 承载（含分位 % 与中位数）。
+            "title": "估值分位处历史低位参考信号",
+            "assumption": f"{risk_bull_signal.get('detail', '估值分位处历史低位')}",
             "transmission": (
-                "极端低估信号触发 → 历史上类似阶段曾出现估值修复窗口 "
+                "估值分位处历史低位 → 历史上类似阶段曾出现估值修复窗口 "
                 "[推测，待验证：样本案例与胜率待补] → 可关注估值修复机会。"
             ),
             "numbers": [f"- 信号来源: risk_scanner / {risk_bull_signal.get('category', 'market')}"],
@@ -613,6 +631,15 @@ def _section_bull_bear(
 
     # ── 5b. Bear chain: 假设→传导→数字 ────────────────────────────
     lines.append("### 5b. 空头逻辑链")
+    from lib.analysis_schema import (
+        BEAR_CHAIN_KEYS,
+        find_section,
+        mark_inline_consumed,
+    )
+    _bear = find_section(analysis, BEAR_CHAIN_KEYS)
+    _bear_md = str((_bear or {}).get("analysis_md") or "").strip()
+    if _bear_md:
+        mark_inline_consumed(collection, _bear)
     if bear_chains:
         for idx, bc in enumerate(bear_chains, 1):
             lines.append(f"#### 空头逻辑 {idx}: {bc['title']}")
@@ -625,7 +652,19 @@ def _section_bull_bear(
                 lines.append("  - 数据不足，未生成量化估算")
             lines.append(f"- 证据强度: {bc['strength']}")
             lines.append("")
+        # 引擎已生成空头链时，槽位段仍须渲染（否则段内容静默丢失——
+        # is_inline_slotted 已把它排除出「分析详情」，无处可去）。追加而非
+        # 替换：引擎链是自动生成的独立内容，不是占位文本。
+        if _bear_md:
+            lines.append("**补充空头链（analysis.json 注入）**")
+            lines.append("")
+            lines.append(_bear_md)
+            lines.append("")
+    elif _bear_md:
+        lines.append(_bear_md)
+        lines.append("")
     else:
+        # 引擎无链且无分析段 → 保持空依据声明，completion 门禁照常拦截。
         lines.append("- 当前数据未形成明确空头逻辑链 [来源: 模块 2/4/6 + risk_scanner]")
         lines.append("")
 
@@ -644,19 +683,21 @@ def _section_bull_bear(
     if ig.get("g_implied") is not None and ref_cagr is not None and ref_label:
         divergence_count += 1
         g_pct = ig["g_implied"] * 100
-        direction_bull = "低估" if g_pct > ref_cagr else "合理"
-        direction_bear = "透支" if g_pct > ref_cagr else "悲观"
         # review #13：r 为默认假设（FRED dgs10 不可得）时方向性对比须降级标注——
         # 与模块 4 D-③（_v3.py:3487-3491）同口径，禁以猜测 r 出未经标注的方向结论
         r_default_caution = (
             "（注意：r 为默认假设 2.5% [推测，待验证]，方向性对比仅供参考，"
             "须先获取真实无风险利率）" if ig.get("rf_is_default") else ""
         )
+        # 2026-09-19：原实现把「两个数字不同」直接写成「Bear 认为实际 CAGR 无法匹配，
+        # 定价悲观」——既把数字差异误表述为定性结论，又与 5d「与实际营收 CAGR 接近」
+        # 互斥（600519 实测：5c 称「无法匹配」、5d 称「接近」）。改为中性陈述分歧：
+        # 给出两数与差值，两侧读法并列，不替任一侧下「匹配/无法匹配」的判定。
         lines.append(
-            f"{divergence_count}. **[隐含增长 vs 实际增长]**：Bull 认为 g_implied "
-            f"({g_pct:.2f}%) {direction_bull}，未来增长可期；Bear 认为 "
-            f"实际{ref_label} {ref_cagr:+.2f}% 无法匹配，定价{direction_bear}。"
-            f"{r_default_caution}"
+            f"{divergence_count}. **[隐含增长 vs 实际增长]**：市场隐含增长 g_implied"
+            f"（{g_pct:.2f}%）与实际{ref_label}（{ref_cagr:+.2f}%）相差 "
+            f"{abs(g_pct - ref_cagr):.2f}pp——Bull 读作「隐含假设保守、存在重估空间」，"
+            f"Bear 读作「历史增速不可持续、市场已在定价减速」。{r_default_caution}"
         )
     # divergence: northbound vs moneyflow (if we haven't hit 2)
     m_v = mf_net
@@ -666,15 +707,15 @@ def _section_bull_bear(
         bear_direction = "净流入" if m_v > 0 else "净流出"
         lines.append(
             f"{divergence_count}. **[资金流向背离]**：Bull 关注北向 {_fmt_v2(nb_v)} "
-            f"（{bull_direction}），认为外资流入是正面信号；Bear 关注主力 "
+            f"（{bull_direction}），认为外资流入是正面信号；Bear 关注全档资金 "
             f"{_fmt_v2(m_v)}（{bear_direction}），认为内资撤离是预警。"
         )
     if divergence_count == 0:
         lines.append("1. 关键变量数据不足，暂无法提炼定量分歧点 [来源: 多维度缺口]")
     lines.append("")
 
-    # ── 5d. 预期差（LAW 15） — unchanged ──────────────────────────
-    lines.append("### 5d. 预期差（LAW 15）")
+    # ── 5d. 预期差 — unchanged ──────────────────────────
+    lines.append("### 5d. 预期差")
     if ig.get("g_implied") is not None:
         g_pct = ig["g_implied"] * 100
         # review #13：r 为默认假设时在 label 上标注 [推测，待验证]（对齐 _v3.py rf_label）
@@ -691,18 +732,23 @@ def _section_bull_bear(
             )
         if ref_cagr is not None and ref_label:
             gap = g_pct - ref_cagr
+            rel = abs(gap) / abs(ref_cagr) * 100 if ref_cagr else None
             # review #13：默认 r 下 gap 定价方向仅供参考（r 非实测）
             r_default_note = "（r 为默认假设，方向仅供参考）" if ig.get("rf_is_default") else ""
-            if abs(gap) > 5:
-                direction = "偏乐观" if gap > 0 else "偏悲观"
+            # 2026-09-19：原判定只看绝对差（>5pp），相对差很大时仍写「接近」
+            # （600519 实测差 4.98pp、相对 46%）——与模块 4 D-③ 同口径改用相对差 ≤20%
+            if rel is not None and rel <= 20:
                 lines.append(
-                    f"- 与实际{ref_label}（{ref_cagr:+.2f}%）差距 {gap:+.2f}pp，定价{direction}"
+                    f"- 与实际{ref_label}（{ref_cagr:+.2f}%）接近"
+                    f"（差 {abs(gap):.2f}pp，相对 {rel:.1f}%），定价大致反映历史增长"
                     f" [来源: financials CAGR vs D-③]{r_default_note}"
                 )
             else:
+                direction = "偏乐观" if gap > 0 else "偏悲观"
+                _rel_s = f"{rel:.1f}%" if rel is not None else "不可得"
                 lines.append(
-                    f"- 与实际{ref_label}（{ref_cagr:+.2f}%）接近，定价大致反映历史增长"
-                    f" [来源: financials CAGR vs D-③]{r_default_note}"
+                    f"- 与实际{ref_label}（{ref_cagr:+.2f}%）差距 {gap:+.2f}pp（相对 {_rel_s}），"
+                    f"定价{direction} [来源: financials CAGR vs D-③]{r_default_note}"
                 )
         else:
             lines.append("- 实际 CAGR 不可得，仅呈现 g_implied 供与模块 4 D-③ 对照 [来源: financials 缺口]")
@@ -716,7 +762,8 @@ def _section_bull_bear(
             lines.append(
                 _cv(
                     "divergence", "CV-6", "PE 分位 vs PB 分位（分歧视角）",
-                    f"PE 分位 {pe_pct:.1f}% 与 PB 分位 {pb_pct:.1f}% 方向不一致",
+                    f"PE 分位 {pe_pct:.1f}%{_pct_median_suffix(pe_med)}"
+                    f" 与 PB 分位 {pb_pct:.1f}%{_pct_median_suffix(_pb_med5)} 方向不一致",
                     "中",
                 )
             )
@@ -997,7 +1044,8 @@ def _section_left_right_probability(
 ) -> str:
     # LAW 17: 构建含数据的标题
     pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
-    pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    pe_med6, _pb_med6 = _pct_medians(val_cache, dims)
+    pe_s = f"PE {pe_pct:.1f}% 分位{_pct_median_suffix(pe_med6)}" if pe_pct is not None else ""
     title_suffix = f"左/右概率判断 · {pe_s}" if pe_s else "左侧/右侧概率判断"
     judgment = f"基于 {pe_s} 的综合位置评估，左/右概率见下方分析。" if pe_s else "左侧/右侧概率的综合评估，详见下方。"
 
@@ -1025,7 +1073,21 @@ def _section_left_right_probability(
     if erp and erp.get("percentile_5y") is not None and erp["percentile_5y"] >= 70:
         left_items.append(f"② ERP 5年区间位置偏高（{erp['percentile_5y']}%），证据强度：⚠️")
     if not left_items:
-        left_items.append("① 左侧参考指标数据不足或未达到阈值，证据强度：❓")
+        # 不写纯哨兵句：哨兵只能靠措辞躲过 QC 的 completion-empty-basis 判定，
+        # 而「这一节到底有没有依据」应由**信息量**决定。这里给出实测值与阈值，
+        # 读者知道差多少，门禁也按「有实质内容」正确放行。
+        _pe_s = (f"PE 分位 {pe_pct:.1f}%{_pct_median_inline(pe_med6)}"
+                 if pe_pct is not None else "PE 分位不可得")
+        _erp_p = erp.get("percentile_5y") if isinstance(erp, dict) else None
+        _erp_s = f"ERP 5年分位 {_erp_p}%" if _erp_p is not None else "ERP 5年分位不可得"
+        left_items.append(
+            f"① 左侧指标均未达阈：{_pe_s}（阈值 <{ZONE_LOW_THRESHOLD:.0f}%）、"
+            f"{_erp_s}（阈值 ≥70%），证据强度：❓"
+        )
+    # 修复：left_items 原先直到「右侧」标题之后才写入，导致「左侧」节恒为空、
+    # 内容全部落到「右侧」标题之下（qc completion-empty-basis 因此恒 FAIL）。
+    # 此处紧接左侧标题写入，右侧同理。
+    lines.extend(left_items)
     lines.append("")
     lines.append("### 右侧概率的主要支撑依据")
     right_items: list[str] = []
@@ -1063,14 +1125,31 @@ def _section_left_right_probability(
         _mf_raw = nb_lr.get("net_sum_10d")
     mf10 = _safe_num(_mf_raw)
     if mf10 is not None and mf10 > 0:
-        continuation_hits.append(f"主力资金/北向近10日净流入 {_fmt_v2(mf10)}")
+        continuation_hits.append(f"全档资金/北向近10日净流入 {_fmt_v2(mf10)}")
     if len(continuation_hits) >= 2:
         right_items.append(
             f"④ 趋势延续信号组合 {len(continuation_hits)}/3 项："
             + "；".join(continuation_hits) + "，证据强度：⚠️"
         )
     if not right_items:
-        right_items.append("① 右侧参考指标数据不足，证据强度：❓")
+        # 不给纯哨兵句（v0.3.0 A7）：哨兵只能靠措辞躲过 QC 的 completion-empty-basis
+        # 判定，而「这一节到底有没有依据」应由**信息量**决定。照左侧同款给出各项
+        # 实测值与阈值——读者知道差多少，门禁也按「有实质内容」正确放行。
+        # 左侧未改写前右侧单独告警，同数据下左右不对称。
+        if tech and "error" not in tech:
+            _ma_s = f"MA 排列 {label or '无明确多头结构'}"
+            _macd_s = (f"MACD DIF={macd.get('dif')} DEA={macd.get('dea')}"
+                       if macd.get("available") else "MACD 不可得")
+        else:
+            _ma_s, _macd_s = "MA 排列不可得", "MACD 不可得"
+        _sw_p = sw.get("stock_vs_industry_pct") if isinstance(sw, dict) else None
+        _sw_s = (f"个股相对行业 {_sw_p:+.2f}%" if _sw_p is not None
+                 else "个股相对行业不可得")
+        right_items.append(
+            f"① 右侧指标均未达阈：{_ma_s}（阈值：出现多头排列）、{_macd_s}"
+            f"（阈值：可计算）、{_sw_s}（阈值 >0%）、趋势延续信号组合 "
+            f"{len(continuation_hits)}/3 项（阈值 ≥2 项），证据强度：❓"
+        )
 
     prob = ProbabilityStructure(
         left_items=left_items,
@@ -1084,8 +1163,6 @@ def _section_left_right_probability(
             "| 下季度财报期 | 业绩公布 | 净利润同比、经营现金流 |",
         ],
     )
-    lines.extend(prob.left_items)
-    lines.append("")
     lines.extend(prob.right_items)
     lines.append("")
     lines.append("### 走势转变的触发条件")
@@ -1099,7 +1176,8 @@ def _section_left_right_probability(
     lines.extend(prob.watch_nodes)
     mf_net, mf_key = resolve_moneyflow(market_structure.get("moneyflow"))
     pe_pct_lr, _, _ = _v3_valuation_percentiles(dims, val_cache)
-    cv7_lr = _v3_cv7_block(pe_pct_lr, mf_net)
+    _pe_med_lr, _ = _pct_medians(val_cache, dims)
+    cv7_lr = _v3_cv7_block(pe_pct_lr, mf_net, _pe_med_lr)
     if cv7_lr:
         lines.append("")
         lines.append("### 估值-资金交叉验证（左/右权重参考）")

@@ -250,10 +250,14 @@ def save_collection(result: dict[str, Any], kind: str = "collect") -> int:
             break
     c = _conn()
     try:
+        from .analysis_schema import strip_render_state
+        # 渲染期登记键（id() 堆地址）不得落库：否则字节相同的采集数据每次
+        # 写出不同的 raw_json（review C4）。
+        payload = strip_render_state(result)
         cur = c.execute(
             "INSERT INTO collections (symbol,name,fetched_at,dimensions_total,dimensions_ok,raw_json,kind) VALUES (?,?,?,?,?,?,?)",
             (symbol, name, result.get("fetched_at", ""), sm.get("total", 0), sm.get("available", 0),
-             dumps_json(result), kind))
+             dumps_json(payload), kind))
         cid = cur.lastrowid
         for d in dims:
             data = d.get("data")

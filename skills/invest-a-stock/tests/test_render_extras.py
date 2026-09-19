@@ -216,6 +216,44 @@ class TestExogenousShock:
         assert "重大合同公告" in out
         assert "official" in out
 
+    def test_window_label_follows_news_days(self):
+        """[事实] 窗口须写**实际抓取窗口**（news.days），不得硬编码 30 日。
+
+        新闻包默认 days=7（`attach_news_pack(..., days=7)`，news_scanner 按该值
+        真过滤），渲染写「近 30 日」等于把事实窗口夸大 4 倍——而 [事实] 块是
+        后续 [分析] 的来源依据（QC structure-analysis-without-fact）。
+        """
+        from lib.render_extras import section_exogenous_shock
+
+        coll = _minimal_collection()
+        coll["news"] = {
+            "days": 7,
+            "cards": [
+                {"date": "2026-07-01", "direction": "neutral",
+                 "credibility": "official", "credibility_score": 0.95,
+                 "title": "重大合同公告", "source": "notice"},
+            ],
+        }
+        out = section_exogenous_shock(coll)
+        assert "近 7 日" in out
+        assert "近 30 日" not in out
+
+    def test_window_label_degrades_without_days(self):
+        """旧快照无 days 键 → 不得编造窗口数字（宁缺勿错）。"""
+        from lib.render_extras import section_exogenous_shock
+
+        coll = _minimal_collection()
+        coll["news"] = {
+            "cards": [
+                {"date": "2026-07-01", "direction": "neutral",
+                 "credibility": "official", "credibility_score": 0.95,
+                 "title": "重大合同公告", "source": "notice"},
+            ],
+        }
+        out = section_exogenous_shock(coll)
+        assert "30 日" not in out
+        assert "[事实]" in out, "无窗口数字时仍须有 [事实] 标签（QC 结构要求）"
+
     def test_empty_news_returns_empty(self):
         """无 news cards → 空字符串."""
         from lib.render_extras import section_exogenous_shock

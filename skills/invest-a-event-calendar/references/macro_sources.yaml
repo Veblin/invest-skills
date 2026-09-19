@@ -1,0 +1,122 @@
+# 宏观事件日历策展规则（invest-a-event-calendar v3）
+#
+# 为什么必须有这张表（2026-09-10 实测，不要删）：
+#   百度源 29 天窗返回 **1229 行**原始数据，其中中国区 84 行里有 **60 行是噪音（71%）**
+#   （上期所每日仓单、银行结售汇）；美国「非噪音」里仍大量是钻井数 / NYMEX 库存 /
+#   iShares 持仓等运营数据。而 `重要性` 列**只有 1/2 两档且类型不一致**
+#   （str `'1'` 与 float `1.0` 混用），噪音行同样有值 → **不能当筛选器**。
+#   不做策展过滤，日历会被噪音淹没（过滤后 ≈1.2 条/天，可用）。
+#
+# 维护约定：
+#   - `us_releases` 按 **(id, name) 对**匹配 FRED：id 命中但 name 不符 → 报配置漂移
+#     并排除该行（fail-loud，绝不静默纳入错数据）。改名时须同步更新本表。
+#   - `cn_keywords` 是**白名单**：含任一关键词才收录；命中的档位用于展示的
+#     「重要性」列（源的 `重要性` 只作备注原值保留）。
+#   - `noise_patterns` **必须极窄**——只写已实测的噪音族。反例警示：写成宽泛的
+#     「库存」会误杀「美国 EIA 原油库存」这类**真实**事件（其公布会移动价格）。
+#     宁可少过滤；频率检测（`noise_min_days`）是结构性兜底。
+#   - 改动本表后必须跑 `skills/invest-a-event-calendar/tests/test_macro_calendar.py`
+#     验证不误伤（尤其 test_narrow_pattern_does_not_kill_real_inventory_event）。
+
+regions: [中国, 美国, 日本]
+
+# 噪音 pattern（正则，极窄）
+noise_patterns:
+  - "上期所每日仓单变动"
+  - "每日仓单变动"
+  - "商业银行结售汇"
+  # 美国周频低价值族（2026-09-10 实测进入时间轴后按族清理）：
+  # 保留「初请失业金」「EIA 原油/汽油库存」——它们有真实市场含义，不在此列
+  - "红皮书"
+  - "ADP就业周度"
+  - "EIA天然气隐含流量"     # 派生量，非独立数据点
+
+# 频率检测阈值：同名 + 同刻出现于 >= N 个不同日期 → 判每日类噪音移出主表。
+# ⚠️ N 须**大于窗口内单星期几的最大出现次数**：窗口是 31 天**含端点**，故某个
+#    星期几必然出现 5 次 → 阈值 5 会把标题/时刻稳定的**周频**（「初请」「EIA 周报」）
+#    当每日类噪音丢掉（2026-09-11 审查实证）。真每日类（工作日）窗内约 22 次，
+#    取 8 两侧都有余量。改动本值须同步 `macro_calendar.DEFAULT_NOISE_MIN_DAYS`。
+noise_min_days: 8
+
+# 事件白名单——**按区域分表**（含任一关键词才收录；长关键词优先匹配）。
+# 某区未配置表 → 该区全收（档位记「—」）。
+# ⚠️ 同一区域表内**不得出现重复键**（YAML 静默取后者，会让档位/归组被悄悄覆盖）；
+#    关键词在不同区域表里可以同名，family 必须写该区自己的（曾把美国 CPI 标成中国CPI）。
+# ⚠️ **更长关键词优先匹配** → 用更长的子串把同一次发布的细分项降到中/低档，
+#    否则头部「重点事件」与时间轴都会被一次发布的十几个分项灌满
+#    （实测：Q2 GDP 带出 6 条、CPI 带出 9 条、EIA 周报带出 14 条）。
+#    `family` = 发布级归组名：同日同区的同名分项折叠为一条「<family>（N 项）」。
+region_keywords:
+  中国:
+    "CPI": {importance: 高, family: 中国CPI}
+    "PPI": {importance: 高, family: 中国PPI}
+    "采购经理": {importance: 高, family: 中国PMI}
+    "PMI": {importance: 高, family: 中国PMI}
+    "社会消费品零售总额": {importance: 高, family: 中国社零}
+    "工业增加值": {importance: 高, family: 中国工业增加值}
+    "固定资产投资": {importance: 中, family: 中国固定资产投资}
+    "工业企业利润": {importance: 中, family: 中国工业企业利润}
+    "贷款市场报价利率": {importance: 高, family: 中国LPR}
+    "中期借贷便利": {importance: 中, family: 中国MLF}
+    "城镇调查失业率": {importance: 中, family: 中国城镇调查失业率}
+    "国内生产总值": {importance: 高, family: 中国GDP}
+    "贸易帐": {importance: 中, family: 中国贸易帐}
+    "外汇储备": {importance: 低, family: 中国外汇储备}
+    "社会融资": {importance: 高, family: 中国社融}
+    "货币供应": {importance: 中, family: 中国M2}
+
+  # 美国：百度源的近场条目（长窗由 FRED 白名单覆盖）。**必须配置**——
+  # 未配置表时该区「全收」，实测会把钻井总数 / COMEX·NYMEX 库存 / SPDR·iShares
+  # 持仓等每日运营数据全部灌进时间轴（报告从 ~5KB 涨到 ~39KB）。
+  美国:
+    "非农": {importance: 高, family: 美国非农就业}
+    "私营企业非农就业人数": {importance: 中, family: 美国非农就业}
+    "失业率": {importance: 高, family: 美国失业率}
+    "U6失业率": {importance: 中, family: 美国失业率}
+    "初请": {importance: 中, family: 美国初请失业金}
+    "CPI": {importance: 高, family: 美国CPI}
+    "PPI": {importance: 高, family: 美国PPI}
+    "PCE": {importance: 高, family: 美国PCE}
+    "PCE物价指数年化": {importance: 中, family: 美国PCE}
+    "达拉斯联储PCE": {importance: 低, family: 美国PCE}
+    "个人收入": {importance: 中, family: 美国个人收入与支出}
+    "GDP": {importance: 高, family: 美国GDP}
+    "年化实际GDP": {importance: 中, family: 美国GDP}   # 水平值，非增速头条
+    "GDP价格指数": {importance: 中, family: 美国GDP}
+    "隐性平减指数": {importance: 中, family: 美国GDP}
+    "ISM非制造业": {importance: 中, family: 美国ISM非制造业}
+    "ISM": {importance: 中, family: 美国ISM制造业}
+    "ADP": {importance: 中, family: 美国ADP就业}
+    "零售销售": {importance: 中, family: 美国零售销售}
+    "工业产出": {importance: 中, family: 美国工业产出}
+    "耐用品": {importance: 中, family: 美国耐用品订单}
+    "消费者信心": {importance: 中, family: 美国消费者信心}
+    "贸易帐": {importance: 中, family: 美国贸易帐}
+    "EIA月报": {importance: 低, family: 美国EIA月报}
+    "EIA": {importance: 中, family: 美国EIA周报}
+    "货币供应": {importance: 低, family: 美国货币供应}
+
+  # 日本：关键词取自 2026-09-10 实测源事件名（"日本8月全国CPI年率(%)" 等）
+  日本:
+    "全国CPI": {importance: 中, family: 日本CPI}
+    "CPI": {importance: 中, family: 日本CPI}
+    "Jibun": {importance: 低, family: 日本PMI}
+    "PMI": {importance: 低, family: 日本PMI}
+    "工业产出": {importance: 中, family: 日本工业产出}
+    "第三产业活动": {importance: 低, family: 日本第三产业活动}
+    "贸易帐": {importance: 中, family: 日本贸易帐}
+    "国内生产总值": {importance: 中, family: 日本GDP}
+    "日本央行": {importance: 高, family: 日本央行利率}
+
+# FRED release 白名单（id 于 2026-09-10 实测核对）
+# family 指向**与百度侧同名的发布**，使两个源的同一次发布折叠为一行；不写则退回 label。
+us_releases:
+  - {id: 10,  name: "Consumer Price Index",             label: 美国CPI,        family: 美国CPI,       importance: 高}
+  - {id: 46,  name: "Producer Price Index",             label: 美国PPI,        family: 美国PPI,       importance: 高}
+  - {id: 50,  name: "Employment Situation",             label: 美国非农就业,    family: 美国非农就业,   importance: 高}
+  - {id: 53,  name: "Gross Domestic Product",           label: 美国GDP,        family: 美国GDP,       importance: 高}
+  - {id: 54,  name: "Personal Income and Outlays",      label: 美国PCE与个人收入, family: 美国PCE,      importance: 高}
+  - {id: 9,   name: "Advance Monthly Sales for Retail and Food Services",
+                                                        label: 美国零售销售,    family: 美国零售销售,   importance: 中}
+  - {id: 192, name: "Job Openings and Labor Turnover Survey",
+                                                        label: 美国JOLTS职位空缺, family: 美国JOLTS职位空缺, importance: 中}

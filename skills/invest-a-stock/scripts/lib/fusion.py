@@ -86,7 +86,10 @@ def weighted_rrf_for_dimension(
         src, val = next(iter(valid.items()))
         return FusedDataPoint(
             dimension=dimension,
-            fused_value=val,
+            # 与多源分支同口径 round：单源值原样透传会把浮点残渣
+            # （如 14135.275950600002）写进 collections.raw_json 与存档，
+            # 字节相同的数据每次采集写出不同的长小数（review C7）。
+            fused_value=round(val, 4),
             source_values=dict(valid),
             source_weights={src: 1.0},
             consensus="weak",

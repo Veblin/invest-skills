@@ -70,7 +70,7 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `portfolio` | 组合风险特征（行业集中度/相关性/压力测试） |
 | `thesis` | 投资假设追踪 |
 | `shock` | 价格冲击插值比例（非风险中性概率） |
-| `catalyst` | 催化剂日历：分红/解禁/公告前瞻事件 |
+| `catalyst` | 催化剂日历：分红/解禁/公告前瞻事件（取数失败时产物写明「不可得 ≠ 无事件」） |
 | `diagnose` | 检查数据源可用性 |
 
 ## 常用示例

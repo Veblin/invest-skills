@@ -8,6 +8,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+# ruff 增量分析缓存（可再生产物；此前仅靠 ruff 自建的 .ruff_cache/.gitignore 保护，2026-09-18 显式声明）
+.ruff_cache/
+.mypy_cache/
 
 # IDE
 .vscode/
@@ -41,3 +44,6 @@ reports/
 
 # v0.2.7 C14 定案：历史规划/评审稿保留本地、不随版本库分发（详见 host-docs 执行计划）
 docs/superpowers/
+
+# v0.3.0 合规（2026-09-08 用户裁决）：个股级扫描命中不随公开仓库分发（reports/ 本地区）
+docs/data/*_scan_result.json

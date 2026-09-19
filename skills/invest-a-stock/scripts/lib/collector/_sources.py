@@ -479,19 +479,42 @@ def _normalize_northbound_records(records: list[dict], source: str) -> list[dict
 
 
 def _flow_amount_yuan(record: dict) -> float | None:
-    """从归一化后的资金流记录读取净额（元），缺失时返回 None。"""
+    """从归一化后的资金流记录读取净额（元），缺失时返回 None。
+
+    缺失判定走 safe_float：pandas DataFrame 的缺失值是 NaN 而非 None，
+    `float(NaN)` 会成功返回 NaN 并一路穿透成报告字面量「nan」。
+    """
     val = record.get("net_mf_amount")
     if val is None:
         val = record.get("net_mf_vol")
-    if val is None:
+    return safe_float(val)
+
+
+def _flow_lg_elg_yuan(record: dict) -> float | None:
+    """大单+特大单净额（元）——行情软件惯用的「主力」口径。
+
+    Tushare moneyflow 的 buy/sell_lg_amount 与 buy/sell_elg_amount 单位**万元**
+    （与 net_mf_amount 同），故乘 ONE_PER_WAN。四个字段任一缺失 → None：不部分
+    求和，避免把残缺口径当成完整口径输出（宁缺勿错）。
+
+    缺失判定走 safe_float：DataFrame 的缺失值是 NaN 而非 None，
+    `any(v is None)` 拦不住它（float(NaN) 是合法 float），求和结果也会是 NaN。
+    """
+    keys = ("buy_lg_amount", "sell_lg_amount", "buy_elg_amount", "sell_elg_amount")
+    buy_lg, sell_lg, buy_elg, sell_elg = (safe_float(record.get(k)) for k in keys)
+    if buy_lg is None or sell_lg is None or buy_elg is None or sell_elg is None:
         return None
-    return float(val)
+    return (buy_lg + buy_elg - sell_lg - sell_elg) * ONE_PER_WAN
 
 
 def _q_tushare_moneyflow(symbol: str) -> list[dict] | None:
     config, tc = _require_tushare()
+    # 含大单/特大单分档金额：net_mf_amount 是**全档**净额，与「主力」口径
+    # 方向可相反（见 participant_scan._MF_LABELS 注释），需并列输出。
     df = tc.query("moneyflow", ts_code=_ts_code(symbol),
-                  fields="ts_code,trade_date,net_mf_amount,buy_sm_vol,sell_sm_vol,net_mf_vol",
+                  fields="ts_code,trade_date,net_mf_amount,"
+                         "buy_sm_vol,sell_sm_vol,net_mf_vol,"
+                         "buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount",
                   start_date=_days_ago(10), end_date=_today())
     if df is not None and not df.empty:
         return _normalize_northbound_records(df.to_dict("records"), "tushare.moneyflow")
@@ -514,6 +537,75 @@ def _q_tushare_hsgt_top10(symbol: str) -> list[dict] | None:
     if not rows:
         return None
     return _normalize_northbound_records(rows, "tushare.hsgt_top10")
+
+
+_MAINBZ_TYPES = {"P": "product", "D": "region"}
+
+# 非分部的行：接口会按报告期**变化地**返回这些合计/调整行，必须全部剔除。
+#   20241231 实测：type=P 多出一行名为「产品」、type=D 多出一行名为「地区」，
+#   其 bz_sales 恰为其余分部之和（362012554000）；同时「合计特别调整」的
+#   bz_sales 是 1000.0 —— 不是 NaN，**躲过了 NaN 过滤**。
+#   20260630 实测：无「产品」/「地区」行，「合计特别调整」为 NaN。
+# 若不剔除，按分部求和会虚高近一倍（7240.25 亿 vs 真实 3620.13 亿）。
+_MAINBZ_NON_SEGMENT_ITEMS = frozenset({"产品", "地区", "合计"})
+
+
+def _is_segment_item(item: str) -> bool:
+    """是否为真正的分部行（排除合计行与特别调整行）。"""
+    name = item.strip()
+    return bool(name) and name not in _MAINBZ_NON_SEGMENT_ITEMS and "合计" not in name
+
+
+def _dedupe_mainbz_rows(records: list[dict]) -> list[dict]:
+    """按 ``(bz_sales, bz_profit)`` 值对去重，别名取较短名（同长取先出现者）。
+
+    ``fina_mainbz`` 对同一分部会返回**别名重复行**——实测 300750 2026H1：按产品
+    同时给出「电池材料及回收、矿产资源」与「电池材料及回收」、按地区同时给出
+    「境外」与「国外」，两行数值完全相同。不去重会让分部合计虚高（实测 3489.89
+    亿 vs 真实营收 2769.17 亿）。
+    """
+    chosen: dict[tuple, dict] = {}
+    for row in records:
+        key = (row["bz_sales"], row["bz_profit"])
+        current = chosen.get(key)
+        if current is None or len(str(row["bz_item"])) < len(str(current["bz_item"])):
+            chosen[key] = row
+    return list(chosen.values())
+
+
+def _q_tushare_mainbz(symbol: str) -> list[dict] | None:
+    """Tushare fina_mainbz：主营构成（按产品 + 按地区）多期序列。
+
+    「按报告期对齐」的口径信息由 ``type`` 字段携带（product/region）；销售额与
+    分部利润原样保留，毛利率由本函数计算并标注为派生值。
+    """
+    config, tc = _require_tushare()
+    out: list[dict] = []
+    for bz_type, label in _MAINBZ_TYPES.items():
+        df = tc.query("fina_mainbz", ts_code=_ts_code(symbol), type=bz_type,
+                      start_date=_days_ago(730), end_date=_today())
+        if df is None or df.empty:
+            continue
+        records: list[dict] = []
+        for raw in df.to_dict("records"):
+            item = str(raw.get("bz_item") or "").strip()
+            end_date = str(raw.get("end_date") or "").strip()
+            sales = safe_float(raw.get("bz_sales"))
+            profit = safe_float(raw.get("bz_profit"))
+            # 合计/调整行一律剔除（见 _MAINBZ_NON_SEGMENT_ITEMS：其 bz_sales
+            # 时而为 NaN、时而为 1000.0、时而等于全部分部之和，只靠 NaN 挡不住）
+            if not _is_segment_item(item) or not end_date or sales is None:
+                continue
+            records.append({"bz_item": item, "bz_sales": sales,
+                            "bz_profit": profit, "end_date": end_date})
+        for row in _dedupe_mainbz_rows(records):
+            out.append({
+                "end_date": row["end_date"], "type": label, "item": row["bz_item"],
+                "sales": row["bz_sales"], "profit": row["bz_profit"],
+                "margin_pct": (round(row["bz_profit"] / row["bz_sales"] * 100, 2)
+                               if row["bz_profit"] is not None and row["bz_sales"] else None),
+            })
+    return out or None
 
 
 def _q_akshare_basic(symbol: str) -> dict | None:
@@ -798,32 +890,108 @@ def _q_akshare_industry_board(symbol: str, industry_name: str = "") -> dict | No
         return None
 
 
-def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
+def _industry_pe_unavailable(reason: str, *, industry_name: str = "") -> dict:
+    """行业 PE 不可得的**显式三态**（R2/T9-5，D-G=G2：不吞错）。
+
+    键位保持稳定（数值键为 None，由 ``status`` 区分「不可得」与「值为空」），
+    使 `_merge_industry` 合并后该键**不再静默消失**——此前返回裸 None 时
+    `industry_pe_median` 在维度 data 里直接没有，且该键在渲染层零引用，
+    缺失无处可见。``note`` 为分类后的用户可读原因（异常原文只进日志，R12h）。
+    """
+    return {
+        "industry_name": industry_name,
+        "industry_pe_median": None,
+        "industry_pe_avg": None,
+        "status": "unavailable",
+        "note": reason,
+    }
+
+
+# 巨潮行业 PE：akshare 1.18.64 **改名且改签名**（旧名 stock_board_industry_pe_ratio_cninfo
+# 已移除；新接口 stock_industry_pe_ratio_cninfo(symbol, date) 按日期取，默认日期停在
+# 2021 年）→ 必须显式传近期日期，周末/长假回溯到最近有数据的一天。
+_CNINFO_PE_API = "stock_industry_pe_ratio_cninfo"
+_CNINFO_PE_LOOKBACK_DAYS = 7
+
+
+def _fetch_cninfo_industry_pe(ak: Any) -> tuple[Any, str | None]:
+    """取巨潮行业市盈率表 → ``(df, 失败原因)``。
+
+    回溯是必需的：该接口按日期取，周末/假日无数据，而旧实现是「当前快照」语义。
+
+    三态分明（R2 审查 P0-3）：逐日异常与「逐日正常返回空」**不是一回事**——
+    前者是接口故障（改名/签名变化/上游 5xx），后者才是无数据。旧实现用裸
+    ``continue`` 吞掉异常后统一返回 None，调用方只能报「近 7 日均无数据」，
+    即把接口故障说成对源内容的断言（T9-5 要消除的误归因）。故此处只**分类**、
+    不回显异常原文（R12h：原因文本原样进报告）。
+    """
+    import datetime as _dt
+
+    day = _dt.date.today()
+    errors = 0
+    for back in range(_CNINFO_PE_LOOKBACK_DAYS):
+        ds = (day - _dt.timedelta(days=back)).strftime("%Y%m%d")
+        try:
+            df = getattr(ak, _CNINFO_PE_API)(date=ds)
+        except Exception:  # noqa: BLE001 —— 单日失败继续回溯，但计数以区分成因
+            errors += 1
+            continue
+        if df is not None and not df.empty:
+            return df, None
+    if errors == 0:
+        return None, None
+    if errors == _CNINFO_PE_LOOKBACK_DAYS:
+        return None, (f"巨潮行业 PE 取数失败（近 {_CNINFO_PE_LOOKBACK_DAYS} 天调用均抛错，"
+                      "非「无数据」）——疑接口改名/签名变化或上游故障，"
+                      "请核对 data-interface-map")
+    return None, (f"巨潮行业 PE 接口近 {_CNINFO_PE_LOOKBACK_DAYS} 天均无数据"
+                  f"（其中 {errors} 天取数失败）")
+
+
+def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict:
     """获取行业PE中位数（akshare/巨潮资讯）。
 
     Returns:
-        dict with: industry_pe_median, industry_pe_avg, company_pe, relative_position
-        或 None
+        dict with: industry_pe_median, industry_pe_avg, company_pe, relative_position,
+        dict with **status**（available / unavailable）与 **note**（不可得原因）。
+        无论行业名预取、匹配还是取数失败，均返回显式三态；不得用裸 ``None``
+        让维度状态和报告静默消失。
     """
-    if not env.is_akshare_available() or not akshare_push2_available():
-        return None
+    # 只 gate 在 **akshare 可用性**上：本函数走巨潮 cninfo，与东财 push2 无关——
+    # 用 push2 可达性 gate 它会让代理环境下的该维度永久不可得（且归因成
+    # 「akshare 不可用」）。东财相关守卫只应出现在走 push2 的孪生函数里。
+    if not env.is_akshare_available():
+        return _industry_pe_unavailable("akshare 不可用（未安装或环境未就绪）",
+                                        industry_name=industry_name)
     try:
         with akshare_direct_session():
             import akshare as ak
-            df = ak.stock_board_industry_pe_ratio_cninfo()
+            df, fetch_err = _fetch_cninfo_industry_pe(ak)
             if df is None or df.empty:
-                return None
+                if fetch_err:
+                    return _industry_pe_unavailable(fetch_err, industry_name=industry_name)
+                return _industry_pe_unavailable(
+                    f"巨潮行业 PE 接口近 {_CNINFO_PE_LOOKBACK_DAYS} 日均无数据",
+                    industry_name=industry_name)
 
             # 获取个股行业（优先使用预取）
             if not industry_name:
                 info = _q_akshare_basic(symbol)
                 if not info:
-                    return None
+                    # 不可将空行业名用于 contains（会全表误匹配），但也不能把
+                    # 东财名称查询失败伪装成巨潮取数失败或静默吞掉。
+                    return _industry_pe_unavailable(
+                        "行业名称不可得，无法将个股与巨潮行业 PE 口径匹配",
+                        industry_name=industry_name)
                 industry_name = info.get("行业") or info.get("industry", "")
             # P0：空名守卫（对齐孪生函数 _q_akshare_industry_board）——行业字段缺失时
-            # str.contains("") 全表匹配会静默取巨潮 PE 表首行作为本股行业 PE（数据错误）
+            # str.contains("") 全表匹配会静默取巨潮 PE 表首行作为本股行业 PE（数据错误）。
+            # 这是防止全表误匹配的必要守卫；同时保留显式不可得状态，以免
+            # 该维度在聚合、引用附录和报告中静默消失。
             if not industry_name:
-                return None
+                return _industry_pe_unavailable(
+                    "行业名称为空，无法将个股与巨潮行业 PE 口径匹配",
+                    industry_name=industry_name)
 
             # 匹配行业PE
             matched = df[df["行业名称"].str.contains(industry_name, na=False)]
@@ -835,22 +1003,43 @@ def _q_akshare_industry_pe(symbol: str, industry_name: str = "") -> dict | None:
                         break
 
             if matched.empty:
-                return {"industry_name": industry_name, "note": "未匹配到行业PE数据"}
+                return _industry_pe_unavailable(
+                    "未匹配到行业 PE 数据（行业名与巨潮口径不一致）",
+                    industry_name=industry_name)
 
             row = matched.iloc[0]
-            pe_median = safe_float(row.get("市盈率中位数") or row.get("市盈率"))
-            pe_avg = safe_float(row.get("市盈率平均值"))
+            # 列名按**新接口**映射，旧列名兜底（上游若再改名，兜底可防静默取空；
+            # 注意不能用 `a or b`——NaN 是真值，`NaN or b` 仍得 NaN）
+            pe_median = safe_float(row.get("静态市盈率-中位数"))
+            if pe_median is None:
+                pe_median = safe_float(row.get("市盈率中位数"))
+            if pe_median is None:
+                pe_median = safe_float(row.get("市盈率"))
+            pe_avg = safe_float(row.get("静态市盈率-算术平均"))
+            if pe_avg is None:
+                pe_avg = safe_float(row.get("市盈率平均值"))
+
+            if pe_median is None:
+                return _industry_pe_unavailable(
+                    "巨潮行业 PE 表未提供有效中位数（字段缺失或值为空）",
+                    industry_name=str(row.get("行业名称", "")))
 
             return {
                 "industry_name": str(row.get("行业名称", "")),
                 "industry_pe_median": pe_median,
                 "industry_pe_avg": pe_avg,
                 "stock_count": safe_float(row.get("公司数量")),
-                "source": "akshare.stock_board_industry_pe_ratio_cninfo",
+                "source": f"akshare.{_CNINFO_PE_API}",
+                "status": "available",
             }
     except Exception as exc:
-        logger.debug("akshare industry PE failed for %s: %s", symbol, exc)
-        return None
+        # 异常原文**只进日志**（此前是 debug 级静默 return None）；维度侧留显式三态
+        logger.warning("akshare industry PE failed for %s: %s", symbol, exc)
+        # 归因须指向**本模块的接口面**：旧名在 akshare 1.18.64 已移除却被长期调用，
+        # 该维度一直不可得，而原文案「上游异常，本模块不修上游」把责任推给了上游
+        return _industry_pe_unavailable(
+            f"巨潮行业 PE 取数失败（本模块接口面：akshare {_CNINFO_PE_API}）"
+            "——上游异常或接口再改名，请核对 data-interface-map", industry_name=industry_name)
 
 
 def _latest_quarter_dates(as_of: datetime | None = None, count: int = 5) -> list[str]:
@@ -1071,5 +1260,4 @@ def _qp_tickflow(symbol: str, start_date: str, end_date: str) -> str:
         f"tf.TickFlow.free().klines.get(symbol='{code}', "
         f"start={start_date}, end={end_date}, adjust='forward')"
     )
-
 

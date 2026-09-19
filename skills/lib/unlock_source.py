@@ -1,0 +1,140 @@
+"""个股限售解禁队列源（共享模块）——invest-a-event-calendar v2 / invest-a-stock catalyst。
+
+数据源：akshare ``stock_restricted_release_queue_em``（东财，单标的）。
+
+设计要点（R1 审查教训内化）：
+- **错误不静默**：返回 ``(rows, error)``——error=None 表示取数成功（含合法空结果），
+  否则为失败原因字符串；调用方必须区分「无解禁记录」与「取数失败」。
+- 窗口过滤与列名口径沿用 catalyst.py 既有实现（解禁数量 股→亿；股东数 NaN 容错）。
+- 不做缓存（调用方按需处理）；akshare 代理直连经 ``lib.proxy.akshare_direct_session``。
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+from typing import Any
+
+ONE_PER_YI = 1e8
+
+_DATE_COLS = ("解禁时间", "实际解禁日期")
+_QTY_COLS = ("解禁数量", "实际解禁数量")
+_HOLDER_COLS = ("解禁股东数", "股东数")
+_KIND_COLS = ("限售股类型", "解禁类型")
+
+
+def _clean_str(v: Any) -> str | None:
+    """字符串清洗（None/NaN/空串 → None）。"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "<na>", "nat"):
+        return None
+    return s
+
+
+def _safe_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    return int(f)
+
+
+def _parse_unlock_date(raw: Any) -> _dt.date | None:
+    """解禁时间 → date；兼容 '2026-11-05' / '20261105' / datetime 对象。"""
+    if raw is None:
+        return None
+    if isinstance(raw, _dt.datetime):
+        try:
+            d = raw.date()
+        except Exception:  # noqa: BLE001 —— 解析失败按不可用处理，不中断整次取数
+            return None
+        # pd.NaT 是 datetime **伪子类**：`NaT.date()` 返回 NaT 且不抛异常——必须在
+        # datetime 分支内显式判空，否则后续 `lo <= d <= hi` 抛
+        # `TypeError: Cannot compare NaT with datetime.date object`（东财含空解禁
+        # 时间的行即触发）。守卫口径与 `dates.parse_date` 一致
+        # （见 invest-a-stock/tests/test_catalyst.py::TestParseDate::test_pandas_nat）。
+        return None if str(d) == "NaT" else d
+    if isinstance(raw, _dt.date):
+        return raw
+    s = _clean_str(raw)
+    if not s:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    try:
+        return _dt.datetime.strptime(digits[:8], "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _column(df: Any, names: tuple[str, ...]) -> str | None:
+    """返回首个实际存在的列名；关键列改名不能被当作合法空结果。"""
+    cols = set(getattr(df, "columns", []))
+    return next((name for name in names if name in cols), None)
+
+
+def fetch_symbol_unlocks(symbol: str, *, lookahead_days: int = 90,
+                         today: _dt.date | None = None,
+                         include_past_days: int = 0) -> tuple[list[dict], str | None]:
+    """拉取单标的解禁队列并过滤窗口。
+
+    Returns
+    -------
+    (rows, error)
+        rows: [{date: "YYYY-MM-DD", qty_yi: float | None, holders: int | None,
+                kind: str}]，窗口内按日期升序；date 为字符串便于 JSON 状态文件。
+        error: None=成功（含空 rows）；否则失败原因（网络/权限/接口变更）。
+
+    窗口 = [today - include_past_days, today + lookahead_days]。默认只看未来。
+    """
+    today = today or _dt.date.today()
+    try:
+        from lib.proxy import akshare_direct_session
+
+        with akshare_direct_session():
+            import akshare as ak
+
+            df = ak.stock_restricted_release_queue_em(symbol=symbol)
+    except Exception as exc:  # noqa: BLE001 — 失败原因必须显式返回（不静默空）
+        return [], f"{type(exc).__name__}: {str(exc)[:120]}"
+
+    if df is None:
+        return [], "接口返回 None（非预期形态，疑接口变更）"
+    if df.empty:
+        return [], None
+
+    date_col, qty_col = _column(df, _DATE_COLS), _column(df, _QTY_COLS)
+    if not date_col or not qty_col:
+        missing = []
+        if not date_col:
+            missing.append("解禁日期")
+        if not qty_col:
+            missing.append("解禁数量")
+        return [], f"接口字段缺失（{'、'.join(missing)}；疑接口改名），不可将其视为无解禁"
+    holder_col, kind_col = _column(df, _HOLDER_COLS), _column(df, _KIND_COLS)
+
+    lo = today - _dt.timedelta(days=include_past_days)
+    hi = today + _dt.timedelta(days=lookahead_days)
+    rows: list[dict] = []
+    for _, raw in df.iterrows():
+        d = _parse_unlock_date(raw.get(date_col))
+        if d is None or not (lo <= d <= hi):
+            continue
+        try:
+            shares = float(raw.get(qty_col) or 0)
+        except (TypeError, ValueError):
+            shares = 0.0
+        rows.append({
+            "date": d.strftime("%Y-%m-%d"),
+            "qty_yi": round(shares / ONE_PER_YI, 4) if shares > 0 else None,
+            "holders": _safe_int(raw.get(holder_col)) if holder_col else None,
+            "kind": _clean_str(raw.get(kind_col)) if kind_col else "",
+        })
+    rows.sort(key=lambda r: r["date"])
+    return rows, None

@@ -339,7 +339,11 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     else:
         print(f"  不可用: {share_history.get('note', '未知')}")
     print()
-    print("> 完整叙事请按 skills/invest-a-etf/references/report-template.md 合成。")
+    # 路径须按运行布局打印（包内 references/ 就在包根下，没有 skills/ 目录）
+    from skill_paths import skill_relpath
+
+    _tpl = skill_relpath(__file__, "references/report-template.md")
+    print(f"> 完整叙事请按 {_tpl} 合成。")
     print("> ⚠️ 不构成投资建议。")
     return 0
 
@@ -522,9 +526,14 @@ def _resolve_md_path(symbol: str, md_path: str | None) -> tuple[Path | None, str
         return p, None
     # 按文件名（时间戳 = 字典序 = 时间序）排序取全局最新；按完整路径排
     # 序会受目录名干扰（F1-7 改名遗留目录「通信ETF华夏」字典序靠后但报告旧）
+    # 复盘纪要自身落在同一目录，**不是报告**：不排除会让 review/--init 把上次
+    # 生成的纪要当成「最新报告」（实测踩过：report_ts 取成 20260911-review）
+    from decision_review import REVIEW_NAME_RE
+
     candidates: list[Path] = []
     for d in Path("reports").glob(f"{symbol}-*"):
-        candidates.extend(d.glob("*.md"))
+        candidates.extend(p for p in d.glob("*.md")
+                          if not REVIEW_NAME_RE.match(p.name))
     candidates.sort(key=lambda p: p.name)
     if not candidates:
         return None, (
@@ -601,11 +610,12 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
     if symbol is None:
         return 2
     try:
-        from sector_flow import query_sector_flow
+        from sector_flow import query_sector_flow, sector_flow_stale_note
     except ImportError as exc:
         print(f"sector_flow 模块不可用: {exc}（请检查路径配置）")
         return 1
     data = query_sector_flow(symbol)
+    stale = sector_flow_stale_note(data.get("as_of"))   # T7-1：as_of 滞后预警
     if as_json:
         from dates import shanghai_now
 
@@ -614,9 +624,12 @@ def cmd_sector_flow(symbol: str, *, as_json: bool) -> int:
             "generated_at": shanghai_now().isoformat(),
             "symbol": symbol,
             "sector_flow": data,
+            "warnings": [stale] if stale else [],
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return 0
+    if stale:
+        print(f"⚠ {stale}", file=sys.stderr)
 
     sw_name = data.get("sw_name") or "-"
     sw_code = data.get("sw_code") or "-"
@@ -665,7 +678,10 @@ def cmd_collect_sector_flow() -> int:
         print(f"采集失败: {result['error']}")
         return 1
     if result.get("skipped"):
-        print(f"跳过: {result['note']}")
+        # T7-2（R1 审查 F6 修正）：停更信号挂在跳过路径——权威交易日 + 全等 →
+        # stale_suspect=True（写前 C5 门已丢弃全等快照，写后比较永不触发）
+        mark = "⚠ " if result.get("stale_suspect") else ""
+        print(f"{mark}跳过: {result['note']}")
         return 0  # 快照为旧数据/非交易日，名单自检基于旧名单无意义（R16）
     partial = "（部分窗口失败）" if errs else ""
     print(f"完成: {result['rows_saved']} 行已写入 sector_flow_snapshots"
@@ -698,7 +714,7 @@ def cmd_collect_sector_flow() -> int:
 def cmd_industry_pe() -> int:
     """打印申万一级行业 PE/PB 一览。"""
     try:
-        from industry_snapshot import list_industry_snapshot
+        from industry_snapshot import industry_snapshot_stale_note, list_industry_snapshot
     except ImportError:
         print("industry_snapshot 模块不可用（请检查路径配置）")
         return 1
@@ -707,6 +723,12 @@ def cmd_industry_pe() -> int:
         print("无行业 PE 数据。请先运行 `etf.py collect-weekly` 采集。")
         print("（首次采集后需等待每周五收盘后自动更新，或手动触发。）")
         return 0
+    # T7-3（R1 审查 F10/F2 修正）：日期取全表最大（原取 PE 最高行）；滞后按源发布日期判
+    latest_date = max((r.get("date") or "" for r in rows), default="")
+    latest_src = max((r.get("src_date") or "" for r in rows), default="")
+    stale = industry_snapshot_stale_note(latest_date or None, src_date=latest_src or None)
+    if stale:
+        print(f"⚠ {stale}")   # 快照陈旧提示（输出在表前，防读到旧值不自知）
     print(f"{'行业':<10s} {'代码':<8s} {'PE':>8s} {'PB':>6s} {'涨跌%':>8s} {'换手%':>8s} {'日期':>10s}")
     print("-" * 62)
     for r in rows:
@@ -738,7 +760,7 @@ def _persist_index_pe(idx_codes: list[str] | None) -> dict:
 def cmd_collect_weekly() -> int:
     """手动触发行业 PE 周度采集 + 指数 PE 历史快照入库。"""
     try:
-        from industry_snapshot import collect_industry_weekly
+        from industry_snapshot import collect_industry_weekly, weekly_unchanged_vs_previous
     except ImportError:
         print("industry_snapshot 模块不可用（请检查路径配置）")
         return 1
@@ -748,6 +770,9 @@ def cmd_collect_weekly() -> int:
         print(f"采集失败: {result['error']}")
         return 1
     print(f"完成: {result['industries_saved']} 个行业已写入 industry_weekly（日期 {result['date']}）")
+    if weekly_unchanged_vs_previous(result["date"]):
+        print(f"⚠ {result['industries_saved']} 行业数值与上一期全同，"
+              "疑数据源停更（写入已完成，请人工核对）")
     # 顺带全量写指数 PE 历史（CSINDEX_MAP 全部代码，从 L2 缓存信封提取）
     pe_result = _persist_index_pe(None)
     if pe_result.get("error"):
@@ -779,6 +804,102 @@ def cmd_diagnose() -> int:
     sample = "510300"
     print(f"  sample hedge[{sample}]: {ETF_HEDGE_MAP.get(sample)}")
     print("diagnose: OK")
+    return 0
+
+
+def cmd_decision(symbol: str, *, from_path: str | None, init: bool,
+                 md: str | None = None) -> int:
+    """复盘原料 sidecar（decision.json）：初始化模板 / 校验并落盘。
+
+    设计：host-docs/v0.3.0/review-material-design.md D1/D3（用户已批准）。
+    sidecar 与报告 md **同目录同 ts**——必须能配到某一份报告，否则 review 无法
+    把「当时的假设」和当时的报告对上。故没有报告 md 时**显式失败**，
+    不落一个无主的 sidecar。
+
+    校验 fail-loud（退出 2）：LAW 6 要求多情景参考价带假设前提 + 概率权重，
+    缺项不得静默落盘。
+    """
+    from decision_schema import DecisionSchemaError, load_decision_json, minimal_decision
+
+    md_path, err = _resolve_md_path(symbol, md)
+    if err:
+        print(f"❌ {err}", file=sys.stderr)
+        return 2
+    assert md_path is not None
+    ts = md_path.stem
+
+    if init:
+        from dates import shanghai_now  # noqa: E402
+
+        payload = minimal_decision(symbol=symbol, report_ts=ts,
+                                   as_of=shanghai_now().date().isoformat())
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if not from_path:
+        print("❌ 需指定 --from <path>（校验并落盘）或 --init（输出模板）",
+              file=sys.stderr)
+        return 2
+
+    try:
+        payload = load_decision_json(from_path)
+    except DecisionSchemaError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 2
+
+    # 配对守卫：symbol/report_ts 须与目标报告一致，防张冠李戴
+    mismatches: list[str] = []
+    if payload.get("symbol") != symbol:
+        mismatches.append(f"symbol: {payload.get('symbol')!r} ≠ {symbol!r}")
+    if payload.get("report_ts") != ts:
+        mismatches.append(f"report_ts: {payload.get('report_ts')!r} ≠ {ts!r}")
+    if mismatches:
+        print("❌ sidecar 与目标报告不配对：" + "；".join(mismatches), file=sys.stderr)
+        return 2
+
+    out = md_path.parent / f"{ts}.decision.json"
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    print(f"✅ 复盘原料已落盘: {out}")
+    return 0
+
+
+def cmd_review(symbol: str, *, out: str | None = None, md: str | None = None) -> int:
+    """复盘纪要：把该标的的报告序列 + 复盘原料（sidecar）对照成三段式纪要。
+
+    设计：host-docs/v0.3.0/review-material-design.md D3。
+    **只对照假设状态**——不评价该不该行动、不含买卖语义（LAW 6）。
+    产出后须过 `report_qc.py --fail-on error` 方可交付。
+    """
+    md_path, err = _resolve_md_path(symbol, md)
+    if err:
+        print(f"❌ {err}", file=sys.stderr)
+        return 2
+
+    from decision_review import collect_sidecars, render_review
+    from dates import shanghai_now
+
+    report_dir = md_path.parent
+    sidecars = collect_sidecars(report_dir)
+    today = shanghai_now().date()
+    body = render_review(symbol, sidecars=sidecars, today=today)
+
+    out_path = Path(out) if out else report_dir / f"{today:%Y%m%d}-review.md"
+    if out and not out_path.parent.is_dir():
+        # 与 --md / --from 的路径参数同口径：显式报错 + exit 2（此前是
+        # FileNotFoundError traceback）。**不代建目录**——手误路径不该留下垃圾目录树。
+        print(f"❌ --out 父目录不存在：{out_path.parent}", file=sys.stderr)
+        return 2
+    out_path.write_text(body, encoding="utf-8")
+    print(body)
+    print(f"\n已落盘: {out_path}")
+    # 准出命令须**按运行布局**打印（仓内 skills/lib ↔ 包内 scripts/lib）：写死仓内
+    # 路径会让分发包里的 agent 照自己 CLI 的指示执行必然失败 →「机器层准出（必跑）」
+    # 在分发形态从未运行（R2 review P2，实测 builder 产物内无 skills/ 目录）。
+    from skill_paths import shared_tool_relpath
+
+    qc = shared_tool_relpath(__file__, "report_qc")
+    print(f"> 交付前须跑：uv run python {qc} {out_path} --fail-on error")
     return 0
 
 
@@ -847,6 +968,21 @@ def main(argv: list[str] | None = None) -> int:
     p_fb.add_argument("symbol", help="6 位 ETF 代码")
     p_fb.add_argument("--json", action="store_true", help="输出完整 JSON")
 
+    p_dec = sub.add_parser(
+        "decision", help="复盘原料 sidecar：初始化模板 / 校验并落盘（与报告 md 同 ts）")
+    p_dec.add_argument("symbol", help="6 位 ETF 代码")
+    p_dec.add_argument("--from", dest="from_path", default=None,
+                       help="待校验并落盘的 decision.json 路径")
+    p_dec.add_argument("--init", action="store_true",
+                       help="按最新报告 ts 输出最小 schema 模板（供填写）")
+    p_dec.add_argument("--md", default=None, help="显式指定配对报告 md 路径")
+
+    p_rev = sub.add_parser(
+        "review", help="复盘纪要：报告序列 + 复盘原料对照（只对照假设状态，非决策）")
+    p_rev.add_argument("symbol", help="6 位 ETF 代码")
+    p_rev.add_argument("--out", default=None, help="输出路径（缺省 报告目录/{YYYYMMDD}-review.md）")
+    p_rev.add_argument("--md", default=None, help="显式指定配对报告 md 路径")
+
     p_html = sub.add_parser("html", help="生成交互式 HTML 报告（仪表盘 + 报告 md 原文嵌入）")
     p_html.add_argument("symbol", help="6 位 ETF 代码")
     p_html.add_argument("--md", metavar="PATH", default=None,
@@ -877,6 +1013,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_collect_sector_flow()
     if args.cmd == "futures-basis":
         return cmd_futures_basis(args.symbol, as_json=args.json)
+    if args.cmd == "decision":
+        return cmd_decision(args.symbol, from_path=args.from_path, init=args.init,
+                            md=args.md)
+    if args.cmd == "review":
+        return cmd_review(args.symbol, out=args.out, md=args.md)
     if args.cmd == "html":
         return cmd_html(args.symbol, md_path=args.md, out_path=args.out,
                         no_open=args.no_open)

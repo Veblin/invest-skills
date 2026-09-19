@@ -1,13 +1,13 @@
 ---
 name: invest-skills
-description: "A股投研技能集：个股投研、ETF研究、交易日志、市场情绪脉搏、跳空缺口扫描、底部形态扫描，六大技能共用一个 Python 数据引擎，产出带来源追溯的研究备忘录。研究工具，非决策工具。触发词：个股投研/估值/财报/ETF/指数基金/交易日志/买入评估/卖出评估/市场情绪/大盘/市场脉搏/缺口扫描/跳空扫描/双底/形态扫描/三角形底/底部形态"
+description: "A股投研技能集：个股投研、ETF研究、交易日志、市场情绪脉搏、跳空缺口扫描、底部形态扫描、港股研究、事件日历、低估发现扫描，九大技能共用一个 Python 数据引擎，产出带来源追溯的研究备忘录。研究工具，非决策工具。触发词：个股投研/估值/财报/ETF/指数基金/交易日志/买入评估/卖出评估/市场情绪/大盘/市场脉搏/缺口扫描/跳空扫描/双底/形态扫描/三角形底/底部形态/港股/AH比价/南向资金/事件日历/宏观日历/解禁日历/低估/发现/便宜/估值扫描"
 agent_created: true
 user-invocable: true
 ---
 
 # invest-skills（A股投研技能集入口）
 
-本包是 6 个投研技能的 bundle：**共用一个 Python 数据引擎**，子技能是流程指令 + 引擎命令。
+本包是 9 个投研技能的 bundle：**共用一个 Python 数据引擎**，子技能是流程指令 + 引擎命令。
 
 ## 子技能路由表
 
@@ -19,6 +19,9 @@ user-invocable: true
 | 市场情绪 / 大盘 / 市场脉搏 | `skills/invest-a-pulse/SKILL.md` | 五维情绪 + 环境标签 |
 | 缺口扫描 / 跳空扫描 | `skills/invest-a-gap-scan/SKILL.md` | 成分股池缺口扫描 |
 | 双底 / 形态扫描 / 三角形底 / 底部形态 | `skills/invest-a-pattern-scan/SKILL.md` | LMW 双底/三角形底 |
+| 港股 / H股（5 位代码） | `skills/invest-hk-stock/SKILL.md` | 港股快照/估值位置/风险层（v1） |
+| 事件日历 / 宏观日历 / 经济数据日程 / 解禁日历 / 解禁压力 / 限售股解禁 | `skills/invest-a-event-calendar/SKILL.md` | 定期事件前瞻（中美 CPI/社零/非农/议息）+ 解禁池扫描 |
+| 低估 / 发现 / 便宜 / 估值扫描 / 找机会 / 筛股 | `skills/invest-a-discover-scan/SKILL.md` | 多透镜粗筛 → 观察短清单（≤15 只）+ 下钻命令 |
 
 **执行约定**：识别意图后，先 Read 对应子技能 SKILL.md 并完整遵循其 SOP；子技能引用的 references/ 在其各自目录或 `skills/lib/references/` 下。
 

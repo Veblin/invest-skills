@@ -1,10 +1,12 @@
 """sync_version.py — 版本收敛工具测试。"""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
@@ -21,46 +23,17 @@ def _write_fixture_tree(root: Path, version: str) -> None:
     and the .agents/plugins/marketplace.json output dir) so sync/bump preflight
     and output generation pass.
     """
-    (root / "skills" / "invest-a-stock").mkdir(parents=True)
-    (root / "skills" / "invest-a-gap-scan").mkdir(parents=True)
-    (root / "skills" / "invest-a-journal").mkdir(parents=True)
-    (root / "skills" / "invest-a-etf").mkdir(parents=True)
-    (root / "skills" / "invest-a-pulse").mkdir(parents=True)
-    (root / "skills" / "invest-a-pattern-scan").mkdir(parents=True)
-    (root / "skills" / "invest-hk-stock").mkdir(parents=True)
-    (root / ".claude-plugin").mkdir(parents=True)
-    (root / ".agents" / "plugins").mkdir(parents=True)
+    # ⚠️ 技能列表**从 SKILL_TARGETS 派生**，不逐个硬编码——否则新增技能时
+    # 夹具缺文件会让 preflight 假红（2026-09-12 新增 discover-scan 时实测踩坑）。
+    for _t in _sync.SKILL_TARGETS:
+        _p = root / _t.rel_path
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _p.write_text(f'---\nname: {_t.label}\nversion: "{version}"\n---\n', encoding="utf-8")
+    (root / ".claude-plugin").mkdir(parents=True, exist_ok=True)
+    (root / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
 
     (root / "pyproject.toml").write_text(
         f'[project]\nname = "test"\nversion = "{version}"\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-stock" / "SKILL.md").write_text(
-        f'---\nname: invest:a-stock\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-gap-scan" / "SKILL.md").write_text(
-        f'---\nname: invest:a-gap-scan\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-journal" / "SKILL.md").write_text(
-        f'---\nname: invest:a-journal\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-etf" / "SKILL.md").write_text(
-        f'---\nname: invest:a-etf\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-pulse" / "SKILL.md").write_text(
-        f'---\nname: invest:a-pulse\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-a-pattern-scan" / "SKILL.md").write_text(
-        f'---\nname: invest:a-pattern-scan\nversion: "{version}"\n---\n',
-        encoding="utf-8",
-    )
-    (root / "skills" / "invest-hk-stock" / "SKILL.md").write_text(
-        f'---\nname: invest:a-hk\nversion: "{version}"\n---\n',
         encoding="utf-8",
     )
 
@@ -84,6 +57,21 @@ def _write_fixture_tree(root: Path, version: str) -> None:
         f"(https://img.shields.io/github/v/release/Veblin/invest-skills?label=v{version})]\n",
         encoding="utf-8",
     )
+
+    # 正文可见版本锚点：sync_version 现同步 report-conventions / journal / pulse 的
+    # 正文版本行，并把它列入 preflight 必需项。同上，**从 VERSION_TEXT_TARGETS 派生**
+    # 而非硬编码——其中 journal/pulse 的 SKILL.md 与上方 frontmatter 是同一文件，
+    # 故此处**追加**锚点行，不覆盖。
+    for _rel, _pattern, _template in _sync.VERSION_TEXT_TARGETS:
+        _p = root / _rel
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _anchor = _template.format(version=version)
+        _body = _p.read_text(encoding="utf-8") if _p.exists() else "# test fixture\n"
+        if _anchor not in _body:
+            _p.write_text(
+                _body + ("" if _body.endswith("\n") else "\n") + _anchor + "\n",
+                encoding="utf-8",
+            )
 
 
 class TestSyncVersionCheck:
@@ -186,3 +174,49 @@ class TestSyncCommand:
         _write_fixture_tree(tmp_path, "0.1.0")
         (tmp_path / "pyproject.toml").write_text("[project]\nname = \"x\"\n", encoding="utf-8")
         assert _sync.cmd_sync(tmp_path) == 1
+
+
+class TestRegistrationParity:
+    """三个注册面（SKILL_TARGETS / marketplace 清单 / skills.yaml）须两两一致。
+
+    docs/architecture.md 声称「skills.yaml（10 个用户 skill）→ sync_version.py 同步
+    生成三处 marketplace 清单」，但 *.json.in 模板里的插件列表是硬编码的：sync 只
+    替换 {{ VERSION }}，新增技能不会进清单，也无测试断言三者一致——实测 marketplace
+    仍停在 6 个插件，invest-hk-stock 与 3 个新技能无法经 /plugin marketplace 安装。
+    """
+
+    @staticmethod
+    def _plugin_names(rel: str) -> set[str]:
+        data = json.loads((_REPO_ROOT / rel).read_text(encoding="utf-8"))
+        return {p["name"] for p in data["plugins"]}
+
+    @staticmethod
+    def _skill_dirs() -> set[str]:
+        return {p.parent.name for p in (_REPO_ROOT / "skills").glob("*/SKILL.md")}
+
+    def test_skill_targets_cover_all_skill_dirs(self):
+        have = {Path(t.rel_path).parent.name for t in _sync.SKILL_TARGETS}
+        assert have == self._skill_dirs(), f"SKILL_TARGETS 未覆盖: {self._skill_dirs() - have}"
+
+    def test_marketplace_lists_every_skill_target(self):
+        expected = {t.label for t in _sync.SKILL_TARGETS}
+        for rel in (".claude-plugin/marketplace.json", ".agents/plugins/marketplace.json"):
+            names = self._plugin_names(rel)
+            assert names == expected, (
+                f"{rel} 插件集与 SKILL_TARGETS 不一致："
+                f"缺 {sorted(expected - names)}，多 {sorted(names - expected)}"
+            )
+
+    def test_agents_marketplace_byte_identical_to_claude_plugin(self):
+        """.agents 副本与 .claude-plugin 共用同一模板（sync_version docstring 承诺）。"""
+        a = (_REPO_ROOT / ".agents/plugins/marketplace.json").read_text(encoding="utf-8")
+        b = (_REPO_ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
+        assert a == b
+
+    def test_skills_yaml_matches_skill_dirs(self):
+        """skills.yaml（antfu/skills-cli 清单）条目须与 skills/ 一一对应。"""
+        data = yaml.safe_load((_REPO_ROOT / "skills.yaml").read_text(encoding="utf-8"))
+        names = {s["name"] for s in data["skills"]}
+        assert names == self._skill_dirs(), (
+            f"skills.yaml 未覆盖: {self._skill_dirs() - names}；多余: {names - self._skill_dirs()}"
+        )

@@ -1,6 +1,6 @@
 ---
 name: invest-a-pattern-scan
-version: "0.2.9"
+version: "0.3.0"
 description: "底部形态扫描 — LMW 双底/三角形底全市场检出 + 数据窥探防护（RC p）。研究信号，非决策。触发词：双底/形态扫描/三角形底/底部形态"
 whenToUse: "双底/形态扫描/三角形底/底部形态：LMW 双底与三角形底的全市场检出"
 argument-hint: "/invest-a-pattern-scan → 双底/三角形底全市场扫描"
@@ -27,10 +27,17 @@ uv run python ../scan.py --universe csi300 a500 star50 --days 150
 # 输出 docs/data/pattern_scan_result.json + stdout 摘要
 ```
 
+**落盘约定（每次运行必须）**：引擎 JSON 写入 `docs/data/pattern_scan_result.json`（覆写式，**本地文件不随 git 跟踪**——`.gitignore` 含 `docs/data/*_scan_result.json`；2026-09-08 用户裁决：个股级扫描命中属红线「个股产出不进公开仓库」，历史提交中旧版已接受不清洗）；运行后 Claude 必须将人类可读解读简报落盘 **`reports/pattern-scan/{YYYY-MM-DD}.md`**（gitignored 本地区），不得只在对话输出。
+
 ## 输出解读
 
 - `hits[]`：命中形态（ts_code / pattern / bandwidth / 形态几何详情）
-- `reality_check`：**数据窥探防护**（White 2000 RC）——全规则宇宙（形态×带宽×窗口 = 12 规则）的最优规则是否显著优于噪声；`p_value < 0.05` 才可声称"该规则组合有统计增量信息"，否则命中列表仅作观察清单
+- `reality_check`：**数据窥探防护**（White 2000 RC）——全规则宇宙（**27 条** = 形态 2 × 带宽 3 × 窗口 3 = 18，**加 R-B01 三特征 × 3 窗口 = 9**）的最优规则是否显著优于噪声；`p_value < 0.05` 才可声称"该规则组合有统计增量信息"，否则命中列表仅作观察清单
+- **R-B01 三特征**（MACD 底背离 / 缩量回踩 / 涨停站上中期均线）：命中带 `evidence_note`（底背离与缩量回踩**无顶级期刊直接检验**，涨停分层假设出自 Liu (2015)**待核验**）；三者**只作筛选特征**，与既有形态**并入同一规则宇宙**，不得单独设门
+- **R-B02 左右侧双组回测**：突破确认组 vs 未确认底背离组（同池同窗）——只并列胜率/超额/最大回撤，**禁止预设结论**（措辞固定为「本池样本内右侧 X% vs 左侧 Y%，样本 N」）
+  - ⚠️ **落地状态（2026-09-13 校正）**：`feature_patterns.left_right_backtest()` 函数**已交付**（含单测），
+    但**尚未接入扫描输出**——`pattern_scan_result.json` **不含**该字段，报告不得引用它。
+    调用点待 v0.3.1（见 `host-docs/v0.3.0/round-plans/r5-20260912.md` 移档记录）
 - 带宽 0.3/0.5/1.0 三档敏感性：仅单一带宽命中的形态置信度低
 
 ## 方法学要点（报告引用时强制）
@@ -59,3 +66,4 @@ uv run python ../scan.py --universe csi300 a500 star50 --days 150
 2. ✅ RC p 值已输出且与结论一致（p≥0.05 时明确写"无统计增量信息"）
 3. ✅ 无"双底=买入信号"类断言；形态名称后带几何数值与带宽档
 4. ✅ 命中列表为观察清单，附证据分级（LMW A 级模板 / 参数 C 级阈值）
+5. ✅ 解读简报已落盘 `reports/pattern-scan/{YYYY-MM-DD}.md`（每次运行必须）

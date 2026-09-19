@@ -192,16 +192,21 @@ def get_index_pe_history(index_code: str, days: int = 250) -> list[dict]:
         _safe_close(c)
 
 
-def index_pe_percentile(rows: list[dict], current_pe: float | None) -> float | None:
+def index_pe_percentile(rows: list[dict], current_pe: float | None, *,
+                        column: str = "pe") -> float | None:
     """当前 PE 在历史序列中的含边界分位（复用 lib.stats.percentile_rank_inclusive）。
 
     有效 PE 值 <20 个或 current_pe 为 None → None（csindex 单窗即约 20 条，
     首次入库即有分位可算；更少时视为数据不足）。守卫计「有效值」而非原始
     行数——亏损期/无 PE 的 NULL 行不占名额（review #5）。
+
+    ``column`` **必须与当前值同口径**：表内 `pe`=市盈率1（股本加权）、
+    `pe_circulating`=市盈率2（流通加权）。用股本加权历史去排一个流通加权的当前值，
+    分位与徽章口径自相矛盾（R0~R2 review 修复）。
     """
     if current_pe is None:
         return None
-    seq = [safe_float(r.get("pe")) for r in rows]
+    seq = [safe_float(r.get(column)) for r in rows]
     seq = [v for v in seq if v is not None]
     if len(seq) < _INDEX_PE_MIN_HISTORY:
         return None

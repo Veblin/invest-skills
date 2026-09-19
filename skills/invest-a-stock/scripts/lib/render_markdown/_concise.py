@@ -619,13 +619,21 @@ def _concise_capital_flow(dims, collection):
 
 # --- render_report_v3 ---
 def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full",
-                     analysis: list[dict] | None = None) -> str:
-    """v0.2.0 九模块研究备忘录。mode="brief" 仅输出精简简报, mode="concise" 输出对话场景精简。
+                     analysis: list[dict] | None = None,
+                     profile: dict[str, Any] | None = None) -> str:
+    """v0.2.0 九模块数据底稿。mode="brief" 输出精简简报, mode="concise" 输出对话场景精简。
 
     analysis（R-B1）: analysis.json 段列表，渲染期替换 "[待 Claude report 阶段填充]" 占位。
+    profile（P0-5）: ResearchProfile 研究档案；仅 full 模式在报告说明块内展示，
+    不做字段过滤——偏好只改阅读顺序与补证优先级。
     """
     dims = _index_dims(collection)
     market_structure = collection.get("market_structure") or {}
+
+    # 就地槽位消费登记：每轮渲染从零开始（同一 collection 二次渲染不得残留
+    # 上一轮的登记，否则本次未渲染的段会被误剔除）。
+    from lib.analysis_schema import reset_inline_consumed
+    reset_inline_consumed(collection)
 
     # val_cache 先建：增强器条件 / 风险报告 / 各 section 共用同一缓存，
     # 5 年 PE/PB/PS 分位序列只全量计算一次（code-review: 临时 dict 永不命中备忘录）
@@ -649,7 +657,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _extras = _render_extras_block(collection, strict=strict)
         if _extras:
             parts.append("\n\n".join(_extras))
-        parts.extend([
+        sections = [
             _section_executive_summary(collection, symbol, dims, val_cache=val_cache),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
@@ -658,7 +666,8 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_bull_bear(
-                collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
+                collection, symbol, dims, market_structure, risk_data,
+                val_cache=val_cache, analysis=analysis,
             ),
             _wrap_details(
                 "展开：风险与不确定性",
@@ -669,6 +678,16 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             ),
             _references_appendix(collection),
             _risk_footer(),
+        ]
+        parts.extend([
+            # v0.3.0 fix②：brief 此前完全忽略 analysis payload（`--analysis` 传了
+            # 也不生效），6.4 分钟的精简版因此一个分析字都没有。现前置 overview
+            # 判断区、尾部附其余分析段，与 full 共用同一组槽位语义。
+            # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值（上面的
+            # list 已完成宿主调用），再与 overview/附录一起入列。
+            _render_analysis_overview(analysis, collection),
+            _render_analysis_appendix(analysis, collection),
+            *sections,
         ])
     elif mode == "concise":
         # === Hermes/OpenClaw 对话场景精简模式 ===
@@ -682,11 +701,19 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _extras = _render_extras_block(collection, strict=strict)
         if _extras:
             parts.append("\n\n".join(_extras))
-        parts.extend([
+        sections = [
             _concise_positioning(collection, symbol, dims, val_cache=val_cache),
             _concise_contradictions(collection, dims, val_cache=val_cache),
             _concise_bull(collection, symbol, dims, market_structure, val_cache=val_cache),
             _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cache=val_cache),
+        ]
+        # v0.3.0 fix②（concise 侧补齐）：此前 `--analysis` 在本模式下被解析、校验后
+        # 丢弃（exit 0），一句话不落。现与 brief 同形——overview 前置（对话场景
+        # 本就「结论先行」），其余段进展开块，既不静默丢内容也不撑长输出。
+        # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值再入列。
+        parts.extend([
+            _render_analysis_overview(analysis, collection),
+            *sections,
         ])
         # 可选第 5 段：催化剂
         catalyst = _concise_catalyst(collection, dims)
@@ -702,6 +729,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         cap_block = _concise_capital_flow(dims, collection)
         if cap_block:
             parts.append(_wrap_details("展开：资金行为", cap_block))
+        appendix = _render_analysis_appendix(analysis, collection)
+        if appendix:
+            parts.append(_wrap_details("展开：分析详情", appendix))
         parts.append(_wrap_details("展开：参考资料", _references_appendix(collection)))
         parts.append(_risk_footer())
     else:
@@ -709,6 +739,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _fast_veto = _check_fast_veto(dims, collection)
         parts: list[str] = [
             _header_v2(collection, symbol),
+            _render_judgment_index(analysis),
         ]
         extras = _render_engine_extras(collection)
         if extras:
@@ -716,7 +747,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _extras = _render_extras_block(collection, strict=strict)
         if _extras:
             parts.append("\n\n".join(_extras))
-        parts.extend([
+        sections = [
             _report_toc(collection),
             _section_research_question(collection, symbol, val_cache=val_cache),
             _section_snapshot(collection, symbol, dims, val_cache=val_cache),
@@ -727,9 +758,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 collection, symbol, market_structure, val_cache=val_cache,
             ),
             _section_participant_behavior_scan(
-                collection, symbol, market_structure, dims,
+                collection, symbol, market_structure, dims, analysis=analysis,
             ),
-            _section_events_timeline(collection),
+            _section_events_timeline(collection, analysis=analysis),
             _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_research_summary(collection, symbol, dims),
             _wrap_details(
@@ -746,7 +777,8 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                 collection, symbol, dims, market_structure, val_cache=val_cache,
             ),
             _section_bull_bear(
-                collection, symbol, dims, market_structure, risk_data, val_cache=val_cache,
+                collection, symbol, dims, market_structure, risk_data,
+                val_cache=val_cache, analysis=analysis,
             ),
             _section_left_right_probability(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
@@ -758,16 +790,143 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
                     val_cache=val_cache,
                 ),
             ),
-            _section_technical_brief(dims, val_cache=val_cache),
+            _section_technical_brief(dims, val_cache=val_cache, collection=collection),
             _section_six_gates_scorecard(dims, collection, val_cache),
+            _render_engine_selfcheck_appendix(collection),
             _references_appendix(collection),
-            _render_analysis_appendix(analysis),
             _risk_footer(),
+        ]
+        # 方案 A（v0.3.0，四层阅读结构）——
+        #   ① 判断索引（首屏索引，见 _render_judgment_index；在 parts 头部）
+        #   ② 报告说明（底稿身份 + 研究档案）
+        #   ③ 重要发现（5 分钟阅读区，overview 槽位正文）→ 分析详情（其余分析段）
+        #   ④ 九模块数据底稿（以下各 section）
+        # 均置于目录之前，使「结论先行」不受导航块干扰；无 analysis
+        # 时各层均返回空串（基线零 diff 保持）。
+        # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值，再入列。
+        parts.extend([
+            _full_mode_identity_status(symbol, analysis, profile),
+            _render_analysis_overview(analysis, collection),
+            _render_analysis_appendix(analysis, collection),
+            *sections,
         ])
     return "\n\n".join(p for p in parts if p)
 
 
-def _render_analysis_appendix(analysis: list[dict] | None) -> str:
+def _full_mode_identity_status(symbol: str, analysis: list[dict] | None,
+                               profile: dict[str, Any] | None = None) -> str:
+    """full 是可审计底稿；不得在缺少分析合成时伪装成研究成品。
+
+    profile（P0-5）：研究档案仅在提供时追加到同一「报告说明」块内，
+    不改变底稿身份判定，也不影响 brief/concise（该块本就不渲染）。
+    """
+    from lib.analysis_status import (ANALYSIS_OK, ANALYSIS_UNAVAILABLE,
+                                     analysis_payload_status)
+    from lib.research_profile import format_profile_markdown_lines
+
+    status = analysis_payload_status(analysis)
+    if status == ANALYSIS_OK:
+        lines = [
+            "## 报告说明",
+            "",
+            "> **产物定位：审计/证据数据底稿（分析合成已注入）。**",
+            "> 本模式保留完整数据、来源与计算过程以供追溯；分析段已附在文末，"
+            "但数据底稿本身不替代面向阅读的研究结论。",
+        ]
+    elif status == ANALYSIS_UNAVAILABLE:
+        # 工具故障 ≠ 内容缺失：不得断言「分析合成未完成」（review C2）。
+        lines = [
+            "## 报告说明",
+            "",
+            "> **产物定位：数据底稿（分析合成状态无法校验）。**",
+            "> 分析校验组件本次不可用，无法确认分析段是否已注入——这是工具故障，"
+            "**不是内容缺失的证据**。",
+            "> 本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。",
+        ]
+    else:
+        lines = [
+            "## 报告说明",
+            "",
+            "> **产物定位：数据底稿（分析合成未完成）。**",
+            "> 本文件仅用于核验采集数据、来源和计算过程，不能视为完成的研究报告。",
+            "> 完成方式：准备通过校验的 `analysis.json` 后重渲："
+            f"`uv run python skills/invest-a-stock/scripts/invest.py report {symbol} --mode full --analysis <analysis.json>`。",
+        ]
+    return "\n".join(lines + format_profile_markdown_lines(profile))
+
+
+def _render_analysis_overview(analysis: list[dict] | None,
+                              collection: dict | None = None) -> str:
+    """方案 A：把 overview 槽位的分析段前置为「重要发现（5 分钟阅读区）」。
+
+    动机：full 底稿把最有价值的判断层放在文末，读者需读完全文才看到结论。
+    前置后形成「5 分钟判断区 → 九模块数据底稿 → 其余分析注记」三层。
+
+    渲染体例与尾部注记同构（[事实]/[分析]/证据等级）——既满足 SOP-QC 的
+    「先事实后分析」结构要求，也让前置段可独立追溯。长度由 analysis.json
+    的写作控制，渲染器不做截断（截断会静默丢来源标注）。
+
+    无 overview 段 → 返回空串，brief/full 基线零 diff 保持。
+    """
+    from lib.analysis_schema import mark_inline_consumed, split_overview
+    ov, _ = split_overview(analysis)
+    if not ov:
+        return ""
+    n = len(ov)
+    lines = [
+        "## 重要发现（5 分钟阅读区）",
+        "",
+        f"> 结论先行区：以下 {n} 段是本次分析的核心判断，数据底稿与其余分析注记见文末。",
+    ]
+    for sec in ov:
+        mark_inline_consumed(collection, sec)
+        title = str(sec.get("title") or "").strip()
+        facts = str(sec.get("facts_md") or "").strip()
+        amd = str(sec.get("analysis_md") or "").strip()
+        ev = str(sec.get("evidence_tag") or "").strip()
+        lines.append("")
+        if title:
+            lines += [f"### {title}", ""]
+        if facts:
+            lines += ["**[事实]**", "", facts, ""]
+        if amd:
+            lines += ["**[分析]**", "", amd, ""]
+        if ev:
+            lines.append(f"**证据等级：** {ev}")
+            lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _render_judgment_index(analysis: list[dict] | None) -> str:
+    """在完整底稿首屏列出本次分析的判断索引（分类标签 + 标题）。
+
+    分析段标题由研究阶段生成，已覆盖事件归因、经营质量、估值、行业/竞争、
+    资金与风险等判断。这里只做可追溯索引，不重新概括或改写分析结论；完整
+    事实、来源和证据强度仍以稍后的分析详情为准。
+
+    成员判据与标签**不在本层决定**——由 `analysis_schema.index_entries` 单点
+    给出（与 html 侧 `_html_judgment_index` 共用），本层只负责 md 排布。
+    无条目 → 空串（无 analysis 与「全部段都被排除」两种情况都不会留下空标题）。
+    """
+    from lib.analysis_schema import index_entries
+
+    entries = index_entries(analysis)
+    if not entries:
+        return ""
+    lines = [
+        "## 判断索引",
+        "",
+        "> 以下是本次研究最值得先看的判断索引；数字、事实来源和证据强度请展开对应分析段核验。",
+        "",
+    ]
+    lines.extend(
+        f"- **{label}**：{title}（详见下方对应分析段）" for label, title in entries
+    )
+    return "\n".join(lines).rstrip()
+
+
+def _render_analysis_appendix(analysis: list[dict] | None,
+                              collection: dict | None = None) -> str:
     """全量审查 P0-3：md 与 html 同源消费 analysis 段。
 
     旧实现 md 侧只在 A-5 时间线消费 events 段首行——非 events 的
@@ -775,11 +934,22 @@ def _render_analysis_appendix(analysis: list[dict] | None) -> str:
     **静默消失**（「同源」协议仅对 events 成立）。此处将全部段渲染为
     尾部注记节（facts/analysis/evidence 与 html 卡同构）；无 analysis →
     返回空串（基线 md 零 diff 保持）。
+
+    方案 A / fix③：已被就地渲染的段必须剔除，否则同一段在 md 中出现两次。
+    v0.3.0 修复：剔除条件从 `is_inline_slotted`（静态：命中槽位）改为
+    `is_consumed_inline`（动态：本次确实渲染了）。静态版会误删宿主未渲染的
+    段——条件宿主（无扫描行/无事件卡/无 MD&A 卡）与 brief 模式下，这些段
+    既无正文落点又被剔除，`--analysis` 内容零落点丢失；同槽位多段也只有
+    首个被 find_section 消费，其余同样丢失。
+
+    **调用顺序敏感**：须在全部宿主 section 渲染之后调用（见 render_report_v3）。
     """
-    if not analysis:
+    from lib.analysis_schema import is_consumed_inline
+    rest = [s for s in (analysis or []) if not is_consumed_inline(collection, s)]
+    if not rest:
         return ""
-    lines = ["## 分析注记（analysis.json 注入）", ""]
-    for i, sec in enumerate(analysis):
+    lines = ["## 分析详情（analysis.json 注入）", ""]
+    for i, sec in enumerate(rest):
         if not isinstance(sec, dict):
             continue
         mod = str(sec.get("module") or sec.get("position") or f"section-{i}")
@@ -797,4 +967,3 @@ def _render_analysis_appendix(analysis: list[dict] | None) -> str:
             lines.append(f"**证据等级：** {ev}")
             lines.append("")
     return "\n".join(lines)
-
