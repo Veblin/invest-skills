@@ -274,6 +274,17 @@ def _pe_percentile(valuation: dict | None) -> float | None:
     return safe_float(pe.get("pct"))
 
 
+def _pe_median(valuation: dict | None) -> float | None:
+    """PE 历史中位数——分位读数须伴随中位数（CLAUDE.md 估值分位规则 3）。"""
+    if not valuation:
+        return None
+    v = safe_float(valuation.get("pe_median"))
+    if v is not None:
+        return v
+    pe = valuation.get("pe") or {}
+    return safe_float(pe.get("median"))
+
+
 def _technical_breakdown(technical: dict | None) -> tuple[bool, str]:
     if not technical or technical.get("error"):
         return False, "技术指标数据不足"
@@ -324,16 +335,18 @@ def scan_market_risks(
 
     pe_pct = _pe_percentile(valuation)
     if pe_pct is not None:
+        _med = _pe_median(valuation)
+        _med_s = f"（中位数 {_med:.2f}x）" if _med is not None else ""
         high_trig = pe_pct >= 90
         signals.append(_signal("valuation_extreme_high", "估值极端高", "market",
                                  triggered=high_trig, severity="中",
-                                 detail=f"PE 历史分位 {pe_pct:.1f}%（≥90%）" if high_trig
-                                 else f"PE 历史分位 {pe_pct:.1f}%", auto=True))
+                                 detail=f"PE 历史分位 {pe_pct:.1f}%{_med_s}（≥90%）" if high_trig
+                                 else f"PE 历史分位 {pe_pct:.1f}%{_med_s}", auto=True))
         low_trig = pe_pct <= 10
         signals.append(_signal("valuation_extreme_low", "估值极端低", "market",
                                  triggered=low_trig, severity="参考",
-                                 detail=f"PE 历史分位 {pe_pct:.1f}%（≤10%）" if low_trig
-                                 else f"PE 历史分位 {pe_pct:.1f}%", auto=True))
+                                 detail=f"PE 历史分位 {pe_pct:.1f}%{_med_s}（≤10%）" if low_trig
+                                 else f"PE 历史分位 {pe_pct:.1f}%{_med_s}", auto=True))
     else:
         for sid, name in (("valuation_extreme_high", "估值极端高"),
                           ("valuation_extreme_low", "估值极端低")):

@@ -141,19 +141,24 @@ rules:
     law_ref: "措辞规范 — 动态驱动"
 
   - id: "wording-extreme-high"
-    pattern: "极度高估"
+    # 2026-09-19：① 补「极端」词形——引擎 actual 产出的是「极端低估」，原规则只覆盖
+    # 「极度」，词形不同即不触发（600519 实跑 §5 多头逻辑实证）；② 移除 `\[来源:`
+    # 豁免——该豁免使「同行带任何来源标注即可绕过」成立（A/B 对照实验定证：仅词命中 /
+    # 词+[来源: 不命中）。同族缺陷 v0.3.0 A6 已为 wording-practitioner-convention 修复
+    # 但未推广。影响面实测：1065 份语料净增 5 条（114 行含词 → 旧规则跳 23 → 新触发 96）。
+    pattern: "(极度|极端)高估"
     severity: "warning"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
-    message: "禁止使用'极度高估'，改为数值比较：'PE 665x vs 同赛道平均 40x，溢价约 16 倍'"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️)"
+    message: "禁止使用'极度/极端高估'，改为数值比较：'PE 665x vs 同赛道平均 40x，溢价约 16 倍'"
     law_ref: "措辞规范 — 估值段落"
 
   - id: "wording-extreme-low"
-    pattern: "极度低估"
+    pattern: "(极度|极端)低估"
     severity: "warning"
     scope: "line"
-    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️|\\[来源:)"
-    message: "禁止使用'极度低估'，改为数值比较"
+    skip_if_pattern: "(风险提示|免责声明|不构成|⚠️)"
+    message: "禁止使用'极度/极端低估'，改为数值比较"
     law_ref: "措辞规范 — 估值段落"
 
   - id: "wording-crash"

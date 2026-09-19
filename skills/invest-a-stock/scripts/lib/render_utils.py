@@ -175,6 +175,7 @@ def _evidence_conclusion_block(conclusion: str, evidences: list[tuple[str, str]]
 # --- _v3_cv7_assessment ---
 def _v3_cv7_assessment(
     pe_pct: float | None, mf_out: float | int | None,
+    pe_median: Any = None,
 ) -> tuple[str, str] | None:
     """CV-7：PE 分位 vs 全档资金方向。
 
@@ -194,20 +195,25 @@ def _v3_cv7_assessment(
     if pe_pct is None or mf_out is None:
         return None
     mf_f = float(mf_out)
+    # 分位须伴随中位数（CLAUDE.md 估值分位规则 3）：句式统一为「分位 X%，中位数 Yx」
+    # （本句已处于 `（分位 …）` 括号内，用逗号式避免嵌套括号）
+    _med_s = _pct_median_inline(pe_median)
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f < 0:
-        return "divergence", f"PE 低位（{pe_pct:.1f}%）但全档资金净流出"
+        return "divergence", f"PE 低位（分位 {pe_pct:.1f}%{_med_s}）但全档资金净流出"
     if pe_pct > ZONE_HIGH_THRESHOLD and mf_f > 0:
-        return "divergence", f"PE 高位（{pe_pct:.1f}%）但全档资金净流入"
+        return "divergence", f"PE 高位（分位 {pe_pct:.1f}%{_med_s}）但全档资金净流入"
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f > 0:
-        return "convergence", f"PE 低位（{pe_pct:.1f}%）且全档资金净流入"
+        return "convergence", f"PE 低位（分位 {pe_pct:.1f}%{_med_s}）且全档资金净流入"
     if pe_pct > ZONE_HIGH_THRESHOLD and mf_f < 0:
-        return "convergence", f"PE 高位（{pe_pct:.1f}%）且全档资金净流出"
+        return "convergence", f"PE 高位（分位 {pe_pct:.1f}%{_med_s}）且全档资金净流出"
     return "gap", "估值与资金流向未呈现典型背离/共振"
 
 
 # --- _v3_cv7_block ---
-def _v3_cv7_block(pe_pct: float | None, mf_out: float | int | None) -> str | None:
-    assessed = _v3_cv7_assessment(pe_pct, mf_out)
+def _v3_cv7_block(
+    pe_pct: float | None, mf_out: float | int | None, pe_median: Any = None,
+) -> str | None:
+    assessed = _v3_cv7_assessment(pe_pct, mf_out, pe_median)
     if assessed is None:
         return None
     status, detail = assessed
@@ -441,6 +447,48 @@ def _historical_pe_median(val_cache: dict | None, dims: dict[str, dict]) -> floa
     pe = summary.get("pe") or {}
     median = pe.get("median")
     return float(median) if median is not None else None
+
+
+# --- _pct_medians / _pct_median_suffix ---
+def _pct_medians(
+    val_cache: dict | None, dims: dict[str, dict],
+) -> tuple[float | None, float | None]:
+    """(PE 中位数, PB 中位数)，供分位渲染点拼接（LAW 3 可追溯）。"""
+    summary = _v3_load_valuation_summary(dims, val_cache)
+    if not summary:
+        return (None, None)
+    pe = summary.get("pe") or {}
+    pb = summary.get("pb") or {}
+    return (pe.get("median"), pb.get("median"))
+
+
+def _pct_median_suffix(median: Any) -> str:
+    """分位读数的中位数伴随串；中位数不可得时返回空串（不编造）。
+
+    CLAUDE.md「估值分位使用规则」3 与 report-conventions §2.3：**分位数不单独使用**，
+    必须伴随中位数或均值。行内复查规则 `percentile-without-median` 对本仓全部报告
+    生效，**引擎模板自身也须满足**——分位渲染点一律经本函数拼接中位数。
+
+    2026-09-19：此前引擎仅在模块 4 D-① 一处附带中位数，其余 22 处（模块 0/1/5/6
+    标题与结论、CV-3/CV-7、D-① 预警、同行分位排名）裸出分位，导致个股报告在
+    `--fail-on error` 下**必然 FAIL 且写作者无从修复**（analysis.json 不触及模板行）。
+    """
+    if median is None:
+        return ""
+    try:
+        return f"（中位数 {float(median):.2f}x）"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _pct_median_inline(median: Any) -> str:
+    """同 `_pct_median_suffix`，但用逗号式（无括号）——供已处于括号内的位置使用，避免嵌套。"""
+    if median is None:
+        return ""
+    try:
+        return f"，中位数 {float(median):.2f}x"
+    except (TypeError, ValueError):
+        return ""
 
 
 # --- _bull_bear_valuation_divergence_text ---

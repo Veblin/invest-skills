@@ -603,7 +603,11 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
             "index_pe_caliber": caliber,
             "index_pe_circulating": pe2,
             "index_pe_note": (
-                f"来源: csindex {idx_code}，单窗 {len(df)} 条历史；"
+                f"来源: csindex {idx_code}，单窗 {len(df)} 条历史，"
+                # 2026-09-19：注明取值日期。此前只给口径不给日期，读者无法知道该 PE
+                # 是不是最新交易日（600519/588000 实跑暴露：源已含 09-18 行而报告取到
+                # 09-17 值，且输出无任何日期线索）。日期缺失时留「日期不可得」不编造。
+                f"取值日期 {latest.get('日期') or '不可得'}；"
                 f"本次取值口径＝{caliber or '不可得'}"
                 "（市盈率1=股本加权；市盈率2=流通加权；历史分位见 index_pe_pct）"
             ),

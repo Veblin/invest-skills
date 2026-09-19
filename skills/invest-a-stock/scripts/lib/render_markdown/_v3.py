@@ -135,6 +135,7 @@ def _v3_build_candidate_explanations(
     """LAW 13 候选解释，最多 5 条。返回 (标签, 文本, 证据, 强度)。"""
     explanations: list[tuple[str, str, str, str]] = []
     pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
+    pe_med, pb_med = _pct_medians(val_cache, dims)
     sw = market_structure.get("sw_index") or {}
     mf = market_structure.get("moneyflow") or {}
     nb = market_structure.get("northbound") or {}
@@ -159,7 +160,7 @@ def _v3_build_candidate_explanations(
         zone = "偏高" if pe_pct >= EXTREME_HIGH_THRESHOLD else "偏低"
         explanations.append((
             "B",
-            f"估值历史分位{zone}（PE {pe_pct:.1f}%）驱动定价预期重估",
+            f"估值历史分位{zone}（PE {pe_pct:.1f}%{_pct_median_inline(pe_med)}）驱动定价预期重估",
             "valuation 历史分位",
             "⚠️",
         ))
@@ -167,7 +168,7 @@ def _v3_build_candidate_explanations(
         zone = "偏高" if pb_pct >= EXTREME_HIGH_THRESHOLD else "偏低"
         explanations.append((
             "B",
-            f"PB 历史分位{zone}（{pb_pct:.1f}%）或反映资产定价差异",
+            f"PB 历史分位{zone}（{pb_pct:.1f}%{_pct_median_inline(pb_med)}）或反映资产定价差异",
             "valuation 历史分位",
             "⚠️",
         ))
@@ -391,10 +392,11 @@ def _section_research_question(
         triggers.append("A")
 
     pe_pct, pb_pct, _ = _v3_valuation_percentiles(dims, val_cache)
+    pe_med, _pb_med = _pct_medians(val_cache, dims)
 
     # LAW 17: 构建含触发源数据的标题 + 段首主旨句
     chg_s = f"{chg:+.2f}%" if chg is not None else ""
-    pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    pe_s = f"PE {pe_pct:.1f}% 分位{_pct_median_suffix(pe_med)}" if pe_pct is not None else ""
     loss_flag = _pe_loss_flag(val_cache)
     if pe_s and loss_flag:
         pe_s += f"（{loss_flag}）"
@@ -491,14 +493,15 @@ def _section_snapshot(
         chg = quote.get("change_pct")
 
     pe_pct, pb_pct, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    pe_med, pb_med = _pct_medians(val_cache, dims)
 
     # LAW 17: 构建含数据的标题 + 段首主旨句
     price_s = f"{price}" if price is not None else ""
-    pe_s = f"PE {pe_pct:.1f}% 分位" if pe_pct is not None else ""
+    pe_s = f"PE {pe_pct:.1f}% 分位{_pct_median_suffix(pe_med)}" if pe_pct is not None else ""
     loss_flag = _pe_loss_flag(val_cache)
     if pe_s and loss_flag:
         pe_s += f"（{loss_flag}）"
-    pb_s = f"PB {pb_pct:.1f}% 分位" if pb_pct is not None else ""
+    pb_s = f"PB {pb_pct:.1f}% 分位{_pct_median_suffix(pb_med)}" if pb_pct is not None else ""
     title_parts = [p for p in [price_s, pe_s, pb_s] if p]
     title_suffix = " · ".join(title_parts) if title_parts else "当前状态快照"
     judgment_parts = [s for s in [f"最新价 {price_s}" if price_s else "", pe_s, pb_s] if s]
@@ -512,9 +515,9 @@ def _section_snapshot(
         chg_s = f"（{chg:+.2f}%）" if chg is not None else ""
         lines.append(f"- **最新价:** {price}{chg_s}")
     if pe_pct is not None:
-        lines.append(f"- **PE(TTM) 历史分位:** {pe_pct:.1f}%（{pe_zone or '—'}）")
+        lines.append(f"- **PE(TTM) 历史分位:** {pe_pct:.1f}%（{pe_zone or '—'}{_pct_median_inline(pe_med)}）")
     if pb_pct is not None:
-        lines.append(f"- **PB 历史分位:** {pb_pct:.1f}%")
+        lines.append(f"- **PB 历史分位:** {pb_pct:.1f}%{_pct_median_suffix(pb_med)}")
 
     fin = _get_dim_data(dims, "financials")
     if fin and isinstance(fin, list):
@@ -550,10 +553,12 @@ def _section_snapshot(
     if pe_pct is not None and pb_pct is not None:
         if (pe_pct >= 70 and pb_pct >= 70) or (pe_pct <= 30 and pb_pct <= 30):
             cv3 = "convergence"
-            cv3d = f"PE 分位 {pe_pct:.1f}% 与 PB 分位 {pb_pct:.1f}% 同向"
+            cv3d = (f"PE 分位 {pe_pct:.1f}%{_pct_median_suffix(pe_med)}"
+                    f" 与 PB 分位 {pb_pct:.1f}%{_pct_median_suffix(pb_med)} 同向")
         else:
             cv3 = "divergence"
-            cv3d = f"PE 分位 {pe_pct:.1f}% 与 PB 分位 {pb_pct:.1f}% 方向不一致"
+            cv3d = (f"PE 分位 {pe_pct:.1f}%{_pct_median_suffix(pe_med)}"
+                    f" 与 PB 分位 {pb_pct:.1f}%{_pct_median_suffix(pb_med)} 方向不一致")
         lines.append("")
         lines.append(_cv(cv3, "CV-3", "PE 分位 vs PB 分位", cv3d, "中"))
 
@@ -918,8 +923,9 @@ def _section_market_structure(
             )
 
     pe_pct, _, _ = _v3_valuation_percentiles(_index_dims(collection), val_cache)
+    _pe_med7, _ = _pct_medians(val_cache, _index_dims(collection))
     mf_out = mf_net
-    cv7 = _v3_cv7_block(pe_pct, mf_out)
+    cv7 = _v3_cv7_block(pe_pct, mf_out, _pe_med7)
     if cv7:
         lines.append("")
         lines.append(cv7)
@@ -2531,6 +2537,8 @@ class _FundamentalsContext:
         self.val_window_label = self.vs.get("window_label", "历史") if self.vs else "历史"
         self.pe_pct, self.pb_pct_ext, _ = _v3_valuation_percentiles(dims, val_cache)
         self.hist_pe_median = _historical_pe_median(val_cache, dims)
+        # 分位须伴随中位数（CLAUDE.md 估值分位规则 3）：D-① 预警与误区句同源取用
+        _pe_med_any, self.hist_pb_median = _pct_medians(val_cache, dims)
 
         # --- 行业同行 / 市场结构（原块④余量）---
         self.industry_peers = collection.get("industry_peers") or {}
@@ -3444,19 +3452,21 @@ def _section_4d_valuation_expectation(
     pb_extreme = ctx.pb_pct_ext is not None and (ctx.pb_pct_ext >= EXTREME_HIGH_THRESHOLD or ctx.pb_pct_ext <= EXTREME_LOW_THRESHOLD)
     if pe_extreme:
         zone = "偏高（≥80% 分位）" if ctx.pe_pct >= EXTREME_HIGH_THRESHOLD else "偏低（≤20% 分位）"
-        lines.append(f"⚠️ PE 处于历史 {zone}，建议触发完整预期差分析（见 D-③）。")
+        lines.append(f"⚠️ PE 处于历史 {zone}{_pct_median_inline(ctx.hist_pe_median)}，建议触发完整预期差分析（见 D-③）。")
     if pb_extreme:
         zone = "偏高（≥80% 分位）" if ctx.pb_pct_ext >= EXTREME_HIGH_THRESHOLD else "偏低（≤20% 分位）"
-        lines.append(f"⚠️ PB 处于历史 {zone}，建议结合 D-③ 与资产质量验证预期差。")
+        lines.append(f"⚠️ PB 处于历史 {zone}{_pct_median_inline(ctx.hist_pb_median)}，建议结合 D-③ 与资产质量验证预期差。")
     if pe_extreme or pb_extreme:
         lines.append("**[扩展激活 · 估值极端]** 完整预期差分析：① 隐含 g vs 历史 CAGR；② 一致预期（若可得）；③ 增长拐点催化剂。")
     lines.append("")
     d1_pitfall = (
-        f"本次 PE 历史分位 {ctx.pe_pct:.1f}%、PB {ctx.pb_pct_ext:.1f}%，"
+        f"本次 PE 历史分位 {ctx.pe_pct:.1f}%{_pct_median_inline(ctx.hist_pe_median)}、"
+        f"PB {ctx.pb_pct_ext:.1f}%{_pct_median_inline(ctx.hist_pb_median)}，"
         "若把低分位直接等同于「便宜」，可能忽略盈利下修导致的「低 PE 陷阱」。"
         if ctx.pe_pct is not None and ctx.pb_pct_ext is not None else
         (
-            f"本次 PE 历史分位 {ctx.pe_pct:.1f}%，需结合 PB 与盈利趋势判断是否为价值陷阱。"
+            f"本次 PE 历史分位 {ctx.pe_pct:.1f}%{_pct_median_inline(ctx.hist_pe_median)}，"
+            "需结合 PB 与盈利趋势判断是否为价值陷阱。"
             if ctx.pe_pct is not None else
             "本次估值分位不可得，不宜用当前 PE 绝对值替代历史分位判断。"
         )
@@ -3628,8 +3638,24 @@ def _section_4d_valuation_expectation(
                         "解读时优先核对利润率变化与非经常性损益。"
                     )
             elif ref_cagr is not None:
+                # 2026-09-19：原实现无条件断言「市场隐含增长 ≈ 实际 CAGR」。当绝对差 ≤5pp
+                # 但**相对差**很大时（600519 实测 5.83% vs 10.81%，差 4.98pp / 相对 46%），
+                # 「≈」被引擎自身输入证伪。改为：一律打印两个数 + 差值，且仅在相对差
+                # ≤20% 时才表述「接近」。
+                _gap_pp = g_implied_pct - ref_cagr
+                _rel = abs(_gap_pp) / abs(ref_cagr) * 100 if ref_cagr else None
+                if _rel is not None and _rel <= 20:
+                    _verdict = "接近，定价基本反映历史增长"
+                else:
+                    _rel_s = f"{_rel:.1f}%" if _rel is not None else "不可得"
+                    _verdict = (
+                        f"存在差距（差 {abs(_gap_pp):.2f}pp，相对 {_rel_s}）——"
+                        + ("市场隐含的增长假设低于历史兑现水平"
+                           if _gap_pp < 0 else "市场隐含的增长假设高于历史兑现水平")
+                    )
                 lines.append(
-                    f"**解读：** 市场隐含增长 ≈ 实际{ref_label} CAGR，定价基本反映历史增长，关注增长率拐点。"
+                    f"**解读：** 市场隐含增长（{g_implied_pct:.2f}%）与实际{ref_label} CAGR"
+                    f"（{ref_text}）{_verdict}，关注增长率拐点。"
                 )
             else:
                 lines.append("**解读：** 缺少实际 CAGR 对比，仅呈现隐含增长率供参考。")
@@ -3716,7 +3742,14 @@ def _peer_comparison_table(industry_peers: dict) -> list[str]:
             name = p.get("name", "") or p.get("symbol", "?")
             lines.append(f"| {name} | {p_pe} | {p_pb} | {p_roe} | {p_ry} |")
         lines.append("")
-        # 分位排名
+        # 分位排名（分位须伴随中位数——此处取同行组中位数，CLAUDE.md 估值分位规则 3）
+        from lib.valuation import median_of
+        peer_vals: dict[str, list[float]] = {}
+        for _p in industry_peers.get("peers", []):
+            for _m in ("pe_ttm", "pb", "roe", "revenue_yoy"):
+                _v = _p.get(_m)
+                if isinstance(_v, (int, float)) and not isinstance(_v, bool):
+                    peer_vals.setdefault(_m, []).append(float(_v))
         rk_lines = []
         for metric, label in [("pe_ttm", "PE"), ("pb", "PB"), ("roe", "ROE"), ("revenue_yoy", "营收增速")]:
             pct_key = f"{metric}_pct"
@@ -3726,7 +3759,10 @@ def _peer_comparison_table(industry_peers: dict) -> list[str]:
             rk_v = rankings.get(rk_key)
             tot_v = rankings.get(tot_key)
             if pct_v is not None:
-                rk_lines.append(f"- {label}：分位 **{pct_v}%**（排名 {rk_v}/{tot_v}）")
+                med_v = median_of(peer_vals.get(metric) or [])
+                unit = "x" if metric in ("pe_ttm", "pb") else ""
+                med_s = f"，同行中位 {med_v:.2f}{unit}" if med_v is not None else ""
+                rk_lines.append(f"- {label}：分位 **{pct_v}%**（排名 {rk_v}/{tot_v}{med_s}）")
         if rk_lines:
             lines.append("**分位排名（在同行中的位置）：**")
             lines.extend(rk_lines)
