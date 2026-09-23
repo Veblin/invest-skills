@@ -368,7 +368,7 @@ class TestRenderMaSystemUnavailableClose:
 
         修复前 `_kd` 从原始 kline 取 max(trade_date) —— 被剔除的 NaN 行（停牌
         残留 bar）日期仍在列表里，于是把前一有效交易日的收盘价标注成该行日期，
-        技术段的数字失去可追溯性（AGENTS.md:20）。
+        技术段的数字失去可追溯性（AGENTS.md 约束 3：分析解释必须依赖数据源）。
         """
         from lib.render_markdown._base import _render_ma_system
         from lib.technical import compute
