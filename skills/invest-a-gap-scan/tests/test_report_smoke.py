@@ -771,3 +771,51 @@ def test_cache_row_discloses_unsettled_refresh():
     format_markdown_report(result, str(out))
     md = out.read_text(encoding="utf-8")
     assert "3 只为「缓存末根 bar 未定稿（写入早于当日收盘）」而重拉" in md
+
+
+def test_scan_survives_malformed_cached_date(tmp_path, monkeypatch, capsys):
+    """评审续三（集成）：单条坏缓存日期不得中止整次扫描。
+
+    实测：缓存 trade_date = "20260230"（8 位但非法日历）此前在缓存校验里抛
+    ValueError，冒泡出 `_run_scan` → 整个扫描中止。修复后按「未定稿」处理：
+    该股重拉（记入 refreshed_unsettled），其余缓存照常命中。
+    """
+    import json as _json
+    import os as _os
+
+    import pandas as _pd
+
+    from lib import env as _env
+
+    mod = _load_scan_module()
+    monkeypatch.setattr(_env, "STORE_DIR", tmp_path)
+    monkeypatch.setattr(
+        mod, "_fetch_trade_cal", lambda a, b: (["20260923", "20260924"], True))
+    monkeypatch.setattr(mod, "shanghai_now", lambda: _now_day("20260924", "0900"))
+
+    def _kline(last_date: str):
+        n = 5
+        return _pd.DataFrame({
+            "trade_date": [f"2026090{i}" for i in range(1, n)] + [last_date],
+            "open_qfq": [10.0] * n, "high_qfq": [10.2] * n,
+            "low_qfq": [9.9] * n, "close_qfq": [10.1] * n,
+            "amount": [1e8] * n,
+        })
+
+    cache = mod._KLINE_CACHE
+    cache.save("kline", ("tushare", "000001.SZ"), _kline("20260922"))
+    closed = _now_day("20260922", "1600").timestamp()
+    p1 = cache.path_for("kline", ("tushare", "000001.SZ"))
+    _os.utime(p1, (closed, closed))
+    cache.save("kline", ("tushare", "000002.SZ"), _kline("20260230"))  # 非法日期
+
+    stocks = [_StubStock("000001.SZ"), _StubStock("000002.SZ")]
+    args = mod.build_parser().parse_args(["--json", "--no-save-report"])
+    rc = mod._run_scan(args, stocks, {"000001.SZ", "000002.SZ"}, _StubSource(),
+                       "stub (前复权)", False, 0.0)   # 不得抛异常
+
+    payload = _json.loads(capsys.readouterr().out)
+    cache_status = payload["cache_status"]
+    assert rc == 0
+    assert cache_status["hit"] == 1
+    assert cache_status["refreshed_unsettled"] == 1

@@ -22,6 +22,7 @@ from gap_scanner import (
     _check_unfilled,
     _find_candidate_gaps,
     _ma60_streak_stats,
+    _normalize_date,
     _resolve_after_close,
     scan_all,
 )
@@ -1244,3 +1245,49 @@ class TestCachedBarSettled:
         assert is_cached_bar_settled(
             "2026-09-22", _now_at("20260922", "1600").timestamp(),
             _now_at("20260923", "0900")) is True
+
+
+class TestCachedBarSettledNeverRaises:
+    """评审续三：缓存校验谓词**永不抛异常**——调用点在逐股异常隔离之外。
+
+    8 位但非法的日历日期（`20260230`/`20260000`）此前会在此抛 ValueError，
+    一路冒泡中止整次扫描（实测 `_run_scan` 直接抛错），而函数本意是「不可信 →
+    按未定稿处理 → 该股重拉」。这里参数化钉住「任何输入都返回 bool」。
+    """
+
+    @pytest.mark.parametrize("bad_date", [
+        "20260230",   # 2 月无 30 日（ValueError: day is out of range）
+        "20260000",   # 月/日为 00
+        "20261301",   # 月 13（字符串比较已拦，仍须不抛）
+        "2026-02-30",  # 带连字符的非法日期（归一化后同上）
+        "202609023",  # 9 位
+        "2026",       # 位数不足
+        "",           # 空
+        "not-a-date",  # 非数字
+        "20260931",   # 9 月无 31 日
+    ])
+    def test_malformed_dates_return_false_without_raising(self, bad_date):
+        now = _now_at("20260924", "0900")
+        assert is_cached_bar_settled(bad_date, now.timestamp(), now) is False
+
+    def test_out_of_range_mtime_does_not_raise(self):
+        """时间戳越界同样归入未定稿，不抛出。"""
+        now = _now_at("20260924", "0900")
+        assert is_cached_bar_settled("20260922", 1e30, now) is False
+
+
+class TestNormalizeDateNoTruncation:
+    """`_normalize_date` 不得把坏数据**截断**成看似合理的日期。"""
+
+    @pytest.mark.parametrize("value,expected", [
+        ("20260923", "20260923"),
+        ("2026-09-23", "20260923"),
+        ("2026-09-23 00:00:00", "20260923"),   # pandas Timestamp 形式
+        ("202609023", ""),                      # 9 位 → 不截断
+        ("2026092345", ""),                     # 10 位数字 → 不截断
+        ("2026092", ""),                        # 位数不足
+        ("", ""),
+        ("not-a-date", ""),
+    ])
+    def test_normalize(self, value, expected):
+        assert _normalize_date(value) == expected

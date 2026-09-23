@@ -256,8 +256,18 @@ def _is_gap_across_suspension(
 
 
 def _normalize_date(value: Any) -> str:
-    """规范化交易日为 ``yyyymmdd``（兼容 ``YYYY-MM-DD`` 与 Timestamp）。"""
-    return str(value).replace("-", "")[:8]
+    """规范化交易日为 ``yyyymmdd``；**无法唯一确定日期时返回 ``""``**。
+
+    兼容 ``YYYYMMDD``、``YYYY-MM-DD`` 与 pandas Timestamp 的
+    ``YYYY-MM-DD HH:MM:SS`` 前缀。位数异常（如 9 位的 ``202609023``）一律返回
+    ``""``——**不做截断猜测**：截断会把坏数据变成看似合理的日期，再被用作
+    「bar 是否已完成」「数据截止日」这类判定的输入。
+    （日历合法性如 ``20260230`` 不在此处判：见 :func:`is_cached_bar_settled`。）
+    """
+    s = str(value).strip().replace("-", "")
+    if len(s) >= 8 and s[:8].isdigit() and (len(s) == 8 or not s[8].isdigit()):
+        return s[:8]
+    return ""
 
 
 def _resolve_after_close(last_bar_date: str, now: datetime | None = None) -> bool:
@@ -300,6 +310,10 @@ def is_cached_bar_settled(last_bar_date: str, cache_mtime: float | None,
 
     - bar 日期不可解析 / 晚于今日（异常数据）→ 不信任 ❌
     - 写入时刻不可得（stat 失败）→ 保守判未定稿 ❌
+
+    **本函数永不抛异常**：它是缓存校验谓词，调用点在逐股异常隔离之外，抛出会
+    让**整次扫描中止**。故 8 位但非法的日历日期（`20260230`）、时间戳越界等
+    一律归入「未定稿」→ 该股按缓存未命中重拉，坏条目被覆盖。
     """
     _now = now or shanghai_now()
     bar = _normalize_date(last_bar_date)
@@ -310,8 +324,12 @@ def is_cached_bar_settled(last_bar_date: str, cache_mtime: float | None,
     if cache_mtime is None:
         return False
     tz = _now.tzinfo or ZoneInfo("Asia/Shanghai")
-    written = datetime.fromtimestamp(cache_mtime, tz=tz)
-    bar_close = datetime.strptime(bar, "%Y%m%d").replace(hour=15, tzinfo=tz)
+    try:
+        bar_close = datetime.strptime(bar, "%Y%m%d").replace(hour=15, tzinfo=tz)
+        written = datetime.fromtimestamp(cache_mtime, tz=tz)
+    except (ValueError, OverflowError, OSError):
+        # 非法日历日期（20260230）、月/日为 00、时间戳越界 → 不信任，按未定稿重拉
+        return False
     return written >= bar_close
 
 
