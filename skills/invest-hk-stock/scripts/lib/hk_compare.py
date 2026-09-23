@@ -14,7 +14,9 @@ _ROW_SPECS: tuple[tuple[str, str, tuple[str, ...], str, str | None], ...] = (
     ("快照", "现价", ("snapshot", "price"), "HKD", None),
     ("快照", "涨跌幅", ("snapshot", "chg_pct"), "%", None),
     ("快照", "PE(TTM)", ("snapshot", "pe_ttm"), "x", None),
-    ("快照", "总市值", ("snapshot", "mcap_hkd_yi"), "亿 HKD", None),
+    # D3：该字段语义随标的类型变化（纯港股=总市值 / A+H=H 股部分市值）→ 指标名用
+    # 中性词「市值」，口径注由 cmd_compare 统一追加。写成「总市值」对 A+H 标的是错的。
+    ("快照", "市值", ("snapshot", "mcap_hkd_yi"), "亿 HKD", None),
     ("快照", "52 周高", ("snapshot", "high_52w"), "HKD", None),
     ("快照", "52 周低", ("snapshot", "low_52w"), "HKD", None),
     ("估值位置", "PE 序列分位", ("valuation_pctl", "pe", "pct"), "%", None),

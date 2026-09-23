@@ -280,3 +280,97 @@ def test_cli_ah_rejects_bad_a_symbol(monkeypatch, tmp_path, capsys):
     hk_mod = _stub_all(monkeypatch)
     assert hk_mod.cmd_ah(_args(tmp_path, a="0700")) == 2
     assert "A 股代码" in capsys.readouterr().err
+
+
+# ── O-23：命令级一致性（Markdown ↔ 引擎结构化返回）────────────────────────
+
+def test_cli_ah_markdown_matches_engine_structured_result(monkeypatch, tmp_path, capsys):
+    """命令级一致性（开发计划 P1 验收「JSON 与 Markdown 一致」）。
+
+    本 CLI 没有 `--json` 通道；按「不叠架构」不新增 flag，改为用**同一组输入**分别
+    走引擎纯函数与 CLI 渲染，再逐项比对：溢价率、两侧报价日期、市场状态、行情时点。
+    渲染层若自造数字或漏字段，本用例即失败。
+    """
+    hk_mod = _stub_all(monkeypatch)          # A 15:00 / H 16:08，同日两侧已收盘
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 0
+    out = capsys.readouterr().out
+
+    al = hk_ah.align_quotes({"price": 36.42, "ts": "20260912150000"},
+                            {"price": 42.15, "ts": "2026/09/12 16:08:06"})
+    pct = hk_ah.premium_pct(al["a_price"], al["h_price"], _FX_OK["rate"])
+    assert pct is not None
+
+    assert f"{pct:+.2f}%" in out, "渲染的溢价率与引擎纯函数结果不一致"
+    for label, value in (("a_date", al["a_date"]), ("h_date", al["h_date"]),
+                         ("a_state", al["a_state"]), ("h_state", al["h_state"]),
+                         ("a_as_of", al["a_as_of"]), ("h_as_of", al["h_as_of"])):
+        assert value and value in out, f"对齐结果 {label}={value!r} 未进入 Markdown"
+
+
+def test_cli_ah_alignment_table_has_as_of_column(monkeypatch, tmp_path, capsys):
+    """「交易日对齐」表须含**行情时点**列——只有日期+状态无法判断相隔多久。"""
+    hk_mod = _stub_all(monkeypatch)
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 0
+    out = capsys.readouterr().out
+    assert "| 侧 | 报价日期 | 行情时点 | 市场状态 |" in out
+    assert "行情时点" in out and "抓取 " in out, "抓取时刻与行情时点须分别标注"
+
+
+def test_cli_ah_intraday_beyond_tolerance_refused(monkeypatch, tmp_path, capsys):
+    """O-23 命令级回归：两侧同为「交易中」但相隔 37 分钟 → 不出溢价率。
+
+    这是「均交易中即可比」旧判据的失效形态：状态相同不等于时刻相同。
+    """
+    hk_mod = _stub_all(monkeypatch, a_ts="20260917103000",    # A 10:30 交易中
+                       h_ts="2026/09/17 11:07:00")            # H 11:07 交易中
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 1, "超容差须 return 1"
+    out = capsys.readouterr().out
+    assert "—（不可比）" in out
+    assert "37 分钟" in out and "5 分钟容差" in out
+    assert "A价/(H价×汇率)−1" not in out, "不可比时不得输出溢价率公式标签"
+    assert "10:30" in out and "11:07" in out, "两侧行情时点须并列可见"
+
+
+def test_cli_ah_records_per_side_fetch_time(monkeypatch, tmp_path, capsys):
+    """抓取时刻须**逐侧各记**，不能在全部请求完成后统一取一次。
+
+    2026-09-23 验收发现的缺陷：H→A→汇率三笔请求串行，统一取的时间晚于实际抓价
+    时刻（汇率耗时越久偏差越大），却标成两侧各自的「抓取时刻」。此处用递增桩值
+    钉住调用顺序：H 先抓、A 次之，两侧须各显示自己那一刻。
+    """
+    hk_mod = _stub_all(monkeypatch)
+    stamps = iter(["11111111111111", "22222222222222", "33333333333333"])
+    monkeypatch.setattr(hk_mod, "_now_shanghai", lambda: next(stamps))
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 0
+    out = capsys.readouterr().out
+    h_line = next(l for l in out.splitlines() if l.startswith("| H 价"))
+    a_line = next(l for l in out.splitlines() if l.startswith("| A 价"))
+    assert "11111111111111" in h_line, "H 侧抓取时刻应为第一笔"
+    assert "22222222222222" in a_line, "A 侧抓取时刻应为第二笔"
+    assert "33333333333333" not in h_line and "33333333333333" not in a_line, (
+        "汇率请求之后的时刻不得被标作任一报价的抓取时刻"
+    )
+
+
+def test_cli_ah_cross_day_does_not_print_bogus_minute_gap(monkeypatch, tmp_path, capsys):
+    """跨日报价：容差行不得显示「相隔 N 分钟」，须说明钟点差无意义。"""
+    hk_mod = _stub_all(monkeypatch, a_ts="20260916103000",        # A 9/16 10:30
+                       h_ts="2026/09/15 10:30:00")                # H 9/15 10:30
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "—（不可比）" in out
+    assert "跨报价日期，钟点差无意义" in out
+    assert "相隔 0 分钟" not in out, "跨日不得显示 0 分钟这个假数字"
+
+
+def test_cli_ah_output_has_no_combined_cap_or_inferred_share_count(monkeypatch, tmp_path, capsys):
+    """D3：缺股本结构 → 不产出 A+H 合计市值，也不产出推断的 H 股股数。
+
+    实测背景：需求文档 §2.1.1 的 H 股数 2.1829 亿股取自前十大流通股东的
+    HKSCC NOMINEES 持仓，属**推断值**；引擎未采集股本结构字段。
+    """
+    hk_mod = _stub_all(monkeypatch)
+    assert hk_mod.cmd_ah(_args(tmp_path)) == 0
+    out = capsys.readouterr().out
+    assert "A+H 合计" not in out and "2.1829" not in out
+    assert "亿股" not in out, "未采集股本结构时不得出现股数"
