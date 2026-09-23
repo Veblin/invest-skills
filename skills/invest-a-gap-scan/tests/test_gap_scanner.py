@@ -7,18 +7,25 @@ and exclusion reasons.
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from gap_scanner import (
     GapInfo,
+    is_cached_bar_settled,
     _build_scan_hit,
     _check_ma60_streak,
     _check_unfilled,
     _find_candidate_gaps,
+    _ma60_streak_stats,
+    _resolve_after_close,
     scan_all,
 )
+from lib.technical import sma  # noqa: E402（与引擎同源，用于覆盖度独立复算）
 from skip_reasons import ExcludeReason, NonHitReason
 
 
@@ -33,6 +40,20 @@ class MockStock:
         self.name = name
         self.index_membership = index_membership or []
         self.board = board
+
+
+def _now_at(ymd: str, hhmm: str = "1030") -> datetime:
+    """构造上海时区的固定时点，供 after_close 的日期感知判定注入。
+
+    合成 K 线的日期起点是 2025-01-01（远早于墙钟「今天」），注入固定时点
+    才能确定性地复现「盘中未完成 / 盘前已完成」两种情形。
+    """
+    return datetime.strptime(f"{ymd}{hhmm}", "%Y%m%d%H%M").replace(
+        tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+def _last_bar(kline: pd.DataFrame) -> str:
+    return str(kline.iloc[-1]["trade_date"])
 
 
 def _make_kline(
@@ -460,11 +481,12 @@ class TestHits:
         assert hit.vol_ratio >= 1.0
         assert isinstance(hit.avg_amount_20d, float) and hit.avg_amount_20d > 0
 
-    def test_gap_day_is_latest(self):
-        """Gap on the last bar -> 无后续数据无法确认回补 -> 不报命中。
+    def test_gap_day_is_latest_intraday_unconfirmed(self):
+        """最新 bar 尚未完成（当日盘中）→ 两条结论都不下 → GAP_UNCONFIRMED。
 
-        缺陷 4 修复前：最新 bar 的跳空恒判「未回补」→ 盘中扫描恒命中，
-        每次扫描都会把当日所有跳空股报为命中。
+        bar 未完成时「未回补」（`_check_unfilled` 对无后续数据的 bar 返回
+        False）与「已回补」都不成立，故单列终结桶；若没有该分支，缺口会被
+        误归入「缺口回补」（旧注释称「不判则恒命中」方向相反，已改正）。
         """
         kline = _make_kline(n_bars=200, gap_at=199)
         result = scan_all(
@@ -473,9 +495,12 @@ class TestHits:
             adj_factor_map={"000001.SZ": _valid_adj()},
             suspension_map={},
             params=DEFAULT_PARAMS,
+            now=_now_at(_last_bar(kline), "1030"),  # 当日盘中
         )
         assert len(result.hits) == 0
         assert result.non_hit_reasons[NonHitReason.GAP_UNCONFIRMED] == 1
+        # 未完成 ≠ 已回补：不得混入 GAP_FILLED
+        assert result.non_hit_reasons.get(NonHitReason.GAP_FILLED, 0) == 0
 
     def test_check_unfilled_last_bar_returns_false(self):
         """_check_unfilled 对最新 bar（无后续数据）返回 False，不做空洞真值。"""
@@ -514,7 +539,7 @@ class TestHits:
         assert _check_ma60_streak(closes, ma60, gap_idx=len(closes) - 2) is True
 
     def test_latest_bar_gap_falls_back_to_older_confirmed(self):
-        """最新 bar 跳空待收盘确认，容错规则回退到更早的已确认未回补缺口。"""
+        """最新 bar（盘中未完成）跳空待收盘确认，容错规则回退到更早的已确认缺口。"""
         kline = _make_two_gap_kline(
             n_bars=200,
             gaps=[(80, 1.5, False), (199, 1.5, False)],
@@ -526,6 +551,7 @@ class TestHits:
             adj_factor_map={"000001.SZ": _valid_adj()},
             suspension_map={},
             params=params,
+            now=_now_at(_last_bar(kline), "1030"),  # 当日盘中
         )
         assert len(result.hits) == 1
         assert result.hits[0].gap.gap_date == str(kline.iloc[80]["trade_date"])
@@ -937,3 +963,284 @@ class TestMaxGapFailOpenAndBoard:
             kline, 40, 1.0, suspensions=[], trade_cal=dates, ts_code="300001.SZ")
         assert len(all_c) == 1
         assert all_c[0][1].gap_pct == pytest.approx(55.0)
+
+
+class TestAfterCloseDateAware:
+    """V31-59：`after_close` 按**数据日期**判定，不按墙钟小时。
+
+    实测（2026-09-23 复现）：同一份缓存数据（最新 bar = 2026-09-18 周五，已完成）
+    周六 23:46 扫描得 10 命中，周一 06:40 扫描得 9 命中 + 1 条「最新bar待收盘确认」
+    —— 墙钟 `hour >= 15` 把已完成的 bar 当成未收盘，丢掉可判定的命中。
+    """
+
+    def test_resolve_premarket_prev_bar_complete(self):
+        """盘前：最新 bar 是上一交易日（更早日期）→ 已完成。"""
+        assert _resolve_after_close("20260918", _now_at("20260921", "0640")) is True
+
+    def test_resolve_weekend_prev_bar_complete(self):
+        """周末：最新 bar 是周五 → 已完成。"""
+        assert _resolve_after_close("20260918", _now_at("20260919", "2346")) is True
+
+    def test_resolve_same_day_intraday_incomplete(self):
+        """当日盘中：最新 bar 就是今日且未收盘 → 未完成。"""
+        assert _resolve_after_close("20260923", _now_at("20260923", "1030")) is False
+
+    def test_resolve_same_day_after_close_complete(self):
+        """当日 15:00 后：日线已发布 → 已完成。"""
+        assert _resolve_after_close("20260923", _now_at("20260923", "1530")) is True
+        assert _resolve_after_close("20260923", _now_at("20260923", "1500")) is True
+
+    def test_resolve_unparsable_date_is_conservative(self):
+        """日期不可解析 → 保守判未完成（不猜成已完成）。"""
+        assert _resolve_after_close("", _now_at("20260923", "1530")) is False
+        assert _resolve_after_close("2026-13-99x", _now_at("20260923", "1530")) is False
+
+    def test_resolve_accepts_dashed_date(self):
+        """兼容带连字符的日期串（源差异）。"""
+        assert _resolve_after_close("2026-09-18", _now_at("20260921", "0640")) is True
+
+    def test_premarket_latest_bar_gap_confirms_hit(self):
+        """盘前（周末/节假日）最新 bar 已完成 → 缺口确认命中（V31-59 回归）。
+
+        修复前：hour(6) < 15 → after_close=False → 归入 GAP_UNCONFIRMED，丢失命中。
+        """
+        kline = _make_kline(n_bars=200, gap_at=199)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            # 周一 06:40 运行，最新 bar 是上周五（已完成）
+            now=_now_at("20251013", "0640"),
+        )
+        assert len(result.hits) == 1
+        assert result.hits[0].gap.gap_date == _last_bar(kline)
+        assert result.non_hit_reasons.get(NonHitReason.GAP_UNCONFIRMED, 0) == 0
+
+    def test_explicit_after_close_false_still_honored(self):
+        """显式传 after_close=False 时不做日期感知（测试/重放用）。"""
+        kline = _make_kline(n_bars=200, gap_at=199)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            after_close=False,
+        )
+        assert len(result.hits) == 0
+        assert result.non_hit_reasons[NonHitReason.GAP_UNCONFIRMED] == 1
+
+
+class TestHitProvenance:
+    """V31-38/41/42：命中携带可复算分母、MA60 覆盖度与数据日（报告据此自证口径）。"""
+
+    def test_vol_ratio_is_recomputable(self):
+        """量比 = 缺口日成交额 / 分母（缺口日前至多 20 根 bar 日均额）。"""
+        kline = _make_kline(n_bars=200, gap_at=150)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        hit = result.hits[0]
+        assert hit.gap_day_amount == pytest.approx(5e8)
+        assert hit.vol_ratio_denom == pytest.approx(5e8)
+        assert hit.vol_ratio == pytest.approx(hit.gap_day_amount / hit.vol_ratio_denom)
+
+    def test_vol_ratio_denominator_uses_gap_local_window(self):
+        """分母是缺口日前 20 根（不是当前尾部）——两窗口取值不同。"""
+        amounts = np.full(200, 2e8)
+        amounts[130:150] = 4e8          # 缺口前 20 根被放大
+        amounts[180:] = 1e8             # 当前尾部相反
+        kline = _make_kline(n_bars=200, gap_at=150, amounts=amounts)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        hit = result.hits[0]
+        assert hit.vol_ratio_denom == pytest.approx(4e8)      # 缺口前 20 根
+        assert hit.avg_amount_20d == pytest.approx(1e8)       # 当前尾部 20 根
+        assert hit.vol_ratio_denom != hit.avg_amount_20d
+
+    def test_gap_local_window_capped_at_20_bars(self):
+        """缺口靠前时分母只取 `min(20, gap_idx)` 根（至多 20）。"""
+        amounts = np.full(200, 1e8)
+        amounts[1] = 3e8
+        amounts[5:25] = 2e8
+        kline = _make_kline(n_bars=130, gap_at=25, amounts=amounts[:130])
+        # lookback 放大到 120 才能把 idx=25 纳入搜索窗口。
+        # 缺口 idx=25 → 分母窗口 = amounts[5:25]（20 根，均值 2e8）
+        params = {**DEFAULT_PARAMS, "gap_lookback": 120}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        hit = result.hits[0]
+        assert hit.vol_ratio_denom == pytest.approx(2e8)
+
+    def test_ma60_coverage_fields_present(self):
+        """MA60 覆盖度随命中输出（报告披露判定强度）。"""
+        kline = _make_kline(n_bars=200, gap_at=150)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        hit = result.hits[0]
+        assert hit.ma60_total_bars == 200 - 150
+        assert hit.ma60_valid_bars == 200 - 150  # 数据充足：全部 bar 有 MA60
+        # 与引擎内部复算一致（覆盖度字段不是独立心算，而是同一判定的输出）
+        passed, valid, total = _ma60_streak_stats(
+            kline["close_qfq"].tolist(),
+            sma(kline["close_qfq"].tolist(), 60),
+            150,
+        )
+        assert passed is True
+        assert (valid, total) == (hit.ma60_valid_bars, hit.ma60_total_bars)
+
+    def test_ma60_coverage_partial_history_included(self):
+        """短历史但覆盖度达标（74 根、缺口 idx=14）→ 命中且覆盖度 15/60。
+
+        74 根标的的 MA60 仅 bar 59 起有效：缺口起 60 根 bar 中只有 15 根
+        有 MA60 值，恰好满足门槛 `max(ceil(60×0.25), 3) = 15`。
+        """
+        kline = _make_kline(n_bars=74, gap_at=14, gap_pct=1.5)
+        params = {**DEFAULT_PARAMS, "min_list_days": 60}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        hit = result.hits[0]
+        assert (hit.ma60_valid_bars, hit.ma60_total_bars) == (15, 60)
+
+    def test_ma60_coverage_below_threshold_is_ma60_broken(self):
+        """覆盖度不足（64 根、缺口 idx=10 → 5/54）→ 归入 MA60破，不报命中。
+
+        这是**有意收紧**：覆盖度不足时 MA60 判定无强度含义，宁可归入 MA60破
+        也不放行一个没有 MA60 支撑的命中（报告会披露覆盖度，见 SKILL.md）。
+        """
+        kline = _make_kline(n_bars=64, gap_at=10, gap_pct=1.5)
+        params = {**DEFAULT_PARAMS, "min_list_days": 60}
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=params,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        assert len(result.hits) == 0
+        assert result.non_hit_reasons[NonHitReason.MA60_BROKEN] == 1
+        _, valid, total = _ma60_streak_stats(
+            kline["close_qfq"].tolist(),
+            sma(kline["close_qfq"].tolist(), 60),
+            10,
+        )
+        assert (valid, total) == (5, 54)
+
+    def test_data_as_of_and_hit_data_date(self):
+        """`data_as_of` = 全池最新 bar；命中携带各自数据日。"""
+        kline = _make_kline(n_bars=200, gap_at=150)
+        result = scan_all(
+            stocks=[STOCK],
+            stock_kline_map={"000001.SZ": kline},
+            adj_factor_map={"000001.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            now=_now_at(_last_bar(kline), "1030"),
+        )
+        assert result.data_as_of == _last_bar(kline)
+        # 归一化为 yyyymmdd（不含连字符）
+        assert "-" not in result.data_as_of
+        assert result.hits[0].data_date == _last_bar(kline)
+
+    def test_data_as_of_picks_latest_across_stocks(self):
+        """多标的时取最新 bar（停牌股更早不得拉低数据截止日）。"""
+        kline_a = _make_kline(n_bars=200, gap_at=150)
+        kline_b = _make_kline(n_bars=180, gap_at=140)  # 更早结束
+        stock_b = MockStock("000002.SZ")
+        result = scan_all(
+            stocks=[STOCK, stock_b],
+            stock_kline_map={"000001.SZ": kline_a, "000002.SZ": kline_b},
+            adj_factor_map={"000001.SZ": _valid_adj(), "000002.SZ": _valid_adj()},
+            suspension_map={},
+            params=DEFAULT_PARAMS,
+            now=_now_at(_last_bar(kline_a), "1030"),
+        )
+        assert result.data_as_of == _last_bar(kline_a)
+        assert _last_bar(kline_b) < _last_bar(kline_a)
+
+
+class TestCachedBarSettled:
+    """评审续（2026-09-23）：缓存里的**盘中快照**不得在隔日被当成已完成 bar。
+
+    实测缺陷：盘中 10:30 写入的缓存（末根 bar = 当日）在次日 09:00 被复用，
+    日期比较「昨日 < 今日」成立 → 用未走完的低点断言「缺口未回补」，凭空产出命中；
+    而当日真实收盘该缺口根本不成立。判据因此是「写入时刻晚于**该 bar 自身交易日**的收盘」。
+    """
+
+    def test_history_bar_written_after_its_close_is_settled(self):
+        """昨日 bar + 缓存在该 bar 收盘后写入 → 定稿。"""
+        assert is_cached_bar_settled(
+            "20260923", _now_at("20260923", "1600").timestamp(),
+            _now_at("20260924", "0900")) is True
+        assert is_cached_bar_settled(
+            "20260923", _now_at("20260923", "1500").timestamp(),
+            _now_at("20260924", "0900")) is True
+
+    def test_history_bar_written_intraday_is_not_settled(self):
+        """昨日 bar 但缓存在该 bar **盘中**写入 → 未定稿（本缺陷的核心场景）。"""
+        assert is_cached_bar_settled(
+            "20260923", _now_at("20260923", "1030").timestamp(),
+            _now_at("20260924", "0900")) is False
+
+    def test_today_bar_written_intraday_is_not_settled(self):
+        assert is_cached_bar_settled(
+            "20260923", _now_at("20260923", "1030").timestamp(),
+            _now_at("20260923", "1030")) is False
+
+    def test_today_bar_written_after_close_is_settled(self):
+        assert is_cached_bar_settled(
+            "20260923", _now_at("20260923", "1530").timestamp(),
+            _now_at("20260923", "2000")) is True
+
+    def test_refetch_after_close_next_day_is_settled(self):
+        """次日盘前重拉得到的「昨日 bar」→ 写入时刻晚于该 bar 收盘 → 定稿。"""
+        assert is_cached_bar_settled(
+            "20260923", _now_at("20260924", "0900").timestamp(),
+            _now_at("20260924", "0902")) is True
+
+    def test_missing_mtime_is_not_settled(self):
+        """写入时刻不可得（stat 失败）→ 保守判未定稿。"""
+        assert is_cached_bar_settled("20260923", None, _now_at("20260924", "0900")) is False
+
+    def test_future_or_malformed_date_is_not_settled(self):
+        now = _now_at("20260923", "2000")
+        assert is_cached_bar_settled("20260924", 0.0, now) is False  # 未来 bar
+        assert is_cached_bar_settled("", 0.0, now) is False
+        assert is_cached_bar_settled("not-a-date", 0.0, now) is False
+
+    def test_dashed_date_accepted(self):
+        assert is_cached_bar_settled(
+            "2026-09-22", _now_at("20260922", "1600").timestamp(),
+            _now_at("20260923", "0900")) is True

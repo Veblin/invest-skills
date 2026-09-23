@@ -12,6 +12,7 @@ Typical usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 from dataclasses import dataclass
@@ -137,6 +138,51 @@ def _load_cache(path: Path) -> list[StockInfo] | None:
     except Exception as exc:
         logger.warning("Failed to load universe cache %s: %s", path, exc)
         return None
+
+
+def _provenance_path(date_str: str | None = None) -> Path:
+    """成分股来源 sidecar 路径：``universe_{yyyymmdd}.provenance.json``。
+
+    来源**不放进 pickle**（StockInfo 是逐股对象，装不进池级元数据；且旧缓存
+    反序列化到新增字段会 AttributeError）。独立 sidecar 让「来源可追溯」与
+    「缓存可复用」解耦：sidecar 缺失即明确判未知，不猜。
+    """
+    return _cache_path(date_str).with_suffix(".provenance.json")
+
+
+def _load_provenance(path: Path) -> dict[str, str] | None:
+    """读取 sidecar；不存在/损坏返回 None（调用方按「来源未记录」处理）。
+
+    「损坏」含**合法 JSON 但顶层不是对象**（`[]` / `null` / 字符串 / 数字）：
+    这类文件解析不抛异常，却在 `.get()` 处抛 `AttributeError`，且抛在 try 之外
+    → 会一路打断 `build_universe()` 让整次扫描中止。故先校验顶层类型。
+    """
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to load universe provenance %s: %s", path, exc)
+        return None
+    if not isinstance(data, dict):
+        logger.warning(
+            "Universe provenance %s 顶层不是对象（%s）——按「来源未记录」处理",
+            path, type(data).__name__,
+        )
+        return None
+    per_index = data.get("per_index")
+    return per_index if isinstance(per_index, dict) else None
+
+
+def _save_provenance(path: Path, per_index: dict[str, str | None]) -> None:
+    """写入 sidecar（失败不影响主流程：来源缺失会被报告标为未记录）。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"per_index": per_index}, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.warning("Failed to save universe provenance %s: %s", path, exc)
 
 
 def _save_cache(path: Path, universe: list[StockInfo]) -> None:
@@ -433,6 +479,7 @@ def build_universe(
     indices: list[str] | None = None,
     force_refresh: bool = False,
     universe_limit: int | None = None,
+    provenance: dict | None = None,
 ) -> list[StockInfo]:
     """Build the gap-scan stock universe from index constituent union.
 
@@ -461,6 +508,13 @@ def build_universe(
             upstream APIs.
         universe_limit: If set, return at most this many stocks (useful
             for development/debugging).
+        provenance: 可选出参。传入 dict 时回填池来源，供报告如实披露：
+            ``{"from_cache": bool, "per_index": {index_key: source_label | None}}``。
+            ``source_label`` 取三级链中**实际成功**的一级
+            （``"akshare index_stock_cons"`` / ``"akshare index_stock_cons_sina"``
+            / ``"Tushare index_weight"``）；全部源失败记 ``None``；
+            **复用缓存且无 provenance sidecar 时 ``per_index`` 为空 dict**
+            ——调用方须按「来源未记录」呈现，不得回落到默认口径。
 
     Returns:
         List of :class:`StockInfo` objects, sorted by ``ts_code``.
@@ -475,6 +529,11 @@ def build_universe(
     if not force_refresh:
         cached = _load_cache(_cache_path(today_str))
         if cached is not None:
+            if provenance is not None:
+                # 复用缓存时来源只能来自 sidecar；缺失即「未记录」（不猜）
+                per_index = _load_provenance(_provenance_path(today_str))
+                provenance["from_cache"] = True
+                provenance["per_index"] = per_index or {}
             if universe_limit is not None:
                 return cached[:universe_limit]
             return cached
@@ -487,6 +546,7 @@ def build_universe(
     # ---- Fetch index constituents ----
     # stock_map: ts_code → {ts_code, name, index_membership, market, list_date}
     stock_map: dict[str, dict[str, Any]] = {}
+    per_index_source: dict[str, str | None] = {}
 
     for idx_key in indices:
         config = _INDICES_CONFIG.get(idx_key)
@@ -495,30 +555,40 @@ def build_universe(
             continue
 
         codes: set[str] = set()
+        used_source: str | None = None
 
         # Priority 1: akshare index_stock_cons
         df = _fetch_index_akshare(idx_key, config)
         if df is not None and not df.empty:
             codes = _extract_codes_from_akshare_df(df)
+            if codes:
+                used_source = "akshare index_stock_cons"
 
         # Priority 2: akshare index_stock_cons_sina (only csi300)
         if not codes:
             df = _fetch_index_sina(idx_key, config)
             if df is not None and not df.empty:
                 codes = _extract_codes_from_akshare_df(df)
+                if codes:
+                    used_source = "akshare index_stock_cons_sina"
 
         # Priority 3: Tushare index_weight
         if not codes and tushare_available:
             df = _fetch_index_tushare(idx_key, config, client)
             if df is not None and not df.empty:
                 codes = _extract_codes_from_tushare_df(df)
+                if codes:
+                    used_source = "Tushare index_weight"
 
         if not codes:
             logger.warning(
                 "All sources failed for index %r — no constituents loaded",
                 idx_key,
             )
+            per_index_source[idx_key] = None  # 全部源失败：该指数未纳入池
             continue
+
+        per_index_source[idx_key] = used_source
 
         # Record membership
         for code_6d in codes:
@@ -579,6 +649,11 @@ def build_universe(
 
     # ---- Cache ----
     _save_cache(_cache_path(today_str), result)
+    # 来源 sidecar：与缓存同批落盘，供报告如实披露池来源（含降级到哪一级）
+    _save_provenance(_provenance_path(today_str), per_index_source)
+    if provenance is not None:
+        provenance["from_cache"] = False
+        provenance["per_index"] = per_index_source
 
     if universe_limit is not None:
         return result[:universe_limit]

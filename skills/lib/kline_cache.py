@@ -69,6 +69,20 @@ class KlineTTLCache:
             else:
                 raise
 
+    def path_for(self, date_str: str, parts: tuple[str, ...]) -> Path:
+        """该条目的落盘路径（只读访问器，供审计/缓存年龄披露使用）。
+
+        不存在时不创建任何目录；调用方自行 `exists()`/`stat()`。
+        """
+        return self._path(date_str, parts)
+
+    def age_seconds(self, date_str: str, parts: tuple[str, ...]) -> float | None:
+        """条目文件的年龄（秒，基于 mtime）；不存在返回 None。"""
+        try:
+            return time.time() - self.path_for(date_str, parts).stat().st_mtime
+        except OSError:
+            return None
+
     def load(self, date_str: str, parts: tuple[str, ...], *,
              type_guard: type | None = None) -> Any | None:
         """读取缓存；未启用/不存在/过期/损坏/类型不符均返回 None（视为未命中）。"""
