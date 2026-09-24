@@ -1,6 +1,6 @@
 # 参与者行为扫描专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent game_theory` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) 契约 A–D 约束（legacy LAW 编号的映射见该文件「降级与废止」注）。`plan --intent game_theory` 时加载本文件。
 
 ## 定位（v0.1.9）
 
@@ -73,4 +73,4 @@ uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/
 
 ## 不可得处理
 
-全部参与者维度无数据时，引擎输出 LAW 5 标准句；Claude 不推测参与者意图。
+全部参与者维度无数据时，引擎输出 A3/C4（原 LAW 5）标准句；Claude 不推测参与者意图。

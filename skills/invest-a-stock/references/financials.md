@@ -1,6 +1,6 @@
 # 财报深度研究专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent financials_deep` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) 契约 A–D 约束（legacy LAW 编号的映射见该文件「降级与废止」注）。`plan --intent financials_deep` 时加载本文件。
 
 ## 采集工作流
 

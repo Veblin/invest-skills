@@ -421,6 +421,24 @@ PARTICIPANT_SCAN_KEYS = frozenset({"participant_scan"})
 # 两个渲染器共用（见 render_html.has_events_analysis 与 _v3._section_events_timeline）。
 EVENTS_HOST_KEYS = EVENT_CLASSIFICATION_KEYS | {"events"}
 
+# 首版 MD 的占位串 → 必须命中的槽位（`missing_draft_slots` 的判据表）。
+#
+# **每条占位串都归渲染层所有**，本表只是它的镜像：措辞改了而这里没跟着改，
+# 闸门会静默退化成 no-op——`--draft` 照旧打印「✅ 校验通过」，占位却进了终稿
+# （report_qc 用的是宽容正则 `_EMPTY_BASIS_RE`，多半仍会命中，于是更难发现）。
+# 故 `tests/test_fast_report_pipeline.py::test_draft_slot_markers_match_render_output`
+# 对**渲染实际输出**断言这些字面量：改词即红。
+DRAFT_SLOT_MARKERS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("bear_chain", "当前数据未形成明确空头逻辑链", BEAR_CHAIN_KEYS),
+    ("mda_narrative", "待 Claude 填充管理层论述解读", MDA_NARRATIVE_KEYS),
+    ("participant_scan", "分析提示（Claude 填写）", PARTICIPANT_SCAN_KEYS),
+    ("event_classification", "待 Claude 验证", EVENTS_HOST_KEYS),
+    # 事件槽位的**第二个**产出点：A-5 管理层时间线单元格（_v3 的 ev_cell）。
+    # 漏掉它则「首版 MD 带此占位」直接过闸，直到流水线末尾才被 report_qc 以
+    # error 级拦下（要重跑整次 collect+render）。同一槽位 → 同名去重。
+    ("event_classification", "[待 Claude report 阶段填充]", EVENTS_HOST_KEYS),
+)
+
 
 def _keys_of(sec: dict) -> set[str]:
     """段的 module/position 归一化小写集合（非 dict → 空集）。"""
@@ -442,6 +460,25 @@ def find_section(analysis: list[dict] | None, keys: frozenset[str]) -> dict | No
         if _keys_of(sec) & keys:
             return sec
     return None
+
+
+def missing_draft_slots(analysis: list[dict], draft_text: str) -> list[str]:
+    """由首版 MD 的实际占位推导必须命中的分析槽位。
+
+    首版报告是本次 collection 的条件渲染结果；仅检查本次真的出现的宿主，
+    避免要求没有 MD&A 卡或参与者扫描行的报告硬填无落点的段。
+
+    判据表见 ``DRAFT_SLOT_MARKERS``（占位串由渲染层产出，本模块只做镜像）。
+    """
+    markers = DRAFT_SLOT_MARKERS
+    missing: list[str] = []
+    for name, marker, keys in markers:
+        if marker not in draft_text or name in missing:
+            continue
+        section = find_section(analysis, keys)
+        if not section or not str(section.get("analysis_md") or "").strip():
+            missing.append(name)
+    return missing
 
 
 def split_overview(analysis: list[dict] | None) -> tuple[list[dict], list[dict]]:

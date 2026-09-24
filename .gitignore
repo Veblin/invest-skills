@@ -39,8 +39,12 @@ dist/
 # 绘图工作区（锚定根目录：docs/diagram/ 存放对外发布的成品图，须可跟踪）
 /diagram/
 
-# invest.py report 
+# invest.py report
 reports/
+
+# 开发模式日志（INVEST_DEV=1）。锚定根目录：落盘位置由 logutil 的文件身份判据
+# 锁定为唯一的 <repo>/logs/，不放宽以免误伤未来嵌套的 <pkg>/logs
+/logs/
 
 
 # v0.2.7 C14 定案：历史规划/评审稿保留本地、不随版本库分发（详见 host-docs 执行计划）

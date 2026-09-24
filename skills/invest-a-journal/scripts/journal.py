@@ -305,6 +305,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-journal")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     parser = build_parser()
     args = parser.parse_args()
 

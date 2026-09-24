@@ -880,6 +880,8 @@ def _run_theme(args) -> int:
 
 
 def main() -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-event-calendar")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days-past", type=int, default=120, help="分位回看窗口（自然日，默认 120）")
     ap.add_argument("--days-future", type=int, default=30, help="展望窗口（自然日，默认 30）")

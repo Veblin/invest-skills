@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 from lib.events import (
     attach_events,
@@ -166,6 +168,10 @@ class TestGetLogicRelation:
 
     def test_unknown_does_not_change(self):
         assert _get_logic_relation("unknown_type") == "不改变"
+
+    @pytest.mark.parametrize("event_type", ["unlock", "investment"])
+    def test_event_type_alone_does_not_establish_direction(self, event_type):
+        assert _get_logic_relation(event_type) == "不改变"
 
 
 # ── _normalize_date ──
@@ -537,6 +543,27 @@ class TestAttachEventsIntegration:
 
         assert len(result["events"]) == 1
         assert result["events"][0]["type"] == "buyback"
+        # 抛异常的腿记 failed（fetch 抛栈与返回 None 同义）
+        assert result["_meta"]["events_legs"]["dividend"] == "failed"
+
+    @patch("lib.events._fetch_notice_events")
+    @patch("lib.events._fetch_dividend_events")
+    @patch("lib.events._fetch_shareholder_events")
+    def test_attach_events_records_three_leg_states(self, mock_shareholder, mock_dividend, mock_notice):
+        """失败/无数据/取到 三态分别落盘——供渲染层区分「未取到」与「窗口内无公告」。"""
+        d_recent = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+        mock_notice.return_value = None      # 接口异常
+        mock_dividend.return_value = []      # 接口正常但无数据
+        mock_shareholder.return_value = [{
+            "date": d_recent, "type": "holder_increase", "title": "股东增持",
+            "impact_dimension": "估值", "duration": "短期扰动",
+            "logic_relation": "强化", "source": "akshare stock_shareholder_change_ths", "url": "",
+        }]
+
+        result = attach_events({}, "600176", days=30)
+        assert result["_meta"]["events_legs"] == {
+            "notice": "failed", "dividend": "empty", "holder_change": "ok",
+        }
 
     @patch("lib.events._fetch_notice_events")
     @patch("lib.events._fetch_dividend_events")
@@ -604,9 +631,9 @@ class TestFetchNoticeEvents:
 
     @patch("akshare.stock_individual_notice_report")
     def test_api_failure(self, mock_notice):
+        """接口异常 → None（与「接口正常但无数据」的 [] 区分开）。"""
         mock_notice.side_effect = RuntimeError("Connection error")
-        events = _fetch_notice_events("600176")
-        assert events == []
+        assert _fetch_notice_events("600176") is None
 
 
 class TestFetchDividendEvents:
@@ -643,6 +670,18 @@ class TestFetchDividendEvents:
         events = _fetch_dividend_events("600176")
         assert events == []
 
+    @patch("akshare.stock_history_dividend_detail")
+    @patch("akshare.stock_dividend_cninfo")
+    def test_dividend_both_sources_fail_returns_none(self, mock_cninfo, mock_history):
+        """主源与回退源都异常 → None；任一源正常应答（哪怕空表）→ []。"""
+        mock_history.side_effect = RuntimeError("primary down")
+        mock_cninfo.side_effect = RuntimeError("fallback down")
+        assert _fetch_dividend_events("600176") is None
+
+        mock_cninfo.side_effect = None
+        mock_cninfo.return_value = MockDataFrame([])
+        assert _fetch_dividend_events("600176") == []
+
 
 class TestFetchShareholderEvents:
     @patch("akshare.stock_shareholder_change_ths")
@@ -675,9 +714,9 @@ class TestFetchShareholderEvents:
 
     @patch("akshare.stock_shareholder_change_ths")
     def test_shareholder_api_failure(self, mock_shareholder):
+        """接口异常 → None（与「接口正常但无数据」的 [] 区分开）。"""
         mock_shareholder.side_effect = RuntimeError("API error")
-        events = _fetch_shareholder_events("600176")
-        assert events == []
+        assert _fetch_shareholder_events("600176") is None
 
 
 class TestCollectAllDeepEvents:
@@ -738,6 +777,34 @@ class TestNeedsEventsBackfill:
         coll = {
             "events": [],
             "_meta": {"events_summary": {"event_count": 0, "window_days": 30}},
+        }
+        assert needs_events_backfill(coll) is False
+
+    def test_empty_with_all_legs_failed(self):
+        """有 summary 但三条腿全失败 → 是采集缺陷，须重试（不得读成「窗口内无事件」）。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {
+                    "notice": "failed", "dividend": "failed", "holder_change": "failed",
+                },
+            },
+        }
+        assert needs_events_backfill(coll) is True
+
+    def test_empty_with_partial_leg_failure_still_terminal(self):
+        """仅部分腿失败且其余腿确认无数据 → 不是全败，不重试。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {"notice": "failed", "dividend": "empty", "holder_change": "empty"},
+            },
         }
         assert needs_events_backfill(coll) is False
 

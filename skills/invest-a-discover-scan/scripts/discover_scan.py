@@ -603,6 +603,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-discover-scan")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     args = build_parser().parse_args(argv)
 
     if not sources.has_token():

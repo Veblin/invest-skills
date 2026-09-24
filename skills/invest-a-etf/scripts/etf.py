@@ -904,6 +904,8 @@ def cmd_review(symbol: str, *, out: str | None = None, md: str | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-etf")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     parser = argparse.ArgumentParser(prog="etf.py", description="invest-a-etf CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

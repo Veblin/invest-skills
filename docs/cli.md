@@ -25,7 +25,7 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `--resume` | 从上次中断的步骤继续 |
 | `--save-raw` | 保存原始采集 JSON 到 `~/.local/share/investment/raw/` |
 
-## 子命令分组（invest.py，27 个）
+## 子命令分组（invest.py，30 个）
 
 ### 研究主线
 
@@ -36,6 +36,7 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `analyze` | 分析采集结果（输出中间分析 JSON） |
 | `synthesize` | 合成最终研究报告 |
 | `report` | 一键生成分析报告（collect + analyze + synthesize） |
+| `validate-analysis` | 校验分析 JSON 槽位（`--draft` 同时检查首版 MD 的实际占位） |
 | `evidence` | 生成结构化证据表 |
 
 ### 验算与质控
@@ -71,6 +72,7 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `thesis` | 投资假设追踪 |
 | `shock` | 价格冲击插值比例（非风险中性概率） |
 | `catalyst` | 催化剂日历：分红/解禁/公告前瞻事件（取数失败时产物写明「不可得 ≠ 无事件」） |
+| `notice-body` | 取公告正文（`art_code` 或详情页 url；原文不改写 + 截断三态，不做结构化抽取） |
 | `diagnose` | 检查数据源可用性 |
 
 ## 常用示例

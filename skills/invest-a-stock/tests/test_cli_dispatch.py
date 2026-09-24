@@ -13,15 +13,38 @@ def _parse(argv):
     return invest.build_parser().parse_args(argv)
 
 
+def test_parser_and_dispatch_counts_match_by_measurement():
+    """两处注册表的数量与成员必须一致——**实测**，不靠注释里的手数字。
+
+    注释曾写「29 个 sub.add_parser」而真实为 30（改数字时没重数）；数量由本测试
+    钉住，注释不再承载手数常量。
+    """
+    import ast
+    from pathlib import Path
+
+    import invest
+
+    src = Path(invest.__file__).read_text(encoding="utf-8")
+    n_parser = sum(
+        1 for nd in ast.walk(ast.parse(src))
+        if isinstance(nd, ast.Call) and isinstance(nd.func, ast.Attribute)
+        and nd.func.attr == "add_parser"
+    )
+    assert n_parser == len(invest.CMD_DISPATCH), (
+        f"sub.add_parser {n_parser} 个 vs CMD_DISPATCH {len(invest.CMD_DISPATCH)} 条"
+    )
+
+
 def test_main_dispatch_desync_fails_loud(monkeypatch, capsys):
     """CMD_DISPATCH 缺条目（与 build_parser 失步）→ 友好错误 + exit 1。"""
     import invest
     from lib import env as env_mod
-    from lib import logutil
 
     monkeypatch.setattr(env_mod, "ensure_env_loaded", lambda: None)
     monkeypatch.setattr(env_mod, "configure_socket_timeout", lambda: None)
-    monkeypatch.setattr(logutil, "setup_logging", lambda: None)
+    # 不再 monkeypatch logutil：main() 现经 `lib._invest_path` 引导后从**共享层**
+    # 导入 setup_logging，release（无 INVEST_DEV）分支本身就是零副作用 no-op。
+    monkeypatch.delenv("INVEST_DEV", raising=False)
 
     class FakeParser:
         def parse_args(self):

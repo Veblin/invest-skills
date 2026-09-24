@@ -306,6 +306,77 @@ class TestEventsKeySnapshot:
         events_diff = result.get("events") or {}
         assert events_diff.get("count_change") == 3
 
+    def test_legacy_other_ranking_does_not_produce_phantom_type_change(self):
+        """旧快照的 top_types 带 other（v0.3.1 前的口径）不得报成「事件类型发生变化」。
+
+        top_types 语义在本次改动静默变过（低信号被剔出榜）：两侧不剔低信号，同一批
+        公告会被读成新出现了 guarantee/pledge/… 并移除了 other。
+        """
+        from lib.store import diff_key_snapshots
+
+        def _coll(fetched: str, top_types: list, proc: int, uncl: int) -> dict:
+            return {
+                "symbol": "600176",
+                "fetched_at": fetched,
+                "_meta": {"events_summary": {
+                    "event_count": 3, "window_days": 30, "top_types": top_types,
+                    "procedural_count": proc, "unclassified_count": uncl,
+                }},
+            }
+
+        old = _coll("2026-06-01T00:00:00Z",
+                    [{"type": "other", "count": 68}, {"type": "buyback", "count": 3}], 0, 68)
+        new = _coll("2026-06-08T00:00:00Z", [{"type": "buyback", "count": 3}], 0, 68)
+
+        events_diff = diff_key_snapshots(old, new).get("events") or {}
+        assert events_diff.get("new_types", []) == []
+        assert events_diff.get("removed_types", []) == []
+
+    def test_low_signal_surge_is_reported(self):
+        """程序性/未分类公告的激增须可见（top_types 已剔除这两类，只能靠计数）。"""
+        from lib.store import diff_key_snapshots
+
+        def _coll(fetched: str, proc: int, uncl: int) -> dict:
+            return {
+                "symbol": "600176",
+                "fetched_at": fetched,
+                "_meta": {"events_summary": {
+                    "event_count": 3, "window_days": 30,
+                    "top_types": [{"type": "buyback", "count": 3}],
+                    "procedural_count": proc, "unclassified_count": uncl,
+                }},
+            }
+
+        result = diff_key_snapshots(_coll("2026-06-01T00:00:00Z", 10, 0),
+                                    _coll("2026-06-08T00:00:00Z", 50, 0))
+        assert (result.get("events") or {}).get("low_signal_change") == 40
+
+    def test_low_signal_change_skipped_when_legacy_snapshot_lacks_counts(self):
+        """v0.3.1 前的 summary 无低信号计数字段 → 不可比，不得报成「从 0 涨到 N」。"""
+        from lib.store import diff_key_snapshots
+
+        old = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-01T00:00:00Z",
+            "_meta": {"events_summary": {
+                "event_count": 3, "window_days": 30,
+                "top_types": [{"type": "buyback", "count": 3}],
+            }},
+        }
+        new = {
+            "symbol": "600176",
+            "fetched_at": "2026-06-08T00:00:00Z",
+            "_meta": {"events_summary": {
+                "event_count": 3, "window_days": 30,
+                "top_types": [{"type": "buyback", "count": 3}],
+                "procedural_count": 50, "unclassified_count": 0,
+            }},
+        }
+
+        events_diff = diff_key_snapshots(old, new).get("events") or {}
+        assert "low_signal_change" not in events_diff
+        assert "procedural_count" not in (events_diff or {})
+
     def test_diff_skips_count_when_window_days_differ(self):
         from lib.store import diff_key_snapshots
 

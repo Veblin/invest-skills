@@ -44,6 +44,13 @@ _DIRECTION_RULES: dict[str, tuple[str, str]] = {
     "holder_decrease": ("负向", "medium"),
     "st_risk": ("负向", "medium"),
     "litigation": ("负向", "medium"),
+    # v0.3.1 新增类型中**方向明确**的风险项；其余有意不给方向：
+    # market_anomaly（异动方向不定）、investment（对外投资未必利好）、
+    # unlock（解禁本身不代表减持）、
+    # holder_change（权益变动可能是增持也可能是减持）、related_party / procedural。
+    "regulatory": ("负向", "medium"),
+    "pledge": ("负向", "medium"),
+    "guarantee": ("负向", "medium"),
 }
 
 _DIRECTION_DISCLAIMER = "[参考: 事件类型分类规则，不构成投资建议]"
@@ -459,6 +466,17 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
 
 
 # ---- Taxonomy loader ----
+
+
+def event_type_label(event_type: str) -> str:
+    """事件类型 → 中文标签，**单一源**是 taxonomy 的 ``label``。
+
+    渲染层与事实层此前各自维护一张 dict，已漂移到含 `warning`/`merger` 等不再存在的键；
+    新增类型则静默回落成英文标识（``.get(k, k)`` 不报错，所以长期不可见）。
+    取不到时退回原标识，不臆造译名。
+    """
+    label = (load_event_taxonomy().get("event_types", {}).get(event_type) or {}).get("label")
+    return str(label) if label else str(event_type)
 
 
 def load_event_taxonomy() -> dict:

@@ -287,13 +287,12 @@ def _split_adj_factor_map(
 def main() -> int:
     args = build_parser().parse_args()
 
-    # 配置日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stderr,
-    )
+    # 开发日志统一门控：此前无条件在 root 上挂 stderr handler 输出 INFO，是全系列
+    # 唯一不看 INVEST_DEV 的入口（release 用户也看到扫描 INFO）。
+    # 注意 release 下的两处变化：INFO 静默；WARNING/ERROR 走 lastResort，只剩裸消息
+    # （无时间戳/级别前缀）。dev 模式恢复格式化输出，但多一个 [skill] 标识。
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-gap-scan")
 
     start_wall = time.time()
     logger.info("开始扫描 (universe=%s)", args.universe)

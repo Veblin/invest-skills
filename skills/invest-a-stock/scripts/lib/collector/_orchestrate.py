@@ -5,6 +5,8 @@ import math
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -2116,18 +2118,25 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     if deep:
         kline_kwargs["start_date"] = _days_ago(730)
 
-    dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
-    industry_pricing = _collect_industry_pricing_block(symbol, dims, dim_results)
-    if industry_pricing is not None:
-        dim_results["industry_pricing"] = industry_pricing
+    # 宏观取数只依赖 symbol，与个股维度、融合和产业链取数并行。
+    # 仅在显式 --with-macro 时创建额外 worker；无宏观请求的路径不变。
+    pool = ThreadPoolExecutor(max_workers=1) if with_macro else nullcontext()
+    with pool as macro_pool:
+        macro_future = (
+            macro_pool.submit(_collect_macro_context_block, symbol, True)
+            if with_macro else None
+        )
+        dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
+        industry_pricing = _collect_industry_pricing_block(symbol, dims, dim_results)
+        if industry_pricing is not None:
+            dim_results["industry_pricing"] = industry_pricing
 
-    # 按输入顺序排列
-    dimensions = _order_dimensions(dims, dim_results)
-
-    fusion_results = _fuse_dimensions(dimensions, symbol)
-    credibility_scores = _score_credibility(dimensions, symbol)
-    macro_context = _collect_macro_context_block(symbol, with_macro)
-    chain_context = _collect_chain_context_block(symbol, with_chain, dim_results)
+        # 按输入顺序排列
+        dimensions = _order_dimensions(dims, dim_results)
+        fusion_results = _fuse_dimensions(dimensions, symbol)
+        credibility_scores = _score_credibility(dimensions, symbol)
+        chain_context = _collect_chain_context_block(symbol, with_chain, dim_results)
+        macro_context = macro_future.result() if macro_future else {}
 
     result = _assemble_result(symbol, dimensions, fusion_results,
                               credibility_scores, macro_context, chain_context)

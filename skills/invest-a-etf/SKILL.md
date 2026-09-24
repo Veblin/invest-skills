@@ -22,7 +22,7 @@ metadata:
 
 1. **采集**：调用共用数据引擎 `etf_data.py`（指数 PE、折溢价、AUM、净值波动、对冲覆盖）
 2. **合成**：按 [references/report-template.md](references/report-template.md) 产出 Markdown 研究备忘录
-3. **标注**：每个数字带来源；推测标注「待验证」；遵守 LAW 6 / 6a
+3. **标注**：每个数字带来源；推测标注「待验证」；遵守 A1 / A2（原 LAW 6 / 6a）
 
 **研究工具，非决策工具。** 不做买卖/仓位建议。需要评估「我要买/卖这只 ETF 的方案」时，引导用户用 `/invest-a-journal`。
 
@@ -125,11 +125,11 @@ sidecar 把这三样结构化落盘，使复盘可批量、到期可核验：
 - **落点**：与报告 md **同目录同 ts**——`reports/{symbol}-{name}/{ts}.decision.json`（**必须能配到某一份报告**；无报告时显式失败，不落无主的 sidecar）
 - **谁写**：**Claude 写**（情景假设与证伪条件是合成段），引擎只做**校验 + 消费**
 - **最小 schema**：只填 `schema_version/symbol/report_ts/as_of/disclaimer` 五键，`scenarios`/`falsifiers` 留空——无假设的报告**也要落盘**，否则「有/没有 sidecar」不可机器区分
-- **校验 fail-loud**（退出 2）：情景参考价**必须**带 `assumption`（假设前提）+ `weight`（概率权重），`disclaimer` 必填（LAW 6）；`falsifiers[].due` 必填且为 `YYYY-MM-DD`（到期清单靠它核验）
+- **校验 fail-loud**（退出 2）：情景参考价**必须**带 `assumption`（假设前提）+ `weight`（概率权重），`disclaimer` 必填（A1／原 LAW 6）；`falsifiers[].due` 必填且为 `YYYY-MM-DD`（到期清单靠它核验）
 - **`review <symbol>`** 产出**三段式复盘纪要**：① 报告序列 ② **证伪条件状态（按到期日排序，可机器核验）** ③ 假设对照
   - 到期状态由 `due` 与生成日**推导**（`⏰ 已过期` / `🔔 临近 N 日`），**不依赖 sidecar 里手写的 status**
   - 存量报告**无 sidecar 时显式列出**（不静默跳过）；纪要自身不参与报告序列（文件名 `-review.md`，防自我污染）
-  - **只对照假设状态，不产生建议**（LAW 6）；产出后须过 `report_qc.py --fail-on error`（纪要为独立产物类型 `review`，不套研报结构检查）
+  - **只对照假设状态，不产生建议**（A1／原 LAW 6）；产出后须过 `report_qc.py --fail-on error`（纪要为独立产物类型 `review`，不套研报结构检查）
 
 ### HTML 产物
 
@@ -151,7 +151,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - `--history`：历史行情深度（nav 链路优先，失败自动回退 baostock `sh.{code}`）+ 年度高低点/最大回撤/±5% 交易日/MA20-60-120/偏离% 统计
 - `--history-days N`：历史回溯交易日数（默认 250，约 1 年）
 - `--events PATH`：事件文件（JSON Lines，`{date, event, source_url, published_date, confidence}`）；缺省自动读 `events/{symbol}.json`，无文件不阻断
-- `--playbook`：情景预案（回撤档位 σ 分级 + 三步核查清单 + LAW 6a 声明）
+- `--playbook`：情景预案（回撤档位 σ 分级 + 三步核查清单 + A2 声明）
 
 ---
 
@@ -172,7 +172,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | 7.5 | 动态基差与持仓 | 映射到可用期货时必须有；无映射时**显式写「该 ETF 无对应期货合约」**，不得省略不表 |
 | 8 | 对冲覆盖（hedge-map） | 必须 |
 | 9 | 因子 / 主题逻辑 | 必须（无来源则「待验证」） |
-| 10 | 多情景参考 | 可选（LAW 6a） |
+| 10 | 多情景参考 | 可选（A2／原 LAW 6a） |
 | 11 | 情景预案 | `--playbook` 时必须有 |
 | 12 | 对抗性假设检验 | 必须（做法见「分析合成」§3） |
 | 13 | 「致命一击」归纳 | 必须（做法见「分析合成」§4） |

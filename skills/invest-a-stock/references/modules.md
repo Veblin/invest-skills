@@ -1,6 +1,6 @@
 # 九模块与八段研究结构
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。完整分析时由 `render_report_v3()` 渲染。
+> 受 [SKILL.md](../SKILL.md) 契约 A–D 约束（legacy LAW 编号的映射见该文件「降级与废止」注）。完整分析时由 `render_report_v3()` 渲染。
 
 ## 九模块研究结构（v0.1.4 起）
 

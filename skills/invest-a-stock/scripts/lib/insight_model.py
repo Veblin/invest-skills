@@ -83,11 +83,23 @@ _CAUSAL_RE = re.compile(r"导致|引起|造成|致使|(?<!未)(?<!不)证实|证
 _CHAIN_NOTE = "本条为工程约定，无同行评审先例；不得作为核心论证。"
 
 # 事件类型 → 中文标签（引擎 events 维度）
-_EVENT_TYPE_LABELS = {
-    "buyback": "回购", "equity_incentive": "股权激励", "other": "其他公告",
-    "dividend": "分红", "warning": "业绩预警", "litigation": "诉讼",
-    "increase_holding": "增持", "decrease_holding": "减持", "merger": "并购",
-}
+def _event_label(event_type: str) -> str:
+    """事件类型 → 中文标签（委托 `analysis_templates.event_type_label`，单一源）。
+
+    此前本模块另维护一张 `_EVENT_TYPE_LABELS`，已漂移到含 `warning`/`merger`/
+    `increase_holding` 等**早已不存在**的键，而新增类型则直接泄漏英文标识进中文报告——
+    缺键时 `.get()` 回落成原样字符串、不报错，所以漂移长期不可见。
+    """
+    try:
+        from .analysis_templates import event_type_label
+
+        return event_type_label(event_type)
+    except Exception:  # noqa: BLE001 —— 标签取不到不得影响事实生成
+        # 回落**中文占位**而非原标识：此处产出的是中文报告的事实串（如 `回购×1`），
+        # 直接回原标识正是本函数要修的那种英文键泄漏。
+        # （`event_type_label` 自身对未知键「退回原标识、不臆造译名」是有意设计，
+        # 不改；这里只管取不到标签的异常路径。）
+        return "未知类型"
 
 # 当日异动阈值：|涨跌幅| ≥ 5% 视为异动，需做公告层排查
 _INTRADAY_MOVE_THRESHOLD_PCT = 5.0
@@ -314,7 +326,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         types = summary.get("top_types") or []
         if types:
             named = "、".join(
-                f"{_EVENT_TYPE_LABELS.get(str(t.get('type')), str(t.get('type')))}×{t.get('count')}"
+                f"{_event_label(str(t.get('type')))}×{t.get('count')}"
                 for t in types[:4] if isinstance(t, dict) and t.get("type")
             )
             if named:

@@ -765,12 +765,20 @@ def extract_key_snapshot(raw: dict) -> dict:
     # Events
     events_summary = body.get("_meta", {}).get("events_summary", {})
     if events_summary:
-        snap["events"] = {
+        ev_snap: dict[str, Any] = {
             "event_count": _events_count_from_summary(events_summary),
             "window_days": events_summary.get("window_days", 30),
             "latest_date": events_summary.get("latest_date"),
             "top_types": events_summary.get("top_types", []),
         }
+        # 低信号计数随快照留档：top_types 已剔除这两类，不留档则程序性/未分类公告
+        # 的激增在 diff 里完全不可见（CHANGELOG 承诺的「仍计数留档」）。
+        # 仅当源 summary 确有该字段才写——v0.3.1 前的快照无此字段，补默认 0 会让
+        # diff 把「没有字段」读成「从 0 涨到 N」。
+        if "procedural_count" in events_summary or "unclassified_count" in events_summary:
+            ev_snap["procedural_count"] = int(events_summary.get("procedural_count", 0) or 0)
+            ev_snap["unclassified_count"] = int(events_summary.get("unclassified_count", 0) or 0)
+        snap["events"] = ev_snap
 
     return snap
 
@@ -884,17 +892,45 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
         if old_window != new_window:
             window_days_changed = {"old": old_window, "new": new_window}
 
-        old_types = {t.get("type", "") for t in old_events.get("top_types", []) if t.get("type")}
-        new_types = {t.get("type", "") for t in new_events.get("top_types", []) if t.get("type")}
+        from .events import is_low_signal  # 低信号判据单一源；本模块不复制字面量集合
+
+        def _signal_types(ev: dict) -> set[str]:
+            """top_types 里的**实质**类型集合。
+
+            top_types 的语义在 v0.3.1 变过（低信号被剔除出榜）：旧快照里可能仍带
+            other(N)/procedural(N)，两侧不剔就会把「同一批公告」读成「事件类型发生
+            变化」——纯幻影 diff。
+            """
+            return {
+                str(t.get("type"))
+                for t in ev.get("top_types", [])
+                if t.get("type") and not is_low_signal(t.get("type"))
+            }
+
+        old_types = _signal_types(old_events)
+        new_types = _signal_types(new_events)
         added_types = sorted(new_types - old_types)
         removed_types = sorted(old_types - new_types)
 
-        if count_change != 0 or added_types or removed_types or window_days_changed:
+        # 低信号计数变化：仅两侧都留档时才可比（旧快照无此字段 → 不报，避免把
+        # 「没有字段」读成「从 0 涨到 N」的同型幻影）
+        low_signal_change: int | None = None
+        if "procedural_count" in old_events and "procedural_count" in new_events:
+            old_low = int(old_events.get("procedural_count", 0) or 0) + int(
+                old_events.get("unclassified_count", 0) or 0)
+            new_low = int(new_events.get("procedural_count", 0) or 0) + int(
+                new_events.get("unclassified_count", 0) or 0)
+            low_signal_change = new_low - old_low
+
+        if (count_change != 0 or added_types or removed_types or window_days_changed
+                or low_signal_change):
             events_diff = {
                 "count_change": count_change,
                 "new_types": added_types,
                 "removed_types": removed_types,
             }
+            if low_signal_change:
+                events_diff["low_signal_change"] = low_signal_change
             if window_days_changed:
                 events_diff["window_days_changed"] = window_days_changed
 

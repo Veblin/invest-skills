@@ -324,6 +324,14 @@ class TestEventClassificationCards:
         assert card.direction_confidence == "low"
         assert card.direction_note == ""
 
+    @pytest.mark.parametrize("event_type", ["unlock", "investment"])
+    def test_direction_requires_notice_evidence(self, event_type):
+        cards = _build_event_classification_cards({"events": [
+            {"type": event_type, "title": "中性公告", "date": "20260601"},
+        ]})
+        assert cards[0].direction_hint == ""
+        assert cards[0].direction_confidence == "low"
+
     def test_other_type_defaults(self):
         cards = _build_event_classification_cards({"events": self.SAMPLE_EVENTS})
         card = next(c for c in cards if c.event_type == "other")

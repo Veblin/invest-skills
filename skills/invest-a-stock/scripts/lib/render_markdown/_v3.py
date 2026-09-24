@@ -599,6 +599,57 @@ def _v3_driver_unavailable(category: str) -> DriverFactor:
     return DriverFactor(category, "[数据源不可用，该因子跳过]", "—", "—", "—")
 
 
+# --- 事件采集可得性（渲染层判据的唯一入口） ---
+def _events_leg_state(collection: dict) -> str:
+    """事件采集的可得性状态，供文案分支使用（**不得由 events 是否为空反推**）。
+
+    - ``ok``：事件非空，且公告腿未明确失败
+    - ``notice_failed``：事件非空，但公告腿失败（数据来自分红/股东变动腿）
+    - ``no_rows``：确认窗口内无公告事件（**是事实，不是采集缺陷**）
+    - ``unavailable``：未挂载或来源腿全失败（采集缺陷）
+    """
+    events = collection.get("events")
+    meta = collection.get("_meta") or {}
+    legs = meta.get("events_legs")
+    legs = legs if isinstance(legs, dict) else {}
+
+    if events:
+        return "notice_failed" if legs.get("notice") == "failed" else "ok"
+    if events is None:
+        return "unavailable"
+    # events == []：「失败」与「确实无」的判据复用 needs_events_backfill，保持单一源
+    from ..events import needs_events_backfill
+
+    return "unavailable" if needs_events_backfill(collection) else "no_rows"
+
+
+def _events_factor_label(events: list, summary: dict) -> str:
+    """事件催化行的计数文案（计数**现场聚合**，见 summarize_event_types）。"""
+    from ..analysis_templates import event_type_label
+    from ..events import summarize_event_types
+
+    agg = summarize_event_types(events)
+    parts: list[str] = []
+    if agg["substantive"]:
+        named = "、".join(
+            f"{event_type_label(t)}({c})" for t, c in agg["substantive"][:3]
+        )
+        if len(agg["substantive"]) > 3:
+            named += "…"
+        parts.append(f"实质 {agg['substantive_count']}：{named}")
+    # 两个低信号桶分列，不合并、不互相代称
+    low_parts = []
+    if agg["procedural_count"]:
+        low_parts.append(f"程序性公告 {agg['procedural_count']} 条")
+    if agg["unclassified_count"]:
+        low_parts.append(f"未分类公告 {agg['unclassified_count']} 条")
+    if low_parts:
+        parts.append("、".join(low_parts))
+
+    window = summary.get("window_days", 30)
+    return f"近{window}日 {agg['total']}条公告（{'；'.join(parts)}）"
+
+
 # --- _section_dynamic_drivers ---
 def _section_dynamic_drivers(
     collection: dict, symbol: str, dims: dict[str, dict], market_structure: dict,
@@ -633,7 +684,21 @@ def _section_dynamic_drivers(
         lines.append(f"   强度：{strength}")
         lines.append("")
     if len(candidates) < 5:
-        lines.append("⚠️ **尚无候选解释的部分：** 公告/政策类事件需 WebSearch 或 anns 数据补充。")
+        # 此前写「需 WebSearch 或 anns 数据补充」——`anns` 维度并不存在（采集器与
+        # 默认维度表里都没有），属悬空引用。改写后须**与本节其它行保持一致**：
+        # 公告腿未取到、或窗口内确实无公告时，都不得断言「公告已采集并分类」。
+        _state = _events_leg_state(collection)
+        lines.append(
+            "⚠️ **尚无候选解释的部分：** 候选解释由引擎因子生成"
+            + {
+                "ok": "，尚未消费公告正文（公告已采集并分类，见「事件催化」行）",
+                "notice_failed": "，尚未消费公告正文（公告接口未取到，现有事件来自"
+                                 "分红/股东变动来源，见「事件催化」行）",
+                "no_rows": "；本次窗口内无公告事件（见「事件催化」行）",
+                "unavailable": "；本次公告事件未取到（见「事件催化」行的不可得说明）",
+            }[_state]
+            + "；需外部检索补充的政策/传闻类事件应标注为待核验，不在此处臆造解释。"
+        )
         lines.append("")
     lines.append("### 多因子驱动矩阵")
     lines.append("")
@@ -733,23 +798,23 @@ def _section_dynamic_drivers(
         fin_dir = "↑正向" if float(np_now) > float(np_prev) else (
             "↓负向" if float(np_now) < float(np_prev) else "→中性")
 
-    # 事件催化因子 — from collection["events"]
+    # 事件催化因子 — from collection["events"]（计数**现场聚合**，不读快照 top_types：
+    # 后者只存信号榜前 5 且旧快照仍是历史口径，会让括号内数字与总数对不上）
     events_list = collection.get("events") or []
     if events_list and isinstance(events_list, list) and len(events_list) > 0:
-        event_count = len(events_list)
         summary = (collection.get("_meta") or {}).get("events_summary") or {}
-        top_types = summary.get("top_types", [])
-        top_types_str = "、".join(
-            f"{t['type']}({t['count']})" for t in top_types[:3]
-        ) if top_types else f"{event_count}条"
-        event_label = f"近{summary.get('window_days', 30)}日 {event_count}条事件（{top_types_str}）"
         factors.append(DriverFactor(
-            "事件催化", event_label, "→中性", "⚠️",
+            "事件催化", _events_factor_label(events_list, summary), "→中性", "⚠️",
             "akshare stock_individual_notice_report",
         ))
     else:
+        # 空 events 有两种相反含义，不得混同：采集缺陷 vs 窗口内确实无公告
+        no_rows = _events_leg_state(collection) == "no_rows"
         factors.append(DriverFactor(
-            "事件催化", "事件数据暂不可用（akshare 公告接口未返回数据）", "—", "—",
+            "事件催化",
+            "窗口内无公告事件（非采集失败）" if no_rows
+            else "事件数据暂不可用（akshare 公告接口未返回数据）",
+            "—", "—",
             "akshare stock_individual_notice_report",
         ))
     rows = [f.to_matrix_row() for f in factors]
@@ -1491,6 +1556,8 @@ def _section_events_timeline(
     if not events_all or not isinstance(events_all, list) or len(events_all) == 0:
         return ""
 
+    from ..analysis_templates import event_type_label
+
     lines = ["## 3a. 事件时间线", ""]
 
     # 按 date 降序排列
@@ -1505,7 +1572,8 @@ def _section_events_timeline(
     lines.append("|------|------|---------|---------|---------|")
     for ev in shown:
         date = str(ev.get("date", ""))
-        etype = str(ev.get("type", "other"))
+        # 中文标签经 taxonomy 单一源（与因子矩阵同一函数），不再打印英文类型键
+        etype = event_type_label(str(ev.get("type", "other")))
         title = str(ev.get("title", ""))
         impact = str(ev.get("impact_dimension", ""))
         duration = str(ev.get("duration", ""))
@@ -2276,24 +2344,25 @@ def _section_management_assessment(
     不给"信赖/不信赖"二元结论。软维度（组织能力/企业文化/接班人风险）固定标注
     "[Claude report 阶段定性填充]"占位。
 
-    analysis（R-B1）: 命中 module/position == "events" 的段时，以 analysis_md
-    首行摘要替换决策时间线占位；无匹配段 → 保持 "[待 Claude report 阶段填充]"
-    （F0-3 qc 拦截未填占位）。
+    analysis（R-B1）: 命中事件槽位（EVENTS_HOST_KEYS：「events」或
+    「event_classification」）的段时，以 analysis_md 首行摘要替换决策时间线占位；
+    无匹配段 → 保持 "[待 Claude report 阶段填充]"（F0-3 qc 拦截未填占位）。
     """
+    from lib.analysis_schema import EVENTS_HOST_KEYS, find_section
     from lib.schema import ManagementTimelineEntry
     from lib.scoring import insider_signal, management_ability_proxy
 
+    # 判据与 _section_events_timeline(:1600) / render_html(:1526) 同源：
+    # 此前这里手写 module/position == "events"，于是 `module: "event_classification"`
+    # （文档里的写法）能过预检却命不中此处，A-5 单元格留 error 级占位。
+    _sec = find_section(analysis, EVENTS_HOST_KEYS)
     ev_summary = ""
-    for sec in (analysis or []):
-        if not isinstance(sec, dict):
-            continue
-        if sec.get("module") == "events" or sec.get("position") == "events":
-            first_line = str(sec.get("analysis_md") or "").splitlines()
-            ev_summary = (first_line[0].strip() if first_line else "")
-            # 全量审查 P2：analysis_md 首行入 A-5 表格单元格——须 | 转义 +
-            # 长度截断（仿事件标题处理；旧实现裸插，含 | 的摘要会拆裂表格列）
-            ev_summary = ev_summary.replace("|", "｜")[:47]
-            break
+    if _sec is not None:
+        first_line = str(_sec.get("analysis_md") or "").splitlines()
+        ev_summary = (first_line[0].strip() if first_line else "")
+        # 全量审查 P2：analysis_md 首行入 A-5 表格单元格——须 | 转义 +
+        # 长度截断（仿事件标题处理；旧实现裸插，含 | 的摘要会拆裂表格列）
+        ev_summary = ev_summary.replace("|", "｜")[:47]
     ev_cell = (f'<span data-module="events">**{ev_summary}**</span>'
                if ev_summary else "[待 Claude report 阶段填充]")
 
@@ -4007,4 +4076,3 @@ def _pe_band_markdown_table(
         f"| 当前位置 | {_cell(band.get('current_position'))} |",
     ]
     return "\n".join(lines)
-

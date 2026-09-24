@@ -340,6 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--analysis", default=None,
                     help="analysis.json 路径（R-B1）；full 替换 [待 Claude report 阶段填充] 占位，"
                          "insight 注入「分析合成」独立分区并落同代侧车")
+    pr.add_argument("--draft", default=None,
+                    help="首版 MD 路径；与 --analysis 合用，在采集/渲染前检查本次实际占位槽位")
+
+    pv = sub.add_parser("validate-analysis", help="仅校验 analysis.json，不采集或渲染报告")
+    pv.add_argument("path", help="待校验的 analysis.json 路径")
+    pv.add_argument("--draft", default=None, help="首版 MD 路径；同时检查实际占位槽位")
     # P0-5 研究档案：记录 R12g-B 开场四问结果，落同代 profile 侧车并在 full 头部展示。
     # 只改变阅读顺序与补证优先级，不做字段过滤（不隐藏反证/缺口/风险）。
     pr.add_argument("--horizon", default=None,
@@ -574,6 +580,13 @@ def build_parser() -> argparse.ArgumentParser:
     pcat.add_argument("symbol", help="股票代码，如 600176")
     pcat.add_argument("--days", type=int, default=90, help="前瞻天数（默认 90）")
 
+    pnb = sub.add_parser(
+        "notice-body",
+        help="取公告正文（东财内容接口；原文不改写，含截断提示，不做结构化抽取）")
+    pnb.add_argument("target", help="公告 art_code（AN…）或公告详情页 url")
+    pnb.add_argument("--no-cache", action="store_true", help="跳过缓存强制重取")
+    pnb.add_argument("--json", action="store_true", help="输出完整 JSON（含状态与截断标记）")
+
     return p
 
 
@@ -772,6 +785,44 @@ def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | No
     return sidecar
 
 
+def _validated_analysis(path: Path, draft_path: Path | None = None) -> list[dict] | None:
+    """校验分析协议；失败时列出全部错误，供无渲染的迭代回路使用。"""
+    from lib.analysis_schema import (
+        AnalysisSchemaError, load_analysis_json, missing_draft_slots, validate_sections,
+    )
+    try:
+        payload = load_analysis_json(path)
+    except AnalysisSchemaError as exc:
+        print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
+        return None
+    errors = validate_sections(payload)
+    if draft_path is not None:
+        try:
+            draft_text = draft_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"❌ 首版 MD 读取失败: {exc}", file=sys.stderr)
+            return None
+        errors.extend(
+            f"缺少就地槽位 {slot}（首版 MD 存在对应占位）"
+            for slot in missing_draft_slots(payload, draft_text)
+        )
+    if errors:
+        print(f"❌ analysis.json 校验失败（{len(errors)} 项）:", file=sys.stderr)
+        for error in errors:
+            print(f"  {error}", file=sys.stderr)
+        return None
+    return payload
+
+
+def cmd_validate_analysis(args: argparse.Namespace) -> int:
+    payload = _validated_analysis(
+        Path(args.path), Path(args.draft) if args.draft else None)
+    if payload is None:
+        return 2
+    print(f"✅ analysis.json 校验通过（{len(payload)} 段）")
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     dims = _apply_deep_dims(_dims_from_args(args), args.deep)
     # P0-5: ResearchProfile 校验（fail-loud，且在采集之前——参数拼错不该先跑一遍
@@ -798,6 +849,17 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 2
     if profile is not None:
         print(f"📐 研究档案已加载（{len(profile)} 字段）", file=sys.stderr)
+    # 输入错误必须在 store 恢复、现场采集和渲染之前暴露。
+    analysis_payload: list[dict] | None = None
+    if getattr(args, "draft", None) and not getattr(args, "analysis", None):
+        print("❌ --draft 须与 --analysis 合用", file=sys.stderr)
+        return 2
+    if getattr(args, "analysis", None):
+        analysis_payload = _validated_analysis(
+            Path(args.analysis), Path(args.draft) if getattr(args, "draft", None) else None)
+        if analysis_payload is None:
+            return 2
+        print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
     result = None
     resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
     if args.resume and _HAS_STORE:
@@ -832,19 +894,6 @@ def cmd_report(args: argparse.Namespace) -> int:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
-    # R-B1: analysis.json 加载校验（fail-loud：校验失败 exit 2，不静默降级渲染）
-    analysis_payload: list[dict] | None = None
-    if getattr(args, "analysis", None):
-        from lib.analysis_schema import AnalysisSchemaError, load_analysis_json, validate_sections
-        try:
-            analysis_payload = load_analysis_json(Path(args.analysis))
-            errs = validate_sections(analysis_payload) if isinstance(analysis_payload, list) else ["analysis.json 顶层必须为数组"]
-            if errs:
-                raise AnalysisSchemaError("; ".join(errs[:5]))
-        except AnalysisSchemaError as exc:
-            print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
-            return 2
-        print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
     # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，披露移入附录「覆盖缺口」）
     try:
         from lib.render_utils import _get_dim_data, _index_dims
@@ -2019,7 +2068,7 @@ def cmd_attribution(args: argparse.Namespace) -> int:
     from lib.attribution import decompose_move
 
     if not args.snapshot:
-        print("⚠️ 实时归因暂不可用：K 线为统一前复权，不复权收盘与历史股本无公开数据通道（LAW 5 三态：不可得）。")
+        print("⚠️ 实时归因暂不可用：K 线为统一前复权，不复权收盘与历史股本无公开数据通道（A3/C4 三态：不可得）。")
         print("请以 --snapshot PATH 提供端点快照（总市值 + 当时可见 TTM 归母净利，口径见调研 v-domain-attribution-methodology §3）。")
         return 1
     try:
@@ -2678,9 +2727,46 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
 
 
-# 命令分发表：与 build_parser 的 27 个 sub.add_parser 一一对应（新增子命令须同步两处）
+def cmd_notice_body(args: argparse.Namespace) -> int:
+    """取公告正文（管道，不做结构化抽取）。
+
+    存在的意义：让 `lib.notice_body` 有一条**真实运行路径**——否则它只被测试引用，
+    构建器按 import 闭包打包时会把它排除在外，分发形态拿不到该能力。
+    """
+    from lib.notice_body import describe, extract_art_code, fetch_notice_body
+
+    code = extract_art_code(args.target) or str(args.target).strip()
+    body = fetch_notice_body(code, use_cache=not args.no_cache)
+
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0 if body.get("status") == "ok" else 1
+
+    from lib.shared_dates import fmt_fetched_at
+
+    print(f"# 公告正文 {code}")
+    print()
+    print(f"> {describe(body)}")
+    # 取数时刻走统一口径（UTC → 北京时间）。缓存命中时 fetched_at 是**首次**取数
+    # 时刻，直接展示会让旧正文冒充新取——本命令的全部意义就是溯源，必须标注。
+    stamp = fmt_fetched_at(body.get("fetched_at")) or "—"
+    cache_note = "（本地缓存，非本次取数）" if body.get("cached") else ""
+    print(f"> 来源：{body.get('source') or '—'}｜取数时刻：{stamp}{cache_note}")
+    if body.get("status") != "ok":
+        print()
+        print(f"原因：{body.get('error') or '未知'}")
+        return 1
+    print()
+    print(body["text"])
+    return 0
+
+
+# 命令分发表：与 build_parser 的 sub.add_parser 一一对应（新增子命令须同步两处）。
+# 数量不写死在此处——由 tests/test_cli_dispatch.py 实测断言，避免手数漂移
+# （历史上这里先后写过 27 与 29，真实值两次都不是它）。
 CMD_DISPATCH = {
     "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
+    "validate-analysis": cmd_validate_analysis,
     "diff": cmd_diff, "watchlist": cmd_watchlist, "diagnose": cmd_diagnose,
     "lint": cmd_lint, "qc-report": cmd_qc_report, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
     "evidence": cmd_evidence, "analyze": cmd_analyze, "synthesize": cmd_synthesize,
@@ -2690,6 +2776,7 @@ CMD_DISPATCH = {
     "classify": cmd_classify, "market-status": cmd_market_status,
     "attribution": cmd_attribution,
     "etf-flow": cmd_etf_flow, "catalyst": cmd_catalyst,
+    "notice-body": cmd_notice_body,
 }
 
 
@@ -2698,8 +2785,10 @@ def main() -> int:
     # 全局 socket 兜底超时：必须在任何网络调用之前（.env 注入后读取才生效）。
     # 覆盖 baostock/tickflow/akshare 无 timeout 参数的接口，防无限挂起。
     env.configure_socket_timeout()
-    from lib.logutil import setup_logging
-    setup_logging()  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
+    from lib._invest_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-stock")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     args = build_parser().parse_args()
     # 显式成员检查而非裸 KeyError（review #9）：与 build_parser 失步（新增子命令
     # 只加一处）时打印指向 CMD_DISPATCH 的友好错误并 exit 1——开发者仍 fail-loud，

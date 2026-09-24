@@ -98,7 +98,7 @@ def _fetch_notice_cards(symbol: str, days: int) -> list[NewsCard]:
 
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     cards: list[NewsCard] = []
-    for ev in _fetch_notice_events(symbol):
+    for ev in (_fetch_notice_events(symbol) or []):  # None = 取数失败，此处按无数据处理
         date_str = _normalize_date(str(ev.get("date") or ""))
         if not date_str or date_str < cutoff:
             continue

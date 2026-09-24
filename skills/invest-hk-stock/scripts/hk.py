@@ -1077,6 +1077,8 @@ CMD_DISPATCH = {
 
 
 def main() -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-hk-stock")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     parser = build_parser()
     args = parser.parse_args()
     if args.command not in CMD_DISPATCH:

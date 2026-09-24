@@ -12,8 +12,8 @@ rules:
     pattern: "建议\\s*(?:净|择机|逢低|逢高|分批|适量|坚决|立即|继续|长期)?\\s*买入"
     severity: "error"
     scope: "line"
-    message: "禁止使用'建议买入'（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止使用'建议买入'（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-sell-advice"
     # 2026-09-18 review #2：原 `建议卖出` 为**严格相邻**匹配，中间插一个修饰语即漏网
@@ -22,15 +22,15 @@ rules:
     pattern: "建议\\s*(?:净|择机|逢低|逢高|分批|适量|坚决|立即|继续|长期)?\\s*卖出"
     severity: "error"
     scope: "line"
-    message: "禁止使用'建议卖出'（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止使用'建议卖出'（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-hold-advice"
     pattern: "建议\\s*(?:长期|继续|择机|适量|坚决|立即)?\\s*持有"
     severity: "error"
     scope: "line"
-    message: "禁止使用'建议持有'（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止使用'建议持有'（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-buy-standalone"
     # 全量审查补充：排除两融数据字段/统计描述语境（融资买入额、买入 5 日均值、
@@ -50,8 +50,8 @@ rules:
     skip_if_pattern: "(\\[来源:|(?:主力|北向|融资|沪股通|深股通|龙虎榜|席位)[^。；，]{0,12}净买入|机构|券商|研报|评级|家机构|不预设任何|买卖指令|操作决策由用户|\\|\\s*(买入|增持|推荐|强推|中性|减持|卖出)\\s*\\|)"
     severity: "warning"
     scope: "line"
-    message: "禁止使用'买入'建议词汇（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止使用'买入'建议词汇（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-sell-standalone"
     pattern: "(?<!在)(?<!不)(?<!建议)卖出(?!量|金额|均价|收入|资产|股份|价格|信号|机会|时点|逻辑|力度|意愿)"
@@ -65,8 +65,8 @@ rules:
     skip_if_pattern: "(\\[来源:|(?:主力|北向|融资|资金|沪股通|深股通|龙虎榜|席位|成交额|份额)[^。；，]{0,12}净卖出|成交额|主力资金|机构|券商|研报|评级|不预设任何|买卖指令|操作决策由用户|已经.{0,12}卖出|\\|\\s*(买入|增持|推荐|强推|中性|减持|卖出)\\s*\\|)"
     severity: "warning"
     scope: "line"
-    message: "禁止使用'卖出'建议词汇（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止使用'卖出'建议词汇（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-hold-standalone"
     pattern: "(?<!在)(?<!不)(?<!建议)持有(?!人|股|比例|量|成本|期间|期|者|方|仓|单|证|券|债|基金|保险|资产|股份|股票)"
@@ -78,8 +78,8 @@ rules:
     skip_if_pattern: "(不构成|不代表|免责|风险提示|持有的最大风险|持有\\s*\\d+\\s*万股|不预设任何|买卖指令|操作决策由用户)"
     severity: "warning"
     scope: "line"
-    message: "禁止使用'持有'建议词汇（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止使用'持有'建议词汇（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-target-price"
     pattern: "目标价\\s*[：:]*\\s*\\d+[\\.\\d]*"
@@ -94,15 +94,15 @@ rules:
     skip_if_pattern: "(\\[来源:|WebSearch|query|研报|机构|券商|^\\|(?:[^|]*\\|)+[^|]*目标价)"
     severity: "error"
     scope: "line"
-    message: "禁止给出单一目标价（LAW 6），应提供估值区间"
-    law_ref: "LAW 6"
+    message: "禁止给出单一目标价（A1／原 LAW 6），应提供估值区间"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "law6-position-advice"
     pattern: "(建议|考虑|可以)(加仓|减仓|建仓|清仓|重仓|轻仓)"
     severity: "error"
     scope: "line"
-    message: "禁止仓位建议（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止仓位建议（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   # ==========================================================================
   # LAW 16 — 禁止单一"左侧/右侧"结论
@@ -111,15 +111,15 @@ rules:
     pattern: "[。，；.!;，]?(处于|属于)(左侧|右侧)[。，；.!;，]?$"
     severity: "warning"
     scope: "line"
-    message: "禁止单一'左侧/右侧'结论，需标注概率（LAW 16）。正确写法：'左侧特征更强：XXXX；右侧支撑：YYYY。综合概率：左偏（≈60% vs 40%）'"
-    law_ref: "LAW 16"
+    message: "禁止单一'左侧/右侧'结论，需标注概率（D3／原 LAW 16）。正确写法：'左侧特征更强：XXXX；右侧支撑：YYYY。综合概率：左偏（≈60% vs 40%）'"
+    law_ref: "D3 概率并列（原 LAW 16）"
 
   - id: "law16-current-left-right"
     pattern: "当前处于(左侧|右侧)"
     severity: "warning"
     scope: "line"
-    message: "禁止单一'当前处于左侧/右侧'（LAW 16），需标注概率分布"
-    law_ref: "LAW 16"
+    message: "禁止单一'当前处于左侧/右侧'（D3／原 LAW 16），需标注概率分布"
+    law_ref: "D3 概率并列（原 LAW 16）"
 
   # ==========================================================================
   # 措辞规范 — 禁止词与替换表
@@ -203,15 +203,15 @@ rules:
     pattern: "[。，；]?往往[不]?(伴随|在|是|有|会|出现|高于|低于|处于|位于|大于|小于)"
     severity: "info"
     scope: "line"
-    message: "'往往'需标注数据来源或转为具体案例（LAW 3），避免无依据口头经验"
-    law_ref: "LAW 3"
+    message: "'往往'需标注数据来源或转为具体案例（A4／原 LAW 3），避免无依据口头经验"
+    law_ref: "A4 事实与分析分离（原 LAW 3）"
 
   - id: "law3-tongchang-unqualified"
     pattern: "[。，；]?通常[不]?(伴随|在|是|有|会|出现|高于|低于|处于|位于|大于|小于)"
     severity: "info"
     scope: "line"
-    message: "'通常'需标注数据来源或转为具体案例（LAW 3），避免无依据口头经验"
-    law_ref: "LAW 3"
+    message: "'通常'需标注数据来源或转为具体案例（A4／原 LAW 3），避免无依据口头经验"
+    law_ref: "A4 事实与分析分离（原 LAW 3）"
 
   # ==========================================================================
   # 估值分位使用规则
@@ -284,22 +284,22 @@ rules:
     pattern: "(买入|卖出|持有)该(股票|标的|公司|股份)"
     severity: "error"
     scope: "line"
-    message: "禁止'买入/卖出/持有该标的'建议词汇（LAW 6）"
-    law_ref: "LAW 6 — 已知违规模式 #2"
+    message: "禁止'买入/卖出/持有该标的'建议词汇（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）— 已知违规模式 #2"
 
   - id: "known-violation-ting-pai"
     pattern: "建议(买入|卖出|持有|回避)"
     severity: "error"
     scope: "line"
-    message: "禁止任何形式的'建议'指令（LAW 6）"
-    law_ref: "LAW 6"
+    message: "禁止任何形式的'建议'指令（A1／原 LAW 6）"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）"
 
   - id: "known-violation-target-price-amount"
     pattern: "目标(价|位)[：:]*\\s*\\d+[\\.\\d]*\\s*(元|美元|港元|港币)"
     severity: "error"
     scope: "line"
-    message: "禁止给出单一目标价（LAW 6），应提供估值区间"
-    law_ref: "LAW 6 — 已知违规模式 #3"
+    message: "禁止给出单一目标价（A1／原 LAW 6），应提供估值区间"
+    law_ref: "A1 合规与非决策边界（原 LAW 6）— 已知违规模式 #3"
 
   # ==========================================================================
   # 占位残留检查（原 check_report.sh 检查项 3）
@@ -438,29 +438,29 @@ rules:
     pattern: "^##\\s+[0-9一二三四五六七八九十][、.]?\\s*(公司画像|经营质量|估值位置|资金与筹码|技术结构|事件催化|研究问题卡|当前状态快照|动态驱动分析|市场结构分析|静态基本面分析|市场分歧|左侧.*右侧.*判断|风险与不确定性|附录|执行摘要|机构观点与盈利预测|研究快照|基础参数|核心财务数据.*最近一期|历史估值位置|盈利收益率.*要求回报率|Fed Model)\\s*$"
     severity: "warning"
     scope: "line"
-    message: "标题应为完整判断句而非名词短语（LAW 17 — 标题即论点）。正确示例：'PE 55.5x 处 98.4% 分位，已定价乐观预期'"
-    law_ref: "LAW 17"
+    message: "标题应为完整判断句而非名词短语（D4／原 LAW 17 — 标题即论点）。正确示例：'PE 55.5x 处 98.4% 分位，已定价乐观预期'"
+    law_ref: "D4 结论先行（原 LAW 17）"
 
   - id: "law17-process-module-title"
     pattern: "^##\\s*模块\\d"
     severity: "warning"
     scope: "line"
-    message: "禁止使用'模块1/模块2'等流程性标题（LAW 17），应改为结论句如'PE 36.5x 处 98% 分位，已定价乐观预期'"
-    law_ref: "LAW 17"
+    message: "禁止使用'模块1/模块2'等流程性标题（D4／原 LAW 17），应改为结论句如'PE 36.5x 处 98% 分位，已定价乐观预期'"
+    law_ref: "D4 结论先行（原 LAW 17）"
 
   - id: "law17-no-conclusion-sentence"
     pattern: "\\*\\*结论：\\*\\*"
     severity: "warning"
     scope: "file"
-    message: "报告中缺少段首主旨句（**结论：**）（LAW 17），每个分析段落第一句应为加粗主旨句"
-    law_ref: "LAW 17"
+    message: "报告中缺少段首主旨句（**结论：**）（D4／原 LAW 17），每个分析段落第一句应为加粗主旨句"
+    law_ref: "D4 结论先行（原 LAW 17）"
 
   - id: "law17-no-logic-chain"
     pattern: "\\*\\*逻辑链：\\*\\*"
     severity: "info"
     scope: "file"
-    message: "报告中缺少数据→推理→判断逻辑链标注（**逻辑链：**）（LAW 17）"
-    law_ref: "LAW 17"
+    message: "报告中缺少数据→推理→判断逻辑链标注（**逻辑链：**）（D4／原 LAW 17）"
+    law_ref: "D4 结论先行（原 LAW 17）"
 
   # ==========================================================================
   # 结论段证据等级兜底（v0.2.8，R-A2）
