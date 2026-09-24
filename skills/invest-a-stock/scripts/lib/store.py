@@ -788,6 +788,11 @@ _KEY_DIFF_ALWAYS = frozenset({
 })
 _KEY_DIFF_THRESHOLD_PCT = 1.0
 
+#: `events_diff["low_signal_change"]` 两桶的展示名——键与快照字段
+#: （`procedural_count`／`unclassified_count`）同源。CLI 与 insight 渲染共用，
+#: 避免各处各写一套措辞（也避免把英文键直接打进中文产物）。
+LOW_SIGNAL_DIFF_LABELS = {"procedural": "程序性公告", "unclassified": "未分类公告"}
+
 CATEGORY_LABELS = {
     "valuation": "估值",
     "financials": "财务",
@@ -894,33 +899,38 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
 
         from .events import is_low_signal  # 低信号判据单一源；本模块不复制字面量集合
 
-        def _signal_types(ev: dict) -> set[str]:
-            """top_types 里的**实质**类型集合。
+        # 「同口径」标记：低信号计数自 v0.3.1 起随 summary 落档。缺该字段的旧快照用的是
+        # **未过滤**的 `top_types[:5]`（低信号占位），与现在的「剔除低信号后取前 5」
+        # 不可直接相减——被旧榜挤到第 6 位的实质类型会以 new_types 出现，而事件本身没有
+        # 变化（幻影 diff）。类型集合与低信号计数两类比较都以此标记为可比性闸门。
+        same_basis = ("procedural_count" in old_events
+                      and "procedural_count" in new_events)
 
-            top_types 的语义在 v0.3.1 变过（低信号被剔除出榜）：旧快照里可能仍带
-            other(N)/procedural(N)，两侧不剔就会把「同一批公告」读成「事件类型发生
-            变化」——纯幻影 diff。
-            """
+        def _signal_types(ev: dict) -> set[str]:
+            """top_types 里的**实质**类型集合（供同口径两侧比较）。"""
             return {
                 str(t.get("type"))
                 for t in ev.get("top_types", [])
                 if t.get("type") and not is_low_signal(t.get("type"))
             }
 
-        old_types = _signal_types(old_events)
-        new_types = _signal_types(new_events)
-        added_types = sorted(new_types - old_types)
-        removed_types = sorted(old_types - new_types)
+        added_types: list[str] = []
+        removed_types: list[str] = []
+        if same_basis:
+            added_types = sorted(_signal_types(new_events) - _signal_types(old_events))
+            removed_types = sorted(_signal_types(old_events) - _signal_types(new_events))
 
-        # 低信号计数变化：仅两侧都留档时才可比（旧快照无此字段 → 不报，避免把
-        # 「没有字段」读成「从 0 涨到 N」的同型幻影）
-        low_signal_change: int | None = None
-        if "procedural_count" in old_events and "procedural_count" in new_events:
-            old_low = int(old_events.get("procedural_count", 0) or 0) + int(
-                old_events.get("unclassified_count", 0) or 0)
-            new_low = int(new_events.get("procedural_count", 0) or 0) + int(
-                new_events.get("unclassified_count", 0) or 0)
-            low_signal_change = new_low - old_low
+        # 低信号**分桶**比较，不只看合计：procedural ↔ unclassified 之间平移（合计不变）
+        # 也是变化——两桶语义不同（源标注程序性 vs 源未分类），合并求和会把它抹平。
+        low_signal_change: dict[str, int] | None = None
+        if same_basis:
+            delta = {
+                "procedural": int(new_events.get("procedural_count", 0) or 0)
+                - int(old_events.get("procedural_count", 0) or 0),
+                "unclassified": int(new_events.get("unclassified_count", 0) or 0)
+                - int(old_events.get("unclassified_count", 0) or 0),
+            }
+            low_signal_change = {k: v for k, v in delta.items() if v} or None
 
         if (count_change != 0 or added_types or removed_types or window_days_changed
                 or low_signal_change):
@@ -929,6 +939,9 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
                 "new_types": added_types,
                 "removed_types": removed_types,
             }
+            if not same_basis:
+                # 说清「没比较」而不是让读者以为「没变化」
+                events_diff["types_incomparable"] = True
             if low_signal_change:
                 events_diff["low_signal_change"] = low_signal_change
             if window_days_changed:

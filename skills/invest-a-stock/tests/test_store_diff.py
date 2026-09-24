@@ -306,11 +306,11 @@ class TestEventsKeySnapshot:
         events_diff = result.get("events") or {}
         assert events_diff.get("count_change") == 3
 
-    def test_legacy_other_ranking_does_not_produce_phantom_type_change(self):
-        """旧快照的 top_types 带 other（v0.3.1 前的口径）不得报成「事件类型发生变化」。
+    def test_other_in_old_ranking_does_not_produce_phantom_type_change(self):
+        """同口径两侧：旧榜里的 `other` 不得读成「移除了 other + 新增一堆类型」。
 
-        top_types 语义在本次改动静默变过（低信号被剔出榜）：两侧不剔低信号，同一批
-        公告会被读成新出现了 guarantee/pledge/… 并移除了 other。
+        （同口径快照也可能带 `other`——v0.3.1 实现迭代中途存下的快照有计数却未过滤榜，
+        故 `_signal_types` 的低信号过滤是承重的，不是冗余。）
         """
         from lib.store import diff_key_snapshots
 
@@ -332,6 +332,49 @@ class TestEventsKeySnapshot:
         assert events_diff.get("new_types", []) == []
         assert events_diff.get("removed_types", []) == []
 
+    def test_pre_v031_snapshot_does_not_produce_phantom_types(self):
+        """**跨口径**比较不得报类型变化，并须显式说明「未比较」。
+
+        v0.3.1 前的 `top_types` 取**未过滤**前 5（低信号占位），现在的取「剔除低信号后
+        前 5」。同一批公告，新榜能显示旧榜被 `other` 挤出前 5 的实质类型——只做集合相减
+        就会把它报成 new_types。过滤救不回来（旧榜根本没存第 6 位），只能按口径闸门跳过，
+        且必须**说出来**：静默跳过与「无变化」在输出上无法区分。
+        """
+        from lib.store import diff_key_snapshots
+
+        old = {  # 无低信号计数 = v0.3.1 前口径；other(68) 占掉一个榜位
+            "symbol": "600176",
+            "fetched_at": "2026-06-01T00:00:00Z",
+            "_meta": {"events_summary": {
+                "event_count": 58, "window_days": 30,
+                "top_types": [
+                    {"type": "other", "count": 68}, {"type": "buyback", "count": 3},
+                    {"type": "dividend", "count": 2}, {"type": "earnings_report", "count": 2},
+                    {"type": "holder_decrease", "count": 1},
+                ],
+            }},
+        }
+        new = {  # 同一批公告：equity_incentive(1) 此前被 other 挤出前 5
+            "symbol": "600176",
+            "fetched_at": "2026-06-08T00:00:00Z",
+            "_meta": {"events_summary": {
+                "event_count": 60, "window_days": 30,
+                "top_types": [
+                    {"type": "buyback", "count": 3}, {"type": "dividend", "count": 2},
+                    {"type": "earnings_report", "count": 2}, {"type": "holder_decrease", "count": 1},
+                    {"type": "equity_incentive", "count": 1},
+                ],
+                "procedural_count": 5, "unclassified_count": 3,
+            }},
+        }
+
+        events_diff = diff_key_snapshots(old, new).get("events") or {}
+        assert events_diff, "有 count_change（58→60）时应产出 diff 对象"
+        assert events_diff.get("new_types", []) == [], "跨口径不得报幻影新增类型"
+        assert events_diff.get("removed_types", []) == []
+        assert events_diff.get("types_incomparable") is True, "跳过比较须显式说明"
+        assert events_diff.get("count_change") == 2, "数量变化仍可比、照常报告"
+
     def test_low_signal_surge_is_reported(self):
         """程序性/未分类公告的激增须可见（top_types 已剔除这两类，只能靠计数）。"""
         from lib.store import diff_key_snapshots
@@ -349,7 +392,33 @@ class TestEventsKeySnapshot:
 
         result = diff_key_snapshots(_coll("2026-06-01T00:00:00Z", 10, 0),
                                     _coll("2026-06-08T00:00:00Z", 50, 0))
-        assert (result.get("events") or {}).get("low_signal_change") == 40
+        assert (result.get("events") or {}).get("low_signal_change") == {"procedural": 40}
+
+    def test_low_signal_bucket_shift_is_reported_despite_equal_total(self):
+        """10 条从 procedural 移到 unclassified（合计不变）也须报告。
+
+        两桶语义不同（源标注程序性 vs 源未分类），只看合计会把这次口径平移抹平。
+        """
+        from lib.store import diff_key_snapshots
+
+        def _coll(fetched: str, proc: int, uncl: int) -> dict:
+            return {
+                "symbol": "600176",
+                "fetched_at": fetched,
+                "_meta": {"events_summary": {
+                    "event_count": 20, "window_days": 30,
+                    "top_types": [{"type": "buyback", "count": 3}],
+                    "procedural_count": proc, "unclassified_count": uncl,
+                }},
+            }
+
+        result = diff_key_snapshots(_coll("2026-06-01T00:00:00Z", 10, 0),
+                                    _coll("2026-06-08T00:00:00Z", 0, 10))
+        events_diff = result.get("events") or {}
+        assert events_diff, "合计不变但分桶平移 → 必须产出 diff"
+        assert events_diff.get("low_signal_change") == {
+            "procedural": -10, "unclassified": 10,
+        }
 
     def test_low_signal_change_skipped_when_legacy_snapshot_lacks_counts(self):
         """v0.3.1 前的 summary 无低信号计数字段 → 不可比，不得报成「从 0 涨到 N」。"""
@@ -363,19 +432,20 @@ class TestEventsKeySnapshot:
                 "top_types": [{"type": "buyback", "count": 3}],
             }},
         }
-        new = {
+        new = {  # event_count 5 ≠ 3：确保产出 diff 对象，断言才非空转
             "symbol": "600176",
             "fetched_at": "2026-06-08T00:00:00Z",
             "_meta": {"events_summary": {
-                "event_count": 3, "window_days": 30,
+                "event_count": 5, "window_days": 30,
                 "top_types": [{"type": "buyback", "count": 3}],
                 "procedural_count": 50, "unclassified_count": 0,
             }},
         }
 
         events_diff = diff_key_snapshots(old, new).get("events") or {}
-        assert "low_signal_change" not in events_diff
-        assert "procedural_count" not in (events_diff or {})
+        assert events_diff, "应有 count_change，否则本测试空转"
+        assert "low_signal_change" not in events_diff, "跨口径不得比低信号计数"
+        assert events_diff.get("types_incomparable") is True
 
     def test_diff_skips_count_when_window_days_differ(self):
         from lib.store import diff_key_snapshots
@@ -408,3 +478,36 @@ class TestEventsKeySnapshot:
         events_diff = result.get("events") or {}
         assert events_diff.get("count_change") == 0
         assert events_diff.get("window_days_changed") == {"old": 30, "new": 90}
+
+
+class TestDiffEventsRendering:
+    """`invest.py _print_diff_events` 的展示层。
+
+    该函数此前无测试——而它是 `diff` CLI 的唯一出口（用户看到的就是这几行）。
+    """
+
+    def test_prints_low_signal_buckets_separately(self, capsys):
+        """两桶分列打印，且不把英文键直接打进中文产物。"""
+        import invest
+
+        invest._print_diff_events({"events": {
+            "count_change": 0, "new_types": [], "removed_types": [],
+            "low_signal_change": {"procedural": -10, "unclassified": 10},
+        }})
+        out = capsys.readouterr().out
+        assert "低信号变化" in out
+        assert "程序性公告 -10" in out
+        assert "未分类公告 +10" in out
+        assert "procedural" not in out and "unclassified" not in out, "英文键泄漏进中文输出"
+
+    def test_prints_types_incomparable_note(self, capsys):
+        """跨口径比较须显式说明「未比较」，不能与「无变化」看起来一样。"""
+        import invest
+
+        invest._print_diff_events({"events": {
+            "count_change": 2, "new_types": [], "removed_types": [],
+            "types_incomparable": True,
+        }})
+        out = capsys.readouterr().out
+        assert "未比较类型集合" in out
+        assert "事件数量变化: +2" in out

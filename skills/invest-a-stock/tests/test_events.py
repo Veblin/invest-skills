@@ -795,8 +795,13 @@ class TestNeedsEventsBackfill:
         }
         assert needs_events_backfill(coll) is True
 
-    def test_empty_with_partial_leg_failure_still_terminal(self):
-        """仅部分腿失败且其余腿确认无数据 → 不是全败，不重试。"""
+    def test_empty_with_notice_leg_failed_requires_retry(self):
+        """公告腿失败 + 两条辅助腿空表 → **仍须重试**。
+
+        分红明细与股东变动覆盖的公告类型很窄，它们为空不能替代公告源得出「没有公告」
+        的结论（C4：一手优先、二手不取代一手核验）。按「全腿失败」判会把这一组合读成
+        「窗口内无公告」，把采集缺陷说成事实。
+        """
         from lib.events import needs_events_backfill
 
         coll = {
@@ -804,6 +809,34 @@ class TestNeedsEventsBackfill:
             "_meta": {
                 "events_summary": {"event_count": 0, "window_days": 30},
                 "events_legs": {"notice": "failed", "dividend": "empty", "holder_change": "empty"},
+            },
+        }
+        assert needs_events_backfill(coll) is True
+
+    def test_empty_with_all_legs_answered_is_terminal(self):
+        """公告腿已应答（ok/empty）且其余腿无数据 → 窗口内确实无事件，不重试。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {
+                    "notice": "empty", "dividend": "empty", "holder_change": "empty",
+                },
+            },
+        }
+        assert needs_events_backfill(coll) is False
+
+    def test_empty_with_notice_ok_but_aux_failed_is_terminal(self):
+        """公告腿有应答即为结论（辅助腿失败不影响「无公告」的成立）。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {"notice": "empty", "dividend": "failed", "holder_change": "failed"},
             },
         }
         assert needs_events_backfill(coll) is False

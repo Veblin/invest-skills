@@ -160,6 +160,15 @@ def _discovery_lines(model: dict[str, Any]) -> list[str]:
             parts.append("新增类型: " + "、".join(str(t) for t in events["new_types"]))
         if events.get("removed_types"):
             parts.append("消失类型: " + "、".join(str(t) for t in events["removed_types"]))
+        low = events.get("low_signal_change")
+        if isinstance(low, dict) and low:
+            # 两桶语义不同（源标注程序性 vs 源未分类），分列而非只报合计
+            from lib.store import LOW_SIGNAL_DIFF_LABELS
+
+            parts.append("低信号 " + "、".join(
+                f"{LOW_SIGNAL_DIFF_LABELS.get(k, k)} {v:+d}" for k, v in low.items()))
+        if events.get("types_incomparable"):
+            parts.append("类型未比较（旧快照口径不同）")
         window = events.get("window_days_changed")
         if isinstance(window, dict):
             parts.append(f"窗口 {window.get('old')} → {window.get('new')} 日")

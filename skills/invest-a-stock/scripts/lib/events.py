@@ -612,9 +612,14 @@ def needs_events_backfill(collection: dict) -> bool:
     """判断 collection 是否需要重新采集 events。
 
     - ``events`` 缺失：从未挂载
-    - ``events == []`` 且 ``events_legs`` 全为 ``failed``：采集失败，应重试
+    - ``events == []`` 且**公告腿未给出结论**（failed 或缺失）：应重试
     - ``events == []`` 且无 ``events_summary``：采集未完成或失败，应重试
-    - ``events == []`` 且有 ``events_summary``（腿非全败）：窗口内确实无事件，不重试
+    - ``events == []`` 且公告腿已应答、``events_summary`` 存在：窗口内确实无事件，不重试
+
+    **判据落在公告腿本身，而不是「所有腿都失败」**：分红明细与股东变动只覆盖很窄的
+    公告类型，它们为空**不能**替代公告源得出「没有公告」的结论（C4：一手优先，
+    二手只作线索、不取代一手核验）。按「全腿失败」判会把「公告腿挂掉 + 两条辅助腿
+    空表」读成「窗口内无公告」——把采集缺陷说成事实。
     """
     events = collection.get("events")
     if events is None:
@@ -622,7 +627,7 @@ def needs_events_backfill(collection: dict) -> bool:
     if isinstance(events, list) and len(events) == 0:
         meta = collection.get("_meta") or {}
         legs = meta.get("events_legs")
-        if isinstance(legs, dict) and legs and all(v == "failed" for v in legs.values()):
+        if isinstance(legs, dict) and legs.get("notice") not in ("ok", "empty"):
             return True
         return "events_summary" not in meta
     return False

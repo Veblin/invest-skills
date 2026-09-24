@@ -1698,6 +1698,15 @@ def _print_diff_events(key_diff: dict) -> None:
         parts.append(f"新增类型: {', '.join(new_types)}")
     if removed_types:
         parts.append(f"消失类型: {', '.join(removed_types)}")
+    low_signal = events_diff.get("low_signal_change")
+    if isinstance(low_signal, dict) and low_signal:
+        # 两桶语义不同（源标注程序性 vs 源未分类），分列而非只报合计
+        from lib.store import LOW_SIGNAL_DIFF_LABELS
+
+        parts.append("低信号变化: " + "、".join(
+            f"{LOW_SIGNAL_DIFF_LABELS.get(k, k)} {v:+d}" for k, v in low_signal.items()))
+    if events_diff.get("types_incomparable"):
+        parts.append("（旧快照 top_types 口径不同，本次未比较类型集合）")
 
     if parts:
         print("## 事件变化")

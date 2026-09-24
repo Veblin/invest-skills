@@ -306,3 +306,25 @@ def test_qc_ignores_legacy_insight_without_synthesis_key(tmp_path):
                  if layer.layer == "insight-contract")
     assert not any(str(item["id"]).startswith("insight-synthesis")
                    or "analysis-sidecar" in str(item["id"]) for item in layer.details)
+
+
+def test_discovery_lines_render_low_signal_buckets_and_incomparable_note():
+    """insight 侧「本次新增发现」的事件行：两桶分列 + 跨口径说明，且不泄漏英文键。
+
+    `_discovery_lines` 的事件块此前只覆盖 count_change / new_types / removed_types，
+    低信号变化与「口径不可比」没有出口——补上后在此钉住。
+    """
+    from lib.render_insight import _discovery_lines
+
+    model = {"discoveries": {
+        "status": "changed", "items": [],
+        "events": {
+            "count_change": 0, "new_types": [], "removed_types": [],
+            "low_signal_change": {"procedural": -10, "unclassified": 10},
+            "types_incomparable": True,
+        },
+    }}
+    line = next(ln for ln in _discovery_lines(model) if ln.startswith("- **事件**"))
+    assert "程序性公告 -10" in line and "未分类公告 +10" in line
+    assert "类型未比较" in line
+    assert "procedural" not in line and "unclassified" not in line, "英文键泄漏进中文产物"
