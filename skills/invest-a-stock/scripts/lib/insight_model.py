@@ -485,6 +485,14 @@ def load_snapshot_diff(symbol: str, collection: dict[str, Any]) -> tuple[dict[st
     return diff, "ok"
 
 
+def _has_event_change(events: Any) -> bool:
+    """仅把可观察的事件数量、类型和低信号变化算作新增发现。"""
+    return isinstance(events, dict) and bool(
+        events.get("count_change") or events.get("new_types")
+        or events.get("removed_types") or events.get("low_signal_change")
+    )
+
+
 def build_discoveries(key_diff: dict[str, Any] | None, *, reason: str = "no_history") -> dict[str, Any]:
     """把 store 的关键字段对比归一化为渲染用的发现区块。
 
@@ -534,7 +542,7 @@ def build_discoveries(key_diff: dict[str, Any] | None, *, reason: str = "no_hist
     events = key_diff.get("events")
     block["events"] = events if isinstance(events, dict) and events else None
 
-    if block["items"] or block["events"]:
+    if block["items"] or _has_event_change(block["events"]):
         block["status"] = "changed"
         block["reason"] = "ok"
     else:
@@ -779,12 +787,17 @@ def _validate_discoveries(block: Any) -> list[str]:
     items = block.get("items")
     if not isinstance(items, list):
         return ["discoveries.items 必须是列表"]
+    events = block.get("events")
     if status == "none":
         if items:
             errors.append("discoveries.status 为 none 时 items 必须为空")
+        if _has_event_change(events):
+            errors.append("discoveries.status 为 none 时不得包含事件变化")
         return errors
-    if not items:
-        errors.append("discoveries.status 为 changed 时 items 不得为空")
+    if events is not None and not isinstance(events, dict):
+        errors.append("discoveries.events 必须是对象或 null")
+    if not items and not _has_event_change(events):
+        errors.append("discoveries.status 为 changed 时必须有字段或事件变化")
     if len(items) > MAX_DISCOVERIES:
         errors.append(f"discoveries 条目不得超过 {MAX_DISCOVERIES} 条")
     for item in items:
@@ -800,9 +813,6 @@ def _validate_discoveries(block: Any) -> list[str]:
         errors.append("discoveries.status 为 changed 时必须带 old_at 与 new_at")
     if not block.get("old_at_label") or not block.get("new_at_label"):
         errors.append("discoveries 的时间标签缺失（须为北京时间，不得回落 ISO 直出）")
-    events = block.get("events")
-    if events is not None and not isinstance(events, dict):
-        errors.append("discoveries.events 必须是对象或 null")
     return errors
 
 

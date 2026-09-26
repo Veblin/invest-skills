@@ -885,26 +885,38 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
     new_events = new_snap.get("events") or {}
     events_diff: dict[str, Any] | None = None
     if old_events or new_events:
+        # 可比性的**第一道闸门：两侧都必须真的有事件摘要**。事件采集失败/不完整时
+        # `extract_key_snapshot` 根本不写 events 键，这里取到 `{}`——若直接与有数据的
+        # 一侧相减，会把「没采到」报成「数量下降」与「这些类型消失了」，即用数据缺口
+        # 冒充事件变化（AGENTS.md 约束 3：没有数据支撑的分析不输出）。
+        both_have_data = bool(old_events) and bool(new_events)
+
         old_window = old_events.get("window_days", 30)
         new_window = new_events.get("window_days", 30)
         count_change = 0
-        if old_window == new_window:
-            old_count = _events_count_from_summary(old_events)
-            new_count = _events_count_from_summary(new_events)
-            count_change = new_count - old_count
-
         window_days_changed: dict[str, int] | None = None
-        if old_window != new_window:
-            window_days_changed = {"old": old_window, "new": new_window}
+        if both_have_data:
+            if old_window == new_window:
+                old_count = _events_count_from_summary(old_events)
+                new_count = _events_count_from_summary(new_events)
+                count_change = new_count - old_count
+            else:
+                window_days_changed = {"old": old_window, "new": new_window}
 
         from .events import is_low_signal  # 低信号判据单一源；本模块不复制字面量集合
 
-        # 「同口径」标记：低信号计数自 v0.3.1 起随 summary 落档。缺该字段的旧快照用的是
-        # **未过滤**的 `top_types[:5]`（低信号占位），与现在的「剔除低信号后取前 5」
-        # 不可直接相减——被旧榜挤到第 6 位的实质类型会以 new_types 出现，而事件本身没有
-        # 变化（幻影 diff）。类型集合与低信号计数两类比较都以此标记为可比性闸门。
-        same_basis = ("procedural_count" in old_events
-                      and "procedural_count" in new_events)
+        # 新版榜单剔除低信号后取前 5；旧版榜单直接取前 5。跨代不可比。
+        # 两代榜单都只有在两侧不足 5 项时才是完整类型集合：满榜时第 6 位
+        # 可能仅因排名变化进入榜单，不能据此声称「新增类型」。
+        old_has_counts = "procedural_count" in old_events
+        new_has_counts = "procedural_count" in new_events
+        same_basis = both_have_data and (old_has_counts == new_has_counts)
+        same_window = both_have_data and old_window == new_window
+        rankings_complete = (
+            len(old_events.get("top_types") or []) < 5
+            and len(new_events.get("top_types") or []) < 5
+        )
+        types_comparable = same_window and same_basis and rankings_complete
 
         def _signal_types(ev: dict) -> set[str]:
             """top_types 里的**实质**类型集合（供同口径两侧比较）。"""
@@ -916,14 +928,14 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
 
         added_types: list[str] = []
         removed_types: list[str] = []
-        if same_basis:
+        if types_comparable:
             added_types = sorted(_signal_types(new_events) - _signal_types(old_events))
             removed_types = sorted(_signal_types(old_events) - _signal_types(new_events))
 
         # 低信号**分桶**比较，不只看合计：procedural ↔ unclassified 之间平移（合计不变）
         # 也是变化——两桶语义不同（源标注程序性 vs 源未分类），合并求和会把它抹平。
         low_signal_change: dict[str, int] | None = None
-        if same_basis:
+        if same_window and old_has_counts and new_has_counts:
             delta = {
                 "procedural": int(new_events.get("procedural_count", 0) or 0)
                 - int(old_events.get("procedural_count", 0) or 0),
@@ -932,16 +944,31 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
             }
             low_signal_change = {k: v for k, v in delta.items() if v} or None
 
+        # 不可比**必须说出来**，且要说清是哪一种：数据缺口（本次没采到）与口径差异
+        # （跨代榜单）对读者的含义不同，写同一句话会把前者读成后者。
+        incomparable_reason: str | None = None
+        if not both_have_data:
+            incomparable_reason = "events_data_missing"
+        elif not same_window:
+            incomparable_reason = "window_changed"
+        elif not same_basis:
+            incomparable_reason = "basis_changed"
+        elif not types_comparable:
+            incomparable_reason = "type_ranking_truncated"
+
+        # `incomparable_reason` 也进入本条件：不可比时**必须产出 diff 对象**，否则标记
+        # 不会出现在输出里，下游（insight_model）会把「未比较」读成「无变化」，
+        # 报出 no_material_change。（P2 修正 2026-09-25）
         if (count_change != 0 or added_types or removed_types or window_days_changed
-                or low_signal_change):
+                or low_signal_change or incomparable_reason):
             events_diff = {
                 "count_change": count_change,
                 "new_types": added_types,
                 "removed_types": removed_types,
             }
-            if not same_basis:
-                # 说清「没比较」而不是让读者以为「没变化」
-                events_diff["types_incomparable"] = True
+            if incomparable_reason:
+                events_diff["types_incomparable"] = True       # 既有消费方（渲染/校验）沿用
+                events_diff["incomparable_reason"] = incomparable_reason
             if low_signal_change:
                 events_diff["low_signal_change"] = low_signal_change
             if window_days_changed:

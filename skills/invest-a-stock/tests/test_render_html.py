@@ -523,6 +523,34 @@ class TestFullReviewAnalysisSameSource:
                            analysis=analysis)
         assert "投资假设检验" in html
 
+    def test_full_md_and_html_drop_judgment_index_but_keep_analysis(self):
+        """v0.3.1 A1 主路径回归：带 analysis 的 full md 与 html 都不得再出现
+        「判断索引」层，同时「重要发现」「分析详情」与分析正文必须完整保留。
+
+        此前保留的两条反向断言只覆盖『无 analysis 的 md』与『brief 的 html』，
+        主路径（带 analysis 的 full 双格式）没有测试锁住——本用例补上。
+        """
+        from lib.render import render_html, render_report_v3
+
+        analysis = [
+            {"module": "overview", "title": "首要判断",
+             "facts_md": "事实一 [来源: engine]", "analysis_md": "判断一",
+             "evidence_tag": "B", "position": "overview"},
+            {"module": "events", "title": "事件分层分析",
+             "facts_md": "事实二 [来源: engine]", "analysis_md": "判断二",
+             "evidence_tag": "B", "position": "events"},
+        ]
+        coll = collection_v2_minimal()
+        md = render_report_v3(coll, "600176", mode="full", analysis=analysis)
+        html = render_html(coll, "600176", mode="full", analysis=analysis)
+
+        for label, text in (("full md", md), ("full html", html)):
+            assert "判断索引" not in text, f"{label} 首屏不得出现已移除的判断索引层"
+        assert "重要发现（5 分钟阅读区）" in md, "overview 前置层不得随索引一并丢失"
+        assert "分析详情（analysis.json 注入）" in md
+        assert "判断一" in md and "判断二" in md, "分析正文不得丢失"
+        assert "判断一" in html and "判断二" in html, "html 分析卡不得丢失"
+
     def test_events_static_placeholder_hidden_when_analysis_provided(self):
         """analysis 提供 events 段 → 静态「待填写」占位 section 隐藏（旧实现
         死块永不填充与真卡并存）。"""
@@ -580,44 +608,16 @@ class TestFullReviewAnalysisSameSource:
         assert "分析详情" not in md and "重要发现（5 分钟阅读区）" not in md
         assert "判断索引" not in md
 
-    # ---- 2026-09-18 评审批次：首屏判断索引 md/html 同源 ----
+    def test_brief_html_renders_analysis_card(self):
+        """v0.3.1 A1 后：判断索引整层已移除；本用例保留为 brief HTML 的分析卡渲染守卫。"""
+        from lib.render import render_html
 
-    @staticmethod
-    def _index_payload() -> list[dict]:
-        return [
+        payload = [
             {"module": "bear_chain", "position": "conclusion",
              "title": "空头链条：量增依赖让利", "facts_md": "f", "analysis_md": "a",
              "evidence_tag": "B"},
-            {"module": "事件归因", "position": "events", "title": "下跌非公告驱动",
-             "facts_md": "f", "analysis_md": "a", "evidence_tag": "B"},
         ]
-
-    def test_judgment_index_same_source_md_html(self):
-        """索引条目由 analysis_schema.index_entries 单点给出：md/html 同序同标签。"""
-        from lib.analysis_schema import index_entries
-        from lib.render import render_html, render_report_v3
-
-        payload = self._index_payload()
-        md = render_report_v3(collection_v2_minimal(), "600176", mode="full",
-                              analysis=payload)
-        html = render_html(collection_v2_minimal(), "600176", mode="full",
-                           analysis=payload)
-        entries = index_entries(payload)
-        assert entries == [("结论", "空头链条：量增依赖让利"),
-                           ("事件归因", "下跌非公告驱动")], "内部 slug 未回退 position 中文名"
-        last_md = last_html = -1
-        for label, title in entries:
-            i_md = md.index(f"- **{label}**：{title}")
-            i_html = html.index(f">{label}</strong>：{title}")
-            assert i_md > last_md and i_html > last_html, "md/html 索引次序不一致"
-            last_md, last_html = i_md, i_html
-        assert "bear_chain" not in md, "md 首屏泄漏内部槽位键"
-
-    def test_judgment_index_is_full_mode_only_in_html(self):
-        """与 md 侧同门槛：该层是 full 底稿的首屏索引，brief 不出（分析卡照常渲染）。"""
-        from lib.render import render_html
-
         html = render_html(collection_v2_minimal(), "600176", mode="brief",
-                           analysis=self._index_payload())
-        assert "判断索引" not in html
-        assert "空头链条：量增依赖让利" in html, "brief 的分析卡不受索引层影响"
+                           analysis=payload)
+        assert "判断索引" not in html, "A1 后不得重现（反向守卫）"
+        assert "空头链条：量增依赖让利" in html, "brief 的分析卡不受索引层移除影响"

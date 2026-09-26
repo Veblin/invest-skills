@@ -739,7 +739,6 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         _fast_veto = _check_fast_veto(dims, collection)
         parts: list[str] = [
             _header_v2(collection, symbol),
-            _render_judgment_index(analysis),
         ]
         extras = _render_engine_extras(collection)
         if extras:
@@ -797,7 +796,6 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _risk_footer(),
         ]
         # 方案 A（v0.3.0，四层阅读结构）——
-        #   ① 判断索引（首屏索引，见 _render_judgment_index；在 parts 头部）
         #   ② 报告说明（底稿身份 + 研究档案）
         #   ③ 重要发现（5 分钟阅读区，overview 槽位正文）→ 分析详情（其余分析段）
         #   ④ 九模块数据底稿（以下各 section）
@@ -894,34 +892,6 @@ def _render_analysis_overview(analysis: list[dict] | None,
         if ev:
             lines.append(f"**证据等级：** {ev}")
             lines.append("")
-    return "\n".join(lines).rstrip()
-
-
-def _render_judgment_index(analysis: list[dict] | None) -> str:
-    """在完整底稿首屏列出本次分析的判断索引（分类标签 + 标题）。
-
-    分析段标题由研究阶段生成，已覆盖事件归因、经营质量、估值、行业/竞争、
-    资金与风险等判断。这里只做可追溯索引，不重新概括或改写分析结论；完整
-    事实、来源和证据强度仍以稍后的分析详情为准。
-
-    成员判据与标签**不在本层决定**——由 `analysis_schema.index_entries` 单点
-    给出（与 html 侧 `_html_judgment_index` 共用），本层只负责 md 排布。
-    无条目 → 空串（无 analysis 与「全部段都被排除」两种情况都不会留下空标题）。
-    """
-    from lib.analysis_schema import index_entries
-
-    entries = index_entries(analysis)
-    if not entries:
-        return ""
-    lines = [
-        "## 判断索引",
-        "",
-        "> 以下是本次研究最值得先看的判断索引；数字、事实来源和证据强度请展开对应分析段核验。",
-        "",
-    ]
-    lines.extend(
-        f"- **{label}**：{title}（详见下方对应分析段）" for label, title in entries
-    )
     return "\n".join(lines).rstrip()
 
 

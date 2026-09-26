@@ -1706,7 +1706,15 @@ def _print_diff_events(key_diff: dict) -> None:
         parts.append("低信号变化: " + "、".join(
             f"{LOW_SIGNAL_DIFF_LABELS.get(k, k)} {v:+d}" for k, v in low_signal.items()))
     if events_diff.get("types_incomparable"):
-        parts.append("（旧快照 top_types 口径不同，本次未比较类型集合）")
+        reason = events_diff.get("incomparable_reason")
+        if reason == "events_data_missing":
+            parts.append("（其中一次采集没有事件数据，本次未比较事件数量与类型）")
+        elif reason == "window_changed":
+            parts.append("（事件窗口不同，本次未比较事件数量、类型与低信号计数）")
+        elif reason == "type_ranking_truncated":
+            parts.append("（事件类型榜单仅保留前 5，本次未比较类型集合）")
+        else:
+            parts.append("（旧快照 top_types 口径不同，本次未比较类型集合）")
 
     if parts:
         print("## 事件变化")

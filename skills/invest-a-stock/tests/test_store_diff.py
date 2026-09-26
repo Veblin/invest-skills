@@ -375,6 +375,146 @@ class TestEventsKeySnapshot:
         assert events_diff.get("types_incomparable") is True, "跳过比较须显式说明"
         assert events_diff.get("count_change") == 2, "数量变化仍可比、照常报告"
 
+    def test_two_legacy_snapshots_are_comparable_to_each_other(self):
+        """两份旧快照的榜单都不足五项时，完整类型集合仍可比较。"""
+        from lib.store import diff_key_snapshots
+
+        def _legacy(fetched: str, top_types: list, count: int) -> dict:
+            return {"symbol": "600176", "fetched_at": fetched,
+                    "_meta": {"events_summary": {
+                        "event_count": count, "window_days": 30, "top_types": top_types,
+                    }}}  # 无 procedural_count = v0.3.1 前口径
+
+        old = _legacy("2026-06-01T00:00:00Z", [{"type": "buyback", "count": 3}], 3)
+        new = _legacy("2026-06-08T00:00:00Z", [{"type": "dividend", "count": 3}], 3)
+
+        events_diff = diff_key_snapshots(old, new).get("events") or {}
+        assert events_diff, "两份旧快照类型变了却无 diff —— 回到静默跳过"
+        assert events_diff.get("new_types") == ["dividend"]
+        assert events_diff.get("removed_types") == ["buyback"]
+        assert "types_incomparable" not in events_diff
+
+    def test_legacy_full_ranking_does_not_report_displaced_type_as_new(self):
+        """旧版未过滤前五榜单满额时，第六位进入榜单不证明出现新事件类型。"""
+        from lib.store import diff_key_snapshots
+
+        def _legacy(fetched: str, top_types: list[dict]) -> dict:
+            return {"symbol": "600176", "fetched_at": fetched,
+                    "_meta": {"events_summary": {
+                        "event_count": 12, "window_days": 30, "top_types": top_types,
+                    }}}
+
+        old = _legacy("2026-06-01T00:00:00Z", [
+            {"type": "other", "count": 4}, {"type": "buyback", "count": 3},
+            {"type": "dividend", "count": 2}, {"type": "earnings_report", "count": 2},
+            {"type": "holder_decrease", "count": 1},
+        ])
+        new = _legacy("2026-06-08T00:00:00Z", [
+            {"type": "buyback", "count": 3}, {"type": "dividend", "count": 2},
+            {"type": "earnings_report", "count": 2},
+            {"type": "holder_decrease", "count": 1},
+            {"type": "equity_incentive", "count": 1},
+        ])
+
+        events_diff = diff_key_snapshots(old, new)["events"]
+        assert events_diff["new_types"] == []
+        assert events_diff["removed_types"] == []
+        assert events_diff["types_incomparable"] is True
+        assert events_diff["incomparable_reason"] == "type_ranking_truncated"
+        assert events_diff["count_change"] == 0
+
+    def test_current_full_ranking_does_not_report_displaced_type_as_new(self):
+        """新版实质类型前五榜单满额时，也无法判断第六位是否原已存在。"""
+        from lib.store import diff_key_snapshots
+
+        def _current(fetched: str, kinds: list[str]) -> dict:
+            return {"symbol": "600176", "fetched_at": fetched,
+                    "_meta": {"events_summary": {
+                        "event_count": 10, "window_days": 30,
+                        "top_types": [{"type": kind, "count": 1} for kind in kinds],
+                        "procedural_count": 0, "unclassified_count": 0,
+                    }}}
+
+        old = _current("2026-06-01T00:00:00Z", [
+            "buyback", "dividend", "earnings_report", "holder_decrease", "lawsuit",
+        ])
+        new = _current("2026-06-08T00:00:00Z", [
+            "buyback", "dividend", "earnings_report", "holder_decrease", "equity_incentive",
+        ])
+        events_diff = diff_key_snapshots(old, new)["events"]
+        assert events_diff["new_types"] == []
+        assert events_diff["removed_types"] == []
+        assert events_diff["incomparable_reason"] == "type_ranking_truncated"
+
+    def test_legacy_type_diff_skipped_when_windows_differ(self):
+        """旧版榜单未满额也不能跨不同天数的事件窗口比较。"""
+        from lib.store import diff_key_snapshots
+
+        def _legacy(fetched: str, window: int, kind: str) -> dict:
+            return {"symbol": "600176", "fetched_at": fetched,
+                    "_meta": {"events_summary": {
+                        "event_count": 3, "window_days": window,
+                        "top_types": [{"type": kind, "count": 3}],
+                    }}}
+
+        old = _legacy("2026-06-01T00:00:00Z", 30, "buyback")
+        new = _legacy("2026-06-08T00:00:00Z", 60, "dividend")
+        events_diff = diff_key_snapshots(old, new)["events"]
+        assert events_diff["new_types"] == []
+        assert events_diff["removed_types"] == []
+        assert events_diff["count_change"] == 0
+        assert events_diff["window_days_changed"] == {"old": 30, "new": 60}
+        assert events_diff["incomparable_reason"] == "window_changed"
+
+    def test_cross_version_incomparable_marker_survives_no_other_change(self):
+        """跨口径但**数量/窗口/可见类型都没变**时，仍须产出 diff 并带 `types_incomparable`。
+
+        否则 `events_diff` 为 None → 下游 insight_model 的 `block["events"]` 为 None →
+        报 `no_material_change`，把「类型未比较」说成「无变化」（P2，2026-09-25 修正）。
+        """
+        from lib.store import diff_key_snapshots
+
+        old = {"symbol": "600176", "fetched_at": "2026-06-01T00:00:00Z",
+               "_meta": {"events_summary": {
+                   "event_count": 3, "window_days": 30,
+                   "top_types": [{"type": "buyback", "count": 3}]}}}       # v0.3.1 前
+        new = {"symbol": "600176", "fetched_at": "2026-06-08T00:00:00Z",
+               "_meta": {"events_summary": {
+                   "event_count": 3, "window_days": 30,
+                   "top_types": [{"type": "buyback", "count": 3}],
+                   "procedural_count": 0, "unclassified_count": 0}}}       # v0.3.1 起
+
+        events_diff = diff_key_snapshots(old, new).get("events")
+        assert events_diff is not None, "跨口径必须产出 diff，否则可比性标记无处落脚"
+        assert events_diff.get("types_incomparable") is True
+        assert events_diff.get("count_change") == 0
+
+    def test_missing_event_data_is_not_reported_as_type_change(self):
+        """一端**没有事件数据**时不得报类型变化——数据缺口不等于事件变化。
+
+        事件采集失败/不完整时 `extract_key_snapshot` 不写 events 键，diff 取到 `{}`。
+        若只按「版本标记」判可比性，「缺数据的一侧」与「旧口径的一侧」都无
+        `procedural_count` → 被判为同口径 → 有数据一侧的类型全被报成 removed_types。
+        这是**用数据缺口冒充事件变化**（AGENTS.md 约束 3），必须按缺失闸门挡住并说明。
+        （P2，2026-09-25）
+        """
+        from lib.store import diff_key_snapshots
+
+        old = {"symbol": "600176", "fetched_at": "2026-06-01T00:00:00Z",
+               "_meta": {"events_summary": {
+                   "event_count": 3, "window_days": 30,
+                   "top_types": [{"type": "buyback", "count": 3}]}}}      # 旧口径、有数据
+        new = {"symbol": "600176", "fetched_at": "2026-06-08T00:00:00Z",
+               "_meta": {}}                                            # 事件采集失败
+
+        events_diff = diff_key_snapshots(old, new).get("events")
+        assert events_diff is not None, "数据缺口也必须产出对象，否则无法说明「未比较」"
+        assert events_diff.get("removed_types") == [], "缺数据不得报成「类型消失」"
+        assert events_diff.get("new_types") == []
+        assert events_diff.get("count_change") == 0, "缺数据不得报成「数量下降」"
+        assert events_diff.get("incomparable_reason") == "events_data_missing"
+        assert events_diff.get("types_incomparable") is True
+
     def test_low_signal_surge_is_reported(self):
         """程序性/未分类公告的激增须可见（top_types 已剔除这两类，只能靠计数）。"""
         from lib.store import diff_key_snapshots
@@ -478,6 +618,24 @@ class TestEventsKeySnapshot:
         events_diff = result.get("events") or {}
         assert events_diff.get("count_change") == 0
         assert events_diff.get("window_days_changed") == {"old": 30, "new": 90}
+        assert events_diff.get("incomparable_reason") == "window_changed"
+
+    def test_new_snapshot_skips_low_signal_change_when_windows_differ(self):
+        from lib.store import diff_key_snapshots
+
+        def _current(fetched: str, window: int, proc: int) -> dict:
+            return {"symbol": "600176", "fetched_at": fetched,
+                    "_meta": {"events_summary": {
+                        "event_count": 3, "window_days": window,
+                        "top_types": [{"type": "buyback", "count": 3}],
+                        "procedural_count": proc, "unclassified_count": 0,
+                    }}}
+
+        old = _current("2026-06-01T00:00:00Z", 30, 2)
+        new = _current("2026-06-08T00:00:00Z", 60, 12)
+        events_diff = diff_key_snapshots(old, new)["events"]
+        assert "low_signal_change" not in events_diff
+        assert events_diff["incomparable_reason"] == "window_changed"
 
 
 class TestDiffEventsRendering:
@@ -511,3 +669,15 @@ class TestDiffEventsRendering:
         out = capsys.readouterr().out
         assert "未比较类型集合" in out
         assert "事件数量变化: +2" in out
+
+    def test_prints_ranking_limit_without_claiming_version_mismatch(self, capsys):
+        import invest
+
+        invest._print_diff_events({"events": {
+            "count_change": 0, "new_types": [], "removed_types": [],
+            "types_incomparable": True,
+            "incomparable_reason": "type_ranking_truncated",
+        }})
+        out = capsys.readouterr().out
+        assert "榜单仅保留前 5" in out
+        assert "口径不同" not in out

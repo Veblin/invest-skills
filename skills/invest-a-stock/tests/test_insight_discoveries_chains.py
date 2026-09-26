@@ -151,6 +151,110 @@ def test_no_material_change_shows_verifiable_baseline() -> None:
     assert "2026-06-04" in body and "北京时间" in body   # 基线窗口可见
 
 
+@pytest.mark.parametrize("reason,needle,anti", [
+    ("events_data_missing", "事件数据缺失", "旧快照口径不同"),
+    ("basis_changed", "旧快照口径不同", "事件数据缺失"),
+    ("window_changed", "事件窗口不同", "旧快照口径不同"),
+    ("type_ranking_truncated", "榜单仅保留前 5", "旧快照口径不同"),
+])
+def test_event_incomparable_wording_matches_reason(reason, needle, anti) -> None:
+    """事件数据缺口、窗口、榜单截断与跨代口径各有准确措辞。"""
+    from lib.render_insight import _event_warning_lines
+
+    model = {"discoveries": {
+        "status": "none", "reason": "no_material_change",
+        "events": {"count_change": 0, "new_types": [], "removed_types": [],
+                   "types_incomparable": True, "incomparable_reason": reason,
+                   "window_days_changed": {"old": 30, "new": 60} if reason == "window_changed" else None},
+    }}
+    joined = "\n".join(_event_warning_lines(model))
+    assert needle in joined
+    assert anti not in joined, f"{reason} 不得套用另一种理由的措辞"
+
+
+@pytest.mark.parametrize("scenario", [
+    "basis_changed", "type_ranking_truncated", "events_data_missing",
+])
+def test_event_only_incomparable_diff_is_warning_not_discovery(scenario) -> None:
+    """仅有不可比标记时保留提醒，但不声称有新增发现。"""
+    from lib.insight_model import validate_insight
+    from lib.render_insight import render_insight_html, render_insight_markdown
+    from lib.store import diff_key_snapshots
+
+    old = collection_v2_minimal()
+    new = copy.deepcopy(old)
+    old["fetched_at"] = "2026-06-04T12:00:00+00:00"
+    new["fetched_at"] = "2026-06-11T12:00:00+00:00"
+    ranking_truncated = scenario == "type_ranking_truncated"
+    top_types = [{"type": kind, "count": 1} for kind in (
+        "buyback", "dividend", "earnings_report", "holder_decrease", "lawsuit",
+    )] if ranking_truncated else [{"type": "buyback", "count": 3}]
+    summary = {"event_count": 5 if ranking_truncated else 3,
+               "window_days": 30, "top_types": top_types}
+    old.setdefault("_meta", {})["events_summary"] = summary
+    if scenario != "events_data_missing":
+        new.setdefault("_meta", {})["events_summary"] = {
+            **summary,
+            **({"procedural_count": 0, "unclassified_count": 0}
+               if scenario == "basis_changed" else {}),
+        }
+
+    key_diff = diff_key_snapshots(old, new)
+    assert key_diff["categories"] == {}
+    assert key_diff["events"]["incomparable_reason"] == scenario
+
+    model = _model(new, key_diff=key_diff, diff_reason="ok")
+    assert model["discoveries"]["status"] == "none"
+    assert model["discoveries"]["reason"] == "no_material_change"
+    assert model["discoveries"]["items"] == []
+    assert validate_insight(model) == []
+    markdown = render_insight_markdown(model)
+    discovery_body = _section(markdown, "本次新增发现")
+    warning_body = _section(markdown, "事件数据可比性")
+    assert "未比较" not in discovery_body
+    assert "无显著变化" in discovery_body
+    needle = {"basis_changed": "类型未比较",
+              "type_ranking_truncated": "榜单仅保留前 5",
+              "events_data_missing": "事件数据缺失"}[scenario]
+    assert needle in warning_body
+    assert "[来源: store 快照对比" in warning_body
+    html = render_insight_html(model)
+    assert html.index("本次新增发现") < html.index("事件数据可比性")
+    assert needle in html
+
+
+def test_event_change_and_incomparability_use_separate_sections() -> None:
+    from lib.render_insight import render_insight_markdown
+    from lib.store import diff_key_snapshots
+
+    old = {"symbol": "600176", "fetched_at": "2026-06-04T12:00:00+00:00",
+           "_meta": {"events_summary": {"event_count": 3, "window_days": 30,
+                                        "top_types": [{"type": "buyback", "count": 3}]}}}
+    new = {"symbol": "600176", "fetched_at": "2026-06-11T12:00:00+00:00",
+           "_meta": {"events_summary": {"event_count": 5, "window_days": 30,
+                                        "top_types": [{"type": "buyback", "count": 3}],
+                                        "procedural_count": 0, "unclassified_count": 0}}}
+    model = _model(key_diff=diff_key_snapshots(old, new), diff_reason="ok")
+    assert model["discoveries"]["status"] == "changed"
+    markdown = render_insight_markdown(model)
+    assert "窗口内事件数 +2" in _section(markdown, "本次新增发现")
+    assert "未比较" not in _section(markdown, "本次新增发现")
+    assert "类型未比较" in _section(markdown, "事件数据可比性")
+
+
+@pytest.mark.parametrize("events", [None, {}, {"types_incomparable": True}])
+def test_changed_discoveries_without_items_or_events_still_fails_validation(events) -> None:
+    from lib.insight_model import validate_insight
+
+    model = _model()
+    model["discoveries"].update({
+        "status": "changed", "reason": "ok", "items": [], "events": events,
+        "old_at": "2026-06-04T12:00:00+00:00", "new_at": "2026-06-11T12:00:00+00:00",
+        "old_at_label": "2026-06-04 北京时间", "new_at_label": "2026-06-11 北京时间",
+    })
+    assert any("字段或事件变化" in error for error in validate_insight(model))
+
+
 def test_chain_engineering_note_is_not_rendered() -> None:
     """chain["note"] 属程序规则说明，只留侧车，不进读者报告（审查意见 #3）。"""
     from lib.render_insight import render_insight_html, render_insight_markdown
@@ -269,7 +373,7 @@ def test_validate_rejects_broken_chain(mutate, needle) -> None:
 
 @pytest.mark.parametrize("mutate,needle", [
     (lambda b: b.update(status="bogus"), "status 非法"),
-    (lambda b: b.update(items=[]), "items 不得为空"),
+    (lambda b: b.update(items=[]), "字段或事件变化"),
     (lambda b: b.update(old_at=None), "old_at"),
     (lambda b: b.update(old_at_label=None), "时间标签"),
     (lambda b: b.update(items=[{"category": "估值"}]), "category 与 label"),

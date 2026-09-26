@@ -167,17 +167,38 @@ def _discovery_lines(model: dict[str, Any]) -> list[str]:
 
             parts.append("低信号 " + "、".join(
                 f"{LOW_SIGNAL_DIFF_LABELS.get(k, k)} {v:+d}" for k, v in low.items()))
-        if events.get("types_incomparable"):
-            parts.append("类型未比较（旧快照口径不同）")
-        window = events.get("window_days_changed")
-        if isinstance(window, dict):
-            parts.append(f"窗口 {window.get('old')} → {window.get('new')} 日")
         if parts:
             lines.append("- **事件** " + "；".join(parts))
     unchanged = block.get("unchanged_count")
     if isinstance(unchanged, int) and unchanged > 0:
         lines.append(f"（另有 {unchanged} 项关键字段无显著变化）")
     return lines or [_NO_RENDERABLE_LINE]
+
+
+def _event_warning_lines(model: dict[str, Any]) -> list[str]:
+    """事件差分的可比性提醒，与「本次新增发现」分开呈现。"""
+    block = model.get("discoveries") or {}
+    events = block.get("events")
+    if not isinstance(events, dict) or not (events.get("types_incomparable")
+                                            or events.get("window_days_changed")):
+        return []
+    reason = events.get("incomparable_reason")
+    if reason == "events_data_missing":
+        note = "事件数据缺失，未比较数量与类型"
+    elif reason == "window_changed" or events.get("window_days_changed"):
+        window = events.get("window_days_changed") or {}
+        note = (f"事件窗口不同（{window.get('old')} → {window.get('new')} 日），"
+                "未比较数量、类型与低信号计数")
+    elif reason == "type_ranking_truncated":
+        note = "事件类型榜单仅保留前 5，未比较类型"
+    else:
+        note = "类型未比较（旧快照口径不同）"
+    lines: list[str] = []
+    old_label, new_label = block.get("old_at_label"), block.get("new_at_label")
+    if old_label and new_label:
+        lines.append(f"[来源: store 快照对比 {old_label} → {new_label}]")
+    lines.append(f"- ⚠️ {note}。")
+    return lines
 
 
 def _chain_lines(model: dict[str, Any]) -> list[str]:
@@ -320,6 +341,9 @@ def render_insight_markdown(model: dict[str, Any]) -> str:
         lines += _synthesis_lines(model)
     lines += ["", "## 本次新增发现"]
     lines += _discovery_lines(model)
+    warning_lines = _event_warning_lines(model)
+    if warning_lines:
+        lines += ["", "## 事件数据可比性", *warning_lines]
     lines += ["", f"## {_CHAIN_SECTION_TITLE}", _CHAIN_SECTION_NOTE]
     lines += _chain_lines(model)
     lines += ["", "## 支持、反证与关联边界"]
@@ -369,6 +393,11 @@ def render_insight_html(model: dict[str, Any]) -> str:
     status = "分析完成" if model["completion"] == "complete" else "分析未完成（证据不足）"
     # 与 markdown 同源的文本：同一 model 键、同一格式化函数，防止两条渲染路径漂移。
     discoveries_html = escape("\n".join(_discovery_lines(model)))
+    warning_lines = _event_warning_lines(model)
+    warning_text = escape("\n".join(warning_lines))
+    warning_html = (f'<section><h2>事件数据可比性</h2><div class="finding">'
+                    f'<pre class="plain">{warning_text}</pre></div></section>'
+                    if warning_lines else "")
     chains_html = escape("\n".join(_chain_lines(model)))
     fetched_label = escape(_beijing(model.get("fetched_at")))
     # 与 markdown 同位：核心矛盾之后、本次新增发现之前（两格式同序）
@@ -380,6 +409,7 @@ def render_insight_html(model: dict[str, Any]) -> str:
 <section><h2>核心矛盾</h2><div class="finding">{escape(model["core_tension"]["claim"])}</div></section>
 {synthesis_html}
 <section><h2>本次新增发现</h2><div class="finding"><pre class="plain">{discoveries_html}</pre></div></section>
+{warning_html}
 <section><h2>{escape(_CHAIN_SECTION_TITLE)}</h2><div class="finding"><p class="note">{escape(_CHAIN_SECTION_NOTE)}</p><pre class="plain">{chains_html}</pre></div></section>
 <section><h2>证据与反证</h2>{evidence}</section>
 <section><h2>数据探索</h2><label>筛选事实维度 <select id="dimension"><option value="all">全部</option><option value="valuation">估值</option><option value="financials">财务</option><option value="technical">技术</option><option value="quote">行情</option><option value="basic">基本信息</option></select></label><p class="note">字段来源单元格可悬停查看公式；筛选状态始终可见，离线可用。</p><table><thead><tr><th>Fact</th><th>数值</th><th>口径</th><th>截至</th><th>来源 / 公式</th></tr></thead><tbody id="facts">{fact_rows}</tbody></table></section>
