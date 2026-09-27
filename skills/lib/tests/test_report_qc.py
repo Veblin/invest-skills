@@ -1110,7 +1110,7 @@ class TestConclusionEvidenceAllTypes:
 # ── v0.3.1 A4：折叠跨度不计阅读篇幅（度量口径对齐） ──
 
 class TestReadingLengthExcludesFoldedSpans:
-    """`<details>` 跨度不计入 `readability_metrics.total_chars`。
+    """仅 stock full 的审计底稿不计入 `readability_metrics.total_chars`。
 
     动机：默认报告（stock full）把九模块 / 12 题 / DCF / 分析详情收进审计底稿
     折叠块，篇幅指标须与「主阅读面」同义，否则底稿越长越像「报告读不完」。
@@ -1129,11 +1129,26 @@ class TestReadingLengthExcludesFoldedSpans:
         assert any(f["id"] == "readability-length" for f in readability_findings(md))
 
     def test_nested_details_and_unclosed_span(self):
-        """嵌套按深度处理；未闭合视为延续到文末（宁可少算，不把底稿算成阅读面）。"""
-        nested = ("前\n<details>\n<summary>外</summary>\n\n" + "折" * 5000
+        """审计底稿嵌套按深度处理；未闭合视为延续到文末。"""
+        nested = ("前\n<details>\n<summary>审计底稿</summary>\n\n" + "折" * 5000
                   + "\n<details>\n<summary>内</summary>\n\n" + "折" * 5000
                   + "\n</details>\n\n</details>\n后\n")
         assert readability_metrics(nested)["total_chars"] < 100
-        unclosed = ("前\n<details>\n<summary>未闭合</summary>\n\n"
+        unclosed = ("前\n<details>\n<summary>审计底稿</summary>\n\n"
                     + "折" * 5000 + "\n")
         assert readability_metrics(unclosed)["total_chars"] < 100
+
+    def test_inline_closed_details_do_not_hide_following_body(self):
+        md = "开头。\n<details><summary>普通附录</summary>附录</details>\n" + "正文。" * 10001
+        met = readability_metrics(md)
+        assert met["total_chars"] > READABILITY_MAX_CHARS
+        assert any(f["id"] == "readability-length" for f in readability_findings(md))
+
+    def test_insight_facts_are_counted(self):
+        md = "## 证据底稿\n<details><summary>展开 Facts 与来源清单</summary>\n" \
+             + "事实。" * 10001 + "\n</details>\n"
+        assert readability_metrics(md)["total_chars"] > READABILITY_MAX_CHARS
+
+    def test_only_named_basement_is_excluded(self):
+        ordinary = "<details>\n<summary>展开：分析详情</summary>\n" + "正文" * 11000 + "\n</details>"
+        assert readability_metrics(ordinary)["total_chars"] > READABILITY_MAX_CHARS

@@ -168,6 +168,12 @@ def test_d4_trade_structure_three_segments():
     assert "条件性估值区间" in ts
 
 
+def test_public_demos_use_conditional_valuation_term():
+    demos = Path(__file__).resolve().parents[3] / "docs" / "demos"
+    for path in demos.glob("*.md"):
+        assert "入场区间" not in path.read_text(encoding="utf-8"), path
+
+
 def test_d4_conventions_62_three_segments():
     conv = _read(_CONVENTIONS)
     sec = _section(conv, "### 6.2 交易结构分析")

@@ -37,7 +37,8 @@ class KlineTTLCache:
         # `shanghai_now` 在测试中被 monkeypatch），TTL 必须在同一条时间线上判定，
         # 否则固定日期的夹具会随真实时间流逝被判过期（时间炸弹：写于 09-23 的
         # 测试在 09-25 之后必红）。默认真实时钟，生产行为不变。
-        self._now = now or time.time
+        # 默认时钟在调用时解析，测试可在单例构造后冻结 time.time。
+        self._now = now if now is not None else lambda: time.time()
 
     def _root_dir(self) -> Path:
         return self._root() if callable(self._root) else Path(self._root)

@@ -106,6 +106,32 @@ class TestCoreTension:
         # 无市场结构数据时仍须能产出（相对行业超额变量缺席，不抛异常）
         assert isinstance(_core_variables(dims, {}), list)
 
+    def test_implied_growth_reuses_render_cache(self, monkeypatch):
+        from lib import render_risk
+
+        c = _collection_phase3()
+        dims = {d["dimension"]: d for d in c["dimensions"]}
+        calls = 0
+        original = render_risk.sort_kline_asc
+
+        def counted(rows):
+            nonlocal calls
+            calls += 1
+            return original(rows)
+
+        monkeypatch.setattr(render_risk, "sort_kline_asc", counted)
+        cache = {}
+        first = render_risk._v3_bull_bear_implied_growth(
+            dims, c["market_structure"], val_cache=cache,
+        )
+        assert calls > 0
+        before = calls
+        second = render_risk._v3_bull_bear_implied_growth(
+            dims, c["market_structure"], val_cache=cache,
+        )
+        assert second == first
+        assert calls == before
+
 
 class TestRiskModule7:
     def test_known_unknowns_slots(self):

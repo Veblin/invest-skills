@@ -72,7 +72,7 @@ class TestParticipantBehaviorScan:
             assert word not in text
 
     def test_cv_note_points_to_section3_conclusion(self):
-        """v0.3.1 A4：北向 vs 全档的一致性结论**只在 §3 的 CV-4 说一次**。
+        """参与者节只给 CV-4 指针，不复述一致性结论。
 
         参与者节保留**指针句**（口径名 + 窗口对齐），不再复述结论——原先同一
         比较在两节各写一遍。结论自身的分支覆盖（一致 / 相反 / 数据不完整 /

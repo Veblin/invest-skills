@@ -78,6 +78,20 @@ def resolve_moneyflow(mf: dict | None, *keys: str) -> tuple[float | None, str | 
     return None, None
 
 
+def flow_direction_relation(northbound_net: Any, moneyflow_net: Any) -> str:
+    """北向与全档净额的共同方向判据。"""
+    try:
+        nb = float(northbound_net)
+        mf = float(moneyflow_net)
+    except (TypeError, ValueError):
+        return "unavailable"
+    if nb == 0 and mf == 0:
+        return "convergence"
+    if nb == 0 or mf == 0:
+        return "gap"
+    return "convergence" if nb * mf > 0 else "divergence"
+
+
 def moneyflow_signal_label(key: str | None) -> str:
     if key:
         return _MF_LABELS.get(key, "全档净额")

@@ -1,5 +1,6 @@
 """Concise mode + ReportEnhancer + V3 main entry point."""
 from __future__ import annotations
+import re
 # Import ALL names (including _-prefixed) from _base
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
@@ -275,6 +276,7 @@ def _render_extras_block(collection: dict, *, strict: bool) -> list[str]:
 _BASEMENT_SUMMARY = (
     "审计底稿（展开：九模块 / 12 题 / DCF / Bull-Bear / 技术读数 / 引擎自检 / 分析详情）"
 )
+_DISCLOSURE_TAG_RE = re.compile(r"<\s*/?\s*details\b[^>]*>", re.IGNORECASE)
 
 
 def _full_mode_basement(fragments: list[str]) -> str:
@@ -294,6 +296,11 @@ def _full_mode_basement(fragments: list[str]) -> str:
     body = "\n\n".join(p for p in fragments if p)
     if not body:
         return ""
+    # 分析段是人工输入：其字面 HTML 标签不得改变外层底稿的折叠边界。
+    body = _DISCLOSURE_TAG_RE.sub(
+        lambda match: match.group().replace("<", "&lt;").replace(">", "&gt;"),
+        body,
+    )
     return _wrap_details(_BASEMENT_SUMMARY, body)
 
 
@@ -779,8 +786,6 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_technical_brief(dims, val_cache=val_cache, collection=collection),
             _section_six_gates_scorecard(dims, collection, val_cache),
             _render_engine_selfcheck_appendix(collection),
-            _references_appendix(collection),
-            _risk_footer(),
         ]
         # 方案 A（v0.3.0，三层阅读结构）+ v0.3.1 A4（单文件双段式）——
         #   ② 报告说明（底稿身份 + 研究档案）
@@ -791,17 +796,19 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         # 时各层均返回空串（基线零 diff 保持）。
         # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值，再入列
         #（`_render_analysis_appendix` 的调用必须晚于 sections 与 overview）。
-        # 折外保留「引用来源」（引用入口）与免责 footer。
+        # 折外保留「引用来源」（引用入口）与免责 footer；不依赖 sections 尾部位置。
+        references = _references_appendix(collection)
+        footer = _risk_footer()
         parts.extend([
             _full_mode_identity_status(symbol, analysis, profile),
             _render_analysis_overview(analysis, collection),
             _full_mode_basement([
                 *basement_extras,
-                *sections[:-2],        # 目录 + 九模块 + 引擎自检附录
+                *sections,             # 目录 + 九模块 + 引擎自检附录
                 _render_analysis_appendix(analysis, collection),
             ]),
-            sections[-2],              # 📚 引用来源
-            sections[-1],              # 免责 footer
+            references,
+            footer,
         ])
     return "\n\n".join(p for p in parts if p)
 

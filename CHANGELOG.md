@@ -15,23 +15,25 @@ v0.3.1 按「修补 + 接线 + 清理，不叠架构」推进，逐迭代交付�
 
 - **单文件双段式**：`--mode full` 正文分「主阅读面」与「审计底稿」两段，边界即 `md.index("<details>")`。主阅读面只留判断链路（报告说明 → 重要发现/`overview` 判断句 → 数据验算警示 → 宏观情景契约行）；目录、九模块 §0–§8、12 题、DCF、Bull-Bear、技术读数、引擎自检附录与分析详情收进**单层** `<details>`（`_full_mode_basement`）。引用来源与免责声明留在折外作引用入口。
 - **折叠对既有检查器透明**：lint 与 `report_qc` 的结构/完成度层都按行首 `^## ` 工作（`lint` 章节正则、`report_qc._MARKDOWN_HEADING_RE`），故阅读顺序调整无需重写任何渲染函数；`overview` 段标题由 `###` 升为 `##`（对齐人工样稿的 H2 判断句形态）。
-- **篇幅口径对齐**：`report_qc._body_lines` 跳过 `<details>` 跨度——折叠是「这段不在阅读面」的显式标记，故折叠内容不再计入 `readability_metrics.total_chars`（配套用例覆盖「折叠不计长」与「折外长文本仍命中」两侧）。**注意这组指标按契约是软建议**（`_check_readability` 封顶 warn）：改动前该报告是 WARN（`readability-length` finding 为 error 级但被层封顶），**不是 FAIL**——本项是度量口径对齐，不是解 FAIL。
-- **去重（同一结论只说一次）**：① 「核心矛盾小结」结论复述段（挂在 DCF 后、无 H2 宿主）删除，三个分歧变量改为 `## 0.` 节内 `**核心变量：**`（`_core_variables`）；② §5b 空头链：人写链为正文，引擎自动链下沉为底稿折叠（原先两套并列各说一遍）；③ §3 资金态度不再重复北向/全档数值行（参与者表已逐行给出，且多带「大单+特大单」口径），参与者节的同结论备注改为指向 CV-4 的指针句，CV-4 的四种分支结论覆盖随之迁至 `test_v030_reading_layers.py::test_cv4_branch_conclusions`。
+- **篇幅口径对齐**：`report_qc._body_lines` 仅跳过 full 报告明确标记的「审计底稿」折叠；同一行开闭的标签正确收栈，insight Facts 及 brief/concise 其他展开块仍计入 `readability_metrics.total_chars`。**这组指标仍是软建议**（`_check_readability` 封顶 warn），不会单独阻断交付。
+- **去重与资金维度完整性**：① 「核心矛盾小结」移入 `## 0.` 的 `**核心变量：**`，隐含增长及 CAGR 在单次渲染内共用缓存；② §5b 保留人写链的 `analysis.json 注入` 溯源标签，引擎链在 full 底稿中直接展开；③ §3 即使只有北向或 moneyflow 单侧可用，也展示资金态度与不可得原因。CV-4、候选解释及 §5c 共用一份方向判据；参与者节保留口径指针句。
 - **HTML 同源**：`render_html._html_analysis` 复用 md 侧 `split_overview` 判定——overview 卡平铺、其余卡进 `<details>`，两侧不会漂移。
 - **评审修复（单层契约）**：折内的 12 题、风险与不确定性、引擎自动空头链原先各自折叠，套进底稿层后成**二级套娃**——「展开审计底稿」之后这些节仍被藏住。现 full 分支改为折内直接展开（`_section_bull_bear(..., fold_engine_chain=False)`，其余两处去掉 `_wrap_details`），**全篇只有底稿一层 `<details>`**（实测真实报告 `<details>` 计数 1）。brief/concise 无底稿层，各自的一级展开块保留（实测 brief 两个折叠区间不重叠、无嵌套）。新增回归：`test_basement_is_single_disclosure_level` 断言 `<details>`/`</details>` 各计数 1。
 - **未做（裁决「跳过」）**：`event_classification` 槽位仍有两个宿主（§3a 与管理层决策时间线单元格），属已知遗留，已在新回归测试中**显式锁定现状**（`count == 2`，修复后应改回 1）。
-- **验证**：新增 `tests/test_v031_reading_surface.py` 六组断言（主阅读面汉字预算、边界互斥、底稿节反向守卫、段标记唯一性、H2 形态、折叠不计篇幅），其中「主阅读面 ≤ 3,000 汉字」以人工样稿实测 2,898 为标尺；全部离线（打桩沪深300 基准）。
+- **验证**：`tests/test_v031_reading_surface.py` 覆盖主阅读面 ≤3,000 汉字、审计节与折外尾部边界、非法闭合标签、资金单源、跨源警示、溯源标签和篇幅计数差异；渲染夹具在网络桩安装后运行，全部离线。
 
 ### 交易结构措辞与入口收敛（A5／D1／D2）
 
-- **A5「入场区间」→「条件性估值区间」全链统一**：动作暗示强的「入场」包装在 SKILL.md（契约 A2 块与专节）、`references/trade-structure.md`、`report-conventions.md` §2.2/§6.2/§8、`ic-framework.md`、ETF SKILL 与报告模板、`CLAUDE.md`、`docs/architecture.md`、workbuddy MEMORY 模板一并改称；三段结构（悲观锚区/中性-悲观区/中性锚区）与合规边界不变。同时收口两处不一致：SKILL.md 允许清单里去掉「盈亏比」（trade-structure.md 的 D4 契约本就禁此词）；表头「进入该区间意味着什么（状态含义）」改为「该区间的状态含义」。D4 文档契约测试同步更新并新增 `"入场区间" not in ts` 负断言。
+- **A5「入场区间」→「条件性估值区间」全链统一**：动作暗示强的「入场」包装在 SKILL.md、研究参考文档、ETF 模板、`CLAUDE.md`、`docs/architecture.md`、`docs/demos/` 与 workbuddy MEMORY 模板改称；三段结构与合规边界不变。D4 文档契约测试同时扫描所有公开 demo，防止残留。
 - **D1 concise 退出默认流程（代码保留）**：默认交付链不再提示该模式（本机 603 份侧车统计中 concise 使用 0 次，属本机观察、不外推为「无人使用」）；`SKILL.md` 第三层描述与 `--mode` 说明同步标注。
 - **D2 深度流程转按需**：3+4 Agent 编排为纯文档驱动（代码侧 `--deep` 只扩采集面），`SKILL.md` SOP-DEEP 段标注「默认不提示、需要时显式 `--deep`」。
 
 ### 估值规则与测试时钟
 
+- **快照 diff 的 NaN 噪声**：两端均为 NaN 的字段按「均不可得」处理，不再列为变化；NaN/Infinity 与有效数值之间仍保留数据可用性变化，但不计算百分比，避免 `nan → nan (+nan%)`。关键字段 diff 与维度级 diff 共用这一判据。
+
 - **PE 亏损期判据文本对齐实现**：`CLAUDE.md` 估值分位规则 2 与 `references/financials.md` 原写「负数 PE 剔除」，与实现及数据源行为不符——实现三处（`lib/valuation.py:106`、`html_charts.py:108`、`valuation_calc.py:893-902`）**均把缺失/NaN/≤0 计为亏损期**，且 tushare `daily_basic` 把亏损期写成缺失而非负数。中红医疗 300981 实测：1212 行中 687 行 `pe_ttm` 为 NaN（56.68%），按旧表述会得 0%。现表述改为「分位序列只取正值；亏损期占比按缺失/NaN 或 ≤0 计」。零代码改动。
-- **gap-scan 测试时间炸弹修复**：两例把缓存 mtime 钉在固定日历时刻，而 `kline_cache.load` 的 TTL 判据走真实时钟 → 夹具在 mtime+3 天后（2026-09-25 16:00 起）必红（表现为扫描提前返回、stdout 无 JSON）。`KlineTTLCache` 新增可注入时钟（`now=`，默认真实时钟，生产行为不变），两例改注入与 `shanghai_now` 同一逻辑时钟。**生产代码无缺陷**——线上两个时钟同源。
+- **gap-scan 测试时间炸弹修复**：两例把缓存 mtime 钉在固定日历时刻，而 TTL 判据走真实时钟，导致夹具过期后必红。`KlineTTLCache` 支持显式注入 `now=`；默认时钟在调用时解析，使模块级单例也能响应后续的时钟冻结。两例改注入与 `shanghai_now` 同一逻辑时钟。
 
 ### 跳空缺口扫描：扫描时点、数据时点与可复算性
 

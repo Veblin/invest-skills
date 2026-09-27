@@ -9,6 +9,7 @@ from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 from lib.participant_scan import (
     build_participant_behavior_section,
+    flow_direction_relation,
     moneyflow_cv_window,
     moneyflow_signal_label,
     northbound_label,
@@ -61,6 +62,7 @@ from ..render_dcf import _section_dcf_valuation
 from ..render_risk import (
     _v3_build_risk_report,
     _v3_bull_bear_implied_growth,
+    _growth_reference,
     _section_bull_bear,
     _section_risk_uncertainty,
     _section_left_right_probability,

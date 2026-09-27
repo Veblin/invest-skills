@@ -9,12 +9,44 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from stock_testutil import make_store_collection
 
 
 class TestDiffCollections:
+    def test_nan_is_missing_not_a_percent_change(self, capsys):
+        from lib.store import _key_field_changed, diff_collections
+        from invest import _print_diff_dimension_supplement
+
+        def collection(value):
+            return {
+                "symbol": "300750",
+                "dimensions": [{
+                    "dimension": "financials",
+                    "data": [{"end_date": "20260630", "depr_amort": value}],
+                }],
+            }
+
+        missing = collection(math.nan)
+        same = diff_collections(missing, collection(math.nan))
+        assert same["changed"] == []
+        assert "financials" in same["unchanged"]
+        assert not _key_field_changed("roe", math.nan, math.nan)
+
+        recovered = diff_collections(missing, collection(100.0))
+        assert len(recovered["changed"]) == 1
+        assert recovered["changed"][0]["path"].endswith("depr_amort")
+        assert "pct" not in recovered["changed"][0]
+        assert _key_field_changed("roe", math.nan, 100.0)
+        _print_diff_dimension_supplement(recovered)
+        assert "nan%" not in capsys.readouterr().out
+
+        finite = diff_collections(collection(50.0), collection(100.0))
+        assert finite["changed"][0]["pct"] == 100.0
+
     def test_scalar_change(self):
         from lib.store import diff_collections
 

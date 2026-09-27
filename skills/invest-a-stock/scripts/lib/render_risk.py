@@ -7,7 +7,7 @@ from typing import Any
 from lib.financials import prior_year_end_date
 from lib.nums import ONE_PER_YI, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
-from lib.participant_scan import resolve_moneyflow
+from lib.participant_scan import flow_direction_relation, resolve_moneyflow
 from lib.schema import ProbabilityStructure
 from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
 
@@ -129,9 +129,12 @@ def _v3_build_risk_report(
 
 # --- _v3_bull_bear_implied_growth ---
 def _v3_bull_bear_implied_growth(
-    dims: dict[str, dict], market_structure: dict,
+    dims: dict[str, dict], market_structure: dict, *, val_cache: dict | None = None,
 ) -> tuple[dict[str, Any], float | None, float | None]:
     """复用 D-③：当前 PE + implied_growth + 实际 CAGR。"""
+    cache_key = "bull_bear_implied_growth"
+    if val_cache is not None and cache_key in val_cache:
+        return val_cache[cache_key]
     val_data = _get_dim_data(dims, "valuation")
     current_pe: float | None = None
     if val_data and isinstance(val_data, list):
@@ -157,7 +160,20 @@ def _v3_bull_bear_implied_growth(
         fin_list = sort_kline_asc(fin)
         cagr, _ = _compute_metric_cagr(fin_list, "revenue")
         np_cagr, _ = _compute_metric_cagr(fin_list, "net_profit")
-    return ig, cagr, np_cagr
+    result = (ig, cagr, np_cagr)
+    if val_cache is not None:
+        val_cache[cache_key] = result
+    return result
+
+
+def _growth_reference(cagr: float | None, np_cagr: float | None
+                      ) -> tuple[float | None, str | None]:
+    """实际增长参考口径：优先营收，缺失时用净利润。"""
+    if cagr is not None:
+        return cagr, "营收"
+    if np_cagr is not None:
+        return np_cagr, "净利润"
+    return None, None
 
 
 # --- _section_bull_bear ---
@@ -254,9 +270,11 @@ def _section_bull_bear(
             if mv is not None:
                 mcap_v = mv
                 break
-    ig, cagr, np_cagr = _v3_bull_bear_implied_growth(dims, market_structure)
-    ref_cagr = cagr if cagr is not None else np_cagr
-    ref_label = "营收 CAGR" if cagr is not None else ("净利润 CAGR" if np_cagr is not None else None)
+    ig, cagr, np_cagr = _v3_bull_bear_implied_growth(
+        dims, market_structure, val_cache=val_cache,
+    )
+    ref_cagr, ref_metric = _growth_reference(cagr, np_cagr)
+    ref_label = f"{ref_metric} CAGR" if ref_metric else None
     rev_yoy = target.get("revenue_yoy")
     latest_pe = ig.get("pe")
 
@@ -662,6 +680,8 @@ def _section_bull_bear(
         # 并列渲染，同一节里两套空头论述各说一遍。引擎链是独立内容（非占位），
         # 故折叠而非删除。
         if _bear_md:
+            lines.append("**补充空头链（analysis.json 注入）**")
+            lines.append("")
             lines.append(_bear_md)
             lines.append("")
             if fold_engine_chain:
@@ -679,6 +699,8 @@ def _section_bull_bear(
             lines.append(engine_block)
             lines.append("")
     elif _bear_md:
+        lines.append("**补充空头链（analysis.json 注入）**")
+        lines.append("")
         lines.append(_bear_md)
         lines.append("")
     else:
@@ -719,7 +741,7 @@ def _section_bull_bear(
         )
     # divergence: northbound vs moneyflow (if we haven't hit 2)
     m_v = mf_net
-    if divergence_count < 2 and nb_v is not None and m_v is not None and nb_v * m_v < 0:
+    if divergence_count < 2 and flow_direction_relation(nb_v, m_v) == "divergence":
         divergence_count += 1
         bull_direction = "净流入" if nb_v > 0 else "净流出"
         bear_direction = "净流入" if m_v > 0 else "净流出"
@@ -1211,4 +1233,3 @@ def _section_left_right_probability(
     lines.append("")
     lines.append("🔍 **待独立验证:** 本节呈现概率结构与支持依据，不构成位置判断。")
     return "\n".join(lines)
-

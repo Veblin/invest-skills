@@ -215,14 +215,13 @@ def _v3_build_candidate_explanations(
                 mf.get("source", "moneyflow"),
                 "❓",
             ))
-    elif nb_v is not None and mf_v is not None:
-        if float(nb_v) * float(mf_v) < 0:
-            explanations.append((
-                "E",
-                "北向与全档资金方向相反，资金归因存在分歧",
-                f"{nb.get('source', '')} vs {mf.get('source', '')}",
-                "❓",
-            ))
+    elif flow_direction_relation(nb_v, mf_v) == "divergence":
+        explanations.append((
+            "E",
+            "北向与全档资金方向相反，资金归因存在分歧",
+            f"{nb.get('source', '')} vs {mf.get('source', '')}",
+            "❓",
+        ))
 
     return explanations[:5]
 
@@ -393,9 +392,10 @@ def _core_variables(dims: dict[str, dict], collection: dict, *,
     """
     pe_pct, _, pe_zone = _v3_valuation_percentiles(dims, val_cache)
     market_structure = collection.get("market_structure") or {}
-    ig, cagr, np_cagr = _v3_bull_bear_implied_growth(dims, market_structure)
-    ref_cagr = cagr if cagr is not None else np_cagr
-    ref_label = "营收" if cagr is not None else ("净利润" if np_cagr is not None else None)
+    ig, cagr, np_cagr = _v3_bull_bear_implied_growth(
+        dims, market_structure, val_cache=val_cache,
+    )
+    ref_cagr, ref_label = _growth_reference(cagr, np_cagr)
     variables: list[str] = []
     if pe_pct is not None:
         variables.append(
@@ -965,38 +965,35 @@ def _section_market_structure(
     nb = market_structure.get("northbound")
     mf = market_structure.get("moneyflow")
     mf_net, mf_key = resolve_moneyflow(mf)
-    # v0.3.1 A4：北向/全档的**数值行**不再在本节重复——同为口径与数值已在
-    # 「参与者行为扫描」表逐行给出（且多带「大单+特大单」第二口径）。凡本节能
-    # 出数值行的分支，参与者表必渲染同名行，故本节删去两行不丢信息；只保留
-    # 交叉验证**结论**（CV-4，下游测试按口径断言其措辞）。
-    if nb and mf_net is not None:
-        nb_net = nb.get("net_sum_10d")
-        if nb_net is not None:
-            n_v = float(nb_net)
-            m_v = mf_net
-            if n_v * m_v > 0:
-                cv4 = "convergence"
-                cv4d = "北向与全档资金净流入方向一致"
-            elif n_v == 0 and m_v == 0:
-                cv4 = "convergence"
-                cv4d = "北向与全档资金净流入方向一致"
-            elif n_v == 0 or m_v == 0:
-                cv4 = "gap"
-                cv4d = "资金数据不完整"
-            else:
-                cv4 = "divergence"
-                cv4d = "北向与全档资金净流入方向相反"
-        else:
-            # P0-1：净额被时效守卫置 None（源停更）——不得以 0.0 代替参与
-            # 「方向一致」判定（一致/相反均无数据可依，只能标数据不可用）
-            cv4 = "gap"
-            cv4d = "北向数据不可用（源停更），无法交叉验证"
+    # 模块 3 即使只有单侧资金源，也须展示可得值与不可得原因。
+    if nb or mf_net is not None:
         lines.append("")
         lines.append("### 资金态度")
+        if nb:
+            nb_src = nb.get("source", "northbound")
+            lines.append(f"- 北向个股资金流（{nb_src}）{northbound_label(nb)}")
+        else:
+            lines.append("- 北向个股资金流：不可得，无法交叉验证 [来源: northbound]")
+        if mf_net is not None:
+            lines.append(
+                f"- 全档资金（moneyflow）{moneyflow_signal_label(mf_key)}: {fmt_amount(mf_net)}"
+            )
+        else:
+            lines.append("- 全档资金（moneyflow）：不可得，无法交叉验证 [来源: moneyflow]")
         # 口径：mf 侧取自 resolve_moneyflow 默认键（net_sum_5d/10d/
         # net_mf_amount），全部是**全档**净额，故称「全档资金」；
         # 「主力」（大单+特大单）是另一口径，见 participant_scan._MF_LABELS。
-        lines.append(_cv(cv4, "CV-4", "北向 vs 全档资金", cv4d, "中"))
+        relation = flow_direction_relation(
+            nb.get("net_sum_10d") if isinstance(nb, dict) else None, mf_net,
+        )
+        cv4d = {
+            "convergence": "北向与全档资金净流入方向一致",
+            "divergence": "北向与全档资金净流入方向相反",
+            "gap": "资金数据不完整",
+            "unavailable": "北向或全档资金数据不可用，无法交叉验证",
+        }[relation]
+        lines.append(_cv(relation if relation != "unavailable" else "gap",
+                         "CV-4", "北向 vs 全档资金", cv4d, "中"))
 
     to = market_structure.get("turnover")
     erp = market_structure.get("erp")
@@ -3716,8 +3713,7 @@ def _section_4d_valuation_expectation(
             lines.append("- 一致预期：无可靠数据，跳过")
             lines.append("")
             g_implied_pct = ig["g_implied"] * 100
-            ref_cagr = ctx.cagr if ctx.cagr is not None else ctx.np_cagr
-            ref_label = "营收" if ctx.cagr is not None else ("净利润" if ctx.np_cagr is not None else None)
+            ref_cagr, ref_label = _growth_reference(ctx.cagr, ctx.np_cagr)
             ref_text = cagr_text if ctx.cagr is not None else np_cagr_text
             if risk_free_is_default:
                 lines.append(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -846,14 +847,17 @@ def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
 
 
 def _key_field_changed(field: str, old: Any, new: Any) -> bool:
-    if old == new:
+    if _same_diff_value(old, new):
         return False
     if field in _KEY_DIFF_ALWAYS:
         return True
     if isinstance(old, (int, float)) and isinstance(new, (int, float)):
         if old == 0:
             return new != 0
-        return abs((new - old) / abs(old) * 100) >= _KEY_DIFF_THRESHOLD_PCT
+        pct = _finite_percent_change(old, new)
+        # 不可计算的变化（例如 NaN → 有效值）是数据可用性变化，不能被
+        # NaN 与阈值比较恒为 False 的行为吞掉。
+        return pct is None or abs(pct) >= _KEY_DIFF_THRESHOLD_PCT
     return True
 
 
@@ -874,8 +878,9 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
                 unchanged.append(f"{cat}.{field}")
                 continue
             change: dict[str, Any] = {"field": field, "old": ov, "new": nv}
-            if isinstance(ov, (int, float)) and isinstance(nv, (int, float)) and ov != 0:
-                change["pct"] = round((nv - ov) / abs(ov) * 100, 2)
+            pct = _finite_percent_change(ov, nv)
+            if pct is not None:
+                change["pct"] = round(pct, 2)
             cat_changes.append(change)
         if cat_changes:
             categories[cat] = cat_changes
@@ -1090,6 +1095,29 @@ def list_valuations(symbol: str | None = None, limit: int = 20) -> list[dict]:
         _safe_close(c)
 
 
+def _same_diff_value(old: Any, new: Any) -> bool:
+    """快照缺失值同态比较：NaN 与 NaN 都表示不可得。"""
+    if isinstance(old, float) and math.isnan(old):
+        return isinstance(new, float) and math.isnan(new)
+    return old == new
+
+
+def _finite_percent_change(old: Any, new: Any) -> float | None:
+    """仅为两端有限的数值计算变化率；数据缺口不伪装成百分比。"""
+    if (not isinstance(old, (int, float)) or isinstance(old, bool)
+            or not isinstance(new, (int, float)) or isinstance(new, bool)
+            or old == 0):
+        return None
+    if ((isinstance(old, float) and not math.isfinite(old))
+            or (isinstance(new, float) and not math.isfinite(new))):
+        return None
+    try:
+        pct = (new - old) / abs(old) * 100
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return pct if math.isfinite(pct) else None
+
+
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
     """递归对比两个维度的 data，返回变化列表。"""
     changes: list[dict] = []
@@ -1099,15 +1127,15 @@ def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
         for key in sorted(all_keys):
             ov = old_data.get(key)
             nv = new_data.get(key)
-            if ov != nv:
+            if not _same_diff_value(ov, nv):
                 change = {
                     "path": f"{dimension}.{key}",
                     "old": ov,
                     "new": nv,
                 }
                 # 数值型计算百分比变化
-                if isinstance(ov, (int, float)) and isinstance(nv, (int, float)) and ov != 0:
-                    pct = (nv - ov) / abs(ov) * 100
+                pct = _finite_percent_change(ov, nv)
+                if pct is not None:
                     change["pct"] = round(pct, 2)
                 changes.append(change)
 

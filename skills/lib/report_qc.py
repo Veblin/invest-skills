@@ -806,26 +806,36 @@ def _evidence_ge_c(ln: str) -> bool:
 def _body_lines(md: str) -> list[str]:
     """去掉命令/引用外的纯正文行（标题也算正文）。
 
-    v0.3.1 A4：`<details>…</details>` 跨度**不计入阅读篇幅**——折叠是「这段不在
-    主阅读面」的显式标记（默认报告把九模块 / 12 题 / DCF / 分析详情收进审计
-    底稿）。只跳过显式折叠的跨度：折外内容口径完全不变；嵌套折叠按深度处理；
-    未闭合的 `<details>` 视为延续到文末（宁可少算，也不把底稿算成阅读面）。
+    仅 stock full 的「审计底稿」折叠不计入主阅读篇幅。其他报告的 details
+    （如 insight Facts、brief/concise 展开块）仍是报告正文，须计入指标。
+    标签可在同一行开闭；未闭合的审计底稿视为延续到文末。
 
     注意本组指标是**软建议**（`_check_readability` 封顶 warn），故本改动是
     度量口径对齐（长度指标与阅读面设计同义），不是放宽阻断。
     """
+    tag_re = re.compile(r"<\s*(/?)\s*details\b[^>]*>", re.IGNORECASE)
+    stack: list[bool] = []
+    visible: list[str] = []
+    end = 0
+    for tag in tag_re.finditer(md):
+        if not any(stack):
+            visible.append(md[end:tag.start()])
+        was_hidden = any(stack)
+        if tag.group(1):
+            if stack:
+                stack.pop()
+        else:
+            summary = md[tag.end():]
+            stack.append(bool(re.match(r"\s*<summary>\s*审计底稿", summary, re.IGNORECASE)))
+        if was_hidden and not any(stack):
+            visible.append("\n")
+        end = tag.end()
+    if not any(stack):
+        visible.append(md[end:])
+
     lines: list[str] = []
-    depth = 0
-    for ln in md.splitlines():
-        s = ln.strip().lower()
-        if s.startswith("<details"):
-            depth += 1
-            continue
-        if s.startswith("</details>"):
-            depth = max(0, depth - 1)
-            continue
-        if depth:
-            continue
+    for ln in "".join(visible).splitlines():
+        ln = re.sub(r"</?summary\b[^>]*>", "", ln, flags=re.IGNORECASE)
         if ln.strip() and not ln.lstrip().startswith(("#", ">", "|", "```")):
             lines.append(ln)
     return lines

@@ -620,10 +620,11 @@ def test_cv4_wording_names_caliber_not_main_force():
     (0, 0, "方向一致"),
 ])
 def test_cv4_branch_conclusions(nb_net: float, mf_net: float, expected: str):
-    """CV-4 的四种分支结论——v0.3.1 A4 后这里是它们的**唯一承载点**。
+    """CV-4 的四种分支结论；方向判据由 flow_direction_relation 共用。
 
     去重前参与者节另有一份同结论的备注，故分支覆盖在
-    `test_participant_scan.py`；现结论只在 §3 的 CV-4 出，覆盖随之迁到这里。
+    `test_participant_scan.py`；参与者节仅保留 CV-4 指针句。§5c 与候选解释
+    仍可按各自语境引用同一方向关系，不应再各自实现一份符号比较。
     """
     coll = collection_v2_minimal()
     coll["market_structure"] = {
