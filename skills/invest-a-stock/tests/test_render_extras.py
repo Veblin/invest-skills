@@ -198,32 +198,22 @@ class TestAHDetection:
         assert out == ""
 
 
-class TestExogenousShock:
-    def test_with_news_cards_renders_table(self):
-        """有 news cards → 输出外生冲击表格."""
-        from lib.render_extras import section_exogenous_shock
+class TestExogenousShockRemoved:
+    def test_section_is_gone_from_module(self):
+        """v0.3.1 A2：新闻/公告标题表段整段移除，渲染器不再提供该函数。
 
-        coll = _minimal_collection()
-        coll["news"] = {
-            "cards": [
-                {"date": "2026-07-01", "direction": "bullish",
-                 "credibility": "official", "credibility_score": 0.95,
-                 "title": "重大合同公告", "source": "notice"},
-            ],
-        }
-        out = section_exogenous_shock(coll)
-        assert "外生冲击" in out
-        assert "重大合同公告" in out
-        assert "official" in out
-
-    def test_window_label_follows_news_days(self):
-        """[事实] 窗口须写**实际抓取窗口**（news.days），不得硬编码 30 日。
-
-        新闻包默认 days=7（`attach_news_pack(..., days=7)`，news_scanner 按该值
-        真过滤），渲染写「近 30 日」等于把事实窗口夸大 4 倍——而 [事实] 块是
-        后续 [分析] 的来源依据（QC structure-analysis-without-fact）。
+        删除依据（`host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §2.1 A2）：
+        表内只有日期与标题，无正文与影响；固定「外生叙事」句无内容依据。事件
+        信息由事件时间线段（类型/影响维度/持续性质）与 insight 事件节承担。
+        反向守卫：NewsCard 数据仍在采集底稿，不得连采集能力一起删。
         """
-        from lib.render_extras import section_exogenous_shock
+        from lib import render_extras
+
+        assert not hasattr(render_extras, "section_exogenous_shock")
+
+    def test_extras_block_ignores_news_cards(self):
+        """带新闻包的 collection 经 extras 装配后不得再产出标题表。"""
+        from lib.render_markdown import _concise
 
         coll = _minimal_collection()
         coll["news"] = {
@@ -234,49 +224,10 @@ class TestExogenousShock:
                  "title": "重大合同公告", "source": "notice"},
             ],
         }
-        out = section_exogenous_shock(coll)
-        assert "近 7 日" in out
-        assert "近 30 日" not in out
-
-    def test_window_label_degrades_without_days(self):
-        """旧快照无 days 键 → 不得编造窗口数字（宁缺勿错）。"""
-        from lib.render_extras import section_exogenous_shock
-
-        coll = _minimal_collection()
-        coll["news"] = {
-            "cards": [
-                {"date": "2026-07-01", "direction": "neutral",
-                 "credibility": "official", "credibility_score": 0.95,
-                 "title": "重大合同公告", "source": "notice"},
-            ],
-        }
-        out = section_exogenous_shock(coll)
-        assert "30 日" not in out
-        assert "[事实]" in out, "无窗口数字时仍须有 [事实] 标签（QC 结构要求）"
-
-    def test_empty_news_returns_empty(self):
-        """无 news cards → 空字符串."""
-        from lib.render_extras import section_exogenous_shock
-
-        coll = _minimal_collection()
-        out = section_exogenous_shock(coll)
-        assert out == ""
-
-    def test_contains_analysis_block(self):
-        """外生冲击段包含分析块."""
-        from lib.render_extras import section_exogenous_shock
-
-        coll = _minimal_collection()
-        coll["news"] = {
-            "cards": [
-                {"date": "2026-07-01", "direction": "neutral",
-                 "credibility": "media_confirmed", "credibility_score": 0.7,
-                 "title": "行业政策调整", "source": "tavily"},
-            ],
-        }
-        out = section_exogenous_shock(coll)
-        assert "分析" in out
-        assert "待独立验证" in out
+        out = "\n".join(_concise._render_extras_block(coll, strict=False))
+        assert "外生冲击" not in out
+        assert "重大合同公告" not in out
+        assert "外生叙事" not in out
 
 
 class TestRigorWarnings:

@@ -264,16 +264,47 @@ def test_slot_sections_do_not_leak_into_detail_layer():
 
 # ── 6. [事实] 标签（QC structure-analysis-without-fact 的引擎侧防线）──
 
-def test_exogenous_shock_block_labels_its_table_as_facts():
-    from lib.render_extras import section_exogenous_shock
+def test_extras_block_no_longer_renders_news_table():
+    """v0.3.1 A2 主路径锁：带新闻包的 full 报告不得再出现新闻/公告标题表。
+
+    删除依据见 `host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §2.1 A2。
+    反向守卫在 `test_render_extras.py::TestExogenousShockRemoved`（卡数据仍在
+    采集底稿，不得连采集能力一起删）。
+    """
     coll = collection_v2_minimal()
     coll["news"] = {"cards": [{"date": "2026-06-11", "direction": "neutral",
                                "credibility": "official", "credibility_score": 0.95,
                                "title": "某公告", "source": "notice",
                                "url": "https://example.invalid/a"}]}
-    out = section_exogenous_shock(coll)
-    assert "[事实]" in out
-    assert out.index("[事实]") < out.index("[分析]"), "先事实后分析"
+    out = render_report_v3(coll, "600176", mode="full")
+    assert "外生冲击" not in out
+    assert "外生叙事" not in out
+    assert "某公告" not in out
+
+
+def test_events_timeline_labels_its_summary_as_facts():
+    """v0.3.1 A2 后，[事实] 前置规则仍须有引擎侧落点（不是被删空）。
+
+    新闻/公告标题表段（原 `render_extras.section_exogenous_shock`）整段移除，
+    须用**仍保留的分析段**验证 `structure-analysis-without-fact` 仍有适用对象：
+    事件时间线节自带的 [分析] 必须由同节段的 [事实] 支撑。切片止于下一个 H2，
+    避免断言被后文任一 [事实] 空转满足（同 `test_participant_scan_...` 的切片法）。
+    """
+    coll = _coll_with_cards(event_classifications=[
+        {"event_type": "buyback", "event_label": "回购", "events": [{"date": "2026-06-11"}]},
+    ])
+    coll["events"] = [{"date": "2026-06-11", "type": "buyback",
+                       "title": "测试股份:关于回购公司A股股份的公告",
+                       "impact_dimension": "估值", "duration": "中长期变量"}]
+    out = render_report_v3(coll, "600176", mode="full",
+                           analysis=[_slot("event_classification", "分类复核结论")])
+    assert "## 3a. 事件时间线" in out, "夹具应产出事件时间线节"
+    rest = out[out.index("## 3a. 事件时间线"):]
+    nxt = rest.find("\n## ", 1)
+    section = rest if nxt < 0 else rest[:nxt]
+    assert "[事实]" in section, "事件时间线节自身缺少 [事实] 标签"
+    assert "[分析]" in section
+    assert section.index("[事实]") < section.index("[分析]"), "先事实后分析"
 
 
 def test_participant_scan_labels_its_table_as_facts():

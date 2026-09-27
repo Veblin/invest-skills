@@ -629,4 +629,5 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 ### SOP industry-research / news-pulse
 
 - [ ] `collect --with-news-pack` → 对 `query_pack` 查询新闻/研报（WebSearch / web-search / /web；Tavily 可选）回填 NewsCard
-- [ ] 外生冲击假说⑥段：方向 + 可信度 + 来源；重大波动用 `shock` CLI 计算价格冲击插值比例（附学术声明）
+- [ ] NewsCard 只作线索：默认报告**不再渲染新闻/公告标题表与固定「外生叙事」句**（v0.3.1 A2 整段移除，卡数据仍留在快照 JSON 供回查）。要用某条事件支撑判断，须先取到原文再写进分析段——公告走 `notice-body`（art_code 或详情页 url；原文不改写 + 截断三态），检索源须打开原链核对；只有标题的条目不作证据
+- [ ] 重大波动用 `shock` CLI 计算价格冲击插值比例（附学术声明）
