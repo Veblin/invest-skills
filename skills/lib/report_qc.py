@@ -804,9 +804,31 @@ def _evidence_ge_c(ln: str) -> bool:
 
 
 def _body_lines(md: str) -> list[str]:
-    """去掉命令/引用外的纯正文行（标题也算正文）。"""
-    return [ln for ln in md.splitlines()
-            if ln.strip() and not ln.lstrip().startswith(("#", ">", "|", "```"))]
+    """去掉命令/引用外的纯正文行（标题也算正文）。
+
+    v0.3.1 A4：`<details>…</details>` 跨度**不计入阅读篇幅**——折叠是「这段不在
+    主阅读面」的显式标记（默认报告把九模块 / 12 题 / DCF / 分析详情收进审计
+    底稿）。只跳过显式折叠的跨度：折外内容口径完全不变；嵌套折叠按深度处理；
+    未闭合的 `<details>` 视为延续到文末（宁可少算，也不把底稿算成阅读面）。
+
+    注意本组指标是**软建议**（`_check_readability` 封顶 warn），故本改动是
+    度量口径对齐（长度指标与阅读面设计同义），不是放宽阻断。
+    """
+    lines: list[str] = []
+    depth = 0
+    for ln in md.splitlines():
+        s = ln.strip().lower()
+        if s.startswith("<details"):
+            depth += 1
+            continue
+        if s.startswith("</details>"):
+            depth = max(0, depth - 1)
+            continue
+        if depth:
+            continue
+        if ln.strip() and not ln.lstrip().startswith(("#", ">", "|", "```")):
+            lines.append(ln)
+    return lines
 
 
 def readability_metrics(md: str) -> dict:

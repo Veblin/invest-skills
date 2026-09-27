@@ -670,25 +670,41 @@ def _html_events() -> str:
 
 
 def _html_analysis(analysis: list[dict]) -> str:
+    from lib.analysis_schema import split_overview
     from lib.md_subset import MarkdownSubsetError, render_markdown
 
     if not analysis:
         return ""
-    cards = []
-    for sec in analysis:
-        try:
-            facts_html = render_markdown(sec.get("facts_md", ""))
-            ana_html = render_markdown(sec.get("analysis_md", ""))
-        except MarkdownSubsetError as exc:
-            ana_html = f'<div class="vnote">分析段 md 子集校验失败：{exc}</div>'
-            facts_html = ""
-        cards.append(
-            f'<section id="analysis-{_html_mod.escape(str(sec.get("module", "x")), quote=True)}" data-module="{_html_mod.escape(str(sec.get("module", "x")), quote=True)}">'
-            f'<div class="sh"><span class="st">{_html_mod.escape(str(sec.get("title", "分析")), quote=True)}</span>'
-            f'<span class="ss">证据：{_html_mod.escape(str(sec.get("evidence_tag", "")), quote=True)}</span></div>'
-            f'<div class="card">{facts_html}{ana_html}</div></section>'
+    # v0.3.1 A4：与 md 同源分区——overview 段是主阅读面（平铺），其余分析段
+    # 收进可展开的底稿块。判定复用 md 侧的 `split_overview`，两侧不会漂移。
+    overview, rest = split_overview(analysis)
+
+    def _cards(secs: list[dict]) -> str:
+        out = []
+        for sec in secs:
+            try:
+                facts_html = render_markdown(sec.get("facts_md", ""))
+                ana_html = render_markdown(sec.get("analysis_md", ""))
+            except MarkdownSubsetError as exc:
+                ana_html = f'<div class="vnote">分析段 md 子集校验失败：{exc}</div>'
+                facts_html = ""
+            mod = _html_mod.escape(str(sec.get("module", "x")), quote=True)
+            out.append(
+                f'<section id="analysis-{mod}" data-module="{mod}">'
+                f'<div class="sh"><span class="st">{_html_mod.escape(str(sec.get("title", "分析")), quote=True)}</span>'
+                f'<span class="ss">证据：{_html_mod.escape(str(sec.get("evidence_tag", "")), quote=True)}</span></div>'
+                f'<div class="card">{facts_html}{ana_html}</div></section>'
+            )
+        return "\n".join(out)
+
+    rest_html = _cards(rest)
+    if rest_html:
+        rest_html = (
+            f'<details class="analysis-basement">'
+            f'<summary>分析底稿（展开：其余 {len(rest)} 段分析）</summary>\n'
+            f'{rest_html}\n</details>'
         )
-    return "\n".join(cards)
+    return "\n".join(p for p in (_cards(overview), rest_html) if p)
 
 
 # --- _html_refs ---

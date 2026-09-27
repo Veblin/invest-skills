@@ -157,12 +157,15 @@ def test_d4_trade_structure_three_segments():
     ts = _read(_TRADE_STRUCTURE)
     assert "为 3 段参考，不设触发条件/比例" in ts
     assert "3 段：悲观锚区/中性-悲观区/中性锚区" in ts
-    assert "进入该区间意味着什么（状态含义）" in ts
+    assert "该区间的状态含义" in ts
     # 模板表头含状态含义列
-    assert "| 情景锚定 | 价格区间 | 对应估值 | 假设前提 | 进入该区间意味着什么（状态含义） |" in ts
+    assert "| 情景锚定 | 价格区间 | 对应估值 | 假设前提 | 该区间的状态含义 |" in ts
     # 负断言：D4 删除乐观溢价区行与盈亏比列
     assert "乐观溢价区" not in ts
     assert "盈亏比" not in ts
+    # v0.3.1 A5：动作暗示强的「入场区间」包装已全链改称「条件性估值区间」
+    assert "入场区间" not in ts
+    assert "条件性估值区间" in ts
 
 
 def test_d4_conventions_62_three_segments():

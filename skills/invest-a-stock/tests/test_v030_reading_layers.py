@@ -613,6 +613,29 @@ def test_cv4_wording_names_caliber_not_main_force():
         assert "全档" in ln
 
 
+@pytest.mark.parametrize("nb_net,mf_net,expected", [
+    (-1.0e9, 1.5e8, "方向相反"),
+    (1.0e9, 1.5e8, "方向一致"),
+    (1.0e9, 0, "资金数据不完整"),
+    (0, 0, "方向一致"),
+])
+def test_cv4_branch_conclusions(nb_net: float, mf_net: float, expected: str):
+    """CV-4 的四种分支结论——v0.3.1 A4 后这里是它们的**唯一承载点**。
+
+    去重前参与者节另有一份同结论的备注，故分支覆盖在
+    `test_participant_scan.py`；现结论只在 §3 的 CV-4 出，覆盖随之迁到这里。
+    """
+    coll = collection_v2_minimal()
+    coll["market_structure"] = {
+        "northbound": {"net_sum_10d": nb_net, "days": 10, "source": "test.fixture"},
+        "moneyflow": {"net_sum_5d": mf_net, "source": "test.fixture"},
+    }
+    md = render_report_v3(coll, "600176", mode="full")
+    cv4 = [ln for ln in md.splitlines() if "CV-4" in ln]
+    assert cv4, "应渲染 CV-4 行"
+    assert any(expected in ln for ln in cv4), f"CV-4 未给出预期结论：{expected}"
+
+
 def test_participant_cv_note_names_caliber_not_main_force():
     """参与者节的 CV 备注是同一比较的第二处实例，句中不得自称「主力」。
 

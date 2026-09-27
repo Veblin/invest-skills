@@ -601,11 +601,16 @@ class TestFullReviewAnalysisSameSource:
         assert "待 Claude 分析阶段填写" not in html, f"{key}: html 仍渲染静态占位"
 
     def test_no_analysis_md_unchanged(self):
-        """无 analysis → md 无注记节（基线零增）。"""
+        """无 analysis → md 无注记节（基线零增）。
+
+        断言按**节标题**形式匹配（`## 分析详情`）：v0.3.1 A4 后审计底稿折叠块的
+        summary 里出现了「分析详情」字样（它是对折内内容的说明），但该节本身
+        仍只在有 analysis 时渲染。
+        """
         from lib.render import render_report_v3
 
         md = render_report_v3(collection_v2_minimal(), "600176")
-        assert "分析详情" not in md and "重要发现（5 分钟阅读区）" not in md
+        assert "## 分析详情" not in md and "## 重要发现（5 分钟阅读区）" not in md
         assert "判断索引" not in md
 
     def test_brief_html_renders_analysis_card(self):

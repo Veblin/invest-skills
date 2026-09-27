@@ -19,12 +19,15 @@ from report_qc import (  # noqa: E402
     qc_directory,
     qc_file,
     qc_latest,
+    readability_findings,
+    readability_metrics,
     _check_etf_derived,
     _check_sourcing,
     _compute_overall,
     _run_verify_layers,
     LayerResult,
     QCResult,
+    READABILITY_MAX_CHARS,
 )
 
 # ── 可复用的合规样例（含 [事实]/[分析]/[证据强度] + 风险声明）──
@@ -1102,3 +1105,35 @@ class TestConclusionEvidenceAllTypes:
         p = self._write(tmp_path, "# 笔记\n\n> 不构成投资建议。\n")
         layers = {l.layer for l in qc_file(p).layers}
         assert "readability" not in layers, "R-A1 保持门控（避免长句密度噪音）"
+
+
+# ── v0.3.1 A4：折叠跨度不计阅读篇幅（度量口径对齐） ──
+
+class TestReadingLengthExcludesFoldedSpans:
+    """`<details>` 跨度不计入 `readability_metrics.total_chars`。
+
+    动机：默认报告（stock full）把九模块 / 12 题 / DCF / 分析详情收进审计底稿
+    折叠块，篇幅指标须与「主阅读面」同义，否则底稿越长越像「报告读不完」。
+    契约边界不变：R-A1 仍是软建议（`_check_readability` 封顶 warn），本组用例
+    只锁度量口径，不锁阻断行为。
+    """
+
+    def test_folded_span_not_counted(self):
+        md = ("## 阅读面\n\n正文若干字。\n\n<details>\n<summary>审计底稿</summary>\n\n"
+              + ("折" * 30000) + "\n\n</details>\n")
+        assert readability_metrics(md)["total_chars"] < 1000
+
+    def test_unfolded_long_text_still_flagged(self):
+        md = "## 阅读面\n\n" + ("长" * 30000) + "\n"
+        assert readability_metrics(md)["total_chars"] > READABILITY_MAX_CHARS
+        assert any(f["id"] == "readability-length" for f in readability_findings(md))
+
+    def test_nested_details_and_unclosed_span(self):
+        """嵌套按深度处理；未闭合视为延续到文末（宁可少算，不把底稿算成阅读面）。"""
+        nested = ("前\n<details>\n<summary>外</summary>\n\n" + "折" * 5000
+                  + "\n<details>\n<summary>内</summary>\n\n" + "折" * 5000
+                  + "\n</details>\n\n</details>\n后\n")
+        assert readability_metrics(nested)["total_chars"] < 100
+        unclosed = ("前\n<details>\n<summary>未闭合</summary>\n\n"
+                    + "折" * 5000 + "\n")
+        assert readability_metrics(unclosed)["total_chars"] < 100

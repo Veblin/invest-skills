@@ -706,6 +706,10 @@ def test_scan_refreshes_cache_with_unsettled_last_bar(tmp_path, monkeypatch, cap
         mod, "_fetch_trade_cal", lambda a, b: (["20260923", "20260924"], True))
     fixed_now = _now_day("20260924", "0900")
     monkeypatch.setattr(mod, "shanghai_now", lambda: fixed_now)
+    # TTL 必须与扫描共用同一条逻辑时间线：本夹具把缓存 mtime 钉在固定日历时刻
+    # （20260922 16:00 / 20260923 10:30），若 TTL 走真实时钟，测试会在
+    # mtime+3 天后（2026-09-25 16:00 起）被判过期而必红——时间炸弹。
+    monkeypatch.setattr(mod._KLINE_CACHE, "_now", lambda: fixed_now.timestamp())
 
     def _kline(last_date: str):
         n = 5
@@ -791,7 +795,11 @@ def test_scan_survives_malformed_cached_date(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_env, "STORE_DIR", tmp_path)
     monkeypatch.setattr(
         mod, "_fetch_trade_cal", lambda a, b: (["20260923", "20260924"], True))
-    monkeypatch.setattr(mod, "shanghai_now", lambda: _now_day("20260924", "0900"))
+    fixed_now = _now_day("20260924", "0900")
+    monkeypatch.setattr(mod, "shanghai_now", lambda: fixed_now)
+    # 同 test_scan_refreshes_cache_with_unsettled_last_bar：TTL 与扫描共用逻辑
+    # 时钟，否则固定 mtime 会随真实时间越过 3 天 TTL（测试时间炸弹）。
+    monkeypatch.setattr(mod._KLINE_CACHE, "_now", lambda: fixed_now.timestamp())
 
     def _kline(last_date: str):
         n = 5

@@ -27,6 +27,7 @@ from .render_utils import (
     _v3_cv8_block,
     _v3_trend_stage_hints,
     _v3_valuation_percentiles,
+    _wrap_details,
     _fmt_v2,
 )
 
@@ -169,6 +170,7 @@ def _section_bull_bear(
     *,
     val_cache: dict | None = None,
     analysis: list[dict] | None = None,
+    fold_engine_chain: bool = True,
 ) -> str:
     """模块 5：多空逻辑链、关键分歧点、预期差（LAW 15）。
 
@@ -641,24 +643,40 @@ def _section_bull_bear(
     if _bear_md:
         mark_inline_consumed(collection, _bear)
     if bear_chains:
+        engine_lines: list[str] = []
         for idx, bc in enumerate(bear_chains, 1):
-            lines.append(f"#### 空头逻辑 {idx}: {bc['title']}")
-            lines.append(f"- **核心假设**: {bc['assumption']}")
-            lines.append(f"- **传导链**: {bc['transmission']}")
-            lines.append("**对应数字**:")
+            engine_lines.append(f"#### 空头逻辑 {idx}: {bc['title']}")
+            engine_lines.append(f"- **核心假设**: {bc['assumption']}")
+            engine_lines.append(f"- **传导链**: {bc['transmission']}")
+            engine_lines.append("**对应数字**:")
             if bc["numbers"]:
-                lines.extend(bc["numbers"])
+                engine_lines.extend(bc["numbers"])
             else:
-                lines.append("  - 数据不足，未生成量化估算")
-            lines.append(f"- 证据强度: {bc['strength']}")
-            lines.append("")
+                engine_lines.append("  - 数据不足，未生成量化估算")
+            engine_lines.append(f"- 证据强度: {bc['strength']}")
+            engine_lines.append("")
+        engine_block = "\n".join(engine_lines).rstrip()
         # 引擎已生成空头链时，槽位段仍须渲染（否则段内容静默丢失——
-        # is_inline_slotted 已把它排除出「分析详情」，无处可去）。追加而非
-        # 替换：引擎链是自动生成的独立内容，不是占位文本。
+        # is_inline_slotted 已把它排除出「分析详情」，无处可去）。
+        # v0.3.1 A4：人写链为 5b 正文，引擎自动链下沉为**底稿折叠**——原先两者
+        # 并列渲染，同一节里两套空头论述各说一遍。引擎链是独立内容（非占位），
+        # 故折叠而非删除。
         if _bear_md:
-            lines.append("**补充空头链（analysis.json 注入）**")
-            lines.append("")
             lines.append(_bear_md)
+            lines.append("")
+            if fold_engine_chain:
+                lines.append(
+                    _wrap_details("底稿：引擎自动空头链（未与人写依据合并）", engine_block)
+                )
+            else:
+                # full 模式下 §5b 本身已在审计底稿折内——再套一层会让「展开底稿」
+                # 后引擎链仍被藏住（A4 单层契约）。改为带标签直接展开。
+                lines.append("**引擎自动空头链（未与人写依据合并）**")
+                lines.append("")
+                lines.append(engine_block)
+            lines.append("")
+        else:
+            lines.append(engine_block)
             lines.append("")
     elif _bear_md:
         lines.append(_bear_md)

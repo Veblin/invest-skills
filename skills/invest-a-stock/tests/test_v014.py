@@ -80,18 +80,31 @@ class TestFundamentalsP0:
 
 
 class TestCoreTension:
-    def test_core_tension_between_modules(self):
-        from lib.render import _section_core_tension, render_report_v3
+    """v0.3.1 A4：核心分歧变量就地进 `## 0.`，不再单出一段「核心矛盾小结」。
+
+    原实现是一段无 `##` 宿主的结论复述（挂在 DCF 之后），与 §0/§1/§3 讲同一件事；
+    去重后三个变量由 `_core_variables` 产出、在 `## 0.` 节内一次说完。
+    """
+
+    def test_core_variables_live_in_section_zero(self):
+        from lib.render import render_report_v3
 
         c = _collection_phase3()
         report = render_report_v3(c, "600176")
-        assert "核心矛盾小结" in report
-        tension = _section_core_tension(
-            c, "600176",
-            {d["dimension"]: d for d in c["dimensions"]},
-            c["market_structure"],
-        )
-        assert "实质上集中在" in tension
+        assert "**核心变量：**" in report
+        assert "核心矛盾小结" not in report, "去重后不得再出结论复述段"
+        sec0 = report.split("## 0.")[1].split("\n## ")[0]
+        assert "**核心变量：**" in sec0, "核心变量须落在 `## 0.` 节内"
+
+    def test_core_variables_helper_requires_two(self):
+        from lib.render import _core_variables
+
+        c = _collection_phase3()
+        dims = {d["dimension"]: d for d in c["dimensions"]}
+        variables = _core_variables(dims, c)
+        assert len(variables) >= 2, "phase3 夹具应有 ≥2 个分歧变量"
+        # 无市场结构数据时仍须能产出（相对行业超额变量缺席，不抛异常）
+        assert isinstance(_core_variables(dims, {}), list)
 
 
 class TestRiskModule7:

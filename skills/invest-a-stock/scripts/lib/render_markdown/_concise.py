@@ -162,50 +162,6 @@ def _section_research_summary(
     return "\n".join(lines)
 
 
-# --- _section_core_tension ---
-def _section_core_tension(
-    collection: dict,
-    symbol: str,
-    dims: dict[str, dict],
-    market_structure: dict,
-    *,
-    val_cache: dict | None = None,
-) -> str:
-    """模块 4–5 之间的核心矛盾小结（P2a，数据驱动填空）。"""
-    pe_pct, _, pe_zone = _v3_valuation_percentiles(dims, val_cache)
-    ig, cagr, np_cagr = _v3_bull_bear_implied_growth(dims, market_structure)
-    ref_cagr = cagr if cagr is not None else np_cagr
-    ref_label = "营收" if cagr is not None else ("净利润" if np_cagr is not None else None)
-    variables: list[str] = []
-    if pe_pct is not None:
-        variables.append(
-            f"估值历史区间位置（当前 {pe_pct:.1f}%，{pe_zone or '—'}）能否维持"
-        )
-    if ig.get("g_implied") is not None and ref_cagr is not None and ref_label:
-        g_pct = ig["g_implied"] * 100
-        variables.append(
-            f"隐含增长 g_implied {g_pct:.1f}% 与实际{ref_label} CAGR {ref_cagr:+.1f}% 的缺口"
-        )
-    sw = market_structure.get("sw_index") or {}
-    if sw.get("stock_vs_industry_pct") is not None:
-        variables.append(
-            f"个股相对行业超额 {sw['stock_vs_industry_pct']:+.2f}% 的可持续性"
-        )
-    if len(variables) < 2:
-        return ""
-    name = collection.get("name") or symbol
-    lines = [
-        f"> **核心矛盾小结** — 围绕 {name}（{symbol}）当前市场分歧，实质上集中在：",
-    ]
-    for i, var in enumerate(variables[:3], 1):
-        lines.append(f"> {i}. {var}；")
-    lines.append(
-        "> 其他估值、资金和情绪的争议，本质上都在围绕上述变量摇摆。"
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
 # --- ReportEnhancer ---
 class ReportEnhancer:
     """Report 阶段增强触发器统一管理。
@@ -313,6 +269,32 @@ def _render_extras_block(collection: dict, *, strict: bool) -> list[str]:
         if text and text.strip():
             parts.append(text)
     return parts
+
+
+# --- _full_mode_basement (v0.3.1 A4：审计底稿单层折叠) ---
+_BASEMENT_SUMMARY = (
+    "审计底稿（展开：九模块 / 12 题 / DCF / Bull-Bear / 技术读数 / 引擎自检 / 分析详情）"
+)
+
+
+def _full_mode_basement(fragments: list[str]) -> str:
+    """把底稿片段收进**单层** `<details>`，返回折叠块（空内容返回空串）。
+
+    v0.3.1 A4（用户裁决「单文件双段式」）：主阅读面只留判断链路，九模块、
+    DCF、技术读数、引擎自检与分析详情收进这里。**折叠对 lint 与 report_qc
+    透明**——两者都按行首 `^## ` 工作（`lint` 章节正则、
+    `report_qc._MARKDOWN_HEADING_RE`），故阅读顺序调整不必重写渲染函数；
+    篇幅口径另由 `report_qc._body_lines` 跳过 `<details>` 跨度配套。
+
+    参数保持**片段列表**而非拼好的字符串：将来若改为「正文 + 底稿」双文件
+    产物，只需替换本函数这一层 wrap，装配逻辑不动。
+
+    边界约定：`md.index("<details>")` 即主阅读面与底稿的分界，测试按此切片。
+    """
+    body = "\n\n".join(p for p in fragments if p)
+    if not body:
+        return ""
+    return _wrap_details(_BASEMENT_SUMMARY, body)
 
 
 # --- concise helpers (v0.2.0: Hermes/OpenClaw 对话场景) ---
@@ -745,9 +727,14 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         parts: list[str] = [
             _header_v2(collection, symbol),
         ]
+        # v0.3.1 A4：首屏只留**带结论**的宏观情景行（它是 CLAUDE.md 规定的
+        # 输出契约行，A3a 裁决保留现状）；产业链/收益驱动假设/风格匹配/行业
+        # 成功因素/增强提示下沉进审计底稿，不再与「重要发现」争夺首屏。
         extras = _render_engine_extras(collection)
-        if extras:
-            parts.append("\n".join(extras))
+        macro_lines = [ln for ln in extras if ln.startswith("**[宏观情景]**")]
+        basement_extras = [ln for ln in extras if not ln.startswith("**[宏观情景]**")]
+        if macro_lines:
+            parts.append("\n".join(macro_lines))
         _extras = _render_extras_block(collection, strict=strict)
         if _extras:
             parts.append("\n\n".join(_extras))
@@ -767,32 +754,27 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _section_events_timeline(collection, analysis=analysis),
             _section_holder_changes(dims.get("holder_changes", {}), collection.get("events")),
             _section_research_summary(collection, symbol, dims),
-            _wrap_details(
-                "展开：静态基本面（12题）",
-                _section_static_fundamentals(dims, collection, val_cache=val_cache, analysis=analysis),
-            ),
+            # v0.3.1 A4 评审修复：底稿折内**不得再有二级折叠**——以下两节在
+            # full 分支直接展开（它们原先的 `_wrap_details` 是 v0.3.0 为「阅读面
+            # 不铺长」加的；进了底稿层之后该理由不再成立，套娃会让「展开审计
+            # 底稿」后 12 题与风险节仍被藏住）。concise 分支无底稿层，其折叠保留。
+            _section_static_fundamentals(dims, collection, val_cache=val_cache, analysis=analysis),
             "\n".join(
                 ["### 快速否决检测（F-3）", ""] + _fast_veto["display_lines"]
             ) if _fast_veto["display_lines"] else "",
             _section_dcf_valuation(
                 dims, collection, symbol, veto_triggered=bool(_fast_veto["hard_triggers"]),
             ),
-            _section_core_tension(
-                collection, symbol, dims, market_structure, val_cache=val_cache,
-            ),
             _section_bull_bear(
                 collection, symbol, dims, market_structure, risk_data,
-                val_cache=val_cache, analysis=analysis,
+                val_cache=val_cache, analysis=analysis, fold_engine_chain=False,
             ),
             _section_left_right_probability(
                 collection, symbol, dims, market_structure, val_cache=val_cache,
             ),
-            _wrap_details(
-                "展开：风险与不确定性",
-                _section_risk_uncertainty(
-                    collection, symbol, dims, market_structure, risk_data,
-                    val_cache=val_cache,
-                ),
+            _section_risk_uncertainty(
+                collection, symbol, dims, market_structure, risk_data,
+                val_cache=val_cache,
             ),
             _section_technical_brief(dims, val_cache=val_cache, collection=collection),
             _section_six_gates_scorecard(dims, collection, val_cache),
@@ -800,18 +782,26 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
             _references_appendix(collection),
             _risk_footer(),
         ]
-        # 方案 A（v0.3.0，四层阅读结构）——
+        # 方案 A（v0.3.0，三层阅读结构）+ v0.3.1 A4（单文件双段式）——
         #   ② 报告说明（底稿身份 + 研究档案）
-        #   ③ 重要发现（5 分钟阅读区，overview 槽位正文）→ 分析详情（其余分析段）
-        #   ④ 九模块数据底稿（以下各 section）
+        #   ③ 重要发现（5 分钟阅读区，overview 槽位正文，H2 判断句）
+        #   ④ 审计底稿：目录 / 九模块 / 12 题 / DCF / 技术读数 / 引擎自检 /
+        #      分析详情，收进**单层** `<details>`（`_full_mode_basement`）。
         # 均置于目录之前，使「结论先行」不受导航块干扰；无 analysis
         # 时各层均返回空串（基线零 diff 保持）。
-        # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值，再入列。
+        # 顺序敏感：附录依赖宿主「消费登记」，故 sections 先求值，再入列
+        #（`_render_analysis_appendix` 的调用必须晚于 sections 与 overview）。
+        # 折外保留「引用来源」（引用入口）与免责 footer。
         parts.extend([
             _full_mode_identity_status(symbol, analysis, profile),
             _render_analysis_overview(analysis, collection),
-            _render_analysis_appendix(analysis, collection),
-            *sections,
+            _full_mode_basement([
+                *basement_extras,
+                *sections[:-2],        # 目录 + 九模块 + 引擎自检附录
+                _render_analysis_appendix(analysis, collection),
+            ]),
+            sections[-2],              # 📚 引用来源
+            sections[-1],              # 免责 footer
         ])
     return "\n\n".join(p for p in parts if p)
 
@@ -870,6 +860,9 @@ def _render_analysis_overview(analysis: list[dict] | None,
     的写作控制，渲染器不做截断（截断会静默丢来源标注）。
 
     无 overview 段 → 返回空串，brief/full 基线零 diff 保持。
+
+    v0.3.1 A4：段标题由 `###` 升为 `##` —— 主阅读面由若干**完整判断句**的 H2
+    构成（对齐人工样稿：70 行 / 6 个 H2 / 零 H3），标题即论点（D4 原 LAW 17）。
     """
     from lib.analysis_schema import mark_inline_consumed, split_overview
     ov, _ = split_overview(analysis)
@@ -889,7 +882,7 @@ def _render_analysis_overview(analysis: list[dict] | None,
         ev = str(sec.get("evidence_tag") or "").strip()
         lines.append("")
         if title:
-            lines += [f"### {title}", ""]
+            lines += [f"## {title}", ""]
         if facts:
             lines += ["**[事实]**", "", facts, ""]
         if amd:

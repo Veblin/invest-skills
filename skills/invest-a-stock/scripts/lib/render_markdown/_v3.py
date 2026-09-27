@@ -380,6 +380,40 @@ def _section_executive_summary(collection, symbol, dims, val_cache=None):
     return "\n".join(lines)
 
 
+# --- _core_variables ---
+def _core_variables(dims: dict[str, dict], collection: dict, *,
+                    val_cache: dict | None = None) -> list[str]:
+    """本次分歧所围绕的核心变量（0–3 条）。
+
+    v0.3.1 A4：原 `_concise._section_core_tension` 的「核心矛盾小结」是一段无
+    `##` 宿主的结论复述（挂在 DCF 之后，与 §0/§1/§3 讲同一件事），改为在
+    `## 0.` 节内就地给出这三个变量——同一判断只出现一次。
+
+    不足 2 条时返回空表（沿用原判据：单变量不构成「矛盾」，不硬凑）。
+    """
+    pe_pct, _, pe_zone = _v3_valuation_percentiles(dims, val_cache)
+    market_structure = collection.get("market_structure") or {}
+    ig, cagr, np_cagr = _v3_bull_bear_implied_growth(dims, market_structure)
+    ref_cagr = cagr if cagr is not None else np_cagr
+    ref_label = "营收" if cagr is not None else ("净利润" if np_cagr is not None else None)
+    variables: list[str] = []
+    if pe_pct is not None:
+        variables.append(
+            f"估值历史区间位置（当前 {pe_pct:.1f}%，{pe_zone or '—'}）能否维持"
+        )
+    if ig.get("g_implied") is not None and ref_cagr is not None and ref_label:
+        g_pct = ig["g_implied"] * 100
+        variables.append(
+            f"隐含增长 g_implied {g_pct:.1f}% 与实际{ref_label} CAGR {ref_cagr:+.1f}% 的缺口"
+        )
+    sw = market_structure.get("sw_index") or {}
+    if sw.get("stock_vs_industry_pct") is not None:
+        variables.append(
+            f"个股相对行业超额 {sw['stock_vs_industry_pct']:+.2f}% 的可持续性"
+        )
+    return variables if len(variables) >= 2 else []
+
+
 # --- _section_research_question ---
 def _section_research_question(
     collection: dict, symbol: str, *, val_cache: dict | None = None,
@@ -430,6 +464,13 @@ def _section_research_question(
         lines.append("**激活的触发源:** " + "、".join(f"{t} {trigger_labels[t]}" for t in triggers))
     else:
         lines.append("**激活的触发源:** 暂无明确触发（以事实快照为主构建问题）")
+
+    # v0.3.1 A4：本次分歧围绕的核心变量——与触发源同段（都在回答「本节要盯什么」），
+    # 取代原先挂在 DCF 之后的「核心矛盾小结」结论复述。
+    core_vars = _core_variables(dims, collection, val_cache=val_cache)
+    if core_vars:
+        lines.append("")
+        lines.append("**核心变量：** " + "；".join(core_vars) + "。")
 
     lines.extend([
         "", "```",
@@ -924,45 +965,38 @@ def _section_market_structure(
     nb = market_structure.get("northbound")
     mf = market_structure.get("moneyflow")
     mf_net, mf_key = resolve_moneyflow(mf)
-    if nb or mf_net is not None:
+    # v0.3.1 A4：北向/全档的**数值行**不再在本节重复——同为口径与数值已在
+    # 「参与者行为扫描」表逐行给出（且多带「大单+特大单」第二口径）。凡本节能
+    # 出数值行的分支，参与者表必渲染同名行，故本节删去两行不丢信息；只保留
+    # 交叉验证**结论**（CV-4，下游测试按口径断言其措辞）。
+    if nb and mf_net is not None:
+        nb_net = nb.get("net_sum_10d")
+        if nb_net is not None:
+            n_v = float(nb_net)
+            m_v = mf_net
+            if n_v * m_v > 0:
+                cv4 = "convergence"
+                cv4d = "北向与全档资金净流入方向一致"
+            elif n_v == 0 and m_v == 0:
+                cv4 = "convergence"
+                cv4d = "北向与全档资金净流入方向一致"
+            elif n_v == 0 or m_v == 0:
+                cv4 = "gap"
+                cv4d = "资金数据不完整"
+            else:
+                cv4 = "divergence"
+                cv4d = "北向与全档资金净流入方向相反"
+        else:
+            # P0-1：净额被时效守卫置 None（源停更）——不得以 0.0 代替参与
+            # 「方向一致」判定（一致/相反均无数据可依，只能标数据不可用）
+            cv4 = "gap"
+            cv4d = "北向数据不可用（源停更），无法交叉验证"
         lines.append("")
         lines.append("### 资金态度")
-        if nb:
-            nb_src = nb.get("source", "northbound")
-            lines.append(
-                f"- 北向个股资金流（{nb_src}）{_v3_northbound_signal_label(nb)}"
-            )
-        if mf_net is not None:
-            lines.append(
-                f"- 全档资金（moneyflow）{moneyflow_signal_label(mf_key)}: {fmt_amount(mf_net)}"
-            )
-        if nb and mf_net is not None:
-            nb_net = nb.get("net_sum_10d")
-            if nb_net is not None:
-                n_v = float(nb_net)
-                m_v = mf_net
-                if n_v * m_v > 0:
-                    cv4 = "convergence"
-                    cv4d = "北向与全档资金净流入方向一致"
-                elif n_v == 0 and m_v == 0:
-                    cv4 = "convergence"
-                    cv4d = "北向与全档资金净流入方向一致"
-                elif n_v == 0 or m_v == 0:
-                    cv4 = "gap"
-                    cv4d = "资金数据不完整"
-                else:
-                    cv4 = "divergence"
-                    cv4d = "北向与全档资金净流入方向相反"
-            else:
-                # P0-1：净额被时效守卫置 None（源停更）——不得以 0.0 代替参与
-                # 「方向一致」判定（一致/相反均无数据可依，只能标数据不可用）
-                cv4 = "gap"
-                cv4d = "北向数据不可用（源停更），无法交叉验证"
-            lines.append("")
-            # 口径：mf 侧取自 resolve_moneyflow 默认键（net_sum_5d/10d/
-            # net_mf_amount），全部是**全档**净额，故称「全档资金」；
-            # 「主力」（大单+特大单）是另一口径，见 participant_scan._MF_LABELS。
-            lines.append(_cv(cv4, "CV-4", "北向 vs 全档资金", cv4d, "中"))
+        # 口径：mf 侧取自 resolve_moneyflow 默认键（net_sum_5d/10d/
+        # net_mf_amount），全部是**全档**净额，故称「全档资金」；
+        # 「主力」（大单+特大单）是另一口径，见 participant_scan._MF_LABELS。
+        lines.append(_cv(cv4, "CV-4", "北向 vs 全档资金", cv4d, "中"))
 
     to = market_structure.get("turnover")
     erp = market_structure.get("erp")

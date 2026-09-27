@@ -71,42 +71,24 @@ class TestParticipantBehaviorScan:
         for word in forbidden:
             assert word not in text
 
-    def test_cv_divergence_note_when_nb_mf_opposite(self):
+    def test_cv_note_points_to_section3_conclusion(self):
+        """v0.3.1 A4：北向 vs 全档的一致性结论**只在 §3 的 CV-4 说一次**。
+
+        参与者节保留**指针句**（口径名 + 窗口对齐），不再复述结论——原先同一
+        比较在两节各写一遍。结论自身的分支覆盖（一致 / 相反 / 数据不完整 /
+        双零）见 `test_v030_reading_layers.py::test_cv4_branch_conclusions`。
+        """
         ms = {
             "northbound": {"net_sum_10d": 10_000_000, "days": 10, "source": "tushare"},
             "moneyflow": {"net_sum_5d": -5_000_000, "source": "tushare.moneyflow"},
         }
         text = build_participant_behavior_section({}, "600176", ms, _dims())
         assert "交叉验证（参与者行为）" in text
-        assert "方向相反" in text
-        assert "北向近10日 vs 全档近5日" in text
-
-    def test_cv_convergence_uses_neutral_heading(self):
-        ms = {
-            "northbound": {"net_sum_10d": 10_000_000, "days": 10, "source": "tushare"},
-            "moneyflow": {"net_sum_5d": 5_000_000, "source": "tushare.moneyflow"},
-        }
-        text = build_participant_behavior_section({}, "600176", ms, _dims())
-        assert "交叉验证（参与者行为）" in text
-        assert "行为分歧" not in text
-        assert "方向一致" in text
-
-    def test_cv_marks_gap_when_moneyflow_zero(self):
-        ms = {
-            "northbound": {"net_sum_10d": 10_000_000, "days": 10, "source": "tushare"},
-            "moneyflow": {"net_sum_5d": 0, "source": "tushare.moneyflow"},
-        }
-        text = build_participant_behavior_section({}, "600176", ms, _dims())
-        assert "资金数据不完整" in text
-
-    def test_cv_both_zero_reports_convergence(self):
-        ms = {
-            "northbound": {"net_sum_10d": 0, "days": 10, "source": "tushare"},
-            "moneyflow": {"net_sum_5d": 0, "source": "tushare.moneyflow"},
-        }
-        text = build_participant_behavior_section({}, "600176", ms, _dims())
-        assert "方向一致" in text
-        assert "资金数据不完整" not in text
+        assert "北向与全档资金的口径与窗口对齐见上文 CV-4" in text
+        assert "北向近10日 vs 全档近5日" in text, "窗口口径须仍在本节可见"
+        assert "方向相反" not in text and "方向一致" not in text, (
+            "一致性结论不得在参与者节复述（A4 去重）"
+        )
 
     def test_moneyflow_fallback_uses_10d_label(self):
         ms = {

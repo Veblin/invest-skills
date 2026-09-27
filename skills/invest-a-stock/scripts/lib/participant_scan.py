@@ -198,17 +198,13 @@ def _scan_rows(
         except (TypeError, ValueError):
             nb_net = None
     mf_window = moneyflow_cv_window(mf_key)
+    # v0.3.1 A4：方向一致性判定与 §3 的 CV-4 是同一比较、同一结论，此处不再
+    # 复述（原先两处各写一遍）。保留**指针句**而非删除：口径名（全档）与窗口
+    # 口径须在参与者节可见——本表两个口径如何对齐是读者判断这张表的前提。
     if nb_net is not None and mf_net is not None:
-        if nb_net * mf_net > 0:
-            cv_notes.append(f"北向与全档资金净流入方向一致（北向近10日 vs {mf_window}）")
-        elif nb_net == 0 and mf_net == 0:
-            cv_notes.append(f"北向与全档资金净流入方向一致（北向近10日 vs {mf_window}）")
-        elif nb_net == 0 or mf_net == 0:
-            cv_notes.append(f"资金数据不完整（北向近10日 vs {mf_window}）")
-        else:
-            cv_notes.append(
-                f"北向与全档资金净流入方向相反（北向近10日 vs {mf_window}，可能存在参与者差异或滞后）"
-            )
+        cv_notes.append(
+            f"北向与全档资金的口径与窗口对齐见上文 CV-4（北向近10日 vs {mf_window}）"
+        )
 
     quote = (dims.get("quote") or {}).get("data") or {}
     chg = quote.get("change_pct") if isinstance(quote, dict) else None
