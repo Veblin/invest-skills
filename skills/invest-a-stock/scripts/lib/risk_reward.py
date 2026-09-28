@@ -212,6 +212,18 @@ def compute_dcf_risk_reward(
             "_meta": {"net_debt_source": nd_source},
         }
 
+    default_inputs = []
+    if wacc_result.get("risk_free_is_default"):
+        default_inputs.append("无风险利率")
+    if wacc_result.get("beta_is_default"):
+        default_inputs.append("Beta")
+    if default_inputs:
+        return {
+            "error": "关键输入采用默认值（" + "、".join(default_inputs)
+            + "），暂停数值 DCF 三情景、概率权重和盈亏比",
+            "_meta": {"wacc_missing_defaults": wacc_missing},
+        }
+
     scenarios: dict[str, float] = {}
     scenario_details: dict[str, dict] = {}
 

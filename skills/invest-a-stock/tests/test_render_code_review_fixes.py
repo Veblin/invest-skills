@@ -470,10 +470,9 @@ class TestRiskImpliedMcUsesLatestRow:
 
 
 class TestBullBearDefaultRAnnotation:
-    """review #13：模块 5 在 r 为默认假设 2.5%（FRED/akshare 不可得）时须标注
-    [推测，待验证] 且方向性对比加盖警示——与模块 4 D-③（_v3.py:3487-3491）口径一致。"""
+    """无风险利率缺失时，模块 5 暂停隐含增长和方向比较。"""
 
-    def test_default_r_annotated_in_5c_and_5d(self):
+    def test_default_r_suppresses_5c_and_5d_comparison(self):
         from lib.render_risk import _section_bull_bear
 
         dims = {
@@ -489,8 +488,46 @@ class TestBullBearDefaultRAnnotation:
         }
         # market_structure={} → erp.dgs10 不可得 → risk_free=0.025 默认假设路径
         text = _section_bull_bear({}, "600176", dims, {}, {"signals": []})
-        assert "[推测，待验证" in text
-        assert "方向仅供参考" in text
+        section_5c = text.split("### 5c. 关键分歧点", 1)[1].split("### 5d. 预期差", 1)[0]
+        section_5d = text.split("### 5d. 预期差", 1)[1]
+        assert "隐含增长 vs 实际增长" not in section_5c
+        assert "无风险利率采用默认假设，暂停隐含增长比较和方向判断" in section_5d
+        assert "g_implied ≈" not in section_5d
+        assert "定价偏乐观" not in section_5d
+        assert "定价偏悲观" not in section_5d
+
+    def test_default_r_suppresses_core_variable_gap(self):
+        from lib.render_markdown._v3 import _core_variables
+
+        dims = {
+            "valuation": {"data": [
+                {"trade_date": "2024-01-01", "pe_ttm": 12.0},
+                {"trade_date": "2025-01-01", "pe_ttm": 20.0},
+            ]},
+            "financials": {"data": [
+                {"end_date": "20231231", "revenue": 1.5e9, "net_profit": 1.5e8},
+                {"end_date": "20241231", "revenue": 1.7e9, "net_profit": 1.8e8},
+                {"end_date": "20251231", "revenue": 2.0e9, "net_profit": 2.0e8},
+            ]},
+        }
+        market_structure = {"sw_index": {"stock_vs_industry_pct": 3.0}}
+        default_r = _core_variables(dims, {"market_structure": market_structure})
+        assert all("g_implied" not in variable for variable in default_r)
+        assert any("无风险利率尚待核验" in variable for variable in default_r)
+
+        market_structure["erp"] = {"dgs10": 2.5}
+        sourced_r = _core_variables(dims, {"market_structure": market_structure})
+        assert any("g_implied" in variable for variable in sourced_r)
+
+    def test_default_r_suppresses_d3_value_and_success_status(self):
+        from fixtures.collections import collection_v2_minimal
+        from lib.render_markdown._concise import render_report_v3
+
+        md = render_report_v3(collection_v2_minimal(), "600176", mode="full")
+        d3 = md.split("#### D-③ 隐性预期差", 1)[1].split("### 12题回答状态", 1)[0]
+        assert "无风险利率不可得，暂停隐含增长率计算" in d3
+        assert "市场隐含增长率 g_implied：约" not in d3
+        assert "| D-③ | 隐性预期差 | ❌ | 无风险利率缺口，计算暂停 |" in md
 
 
 class TestAnalysisStatusUnavailable:

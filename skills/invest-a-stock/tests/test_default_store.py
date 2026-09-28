@@ -660,3 +660,49 @@ class TestMacroRawJsonMerge:
         assert raw["pmi"] == {"value": 50.3, "source": "akshare", "signal": "扩张"}
         assert raw["vix"] == {"value": 15.0, "source": "fred", "signal": ""}
         assert raw["sox"] == {"value": 5600.0, "source": "yahoo", "signal": ""}
+
+
+class TestStoredCollectionConsumers:
+    """store 返回包装行时，命令消费者必须取其中的 raw_json。"""
+
+    def test_risk_reward_store_uses_raw_collection(self, isolated_store, monkeypatch):
+        from argparse import Namespace
+        import invest
+        from lib import risk_reward
+
+        raw = _fake_result()
+        isolated_store.save_collection(raw)
+        seen = []
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(
+            risk_reward, "compute_dcf_risk_reward",
+            lambda collection, **_kw: seen.append(collection) or {"error": "测试停止"},
+        )
+        args = Namespace(symbol="600176", store=True, rf=None, erp=None, terminal_g=None)
+
+        assert invest.cmd_risk_reward(args) == 1
+        assert seen == [raw]
+
+    def test_ic_store_uses_raw_collection_without_recollecting(self, isolated_store, monkeypatch):
+        from argparse import Namespace
+        import invest
+        from lib import collector, quality_check, risk_reward, risk_scanner
+
+        raw = _fake_result()
+        isolated_store.save_collection(raw)
+        seen = []
+        monkeypatch.setattr(invest, "_HAS_STORE", True)
+        monkeypatch.setattr(
+            collector, "collect_all", lambda *_a, **_kw: pytest.fail("不应重新采集"),
+        )
+        monkeypatch.setattr(
+            risk_reward, "compute_dcf_risk_reward",
+            lambda collection, **_kw: seen.append(collection) or {"error": "测试停止"},
+        )
+        monkeypatch.setattr(quality_check, "run_quality_check", lambda _c: {"summary": {"overall": "pass"}})
+        monkeypatch.setattr(quality_check, "format_quality_check", lambda _qc: "质量测试")
+        monkeypatch.setattr(risk_scanner, "risk_report", lambda _rows: [])
+        args = Namespace(symbol="600176", rf=None, erp=None, force_sector_sync=False)
+
+        assert invest.cmd_ic(args) == 0
+        assert seen == [raw]

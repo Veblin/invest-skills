@@ -358,6 +358,32 @@ class TestRiskRewardNetDebt:
         result = compute_dcf_risk_reward(collection)
         assert "有息负债字段未采集" in result["error"]
 
+    @pytest.mark.parametrize("default_flag", ["risk_free_is_default", "beta_is_default"])
+    def test_default_wacc_input_suppresses_scenarios(self, monkeypatch, default_flag):
+        """独立 risk-reward 路径须与报告 DCF 一样拒绝默认输入。"""
+        from lib import render_dcf, valuation
+        from lib.risk_reward import compute_dcf_risk_reward
+
+        wacc = {"wacc": 0.08, "components": {"risk_free_rate": 0.025, "erp": 0.06},
+                "risk_free_is_default": False, "beta_is_default": False}
+        wacc[default_flag] = True
+        monkeypatch.setattr(render_dcf, "_dcf_try_wacc", lambda *_a, **_kw: (wacc, []))
+        monkeypatch.setattr(
+            valuation, "scenario_fcff",
+            lambda *_a, **_kw: pytest.fail("默认 WACC 不得进入情景计算"),
+        )
+        collection = {"dimensions": [
+            {"dimension": "kline", "data": [{"trade_date": "20260815", "close": 10.2}]},
+            {"dimension": "basic_info", "data": {"总股本": "24.6亿股"}},
+            {"dimension": "financials", "data": [], "dcf_preprocess": {
+                "net_debt": {"method": "有息口径", "net_debt": 1e8},
+            }},
+        ]}
+        result = compute_dcf_risk_reward(collection)
+        assert "error" in result
+        assert "关键输入采用默认值" in result["error"]
+        assert "scenario_details" not in result.get("_meta", {})
+
 
 # ---------------------------------------------------------------------------
 # R-10: latest_month_row 静默回退

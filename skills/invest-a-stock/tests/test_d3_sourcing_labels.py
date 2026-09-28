@@ -42,10 +42,18 @@ def _render_offline(collection: dict) -> str:
         return render_report_v3(collection, "600176", mode="full")
 
 
+def _with_sourced_rate(collection: dict) -> dict:
+    """来源标签测试聚焦可计算 D-③；缺利率路径由默认值闸门测试覆盖。"""
+    collection.setdefault("market_structure", {}).setdefault("erp", {}).update({
+        "dgs10": 2.5, "source": "akshare+FRED.DGS10",
+    })
+    return collection
+
+
 @pytest.fixture(scope="module")
 def full_render() -> str:
     """无可比 CAGR 的 collection → 命中 d3_pitfall 第二分支。"""
-    return _render_offline(collection_v2_minimal())
+    return _render_offline(_with_sourced_rate(collection_v2_minimal()))
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +61,7 @@ def full_render_with_cagr() -> str:
     """含可比 CAGR 的 collection → 命中 d3_pitfall 第一分支（带 CAGR 的措辞）。"""
     from test_v013_phase2 import _collection_phase2
 
-    return _render_offline(_collection_phase2())
+    return _render_offline(_with_sourced_rate(_collection_phase2()))
 
 
 def test_full_report_has_no_unsourced_derived_claims(full_render: str) -> None:

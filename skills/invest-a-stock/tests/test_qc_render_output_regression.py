@@ -128,6 +128,26 @@ def test_events_render_trips_template_placeholder(tmp_path: Path, events_text: s
     assert "[待 Claude report 阶段填充]" in events_text
 
 
+def test_rendered_bull_chain_review_marker_is_caught_by_qc(
+    tmp_path: Path,
+) -> None:
+    """已注入其他分析段、但缺 bull_chain 时，完成度 QC 仍拦多头占位。"""
+    rendered = render_report_v3(
+        collection_v2_minimal(), _SYMBOL, mode="full",
+        analysis=json.loads(_VALID_SIDECAR),
+    )
+    marker = "[待 Claude 核对多头依据]"
+    assert marker in rendered
+    path = _write_report(tmp_path, rendered)
+    path.with_suffix(".analysis.json").write_text(_VALID_SIDECAR, encoding="utf-8")
+
+    details = _completion_details(path)
+    flagged_lines = {
+        d["line"] for d in details if d["id"] == "completion-template-placeholder"
+    }
+    assert any(rendered.splitlines()[line - 1] == marker for line in flagged_lines)
+
+
 def test_degraded_render_trips_both_directions(tmp_path: Path, degraded_text: str) -> None:
     """反证不足：多空两侧**逻辑链**为空必须被拦（Bull/Bear）。
 

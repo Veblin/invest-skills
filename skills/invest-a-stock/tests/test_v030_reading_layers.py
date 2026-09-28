@@ -198,7 +198,8 @@ def test_participant_scan_slot_replaces_placeholder():
 
 def test_event_classification_slot_replaces_placeholder():
     coll = _coll_with_cards(event_classifications=[
-        {"event_type": "buyback", "event_label": "回购", "events": [{"date": "2026-06-11"}]},
+        {"event_type": "buyback", "event_label": "回购", "events": [{"date": "2026-06-11"}],
+         "direction_hint": "正向"},
     ])
     # 事件时间线是分类摘要的宿主节：events 为空时整节（含摘要）不渲染。
     coll["events"] = [{"date": "2026-06-11", "type": "buyback",
@@ -210,6 +211,9 @@ def test_event_classification_slot_replaces_placeholder():
                              analysis=[_slot("event_classification", "分类复核结论")])
     assert "待 Claude 验证" not in with_
     assert "分类复核结论" in with_
+    assert "方向: 正向" not in with_, "仅有公告标题时不应输出影响方向"
+    assert "[来源: _meta.analysis_cards.event_classifications.0.event_label]" in with_
+    assert "[来源: Python calc: len(ec.get('events') or ())]" in with_
 
 
 def test_mda_narrative_slot_replaces_placeholder():
@@ -252,6 +256,66 @@ def test_bear_chain_slot_renders_when_engine_has_no_chain():
     injected = _section_bull_bear(coll, "600176", dims, {}, {},
                                   analysis=[_slot("bear_chain", "空头逻辑唯一标记")])
     assert "空头逻辑唯一标记" in injected
+
+
+def test_bull_chain_slot_preserves_engine_chain_as_audit_basis():
+    """已核对的多头依据作为正文，引擎多头链保留为独立底稿。"""
+    coll = collection_v2_minimal()
+    draft = render_report_v3(coll, "600176", mode="full")
+    assert "[待 Claude 核对多头依据]" in draft
+    bull = _slot("bull_chain", "多头依据唯一标记")
+    bull["facts_md"] = "多头事实唯一标记 [来源: test.fixture]"
+    md = render_report_v3(coll, "600176", mode="full",
+                          analysis=[bull])
+    assert md.count("多头依据唯一标记") == 1
+    assert md.count("多头事实唯一标记") == 1
+    assert md.index("多头事实唯一标记") < md.index("多头依据唯一标记")
+    assert "### 5a. 多头逻辑链" in md
+    assert "**证据等级：** B" in md
+    assert "**引擎自动多头链（未与人写依据合并）**" in md
+    assert "#### 多头逻辑" in md
+    assert "[待 Claude 核对多头依据]" not in md
+    assert "当前数据未形成明确多头逻辑链" not in md
+
+
+def test_bull_chain_engine_basis_folds_in_concise_mode():
+    from lib.render_risk import _section_bull_bear
+    from lib.schema import index_dimensions
+
+    coll = collection_v2_minimal()
+    text = _section_bull_bear(
+        coll, "600176", index_dimensions(coll), {}, {},
+        analysis=[_slot("bull_chain", "已核对的多头依据")],
+        fold_engine_chain=True,
+    )
+    assert "底稿：引擎自动多头链（未与人写依据合并）" in text
+    assert "#### 多头逻辑" in text
+    assert "<details>" in text
+
+
+def test_bull_chain_injection_keeps_engine_asymmetry_disclosure():
+    from lib.render_risk import _section_bull_bear
+    from lib.schema import index_dimensions
+
+    coll = collection_v2_minimal()
+    market = {
+        "northbound": {"net_sum_10d": 1_000_000},
+        "sw_index": {"stock_vs_industry_pct": 5},
+        "erp": {"percentile_5y": 80},
+    }
+    risk = {"signals": [{"triggered": True, "severity": "参考",
+                         "id": "valuation_extreme_low", "detail": "低位",
+                         "category": "market"}]}
+    base = _section_bull_bear(coll, "600176", index_dimensions(coll), market, risk)
+    assert "结构性不对称" in base, "夹具须先触发多空链数量差"
+
+    injected = _section_bull_bear(
+        coll, "600176", index_dimensions(coll), market, risk,
+        analysis=[_slot("bull_chain", "已核对的多头依据")], fold_engine_chain=False,
+    )
+    assert "已核对的多头依据" in injected
+    assert "引擎自动多头链" in injected
+    assert "结构性不对称" in injected
 
 
 def test_slot_sections_do_not_leak_into_detail_layer():

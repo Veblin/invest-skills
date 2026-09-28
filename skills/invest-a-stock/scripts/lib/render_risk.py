@@ -205,7 +205,10 @@ def _section_bull_bear(
     # LAW 17: 构建含数据的标题 + 段首主旨句
     pe_s = f"PE {pe_pct:.1f}% 分位{_pct_median_suffix(pe_med)}" if pe_pct is not None else ""
     title_suffix = f"Bull/Bear 多空逻辑链 · {pe_s}" if pe_s else "Bull/Bear 多空逻辑链与情景估值"
-    judgment = f"当前 {pe_s}，以下为 Bull/Bear 对称辩论与多情景估值参考。" if pe_s else "以下为 Bull/Bear 多空逻辑链与情景估值分析。"
+    judgment = (
+        f"当前 {pe_s}，以下并列列示支持证据、风险证据与待核情景前提。"
+        if pe_s else "以下并列列示支持证据、风险证据与待核情景前提。"
+    )
 
     lines = [f"## 5. {title_suffix}", ""]
     lines.append(f"**结论：** {judgment}")
@@ -633,29 +636,61 @@ def _section_bull_bear(
 
     # ── 5a. Bull chain: 假设→传导→数字 ────────────────────────────
     lines.append("### 5a. 多头逻辑链")
-    if bull_chains:
-        for idx, bc in enumerate(bull_chains, 1):
-            lines.append(f"#### 多头逻辑 {idx}: {bc['title']}")
-            lines.append(f"- **核心假设**: {bc['assumption']}")
-            lines.append(f"- **传导链**: {bc['transmission']}")
-            lines.append("**对应数字**:")
-            if bc["numbers"]:
-                lines.extend(bc["numbers"])
-            else:
-                lines.append("  - 数据不足，未生成量化估算")
-            lines.append(f"- 证据强度: {bc['strength']}")
+    from lib.analysis_schema import (
+        BEAR_CHAIN_KEYS, BULL_CHAIN_KEYS, find_section, mark_inline_consumed,
+    )
+    _bull = find_section(analysis, BULL_CHAIN_KEYS)
+    _bull_facts = str((_bull or {}).get("facts_md") or "").strip()
+    _bull_md = str((_bull or {}).get("analysis_md") or "").strip()
+    if _bull_md:
+        mark_inline_consumed(collection, _bull)
+        lines.append("**经核对的支持证据（analysis.json 注入）**")
+        lines.append("")
+        if _bull_facts:
+            lines.append("**[事实]**")
             lines.append("")
-    else:
+            lines.append(_bull_facts)
+            lines.append("")
+        lines.append("**[分析]**")
+        lines.append("")
+        lines.append(_bull_md)
+        lines.append("")
+        _bull_evidence = str((_bull or {}).get("evidence_tag") or "").strip()
+        if _bull_evidence:
+            lines.append(f"**证据等级：** {_bull_evidence}")
+            lines.append("")
+    if bull_chains:
+        engine_lines: list[str] = []
+        for idx, bc in enumerate(bull_chains, 1):
+            engine_lines.append(f"#### 多头逻辑 {idx}: {bc['title']}")
+            engine_lines.append(f"- **核心假设**: {bc['assumption']}")
+            engine_lines.append(f"- **传导链**: {bc['transmission']}")
+            engine_lines.append("**对应数字**:")
+            if bc["numbers"]:
+                engine_lines.extend(bc["numbers"])
+            else:
+                engine_lines.append("  - 数据不足，未生成量化估算")
+            engine_lines.append(f"- 证据强度: {bc['strength']}")
+            engine_lines.append("")
+        engine_block = "\n".join(engine_lines).rstrip()
+        if _bull_md:
+            if fold_engine_chain:
+                lines.append(_wrap_details("底稿：引擎自动多头链（未与人写依据合并）", engine_block))
+            else:
+                lines.append("**引擎自动多头链（未与人写依据合并）**")
+                lines.append("")
+                lines.append(engine_block)
+        else:
+            lines.append("[待 Claude 核对多头依据]")
+            lines.append("")
+            lines.append(engine_block)
+        lines.append("")
+    elif not _bull_md:
         lines.append("- 当前数据未形成明确多头逻辑链 [来源: 模块 2/4/6 汇总]")
         lines.append("")
 
     # ── 5b. Bear chain: 假设→传导→数字 ────────────────────────────
     lines.append("### 5b. 空头逻辑链")
-    from lib.analysis_schema import (
-        BEAR_CHAIN_KEYS,
-        find_section,
-        mark_inline_consumed,
-    )
     _bear = find_section(analysis, BEAR_CHAIN_KEYS)
     _bear_md = str((_bear or {}).get("analysis_md") or "").strip()
     if _bear_md:
@@ -720,15 +755,9 @@ def _section_bull_bear(
             f"{_bull_bear_valuation_divergence_text(pe_pct, pe_zone, float(rev_yoy))}"
         )
     # divergence: implied growth vs actual CAGR
-    if ig.get("g_implied") is not None and ref_cagr is not None and ref_label:
+    if ig.get("g_implied") is not None and not ig.get("rf_is_default") and ref_cagr is not None and ref_label:
         divergence_count += 1
         g_pct = ig["g_implied"] * 100
-        # review #13：r 为默认假设（FRED dgs10 不可得）时方向性对比须降级标注——
-        # 与模块 4 D-③（_v3.py:3487-3491）同口径，禁以猜测 r 出未经标注的方向结论
-        r_default_caution = (
-            "（注意：r 为默认假设 2.5% [推测，待验证]，方向性对比仅供参考，"
-            "须先获取真实无风险利率）" if ig.get("rf_is_default") else ""
-        )
         # 2026-09-19：原实现把「两个数字不同」直接写成「Bear 认为实际 CAGR 无法匹配，
         # 定价悲观」——既把数字差异误表述为定性结论，又与 5d「与实际营收 CAGR 接近」
         # 互斥（600519 实测：5c 称「无法匹配」、5d 称「接近」）。改为中性陈述分歧：
@@ -737,7 +766,7 @@ def _section_bull_bear(
             f"{divergence_count}. **[隐含增长 vs 实际增长]**：市场隐含增长 g_implied"
             f"（{g_pct:.2f}%）与实际{ref_label}（{ref_cagr:+.2f}%）相差 "
             f"{abs(g_pct - ref_cagr):.2f}pp——Bull 读作「隐含假设保守、存在重估空间」，"
-            f"Bear 读作「历史增速不可持续、市场已在定价减速」。{r_default_caution}"
+            "Bear 读作「历史增速不可持续、市场已在定价减速」。"
         )
     # divergence: northbound vs moneyflow (if we haven't hit 2)
     m_v = mf_net
@@ -756,16 +785,16 @@ def _section_bull_bear(
 
     # ── 5d. 预期差 — unchanged ──────────────────────────
     lines.append("### 5d. 预期差")
-    if ig.get("g_implied") is not None:
+    if ig.get("rf_is_default"):
+        lines.append("- 无风险利率采用默认假设，暂停隐含增长比较和方向判断；须补同估值时点的实际利率。[来源: market_structure.erp 缺口]")
+    elif ig.get("g_implied") is not None:
         g_pct = ig["g_implied"] * 100
-        # review #13：r 为默认假设时在 label 上标注 [推测，待验证]（对齐 _v3.py rf_label）
-        r_label = (f"{ig.get('r', 0) * 100:.2f}%"
-                   + (" [推测，待验证：FRED/akshare 不可得]" if ig.get("rf_is_default") else ""))
+        r_label = f"{ig.get('r', 0) * 100:.2f}%"
         lines.append(
             f"- 市场隐含增长率 g_implied ≈ **{g_pct:.2f}%**（PE {ig.get('pe')}x，"
             f"r={r_label}）[来源: lib.valuation.implied_growth / 模块 4 D-③]"
         )
-        if "g_band_up" in ig and not ig.get("rf_is_default"):
+        if "g_band_up" in ig:
             lines.append(
                 f"- g_implied 敏感性带（r±1pp）：{ig['g_band_down'] * 100:.2f}% ~ "
                 f"{ig['g_band_up'] * 100:.2f}%（与模块 4 D-③ 同源）"
@@ -773,22 +802,20 @@ def _section_bull_bear(
         if ref_cagr is not None and ref_label:
             gap = g_pct - ref_cagr
             rel = abs(gap) / abs(ref_cagr) * 100 if ref_cagr else None
-            # review #13：默认 r 下 gap 定价方向仅供参考（r 非实测）
-            r_default_note = "（r 为默认假设，方向仅供参考）" if ig.get("rf_is_default") else ""
             # 2026-09-19：原判定只看绝对差（>5pp），相对差很大时仍写「接近」
             # （600519 实测差 4.98pp、相对 46%）——与模块 4 D-③ 同口径改用相对差 ≤20%
             if rel is not None and rel <= 20:
                 lines.append(
                     f"- 与实际{ref_label}（{ref_cagr:+.2f}%）接近"
                     f"（差 {abs(gap):.2f}pp，相对 {rel:.1f}%），定价大致反映历史增长"
-                    f" [来源: financials CAGR vs D-③]{r_default_note}"
+                    " [来源: financials CAGR vs D-③]"
                 )
             else:
                 direction = "偏乐观" if gap > 0 else "偏悲观"
                 _rel_s = f"{rel:.1f}%" if rel is not None else "不可得"
                 lines.append(
                     f"- 与实际{ref_label}（{ref_cagr:+.2f}%）差距 {gap:+.2f}pp（相对 {_rel_s}），"
-                    f"定价{direction} [来源: financials CAGR vs D-③]{r_default_note}"
+                    f"定价{direction} [来源: financials CAGR vs D-③]"
                 )
         else:
             lines.append("- 实际 CAGR 不可得，仅呈现 g_implied 供与模块 4 D-③ 对照 [来源: financials 缺口]")

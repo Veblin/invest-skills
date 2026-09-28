@@ -2244,7 +2244,11 @@ def cmd_risk_reward(args: argparse.Namespace) -> int:
     if args.store and _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=args.symbol)
         if rows:
-            collection = store_mod.get_collection(rows[0]["id"])
+            collection = _unwrap_raw(store_mod.get_collection(rows[0]["id"]) or {})
+            if not collection:
+                print(f"❌ store 中 {args.symbol} 的采集快照缺少有效 raw_json",
+                      file=sys.stderr)
+                return 1
         else:
             print(f"⚠️ store 中无 {args.symbol} 的采集记录，请先运行 collect --store",
                   file=sys.stderr)
@@ -2284,7 +2288,7 @@ def cmd_ic(args: argparse.Namespace) -> int:
     if _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=args.symbol)
         if rows:
-            collection = store_mod.get_collection(rows[0]["id"])
+            collection = _unwrap_raw(store_mod.get_collection(rows[0]["id"]) or {}) or None
 
     if collection is None:
         print(f"采集 {args.symbol} 数据...", file=sys.stderr)

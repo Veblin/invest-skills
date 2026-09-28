@@ -523,7 +523,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
      `[来源: Python calc: …]` 是散文式说明（含 `≤ × （`），不可照抄当 `formula`
      （实测 11/11 条不可求值，照抄会被 fail-loud 拦下）
    - 校验：先运行 `uv run python skills/invest-a-stock/scripts/invest.py validate-analysis <path> --draft <首版MD>`（仅校验，不采集、不渲染；一次列出全部错误，并按本次初稿实际占位检查槽位），通过后再 `report --analysis <path> --draft <首版MD>`。后者也会在恢复快照或现场采集前校验，失败退出 2。
-   - full 报告中按需填就地槽位：`bear_chain`（空头依据）；有 MD&A 卡时 `mda_narrative`；有参与者扫描行时 `participant_scan`；有事件卡时 `event_classification`。以首版 MD 中实际出现的占位和 `report_qc` 为准，条件宿主未出现时无需硬填。
+   - full 报告中填就地槽位：`bull_chain`（核对多头依据；替换引擎自动多头链）、`bear_chain`（空头依据）；有 MD&A 卡时 `mda_narrative`；有参与者扫描行时 `participant_scan`；有事件卡时 `event_classification`。以首版 MD 中实际出现的占位和 `report_qc` 为准，条件宿主未出现时无需硬填。`bull_chain` 的 `facts_md` 须列可追溯证据，`analysis_md` 须说明假设与传导；证据不足时明确披露缺口。
    - **改动须知**：`facts` 契约与 `[事实: F{n}]` 引用语法由 `lib/analysis_schema.py` 单点定义，
      文档/prompt/校验三处须同步改（2026-09-18 review #3 的教训：三处不一致 → 闸门空转）
 3. **复合重渲（工作流默认出 html；`--emit` 须显式写 html）**：`report SYMBOL --analysis <path> --emit html`（或 `--resume`）→ 分析段替换占位 → **html + 同代 md 同源落盘**（`--emit html` 分支同时写 md_v2，保证 md/html 同代；不重渲则以 md 为唯一产物，属例外情形）

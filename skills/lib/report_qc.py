@@ -226,13 +226,15 @@ _AUTOMATED_ENGINE_NOTICE_RE = re.compile(r"本报告由自动化引擎生成")
 _TEMPLATE_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = (
     # 包在方括号里的「待模型填写」残留。**不含**裸 `分析提示`：`> [分析提示]`
     # 是 _law10_hint 的体例标签（_v3.py 的「每题末尾固定格式」），每份 full 报告
-    # 都带，命中它会让完成度门禁对任何报告恒 FAIL。真正的未填提示由下面第 2 条
-    # （`分析提示（Claude 填写）`）精确捕捉。
+    # 都带，命中它会让完成度门禁对任何报告恒 FAIL。真正的未填提示由后面的
+    # `分析提示（Claude 填写）` 规则精确捕捉。
     re.compile(
         r"\[\s*(?:待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"
         r"(?:填充|填写|补充|验证)?|待(?:填|填写|填充)|TODO|TBD|FIXME)\s*\]",
         re.I,
     ),
+    # 带具体待核内容的方括号占位；普通正文中的「待 Claude 核对」不应触发。
+    re.compile(r"\[\s*待\s*(?:Claude|AI|LLM)\s+核对[^\]\n]{0,24}\s*\]", re.I),
     re.compile(r"分析提示\s*[（(]\s*(?:Claude|AI|LLM)[^）)]{0,24}[）)]", re.I),
     re.compile(
         r"待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"

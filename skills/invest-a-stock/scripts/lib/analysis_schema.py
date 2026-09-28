@@ -409,6 +409,7 @@ def validate_sections(raw: list[dict]) -> list[str]:
 # 未命中任何槽位的段仍走尾部注记（零回归）。
 OVERVIEW_KEYS = frozenset({"overview", "executive_summary"})
 BEAR_CHAIN_KEYS = frozenset({"bear_chain"})
+BULL_CHAIN_KEYS = frozenset({"bull_chain"})
 MDA_NARRATIVE_KEYS = frozenset({"mda_narrative"})
 EVENT_CLASSIFICATION_KEYS = frozenset({"event_classification"})
 PARTICIPANT_SCAN_KEYS = frozenset({"participant_scan"})
@@ -429,6 +430,8 @@ EVENTS_HOST_KEYS = EVENT_CLASSIFICATION_KEYS | {"events"}
 # 故 `tests/test_fast_report_pipeline.py::test_draft_slot_markers_match_render_output`
 # 对**渲染实际输出**断言这些字面量：改词即红。
 DRAFT_SLOT_MARKERS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("bull_chain", "[待 Claude 核对多头依据]", BULL_CHAIN_KEYS),
+    ("bull_chain", "当前数据未形成明确多头逻辑链", BULL_CHAIN_KEYS),
     ("bear_chain", "当前数据未形成明确空头逻辑链", BEAR_CHAIN_KEYS),
     ("mda_narrative", "待 Claude 填充管理层论述解读", MDA_NARRATIVE_KEYS),
     ("participant_scan", "分析提示（Claude 填写）", PARTICIPANT_SCAN_KEYS),
@@ -498,6 +501,7 @@ def split_overview(analysis: list[dict] | None) -> tuple[list[dict], list[dict]]
 INLINE_SLOT_KEYS = (
     OVERVIEW_KEYS
     | BEAR_CHAIN_KEYS
+    | BULL_CHAIN_KEYS
     | MDA_NARRATIVE_KEYS
     | EVENT_CLASSIFICATION_KEYS
     | PARTICIPANT_SCAN_KEYS

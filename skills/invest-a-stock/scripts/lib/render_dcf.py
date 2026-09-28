@@ -19,11 +19,10 @@ _DCF_TERMINAL_G_DEFAULT = 0.025  # 与 D-③ 10Y 国债默认假设一致，作�
 def _scenario_evidence(scenario: dict, base: dict) -> str:
     """按数据可得性为情景权重标注证据等级（R-A3 确定性规则，非人工评级）：
     - 基期 FCFF 实值可得 且 显式期增速参数完整 → B（参数驱动，历史/当期实值锚定）
-    - 基期 FCFF 实值缺失 或 wacc 参数降级（__label 含"近似"/"缺失"） → C
+    - 基期 FCFF 实值缺失 → C；默认 WACC 输入在进入情景计算前已被拦截
     """
     fcff_ok = (base.get("fcff") or {}).get("fcff") is not None
-    wacc_ok = "近似" not in (base.get("wacc_label") or "") and "缺失" not in (base.get("wacc_label") or "")
-    return "B" if fcff_ok and wacc_ok else "C"
+    return "B" if fcff_ok else "C"
 
 
 # --- _dcf_compute_beta ---
@@ -386,6 +385,13 @@ def _section_dcf_valuation(
     lines.append("#### D-④ DCF 三情景估值区间")
     lines.append("")
 
+    # 利率缺口已知时无需为随后会暂停的估值实时抓取沪深300基准。
+    if (market_structure.get("erp") or {}).get("dgs10") is None:
+        lines.append("关键输入采用默认值（无风险利率），暂停数值 DCF 三情景、概率权重和敏感性矩阵。")
+        lines.append("🔍 待独立验证：取得同币种、同估值时点的利率后重算。")
+        lines.append("[来源: market_structure.erp.dgs10]")
+        return "\n".join(lines)
+
     wacc_result, wacc_missing = _dcf_try_wacc(financials, market_structure, kline_data=kline_data)
     if wacc_result is None:
         lines.append("数据不足，WACC 无法计算，DCF 段落跳过。缺失项：")
@@ -393,6 +399,29 @@ def _section_dcf_valuation(
             lines.append(f"- {m}")
         lines.append("")
         lines.append("[来源: valuation.calc_wacc 所需参数缺失]")
+        return "\n".join(lines)
+
+    # 默认利率或默认 beta 只能用来解释缺口，不能进入数值估值与概率表。
+    # 否则报告正文即使暂停价带，审计底稿仍会给出看似精确的 DCF 情景。
+    default_inputs = []
+    if wacc_result.get("risk_free_is_default"):
+        default_inputs.append("无风险利率")
+    if wacc_result.get("beta_is_default"):
+        default_inputs.append("Beta")
+    if default_inputs:
+        lines.append(
+            "关键输入采用默认值（" + "、".join(default_inputs)
+            + "），暂停数值 DCF 三情景、概率权重和敏感性矩阵。"
+        )
+        if wacc_result.get("beta_is_default"):
+            lines.append(f"- Beta 缺口：{wacc_result.get('beta_source') or '来源不可得'}。")
+        missing_evidence = []
+        if wacc_result.get("risk_free_is_default"):
+            missing_evidence.append("同币种、同估值时点的利率")
+        if wacc_result.get("beta_is_default"):
+            missing_evidence.append("可复核的 Beta")
+        lines.append("🔍 待独立验证：取得" + "及".join(missing_evidence) + "后重算。")
+        lines.append("[来源: valuation.calc_wacc 输入状态]")
         return "\n".join(lines)
 
     wacc = wacc_result["wacc"]
@@ -438,10 +467,7 @@ def _section_dcf_valuation(
         scenario_ev[sc] = ev
 
     wacc_label = f"{wacc*100:.2f}%"
-    rf_note = (
-        "10Y 国债使用默认值 2.5% [推测，待验证]" if wacc_result.get("risk_free_is_default")
-        else "10Y 国债取自 FRED/akshare"
-    )
+    rf_note = "10Y 国债取自 FRED/akshare"
     # Beta 来源说明
     beta_val = wacc_result.get("beta")
     beta_source = wacc_result.get("beta_source", "")
@@ -449,14 +475,8 @@ def _section_dcf_valuation(
     beta_note_parts = [f"β={beta_val:.3f}"]
     if beta_r2 is not None:
         beta_note_parts.append(f"R²={beta_r2:.3f}")
-    if wacc_result.get("beta_is_default"):
-        beta_note_parts.append(f"[推测，待验证: {beta_source}]")
-    else:
-        beta_note_parts.append(f"[{beta_source}]")
+    beta_note_parts.append(f"[{beta_source}]")
     beta_note = "，".join(beta_note_parts)
-    if wacc_result.get("beta_is_default"):
-        # F0-5: β 为默认值时明示对估值量级的影响，不静默参与输出。
-        beta_note += "（默认值参与计算，企业价值仅作量级参考）"
 
     lines.append(
         f"- WACC：**{wacc_label}**（cost_of_equity 近似，因债务成本/权重数据不可得；"
@@ -465,16 +485,8 @@ def _section_dcf_valuation(
     lines.append(f"- 永续增长率假设：**{terminal_g*100:.2f}%**[推测，待验证：长期宏观增长代理，与 D-③ 一致]")
     lines.append("")
 
-    # R-A3：WACC/基期 FCFF 可得性 → 三情景权重证据等级（_scenario_evidence 确定性规则）
-    wacc_state_parts = []
-    if wacc_result.get("risk_free_is_default"):
-        wacc_state_parts.append("无风险利率默认值（缺失）")
-    if wacc_result.get("beta_is_default"):
-        wacc_state_parts.append("Beta 默认值（近似）")
-    dcf_base = {
-        "fcff": (financials.get("dcf_preprocess") or {}).get("fcff"),
-        "wacc_label": "、".join(wacc_state_parts) or "实值参数",
-    }
+    # 默认 WACC 输入已拦截；基期 FCFF 可得性决定情景权重证据等级。
+    dcf_base = {"fcff": (financials.get("dcf_preprocess") or {}).get("fcff")}
     sc_evidence = _scenario_evidence(scenario_results.get("base", {}), dcf_base)
 
     _sc_label = {"bear": "悲观情景", "base": "中性情景", "bull": "乐观情景"}
@@ -684,4 +696,3 @@ def _section_dcf_valuation(
     lines.append("")
 
     return "\n".join(lines)
-

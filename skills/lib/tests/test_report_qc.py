@@ -337,6 +337,40 @@ class TestStockCompletionGate:
         assert "分析提示" not in flagged
         assert completion.status == "fail"
 
+    def test_bull_chain_review_marker_fails_even_with_valid_sidecar(self, tmp_path: Path):
+        """缺 bull_chain 槽位时，核对占位不得被同代有效侧车掩盖。"""
+        marker = "[待 Claude 核对多头依据]"
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 盈利增长与现金流改善相互印证 [来源: engine]",
+                marker + "\n- 盈利增长与现金流改善相互印证 [来源: engine]",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+
+        result = qc_file(report, fail_on="error")
+        completion = _completion_layer(result)
+        assert completion.status == "fail"
+        assert result.overall == "FAIL"
+        assert "completion-analysis-sidecar-missing" not in {d["id"] for d in completion.details}
+        assert "completion-empty-basis" not in {d["id"] for d in completion.details}
+        markers = [d for d in completion.details if d["id"] == "completion-template-placeholder"]
+        assert len(markers) == 1
+        assert report.read_text(encoding="utf-8").splitlines()[markers[0]["line"] - 1] == marker
+
+    def test_bull_chain_review_prose_is_not_a_template_marker(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT + "\n上述假设待 Claude 核对后再引用。\n",
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        result = qc_file(report, fail_on="error")
+        completion = _completion_layer(result)
+        assert completion.status == "pass", completion.details
+        assert not any(d["id"] == "completion-template-placeholder" for d in completion.details)
+        assert result.overall != "FAIL"
+
     def test_empty_bear_and_left_basis_fail(self, tmp_path: Path):
         report = _write(
             tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",

@@ -401,11 +401,14 @@ def _core_variables(dims: dict[str, dict], collection: dict, *,
         variables.append(
             f"估值历史区间位置（当前 {pe_pct:.1f}%，{pe_zone or '—'}）能否维持"
         )
-    if ig.get("g_implied") is not None and ref_cagr is not None and ref_label:
+    if (ig.get("g_implied") is not None and not ig.get("rf_is_default")
+            and ref_cagr is not None and ref_label):
         g_pct = ig["g_implied"] * 100
         variables.append(
             f"隐含增长 g_implied {g_pct:.1f}% 与实际{ref_label} CAGR {ref_cagr:+.1f}% 的缺口"
         )
+    elif ig.get("rf_is_default") and ig.get("g_implied") is not None and ref_cagr is not None:
+        variables.append("无风险利率尚待核验，隐含增长与实际增长的比较暂缓")
     sw = market_structure.get("sw_index") or {}
     if sw.get("stock_vs_industry_pct") is not None:
         variables.append(
@@ -1638,7 +1641,7 @@ def _section_events_timeline(
         # 无分析段 → 保持原占位串，完成度门禁照常拦截未填报告。
         lines.append(
             "**事件分类摘要**（规则分类，已由本次分析复核条目；"
-            "方向标注仅为规则推断，不构成投资建议）[来源: akshare "
+            "标题仅作原文检索线索，不推断影响方向）[来源: akshare "
             "stock_individual_notice_report 事件分类规则]:"
             if _ec else
             "**事件分类摘要**（规则推断，待 Claude 验证）:"
@@ -1654,20 +1657,15 @@ def _section_events_timeline(
                       or 30)
             lines.append(f"**[事实]** 近 {_edays} 日公告按类型归类如下：")
             lines.append("")
-        for ec in event_classifications:
-            ev_type = ec.get("event_label", ec.get("event_type", "其他"))
-            ev_count = len(ec.get("events", []))
-            direction_hint = ec.get("direction_hint", "")
-            duration = ec.get("default_duration_hint", "")
-            direction_note = ec.get("direction_note", "")
-            summary_parts = [f"**{ev_type}** ({ev_count}条)"]
-            if direction_hint:
-                summary_parts.append(f"方向: {direction_hint}")
-                if direction_note:
-                    summary_parts.append(f"{direction_note}")
-            else:
-                summary_parts.append("[参考: 事件类型分类规则，不构成投资建议]")
-            lines.append("  - " + " ".join(summary_parts))
+        for idx, ec in enumerate(event_classifications):
+            ev_type = ec.get("event_label") or ec.get("event_type") or "其他"
+            ev_count = len(ec.get("events") or ())
+            label_field = "event_label" if ec.get("event_label") else "event_type"
+            lines.append(
+                f"  - **{ev_type}** ({ev_count}条) "
+                f"[来源: _meta.analysis_cards.event_classifications.{idx}.{label_field}] "
+                "[来源: Python calc: len(ec.get('events') or ())]"
+            )
         lines.append("")
         _ec_amd = str((_ec or {}).get("analysis_md") or "").strip()
         if _ec_amd:
@@ -3657,6 +3655,7 @@ def _section_4d_valuation_expectation(
     # D-③ 隐性预期差
     lines.append("#### D-③ 隐性预期差")
     ig: dict[str, Any] = {}
+    risk_free_is_default = False
     if ctx.current_pe is not None and ctx.current_pe > 0:
         erp_data = ctx.ms.get("erp") or {}
         risk_free_raw = erp_data.get("dgs10")
@@ -3665,12 +3664,14 @@ def _section_4d_valuation_expectation(
             _, y10_source = str(erp_data["source"]).split("+", 1)
         risk_free_is_default = risk_free_raw is None
         if risk_free_is_default:
-            risk_free = 0.025
-            y10_source = "默认值（FRED/akshare 国债数据不可得）"
+            lines.append(
+                "- 无风险利率不可得，暂停隐含增长率计算、与 CAGR 比较及方向判断；"
+                "须补同估值时点的实际利率。[来源: market_structure.erp.dgs10]"
+            )
         else:
             risk_free = risk_free_raw / 100.0
-        from lib.valuation import implied_growth
-        ig = implied_growth(ctx.current_pe, risk_free, erp=0.06, sensitivity=True)
+            from lib.valuation import implied_growth
+            ig = implied_growth(ctx.current_pe, risk_free, erp=0.06, sensitivity=True)
         if ig.get("g_implied") is not None:
             lines.append(f"- 当前 PE(TTM)：**{ig['pe']}x**")
             # F0-5 配套：y10_source 已含 FRED.DGS10 前缀时不再拼接（旧逻辑
@@ -3680,11 +3681,7 @@ def _section_4d_valuation_expectation(
                 if not y10_source or (y10_source or "").startswith("FRED.DGS10")
                 else f"FRED.DGS10 +{y10_source}"
             )
-            rf_label = (
-                f"{ig['risk_free_rate'] * 100:.2f}% [推测，待验证：{y10_source}]"
-                if risk_free_is_default else
-                f"{ig['risk_free_rate'] * 100:.2f}%（{y10_label}）"
-            )
+            rf_label = f"{ig['risk_free_rate'] * 100:.2f}%（{y10_label}）"
             lines.append(f"- 10Y 国债收益率：**{rf_label}**")
             lines.append(f"- ERP 假设：**6%**（保守基准）")
             lines.append(f"- 折现率 r：**{ig['r'] * 100:.2f}%**" if ig.get("r") else "- 折现率：不可得")
@@ -3692,15 +3689,11 @@ def _section_4d_valuation_expectation(
                 f"- **市场隐含增长率 g_implied：约 {ig['g_implied'] * 100:.2f}%** "
                 f"{_D3_SOURCE_LABEL}"
             )
-            # V-2 r±1pp 带（code-review max F14）：r 为默认猜测值（FRED/akshare 不可得，
-            # risk_free=0.025 兜底）时不渲染精确带——带围绕猜测中心、宽度恒 ±1pp 是固定
-            # 偏移而非真实敏感性，猜测偏差 >1pp 时真实 g 在带外，渲染会造成"实测精度"假象
-            if not risk_free_is_default:
-                lines.append(
-                    f"- g_implied 敏感性带（r±1pp）：{ig['g_band_down'] * 100:.2f}% ~ "
-                    f"{ig['g_band_up'] * 100:.2f}%（对应 r={ig['r'] * 100:.2f}% ±1pp，"
-                    f"r 口径 = 10Y {rf_label} + ERP {ig['erp'] * 100:.0f}%；与模块 4 D-③ 同源）"
-                )
+            lines.append(
+                f"- g_implied 敏感性带（r±1pp）：{ig['g_band_down'] * 100:.2f}% ~ "
+                f"{ig['g_band_up'] * 100:.2f}%（对应 r={ig['r'] * 100:.2f}% ±1pp，"
+                f"r 口径 = 10Y {rf_label} + ERP {ig['erp'] * 100:.0f}%；与模块 4 D-③ 同源）"
+            )
             lines.append("")
             cagr_text = f"{ctx.cagr:+.2f}%" if ctx.cagr is not None else "不可得"
             cagr_years_label = f"{ctx.cagr_years_span:.1f}" if ctx.cagr_years_span is not None else "?"
@@ -3715,12 +3708,7 @@ def _section_4d_valuation_expectation(
             g_implied_pct = ig["g_implied"] * 100
             ref_cagr, ref_label = _growth_reference(ctx.cagr, ctx.np_cagr)
             ref_text = cagr_text if ctx.cagr is not None else np_cagr_text
-            if risk_free_is_default:
-                lines.append(
-                    "**解读：** 10Y 国债使用默认假设 2.5% [推测，待验证]，"
-                    "g_implied 与 CAGR 的方向性对比仅供参考，须先获取真实无风险利率。"
-                )
-            elif ref_cagr is not None and abs(g_implied_pct - ref_cagr) > 5:
+            if ref_cagr is not None and abs(g_implied_pct - ref_cagr) > 5:
                 if g_implied_pct > ref_cagr:
                     lines.append(
                         f"**解读：** 市场隐含增长（{g_implied_pct:.2f}%）> 实际{ref_label} CAGR（{ref_text}），"
@@ -3765,7 +3753,8 @@ def _section_4d_valuation_expectation(
                 lines.append("**[扩展激活 · 完整预期差]** 估值处于历史极端区间："
                              "请逐项验证 g_implied 假设、盈利增速拐点、以及行业相对估值（D-②）是否一致。")
         else:
-            lines.append(f"数据不足：[{ig.get('error', '隐含增长率计算失败')}]")
+            if not risk_free_is_default:
+                lines.append(f"数据不足：[{ig.get('error', '隐含增长率计算失败')}]")
     else:
         lines.append("数据不足：[PE 非正或不可得，无法计算隐含增长率]")
     lines.append("")
@@ -3786,17 +3775,22 @@ def _section_4d_valuation_expectation(
             "不宜单独用隐含增长率做方向性结论。"
             f" {_D3_SOURCE_LABEL}"
             if ctx.current_pe and g_implied is not None else
-            "本次 PE 或 g_implied 不可得，戈登反推不适用。"
+            ("本次无风险利率不可得，隐含增长率计算已暂停。"
+             if risk_free_is_default else "本次 PE 或 g_implied 不可得，戈登反推不适用。")
         )
     )
+    d3_next_steps = ["核对 10Y 国债与 ERP 假设是否匹配当前宏观环境"]
+    if risk_free_is_default:
+        d3_next_steps.append("先取得同估值时点的实际利率，再复核隐含增长与 CAGR")
+    else:
+        d3_next_steps.extend([
+            "对比 g_implied 与近 3 年营收/净利润 CAGR、管理层指引增速",
+            "PE>50 时仅作方向性参考，不作精确估值结论",
+        ])
     lines.append(_law10_hint(
         "g_implied 回答「当前 PE 隐含了多高的永续增长预期」——是预期差分析的定量锚点。",
         d3_pitfall,
-        [
-            "核对 10Y 国债与 ERP 假设是否匹配当前宏观环境",
-            "对比 g_implied 与近 3 年营收/净利润 CAGR、管理层指引增速",
-            "PE>50 或国债为默认值时，仅作方向性参考，不作精确估值结论",
-        ],
+        d3_next_steps,
     ))
     lines.append("")
 
@@ -3807,7 +3801,8 @@ def _section_4d_valuation_expectation(
     except (NameError, AttributeError):
         pass
     _d3_ok = ctx.current_pe is not None and ctx.current_pe > 0 and _d3_implied is not None
-    _d3_s = f"g_implied={_d3_implied * 100:.2f}%" if _d3_ok else "数据不足"
+    _d3_s = (f"g_implied={_d3_implied * 100:.2f}%" if _d3_ok else
+             "无风险利率缺口，计算暂停" if risk_free_is_default else "数据不足")
     status_rows.append(("D-③", "隐性预期差", _d3_ok, _d3_s))
 
     return lines

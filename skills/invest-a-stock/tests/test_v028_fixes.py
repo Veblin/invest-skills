@@ -19,12 +19,6 @@ class TestScenarioEvidenceLevel:
         base = {"fcff": None, "wacc_label": "实值参数"}
         assert _scenario_evidence({}, base) == "C"
 
-    def test_evidence_c_when_wacc_degraded(self):
-        from lib.render_dcf import _scenario_evidence
-
-        base = {"fcff": {"fcff": 1.0}, "wacc_label": "Beta 默认 1.0（近似）"}
-        assert _scenario_evidence({}, base) == "C"
-
     def test_scenario_table_cells_carry_evidence_mark(self):
         """D-④ 三情景表概率单元格带（证据 X）标记。"""
         from test_v018 import _make_dcf_render_financials, _make_research_dim

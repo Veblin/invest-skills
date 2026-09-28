@@ -55,6 +55,8 @@ def test_draft_slot_preflight_blocks_report_before_collection(tmp_path, monkeypa
     draft.write_text(
         "分析提示（Claude 填写）\n"
         "[待 Claude 填充管理层论述解读]\n"
+        "[待 Claude 核对多头依据]\n"
+        "当前数据未形成明确多头逻辑链\n"
         "当前数据未形成明确空头逻辑链\n",
         encoding="utf-8",
     )
@@ -65,7 +67,7 @@ def test_draft_slot_preflight_blocks_report_before_collection(tmp_path, monkeypa
 
     assert invest.cmd_report(args) == 2
     err = capsys.readouterr().err
-    for slot in ("bear_chain", "mda_narrative", "participant_scan"):
+    for slot in ("bull_chain", "bear_chain", "mda_narrative", "participant_scan"):
         assert slot in err
 
 
@@ -85,6 +87,7 @@ def test_draft_slot_markers_still_exist_in_their_producers():
 
     root = Path(__file__).resolve().parents[1] / "scripts"
     producers = {
+        "bull_chain": "lib/render_risk.py",
         "bear_chain": "lib/render_risk.py",
         "mda_narrative": "lib/analysis_templates.py",
         "participant_scan": "lib/participant_scan.py",
@@ -133,7 +136,8 @@ def test_draft_slot_markers_appear_in_rendered_report():
     absent = [
         (slot, marker)
         for slot, marker, _ in DRAFT_SLOT_MARKERS
-        if slot != "bear_chain" and marker not in md
+        if slot != "bear_chain" and marker != "当前数据未形成明确多头逻辑链"
+        and marker not in md
     ]
     assert absent == [], f"渲染输出里缺少闸门依赖的占位串：{absent}"
 
