@@ -2,7 +2,7 @@
 
 > **来源**: 反复出现的 `/code-review` 缺陷模式汇总。
 > **使用者**: `/code-review` skill、开发者自我审查、新代码提交前检查。
-> **格式**: D1-D13 规则 ID，可被 review finding 引用（如 "违反 D1"）。
+> **格式**: D1-D14 规则 ID，可被 review finding 引用（如 "违反 D1"）。
 >
 > 每条标注 🌐 = 跨语言通用 / 🐍 = Python 专项。
 
@@ -265,6 +265,29 @@ CI 无源（'No data returned' 骨架）失败。
 
 ---
 
+### D14 — 引擎命令一律 `uv run python`，不得直接用 `pip`/裸 `python` 🐍
+
+**原则**: 本仓库的 Python CLI 是**本仓库本地约定**——依赖由 `uv` 管理并解析到项目根 `.venv`。两条禁令：
+
+- **不在项目目录下直接运行 `pip install`**：`pip` 指向 Homebrew 全局 Python（`/opt/homebrew`），会污染系统环境，而 `.venv` 里反而没有该依赖。
+- **不用裸 `python script.py`**：绕过 `uv` 会拿到系统解释器，依赖与版本都可能不是项目锁定的那套（多 harness 分发场景下尤甚）。
+
+| 场景 | 命令 |
+|------|------|
+| 安装/同步项目依赖 | `uv sync`（按 `pyproject.toml` + `uv.lock`） |
+| 添加新依赖 | 编辑 `pyproject.toml` 的 `dependencies`，然后 `uv sync` |
+| 查看已安装包 | `uv run python -m pip list` |
+| 临时运行脚本 | `uv run python script.py` |
+| 激活 .venv 后使用 pip | `source .venv/bin/activate && pip list` |
+
+验证 `.venv` 生效：`uv run python -c "import sys; print(sys.executable)"` → 应输出 `.../.venv/bin/python3`，而不是 `/opt/homebrew/...`。
+
+**边界（勿过度外推）**：本条约束的是**本仓库 Python CLI 的本地运行方式**。MCP / 无 Python 的分发路径（WorkBuddy 等）另有执行方式（随包 `bootstrap.sh` 建包根 `.venv`），不被本条排除。
+
+**触发来源**: `pip` 污染 Homebrew 环境 + `.venv` 缺依赖的反复排障（2026-09-29 迁入 self-reference）。
+
+---
+
 ## 附录：快速检查清单
 
 在提交代码前，逐条过一遍：
@@ -282,3 +305,4 @@ CI 无源（'No data returned' 骨架）失败。
 - [ ] D11: 修复的 bug 模式在其他文件里还有吗？
 - [ ] D12: 决定不修的 finding 写了理由吗？
 - [ ] D13: 测试 mock 打在定义模块命名空间了吗？提交前跑过无凭据套件（`TUSHARE_TOKEN="bogus" ... pytest -q`）吗？
+- [ ] D14: 引擎命令用了 `uv run python` 吗？没有裸 `python`/`pip` 吗？

@@ -24,6 +24,19 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 
 ### Cutting a release
 
+**发布前检查清单**（原 `AGENTS.md` 维护，v0.3.1 迁入此处——版本与发布细节属本文件职责）：
+
+- [ ] `CHANGELOG.md` 已更新（`###` 小节标题 = Release 正文「主要修改」清单，正文自动精简）
+- [ ] `bash scripts/bump-version.sh X.Y.Z` 已执行（`pyproject.toml` 为唯一 canonical 源）→ `uv run python scripts/sync_version.py check` 通过
+- [ ] `.claude-plugin/marketplace.json` 描述准确
+- [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 描述同步
+- [ ] `gemini-extension.json.in` env vars 与 `.env.example` 一致
+- [ ] `uv run pytest` 通过
+- [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
+- [ ] `bash scripts/build_wb_package.sh` 可运行，`dist/invest-skills-wb-vX.Y.Z.zip` 内容完整（发布时由 `release.yml` 自动构建并随 Release 附带，此条为本地预检）
+- [ ] `invest-a-stock`/`invest-a-etf` 的 `SKILL.md` 为最新规格（工作流、反模式完整）
+- [ ] 无 API Key 或敏感信息泄露（`validate.yml` Security scan 内联 secrets grep 已验证）
+
 1. 在 `CHANGELOG.md` 写好 `## vX.Y.Z` 章节（Release 正文从此提取）
 2. 运行 `bash scripts/bump-version.sh X.Y.Z`（同步 pyproject + SKILL + plugin + marketplace + gemini 共 5 文件）
 3. **合并到 `main`** 前可选：`INVEST_RUN_E2E=1 uv run pytest skills/invest-a-stock/tests/test_v017_e2e.py -v`（四标的 live 冒烟）

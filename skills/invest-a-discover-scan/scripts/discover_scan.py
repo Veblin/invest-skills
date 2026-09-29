@@ -460,7 +460,7 @@ def render_report(scan: dict) -> str:
             # 行业缺失的命中行 ind_rk/ind_n 均为 None——不得渲染成「None/None」
             ind_txt = (f"行业内排名 {h['ind_rk']}/{h['ind_n']}；" if h.get("ind_rk")
                        else "行业内排名：行业字段缺失，该条件已跳过（设计 §5 降级）；")
-            # 分位**必须伴随中位数**（CLAUDE.md 估值分位使用规则 3；
+            # 分位**必须伴随中位数**（report-conventions.md §9.2 估值分位规则 3；
             # lint `percentile-without-median` 拦截）。中位缺失时退回不给分位文本，
             # 而不是只印分位
             if ps.get("median_pe"):

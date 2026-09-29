@@ -214,7 +214,7 @@ def _safe_collect_valuation(symbol: str) -> dict:
                 pe = safe_float(d.get("pe_ttm"))
                 pb = safe_float(d.get("pb"))
                 # 剔除亏损期负 PE/PB：负值参与分位会抬高"分位"与拉低中位数
-                # （CLAUDE.md P0-2 口径；与 invest-a-stock valuation.py 一致）
+                # （delivery-qc.md §1 P0 口径；与 invest-a-stock valuation.py 一致）
                 if pe is not None and pe > 0:
                     pe_list.append(pe)
                     pe_dates.append(td)

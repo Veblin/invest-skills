@@ -370,7 +370,7 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
                                  verification={"event": "下一报告期", "test": "核对盈利变化与估值口径是否同步更新"}))
     elif pe and pe["value"] <= 0:
         # v0.3.0 B3：亏损期（PE 非正）无分位可言 → 不给「位置」结论，改为显式
-        # 披露「分位不适用」，避免读者把负 PE 误读为低估（CLAUDE.md 估值分位
+        # 披露「分位不适用」，避免读者把负 PE 误读为低估（report-conventions.md §9.2 估值分位
         # 规则 2：亏损期标的须标注仅作位置参考、不反映估值贵贱）。
         findings.append(_finding(
             "valuation-pe-nonpositive",

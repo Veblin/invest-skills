@@ -1010,7 +1010,7 @@ def law6a_scenario_findings(text: str) -> list[dict]:
 
     v0.3.0 全量重审 F-U7-5：LAW 6a 的实质要件此前在规则引擎中**零实现**——
     唯一机器机制只是全文级「不构成投资建议」存在性检查（warning、file scope），
-    既不校验概率权重也不校验假设前提。而 CLAUDE.md 明文规定：
+    既不校验概率权重也不校验假设前提。而 report-conventions.md §2.1 明文规定：
     「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
     「**不允许不标注假设前提的单一目标价数字**」。
 
@@ -1413,7 +1413,7 @@ def format_qc_result(result: QCResult, *, verbose: bool = False) -> str:
                 # severity 词表权威定义见 invest-a-stock lib/lint.py:34 =
                 # error/warning/info。v0.3.0 A5 前本文件产出侧混用 "warn"/"warning"
                 # 两种拼写，而这里只认 "warn" → lint 层（发 "warning"）的全部
-                # warning 级 finding 被渲染成 ℹ️，与 info 无法区分，CLAUDE.md
+                # warning 级 finding 被渲染成 ℹ️，与 info 无法区分，delivery-qc.md
                 # 要求的「逐条复核 sourcing warning」被静默跳过。产出侧已统一，
                 # 此处兼容两种拼写以防未来漂移再次静默降级为 info 外观。
                 icon = "❌" if sev == "error" else ("⚠️" if sev in ("warning", "warn") else "ℹ️")
@@ -1452,7 +1452,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("target", nargs="*", help="报告文件路径（可多个）")
     parser.add_argument("--latest", action="store_true", help="检查 reports/ 下最新 .md")
     parser.add_argument("--dir", default="", help="批量检查目录下所有 .md")
-    # 默认 claude：CLAUDE.md 第 0 层「机器准出（必跑）」就是本 CLI 不带 --profile
+    # 默认 claude：delivery-qc.md §2 第 0 层「机器准出（必跑）」就是本 CLI 不带 --profile
     # 的形式，故**默认值即合规门禁**。历史默认 precommit 对齐旧 check_report.sh
     # 的阻断项，会跳过全部 law6-* / known-violation*（14 条 error 级），使 v0.3.0
     # 注入报告首屏的模型撰写正文失去机器拦截。库函数默认值不动（保持对下游

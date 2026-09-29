@@ -4,7 +4,7 @@
 - F3：compliance_rules.yaml 存在 `wording-unrun-source-label` 规则（error/line 级），
   5 个未实跑字样逐词命中、合法来源标注不误伤
 - F1：report-conventions §2.3 强制行为 7（[分析] 事实性前提来源标注）存在
-- F3 同步：report-conventions 强制 5 与 CLAUDE.md 含全部 5 个禁用字样
+- F3 同步：report-conventions 强制 5 与 delivery-qc §1 含全部 5 个禁用字样
 - F4：report-conventions §3.2 新增模式 #18（§N 交叉引用错位）存在；
   §3.2 编号 1 起连续且 >=19 条
 - F5：§3.2 模式 #15（距前高口径）含标准表述模板
@@ -26,7 +26,9 @@ sys.path.insert(0, str(_REPO_ROOT))  # yaml 读取用相对路径（保持与 v0
 
 _CONVENTIONS = "skills/lib/references/report-conventions.md"
 _RULES_YAML = "skills/invest-a-stock/scripts/references/compliance_rules.yaml"
-_CLAUDE_MD = "CLAUDE.md"
+# P0 来源标注条文已迁入随包共享规范（v0.3.1）；根 CLAUDE.md 只留链接，
+# 故 5 个禁用字样的第二落点随之改指 delivery-qc.md。
+_DELIVERY_QC = "skills/lib/references/delivery-qc.md"
 
 _UNRUN_TOKENS = ("Python calc 视角", "口径源自引擎", "聚合验证", "Python 复算一致", "自洽校验")
 _RULE_ID = "wording-unrun-source-label"
@@ -114,13 +116,13 @@ def test_conventions_f1_premise_source_mandate():
     assert "证据强度标签只对其实际覆盖的数据依据负责" in conv
 
 
-def test_unrun_tokens_synced_in_conventions_and_claude_md():
-    """5 个禁用字样须同时出现在 report-conventions §2.3 强制 5 与 CLAUDE.md P0 表。"""
+def test_unrun_tokens_synced_in_conventions_and_delivery_qc():
+    """5 个禁用字样须同时出现在 report-conventions §2.3 强制 5 与 delivery-qc §1 P0 表。"""
     conv = _read(_CONVENTIONS)
-    claude = _read(_CLAUDE_MD)
+    qc = _read(_DELIVERY_QC)
     for token in _UNRUN_TOKENS:
         assert token in conv, f"report-conventions 缺禁用字样: {token}"
-        assert token in claude, f"CLAUDE.md 缺禁用字样: {token}"
+        assert token in qc, f"delivery-qc 缺禁用字样: {token}"
 
 
 def test_conventions_32_numbering_19_continuous():

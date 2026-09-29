@@ -342,7 +342,7 @@ def _section_dcf_valuation(
     若 veto_triggered=True，只返回一行"研究终止条件触发，估值段落已跳过"，
     不渲染任何 DCF 数值（Step 7/8 快速否决检测触发时会传入 True）。
 
-    合规红线（AGENTS.md 约束1 / CLAUDE.md LAW 6）：不输出单一"目标价"，
+    合规红线（AGENTS.md 约束1 / report-conventions.md §2.1 原 LAW 6）：不输出单一"目标价"，
     只输出企业价值区间 + 三情景假设 + 概率权重，并注明仅供参考。
     """
     header = "## D. DCF 估值区间与三角对照"

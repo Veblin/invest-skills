@@ -195,7 +195,7 @@ def _v3_cv7_assessment(
     if pe_pct is None or mf_out is None:
         return None
     mf_f = float(mf_out)
-    # 分位须伴随中位数（CLAUDE.md 估值分位规则 3）：句式统一为「分位 X%，中位数 Yx」
+    # 分位须伴随中位数（report-conventions.md §9.2 估值分位规则 3）：句式统一为「分位 X%，中位数 Yx」
     # （本句已处于 `（分位 …）` 括号内，用逗号式避免嵌套括号）
     _med_s = _pct_median_inline(pe_median)
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f < 0:
@@ -465,7 +465,7 @@ def _pct_medians(
 def _pct_median_suffix(median: Any) -> str:
     """分位读数的中位数伴随串；中位数不可得时返回空串（不编造）。
 
-    CLAUDE.md「估值分位使用规则」3 与 report-conventions §2.3：**分位数不单独使用**，
+    report-conventions.md §9.2「估值分位使用规则」3 与 §2.3：**分位数不单独使用**，
     必须伴随中位数或均值。行内复查规则 `percentile-without-median` 对本仓全部报告
     生效，**引擎模板自身也须满足**——分位渲染点一律经本函数拼接中位数。
 

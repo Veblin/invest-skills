@@ -914,7 +914,7 @@ class TestQcLatestSkipsReviewMemo:
 
 # ── CLI 默认 profile：第 0 层门禁必须覆盖 LAW 6 ──────────────────────────────
 #
-# CLAUDE.md 第 0 层「机器准出（必跑）」就是 `report_qc.py <报告> --fail-on error`
+# delivery-qc.md §2 第 0 层「机器准出（必跑）」就是 `report_qc.py <报告> --fail-on error`
 # 这条不带 --profile 的命令，因此 **CLI 默认值就是合规门禁本身**。
 # 历史默认 precommit 是对齐旧 check_report.sh 的阻断项，会跳过全部 law6-* 与
 # known-violation*（实测 73 条规则中 35 条被跳过，含 14 条 error 级）；v0.3.0 把
@@ -983,7 +983,7 @@ class TestSeverityVocabularyUnified:
 
     此前本文件产出侧混用 `"warn"` 与 `"warning"` 两种拼写，而详情图标只认
     `"warn"` → lint 层（发 `"warning"`）的全部 warning 级 finding 被渲染成 ℹ️，
-    与 info 无法区分 → CLAUDE.md 第 0 层要求的「sourcing warning 逐条复核后
+    与 info 无法区分 → delivery-qc.md §2 第 0 层要求的「sourcing warning 逐条复核后
     消除或说明」被静默跳过。
     """
 
@@ -1014,7 +1014,7 @@ class TestSeverityVocabularyUnified:
 class TestLaw6aScenarioContext:
     """v0.3.0 全量重审 F-U7-5：LAW 6a 三情景上下文门禁（此前**零实现**）。
 
-    CLAUDE.md：「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
+    report-conventions.md §2.1：「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
     ——此前唯一机器机制只是全文级免责存在性检查，既不校验假设也不校验概率权重。
     实测语料：253 份中 109 份含三情景词，108 份已合规，1 份真实缺概率权重。
     """

@@ -734,7 +734,7 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         parts: list[str] = [
             _header_v2(collection, symbol),
         ]
-        # v0.3.1 A4：首屏只留**带结论**的宏观情景行（它是 CLAUDE.md 规定的
+        # v0.3.1 A4：首屏只留**带结论**的宏观情景行（它是 report-conventions.md §9.1 规定的
         # 输出契约行，A3a 裁决保留现状）；产业链/收益驱动假设/风格匹配/行业
         # 成功因素/增强提示下沉进审计底稿，不再与「重要发现」争夺首屏。
         extras = _render_engine_extras(collection)

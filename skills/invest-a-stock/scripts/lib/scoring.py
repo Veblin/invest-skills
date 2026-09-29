@@ -5,7 +5,7 @@
   - Shy (2002), *Int'l J. of Industrial Organization* 20(3), 367-393 — 转换成本代数估算（客户锁定代理）
   - Demerjian, Lev & McVay (2012), *Management Science* 58(7), 1229-1248 — DEA+Tobit 管理层能力量化（简化代理）
 
-原则（AGENTS.md 约束 1/2/3, CLAUDE.md 措辞规范）：
+原则（AGENTS.md 约束 1/2/3, report-conventions.md §3 措辞规范）：
   - 只输出行为事实的量化聚合，不输出"买入/卖出/建仓/目标价"等操作建议或分数到操作的映射。
   - 数据不足时明确标注 `insufficient_data`，不得用默认值掩盖缺失后继续计算并呈现为正常分数。
   - 每个函数返回 dict 均附带 `sources` 字段，列出用到的原始字段名，供 render.py 渲染 `[来源: ...]`。

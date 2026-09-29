@@ -2003,7 +2003,7 @@ def cmd_qc_report(args: argparse.Namespace) -> int:
         return 1
     result = qc_file(p, profile="claude", fail_on=args.fail_on)
     print(format_qc_result(result, verbose=True))
-    # 退出码对齐 CLAUDE.md 第 0 层契约（0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）。
+    # 退出码对齐 delivery-qc.md §2 第 0 层契约（0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）。
     # 语义变更：旧实现对 FAIL 只返回 1，现按契约返回 2。
     return {"PASS": 0, "WARN": 1, "FAIL": 2}[result.overall]
 

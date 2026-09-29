@@ -66,7 +66,7 @@ def test_market_mode_uses_akshare_direct_session(monkeypatch, capsys):
     """市场模式须经 akshare_direct_session（东财直连 + ≥0.5s 节流）。
 
     回归：市场模式直调东财端点、绕过 proxy 会话——池模式同环境可用而市场模式在
-    Clash/VPN 下 ProxyError（CLAUDE.md 记载东财 API 需直连），且以无限流方式打东财。
+    Clash/VPN 下 ProxyError（CONFIGURATION.md「代理与东方财富」记载东财 API 需直连），且以无限流方式打东财。
     """
     import contextlib
 

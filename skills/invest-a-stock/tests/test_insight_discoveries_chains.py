@@ -590,7 +590,7 @@ def _set_latest_pe(collection: dict, value: float) -> dict:
 class TestLossPeriodPeHandling:
     """旧实现拿负 latest_pe 去比**正值**序列 → count(positive <= negative) = 0 →
     恒得 0.0 分位，下游据此写出「位于可用正 PE 序列的 0.0% 分位，属于历史样本的
-    偏低位置」——负 PE 被读成便宜，且缺 CLAUDE.md 估值分位规则 2 的亏损期标注。
+    偏低位置」——负 PE 被读成便宜，且缺 report-conventions.md §9.2 估值分位规则 2 的亏损期标注。
     口径对齐 valuation_calc「PE 非正 → 标注不可得」。
     """
 

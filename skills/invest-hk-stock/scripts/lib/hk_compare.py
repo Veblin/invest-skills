@@ -23,7 +23,7 @@ _ROW_SPECS: tuple[tuple[str, str, tuple[str, ...], str, str | None], ...] = (
     ("估值位置", "PE 序列中位", ("valuation_pctl", "pe", "median"), "x", None),
     ("估值位置", "PE 序列交易日数", ("valuation_pctl", "pe", "n"), "日", None),
     ("估值位置", "PB 序列分位", ("valuation_pctl", "pb", "pct"), "%", None),
-    # 分位**不得单独出现**（CLAUDE.md 估值分位使用规则 3：必须伴随中位数/均值）——
+    # 分位**不得单独出现**（report-conventions.md §9.2 估值分位规则 3：必须伴随中位数/均值）——
     # 缺这行会让 PB 分位成为无基准的孤立数字，且 lint 的
     # `percentile-without-median`（行级）会命中
     ("估值位置", "PB 序列中位", ("valuation_pctl", "pb", "median"), "x", None),

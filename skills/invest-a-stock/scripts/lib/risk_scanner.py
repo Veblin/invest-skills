@@ -275,7 +275,7 @@ def _pe_percentile(valuation: dict | None) -> float | None:
 
 
 def _pe_median(valuation: dict | None) -> float | None:
-    """PE 历史中位数——分位读数须伴随中位数（CLAUDE.md 估值分位规则 3）。"""
+    """PE 历史中位数——分位读数须伴随中位数（report-conventions.md §9.2 估值分位规则 3）。"""
     if not valuation:
         return None
     v = safe_float(valuation.get("pe_median"))

@@ -955,7 +955,7 @@ def main() -> int:
     # F12：拉取窗口对齐参数（原实现固定 past_days*2，约 44% 行解析后废弃）
     start = fmt_date(today - _dt.timedelta(days=args.days_past))
     end = fmt_date(today + _dt.timedelta(days=args.days_future))
-    try:  # 东财直连 + ≥0.5s 节流（与 unlock_source 同一会话口径；CLAUDE.md：东财需直连）
+    try:  # 东财直连 + ≥0.5s 节流（与 unlock_source 同一会话口径；CONFIGURATION.md「代理与东方财富」：东财需直连）
         from lib.proxy import akshare_direct_session
     except Exception:  # 库引导不可用 → 无会话退化（不阻断取数，行为同修复前）
         from contextlib import nullcontext as akshare_direct_session

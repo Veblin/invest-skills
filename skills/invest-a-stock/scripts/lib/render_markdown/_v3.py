@@ -1434,7 +1434,7 @@ def _section_six_gates_scorecard(
 
     来源: 借鉴报告 §6.1 investment-checklist、§8.5。
 
-    合规红线（CLAUDE.md 六关评分规则，最容易违规的一条）：**无通过/不通过二元判决，
+    合规红线（references/financials.md F-4 六关评分速览规范，最容易违规的一条）：**无通过/不通过二元判决，
     无仓位动作映射**——每关仅用分数或描述性档位（较强/中等/较弱等）呈现，末尾必须附加
     合规声明。
     """
@@ -2635,7 +2635,7 @@ class _FundamentalsContext:
         self.val_window_label = self.vs.get("window_label", "历史") if self.vs else "历史"
         self.pe_pct, self.pb_pct_ext, _ = _v3_valuation_percentiles(dims, val_cache)
         self.hist_pe_median = _historical_pe_median(val_cache, dims)
-        # 分位须伴随中位数（CLAUDE.md 估值分位规则 3）：D-① 预警与误区句同源取用
+        # 分位须伴随中位数（report-conventions.md §9.2 估值分位规则 3）：D-① 预警与误区句同源取用
         _pe_med_any, self.hist_pb_median = _pct_medians(val_cache, dims)
 
         # --- 行业同行 / 市场结构（原块④余量）---
@@ -3836,7 +3836,7 @@ def _peer_comparison_table(industry_peers: dict) -> list[str]:
             name = p.get("name", "") or p.get("symbol", "?")
             lines.append(f"| {name} | {p_pe} | {p_pb} | {p_roe} | {p_ry} |")
         lines.append("")
-        # 分位排名（分位须伴随中位数——此处取同行组中位数，CLAUDE.md 估值分位规则 3）
+        # 分位排名（分位须伴随中位数——此处取同行组中位数，report-conventions.md §9.2 估值分位规则 3）
         from lib.valuation import median_of
         peer_vals: dict[str, list[float]] = {}
         for _p in industry_peers.get("peers", []):

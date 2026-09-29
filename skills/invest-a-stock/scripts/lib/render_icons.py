@@ -19,7 +19,7 @@ ICON_CV_LABELS = {
     "gap": "缺口",
 }
 
-# ── Evidence Strength（对齐 CLAUDE.md：✅ 强 / ⚠️ 中 / ❓ 弱）──
+# ── Evidence Strength（对齐 report-conventions.md §5 SOP-EV：✅ 强 / ⚠️ 中 / ❓ 弱）──
 ICON_EVIDENCE_STRONG = "✅ 强"
 ICON_EVIDENCE_MEDIUM = "⚠️ 中"
 ICON_EVIDENCE_WEAK = "❓ 弱"

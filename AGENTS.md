@@ -1,7 +1,8 @@
 # AGENTS.md — AI 协作规则
 
-> 本文档定义 AI Agent 在本项目中的行为边界、设计哲学和质量标准。
-> 所有贡献者（人类和 AI）都应遵守这些规则。
+> 本文件是**项目长期边界与变更门禁**，跨 harness 适用，所有贡献者（人类和 AI）都应遵守。
+> **不在此维护**易变的运行细节——源矩阵、命令清单、报告规则、目录树见：各 `SKILL.md`、`skills/lib/references/`（随包携带）与确定性引擎。
+> 约束 1–4 的编号是**代码契约**（多处源码与测试按号引用），不得重排或合并。
 
 ---
 
@@ -31,166 +32,70 @@ LLM 存在幻觉问题——在专业金融领域，这些幻觉极难被非专�
 
 ---
 
-## 目标用户画像
+## 产品原则
 
-用户画像：能够在 Claude Code 或 Hermes 中安装并使用 Skills 的用户，普遍具备较强的信息获取和自主判断能力——学习能力强、能自行验证信息、不会被营销话术左右。
+用户是**能自行验证信息、不会被营销话术左右**的聪明人——不需要"简单化"，需要"可验证"与"方法论"。因此产品逻辑是"这是数据，这是分析方法，这是不确定性，你自己判断"，而不是"信任我，我帮你判断"；迭代逻辑是"我在投资学习中遇到了什么问题"，而不是"用户想要什么功能"。项目是开源学习工具，无流量变现/知识付费等商业逻辑。
 
-这意味着：
-- **不需要"简单化"**：可以用专业术语，可以展示复杂逻辑
-- **需要"可验证"**：每个结论都要追溯到数据源头，让用户独立判断
-- **需要"方法论"**：用户要的是分析框架和思考工具，不是结论
-- **不存在商业变现动机**：项目是开源学习工具，没有"流量变现"/"知识付费"等商业逻辑
-
----
-
-## 设计哲学
-
-```
-用户能力模型：
-  不是"需要被告知该做什么的小白"
-  而是"想要理解事情如何运作的聪明人"
-
-产品逻辑：
-  不是"信任我，我帮你判断"
-  而是"这是数据，这是分析方法，这是不确定性，你自己判断"
-
-迭代逻辑：
-  不是"用户想要什么功能"
-  而是"我在投资学习中遇到了什么问题，需要一个工具来解决"
-```
-
----
+日常个股研究产出留在本机，不进入公开仓库；对外 demo 须经脱敏与内容审查，具体发布规则见 [CLAUDE.md「对外内容红线」](CLAUDE.md)。
 
 ## 技术指标规范
 
-MA5/MA10/MA20/MA60 和 MACD（DIF/DEA）等指标**仅用于理解市场状态**，不用于生成交易信号：
+MA5/MA10/MA20/MA60 和 MACD（DIF/DEA）等指标**仅用于理解市场状态**，不用于生成交易信号：可描述价格与均线的位置关系、MACD 的 DIF/DEA 位置与方向、市场参与者的共识趋势；**禁止**输出"金叉买入""死叉卖出""MACD 底背离抄底"等信号，或基于技术指标给出任何操作建议。学术依据与模块呈现细则见 [modules.md](skills/invest-a-stock/references/modules.md)。
 
-- ✅ 描述当前价格与均线的位置关系（如"价格位于 MA60 上方""MA20 走平"）
-- ✅ 描述 MACD 的 DIF/DEA 位置和方向（如"DIF 在零轴上方""DIF 向下靠近 DEA"）
-- ✅ 结合均线和 MACD 理解"市场参与者的共识趋势"
-- ❌ 输出"金叉买入""死叉卖出""MACD 底背离抄底"等交易信号
-- ❌ 基于技术指标给出任何操作建议
+## 报告质量门（全 skill 适用）
 
----
+- **首部有风险声明 / 尾部有风险声明**——两条都须**完整可见**；首部 boilerplate 不得以"置尾"为由删去
+- 每个财务数字带 `[来源: ...]`；推测性语句标 `[推测，待验证]`；不可得维度标 `⚠️` + `attempted_sources`
+- 无"买入/卖出/建仓"等词；估值参考价必须是带假设前提的多情景表述，而非单一目标价数字
+- 技术指标仅为状态描述，无交易信号
+- **交付前必做**：机器准出 + 三层人工复检（数字/合规/逻辑），见 [delivery-qc.md](skills/lib/references/delivery-qc.md)；内容逐项自查见 [report-conventions.md §7](skills/lib/references/report-conventions.md)
 
-## 数据源分层（A股/港股 + 全球宏观）
+> 完整的报告规则**不再本文件维护**——唯一详细定义在 `skills/lib/references/`（随包携带，独立包亦可读）。本文件只保留**代码按名引用的门槛项**。
 
-### A 股数据源（优先级）
+## 数据源策略
 
-```
-有 Token: Tushare ∥ akshare → 腾讯行情 → 标注不可得
-无 Token: akshare → 腾讯行情 → 标注不可得
-```
+**不在此维护静态源链**（源随版本漂移，且各维度链不同）。原则：
 
-- Tushare 与 akshare 并列并行（先到先用），非前置拦截器
-- Tushare Token 无效时静默跳过，不影响主 fallback 链
-- TickFlow ✅ 已接入（v0.1.6）— 免费免注册独立 K 线数据源，提供第四源交叉验证
+- 源策略按**维度**定义在确定性 collector 与各 Skill `references`；接口与源的实际清单见 [data-interface-map.md](skills/lib/references/data-interface-map.md)
+- **降级必须透明**：失败记录 `attempted_sources` 与原因，不阻塞其余维度；全失败标注"未获取到任何有效数据"
+- 代理与 stderr 约定见 [data-interface-map.md §G](skills/lib/references/data-interface-map.md)
 
-### 港股数据源（优先级）
+## 扩张门禁（新增能力前必读）
 
-```
-akshare（东方财富港股频道）→ 标注不可得
-```
+**AI 不自行新增 Skill、模式或常驻扫描；先尝试改现有入口。** 新增公开 Skill、CLI 一级命令、默认报告栏目、强制数据源或 Agent 步骤前，须提交一页变更卡：
 
-> yfinance（Yahoo，`.HK` 4 位补零形态）**已接入**：作港股 PB / 股息率 / PE 的交叉源
-> （非降级链成员；**境外源须走代理**，与东财/腾讯 DIRECT 方向相反）。
+1. 最近**真实任务**与缺口证据（不是"以后可能有用"）
+2. 现有入口/数据层为何不能承载
+3. 本次新增的入口、依赖、联网请求、报告产物与分发包变化
+4. 对主链耗时与 QC 的影响
+5. 被替换/退出的旧路径（或无法替换的理由）
+6. 两个真实样例与回退条件
 
-### 全球宏观数据源
+证据未齐时**允许内部按需实验**，但不进入默认路径与公开分发。每次新增入口都设反馈窗口：没有真实调用或复盘结论就撤出默认入口/公开目录，窗口结束必须裁决——**不以"暂留以后可能用"为默认结论**。
 
-```
-FRED API（有 Key）→ akshare → 标注不可得
-```
+## 发布与版本
 
-> yfinance 计划在未来版本接入。
+- **版本号 canonical**：`pyproject.toml` `[project].version`（唯一手动维护处）；`scripts/bump-version.sh X.Y.Z` 同步全部派生文件
+- 校验 `uv run python scripts/sync_version.py check`（CI / pre-commit 已接入）
+- **发布前检查清单**与分发包维护步骤见 [CONTRIBUTORS.md「Cutting a release」](CONTRIBUTORS.md)（不再复制到本文件）
 
-### 搜索/新闻源
-
-```
-Tavily → WebSearch（Claude 内置）
-```
-
----
-
-## 报告质量检查清单（AI 自检）
-
-在输出报告前，AI 应逐项自检：
-
-- [ ] 首部有风险声明
-- [ ] 尾部有风险声明
-- [ ] 每个财务数字有 `[来源: ... / 日期]`
-- [ ] 推测性语句有 `[推测，待验证]`
-- [ ] 没有"买入/卖出/建仓"等词语；如出现估值参考价，必须为带假设前提的多情景表述，而非单一目标价数字
-- [ ] 技术指标仅为状态描述，无交易信号
-- [ ] 不可得维度标注 ⚠️ + attempted_sources
-- [ ] 每个维度末尾有 🔍 待独立验证项
-- [ ] 数据源清单标注可信度 ★
-
----
-
-## 发布与分发包维护
-
-本 Skill 按 [Agent Skills](https://agentskills.io) 开放格式构建，面向多平台分发。
-
-### 发布前检查清单
-
-- [ ] `skills/invest-a-stock/SKILL.md` 为最新规格（所有 LAWs、工作流、反模式完整）
-- [ ] `bash scripts/bump-version.sh X.Y.Z` 已执行（`pyproject.toml` 为唯一 canonical 源）
-- [ ] `uv run python scripts/sync_version.py check` 通过
-- [ ] `.claude-plugin/marketplace.json` 描述准确
-- [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 描述同步
-- [ ] `gemini-extension.json.in` env vars 与 `.env.example` 一致
-- [ ] `CHANGELOG.md` 已更新（`###` 小节标题 = Release 正文「主要修改」清单，正文自动精简；全文经 Release 末尾 Full Changelog 链接指向本文件）
-- [ ] `uv run pytest` 通过
-- [ ] `uv run python skills/invest-a-stock/scripts/invest.py diagnose` 输出正常
-- [ ] `bash scripts/build_wb_package.sh` 可运行，`dist/invest-skills-wb-vX.Y.Z.zip` 内容完整（发布时由 release.yml 自动构建并随 Release 附带，此条为本地预检）
-- [ ] 无 API Key 或敏感信息泄露（`validate.yml` Security scan 内联 secrets grep 已验证）
-
-### 版本号规范
-
-**canonical**：`pyproject.toml` `[project].version` — **唯一手动维护的版本号**。
-
-`bash scripts/bump-version.sh X.Y.Z` 或 `uv run python scripts/sync_version.py bump X.Y.Z` 自动同步全部派生文件。
-
-校验：`uv run python scripts/sync_version.py check`（CI / pre-commit 已接入）。
-
-### 跨 Harness 兼容
+## 跨 Harness 兼容
 
 - 不硬编码任何特定 harness 的路径（如 `~/.claude/`）
 - `SKILL.md` 中不假定用户使用特定运行时
 - 配置文档（`CONFIGURATION.md`）应列出各 harness 的安装方式
 - 引擎脚本仅依赖标准库和 `pyproject.toml` 中声明的依赖
+- **结果等价**：同一输入在不同 harness 下应产出等价结果；能力缺失须如实声明，不以文档承诺代替运行验证
 
----
-
-## 项目结构
+## 项目结构（要点，非完整树）
 
 ```
-code/
-  AGENTS.md                     ← 本文件（AI 协作规则）
-  README.md                     ← 用户文档
-  CHANGELOG.md                  ← 版本变更记录
-  CONFIGURATION.md              ← 配置指南
-  CONTRIBUTORS.md               ← 贡献指南
-  .env.example                  ← 环境变量模板
-  pyproject.toml                ← uv 依赖管理
-  skills/
-    invest-a-stock/              ← 个股深度研究（slash: /invest-a-stock）
-      SKILL.md                    ← 运行时规格（LAWs + 工作流 + 专业知识）
-      scripts/
-        invest.py                 ← CLI 单入口
-        lib/
-          collector.py            ← 多维度数据采集
-          render.py               ← 报告渲染（compact/json/md）
-          store.py                ← SQLite 持久化存储
-          tushare_client.py       ← Tushare HTTP 轻量客户端
-          env.py                  ← 集中配置管理
-      tests/                      ← pytest 测试
-      references/                 ← 数据源参考文档
-    invest-a-etf/               ← ETF 研究（slash: /invest-a-etf；数据层供 journal 共用）
-    invest-a-journal/           ← 交易方案评估（slash: /invest-a-journal）
-    invest-a-gap-scan/          ← 跳空缺口扫描（slash: /invest-a-gap-scan）
-  .claude-plugin/               ← Claude Code 插件注册
-  .agents/                      ← Agent Skills 通用注册
-  .github/                      ← CI/workflows/issue templates
-  hooks/                        ← SessionStart 钩子脚本
+code/skills/<skill>/   SKILL.md + scripts/ + references/ + tests/（各 skill 自身布局为准）
+code/skills/lib/       跨 skill 共享实现 + references/（随包携带的共享规范）
+code/scripts/          构建器与发布脚本（skillhub / WorkBuddy）
 ```
+
+- **三个研究核心入口**：`invest-a-stock`、`invest-a-etf`、`invest-hk-stock`
+- **按需专项入口**：`invest-a-journal`、`invest-a-event-calendar`、`invest-a-gap-scan`、`invest-a-pattern-scan`、`invest-a-pulse`、`invest-a-discover-scan`
+- 各 harness 安装方式见 [CONFIGURATION.md](CONFIGURATION.md)；文档索引见 [docs/README.md](docs/README.md)
+- **不要从 `archive/` 导入任何模块**（v0.2 遗留）

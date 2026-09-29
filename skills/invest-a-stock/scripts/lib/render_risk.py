@@ -99,7 +99,7 @@ def _v3_build_risk_report(
     val_payload: dict[str, Any] = {}
     if pe_pct is not None:
         # 中位数随分位一并下发：风险信号 detail 含分位读数，须同行带中位数
-        # （CLAUDE.md 估值分位规则 3；见 risk_scanner._pe_median）
+        # （report-conventions.md §9.2 估值分位规则 3；见 risk_scanner._pe_median）
         _pe_med_payload, _ = _pct_medians(val_cache, dims)
         val_payload["pe_percentile"] = pe_pct
         val_payload["pe"] = {"pct": pe_pct, "median": _pe_med_payload}
