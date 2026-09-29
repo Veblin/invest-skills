@@ -1,7 +1,7 @@
 # 数据接口地图（Data Interface Map）
 
 > 全量盘点 skill 代码**实际调用**的外部数据接口：能力簇 / 使用方 / 风险 / 实测状态。
-> 与 [source-guide.md](../../invest-a-stock/references/source-guide.md)（选源策略/优先级/积分降级）互补：本文件是**「清单 + 归属」字典**，source-guide 是**「怎么选源、怎么降级」**。
+> 与个股包内的 `references/source-guide.md`（选源策略/优先级/积分降级）互补：本文件是**「清单 + 归属」字典**，source-guide 是**「怎么选源、怎么降级」**。（该文件只随 `invest-a-stock` 包分发，共享 references 出现在其余 8 个包内时无法解析相对路径，故用文件名标注而非相对链接。）
 >
 > **更新约定**：每次接口实测结论变化时，更新下方「实测日期 + 版本」并修订对应行；季度冒烟由 `scripts/smoke_interfaces.py` 驱动（L1 存在性检查零网络、L2 精选实探）。**版本号是接口存在性的关键变量**——akshare 接口随版本漂移（2026-09-08 实证：个股乐咕接口 `stock_a_lg_indicator` 已在当前版本移除）。
 
@@ -231,3 +231,30 @@ uv run python scripts/smoke_interfaces.py --live
 - 冒烟输出头部含 akshare/tushare 版本，**留存输出即可对照「版本 vs 可用性」**
 - 建议节奏：季度一次；新增大版本升级（akshare minor 升版）后必跑
 - 失败处置：报错型 → 改代码或更新本文件 E 节；静默语义型 → 依赖跨源交叉验证兜底
+
+## G. 源策略原则、代理与 stderr 约定
+
+> 本文件 A–F 节是**接口与源的实际清单**（随版本漂移，以引擎与本节为准）。本文件**不维护**「哪个维度用哪条链」的静态矩阵——那是各 Skill `references` 与确定性 collector 的职责（如 L3 行情类经 `_run_sources_cascade` 首选源单发、失败按序降级；L2 财务类经 `_run_sources_parallel` 并行双源先到先用）。原则只有一条：**降级必须透明**——失败记录 `attempted_sources` 与原因，不阻塞其余维度，全失败标注「未获取到任何有效数据」。
+
+**代理（Clash/VPN）**：东方财富 API 需**直连**——采集器自动绕过 `HTTP_PROXY` 等环境变量让国内金融域名直连；若仍不通（常见于 **TUN 模式**），引擎会跳过 akshare 行情/基本信息并回退 Tushare/Baostock。
+
+- 自查：`invest.py diagnose` 输出 `proxy_bypass_effective` 与 `akshare_eastmoney_api` 状态；Clash 规则片段也由 `diagnose` 给出
+- 代理未绕过：Clash 规则中把 `eastmoney.com` 等设为 `DIRECT`（`DOMAIN-SUFFIX,eastmoney.com,DIRECT`）
+- TUN/CDN 阻断：暂时关闭 TUN 或全局代理后重试
+- `INVEST_A_FORCE_AKSHARE_EM=1`：忽略 push2 预检、仍调度 akshare 东财任务（连接失败由单源降级处理），用于排查网络
+- token 与依赖分别走 `TUSHARE_TOKEN`（环境变量或 `.env`）与包内 `requirements.txt`；各 harness 安装步骤见该 Skill 根 `SKILL.md` 的 Step 0
+
+> 仓库根 `CONFIGURATION.md`「代理与东方财富（Clash / VPN）」另有细节，但**该文件与根 `CLAUDE.md` 一样不随独立包分发**，故上文已把随包可用的要点内联，不再外链（评审 P2）。
+
+**akshare 进度条过滤**：akshare 调用的 tqdm 进度条输出到 **stderr**，不要用复杂 grep 过滤：
+
+```bash
+# ❌ 错误模式（ugrep/GNU grep 下 \|\| 解析为交替操作符，报 "empty subexpression"）
+uv run python -c "..." 2>&1 | grep -v '^\d+%\|'
+
+# ✅ 正确：直接丢弃 stderr（进度条在 stderr，数据在 stdout）
+uv run python -c "..." 2>/dev/null
+
+# ✅ 如果同时需要看错误信息：用 -E 扩展正则
+uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
+```

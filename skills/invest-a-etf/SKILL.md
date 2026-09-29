@@ -370,7 +370,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] 计数经 Python（`len()`），无目视计数（R3）
 - [ ] **机器层准出（写入后必跑，非可选）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明
 - [ ] **复盘原料 sidecar 已落盘**：`decision SYMBOL --init` → 填写 `scenarios`/`falsifiers` → `--from`（退出 0）；**无假设的报告也要落盘**（最小 schema 五键），否则「有/没有 sidecar」不可机器区分
-- [ ] **报告复检流程已执行**（CLAUDE.md「报告复检流程」三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果
+- [ ] **报告复检流程已执行**（[delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§5 第 0 层机器准出 + 三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果
 
 ---
 

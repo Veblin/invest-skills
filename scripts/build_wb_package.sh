@@ -34,6 +34,11 @@ rsync -a \
 # 依赖清单（uv sync 依据）
 cp pyproject.toml uv.lock "$PKG/"
 
+# 指令面检查（复核 P0-c）：包内 SKILL.md 的运行指令不得引用包内不存在的规则。
+# 本渠道**不改写 SKILL.md**（rsync 原样复制）→ 源文件必须自己干净，否则必然悬空。
+uv run python scripts/build_skillhub_packages.py --check-refs "$PKG" \
+  || { echo "❌ 分发包存在悬空规则引用"; exit 1; }
+
 # 打包（顶层目录 invest-skills/，解压即得目录）
 rm -f "$ZIP"
 (cd "$STAGE" && zip -r -q "$OLDPWD/$ZIP" invest-skills)

@@ -173,9 +173,14 @@ def test_skill_md_rewrite_rules():
     out = b._rewrite_skill_md("[skills/lib/references/report-conventions.md](../../../skills/lib/references/report-conventions.md)\n",
                               "invest-a-stock")
     assert "[lib/references/report-conventions.md](lib/references/report-conventions.md)" in out
-    # 3. 见 CLAUDE.md 引用
+    # 3. CLAUDE.md 章节引用 → 包内真实存在的规则文件（不再降级为 --help）
     out = b._rewrite_skill_md("子命令全清单见 CLAUDE.md「运行命令」。\n", "invest-a-stock")
-    assert "子命令全清单见 scripts/invest.py --help。" in out
+    assert "见 `lib/references/delivery-qc.md`" not in out  # 运行命令不在映射表 → 原样
+    out = b._rewrite_skill_md("走 CLAUDE.md「报告复检流程」三层。\n", "invest-a-stock")
+    assert "`lib/references/delivery-qc.md`" in out
+    assert "CLAUDE.md" not in out
+    out = b._rewrite_skill_md("完整指标见 CLAUDE.md「宏观情景」。\n", "invest-a-stock")
+    assert "`lib/references/report-conventions.md`" in out
     # 4. 运行目录行（含第 3 类合并改写）
     text = "> 运行目录：`code/`。必须用 `uv run python`（所有引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀）。子命令全清单见 CLAUDE.md「运行命令」。\n"
     out = b._rewrite_skill_md(text, "invest-a-stock")
@@ -193,13 +198,75 @@ def test_skill_md_rewrite_rules():
     # 无 CLI/运行 节（journal 形态）不插入
     out = b._rewrite_skill_md("## 数据查询规范\n\n### 引擎脚本\n", "invest-a-journal")
     assert "Step 0" not in out
-    # 无 CLI 的 skill 跳过 CLAUDE.md 引用替换
-    out = b._rewrite_skill_md("见 CLAUDE.md「报告复检流程」\n", "invest-a-journal")
-    assert "见 CLAUDE.md「报告复检流程」" in out
+    # 无 CLI 的 skill **同样参与**章节引用改写（旧行为是整类跳过 → 包内悬空）
+    for skill in b.ENTRY_SCRIPTS:
+        out = b._rewrite_skill_md("走 CLAUDE.md「报告复检流程」三层。\n", skill)
+        assert "`lib/references/delivery-qc.md`" in out, skill
+        assert "CLAUDE.md" not in out, skill
     # 6. 跨 skill 路径（journal → scripts/lib）
     out = b._rewrite_skill_md('cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \\\n',
                               "invest-a-journal")
     assert 'cd "${INVEST_SKILLS_ROOT:-.}/scripts/lib" && \\' in out
+
+
+def test_claude_ref_rewrites_targets_exist():
+    """`CLAUDE_REF_REWRITES` 的每个目标都必须是包内真实存在的共享规范。
+
+    映射表指向不存在的文件 = 把「悬空引用」从 SKILL.md 挪进改写结果里，比不改还糟。
+    同时锁定落点不变式：共享 ref 在所有 layout 下**恒定**落 `<pkg>/lib/references/`，
+    故目标必须以 `lib/references/` 开头（不能是 `scripts/lib/...`）。
+    """
+    assert b.CLAUDE_REF_REWRITES, "映射表为空 → 章节引用会被原样保留（悬空）"
+    refs_dir = ROOT / "skills" / "lib" / "references"
+    for chapter, target in b.CLAUDE_REF_REWRITES.items():
+        assert target.startswith("lib/references/"), (chapter, target)
+        assert (refs_dir / target.removeprefix("lib/references/")).is_file(), (
+            f"CLAUDE_REF_REWRITES[{chapter!r}] 指向不存在的规范文件: {target}")
+
+
+def test_check_package_refs_catches_dangling(tmp_path):
+    """指令面检查对两类悬空引用必须报 error（负向验证：检查须能命中）。"""
+    (tmp_path / "SKILL.md").write_text(
+        "正常行\n"
+        "> 详见 CLAUDE.md「运行命令」。\n"                        # A 档：章节引用
+        "> 见 lib/references/no-such.md。\n"                      # B 档：规范不存在
+        "> 无 CLAUDE.md 的渠道本规范自包含。\n",                   # 说明性提及 → 放行
+        encoding="utf-8")
+    errors, _warnings = b.check_package_refs(tmp_path)
+    joined = "\n".join(errors)
+    assert "悬空章节引用" in joined
+    assert "共享规范不存在" in joined
+    assert not any("自包含" in e for e in errors), "说明性提及被误判为缺陷"
+
+
+def test_check_package_refs_accepts_workbuddy_layout(tmp_path):
+    """WB / release 布局（整棵 skills/ 树未改写）不得被误判为悬空。
+
+    回归：检查器最初只按 SkillHub 布局解析（`<pkg>/lib/references/`、
+    `<pkg>/lib/`），对 WB 包报出 43 条假 error —— 正是复核 §9.1 说的「说重」。
+    WB 渠道**不改写 SKILL.md、也不改写共享 ref**，故：
+      ① 共享规范在 `<pkg>/skills/lib/references/`
+      ② 模块在 `<pkg>/skills/lib/` 与 `<pkg>/skills/<skill>/scripts/lib/`
+      ③ 共享 ref 内的 `skills/lib/` 是**正确**路径，不适用裸路径检查
+    """
+    refs = tmp_path / "skills" / "lib" / "references"
+    refs.mkdir(parents=True)
+    (refs / "delivery-qc.md").write_text(
+        "> 命令：`python skills/lib/report_qc.py <报告> --fail-on error`\n"
+        "> 随包携带于 skills/lib/references/。\n", encoding="utf-8")
+    (tmp_path / "skills" / "lib" / "report_qc.py").write_text("", encoding="utf-8")
+
+    stock = tmp_path / "skills" / "invest-a-stock"
+    (stock / "scripts" / "lib").mkdir(parents=True)
+    (stock / "scripts" / "lib" / "invest_path.py").write_text("", encoding="utf-8")
+    (stock / "SKILL.md").write_text(
+        "> 复检见 [delivery-qc.md](../../../skills/lib/references/delivery-qc.md)\n"
+        "> 命令：`uv run python skills/lib/report_qc.py <报告> --fail-on error`\n",
+        encoding="utf-8")
+
+    errors, warnings = b.check_package_refs(tmp_path)
+    assert not errors, f"WB 布局被误判：{errors}"
+    assert not warnings, f"WB 布局出现无谓 warning：{warnings}"
 
 
 def test_rewrite_pulse_md_cd_paths_and_imports():
@@ -238,6 +305,18 @@ def test_stock_package_build_single_lib_and_rewrites(tmp_path):
     assert "见 scripts/invest.py --help" in md
     # 共享 references 落包根 lib/references/
     assert (dst / "lib/references/report-conventions.md").is_file()
+    assert (dst / "lib/references/delivery-qc.md").is_file()   # 复检规则随包可达
+    # B5：共享 ref 的路径按包布局改写（script 布局 → scripts/lib/；不得残留裸仓库路径）
+    dq = (dst / "lib/references/delivery-qc.md").read_text(encoding="utf-8")
+    assert "skills/lib/" not in dq, "共享规范残留裸仓库路径 → 包内死链"
+    assert "scripts/lib/report_qc.py" in dq
+    # 仓库 references/modules.md 的 ../../lib/ 链接在独立包中须落到 ../lib/。
+    modules = (dst / "references/modules.md").read_text(encoding="utf-8")
+    assert "[report-conventions.md §7](../lib/references/report-conventions.md)" in modules
+    assert (dst / "references" / "../lib/references/report-conventions.md").is_file()
+    # 指令面检查：本包无悬空引用
+    errors, _warnings = b.check_package_refs(dst)
+    assert not errors, errors
 
 
 def test_etf_package_build_closure(tmp_path):
@@ -273,6 +352,24 @@ def test_journal_package_inline_layout(tmp_path):
     assert "skills/invest-a-journal/scripts/lib" not in md
 
 
+def test_delivery_qc_tool_in_every_standalone_package(tmp_path):
+    for skill in ("invest-a-journal", "invest-a-gap-scan", "invest-a-pattern-scan",
+                  "invest-hk-stock", "invest-a-discover-scan"):
+        b.build_one(skill, b.project_version(), tmp_path, dry_run=False)
+        root = tmp_path / skill
+        assert (root / "scripts/lib/report_qc.py").is_file(), skill
+        assert (root / "scripts/references/compliance_rules.yaml").is_file(), skill
+        assert "uv run python scripts/lib/report_qc.py" in (
+            root / "lib/references/delivery-qc.md").read_text(encoding="utf-8")
+        run = subprocess.run(
+            [sys.executable, "scripts/lib/report_qc.py", "--help"],
+            cwd=root, capture_output=True, text=True,
+        )
+        assert run.returncode == 0, (skill, run.stderr)
+        errors, _ = b.check_package_refs(root)
+        assert not errors, (skill, errors)
+
+
 def test_pulse_package_lib_at_root(tmp_path):
     total = b.build_one("invest-a-pulse", b.project_version(), tmp_path, dry_run=False)
     assert 0 < total <= b.MAX_FILES
@@ -288,6 +385,12 @@ def test_pulse_package_lib_at_root(tmp_path):
     assert "skills/invest-a-stock" not in md
     assert "from lib.market_microstructure import" in md
     assert "import lib._invest_path" in md
+    # B5：pulse 布局 → lib/（与 script 布局的 scripts/lib/ 区分）
+    dq = (dst / "lib/references/delivery-qc.md").read_text(encoding="utf-8")
+    assert "skills/lib/" not in dq, "共享规范残留裸仓库路径 → 包内死链"
+    assert "lib/report_qc.py" in dq and "scripts/lib/report_qc.py" not in dq
+    errors, _warnings = b.check_package_refs(dst)
+    assert not errors, errors
 
 
 def test_pattern_package_gap_modules(tmp_path):

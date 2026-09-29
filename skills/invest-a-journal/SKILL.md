@@ -697,7 +697,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 
 ## 情景预案闭环（scenario-plans）
 
-> v0.2.6 新增 — 预案库见 [scenario-plans.md](../../lib/references/scenario-plans.md)（模板 + E-001 + 候选 E-002~E-007 + 闭环机制）。
+> v0.2.6 新增 — 预案库见 [scenario-plans.md](../lib/references/scenario-plans.md)（模板 + E-001 + 候选 E-002~E-007 + 闭环机制）。
 > 预案为**研究流程规则，非交易指令**：触发 = 启动重新评估流程（检查什么、哪个假设被证伪），动作由用户决定（A1/A2，原 LAW 6/6a）。
 
 **评估流程要求**：
@@ -791,4 +791,4 @@ ETF 数据与对冲表的 **canonical** 拥有者。journal 的 `etf_data.py` �
 
 - `references/evaluation-criteria.md` — 评估细则 + 校准场景 + 边界条件示例
 - `../invest-a-etf/references/etf-hedge-map.md` — ETF 对冲覆盖表（canonical；本目录仅留指针）
-- [`../../host-docs/v0.2.1/calibration-case-july-2026.md`](../../host-docs/v0.2.1/calibration-case-july-2026.md) — 7 月校准案例（去杠杆 + V 型反弹）
+- `host-docs/v0.2.1/calibration-case-july-2026.md` — 7 月校准案例（去杠杆 + V 型反弹；维护者文档，不随包）

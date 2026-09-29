@@ -74,6 +74,10 @@ EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".DS_Store"}
 ALLOWED_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml", ".js", ".cjs", ".mjs", ".ts",
                     ".py", ".sh", ".png", ".jpg", ".svg"}
 
+# 可作 UTF-8 文本读写的后缀（其余按二进制逐字节复制）
+_TEXT_SUFFIXES = frozenset({".md", ".txt", ".json", ".yaml", ".yml", ".js", ".cjs",
+                            ".mjs", ".ts", ".py", ".sh", ".svg"})
+
 # 各 skill 的 skillhub 展示名/简介（summary 复用 description 或单独定制）
 SKILL_META: dict[str, dict[str, str]] = {
     "invest-a-stock": {"displayName": "invest:a-stock 个股投研"},
@@ -175,6 +179,19 @@ CROSS_PATH_REWRITES: dict[str, list[tuple[str, str]]] = {
     "invest-a-journal": [
         ("skills/invest-a-journal/scripts/lib", "scripts/lib"),
     ],
+}
+
+# SKILL.md 正文「CLAUDE.md「章节」」引用 → 包内**真实存在**的规则文件。
+# 根 CLAUDE.md 不随任何分发渠道出包（SkillHub/WB 包均不含），故章节引用必须在
+# 构建期重定向到随包携带的共享 references；否则包内运行指令指向不存在的规则
+# （复核 RA-01/RA-04）。
+# 未登记的章节名**原样保留**，交由 check_package_refs 的 A 档报错——映射表
+# 因此不会悄悄腐烂（新增引用必须同时登记）。
+CLAUDE_REF_REWRITES: dict[str, str] = {
+    "报告复检流程": "lib/references/delivery-qc.md",
+    "宏观情景": "lib/references/report-conventions.md",
+    "估值分位": "lib/references/report-conventions.md",
+    "措辞规范": "lib/references/report-conventions.md",
 }
 
 # SKILL.md 以**命令行形式**强制的共享工具（「机器层准出」等）：非 import 可达 →
@@ -904,15 +921,33 @@ _STEP0_BLOCK = (
 )
 
 
+# 指向共享 references 的**相对**链接：仓库布局比包内布局多一级 `..`。
+#   仓库 skills/<name>/references/x.md → skills/lib/references/  需 ../../lib/references/
+#   包内 <pkg>/references/x.md        → <pkg>/lib/references/    只需 ../lib/references/
+# （SKILL.md 同理：仓库 skills/<name>/SKILL.md 需 ../lib/references/，包内 <pkg>/SKILL.md 需 lib/references/）
+# 成因：共享 lib 在仓库里位于 skill 目录**之外**（skills/lib），在包内位于**包根之内**。
+# 只压以 lib/references/ 结尾前缀的 `../` 串；跨 skill、仓库根文档（CONFIGURATION.md /
+# host-docs）等本就不随包的链接保持原样，交由 check_package_refs 口径人工裁决（评审 P2）。
+_REF_LINK_RE = re.compile(r"(?:\.\./)+(?=lib/references/)")
+
+
+def _rewrite_ref_links(text: str) -> str:
+    """把共享 references 的相对链接压到包内层级（单次扫描替换，不链式改写）。"""
+    return _REF_LINK_RE.sub(
+        lambda m: "../" * max(0, m.group(0).count("../") - 1), text)
+
+
 def _rewrite_skill_md(text: str, skill_name: str,
                       names: set[str] | None = None) -> str:
-    """SKILL.md 正文适配 — 五类确定性替换 + 包内新增。
+    """SKILL.md 正文适配 — 确定性替换 + 包内新增。
 
     1. skills/<name>/scripts/ → scripts/（CLI 命令行路径）
     2. ../../../skills/lib/references/ → lib/references/（含链接文本的
        skills/lib/references/ → lib/references/）
-    3. 「见 CLAUDE.md「X」」 → 「见 scripts/<entry>.py --help」（无 CLI 的 skill 跳过）
-    4. 「> 运行目录：code/ …」行 → 「运行目录：skill 包根 …」（含第 3 类合并改写）
+    3. 「CLAUDE.md「章节」」→ 包内真实存在的规则文件（CLAUDE_REF_REWRITES）；
+       未登记的章节名原样保留，交由 check_package_refs 报错。
+       **与 ENTRY_SCRIPTS 无关**——journal/pulse 无 CLI 也需正确指向。
+    4. 「> 运行目录：code/ …」行 → 「运行目录：skill 包根 …」
     5. 「CLI 命令 / 运行」节开头插入 Step 0（uv venv && uv pip install -r requirements.txt）
     6. 跨 skill 路径改写（CROSS_PATH_REWRITES）
     7. pulse 专属: cd 路径收口到包根 + 内联 python 裸导入 → lib.X
@@ -921,8 +956,20 @@ def _rewrite_skill_md(text: str, skill_name: str,
     text = text.replace(f"skills/{skill_name}/scripts/", "scripts/")
     text = text.replace("../../../skills/lib/references/", "lib/references/")
     text = text.replace("skills/lib/references/", "lib/references/")
+    # 2b. 仓库内相对形态（skills/<name>/SKILL.md → ../lib/references/x.md）
+    #     在包内落包根，故收口为 lib/references/（见 _rewrite_ref_links 成因说明）
+    text = _rewrite_ref_links(text)
+
+    # 3. 章节引用重定向。此前是「见 CLAUDE.md「X」」→「见 scripts/<entry>.py --help」，
+    #    两个缺陷：① 只匹配「见」字形态，其它形态漏改 → 包内悬空；② --help 承载不了
+    #    内容引用（宏观指标清单等），且 ENTRY_SCRIPTS 为 None 的 skill 整类跳过。
+    def _sub_chapter_ref(m: re.Match) -> str:
+        target = CLAUDE_REF_REWRITES.get(m.group(1))
+        return f"`{target}`" if target else m.group(0)
+
+    text = re.sub(r"CLAUDE\.md\s*「([^」]*)」", _sub_chapter_ref, text)
+
     if entry:
-        text = re.sub(r"见 CLAUDE\.md「[^」]*」", f"见 scripts/{entry} --help", text)
         text = re.sub(
             r"^> 运行目录：.*$",
             f"> 运行目录：skill 包根（与 scripts/ 同级）。必须用 `uv run python`"
@@ -992,7 +1039,9 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
     skill_md_text = (src / "SKILL.md").read_text(encoding="utf-8")
     md_text = skill_md_text if layout in ("inline", "pulse") else ""
     closure.compute(entry_files, md_text)
-    closure.add_mandated_tools(skill_md_text)
+    # 共享交付规范随每个独立包分发，其中的必跑命令也是包的运行契约。
+    delivery_qc = (LIB_DIR / "references" / "delivery-qc.md").read_text(encoding="utf-8")
+    closure.add_mandated_tools(skill_md_text + "\n" + delivery_qc)
 
     # 2. 计数
     own = _collect_own(src)
@@ -1004,7 +1053,7 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
     data_rel_dir = (Path("references") if layout == "pulse"
                     else Path("scripts") / "references")
     mandated_data = [(s, data_rel_dir / s.name)
-                     for s in _mandated_data_sources(skill_md_text)]
+                     for s in _mandated_data_sources(skill_md_text + "\n" + delivery_qc)]
     n_mandated = sum(1 for _s, rel in mandated_data if rel not in set(own))
     total = (len(own) + n_lib + _N_SHARED_REFS + n_mandated
              + 1 + n_generated)  # + requirements.txt
@@ -1033,6 +1082,10 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
         text = (src / rel).read_text(encoding="utf-8")
         if rel.parts[:1] == ("scripts",) and rel.suffix == ".py" and len(rel.parts) == 2:
             text = _rewrite_imports(text, "engine", names)
+        elif rel.parts[:1] == ("references",) and rel.suffix in _TEXT_SUFFIXES:
+            # references/*.md 此前逐字节复制 → 仓库内正确的 ../../lib/references/
+            # 在包内解析到包外，self-check 等引用在独立包中不可达（评审 P2）
+            text = _rewrite_ref_links(text)
         target.write_text(text, encoding="utf-8")
 
     # 4. lib 闭包复制（含改写 / version / invest_path 替换）
@@ -1073,12 +1126,24 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
         (scripts_dir / "_invest_path.py").write_text(
             _GENERATED_SCRIPTS_INVEST_PATH, encoding="utf-8")
 
-    # 7. 共享 references 文档 → <dst>/lib/references/
+    # 7. 共享 references 文档 → <dst>/lib/references/（layout-aware 路径改写）
+    #    共享 ref 原先逐字节复制 → 文档里写的 skills/lib/… 在包内是死链
+    #    （script 布局实际落 scripts/lib/，pulse 落 lib/）。改写顺序是陷阱：
+    #    必须先换 references/ 子路径，再换模块路径，否则
+    #    skills/lib/references/x.md 会被误写成 scripts/lib/references/x.md
+    #    ——而共享 ref 在包内**恒定**落 <dst>/lib/references/。
+    lib_token = "lib/" if layout == "pulse" else "scripts/lib/"
     refs_src = LIB_DIR / "references"
     for rel in _collect_files(refs_src):
         target = dst / "lib" / "references" / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(refs_src / rel, target)
+        if rel.suffix in _TEXT_SUFFIXES:
+            txt = (refs_src / rel).read_text(encoding="utf-8")
+            txt = txt.replace("skills/lib/references/", "lib/references/")
+            txt = txt.replace("skills/lib/", lib_token)
+            target.write_text(txt, encoding="utf-8")
+        else:  # 二进制（.png/.jpg 等）逐字节复制，不做文本改写
+            shutil.copy2(refs_src / rel, target)
 
     # 8. requirements.txt
     (dst / "requirements.txt").write_text(
@@ -1095,13 +1160,131 @@ def build_one(skill_name: str, version: str, out_dir: Path, dry_run: bool) -> in
     return total
 
 
+# ─────────────────────────────────────────────────────────────
+# 指令面检查（复核 P0-c）：运行指令不得引用包内不存在的规则
+# ─────────────────────────────────────────────────────────────
+# 判据按**引用形态**而非**字样**——说明性提及（如 pulse 的「WorkBuddy 环境无
+# CLAUDE.md，本规范自包含」）是有效内容，必须放行。复核 §9.1「过重表述防线」：
+# 只有把「实现是否存在于产物」「是否以 Agent 可读的运行说明形式存在」「是否属
+# 说明性提及」三态分清，才不会写出「说重」的结论。
+
+# A 档（error）：带章节引号的引用——说明性提及**定义上**不带「」引号
+_CHAPTER_QUOTE_RE = re.compile(r"CLAUDE\.md\s*「")
+# B 档（error）：包内路径引用，需在包内真实存在
+_SHARED_REF_RE = re.compile(r"(?:\.\./)*(?:skills/)?lib/references/([^\s)\]，。）」`]+)")
+_LIB_MODULE_RE = re.compile(r"(?:\.\./)*(?:skills/)?(?:scripts/)?lib/([A-Za-z_]\w*\.py)")
+# C 档（warn）：指令动词 + 8 字内 CLAUDE.md，且同行无否定/沿革语 → 人工兜底
+_DIRECTIVE_RE = re.compile(r"(?:见|参见|详见|依据|遵循|按照|参照)[^。\n]{0,8}CLAUDE\.md")
+_NARRATIVE_OK_RE = re.compile(
+    r"(?:无|不含|不会|没有|不依赖|已迁|历史|曾)[^。\n]{0,14}CLAUDE\.md"
+    r"|CLAUDE\.md[^。\n]{0,14}(?:自包含|已迁|无该文件|不存在)"
+)
+
+
+def _pkg_skill_mds(pkg_root: Path) -> list[Path]:
+    """包内 SKILL.md：顶层入口 + skills/<name>/SKILL.md（WB 树形）。"""
+    found: list[Path] = []
+    if (pkg_root / "SKILL.md").is_file():
+        found.append(pkg_root / "SKILL.md")
+    found.extend(sorted(pkg_root.glob("skills/*/SKILL.md")))
+    return found
+
+
+def _pkg_shared_refs(pkg_root: Path) -> list[Path]:
+    """包内共享 references：SkillHub <pkg>/lib/references/、WB <pkg>/skills/lib/references/。"""
+    found = sorted((pkg_root / "lib" / "references").glob("**/*"))
+    found += sorted((pkg_root / "skills" / "lib" / "references").glob("**/*"))
+    return [p for p in found if p.is_file()]
+
+
+def _rewritten_refs(pkg_root: Path) -> list[Path]:
+    """**经构建期改写**的共享 ref（仅 SkillHub 布局：<pkg>/lib/references/）。
+
+    WB / release 渠道整棵 `skills/` 树原样保留、不做改写，那里的 `skills/lib/`
+    是**正确**路径 → 裸路径检查只对该布局生效，否则会把正确产物判成缺陷。
+    """
+    return [p for p in sorted((pkg_root / "lib" / "references").glob("**/*"))
+            if p.is_file() and p.suffix in _TEXT_SUFFIXES]
+
+
+def _resolve_shared_ref(pkg_root: Path, name: str) -> bool:
+    """共享规范在各布局下的落点：<pkg>/lib/references/ 或 <pkg>/skills/lib/references/。"""
+    return ((pkg_root / "lib" / "references" / name).is_file()
+            or (pkg_root / "skills" / "lib" / "references" / name).is_file())
+
+
+def _resolve_module(pkg_root: Path, name: str) -> bool:
+    """包内模块按 basename 解析——布局随渠道与 skill 而异：
+    SkillHub `<pkg>/lib/`、`<pkg>/scripts/lib/`；WB/release `<pkg>/skills/lib/`、
+    `<pkg>/skills/<skill>/scripts/lib/`。用 basename 搜索而非拼固定路径，
+    避免把正确产物误判为悬空（复核 §9.1「过重表述防线」）。
+    """
+    return any(p.name == name for p in pkg_root.rglob(name))
+
+
+def check_package_refs(pkg_root: Path) -> tuple[list[str], list[str]]:
+    """检查单包指令面。返回 (errors, warnings)；errors 非空则该包不得发布。
+
+    检查范围＝**运行指令面**（SKILL.md 引用 + 经改写的共享 ref 路径），不含源码
+    注释与说明性提及。验收口径见复核 §9.2：目标不是「包内不得出现 CLAUDE.md
+    字样」，而是「运行指令不得引用包内不存在的规则」。
+
+    支持 SkillHub（已改写）与 WorkBuddy/release（树未变）两种布局。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for md in _pkg_skill_mds(pkg_root):
+        rel = md.relative_to(pkg_root)
+        text = md.read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if _CHAPTER_QUOTE_RE.search(line):
+                errors.append(f"{rel}:{lineno} 悬空章节引用：{line.strip()[:90]}")
+            for name in _SHARED_REF_RE.findall(line):
+                if not _resolve_shared_ref(pkg_root, name):
+                    errors.append(f"{rel}:{lineno} 共享规范不存在：lib/references/{name}")
+            for name in _LIB_MODULE_RE.findall(line):
+                if not _resolve_module(pkg_root, name):
+                    errors.append(f"{rel}:{lineno} 包内模块不存在：{name}")
+            if _DIRECTIVE_RE.search(line) and not _NARRATIVE_OK_RE.search(line):
+                warnings.append(f"{rel}:{lineno} 疑似指令性引用，请人工确认：{line.strip()[:90]}")
+
+    # 裸仓库路径检查只对**经改写**的共享 ref 生效
+    for ref in _rewritten_refs(pkg_root):
+        for lineno, line in enumerate(ref.read_text(encoding="utf-8").splitlines(), 1):
+            if "skills/lib/" in line:
+                errors.append(
+                    f"{ref.relative_to(pkg_root)}:{lineno} 共享规范内残留裸仓库路径 "
+                    f"skills/lib/（应已按包布局改写）")
+    return errors, warnings
+
+
+def report_package_refs(pkg_root: Path, label: str) -> int:
+    """跑检查并打印。返回 error 数（0 = 通过）。"""
+    errors, warnings = check_package_refs(pkg_root)
+    for w in warnings:
+        print(f"  ⚠️ [指令面] {w}")
+    for e in errors:
+        print(f"  ❌ [指令面] {e}")
+    if not errors and not warnings:
+        print(f"  ✅ {label}: 指令面无悬空引用")
+    return len(errors)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="构建 SkillHub 分发包")
     ap.add_argument("--out", type=Path, default=ROOT.parent / "invest-skills-skillhub" / "skills",
                     help="输出目录（默认 ../invest-skills-skillhub/skills）")
     ap.add_argument("--dry-run", action="store_true", help="只统计不写入")
     ap.add_argument("--skills", nargs="*", default=None, help="只构建指定 skill（默认全部）")
+    ap.add_argument("--check-refs", type=Path, default=None, metavar="PKG_ROOT",
+                    help="只对已有包目录跑指令面检查（WB 包预检用；不构建）")
     args = ap.parse_args(argv)
+
+    if args.check_refs is not None:
+        n_err = report_package_refs(args.check_refs.resolve(),
+                                    f"指令面检查 {args.check_refs}")
+        return 1 if n_err else 0
 
     version = project_version()
     print(f"主仓库版本: {version}")
@@ -1124,6 +1307,17 @@ def main(argv: list[str] | None = None) -> int:
         for name, total in failed:
             print(f"❌ {name}: {total} 个文件 > {MAX_FILES} 上限，构建失败")
         return 1
+
+    # 指令面检查（复核 P0-c）：运行指令不得引用包内不存在的规则
+    if not args.dry_run:
+        n_ref_err = 0
+        for name in skills:
+            if (args.out / name).is_dir():
+                n_ref_err += report_package_refs(args.out / name, name)
+        if n_ref_err:
+            print(f"❌ 指令面悬空引用 {n_ref_err} 处，构建失败（运行指令指向包内不存在的规则）")
+            return 1
+
     if not args.dry_run:
         print("下一步: 进入分发仓库 → 逐个包 `skillhub publish <dir> --dry-run` 预检 → 提交 → tag → CI 发布")
     return 0

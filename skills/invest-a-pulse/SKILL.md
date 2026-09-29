@@ -349,7 +349,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
    **禁止凭打印出的子集做区间或极值断言**（实例：ERP「2026-08 以来区间 1.83%–2.52%」实为末 5 个非空值的子集，
    全序列 max 为 5.62；行业数「90 余」实为 97 个 key 的目视结果，当日有涨停的行业实为 47）；
    Python calc 结果标注 `[来源: Python calc: ...]`。
-5. **证据标签**：每段分析末尾附四维标注（强度/来源/时效/交叉），同 CLAUDE.md 规范。
+5. **证据标签**：每段分析末尾附四维标注（强度/来源/时效/交叉），同 [report-conventions.md §5](../../../skills/lib/references/report-conventions.md) 规范。
 6. **推测标注**：无历史数据支撑的规律性表述（"历史上常出现…"）必须标注「待验证」或附案例。
 7. **跷跷板观察边界**：`zt_seesaw` 是**参考内容**（帮助分析盘面，不构成投资决策）。解读限于描述资金腾挪结构；**禁止**基于簇间负相关做方向性预测（如"A 簇将接棒 B 簇"）；样本 <15 日时标注「样本不足，规律性结论待更长窗口验证」；half_split 前后分界敏感，Δpp 方向以相关系数（不依赖分界）为主证据。
 8. **主线确认：资金流/拥挤度为主证据**（两融趋势：`compute_chip_clearance().signals.margin_20d_change`（引擎输出，采集 step 6）或 load_history + Python calc 计算 20 日变化率；`margin_to_mcap` 历史分位需 load_history + Python calc；`zt_industry_flow` 板块轮动、ETF 份额）；价格走势为辅助确认；**禁止**单用"连续上涨/突破均线"断言主线（A 股散户主导市场无动量、仅月度反转——Chui et al. 2022）
@@ -370,8 +370,9 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 ## 复检流程（发报告前必做）
 
-> 与 CLAUDE.md「报告复检流程」同构（WorkBuddy 环境无 CLAUDE.md，本规范自包含）。
-> **第 0 层机器准出 + 三层人工复检**，全部通过才可发出；发现问题立即修正并标注修正项/降级项。
+> **完整定义**：[delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§6（第 0 层机器准出 + 三层人工复检）。
+> **本规范随包分发**（P0 铁律见同文件 §1）——不依赖仓库根指令文件，WorkBuddy 等无根文件的渠道同样可用。
+> 全部通过才可发出；发现问题立即修正并标注修正项/降级项。
 
 ### 第 0 层：机器准出（必跑，非可选自检）
 
@@ -386,7 +387,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py reports/m
 
 > ⚠️ 实测（2026-09-18 报告）：`law17-no-conclusion-sentence` / `percentile-without-median`
 > 等均在**本层**被拦下——模板已内嵌骨架后属可规避类型。
-> **漏跑本层 = 缺陷直接随报告发出**：WorkBuddy 环境无 CLAUDE.md，不会有人替你补跑。
+> **漏跑本层 = 缺陷直接随报告发出**，不会有人替你补跑。
 
 **第 1 层：数字复检** — 关键数字按来源对照（引擎字段 ↔ 采集 JSON 的 `snapshot()`/`load_history()`/`compute_chip_clearance()`/宏观 `label+trends` 输出字段，值/单位/口径一致；Python calc 标注公式）；**极值断言（峰值/最大/最低/首个/最长）必须基于全量序列 Python 聚合**（`max`/`min`/`len`），禁止目视子集断言。
 

@@ -142,7 +142,7 @@ L3 为 fallback，可信度标注 ❓ 弱，推测须标 `[推测，待验证]`�
 
 > v0.1.4 起 `collect_research()` 按此表顺序降级（高阶成功则跳过低阶 API）：`report_rc(10000) → forecast(2000) → akshare → 跳过`。
 > 默认 `collect`/`report` **不**包含 `research` 维度；需显式 `--dims=...,research`。
-> 完整对照见项目根目录 [CONFIGURATION.md](../../../CONFIGURATION.md)。
+> 上表即随包口径；仓库内另有根 `CONFIGURATION.md` 的完整对照，但**该文件不随独立包分发**（同根 `CLAUDE.md`），包内以上表与引擎为准。故此处用文件名标注而非相对链接，避免包内出现死链。
 
 ## 港股数据源（invest-hk-stock，v0.2.9 v1）
 

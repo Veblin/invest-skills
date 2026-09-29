@@ -491,7 +491,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 
 | 段 | 内容 |
 |---|---|
-| **主阅读面**（折外） | 报告说明 → 重要发现（`overview` 槽位，每段一个 **H2 判断句**）→ 数据验算警示 → 宏观情景行（CLAUDE.md 契约行）|
+| **主阅读面**（折外） | 报告说明 → 重要发现（`overview` 槽位，每段一个 **H2 判断句**）→ 数据验算警示 → 宏观情景行（共享规范 §9.1 契约行）|
 | **审计底稿**（单层 `<details>`） | 引擎判定摘要（产业链/收益驱动/风格匹配/成功关键因素）、目录、九模块 §0–§8、DCF、Bull-Bear、技术读数、引擎自检附录、分析详情 |
 | 折外尾部 | 📚 引用来源（引用入口）与免责声明 |
 
@@ -564,7 +564,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <步骤3 
 
 `collect` 成功落库后，`evidence --from-store` 与首次 `report --resume` 都只依赖同一采集快照，可在两个终端同时启动；两者都完成后再撰写分析。R12a 外部取证也可与首次报告渲染重叠，但分析合成须等证据与初稿齐备。`validate-analysis --draft` 可反复运行，不触发采集或重渲；只在通过后启动最终 HTML 渲染。最终 `report_qc` 仍须检查刚生成的 MD。
 
-> 第 4 步之后仍须走共享规范 §7 Self-Check 与 CLAUDE.md「报告复检流程」的三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
+> 第 4 步之后仍须走共享规范 §7 Self-Check 与 [delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§5 的第 0 层机器准出 + 三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
 
 ### 常用命令
 
@@ -584,7 +584,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py store list
 ```
 
-> 运行目录：`code/`。必须用 `uv run python`（所有引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀）。子命令全清单见 CLAUDE.md「运行命令」。
+> 运行目录：`code/`。必须用 `uv run python`（所有引擎命令已统一带 `${INVEST_SKILLS_ROOT:-.}` cd 前缀）。子命令全清单以 `invest.py --help` 为准。
 
 ## 代理 / VPN
 
@@ -614,7 +614,7 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ### SOP-M1 宏观情景（`--with-macro`）
 
-> 完整指标清单与输出格式见 CLAUDE.md「宏观情景」。要点：简报首行 `[宏观情景]` 为**两段式、每段各带结论**——首行「国内：PMI + CPI + LPR + M2 →政策方向 |」，次行「海外：VIX + 波动等级 + SOX + 美 10Y/实际利率/期限利差/布油 →海外结论」。海外段指标集由 `TestLabelE2` 锁定，不得删减；两段结论均由确定性规则生成，不由 LLM 书写。
+> 完整指标清单与输出格式见 [report-conventions.md §9.1](../../../skills/lib/references/report-conventions.md)（宏观情景）。要点：简报首行 `[宏观情景]` 为**两段式、每段各带结论**——首行「国内：PMI + CPI + LPR + M2 →政策方向 |」，次行「海外：VIX + 波动等级 + SOX + 美 10Y/实际利率/期限利差/布油 →海外结论」。海外段指标集由 `TestLabelE2` 锁定，不得删减；两段结论均由确定性规则生成，不由 LLM 书写。
 
 ---
 
