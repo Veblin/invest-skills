@@ -28,6 +28,7 @@ from lib.analysis_schema import (
     PARTICIPANT_SCAN_KEYS,
     find_section,
     is_inline_slotted,
+    missing_draft_slots,
     split_overview,
     validate_sections,
 )
@@ -276,6 +277,22 @@ def test_bull_chain_slot_preserves_engine_chain_as_audit_basis():
     assert "#### 多头逻辑" in md
     assert "[待 Claude 核对多头依据]" not in md
     assert "当前数据未形成明确多头逻辑链" not in md
+
+
+def test_bull_chain_position_passes_validation_and_replaces_placeholder():
+    """通用 module 通过 position 命中多头槽位，校验与渲染口径一致。"""
+    coll = collection_v2_minimal()
+    section = _slot("risk", "已核对的多头依据")
+    section["position"] = "bull_chain"
+    analysis = [section]
+
+    assert validate_sections(analysis) == []
+    assert find_section(analysis, frozenset({"bull_chain"})) is section
+    assert missing_draft_slots(analysis, "[待 Claude 核对多头依据]") == []
+
+    md = render_report_v3(coll, "600176", mode="full", analysis=analysis)
+    assert md.count("已核对的多头依据") == 1
+    assert "[待 Claude 核对多头依据]" not in md
 
 
 def test_bull_chain_engine_basis_folds_in_concise_mode():

@@ -18,7 +18,8 @@ from lib.md_subset import MarkdownSubsetError, render_markdown
 REQUIRED_FIELDS = ("module", "title", "facts_md", "analysis_md", "evidence_tag", "position")
 MAX_LEN = {"module": 64, "title": 128, "facts_md": 20_000, "analysis_md": 40_000, "evidence_tag": 32, "position": 64}
 POSITION_ALLOWED = {"overview", "valuation", "financials", "technicals", "northbound",
-                    "holders", "events", "refs", "research", "conclusion", "analysis"}
+                    "holders", "events", "refs", "research", "conclusion", "analysis",
+                    "bull_chain"}
 _EVIDENCE_RE = re.compile(r"^([A-Da-d]{1,2}|[Ll][1-4])")
 
 # --- 事实绑定（v0.3.1 #4）------------------------------------------------------
