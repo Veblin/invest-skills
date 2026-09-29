@@ -4,6 +4,18 @@
 
 v0.3.1 按「修补 + 接线 + 清理，不叠架构」推进，逐迭代交付。本节记录已落地部分；全部输出仍仅供个人研究与学习参考，不构成投资建议。
 
+### 多头链槽位与默认输入闸门
+
+- **`bull_chain` 就地槽位**（`644787b`；校验白名单补齐见 `71efb91`）：多头逻辑链可整段注入并与人工依据并列，引擎自动生成的多头链降为底稿；缺该槽位时渲染 `[待 Claude 核对多头依据]` 并由 QC 完成度门禁拦截（定向占位规则，正文里出现「待 Claude 核对」等散文措辞不误伤）。补齐前 `POSITION_ALLOWED` 漏列 `bull_chain`，而渲染侧早已支持——按该槽位撰写的段会被校验拒绝，两套口径不一致；现补入白名单并以用例锁定「校验 / 槽位命中 / 占位缺失 / 渲染替换」四处一致。
+- **DCF、D-③ 与风险收益三条路径统一拒绝默认输入**：默认无风险利率或默认 Beta 时，不再进入数值情景、概率权重与敏感性矩阵，只输出缺口说明与待核项；利率缺口下提前返回，省掉无用的沪深300 基准抓取。**模块 5** 在默认利率下不再做 g_implied 与营收 CAGR 的方向比较（此前只加「仅供参考」标注，仍会给出方向性措辞），改为暂停并提示补实际利率。原 review #13 的「默认值 + 警示标注」由硬闸门取代，相应用例改为断言暂停行为。
+- **事件分类摘要移除方向推断**：改为纯计数 + 可追溯来源标签（卡片 `idx` 字段 + `len()` 公式），不再由分类结果推断方向。
+- **修复 `risk-reward` / `ic` 读 store 取空集合**：两个子命令读快照时未解包 `raw_json` 包装行。
+
+### 测试隔离：ETF 用例不再碰真实研究库
+
+- **缺陷与复现**（`ebd0d94`）：`futures_basis.query_futures_basis` 在查询前先调 `store.init_db()`，而用例只 mock 了 `load_futures_daily`。DB 可写时用例通过——但**仍会打开/建表用户的真实 `research.db`**；DB 不可写时 `init_db()` 的异常被折成「futures_daily 读取失败」，mock 数据根本到不了。修复前复现：把 HOME 指向只读 `research.db` 后运行该文件 → **3 failed**，失败签名 `'历史数据不足' not in 'futures_daily 读取失败'`。
+- **修法**：`invest-a-etf/tests/conftest.py` 加 autouse fixture，经既有 `store._db_override` 指向 tmp 库（与 `invest-a-stock/tests/conftest.py::isolated_store`、`test_r1_staleness.py` 同型，**不新增接口**）。设为 autouse 的理由是缺陷不在单个用例，而是任何遍历到 store 的 ETF 用例都会外溢。修复后同一只读条件下 5 用例全过，真实库 mtime/size 不变。
+
 ### 报告读者面：判断索引与新闻/公告标题表退出默认（A1／A2）
 
 - **A1 判断索引整层移除**（`02ebd46`）：该层只复述各分析段标题、不交代判断，却占据 full 报告首屏。md/html 两侧渲染器与共享的 `index_entries` 专用逻辑（`POSITION_LABELS`／`INDEX_EXCLUDED_KEYS`／`_INDEX_SLUG_RE`）同删，重要结论直接进正文；连带删除 5 组只锁该层的测试并新增主路径回归用例。
