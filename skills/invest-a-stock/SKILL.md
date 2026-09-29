@@ -638,7 +638,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 >
 > 完整流程（Phase 1 采集 3 Agent / Phase 2 分析 4 Agent / Phase 3 合成模板 / 四视角覆盖内容 / 交叉验证规则）见 [references/deep-sop.md](references/deep-sop.md)。**`report --deep` 时主编 Claude 必须先 Read 该文件**，其余流程不读。
 
-要点：采集 3 Agent（财务 Tushare / 行情+财务交叉 akshare / 股东研报事件）并行 ≈ 30-40s；financials 跨源差异 ≥5% 触发第三源投票；分析 4 Agent 用 [agent-prompts.md](references/agent-prompts.md) 模板；Agent 只调 Bash 不直连 API（防限流）；合成阶段执行分析合成三步（≥5 假设）。
+要点：采集 3 Agent（财务 Tushare / 行情+财务交叉 akshare / 股东研报事件）并行 ≈ 30-40s；financials 跨源差异 ≥5% 触发第三方口径核对（**并列呈现，不投票裁决**，见共享规范 §2.3 强制行为 4）；分析 4 Agent 用 [agent-prompts.md](references/agent-prompts.md) 模板；Agent 只调 Bash 不直连 API（防限流）；合成阶段执行分析合成三步（≥5 假设）。
 
 ### SOP earnings-review（季报/年报后）
 

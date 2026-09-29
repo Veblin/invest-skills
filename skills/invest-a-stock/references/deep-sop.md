@@ -30,11 +30,17 @@
 ```
 
 **验证规则：**
-- financials 维度：A（Tushare）vs B（akshare），关键字段（ROE/EPS/毛利率）差异 <5% → 通过
-- 差异 ≥5% → 触发 Tie-breaker（第三源三方投票）：另采一份第三方 collection
-  `invest.py collect SYMBOL --dims "financials" --deep`（换批次/时点），
+- financials 维度：A（Tushare）vs B（akshare），关键字段（ROE/EPS/毛利率）差异 <5% → 口径一致，直接引用
+- 差异 ≥5% → **并列呈现，不裁决**：另采一份第三方 collection
+  `invest.py collect SYMBOL --dims "financials" --deep`（换批次/时点）作**第三方口径参考**，
   与 A/B 一起跑 `skills/invest-a-stock/scripts/merge_collections.py`
-- 三取二投票决定最终值，无法决定则保留差异并标注"跨源分歧"
+- Phase 2 从合并 JSON 的 `_cross_validation.batches.financials` 读取各批次原值、来源与采集序号；
+  同名来源的第三批也要单独列出，`_cross_validation.results` 中的 `collection_a/b`
+  用于定位成对差异。`dimensions[].data` 仍是主批次值，不代表三批一致。
+- **第三方用于核验口径差异来源，不得用"三取二投票"决定最终值**——与
+  `report-conventions.md` §2.3 强制行为 4「数据冲突并列不裁决」一致：报告同时列出
+  三源各自的口径与值，说明差异可能来源（财报口径/复权/时点），无法一致时标注"跨源分歧"
+  并保留全部口径，由读者判断
 - 合并 3-4 份 JSON → 完整 collection（用 `skills/invest-a-stock/scripts/merge_collections.py`）
 
 **Phase 1 耗时：** 3 Agent 并行 ≈ 30-40s（vs 串行 80s）
@@ -123,5 +129,5 @@
 3. **行业与竞争**：波特五力 / 竞争格局 / 产业链利润池
 4. **风险与治理**：快速否决 / 风险信号 / 公司治理 / Known Unknowns
 
-> Agent prompt 模板详见 [references/agent-prompts.md](references/agent-prompts.md)。
+> Agent prompt 模板详见 [agent-prompts.md](agent-prompts.md)。
 > 采集/分析阶段的所有 Agent 只调 Bash（invest.py / skills/invest-a-stock/scripts/merge_collections.py），不调 Tushare/akshare API — 不触发限流。

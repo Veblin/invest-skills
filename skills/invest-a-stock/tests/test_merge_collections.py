@@ -110,6 +110,17 @@ class TestMergeDataFallback:
         assert cv["results"][0]["source_a"] == "akshare"
         assert cv["results"][0]["source_b"] == "baostock"
 
+    def test_third_collection_same_source_preserves_values(self):
+        a = _dim("financials", data={"roe": 10.0}, source="tushare")
+        b = _dim("financials", data={"roe": 12.0}, source="akshare")
+        c = _dim("financials", data={"roe": 11.0}, source="tushare")
+        merged = merge_collections([_collection([a]), _collection([b]), _collection([c])])
+        cv = merged["_cross_validation"]
+        assert [(x["collection"], x["data"]["roe"])
+                for x in cv["batches"]["financials"]] == [(1, 10.0), (2, 12.0), (3, 11.0)]
+        assert {x["collection_b"] for x in cv["results"]} == {2, 3}
+        assert cv["need_tiebreaker"] is True
+
     def test_single_dim_untouched(self):
         a = _dim("quote", data={"close": 10.0})
         merged = merge_collections([_collection([a])])
