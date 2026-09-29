@@ -34,6 +34,21 @@ TUSHARE_API_URL = "https://api.tushare.pro"
 DAILY_CALL_LIMIT = 500
 RATE_LIMIT_PER_MINUTE = 80
 
+# 官方「积分与频次权限对应表」（https://tushare.pro/document/1?doc_id=290）：
+#   120 分 → 50 次/分钟；2000 分以上 → 200；5000 分以上 → 500；10000 分以上 → 500（特色数据 300）
+# 用于把「接口要求的最低积分」机械映射成该接口的默认频次预算。
+#
+# ⚠️ 口径诚实标注：官方页**未明说**限额是按接口还是按账号。故本映射取官方值的
+#    1/4 作保守下限（CONSERVATIVE_TIER_DIVISOR），并且**以实例默认值为地板**——
+#    即只有「能访问高积分接口 ⇒ 账号必然在高档位」的接口才会放宽，其余一字不动。
+#    若观察到 403/限流响应，用环境变量 TUSHARE_RATE_LIMIT_PER_MINUTE 全局下调。
+OFFICIAL_TIER_RPM: list[tuple[int, int]] = [  # (所需积分下限, 官方每分钟频次)
+    (5000, 500),
+    (2000, 200),
+    (120, 50),
+]
+CONSERVATIVE_TIER_DIVISOR = 4
+
 # 官方最低积分（以各接口文档为准；用于降级提示）
 # sw_daily: https://tushare.pro/document/2?doc_id=327
 TUSHARE_API_MIN_POINTS: dict[str, int] = {
@@ -58,6 +73,43 @@ TUSHARE_API_MIN_POINTS: dict[str, int] = {
 def api_min_points(api_name: str) -> int | None:
     """返回接口文档标注的最低积分，未知则 None。"""
     return TUSHARE_API_MIN_POINTS.get(api_name)
+
+
+def official_tier_rpm(points: int) -> int | None:
+    """按账号积分档位返回官方每分钟频次；低于最低档返回 None。"""
+    for min_points, rpm in OFFICIAL_TIER_RPM:
+        if points >= min_points:
+            return rpm
+    return None
+
+
+def _env_rate_limit() -> int | None:
+    """TUSHARE_RATE_LIMIT_PER_MINUTE 覆盖（非正整数/缺省 → None，用默认值）。"""
+    raw = os.environ.get("TUSHARE_RATE_LIMIT_PER_MINUTE")
+    if raw and raw.strip().isdigit() and int(raw) > 0:
+        return int(raw)
+    return None
+
+
+def rate_limit_for_api(
+    api_name: str, floor: int = RATE_LIMIT_PER_MINUTE, *, ceiling: int | None = None,
+) -> int:
+    """该接口的每分钟调用预算；显式降速时用 ceiling 封顶。
+
+    能访问某接口 ⇒ 账号积分 ≥ 该接口的最低积分 ⇒ 官方频次至少是该档位值。
+    取 1/4 作保守下限（官方页未明说限额按接口还是按账号），并**以 floor 为地板**：
+    只有 5000 档接口放宽，其余保持默认 80/min 不变。
+
+    实测效果：opt_daily(5000) → max(80, 125) = 125；daily_basic(2000) → max(80, 50) = 80；
+    daily(120) → max(80, 12) = 80；未知接口 → 80。
+
+    例：`opt_daily` 原受 80/min 自节流，~121 次调用的理论最短窗口 ≈ 90.8s；
+    按 125/min 降至 ≈ 58.1s（理论值，非实测墙钟）。
+    """
+    points = TUSHARE_API_MIN_POINTS.get(api_name)
+    rpm = official_tier_rpm(points) if points is not None else None
+    budget = max(floor, rpm // CONSERVATIVE_TIER_DIVISOR) if rpm is not None else floor
+    return min(budget, ceiling) if ceiling is not None else budget
 
 # 积分/权限不足（预期降级，非异常）
 _PERMISSION_DENIED_CODES = frozenset({40203})
@@ -107,6 +159,13 @@ class TushareClient:
             except Exception:
                 self._token = None
         self._timeout = timeout
+        # 显式参数 > 环境变量 TUSHARE_RATE_LIMIT_PER_MINUTE > 默认 80。
+        # env 统一在此解析，避免各调用方（market_daily / futures_data）各写一份。
+        # 显式值是账号总量及各接口的上限；默认值用于低积分接口的地板。
+        self._explicit_rate_limit = rate_limit_per_minute is not None
+        if rate_limit_per_minute is None:
+            rate_limit_per_minute = _env_rate_limit()
+            self._explicit_rate_limit = rate_limit_per_minute is not None
         self._rate_limit_per_minute = (
             RATE_LIMIT_PER_MINUTE if rate_limit_per_minute is None else rate_limit_per_minute
         )
@@ -115,7 +174,10 @@ class TushareClient:
         )
         self._session = requests.Session()
         self._session.trust_env = False
-        self._call_timestamps: list[float] = []
+        # 按**接口名分桶**的 60s 滑动窗口。分桶是必需的：若仍用单一全局窗口，
+        # 即便 rate_limit_for_api 放开了 opt_daily 的预算，全局计数照样会把它卡在 80。
+        self._call_timestamps: dict[str, list[float]] = {}
+        self._total_call_timestamps: list[float] = []
         self._daily_calls = 0
         # 限流计数器并发保护：_map_parallel 的 PCR/创新高面板 fan-out
         # （默认 8 线程）共享同一实例并发 query，append+重绑定的复合操作
@@ -124,6 +186,10 @@ class TushareClient:
         # 当日结束时重置计数器（Tushare 日配额按北京时间 UTC+8 零点重置）
         self._daily_reset_at = _next_beijing_midnight_reset_at(time.time())
         self._permission_denied_apis: set[str] = set()
+        # 账号积分档位的**已证明下限**：仅当某个 ≥该档的接口实际返回成功才抬升。
+        # 「能调用某接口 ⇒ 账号积分 ≥ 该接口门槛」只对该接口成立，不能推广到账号
+        # 总量——未证明前总桶保持地板，避免只用低档接口的账号被机械放宽（评审 P2）。
+        self._proven_points: int = 0
         # 最近一次 query 的失败原因（None=成功，含合法空结果）。
         # 失败路径一律返回空 DataFrame 不抛异常（本类契约）→ 调用方若要区分
         # 「真空窗」与「取数失败」必须读此信号（R1 审查 F1：forecast 曾假设
@@ -197,7 +263,7 @@ class TushareClient:
             return pd.DataFrame()
 
         self._reset_daily_counter_if_needed()
-        self._wait_for_rate_limit()
+        self._wait_for_rate_limit(api_name, reserve=True)
 
         payload: dict[str, Any] = {
             "api_name": api_name,
@@ -245,7 +311,13 @@ class TushareClient:
                 self.last_error = f"code={code} {msg[:80]}"
                 return pd.DataFrame()
 
-            self._record_call()
+            # code==0 即证明账号可访问该接口 ⇒ 积分 ≥ 该接口门槛（供账号总桶预算用）。
+            # 空结果同样算证明：非交易日返回空帧也是「有权限」的合法响应。
+            _pts = api_min_points(api_name)
+            if _pts is not None:
+                with self._lock:
+                    if _pts > self._proven_points:
+                        self._proven_points = _pts
 
             data_obj = data.get("data", {})
             if not data_obj:
@@ -279,30 +351,62 @@ class TushareClient:
     # 内部方法
     # ------------------------------------------------------------------
 
-    def _record_call(self) -> None:
+    def _record_call(self, api_name: str) -> None:
         with self._lock:
             now = time.time()
-            self._call_timestamps.append(now)
+            bucket = self._call_timestamps.setdefault(api_name, [])
+            bucket.append(now)
+            self._total_call_timestamps.append(now)
             self._daily_calls += 1
             # 只保留最近 60 秒的记录
             cutoff = now - 60
-            self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
+            self._call_timestamps[api_name] = [t for t in bucket if t > cutoff]
+            self._total_call_timestamps = [t for t in self._total_call_timestamps if t > cutoff]
 
-    def _wait_for_rate_limit(self) -> None:
-        """遵守实例级频率限制（默认 80 次/分钟）。
+    def _wait_for_rate_limit(self, api_name: str, *, reserve: bool = False) -> None:
+        """遵守接口与账号总量的 60 秒窗口；query 在放行时预占名额。
 
-        sleep 保持在锁内：串行化即限流器本意——并发线程到达限制时
-        依次等待，而不是各自估算后一起放行。
+        预算由 `rate_limit_for_api(api_name, floor=self._rate_limit_per_minute)` 给出：
+        地板保证不会比旧行为更激进，档位映射只对高积分接口放宽。
+        账号总桶同理：未证明更高档位前保持地板（见 `_proven_points`）。
+
+        预占在锁内完成，并发请求不能同时看到同一剩余额度。
         """
-        with self._lock:
-            cutoff = time.time() - 60
-            self._call_timestamps = [t for t in self._call_timestamps if t > cutoff]
-            recent_calls = len(self._call_timestamps)
-            limit = self._rate_limit_per_minute
-            if recent_calls >= limit:
-                wait = 1.0 + (recent_calls - limit + 1) * 0.75
-                logger.debug("Tushare: 频率限制，等待 %.1fs", wait)
-                time.sleep(min(wait, 5.0))
+        limit = rate_limit_for_api(
+            api_name, floor=self._rate_limit_per_minute,
+            ceiling=self._rate_limit_per_minute if self._explicit_rate_limit else None,
+        )
+        # 账号总桶：未证明更高档位前一律用地板。旧写法无条件取档位表首项推导值
+        # （5000 档 → 125），使只用低档接口的账号也被放宽，与「不得机械提高并发」
+        # 相悖（评审 P2）。档位由 _proven_points 决定：成功调用过 opt_daily/sw_daily
+        # 等 5000 档接口后才抬到 125；2000 档推导值 50 < 地板，仍保持地板。
+        total_limit = (
+            self._rate_limit_per_minute if self._explicit_rate_limit
+            else max(RATE_LIMIT_PER_MINUTE,
+                     (official_tier_rpm(self._proven_points) or 0) // CONSERVATIVE_TIER_DIVISOR)
+        )
+        while True:
+            with self._lock:
+                now = time.time()
+                cutoff = now - 60
+                bucket = [t for t in self._call_timestamps.get(api_name, []) if t > cutoff]
+                total = [t for t in self._total_call_timestamps if t > cutoff]
+                self._call_timestamps[api_name] = bucket
+                self._total_call_timestamps = total
+                waits = []
+                if len(bucket) >= limit:
+                    waits.append(bucket[0] + 60 - now)
+                if len(total) >= total_limit:
+                    waits.append(total[0] + 60 - now)
+                if not waits:
+                    if reserve:
+                        bucket.append(now)
+                        total.append(now)
+                        self._daily_calls += 1
+                    return
+                wait = max(waits)
+            logger.debug("Tushare: 频率限制 (%s)，等待 %.1fs", api_name, wait)
+            time.sleep(max(wait, 0.001))
 
     def _reset_daily_counter_if_needed(self) -> None:
         with self._lock:
