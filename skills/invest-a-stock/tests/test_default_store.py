@@ -216,15 +216,12 @@ class TestReportAutoStore:
         """CLI 默认 full 落盘必须保留 renderer 的底稿身份，而非伪装成研究成品。"""
         import invest
 
-        original_render = invest.render.render
         monkeypatch.setattr(invest, "_HAS_STORE", False)
         monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
-
-        def _offline_render(*args, **kwargs):
-            kwargs["attach_extras"] = False
-            return original_render(*args, **kwargs)
-
-        monkeypatch.setattr(invest.render, "render", _offline_render)
+        # 补挂已收敛回采集/准备期（不再交给 render 的 attach_extras=False 覆盖），
+        # 故在此显式短路，否则本用例会真联网取市场结构（项目 .env 里有 token）。
+        # 真实渲染器照常运行——该用例断言的是落盘的底稿身份文案。
+        monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
         outdir = tmp_path / "reports"
         assert invest.cmd_report(_report_args(store=False, outdir=str(outdir), mode="full")) == 0
         text = next(outdir.rglob("*.md")).read_text(encoding="utf-8")
@@ -324,6 +321,9 @@ class TestReportAutoStore:
         monkeypatch.setattr(invest, "store_mod", isolated_store)
         monkeypatch.setattr(invest, "_try_resume_collection", lambda _s: payload)
         monkeypatch.setattr(invest, "_resume_cache_compatible", lambda *a, **k: True)
+        # 恢复路径仍会在渲染前补齐报告字段（自带降级）——用例只需断言落库行为，
+        # 故在此短路，避免真联网（项目 .env 里有 token）。
+        monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
         monkeypatch.setattr(invest.render, "render", lambda *a, **k: "ok")
 
         assert invest.cmd_report(_report_args(resume=True)) == 0
@@ -343,27 +343,39 @@ class TestReportAutoStore:
         assert invest.cmd_report(_report_args(resume=True)) == 0
         assert len(isolated_store.list_collections(symbol="600176")) == 1
 
-    def test_report_md_renders_with_attach_extras(self, isolated_store, monkeypatch):
-        """#1 回归：cmd_report 默认 md 路径显式传 attach_extras=True（补挂 market_structure）。
+    def test_report_md_prepares_at_collect_and_renders_offline(
+            self, tmp_path: Path, monkeypatch):
+        """#1 回归（2026-09-30 收敛后重述）：采集期备齐、render 收 attach_extras=False。
 
         98813b5 把 render 默认值翻转为 False 后，默认 md 报告与落库快照静默缺失
-        模块 5 市场结构；此用例锁定 cmd_report 必须显式开启。
+        模块 5 市场结构；原用例断言「cmd_report 传 attach_extras=True」——那是**代理断言**，
+        锁的是实现方式而非保证。补挂已收敛到采集装配末尾（`collect_all(prepare_for_report=True)`），
+        故改为断言合同：① 采集链收到 `prepare_for_report=True`；② 交给 render 的集合里
+        已有 market_structure；③ render 收到 `attach_extras=False`（渲染链不联网）。
         """
         import invest
 
         captured: dict = {}
-        monkeypatch.setattr(invest, "_HAS_STORE", True)
-        monkeypatch.setattr(invest, "store_mod", isolated_store)
-        monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _fake_result())
 
-        def _spy_render(*a, **k):
-            captured["kwargs"] = k
+        def _collect_with_market_structure(_symbol, _dims, **kwargs):
+            captured["collect_kwargs"] = kwargs
+            data = _fake_result()
+            data["market_structure"] = {"put_call_ratio": {"ratio": 0.742}}
+            return data
+
+        def _spy_render(collection, *a, **k):
+            captured["attach_extras"] = k.get("attach_extras")
+            captured["has_market_structure"] = "market_structure" in collection
             return "ok"
 
+        monkeypatch.setattr(invest, "_HAS_STORE", False)
+        monkeypatch.setattr(invest.collector, "collect_all", _collect_with_market_structure)
         monkeypatch.setattr(invest.render, "render", _spy_render)
 
-        assert invest.cmd_report(_report_args()) == 0
-        assert captured["kwargs"].get("attach_extras") is True
+        assert invest.cmd_report(_report_args(store=False, outdir=str(tmp_path))) == 0
+        assert captured["collect_kwargs"].get("prepare_for_report") is True
+        assert captured["attach_extras"] is False
+        assert captured["has_market_structure"] is True
 
     def test_report_no_store_skips_pipeline_step(self, isolated_store, monkeypatch):
         """review #3 附：--no-store 时 report 不标记 pipeline 步骤完成。"""

@@ -327,12 +327,19 @@ def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
     return (now - dt) < timedelta(minutes=SAME_SESSION_WINDOW_MINUTES)
 
 
-def list_collections(limit: int = 20, symbol: str | None = None) -> list[dict]:
+def list_collections(limit: int = 20, symbol: str | None = None,
+                     kind: str | None = None) -> list[dict]:
     init_db()
     c = _conn()
     try:
-        if symbol:
+        if symbol and kind:
+            rows = c.execute("SELECT * FROM collections WHERE symbol=? AND kind=? ORDER BY fetched_at DESC, id DESC LIMIT ?",
+                             (symbol, kind, limit)).fetchall()
+        elif symbol:
             rows = c.execute("SELECT * FROM collections WHERE symbol=? ORDER BY fetched_at DESC LIMIT ?", (symbol, limit)).fetchall()
+        elif kind:
+            rows = c.execute("SELECT * FROM collections WHERE kind=? ORDER BY fetched_at DESC, id DESC LIMIT ?",
+                             (kind, limit)).fetchall()
         else:
             rows = c.execute("SELECT * FROM collections ORDER BY fetched_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
@@ -433,7 +440,7 @@ def get_collection(collection_id: int) -> dict | None:
     c = _conn()
     try:
         row = c.execute(
-            "SELECT id, symbol, name, fetched_at, raw_json FROM collections WHERE id=?",
+            "SELECT id, symbol, name, fetched_at, kind, raw_json FROM collections WHERE id=?",
             (collection_id,)).fetchone()
         if not row:
             return None

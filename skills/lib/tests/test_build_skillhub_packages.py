@@ -570,10 +570,13 @@ def test_dry_run_all_packages_within_200(tmp_path):
     # 至 120 且仍显著低于旧版全量复制 129。
     # 2026-09-14 实测 121（P0-5 引入 lib/research_profile.py，被 _concise.py 与
     # render_html.py 引用，随同一共享面并入 etf 闭包）——上限放宽至 125。
+    # 2026-09-30 实测 125（lib/report_snapshot.py 被共享的 render_dcf.py 引用：
+    # 封存快照链的「渲染期不联网」判据 is_sealed 定义在该模块，DCF beta 与
+    # risk_reward 都据此决定是否现场抓基准）——上限放宽至 130。
     # 注意闭包扫描是 AST 全程遍历（build_skillhub_packages.py:279-286），
     # 函数内 import 同样计入，改动态 import 只会让运行时 ImportError 而非省文件。
     etf_total = b.build_one("invest-a-etf", b.project_version(), tmp_path, dry_run=True)
-    assert etf_total < 125
+    assert etf_total < 130
 
 
 # ---- 主仓库源文件不得被回写 ----

@@ -20,7 +20,8 @@ def render_json(collection: dict[str, Any]) -> str:
 def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
            mode: str = "full", *, attach_extras: bool = False,
            analysis: list[dict] | None = None,
-           profile: dict[str, Any] | None = None) -> str:
+           profile: dict[str, Any] | None = None,
+           strict_rigor: bool | None = None) -> str:
     """统一渲染入口。支持 compact / json / md / html 格式。
 
     compact  — 紧凑文本报告（v0.1.2 八段 v2 模板）
@@ -78,12 +79,14 @@ def render(collection: dict[str, Any], symbol: str, fmt: str = "compact",
         return render_html(collection, symbol, analysis=analysis, mode=mode, profile=profile)
     if fmt == "md":
         from ._concise import render_report_v3 as _v3  # deferred: avoid circular import
-        return _v3(collection, symbol, mode=mode, analysis=analysis, profile=profile)
-    return render_report_v2(collection, symbol)
+        return _v3(collection, symbol, mode=mode, analysis=analysis, profile=profile,
+                   strict_rigor=strict_rigor)
+    return render_report_v2(collection, symbol, strict_rigor=strict_rigor)
 
 
 # --- render_report_v2 ---
-def render_report_v2(collection: dict[str, Any], symbol: str) -> str:
+def render_report_v2(collection: dict[str, Any], symbol: str, *,
+                     strict_rigor: bool | None = None) -> str:
     """v0.1.2 八段研究模板。
 
     结构: 公司画像 → 经营质量 → 估值位置 → 资金与筹码 →
@@ -96,7 +99,7 @@ def render_report_v2(collection: dict[str, Any], symbol: str) -> str:
         _header_v2(collection, symbol),
         _section_profile(dims),
         _section_quality(dims),
-        render_valuation_section(dims, collection),
+        render_valuation_section(dims, collection, strict_rigor=strict_rigor),
         _section_flow(dims, collection),
         render_technical_section(dims, collection),
         (_c._section_research_summary)(collection, symbol, dims),
@@ -227,7 +230,8 @@ def _section_quality(dims: dict[str, dict]) -> str:
 
 
 # --- render_valuation_section ---
-def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> str:
+def render_valuation_section(dims: dict[str, dict], collection: dict = None, *,
+                             strict_rigor: bool | None = None) -> str:
     """估值位置（valuation 维度 + valuation.py 分位计算）。"""
     val_dim = dims.get("valuation", {})
     val_data = _get_dim_data(dims, "valuation")
@@ -240,7 +244,9 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None) -> 
     if collection:
         try:
             from ..render_extras import render_rigor_warnings
-            strict = bool((collection.get("_meta") or {}).get("strict_rigor"))
+            # 显式入参优先；`_meta.strict_rigor` 保留为回退（既有调用方与测试契约）
+            strict = bool(strict_rigor if strict_rigor is not None
+                          else (collection.get("_meta") or {}).get("strict_rigor"))
             rigor = render_rigor_warnings(collection, strict=strict)
             if rigor:
                 lines.append(rigor)

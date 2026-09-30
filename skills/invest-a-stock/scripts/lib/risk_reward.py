@@ -179,9 +179,11 @@ def compute_dcf_risk_reward(
     # ---- Step 3: WACC ----
     market_structure = collection.get("market_structure") or {}
 
+    from lib.report_snapshot import is_sealed
     wacc_result, wacc_missing = _dcf_try_wacc(
         financials, market_structure, kline_data,
         rf_override=rf_override, erp_override=erp_override,
+        allow_network=not is_sealed(collection),
     )
     if wacc_result is None:
         return {"error": f"WACC 计算失败: {', '.join(wacc_missing)}"}

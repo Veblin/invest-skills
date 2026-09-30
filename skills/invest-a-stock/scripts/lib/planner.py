@@ -7,6 +7,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from .report_snapshot import REPORT_DEPENDENCIES, plan_digest
+
+__all__ = ["ModuleConfig", "AnalysisPlan", "INTENT_PRESETS", "generate_plan",
+           "REPORT_DEPENDENCIES"]
+
+# 依赖合同的唯一定义在 `report_snapshot`（读取侧同用一份，避免两处漂移）；
+# 此处仅 re-export 供 plan 载荷与调用方使用。
 
 
 @dataclass
@@ -26,9 +33,12 @@ class AnalysisPlan:
     intent: str
     modules: list[ModuleConfig] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # 报告模式是合同的一部分：brief 与 full 的必需字段不同，同一 symbol 的
+    # 两种模式不应得到同一个 plan_hash（原实现硬编码 "full"，等于谎报）。
+    mode: str = "full"
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "symbol": self.symbol,
             "intent": self.intent,
             "modules": [
@@ -42,7 +52,20 @@ class AnalysisPlan:
                 for m in self.modules
             ],
             "notes": self.notes,
+            "report_contract": {
+                "version": 1,
+                "mode": self.mode,
+                "dependencies": REPORT_DEPENDENCIES,
+                "source_policy": {"financials": "L2_parallel_dual_source",
+                                  "valuation": "L2_parallel_dual_source",
+                                  "quote": "L3_cascade_first_success",
+                                  "kline": "L3_cascade_first_success"},
+                "snapshot": "collect_report_ready_then_read_by_id",
+                "freshness": "preserve_fetched_at_and_each_source_as_of",
+            },
         }
+        payload["plan_hash"] = plan_digest(payload)
+        return payload
 
     def dimension_list(self) -> list[str]:
         """提取计划中的维度列表（按 priority 排序）。"""
@@ -145,14 +168,15 @@ INTENT_PRESETS: dict[str, AnalysisPlan] = {
         ],
         notes=[
             "Load references/game-theory.md",
-            "Render: participant_behavior_scan (market_structure attached at render)",
+            "Collect: participant_behavior_scan (market_structure sealed before render)",
         ],
     ),
 }
 
 
-def generate_plan(symbol: str, intent: str = "deep_analysis") -> AnalysisPlan:
-    """根据意图生成采集计划。"""
+def generate_plan(symbol: str, intent: str = "deep_analysis",
+                  mode: str = "full") -> AnalysisPlan:
+    """根据意图生成采集计划。`mode` 记入报告合同（见 `AnalysisPlan.mode`）。"""
     preset = INTENT_PRESETS.get(intent)
     if preset is None:
         raise ValueError(f"未知意图 '{intent}'。可用: {list(INTENT_PRESETS.keys())}")
@@ -161,5 +185,6 @@ def generate_plan(symbol: str, intent: str = "deep_analysis") -> AnalysisPlan:
         intent=intent,
         modules=deepcopy(preset.modules),
         notes=list(preset.notes),
+        mode=mode or "full",
     )
     return plan

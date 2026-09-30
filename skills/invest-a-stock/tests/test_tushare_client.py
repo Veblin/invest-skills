@@ -378,6 +378,66 @@ class TestPerApiRateLimitBudget:
                 client._wait_for_rate_limit("daily", reserve=True)
 
 
+def test_concurrent_query_outcomes_use_each_requests_error(monkeypatch):
+    """A successful concurrent query must not erase a failed query's outcome."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    import pandas as pd
+    from lib.tushare_client import TushareClient, rate_limit_stats
+
+    client = TushareClient(token="a" * 32)
+    failed_ready = Event()
+    success_finished = Event()
+
+    def query_impl(api_name, **_kwargs):
+        if api_name == "concurrent_failed_test":
+            client.last_error = "timeout"
+            failed_ready.set()
+            assert success_finished.wait(2)
+            return pd.DataFrame()
+        assert failed_ready.wait(2)
+        client.last_error = None
+        return pd.DataFrame({"value": [1]})
+
+    monkeypatch.setattr(client, "_query_impl", query_impl)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failed = executor.submit(client.query, "concurrent_failed_test")
+        succeeded = executor.submit(client.query, "concurrent_ok_test")
+        assert not succeeded.result(timeout=3).empty
+        success_finished.set()
+        assert failed.result(timeout=3).empty
+
+    stats = rate_limit_stats()["by_api"]
+    assert stats["concurrent_failed_test"]["failed"] == 1
+    assert stats["concurrent_ok_test"].get("failed", 0) == 0
+
+    ok_ready = Event()
+    failure_finished = Event()
+
+    def reversed_query_impl(api_name, **_kwargs):
+        if api_name == "concurrent_ok_after_failure_test":
+            client.last_error = None
+            ok_ready.set()
+            assert failure_finished.wait(2)
+            return pd.DataFrame({"value": [1]})
+        assert ok_ready.wait(2)
+        client.last_error = "timeout"
+        return pd.DataFrame()
+
+    monkeypatch.setattr(client, "_query_impl", reversed_query_impl)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        succeeded = executor.submit(client.query, "concurrent_ok_after_failure_test")
+        failed = executor.submit(client.query, "concurrent_failed_before_ok_test")
+        assert failed.result(timeout=3).empty
+        failure_finished.set()
+        assert not succeeded.result(timeout=3).empty
+
+    stats = rate_limit_stats()["by_api"]
+    assert stats["concurrent_failed_before_ok_test"]["failed"] == 1
+    assert stats["concurrent_ok_after_failure_test"].get("failed", 0) == 0
+
+
 class TestTokenResolution:
     """#15：token 三级降级（显式 → os.environ → .env 文件）。"""
 

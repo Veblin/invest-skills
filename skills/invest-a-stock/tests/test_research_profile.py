@@ -285,6 +285,7 @@ def test_cli_sidecar_carries_generation(tmp_path: Path,
 
     monkeypatch.setattr(invest, "_HAS_STORE", False)
     monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _RENDER_COLLECTION)
+    monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
     monkeypatch.setattr(invest.render, "render", lambda *a, **k: "# report\n")
 
     outdir = tmp_path / "reports"
@@ -359,6 +360,7 @@ def test_cli_persists_profile_sidecar(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(invest, "_HAS_STORE", False)
     monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _RENDER_COLLECTION)
+    monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
     monkeypatch.setattr(invest.render, "render", lambda *a, **k: "# report\n")
 
     outdir = tmp_path / "reports"

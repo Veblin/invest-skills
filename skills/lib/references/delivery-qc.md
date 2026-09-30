@@ -52,6 +52,8 @@ uv run python skills/lib/report_qc.py <报告文件> --fail-on error
 
 → 无 error 级发现方可进入以下三层人工复检（退出码 **0=PASS / 1=WARN 均可交付**，**2=FAIL 不得交付**）；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）逐条复核后消除或说明。qc 规则细节见 `skills/lib/report_qc.py` 层说明。
 
+> **`--verify-data` 不是本步的加严开关，而是另一件事**：它会让 `report_qc.py` 重新联网跑 `collect_all` 做 audit/quality/rigor（仅个股），属**独立现场复核**。默认链（八分钟口径）只跑上面这条不带 `--verify-data` 的命令；要用它，明确当成另一次现场核验来对待，别混入默认链的耗时与成败判定。
+
 > **机器 PASS ≠ 可交付**：第 0 层只拦可机械判定的问题，其后三层人工复检不可省。
 
 ---

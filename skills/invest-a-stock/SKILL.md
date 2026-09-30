@@ -216,7 +216,7 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 
 **Insight 层（`report --mode insight`，v0.3.0 MVP）**：面向阅读的研究要点，由确定性 Facts / Findings 模型生成。首层只给可追溯结论、核心矛盾、分析合成、反证/关联边界、观察节点与补证路径；九模块原始表和公式继续留在 `full` 审计底稿。每次同时落盘 `.facts.json`、`.insight.json` 与 `.report.json`，Markdown 与 HTML 只能消费同一代 Finding。证据不足时明确标为「分析未完成」，不以空模板或数据罗列伪装完成。
 
-**分析合成注入（`--analysis`）**：传入时把 analysis.json 渲染为「分析合成（Claude 撰写）」独立分区（置于核心矛盾之后），并落同代 `<ts>.insight.analysis.json` 侧车、在 manifest 登记 `analysis_sidecar`。该分区**不是 Finding**：不参与 findings / core_tension / analysis_chains / completion 的任何推导。段内数字的机器保证来自段内 `facts` 数组（v0.3.1 #4：`[事实: F{n}]` 引用完整性 + formula 复算一致，见下节）；**未声明 `facts` 的段不触发校验**，其可审计性止于「来源 + 同代绑定 + 段级证据等级」——该缺口（`facts` 与**当次采集**的字段级比对）已在 `analysis_schema.py` 记录为后续项，文档不假装已闭环。`completion` 与 `synthesis.status` 是两条独立状态轴——AI 散文不得把「证据不足」抬成「分析完成」。未传 `--analysis` 时**不渲染分析合成分区、不写分析侧车**；既有输出契约不变，但有两处**新增字段**（非逐字节一致）：状态卡多一段「分析合成：未注入（仅引擎结论）」，`.insight.json` 多一个 `synthesis` 键（`status="absent"`）。以逐字节基线验收的消费者需知悉。
+**分析合成注入（`--analysis`）**：传入时把 analysis.json 渲染为「分析合成（Claude 撰写）」独立分区（置于核心矛盾之后），并落同代 `<ts>.insight.analysis.json` 侧车、在 manifest 登记 `analysis_sidecar`。该分区**不是 Finding**：不参与 findings / core_tension / analysis_chains / completion 的任何推导。段内数字先由 `facts` 数组检查 `[事实: F{n}]` 引用与 formula；固定快照链进一步按 `source_path` 对封存数值，外部 `source_url` 仍由研究者读原文核验。**未声明 `facts` 的段不触发字段级校验**，其可审计性止于「来源 + 同代绑定 + 段级证据等级」，不得承载未经核验的关键数字。`completion` 与 `synthesis.status` 是两条独立状态轴——AI 散文不得把「证据不足」抬成「分析完成」。未传 `--analysis` 时**不渲染分析合成分区、不写分析侧车**；既有输出契约不变，但有两处**新增字段**（非逐字节一致）：状态卡多一段「分析合成：未注入（仅引擎结论）」，`.insight.json` 多一个 `synthesis` 键（`status="absent"`）。以逐字节基线验收的消费者需知悉。
 
 **第三层（concise 对话模式，按需专项）**：Hermes/OpenClaw 等对话场景使用。结论先行 + 关键数据展开块。3-5 段核心结论直出，详细数据用 `<details>` 折叠。CLI 对应 `--mode concise`。
 > **v0.3.1 D1：退出默认流程（代码保留）。** 默认交付链不提示该模式，需要时显式指定。依据：本机 603 份报告侧车统计中 concise 使用 0 次（`host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §1.1）——这是本机观察结果，不外推为「无人使用」，故只退出流程而不删代码。
@@ -322,6 +322,8 @@ PE / PB / PS
 > 动机：引擎按固定维度清单采集，无法覆盖"这家公司特有的数据"（分部收入、订单/临床里程碑、可比公司、行业技术路线）。引擎没采到 ≠ 数据不存在——**先找材料，找不到才标「数据不足」**（借鉴 ai-berkshire "材料驱动"）。
 
 采集完成后、合成报告前，**必须**执行以下四步（每步 ≤2 次查询新闻/研报——WebSearch / web-search 技能 / /web，视 harness 而定；遵守 agent-prompts.md 搜索纪律——并行批搜 + search_cache）：
+
+同一快照的 `evidence`、首版 MD 和已知公告 ID／分部缺口的原文检索可并行；它们必须引用同一个 `collection_id`。检索前列出有限问题清单，批量提交可并行查询并按 URL 去重；每份用于结论的材料记录 URL、发布日期、抓取时刻、原文定位和核验状态，标题或摘要仅作线索。草稿提出新问题时只针对具体缺口做一次有界补证，写独立证据记录；若改变数值输入，重新采集并生成新 ID，不修改旧快照。
 
 ```
 STEP 1 公司画像锚定（必做）：主营构成/收入分项（修正引擎行业标签）+ 客户结构 + 技术路线一句话 → 「公司画像锚定」小节（来源 + SOP-EV）
@@ -507,7 +509,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
    `[{module, title, facts_md, analysis_md, evidence_tag, position, facts?}]`
    - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（带 [证据: X] / [证据强度: ...]）
    - `evidence_tag`：A-D 或 L1-L4；`position` ∈ events/valuation/financials/northbound/holders/refs/conclusion
-   - **`facts`（协议层可选，交付路径必填——P0 数字纪律的机器保证只在带它时生效）**：
+   - **`facts`（协议层可选，交付路径必填——P0 数字纪律的机器保证只在带它时生效）**：固定快照链还须逐项提供 `source_path`（封存 JSON 的点路径，可用 `dimension_by_name.<维度>.data...`，必要时显式 `source_scale`）或外部原文 `source_url`；前者由 `validate-analysis --collection-id` 与 `report --collection-id` 复核数值，后者须人工核验原文。
      本段数值事实数组 `[{id: "F1", value: 12.5, formula: "…", field: "valuation.pe_ttm"}]`。
      **`value` 必填且必为数值**（只写 `field` 不写 `value` 会 fail-loud：`value 必为数值`）；
      `field`（来源标签）与 `formula` 均可选、不互斥，两者都省略时该 fact 无来源标签亦无复算。
@@ -542,18 +544,19 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 > 交付一条完整研究产物只有这一条链。`--analysis` 注入与末步 `report_qc` 是**链上步骤**，不是可省略的收尾动作。任一步失败即停在该步，不带缺陷往下走。
 
 ```bash
-# 1) 采集：plan → collect → evidence（--from-store 复用 collect 快照，跳过重复现场采集）
-#    ⚠️ plan 只把 JSON 打到 stdout，**必须重定向落盘**：漏了 `> /tmp/plan.json`，
-#    后续 `--plan` 读不到文件只会警告一行，然后**静默退回 CLI 默认维度**（丢 segments / research）
+# 1) plan → 一次 report-ready 采集。plan 必须重定向落盘；无效/空计划会报错退出。
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py plan 600176 --intent deep_analysis > /tmp/plan.json
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json --from-store
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json --report-ready
+# 从上一条 stderr 的 collection_id= 读取本轮 ID；以下命令均填同一个 ID，不查“同标的最新”。
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json --collection-id <本轮ID>
 # 2) 出 md（分析段为占位符；qc 的 F0-3 拦截未填占位）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --resume
-# 3) 写 analysis.json（含 facts 数组）→ 先快速校验，再注入并出 html（同代 md_v2 一并落盘）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID>
+# 3) 写 analysis.json（含 facts 数组）→ 协议校验 → 候选完整 MD 的离线 lint/QC → 最终 HTML+MD
 #    输入路径任意；引擎会把已校验的段原样复制到 <报告>.analysis.json 同代侧车（勿手写侧车路径）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py validate-analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径>
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --resume \
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py validate-analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --collection-id <本轮ID> --plan /tmp/plan.json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID> \
+  --analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --emit html --preflight
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID> \
   --analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --emit html
 # 4) 机器准出（必跑；退出码 0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）
 #    目标 = **步骤 3 刚落盘的 md**：路径逐字取步骤 3 stderr 的「📝 Markdown 报告:」行。
@@ -562,7 +565,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <步骤3 stderr 的 md 路径> --fail-on error
 ```
 
-`collect` 成功落库后，`evidence --from-store` 与首次 `report --resume` 都只依赖同一采集快照，可在两个终端同时启动；两者都完成后再撰写分析。R12a 外部取证也可与首次报告渲染重叠，但分析合成须等证据与初稿齐备。`validate-analysis --draft` 可反复运行，不触发采集或重渲；只在通过后启动最终 HTML 渲染。最终 `report_qc` 仍须检查刚生成的 MD。
+`collect --report-ready` 封存市场结构（含 PCR 样本与来源状态）、事件、条件连板项、沪深300 基准序列（DCF beta 用，**渲染链唯一的联网点由此前移**）和默认 `value` 结果，输出 ID/hash；每条依赖另落 available/unavailable/not_triggered 三态（条件项未触发不算缺口）。绑定计划的快照在后续每条只读命令都须附同一 `--plan`；仅传 ID 或匹配维度不够。首次 `report` 用固定 ID 时会打印**事实路径索引**（写 `facts.source_path` 用）、数据时点/样本窗口与写作约束。`evidence` 与首次 `report` 用同一 ID 并行只读；R12a 一手核验可同时开始，分析须等证据与初稿齐备。`value SYMBOL --collection-id <本轮ID> --plan /tmp/plan.json` 读取同代默认估值；若需 `--steady` 等额外参数，须单列现场取证，不能称为同快照结果。候选 `--preflight` 须使用固定 ID，调用同一报告产物路径并仅在临时目录写入；Insight 候选含其 sidecars。最终 HTML 同代 MD 仍须对最终路径执行 `report_qc` 与三层人工复检。旧 `--resume` 保留兼容，会按最近 collect 快照恢复，缺扩展字段时仍可能现场补采，不用于固定输入链。
 
 > 第 4 步之后仍须走共享规范 §7 Self-Check 与 [delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§5 的第 0 层机器准出 + 三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
 

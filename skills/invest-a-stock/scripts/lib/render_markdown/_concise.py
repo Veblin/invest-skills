@@ -614,7 +614,8 @@ def _concise_capital_flow(dims, collection):
 # --- render_report_v3 ---
 def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full",
                      analysis: list[dict] | None = None,
-                     profile: dict[str, Any] | None = None) -> str:
+                     profile: dict[str, Any] | None = None,
+                     strict_rigor: bool | None = None) -> str:
     """v0.2.0 九模块数据底稿。mode="brief" 输出精简简报, mode="concise" 输出对话场景精简。
 
     analysis（R-B1）: analysis.json 段列表，渲染期替换 "[待 Claude report 阶段填充]" 占位。
@@ -639,7 +640,9 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
     risk_data = _v3_build_risk_report(
         collection, dims, market_structure, val_cache=val_cache,
     )
-    strict = bool((collection.get("_meta") or {}).get("strict_rigor"))
+    # 显式入参优先；`_meta.strict_rigor` 保留为回退（既有调用方与测试契约）
+    strict = bool(strict_rigor if strict_rigor is not None
+                  else (collection.get("_meta") or {}).get("strict_rigor"))
 
     if mode == "brief":
         parts: list[str] = [

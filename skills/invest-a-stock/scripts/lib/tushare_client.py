@@ -190,11 +190,13 @@ class TushareClient:
         # 「能调用某接口 ⇒ 账号积分 ≥ 该接口门槛」只对该接口成立，不能推广到账号
         # 总量——未证明前总桶保持地板，避免只用低档接口的账号被机械放宽（评审 P2）。
         self._proven_points: int = 0
-        # 最近一次 query 的失败原因（None=成功，含合法空结果）。
+        # 最近一次 query 的失败原因按线程隔离：市场结构面板并发复用此实例，
+        # 共享槽会让一个请求覆盖另一个请求的结果与失败统计。
         # 失败路径一律返回空 DataFrame 不抛异常（本类契约）→ 调用方若要区分
         # 「真空窗」与「取数失败」必须读此信号（R1 审查 F1：forecast 曾假设
         # query 会抛/返回 None，导致失败检测永不触发）。
-        self.last_error: str | None = None
+        self._last_error_local = threading.local()
+        self.last_error = None
         # 在初始化时捕获代理设置，供显式传入 Session（trust_env=False）
         self._proxies: dict[str, str] = {}
         for key in ("http", "https"):
@@ -205,6 +207,14 @@ class TushareClient:
     # ------------------------------------------------------------------
     # 公共方法
     # ------------------------------------------------------------------
+
+    @property
+    def last_error(self) -> str | None:
+        return getattr(self._last_error_local, "value", None)
+
+    @last_error.setter
+    def last_error(self, value: str | None) -> None:
+        self._last_error_local.value = value
 
     def is_available(self) -> bool:
         """检测 Token 是否有效且可连接。
@@ -240,6 +250,16 @@ class TushareClient:
         return api_name in self._permission_denied_apis
 
     def query(self, api_name: str, fields: str = "", **kwargs: Any) -> pd.DataFrame:
+        """公开入口：原实现 + 结果计数（可观测性；计数本身绝不改变返回）。"""
+        try:
+            frame = self._query_impl(api_name, fields=fields, **kwargs)
+        except BaseException:
+            self._note_outcome(api_name, None, crashed=True)
+            raise
+        self._note_outcome(api_name, frame, error=self.last_error)
+        return frame
+
+    def _query_impl(self, api_name: str, fields: str = "", **kwargs: Any) -> pd.DataFrame:
         """统一查询入口。
 
         Args:
@@ -292,6 +312,7 @@ class TushareClient:
                     logger.warning("Tushare: 配额已用完 (%s)", api_name)
                 elif _is_permission_denied(code, msg):
                     self._permission_denied_apis.add(api_name)
+                    _accumulate_permission_denied(api_name)
                     min_pts = api_min_points(api_name)
                     if min_pts:
                         logger.debug(
@@ -318,6 +339,7 @@ class TushareClient:
                 with self._lock:
                     if _pts > self._proven_points:
                         self._proven_points = _pts
+                _accumulate_proven_points(_pts)
 
             data_obj = data.get("data", {})
             if not data_obj:
@@ -385,6 +407,9 @@ class TushareClient:
             else max(RATE_LIMIT_PER_MINUTE,
                      (official_tier_rpm(self._proven_points) or 0) // CONSERVATIVE_TIER_DIVISOR)
         )
+        # 预算在请求获准前就落账：零等待的运行也能看出「生效预算是多少」，
+        # 而不是把「未观测」显示成 0（trace 无法区分二者）。
+        self._note_budget(api_name, budget=limit, account_budget=total_limit)
         while True:
             with self._lock:
                 now = time.time()
@@ -406,7 +431,36 @@ class TushareClient:
                     return
                 wait = max(waits)
             logger.debug("Tushare: 频率限制 (%s)，等待 %.1fs", api_name, wait)
-            time.sleep(max(wait, 0.001))
+            slept = max(wait, 0.001)
+            time.sleep(slept)
+            # 逐请求等待与「共享额度实际生效值」一并留痕：额度语义（按接口还是按账号）
+            # 官方未明说，只能靠实测稳态数据裁决，故把每次等待都记下来。
+            self._note_wait(api_name, waited=slept)
+
+    # ------------------------------------------------------------------
+    # 可观测性（复核 §5「先可观测、再可配置、后定额度」的**可观测**半步；
+    # 截至 v0.3.1 只有「可配置」落地。计数只累加，不参与任何限流判定。
+    # ------------------------------------------------------------------
+
+    def _note_outcome(self, api_name: str, frame: Any, *, crashed: bool = False,
+                      error: str | None = None) -> None:
+        """记录一次调用结果：空帧/失败按本次请求的错误分开计数。"""
+        outcome = ("failed" if (crashed or error)
+                   else "empty" if (frame is None or getattr(frame, "empty", True))
+                   else "ok")
+        try:
+            _accumulate(api_name, count_fields={
+                "calls": 1, **({"failed": 1} if outcome == "failed"
+                               else {"empty": 1} if outcome == "empty" else {})})
+        except Exception:  # 计数失败不得影响调用结果
+            logger.debug("tushare stats: 累计 %s 结果失败", api_name)
+
+    def _note_budget(self, api_name: str, *, budget: int, account_budget: int) -> None:
+        """记录**生效预算**（请求获准时调用，不只在被限流时）。"""
+        _accumulate(api_name, budgets=(budget, account_budget))
+
+    def _note_wait(self, api_name: str, *, waited: float) -> None:
+        _accumulate(api_name, count_fields={"waits": 1}, wait_seconds=max(waited, 0.0))
 
     def _reset_daily_counter_if_needed(self) -> None:
         with self._lock:
@@ -427,6 +481,68 @@ class TushareClient:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+
+# ------------------------------------------------------------------
+# 进程内统计汇总（可观测性；只读，不参与限流判定）
+# ------------------------------------------------------------------
+
+# 进程级累计：客户端对象可能在 main() 汇总之前就被回收（worker 线程内、
+# `run_valuation` 等函数内的局部客户端），若只靠实例快照，这部分调用与等待
+# 会凭空消失——而该统计的用途恰恰是「实测本账号真实调用与等待」。
+_GLOBAL_LOCK = threading.Lock()
+_GLOBAL_BY_API: dict[str, dict[str, Any]] = {}
+_GLOBAL_TOTALS: dict[str, Any] = {"proven_points": 0, "permission_denied": set()}
+
+
+def _accumulate(api_name: str, *, count_fields: dict[str, int] | None = None,
+                wait_seconds: float = 0.0,
+                budgets: tuple[int, int] | None = None) -> None:
+    with _GLOBAL_LOCK:
+        slot = _GLOBAL_BY_API.setdefault(api_name, {
+            "calls": 0, "empty": 0, "failed": 0, "waits": 0, "wait_seconds": 0.0,
+            "budget_per_minute": 0, "account_budget_per_minute": 0,
+        })
+        for key, value in (count_fields or {}).items():
+            slot[key] = int(slot.get(key) or 0) + int(value)
+        if wait_seconds:
+            slot["wait_seconds"] = round(float(slot.get("wait_seconds") or 0) + wait_seconds, 3)
+        if budgets is not None:
+            slot["budget_per_minute"] = int(budgets[0])
+            slot["account_budget_per_minute"] = int(budgets[1])
+
+
+def _accumulate_proven_points(points: int) -> None:
+    with _GLOBAL_LOCK:
+        if points > int(_GLOBAL_TOTALS["proven_points"] or 0):
+            _GLOBAL_TOTALS["proven_points"] = points
+
+
+def _accumulate_permission_denied(api_name: str) -> None:
+    with _GLOBAL_LOCK:
+        _GLOBAL_TOTALS["permission_denied"].add(api_name)
+
+
+def rate_limit_stats() -> dict[str, Any]:
+    """本进程累计的调用/等待统计（供 run trace），与客户端生命周期无关。
+
+    用途见复核 §5：官方页未明说限额是按接口还是按账号，只能靠**实测稳态数据**
+    裁决共享额度语义；此函数给出「按接口预算 / 账号总桶 / 实际等待」三组事实。
+    预算字段在**请求获准时**就写入（不是只在被限流时才写），故零等待的运行
+    也能区分「预算为 0」与「未曾观测」。
+    """
+    with _GLOBAL_LOCK:
+        by_api = {name: dict(stats) for name, stats in _GLOBAL_BY_API.items()}
+        totals = {
+            "proven_points": int(_GLOBAL_TOTALS["proven_points"] or 0),
+            "permission_denied": sorted(_GLOBAL_TOTALS["permission_denied"]),
+        }
+    for key in ("calls", "empty", "failed", "waits"):
+        totals[key] = sum(int(stats.get(key) or 0) for stats in by_api.values())
+    totals["wait_seconds"] = round(
+        sum(float(stats.get("wait_seconds") or 0) for stats in by_api.values()), 3)
+    totals["by_api"] = by_api
+    return totals
 
 
 # ------------------------------------------------------------------

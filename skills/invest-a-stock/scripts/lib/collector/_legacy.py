@@ -74,6 +74,7 @@ from ._orchestrate import (  # noqa: F401
     _source_has_data,
     _stock_basic_name_map,
     _summarize_research,
+    attach_events_for_report,
     attach_market_structure,
     attach_phase2_extras,
     collect_all,

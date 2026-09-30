@@ -25,22 +25,8 @@ def _scenario_evidence(scenario: dict, base: dict) -> str:
     return "B" if fcff_ok else "C"
 
 
-# --- _dcf_compute_beta ---
-def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
-    """从个股 K 线 + 沪深300 基准计算 Beta。
-
-    对齐个股与沪深300 的交易日，计算日收益率序列，
-    调用 valuation.calc_beta() 做回归。
-
-    Args:
-        kline_data: 个股 K 线数据（list of dict，含 trade_date/close）
-
-    Returns:
-        {"beta": float, "r_squared": float | None, "observations": int,
-         "source": str, "is_default": bool}
-        计算失败时返回 {"beta": 1.0, "is_default": True, ...}
-    """
-
+def _dcf_stock_by_date(kline_data: list[dict] | None) -> dict[str, float]:
+    """Normalize the trading days used by beta and its collection prerequisite."""
     stock_by_date: dict[str, float] = {}
     if kline_data and isinstance(kline_data, list):
         for r in kline_data:
@@ -53,6 +39,30 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
             td = str(r.get("trade_date") or "").replace("-", "").replace("/", "")[:8]
             if len(td) == 8 and td.isdigit():
                 stock_by_date[td] = close_f
+    return stock_by_date
+
+
+# --- _dcf_compute_beta ---
+def _dcf_compute_beta(kline_data: list[dict] | None,
+                      *, benchmark: dict | None = None) -> dict:
+    """从个股 K 线 + 沪深300 基准计算 Beta。
+
+    对齐个股与沪深300 的交易日，计算日收益率序列，
+    调用 valuation.calc_beta() 做回归。
+
+    Args:
+        kline_data: 个股 K 线数据（list of dict，含 trade_date/close）
+        benchmark: 封存快照中的沪深300 基准序列（`market_structure.benchmark_hs300`）。
+            **固定快照链必须传入**——渲染链上唯一的联网点就是这里的基准抓取；
+            不传则回落现场抓取（旧 `--resume` 链行为不变）。
+
+    Returns:
+        {"beta": float, "r_squared": float | None, "observations": int,
+         "source": str, "is_default": bool}
+        计算失败时返回 {"beta": 1.0, "is_default": True, ...}
+    """
+
+    stock_by_date = _dcf_stock_by_date(kline_data)
 
     if len(stock_by_date) < 12:
         return {
@@ -61,15 +71,33 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
             "is_default": True,
         }
 
-    # 获取沪深300 基准数据
-    try:
-        from lib.collector import _akshare_hs300_dated_closes
-        bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
-    except Exception as exc:
-        # 单行降级日志（不带 traceback，对齐 collector/_base 降级惯例；
-        # 东财不可达的 ConnectionError 链式栈会淹没真实错误）
-        logger.warning("沪深300基准数据获取失败（%s），Beta 使用默认值 1.0", exc)
+    # 获取沪深300 基准数据：优先封存序列（零网络），否则现场抓取（旧链）
+    bench_from_snapshot = False
+    if benchmark is not None:
         bench_dated = []
+        for row in benchmark.get("closes") or []:
+            try:
+                td, close_v = row[0], row[1]
+            except (TypeError, IndexError):
+                continue
+            td_s = str(td).replace("-", "").replace("/", "")[:8]
+            if len(td_s) == 8 and td_s.isdigit() and close_v is not None:
+                bench_dated.append((td_s, float(close_v)))
+        bench_from_snapshot = bool(bench_dated)
+        if not bench_from_snapshot:
+            logger.warning(
+                "封存快照无可用沪深300基准序列（%s），Beta 使用默认值 1.0",
+                benchmark.get("availability", "空序列"),
+            )
+    else:
+        try:
+            from lib.collector import _akshare_hs300_dated_closes
+            bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
+        except Exception as exc:
+            # 单行降级日志（不带 traceback，对齐 collector/_base 降级惯例；
+            # 东财不可达的 ConnectionError 链式栈会淹没真实错误）
+            logger.warning("沪深300基准数据获取失败（%s），Beta 使用默认值 1.0", exc)
+            bench_dated = []
 
     if not bench_dated:
         return {
@@ -109,11 +137,13 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
             "is_default": True,
         }
 
+    obs = beta_result.get("observations", len(stock_returns))
+    bench_label = "封存基准序列" if bench_from_snapshot else "现场抓取基准"
     return {
         "beta": beta_result["beta"],
         "r_squared": beta_result.get("r_squared"),
-        "observations": beta_result.get("observations", len(stock_returns)),
-        "source": f"个股 vs 沪深300 日收益率回归（{beta_result.get('observations', len(stock_returns))} 个对齐交易日）",
+        "observations": obs,
+        "source": f"个股 vs 沪深300 日收益率回归（{obs} 个对齐交易日，{bench_label}）",
         "is_default": False,
     }
 
@@ -124,6 +154,8 @@ def _dcf_try_wacc(
     kline_data: list[dict] | None = None,
     rf_override: float | None = None,
     erp_override: float | None = None,
+    *,
+    allow_network: bool = True,
 ) -> tuple[dict | None, list[str]]:
     """尝试计算 WACC（CAPM）。
 
@@ -133,7 +165,9 @@ def _dcf_try_wacc(
 
     beta 优先级：
     1. financials / market_structure 中预存的 beta（未来版本直接接入）
-    2. 从 kline_data + HS300 基准实时计算（_dcf_compute_beta）
+    2. 从 kline_data + HS300 基准计算（_dcf_compute_beta）——基准优先取封存的
+       `market_structure.benchmark_hs300`；缺失才现场抓取，但 `allow_network=False`
+       （封存输入）时一律不抓，改标不可得让 beta 走默认值并由报告披露
     3. 默认值 1.0（标注 [推测，待验证]）
 
     Returns:
@@ -147,7 +181,12 @@ def _dcf_try_wacc(
 
     beta_meta: dict = {}
     if beta is None:
-        beta_meta = _dcf_compute_beta(kline_data)
+        sealed_bench = (market_structure.get("benchmark_hs300")
+                        if isinstance(market_structure, dict) else None)
+        if sealed_bench is None and not allow_network:
+            # 封存输入缺基准序列：显式标不可得，绝不联网补抓
+            sealed_bench = {"availability": "unavailable: 快照未封存基准序列", "closes": []}
+        beta_meta = _dcf_compute_beta(kline_data, benchmark=sealed_bench)
         beta = beta_meta["beta"]
 
     # rf: user override > data source > default
@@ -392,7 +431,11 @@ def _section_dcf_valuation(
         lines.append("[来源: market_structure.erp.dgs10]")
         return "\n".join(lines)
 
-    wacc_result, wacc_missing = _dcf_try_wacc(financials, market_structure, kline_data=kline_data)
+    from lib.report_snapshot import is_sealed
+    wacc_result, wacc_missing = _dcf_try_wacc(
+        financials, market_structure, kline_data=kline_data,
+        allow_network=not is_sealed(collection),
+    )
     if wacc_result is None:
         lines.append("数据不足，WACC 无法计算，DCF 段落跳过。缺失项：")
         for m in wacc_missing:

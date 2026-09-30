@@ -2089,7 +2089,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 with_macro: bool = False,
                 with_chain: bool = False,
                 with_news_pack: bool = False,
-                force_sector_sync: bool = False) -> dict[str, Any]:
+                force_sector_sync: bool = False,
+                prepare_for_report: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
@@ -2104,6 +2105,10 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
         force_sector_sync: 绕过 F1 冷缓存门控强制计算板块同步性（首次预热，
             成分股日线全量抓取约 5-10 分钟；默认冷缓存时跳过并标注原因）
+        prepare_for_report: 报告链专用——在装配末尾补采 `market_structure`
+            （PCR/ERP/资金流等报告必需项）。**采集期一次性完成，渲染期不再联网补采**；
+            失败写 availability/attempted_sources，不阻断采集（旧行为是渲染入口
+            补采，且补采结果不入库 → 同一输入连渲四次 = 四次同量联网）。
     """
     # 空列表（如 CLI --dims "" 解析结果）视同 None 填默认维度；
     # 显式语义 + 日志提示（review #2：不静默跑全量）
@@ -2144,12 +2149,53 @@ def collect_all(symbol: str, dims: list[str] | None = None,
     _attach_phase2_block(result, symbol)
     _attach_events_block(result, symbol, deep)
     _attach_analysis_cards_block(result)
+    if prepare_for_report:
+        # 采集期补齐报告必需项：市场结构（含 PCR 样本与逐子源 attempted_sources）
+        # 与 events 回填（瞬时失败在这里重试一次，而不是留给渲染期联网重试）。
+        # 市场结构置于 manifest 之前，使逐源清单覆盖它；失败都不阻断采集。
+        try:
+            attach_market_structure(result, symbol)
+        except Exception as exc:
+            result["market_structure"] = {
+                "availability": {"market_structure": f"unavailable: {exc}"},
+                "attempted_sources": ["collect_market_structure"],
+            }
+        attach_events_for_report(result, symbol, deep=deep)
     _attach_manifest_block(result)
     _attach_news_pack_block(result, symbol, with_news_pack)
 
     logger.info("collect_all total=%.1fs symbol=%s dims=%d",
                 time.time() - start_all, symbol, len(dims))
     return result
+
+
+def attach_events_for_report(collection: dict, symbol: str,
+                            *, deep: bool | None = None) -> bool:
+    """报告前的 events 回填：采集装配末尾与恢复路径共用同一实现。
+
+    此前该重试由 `render(..., attach_extras=True)` 兼任；渲染改为零网络后，重试
+    必须落在采集/准备期——否则一次瞬时失败会让报告缺事件，而采集侧只留一行日志。
+    回填成功要重建分析卡片：`collect_all` 已按旧事件建过一版，不同代会自相矛盾。
+    """
+    from lib.events import attach_events, needs_events_backfill
+
+    if not needs_events_backfill(collection):
+        return False
+    if deep is None:
+        deep = bool((collection.get("_meta") or {}).get("deep"))
+    try:
+        attach_events(collection, symbol, days=90 if deep else 30)
+    except Exception as exc:
+        collection.setdefault("_meta", {})["events_error"] = str(exc)
+        collection.setdefault("events", [])
+        return False
+    collection.setdefault("_meta", {}).pop("analysis_cards", None)
+    try:
+        from lib.analysis_templates import build_analysis_cards
+        build_analysis_cards(collection)
+    except Exception as exc:
+        collection.setdefault("_meta", {})["analysis_cards_error"] = str(exc)
+    return True
 
 
 def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict[str, Any]:
@@ -3949,6 +3995,7 @@ def _ms_try_fetch(
                 return "不可得（原因分类失败）"
         return str(unavailable_msg)
 
+    started = time.monotonic()
     try:
         value = fetch_fn()
         result[key] = value
@@ -3964,6 +4011,8 @@ def _ms_try_fetch(
         # 且违反 R12h「不可得 + attempted sources」标注规范）
         logger.warning("market_structure %s fetch failed: %s", key, exc)
         _ms_set_unavailable(result["availability"], key, _reason())
+    finally:
+        result.setdefault("latency_ms", {})[key] = round((time.monotonic() - started) * 1000)
 
 
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:

@@ -31,9 +31,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import sys
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
@@ -1496,8 +1499,37 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2))
         worst = max((r.overall for r in results), default="PASS",
                     key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0))
+        _trace_qc(results)
         return {"PASS": 0, "WARN": 1, "FAIL": 2}.get(worst, 0)
+    _trace_qc(results)
     return _print_summary(results, verbose=args.verbose)
+
+
+def _trace_qc(results: list[QCResult]) -> None:
+    """可选 run trace 钩子（仅 `INVEST_TRACE_FILE` 设置时生效；失败一律吞掉）。
+
+    第 0 层机器准出是**独立进程**（本文件自带 CLI），`invest.py` 侧的计时覆盖不到
+    它；宿主按标准链调用时可借此把最终 QC 的耗时与结论并入同一条 time line。
+    未设置环境变量时行为与本函数不存在完全一致。
+    """
+    path = os.environ.get("INVEST_TRACE_FILE")
+    if not path or not results:
+        return
+    try:
+        row = {
+            "run_id": os.environ.get("INVEST_RUN_ID") or "",
+            "stage": "report_qc",
+            "event": "end",
+            "wall_time": datetime.now().astimezone().isoformat(),
+            "monotonic_ns": time.monotonic_ns(),
+            "targets": [Path(r.report_path).name for r in results],
+            "overall": max((r.overall for r in results),
+                           key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0)),
+        }
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        return
 
 
 if __name__ == "__main__":
