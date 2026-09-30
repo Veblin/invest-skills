@@ -504,7 +504,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 - **去重硬约束**：同一结论只说一次——引擎已给出的分位、核心变量（`## 0.` 节）、事件时间线、参与者口径不要在 `overview` 里复述。唯一例外：`event_classification` 槽位仍有两个宿主（§3a 与 A-5 单元格），属**已知遗留**，见 `host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §4.2。
 - **折叠对门禁透明**：lint 与 `report_qc` 的结构/完成度层都按行首 `^## ` 工作，折叠不改变其判定；`readability_metrics` 仅跳过 full 报告的「审计底稿」折叠跨度。insight、brief 与 concise 的其他折叠内容仍计入篇幅。
 
-1. **先出 md**：`report SYMBOL` → `reports/{symbol}-{name}/{ts}.md`（分析段以占位符保留，qc 的 F0-3 会拦截未填占位——**正文写完立刻填写**）
+1. **先出 md**：`report SYMBOL` → `reports/{symbol}-{name}/{ts}.draft.md`（分析段以占位符保留，qc 的 F0-3 会拦截未填占位——**正文写完立刻填写**）
 2. **再写分析协议**（输入路径任意；引擎会把已校验的段原样复制到 `<报告>.analysis.json` 同代侧车，故建议直接写在报告同目录），段结构：
    `[{module, title, facts_md, analysis_md, evidence_tag, position, facts?}]`
    - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（带 [证据: X] / [证据强度: ...]）
@@ -528,11 +528,11 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
    - full 报告中填就地槽位：`bull_chain`（核对多头依据；替换引擎自动多头链）、`bear_chain`（空头依据）；有 MD&A 卡时 `mda_narrative`；有参与者扫描行时 `participant_scan`；有事件卡时 `event_classification`。以首版 MD 中实际出现的占位和 `report_qc` 为准，条件宿主未出现时无需硬填。`bull_chain` 的 `facts_md` 须列可追溯证据，`analysis_md` 须说明假设与传导；证据不足时明确披露缺口。
    - **改动须知**：`facts` 契约与 `[事实: F{n}]` 引用语法由 `lib/analysis_schema.py` 单点定义，
      文档/prompt/校验三处须同步改（2026-09-18 review #3 的教训：三处不一致 → 闸门空转）
-3. **复合重渲（工作流默认出 html；`--emit` 须显式写 html）**：`report SYMBOL --analysis <path> --emit html`（或 `--resume`）→ 分析段替换占位 → **html + 同代 md 同源落盘**（`--emit html` 分支同时写 md_v2，保证 md/html 同代；不重渲则以 md 为唯一产物，属例外情形）
+3. **复合重渲（工作流默认出 html；`--emit` 须显式写 html）**：`report SYMBOL --analysis <path> --emit html`（或 `--resume`）→ 分析段替换占位 → **`{ts}.final.html` + 同代 `{ts}.final.md` 同源落盘**（`--emit html` 分支同时写 md_v2，保证 md/html 同代；不重渲则以 md 为唯一产物，属例外情形）
 
 ### HTML 产物
 
-- 默认路径：步骤 3 的 `--emit html`（工作流默认步骤，非可选项；CLI 旗标默认值仍为 md，两者口径差异见上），`reports/{symbol}-{name}/{ts}.html`（单文件自包含，无 CDN，file:// 离线可用）
+- 默认路径：步骤 3 的 `--emit html`（工作流默认步骤，非可选项；CLI 旗标默认值仍为 md，两者口径差异见上），`reports/{symbol}-{name}/{ts}.final.html`（单文件自包含，无 CDN，file:// 离线可用）
 - 若 `<script>` 未内联图表库（资产缺失）报告仍正常出稿（图表 disabled），语义同「数据缺失降级」
 - `--analysis <path>` 在 HTML 中同样生效（分析段渲染进页面）
 - full 模式 HTML 与 md 同源渲染分析段（`--analysis`）；**首屏不再有「判断索引」层**（v0.3.1 A1 移除），分析卡在页末，正文直接进入研究问题与判断
@@ -549,15 +549,16 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --plan /tmp/plan.json --report-ready
 # 从上一条 stderr 的 collection_id= 读取本轮 ID；以下命令均填同一个 ID，不查“同标的最新”。
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tmp/plan.json --collection-id <本轮ID>
+# 按本次四问替换下列档案值；焦点可重复。步骤 2、预检、终稿逐条传同一组值。
 # 2) 出 md（分析段为占位符；qc 的 F0-3 拦截未填占位）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID>
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID> --style <本次风格> --horizon <本次周期枚举> --focus <本次焦点枚举>
 # 3) 写 analysis.json（含 facts 数组）→ 协议校验 → 候选完整 MD 的离线 lint/QC → 最终 HTML+MD
 #    输入路径任意；引擎会把已校验的段原样复制到 <报告>.analysis.json 同代侧车（勿手写侧车路径）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py validate-analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --collection-id <本轮ID> --plan /tmp/plan.json
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID> \
-  --analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --emit html --preflight
+  --analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --emit html --preflight --style <本次风格> --horizon <本次周期枚举> --focus <本次焦点枚举>
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/plan.json --mode full --collection-id <本轮ID> \
-  --analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --emit html
+  --analysis /tmp/600176-analysis.json --draft <步骤2 stderr 的 md 路径> --emit html --style <本次风格> --horizon <本次周期枚举> --focus <本次焦点枚举>
 # 4) 机器准出（必跑；退出码 0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）
 #    目标 = **步骤 3 刚落盘的 md**：路径逐字取步骤 3 stderr 的「📝 Markdown 报告:」行。
 #    勿用 --latest——它按全局 mtime 取 reports/ 下最新 .md，并发或多标的时会复检到别的报告，

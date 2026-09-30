@@ -34,7 +34,7 @@ import os
 import sys
 import math
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -1202,6 +1202,7 @@ class ValuationResult:
     timestamp: str
     # 基础数据
     price: float | None = None
+    price_fetched_at: str | None = None
     total_shares_wan: float | None = None
     total_mv_yi: float | None = None
     rf_china_10y: float | None = None
@@ -1305,6 +1306,7 @@ def run_valuation(
     quote = get_quote_ak(symbol)
     price = quote.get("price")
     result.price = price
+    result.price_fetched_at = datetime.now(timezone.utc).isoformat()
     result.sources["quote"] = quote.get("source", "unknown")
 
     # ---- Step 2: 总股本 ----

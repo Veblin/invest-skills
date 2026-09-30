@@ -293,6 +293,25 @@ def format_profile_html(profile: dict[str, Any] | None) -> str:
     )
 
 
+def draft_profile_mismatch(draft_path: Path, profile: dict[str, Any] | None) -> str | None:
+    """Return an actionable error when a draft's sealed profile differs.
+
+    Older hand-written drafts without a sidecar remain readable; standard CLI
+    drafts always write one when a profile is present.
+    """
+    sidecar = draft_path.with_suffix(".profile.json")
+    if not sidecar.exists():
+        return None
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return f"初稿研究档案侧车不可读：{sidecar}（{exc}）"
+    draft_profile = payload.get("profile") if isinstance(payload, dict) else None
+    if draft_profile != profile:
+        return "初稿与本次报告的研究档案不一致；请用相同 --style/--horizon/--focus 等参数重出初稿"
+    return None
+
+
 def write_profile_sidecar(
     report_path: Path,
     profile: dict[str, Any] | None,

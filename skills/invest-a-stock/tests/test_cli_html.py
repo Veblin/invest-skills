@@ -32,4 +32,4 @@ def test_emit_html_default_outdir_matches_md_branch():
     html_branch = src[src.index("if fmt == \"html\":"):src.index("if fmt == \"md\":")]
     assert "(Path.cwd() / \"reports\").resolve()" in html_branch
     # html 路径走 _html_report_path（with_suffix .html）
-    assert "_html_report_path(outdir, subdir, ts)" in html_branch
+    assert "_html_report_path(outdir, subdir, ts, report_stage)" in html_branch

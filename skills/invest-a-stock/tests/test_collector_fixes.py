@@ -61,23 +61,28 @@ class TestPcrPartialFlag:
         """~5 年（1230 交易日）日历，> 采样上限 80 → 必然触发降采样。"""
         import pandas as pd
 
-        dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=1230)
+        dates = pd.bdate_range(end="2026-09-30", periods=1230)
         return [d.strftime("%Y%m%d") for d in dates]
 
-    def test_pcr_sampling_success_partial_false(self):
+    def test_pcr_sampling_success_partial_false(self, monkeypatch):
         """5 年窗口降采样且全部采样日查询成功 → partial=False（修复点）。
 
         修复前：raw_days(1230) > len(sampled)(~80) 恒 True → partial 永久 true →
         报告恒显示「历史样本不足」警告。
         """
-        from lib.collector._orchestrate import _ms_fetch_put_call_ratio
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from lib.collector import _orchestrate
+        monkeypatch.setattr(_orchestrate, "shanghai_now",
+                            lambda: datetime(2026, 9, 30, 13, tzinfo=ZoneInfo("Asia/Shanghai")))
+        _ms_fetch_put_call_ratio = _orchestrate._ms_fetch_put_call_ratio
 
         cal = self._five_year_cal()
         r = _ms_fetch_put_call_ratio(self._fake_tc(cal))
         assert r is not None
         assert r["sampled"] is True            # 采样确实发生（5 年 > 80 点上限）
         assert r["partial"] is False           # 修复点：采样成功 → 非 partial
-        assert r["current_date"] == cal[-1]
+        assert r["current_date"] == cal[-2]  # opt_daily 当日 17:00 才发布
         assert r["ratio"] == 0.5
 
     def test_pcr_sample_query_missing_partial_true(self):
@@ -269,13 +274,17 @@ class TestPcrProbeRetry:
     def _short_cal(n: int = 5) -> list[str]:
         import pandas as pd
 
-        dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=n)
+        dates = pd.bdate_range(end="2026-09-30", periods=n)
         return [d.strftime("%Y%m%d") for d in dates]
 
     def test_probe_retry_then_result_reuse(self, monkeypatch):
         """首次探针超时 → 重试成功 → 不整体降级；探针结果复用，
         最新日不重复取（opt_daily 总调用 == fetch_dates 数，修复前多 1 次）。"""
         from lib.collector import _orchestrate
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        monkeypatch.setattr(_orchestrate, "shanghai_now",
+                            lambda: datetime(2026, 9, 30, 13, tzinfo=ZoneInfo("Asia/Shanghai")))
         from lib.collector._orchestrate import (
             _PCR_MAX_DAILY_QUERIES, _ms_subsample_trade_dates,
         )
@@ -294,9 +303,7 @@ class TestPcrProbeRetry:
         r = _orchestrate._ms_fetch_put_call_ratio(fake)
         assert r is not None
         assert r["ratio"] == 0.5
-        fetch_dates = sorted(
-            set(_ms_subsample_trade_dates(cal, _PCR_MAX_DAILY_QUERIES))
-        )
+        fetch_dates = sorted(set(_ms_subsample_trade_dates(cal[:-1], _PCR_MAX_DAILY_QUERIES)))
         # 探针日 1 次（probe2 成功那次）+ 其余 N-1 日各 1 次
         assert fake.opt_daily_calls == len(fetch_dates)
 

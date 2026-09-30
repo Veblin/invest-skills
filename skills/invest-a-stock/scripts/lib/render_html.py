@@ -10,7 +10,7 @@ from typing import Any
 from lib.nums import ONE_PER_YI, safe_float
 from lib.technical import compute, sort_kline_asc
 
-from .shared_dates import fmt_fetched_at, yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import fmt_collection_period, fmt_fetched_at, yyyymmdd_to_iso as _to_iso_date
 from .render_utils import (
     ENGINE_VERSION,
     _data_fields,
@@ -1200,9 +1200,9 @@ def _extract_refs_data(collection: dict) -> list[tuple[str, str, bool, str]]:
                 sn = s.get("source", "?")
                 qp = s.get("query_params", "")
                 avail = s.get("data_available", False)
-                # all_sources 中每个源有独立 data 吗？没有——只有 data_available 布尔。
-                # 同一维度下所有源共享 dim_data，但为保持列准确，失败源标为空。
-                detail = _data_fields(dn, dim_data) if avail else ""
+                # quote 等维度会把腾讯盘中价合并进日线主数据；逐源行必须读
+                # 各自封存的原始 data，不能把盘中价错归给 Tushare 日线。
+                detail = _data_fields(dn, s.get("data")) if avail else ""
                 refs.append((display, f"{sn}: {qp}" if qp else sn, avail, detail))
     return refs
 
@@ -1285,7 +1285,7 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     dims = _index_dims(collection)
     basic = _get_dim_data(dims, "basic_info") or {}
     summary = collection.get("summary", {})
-    fetched_at = fmt_fetched_at(collection.get("fetched_at", ""))
+    fetched_at = fmt_collection_period(collection)
 
     name = basic.get("name", "") or basic.get("股票简称", "")
     industry = basic.get("industry", "")

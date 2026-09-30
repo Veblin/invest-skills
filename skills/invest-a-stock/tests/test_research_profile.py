@@ -392,3 +392,59 @@ def test_cli_rejects_invalid_profile_before_collect(
     assert invest.cmd_report(_report_args(**overrides)) == 2
     assert collected == [], "校验失败时不得发起采集"
     assert needle in capsys.readouterr().err
+
+
+def test_report_rejects_profile_different_from_draft_before_collect(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import invest
+
+    draft = tmp_path / "first.draft.md"
+    draft.write_text("# 初稿\n", encoding="utf-8")
+    draft.with_suffix(".profile.json").write_text(
+        json.dumps({"profile": {"style": "成长"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    collected = []
+    monkeypatch.setattr(invest, "_HAS_STORE", False)
+    monkeypatch.setattr(invest.collector, "collect_all",
+                        lambda *a, **k: collected.append(1) or _RENDER_COLLECTION)
+
+    rc = invest.cmd_report(_report_args(
+        style="价值", draft=str(draft), analysis=str(tmp_path / "analysis.json"),
+    ))
+    assert rc == 2
+    assert collected == []
+    assert "初稿与本次报告的研究档案不一致" in capsys.readouterr().err
+
+
+def test_resume_without_new_collection_preserves_original_end_time(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    import invest
+    from lib import lhb, style_match
+
+    original_end = "2026-09-29T07:00:00+00:00"
+    cached = {
+        **_RENDER_COLLECTION,
+        "collection_started_at": "2026-09-29T06:58:00+00:00",
+        "collection_completed_at": original_end,
+    }
+    seen: dict = {}
+
+    monkeypatch.setattr(invest, "_HAS_STORE", True)
+    monkeypatch.setattr(invest.store_mod, "get_pipeline_progress", lambda _s: {"collect": True})
+    monkeypatch.setattr(invest, "_try_resume_collection", lambda _s: dict(cached))
+    monkeypatch.setattr(invest, "_resume_cache_compatible", lambda *_a: True)
+    monkeypatch.setattr(invest, "_ensure_render_ready", lambda *_a: None)
+    monkeypatch.setattr(invest.collector, "collect_all", lambda *_a, **_k: pytest.fail("不应重采"))
+    monkeypatch.setattr(lhb, "attach_limit_streak_dims", lambda *_a: False)
+    monkeypatch.setattr(style_match, "assemble_style_match", lambda *_a: None)
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda *_a, **_k: None)
+
+    def capture_render(collection, *_args, **_kwargs):
+        seen["completed_at"] = collection.get("collection_completed_at")
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", capture_render)
+    assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
+    assert seen["completed_at"] == original_end

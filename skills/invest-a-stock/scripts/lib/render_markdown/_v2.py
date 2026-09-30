@@ -1,6 +1,7 @@
 """V2/legacy rendering sections."""
 from __future__ import annotations
 import logging
+from ..shared_dates import fmt_collection_period
 # Import ALL names (including _-prefixed) from _base
 from . import _base as __base_ref
 for __base_n in dir(__base_ref):
@@ -120,7 +121,7 @@ def _header_v2(collection: dict, symbol: str) -> str:
     title = f"# {symbol} {name} 研究快照"
     lines = [
         title.strip(),
-        f"采集时间: {fmt_fetched_at(collection.get('fetched_at', ''))}",
+        f"采集时间: {fmt_collection_period(collection)}",
         f"维度: {collection['summary']['available']}/{collection['summary']['total']} 有数据"
         + (f"（{collection['summary']['degraded']} 降级）" if collection['summary'].get('degraded') else ""),
         "",
@@ -612,5 +613,3 @@ def _section_thesis(dims: dict[str, dict], collection: dict) -> str:
     lines = ["## ⚡ 核心矛盾（当前最值得跟踪的问题）", ""]
     lines.extend(f"- {item}" for item in items)
     return "\n".join(lines)
-
-

@@ -198,9 +198,13 @@ def _scan_rows(
 
     pcr = ms.get("put_call_ratio")
     if isinstance(pcr, dict) and pcr.get("ratio") is not None:
+        pcr_date = str(pcr.get("current_date") or "")
+        expected = str(pcr.get("expected_latest_date") or "")
+        stale = bool(expected and pcr_date and pcr_date < expected)
+        date_note = f"（截至 {pcr_date}{'；非当期值' if stale else ''}）" if pcr_date else "（日期未封存）"
         rows.append({
             "role": "期权情绪代理（PCR）",
-            "signal": f"认沽认购比 {pcr.get('ratio')}",
+            "signal": f"认沽认购比 {pcr.get('ratio')}{date_note}",
             "source": str(pcr.get("source") or "market_structure.put_call_ratio"),
         })
 

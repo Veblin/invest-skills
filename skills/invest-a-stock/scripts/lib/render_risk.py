@@ -25,6 +25,7 @@ from .render_utils import (
     _pct_median_inline,
     _v3_cv7_block,
     _v3_cv8_block,
+    pcr_is_current_for_snapshot,
     _v3_trend_stage_hints,
     _v3_valuation_percentiles,
     _wrap_details,
@@ -1249,10 +1250,21 @@ def _section_left_right_probability(
         lines.append("")
         lines.append("### 估值-资金交叉验证（左/右权重参考）")
         lines.append(cv7_lr)
+    pcr_for_cv = market_structure.get("put_call_ratio")
+    if pcr_for_cv and not pcr_is_current_for_snapshot(pcr_for_cv, collection):
+        lines.append("")
+        lines.append(
+            f"⚠️ PCR 最新样本 {pcr_for_cv.get('current_date') or '日期未封存'}，"
+            "未纳入当期情绪交叉验证。"
+        )
+    elif pcr_for_cv and pcr_for_cv.get("percentile_5y") is None:
+        lines.append("")
+        lines.append("⚠️ PCR 五年采样不完整，未纳入 CV-8 的同窗口交叉验证。")
     cv8_lr = _v3_cv8_block(
         market_structure.get("erp"),
-        market_structure.get("put_call_ratio"),
+        pcr_for_cv,
         market_structure.get("short_margin"),
+        collection=collection,
     )
     if cv8_lr:
         lines.append("")

@@ -26,6 +26,7 @@ from ..proxy import akshare_direct_session, akshare_push2_available
 from ..schema import DimensionResult, SourceResult
 from ..shared_dates import (
     shanghai_days_ago as _days_ago,
+    shanghai_now,
     shanghai_today as _today,
     yyyymmdd_to_iso as _to_iso_date,
 )
@@ -270,6 +271,14 @@ def collect_quote(symbol: str) -> dict:
             merged = dict(tencent.data)
             merged["kline"] = data  # 保留 10 日 K 线（消费方按 dict 读实时字段）
             legacy["data"] = merged
+            meta = legacy.setdefault("_meta", {})
+            primary_source = str(meta.get("source") or "unknown")
+            meta["source"] = f"merged:{primary_source}+{tencent.source}"
+            meta["merged_sources"] = [primary_source, tencent.source]
+            meta["primary_source"] = primary_source
+            if tencent.data.get("price") is not None:
+                meta["price_source"] = tencent.source
+                meta["price_fetched_at"] = tencent.fetched_at
         return legacy
 
     return _collect_dimension(
@@ -2117,6 +2126,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         dims = list(_DEFAULT_DIMS)
 
     start_all = time.time()
+    collection_started_at = datetime.now(timezone.utc).isoformat()
 
     # 深度模式：kline 用更长窗口
     kline_kwargs = {}
@@ -2145,6 +2155,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
 
     result = _assemble_result(symbol, dimensions, fusion_results,
                               credibility_scores, macro_context, chain_context)
+    result["collection_started_at"] = collection_started_at
     _attach_sector_sync_block(result, symbol, dim_results, force_sector_sync)
     _attach_phase2_block(result, symbol)
     _attach_events_block(result, symbol, deep)
@@ -2163,6 +2174,7 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         attach_events_for_report(result, symbol, deep=deep)
     _attach_manifest_block(result)
     _attach_news_pack_block(result, symbol, with_news_pack)
+    result["collection_completed_at"] = datetime.now(timezone.utc).isoformat()
 
     logger.info("collect_all total=%.1fs symbol=%s dims=%d",
                 time.time() - start_all, symbol, len(dims))
@@ -3309,8 +3321,10 @@ _ETF_300_CODE = "510300.SH"
 _NEW_HIGH_SAMPLE = 30
 _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
-# 5 年 PCR 历史分位：均匀降采样上限，避免逐日 opt_daily 风暴
-_PCR_MAX_DAILY_QUERIES = 80
+# 单次 PCR 面板的总查询预算（5 年均匀样本 + 近期全分辨率），
+# 避免两个窗口分别规划后超过同一客户端的分钟额度。
+_PCR_MAX_DAILY_QUERIES = 100
+_PCR_MIN_HISTORY_SAMPLES = 30
 
 
 def _ms_50etf_option_codes(
@@ -3344,13 +3358,14 @@ def _ms_50etf_option_codes(
 
 def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
     """均匀降采样交易日列表，始终保留最后一日。"""
+    if max_points <= 0 or not dates:
+        return []
     if len(dates) <= max_points:
         return dates
-    step = max(1, len(dates) // max_points)
-    sampled = list(dates[::step])
-    if dates[-1] not in sampled:
-        sampled.append(dates[-1])
-    return sorted(set(sampled))
+    if max_points == 1:
+        return dates[-1:]
+    return [dates[round(i * (len(dates) - 1) / (max_points - 1))]
+            for i in range(max_points)]
 
 
 def _ms_pcr_from_df(df: Any, put_codes: set[str], call_codes: set[str]) -> float | None:
@@ -3405,36 +3420,45 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
         return None
     dates = sorted(str(d) for d in cal["cal_date"].tolist())
     raw_days = len(dates)
-    sampled = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+    # Tushare opt_daily 每日约 17:00 发布。盘中 trade_cal 已含当日，但
+    # 当日期权日线尚不可用；探针和 current 都以最近已发布交易日为目标。
+    now_sh = shanghai_now()
+    if now_sh.hour < 17:
+        dates = [d for d in dates if d < now_sh.strftime("%Y%m%d")]
+    if not dates:
+        return None
     # 60 日分位窗口取最近 _PCR_HISTORY_60D 个自然日全分辨率（此前对降采样
     # 序列取 ratios[-60:] 实际横跨 ~3.5 年——降采样 step≈15 时 60 点覆盖 900+ 交易日）
     cutoff = _days_ago(_PCR_HISTORY_60D)
     recent_dates = [d for d in dates if d >= cutoff]
-    fetch_dates = sorted(set(sampled) | set(recent_dates))
-
+    available_slots = getattr(tc, "available_rate_limit_slots", None)
+    headroom = available_slots("opt_daily") if callable(available_slots) else None
+    if headroom is not None and headroom <= 0:
+        if diag is not None:
+            diag["reason"] = "rate_limited"
+        return None
     ratio_by_date: dict[str, float] = {}
     # F1-5 修复：批量取数前单点预检——端点整体挂起/限流时（实测 56 天 × 8s
     # 超时风暴，单次报告拖慢数分钟），8s 探针失败重试一次、两次均败才整体
     # 降级跳过（单次网络抖动不抹掉整个 PCR 维度）。端点正常时探针结果直接
-    # 复用（不再重复取 fetch_dates[-1]），净额外查询为 0。
-    if fetch_dates:
+    # 复用（不再重复取最新日），净额外查询为 0。
+    if dates:
         probe_df = _run_with_timeout(
-            lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
-            8.0, f"opt_daily-probe:{fetch_dates[-1]}",
+            lambda: tc.query("opt_daily", trade_date=dates[-1], exchange="SSE"),
+            8.0, f"opt_daily-probe:{dates[-1]}",
         )
         if probe_df is None:
             # 探针失败不整体丢弃：单次网络抖动/慢查询不应抹掉整个 PCR
             # 维度（旧实现单日失败仅跳过当日并带 stale/partial 标志）。
             # 重试一次，仍失败才整体降级。
             probe_df = _run_with_timeout(
-                lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
-                8.0, f"opt_daily-probe2:{fetch_dates[-1]}",
+                lambda: tc.query("opt_daily", trade_date=dates[-1], exchange="SSE"),
+                8.0, f"opt_daily-probe2:{dates[-1]}",
             )
             if probe_df is None:
                 logger.warning(
-                    "opt_daily probe failed twice (%s); "
-                    "skipping PCR fetch storm (%d dates)",
-                    fetch_dates[-1], len(fetch_dates),
+                    "opt_daily probe failed twice (%s); skipping PCR fetch storm",
+                    dates[-1],
                 )
                 if diag is not None:
                     # 自身观测：超时时被丢弃的 daemon 线程从未返回，client 的
@@ -3445,16 +3469,40 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
         # 未命中代码集时留空，由主循环重取。
         probe_ratio = _ms_pcr_from_df(probe_df, put_set, call_set)
         if probe_ratio is not None:
-            ratio_by_date[fetch_dates[-1]] = probe_ratio
+            ratio_by_date[dates[-1]] = probe_ratio
         else:
-            logger.debug("opt_daily probe %s: no usable PCR row", fetch_dates[-1])
+            logger.debug("opt_daily probe %s: no usable PCR row", dates[-1])
+
+    # 探针成功后，客户端已证明 opt_daily 权限，分钟预算会从默认档
+    # 提升到该接口对应积分档。此时规划采样才能准确给后续 daily 面板留量。
+    headroom = available_slots("opt_daily") if callable(available_slots) else None
+    reserved_for_new_high = (
+        min(_NEW_HIGH_SAMPLE + 2, max(0, headroom - len(recent_dates)))
+        if headroom is not None else 0
+    )
+    daily_budget = min(
+        _PCR_MAX_DAILY_QUERIES,
+        max(1, headroom - reserved_for_new_high + len(ratio_by_date))
+        if headroom is not None else _PCR_MAX_DAILY_QUERIES,
+    )
+    history_budget = max(1, daily_budget - len(recent_dates))
+    sampled = _ms_subsample_trade_dates(dates, history_budget)
+    fetch_dates = sorted(set(sampled) | set(recent_dates))
 
     def _on_pcr_error(td: str, exc: Exception) -> None:
         logger.debug("opt_daily %s failed: %s", td, exc)
 
     # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
     # _base._map_parallel）：~123 次串行最坏 16 分钟
-    remaining = [d for d in fetch_dates if d not in ratio_by_date]
+    # 最近窗口先取，余量才给历史点。探针之后读取本客户端的剩余额度，
+    # 超额日期本轮直接标 partial，避免在限流等待中耗尽单次 8s 超时。
+    priority_dates = list(reversed(recent_dates)) + list(reversed(sampled))
+    remaining = list(dict.fromkeys(d for d in priority_dates if d not in ratio_by_date))
+    if callable(available_slots):
+        remaining = remaining[:max(0, min(
+            _PCR_MAX_DAILY_QUERIES - len(ratio_by_date),
+            available_slots("opt_daily") - reserved_for_new_high,
+        ))]
     for td, r in _map_parallel(
         remaining,
         lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
@@ -3477,7 +3525,11 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # （ratio_pairs 非空 ⇒ current_date 必非 None，无需冗余守卫）
     stale = current_date != sampled[-1]
     ratios = [r for _, r in ratio_pairs]
-    pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
+    # 缺失历史采样点时，成功点通常集中在最近日期；不能把这个偏样本
+    # 继续标成「5 年分位」。近期窗口可独立保留。
+    pct_5y = (percentile_rank(ratios, current)
+              if len(ratios) >= _PCR_MIN_HISTORY_SAMPLES
+              and len(ratios) == len(sampled) else None)
     ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
     # current 在窗口内（current_date >= cutoff）才计算 60 日分位：最新 1-3 个
     # 采样日查询失败时 current 回退约 step×失败点数 天（降采样 step≈15），
@@ -3485,23 +3537,31 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # 置 None 而非渲染成"0.0% 低位"（与 stale/partial 标志并存，互不替代）
     pct_60d = (
         percentile_rank(ratios_60d, current)
-        if len(ratios_60d) >= 5 and current_date >= cutoff else None
+        if (len(ratios_60d) >= 5 and len(ratios_60d) == len(recent_dates)
+            and current_date >= cutoff) else None
     )
     return {
         "ratio": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
         "current_date": current_date,
+        "expected_latest_date": dates[-1],
         "history_days": len(ratios),
+        "history_sample_target": len(sampled),
+        "recent_days": len(recent_dates),
+        "recent_observed_days": len(ratios_60d),
         # 降采样是设计内的（5 年窗口按 _PCR_MAX_DAILY_QUERIES 均匀采样）：
-        # partial 只在采样本身失败/缺失时置 True —— 实际取得的采样点数少于
-        # 计划点数（len(ratios) < len(sampled)），或最新采样日失败致 current
-        # 回退到旧样本（stale）。此前 raw_days > len(sampled) 在 5 年窗口
+        # partial 只在计划样本或近期窗口缺失时置 True：历史采样少于计划点数、
+        # 最新日失败致 current 回退（stale），或近期全分辨率点有缺口。
+        # 此前 raw_days > len(sampled) 在 5 年窗口
         # （~1220 交易日 vs 上限 80）下恒 True → partial 永久 true → 报告恒
         # 显示「历史样本不足」警告。
-        "partial": len(ratios) < len(sampled) or stale,
+        "partial": (len(ratios) < len(sampled)
+                    or len(sampled) < _PCR_MIN_HISTORY_SAMPLES or stale
+                    or any(td not in ratio_by_date for td in recent_dates)),
         "sampled": raw_days > len(sampled),
         "sample_points": len(fetch_dates),
+        "queried_points": len(set(remaining) | {fetch_dates[-1]}),
         "calendar_days": raw_days,
         "underlying": _50ETF_UNDERLYING,
         "source": "tushare.opt_daily",
@@ -3597,6 +3657,13 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     codes = rng.sample(codes_all, min(_NEW_HIGH_SAMPLE, len(codes_all)))
     if not codes:
         return None
+    requested_count = len(codes)
+    available_slots = getattr(tc, "available_rate_limit_slots", None)
+    if callable(available_slots):
+        # 额度不足时立即降级，避免 daily 排队被 8s 网络超时误判。
+        codes = codes[:max(0, available_slots("daily"))]
+    if not codes:
+        return None
     def _fetch_daily_panel_row(ts_code: str) -> list[dict] | None:
         # 单次 daily 查询加时限（与 _ms_pcr_on_date 同款 8s）：_map_parallel
         # 契约要求内部单次执行有超时兜底，否则挂起 socket 会拖住
@@ -3640,13 +3707,17 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
             r = _ms_new_high_ratio_from_panel(slice_panel)
             if r is not None:
                 hist.append(r)
-    pct = percentile_rank(hist, current) if len(hist) >= 5 else None
+    # 缺样可能来自限流、停牌或源失败；缺失机制并非市场随机抽样。
+    # 当前比例保留供审计，但不把它的分位作为完整市场广度信号。
+    partial = len(panel) < _NEW_HIGH_SAMPLE
+    pct = percentile_rank(hist, current) if len(hist) >= 5 and not partial else None
     return {
         "ratio_pct": round(current, 2),
         "percentile_60d": round(pct, 1) if pct is not None else None,
         "sample_size": len(panel),
-        "sample_requested": len(codes),
-        "partial": len(panel) < _NEW_HIGH_SAMPLE,
+        "sample_requested": requested_count,
+        "sample_target": _NEW_HIGH_SAMPLE,
+        "partial": partial,
         "source": "tushare.daily",
     }
 
@@ -3946,6 +4017,8 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
             return f"权限不足：接口 {denied_api} 无权限或积分不够{hint}"
         if code == "probe_timeout":
             return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
+        if code == "rate_limited":
+            return "本轮 Tushare 客户端额度已满（PCR 未发起逐日查询，可稍后重试）"
         if code == "empty_rows":
             return "当日无 50ETF 期权成交（接口正常返回空）"
         if tc is None:

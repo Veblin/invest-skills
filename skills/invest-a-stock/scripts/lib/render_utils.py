@@ -11,7 +11,9 @@ from typing import Any
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import sort_kline_asc
 
-from .shared_dates import normalize_end_date as _norm_ed, yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import (normalize_end_date as _norm_ed,
+                           parse_date,
+                           yyyymmdd_to_iso as _to_iso_date)
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
@@ -115,7 +117,8 @@ def _references_appendix(collection: dict[str, Any]) -> str:
             dim_label = display if first else ""
             first = False
             if avail:
-                detail = _data_fields(dim.get("dimension", ""), dim_data)
+                # 合并维度（quote）可含另一个源的实时价；逐源行只描述本源原始数据。
+                detail = _data_fields(dim.get("dimension", ""), s.get("data"))
                 lines.append(f"| {dim_label} | {src_name} | `{qp}` | ✅ {detail} |")
             elif error:
                 lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {_sanitize_error(error, 55)} |")
@@ -221,6 +224,25 @@ def _v3_cv7_block(
 
 
 # --- _v3_cv8_assessment ---
+def pcr_is_current_for_snapshot(pcr: dict | None, collection: dict) -> bool:
+    """Only compare PCR with current factors when its date reaches the closed bar.
+
+    New snapshots seal the latest *published* opt_daily date. Old snapshots use
+    the latest K-line trade date; absent date evidence fails closed.
+    """
+    if not isinstance(pcr, dict):
+        return False
+    current = parse_date(pcr.get("current_date"))
+    expected = parse_date(pcr.get("expected_latest_date"))
+    if expected is None:
+        kline = _get_dim_data(_index_dims(collection), "kline")
+        if isinstance(kline, list):
+            dated = [parse_date(row.get("trade_date")) for row in kline
+                     if isinstance(row, dict)]
+            expected = max((d for d in dated if d is not None), default=None)
+    return current is not None and expected is not None and current >= expected
+
+
 def _v3_cv8_assessment(
     erp: dict | None,
     pcr: dict | None,
@@ -271,7 +293,12 @@ def _v3_cv8_block(
     erp: dict | None,
     pcr: dict | None,
     short_margin: dict | None,
+    *, collection: dict | None = None,
 ) -> str | None:
+    if pcr is not None and collection is not None and not pcr_is_current_for_snapshot(pcr, collection):
+        return None
+    if pcr is not None and pcr.get("percentile_5y") is None:
+        return None  # CV-8 与 ERP 同为 5 年分位；近期分位不能替代其口径
     assessed = _v3_cv8_assessment(erp, pcr, short_margin)
     if assessed is None:
         return None

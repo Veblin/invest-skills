@@ -437,6 +437,27 @@ class TushareClient:
             # 官方未明说，只能靠实测稳态数据裁决，故把每次等待都记下来。
             self._note_wait(api_name, waited=slept)
 
+    def available_rate_limit_slots(self, api_name: str) -> int:
+        """Return slots available now in both the API and account 60s windows.
+
+        This is a planning hint for optional fan-out panels. `query` still reserves
+        every slot under the lock, so this method does not weaken rate limiting.
+        """
+        limit = rate_limit_for_api(
+            api_name, floor=self._rate_limit_per_minute,
+            ceiling=self._rate_limit_per_minute if self._explicit_rate_limit else None,
+        )
+        total_limit = (
+            self._rate_limit_per_minute if self._explicit_rate_limit
+            else max(RATE_LIMIT_PER_MINUTE,
+                     (official_tier_rpm(self._proven_points) or 0) // CONSERVATIVE_TIER_DIVISOR)
+        )
+        with self._lock:
+            cutoff = time.time() - 60
+            api_used = sum(t > cutoff for t in self._call_timestamps.get(api_name, ()))
+            total_used = sum(t > cutoff for t in self._total_call_timestamps)
+        return max(0, min(limit - api_used, total_limit - total_used))
+
     # ------------------------------------------------------------------
     # 可观测性（复核 §5「先可观测、再可配置、后定额度」的**可观测**半步；
     # 截至 v0.3.1 只有「可配置」落地。计数只累加，不参与任何限流判定。

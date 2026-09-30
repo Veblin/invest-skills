@@ -11,6 +11,38 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 
 class TestReportFilepath:
+    def test_full_workflow_marks_draft_and_final_artifacts(self, tmp_path: Path):
+        import invest
+
+        ts = "2026-09-30-13-33-50"
+        draft = invest._report_filepath(
+            tmp_path, "600519-贵州茅台", ts, invest._report_stage("full", None))
+        final = invest._report_filepath(
+            tmp_path, "600519-贵州茅台", ts, invest._report_stage("full", [{"module": "overview"}]))
+        html = invest._html_report_path(tmp_path, "600519-贵州茅台", ts, "final")
+        assert draft.name == f"{ts}.draft.md"
+        assert final.name == f"{ts}.final.md"
+        assert html.name == f"{ts}.final.html"
+        assert draft != final
+
+    def test_non_full_modes_and_empty_analysis_keep_no_final_suffix(self, tmp_path: Path):
+        """非 full 模式与「无分析段」都不得被标成 final。
+
+        锁定三点：`brief/concise/insight` 直接不参与 draft/final 命名（返回 None）；
+        full + 空分析列表（falsy）判为 draft；stage 为 None 时文件名不带任何后缀。
+        """
+        import invest
+
+        for mode in ("brief", "concise", "insight"):
+            assert invest._report_stage(mode, [{"module": "overview"}]) is None
+        assert invest._report_stage("full", []) == "draft"
+
+        ts = "2026-09-30-13-33-50"
+        assert invest._report_filepath(
+            tmp_path, "600519-贵州茅台", ts, None).name == f"{ts}.md"
+        assert invest._report_filepath(
+            tmp_path, "600519-贵州茅台", ts, "unknown-stage").name == f"{ts}.md"
+
     def test_uses_full_timestamp_not_date_only(self, tmp_path: Path):
         import invest
 

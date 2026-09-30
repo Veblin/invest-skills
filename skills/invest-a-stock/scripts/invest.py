@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # 确保从本项目的 lib/ 导入，排除旧归档路径
@@ -364,6 +364,7 @@ def _prepare_report_input(result: dict, symbol: str, plan_hash: str | None,
     except Exception:
         result["style_match"] = None
     _seal_benchmark_series(result)
+    result["collection_completed_at"] = datetime.now(timezone.utc).isoformat()
     content_hash = report_snapshot.seal(result, plan_hash=plan_hash, options=options)
     _trace("report_prepare", "end", content_hash=content_hash)
     return content_hash
@@ -1133,16 +1134,26 @@ def _report_basename(result: dict, symbol: str, ts: str) -> str:
     return f"{symbol}-{safe_name}" if safe_name else symbol
 
 
-def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
-    """生成报告完整路径：{outdir}/{subdir}/{YYYY-MM-DD-HH-MM-SS}.md。"""
+def _report_filepath(outdir: Path, subdir: str, ts: str,
+                     stage: str | None = None) -> Path:
+    """生成报告路径；full 模式以 draft/final 后缀区分产物状态。"""
     report_dir = outdir / subdir
     report_dir.mkdir(parents=True, exist_ok=True)
-    return report_dir / f"{ts}.md"
+    suffix = f".{stage}" if stage in {"draft", "final"} else ""
+    return report_dir / f"{ts}{suffix}.md"
 
 
-def _html_report_path(outdir: Path, subdir: str, ts: str) -> Path:
+def _html_report_path(outdir: Path, subdir: str, ts: str,
+                      stage: str | None = None) -> Path:
     """T5-1（R-B2）：html 产物路径 = md 路径换 .html 后缀（同目录约定）。"""
-    return _report_filepath(outdir, subdir, ts).with_suffix(".html")
+    return _report_filepath(outdir, subdir, ts, stage).with_suffix(".html")
+
+
+def _report_stage(mode: str, analysis_payload: list[dict] | None) -> str | None:
+    """Full reports without completed analysis are drafts, including HTML."""
+    if mode != "full":
+        return None
+    return "final" if analysis_payload else "draft"
 
 
 def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | None) -> Path | None:
@@ -1276,6 +1287,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     from lib.research_profile import (
         ProfileSchemaError,
         build_profile,
+        draft_profile_mismatch,
         resolve_mode,
         validate_profile,
         write_profile_sidecar,
@@ -1300,6 +1312,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     if getattr(args, "draft", None) and not getattr(args, "analysis", None):
         print("❌ --draft 须与 --analysis 合用", file=sys.stderr)
         return 2
+    if getattr(args, "draft", None):
+        mismatch = draft_profile_mismatch(Path(args.draft), profile)
+        if mismatch:
+            print(f"❌ {mismatch}", file=sys.stderr)
+            return 2
     if getattr(args, "analysis", None):
         analysis_payload = _validated_analysis(
             Path(args.analysis), Path(args.draft) if getattr(args, "draft", None) else None)
@@ -1351,7 +1368,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）", file=sys.stderr)
     if args.with_macro:
         print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）", file=sys.stderr)
-    if result is None:
+    collected_this_report = result is None
+    if collected_this_report:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
         # 报告链采集：在装配末尾顺带补采 market_structure（采集期一次完成，
@@ -1395,6 +1413,10 @@ def cmd_report(args: argparse.Namespace) -> int:
             result["style_match"] = assemble_style_match(result, args.symbol)
         except Exception:  # 装配失败不阻断报告
             pass
+        # 恢复的快照即使在报告阶段装配本地派生字段，原始采集窗口也不延伸。
+        # 只对本次新采集的结果更新终点；旧快照保留其封存时刻。
+        if collected_this_report and result.get("collection_started_at"):
+            result["collection_completed_at"] = datetime.now(timezone.utc).isoformat()
     # `--strict-rigor` 是**渲染期选项**，不是采集数据：写进 `_meta` 会让封存体
     # 在哈希校验之后被改写（`--emit json` 输出的载荷因此与自带哈希不自洽）。
     # 改为随渲染调用显式下传；`_meta.strict_rigor` 仍作为回退读法保留。
@@ -1413,6 +1435,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
+    report_stage = _report_stage(getattr(args, "mode", "full"), analysis_payload)
     # Insight 是 reader-first 的独立产物：不复用 full 模式九模块渲染器，避免
     # Markdown/HTML 各自从 collection 推导一套结论。旧模式的输出契约不变。
     if getattr(args, "mode", "full") == "insight":
@@ -1505,8 +1528,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         # T5-1：outdir 默认与 md 分支一致（cwd/reports），落 reports/{sym}/ 约定
         outdir = Path(args.outdir).resolve() if args.outdir \
             else (Path.cwd() / "reports").resolve()
-        htmlpath = _html_report_path(outdir, subdir, ts)
-        mdfile = _report_filepath(outdir, subdir, ts)
+        htmlpath = _html_report_path(outdir, subdir, ts, report_stage)
+        mdfile = _report_filepath(outdir, subdir, ts, report_stage)
         # 侧车必须先于主体产物落盘（同 insight 分支）：正文一旦写出就「自称已注入」，
         # 侧车后写或写失败会留下一个声称有合成、实际无从追溯的孤儿成品
         # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
@@ -1556,7 +1579,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         # 显式 --outdir 仍优先（兼容既有调用方与自定义路径）。
         outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
                   else (Path.cwd() / "reports").resolve())
-        mdpath = _report_filepath(outdir, subdir, ts)
+        mdpath = _report_filepath(outdir, subdir, ts, report_stage)
         # 侧车先于正文落盘（同 insight 分支）：见 html 分支同款说明。
         try:
             sidecar = _write_analysis_sidecar(mdpath, analysis_payload)

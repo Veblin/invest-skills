@@ -557,7 +557,14 @@ def _section_snapshot(
 
     if isinstance(quote, dict) and price is not None:
         chg_s = f"（{chg:+.2f}%）" if chg is not None else ""
-        lines.append(f"- **最新价:** {price}{chg_s}")
+        quote_meta = _get_dim_meta(dims, "quote")
+        price_source = quote_meta.get("price_source") or quote_meta.get("source") or "来源未封存"
+        price_at = fmt_fetched_at(quote_meta.get("price_fetched_at") or quote_meta.get("fetched_at"))
+        time_note = f"；取数 {price_at}" if price_at else ""
+        bar_dates = [str(row.get("trade_date")) for row in (quote.get("kline") or [])
+                     if isinstance(row, dict) and row.get("trade_date")]
+        bar_note = f"；日线截至 {_to_iso_date(max(bar_dates))}" if bar_dates else ""
+        lines.append(f"- **最新价:** {price}{chg_s}（{price_source}{time_note}{bar_note}）")
     if pe_pct is not None:
         lines.append(f"- **PE(TTM) 历史分位:** {pe_pct:.1f}%（{pe_zone or '—'}{_pct_median_inline(pe_med)}）")
     if pb_pct is not None:
@@ -1059,16 +1066,25 @@ def _section_market_structure(
         lines.append("")
         lines.append("### 3c. 情绪指标")
         if pcr:
-            partial = "（历史样本不足，分位仅供参考）" if pcr.get("partial") else ""
+            partial = "（采样不完整，仅展示可用窗口分位）" if pcr.get("partial") else ""
+            pcr_date = _to_iso_date(str(pcr.get("current_date") or "")) or "日期未封存"
+            stale_note = ("；未纳入当期交叉验证"
+                          if not _ru.pcr_is_current_for_snapshot(pcr, collection) else "")
             pct_5y = pcr.get("percentile_5y")
             pct_60d = pcr.get("percentile_60d")
             if pct_5y is not None and pct_60d is not None and pct_5y != pct_60d:
                 pct_s = f"5年分位 {pct_5y}%，60日分位 {pct_60d}%"
             else:
                 pct_s = f"分位 {pct_5y if pct_5y is not None else pct_60d if pct_60d is not None else '-'}"
+            sample_note = (
+                f"；五年均匀样本 {pcr.get('history_days', '-')} 点"
+                f"；近期窗口 {pcr.get('recent_observed_days', '-')}"
+                f"/{pcr.get('recent_days', '-')} 个交易日"
+                if pcr.get("history_sample_target") is not None else ""
+            )
             lines.append(
                 f"- **50ETF 认沽认购比:** {pcr.get('ratio', '-')}，"
-                f"{pct_s}{partial} "
+                f"{pct_s}{partial}（截至 {pcr_date}{sample_note}{stale_note}） "
                 f"[{pcr.get('source', '')}]"
             )
         else:
@@ -1090,11 +1106,14 @@ def _section_market_structure(
                 f"{_v3_ms_availability_note(avail, 'short_margin')}"
             )
         if nhr:
-            partial = "（采样近似）" if nhr.get("partial") else ""
+            partial = bool(nhr.get("partial"))
+            sample = f"{nhr.get('sample_size', '-')}/{nhr.get('sample_target', 30)}"
+            pct = nhr.get("percentile_60d") if not partial else None
+            note = "；样本不完整，不作市场广度判断" if partial else ""
             lines.append(
                 f"- **创新高个股占比:** {nhr.get('ratio_pct', '-')}%"
-                f"，60日分位 {nhr.get('percentile_60d', '-')}%"
-                f"{partial} [样本 {nhr.get('sample_size', '-')}]"
+                f"，60日分位 {f'{pct}%' if pct is not None else '—'}"
+                f" [样本 {sample}{note}] [来源: {nhr.get('source', 'tushare.daily')}]"
             )
         else:
             lines.append(
@@ -1129,9 +1148,13 @@ def _section_market_structure(
         ms_evidences.append(("❓", "ERP 不可得，仅换手数据可参考"))
     if pcr:
         pct = pcr.get("percentile_5y") or pcr.get("percentile_60d")
+        pcr_date = _to_iso_date(str(pcr.get("current_date") or "")) or "日期未封存"
+        stale_note = ("；不作当期判断"
+                      if not _ru.pcr_is_current_for_snapshot(pcr, collection) else "")
         ms_evidences.append((
             "⚠️",
-            f"50ETF 认沽认购比 {pcr.get('ratio', '-')}（分位 {pct if pct is not None else '-'}%）",
+            f"50ETF 认沽认购比 {pcr.get('ratio', '-')}（分位 {pct if pct is not None else '-'}%；"
+            f"截至 {pcr_date}{stale_note}）",
         ))
     if sm:
         ms_evidences.append((

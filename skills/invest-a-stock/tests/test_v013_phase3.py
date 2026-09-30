@@ -28,6 +28,8 @@ def _collection_phase3() -> dict:
         "put_call_ratio": {
             "ratio": 1.15,
             "percentile_5y": 75.0,
+            "current_date": "20260929",
+            "expected_latest_date": "20260929",
             "source": "tushare.opt_daily",
         },
         "short_margin": {
