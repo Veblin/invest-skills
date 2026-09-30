@@ -3327,6 +3327,19 @@ _PCR_MAX_DAILY_QUERIES = 100
 _PCR_MIN_HISTORY_SAMPLES = 30
 
 
+def _pcr_coverage_ok(observed: int, planned: int, floor: int) -> bool:
+    """PCR 采样覆盖率门槛：容忍 ≤10% 缺失，但不低于 floor。
+
+    2026-09-30 裁决（用户）。此前是**精确等号**（`observed == planned`）：鉴于
+    「限流等待计入 8 s 窗口」这条已知残留，任意 1 天缺失即让分位为 None，而
+    `render_utils._v3_cv8_block` 又因 `percentile_5y is None` 摘掉整个 CV-8
+    —— 等号等于让该功能事实上不存在。披露责任改由 `partial` 标志承担。
+    """
+    if planned <= 0:
+        return False
+    return observed >= max(floor, -(-planned * 9 // 10))  # ceil(0.9 * planned)
+
+
 def _ms_50etf_option_codes(
     tc: Any, *, diag: dict | None = None,
 ) -> tuple[list[str], list[str]]:
@@ -3476,8 +3489,18 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # 探针成功后，客户端已证明 opt_daily 权限，分钟预算会从默认档
     # 提升到该接口对应积分档。此时规划采样才能准确给后续 daily 面板留量。
     headroom = available_slots("opt_daily") if callable(available_slots) else None
+    # 历史采样是 5 年分位的前提（`pct_5y` 需 ≥ _PCR_MIN_HISTORY_SAMPLES 点）。
+    # 此前 new_high 的预留先于历史采样，紧额度下 history_budget 可低到个位数
+    # → pct_5y 结构性为 None → CV-8 整块消失。2026-09-30 裁决（用户）：**先保
+    # 历史下限，余量再给 new_high**（后者本就常在 25/30 附近 partial，且样本不足时
+    # 其分位已按设计不输出）。
+    reserved_for_history = (
+        min(_PCR_MIN_HISTORY_SAMPLES, max(0, headroom - len(recent_dates)))
+        if headroom is not None else 0
+    )
     reserved_for_new_high = (
-        min(_NEW_HIGH_SAMPLE + 2, max(0, headroom - len(recent_dates)))
+        min(_NEW_HIGH_SAMPLE + 2,
+            max(0, headroom - len(recent_dates) - reserved_for_history))
         if headroom is not None else 0
     )
     daily_budget = min(
@@ -3525,11 +3548,14 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # （ratio_pairs 非空 ⇒ current_date 必非 None，无需冗余守卫）
     stale = current_date != sampled[-1]
     ratios = [r for _, r in ratio_pairs]
-    # 缺失历史采样点时，成功点通常集中在最近日期；不能把这个偏样本
-    # 继续标成「5 年分位」。近期窗口可独立保留。
+    # 5 年分位的双重门槛：① 覆盖率 ≥90% 且不低于下限（见 _pcr_coverage_ok）——
+    # 容忍零散缺失，避免单点抖动就让分位整块消失；② `not stale` —— 覆盖率达标
+    # 并不能排除**有偏**样本（近期窗口整段失败时，成功点全落在历史，覆盖率仍可能
+    # 达标）。`stale` 恰是「最新计划采样点没拿到」的判据，与 pct_60d 的
+    # `current_date >= cutoff` 对称。
     pct_5y = (percentile_rank(ratios, current)
-              if len(ratios) >= _PCR_MIN_HISTORY_SAMPLES
-              and len(ratios) == len(sampled) else None)
+              if _pcr_coverage_ok(len(ratios), len(sampled), _PCR_MIN_HISTORY_SAMPLES)
+              and not stale else None)
     ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
     # current 在窗口内（current_date >= cutoff）才计算 60 日分位：最新 1-3 个
     # 采样日查询失败时 current 回退约 step×失败点数 天（降采样 step≈15），
@@ -3537,7 +3563,7 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # 置 None 而非渲染成"0.0% 低位"（与 stale/partial 标志并存，互不替代）
     pct_60d = (
         percentile_rank(ratios_60d, current)
-        if (len(ratios_60d) >= 5 and len(ratios_60d) == len(recent_dates)
+        if (_pcr_coverage_ok(len(ratios_60d), len(recent_dates), 5)
             and current_date >= cutoff) else None
     )
     return {

@@ -45,14 +45,77 @@ def test_pcr_uses_published_day_and_recent_window_first(monkeypatch):
     assert result is not None
     assert result["current_date"] == result["expected_latest_date"] == "20260929"
     assert result["percentile_60d"] is not None
-    assert result["percentile_5y"] is None  # 七个历史点不足以代表五年分位
-    assert result["partial"] is True  # 额度不足时明确降级
-    assert result["sample_points"] <= 100
-    assert len(tc.requested) <= 51
-    assert len(tc.requested) <= 80 - orch._NEW_HIGH_SAMPLE - 2
+    # 2026-09-30 裁决：额度先保历史下限（此前 new_high 的预留先于历史采样，
+    # 同档 headroom 下 history_budget 只有个位数 → pct_5y 结构性为 None）。
+    assert result["history_days"] >= orch._PCR_MIN_HISTORY_SAMPLES
+    assert result["percentile_5y"] is not None
+    # 计划点全部到齐 → 没有缺失可披露，partial 应为 False
+    assert result["history_days"] == result["history_sample_target"]
+    assert result["recent_observed_days"] == result["recent_days"]
+    assert result["partial"] is False
+    assert result["sample_points"] <= orch._PCR_MAX_DAILY_QUERIES
+    assert len(tc.requested) <= 80  # 不得超出该接口当刻额度
     assert "20260930" not in tc.requested
     assert tc.requested[0] == "20260929"  # 最新已发布日探针
     assert all(d >= "20260801" for d in tc.requested[1:9])  # 并发请求先覆盖近期
+
+
+def test_pcr_coverage_threshold_tolerates_up_to_one_tenth_missing():
+    """覆盖率门槛：容忍 ≤10% 缺失，但不低于 floor（2026-09-30 裁决）。"""
+    from lib.collector import _orchestrate as orch
+
+    # 两个门槛取**更严**者：计划 100 点时要求 90 点（floor=30 不再起作用）
+    assert orch._pcr_coverage_ok(90, 100, 30) is True
+    assert orch._pcr_coverage_ok(89, 100, 30) is False
+    # floor 在计划点很少时才起作用：计划 20 点、90% 只要 18，但 floor=30 → 18 不达
+    assert orch._pcr_coverage_ok(18, 20, 30) is False
+    assert orch._pcr_coverage_ok(30, 31, 30) is True
+    # 90% 取上取整：42 点允许缺 4 点（38/42 = 90.4%），缺 5 点即不达
+    assert orch._pcr_coverage_ok(38, 42, 5) is True
+    assert orch._pcr_coverage_ok(37, 42, 5) is False
+    # 空计划保护
+    assert orch._pcr_coverage_ok(0, 0, 5) is False
+
+
+def test_pcr_partial_sample_within_coverage_still_reports_percentiles(monkeypatch):
+    """少量缺失（≤10%）不再让分位整块消失——披露责任改由 partial 承担。"""
+    from lib.collector import _orchestrate as orch
+
+    now = datetime(2026, 9, 30, 13, 31, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(orch, "shanghai_now", lambda: now)
+    monkeypatch.setattr(orch, "_today", lambda: "20260930")
+    monkeypatch.setattr(
+        orch, "_days_ago",
+        lambda n: (now.date() - timedelta(days=n)).strftime("%Y%m%d"),
+    )
+    dates = [d.strftime("%Y%m%d") for d in pd.bdate_range(end="2026-09-30", periods=1215)]
+    failing = {"20260922", "20260923"}  # 近期窗口内 2 天取不到
+
+    class FakeTC:
+        def __init__(self):
+            self.requested: list[str] = []
+
+        def available_rate_limit_slots(self, api):
+            return 79 if self.requested else 80
+
+        def query(self, api, **kwargs):
+            if api == "opt_basic":
+                return pd.DataFrame([
+                    {"ts_code": "C.SH", "name": "50ETF购", "call_put": "C"},
+                    {"ts_code": "P.SH", "name": "50ETF沽", "call_put": "P"},
+                ])
+            if api == "trade_cal":
+                return pd.DataFrame({"cal_date": dates})
+            self.requested.append(kwargs["trade_date"])
+            if kwargs["trade_date"] in failing:
+                return pd.DataFrame()
+            return pd.DataFrame({"ts_code": ["C.SH", "P.SH"], "vol": [100, 50]})
+
+    result = orch._ms_fetch_put_call_ratio(FakeTC())
+    assert result is not None
+    assert result["recent_observed_days"] < result["recent_days"]
+    assert result["percentile_60d"] is not None  # 覆盖率仍达门槛
+    assert result["partial"] is True  # 缺失照样披露
 
 
 def test_stale_pcr_excluded_from_current_cv8():

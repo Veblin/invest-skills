@@ -96,7 +96,9 @@ def detect_macd_divergence(closes: list[float], *, pivot_window: int = PIVOT_WIN
     """① MACD 底背离：**价格创新低 + MACD 低点抬高**。
 
     量化定义：取最近 `max_pivots` 个价格局部低点；若**相邻两低点**满足
-    `price[i2] < price[i1]` 且 `dif[i2] > dif[i1]` → 在后一低点记一次底背离。
+    `price[i2] < price[i1]` 且 `dif[i2] > dif[i1]` → 记一次底背离。
+    低点索引保留为元数据；事件终点为 `i2 + pivot_window`（低点可确认之日），
+    前向收益从确认日开始，避免把确认窗口内的价格计入收益。
     """
     macd = macd_series(closes)
     dif = macd["dif"]
@@ -107,7 +109,7 @@ def detect_macd_divergence(closes: list[float], *, pivot_window: int = PIVOT_WIN
     for i1, i2 in zip(lows, lows[1:]):
         if closes[i2] < closes[i1] and dif[i2] > dif[i1]:
             out.append({
-                "endpoint_idx": i2,
+                "endpoint_idx": i2 + pivot_window,
                 "detail": {
                     "kind": "macd_divergence",
                     "prev_low_idx": i1, "low_idx": i2,
@@ -165,7 +167,9 @@ def detect_shrink_pullback(closes: list[float], vols: list[float | None], *,
         pullback_pct = (peak_px - px[i]) / peak_px * 100.0
         if pullback_pct < pullback_min_pct:
             continue
-        peak_vols = [v for v in vals[max(0, peak_i - 3): peak_i + 4] if v is not None]
+        # 前高附近量能只能使用终点 i 当日及以前的观测。
+        peak_vols = [v for v in vals[max(0, peak_i - 3): min(peak_i + 4, i + 1)]
+                     if v is not None]
         pull_vols = [v for v in vals[peak_i + 1: i + 1] if v is not None]
         # ⚠️ 量能**不可得 → 不构成「缩量回踩」**（该特征的定义就是量能条件）。
         # 曾把「无量」当命中发出（`shrink_ratio=None` + `volume_available=False`）——

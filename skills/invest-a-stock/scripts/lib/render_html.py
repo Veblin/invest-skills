@@ -379,6 +379,7 @@ def _html_overview(
     price_str: str, change_str: str, price_color: str, chg_color: str,
     volume_str: str, turover_str: str, atr_str: str, vol5d_str: str,
     dv_str: str, ma250_str: str, ma250_pos: str, kline_days: int,
+    *, price_basis: str = "",
 ) -> str:
     # 默认值
     price_str = price_str or "--"
@@ -393,7 +394,7 @@ def _html_overview(
     return f'''<section id="overview">
   <div class="sh"><span class="st">行情快照</span><div class="sd"></div><span class="ss">交易日 {kline_days}d</span></div>
   <div class="g4">
-    <div class="card card-sm"><div class="kl">最新价</div><div class="kv" style="color:{price_color}">{price_str}</div><div class="ks">较昨收 {change_str}</div></div>
+    <div class="card card-sm"><div class="kl">最新价</div><div class="kv" style="color:{price_color}">{price_str}</div><div class="ks">较昨收 {change_str}{price_basis}</div></div>
     <div class="card card-sm"><div class="kl">换手率</div><div class="kv">{turover_str}</div><div class="ks">ATR(14) = {atr_str}</div></div>
     <div class="card card-sm"><div class="kl">近5日均量</div><div class="kv" style="font-size:var(--text-lg)">{volume_str}</div><div class="ks">MA250 = {ma250_str} <span style="color:{ma250_color}">{ma250_pos}</span></div></div>
     <div class="card card-sm"><div class="kl">股息率</div><div class="kv">{dv_str.split("%")[0] if "%" in dv_str else dv_str}%</div><div class="ks">dv_ratio 最近交易日</div></div>
@@ -1312,6 +1313,24 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     chg_color = "var(--dn)" if is_down else ("var(--up)" if is_up else "var(--tx-m)")
     turnover_str = f"{turnover:.2f}%" if turnover is not None else "--"
 
+    # ── 价格基准（与 md 侧 `_v3._section_snapshot` 同源同措辞）──
+    # 快照可能是**盘中**采集：`price` 是实时价，而估值分位与技术指标的日线序列
+    # 截至上一交易日收盘。HTML 是工作流默认交付面，缺这段读者就只能看到
+    # 「1248.92／较昨收」，无法分辨它是盘中价还是收盘价。二者都必须可读。
+    quote_meta = _get_dim_meta(dims, "quote")
+    _basis_src = quote_meta.get("price_source") or quote_meta.get("source")
+    _basis_at = fmt_fetched_at(
+        quote_meta.get("price_fetched_at") or quote_meta.get("fetched_at"))
+    _basis_kline = (quote.get("kline") if isinstance(quote, dict) else None) \
+        or _get_dim_data(dims, "kline") or []
+    _basis_dates = [str(row.get("trade_date")) for row in _basis_kline
+                    if isinstance(row, dict) and row.get("trade_date")]
+    price_basis_note = "".join([
+        f"；来源 {_basis_src}" if _basis_src else "",
+        f"；取数 {_basis_at}" if _basis_at else "",
+        f"；日线截至 {_to_iso_date(max(_basis_dates))}" if _basis_dates else "",
+    ])
+
     # ── 财务数据 ──
     # B3-R ④：恢复 pre-T3 被静默删除的 ROE/EPS 与扣非净利图（ECharts 版）
     fin_labels, fin_roe, fin_eps, fin_profit, fin_table_html, fin_note = (
@@ -1455,7 +1474,8 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     sidebar = _html_sidebar()
     overview = _html_overview(price_str, change_str, price_color, chg_color,
                               vol5d_str, turnover_str, atr_str, vol5d_str,
-                              dv_str, ma250_str, ma250_pos, kline_days)
+                              dv_str, ma250_str, ma250_pos, kline_days,
+                              price_basis=price_basis_note)
     # ── 估值历史分位带图（R-B3①；val_data 已带 isinstance 守卫，A6） ──
     band_html = ""
     if isinstance(val_data, list) and val_data:

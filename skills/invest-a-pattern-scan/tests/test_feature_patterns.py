@@ -72,7 +72,47 @@ def test_macd_divergence_short_sample_is_empty():
     assert fp.detect_macd_divergence([1.0] * 10) == []
 
 
+@pytest.mark.parametrize("pivot_window", [4, 10])
+def test_macd_divergence_starts_returns_when_pivot_is_observable(pivot_window):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+    from lmw import pattern_forward_stats
+
+    closes = _divergence_series()
+    hits = fp.detect_macd_divergence(closes, pivot_window=pivot_window)
+    assert hits
+    for hit in hits:
+        low = hit["detail"]["low_idx"]
+        endpoint = hit["endpoint_idx"]
+        assert endpoint == low + pivot_window
+        # 未走完右侧确认窗口时不可观测；确认日收盘后即可重现同一事件。
+        before = fp.detect_macd_divergence(closes[:endpoint], pivot_window=pivot_window)
+        assert not any(h["detail"]["low_idx"] == low for h in before)
+        observed = fp.detect_macd_divergence(closes[:endpoint + 1],
+                                             pivot_window=pivot_window)
+        assert hit in observed
+        stats = pattern_forward_stats(closes, [hit], horizons=(5, 10))
+        for horizon in (5, 10):
+            expected = (closes[endpoint + horizon] / closes[endpoint] - 1) * 100
+            assert stats[f"+{horizon}"] == pytest.approx([expected])
+
+
 # ── ② 缩量回踩 ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("pull_volume, expected_hit", [(400.0, True), (1000.0, False)])
+def test_shrink_pullback_ignores_volume_after_endpoint(pull_volume, expected_hit):
+    closes = [100.0] * 23 + [120.0, 110.0, 120.0, 120.0]
+    vols = [1000.0] * 24 + [pull_volume, 1000.0, 1000.0]
+
+    def event_at_24(volumes):
+        return [h for h in fp.detect_shrink_pullback(closes, volumes)
+                if h["endpoint_idx"] == 24]
+
+    baseline = event_at_24(vols)
+    assert bool(baseline) is expected_hit
+    for future_volume in (0.0, 1_000_000.0, None):
+        changed = vols[:25] + [future_volume, future_volume]
+        assert event_at_24(changed) == baseline
+
 
 def test_shrink_pullback_detected():
     closes = [100.0] + [100 + i * 0.5 for i in range(20)] + [110 - i * 0.9 for i in range(15)]

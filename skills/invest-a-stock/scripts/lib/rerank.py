@@ -89,7 +89,11 @@ def score_from_dimension_meta(meta: dict) -> float:
     """
     multi_source = meta.get("multi_source", False)
     cv_status = meta.get("cross_validation")
-    primary_src = meta.get("source", "")
+    # 多源合并会把 `source` 改写成 `merged:<主源>+<实时源>`（见 collector 的
+    # quote 合并），而本函数按 `startswith("tushare")` 判付费源 → 合并维度会
+    # 静默丢掉 PAID_SOURCE 加分。合并时 collector 另存了合并前的 `primary_source`，
+    # 故判据优先读它；未合并且无该键时行为与旧写法逐字一致（无回归）。
+    primary_src = meta.get("primary_source") or meta.get("source", "")
     all_src = meta.get("all_sources", [])
     source_count = meta.get("source_count", len([s for s in all_src if s.get("data_available")]))
 

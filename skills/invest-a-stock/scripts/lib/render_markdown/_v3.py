@@ -561,7 +561,8 @@ def _section_snapshot(
         price_source = quote_meta.get("price_source") or quote_meta.get("source") or "来源未封存"
         price_at = fmt_fetched_at(quote_meta.get("price_fetched_at") or quote_meta.get("fetched_at"))
         time_note = f"；取数 {price_at}" if price_at else ""
-        bar_dates = [str(row.get("trade_date")) for row in (quote.get("kline") or [])
+        kline = quote.get("kline") or _get_dim_data(dims, "kline") or []
+        bar_dates = [str(row.get("trade_date")) for row in kline
                      if isinstance(row, dict) and row.get("trade_date")]
         bar_note = f"；日线截至 {_to_iso_date(max(bar_dates))}" if bar_dates else ""
         lines.append(f"- **最新价:** {price}{chg_s}（{price_source}{time_note}{bar_note}）")
