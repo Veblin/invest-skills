@@ -32,8 +32,18 @@ SCHEMA_VERSION = 1
 _db_override: Path | None = None
 
 
-def _get_path() -> Path:
+def get_db_path() -> Path:
+    """当前研究库路径 —— 跨 skill 唯一真源（issue #33）。
+
+    测试隔离统一走 `_db_override`：journal 侧 `db.py` 的写入连接亦经本函数解析，
+    因此「建表路径」与「写连接路径」不会再错位。未设置 override 时 == `env.STORE_DB`，
+    与历史行为逐字一致。
+    """
     return _db_override or DB_PATH
+
+
+def _get_path() -> Path:  # 兼容既有内部调用点
+    return get_db_path()
 
 
 def _conn() -> sqlite3.Connection:
@@ -1335,8 +1345,9 @@ def thesis_update(symbol: str, assumptions: list[dict] | None = None,
 # ---------------------------------------------------------------------------
 # 宏观日快照（macro_snapshots 表，v0.2.4）
 #
-# 放置于 store.py 而非 journal lib：journal 侧 db.py 直连 env.STORE_DB，
-# 不 honor _db_override，写入若在 journal 侧将无法测试隔离（污染真实库）。
+# 放置于 store.py 而非 journal lib：宏观快照与 market_snapshots 同库同表族，
+# 由 store 统一建表与隔离。journal 侧 db.py 自 issue #33 起亦经
+# `store.get_db_path()` 解析写入路径，`_db_override` 对 journal 写路径同样生效。
 # 日期用上海口径（宏观指标无交易日概念，LPR/PMI 月度、VIX/SOX 日频，
 # 非交易日也写入，与 market_snapshots 的交易日跳过策略不同）。
 # ---------------------------------------------------------------------------

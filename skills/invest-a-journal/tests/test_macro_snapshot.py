@@ -1,8 +1,9 @@
 """v0.2.4：macro_snapshots 宏观日快照（store 侧 API + journal 触发点）。
 
 隔离说明：save_macro_snapshot / load_macro_history 位于 invest-a-stock 的
-store（honor _db_override）；journal 侧 db.py 直连真实库，但本测试不触碰
-journal db 函数，仅通过 store 的 override 隔离。
+store。journal 侧 db.py 自 issue #33 起同样经 `store.get_db_path()` 解析写入
+路径；本目录 conftest 的 autouse fixture 已统一隔离，本测试另用局部 override
+显式固定（双保险）。
 """
 
 from __future__ import annotations

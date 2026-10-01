@@ -15,17 +15,15 @@ for _p in (str(_LIB_DIR), str(_SCRIPT_DIR)):
 
 from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
 
-ensure_invest_a_scripts_on_path()  # `from lib import env` 须命中 invest-a-stock 的 lib 包
+ensure_invest_a_scripts_on_path()  # `from lib import ...` 须命中 invest-a-stock 的 lib 包
 
-from lib import env as invest_env  # noqa: E402
 import db  # noqa: E402
 
 
 @pytest.fixture
-def tmp_db(tmp_path: Path, monkeypatch):
-    db_path = tmp_path / "test_journal.db"
-    monkeypatch.setattr(invest_env, "STORE_DB", str(db_path))
-    monkeypatch.setattr(db, "DB_PATH", db_path)
+def tmp_db():
+    """DB 隔离由 conftest 的 autouse fixture 提供（store._db_override 单一真源，
+    issue #33）；此处仅确保 trade_journals 就绪。"""
     db.init_db()
     yield db
 
