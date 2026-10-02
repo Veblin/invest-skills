@@ -43,6 +43,8 @@ def test_dedupe_keeps_shorter_alias_name() -> None:
         {"bz_item": "储能电池系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
         {"bz_item": "储能系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
     ]
+    for row in rows:
+        row["end_date"] = "20260630"
     kept = {row["bz_item"] for row in src._dedupe_mainbz_rows(rows)}
     assert kept == {"电池材料及回收", "储能系统"}
 
@@ -94,10 +96,29 @@ def test_dedupe_keeps_distinct_segments() -> None:
         {"bz_item": "动力电池系统", "bz_sales": 1.921249e11, "bz_profit": 3.963278e10},
         {"bz_item": "其他业务", "bz_sales": 1.271964e10, "bz_profit": 8.781601e9},
     ]
+    for row in rows:
+        row["end_date"] = "20260630"
     assert len(src._dedupe_mainbz_rows(rows)) == 2
 
 
 # ── fetcher：解析 / 去重 / 剔 NaN / 派生毛利率 ──────────────────────────────
+
+
+@pytest.mark.parametrize("profit", [20.0, None])
+def test_mainbz_preserves_equal_values_across_periods(monkeypatch, profit) -> None:
+    _install(monkeypatch, {
+        "P": _mainbz_frame([
+            {"end_date": period, "bz_item": item, "bz_sales": 100.0, "bz_profit": profit}
+            for period in ("20251231", "20260630")
+            for item in ("储能电池系统", "储能系统")
+        ]),
+    })
+    rows = src._q_tushare_mainbz("300750")
+    assert rows is not None
+    assert len(rows) == 2
+    assert {(r["end_date"], r["item"]) for r in rows} == {
+        ("20251231", "储能系统"), ("20260630", "储能系统")}
+    assert all(r["sales"] == 100.0 and r["profit"] == profit for r in rows)
 
 
 def test_mainbz_parses_dedupes_and_skips_nan(monkeypatch) -> None:

@@ -557,7 +557,7 @@ def _is_segment_item(item: str) -> bool:
 
 
 def _dedupe_mainbz_rows(records: list[dict]) -> list[dict]:
-    """按 ``(bz_sales, bz_profit)`` 值对去重，别名取较短名（同长取先出现者）。
+    """按 ``(end_date, bz_sales, bz_profit)`` 去重，别名取较短名（同长取先出现者）。
 
     ``fina_mainbz`` 对同一分部会返回**别名重复行**——实测 300750 2026H1：按产品
     同时给出「电池材料及回收、矿产资源」与「电池材料及回收」、按地区同时给出
@@ -566,7 +566,7 @@ def _dedupe_mainbz_rows(records: list[dict]) -> list[dict]:
     """
     chosen: dict[tuple, dict] = {}
     for row in records:
-        key = (row["bz_sales"], row["bz_profit"])
+        key = (row["end_date"], row["bz_sales"], row["bz_profit"])
         current = chosen.get(key)
         if current is None or len(str(row["bz_item"])) < len(str(current["bz_item"])):
             chosen[key] = row
