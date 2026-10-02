@@ -1380,6 +1380,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 此处只兜 `--resume` 恢复出来的旧快照（可能缺 market_structure），且自带降级、
     # 数据已在时不重复取数。固定输入链绝不补采（缺字段即 fail-loud）。
     if resumed_from_store and not fixed_input:
+        # issue #35 E（2026-10-02 用户裁决）：未封存快照保留现场补采兼容路线，
+        # 但必须显式提示——补采仅本次有效、不写回快照，重复渲染会重复联网。
+        if not report_snapshot.is_sealed(result):
+            print(
+                "⚠️ --resume: 快照未封存（非固定输入链），渲染期将按需现场补采缺失数据"
+                "（仅本次、不写回快照）；如需可复现/零联网渲染，请先执行 "
+                "`collect <SYMBOL> --report-ready`，再用 `--collection-id <ID>` 渲染。",
+                file=sys.stderr,
+            )
         _ensure_render_ready(result, args.symbol)
     # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，披露移入附录「覆盖缺口」）
     if not fixed_input:

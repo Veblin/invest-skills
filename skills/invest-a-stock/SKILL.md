@@ -567,7 +567,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <步骤3 stderr 的 md 路径> --fail-on error
 ```
 
-`collect --report-ready` 封存市场结构（含 PCR 样本与来源状态）、事件、条件连板项、沪深300 基准序列（DCF beta 用，**渲染链唯一的联网点由此前移**）和默认 `value` 结果，输出 ID/hash；每条依赖另落 available/unavailable/not_triggered 三态（条件项未触发不算缺口）。绑定计划的快照在后续每条只读命令都须附同一 `--plan`；仅传 ID 或匹配维度不够。首次 `report` 用固定 ID 时会打印**事实路径索引**（写 `facts.source_path` 用）、数据时点/样本窗口与写作约束。`evidence` 与首次 `report` 用同一 ID 并行只读；R12a 一手核验可同时开始，分析须等证据与初稿齐备。`value SYMBOL --collection-id <本轮ID> --plan /tmp/plan.json` 读取同代默认估值；若需 `--steady` 等额外参数，须单列现场取证，不能称为同快照结果。候选 `--preflight` 须使用固定 ID，调用同一报告产物路径并仅在临时目录写入；Insight 候选含其 sidecars。最终 HTML 同代 MD 仍须对最终路径执行 `report_qc` 与三层人工复检。旧 `--resume` 保留兼容，会按最近 collect 快照恢复，缺扩展字段时仍可能现场补采，不用于固定输入链。
+`collect --report-ready` 封存市场结构（含 PCR 样本与来源状态）、事件、条件连板项、沪深300 基准序列（DCF beta 用，**渲染链唯一的联网点由此前移**）和默认 `value` 结果，输出 ID/hash；每条依赖另落 available/unavailable/not_triggered 三态（条件项未触发不算缺口）。绑定计划的快照在后续每条只读命令都须附同一 `--plan`；仅传 ID 或匹配维度不够。首次 `report` 用固定 ID 时会打印**事实路径索引**（写 `facts.source_path` 用）、数据时点/样本窗口与写作约束。`evidence` 与首次 `report` 用同一 ID 并行只读；R12a 一手核验可同时开始，分析须等证据与初稿齐备。`value SYMBOL --collection-id <本轮ID> --plan /tmp/plan.json` 读取同代默认估值；若需 `--steady` 等额外参数，须单列现场取证，不能称为同快照结果。候选 `--preflight` 须使用固定 ID，调用同一报告产物路径并仅在临时目录写入；Insight 候选含其 sidecars。最终 HTML 同代 MD 仍须对最终路径执行 `report_qc` 与三层人工复检。旧 `--resume` 保留兼容，会按最近 collect 快照恢复，缺扩展字段时仍可能现场补采（未封存快照会在 stderr 显式提示：补采仅本次、不写回快照），不用于固定输入链。
 
 > 第 4 步之后仍须走共享规范 §7 Self-Check 与 [delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§5 的第 0 层机器准出 + 三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
 

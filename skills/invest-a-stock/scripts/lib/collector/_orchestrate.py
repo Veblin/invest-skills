@@ -3323,8 +3323,19 @@ _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
 # 单次 PCR 面板的总查询预算（5 年均匀样本 + 近期全分辨率），
 # 避免两个窗口分别规划后超过同一客户端的分钟额度。
+# 不变式（test_pcr_budget_invariant_locked 锁定）：默认档下
+# `_PCR_MAX_DAILY_QUERIES <= rate_limit_for_api("opt_daily")`（100 ≤ 125）；
+# 显式降速与账号桶占用由运行期 available_rate_limit_slots 截断覆盖。
 _PCR_MAX_DAILY_QUERIES = 100
 _PCR_MIN_HISTORY_SAMPLES = 30
+# 探针与逐日扇出共用的单次查询时限；集中为具名常量，不得散落字面量
+# （变更卡 §7 已知残留 1）。
+_PCR_QUERY_TIMEOUT_SEC = 8.0
+# worker 层累计超时熔断阈值（issue #35 C / 审计 R5）：任一非超时完成即清零；
+# 达此值置停止信号，后续 worker 在真实查询前检查。
+_PCR_TIMEOUT_STREAK_LIMIT = 5
+# new_high 面板单次 daily 查询时限（与 _ms_pcr_query_one 同款）。
+_NEW_HIGH_QUERY_TIMEOUT_SEC = 8.0
 
 
 def _pcr_coverage_ok(observed: int, planned: int, floor: int) -> bool:
@@ -3338,6 +3349,25 @@ def _pcr_coverage_ok(observed: int, planned: int, floor: int) -> bool:
     if planned <= 0:
         return False
     return observed >= max(floor, -(-planned * 9 // 10))  # ceil(0.9 * planned)
+
+
+def _pcr_breaker_tick(state: dict, kind: str) -> bool:
+    """推进 PCR 熔断状态；返回本次是否触发熔断。
+
+    冻结语义（2026-10-02 独立复核 P2-2）：一旦 tripped，迟到的完成（含熔断后
+    到达的在途成功）不得再改写计数——触发时的 streak 是要保留的可追溯证据。
+    非超时完成（ok/empty/error）表示端点仍在响应，连续计数清零。
+    """
+    if state.get("tripped"):
+        return False
+    if kind == "timeout":
+        state["streak"] += 1
+        if state["streak"] >= _PCR_TIMEOUT_STREAK_LIMIT:
+            state["tripped"] = True
+            return True
+        return False
+    state["streak"] = 0
+    return False
 
 
 def _ms_50etf_option_codes(
@@ -3405,16 +3435,47 @@ def _ms_pcr_from_df(df: Any, put_codes: set[str], call_codes: set[str]) -> float
     return put_vol / call_vol
 
 
+def _ms_pcr_query_one(
+    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
+) -> tuple[float | None, str]:
+    """单日 opt_daily 查询并分类结果：kind ∈ {ok, empty, error, timeout}。
+
+    旧实现经 _run_with_timeout 把「超时」与「正常空帧」同返 None，扇出层无法
+    统计显式的超时结果（issue #35 C / 审计 R5 修订）——直接调 _run_in_thread
+    读回 err 分类。
+
+    上界说明（2026-10-02 独立复核两轮修正）：受控 worker 并发 ≤
+    _env_max_workers()（默认 8），但每次超时会遗留一个**未结束的底层查询
+    线程**（_run_in_thread daemon，不 join），其寿命不受本次超时预算或 30s
+    socket 超时约束——限流等待发生在 HTTP 请求之前，重试还会延长。
+    查询量上界分两个口径：**扇出阶段全部超时**时，扇出已发出查询 ≤
+    阈值 + workers - 1（回归测试锁定）；任意结果序列下（成功/空帧/错误完成
+    会重置连续计数，扇出可远超该式），含探针重试的总调用数仍有硬上界
+    `_PCR_MAX_DAILY_QUERIES`（硬钳 + 回归测试锁定）。**不消除**存量线程的
+    结构风险（变更卡 §7 残留 2/3）。
+    """
+    label = f"opt_daily:{trade_date}"
+    df, err = _run_in_thread(
+        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
+        _PCR_QUERY_TIMEOUT_SEC, label,
+    )
+    if err is not None:
+        if isinstance(err, TimeoutError):
+            logger.warning("%s timed out after %.0fs, skipping",
+                           label, _PCR_QUERY_TIMEOUT_SEC)
+            return None, "timeout"
+        logger.warning("%s failed: %s", label, err)
+        return None, "error"
+    ratio = _ms_pcr_from_df(df, put_codes, call_codes)
+    return (ratio, "ok") if ratio is not None else (None, "empty")
+
+
 def _ms_pcr_on_date(
     tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
 ) -> float | None:
-    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
-    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
-    df = _run_with_timeout(
-        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
-        8.0, f"opt_daily:{trade_date}",
-    )
-    return _ms_pcr_from_df(df, put_codes, call_codes)
+    """兼容入口：仅取比值（分类信息见 _ms_pcr_query_one）。"""
+    ratio, _kind = _ms_pcr_query_one(tc, trade_date, put_codes, call_codes)
+    return ratio
 
 
 def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | None:
@@ -3455,18 +3516,21 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # 超时风暴，单次报告拖慢数分钟），8s 探针失败重试一次、两次均败才整体
     # 降级跳过（单次网络抖动不抹掉整个 PCR 维度）。端点正常时探针结果直接
     # 复用（不再重复取最新日），净额外查询为 0。
+    probe_calls = 0
     if dates:
+        probe_calls = 1
         probe_df = _run_with_timeout(
             lambda: tc.query("opt_daily", trade_date=dates[-1], exchange="SSE"),
-            8.0, f"opt_daily-probe:{dates[-1]}",
+            _PCR_QUERY_TIMEOUT_SEC, f"opt_daily-probe:{dates[-1]}",
         )
         if probe_df is None:
             # 探针失败不整体丢弃：单次网络抖动/慢查询不应抹掉整个 PCR
             # 维度（旧实现单日失败仅跳过当日并带 stale/partial 标志）。
             # 重试一次，仍失败才整体降级。
+            probe_calls = 2
             probe_df = _run_with_timeout(
                 lambda: tc.query("opt_daily", trade_date=dates[-1], exchange="SSE"),
-                8.0, f"opt_daily-probe2:{dates[-1]}",
+                _PCR_QUERY_TIMEOUT_SEC, f"opt_daily-probe2:{dates[-1]}",
             )
             if probe_df is None:
                 logger.warning(
@@ -3515,26 +3579,54 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     def _on_pcr_error(td: str, exc: Exception) -> None:
         logger.debug("opt_daily %s failed: %s", td, exc)
 
-    # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
-    # _base._map_parallel）：~123 次串行最坏 16 分钟
-    # 最近窗口先取，余量才给历史点。探针之后读取本客户端的剩余额度，
-    # 超额日期本轮直接标 partial，避免在限流等待中耗尽单次 8s 超时。
+    # 全窗口并行取数（单次查询时限由 _ms_pcr_query_one 内部兜底；fan-out 样板
+    # 共享 _base._map_parallel）。最近窗口先取，余量才给历史点；超额日期本轮
+    # 直接标 partial，避免在限流等待中耗尽单次超时预算。
     priority_dates = list(reversed(recent_dates)) + list(reversed(sampled))
     remaining = list(dict.fromkeys(d for d in priority_dates if d not in ratio_by_date))
+    # 硬上界（无条件）：探针 probe_calls 次 + 扇出 ≤ _PCR_MAX_DAILY_QUERIES。
+    # 此前只在 client 有 available_rate_limit_slots 时钳制，无该方法的旧 client
+    # 只能靠规划值间接有界（探针空帧/失败重试时实测 101 次）——审计 R5 要求
+    # 可证明的上界。探针成功后 opt_daily 权限已证实、分钟预算升到积分档，
+    # 此时再按当刻额度截断并给后续 new_high 面板留 reserved_for_new_high。
+    remaining = remaining[:max(0, _PCR_MAX_DAILY_QUERIES - probe_calls)]
     if callable(available_slots):
-        remaining = remaining[:max(0, min(
-            _PCR_MAX_DAILY_QUERIES - len(ratio_by_date),
-            available_slots("opt_daily") - reserved_for_new_high,
-        ))]
-    for td, r in _map_parallel(
-        remaining,
-        lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
-        on_error=_on_pcr_error,
-    ):
+        remaining = remaining[:max(0, available_slots("opt_daily") - reserved_for_new_high)]
+
+    # worker 层连续超时熔断（issue #35 C / 审计 R5 修订）：超时在 worker 内
+    # 显式分类并加锁累计，达 _PCR_TIMEOUT_STREAK_LIMIT 置停止信号；每个 worker
+    # 在真实查询前检查停止信号——熔断后已提交未开跑的项直接跳过，不再发请求。
+    # 已发出扇出查询上界（全超时序列）≤ _PCR_TIMEOUT_STREAK_LIMIT + workers - 1；
+    # 任意结果序列下总调用（含探针重试）受 _PCR_MAX_DAILY_QUERIES 硬钳（回归测试
+    # 锁定）。被放弃线程的寿命不受本预算约束（见 _ms_pcr_query_one docstring）。
+    breaker = {"streak": 0, "tripped": False}
+    breaker_lock = threading.Lock()
+    stop = threading.Event()
+    issued = {"dates": set(), "calls": 0}  # 实际发出的扇出查询（被跳过的日期不计）
+
+    def _pcr_worker(td: str) -> float | None:
+        if stop.is_set():
+            return None
+        ratio, kind = _ms_pcr_query_one(tc, td, put_set, call_set)
+        with breaker_lock:
+            issued["dates"].add(td)
+            issued["calls"] += 1
+            if _pcr_breaker_tick(breaker, kind):
+                stop.set()
+                logger.warning(
+                    "opt_daily: %d cumulative timeouts, tripping breaker; "
+                    "skipping remaining dates", breaker["streak"])
+        return ratio
+
+    for td, r in _map_parallel(remaining, _pcr_worker, on_error=_on_pcr_error):
         if r is not None:
             ratio_by_date[td] = r
+    if breaker["tripped"] and diag is not None:
+        # streak 已在触发时冻结（_pcr_breaker_tick 不再改写）；原因保留到可追溯状态
+        diag["timeout_streak"] = breaker["streak"]
+        diag["reason"] = "timeout_streak"
     if not ratio_by_date:
-        if diag is not None:
+        if diag is not None and not breaker["tripped"]:
             diag["reason"] = "empty_rows"   # 探针成功了但无可用 PCR 行 → 合法空
         return None
     # 单次扫描按 sampled 顺序构建 (date, ratio) 对（此前两次同谓词扫描
@@ -3566,7 +3658,7 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
         if (_pcr_coverage_ok(len(ratios_60d), len(recent_dates), 5)
             and current_date >= cutoff) else None
     )
-    return {
+    pcr_out = {
         "ratio": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
@@ -3584,14 +3676,23 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
         # 显示「历史样本不足」警告。
         "partial": (len(ratios) < len(sampled)
                     or len(sampled) < _PCR_MIN_HISTORY_SAMPLES or stale
-                    or any(td not in ratio_by_date for td in recent_dates)),
+                    or any(td not in ratio_by_date for td in recent_dates)
+                    or breaker["tripped"]),
         "sampled": raw_days > len(sampled),
+        # sample_points 是计划值；queried_points/query_calls 是实际发出值——
+        # 分开记录（2026-10-02 独立复核 P2-1：此前 queried_points 报计划值，
+        # 熔断场景实测仅 13 次却报 98 点）。query_calls 含探针重试。
         "sample_points": len(fetch_dates),
-        "queried_points": len(set(remaining) | {fetch_dates[-1]}),
+        "queried_points": len(issued["dates"] | ({dates[-1]} if probe_calls else set())),
+        "query_calls": probe_calls + issued["calls"],
         "calendar_days": raw_days,
         "underlying": _50ETF_UNDERLYING,
         "source": "tushare.opt_daily",
     }
+    if breaker["tripped"]:
+        # 熔断原因随部分结果一并封存（可追溯状态；2026-10-02 复核 P2-2）
+        pcr_out["timeout_streak"] = breaker["streak"]
+    return pcr_out
 
 
 def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
@@ -3691,7 +3792,7 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     if not codes:
         return None
     def _fetch_daily_panel_row(ts_code: str) -> list[dict] | None:
-        # 单次 daily 查询加时限（与 _ms_pcr_on_date 同款 8s）：_map_parallel
+        # 单次 daily 查询加时限（与 _ms_pcr_query_one 同款）：_map_parallel
         # 契约要求内部单次执行有超时兜底，否则挂起 socket 会拖住
         # with ThreadPoolExecutor 的 join，market_structure 整块阻塞数分钟
         # ⚠️ 只返回 records（不得返回 (ts_code, records) 元组）——_map_parallel
@@ -3704,7 +3805,7 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
                 start_date=_days_ago(70), end_date=_today(),
                 fields="trade_date,close,high",
             ),
-            8.0, f"daily:{ts_code}",
+            _NEW_HIGH_QUERY_TIMEOUT_SEC, f"daily:{ts_code}",
         )
         if df is None or df.empty:
             return None
@@ -4043,6 +4144,8 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
             return f"权限不足：接口 {denied_api} 无权限或积分不够{hint}"
         if code == "probe_timeout":
             return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
+        if code == "timeout_streak":
+            return "连续多次 opt_daily 查询超时，已熔断停止后续取数（非权限问题，可重试）"
         if code == "rate_limited":
             return "本轮 Tushare 客户端额度已满（PCR 未发起逐日查询，可稍后重试）"
         if code == "empty_rows":

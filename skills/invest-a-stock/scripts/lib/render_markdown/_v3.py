@@ -1078,7 +1078,8 @@ def _section_market_structure(
             else:
                 pct_s = f"分位 {pct_5y if pct_5y is not None else pct_60d if pct_60d is not None else '-'}"
             sample_note = (
-                f"；五年均匀样本 {pcr.get('history_days', '-')} 点"
+                f"；五年均匀样本 {pcr.get('history_days', '-')}"
+                f"/{pcr.get('history_sample_target', '-')} 点"
                 f"；近期窗口 {pcr.get('recent_observed_days', '-')}"
                 f"/{pcr.get('recent_days', '-')} 个交易日"
                 if pcr.get("history_sample_target") is not None else ""

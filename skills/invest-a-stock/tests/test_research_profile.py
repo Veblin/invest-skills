@@ -448,3 +448,67 @@ def test_resume_without_new_collection_preserves_original_end_time(
     monkeypatch.setattr(invest.render, "render", capture_render)
     assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
     assert seen["completed_at"] == original_end
+
+
+# ── issue #35 E（2026-10-02 用户裁决）：未封存快照 --resume 现场补采须显式提示 ──
+
+
+def _patch_resume_harness(monkeypatch, cached: dict) -> dict:
+    import invest
+    from lib import lhb, style_match
+
+    seen = {"ensure": 0}
+    monkeypatch.setattr(invest, "_HAS_STORE", True)
+    monkeypatch.setattr(invest.store_mod, "get_pipeline_progress", lambda _s: {"collect": True})
+    monkeypatch.setattr(invest, "_try_resume_collection", lambda _s: dict(cached))
+    monkeypatch.setattr(invest, "_resume_cache_compatible", lambda *_a: True)
+
+    def record_ensure(*_a):
+        seen["ensure"] += 1
+
+    monkeypatch.setattr(invest, "_ensure_render_ready", record_ensure)
+    monkeypatch.setattr(invest.collector, "collect_all", lambda *_a, **_k: pytest.fail("不应重采"))
+    monkeypatch.setattr(lhb, "attach_limit_streak_dims", lambda *_a: False)
+    monkeypatch.setattr(style_match, "assemble_style_match", lambda *_a: None)
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest.render, "render", lambda *_a, **_k: "ok")
+    return seen
+
+
+def test_report_resume_unsealed_warns_live_fetch(
+        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """未封存快照：保持现场补采（行为不变），但补采前必须向 stderr 显式提示。"""
+    import invest
+
+    cached = {
+        **_RENDER_COLLECTION,
+        "collection_started_at": "2026-09-29T06:58:00+00:00",
+        "collection_completed_at": "2026-09-29T07:00:00+00:00",
+    }
+    seen = _patch_resume_harness(monkeypatch, cached)
+
+    assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
+    err = capsys.readouterr().err
+    assert err.count("未封存") == 1
+    assert "现场补采" in err
+    assert "--collection-id" in err
+    assert seen["ensure"] == 1  # 兼容路线保留：仍然现场补采
+
+
+def test_report_resume_sealed_prints_no_notice(
+        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """已封存快照：无需提示（也不得声称会补采）。"""
+    import invest
+
+    cached = {
+        **_RENDER_COLLECTION,
+        "_meta": {"report_input_hash": "deadbeef"},
+        "collection_started_at": "2026-09-29T06:58:00+00:00",
+        "collection_completed_at": "2026-09-29T07:00:00+00:00",
+    }
+    seen = _patch_resume_harness(monkeypatch, cached)
+
+    assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
+    assert "未封存" not in capsys.readouterr().err
+    assert seen["ensure"] == 1
