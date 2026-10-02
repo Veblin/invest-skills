@@ -52,6 +52,8 @@ uv run python skills/lib/report_qc.py <报告文件> --fail-on error
 
 → 无 error 级发现方可进入以下三层人工复检（退出码 **0=PASS / 1=WARN 均可交付**，**2=FAIL 不得交付**）；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）逐条复核后消除或说明。qc 规则细节见 `skills/lib/report_qc.py` 层说明。
 
+> **候选预检（`report … --preflight`）≠ 本步的替代**：`--preflight` 在临时目录执行**真实渲染**，再对候选产物跑 lint（claude 档）与完整 `report_qc`，退出码同为 0/2——用于**正式交付前的候选预检**（把 error 级 QC 前移，避免「渲染 → 改 → 再渲染」返工；标准链见 SKILL.md）。它**不是普通 `report` 自动强制执行的闸门**；最终路径仍须对本步命令（对最终落盘 md）跑 `report_qc` 与后续三层人工复检。
+
 > **`--verify-data` 不是本步的加严开关，而是另一件事**：它会让 `report_qc.py` 重新联网跑 `collect_all` 做 audit/quality/rigor（仅个股），属**独立现场复核**。默认链（八分钟口径）只跑上面这条不带 `--verify-data` 的命令；要用它，明确当成另一次现场核验来对待，别混入默认链的耗时与成败判定。
 
 > **机器 PASS ≠ 可交付**：第 0 层只拦可机械判定的问题，其后三层人工复检不可省。

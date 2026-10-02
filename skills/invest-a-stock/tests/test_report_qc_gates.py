@@ -148,6 +148,75 @@ class TestFullReviewConclusionGate:
         assert not any(x["id"] == "readability-summary-elements" for x in f)
 
 
+# ── R2（#36）：渲染器自出标签行与标题行后缀的误报豁免（2026-10-01 核查记录，10-02 修复）──
+
+class TestRendererLabelExemption:
+    """渲染器按各宿主体例及字段是否非空输出 `**[事实]**`/`**[分析]**`/`**证据等级：** {标签}`
+    （`_render_analysis_overview`、`render_risk` 等），`## 结论…` 标题的后缀文字
+    也不属段内正文。两者此前都被 R-A2 当缺标签断言误报（以「结论」开头的卡
+    含三行渲染标签且未被子标题截断时会报 3-4 条 error）。本组锁：误报清零 + 正文证据门不放松。"""
+
+    @staticmethod
+    def _card(title: str) -> str:
+        """按 `lib/render_markdown/_concise.py::_render_analysis_overview` 的
+        实际输出体例构造（标签行独占一行，正文均带合规标签）。"""
+        return (
+            f"## {title}\n\n"
+            "**[事实]**\n\n"
+            "今日收盘价 12.34 元，PE(TTM) 18.2 倍。[来源: kline 2026-10-02]\n\n"
+            "**[分析]**\n\n"
+            "估值处于近五年 45% 分位，低于行业中位。[证据: B]\n\n"
+            "**证据等级：** B\n"
+        )
+
+    def test_suffixed_conclusion_titles_pass(self):
+        """带后缀标题（「：」与无「：」两形态）：修复前 3-4 条 error → 0。"""
+        for title in ("结论", "结论：估值处于历史中位", "结论与交易结构"):
+            assert conclusion_evidence_findings(self._card(title)) == [], title
+
+    def test_evidence_label_legal_values_exempt(self):
+        """证据等级行合法结构：等级首标记（A-D / L1-L4，同 analysis_schema
+        `_EVIDENCE_RE`）+ §5.2 标记与注解词表（含 §5.1 例「✓✓ 跨源一致」、
+        「✅ 强」空格形态、「🕐 近 30 日」「🗄️ 滞后 >1 年」）。"""
+        for ev in ("B", "L1", "C ⚠️中 📡单源 🔮框架估计",
+                   "B ✅强 📡多源 📅最新期 ✓✓",
+                   "B ✅ 强 🌐 多源 🕐 近30日 ✓✓ 跨源一致",
+                   "B ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 多源一致",
+                   "B 🕐 近 30 日", "B 🗄️ 滞后 >1 年"):
+            md = self._card("结论：估值处于历史中位").replace(
+                "**证据等级：** B\n", f"**证据等级：** {ev}\n")
+            assert conclusion_evidence_findings(md) == [], ev
+
+    def test_missing_source_body_still_fails(self):
+        """正文缺来源 → 仍报 error；行号须落在正文行（标题行不计入）。"""
+        md = self._card("结论：估值处于历史中位").replace(
+            "今日收盘价 12.34 元，PE(TTM) 18.2 倍。[来源: kline 2026-10-02]",
+            "今日收盘价 12.34 元，PE(TTM) 18.2 倍。")
+        f = conclusion_evidence_findings(md)
+        assert [x["id"] for x in f] == ["wording-conclusion-evidence"]
+        assert f[0]["line"] == md.splitlines().index(
+            "今日收盘价 12.34 元，PE(TTM) 18.2 倍。") + 1
+
+    def test_d_grade_body_still_fails(self):
+        md = self._card("结论：估值处于历史中位").replace("[证据: B]", "[证据: D 推测]")
+        assert any(x["id"] == "wording-conclusion-evidence-level"
+                   for x in conclusion_evidence_findings(md))
+
+    def test_label_with_appended_prose_not_exempt(self):
+        """标签行后跟实际正文 → 不豁免；标记后紧跟词表外文字同样不豁免
+        （2026-10-02 复审反例：`B ✅该标的有望走强` / `B —该标的有望走强`）。"""
+        base = self._card("结论：估值处于历史中位")
+        variants = [
+            base.replace("**[分析]**\n", "**[分析]** 该标的有望走强。\n"),
+            base.replace("**证据等级：** B\n", "**证据等级：** B 该标的有望走强\n"),
+            base.replace("**证据等级：** B\n", "**证据等级：** B ✅该标的有望走强\n"),
+            base.replace("**证据等级：** B\n", "**证据等级：** B —该标的有望走强\n"),
+        ]
+        for md in variants:
+            assert any(x["id"] == "wording-conclusion-evidence"
+                       for x in conclusion_evidence_findings(md)), md
+
+
 # ── v0.3.0 A3：层状态映射契约 ──
 
 class TestLayerStatusContract:

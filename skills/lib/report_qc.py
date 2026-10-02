@@ -792,6 +792,30 @@ _SUMMARY_ELEMS = {
 }
 # 结论段结构行（表行/引用/分隔/标题/代码围栏）不算断言（全量审查：FP 源）
 _STRUCT_LINE_RE = re.compile(r"^(\||>|---|```|#{2,})")
+# R-A2 渲染器标签行豁免（R2/#36，2026-10-01 独立核查记录 / 10-02 实施）：渲染器
+# 按各宿主体例输出 `**[事实]**`/`**[分析]**`/`**证据等级：** {标签}`
+# （_concise.py、render_risk.py、render_insight.py；字段非空才逐行输出）。这些标签行是渲染结构、不是断言——
+# 旧实现把它们当结论段缺标签断言：以「结论」开头的卡含渲染标签时必报 3 条 error
+# （标题带后缀再 +1；遇 ###/#### 子标题停止扫描，计数可能更少）。
+# 豁免从严：仅整行恰为标签时生效；标签后跟正文的行（如 participant_scan
+# `**[事实]** 各类参与者…`）仍按断言扫描。
+_RENDER_LABEL_RE = re.compile(r"^\*\*\[(?:事实|分析)\]\*\*\s*$")
+# 证据等级行合法结构（R2，2026-10-02 复审 P1 收紧为封闭语法）：
+#   **证据等级：** <等级> [<四维令牌>…]
+#   等级 = A-D（一至二位）/ L1-L4（同 analysis_schema._EVIDENCE_RE 语义）；
+#   四维令牌 = 标记（✅/⚠/❓/🌐/📡/🔮/🕐/📅/🗄/✓/✗/—，可带 VS16）+ 可选注解词；
+#   注解词限**封闭词表**（report-conventions §5.2 词表 + §5.1 例「跨源一致」+
+#   渲染实测变体「框架估计」「最新期」）。词表之外的一律不豁免——
+#   按「标记 + 任意非空白文字」豁免会把正文放进豁免区（复审反例：
+#   `B ✅该标的有望走强`、`B —该标的有望走强` 曾被吞）。
+_EVIDENCE_ANNOTATION = (
+    r"(?:多源一致|源间有差异|跨源一致|单源无验证|框架估计|最新期"
+    r"|近\s*30\s*日|近季度|滞后\s*>?\s*1\s*年|强|中|弱|多源|单源|推测)"
+)
+_RENDER_EVIDENCE_RE = re.compile(
+    r"^\*\*证据等级[:：]\*\*\s+(?:[A-Da-d]{1,2}|[Ll][1-4])"
+    r"(?:\s*[✅⚠❓🌐📡🔮🕐📅🗄✓✗—]\ufe0f?\s*" + _EVIDENCE_ANNOTATION + r"?)*\s*$"
+)
 
 
 def _evidence_ge_c(ln: str) -> bool:
@@ -894,20 +918,27 @@ def conclusion_evidence_findings(md: str) -> list[dict]:
     - 结构行（| 表行/> 引用/---/#### 标题/```）排除——旧实现把表行/引用/
       情景子标题当断言（FP 源）
     - 段边界含 ####（乐观/悲观情景子标题内容不再误扫）
+    - R2（#36）：标题**整行**跳过（`## 结论：…` 的后缀文字属标题、不是断言）；
+      渲染器自出的纯结构标签行（`**[事实]**`/`**[分析]**`/`**证据等级：** {标签}`）
+      不算断言——两者此前都被当缺标签断言（带后缀标题的卡必报 3-4 条 error）
     """
     out: list[dict] = []
     m = _CONCLUSION_HEAD_RE.search(md)
     if not m:
         return out
-    tail = md[m.end():]
+    seg_start = md.find("\n", m.end())
+    seg_start = len(md) if seg_start == -1 else seg_start + 1
+    tail = md[seg_start:]
     nxt = re.search(r"^#{2,4}\s", tail, re.M)
     seg = tail if not nxt else tail[: nxt.start()]
-    line_base = md[: m.end()].count("\n") + 1
+    line_base = md[:seg_start].count("\n") + 1
     lines = seg.splitlines()
     weak_lines: list[tuple[int, str]] = []
     for i, ln in enumerate(lines):
         stripped = ln.strip()
-        if not stripped or _STRUCT_LINE_RE.match(stripped):
+        if (not stripped or _STRUCT_LINE_RE.match(stripped)
+                or _RENDER_LABEL_RE.match(stripped)
+                or _RENDER_EVIDENCE_RE.match(stripped)):
             continue
         if _EVIDENCE_TAG_RE.search(ln):
             if not _evidence_ge_c(ln):
