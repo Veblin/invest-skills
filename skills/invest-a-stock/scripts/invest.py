@@ -3178,6 +3178,17 @@ def _print_env_labels(snap: dict) -> None:
         except Exception:
             pass
 
+    # issue #34：历史 env_label 里的 IC 基差子句在不可引用时（无数据日期/滞后）
+    # 不得随标签展示——字段过滤与标签文本必须同一日期规则。
+    if cap and "IC 基差" in cap:
+        try:
+            from market_microstructure import basis_is_current, strip_basis_clause
+
+            if not basis_is_current(snap)[0]:
+                cap = strip_basis_clause(cap)
+        except ImportError:
+            pass
+
     print()
     print("┌──────────────────────────────────────────────────┐")
     print(f"│ 🧊 杠杆: {lev or '—'}")

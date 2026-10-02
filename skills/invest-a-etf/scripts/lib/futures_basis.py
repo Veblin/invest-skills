@@ -87,6 +87,35 @@ def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
     from stats import median, percentile_rank_inclusive  # noqa: E402
 
     latest = rows[-1]
+
+    # issue #34：futures_daily 已无在网生产者（最后更新 2026-08-14）。滞后数据
+    # 不得作为「当期基差状态/当前分位」输出——available=False + 说明（日期继续显示），
+    # 阈值与 journal 侧共用（freshness.FUTURES_BASIS_STALE_TRADING_DAYS）。
+    from dates import shanghai_session_date  # noqa: E402
+    from freshness import FUTURES_BASIS_STALE_TRADING_DAYS, trading_day_lag  # noqa: E402
+
+    asof = str(latest.get("date") or "").replace("-", "")
+    lag, degraded = trading_day_lag(asof, str(shanghai_session_date()))
+    if lag is None or lag < 0 or lag > FUTURES_BASIS_STALE_TRADING_DAYS:
+        if lag is None:
+            reason = "数据日期不可解析"
+        elif lag < 0:
+            reason = "数据日期在未来"
+        else:
+            reason = f"滞后 {lag} 个交易日"
+        suffix = "（日历不可用，按自然日粗判）" if degraded and (lag or 0) >= 0 else ""
+        result.update({
+            "date": latest.get("date"),
+            "stale": True,
+            "lag_trading_days": lag,
+            "note": (
+                f"{fsym} 基差数据滞后：{reason}{suffix}（截至 {latest.get('date')}，"
+                f"阈值 {FUTURES_BASIS_STALE_TRADING_DAYS} 交易日），本期不引用；"
+                "futures_daily 已无在网生产者（issue #34）"
+            ),
+        })
+        return result
+
     result.update({
         "available": True,
         "date": latest["date"],

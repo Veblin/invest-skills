@@ -221,6 +221,9 @@ def _apply_migrations(c: sqlite3.Connection) -> None:
         ("futures_oi_change_pct", "REAL"),
     ]:
         _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.3.1 迁移（issue #34）：股指期货基差的数据日期（YYYYMMDD）。
+    # 与 futures_basis_pct 成对写入；无日期（含历史行）→ 读取侧按「新鲜度不可判定」禁用。
+    _add_column_if_missing(c, "market_snapshots", "futures_basis_date", "TEXT")
     # v0.2.8 迁移：数据新鲜度审计列（W1/code-review #4）——collected_at 老库已有
     _add_column_if_missing(c, "market_snapshots", "data_note", "TEXT")
     # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
