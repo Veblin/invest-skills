@@ -380,10 +380,22 @@ def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
                 "message": "报告保留了待模型填写的模板占位，分析合成尚未完成",
             })
 
+    engine_notice = bool(_AUTOMATED_ENGINE_NOTICE_RE.search(text))
     is_automated_snapshot = bool(
-        _AUTOMATED_STOCK_SNAPSHOT_RE.search(text)
-        and _AUTOMATED_ENGINE_NOTICE_RE.search(text)
+        _AUTOMATED_STOCK_SNAPSHOT_RE.search(text) and engine_notice
     )
+    if engine_notice and not is_automated_snapshot and not _is_insight_report(text):
+        # C1-c：标题漂移守卫——含引擎声明却认不出快照标题时，同代侧车闸门
+        # 会静默失效（本函数注释记录过同类事故）；改为 error 强制发现，不再
+        # 落 skip 被 _compute_overall 过滤成假 PASS。
+        layer.findings_count += 1
+        layer.details.append({
+            "id": "completion-snapshot-title-unrecognized",
+            "severity": "error",
+            "message": ("报告含自动化引擎声明但标题未被识别为研究快照"
+                        "（`# {6位代码} {名称} 研究快照`）——标题漂移会使同代"
+                        "分析侧车校验失效，须核对"),
+        })
     if is_automated_snapshot:
         sidecar = _same_generation_analysis_path(report_path)
         if not sidecar.is_file():
@@ -767,9 +779,20 @@ _TERM_GLOSSARY = {
     "(EP|PE|PB|PS)(TTM)?", "折溢价", "席位", "龙虎榜", "胜率", "赔率",
 }
 
-_CONCLUSION_HEAD_RE = re.compile(r"^#{2,3}\s*(主要|核心)?结论", re.M)
+# C1-c（v0.3.1 收尾）：结论/主判断段标题族——封闭集，锚定行首标题起始词。
+# 反例：600519 2026-10-02 报告主判断标题为 `## 主判断：…`，旧 regex 只认
+# 「(主要|核心)?结论」开头 → 全报告零命中 → conclusion-evidence 层静默 pass
+# （D04「主判断未被 QC 定位」）。覆盖：结论族（含 insight `## 可得结论`，
+# render_insight.py）+ 判断族（主/主要/核心/首要判断）+ D4 体例 H2 括注
+# `（结论）/（主要结论）/（结论与交易结构）`；否定式（「非单一结论」）与
+# 模块内 H3（「因子交叉验证结论」）不命中。
+_CONCLUSION_HEAD_RE = re.compile(
+    r"^#{2,3}\s*(?:可得结论|重要发现（5 分钟阅读区）|(?:主要|核心)?结论|(?:主要|核心|首要|主)?判断)"
+    r"|^##\s[^\n]*（(?:主要|核心)?结论(?:与交易结构)?）",
+    re.M,
+)
 _SENT_SPLIT_RE = re.compile(r"[。！？!?]")
-_EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度)\s*[:：]")
+_EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度|事实)\s*[:：]")
 _FACT_MARK_RE = re.compile(r"\[事实\]")
 _ANALYSIS_MARK_RE = re.compile(r"\[分析\]")
 # R-A6 节边界 = `## `，与 lint `_SECTION_HEADER_RE`（lint.py:98）**逐字对齐**：
@@ -818,10 +841,22 @@ _RENDER_EVIDENCE_RE = re.compile(
 )
 
 
+# C1-c：新格式正文的 `**证据强度：✅ 强**🌐多源🕐近 30 日✓✗（括注）` 行——
+# 标签 + 四维元数据（无句末标点）属渲染结构、不是断言；带句末标点的整行
+# 仍按断言扫描（豁免从严）。
+_RENDER_STRENGTH_RE = re.compile(r"^\*\*证据强度[:：][^*]*\*\*[^。！？!?]*$")
+# C1-c：纯加粗小标题行（`**行情（最新收盘 …）**` 等，无句末标点）是结构行。
+_BOLD_HEADING_RE = re.compile(r"^\*\*[^*。！？!?]+\*\*$")
+
+
 def _evidence_ge_c(ln: str) -> bool:
     """断言证据等级 ≥C（全量审查 P0-2：死代码「tagged==0 且无 out」不可达——
     tagged==0 时 out 必有内容。改为逐行判定：来源标注（可核验）或 [证据: A/B/C]
-    或四维强度 ✅ 视为 ≥C；[证据: D] / ❓ 强度为 <C）。"""
+    或四维强度 ✅ 视为 ≥C；[证据: D] / ❓ 强度为 <C）。
+    C1-c：`[事实: F{n}]` 引用（analysis.json facts 契约，存在性与数字绑定已由
+    verify_facts 校验）视为 ≥C 级可追溯证据。"""
+    if re.search(r"\[事实\s*[:：]\s*F\d+\]", ln):
+        return True
     if re.search(r"\[来源\s*[:：]", ln):
         return True
     m = re.search(r"\[证据\s*[:：]\s*([A-Da-d])", ln)
@@ -921,48 +956,52 @@ def conclusion_evidence_findings(md: str) -> list[dict]:
     - R2（#36）：标题**整行**跳过（`## 结论：…` 的后缀文字属标题、不是断言）；
       渲染器自出的纯结构标签行（`**[事实]**`/`**[分析]**`/`**证据等级：** {标签}`）
       不算断言——两者此前都被当缺标签断言（带后缀标题的卡必报 3-4 条 error）
+    - C1-c（v0.3.1 收尾）：标题族扩展（主判断/可得结论/…，见 `_CONCLUSION_HEAD_RE`）
+      且 `finditer` **扫全部**核心判断段（原实现只扫首个匹配）；新格式
+      `[事实: F{n}]` 引用视为 ≥C 级证据；`**证据强度：…**` 渲染标签行与纯加粗
+      小标题行豁免（600519 主判断段实测：`**证据强度：✅ 强**🌐…` 行旧实现会报 FP）。
     """
     out: list[dict] = []
-    m = _CONCLUSION_HEAD_RE.search(md)
-    if not m:
-        return out
-    seg_start = md.find("\n", m.end())
-    seg_start = len(md) if seg_start == -1 else seg_start + 1
-    tail = md[seg_start:]
-    nxt = re.search(r"^#{2,4}\s", tail, re.M)
-    seg = tail if not nxt else tail[: nxt.start()]
-    line_base = md[:seg_start].count("\n") + 1
-    lines = seg.splitlines()
-    weak_lines: list[tuple[int, str]] = []
-    for i, ln in enumerate(lines):
-        stripped = ln.strip()
-        if (not stripped or _STRUCT_LINE_RE.match(stripped)
-                or _RENDER_LABEL_RE.match(stripped)
-                or _RENDER_EVIDENCE_RE.match(stripped)):
-            continue
-        if _EVIDENCE_TAG_RE.search(ln):
-            if not _evidence_ge_c(ln):
-                weak_lines.append((line_base + i, stripped[:80]))
-        else:
+    for m in _CONCLUSION_HEAD_RE.finditer(md):
+        seg_start = md.find("\n", m.end())
+        seg_start = len(md) if seg_start == -1 else seg_start + 1
+        tail = md[seg_start:]
+        nxt = re.search(r"^#{2,4}\s", tail, re.M)
+        seg = tail if not nxt else tail[: nxt.start()]
+        line_base = md[:seg_start].count("\n") + 1
+        lines = seg.splitlines()
+        weak_lines: list[tuple[int, str]] = []
+        for i, ln in enumerate(lines):
+            stripped = ln.strip()
+            if (not stripped or _STRUCT_LINE_RE.match(stripped)
+                    or _RENDER_LABEL_RE.match(stripped)
+                    or _RENDER_EVIDENCE_RE.match(stripped)
+                    or _RENDER_STRENGTH_RE.match(stripped)
+                    or _BOLD_HEADING_RE.match(stripped)):
+                continue
+            if _EVIDENCE_TAG_RE.search(ln):
+                if not _evidence_ge_c(ln):
+                    weak_lines.append((line_base + i, stripped[:80]))
+            else:
+                out.append({
+                    "id": "wording-conclusion-evidence",
+                    "severity": "error",
+                    "line": line_base + i,
+                    "message": "结论段断言缺少证据标签（[来源: / [证据: / [证据强度: / [事实: F…]）"
+                               "——无 ≥C 级证据的断言不得进入结论段（R-A2）",
+                    "context": stripped[:80],
+                })
+        if weak_lines:
+            lines_txt = "；".join(f"L{ln}: {ctx}" for ln, ctx in weak_lines[:3])
             out.append({
-                "id": "wording-conclusion-evidence",
+                "id": "wording-conclusion-evidence-level",
                 "severity": "error",
-                "line": line_base + i,
-                "message": "结论段断言缺少证据标签（[来源: / [证据: / [证据强度:）"
-                           "——无 ≥C 级证据的断言不得进入结论段（R-A2）",
-                "context": stripped[:80],
+                "line": weak_lines[0][0],
+                "message": ("结论段存在 <C 级证据断言（D 级/未标等级）——不满足"
+                            "「无 ≥C 级证据不入结论段」，标注「证据弱，仅作观察」（R-A2）"
+                            f"：{lines_txt}"),
+                "context": seg[:80],
             })
-    if weak_lines:
-        lines_txt = "；".join(f"L{ln}: {ctx}" for ln, ctx in weak_lines[:3])
-        out.append({
-            "id": "wording-conclusion-evidence-level",
-            "severity": "error",
-            "line": weak_lines[0][0],
-            "message": ("结论段存在 <C 级证据断言（D 级/未标等级）——不满足"
-                        "「无 ≥C 级证据不入结论段」，标注「证据弱，仅作观察」（R-A2）"
-                        f"：{lines_txt}"),
-            "context": seg[:80],
-        })
     return out
 
 
@@ -1091,14 +1130,26 @@ def _check_law6a_scenarios(text: str) -> LayerResult:
     return layer
 
 
-def _check_conclusion_evidence(text: str) -> LayerResult:
+def _check_conclusion_evidence(text: str, report_type: str = "") -> LayerResult:
     """R-A2 结论段证据等级 + R-A6 [事实]→[分析] 对偶。
 
     二者是 error 级实质缺陷（R-A6 与 lint structure-analysis-without-fact
     同规则），故保留 error→fail 映射。
+    C1-c：stock 报告若连结论/主判断段与 [事实: F…] 引用都定位不到，说明检查
+    无扫描对象（如注入前快照）——追加 warning，不得静默 PASS（「找不到适用
+    对象不能 PASS」；注入前快照属预期出现本提示）。
     """
     layer = LayerResult(layer="conclusion-evidence", status="pass")
     findings = conclusion_evidence_findings(text) + fact_analysis_pair_findings(text)
+    if (report_type == "stock" and not _CONCLUSION_HEAD_RE.search(text)
+            and not re.search(r"\[事实\s*[:：]\s*F\d+\]", text)):
+        findings.append({
+            "id": "wording-conclusion-section-missing",
+            "severity": "warning",
+            "line": 0,
+            "message": ("未定位到结论/主判断段（且无 [事实: F…] 引用）——R-A2 检查"
+                        "无扫描对象，不得视为通过（注入前快照预期出现本提示）"),
+        })
     layer.details = findings
     layer.findings_count = len(findings)
     if any(d["severity"] == "error" for d in findings):
@@ -1361,7 +1412,7 @@ def qc_file(
     # `run_report_qc` 对**任意**文件跑这三项，故 A3 移植时把它们一并门控是**净移除**
     # 了 journal/pulse/gap_scan/unknown 经 `invest.py qc-report` 的结论段门禁。
     # 拆分依据：源代码注释只论证了 R-A1（长句密度噪音），未论证 R-A2/R-A6。
-    layers.append(_check_conclusion_evidence(text))
+    layers.append(_check_conclusion_evidence(text, report_type))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
     elif report_type == "stock":

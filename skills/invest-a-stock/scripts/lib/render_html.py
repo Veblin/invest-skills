@@ -766,7 +766,8 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
     if not fin or not isinstance(fin, list) or not fin:
         return [], [], [], [], "<div style='padding:2rem;text-align:center;color:var(--tx-f)'>财务数据不可得</div>", "财务数据不可得"
 
-    fin = sort_kline_asc(fin)
+    from lib.financials import dedupe_by_end_date  # C1-a：修订行去重
+    fin = dedupe_by_end_date(sort_kline_asc(fin))
     recent = fin[-8:] if len(fin) >= 8 else fin
 
     labels = []
@@ -804,12 +805,18 @@ def _extract_financials_data(dims: dict) -> tuple[list, list, list, list, str, s
         rev_str = _fmt_v2(rev_v) if rev_v is not None else "-"
         np_v = r.get("net_profit")
         np_str = _fmt_v2(np_v) if np_v is not None else "-"
-        # ROE 高/低标记
+        # ROE 高/低标记（C1-a：只在同报告期类型内比较——Q1 与年报 ROE 不混比；
+        # 同类型不足 2 期时不标 class）
         roe_cls = ""
-        if len(recent) >= 3:
-            all_roe = [x.get("roe") for x in recent if x.get("roe") is not None]
-            if all_roe and roe_v is not None:
-                avg = sum(all_roe) / len(all_roe)
+        ed8r = _to_iso_date(ed).replace("-", "") if ed else ""
+        if roe_v is not None and len(ed8r) == 8 and ed8r.isdigit():
+            same_mmdd = [
+                x.get("roe") for x in recent
+                if x.get("roe") is not None
+                and _to_iso_date(str(x.get("end_date", ""))).replace("-", "")[4:] == ed8r[4:]
+            ]
+            if len(same_mmdd) >= 2:
+                avg = sum(same_mmdd) / len(same_mmdd)
                 roe_cls = ' class="roe-hi"' if roe_v > avg * 1.1 else (' class="roe-lo"' if roe_v < avg * 0.9 else "")
         rows_html += (f"<tr><td>{_html_mod.escape(qlabel, quote=True)}</td>"
                       f"<td{roe_cls}>{roe_str}</td><td>{eps_str}</td>"

@@ -327,7 +327,9 @@ def render_insight_markdown(model: dict[str, Any]) -> str:
             mark = {"strong": "✅", "medium": "⚠️", "weak": "❓"}.get(finding["evidence_strength"], "❓")
             lines += [f"- {mark} **{finding['claim']}** [来源: {_source_label(model, finding['fact_ids'])}]",]
             if finding["counter_fact_ids"]:
-                lines.append(f"  - 反证/限制：{_source_label(model, finding['counter_fact_ids'])}")
+                # C1-c：反证行带规范来源标签——`## 可得结论` 进入结论段扫描后，
+                # 无 [来源:] 的断言行会被 R-A2 报缺标签（300750 insight 实测）。
+                lines.append(f"  - 反证/限制：[来源: {_source_label(model, finding['counter_fact_ids'])}]")
     else:
         lines.append("- 当前没有满足来源、反证与可解释性门槛的结论。")
     tension = model["core_tension"]

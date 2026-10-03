@@ -302,7 +302,8 @@ def _q_tushare_financials(symbol: str) -> list[dict] | None:
     df = tc.query(
         "fina_indicator", ts_code=ts,
         fields=(
-            "ts_code,end_date,roe,eps,profit_dedt,revenue,net_profit,"
+            # ann_date（C1-a，v0.3.1 收尾）：同报告期修订行的去重选择依据
+            "ts_code,end_date,ann_date,roe,eps,profit_dedt,revenue,net_profit,"
             "grossprofit_margin,netprofit_margin,assets_turn,eqt_to_debt,"
             "debt_to_assets,ebit,ebitda,fcff,fcfe"
         ),

@@ -63,6 +63,38 @@ def find_yoy_row(rows: list[dict], latest: dict) -> dict | None:
     return None
 
 
+def _ann_sort_key(row: dict) -> str:
+    ann = normalize_end_date(str(row.get("ann_date") or ""))
+    return ann if len(ann) == 8 and ann.isdigit() else ""
+
+
+def dedupe_by_end_date(rows: list[dict]) -> list[dict]:
+    """同 end_date 只保留一行（C1-a：修订披露取 ann_date 最大者）。
+
+    规则：两行都有 ann_date → 取较大（最新披露/修订，选择依据见 v0.3.1 收尾
+    任务卡 C1）；一行有一行无 → 取有的；都无 → 保留输入顺序中先出现者（与
+    _financial_panorama_table 原「F0-9 保留先出现」行为等价）。不排序（保持
+    调用方排序职责），保留位置 = 首现位置。无法归一 end_date 的行原样保留、
+    不参与合并（避免 "" 键把不可解析行误合并——同 _roe_trend_anchors 教训）。
+    """
+    out: list[dict] = []
+    pos: dict[str, int] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        key = normalize_end_date(str(r.get("end_date") or ""))
+        if len(key) != 8 or not key.isdigit():
+            out.append(r)
+            continue
+        at = pos.get(key)
+        if at is None:
+            pos[key] = len(out)
+            out.append(r)
+        elif _ann_sort_key(r) > _ann_sort_key(out[at]):
+            out[at] = r
+    return out
+
+
 def gross_margin_annual_series(fin_rows: list[dict]) -> list[tuple[str, float]]:
     """Latest gross margin per calendar year, sorted ascending."""
     by_year: dict[str, float] = {}

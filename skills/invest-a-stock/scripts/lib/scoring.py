@@ -17,7 +17,13 @@ import statistics
 from datetime import date
 from typing import Any
 
-from lib.financials import GROSS_MARGIN_FIELDS, find_yoy_row, normalize_end_date, parse_end_date
+from lib.financials import (
+    GROSS_MARGIN_FIELDS,
+    dedupe_by_end_date,
+    find_yoy_row,
+    normalize_end_date,
+    parse_end_date,
+)
 from lib.nums import coalesce_field
 from lib.technical import sort_kline_asc
 from lib.valuation import _infer_tax_rate
@@ -40,7 +46,8 @@ def _sorted_rows(financials: list[dict] | None) -> list[dict]:
     if not isinstance(financials, list):
         return []
     rows = [r for r in financials if isinstance(r, dict) and r.get("end_date")]
-    return sort_kline_asc(rows)
+    # C1-a：同报告期修订行去重（ann_date 最大者），再按 end_date 升序。
+    return dedupe_by_end_date(sort_kline_asc(rows))
 
 
 # _parse_date replaced by lib.financials.parse_end_date (imported above)
@@ -66,7 +73,7 @@ def revenue_quality_score(financials: list[dict]) -> dict:
     三个子信号（等权重合成，缺失子信号从分母中剔除并标注）：
       - receivables_signal: ΔAR / ΔRevenue（应收增速快于营收增速 → 激进确认风险）
       - margin_stability: 1 - CV(近 8 期 grossprofit_margin)（定价权/收入模式一致性）
-      - ocf_coverage: OCF / 净利润 近 4 期均值（经营现金流对账面利润的覆盖，现金收入模式验证）
+      - ocf_coverage: OCF / 净利润 近 4 期均值（经营现金流对账面利润的覆盖关系验证，不构成质量结论）
 
     递延收入（deferred_rev，v0.1.7 未采集合同负债/预收款项字段）恒定标注为数据不足，
     不参与计算，总分永远标注 `partial: True`（补充资料 1.2）。
@@ -135,9 +142,19 @@ def revenue_quality_score(financials: list[dict]) -> dict:
     detail["margin_stability"] = margin_detail
 
     # -- ocf_coverage --
+    # C1-a 同类口径：优先与最新报告期同类型的行（≥3 期），否则回退近 4 期并
+    # 标注「含不同报告期」（累计口径下 OCF/NP 比值跨报告期不可比）。
+    latest_mmdd = normalize_end_date(str(rows[-1].get("end_date") or ""))[4:] if rows else ""
+    same_period_rows = [
+        r for r in rows
+        if normalize_end_date(str(r.get("end_date") or ""))[4:] == latest_mmdd
+    ] if latest_mmdd else []
+    mixed_fallback = len(same_period_rows) < 3
+    _ocf_pool = (rows if mixed_fallback else same_period_rows)[-_RECENT_OCF_PERIODS:]
+    caliber_note = "（含不同报告期，均值仅供参考）" if mixed_fallback else ""
     ocf_detail: dict[str, Any] = {}
     ratios: list[float] = []
-    for r in rows[-_RECENT_OCF_PERIODS:]:
+    for r in _ocf_pool:
         ocf = _field(r, "n_cashflow_act", "ocf")
         net_profit = _field(r, "net_profit")
         # Only profitable periods: both-negative OCF/NP would inflate the ratio
@@ -149,13 +166,13 @@ def revenue_quality_score(financials: list[dict]) -> dict:
     if ratios:
         avg_ratio = statistics.mean(ratios)
         if avg_ratio >= 1.0:
-            score, note = 90.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}（≥1.0），现金收入模式特征明显"
+            score, note = 90.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}（≥1.0，覆盖充分；比值只证明覆盖关系）{caliber_note}"
         elif avg_ratio >= 0.5:
-            score, note = 60.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}"
+            score, note = 60.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}{caliber_note}"
         elif avg_ratio >= 0:
-            score, note = 30.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}（偏低）"
+            score, note = 30.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}（偏低）{caliber_note}"
         else:
-            score, note = 10.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}（为负，现金收入模式证据弱）"
+            score, note = 10.0, f"近 {len(ratios)} 期 OCF/净利润均值 {avg_ratio:.2f}（为负，覆盖关系证据弱）{caliber_note}"
         points.append(score)
         sources.extend(["n_cashflow_act", "net_profit"])
         ocf_detail = {"periods": len(ratios), "avg_ratio": round(avg_ratio, 3), "score": score, "note": note}

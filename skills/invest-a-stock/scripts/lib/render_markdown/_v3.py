@@ -20,6 +20,7 @@ from ..shared_dates import (  # noqa: E402
     normalize_end_date as _norm_ed,
     yyyymmdd_to_iso as _to_iso_date,
 )
+from ..financials import dedupe_by_end_date  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -592,14 +593,14 @@ def _section_snapshot(
                 cv_status = "gap"
             else:
                 cv_status = "divergence"
-            cv_detail = f"净利润 {_fmt_v2(np_v)} vs 经营现金流 {_fmt_v2(ocf)}"
+            cv_detail = f"净利润 {_fmt_v2(np_v)} vs 经营现金流 {_fmt_v2(ocf)}（覆盖关系）"
             lines.append("")
             lines.append(_cv(cv_status, "CV-1", "净利润 vs 经营现金流", cv_detail, "中（单期财报）"))
         else:
             lines.append("")
             lines.append(_cv(
                 "gap", "CV-1", "净利润 vs 经营现金流",
-                "经营现金流字段不可得，无法交叉验证利润质量", "低",
+                "经营现金流字段不可得，无法核对覆盖关系", "低",
             ))
 
     if pe_pct is not None and pb_pct is not None:
@@ -2034,13 +2035,13 @@ def _conclude_cash_flow_quality(
             return "经营现金流/净利润覆盖比为负，比值不适用（利润与现金流方向不一致）"
         base = ""
         if cf_ratio >= OCF_COVERAGE_EXCELLENT:
-            base = "现金流质量优秀，经营现金流充分覆盖净利润"
+            base = "经营现金流对净利润覆盖充分（≥1.0；覆盖关系指标，不单独构成利润质量或持续性结论）"
         elif cf_ratio >= OCF_COVERAGE_GOOD:
-            base = "现金流质量良好，经营现金流基本覆盖净利润"
+            base = "经营现金流对净利润基本覆盖（0.8-1.0；覆盖关系指标，不单独构成利润质量结论）"
         elif cf_ratio >= OCF_COVERAGE_WEAK:
-            base = "现金流质量偏弱，经营现金流与净利润存在一定背离"
+            base = "经营现金流对净利润覆盖偏低（0.5-0.8），需结合现金流量表构成复核"
         else:
-            base = "现金流质量较差，经营现金流与净利润严重背离"
+            base = "经营现金流对净利润覆盖不足（<0.5），需结合现金流量表构成复核"
         if ar_growth is not None and rev_growth is not None:
             if ar_growth > rev_growth * 1.5:
                 return base + "；应收增速远超营收，回款质量存疑"
@@ -2109,17 +2110,10 @@ def _financial_panorama_table(fin_list: list[dict]) -> list[str]:
     """模块4 业绩全景表（P1b：含 EPS 列）。"""
     if not fin_list:
         return []
-    sorted_rows = sort_kline_asc(fin_list)
-    # F0-9 修复：同报告期去重（多源/重复行），保留先出现的行（EPS 非空优先）。
-    deduped: dict[str, dict] = {}
-    for r in sorted_rows:
-        ed = str(r.get("end_date") or "")
-        if ed not in deduped:
-            deduped[ed] = r
-        elif r.get("eps") is not None and r.get("eps") != deduped[ed].get("eps") \
-                and deduped[ed].get("eps") is None:
-            deduped[ed] = r
-    rows = list(deduped.values())[-8:]
+    # F0-9/C1-a：同报告期去重（多源/重复行、修订行）——统一走 lib.financials
+    # 的 dedupe_by_end_date（ann_date 最大者优先；ann_date 缺失时等价于原
+    # 「保留先出现行」规则）。
+    rows = dedupe_by_end_date(sort_kline_asc(fin_list))[-8:]
     lines = [
         "### 业绩全景（近8期）",
         "",
@@ -2170,15 +2164,50 @@ def _score_to_stars(score: float | None) -> int | None:
     return 1
 
 
+# --- 同报告期序列（C1-a）---
+_PERIOD_CALIBER = {"0331": "一季报", "0630": "中报", "0930": "三季报", "1231": "年报"}
+
+
+def _same_period_fin_rows(rows: list[dict]) -> tuple[list[dict], str]:
+    """按「同报告期类型」构造可比序列（C1-a），返回 (rows, 口径标签)。
+
+    年报 ≥3 期 → 用年报（波动/规模判断惯用窗口）；否则取与最新报告期同 MMDD
+    的行（≥3 期时可用）；再否则返回空列表——调用方输出数据不足，**禁止混期
+    计算**（混算会把年报 ROE 与半年/季累计 ROE 混在一起，系统性放大方差，
+    600519 反例：混算 CV=0.48）。rows 需已去重且按 end_date 升序。
+    """
+    annual = [r for r in rows if _norm_ed(str(r.get("end_date") or "")).endswith("1231")]
+    if len(annual) >= 3:
+        return annual, "年报"
+    if not rows:
+        return [], ""
+    mmdd = _norm_ed(str(rows[-1].get("end_date") or ""))[4:]
+    if mmdd:
+        same = [r for r in rows if _norm_ed(str(r.get("end_date") or ""))[4:] == mmdd]
+        if len(same) >= 3:
+            return same, _PERIOD_CALIBER.get(mmdd, "同报告期")
+    return [], ""
+
+
 # --- _canvas_scale_effect ---
 def _canvas_scale_effect(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
-    """规模效应：近 3-5 期营收增速 vs 毛利率变化关系推断。"""
+    """规模效应：同报告期序列的营收增长 vs 毛利率变化关系推断。
+
+    C1-a：序列先去除同报告期修订重复行，再用同报告期类型序列（年报优先）——
+    禁止跨期混比（旧实现取混期首尾，年报营收对半年累计会算出跨期伪"下滑"）。
+    """
     if not fin_list:
         return None, "数据不足：缺少财务数据，无法判断规模效应", []
-    rows = sort_kline_asc(fin_list)[-5:]
+    rows = dedupe_by_end_date(sort_kline_asc(fin_list))
+    series, caliber = _same_period_fin_rows(rows)
+    if len(series) < 3:
+        return None, (
+            "数据不足：同报告期序列不足 3 期（年报/同报告期各需 ≥3 期），"
+            "无法判断规模效应"
+        ), []
     pairs = [
         (_fin_field_num(r, "revenue"), _fin_field_num(r, *GROSS_MARGIN_FIELDS))
-        for r in rows
+        for r in series
     ]
     valid = [(rev, gm) for rev, gm in pairs if rev is not None and gm is not None]
     if len(valid) < 3:
@@ -2192,41 +2221,59 @@ def _canvas_scale_effect(fin_list: list[dict]) -> tuple[float | None, str, list[
     if rev_growth > 0 and margin_change >= -1:
         score = 80.0
         note = (
-            f"近 {len(valid)} 期营收增长 {rev_growth:+.1f}%，同期毛利率变化 {margin_change:+.2f}pp"
-            "（未随规模扩大而下降），呈现规模效应特征"
+            f"近 {len(valid)} 期{caliber}营收增长 {rev_growth:+.1f}%，同期毛利率变化 {margin_change:+.2f}pp"
+            f"（口径：{caliber}；未随规模扩大而下降），呈现规模效应特征"
         )
     elif rev_growth > 0:
         score = 40.0
         note = (
-            f"近 {len(valid)} 期营收增长 {rev_growth:+.1f}%，但毛利率下降 {margin_change:+.2f}pp，"
-            "规模效应证据较弱（可能被价格竞争或成本上升抵消）"
+            f"近 {len(valid)} 期{caliber}营收增长 {rev_growth:+.1f}%，但毛利率下降 {margin_change:+.2f}pp"
+            f"（口径：{caliber}），规模效应证据较弱（可能被价格竞争或成本上升抵消）"
         )
     else:
         score = 20.0
-        note = f"近 {len(valid)} 期营收未见增长（{rev_growth:+.1f}%），规模效应无法验证"
+        note = (
+            f"近 {len(valid)} 期{caliber}营收未见增长（{rev_growth:+.1f}%，口径：{caliber}），"
+            "规模效应无法验证"
+        )
     return score, note, ["revenue", "grossprofit_margin"]
 
 
 # --- _canvas_cyclicality ---
 def _canvas_cyclicality(fin_list: list[dict]) -> tuple[float | None, str, list[str]]:
-    """周期性：历史 ROE 波动率推断（波动越大周期性越强，星级越低）。"""
+    """周期性：同报告期 ROE 波动率推断（波动越大周期性越强，星级越低）。
+
+    C1-a：只用同报告期且去重的序列——年报 ≥3 期用年报，否则与最新报告期同
+    MMDD 的行；都不足 3 期则输出数据不足，**不做混期 CV**。波动描述必须带
+    口径标签，且不单独构成周期性结论（阈值 0.15/0.35 数值未变，仅输入序列
+    与文案口径修正）。
+    """
     if not fin_list:
         return None, "数据不足：缺少财务数据，无法判断周期性", []
     import statistics
-    rows = sort_kline_asc(fin_list)[-8:]
-    roes = [v for v in (_fin_field_num(r, "roe") for r in rows) if v is not None]
+    rows = dedupe_by_end_date(sort_kline_asc(fin_list))
+    series, caliber = _same_period_fin_rows(rows)
+    if len(series) < 3:
+        return None, (
+            "数据不足：同报告期 ROE 序列不足 3 期（年报/同报告期各需 ≥3 期），"
+            "不做波动或周期性判断"
+        ), []
+    roes = [v for v in (_fin_field_num(r, "roe") for r in series) if v is not None]
     if len(roes) < 3:
-        return None, "数据不足：ROE 至少需 3 期数据评估波动性", []
+        return None, "数据不足：ROE 至少需 3 期同报告期数据评估波动性", []
     mean_roe = statistics.mean(roes)
     if abs(mean_roe) <= 1e-9:
         return None, "数据不足：ROE 均值接近 0，变异系数不适用", []
     cv = statistics.pstdev(roes) / abs(mean_roe)
     if cv < 0.15:
-        score, note = 90.0, f"近 {len(roes)} 期 ROE 变异系数 {cv:.2f}（<0.15），波动小，周期性特征弱"
+        score, note = 90.0, f"近 {len(roes)} 期{caliber} ROE 变异系数 {cv:.2f}（<0.15），波动小（口径：{caliber}）"
     elif cv < 0.35:
-        score, note = 55.0, f"近 {len(roes)} 期 ROE 变异系数 {cv:.2f}（0.15-0.35），中等波动"
+        score, note = 55.0, f"近 {len(roes)} 期{caliber} ROE 变异系数 {cv:.2f}（0.15-0.35），中等波动（口径：{caliber}）"
     else:
-        score, note = 20.0, f"近 {len(roes)} 期 ROE 变异系数 {cv:.2f}（≥0.35），波动大，周期性特征明显"
+        score, note = 20.0, (
+            f"近 {len(roes)} 期{caliber} ROE 变异系数 {cv:.2f}（≥0.35），波动大，"
+            f"呈周期性波动特征（口径：{caliber}；不单独构成周期性结论）"
+        )
     return score, note, ["roe"]
 
 
@@ -2603,7 +2650,8 @@ class _FundamentalsContext:
         fin = _get_dim_data(dims, "financials")
         self.fin_list: list[dict] = []
         if fin and isinstance(fin, list):
-            self.fin_list = sort_kline_asc(fin)
+            # C1-a：同报告期修订行先去重（ann_date 最大者），再升序。
+            self.fin_list = dedupe_by_end_date(sort_kline_asc(fin))
         self.latest_fin: dict = self.fin_list[-1] if self.fin_list else {}
         # F0-2: 同比基期取同报告期上年行；无基期 → 同比不可比（禁止跨期混比）。
         self.prev_fin: dict = _prior_year_row(self.fin_list, self.latest_fin) or {}
@@ -2756,11 +2804,11 @@ def _core_judgment_summary(ctx: _FundamentalsContext) -> list[str]:
     cf_analysis = []
     if ctx.cf_ratio_val is not None:
         if ctx.cf_ratio_val >= OCF_COVERAGE_EXCELLENT:
-            cf_analysis.append("经营现金流充分覆盖净利润，利润含金量高")
+            cf_analysis.append("经营现金流对净利润覆盖充分（覆盖关系指标，不单独构成利润质量或持续性结论）")
         elif ctx.cf_ratio_val >= OCF_COVERAGE_GOOD:
-            cf_analysis.append("经营现金流基本覆盖净利润，利润质量良好")
+            cf_analysis.append("经营现金流对净利润基本覆盖（覆盖关系指标，不单独构成利润质量结论）")
         else:
-            cf_analysis.append("经营现金流覆盖不足，利润质量存疑，需关注应收与存货变化")
+            cf_analysis.append("经营现金流对净利润覆盖不足，需结合现金流量表构成与应收/存货变化复核")
     if ctx.ar_growth is not None and ctx.rev_yoy is not None:
         if ctx.ar_growth > ctx.rev_yoy * 1.5:
             cf_analysis.append(f"应收增速远超营收增速，存在赊销膨胀或回款恶化的风险")
@@ -3188,8 +3236,9 @@ def _section_4b_business_quality(
     lines.append("#### B-③ 现金流模式")
     if ctx.ocf_val is not None and ctx.np_v is not None and ctx.np_v > 0:
         # C4: 覆盖比重推消除——ctx.cf_ratio_val 在 ctx 构造时已按同一公式计算
-        quality = "健康" if ctx.cf_ratio_val >= OCF_COVERAGE_GOOD else (
-            "偏弱" if ctx.cf_ratio_val >= OCF_COVERAGE_WEAK else "严重背离")
+        # C1-b：覆盖关系措辞（原「健康/偏弱/严重背离」含质量定性）
+        quality = "覆盖充分" if ctx.cf_ratio_val >= OCF_COVERAGE_GOOD else (
+            "覆盖偏低" if ctx.cf_ratio_val >= OCF_COVERAGE_WEAK else "覆盖不足")
         lines.append(f"经营现金流/净利润覆盖比：**{ctx.cf_ratio_val:.2f}**（{quality}）。")
         if ctx.cf_ratio_val < OCF_COVERAGE_GOOD:
             lines.append(f"⚠️ 现金流覆盖比 < {OCF_COVERAGE_GOOD}，建议扩展分析：收入确认质量、应收/存货变动（见 C-③ 交叉验证）。")
@@ -3199,13 +3248,13 @@ def _section_4b_business_quality(
         lines.append("数据不足：[净利润非正，无法计算覆盖比]")
     lines.append("")
     lines.append(_law10_hint(
-        "现金流是利润的「含金量」检验——利润好看但现金流持续弱于利润，"
+        "经营现金流对净利润的覆盖比是覆盖关系指标——利润与现金流持续背离，"
         "可能意味着应收膨胀、存货积压或收入确认激进（待补案例）。",
         (
-            f"本次经营现金流/净利润 = {ctx.cf_ratio_val:.2f}，若仅看单期就认定利润质量差，"
-            "可能忽略季节性备货——应对比连续 4 期趋势。"
+            f"本次经营现金流/净利润覆盖比 = {ctx.cf_ratio_val:.2f}，单期读数不构成利润质量结论，"
+            "应对比连续 4 期同口径趋势。"
             if ctx.cf_ratio_val is not None else
-            "本次现金流覆盖比不可得，不宜用净利润同比单独判断利润含金量。"
+            "本次现金流覆盖比不可得，不宜用净利润同比单独推断覆盖关系。"
         ),
         [
             "对比应收增速 vs 营收增速（CV-2）",
@@ -3255,6 +3304,10 @@ def _section_4_header_mda(
         ocf = mda_card.get("operating_cashflow")
         np = mda_card.get("net_profit")
         cq = mda_card.get("cashflow_quality_hint", "")
+        # C1-b：封存快照中的卡片值是旧质量词（良好/一般/需关注），渲染层做
+        # 术语映射——快照内容不改（完整性契约），显示与新覆盖口径一致；
+        # 新采集快照产出新词，映射恒等。
+        cq = {"良好": "覆盖充分", "一般": "基本覆盖", "需关注": "覆盖偏低"}.get(cq, cq)
         ratio_str = ""
         if ocf is not None and np is not None and abs(np) > 1e-9:
             ratio_str = f"{ocf/np:.2f}"
@@ -3267,7 +3320,7 @@ def _section_4_header_mda(
         lines.append(f"> - 营收增速: {rg_s} | 净利润增速: {pg_s}")
         lines.append(f"> - 毛利率: {_fmt_pct(gm)} ({_fmt_pp(gmc)}) | 净利率: {_fmt_pct(nm)} ({_fmt_pp(nmc)})")
         if ratio_str:
-            lines.append(f"> - 经营现金流/净利润: {ratio_str} → 利润含金量: {cq}")
+            lines.append(f"> - 经营现金流/净利润覆盖: {ratio_str} → {cq}（仅覆盖关系）")
         if roe is not None:
             dr_label = f"{dr:.2f}%" if dr is not None else "—"
             lines.append(f"> - ROE: {roe:.2f}% | 负债率: {dr_label}")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .financials import normalize_end_date
+from .financials import dedupe_by_end_date, normalize_end_date
 from .industry import get_quality_overrides, get_sector_group
 from .nums import ONE_PER_YI, coalesce_field, safe_float
 from .risk_scanner import ocf_np_divergence_flag
@@ -20,10 +20,11 @@ def _sorted_fin_rows(collection: dict) -> list[dict]:
         rows = [r for r in fin if isinstance(r, dict)]
     else:
         rows = extract_financial_rows(dims.get("financials", {}))
-    return sorted(
+    # C1-a：同报告期修订行先去重（ann_date 最大者），再按 end_date 升序。
+    return dedupe_by_end_date(sorted(
         rows,
         key=lambda r: normalize_end_date(str(r.get("end_date") or "")),
-    )
+    ))
 
 
 def _exemptions(collection: dict, rows: list[dict]) -> list[str]:
@@ -140,13 +141,20 @@ def _metric_interest_coverage(rows: list[dict]) -> dict[str, Any]:
 
 
 def _metric_gross_margin_vol(rows: list[dict]) -> dict[str, Any]:
+    # C1-a：指标名即「5年」——只取年报行（毛利率为期内比率量，虽不随累计口径
+    # 缩放，但 5 期窗口混入半年/季报会使「5年」名不符实）。
+    annual = [
+        r for r in rows
+        if normalize_end_date(str(r.get("end_date") or "")).endswith("1231")
+    ]
     margins = []
-    for r in rows[-5:]:
+    for r in annual[-5:]:
         gm = coalesce_field(r, "grossprofit_margin", "gross_margin")
         if gm is not None:
             margins.append(gm)
     if len(margins) < 3:
-        return {"id": 4, "name": "毛利率波动 (5年 std)", "status": "skip", "detail": "数据不足"}
+        return {"id": 4, "name": "毛利率波动 (5年 std)", "status": "skip",
+                "detail": "年报数据不足（需 ≥3 个年报期）"}
     mean = sum(margins) / len(margins)
     var = sum((m - mean) ** 2 for m in margins) / (len(margins) - 1)
     std = var ** 0.5

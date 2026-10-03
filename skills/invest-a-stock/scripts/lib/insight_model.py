@@ -292,7 +292,8 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
                                formula="(latest revenue/same period prior year revenue-1)*100"))
         ocf = _number(latest.get("n_cashflow_act", latest.get("ocf")))
         net_profit = _number(latest.get("net_profit"))
-        if ocf is not None and net_profit not in (None, 0):
+        # C1-b：亏损期比值无解释力（负值会扭曲「低于 0.6」描述），不出该 fact
+        if ocf is not None and net_profit is not None and net_profit > 0:
             facts.append(_fact("financials.ocf_to_np.latest", round(ocf / net_profit, 3), as_of=as_of,
                                unit="ratio", basis="经营现金流/归母净利润", source_id=sid,
                                formula="n_cashflow_act/net_profit"))

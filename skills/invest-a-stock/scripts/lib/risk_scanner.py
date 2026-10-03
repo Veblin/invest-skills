@@ -7,20 +7,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.financials import find_yoy_row
+from lib.financials import dedupe_by_end_date, find_yoy_row, normalize_end_date
 from lib.nums import ONE_PER_YI, coalesce_field, safe_float
 from lib.technical import compute, rsi_series, sort_kline_asc
 
 
 def _fin(rows: list[dict]) -> list[dict]:
-    """财务行按报告期升序，ann_date 为次要排序键。"""
-    return sorted(
+    """财务行按报告期升序，ann_date 为次要排序键；同报告期修订行先去重（C1-a）。"""
+    return dedupe_by_end_date(sorted(
         sort_kline_asc(rows),
         key=lambda r: (
             str(r.get("trade_date") or r.get("end_date", "")),
             str(r.get("ann_date", "")),
         ),
-    )
+    ))
 
 
 def _ocf(row: dict) -> float | None:
@@ -78,11 +78,12 @@ def scan_financial_risks(
                              triggered=trig, severity="高", detail=detail, auto=True))
 
     # 2 利润质量低（连续 2 年 OCF/净利润 < 0.6）
+    # C1-a：只收年报行——某年只有 Q1/半年累计行时，累计口径会被当整年比值使用。
     by_year: dict[str, dict] = {}
     for r in rows:
-        y = str(r.get("end_date", ""))[:4]
-        if y:
-            by_year[y] = r
+        ed = normalize_end_date(str(r.get("end_date") or ""))
+        if len(ed) == 8 and ed.endswith("1231"):
+            by_year[ed[:4]] = r
     years = sorted(by_year)[-2:]
     qual_trig = False
     qual_parts: list[str] = []
@@ -97,7 +98,7 @@ def scan_financial_risks(
                 qual_parts.append(f"{y}: OCF/净利润={ratio:.2f}")
                 low_flags.append(ratio < 0.6)
         qual_trig = len(low_flags) == 2 and all(low_flags)
-        detail = "；".join(qual_parts) if qual_parts else "缺少 OCF/净利润字段"
+        detail = "覆盖关系：" + "；".join(qual_parts) if qual_parts else "缺少 OCF/净利润字段"
         if not qual_trig and qual_parts:
             detail += "（未连续 2 年均低于 0.6）"
     else:
@@ -506,6 +507,6 @@ def ocf_np_divergence_flag(financials: list[dict]) -> dict[str, Any]:
     triggered = (np_ > 0 and ratio < 0.6) or (np_ < 0 and ocf > 0)  # 0.6 阈值与 scan_financial_risks L83 一致
     return {
         "triggered": triggered,
-        "detail": f"最新期 OCF/净利润 = {ratio:.2f}（OCF={ocf:.0f}, NP={np_:.0f}）",
+        "detail": f"最新期 OCF/净利润 = {ratio:.2f}（OCF={ocf:.0f}, NP={np_:.0f}；覆盖关系，非质量结论）",
         "ratio": round(ratio, 3),
     }

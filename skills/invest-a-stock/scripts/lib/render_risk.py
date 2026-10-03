@@ -397,14 +397,17 @@ def _section_bull_bear(
         if rev_yoy_pct is not None and rev_yoy_pct >= 60:
             quality_items.append(f"营收增速同行分位 {rev_yoy_pct:.1f}%")
         if cf_quality:
-            quality_items.append(f"经营现金流/净利润 = {ocf / np_v:.2f}")
+            quality_items.append(f"经营现金流/净利润覆盖 = {ocf / np_v:.2f}")
         chain = {
             "title": "基本面质量偏优",
-            "assumption": f"财务数据显示盈利能力较强：{'；'.join(quality_items)}。",
+            "assumption": (
+                f"财务数据显示盈利能力较强：{'；'.join(quality_items)}。"
+                "OCF/净利润为覆盖关系指标，不构成质量与持续性结论。"
+            ),
             "transmission": (
-                "高 ROE / 同行领先 → 企业具有竞争优势或良好管理层治理 → "
-                "盈利持续性强 → 市场应对其给予估值溢价 → "
-                "支撑当前股价甚至推动上行。"
+                "高 ROE / 同行领先 → 企业具有竞争优势或良好管理层治理（推断） → "
+                "盈利稳定性或高于同业（推断；现金流覆盖比只证明覆盖关系） → "
+                "市场或给予估值溢价 → 支撑当前股价甚至推动上行 [机制推断，待验证]。"
             ),
             "numbers": [],
             "strength": "✅ 强" if (roe_judge is not None and roe_judge >= 22) else "⚠️ 中",
@@ -520,12 +523,12 @@ def _section_bull_bear(
         chain = {
             "title": "经营现金流未能覆盖净利润",
             "assumption": (
-                f"经营现金流/净利润 = {ocf / np_v:.2f}，低于 0.6 的及格线，"
-                f"利润含金量偏低。"
+                f"经营现金流/净利润覆盖 = {ocf / np_v:.2f}，低于 0.6 的覆盖告警线"
+                f"（覆盖关系指标，不单独构成利润质量结论）。"
             ),
             "transmission": (
-                "利润与现金流不匹配 → 盈利可能依赖应收账款或非现金项目 → "
-                "现金流紧张增加运营风险 → 市场调整盈利质量预期 → 估值受压。"
+                "利润与现金流不匹配 → 盈利可能依赖应收账款或非现金项目（推断） → "
+                "现金流紧张增加运营风险 → 市场调整盈利质量预期 [机制推断，待验证] → 估值受压。"
             ),
             "numbers": [
                 f"- OCF/NP 比率: {ocf / np_v:.2f}",

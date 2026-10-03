@@ -24,6 +24,7 @@ from report_qc import (  # noqa: E402
     READABILITY_LONG_SENT_CHARS,
     _check_conclusion_evidence,
     _check_readability,
+    _check_stock_completion,
     conclusion_evidence_findings,
     fact_analysis_pair_findings,
     readability_findings,
@@ -248,6 +249,93 @@ class TestLayerStatusContract:
                  "分歧在于汇率 [来源: engine]。\n"
                  "风险是资本开支 [来源: engine]。\n")
         assert _check_readability(short).status == "pass"
+
+
+class TestV031MainJudgmentGate:
+    """C1-c（2026-10-04）：主判断/结论段标题族 + 全段扫描 + 无对象不 PASS。
+
+    反例：600519 `2026-10-02-22-32-48.final.md` 主判断标题为 `## 主判断：…`，
+    旧 regex 只认「(主要|核心)?结论」开头 → 整段未被扫描、层静默 pass（D04
+    「主判断未被 QC 定位」）。修复后跑该报告：层由 pass(0) 变为 fail，
+    且 finditer 只命中真正缺证据引用的一行（L44 判断句）。
+    """
+
+    _MAIN_JUDGMENT_MD = """## 重要发现（5 分钟阅读区）
+
+> 结论先行区：以下为本次核心判断。
+
+## 主判断：PE 19.32x 处 4.1% 分位
+
+**[事实]**
+
+**行情（最新收盘 2026-09-30）**
+- 现价 1258.62 元[事实: F1]（+1.86%[事实: F2]）
+
+**[分析]**
+
+**判断：低分位是读数，不是保护——分子在缩。**
+
+- 逻辑链：PE 19.32x[事实: F3] → 归母净利同比 -1.95%[事实: F12]（数据）。
+
+**证据强度：✅ 强**🌐多源🕐近 30 日✓✗（估值/盈利序列为封存字段直读）
+**证据等级：** A
+"""
+
+    def test_real_new_style_section_located_and_single_missing_line_flagged(self):
+        findings = conclusion_evidence_findings(self._MAIN_JUDGMENT_MD)
+        flagged = [f for f in findings if f["id"] == "wording-conclusion-evidence"]
+        assert len(flagged) == 1, [f.get("context") for f in flagged]
+        assert "判断：低分位" in flagged[0]["context"]
+
+    def test_bare_assertion_under_main_judgment_fails(self):
+        md = "## 主判断：该标的有望走强\n\n估值便宜，值得研究。\n"
+        findings = conclusion_evidence_findings(md)
+        assert any(
+            f["id"] == "wording-conclusion-evidence" and f["severity"] == "error"
+            for f in findings
+        )
+
+    def test_insight_available_conclusion_scanned(self):
+        ok = "## 可得结论\n\n- 结论 [来源: engine facts]。\n"
+        assert not [
+            f for f in conclusion_evidence_findings(ok)
+            if f["id"] == "wording-conclusion-evidence"
+        ]
+        bad = "## 可得结论\n\n- 该标的有望走强。\n"
+        assert [
+            f for f in conclusion_evidence_findings(bad)
+            if f["id"] == "wording-conclusion-evidence"
+        ]
+
+    def test_all_matched_sections_scanned(self):
+        md = "## 主判断：A\n\n裸断言一。\n\n## 主要结论\n\n裸断言二。\n"
+        flagged = [
+            f for f in conclusion_evidence_findings(md)
+            if f["id"] == "wording-conclusion-evidence"
+        ]
+        assert len(flagged) == 2
+
+    def test_missing_object_warns_for_stock_not_others(self):
+        md = "# 600519 贵州茅台 研究快照\n\n只有数据，没有任何结论段。\n"
+        layer = _check_conclusion_evidence(md, "stock")
+        assert layer.status == "warn"
+        assert any(
+            f["id"] == "wording-conclusion-section-missing" for f in layer.details
+        )
+        other = _check_conclusion_evidence(md, "etf")
+        assert not any(
+            f["id"] == "wording-conclusion-section-missing" for f in other.details
+        )
+
+    def test_completion_title_drift_is_error(self, tmp_path):
+        text = "本报告由自动化引擎生成\n# 600519 贵州茅台 评测稿\n"
+        layer = _check_stock_completion(tmp_path / "x.md", text)
+        assert any(
+            f["id"] == "completion-snapshot-title-unrecognized"
+            and f["severity"] == "error"
+            for f in layer.details
+        )
+        assert layer.status == "fail"
 
 
 class TestQcReportUsesSharedImplementation:

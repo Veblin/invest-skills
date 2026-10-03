@@ -437,7 +437,7 @@ def _concise_bear(collection, symbol, dims, market_structure, risk_data, val_cac
             points.append(f"PE 处于历史偏高位置（{pe_pct:.1f}% 分位），存在估值收缩风险")
 
     if ocf_divergence:
-        points.append(f"经营现金流/净利润 < {OCF_COVERAGE_ALERT}，利润质量需关注")
+        points.append(f"经营现金流/净利润覆盖 < {OCF_COVERAGE_ALERT}，现金转化需复核（比值不单独证明利润质量）")
 
     if gross_margin_declining:
         points.append("毛利率连续下滑，竞争压力或成本上升")

@@ -735,7 +735,8 @@ def extract_key_snapshot(raw: dict) -> dict:
 
     fin = _dim_data(body, "financials")
     if isinstance(fin, list) and fin:
-        latest = sorted(fin, key=lambda r: str(r.get("end_date", "")))[-1]
+        from lib.financials import dedupe_by_end_date as _dedupe_fin  # C1-a
+        latest = sorted(_dedupe_fin(fin), key=lambda r: str(r.get("end_date", "")))[-1]
         if latest.get("roe") is not None:
             snap["financials"]["roe"] = latest["roe"]
         ry = _yoy_from_fina_rows(fin, "revenue")

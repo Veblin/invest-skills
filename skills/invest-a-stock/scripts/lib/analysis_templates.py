@@ -253,16 +253,19 @@ def _build_mda_card(collection: dict) -> Optional[MDANarrativeCard]:
         if nm_prior is not None:
             nm_change = round(nm - nm_prior, 2)
 
-    # ---- Operating cashflow & quality hint ----
+    # ---- Operating cashflow & coverage hint ----
+    # C1-b：只表述覆盖关系（不写「利润质量良好」类质量结论）；亏损期
+    # （net_profit<=0）比值不适用——旧守卫 abs(np)>1e-9 会把亏损期算成
+    # 「良好」（ocf=-10 亦 > np*1.1=-110）。
     ocf = _get(latest, "n_cashflow_act", "ocf")
     cq_hint = ""
-    if ocf is not None and net_profit_val is not None and abs(net_profit_val) > 1e-9:
+    if ocf is not None and net_profit_val is not None and net_profit_val > 0:
         if ocf > net_profit_val * 1.1:
-            cq_hint = "良好"
+            cq_hint = "覆盖充分"
         elif ocf >= net_profit_val * 0.9:
-            cq_hint = "一般"
+            cq_hint = "基本覆盖"
         else:
-            cq_hint = "需关注"
+            cq_hint = "覆盖偏低"
 
     # ---- ROE ----
     roe = _get(latest, "roe")
