@@ -438,8 +438,11 @@ def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
     if profile_path.is_file():
         try:
             import json as _json
-            prof_style = (_json.loads(profile_path.read_text(encoding="utf-8"))
-                          or {}).get("style")
+            _prof = _json.loads(profile_path.read_text(encoding="utf-8")) or {}
+            # 侧车真实结构为嵌套 {"profile": {"style": ...}}（research_profile.py）；
+            # 兼容旧扁平写法。
+            prof_style = ((_prof.get("profile") or {}).get("style")
+                          or _prof.get("style"))
         except Exception:
             prof_style = None
         m_style = re.search(r"自评风格\s*([^\s×（(]+)", text)
@@ -943,16 +946,28 @@ def readability_metrics(md: str) -> dict:
 
     # 结论摘要要素：在「主要/核心结论」段内查找；无结论段标题 → 不判缺
     # （全量审查：旧实现无标题也报缺要素——对前置引擎输出假阳性）
+    # C1-c 配套：标题族扩展后首个命中可能是 `重要发现（5 分钟阅读区）` 这类
+    # **容器段**（段内只有引用行指针）——取其后的首个**有实质内容**的段，
+    # 否则退回首段；全部无内容才按未知处理。
     summary_elements = {k: False for k in _SUMMARY_ELEMS}
-    m = _CONCLUSION_HEAD_RE.search(md)
-    if m:
+    seg_pick: str | None = None
+    m_any = None
+    for m in _CONCLUSION_HEAD_RE.finditer(md):
+        m_any = m
         tail = md[m.end():]
         next_head = re.search(r"^#{2,4}\s", tail, re.M)
-        seg = tail if not next_head else tail[: next_head.start()]
-        for k, pat in _SUMMARY_ELEMS.items():
-            summary_elements[k] = bool(pat.search(seg))
-    else:
+        cand = tail if not next_head else tail[: next_head.start()]
+        if seg_pick is None:
+            seg_pick = cand
+        if any(ln.strip() and not ln.strip().startswith(">")
+               for ln in cand.splitlines()):
+            seg_pick = cand
+            break
+    if m_any is None:
         summary_elements = {k: None for k in _SUMMARY_ELEMS}  # 无结论段 → 未知
+    else:
+        for k, pat in _SUMMARY_ELEMS.items():
+            summary_elements[k] = bool(pat.search(seg_pick or ""))
 
     return {
         "total_chars": total_chars,

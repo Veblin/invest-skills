@@ -344,15 +344,17 @@ class TestV031MainJudgmentGate:
             "**[风格匹配]** 中性：自评风格 成长 × 收益驱动 暂无法判定\n"
         )
         md = tmp_path / "a.final.md"
-        (tmp_path / "a.final.profile.json").write_text('{"style": "价值"}', encoding="utf-8")
+        (tmp_path / "a.final.profile.json").write_text(
+            '{"profile": {"style": "价值"}}', encoding="utf-8")
         layer = _check_stock_completion(md, text)
         assert any(
             f["id"] == "completion-style-mismatch" and f["severity"] == "warning"
             for f in layer.details
         )
-        # 一致 → 无该 finding
+        # 一致 → 无该 finding（侧车嵌套结构）
         md2 = tmp_path / "b.final.md"
-        (tmp_path / "b.final.profile.json").write_text('{"style": "成长"}', encoding="utf-8")
+        (tmp_path / "b.final.profile.json").write_text(
+            '{"profile": {"style": "成长"}}', encoding="utf-8")
         layer2 = _check_stock_completion(md2, text)
         assert not any(f["id"] == "completion-style-mismatch" for f in layer2.details)
 

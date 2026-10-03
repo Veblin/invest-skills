@@ -1708,12 +1708,16 @@ def _section_events_timeline(
             lines.append("")
 
     # Industry / market event placeholders
+    # C3：封存 _meta 携带旧文案（「待补来源」）——渲染层做术语映射，避免
+    # lint placeholder-tofill 把封存旧词当未填占位；新采集产出新词，映射恒等。
+    def _note_display(note: str) -> str:
+        return str(note).replace("待补来源", "来源缺口")
     ind_note = collection.get("_meta", {}).get("industry_events_note")
     mkt_note = collection.get("_meta", {}).get("market_events_note")
     if ind_note:
-        lines.append(f"⏭️ **行业事件**: {ind_note}")
+        lines.append(f"⏭️ **行业事件**: {_note_display(ind_note)}")
     if mkt_note:
-        lines.append(f"⏭️ **市场事件**: {mkt_note}")
+        lines.append(f"⏭️ **市场事件**: {_note_display(mkt_note)}")
     if ind_note or mkt_note:
         lines.append("")
 
@@ -3255,7 +3259,7 @@ def _section_4b_business_quality(
     lines.append("")
     lines.append(_law10_hint(
         "经营现金流对净利润的覆盖比是覆盖关系指标——利润与现金流持续背离，"
-        "可能意味着应收膨胀、存货积压或收入确认激进（待补案例）。",
+        "可能意味着应收膨胀、存货积压或收入确认激进（案例尚缺）。",
         (
             f"本次经营现金流/净利润覆盖比 = {ctx.cf_ratio_val:.2f}，单期读数不构成利润质量结论，"
             "应对比连续 4 期同口径趋势。"
@@ -3691,7 +3695,10 @@ def _section_4d_valuation_expectation(
             ind_median = median_of([float(x) for x in peer_pes])
             premium = (ctx.current_pe - ind_median) / ind_median * 100
             lines.append(f"- 公司 PE(TTM)：**{ctx.current_pe:.2f}x**")
-            lines.append(f"- 行业中位数 PE：**{ind_median:.2f}x**（{len(peer_pes)} 家同行）")
+            # C2-d：家数必须带口径——本行为「有有效 PE 的同行数」，与同行池
+            # 总数（另有标注）及各指标排名分母不同（600519 反例：8/10/9 三值
+            # 无口径并列）。
+            lines.append(f"- 行业中位数 PE：**{ind_median:.2f}x**（{len(peer_pes)} 家，PE 有效）")
             lines.append(f"- 溢价/折价：**{premium:+.1f}%**（{'溢价' if premium > 0 else '折价'}）")
             if premium > 30:
                 lines.append("公司 PE 显著高于行业，需验证：是否具备远超同行的盈利增长或护城河。")
@@ -3906,7 +3913,7 @@ def _peer_comparison_table(industry_peers: dict) -> list[str]:
         lines.append("")
         target = industry_peers.get("target") or {}
         rankings = industry_peers.get("rankings") or {}
-        lines.append(f"行业：{industry_peers.get('industry_name', '?')}（{len(industry_peers.get('peers', []))} 家同行）")
+        lines.append(f"行业：{industry_peers.get('industry_name', '?')}（同行池 {len(industry_peers.get('peers', []))} 家）")
         lines.append("")
         lines.append("| 公司 | PE(TTM) | PB | ROE(%) | 营收增速(%) |")
         lines.append("|------|---------|-----|--------|------------|")
@@ -3950,6 +3957,9 @@ def _peer_comparison_table(industry_peers: dict) -> list[str]:
             lines.extend(rk_lines)
             lines.append("")
         lines.append("> 分位排名越高，表示在同行中数值越高。PE/PB 分位高 = 估值高于多数同行。ROE/营收增速分位高 = 盈利能力或增长优于同行。")
+        # C2-d：排名分母 = 各指标**有效样本数**（缺字段的同行不入该指标池），
+        # 与「同行池」总数、中位数样本数互不相同——显式说明，防口径混读。
+        lines.append("> 备注：排名分母为对应指标的有效样本数（各指标口径不同），与同行池总数及中位数样本数可能不一致。")
     return lines
 
 

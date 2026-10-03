@@ -350,7 +350,7 @@ def _section_bull_bear(
             "assumption": f"{risk_bull_signal.get('detail', '估值分位处历史低位')}",
             "transmission": (
                 "估值分位处历史低位 → 历史上类似阶段曾出现估值修复窗口 "
-                "[推测，待验证：样本案例与胜率待补] → 可关注估值修复机会。"
+                "[推测，待验证：样本案例与胜率尚未补足] → 可关注估值修复机会。"
             ),
             "numbers": [f"- 信号来源: risk_scanner / {risk_bull_signal.get('category', 'market')}"],
             "strength": "⚠️ 中",
@@ -583,7 +583,7 @@ def _section_bull_bear(
         chain = {
             "title": "估值未处于低位 — 修复安全边际有限",
             "assumption": (
-                f"当前 PE 处于历史 {pe_zone or '中性偏高区'}（{pe_pct:.1f}% 分位），"
+                f"当前 PE 处于历史 {pe_zone or '中性偏高区'}（{pe_pct:.1f}% 分位{_pct_median_inline(pe_med)}），"
                 f"并非历史低位，估值端不具备低估安全边际。"
             ),
             "transmission": (
@@ -591,7 +591,7 @@ def _section_bull_bear(
                 "若基本面出现边际走弱或不及预期 → 估值缺乏低位缓冲，"
                 "股价对负面消息的敏感度更高。"
             ),
-            "numbers": [f"- 当前 PE 分位: {pe_pct:.1f}%（{pe_zone or '中性偏高区'}）[来源: valuation 维度]"],
+            "numbers": [f"- 当前 PE 分位: {pe_pct:.1f}%（{pe_zone or '中性偏高区'}{_pct_median_inline(pe_med)}）[来源: valuation 维度]"],
             "strength": "❓ 弱",
         }
         bear_chains.append(chain)

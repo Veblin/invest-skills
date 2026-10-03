@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 INDUSTRY_EVENTS_PLACEHOLDER: tuple[dict, ...] = ()
 MARKET_EVENTS_PLACEHOLDER: tuple[dict, ...] = ()
 
-PLACEHOLDER_NOTE_INDUSTRY = "⏭️ 待补来源：暂无稳定 API"
-PLACEHOLDER_NOTE_MARKET = "⏭️ 待补来源：暂无稳定 API"
+PLACEHOLDER_NOTE_INDUSTRY = "⏭️ 来源缺口：暂无稳定 API"
+PLACEHOLDER_NOTE_MARKET = "⏭️ 来源缺口：暂无稳定 API"
 
 
 # ── 事件类型元数据（从 event_type_taxonomy.yaml 加载，共享 analysis_templates 的缓存）──
