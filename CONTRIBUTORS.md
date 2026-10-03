@@ -18,6 +18,7 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 
 ### Before submitting
 
+- Follow the applicable stages in [Development workflow](docs/development-workflow.md); keep implementation, independent verification and product acceptance evidence distinct.
 - Run `uv run python skills/invest-a-stock/scripts/invest.py diagnose` to verify environment
 - Run `uv run pytest` to verify tests pass
 - Ensure no API keys or secrets are committed
@@ -27,6 +28,7 @@ Built by [@veblin](https://github.com/veblin) — an investment learner who want
 **发布前检查清单**（原 `AGENTS.md` 维护，v0.3.1 迁入此处——版本与发布细节属本文件职责）：
 
 - [ ] `CHANGELOG.md` 已更新（`###` 小节标题 = Release 正文「主要修改」清单，正文自动精简）
+- [ ] 按 [开发执行与验收流程](docs/development-workflow.md) 留有版本主目标验收记录；未达项和未验证项已明确，不能仅凭测试通过签认整体完成
 - [ ] `bash scripts/bump-version.sh X.Y.Z` 已执行（`pyproject.toml` 为唯一 canonical 源）→ `uv run python scripts/sync_version.py check` 通过
 - [ ] `.claude-plugin/marketplace.json` 描述准确
 - [ ] `.agents/plugins/marketplace.json` 与 claude-plugin 描述同步

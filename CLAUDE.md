@@ -56,6 +56,7 @@ notice-body  # 取公告正文（art_code 或详情页 url；原文不改写 + �
 | 宏观情景（指标清单 + 两段式输出合同） | report-conventions.md §9.1 |
 | 估值分位使用规则（含亏损期判据口径） | report-conventions.md §9.2 |
 | 开发规范 D1–D14（`/code-review` 审查标准） | [development-rules.md](skills/lib/references/development-rules.md) |
+| 开发执行、角色交接与目标验收 | [development-workflow.md](docs/development-workflow.md)（开发流程，非报告运行时规则） |
 | 源策略原则、代理与 stderr 过滤 | [data-interface-map.md §G](skills/lib/references/data-interface-map.md) |
 | 九模块结构、技术指标规范 | [modules.md](skills/invest-a-stock/references/modules.md) |
 

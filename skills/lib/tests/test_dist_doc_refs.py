@@ -3,7 +3,7 @@
 **为什么需要源侧测试而不是只靠构建器**：CI 的 `build-skillhub-mirror.yml`
 只构建 `invest-a-stock` / `invest-a-etf` 两个包，其余 7 个 skill 不进该路径。
 只加在构建脚本里的门禁对它们没有保护；本文件在 `pyproject.testpaths` 内，
-`validate.yml` 的每个 PR 都会跑，覆盖全部 9 个 skill。
+`validate.yml` 的每个 PR 都会跑，覆盖全部 8 个公开 skill。
 
 **为什么源文件必须自己干净**：SkillHub 渠道会改写 SKILL.md，但 **WorkBuddy
 渠道原样复制、零改写** —— 任何「靠改写器兜住」的方案在 WB 侧必然悬空。故正确
@@ -33,8 +33,8 @@ _LIB_MODULE_RE = re.compile(r"(?:\.\./)*skills/lib/([A-Za-z_]\w*\.py)")
 
 
 def test_all_skill_md_present():
-    """锁覆盖面：9 个 skill 的根文档都在扫描集内（防 glob 静默变空）。"""
-    assert len(SKILL_MDS) == 9, [p.parent.name for p in SKILL_MDS]
+    """锁覆盖面：8 个公开 skill 的根文档都在扫描集内（防 glob 静默变空）。"""
+    assert len(SKILL_MDS) == 8, [p.parent.name for p in SKILL_MDS]
 
 
 def test_no_chapter_quote_of_root_doc():

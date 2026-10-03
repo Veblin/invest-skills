@@ -73,6 +73,14 @@ MA5/MA10/MA20/MA60 和 MACD（DIF/DEA）等指标**仅用于理解市场状态**
 
 证据未齐时**允许内部按需实验**，但不进入默认路径与公开分发。每次新增入口都设反馈窗口：没有真实调用或复盘结论就撤出默认入口/公开目录，窗口结束必须裁决——**不以"暂留以后可能用"为默认结论**。
 
+## 开发执行与完成门禁
+
+- **先定义验收再实施**：将原始任务与生效计划对应到可观察结果、反例、真实入口和完成证据；简单任务可简写。
+- **修复须检查消费链**：复现原问题，执行 D11 同类模式检查；协议、标题、槽位或状态变化时，验证生产者、消费者与检查器一致，并证明应失败的反例确实被拦截。
+- **完成声明不得越界**：实现、自检、独立复检与版本目标验收分别记录。单项 PASS、测试数量、版本号及 `final` 文件名均不证明整体完成；未验证项与偏差必须披露。
+- **重要改造验实际产物**：默认报告、财务语义、QC、存储、跨格式及分发链的改造须核验适用的真实入口与完整结果；复检签认绑定实际核查版本，不能沿用修改前的结论。
+- **按风险执行，不增加无关审批**：在既有授权内持续完成修复和验收；低影响任务可合并阶段。详细角色、交接和结项流程见 [开发执行与验收流程](docs/development-workflow.md)，不要求固定模型或新增常驻 Agent。
+
 ## 发布与版本
 
 - **版本号 canonical**：`pyproject.toml` `[project].version`（唯一手动维护处）；`scripts/bump-version.sh X.Y.Z` 同步全部派生文件
@@ -96,6 +104,7 @@ code/scripts/          构建器与发布脚本（skillhub / WorkBuddy）
 ```
 
 - **三个研究核心入口**：`invest-a-stock`、`invest-a-etf`、`invest-hk-stock`
-- **按需专项入口**：`invest-a-journal`、`invest-a-event-calendar`、`invest-a-gap-scan`、`invest-a-pattern-scan`、`invest-a-pulse`、`invest-a-discover-scan`
+- **按需专项入口**：`invest-a-journal`、`invest-a-gap-scan`、`invest-a-pattern-scan`、`invest-a-pulse`、`invest-a-discover-scan`
+- **暂停维护**：`invest-a-event-calendar` 已退出公开入口与分发；源码保留，见 [历史说明](skills/invest-a-event-calendar/README.md)。共享解禁数据层继续服务个股研究。
 - 各 harness 安装方式见 [CONFIGURATION.md](CONFIGURATION.md)；文档索引见 [docs/README.md](docs/README.md)
 - **不要从 `archive/` 导入任何模块**（v0.2 遗留）

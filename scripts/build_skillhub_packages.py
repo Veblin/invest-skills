@@ -62,7 +62,6 @@ PUBLISH_SKILLS = [
     "invest-a-gap-scan",
     "invest-a-pattern-scan",
     "invest-hk-stock",
-    "invest-a-event-calendar",
     "invest-a-discover-scan",
 ]
 
@@ -87,7 +86,6 @@ SKILL_META: dict[str, dict[str, str]] = {
     "invest-a-gap-scan": {"displayName": "invest:a-gap-scan 缺口扫描"},
     "invest-a-pattern-scan": {"displayName": "invest:a-pattern-scan 形态扫描"},
     "invest-hk-stock": {"displayName": "invest:a-hk 港股研究"},
-    "invest-a-event-calendar": {"displayName": "invest:a-event-calendar 事件日历"},
     "invest-a-discover-scan": {"displayName": "invest:a-discover-scan 低估发现"},
 }
 
@@ -101,7 +99,6 @@ ENTRY_SCRIPTS: dict[str, str | None] = {
     "invest-a-gap-scan": "scan.py",
     "invest-a-pattern-scan": "scan.py",
     "invest-hk-stock": "hk.py",
-    "invest-a-event-calendar": "unlock_calendar.py",
     "invest-a-discover-scan": "discover_scan.py",
 }
 
@@ -121,7 +118,6 @@ LAYOUT: dict[str, str] = {
     "invest-a-gap-scan": "script",
     "invest-a-pattern-scan": "script",
     "invest-hk-stock": "script",
-    "invest-a-event-calendar": "script",
     "invest-a-discover-scan": "script",
 }
 
@@ -140,12 +136,6 @@ CROSS_LIBS: dict[str, list[str]] = {
     # sessions，hk.py:91/226）与 lib.tushare_client（hk_tushare._client，hk_tushare.py:21）；
     # 包内无该引导 → 一并闭包并入（technical 由共享 skills/lib 满足，无需计入）
     "invest-hk-stock": ["invest-a-stock"],
-    # event-calendar 的 unlock_source（东财直连，unlock_source.py:78 `from lib.proxy
-    # import akshare_direct_session`）与 trade_cal（:30-31 `from lib import env` /
-    # `lib.tushare_client`）从 invest-a-stock lib 解析；包内无该引导 → 一并闭包并入。
-    # 缺 proxy → 池模式每次取数 ModuleNotFoundError（误报数据源不可得）；缺
-    # tushare_client → trade_cal 恒走 except ImportError 估算分支（交易日恒粗判）。
-    "invest-a-event-calendar": ["invest-a-stock"],
     # discover-scan 经 _invest_path 从 invest-a-stock lib 解析 lib.tushare_client
     # （sources.client）、lib.cache（DataCache）、lib.trade_cal、lib.proxy
     # （rf_10y_pct 的 akshare 直连上下文）与 lib.env（token 读取）；包内无该引导

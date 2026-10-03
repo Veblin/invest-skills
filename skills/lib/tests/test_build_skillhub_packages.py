@@ -454,22 +454,11 @@ def test_published_packages_have_no_dangling_lib_imports():
         assert not dangling, f"{skill} 闭包悬空引用: {sorted(dangling)}"
 
 
-def test_event_calendar_package_build_closure(tmp_path):
-    """event-calendar 池模式的东财直连依赖（lib.proxy）与交易日历依赖必须进包。
-
-    无 lib.proxy → 池模式每次取数 ModuleNotFoundError（误报为数据源不可得）；
-    无 lib.tushare_client → trade_cal 恒走 except ImportError 估算分支（恒粗判）。
-    """
-    total = b.build_one("invest-a-event-calendar", b.project_version(), tmp_path, dry_run=False)
-    assert 0 < total <= b.MAX_FILES
-    dst = tmp_path / "invest-a-event-calendar"
-    assert (dst / "scripts/lib/proxy.py").is_file()
-    assert (dst / "scripts/lib/tushare_client.py").is_file()
-    assert (dst / "scripts/lib/unlock_source.py").is_file()
-    # v3 宏观日程：数据层模块与两份策展表须一并进包（否则 --macro 在分发包内不可用）
-    assert (dst / "scripts/macro_calendar.py").is_file()
-    assert (dst / "references/fomc_meetings.yaml").is_file()
-    assert (dst / "references/macro_sources.yaml").is_file()
+def test_event_calendar_is_not_published(tmp_path):
+    assert "invest-a-event-calendar" not in b.PUBLISH_SKILLS
+    assert not (b.SKILLS_DIR / "invest-a-event-calendar" / "SKILL.md").exists()
+    assert b.main(["--skills", "invest-a-event-calendar", "--out", str(tmp_path)]) == 0
+    assert not (tmp_path / "invest-a-event-calendar").exists()
 
 
 def test_discover_package_bundles_dynamic_hk_modules(tmp_path):
@@ -523,8 +512,8 @@ def test_mandated_qc_tool_packaged_and_runnable(tmp_path):
     回归：包内既无 report_qc 也无路径改写 → 分发用户执行 SKILL.md 强制的命令直接
     can't open file …/skills/lib/report_qc.py，闸门在大多数用户收到的形态下失效。
     """
-    b.build_one("invest-a-event-calendar", b.project_version(), tmp_path, dry_run=False)
-    dst = tmp_path / "invest-a-event-calendar"
+    b.build_one("invest-a-stock", b.project_version(), tmp_path, dry_run=False)
+    dst = tmp_path / "invest-a-stock"
     lib = dst / "scripts" / "lib"
     assert (lib / "report_qc.py").is_file(), "report_qc 未进包"
     assert (lib / "lint.py").is_file(), "lint（动态加载目标）未进包"

@@ -46,7 +46,7 @@ AK_INTERFACES: list[str] = [
     # A6 股东/高管/解禁
     "stock_shareholder_change_ths", "stock_gdfx_top_10_em",
     "stock_hold_management_detail_cninfo", "stock_restricted_release_queue_em",
-    "stock_restricted_release_summary_em", "stock_info_a_code_name",
+    "stock_info_a_code_name",
     # A7 分红
     "stock_dividend_cninfo", "stock_history_dividend_detail",
     # A8 财务
@@ -54,7 +54,6 @@ AK_INTERFACES: list[str] = [
     # A9 宏观
     "macro_china_pmi", "macro_china_cpi", "macro_china_ppi", "macro_china_lpr",
     "macro_china_money_supply", "macro_rmb_loan", "bond_china_yield", "bond_zh_us_rate",
-    "news_economic_baidu",  # v3 宏观日程（invest-a-event-calendar；能返回未来日程）
     "currency_boc_sina",  # 中行外汇牌价（A/H 比价汇率；⚠️ 每 100 港元计价，须显式传日期区间）
     # A10 新闻/公告/研报
     "stock_notice_report", "stock_individual_notice_report", "stock_news_em",

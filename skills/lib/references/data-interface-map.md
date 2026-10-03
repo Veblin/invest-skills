@@ -85,7 +85,7 @@
 | `stock_gdfx_top_10_em` | invest-a-stock | 🔥 | 高管持股 Top10 |
 | `stock_hold_management_detail_cninfo` | invest-a-stock | — | 巨潮高管持股变动 |
 | `stock_restricted_release_queue_em` | invest-a-stock | 🔥 | 解禁队列（按股票） |
-| `stock_restricted_release_summary_em` | invest-a-event-calendar | 🔥 | 东财全市场解禁日汇总（symbol=全部股票；唯一全市场型解禁日历源，unlock_calendar 主源） |
+| `stock_restricted_release_summary_em` | invest-a-event-calendar（暂停维护，不分发） | — | 东财全市场解禁日汇总（symbol=全部股票；唯一全市场型解禁日历源，unlock_calendar 主源） |
 | `stock_info_a_code_name` | invest-a-gap-scan | — | A 股代码/名称全表 |
 
 ### A7. 分红
@@ -109,7 +109,7 @@
 | `bond_china_yield` | invest-a-stock | — | 中债收益率 |
 | `bond_zh_us_rate` | invest-a-journal, invest-a-stock | — | 中美利率对比（ERP 原料） |
 | `currency_boc_sina` | **invest-hk-stock** | — | 中行外汇牌价（`symbol="港币"`）。⚠️ **每 100 港元计价**（86.384 → 0.86384 CNY/HKD），漏除 100 会把 A/H 溢价率放大近百倍；⚠️ **必须显式传日期区间**——不传时返回的默认窗口**不是最新数据**（2026-09-12 真机踩坑：取到 2023-11-10 的中间价，溢价率方向对但幅度差近一倍），消费方须按日期排序 + 陈旧分级（>10 天标注、>30 天不采用转降级） |
-| `news_economic_baidu` | invest-a-event-calendar（v3 宏观日程） | 🔥 | 财经日历，**能返回未来日程**。2026-09-10 实测：前向窗 ≈30 天（10-16 起返回空）；窗口内**无美国 CPI**（103 条 CPI 全是其他国家的）；单次调用失败率 ≈12%；`重要性` 只有 1/2 两档且 str/float 混型（噪音行同样有值 → 不可作筛选器）；`cookie` 为空时每次调用多 2 个握手请求。走 `curl_cffi` → **不要**包 `akshare_direct_session`（那是东财 requests 直连+节流） |
+| `news_economic_baidu` | invest-a-event-calendar（暂停维护，不分发） | — | 财经日历，**能返回未来日程**。2026-09-10 实测：前向窗 ≈30 天（10-16 起返回空）；窗口内**无美国 CPI**（103 条 CPI 全是其他国家的）；单次调用失败率 ≈12%；`重要性` 只有 1/2 两档且 str/float 混型（噪音行同样有值 → 不可作筛选器）；`cookie` 为空时每次调用多 2 个握手请求。走 `curl_cffi` → **不要**包 `akshare_direct_session`（那是东财 requests 直连+节流） |
 
 ### A10. 新闻 / 公告 / 研报
 
@@ -183,8 +183,8 @@
 | 腾讯行情 | `qt.gtimg.cn` HTTP | 实时报价（价格/成交量/PE/市值） | 2026-09-08 实测可用（600737 盘中 +9.99%） |
 | FRED | `fredapi` | 美 10Y/30Y/VIX/CPI/美元指数（宏观标签） | 需 FRED_API_KEY |
 | FRED `releases/dates` | `api.stlouisfed.org/fred/releases/dates` | 美国宏观**发布日程**（urllib 直取；fredapi 无该端点） | 需 FRED_API_KEY；前向 ≥3 个月；**无时刻字段**（不推测）；名为 `FOMC Press Release` 的 release 几乎每天一条，是日常新闻稿噪音，**不可**用作议息日程 |
-| FOMC 会议日程（策展表） | `skills/invest-a-event-calendar/references/fomc_meetings.yaml` | 议息会议日 | **无自动源**；人工誊录 federalreserve.gov，年度刷新；表过期/缺失时引擎显式告警（不渲染成「无议息」） |
-| 宏观事件白名单（策展表） | `skills/invest-a-event-calendar/references/macro_sources.yaml` | 中美事件白名单 + 噪音 pattern + FRED release 白名单 | 人工资产；`us_releases` 按 (id, name) 对匹配，name 不符报配置漂移 |
+| FOMC 会议日程（策展表） | `skills/invest-a-event-calendar/references/fomc_meetings.yaml` | 议息会议日 | **暂停维护**；无自动源，历史人工誊录 federalreserve.gov，年度刷新；表过期/缺失时引擎显式告警（不渲染成「无议息」） |
+| 宏观事件白名单（策展表） | `skills/invest-a-event-calendar/references/macro_sources.yaml` | 中美事件白名单 + 噪音 pattern + FRED release 白名单 | **暂停维护**；历史人工资产，`us_releases` 按 (id, name) 对匹配，name 不符报配置漂移 |
 | Yahoo | `query1.finance.yahoo.com` | SOX 费城半导体指数 | urllib 直连 |
 | baostock | `query_history_k_data_plus` | K 线兜底（无 tushare token 时 auto） | — |
 | TickFlow | `TickFlow.free()` | 可选 K 线源（默认关闭） | — |

@@ -15,6 +15,7 @@
 | [CHANGELOG.md](../CHANGELOG.md) | 版本变更记录 |
 | [CONTRIBUTORS.md](../CONTRIBUTORS.md) | 贡献指南 |
 | [AGENTS.md](../AGENTS.md) | AI 协作规则与设计约束 |
+| [development-workflow.md](development-workflow.md) | 开发角色分工、实施交接、独立复检与版本目标验收 |
 
 ## 示例报告（docs/demos/）
 

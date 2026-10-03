@@ -556,17 +556,33 @@ def _is_segment_item(item: str) -> bool:
     return bool(name) and name not in _MAINBZ_NON_SEGMENT_ITEMS and "合计" not in name
 
 
-def _dedupe_mainbz_rows(records: list[dict]) -> list[dict]:
-    """按 ``(end_date, bz_sales, bz_profit)`` 去重，别名取较短名（同长取先出现者）。
+# 仅收录既有实测记录明确核对过的别名，限定股票、分类与报告期。
+# 名称相似或财务数值相同都不能证明是同一分部，不向其他公司/报告期推广。
+_MAINBZ_VERIFIED_ALIASES = {
+    ("300750", "P", "20260630"): {
+        "电池材料及回收、矿产资源": "电池材料及回收",
+    },
+    ("300750", "D", "20260630"): {"国外": "境外"},
+}
+
+
+def _dedupe_mainbz_rows(records: list[dict], *, symbol: str = "",
+                        bz_type: str = "") -> list[dict]:
+    """按报告期、分部身份与数值去重；已核验别名取较短名。
 
     ``fina_mainbz`` 对同一分部会返回**别名重复行**——实测 300750 2026H1：按产品
     同时给出「电池材料及回收、矿产资源」与「电池材料及回收」、按地区同时给出
     「境外」与「国外」，两行数值完全相同。不去重会让分部合计虚高（实测 3489.89
     亿 vs 真实营收 2769.17 亿）。
+
+    未核验的不同名称即使数值相同也保留；已核验别名数值不同时也不合并。
     """
     chosen: dict[tuple, dict] = {}
     for row in records:
-        key = (row["end_date"], row["bz_sales"], row["bz_profit"])
+        aliases = _MAINBZ_VERIFIED_ALIASES.get(
+            (symbol.strip().zfill(6), bz_type, row["end_date"]), {})
+        identity = aliases.get(row["bz_item"], row["bz_item"])
+        key = (row["end_date"], identity, row["bz_sales"], row["bz_profit"])
         current = chosen.get(key)
         if current is None or len(str(row["bz_item"])) < len(str(current["bz_item"])):
             chosen[key] = row
@@ -598,7 +614,7 @@ def _q_tushare_mainbz(symbol: str) -> list[dict] | None:
                 continue
             records.append({"bz_item": item, "bz_sales": sales,
                             "bz_profit": profit, "end_date": end_date})
-        for row in _dedupe_mainbz_rows(records):
+        for row in _dedupe_mainbz_rows(records, symbol=symbol, bz_type=bz_type):
             out.append({
                 "end_date": row["end_date"], "type": label, "item": row["bz_item"],
                 "sales": row["bz_sales"], "profit": row["bz_profit"],

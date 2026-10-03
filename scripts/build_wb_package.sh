@@ -22,9 +22,10 @@ cp scripts/wb_bundle/SKILL.md       "$PKG/SKILL.md"
 cp scripts/wb_bundle/bootstrap.sh   "$PKG/scripts/bootstrap.sh"
 cp scripts/wb_bundle/README-安装.md "$PKG/README-安装.md"
 
-# 仓库布局：6 技能 + 共享 lib（排除 limit-up 与测试/缓存）
+# 仓库布局：公开技能 + 共享 lib（排除已退出入口与测试/缓存）
 rsync -a \
   --exclude 'invest-a-limit-up' \
+  --exclude 'invest-a-event-calendar' \
   --exclude 'tests' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \

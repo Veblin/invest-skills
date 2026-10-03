@@ -29,7 +29,6 @@ WIRED = {
     "invest-a-gap-scan": "scan.py",
     "invest-a-pattern-scan": "scan.py",
     "invest-hk-stock": "hk.py",
-    "invest-a-event-calendar": "unlock_calendar.py",
     "invest-a-discover-scan": "discover_scan.py",
 }
 
@@ -107,9 +106,9 @@ def test_gap_scan_has_no_basicconfig():
 # ---------------------------------------------------------------- 完整性不变量
 
 def test_every_script_skill_is_wired_or_exempt():
-    """新增任何带 scripts/ 的 skill 而未接线 → 本测试必红（豁免无需注释背书）。"""
+    """公开 skill 有 scripts/ 而未接线 → 必红；暂停维护目录不注册为 skill。"""
     scripted = {p.name for p in (ROOT / "skills").iterdir()
-                if p.is_dir() and (p / "scripts").is_dir()}
+                if (p / "SKILL.md").is_file() and (p / "scripts").is_dir()}
     assert scripted <= set(WIRED), f"未接线的入口 skill：{sorted(scripted - set(WIRED))}"
     # 豁免必须是**结构性**的：没有 scripts/ 才可豁免，否则豁免掩盖了遗漏
     for s in EXEMPT_SKILLS:
