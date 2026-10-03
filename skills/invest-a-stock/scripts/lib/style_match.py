@@ -165,14 +165,19 @@ def _journal_driver(symbol: str) -> str | None:
         return None
 
 
-def assemble_style_match(collection: dict, symbol: str) -> dict | None:
+def assemble_style_match(
+    collection: dict, symbol: str, style: str | None = None,
+) -> dict | None:
     """cmd_report 装配：driver（R1 引擎）+ style（档案）+ journal_driver（同标的 Q1）。
 
+    C2-c：``style`` 显式传入时优先——report 步骤的 ``--style`` 与 profile 侧车
+    同源（原实现只读 ``user_style.json``，与 ``--style`` 写入的档案矛盾：
+    600519 实测 profile=价值 而正文/封存 style_match 自评「成长」）。
     任一环节失败 → 返回 None（报告不受影响）。
     """
     try:
         driver = _driver_from_collection(collection)
-        style = load_style()
+        style = style or load_style()
         journal_driver = _journal_driver(symbol)
         m = match_style(style, driver, journal_driver)
         return {

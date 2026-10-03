@@ -20,7 +20,7 @@ from ..shared_dates import (  # noqa: E402
     normalize_end_date as _norm_ed,
     yyyymmdd_to_iso as _to_iso_date,
 )
-from ..financials import dedupe_by_end_date  # noqa: E402
+from ..financials import dedupe_by_end_date, resolve_rf  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -1019,12 +1019,18 @@ def _section_market_structure(
             )
         if erp:
             partial_note = "（样本日不足，分位仅供参考）" if erp.get("partial") else ""
-            y10_src = erp.get("source", "")
-            if "+" in y10_src:
-                _, bond_src = y10_src.split("+", 1)
-                y10_note = f"；10Y 国债来源: {bond_src}"
+            # C2-a：来源标注带币种；美元口径显式披露「与 A 股口径不一致」
+            # （旧封存快照无 cn10y/rf_currency，按来源字符串推断币种）。
+            rf = resolve_rf(erp)
+            if rf["rate_pct"] is not None:
+                y10_note = f"；10Y 国债来源: {rf['label']}"
+                if rf["is_wrong_currency"]:
+                    y10_note += "（美元口径——ERP 对齐基准与 A 股口径不一致，仅供参考）"
             else:
-                y10_note = ""
+                # ERP 值已对齐某条 10Y 序列；无现值时至少披露对齐来源字符串
+                combined = str(erp.get("source") or "")
+                src_only = combined.split("+", 1)[1] if "+" in combined else ""
+                y10_note = f"；10Y 国债来源: {src_only}" if src_only else ""
             lines.append(
                 f"- ERP（沪深300）: {erp.get('raw', '-')}%，5年分位 {erp.get('percentile_5y', '-')}%"
                 f"{partial_note}{y10_note} [对齐样本 {erp.get('erp_days', '-')} 日]"
@@ -3733,33 +3739,35 @@ def _section_4d_valuation_expectation(
     # D-③ 隐性预期差
     lines.append("#### D-③ 隐性预期差")
     ig: dict[str, Any] = {}
-    risk_free_is_default = False
+    # C2-a：rf/_ig_attempted 预置中性值——PE 不可得分支与下方 d3_pitfall/
+    # 状态行也引用（原实现在块外预置 risk_free_is_default=False，同款写法）。
+    rf: dict[str, Any] = {"rate_pct": None, "source": "", "currency": "",
+                          "is_default": False, "is_wrong_currency": False, "label": ""}
+    _ig_attempted = False
     if ctx.current_pe is not None and ctx.current_pe > 0:
         erp_data = ctx.ms.get("erp") or {}
-        risk_free_raw = erp_data.get("dgs10")
-        y10_source = ""
-        if erp_data.get("source") and "+" in str(erp_data.get("source", "")):
-            _, y10_source = str(erp_data["source"]).split("+", 1)
-        risk_free_is_default = risk_free_raw is None
-        if risk_free_is_default:
+        # C2-a：优先人民币口径（cn10y）；仅美元口径时显式标注币种并暂停
+        # 方向解读（与 DCF/风险行同一降级通道，report-conventions §9.3）。
+        rf = resolve_rf(erp_data)
+        if rf["is_default"]:
             lines.append(
                 "- 无风险利率不可得，暂停隐含增长率计算、与 CAGR 比较及方向判断；"
-                "须补同估值时点的实际利率。[来源: market_structure.erp.dgs10]"
+                "须补同估值时点的实际利率。[来源: market_structure.erp.cn10y/dgs10]"
+            )
+        elif rf["is_wrong_currency"]:
+            lines.append(
+                f"- ⚠️ 无风险利率仅有美元口径（{rf['rate_pct']:.2f}%，{rf['label']}），"
+                "与 A 股折现率币种不一致——暂停隐含增长率与方向解读；"
+                "须补同币种人民币利率。[来源: market_structure.erp.cn10y 不可得]"
             )
         else:
-            risk_free = risk_free_raw / 100.0
+            _ig_attempted = True
+            risk_free = rf["rate_pct"] / 100.0
             from lib.valuation import implied_growth
             ig = implied_growth(ctx.current_pe, risk_free, erp=0.06, sensitivity=True)
         if ig.get("g_implied") is not None:
             lines.append(f"- 当前 PE(TTM)：**{ig['pe']}x**")
-            # F0-5 配套：y10_source 已含 FRED.DGS10 前缀时不再拼接（旧逻辑
-            # 输出 "FRED.DGS10 +FRED.DGS10" 重复标签）。
-            y10_label = (
-                y10_source
-                if not y10_source or (y10_source or "").startswith("FRED.DGS10")
-                else f"FRED.DGS10 +{y10_source}"
-            )
-            rf_label = f"{ig['risk_free_rate'] * 100:.2f}%（{y10_label}）"
+            rf_label = f"{ig['risk_free_rate'] * 100:.2f}%（{rf['label']}）"
             lines.append(f"- 10Y 国债收益率：**{rf_label}**")
             lines.append(f"- ERP 假设：**6%**（保守基准）")
             lines.append(f"- 折现率 r：**{ig['r'] * 100:.2f}%**" if ig.get("r") else "- 折现率：不可得")
@@ -3831,7 +3839,7 @@ def _section_4d_valuation_expectation(
                 lines.append("**[扩展激活 · 完整预期差]** 估值处于历史极端区间："
                              "请逐项验证 g_implied 假设、盈利增速拐点、以及行业相对估值（D-②）是否一致。")
         else:
-            if not risk_free_is_default:
+            if _ig_attempted:
                 lines.append(f"数据不足：[{ig.get('error', '隐含增长率计算失败')}]")
     else:
         lines.append("数据不足：[PE 非正或不可得，无法计算隐含增长率]")
@@ -3853,12 +3861,13 @@ def _section_4d_valuation_expectation(
             "不宜单独用隐含增长率做方向性结论。"
             f" {_D3_SOURCE_LABEL}"
             if ctx.current_pe and g_implied is not None else
-            ("本次无风险利率不可得，隐含增长率计算已暂停。"
-             if risk_free_is_default else "本次 PE 或 g_implied 不可得，戈登反推不适用。")
+            ("本次无风险利率不可得或口径不一致（详见 D-③），隐含增长率计算已暂停。"
+             if (rf["is_default"] or rf["is_wrong_currency"])
+             else "本次 PE 或 g_implied 不可得，戈登反推不适用。")
         )
     )
     d3_next_steps = ["核对 10Y 国债与 ERP 假设是否匹配当前宏观环境"]
-    if risk_free_is_default:
+    if rf["is_default"] or rf["is_wrong_currency"]:
         d3_next_steps.append("先取得同估值时点的实际利率，再复核隐含增长与 CAGR")
     else:
         d3_next_steps.extend([
@@ -3880,7 +3889,8 @@ def _section_4d_valuation_expectation(
         pass
     _d3_ok = ctx.current_pe is not None and ctx.current_pe > 0 and _d3_implied is not None
     _d3_s = (f"g_implied={_d3_implied * 100:.2f}%" if _d3_ok else
-             "无风险利率缺口，计算暂停" if risk_free_is_default else "数据不足")
+             "无风险利率缺口，计算暂停" if (rf["is_default"] or rf["is_wrong_currency"])
+             else "数据不足")
     status_rows.append(("D-③", "隐性预期差", _d3_ok, _d3_s))
 
     return lines

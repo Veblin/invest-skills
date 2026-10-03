@@ -189,14 +189,21 @@ def _dcf_try_wacc(
         beta_meta = _dcf_compute_beta(kline_data, benchmark=sealed_bench)
         beta = beta_meta["beta"]
 
-    # rf: user override > data source > default
+    # rf: user override > data source > default（C2-a：优先人民币口径 cn10y；
+    # 仅美元口径 → rf_is_wrong_currency，与默认值同走「暂停数值 DCF」闸门）
+    rf_is_wrong_currency = False
+    rf_label = ""
     if rf_override is not None:
         risk_free = rf_override
         risk_free_is_default = False
+        rf_label = f"用户指定 {rf_override * 100:.2f}%"
     else:
-        erp_data = market_structure.get("erp") or {}
-        risk_free_raw = erp_data.get("dgs10")
-        risk_free_is_default = risk_free_raw is None
+        from lib.financials import resolve_rf
+        rf = resolve_rf(market_structure.get("erp"))
+        risk_free_raw = rf["rate_pct"]
+        risk_free_is_default = rf["is_default"]
+        rf_is_wrong_currency = rf["is_wrong_currency"]
+        rf_label = rf["label"]
         risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
 
     # erp: user override > default 6%
@@ -206,7 +213,9 @@ def _dcf_try_wacc(
     if beta_meta.get("is_default"):
         missing.append(f"beta 使用默认值 1.0（{beta_meta.get('source', '未知')}）")
     if risk_free_is_default:
-        missing.append("无风险利率使用默认值 2.5%（10Y 国债不可得）[推测，待验证]")
+        missing.append("无风险利率使用默认值 2.5%（同币种 10Y 国债不可得）[推测，待验证]")
+    elif rf_is_wrong_currency:
+        missing.append(f"无风险利率仅有美元口径（{rf_label}），与 A 股折现率币种不一致")
     if erp_override is not None:
         missing.append(f"ERP 使用用户指定值 {erp_override*100:.1f}%")
     if rf_override is not None:
@@ -216,6 +225,8 @@ def _dcf_try_wacc(
 
     wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=erp, cost_of_debt=None)
     wacc_result["risk_free_is_default"] = risk_free_is_default
+    wacc_result["rf_is_wrong_currency"] = rf_is_wrong_currency
+    wacc_result["rf_label"] = rf_label
     wacc_result["beta"] = beta
     wacc_result["beta_is_default"] = beta_meta.get("is_default", False)
     wacc_result["beta_r_squared"] = beta_meta.get("r_squared")
@@ -425,10 +436,11 @@ def _section_dcf_valuation(
     lines.append("")
 
     # 利率缺口已知时无需为随后会暂停的估值实时抓取沪深300基准。
-    if (market_structure.get("erp") or {}).get("dgs10") is None:
+    _erp_now = market_structure.get("erp") or {}
+    if _erp_now.get("dgs10") is None and _erp_now.get("cn10y") is None:
         lines.append("关键输入采用默认值（无风险利率），暂停数值 DCF 三情景、概率权重和敏感性矩阵。")
         lines.append("🔍 待独立验证：取得同币种、同估值时点的利率后重算。")
-        lines.append("[来源: market_structure.erp.dgs10]")
+        lines.append("[来源: market_structure.erp.cn10y/dgs10]")
         return "\n".join(lines)
 
     from lib.report_snapshot import is_sealed
@@ -449,6 +461,9 @@ def _section_dcf_valuation(
     default_inputs = []
     if wacc_result.get("risk_free_is_default"):
         default_inputs.append("无风险利率")
+    elif wacc_result.get("rf_is_wrong_currency"):
+        # C2-a：美元口径 rf 与 A 股折现币种不一致——同默认值一样不得进入数值估值
+        default_inputs.append("无风险利率（美元口径≠A 股折现币种）")
     if wacc_result.get("beta_is_default"):
         default_inputs.append("Beta")
     if default_inputs:
@@ -459,7 +474,7 @@ def _section_dcf_valuation(
         if wacc_result.get("beta_is_default"):
             lines.append(f"- Beta 缺口：{wacc_result.get('beta_source') or '来源不可得'}。")
         missing_evidence = []
-        if wacc_result.get("risk_free_is_default"):
+        if wacc_result.get("risk_free_is_default") or wacc_result.get("rf_is_wrong_currency"):
             missing_evidence.append("同币种、同估值时点的利率")
         if wacc_result.get("beta_is_default"):
             missing_evidence.append("可复核的 Beta")
@@ -510,7 +525,7 @@ def _section_dcf_valuation(
         scenario_ev[sc] = ev
 
     wacc_label = f"{wacc*100:.2f}%"
-    rf_note = "10Y 国债取自 FRED/akshare"
+    rf_note = f"10Y 国债：{wacc_result.get('rf_label') or '来源不可得'}"
     # Beta 来源说明
     beta_val = wacc_result.get("beta")
     beta_source = wacc_result.get("beta_source", "")

@@ -145,16 +145,19 @@ def _v3_bull_bear_implied_growth(
             current_pe = float(pe_seq[-1])
     ig: dict[str, Any] = {}
     if current_pe is not None and current_pe > 0:
-        erp_data = market_structure.get("erp") or {}
-        risk_free_raw = erp_data.get("dgs10")
-        risk_free_is_default = risk_free_raw is None
-        risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
+        from lib.financials import resolve_rf
+        rf = resolve_rf(market_structure.get("erp"))  # C2-a：优先人民币口径
+        risk_free_is_default = rf["is_default"]
+        risk_free = 0.025 if risk_free_is_default else rf["rate_pct"] / 100.0
         from lib.valuation import implied_growth
         # V-2（v0.2.9）policy：与模块 4 D-③ 同源渲染 r±1pp 带（code-review max F9
         # ——5d 曾渲染裸点估计，与 D-③ 的"无 r 假设的单一 g* 不进报告"标准不一致）
         ig = implied_growth(current_pe, risk_free, erp=0.06, sensitivity=True)
         # review2 A-1：r 为默认猜测（FRED 不可得）时渲染层不得出精确带——同 D-③ F14 规则
         ig["rf_is_default"] = risk_free_is_default
+        # C2-a：美元口径 rf 同默认值处理——不进入方向解读（5c/5d 闸门）
+        ig["rf_is_wrong_currency"] = rf["is_wrong_currency"]
+        ig["rf_label"] = rf["label"]
     fin = _get_dim_data(dims, "financials")
     cagr, np_cagr = None, None
     if fin and isinstance(fin, list):
@@ -759,7 +762,9 @@ def _section_bull_bear(
             f"{_bull_bear_valuation_divergence_text(pe_pct, pe_zone, float(rev_yoy))}"
         )
     # divergence: implied growth vs actual CAGR
-    if ig.get("g_implied") is not None and not ig.get("rf_is_default") and ref_cagr is not None and ref_label:
+    if (ig.get("g_implied") is not None and not ig.get("rf_is_default")
+            and not ig.get("rf_is_wrong_currency")
+            and ref_cagr is not None and ref_label):
         divergence_count += 1
         g_pct = ig["g_implied"] * 100
         # 2026-09-19：原实现把「两个数字不同」直接写成「Bear 认为实际 CAGR 无法匹配，
@@ -791,6 +796,12 @@ def _section_bull_bear(
     lines.append("### 5d. 预期差")
     if ig.get("rf_is_default"):
         lines.append("- 无风险利率采用默认假设，暂停隐含增长比较和方向判断；须补同估值时点的实际利率。[来源: market_structure.erp 缺口]")
+    elif ig.get("rf_is_wrong_currency"):
+        lines.append(
+            f"- ⚠️ 无风险利率仅有美元口径（{ig.get('rf_label') or '美债 10Y'}），"
+            "与 A 股折现率币种不一致——暂停隐含增长比较和方向判断；"
+            "须补同币种人民币利率。[来源: market_structure.erp.cn10y 不可得]"
+        )
     elif ig.get("g_implied") is not None:
         g_pct = ig["g_implied"] * 100
         r_label = f"{ig.get('r', 0) * 100:.2f}%"

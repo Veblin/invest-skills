@@ -126,7 +126,7 @@ class TestParticipantBehaviorScan:
         text = build_participant_behavior_section({}, "600176", ms, _dims(holder_changes={"data": []}))
         assert "杠杆资金" in text
         assert "换手（散户活跃度代理）" in text
-        assert "期权情绪代理（PCR）" in text
+        assert "期权成交量情绪代理（PCR，认沽/认购比）" in text
 
     def test_turnover_row_uses_percentile_60d(self):
         """生产者 _ms_fetch_turnover 写入 percentile_60d（近60交易日分位），

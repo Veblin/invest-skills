@@ -95,6 +95,59 @@ def dedupe_by_end_date(rows: list[dict]) -> list[dict]:
     return out
 
 
+# --- C2-a：无风险利率解析（币种/来源）---
+
+_RF_NAME_BY_CURRENCY = {"CNY": "中国 10Y 国债", "USD": "美债 10Y"}
+
+
+def resolve_rf(erp_data: dict | None) -> dict:
+    """解析 ``market_structure.erp`` 的无风险利率（C2-a）。
+
+    优先人民币口径：``cn10y``（akshare 中国 10Y）→ CNY；回退 ``dgs10``（币种随
+    ``rf_currency``；旧封存快照缺该键时按来源字符串推断——FRED=USD、
+    bond_zh/CN10Y=CNY）。A 股报告语境下 USD 回退标 ``is_wrong_currency=True``，
+    消费者据此暂停方向解读（report-conventions §9.3）。全不可得 →
+    ``is_default=True``。
+
+    返回：rate_pct / source / currency / is_default / is_wrong_currency / label
+    （label 用于正文标注，如「美债 10Y，FRED.DGS10」）。
+    """
+    erp = erp_data or {}
+    cn = erp.get("cn10y")
+    if cn is not None:
+        src = str(erp.get("cn10y_source") or "akshare.bond_zh_us_rate")
+        return {
+            "rate_pct": float(cn),
+            "source": src,
+            "currency": "CNY",
+            "is_default": False,
+            "is_wrong_currency": False,
+            "label": f"中国 10Y 国债，{src}",
+        }
+    raw = erp.get("dgs10")
+    if raw is None:
+        return {"rate_pct": None, "source": "", "currency": "",
+                "is_default": True, "is_wrong_currency": False, "label": ""}
+    src = str(erp.get("y10_source") or "")
+    if not src:
+        combined = str(erp.get("source") or "")
+        src = combined.split("+", 1)[1] if "+" in combined else combined
+    currency = str(erp.get("rf_currency") or "")
+    if not currency:
+        up = src.upper()
+        currency = "USD" if "FRED" in up else (
+            "CNY" if ("CN10Y" in up or "BOND_ZH" in up) else "")
+    name = _RF_NAME_BY_CURRENCY.get(currency, "10Y 国债")
+    return {
+        "rate_pct": float(raw),
+        "source": src,
+        "currency": currency,
+        "is_default": False,
+        "is_wrong_currency": currency == "USD",
+        "label": f"{name}，{src or '来源未知'}",
+    }
+
+
 def gross_margin_annual_series(fin_rows: list[dict]) -> list[tuple[str, float]]:
     """Latest gross margin per calendar year, sorted ascending."""
     by_year: dict[str, float] = {}

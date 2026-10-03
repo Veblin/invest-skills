@@ -153,7 +153,7 @@ class TestValuationSummaryCache:
         monkeypatch.setattr("lib.valuation.valuation_summary", _fake_summary)
         monkeypatch.setattr(
             "lib.valuation.valuation_window_label",
-            lambda n: f"n={n}",
+            lambda n, *a, **k: f"n={n}",
         )
 
         dims = {

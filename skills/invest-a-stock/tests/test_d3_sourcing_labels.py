@@ -43,8 +43,13 @@ def _render_offline(collection: dict) -> str:
 
 
 def _with_sourced_rate(collection: dict) -> dict:
-    """来源标签测试聚焦可计算 D-③；缺利率路径由默认值闸门测试覆盖。"""
+    """来源标签测试聚焦可计算 D-③；缺利率路径由默认值闸门测试覆盖。
+
+    C2-a：A 股 D-③ 需人民币口径（cn10y）方可计算——仅美元口径会被
+    「币种不一致」闸门暂停（该降级路径由 test_v018 与 §9.3 测试覆盖）。
+    """
     collection.setdefault("market_structure", {}).setdefault("erp", {}).update({
+        "cn10y": 2.5, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)",
         "dgs10": 2.5, "source": "akshare+FRED.DGS10",
     })
     return collection

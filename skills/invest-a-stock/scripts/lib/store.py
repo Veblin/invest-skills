@@ -721,7 +721,11 @@ def extract_key_snapshot(raw: dict) -> dict:
         vs = sort_kline_asc(val_data)
         summary = valuation_summary(
             [r.get("pe_ttm") for r in vs], [r.get("pb") for r in vs],
-            window_label=valuation_window_label(len(vs)),
+            window_label=valuation_window_label(
+                len(vs),
+                vs[0].get("trade_date") if vs else None,
+                vs[-1].get("trade_date") if vs else None,
+            ),
         )
         pe, pb = summary.get("pe", {}), summary.get("pb", {})
         if pe.get("pct") is not None:

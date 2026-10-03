@@ -337,6 +337,25 @@ class TestV031MainJudgmentGate:
         )
         assert layer.status == "fail"
 
+    def test_style_mismatch_warns_against_profile(self, tmp_path):
+        """C2-c：正文自评风格 ≠ 同代 profile.style → warning（反例 600519 L329）。"""
+        text = (
+            "本报告由自动化引擎生成\n# 600519 贵州茅台 研究快照\n"
+            "**[风格匹配]** 中性：自评风格 成长 × 收益驱动 暂无法判定\n"
+        )
+        md = tmp_path / "a.final.md"
+        (tmp_path / "a.final.profile.json").write_text('{"style": "价值"}', encoding="utf-8")
+        layer = _check_stock_completion(md, text)
+        assert any(
+            f["id"] == "completion-style-mismatch" and f["severity"] == "warning"
+            for f in layer.details
+        )
+        # 一致 → 无该 finding
+        md2 = tmp_path / "b.final.md"
+        (tmp_path / "b.final.profile.json").write_text('{"style": "成长"}', encoding="utf-8")
+        layer2 = _check_stock_completion(md2, text)
+        assert not any(f["id"] == "completion-style-mismatch" for f in layer2.details)
+
 
 class TestQcReportUsesSharedImplementation:
     """A3 接线锁：`invest.py qc-report` 必须走共享版（含第 0 层各闸门），

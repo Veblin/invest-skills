@@ -17,6 +17,35 @@ from lib.style_match import (
 )
 
 
+class TestAssembleStyleExplicitParam:
+    """C2-c：report 路径 ``--style`` 优先于 user_style.json（档案一致性）。
+
+    反例：600519 profile=价值，但封存 style_match 自评「成长」（原实现只读
+    user_style.json，忽略 --style）。
+    """
+
+    def test_explicit_style_wins(self, monkeypatch):
+        from lib import style_match as sm
+
+        monkeypatch.setattr(sm, "_driver_from_collection", lambda c: "估值股息回归")
+        monkeypatch.setattr(sm, "_journal_driver", lambda s: None)
+        monkeypatch.setattr(sm, "load_style", lambda: "成长")
+        out = sm.assemble_style_match({}, "600519", style="价值")
+        assert out is not None
+        assert out["style"] == "价值"
+        assert out["state"] == "匹配"
+
+    def test_fallback_to_archive_when_style_absent(self, monkeypatch):
+        from lib import style_match as sm
+
+        monkeypatch.setattr(sm, "_driver_from_collection", lambda c: "估值股息回归")
+        monkeypatch.setattr(sm, "_journal_driver", lambda s: None)
+        monkeypatch.setattr(sm, "load_style", lambda: "价值")
+        out = sm.assemble_style_match({}, "600519")
+        assert out is not None
+        assert out["style"] == "价值"
+
+
 class TestMatchStyle:
     """① 三态样本各断言。"""
 

@@ -32,7 +32,11 @@ class TestScenarioEvidenceLevel:
             ]),
         }
         collection = {
-            "market_structure": {"erp": {"dgs10": 2.65, "source": "FRED.DGS10"}},
+            # C2-a：A 股 DCF 用人民币口径（cn10y 优先）；仅美元口径会被闸门暂停
+            "market_structure": {"erp": {
+                "cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)",
+                "dgs10": 2.65, "source": "FRED.DGS10",
+            }},
         }
         text = _section_dcf_valuation(dims, collection, "000001")
 

@@ -100,13 +100,20 @@ class TestBandOptions:
         assert a["p10"] == pytest.approx(srt[int(len(srt) * 0.10)], abs=1e-9)
 
     def test_band_window_label_rule(self):
-        """窗口标签规则与正文一致：1250+ → 近5年；≥250 → 近N年；否则上市以来（数据有限）。"""
+        """窗口标签规则：优先按真实日期跨度取整年（C2-b）；缺日期回退行数规则。"""
         from lib.html_charts import window_label
 
+        # 无日期回退（旧调用/test 夹具路径）
         assert window_label(1200) == "近4年"
         assert window_label(1250) == "近5年"
         assert window_label(300) == "近1年"
         assert window_label(60) == "上市以来（数据有限）"
+        # 日期优先：1211 行 ≈ 4.98 年 → 「近5年」（原反例：行数规则误标「近4年」）
+        assert window_label(1211, "2021-10-08", "2026-09-30") == "近5年"
+        assert window_label(600, "2024-01-02", "2026-01-02") == "近2年"
+        assert window_label(300, "2026-01-02", "2026-03-02") == "上市以来（数据有限）"
+        # 无分隔 yyyymmdd 同样可解析
+        assert window_label(1211, "20211008", "20260930") == "近5年"
 
 
 class TestPctClamp:

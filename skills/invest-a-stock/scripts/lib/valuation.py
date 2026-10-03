@@ -181,15 +181,18 @@ def valuation_summary(
     return result
 
 
-def valuation_window_label(n_trading_days: int) -> str:
+def valuation_window_label(
+    n_trading_days: int, first_date: Any = None, last_date: Any = None,
+) -> str:
     """估值分位窗口描述（A 股约 242 交易日/年）。
 
     B3-R C-4 去重：委托 html_charts.window_label（唯一实现）——本函数保留
     为 BC 别名（store/valuation_calc/render_utils/test_redundancy 引用）。
+    C2-b：可选传入首尾交易日——按真实日期跨度定标签（首选）；缺省回退行数规则。
     """
     from .html_charts import window_label as _html_window_label
 
-    return _html_window_label(n_trading_days)
+    return _html_window_label(n_trading_days, first_date, last_date)
 
 
 # 中位数统一在 skills/lib/stats.py（共用库提升）；别名保留 BC

@@ -3209,15 +3209,18 @@ def _ms_fetch_akshare_cn10y_series() -> list[tuple[str, float]]:
     return out
 
 
-def _ms_fetch_y10_series(config: dict) -> tuple[list[tuple[str, float]], str]:
-    """10Y 国债收益率序列：FRED DGS10 优先，akshare 中国 10Y 回退。"""
+def _ms_fetch_y10_series(config: dict) -> tuple[list[tuple[str, float]], str, str]:
+    """10Y 国债收益率序列：FRED DGS10（USD）优先，akshare 中国 10Y（CNY）回退。
+
+    返回 ``(series, source, currency)``（C2-a：消费端须按币种标注/降级）。
+    """
     fred = _ms_fetch_fred_dgs10_series(config)
     if fred:
-        return fred, "FRED.DGS10"
+        return fred, "FRED.DGS10", "USD"
     cn = _ms_fetch_akshare_cn10y_series()
     if cn:
-        return cn, "akshare.bond_zh_us_rate"
-    return [], ""
+        return cn, "akshare.bond_zh_us_rate(CN10Y)", "CNY"
+    return [], "", ""
 
 
 def _ms_fetch_fred_dgs10_series(config: dict) -> list[tuple[str, float]]:
@@ -3281,9 +3284,20 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
                   start_date=_days_ago(1825), end_date=_today())
     if df is None or df.empty:
         return None
-    dgs10_series, y10_source = _ms_fetch_y10_series(config)
+    dgs10_series, y10_source, y10_currency = _ms_fetch_y10_series(config)
     dgs10_by_date = {d: v for d, v in dgs10_series}
     latest_dgs10 = dgs10_series[-1][1] if dgs10_series else None
+    # C2-a：人民币无风险利率（A 股 D-③/DCF/风险行首选）——CN 分支复用当前
+    # 序列（零额外调用）；USD 分支额外取 akshare 中国 10Y，失败不阻断，
+    # 消费端按 ``is_wrong_currency`` 降级（report-conventions §9.3）。
+    cn10y_series: list[tuple[str, float]] = []
+    cn10y_source = ""
+    if y10_currency == "CNY":
+        cn10y_series, cn10y_source = dgs10_series, y10_source
+    else:
+        cn10y_series = _ms_fetch_akshare_cn10y_series()
+        if cn10y_series:
+            cn10y_source = "akshare.bond_zh_us_rate(CN10Y)"
 
     rows = df.sort_values("trade_date").to_dict("records")
     erp_hist: list[float] = []
@@ -3309,6 +3323,11 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
         "raw": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "dgs10": round(latest_dgs10, 3) if latest_dgs10 is not None else None,
+        "rf_currency": y10_currency,
+        "y10_source": y10_source,
+        "cn10y": round(cn10y_series[-1][1], 3) if cn10y_series else None,
+        "cn10y_source": cn10y_source,
+        "cn10y_date": cn10y_series[-1][0] if cn10y_series else None,
         "erp_days": erp_days,
         "partial": partial,
         "index": _HS300_CODE,

@@ -203,7 +203,7 @@ def _scan_rows(
         stale = bool(expected and pcr_date and pcr_date < expected)
         date_note = f"（截至 {pcr_date}{'；非当期值' if stale else ''}）" if pcr_date else "（日期未封存）"
         rows.append({
-            "role": "期权情绪代理（PCR）",
+            "role": "期权成交量情绪代理（PCR，认沽/认购比）",
             "signal": f"认沽认购比 {pcr.get('ratio')}{date_note}",
             "source": str(pcr.get("source") or "market_structure.put_call_ratio"),
         })

@@ -857,7 +857,10 @@ def _extract_valuation_data(dims: dict) -> dict:
     ps_seq = [r.get("ps_ttm") or r.get("ps") for r in vs]
     dv = next((r.get("dv_ratio") for r in reversed(vs) if r.get("dv_ratio") is not None), None)
 
-    wl = window_label(len(vs))
+    wl = window_label(
+        len(vs), vs[0].get("trade_date") if vs else None,
+        vs[-1].get("trade_date") if vs else None,
+    )
 
     summary = valuation_summary(pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv, window_label=wl)
     result["window_label"] = wl

@@ -373,7 +373,11 @@ def _v3_load_valuation_summary(
             if r.get("dv_ratio") is not None:
                 dv_ratio = _safe_num(r.get("dv_ratio"))
                 break
-        window_label = valuation_window_label(len(val_sorted))
+        window_label = valuation_window_label(
+            len(val_sorted),
+            val_sorted[0].get("trade_date") if val_sorted else None,
+            val_sorted[-1].get("trade_date") if val_sorted else None,
+        )
         summary = valuation_summary(
             pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv_ratio, window_label=window_label,
         )

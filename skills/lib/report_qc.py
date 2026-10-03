@@ -432,6 +432,26 @@ def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
                 "message": f"{kind} 依据节为空或仅声明无逻辑链，不能作为完成的研究交付",
             })
 
+    # C2-c：档案-正文风格一致性（warning）——正文自评风格须与同代 profile 的
+    # ``--style`` 档案一致（反例：600519 profile=价值 vs 正文自评「成长」）。
+    profile_path = report_path.with_suffix(".profile.json")
+    if profile_path.is_file():
+        try:
+            import json as _json
+            prof_style = (_json.loads(profile_path.read_text(encoding="utf-8"))
+                          or {}).get("style")
+        except Exception:
+            prof_style = None
+        m_style = re.search(r"自评风格\s*([^\s×（(]+)", text)
+        if prof_style and m_style and m_style.group(1) != prof_style:
+            layer.findings_count += 1
+            layer.details.append({
+                "id": "completion-style-mismatch",
+                "severity": "warning",
+                "message": (f"正文自评风格「{m_style.group(1)}」与同代档案风格「{prof_style}」"
+                            "不一致——正文风格表述须与档案/引擎 style_match 一致（C2-c）"),
+            })
+
     if layer.findings_count:
         layer.status = "fail"
     elif is_automated_snapshot or any(

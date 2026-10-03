@@ -911,8 +911,11 @@ def calc_historical_percentile(
         valuation_summary as _lib_valuation_summary,
         valuation_window_label,
     )
+    _dates = [str(r.get("trade_date") or "") for r in daily_rows if r.get("trade_date")]
+    _first_d, _last_d = (min(_dates), max(_dates)) if _dates else (None, None)
     vs = _lib_valuation_summary(
-        pe_seq, pb_seq, window_label=valuation_window_label(total_daily))
+        pe_seq, pb_seq,
+        window_label=valuation_window_label(total_daily, _first_d, _last_d))
 
     result: dict[str, Any] = {"n_samples": total_daily, "warnings": list(vs.get("warnings") or [])}
 

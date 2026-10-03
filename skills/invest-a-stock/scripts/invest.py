@@ -1419,7 +1419,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not fixed_input:
         try:
             from lib.style_match import assemble_style_match
-            result["style_match"] = assemble_style_match(result, args.symbol)
+            # C2-c：本次 --style 优先于 user_style.json——与 profile 侧车同源
+            result["style_match"] = assemble_style_match(
+                result, args.symbol, style=getattr(args, "style", None))
         except Exception:  # 装配失败不阻断报告
             pass
         # 恢复的快照即使在报告阶段装配本地派生字段，原始采集窗口也不延伸。

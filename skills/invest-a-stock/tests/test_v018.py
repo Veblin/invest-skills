@@ -761,7 +761,11 @@ class TestSectionDcfValuation:
             ]),
         }
         collection = {
-            "market_structure": {"erp": {"dgs10": 2.65, "source": "FRED.DGS10"}},
+            # C2-a：A 股 DCF 用人民币口径（cn10y 优先；dgs10 仅作跨币种参考）
+            "market_structure": {"erp": {
+                "cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)",
+                "dgs10": 5.29, "source": "tushare.index_dailybasic+FRED.DGS10",
+            }},
         }
         text = _section_dcf_valuation(dims, collection, "000001")
 
@@ -782,6 +786,20 @@ class TestSectionDcfValuation:
         assert "WACC" in text
         assert "永续增长率" in text
         _check_no_forbidden_words(text)
+
+    def test_usd_only_rf_pauses_numeric_dcf(self):
+        """C2-a：仅美元口径 rf（A 股语境）与默认值同走暂停闸门。"""
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=1.1),
+            "research": _make_research_dim(),
+        }
+        collection = {"market_structure": {"erp": {"dgs10": 5.29, "source": "FRED.DGS10"}}}
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        assert "关键输入采用默认值（无风险利率（美元口径≠A 股折现币种））" in text
+        assert "| 情景 | 概率权重 |" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
 
     @pytest.mark.parametrize(
         ("beta", "erp", "missing"),
