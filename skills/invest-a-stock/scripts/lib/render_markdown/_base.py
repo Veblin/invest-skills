@@ -514,36 +514,33 @@ def _render_ma_system(collection: dict[str, Any]) -> list[str]:
     # 缺陷5: latest_close 可为 None/NaN（technical.latest_close）。有限性检查必须在
     # 比较之前——None 参与 >= 抛 TypeError（逃出唯一的 try/except 中止整个渲染），
     # NaN 参与比较恒 False（四根 MA 全误标「现价下方」+ 渲染 '现价 nan'）。
-    if closes is not None:
-        try:
-            closes_finite = math.isfinite(closes)
-        except TypeError:
-            closes_finite = False
-        if not closes_finite:
-            closes = None
+    # R14（2026-10-05）：判据与 HTML（render_html MA pill/MA250）统一走
+    # `render_utils.finite_price`（None/NaN/±inf/≤0 → 不可得）——此前两侧对
+    # 0 值与 NaN 的处理不同，同一快照可给出不同方向标注。
+    closes = _ru.finite_price(closes)
     ma = t.get("ma") or {}
     latest = {}
     for p in ("5", "10", "20", "60"):
         vals = ma.get(p) or []
-        v = vals[-1] if vals and vals[-1] is not None else None
-        if v is not None:
-            try:
-                v_finite = math.isfinite(v)
-            except TypeError:
-                v_finite = False
-            if not v_finite:
-                v = None
-        latest[p] = v
+        latest[p] = _ru.finite_price(vals[-1]) if vals else None
     parts = []
     for p in ("5", "10", "20", "60"):
         v = latest.get(p)
         if v is None:
             parts.append(f"MA{p}: —")
             continue
+        # R7（2026-10-04 独立复检）：原括注「（收盘价上方/下方）」直接附在 MA
+        # 值后，读者按 MA 为主体理解（「MA 在收盘价上方」），与实际比较方向
+        # 相反（代码判据为收盘价 ≥/＜ MA；两案例 8 个标签全部相反）。改为
+        # 显式主语「收盘价在 MA{p} 上方/下方」，相等与不可得分列。
         if closes is None:
             pos = "（收盘价不可得）"
+        elif _ru.prices_equal(closes, v):
+            pos = f"（收盘价与 MA{p} 持平）"
+        elif closes > v:
+            pos = f"（收盘价在 MA{p} 上方）"
         else:
-            pos = "（收盘价上方）" if closes >= v else "（收盘价下方）"
+            pos = f"（收盘价在 MA{p} 下方）"
         parts.append(f"MA{p}={v:.2f}{pos}")
     label = (t.get("alignment") or {}).get("trend_label", "—")
     # 口径标注（review P1）：本表比较用的是**日线收盘价**，与模块 1 的实时价常

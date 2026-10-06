@@ -359,12 +359,14 @@ def scan_market_risks(
     nb_v = safe_float(nb.get("net_sum_10d"))
     if nb_v is not None:
         nb_trig = nb_v < -500_000_000
-        signals.append(_signal("northbound_outflow", "北向持续流出", "market",
+        # R15 round-8：信号名只描述窗口读数——触发量是近 10 日累计净额，
+        # 「持续流出」是对逐日形态的外推（累计和为负不代表逐日持续），旧名撤下。
+        signals.append(_signal("northbound_outflow", "北向资金近 10 日净流出", "market",
                                  triggered=nb_trig, severity="低",
                                  detail=f"近 10 日北向净额 {nb_v / ONE_PER_YI:.2f} 亿元"
                                  + ("（净流出超 5 亿）" if nb_trig else ""), auto=True))
     else:
-        signals.append(_signal("northbound_outflow", "北向持续流出", "market",
+        signals.append(_signal("northbound_outflow", "北向资金近 10 日净流出", "market",
                                  triggered=False, severity=None, detail="北向资金数据不足",
                                  auto=True, status="insufficient_data"))
 

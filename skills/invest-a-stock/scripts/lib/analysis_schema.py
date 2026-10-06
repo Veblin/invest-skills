@@ -15,12 +15,20 @@ from typing import Any
 
 from lib.md_subset import MarkdownSubsetError, render_markdown
 
+# 共享四维标签语法（R12 round-4）：掩码规则唯一来源在 skills/lib/evidence_tags.py，
+# 禁止在此复制正则。经既有 _invest_path shim 保证 skills/lib 在 sys.path。
+from ._invest_path import ensure_skills_lib_on_path  # noqa: E402
+
+ensure_skills_lib_on_path()
+
+from evidence_tags import EVIDENCE_LABEL_RE, mask_four_dim_tags  # noqa: E402
+
 REQUIRED_FIELDS = ("module", "title", "facts_md", "analysis_md", "evidence_tag", "position")
-MAX_LEN = {"module": 64, "title": 128, "facts_md": 20_000, "analysis_md": 40_000, "evidence_tag": 32, "position": 64}
+MAX_LEN = {"module": 64, "title": 128, "facts_md": 20_000, "analysis_md": 40_000, "evidence_tag": 128, "position": 64}
 POSITION_ALLOWED = {"overview", "valuation", "financials", "technicals", "northbound",
                     "holders", "events", "refs", "research", "conclusion", "analysis",
                     "bull_chain"}
-_EVIDENCE_RE = re.compile(r"^([A-Da-d]{1,2}|[Ll][1-4])")
+_EVIDENCE_RE = EVIDENCE_LABEL_RE
 
 # --- 事实绑定（v0.3.1 #4）------------------------------------------------------
 # 缺陷记录：此前 analysis.json **无 fact_id 字段**，段内数字未经任何来源校验
@@ -68,6 +76,10 @@ _MASKED_STRUCTURAL_RE = re.compile(
     r"|\d{1,2}:\d{2}"            # 时刻：09:30
     r"|v\d+(?:\.\d+)+"           # v0.3.1
     r"|\d+(?:\.\d+){2,}"         # 0.3.1（无 v 前缀）
+    # 注：SOP-EV `[证据强度: …]` 标签跨度**不在此列**——掩码规则唯一来源在
+    # skills/lib/evidence_tags.py（R12 round-4）：只有完全匹配合法四维语法的
+    # 标签被掩码；旧实现 `\[证据强度[:：][^\[\]]{0,80}\]` 会整段掩掉任意内容
+    # （`[证据强度: ✅ 公司盈利增长999%]` 的 999 因此逃过绑定校验）。
 )
 
 # URL 内的数字不要求绑定 fact——但**只豁免 URL 自身跨度内的 token**。
@@ -341,8 +353,10 @@ def _validate_fact_numbers(sec: dict) -> list[str]:
     for field in ("facts_md", "analysis_md"):
         raw = str(sec.get(field) or "")
         # 等长空格替换 → 各 token 的 span 与原文一致，_is_exempt_num 的
-        # 前后文判断语义不变
-        text = _MASKED_STRUCTURAL_RE.sub(lambda m: " " * len(m.group(0)), raw)
+        # 前后文判断语义不变。先掩**完全合法**的四维标签（R12：非法标签
+        # 原样保留，其中的数字照常要求绑定），再掩其余结构形态。
+        text = mask_four_dim_tags(raw)
+        text = _MASKED_STRUCTURAL_RE.sub(lambda m: " " * len(m.group(0)), text)
         for m in _NUM_TOKEN_RE.finditer(text):
             if _is_exempt_num(text, m) or _fact_value_matches(m.group(0), facts):
                 continue
@@ -370,8 +384,8 @@ def _validate_one(sec: dict) -> list[str]:
             errs.append(f"len:{k}")
     if errs:
         return errs
-    if not _EVIDENCE_RE.match(sec["evidence_tag"]):
-        errs.append("evidence_tag 须为证据等级（A/B/C/D 或 L1-L4）或四维标签首字标记")
+    if not _EVIDENCE_RE.fullmatch(sec["evidence_tag"].strip()):
+        errs.append("evidence_tag 须为等级（A/B/C/D 或 L1-L4），可附完整四维序列（强度、来源、时效、交叉）")
     if sec["position"] not in POSITION_ALLOWED:
         errs.append(f"position 不在允许集合: {sec['position']}")
     if not errs:

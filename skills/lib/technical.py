@@ -22,6 +22,11 @@ from lib.nums import safe_float  # noqa: E402 — canonical（None/NaN/±inf →
 
 # ---- 内部辅助 ----
 
+def prices_equal(left: float, right: float) -> bool:
+    """有限价格/均线的相等判定，消除求和舍入误差；不是按显示精度取整。"""
+    return math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9)
+
+
 def _require_len(rows: list[dict], n: int, indicator: str) -> str | None:
     """数据不足时返回描述文本，否则返回 None。"""
     if len(rows) < n:
@@ -585,7 +590,8 @@ def compute(rows: list[dict]) -> dict[str, Any]:
         slope = slopes.get(p)
         if latest_ma is not None and slope is not None:
             direction = f"斜率{'+' if slope >= 0 else ''}{slope:.1f}%"
-            pos = "上方" if closes[-1] > latest_ma else ("下方" if closes[-1] < latest_ma else "附近")
+            pos = ("附近" if prices_equal(closes[-1], latest_ma)
+                   else "上方" if closes[-1] > latest_ma else "下方")
             trend_sentences.append(f"MA{p}={latest_ma:.2f}（{direction}），收盘价位于其{pos}")
         elif latest_ma is not None:
             trend_sentences.append(f"MA{p}={latest_ma:.2f}，斜率数据不足")

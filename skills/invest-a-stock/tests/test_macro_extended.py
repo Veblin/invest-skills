@@ -416,8 +416,8 @@ class TestGlobalConclusion:
         from lib.macro import _global_conclusion
 
         # 美10Y 高位 或 实际利率 高实际利率，任一命中即出结论（同一条规则只出一条）
-        assert _global_conclusion({"dgs10": {"signal": "高位"}}) == "海外利率高位，外部估值压制未解除"
-        assert _global_conclusion({"dfii10": {"signal": "高实际利率"}}) == "海外利率高位，外部估值压制未解除"
+        assert _global_conclusion({"dgs10": {"signal": "高位"}}) == "海外利率高位（外部估值压制为候选线索，未经本报告验证）"
+        assert _global_conclusion({"dfii10": {"signal": "高实际利率"}}) == "海外利率高位（外部估值压制为候选线索，未经本报告验证）"
         both = _global_conclusion({"dgs10": {"signal": "高位"},
                                    "dfii10": {"signal": "高实际利率"}})
         assert both.count("；") == 0, f"同一规则重复输出：{both}"
@@ -483,7 +483,7 @@ class TestGlobalConclusion:
         assert first.startswith("国内：") and "→偏宽松" in first
         assert first.endswith("|"), "海外段存在时首行须以 ASCII | 结尾（TestMacroLabel 契约）"
         assert second.startswith("  海外：")
-        assert "→海外利率高位，外部估值压制未解除" in second
+        assert "→海外利率高位（外部估值压制为候选线索，未经本报告验证）" in second
 
 
 # ---------------------------------------------------------------------------

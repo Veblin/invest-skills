@@ -417,6 +417,133 @@ def test_report_rejects_profile_different_from_draft_before_collect(
     assert "初稿与本次报告的研究档案不一致" in capsys.readouterr().err
 
 
+def test_fixed_input_explicit_style_reassembles_render_copy(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3（2026-10-04 独立复检）：固定快照 + 显式 --style 时，渲染副本的
+    style_match 必须按本次档案重装配（与 profile 侧车同源）。
+
+    反例：`report <symbol> --collection-id … --style 价值` 曾 exit 0 但首部/
+    profile=价值、正文自评=成长（装配点被 `if not fixed_input` 排除）。
+    封存体不写回、不改哈希——断言只看渲染副本；未传 --style 时保持封存值。
+    """
+    import invest
+    from lib import style_match
+
+    sealed = {
+        **_RENDER_COLLECTION,
+        "style_match": {"style": "成长", "driver": None, "journal_driver": None,
+                        "state": "中性", "reason": "成长 × 未定义映射",
+                        "hint": None},
+    }
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: dict(sealed))
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+
+    captured: dict = {}
+
+    def _capture(collection, *_a, **_k):
+        captured["collection"] = collection
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", _capture)
+
+    rc = invest.cmd_report(_report_args(collection_id=173, style="价值", emit="compact"))
+    assert rc == 0
+    assert captured["collection"]["style_match"]["style"] == "价值"
+
+    captured.clear()
+    rc = invest.cmd_report(_report_args(collection_id=173, emit="compact"))
+    assert rc == 0
+    assert captured["collection"]["style_match"]["style"] == "成长"  # 封存值保持
+
+
+def test_fixed_input_style_does_not_mutate_sealed_collection(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 二轮（2026-10-04 独立复检）：风格重装配只作用于渲染视图，
+    封存体对象本身不被改写（渲染视图为浅拷贝）。"""
+    import invest
+    from lib import style_match
+
+    sealed_style = {"style": "成长", "driver": None, "journal_driver": None,
+                    "state": "中性", "reason": "成长 × 未定义映射", "hint": None}
+    sealed = {**_RENDER_COLLECTION, "style_match": dict(sealed_style)}
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: sealed)
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+
+    captured: dict = {}
+
+    def _capture(collection, *_a, **_k):
+        captured["collection"] = collection
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", _capture)
+    rc = invest.cmd_report(_report_args(collection_id=173, style="价值", emit="compact"))
+    assert rc == 0
+    assert captured["collection"]["style_match"]["style"] == "价值"
+    assert captured["collection"] is not sealed          # 视图是副本
+    assert sealed["style_match"] == sealed_style          # 封存体未改写
+
+
+def test_fixed_input_json_export_keeps_sealed_hash(
+        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """R3 二轮：`--emit json` 导出**原封存体**，digest 与 `_meta.report_input_hash`
+    自洽（反例：一轮实现改 result.style_match → 导出 digest 与哈希失配）。"""
+    import invest
+    from lib import style_match
+    from lib.report_snapshot import digest
+
+    sealed = {
+        **_RENDER_COLLECTION,
+        "style_match": {"style": "成长", "driver": None, "journal_driver": None,
+                        "state": "中性", "reason": "成长 × 未定义映射", "hint": None},
+    }
+    sealed_hash = digest({**sealed, "_meta": {}})
+    sealed["_meta"] = {"report_input_hash": sealed_hash}
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: sealed)
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda *_a, **_k: None)
+
+    rc = invest.cmd_report(_report_args(collection_id=173, style="价值", emit="json"))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    meta = payload["_meta"]
+    recomputed = digest({k: v for k, v in payload.items() if k != "_meta"}
+                        | {"_meta": {k: v for k, v in meta.items()
+                                     if k != "report_input_hash"}})
+    assert meta["report_input_hash"] == sealed_hash == recomputed
+    assert payload["style_match"]["style"] == "成长"   # 导出=封存体，非渲染视图
+
+
+def test_fixed_input_default_style_follows_profile_archive(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 二轮：未显式 --style 时，视图风格与 profile 侧车同源回落
+    user_style.json——避免「profile=价值 而正文自评=成长」的缺省冲突。"""
+    import invest
+    from lib import style_match
+
+    sealed = {**_RENDER_COLLECTION,
+              "style_match": {"style": "成长", "driver": None, "journal_driver": None,
+                              "state": "中性", "reason": "成长 × 未定义映射",
+                              "hint": None}}
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: dict(sealed))
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+    monkeypatch.setattr(style_match, "load_style", lambda: "价值")
+
+    captured: dict = {}
+
+    def _capture(coll, *_a, **_k):
+        captured["c"] = coll
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", _capture)
+    rc = invest.cmd_report(_report_args(collection_id=173, emit="compact"))
+    assert rc == 0
+    assert captured["c"]["style_match"]["style"] == "价值"
+
+
 def test_resume_without_new_collection_preserves_original_end_time(
         monkeypatch: pytest.MonkeyPatch) -> None:
     import invest

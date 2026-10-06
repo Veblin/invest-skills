@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import Any
 
@@ -99,35 +100,107 @@ def dedupe_by_end_date(rows: list[dict]) -> list[dict]:
 
 _RF_NAME_BY_CURRENCY = {"CNY": "中国 10Y 国债", "USD": "美债 10Y"}
 
+_RF_INVALID_REASON = {
+    "非有限数值": "非有限数值(NaN/Inf)",
+    "不可解析": "不可解析",
+    "布尔值": "布尔值",
+}
+
+
+def _finite_rate(raw: object) -> tuple[float | None, str]:
+    """R11：利率输入 → 有限数值，否则 (None, 原因)。
+
+    合法读数含 **0 与负值**（负利率是真实市场状态，不得按无效处理）；拒绝
+    布尔、NaN/±Infinity 与无法解析为数值的字符串（反例：`"not-a-rate"`
+    曾被 float() 直接抛 ValueError 崩掉报告链）。可解析的数值字符串
+    （如 `"1.68"`）按数值接受。
+    """
+    if raw is None:
+        return None, ""
+    if isinstance(raw, bool):
+        return None, "布尔值"
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return None, "不可解析"
+    if not math.isfinite(value):
+        return None, "非有限数值"
+    return value, ""
+
 
 def resolve_rf(erp_data: dict | None) -> dict:
     """解析 ``market_structure.erp`` 的无风险利率（C2-a）。
 
     优先人民币口径：``cn10y``（akshare 中国 10Y）→ CNY；回退 ``dgs10``（币种随
     ``rf_currency``；旧封存快照缺该键时按来源字符串推断——FRED=USD、
-    bond_zh/CN10Y=CNY）。A 股报告语境下 USD 回退标 ``is_wrong_currency=True``，
-    消费者据此暂停方向解读（report-conventions §9.3）。全不可得 →
-    ``is_default=True``。
+    bond_zh/CN10Y=CNY）。A 股报告语境下 USD 回退标 ``is_wrong_currency=True``；
+    来源与币种都无法确认时标 ``is_currency_unconfirmed=True``。**只有确认同
+    币种（CNY）且值为有限数才准入方向解读**（``rf_usable``）。全不可得/全无效
+    → ``is_default=True``。
 
-    返回：rate_pct / source / currency / is_default / is_wrong_currency / label
-    （label 用于正文标注，如「美债 10Y，FRED.DGS10」）。
+    返回：rate_pct / source / currency / is_default / is_wrong_currency /
+    is_currency_unconfirmed / rf_usable / label（label 用于正文标注，如
+    「美债 10Y，FRED.DGS10」）/ invalid_inputs（存在但无效的字段名）/
+    degraded_note（降级说明；无效输入被忽略时非空，供消费者如实披露）。
+
+    R1（2026-10-04 独立复检）：原实现下 ``resolve_rf({'dgs10': 5.29})``（无
+    来源/币种线索）返回 currency 空且 is_wrong_currency=False → 消费者按
+    「可用」继续隐含增长方向解读。修正为「确认才准入」；零值利率（如
+    cn10y=0.0）是合法读数，不按缺失处理。
+
+    R11（2026-10-04 二轮复检）：非有限/不可解析输入曾被放行或直接抛错——
+    `cn10y=NaN/Infinity` 走 CNY 可用分支，核心变量产出
+    「g_implied nan%/inf%」；`cn10y="not-a-rate"` 抛 ValueError。现改为
+    「有限数值才准入」：cn10y 无效 → 回退 dgs10（其有效性同样校验）；
+    全部无效 → is_default=True；`invalid_inputs/degraded_note` 如实记录
+    降级原因，标签与消费者消息随附披露。
     """
     erp = erp_data or {}
+    invalid: list[str] = []
     cn = erp.get("cn10y")
     if cn is not None:
-        src = str(erp.get("cn10y_source") or "akshare.bond_zh_us_rate")
-        return {
-            "rate_pct": float(cn),
-            "source": src,
-            "currency": "CNY",
-            "is_default": False,
-            "is_wrong_currency": False,
-            "label": f"中国 10Y 国债，{src}",
-        }
+        value, reason = _finite_rate(cn)
+        if value is not None:
+            src = str(erp.get("cn10y_source") or "akshare.bond_zh_us_rate")
+            return {
+                "rate_pct": value,
+                "source": src,
+                "currency": "CNY",
+                "is_default": False,
+                "is_wrong_currency": False,
+                "is_currency_unconfirmed": False,
+                "rf_usable": True,
+                "invalid_inputs": [],
+                "degraded_note": "",
+                "label": f"中国 10Y 国债，{src}",
+            }
+        invalid.append("cn10y")  # 存在但无效 → 回退 dgs10，原因随附
     raw = erp.get("dgs10")
+    dgs_reason = ""
+    if raw is not None:
+        dgs_value, dgs_reason = _finite_rate(raw)
+        if dgs_value is None:
+            invalid.append("dgs10")
+            raw = None
+        else:
+            raw = dgs_value
     if raw is None:
+        note = ""
+        if invalid:
+            reasons = []
+            if "cn10y" in invalid and cn is not None:
+                _, r_cn = _finite_rate(cn)
+                reasons.append(f"cn10y {_RF_INVALID_REASON.get(r_cn, r_cn)}")
+            if "dgs10" in invalid:
+                reasons.append(f"dgs10 {_RF_INVALID_REASON.get(dgs_reason, dgs_reason)}")
+            note = "快照无风险利率值无效已忽略（" + "；".join(reasons) + "）"
         return {"rate_pct": None, "source": "", "currency": "",
-                "is_default": True, "is_wrong_currency": False, "label": ""}
+                "is_default": True, "is_wrong_currency": False,
+                "is_currency_unconfirmed": False, "rf_usable": False,
+                "invalid_inputs": invalid, "degraded_note": note, "label": ""}
     src = str(erp.get("y10_source") or "")
     if not src:
         combined = str(erp.get("source") or "")
@@ -138,13 +211,24 @@ def resolve_rf(erp_data: dict | None) -> dict:
         currency = "USD" if "FRED" in up else (
             "CNY" if ("CN10Y" in up or "BOND_ZH" in up) else "")
     name = _RF_NAME_BY_CURRENCY.get(currency, "10Y 国债")
+    note = ""
+    if invalid:  # 走到这里 invalid 只可能是 cn10y（dgs10 无效时 raw 已置 None）
+        _, r_cn = _finite_rate(cn)
+        note = f"快照 cn10y 无效已忽略（{_RF_INVALID_REASON.get(r_cn, r_cn)}）"
+    label = f"{name}，{src or '来源未知'}"
+    if note:
+        label += f"（{note}）"
     return {
-        "rate_pct": float(raw),
+        "rate_pct": raw,
         "source": src,
         "currency": currency,
         "is_default": False,
         "is_wrong_currency": currency == "USD",
-        "label": f"{name}，{src or '来源未知'}",
+        "is_currency_unconfirmed": currency not in ("CNY", "USD"),
+        "rf_usable": currency == "CNY",
+        "invalid_inputs": invalid,
+        "degraded_note": note,
+        "label": label,
     }
 
 

@@ -4,12 +4,13 @@ from __future__ import annotations
 import html as _html_mod
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
-from lib.technical import sort_kline_asc
+from lib.technical import prices_equal, sort_kline_asc
 
 from .shared_dates import (normalize_end_date as _norm_ed,
                            parse_date,
@@ -29,6 +30,23 @@ _EASTMONEY_BLOCKED_SHORT = "东方财富(East Money)主动拒绝连接"
 _RAW_CONNECTION_REFUSED_SHORT = "服务器拒绝连接"
 _fmt = fmt_amount
 _fmt_v2 = fmt_amount
+
+
+# --- finite_price ---
+def finite_price(value: Any) -> float | None:
+    """价格/均线有限值判据（MD 与 HTML 渲染器共用，R14 一致性）。
+
+    None / 非数值 / NaN / ±inf / ≤0 → None（不可得）；有效正有限值原样返回。
+    两消费者必须同走本函数——此前 MD 用 `is not None + isfinite`（0 值参与
+    比较、可被标成「收盘价在 MA 下方」），HTML 用 `not latest_close`（NaN
+    未被拦截、NaN 比较全 False 落入「持平」分支），同一快照两侧可给出
+    不同结论（R7 二轮修复的 MA pill 与均线表）。
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
 
 
 # --- sanitize_error ---

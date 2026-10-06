@@ -291,8 +291,8 @@ class TestEventClassificationCards:
         by_type = {c.event_type: c for c in cards}
         card = by_type["buyback"]
         assert card.event_label == "回购"
-        assert card.impact_dimension == "估值"
-        assert card.default_duration_hint == "中长期变量"
+        assert card.dimension_hint == "估值"
+        assert card.duration_hint == "中长期变量"
 
     def test_high_confidence_direction_buyback(self):
         cards = _build_event_classification_cards({"events": self.SAMPLE_EVENTS})
@@ -602,8 +602,8 @@ class TestCardToDict:
             event_type="buyback",
             event_label="回购",
             events=[{"title": "回购公告", "date": "20260601"}],
-            impact_dimension="估值",
-            default_duration_hint="中长期变量",
+            dimension_hint="估值",
+            duration_hint="中长期变量",
             direction_hint="正向",
             direction_confidence="medium",
             direction_note=_DIRECTION_DISCLAIMER,

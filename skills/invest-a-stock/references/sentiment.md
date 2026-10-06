@@ -45,7 +45,8 @@ uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tm
 
 ```
 [事实] {摘录或摘要} [来源: WebSearch / query: "..." / {日期}]
-[分析] {语气与股价传导的讨论} [证据强度: ...]
+[分析] {语气与股价传导的讨论，每条断言另带来源或真实事实绑定}
+[证据强度: ⚠️ 中 📡 单源 📅 报告期已注明 — 单源无验证]
 ```
 
 ## 情绪仪表盘输出格式（Claude 填写）

@@ -41,6 +41,7 @@
 | [SKILL.md](../skills/invest-a-stock/SKILL.md) | LAWs、路由表、CLI（**canonical 核心**） |
 | [modules.md](../skills/invest-a-stock/references/modules.md) | 九模块与八段 legacy 结构 |
 | [financials.md](../skills/invest-a-stock/references/financials.md) | 财报深研专项（F-1~F-4） |
+| [financial-semantics.md](../skills/lib/references/financial-semantics.md) | 共享财务语义、计算公式前提、期间/币种/对象与失败处理（实现需逐项验收） |
 | [sentiment.md](../skills/invest-a-stock/references/sentiment.md) | 舆情深研专项（L1~L3） |
 | [game-theory.md](../skills/invest-a-stock/references/game-theory.md) | 参与者行为扫描专项 |
 | [references-format.md](../skills/invest-a-stock/references/references-format.md) | 引用来源表规范 |

@@ -63,12 +63,22 @@ def _event_meta(event_type: str) -> dict:
 
 
 def _event_dimension(event_type: str) -> str:
-    """事件类型 → impact_dimension（来源: event_type_taxonomy.yaml）。"""
+    """事件类型 → 涉及维度默认值（taxonomy `impact_dimension` 字段）。
+
+    R13（2026-10-05）：这是**类型默认的分类线索**，不是已核影响结论——
+    事件卡片以 `dimension_hint` 输出，渲染层注明「类型默认」；影响方向
+    与持续性质须以公告原文核验后写入事件分析段（§9.4.4）。
+    """
     return _event_meta(event_type).get("impact_dimension", "治理")
 
 
 def _event_duration(event_type: str) -> str:
-    """事件类型 → default_duration_hint（来源: event_type_taxonomy.yaml）。"""
+    """事件类型 → 持续性默认提示（taxonomy `default_duration_hint` 字段）。
+
+    R13（2026-10-05）：同 `_event_dimension`——标题/类型不能支撑「短期扰动/
+    中长期变量」的影响结论，本提示只作采集侧线索字段（`duration_hint`），
+    不再作为表内「持续性质」直出。
+    """
     return _event_meta(event_type).get("default_duration_hint", "短期扰动")
 
 
@@ -190,7 +200,8 @@ _CLASSIFICATION_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"业绩快报"), "earnings_preview"),
 ]
 
-# 逻辑关系映射（基于事件类型 + impact_dimension 的默认值）
+# 逻辑关系映射（基于事件类型的默认值；R13：类型级方向默认，不是已核影响——
+# 新采集卡片不再输出本字段，函数仅保留供既有调用与测试使用）
 _LOGIC_RELATION_MAP: dict[str, str] = {
     "buyback": "强化",
     "equity_incentive": "强化",
@@ -368,9 +379,11 @@ def _fetch_notice_events(symbol: str) -> list[dict] | None:
             "date": date_str,
             "type": classified["event_type"],
             "title": title,
-            "impact_dimension": classified["impact_dimension"],
-            "duration": classified["duration"],
-            "logic_relation": _get_logic_relation(classified["event_type"]),
+            # R13（2026-10-05）：类型默认维度/持续性以 `*_hint` 输出——分类
+            # 线索不是已核影响；不再输出 `logic_relation`（类型级方向默认值，
+            # 无已核原文支撑，且全仓无消费者）。
+            "dimension_hint": classified["dimension_hint"],
+            "duration_hint": classified["duration_hint"],
             "source": "akshare stock_individual_notice_report",
             "url": str(rec.get("网址", "")),
         }
@@ -407,9 +420,8 @@ def _fetch_dividend_events(symbol: str) -> list[dict] | None:
                     "date": date_str,
                     "type": "dividend",
                     "title": title,
-                    "impact_dimension": _event_dimension("dividend"),
-                    "duration": _event_duration("dividend"),
-                    "logic_relation": _get_logic_relation("dividend"),
+                    "dimension_hint": _event_dimension("dividend"),
+                    "duration_hint": _event_duration("dividend"),
                     "source": "akshare stock_history_dividend_detail",
                     "url": "",
                 })
@@ -436,9 +448,8 @@ def _fetch_dividend_events(symbol: str) -> list[dict] | None:
                     "date": date_str,
                     "type": "dividend",
                     "title": title,
-                    "impact_dimension": _event_dimension("dividend"),
-                    "duration": _event_duration("dividend"),
-                    "logic_relation": _get_logic_relation("dividend"),
+                    "dimension_hint": _event_dimension("dividend"),
+                    "duration_hint": _event_duration("dividend"),
                     "source": "akshare stock_dividend_cninfo",
                     "url": "",
                 })
@@ -495,9 +506,8 @@ def _fetch_shareholder_events(symbol: str) -> list[dict] | None:
                 "date": date_str,
                 "type": event_type,
                 "title": title,
-                "impact_dimension": _event_dimension(event_type),
-                "duration": _event_duration(event_type),
-                "logic_relation": _get_logic_relation(event_type),
+                "dimension_hint": _event_dimension(event_type),
+                "duration_hint": _event_duration(event_type),
                 "source": "akshare stock_shareholder_change_ths",
                 "url": "",
             })
@@ -517,20 +527,22 @@ def _classify_event(record: dict) -> dict:
         record: 包含 title, raw_type 的字典。
 
     Returns:
-        包含 event_type, impact_dimension, duration 的字典。
+        包含 event_type, dimension_hint, duration_hint 的字典。
+        R13（2026-10-05）：`*_hint` 均为**类型默认线索**（taxonomy 元数据），
+        不是对公告原文的影响判断——影响结论须取得原文后另写。
     """
     title = str(record.get("title", ""))
     raw_type = str(record.get("raw_type", ""))
 
     # 1) **标题正则优先**：标题是公司对本次公告的自述，比平台的粗分类更具体。
     #    实测冲突例：标题「协议转让…暨减持计划」+ 类型「股权转让」——按类型会判成 mna，
-    #    丢掉减持的「削弱」方向；标题「筹划重大资产重组停牌公告」+ 类型「停牌公告」同理。
+    #    丢掉减持分类；标题「筹划重大资产重组停牌公告」+ 类型「停牌公告」同理。
     for pattern, etype in _CLASSIFICATION_RULES:
         if pattern.search(title):
             return {
                 "event_type": etype,
-                "impact_dimension": _event_dimension(etype),
-                "duration": _event_duration(etype),
+                "dimension_hint": _event_dimension(etype),
+                "duration_hint": _event_duration(etype),
             }
 
     # 2) 标题无实质关键词 → 用源提供的「公告类型」映射。这是本次新增能力覆盖的场景：
@@ -540,8 +552,8 @@ def _classify_event(record: dict) -> dict:
     if mapped and mapped not in _LOW_SIGNAL_TYPES:
         return {
             "event_type": mapped,
-            "impact_dimension": _event_dimension(mapped),
-            "duration": _event_duration(mapped),
+            "dimension_hint": _event_dimension(mapped),
+            "duration_hint": _event_duration(mapped),
         }
 
     # 3) 标题正则再看原类型文本（源类型未收录时的最后一条线索）
@@ -549,8 +561,8 @@ def _classify_event(record: dict) -> dict:
         if pattern.search(raw_type):
             return {
                 "event_type": etype,
-                "impact_dimension": _event_dimension(etype),
-                "duration": _event_duration(etype),
+                "dimension_hint": _event_dimension(etype),
+                "duration_hint": _event_duration(etype),
             }
 
     # 4) 兜底：源明确标了低信号类型 → 尊重其分桶；否则才是未分类。
@@ -559,8 +571,8 @@ def _classify_event(record: dict) -> dict:
     fallback = mapped if mapped in _LOW_SIGNAL_TYPES else "other"
     return {
         "event_type": fallback,
-        "impact_dimension": _event_dimension(fallback),
-        "duration": _event_duration(fallback),
+        "dimension_hint": _event_dimension(fallback),
+        "duration_hint": _event_duration(fallback),
     }
 
 

@@ -626,3 +626,165 @@ class TestFullReviewAnalysisSameSource:
                            analysis=payload)
         assert "判断索引" not in html, "A1 后不得重现（反向守卫）"
         assert "空头链条：量增依赖让利" in html, "brief 的分析卡不受索引层移除影响"
+
+
+class TestMaPillExplicitSubject:
+    """R7 二轮（2026-10-04 独立复检）：HTML 均线 pill 的收盘主语与 MD 均线表
+    统一（`收盘价在 MA{p} 上方/下方`），高/低/相等/不可得四态一致；MA250
+    卡片同口径。反例：旧 pill 只写「上方/下方」，读者按 MA 为主体理解。"""
+
+    @staticmethod
+    def _dims(last_close: float = 10.0):
+        from fixtures.collections import collection_v2_minimal, make_kline_rows
+        base = collection_v2_minimal()
+        rows = make_kline_rows(30)
+        rows[-1]["close"] = last_close          # pill 的 latest_close 取自 K 线末行
+        for dim in base["dimensions"]:
+            if dim["dimension"] == "kline":
+                dim["data"] = rows
+        return {d["dimension"]: d for d in base["dimensions"]}
+
+    @staticmethod
+    def _fake_tech(latest_close):
+        return {
+            "latest_close": latest_close,
+            "trend": {
+                "ma": {"5": [9.0], "10": [10.0], "20": [11.0], "60": [None],
+                       "250": [12.0]},
+                "alignment": {"trend_label": "交织"},
+                "slope": {"5": 1.2},
+            },
+            "momentum": {}, "overbought_oversold": {}, "volatility": {},
+        }
+
+    def _extract(self, monkeypatch, latest_close):
+        from unittest.mock import patch
+        from lib import render_html as rh
+        with patch.object(rh, "compute", return_value=self._fake_tech(latest_close)):
+            return rh._extract_technical_html(self._dims(last_close=latest_close))
+
+    def test_pill_subject_and_directions(self, monkeypatch):
+        res = self._extract(monkeypatch, 10.0)
+        grid = res["ma_grid_html"]
+        assert "MA5</div>" in grid
+        assert "收盘价在 MA5 上方" in grid      # 收盘 10 > MA5 9
+        assert "收盘价与 MA10 持平" in grid      # 相等
+        assert "收盘价在 MA20 下方" in grid      # 收盘 10 < MA20 11
+        assert ">上方<" not in grid and ">下方<" not in grid  # 旧无主语形式不得复现
+        assert res["ma250_pos"] == "收盘价在 MA250 下方"        # 收盘 10 < MA250 12
+
+    def test_pill_unavailable_close(self, monkeypatch):
+        res = self._extract(monkeypatch, 0)   # 收盘缺失（0 占位）
+        grid = res["ma_grid_html"]
+        assert "收盘价不可得" in grid
+        assert "收盘价在 MA5 上方" not in grid and "收盘价在 MA5 下方" not in grid
+        assert res["ma250_pos"] == "收盘价不可得"
+
+    def test_pill_nan_close_unavailable(self, monkeypatch):
+        """R14（2026-10-05）：NaN 收盘不得落入「持平」分支（旧 `not nan` 为
+        False → NaN 比较全 False → 误标持平）；与 MD 同走 finite_price。"""
+        res = self._extract(monkeypatch, float("nan"))
+        grid = res["ma_grid_html"]
+        assert "收盘价不可得" in grid
+        assert "收盘价与 MA5 持平" not in grid and "nan" not in grid.lower()
+        assert res["ma250_pos"] == "收盘价不可得"
+
+    def test_pill_nan_ma_unavailable(self, monkeypatch):
+        """R14：MA 值 NaN/0 时 pill 走不可得分支（不得渲染 'nan'）。"""
+        tech = self._fake_tech(10.0)
+        tech["trend"]["ma"]["5"] = [float("nan")]
+        tech["trend"]["ma"]["10"] = [0.0]
+        from unittest.mock import patch
+        from lib import render_html as rh
+        with patch.object(rh, "compute", return_value=tech):
+            res = rh._extract_technical_html(self._dims(last_close=10.0))
+        grid = res["ma_grid_html"]
+        assert "nan" not in grid.lower()
+        assert "收盘价在 MA5" not in grid and "收盘价与 MA5 持平" not in grid
+        assert "收盘价在 MA10" not in grid
+
+
+class TestFinitePriceSharedBoundary:
+    """R14（2026-10-05）：MD/HTML 价格与均线有限值判据单一来源
+    `render_utils.finite_price`——None/非数值/NaN/±inf/≤0 → 不可得。
+    两消费者此前对 0 与 NaN 的处理不同（MD: 0 参与比较；HTML: NaN 未拦）。"""
+
+    def test_finite_price_values(self):
+        from lib.render_utils import finite_price
+        assert finite_price(1.5) == 1.5
+        assert finite_price("2.5") == 2.5
+        for bad in (None, 0, 0.0, -1.0, float("nan"), float("inf"),
+                    float("-inf"), "abc", "", [], {}):
+            assert finite_price(bad) is None, bad
+
+    def test_md_ma_system_same_directions_as_html(self, monkeypatch):
+        """同一 close/MA 组合：MD 均线表与 HTML pill 方向文本一致。"""
+        from unittest.mock import patch
+        import lib.render_markdown._base as base_mod
+        from fixtures.collections import collection_v2_minimal
+
+        tech = self._fake_tech_for_md()
+        coll = collection_v2_minimal()
+        with patch("lib.technical.compute", return_value=tech):
+            lines = base_mod._render_ma_system(coll)
+        joined = "\n".join(lines)
+        assert "收盘价在 MA5 上方" in joined      # 10 > 9
+        assert "收盘价与 MA10 持平" in joined
+        assert "收盘价在 MA20 下方" in joined
+        assert "MA60: —" in joined                 # None → 不可得
+
+    @staticmethod
+    def _fake_tech_for_md():
+        return {
+            "latest_close": 10.0,
+            "last_date": "20260630",
+            "trend": {
+                "ma": {"5": [9.0], "10": [10.0], "20": [11.0], "60": [None]},
+                "alignment": {"trend_label": "交织"},
+            },
+        }
+
+
+@pytest.mark.parametrize(
+    "days,last_delta,position",
+    [(60, 0.0, "持平"), (250, 0.0, "持平"),
+     (250, 1e-10, "持平"), (250, -1e-10, "持平"),
+     (250, 0.01, "上方"), (250, -0.01, "下方")],
+)
+def test_computed_ma_positions_agree_across_outputs(days, last_delta, position):
+    """真实均线计算的舍入误差不得让MD/HTML/生产者摘要给出相反方向。"""
+    from fixtures.collections import make_kline_rows
+    from lib.technical import compute
+    from lib.render_html import _extract_technical_html
+    from lib.render_markdown._base import _render_ma_system
+
+    collection = collection_v2_minimal()
+    rows = make_kline_rows(days)
+    for row in rows:
+        row.update(open=10.11, high=10.11, low=10.11, close=10.11)
+    rows[-1].update(open=10.11 + last_delta, high=10.11 + last_delta,
+                    low=10.11 + last_delta, close=10.11 + last_delta)
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "kline":
+            dim["data"] = rows
+
+    tech = compute(rows)
+    if last_delta == 0.0:
+        # 锁定原反例：不是用手填的完全相等MA绕过实际浮点计算。
+        assert tech["trend"]["ma"]["60"][-1] != tech["latest_close"]
+    markdown = "\n".join(_render_ma_system(collection))
+    html = _extract_technical_html({d["dimension"]: d for d in collection["dimensions"]})
+    for period in (5, 10, 20, 60):
+        expected = (f"收盘价与 MA{period} 持平" if position == "持平"
+                    else f"收盘价在 MA{period} {position}")
+        assert expected in markdown
+        assert expected in html["ma_grid_html"]
+    if days >= 250:
+        expected_250 = ("收盘价与 MA250 持平" if position == "持平"
+                        else f"收盘价在 MA250 {position}")
+        assert expected_250 in html["ma_grid_html"]
+        assert html["ma250_pos"] == expected_250
+    if position == "持平":
+        summaries = [s for s in tech["trend"]["summary_sentences"] if "收盘价位于其" in s]
+        assert summaries
+        assert all("收盘价位于其附近" in s for s in summaries)

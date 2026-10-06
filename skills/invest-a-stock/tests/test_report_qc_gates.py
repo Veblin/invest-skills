@@ -26,6 +26,7 @@ from report_qc import (  # noqa: E402
     _check_readability,
     _check_stock_completion,
     conclusion_evidence_findings,
+    event_analysis_evidence_findings,
     fact_analysis_pair_findings,
     readability_findings,
     readability_metrics,
@@ -35,7 +36,7 @@ from report_qc import (  # noqa: E402
 def _good_report() -> str:
     return """## 主要结论
 - 营收连续增长（数据：近4年 +12.3%/年 [来源: engine financials]），毛利率 42% 维持（逻辑：规模效应传导 [来源: Python calc: revenue_cagr]），分歧点在于海外占比上升的汇率敏感性，风险点在于资本开支 3 年翻倍。
-[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源可验证]
+[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]
 """
 
 
@@ -84,6 +85,55 @@ class TestConclusionEvidence:
         assert conclusion_evidence_findings(_good_report()) == []
 
 
+class TestConclusionEvidenceR12:
+    """R12 round-4：证据强度标签只是元数据、不构成证据——`_evidence_ge_c`
+    不再接受任意 `[证据强度: ✅` 行；标签命名空间（含非法/嵌套形态）内的
+    来源/事实字样也不作数。负控 = Codex 复检形态及变体，正控 = 合法纯标签
+    与真正绑定事实的断言。"""
+
+    @pytest.mark.parametrize("line", [
+        "[证据强度: ✅ 公司盈利增长999%]",                       # 原恶意标签
+        "[证据强度: ✅ 强 🌐多源 🕐近30日 公司盈利增长999%]",       # 标签内偷塞
+        "[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 公司盈利增长999%",    # 尾接同断言
+        "[证据强度：✅强🌐多源🕐近30日✓✗]公司盈利增长999%",         # 中英文标点/空白变体
+        "[证据强度: 🌐多源 🕐近30日 ✓✗ 公司盈利增长999%]",         # 缺维度
+        "[证据强度: ✅ 强 ✅ 强 公司盈利增长999%]",                # 重复维度
+        "[证据强度: ✅ 强 [来源: 假] 公司盈利增长999%]",            # 伪造来源包入标签
+        "[证据强度: ✅ 强 来源: 公司公告显示盈利增长999%]",          # 标签内来源文字
+    ])
+    def test_strength_tag_cannot_certify_assertion(self, line):
+        md = "## 主要结论\n" + line + "\n"
+        findings = conclusion_evidence_findings(md, fact_ids=frozenset({"F1"}))
+        assert any(f["id"] == "wording-conclusion-evidence-level"
+                   and f["severity"] == "error" for f in findings), (line, findings)
+
+    def test_plain_assertion_still_flagged(self):
+        md = "## 主要结论\n公司盈利增长999%\n"
+        assert any(f["id"] == "wording-conclusion-evidence"
+                   for f in conclusion_evidence_findings(md))
+
+    def test_legal_pure_tags_exempt(self):
+        """正控：实际交付件使用的合法纯四维标签行（含 R10 新中性档）不报。"""
+        md = ("## 主要结论\n"
+              "[证据强度: ⚠️ 中 🌐多源 📅近季度 ✓✗]\n"
+              "[证据强度: ⚠️ 中 📡单源 🗄️滞后 > 1 年 —]\n"
+              "[证据强度: ⚠️ 中 🌐多源 📅报告期已注明 ✓✗]\n")
+        assert conclusion_evidence_findings(md, fact_ids=frozenset({"F1"})) == []
+
+    def test_bound_fact_and_real_source_pass(self):
+        """正控：标签外真正绑定事实 / 真实来源标注的断言照常 ≥C。"""
+        md = ("## 主要结论\n"
+              "盈利增长 999%[事实: F1]\n"
+              "营收增长 42%[来源: engine financials]\n"
+              "[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 判断来自同段上游 [来源: engine]\n")
+        assert conclusion_evidence_findings(md, fact_ids=frozenset({"F1"})) == []
+
+    def test_fake_fact_id_not_evidence(self):
+        md = "## 主要结论\n公司盈利增长999%[事实: F999999]\n"
+        assert any(f["id"] == "wording-conclusion-evidence-level"
+                   for f in conclusion_evidence_findings(md, fact_ids=frozenset({"F1"})))
+
+
 class TestFactAnalysisPair:
     """R-A6：[分析] 节段内须有前置 [事实] 块（50 行回溯 + ##/### 边界停止）。"""
 
@@ -128,9 +178,12 @@ class TestFullReviewConclusionGate:
         assert _run_all(md) == []
 
     def test_structure_lines_not_assertions(self):
-        """表行/引用行不算断言（FP 源）；带 B 级证据断言通过。"""
+        """表行/引用行不算断言（FP 源）；带 B 级证据断言通过。
+
+        R14 round-8：表行正控改用行内绑定形态——混合行（含文字格）不再按
+        长度豁免（Codex table_numeric_mixed）。"""
         md = ("## 主要结论\n"
-              "| 指标 | 值 |\n|---|---|\n| 营收 | 382 亿 |\n"
+              "| 指标 | 值 |\n|---|---|\n| 营收 | 382 亿[来源: engine] |\n"
               "> 以上不构成投资建议\n"
               "该标的有望走强 [证据: B]。\n")
         assert conclusion_evidence_findings(md) == []
@@ -176,17 +229,31 @@ class TestRendererLabelExemption:
             assert conclusion_evidence_findings(self._card(title)) == [], title
 
     def test_evidence_label_legal_values_exempt(self):
-        """证据等级行合法结构：等级首标记（A-D / L1-L4，同 analysis_schema
-        `_EVIDENCE_RE`）+ §5.2 标记与注解词表（含 §5.1 例「✓✓ 跨源一致」、
-        「✅ 强」空格形态、「🕐 近 30 日」「🗄️ 滞后 >1 年」）。"""
-        for ev in ("B", "L1", "C ⚠️中 📡单源 🔮框架估计",
-                   "B ✅强 📡多源 📅最新期 ✓✓",
+        """证据等级行合法结构（R12 round-5）：等级（A-D / L1-L4，同
+        analysis_schema `_EVIDENCE_RE`）+ 可选**四维齐全序列**（强度→来源→
+        时效→交叉、图标-注解配对；词表唯一来源 evidence_tags）。"""
+        for ev in ("B", "L1",
                    "B ✅ 强 🌐 多源 🕐 近30日 ✓✓ 跨源一致",
-                   "B ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 多源一致",
-                   "B 🕐 近 30 日", "B 🗄️ 滞后 >1 年"):
+                   "C ⚠️ 中 📡 单源 🕐 近 30 日 —",
+                   "B ✅强 🌐多源 📅报告期已注明 ✓✗",
+                   "B ❓弱 🔮推测 🗄️滞后 > 1 年 —"):
             md = self._card("结论：估值处于历史中位").replace(
                 "**证据等级：** B\n", f"**证据等级：** {ev}\n")
             assert conclusion_evidence_findings(md) == [], ev
+
+    def test_evidence_label_partial_or_mismatched_tail_not_exempt(self):
+        """半截序列 / 图标注解矛盾 / 词表外文字 / 单维简式 → **不豁免**
+        （R12 round-5 收紧；round-4 及更早这些形态曾被当结构行放过）。"""
+        for ev in ("C ⚠️中 📡单源 🔮框架估计",
+                   "B ✅强 📡多源 📅最新期 ✓✓",
+                   "B 🕐 近 30 日",
+                   "B 🗄️ 滞后 >1 年",
+                   "B ✅ 强",
+                   "B ✅该标的有望走强"):
+            md = self._card("结论：估值处于历史中位").replace(
+                "**证据等级：** B\n", f"**证据等级：** {ev}\n")
+            assert any(x["id"] == "wording-conclusion-evidence"
+                       for x in conclusion_evidence_findings(md)), ev
 
     def test_missing_source_body_still_fails(self):
         """正文缺来源 → 仍报 error；行号须落在正文行（标题行不计入）。"""
@@ -262,7 +329,7 @@ class TestV031MainJudgmentGate:
 
     _MAIN_JUDGMENT_MD = """## 重要发现（5 分钟阅读区）
 
-> 结论先行区：以下为本次核心判断。
+> 结论先行区：以下 5 段是本次分析的核心判断，数据底稿与其余分析注记见文末。
 
 ## 主判断：PE 19.32x 处 4.1% 分位
 
@@ -337,6 +404,66 @@ class TestV031MainJudgmentGate:
         )
         assert layer.status == "fail"
 
+
+class TestV031R2StructuralExemption:
+    """R2（2026-10-04 独立复检）：结构行豁免必须封闭——同一无来源断言不得
+    因裸写/加粗/证据强度尾接而改变验收结果；合法结构正例不误报。
+
+    反例来源：Codex 复检对真实成品结论容器插入同一断言：
+    `公司盈利持续改善` FAIL / `**公司盈利持续改善**` PASS /
+    `**证据强度：✅ 强**公司盈利持续改善` PASS（旧实现，已修复）。
+    """
+
+    _CONTAINER = "## 主判断：测试\n\n"
+
+    @pytest.mark.parametrize("assertion", [
+        "公司盈利持续改善",
+        "**公司盈利持续改善**",
+        "**证据强度：✅ 强**公司盈利持续改善",
+    ])
+    def test_unsourced_assertion_fails_in_all_three_forms(self, assertion):
+        findings = conclusion_evidence_findings(self._CONTAINER + assertion + "\n")
+        assert any(f["id"] == "wording-conclusion-evidence"
+                   and f["severity"] == "error" for f in findings), assertion
+
+    @pytest.mark.parametrize("assertion", [
+        "**证据强度：✅ 强，公司盈利持续改善**",   # 标签内容被掺入断言
+        "**证据强度： 公司盈利持续改善**",          # 标签不合封闭语法
+        "**公司盈利持续改善（机构预测）**",          # 括注无元数据信号
+        "**公司盈利持续改善：**",                    # 冒号加尾式绕过
+    ])
+    def test_structural_lookalikes_do_not_exempt(self, assertion):
+        findings = conclusion_evidence_findings(self._CONTAINER + assertion + "\n")
+        assert any(f["id"] == "wording-conclusion-evidence" for f in findings), assertion
+
+    @pytest.mark.parametrize("line", [
+        # 证据强度行（实测语料）：四维令牌 + 元数据括注 / 双档并列
+        "**证据强度：✅ 强**",
+        "**证据强度：✅ 强**🌐多源🕐近 30 日✓✗（估值/盈利序列为封存字段直读）",
+        "**证据强度：⚠️ 中**（价格/估值/盈利均可复核；机制归因为解释，非观测）",
+        "**证据强度：✅ 强**（估值、盈利、历史序列均为封存字段直读，可逐项复算）"
+        "／⚠️ 中（ROE 数值受跨源差异影响）",
+        # 加粗小标题（实测语料）：主体+元数据括注 / 冒号表头 / 封闭清单
+        "**盈利（中报累计口径，报告期 2026-06-30）**",
+        "**本次问题与数据截止（2026-09-30 收盘；2026-10-02 采集，固定快照回放）**",
+        "**截至 2026-09-24 收盘的并列量值：**",
+        "**边界（如实披露）：**",
+        "**关键观察节点**",
+        "**盲点**",
+        "**逻辑链**",
+        "**明示缺口**",
+    ])
+    def test_corpus_structural_lines_still_exempt(self, line):
+        assert conclusion_evidence_findings(self._CONTAINER + line + "\n") == [], line
+
+    def test_missing_conclusion_heading_warns_even_with_fact_ref(self):
+        """无结论标题时不得因其他位置的 [事实: F…] 而静默 pass(0)。"""
+        layer = _check_conclusion_evidence(
+            "## 研究摘要\n公司盈利持续改善[事实: F1]\n", "stock")
+        assert layer.status == "warn"
+        assert any(f["id"] == "wording-conclusion-section-missing"
+                   for f in layer.details)
+
     def test_style_mismatch_warns_against_profile(self, tmp_path):
         """C2-c：正文自评风格 ≠ 同代 profile.style → warning（反例 600519 L329）。"""
         text = (
@@ -357,6 +484,203 @@ class TestV031MainJudgmentGate:
             '{"profile": {"style": "成长"}}', encoding="utf-8")
         layer2 = _check_stock_completion(md2, text)
         assert not any(f["id"] == "completion-style-mismatch" for f in layer2.details)
+
+
+class TestV031R14HierarchyTablesEvents:
+    """R14（2026-10-05 第三批 round-6）：按层级全子段扫描 + 表格断言检查 +
+    事件分析段扫描。反例来源：pre-review/review-probes.json 四份真实变异
+    （H3/表包装无来源断言均 PASS）与 round-5 银行 final 事件段（R13）。"""
+
+    @pytest.mark.parametrize("md", [
+        # ① H3 子段注入（原实现遇 H3 停止 → PASS）
+        "## 重要发现（5 分钟阅读区）\n\n### 竞争解释\n\n公司盈利持续改善\n",
+        # 同级更深：H4 子段（核心判断摘要各卡片）
+        "### 核心判断摘要\n\n#### 盈利结构\n\n[结论] 公司盈利持续改善\n",
+    ])
+    def test_subsection_assertion_flagged(self, md):
+        f = conclusion_evidence_findings(md)
+        assert any(x["id"] == "wording-conclusion-evidence"
+                   and x["severity"] == "error" for x in f), md
+
+    @pytest.mark.parametrize("row", [
+        "| 公司盈利持续改善 |",       # 非数字无来源断言
+        "| 公司盈利增长999% |",       # 数字断言
+        "| 判断 | 公司盈利增长999% |",
+        # R14 round-7（Codex table_placeholder）：短断言 + 占位符不得按数据行放行
+        "| 公司盈利持续改善 | — |",
+        # R14 round-7（Codex table_fake_source）：强度标签内嵌假来源不得按数据/证据放行
+        "| 公司盈利持续改善[证据强度: ✅ 强 [来源: fake]] |",
+    ])
+    def test_table_wrapped_assertion_flagged(self, row):
+        md = ("## 主判断：测试\n\n"
+              "| 判断 |\n|---|\n" + row + "\n")
+        f = conclusion_evidence_findings(md)
+        assert any(x["id"].startswith("wording-conclusion-table-evidence")
+                   and x["severity"] == "error" for x in f), row
+
+    def test_label_plus_number_row_requires_binding(self):
+        """R14 round-8（Codex table_numeric_mixed）：`| 断言 | 999 |` 混排行
+        曾被 round-7「短标签+数值」分支按数据行放行——preflight 仅因 999 未绑定
+        拦截（validate 面），final QC 仍 WARN。现混合行只认行内有效证据绑定；
+        同一形态加绑定即通过（正控）。"""
+        flagged = ("## 重要发现（5 分钟阅读区）\n\n"
+                   "| 判断 | 值 |\n|---|---|\n| 公司盈利持续改善 | 999 |\n")
+        f = conclusion_evidence_findings(flagged)
+        assert any(x["id"] == "wording-conclusion-table-evidence"
+                   and x["severity"] == "error" for x in f)
+        bound = ("## 重要发现（5 分钟阅读区）\n\n"
+                 "| 指标 | 值 |\n|---|---|\n| 营收 | 382 亿[事实: F1] |\n")
+        assert conclusion_evidence_findings(
+            bound, fact_ids=frozenset({"F1"})) == []
+
+    def test_table_claim_above_source_line_not_exempt(self):
+        """R14 round-7：邻近（非行内）来源字符串不得给整表免审（反例：把断言行
+        写在事件来源行上方即被吞掉）。"""
+        md = ("## 重要发现（5 分钟阅读区）\n\n"
+              "| 判断 |\n|---|\n| 公司盈利持续改善 |\n\n"
+              "[来源: akshare stock_individual_notice_report / 5 条事件]\n")
+        f = conclusion_evidence_findings(md)
+        assert any(x["id"] == "wording-conclusion-table-evidence"
+                   and x["severity"] == "error" for x in f)
+
+    def test_real_data_table_not_flagged(self):
+        """正控：真数据表不误拦——**全数据格**数据行（渲染器指标表形态）。
+
+        R14 round-8：原「短标签+数值/日期」正控随判据收紧撤下（Codex
+        table_numeric_mixed：短标签+数字无法与短断言区分）。真实渲染器数据表
+        为全数值行（如业绩全景 `| 20240930 | 26.833 | 48.42 | 1207.76亿 |`），
+        照常放行；带行内绑定的标签行走 `test_label_plus_number_row_requires_binding`
+        正控。"""
+        md = ("## 主要结论\n"
+              "| 报告期 | ROE(%) | EPS | 营收 |\n|---|---|---|---|\n"
+              "| 20240930 | 26.833 | 48.42 | 1207.76亿 |\n"
+              "| 20250630 | 19.2486 | 36.18 | 893.89亿 |\n")
+        assert conclusion_evidence_findings(md) == []
+
+    def test_in_row_fact_bound_scenario_not_flagged(self):
+        """正控：行内绑定 [事实: F…] 的情景表照常放行（不依赖表级/邻近来源）。"""
+        md = ("## 主要结论\n"
+              "| 情景 | 读数 |\n|---|---|\n"
+              "| 中性 | 1145–1851 元[事实: F1] |\n\n"
+              "[来源: Python calc: scenario_table]\n")
+        assert conclusion_evidence_findings(md, fact_ids=frozenset({"F1"})) == []
+
+    def test_event_table_renderer_structure_exempt(self):
+        """正控：渲染器事件表（逐字表头）数据行按结构核验放行——含长封存标题、
+        原始英文键（未映射回落）与 >15 条的截断行。
+
+        R14 round-8：整块豁免已撤（Codex event_copied_header：复制表头注入
+        「确定影响」断言曾被整块放行），改为逐行结构核验。"""
+        md = ("## 3a. 事件时间线\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|------|------|---------|---------|\n"
+              "| 2026-10-01 | 程序性公告 | 招商银行:招商银行股份有限公司关于非执行董事离任的公告 | 治理 |\n"
+              "| 2026-09-30 | unknown_legacy | 关于某事项的提示性公告 | 估值 |\n"
+              "| ... | ... | （另有 3 条事件未展示） | ... | ... |\n\n"
+              "[来源: akshare stock_individual_notice_report / 5 条事件]\n")
+        assert event_analysis_evidence_findings(md) == []
+
+    def test_copied_event_header_rows_checked(self):
+        """R14 round-8（Codex event_copied_header）：复制事件表头并在类型/维度
+        格写「确定影响」断言的构造不构成数据行（validate/preflight=0 时
+        final QC 必须拦）。"""
+        body = ("| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+                "|---|---|---|---|\n"
+                "| 2026-10-01 | 治理 | 公司盈利持续改善 | 治理变动不影响盈利与估值 |\n")
+        f = event_analysis_evidence_findings("## 3a. 事件时间线\n\n" + body)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f)
+        # 行内有效来源绑定照常放行（不因表种一律拒收）
+        ok = ("## 3a. 事件时间线\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|---|---|---|---|\n"
+              "| 2026-10-01 | 程序性公告 | 关于董事离任的公告[来源: 封存 events 字段] | 治理 |\n")
+        assert event_analysis_evidence_findings(ok) == []
+
+    def test_event_analysis_assertion_flagged(self):
+        """R13 连线：事件段无证据断言（含「不改变盈利路径」式影响判断）须拦。"""
+        md = ("## 3a. 事件时间线\n\n"
+              "**[分析]**\n\n"
+              "治理变动本身不改变盈利路径与估值锚点\n")
+        f = event_analysis_evidence_findings(md)
+        assert any(x["id"] == "wording-event-analysis-evidence"
+                   and x["severity"] == "error" for x in f)
+
+    @pytest.mark.parametrize("body", [
+        # Codex batch3 探针 event_bare / event_unverified
+        "治理变动本身不改变盈利路径与估值锚点。",
+        "公告原文未逐条读取；治理变动不影响盈利与估值。",
+        # Codex batch3 探针 event_title_source：标题来源不是原文已核证据
+        "仅复核公告标题；治理变动不影响盈利与估值。[来源: akshare 公告标题]",
+        # 同族变体：把「原文未读取」写进标签仍不构成依据
+        "公告原文未逐条读取；治理变动不影响盈利与估值。[来源: akshare 公告标题；公告原文未读取]",
+        # 表格包装 + 标题来源
+        "| 判断 | 治理变动不影响盈利与估值。[来源: akshare 公告标题] |",
+        # R13 round-7（Codex event_absent_source）：自述未读的来源标签
+        "治理变动不影响盈利与估值。[来源: 公告原文未读取]",
+        "治理变动不影响盈利与估值。[来源: 公告原文未获取]",
+    ])
+    def test_event_title_or_no_source_assertion_flagged(self, body):
+        md = f"## 3a. 事件时间线\n\n**[分析]**\n\n{body}\n"
+        f = event_analysis_evidence_findings(md)
+        assert any(x["severity"] == "error" for x in f), body
+
+    def test_event_original_text_basis_passes(self):
+        """正控：引原文档级依据（notice-body 留档）的断言行不误拦。"""
+        md = ("## 3a. 事件时间线\n\n**[分析]**\n\n"
+              "公告原文已逐条读取（notice-body 留档）——原文之外的影响仍无法判定。"
+              "[来源: 公告原文（notice-body 留档）]\n")
+        assert event_analysis_evidence_findings(md) == []
+
+    def test_event_section_sourced_and_structural_pass(self):
+        """正控：事件段的结构行/来源绑定行/数据表不误拦。"""
+        md = ("## 3a. 事件时间线\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|------|------|---------|---------|\n"
+              "| 2026-10-01 | 程序性公告 | 关于董事离任的公告 | 治理 |\n\n"
+              "[来源: akshare stock_individual_notice_report / 1 条事件]\n\n"
+              "**[事实]** 近 30 日公告按类型归类如下：\n\n"
+              "  - **程序性公告** (1条) [来源: _meta.analysis_cards.event_classifications.0.event_label]\n\n"
+              "**[分析]**\n\n"
+              "分类线索仅作检索提示[来源: 封存 events 字段（类型/分类）]\n\n"
+              "[证据强度: ⚠️ 中 📡单源 📅报告期已注明 —]\n\n"
+              "⏭️ **行业事件**: ⏭️ 来源缺口：暂无稳定 API\n")
+        assert event_analysis_evidence_findings(md) == []
+
+    def test_event_layer_wired_into_conclusion_evidence(self):
+        layer = _check_conclusion_evidence(
+            "## 3a. 事件时间线\n\n**[分析]**\n\n公司盈利持续改善\n", "stock")
+        assert layer.status == "fail"
+        assert any(x["id"] == "wording-event-analysis-evidence"
+                   for x in layer.details)
+
+
+class TestEventTableVocabSyncWithProducer:
+    """R14 round-8 生产者-检查器一致：`report_qc` 事件表结构核验的类型/维度
+    词表由 taxonomy YAML（生产者单一源 `event_type_label`/`_event_dimension`
+    的数据源）锁定——taxonomy 增改类型/维度而词表未同步时本组先红。"""
+
+    _TAXONOMY = (Path(__file__).resolve().parents[1]
+                 / "scripts" / "references" / "event_type_taxonomy.yaml")
+
+    def _taxonomy(self) -> dict:
+        yaml = pytest.importorskip("yaml")
+        return yaml.safe_load(self._TAXONOMY.read_text(encoding="utf-8"))
+
+    def test_type_labels_match_taxonomy(self):
+        from report_qc import _EVENT_TYPE_LABELS
+        types = self._taxonomy().get("event_types", {})
+        labels = {v.get("label") for v in types.values()
+                  if isinstance(v, dict) and v.get("label")}
+        assert set(_EVENT_TYPE_LABELS) == labels
+
+    def test_dimension_labels_match_taxonomy(self):
+        from report_qc import _EVENT_DIMENSION_LABELS
+        types = self._taxonomy().get("event_types", {})
+        dims = {v.get("impact_dimension") for v in types.values()
+                if isinstance(v, dict) and v.get("impact_dimension")}
+        # `_event_dimension` 缺省回落后维度为「治理」——词表须含（taxonomy 值集并集）
+        assert set(_EVENT_DIMENSION_LABELS) == dims | {"治理"}
 
 
 class TestQcReportUsesSharedImplementation:

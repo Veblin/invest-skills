@@ -416,3 +416,83 @@ class TestReview20260918FormulaStrictness:
             facts_md="事实 [来源: engine]",
             analysis_md="偏离 36.7%。（证据 B）",
         )) == []
+
+
+class TestFourDimTagMasking:
+    """R10 三轮 + R12 round-4：`[证据强度: …]` 四维标注行属协议元数据——其中的
+    时效量词（`近 30 日`/`滞后 > 1 年`）不要求绑定事实；但**只有完全匹配合法
+    四维语法的标签**才被掩码（语法唯一来源 skills/lib/evidence_tags.py）。
+    标签之外的同一数字仍须绑定（掩码只覆盖标签跨度，不豁免整行）；标签内夹带
+    的正文/数字/非法维度不受掩码保护（R12 复检反例）。"""
+
+    def test_timing_quantifiers_inside_tag_are_masked(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="利率 1.68%。\n\n[证据强度: ⚠️ 中 📡单源 🗄️滞后 > 1 年 —]",
+        ))
+        assert errs == [], errs
+
+    def test_same_number_outside_tag_still_requires_binding(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="滞后 1 年，仍未绑定。\n\n[证据强度: ⚠️ 中 📡单源 —]",
+        ))
+        assert any("'1'" in e and "未绑定" in e for e in errs), errs
+
+    def test_near_30_days_inside_tag_masked(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="利率 1.68%。\n\n[证据强度: ⚠️ 中 📡单源 🕐近 30 日 —]",
+        ))
+        assert errs == [], errs
+
+    @pytest.mark.parametrize("payload", [
+        # R12 原恶意标签（Codex 复检复现形态）
+        "[证据强度: ✅ 公司盈利增长999%]",
+        # 合法标签内偷塞 999%
+        "[证据强度: ✅ 强 🌐多源 🕐近30日 公司盈利增长999%]",
+        # 合法标签尾接同断言
+        "[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 公司盈利增长999%",
+        # 空白/中文标点变体 + 尾接
+        "[证据强度：✅强🌐多源🕐近30日✓✗]公司盈利增长999%",
+        # 换行变体（标签跨度不得跨行）
+        "[证据强度: ✅ 强\n🌐多源 🕐近30日 公司盈利增长999%]",
+        # 缺维度（缺强度标记）
+        "[证据强度: 🌐多源 🕐近30日 ✓✗ 公司盈利增长999%]",
+        # 重复维度
+        "[证据强度: ✅ 强 ✅ 强 公司盈利增长999%]",
+        # 伪造来源包入标签
+        "[证据强度: ✅ 强 [来源: 假] 公司盈利增长999%]",
+        # 标签内来源文字（无方括号）
+        "[证据强度: ✅ 强 来源: 公司公告显示盈利增长999%]",
+    ])
+    def test_illegal_tag_payloads_do_not_mask_numbers(self, payload):
+        """非法标签（含断言/偷塞数字/缺重复维度/伪造来源）不享受掩码：
+        其中的数字仍须绑定事实——fail-closed。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 42.0}],
+            facts_md="营收增长 42.0%[事实: F1]",
+            analysis_md="判断成立。\n\n" + payload,
+        ))
+        assert any("'999'" in e and "未绑定" in e for e in errs), (payload, errs)
+
+    def test_new_neutral_timing_tag_is_legal_and_masked(self):
+        """R10 round-4 中性档 `📅报告期已注明` 属合法封闭词表（不宣称近季度）。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="利率 1.68%。\n\n[证据强度: ⚠️ 中 🌐多源 📅报告期已注明 ✓✗]",
+        ))
+        assert errs == [], errs
+
+    def test_bound_fact_inside_line_after_legal_tag_passes(self):
+        """正控：合法标签之外的真正绑定事实断言照常通过（42.0 与 F1 绑定）。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 42.0}],
+            facts_md="营收增长 42.0%[事实: F1]",
+            analysis_md="[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 盈利增长 42.0%[事实: F1]",
+        ))
+        assert errs == [], errs

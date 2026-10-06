@@ -145,7 +145,7 @@ v0.2.4 R12h **多源降级链**：L3 行情类（kline/quote/basic_info/sharehol
 
 ## 核心结论
 [2-3 句最重要的判断，每条携带支撑数据]
-[证据强度: ✅/⚠️/❓ 🌐/📡/🔮 🕐/📅/🗄️ ✓✓/✓✗/—]
+[证据强度: ✅ 强 🌐 多源 📅 报告期已注明 ✓✓ 跨源一致]
 
 ## 逻辑链
 1. 数据 A → 推论 B → 子结论 C
@@ -281,7 +281,7 @@ PE / PB / PS
 
 ### SOP-EV 证据强度
 
-可靠性 ✅/⚠️/❓ | 丰富度 🌐/📡/🔮 | 时效 🕐/📅/🗄️ | 交叉验证 ✓✓/✓✗/—
+按实际证据填写完整四维，顺序为强度→来源→时效→交叉；图标必须带匹配注解，不能只填图标或追加自由尾注。强度：✅ 强 / ⚠️ 中 / ❓ 弱；来源：🌐 多源 / 📡 单源 / 🔮 推测；时效：🕐 近 30 日 / 📅 近季度或报告期已注明 / 🗄️ 滞后 >1 年；交叉：✓✓ 跨源一致 / ✓✗ 源间有差异 / — 单源无验证。上方模板是格式示例，不能照抄其证据评级；正文判断另带来源/事实绑定。
 
 ---
 
@@ -507,8 +507,8 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 1. **先出 md**：`report SYMBOL` → `reports/{symbol}-{name}/{ts}.draft.md`（分析段以占位符保留，qc 的 F0-3 会拦截未填占位——**正文写完立刻填写**）
 2. **再写分析协议**（输入路径任意；引擎会把已校验的段原样复制到 `<报告>.analysis.json` 同代侧车，故建议直接写在报告同目录），段结构：
    `[{module, title, facts_md, analysis_md, evidence_tag, position, facts?}]`
-   - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（带 [证据: X] / [证据强度: ...]）
-   - `evidence_tag`：A-D 或 L1-L4；`position` ∈ events/valuation/financials/northbound/holders/refs/conclusion
+   - `facts_md`：事实块（带 [来源: ...]）；`analysis_md`：逻辑推演（每条断言带 [来源: ...] / [证据: A-C] / 真实 [事实: F…]；证据强度标签仅是元数据，不能替代绑定）
+   - `evidence_tag`：A-D 或 L1-L4，可附上述完整四维序列（如 `B ⚠️ 中 📡 单源 📅 报告期已注明 —`）；禁止任意尾注或半截序列；`position` ∈ events/valuation/financials/northbound/holders/refs/conclusion
    - **`facts`（协议层可选，交付路径必填——P0 数字纪律的机器保证只在带它时生效）**：固定快照链还须逐项提供 `source_path`（封存 JSON 的点路径，可用 `dimension_by_name.<维度>.data...`，必要时显式 `source_scale`）或外部原文 `source_url`；前者由 `validate-analysis --collection-id` 与 `report --collection-id` 复核数值，后者须人工核验原文。
      本段数值事实数组 `[{id: "F1", value: 12.5, formula: "…", field: "valuation.pe_ttm"}]`。
      **`value` 必填且必为数值**（只写 `field` 不写 `value` 会 fail-loud：`value 必为数值`）；

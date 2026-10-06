@@ -157,6 +157,11 @@ def _v3_bull_bear_implied_growth(
         ig["rf_is_default"] = risk_free_is_default
         # C2-a：美元口径 rf 同默认值处理——不进入方向解读（5c/5d 闸门）
         ig["rf_is_wrong_currency"] = rf["is_wrong_currency"]
+        # R1（2026-10-04）：来源/币种未确认同暂停；rf_usable=仅 CNY 确认准入
+        ig["rf_is_currency_unconfirmed"] = rf["is_currency_unconfirmed"]
+        ig["rf_usable"] = rf["rf_usable"]
+        # R11：无效输入降级说明（非空时消费者如实披露，不得静默）
+        ig["rf_note"] = rf.get("degraded_note", "")
         ig["rf_label"] = rf["label"]
     fin = _get_dim_data(dims, "financials")
     cagr, np_cagr = None, None
@@ -309,29 +314,41 @@ def _section_bull_bear(
                 f"（分位 {pe_pct:.1f}%{_pct_median_inline(pe_med)}），"
                 f"低于历史上大多数时期的估值中枢。"
             ),
+            # R15（2026-10-05 round-7）：原文「低分位→情绪悲观/负面预期已计入→
+            # 回归动力→股价上升」为无证据的确定因果链（低分位不证明悲观预期
+            # 已计入，也不保证回归）。改为位置读数 + 两种待验证解释；数值保留。
+            # R15 round-8：删除「低分位可由盈利下修本身造成」——静态恒等式
+            # PE=P/E 下正盈利下降而价格不变时 PE 反而升高；低 PE 陷阱成立
+            # 需要条件（盈利处高点将下修、或价格调整更大/更快），见报告规范 §9.4。
             "transmission": (
-                "低估值分位 → 市场对该标的情绪悲观，定价已计入较多负面预期 → "
-                "若基本面不发生实质性恶化，PE 存在向历史中位数回归的动力 → "
-                "估值修复将推动股价上升。"
+                "低估值分位是相对自身历史的**位置读数**——它不证明市场已计入"
+                "悲观预期，也不保证均值回归。待验证解释：若盈利不恶化，分位存在"
+                "向历史中位数方向修复的条件；反向解释（同等成立）：「低 PE 陷阱」"
+                "须成立条件——PE=P/E，正盈利下修本身会**抬高** PE；低分位与"
+                "盈利下修并存的路径只能是价格调整更大/更快，或当前盈利处高点、"
+                "下修后 PE 回升使「便宜」表象消失——本快照不能区分，不作方向判断。"
             ),
             "numbers": [],
             "strength": "⚠️ 中",
         }
         if latest_pe is not None:
-            chain["numbers"].append(f"- 当前 PE: {latest_pe:.1f}x")
+            # C3/R14（2026-10-05 全量审查）：PE 显示精度与报告其余部分统一为
+            # 两位小数（此前 .1f 输出 19.3x / 28.4x，与正文 19.32x / 28.45x
+            # 同一对象两种精度）。
+            chain["numbers"].append(f"- 当前 PE: {latest_pe:.2f}x")
         chain["strength"] = "✅ 强" if (pe_pct is not None and pe_pct < 10) else "⚠️ 中"
         # implied market cap — 市值比例法（当前市值 × PE 比值，净利润口径抵消；
         # 不再用累计 YTD 净利 × TTM PE，避免 0331/0630/0930 报告期低估 2-4 倍）
         if mcap_v is not None and mcap_v > 0 and latest_pe is not None:
             median_pe = _historical_pe_median(val_cache, dims)
             chain["numbers"].append(
-                f"- 当前市值 {_fmt_v2(mcap_v * ONE_PER_YI)}，当前 PE {latest_pe:.1f}x"
+                f"- 当前市值 {_fmt_v2(mcap_v * ONE_PER_YI)}，当前 PE {latest_pe:.2f}x"
                 "（来源: valuation 维度）"
             )
             if median_pe is not None and median_pe > 0:
                 implied_mc = mcap_v * (median_pe / latest_pe)
                 chain["numbers"].append(
-                    f"- 若 PE 修复至历史中位数 {median_pe:.1f}x（来源: valuation 维度），"
+                    f"- 若 PE 修复至历史中位数 {median_pe:.2f}x（来源: valuation 维度），"
                     f"对应市值约 {_fmt_v2(implied_mc * ONE_PER_YI)}"
                 )
             else:
@@ -348,9 +365,11 @@ def _section_bull_bear(
             # detail 承载（含分位 % 与中位数）。
             "title": "估值分位处历史低位参考信号",
             "assumption": f"{risk_bull_signal.get('detail', '估值分位处历史低位')}",
+            # R15（round-7）：撤「可关注修复机会」操作指向；保留待验证假设标注。
             "transmission": (
-                "估值分位处历史低位 → 历史上类似阶段曾出现估值修复窗口 "
-                "[推测，待验证：样本案例与胜率尚未补足] → 可关注估值修复机会。"
+                "该行为估值位置读数（分位与中位数见上）；「历史上类似阶段曾出现"
+                "修复窗口」为待验证假设——样本案例与胜率尚未补足，"
+                "不构成方向判断，也不作为操作依据。"
             ),
             "numbers": [f"- 信号来源: risk_scanner / {risk_bull_signal.get('category', 'market')}"],
             "strength": "⚠️ 中",
@@ -360,22 +379,27 @@ def _section_bull_bear(
     # Bull chain 3: 资金流入链
     if nb_v is not None and nb_v > 0:
         chain = {
-            "title": "北向资金持续流入",
+            # R15 round-8：标题只描述窗口读数——nb_v 为近 10 日累计净额，
+            # 「持续流入」是对窗口内逐日形态的外推（累计和为正不代表逐日持续），
+            # 标题改为窗口口径。
+            "title": "北向资金近 10 日净流入",
+            # R15（round-7）：资金流读数为价格/持仓结果，不证明「看多意愿」
+            # 或未来买入；撤确定因果链。
             "assumption": (
-                f"北向资金近 10 个交易日净流入 {_fmt_v2(nb_v)}，"
-                f"外资对该标的存在配置意愿。"
+                f"北向资金近 10 个交易日净流入 {_fmt_v2(nb_v)}（资金流读数）。"
             ),
             "transmission": (
-                "北向资金净流入 → 外资看多信号 → 增量资金入场推升需求 → "
-                "短期量价配合，有利于股价表现。"
+                "北向净流入是资金流**读数**——不直接等于「外资看多」或后续"
+                "流入意愿；「增量资金推升需求」为待验证解释（反向解释：被动"
+                "配置/对冲交易同样可产生净流入），不构成方向判断。"
             ),
             "numbers": [f"- 近 10 日北向净流入: {_fmt_v2(nb_v)}"],
             "strength": "⚠️ 中",
         }
         if latest_pe is not None and np_v is not None and np_v > 0:
             chain["numbers"].append(
-                f"- 当前 PE {latest_pe:.1f}x，最新报告期净利润（累计口径）{_fmt_v2(np_v)}，"
-                f"资金流入行为可能加速估值回归"
+                f"- 当前 PE {latest_pe:.2f}x，最新报告期净利润（累计口径）{_fmt_v2(np_v)}；"
+                f"资金流与估值的联动未经检验（仅列读数）"
             )
         bull_chains.append(chain)
 
@@ -403,14 +427,17 @@ def _section_bull_bear(
             quality_items.append(f"经营现金流/净利润覆盖 = {ocf / np_v:.2f}")
         chain = {
             "title": "基本面质量偏优",
+            # R15（round-7）：「竞争优势/治理良好/盈利更稳/估值溢价/推动上行」
+            # 为一串无证据推断；改为读数 + 待验证解释 + 反向解释。
             "assumption": (
-                f"财务数据显示盈利能力较强：{'；'.join(quality_items)}。"
+                f"财务数据读数：{'；'.join(quality_items)}（阈值/字段读数）。"
                 "OCF/净利润为覆盖关系指标，不构成质量与持续性结论。"
             ),
             "transmission": (
-                "高 ROE / 同行领先 → 企业具有竞争优势或良好管理层治理（推断） → "
-                "盈利稳定性或高于同业（推断；现金流覆盖比只证明覆盖关系） → "
-                "市场或给予估值溢价 → 支撑当前股价甚至推动上行 [机制推断，待验证]。"
+                "上述各项为**读数**；「竞争优势或治理良好」为推断，"
+                "「盈利稳定性高于同业」「市场给予估值溢价」均为待验证解释——"
+                "价格是否已反映上述质量因素未经检验，不构成方向判断"
+                "（反向解释：质量因素已在定价中 / 行业因素未被剥离）。"
             ),
             "numbers": [],
             "strength": "✅ 强" if (roe_judge is not None and roe_judge >= 22) else "⚠️ 中",
@@ -426,10 +453,13 @@ def _section_bull_bear(
     if svi is not None and svi > 0:
         chain = {
             "title": "个股相对强势",
-            "assumption": f"个股近 20 个交易日跑赢其行业指数 {svi:+.2f}%，体现短期相对强势。",
+            # R15（round-7）：原文「跑赢行业→资金主动配置→动量延续→有利多头」
+            # 为无证据因果链（相对涨跌不能证明主动配置或未来优势）。
+            "assumption": f"个股近 20 个交易日相对行业指数超额 {svi:+.2f}%（相对涨跌读数）。",
             "transmission": (
-                "跑赢行业 → 资金主动配置该标的而非行业 β → "
-                "相对动量可能延续 → 短期趋势有利于多头。"
+                "相对涨跌读数是价格结果——不能证明「资金主动配置」（无资金流"
+                "证据），也不构成未来相对优势；「相对动量延续」为待验证假设，"
+                "反向解释（行业内部结构差异/单日噪声）未被排除，不作方向判断。"
             ),
             "numbers": [f"- 近 20 日相对行业超额收益: {svi:+.2f}%"],
             "strength": "⚠️ 中",
@@ -442,8 +472,9 @@ def _section_bull_bear(
             "title": "ERP 处于高位，权益风险溢价补偿丰厚",
             "assumption": f"ERP 5 年分位 {erp_pct:.1f}%，股权风险溢价处于历史偏高水平。",
             "transmission": (
-                "ERP 高位 → 股票相对债券的性价比突出 → "
-                "长期资金可能增加权益配置 → 宏观环境利好权益资产。"
+                "ERP 分位偏高是相对估值的**读数**（权益相对债券的补偿位置）；"
+                "「长期资金可能增加权益配置」为待验证解释（无资金流证据），"
+                "不构成宏观方向判断。"
             ),
             "numbers": [f"- ERP 5 年分位: {erp_pct:.1f}%"],
             "strength": "⚠️ 中",
@@ -462,9 +493,10 @@ def _section_bull_bear(
                 f"高于大多数历史时期的估值水平。"
             ),
             "transmission": (
-                "高估值分位 → 市场对该标的预期已较为充分 → "
-                "一旦基本面不及预期，估值和盈利面临「双杀」 → "
-                "PE 向历史中枢回归将导致股价下行。"
+                "高估值分位是相对自身历史的位置**读数**——不证明市场预期已充分"
+                "计入；「双杀」与「向中枢回归导致下行」为待验证情景路径"
+                "（需盈利与价格路径共同验证），反向解释（盈利上修可消化高估值）"
+                "未被排除，不作方向判断。"
             ),
             "numbers": [],
             "strength": "✅ 强" if (pe_pct is not None and pe_pct > 90) else "⚠️ 中",
@@ -496,8 +528,8 @@ def _section_bull_bear(
                 f"超过 5 亿元预警阈值。"
             ),
             "transmission": (
-                "北向大幅流出 → 外资主动减仓 → 抛压增加 → "
-                "短期资金面恶化，压制股价表现。"
+                "北向净流出是资金流**读数**——不能证明「外资主动减仓」或未来"
+                "抛压；「资金面恶化压制股价」为待验证解释，不作方向判断。"
             ),
             "numbers": [f"- 近 10 日北向净流出: {_fmt_v2(nb_v)}（阈值 5 亿）"],
             "strength": "⚠️ 中",
@@ -511,8 +543,9 @@ def _section_bull_bear(
             "title": "ROE 偏低",
             "assumption": f"最近年报 ROE 为 {roe_judge:.1f}%，低于 10% 的盈利效率门槛。",
             "transmission": (
-                "低 ROE → 资本回报效率不足 → 企业内生增长动力有限 → "
-                "市场对其给予估值折价 → 压制股价。"
+                "ROE 低于阈值为**读数**；「内生增长动力有限」「市场给予估值"
+                "折价」为待验证解释（反向解释：低 ROE 可由一次性因素/周期位置"
+                "造成），不构成方向判断。"
             ),
             "numbers": [f"- ROE: {roe_judge:.1f}%{_roe_suffix}（<10% 视为偏低）"],
             "strength": "⚠️ 中",
@@ -530,8 +563,9 @@ def _section_bull_bear(
                 f"（覆盖关系指标，不单独构成利润质量结论）。"
             ),
             "transmission": (
-                "利润与现金流不匹配 → 盈利可能依赖应收账款或非现金项目（推断） → "
-                "现金流紧张增加运营风险 → 市场调整盈利质量预期 [机制推断，待验证] → 估值受压。"
+                "覆盖比低于告警线为**读数**；「盈利可能依赖应收账款或非现金项目」"
+                "为推断，「现金流紧张增加运营风险」「估值受压」为待验证解释——"
+                "需现金流量表构成核验，不构成方向判断。"
             ),
             "numbers": [
                 f"- OCF/NP 比率: {ocf / np_v:.2f}",
@@ -547,8 +581,8 @@ def _section_bull_bear(
             "title": "个股相对弱势",
             "assumption": f"个股近 20 个交易日跑输其行业指数 {svi:+.2f}%。",
             "transmission": (
-                "跑输行业 → 资金对该标的出现避险行为 → "
-                "相对弱势可能延续 → 短期趋势对多头不利。"
+                "相对涨跌读数是价格结果——不能证明「避险行为」或未来相对劣势；"
+                "「相对弱势延续」为待验证假设，反向解释未被排除，不作方向判断。"
             ),
             "numbers": [f"- 近 20 日相对行业超额收益: {svi:+.2f}%"],
             "strength": "⚠️ 中",
@@ -561,9 +595,10 @@ def _section_bull_bear(
             "title": f"风险信号: {sig['name']}",
             "assumption": sig.get("detail", "触发风险监测信号。"),
             "transmission": (
-                f"「{sig.get('category', '')}」类别风险触发 → "
-                f"影响企业的 {sig.get('name', '相关')} 方面 → "
-                f"若持续或加剧，市场可能下调盈利预期和估值倍数 → 股价承压。"
+                f"该信号为阈值触发的**读数**（{sig.get('severity', '')} 级）；"
+                f"其对「{sig.get('name', '相关')}」的实际影响未经核验——"
+                f"「若持续或加剧，市场下调盈利预期与估值倍数」为待验证情景路径，"
+                f"不构成方向判断。"
             ),
             "numbers": [f"- 严重程度: {sig.get('severity', '')} 级"],
             "strength": "✅ 强" if sig.get("severity") == "高" else "⚠️ 中",
@@ -584,12 +619,12 @@ def _section_bull_bear(
             "title": "估值未处于低位 — 修复安全边际有限",
             "assumption": (
                 f"当前 PE 处于历史 {pe_zone or '中性偏高区'}（{pe_pct:.1f}% 分位{_pct_median_inline(pe_med)}），"
-                f"并非历史低位，估值端不具备低估安全边际。"
+                f"并非历史低位（位置读数）。"
             ),
             "transmission": (
-                "估值分位不低 → 市场已给予该标的中性以上定价 → "
-                "若基本面出现边际走弱或不及预期 → 估值缺乏低位缓冲，"
-                "股价对负面消息的敏感度更高。"
+                "估值分位是相对自身历史的位置**读数**；「市场已给予中性以上"
+                "定价」「估值缺乏低位缓冲、对负面消息更敏感」为待验证解释，"
+                "反向解释（分位受窗口与盈利路径共同影响）未被排除，不作方向判断。"
             ),
             "numbers": [f"- 当前 PE 分位: {pe_pct:.1f}%（{pe_zone or '中性偏高区'}{_pct_median_inline(pe_med)}）[来源: valuation 维度]"],
             "strength": "❓ 弱",
@@ -618,9 +653,9 @@ def _section_bull_bear(
                 f" [来源: industry_peers 维度]。"
             ),
             "transmission": (
-                "同行排名靠后 → 议价能力/抗风险能力相对偏弱 → "
-                "若行业竞争加剧或格局生变，公司份额或毛利率可能率先承压 → "
-                "盈利能见度下降，市场可能下调估值倍数。"
+                "同行排名为相对位置**读数**；「议价/抗风险能力偏弱」为推断，"
+                "「竞争加剧时份额或毛利率率先承压、估值倍数下修」为待验证"
+                "情景路径，不构成方向判断。"
             ),
             "numbers": [f"- {it}" for it in items],
             "strength": "⚠️ 中",
@@ -762,8 +797,9 @@ def _section_bull_bear(
             f"{_bull_bear_valuation_divergence_text(pe_pct, pe_zone, float(rev_yoy))}"
         )
     # divergence: implied growth vs actual CAGR
-    if (ig.get("g_implied") is not None and not ig.get("rf_is_default")
-            and not ig.get("rf_is_wrong_currency")
+    # R1：准入判据收敛为 rf_usable（仅确认 CNY）——默认/美元口径/未确认币种
+    # 一律不把 g_implied 用作分歧读数
+    if (ig.get("g_implied") is not None and ig.get("rf_usable")
             and ref_cagr is not None and ref_label):
         divergence_count += 1
         g_pct = ig["g_implied"] * 100
@@ -795,12 +831,21 @@ def _section_bull_bear(
     # ── 5d. 预期差 — unchanged ──────────────────────────
     lines.append("### 5d. 预期差")
     if ig.get("rf_is_default"):
-        lines.append("- 无风险利率采用默认假设，暂停隐含增长比较和方向判断；须补同估值时点的实际利率。[来源: market_structure.erp 缺口]")
+        _rf_note = f"（{ig['rf_note']}）" if ig.get("rf_note") else ""
+        lines.append(
+            f"- 无风险利率采用默认假设{_rf_note}，暂停隐含增长比较和方向判断；"
+            "须补同估值时点的实际利率。[来源: market_structure.erp 缺口]")
     elif ig.get("rf_is_wrong_currency"):
         lines.append(
             f"- ⚠️ 无风险利率仅有美元口径（{ig.get('rf_label') or '美债 10Y'}），"
             "与 A 股折现率币种不一致——暂停隐含增长比较和方向判断；"
             "须补同币种人民币利率。[来源: market_structure.erp.cn10y 不可得]"
+        )
+    elif ig.get("rf_is_currency_unconfirmed"):
+        lines.append(
+            f"- ⚠️ 无风险利率来源/币种未确认（{ig.get('rf_label') or '来源未知'}）——"
+            "无法确认与 A 股折现率同币种，暂停隐含增长比较和方向判断；"
+            "须补带来源标注的人民币利率。[来源: market_structure.erp.y10_source 缺口]"
         )
     elif ig.get("g_implied") is not None:
         g_pct = ig["g_implied"] * 100
@@ -1182,7 +1227,10 @@ def _section_left_right_probability(
             right_items.append(f"② MACD DIF={macd.get('dif')} DEA={macd.get('dea')}，证据强度：❓")
     sw = market_structure.get("sw_index")
     if sw and sw.get("stock_vs_industry_pct") is not None and sw["stock_vs_industry_pct"] > 0:
-        right_items.append(f"③ 个股跑赢行业（{sw['stock_vs_industry_pct']:+.2f}%），证据强度：⚠️")
+        # R15（round-7）：相对涨跌为读数，不映射为「主动配置/未来优势」。
+        right_items.append(
+            f"③ 个股近 20 日相对行业超额 {sw['stock_vs_industry_pct']:+.2f}%"
+            "（相对涨跌读数），证据强度：⚠️")
     # P1d：右侧趋势延续信号组合（满足 ≥2/3 视为强化）
     continuation_hits: list[str] = []
     fin_lr = _get_dim_data(dims, "financials")

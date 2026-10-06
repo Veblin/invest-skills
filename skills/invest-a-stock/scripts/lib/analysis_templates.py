@@ -92,12 +92,16 @@ class EventClassificationCard:
 
     Groups events from collection["events"] by type and enriches
     each group with taxonomy metadata and direction hints.
+
+    R13（2026-10-05）：`dimension_hint`/`duration_hint` 是 taxonomy 类型默认
+    线索（不是已核影响）——字段名带 hint、消费方须按线索呈现；影响结论
+    须取得公告原文后另写（§9.4.4）。
     """
     event_type: str
     event_label: str
     events: list[dict]
-    impact_dimension: str
-    default_duration_hint: str
+    dimension_hint: str
+    duration_hint: str
     direction_hint: str
     direction_confidence: str
     direction_note: str
@@ -363,8 +367,8 @@ def _build_event_classification_cards(
                 event_type=etype,
                 event_label=label,
                 events=ev_list,
-                impact_dimension=impact_dim,
-                default_duration_hint=duration,
+                dimension_hint=impact_dim,
+                duration_hint=duration,
                 direction_hint=direction_hint,
                 direction_confidence=direction_confidence,
                 direction_note=direction_note,

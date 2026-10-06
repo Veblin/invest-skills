@@ -65,9 +65,12 @@ PUBLISH_SKILLS = [
     "invest-a-discover-scan",
 ]
 
-# 包内排除的路径（tests/__pycache__ 等）
-EXCLUDE_DIRS = {"tests", "__pycache__", ".pytest_cache"}
-EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".DS_Store"}
+# 包内排除的路径（tests/__pycache__ 等）。
+# R8（2026-10-04 独立复检）：`reports/` 是运行/测试产物目录（test_default_store
+# 直写 skills/invest-a-stock/reports/，实测 33 文件）——发布包不得携带，
+# 原仓库产物保留（本常量只影响打包收集）。
+EXCLUDE_DIRS = {"tests", "__pycache__", ".pytest_cache", "reports"}
+EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".DS_Store", ".log"}
 
 # skillhub 文件类型白名单（.toml/.lock 不在白名单 → 用 requirements.txt）
 ALLOWED_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml", ".js", ".cjs", ".mjs", ".ts",

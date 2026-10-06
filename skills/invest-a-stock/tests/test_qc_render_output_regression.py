@@ -307,3 +307,45 @@ def test_insight_headings_stay_coupled_to_qc_structure_rule(tmp_path: Path) -> N
     assert layer.details == [] or all(
         d["id"] != "insight-structure" for d in layer.details
     ), f"渲染器标题与 QC 必需区块已漂移: {[d['message'] for d in layer.details]}"
+
+
+# ── R14 round-8：事件表生产者（渲染器）↔ 检查器（report_qc）结构耦合守卫 ────
+
+
+def test_event_table_rows_satisfy_qc_structure() -> None:
+    """渲染器事件表的表头与数据行必须通过 `report_qc` 的登记结构核验。
+
+    R14 round-8：事件表豁免由「表头常量整块豁免」改为「表头识别 + 数据行
+    逐行结构核验」（Codex event_copied_header）。本用例直接渲染真实渲染器
+    输出（>15 条事件以覆盖截断行），把「渲染器改了事件行结构、检查器词表
+    没同步」的漂移显式化——两侧任一处漂移先在这里红。
+    """
+    import report_qc
+
+    coll = collection_v2_minimal()
+    coll["events"] = [
+        {"date": f"2026-{m:02d}-{d:02d}",
+         "title": f"关于示例事项{i}的公告", "type": "buyback"}
+        for i, (m, d) in enumerate(
+            [(1, 1), (1, 15), (2, 1), (2, 15), (3, 1), (3, 15), (4, 1),
+             (4, 15), (5, 1), (5, 15), (6, 1), (6, 15), (7, 1), (7, 15),
+             (8, 1), (8, 15), (9, 1)]
+        )
+    ]
+    text = render_report_v3(coll, _SYMBOL, mode="full")
+    lines = text.splitlines()
+    header = next(ln for ln in lines if ln.startswith("|") and "公告标题" in ln)
+    assert tuple(report_qc._table_cells(header)) == report_qc._EVENT_TIMELINE_HEADER
+    i = lines.index(header)
+    block: list[str] = []
+    for ln in lines[i + 1:]:
+        if not ln.strip().startswith("|"):
+            break
+        block.append(ln)
+    data_rows = [ln for ln in block if not report_qc._is_table_separator(ln)]
+    assert len(data_rows) >= 2, "事件表应含表头与数据行"
+    for ln in data_rows[1:]:
+        assert report_qc._event_timeline_row_ok(ln), f"渲染器事件行未过结构核验: {ln}"
+    assert any("（另有" in ln for ln in data_rows), ">15 条应渲染截断行"
+    findings = report_qc.event_analysis_evidence_findings(text)
+    assert not [f for f in findings if f["id"].endswith("table-evidence")], findings

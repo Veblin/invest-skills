@@ -190,8 +190,11 @@ def _dcf_try_wacc(
         beta = beta_meta["beta"]
 
     # rf: user override > data source > default（C2-a：优先人民币口径 cn10y；
-    # 仅美元口径 → rf_is_wrong_currency，与默认值同走「暂停数值 DCF」闸门）
+    # 仅美元口径 → rf_is_wrong_currency；R1：来源/币种未确认 →
+    # rf_is_currency_unconfirmed——三者同走「暂停数值 DCF」闸门）
     rf_is_wrong_currency = False
+    rf_is_currency_unconfirmed = False
+    rf_invalid_note = ""
     rf_label = ""
     if rf_override is not None:
         risk_free = rf_override
@@ -203,6 +206,8 @@ def _dcf_try_wacc(
         risk_free_raw = rf["rate_pct"]
         risk_free_is_default = rf["is_default"]
         rf_is_wrong_currency = rf["is_wrong_currency"]
+        rf_is_currency_unconfirmed = rf["is_currency_unconfirmed"]
+        rf_invalid_note = rf.get("degraded_note", "")
         rf_label = rf["label"]
         risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
 
@@ -213,9 +218,14 @@ def _dcf_try_wacc(
     if beta_meta.get("is_default"):
         missing.append(f"beta 使用默认值 1.0（{beta_meta.get('source', '未知')}）")
     if risk_free_is_default:
-        missing.append("无风险利率使用默认值 2.5%（同币种 10Y 国债不可得）[推测，待验证]")
+        _rf_suffix = f"；{rf_invalid_note}" if rf_invalid_note else ""
+        missing.append(
+            "无风险利率使用默认值 2.5%（同币种 10Y 国债不可得）"
+            f"{_rf_suffix}[推测，待验证]")
     elif rf_is_wrong_currency:
         missing.append(f"无风险利率仅有美元口径（{rf_label}），与 A 股折现率币种不一致")
+    elif rf_is_currency_unconfirmed:
+        missing.append(f"无风险利率来源/币种未确认（{rf_label}），无法确认与 A 股折现率同币种")
     if erp_override is not None:
         missing.append(f"ERP 使用用户指定值 {erp_override*100:.1f}%")
     if rf_override is not None:
@@ -226,6 +236,8 @@ def _dcf_try_wacc(
     wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=erp, cost_of_debt=None)
     wacc_result["risk_free_is_default"] = risk_free_is_default
     wacc_result["rf_is_wrong_currency"] = rf_is_wrong_currency
+    wacc_result["rf_is_currency_unconfirmed"] = rf_is_currency_unconfirmed
+    wacc_result["rf_degraded_note"] = rf_invalid_note
     wacc_result["rf_label"] = rf_label
     wacc_result["beta"] = beta
     wacc_result["beta_is_default"] = beta_meta.get("is_default", False)
@@ -464,6 +476,9 @@ def _section_dcf_valuation(
     elif wacc_result.get("rf_is_wrong_currency"):
         # C2-a：美元口径 rf 与 A 股折现币种不一致——同默认值一样不得进入数值估值
         default_inputs.append("无风险利率（美元口径≠A 股折现币种）")
+    elif wacc_result.get("rf_is_currency_unconfirmed"):
+        # R1：来源/币种未确认同样不得进入数值估值
+        default_inputs.append("无风险利率（来源/币种未确认）")
     if wacc_result.get("beta_is_default"):
         default_inputs.append("Beta")
     if default_inputs:
@@ -471,10 +486,14 @@ def _section_dcf_valuation(
             "关键输入采用默认值（" + "、".join(default_inputs)
             + "），暂停数值 DCF 三情景、概率权重和敏感性矩阵。"
         )
+        if wacc_result.get("rf_degraded_note"):
+            lines.append(f"- ⚠️ {wacc_result['rf_degraded_note']}。")
         if wacc_result.get("beta_is_default"):
             lines.append(f"- Beta 缺口：{wacc_result.get('beta_source') or '来源不可得'}。")
         missing_evidence = []
-        if wacc_result.get("risk_free_is_default") or wacc_result.get("rf_is_wrong_currency"):
+        if (wacc_result.get("risk_free_is_default")
+                or wacc_result.get("rf_is_wrong_currency")
+                or wacc_result.get("rf_is_currency_unconfirmed")):
             missing_evidence.append("同币种、同估值时点的利率")
         if wacc_result.get("beta_is_default"):
             missing_evidence.append("可复核的 Beta")

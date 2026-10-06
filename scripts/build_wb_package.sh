@@ -22,13 +22,19 @@ cp scripts/wb_bundle/SKILL.md       "$PKG/SKILL.md"
 cp scripts/wb_bundle/bootstrap.sh   "$PKG/scripts/bootstrap.sh"
 cp scripts/wb_bundle/README-安装.md "$PKG/README-安装.md"
 
-# 仓库布局：公开技能 + 共享 lib（排除已退出入口与测试/缓存）
+# 仓库布局：公开技能 + 共享 lib（排除已退出入口与测试/缓存/运行产物）
+# R8（2026-10-04 独立复检）：skills/*/reports/ 是测试/运行产物（test_default_store
+# 直写仓库目录），曾整目录进 WB 包（32 个文件样本为 `ok`）；发布包不得携带
+# 运行 reports、pytest 缓存与日志。既有产物文件保留在仓库（本规则只排除打包）。
 rsync -a \
   --exclude 'invest-a-limit-up' \
   --exclude 'invest-a-event-calendar' \
   --exclude 'tests' \
+  --exclude 'reports' \
   --exclude '__pycache__' \
+  --exclude '.pytest_cache' \
   --exclude '*.pyc' \
+  --exclude '*.log' \
   --exclude '.DS_Store' \
   skills/ "$PKG/skills/"
 

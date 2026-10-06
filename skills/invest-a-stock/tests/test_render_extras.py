@@ -204,7 +204,7 @@ class TestExogenousShockRemoved:
 
         删除依据（`host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §2.1 A2）：
         表内只有日期与标题，无正文与影响；固定「外生叙事」句无内容依据。事件
-        信息由事件时间线段（类型/影响维度/持续性质）与 insight 事件节承担。
+        信息由事件时间线段（日期/类型/标题/涉及维度（类型默认））与 insight 事件节承担。
         反向守卫：NewsCard 数据仍在采集底稿，不得连采集能力一起删。
         """
         from lib import render_extras

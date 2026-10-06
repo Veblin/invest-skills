@@ -36,8 +36,10 @@ class TestClassifyEvent:
     def test_buyback(self):
         result = _classify_event({"title": "关于回购公司股份的公告", "raw_type": ""})
         assert result["event_type"] == "buyback"
-        assert result["impact_dimension"] == "估值"
-        assert result["duration"] == "中长期变量"
+        # R13（2026-10-05）：类型默认线索以 *_hint 输出；影响结论键不再产出
+        assert result["dimension_hint"] == "估值"
+        assert result["duration_hint"] == "中长期变量"
+        assert "impact_dimension" not in result and "duration" not in result
 
     def test_equity_incentive(self):
         result = _classify_event({"title": "股权激励计划草案", "raw_type": ""})
@@ -126,8 +128,8 @@ class TestClassifyEvent:
     def test_other_default(self):
         result = _classify_event({"title": "关于召开股东大会的提示性公告", "raw_type": ""})
         assert result["event_type"] == "other"
-        assert result["impact_dimension"] == "治理"
-        assert result["duration"] == "短期扰动"
+        assert result["dimension_hint"] == "治理"
+        assert result["duration_hint"] == "短期扰动"
 
     def test_classify_uses_raw_type_fallback(self):
         """当标题不匹配时，应检查 raw_type 字段"""
@@ -142,15 +144,17 @@ class TestClassifyEvent:
         with patch("lib.events.load_event_taxonomy", return_value={"event_types": {}}):
             result = _classify_event({"title": "关于回购公司股份的公告", "raw_type": ""})
         assert result["event_type"] == "buyback"
-        assert result["impact_dimension"] == "估值"
-        assert result["duration"] == "中长期变量"
+        # R13（2026-10-05）：类型默认线索以 *_hint 输出；影响结论键不再产出
+        assert result["dimension_hint"] == "估值"
+        assert result["duration_hint"] == "中长期变量"
+        assert "impact_dimension" not in result and "duration" not in result
 
     def test_other_fallback_uses_other_defaults(self):
         with patch("lib.events.load_event_taxonomy", return_value={"event_types": {}}):
             result = _classify_event({"title": "关于召开股东大会的提示性公告", "raw_type": ""})
         assert result["event_type"] == "other"
-        assert result["impact_dimension"] == "治理"
-        assert result["duration"] == "短期扰动"
+        assert result["dimension_hint"] == "治理"
+        assert result["duration_hint"] == "短期扰动"
 
 
 # ── _get_logic_relation ──

@@ -550,7 +550,7 @@ class TestRenderV3:
         drivers = text.split("## 2.")[1].split("## 3.")[0]
         labels = re.findall(r"→ 解释 ([A-E])：", drivers)
         assert len(labels) >= 2
-        assert "主导因子（声明）:" in drivers
+        assert "主导因子（候选线索，阈值规则筛出，非因果归因）:" in drivers
         assert "净利润环比" in drivers or "基本面" in drivers
 
     def test_render_md_attaches_market_structure(self):

@@ -18,6 +18,8 @@ from .render_utils import (
     _get_dim_data,
     _get_dim_meta,
     _index_dims,
+    finite_price,
+    prices_equal,
     sanitize_error,
 )
 
@@ -938,8 +940,7 @@ def _extract_technical_html(dims: dict) -> dict:
         result.update(macd_html=err_html, rsi_kdj_html="", boll_html="", ma_grid_html=err_html)
         return result
 
-    closes = [r.get("close", 0) or 0 for r in kd]
-    latest_close = closes[-1] if closes else 0
+    latest_close = tech["latest_close"]  # 与 MD 共用剔除无效 bar 后的值/时点
 
     # MACD
     macd = tech.get("momentum", {}).get("macd", {})
@@ -1059,14 +1060,32 @@ def _extract_technical_html(dims: dict) -> dict:
     result["trend_label"] = alignment.get("trend_label", "")
 
     ma_pills = ""
+    # R14（2026-10-05）：均线/收盘有限值判据与 MD 均线表统一走
+    # `render_utils.finite_price`（None/NaN/±inf/≤0 → 不可得）——此前 HTML
+    # 用 `not latest_close`（NaN 漏拦、比较全 False 落入「持平」），MD 用
+    # `is not None + isfinite`（0 值参与比较），同一快照两侧结论可能不同。
+    close_f = finite_price(latest_close)
     for p in (5, 10, 20, 60, 120, 250):
         vals = ma.get(str(p), [])
-        if vals and vals[-1] is not None:
-            ma_v = vals[-1]
+        ma_v = finite_price(vals[-1]) if vals else None
+        if ma_v is not None:
             slope = slopes.get(str(p))
             slope_str = f"斜率{'+' if slope and slope >= 0 else ''}{slope:.1f}%" if slope is not None else "--"
-            pos_str = "上方" if latest_close > ma_v else ("下方" if latest_close < ma_v else "附近")
-            pos_color = "var(--up)" if pos_str == "上方" else ("var(--dn)" if pos_str == "下方" else "var(--tx)")
+            # R7 二轮（2026-10-04 独立复检）：pill 只写「上方/下方」时读者仍按
+            # MA 为主体理解——与 MD 均线表统一为显式主语「收盘价在 MA{p} …」；
+            # 收盘缺失（0/空/非有限）→ 不可得，不得拿无效值参与比较误标方向。
+            if close_f is None:
+                pos_str = f"收盘价不可得"
+                pos_color = "var(--tx)"
+            elif prices_equal(close_f, ma_v):
+                pos_str = f"收盘价与 MA{p} 持平"
+                pos_color = "var(--tx)"
+            elif close_f > ma_v:
+                pos_str = f"收盘价在 MA{p} 上方"
+                pos_color = "var(--up)"
+            else:
+                pos_str = f"收盘价在 MA{p} 下方"
+                pos_color = "var(--dn)"
             slp_color = "var(--up)" if slope and slope >= 0 else ("var(--dn)" if slope and slope < 0 else "var(--tx)")
             border_extra = ';border-color:rgba(56,189,248,.25)' if p == 250 else ''
             name_color = ' style="color:var(--ac)"' if p == 250 else ''
@@ -1092,11 +1111,20 @@ def _extract_technical_html(dims: dict) -> dict:
     vol_info = tech.get("volume", {})
     result["vol5d"] = vol_info.get("avg_vol_5d")
 
-    # MA250
+    # MA250（R7 二轮：同 MD/ma pill 口径——显式收盘主语；不可得不参与比较。
+    # R14：有限值判据走 finite_price，与 MD 一致）
     ma250_vals = ma.get("250", [])
-    if ma250_vals and ma250_vals[-1] is not None:
-        result["ma250_val"] = f"{ma250_vals[-1]:.2f}"
-        result["ma250_pos"] = "上方" if latest_close > ma250_vals[-1] else ("下方" if latest_close < ma250_vals[-1] else "附近")
+    ma250_v = finite_price(ma250_vals[-1]) if ma250_vals else None
+    if ma250_v is not None:
+        result["ma250_val"] = f"{ma250_v:.2f}"
+        if close_f is None:
+            result["ma250_pos"] = "收盘价不可得"
+        elif prices_equal(close_f, ma250_v):
+            result["ma250_pos"] = "收盘价与 MA250 持平"
+        elif close_f > ma250_v:
+            result["ma250_pos"] = "收盘价在 MA250 上方"
+        else:
+            result["ma250_pos"] = "收盘价在 MA250 下方"
 
     # K 线图（R-B3③）：kd_tail 先切片再 compute（A3：derived 无 momentum，
     # 全量算后切片会因停牌 bar 过滤索引错位；kd≤500 时复用现有 tech 免二次计算）

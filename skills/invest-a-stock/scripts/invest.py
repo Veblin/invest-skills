@@ -1324,6 +1324,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             return 2
         print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
     result = None
+    render_view: dict | None = None  # R3 二轮：渲染派生视图（封存体不改写）
     resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
     fixed_input = getattr(args, "collection_id", None) is not None
     if fixed_input:
@@ -1338,6 +1339,28 @@ def cmd_report(args: argparse.Namespace) -> int:
                     print(f"  {error}", file=sys.stderr)
                 return 2
         resumed_from_store = True
+        # R3 二轮（2026-10-04 独立复检）：固定快照的风格重装配必须走**渲染派生
+        # 视图**，不得改写封存体本身——`--emit json` 会导出收藏集内容并要求与
+        # `_meta.report_input_hash` 自洽（一轮实现直接改 result → 导出 digest 与
+        # 哈希失配，Codex 两案例实测 hash_consistent=false）。
+        # 语义：显式 --style 优先；未显式时与 profile 侧车同源回落
+        # user_style.json（build_profile 的同一口径）——避免「缺省时 profile 与
+        # 正文自评互斥」；两者皆无（无档案）则保持封存视图（无冲突面）。
+        eff_style = getattr(args, "style", None)
+        if not eff_style:
+            try:
+                from lib.style_match import load_style
+                eff_style = load_style()
+            except Exception:  # 档案不可读 → 保持封存视图
+                eff_style = None
+        if eff_style:
+            try:
+                from lib.style_match import assemble_style_match
+                sm = assemble_style_match(result, args.symbol, style=eff_style)
+                if sm is not None:
+                    render_view = {**result, "style_match": sm}
+            except Exception:  # 装配失败不阻断报告（同 R10 装配点）
+                pass
         # 合成前可见性（§3.3-3/4）：首版渲染或带 --draft 的渲染时给出可引用字段、
         # 数据窗口与写作约束；最终成品渲染不再重复打印。仅走固定快照链（有封存输入）。
         if not analysis_payload or getattr(args, "draft", None):
@@ -1432,6 +1455,9 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 在哈希校验之后被改写（`--emit json` 输出的载荷因此与自带哈希不自洽）。
     # 改为随渲染调用显式下传；`_meta.strict_rigor` 仍作为回退读法保留。
     strict_rigor = bool(getattr(args, "strict_rigor", False))
+    # R3 二轮：渲染统一走派生视图（固定输入下含本次风格重装配；其余路径
+    # render_view=None → 即 result 本体）。`--emit json` 例外，见渲染分支。
+    view = render_view if render_view is not None else result
     _warn_degraded_collection(result)
     if getattr(args, "material_gap", False):
         try:
@@ -1456,7 +1482,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         key_diff, diff_reason = ((None, "fixed_snapshot") if fixed_input
                                  else _insight_snapshot_diff(args.symbol, result))
         try:
-            insight_model = build_report_model(result, args.symbol, profile,
+            insight_model = build_report_model(view, args.symbol, profile,
                                                key_diff=key_diff, diff_reason=diff_reason,
                                                analysis=analysis_payload)
         except InsightSchemaError as exc:
@@ -1525,10 +1551,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         # 不同代，且 analysis 只进 html、md 静默缺失（同目录两代 md 产物）。
         _trace("final_render", "start", fmt="html")
         md_v2 = render.render_report_v3(
-            result, args.symbol, mode=getattr(args, "mode", "full"),
+            view, args.symbol, mode=getattr(args, "mode", "full"),
             analysis=analysis_payload, profile=profile, strict_rigor=strict_rigor)
         output = render.render_html(
-            result, args.symbol, mode=getattr(args, "mode", "full"),
+            view, args.symbol, mode=getattr(args, "mode", "full"),
             analysis=analysis_payload, profile=profile)
         _trace("final_render", "end", fmt="html", md_chars=len(md_v2), html_chars=len(output))
         from lib.shared_dates import shanghai_now
@@ -1554,7 +1580,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         htmlpath.write_text(output, encoding="utf-8")
         mdfile.write_text(md_v2, encoding="utf-8")
 
-        print(render.render(result, args.symbol, "compact"))
+        print(render.render(view, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
         print(f"📝 Markdown 报告: {mdfile.resolve()}", file=sys.stderr)
         if sidecar:
@@ -1567,7 +1593,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     # 补挂已收敛到「获取 result 之后」的单一落点（见上）；此处渲染函数不再联网。
     _trace("final_render", "start", fmt=fmt)
-    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
+    # R3 二轮：`json` 导出必须保留**原封存体**（与 _meta.report_input_hash 自洽）；
+    # 其余呈现格式走渲染派生视图。
+    output = render.render(result if fmt == "json" else view, args.symbol, fmt,
+                           mode=getattr(args, 'mode', 'full'),
                            attach_extras=False,
                            analysis=analysis_payload, profile=profile,
                            strict_rigor=strict_rigor)

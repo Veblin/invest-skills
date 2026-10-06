@@ -44,7 +44,7 @@ COMPLIANT_STOCK = """# 600176 中国巨石 研究备忘录
 [分析]
 利润增速远超收入增速，反映规模效应释放。
 
-[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ Tushare+akshare 一致]
+[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]
 """
 
 COMPLIANT_ETF = """# 588000 科创50ETF 研究备忘录
@@ -202,7 +202,7 @@ class TestQcFileOffline:
 
 class TestStructureChecks:
     def test_stock_missing_evidence_tag_warns(self, tmp_path: Path):
-        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ Tushare+akshare 一致]", "")
+        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]", "")
         p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", text)
         r = qc_file(p)
         structure = next(l for l in r.layers if l.layer == "structure")
@@ -698,7 +698,7 @@ class TestFormatOutput:
         assert str(p) in out
 
     def test_verbose_shows_details(self, tmp_path: Path):
-        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ Tushare+akshare 一致]", "")
+        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]", "")
         p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", text)
         r = qc_file(p)
         out = format_qc_result(r, verbose=True)

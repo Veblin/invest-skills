@@ -2,6 +2,8 @@
 
 > 受 [SKILL.md](../SKILL.md) 契约 A–D 约束（legacy LAW 编号的映射见该文件「降级与废止」注）。`plan --intent financials_deep` 时加载本文件。
 
+> 财务指标定义、公式、期间与币种的统一口径见 [财务语义与计算规范](../../lib/references/financial-semantics.md)。本专项仅维护研究工作流和呈现要求，现有代理评分不得豁免该规范；规范建立不表示既有实现已全部迁移。
+
 ## 采集工作流
 
 ```bash

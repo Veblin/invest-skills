@@ -445,6 +445,10 @@ def _stub_all_collection_adapters(monkeypatch):
     monkeypatch.setattr(analysis_templates, "build_analysis_cards", _trip("build_analysis_cards"))
     monkeypatch.setattr(lhb, "attach_limit_streak_dims", _trip("attach_limit_streak_dims"))
     monkeypatch.setattr(style_match, "assemble_style_match", _trip("assemble_style_match"))
+    # R3 二轮：固定链在「显式 --style 或存在风格档案」时做**渲染色样式重装配**
+    # （离线：封存体 + 本地档案）。本测试断言的是「无风格上下文时固定链零派生
+    # 入口」，故隔离档案源——装配路径由 test_research_profile 的 R3 用例覆盖。
+    monkeypatch.setattr(style_match, "load_style", lambda: None)
     monkeypatch.setattr(industry_base, "get_success_factors", _trip("get_success_factors"))
     import valuation_calc
     monkeypatch.setattr(valuation_calc, "run_valuation", _trip("run_valuation"))

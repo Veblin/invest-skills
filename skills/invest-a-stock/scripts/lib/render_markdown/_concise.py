@@ -257,7 +257,7 @@ def _render_extras_block(collection: dict, *, strict: bool) -> list[str]:
 
     v0.3.1 A2：新闻/公告标题表段（原 `section_exogenous_shock`）整段移除——
     表内只有日期与标题，无正文与影响，固定「外生叙事」句无内容依据；事件信息
-    由事件时间线段（类型/影响维度/持续性质）与 insight 事件节承担，NewsCard
+    由事件时间线段（日期/类型/标题/涉及维度（类型默认））与 insight 事件节承担，NewsCard
     仍留在采集底稿 JSON 供回查。
     """
     try:

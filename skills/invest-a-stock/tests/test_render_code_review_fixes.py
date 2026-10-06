@@ -515,9 +515,38 @@ class TestBullBearDefaultRAnnotation:
         assert all("g_implied" not in variable for variable in default_r)
         assert any("无风险利率尚待核验" in variable for variable in default_r)
 
-        market_structure["erp"] = {"dgs10": 2.5}
+        # R1：只有确认同币种（CNY）才准入 g_implied 比较
+        market_structure["erp"] = {"cn10y": 2.5, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)"}
         sourced_r = _core_variables(dims, {"market_structure": market_structure})
         assert any("g_implied" in variable for variable in sourced_r)
+
+    def test_usd_and_unknown_currency_suppress_core_variable_gap(self):
+        """R1 反例：美元口径 / 来源币种未确认时，核心变量不得再列 g_implied 缺口
+        （旧实现只查 rf_is_default，两案例实测同报告并存「缺口」与「暂停」）。"""
+        from lib.render_markdown._v3 import _core_variables
+
+        dims = {
+            "valuation": {"data": [
+                {"trade_date": "2024-01-01", "pe_ttm": 12.0},
+                {"trade_date": "2025-01-01", "pe_ttm": 20.0},
+            ]},
+            "financials": {"data": [
+                {"end_date": "20231231", "revenue": 1.5e9, "net_profit": 1.5e8},
+                {"end_date": "20241231", "revenue": 1.7e9, "net_profit": 1.8e8},
+                {"end_date": "20251231", "revenue": 2.0e9, "net_profit": 2.0e8},
+            ]},
+        }
+        market_structure = {"sw_index": {"stock_vs_industry_pct": 3.0}}
+        market_structure["erp"] = {
+            "dgs10": 5.29, "rf_currency": "USD", "y10_source": "FRED.DGS10"}
+        usd_r = _core_variables(dims, {"market_structure": market_structure})
+        assert all("g_implied" not in variable for variable in usd_r)
+        assert any("币种与 A 股不一致" in variable for variable in usd_r)
+
+        market_structure["erp"] = {"dgs10": 2.65}  # 无来源/币种线索 → 未确认
+        unknown_r = _core_variables(dims, {"market_structure": market_structure})
+        assert all("g_implied" not in variable for variable in unknown_r)
+        assert any("来源/币种未确认" in variable for variable in unknown_r)
 
     def test_default_r_suppresses_d3_value_and_success_status(self):
         from fixtures.collections import collection_v2_minimal
