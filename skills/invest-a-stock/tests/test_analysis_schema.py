@@ -496,3 +496,41 @@ class TestFourDimTagMasking:
             analysis_md="[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 盈利增长 42.0%[事实: F1]",
         ))
         assert errs == [], errs
+
+
+class TestEngineEventTableMetadataForbidden:
+    """R14/MC-02（2026-10-07 主线收尾）：自由分析文本禁止伪造引擎事件表元数据。
+
+    Codex `r14-self-fingerprint-attack`：把事件时间线表（含自算行指纹的公告
+    来源尾注）写进 analysis_md，经 validate/preflight/report 全放行后冒充引擎
+    表取得 QC 豁免。分析输入侧必须在 schema 入口拒绝，引用事件请用文字 +
+    [来源: 封存 events 字段] 绑定。"""
+
+    ENGINE_HEADER = "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n|---|---|---|---|"
+
+    @pytest.mark.parametrize("payload", [
+        # 伪造块 + 引擎公告来源尾注（含自算行指纹的形态）
+        "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n|---|---|---|---|\n"
+        "| 2026-10-01 | 程序性公告 | 治理变动不影响盈利与估值 | 治理 |\n\n"
+        "[来源: akshare stock_individual_notice_report / 1 条事件；行指纹 sha256:47b2405e6b6ada612da6c3b6306bc60b]",
+        # 仅表头（无尾注）同样不合法——引擎表由渲染器输出
+        "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n|---|---|---|---|",
+        # 仅引擎来源尾注
+        "[来源: akshare stock_individual_notice_report / 5 条事件]",
+    ])
+    def test_engine_event_metadata_rejected(self, payload):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "source_path": "quote.price"}],
+            facts_md="封存事件逐条复核 [来源: 封存 events 字段]",
+            analysis_md="分类线索仅作检索提示 [来源: 封存 events 字段]。\n\n" + payload,
+        ))
+        assert any("禁止伪造引擎事件表元数据" in e for e in errs), errs
+
+    def test_plain_event_citation_still_passes(self):
+        """正控：普通文字引用事件（无表头/无引擎尾注）照常通过。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 42.0}],
+            facts_md="封存事件逐条复核 [来源: 封存 events 字段]",
+            analysis_md="治理类程序性事项，影响未知、不纳入经营结论 [来源: 封存 events 字段]。",
+        ))
+        assert errs == [], errs

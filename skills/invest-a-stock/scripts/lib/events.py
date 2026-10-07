@@ -773,6 +773,27 @@ def _build_summary(events: list[dict], days: int) -> dict:
     }
 
 
+def event_table_fingerprint(rows: list[list[str]]) -> str:
+    """事件时间线数据行的规范指纹（R14，2026-10-07 主线收尾）——**完整性校验**。
+
+    生产者（`render_markdown._v3._section_events_timeline`）在来源尾注中写入该
+    指纹；检查器（`skills/lib/report_qc.py`）从报告里实际出现的行重算并比对，
+    证明表块与尾注**自洽**（行级增删/1:1 标题替换/复制外形即失配）。它**不
+    证明来源身份**：算法公开、任何一方都可对自造行重算（Codex
+    `r14-self-fingerprint-attack` 已复现）——来源身份的关闭在消费链：
+    `analysis_schema` 入口禁止自由分析伪造引擎事件表元数据；QC 只对事件段
+    首个引擎表块授予豁免（人工分析区不获豁免，哪怕尾部/指纹自洽）。
+
+    规范串：每行 cell 去首尾空白后以 ``|`` 连接，行间 ``\\n``，UTF-8
+    sha256 取前 32 hex。生产者与检查器各自实现同一规范（跨包依赖最小化），
+    一致性由渲染器↔检查器耦合测试锁定（`test_event_table_rows_satisfy_qc_structure`）。
+    """
+    import hashlib
+
+    canon = "\n".join("|".join(str(c).strip() for c in row) for row in rows)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:32]
+
+
 def calc_price_impact_interpolation(
     pre_price: float,
     post_price: float,

@@ -570,29 +570,50 @@ def _score_margin_trajectory(rows: list[dict]) -> tuple[float | None, dict, list
 
 
 def _score_capex_efficiency(rows: list[dict]) -> tuple[float | None, dict, list[str], str]:
+    """ΔRevenue/CAPEX 代理**读数**（REV-07：同报告期窗口，禁止混期相减）。
+
+    营收差与分母同报告期：营收差 = 最新累计期 − 上年同报告期（同 MMDD）行；
+    找不到同报告期基期 → 数据不足（不再取相邻行相减——半年累计减一季度累计
+    会把「多一个季度的收入」当成投资增量；反例 600519：(907.03−539.09)/8.32
+    =44.22 触发满分）。分母 = 本期累计 CAPEX。该比值不是投资回报率或研发
+    回报（研发投入明细未采集），仅是营收增量/资本开支的代理读数。
+    """
     if len(rows) < 2:
-        return None, {"score": None, "note": "数据不足，跳过"}, [], "capex_efficiency（revenue/cap_ex 至少需 2 期数据）"
-    latest, prev = rows[-1], rows[-2]
+        return None, {"score": None, "note": "数据不足，跳过"}, [], "capex_efficiency（同报告期基期不足）"
+    latest = rows[-1]
+    yoy = find_yoy_row(rows, latest)
     rev_latest = _field(latest, "revenue")
-    rev_prev = _field(prev, "revenue")
+    rev_base = _field(yoy, "revenue") if yoy else None
     cap_ex_raw = _field(latest, "cap_ex")
-    if None in (rev_latest, rev_prev, cap_ex_raw):
-        return None, {"score": None, "note": "数据不足，跳过"}, [], "capex_efficiency（revenue/cap_ex 缺失）"
+    if None in (rev_latest, rev_base, cap_ex_raw):
+        return None, {"score": None, "note": "数据不足，跳过"}, [], "capex_efficiency（缺同报告期营收基期或 cap_ex）"
     cap_ex = abs(cap_ex_raw)
     if cap_ex < 1e-9:
         return None, {"score": None, "note": "数据不足，跳过"}, [], "capex_efficiency（cap_ex 为 0，无法计算比率）"
 
-    delta_rev = rev_latest - rev_prev
+    ed = str(latest.get("end_date") or "")
+    base_ed = str(yoy.get("end_date") or "")
+    delta_rev = rev_latest - rev_base
     ratio = delta_rev / cap_ex
+    window = f"{ed} vs {base_ed}（同报告期营收差/本期 CAPEX）"
     if ratio > 2:
-        score, note = 25.0, f"ΔRevenue/CAPEX={ratio:.2f}（>2x），投资回报效率较高"
+        score, verdict = 25.0, ">2x"
     elif ratio > 1:
-        score, note = 15.0, f"ΔRevenue/CAPEX={ratio:.2f}（1-2x）"
+        score, verdict = 15.0, "1-2x"
     elif ratio > 0:
-        score, note = 8.0, f"ΔRevenue/CAPEX={ratio:.2f}（0-1x），投资回报效率偏低"
+        score, verdict = 8.0, "0-1x"
     else:
-        score, note = 0.0, f"ΔRevenue/CAPEX={ratio:.2f}（营收未增长或下滑）"
-    return score, {"ratio": round(ratio, 3), "score": score, "note": note}, ["revenue", "cap_ex"], ""
+        score, verdict = 0.0, "营收未增长或下滑"
+    note = (
+        f"ΔRevenue/CAPEX={ratio:.2f}（{verdict}，{window}）——代理读数，"
+        "非投资回报率或研发回报（研发投入明细未采集）"
+    )
+    return (
+        score,
+        {"ratio": round(ratio, 3), "score": score, "note": note, "window": window},
+        ["revenue", "cap_ex"],
+        "",
+    )
 
 
 # ---- AI 分析置信度矩阵（已移除，CHANGELOG v0.2.1「报告精简」） ----

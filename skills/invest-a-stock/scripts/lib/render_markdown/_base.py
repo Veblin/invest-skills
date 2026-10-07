@@ -116,12 +116,18 @@ _v3_northbound_signal_label = northbound_label
 
 
 # --- _render_engine_extras ---
-def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
+def _render_engine_extras(collection: dict[str, Any], *,
+                          macro_block: bool = False) -> list[str]:
     """渲染报告头部：只放**带结论/判定**的引擎行。
 
     头部是全报告最高价值的位置。本函数被 brief/concise/full 三模式共用
     （_concise.render_report_v3），因此本函数里增删任何内容都会同时影响三种
     交付形态——下沉前须确认每种模式都有承接方。
+
+    macro_block（v0.3.1 阅读验收，2026-10-07）：full 用**分组展示块**（短摘要 +
+    国内/海外指标表，保留读数/来源/币种，整块为**一个多行元素**）；默认 False 时
+    保持 compact 两段式标签（brief/concise 为按需对话/精简产物，一屏优先；
+    标签合同不受影响）。full 首屏提取按元素前缀整块迁移，多行不会漏进底稿。
 
     保留：宏观情景（国内/海外各带结论）、产业链位置、收益驱动假设（R1）、
     风格匹配（R10）、行业成功关键因素（R4，含未覆盖行业的覆盖范围披露）、
@@ -144,8 +150,13 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
 
     macro = collection.get("macro_context") or {}
     if macro.get("status") == "ok":
-        from ..macro import macro_signal_label
-        lines.append(f"**[宏观情景]** {macro_signal_label(macro)}")
+        from ..macro import (MACRO_BLOCK_MARKER, macro_scenario_lines,
+                             macro_signal_label)
+        if macro_block:
+            # 整块 = 一个列表元素（多行字符串）：full 首屏提取按前缀整块迁移
+            lines.append("\n".join(macro_scenario_lines(macro)))
+        else:
+            lines.append(f"{MACRO_BLOCK_MARKER} {macro_signal_label(macro)}")
 
     chain = collection.get("chain_context") or {}
     if chain.get("status") == "ok" and chain.get("industry"):

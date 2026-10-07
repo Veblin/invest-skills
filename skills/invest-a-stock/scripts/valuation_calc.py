@@ -1006,8 +1006,9 @@ def implied_growth_detailed(
         "g_implied": g_implied,
         "fair_pe_by_g": fair_pe_table,
         "note": (
-            f"当前 PE {pe:.2f}x 隐含永续增长率 {g_implied * 100:.2f}%。"
-            f"若 g_implied < 0，市场定价了盈利萎缩预期。"
+            f"当前 PE {pe:.2f}x 的戈登反推隐含增长率 {g_implied * 100:.2f}%"
+            "（条件模型读数：取 r 与 PE 假设；与历史区间增速口径不同，"
+            "不直接构成市场预期或高估/低估的裁决）。"
         ),
     }
 
@@ -1599,12 +1600,15 @@ def _format_section_implied_growth(result: ValuationResult, lines: list[str]) ->
         lines.append(f"  盈利收益率 (E/P)    {ig['earnings_yield'] * 100:.2f}%")
         lines.append(f"  ──────────────────────────────────")
         lines.append(f"  隐含增长率 g       {ig['g_implied'] * 100:.2f}%")
+        # REV-04 同消费链（2026-10-07 主线收尾）：原「市场在定价盈利逐年萎缩/
+        # 温和/结构性成长」把戈登反推的模型读数读作市场预期裁决——改为读数
+        # 描述（市场预期须另证）。
         if ig["g_implied"] < 0:
-            lines.append(f"  🔴 负增长 —— 市场在定价盈利逐年萎缩")
+            lines.append("  🔴 g_implied 为负（戈登模型读数，不构成市场预期裁决）")
         elif ig["g_implied"] < 0.02:
-            lines.append(f"  🟡 低增长 —— 市场定价温和/保守")
+            lines.append("  🟡 g_implied 低于 2%（戈登模型读数，不构成市场预期裁决）")
         else:
-            lines.append(f"  🟢 正增长 —— 市场定价结构性成长")
+            lines.append("  🟢 g_implied 为正（戈登模型读数，不构成市场预期裁决）")
 
         lines.append("")
         lines.append("  不同 g 假设下的合理 PE:")

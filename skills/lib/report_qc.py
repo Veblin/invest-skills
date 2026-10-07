@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -1272,6 +1273,7 @@ def _scan_segment_assertions(
     extra_exempt_res: tuple[re.Pattern, ...] = (),
     source_basis_ok: "Callable[[str], bool] | None" = None,
     exempt_headers: tuple[tuple[str, ...], ...] = (),
+    exempt_block_start: int | None = None,
 ) -> list[dict]:
     """段内逐行断言证据扫描（共享实现：结论段 / 事件分析段）。
 
@@ -1281,6 +1283,8 @@ def _scan_segment_assertions(
       round-7/round-8）；
     - `source_basis_ok`（事件段 R13）：来源绑定即使语法合法、但其依据不合格
       （仅标题/URL、或自述未读/未取得）时同样按 <C 证据处理；
+    - `exempt_block_start`（R14/MC-02）：登记表结构豁免只授予**该行号开始的
+      块**——事件段传入引擎表块起点（人工分析区内的复制表不获豁免）；
     - `where` 用于消息（「结论段」/「事件分析段」），机器只查来源纪律。
     """
     out: list[dict] = []
@@ -1296,7 +1300,8 @@ def _scan_segment_assertions(
             _scan_table_rows(lines, i, j, line_base, fact_ids, out,
                              where=where, id_missing=id_missing_table,
                              id_weak=id_weak_table, source_basis_ok=source_basis_ok,
-                             exempt_headers=exempt_headers)
+                             exempt_headers=exempt_headers,
+                             exempt_block_start=exempt_block_start)
             i = j
             continue
         i += 1
@@ -1344,6 +1349,7 @@ def _scan_table_rows(
     where: str, id_missing: str, id_weak: str,
     source_basis_ok: "Callable[[str], bool] | None" = None,
     exempt_headers: tuple[tuple[str, ...], ...] = (),
+    exempt_block_start: int | None = None,
 ) -> None:
     """表块行断言扫描（R14）：真表头/分隔行、数据行、登记结构表逐行核验豁免。
 
@@ -1355,10 +1361,23 @@ def _scan_table_rows(
     （Codex round-7 `event_copied_header`：复制事件表头插入「确定影响」断言
     曾被整块放行，validate/preflight=0 且 final QC WARN）。数据行判据同步
     收紧为「全数据格」或行内有效证据（见 `_row_is_data_like`）。
+    R14（2026-10-07 主线收尾）：登记事件表的行级结构豁免还须通过
+    `_registered_event_block_integrity_ok` 的**完整性与块位校验**（表块须为
+    事件段首个引擎表块 [`exempt_block_start`]、紧跟固定来源尾注、行数与 N
+    一致、行指纹自洽）——Codex round-8 `event_title_assertion`、2026-10-07
+    footer 变体与 `r14-self-fingerprint-attack`（**[分析]** 区自算指纹的伪造
+    表）在旧判据下 validate/preflight=0、final QC conclusion-evidence pass；
+    契约不符的块退回普通断言行检查（fail-closed）。行指纹只作**完整性**
+    校验（防行级篡改/外形复制），不证明来源身份；人工分析区不获该豁免。
     """
     block = [lines[i] for i in range(start, end)]
     header = tuple(_table_cells(block[0])) if block else ()
-    header_registered = header in exempt_headers
+    header_registered = (header in exempt_headers
+                         and exempt_block_start is not None
+                         and start == exempt_block_start)
+    if header_registered:
+        header_registered = _registered_event_block_integrity_ok(
+            lines, start, end, header)
     data_rows = [(i, lines[i]) for i in range(start, end)
                  if not _is_table_separator(lines[i])]
     if not data_rows:
@@ -1539,6 +1558,91 @@ def _registered_table_row_ok(row: str, header: tuple[str, ...]) -> bool:
     return False
 
 
+# 生产者固定来源尾注（`_section_events_timeline` 在表块后逐字输出；
+# N = 封存事件总数，行指纹 = 数据行规范串 sha256 前 32 hex；2026-10-07 主线
+# 收尾起带指纹——旧产物无指纹形态：`[来源: akshare stock_individual_notice_report / N 条事件]`
+_EVENT_TABLE_SOURCE_LINE_RE = re.compile(
+    r"^\[来源:\s*akshare stock_individual_notice_report\s*/\s*(\d+)\s*条事件"
+    r"(?:；行指纹 sha256:([0-9a-f]{32}))?\]$")
+
+
+def _event_table_fingerprint(rows: list[list[str]]) -> str:
+    """事件表数据行规范指纹（R14，2026-10-07 主线收尾）。
+
+    与生产者 `lib.events.event_table_fingerprint` 同一规范：每行 cell 去首尾
+    空白后以 ``|`` 连接、行间 ``\\n``、UTF-8 sha256 取前 32 hex。跨包各留一份
+    实现（避免 QC 强依赖 stock 包），一致性由渲染器↔检查器耦合测试
+    （`test_event_table_rows_satisfy_qc_structure`）锁定——两处任一漂移即红。
+    """
+    canon = "\n".join("|".join(str(c).strip() for c in row) for row in rows)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:32]
+
+
+def _registered_event_block_integrity_ok(
+    lines: list[str], start: int, end: int, header: tuple[str, ...],
+) -> bool:
+    """登记事件表的豁免须通过「完整性校验」（R14/MC-02，2026-10-07 主线收尾）。
+
+    仅凭逐字表头 + 行结构核验，复制表头插入的「无来源影响断言」会被当数据行
+    放行（Codex round-8 `event_title_assertion`）；仅凭固定尾注与条数的外形，
+    把尾注一并复制仍可冒充（footer 变体）；把整块放进人工分析区并**用公开
+    算法自算行指纹**同样自洽（`r14-self-fingerprint-attack`）——故本层只按
+    **完整性**收紧（表块紧跟来源尾注、条数一致、行指纹与报告实际数据行重算
+    值一致），**不宣称证明来源身份**。
+
+    来源身份的完整关闭分布在消费链前端与块位规则：
+    ① `analysis_schema` 入口拒绝自由 facts_md/analysis_md 伪造引擎事件表元数据
+       （表头/公告来源尾注）——分析文本不再能把伪造表带进任何产物；
+    ② `exempt_block_start`（见 `_scan_table_rows`）把豁免限定为事件段**首个**
+       引擎表块——人工分析区（`**[分析]**` 之后）的复制表一律按普通断言逐行
+       要求有效证据；
+    ③ 本函数只作完整性 fail-closed（行级增删/1:1 替换/复制外形即失配）。
+
+    机器边界（如实记录）：文本级检查无法证明标题来自封存源；重写整块并重算
+    指纹属「连贯伪造报告」，需 QC 直读封存 events 的协议（范围外，未在本轮）。
+    """
+    if header != _EVENT_TIMELINE_HEADER:
+        return False
+    total = fp = None
+    for ln in lines[end:]:
+        s = ln.strip()
+        if not s:
+            continue
+        m = _EVENT_TABLE_SOURCE_LINE_RE.match(s)
+        if m is None:
+            return False
+        total, fp = int(m.group(1)), m.group(2)
+        break
+    if total is None or not fp:
+        return False
+    date_rows = hidden_rows = 0
+    data_cells: list[list[str]] = []
+    for row in lines[start:end]:
+        if _is_table_separator(row):
+            continue
+        cells = _table_cells(row)
+        if not cells:
+            continue
+        first = cells[0].strip()
+        if first == "日期":
+            continue  # 逐字表头行不参与指纹与计数
+        data_cells.append(cells)
+        if (len(cells) == 5 and first == "..."
+                and _EVENT_HIDDEN_ROW_RE.match(cells[2].strip())):
+            hidden_rows += 1
+        elif _PURE_DATE_CELL_RE.match(first):
+            date_rows += 1
+        else:
+            return False  # 非日期/截断数据行不属生产者契约
+    if hidden_rows:
+        # 渲染器截断形态：15 行数据 + 1 截断行，N 为封存总数（必然 >15）
+        if not (hidden_rows == 1 and date_rows == 15 and total > 15):
+            return False
+    elif not (total <= 15 and date_rows == total):
+        return False
+    return _event_table_fingerprint(data_cells) == fp
+
+
 def _event_source_basis_ok(line: str) -> bool:
     """事件段的来源绑定是否可作 ≥C 证据（R13 依据判据，round-7 收紧）。"""
     for m in _EVENT_SOURCE_TAG_RE.finditer(line):
@@ -1573,8 +1677,29 @@ def event_analysis_evidence_findings(
             id_weak_table="wording-event-analysis-table-evidence-level",
             extra_exempt_res=_EVENT_EXTRA_EXEMPT,
             source_basis_ok=_event_source_basis_ok,
-            exempt_headers=_EVENT_EXEMPT_HEADERS))
+            exempt_headers=_EVENT_EXEMPT_HEADERS,
+            exempt_block_start=_engine_event_block_start(lines)))
     return out
+
+
+def _engine_event_block_start(lines: list[str]) -> int | None:
+    """事件段内引擎事件表块的起始行号（R14/MC-02 块位规则）。
+
+    渲染器契约：`## 3a. 事件时间线` 标题后**首个**逐字表头块即引擎表；其后
+    的分类摘要与 `**[分析]**`（渲染器逐字输出）属于人工分析区——该区内即使
+    出现复制表头 + 自洽尾注/行指纹，也不构成引擎表，不获结构豁免
+    （Codex `r14-self-fingerprint-attack`：自由分析区自算指纹仍应逐行查证据）。
+    分析区之前找不到逐字表头块 → None（无豁免，fail-closed）。
+    """
+    analysis_start = next(
+        (idx for idx, ln in enumerate(lines) if ln.strip() == "**[分析]**"), None)
+    for idx, ln in enumerate(lines):
+        if tuple(_table_cells(ln.strip())) != _EVENT_TIMELINE_HEADER:
+            continue
+        if analysis_start is not None and idx > analysis_start:
+            continue  # 人工分析区内的复制表头不是引擎表
+        return idx
+    return None
 
 
 def fact_analysis_pair_findings(md: str) -> list[dict]:

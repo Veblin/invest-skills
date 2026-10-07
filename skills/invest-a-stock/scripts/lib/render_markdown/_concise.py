@@ -27,6 +27,52 @@ del __v3_ref, __v3_n
 
 logger = logging.getLogger(__name__)
 
+# 未填分析槽位的占位形态（与 lint `placeholder-engine-slot` 词规**四分支**对齐：
+# `\[待 Claude` / `\[待填充` / `Claude report 阶段` / `Claude 填写`；容忍空白变体
+# 与行内前缀，按 `.search()` 全串命中）。渲染器不得直出未填占位（F0-3），
+# 命中即跳过该行。
+# Codex 复检 F-2（2026-10-07）：原 `.match()` 只覆盖行首前两分支，裸
+# `Claude 填写`/`Claude report 阶段`或带前缀形态可漏过；收敛为全词规 search。
+_UNFILLED_SLOT_RE = re.compile(
+    r"\[\s*待\s*(?:Claude|填充)|Claude\s*report\s*阶段|Claude\s*填写"
+)
+
+# 宏观块的续行形态（逐行元素形态时的边界判定）：空行 / 表格行 / 引言行。
+# 其余 engine extras 一律以 `**[…]**` 或 `- ` 开头，不会被吞。
+_MACRO_CONTINUATION_RE = re.compile(r"^\s*$|^[|>]")
+
+
+def _split_macro_block(extras: list[str]) -> tuple[list[str], list[str]]:
+    """full 首屏提取：把宏观块与其余 engine extras 分开（整块迁移）。
+
+    宏观块由 `macro_scenario_lines` 生成、以**单个多行元素**进入 extras
+    （`_render_engine_extras(macro_block=True)`）——按元素前缀整块迁移，
+    表格行不会漏进底稿。本函数同时兜住「逐行元素」形态（同类模式检查的
+    另一形态）：起始行单行时，把紧随其后的同块续行（空行 / `|` 表格行 /
+    `>` 引言行）一并迁移，避免多行格式把半块留在底稿。
+
+    验收绑定：full 首屏提取宏观不能因多行格式漏行或掉到正文
+    （tests/test_macro_extended.py::TestMacroScenarioBlock 正反例）。
+    """
+    from lib.macro import MACRO_BLOCK_MARKER
+
+    macro: list[str] = []
+    rest: list[str] = []
+    i = 0
+    while i < len(extras):
+        ln = extras[i]
+        if not macro and str(ln).startswith(MACRO_BLOCK_MARKER):
+            macro.append(ln)
+            i += 1
+            if len(str(ln).splitlines()) == 1:
+                while i < len(extras) and _MACRO_CONTINUATION_RE.match(str(extras[i])):
+                    macro.append(extras[i])
+                    i += 1
+            continue
+        rest.append(ln)
+        i += 1
+    return macro, rest
+
 # --- _classify_sellside_rating ---
 def _classify_sellside_rating(rating: str) -> str:
     """卖方评级归类（LAW 6：输出侧避免「买入」「目标价」字面）。"""
@@ -141,8 +187,13 @@ def _section_research_summary(
             lines.append(
                 f"\n> **研报情绪:** EPS一致预期 {eps_mean} (n={eps_count}){eps_range}"
             )
-        slot_text = sentiment_card.get("sentiment_slot", "")
-        if slot_text:
+        # F0-3 占位纪律：sentiment_slot 命中未填占位词规（F-2 收敛后为 lint 全
+        # 四分支、全串 search）时不输出——渲染器直出会被 lint
+        # `placeholder-engine-slot`（error 级）拦下，且该槽位当前无 analysis.json
+        # 注入通道（无消费方读取本字段；写入方固定出占位串）。槽位一旦被真实
+        # 填充（非占位形态）照常渲染。
+        slot_text = str(sentiment_card.get("sentiment_slot") or "").strip()
+        if slot_text and not _UNFILLED_SLOT_RE.search(slot_text):
             lines.append(f"> *{slot_text}*")
 
     from datetime import datetime
@@ -737,12 +788,12 @@ def render_report_v3(collection: dict[str, Any], symbol: str, mode: str = "full"
         parts: list[str] = [
             _header_v2(collection, symbol),
         ]
-        # v0.3.1 A4：首屏只留**带结论**的宏观情景行（它是 report-conventions.md §9.1 规定的
-        # 输出契约行，A3a 裁决保留现状）；产业链/收益驱动假设/风格匹配/行业
-        # 成功因素/增强提示下沉进审计底稿，不再与「重要发现」争夺首屏。
-        extras = _render_engine_extras(collection)
-        macro_lines = [ln for ln in extras if ln.startswith("**[宏观情景]**")]
-        basement_extras = [ln for ln in extras if not ln.startswith("**[宏观情景]**")]
+        # v0.3.1 A4 + 阅读验收（2026-10-07）：首屏只留宏观情景**块**（分组展示，
+        # 多行；§9.1 输出契约）；产业链/收益驱动假设/风格匹配/行业成功因素/
+        # 增强提示下沉进审计底稿，不再与「重要发现」争夺首屏。
+        # 整块迁移由 `_split_macro_block` 承担（多行元素前缀匹配 + 逐行形态兜底）。
+        extras = _render_engine_extras(collection, macro_block=True)
+        macro_lines, basement_extras = _split_macro_block(extras)
         if macro_lines:
             parts.append("\n".join(macro_lines))
         _extras = _render_extras_block(collection, strict=strict)

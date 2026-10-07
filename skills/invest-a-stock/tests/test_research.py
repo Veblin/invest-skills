@@ -220,6 +220,80 @@ class TestSectionResearchSummary:
         dims = {d["dimension"]: d for d in c["dimensions"]}
         assert _section_research_summary(c, "600176", dims) == ""
 
+    def test_unfilled_sentiment_slot_not_rendered(self):
+        """未填槽位不得直出（F0-3）：lint placeholder-engine-slot 为 error 级。
+
+        写入方（analysis_templates）固定产出「[待 Claude 标注语气信号]」占位；
+        该槽位当前无 analysis.json 注入通道，渲染器直出会阻断准出。
+        Codex 复检 F-2：守卫须覆盖 lint 词规四分支（含裸 `Claude 填写`/
+        `Claude report 阶段`）与带行内前缀的形态（search 而非 match）。
+        """
+        from lib.render import _section_research_summary
+
+        summary = {
+            "status": "ok",
+            "latest_ratings": [],
+            "target_price_range": {"min": 40.0, "max": 50.0, "avg_upper": 48.0},
+            "eps_forecasts": [],
+        }
+        variants = [
+            "[待 Claude 标注语气信号]",
+            "[待填充语气信号]",
+            "Claude 填写",
+            "Claude report 阶段",
+            "说明：[待 Claude 语气信号]",
+        ]
+        for slot in variants:
+            c = _collection_with_research(summary)
+            c["_meta"] = {
+                "analysis_cards": {
+                    "sentiment": {
+                        "eps_forecast_mean": 2.5,
+                        "sentiment_slot": slot,
+                    },
+                },
+            }
+            dims = {d["dimension"]: d for d in c["dimensions"]}
+            text = _section_research_summary(c, "600176", dims)
+            assert "研报情绪" in text
+            assert "[待 Claude" not in text and "Claude 填写" not in text, slot
+            assert "Claude report 阶段" not in text, slot
+
+    def test_filled_sentiment_slot_rendered(self):
+        """槽位被真实填充（非占位形态）时照常渲染；守卫不吞正常文本。
+
+        反例覆盖（Codex F-2 建议）：含「Claude」但与占位无关的正常句、
+        「待独立验证」释义句——均不得被守卫过滤。
+        """
+        from lib.render import _section_research_summary
+
+        summary = {
+            "status": "ok",
+            "latest_ratings": [],
+            "target_price_range": {"min": 40.0, "max": 50.0, "avg_upper": 48.0},
+            "eps_forecasts": [],
+        }
+        filled = [
+            "卖方评级语气：偏多为主（已人工复核）",
+            "卖方评级语气：中性（已核对）",
+            "[来源: report_rc] 语气中性",
+            "待独立验证：评级覆盖不足",
+            "数据经 Claude 核对后语气中性",
+        ]
+        for slot in filled:
+            c = _collection_with_research(summary)
+            c["_meta"] = {
+                "analysis_cards": {
+                    "sentiment": {
+                        "eps_forecast_mean": 2.5,
+                        "sentiment_slot": slot,
+                    },
+                },
+            }
+            dims = {d["dimension"]: d for d in c["dimensions"]}
+            text = _section_research_summary(c, "600176", dims)
+            assert slot in text, slot
+
 
 class TestHtmlResearch:
     def test_html_includes_research_when_present(self):

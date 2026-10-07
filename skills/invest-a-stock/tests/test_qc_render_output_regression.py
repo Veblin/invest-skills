@@ -344,8 +344,22 @@ def test_event_table_rows_satisfy_qc_structure() -> None:
         block.append(ln)
     data_rows = [ln for ln in block if not report_qc._is_table_separator(ln)]
     assert len(data_rows) >= 2, "事件表应含表头与数据行"
-    for ln in data_rows[1:]:
+    # block 始于表头之后：data_rows 全部是数据行（含截断行），表头不在其中。
+    for ln in data_rows:
         assert report_qc._event_timeline_row_ok(ln), f"渲染器事件行未过结构核验: {ln}"
     assert any("（另有" in ln for ln in data_rows), ">15 条应渲染截断行"
+    # 2026-10-07 主线收尾：生产者行指纹（lib.events）与检查器实现（report_qc）
+    # 必须同规范——两处任一漂移先在此红；尾注中的指纹须与渲染行重算值一致。
+    from lib.events import event_table_fingerprint as producer_fp
+
+    meta_rows = [report_qc._table_cells(ln) for ln in data_rows]
+    sample = [["2026-01-01", "程序性公告", "标题 | 转义/", "治理"],
+              ["...", "...", "（另有 3 条事件未展示）", "...", "..."]]
+    assert producer_fp(sample) == report_qc._event_table_fingerprint(sample)
+    tail = next(ln for ln in lines if ln.startswith("[来源: akshare stock_individual_notice_report"))
+    m = report_qc._EVENT_TABLE_SOURCE_LINE_RE.match(tail.strip())
+    assert m and m.group(2), f"渲染器事件尾注应带行指纹: {tail}"
+    assert report_qc._event_table_fingerprint(meta_rows) == m.group(2), (
+        f"尾注指纹与渲染行不一致: {tail}")
     findings = report_qc.event_analysis_evidence_findings(text)
     assert not [f for f in findings if f["id"].endswith("table-evidence")], findings

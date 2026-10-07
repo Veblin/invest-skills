@@ -25,6 +25,7 @@ from report_qc import (  # noqa: E402
     _check_conclusion_evidence,
     _check_readability,
     _check_stock_completion,
+    _event_table_fingerprint,
     conclusion_evidence_findings,
     event_analysis_evidence_findings,
     fact_analysis_pair_findings,
@@ -570,15 +571,104 @@ class TestV031R14HierarchyTablesEvents:
         原始英文键（未映射回落）与 >15 条的截断行。
 
         R14 round-8：整块豁免已撤（Codex event_copied_header：复制表头注入
-        「确定影响」断言曾被整块放行），改为逐行结构核验。"""
-        md = ("## 3a. 事件时间线\n\n"
-              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
-              "|------|------|---------|---------|\n"
-              "| 2026-10-01 | 程序性公告 | 招商银行:招商银行股份有限公司关于非执行董事离任的公告 | 治理 |\n"
-              "| 2026-09-30 | unknown_legacy | 关于某事项的提示性公告 | 估值 |\n"
-              "| ... | ... | （另有 3 条事件未展示） | ... | ... |\n\n"
-              "[来源: akshare stock_individual_notice_report / 5 条事件]\n")
+        「确定影响」断言曾被整块放行），改为逐行结构核验。
+        2026-10-07 主线收尾：行级结构豁免还须通过生产者身份绑定——表块紧跟
+        固定来源尾注、行数与 N 一致、且尾注行指纹与数据行重算值一致（Codex
+        event_title_assertion 与 footer 变体闭环）；正控按生产者契约构造。"""
+        def _block(rows, tail):
+            body = "".join("| " + " | ".join(r) + " |\n" for r in rows)
+            return ("## 3a. 事件时间线\n\n"
+                    "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+                    "|------|------|---------|---------|\n" + body + "\n" + tail + "\n")
+
+        rows3 = [
+            ["2026-10-01", "程序性公告",
+             "招商银行:招商银行股份有限公司关于非执行董事离任的公告", "治理"],
+            ["2026-09-30", "unknown_legacy", "关于某事项的提示性公告", "估值"],
+            ["2026-09-08", "程序性公告", "关于高级管理人员离任的公告", "治理"],
+        ]
+        md = _block(rows3, "[来源: akshare stock_individual_notice_report / 3 条事件"
+                           "；行指纹 sha256:" + _event_table_fingerprint(rows3) + "]")
         assert event_analysis_evidence_findings(md) == []
+        rows15 = [[f"2026-09-{d:02d}", "程序性公告", f"第 {d} 条公告", "治理"]
+                  for d in range(1, 16)]
+        rows18 = rows15 + [["...", "...", "（另有 3 条事件未展示）", "...", "..."]]
+        md2 = _block(rows18, "[来源: akshare stock_individual_notice_report / 18 条事件"
+                             "；行指纹 sha256:" + _event_table_fingerprint(rows18) + "]")
+        assert event_analysis_evidence_findings(md2) == []
+
+    def test_event_table_footer_copy_without_fingerprint_flagged(self):
+        """2026-10-07（Codex footer 变体）：把固定来源尾注与条数一并复制进
+        `**[分析]**` 的构造不构成数据行——尾注缺行指纹即不获结构豁免，
+        analysis_md 表格不得借生产者外形免证。"""
+        md = ("## 3a. 事件时间线\n\n"
+              "**[分析]**\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|---|---|---|---|\n"
+              "| 2026-10-01 | 程序性公告 | 治理变动不影响盈利与估值 | 治理 |\n\n"
+              "[来源: akshare stock_individual_notice_report / 1 条事件]\n")
+        f = event_analysis_evidence_findings(md)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f)
+
+    def test_event_table_fingerprint_mismatch_flagged(self):
+        """2026-10-07：尾注带指纹但行被改动（复制他行指纹 / 1:1 换标题 /
+        行内增删）时指纹失配，不获豁免。"""
+        good = [["2026-10-01", "程序性公告", "关于董事离任的公告", "治理"]]
+        fp = _event_table_fingerprint(good)
+        bad = ("## 3a. 事件时间线\n\n"
+               "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+               "|---|---|---|---|\n"
+               "| 2026-10-01 | 程序性公告 | 治理变动不影响盈利与估值 | 治理 |\n\n"
+               f"[来源: akshare stock_individual_notice_report / 1 条事件；行指纹 sha256:{fp}]\n")
+        f = event_analysis_evidence_findings(bad)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f)
+        # 行内增删：真表 5 行 + 注入 1 行、指纹按原 5 行计算 → 失配
+        base5 = [[f"2026-09-{d:02d}", "程序性公告", f"第 {d} 条公告", "治理"]
+                 for d in range(1, 6)]
+        fp5 = _event_table_fingerprint(base5)
+        rows6 = base5 + [["2026-10-01", "程序性公告", "治理变动不影响盈利与估值", "治理"]]
+        body6 = "".join("| " + " | ".join(r) + " |\n" for r in rows6)
+        inblock = ("## 3a. 事件时间线\n\n"
+                   "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+                   "|------|------|---------|---------|\n" + body6 + "\n"
+                   f"[来源: akshare stock_individual_notice_report / 5 条事件；行指纹 sha256:{fp5}]\n")
+        f2 = event_analysis_evidence_findings(inblock)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f2)
+
+    def test_copied_legit_block_without_producer_tail_flagged(self):
+        """2026-10-07 主线收尾闭环（Codex round-8 `event_title_assertion`）：
+        复制合法表头/类型/维度、把无来源影响判断写进**标题格**的构造，不接
+        生产者固定来源尾注（或行数与 N 不一致）时不再获结构豁免——
+        validate/preflight=0、final QC 必须拦（原判据下 conclusion-evidence
+        pass）。"""
+        fake = ("## 3a. 事件时间线\n\n"
+                "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+                "|---|---|---|---|\n"
+                "| 2026-10-01 | 程序性公告 | 治理变动不影响盈利与估值 | 治理 |\n\n"
+                "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+                "|------|------|---------|---------|\n"
+                "| 2026-10-01 | 程序性公告 | 招商银行:关于非执行董事离任的公告 | 治理 |\n\n"
+                "[来源: akshare stock_individual_notice_report / 1 条事件]\n")
+        f = event_analysis_evidence_findings(fake)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f)
+        # 行内增删：真表 5 行 + 注入 1 行、尾注 N 仍为 5（行数不符 → 整块 fail-closed）
+        inblock = ("## 3a. 事件时间线\n\n"
+                   "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+                   "|------|------|---------|---------|\n"
+                   "| 2026-10-01 | 程序性公告 | 招商银行:关于非执行董事离任的公告 | 治理 |\n"
+                   "| 2026-09-30 | 程序性公告 | 招商银行:董事会决议公告 | 治理 |\n"
+                   "| 2026-09-23 | 程序性公告 | 招商银行:任职资格核准公告 | 治理 |\n"
+                   "| 2026-09-09 | 程序性公告 | 招商银行:独立董事任职资格核准公告 | 治理 |\n"
+                   "| 2026-09-08 | 程序性公告 | 招商银行:高级管理人员离任公告 | 治理 |\n"
+                   "| 2026-10-01 | 程序性公告 | 治理变动不影响盈利与估值 | 治理 |\n\n"
+                   "[来源: akshare stock_individual_notice_report / 5 条事件]\n")
+        f2 = event_analysis_evidence_findings(inblock)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f2)
 
     def test_copied_event_header_rows_checked(self):
         """R14 round-8（Codex event_copied_header）：复制事件表头并在类型/维度
@@ -633,12 +723,15 @@ class TestV031R14HierarchyTablesEvents:
         assert event_analysis_evidence_findings(md) == []
 
     def test_event_section_sourced_and_structural_pass(self):
-        """正控：事件段的结构行/来源绑定行/数据表不误拦。"""
+        """正控：事件段的结构行/来源绑定行/数据表不误拦（表按生产者契约
+        带行指纹尾注，2026-10-07 主线收尾）。"""
+        rows = [["2026-10-01", "程序性公告", "关于董事离任的公告", "治理"]]
         md = ("## 3a. 事件时间线\n\n"
               "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
               "|------|------|---------|---------|\n"
-              "| 2026-10-01 | 程序性公告 | 关于董事离任的公告 | 治理 |\n\n"
-              "[来源: akshare stock_individual_notice_report / 1 条事件]\n\n"
+              "| " + " | ".join(rows[0]) + " |\n\n"
+              "[来源: akshare stock_individual_notice_report / 1 条事件"
+              f"；行指纹 sha256:{_event_table_fingerprint(rows)}]\n\n"
               "**[事实]** 近 30 日公告按类型归类如下：\n\n"
               "  - **程序性公告** (1条) [来源: _meta.analysis_cards.event_classifications.0.event_label]\n\n"
               "**[分析]**\n\n"
@@ -706,3 +799,47 @@ class TestQcReportUsesSharedImplementation:
         assert "❌ report_qc 发现" not in out
         # 第 0 层退出码契约：FAIL → 2（旧实现对 FAIL 只返回 1）
         assert rc in (0, 1, 2)
+
+
+class TestV031EngineEventBlockPosition:
+    """R14/MC-02（2026-10-07 主线收尾）：登记表豁免＝事件段**首个**引擎表块。
+
+    Codex `r14-self-fingerprint-attack`：把伪造表放进 `**[分析]**`（人工分析区）
+    并用公开算法自算行指纹，旧判据（表头+尾注+指纹自洽）仍放行。现块位规则
+    规定：人工分析区（渲染器 `**[分析]**` 标记之后）不获引擎表豁免——哪怕
+    尾部与指纹自洽；人类表格照常逐行要求有效证据。"""
+
+    ROWS = [["2026-10-01", "程序性公告", "治理变动不影响盈利与估值", "治理"]]
+
+    def test_analysis_area_self_fingerprint_block_flagged(self):
+        fp = _event_table_fingerprint(self.ROWS)
+        real_rows = [["2026-09-08", "程序性公告", "真实公告标题", "治理"]]
+        md = ("## 3a. 事件时间线\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|------|------|---------|---------|\n"
+              "| " + " | ".join(real_rows[0]) + " |\n\n"
+              "[来源: akshare stock_individual_notice_report / 1 条事件"
+              f"；行指纹 sha256:{_event_table_fingerprint(real_rows)}]\n\n"
+              "**[事实]** 近 30 日公告按类型归类如下：\n\n"
+              "**[分析]**\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|---|---|---|---|\n"
+              "| " + " | ".join(self.ROWS[0]) + " |\n\n"
+              f"[来源: akshare stock_individual_notice_report / 1 条事件；行指纹 sha256:{fp}]\n")
+        f = event_analysis_evidence_findings(md)
+        assert any(x["id"] == "wording-event-analysis-table-evidence"
+                   and x["severity"] == "error" for x in f), f
+
+    def test_first_block_engine_table_with_integrity_passes(self):
+        """正控：事件段首个表块 + 尾注/条数/指纹自洽 → 引擎表照常放行。"""
+        rows = [["2026-09-08", "程序性公告", "真实公告标题", "治理"]]
+        md = ("## 3a. 事件时间线\n\n"
+              "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n"
+              "|------|------|---------|---------|\n"
+              "| " + " | ".join(rows[0]) + " |\n\n"
+              "[来源: akshare stock_individual_notice_report / 1 条事件"
+              f"；行指纹 sha256:{_event_table_fingerprint(rows)}]\n\n"
+              "**[事实]** 近 30 日公告按类型归类如下：\n\n"
+              "**[分析]**\n\n"
+              "分类线索仅作检索提示[来源: 封存 events 字段]\n")
+        assert event_analysis_evidence_findings(md) == []

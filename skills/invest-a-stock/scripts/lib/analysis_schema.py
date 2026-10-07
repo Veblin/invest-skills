@@ -368,6 +368,19 @@ class AnalysisSchemaError(ValueError):
     pass
 
 
+# 引擎事件表专用元数据（R14/MC-02，2026-10-07 主线收尾）：事件时间线表由渲染器
+# 自封存 events 输出，其逐字表头与公告来源尾注（`/ N 条事件[；行指纹 …]`）是
+# **引擎输出标识**。自由分析文本不得伪造——否则可借「登记表头 + 来源尾注
+# （+公开算法自算行指纹）」在 **[分析]** 区冒充引擎表并取得豁免
+# （Codex r14-self-fingerprint-attack 真实入口复现：validate/preflight/report=0）。
+# 引用事件请用文字 + `[来源: 封存 events 字段]` 绑定；需要全量事件清单时由引擎
+# 段落呈现。行指纹自洽只作**完整性**校验，不构成来源身份证明。
+_ENGINE_EVENT_TABLE_HEADER_RE = re.compile(
+    r"\|\s*日期\s*\|\s*类型\s*\|\s*公告标题\s*\|\s*涉及维度（类型默认）\s*\|")
+_ENGINE_EVENT_TABLE_FOOTER_RE = re.compile(
+    r"\[来源\s*[:：]\s*akshare stock_individual_notice_report\s*/\s*\d+\s*条事件[^\]]*\]")
+
+
 def _validate_one(sec: dict) -> list[str]:
     errs: list[str] = []
     if not isinstance(sec, dict):
@@ -396,6 +409,12 @@ def _validate_one(sec: dict) -> list[str]:
                 render_markdown(sec[k])
             except MarkdownSubsetError as exc:
                 errs.append(f"markdown:{k}:{exc}")
+            if (_ENGINE_EVENT_TABLE_HEADER_RE.search(sec[k])
+                    or _ENGINE_EVENT_TABLE_FOOTER_RE.search(sec[k])):
+                errs.append(
+                    f"{k}:禁止伪造引擎事件表元数据（事件时间线表头/公告来源尾注"
+                    "——该表由渲染器自封存 events 输出，分析文本引用事件请用"
+                    "文字 + [来源: 封存 events 字段] 绑定；行指纹只作完整性校验）")
         errs.extend(_validate_fact_refs(sec, known_ids))
         errs.extend(_validate_fact_numbers(sec))
     return errs

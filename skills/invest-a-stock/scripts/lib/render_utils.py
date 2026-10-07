@@ -546,25 +546,22 @@ def _bull_bear_valuation_divergence_text(
     pe_zone: str | None,
     rev_yoy: float,
 ) -> str:
-    """模块 5c：按 PE 历史区间位置分支 Bull/Bear 估值叙事。"""
-    from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
+    """模块 5c：PE 历史区间位置与营收同比的并列读数（REV-03 消费链，2026-10-07）。
 
+    原实现按分位高低输出二值裁决——低分位「定价偏悲观、存在修复空间」、高分位
+    「估值透支、均值回归风险上升」、中区「尚未完全定价」——把历史位置与单期
+    营收同比读作市场已计入何种预期/重估空间的结论（AGENTS 约束 3；报告规范
+    §9.4）。历史位置与同比是**读数**，不足以推定市场预期；现一律输出两事实 +
+    「市场含义待验证」的两类候选读法，并说明**仅凭这两个读数尚未验证该解释**——
+    不由这两数推定、不据此断言修复空间或透支风险（也不得由本函数仅有的两个
+    输入推断全快照缺哪些数据：资金等字段可能在快照内可用）。
+    """
     zone_label = pe_zone or "中间带"
-    if pe_pct < ZONE_LOW_THRESHOLD:
-        return (
-            f"Bull 认为 PE 历史区间位置 {pe_pct:.1f}%（{zone_label}），"
-            f"定价偏悲观、存在修复空间；Bear 认为营收同比 {rev_yoy:+.1f}%"
-            f"不足以支撑估值向上修复。"
-        )
-    if pe_pct > ZONE_HIGH_THRESHOLD:
-        return (
-            f"Bull 认为营收同比 {rev_yoy:+.1f}% 可支撑当前定价；"
-            f"Bear 认为 PE 历史区间位置 {pe_pct:.1f}%（{zone_label}），"
-            f"估值透支、均值回归风险上升。"
-        )
     return (
-        f"Bull 认为营收同比 {rev_yoy:+.1f}% 与 PE 历史区间位置 {pe_pct:.1f}%"
-        f"尚未完全定价；Bear 认为二者匹配度存疑，需观察增速能否维持。"
+        f"事实并列：PE 历史区间位置 {pe_pct:.1f}%（{zone_label}）、"
+        f"营收同比 {rev_yoy:+.1f}%。市场含义待验证：该组合可能对应「预期已部分"
+        "反映」或「尚未反映」两类读法之一——仅凭这两个读数尚未验证该解释，"
+        "本快照不作二值裁决；须另行核验盈利路径、资金及公告原文。"
     )
 
 

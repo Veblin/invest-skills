@@ -20,7 +20,7 @@ from ..shared_dates import (  # noqa: E402
     normalize_end_date as _norm_ed,
     yyyymmdd_to_iso as _to_iso_date,
 )
-from ..financials import dedupe_by_end_date, resolve_rf  # noqa: E402
+from ..financials import dedupe_by_end_date, find_yoy_row, resolve_rf  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -407,9 +407,14 @@ def _core_variables(dims: dict[str, dict], collection: dict, *,
     # 解读」（A06 跨节冲突）。准入收敛为 rf_usable（仅确认 CNY）。
     if (ig.get("g_implied") is not None and ig.get("rf_usable")
             and ref_cagr is not None and ref_label):
+        # REV-04 同消费链（2026-10-07 主线收尾）：原「g_implied 与实际 CAGR 的
+        # 缺口」把两个不同变量/时间假设的读数读作可解释的增长缺口——改为两个
+        # 分别核查的读数（条件模型读数 vs 历史事实），并明示不可直接比较。
         g_pct = ig["g_implied"] * 100
         variables.append(
-            f"隐含增长 g_implied {g_pct:.1f}% 与实际{ref_label} CAGR {ref_cagr:+.1f}% 的缺口"
+            f"条件模型读数（隐含增长 g_implied {g_pct:.1f}%，取 r 与 PE 假设）与"
+            f"历史事实（实际{ref_label} CAGR {ref_cagr:+.1f}%，有限历史区间）"
+            "须分别核查——两值变量与时间假设不同，不可直接比较"
         )
     elif ig.get("g_implied") is not None and ref_cagr is not None:
         if ig.get("rf_is_default"):
@@ -715,6 +720,133 @@ def _events_factor_label(events: list, summary: dict) -> str:
     return f"近{window}日 {agg['total']}条公告（{'；'.join(parts)}）"
 
 
+# 同一财年相邻累计期的前一报告期 MMDD（单季拆分用）
+_SQ_PREV_MMDD = {"0630": "0331", "0930": "0630", "1231": "0930"}
+_SQ_QUARTER = {"0331": "Q1", "0630": "Q2", "0930": "Q3", "1231": "Q4"}
+
+
+def _v3_single_quarter_row(rows: list[dict], idx: int, field: str) -> float | None:
+    """累计行拆分单季值（仅同财年相邻期齐全时）；缺期/跨年 → None。
+
+    日期先经 ``_norm_ed`` 归一（2026-10-07 复检修复）：ISO（2026-06-30）与
+    compact（20260630）混合输入下的拆分结果须与全 compact 一致。"""
+    if idx < 0 or idx >= len(rows):
+        return None
+    ed = _norm_ed(str(rows[idx].get("end_date") or ""))
+    cur = _safe_num(rows[idx].get(field))
+    if cur is None or len(ed) != 8 or not ed.isdigit():
+        return None
+    mmdd = ed[4:]
+    if mmdd == "0331":
+        return cur  # Q1 累计即单季
+    prev_mmdd = _SQ_PREV_MMDD.get(mmdd)
+    if prev_mmdd is None:
+        return None
+    prev_ed = ed[:4] + prev_mmdd
+    for r in rows:
+        if _norm_ed(str(r.get("end_date") or "")) == prev_ed:
+            base = _safe_num(r.get(field))
+            return None if base is None else cur - base
+    return None
+
+
+def _v3_single_quarter_of(rows: list[dict], end_date: str, field: str) -> float | None:
+    """指定报告期（按 end_date 查找）的单季值；行缺失/缺中间期 → None。
+
+    查找同样按 ``_norm_ed`` 归一后比较（ISO/compact 等价）。"""
+    target = _norm_ed(str(end_date or ""))
+    if len(target) != 8 or not target.isdigit():
+        return None
+    for i, r in enumerate(rows):
+        if _norm_ed(str(r.get("end_date") or "")) == target:
+            return _v3_single_quarter_row(rows, i, field)
+    return None
+
+
+def _v3_period_label(end_date: str) -> str:
+    """20260630 / 2026-06-30 → 「2026Q2」；无法识别时原样返回。"""
+    raw = str(end_date or "")
+    ed = _norm_ed(raw)
+    if len(ed) == 8 and ed.isdigit() and ed[4:] in _SQ_QUARTER:
+        return f"{ed[:4]}{_SQ_QUARTER[ed[4:]]}"
+    return raw
+
+
+def _v3_previous_quarter_end(end_date: str) -> str:
+    """日历上紧邻的前一报告期末：2026Q1 → 2025-12-31；其余 → 同年上一 MMDD。
+
+    MC-01（2026-10-07 独立探针）：环比比较的两端必须是**相邻日历季度**——
+    两个 Q1（相隔一年）不是环比，跨年缺口也要停笔。日期先经 ``_norm_ed``
+    归一（ISO/compact 等价，2026-10-07 复检修复）。"""
+    ed = _norm_ed(str(end_date or ""))
+    if len(ed) != 8 or not ed.isdigit():
+        return ""
+    mmdd = ed[4:]
+    if mmdd == "0331":
+        return f"{int(ed[:4]) - 1}1231"
+    prev_mmdd = _SQ_PREV_MMDD.get(mmdd)
+    return ed[:4] + prev_mmdd if prev_mmdd else ""
+
+
+def _v3_recent_profit_direction(fin_list: list[dict]) -> tuple[str, str, str]:
+    """近期净利润方向（REV-01）：只做同口径比较，禁止跨累计期直接相减。
+
+    返回 ``(direction, label, basis)``，方向不可得时三者均为空串：
+
+    1. **单季环比**（优先）：最新期可拆单季、且**日历前一个季度**也可拆
+       （同财年相邻累计期差，或跨年 Q1 由上年 Q4 差 = FY−9M 得到）时，
+       比较两个相邻单季，label=「净利润环比」，basis 注明两端（如
+       「2026Q2 vs 2026Q1」；跨年 Q4→Q1 为「2026Q1 vs 2025Q4」）。
+    2. **同报告期同比**：单季环比不可得（缺中间期/跨年缺基期/两个 Q1 相隔
+       一年等）时，找上年同 MMDD 行比较累计值，label=「净利润同比」，basis
+       注明两端报告期。
+    3. 两者皆缺 → 方向不可得（中性 + 缺口标注），不得用相邻行（含同报告期
+       修订重复行）硬比。
+
+    原反例（REV-01，600519 collection 175）：2026 半年累计 445.17 亿与一季度
+    累计 272.43 亿直接相减得「↑正向」；按单季拆分二季度为 172.74 亿，环比
+    -36.59%（集合含一季度）。MC-01 追加反例：仅凭「两个值各可拆单季」不能
+    标环比——20250331 vs 20260331（相隔一年）须退回同报告期同比，年份缺口
+    （20240331 vs 20260331）缺基期须停笔。修订重复行（同 end_date）先按
+    ann_date 去重，否则相邻比较会退化成同一行自比（600036 collection 172
+    实测「→中性」）。
+
+    2026-10-07 复检修复：行日期先经 ``_norm_ed`` 归一（保留不可解析行原样），
+    排序/最新期/同比 basis 在 ISO 与 compact 混合输入下与全 compact 一致；
+    去重与缺期/跨年停笔纪律保持不变。
+    """
+    normed: list[dict] = []
+    for r in fin_list or []:
+        ed = _norm_ed(str(r.get("end_date") or ""))
+        cur_ed = str(r.get("end_date") or "")
+        normed.append({**r, "end_date": ed} if ed and ed != cur_ed else r)
+    rows = dedupe_by_end_date(sort_kline_asc(normed))
+    if not rows:
+        return "", "", ""
+    latest = rows[-1]
+    ed_latest = str(latest.get("end_date") or "")
+    s_now = _v3_single_quarter_row(rows, len(rows) - 1, "net_profit")
+    prev_end = _v3_previous_quarter_end(ed_latest)
+    s_prev = _v3_single_quarter_of(rows, prev_end, "net_profit") if prev_end else None
+    if s_now is not None and s_prev is not None:
+        d = ("↑正向" if s_now > s_prev else "↓负向" if s_now < s_prev else "→中性")
+        basis = (
+            f"{_v3_period_label(ed_latest)} vs {_v3_period_label(prev_end)} 单季"
+        )
+        return d, "净利润环比", basis
+    yoy = find_yoy_row(rows, latest)
+    if yoy is not None:
+        cur = _safe_num(latest.get("net_profit"))
+        base = _safe_num(yoy.get("net_profit"))
+        if cur is not None and base is not None:
+            d = ("↑正向" if cur > base else "↓负向" if cur < base else "→中性")
+            basis = (
+                f"{str(latest.get('end_date'))} vs {str(yoy.get('end_date'))} 同报告期"
+            )
+            return d, "净利润同比", basis
+    return "", "", ""
+
+
 # --- _section_dynamic_drivers ---
 def _section_dynamic_drivers(
     collection: dict, symbol: str, dims: dict[str, dict], market_structure: dict,
@@ -772,16 +904,16 @@ def _section_dynamic_drivers(
 
     factors: list[DriverFactor] = []
     fin = _get_dim_data(dims, "financials")
-    np_now, np_prev = None, None
+    fin_dir, fin_label, fin_basis = "→中性", "", ""
     if fin and isinstance(fin, list) and len(fin) >= 2:
-        fin = sort_kline_asc(fin)
-        np_now = fin[-1].get("net_profit")
-        np_prev = fin[-2].get("net_profit")
-        if np_now is not None and np_prev is not None:
-            d = "↑正向" if float(np_now) > float(np_prev) else ("↓负向" if float(np_now) < float(np_prev) else "→中性")
-            factors.append(DriverFactor("基本面", "净利润环比", d, "⚠️", "financials"))
+        # REV-01：只做同口径比较（单季拆分环比 → 同报告期同比），
+        # 不得把相邻累计行直接相减（原反例：半年累计 vs 一季度累计）。
+        _d, _label, _basis = _v3_recent_profit_direction(fin)
+        if _d:
+            fin_dir, fin_label, fin_basis = _d, _label, _basis
+            factors.append(DriverFactor("基本面", fin_label, fin_dir, "⚠️", "financials"))
         else:
-            factors.append(DriverFactor("基本面", "净利润", "→中性", "❓", "financials"))
+            factors.append(DriverFactor("基本面", "净利润（可比期不足）", "→中性", "❓", "financials"))
     else:
         factors.append(_v3_driver_unavailable("基本面"))
 
@@ -842,7 +974,7 @@ def _section_dynamic_drivers(
     kline = _get_dim_data(dims, "kline")
     ma_dir = "→中性"
     ma_strength = "❓"
-    fin_dir = "→中性"
+    # fin_dir/fin_label 在因子矩阵处已按同口径比较赋值（REV-01），不在此重置。
     if kline and isinstance(kline, list):
         tech = compute(sort_kline_asc(kline))
         if "error" not in tech:
@@ -859,9 +991,7 @@ def _section_dynamic_drivers(
     else:
         factors.append(_v3_driver_unavailable("技术趋势"))
 
-    if np_now is not None and np_prev is not None:
-        fin_dir = "↑正向" if float(np_now) > float(np_prev) else (
-            "↓负向" if float(np_now) < float(np_prev) else "→中性")
+    # fin_dir/fin_label 已在因子矩阵处按同口径比较得出（REV-01），此处不再重算。
 
     # 事件催化因子 — from collection["events"]（计数**现场聚合**，不读快照 top_types：
     # 后者只存信号榜前 5 且旧快照仍是历史口径，会让括号内数字与总数对不上）
@@ -897,12 +1027,14 @@ def _section_dynamic_drivers(
     if ma_dir == fin_dir and ma_dir != "→中性" and fin_dir != "→中性":
         lines.append(_cv(
             "convergence", "CV-6", "MA 趋势 vs 近期业绩方向",
-            f"技术趋势 {ma_dir} 与净利润环比方向 {fin_dir} 一致", "中",
+            f"技术趋势 {ma_dir} 与{fin_label}方向 {fin_dir} 一致"
+            f"（{fin_basis}；财报与价格窗口不同，仅作方向对照）", "中",
         ))
     elif ma_dir != "→中性" and fin_dir != "→中性" and ma_dir != fin_dir:
         lines.append(_cv(
             "divergence", "CV-6", "MA 趋势 vs 近期业绩方向",
-            f"技术趋势 {ma_dir} 与净利润环比方向 {fin_dir} 不一致", "中",
+            f"技术趋势 {ma_dir} 与{fin_label}方向 {fin_dir} 不一致"
+            f"（{fin_basis}；财报与价格窗口不同，仅作方向对照）", "中",
         ))
     else:
         lines.append(_cv(
@@ -937,6 +1069,12 @@ def _section_participant_behavior_scan(
     return build_participant_behavior_section(
         collection, symbol, market_structure, dims, analysis=analysis,
     )
+
+
+def _v3_rf_series_key(src: str) -> str:
+    """10Y 来源串归一（小写、去掉「(CN10Y)」等参数后缀），用于判断 ERP 对齐
+    序列与 cn10y 现值是否同源；空串/仅后缀时不构成同源。"""
+    return src.strip().lower().split("(", 1)[0].strip()
 
 
 # --- _section_market_structure ---
@@ -1033,20 +1171,48 @@ def _section_market_structure(
             )
         if erp:
             partial_note = "（样本日不足，分位仅供参考）" if erp.get("partial") else ""
-            # C2-a：来源标注带币种；美元口径显式披露「与 A 股口径不一致」
-            # （旧封存快照无 cn10y/rf_currency，按来源字符串推断币种）。
-            rf = resolve_rf(erp)
-            if rf["rate_pct"] is not None:
-                y10_note = f"；10Y 国债来源: {rf['label']}"
-                if rf["is_wrong_currency"]:
-                    y10_note += "（美元口径——ERP 对齐基准与 A 股口径不一致，仅供参考）"
-                elif rf["is_currency_unconfirmed"]:
-                    y10_note += "（来源/币种未确认——无法核对与 A 股口径一致性，仅供参考）"
-            else:
-                # ERP 值已对齐某条 10Y 序列；无现值时至少披露对齐来源字符串
-                combined = str(erp.get("source") or "")
-                src_only = combined.split("+", 1)[1] if "+" in combined else ""
-                y10_note = f"；10Y 国债来源: {src_only}" if src_only else ""
+            # REV-02（2026-10-07 主线收尾）：标签必须绑定**实际参与 ERP 运算的
+            # 整条 10Y 序列**（erp.y10_source/rf_currency），而不是现值闸门
+            # （resolve_rf）按 cn10y 优先挑的现值——两者可并存且币种不同。
+            # 反例（封存 175）：ERP 2.27% / 分位 1.4% 由 FRED.DGS10（USD）序列
+            # 算出，同时存在独立 cn10y 现值 1.682%；旧实现把该行标成「中国
+            # 10Y 国债」口径。旧封存快照缺 y10_source/rf_currency 时按来源
+            # 字符串推断（FRED=USD，bond_zh/CN10Y=CNY）。人民币现值的参与
+            # 说明按证据三分（2026-10-07 复检修复）：USD 序列且来源已证明
+            # → 明示「未参与」；CNY 且与 ERP 序列同源（_v3_rf_series_key 归一
+            # 比较）→「同源人民币序列，按交易日对齐」（现值是否参与取决于
+            # 对齐，不断言）；来源/关系未确认 → 只披露现值，不断言参与与否。
+            combined = str(erp.get("source") or "")
+            series_src = str(erp.get("y10_source") or "")
+            if not series_src and "+" in combined:
+                series_src = combined.split("+", 1)[1].strip()
+            cur = str(erp.get("rf_currency") or "")
+            if not cur and series_src:
+                up = series_src.upper()
+                if "FRED" in up:
+                    cur = "USD"
+                elif "CN10Y" in up or "BOND_ZH" in up:
+                    cur = "CNY"
+            y10_note = f"；10Y 国债来源: {series_src}" if series_src else ""
+            if series_src and cur == "USD":
+                y10_note += "（美元口径——ERP 对齐序列与 A 股口径不一致，读数仅供参考、不作方向解读）"
+            elif series_src and cur != "CNY":
+                y10_note += "（来源/币种未确认——无法核对与 A 股口径一致性，仅供参考）"
+            if erp.get("cn10y") is not None:
+                cn_src = str(erp.get("cn10y_source") or "") or "来源未标注"
+                same_series = bool(series_src) and _v3_rf_series_key(
+                    str(erp.get("cn10y_source") or "")) == _v3_rf_series_key(series_src)
+                if cur == "USD" and series_src and not same_series:
+                    # ERP 对齐序列已证明为 USD（USD 分支的 cn10y 必为独立 CNY
+                    # 序列）：现值未参与本 ERP 计算。
+                    tail = "未参与本 ERP 计算"
+                elif cur == "CNY" and same_series:
+                    # 同源人民币序列：现值是否参与取决于交易日对齐，不作断言。
+                    tail = "同源人民币序列，按交易日对齐"
+                else:
+                    # 来源/关系未确认：不断言参与与否。
+                    tail = "与 ERP 序列关系未确认"
+                y10_note += f"；人民币 10Y 现值 {erp.get('cn10y')}%（{cn_src}，{tail}）"
             lines.append(
                 f"- ERP（沪深300）: {erp.get('raw', '-')}%，5年分位 {erp.get('percentile_5y', '-')}%"
                 f"{partial_note}{y10_note} [对齐样本 {erp.get('erp_days', '-')} 日]"
@@ -1639,6 +1805,7 @@ def _section_events_timeline(
         return ""
 
     from ..analysis_templates import event_type_label
+    from ..events import event_table_fingerprint
 
     lines = ["## 3a. 事件时间线", ""]
 
@@ -1652,6 +1819,7 @@ def _section_events_timeline(
 
     lines.append("| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |")
     lines.append("|------|------|---------|---------|")
+    row_cells: list[list[str]] = []
     for ev in shown:
         date = str(ev.get("date", ""))
         # 中文标签经 taxonomy 单一源（与因子矩阵同一函数），不再打印英文类型键
@@ -1668,14 +1836,26 @@ def _section_events_timeline(
             title = title[:47] + "..."
         # Escape pipe chars
         title = title.replace("|", "/")
-        lines.append(f"| {date} | {etype} | {title} | {impact} |")
+        row_cells.append([date, etype, title, impact])
 
     hide_count = max(0, len(sorted_events) - 15)
     if hide_count > 0:
-        lines.append(f"| ... | ... | （另有 {hide_count} 条事件未展示） | ... | ... |")
+        row_cells.append(
+            ["...", "...", f"（另有 {hide_count} 条事件未展示）", "...", "..."])
+    for cells in row_cells:
+        lines.append("| " + " | ".join(cells) + " |")
 
     lines.append("")
-    lines.append(f"[来源: akshare stock_individual_notice_report / {len(sorted_events)} 条事件]")
+    # R14（2026-10-07 主线收尾）：尾注附**行指纹**——检查器从报告实际行重算
+    # 并比对，把行级结构豁免收紧为「行集合与该尾注自洽」（完整性校验）；仅
+    # 复制表头/尾注/条数的外形不再放行（Codex round-8 event_title_assertion 的
+    # footer 变体）。指纹**不证明来源身份**（算法公开、可对自造行重算）：
+    # 来源身份的关闭在 analysis_schema 入口（禁止自由分析伪造引擎事件表元数据）
+    # 与 report_qc 块位规则（只豁免事件段首个引擎表块，人工分析区不豁免）。
+    fp = event_table_fingerprint(row_cells)
+    lines.append(
+        f"[来源: akshare stock_individual_notice_report / {len(sorted_events)} 条事件"
+        f"；行指纹 sha256:{fp}]")
     lines.append("")
 
     # ---- Template B classification cards ----
@@ -2578,11 +2758,11 @@ def _section_management_assessment(
     if capex_score25 is not None:
         score100 = capex_score25 / 25.0 * 100
         lines.append(_canvas_row(
-            "研发回报（代理: ΔRevenue/CAPEX）", score100, capex_note,
+            "营收增量/CAPEX（同报告期代理读数）", score100, capex_note,
             ["revenue", "cap_ex"],
         ))
     else:
-        lines.append(f"| 研发回报（代理: ΔRevenue/CAPEX） | 数据不足 | {capex_note} |")
+        lines.append(f"| 营收增量/CAPEX（同报告期代理读数） | 数据不足 | {capex_note} |")
     for dim_name, reason in (
         ("并购", "需并购标的估值倍数/协同效应实现情况，当前引擎未采集"),
         ("回购", "需回购价格区间/实际执行率数据，当前引擎未采集"),
@@ -3970,42 +4150,25 @@ def _section_4d_valuation_expectation(
             g_implied_pct = ig["g_implied"] * 100
             ref_cagr, ref_label = _growth_reference(ctx.cagr, ctx.np_cagr)
             ref_text = cagr_text if ctx.cagr is not None else np_cagr_text
-            if ref_cagr is not None and abs(g_implied_pct - ref_cagr) > 5:
-                if g_implied_pct > ref_cagr:
-                    lines.append(
-                        f"**解读：** 市场隐含增长（{g_implied_pct:.2f}%）> 实际{ref_label} CAGR（{ref_text}），"
-                        "市场定价偏乐观，需验证增长加速依据。"
-                    )
-                else:
-                    lines.append(
-                        f"**解读：** 市场隐含增长（{g_implied_pct:.2f}%）< 实际{ref_label} CAGR（{ref_text}），"
-                        "市场定价偏悲观，可能存在低估（需结合风险评估）。"
-                    )
+            # REV-04 全文补充（2026-10-07 主线收尾）：原「解读」按差值大小给
+            # 「偏乐观/偏悲观、可能存在低估」或「接近=定价基本反映历史增长」——
+            # 均为把条件模型读数与历史事实的差值读作定价裁决；上一稿仍输出
+            # 「相差 X pp（相对 Y%）」。现统一为：分别列两个读数 + 不可直接比较
+            # 的原因——**不输出差值/相对差**，不作方向裁决（与 5c/5d/核心变量同口径）。
+            if ref_cagr is not None:
+                lines.append(
+                    f"**解读：** 市场隐含增长（{g_implied_pct:.2f}%）是**条件模型读数**"
+                    "（永续口径，取 r 与 PE 假设）；实际"
+                    f"{ref_label} CAGR（{ref_text}）是**有限历史区间的已发生增速**——"
+                    "两者变量与时间假设不同，不可直接相减或换算为「高估/低估」裁决；"
+                    "须分别核查模型假设（收益分配、风险溢价、盈利与可分配现金流差异）"
+                    "与增长可持续性证据。"
+                )
                 if ctx.cagr is not None and ctx.np_cagr is not None and abs(ctx.cagr - ctx.np_cagr) > 5:
                     lines.append(
                         f"补充：营收 CAGR（{cagr_text}）与净利润 CAGR（{np_cagr_text}）分化较大，"
                         "解读时优先核对利润率变化与非经常性损益。"
                     )
-            elif ref_cagr is not None:
-                # 2026-09-19：原实现无条件断言「市场隐含增长 ≈ 实际 CAGR」。当绝对差 ≤5pp
-                # 但**相对差**很大时（600519 实测 5.83% vs 10.81%，差 4.98pp / 相对 46%），
-                # 「≈」被引擎自身输入证伪。改为：一律打印两个数 + 差值，且仅在相对差
-                # ≤20% 时才表述「接近」。
-                _gap_pp = g_implied_pct - ref_cagr
-                _rel = abs(_gap_pp) / abs(ref_cagr) * 100 if ref_cagr else None
-                if _rel is not None and _rel <= 20:
-                    _verdict = "接近，定价基本反映历史增长"
-                else:
-                    _rel_s = f"{_rel:.1f}%" if _rel is not None else "不可得"
-                    _verdict = (
-                        f"存在差距（差 {abs(_gap_pp):.2f}pp，相对 {_rel_s}）——"
-                        + ("市场隐含的增长假设低于历史兑现水平"
-                           if _gap_pp < 0 else "市场隐含的增长假设高于历史兑现水平")
-                    )
-                lines.append(
-                    f"**解读：** 市场隐含增长（{g_implied_pct:.2f}%）与实际{ref_label} CAGR"
-                    f"（{ref_text}）{_verdict}，关注增长率拐点。"
-                )
             else:
                 lines.append("**解读：** 缺少实际 CAGR 对比，仅呈现隐含增长率供参考。")
             if ig.get("warning"):
