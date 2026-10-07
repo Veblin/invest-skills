@@ -15,6 +15,12 @@ from typing import Any
 
 DEFAULT_TOL = 1e-9
 
+# 股指期货基差的新鲜度阈值（**交易日**口径，issue #34）。
+# 两处消费方共用同一常量，避免各自演化（同 #35「两个 80」教训）：
+# ① journal `market_microstructure._fetch_futures`（写成对值/日期，滞后拒写）；
+# ② ETF `futures_basis.query_futures_basis`（直读 futures_daily，滞后不给当期读数）。
+FUTURES_BASIS_STALE_TRADING_DAYS = 5
+
 
 def values_equal(a: Any, b: Any, *, tol: float = DEFAULT_TOL,
                  nulls_equal: bool = False) -> bool:

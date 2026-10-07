@@ -1,6 +1,6 @@
 # 舆情深度研究专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent sentiment_deep` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) 契约 A–D 约束（legacy LAW 编号的映射见该文件「降级与废止」注）。`plan --intent sentiment_deep` 时加载本文件。
 
 ## 三层舆情（勿与 Template C 混淆）
 
@@ -45,7 +45,8 @@ uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tm
 
 ```
 [事实] {摘录或摘要} [来源: WebSearch / query: "..." / {日期}]
-[分析] {语气与股价传导的讨论} [证据强度: ...]
+[分析] {语气与股价传导的讨论，每条断言另带来源或真实事实绑定}
+[证据强度: ⚠️ 中 📡 单源 📅 报告期已注明 — 单源无验证]
 ```
 
 ## 情绪仪表盘输出格式（Claude 填写）
@@ -65,7 +66,7 @@ uv run python skills/invest-a-stock/scripts/invest.py evidence 600176 --plan /tm
 - 模块 3 行业情绪 ≠ L3 社媒舆情
 - 完整 `report --deep` 时仍加载本文件以补充 L3
 
-## 不可得处理（LAW 5）
+## 不可得处理（契约 C4，原 LAW 5）
 
 L3 全部检索失败时：
 

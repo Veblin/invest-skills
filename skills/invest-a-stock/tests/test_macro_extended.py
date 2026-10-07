@@ -416,8 +416,8 @@ class TestGlobalConclusion:
         from lib.macro import _global_conclusion
 
         # 美10Y 高位 或 实际利率 高实际利率，任一命中即出结论（同一条规则只出一条）
-        assert _global_conclusion({"dgs10": {"signal": "高位"}}) == "海外利率高位，外部估值压制未解除"
-        assert _global_conclusion({"dfii10": {"signal": "高实际利率"}}) == "海外利率高位，外部估值压制未解除"
+        assert _global_conclusion({"dgs10": {"signal": "高位"}}) == "海外利率高位（外部估值压制为候选线索，未经本报告验证）"
+        assert _global_conclusion({"dfii10": {"signal": "高实际利率"}}) == "海外利率高位（外部估值压制为候选线索，未经本报告验证）"
         both = _global_conclusion({"dgs10": {"signal": "高位"},
                                    "dfii10": {"signal": "高实际利率"}})
         assert both.count("；") == 0, f"同一规则重复输出：{both}"
@@ -483,7 +483,7 @@ class TestGlobalConclusion:
         assert first.startswith("国内：") and "→偏宽松" in first
         assert first.endswith("|"), "海外段存在时首行须以 ASCII | 结尾（TestMacroLabel 契约）"
         assert second.startswith("  海外：")
-        assert "→海外利率高位，外部估值压制未解除" in second
+        assert "→海外利率高位（外部估值压制为候选线索，未经本报告验证）" in second
 
 
 # ---------------------------------------------------------------------------
@@ -797,3 +797,153 @@ class TestFormatMacroTrends:
         assert "4 项中 1 项创 20 年新高" in text
         assert "滞后约 2.5 个月" in text
         assert "创 20 年新高" in text
+
+
+# ---------------------------------------------------------------------------
+# 宏观分组展示块（v0.3.1 阅读验收，2026-10-07）
+#
+# 背景：full 报告首屏原为「国内/海外 + 全部读数挤一行」；改分组展示块后，
+# 契约要点：①全部原读数/信号保留；②币种/口径列逐项区分（指数、同比百分比、
+# 人民币/美元利率百分比、人民币信贷金额、人民币元/美元），不把指数/同比
+# 误标成币种金额；③条件边界随块输出；④macro_signal_label 不受影响；
+# ⑤整块多行 ≠ 可漏行——full 首屏提取必须整块迁移（不得漏进底稿）。
+# ---------------------------------------------------------------------------
+
+def _macro_300308_like() -> dict:
+    """与封存快照 177 同形的宏观 dict（仅用于展示层断言）。"""
+    return {
+        "status": "ok",
+        "available_count": 20,
+        "failed_indicators": ["PPI"],
+        "indicators": {
+            "pmi": {"value": 50.1, "signal": "扩张", "source": "akshare.macro_china_pmi"},
+            "cpi": {"value": 0.8, "signal": "温和", "source": "akshare.macro_china_cpi"},
+            "lpr": {"value": 3.0, "signal": "偏宽松", "source": "akshare.macro_china_lpr"},
+            "money_supply": {"value": 7.5, "signal": "稳健", "credit_pulse": 2.5,
+                             "source": "akshare.macro_china_money_supply"},
+            "loan": {"value": 600.0, "signal": "收缩", "source": "akshare.macro_rmb_loan"},
+            "vix": {"value": 15.52, "signal": "正常", "source": "FRED.VIXCLS"},
+            "sox": {"value": 13217.82, "signal": "", "source": "YahooFinance.^SOX"},
+            "dgs10": {"value": 5.31, "signal": "高位", "source": "FRED.DGS10",
+                      "as_of": "2026-10-05"},
+            "dfii10": {"value": 2.95, "signal": "高实际利率", "source": "FRED.DFII10",
+                       "as_of": "2026-10-05"},
+            "dcoilbrenteu": {"value": 113.96, "signal": "高位",
+                             "source": "FRED.DCOILBRENTEU", "as_of": "2026-09-29"},
+            "dexchus": {"value": 6.7, "signal": "人民币偏强", "source": "FRED.DEXCHUS",
+                        "as_of": "2026-10-02"},
+            "acm_tp10": {"value": 0.91, "signal": "正常",
+                         "source": "NYFed.ACMTermPremium(ACMTP10)", "as_of": "2026-10-02"},
+        },
+    }
+
+
+class TestScenarioBlock:
+    def test_keeps_all_readings_signals_and_conclusions(self):
+        block = "\n".join(macro.macro_scenario_lines(_macro_300308_like()))
+        # 原读数与信号全部保留（逐项）
+        for token in ("PMI", "50.1", "扩张", "CPI", "+0.8%", "LPR", "3.0%",
+                      "M2", "7.5%", "脉冲 +2.5%", "新增信贷", "0.1万亿",
+                      "VIX", "15.52", "SOX", "13,218", "美10Y", "5.31%", "高位",
+                      "实际利率", "2.95%", "高实际利率", "布油", "114.0",
+                      "USDCNY", "6.70", "人民币偏强", "ACM10Y", "0.91"):
+            assert token in block, token
+        # 条件边界与降级披露
+        assert "外部估值压制为候选线索，未经本报告验证" in block
+        assert "不推演为公司成本/盈利结论" in block
+        assert "未获取：PPI" in block
+        # 结论仍来自确定性规则（与紧凑标签同口径）
+        assert "→偏宽松" in block
+        assert "→海外利率高位" in block
+
+    def test_currency_column_distinguishes_units(self):
+        block = "\n".join(macro.macro_scenario_lines(_macro_300308_like()))
+        # 表头 + 逐项口径：指数/同比百分比/人民币利率百分比/人民币信贷金额；
+        # 美元利率为「利率百分比」（非金额）；USDCNY 报价方向明确
+        assert "| 分组 | 指标 | 读数 | 信号 | 来源 | 币种/口径 |" in block
+        assert "| 国内 | PMI | 50.1 | 扩张 | akshare.macro_china_pmi | 指数 |" in block
+        assert "同比百分比" in block
+        assert "人民币利率百分比" in block
+        assert "人民币信贷金额" in block
+        assert "美元利率百分比" in block
+        assert "人民币元/美元" in block
+        # 旧版含糊标注（整格恰为 CNY/USD）不得残留（USDCNY 是指标名，不算）
+        assert "| CNY |" not in block and "| USD |" not in block, "旧版含糊币种标注残留"
+        # as_of 随来源列输出（FRED 序列的截至日期）
+        assert "FRED.DGS10（截至 2026-10-05）" in block
+
+    def test_no_readings_degrades_to_single_line(self):
+        block = macro.macro_scenario_lines({"indicators": {}})
+        assert block == ["**[宏观情景]** 宏观数据不可得"]
+
+    def test_compact_label_unchanged_by_block(self):
+        """分组块不改变 macro_signal_label 的两段式合同（同源结论、独立渲染）。"""
+        m = _macro_300308_like()
+        label = macro.macro_signal_label(m)
+        assert "|" in label and label.count("\n") == 1
+        assert "→偏宽松" in label and "→海外利率高位" in label
+
+
+class TestMacroBlockFirstScreenExtraction:
+    """full 首屏提取：多行块整块迁移，不漏行进审计底稿（验收硬条）。"""
+
+    @staticmethod
+    def _render_full(macro_ctx: dict) -> str:
+        import sys
+        from pathlib import Path
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        libdir = scripts.parent.parent / "lib"
+        if str(libdir) not in sys.path:
+            sys.path.insert(0, str(libdir))
+        from fixtures.collections import collection_v2_minimal
+        from lib.render_markdown._concise import render_report_v3
+        coll = collection_v2_minimal()
+        coll["macro_context"] = macro_ctx
+        return render_report_v3(coll, "600176", mode="full")
+
+    def test_block_on_surface_and_not_in_basement(self):
+        md = self._render_full(_macro_300308_like())
+        surface = md[: md.index("<details>")]
+        basement = md[md.index("<details>"):]
+        assert "**[宏观情景]**" in surface
+        assert "| 分组 | 指标 | 读数 | 信号 | 来源 | 币种/口径 |" in surface
+        assert "| 海外 | USDCNY | 6.70 | 人民币偏强" in surface
+        assert "未获取：PPI" in surface
+        # 多行块不得漏行到正文（底稿）
+        assert "宏观情景" not in basement
+        assert "| 分组 | 指标 |" not in basement
+
+    def test_marker_appears_exactly_once(self):
+        md = self._render_full(_macro_300308_like())
+        assert md.count("**[宏观情景]**") == 1
+
+    def test_non_ok_status_renders_no_block(self):
+        md = self._render_full({"status": "all_failed", "indicators": {}})
+        assert "**[宏观情景]**" not in md
+
+
+class TestSplitMacroBlock:
+    """_split_macro_block：整块（多行元素）与逐行元素两种形态都不漏行。"""
+
+    def test_single_multiline_element_migrates_whole(self):
+        from lib.render_markdown._concise import _split_macro_block
+        block = "\n".join(macro.macro_scenario_lines(_macro_300308_like()))
+        extras = [block, "**[产业链]** 通信网络设备及器件 · 中游"]
+        macro_lines, rest = _split_macro_block(extras)
+        assert macro_lines == [block]
+        assert rest == ["**[产业链]** 通信网络及器件 · 中游".replace("及器件", "设备及器件")]
+        assert "| 分组 | 指标 |" in "\n".join(macro_lines)
+
+    def test_linewise_shape_migrates_continuations(self):
+        """上游若改为逐行元素：续行（表格/引言行）须一并迁移，不留半块在底稿。"""
+        from lib.render_markdown._concise import _split_macro_block
+        extras = ["**[宏观情景]** 长块首行", "", "> 结论行", "| 分组 | 指标 |",
+                  "| 国内 | PMI | 50.1 | 扩张 | src | 指数 |",
+                  "**[产业链]** x"]
+        macro_lines, rest = _split_macro_block(extras)
+        assert macro_lines == ["**[宏观情景]** 长块首行", "", "> 结论行",
+                               "| 分组 | 指标 |",
+                               "| 国内 | PMI | 50.1 | 扩张 | src | 指数 |"]
+        assert rest == ["**[产业链]** x"]

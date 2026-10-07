@@ -5,6 +5,8 @@ import math
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +26,7 @@ from ..proxy import akshare_direct_session, akshare_push2_available
 from ..schema import DimensionResult, SourceResult
 from ..shared_dates import (
     shanghai_days_ago as _days_ago,
+    shanghai_now,
     shanghai_today as _today,
     yyyymmdd_to_iso as _to_iso_date,
 )
@@ -268,6 +271,14 @@ def collect_quote(symbol: str) -> dict:
             merged = dict(tencent.data)
             merged["kline"] = data  # 保留 10 日 K 线（消费方按 dict 读实时字段）
             legacy["data"] = merged
+            meta = legacy.setdefault("_meta", {})
+            primary_source = str(meta.get("source") or "unknown")
+            meta["source"] = f"merged:{primary_source}+{tencent.source}"
+            meta["merged_sources"] = [primary_source, tencent.source]
+            meta["primary_source"] = primary_source
+            if tencent.data.get("price") is not None:
+                meta["price_source"] = tencent.source
+                meta["price_fetched_at"] = tencent.fetched_at
         return legacy
 
     return _collect_dimension(
@@ -2087,7 +2098,8 @@ def collect_all(symbol: str, dims: list[str] | None = None,
                 with_macro: bool = False,
                 with_chain: bool = False,
                 with_news_pack: bool = False,
-                force_sector_sync: bool = False) -> dict[str, Any]:
+                force_sector_sync: bool = False,
+                prepare_for_report: bool = False) -> dict[str, Any]:
     """全维度采集。
 
     last30days 模式扩展：维度之间也并行执行（跨维度 fan-out）。
@@ -2102,6 +2114,10 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         with_news_pack: 采集新闻包（公告 + 查询包 + 可选 Tavily）
         force_sector_sync: 绕过 F1 冷缓存门控强制计算板块同步性（首次预热，
             成分股日线全量抓取约 5-10 分钟；默认冷缓存时跳过并标注原因）
+        prepare_for_report: 报告链专用——在装配末尾补采 `market_structure`
+            （PCR/ERP/资金流等报告必需项）。**采集期一次性完成，渲染期不再联网补采**；
+            失败写 availability/attempted_sources，不阻断采集（旧行为是渲染入口
+            补采，且补采结果不入库 → 同一输入连渲四次 = 四次同量联网）。
     """
     # 空列表（如 CLI --dims "" 解析结果）视同 None 填默认维度；
     # 显式语义 + 日志提示（review #2：不静默跑全量）
@@ -2110,37 +2126,88 @@ def collect_all(symbol: str, dims: list[str] | None = None,
         dims = list(_DEFAULT_DIMS)
 
     start_all = time.time()
+    collection_started_at = datetime.now(timezone.utc).isoformat()
 
     # 深度模式：kline 用更长窗口
     kline_kwargs = {}
     if deep:
         kline_kwargs["start_date"] = _days_ago(730)
 
-    dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
-    industry_pricing = _collect_industry_pricing_block(symbol, dims, dim_results)
-    if industry_pricing is not None:
-        dim_results["industry_pricing"] = industry_pricing
+    # 宏观取数只依赖 symbol，与个股维度、融合和产业链取数并行。
+    # 仅在显式 --with-macro 时创建额外 worker；无宏观请求的路径不变。
+    pool = ThreadPoolExecutor(max_workers=1) if with_macro else nullcontext()
+    with pool as macro_pool:
+        macro_future = (
+            macro_pool.submit(_collect_macro_context_block, symbol, True)
+            if with_macro else None
+        )
+        dim_results = _collect_dims_fanout(symbol, dims, kline_kwargs)
+        industry_pricing = _collect_industry_pricing_block(symbol, dims, dim_results)
+        if industry_pricing is not None:
+            dim_results["industry_pricing"] = industry_pricing
 
-    # 按输入顺序排列
-    dimensions = _order_dimensions(dims, dim_results)
-
-    fusion_results = _fuse_dimensions(dimensions, symbol)
-    credibility_scores = _score_credibility(dimensions, symbol)
-    macro_context = _collect_macro_context_block(symbol, with_macro)
-    chain_context = _collect_chain_context_block(symbol, with_chain, dim_results)
+        # 按输入顺序排列
+        dimensions = _order_dimensions(dims, dim_results)
+        fusion_results = _fuse_dimensions(dimensions, symbol)
+        credibility_scores = _score_credibility(dimensions, symbol)
+        chain_context = _collect_chain_context_block(symbol, with_chain, dim_results)
+        macro_context = macro_future.result() if macro_future else {}
 
     result = _assemble_result(symbol, dimensions, fusion_results,
                               credibility_scores, macro_context, chain_context)
+    result["collection_started_at"] = collection_started_at
     _attach_sector_sync_block(result, symbol, dim_results, force_sector_sync)
     _attach_phase2_block(result, symbol)
     _attach_events_block(result, symbol, deep)
     _attach_analysis_cards_block(result)
+    if prepare_for_report:
+        # 采集期补齐报告必需项：市场结构（含 PCR 样本与逐子源 attempted_sources）
+        # 与 events 回填（瞬时失败在这里重试一次，而不是留给渲染期联网重试）。
+        # 市场结构置于 manifest 之前，使逐源清单覆盖它；失败都不阻断采集。
+        try:
+            attach_market_structure(result, symbol)
+        except Exception as exc:
+            result["market_structure"] = {
+                "availability": {"market_structure": f"unavailable: {exc}"},
+                "attempted_sources": ["collect_market_structure"],
+            }
+        attach_events_for_report(result, symbol, deep=deep)
     _attach_manifest_block(result)
     _attach_news_pack_block(result, symbol, with_news_pack)
+    result["collection_completed_at"] = datetime.now(timezone.utc).isoformat()
 
     logger.info("collect_all total=%.1fs symbol=%s dims=%d",
                 time.time() - start_all, symbol, len(dims))
     return result
+
+
+def attach_events_for_report(collection: dict, symbol: str,
+                            *, deep: bool | None = None) -> bool:
+    """报告前的 events 回填：采集装配末尾与恢复路径共用同一实现。
+
+    此前该重试由 `render(..., attach_extras=True)` 兼任；渲染改为零网络后，重试
+    必须落在采集/准备期——否则一次瞬时失败会让报告缺事件，而采集侧只留一行日志。
+    回填成功要重建分析卡片：`collect_all` 已按旧事件建过一版，不同代会自相矛盾。
+    """
+    from lib.events import attach_events, needs_events_backfill
+
+    if not needs_events_backfill(collection):
+        return False
+    if deep is None:
+        deep = bool((collection.get("_meta") or {}).get("deep"))
+    try:
+        attach_events(collection, symbol, days=90 if deep else 30)
+    except Exception as exc:
+        collection.setdefault("_meta", {})["events_error"] = str(exc)
+        collection.setdefault("events", [])
+        return False
+    collection.setdefault("_meta", {}).pop("analysis_cards", None)
+    try:
+        from lib.analysis_templates import build_analysis_cards
+        build_analysis_cards(collection)
+    except Exception as exc:
+        collection.setdefault("_meta", {})["analysis_cards_error"] = str(exc)
+    return True
 
 
 def attach_news_pack(result: dict[str, Any], symbol: str, days: int = 7) -> dict[str, Any]:
@@ -3142,15 +3209,18 @@ def _ms_fetch_akshare_cn10y_series() -> list[tuple[str, float]]:
     return out
 
 
-def _ms_fetch_y10_series(config: dict) -> tuple[list[tuple[str, float]], str]:
-    """10Y 国债收益率序列：FRED DGS10 优先，akshare 中国 10Y 回退。"""
+def _ms_fetch_y10_series(config: dict) -> tuple[list[tuple[str, float]], str, str]:
+    """10Y 国债收益率序列：FRED DGS10（USD）优先，akshare 中国 10Y（CNY）回退。
+
+    返回 ``(series, source, currency)``（C2-a：消费端须按币种标注/降级）。
+    """
     fred = _ms_fetch_fred_dgs10_series(config)
     if fred:
-        return fred, "FRED.DGS10"
+        return fred, "FRED.DGS10", "USD"
     cn = _ms_fetch_akshare_cn10y_series()
     if cn:
-        return cn, "akshare.bond_zh_us_rate"
-    return [], ""
+        return cn, "akshare.bond_zh_us_rate(CN10Y)", "CNY"
+    return [], "", ""
 
 
 def _ms_fetch_fred_dgs10_series(config: dict) -> list[tuple[str, float]]:
@@ -3214,9 +3284,20 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
                   start_date=_days_ago(1825), end_date=_today())
     if df is None or df.empty:
         return None
-    dgs10_series, y10_source = _ms_fetch_y10_series(config)
+    dgs10_series, y10_source, y10_currency = _ms_fetch_y10_series(config)
     dgs10_by_date = {d: v for d, v in dgs10_series}
     latest_dgs10 = dgs10_series[-1][1] if dgs10_series else None
+    # C2-a：人民币无风险利率（A 股 D-③/DCF/风险行首选）——CN 分支复用当前
+    # 序列（零额外调用）；USD 分支额外取 akshare 中国 10Y，失败不阻断，
+    # 消费端按 ``is_wrong_currency`` 降级（report-conventions §9.3）。
+    cn10y_series: list[tuple[str, float]] = []
+    cn10y_source = ""
+    if y10_currency == "CNY":
+        cn10y_series, cn10y_source = dgs10_series, y10_source
+    else:
+        cn10y_series = _ms_fetch_akshare_cn10y_series()
+        if cn10y_series:
+            cn10y_source = "akshare.bond_zh_us_rate(CN10Y)"
 
     rows = df.sort_values("trade_date").to_dict("records")
     erp_hist: list[float] = []
@@ -3242,6 +3323,11 @@ def _ms_fetch_erp(tc: Any, config: dict) -> dict | None:
         "raw": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "dgs10": round(latest_dgs10, 3) if latest_dgs10 is not None else None,
+        "rf_currency": y10_currency,
+        "y10_source": y10_source,
+        "cn10y": round(cn10y_series[-1][1], 3) if cn10y_series else None,
+        "cn10y_source": cn10y_source,
+        "cn10y_date": cn10y_series[-1][0] if cn10y_series else None,
         "erp_days": erp_days,
         "partial": partial,
         "index": _HS300_CODE,
@@ -3254,8 +3340,53 @@ _ETF_300_CODE = "510300.SH"
 _NEW_HIGH_SAMPLE = 30
 _PCR_HISTORY_5Y_CAL_DAYS = 1825
 _PCR_HISTORY_60D = 60
-# 5 年 PCR 历史分位：均匀降采样上限，避免逐日 opt_daily 风暴
-_PCR_MAX_DAILY_QUERIES = 80
+# 单次 PCR 面板的总查询预算（5 年均匀样本 + 近期全分辨率），
+# 避免两个窗口分别规划后超过同一客户端的分钟额度。
+# 不变式（test_pcr_budget_invariant_locked 锁定）：默认档下
+# `_PCR_MAX_DAILY_QUERIES <= rate_limit_for_api("opt_daily")`（100 ≤ 125）；
+# 显式降速与账号桶占用由运行期 available_rate_limit_slots 截断覆盖。
+_PCR_MAX_DAILY_QUERIES = 100
+_PCR_MIN_HISTORY_SAMPLES = 30
+# 探针与逐日扇出共用的单次查询时限；集中为具名常量，不得散落字面量
+# （变更卡 §7 已知残留 1）。
+_PCR_QUERY_TIMEOUT_SEC = 8.0
+# worker 层累计超时熔断阈值（issue #35 C / 审计 R5）：任一非超时完成即清零；
+# 达此值置停止信号，后续 worker 在真实查询前检查。
+_PCR_TIMEOUT_STREAK_LIMIT = 5
+# new_high 面板单次 daily 查询时限（与 _ms_pcr_query_one 同款）。
+_NEW_HIGH_QUERY_TIMEOUT_SEC = 8.0
+
+
+def _pcr_coverage_ok(observed: int, planned: int, floor: int) -> bool:
+    """PCR 采样覆盖率门槛：容忍 ≤10% 缺失，但不低于 floor。
+
+    2026-09-30 裁决（用户）。此前是**精确等号**（`observed == planned`）：鉴于
+    「限流等待计入 8 s 窗口」这条已知残留，任意 1 天缺失即让分位为 None，而
+    `render_utils._v3_cv8_block` 又因 `percentile_5y is None` 摘掉整个 CV-8
+    —— 等号等于让该功能事实上不存在。披露责任改由 `partial` 标志承担。
+    """
+    if planned <= 0:
+        return False
+    return observed >= max(floor, -(-planned * 9 // 10))  # ceil(0.9 * planned)
+
+
+def _pcr_breaker_tick(state: dict, kind: str) -> bool:
+    """推进 PCR 熔断状态；返回本次是否触发熔断。
+
+    冻结语义（2026-10-02 独立复核 P2-2）：一旦 tripped，迟到的完成（含熔断后
+    到达的在途成功）不得再改写计数——触发时的 streak 是要保留的可追溯证据。
+    非超时完成（ok/empty/error）表示端点仍在响应，连续计数清零。
+    """
+    if state.get("tripped"):
+        return False
+    if kind == "timeout":
+        state["streak"] += 1
+        if state["streak"] >= _PCR_TIMEOUT_STREAK_LIMIT:
+            state["tripped"] = True
+            return True
+        return False
+    state["streak"] = 0
+    return False
 
 
 def _ms_50etf_option_codes(
@@ -3289,13 +3420,14 @@ def _ms_50etf_option_codes(
 
 def _ms_subsample_trade_dates(dates: list[str], max_points: int) -> list[str]:
     """均匀降采样交易日列表，始终保留最后一日。"""
+    if max_points <= 0 or not dates:
+        return []
     if len(dates) <= max_points:
         return dates
-    step = max(1, len(dates) // max_points)
-    sampled = list(dates[::step])
-    if dates[-1] not in sampled:
-        sampled.append(dates[-1])
-    return sorted(set(sampled))
+    if max_points == 1:
+        return dates[-1:]
+    return [dates[round(i * (len(dates) - 1) / (max_points - 1))]
+            for i in range(max_points)]
 
 
 def _ms_pcr_from_df(df: Any, put_codes: set[str], call_codes: set[str]) -> float | None:
@@ -3322,16 +3454,47 @@ def _ms_pcr_from_df(df: Any, put_codes: set[str], call_codes: set[str]) -> float
     return put_vol / call_vol
 
 
+def _ms_pcr_query_one(
+    tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
+) -> tuple[float | None, str]:
+    """单日 opt_daily 查询并分类结果：kind ∈ {ok, empty, error, timeout}。
+
+    旧实现经 _run_with_timeout 把「超时」与「正常空帧」同返 None，扇出层无法
+    统计显式的超时结果（issue #35 C / 审计 R5 修订）——直接调 _run_in_thread
+    读回 err 分类。
+
+    上界说明（2026-10-02 独立复核两轮修正）：受控 worker 并发 ≤
+    _env_max_workers()（默认 8），但每次超时会遗留一个**未结束的底层查询
+    线程**（_run_in_thread daemon，不 join），其寿命不受本次超时预算或 30s
+    socket 超时约束——限流等待发生在 HTTP 请求之前，重试还会延长。
+    查询量上界分两个口径：**扇出阶段全部超时**时，扇出已发出查询 ≤
+    阈值 + workers - 1（回归测试锁定）；任意结果序列下（成功/空帧/错误完成
+    会重置连续计数，扇出可远超该式），含探针重试的总调用数仍有硬上界
+    `_PCR_MAX_DAILY_QUERIES`（硬钳 + 回归测试锁定）。**不消除**存量线程的
+    结构风险（变更卡 §7 残留 2/3）。
+    """
+    label = f"opt_daily:{trade_date}"
+    df, err = _run_in_thread(
+        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
+        _PCR_QUERY_TIMEOUT_SEC, label,
+    )
+    if err is not None:
+        if isinstance(err, TimeoutError):
+            logger.warning("%s timed out after %.0fs, skipping",
+                           label, _PCR_QUERY_TIMEOUT_SEC)
+            return None, "timeout"
+        logger.warning("%s failed: %s", label, err)
+        return None, "error"
+    ratio = _ms_pcr_from_df(df, put_codes, call_codes)
+    return (ratio, "ok") if ratio is not None else (None, "empty")
+
+
 def _ms_pcr_on_date(
     tc: Any, trade_date: str, put_codes: set[str], call_codes: set[str],
 ) -> float | None:
-    # 单次 opt_daily 查询加时限：该端点单次数据量小，正常 <1s；
-    # 网络挂起时 socket 默认 30s × 全窗口 ~130 次查询会拖死整个 market_structure
-    df = _run_with_timeout(
-        lambda: tc.query("opt_daily", trade_date=trade_date, exchange="SSE"),
-        8.0, f"opt_daily:{trade_date}",
-    )
-    return _ms_pcr_from_df(df, put_codes, call_codes)
+    """兼容入口：仅取比值（分类信息见 _ms_pcr_query_one）。"""
+    ratio, _kind = _ms_pcr_query_one(tc, trade_date, put_codes, call_codes)
+    return ratio
 
 
 def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | None:
@@ -3350,36 +3513,48 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
         return None
     dates = sorted(str(d) for d in cal["cal_date"].tolist())
     raw_days = len(dates)
-    sampled = _ms_subsample_trade_dates(dates, _PCR_MAX_DAILY_QUERIES)
+    # Tushare opt_daily 每日约 17:00 发布。盘中 trade_cal 已含当日，但
+    # 当日期权日线尚不可用；探针和 current 都以最近已发布交易日为目标。
+    now_sh = shanghai_now()
+    if now_sh.hour < 17:
+        dates = [d for d in dates if d < now_sh.strftime("%Y%m%d")]
+    if not dates:
+        return None
     # 60 日分位窗口取最近 _PCR_HISTORY_60D 个自然日全分辨率（此前对降采样
     # 序列取 ratios[-60:] 实际横跨 ~3.5 年——降采样 step≈15 时 60 点覆盖 900+ 交易日）
     cutoff = _days_ago(_PCR_HISTORY_60D)
     recent_dates = [d for d in dates if d >= cutoff]
-    fetch_dates = sorted(set(sampled) | set(recent_dates))
-
+    available_slots = getattr(tc, "available_rate_limit_slots", None)
+    headroom = available_slots("opt_daily") if callable(available_slots) else None
+    if headroom is not None and headroom <= 0:
+        if diag is not None:
+            diag["reason"] = "rate_limited"
+        return None
     ratio_by_date: dict[str, float] = {}
     # F1-5 修复：批量取数前单点预检——端点整体挂起/限流时（实测 56 天 × 8s
     # 超时风暴，单次报告拖慢数分钟），8s 探针失败重试一次、两次均败才整体
     # 降级跳过（单次网络抖动不抹掉整个 PCR 维度）。端点正常时探针结果直接
-    # 复用（不再重复取 fetch_dates[-1]），净额外查询为 0。
-    if fetch_dates:
+    # 复用（不再重复取最新日），净额外查询为 0。
+    probe_calls = 0
+    if dates:
+        probe_calls = 1
         probe_df = _run_with_timeout(
-            lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
-            8.0, f"opt_daily-probe:{fetch_dates[-1]}",
+            lambda: tc.query("opt_daily", trade_date=dates[-1], exchange="SSE"),
+            _PCR_QUERY_TIMEOUT_SEC, f"opt_daily-probe:{dates[-1]}",
         )
         if probe_df is None:
             # 探针失败不整体丢弃：单次网络抖动/慢查询不应抹掉整个 PCR
             # 维度（旧实现单日失败仅跳过当日并带 stale/partial 标志）。
             # 重试一次，仍失败才整体降级。
+            probe_calls = 2
             probe_df = _run_with_timeout(
-                lambda: tc.query("opt_daily", trade_date=fetch_dates[-1], exchange="SSE"),
-                8.0, f"opt_daily-probe2:{fetch_dates[-1]}",
+                lambda: tc.query("opt_daily", trade_date=dates[-1], exchange="SSE"),
+                _PCR_QUERY_TIMEOUT_SEC, f"opt_daily-probe2:{dates[-1]}",
             )
             if probe_df is None:
                 logger.warning(
-                    "opt_daily probe failed twice (%s); "
-                    "skipping PCR fetch storm (%d dates)",
-                    fetch_dates[-1], len(fetch_dates),
+                    "opt_daily probe failed twice (%s); skipping PCR fetch storm",
+                    dates[-1],
                 )
                 if diag is not None:
                     # 自身观测：超时时被丢弃的 daemon 线程从未返回，client 的
@@ -3390,25 +3565,87 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
         # 未命中代码集时留空，由主循环重取。
         probe_ratio = _ms_pcr_from_df(probe_df, put_set, call_set)
         if probe_ratio is not None:
-            ratio_by_date[fetch_dates[-1]] = probe_ratio
+            ratio_by_date[dates[-1]] = probe_ratio
         else:
-            logger.debug("opt_daily probe %s: no usable PCR row", fetch_dates[-1])
+            logger.debug("opt_daily probe %s: no usable PCR row", dates[-1])
+
+    # 探针成功后，客户端已证明 opt_daily 权限，分钟预算会从默认档
+    # 提升到该接口对应积分档。此时规划采样才能准确给后续 daily 面板留量。
+    headroom = available_slots("opt_daily") if callable(available_slots) else None
+    # 历史采样是 5 年分位的前提（`pct_5y` 需 ≥ _PCR_MIN_HISTORY_SAMPLES 点）。
+    # 此前 new_high 的预留先于历史采样，紧额度下 history_budget 可低到个位数
+    # → pct_5y 结构性为 None → CV-8 整块消失。2026-09-30 裁决（用户）：**先保
+    # 历史下限，余量再给 new_high**（后者本就常在 25/30 附近 partial，且样本不足时
+    # 其分位已按设计不输出）。
+    reserved_for_history = (
+        min(_PCR_MIN_HISTORY_SAMPLES, max(0, headroom - len(recent_dates)))
+        if headroom is not None else 0
+    )
+    reserved_for_new_high = (
+        min(_NEW_HIGH_SAMPLE + 2,
+            max(0, headroom - len(recent_dates) - reserved_for_history))
+        if headroom is not None else 0
+    )
+    daily_budget = min(
+        _PCR_MAX_DAILY_QUERIES,
+        max(1, headroom - reserved_for_new_high + len(ratio_by_date))
+        if headroom is not None else _PCR_MAX_DAILY_QUERIES,
+    )
+    history_budget = max(1, daily_budget - len(recent_dates))
+    sampled = _ms_subsample_trade_dates(dates, history_budget)
+    fetch_dates = sorted(set(sampled) | set(recent_dates))
 
     def _on_pcr_error(td: str, exc: Exception) -> None:
         logger.debug("opt_daily %s failed: %s", td, exc)
 
-    # 全窗口并行取数（单次查询 8s 时限内部兜底；fan-out 样板共享
-    # _base._map_parallel）：~123 次串行最坏 16 分钟
-    remaining = [d for d in fetch_dates if d not in ratio_by_date]
-    for td, r in _map_parallel(
-        remaining,
-        lambda td: _ms_pcr_on_date(tc, td, put_set, call_set),
-        on_error=_on_pcr_error,
-    ):
+    # 全窗口并行取数（单次查询时限由 _ms_pcr_query_one 内部兜底；fan-out 样板
+    # 共享 _base._map_parallel）。最近窗口先取，余量才给历史点；超额日期本轮
+    # 直接标 partial，避免在限流等待中耗尽单次超时预算。
+    priority_dates = list(reversed(recent_dates)) + list(reversed(sampled))
+    remaining = list(dict.fromkeys(d for d in priority_dates if d not in ratio_by_date))
+    # 硬上界（无条件）：探针 probe_calls 次 + 扇出 ≤ _PCR_MAX_DAILY_QUERIES。
+    # 此前只在 client 有 available_rate_limit_slots 时钳制，无该方法的旧 client
+    # 只能靠规划值间接有界（探针空帧/失败重试时实测 101 次）——审计 R5 要求
+    # 可证明的上界。探针成功后 opt_daily 权限已证实、分钟预算升到积分档，
+    # 此时再按当刻额度截断并给后续 new_high 面板留 reserved_for_new_high。
+    remaining = remaining[:max(0, _PCR_MAX_DAILY_QUERIES - probe_calls)]
+    if callable(available_slots):
+        remaining = remaining[:max(0, available_slots("opt_daily") - reserved_for_new_high)]
+
+    # worker 层连续超时熔断（issue #35 C / 审计 R5 修订）：超时在 worker 内
+    # 显式分类并加锁累计，达 _PCR_TIMEOUT_STREAK_LIMIT 置停止信号；每个 worker
+    # 在真实查询前检查停止信号——熔断后已提交未开跑的项直接跳过，不再发请求。
+    # 已发出扇出查询上界（全超时序列）≤ _PCR_TIMEOUT_STREAK_LIMIT + workers - 1；
+    # 任意结果序列下总调用（含探针重试）受 _PCR_MAX_DAILY_QUERIES 硬钳（回归测试
+    # 锁定）。被放弃线程的寿命不受本预算约束（见 _ms_pcr_query_one docstring）。
+    breaker = {"streak": 0, "tripped": False}
+    breaker_lock = threading.Lock()
+    stop = threading.Event()
+    issued = {"dates": set(), "calls": 0}  # 实际发出的扇出查询（被跳过的日期不计）
+
+    def _pcr_worker(td: str) -> float | None:
+        if stop.is_set():
+            return None
+        ratio, kind = _ms_pcr_query_one(tc, td, put_set, call_set)
+        with breaker_lock:
+            issued["dates"].add(td)
+            issued["calls"] += 1
+            if _pcr_breaker_tick(breaker, kind):
+                stop.set()
+                logger.warning(
+                    "opt_daily: %d cumulative timeouts, tripping breaker; "
+                    "skipping remaining dates", breaker["streak"])
+        return ratio
+
+    for td, r in _map_parallel(remaining, _pcr_worker, on_error=_on_pcr_error):
         if r is not None:
             ratio_by_date[td] = r
+    if breaker["tripped"] and diag is not None:
+        # streak 已在触发时冻结（_pcr_breaker_tick 不再改写）；原因保留到可追溯状态
+        diag["timeout_streak"] = breaker["streak"]
+        diag["reason"] = "timeout_streak"
     if not ratio_by_date:
-        if diag is not None:
+        if diag is not None and not breaker["tripped"]:
             diag["reason"] = "empty_rows"   # 探针成功了但无可用 PCR 行 → 合法空
         return None
     # 单次扫描按 sampled 顺序构建 (date, ratio) 对（此前两次同谓词扫描
@@ -3422,7 +3659,14 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # （ratio_pairs 非空 ⇒ current_date 必非 None，无需冗余守卫）
     stale = current_date != sampled[-1]
     ratios = [r for _, r in ratio_pairs]
-    pct_5y = percentile_rank(ratios, current) if len(ratios) >= 5 else None
+    # 5 年分位的双重门槛：① 覆盖率 ≥90% 且不低于下限（见 _pcr_coverage_ok）——
+    # 容忍零散缺失，避免单点抖动就让分位整块消失；② `not stale` —— 覆盖率达标
+    # 并不能排除**有偏**样本（近期窗口整段失败时，成功点全落在历史，覆盖率仍可能
+    # 达标）。`stale` 恰是「最新计划采样点没拿到」的判据，与 pct_60d 的
+    # `current_date >= cutoff` 对称。
+    pct_5y = (percentile_rank(ratios, current)
+              if _pcr_coverage_ok(len(ratios), len(sampled), _PCR_MIN_HISTORY_SAMPLES)
+              and not stale else None)
     ratios_60d = [ratio_by_date[td] for td in recent_dates if td in ratio_by_date]
     # current 在窗口内（current_date >= cutoff）才计算 60 日分位：最新 1-3 个
     # 采样日查询失败时 current 回退约 step×失败点数 天（降采样 step≈15），
@@ -3430,27 +3674,44 @@ def _ms_fetch_put_call_ratio(tc: Any, *, diag: dict | None = None) -> dict | Non
     # 置 None 而非渲染成"0.0% 低位"（与 stale/partial 标志并存，互不替代）
     pct_60d = (
         percentile_rank(ratios_60d, current)
-        if len(ratios_60d) >= 5 and current_date >= cutoff else None
+        if (_pcr_coverage_ok(len(ratios_60d), len(recent_dates), 5)
+            and current_date >= cutoff) else None
     )
-    return {
+    pcr_out = {
         "ratio": round(current, 3),
         "percentile_5y": round(pct_5y, 1) if pct_5y is not None else None,
         "percentile_60d": round(pct_60d, 1) if pct_60d is not None else None,
         "current_date": current_date,
+        "expected_latest_date": dates[-1],
         "history_days": len(ratios),
+        "history_sample_target": len(sampled),
+        "recent_days": len(recent_dates),
+        "recent_observed_days": len(ratios_60d),
         # 降采样是设计内的（5 年窗口按 _PCR_MAX_DAILY_QUERIES 均匀采样）：
-        # partial 只在采样本身失败/缺失时置 True —— 实际取得的采样点数少于
-        # 计划点数（len(ratios) < len(sampled)），或最新采样日失败致 current
-        # 回退到旧样本（stale）。此前 raw_days > len(sampled) 在 5 年窗口
+        # partial 只在计划样本或近期窗口缺失时置 True：历史采样少于计划点数、
+        # 最新日失败致 current 回退（stale），或近期全分辨率点有缺口。
+        # 此前 raw_days > len(sampled) 在 5 年窗口
         # （~1220 交易日 vs 上限 80）下恒 True → partial 永久 true → 报告恒
         # 显示「历史样本不足」警告。
-        "partial": len(ratios) < len(sampled) or stale,
+        "partial": (len(ratios) < len(sampled)
+                    or len(sampled) < _PCR_MIN_HISTORY_SAMPLES or stale
+                    or any(td not in ratio_by_date for td in recent_dates)
+                    or breaker["tripped"]),
         "sampled": raw_days > len(sampled),
+        # sample_points 是计划值；queried_points/query_calls 是实际发出值——
+        # 分开记录（2026-10-02 独立复核 P2-1：此前 queried_points 报计划值，
+        # 熔断场景实测仅 13 次却报 98 点）。query_calls 含探针重试。
         "sample_points": len(fetch_dates),
+        "queried_points": len(issued["dates"] | ({dates[-1]} if probe_calls else set())),
+        "query_calls": probe_calls + issued["calls"],
         "calendar_days": raw_days,
         "underlying": _50ETF_UNDERLYING,
         "source": "tushare.opt_daily",
     }
+    if breaker["tripped"]:
+        # 熔断原因随部分结果一并封存（可追溯状态；2026-10-02 复核 P2-2）
+        pcr_out["timeout_streak"] = breaker["streak"]
+    return pcr_out
 
 
 def _ms_fetch_short_margin_growth(tc: Any, symbol: str) -> dict | None:
@@ -3542,8 +3803,15 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
     codes = rng.sample(codes_all, min(_NEW_HIGH_SAMPLE, len(codes_all)))
     if not codes:
         return None
+    requested_count = len(codes)
+    available_slots = getattr(tc, "available_rate_limit_slots", None)
+    if callable(available_slots):
+        # 额度不足时立即降级，避免 daily 排队被 8s 网络超时误判。
+        codes = codes[:max(0, available_slots("daily"))]
+    if not codes:
+        return None
     def _fetch_daily_panel_row(ts_code: str) -> list[dict] | None:
-        # 单次 daily 查询加时限（与 _ms_pcr_on_date 同款 8s）：_map_parallel
+        # 单次 daily 查询加时限（与 _ms_pcr_query_one 同款）：_map_parallel
         # 契约要求内部单次执行有超时兜底，否则挂起 socket 会拖住
         # with ThreadPoolExecutor 的 join，market_structure 整块阻塞数分钟
         # ⚠️ 只返回 records（不得返回 (ts_code, records) 元组）——_map_parallel
@@ -3556,7 +3824,7 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
                 start_date=_days_ago(70), end_date=_today(),
                 fields="trade_date,close,high",
             ),
-            8.0, f"daily:{ts_code}",
+            _NEW_HIGH_QUERY_TIMEOUT_SEC, f"daily:{ts_code}",
         )
         if df is None or df.empty:
             return None
@@ -3585,13 +3853,17 @@ def _ms_fetch_new_high_ratio(tc: Any) -> dict | None:
             r = _ms_new_high_ratio_from_panel(slice_panel)
             if r is not None:
                 hist.append(r)
-    pct = percentile_rank(hist, current) if len(hist) >= 5 else None
+    # 缺样可能来自限流、停牌或源失败；缺失机制并非市场随机抽样。
+    # 当前比例保留供审计，但不把它的分位作为完整市场广度信号。
+    partial = len(panel) < _NEW_HIGH_SAMPLE
+    pct = percentile_rank(hist, current) if len(hist) >= 5 and not partial else None
     return {
         "ratio_pct": round(current, 2),
         "percentile_60d": round(pct, 1) if pct is not None else None,
         "sample_size": len(panel),
-        "sample_requested": len(codes),
-        "partial": len(panel) < _NEW_HIGH_SAMPLE,
+        "sample_requested": requested_count,
+        "sample_target": _NEW_HIGH_SAMPLE,
+        "partial": partial,
         "source": "tushare.daily",
     }
 
@@ -3891,6 +4163,10 @@ def _ms_pcr_unavailable_reason(tc: Any, diag: dict | None = None) -> str:
             return f"权限不足：接口 {denied_api} 无权限或积分不够{hint}"
         if code == "probe_timeout":
             return "取数超时或网络异常（探针两次均未返回；非权限问题，可重试）"
+        if code == "timeout_streak":
+            return "连续多次 opt_daily 查询超时，已熔断停止后续取数（非权限问题，可重试）"
+        if code == "rate_limited":
+            return "本轮 Tushare 客户端额度已满（PCR 未发起逐日查询，可稍后重试）"
         if code == "empty_rows":
             return "当日无 50ETF 期权成交（接口正常返回空）"
         if tc is None:
@@ -3940,6 +4216,7 @@ def _ms_try_fetch(
                 return "不可得（原因分类失败）"
         return str(unavailable_msg)
 
+    started = time.monotonic()
     try:
         value = fetch_fn()
         result[key] = value
@@ -3955,6 +4232,8 @@ def _ms_try_fetch(
         # 且违反 R12h「不可得 + attempted sources」标注规范）
         logger.warning("market_structure %s fetch failed: %s", key, exc)
         _ms_set_unavailable(result["availability"], key, _reason())
+    finally:
+        result.setdefault("latency_ms", {})[key] = round((time.monotonic() - started) * 1000)
 
 
 def collect_market_structure(symbol: str, *, industry: str | None = None) -> dict:

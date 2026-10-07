@@ -22,17 +22,29 @@ cp scripts/wb_bundle/SKILL.md       "$PKG/SKILL.md"
 cp scripts/wb_bundle/bootstrap.sh   "$PKG/scripts/bootstrap.sh"
 cp scripts/wb_bundle/README-安装.md "$PKG/README-安装.md"
 
-# 仓库布局：6 技能 + 共享 lib（排除 limit-up 与测试/缓存）
+# 仓库布局：公开技能 + 共享 lib（排除已退出入口与测试/缓存/运行产物）
+# R8（2026-10-04 独立复检）：skills/*/reports/ 是测试/运行产物（test_default_store
+# 直写仓库目录），曾整目录进 WB 包（32 个文件样本为 `ok`）；发布包不得携带
+# 运行 reports、pytest 缓存与日志。既有产物文件保留在仓库（本规则只排除打包）。
 rsync -a \
   --exclude 'invest-a-limit-up' \
+  --exclude 'invest-a-event-calendar' \
   --exclude 'tests' \
+  --exclude 'reports' \
   --exclude '__pycache__' \
+  --exclude '.pytest_cache' \
   --exclude '*.pyc' \
+  --exclude '*.log' \
   --exclude '.DS_Store' \
   skills/ "$PKG/skills/"
 
 # 依赖清单（uv sync 依据）
 cp pyproject.toml uv.lock "$PKG/"
+
+# 指令面检查（复核 P0-c）：包内 SKILL.md 的运行指令不得引用包内不存在的规则。
+# 本渠道**不改写 SKILL.md**（rsync 原样复制）→ 源文件必须自己干净，否则必然悬空。
+uv run python scripts/build_skillhub_packages.py --check-refs "$PKG" \
+  || { echo "❌ 分发包存在悬空规则引用"; exit 1; }
 
 # 打包（顶层目录 invest-skills/，解压即得目录）
 rm -f "$ZIP"

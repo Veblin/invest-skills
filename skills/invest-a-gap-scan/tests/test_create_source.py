@@ -120,3 +120,72 @@ def test_forced_baostock_unchanged(mock_baostock_cls):
 
     assert result is mock_baostock_cls.return_value
     mock_baostock_cls.assert_called_once_with(ts_codes=codes)
+
+
+# ======================================================================
+# 评审回归（2026-09-23）：attempted_sources 只记**实际尝试过**的源
+# ======================================================================
+
+
+@patch.object(kline_source, "TushareBulkSource")
+@patch("lib.env.get_config", return_value={"TUSHARE_TOKEN": "tok"})
+def test_auto_available_records_single_attempt(mock_get_config, mock_bulk_cls):
+    """首选源可用：attempted = ("tushare",)，且理由由采集层给出。"""
+    mock_bulk_cls.return_value = MagicMock(name="bulk")
+    Client = _make_probe_client(available=True)
+
+    with patch("lib.tushare_client.TushareClient", Client):
+        result = kline_source.create_source("auto", ts_codes=["600176.SH"])
+
+    assert result.attempted_sources == ("tushare",)
+    assert "未降级" in result.source_selection_note
+
+
+@patch.object(kline_source, "BaostockSource")
+@patch("lib.env.get_config", return_value={"TUSHARE_TOKEN": "tok"})
+def test_auto_unavailable_records_true_degradation(mock_get_config, mock_baostock_cls):
+    """有 token 但检验失败：确为「尝试过 Tushare 后降级」。"""
+    mock_baostock_cls.return_value = MagicMock(name="baostock")
+    Client = _make_probe_client(available=False)
+
+    with patch("lib.tushare_client.TushareClient", Client):
+        result = kline_source.create_source("auto", ts_codes=["600176.SH"])
+
+    assert result.attempted_sources == ("tushare", "baostock")
+    assert "检验失败" in result.source_selection_note and "降级" in result.source_selection_note
+
+
+@patch.object(kline_source, "BaostockSource")
+@patch("lib.env.get_config", return_value={})
+def test_auto_no_token_does_not_claim_tushare_attempted(
+    mock_get_config, mock_baostock_cls,
+):
+    """F4 回归：无 token 时 Tushare 从未被调用，不得记为「尝试过」。
+
+    修复前回退分支无条件写 ("tushare", "baostock")，报告据此标「发生降级」，
+    与「实际尝试过」的定义不符（未配置 ≠ 尝试后失败）。
+    """
+    mock_baostock_cls.return_value = MagicMock(name="baostock")
+
+    with patch("lib.tushare_client.TushareClient", _ProbeClient):
+        result = kline_source.create_source("auto")
+
+    assert result.attempted_sources == ("baostock",)
+    assert "未配置 TUSHARE_TOKEN" in result.source_selection_note
+    assert _ProbeClient.is_available_calls == 0  # 确未发起可用性检验
+
+
+@patch.object(kline_source, "TushareBulkSource")
+def test_forced_tushare_records_explicit_choice(mock_bulk_cls):
+    mock_bulk_cls.return_value = MagicMock(name="bulk")
+    result = kline_source.create_source("tushare")
+    assert result.attempted_sources == ("tushare",)
+    assert "显式指定" in result.source_selection_note
+
+
+@patch.object(kline_source, "BaostockSource")
+def test_forced_baostock_records_explicit_choice(mock_baostock_cls):
+    mock_baostock_cls.return_value = MagicMock(name="baostock")
+    result = kline_source.create_source("baostock", ts_codes=["000001.SZ"])
+    assert result.attempted_sources == ("baostock",)
+    assert "显式指定" in result.source_selection_note

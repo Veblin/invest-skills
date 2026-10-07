@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _LIB = Path(__file__).resolve().parents[1]
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
@@ -142,6 +144,24 @@ def test_render_states_when_no_sidecar_at_all():
 # 校验失败 = schema 报错原文），但渲染层只写死「❌ 无复盘原料」，且脚注把两种
 # 情况一律归因为「早于 sidecar 协议或未落盘」——文件在、内容不合规的侧车，
 # 读者既看不到原因，也不知道该修什么。
+
+@pytest.mark.parametrize("sidecars", [
+    [],
+    [{"ts": "OLD", "payload": None, "kind": "missing", "error": "无复盘原料"}],
+    [{"ts": "BAD", "payload": None, "kind": "invalid", "error": "校验失败"}],
+    [{"ts": "T1", "payload": _payload("T1", [], [
+        {"key": "base", "weight": 1.0, "valuation_ref": 1.2,
+         "assumption": "盈利保持稳定"}]), "error": None}],
+])
+def test_review_has_visible_opening_and_complete_closing_disclaimers(sidecars):
+    md = render_review("515050", sidecars=sidecars, today=_TODAY)
+    opening = md.split("## ①", 1)[0]
+    assert "研究工具，非决策工具，不构成投资建议" in opening
+    closing = md.strip().splitlines()[-1]
+    for required in ("风险声明", "学习与研究", "非决策工具", "假设前提与概率权重",
+                     "仅供参考，不构成投资建议", "核验原始来源", "市场有风险"):
+        assert required in closing
+
 
 def test_invalid_sidecar_error_text_is_rendered_in_sequence_table():
     md = render_review(

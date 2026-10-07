@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 from lib.events import (
     attach_events,
@@ -34,8 +36,10 @@ class TestClassifyEvent:
     def test_buyback(self):
         result = _classify_event({"title": "关于回购公司股份的公告", "raw_type": ""})
         assert result["event_type"] == "buyback"
-        assert result["impact_dimension"] == "估值"
-        assert result["duration"] == "中长期变量"
+        # R13（2026-10-05）：类型默认线索以 *_hint 输出；影响结论键不再产出
+        assert result["dimension_hint"] == "估值"
+        assert result["duration_hint"] == "中长期变量"
+        assert "impact_dimension" not in result and "duration" not in result
 
     def test_equity_incentive(self):
         result = _classify_event({"title": "股权激励计划草案", "raw_type": ""})
@@ -124,8 +128,8 @@ class TestClassifyEvent:
     def test_other_default(self):
         result = _classify_event({"title": "关于召开股东大会的提示性公告", "raw_type": ""})
         assert result["event_type"] == "other"
-        assert result["impact_dimension"] == "治理"
-        assert result["duration"] == "短期扰动"
+        assert result["dimension_hint"] == "治理"
+        assert result["duration_hint"] == "短期扰动"
 
     def test_classify_uses_raw_type_fallback(self):
         """当标题不匹配时，应检查 raw_type 字段"""
@@ -140,15 +144,17 @@ class TestClassifyEvent:
         with patch("lib.events.load_event_taxonomy", return_value={"event_types": {}}):
             result = _classify_event({"title": "关于回购公司股份的公告", "raw_type": ""})
         assert result["event_type"] == "buyback"
-        assert result["impact_dimension"] == "估值"
-        assert result["duration"] == "中长期变量"
+        # R13（2026-10-05）：类型默认线索以 *_hint 输出；影响结论键不再产出
+        assert result["dimension_hint"] == "估值"
+        assert result["duration_hint"] == "中长期变量"
+        assert "impact_dimension" not in result and "duration" not in result
 
     def test_other_fallback_uses_other_defaults(self):
         with patch("lib.events.load_event_taxonomy", return_value={"event_types": {}}):
             result = _classify_event({"title": "关于召开股东大会的提示性公告", "raw_type": ""})
         assert result["event_type"] == "other"
-        assert result["impact_dimension"] == "治理"
-        assert result["duration"] == "短期扰动"
+        assert result["dimension_hint"] == "治理"
+        assert result["duration_hint"] == "短期扰动"
 
 
 # ── _get_logic_relation ──
@@ -166,6 +172,10 @@ class TestGetLogicRelation:
 
     def test_unknown_does_not_change(self):
         assert _get_logic_relation("unknown_type") == "不改变"
+
+    @pytest.mark.parametrize("event_type", ["unlock", "investment"])
+    def test_event_type_alone_does_not_establish_direction(self, event_type):
+        assert _get_logic_relation(event_type) == "不改变"
 
 
 # ── _normalize_date ──
@@ -537,6 +547,27 @@ class TestAttachEventsIntegration:
 
         assert len(result["events"]) == 1
         assert result["events"][0]["type"] == "buyback"
+        # 抛异常的腿记 failed（fetch 抛栈与返回 None 同义）
+        assert result["_meta"]["events_legs"]["dividend"] == "failed"
+
+    @patch("lib.events._fetch_notice_events")
+    @patch("lib.events._fetch_dividend_events")
+    @patch("lib.events._fetch_shareholder_events")
+    def test_attach_events_records_three_leg_states(self, mock_shareholder, mock_dividend, mock_notice):
+        """失败/无数据/取到 三态分别落盘——供渲染层区分「未取到」与「窗口内无公告」。"""
+        d_recent = (date.today() - timedelta(days=5)).strftime("%Y-%m-%d")
+        mock_notice.return_value = None      # 接口异常
+        mock_dividend.return_value = []      # 接口正常但无数据
+        mock_shareholder.return_value = [{
+            "date": d_recent, "type": "holder_increase", "title": "股东增持",
+            "impact_dimension": "估值", "duration": "短期扰动",
+            "logic_relation": "强化", "source": "akshare stock_shareholder_change_ths", "url": "",
+        }]
+
+        result = attach_events({}, "600176", days=30)
+        assert result["_meta"]["events_legs"] == {
+            "notice": "failed", "dividend": "empty", "holder_change": "ok",
+        }
 
     @patch("lib.events._fetch_notice_events")
     @patch("lib.events._fetch_dividend_events")
@@ -604,9 +635,9 @@ class TestFetchNoticeEvents:
 
     @patch("akshare.stock_individual_notice_report")
     def test_api_failure(self, mock_notice):
+        """接口异常 → None（与「接口正常但无数据」的 [] 区分开）。"""
         mock_notice.side_effect = RuntimeError("Connection error")
-        events = _fetch_notice_events("600176")
-        assert events == []
+        assert _fetch_notice_events("600176") is None
 
 
 class TestFetchDividendEvents:
@@ -643,6 +674,18 @@ class TestFetchDividendEvents:
         events = _fetch_dividend_events("600176")
         assert events == []
 
+    @patch("akshare.stock_history_dividend_detail")
+    @patch("akshare.stock_dividend_cninfo")
+    def test_dividend_both_sources_fail_returns_none(self, mock_cninfo, mock_history):
+        """主源与回退源都异常 → None；任一源正常应答（哪怕空表）→ []。"""
+        mock_history.side_effect = RuntimeError("primary down")
+        mock_cninfo.side_effect = RuntimeError("fallback down")
+        assert _fetch_dividend_events("600176") is None
+
+        mock_cninfo.side_effect = None
+        mock_cninfo.return_value = MockDataFrame([])
+        assert _fetch_dividend_events("600176") == []
+
 
 class TestFetchShareholderEvents:
     @patch("akshare.stock_shareholder_change_ths")
@@ -675,9 +718,9 @@ class TestFetchShareholderEvents:
 
     @patch("akshare.stock_shareholder_change_ths")
     def test_shareholder_api_failure(self, mock_shareholder):
+        """接口异常 → None（与「接口正常但无数据」的 [] 区分开）。"""
         mock_shareholder.side_effect = RuntimeError("API error")
-        events = _fetch_shareholder_events("600176")
-        assert events == []
+        assert _fetch_shareholder_events("600176") is None
 
 
 class TestCollectAllDeepEvents:
@@ -738,6 +781,67 @@ class TestNeedsEventsBackfill:
         coll = {
             "events": [],
             "_meta": {"events_summary": {"event_count": 0, "window_days": 30}},
+        }
+        assert needs_events_backfill(coll) is False
+
+    def test_empty_with_all_legs_failed(self):
+        """有 summary 但三条腿全失败 → 是采集缺陷，须重试（不得读成「窗口内无事件」）。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {
+                    "notice": "failed", "dividend": "failed", "holder_change": "failed",
+                },
+            },
+        }
+        assert needs_events_backfill(coll) is True
+
+    def test_empty_with_notice_leg_failed_requires_retry(self):
+        """公告腿失败 + 两条辅助腿空表 → **仍须重试**。
+
+        分红明细与股东变动覆盖的公告类型很窄，它们为空不能替代公告源得出「没有公告」
+        的结论（C4：一手优先、二手不取代一手核验）。按「全腿失败」判会把这一组合读成
+        「窗口内无公告」，把采集缺陷说成事实。
+        """
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {"notice": "failed", "dividend": "empty", "holder_change": "empty"},
+            },
+        }
+        assert needs_events_backfill(coll) is True
+
+    def test_empty_with_all_legs_answered_is_terminal(self):
+        """公告腿已应答（ok/empty）且其余腿无数据 → 窗口内确实无事件，不重试。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {
+                    "notice": "empty", "dividend": "empty", "holder_change": "empty",
+                },
+            },
+        }
+        assert needs_events_backfill(coll) is False
+
+    def test_empty_with_notice_ok_but_aux_failed_is_terminal(self):
+        """公告腿有应答即为结论（辅助腿失败不影响「无公告」的成立）。"""
+        from lib.events import needs_events_backfill
+
+        coll = {
+            "events": [],
+            "_meta": {
+                "events_summary": {"event_count": 0, "window_days": 30},
+                "events_legs": {"notice": "empty", "dividend": "failed", "holder_change": "failed"},
+            },
         }
         assert needs_events_backfill(coll) is False
 

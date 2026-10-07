@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-journal
-version: "0.3.0"
+version: "0.3.1"
 description: "交易日志 v2 — Claude 驱动四维评估（逻辑/盲点/仓位匹配/风险收益）+ 数据引擎；ETF 路径调用 invest-a-etf 共用模块。研究工具，非决策工具。触发词：交易日志/买入/卖出评估"
 whenToUse: "交易日志/买入/卖出评估：对既有交易方案做逻辑、盲点、仓位匹配、风险收益四维检查"
 argument-hint: "/invest-a-journal → 买入/卖出 → ETF/个股 → Q&A → 评估"
@@ -12,7 +12,7 @@ metadata:
     bins: [uv, python3]
 ---
 
-# invest-a-journal v0.3.0
+# invest-a-journal v0.3.1
 
 > **工具约束说明**：frontmatter 的 `allowed-tools` 是 Claude Code 约定；在 DSH 等不读取该字段的 harness 下不生效，实际可用工具由平台自身沙箱控制。本技能全部操作均为本地数据采集与计算，仅依赖 Bash 与 Python 运行环境。
 
@@ -75,7 +75,7 @@ metadata:
 "涨跌停比 7.4:1，市场过于亢奋，建议等情绪回落至 3:1 以下再买入。"
 
 ❌ 违规："建议仓位 ≤5%。你确定这是你能承受的吗？"
-   → 这是仓位建议，违反 LAW 6。
+   → 这是仓位建议，违反 A1（原 LAW 6）。
 
 ✅ 正确：
 "涨跌停比 7.4:1（近 20 日 85% 分位）。如果你现在买入 6% 仓位：
@@ -135,7 +135,7 @@ metadata:
 每个评估输出第一行固定格式：
 
 ```
-🔍 invest-a-journal v0.3.0 · {date} · {环境标签}
+🔍 invest-a-journal v0.3.1 · {date} · {环境标签}
 ```
 
 环境标签从 `market_microstructure.snapshot()` 读取：
@@ -147,7 +147,7 @@ metadata:
 示例：
 
 ```
-🔍 invest-a-journal v0.3.0 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
+🔍 invest-a-journal v0.3.1 · 2026-07-21 · 🧊中性 🌤正常 ⚠️极端亢奋
 ```
 
 ---
@@ -159,12 +159,12 @@ metadata:
 1. ✅ 扫描禁止词：不含 "建议买入/卖出/持有/减仓/加仓/止损/止盈"、"止损提高收益"、崩盘、极度高估/低估
 2. ✅ 检查择时：不含 "等回调再买"、"建议减仓"、"目标价 XX 元"
 3. ✅ 检查趋势：每个数据点有分位或趋势，纯绝对值已补全
-4. ✅ 检查 LAW 8：无综合评分数字（7/10、65 分等）
-5. ✅ 检查 LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
-6. ✅ 检查 LAW 10：末尾有免责声明
+4. ✅ 检查 JOURNAL-LAW 8：无综合评分数字（7/10、65 分等）
+5. ✅ 检查 JOURNAL-LAW 9：是否读取并关联了历史日志（标注"无历史"或展示关联）
+6. ✅ 检查 JOURNAL-LAW 10：末尾有免责声明
 6b. ✅ 检查 P0 数字铁律：每个数字来自引擎字段或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/「Python calc 视角」类未实跑标注（共享规范 §2.3 强制行为 5-6）
-7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.3.0` badge
-8. ✅ 检查 LAW 5：无仓位/买卖具体数字建议
+7. ✅ 检查 badge：第一行有 `🔍 invest-a-journal v0.3.1` badge
+8. ✅ 检查 JOURNAL-LAW 5：无仓位/买卖具体数字建议
 9. ✅ 检查 D2：卖出评估包含参考点独立性核对（四问 + 关键问题 + 独立依据）
 10. ✅ 检查 R-C02：买入评估**风险收益比维含「失效条件预设」**（观测项/阈值/来源/复核时点四要素齐备；不输出止损百分比建议）
 11. ✅ 检查 R-C01：买入评估前跑 `journal.py stats`——若显示错频触发，先完成结构化复盘再继续（冷却 = 流程，非禁止交易）
@@ -259,7 +259,7 @@ Q3b 失效条件预设（R-C02 必填，非多选）:
 |------|------|
 | A | 已按四要素写全（观测项 + 阈值 + 来源 + 复核时点） |
 | B | 只写了观测项，阈值/来源待补 → **不保存**，回到 A 补全 |
-| C | 写的是「跌到 X% 就走」→ 属**交易指令**（LAW 6 禁止）：请改述为逻辑失效条件 |
+| C | 写的是「跌到 X% 就走」→ 属**交易指令**（A1／原 LAW 6 禁止）：请改述为逻辑失效条件 |
 | D | 暂无明确失效条件 → 记「**未预设**」并标注为盲点（不得留空冒充已预设） |
 
 > 该字段是处置效应疫苗：**入场时**写死证伪条件，避免事后用价格涨跌反推理由。
@@ -497,7 +497,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > **v0.2.6 止损位必填（字段完整性要求，非交易指令）**：买入评估须引导用户填写
 > `stop_price`（用户自己设定）；引擎计算 `expected_loss_pct = |stop/entry − 1|×100`
 > 并对照用户自报的 `max_loss_amount`（差异即风险认知检查点）。评估只提示补全、
-> 不阻止保存；**不输出止损位建议数字**（LAW 6/6a 边界不变——填写 ≠ 给建议）。
+> 不阻止保存；**不输出止损位建议数字**（A1/A2 边界不变，原 LAW 6/6a——填写 ≠ 给建议）。
 
 - 下方风险 vs 上方空间的非对称性
 - 是否存在"赚小钱冒大险"的结构？
@@ -545,7 +545,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > 引擎输出：`journal show <id> --portfolio holdings.json`（位置卡 + 导航参考表）。
 > 三隔离：位置卡（纯状态）与结构卡（引擎判断）**分栏并置，互不推导**。
 > 位置信息永不参与结构结论；结构结论永不引用成本/浮盈（P-3 护栏）。
-> 本参考为 if-then 决策框架（检查框架与提示，非操作建议）——LAW 6/6a。
+> 本参考为 if-then 决策框架（检查框架与提示，非操作建议）——A1/A2（原 LAW 6/6a）。
 
 ### 位置卡（弱显著：只显档位与天数，不显盈亏数值——显性成本即偏差放大器，Frydman & Wang 2020）
 
@@ -568,7 +568,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 | 浮盈厚 + 结构完好 | → 运行卖出评估四问（若考虑退出）——参考点独立性核对优先；或继续持有并 journal 记录理由 |
 | 深亏/浅亏 | → 先做假设检查（journal 错误条件 diff），**不等回本**（P-3） |
 | 任意位置 + thesis 超期 | → thesis --update（论文是否仍成立，与盈亏无关） |
-| 任意位置 + 结构失效触发 | → 失效触发即执行错误条件纪律（LAW 6a——与位置无关的独立依据） |
+| 任意位置 + 结构失效触发 | → 失效触发即执行错误条件纪律（A2／原 LAW 6a——与位置无关的独立依据） |
 
 > 唯一合法使用账户位置的通道（P 域调研 §5.2 边界表）：权重/风险预算（占比过大 →
 > 组合风险维度）、红利税持股期、维保比例、市场结构止损（可独立复算）。
@@ -589,7 +589,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 > `commitment_level`（结构性承诺>计划性承诺>提醒）。
 
 ```markdown
-🔍 invest-a-journal v0.3.0 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
+🔍 invest-a-journal v0.3.1 · {date} · 🧊{杠杆} 🌤{广度} ⚠️{情绪}
 
 ## {方向}: {标的} ({代码}) — {资产类型}
 
@@ -697,8 +697,8 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 
 ## 情景预案闭环（scenario-plans）
 
-> v0.2.6 新增 — 预案库见 [scenario-plans.md](../../lib/references/scenario-plans.md)（模板 + E-001 + 候选 E-002~E-007 + 闭环机制）。
-> 预案为**研究流程规则，非交易指令**：触发 = 启动重新评估流程（检查什么、哪个假设被证伪），动作由用户决定（LAW 6/6a）。
+> v0.2.6 新增 — 预案库见 [scenario-plans.md](../lib/references/scenario-plans.md)（模板 + E-001 + 候选 E-002~E-007 + 闭环机制）。
+> 预案为**研究流程规则，非交易指令**：触发 = 启动重新评估流程（检查什么、哪个假设被证伪），动作由用户决定（A1/A2，原 LAW 6/6a）。
 
 **评估流程要求**：
 
@@ -791,4 +791,4 @@ ETF 数据与对冲表的 **canonical** 拥有者。journal 的 `etf_data.py` �
 
 - `references/evaluation-criteria.md` — 评估细则 + 校准场景 + 边界条件示例
 - `../invest-a-etf/references/etf-hedge-map.md` — ETF 对冲覆盖表（canonical；本目录仅留指针）
-- [`../../host-docs/v0.2.1/calibration-case-july-2026.md`](../../host-docs/v0.2.1/calibration-case-july-2026.md) — 7 月校准案例（去杠杆 + V 型反弹）
+- `host-docs/v0.2.1/calibration-case-july-2026.md` — 7 月校准案例（去杠杆 + V 型反弹；维护者文档，不随包）

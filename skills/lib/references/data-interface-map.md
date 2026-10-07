@@ -1,7 +1,7 @@
 # 数据接口地图（Data Interface Map）
 
 > 全量盘点 skill 代码**实际调用**的外部数据接口：能力簇 / 使用方 / 风险 / 实测状态。
-> 与 [source-guide.md](../../invest-a-stock/references/source-guide.md)（选源策略/优先级/积分降级）互补：本文件是**「清单 + 归属」字典**，source-guide 是**「怎么选源、怎么降级」**。
+> 与个股包内的 `references/source-guide.md`（选源策略/优先级/积分降级）互补：本文件是**「清单 + 归属」字典**，source-guide 是**「怎么选源、怎么降级」**。（该文件只随 `invest-a-stock` 包分发，共享 references 出现在其余 8 个包内时无法解析相对路径，故用文件名标注而非相对链接。）
 >
 > **更新约定**：每次接口实测结论变化时，更新下方「实测日期 + 版本」并修订对应行；季度冒烟由 `scripts/smoke_interfaces.py` 驱动（L1 存在性检查零网络、L2 精选实探）。**版本号是接口存在性的关键变量**——akshare 接口随版本漂移（2026-09-08 实证：个股乐咕接口 `stock_a_lg_indicator` 已在当前版本移除）。
 
@@ -85,7 +85,7 @@
 | `stock_gdfx_top_10_em` | invest-a-stock | 🔥 | 高管持股 Top10 |
 | `stock_hold_management_detail_cninfo` | invest-a-stock | — | 巨潮高管持股变动 |
 | `stock_restricted_release_queue_em` | invest-a-stock | 🔥 | 解禁队列（按股票） |
-| `stock_restricted_release_summary_em` | invest-a-event-calendar | 🔥 | 东财全市场解禁日汇总（symbol=全部股票；唯一全市场型解禁日历源，unlock_calendar 主源） |
+| `stock_restricted_release_summary_em` | invest-a-event-calendar（暂停维护，不分发） | — | 东财全市场解禁日汇总（symbol=全部股票；唯一全市场型解禁日历源，unlock_calendar 主源） |
 | `stock_info_a_code_name` | invest-a-gap-scan | — | A 股代码/名称全表 |
 
 ### A7. 分红
@@ -109,7 +109,7 @@
 | `bond_china_yield` | invest-a-stock | — | 中债收益率 |
 | `bond_zh_us_rate` | invest-a-journal, invest-a-stock | — | 中美利率对比（ERP 原料） |
 | `currency_boc_sina` | **invest-hk-stock** | — | 中行外汇牌价（`symbol="港币"`）。⚠️ **每 100 港元计价**（86.384 → 0.86384 CNY/HKD），漏除 100 会把 A/H 溢价率放大近百倍；⚠️ **必须显式传日期区间**——不传时返回的默认窗口**不是最新数据**（2026-09-12 真机踩坑：取到 2023-11-10 的中间价，溢价率方向对但幅度差近一倍），消费方须按日期排序 + 陈旧分级（>10 天标注、>30 天不采用转降级） |
-| `news_economic_baidu` | invest-a-event-calendar（v3 宏观日程） | 🔥 | 财经日历，**能返回未来日程**。2026-09-10 实测：前向窗 ≈30 天（10-16 起返回空）；窗口内**无美国 CPI**（103 条 CPI 全是其他国家的）；单次调用失败率 ≈12%；`重要性` 只有 1/2 两档且 str/float 混型（噪音行同样有值 → 不可作筛选器）；`cookie` 为空时每次调用多 2 个握手请求。走 `curl_cffi` → **不要**包 `akshare_direct_session`（那是东财 requests 直连+节流） |
+| `news_economic_baidu` | invest-a-event-calendar（暂停维护，不分发） | — | 财经日历，**能返回未来日程**。2026-09-10 实测：前向窗 ≈30 天（10-16 起返回空）；窗口内**无美国 CPI**（103 条 CPI 全是其他国家的）；单次调用失败率 ≈12%；`重要性` 只有 1/2 两档且 str/float 混型（噪音行同样有值 → 不可作筛选器）；`cookie` 为空时每次调用多 2 个握手请求。走 `curl_cffi` → **不要**包 `akshare_direct_session`（那是东财 requests 直连+节流） |
 
 ### A10. 新闻 / 公告 / 研报
 
@@ -183,8 +183,8 @@
 | 腾讯行情 | `qt.gtimg.cn` HTTP | 实时报价（价格/成交量/PE/市值） | 2026-09-08 实测可用（600737 盘中 +9.99%） |
 | FRED | `fredapi` | 美 10Y/30Y/VIX/CPI/美元指数（宏观标签） | 需 FRED_API_KEY |
 | FRED `releases/dates` | `api.stlouisfed.org/fred/releases/dates` | 美国宏观**发布日程**（urllib 直取；fredapi 无该端点） | 需 FRED_API_KEY；前向 ≥3 个月；**无时刻字段**（不推测）；名为 `FOMC Press Release` 的 release 几乎每天一条，是日常新闻稿噪音，**不可**用作议息日程 |
-| FOMC 会议日程（策展表） | `skills/invest-a-event-calendar/references/fomc_meetings.yaml` | 议息会议日 | **无自动源**；人工誊录 federalreserve.gov，年度刷新；表过期/缺失时引擎显式告警（不渲染成「无议息」） |
-| 宏观事件白名单（策展表） | `skills/invest-a-event-calendar/references/macro_sources.yaml` | 中美事件白名单 + 噪音 pattern + FRED release 白名单 | 人工资产；`us_releases` 按 (id, name) 对匹配，name 不符报配置漂移 |
+| FOMC 会议日程（策展表） | `skills/invest-a-event-calendar/references/fomc_meetings.yaml` | 议息会议日 | **暂停维护**；无自动源，历史人工誊录 federalreserve.gov，年度刷新；表过期/缺失时引擎显式告警（不渲染成「无议息」） |
+| 宏观事件白名单（策展表） | `skills/invest-a-event-calendar/references/macro_sources.yaml` | 中美事件白名单 + 噪音 pattern + FRED release 白名单 | **暂停维护**；历史人工资产，`us_releases` 按 (id, name) 对匹配，name 不符报配置漂移 |
 | Yahoo | `query1.finance.yahoo.com` | SOX 费城半导体指数 | urllib 直连 |
 | baostock | `query_history_k_data_plus` | K 线兜底（无 tushare token 时 auto） | — |
 | TickFlow | `TickFlow.free()` | 可选 K 线源（默认关闭） | — |
@@ -231,3 +231,30 @@ uv run python scripts/smoke_interfaces.py --live
 - 冒烟输出头部含 akshare/tushare 版本，**留存输出即可对照「版本 vs 可用性」**
 - 建议节奏：季度一次；新增大版本升级（akshare minor 升版）后必跑
 - 失败处置：报错型 → 改代码或更新本文件 E 节；静默语义型 → 依赖跨源交叉验证兜底
+
+## G. 源策略原则、代理与 stderr 约定
+
+> 本文件 A–F 节是**接口与源的实际清单**（随版本漂移，以引擎与本节为准）。本文件**不维护**「哪个维度用哪条链」的静态矩阵——那是各 Skill `references` 与确定性 collector 的职责（如 L3 行情类经 `_run_sources_cascade` 首选源单发、失败按序降级；L2 财务类经 `_run_sources_parallel` 并行双源先到先用）。原则只有一条：**降级必须透明**——失败记录 `attempted_sources` 与原因，不阻塞其余维度，全失败标注「未获取到任何有效数据」。
+
+**代理（Clash/VPN）**：东方财富 API 需**直连**——采集器自动绕过 `HTTP_PROXY` 等环境变量让国内金融域名直连；若仍不通（常见于 **TUN 模式**），引擎会跳过 akshare 行情/基本信息并回退 Tushare/Baostock。
+
+- 自查：`invest.py diagnose` 输出 `proxy_bypass_effective` 与 `akshare_eastmoney_api` 状态；Clash 规则片段也由 `diagnose` 给出
+- 代理未绕过：Clash 规则中把 `eastmoney.com` 等设为 `DIRECT`（`DOMAIN-SUFFIX,eastmoney.com,DIRECT`）
+- TUN/CDN 阻断：暂时关闭 TUN 或全局代理后重试
+- `INVEST_A_FORCE_AKSHARE_EM=1`：忽略 push2 预检、仍调度 akshare 东财任务（连接失败由单源降级处理），用于排查网络
+- token 与依赖分别走 `TUSHARE_TOKEN`（环境变量或 `.env`）与包内 `requirements.txt`；各 harness 安装步骤见该 Skill 根 `SKILL.md` 的 Step 0
+
+> 仓库根 `CONFIGURATION.md`「代理与东方财富（Clash / VPN）」另有细节，但**该文件与根 `CLAUDE.md` 一样不随独立包分发**，故上文已把随包可用的要点内联，不再外链（评审 P2）。
+
+**akshare 进度条过滤**：akshare 调用的 tqdm 进度条输出到 **stderr**，不要用复杂 grep 过滤：
+
+```bash
+# ❌ 错误模式（ugrep/GNU grep 下 \|\| 解析为交替操作符，报 "empty subexpression"）
+uv run python -c "..." 2>&1 | grep -v '^\d+%\|'
+
+# ✅ 正确：直接丢弃 stderr（进度条在 stderr，数据在 stdout）
+uv run python -c "..." 2>/dev/null
+
+# ✅ 如果同时需要看错误信息：用 -E 扩展正则
+uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
+```

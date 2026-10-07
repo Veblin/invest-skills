@@ -1,4 +1,8 @@
-# CLAUDE.md — invest:a-stock 投研助手
+# CLAUDE.md — invest-skills 仓库开发说明
+
+> 本文件是**仓库内 Claude 的开发操作说明**：本地命令、排障、开发约定、公开发布细则。
+> - 跨平台**长期边界与变更门禁**（四条硬约束、扩张门禁）见 [AGENTS.md](AGENTS.md)
+> - **运行时规则**（报告质量、数字纪律、复检流程、措辞/分位）的**唯一详细定义**在随包规范 [`skills/lib/references/`](skills/lib/references/)——本文件只留链接与本地命令例子，不复制条文
 
 ## 底座准则（复杂度控制）
 
@@ -7,54 +11,24 @@
 - **兼容性不可轻动**：frontmatter 格式、SKILL.md 结构、多 harness 兼容性是对下游项目的承诺，任何改动须先评估对全部下游项目的影响
 - **目录结构不可轻动**：`skills/` 布局与路径约定是既有契约
 - **复杂度受控**：新能力优先落在下游项目（如 invest-skills-skillhub），底座只收共享核心；改动从简，不叠架构
+- **替换优先**：新增 Skill / 一级命令 / 默认报告栏目 / 强制数据源或 Agent 步骤前，按 [AGENTS.md](AGENTS.md)「扩张门禁」先交变更卡
 
-## 对外内容红线（公开渠道）
-
-> 适用于一切**面向不特定对象**的公开发布：GitHub 仓库与 README、`docs/demos/`、技术社区文章、分发平台描述与截图。
-> 与 LAW 6 互补——**LAW 6 管报告写什么，本节管什么可以公开发**。合规判断的关键不是「免费」，而是「是否面向不特定对象发布个股倾向性内容」。
-
-| 红线 | 规则 |
-|------|------|
-| **个股产出不进公开仓库** | 日常研究产出一律留在本地 `reports/`（已 gitignore）。公开仓库只保留经脱敏审查的 demo，新增 demo 须走本节检查 |
-| **公开 demo 三项强制** | ① 首行头部免责声明 ② 无方向性倾向表述（「一致看多」「强烈信号」「安全边际吃尽」等）③ 明示为历史快照、不代表当前状况 |
-| **对外文章只讲方法论** | 技术社区/周刊/分发平台的宣传素材只讲工程实现与方法论（P0 计算铁律、三层复检、多源降级链），**不以个股分析作为宣传素材** |
-| **不导流、不变现个股观点** | 「间接有偿」会使「免费」这道防线失效：禁止开户导流/返佣、付费荐股、打赏换观点。**任何变现方案启动前须重做合规评估** |
-| **渠道选择** | 优先开发者渠道（掘金/HN/阮一峰周刊/ClawHub/skillhub）；股民向渠道（雪球/知乎/公众号）仅发方法论，且须先核对平台资质要求。小红书等已明确「仅持牌机构」的平台不发 |
-
-变更本节前须重新评估合规影响。背景分析见 `host-docs/v0.2.7/directions-research-2026-08-18.md` §5.4。
-
-## 版本规则
-
-- 最多三位：`v{major}.{minor}.{patch}`
-- 小幅迭代递增末位：`v0.1.3 → v0.1.4 → ...`
-- 同版本内多次修订用日期区分，不自创四位版本号
-- Git 分支：`feat/v{version}`
-
-### 版本号同步（统一修改）
-
-**canonical 源**：`pyproject.toml` 的 `[project].version`（运行时经 `version.py` 读取）。
-
-**禁止手动改多处版本号**。`pyproject.toml` 为唯一 canonical 源，`scripts/sync_version.py` 同步全部派生文件：
+## 运行命令（本仓库本地约定）
 
 ```bash
-bash scripts/bump-version.sh X.Y.Z   # 或: uv run python scripts/sync_version.py bump X.Y.Z
-uv run python scripts/sync_version.py check
+# 本仓库 Python CLI 一律 uv run python，确保从项目根 .venv 加载依赖
+uv run python skills/invest-a-stock/scripts/invest.py <subcommand> <symbol> [--flags]
 ```
 
-运行 bump 后务必执行分支重命名（如当前分支是 `feat/v0.1.5`，重命名为 `feat/v0.1.6`）。
+> 该约定**只约束本仓库 Python CLI 的本地运行方式**；MCP / 无 Python 的分发路径（WorkBuddy 等）另有执行方式（随包 `bootstrap.sh` 建包根 `.venv`），不被此句排除。完整理由与 `pip` 禁令见 [development-rules.md D14](skills/lib/references/development-rules.md)。
 
-版本一致性仅在发布/CI 时校验（`sync_version.py check`），**不在 Skill 运行时或 SessionStart 钩子中执行**。
-
-## 运行命令
+常用子命令（完整清单以 `--help` 为准）：
 
 ```bash
-# 所有命令必须用 uv run python，确保从 .venv 加载依赖
-uv run python skills/invest-a-stock/scripts/invest.py <subcommand> <symbol> [--flags]
-
-# 常用子命令
 diagnose     # 检查数据源可用性
 collect      # 采集数据（--with-news-pack 新闻三层架构）
 report       # 生成报告
+validate-analysis  # 校验分析 JSON 槽位（--draft 同时检查首版 MD 占位）
 compare      # 双标的对比
 diff         # 对比两次快照
 store list   # 历史采集记录
@@ -64,202 +38,61 @@ check        # 单标的质地检查（7 指标）
 portfolio    # 组合风险特征
 thesis       # 投资假设追踪
 shock        # 价格冲击插值比例
+notice-body  # 取公告正文（art_code 或详情页 url；原文不改写 + 截断三态，不做结构化抽取）
 ```
 
-## 核心原则
+## 运行时规则的落点（索引）
 
-### P0 — 一切数字必须经 Python 计算（禁止 LLM 心算）
+**规则条文不在此维护**——按下表查随包规范（SkillHub / WorkBuddy / release 三种分发都携带）：
 
-**所有涉及数值的计算（加减乘除、百分比、均值、偏离度、比值、计数、推导等）必须由 Python 引擎或 Python 脚本完成。LLM 不得在脑中或对话中进行任何数学计算——心算、目视计数、脑内推导一律禁止，无论数字多简单。**
-
-| 规则 | 说明 |
+| 规则 | 唯一详细定义 |
 |------|------|
-| **禁止 AI 心算** | 不得在报告/简报中写出任何经 AI 手动计算得出的数字（如 "NAV 低于 MA20 约 15%"）；**计数同样禁止目视**（N 个交易日、N 个净流出日等必须先跑 `len()`/聚合） |
-| **清单二次加工必须 Python** | 引擎输出的清单（big_move_days 数组、份额流 rows、事件表等）**不是聚合**——从中数 N 个、算比例、做区间推导，必须跑 Python 聚合，禁止目视清单 |
-| **极值断言须全量核验** | 断言"峰值/最大/最少/首个"前，必须对全量序列跑 Python 聚合（`max/min`），禁止凭打印的子集断言（实例：只看近 8 行份额流就断言"7/30 为峰值"，真实峰值是 7/20） |
-| **引擎预计算** | 衍生指标（偏离度%、BOLL 位置%、日均波动等）由数据引擎统一输出到 `derived` 字段 |
-| **报告引用** | 报告中所有数字必须直接引用引擎字段值或 `[来源: Python calc: formula]` 输出，禁止二次加工与心算推导 |
-| **来源标注合法性（两种，无第三种）** | ① `[来源: 引擎字段名]` ② `[来源: Python calc: formula]`。"Python calc 视角"、"口径源自引擎"、"聚合验证"、"Python 复算一致"、"自洽校验"等**未实跑字样一律禁止**——要么真跑 Python，要么删除该数字；加工组数字（倍数/百分点差/占比等）须带公式标签（F2，见 report-conventions §2.3 强制 5） |
-| **验证** | 涉及计算的数字若引擎未输出，先用 Python 算一遍，将结果作为引用源，再写入报告 |
+| P0 数字铁律、引擎 `derived` 字段清单 | [delivery-qc.md §1](skills/lib/references/delivery-qc.md) |
+| 报告复检流程（第 0 层机器准出 + 三层人工复检） | [delivery-qc.md §2–§6](skills/lib/references/delivery-qc.md) |
+| 措辞规范 / 已知违规模式 / 事实边界 | [report-conventions.md §2–§3](skills/lib/references/report-conventions.md) |
+| 点位引用证据等级（L1–L4） | report-conventions.md §2.4 |
+| 分析标记（[事实]/[分析] + SOP-EV 四维） | report-conventions.md §5 |
+| 多情景参考与交易结构分析 | report-conventions.md §6 |
+| 宏观情景（指标清单 + 两段式输出合同） | report-conventions.md §9.1 |
+| 估值分位使用规则（含亏损期判据口径） | report-conventions.md §9.2 |
+| 开发规范 D1–D14（`/code-review` 审查标准） | [development-rules.md](skills/lib/references/development-rules.md) |
+| 开发执行、角色交接与目标验收 | [development-workflow.md](docs/development-workflow.md)（开发流程，非报告运行时规则） |
+| 源策略原则、代理与 stderr 过滤 | [data-interface-map.md §G](skills/lib/references/data-interface-map.md) |
+| 九模块结构、技术指标规范 | [modules.md](skills/invest-a-stock/references/modules.md) |
 
-**正确 vs 错误示例**：
+## 对外内容红线（公开渠道）
 
-```markdown
-# ❌ 错误 — AI 心算
-NAV 1.676 低于 MA20 1.9802 约 15.4%
+> 适用于一切**面向不特定对象**的公开发布：GitHub 仓库与 README、`docs/demos/`、技术社区文章、分发平台描述与截图。
+> 与 A1（原 LAW 6）互补——**A1 管报告写什么，本节管什么可以公开发**。合规判断的关键不是「免费」，而是「是否面向不特定对象发布个股倾向性内容」。
 
-# ✅ 正确 — 引用引擎 derived 字段
-NAV 1.676 vs MA20 1.9802，偏离 -15.36% [来源: kline.derived.nav_vs_ma20_pct]
-```
-
-**引擎覆盖的衍生指标**（`query_etf_kline` → `derived`）：
-- `nav_vs_ma20_pct` / `nav_vs_ma60_pct` / `nav_vs_boll_mid_pct` — NAV 与均线的偏离%
-- `boll_position_pct` — NAV 在 BOLL 带内位置（0% = 下轨，100% = 上轨）
-- `nav_to_boll_lower_pct` / `nav_to_boll_upper_pct` — NAV 距 BOLL 上下轨的%
-- `boll_bandwidth_pct` — BOLL 带宽%
-- `daily_volatility_pct` — 日均波动率（年化/√252）
-
-**E1 板块同步性字段**（v0.2.7，collect 时随 kline.derived 输出；首跑须 `--force-sector-sync` 预热板块成分股缓存，冷缓存默认跳过并标注）：`sector_beta_60d` / `sector_r2_60d` / `idio_var_share` / `sector_dispersion` / `csad_gamma2` / `downside_corr_gap`（值域与中文标签见 report_qc）
-
-**引擎未覆盖的计算**：先用 Python 脚本计算，将结果写入报告时标注 `[来源: Python calc: formula]`。
-
-### 新闻采集（--with-news-pack）
-
-三层：L1 akshare 公告（始终可用）→ L2 声明式 `query_pack`（供 WebSearch）→ L3 Tavily REST（`TAVILY_API_KEY` 可选，无 Key 时静默跳过）。
-
-```bash
-uv run python skills/invest-a-stock/scripts/invest.py collect 600176 --with-news-pack
-```
-
-## pip 规范
-
-**永远不要在项目目录下直接运行 `pip install`** — `pip` 指向的是 Homebrew 全局 Python（`/opt/homebrew`），安装的包会污染系统环境，而且 `.venv` 里反而没有。
-
-正确的操作：
-
-| 场景 | 命令 |
+| 红线 | 规则 |
 |------|------|
-| 安装/同步项目依赖 | `uv sync`（自动根据 `pyproject.toml` + `uv.lock` 同步） |
-| 添加新依赖 | 编辑 `pyproject.toml` 的 `dependencies`，然后 `uv sync` |
-| 查看已安装包 | `uv run python -m pip list` |
-| 临时运行脚本 | `uv run python script.py` |
-| 激活 .venv 后使用 pip | `source .venv/bin/activate && pip list` |
+| **个股产出不进公开仓库** | 日常研究产出一律留在本地 `reports/`（已 gitignore）。公开仓库只保留经脱敏审查的 demo，新增 demo 须走本节检查 |
+| **公开 demo 三项强制** | ① 首行头部免责声明 ② 无方向性倾向表述（「一致看多」「强烈信号」「安全边际吃尽」等）③ 明示为历史快照、不代表当前状况 |
+| **对外文章只讲方法论** | 技术社区/周刊/分发平台的宣传素材只讲工程实现与方法论（P0 计算铁律、三层复检、多源降级链），**不以个股分析作为宣传素材** |
+| **不导流、不变现个股观点** | 「间接有偿」会使「免费」这道防线失效：禁止开户导流/返佣、付费荐股、打赏换观点。**任何变现方案启动前须重做合规评估** |
 
-验证 .venv 是否生效：
-```bash
-uv run python -c "import sys; print(sys.executable)"
-# 应输出 .../.venv/bin/python3，而不是 /opt/homebrew/...
-```
+变更本节前须重新评估合规影响。背景分析见 `host-docs/v0.2.7/directions-research-2026-08-18.md` §5.4。
 
-## 数据源
+## 版本规则与同步
 
-详见 `skills/invest-a-stock/references/source-guide.md` — 各数据源的注册要求、权限层级及代理注意事项的完整说明。
-
-**代理问题：** 东方财富 API 需直连。若 Clash/VPN 开启，需配置 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。
-
-### akshare 进度条过滤
-
-akshare 调用时 tqdm 进度条输出到 stderr，不要用复杂 grep 过滤：
+- 最多三位：`v{major}.{minor}.{patch}`；小幅迭代递增末位；同版本内多次修订用日期区分，不自创四位版本号
+- Git 分支：`feat/v{version}`；运行 bump 后务必重命名分支（如 `feat/v0.1.5` → `feat/v0.1.6`）
+- **canonical 源**：`pyproject.toml` 的 `[project].version`（运行时经 `version.py` 读取）。**禁止手动改多处版本号**
 
 ```bash
-# ❌ 错误模式（ugrep/GNU grep 下 \|\| 解析为交替操作符，报 "empty subexpression"）
-uv run python -c "..." 2>&1 | grep -v '^\d+%\|\|'
-
-# ✅ 正确：直接丢弃 stderr（进度条在 stderr，数据在 stdout）
-uv run python -c "..." 2>/dev/null
-
-# ✅ 如果同时需要看错误信息：用 -E 扩展正则
-uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
+bash scripts/bump-version.sh X.Y.Z   # 或: uv run python scripts/sync_version.py bump X.Y.Z
+uv run python scripts/sync_version.py check
 ```
 
-## 宏观情景
-
-每次分析时，在 SKILL.md SOP-M1 指导下：
-
-1. 若 `--with-macro` 启用：akshare 中国宏观 + FRED VIX + Yahoo SOX 数据注入 collector
-2. Claude 在采集后读取以下指标并生成标签：
-   - 增长: 中国 PMI [来源: akshare macro_china_pmi]
-   - 通胀: CPI / PPI [来源: akshare macro_china_cpi / ppi]
-   - 利率: LPR / US 10Y [来源: akshare macro_china_lpr / FRED]
-   - 汇率: USD/CNY [来源: FRED]
-   - 波动: VIX 恐慌指数 [来源: FRED VIXCLS] — 信号: <15 低波 / 15-25 正常 / 25-35 偏高 / >35 恐慌
-   - 科技: SOX 费城半导体指数 [来源: Yahoo Finance] — AI/半导体需求领先指标
-
-输出格式（简报首行，两段式——每段都必须带结论）：
-[宏观情景] 国内：PMI XX.X + CPI +X.X% + LPR X.X% + M2 X.X% →偏宽松/中性/偏紧 |
-  海外：VIX XX.X 正常 SOX X,XXX 美10Y X.XX% 高位 … →海外利率高位，外部估值压制未解除
-
-- **海外段指标集不可删减**：美10Y/美30Y/实际利率/期限利差/5Y盈亏/美元指数/布油/USDCNY/ACM10Y 由 `tests/test_macro_extended.py::TestLabelE2` 锁定（基线信号不显示，避免冗长）
-- **两段结论均由确定性规则生成**（`macro._global_conclusion`、国内段政策方向判定），不由 LLM 书写；海外规则输入是引擎已产出的 `signal` 字段，渲染层不引入新阈值
-- `|` 为 ASCII 分隔符且条件出现（无海外指标时不得出现）——`tests/test_v015_fixes.py::TestMacroLabel` 锁定
-- 溢出指标明细见报告附录「数据质量与引擎自检」
-
-**标签生成责任**（F2-7）：当前引擎自动生成宏观标签并写入报告头部。Claude 须核验标签数字为**最新期**（akshare PMI/CPI 序列最新在前，引擎曾取 2008-01 旧行，F0-4 已修）；发现非当期数字时按正确值改写标签并标注来源。
+版本一致性仅在发布/CI 时校验（`sync_version.py check`），**不在 Skill 运行时或 SessionStart 钩子中执行**。发布前检查清单见 [CONTRIBUTORS.md](CONTRIBUTORS.md)。
 
 ## 关键架构
 
 - **多源降级链（R12h）**：L3 行情类（kline/quote/basic_info/shareholders/northbound）经 `_run_sources_cascade` 首选源单发、失败按序降级（防东财限流/首选源挂死）；L2 财务类（financials/valuation）经 `_run_sources_parallel` 并行双源先到先用；industry/holder_changes 互补数据并行
-- **所有源独立记录**：失败不阻塞，全失败标注 "未获取到任何有效数据"
-- **禁止买卖建议、仓位建议**（LAW 6）。**允许多情景估值参考价**（乐观/中性/悲观），须标注各情景的假设前提与概率权重，且注明"仅供参考，不构成投资建议"。**不允许不标注假设前提的单一目标价数字**（如"目标价 XX 元"）
-- **允许「交易结构分析」**（LAW 6a）— 基于多情景估值的入场区间（标注情景锚定 + 假设前提；3 段参考输出，不设触发条件/比例）、假设失效触发（离场条件）、操作纪律（研究流程规则）。入场区间 ≠ 买入建议：区间告诉你"在这个假设下，估值模型给出的合理价格带"，由用户自行决定。详见 [trade-structure.md](skills/invest-a-stock/references/trade-structure.md)
+- **所有源独立记录**：失败不阻塞，全失败标注"未获取到任何有效数据"
+- **合规边界**：禁止买卖建议、仓位建议（A1／原 LAW 6）；允许多情景估值参考价（须假设前提 + 概率权重 + "仅供参考，不构成投资建议"），**不允许无假设前提的单一目标价数字**；允许「交易结构分析」（A2／原 LAW 6a）——条件性估值区间 ≠ 买入建议，详见 [trade-structure.md](skills/invest-a-stock/references/trade-structure.md)
 - **archive/ 目录**是 v0.2 遗留，不要引用
-
-## 开发规范
-
-详见 [development-rules.md](skills/lib/references/development-rules.md) — 13 条规则（D1-D13），来自 `/code-review` 反复出现的缺陷模式。每次 `/code-review` 应加载此文件作为审查标准。
-
-## 措辞规范
-
-> **Canonical 源**：[report-conventions.md §3](skills/lib/references/report-conventions.md)（禁止词替换表 + 已知违规模式 19 条 + 事实边界 §2.3）。此处仅列最高频约束，完整表在发出报告前须逐一核对：
-- 禁止：买卖/仓位建议（LAW 6）、无假设单一目标价（LAW 6）、"当前处于左侧/右侧"单边结论（LAW 16）、"极度高估/低估"形容词（用数值比较）、无来源"往往/通常"（标注待补）、"检索不到→数据不存在"推断（只允许「未检索到/公开不可独立验证」）、"崩盘"（改"剧烈回调"+条件描述）
-- 禁止（宏观外推红线，E5/C6-C10）："全线创新高"类整体断言（须逐项复算输出「X 项中 Y 项成立」+ 各自最高值与日期）、"理论上无顶部/长期方向不变"（需求侧支撑与价格结论分离表述）、"基本面短期意义有限/不重要"（须带条件限定的方差归属表述）、未标口径的"距前高 X%"（强制标注收益率/价格口径 + 窗口起止）、传导链三环节等权表述（逐环节标注证据等级 A/B/C/D，最弱环节不得作核心论证）、月频海外数据描述当期状况（英德法日 10Y 等）
-- 强制：多情景估值参考价须假设前提 + 概率权重 + "仅供参考，不构成投资建议"；月频海外数据标注「截至 YYYY-MM，滞后约 N 个月」
-
-## 估值分位使用规则
-
-1. **仅模块 1（当前状态快照）的"估值位置"段使用"分位"一词**；其余模块用"历史位置"或"区间位置"。
-2. **亏损期标的强制标注**：PE 历史序列中 >30% 交易日为亏损期（负数 PE 剔除）→ 分位旁标注"该标的历史大部分时间微利/亏损，PE 分位数仅作位置参考，不反映估值贵贱"。
-3. **分位数不单独使用**：必须伴随中位数或均值。✅ "PE 93.11x，近4年 98.3% 分位（中位数 37.52x）" ❌ "PE 处于历史 98.3% 分位"
-
-## 点位引用规范（v0.2.6）
-
-> **Canonical 源**：[report-conventions.md §2.4](skills/lib/references/report-conventions.md)（L1-L4 证据等级 + 禁止断言表 + 允许表述形式）。lint 已内置 6 条 `wording-level-*` error 级规则自动拦截。
-- 引用点位必须带证据等级标签（L1 参考系 / L2 机制注记 / L3 习俗 / L4 反证）
-- 禁止断言："将回踩/测试 MA"、"缺口必然回补"、"BOLL 上轨将回调"、"斐波回撤位有支撑"、"整数关口必然受阻/突破"、"X 浪回撤将止于 Y%"
-- 允许："当前价 vs 点位距离 X% [来源: engine]"；"整数关口 4000 为市场关注位（熊市效应最强）[证据: L1-2]"；缺口/斐波/波浪可展示但强制习俗标签，不与 L1/L2 同权重
-- 日历效应（8 月中旬谨慎）已回测裁决为 ❌ 不显著 → 降级为建议（journal SKILL.md 日历效应建议节）
-
-## 分析标记规范
-
-> 结构：**[事实]** 块（带来源）→ **[分析]** 块（逻辑推演）→ 末尾 SOP-EV 四维标签。完整定义见 [report-conventions.md §5](skills/lib/references/report-conventions.md)。
-
-四维标注：数据可靠性 ✅/⚠️/❓ | 来源丰富度 🌐/📡/🔮 | 时效性 🕐/📅/🗄️ | 交叉验证 ✓✓/✓✗/—
-
-示例：`[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源可验证]`
-
-## 报告复检流程（发报告前必做）
-
-> 复检在**报告写入文件后、向用户发出简报前**执行。三层递进，全部通过才可发出。复检发现的问题立即修正报告，并向用户汇报复检结果（修正项/降级项）。
-
-### 第 0 层：机器准出（必跑，非可选自检）
-
-`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现方可进入以下三层人工复检（退出码 0=PASS / 1=WARN 均可交付，2=FAIL 不得交付）；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）逐条复核后消除或说明。qc 规则细节见 `skills/lib/report_qc.py` 层说明。
-
-### 第 1 层：数字复检（准确性）— 独立重算，非重新目视
-
-> 复检者与写作者共享认知：**"重新看"无法发现目视/心算错误**。加工组数字必须重跑 Python，不依赖肉眼复核。
-
-提取报告全部关键数字，按来源分两组：
-
-| 来源分组 | 复核方法 |
-|---------|---------|
-| 引擎字段直引 | 对照原始 JSON 输出，值/单位/口径必须一致 |
-| 加工组（%变化/计数/倍数/比例/区间推导） | **全部重跑 Python 复算**（`len()`/`max/min`/公式），对照标注的 formula |
-| 检索/新闻口径 | 必须带「检索摘要口径，出处待核实」标注；**不得归因到未读原文的媒体** |
-
-强制项：
-- **计数断言（N 个/N 日/N 笔）→ 对引擎清单跑 `len()` 聚合**（R3，禁止目视清单）
-- 极值断言（峰值/最大/最低/首个）→ 确认基于**全量序列**的 Python `max/min`
-- 任何 `Python calc 视角` 类未实跑标注 → 删除该数字或重跑补标注
-- 任何不匹配 → 修正报告后再进入第 2 层
-
-**已知错误实例（不得重犯）**：① 子集断言（2026-08-07 只看近 8 行断言峰值，真实峰值在全量序列）；② 摘要归因（把 WebSearch 摘要数字归因到未读原文媒体）；③ 目视计数（2026-08-14 "8/4 起 6 日净流出"实为 7 日、"4-6 月 6 个上涨日"实为 5 个——引擎给的是清单，计数是 AI 目视的）；④ 未实跑标注（"Python calc 视角 -21%"实际没跑 Python）。
-
-### 第 2 层：合规复检（规则）
-
-- **P0**：每个数字有引擎来源或 `[来源: Python calc: formula]`，无 AI 心算/目视计数痕迹
-- **LAW 6/6a**：无买卖/仓位建议；多情景带假设前提+概率权重；无无假设单一目标价
-- **措辞规范 §3**：禁止词替换表 + 已知违规模式 19 条逐一核对；[分析] 事实性前提带来源或「框架性陈述/待验证」标注、未被证据标签背书（report-conventions §2.3 强制 7）；派生数字带 calc 公式、无「复算一致/自洽校验」类未实跑字样；正文 §N 交叉引用指向节含被引内容
-- **宏观外推红线（E5）**：无"全线创新高"类整体断言；"距前高 X%"带口径（收益率/价格）+ 窗口起止；**传导链逐环节标注证据等级 A/B/C/D 且最弱环节（C/D 级）不得作核心论证（C9 强制检查项，lint 规则 `wording-macro-chain-evidence` 之外的人工复核）**；月频海外数据（英德法日 10Y 等）带「截至 YYYY-MM，滞后约 N 个月」staleness 标注
-- **事实边界 §2.3**：无猜测/推断/幻觉；数据冲突并列不裁决；三态标注（可验证/公开不可独立验证/未知）
-- **分析标记**：每个 [分析] 块带 SOP-EV 四维标签
-- **估值分位规则**：分位伴随中位数/均值；亏损标的标注；仅模块 1 用"分位"一词
-
-### 第 3 层：逻辑复检（自洽性）
-
-- 核心判断与数据是否矛盾（如"资金承接"判断 vs 份额数据方向）
-- 对抗性假设 ≥3 且可证伪；致命一击为条件句；盲点 ≥2
-- 引擎标注「不可得/未知」的字段未被填充数字
 
 ## 报告路径
 
@@ -267,3 +100,12 @@ uv run python -c "..." 2>&1 | grep -vE '^[0-9]+%\|'
 - 个股报告：`reports/{symbol}-{name}/{YYYY-MM-DD-HH-MM-SS}.md`
 - 财报 F 规范：`skills/invest-a-stock/references/financials.md`
 - 九模块结构：`skills/invest-a-stock/references/modules.md`
+
+## 排障速查
+
+| 症状 | 处置 |
+|------|------|
+| 东财 API 连接被重置 / ProxyError | 需**直连**：Clash/VPN 下配 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`。详见 [CONFIGURATION.md](CONFIGURATION.md)「代理与东方财富」 |
+| akshare 输出混入进度条 | 进度条在 **stderr**，直接 `2>/dev/null` 丢弃；需看错误时用 `grep -vE '^[0-9]+%\|'`。详见 [data-interface-map.md §G](skills/lib/references/data-interface-map.md) |
+| `import` 失败 / 依赖缺失 | 用 `uv sync`（**不要** `pip install`，会污染 Homebrew 全局 Python）；见 [development-rules.md D14](skills/lib/references/development-rules.md) |
+| 报告被 QC 拦下 | 先跑 `uv run python skills/lib/report_qc.py <报告> --fail-on error`，退出码 2 即不得交付；流程见 [delivery-qc.md](skills/lib/references/delivery-qc.md) |

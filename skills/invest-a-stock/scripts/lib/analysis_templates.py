@@ -44,6 +44,13 @@ _DIRECTION_RULES: dict[str, tuple[str, str]] = {
     "holder_decrease": ("负向", "medium"),
     "st_risk": ("负向", "medium"),
     "litigation": ("负向", "medium"),
+    # v0.3.1 新增类型中**方向明确**的风险项；其余有意不给方向：
+    # market_anomaly（异动方向不定）、investment（对外投资未必利好）、
+    # unlock（解禁本身不代表减持）、
+    # holder_change（权益变动可能是增持也可能是减持）、related_party / procedural。
+    "regulatory": ("负向", "medium"),
+    "pledge": ("负向", "medium"),
+    "guarantee": ("负向", "medium"),
 }
 
 _DIRECTION_DISCLAIMER = "[参考: 事件类型分类规则，不构成投资建议]"
@@ -85,12 +92,16 @@ class EventClassificationCard:
 
     Groups events from collection["events"] by type and enriches
     each group with taxonomy metadata and direction hints.
+
+    R13（2026-10-05）：`dimension_hint`/`duration_hint` 是 taxonomy 类型默认
+    线索（不是已核影响）——字段名带 hint、消费方须按线索呈现；影响结论
+    须取得公告原文后另写（§9.4.4）。
     """
     event_type: str
     event_label: str
     events: list[dict]
-    impact_dimension: str
-    default_duration_hint: str
+    dimension_hint: str
+    duration_hint: str
     direction_hint: str
     direction_confidence: str
     direction_note: str
@@ -246,16 +257,19 @@ def _build_mda_card(collection: dict) -> Optional[MDANarrativeCard]:
         if nm_prior is not None:
             nm_change = round(nm - nm_prior, 2)
 
-    # ---- Operating cashflow & quality hint ----
+    # ---- Operating cashflow & coverage hint ----
+    # C1-b：只表述覆盖关系（不写「利润质量良好」类质量结论）；亏损期
+    # （net_profit<=0）比值不适用——旧守卫 abs(np)>1e-9 会把亏损期算成
+    # 「良好」（ocf=-10 亦 > np*1.1=-110）。
     ocf = _get(latest, "n_cashflow_act", "ocf")
     cq_hint = ""
-    if ocf is not None and net_profit_val is not None and abs(net_profit_val) > 1e-9:
+    if ocf is not None and net_profit_val is not None and net_profit_val > 0:
         if ocf > net_profit_val * 1.1:
-            cq_hint = "良好"
+            cq_hint = "覆盖充分"
         elif ocf >= net_profit_val * 0.9:
-            cq_hint = "一般"
+            cq_hint = "基本覆盖"
         else:
-            cq_hint = "需关注"
+            cq_hint = "覆盖偏低"
 
     # ---- ROE ----
     roe = _get(latest, "roe")
@@ -353,8 +367,8 @@ def _build_event_classification_cards(
                 event_type=etype,
                 event_label=label,
                 events=ev_list,
-                impact_dimension=impact_dim,
-                default_duration_hint=duration,
+                dimension_hint=impact_dim,
+                duration_hint=duration,
                 direction_hint=direction_hint,
                 direction_confidence=direction_confidence,
                 direction_note=direction_note,
@@ -459,6 +473,17 @@ def _build_sentiment_card(collection: dict) -> Optional[SentimentCard]:
 
 
 # ---- Taxonomy loader ----
+
+
+def event_type_label(event_type: str) -> str:
+    """事件类型 → 中文标签，**单一源**是 taxonomy 的 ``label``。
+
+    渲染层与事实层此前各自维护一张 dict，已漂移到含 `warning`/`merger` 等不再存在的键；
+    新增类型则静默回落成英文标识（``.get(k, k)`` 不报错，所以长期不可见）。
+    取不到时退回原标识，不臆造译名。
+    """
+    label = (load_event_taxonomy().get("event_types", {}).get(event_type) or {}).get("label")
+    return str(label) if label else str(event_type)
 
 
 def load_event_taxonomy() -> dict:

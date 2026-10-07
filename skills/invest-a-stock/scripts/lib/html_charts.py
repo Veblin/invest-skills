@@ -66,8 +66,41 @@ def lttb(pts: Sequence[tuple[float, float]], target: int) -> list[tuple[float, f
 
 # ── T3-2 估值历史分位带图 ──
 
-def window_label(n_rows: int) -> str:
-    """估值窗口标签（与 render_html._extract_valuation_data 同一规则，D11 去重）。"""
+def _span_years(first_date: Any, last_date: Any) -> float:
+    """日期跨度（年，按 365.25 天）；任一不可解析或倒序 → 0。"""
+    import datetime as _dt
+
+    def _parse(raw: Any) -> "_dt.date | None":
+        s = str(raw or "").strip()[:10]
+        if not s:
+            return None
+        if len(s) == 8 and s.isdigit():
+            s = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+        try:
+            return _dt.date.fromisoformat(s.replace("/", "-"))
+        except ValueError:
+            return None
+
+    a, b = _parse(first_date), _parse(last_date)
+    if a is None or b is None or b < a:
+        return 0.0
+    return (b - a).days / 365.25
+
+
+def window_label(n_rows: int, first_date: Any = None, last_date: Any = None) -> str:
+    """估值窗口标签（唯一实现，D11 去重；render_html/render_utils/store/
+    valuation_calc 经 valuation_window_label 委托）。
+
+    C2-b：优先按**实际日期跨度**取最近整年（反例：1211 行 ≈5 年却按
+    1210//250 标「近4年」，与同报告「5年轨道」互斥）；封顶「近5年」与 PE Band
+    的 5 年轨道一致，下限「近1年」，不足 0.75 年标「上市以来（数据有限）」。
+    缺有效日期（旧调用/test 夹具）时回退行数规则（约 250 行/年）。
+    """
+    span_years = _span_years(first_date, last_date)
+    if span_years > 0:
+        if span_years < 0.75:
+            return "上市以来（数据有限）"
+        return f"近{max(1, min(5, round(span_years)))}年"
     if n_rows >= 1250:
         return "近5年"
     if n_rows >= 250:
@@ -193,7 +226,10 @@ def build_valuation_band_options(
             "p10": plain_num(p10),
             "p90": plain_num(p90),
             "loss_ratio_pct": loss_ratio_pct,
-            "window_label": window_label(len(w_raw)),
+            "window_label": window_label(
+                len(w_raw), w_raw[0][0] if w_raw else None,
+                w_raw[-1][0] if w_raw else None,
+            ),
             "note": note,
         },
     }

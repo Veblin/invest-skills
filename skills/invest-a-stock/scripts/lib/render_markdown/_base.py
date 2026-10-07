@@ -9,6 +9,7 @@ from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
 from lib.technical import compute, sort_kline_asc
 from lib.participant_scan import (
     build_participant_behavior_section,
+    flow_direction_relation,
     moneyflow_cv_window,
     moneyflow_signal_label,
     northbound_label,
@@ -61,6 +62,7 @@ from ..render_dcf import _section_dcf_valuation
 from ..render_risk import (
     _v3_build_risk_report,
     _v3_bull_bear_implied_growth,
+    _growth_reference,
     _section_bull_bear,
     _section_risk_uncertainty,
     _section_left_right_probability,
@@ -114,12 +116,18 @@ _v3_northbound_signal_label = northbound_label
 
 
 # --- _render_engine_extras ---
-def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
+def _render_engine_extras(collection: dict[str, Any], *,
+                          macro_block: bool = False) -> list[str]:
     """渲染报告头部：只放**带结论/判定**的引擎行。
 
     头部是全报告最高价值的位置。本函数被 brief/concise/full 三模式共用
     （_concise.render_report_v3），因此本函数里增删任何内容都会同时影响三种
     交付形态——下沉前须确认每种模式都有承接方。
+
+    macro_block（v0.3.1 阅读验收，2026-10-07）：full 用**分组展示块**（短摘要 +
+    国内/海外指标表，保留读数/来源/币种，整块为**一个多行元素**）；默认 False 时
+    保持 compact 两段式标签（brief/concise 为按需对话/精简产物，一屏优先；
+    标签合同不受影响）。full 首屏提取按元素前缀整块迁移，多行不会漏进底稿。
 
     保留：宏观情景（国内/海外各带结论）、产业链位置、收益驱动假设（R1）、
     风格匹配（R10）、行业成功关键因素（R4，含未覆盖行业的覆盖范围披露）、
@@ -142,8 +150,13 @@ def _render_engine_extras(collection: dict[str, Any]) -> list[str]:
 
     macro = collection.get("macro_context") or {}
     if macro.get("status") == "ok":
-        from ..macro import macro_signal_label
-        lines.append(f"**[宏观情景]** {macro_signal_label(macro)}")
+        from ..macro import (MACRO_BLOCK_MARKER, macro_scenario_lines,
+                             macro_signal_label)
+        if macro_block:
+            # 整块 = 一个列表元素（多行字符串）：full 首屏提取按前缀整块迁移
+            lines.append("\n".join(macro_scenario_lines(macro)))
+        else:
+            lines.append(f"{MACRO_BLOCK_MARKER} {macro_signal_label(macro)}")
 
     chain = collection.get("chain_context") or {}
     if chain.get("status") == "ok" and chain.get("industry"):
@@ -512,36 +525,33 @@ def _render_ma_system(collection: dict[str, Any]) -> list[str]:
     # 缺陷5: latest_close 可为 None/NaN（technical.latest_close）。有限性检查必须在
     # 比较之前——None 参与 >= 抛 TypeError（逃出唯一的 try/except 中止整个渲染），
     # NaN 参与比较恒 False（四根 MA 全误标「现价下方」+ 渲染 '现价 nan'）。
-    if closes is not None:
-        try:
-            closes_finite = math.isfinite(closes)
-        except TypeError:
-            closes_finite = False
-        if not closes_finite:
-            closes = None
+    # R14（2026-10-05）：判据与 HTML（render_html MA pill/MA250）统一走
+    # `render_utils.finite_price`（None/NaN/±inf/≤0 → 不可得）——此前两侧对
+    # 0 值与 NaN 的处理不同，同一快照可给出不同方向标注。
+    closes = _ru.finite_price(closes)
     ma = t.get("ma") or {}
     latest = {}
     for p in ("5", "10", "20", "60"):
         vals = ma.get(p) or []
-        v = vals[-1] if vals and vals[-1] is not None else None
-        if v is not None:
-            try:
-                v_finite = math.isfinite(v)
-            except TypeError:
-                v_finite = False
-            if not v_finite:
-                v = None
-        latest[p] = v
+        latest[p] = _ru.finite_price(vals[-1]) if vals else None
     parts = []
     for p in ("5", "10", "20", "60"):
         v = latest.get(p)
         if v is None:
             parts.append(f"MA{p}: —")
             continue
+        # R7（2026-10-04 独立复检）：原括注「（收盘价上方/下方）」直接附在 MA
+        # 值后，读者按 MA 为主体理解（「MA 在收盘价上方」），与实际比较方向
+        # 相反（代码判据为收盘价 ≥/＜ MA；两案例 8 个标签全部相反）。改为
+        # 显式主语「收盘价在 MA{p} 上方/下方」，相等与不可得分列。
         if closes is None:
             pos = "（收盘价不可得）"
+        elif _ru.prices_equal(closes, v):
+            pos = f"（收盘价与 MA{p} 持平）"
+        elif closes > v:
+            pos = f"（收盘价在 MA{p} 上方）"
         else:
-            pos = "（收盘价上方）" if closes >= v else "（收盘价下方）"
+            pos = f"（收盘价在 MA{p} 下方）"
         parts.append(f"MA{p}={v:.2f}{pos}")
     label = (t.get("alignment") or {}).get("trend_label", "—")
     # 口径标注（review P1）：本表比较用的是**日线收盘价**，与模块 1 的实时价常

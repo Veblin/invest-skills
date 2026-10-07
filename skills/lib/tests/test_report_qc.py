@@ -19,12 +19,15 @@ from report_qc import (  # noqa: E402
     qc_directory,
     qc_file,
     qc_latest,
+    readability_findings,
+    readability_metrics,
     _check_etf_derived,
     _check_sourcing,
     _compute_overall,
     _run_verify_layers,
     LayerResult,
     QCResult,
+    READABILITY_MAX_CHARS,
 )
 
 # ── 可复用的合规样例（含 [事实]/[分析]/[证据强度] + 风险声明）──
@@ -41,7 +44,7 @@ COMPLIANT_STOCK = """# 600176 中国巨石 研究备忘录
 [分析]
 利润增速远超收入增速，反映规模效应释放。
 
-[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ Tushare+akshare 一致]
+[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]
 """
 
 COMPLIANT_ETF = """# 588000 科创50ETF 研究备忘录
@@ -199,7 +202,7 @@ class TestQcFileOffline:
 
 class TestStructureChecks:
     def test_stock_missing_evidence_tag_warns(self, tmp_path: Path):
-        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ Tushare+akshare 一致]", "")
+        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]", "")
         p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", text)
         r = qc_file(p)
         structure = next(l for l in r.layers if l.layer == "structure")
@@ -333,6 +336,40 @@ class TestStockCompletionGate:
         assert "[待 Claude report 阶段填充]" in flagged
         assert "分析提示" not in flagged
         assert completion.status == "fail"
+
+    def test_bull_chain_review_marker_fails_even_with_valid_sidecar(self, tmp_path: Path):
+        """缺 bull_chain 槽位时，核对占位不得被同代有效侧车掩盖。"""
+        marker = "[待 Claude 核对多头依据]"
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT.replace(
+                "- 盈利增长与现金流改善相互印证 [来源: engine]",
+                marker + "\n- 盈利增长与现金流改善相互印证 [来源: engine]",
+            ),
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+
+        result = qc_file(report, fail_on="error")
+        completion = _completion_layer(result)
+        assert completion.status == "fail"
+        assert result.overall == "FAIL"
+        assert "completion-analysis-sidecar-missing" not in {d["id"] for d in completion.details}
+        assert "completion-empty-basis" not in {d["id"] for d in completion.details}
+        markers = [d for d in completion.details if d["id"] == "completion-template-placeholder"]
+        assert len(markers) == 1
+        assert report.read_text(encoding="utf-8").splitlines()[markers[0]["line"] - 1] == marker
+
+    def test_bull_chain_review_prose_is_not_a_template_marker(self, tmp_path: Path):
+        report = _write(
+            tmp_path, "600176-中国巨石", "2026-09-14-13-41-24.md",
+            _AUTOMATED_STOCK_SNAPSHOT + "\n上述假设待 Claude 核对后再引用。\n",
+        )
+        report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        result = qc_file(report, fail_on="error")
+        completion = _completion_layer(result)
+        assert completion.status == "pass", completion.details
+        assert not any(d["id"] == "completion-template-placeholder" for d in completion.details)
+        assert result.overall != "FAIL"
 
     def test_empty_bear_and_left_basis_fail(self, tmp_path: Path):
         report = _write(
@@ -661,7 +698,7 @@ class TestFormatOutput:
         assert str(p) in out
 
     def test_verbose_shows_details(self, tmp_path: Path):
-        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ Tushare+akshare 一致]", "")
+        text = COMPLIANT_STOCK.replace("[证据强度: ✅ 强 🌐 多源 🕐 近 30 日 ✓✓ 跨源一致]", "")
         p = _write(tmp_path, "600176-中国巨石", "2026-08-02-10-00-00.md", text)
         r = qc_file(p)
         out = format_qc_result(r, verbose=True)
@@ -877,7 +914,7 @@ class TestQcLatestSkipsReviewMemo:
 
 # ── CLI 默认 profile：第 0 层门禁必须覆盖 LAW 6 ──────────────────────────────
 #
-# CLAUDE.md 第 0 层「机器准出（必跑）」就是 `report_qc.py <报告> --fail-on error`
+# delivery-qc.md §2 第 0 层「机器准出（必跑）」就是 `report_qc.py <报告> --fail-on error`
 # 这条不带 --profile 的命令，因此 **CLI 默认值就是合规门禁本身**。
 # 历史默认 precommit 是对齐旧 check_report.sh 的阻断项，会跳过全部 law6-* 与
 # known-violation*（实测 73 条规则中 35 条被跳过，含 14 条 error 级）；v0.3.0 把
@@ -946,7 +983,7 @@ class TestSeverityVocabularyUnified:
 
     此前本文件产出侧混用 `"warn"` 与 `"warning"` 两种拼写，而详情图标只认
     `"warn"` → lint 层（发 `"warning"`）的全部 warning 级 finding 被渲染成 ℹ️，
-    与 info 无法区分 → CLAUDE.md 第 0 层要求的「sourcing warning 逐条复核后
+    与 info 无法区分 → delivery-qc.md §2 第 0 层要求的「sourcing warning 逐条复核后
     消除或说明」被静默跳过。
     """
 
@@ -977,7 +1014,7 @@ class TestSeverityVocabularyUnified:
 class TestLaw6aScenarioContext:
     """v0.3.0 全量重审 F-U7-5：LAW 6a 三情景上下文门禁（此前**零实现**）。
 
-    CLAUDE.md：「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
+    report-conventions.md §2.1：「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
     ——此前唯一机器机制只是全文级免责存在性检查，既不校验假设也不校验概率权重。
     实测语料：253 份中 109 份含三情景词，108 份已合规，1 份真实缺概率权重。
     """
@@ -1102,3 +1139,50 @@ class TestConclusionEvidenceAllTypes:
         p = self._write(tmp_path, "# 笔记\n\n> 不构成投资建议。\n")
         layers = {l.layer for l in qc_file(p).layers}
         assert "readability" not in layers, "R-A1 保持门控（避免长句密度噪音）"
+
+
+# ── v0.3.1 A4：折叠跨度不计阅读篇幅（度量口径对齐） ──
+
+class TestReadingLengthExcludesFoldedSpans:
+    """仅 stock full 的审计底稿不计入 `readability_metrics.total_chars`。
+
+    动机：默认报告（stock full）把九模块 / 12 题 / DCF / 分析详情收进审计底稿
+    折叠块，篇幅指标须与「主阅读面」同义，否则底稿越长越像「报告读不完」。
+    契约边界不变：R-A1 仍是软建议（`_check_readability` 封顶 warn），本组用例
+    只锁度量口径，不锁阻断行为。
+    """
+
+    def test_folded_span_not_counted(self):
+        md = ("## 阅读面\n\n正文若干字。\n\n<details>\n<summary>审计底稿</summary>\n\n"
+              + ("折" * 30000) + "\n\n</details>\n")
+        assert readability_metrics(md)["total_chars"] < 1000
+
+    def test_unfolded_long_text_still_flagged(self):
+        md = "## 阅读面\n\n" + ("长" * 30000) + "\n"
+        assert readability_metrics(md)["total_chars"] > READABILITY_MAX_CHARS
+        assert any(f["id"] == "readability-length" for f in readability_findings(md))
+
+    def test_nested_details_and_unclosed_span(self):
+        """审计底稿嵌套按深度处理；未闭合视为延续到文末。"""
+        nested = ("前\n<details>\n<summary>审计底稿</summary>\n\n" + "折" * 5000
+                  + "\n<details>\n<summary>内</summary>\n\n" + "折" * 5000
+                  + "\n</details>\n\n</details>\n后\n")
+        assert readability_metrics(nested)["total_chars"] < 100
+        unclosed = ("前\n<details>\n<summary>审计底稿</summary>\n\n"
+                    + "折" * 5000 + "\n")
+        assert readability_metrics(unclosed)["total_chars"] < 100
+
+    def test_inline_closed_details_do_not_hide_following_body(self):
+        md = "开头。\n<details><summary>普通附录</summary>附录</details>\n" + "正文。" * 10001
+        met = readability_metrics(md)
+        assert met["total_chars"] > READABILITY_MAX_CHARS
+        assert any(f["id"] == "readability-length" for f in readability_findings(md))
+
+    def test_insight_facts_are_counted(self):
+        md = "## 证据底稿\n<details><summary>展开 Facts 与来源清单</summary>\n" \
+             + "事实。" * 10001 + "\n</details>\n"
+        assert readability_metrics(md)["total_chars"] > READABILITY_MAX_CHARS
+
+    def test_only_named_basement_is_excluded(self):
+        ordinary = "<details>\n<summary>展开：分析详情</summary>\n" + "正文" * 11000 + "\n</details>"
+        assert readability_metrics(ordinary)["total_chars"] > READABILITY_MAX_CHARS

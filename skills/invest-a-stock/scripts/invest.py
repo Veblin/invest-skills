@@ -18,12 +18,17 @@ investment-learning CLI。
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
+import io
 import json
 import os
 import re
 import sys
 import tempfile
-from datetime import datetime
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # 确保从本项目的 lib/ 导入，排除旧归档路径
@@ -42,10 +47,43 @@ while _project_root != _project_root.parent:
     _project_root = _project_root.parent
 
 from lib import collector, env, render
+from lib import report_snapshot
 from lib.collector import _DEFAULT_DIMS
 from lib.proxy import warn_if_proxy_detected
 
 _CLI_DEFAULT_DIMS = ",".join(_DEFAULT_DIMS)
+_TRACE_RUN_ID: str | None = None
+_TRACE_FAILED = False  # 首次写入失败后停用本次 run 的 trace（避免逐次报错）
+
+
+def _trace_run_id() -> str:
+    """进程内稳定的 run id；首次使用时才解析（import 后设置环境变量同样生效）。"""
+    global _TRACE_RUN_ID
+    if _TRACE_RUN_ID is None:
+        _TRACE_RUN_ID = os.environ.get("INVEST_RUN_ID") or uuid.uuid4().hex
+    return _TRACE_RUN_ID
+
+
+def _trace(stage: str, event: str, **fields: object) -> None:
+    """Opt-in JSONL timing without tokens or report text.
+
+    可观测性不得让业务挂掉：trace 路径不可写时只降级（一次性提示后停用），
+    绝不把异常抛进命令主流程（实测未防护时 `INVEST_TRACE_FILE=/nonexistent-dir/x`
+    会让命令完全没跑、rc=1）。
+    """
+    global _TRACE_FAILED
+    path = os.environ.get("INVEST_TRACE_FILE")
+    if not path or _TRACE_FAILED:
+        return
+    row = {"run_id": _trace_run_id(), "stage": stage, "event": event,
+           "wall_time": datetime.now().astimezone().isoformat(),
+           "monotonic_ns": time.monotonic_ns(), **fields}
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        _TRACE_FAILED = True
+        print(f"⚠️ trace 写入失败（本次 run 后续不再记录 trace）：{exc}", file=sys.stderr)
 
 try:
     from lib import store as store_mod
@@ -102,14 +140,19 @@ def _dims_from_args(args: argparse.Namespace) -> list[str]:
         try:
             with open(plan_path, "r", encoding="utf-8") as f:
                 pdata = json.load(f)
+            if pdata.get("symbol") != getattr(args, "symbol", None):
+                raise ValueError("计划标的与命令标的不一致")
+            if pdata.get("plan_hash") and pdata["plan_hash"] != report_snapshot.plan_digest(pdata):
+                raise ValueError("计划文件内容与 plan_hash 不一致")
             modules = pdata.get("modules", [])
             if modules:
                 return [
                     m["module_id"]
                     for m in sorted(modules, key=_plan_sort_key)
                 ]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-            print(f"⚠️ 无法读取计划文件 {plan_path}: {exc}", file=sys.stderr)
+            raise ValueError("modules 为空")
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"无法读取计划文件 {plan_path}: {exc}") from exc
     return [d.strip() for d in args.dims.split(",") if d.strip()]
 
 
@@ -133,7 +176,7 @@ def _try_resume_collection(symbol: str) -> dict | None:
     progress = store_mod.get_pipeline_progress(symbol)
     if not progress.get("collect"):
         return None
-    rows = store_mod.list_collections(limit=1, symbol=symbol)
+    rows = store_mod.list_collections(limit=1, symbol=symbol, kind="collect")
     if not rows:
         return None
     rec = store_mod.get_collection(rows[0]["id"])
@@ -155,6 +198,14 @@ def _apply_deep_dims(dims: list[str], deep: bool) -> list[str]:
     return out
 
 
+def _collection_dims_from_args(args: argparse.Namespace) -> list[str]:
+    """Resolve the dimensions collected for these CLI flags."""
+    dims = _apply_deep_dims(_dims_from_args(args), getattr(args, "deep", False))
+    if getattr(args, "with_macro", False) and "kline" not in dims:
+        dims.append("kline")
+    return dims
+
+
 def _normalize_collection_for_render(payload: dict) -> dict:
     """统一 credibility / credibility_scores 别名，供 render 消费。"""
     out = dict(payload)
@@ -171,10 +222,309 @@ def _normalize_collection_for_render(payload: dict) -> dict:
 
 
 def _ensure_render_ready(collection: dict, symbol: str) -> None:
-    """补齐报告渲染所需字段（market_structure / phase2），写入 collection。"""
+    """补齐报告渲染所需字段（market_structure / phase2），写入 collection。
+
+    每项独立降级（与 `_prepare_report_input` 同形的 availability/attempted_sources），
+    不打断渲染：原 md 分支靠 `render(..., attach_extras=True)` 内部的 try/except 兜底，
+    网络收敛到本函数之后必须自带同等保护，否则一次超时就会打断渲染。
+    """
     if not collection.get("market_structure"):
-        collector.attach_market_structure(collection, symbol)
-    collector.attach_phase2_extras(collection, symbol)
+        try:
+            collector.attach_market_structure(collection, symbol)
+        except Exception as exc:
+            collection["market_structure"] = {
+                "availability": {"market_structure": f"unavailable: {exc}"},
+                "attempted_sources": ["collect_market_structure"],
+            }
+    try:
+        collector.attach_phase2_extras(collection, symbol)
+    except Exception as exc:  # 该函数内部已逐项降级；此处兜住意料外异常
+        collection.setdefault("_meta", {})["phase2_error"] = str(exc)
+    # events 回填（原由 render(attach_extras=True) 兼任，收敛后必须在这里重试）
+    collector.attach_events_for_report(collection, symbol)
+
+
+def _plan_hash(args: argparse.Namespace, *, symbol: str | None = None) -> str | None:
+    path = getattr(args, "plan", "") or ""
+    if not path:
+        return None
+    with open(path, encoding="utf-8") as f:
+        plan = json.load(f)
+    if plan.get("symbol") != (symbol or getattr(args, "symbol", None)):
+        raise ValueError("计划标的与命令标的不一致")
+    actual = report_snapshot.plan_digest(plan)
+    if plan.get("plan_hash") and plan["plan_hash"] != actual:
+        raise ValueError("计划文件内容与 plan_hash 不一致")
+    return actual
+
+
+def _seal_benchmark_series(result: dict) -> None:
+    """封存沪深300 基准序列（`market_structure.benchmark_hs300`）。
+
+    `render_dcf._dcf_compute_beta` 原先在**渲染期**现场抓取沪深300 日线——这是渲染链上
+    唯一的真联网点，不封存则「同输入重渲零网络」不成立。这里按与渲染完全相同的口径
+    （同一个 `_akshare_hs300_dated_closes`）前移到采集期，故 beta 数值不变。
+
+    窗口取 `max(160, 有效交易日数 + 30)`：渲染只用「个股 ∩ 基准」的公共交易日，多给历史
+    不改变结果；有效交易日与 beta 计算使用同一判定口径。
+    """
+    market_structure = result.get("market_structure")
+    if not isinstance(market_structure, dict) or "benchmark_hs300" in market_structure:
+        return
+    stock_days = 0
+    try:
+        from lib.render_utils import _get_dim_data, _index_dims
+        from lib.render_dcf import _dcf_stock_by_date
+        kline = _get_dim_data(_index_dims(result), "kline") or []
+        stock_days = len(_dcf_stock_by_date(kline)) if isinstance(kline, list) else 0
+    except Exception:  # 数据格式异常也不能让可选基准采集阻断封存
+        stock_days = 0
+    if stock_days < 12:
+        market_structure["benchmark_hs300"] = {
+            "availability": "unavailable: 个股有效 K 线不足 12 个交易日，未请求 HS300",
+            "attempted_sources": [],
+            "closes": [],
+        }
+        _trace("benchmark", "skipped", availability="unavailable", stock_days=stock_days)
+        return
+    days = max(160, stock_days + 30)
+    _trace("benchmark", "start", days=days)
+    try:
+        from lib.collector import _akshare_hs300_dated_closes
+        series = _akshare_hs300_dated_closes(days=days)
+    except Exception as exc:
+        market_structure["benchmark_hs300"] = {
+            "availability": f"unavailable: {exc}",
+            "attempted_sources": ["_akshare_hs300_dated_closes"],
+            "closes": [],
+        }
+    else:
+        market_structure["benchmark_hs300"] = {
+            "availability": "available" if series else "empty",
+            "attempted_sources": ["_akshare_hs300_dated_closes"],
+            "closes": [[d, c] for d, c in series],
+            "count": len(series),
+        }
+    _trace("benchmark", "end",
+           availability=market_structure["benchmark_hs300"]["availability"],
+           count=len(market_structure["benchmark_hs300"]["closes"]))
+
+
+def _prepare_report_input(result: dict, symbol: str, plan_hash: str | None,
+                          *, with_value: bool = False, options: dict | None = None) -> str:
+    """Perform conditional network work before sealing the immutable input."""
+    _trace("report_prepare", "start", symbol=symbol)
+    if "market_structure" not in result:
+        _trace("market_structure", "start")
+        try:
+            collector.attach_market_structure(result, symbol)
+        except Exception as exc:
+            result["market_structure"] = {"availability": {"market_structure": f"unavailable: {exc}"},
+                                          "attempted_sources": ["collect_market_structure"]}
+        _trace("market_structure", "end")
+    collector.attach_events_for_report(result, symbol)
+    result.setdefault("events", [])
+    result.setdefault("industry_peers", {"peers": [], "availability": "unavailable",
+                                         "attempted_sources": ["collect_all.phase2"]})
+    result.setdefault("pe_band", None)
+    result.setdefault("industry_pricing", {"status": "missing", "data": None,
+                                           "attempted_sources": ["collect_all.phase2"]})
+    result.setdefault("price_shock", {"has_shock": False, "shock_dates": [],
+                                      "availability": "unavailable"})
+    try:
+        from lib.lhb import attach_limit_streak_dims
+        attach_limit_streak_dims(result, symbol)
+    except Exception as exc:
+        result.setdefault("_meta", {})["limit_streak_error"] = str(exc)
+    if with_value:
+        _trace("value", "start")
+        try:
+            from valuation_calc import run_valuation
+            result["value_result"] = run_valuation(symbol).to_dict()
+        except Exception as exc:
+            result["value_result"] = {"availability": "unavailable",
+                                      "attempted_sources": ["valuation_calc.run_valuation"],
+                                      "error": str(exc)}
+        _trace("value", "end")
+    else:
+        result.setdefault("value_result", {"availability": "not_requested",
+                                           "attempted_sources": []})
+    try:
+        from lib.render_utils import _get_dim_data, _index_dims
+        from lib.industry.base import get_success_factors
+        basic = _get_dim_data(_index_dims(result), "basic_info") or {}
+        industry = str(basic.get("industry") or basic.get("行业") or "") if isinstance(basic, dict) else ""
+        factors = get_success_factors(industry)
+        result["success_factors"] = {"industry": industry, "covered": bool(factors), "factors": factors}
+    except Exception:
+        result["success_factors"] = {"industry": "", "covered": False, "factors": []}
+    try:
+        from lib.style_match import assemble_style_match
+        result["style_match"] = assemble_style_match(result, symbol)
+    except Exception:
+        result["style_match"] = None
+    _seal_benchmark_series(result)
+    result["collection_completed_at"] = datetime.now(timezone.utc).isoformat()
+    content_hash = report_snapshot.seal(result, plan_hash=plan_hash, options=options)
+    _trace("report_prepare", "end", content_hash=content_hash)
+    return content_hash
+
+
+def _numeric_leaves(node: object, prefix: str, out: list[str], *, max_keys: int = 12) -> None:
+    """收集「路径 = 数值」行（只收数值叶子；布尔不是数值来源，跳过）。
+
+    数组下标用**点分隔**（`…data.0.close`）而不是 `data[0]`：`verify_facts` 按点切分
+    并对 list 走 `int(part)`，方括号写法会被它判为「无法读取数值」——索引一旦不可被
+    校验器读，就等于把作者往失败路径上引。两处词汇必须一致（见同名回归测试）。
+    """
+    if isinstance(node, bool):
+        return
+    if isinstance(node, (int, float)):
+        out.append(f"{prefix} = {node}")
+        return
+    if isinstance(node, dict):
+        for key in [k for k in node if not str(k).startswith("_")][:max_keys]:
+            _numeric_leaves(node[key], f"{prefix}.{key}", out, max_keys=max_keys)
+        return
+    if isinstance(node, list) and node:
+        for index in sorted({0, len(node) - 1}):
+            _numeric_leaves(node[index], f"{prefix}.{index}", out, max_keys=max_keys)
+
+
+def _fact_path_index(collection: dict, *, limit: int = 160) -> list[str]:
+    """把封存快照的数值字段走成 `facts.source_path` 词表。
+
+    与 `report_snapshot.verify_facts` 用**同一套路径词汇**
+    （`dimension_by_name.<维度>.data...`），不另立第三套写法。
+    """
+    out: list[str] = []
+    view = dict(collection)
+    view["dimension_by_name"] = {
+        item.get("dimension"): item for item in collection.get("dimensions") or []
+        if isinstance(item, dict) and item.get("dimension")
+    }
+    for key in ("market_structure", "pe_band", "industry_pricing", "price_shock",
+                "value_result", "industry_peers", "success_factors"):
+        if key in view:
+            _numeric_leaves(view[key], key, out)
+    for name, item in view["dimension_by_name"].items():
+        _numeric_leaves(item.get("data"), f"dimension_by_name.{name}.data", out)
+    return out[:limit]
+
+
+def _manifest_period_lines(collection: dict, *, limit: int = 24) -> list[str]:
+    """数据时点/样本窗口：直接渲染已封存的 `_meta.manifest`（不重新推断）。"""
+    manifest = (collection.get("_meta") or {}).get("manifest") or {}
+    sources = manifest.get("sources") if isinstance(manifest, dict) else None
+    lines: list[str] = []
+    for name, src in list((sources or {}).items())[:limit]:
+        if not isinstance(src, dict):
+            continue
+        span = src.get("date_range") or ""
+        rows = src.get("row_count")
+        status = src.get("status") or ""
+        parts = [f"{name}"]
+        if span:
+            parts.append(str(span))
+        if rows is not None:
+            parts.append(f"{rows} 行")
+        if status and status != "available":
+            parts.append(f"[{status}]")
+        lines.append("  ".join(parts))
+    return lines
+
+
+def _writing_constraints(*, limit: int = 24) -> list[str]:
+    """写作约束：**从合规规则表派生**（不复制规则文本，避免与最终 QC 漂移）。
+
+    含 warning 级——`percentile-without-median`（分位须附中位数）正是 warning，
+    只筛 error 会把它漏掉。
+    """
+    if not _HAS_LINT:
+        return []
+    try:
+        rules = lint_mod.load_rules()
+    except Exception:
+        return []
+    focus = ("wording-", "percentile-", "law6-", "law16-", "law17-", "p3-")
+    percentile: list[str] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    for rule in rules:
+        rule_id = str(rule.get("id") or "")
+        severity = rule.get("severity")
+        if not rule_id.startswith(focus) or severity not in ("error", "warning"):
+            continue
+        message = str(rule.get("message") or "").strip()
+        key = message[:80]
+        if not message or key in seen:
+            continue
+        seen.add(key)
+        law = str(rule.get("law_ref") or "").strip()
+        line = f"[{rule_id}] {message}" + (f"（{law}）" if law else "")
+        # 分位中位数是**warning**级，若与其余 warning 一起按文件序截断会被挤出清单，
+        # 故单独置顶（主方案 §3.3-4 点名要求展示它）。
+        if rule_id.startswith("percentile-"):
+            percentile.append(line)
+        elif severity == "error":
+            errors.append(line)
+        else:
+            warnings.append(line)
+    return (percentile + errors + warnings)[:limit]
+
+
+def _print_writing_aids(collection: dict) -> None:
+    """合成前的可见性（主方案 §3.3-3/4）：可引用字段与窗口 + 写作约束。"""
+    index = _fact_path_index(collection)
+    if index:
+        print("📎 事实路径索引（写 facts.source_path 用；数值取自封存快照，"
+              "勿按四舍五入后的展示值反推百分比）:", file=sys.stderr)
+        for line in index:
+            print(f"   {line}", file=sys.stderr)
+    periods = _manifest_period_lines(collection)
+    if periods:
+        print("🗓 数据时点与样本窗口（来自封存 _meta.manifest；「近 N 年」须据此实算）:",
+              file=sys.stderr)
+        for line in periods:
+            print(f"   {line}", file=sys.stderr)
+    constraints = _writing_constraints()
+    if constraints:
+        print("📏 写作约束（与最终 QC 同一规则表，error 优先）:", file=sys.stderr)
+        for line in constraints:
+            print(f"   {line}", file=sys.stderr)
+
+
+def _load_fixed_collection(args: argparse.Namespace) -> dict | None:
+    if not _HAS_STORE:
+        print("❌ store 模块不可用，无法读取固定快照", file=sys.stderr)
+        return None
+    record = store_mod.get_collection(args.collection_id)
+    errors = report_snapshot.validate(record, args.symbol, plan_hash=_plan_hash(args))
+    if not errors:
+        sealed_options = record["raw_json"].get("_meta", {}).get("report_options") or {}
+        sealed_dims = set(sealed_options.get("dims") or [])
+        requested_dims = set(_collection_dims_from_args(args))
+        if sealed_dims and sealed_dims != requested_dims:
+            # 原实现只报「维度与封存采集不一致」，用户看不出该改哪个参数。
+            # 定向提示：列出两侧差异 + 真正的修法（用采集时的 --dims / --plan）。
+            only_sealed = "、".join(sorted(sealed_dims - requested_dims)) or "无"
+            only_requested = "、".join(sorted(requested_dims - sealed_dims)) or "无"
+            errors.append(
+                f"维度与封存采集不一致（快照独有：{only_sealed}；命令独有：{only_requested}）"
+                "；须用与采集时相同的 --dims，或改传采集时的 --plan"
+            )
+        for flag in ("deep", "with_macro", "with_news_pack", "force_sector_sync"):
+            if getattr(args, flag, False) and not sealed_options.get(flag, False):
+                errors.append(f"请求 --{flag.replace('_', '-')}，但快照未按该参数采集；须重新 collect --report-ready")
+    if errors:
+        print("❌ 固定快照校验失败: " + "; ".join(errors), file=sys.stderr)
+        return None
+    print(f"🔒 固定快照 id={args.collection_id} sha256={record['raw_json']['_meta']['report_input_hash']}", file=sys.stderr)
+    # 不改写入参：`report_input_hash` 已按原样校验过，注入任何键都会让
+    # 「哈希 vs 内容」不再自洽（`render_json` 会把整份集合连同该哈希一起输出）。
+    # 「封存链不得联网」由渲染侧按 `report_snapshot.is_sealed` 判定，见 render_dcf。
+    return record["raw_json"]
 
 
 def _resume_cache_compatible(
@@ -330,6 +680,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="存入持久化存储（默认开启；--no-store 关闭）")
     pc.add_argument("--no-store", action="store_false", dest="store",
                    help="不存入持久化存储")
+    pc.add_argument("--report-ready", action="store_true",
+                    help="封存 full 报告所需扩展数据并输出固定快照 ID/hash")
     _add_collect_flags(pc, with_news_pack=True)
 
     pr = sub.add_parser("report", help="生成分析报告")
@@ -340,6 +692,20 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--analysis", default=None,
                     help="analysis.json 路径（R-B1）；full 替换 [待 Claude report 阶段填充] 占位，"
                          "insight 注入「分析合成」独立分区并落同代侧车")
+    pr.add_argument("--draft", default=None,
+                    help="首版 MD 路径；与 --analysis 合用，在采集/渲染前检查本次实际占位槽位")
+    pr.add_argument("--collection-id", type=int,
+                    help="只读指定 report-ready collect 快照；缺字段或不匹配即失败")
+    pr.add_argument("--preflight", action="store_true",
+                    help="离线生成候选 Markdown 并运行完整 lint/QC；不写正式报告")
+
+    pv = sub.add_parser("validate-analysis", help="仅校验 analysis.json，不采集或渲染报告")
+    pv.add_argument("path", help="待校验的 analysis.json 路径")
+    pv.add_argument("--draft", default=None, help="首版 MD 路径；同时检查实际占位槽位")
+    pv.add_argument("--collection-id", type=int,
+                    help="对封存快照逐项核对 facts.source_path 数值")
+    pv.add_argument("--plan", default=argparse.SUPPRESS,
+                    help="绑定快照原采集计划（计划快照必填）")
     # P0-5 研究档案：记录 R12g-B 开场四问结果，落同代 profile 侧车并在 full 头部展示。
     # 只改变阅读顺序与补证优先级，不做字段过滤（不隐藏反证/缺口/风险）。
     pr.add_argument("--horizon", default=None,
@@ -426,6 +792,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pe = sub.add_parser("evidence", help="生成结构化证据表")
     pe.add_argument("symbol")
+    pe.add_argument("--collection-id", type=int,
+                    help="只读指定 report-ready collect 快照")
     pe.add_argument("--emit", default="md", choices=["md", "json"])
     pe.add_argument("--dims", default=_CLI_DEFAULT_DIMS)
     pe.add_argument(
@@ -546,6 +914,10 @@ def build_parser() -> argparse.ArgumentParser:
     pval.add_argument("--erp", type=float, default=0.06, help="股权风险溢价（默认 0.06）")
     pval.add_argument("--store", action="store_true", help="结果存入数据库便于回溯")
     pval.add_argument("--emit", default="text", choices=["text", "json"])
+    pval.add_argument("--collection-id", type=int,
+                      help="读取指定快照中的估值原始字段（未封存所需字段时失败）")
+    pval.add_argument("--plan", default=argparse.SUPPRESS,
+                      help="绑定快照原采集计划（计划快照必填）")
     pval.add_argument("--steady", action="store_true",
                       help="R2: 追加稳态盈利估值（穿越周期视角，识别周期高点低PE陷阱）")
     pval.add_argument("--cycle-start", default=None, help="周期区间起点（YYYY1231）")
@@ -574,11 +946,21 @@ def build_parser() -> argparse.ArgumentParser:
     pcat.add_argument("symbol", help="股票代码，如 600176")
     pcat.add_argument("--days", type=int, default=90, help="前瞻天数（默认 90）")
 
+    pnb = sub.add_parser(
+        "notice-body",
+        help="取公告正文（东财内容接口；原文不改写，含截断提示，不做结构化抽取）")
+    pnb.add_argument("target", help="公告 art_code（AN…）或公告详情页 url")
+    pnb.add_argument("--no-cache", action="store_true", help="跳过缓存强制重取")
+    pnb.add_argument("--json", action="store_true", help="输出完整 JSON（含状态与截断标记）")
+
     return p
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
-    dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    if getattr(args, "report_ready", False) and (not args.store or args.resume or not _HAS_STORE):
+        print("❌ --report-ready 须落库且不可与 --resume 合用", file=sys.stderr)
+        return 2
+    dims = _collection_dims_from_args(args)
     if args.resume and _HAS_STORE:
         progress = store_mod.get_pipeline_progress(args.symbol)
         completed_steps = [s for s, done in progress.items() if done]
@@ -610,8 +992,6 @@ def cmd_collect(args: argparse.Namespace) -> int:
             "⚠️ --resume: store 模块不可用（导入失败），无法恢复快照，将执行全新采集",
             file=sys.stderr,
         )
-    if args.with_macro and "kline" not in dims:
-        dims.append("kline")
     if args.deep:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）", file=sys.stderr)
     if args.with_macro:
@@ -626,16 +1006,40 @@ def cmd_collect(args: argparse.Namespace) -> int:
             _kline_cache.cleanup_old()
         except Exception:
             pass
-    result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
+    _trace("collect_all", "start", symbol=args.symbol)
+    result = collector.collect_all(
+        args.symbol, dims, **_collect_kwargs(args),
+        # 报告链：市场结构在采集装配末尾一次取齐（`_prepare_report_input` 随后
+        # 只做封存与条件项，不再重复判断是否已有该字段）。
+        prepare_for_report=bool(getattr(args, "report_ready", False)),
+    )
+    _trace("collect_all", "end", symbol=args.symbol)
     _warn_degraded_collection(result)
     if _no_sources_responded(result["summary"]):
         print(render.render(result, args.symbol, "compact"))
         print("⚠️ 所有维度均不可用。请运行 diagnose。", file=sys.stderr)
         return 1
+    if getattr(args, "report_ready", False):
+        options = {"dims": dims, **{flag: bool(getattr(args, flag, False)) for flag in (
+            "deep", "with_macro", "with_news_pack", "force_sector_sync")}}
+        content_hash = _prepare_report_input(result, args.symbol, _plan_hash(args),
+                                             with_value=True, options=options)
+        print(f"🔒 report-ready sha256={content_hash}", file=sys.stderr)
     print(render.render(result, args.symbol, "compact"))
     if args.store and _HAS_STORE:
-        store_mod.save_collection(result)
-        print("💾 已存入持久化存储", file=sys.stderr)
+        collection_id = store_mod.save_collection(result)
+        print(f"💾 已存入持久化存储 collection_id={collection_id}", file=sys.stderr)
+        if getattr(args, "report_ready", False):
+            print("SNAPSHOT_JSON=" + json.dumps({
+                "collection_id": collection_id,
+                "symbol": args.symbol,
+                "content_hash": result.get("_meta", {}).get("report_input_hash"),
+                "plan_hash": result.get("_meta", {}).get("plan_hash"),
+                "fetched_at": result.get("fetched_at"),
+            }, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+        _trace("seal", "end", collection_id=collection_id,
+               content_hash=result.get("_meta", {}).get("report_input_hash"),
+               dependencies=result.get("_meta", {}).get("report_dependencies"))
         _maybe_store_macro_snapshot(result, args)
     if getattr(args, "store", True) and _HAS_STORE:
         store_mod.save_pipeline_step(
@@ -730,16 +1134,26 @@ def _report_basename(result: dict, symbol: str, ts: str) -> str:
     return f"{symbol}-{safe_name}" if safe_name else symbol
 
 
-def _report_filepath(outdir: Path, subdir: str, ts: str) -> Path:
-    """生成报告完整路径：{outdir}/{subdir}/{YYYY-MM-DD-HH-MM-SS}.md。"""
+def _report_filepath(outdir: Path, subdir: str, ts: str,
+                     stage: str | None = None) -> Path:
+    """生成报告路径；full 模式以 draft/final 后缀区分产物状态。"""
     report_dir = outdir / subdir
     report_dir.mkdir(parents=True, exist_ok=True)
-    return report_dir / f"{ts}.md"
+    suffix = f".{stage}" if stage in {"draft", "final"} else ""
+    return report_dir / f"{ts}{suffix}.md"
 
 
-def _html_report_path(outdir: Path, subdir: str, ts: str) -> Path:
+def _html_report_path(outdir: Path, subdir: str, ts: str,
+                      stage: str | None = None) -> Path:
     """T5-1（R-B2）：html 产物路径 = md 路径换 .html 后缀（同目录约定）。"""
-    return _report_filepath(outdir, subdir, ts).with_suffix(".html")
+    return _report_filepath(outdir, subdir, ts, stage).with_suffix(".html")
+
+
+def _report_stage(mode: str, analysis_payload: list[dict] | None) -> str | None:
+    """Full reports without completed analysis are drafts, including HTML."""
+    if mode != "full":
+        return None
+    return "final" if analysis_payload else "draft"
 
 
 def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | None) -> Path | None:
@@ -772,13 +1186,108 @@ def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | No
     return sidecar
 
 
+def _validated_analysis(path: Path, draft_path: Path | None = None) -> list[dict] | None:
+    """校验分析协议；失败时列出全部错误，供无渲染的迭代回路使用。"""
+    from lib.analysis_schema import (
+        AnalysisSchemaError, load_analysis_json, missing_draft_slots, validate_sections,
+    )
+    try:
+        payload = load_analysis_json(path)
+    except AnalysisSchemaError as exc:
+        print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
+        return None
+    errors = validate_sections(payload)
+    if draft_path is not None:
+        try:
+            draft_text = draft_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"❌ 首版 MD 读取失败: {exc}", file=sys.stderr)
+            return None
+        errors.extend(
+            f"缺少就地槽位 {slot}（首版 MD 存在对应占位）"
+            for slot in missing_draft_slots(payload, draft_text)
+        )
+    if errors:
+        print(f"❌ analysis.json 校验失败（{len(errors)} 项）:", file=sys.stderr)
+        for error in errors:
+            print(f"  {error}", file=sys.stderr)
+        return None
+    return payload
+
+
+def cmd_validate_analysis(args: argparse.Namespace) -> int:
+    payload = _validated_analysis(
+        Path(args.path), Path(args.draft) if args.draft else None)
+    if payload is None:
+        return 2
+    if getattr(args, "collection_id", None) is not None:
+        record = store_mod.get_collection(args.collection_id) if _HAS_STORE else None
+        symbol = record.get("symbol") if record else ""
+        errors = report_snapshot.validate(record, symbol,
+                                          plan_hash=_plan_hash(args, symbol=symbol) if record else None)
+        if not errors:
+            errors = report_snapshot.verify_facts(payload, record["raw_json"])
+        if errors:
+            for error in errors:
+                print(f"❌ {error}", file=sys.stderr)
+            return 2
+    print(f"✅ analysis.json 校验通过（{len(payload)} 段）")
+    return 0
+
+
+def _preflight_report(args: argparse.Namespace) -> int:
+    """Run the real report path in a disposable directory, then QC its actual MD."""
+    if getattr(args, "collection_id", None) is None:
+        print("❌ --preflight 须指定 --collection-id，避免预检与最终报告使用不同采集输入", file=sys.stderr)
+        return 2
+    if args.emit not in ("md", "html"):
+        print("❌ --preflight 仅支持 --emit md 或 html", file=sys.stderr)
+        return 2
+    _trace("candidate_qc", "start", emit=args.emit)
+    from report_qc import format_qc_result, qc_file
+
+    with tempfile.TemporaryDirectory(prefix="invest-preflight-") as tmp:
+        candidate_args = copy.copy(args)
+        candidate_args.preflight = False
+        candidate_args.outdir = str(Path(tmp) / "reports")
+        candidate_args.store = False
+        candidate_args.save_raw = False
+        captured_stdout = io.StringIO()
+        captured_stderr = io.StringIO()
+        with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
+            status = cmd_report(candidate_args)
+        if status != 0:
+            print(captured_stderr.getvalue(), file=sys.stderr, end="")
+            return status
+        reports = list(Path(candidate_args.outdir).rglob("*.md"))
+        if len(reports) != 1:
+            print(f"❌ 候选报告数量异常：{len(reports)}", file=sys.stderr)
+            return 2
+        candidate = reports[0]
+        findings = lint_mod.lint_file(candidate, profile="claude") if _HAS_LINT else []
+        qc = qc_file(candidate, fail_on="error")
+        print(format_qc_result(qc), file=sys.stderr)
+        for finding in findings:
+            print(f"lint {finding.rule_id}: {finding.message}", file=sys.stderr)
+        lint_errors = sum(1 for f in findings if f.severity == "error")
+        _trace("candidate_qc", "end", qc_overall=qc.overall,
+               lint_findings=len(findings), lint_errors=lint_errors)
+        return 2 if qc.overall == "FAIL" or lint_errors else 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
-    dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    if getattr(args, "preflight", False):
+        return _preflight_report(args)
+    if getattr(args, "collection_id", None) and args.resume:
+        print("❌ --collection-id 与 --resume 不可同时使用", file=sys.stderr)
+        return 2
+    dims = _collection_dims_from_args(args)
     # P0-5: ResearchProfile 校验（fail-loud，且在采集之前——参数拼错不该先跑一遍
     # 联网采集才报错）。未传任何相关参数时 profile=None，行为与既有完全一致。
     from lib.research_profile import (
         ProfileSchemaError,
         build_profile,
+        draft_profile_mismatch,
         resolve_mode,
         validate_profile,
         write_profile_sidecar,
@@ -798,9 +1307,65 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 2
     if profile is not None:
         print(f"📐 研究档案已加载（{len(profile)} 字段）", file=sys.stderr)
+    # 输入错误必须在 store 恢复、现场采集和渲染之前暴露。
+    analysis_payload: list[dict] | None = None
+    if getattr(args, "draft", None) and not getattr(args, "analysis", None):
+        print("❌ --draft 须与 --analysis 合用", file=sys.stderr)
+        return 2
+    if getattr(args, "draft", None):
+        mismatch = draft_profile_mismatch(Path(args.draft), profile)
+        if mismatch:
+            print(f"❌ {mismatch}", file=sys.stderr)
+            return 2
+    if getattr(args, "analysis", None):
+        analysis_payload = _validated_analysis(
+            Path(args.analysis), Path(args.draft) if getattr(args, "draft", None) else None)
+        if analysis_payload is None:
+            return 2
+        print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
     result = None
+    render_view: dict | None = None  # R3 二轮：渲染派生视图（封存体不改写）
     resumed_from_store = False  # 仅「恢复成功且兼容」为 True；被拒后重新采集仍须入库
-    if args.resume and _HAS_STORE:
+    fixed_input = getattr(args, "collection_id", None) is not None
+    if fixed_input:
+        result = _load_fixed_collection(args)
+        if result is None:
+            return 2
+        if analysis_payload:
+            fact_errors = report_snapshot.verify_facts(analysis_payload, result)
+            if fact_errors:
+                print("❌ analysis facts 与固定快照不一致:", file=sys.stderr)
+                for error in fact_errors:
+                    print(f"  {error}", file=sys.stderr)
+                return 2
+        resumed_from_store = True
+        # R3 二轮（2026-10-04 独立复检）：固定快照的风格重装配必须走**渲染派生
+        # 视图**，不得改写封存体本身——`--emit json` 会导出收藏集内容并要求与
+        # `_meta.report_input_hash` 自洽（一轮实现直接改 result → 导出 digest 与
+        # 哈希失配，Codex 两案例实测 hash_consistent=false）。
+        # 语义：显式 --style 优先；未显式时与 profile 侧车同源回落
+        # user_style.json（build_profile 的同一口径）——避免「缺省时 profile 与
+        # 正文自评互斥」；两者皆无（无档案）则保持封存视图（无冲突面）。
+        eff_style = getattr(args, "style", None)
+        if not eff_style:
+            try:
+                from lib.style_match import load_style
+                eff_style = load_style()
+            except Exception:  # 档案不可读 → 保持封存视图
+                eff_style = None
+        if eff_style:
+            try:
+                from lib.style_match import assemble_style_match
+                sm = assemble_style_match(result, args.symbol, style=eff_style)
+                if sm is not None:
+                    render_view = {**result, "style_match": sm}
+            except Exception:  # 装配失败不阻断报告（同 R10 装配点）
+                pass
+        # 合成前可见性（§3.3-3/4）：首版渲染或带 --draft 的渲染时给出可引用字段、
+        # 数据窗口与写作约束；最终成品渲染不再重复打印。仅走固定快照链（有封存输入）。
+        if not analysis_payload or getattr(args, "draft", None):
+            _print_writing_aids(result)
+    elif args.resume and _HAS_STORE:
         progress = store_mod.get_pipeline_progress(args.symbol)
         completed_steps = [s for s, done in progress.items() if done]
         if completed_steps:
@@ -822,60 +1387,77 @@ def cmd_report(args: argparse.Namespace) -> int:
             "⚠️ --resume: store 模块不可用（导入失败），无法恢复快照，将执行全新采集",
             file=sys.stderr,
         )
-    if args.with_macro and "kline" not in dims:
-        dims.append("kline")
     if args.deep:
         print("🔬 深度模式已启用（扩大K线范围至730日 + 行业/舆情分析）", file=sys.stderr)
     if args.with_macro:
         print("🌐 宏观数据模式已启用（中国 PMI/CPI/PPI/LPR + 全球 VIX/SOX）", file=sys.stderr)
-    if result is None:
+    collected_this_report = result is None
+    if collected_this_report:
         env.print_missing_token_warnings()
         warn_if_proxy_detected(probe=True)
-        result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args))
-    # R-B1: analysis.json 加载校验（fail-loud：校验失败 exit 2，不静默降级渲染）
-    analysis_payload: list[dict] | None = None
-    if getattr(args, "analysis", None):
-        from lib.analysis_schema import AnalysisSchemaError, load_analysis_json, validate_sections
-        try:
-            analysis_payload = load_analysis_json(Path(args.analysis))
-            errs = validate_sections(analysis_payload) if isinstance(analysis_payload, list) else ["analysis.json 顶层必须为数组"]
-            if errs:
-                raise AnalysisSchemaError("; ".join(errs[:5]))
-        except AnalysisSchemaError as exc:
-            print(f"❌ analysis.json 校验失败: {exc}", file=sys.stderr)
-            return 2
-        print(f"📋 analysis.json 已加载（{len(analysis_payload)} 段）", file=sys.stderr)
+        # 报告链采集：在装配末尾顺带补采 market_structure（采集期一次完成，
+        # 渲染期不再联网补采——旧行为是渲染入口补采且不入库，连渲四次 = 四次同量联网）。
+        result = collector.collect_all(args.symbol, dims, **_collect_kwargs(args),
+                                       prepare_for_report=True)
+    # 补挂的唯一落点：采集期已在 collect_all(prepare_for_report=True) 内完成；
+    # 此处只兜 `--resume` 恢复出来的旧快照（可能缺 market_structure），且自带降级、
+    # 数据已在时不重复取数。固定输入链绝不补采（缺字段即 fail-loud）。
+    if resumed_from_store and not fixed_input:
+        # issue #35 E（2026-10-02 用户裁决）：未封存快照保留现场补采兼容路线，
+        # 但必须显式提示——补采仅本次有效、不写回快照，重复渲染会重复联网。
+        if not report_snapshot.is_sealed(result):
+            print(
+                "⚠️ --resume: 快照未封存（非固定输入链），渲染期将按需现场补采缺失数据"
+                "（仅本次、不写回快照）；如需可复现/零联网渲染，请先执行 "
+                "`collect <SYMBOL> --report-ready`，再用 `--collection-id <ID>` 渲染。",
+                file=sys.stderr,
+            )
+        _ensure_render_ready(result, args.symbol)
     # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，披露移入附录「覆盖缺口」）
-    try:
-        from lib.render_utils import _get_dim_data, _index_dims
-        from lib.industry.base import get_success_factors
-        basic = _get_dim_data(_index_dims(result), "basic_info") or {}
-        industry = ""
-        if isinstance(basic, dict):
-            industry = str(basic.get("industry") or basic.get("行业") or "")
-        factors = get_success_factors(industry)
-        result["success_factors"] = {
-            "industry": industry,
-            "covered": bool(factors),
-            "factors": factors,
-        }
-    except Exception:  # 装配失败不阻断报告
-        result["success_factors"] = {"industry": "", "covered": False, "factors": []}
+    if not fixed_input:
+        try:
+            from lib.render_utils import _get_dim_data, _index_dims
+            from lib.industry.base import get_success_factors
+            basic = _get_dim_data(_index_dims(result), "basic_info") or {}
+            industry = ""
+            if isinstance(basic, dict):
+                industry = str(basic.get("industry") or basic.get("行业") or "")
+            factors = get_success_factors(industry)
+            result["success_factors"] = {
+                "industry": industry,
+                "covered": bool(factors),
+                "factors": factors,
+            }
+        except Exception:  # 装配失败不阻断报告
+            result["success_factors"] = {"industry": "", "covered": False, "factors": []}
     # R12g-A: 连板触发 → 龙虎榜/涨停池采集（仅触发时执行，未触发零额外网络调用）
-    try:
-        from lib.lhb import attach_limit_streak_dims
-        if attach_limit_streak_dims(result, args.symbol):
-            print("⚡ 近 5 日 ≥2 涨停，已附加连板结构数据（龙虎榜/涨停池）", file=sys.stderr)
-    except Exception:  # 采集失败不阻断报告
-        pass
+    if not fixed_input:
+        try:
+            from lib.lhb import attach_limit_streak_dims
+            if attach_limit_streak_dims(result, args.symbol):
+                print("⚡ 近 5 日 ≥2 涨停，已附加连板结构数据（龙虎榜/涨停池）", file=sys.stderr)
+        except Exception:  # 采集失败不阻断报告
+            pass
     # R10/R12g-B: 风格-标的匹配三态（风格档案 + 同标的 journal Q1 代理）
-    try:
-        from lib.style_match import assemble_style_match
-        result["style_match"] = assemble_style_match(result, args.symbol)
-    except Exception:  # 装配失败不阻断报告
-        pass
-    if getattr(args, "strict_rigor", False):
-        result.setdefault("_meta", {})["strict_rigor"] = True
+    if not fixed_input:
+        try:
+            from lib.style_match import assemble_style_match
+            # C2-c：本次 --style 优先于 user_style.json——与 profile 侧车同源
+            result["style_match"] = assemble_style_match(
+                result, args.symbol, style=getattr(args, "style", None))
+        except Exception:  # 装配失败不阻断报告
+            pass
+        # 恢复的快照即使在报告阶段装配本地派生字段，原始采集窗口也不延伸。
+        # 只对本次新采集的结果更新终点；旧快照保留其封存时刻。
+        if collected_this_report and result.get("collection_started_at"):
+            result["collection_completed_at"] = datetime.now(timezone.utc).isoformat()
+    # `--strict-rigor` 是**渲染期选项**，不是采集数据：写进 `_meta` 会让封存体
+    # 在哈希校验之后被改写（`--emit json` 输出的载荷因此与自带哈希不自洽）。
+    # 改为随渲染调用显式下传；`_meta.strict_rigor` 仍作为回退读法保留。
+    strict_rigor = bool(getattr(args, "strict_rigor", False))
+    # R3 二轮：渲染统一走派生视图（固定输入下含本次风格重装配；其余路径
+    # render_view=None → 即 result 本体）。`--emit json` 例外，见渲染分支。
+    view = render_view if render_view is not None else result
     _warn_degraded_collection(result)
     if getattr(args, "material_gap", False):
         try:
@@ -890,15 +1472,17 @@ def cmd_report(args: argparse.Namespace) -> int:
         store_mod.save_pipeline_step(args.symbol, "report", {"dims": dims, "mode": getattr(args, "mode", "full")})
 
     fmt = args.emit
+    report_stage = _report_stage(getattr(args, "mode", "full"), analysis_payload)
     # Insight 是 reader-first 的独立产物：不复用 full 模式九模块渲染器，避免
     # Markdown/HTML 各自从 collection 推导一套结论。旧模式的输出契约不变。
     if getattr(args, "mode", "full") == "insight":
         from lib.insight_model import InsightSchemaError, build_report_model, write_sidecars
         from lib.render_insight import render_insight_html, render_insight_markdown
         # 必须在 _maybe_store_report_snapshot 之前读取，否则 diff 自比为空。
-        key_diff, diff_reason = _insight_snapshot_diff(args.symbol, result)
+        key_diff, diff_reason = ((None, "fixed_snapshot") if fixed_input
+                                 else _insight_snapshot_diff(args.symbol, result))
         try:
-            insight_model = build_report_model(result, args.symbol, profile,
+            insight_model = build_report_model(view, args.symbol, profile,
                                                key_diff=key_diff, diff_reason=diff_reason,
                                                analysis=analysis_payload)
         except InsightSchemaError as exc:
@@ -960,16 +1544,19 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
 
     if fmt == "html":
-        _ensure_render_ready(result, args.symbol)
+        # 渲染所需字段已在上面统一补齐（补挂在获取 result 之后、两分支之前各一次），
+        # 此处不再重复补采。
         # 全量审查 P0-3：伴随 .md 改九模块 v3（与 --emit md 同代）+ analysis
         # 注入——旧实现 render_report_v2（v0.1.2 旧模板）与 html 侧 v3 结构
         # 不同代，且 analysis 只进 html、md 静默缺失（同目录两代 md 产物）。
+        _trace("final_render", "start", fmt="html")
         md_v2 = render.render_report_v3(
-            result, args.symbol, mode=getattr(args, "mode", "full"),
-            analysis=analysis_payload, profile=profile)
+            view, args.symbol, mode=getattr(args, "mode", "full"),
+            analysis=analysis_payload, profile=profile, strict_rigor=strict_rigor)
         output = render.render_html(
-            result, args.symbol, mode=getattr(args, "mode", "full"),
+            view, args.symbol, mode=getattr(args, "mode", "full"),
             analysis=analysis_payload, profile=profile)
+        _trace("final_render", "end", fmt="html", md_chars=len(md_v2), html_chars=len(output))
         from lib.shared_dates import shanghai_now
         now = shanghai_now()  # F2-4 口径：文件路径时间戳统一北京时间
         ts = now.strftime("%Y-%m-%d-%H-%M-%S")
@@ -978,8 +1565,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         # T5-1：outdir 默认与 md 分支一致（cwd/reports），落 reports/{sym}/ 约定
         outdir = Path(args.outdir).resolve() if args.outdir \
             else (Path.cwd() / "reports").resolve()
-        htmlpath = _html_report_path(outdir, subdir, ts)
-        mdfile = _report_filepath(outdir, subdir, ts)
+        htmlpath = _html_report_path(outdir, subdir, ts, report_stage)
+        mdfile = _report_filepath(outdir, subdir, ts, report_stage)
         # 侧车必须先于主体产物落盘（同 insight 分支）：正文一旦写出就「自称已注入」，
         # 侧车后写或写失败会留下一个声称有合成、实际无从追溯的孤儿成品
         # （P0-5：任何失败都 fail-loud，不静默降级成正常成品）。
@@ -993,7 +1580,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         htmlpath.write_text(output, encoding="utf-8")
         mdfile.write_text(md_v2, encoding="utf-8")
 
-        print(render.render(result, args.symbol, "compact"))
+        print(render.render(view, args.symbol, "compact"))
         print(f"📄 HTML 报告: {htmlpath.resolve()}", file=sys.stderr)
         print(f"📝 Markdown 报告: {mdfile.resolve()}", file=sys.stderr)
         if sidecar:
@@ -1004,12 +1591,16 @@ def cmd_report(args: argparse.Namespace) -> int:
         _maybe_save_raw(args, result)
         return 0
 
-    # attach_extras=True：cmd_report 非纯渲染（刚跑完 collect_all / resume 恢复），
-    # 补挂 market_structure/phase2 后再渲染与落库快照（98813b5 把 render 默认值
-    # 翻转为 False 后，默认 md 路径曾静默缺失模块 5 市场结构——code-review #1）；
-    # 联网补采路径内部 try/except 快速降级，绝不阻塞渲染
-    output = render.render(result, args.symbol, fmt, mode=getattr(args, 'mode', 'full'),
-                           attach_extras=True, analysis=analysis_payload, profile=profile)
+    # 补挂已收敛到「获取 result 之后」的单一落点（见上）；此处渲染函数不再联网。
+    _trace("final_render", "start", fmt=fmt)
+    # R3 二轮：`json` 导出必须保留**原封存体**（与 _meta.report_input_hash 自洽）；
+    # 其余呈现格式走渲染派生视图。
+    output = render.render(result if fmt == "json" else view, args.symbol, fmt,
+                           mode=getattr(args, 'mode', 'full'),
+                           attach_extras=False,
+                           analysis=analysis_payload, profile=profile,
+                           strict_rigor=strict_rigor)
+    _trace("final_render", "end", fmt=fmt, chars=len(output))
     _maybe_store_report_snapshot(args, result, resumed=resumed_from_store)
 
     # v0.3.0 D5：原为内联块（且只写在 full 分支尾），现统一走 helper——见其说明
@@ -1028,7 +1619,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         # 显式 --outdir 仍优先（兼容既有调用方与自定义路径）。
         outdir = (Path(args.outdir).resolve() if getattr(args, "outdir", None)
                   else (Path.cwd() / "reports").resolve())
-        mdpath = _report_filepath(outdir, subdir, ts)
+        mdpath = _report_filepath(outdir, subdir, ts, report_stage)
         # 侧车先于正文落盘（同 insight 分支）：见 html 分支同款说明。
         try:
             sidecar = _write_analysis_sidecar(mdpath, analysis_payload)
@@ -1150,7 +1741,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     if not _HAS_PLANNER:
         print("⚠️ planner 模块不可用", file=sys.stderr)
         return 1
-    plan = planner_mod.generate_plan(args.symbol, args.intent)
+    plan = planner_mod.generate_plan(args.symbol, args.intent,
+                                     mode=getattr(args, "mode", None) or "full")
     if args.emit == "json":
         print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
         if _HAS_STORE:
@@ -1164,12 +1756,19 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     if not _HAS_EVIDENCE:
         print("⚠️ evidence 模块不可用", file=sys.stderr)
         return 1
-    env.print_missing_token_warnings()
-    dims = _apply_deep_dims(_dims_from_args(args), args.deep)
+    if not getattr(args, "collection_id", None):
+        env.print_missing_token_warnings()
+    # 与 cmd_collect 的 save_pipeline_step 同口径：--with-macro 会补 kline，
+    # 否则 `_resume_cache_compatible` 会判「维度不一致」而静默转现场重采（吃回 F2-3）。
+    dims = _collection_dims_from_args(args)
     # F2-3: --from-store 复用 collect 快照（兼容性校验同 --resume），
     # 避免 evidence 与 collect 双重现场采集（实测两轮合计 ~2 倍网络负载）。
     result: dict | None = None
-    if getattr(args, "from_store", False) and _HAS_STORE:
+    if getattr(args, "collection_id", None) is not None:
+        result = _load_fixed_collection(args)
+        if result is None:
+            return 2
+    elif getattr(args, "from_store", False) and _HAS_STORE:
         cached = _try_resume_collection(args.symbol)
         if cached and _resume_cache_compatible(args, dims, cached):
             print("♻️ 复用 store 采集快照（--from-store），跳过现场采集", file=sys.stderr)
@@ -1649,6 +2248,23 @@ def _print_diff_events(key_diff: dict) -> None:
         parts.append(f"新增类型: {', '.join(new_types)}")
     if removed_types:
         parts.append(f"消失类型: {', '.join(removed_types)}")
+    low_signal = events_diff.get("low_signal_change")
+    if isinstance(low_signal, dict) and low_signal:
+        # 两桶语义不同（源标注程序性 vs 源未分类），分列而非只报合计
+        from lib.store import LOW_SIGNAL_DIFF_LABELS
+
+        parts.append("低信号变化: " + "、".join(
+            f"{LOW_SIGNAL_DIFF_LABELS.get(k, k)} {v:+d}" for k, v in low_signal.items()))
+    if events_diff.get("types_incomparable"):
+        reason = events_diff.get("incomparable_reason")
+        if reason == "events_data_missing":
+            parts.append("（其中一次采集没有事件数据，本次未比较事件数量与类型）")
+        elif reason == "window_changed":
+            parts.append("（事件窗口不同，本次未比较事件数量、类型与低信号计数）")
+        elif reason == "type_ranking_truncated":
+            parts.append("（事件类型榜单仅保留前 5，本次未比较类型集合）")
+        else:
+            parts.append("（旧快照 top_types 口径不同，本次未比较类型集合）")
 
     if parts:
         print("## 事件变化")
@@ -1937,7 +2553,7 @@ def cmd_qc_report(args: argparse.Namespace) -> int:
         return 1
     result = qc_file(p, profile="claude", fail_on=args.fail_on)
     print(format_qc_result(result, verbose=True))
-    # 退出码对齐 CLAUDE.md 第 0 层契约（0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）。
+    # 退出码对齐 delivery-qc.md §2 第 0 层契约（0=PASS / 1=WARN 可交付 / 2=FAIL 不得交付）。
     # 语义变更：旧实现对 FAIL 只返回 1，现按契约返回 2。
     return {"PASS": 0, "WARN": 1, "FAIL": 2}[result.overall]
 
@@ -2019,7 +2635,7 @@ def cmd_attribution(args: argparse.Namespace) -> int:
     from lib.attribution import decompose_move
 
     if not args.snapshot:
-        print("⚠️ 实时归因暂不可用：K 线为统一前复权，不复权收盘与历史股本无公开数据通道（LAW 5 三态：不可得）。")
+        print("⚠️ 实时归因暂不可用：K 线为统一前复权，不复权收盘与历史股本无公开数据通道（A3/C4 三态：不可得）。")
         print("请以 --snapshot PATH 提供端点快照（总市值 + 当时可见 TTM 归母净利，口径见调研 v-domain-attribution-methodology §3）。")
         return 1
     try:
@@ -2178,7 +2794,11 @@ def cmd_risk_reward(args: argparse.Namespace) -> int:
     if args.store and _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=args.symbol)
         if rows:
-            collection = store_mod.get_collection(rows[0]["id"])
+            collection = _unwrap_raw(store_mod.get_collection(rows[0]["id"]) or {})
+            if not collection:
+                print(f"❌ store 中 {args.symbol} 的采集快照缺少有效 raw_json",
+                      file=sys.stderr)
+                return 1
         else:
             print(f"⚠️ store 中无 {args.symbol} 的采集记录，请先运行 collect --store",
                   file=sys.stderr)
@@ -2218,7 +2838,7 @@ def cmd_ic(args: argparse.Namespace) -> int:
     if _HAS_STORE:
         rows = store_mod.list_collections(limit=1, symbol=args.symbol)
         if rows:
-            collection = store_mod.get_collection(rows[0]["id"])
+            collection = _unwrap_raw(store_mod.get_collection(rows[0]["id"]) or {}) or None
 
     if collection is None:
         print(f"采集 {args.symbol} 数据...", file=sys.stderr)
@@ -2399,23 +3019,40 @@ def cmd_classify(args: argparse.Namespace) -> int:
 def cmd_value(args: argparse.Namespace) -> int:
     """科学估值：多方法交叉估值（PE/PB/盈利收益/隐含增长/ROE-PB 匹配）。"""
     try:
-        from valuation_calc import run_valuation, format_output, _format_steady_block, _format_ev_ebitda_block
+        from valuation_calc import (ValuationResult, run_valuation, format_output,
+                                    _format_steady_block, _format_ev_ebitda_block)
     except ImportError:
         print("⚠️ valuation_calc 模块不可用", file=sys.stderr)
         return 1
 
-    result = run_valuation(
-        symbol=args.symbol,
-        rf_override=args.rf,
-        erp_override=args.erp,
-        steady=getattr(args, "steady", False),
-        cycle_start=getattr(args, "cycle_start", None),
-        cycle_end=getattr(args, "cycle_end", None),
-        cycle_method=getattr(args, "cycle_method", "median"),
-        cycle_pe=getattr(args, "cycle_pe", None),
-        ev_ebitda=getattr(args, "ev_ebitda", False),
-        ev_ebitda_industry=getattr(args, "industry", None),
-    )
+    if getattr(args, "collection_id", None) is not None:
+        if (args.rf is not None or args.erp != 0.06 or args.steady or args.ev_ebitda
+                or args.cycle_start or args.cycle_end or args.cycle_pe is not None):
+            print("❌ 固定快照估值仅支持封存时的默认参数；其他参数须开启新采集", file=sys.stderr)
+            return 2
+        record = store_mod.get_collection(args.collection_id) if _HAS_STORE else None
+        errors = report_snapshot.validate(record, args.symbol, plan_hash=_plan_hash(args))
+        if errors:
+            print("❌ 固定快照校验失败: " + "; ".join(errors), file=sys.stderr)
+            return 2
+        stored = record["raw_json"].get("value_result") or {}
+        if stored.get("availability") or "symbol" not in stored:
+            print("❌ 快照未封存可用的估值结果: " + str(stored), file=sys.stderr)
+            return 2
+        result = ValuationResult(**stored)
+    else:
+        result = run_valuation(
+            symbol=args.symbol,
+            rf_override=args.rf,
+            erp_override=args.erp,
+            steady=getattr(args, "steady", False),
+            cycle_start=getattr(args, "cycle_start", None),
+            cycle_end=getattr(args, "cycle_end", None),
+            cycle_method=getattr(args, "cycle_method", "median"),
+            cycle_pe=getattr(args, "cycle_pe", None),
+            ev_ebitda=getattr(args, "ev_ebitda", False),
+            ev_ebitda_industry=getattr(args, "industry", None),
+        )
 
     if args.emit == "json":
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, default=str))
@@ -2581,6 +3218,17 @@ def _print_env_labels(snap: dict) -> None:
         except Exception:
             pass
 
+    # issue #34：历史 env_label 里的 IC 基差子句在不可引用时（无数据日期/滞后）
+    # 不得随标签展示——字段过滤与标签文本必须同一日期规则。
+    if cap and "IC 基差" in cap:
+        try:
+            from market_microstructure import basis_is_current, strip_basis_clause
+
+            if not basis_is_current(snap)[0]:
+                cap = strip_basis_clause(cap)
+        except ImportError:
+            pass
+
     print()
     print("┌──────────────────────────────────────────────────┐")
     print(f"│ 🧊 杠杆: {lev or '—'}")
@@ -2678,9 +3326,46 @@ def cmd_catalyst(args: argparse.Namespace) -> int:
 
 
 
-# 命令分发表：与 build_parser 的 27 个 sub.add_parser 一一对应（新增子命令须同步两处）
+def cmd_notice_body(args: argparse.Namespace) -> int:
+    """取公告正文（管道，不做结构化抽取）。
+
+    存在的意义：让 `lib.notice_body` 有一条**真实运行路径**——否则它只被测试引用，
+    构建器按 import 闭包打包时会把它排除在外，分发形态拿不到该能力。
+    """
+    from lib.notice_body import describe, extract_art_code, fetch_notice_body
+
+    code = extract_art_code(args.target) or str(args.target).strip()
+    body = fetch_notice_body(code, use_cache=not args.no_cache)
+
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, indent=2))
+        return 0 if body.get("status") == "ok" else 1
+
+    from lib.shared_dates import fmt_fetched_at
+
+    print(f"# 公告正文 {code}")
+    print()
+    print(f"> {describe(body)}")
+    # 取数时刻走统一口径（UTC → 北京时间）。缓存命中时 fetched_at 是**首次**取数
+    # 时刻，直接展示会让旧正文冒充新取——本命令的全部意义就是溯源，必须标注。
+    stamp = fmt_fetched_at(body.get("fetched_at")) or "—"
+    cache_note = "（本地缓存，非本次取数）" if body.get("cached") else ""
+    print(f"> 来源：{body.get('source') or '—'}｜取数时刻：{stamp}{cache_note}")
+    if body.get("status") != "ok":
+        print()
+        print(f"原因：{body.get('error') or '未知'}")
+        return 1
+    print()
+    print(body["text"])
+    return 0
+
+
+# 命令分发表：与 build_parser 的 sub.add_parser 一一对应（新增子命令须同步两处）。
+# 数量不写死在此处——由 tests/test_cli_dispatch.py 实测断言，避免手数漂移
+# （历史上这里先后写过 27 与 29，真实值两次都不是它）。
 CMD_DISPATCH = {
     "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
+    "validate-analysis": cmd_validate_analysis,
     "diff": cmd_diff, "watchlist": cmd_watchlist, "diagnose": cmd_diagnose,
     "lint": cmd_lint, "qc-report": cmd_qc_report, "peer": cmd_peer, "store": cmd_store, "plan": cmd_plan,
     "evidence": cmd_evidence, "analyze": cmd_analyze, "synthesize": cmd_synthesize,
@@ -2690,6 +3375,7 @@ CMD_DISPATCH = {
     "classify": cmd_classify, "market-status": cmd_market_status,
     "attribution": cmd_attribution,
     "etf-flow": cmd_etf_flow, "catalyst": cmd_catalyst,
+    "notice-body": cmd_notice_body,
 }
 
 
@@ -2698,8 +3384,10 @@ def main() -> int:
     # 全局 socket 兜底超时：必须在任何网络调用之前（.env 注入后读取才生效）。
     # 覆盖 baostock/tickflow/akshare 无 timeout 参数的接口，防无限挂起。
     env.configure_socket_timeout()
-    from lib.logutil import setup_logging
-    setup_logging()  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
+    from lib._invest_path import ensure_skills_lib_on_path
+    ensure_skills_lib_on_path()
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-stock")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     args = build_parser().parse_args()
     # 显式成员检查而非裸 KeyError（review #9）：与 build_parser 失步（新增子命令
     # 只加一处）时打印指向 CMD_DISPATCH 的友好错误并 exit 1——开发者仍 fail-loud，
@@ -2712,7 +3400,25 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    return CMD_DISPATCH[args.command](args)
+    _trace(args.command, "start", symbol=getattr(args, "symbol", None))
+    try:
+        status = CMD_DISPATCH[args.command](args)
+    except ValueError as exc:
+        print(f"❌ 输入无效: {exc}", file=sys.stderr)
+        status = 2
+    except BaseException:
+        _trace(args.command, "end", status="exception")
+        raise
+    _trace(args.command, "end", status=status)
+    if os.environ.get("INVEST_TRACE_FILE"):
+        # 网络可观测性（复核 §5「先可观测」）：逐接口调用/空返回/失败/等待与
+        # 生效预算。额度语义官方未明说，只能靠实测数据裁决共享方式。
+        try:
+            from lib.tushare_client import rate_limit_stats
+            _trace("network", "stats", **rate_limit_stats())
+        except Exception as exc:  # 统计失败不得影响命令退出码
+            _trace("network", "stats_error", error=str(exc))
+    return status
 
 
 if __name__ == "__main__":

@@ -228,15 +228,18 @@ def merge_collections(collections: list[dict]) -> dict:
 
     merged_dims: dict[str, list[dict]] = {}
     sources: list[str] = []
+    batch_numbers: dict[str, list[int]] = {}
 
-    for coll in collections:
+    for batch_number, coll in enumerate(collections, 1):
         src = coll.get("symbol", "?")
         sources.append(src)
         for dim in coll.get("dimensions", []):
             dim_name = dim.get("dimension", "unknown")
             if dim_name not in merged_dims:
                 merged_dims[dim_name] = []
+                batch_numbers[dim_name] = []
             merged_dims[dim_name].append(dim)
+            batch_numbers[dim_name].append(batch_number)
 
     # 跨 collection symbol 不一致：取第一份（调用方应自检批次来源）
     distinct_symbols = {s for s in sources if s}
@@ -310,18 +313,21 @@ def merge_collections(collections: list[dict]) -> dict:
                 primary["research_summary"] = merged_summary
             result_dimensions.append(primary)
 
-            # 交叉验证：对比两个"有数据的"源（chosen 之后首个有数据维度）；
-            # 此前硬编码 dims[0] vs dims[1]，dims[0] 无数据时真实分歧静默消失
+            # 第一份有数据的批次与其余各批次逐一比较。来源名可能相同，
+            # collection 序号用于区分换时点的第三次采集。
             if len(data_bearing) >= 2 and dim_name in CRITICAL_FIELDS:
-                cv = cross_validate_dim(
-                    dim_name,
-                    data_bearing[0].get("data"),
-                    data_bearing[1].get("data"),
-                    _meta_of(data_bearing[0]).get("source", "unknown"),
-                    _meta_of(data_bearing[1]).get("source", "unknown"),
-                )
-                if cv["max_diff_pct"] > 0:
-                    cv_results.append(cv)
+                indexed = [(i, d) for i, d in enumerate(dims) if has_data(d.get("data"))]
+                first_index, first = indexed[0]
+                for other_index, other in indexed[1:]:
+                    cv = cross_validate_dim(
+                        dim_name, first.get("data"), other.get("data"),
+                        _meta_of(first).get("source", "unknown"),
+                        _meta_of(other).get("source", "unknown"),
+                    )
+                    cv["collection_a"] = batch_numbers[dim_name][first_index]
+                    cv["collection_b"] = batch_numbers[dim_name][other_index]
+                    if cv["max_diff_pct"] > 0:
+                        cv_results.append(cv)
 
     # 汇总统计
     all_dim_names = sorted(merged_dims.keys())
@@ -352,6 +358,18 @@ def merge_collections(collections: list[dict]) -> dict:
         },
         "_cross_validation": {
             "results": cv_results,
+            # all_sources 为现有消费者按源名去重；这里按采集批次保留每份原值。
+            "batches": {
+                name: [
+                    {"collection": batch_numbers[name][i],
+                     "source": _meta_of(d).get("source", "unknown"),
+                     "fetched_at": (_meta_of(d).get("fetched_at")
+                                    or collections[batch_numbers[name][i] - 1].get("fetched_at", "")),
+                     "data": d.get("data")}
+                    for i, d in enumerate(dims) if has_data(d.get("data"))
+                ]
+                for name, dims in merged_dims.items() if name in CRITICAL_FIELDS
+            },
             "need_tiebreaker": any(cv["overall_status"] == "fail" for cv in cv_results),
             "tiebreaker_dims": [
                 cv["dimension"] for cv in cv_results if cv["overall_status"] == "fail"

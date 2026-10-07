@@ -181,15 +181,18 @@ def valuation_summary(
     return result
 
 
-def valuation_window_label(n_trading_days: int) -> str:
+def valuation_window_label(
+    n_trading_days: int, first_date: Any = None, last_date: Any = None,
+) -> str:
     """估值分位窗口描述（A 股约 242 交易日/年）。
 
     B3-R C-4 去重：委托 html_charts.window_label（唯一实现）——本函数保留
     为 BC 别名（store/valuation_calc/render_utils/test_redundancy 引用）。
+    C2-b：可选传入首尾交易日——按真实日期跨度定标签（首选）；缺省回退行数规则。
     """
     from .html_charts import window_label as _html_window_label
 
-    return _html_window_label(n_trading_days)
+    return _html_window_label(n_trading_days, first_date, last_date)
 
 
 # 中位数统一在 skills/lib/stats.py（共用库提升）；别名保留 BC
@@ -661,7 +664,7 @@ def attach_dcf_preprocess(financials_legacy: dict) -> None:
 # ═══════════════════════════════════════════════════════════════
 # V-1~V-5: DCF 估值模型（v0.1.8 Step 3）
 #
-# 合规红线（AGENTS.md 约束1 / CLAUDE.md LAW 6）：
+# 合规红线（AGENTS.md 约束1 / report-conventions.md §2.1 原 LAW 6）：
 #   - dcf_two_stage / dcf_sensitivity 只返回企业价值（enterprise_value）及矩阵，
 #     不做每股换算，不输出任何形式的"目标价"数字。每股价值换算与多情景区间呈现
 #     留给 render.py（Step 4）在调用处完成，且必须伴随情景假设说明。
@@ -1044,7 +1047,7 @@ def triangle_check(
 
     任一输入为 None → 对应行标注"不可得"，不跳过整个函数（其余行照常输出）。
     仅当三者都存在且 (max-min) > 3pp 时生成 divergence_note，措辞使用数值比较，
-    禁止"低估/高估"等形容词（CLAUDE.md 禁止词表）。
+    禁止"低估/高估"等形容词（report-conventions.md §3.1 禁止词替换表）。
 
     Args:
         dcf_growth: 自算 DCF 隐含增速（小数，如 0.12），通常来自 scenario_fcff/

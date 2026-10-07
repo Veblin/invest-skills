@@ -137,12 +137,14 @@ L3 为 fallback，可信度标注 ❓ 弱，推测须标 `[推测，待验证]`�
 | **`forecast`** | **2000** | **业绩预告（公司自披露）** | 降级至 akshare → 跳过 |
 | `index_dailybasic` | 4000 | 沪深300 PE（ERP） | 部分可得/标注 partial |
 | **`sw_daily`** | **5000** | 申万行业日线 | 降级至 akshare `index_hist_sw` |
-| `opt_daily` | 5000 | 50ETF 期权（认沽认购比） | 因子跳过 |
+| `opt_daily` | 5000 | 50ETF 期权（认沽认购比；Tushare 每日约 17:00 更新，盘中以最近已发布交易日为准） | 因子跳过 |
 | **`report_rc`** | **10000**（特色大数据） | **研报评级+目标价+盈利预测** | 降级至 forecast → akshare → 跳过 |
+
+`new_high_ratio` 从 `stock_basic` 的在市股票中按日随机取 30 只，再查 `daily`。若实际样本不足 30，只保留比例和覆盖数供审计；60 日分位不计算，也不作市场广度判断。额度不足时按即时余量缩减请求，避免把客户端限流等待误记为网络超时。
 
 > v0.1.4 起 `collect_research()` 按此表顺序降级（高阶成功则跳过低阶 API）：`report_rc(10000) → forecast(2000) → akshare → 跳过`。
 > 默认 `collect`/`report` **不**包含 `research` 维度；需显式 `--dims=...,research`。
-> 完整对照见项目根目录 [CONFIGURATION.md](../../../CONFIGURATION.md)。
+> 上表即随包口径；仓库内另有根 `CONFIGURATION.md` 的完整对照，但**该文件不随独立包分发**（同根 `CLAUDE.md`），包内以上表与引擎为准。故此处用文件名标注而非相对链接，避免包内出现死链。
 
 ## 港股数据源（invest-hk-stock，v0.2.9 v1）
 

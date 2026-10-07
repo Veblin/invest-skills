@@ -1,6 +1,6 @@
 ---
 name: invest-a-pattern-scan
-version: "0.3.0"
+version: "0.3.1"
 description: "底部形态扫描 — LMW 双底/三角形底全市场检出 + 数据窥探防护（RC p）。研究信号，非决策。触发词：双底/形态扫描/三角形底/底部形态"
 whenToUse: "双底/形态扫描/三角形底/底部形态：LMW 双底与三角形底的全市场检出"
 argument-hint: "/invest-a-pattern-scan → 双底/三角形底全市场扫描"
@@ -17,7 +17,7 @@ metadata:
 
 底部反转形态扫描器（MVP：双底 + 三角形底）。方法学：Lo-Mamaysky-Wang (2000, JF) 核平滑 + 5 极值模板；参数表与证据分级见 `skills/lib/references/scenario-plans.md` 同源设计（ABCD 设计 §2.3）。
 
-**定位：研究信号，非决策。** 检出 = "该标的历史价格符合双底/三角形底的客观形态定义"，不构成任何交易建议（LAW 6）。
+**定位：研究信号，非决策。** 检出 = "该标的历史价格符合双底/三角形底的客观形态定义"，不构成任何交易建议（A1／原 LAW 6）。
 
 ## 运行
 

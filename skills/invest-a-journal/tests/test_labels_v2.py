@@ -54,10 +54,15 @@ class TestBreadthLabelTodayExclusion:
 class TestCapitalFlowNoOiSegment:
     def test_capital_flow_has_no_oi_segment(self):
         """回归（finding #2）：资金面标签不再输出 OI 20 日变化段（F3 已裁定
-        该口径为展期节奏主导、不可刻画持仓状态）。"""
+        该口径为展期节奏主导、不可刻画持仓状态）。
+
+        issue #34：基差须与数据日期成对且新鲜（否则标签按规则剔除该子句）——
+        fixture 补成对日期（== snap 日期，lag=0 不查日历）；本用例仍只测「无 OI 段」。
+        """
         from market_microstructure import _compute_labels_v2
 
-        snap = {"date": "20260807", "futures_basis_pct": -8.5, "futures_oi_change_pct": -74.5}
+        snap = {"date": "20260807", "futures_basis_pct": -8.5,
+                "futures_basis_date": "20260807", "futures_oi_change_pct": -74.5}
         _compute_labels_v2(snap, [])
         assert "持仓" not in snap["label_capital_flow"]
-        assert "基差 -8.50%" in snap["label_capital_flow"]
+        assert "基差 -8.50%（截至 2026-08-07）" in snap["label_capital_flow"]

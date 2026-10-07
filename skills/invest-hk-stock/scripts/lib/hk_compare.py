@@ -14,14 +14,16 @@ _ROW_SPECS: tuple[tuple[str, str, tuple[str, ...], str, str | None], ...] = (
     ("快照", "现价", ("snapshot", "price"), "HKD", None),
     ("快照", "涨跌幅", ("snapshot", "chg_pct"), "%", None),
     ("快照", "PE(TTM)", ("snapshot", "pe_ttm"), "x", None),
-    ("快照", "总市值", ("snapshot", "mcap_hkd_yi"), "亿 HKD", None),
+    # D3：该字段语义随标的类型变化（纯港股=总市值 / A+H=H 股部分市值）→ 指标名用
+    # 中性词「市值」，口径注由 cmd_compare 统一追加。写成「总市值」对 A+H 标的是错的。
+    ("快照", "市值", ("snapshot", "mcap_hkd_yi"), "亿 HKD", None),
     ("快照", "52 周高", ("snapshot", "high_52w"), "HKD", None),
     ("快照", "52 周低", ("snapshot", "low_52w"), "HKD", None),
     ("估值位置", "PE 序列分位", ("valuation_pctl", "pe", "pct"), "%", None),
     ("估值位置", "PE 序列中位", ("valuation_pctl", "pe", "median"), "x", None),
     ("估值位置", "PE 序列交易日数", ("valuation_pctl", "pe", "n"), "日", None),
     ("估值位置", "PB 序列分位", ("valuation_pctl", "pb", "pct"), "%", None),
-    # 分位**不得单独出现**（CLAUDE.md 估值分位使用规则 3：必须伴随中位数/均值）——
+    # 分位**不得单独出现**（report-conventions.md §9.2 估值分位规则 3：必须伴随中位数/均值）——
     # 缺这行会让 PB 分位成为无基准的孤立数字，且 lint 的
     # `percentile-without-median`（行级）会命中
     ("估值位置", "PB 序列中位", ("valuation_pctl", "pb", "median"), "x", None),

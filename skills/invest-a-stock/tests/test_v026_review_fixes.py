@@ -358,6 +358,32 @@ class TestRiskRewardNetDebt:
         result = compute_dcf_risk_reward(collection)
         assert "有息负债字段未采集" in result["error"]
 
+    @pytest.mark.parametrize("default_flag", ["risk_free_is_default", "beta_is_default"])
+    def test_default_wacc_input_suppresses_scenarios(self, monkeypatch, default_flag):
+        """独立 risk-reward 路径须与报告 DCF 一样拒绝默认输入。"""
+        from lib import render_dcf, valuation
+        from lib.risk_reward import compute_dcf_risk_reward
+
+        wacc = {"wacc": 0.08, "components": {"risk_free_rate": 0.025, "erp": 0.06},
+                "risk_free_is_default": False, "beta_is_default": False}
+        wacc[default_flag] = True
+        monkeypatch.setattr(render_dcf, "_dcf_try_wacc", lambda *_a, **_kw: (wacc, []))
+        monkeypatch.setattr(
+            valuation, "scenario_fcff",
+            lambda *_a, **_kw: pytest.fail("默认 WACC 不得进入情景计算"),
+        )
+        collection = {"dimensions": [
+            {"dimension": "kline", "data": [{"trade_date": "20260815", "close": 10.2}]},
+            {"dimension": "basic_info", "data": {"总股本": "24.6亿股"}},
+            {"dimension": "financials", "data": [], "dcf_preprocess": {
+                "net_debt": {"method": "有息口径", "net_debt": 1e8},
+            }},
+        ]}
+        result = compute_dcf_risk_reward(collection)
+        assert "error" in result
+        assert "关键输入采用默认值" in result["error"]
+        assert "scenario_details" not in result.get("_meta", {})
+
 
 # ---------------------------------------------------------------------------
 # R-10: latest_month_row 静默回退
@@ -468,3 +494,53 @@ class TestRowValueOrLast:
     def test_empty_row_none(self):
         from lib.nums import row_value_or_last
         assert row_value_or_last({}, "制造业-指数") is None
+
+
+class TestRoeTrendLineR9:
+    """R9（2026-10-04 独立复检）：B-① 不再以首末点净变化判「强化/侵蚀」；
+    明示同口径年度完整序列与最近一期变化；年报不足退同报告期序列并标口径；
+    两者皆缺 → 停笔。"""
+
+    @staticmethod
+    def _render(rows):
+        from lib.render_markdown._v3 import (
+            _FundamentalsContext, _section_4b_business_quality,
+        )
+        dims = {"financials": {"data": rows}}
+        ctx = _FundamentalsContext(dims, {})
+        status_rows: list = []
+        return "\n".join(_section_4b_business_quality(dims, {}, ctx, status_rows))
+
+    def test_full_annual_series_and_latest_change_no_verdict(self):
+        rows = [
+            {"end_date": "20221231", "roe": 32.41, "revenue": 1.0e9, "net_profit": 1e8},
+            {"end_date": "20231231", "roe": 36.18, "revenue": 1.1e9, "net_profit": 1e8},
+            {"end_date": "20241231", "roe": 38.43, "revenue": 1.2e9, "net_profit": 1e8},
+            {"end_date": "20251231", "roe": 34.46, "revenue": 1.3e9, "net_profit": 1e8},
+            {"end_date": "20260630", "roe": 17.95, "revenue": 6.0e8, "net_profit": 5e7},
+        ]
+        text = self._render(rows)
+        assert ("近 4 个有效年报 ROE（年报口径，按报告期）："
+                "2022-12-31: 32.41% → 2023-12-31: 36.18% → 2024-12-31: 38.43% → 2025-12-31: 34.46%；最新有效一期较上年 -3.97pp。") in text
+        assert "强化" not in text and "侵蚀" not in text
+        assert "ROE 趋势" not in text
+
+    def test_single_annual_falls_back_to_same_period_series(self):
+        rows = [
+            {"end_date": "20250630", "roe": 1.80, "revenue": 1.0e8, "net_profit": 1e7},
+            {"end_date": "20251231", "roe": 12.00, "revenue": 2.0e8, "net_profit": 2e7},
+            {"end_date": "20260630", "roe": 3.10, "revenue": 1.1e8, "net_profit": 1e7},
+        ]
+        text = self._render(rows)
+        assert "同报告期（06-30）ROE 序列（近 2 个有效期，非年报口径）：2025-06-30: 1.80% → 2026-06-30: 3.10%；" \
+               "最新有效一期较上年同期 +1.30pp。" in text
+        assert "强化" not in text and "侵蚀" not in text
+
+    def test_no_series_no_trend_sentence(self):
+        rows = [
+            {"end_date": "20251231", "roe": 12.00, "revenue": 2.0e8, "net_profit": 2e7},
+            {"end_date": "20260331", "roe": 2.90, "revenue": 5.0e7, "net_profit": 5e6},
+        ]
+        text = self._render(rows)
+        b1 = text.split("#### B-① 护城河来源", 1)[1].split("####", 1)[0]
+        assert "最近一期较上年" not in b1 and "个年报" not in b1 and "ROE 序列" not in b1

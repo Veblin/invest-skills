@@ -418,8 +418,12 @@ class TestRenderV3:
         from lib.render import render_report_v3
 
         text = render_report_v3(_collection_v3(), "600176")
-        assert "净利润环比方向" in text
         assert "ROE 方向" not in text
+        # REV-01（2026-10-07 主线收尾）：该 fixture 财务行（20240331 + 20241231）
+        # 混期且无同报告期基期——不可比时不再输出「净利润环比方向」
+        # （原实现用相邻行相减），CV-6 落「数据不足」缺口分支。
+        assert "净利润环比方向" not in text
+        assert "技术或业绩方向数据不足" in text
 
     def test_cross_validation_convergence(self):
         from lib.schema import CrossValidation
@@ -550,7 +554,7 @@ class TestRenderV3:
         drivers = text.split("## 2.")[1].split("## 3.")[0]
         labels = re.findall(r"→ 解释 ([A-E])：", drivers)
         assert len(labels) >= 2
-        assert "主导因子（声明）:" in drivers
+        assert "主导因子（候选线索，阈值规则筛出，非因果归因）:" in drivers
         assert "净利润环比" in drivers or "基本面" in drivers
 
     def test_render_md_attaches_market_structure(self):

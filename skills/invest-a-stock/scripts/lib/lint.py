@@ -6,7 +6,8 @@ compliance/lint 模块 — invest:a-stock 研究报告合规扫描器。
     findings = lint_file(Path("report.md"))
     print(format_results("report.md", findings))
 
-规则来源：CLAUDE.md 措辞规范、已知违规模式、估值分位规则、分析标记规范。
+规则来源：report-conventions.md §3 措辞规范/§3.2 已知违规模式、§9.2 估值分位规则、
+§5 分析标记规范，以及随包的 compliance_rules.yaml（CLI 引用驱动入包）。
 """
 
 from __future__ import annotations

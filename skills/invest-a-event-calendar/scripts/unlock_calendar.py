@@ -880,6 +880,8 @@ def _run_theme(args) -> int:
 
 
 def main() -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-event-calendar")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days-past", type=int, default=120, help="分位回看窗口（自然日，默认 120）")
     ap.add_argument("--days-future", type=int, default=30, help="展望窗口（自然日，默认 30）")
@@ -953,7 +955,7 @@ def main() -> int:
     # F12：拉取窗口对齐参数（原实现固定 past_days*2，约 44% 行解析后废弃）
     start = fmt_date(today - _dt.timedelta(days=args.days_past))
     end = fmt_date(today + _dt.timedelta(days=args.days_future))
-    try:  # 东财直连 + ≥0.5s 节流（与 unlock_source 同一会话口径；CLAUDE.md：东财需直连）
+    try:  # 东财直连 + ≥0.5s 节流（与 unlock_source 同一会话口径；CONFIGURATION.md「代理与东方财富」：东财需直连）
         from lib.proxy import akshare_direct_session
     except Exception:  # 库引导不可用 → 无会话退化（不阻断取数，行为同修复前）
         from contextlib import nullcontext as akshare_direct_session

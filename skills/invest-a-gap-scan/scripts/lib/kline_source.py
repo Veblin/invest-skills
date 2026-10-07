@@ -67,7 +67,17 @@ class KlineSource(ABC):
 
     Concrete subclasses must implement :meth:`fetch_daily_batch`,
     :meth:`fetch_adj_factor`, and :meth:`source_name`.
+
+    ``attempted_sources`` 记录本次采集**实际尝试过**的源（工厂
+    :func:`create_source` 写入）——报告须区分「实际使用源」与「尝试源」，
+    不得把降级链写成并列来源。**「未配置而跳过」不算尝试**：无 `TUSHARE_TOKEN`
+    时 Tushare 从未被调用，只记 ``("baostock",)``；只有「已发起可用性检验但
+    失败」才记为 ``("tushare", "baostock")``。选择理由见
+    ``source_selection_note``（供报告如实转述，不由渲染层臆测降级原因）。
     """
+
+    attempted_sources: tuple[str, ...] = ()
+    source_selection_note: str = ""
 
     @abstractmethod
     def fetch_daily_batch(self, trade_dates: list[str]) -> pd.DataFrame:
@@ -539,9 +549,15 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
             baostock is available.
     """
     if source == "tushare":
-        return TushareBulkSource()
+        src = TushareBulkSource()
+        src.attempted_sources = ("tushare",)
+        src.source_selection_note = "显式指定 --source tushare"
+        return src
     if source == "baostock":
-        return BaostockSource(ts_codes=ts_codes or [])
+        src = BaostockSource(ts_codes=ts_codes or [])
+        src.attempted_sources = ("baostock",)
+        src.source_selection_note = "显式指定 --source baostock"
+        return src
 
     # auto: Tushare first, then baostock
     from lib import env  # noqa: F811
@@ -552,7 +568,10 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
     if token:
         with TushareClient(token=token) as client:
             if client.is_available():
-                return TushareBulkSource(skip_availability_check=True)
+                src = TushareBulkSource(skip_availability_check=True)
+                src.attempted_sources = ("tushare",)
+                src.source_selection_note = "auto：首选源 Tushare 可用性检验通过，未降级"
+                return src
 
     # Fall back to baostock
     try:
@@ -563,7 +582,19 @@ def create_source(source: str = "auto", ts_codes: list[str] | None = None) -> Kl
             "(%d ts_codes provided)",
             len(ts_codes or []),
         )
-        return BaostockSource(ts_codes=ts_codes or [])
+        src = BaostockSource(ts_codes=ts_codes or [])
+        # 区分两种回退，报告不得把「未配置」写成「尝试过但失败」：
+        if token:
+            src.attempted_sources = ("tushare", "baostock")  # 已检验且失败 → 真降级
+            src.source_selection_note = (
+                "auto：Tushare 可用性检验失败 → 降级 baostock"
+            )
+        else:
+            src.attempted_sources = ("baostock",)  # Tushare 从未被调用
+            src.source_selection_note = (
+                "auto：未配置 TUSHARE_TOKEN（未尝试 Tushare）→ 直接使用 baostock"
+            )
+        return src
     except ImportError:
         raise ValueError(
             "No data source available: Tushare unavailable and baostock "

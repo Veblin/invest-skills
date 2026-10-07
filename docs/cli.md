@@ -22,10 +22,19 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 |:---|:---|
 | `--mode {brief,full,concise}` | 报告模式：简报 / 完整九模块 / 对话精简 |
 | `--plan PLAN` | JSON 采集计划文件路径 |
-| `--resume` | 从上次中断的步骤继续 |
+| `--resume` | 从上次中断的步骤继续（兼容入口，可能现场补采） |
 | `--save-raw` | 保存原始采集 JSON 到 `~/.local/share/investment/raw/` |
+| `--report-ready`（`collect`） | 落库前封存 full 报告所需扩展数据，输出固定快照 ID/hash；须落库、不可与 `--resume` 合用 |
+| `--collection-id ID`（`report`/`evidence`/`value`/`validate-analysis`） | 只读指定 report-ready 快照；校验标的、`kind=collect`、计划哈希与内容哈希，缺字段即退出、不补采 |
+| `--preflight`（`report`） | 在临时目录跑与最终报告相同的生成路径 + lint/QC；须指定 `--collection-id`，不写正式产物 |
 
-## 子命令分组（invest.py，27 个）
+标准 full 报告链先运行 `collect SYMBOL --plan plan.json --report-ready`，从 stderr 取得 `collection_id` 和 SHA-256。之后 `evidence`、`report`、`value` 使用同一个 `--collection-id ID`；计划快照的每条只读命令还须传原 `--plan plan.json`，缺计划会报错。系统校验标的、`kind=collect`、计划哈希和封存内容；缺字段会退出，不会补采。分析侧车中每个 `facts` 条目须写 `source_path`（例如 `market_structure.put_call_ratio.ratio` 或 `dimension_by_name.financials.data...`；可附 `source_scale`）或外部原文 `source_url`；`validate-analysis --collection-id ID --plan plan.json` 会复核封存字段数值，外部原文仍须人工核验。`report --preflight --emit html --analysis analysis.json --collection-id ID --plan plan.json` 运行与最终 HTML 报告相同的生成路径，在临时目录检查实际 MD（Insight 包含其 sidecars），并运行 lint/QC；未指定固定 ID 时预检会拒绝。正式落盘后仍须对最终 MD 运行 `report_qc.py` 并做数字、合规、逻辑复检。旧 `--resume` 仅作兼容入口，可能现场补采。
+
+可设置 `INVEST_RUN_ID` 和 `INVEST_TRACE_FILE` 生成跨命令 JSONL 时间账；记录阶段起止、快照 ID/hash 和状态，不记录正文或 token。`market_structure.latency_ms` 保存逐子源耗时；trace 末尾另有一行网络统计（逐接口调用/空返回/失败/等待秒数与生效预算），供裁决「限额按接口还是按账号」。该 trace 只能解释单次运行的耗时构成；模型撰写、原文核验与人工复检属宿主机阶段，进程内不可测。八分钟门禁仍须真实联网全链预定义样本的 P90 验证。
+
+`report_qc.py --verify-data` 是**独立现场复核**（会重新联网跑 `collect_all` 做 audit/quality/rigor），**不在八分钟默认链内**；默认链只跑不带该 flag 的第 0 层机器准出。固定快照链目前只在 Python CLI（`invest.py`）侧落地；**MCP / 无 Python 分发路径的等价入口本轮未验证**，不得据本文宣称跨 harness 结果等价。
+
+## 子命令分组（invest.py，30 个）
 
 ### 研究主线
 
@@ -35,7 +44,8 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `collect` | 采集多维度数据（`--with-news-pack` 新闻三层架构） |
 | `analyze` | 分析采集结果（输出中间分析 JSON） |
 | `synthesize` | 合成最终研究报告 |
-| `report` | 一键生成分析报告（collect + analyze + synthesize） |
+| `report` | 渲染报告；固定快照链读取封存输入，分析合成由宿主另行完成 |
+| `validate-analysis` | 校验分析 JSON 槽位（`--draft` 同时检查首版 MD 的实际占位） |
 | `evidence` | 生成结构化证据表 |
 
 ### 验算与质控
@@ -71,6 +81,7 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `thesis` | 投资假设追踪 |
 | `shock` | 价格冲击插值比例（非风险中性概率） |
 | `catalyst` | 催化剂日历：分红/解禁/公告前瞻事件（取数失败时产物写明「不可得 ≠ 无事件」） |
+| `notice-body` | 取公告正文（`art_code` 或详情页 url；原文不改写 + 截断三态，不做结构化抽取） |
 | `diagnose` | 检查数据源可用性 |
 
 ## 常用示例

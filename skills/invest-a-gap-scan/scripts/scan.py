@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import shutil
 import sys
 import time
@@ -48,7 +49,7 @@ from dates import shanghai_now  # noqa: E402
 from lib import env  # noqa: E402
 
 # ---- 本 skill 的 lib 模块（top-level import 通过 _LIB_DIR） ----
-from gap_scanner import scan_all  # noqa: E402
+from gap_scanner import is_cached_bar_settled, scan_all  # noqa: E402
 from report_formatter import (  # noqa: E402
     format_brief,
     format_json,
@@ -119,6 +120,47 @@ logger = logging.getLogger(__name__)
 # ======================================================================
 
 
+def _finite_float(min_value: float | None = None, *, inclusive: bool = True):
+    """argparse type：拒绝 nan / ±inf 与越界值。
+
+    非有限值会让门槛**静默改变行为却无法在报告中复现**：`--gap-min-vol-ratio inf`
+    在引擎侧 `not isclose(inf, 1.0)` 判为生效且过滤掉所有有限量比，而渲染层
+    有限性门判其「不生效」故不打印该参数——报告与实际执行分叉。故在参数入口
+    统一拒绝，使引擎与报告共用同一套有效性规则。
+    """
+
+    def _parse(text: str) -> float:
+        try:
+            val = float(text)
+        except (TypeError, ValueError):
+            raise argparse.ArgumentTypeError(f"需要数值，收到 {text!r}") from None
+        if not math.isfinite(val):
+            raise argparse.ArgumentTypeError(
+                f"必须是有限数值（nan/inf 会使门槛静默失效或过滤全部标的），收到 {text!r}"
+            )
+        if min_value is not None and (val < min_value or (not inclusive and val == min_value)):
+            op = "≥" if inclusive else ">"
+            raise argparse.ArgumentTypeError(f"必须 {op} {min_value}，收到 {val}")
+        return val
+
+    return _parse
+
+
+def _at_least(limit: int):
+    """argparse type：整数下限校验（非法值直接报错，不进入扫描）。"""
+
+    def _parse(text: str) -> int:
+        try:
+            val = int(text)
+        except (TypeError, ValueError):
+            raise argparse.ArgumentTypeError(f"需要整数，收到 {text!r}") from None
+        if val < limit:
+            raise argparse.ArgumentTypeError(f"必须 ≥ {limit}，收到 {val}")
+        return val
+
+    return _parse
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="跳空缺口扫描 — 向上缺口 + MA60 上方 + 未回补",
@@ -128,27 +170,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="指数池，逗号分隔（默认 csi300,a500,star50）",
     )
     p.add_argument(
-        "--gap-min-pct", type=float, default=1.0,
+        "--gap-min-pct", type=_finite_float(0.0), default=1.0,
         help="缺口幅度阈值 %%（默认 1.0）",
     )
     p.add_argument(
-        "--gap-lookback", type=int, default=60,
+        "--gap-lookback", type=_at_least(1), default=60,
         help="缺口回溯交易日数（默认 60）",
     )
     p.add_argument(
-        "--gap-min-vol-ratio", type=float, default=1.0,
-        help="缺口日成交额 / 20 日均额下限（默认 1.0 = 不过滤）",
+        "--gap-min-vol-ratio", type=_finite_float(0.0, inclusive=False), default=1.0,
+        help="缺口日成交额 / 缺口日前至多 20 根 bar 日均额 的下限"
+             "（默认 1.0 = 不过滤；任何非 1.0 值都会启用该门槛）",
     )
     p.add_argument(
-        "--min-avg-amount", type=int, default=100_000_000,
-        help="20 日均额门槛（元，默认 100000000 = 1 亿）",
+        "--min-avg-amount", type=_at_least(0), default=100_000_000,
+        help="当前尾部 20 个交易日平均成交额门槛（元，默认 1 亿）"
+             "；与量比分母（缺口前窗口）不是同一口径",
     )
     p.add_argument(
-        "--min-list-days", type=int, default=60,
+        "--min-list-days", type=_at_least(0), default=60,
         help="最少 K 线根数（默认 60）",
     )
     p.add_argument(
-        "--top", type=int, default=30,
+        "--top", type=_at_least(0), default=30,
         help="stdout 行数（默认 30；md 报告全量）",
     )
     p.add_argument(
@@ -160,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="强制刷新（含成分股缓存与 K 线缓存）",
     )
     p.add_argument(
-        "--universe-limit", type=int, default=None,
+        "--universe-limit", type=_at_least(1), default=None,
         help="只扫前 N 只（开发调试用）",
     )
     p.add_argument(
@@ -243,13 +287,12 @@ def _split_adj_factor_map(
 def main() -> int:
     args = build_parser().parse_args()
 
-    # 配置日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stderr,
-    )
+    # 开发日志统一门控：此前无条件在 root 上挂 stderr handler 输出 INFO，是全系列
+    # 唯一不看 INVEST_DEV 的入口（release 用户也看到扫描 INFO）。
+    # 注意 release 下的两处变化：INFO 静默；WARNING/ERROR 走 lastResort，只剩裸消息
+    # （无时间戳/级别前缀）。dev 模式恢复格式化输出，但多一个 [skill] 标识。
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-gap-scan")
 
     start_wall = time.time()
     logger.info("开始扫描 (universe=%s)", args.universe)
@@ -262,11 +305,14 @@ def main() -> int:
         logger.warning("kline_cache legacy dir pruning failed: %s", exc)
 
     # ---- Step 1: 构建成分股并集 ----
+    # 池来源随调用回填（三级降级链实际用到哪一级）；报告不得默认写成首选源
+    universe_provenance: dict = {}
     try:
         stocks = build_universe(
             indices=[i.strip() for i in args.universe.split(",") if i.strip()],
             force_refresh=args.no_cache,
             universe_limit=args.universe_limit,
+            provenance=universe_provenance,
         )
     except Exception as exc:
         logger.error("构建成分股失败: %s", exc)
@@ -289,7 +335,8 @@ def main() -> int:
     already_qfq = source.source_name() == "baostock"
 
     try:
-        return _run_scan(args, stocks, universe_ts_codes, source, source_label, already_qfq, start_wall)
+        return _run_scan(args, stocks, universe_ts_codes, source, source_label,
+                         already_qfq, start_wall, universe_provenance)
     finally:
         if hasattr(source, "cleanup"):
             try:
@@ -306,6 +353,7 @@ def _run_scan(
     source_label: str,
     already_qfq: bool,
     start_wall: float,
+    universe_provenance: dict | None = None,
 ) -> int:
     # ---- Step 3: 交易日历 ----
     now = shanghai_now()
@@ -335,16 +383,57 @@ def _run_scan(
     }
     cache_misses: list = []
 
+    cache_age_hours: list[float] = []
+    refreshed_unsettled = 0
     if not args.no_cache:
         for stock in stocks:
-            cached = _KLINE_CACHE.load(cache_date,
-                                       _cache_parts(stock.ts_code, source.source_name()))
+            parts = _cache_parts(stock.ts_code, source.source_name())
+            cached = _KLINE_CACHE.load(cache_date, parts)
+            if cached is not None and not cached.empty:
+                # 盘中写入的缓存含**未走完的当日 bar**，隔日仅按日期比较会被当成
+                # 已完成 bar（实测可凭空产出命中）→ 判未定稿即视为未命中，重拉。
+                mtime: float | None
+                try:
+                    mtime = _KLINE_CACHE.path_for(cache_date, parts).stat().st_mtime
+                except OSError:
+                    mtime = None
+                last_bar = (
+                    str(cached["trade_date"].values[-1])
+                    if "trade_date" in cached.columns else ""
+                )
+                if not is_cached_bar_settled(last_bar, mtime, now):
+                    logger.info(
+                        "缓存最后一根 bar 未定稿（bar=%s，写入早于当日收盘）→ 重拉 %s",
+                        last_bar, stock.ts_code,
+                    )
+                    refreshed_unsettled += 1
+                    cached = None
             if cached is not None and not cached.empty:
                 stock_kline_map[stock.ts_code] = cached
+                age = _KLINE_CACHE.age_seconds(cache_date, parts)
+                if age is not None:
+                    cache_age_hours.append(age / 3600.0)
             else:
                 cache_misses.append(stock)
     else:
         cache_misses = list(stocks)
+
+    # 采集前快照：读缓存成功的只数（报告「数据与来源」段的缓存状态来源）。
+    # ⚠️ 只记「计划拉取数」是不够的：待拉标的可能拉取失败而未被写入
+    # stock_kline_map（fetch 失败 / build_stock_kline 返回 None / 缺复权因子），
+    # 那时把它们写成「新拉」就是误报。实际成功/失败数在构建完成后回填（见下）。
+    cache_hit_count = len(stock_kline_map)
+    cache_status = {
+        "enabled": not args.no_cache,
+        "hit": cache_hit_count,
+        "planned_fetch": len(cache_misses),
+        "fetched": 0,        # 实际写入 K 线的只数（构建后回填）
+        "fetch_failed": 0,   # 拉了但没拿到（构建后回填）
+        "refreshed_unsettled": refreshed_unsettled,  # 缓存 bar 未定稿而重拉
+        "ttl_days": _KLINE_CACHE.ttl_seconds / 86400.0,
+        "min_age_hours": min(cache_age_hours) if cache_age_hours else None,
+        "max_age_hours": max(cache_age_hours) if cache_age_hours else None,
+    }
 
     all_cache_hit = len(cache_misses) == 0 and len(stocks) > 0
     daily_raw: pd.DataFrame | None = None
@@ -430,6 +519,16 @@ def _run_scan(
         len(stocks),
     )
 
+    # 实际拉取结果回填（报告「新拉 / 拉取失败」必须反映真实执行，不是计划数）
+    fetched_ok = max(0, len(stock_kline_map) - cache_hit_count)
+    cache_status["fetched"] = fetched_ok
+    cache_status["fetch_failed"] = max(0, len(cache_misses) - fetched_ok)
+    if cache_status["fetch_failed"]:
+        logger.warning(
+            "拉取失败 %d 只（已计入「获取失败/数据缺失」排除桶）",
+            cache_status["fetch_failed"],
+        )
+
     # ---- Step 6: 停牌检测 ----
     if cal_is_estimated:
         logger.warning(
@@ -458,6 +557,12 @@ def _run_scan(
         "min_list_days": args.min_list_days,
         "universe_str": args.universe,
         "source_label": source_label,
+        # 报告「数据与来源」段：字段级来源与降级状态须可追溯
+        "source_name": source.source_name(),
+        "source_note": getattr(source, "source_selection_note", "") or "",
+        "cal_estimated": cal_is_estimated,
+        # 成分股池来源（三级降级链实际用到哪一级；缓存复用且无 sidecar 时为空）
+        "universe_provenance": dict(universe_provenance or {}),
     }
 
     result = scan_all(
@@ -468,9 +573,14 @@ def _run_scan(
         params,
         trade_cal=trade_dates,
         already_qfq=already_qfq,
-        # 收盘后（上海时间 ≥15:00）日线 bar 完整：最新 bar 缺口 low>gap_high
-        # 可直接确认未回补，不再标 GAP_UNCONFIRMED 假阴性
-        after_close=shanghai_now().hour >= 15,
+        # after_close 交给引擎**逐股按数据日期**判定（`_resolve_after_close`）：
+        # 最新 bar 早于今日即为已完成（盘前/周末/节假日），不再用墙钟 hour>=15
+        # 把已完成的 bar 误标「待收盘确认」丢掉命中；仅当日 bar 需 ≥15:00 才确认。
+        now=now,
+    )
+    result.cache_status = cache_status
+    result.attempted_sources = list(
+        getattr(source, "attempted_sources", ()) or (source.source_name(),)
     )
 
     elapsed = time.time() - start_wall

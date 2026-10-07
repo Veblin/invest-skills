@@ -179,9 +179,11 @@ def compute_dcf_risk_reward(
     # ---- Step 3: WACC ----
     market_structure = collection.get("market_structure") or {}
 
+    from lib.report_snapshot import is_sealed
     wacc_result, wacc_missing = _dcf_try_wacc(
         financials, market_structure, kline_data,
         rf_override=rf_override, erp_override=erp_override,
+        allow_network=not is_sealed(collection),
     )
     if wacc_result is None:
         return {"error": f"WACC 计算失败: {', '.join(wacc_missing)}"}
@@ -210,6 +212,18 @@ def compute_dcf_risk_reward(
             "error": "净债务不可得（有息负债字段未采集），每股换算已抑制——"
             "与 render_dcf 同口径，不输出每股目标价",
             "_meta": {"net_debt_source": nd_source},
+        }
+
+    default_inputs = []
+    if wacc_result.get("risk_free_is_default"):
+        default_inputs.append("无风险利率")
+    if wacc_result.get("beta_is_default"):
+        default_inputs.append("Beta")
+    if default_inputs:
+        return {
+            "error": "关键输入采用默认值（" + "、".join(default_inputs)
+            + "），暂停数值 DCF 三情景、概率权重和盈亏比",
+            "_meta": {"wacc_missing_defaults": wacc_missing},
         }
 
     scenarios: dict[str, float] = {}

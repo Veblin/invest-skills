@@ -257,15 +257,15 @@ class TestPutCallRatio60dWindow:
         r = _ms_fetch_put_call_ratio(FakeTC())
         assert r is not None
         assert r["ratio"] == 2.0
-        # 最近 60 自然日全分辨率取数 → 拉取点数超过 5 年降采样上限
-        assert r["sample_points"] > _PCR_MAX_DAILY_QUERIES
+        # 两个窗口在总预算内规划，近期窗口仍保持全分辨率
+        assert r["sample_points"] <= _PCR_MAX_DAILY_QUERIES
         assert r["sampled"] is True
         # 60d 窗口内全部为 2.0 → 分位 0.0（修复前混入旧 0.5 样本 → ~33）
         assert r["percentile_60d"] == 0.0
         # 5y 窗口包含 0.5 样本 → 分位显著高于 60d 窗口
         assert r["percentile_5y"] > r["percentile_60d"]
-        # staleness 标识：最新日查询成功 → current_date == 最新交易日
-        assert r["current_date"] == cal[-1]
+        # 最新已发布日查询成功；盘中当日日线尚未发布。
+        assert r["current_date"] == r["expected_latest_date"]
 
 
 class TestNewHighSampling:
@@ -361,20 +361,14 @@ class TestPutCallRatioStaleOutsideWindow:
     def test_current_outside_window_percentile_none(self):
         import pandas as pd
 
-        from lib.collector._orchestrate import (
-            _PCR_MAX_DAILY_QUERIES, _days_ago, _ms_fetch_put_call_ratio,
-            _ms_subsample_trade_dates,
-        )
+        from lib.collector._orchestrate import _days_ago, _ms_fetch_put_call_ratio
 
         cutoff = _days_ago(60)
         # 1230 个交易日（~5 年）：降采样 step≈15
         dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=1230)
         cal = [d.strftime("%Y%m%d") for d in dates]
-        sampled = _ms_subsample_trade_dates(cal, _PCR_MAX_DAILY_QUERIES)
-        # 最新 5 个采样日查询失败（窗口内 3 个 + 窗口外 2 个）→ current 回退
-        # 到 sampled[-6]（≈103 自然日前）——远超 60 日窗口
-        fail_dates = set(sampled[-5:])
-        assert sampled[-6] < cutoff  # 场景自检：回退目标确实在窗口外
+        # 近期全窗口失败，当前值只能回退到更早的历史采样日。
+        fail_dates = {d for d in cal if d >= cutoff}
 
         class FakeTC:
             def query(self, api, **kw):
@@ -396,12 +390,11 @@ class TestPutCallRatioStaleOutsideWindow:
         r = _ms_fetch_put_call_ratio(FakeTC())
         assert r is not None
         assert r["ratio"] == 0.5
-        assert r["current_date"] == sampled[-6]
         assert r["current_date"] < cutoff
         assert r["partial"] is True  # stale 计入 partial
         # 修复点：current 在窗口外 → 60 日分位无意义，置 None 而非伪造"低位"
         assert r["percentile_60d"] is None
-        assert isinstance(r["percentile_5y"], float)
+        assert r["percentile_5y"] is None  # 缺点偏样本不得冒充五年分位
 
 
 class TestApplyQfqNewestRawFallback:

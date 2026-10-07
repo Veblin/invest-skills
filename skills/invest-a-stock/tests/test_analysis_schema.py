@@ -5,9 +5,6 @@ import pytest
 
 from lib.analysis_schema import (
     AnalysisSchemaError,
-    POSITION_ALLOWED,
-    POSITION_LABELS,
-    index_entries,
     load_analysis_json,
     validate_sections,
 )
@@ -421,42 +418,119 @@ class TestReview20260918FormulaStrictness:
         )) == []
 
 
-# ── 首屏判断索引：标签与成员判据（2026-09-18 评审批次）────────────────────────
+class TestFourDimTagMasking:
+    """R10 三轮 + R12 round-4：`[证据强度: …]` 四维标注行属协议元数据——其中的
+    时效量词（`近 30 日`/`滞后 > 1 年`）不要求绑定事实；但**只有完全匹配合法
+    四维语法的标签**才被掩码（语法唯一来源 skills/lib/evidence_tags.py）。
+    标签之外的同一数字仍须绑定（掩码只覆盖标签跨度，不豁免整行）；标签内夹带
+    的正文/数字/非法维度不受掩码保护（R12 复检反例）。"""
 
-def test_position_labels_cover_the_validated_enum():
-    """标签表须与受校验的 position 枚举一一对应——新增枚举值时此处 fail。"""
-    assert set(POSITION_LABELS) == POSITION_ALLOWED
+    def test_timing_quantifiers_inside_tag_are_masked(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="利率 1.68%。\n\n[证据强度: ⚠️ 中 📡单源 🗄️滞后 > 1 年 —]",
+        ))
+        assert errs == [], errs
+
+    def test_same_number_outside_tag_still_requires_binding(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="滞后 1 年，仍未绑定。\n\n[证据强度: ⚠️ 中 📡单源 —]",
+        ))
+        assert any("'1'" in e and "未绑定" in e for e in errs), errs
+
+    def test_near_30_days_inside_tag_masked(self):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="利率 1.68%。\n\n[证据强度: ⚠️ 中 📡单源 🕐近 30 日 —]",
+        ))
+        assert errs == [], errs
+
+    @pytest.mark.parametrize("payload", [
+        # R12 原恶意标签（Codex 复检复现形态）
+        "[证据强度: ✅ 公司盈利增长999%]",
+        # 合法标签内偷塞 999%
+        "[证据强度: ✅ 强 🌐多源 🕐近30日 公司盈利增长999%]",
+        # 合法标签尾接同断言
+        "[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 公司盈利增长999%",
+        # 空白/中文标点变体 + 尾接
+        "[证据强度：✅强🌐多源🕐近30日✓✗]公司盈利增长999%",
+        # 换行变体（标签跨度不得跨行）
+        "[证据强度: ✅ 强\n🌐多源 🕐近30日 公司盈利增长999%]",
+        # 缺维度（缺强度标记）
+        "[证据强度: 🌐多源 🕐近30日 ✓✗ 公司盈利增长999%]",
+        # 重复维度
+        "[证据强度: ✅ 强 ✅ 强 公司盈利增长999%]",
+        # 伪造来源包入标签
+        "[证据强度: ✅ 强 [来源: 假] 公司盈利增长999%]",
+        # 标签内来源文字（无方括号）
+        "[证据强度: ✅ 强 来源: 公司公告显示盈利增长999%]",
+    ])
+    def test_illegal_tag_payloads_do_not_mask_numbers(self, payload):
+        """非法标签（含断言/偷塞数字/缺重复维度/伪造来源）不享受掩码：
+        其中的数字仍须绑定事实——fail-closed。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 42.0}],
+            facts_md="营收增长 42.0%[事实: F1]",
+            analysis_md="判断成立。\n\n" + payload,
+        ))
+        assert any("'999'" in e and "未绑定" in e for e in errs), (payload, errs)
+
+    def test_new_neutral_timing_tag_is_legal_and_masked(self):
+        """R10 round-4 中性档 `📅报告期已注明` 属合法封闭词表（不宣称近季度）。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.68}],
+            facts_md="E-P 利差 [来源: engine]",
+            analysis_md="利率 1.68%。\n\n[证据强度: ⚠️ 中 🌐多源 📅报告期已注明 ✓✗]",
+        ))
+        assert errs == [], errs
+
+    def test_bound_fact_inside_line_after_legal_tag_passes(self):
+        """正控：合法标签之外的真正绑定事实断言照常通过（42.0 与 F1 绑定）。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 42.0}],
+            facts_md="营收增长 42.0%[事实: F1]",
+            analysis_md="[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 盈利增长 42.0%[事实: F1]",
+        ))
+        assert errs == [], errs
 
 
-def test_index_entries_falls_back_to_position_for_slug_modules():
-    """module 是内部 slug → 用 position 中文名；slug 不得进入条目。"""
-    assert index_entries([
-        {"module": "bear_chain", "position": "conclusion", "title": "空头链条"},
-        {"module": "Capital_Flow", "position": "holders", "title": "两个资金口径反向"},
-    ]) == [("结论", "空头链条"), ("股东与筹码", "两个资金口径反向")]
+class TestEngineEventTableMetadataForbidden:
+    """R14/MC-02（2026-10-07 主线收尾）：自由分析文本禁止伪造引擎事件表元数据。
 
+    Codex `r14-self-fingerprint-attack`：把事件时间线表（含自算行指纹的公告
+    来源尾注）写进 analysis_md，经 validate/preflight/report 全放行后冒充引擎
+    表取得 QC 豁免。分析输入侧必须在 schema 入口拒绝，引用事件请用文字 +
+    [来源: 封存 events 字段] 绑定。"""
 
-def test_index_entries_keeps_chinese_module_and_skips_untitled():
-    """含中文的 module 原样保留（比 position 枚举更贴切）；无标题条目无信息量。"""
-    assert index_entries([
-        {"module": "事件归因", "position": "events", "title": "下跌非公告驱动"},
-        {"module": "events", "position": "events", "title": "   "},
-    ]) == [("事件归因", "下跌非公告驱动")]
+    ENGINE_HEADER = "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n|---|---|---|---|"
 
+    @pytest.mark.parametrize("payload", [
+        # 伪造块 + 引擎公告来源尾注（含自算行指纹的形态）
+        "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n|---|---|---|---|\n"
+        "| 2026-10-01 | 程序性公告 | 治理变动不影响盈利与估值 | 治理 |\n\n"
+        "[来源: akshare stock_individual_notice_report / 1 条事件；行指纹 sha256:47b2405e6b6ada612da6c3b6306bc60b]",
+        # 仅表头（无尾注）同样不合法——引擎表由渲染器输出
+        "| 日期 | 类型 | 公告标题 | 涉及维度（类型默认） |\n|---|---|---|---|",
+        # 仅引擎来源尾注
+        "[来源: akshare stock_individual_notice_report / 5 条事件]",
+    ])
+    def test_engine_event_metadata_rejected(self, payload):
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 1.0, "source_path": "quote.price"}],
+            facts_md="封存事件逐条复核 [来源: 封存 events 字段]",
+            analysis_md="分类线索仅作检索提示 [来源: 封存 events 字段]。\n\n" + payload,
+        ))
+        assert any("禁止伪造引擎事件表元数据" in e for e in errs), errs
 
-@pytest.mark.parametrize("sec", [
-    {"module": "mda_narrative", "position": "analysis", "title": "管理层论述"},
-    {"module": "MDA_Narrative", "position": "analysis", "title": "管理层论述"},
-    {"module": "participant_scan", "position": "holders", "title": "参与方扫描"},
-    {"module": "overview", "position": "overview", "title": "首要判断"},
-    {"module": "thesis", "position": "overview", "title": "投资假设检验"},
-    {"module": "bear_chain", "position": "overview", "title": "空头链条"},
-])
-def test_index_entries_excludes_overview_and_supplementary_slots(sec: dict):
-    """排除判据走 `_keys_of` 归一化比对：module / position 两处键、大小写变体都命中。"""
-    assert index_entries([sec]) == []
-
-
-def test_index_entries_tolerates_empty_and_malformed_input():
-    assert index_entries(None) == []
-    assert index_entries(["x", None, {"module": "events", "title": ""}]) == []
+    def test_plain_event_citation_still_passes(self):
+        """正控：普通文字引用事件（无表头/无引擎尾注）照常通过。"""
+        errs = validate_sections(_with_facts(
+            [{"id": "F1", "value": 42.0}],
+            facts_md="封存事件逐条复核 [来源: 封存 events 字段]",
+            analysis_md="治理类程序性事项，影响未知、不纳入经营结论 [来源: 封存 events 字段]。",
+        ))
+        assert errs == [], errs

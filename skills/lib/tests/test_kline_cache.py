@@ -28,6 +28,16 @@ def _make_old(path: Path, seconds: float) -> None:
 
 
 class TestSaveLoad:
+    def test_default_clock_tracks_later_patch(self, tmp_path: Path, monkeypatch):
+        c = _cache(tmp_path)
+        c.save("20260722", ("s", "x"), 1)
+        path = c.path_for("20260722", ("s", "x"))
+        os.utime(path, (100.0, 100.0))
+        monkeypatch.setattr(time, "time", lambda: 100.0)
+        assert c.load("20260722", ("s", "x")) == 1
+        monkeypatch.setattr(time, "time", lambda: 100.0 + _TTL + 1)
+        assert c.load("20260722", ("s", "x")) is None
+
     def test_roundtrip_layout(self, tmp_path: Path):
         c = _cache(tmp_path)
         c.save("20260722", ("tushare", "000001.SZ"), {"close": [1.0]})

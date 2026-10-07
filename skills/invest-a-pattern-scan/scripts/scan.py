@@ -54,6 +54,8 @@ def _hit_to_dict(h) -> dict:
 
 
 def main() -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-a-pattern-scan")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     parser = argparse.ArgumentParser(description="invest-a-pattern-scan 形态扫描")
     parser.add_argument("--universe", nargs="+", default=None, help="指数成分池（默认 csi300 a500 star50）")
     parser.add_argument("--days", type=int, default=LOOKBACK_DAYS, help="回看交易日数")

@@ -64,6 +64,33 @@ def test_low_volume_state_semantics_are_restricted():
     assert "禁止" in out["semantics"] or "不得" in out["semantics"]
 
 
+@pytest.mark.parametrize("missing", [None, float("nan"), float("inf"), "invalid"])
+@pytest.mark.parametrize("field", ["vol", "amount"])
+def test_latest_missing_volume_is_unavailable(missing, field):
+    rows = _rows()
+    if field == "amount":
+        for row in rows:
+            row["amount"] = row.pop("vol")
+    rows[-2][field] = 9_000_000
+    rows[-1][field] = missing
+    rows[-1]["close"] = min(r["close"] for r in rows) * 0.8
+    out = vp.volume_percentile(rows)
+    assert out["available"] is False
+    assert out["vol_pctile"] is None
+    assert out["state"] == "不可得"
+    assert "最新" in out["reason"]
+    assert vp.risk_state(rows)["available"] is False
+
+
+def test_missing_historical_volume_does_not_hide_latest_observation():
+    rows = _rows()
+    rows[-2]["vol"] = None
+    rows[-1]["vol"] = 9_000_000
+    out = vp.volume_percentile(rows)
+    assert out["available"] is True
+    assert out["state"] == "放量日"
+
+
 # ── R-A03 ② LMSW b2 ──────────────────────────────────────────────────────
 
 def test_lmsm_b2_returns_coef_ci_and_n():
@@ -147,6 +174,28 @@ def test_features_never_claim_direction():
 
 def _bench(rows, daily=0.0002):
     return {r["trade_date"]: daily for r in rows}
+
+
+@pytest.mark.parametrize("stock_return,expected_excess", [(0.0, -21.0), (0.205, -0.5)])
+def test_conditional_table_compounds_benchmark_windows(monkeypatch, stock_return, expected_excess):
+    rows = [
+        {"trade_date": f"day-{i}", "close": close}
+        for i, close in enumerate((100.0, 100.0, 100.0 * (1 + stock_return)))
+    ]
+    monkeypatch.setattr(vp, "panic_selloff_days", lambda rows, **kw: [{"idx": 0, "date": "day-0"}])
+    out = vp.conditional_reversal_table(
+        rows, benchmark_returns={"day-0": 0.9, "day-1": 0.1, "day-2": 0.1},
+        horizons=(1, 2), min_events=1)
+    assert out["available"] is True
+    one = out["horizons"]["1"]
+    assert one["mean_excess_pct"] == pytest.approx(-10.0)
+    two = out["horizons"]["2"]
+    assert two["n"] == two["baseline_n"] == 1
+    assert two["mean_excess_pct"] == pytest.approx(expected_excess)
+    assert two["median_excess_pct"] == pytest.approx(expected_excess)
+    assert two["baseline_excess_pct"] == pytest.approx(expected_excess)
+    assert two["win_rate_pct"] == 0.0
+    assert two["continuation_share_pct"] == 100.0
 
 
 def test_panic_days_requires_both_drop_and_volume():

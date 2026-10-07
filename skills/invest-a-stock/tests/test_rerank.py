@@ -1,5 +1,6 @@
 """Tests for deterministic rerank credibility scoring (R-09)."""
 from lib.rerank import (
+    PAID_SOURCE,
     score_evidence,
     score_from_dimension_meta,
     score_all_dimensions,
@@ -106,6 +107,50 @@ class TestScoreFromDimensionMeta:
         }
         score = score_from_dimension_meta(meta)
         assert score <= 45
+
+    def test_merged_quote_keeps_paid_source_bonus(self):
+        """多源合并后 `source` 变 `merged:…`，付费源加分必须仍在。
+
+        回归（2026-09-30 实测）：collector 把 quote 的 `_meta.source` 改写成
+        `merged:tushare.daily+tencent_finance` 后，本函数的
+        `primary_source.startswith("tushare")` 不再命中 → 付费源 +10 静默丢失
+        → 附录「实时行情」可信度由 70 掉到 60（用户可见数值回归）。
+        判据改读合并前 collector 另存的 `primary_source`；未合并且无该键时行为不变。
+        """
+        merged = {
+            "source": "merged:tushare.daily+tencent_finance",
+            "primary_source": "tushare.daily",
+            "merged_sources": ["tushare.daily", "tencent_finance"],
+            "confidence": "high",
+            "multi_source": True,
+            "source_count": 2,
+            "cross_validation": "convergence",
+            "all_sources": [
+                {"source": "tushare.daily", "data_available": True},
+                {"source": "tencent_finance", "data_available": True},
+            ],
+            "fetched_at": "2026-06-22T10:00:00+00:00",
+        }
+        without = {k: v for k, v in merged.items() if k != "primary_source"}
+        # 去掉 `primary_source` 即复现旧写法下的丢分场景，差额恰为付费源加分
+        assert score_from_dimension_meta(merged) - score_from_dimension_meta(without) \
+            == PAID_SOURCE
+
+    def test_unmerged_meta_ignores_absent_primary_source(self):
+        """未合并维度没有 `primary_source` 键 → 判据回落到 `source`，行为不变。"""
+        meta = {
+            "source": "tushare.daily_basic",
+            "confidence": "high",
+            "multi_source": True,
+            "source_count": 2,
+            "cross_validation": "convergence",
+            "all_sources": [
+                {"source": "tushare.daily_basic", "data_available": True},
+                {"source": "tencent_finance", "data_available": True},
+            ],
+            "fetched_at": "2026-06-22T10:00:00+00:00",
+        }
+        assert score_from_dimension_meta(meta) >= 75
 
 
 class TestScoreAllDimensions:

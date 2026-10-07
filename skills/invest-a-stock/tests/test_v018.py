@@ -761,7 +761,11 @@ class TestSectionDcfValuation:
             ]),
         }
         collection = {
-            "market_structure": {"erp": {"dgs10": 2.65, "source": "FRED.DGS10"}},
+            # C2-a：A 股 DCF 用人民币口径（cn10y 优先；dgs10 仅作跨币种参考）
+            "market_structure": {"erp": {
+                "cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)",
+                "dgs10": 5.29, "source": "tushare.index_dailybasic+FRED.DGS10",
+            }},
         }
         text = _section_dcf_valuation(dims, collection, "000001")
 
@@ -783,21 +787,73 @@ class TestSectionDcfValuation:
         assert "永续增长率" in text
         _check_no_forbidden_words(text)
 
-    def test_wacc_insufficient_data_skips_section(self):
-        """beta 不可得时使用默认值 1.0，WACC 仍可计算，DCF 段落不跳过。"""
+    def test_usd_only_rf_pauses_numeric_dcf(self):
+        """C2-a：仅美元口径 rf（A 股语境）与默认值同走暂停闸门。"""
         dims = {
-            "financials": _make_dcf_render_financials(4, beta=None),
+            "financials": _make_dcf_render_financials(4, beta=1.1),
             "research": _make_research_dim(),
         }
-        collection = {"market_structure": {}}
+        collection = {"market_structure": {"erp": {"dgs10": 5.29, "source": "FRED.DGS10"}}}
         text = _section_dcf_valuation(dims, collection, "000001")
 
-        # beta 默认为 1.0，WACC 可计算 → DCF 段落不应跳过
-        assert "数据不足，WACC 无法计算，DCF 段落跳过" not in text
-        # WACC 行应包含 beta 信息
-        assert "β=" in text
-        # DCF 段落应正常渲染（如果 scenario_fcff 数据充足）
+        assert "关键输入采用默认值（无风险利率（美元口径≠A 股折现币种））" in text
+        assert "| 情景 | 概率权重 |" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
+
+    @pytest.mark.parametrize(
+        ("beta", "erp", "missing"),
+        [(1.1, {}, "无风险利率"),
+         (None, {"cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)"}, "Beta")],
+    )
+    def test_wacc_insufficient_data_skips_section(self, beta, erp, missing):
+        """默认利率与默认 Beta 分别不能进入数值情景与概率表。
+
+        R1（2026-10-04）：Beta-only 用例的 rf 改为**确认 CNY**——旧夹具用无来源
+        的 `{"dgs10": 2.65}`，在新准入规则下同为「未确认」暂停，见下方反例。"""
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=beta),
+            "research": _make_research_dim(),
+        }
+        collection = {"market_structure": {"erp": erp}}
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        assert f"关键输入采用默认值（{missing}）" in text
+        if missing == "Beta":
+            assert "Beta 缺口：默认值（个股 K 线不足 12 个交易日）" in text
+        assert "| 情景 | 概率权重 |" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
+        assert "悲观情景" not in text
         _check_no_forbidden_words(text)
+
+    def test_unknown_source_rf_pauses_numeric_dcf(self):
+        """R1 反例：来源/币种未确认的 dgs10（无 source 线索）不得进入数值 DCF——
+        旧实现按「可用」放行，与暂停声明互斥。"""
+        dims = {
+            "financials": _make_dcf_render_financials(4, beta=1.1),
+            "research": _make_research_dim(),
+        }
+        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        text = _section_dcf_valuation(dims, collection, "000001")
+
+        assert "关键输入采用默认值（无风险利率（来源/币种未确认））" in text
+        assert "| 情景 | 概率权重 |" not in text
+        assert "D-⑤" not in text
+        assert "D-⑥" not in text
+        _check_no_forbidden_words(text)
+
+    def test_missing_rate_skips_beta_fetch(self, monkeypatch):
+        """已知利率缺口时，不为随后会暂停的 DCF 抓取沪深300基准。"""
+        from lib import render_dcf
+
+        monkeypatch.setattr(
+            render_dcf, "_dcf_try_wacc",
+            lambda *_args, **_kwargs: pytest.fail("利率缺口下不应计算 WACC"),
+        )
+        dims = {"financials": _make_dcf_render_financials(4, beta=None)}
+        text = _section_dcf_valuation(dims, {"market_structure": {}}, "000001")
+        assert "关键输入采用默认值（无风险利率）" in text
 
     def test_wacc_truly_blocked_when_wacc_le_terminal_g(self):
         """WACC ≤ terminal_g 时 DCF 段落跳过（与 beta 无关）。"""
@@ -805,8 +861,10 @@ class TestSectionDcfValuation:
             "financials": _make_dcf_render_financials(4, beta=0.3),
             "research": _make_research_dim(),
         }
-        # 极高无风险利率使 WACC 极端低（测试 wacc ≤ terminal_g 阻塞）
-        collection = {"market_structure": {"erp": {"dgs10": 0.5}}}  # 0.5% 10Y
+        # 极低无风险利率 + 低 beta 使 WACC ≤ terminal_g（测试该阻塞分支；
+        # R1 后须用确认 CNY 口径，否则先被币种闸门暂停、测不到该分支）
+        collection = {"market_structure": {"erp": {
+            "cn10y": 0.5, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)"}}}  # 0.5% 10Y
         text = _section_dcf_valuation(dims, collection, "000001")
 
         # 低无风险利率意味着低 WACC，可能 ≤ 2.5% terminal_g
@@ -823,7 +881,7 @@ class TestSectionDcfValuation:
             "financials": _make_dcf_render_financials(4, beta=1.1),
             "research": _make_research_dim(),
         }
-        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        collection = {"market_structure": {"erp": {"cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)"}}}
         text = _section_dcf_valuation(dims, collection, "000001", veto_triggered=True)
 
         assert "研究终止条件触发，估值段落已跳过" in text
@@ -841,7 +899,7 @@ class TestSectionDcfValuation:
                 {"quarter": "Q1", "avg_np_100m": 10.0, "n_analysts": 3},
             ]),
         }
-        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        collection = {"market_structure": {"erp": {"cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)"}}}
         text = _section_dcf_valuation(dims, collection, "000001")
 
         assert "机构一致预期增速 | 不可得" in text
@@ -852,7 +910,7 @@ class TestSectionDcfValuation:
             "financials": _make_dcf_render_financials(4, beta=1.1),
             "research": _make_research_dim(),
         }
-        collection = {"market_structure": {"erp": {"dgs10": 2.65}}}
+        collection = {"market_structure": {"erp": {"cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)"}}}
         with patch("lib.render._compute_metric_cagr", side_effect=AssertionError("should not call")):
             text = _section_dcf_valuation(dims, collection, "000001")
         assert "历史营收CAGR" in text
@@ -1435,6 +1493,95 @@ def _bb_financials(*, roe: float, ocf_ratio: float, net_profit: float = 1.2e8) -
         {"end_date": "20230630", "roe": roe, "net_profit": net_profit,
          "n_cashflow_act": ocf, "revenue": 3.2e9},
     ]
+
+
+class TestR15ChainLanguage:
+    """R15（2026-10-05 round-7）：引擎多空链不得输出无证据的确定因果/操作指向。
+
+    反例（round-6 独立复检）：低分位→「情绪悲观/负面预期已计入/回归动力/
+    股价上升」；跑赢行业→「资金主动配置/相对动量延续/有利于多头」。
+    修复后须为 读数 + 待验证解释 + 反向解释，且不含操作指向。
+    """
+
+    _FORBIDDEN = (
+        "推动股价上升", "资金主动配置该标的", "外资看多信号", "有利于多头",
+        "对多头不利", "压制股价", "市场已给予该标的中性以上定价",
+        "盈利依赖高周转或高杠杆驱动", "估值修复将推动股价",
+    )
+
+    @staticmethod
+    def _render(pe_pct: float, svi: float) -> str:
+        dims = {
+            "financials": {"data": _bb_financials(roe=20.0, ocf_ratio=0.9)},
+            "valuation": {"data": []},
+        }
+        market_structure = {
+            "sw_index": {"stock_vs_industry_pct": svi},
+            "northbound": {},
+            "moneyflow": {},
+            "erp": {},
+        }
+        # 注意：render_risk 在模块顶层 from .render_utils import 该函数——
+        # 补丁须打在 render_risk 的命名空间（打 lib.render 上不生效）。
+        with patch("lib.render_risk._v3_valuation_percentiles",
+                   return_value=(pe_pct, pe_pct, "偏低区" if pe_pct < 30 else "中性区")):
+            return _section_bull_bear(
+                {"industry_peers": {"sufficient": False}}, "600176", dims,
+                market_structure, {"signals": []}, val_cache=None,
+            )
+
+    def test_low_percentile_chain_is_read_not_causality(self):
+        text = self._render(pe_pct=4.1, svi=0.58)
+        for w in self._FORBIDDEN:
+            assert w not in text, w
+        assert "位置读数" in text
+        assert "不证明市场已计入" in text
+        assert "待验证解释" in text
+        assert "低 PE 陷阱" in text
+        # R15 round-8：低 PE 陷阱须给成立条件——静态恒等式 PE=P/E 下正盈利
+        # 下修抬高 PE；不得再写「低分位可由盈利下修本身造成」的旧分式错句。
+        assert "盈利下修本身造成" not in text
+        assert "PE=P/E" in text and "抬高" in text
+
+    def test_northbound_chain_title_is_windowed_not_persistence(self):
+        """R15 round-8：北向多头的触发量是近 10 日**累计净额**，标题不得外推
+        为「持续流入」（累计和为正不代表逐日持续；Codex round-7 复检）。"""
+        dims = {
+            "financials": {"data": _bb_financials(roe=20.0, ocf_ratio=0.9)},
+            "valuation": {"data": []},
+        }
+        market_structure = {
+            "sw_index": {},
+            "northbound": {"net_sum_10d": 600_000_000},
+            "moneyflow": {},
+            "erp": {},
+        }
+        with patch("lib.render_risk._v3_valuation_percentiles",
+                   return_value=(50.0, 50.0, "中性区")):
+            text = _section_bull_bear(
+                {"industry_peers": {"sufficient": False}}, "600176", dims,
+                market_structure, {"signals": []}, val_cache=None,
+            )
+        assert "北向资金近 10 日净流入" in text
+        assert "北向资金持续流入" not in text
+
+    def test_relative_strength_chain_is_read_not_active_allocation(self):
+        text = self._render(pe_pct=59.0, svi=0.58)
+        for w in self._FORBIDDEN:
+            assert w not in text, w
+        assert "相对涨跌读数" in text
+        assert "不能证明「资金主动配置」" in text  # 仅以否定形式出现
+        _check_no_forbidden_words(text)
+        assert "反向解释" in text
+        # 右侧概率支撑项（模块 6）：相对超额为读数措辞
+        from lib.render_risk import _section_left_right_probability
+        dims = {"financials": {"data": _bb_financials(roe=20.0, ocf_ratio=0.9)},
+                "valuation": {"data": []}}
+        ms = {"sw_index": {"stock_vs_industry_pct": 0.58}, "northbound": {},
+              "moneyflow": {}, "erp": {}}
+        t6 = _section_left_right_probability({}, "600176", dims, ms, val_cache=None)
+        assert "个股近 20 日相对行业超额" in t6
+        assert "个股跑赢行业" not in t6
 
 
 class TestSectionBullBearPadding:

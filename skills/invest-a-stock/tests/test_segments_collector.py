@@ -36,15 +36,39 @@ def _install(monkeypatch, frame_by_type: dict[str, pd.DataFrame]) -> None:
 # ── 纯函数：别名去重 ────────────────────────────────────────────────────────
 
 
-def test_dedupe_keeps_shorter_alias_name() -> None:
+def test_dedupe_merges_only_verified_aliases() -> None:
     rows = [
         {"bz_item": "电池材料及回收、矿产资源", "bz_sales": 1.881108e10, "bz_profit": 5.087196e9},
         {"bz_item": "电池材料及回收", "bz_sales": 1.881108e10, "bz_profit": 5.087196e9},
         {"bz_item": "储能电池系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
         {"bz_item": "储能系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
     ]
-    kept = {row["bz_item"] for row in src._dedupe_mainbz_rows(rows)}
-    assert kept == {"电池材料及回收", "储能系统"}
+    for row in rows:
+        row["end_date"] = "20260630"
+    kept = {row["bz_item"] for row in src._dedupe_mainbz_rows(
+        rows, symbol="300750", bz_type="P")}
+    assert kept == {"电池材料及回收", "储能电池系统", "储能系统"}
+
+
+@pytest.mark.parametrize("symbol,bz_type,period", [
+    ("600000", "P", "20260630"),
+    ("300750", "D", "20260630"),
+    ("300750", "P", "20251231"),
+])
+def test_verified_aliases_do_not_leak_to_other_contexts(symbol, bz_type, period) -> None:
+    rows = [
+        {"end_date": period, "bz_item": item, "bz_sales": 100.0, "bz_profit": None}
+        for item in ("电池材料及回收、矿产资源", "电池材料及回收")
+    ]
+    assert src._dedupe_mainbz_rows(rows, symbol=symbol, bz_type=bz_type) == rows
+
+
+def test_verified_aliases_with_different_values_are_preserved() -> None:
+    rows = [
+        {"end_date": "20260630", "bz_item": "国外", "bz_sales": 100.0, "bz_profit": None},
+        {"end_date": "20260630", "bz_item": "境外", "bz_sales": 200.0, "bz_profit": None},
+    ]
+    assert src._dedupe_mainbz_rows(rows, symbol="300750", bz_type="D") == rows
 
 
 def test_total_and_adjustment_rows_are_excluded() -> None:
@@ -94,10 +118,50 @@ def test_dedupe_keeps_distinct_segments() -> None:
         {"bz_item": "动力电池系统", "bz_sales": 1.921249e11, "bz_profit": 3.963278e10},
         {"bz_item": "其他业务", "bz_sales": 1.271964e10, "bz_profit": 8.781601e9},
     ]
+    for row in rows:
+        row["end_date"] = "20260630"
     assert len(src._dedupe_mainbz_rows(rows)) == 2
 
 
 # ── fetcher：解析 / 去重 / 剔 NaN / 派生毛利率 ──────────────────────────────
+
+
+@pytest.mark.parametrize("profit", [20.0, None])
+def test_mainbz_preserves_equal_values_across_periods(monkeypatch, profit) -> None:
+    _install(monkeypatch, {
+        "P": _mainbz_frame([
+            {"end_date": period, "bz_item": item, "bz_sales": 100.0, "bz_profit": profit}
+            for period in ("20251231", "20260630")
+            for item in ("储能系统", "储能系统")
+        ]),
+    })
+    rows = src._q_tushare_mainbz("300750")
+    assert rows is not None
+    assert len(rows) == 2
+    assert {(r["end_date"], r["item"]) for r in rows} == {
+        ("20251231", "储能系统"), ("20260630", "储能系统")}
+    assert all(r["sales"] == 100.0 and r["profit"] == profit for r in rows)
+
+
+@pytest.mark.parametrize("profit", [20.0, None])
+@pytest.mark.parametrize("bz_type,label,items", [
+    ("D", "region", ("华东", "华北")),
+    ("P", "product", ("产品甲", "产品乙")),
+])
+def test_mainbz_preserves_distinct_segments_with_equal_values(
+        monkeypatch, profit, bz_type, label, items) -> None:
+    _install(monkeypatch, {
+        bz_type: _mainbz_frame([
+            {"end_date": "20260630", "bz_item": item, "bz_sales": 100.0, "bz_profit": profit}
+            for item in items
+        ]),
+    })
+    rows = src._q_tushare_mainbz("300750")
+    assert rows is not None
+    assert len(rows) == 2
+    assert {r["item"] for r in rows} == set(items)
+    assert all(r["type"] == label and r["profit"] == profit for r in rows)
+    assert sum(r["sales"] for r in rows) == 200.0
 
 
 def test_mainbz_parses_dedupes_and_skips_nan(monkeypatch) -> None:
@@ -105,7 +169,7 @@ def test_mainbz_parses_dedupes_and_skips_nan(monkeypatch) -> None:
         "P": _mainbz_frame([
             {"end_date": "20260630", "bz_item": "动力电池系统", "bz_sales": 1.921249e11, "bz_profit": 3.963278e10},
             {"end_date": "20260630", "bz_item": "储能系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
-            {"end_date": "20260630", "bz_item": "储能电池系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
+            {"end_date": "20260630", "bz_item": "储能系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
             {"end_date": "20260630", "bz_item": "合计特别调整", "bz_sales": float("nan"), "bz_profit": float("nan")},
         ]),
         "D": _mainbz_frame([
@@ -137,7 +201,7 @@ def test_mainbz_deduped_total_matches_revenue_scale(monkeypatch) -> None:
         "P": _mainbz_frame([
             {"end_date": "20260630", "bz_item": "动力电池系统", "bz_sales": 1.921249e11, "bz_profit": 3.963278e10},
             {"end_date": "20260630", "bz_item": "储能系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
-            {"end_date": "20260630", "bz_item": "储能电池系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
+            {"end_date": "20260630", "bz_item": "储能系统", "bz_sales": 5.326097e10, "bz_profit": 1.276011e10},
             {"end_date": "20260630", "bz_item": "电池材料及回收", "bz_sales": 1.881108e10, "bz_profit": 5.087196e9},
             {"end_date": "20260630", "bz_item": "其他业务", "bz_sales": 1.271964e10, "bz_profit": 8.781601e9},
         ]),

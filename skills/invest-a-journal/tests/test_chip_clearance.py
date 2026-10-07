@@ -263,7 +263,7 @@ def test_snap_none_bridge_down_falls_back_to_snapshot(monkeypatch):
     # 模块级 _fetch_* 全失败 → snapshot() 返回 all_failed（无网络）
     for name in ("_fetch_margin", "_fetch_ad_ratio", "_fetch_limit_pools",
                  "_fetch_turnover", "_fetch_erp", "_fetch_pcr",
-                 "_fetch_below_book_pct", "_fetch_northbound"):
+                 "_fetch_below_book_pct", "_fetch_northbound", "_fetch_futures"):
         monkeypatch.setattr(
             market_microstructure, name,
             lambda result, _n=name: result["_errors"].append(f"{_n}: boom"))

@@ -15,11 +15,20 @@ from typing import Any
 
 from lib.md_subset import MarkdownSubsetError, render_markdown
 
+# 共享四维标签语法（R12 round-4）：掩码规则唯一来源在 skills/lib/evidence_tags.py，
+# 禁止在此复制正则。经既有 _invest_path shim 保证 skills/lib 在 sys.path。
+from ._invest_path import ensure_skills_lib_on_path  # noqa: E402
+
+ensure_skills_lib_on_path()
+
+from evidence_tags import EVIDENCE_LABEL_RE, mask_four_dim_tags  # noqa: E402
+
 REQUIRED_FIELDS = ("module", "title", "facts_md", "analysis_md", "evidence_tag", "position")
-MAX_LEN = {"module": 64, "title": 128, "facts_md": 20_000, "analysis_md": 40_000, "evidence_tag": 32, "position": 64}
+MAX_LEN = {"module": 64, "title": 128, "facts_md": 20_000, "analysis_md": 40_000, "evidence_tag": 128, "position": 64}
 POSITION_ALLOWED = {"overview", "valuation", "financials", "technicals", "northbound",
-                    "holders", "events", "refs", "research", "conclusion", "analysis"}
-_EVIDENCE_RE = re.compile(r"^([A-Da-d]{1,2}|[Ll][1-4])")
+                    "holders", "events", "refs", "research", "conclusion", "analysis",
+                    "bull_chain"}
+_EVIDENCE_RE = EVIDENCE_LABEL_RE
 
 # --- 事实绑定（v0.3.1 #4）------------------------------------------------------
 # 缺陷记录：此前 analysis.json **无 fact_id 字段**，段内数字未经任何来源校验
@@ -67,6 +76,10 @@ _MASKED_STRUCTURAL_RE = re.compile(
     r"|\d{1,2}:\d{2}"            # 时刻：09:30
     r"|v\d+(?:\.\d+)+"           # v0.3.1
     r"|\d+(?:\.\d+){2,}"         # 0.3.1（无 v 前缀）
+    # 注：SOP-EV `[证据强度: …]` 标签跨度**不在此列**——掩码规则唯一来源在
+    # skills/lib/evidence_tags.py（R12 round-4）：只有完全匹配合法四维语法的
+    # 标签被掩码；旧实现 `\[证据强度[:：][^\[\]]{0,80}\]` 会整段掩掉任意内容
+    # （`[证据强度: ✅ 公司盈利增长999%]` 的 999 因此逃过绑定校验）。
 )
 
 # URL 内的数字不要求绑定 fact——但**只豁免 URL 自身跨度内的 token**。
@@ -340,8 +353,10 @@ def _validate_fact_numbers(sec: dict) -> list[str]:
     for field in ("facts_md", "analysis_md"):
         raw = str(sec.get(field) or "")
         # 等长空格替换 → 各 token 的 span 与原文一致，_is_exempt_num 的
-        # 前后文判断语义不变
-        text = _MASKED_STRUCTURAL_RE.sub(lambda m: " " * len(m.group(0)), raw)
+        # 前后文判断语义不变。先掩**完全合法**的四维标签（R12：非法标签
+        # 原样保留，其中的数字照常要求绑定），再掩其余结构形态。
+        text = mask_four_dim_tags(raw)
+        text = _MASKED_STRUCTURAL_RE.sub(lambda m: " " * len(m.group(0)), text)
         for m in _NUM_TOKEN_RE.finditer(text):
             if _is_exempt_num(text, m) or _fact_value_matches(m.group(0), facts):
                 continue
@@ -351,6 +366,19 @@ def _validate_fact_numbers(sec: dict) -> list[str]:
 
 class AnalysisSchemaError(ValueError):
     pass
+
+
+# 引擎事件表专用元数据（R14/MC-02，2026-10-07 主线收尾）：事件时间线表由渲染器
+# 自封存 events 输出，其逐字表头与公告来源尾注（`/ N 条事件[；行指纹 …]`）是
+# **引擎输出标识**。自由分析文本不得伪造——否则可借「登记表头 + 来源尾注
+# （+公开算法自算行指纹）」在 **[分析]** 区冒充引擎表并取得豁免
+# （Codex r14-self-fingerprint-attack 真实入口复现：validate/preflight/report=0）。
+# 引用事件请用文字 + `[来源: 封存 events 字段]` 绑定；需要全量事件清单时由引擎
+# 段落呈现。行指纹自洽只作**完整性**校验，不构成来源身份证明。
+_ENGINE_EVENT_TABLE_HEADER_RE = re.compile(
+    r"\|\s*日期\s*\|\s*类型\s*\|\s*公告标题\s*\|\s*涉及维度（类型默认）\s*\|")
+_ENGINE_EVENT_TABLE_FOOTER_RE = re.compile(
+    r"\[来源\s*[:：]\s*akshare stock_individual_notice_report\s*/\s*\d+\s*条事件[^\]]*\]")
 
 
 def _validate_one(sec: dict) -> list[str]:
@@ -369,8 +397,8 @@ def _validate_one(sec: dict) -> list[str]:
             errs.append(f"len:{k}")
     if errs:
         return errs
-    if not _EVIDENCE_RE.match(sec["evidence_tag"]):
-        errs.append("evidence_tag 须为证据等级（A/B/C/D 或 L1-L4）或四维标签首字标记")
+    if not _EVIDENCE_RE.fullmatch(sec["evidence_tag"].strip()):
+        errs.append("evidence_tag 须为等级（A/B/C/D 或 L1-L4），可附完整四维序列（强度、来源、时效、交叉）")
     if sec["position"] not in POSITION_ALLOWED:
         errs.append(f"position 不在允许集合: {sec['position']}")
     if not errs:
@@ -381,6 +409,12 @@ def _validate_one(sec: dict) -> list[str]:
                 render_markdown(sec[k])
             except MarkdownSubsetError as exc:
                 errs.append(f"markdown:{k}:{exc}")
+            if (_ENGINE_EVENT_TABLE_HEADER_RE.search(sec[k])
+                    or _ENGINE_EVENT_TABLE_FOOTER_RE.search(sec[k])):
+                errs.append(
+                    f"{k}:禁止伪造引擎事件表元数据（事件时间线表头/公告来源尾注"
+                    "——该表由渲染器自封存 events 输出，分析文本引用事件请用"
+                    "文字 + [来源: 封存 events 字段] 绑定；行指纹只作完整性校验）")
         errs.extend(_validate_fact_refs(sec, known_ids))
         errs.extend(_validate_fact_numbers(sec))
     return errs
@@ -409,6 +443,7 @@ def validate_sections(raw: list[dict]) -> list[str]:
 # 未命中任何槽位的段仍走尾部注记（零回归）。
 OVERVIEW_KEYS = frozenset({"overview", "executive_summary"})
 BEAR_CHAIN_KEYS = frozenset({"bear_chain"})
+BULL_CHAIN_KEYS = frozenset({"bull_chain"})
 MDA_NARRATIVE_KEYS = frozenset({"mda_narrative"})
 EVENT_CLASSIFICATION_KEYS = frozenset({"event_classification"})
 PARTICIPANT_SCAN_KEYS = frozenset({"participant_scan"})
@@ -420,6 +455,26 @@ PARTICIPANT_SCAN_KEYS = frozenset({"participant_scan"})
 # 占位、html 反而正常。md/html 同源是这条路径的既有契约，故判定上收到此常量，
 # 两个渲染器共用（见 render_html.has_events_analysis 与 _v3._section_events_timeline）。
 EVENTS_HOST_KEYS = EVENT_CLASSIFICATION_KEYS | {"events"}
+
+# 首版 MD 的占位串 → 必须命中的槽位（`missing_draft_slots` 的判据表）。
+#
+# **每条占位串都归渲染层所有**，本表只是它的镜像：措辞改了而这里没跟着改，
+# 闸门会静默退化成 no-op——`--draft` 照旧打印「✅ 校验通过」，占位却进了终稿
+# （report_qc 用的是宽容正则 `_EMPTY_BASIS_RE`，多半仍会命中，于是更难发现）。
+# 故 `tests/test_fast_report_pipeline.py::test_draft_slot_markers_match_render_output`
+# 对**渲染实际输出**断言这些字面量：改词即红。
+DRAFT_SLOT_MARKERS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("bull_chain", "[待 Claude 核对多头依据]", BULL_CHAIN_KEYS),
+    ("bull_chain", "当前数据未形成明确多头逻辑链", BULL_CHAIN_KEYS),
+    ("bear_chain", "当前数据未形成明确空头逻辑链", BEAR_CHAIN_KEYS),
+    ("mda_narrative", "待 Claude 填充管理层论述解读", MDA_NARRATIVE_KEYS),
+    ("participant_scan", "分析提示（Claude 填写）", PARTICIPANT_SCAN_KEYS),
+    ("event_classification", "待 Claude 验证", EVENTS_HOST_KEYS),
+    # 事件槽位的**第二个**产出点：A-5 管理层时间线单元格（_v3 的 ev_cell）。
+    # 漏掉它则「首版 MD 带此占位」直接过闸，直到流水线末尾才被 report_qc 以
+    # error 级拦下（要重跑整次 collect+render）。同一槽位 → 同名去重。
+    ("event_classification", "[待 Claude report 阶段填充]", EVENTS_HOST_KEYS),
+)
 
 
 def _keys_of(sec: dict) -> set[str]:
@@ -444,6 +499,25 @@ def find_section(analysis: list[dict] | None, keys: frozenset[str]) -> dict | No
     return None
 
 
+def missing_draft_slots(analysis: list[dict], draft_text: str) -> list[str]:
+    """由首版 MD 的实际占位推导必须命中的分析槽位。
+
+    首版报告是本次 collection 的条件渲染结果；仅检查本次真的出现的宿主，
+    避免要求没有 MD&A 卡或参与者扫描行的报告硬填无落点的段。
+
+    判据表见 ``DRAFT_SLOT_MARKERS``（占位串由渲染层产出，本模块只做镜像）。
+    """
+    markers = DRAFT_SLOT_MARKERS
+    missing: list[str] = []
+    for name, marker, keys in markers:
+        if marker not in draft_text or name in missing:
+            continue
+        section = find_section(analysis, keys)
+        if not section or not str(section.get("analysis_md") or "").strip():
+            missing.append(name)
+    return missing
+
+
 def split_overview(analysis: list[dict] | None) -> tuple[list[dict], list[dict]]:
     """切出 overview 槽位的段，返回 ``(overview 段, 其余段)``。
 
@@ -461,6 +535,7 @@ def split_overview(analysis: list[dict] | None) -> tuple[list[dict], list[dict]]
 INLINE_SLOT_KEYS = (
     OVERVIEW_KEYS
     | BEAR_CHAIN_KEYS
+    | BULL_CHAIN_KEYS
     | MDA_NARRATIVE_KEYS
     | EVENT_CLASSIFICATION_KEYS
     | PARTICIPANT_SCAN_KEYS
@@ -470,59 +545,6 @@ INLINE_SLOT_KEYS = (
 def is_inline_slotted(sec: dict) -> bool:
     """段是否命中任一就地渲染槽位。"""
     return bool(_keys_of(sec) & INLINE_SLOT_KEYS)
-
-
-# --- 首屏「判断索引」的共用判据与标签（md / html 单点定义）------------------------
-# 与 split_overview / EVENTS_HOST_KEYS 同源的理由一样：索引的成员判据和标签规则
-# 若在 md 与 html 各写一份，必然漂移（见上面 EVENTS_HOST_KEYS 的记录）。故集中在此，
-# 两个渲染器只做「怎么显示」，不做「谁入选、叫什么」。
-#
-# 排除 = overview 槽位（另有 5 分钟阅读区）+ 补充材料槽位（管理层叙事 / 参与方扫描
-# 不占首屏名额）；一律走 `_keys_of` 归一化比对，大小写与首尾空白变体同样命中。
-INDEX_EXCLUDED_KEYS = OVERVIEW_KEYS | MDA_NARRATIVE_KEYS | PARTICIPANT_SCAN_KEYS
-
-# 标签取值：`module` 是写作者自选的自由文本（schema 只校验长度 ≤64），实测语料里
-# 六成条目写成内部槽位键（bear_chain / financials / event_classification …），而
-# `position` 才是受校验枚举（POSITION_ALLOWED）。故**内部 slug 不出读者面**：
-# 纯 ASCII 标识符（含大小写混写，如 Capital_Flow）→ 回退 position 中文名；
-# 含中文的 module（事件归因 …）原样保留。
-_INDEX_SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$", re.I)
-POSITION_LABELS = {
-    "overview": "总览",
-    "valuation": "估值",
-    "financials": "财务",
-    "technicals": "技术面",
-    "northbound": "北向资金",
-    "holders": "股东与筹码",
-    "events": "事件",
-    "refs": "参考资料",
-    "research": "研究",
-    "conclusion": "结论",
-    "analysis": "分析",
-}
-
-
-def index_entries(analysis: list[dict] | None) -> list[tuple[str, str]]:
-    """首屏判断索引的 ``(标签, 标题)`` 列表；md 与 html 共用同一份。
-
-    无标题的段跳过（没标题的索引条目没有信息量）；全部被跳过 → 空列表，
-    调用方据此让整节不渲染（避免只剩一个空标题）。
-    """
-    entries: list[tuple[str, str]] = []
-    for sec in (analysis or []):
-        if not isinstance(sec, dict) or _keys_of(sec) & INDEX_EXCLUDED_KEYS:
-            continue
-        title = str(sec.get("title") or "").strip()
-        if not title:
-            continue
-        module = str(sec.get("module") or "").strip()
-        if module and not _INDEX_SLUG_RE.match(module):
-            label = module
-        else:
-            label = POSITION_LABELS.get(
-                str(sec.get("position") or "").strip().lower(), "分析")
-        entries.append((label, title))
-    return entries
 
 
 # --- 就地消费登记（渲染期状态）--------------------------------------------------

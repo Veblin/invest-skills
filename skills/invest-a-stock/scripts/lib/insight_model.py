@@ -83,11 +83,23 @@ _CAUSAL_RE = re.compile(r"导致|引起|造成|致使|(?<!未)(?<!不)证实|证
 _CHAIN_NOTE = "本条为工程约定，无同行评审先例；不得作为核心论证。"
 
 # 事件类型 → 中文标签（引擎 events 维度）
-_EVENT_TYPE_LABELS = {
-    "buyback": "回购", "equity_incentive": "股权激励", "other": "其他公告",
-    "dividend": "分红", "warning": "业绩预警", "litigation": "诉讼",
-    "increase_holding": "增持", "decrease_holding": "减持", "merger": "并购",
-}
+def _event_label(event_type: str) -> str:
+    """事件类型 → 中文标签（委托 `analysis_templates.event_type_label`，单一源）。
+
+    此前本模块另维护一张 `_EVENT_TYPE_LABELS`，已漂移到含 `warning`/`merger`/
+    `increase_holding` 等**早已不存在**的键，而新增类型则直接泄漏英文标识进中文报告——
+    缺键时 `.get()` 回落成原样字符串、不报错，所以漂移长期不可见。
+    """
+    try:
+        from .analysis_templates import event_type_label
+
+        return event_type_label(event_type)
+    except Exception:  # noqa: BLE001 —— 标签取不到不得影响事实生成
+        # 回落**中文占位**而非原标识：此处产出的是中文报告的事实串（如 `回购×1`），
+        # 直接回原标识正是本函数要修的那种英文键泄漏。
+        # （`event_type_label` 自身对未知键「退回原标识、不臆造译名」是有意设计，
+        # 不改；这里只管取不到标签的异常路径。）
+        return "未知类型"
 
 # 当日异动阈值：|涨跌幅| ≥ 5% 视为异动，需做公告层排查
 _INTRADAY_MOVE_THRESHOLD_PCT = 5.0
@@ -280,7 +292,8 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
                                formula="(latest revenue/same period prior year revenue-1)*100"))
         ocf = _number(latest.get("n_cashflow_act", latest.get("ocf")))
         net_profit = _number(latest.get("net_profit"))
-        if ocf is not None and net_profit not in (None, 0):
+        # C1-b：亏损期比值无解释力（负值会扭曲「低于 0.6」描述），不出该 fact
+        if ocf is not None and net_profit is not None and net_profit > 0:
             facts.append(_fact("financials.ocf_to_np.latest", round(ocf / net_profit, 3), as_of=as_of,
                                unit="ratio", basis="经营现金流/归母净利润", source_id=sid,
                                formula="n_cashflow_act/net_profit"))
@@ -314,7 +327,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         types = summary.get("top_types") or []
         if types:
             named = "、".join(
-                f"{_EVENT_TYPE_LABELS.get(str(t.get('type')), str(t.get('type')))}×{t.get('count')}"
+                f"{_event_label(str(t.get('type')))}×{t.get('count')}"
                 for t in types[:4] if isinstance(t, dict) and t.get("type")
             )
             if named:
@@ -358,7 +371,7 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
                                  verification={"event": "下一报告期", "test": "核对盈利变化与估值口径是否同步更新"}))
     elif pe and pe["value"] <= 0:
         # v0.3.0 B3：亏损期（PE 非正）无分位可言 → 不给「位置」结论，改为显式
-        # 披露「分位不适用」，避免读者把负 PE 误读为低估（CLAUDE.md 估值分位
+        # 披露「分位不适用」，避免读者把负 PE 误读为低估（report-conventions.md §9.2 估值分位
         # 规则 2：亏损期标的须标注仅作位置参考、不反映估值贵贱）。
         findings.append(_finding(
             "valuation-pe-nonpositive",
@@ -473,6 +486,14 @@ def load_snapshot_diff(symbol: str, collection: dict[str, Any]) -> tuple[dict[st
     return diff, "ok"
 
 
+def _has_event_change(events: Any) -> bool:
+    """仅把可观察的事件数量、类型和低信号变化算作新增发现。"""
+    return isinstance(events, dict) and bool(
+        events.get("count_change") or events.get("new_types")
+        or events.get("removed_types") or events.get("low_signal_change")
+    )
+
+
 def build_discoveries(key_diff: dict[str, Any] | None, *, reason: str = "no_history") -> dict[str, Any]:
     """把 store 的关键字段对比归一化为渲染用的发现区块。
 
@@ -522,7 +543,7 @@ def build_discoveries(key_diff: dict[str, Any] | None, *, reason: str = "no_hist
     events = key_diff.get("events")
     block["events"] = events if isinstance(events, dict) and events else None
 
-    if block["items"] or block["events"]:
+    if block["items"] or _has_event_change(block["events"]):
         block["status"] = "changed"
         block["reason"] = "ok"
     else:
@@ -767,12 +788,17 @@ def _validate_discoveries(block: Any) -> list[str]:
     items = block.get("items")
     if not isinstance(items, list):
         return ["discoveries.items 必须是列表"]
+    events = block.get("events")
     if status == "none":
         if items:
             errors.append("discoveries.status 为 none 时 items 必须为空")
+        if _has_event_change(events):
+            errors.append("discoveries.status 为 none 时不得包含事件变化")
         return errors
-    if not items:
-        errors.append("discoveries.status 为 changed 时 items 不得为空")
+    if events is not None and not isinstance(events, dict):
+        errors.append("discoveries.events 必须是对象或 null")
+    if not items and not _has_event_change(events):
+        errors.append("discoveries.status 为 changed 时必须有字段或事件变化")
     if len(items) > MAX_DISCOVERIES:
         errors.append(f"discoveries 条目不得超过 {MAX_DISCOVERIES} 条")
     for item in items:
@@ -788,9 +814,6 @@ def _validate_discoveries(block: Any) -> list[str]:
         errors.append("discoveries.status 为 changed 时必须带 old_at 与 new_at")
     if not block.get("old_at_label") or not block.get("new_at_label"):
         errors.append("discoveries 的时间标签缺失（须为北京时间，不得回落 ISO 直出）")
-    events = block.get("events")
-    if events is not None and not isinstance(events, dict):
-        errors.append("discoveries.events 必须是对象或 null")
     return errors
 
 

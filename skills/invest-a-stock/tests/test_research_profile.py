@@ -285,6 +285,7 @@ def test_cli_sidecar_carries_generation(tmp_path: Path,
 
     monkeypatch.setattr(invest, "_HAS_STORE", False)
     monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _RENDER_COLLECTION)
+    monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
     monkeypatch.setattr(invest.render, "render", lambda *a, **k: "# report\n")
 
     outdir = tmp_path / "reports"
@@ -359,6 +360,7 @@ def test_cli_persists_profile_sidecar(tmp_path: Path, monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(invest, "_HAS_STORE", False)
     monkeypatch.setattr(invest.collector, "collect_all", lambda *a, **k: _RENDER_COLLECTION)
+    monkeypatch.setattr(invest, "_ensure_render_ready", lambda *a, **k: None)
     monkeypatch.setattr(invest.render, "render", lambda *a, **k: "# report\n")
 
     outdir = tmp_path / "reports"
@@ -390,3 +392,250 @@ def test_cli_rejects_invalid_profile_before_collect(
     assert invest.cmd_report(_report_args(**overrides)) == 2
     assert collected == [], "校验失败时不得发起采集"
     assert needle in capsys.readouterr().err
+
+
+def test_report_rejects_profile_different_from_draft_before_collect(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import invest
+
+    draft = tmp_path / "first.draft.md"
+    draft.write_text("# 初稿\n", encoding="utf-8")
+    draft.with_suffix(".profile.json").write_text(
+        json.dumps({"profile": {"style": "成长"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    collected = []
+    monkeypatch.setattr(invest, "_HAS_STORE", False)
+    monkeypatch.setattr(invest.collector, "collect_all",
+                        lambda *a, **k: collected.append(1) or _RENDER_COLLECTION)
+
+    rc = invest.cmd_report(_report_args(
+        style="价值", draft=str(draft), analysis=str(tmp_path / "analysis.json"),
+    ))
+    assert rc == 2
+    assert collected == []
+    assert "初稿与本次报告的研究档案不一致" in capsys.readouterr().err
+
+
+def test_fixed_input_explicit_style_reassembles_render_copy(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3（2026-10-04 独立复检）：固定快照 + 显式 --style 时，渲染副本的
+    style_match 必须按本次档案重装配（与 profile 侧车同源）。
+
+    反例：`report <symbol> --collection-id … --style 价值` 曾 exit 0 但首部/
+    profile=价值、正文自评=成长（装配点被 `if not fixed_input` 排除）。
+    封存体不写回、不改哈希——断言只看渲染副本；未传 --style 时保持封存值。
+    """
+    import invest
+    from lib import style_match
+
+    sealed = {
+        **_RENDER_COLLECTION,
+        "style_match": {"style": "成长", "driver": None, "journal_driver": None,
+                        "state": "中性", "reason": "成长 × 未定义映射",
+                        "hint": None},
+    }
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: dict(sealed))
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+
+    captured: dict = {}
+
+    def _capture(collection, *_a, **_k):
+        captured["collection"] = collection
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", _capture)
+
+    rc = invest.cmd_report(_report_args(collection_id=173, style="价值", emit="compact"))
+    assert rc == 0
+    assert captured["collection"]["style_match"]["style"] == "价值"
+
+    captured.clear()
+    rc = invest.cmd_report(_report_args(collection_id=173, emit="compact"))
+    assert rc == 0
+    assert captured["collection"]["style_match"]["style"] == "成长"  # 封存值保持
+
+
+def test_fixed_input_style_does_not_mutate_sealed_collection(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 二轮（2026-10-04 独立复检）：风格重装配只作用于渲染视图，
+    封存体对象本身不被改写（渲染视图为浅拷贝）。"""
+    import invest
+    from lib import style_match
+
+    sealed_style = {"style": "成长", "driver": None, "journal_driver": None,
+                    "state": "中性", "reason": "成长 × 未定义映射", "hint": None}
+    sealed = {**_RENDER_COLLECTION, "style_match": dict(sealed_style)}
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: sealed)
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+
+    captured: dict = {}
+
+    def _capture(collection, *_a, **_k):
+        captured["collection"] = collection
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", _capture)
+    rc = invest.cmd_report(_report_args(collection_id=173, style="价值", emit="compact"))
+    assert rc == 0
+    assert captured["collection"]["style_match"]["style"] == "价值"
+    assert captured["collection"] is not sealed          # 视图是副本
+    assert sealed["style_match"] == sealed_style          # 封存体未改写
+
+
+def test_fixed_input_json_export_keeps_sealed_hash(
+        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """R3 二轮：`--emit json` 导出**原封存体**，digest 与 `_meta.report_input_hash`
+    自洽（反例：一轮实现改 result.style_match → 导出 digest 与哈希失配）。"""
+    import invest
+    from lib import style_match
+    from lib.report_snapshot import digest
+
+    sealed = {
+        **_RENDER_COLLECTION,
+        "style_match": {"style": "成长", "driver": None, "journal_driver": None,
+                        "state": "中性", "reason": "成长 × 未定义映射", "hint": None},
+    }
+    sealed_hash = digest({**sealed, "_meta": {}})
+    sealed["_meta"] = {"report_input_hash": sealed_hash}
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: sealed)
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda *_a, **_k: None)
+
+    rc = invest.cmd_report(_report_args(collection_id=173, style="价值", emit="json"))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    meta = payload["_meta"]
+    recomputed = digest({k: v for k, v in payload.items() if k != "_meta"}
+                        | {"_meta": {k: v for k, v in meta.items()
+                                     if k != "report_input_hash"}})
+    assert meta["report_input_hash"] == sealed_hash == recomputed
+    assert payload["style_match"]["style"] == "成长"   # 导出=封存体，非渲染视图
+
+
+def test_fixed_input_default_style_follows_profile_archive(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3 二轮：未显式 --style 时，视图风格与 profile 侧车同源回落
+    user_style.json——避免「profile=价值 而正文自评=成长」的缺省冲突。"""
+    import invest
+    from lib import style_match
+
+    sealed = {**_RENDER_COLLECTION,
+              "style_match": {"style": "成长", "driver": None, "journal_driver": None,
+                              "state": "中性", "reason": "成长 × 未定义映射",
+                              "hint": None}}
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _a: dict(sealed))
+    monkeypatch.setattr(invest, "_print_writing_aids", lambda _r: None)
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+    monkeypatch.setattr(style_match, "load_style", lambda: "价值")
+
+    captured: dict = {}
+
+    def _capture(coll, *_a, **_k):
+        captured["c"] = coll
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", _capture)
+    rc = invest.cmd_report(_report_args(collection_id=173, emit="compact"))
+    assert rc == 0
+    assert captured["c"]["style_match"]["style"] == "价值"
+
+
+def test_resume_without_new_collection_preserves_original_end_time(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    import invest
+    from lib import lhb, style_match
+
+    original_end = "2026-09-29T07:00:00+00:00"
+    cached = {
+        **_RENDER_COLLECTION,
+        "collection_started_at": "2026-09-29T06:58:00+00:00",
+        "collection_completed_at": original_end,
+    }
+    seen: dict = {}
+
+    monkeypatch.setattr(invest, "_HAS_STORE", True)
+    monkeypatch.setattr(invest.store_mod, "get_pipeline_progress", lambda _s: {"collect": True})
+    monkeypatch.setattr(invest, "_try_resume_collection", lambda _s: dict(cached))
+    monkeypatch.setattr(invest, "_resume_cache_compatible", lambda *_a: True)
+    monkeypatch.setattr(invest, "_ensure_render_ready", lambda *_a: None)
+    monkeypatch.setattr(invest.collector, "collect_all", lambda *_a, **_k: pytest.fail("不应重采"))
+    monkeypatch.setattr(lhb, "attach_limit_streak_dims", lambda *_a: False)
+    monkeypatch.setattr(style_match, "assemble_style_match", lambda *_a: None)
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda *_a, **_k: None)
+
+    def capture_render(collection, *_args, **_kwargs):
+        seen["completed_at"] = collection.get("collection_completed_at")
+        return "ok"
+
+    monkeypatch.setattr(invest.render, "render", capture_render)
+    assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
+    assert seen["completed_at"] == original_end
+
+
+# ── issue #35 E（2026-10-02 用户裁决）：未封存快照 --resume 现场补采须显式提示 ──
+
+
+def _patch_resume_harness(monkeypatch, cached: dict) -> dict:
+    import invest
+    from lib import lhb, style_match
+
+    seen = {"ensure": 0}
+    monkeypatch.setattr(invest, "_HAS_STORE", True)
+    monkeypatch.setattr(invest.store_mod, "get_pipeline_progress", lambda _s: {"collect": True})
+    monkeypatch.setattr(invest, "_try_resume_collection", lambda _s: dict(cached))
+    monkeypatch.setattr(invest, "_resume_cache_compatible", lambda *_a: True)
+
+    def record_ensure(*_a):
+        seen["ensure"] += 1
+
+    monkeypatch.setattr(invest, "_ensure_render_ready", record_ensure)
+    monkeypatch.setattr(invest.collector, "collect_all", lambda *_a, **_k: pytest.fail("不应重采"))
+    monkeypatch.setattr(lhb, "attach_limit_streak_dims", lambda *_a: False)
+    monkeypatch.setattr(style_match, "assemble_style_match", lambda *_a: None)
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda *_a, **_k: None)
+    monkeypatch.setattr(invest.render, "render", lambda *_a, **_k: "ok")
+    return seen
+
+
+def test_report_resume_unsealed_warns_live_fetch(
+        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """未封存快照：保持现场补采（行为不变），但补采前必须向 stderr 显式提示。"""
+    import invest
+
+    cached = {
+        **_RENDER_COLLECTION,
+        "collection_started_at": "2026-09-29T06:58:00+00:00",
+        "collection_completed_at": "2026-09-29T07:00:00+00:00",
+    }
+    seen = _patch_resume_harness(monkeypatch, cached)
+
+    assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
+    err = capsys.readouterr().err
+    assert err.count("未封存") == 1
+    assert "现场补采" in err
+    assert "--collection-id" in err
+    assert seen["ensure"] == 1  # 兼容路线保留：仍然现场补采
+
+
+def test_report_resume_sealed_prints_no_notice(
+        monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """已封存快照：无需提示（也不得声称会补采）。"""
+    import invest
+
+    cached = {
+        **_RENDER_COLLECTION,
+        "_meta": {"report_input_hash": "deadbeef"},
+        "collection_started_at": "2026-09-29T06:58:00+00:00",
+        "collection_completed_at": "2026-09-29T07:00:00+00:00",
+    }
+    seen = _patch_resume_harness(monkeypatch, cached)
+
+    assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
+    assert "未封存" not in capsys.readouterr().err
+    assert seen["ensure"] == 1

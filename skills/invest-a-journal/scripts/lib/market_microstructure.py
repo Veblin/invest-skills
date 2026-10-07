@@ -23,6 +23,7 @@ from dates import (  # noqa: E402
     shanghai_session_date_degraded,
     shanghai_today,
 )
+from freshness import FUTURES_BASIS_STALE_TRADING_DAYS, trading_day_lag  # noqa: E402
 from lib import env  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from lib.proxy import akshare_direct_session  # noqa: E402
@@ -66,6 +67,7 @@ _MARKET_SNAPSHOT_COLUMNS = (
     "erp", "pcr", "below_book_pct",
     "northbound_net_inflow", "northbound_direction", "northbound_source",
     "futures_basis_pct",
+    "futures_basis_date",  # v0.3.1（issue #34）：与 pct 成对写入的数据日期（YYYYMMDD）
     "env_label",
     # v0.2.8 数据新鲜度审计（W1/code-review #4）：persist 列须含审计字段，
     # 否则 collected_at 落库为 SQLite 默认 UTC、data_note 直接丢失
@@ -118,6 +120,7 @@ def snapshot() -> dict[str, Any]:
         "northbound_source": None,           # "direct" | "derived" | None
         # 资金面 — 股指期货（v0.2.6 F 系列：机构对冲行为，状态度量非预测）
         "futures_basis_pct": None,           # IC 当月基差%（负 = 贴水）
+        "futures_basis_date": None,          # 该读数的数据日期（YYYYMMDD，issue #34）
         # 标签
         "label_leverage": None,
         "label_breadth": None,
@@ -304,6 +307,10 @@ def save_snapshot() -> dict[str, Any] | None:
 def load_history(days: int = 60) -> list[dict]:
     """从 market_snapshots 表读取近 N 日记录。
 
+    issue #34：每行基差经 `_apply_basis_gate` 收敛为可引用视图——**行内相对判定**
+    （数据日期 vs 该行自身 date）。无日期（全部历史行）/滞后/未来的值返回 None
+    并附 `futures_basis_note`；原始审计读数仍在库内。
+
     Returns
     -------
     list[dict]
@@ -311,7 +318,8 @@ def load_history(days: int = 60) -> list[dict]:
     """
     c = _conn()
     try:
-        return load_recent_rows(c, "market_snapshots", limit=int(days))
+        rows = load_recent_rows(c, "market_snapshots", limit=int(days))
+        return [_apply_basis_gate(dict(r)) for r in rows]
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return []
@@ -321,13 +329,18 @@ def load_history(days: int = 60) -> list[dict]:
 
 
 def latest_snapshot() -> dict | None:
-    """获取最近一条 market_snapshot。"""
+    """获取最近一条 market_snapshot（基差经**当期**可引用判定，issue #34）。
+
+    与 `load_history` 的差别：本函数代表「当前状态」，滞后又以**当日 session** 判定
+    （历史行相对判定会放过「当时新鲜、现已久远」的值）；不可引用 → 值置 None +
+    `futures_basis_note`。
+    """
     c = _conn()
     try:
         row = c.execute(
             "SELECT * FROM market_snapshots ORDER BY date DESC LIMIT 1",
         ).fetchone()
-        return dict(row) if row else None
+        return _apply_basis_gate(dict(row), str(shanghai_session_date())) if row else None
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return None
@@ -814,8 +827,9 @@ def _compute_labels_v2(snap: dict, history: list[dict]) -> None:
     else:
         parts.append("北向数据暂不可用")
     basis = snap.get("futures_basis_pct")
-    if basis is not None:
-        parts.append(f"IC 基差 {basis:+.2f}%")
+    if basis is not None and basis_is_current(snap)[0]:  # issue #34：同日期规则
+        asof = _fmt_ymd(snap.get("futures_basis_date"))
+        parts.append(f"IC 基差 {basis:+.2f}%" + (f"（截至 {asof}）" if asof else ""))
     snap["label_capital_flow"] = "；".join(parts)
 
     # --- 综合环境标签（JSON，供 journal 注入） ---
@@ -926,8 +940,9 @@ def _compute_labels(result: dict) -> None:
         else:
             parts.append(f"北向 {mv_str}（季度快照，日频不可得）")
     basis = result.get("futures_basis_pct")
-    if basis is not None:
-        parts.append(f"IC 基差 {basis:+.2f}%")
+    if basis is not None and basis_is_current(result)[0]:  # issue #34：同日期规则
+        asof = _fmt_ymd(result.get("futures_basis_date"))
+        parts.append(f"IC 基差 {basis:+.2f}%" + (f"（截至 {asof}）" if asof else ""))
     if parts:
         result["label_capital_flow"] = "；".join(parts)
 
@@ -1309,6 +1324,103 @@ def _fetch_below_book_pct(result: dict) -> None:
         result["_errors"].append(f"below_book: {exc}{hint}")
 
 
+def _normalize_ymd(raw: Any) -> str | None:
+    """归一化日期为 YYYYMMDD（兼容 '2026-08-14' 形态）；不可解析返回 None。"""
+    s = str(raw or "").strip().replace("-", "")
+    return s if len(s) == 8 and s.isdigit() else None
+
+
+def _fmt_ymd(raw: Any) -> str | None:
+    """YYYYMMDD → 'YYYY-MM-DD'（标签展示用）；不可解析返回 None。"""
+    s = _normalize_ymd(raw)
+    return f"{s[:4]}-{s[4:6]}-{s[6:]}" if s else None
+
+
+def basis_is_current(row: dict, session: str | None = None) -> tuple[bool, str]:
+    """快照行/字典中的股指期货基差是否可作可引用读数（issue #34 读取侧规则）。
+
+    规则：`futures_basis_pct` 与 `futures_basis_date` 成对且非空，数据日期距
+    session 不超过 `FUTURES_BASIS_STALE_TRADING_DAYS` 个交易日；日期缺失/不可解析/
+    未来 → 不可引用。
+
+    session 缺省 = 该行自身的 `date`（历史行按「其采集时点」判定新鲜度；
+    无 date 键时回退当日 session）——当前行/实时快照（date=当日）与显式传参等价。
+
+    Returns
+    -------
+    (是否可引用, 原因) —— 原因仅在不可引用时非空，供降级文本使用。
+    """
+    if row.get("futures_basis_pct") is None:
+        return False, "无基差读数"
+    asof = _normalize_ymd(row.get("futures_basis_date"))
+    if asof is None:
+        return False, "缺数据日期（无法判定新鲜度，不引用）"
+    if session is None:
+        session = _normalize_ymd(row.get("date")) or str(shanghai_session_date())
+    lag, degraded = trading_day_lag(asof, str(session))
+    if lag is None:
+        return False, "数据日期不可解析"
+    if lag < 0:
+        return False, "数据日期在未来"
+    if lag > FUTURES_BASIS_STALE_TRADING_DAYS:
+        suffix = "（日历不可用，按自然日粗判）" if degraded else ""
+        return False, f"数据滞后 {lag} 个交易日{suffix}"
+    return True, ""
+
+
+def _strip_basis_clause_in_row(row: dict) -> None:
+    """净化行副本中的标签文本：`label_capital_flow` 与 `env_label` JSON 的
+    `capital_flow` 键剔除「IC 基差 …」子句（「值过滤与标签文本同一边界」的
+    唯一写点；非 str / 解析失败时原样保留）。"""
+    if isinstance(row.get("label_capital_flow"), str):
+        row["label_capital_flow"] = strip_basis_clause(row["label_capital_flow"])
+    raw_env = row.get("env_label")
+    if isinstance(raw_env, str) and "IC 基差" in raw_env:
+        try:
+            env = json.loads(raw_env)
+        except ValueError:
+            env = None
+        if isinstance(env, dict) and isinstance(env.get("capital_flow"), str):
+            env["capital_flow"] = strip_basis_clause(env["capital_flow"])
+            row["env_label"] = json.dumps(env, ensure_ascii=False)
+
+
+def _apply_basis_gate(row: dict, session: str | None = None) -> dict:
+    """把行内基差收敛为「可引用视图」：仅保留通过 `basis_is_current` 的成对值；
+    否则置 None 并把标签文本中的「IC 基差 …」子句一并剔除——**值过滤与标签
+    文本同一边界**。原始读数仍在库内（审计），本函数只作用于返回/展示副本。
+
+    分支语义：
+    - 值非空但不可引用（无日期/滞后/未来）→ 值/日期置 None + `futures_basis_note`
+      （原因）+ 文本净化（2026-10-01 复检 P1 补齐）；
+    - 值本就为空（历史常态 / 清理后残留）→ **不添加 note**（无被拒读数，避免
+      给全部空值行加噪），但文本仍须净化；残缺的「只有日期没有值」不得作为
+      成对读数的一部分返回（2026-10-02 复验 P2 补齐）。
+    """
+    if row.get("futures_basis_pct") is None:
+        if row.get("futures_basis_date") is not None:
+            row["futures_basis_date"] = None
+        _strip_basis_clause_in_row(row)
+        return row
+    ok, reason = basis_is_current(row, session)
+    if not ok:
+        row["futures_basis_pct"] = None
+        row["futures_basis_date"] = None
+        row.setdefault("futures_basis_note", f"IC 基差不可引用：{reason}")
+        _strip_basis_clause_in_row(row)
+    return row
+
+
+def strip_basis_clause(label_text: str) -> str:
+    """从资金面标签文本中剔除「IC 基差 …」子句（展示层：不可引用的历史标签）。
+
+    标签各段以「；」连接，逐段过滤（不用正则，避免误伤其它含 % 的段）。
+    """
+    if not label_text or "IC 基差" not in label_text:
+        return label_text
+    return "；".join(p for p in str(label_text).split("；") if "IC 基差" not in p)
+
+
 def _fetch_futures(result: dict) -> None:
     """股指期货基差（v0.2.6 F 系列）——机构对冲成本状态度量，非预测。
 
@@ -1316,16 +1428,47 @@ def _fetch_futures(result: dict) -> None:
     注：持仓量 20 日变化已由 F3 实证裁定为展期节奏主导（不可刻画持仓
     状态），本修订起不再输出到用户标签；字段与 compound_oi_change
     helper 保留于数据层供后续研究。
+
+    issue #34（该表已无在网生产者，最后更新 2026-08-14）：本函数只接受
+    「数据日期距最近交易日 ≤ FUTURES_BASIS_STALE_TRADING_DAYS」的读数，且
+    **值与数据日期成对写入**（滞后时两者均不写 → merge=COALESCE 保留成对旧值，
+    不给旧值刷新日期）；滞后/日期不可解析/未来日期 → 拒绝写值并记 note 与
+    _errors（实时路径不引用；历史行由 `basis_is_current` 读取侧判定）。
     """
     try:
         from lib import store as _store  # noqa: E402 — 惰性导入
         _store.init_db()
         rows = _store.load_futures_daily(symbol="IC", limit=21)
         if not rows:
+            result["_errors"].append("futures: futures_daily 无数据（降级：资金面缺期货维度）")
             return
         latest = rows[-1]
-        if latest.get("basis_pct") is not None:
-            result["futures_basis_pct"] = latest["basis_pct"]
+        if latest.get("basis_pct") is None:
+            return
+        raw_date = latest.get("date")
+        asof = _normalize_ymd(raw_date)
+        session = str(shanghai_session_date())
+        lag, degraded = trading_day_lag(asof or "", session)
+        if asof is None or lag is None or lag < 0 or lag > FUTURES_BASIS_STALE_TRADING_DAYS:
+            if asof is None:
+                reason = "数据日期缺失/不可解析"
+            elif lag is not None and lag < 0:
+                reason = "数据日期在未来"
+            else:
+                reason = f"数据滞后 {lag} 个交易日"
+            note = (
+                f"IC 基差数据滞后：{reason}（截至 {raw_date}，"
+                f"阈值 {FUTURES_BASIS_STALE_TRADING_DAYS} 交易日），本期不引用"
+            )
+            if degraded and lag is not None and lag >= 0:
+                note += "（日历不可用，按自然日粗判）"
+            result["futures_basis_note"] = note
+            result["_errors"].append(f"futures: {reason}（降级：资金面缺期货维度）")
+            return
+        result["futures_basis_pct"] = latest["basis_pct"]
+        result["futures_basis_date"] = asof
+        if degraded:
+            result["futures_basis_note"] = "（日历不可用，基差新鲜度按自然日粗判）"
     except Exception:  # noqa: BLE001 — 单维度失败不阻塞
         result["_errors"].append("futures 读取失败（降级：资金面缺期货维度）")
 

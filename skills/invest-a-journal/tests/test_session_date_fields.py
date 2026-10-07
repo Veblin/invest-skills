@@ -22,6 +22,9 @@ def _silence_fetchers(monkeypatch) -> None:
         monkeypatch.setattr(mm, name, lambda result: None)
     monkeypatch.setattr(mm, "_compute_labels", lambda result: None)
     monkeypatch.setattr(mm, "_auto_persist", lambda snap: None)
+    # 会话日及当前时刻在用例内固定；日历降级状态也须固定，避免其他测试
+    # 对 dates 模块全局缓存的访问改变 data_note 判定。
+    monkeypatch.setattr(mm, "shanghai_session_date_degraded", lambda: False)
 
 
 def test_snapshot_has_collected_at_and_no_data_note_in_session(

@@ -2,26 +2,21 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from _invest_path import ensure_invest_a_scripts_on_path
 
 ensure_invest_a_scripts_on_path()
 
-from lib import env as invest_env  # noqa: E402
-
 import db  # noqa: E402
 
 
 @pytest.fixture()
-def tmp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    db_path = tmp_path / "research.db"
-    monkeypatch.setattr(invest_env, "STORE_DB", db_path)
-    monkeypatch.setattr(db, "DB_PATH", db_path)
+def tmp_db():
+    """DB 隔离由 conftest 的 autouse fixture 提供（store._db_override 单一真源，
+    issue #33）；此处仅确保 trade_journals 就绪。"""
     db.init_db()
-    return db_path
+    return db
 
 
 class TestSellAutoLink:

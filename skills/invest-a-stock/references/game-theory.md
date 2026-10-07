@@ -1,6 +1,6 @@
 # 参与者行为扫描专项
 
-> 受 [SKILL.md](../SKILL.md) LAW 1–17 约束。`plan --intent game_theory` 时加载本文件。
+> 受 [SKILL.md](../SKILL.md) 契约 A–D 约束（legacy LAW 编号的映射见该文件「降级与废止」注）。`plan --intent game_theory` 时加载本文件。
 
 ## 定位（v0.1.9）
 
@@ -54,8 +54,10 @@ uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/
 
 [分析]
 北向与主力方向{一致/相反}，{若相反须列可能滞后或参与者差异，非操作建议}
-[证据强度: ✅/⚠️/❓ ...]
+[证据强度: ⚠️ 中 📡 单源 📅 报告期已注明 — 单源无验证]
 ```
+
+标签为格式示例，评级须按实际证据填写完整四维，正文判断另绑定来源。
 
 ## 模块边界
 
@@ -73,4 +75,4 @@ uv run python skills/invest-a-stock/scripts/invest.py report 600176 --plan /tmp/
 
 ## 不可得处理
 
-全部参与者维度无数据时，引擎输出 LAW 5 标准句；Claude 不推测参与者意图。
+全部参与者维度无数据时，引擎输出 A3/C4（原 LAW 5）标准句；Claude 不推测参与者意图。

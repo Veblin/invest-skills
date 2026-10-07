@@ -26,18 +26,15 @@ INDEX_MAP = {"IF": "sh000300", "IH": "sh000016", "IC": "sh000905", "IM": "sh0008
 
 
 def _make_client() -> TushareClient:
-    import os
-
     from . import env
 
     cfg = env.get_config()
     token = cfg.get("TUSHARE_TOKEN")
     if not token:
         raise RuntimeError("TUSHARE_TOKEN 未配置")
+    # 频率上限由 TushareClient 统一解析（env > 默认 80，且作为按接口预算的地板）。
     daily = cfg.get("TUSHARE_DAILY_CALL_LIMIT")
-    rate_raw = os.environ.get("TUSHARE_RATE_LIMIT_PER_MINUTE")
-    rate = int(rate_raw) if rate_raw and rate_raw.strip().isdigit() else 80
-    return TushareClient(token=token, daily_call_limit=daily, rate_limit_per_minute=rate)
+    return TushareClient(token=token, daily_call_limit=daily)
 
 
 def _third_friday(ym: str) -> str:

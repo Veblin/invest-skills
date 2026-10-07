@@ -7,8 +7,12 @@
 3. 四个就地槽位（participant_scan / event_classification / mda_narrative /
    bear_chain）替换引擎占位串 —— 该四处是 QC
    `completion-template-placeholder` / `completion-empty-basis` 的 error 级命中项。
-4. 方案 A：首屏「判断索引」+ overview 槽位前置为「重要发现（5 分钟阅读区）」，
-   其余段进「分析详情」，各层互斥不重复。
+4. 方案 A：overview 槽位前置为「重要发现（5 分钟阅读区）」，其余段进
+   「分析详情」，各层互斥不重复。
+
+**v0.3.1 A1（2026-09-25）**：首屏「判断索引」整层已移除（只复述各分析段标题、
+不交代判断）。原 §3b 的 5 个索引用例随之删除；`test_no_analysis_means_no_reading_layer_headings`
+保留「判断索引」不得重现的反向断言。§4 的 brief/full 槽位语义断言不受影响。
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from lib.analysis_schema import (
     PARTICIPANT_SCAN_KEYS,
     find_section,
     is_inline_slotted,
+    missing_draft_slots,
     split_overview,
     validate_sections,
 )
@@ -138,72 +143,6 @@ def test_no_analysis_means_no_reading_layer_headings():
     assert "分析详情（analysis.json 注入）" not in md
 
 
-# ── 3b. 首屏「判断索引」（2026-09-18 评审批次：内部 slug 不得出读者面）──
-
-def _index_block(md: str) -> str:
-    """切出判断索引节正文（到下一个 `## ` 标题为止），用于避免整篇 substring 断言。"""
-    start = md.index("## 判断索引")
-    rest = md[start + len("## 判断索引"):]
-    end = rest.find("\n## ")
-    return rest if end < 0 else rest[:end]
-
-
-def _bear_sec() -> dict:
-    """管理阶段惯用内部槽位键当 module（本地语料实测：bear_chain 12/12 份报告）。"""
-    return {"module": "bear_chain", "position": "conclusion",
-            "title": "空头链条：量增依赖让利", "facts_md": "事实三 [来源: engine]",
-            "analysis_md": "判断三", "evidence_tag": "B"}
-
-
-def test_judgment_index_precedes_every_other_layer():
-    md = render_report_v3(collection_v2_minimal(), "600176",
-                          analysis=[_overview_sec(), _events_sec()])
-    i_index = md.index("## 判断索引")
-    assert i_index < md.index("## 报告说明")
-    assert i_index < md.index("重要发现（5 分钟阅读区）")
-    assert i_index < md.index("## 目录"), "首屏索引须在导航之前"
-
-
-def test_judgment_index_never_prints_internal_slot_slug():
-    """module 写成内部 slug 时，读者面只许出现 position 中文名（bear_chain → 结论）。"""
-    md = render_report_v3(collection_v2_minimal(), "600176",
-                          analysis=[_overview_sec(), _bear_sec()])
-    assert "bear_chain" not in md, "内部槽位键泄漏到读者面"
-    assert "- **结论**：空头链条：量增依赖让利" in _index_block(md)
-
-
-def test_judgment_index_keeps_chinese_module_label():
-    """写作者用中文概念名时原样保留（索引标签比 position 枚举更贴切）。"""
-    sec = {"module": "事件归因", "position": "events", "title": "下跌非公告驱动",
-           "facts_md": "事实 [来源: engine]", "analysis_md": "判断", "evidence_tag": "B"}
-    md = render_report_v3(collection_v2_minimal(), "600176", analysis=[sec])
-    assert "- **事件归因**：下跌非公告驱动" in _index_block(md)
-
-
-@pytest.mark.parametrize("module", ["mda_narrative", "MDA_Narrative", " participant_scan "])
-def test_judgment_index_excludes_supplementary_slots(module: str):
-    """补充材料槽位不占索引名额；判据走归一化 keys，大小写/空白变体同样命中。
-
-    手写排除集（`module in {...}`）会漏掉变体——本仓为「两处各写一份判据」付过
-    代价（见 analysis_schema.EVENTS_HOST_KEYS 的记录），故此处按变体固化为用例。
-    """
-    sup = {"module": module, "position": "analysis", "title": "补充材料标题",
-           "facts_md": "事实 [来源: engine]", "analysis_md": "判断", "evidence_tag": "B"}
-    md = render_report_v3(collection_v2_minimal(), "600176",
-                          analysis=[sup, _events_sec()])
-    assert "补充材料标题" not in _index_block(md)
-    assert "- **事件**：事件分析" in _index_block(md), "非补充材料段仍在索引内"
-
-
-def test_judgment_index_excludes_overview_slot_by_position():
-    """overview 判据看 position 也看 module（归一化），不只看 module。"""
-    ov = {"module": "thesis", "position": "overview", "title": "投资假设检验",
-          "facts_md": "事实 [来源: engine]", "analysis_md": "判断", "evidence_tag": "B"}
-    md = render_report_v3(collection_v2_minimal(), "600176",
-                          analysis=[ov, _events_sec()])
-    assert "投资假设检验" not in _index_block(md)
-
-
 # ── 4. brief 模式消费 analysis（此前完全忽略）──
 
 def test_brief_mode_consumes_analysis_payload():
@@ -260,7 +199,8 @@ def test_participant_scan_slot_replaces_placeholder():
 
 def test_event_classification_slot_replaces_placeholder():
     coll = _coll_with_cards(event_classifications=[
-        {"event_type": "buyback", "event_label": "回购", "events": [{"date": "2026-06-11"}]},
+        {"event_type": "buyback", "event_label": "回购", "events": [{"date": "2026-06-11"}],
+         "direction_hint": "正向"},
     ])
     # 事件时间线是分类摘要的宿主节：events 为空时整节（含摘要）不渲染。
     coll["events"] = [{"date": "2026-06-11", "type": "buyback",
@@ -272,6 +212,9 @@ def test_event_classification_slot_replaces_placeholder():
                              analysis=[_slot("event_classification", "分类复核结论")])
     assert "待 Claude 验证" not in with_
     assert "分类复核结论" in with_
+    assert "方向: 正向" not in with_, "仅有公告标题时不应输出影响方向"
+    assert "[来源: _meta.analysis_cards.event_classifications.0.event_label]" in with_
+    assert "[来源: Python calc: len(ec.get('events') or ())]" in with_
 
 
 def test_mda_narrative_slot_replaces_placeholder():
@@ -316,6 +259,82 @@ def test_bear_chain_slot_renders_when_engine_has_no_chain():
     assert "空头逻辑唯一标记" in injected
 
 
+def test_bull_chain_slot_preserves_engine_chain_as_audit_basis():
+    """已核对的多头依据作为正文，引擎多头链保留为独立底稿。"""
+    coll = collection_v2_minimal()
+    draft = render_report_v3(coll, "600176", mode="full")
+    assert "[待 Claude 核对多头依据]" in draft
+    bull = _slot("bull_chain", "多头依据唯一标记")
+    bull["facts_md"] = "多头事实唯一标记 [来源: test.fixture]"
+    md = render_report_v3(coll, "600176", mode="full",
+                          analysis=[bull])
+    assert md.count("多头依据唯一标记") == 1
+    assert md.count("多头事实唯一标记") == 1
+    assert md.index("多头事实唯一标记") < md.index("多头依据唯一标记")
+    assert "### 5a. 多头逻辑链" in md
+    assert "**证据等级：** B" in md
+    assert "**引擎自动多头链（未与人写依据合并）**" in md
+    assert "#### 多头逻辑" in md
+    assert "[待 Claude 核对多头依据]" not in md
+    assert "当前数据未形成明确多头逻辑链" not in md
+
+
+def test_bull_chain_position_passes_validation_and_replaces_placeholder():
+    """通用 module 通过 position 命中多头槽位，校验与渲染口径一致。"""
+    coll = collection_v2_minimal()
+    section = _slot("risk", "已核对的多头依据")
+    section["position"] = "bull_chain"
+    analysis = [section]
+
+    assert validate_sections(analysis) == []
+    assert find_section(analysis, frozenset({"bull_chain"})) is section
+    assert missing_draft_slots(analysis, "[待 Claude 核对多头依据]") == []
+
+    md = render_report_v3(coll, "600176", mode="full", analysis=analysis)
+    assert md.count("已核对的多头依据") == 1
+    assert "[待 Claude 核对多头依据]" not in md
+
+
+def test_bull_chain_engine_basis_folds_in_concise_mode():
+    from lib.render_risk import _section_bull_bear
+    from lib.schema import index_dimensions
+
+    coll = collection_v2_minimal()
+    text = _section_bull_bear(
+        coll, "600176", index_dimensions(coll), {}, {},
+        analysis=[_slot("bull_chain", "已核对的多头依据")],
+        fold_engine_chain=True,
+    )
+    assert "底稿：引擎自动多头链（未与人写依据合并）" in text
+    assert "#### 多头逻辑" in text
+    assert "<details>" in text
+
+
+def test_bull_chain_injection_keeps_engine_asymmetry_disclosure():
+    from lib.render_risk import _section_bull_bear
+    from lib.schema import index_dimensions
+
+    coll = collection_v2_minimal()
+    market = {
+        "northbound": {"net_sum_10d": 1_000_000},
+        "sw_index": {"stock_vs_industry_pct": 5},
+        "erp": {"percentile_5y": 80},
+    }
+    risk = {"signals": [{"triggered": True, "severity": "参考",
+                         "id": "valuation_extreme_low", "detail": "低位",
+                         "category": "market"}]}
+    base = _section_bull_bear(coll, "600176", index_dimensions(coll), market, risk)
+    assert "结构性不对称" in base, "夹具须先触发多空链数量差"
+
+    injected = _section_bull_bear(
+        coll, "600176", index_dimensions(coll), market, risk,
+        analysis=[_slot("bull_chain", "已核对的多头依据")], fold_engine_chain=False,
+    )
+    assert "已核对的多头依据" in injected
+    assert "引擎自动多头链" in injected
+    assert "结构性不对称" in injected
+
+
 def test_slot_sections_do_not_leak_into_detail_layer():
     """槽位段是就地渲染，不得再进「分析详情」造成重复。"""
     md = render_report_v3(collection_v2_minimal(), "600176", mode="full",
@@ -326,16 +345,47 @@ def test_slot_sections_do_not_leak_into_detail_layer():
 
 # ── 6. [事实] 标签（QC structure-analysis-without-fact 的引擎侧防线）──
 
-def test_exogenous_shock_block_labels_its_table_as_facts():
-    from lib.render_extras import section_exogenous_shock
+def test_extras_block_no_longer_renders_news_table():
+    """v0.3.1 A2 主路径锁：带新闻包的 full 报告不得再出现新闻/公告标题表。
+
+    删除依据见 `host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §2.1 A2。
+    反向守卫在 `test_render_extras.py::TestExogenousShockRemoved`（卡数据仍在
+    采集底稿，不得连采集能力一起删）。
+    """
     coll = collection_v2_minimal()
     coll["news"] = {"cards": [{"date": "2026-06-11", "direction": "neutral",
                                "credibility": "official", "credibility_score": 0.95,
                                "title": "某公告", "source": "notice",
                                "url": "https://example.invalid/a"}]}
-    out = section_exogenous_shock(coll)
-    assert "[事实]" in out
-    assert out.index("[事实]") < out.index("[分析]"), "先事实后分析"
+    out = render_report_v3(coll, "600176", mode="full")
+    assert "外生冲击" not in out
+    assert "外生叙事" not in out
+    assert "某公告" not in out
+
+
+def test_events_timeline_labels_its_summary_as_facts():
+    """v0.3.1 A2 后，[事实] 前置规则仍须有引擎侧落点（不是被删空）。
+
+    新闻/公告标题表段（原 `render_extras.section_exogenous_shock`）整段移除，
+    须用**仍保留的分析段**验证 `structure-analysis-without-fact` 仍有适用对象：
+    事件时间线节自带的 [分析] 必须由同节段的 [事实] 支撑。切片止于下一个 H2，
+    避免断言被后文任一 [事实] 空转满足（同 `test_participant_scan_...` 的切片法）。
+    """
+    coll = _coll_with_cards(event_classifications=[
+        {"event_type": "buyback", "event_label": "回购", "events": [{"date": "2026-06-11"}]},
+    ])
+    coll["events"] = [{"date": "2026-06-11", "type": "buyback",
+                       "title": "测试股份:关于回购公司A股股份的公告",
+                       "impact_dimension": "估值", "duration": "中长期变量"}]
+    out = render_report_v3(coll, "600176", mode="full",
+                           analysis=[_slot("event_classification", "分类复核结论")])
+    assert "## 3a. 事件时间线" in out, "夹具应产出事件时间线节"
+    rest = out[out.index("## 3a. 事件时间线"):]
+    nxt = rest.find("\n## ", 1)
+    section = rest if nxt < 0 else rest[:nxt]
+    assert "[事实]" in section, "事件时间线节自身缺少 [事实] 标签"
+    assert "[分析]" in section
+    assert section.index("[事实]") < section.index("[分析]"), "先事实后分析"
 
 
 def test_participant_scan_labels_its_table_as_facts():
@@ -642,6 +692,30 @@ def test_cv4_wording_names_caliber_not_main_force():
     for ln in lines:
         assert "主力" not in ln, f"CV-4 仍称主力: {ln}"
         assert "全档" in ln
+
+
+@pytest.mark.parametrize("nb_net,mf_net,expected", [
+    (-1.0e9, 1.5e8, "方向相反"),
+    (1.0e9, 1.5e8, "方向一致"),
+    (1.0e9, 0, "资金数据不完整"),
+    (0, 0, "方向一致"),
+])
+def test_cv4_branch_conclusions(nb_net: float, mf_net: float, expected: str):
+    """CV-4 的四种分支结论；方向判据由 flow_direction_relation 共用。
+
+    去重前参与者节另有一份同结论的备注，故分支覆盖在
+    `test_participant_scan.py`；参与者节仅保留 CV-4 指针句。§5c 与候选解释
+    仍可按各自语境引用同一方向关系，不应再各自实现一份符号比较。
+    """
+    coll = collection_v2_minimal()
+    coll["market_structure"] = {
+        "northbound": {"net_sum_10d": nb_net, "days": 10, "source": "test.fixture"},
+        "moneyflow": {"net_sum_5d": mf_net, "source": "test.fixture"},
+    }
+    md = render_report_v3(coll, "600176", mode="full")
+    cv4 = [ln for ln in md.splitlines() if "CV-4" in ln]
+    assert cv4, "应渲染 CV-4 行"
+    assert any(expected in ln for ln in cv4), f"CV-4 未给出预期结论：{expected}"
 
 
 def test_participant_cv_note_names_caliber_not_main_force():

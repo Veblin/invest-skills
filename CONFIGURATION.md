@@ -21,9 +21,17 @@ cp .env.example .env
 | `FRED_API_KEY` | 可选 | FRED 美国宏观数据 | [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html) |
 | `TAVILY_API_KEY` | 可选 | 新闻 Layer 3（`--with-news-pack`）；无 Key 时公告+查询包仍可用 | [tavily.com](https://tavily.com) |
 | `INVEST_A_FORCE_AKSHARE_EM` | 可选 | 强制尝试东方财富 akshare 接口（跳过 push2 可达性预检） | 设为 `1` / `true` / `yes` |
+| `INVEST_DEV` | 可选 | 开发模式日志：stderr 输出 INFO 并写 `logs/`（5MB×7 轮转）。**默认关闭**，release 下多数 skill 静默 | 设为 `1` |
+| `INVEST_MAX_WORKERS` | 可选 | 采集并发上限（默认 8，下限 1）；抗东财/akshare 限流时可调到 `1` 串行化 | 整数 |
+| `INVEST_SOCKET_TIMEOUT` | 可选 | 单次网络请求 socket 超时秒数（默认 30） | 整数 |
 
 **不配置 Tushare 时**：实时行情可通过腾讯免费接口获取，但财务指标、股东、资金流向等维度将不可用。
 **不配置 FRED 时**：宏观维度需要通过 WebSearch 补充。
+
+**不配置 `INVEST_DEV` 时**（默认）：日志静默是**有意设计**（release 零文件 I/O）。这包括
+`invest-a-gap-scan` 等原先无条件打印 INFO 进度的入口——此类长任务（全市场扫描 5-10 分钟）
+若需观察进度，请显式设 `INVEST_DEV=1`。日志只在**本仓库工作副本**中落盘：两种分发形态
+（SkillHub 包 `<pkg>/scripts/lib/`、WorkBuddy 包 `<pkg>/skills/lib/`）永不写文件。
 
 ### 代理与东方财富（Clash / VPN）
 

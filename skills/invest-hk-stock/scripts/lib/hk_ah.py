@@ -28,6 +28,16 @@ _BOC_LOOKBACK_DAYS = 30        # 显式回溯窗：不传日期时该接口返�
 _FX_STALE_WARN_DAYS = 10       # 源日期距今超过此值 → 标注「数据陈旧」
 _FX_STALE_FAIL_DAYS = 30       # 超过此值 → 视为不可得，转下一级源（防用 3 年前的汇率算溢价）
 
+# 盘中 as_of 容差（O-23 裁决，2026-09-23 冻结）
+# 依据（2026-09-23 13:58-13:59 探针，见 host-docs/v0.3.1/G-a-repro-v0.3.1_20260923.md §1.1）：
+# 腾讯 A 股与港股 r_hk 的时间戳**都带秒位**（实测 A `...135848`、H `13:58:39`），
+# 但本模块的比对**按分钟粒度**进行——`parse_quote_ts()` 只保留 HH:MM。活跃标的
+# 双侧实测分钟差 0。本值取 **5 × 比较粒度**。
+# 适用面：**仅两侧同处「交易中」**——此时价格仍在变动，两个不同时刻的快照不具
+# 可比性。双侧「已收盘」（终值）或「午间休市」（价格停摆）不适用；混合状态
+# （A 已收盘 / H 仍在交易）按用户裁决保留可比并标注实际时差。
+_INTRADAY_TOLERANCE_MIN = 5
+
 # ---------------------------------------------------------------------------
 # 交易日对齐（HK-2 D1/D2 修复，2026-09-17）
 # ---------------------------------------------------------------------------
@@ -37,6 +47,8 @@ _FX_STALE_FAIL_DAYS = 30       # 超过此值 → 视为不可得，转下一级
 # 是 -29.27%。原报告注记把跨日错配描述成「快照时点差」，掩盖了真实缺陷。
 # 纪律：溢价率仅在两侧 **同交易日** 且 **状态可比** 时计算；否则拒绝出数并显式
 # 输出两侧日期与状态。
+# 补充（O-23，2026-09-23 裁决）：**同态不足以保证时点可比**——两侧同处「交易中」
+# 时价格仍在变动，还须校验两个快照的 as_of 时点差（容差见 _INTRADAY_TOLERANCE_MIN）。
 _STATE_UNKNOWN = "未知"
 _STATE_PREOPEN = "未开盘"
 _STATE_AUCTION = "竞价时段"
@@ -119,8 +131,37 @@ def market_state(raw_ts, market: str) -> str:
     return _STATE_PREOPEN if hm < sessions[0][0] else _STATE_CLOSED
 
 
+def _as_of(date_iso: str | None, hm: str | None) -> str | None:
+    """(ISO 日期, "HH:MM") → ``"YYYY-MM-DD HH:MM"``；任一缺失 → None。"""
+    if not date_iso or not hm:
+        return None
+    return f"{date_iso} {hm}"
+
+
+def _as_of_gap_min(a_hm: str | None, b_hm: str | None) -> int | None:
+    """两个 ``"HH:MM"`` 的**同日绝对分钟差**；任一不可解析 → None。
+
+    ⚠️ **只对同一报价日期有意义**——本函数看不到日期，跨日的两个 10:30 会算出
+    0 分钟，而两个价格实际相隔一个交易日。调用方**必须**先自行判定两侧同日
+    （`align_quotes()` 已如此处理）；不要拿它的返回值描述跨日情形。
+    """
+    def _m(hm: str | None) -> int | None:
+        if not hm:
+            return None
+        try:
+            hh, mm = str(hm).split(":")
+            return int(hh) * 60 + int(mm)
+        except (TypeError, ValueError):
+            return None
+
+    x, y = _m(a_hm), _m(b_hm)
+    if x is None or y is None:
+        return None
+    return abs(x - y)
+
+
 def align_quotes(a_quote: dict, h_quote: dict) -> dict:
-    """两侧报价的**同日/同态**对齐判定（纯函数）。
+    """两侧报价的**同日/同态/同时点**对齐判定（纯函数）。
 
     返回::
 
@@ -128,48 +169,85 @@ def align_quotes(a_quote: dict, h_quote: dict) -> dict:
           "comparable": bool,          # 是否可直接计算溢价率
           "basis": str,                # 口径说明（可比时）或不可比原因
           "a_date"/"h_date": str|None, # 各侧报价所属交易日
+          "a_as_of"/"h_as_of": str|None,  # "YYYY-MM-DD HH:MM"（行情时点，非抓取时刻）
           "a_state"/"h_state": str,    # 各侧市场状态
           "a_price"/"h_price": float|None,
+          "as_of_gap_min": int|None,   # 两侧行情时点的分钟差；**跨报价日期时恒为 None**
+          "tolerance_applied": bool,   # 本次是否实际施加了盘中容差判定
           "fallback": dict|None,       # 不可比时的回退口径（前提为待验证）
         }
 
     可比条件：**两侧报价日期相同** 且 **两侧状态都已产生今日成交价**
-    （状态 ∈ {交易中, 午间休市, 已收盘}）。
+    （状态 ∈ {交易中, 午间休市, 已收盘}）且 **满足盘中时点容差**。
 
-    两条排除逻辑各有实测依据：
+    三条排除逻辑各有实测依据：
     - **日期不同 → 排除**：D1 缺陷现场（A 取 9/16 收盘、H 取 9/15 收盘，引擎仍算出
       -31.33%，正确值 -29.27%）。
     - **任一侧处于 未开盘 / 竞价时段 → 排除**：D2 缺陷现场（09:00 港股未开盘，
       r_hk 的 price 是跳动中的竞价参考：516.0 → 490.0 → 485.0 一分钟内）。
       **同日两侧都在竞价时同样排除**——竞价价不是成交价。
-    - 午间休市（12:00–13:00）**可比**：两侧的上午成交价都是今日的，只是暂停撮合。
+    - **两侧同处「交易中」但快照相隔 > `_INTRADAY_TOLERANCE_MIN` → 排除**（O-23，
+      2026-09-23 裁决）：「均交易中」只说明状态相同，不说明两个快照是同一时刻。
+      超容差时只并列两侧价格与各自时点。
+    - 午间休市（12:00–13:00）**可比**：两侧的上午成交价都是今日的，只是暂停撮合，
+      价格停摆 → 不适用盘中容差。
+    - 混合状态（A 已收盘 / H 仍在交易）**保留可比并标注实际时差**（2026-09-23 裁决）：
+      两地收盘时刻本就不同（15:00 / 16:00），要求同态会直接废掉该时段；改为把时差
+      显式写给读者。
 
     其余一律 ``comparable=False``——**不计算溢价率**（宁可不出数，不出误导数）。
     """
     a_ts = (a_quote or {}).get("ts")
     h_ts = (h_quote or {}).get("ts")
-    a_date, _ = parse_quote_ts(a_ts)
-    h_date, _ = parse_quote_ts(h_ts)
+    a_date, a_hm = parse_quote_ts(a_ts)
+    h_date, h_hm = parse_quote_ts(h_ts)
     a_state = market_state(a_ts, "A")
     h_state = market_state(h_ts, "HK")
     a_price = (a_quote or {}).get("price")
     h_price = (h_quote or {}).get("price")
+    # 钟点差**只在同一报价日期内有意义**：跨日时 A 9/16 10:30 与 H 9/15 10:30 会
+    # 算出「相隔 0 分钟」，而两个价格实际差一个交易日。跨日 → None，渲染层据此
+    # 说明「跨报价日期，钟点差无意义」而不是显示一个假数字。
+    gap = _as_of_gap_min(a_hm, h_hm) if (a_date and a_date == h_date) else None
 
     out: dict = {
         "comparable": False, "basis": "", "a_date": a_date, "h_date": h_date,
+        "a_as_of": _as_of(a_date, a_hm), "h_as_of": _as_of(h_date, h_hm),
         "a_state": a_state, "h_state": h_state, "a_price": a_price,
-        "h_price": h_price, "fallback": None,
+        "h_price": h_price, "as_of_gap_min": gap, "tolerance_applied": False,
+        "fallback": None,
     }
 
     # 「已产生今日成交价」的状态族（竞价/未开盘不在其中：那还不是成交价）
     _PRICED = {_STATE_TRADING, _STATE_LUNCH, _STATE_CLOSED}
     if a_date and a_date == h_date and a_state in _PRICED and h_state in _PRICED:
+        # O-23 盘中容差：两侧**同处「交易中」**时价格仍在变动，两个不同时刻的
+        # 快照不具可比性 → 须校验时点差。收盘（终值）/午间（停摆）/混合状态
+        # 不适用此判定，理由见 _INTRADAY_TOLERANCE_MIN 注释。
+        if a_state == _STATE_TRADING and h_state == _STATE_TRADING:
+            out["tolerance_applied"] = True
+            if gap is not None and gap <= _INTRADAY_TOLERANCE_MIN:
+                out.update(
+                    comparable=True,
+                    basis=(f"同一交易日盘中（双侧均在交易时段，快照相隔 {gap} 分钟 ≤ "
+                           f"{_INTRADAY_TOLERANCE_MIN} 分钟容差）"),
+                )
+            else:
+                shown = gap if gap is not None else "不可解析"
+                out["basis"] = (
+                    f"同日两侧均在交易中，但快照相隔 {shown} 分钟 > "
+                    f"{_INTRADAY_TOLERANCE_MIN} 分钟容差"
+                    f"（A: {a_hm or '不可解析'} / H: {h_hm or '不可解析'}）"
+                    "——两个不同时刻的盘中价不具可比性，溢价率不可比"
+                )
+            return out
         if a_state == h_state:
-            label = {_STATE_CLOSED: "同一交易日收盘（双侧均已收盘）",
-                     _STATE_TRADING: "同一交易日盘中（双侧均在交易时段）",
-                     _STATE_LUNCH: "同一交易日午间休市（双侧上午价）"}[a_state]
+            label = {_STATE_CLOSED: "同一交易日收盘（双侧均已收盘，终值不适用盘中容差）",
+                     _STATE_LUNCH: "同一交易日午间休市（双侧上午价，价格停摆、不适用盘中容差）"}[a_state]
         else:
-            label = f"同一交易日混合状态（A: {a_state} / H: {h_state}，均为当日成交价）"
+            gap_note = f"，快照相隔 {gap} 分钟" if gap is not None else ""
+            label = (f"同一交易日混合状态（A: {a_state} / H: {h_state}，均为当日成交价{gap_note}）"
+                     "——按现行裁决保留可比，时差由读者自行判断")
         out.update(comparable=True, basis=label)
         return out
 

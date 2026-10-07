@@ -117,8 +117,8 @@ class TestBuildMDACard:
         # Net margin
         assert card.net_margin == 14.56
         assert card.net_margin_change == pytest.approx(0.16, rel=0.01)
-        # Cashflow quality: 2.8B > 1.1 * 2.3B → "良好"
-        assert card.cashflow_quality_hint == "良好"
+        # Cashflow coverage: 2.8B > 1.1 * 2.3B → "覆盖充分"（C1-b：只表述覆盖关系）
+        assert card.cashflow_quality_hint == "覆盖充分"
         # ROE
         assert card.roe == 15.82
         assert card.roe_change == pytest.approx(1.72, rel=0.01)
@@ -149,23 +149,33 @@ class TestBuildMDACard:
         assert _build_mda_card(collection) is None
 
     def test_cashflow_quality_general(self):
-        """OCF roughly equals net_profit → "一般"."""
+        """OCF roughly equals net_profit → "基本覆盖"."""
         records = [
             {"end_date": "20251231", "net_profit": 100.0, "n_cashflow_act": 95.0, "revenue": 1000.0},
         ]
         collection = {"dimensions": [_make_financials_dimension(records)]}
         card = _build_mda_card(collection)
         assert card is not None
-        assert card.cashflow_quality_hint == "一般"
+        assert card.cashflow_quality_hint == "基本覆盖"
 
     def test_cashflow_quality_concerning(self):
-        """OCF significantly less than net_profit → "需关注"."""
+        """OCF significantly less than net_profit → "覆盖偏低"."""
         records = [
             {"end_date": "20251231", "net_profit": 100.0, "n_cashflow_act": 50.0, "revenue": 1000.0},
         ]
         collection = {"dimensions": [_make_financials_dimension(records)]}
         card = _build_mda_card(collection)
-        assert card.cashflow_quality_hint == "需关注"
+        assert card.cashflow_quality_hint == "覆盖偏低"
+
+    def test_cashflow_quality_negative_profit_returns_empty_string(self):
+        """C1-b 反例：亏损期旧守卫 abs(np)>1e-9 会把 ocf=-10/np=-100 算成「良好」。"""
+        records = [
+            {"end_date": "20251231", "net_profit": -100.0, "n_cashflow_act": -10.0, "revenue": 1000.0},
+        ]
+        collection = {"dimensions": [_make_financials_dimension(records)]}
+        card = _build_mda_card(collection)
+        assert card is not None
+        assert card.cashflow_quality_hint == ""
 
     def test_cashflow_quality_missing_returns_empty_string(self):
         records = [
@@ -281,8 +291,8 @@ class TestEventClassificationCards:
         by_type = {c.event_type: c for c in cards}
         card = by_type["buyback"]
         assert card.event_label == "回购"
-        assert card.impact_dimension == "估值"
-        assert card.default_duration_hint == "中长期变量"
+        assert card.dimension_hint == "估值"
+        assert card.duration_hint == "中长期变量"
 
     def test_high_confidence_direction_buyback(self):
         cards = _build_event_classification_cards({"events": self.SAMPLE_EVENTS})
@@ -323,6 +333,14 @@ class TestEventClassificationCards:
         assert card.direction_hint == ""
         assert card.direction_confidence == "low"
         assert card.direction_note == ""
+
+    @pytest.mark.parametrize("event_type", ["unlock", "investment"])
+    def test_direction_requires_notice_evidence(self, event_type):
+        cards = _build_event_classification_cards({"events": [
+            {"type": event_type, "title": "中性公告", "date": "20260601"},
+        ]})
+        assert cards[0].direction_hint == ""
+        assert cards[0].direction_confidence == "low"
 
     def test_other_type_defaults(self):
         cards = _build_event_classification_cards({"events": self.SAMPLE_EVENTS})
@@ -584,8 +602,8 @@ class TestCardToDict:
             event_type="buyback",
             event_label="回购",
             events=[{"title": "回购公告", "date": "20260601"}],
-            impact_dimension="估值",
-            default_duration_hint="中长期变量",
+            dimension_hint="估值",
+            duration_hint="中长期变量",
             direction_hint="正向",
             direction_confidence="medium",
             direction_note=_DIRECTION_DISCLAIMER,

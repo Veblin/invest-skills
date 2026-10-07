@@ -65,6 +65,56 @@ event_types:
     impact_dimension: "治理"
     default_duration_hint: "结构性质变"
     description: "ST警示/退市风险提示"
+  regulatory:
+    label: "监管风险"
+    impact_dimension: "治理"
+    default_duration_hint: "结构性质变"
+    description: "违法违规/警示函/交易所监管工作函"
+  pledge:
+    label: "质押冻结"
+    impact_dimension: "估值"
+    default_duration_hint: "短期扰动"
+    description: "股份质押、司法冻结"
+  unlock:
+    label: "限售解禁"
+    impact_dimension: "估值"
+    default_duration_hint: "短期扰动"
+    description: "限售股份上市流通"
+  market_anomaly:
+    label: "异动/停复牌"
+    impact_dimension: "治理"
+    default_duration_hint: "短期扰动"
+    description: "股票交易异常波动/停牌/复牌"
+  investment:
+    label: "对外投资"
+    impact_dimension: "收入"
+    default_duration_hint: "中长期变量"
+    description: "对外项目投资/投资设立公司/投资理财"
+  ipo:
+    label: "首发/招股"
+    impact_dimension: "现金流"
+    default_duration_hint: "中长期变量"
+    description: "首次公开发行招股说明书——**不是**再融资（勿与增发混用）"
+  guarantee:
+    label: "对外担保"
+    impact_dimension: "治理"
+    default_duration_hint: "中长期变量"
+    description: "担保事项/对外担保/担保额度预计（或有负债）"
+  holder_change:
+    label: "权益变动"
+    impact_dimension: "估值"
+    default_duration_hint: "短期扰动"
+    description: "权益变动报告书/股本变动/股权转让——方向未知，不给方向提示"
+  related_party:
+    label: "关联交易"
+    impact_dimension: "治理"
+    default_duration_hint: "短期扰动"
+    description: "关联交易公告"
+  procedural:
+    label: "程序性公告"
+    impact_dimension: "治理"
+    default_duration_hint: "短期扰动"
+    description: "治理与程序类（决议/章程/意见书/调研等）——留档但不计入信号榜"
   other:
     label: "其他公告"
     impact_dimension: "治理"

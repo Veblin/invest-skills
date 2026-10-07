@@ -194,13 +194,17 @@ class TestPhase4ReportUx:
         assert "roe" in mod1.lower() or "ROE" in mod1 or "财务" in mod1
 
     def test_details_collapsible(self):
+        """v0.3.1 A4：full 只有审计底稿一层折叠，折内各节直接展开。
+
+        原先 12 题与风险节各有自己的 `展开：…` 折叠，进底稿层后形成二级套娃
+        （展开底稿仍看不到这两节）——评审 P2 修复后改为折内直接展开。
+        """
         from lib.render import render_report_v3
 
         text = render_report_v3(_collection_phase3(), "600176")
-        assert text.count("<details>") >= 2
-        assert "<summary>" in text
-        assert "展开：静态基本面（12题）" in text
-        assert "展开：风险与不确定性" in text
+        assert text.count("<details>") == 1, "折内不得再有二级折叠（A4 单层契约）"
+        assert "<summary>审计底稿" in text
+        assert "## 4. " in text and "## 7. " in text, "12 题与风险节须在折内直接可见"
 
     def test_pe_band_text_table(self):
         from lib.render import _index_dims, _pe_band_markdown_table, render_report_v3

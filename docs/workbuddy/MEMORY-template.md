@@ -51,7 +51,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-gap-scan/scripts/
 
 - 核心原则：P0 — AI 禁止做数学计算，所有数字必须来自 Python 引擎；报告复检三层（数字/合规/逻辑）
 - 多源降级链：L3 行情类串联降级（防限流），L2 财务类并行双源先到先用；失败不阻塞
-- 禁止买卖建议（LAW 6）；允许多情景估值参考价（须假设前提+概率权重）；允许交易结构分析（入场区间/假设失效触发/操作纪律）
+- 禁止买卖建议（LAW 6）；允许多情景估值参考价（须假设前提+概率权重）；允许交易结构分析（条件性估值区间/假设失效触发/操作纪律）
 - 东财 API 需直连：Clash 配 `DOMAIN-SUFFIX,eastmoney.com,DIRECT`（另加 gtimg.cn / baostock.com / tickflow.org）
 - 版本规则：v{major}.{minor}.{patch}，canonical 源为 pyproject.toml
 ```

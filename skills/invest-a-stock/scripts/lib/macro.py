@@ -852,7 +852,10 @@ def collect_macro_context(symbol: str = "") -> dict[str, Any]:
 #          t5yie 高通胀预期≥2.5 / vix 恐慌 / dcoilbrenteu 高位≥90 /
 #          dexchus 人民币偏弱>7.3 / acm_tp10 偏高≥1.0。
 _GLOBAL_CONCLUSION_RULES: tuple[tuple[tuple[tuple[str, str], ...], str], ...] = (
-    ((("dgs10", "高位"), ("dfii10", "高实际利率")), "海外利率高位，外部估值压制未解除"),
+    # R15 round-8 全文补齐（Codex supplement L855）：美元利率不能直接解释为
+    # 「本 A 股外部估值压制已确认」——改候选线索 + 未验证声明。
+    ((("dgs10", "高位"), ("dfii10", "高实际利率")),
+     "海外利率高位（外部估值压制为候选线索，未经本报告验证）"),
     ((("t10y2y", "倒挂"),), "海外收益率曲线倒挂"),
     ((("t5yie", "高通胀预期"),), "海外通胀预期偏高"),
     ((("vix", "恐慌"),), "海外风险偏好收缩"),
@@ -882,13 +885,40 @@ def _global_conclusion(indicators: dict) -> str:
     return "；".join(clauses[:_MAX_GLOBAL_CLAUSES]) or _NO_GLOBAL_SIGNAL
 
 
+def _china_policy_conclusion(indicators: dict) -> str:
+    """国内政策方向结论（确定性规则；macro_signal_label 与分组展示块共用）。
+
+    综合 LPR 与 CPI（LPR 优先，CPI 作为补充信号）；两者皆缺时由 PMI 景气方向兜底。
+    单点定义在此，避免标签与分组块出现两套口径。
+    """
+    policy_parts: list[str] = []
+    lpr = indicators.get("lpr")
+    if lpr:
+        policy_parts.append(lpr.get("signal", ""))
+    cpi = indicators.get("cpi")
+    if cpi:
+        cpi_val = cpi.get("value")
+        if cpi_val is None:
+            pass  # R12c: 异常值拦截后（signal=不可靠），不参与政策方向判定
+        elif cpi_val < 0:
+            policy_parts.append("CPI通缩压力")
+        elif cpi_val > 3:
+            policy_parts.append("CPI通胀压力")
+    conclusion = "/".join(p for p in policy_parts if p)
+    pmi = indicators.get("pmi")
+    if not conclusion and pmi and pmi.get("signal"):
+        # 无 LPR/CPI 时以 PMI 景气方向兜底，国内段同样不留无结论的数值堆砌
+        conclusion = f"景气{pmi['signal']}"
+    return conclusion
+
+
 def macro_signal_label(macro: dict) -> str:
     """从宏观数据生成情景标签字符串（两段式，每段各带结论）。
 
     格式（首行国内 → 政策方向；次行海外 → 海外结论）::
 
         国内：PMI 49.8 + CPI +0.8% + LPR 3.0% + M2 7.5% →偏宽松 |
-          海外：VIX 17.1 正常 SOX 11,176 美10Y 4.96% 高位 →海外利率高位，外部估值压制未解除
+          海外：VIX 17.1 正常 SOX 11,176 美10Y 4.96% 高位 →海外利率高位（外部估值压制为候选线索，未经本报告验证）
 
     两段都给出结论是刻意设计：原实现海外段只平铺「数值 + 单词标签」
     （高位/平坦/偏强），读者拿不到任何判断，而这段位于报告头部——
@@ -927,23 +957,9 @@ def macro_signal_label(macro: dict) -> str:
         parts.append(f"信贷 {loan_fmt}")
 
     # 政策方向：综合 LPR 与 CPI（LPR 优先，CPI 作为补充信号）
-    policy_parts: list[str] = []
-    if lpr:
-        policy_parts.append(lpr.get("signal", ""))
-    if cpi:
-        cpi_val = cpi.get("value")
-        if cpi_val is None:
-            pass  # R12c: 异常值拦截后（signal=不可靠），不参与政策方向判定
-        elif cpi_val < 0:
-            policy_parts.append("CPI通缩压力")
-        elif cpi_val > 3:
-            policy_parts.append("CPI通胀压力")
     # 结论单独成段拼接：原实现把「→偏宽松」当成一个 part 用 " + " 连接，
     # 渲染出「信贷 0.1万亿 + →偏宽松」——分隔符语义错位（结论不是又一个指标）。
-    if policy_parts:
-        policy_conclusion = "/".join(p for p in policy_parts if p)
-    else:
-        policy_conclusion = ""
+    policy_conclusion = _china_policy_conclusion(indicators)
 
     # ---- 全球指标（｜分隔）----
     global_parts: list[str] = []
@@ -997,10 +1013,6 @@ def macro_signal_label(macro: dict) -> str:
             token = f"{token} {sig}"
         global_parts.append(token)
 
-    if not policy_conclusion and pmi and pmi.get("signal"):
-        # 无 LPR/CPI 时以 PMI 景气方向兜底，国内段同样不留无结论的数值堆砌
-        policy_conclusion = f"景气{pmi['signal']}"
-
     china_part = " + ".join(parts) if parts else ""
     china_line = f"国内：{china_part}" if china_part else "宏观数据不可得"
     if policy_conclusion:
@@ -1013,6 +1025,141 @@ def macro_signal_label(macro: dict) -> str:
         f"{china_line} |\n"
         f"  海外：{global_part} →{_global_conclusion(indicators)}"
     )
+
+
+# --- 分组展示块（v0.3.1 阅读验收，2026-10-07）---------------------------------
+# 背景：full 报告首屏的宏观情景原为单行紧凑标签（macro_signal_label 两段式），
+# 国内/海外 + 全部读数挤在一行，读者验收反馈「难读」。改为「短摘要 + 分组指标表」
+# 的展示层分组，保留原读数、来源与币种、条件边界。
+#
+# 契约：
+#   · `macro_signal_label` **保持不变**——它是简报/concise、invest-a-pulse
+#     （SKILL 明文要求两段式整体原样引用）等既有消费方的合同，本块不改它。
+#   · 读数/信号/来源/as_of 全部取自同一 macro dict，不新增阈值、不新增结论：
+#     两句结论仍由 `_china_policy_conclusion` / `_global_conclusion` 确定性生成
+#     （与标签同源，避免同一指标两套口径）。
+#   · 币种/口径列是**展示层对读数计量单位的准确分类**（不是新增数据字段、
+#     不引入新阈值）：指数（扩散指数/点位）、同比百分比（同比增速）、
+#     人民币/美元利率百分比（对应币种的利率读数，**不是金额**）、
+#     人民币信贷金额、美元/桶、人民币元/美元（USDCNY 报价方向）。
+#     首轮实现把国内指标一律写成 CNY、把美元利率写成 USD，会把「指数/同比」
+#     误标成币种金额、把利率百分数误读成美元金额——本列按上表口径逐一区分。
+#   · 返回**整块文本**（多行字符串）：full 首屏提取按元素前缀整块迁移，
+#     表格行不会漏进底稿（这是多行格式的主要风险，见 _concise 的提取处）。
+MACRO_BLOCK_MARKER = "**[宏观情景]**"
+
+# (key, 显示名, 币种/口径) —— 顺序与 macro_signal_label 的分段顺序一致；
+# 海外行集合 = 海外段指标集（TestLabelE2 锁定），不得删减。
+_MACRO_BLOCK_ROWS_CN: tuple[tuple[str, str, str], ...] = (
+    ("pmi", "PMI", "指数"),
+    ("cpi", "CPI", "同比百分比"),
+    ("lpr", "LPR", "人民币利率百分比"),
+    ("money_supply", "M2", "同比百分比"),
+    ("loan", "新增信贷", "人民币信贷金额"),
+)
+_MACRO_BLOCK_ROWS_OS: tuple[tuple[str, str, str], ...] = (
+    ("vix", "VIX", "指数点"),
+    ("sox", "SOX", "指数点"),
+    ("dgs10", "美10Y", "美元利率百分比"),
+    ("dgs30", "美30Y", "美元利率百分比"),
+    ("dfii10", "实际利率", "美元利率百分比"),
+    ("t10y2y", "期限利差", "美元利率百分比"),
+    ("t5yie", "5Y盈亏", "美元利率百分比"),
+    ("dtwexbgs", "美元指数", "指数点"),
+    ("dcoilbrenteu", "布油", "美元/桶"),
+    ("dexchus", "USDCNY", "人民币元/美元"),
+    ("acm_tp10", "ACM10Y", "美元利率百分比"),
+)
+
+_MACRO_BASELINE_SIGNALS = {"", "正常", "中性", "中位"}
+
+
+def _macro_reading_fmt(key: str, ind: dict) -> tuple[str, str] | None:
+    """指标读数与信号的展示文本；值不可得 → None。
+
+    数字格式与 macro_signal_label 复用同一套（两处口径一处定义）——
+    单一来源替换后标签输出必须逐字节不变（tests/test_macro_extended.py）。
+    """
+    val = ind.get("value")
+    if val is None:
+        return None
+    if key == "pmi":
+        disp = f"{val}"
+    elif key == "cpi":
+        disp = f"{val:+.1f}%"
+    elif key == "lpr":
+        disp = f"{val}%"
+    elif key == "money_supply":
+        cp = ind.get("credit_pulse")
+        disp = f"{val}%" + (f"（脉冲 {cp:+.1f}%）" if cp is not None else "")
+    elif key == "loan":
+        disp = f"{val:.0f}亿" if val >= 10000 else f"{val/10000:.1f}万亿"
+    elif key == "sox":
+        disp = f"{val:,.0f}" if val >= 1000 else f"{val}"
+    elif key in ("dgs10", "dgs30", "dfii10", "t10y2y", "t5yie"):
+        disp = f"{val:.2f}%"
+    elif key in ("dtwexbgs", "dcoilbrenteu"):
+        disp = f"{val:,.1f}"
+    else:
+        disp = f"{val:.2f}"
+    return disp, str(ind.get("signal") or "")
+
+
+def macro_scenario_lines(macro: dict) -> list[str]:
+    """full 报告首部的宏观分组展示块（多行；见上方契约注释）。
+
+    无任何可用读数时返回单行「宏观数据不可得」（与标签的降级语义一致）。
+    """
+    indicators = macro.get("indicators") or {}
+
+    def _rows(spec: tuple[tuple[str, str, str], ...], group: str) -> list[str]:
+        out: list[str] = []
+        for key, name, ccy in spec:
+            ind = indicators.get(key)
+            if not isinstance(ind, dict) or _macro_reading_fmt(key, ind) is None:
+                continue
+            disp, sig = _macro_reading_fmt(key, ind)
+            src = str(ind.get("source") or "—")
+            as_of = str(ind.get("as_of") or "")
+            src_disp = f"{src}（截至 {as_of}）" if as_of else src
+            out.append(
+                f"| {group} | {name} | {disp} | {sig or '—'} | {src_disp} | {ccy} |"
+            )
+        return out
+
+    cn_rows = _rows(_MACRO_BLOCK_ROWS_CN, "国内")
+    os_rows = _rows(_MACRO_BLOCK_ROWS_OS, "海外")
+    if not cn_rows and not os_rows:
+        return [f"{MACRO_BLOCK_MARKER} 宏观数据不可得"]
+
+    lines = [
+        f"{MACRO_BLOCK_MARKER}（引擎确定性读数，仅作外部背景锚定）",
+        "",
+    ]
+    conclusion_parts: list[str] = []
+    cn_conclusion = _china_policy_conclusion(indicators)
+    if cn_rows:
+        conclusion_parts.append(f"> **国内结论：** →{cn_conclusion or '方向不可得'}")
+    if os_rows:
+        conclusion_parts.append(f"> **海外结论：** →{_global_conclusion(indicators)}")
+    lines += conclusion_parts
+
+    lines += [
+        "",
+        "| 分组 | 指标 | 读数 | 信号 | 来源 | 币种/口径 |",
+        "|------|------|------|------|------|-----------|",
+    ]
+    lines += cn_rows
+    lines += os_rows
+    lines.append("")
+    failed = [f for f in (macro.get("failed_indicators") or []) if f]
+    if failed:
+        lines.append(f"> 未获取：{'、'.join(failed)}。")
+    lines.append(
+        "> 读数为封存快照原值（截至见表内）；同比百分比=同比增速，利率百分比="
+        "对应币种利率读数（非金额）；宏观状态仅作背景锚定，不推演为公司成本/盈利结论。"
+    )
+    return lines
 
 
 # ---------------------------------------------------------------------------

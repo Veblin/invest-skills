@@ -34,7 +34,6 @@ jobs:
             skills/invest-a-pulse \
             skills/invest-a-pattern-scan \
             skills/invest-hk-stock \
-            skills/invest-a-event-calendar \
             skills/invest-a-discover-scan \
             skills.yaml \
             gemini-extension.json \
@@ -59,7 +58,6 @@ jobs:
             dist/pkg/invest-a-pulse/__pycache__ \
             dist/pkg/invest-a-pattern-scan/__pycache__ \
             dist/pkg/invest-hk-stock/__pycache__ \
-            dist/pkg/invest-a-event-calendar/__pycache__ \
             dist/pkg/invest-a-discover-scan/__pycache__ \
             dist/pkg/.venv
           find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete

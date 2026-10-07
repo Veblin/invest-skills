@@ -128,6 +128,26 @@ def test_events_render_trips_template_placeholder(tmp_path: Path, events_text: s
     assert "[待 Claude report 阶段填充]" in events_text
 
 
+def test_rendered_bull_chain_review_marker_is_caught_by_qc(
+    tmp_path: Path,
+) -> None:
+    """已注入其他分析段、但缺 bull_chain 时，完成度 QC 仍拦多头占位。"""
+    rendered = render_report_v3(
+        collection_v2_minimal(), _SYMBOL, mode="full",
+        analysis=json.loads(_VALID_SIDECAR),
+    )
+    marker = "[待 Claude 核对多头依据]"
+    assert marker in rendered
+    path = _write_report(tmp_path, rendered)
+    path.with_suffix(".analysis.json").write_text(_VALID_SIDECAR, encoding="utf-8")
+
+    details = _completion_details(path)
+    flagged_lines = {
+        d["line"] for d in details if d["id"] == "completion-template-placeholder"
+    }
+    assert any(rendered.splitlines()[line - 1] == marker for line in flagged_lines)
+
+
 def test_degraded_render_trips_both_directions(tmp_path: Path, degraded_text: str) -> None:
     """反证不足：多空两侧**逻辑链**为空必须被拦（Bull/Bear）。
 
@@ -287,3 +307,59 @@ def test_insight_headings_stay_coupled_to_qc_structure_rule(tmp_path: Path) -> N
     assert layer.details == [] or all(
         d["id"] != "insight-structure" for d in layer.details
     ), f"渲染器标题与 QC 必需区块已漂移: {[d['message'] for d in layer.details]}"
+
+
+# ── R14 round-8：事件表生产者（渲染器）↔ 检查器（report_qc）结构耦合守卫 ────
+
+
+def test_event_table_rows_satisfy_qc_structure() -> None:
+    """渲染器事件表的表头与数据行必须通过 `report_qc` 的登记结构核验。
+
+    R14 round-8：事件表豁免由「表头常量整块豁免」改为「表头识别 + 数据行
+    逐行结构核验」（Codex event_copied_header）。本用例直接渲染真实渲染器
+    输出（>15 条事件以覆盖截断行），把「渲染器改了事件行结构、检查器词表
+    没同步」的漂移显式化——两侧任一处漂移先在这里红。
+    """
+    import report_qc
+
+    coll = collection_v2_minimal()
+    coll["events"] = [
+        {"date": f"2026-{m:02d}-{d:02d}",
+         "title": f"关于示例事项{i}的公告", "type": "buyback"}
+        for i, (m, d) in enumerate(
+            [(1, 1), (1, 15), (2, 1), (2, 15), (3, 1), (3, 15), (4, 1),
+             (4, 15), (5, 1), (5, 15), (6, 1), (6, 15), (7, 1), (7, 15),
+             (8, 1), (8, 15), (9, 1)]
+        )
+    ]
+    text = render_report_v3(coll, _SYMBOL, mode="full")
+    lines = text.splitlines()
+    header = next(ln for ln in lines if ln.startswith("|") and "公告标题" in ln)
+    assert tuple(report_qc._table_cells(header)) == report_qc._EVENT_TIMELINE_HEADER
+    i = lines.index(header)
+    block: list[str] = []
+    for ln in lines[i + 1:]:
+        if not ln.strip().startswith("|"):
+            break
+        block.append(ln)
+    data_rows = [ln for ln in block if not report_qc._is_table_separator(ln)]
+    assert len(data_rows) >= 2, "事件表应含表头与数据行"
+    # block 始于表头之后：data_rows 全部是数据行（含截断行），表头不在其中。
+    for ln in data_rows:
+        assert report_qc._event_timeline_row_ok(ln), f"渲染器事件行未过结构核验: {ln}"
+    assert any("（另有" in ln for ln in data_rows), ">15 条应渲染截断行"
+    # 2026-10-07 主线收尾：生产者行指纹（lib.events）与检查器实现（report_qc）
+    # 必须同规范——两处任一漂移先在此红；尾注中的指纹须与渲染行重算值一致。
+    from lib.events import event_table_fingerprint as producer_fp
+
+    meta_rows = [report_qc._table_cells(ln) for ln in data_rows]
+    sample = [["2026-01-01", "程序性公告", "标题 | 转义/", "治理"],
+              ["...", "...", "（另有 3 条事件未展示）", "...", "..."]]
+    assert producer_fp(sample) == report_qc._event_table_fingerprint(sample)
+    tail = next(ln for ln in lines if ln.startswith("[来源: akshare stock_individual_notice_report"))
+    m = report_qc._EVENT_TABLE_SOURCE_LINE_RE.match(tail.strip())
+    assert m and m.group(2), f"渲染器事件尾注应带行指纹: {tail}"
+    assert report_qc._event_table_fingerprint(meta_rows) == m.group(2), (
+        f"尾注指纹与渲染行不一致: {tail}")
+    findings = report_qc.event_analysis_evidence_findings(text)
+    assert not [f for f in findings if f["id"].endswith("table-evidence")], findings

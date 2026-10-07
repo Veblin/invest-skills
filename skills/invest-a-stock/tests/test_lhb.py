@@ -108,6 +108,37 @@ class TestRenderMaSystem:
 
         assert _render_ma_system(_collection(_kline(3))) == []
 
+    def test_position_labels_have_explicit_subject_and_direction(self):
+        """R7（2026-10-04 独立复检）：括注主体为「收盘价在 MA{p} 上方/下方」，
+        与比较方向一致（原「（收盘价上方）」附在 MA 值后被读成 MA 在上方，
+        两案例 8 个标签全部相反）。高/低/相等/不可得四态分列。"""
+        from unittest.mock import patch
+        from lib.render_markdown._base import _render_ma_system
+
+        tech = {
+            "latest_close": 10.0,
+            "trend": {
+                "ma": {"5": [9.0], "10": [10.0], "20": [11.0], "60": [None]},
+                "alignment": {"trend_label": "交织"},
+            },
+        }
+        with patch("lib.technical.compute", return_value=tech):
+            joined = "\n".join(_render_ma_system(_collection(_kline(60))))
+        assert "MA5=9.00（收盘价在 MA5 上方）" in joined      # 收盘 10 > MA5 9
+        assert "MA10=10.00（收盘价与 MA10 持平）" in joined    # 相等
+        assert "MA20=11.00（收盘价在 MA20 下方）" in joined    # 收盘 10 < MA20 11
+        assert "MA60: —" in joined                             # 不可得
+
+    def test_ascending_series_labels_close_above_each_ma(self):
+        """线性上行序列：收盘价高于全部 MA → 每根括注「收盘价在 MA{p} 上方」
+        （旧实现同数据会写成「（收盘价上方）」——方向读反）。"""
+        from lib.render_markdown._base import _render_ma_system
+
+        joined = "\n".join(_render_ma_system(_collection(_kline(60))))
+        for p in (5, 10, 20, 60):
+            assert f"（收盘价在 MA{p} 上方）" in joined
+        assert "（收盘价上方）" not in joined
+
 
 # ---------------------------------------------------------------------------
 # ② 东财失败 → 新浪回退
@@ -368,7 +399,7 @@ class TestRenderMaSystemUnavailableClose:
 
         修复前 `_kd` 从原始 kline 取 max(trade_date) —— 被剔除的 NaN 行（停牌
         残留 bar）日期仍在列表里，于是把前一有效交易日的收盘价标注成该行日期，
-        技术段的数字失去可追溯性（AGENTS.md:20）。
+        技术段的数字失去可追溯性（AGENTS.md 约束 3：分析解释必须依赖数据源）。
         """
         from lib.render_markdown._base import _render_ma_system
         from lib.technical import compute

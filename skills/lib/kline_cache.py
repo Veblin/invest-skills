@@ -28,10 +28,17 @@ class KlineTTLCache:
     """
 
     def __init__(self, root: Path | Callable[[], Path], ttl_seconds: int, *,
-                 enabled: Callable[[], bool] | None = None) -> None:
+                 enabled: Callable[[], bool] | None = None,
+                 now: Callable[[], float] | None = None) -> None:
         self._root = root
         self.ttl_seconds = ttl_seconds
         self._enabled = enabled
+        # 时钟可注入：调用方的「现在」可能是被固定的逻辑时刻（如 gap-scan 的
+        # `shanghai_now` 在测试中被 monkeypatch），TTL 必须在同一条时间线上判定，
+        # 否则固定日期的夹具会随真实时间流逝被判过期（时间炸弹：写于 09-23 的
+        # 测试在 09-25 之后必红）。默认真实时钟，生产行为不变。
+        # 默认时钟在调用时解析，测试可在单例构造后冻结 time.time。
+        self._now = now if now is not None else lambda: time.time()
 
     def _root_dir(self) -> Path:
         return self._root() if callable(self._root) else Path(self._root)
@@ -69,6 +76,20 @@ class KlineTTLCache:
             else:
                 raise
 
+    def path_for(self, date_str: str, parts: tuple[str, ...]) -> Path:
+        """该条目的落盘路径（只读访问器，供审计/缓存年龄披露使用）。
+
+        不存在时不创建任何目录；调用方自行 `exists()`/`stat()`。
+        """
+        return self._path(date_str, parts)
+
+    def age_seconds(self, date_str: str, parts: tuple[str, ...]) -> float | None:
+        """条目文件的年龄（秒，基于 mtime）；不存在返回 None。"""
+        try:
+            return self._now() - self.path_for(date_str, parts).stat().st_mtime
+        except OSError:
+            return None
+
     def load(self, date_str: str, parts: tuple[str, ...], *,
              type_guard: type | None = None) -> Any | None:
         """读取缓存；未启用/不存在/过期/损坏/类型不符均返回 None（视为未命中）。"""
@@ -77,7 +98,7 @@ class KlineTTLCache:
         path = self._path(date_str, parts)
         try:
             st = path.stat()  # 单次 stat（FileNotFoundError 由 except 兜底）
-            if time.time() - st.st_mtime > self.ttl_seconds:
+            if self._now() - st.st_mtime > self.ttl_seconds:
                 return None
             with open(path, "rb") as f:
                 data = pickle.load(f)
@@ -92,7 +113,7 @@ class KlineTTLCache:
         root = self._root_dir()
         if not root.exists():
             return
-        now = time.time()
+        now = self._now()
         for entry in root.iterdir():
             if entry.is_dir() and now - entry.stat().st_mtime > self.ttl_seconds:
                 shutil.rmtree(entry, ignore_errors=ignore_errors)

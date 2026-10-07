@@ -34,6 +34,8 @@ def _collection_phase2() -> dict:
         "erp": {
             "raw": 4.2,
             "percentile_5y": 72.0,
+            # C2-a：A 股 D-③ 用人民币口径（cn10y 优先）；dgs10 仅跨币种参考
+            "cn10y": 2.85, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)",
             "dgs10": 2.85,
             "erp_days": 200,
             "partial": False,

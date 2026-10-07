@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -31,8 +32,18 @@ SCHEMA_VERSION = 1
 _db_override: Path | None = None
 
 
-def _get_path() -> Path:
+def get_db_path() -> Path:
+    """当前研究库路径 —— 跨 skill 唯一真源（issue #33）。
+
+    测试隔离统一走 `_db_override`：journal 侧 `db.py` 的写入连接亦经本函数解析，
+    因此「建表路径」与「写连接路径」不会再错位。未设置 override 时 == `env.STORE_DB`，
+    与历史行为逐字一致。
+    """
     return _db_override or DB_PATH
+
+
+def _get_path() -> Path:  # 兼容既有内部调用点
+    return get_db_path()
 
 
 def _conn() -> sqlite3.Connection:
@@ -210,6 +221,9 @@ def _apply_migrations(c: sqlite3.Connection) -> None:
         ("futures_oi_change_pct", "REAL"),
     ]:
         _add_column_if_missing(c, "market_snapshots", col, col_type)
+    # v0.3.1 迁移（issue #34）：股指期货基差的数据日期（YYYYMMDD）。
+    # 与 futures_basis_pct 成对写入；无日期（含历史行）→ 读取侧按「新鲜度不可判定」禁用。
+    _add_column_if_missing(c, "market_snapshots", "futures_basis_date", "TEXT")
     # v0.2.8 迁移：数据新鲜度审计列（W1/code-review #4）——collected_at 老库已有
     _add_column_if_missing(c, "market_snapshots", "data_note", "TEXT")
     # v0.2.4 迁移：collections.kind（collect/report 快照区分，review #9 第二轮）
@@ -326,12 +340,19 @@ def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
     return (now - dt) < timedelta(minutes=SAME_SESSION_WINDOW_MINUTES)
 
 
-def list_collections(limit: int = 20, symbol: str | None = None) -> list[dict]:
+def list_collections(limit: int = 20, symbol: str | None = None,
+                     kind: str | None = None) -> list[dict]:
     init_db()
     c = _conn()
     try:
-        if symbol:
+        if symbol and kind:
+            rows = c.execute("SELECT * FROM collections WHERE symbol=? AND kind=? ORDER BY fetched_at DESC, id DESC LIMIT ?",
+                             (symbol, kind, limit)).fetchall()
+        elif symbol:
             rows = c.execute("SELECT * FROM collections WHERE symbol=? ORDER BY fetched_at DESC LIMIT ?", (symbol, limit)).fetchall()
+        elif kind:
+            rows = c.execute("SELECT * FROM collections WHERE kind=? ORDER BY fetched_at DESC, id DESC LIMIT ?",
+                             (kind, limit)).fetchall()
         else:
             rows = c.execute("SELECT * FROM collections ORDER BY fetched_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
@@ -432,7 +453,7 @@ def get_collection(collection_id: int) -> dict | None:
     c = _conn()
     try:
         row = c.execute(
-            "SELECT id, symbol, name, fetched_at, raw_json FROM collections WHERE id=?",
+            "SELECT id, symbol, name, fetched_at, kind, raw_json FROM collections WHERE id=?",
             (collection_id,)).fetchone()
         if not row:
             return None
@@ -700,7 +721,11 @@ def extract_key_snapshot(raw: dict) -> dict:
         vs = sort_kline_asc(val_data)
         summary = valuation_summary(
             [r.get("pe_ttm") for r in vs], [r.get("pb") for r in vs],
-            window_label=valuation_window_label(len(vs)),
+            window_label=valuation_window_label(
+                len(vs),
+                vs[0].get("trade_date") if vs else None,
+                vs[-1].get("trade_date") if vs else None,
+            ),
         )
         pe, pb = summary.get("pe", {}), summary.get("pb", {})
         if pe.get("pct") is not None:
@@ -714,7 +739,8 @@ def extract_key_snapshot(raw: dict) -> dict:
 
     fin = _dim_data(body, "financials")
     if isinstance(fin, list) and fin:
-        latest = sorted(fin, key=lambda r: str(r.get("end_date", "")))[-1]
+        from lib.financials import dedupe_by_end_date as _dedupe_fin  # C1-a
+        latest = sorted(_dedupe_fin(fin), key=lambda r: str(r.get("end_date", "")))[-1]
         if latest.get("roe") is not None:
             snap["financials"]["roe"] = latest["roe"]
         ry = _yoy_from_fina_rows(fin, "revenue")
@@ -765,12 +791,20 @@ def extract_key_snapshot(raw: dict) -> dict:
     # Events
     events_summary = body.get("_meta", {}).get("events_summary", {})
     if events_summary:
-        snap["events"] = {
+        ev_snap: dict[str, Any] = {
             "event_count": _events_count_from_summary(events_summary),
             "window_days": events_summary.get("window_days", 30),
             "latest_date": events_summary.get("latest_date"),
             "top_types": events_summary.get("top_types", []),
         }
+        # 低信号计数随快照留档：top_types 已剔除这两类，不留档则程序性/未分类公告
+        # 的激增在 diff 里完全不可见（CHANGELOG 承诺的「仍计数留档」）。
+        # 仅当源 summary 确有该字段才写——v0.3.1 前的快照无此字段，补默认 0 会让
+        # diff 把「没有字段」读成「从 0 涨到 N」。
+        if "procedural_count" in events_summary or "unclassified_count" in events_summary:
+            ev_snap["procedural_count"] = int(events_summary.get("procedural_count", 0) or 0)
+            ev_snap["unclassified_count"] = int(events_summary.get("unclassified_count", 0) or 0)
+        snap["events"] = ev_snap
 
     return snap
 
@@ -779,6 +813,11 @@ _KEY_DIFF_ALWAYS = frozenset({
     "pe_pct", "pb_pct", "ma_alignment", "triggered_count", "triggered_signals",
 })
 _KEY_DIFF_THRESHOLD_PCT = 1.0
+
+#: `events_diff["low_signal_change"]` 两桶的展示名——键与快照字段
+#: （`procedural_count`／`unclassified_count`）同源。CLI 与 insight 渲染共用，
+#: 避免各处各写一套措辞（也避免把英文键直接打进中文产物）。
+LOW_SIGNAL_DIFF_LABELS = {"procedural": "程序性公告", "unclassified": "未分类公告"}
 
 CATEGORY_LABELS = {
     "valuation": "估值",
@@ -833,14 +872,17 @@ def load_key_diff_vs_stored(symbol: str, current: dict) -> dict | None:
 
 
 def _key_field_changed(field: str, old: Any, new: Any) -> bool:
-    if old == new:
+    if _same_diff_value(old, new):
         return False
     if field in _KEY_DIFF_ALWAYS:
         return True
     if isinstance(old, (int, float)) and isinstance(new, (int, float)):
         if old == 0:
             return new != 0
-        return abs((new - old) / abs(old) * 100) >= _KEY_DIFF_THRESHOLD_PCT
+        pct = _finite_percent_change(old, new)
+        # 不可计算的变化（例如 NaN → 有效值）是数据可用性变化，不能被
+        # NaN 与阈值比较恒为 False 的行为吞掉。
+        return pct is None or abs(pct) >= _KEY_DIFF_THRESHOLD_PCT
     return True
 
 
@@ -861,8 +903,9 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
                 unchanged.append(f"{cat}.{field}")
                 continue
             change: dict[str, Any] = {"field": field, "old": ov, "new": nv}
-            if isinstance(ov, (int, float)) and isinstance(nv, (int, float)) and ov != 0:
-                change["pct"] = round((nv - ov) / abs(ov) * 100, 2)
+            pct = _finite_percent_change(ov, nv)
+            if pct is not None:
+                change["pct"] = round(pct, 2)
             cat_changes.append(change)
         if cat_changes:
             categories[cat] = cat_changes
@@ -872,29 +915,92 @@ def diff_key_snapshots(old_raw: dict, new_raw: dict) -> dict:
     new_events = new_snap.get("events") or {}
     events_diff: dict[str, Any] | None = None
     if old_events or new_events:
+        # 可比性的**第一道闸门：两侧都必须真的有事件摘要**。事件采集失败/不完整时
+        # `extract_key_snapshot` 根本不写 events 键，这里取到 `{}`——若直接与有数据的
+        # 一侧相减，会把「没采到」报成「数量下降」与「这些类型消失了」，即用数据缺口
+        # 冒充事件变化（AGENTS.md 约束 3：没有数据支撑的分析不输出）。
+        both_have_data = bool(old_events) and bool(new_events)
+
         old_window = old_events.get("window_days", 30)
         new_window = new_events.get("window_days", 30)
         count_change = 0
-        if old_window == new_window:
-            old_count = _events_count_from_summary(old_events)
-            new_count = _events_count_from_summary(new_events)
-            count_change = new_count - old_count
-
         window_days_changed: dict[str, int] | None = None
-        if old_window != new_window:
-            window_days_changed = {"old": old_window, "new": new_window}
+        if both_have_data:
+            if old_window == new_window:
+                old_count = _events_count_from_summary(old_events)
+                new_count = _events_count_from_summary(new_events)
+                count_change = new_count - old_count
+            else:
+                window_days_changed = {"old": old_window, "new": new_window}
 
-        old_types = {t.get("type", "") for t in old_events.get("top_types", []) if t.get("type")}
-        new_types = {t.get("type", "") for t in new_events.get("top_types", []) if t.get("type")}
-        added_types = sorted(new_types - old_types)
-        removed_types = sorted(old_types - new_types)
+        from .events import is_low_signal  # 低信号判据单一源；本模块不复制字面量集合
 
-        if count_change != 0 or added_types or removed_types or window_days_changed:
+        # 新版榜单剔除低信号后取前 5；旧版榜单直接取前 5。跨代不可比。
+        # 两代榜单都只有在两侧不足 5 项时才是完整类型集合：满榜时第 6 位
+        # 可能仅因排名变化进入榜单，不能据此声称「新增类型」。
+        old_has_counts = "procedural_count" in old_events
+        new_has_counts = "procedural_count" in new_events
+        same_basis = both_have_data and (old_has_counts == new_has_counts)
+        same_window = both_have_data and old_window == new_window
+        rankings_complete = (
+            len(old_events.get("top_types") or []) < 5
+            and len(new_events.get("top_types") or []) < 5
+        )
+        types_comparable = same_window and same_basis and rankings_complete
+
+        def _signal_types(ev: dict) -> set[str]:
+            """top_types 里的**实质**类型集合（供同口径两侧比较）。"""
+            return {
+                str(t.get("type"))
+                for t in ev.get("top_types", [])
+                if t.get("type") and not is_low_signal(t.get("type"))
+            }
+
+        added_types: list[str] = []
+        removed_types: list[str] = []
+        if types_comparable:
+            added_types = sorted(_signal_types(new_events) - _signal_types(old_events))
+            removed_types = sorted(_signal_types(old_events) - _signal_types(new_events))
+
+        # 低信号**分桶**比较，不只看合计：procedural ↔ unclassified 之间平移（合计不变）
+        # 也是变化——两桶语义不同（源标注程序性 vs 源未分类），合并求和会把它抹平。
+        low_signal_change: dict[str, int] | None = None
+        if same_window and old_has_counts and new_has_counts:
+            delta = {
+                "procedural": int(new_events.get("procedural_count", 0) or 0)
+                - int(old_events.get("procedural_count", 0) or 0),
+                "unclassified": int(new_events.get("unclassified_count", 0) or 0)
+                - int(old_events.get("unclassified_count", 0) or 0),
+            }
+            low_signal_change = {k: v for k, v in delta.items() if v} or None
+
+        # 不可比**必须说出来**，且要说清是哪一种：数据缺口（本次没采到）与口径差异
+        # （跨代榜单）对读者的含义不同，写同一句话会把前者读成后者。
+        incomparable_reason: str | None = None
+        if not both_have_data:
+            incomparable_reason = "events_data_missing"
+        elif not same_window:
+            incomparable_reason = "window_changed"
+        elif not same_basis:
+            incomparable_reason = "basis_changed"
+        elif not types_comparable:
+            incomparable_reason = "type_ranking_truncated"
+
+        # `incomparable_reason` 也进入本条件：不可比时**必须产出 diff 对象**，否则标记
+        # 不会出现在输出里，下游（insight_model）会把「未比较」读成「无变化」，
+        # 报出 no_material_change。（P2 修正 2026-09-25）
+        if (count_change != 0 or added_types or removed_types or window_days_changed
+                or low_signal_change or incomparable_reason):
             events_diff = {
                 "count_change": count_change,
                 "new_types": added_types,
                 "removed_types": removed_types,
             }
+            if incomparable_reason:
+                events_diff["types_incomparable"] = True       # 既有消费方（渲染/校验）沿用
+                events_diff["incomparable_reason"] = incomparable_reason
+            if low_signal_change:
+                events_diff["low_signal_change"] = low_signal_change
             if window_days_changed:
                 events_diff["window_days_changed"] = window_days_changed
 
@@ -1014,6 +1120,29 @@ def list_valuations(symbol: str | None = None, limit: int = 20) -> list[dict]:
         _safe_close(c)
 
 
+def _same_diff_value(old: Any, new: Any) -> bool:
+    """快照缺失值同态比较：NaN 与 NaN 都表示不可得。"""
+    if isinstance(old, float) and math.isnan(old):
+        return isinstance(new, float) and math.isnan(new)
+    return old == new
+
+
+def _finite_percent_change(old: Any, new: Any) -> float | None:
+    """仅为两端有限的数值计算变化率；数据缺口不伪装成百分比。"""
+    if (not isinstance(old, (int, float)) or isinstance(old, bool)
+            or not isinstance(new, (int, float)) or isinstance(new, bool)
+            or old == 0):
+        return None
+    if ((isinstance(old, float) and not math.isfinite(old))
+            or (isinstance(new, float) and not math.isfinite(new))):
+        return None
+    try:
+        pct = (new - old) / abs(old) * 100
+    except (OverflowError, ZeroDivisionError):
+        return None
+    return pct if math.isfinite(pct) else None
+
+
 def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
     """递归对比两个维度的 data，返回变化列表。"""
     changes: list[dict] = []
@@ -1023,15 +1152,15 @@ def _diff_data(dimension: str, old_data: Any, new_data: Any) -> list[dict]:
         for key in sorted(all_keys):
             ov = old_data.get(key)
             nv = new_data.get(key)
-            if ov != nv:
+            if not _same_diff_value(ov, nv):
                 change = {
                     "path": f"{dimension}.{key}",
                     "old": ov,
                     "new": nv,
                 }
                 # 数值型计算百分比变化
-                if isinstance(ov, (int, float)) and isinstance(nv, (int, float)) and ov != 0:
-                    pct = (nv - ov) / abs(ov) * 100
+                pct = _finite_percent_change(ov, nv)
+                if pct is not None:
                     change["pct"] = round(pct, 2)
                 changes.append(change)
 
@@ -1224,8 +1353,9 @@ def thesis_update(symbol: str, assumptions: list[dict] | None = None,
 # ---------------------------------------------------------------------------
 # 宏观日快照（macro_snapshots 表，v0.2.4）
 #
-# 放置于 store.py 而非 journal lib：journal 侧 db.py 直连 env.STORE_DB，
-# 不 honor _db_override，写入若在 journal 侧将无法测试隔离（污染真实库）。
+# 放置于 store.py 而非 journal lib：宏观快照与 market_snapshots 同库同表族，
+# 由 store 统一建表与隔离。journal 侧 db.py 自 issue #33 起亦经
+# `store.get_db_path()` 解析写入路径，`_db_override` 对 journal 写路径同样生效。
 # 日期用上海口径（宏观指标无交易日概念，LPR/PMI 月度、VIX/SOX 日频，
 # 非交易日也写入，与 market_snapshots 的交易日跳过策略不同）。
 # ---------------------------------------------------------------------------

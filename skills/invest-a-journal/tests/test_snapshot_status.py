@@ -47,6 +47,9 @@ def test_snapshot_all_failed_marks_all_failed(monkeypatch):
 
 def test_snapshot_partial_success_marks_ok(monkeypatch):
     _fail_all(monkeypatch)
+    # 状态用例与持久化解耦（issue #33）：本用例只验信封 status，不再顺带写库；
+    # 写入路径由 test_store_isolation.py 在隔离库上专门覆盖。
+    monkeypatch.setattr(market_microstructure, "_auto_persist", lambda snap: None)
 
     def _fake_ad_ratio(result):
         result["ad_ratio"] = 1.2
@@ -79,6 +82,8 @@ def test_all_failed_snapshot_not_cached_by_data_bridge(monkeypatch, tmp_path):
 def test_ok_snapshot_cached_by_data_bridge(monkeypatch, tmp_path):
     """正常快照照常缓存（5min 去重不回归）。"""
     _fail_all(monkeypatch)
+    # 同 test_snapshot_partial_success_marks_ok：本用例只验缓存行为，持久化解耦（#33）。
+    monkeypatch.setattr(market_microstructure, "_auto_persist", lambda snap: None)
 
     def _fake_ad_ratio(result):
         result["ad_ratio"] = 1.2

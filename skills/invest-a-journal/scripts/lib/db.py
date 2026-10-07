@@ -1,5 +1,9 @@
 """交易日志数据库层。表建在 invest-a-stock 的 research.db 中。
 
+路径解析（issue #33）：连接一律经 `store.get_db_path()`（= `store._db_override
+or env.STORE_DB`），与 invest-a-stock / invest-a-etf 同机制；测试只需设置
+`store._db_override` 即可整体隔离，不再依赖本模块的 `DB_PATH` 常量。
+
 v0.2.1: direction / linked_journal_id / evaluation_json 三字段。
 v0.2.4: attribution 复盘归因字段（环境/能力/运气三分归因）。
 v0.2.4: 时间戳统一 UTC 存储（曾误写上海墙钟，与 schema DEFAULT 混用时区，
@@ -20,12 +24,15 @@ ensure_invest_a_scripts_on_path()
 
 from db_util import connect_db, safe_close  # noqa: E402
 from lib import env  # noqa: E402
+from lib import store as _store  # noqa: E402
 
+# 仅供只读展示/兼容引用；写路径已收敛到 store.get_db_path()（issue #33）——
+# 测试经 store._db_override 隔离，与 invest-a-stock / invest-a-etf 同一机制。
 DB_PATH = env.STORE_DB
 
 
 def _conn() -> sqlite3.Connection:
-    return connect_db(DB_PATH)
+    return connect_db(_store.get_db_path())
 
 
 def _safe_close(c: sqlite3.Connection) -> None:

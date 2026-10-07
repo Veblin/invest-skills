@@ -19,12 +19,6 @@ class TestScenarioEvidenceLevel:
         base = {"fcff": None, "wacc_label": "实值参数"}
         assert _scenario_evidence({}, base) == "C"
 
-    def test_evidence_c_when_wacc_degraded(self):
-        from lib.render_dcf import _scenario_evidence
-
-        base = {"fcff": {"fcff": 1.0}, "wacc_label": "Beta 默认 1.0（近似）"}
-        assert _scenario_evidence({}, base) == "C"
-
     def test_scenario_table_cells_carry_evidence_mark(self):
         """D-④ 三情景表概率单元格带（证据 X）标记。"""
         from test_v018 import _make_dcf_render_financials, _make_research_dim
@@ -38,7 +32,11 @@ class TestScenarioEvidenceLevel:
             ]),
         }
         collection = {
-            "market_structure": {"erp": {"dgs10": 2.65, "source": "FRED.DGS10"}},
+            # C2-a：A 股 DCF 用人民币口径（cn10y 优先）；仅美元口径会被闸门暂停
+            "market_structure": {"erp": {
+                "cn10y": 2.65, "cn10y_source": "akshare.bond_zh_us_rate(CN10Y)",
+                "dgs10": 2.65, "source": "FRED.DGS10",
+            }},
         }
         text = _section_dcf_valuation(dims, collection, "000001")
 

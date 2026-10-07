@@ -19,29 +19,14 @@ _DCF_TERMINAL_G_DEFAULT = 0.025  # 与 D-③ 10Y 国债默认假设一致，作�
 def _scenario_evidence(scenario: dict, base: dict) -> str:
     """按数据可得性为情景权重标注证据等级（R-A3 确定性规则，非人工评级）：
     - 基期 FCFF 实值可得 且 显式期增速参数完整 → B（参数驱动，历史/当期实值锚定）
-    - 基期 FCFF 实值缺失 或 wacc 参数降级（__label 含"近似"/"缺失"） → C
+    - 基期 FCFF 实值缺失 → C；默认 WACC 输入在进入情景计算前已被拦截
     """
     fcff_ok = (base.get("fcff") or {}).get("fcff") is not None
-    wacc_ok = "近似" not in (base.get("wacc_label") or "") and "缺失" not in (base.get("wacc_label") or "")
-    return "B" if fcff_ok and wacc_ok else "C"
+    return "B" if fcff_ok else "C"
 
 
-# --- _dcf_compute_beta ---
-def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
-    """从个股 K 线 + 沪深300 基准计算 Beta。
-
-    对齐个股与沪深300 的交易日，计算日收益率序列，
-    调用 valuation.calc_beta() 做回归。
-
-    Args:
-        kline_data: 个股 K 线数据（list of dict，含 trade_date/close）
-
-    Returns:
-        {"beta": float, "r_squared": float | None, "observations": int,
-         "source": str, "is_default": bool}
-        计算失败时返回 {"beta": 1.0, "is_default": True, ...}
-    """
-
+def _dcf_stock_by_date(kline_data: list[dict] | None) -> dict[str, float]:
+    """Normalize the trading days used by beta and its collection prerequisite."""
     stock_by_date: dict[str, float] = {}
     if kline_data and isinstance(kline_data, list):
         for r in kline_data:
@@ -54,6 +39,30 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
             td = str(r.get("trade_date") or "").replace("-", "").replace("/", "")[:8]
             if len(td) == 8 and td.isdigit():
                 stock_by_date[td] = close_f
+    return stock_by_date
+
+
+# --- _dcf_compute_beta ---
+def _dcf_compute_beta(kline_data: list[dict] | None,
+                      *, benchmark: dict | None = None) -> dict:
+    """从个股 K 线 + 沪深300 基准计算 Beta。
+
+    对齐个股与沪深300 的交易日，计算日收益率序列，
+    调用 valuation.calc_beta() 做回归。
+
+    Args:
+        kline_data: 个股 K 线数据（list of dict，含 trade_date/close）
+        benchmark: 封存快照中的沪深300 基准序列（`market_structure.benchmark_hs300`）。
+            **固定快照链必须传入**——渲染链上唯一的联网点就是这里的基准抓取；
+            不传则回落现场抓取（旧 `--resume` 链行为不变）。
+
+    Returns:
+        {"beta": float, "r_squared": float | None, "observations": int,
+         "source": str, "is_default": bool}
+        计算失败时返回 {"beta": 1.0, "is_default": True, ...}
+    """
+
+    stock_by_date = _dcf_stock_by_date(kline_data)
 
     if len(stock_by_date) < 12:
         return {
@@ -62,15 +71,33 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
             "is_default": True,
         }
 
-    # 获取沪深300 基准数据
-    try:
-        from lib.collector import _akshare_hs300_dated_closes
-        bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
-    except Exception as exc:
-        # 单行降级日志（不带 traceback，对齐 collector/_base 降级惯例；
-        # 东财不可达的 ConnectionError 链式栈会淹没真实错误）
-        logger.warning("沪深300基准数据获取失败（%s），Beta 使用默认值 1.0", exc)
+    # 获取沪深300 基准数据：优先封存序列（零网络），否则现场抓取（旧链）
+    bench_from_snapshot = False
+    if benchmark is not None:
         bench_dated = []
+        for row in benchmark.get("closes") or []:
+            try:
+                td, close_v = row[0], row[1]
+            except (TypeError, IndexError):
+                continue
+            td_s = str(td).replace("-", "").replace("/", "")[:8]
+            if len(td_s) == 8 and td_s.isdigit() and close_v is not None:
+                bench_dated.append((td_s, float(close_v)))
+        bench_from_snapshot = bool(bench_dated)
+        if not bench_from_snapshot:
+            logger.warning(
+                "封存快照无可用沪深300基准序列（%s），Beta 使用默认值 1.0",
+                benchmark.get("availability", "空序列"),
+            )
+    else:
+        try:
+            from lib.collector import _akshare_hs300_dated_closes
+            bench_dated = _akshare_hs300_dated_closes(days=max(130, len(stock_by_date) + 10))
+        except Exception as exc:
+            # 单行降级日志（不带 traceback，对齐 collector/_base 降级惯例；
+            # 东财不可达的 ConnectionError 链式栈会淹没真实错误）
+            logger.warning("沪深300基准数据获取失败（%s），Beta 使用默认值 1.0", exc)
+            bench_dated = []
 
     if not bench_dated:
         return {
@@ -110,11 +137,13 @@ def _dcf_compute_beta(kline_data: list[dict] | None) -> dict:
             "is_default": True,
         }
 
+    obs = beta_result.get("observations", len(stock_returns))
+    bench_label = "封存基准序列" if bench_from_snapshot else "现场抓取基准"
     return {
         "beta": beta_result["beta"],
         "r_squared": beta_result.get("r_squared"),
-        "observations": beta_result.get("observations", len(stock_returns)),
-        "source": f"个股 vs 沪深300 日收益率回归（{beta_result.get('observations', len(stock_returns))} 个对齐交易日）",
+        "observations": obs,
+        "source": f"个股 vs 沪深300 日收益率回归（{obs} 个对齐交易日，{bench_label}）",
         "is_default": False,
     }
 
@@ -125,6 +154,8 @@ def _dcf_try_wacc(
     kline_data: list[dict] | None = None,
     rf_override: float | None = None,
     erp_override: float | None = None,
+    *,
+    allow_network: bool = True,
 ) -> tuple[dict | None, list[str]]:
     """尝试计算 WACC（CAPM）。
 
@@ -134,7 +165,9 @@ def _dcf_try_wacc(
 
     beta 优先级：
     1. financials / market_structure 中预存的 beta（未来版本直接接入）
-    2. 从 kline_data + HS300 基准实时计算（_dcf_compute_beta）
+    2. 从 kline_data + HS300 基准计算（_dcf_compute_beta）——基准优先取封存的
+       `market_structure.benchmark_hs300`；缺失才现场抓取，但 `allow_network=False`
+       （封存输入）时一律不抓，改标不可得让 beta 走默认值并由报告披露
     3. 默认值 1.0（标注 [推测，待验证]）
 
     Returns:
@@ -148,17 +181,34 @@ def _dcf_try_wacc(
 
     beta_meta: dict = {}
     if beta is None:
-        beta_meta = _dcf_compute_beta(kline_data)
+        sealed_bench = (market_structure.get("benchmark_hs300")
+                        if isinstance(market_structure, dict) else None)
+        if sealed_bench is None and not allow_network:
+            # 封存输入缺基准序列：显式标不可得，绝不联网补抓
+            sealed_bench = {"availability": "unavailable: 快照未封存基准序列", "closes": []}
+        beta_meta = _dcf_compute_beta(kline_data, benchmark=sealed_bench)
         beta = beta_meta["beta"]
 
-    # rf: user override > data source > default
+    # rf: user override > data source > default（C2-a：优先人民币口径 cn10y；
+    # 仅美元口径 → rf_is_wrong_currency；R1：来源/币种未确认 →
+    # rf_is_currency_unconfirmed——三者同走「暂停数值 DCF」闸门）
+    rf_is_wrong_currency = False
+    rf_is_currency_unconfirmed = False
+    rf_invalid_note = ""
+    rf_label = ""
     if rf_override is not None:
         risk_free = rf_override
         risk_free_is_default = False
+        rf_label = f"用户指定 {rf_override * 100:.2f}%"
     else:
-        erp_data = market_structure.get("erp") or {}
-        risk_free_raw = erp_data.get("dgs10")
-        risk_free_is_default = risk_free_raw is None
+        from lib.financials import resolve_rf
+        rf = resolve_rf(market_structure.get("erp"))
+        risk_free_raw = rf["rate_pct"]
+        risk_free_is_default = rf["is_default"]
+        rf_is_wrong_currency = rf["is_wrong_currency"]
+        rf_is_currency_unconfirmed = rf["is_currency_unconfirmed"]
+        rf_invalid_note = rf.get("degraded_note", "")
+        rf_label = rf["label"]
         risk_free = 0.025 if risk_free_is_default else risk_free_raw / 100.0
 
     # erp: user override > default 6%
@@ -168,7 +218,14 @@ def _dcf_try_wacc(
     if beta_meta.get("is_default"):
         missing.append(f"beta 使用默认值 1.0（{beta_meta.get('source', '未知')}）")
     if risk_free_is_default:
-        missing.append("无风险利率使用默认值 2.5%（10Y 国债不可得）[推测，待验证]")
+        _rf_suffix = f"；{rf_invalid_note}" if rf_invalid_note else ""
+        missing.append(
+            "无风险利率使用默认值 2.5%（同币种 10Y 国债不可得）"
+            f"{_rf_suffix}[推测，待验证]")
+    elif rf_is_wrong_currency:
+        missing.append(f"无风险利率仅有美元口径（{rf_label}），与 A 股折现率币种不一致")
+    elif rf_is_currency_unconfirmed:
+        missing.append(f"无风险利率来源/币种未确认（{rf_label}），无法确认与 A 股折现率同币种")
     if erp_override is not None:
         missing.append(f"ERP 使用用户指定值 {erp_override*100:.1f}%")
     if rf_override is not None:
@@ -178,6 +235,10 @@ def _dcf_try_wacc(
 
     wacc_result = calc_wacc(beta=beta, risk_free_rate=risk_free, erp=erp, cost_of_debt=None)
     wacc_result["risk_free_is_default"] = risk_free_is_default
+    wacc_result["rf_is_wrong_currency"] = rf_is_wrong_currency
+    wacc_result["rf_is_currency_unconfirmed"] = rf_is_currency_unconfirmed
+    wacc_result["rf_degraded_note"] = rf_invalid_note
+    wacc_result["rf_label"] = rf_label
     wacc_result["beta"] = beta
     wacc_result["beta_is_default"] = beta_meta.get("is_default", False)
     wacc_result["beta_r_squared"] = beta_meta.get("r_squared")
@@ -343,7 +404,7 @@ def _section_dcf_valuation(
     若 veto_triggered=True，只返回一行"研究终止条件触发，估值段落已跳过"，
     不渲染任何 DCF 数值（Step 7/8 快速否决检测触发时会传入 True）。
 
-    合规红线（AGENTS.md 约束1 / CLAUDE.md LAW 6）：不输出单一"目标价"，
+    合规红线（AGENTS.md 约束1 / report-conventions.md §2.1 原 LAW 6）：不输出单一"目标价"，
     只输出企业价值区间 + 三情景假设 + 概率权重，并注明仅供参考。
     """
     header = "## D. DCF 估值区间与三角对照"
@@ -386,13 +447,58 @@ def _section_dcf_valuation(
     lines.append("#### D-④ DCF 三情景估值区间")
     lines.append("")
 
-    wacc_result, wacc_missing = _dcf_try_wacc(financials, market_structure, kline_data=kline_data)
+    # 利率缺口已知时无需为随后会暂停的估值实时抓取沪深300基准。
+    _erp_now = market_structure.get("erp") or {}
+    if _erp_now.get("dgs10") is None and _erp_now.get("cn10y") is None:
+        lines.append("关键输入采用默认值（无风险利率），暂停数值 DCF 三情景、概率权重和敏感性矩阵。")
+        lines.append("🔍 待独立验证：取得同币种、同估值时点的利率后重算。")
+        lines.append("[来源: market_structure.erp.cn10y/dgs10]")
+        return "\n".join(lines)
+
+    from lib.report_snapshot import is_sealed
+    wacc_result, wacc_missing = _dcf_try_wacc(
+        financials, market_structure, kline_data=kline_data,
+        allow_network=not is_sealed(collection),
+    )
     if wacc_result is None:
         lines.append("数据不足，WACC 无法计算，DCF 段落跳过。缺失项：")
         for m in wacc_missing:
             lines.append(f"- {m}")
         lines.append("")
         lines.append("[来源: valuation.calc_wacc 所需参数缺失]")
+        return "\n".join(lines)
+
+    # 默认利率或默认 beta 只能用来解释缺口，不能进入数值估值与概率表。
+    # 否则报告正文即使暂停价带，审计底稿仍会给出看似精确的 DCF 情景。
+    default_inputs = []
+    if wacc_result.get("risk_free_is_default"):
+        default_inputs.append("无风险利率")
+    elif wacc_result.get("rf_is_wrong_currency"):
+        # C2-a：美元口径 rf 与 A 股折现币种不一致——同默认值一样不得进入数值估值
+        default_inputs.append("无风险利率（美元口径≠A 股折现币种）")
+    elif wacc_result.get("rf_is_currency_unconfirmed"):
+        # R1：来源/币种未确认同样不得进入数值估值
+        default_inputs.append("无风险利率（来源/币种未确认）")
+    if wacc_result.get("beta_is_default"):
+        default_inputs.append("Beta")
+    if default_inputs:
+        lines.append(
+            "关键输入采用默认值（" + "、".join(default_inputs)
+            + "），暂停数值 DCF 三情景、概率权重和敏感性矩阵。"
+        )
+        if wacc_result.get("rf_degraded_note"):
+            lines.append(f"- ⚠️ {wacc_result['rf_degraded_note']}。")
+        if wacc_result.get("beta_is_default"):
+            lines.append(f"- Beta 缺口：{wacc_result.get('beta_source') or '来源不可得'}。")
+        missing_evidence = []
+        if (wacc_result.get("risk_free_is_default")
+                or wacc_result.get("rf_is_wrong_currency")
+                or wacc_result.get("rf_is_currency_unconfirmed")):
+            missing_evidence.append("同币种、同估值时点的利率")
+        if wacc_result.get("beta_is_default"):
+            missing_evidence.append("可复核的 Beta")
+        lines.append("🔍 待独立验证：取得" + "及".join(missing_evidence) + "后重算。")
+        lines.append("[来源: valuation.calc_wacc 输入状态]")
         return "\n".join(lines)
 
     wacc = wacc_result["wacc"]
@@ -438,10 +544,7 @@ def _section_dcf_valuation(
         scenario_ev[sc] = ev
 
     wacc_label = f"{wacc*100:.2f}%"
-    rf_note = (
-        "10Y 国债使用默认值 2.5% [推测，待验证]" if wacc_result.get("risk_free_is_default")
-        else "10Y 国债取自 FRED/akshare"
-    )
+    rf_note = f"10Y 国债：{wacc_result.get('rf_label') or '来源不可得'}"
     # Beta 来源说明
     beta_val = wacc_result.get("beta")
     beta_source = wacc_result.get("beta_source", "")
@@ -449,14 +552,8 @@ def _section_dcf_valuation(
     beta_note_parts = [f"β={beta_val:.3f}"]
     if beta_r2 is not None:
         beta_note_parts.append(f"R²={beta_r2:.3f}")
-    if wacc_result.get("beta_is_default"):
-        beta_note_parts.append(f"[推测，待验证: {beta_source}]")
-    else:
-        beta_note_parts.append(f"[{beta_source}]")
+    beta_note_parts.append(f"[{beta_source}]")
     beta_note = "，".join(beta_note_parts)
-    if wacc_result.get("beta_is_default"):
-        # F0-5: β 为默认值时明示对估值量级的影响，不静默参与输出。
-        beta_note += "（默认值参与计算，企业价值仅作量级参考）"
 
     lines.append(
         f"- WACC：**{wacc_label}**（cost_of_equity 近似，因债务成本/权重数据不可得；"
@@ -465,16 +562,8 @@ def _section_dcf_valuation(
     lines.append(f"- 永续增长率假设：**{terminal_g*100:.2f}%**[推测，待验证：长期宏观增长代理，与 D-③ 一致]")
     lines.append("")
 
-    # R-A3：WACC/基期 FCFF 可得性 → 三情景权重证据等级（_scenario_evidence 确定性规则）
-    wacc_state_parts = []
-    if wacc_result.get("risk_free_is_default"):
-        wacc_state_parts.append("无风险利率默认值（缺失）")
-    if wacc_result.get("beta_is_default"):
-        wacc_state_parts.append("Beta 默认值（近似）")
-    dcf_base = {
-        "fcff": (financials.get("dcf_preprocess") or {}).get("fcff"),
-        "wacc_label": "、".join(wacc_state_parts) or "实值参数",
-    }
+    # 默认 WACC 输入已拦截；基期 FCFF 可得性决定情景权重证据等级。
+    dcf_base = {"fcff": (financials.get("dcf_preprocess") or {}).get("fcff")}
     sc_evidence = _scenario_evidence(scenario_results.get("base", {}), dcf_base)
 
     _sc_label = {"bear": "悲观情景", "base": "中性情景", "bull": "乐观情景"}
@@ -684,4 +773,3 @@ def _section_dcf_valuation(
     lines.append("")
 
     return "\n".join(lines)
-

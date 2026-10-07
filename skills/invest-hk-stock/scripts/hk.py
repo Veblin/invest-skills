@@ -467,12 +467,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         _write_report(args, code, "数据不可得", "\n".join(lines))
         return 1
     lines.append(f"# {q.get('name') or code} ({code}) — {_today()} 港股初步分析（交易币种 HKD）\n")
+    # D3 口径：该字段对 A+H 标的是 **H 股部分市值**，标成「总市值」即是 D3 失效形态
+    # （2026-09-23 G-a 审计发现的缺口面之一）。改为中性词「市值」+ 紧邻口径注。
     lines.append(
         f"**现价 {q['price']}（{_pct(q.get('chg_pct'))}），52 周 {_fmt_num(q.get('low_52w'))}"
         f"~{_fmt_num(q.get('high_52w'))}，PE(TTM) {_fmt_num(q.get('pe_ttm'))}，"
-        f"总市值 {_fmt_num(q.get('mcap_hkd_yi'), 0)} 亿 HKD**"
+        f"市值 {_fmt_num(q.get('mcap_hkd_yi'), 0)} 亿 HKD**"
     )
     lines.append(f"[来源: tencent.r_hk / {q.get('ts')}]")
+    lines.append(f"⚠️ {hk_ah.MCAP_SCOPE_NOTE}")
     b = hk_tushare.fetch_basic(code)
     if b.get("list_date"):
         # review #8c：market 取自 tushare（主板/GEM），不硬编码
@@ -678,8 +681,13 @@ def cmd_ah(args: argparse.Namespace) -> int:
     lines = [f"# A/H 比价 — {a_code}(A) / {hk_code}(H) — {_today()}\n",
              "> 研究视角参考，**非套利信号**；不含买卖建议（LAW 6）。口径见下方三件套。\n"]
 
+    # 抓取时刻**逐侧各记一次**：三笔请求是串行的（H → A → 汇率），汇率可能耗时数秒，
+    # 若在全部完成后统一取一次时间，两侧会标上晚于实际抓价时刻的时间（2026-09-23
+    # 验收发现）。抓价与取时刻紧邻，标出来的才是这一笔的真实抓取时刻。
     h = _snapshot_row(hk_code)
+    h_fetched_at = _now_shanghai()
     a = _a_quote_row(a_code)
+    a_fetched_at = _now_shanghai()
     fx = hk_ah.fetch_fx_hkd_cny()
     al = hk_ah.align_quotes(a, h)
     h_px, a_px = al.get("h_price"), al.get("a_price")
@@ -693,12 +701,23 @@ def cmd_ah(args: argparse.Namespace) -> int:
     def _cell(v, fmt):
         return fmt(v) if v is not None else "—（不可得）"
 
+    def _src_cell(px, provider, as_of, fetched_at, err):
+        """来源列：**行情时点**（价格属于哪一刻）与**抓取时刻**（何时取的）分开给。
+
+        O-23 的可观测性要求：读者要能自行判断两个价格实际相隔多久。只给抓取时刻
+        会让盘中间隔不可见（2026-09-23 实测：A 行只显示抓取时刻、H 行显示行情时点）。
+        `fetched_at` 由调用方传入**该侧自己的**抓取时刻，不在渲染层统一取时间。
+        """
+        if px is None:
+            return f"{err or '不可得'}"
+        return f"{provider}（行情时点 {as_of or '不可解析'}；抓取 {fetched_at} 北京）"
+
     lines.append("| 项 | 值 | 来源 / 时点 |")
     lines.append("|---|---|---|")
     lines.append(f"| A 价（CNY） | {_cell(a_px, lambda v: f'{v}')} | "
-                 f"{'腾讯 qt.gtimg.cn（抓取 ' + _now_shanghai() + ' 北京）' if a_px is not None else a.get('error') or '不可得'} |")
+                 f"{_src_cell(a_px, '腾讯 qt.gtimg.cn', al.get('a_as_of'), a_fetched_at, a.get('error'))} |")
     lines.append(f"| H 价（HKD） | {_cell(h_px, lambda v: f'{v}')} | "
-                 f"{'腾讯 r_hk ' + str(h.get('ts') or '') if h_px is not None else h.get('error') or '不可得'} |")
+                 f"{_src_cell(h_px, '腾讯 r_hk', al.get('h_as_of'), h_fetched_at, h.get('error'))} |")
     lines.append(f"| 汇率（CNY/HKD） | {_cell(fx.get('rate'), lambda v: f'{v:.5f}')} | "
                  f"{fx.get('source') or '不可得'}{'（' + str(fx['date']) + '）' if fx.get('date') else ''} |")
     if pct is not None:
@@ -710,12 +729,34 @@ def cmd_ah(args: argparse.Namespace) -> int:
     lines.append(f"| **A/H 溢价率** | {pct_cell} | {pct_src} |")
     lines.append("")
 
-    # --- 交易日对齐（D1/D2）：两侧日期与市场状态必须显式，读者才能判断这个数能不能用 ---
+    # --- 交易日对齐（D1/D2/D3）：日期、行情时点、市场状态必须显式，读者才能判断这个数能不能用 ---
+    # 行情时点列是 O-23 的落点：只有「状态」不够——两个都在「交易中」的快照也可能
+    # 相隔几十分钟。时点 + 状态共同构成可比性判定所需的最小可观测面。
     lines.append("## 交易日对齐（强制显式）\n")
-    lines.append("| 侧 | 报价日期 | 市场状态 |")
-    lines.append("|---|---|---|")
-    lines.append(f"| A {a_code} | {al.get('a_date') or '不可解析'} | {al.get('a_state')} |")
-    lines.append(f"| H {hk_code} | {al.get('h_date') or '不可解析'} | {al.get('h_state')} |")
+    lines.append("| 侧 | 报价日期 | 行情时点 | 市场状态 |")
+    lines.append("|---|---|---|---|")
+    lines.append(f"| A {a_code} | {al.get('a_date') or '不可解析'} | "
+                 f"{al.get('a_as_of') or '不可解析'} | {al.get('a_state')} |")
+    lines.append(f"| H {hk_code} | {al.get('h_date') or '不可解析'} | "
+                 f"{al.get('h_as_of') or '不可解析'} | {al.get('h_state')} |")
+    lines.append("")
+    _gap = al.get("as_of_gap_min")
+    if al.get("tolerance_applied"):
+        # 走到这里必然同日（容差分支在同日判定之内），_gap 不可能是 None
+        lines.append(f"- **盘中容差（O-23）**：两侧同处交易时段，行情时点相隔 "
+                     f"{_gap} 分钟，容差 ±{hk_ah._INTRADAY_TOLERANCE_MIN} 分钟 → "
+                     f"{'通过' if al.get('comparable') else '**超出，不出溢价率**'}。")
+    else:
+        _a_d, _h_d = al.get("a_date"), al.get("h_date")
+        if _a_d and _h_d and _a_d != _h_d:
+            # 跨日时不能只说「相隔 0 分钟」——两个价格实际差一个交易日（见 §O-23 验收）
+            _gap_txt = "跨报价日期，钟点差无意义"
+        elif _gap is None:
+            _gap_txt = "不可解析"
+        else:
+            _gap_txt = f"相隔 {_gap} 分钟"
+        lines.append(f"- **盘中容差（O-23）**：本次不适用（两侧非同时处于交易时段——"
+                     f"收盘终值 / 价格停摆 / 混合状态，或报价日期不同）；{_gap_txt}。")
     lines.append("")
     if pct is not None:
         lines.append(f"✅ **可比**：{al.get('basis')}")
@@ -895,6 +936,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     lines.append("> ⚠️ 快照为各自市场**抓取时点**价格（港股同一时段，仍存在秒级时点差）；"
                  "财务期间以各自披露节奏为准（HK 无季报 → 期间口径可能与 A 股不同）；"
                  "估值分位窗口 = 百度序列可得区间（近五年）。")
+    lines.append(f"> ⚠️ {hk_ah.MCAP_SCOPE_NOTE}")
     lines.append("\n> 声明：本表为两标的关键指标并列记录，不构成投资建议，"
                  "也不构成任何相对价值判断。")
 
@@ -1035,6 +1077,8 @@ CMD_DISPATCH = {
 
 
 def main() -> int:
+    from logutil import setup_logging
+    setup_logging(skill="invest-hk-stock")  # INVEST_DEV=1 时启用开发日志；release 零文件 I/O
     parser = build_parser()
     args = parser.parse_args()
     if args.command not in CMD_DISPATCH:

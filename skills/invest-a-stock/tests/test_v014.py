@@ -13,21 +13,37 @@ from test_v013_phase3 import _collection_phase3
 
 
 class TestBullBearDivergence:
-    def test_high_pe_bearish_narrative(self):
+    """REV-03 消费链（2026-10-07 主线收尾）：5c 估值分歧文本只列
+    位置/同比事实 + 待验证读法，不作「偏悲观/修复空间/估值透支/尚未完全定价」
+    的二值裁决（最小反例覆盖低/高/中三分支）。"""
+
+    _VERDICTS = ("定价偏悲观", "修复空间", "估值透支", "尚未完全定价", "均值回归风险上升")
+
+    def test_high_pe_no_exhaustion_verdict(self):
         from lib.render import _bull_bear_valuation_divergence_text
 
         text = _bull_bear_valuation_divergence_text(92.0, "偏高", 15.0)
-        assert "估值透支" in text
-        assert "低估" not in text
+        assert "92.0%" in text and "偏高" in text and "+15.0%" in text  # 事实保留
+        assert "市场含义待验证" in text and "仅凭这两个读数尚未验证该解释" in text
+        assert "不在快照内" not in text  # 不得由两个输入断言全快照缺哪些数据
+        assert all(v not in text for v in self._VERDICTS)
 
-    def test_low_pe_bullish_narrative(self):
+    def test_low_pe_no_pessimism_verdict(self):
         from lib.render import _bull_bear_valuation_divergence_text
 
         text = _bull_bear_valuation_divergence_text(12.0, "偏低", 8.0)
-        assert "修复空间" in text or "偏悲观" in text
-        assert "估值透支" not in text
+        assert "12.0%" in text and "偏低" in text and "+8.0%" in text
+        assert "市场含义待验证" in text
+        assert all(v not in text for v in self._VERDICTS)
 
-    def test_section_5c_high_pe_no_undervalue_claim(self):
+    def test_mid_pe_no_pricing_verdict(self):
+        from lib.render import _bull_bear_valuation_divergence_text
+
+        text = _bull_bear_valuation_divergence_text(45.0, None, 3.0)
+        assert "45.0%" in text and "中间带" in text and "+3.0%" in text
+        assert all(v not in text for v in self._VERDICTS)
+
+    def test_section_5c_high_pe_no_verdict_claims(self):
         from lib.render import _section_bull_bear, _v3_build_risk_report
 
         c = _collection_phase3()
@@ -46,7 +62,9 @@ class TestBullBearDivergence:
         mod5 = _section_bull_bear(c, "600176", dims, ms, risk, val_cache=val_cache)
         assert "5c." in mod5
         assert "估值低估" not in mod5
-        assert "估值透支" in mod5 or "均值回归" in mod5
+        line = next(ln for ln in mod5.splitlines() if "事实并列：PE 历史区间位置" in ln)
+        assert "市场含义待验证" in line
+        assert all(v not in line for v in self._VERDICTS)
 
 
 class TestFundamentalsP0:
@@ -80,18 +98,57 @@ class TestFundamentalsP0:
 
 
 class TestCoreTension:
-    def test_core_tension_between_modules(self):
-        from lib.render import _section_core_tension, render_report_v3
+    """v0.3.1 A4：核心分歧变量就地进 `## 0.`，不再单出一段「核心矛盾小结」。
+
+    原实现是一段无 `##` 宿主的结论复述（挂在 DCF 之后），与 §0/§1/§3 讲同一件事；
+    去重后三个变量由 `_core_variables` 产出、在 `## 0.` 节内一次说完。
+    """
+
+    def test_core_variables_live_in_section_zero(self):
+        from lib.render import render_report_v3
 
         c = _collection_phase3()
         report = render_report_v3(c, "600176")
-        assert "核心矛盾小结" in report
-        tension = _section_core_tension(
-            c, "600176",
-            {d["dimension"]: d for d in c["dimensions"]},
-            c["market_structure"],
+        assert "**核心变量：**" in report
+        assert "核心矛盾小结" not in report, "去重后不得再出结论复述段"
+        sec0 = report.split("## 0.")[1].split("\n## ")[0]
+        assert "**核心变量：**" in sec0, "核心变量须落在 `## 0.` 节内"
+
+    def test_core_variables_helper_requires_two(self):
+        from lib.render import _core_variables
+
+        c = _collection_phase3()
+        dims = {d["dimension"]: d for d in c["dimensions"]}
+        variables = _core_variables(dims, c)
+        assert len(variables) >= 2, "phase3 夹具应有 ≥2 个分歧变量"
+        # 无市场结构数据时仍须能产出（相对行业超额变量缺席，不抛异常）
+        assert isinstance(_core_variables(dims, {}), list)
+
+    def test_implied_growth_reuses_render_cache(self, monkeypatch):
+        from lib import render_risk
+
+        c = _collection_phase3()
+        dims = {d["dimension"]: d for d in c["dimensions"]}
+        calls = 0
+        original = render_risk.sort_kline_asc
+
+        def counted(rows):
+            nonlocal calls
+            calls += 1
+            return original(rows)
+
+        monkeypatch.setattr(render_risk, "sort_kline_asc", counted)
+        cache = {}
+        first = render_risk._v3_bull_bear_implied_growth(
+            dims, c["market_structure"], val_cache=cache,
         )
-        assert "实质上集中在" in tension
+        assert calls > 0
+        before = calls
+        second = render_risk._v3_bull_bear_implied_growth(
+            dims, c["market_structure"], val_cache=cache,
+        )
+        assert second == first
+        assert calls == before
 
 
 class TestRiskModule7:

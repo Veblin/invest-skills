@@ -4,14 +4,17 @@ from __future__ import annotations
 import html as _html_mod
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 from lib.nums import coalesce_field, fmt_amount, safe_float as _safe_num
-from lib.technical import sort_kline_asc
+from lib.technical import prices_equal, sort_kline_asc
 
-from .shared_dates import normalize_end_date as _norm_ed, yyyymmdd_to_iso as _to_iso_date
+from .shared_dates import (normalize_end_date as _norm_ed,
+                           parse_date,
+                           yyyymmdd_to_iso as _to_iso_date)
 from .proxy import (
     EASTMONEY_BLOCKED_KEYWORDS as _EASTMONEY_BLOCKED_KEYWORDS,
     EASTMONEY_FAILURE_PROXY_MARKER,
@@ -27,6 +30,23 @@ _EASTMONEY_BLOCKED_SHORT = "东方财富(East Money)主动拒绝连接"
 _RAW_CONNECTION_REFUSED_SHORT = "服务器拒绝连接"
 _fmt = fmt_amount
 _fmt_v2 = fmt_amount
+
+
+# --- finite_price ---
+def finite_price(value: Any) -> float | None:
+    """价格/均线有限值判据（MD 与 HTML 渲染器共用，R14 一致性）。
+
+    None / 非数值 / NaN / ±inf / ≤0 → None（不可得）；有效正有限值原样返回。
+    两消费者必须同走本函数——此前 MD 用 `is not None + isfinite`（0 值参与
+    比较、可被标成「收盘价在 MA 下方」），HTML 用 `not latest_close`（NaN
+    未被拦截、NaN 比较全 False 落入「持平」分支），同一快照两侧可给出
+    不同结论（R7 二轮修复的 MA pill 与均线表）。
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
 
 
 # --- sanitize_error ---
@@ -115,7 +135,8 @@ def _references_appendix(collection: dict[str, Any]) -> str:
             dim_label = display if first else ""
             first = False
             if avail:
-                detail = _data_fields(dim.get("dimension", ""), dim_data)
+                # 合并维度（quote）可含另一个源的实时价；逐源行只描述本源原始数据。
+                detail = _data_fields(dim.get("dimension", ""), s.get("data"))
                 lines.append(f"| {dim_label} | {src_name} | `{qp}` | ✅ {detail} |")
             elif error:
                 lines.append(f"| {dim_label} | {src_name} | `{qp}` | ❌ {_sanitize_error(error, 55)} |")
@@ -195,7 +216,7 @@ def _v3_cv7_assessment(
     if pe_pct is None or mf_out is None:
         return None
     mf_f = float(mf_out)
-    # 分位须伴随中位数（CLAUDE.md 估值分位规则 3）：句式统一为「分位 X%，中位数 Yx」
+    # 分位须伴随中位数（report-conventions.md §9.2 估值分位规则 3）：句式统一为「分位 X%，中位数 Yx」
     # （本句已处于 `（分位 …）` 括号内，用逗号式避免嵌套括号）
     _med_s = _pct_median_inline(pe_median)
     if pe_pct < ZONE_LOW_THRESHOLD and mf_f < 0:
@@ -221,6 +242,25 @@ def _v3_cv7_block(
 
 
 # --- _v3_cv8_assessment ---
+def pcr_is_current_for_snapshot(pcr: dict | None, collection: dict) -> bool:
+    """Only compare PCR with current factors when its date reaches the closed bar.
+
+    New snapshots seal the latest *published* opt_daily date. Old snapshots use
+    the latest K-line trade date; absent date evidence fails closed.
+    """
+    if not isinstance(pcr, dict):
+        return False
+    current = parse_date(pcr.get("current_date"))
+    expected = parse_date(pcr.get("expected_latest_date"))
+    if expected is None:
+        kline = _get_dim_data(_index_dims(collection), "kline")
+        if isinstance(kline, list):
+            dated = [parse_date(row.get("trade_date")) for row in kline
+                     if isinstance(row, dict)]
+            expected = max((d for d in dated if d is not None), default=None)
+    return current is not None and expected is not None and current >= expected
+
+
 def _v3_cv8_assessment(
     erp: dict | None,
     pcr: dict | None,
@@ -271,7 +311,12 @@ def _v3_cv8_block(
     erp: dict | None,
     pcr: dict | None,
     short_margin: dict | None,
+    *, collection: dict | None = None,
 ) -> str | None:
+    if pcr is not None and collection is not None and not pcr_is_current_for_snapshot(pcr, collection):
+        return None
+    if pcr is not None and pcr.get("percentile_5y") is None:
+        return None  # CV-8 与 ERP 同为 5 年分位；近期分位不能替代其口径
     assessed = _v3_cv8_assessment(erp, pcr, short_margin)
     if assessed is None:
         return None
@@ -346,7 +391,11 @@ def _v3_load_valuation_summary(
             if r.get("dv_ratio") is not None:
                 dv_ratio = _safe_num(r.get("dv_ratio"))
                 break
-        window_label = valuation_window_label(len(val_sorted))
+        window_label = valuation_window_label(
+            len(val_sorted),
+            val_sorted[0].get("trade_date") if val_sorted else None,
+            val_sorted[-1].get("trade_date") if val_sorted else None,
+        )
         summary = valuation_summary(
             pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv_ratio, window_label=window_label,
         )
@@ -465,7 +514,7 @@ def _pct_medians(
 def _pct_median_suffix(median: Any) -> str:
     """分位读数的中位数伴随串；中位数不可得时返回空串（不编造）。
 
-    CLAUDE.md「估值分位使用规则」3 与 report-conventions §2.3：**分位数不单独使用**，
+    report-conventions.md §9.2「估值分位使用规则」3 与 §2.3：**分位数不单独使用**，
     必须伴随中位数或均值。行内复查规则 `percentile-without-median` 对本仓全部报告
     生效，**引擎模板自身也须满足**——分位渲染点一律经本函数拼接中位数。
 
@@ -497,25 +546,22 @@ def _bull_bear_valuation_divergence_text(
     pe_zone: str | None,
     rev_yoy: float,
 ) -> str:
-    """模块 5c：按 PE 历史区间位置分支 Bull/Bear 估值叙事。"""
-    from lib.valuation import ZONE_HIGH_THRESHOLD, ZONE_LOW_THRESHOLD
+    """模块 5c：PE 历史区间位置与营收同比的并列读数（REV-03 消费链，2026-10-07）。
 
+    原实现按分位高低输出二值裁决——低分位「定价偏悲观、存在修复空间」、高分位
+    「估值透支、均值回归风险上升」、中区「尚未完全定价」——把历史位置与单期
+    营收同比读作市场已计入何种预期/重估空间的结论（AGENTS 约束 3；报告规范
+    §9.4）。历史位置与同比是**读数**，不足以推定市场预期；现一律输出两事实 +
+    「市场含义待验证」的两类候选读法，并说明**仅凭这两个读数尚未验证该解释**——
+    不由这两数推定、不据此断言修复空间或透支风险（也不得由本函数仅有的两个
+    输入推断全快照缺哪些数据：资金等字段可能在快照内可用）。
+    """
     zone_label = pe_zone or "中间带"
-    if pe_pct < ZONE_LOW_THRESHOLD:
-        return (
-            f"Bull 认为 PE 历史区间位置 {pe_pct:.1f}%（{zone_label}），"
-            f"定价偏悲观、存在修复空间；Bear 认为营收同比 {rev_yoy:+.1f}%"
-            f"不足以支撑估值向上修复。"
-        )
-    if pe_pct > ZONE_HIGH_THRESHOLD:
-        return (
-            f"Bull 认为营收同比 {rev_yoy:+.1f}% 可支撑当前定价；"
-            f"Bear 认为 PE 历史区间位置 {pe_pct:.1f}%（{zone_label}），"
-            f"估值透支、均值回归风险上升。"
-        )
     return (
-        f"Bull 认为营收同比 {rev_yoy:+.1f}% 与 PE 历史区间位置 {pe_pct:.1f}%"
-        f"尚未完全定价；Bear 认为二者匹配度存疑，需观察增速能否维持。"
+        f"事实并列：PE 历史区间位置 {pe_pct:.1f}%（{zone_label}）、"
+        f"营收同比 {rev_yoy:+.1f}%。市场含义待验证：该组合可能对应「预期已部分"
+        "反映」或「尚未反映」两类读法之一——仅凭这两个读数尚未验证该解释，"
+        "本快照不作二值裁决；须另行核验盈利路径、资金及公告原文。"
     )
 
 

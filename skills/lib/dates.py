@@ -277,7 +277,7 @@ def latest_month_row(rows: list) -> Any:
             first_parse_ok = True
     if best_row is None and rows:
         # 全部行解析失败（akshare 改了月份列格式等）：显式告警而非静默回退
-        # 首行——宏观标签若用了旧期数字，CLAUDE.md F2-7「核验最新期」需要
+        # 首行——宏观标签若用了旧期数字，report-conventions.md §9.1「核验最新期」需要
         # 知道这里发生了什么。
         logger.warning(
             "latest_month_row: 全部 %d 行「月份」列解析失败（期望「YYYY年M月」），"

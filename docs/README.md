@@ -15,6 +15,7 @@
 | [CHANGELOG.md](../CHANGELOG.md) | 版本变更记录 |
 | [CONTRIBUTORS.md](../CONTRIBUTORS.md) | 贡献指南 |
 | [AGENTS.md](../AGENTS.md) | AI 协作规则与设计约束 |
+| [development-workflow.md](development-workflow.md) | 开发角色分工、实施交接、独立复检与版本目标验收 |
 
 ## 示例报告（docs/demos/）
 
@@ -40,6 +41,7 @@
 | [SKILL.md](../skills/invest-a-stock/SKILL.md) | LAWs、路由表、CLI（**canonical 核心**） |
 | [modules.md](../skills/invest-a-stock/references/modules.md) | 九模块与八段 legacy 结构 |
 | [financials.md](../skills/invest-a-stock/references/financials.md) | 财报深研专项（F-1~F-4） |
+| [financial-semantics.md](../skills/lib/references/financial-semantics.md) | 共享财务语义、计算公式前提、期间/币种/对象与失败处理（实现需逐项验收） |
 | [sentiment.md](../skills/invest-a-stock/references/sentiment.md) | 舆情深研专项（L1~L3） |
 | [game-theory.md](../skills/invest-a-stock/references/game-theory.md) | 参与者行为扫描专项 |
 | [references-format.md](../skills/invest-a-stock/references/references-format.md) | 引用来源表规范 |
@@ -49,7 +51,7 @@
 
 | 文档 | 内容 |
 |------|------|
-| [architecture.md](architecture.md) | 已完成功能与实现逻辑总览（三层架构、9 skills、多源降级链、渲染管线、版本演进、工程设施） |
+| [architecture.md](architecture.md) | 已完成功能与实现逻辑总览（三层架构、8 个公开 skills、多源降级链、渲染管线、版本演进、工程设施） |
 | [diagram/](diagram/) | 引擎级完整流程图（SVG，维护者视角）；README 正文另给使用者视角的交付链图 |
 
 ## 路线图

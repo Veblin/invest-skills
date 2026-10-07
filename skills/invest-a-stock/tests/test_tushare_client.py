@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
 BEIJING = ZoneInfo("Asia/Shanghai")
 UTC = ZoneInfo("UTC")
@@ -190,9 +191,9 @@ class TestConcurrentRateLimitCounters:
 
         client = TushareClient(token="a" * 32, rate_limit_per_minute=10000)
         with ThreadPoolExecutor(max_workers=8) as ex:
-            list(ex.map(lambda _: client._record_call(), range(200)))
+            list(ex.map(lambda _: client._record_call("daily"), range(200)))
         assert client._daily_calls == 200
-        assert len(client._call_timestamps) == 200
+        assert len(client._call_timestamps["daily"]) == 200
 
     def test_concurrent_wait_for_rate_limit_no_crash(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -202,13 +203,239 @@ class TestConcurrentRateLimitCounters:
         client = TushareClient(token="a" * 32, rate_limit_per_minute=10000)
 
         def _mixed(_):
-            client._record_call()
-            client._wait_for_rate_limit()
+            client._record_call("daily")
+            client._wait_for_rate_limit("daily")
 
         with ThreadPoolExecutor(max_workers=8) as ex:
             list(ex.map(_mixed, range(64)))
         assert client._daily_calls == 64
-        assert len(client._call_timestamps) == 64
+        assert len(client._call_timestamps["daily"]) == 64
+
+
+class TestPerApiRateLimitBudget:
+    """按接口预算：官方档位表 × 代码已有的 TUSHARE_API_MIN_POINTS 机械映射。
+
+    口径见官方《积分与频次权限对应表》(https://tushare.pro/document/1?doc_id=290)；
+    取官方值的 1/4 作保守下限（官方页未明说限额按接口还是按账号），
+    并**以实例地板为下限** → 只有高积分档接口放宽，其余一字不动。
+    """
+
+    def test_tier_mapping_raises_only_high_tier_apis(self):
+        from lib import tushare_client as tc
+
+        # 5000 档 → 官方 500/min → //4 = 125 > 地板 80 ⇒ 放宽
+        assert tc.rate_limit_for_api("opt_daily") == 125
+        assert tc.rate_limit_for_api("sw_daily") == 125
+        # 2000 档 → 200//4 = 50 < 80 ⇒ 保持地板
+        assert tc.rate_limit_for_api("daily_basic") == tc.RATE_LIMIT_PER_MINUTE
+        assert tc.rate_limit_for_api("fina_indicator") == tc.RATE_LIMIT_PER_MINUTE
+        # 120 档 → 50//4 = 12 < 80 ⇒ 保持地板
+        assert tc.rate_limit_for_api("daily") == tc.RATE_LIMIT_PER_MINUTE
+        # 未登记接口 ⇒ 地板
+        assert tc.rate_limit_for_api("no_such_api") == tc.RATE_LIMIT_PER_MINUTE
+
+    def test_floor_is_honoured(self):
+        from lib import tushare_client as tc
+
+        # 地板高于档位推导值 ⇒ 用地板（gap-scan 传 180 的场景）
+        assert tc.rate_limit_for_api("opt_daily", floor=180) == 180
+        assert tc.rate_limit_for_api("daily", floor=300) == 300
+
+    def test_official_tier_table(self):
+        from lib import tushare_client as tc
+
+        assert tc.official_tier_rpm(5000) == 500
+        assert tc.official_tier_rpm(9999) == 500
+        assert tc.official_tier_rpm(2000) == 200
+        assert tc.official_tier_rpm(120) == 50
+        assert tc.official_tier_rpm(100) is None  # 低于最低档
+
+    def test_windows_are_per_api(self):
+        """分桶是必需的：否则放宽 opt_daily 预算仍会被全局计数卡在 80。"""
+        from lib.tushare_client import TushareClient
+
+        client = TushareClient(token="a" * 32)
+        client._record_call("opt_daily")
+        client._record_call("daily")
+        client._record_call("daily")
+        assert len(client._call_timestamps["opt_daily"]) == 1
+        assert len(client._call_timestamps["daily"]) == 2
+
+    def test_env_override_sets_floor(self, monkeypatch):
+        from lib import tushare_client as tc
+
+        monkeypatch.setenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "300")
+        client = tc.TushareClient(token="a" * 32)
+        assert client._rate_limit_per_minute == 300
+        # 地板抬高后，2000 档接口也用 300（不再受 80 限制）
+        assert tc.rate_limit_for_api("daily_basic", floor=client._rate_limit_per_minute) == 300
+
+    def test_env_override_ignores_garbage(self, monkeypatch):
+        from lib import tushare_client as tc
+
+        for bad in ("", "abc", "0", "-5", "  "):
+            monkeypatch.setenv("TUSHARE_RATE_LIMIT_PER_MINUTE", bad)
+            assert tc.TushareClient(token="a" * 32)._rate_limit_per_minute == tc.RATE_LIMIT_PER_MINUTE
+
+    def test_explicit_arg_beats_env(self, monkeypatch):
+        from lib import tushare_client as tc
+
+        monkeypatch.setenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "300")
+        assert tc.TushareClient(token="a" * 32, rate_limit_per_minute=180)._rate_limit_per_minute == 180
+
+    def test_low_explicit_limit_caps_high_tier_and_total(self, monkeypatch):
+        from lib import tushare_client as tc
+
+        monkeypatch.setenv("TUSHARE_RATE_LIMIT_PER_MINUTE", "40")
+        client = tc.TushareClient(token="a" * 32)
+        assert client._explicit_rate_limit is True
+        assert tc.rate_limit_for_api("opt_daily", floor=40, ceiling=40) == 40
+        for _ in range(20):
+            client._wait_for_rate_limit("daily", reserve=True)
+            client._wait_for_rate_limit("daily_basic", reserve=True)
+        assert client._daily_calls == 40
+        assert len(client._total_call_timestamps) == 40
+        with patch.object(tc.time, "sleep", side_effect=RuntimeError("throttled")):
+            with pytest.raises(RuntimeError, match="throttled"):
+                client._wait_for_rate_limit("opt_daily", reserve=True)
+
+    def test_total_budget_stays_at_floor_for_low_tier_apis(self, monkeypatch):
+        """默认总桶不得因档位表首项而放宽（评审 P2）。
+
+        40 次 daily + 41 次 daily_basic = 81 次混合调用，旧共享限流器在 80 停住；
+        修复前总桶被无条件取 5000 档推导值（125）→ 81 次全部放行。
+        """
+        from lib import tushare_client as tc
+        from lib.tushare_client import TushareClient
+
+        monkeypatch.delenv("TUSHARE_RATE_LIMIT_PER_MINUTE", raising=False)
+        client = TushareClient(token="a" * 32)
+        assert client._proven_points == 0
+        with patch.object(tc.time, "sleep", side_effect=RuntimeError("throttled")):
+            for _ in range(40):
+                client._wait_for_rate_limit("daily", reserve=True)
+            for _ in range(40):
+                client._wait_for_rate_limit("daily_basic", reserve=True)
+            assert len(client._total_call_timestamps) == 80
+            with pytest.raises(RuntimeError, match="throttled"):
+                client._wait_for_rate_limit("daily_basic", reserve=True)
+
+    def test_high_tier_success_raises_total_budget(self, monkeypatch):
+        """账号档位**被证明**后才抬升总桶：opt_daily 成功响应 ⇒ ≥5000 档 ⇒ 125。"""
+        from lib import tushare_client as tc
+        from lib.tushare_client import TushareClient
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"code": 0, "data": {"fields": ["a"], "items": [[1]]}}
+
+            def raise_for_status(self):
+                return None
+
+        monkeypatch.delenv("TUSHARE_RATE_LIMIT_PER_MINUTE", raising=False)
+        client = TushareClient(token="a" * 32)
+        client._session.post = lambda *a, **k: _Resp()
+        client.query("opt_daily")
+        assert client._proven_points == 5000
+
+        before = len(client._total_call_timestamps)  # query 已预占 1 个名额
+        # 总桶已抬到 125：再放行 120 次混合低档调用，一个窗口内无需等待
+        # （若仍是 80，第 81 次会 sleep → 触发下面的 RuntimeError）
+        with patch.object(tc.time, "sleep", side_effect=RuntimeError("throttled")):
+            for _ in range(60):
+                client._wait_for_rate_limit("daily", reserve=True)
+                client._wait_for_rate_limit("daily_basic", reserve=True)
+        assert len(client._total_call_timestamps) == before + 120
+
+    def test_low_tier_success_does_not_raise_total_budget(self, monkeypatch):
+        """低档接口成功不构成高檔位证据：2000 档推导值 50 < 地板，总桶不动。"""
+        from lib import tushare_client as tc
+        from lib.tushare_client import TushareClient
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"code": 0, "data": {"fields": ["a"], "items": [[1]]}}
+
+            def raise_for_status(self):
+                return None
+
+        monkeypatch.delenv("TUSHARE_RATE_LIMIT_PER_MINUTE", raising=False)
+        client = TushareClient(token="a" * 32)
+        client._session.post = lambda *a, **k: _Resp()
+        client.query("daily_basic")
+        assert client._proven_points == 2000
+        with patch.object(tc.time, "sleep", side_effect=RuntimeError("throttled")):
+            for _ in range(40):
+                client._wait_for_rate_limit("daily", reserve=True)
+            for _ in range(39):
+                client._wait_for_rate_limit("daily_basic", reserve=True)
+            assert len(client._total_call_timestamps) == 80
+            with pytest.raises(RuntimeError, match="throttled"):
+                client._wait_for_rate_limit("daily", reserve=True)
+
+
+def test_concurrent_query_outcomes_use_each_requests_error(monkeypatch):
+    """A successful concurrent query must not erase a failed query's outcome."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    import pandas as pd
+    from lib.tushare_client import TushareClient, rate_limit_stats
+
+    client = TushareClient(token="a" * 32)
+    failed_ready = Event()
+    success_finished = Event()
+
+    def query_impl(api_name, **_kwargs):
+        if api_name == "concurrent_failed_test":
+            client.last_error = "timeout"
+            failed_ready.set()
+            assert success_finished.wait(2)
+            return pd.DataFrame()
+        assert failed_ready.wait(2)
+        client.last_error = None
+        return pd.DataFrame({"value": [1]})
+
+    monkeypatch.setattr(client, "_query_impl", query_impl)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failed = executor.submit(client.query, "concurrent_failed_test")
+        succeeded = executor.submit(client.query, "concurrent_ok_test")
+        assert not succeeded.result(timeout=3).empty
+        success_finished.set()
+        assert failed.result(timeout=3).empty
+
+    stats = rate_limit_stats()["by_api"]
+    assert stats["concurrent_failed_test"]["failed"] == 1
+    assert stats["concurrent_ok_test"].get("failed", 0) == 0
+
+    ok_ready = Event()
+    failure_finished = Event()
+
+    def reversed_query_impl(api_name, **_kwargs):
+        if api_name == "concurrent_ok_after_failure_test":
+            client.last_error = None
+            ok_ready.set()
+            assert failure_finished.wait(2)
+            return pd.DataFrame({"value": [1]})
+        assert ok_ready.wait(2)
+        client.last_error = "timeout"
+        return pd.DataFrame()
+
+    monkeypatch.setattr(client, "_query_impl", reversed_query_impl)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        succeeded = executor.submit(client.query, "concurrent_ok_after_failure_test")
+        failed = executor.submit(client.query, "concurrent_failed_before_ok_test")
+        assert failed.result(timeout=3).empty
+        failure_finished.set()
+        assert not succeeded.result(timeout=3).empty
+
+    stats = rate_limit_stats()["by_api"]
+    assert stats["concurrent_failed_before_ok_test"]["failed"] == 1
+    assert stats["concurrent_ok_after_failure_test"].get("failed", 0) == 0
 
 
 class TestTokenResolution:

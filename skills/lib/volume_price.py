@@ -81,7 +81,12 @@ def _state_of(pctl: float | None) -> str:
 
 def volume_percentile(rows: list[dict], *, window: int = DEFAULT_WINDOW) -> dict:
     """量分位（样本内自历史分位）→ 放量日 / 缩量日 / 常态。"""
-    vols = [v for v in _volume_series(rows) if v is not None]
+    series = _volume_series(rows)
+    vols = [v for v in series if v is not None]
+    if series and series[-1] is None:
+        return {"available": False, "vol_pctile": None, "state": "不可得",
+                "n": len(vols), "window": window, "reason": "最新观测的量数据缺失",
+                "semantics": _LOW_VOL_SEMANTICS}
     if len(vols) < 20:
         return {"available": False, "vol_pctile": None, "state": "不可得",
                 "n": len(vols), "window": window, "reason": "量序列不足 20 点",
@@ -170,6 +175,10 @@ def risk_state(rows: list[dict], *, ma: int = RISK_MA,
     ma_val = sum(closes[-ma:]) / ma
     cur = closes[-1]
     vp_out = volume_percentile(rows, window=window)
+    if not vp_out["available"]:
+        return {"available": False, "is_risk_state": None, "components": {},
+                "reason": vp_out["reason"], "n": len(closes),
+                "caliber": _CALIBER}
     high_volume = (vp_out.get("vol_pctile") is not None
                    and vp_out["vol_pctile"] > VOLUME_HIGH_PCTILE)
     below_ma = cur < ma_val
@@ -365,7 +374,8 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
             if a is None or not b:
                 continue
             stock_ret = a / b - 1.0
-            bm = sum(bench_clean.get(d, 0.0) for d in dates[i + 1: i + h + 1])
+            bm = math.prod(1.0 + bench_clean.get(d, 0.0)
+                           for d in dates[i + 1: i + h + 1]) - 1.0
             ex = stock_ret - bm
             excess.append(ex)
             if ex < 0:
@@ -375,7 +385,8 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
             a, b = closes[i + h], closes[i]
             if a is None or not b:
                 continue
-            bm = sum(bench_clean.get(d, 0.0) for d in dates[i + 1: i + h + 1])
+            bm = math.prod(1.0 + bench_clean.get(d, 0.0)
+                           for d in dates[i + 1: i + h + 1]) - 1.0
             base_excess.append((a / b - 1.0) - bm)
         n = len(excess)
         horizons_out[str(h)] = {

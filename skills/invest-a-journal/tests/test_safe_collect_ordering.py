@@ -73,7 +73,7 @@ class TestSafeCollectValuationOrdering:
 
 
 class TestSafeCollectValuationNegativeFilter:
-    """F3: 亏损期负 PE 不得进入分位/中位数总体（CLAUDE.md P0-2 口径）。"""
+    """F3: 亏损期负 PE 不得进入分位/中位数总体（delivery-qc.md §1 P0 口径）。"""
 
     def test_negative_pe_excluded(self, monkeypatch):
         rows = [

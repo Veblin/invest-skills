@@ -29,14 +29,31 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
+import os
 import re
 import sys
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
+
+# 四维证据标签语法唯一来源（R12 round-4/5）：analysis_schema 的掩码与本节
+# 结构行豁免/证据判定共用同一封闭语法，禁止各自复制正则。
+from evidence_tags import (  # noqa: E402
+    EVIDENCE_LABEL_PATTERN,
+    FOUR_DIM_SEQUENCE_PATTERN as _FOUR_DIM_SEQUENCE,
+    FOUR_DIM_TAG_LINE_RE as _FOUR_DIM_TAG_RE,
+    RENDER_STRENGTH_TOKEN_PATTERN as _RENDER_STRENGTH_TOKEN,
+    SOURCE_DIM_PATTERN as _SOURCE_DIM,
+    TIMING_DIM_PATTERN as _TIMING_DIM,
+    CROSS_DIM_PATTERN as _CROSS_DIM,
+    strip_strength_tag_spans as _strip_strength_tag_spans,
+)
 
 
 # ── 数据模型 ──────────────────────────────────────────────────────────────
@@ -226,13 +243,15 @@ _AUTOMATED_ENGINE_NOTICE_RE = re.compile(r"本报告由自动化引擎生成")
 _TEMPLATE_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = (
     # 包在方括号里的「待模型填写」残留。**不含**裸 `分析提示`：`> [分析提示]`
     # 是 _law10_hint 的体例标签（_v3.py 的「每题末尾固定格式」），每份 full 报告
-    # 都带，命中它会让完成度门禁对任何报告恒 FAIL。真正的未填提示由下面第 2 条
-    # （`分析提示（Claude 填写）`）精确捕捉。
+    # 都带，命中它会让完成度门禁对任何报告恒 FAIL。真正的未填提示由后面的
+    # `分析提示（Claude 填写）` 规则精确捕捉。
     re.compile(
         r"\[\s*(?:待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"
         r"(?:填充|填写|补充|验证)?|待(?:填|填写|填充)|TODO|TBD|FIXME)\s*\]",
         re.I,
     ),
+    # 带具体待核内容的方括号占位；普通正文中的「待 Claude 核对」不应触发。
+    re.compile(r"\[\s*待\s*(?:Claude|AI|LLM)\s+核对[^\]\n]{0,24}\s*\]", re.I),
     re.compile(r"分析提示\s*[（(]\s*(?:Claude|AI|LLM)[^）)]{0,24}[）)]", re.I),
     re.compile(
         r"待\s*(?:Claude|AI|LLM)(?:\s+report)?(?:\s+阶段)?\s*"
@@ -375,10 +394,22 @@ def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
                 "message": "报告保留了待模型填写的模板占位，分析合成尚未完成",
             })
 
+    engine_notice = bool(_AUTOMATED_ENGINE_NOTICE_RE.search(text))
     is_automated_snapshot = bool(
-        _AUTOMATED_STOCK_SNAPSHOT_RE.search(text)
-        and _AUTOMATED_ENGINE_NOTICE_RE.search(text)
+        _AUTOMATED_STOCK_SNAPSHOT_RE.search(text) and engine_notice
     )
+    if engine_notice and not is_automated_snapshot and not _is_insight_report(text):
+        # C1-c：标题漂移守卫——含引擎声明却认不出快照标题时，同代侧车闸门
+        # 会静默失效（本函数注释记录过同类事故）；改为 error 强制发现，不再
+        # 落 skip 被 _compute_overall 过滤成假 PASS。
+        layer.findings_count += 1
+        layer.details.append({
+            "id": "completion-snapshot-title-unrecognized",
+            "severity": "error",
+            "message": ("报告含自动化引擎声明但标题未被识别为研究快照"
+                        "（`# {6位代码} {名称} 研究快照`）——标题漂移会使同代"
+                        "分析侧车校验失效，须核对"),
+        })
     if is_automated_snapshot:
         sidecar = _same_generation_analysis_path(report_path)
         if not sidecar.is_file():
@@ -413,6 +444,29 @@ def _check_stock_completion(report_path: Path, text: str) -> LayerResult:
                 "severity": "error",
                 "line": index + 1,
                 "message": f"{kind} 依据节为空或仅声明无逻辑链，不能作为完成的研究交付",
+            })
+
+    # C2-c：档案-正文风格一致性（warning）——正文自评风格须与同代 profile 的
+    # ``--style`` 档案一致（反例：600519 profile=价值 vs 正文自评「成长」）。
+    profile_path = report_path.with_suffix(".profile.json")
+    if profile_path.is_file():
+        try:
+            import json as _json
+            _prof = _json.loads(profile_path.read_text(encoding="utf-8")) or {}
+            # 侧车真实结构为嵌套 {"profile": {"style": ...}}（research_profile.py）；
+            # 兼容旧扁平写法。
+            prof_style = ((_prof.get("profile") or {}).get("style")
+                          or _prof.get("style"))
+        except Exception:
+            prof_style = None
+        m_style = re.search(r"自评风格\s*([^\s×（(]+)", text)
+        if prof_style and m_style and m_style.group(1) != prof_style:
+            layer.findings_count += 1
+            layer.details.append({
+                "id": "completion-style-mismatch",
+                "severity": "warning",
+                "message": (f"正文自评风格「{m_style.group(1)}」与同代档案风格「{prof_style}」"
+                            "不一致——正文风格表述须与档案/引擎 style_match 一致（C2-c）"),
             })
 
     if layer.findings_count:
@@ -762,9 +816,20 @@ _TERM_GLOSSARY = {
     "(EP|PE|PB|PS)(TTM)?", "折溢价", "席位", "龙虎榜", "胜率", "赔率",
 }
 
-_CONCLUSION_HEAD_RE = re.compile(r"^#{2,3}\s*(主要|核心)?结论", re.M)
+# C1-c（v0.3.1 收尾）：结论/主判断段标题族——封闭集，锚定行首标题起始词。
+# 反例：600519 2026-10-02 报告主判断标题为 `## 主判断：…`，旧 regex 只认
+# 「(主要|核心)?结论」开头 → 全报告零命中 → conclusion-evidence 层静默 pass
+# （D04「主判断未被 QC 定位」）。覆盖：结论族（含 insight `## 可得结论`，
+# render_insight.py）+ 判断族（主/主要/核心/首要判断）+ D4 体例 H2 括注
+# `（结论）/（主要结论）/（结论与交易结构）`；否定式（「非单一结论」）与
+# 模块内 H3（「因子交叉验证结论」）不命中。
+_CONCLUSION_HEAD_RE = re.compile(
+    r"^#{2,3}\s*(?:可得结论|重要发现（5 分钟阅读区）|(?:主要|核心)?结论|(?:主要|核心|首要|主)?判断)"
+    r"|^##\s[^\n]*（(?:主要|核心)?结论(?:与交易结构)?）",
+    re.M,
+)
 _SENT_SPLIT_RE = re.compile(r"[。！？!?]")
-_EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度)\s*[:：]")
+_EVIDENCE_TAG_RE = re.compile(r"\[(来源|证据|证据强度|事实)\s*[:：]")
 _FACT_MARK_RE = re.compile(r"\[事实\]")
 _ANALYSIS_MARK_RE = re.compile(r"\[分析\]")
 # R-A6 节边界 = `## `，与 lint `_SECTION_HEADER_RE`（lint.py:98）**逐字对齐**：
@@ -785,28 +850,272 @@ _SUMMARY_ELEMS = {
     "分歧": re.compile(r"分歧|争议|不同观点|不同解读|矛盾|相反|另类路径|不确定性来源"),
     "风险": re.compile(r"风险|不确定性|警示|关注点|留意|注意|制约|下行|回撤|假设失效|承压"),
 }
-# 结论段结构行（表行/引用/分隔/标题/代码围栏）不算断言（全量审查：FP 源）
-_STRUCT_LINE_RE = re.compile(r"^(\||>|---|```|#{2,})")
+# 结论段结构行（表行/分隔/标题/代码围栏）不算断言（全量审查：FP 源）。
+# R2 二轮（2026-10-04 独立复检）：`>` 引用行**不再整体跳过**——引用包装不能
+# 吞断言（反例：`> 公司盈利持续改善` 曾被整行跳过、完整 QC 仅 WARN）。
+# 仅**逐字命中渲染器/规范常量**的引用行保留豁免（下）。
+_STRUCT_LINE_RE = re.compile(r"^(\||---|```|#{2,})")
+# 引用行豁免白名单（逐字常量，非前缀/非词表）：
+#   - `_concise.py:885` 容器说明（段数可变，单独正则逐字匹配）
+#   - 「不构成投资建议」类免责句（report_qc 测试夹具与规范常量）
+#   - 多情景条件性区间免责句（LAW 6a 必附句）
+_QUOTE_CONTAINER_RE = re.compile(
+    r"^> 结论先行区：以下 \d+ 段是本次分析的核心判断，数据底稿与其余分析注记见文末。$")
+_QUOTE_STRUCT_EXACT = frozenset({
+    "> 以上不构成投资建议",
+    "> 以上不构成投资建议。",
+    "> 以上为条件性估值区间（含假设前提与概率权重），仅供参考，不构成投资建议。",
+})
 
 
-def _evidence_ge_c(ln: str) -> bool:
-    """断言证据等级 ≥C（全量审查 P0-2：死代码「tagged==0 且无 out」不可达——
-    tagged==0 时 out 必有内容。改为逐行判定：来源标注（可核验）或 [证据: A/B/C]
-    或四维强度 ✅ 视为 ≥C；[证据: D] / ❓ 强度为 <C）。"""
-    if re.search(r"\[来源\s*[:：]", ln):
+def _is_quote_structure(line: str) -> bool:
+    """引用行是否为逐字已知的渲染器/规范常量（R2 二轮，封闭语法）。"""
+    return line in _QUOTE_STRUCT_EXACT or bool(_QUOTE_CONTAINER_RE.match(line))
+# R-A2 渲染器标签行豁免（R2/#36，2026-10-01 独立核查记录 / 10-02 实施）：渲染器
+# 按各宿主体例输出 `**[事实]**`/`**[分析]**`/`**证据等级：** {标签}`
+# （_concise.py、render_risk.py、render_insight.py；字段非空才逐行输出）。这些标签行是渲染结构、不是断言——
+# 旧实现把它们当结论段缺标签断言：以「结论」开头的卡含渲染标签时必报 3 条 error
+# （标题带后缀再 +1；遇 ###/#### 子标题停止扫描，计数可能更少）。
+# 豁免从严：仅整行恰为标签时生效；标签后跟正文的行（如 participant_scan
+# `**[事实]** 各类参与者…`）仍按断言扫描。
+_RENDER_LABEL_RE = re.compile(r"^\*\*\[(?:事实|分析)\]\*\*\s*$")
+# 证据等级行合法结构（R2 收紧为封闭语法；R12 round-5 收紧为**四维齐全序列**）：
+#   **证据等级：** <等级> [<四维序列>]
+#   等级 = A-D（一至二位）/ L1-L4（同 analysis_schema._EVIDENCE_RE 语义）；
+#   四维序列 = 强度→来源→时效→交叉、图标-注解配对（唯一来源 = 顶部
+#   `from evidence_tags import` 的 `FOUR_DIM_SEQUENCE_PATTERN`）。
+#   缺维度/半截序列/图标注解矛盾的尾巴一律不豁免——如 `B 🕐 近 30 日`、
+#   `B ✅该标的有望走强`（词表外文字）仍按断言扫描。
+_RENDER_EVIDENCE_RE = re.compile(
+    r"^\*\*证据等级[:：]\*\*\s+" + EVIDENCE_LABEL_PATTERN + r"\s*$"
+)
+
+
+# R2 二轮（2026-10-04 独立复检）：结构豁免必须是**封闭语法**——两轮反例
+# （`**公司盈利持续改善（近30日）**`、`（数据）`、`（999%增长）`、
+# `**证据强度：✅ 强**（公司盈利持续改善，来源数据）` 均曾 PASS）证明
+# 「括注含信号词/数字」的宽判据不可用。现改为：
+#   ① 元数据括注 = **逐段全匹配**封闭语法（日期/报告期形态 + 模板常量短语表），
+#      不再「包含即豁免」；
+#   ② 加粗小标题 = 主体属封闭名词表（或登记正则）+ 括注合语法 / 裸小标题
+#      封闭清单；其余整行加粗按断言扫描；
+#   ③ 证据强度尾括注 = 元数据语法或**证据覆盖说明精确表**（实测语料逐字）。
+# 短语表为模板常量枚举（非语义信号词）；新增模板须显式登记（fail-closed）。
+_METADATA_SEGMENT_RES = (
+    re.compile(r"\d{4}-\d{2}-\d{2}(?:\s*(?:收盘|收盘口径|采集|盘中采集|起))?"),
+    re.compile(r"\d{4}-\d{2}-\d{2}\s*至\s*\d{4}-\d{2}-\d{2}"),
+    re.compile(r"(?:截至|自)\s*\d{4}-\d{2}-\d{2}(?:\s*收盘)?"),
+    re.compile(r"报告期\s*\d{4}-\d{2}-\d{2}"),
+    re.compile(r"最新收盘\s*\d{4}-\d{2}-\d{2}"),
+    re.compile(r"\d{4}\s*年(?:\s*\d{1,2}\s*月)?(?:中报|三季报|年报)?(?:与二季度)?"),
+    re.compile(r"\d+\s*个交易日"),
+)
+_METADATA_SEGMENTS_EXACT = frozenset({
+    "中报累计口径", "封存序列口径", "封存序列", "封存字段", "封存快照字段",
+    "均为封存快照字段", "可逐项复算", "固定快照回放", "非收盘定格",
+    "如实披露", "口径分离", "口径纪律",
+    "假设前提", "概率权重见下", "假设一致性检验", "非买卖建议",
+    "每项带可观测证伪条件", "利润池分布代理指标",
+})
+_METADATA_SPLIT_RE = re.compile(r"\s*[，,；;、+]\s*")
+
+
+def _metadata_paren_ok(inner: str) -> bool:
+    """括注是否为结构元数据：每段（按，；、+ 切分）须**整体**命中封闭语法
+    （日期/报告期正则或模板常量短语）；含实质文字即不豁免。"""
+    segments = _METADATA_SPLIT_RE.split(inner.strip())
+    if not segments or any(not seg for seg in segments):
+        return False
+    return all(
+        seg in _METADATA_SEGMENTS_EXACT
+        or any(r.fullmatch(seg) for r in _METADATA_SEGMENT_RES)
+        for seg in segments
+    )
+
+
+# 单维强度元数据的渲染器体例（R12 round-5 与 SOP 四维方括号分开）：
+#   `**证据强度：✅ 强**` / `**证据强度：⚠️ 中**` / `**证据强度：❓ 弱**`
+#   （图标-强度字配对；允许裸强度字；引擎「数据不足」哨兵同为封闭常量）。
+#   旧引擎单维方括号 `[证据强度: ⚠️ 中]` 不属合法四维标签，不再走四维解析；
+#   生产者同步改出本渲染器体例。
+_RENDER_STRENGTH_HEAD_RE = re.compile(
+    r"^\*\*证据强度[:：]\s*(?:" + _RENDER_STRENGTH_TOKEN + r")\*\*(.*)$"
+)
+# 证据覆盖说明（实测语料全量形式，逐字精确表）：解释标签覆盖的数据范围
+# （序列/字段/复核/差异），非语义信号词。新变体须显式登记。
+_STRENGTH_COVERAGE_EXACT = frozenset({
+    "估值/盈利序列为封存字段直读",
+    "估值/盈利序列为封存字段直读；ROE 受跨源差异影响",
+    "估值/盈利序列为封存字段直读；二季度单季为券商点评口径；ROE 受跨源差异影响",
+    "估值、盈利、历史序列均为封存字段直读，可逐项复算",
+    "价格/估值/盈利均可复核；机制归因为解释，非观测",
+    "ROE 数值受跨源差异影响",
+})
+
+
+def _strength_paren_ok(inner: str) -> bool:
+    return inner.strip() in _STRENGTH_COVERAGE_EXACT or _metadata_paren_ok(inner)
+
+
+def _is_render_strength(line: str) -> bool:
+    """`**证据强度：✅ 强**…` 行是否仅由元数据构成（结构行，单维渲染器体例）。
+
+    标签后的实质文本（如 `**证据强度：✅ 强**公司盈利持续改善`）不豁免——
+    返回 False 后该行按断言扫描（R2 反例）。可选 tail 仅接受
+    「来源→时效→交叉」三维修全序列（R12 round-5：与 SOP 四维方括号同规则；
+    半截序列不再豁免）。尾括注须为逐字覆盖说明或元数据语法——
+    `（公司盈利持续改善，来源数据）` 两者皆非（R2 二轮反例）。
+    """
+    m = _RENDER_STRENGTH_HEAD_RE.match(line)
+    if not m:
+        return False
+    rest = m.group(1).strip()
+    if not rest:
         return True
-    m = re.search(r"\[证据\s*[:：]\s*([A-Da-d])", ln)
+    consumed = False
+    # 可选 tail：来源→时效→交叉三维修全、固定顺序（head 已给强度维）；
+    # 半截/乱序/图标注解矛盾的尾巴不豁免（R12 round-5）。
+    seq = re.match(r"^\s*" + _SOURCE_DIM + r"\s*" + _TIMING_DIM + r"\s*" + _CROSS_DIM,
+                   rest)
+    if seq:
+        rest = rest[seq.end():].strip()
+        consumed = True
+    paren = re.match(r"^[（(]([^（）()]{1,80})[）)]", rest)
+    if paren and _strength_paren_ok(paren.group(1)):
+        rest = rest[paren.end():].strip()
+        consumed = True
+    # 可选第二档：`／⚠️ 中（…）`（实测语料：双强度并列行）
+    second = re.match(
+        r"^[/／]\s*[⚠❓]️?\s*[中弱](?:\s*[（(]([^（）()]{1,80})[）)])?", rest)
+    if second:
+        inner = second.group(1)
+        if inner is None or _strength_paren_ok(inner):
+            rest = rest[second.end():].strip()
+            consumed = True
+    return consumed and not rest
+
+
+# 四维标注行（R10，SKILL.md:148 格式）：`[证据强度: ✅ 强 🌐多源 🕐近 30 日 ✓✗]`
+# ——注入 analysis 的 SOP-EV 标签行；封闭语法、无自由文本（括注一律不允许，
+# 需要说明请写进正文并带来源）。R12 round-4 定义收敛到共享模块
+# `evidence_tags.FOUR_DIM_TAG_LINE_RE`（与 analysis_schema 掩码同源，防漂移），
+# 顶部以 `_FOUR_DIM_TAG_RE` 别名导入；round-5 收紧为四维齐全、固定顺序、
+# 图标-注解配对（缺/重复/矛盾不豁免）；单维引擎元数据另走
+# `_is_render_strength` 的 `**证据强度：…**` 体例。
+
+
+# 加粗小标题的封闭语法（R2 二轮）：
+#   主体 ∈ 封闭名词表（或登记正则）→ 允许「主体（元数据括注）」或「主体：」；
+#   裸小标题（无括注/冒号）仅限实测语料封闭清单。
+# `**公司盈利持续改善（近30日）**`（主体不在表）/`**行情（999%增长）**`
+# （括注不合语法）→ 按断言扫描（R2 二轮反例）。
+_BOLD_HEADING_ALLOWLIST = frozenset({
+    "关键观察节点", "关键观察点", "盲点", "逻辑链", "明示缺口", "核心矛盾",
+    "对抗性假设与证伪条件",
+})
+_HEADING_BASE_ALLOWLIST = frozenset({
+    "本次问题与数据截止", "估值", "估值锚", "行情", "盈利", "事实", "行业位置",
+    "明示缺口", "边界", "支持", "对抗性假设检验", "对抗性假设与证伪条件",
+    "多情景参考价", "多情景估值参考", "交易结构", "口径", "读法", "判别式",
+})
+_HEADING_BASE_RES = (
+    re.compile(r"截至\s*\d{4}-\d{2}-\d{2}\s*收盘的并列量值"),
+)
+_BOLD_ONLY_RE = re.compile(r"^\*\*([^*。！？!?]+)\*\*$")
+
+
+def _is_bold_heading(line: str) -> bool:
+    """整行加粗是否为结构小标题（封闭语法，R2 二轮）。
+
+    合法形态：① 裸小标题 ∈ 封闭清单；② `主体（元数据括注）`（主体 ∈ 封闭
+    名词表/登记正则，括注合元数据语法）；③ `主体：`（同主体约束）。
+    其余（含 `**公司盈利持续改善…**` 全变体）按断言扫描。
+    """
+    m = _BOLD_ONLY_RE.match(line)
+    if not m:
+        return False
+    body = m.group(1).strip()
+    if body in _BOLD_HEADING_ALLOWLIST:
+        return True
+    core = body[:-1].strip() if body.endswith(("：", ":")) else body
+    if not core:
+        return False
+    mm = re.fullmatch(r"([^（）()]{1,40})[（(]([^（）()]{1,100})[）)]", core)
+    if mm:
+        base, inner = mm.group(1).strip(), mm.group(2)
+        if (base in _HEADING_BASE_ALLOWLIST
+                or any(r.fullmatch(base) for r in _HEADING_BASE_RES)):
+            return _metadata_paren_ok(inner)
+        return False
+    if body.endswith(("：", ":")):
+        return (core in _HEADING_BASE_ALLOWLIST
+                or any(r.fullmatch(core) for r in _HEADING_BASE_RES))
+    return False
+
+
+def _evidence_ge_c(ln: str, fact_ids: frozenset[str] | None = None) -> bool:
+    """断言证据等级 ≥C（全量审查 P0-2：死代码「tagged==0 且无 out」不可达——
+    tagged==0 时 out 必有内容。改为逐行判定：来源标注（可核验）或 [证据: A/B/C]；
+    [证据: D] 为 <C）。
+    C1-c：`[事实: F{n}]` 引用（analysis.json facts 契约）视为 ≥C 级可追溯证据。
+    R2 二轮（2026-10-04）：提供 `fact_ids`（同代侧车 `.analysis.json` 的事实
+    编号全集）时，**引用编号必须真实存在**——`[事实: F999999]` 不是证据
+    （反例：不存在编号曾被当 ≥C 证据、整层 pass(0)）。未提供事实表（无侧车
+    的单文件校验）时保持既有行为。
+    R12 round-4（2026-10-04 独立复检）：**证据强度标签本身不是证据**——旧判据
+    「任意含 `[证据强度: ✅` 的行即 ≥C」使 `[证据强度: ✅ 公司盈利增长999%]`
+    自授通过结论证据层。强度标签只是元数据（合法的纯标签行在扫描前置已按
+    结构行豁免），断言仍须 [来源:] / [证据: A-C] / 真实 [事实: F…] 绑定。
+    且判定前先剥掉行内**整个** `[证据强度: …]` 命名空间（含非法/嵌套形态，
+    如 `[证据强度: ✅ 强 [来源: 假] 断言]`）——标签内的来源/事实字样不是证据。"""
+    evidence_scope = _strip_strength_tag_spans(ln)
+    ref = re.search(r"\[事实\s*[:：]\s*(F\d+)\]", evidence_scope)
+    if ref and (fact_ids is None or ref.group(1) in fact_ids):
+        return True
+    if re.search(r"\[来源\s*[:：]", evidence_scope):
+        return True
+    m = re.search(r"\[证据\s*[:：]\s*([A-Da-d])", evidence_scope)
     if m:
         return m.group(1).upper() in ("A", "B", "C")
-    if re.search(r"\[证据强度\s*[:：]\s*✅", ln):
-        return True
     return False
 
 
 def _body_lines(md: str) -> list[str]:
-    """去掉命令/引用外的纯正文行（标题也算正文）。"""
-    return [ln for ln in md.splitlines()
-            if ln.strip() and not ln.lstrip().startswith(("#", ">", "|", "```"))]
+    """去掉命令/引用外的纯正文行（标题也算正文）。
+
+    仅 stock full 的「审计底稿」折叠不计入主阅读篇幅。其他报告的 details
+    （如 insight Facts、brief/concise 展开块）仍是报告正文，须计入指标。
+    标签可在同一行开闭；未闭合的审计底稿视为延续到文末。
+
+    注意本组指标是**软建议**（`_check_readability` 封顶 warn），故本改动是
+    度量口径对齐（长度指标与阅读面设计同义），不是放宽阻断。
+    """
+    tag_re = re.compile(r"<\s*(/?)\s*details\b[^>]*>", re.IGNORECASE)
+    stack: list[bool] = []
+    visible: list[str] = []
+    end = 0
+    for tag in tag_re.finditer(md):
+        if not any(stack):
+            visible.append(md[end:tag.start()])
+        was_hidden = any(stack)
+        if tag.group(1):
+            if stack:
+                stack.pop()
+        else:
+            summary = md[tag.end():]
+            stack.append(bool(re.match(r"\s*<summary>\s*审计底稿", summary, re.IGNORECASE)))
+        if was_hidden and not any(stack):
+            visible.append("\n")
+        end = tag.end()
+    if not any(stack):
+        visible.append(md[end:])
+
+    lines: list[str] = []
+    for ln in "".join(visible).splitlines():
+        ln = re.sub(r"</?summary\b[^>]*>", "", ln, flags=re.IGNORECASE)
+        if ln.strip() and not ln.lstrip().startswith(("#", ">", "|", "```")):
+            lines.append(ln)
+    return lines
 
 
 def readability_metrics(md: str) -> dict:
@@ -827,16 +1136,28 @@ def readability_metrics(md: str) -> dict:
 
     # 结论摘要要素：在「主要/核心结论」段内查找；无结论段标题 → 不判缺
     # （全量审查：旧实现无标题也报缺要素——对前置引擎输出假阳性）
+    # C1-c 配套：标题族扩展后首个命中可能是 `重要发现（5 分钟阅读区）` 这类
+    # **容器段**（段内只有引用行指针）——取其后的首个**有实质内容**的段，
+    # 否则退回首段；全部无内容才按未知处理。
     summary_elements = {k: False for k in _SUMMARY_ELEMS}
-    m = _CONCLUSION_HEAD_RE.search(md)
-    if m:
+    seg_pick: str | None = None
+    m_any = None
+    for m in _CONCLUSION_HEAD_RE.finditer(md):
+        m_any = m
         tail = md[m.end():]
         next_head = re.search(r"^#{2,4}\s", tail, re.M)
-        seg = tail if not next_head else tail[: next_head.start()]
-        for k, pat in _SUMMARY_ELEMS.items():
-            summary_elements[k] = bool(pat.search(seg))
-    else:
+        cand = tail if not next_head else tail[: next_head.start()]
+        if seg_pick is None:
+            seg_pick = cand
+        if any(ln.strip() and not ln.strip().startswith(">")
+               for ln in cand.splitlines()):
+            seg_pick = cand
+            break
+    if m_any is None:
         summary_elements = {k: None for k in _SUMMARY_ELEMS}  # 无结论段 → 未知
+    else:
+        for k, pat in _SUMMARY_ELEMS.items():
+            summary_elements[k] = bool(pat.search(seg_pick or ""))
 
     return {
         "total_chars": total_chars,
@@ -847,55 +1168,538 @@ def readability_metrics(md: str) -> dict:
     }
 
 
-def conclusion_evidence_findings(md: str) -> list[dict]:
+# ── R14（2026-10-05）：按层级扫核心判断全部子段 + 表格断言检查 + 事件分析段 ──
+#
+# 反例（`三轮收敛_20261005/pre-review/review-probes.json` 与四份真实变异）：
+# ① `## 重要发现（5 分钟阅读区）` 段内注入 `### 竞争解释` + `公司盈利持续改善`
+#    ——旧实现遇任意 `^#{2,4}` 标题即停，子段成为扫描盲区，qc PASS；
+# ② 同一断言包进 `| 判断 |` 两行表 —— 旧实现 `_STRUCT_LINE_RE` 豁免全部 `|`
+#    行，qc PASS。
+# 修复原则（不新增协议/入口）：
+#  - 段边界改为「下一个同级或更高级标题」——子段（更深标题及其内容）继续扫；
+#  - 表格只在「真表头/分隔行、**全数据格**数据行、行内有效证据绑定行」时豁免；
+#    其余行按断言行要求 ≥C 级证据绑定（round-8 删除「短标签+数值」分支——
+#    Codex round-7 复检反例 `| 公司盈利持续改善 | 999 |` 曾被该分支放行）；
+#  - 登记结构表（事件时间线）表头按逐字常量识别、**数据行逐行结构核验**
+#    （round-8 删除整块豁免——Codex 复制表头注入「确定影响」断言曾被整块放行）；
+#  - 机器只检查来源与缺口纪律（是否绑定、绑定是否合法）与登记表的结构词表，
+#    不声称理解表内文字的因果含义；标题格等自由文本属机器边界（见交接）。
+_HEADING_ANY_RE = re.compile(r"^(#{1,6})\s", re.M)
+_TABLE_ROW_RE = re.compile(r"^\|")
+_TABLE_SEP_CELL_RE = re.compile(r"^:?-{2,}:?$")
+_PURE_NUM_CELL_RE = re.compile(
+    r"^[+-]?\d[\d,]*(?:\.\d+)?\s*"
+    r"(?:%|pp|PP|个百分点|亿元|万元|亿|万|元|美元|倍|[xX]|个|日|天|年|月|次|条|笔|家|只|股|点|bp|BP)?$")
+_PURE_RANGE_CELL_RE = re.compile(
+    r"^[+-]?\d[\d,]*(?:\.\d+)?\s*(?:%|pp|亿元|万元|亿|万|元|倍)?"
+    r"\s*[–~～-]\s*"
+    r"[+-]?\d[\d,]*(?:\.\d+)?\s*(?:%|pp|亿元|万元|亿|万|元|倍)?$")
+_PURE_DATE_CELL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TABLE_PLACEHOLDER_CELLS = frozenset({"—", "–", "--", "-", "N/A", "n/a", "/", "…", "...", ""})
+
+
+def _table_cells(row: str) -> list[str]:
+    inner = row.strip()
+    if inner.startswith("|"):
+        inner = inner[1:]
+    if inner.endswith("|"):
+        inner = inner[:-1]
+    return [c.strip() for c in inner.split("|")]
+
+
+def _is_table_separator(row: str) -> bool:
+    cells = _table_cells(row)
+    return bool(cells) and all(_TABLE_SEP_CELL_RE.match(c) for c in cells)
+
+
+def _is_numeric_cell(cell: str) -> bool:
+    return bool(_PURE_NUM_CELL_RE.match(cell) or _PURE_RANGE_CELL_RE.match(cell)
+                or _PURE_DATE_CELL_RE.match(cell))
+
+
+def _is_data_cell(cell: str) -> bool:
+    """纯数据单元格：数值/日期/占位符。
+
+    R14 round-7：**不再**把「含来源/证据/事实字样」的单元格当数据——来源
+    字符串不能作为整行免审依据（Codex `table_fake_source`：嵌套在强度标签
+    里的 `[来源: fake]` 曾使整行按数据行放行）。
+    """
+    return cell in _TABLE_PLACEHOLDER_CELLS or _is_numeric_cell(cell)
+
+
+def _row_is_data_like(row: str) -> bool:
+    """表数据行判据（R14 round-8）：**全部**单元格为纯数据（数值/日期/占位符）。
+
+    round-7 的「短标签 + 数值/日期」分支已删除——Codex round-7 复检反例
+    `| 公司盈利持续改善 | 999 |` 曾按数据行放行（preflight 仅因数字未绑定
+    拦截、final QC 仍 WARN）；「短长度+数字」判据本身即漏洞面——8 字以内的
+    短断言（如 `| 盈利改善 | 999 |`）与指标名在词形上不可区分。故整行免审
+    只认「全数据格」这一种纯粹结构；任何含文字格的混合行一律按断言处理，
+    其唯一豁免通路是**行内有效证据绑定**（`[来源:]` 依据合格 / `[证据: A–C]`
+    / 真实 `[事实: F…]`）。真实数据表由全数据格（渲染器指标行，如业绩全景
+    的纯数值行）或行内绑定（情景/底稿表）承载；登记结构表（事件时间线）
+    另走逐行结构核验 `_event_timeline_row_ok`。
+    """
+    cells = [c for c in _table_cells(row) if c]
+    return all(_is_data_cell(c) for c in cells)
+
+
+def _heading_level(match_text: str) -> int:
+    return len(match_text) - len(match_text.lstrip("#"))
+
+
+def _segment_after_heading(md: str, m: re.Match) -> tuple[list[str], int]:
+    """标题所属段的行与起始行号——扫到**同级或更高级**标题为止（R14）。
+
+    旧实现遇任意 `^#{2,4}` 即停：注入的 H3/H4 子段成为扫描盲区（反例①）。
+    """
+    level = _heading_level(m.group(0))
+    seg_start = md.find("\n", m.end())
+    seg_start = len(md) if seg_start == -1 else seg_start + 1
+    tail = md[seg_start:]
+    end = len(tail)
+    for h in _HEADING_ANY_RE.finditer(tail):
+        if len(h.group(1)) <= level:
+            end = h.start()
+            break
+    line_base = md[:seg_start].count("\n") + 1
+    return tail[:end].splitlines(), line_base
+
+
+def _scan_segment_assertions(
+    lines: list[str], line_base: int, fact_ids: frozenset[str] | None, *,
+    where: str, id_missing: str, id_weak: str,
+    id_missing_table: str, id_weak_table: str,
+    extra_exempt_res: tuple[re.Pattern, ...] = (),
+    source_basis_ok: "Callable[[str], bool] | None" = None,
+    exempt_headers: tuple[tuple[str, ...], ...] = (),
+    exempt_block_start: int | None = None,
+) -> list[dict]:
+    """段内逐行断言证据扫描（共享实现：结论段 / 事件分析段）。
+
+    - 结构行/渲染器标签行/四维标签行/封闭加粗小标题/引用常量照旧豁免；
+    - 表行改走 `_scan_table_rows`（真表头/分隔行、全数据格行、行内有效证据行
+      豁免；登记结构表逐行结构核验；其余按断言；邻近来源不豁免——R14
+      round-7/round-8）；
+    - `source_basis_ok`（事件段 R13）：来源绑定即使语法合法、但其依据不合格
+      （仅标题/URL、或自述未读/未取得）时同样按 <C 证据处理；
+    - `exempt_block_start`（R14/MC-02）：登记表结构豁免只授予**该行号开始的
+      块**——事件段传入引擎表块起点（人工分析区内的复制表不获豁免）；
+    - `where` 用于消息（「结论段」/「事件分析段」），机器只查来源纪律。
+    """
+    out: list[dict] = []
+    weak_lines: list[tuple[int, str]] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.strip()
+        if _TABLE_ROW_RE.match(stripped):
+            j = i + 1
+            while j < len(lines) and _TABLE_ROW_RE.match(lines[j].strip()):
+                j += 1
+            _scan_table_rows(lines, i, j, line_base, fact_ids, out,
+                             where=where, id_missing=id_missing_table,
+                             id_weak=id_weak_table, source_basis_ok=source_basis_ok,
+                             exempt_headers=exempt_headers,
+                             exempt_block_start=exempt_block_start)
+            i = j
+            continue
+        i += 1
+        if (not stripped or _STRUCT_LINE_RE.match(stripped)
+                or any(r.match(stripped) for r in extra_exempt_res)
+                or _is_quote_structure(stripped)
+                or _RENDER_LABEL_RE.match(stripped)
+                or _RENDER_EVIDENCE_RE.match(stripped)
+                or _FOUR_DIM_TAG_RE.match(stripped)
+                or _is_render_strength(stripped)
+                or _is_bold_heading(stripped)):
+            continue
+        if _EVIDENCE_TAG_RE.search(ln):
+            basis_bad = source_basis_ok is not None and not source_basis_ok(ln)
+            if basis_bad or not _evidence_ge_c(ln, fact_ids):
+                weak_lines.append((line_base + i - 1, stripped[:80]))
+        else:
+            out.append({
+                "id": id_missing,
+                "severity": "error",
+                "line": line_base + i - 1,
+                "message": f"{where}断言缺少证据标签（[来源: / [证据: A–C / [事实: F…]；"
+                           "证据强度标签仅元数据、不构成证据）"
+                           "——无 ≥C 级证据的断言不得进入该段（R-A2/R13）",
+                "context": stripped[:80],
+            })
+    if weak_lines:
+        lines_txt = "；".join(f"L{ln}: {ctx}" for ln, ctx in weak_lines[:3])
+        out.append({
+            "id": id_weak,
+            "severity": "error",
+            "line": weak_lines[0][0],
+            "message": (f"{where}存在 <C 级证据断言（D 级/未标等级/来源依据不合格——"
+                        "如仅标题、URL 或自述未读，不构成原文已核证据）——不满足"
+                        "「无 ≥C 级证据不入该段」，标注「证据弱，仅作观察」"
+                        f"（R-A2/R13）：{lines_txt}"),
+            "context": lines[0][:80] if lines else "",
+        })
+    return out
+
+
+def _scan_table_rows(
+    lines: list[str], start: int, end: int, line_base: int,
+    fact_ids: frozenset[str] | None, out: list[dict], *,
+    where: str, id_missing: str, id_weak: str,
+    source_basis_ok: "Callable[[str], bool] | None" = None,
+    exempt_headers: tuple[tuple[str, ...], ...] = (),
+    exempt_block_start: int | None = None,
+) -> None:
+    """表块行断言扫描（R14）：真表头/分隔行、数据行、登记结构表逐行核验豁免。
+
+    R14 round-7：**取消「整表邻近来源」豁免**——邻近（含块外前后）的
+    `[来源:]` 字符串不再给整表免审（Codex：来源字符串不能作整表/整行免审
+    依据，且邻近来源会吞掉不相关断言）。非数据行一律按自身行内证据判定。
+    R14 round-8：**登记结构表（`exempt_headers`）不再整块豁免**——表头行按
+    逐字常量豁免，数据行须通过 `_registered_table_row_ok` 的逐行结构核验
+    （Codex round-7 `event_copied_header`：复制事件表头插入「确定影响」断言
+    曾被整块放行，validate/preflight=0 且 final QC WARN）。数据行判据同步
+    收紧为「全数据格」或行内有效证据（见 `_row_is_data_like`）。
+    R14（2026-10-07 主线收尾）：登记事件表的行级结构豁免还须通过
+    `_registered_event_block_integrity_ok` 的**完整性与块位校验**（表块须为
+    事件段首个引擎表块 [`exempt_block_start`]、紧跟固定来源尾注、行数与 N
+    一致、行指纹自洽）——Codex round-8 `event_title_assertion`、2026-10-07
+    footer 变体与 `r14-self-fingerprint-attack`（**[分析]** 区自算指纹的伪造
+    表）在旧判据下 validate/preflight=0、final QC conclusion-evidence pass；
+    契约不符的块退回普通断言行检查（fail-closed）。行指纹只作**完整性**
+    校验（防行级篡改/外形复制），不证明来源身份；人工分析区不获该豁免。
+    """
+    block = [lines[i] for i in range(start, end)]
+    header = tuple(_table_cells(block[0])) if block else ()
+    header_registered = (header in exempt_headers
+                         and exempt_block_start is not None
+                         and start == exempt_block_start)
+    if header_registered:
+        header_registered = _registered_event_block_integrity_ok(
+            lines, start, end, header)
+    data_rows = [(i, lines[i]) for i in range(start, end)
+                 if not _is_table_separator(lines[i])]
+    if not data_rows:
+        return
+    # 首行只有紧随真实分隔行的多列表才可视为表头；无表头/单列块不能免审。
+    # 仅表头+分隔的块没有数据行承载，表头也须检查
+    # （登记结构表的表头行本身按逐字常量豁免——它是渲染器结构，不是断言）
+    header_skippable = (len(data_rows) >= 2 and len(header) >= 2
+                        and start + 1 < end and _is_table_separator(lines[start + 1]))
+    for k, (i, row) in enumerate(data_rows):
+        if k == 0 and (header_skippable or header_registered):
+            continue
+        if not any(_table_cells(row)):
+            continue
+        if _row_is_data_like(row):
+            continue
+        if header_registered and _registered_table_row_ok(row, header):
+            continue
+        if _EVIDENCE_TAG_RE.search(row):
+            if ((source_basis_ok is not None and not source_basis_ok(row))
+                    or not _evidence_ge_c(row, fact_ids)):
+                out.append({
+                    "id": id_weak,
+                    "severity": "error",
+                    "line": line_base + i,
+                    "message": (f"{where}表格行存在 <C 级证据断言（含来源依据不合格——"
+                                "如仅标题/URL/自述未读，或嵌套在强度标签内）——"
+                                "表包装不能免除证据绑定（R14）"),
+                    "context": row.strip()[:80],
+                })
+        else:
+            out.append({
+                "id": id_missing,
+                "severity": "error",
+                "line": line_base + i,
+                "message": (f"{where}表格行缺少证据绑定——表格包装不能免除断言"
+                            "证据要求；邻近来源与表头身份不构成整表/整行豁免（R14）"),
+                "context": row.strip()[:80],
+            })
+
+
+def conclusion_evidence_findings(
+    md: str, *, fact_ids: frozenset[str] | None = None,
+) -> list[dict]:
     """R-A2：结论段逐条断言须带证据标签；<C 级证据的断言不得进入结论段。
 
     - 标题支持「核心结论」（真实模板 `## 核心结论`——旧 regex 只匹配主要/结论
       → 210/210 真实报告未检到结论段）
     - 死代码移除：旧「tagged==0 且 not out」不可达（tagged==0 → out 必有行）——
       改为逐行 _evidence_ge_c 判定，D 级/未达标行报 level error
-    - 结构行（| 表行/> 引用/---/#### 标题/```）排除——旧实现把表行/引用/
-      情景子标题当断言（FP 源）
+    - 结构行（表行/---/#### 标题/```）排除；**`>` 引用行不再整体跳过**，
+      仅逐字命中渲染器/规范常量的引用行豁免（`_is_quote_structure`）——
+      引用包装不能吞断言（反例：`> 公司盈利持续改善`）
     - 段边界含 ####（乐观/悲观情景子标题内容不再误扫）
+    - R2（#36）：标题**整行**跳过（`## 结论：…` 的后缀文字属标题、不是断言）；
+      渲染器自出的纯结构标签行（`**[事实]**`/`**[分析]**`/`**证据等级：** {标签}`）
+      不算断言——两者此前都被当缺标签断言（带后缀标题的卡必报 3-4 条 error）
+    - C1-c（v0.3.1 收尾）：标题族扩展（主判断/可得结论/…，见 `_CONCLUSION_HEAD_RE`）
+      且 `finditer` **扫全部**核心判断段（原实现只扫首个匹配）；新格式
+      `[事实: F{n}]` 引用视为 ≥C 级证据；`**证据强度：…**` 渲染标签行与纯加粗
+      小标题行豁免（600519 主判断段实测：`**证据强度：✅ 强**🌐…` 行旧实现会报 FP）。
+    - R2 二轮（2026-10-04 独立复检）：签名/加粗/证据强度三类结构豁免改为**封闭语法**
+      （`_is_render_strength` / `_is_bold_heading`）；四维标注行（R10）按封闭
+      语法豁免（`_FOUR_DIM_TAG_RE`）；`fact_ids` 提供时（同代侧车事实表）
+      `[事实: F…]` 必须引用真实存在的编号（F999999 不是证据）。
+    - R12 round-4（2026-10-04 独立复检）：**强度标签不是证据**——`_evidence_ge_c`
+      不再接受任意 `[证据强度: ✅` 行（该判据曾使 `[证据强度: ✅ 公司盈利增长999%]`
+      通过本层）；只有纯四维元数据标签整行（`_FOUR_DIM_TAG_RE`，共享封闭语法）
+      在结构豁免前置被跳过，其余行程的断言须有 [来源/证据/事实] 绑定。
+    - R14（2026-10-05）：段边界改为**同级或更高级标题**（子段不再截断扫描，
+      反例①`### 竞争解释` 注入不再成为盲区）；表行改由 `_scan_table_rows`
+      判定（反例②表包装断言不再被 `_STRUCT_LINE_RE` 整体豁免）。
+    - R14 round-8（2026-10-05）：数据行判据收紧为「全数据格」；登记结构表
+      （事件时间线）改为**表头 + 逐行结构核验**（反例：短标签+数字行
+      `| 公司盈利持续改善 | 999 |` 与复制事件表头注入）。
     """
     out: list[dict] = []
-    m = _CONCLUSION_HEAD_RE.search(md)
-    if not m:
-        return out
-    tail = md[m.end():]
-    nxt = re.search(r"^#{2,4}\s", tail, re.M)
-    seg = tail if not nxt else tail[: nxt.start()]
-    line_base = md[: m.end()].count("\n") + 1
-    lines = seg.splitlines()
-    weak_lines: list[tuple[int, str]] = []
-    for i, ln in enumerate(lines):
-        stripped = ln.strip()
-        if not stripped or _STRUCT_LINE_RE.match(stripped):
-            continue
-        if _EVIDENCE_TAG_RE.search(ln):
-            if not _evidence_ge_c(ln):
-                weak_lines.append((line_base + i, stripped[:80]))
-        else:
-            out.append({
-                "id": "wording-conclusion-evidence",
-                "severity": "error",
-                "line": line_base + i,
-                "message": "结论段断言缺少证据标签（[来源: / [证据: / [证据强度:）"
-                           "——无 ≥C 级证据的断言不得进入结论段（R-A2）",
-                "context": stripped[:80],
-            })
-    if weak_lines:
-        lines_txt = "；".join(f"L{ln}: {ctx}" for ln, ctx in weak_lines[:3])
-        out.append({
-            "id": "wording-conclusion-evidence-level",
-            "severity": "error",
-            "line": weak_lines[0][0],
-            "message": ("结论段存在 <C 级证据断言（D 级/未标等级）——不满足"
-                        "「无 ≥C 级证据不入结论段」，标注「证据弱，仅作观察」（R-A2）"
-                        f"：{lines_txt}"),
-            "context": seg[:80],
-        })
+    for m in _CONCLUSION_HEAD_RE.finditer(md):
+        lines, line_base = _segment_after_heading(md, m)
+        out.extend(_scan_segment_assertions(
+            lines, line_base, fact_ids, where="结论段",
+            id_missing="wording-conclusion-evidence",
+            id_weak="wording-conclusion-evidence-level",
+            id_missing_table="wording-conclusion-table-evidence",
+            id_weak_table="wording-conclusion-table-evidence-level",
+            extra_exempt_res=_CONCLUSION_EXTRA_EXEMPT))
     return out
+
+
+# 结论段补充结构豁免（封闭语法，R14）：模板卡片的裸标记行 `[事实]`/`[分析]`
+# 是渲染器结构（内容在后续行；标签后跟正文的行仍按断言扫描）。
+_BARE_MARKER_RE = re.compile(r"^\[(?:事实|分析)\]$")
+_CONCLUSION_EXTRA_EXEMPT = (_BARE_MARKER_RE,)
+
+
+# ── R13/R14（2026-10-05）：事件时间线段断言扫描 ──────────────────────────
+# 反例：round-5 银行 final `## 3a. 事件时间线` 的 [分析] 段断言「治理变动
+# 本身不改变盈利路径与估值锚点」而公告原文未读取——标题/类型分类线索不是
+# 已核影响（AGENTS 约束 3；report-conventions §9.4.4）。机器只检查来源与
+# 缺口纪律（断言行有无合法绑定、绑定编号是否存在），不判断文字中的因果。
+_EVENT_SECTION_HEAD_RE = re.compile(r"^#{2,3}\s[^\n]*事件时间线", re.M)
+# 渲染器结构行（封闭常量：分类摘要导语/占位槽），本身不含断言
+_EVENT_FACT_LEAD_RE = re.compile(r"^\*\*\[事实\]\*\* 近 \d+ 日公告按类型归类如下：$")
+_EVENT_PLACEHOLDER_RE = re.compile(
+    r"^⏭️ \*\*(?:行业|市场)事件\*\*: ⏭️ 来源缺口：暂无稳定 API$")
+_EVENT_EXTRA_EXEMPT = (_EVENT_FACT_LEAD_RE, _EVENT_PLACEHOLDER_RE)
+# R13（2026-10-05 round-6 / 2026-10-05 round-7 收紧）：事件段内来源绑定须为
+# 「原文档级/字段级可核依据」——**仅以标题/URL/链接为依据**，或**标签自述
+# 未读/未核/未取得/不存在**（Codex `event_absent_source`：
+# `治理变动不影响盈利与估值。[来源: 公告原文未读取]` 曾按有效证据放行）的
+# 绑定，均不构成 ≥C 证据。否定词只在描述来源取得/核验状态时使绑定失效，内容字段缺失不等于来源未读。
+_EVENT_SOURCE_TAG_RE = re.compile(r"\[来源\s*[:：]([^\[\]]*)\]")
+_EVENT_TITLE_BASIS_RE = re.compile(r"标题|网址|[Uu][Rr][Ll]|链接")
+_EVENT_ORIGINAL_BASIS_RE = re.compile(r"原文|正文|全文|披露文件")
+# 缺失词必须描述来源取得/核验状态，不能把“缺失字段按空值处理”当未读来源。
+_EVENT_SOURCE_UNAVAILABLE_RE = re.compile(
+    r"(?:原文|正文|全文|披露文件|来源|材料)\s*[（(]?\s*(?:尚)?"
+    r"(?:未(?:逐条)?(?:读|复核|核|取得|获取|提供|覆盖)|不在|不存在于|"
+    r"(?:不存在|不可得|缺失)(?=$|[，,；;。)）]))"
+    r"|(?:未(?:读(?:取)?|复核|核(?:验)?|取得|获取|提供)|不存在|不可得|缺失)\s*(?:的)?(?:公告)?(?:原文|正文|全文|披露文件|来源|材料)"
+)
+# 渲染器固定结构表（逐字表头元组）：事件时间线表由 `_section_events_timeline`
+# 以封存数据渲染——表头按此常量识别表种；**数据行逐行结构核验**
+# （R14 round-8：round-7 的整块豁免被复制表头注入绕过——Codex
+# `event_copied_header`；词表与生产者 taxonomy 同步，一致性由测试对照 YAML 锁定）。
+_EVENT_TIMELINE_HEADER: tuple[str, ...] = ("日期", "类型", "公告标题", "涉及维度（类型默认）")
+_EVENT_EXEMPT_HEADERS: tuple[tuple[str, ...], ...] = (_EVENT_TIMELINE_HEADER,)
+# 类型格词表：taxonomy `event_types.*.label` 全集（生产者 analysis_templates.
+# event_type_label 的标签源）。未映射类型直出原始键 → 另放行英文键形态。
+_EVENT_TYPE_LABELS = frozenset({
+    "ST/退市风险", "业绩快报", "业绩预告", "关联交易", "其他公告", "减持", "分红",
+    "回购", "增发", "增持", "定期报告", "对外投资", "对外担保", "并购重组",
+    "异动/停复牌", "权益变动", "监管风险", "程序性公告", "股权激励", "诉讼仲裁",
+    "质押冻结", "重大合同", "限售解禁", "首发/招股",
+})
+# 维度格词表：taxonomy `event_types.*.impact_dimension` 值集
+_EVENT_DIMENSION_LABELS = frozenset({"估值", "收入", "治理", "现金流"})
+# event_type_label 未命中 taxonomy 时直出原始类型键（生产封存数据为英文键）
+_EVENT_RAW_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+# 渲染器截断行（>15 条事件）：| ... | ... | （另有 N 条事件未展示） | ... | ... |
+_EVENT_HIDDEN_ROW_RE = re.compile(r"^（另有 \d+ 条事件未展示）$")
+
+
+def _event_timeline_row_ok(row: str) -> bool:
+    """事件时间线数据行结构核验（R14 round-8，逐行；生产者同步）。
+
+    生产者 `render_markdown._v3._section_events_timeline` 的行形态：
+    `| {date} | {event_type_label(type)} | {title} | {dimension_hint|impact_dimension} |`
+    （超 15 条另有 `| ... | ... | （另有 N 条事件未展示） | ... | ... |`）。
+    核验：日期格 = YYYY-MM-DD；类型格 ∈ taxonomy 中文标签或原始英文键（未映射
+    回落）；维度格 ∈ taxonomy 维度词表或空/占位；标题格非空。标题为封存原文，
+    机器不判其文字语义（如实记录的残留边界）——但复制本表头、把「确定影响」
+    断言写进类型/维度格的构造不再构成数据行（Codex round-7 `event_copied_header`）。
+    """
+    cells = _table_cells(row)
+    if (len(cells) == 5 and cells[0] == cells[1] == cells[3] == cells[4] == "..."
+            and _EVENT_HIDDEN_ROW_RE.match(cells[2])):
+        return True
+    if len(cells) != 4:
+        return False
+    date, etype, title, dimension = cells
+    if not _PURE_DATE_CELL_RE.match(date):
+        return False
+    if etype not in _EVENT_TYPE_LABELS and not _EVENT_RAW_TYPE_RE.match(etype):
+        return False
+    if not title or title in _TABLE_PLACEHOLDER_CELLS:
+        return False
+    if (dimension and dimension not in _EVENT_DIMENSION_LABELS
+            and dimension not in _TABLE_PLACEHOLDER_CELLS):
+        return False
+    return True
+
+
+def _registered_table_row_ok(row: str, header: tuple[str, ...]) -> bool:
+    """登记结构表的行级核验入口（当前仅事件时间线；新增表种时在此登记）。"""
+    if header == _EVENT_TIMELINE_HEADER:
+        return _event_timeline_row_ok(row)
+    return False
+
+
+# 生产者固定来源尾注（`_section_events_timeline` 在表块后逐字输出；
+# N = 封存事件总数，行指纹 = 数据行规范串 sha256 前 32 hex；2026-10-07 主线
+# 收尾起带指纹——旧产物无指纹形态：`[来源: akshare stock_individual_notice_report / N 条事件]`
+_EVENT_TABLE_SOURCE_LINE_RE = re.compile(
+    r"^\[来源:\s*akshare stock_individual_notice_report\s*/\s*(\d+)\s*条事件"
+    r"(?:；行指纹 sha256:([0-9a-f]{32}))?\]$")
+
+
+def _event_table_fingerprint(rows: list[list[str]]) -> str:
+    """事件表数据行规范指纹（R14，2026-10-07 主线收尾）。
+
+    与生产者 `lib.events.event_table_fingerprint` 同一规范：每行 cell 去首尾
+    空白后以 ``|`` 连接、行间 ``\\n``、UTF-8 sha256 取前 32 hex。跨包各留一份
+    实现（避免 QC 强依赖 stock 包），一致性由渲染器↔检查器耦合测试
+    （`test_event_table_rows_satisfy_qc_structure`）锁定——两处任一漂移即红。
+    """
+    canon = "\n".join("|".join(str(c).strip() for c in row) for row in rows)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:32]
+
+
+def _registered_event_block_integrity_ok(
+    lines: list[str], start: int, end: int, header: tuple[str, ...],
+) -> bool:
+    """登记事件表的豁免须通过「完整性校验」（R14/MC-02，2026-10-07 主线收尾）。
+
+    仅凭逐字表头 + 行结构核验，复制表头插入的「无来源影响断言」会被当数据行
+    放行（Codex round-8 `event_title_assertion`）；仅凭固定尾注与条数的外形，
+    把尾注一并复制仍可冒充（footer 变体）；把整块放进人工分析区并**用公开
+    算法自算行指纹**同样自洽（`r14-self-fingerprint-attack`）——故本层只按
+    **完整性**收紧（表块紧跟来源尾注、条数一致、行指纹与报告实际数据行重算
+    值一致），**不宣称证明来源身份**。
+
+    来源身份的完整关闭分布在消费链前端与块位规则：
+    ① `analysis_schema` 入口拒绝自由 facts_md/analysis_md 伪造引擎事件表元数据
+       （表头/公告来源尾注）——分析文本不再能把伪造表带进任何产物；
+    ② `exempt_block_start`（见 `_scan_table_rows`）把豁免限定为事件段**首个**
+       引擎表块——人工分析区（`**[分析]**` 之后）的复制表一律按普通断言逐行
+       要求有效证据；
+    ③ 本函数只作完整性 fail-closed（行级增删/1:1 替换/复制外形即失配）。
+
+    机器边界（如实记录）：文本级检查无法证明标题来自封存源；重写整块并重算
+    指纹属「连贯伪造报告」，需 QC 直读封存 events 的协议（范围外，未在本轮）。
+    """
+    if header != _EVENT_TIMELINE_HEADER:
+        return False
+    total = fp = None
+    for ln in lines[end:]:
+        s = ln.strip()
+        if not s:
+            continue
+        m = _EVENT_TABLE_SOURCE_LINE_RE.match(s)
+        if m is None:
+            return False
+        total, fp = int(m.group(1)), m.group(2)
+        break
+    if total is None or not fp:
+        return False
+    date_rows = hidden_rows = 0
+    data_cells: list[list[str]] = []
+    for row in lines[start:end]:
+        if _is_table_separator(row):
+            continue
+        cells = _table_cells(row)
+        if not cells:
+            continue
+        first = cells[0].strip()
+        if first == "日期":
+            continue  # 逐字表头行不参与指纹与计数
+        data_cells.append(cells)
+        if (len(cells) == 5 and first == "..."
+                and _EVENT_HIDDEN_ROW_RE.match(cells[2].strip())):
+            hidden_rows += 1
+        elif _PURE_DATE_CELL_RE.match(first):
+            date_rows += 1
+        else:
+            return False  # 非日期/截断数据行不属生产者契约
+    if hidden_rows:
+        # 渲染器截断形态：15 行数据 + 1 截断行，N 为封存总数（必然 >15）
+        if not (hidden_rows == 1 and date_rows == 15 and total > 15):
+            return False
+    elif not (total <= 15 and date_rows == total):
+        return False
+    return _event_table_fingerprint(data_cells) == fp
+
+
+def _event_source_basis_ok(line: str) -> bool:
+    """事件段的来源绑定是否可作 ≥C 证据（R13 依据判据，round-7 收紧）。"""
+    for m in _EVENT_SOURCE_TAG_RE.finditer(line):
+        inner = m.group(1)
+        if _EVENT_SOURCE_UNAVAILABLE_RE.search(inner):
+            return False  # 标签自述未读/未取得/不存在：不构成证据
+        if (_EVENT_TITLE_BASIS_RE.search(inner)
+                and not _EVENT_ORIGINAL_BASIS_RE.search(inner)):
+            return False  # 仅标题/URL 依据：不是原文档级证据
+    return True
+
+
+def event_analysis_evidence_findings(
+    md: str, *, fact_ids: frozenset[str] | None = None,
+) -> list[dict]:
+    """事件时间线段逐行证据扫描（R13 配套，2026-10-05）。
+
+    覆盖 `## 3a. 事件时间线`（v0.2 体例 `## 六、事件催化（事件时间线）` 同
+    命中）整段（含更深子段）：断言须有 [来源/证据/事实] 绑定。分类列表
+    子弹与表格数据行照常由其自身绑定/结构豁免；本层不判断「影响是否成立」，
+    只要求「写了什么就绑定什么」——未读原文的影响判断在正文中应降级为
+    「影响未知/不纳入经营结论」（§9.4.4 纪律）。
+    """
+    out: list[dict] = []
+    for m in _EVENT_SECTION_HEAD_RE.finditer(md):
+        lines, line_base = _segment_after_heading(md, m)
+        out.extend(_scan_segment_assertions(
+            lines, line_base, fact_ids, where="事件分析段",
+            id_missing="wording-event-analysis-evidence",
+            id_weak="wording-event-analysis-evidence-level",
+            id_missing_table="wording-event-analysis-table-evidence",
+            id_weak_table="wording-event-analysis-table-evidence-level",
+            extra_exempt_res=_EVENT_EXTRA_EXEMPT,
+            source_basis_ok=_event_source_basis_ok,
+            exempt_headers=_EVENT_EXEMPT_HEADERS,
+            exempt_block_start=_engine_event_block_start(lines)))
+    return out
+
+
+def _engine_event_block_start(lines: list[str]) -> int | None:
+    """事件段内引擎事件表块的起始行号（R14/MC-02 块位规则）。
+
+    渲染器契约：`## 3a. 事件时间线` 标题后**首个**逐字表头块即引擎表；其后
+    的分类摘要与 `**[分析]**`（渲染器逐字输出）属于人工分析区——该区内即使
+    出现复制表头 + 自洽尾注/行指纹，也不构成引擎表，不获结构豁免
+    （Codex `r14-self-fingerprint-attack`：自由分析区自算指纹仍应逐行查证据）。
+    分析区之前找不到逐字表头块 → None（无豁免，fail-closed）。
+    """
+    analysis_start = next(
+        (idx for idx, ln in enumerate(lines) if ln.strip() == "**[分析]**"), None)
+    for idx, ln in enumerate(lines):
+        if tuple(_table_cells(ln.strip())) != _EVENT_TIMELINE_HEADER:
+            continue
+        if analysis_start is not None and idx > analysis_start:
+            continue  # 人工分析区内的复制表头不是引擎表
+        return idx
+    return None
 
 
 def fact_analysis_pair_findings(md: str) -> list[dict]:
@@ -976,7 +1780,7 @@ def law6a_scenario_findings(text: str) -> list[dict]:
 
     v0.3.0 全量重审 F-U7-5：LAW 6a 的实质要件此前在规则引擎中**零实现**——
     唯一机器机制只是全文级「不构成投资建议」存在性检查（warning、file scope），
-    既不校验概率权重也不校验假设前提。而 CLAUDE.md 明文规定：
+    既不校验概率权重也不校验假设前提。而 report-conventions.md §2.1 明文规定：
     「多情景估值参考价须假设前提 + 概率权重 +『仅供参考，不构成投资建议』」
     「**不允许不标注假设前提的单一目标价数字**」。
 
@@ -1023,14 +1827,38 @@ def _check_law6a_scenarios(text: str) -> LayerResult:
     return layer
 
 
-def _check_conclusion_evidence(text: str) -> LayerResult:
+def _check_conclusion_evidence(
+    text: str, report_type: str = "", *, fact_ids: frozenset[str] | None = None,
+) -> LayerResult:
     """R-A2 结论段证据等级 + R-A6 [事实]→[分析] 对偶。
 
     二者是 error 级实质缺陷（R-A6 与 lint structure-analysis-without-fact
     同规则），故保留 error→fail 映射。
+    C1-c：stock 报告若连结论/主判断段都定位不到，说明检查无扫描对象（如注入
+    前快照）——追加 warning，不得静默 PASS（「找不到适用对象不能 PASS」；
+    注入前快照属预期出现本提示）。
+    R2 复审（2026-10-04）：原判据还要求「且无 [事实: F…] 引用」才告警——
+    其他位置的 F 编号不能证明结论段已被扫描（反例：标题改为未识别的
+    「研究摘要」但保留 [事实: F1]，检查层仍 pass(0)）。现只看标题族是否命中。
+    R2 二轮：`fact_ids`（同代侧车事实编号全集）透传给逐行证据判定——
+    不存在的事实编号按 <C 处理。
+    R14（2026-10-05）：同一层内追加事件时间线段扫描（C1/A04 第三批验收：
+    「事件分析R13相关无证据断言被检查」）——事件分析段与结论段同走
+    `_scan_segment_assertions`（按层级全子段 + 表格行断言检查）。
     """
     layer = LayerResult(layer="conclusion-evidence", status="pass")
-    findings = conclusion_evidence_findings(text) + fact_analysis_pair_findings(text)
+    findings = (conclusion_evidence_findings(text, fact_ids=fact_ids)
+                + event_analysis_evidence_findings(text, fact_ids=fact_ids)
+                + fact_analysis_pair_findings(text))
+    if report_type == "stock" and not _CONCLUSION_HEAD_RE.search(text):
+        findings.append({
+            "id": "wording-conclusion-section-missing",
+            "severity": "warning",
+            "line": 0,
+            "message": ("未定位到结论/主判断段——R-A2 检查无扫描对象"
+                        "（其他位置的 [事实: F…] 引用不构成扫描对象），不得视为通过"
+                        "（注入前快照预期出现本提示）"),
+        })
     layer.details = findings
     layer.findings_count = len(findings)
     if any(d["severity"] == "error" for d in findings):
@@ -1041,6 +1869,32 @@ def _check_conclusion_evidence(text: str) -> LayerResult:
 
 
 # ── 主检查流程 ────────────────────────────────────────────────────────────
+
+
+def _load_analysis_fact_ids(path: Path) -> frozenset[str] | None:
+    """读同代侧车 `.analysis.json` 的事实编号全集（R2 二轮）。
+
+    侧车命名与 `invest.py::_write_analysis_sidecar` 同代约定：
+    `<报告>.final.md` → `<报告>.final.analysis.json`（with_suffix 替换 `.md`）。
+    缺失/损坏/空表 → None（保持既有「无事实表」行为，不阻断）。
+    说明：编号在 analysis 协议里是**段内**作用域，本处取全集用于存在性检查
+    （能拦 F999999；「引用了别的段的编号」属更细粒度问题，另案）。
+    """
+    sidecar = path.with_suffix(".analysis.json")
+    try:
+        if not sidecar.exists():
+            return None
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return None
+        ids = {
+            str(f.get("id"))
+            for section in payload if isinstance(section, dict)
+            for f in (section.get("facts") or []) if isinstance(f, dict) and f.get("id")
+        }
+        return frozenset(ids) if ids else None
+    except Exception:
+        return None
 
 
 _INVEST_LIB_CACHE = None  # importlib 加载的 _invest_lib 包（惰性）
@@ -1293,7 +2147,9 @@ def qc_file(
     # `run_report_qc` 对**任意**文件跑这三项，故 A3 移植时把它们一并门控是**净移除**
     # 了 journal/pulse/gap_scan/unknown 经 `invest.py qc-report` 的结论段门禁。
     # 拆分依据：源代码注释只论证了 R-A1（长句密度噪音），未论证 R-A2/R-A6。
-    layers.append(_check_conclusion_evidence(text))
+    # R2 二轮：同代侧车存在时，[事实: F…] 引用须引用真实编号（F999999 非证据）。
+    layers.append(_check_conclusion_evidence(
+        text, report_type, fact_ids=_load_analysis_fact_ids(path)))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
     elif report_type == "stock":
@@ -1379,7 +2235,7 @@ def format_qc_result(result: QCResult, *, verbose: bool = False) -> str:
                 # severity 词表权威定义见 invest-a-stock lib/lint.py:34 =
                 # error/warning/info。v0.3.0 A5 前本文件产出侧混用 "warn"/"warning"
                 # 两种拼写，而这里只认 "warn" → lint 层（发 "warning"）的全部
-                # warning 级 finding 被渲染成 ℹ️，与 info 无法区分，CLAUDE.md
+                # warning 级 finding 被渲染成 ℹ️，与 info 无法区分，delivery-qc.md
                 # 要求的「逐条复核 sourcing warning」被静默跳过。产出侧已统一，
                 # 此处兼容两种拼写以防未来漂移再次静默降级为 info 外观。
                 icon = "❌" if sev == "error" else ("⚠️" if sev in ("warning", "warn") else "ℹ️")
@@ -1418,7 +2274,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("target", nargs="*", help="报告文件路径（可多个）")
     parser.add_argument("--latest", action="store_true", help="检查 reports/ 下最新 .md")
     parser.add_argument("--dir", default="", help="批量检查目录下所有 .md")
-    # 默认 claude：CLAUDE.md 第 0 层「机器准出（必跑）」就是本 CLI 不带 --profile
+    # 默认 claude：delivery-qc.md §2 第 0 层「机器准出（必跑）」就是本 CLI 不带 --profile
     # 的形式，故**默认值即合规门禁**。历史默认 precommit 对齐旧 check_report.sh
     # 的阻断项，会跳过全部 law6-* / known-violation*（14 条 error 级），使 v0.3.0
     # 注入报告首屏的模型撰写正文失去机器拦截。库函数默认值不动（保持对下游
@@ -1462,8 +2318,37 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2))
         worst = max((r.overall for r in results), default="PASS",
                     key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0))
+        _trace_qc(results)
         return {"PASS": 0, "WARN": 1, "FAIL": 2}.get(worst, 0)
+    _trace_qc(results)
     return _print_summary(results, verbose=args.verbose)
+
+
+def _trace_qc(results: list[QCResult]) -> None:
+    """可选 run trace 钩子（仅 `INVEST_TRACE_FILE` 设置时生效；失败一律吞掉）。
+
+    第 0 层机器准出是**独立进程**（本文件自带 CLI），`invest.py` 侧的计时覆盖不到
+    它；宿主按标准链调用时可借此把最终 QC 的耗时与结论并入同一条 time line。
+    未设置环境变量时行为与本函数不存在完全一致。
+    """
+    path = os.environ.get("INVEST_TRACE_FILE")
+    if not path or not results:
+        return
+    try:
+        row = {
+            "run_id": os.environ.get("INVEST_RUN_ID") or "",
+            "stage": "report_qc",
+            "event": "end",
+            "wall_time": datetime.now().astimezone().isoformat(),
+            "monotonic_ns": time.monotonic_ns(),
+            "targets": [Path(r.report_path).name for r in results],
+            "overall": max((r.overall for r in results),
+                           key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0)),
+        }
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        return
 
 
 if __name__ == "__main__":
