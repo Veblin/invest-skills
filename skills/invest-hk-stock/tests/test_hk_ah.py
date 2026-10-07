@@ -134,13 +134,15 @@ def test_fx_uses_converted_price_when_mid_missing(monkeypatch):
 
 def test_fx_falls_back_to_fred_cross_with_lag_note(monkeypatch):
     """中行牌价不可得 → FRED 交叉（CNY/HKD = DEXCHUS / DEXHKUS），须标滞后。"""
+    date = _days_ago_iso(8)
     monkeypatch.setattr(hk_ah, "_fetch_boc_raw", lambda: None)
     monkeypatch.setattr(hk_ah, "_fetch_fred_cross",
-                        lambda: {"rate": 0.8637, "date": "2026-09-04",
+                        lambda: {"rate": 0.8637, "date": date,
                                  "source": "FRED DEXCHUS/DEXHKUS"})
     fx = hk_ah.fetch_fx_hkd_cny()
     assert abs(fx["rate"] - 0.8637) < 1e-9
-    assert "滞后" in fx["note"]
+    assert fx["date"] == date
+    assert "滞后 8 天" in fx["note"]
 
 
 def test_fx_fred_uses_actual_lag_and_marks_staleness(monkeypatch):
