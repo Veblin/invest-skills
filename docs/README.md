@@ -51,7 +51,7 @@
 
 | 文档 | 内容 |
 |------|------|
-| [architecture.md](architecture.md) | 已完成功能与实现逻辑总览（三层架构、9 skills、多源降级链、渲染管线、版本演进、工程设施） |
+| [architecture.md](architecture.md) | 已完成功能与实现逻辑总览（三层架构、8 个公开 skills、多源降级链、渲染管线、版本演进、工程设施） |
 | [diagram/](diagram/) | 引擎级完整流程图（SVG，维护者视角）；README 正文另给使用者视角的交付链图 |
 
 ## 路线图

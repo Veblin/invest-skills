@@ -44,7 +44,7 @@ uv run python skills/invest-a-stock/scripts/invest.py <子命令> <symbol> [--fl
 | `collect` | 采集多维度数据（`--with-news-pack` 新闻三层架构） |
 | `analyze` | 分析采集结果（输出中间分析 JSON） |
 | `synthesize` | 合成最终研究报告 |
-| `report` | 一键生成分析报告（collect + analyze + synthesize） |
+| `report` | 渲染报告；固定快照链读取封存输入，分析合成由宿主另行完成 |
 | `validate-analysis` | 校验分析 JSON 槽位（`--draft` 同时检查首版 MD 的实际占位） |
 | `evidence` | 生成结构化证据表 |
 

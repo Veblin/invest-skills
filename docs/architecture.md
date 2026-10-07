@@ -1,6 +1,6 @@
 # invest-skills 功能与实现逻辑总览
 
-> 版本 v0.3.0 · 更新日期 2026-09-19
+> 版本 v0.3.1（未发布）· 更新日期 2026-10-08
 > 本文档总结仓库已完成的主要功能及实现逻辑，面向使用者与贡献者。运行时规格以各 SKILL.md / references 为准。
 
 ---
@@ -14,7 +14,7 @@
 | 产品形态 | Claude Code 插件（skills 集合）+ Python 数据引擎 + SQLite 持久化 |
 | 核心价值 | 数小时手工研究压缩到几分钟；**所有数字经 Python 引擎计算，Claude 只引用不加工（P0 铁律）** |
 | 报告标准 | 学术级引用（References 表 + 追溯路径）、证据四维标注、多情景估值参考价 |
-| 多 harness | Claude Code（✅ 主开发）、WorkBuddy（✅ 零终端分发真机验证）、Hermes / Gemini CLI（📦 打包就绪待验证） |
+| 多 harness | Claude Code（✅ 主开发）、WorkBuddy（📦 零终端安装包；本版真机未验证）、Hermes / Gemini CLI（📦 打包就绪待验证） |
 
 ## 2. 总体架构
 
@@ -23,7 +23,7 @@
 ```
 ┌─ Skill 层（编排）───────────────────────────────────────────┐
 │ 8 个 skills，每个 = SKILL.md（LAWs 规则 + SOP + CLI 路由表）  │
-│  触发词路由 → 对话简报 / Markdown 备忘录 / concise 三层输出   │
+│  触发词路由 → 对话简报 / 完整 MD 与 HTML；concise 按需   │
 └──────────────┬──────────────────────────────────────────────┘
                │ 调用 CLI（uv run python .../invest.py）
 ┌─ 引擎层（invest-a-stock scripts/lib = 基础设施包）───────────┐
@@ -39,9 +39,11 @@
 **主数据链路**（invest-a-stock）：
 
 ```
-diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/parallel → SourceResult 归一
-  → RRF 融合 → rerank 可信度评分 → 宏观/事件/新闻包/manifest 挂载 → SQLite 落库）
-→ report（render_report_v3 按 --mode 组装九模块 → lint 合规扫描 → reports/ 写入）
+diagnose → plan → collect --report-ready（采集并封存报告输入 → SQLite 落库）
+→ evidence / 首版 report（同一 collection_id 与 plan；只读封存输入）
+→ 分析合成与原文核验 → validate-analysis / report --preflight
+→ report --mode full --emit html（阅读区 + 审计底稿，同代 MD/HTML/侧车）
+→ 最终 report_qc + 数字/合规/逻辑人工复检
 ```
 
 ## 3. Skill 一览
@@ -187,19 +189,19 @@ diagnose → collect（跨维度并行扇出 → 维度内多源 cascade/paralle
 | v0.2.7~v0.2.9 | 08-18~09-07 | 评审修复轮次、回归基线、交付链与文档收敛 |
 | **v0.3.0** | 09-14~19 | **报告读者面重构**（首屏判断索引 + 三层阅读结构 + 标准交付链固化）· **港股线 v2**（南向资金 / A-H 比价 / 交易日历变体）· **discover-scan v0.1**（多透镜粗筛 + 短清单）· **event-calendar v3**（宏观日程 + 解禁排雷）· **门禁误报治理**（R-E04/R-E03 词义碰撞在 652 篇语料上 20→0）· **模板分位补中位数**（此前个股报告结构性无法通过自家门禁）· 移除 forecast-scan / futures-link |
 
-**当前状态**：v0.3.0 已合并至 `main`（PR #31），定位为对外宣发的阶段性稳定版。本轮另有一批**文档面更新**（README 重写 + 工作流图入库 + v0.3.0 样例），其提交尚待合入 `main`——合入后本节描述才完全成立。
+**当前状态**：v0.3.1 分支已提交合并至 `main` 的 PR，尚未正式发布。该版增加固定快照、财务语义与QC修复，默认完整报告采用阅读区/审计底稿两层；退出判断索引、新闻标题表与事件日历公开入口。用户阅读验收和各运行时实测分别记录，不能据测试通过称整版完成。
 
 ## 8. 工程设施
 
 ### 8.1 版本同步
 
-canonical 源 = `pyproject.toml [project].version`（运行时经 `skills/lib/version.py` 读取）。`scripts/sync_version.py` 同步全部派生文件：6 个 SKILL.md frontmatter version 行 + 4 个 JSON manifest（`*.json.in` 模板 `{{ VERSION }}` 占位生成）+ README 发布徽章。`check` 仅在发布/CI 校验。
+canonical 源 = `pyproject.toml [project].version`（运行时经 `skills/lib/version.py` 读取）。`scripts/sync_version.py` 同步全部派生文件：纳入同步清单的 SKILL.md frontmatter version 行 + JSON manifest（`*.json.in` 模板 `{{ VERSION }}` 占位生成）+ README 发布徽章。`check` 仅在发布/CI 校验。
 
 ### 8.2 打包分发
 
-- **WorkBuddy**：`scripts/build_wb_package.sh` → `dist/invest-skills-wb-vX.Y.Z.zip`（自举 bootstrap.sh + 9 skills），Release 零终端安装（真机验证通过）
+- **WorkBuddy**：`scripts/build_wb_package.sh` → `dist/invest-skills-wb-vX.Y.Z.zip`（自举 bootstrap.sh + 8 个公开 skills），支持 Release 包零终端导入；本版真机验证未完成
 - **SkillHub**：`scripts/build_skillhub_packages.py` — 每 skill 一个自包含包（注入 frontmatter、合并 skills/lib 消除跨包依赖）
-- **Claude 插件**：`.claude-plugin/marketplace.json`（4 个 plugin）+ `.agents/` + Gemini 扩展清单
+- **Claude 插件**：`.claude-plugin/marketplace.json`（8 个公开技能插件）+ `.agents/` + Gemini 扩展清单
 
 ### 8.3 CI（4 条流水线）
 
