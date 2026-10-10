@@ -43,7 +43,8 @@ def pe_anomaly(pe_ttm) -> str | None:
 
 
 def _pos(v) -> float | None:
-    """正数值；None / 非数值 / ≤0 → None（亏损期不参与 L1）。"""
+    """正数值；None / 非数值 / ≤0 → None（非正/缺失不参与 L1；A-F03：
+    PE≤0 不确证财务亏损，只按非正处理）。"""
     if v is None:
         return None
     try:

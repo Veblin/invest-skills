@@ -248,11 +248,11 @@ def _safe_collect_valuation(symbol: str) -> dict:
             stale_parts = []
             if pe_stale:
                 stale_parts.append(
-                    f"最新报告期 {latest_td} 无正 PE（亏损期），"
+                    f"最新报告期 {latest_td} 无正 PE（非正或缺失），"
                     f"当前 PE {pe_current} 回退自 {pe_date}")
             if pb_stale:
                 stale_parts.append(
-                    f"最新报告期 {latest_td} 无正 PB（亏损期），"
+                    f"最新报告期 {latest_td} 无正 PB（非正或缺失），"
                     f"当前 PB {pb_current} 回退自 {pb_date}")
             note = "；".join(stale_parts)
 

@@ -265,3 +265,97 @@ class TestDimRsRecentWindow:
         result = _dim_rs("半导体")
         assert result["valid"] is True
         assert result["value"] == "up"
+
+
+# ---------------------------------------------------------------------------
+# A03 R5：一次 build 只取申万两表各一次（6 → 2 请求）
+# ---------------------------------------------------------------------------
+
+class TestBuildSingleTableFetch:
+    """build_industry_climate 单次取表 + 三维复用；失败维度不静默变 0。"""
+
+    @staticmethod
+    def _fake_ak(calls: dict, *, fail_first: bool = False):
+        import pandas as pd
+        from types import SimpleNamespace
+
+        def _first():
+            calls["first"] += 1
+            if fail_first:
+                raise ConnectionError("swsindex blocked")
+            return pd.DataFrame([
+                {"行业代码": "801010.SI", "行业名称": "半导体", "TTM(滚动)市盈率": 30.0},
+                {"行业代码": "801020.SI", "行业名称": "医药", "TTM(滚动)市盈率": 40.0},
+            ])
+
+        def _second():
+            calls["second"] += 1
+            return pd.DataFrame([
+                {"行业代码": "801081.SI", "行业名称": "二级科技", "TTM(滚动)市盈率": 25.0},
+            ])
+
+        return SimpleNamespace(
+            sw_index_first_info=_first,
+            sw_index_second_info=_second,
+            index_hist_sw=lambda **kw: pd.DataFrame({"close": [1.0, 1.1, 1.2]}),
+            stock_zh_index_daily=lambda **kw: pd.DataFrame({"close": [1.0, 1.0, 1.0]}),
+            stock_fund_flow_industry=lambda **kw: pd.DataFrame([{"行业": "半导体", "净额": 1.0}]),
+        )
+
+    def test_build_fetches_each_sw_table_once(self, monkeypatch):
+        """spy：build 一次 = 两表各 1 次；旧路径（三维各自取）为 3+3 次。"""
+        from lib import climate
+
+        calls = {"first": 0, "second": 0}
+        monkeypatch.setattr(climate, "_ak", lambda: self._fake_ak(calls))
+
+        card = climate.build_industry_climate("半导体")
+        assert calls == {"first": 1, "second": 1}, "单次 build 应两表各取一次"
+
+        by_name = {d["name"]: d for d in card["dims"]}
+        # 三维复用同一份表：来源标签（层级/窗口）与取值正常
+        assert by_name["估值分位"]["valid"] is True
+        assert by_name["估值分位"]["source"] == "申万一级行业 TTM PE 分布"
+        assert by_name["盈利趋势"]["valid"] is True
+        assert by_name["相对强度"]["valid"] is True
+        assert by_name["资金流"]["valid"] is True
+
+        # 反例对照：私有函数独立调用（无 tables 入参）仍各自取表 = 6 次
+        calls.update(first=0, second=0)
+        climate._dim_valuation("半导体")
+        climate._dim_earnings("半导体")
+        climate._dim_rs("半导体")
+        assert calls == {"first": 3, "second": 3}
+
+    def test_first_table_failure_marks_mapped_dims_invalid(self, monkeypatch):
+        """单表失败：依赖映射的三维 valid=False，其余维度不静默变 0。"""
+        from lib import climate
+
+        calls = {"first": 0, "second": 0}
+        monkeypatch.setattr(climate, "_ak",
+                            lambda: self._fake_ak(calls, fail_first=True))
+
+        card = climate.build_industry_climate("半导体")
+        by_name = {d["name"]: d for d in card["dims"]}
+        # _sw_tables 既有失败语义：首表抛错即整体降级（不继续请求第二表）
+        assert calls["first"] == 1 and calls["second"] == 0
+        assert by_name["估值分位"]["valid"] is False
+        assert by_name["盈利趋势"]["valid"] is False
+        assert by_name["相对强度"]["valid"] is False
+        assert by_name["估值分位"]["value"] is None  # 不以 0 冒充
+        assert by_name["资金流"]["valid"] is True     # 非申万源维度不受累
+        assert card["state"] == "数据不完整"
+
+    def test_private_dims_accept_shared_tables(self, monkeypatch):
+        """兼容入参：tables 显式传入时零取表；None 时自行取（旧路径）。"""
+        from lib import climate
+
+        calls = {"first": 0, "second": 0}
+        monkeypatch.setattr(climate, "_ak", lambda: self._fake_ak(calls))
+        tables = climate._sw_tables()
+        assert calls == {"first": 1, "second": 1}
+
+        r1 = climate._dim_valuation("半导体", tables)
+        r2 = climate._dim_earnings("半导体", tables)
+        assert r1["valid"] is True and r2["valid"] is True
+        assert calls == {"first": 1, "second": 1}, "传入 tables 不得再取表"

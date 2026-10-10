@@ -132,14 +132,14 @@ def test_journal_crud_lands_in_isolated_db(tmp_path):
         {"symbol": "600176", "direction": "buy", "entry_price": 10.0}
     )
     expected_file = (tmp_path / "test_research.db").resolve()
-    c = store_mod._conn()
+    c = store_mod.open_connection()
     try:
         assert _main_db_file(c) == expected_file
         row = c.execute(
             "SELECT symbol FROM trade_journals WHERE id=?", (jid,)
         ).fetchone()
     finally:
-        store_mod._safe_close(c)
+        store_mod.close_connection(c)
     assert row is not None and row[0] == "600176", (
         "trade_journals 未建在隔离库：conftest 漏调 db.init_db()（S5）或路径错位"
     )

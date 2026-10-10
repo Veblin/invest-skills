@@ -179,9 +179,10 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                 print(f"- PE 交叉：yfinance {y_pe:.2f} vs 腾讯 {q_pe:.2f}"
                       f"（差 {diff:+.1f}%——口径差异，不裁决）")
             else:
-                # review #8b：亏损期负 PE 相除得误导性符号差——只并列不裁决
+                # review #8b：非正 PE 相除得误导性符号差——只并列不裁决
+                # （A-F03：PE≤0 只称非正，不确证财务亏损）
                 print(f"- PE 交叉：yfinance {y_pe:.2f} vs 腾讯 {q_pe:.2f}"
-                      f"（含非正 PE（亏损期），口径差异，不裁决）")
+                      f"（含非正 PE≤0，口径差异，不裁决）")
         elif y.get("pe_ttm") is not None:
             print(f"- PE 交叉：yfinance {y['pe_ttm']:.2f}（腾讯不可得）")
     return 0

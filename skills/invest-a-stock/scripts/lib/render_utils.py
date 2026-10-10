@@ -383,6 +383,8 @@ def _v3_load_valuation_summary(
     if val_data and isinstance(val_data, list):
         from lib.valuation import valuation_summary, valuation_window_label
         val_sorted = sort_kline_asc(val_data)
+        if any(r.get("trade_date") for r in val_sorted):
+            val_sorted = [r for r in val_sorted if r.get("trade_date")]
         pe_seq = [r.get("pe_ttm") for r in val_sorted]
         pb_seq = [r.get("pb") for r in val_sorted]
         ps_seq = [r.get("ps_ttm") or r.get("ps") for r in val_sorted]
@@ -398,6 +400,9 @@ def _v3_load_valuation_summary(
         )
         summary = valuation_summary(
             pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv_ratio, window_label=window_label,
+            # A05-3：亏损/缺失占比按**有效日期窗口**（HTML 分位带同窗口，
+            # 有日期时忽略无日期行；全无日期的旧输入保留样本兼容）
+            pe_loss_window=[r.get("pe_ttm") for r in val_sorted],
         )
     if val_cache is not None:
         val_cache["val_summary"] = summary

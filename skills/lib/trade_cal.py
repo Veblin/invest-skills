@@ -10,7 +10,8 @@ Tushare trade_cal 优先；无 token/不可用/失败 → 自然日去周末估�
 stock _orchestrate.py 的 PCR 窗口保持内联（复用既有 tc、无兜底语义，与
 本模块估算语义不同，收敛有行为风险——见 review 第三轮 #12 说明）。
 
-TushareClient / env 惰性导入（经各 skill _invest_path shim 可达）。
+TushareClient / env 为共享层 canonical（A02 owner 迁移后位于 skills/lib，
+本模块直接按顶层名导入，不再经 stock lib shim 绕行）。
 """
 
 from __future__ import annotations
@@ -25,11 +26,13 @@ logger = logging.getLogger(__name__)
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 # import 探测模块级一次完成（review 第三轮 #6：不得在裸 except Exception 内
-# 吞 import 失败——引导失败应显式走估算路径而非伪装成数据降级）
+# 吞 import 失败——引导失败应显式走估算路径而非伪装成数据降级）。
+# A02：env/tushare_client 为共享 canonical（顶层名）——skills/lib 内不反向
+# import stock 私有 lib.*。
 try:
-    from lib import env
-    from lib.tushare_client import TushareClient
-except ImportError:  # skills/lib 裸环境（无 invest-a-stock 挂载）
+    import env
+    from tushare_client import TushareClient
+except ImportError:  # skills/lib 裸环境（共享模块不可解析）
     env = None  # type: ignore[assignment]
     TushareClient = None  # type: ignore[assignment]
 

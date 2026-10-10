@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 class TestFinancialsHelpers:
     def test_normalize_end_date_formats(self):
@@ -62,6 +64,76 @@ class TestFinancialsHelpers:
             {"end_date": "2023-12-31", "revenue": 120.0},
         ]
         assert _yoy_from_fina_rows(rows, "revenue") == 20.0
+
+
+class TestYoySharedBase:
+    """A05-2：同比共享计算基础（financials.yoy_from_fina_rows）反例。
+
+    离线对照（A基础-财务纯函数反例.py yoy 组）：
+    - 无效值（NaN/±Inf/非数字）→ None（旧 store 路径曾透出 NaN/Inf）；
+    - 同期行回扫策略保留为参数（store=True / collector=False）；
+    - ISO 与 compact 报告期等价。
+    """
+
+    def test_invalid_current_values_return_none(self):
+        from lib.financials import yoy_from_fina_rows
+
+        for bad in (float("nan"), float("inf"), float("-inf"), "n/a"):
+            rows = [{"end_date": "20250630", "revenue": 100.0},
+                    {"end_date": "20260630", "revenue": bad}]
+            assert yoy_from_fina_rows(rows, "revenue") is None, bad
+
+    def test_invalid_prior_values_return_none(self):
+        from lib.financials import yoy_from_fina_rows
+
+        for bad in (float("nan"), "n/a"):
+            rows = [{"end_date": "20250630", "revenue": bad},
+                    {"end_date": "20260630", "revenue": 110.0}]
+            assert yoy_from_fina_rows(rows, "revenue") is None, bad
+
+    def test_rescan_policy_only_differs_on_invalid_prior(self):
+        """同期重复行：store 回扫取可解析值；collector 首条命中即停。"""
+        from lib.financials import yoy_from_fina_rows
+
+        rows = [
+            {"end_date": "20250630", "revenue": 90.0},          # 逆序遍历时先命中
+            {"end_date": "20250630", "revenue": float("nan")},  # 坏值在后（存储序末）
+            {"end_date": "20260630", "revenue": 110.0},
+        ]
+        # 逆序遍历（reversed(sorted_rows[:-1])）= [nan 行, 90 行]
+        assert yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=True) == round(
+            (110.0 - 90.0) / 90.0 * 100, 2)
+        assert yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=False) is None
+
+    def test_iso_and_compact_periods_equivalent(self):
+        from lib.financials import yoy_from_fina_rows
+
+        compact = [{"end_date": "20250630", "revenue": 100.0},
+                   {"end_date": "20260630", "revenue": 130.0}]
+        iso = [{"end_date": "2025-06-30", "revenue": 100.0},
+               {"end_date": "2026-06-30", "revenue": 130.0}]
+        assert yoy_from_fina_rows(compact, "revenue") == 30.0
+        assert yoy_from_fina_rows(iso, "revenue") == 30.0
+
+    def test_missing_prior_year_returns_none(self):
+        from lib.financials import yoy_from_fina_rows
+
+        rows = [{"end_date": "20230630", "revenue": 80.0},
+                {"end_date": "20260630", "revenue": 110.0}]
+        assert yoy_from_fina_rows(rows, "revenue") is None
+
+    def test_store_and_collector_delegate_to_shared(self):
+        """两处调用方 == 共享实现（各自 flag）；替换回退即红。"""
+        from lib.collector import _revenue_yoy_from_fina_rows
+        from lib.financials import yoy_from_fina_rows
+        from lib.store import _yoy_from_fina_rows
+
+        rows = [{"end_date": "20250630", "revenue": 100.0},
+                {"end_date": "20260630", "revenue": 110.0}]
+        assert _yoy_from_fina_rows(rows, "revenue") == yoy_from_fina_rows(
+            rows, "revenue", rescan_invalid_prior=True)
+        assert _revenue_yoy_from_fina_rows(rows) == yoy_from_fina_rows(
+            rows, "revenue", rescan_invalid_prior=False)
 
     def test_flow_amount_yuan_preserves_zero(self):
         from lib.collector import _flow_amount_yuan
@@ -243,3 +315,133 @@ class TestScanFinancialRisksCoalesce:
         ded = next(s for s in signals if s["id"] == "deducted_profit_divergence")
         assert not ded["triggered"]
         assert "扣非或净利润字段不足" in ded["detail"]
+
+
+class TestLatestByEndDateAF01:
+    """A-F01：财务最新期选取必须先归一日期（ISO/compact 混排错期反例）。
+
+    负责人定点探针：20250331=100、2025-06-30=200、20260331=110、2026-06-30=260
+    → 旧实现（原始字符串排序）输 10%，正确 30%。
+    """
+
+    MIXED = [
+        {"end_date": "20250331", "revenue": 100.0, "roe": 5.0},
+        {"end_date": "2025-06-30", "revenue": 200.0, "roe": 6.0},
+        {"end_date": "20260331", "revenue": 110.0, "roe": 5.5},
+        {"end_date": "2026-06-30", "revenue": 260.0, "roe": 7.0},
+    ]
+
+    def test_yoy_uses_normalized_latest_mixed_formats(self):
+        """正例：混排最新期 = 2026-06-30 → 260/200-1 = 30%。"""
+        from lib.financials import yoy_from_fina_rows
+
+        assert yoy_from_fina_rows(self.MIXED, "revenue") == 30.0
+
+    def test_yoy_compact_control_unchanged(self):
+        """对照：全 compact 同数据仍 30%（无回归）。"""
+        from lib.financials import yoy_from_fina_rows
+
+        compact = [{"end_date": "20250331", "revenue": 100.0},
+                   {"end_date": "20250630", "revenue": 200.0},
+                   {"end_date": "20260331", "revenue": 110.0},
+                   {"end_date": "20260630", "revenue": 260.0}]
+        assert yoy_from_fina_rows(compact, "revenue") == 30.0
+
+    def test_unparseable_date_never_becomes_latest(self):
+        """反例：不可解析日期行不得压过有效日期充当最新期。"""
+        from lib.financials import latest_by_end_date, yoy_from_fina_rows
+
+        rows = [
+            {"end_date": "2025-06-30", "revenue": 200.0},
+            {"end_date": "2026-06-30", "revenue": 260.0},
+            {"end_date": "Q2-2026", "revenue": 999.0},
+        ]
+        assert latest_by_end_date(rows)["revenue"] == 260.0
+        assert yoy_from_fina_rows(rows, "revenue") == 30.0
+        assert latest_by_end_date([{"end_date": "Q2-2026"}]) is None  # 全不可解析 → None
+
+    def test_latest_by_end_date_tie_takes_last_input(self):
+        """同报告期并列（修订/重复行）取输入序后者；修订取舍归 dedupe_by_end_date。"""
+        from lib.financials import latest_by_end_date
+
+        rows = [{"end_date": "2026-06-30", "revenue": 250.0},
+                {"end_date": "20260630", "revenue": 260.0}]
+        assert latest_by_end_date(rows)["revenue"] == 260.0
+
+    def test_sort_by_end_date_ascending_puts_unparseable_first(self):
+        """升序输出：归一升序；不可解析键 "" 恒最前（rows[-1] 必为有效最新期）。"""
+        from lib.financials import sort_by_end_date
+
+        rows = [{"end_date": "2026-06-30"}, {"end_date": "bad"},
+                {"end_date": "20250331"}, {"end_date": "2025-06-30"}]
+        assert [str(r["end_date"]) for r in sort_by_end_date(rows)] == [
+            "bad", "20250331", "2025-06-30", "2026-06-30"]
+
+    def test_rescan_policy_unchanged_after_normalization(self):
+        """同期重复回扫政策不变（store=True 回扫 / collector=False 首条命中即停）。"""
+        from lib.financials import yoy_from_fina_rows
+
+        rows = [
+            {"end_date": "20250630", "revenue": 90.0},
+            {"end_date": "20250630", "revenue": float("nan")},
+            {"end_date": "20260630", "revenue": 110.0},
+        ]
+        assert yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=True) == round(
+            (110.0 - 90.0) / 90.0 * 100, 2)
+        assert yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=False) is None
+
+    def test_prior_year_scan_order_stable_by_input(self):
+        """混排同期重复：逆序扫描按输入序（后者先试）——扫描顺序确定且可复现。"""
+        from lib.financials import yoy_from_fina_rows
+
+        rows = [
+            {"end_date": "2025-06-30", "revenue": 200.0},  # 先输入
+            {"end_date": "20250630", "revenue": float("nan")},  # 后输入=先试
+            {"end_date": "2026-06-30", "revenue": 260.0},
+        ]
+        assert yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=False) is None
+        assert yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=True) == 30.0
+
+
+class TestExtractKeySnapshotFinancialLatestAF01:
+    def test_financial_snapshot_uses_normalized_latest(self):
+        from lib.store import extract_key_snapshot
+
+        raw = {"raw_json": {
+            "symbol": "600000",
+            "dimensions": [{"dimension": "financials", "data": [
+                {"end_date": "20250331", "revenue": 100.0, "net_profit": 10.0, "roe": 5.0},
+                {"end_date": "2025-06-30", "revenue": 200.0, "net_profit": 20.0, "roe": 6.0},
+                {"end_date": "20260331", "revenue": 110.0, "net_profit": 11.0, "roe": 5.5},
+                {"end_date": "2026-06-30", "revenue": 260.0, "net_profit": 26.0, "roe": 7.0},
+            ]}],
+        }}
+        snap = extract_key_snapshot(raw)
+        assert snap["financials"]["roe"] == 7.0
+        assert snap["financials"]["revenue_yoy"] == 30.0
+        assert snap["financials"]["net_profit_yoy"] == 30.0
+
+
+
+
+@pytest.mark.parametrize("bad_date", ["20991399", "2099-02-30", "20260229", "00000000"])
+def test_latest_period_ignores_invalid_calendar_date(bad_date):
+    from lib.financials import latest_by_end_date, sort_by_end_date, yoy_from_fina_rows
+    rows = [{"end_date": "20250630", "revenue": 200},
+            {"end_date": "20260630", "revenue": 260},
+            {"end_date": bad_date, "revenue": 9999}]
+    assert latest_by_end_date(rows)["end_date"] == "20260630"
+    assert sort_by_end_date(rows)[-1]["end_date"] == "20260630"
+    assert yoy_from_fina_rows(rows, "revenue") == 30.0
+    assert latest_by_end_date([rows[-1]]) is None
+
+
+def test_revision_selection_ignores_invalid_announcement_dates():
+    from lib.financials import dedupe_by_end_date
+    valid = {"end_date": "20260630", "ann_date": "20260830", "revenue": 260}
+    invalid = {"end_date": "20260630", "ann_date": "20991399", "revenue": 9999}
+    assert dedupe_by_end_date([valid, invalid]) == [valid]
+    assert dedupe_by_end_date([invalid, valid]) == [valid]
+    invalid_periods = [{"end_date": "20991399", "ann_date": "20260830"},
+                       {"end_date": "20991399", "ann_date": "20260831"}]
+    assert dedupe_by_end_date(invalid_periods) == invalid_periods

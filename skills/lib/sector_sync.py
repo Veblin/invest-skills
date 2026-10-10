@@ -104,12 +104,16 @@ _TOMBSTONE_TTL_SECONDS = 1800  # 失败墓碑 TTL（30 分钟）：不可抓代�
 
 @contextlib.contextmanager
 def _direct_session():
-    """akshare 直连会话（东财需直连）。lib.proxy 不可用时退化为裸调用。"""
+    """akshare 直连会话（东财需直连）。共享 proxy 不可用时退化为裸调用。
+
+    A02 后共享 canonical 即顶层 ``proxy``；``lib.proxy``（stock shim）仅作
+    历史布局兜底，正常路径不再反向 import。
+    """
     try:
-        from lib.proxy import akshare_direct_session  # type: ignore
+        from proxy import akshare_direct_session  # type: ignore
     except ImportError:
         try:
-            from proxy import akshare_direct_session  # type: ignore
+            from lib.proxy import akshare_direct_session  # type: ignore
         except ImportError:
             yield
             return
@@ -150,29 +154,29 @@ def _norm_date(raw: Any) -> str:
 
 
 def _default_cache() -> Any:
-    """DataCache 默认单例（lib.cache → 裸 cache 降级，与既有懒导入模式一致）。"""
+    """DataCache 默认单例（共享 cache 优先；lib.cache 仅历史布局兜底）。"""
     try:
-        from lib.cache import default_cache  # type: ignore
-    except ImportError:
         from cache import default_cache  # type: ignore
+    except ImportError:
+        from lib.cache import default_cache  # type: ignore
     return default_cache()
 
 
 def _shanghai_today() -> str:
     """上海时区今日（YYYYMMDD）——采集管线统一口径；date.today() 是本机时区。"""
     try:
-        from lib.dates import shanghai_today  # type: ignore
-    except ImportError:
         from dates import shanghai_today  # type: ignore
+    except ImportError:
+        from lib.dates import shanghai_today  # type: ignore
     return shanghai_today()
 
 
 def _shanghai_days_ago(n: int) -> str:
     """上海时区 N 天前（YYYYMMDD）。"""
     try:
-        from lib.dates import shanghai_days_ago  # type: ignore
-    except ImportError:
         from dates import shanghai_days_ago  # type: ignore
+    except ImportError:
+        from lib.dates import shanghai_days_ago  # type: ignore
     return shanghai_days_ago(n)
 
 
@@ -557,9 +561,9 @@ def _paired(a: list[float | None], b: list[float | None]) -> tuple[list[float], 
 def sector_beta_stats(stock_returns: list[float], sector_returns: list[float]) -> dict:
     """60 日窗口 OLS β + R²（复用 skills/lib/stats.py:109 calc_beta，只读）。"""
     try:
-        from lib.stats import calc_beta  # type: ignore
+        from stats import calc_beta  # type: ignore
     except ImportError:
-        from stats import calc_beta  # type: ignore  # skills/lib 裸路径
+        from lib.stats import calc_beta  # type: ignore  # stock shim 兜底
     res = calc_beta(stock_returns, sector_returns)
     beta = res.get("beta")
     if beta is None:  # D1：β 可合法为 0.0，必须显式 None 判定

@@ -349,7 +349,7 @@ def render_valuation_section(dims: dict[str, dict], collection: dict = None, *,
             lines.append("> ⚠️ **历史分位不可得，仅展示当前 PE/PB。** 需配置 Tushare Token 获取历史估值序列。")
 
     lines.append("")
-    lines.append("🔍 **待独立验证:** PE 亏损期为 null 已剔除；行业相对估值 v0.1.2 未覆盖。估值分位不构成买卖判断。")
+    lines.append("🔍 **待独立验证:** PE 非正与为 null（不可得）样本已从分位序列剔除（PE≤0 不确证财务亏损）；行业相对估值 v0.1.2 未覆盖。估值分位不构成买卖判断。")
     return "\n".join(lines)
 
 

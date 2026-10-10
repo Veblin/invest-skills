@@ -549,23 +549,24 @@ def test_within_limit_exits_zero(tmp_path):
 
 
 def test_dry_run_all_packages_within_200(tmp_path):
-    """六包全部 ≤200（闭包裁剪后各包文件数显著低于旧版全量复制）。"""
+    """全部包 ≤200（**分发硬限制**，与历史预算断言分开）。"""
     for skill in b.PUBLISH_SKILLS:
         total = b.build_one(skill, b.project_version(), tmp_path, dry_run=True)
         assert 0 < total <= b.MAX_FILES, f"{skill}: {total} 超限"
-    # etf 闭包裁剪: 远低于 v0.2.7 的 129。
-    # 2026-09-03 实测 102（B3-R 后 render 共享面（html_charts/render_html）
-    # 随闭包并入 etf 包，文件数较 v0.2.7 时代断言 <70 时上升）——上限放宽
-    # 至 120 且仍显著低于旧版全量复制 129。
-    # 2026-09-14 实测 121（P0-5 引入 lib/research_profile.py，被 _concise.py 与
-    # render_html.py 引用，随同一共享面并入 etf 闭包）——上限放宽至 125。
-    # 2026-09-30 实测 125（lib/report_snapshot.py 被共享的 render_dcf.py 引用：
-    # 封存快照链的「渲染期不联网」判据 is_sealed 定义在该模块，DCF beta 与
-    # risk_reward 都据此决定是否现场抓基准）——上限放宽至 130。
+    # ETF 包预算（**实现细节预算**，非分发硬限制）：用于拦"闭包异常膨胀"回归，
+    # 数值按当轮实际闭包 + 少量余量维护；>200 的硬门禁由上面的循环与
+    # test_over_max_fails（monkeypatch MAX_FILES=3）继续保证。
+    #
+    # 历史：v0.2.7 时代全量复制 129 → 闭包裁剪后 102（2026-09-03）→ 121
+    # （2026-09-14 共享 render 面并入）→ 125（2026-09-30 report_snapshot 并入）。
+    # 2026-10-08 v0.3.2 B06 实测 **130**（新增 etf_generation.py 与共享
+    # snapshot_core.py/evidence_tags.py；report_qc 同代消费层随 SKILL.md
+    # 「机器层准出」强制入包）——旧断言 <130 属预算未随闭包更新而失效，
+    # 按实测更新为 <145（不放宽到接近硬限制，保留对异常增长的拦截能力）。
     # 注意闭包扫描是 AST 全程遍历（build_skillhub_packages.py:279-286），
     # 函数内 import 同样计入，改动态 import 只会让运行时 ImportError 而非省文件。
     etf_total = b.build_one("invest-a-etf", b.project_version(), tmp_path, dry_run=True)
-    assert etf_total < 130
+    assert etf_total < 145, f"invest-a-etf 闭包 {etf_total} 超出预算 145（检查是否异常膨胀）"
 
 
 # ---- 主仓库源文件不得被回写 ----

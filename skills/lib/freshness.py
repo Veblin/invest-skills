@@ -73,7 +73,7 @@ def trading_day_lag(as_of: str, session: str) -> tuple[int | None, bool]:
         if native <= 0:
             return native, False
         try:
-            from lib.trade_cal import fetch_trade_cal
+            from trade_cal import fetch_trade_cal
 
             dates, estimated = fetch_trade_cal(
                 (d0 + timedelta(days=1)).strftime("%Y%m%d"), d1.strftime("%Y%m%d")

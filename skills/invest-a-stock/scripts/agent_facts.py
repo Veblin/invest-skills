@@ -125,12 +125,17 @@ def diff(a, b):
 
 
 def percentile_rank(series, value):
-    """``value`` 在 ``series`` 中的分位（%）= 小于等于它的样本占比。"""
+    """``value`` 在 ``series`` 中的分位（%）＝ 小于等于它的样本占比。
+
+    A05-3：计算收敛到共享核心 ``lib.stats.le_share_pct``；本函数的预处理
+    （num()：bool→None、NaN→None、非数值→None）保留在此（与 safe_float
+    口径不同，属显式保留的定义差异）。
+    """
+    from lib.stats import le_share_pct
+
     xs = [x for x in (num(v) for v in series) if x is not None]
     v = num(value)
-    if not xs or v is None:
-        return None
-    return sum(1 for x in xs if x <= v) / len(xs) * 100.0
+    return le_share_pct(xs, v)
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +295,8 @@ def build_financial(coll: dict) -> Facts:
             # insight_model B3 的同日口径）。旧实现取全序列（含负值）：既让负 PE
             # 参与中位数，又让 latest≤0 时恒得 ≈0% 分位——Agent B 会读成「历史偏低
             # 位置（便宜）」，正是 B3 要拦的失真。「非正样本数」同时是 prompt 要求的
-            # 「PE 分位失真检测（亏损期占比）」的数据载体（否则 Agent 只能违反 P0 自算）。
+            # 「PE 分位失真检测（非正 PE / 缺失占比）」的数据载体（A-F03：PE≤0
+            # 不确证财务亏损，只作非正样本计数；否则 Agent 只能违反 P0 自算）。
             nonnull = [num(r.get(key)) for r in val if num(r.get(key)) is not None]
             series = [x for x in nonnull if x > 0]
             nonpos = len(nonnull) - len(series)

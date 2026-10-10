@@ -84,7 +84,7 @@ def _patch_cal_natural_days(monkeypatch) -> None:
 
 def _seed_snapshot(date: str, pct, basis_date, env_label: dict | None = None) -> None:
     """向隔离库直插一行快照（绕过采集，构造读取侧输入）。"""
-    c = store_mod._conn()
+    c = store_mod.open_connection()
     try:
         c.execute(
             "INSERT INTO market_snapshots "
@@ -95,7 +95,7 @@ def _seed_snapshot(date: str, pct, basis_date, env_label: dict | None = None) ->
         )
         c.commit()
     finally:
-        store_mod._safe_close(c)
+        store_mod.close_connection(c)
 
 
 @pytest.fixture
@@ -190,14 +190,14 @@ class TestPersistPaths:
         snap = {"date": SESSION, "ad_ratio": 1.0,
                 "futures_basis_pct": -0.5072, "futures_basis_date": SESSION}
         mm._auto_persist(dict(snap))
-        c = store_mod._conn()
+        c = store_mod.open_connection()
         try:
             row = c.execute(
                 "SELECT futures_basis_pct, futures_basis_date FROM market_snapshots WHERE date=?",
                 (SESSION,),
             ).fetchone()
         finally:
-            store_mod._safe_close(c)
+            store_mod.close_connection(c)
         assert row[0] == pytest.approx(-0.5072) and row[1] == SESSION
 
     def test_same_day_stale_recollection_keeps_pair_and_read_side_flags(self, frozen_session, monkeypatch):
@@ -213,14 +213,14 @@ class TestPersistPaths:
         assert "futures_basis_pct" not in snap_b  # 实时路径拒写
         mm._auto_persist(snap_b)
 
-        c = store_mod._conn()
+        c = store_mod.open_connection()
         try:
             row = c.execute(
                 "SELECT futures_basis_pct, futures_basis_date FROM market_snapshots WHERE date=?",
                 (SESSION,),
             ).fetchone()
         finally:
-            store_mod._safe_close(c)
+            store_mod.close_connection(c)
         assert row[0] == pytest.approx(-0.5072)   # COALESCE 保留成对旧值
         assert row[1] == "20260701"               # 日期未被刷新成当日
         # 读取侧（真实入口，非手动调 helper）：旧值不得作为当期读数返回/展示
@@ -233,11 +233,11 @@ class TestPersistPaths:
 
     def test_schema_and_columns_include_basis_date(self):
         assert "futures_basis_date" in mm._MARKET_SNAPSHOT_COLUMNS
-        c = store_mod._conn()
+        c = store_mod.open_connection()
         try:
             cols = {r[1] for r in c.execute("PRAGMA table_info(market_snapshots)")}
         finally:
-            store_mod._safe_close(c)
+            store_mod.close_connection(c)
         assert "futures_basis_date" in cols
 
 
@@ -375,7 +375,7 @@ class TestLegacyMigration:
     def _make_legacy_db(self, tmp_path, monkeypatch):
         legacy = tmp_path / "legacy_research.db"
         monkeypatch.setattr(store_mod, "_db_override", legacy)
-        c = store_mod.connect_db(legacy)
+        c = store_mod.open_connection()  # A02：公开连接（路径经 get_db_path=_db_override）
         try:
             c.executescript(
                 "CREATE TABLE market_snapshots ("
@@ -390,7 +390,7 @@ class TestLegacyMigration:
             )
             c.commit()
         finally:
-            store_mod.safe_close(c)
+            store_mod.close_connection(c)
         return legacy
 
     def test_migration_idempotent_and_legacy_row_gated(self, tmp_path, monkeypatch, frozen_session):
@@ -399,7 +399,7 @@ class TestLegacyMigration:
         store_mod.init_db()  # ① 迁移（补列）
         store_mod.init_db()  # ② 重复迁移：幂等不抛
 
-        c = store_mod.connect_db(legacy)
+        c = store_mod.open_connection()
         try:
             cols = {r[1] for r in c.execute("PRAGMA table_info(market_snapshots)")}
             assert "futures_basis_date" in cols
@@ -407,7 +407,7 @@ class TestLegacyMigration:
                 "SELECT date, futures_basis_pct, futures_basis_date FROM market_snapshots"
             ).fetchall()
         finally:
-            store_mod.safe_close(c)
+            store_mod.close_connection(c)
         assert len(rows) == 1  # 旧记录保留
         assert rows[0][0] == "20260810"
         assert rows[0][1] == pytest.approx(-0.5072)  # 旧值未被迁移破坏

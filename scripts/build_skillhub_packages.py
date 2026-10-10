@@ -159,15 +159,17 @@ DYNAMIC_MODULE_SEEDS: dict[str, list[tuple[str, str]]] = {
         ("invest-hk-stock", "hk_quote"),
         ("invest-hk-stock", "hk_financials"),
         ("invest-hk-stock", "hk_calendar"),
-        ("invest-a-journal", "market_microstructure"),
+        # A03（v0.3.2）：market_microstructure canonical 迁共享层（owner=skills/lib）；
+        # "shared" 为模块宇宙首源（优先级 共享 > cross > self），不再从 journal 取名
+        ("shared", "market_microstructure"),
     ],
 }
 
 # SKILL.md 正文中的跨 skill 路径改写（包内副本）
 CROSS_PATH_REWRITES: dict[str, list[tuple[str, str]]] = {
     "invest-a-pulse": [
-        ("skills/invest-a-journal/scripts/lib/market_microstructure.py",
-         "lib/market_microstructure.py"),
+        # A03：市场微观结构 canonical owner 迁共享层
+        ("skills/lib/market_microstructure.py", "lib/market_microstructure.py"),
     ],
     "invest-a-journal": [
         ("skills/invest-a-journal/scripts/lib", "scripts/lib"),
@@ -509,8 +511,9 @@ class _Closure:
         # Dynamic loaders are intentionally explicit: a string/f-string module name cannot
         # be reliably discovered from the import AST. Resolve from the named source rather
         # than the general universe so a same-named local shim cannot replace canonical HK.
+        # source_key == "shared" 指向共享层（skills/lib）单源，供 A03 起的公共 provider。
         for source_key, target in DYNAMIC_MODULE_SEEDS.get(self.skill_name, []):
-            source = f"cross:{source_key}"
+            source = "shared" if source_key == "shared" else f"cross:{source_key}"
             maps = self._by_source.get(source)
             if maps is None:
                 raise SystemExit(f"{self.skill_name}: 动态依赖源不存在: {source_key}")
@@ -774,10 +777,12 @@ from pathlib import Path
 __all__ = [
     "invest_a_scripts_dir",
     "invest_a_etf_lib_dir",
+    "journal_lib_dir",
     "ensure_invest_a_scripts_on_path",
     "ensure_shared_lib_on_path",
     "load_gap_scan_module",
     "load_invest_a_etf_module",
+    "load_journal_module",
 ]
 
 
@@ -793,6 +798,11 @@ def invest_a_etf_lib_dir() -> Path:
 
 def gap_scan_lib_dir() -> Path:
     """包内 lib 目录（gap-scan canonical 模块合并后所在）。"""
+    return Path(__file__).resolve().parent
+
+
+def journal_lib_dir() -> Path:
+    """包内 lib 目录（公共市场服务 canonical 模块合并后所在）。"""
     return Path(__file__).resolve().parent
 
 
@@ -831,13 +841,79 @@ def load_gap_scan_module(module_file: str = "kline_source"):
 _INVEST_A_ETF_MODULE_NAME = "invest_a_etf_etf_data"
 
 
+def _loaded_module_by_path(target):
+    """sys.modules 中 __file__ resolve 等于 target 的已加载模块（任意注册名）。
+
+    与主仓库 skills/lib/invest_path.py 同名助手同语义（A04 R2 同实例合同）：
+    同一 canonical 文件不得出现第二实例（否则 _SPOT_CACHE_LOCK/进程内缓存分叉）。
+    """
+    for mod in list(sys.modules.values()):
+        f = getattr(mod, "__file__", None)
+        if not f:
+            continue
+        try:
+            if Path(f).resolve() == Path(target).resolve():
+                return mod
+        except OSError:
+            continue
+    return None
+
+
 def load_invest_a_etf_module():
     """包内加载 etf_data（import_module("lib.etf_data")，共享同一实例）。"""
+    target = Path(__file__).resolve().parent / "etf_data.py"
+    existing = _loaded_module_by_path(target)
+    if existing is not None:
+        sys.modules.setdefault(_INVEST_A_ETF_MODULE_NAME, existing)
+        sys.modules.setdefault("etf_data", existing)
+        return existing
     mod = sys.modules.get(_INVEST_A_ETF_MODULE_NAME)
     if mod is not None:
+        sys.modules.setdefault("etf_data", mod)
         return mod
     mod = _il.import_module("lib.etf_data")
     sys.modules[_INVEST_A_ETF_MODULE_NAME] = mod
+    sys.modules.setdefault("etf_data", mod)   # 兼容名：包内裸 `import etf_data`
+    return mod
+
+
+_JOURNAL_MODULE_PREFIX = "journal_canonical"
+
+
+def load_journal_module(module_file: str = "market_microstructure"):
+    """包内加载公共市场服务 canonical 模块（import_module("lib.X")，共享同一实例）。
+
+    A03（v0.3.2）：canonical owner 迁共享层，包内单份落 lib 包（相对导入消费方
+    无需路径引导）；与主仓库版同契约——顶层名已导入**同一文件**（``__file__``
+    resolve 相等）→ 复用（monkeypatch 接缝不分叉），否则经包导入取同一实例。
+    journal inline 上下文（cd scripts/lib）未先 import _invest_path 时 ``lib``
+    不可解析 → 先补插 scripts 再试。lib.X 缺失（如 ETF 包未并该闭包）→
+    ImportError，由 data_bridge 降级为 None + warning。
+    """
+    lib = journal_lib_dir()
+    target = (lib / f"{module_file}.py").resolve()
+    existing = sys.modules.get(module_file)
+    if existing is not None:
+        ef = getattr(existing, "__file__", None)
+        if ef:
+            try:
+                if Path(ef).resolve() == target:
+                    return existing
+            except OSError:
+                pass
+    mod_name = f"{_JOURNAL_MODULE_PREFIX}_{module_file}"
+    mod = sys.modules.get(mod_name)
+    if mod is not None:
+        return mod
+    if str(lib) not in sys.path:
+        sys.path.insert(0, str(lib))
+    try:
+        mod = _il.import_module(f"lib.{module_file}")
+    except ImportError:
+        ensure_invest_a_scripts_on_path()  # inline：scripts 入 path 后 lib.X 可解析
+        mod = _il.import_module(f"lib.{module_file}")
+    sys.modules[mod_name] = mod
+    sys.modules.setdefault(module_file, mod)
     return mod
 '''
 
@@ -989,7 +1065,15 @@ def _rewrite_skill_md(text: str, skill_name: str,
 
 
 def _rewrite_pulse_md(text: str, names: set[str]) -> str:
-    """pulse 包专属：inline 采集命令收口到包根（模块单份落 <pkg>/lib/）。"""
+    """pulse 包专属：inline 采集命令收口到包根（模块单份落 <pkg>/lib/）。
+
+    A03 起市场微观结构采集源为共享层 `skills/lib`（仓库布局）→ 包内落 `<pkg>/lib/`，
+    与包根同层，故 cd 一并收口到包根；journal 私有目录字符串保留替换仅为旧文案兜底。
+    """
+    text = text.replace(
+        'cd "${INVEST_SKILLS_ROOT:-.}/skills/lib"',
+        'cd "${INVEST_SKILLS_ROOT:-.}"',
+    )
     text = text.replace(
         'cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib"',
         'cd "${INVEST_SKILLS_ROOT:-.}"',

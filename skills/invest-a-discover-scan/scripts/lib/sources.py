@@ -268,7 +268,12 @@ def market_form_context() -> dict:
     """
     try:
         local = Path(__file__).resolve().with_name("market_microstructure.py")
-        lib = Path(__file__).resolve().parents[3] / "invest-a-journal" / "scripts" / "lib"
+        # A03（v0.3.2）：canonical owner 在共享层 skills/lib；journal 旧路径仅作
+        # 兼容兜底（provider 不依赖 journal 源码）。包内 dynamic seed 仍落本目录。
+        _skills = Path(__file__).resolve().parents[3]
+        _shared = _skills / "lib" / "market_microstructure.py"
+        lib = (_skills / "lib") if _shared.is_file() else (
+            _skills / "invest-a-journal" / "scripts" / "lib")
         name = "discover_market_microstructure"
         mod = sys.modules.get(name)
         if mod is None:

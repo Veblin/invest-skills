@@ -31,6 +31,71 @@ ZONE_HIGH_THRESHOLD = 70.0
 EXTREME_LOW_THRESHOLD = 20.0
 EXTREME_HIGH_THRESHOLD = 80.0
 
+# A05-3（v0.3.2）：PE 分位失真阈值 —— 非正或缺失样本占比 > 30% 时分位仅作位置参考。
+# 判定用**未舍入**比值；显示层各自舍入（MD 4 位小数 / HTML 1 位百分数）。
+PE_LOSS_RATIO_THRESHOLD = 0.30
+
+
+def pe_loss_missing_stats(
+    window_values: list[Any] | tuple[Any, ...],
+    *,
+    min_samples: int = 20,
+) -> dict[str, Any] | None:
+    """窗口内 PE 序列 → 「非正 PE」与「PE 缺失」分列统计（A05-3 canonical，MD/HTML 共用）。
+
+    调用方须传入**同一有效日期窗口**的值序列（先按 ``trade_date`` 真值过滤行；
+    无日期行不得进入分母——修「正文分母含全量 vs 图表先滤日期」的同快照分歧）。
+    逐值经 ``safe_float`` 归一（字符串数值容忍）：
+    - 可解析且 <= 0 → **非正 PE**（``n_loss``；含 0：舍入/零收益/供应商标记均
+      可能产出 ≤0）——**不等于确证财务亏损**（输入只有 PE 值，无利润/EPS 证据；
+      A-F03）；字段名 ``n_loss``/``loss_ratio`` 为兼容保留
+    - 不可解析（None/NaN/±Inf/非数值）→ **PE 不可得**（``n_missing``）——不得称「亏损」
+    - 可解析且 > 0 → 有效正值（``n_valid``）
+    窗口样本 < ``min_samples`` → None（不产出占比，防小样本假比例）。
+
+    返回（比值为未舍入原值；``*_4dp``/``*_pct`` 为显示形态）：
+    ``n_window`` / ``n_valid`` / ``n_loss`` / ``n_missing`` /
+    ``loss_ratio`` / ``missing_ratio`` / ``nonpos_or_missing_ratio`` /
+    ``*_4dp`` / ``*_pct``（1 位小数，四舍五入）/
+    ``elevated``（**未舍入** ``nonpos_or_missing_ratio > PE_LOSS_RATIO_THRESHOLD``）/
+    ``threshold``。
+    """
+    vals = list(window_values)
+    n = len(vals)
+    if n == 0 or n < min_samples:  # 空窗口/低于样本下限 → 不产出占比
+        return None
+    n_valid = n_loss = n_missing = 0
+    for v in vals:
+        f = _safe_float(v)
+        if f is None:
+            n_missing += 1
+        elif f <= 0:
+            n_loss += 1
+        else:
+            n_valid += 1
+    n_nonpos_missing = n_loss + n_missing
+    loss_ratio = n_loss / n
+    missing_ratio = n_missing / n
+    combined = n_nonpos_missing / n
+    return {
+        "n_window": n,
+        "n_valid": n_valid,
+        "n_loss": n_loss,
+        "n_missing": n_missing,
+        "nonpos_or_missing_days": n_nonpos_missing,
+        "loss_ratio": loss_ratio,
+        "missing_ratio": missing_ratio,
+        "nonpos_or_missing_ratio": combined,
+        "loss_ratio_4dp": round(loss_ratio, 4),
+        "missing_ratio_4dp": round(missing_ratio, 4),
+        "nonpos_or_missing_ratio_4dp": round(combined, 4),
+        "loss_ratio_pct": round(loss_ratio * 100, 1),
+        "missing_ratio_pct": round(missing_ratio * 100, 1),
+        "nonpos_or_missing_ratio_pct": round(combined * 100, 1),
+        "elevated": combined > PE_LOSS_RATIO_THRESHOLD,
+        "threshold": PE_LOSS_RATIO_THRESHOLD,
+    }
+
 
 def zone_label(
     pct: float,
@@ -62,6 +127,7 @@ def valuation_summary(
     dv_ratio: float | None = None,
     *,
     window_label: str = "近5年",
+    pe_loss_window: list[Any] | tuple[Any, ...] | None = None,
 ) -> dict[str, Any]:
     """生成估值状态结构化描述。
 
@@ -74,17 +140,27 @@ def valuation_summary(
         ps_seq: 历史 PS 序列，可选
         dv_ratio: 股息率（最近交易日），可选
         window_label: 分位窗口描述，如"近5年"、"上市以来"
+        pe_loss_window: **同一有效日期窗口**的 PE 值序列（含 None/NaN/非正值），
+            用于亏损/缺失占比统计（A05-3 共用定义 `pe_loss_missing_stats`）。
+            缺省 None 时退回 ``pe_ttm_seq``（旧调用面兼容；有行数据的调用方
+            应显式传日期真值窗口，保证 MD/HTML 同窗口）。
 
     Returns:
-        dict 含 pe/pb/ps 分位、zone、median、样本数等
+        dict 含 pe/pb/ps 分位、zone、median、样本数、PE 亏损/缺失分列统计等
     """
-    pe_seq_clean = [v for v in pe_ttm_seq if v is not None and v > 0]
-    pb_seq_clean = [v for v in pb_seq if v is not None and v > 0]
+    # A05-3：序列清洗统一走 safe_float（字符串数值容忍；旧实现对字符串 `v > 0`
+    # 直接 TypeError——反例见 test_pe_loss_missing_consistency.py；float/None 输入
+    # 结果与旧实现逐字一致）
+    pe_seq_clean = [f for v in pe_ttm_seq if (f := _safe_float(v)) is not None and f > 0]
+    pb_seq_clean = [f for v in pb_seq if (f := _safe_float(v)) is not None and f > 0]
 
     if current_pe is None and pe_seq_clean:
         current_pe = pe_seq_clean[-1]
     if current_pb is None and pb_seq_clean:
         current_pb = pb_seq_clean[-1]
+    current_pe = _safe_float(current_pe)
+    current_pb = _safe_float(current_pb)
+    current_ps = _safe_float(current_ps) if current_ps is not None else None
 
     result: dict[str, Any] = {
         "window_label": window_label,
@@ -92,34 +168,46 @@ def valuation_summary(
         "sufficient": len(pe_seq_clean) >= 30,
     }
 
+    # R12c / A05-3：PE 亏损与缺失**分列**统计（canonical pe_loss_missing_stats）。
+    # 窗口 = pe_loss_window（调用方给的有效日期窗口）或 pe_ttm_seq（旧调用面）。
+    # 字段定义（与 html_charts / valuation_calc 同一函数、同一日期窗口）：
+    #   loss_days/loss_ratio        —— 确证 PE≤0（亏损期）日数与占比
+    #   missing_days/missing_ratio  —— PE 不可得（None/NaN/±Inf/非数值）
+    #   nonpos_or_missing_*         —— 分位失真样本合计（标题/文案判定用，未舍入比值）
+    # 旧版 loss_days 把 None/NaN 与 ≤0 合并计入且无缺失分列（A05-3 差异对照表）。
+    pe_window = pe_ttm_seq if pe_loss_window is None else list(pe_loss_window)
+    # 样本下限：本函数自 v0.2.1 起对任意长度窗口均产出计数（旧行为保持，
+    # 供报告文案与标题标注）；渲染侧（HTML 分位带）另有 <20 行不成图的下限。
+    pe_stats = pe_loss_missing_stats(pe_window, min_samples=0) or {}
+
     # PE
     if pe_seq_clean and current_pe is not None:
         pe_pct = percentile_rank(pe_seq_clean, current_pe)
         pe_median = _median(pe_seq_clean)
-        # R12c: 亏损期占比结构化暴露（P0-2 规则：>30% 亏损交易日 → 分位仅作位置参考）
-        # 分母 = 总交易日数（含亏损日）；分子 = 亏损日数（None/**NaN**/<=0——
-        # 全量审查 #3：真实 daily_basic 缺失行 pe_ttm 是 float('nan') 而非 None，
-        # `v is None or v <= 0` 对 NaN 双 false → 漏计（300981 实证 677/1210 行
-        # NaN 全漏，md loss 0.0 vs HTML band 56.0 同快照分歧）——与
-        # html_charts 的 safe_float 计数同口径）
-        pe_total = len(pe_ttm_seq)
-        pe_loss = len([
-            v for v in pe_ttm_seq
-            if v is None or (isinstance(v, float) and v != v) or v <= 0])
         result["pe"] = {
             "current": round(current_pe, 2),
             "pct": round(pe_pct, 2) if pe_pct is not None else None,
             "median": round(pe_median, 2) if pe_median is not None else None,
             "zone": zone_label(pe_pct) if pe_pct is not None else "未知",
             "n_valid": len(pe_seq_clean),
-            "loss_days": pe_loss,
-            "loss_ratio": round(pe_loss / pe_total, 4) if pe_total else 0.0,
+
         }
     else:
         result["pe"] = {"current": None, "pct": None, "median": None,
                         "zone": "未知", "n_valid": 0,
-                        "reason": "PE 数据为空或无正值",
-                        "loss_days": 0, "loss_ratio": 0.0}
+                        "reason": "PE 数据为空或无正值"}
+    # 窗口统计独立于正 PE 可得性：全缺失/全非正窗口也保留真实计数。
+    result["pe"].update({
+        "loss_days": pe_stats.get("n_loss", 0),
+        "loss_ratio": pe_stats.get("loss_ratio_4dp", 0.0),
+        "missing_days": pe_stats.get("n_missing", 0),
+        "missing_ratio": pe_stats.get("missing_ratio_4dp", 0.0),
+        "nonpos_or_missing_days": pe_stats.get("nonpos_or_missing_days", 0),
+        "nonpos_or_missing_ratio": pe_stats.get("nonpos_or_missing_ratio_4dp", 0.0),
+        "nonpos_or_missing_ratio_raw": pe_stats.get("nonpos_or_missing_ratio", 0.0),
+        "pe_loss_window_n": pe_stats.get("n_window", 0),
+        "loss_ratio_elevated": bool(pe_stats.get("elevated", False)),
+    })
 
     # PB
     if pb_seq_clean and current_pb is not None:
@@ -139,7 +227,7 @@ def valuation_summary(
 
     # PS（可选）
     if ps_seq is not None:
-        ps_seq_clean = [v for v in ps_seq if v is not None and v > 0]
+        ps_seq_clean = [f for v in ps_seq if (f := _safe_float(v)) is not None and f > 0]
         if current_ps is None and ps_seq_clean:
             current_ps = ps_seq_clean[-1]
         if ps_seq_clean and current_ps is not None:
@@ -167,13 +255,15 @@ def valuation_summary(
     if not result["sufficient"]:
         result["warnings"].append("样本不足30个交易日，分位计算结果仅供参考")
 
-    # 检查亏损期（PE None/<=0，Tushare daily_basic 对亏损期返回 None）是否被过滤
-    pe_total = len(pe_ttm_seq)
-    pe_pos = len(pe_seq_clean)
-    if pe_total > pe_pos:
+    # 检查非正/缺失样本（PE None/≤0；Tushare daily_basic 对亏损公司常返回 None
+    # 或非正值）——A-F03：函数输入只有 PE 值，不足以确证财务亏损（舍入/零收益/
+    # 供应商编码均可致 ≤0），故只称「非正 PE」，与缺失分列，不称「亏损期」。
+    pe_nonpos_missing = int(pe_stats.get("nonpos_or_missing_days", 0) or 0)
+    if pe_nonpos_missing > 0:
         result["warnings"].append(
-            f"PE 历史序列中有 {pe_total - pe_pos} 个交易日为亏损期（PE 不可得或非正），"
-            f"已从历史样本中排除，分位计算可能偏高")
+            f"PE 历史序列中有 {pe_nonpos_missing} 个交易日非正或不可得"
+            f"（其中非正 PE≤0 {pe_stats.get('n_loss', 0)} 日、PE 缺失 "
+            f"{pe_stats.get('n_missing', 0)} 日），已从历史样本中排除，分位计算可能偏高")
 
     # 摘要文本（渲染用）
     result["summary_text"] = _build_summary_text(result)

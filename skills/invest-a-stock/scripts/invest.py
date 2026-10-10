@@ -34,10 +34,12 @@ from pathlib import Path
 # 确保从本项目的 lib/ 导入，排除旧归档路径
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_SCRIPT_DIR))
-# 跨 skill 导入 invest-a-journal 的 market_microstructure
-_JOURNAL_LIB = _SCRIPT_DIR.parent.parent / "invest-a-journal" / "scripts" / "lib"
-if str(_JOURNAL_LIB) not in sys.path:
-    sys.path.insert(0, str(_JOURNAL_LIB))
+# A03（v0.3.2）：市场微观结构 canonical 在共享层 skills/lib（公共 provider）。
+# 经 stock lib 的路径 shim 显式引导（不再注入 journal 私有目录）；ETFs 数据
+# 走 invest_path.load_invest_a_etf_module() 公共 loader（见 cmd_etf_flow）。
+from lib._invest_path import ensure_skills_lib_on_path
+
+ensure_skills_lib_on_path()
 
 # 查找项目根目录（向上遍历直到找到 pyproject.toml）
 _project_root = _SCRIPT_DIR
@@ -49,7 +51,10 @@ while _project_root != _project_root.parent:
 from lib import collector, env, render
 from lib import report_snapshot
 from lib.collector import _DEFAULT_DIMS
+from lib.json_util import atomic_write_text
 from lib.proxy import warn_if_proxy_detected
+
+from invest_path import load_invest_a_etf_module  # noqa: E402 — skills/lib 公共 loader
 
 _CLI_DEFAULT_DIMS = ",".join(_DEFAULT_DIMS)
 _TRACE_RUN_ID: str | None = None
@@ -1171,18 +1176,9 @@ def _write_analysis_sidecar(report_path: Path, analysis_payload: list[dict] | No
         return None
     sidecar = report_path.with_suffix(".analysis.json")
     payload = json.dumps(analysis_payload, ensure_ascii=False, indent=2) + "\n"
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{sidecar.name}.", suffix=".tmp", dir=str(sidecar.parent), text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        Path(temp_name).replace(sidecar)
-    except Exception:
-        Path(temp_name).unlink(missing_ok=True)
-        raise
+    # A05-1 R2：原子写底层委托 lib.json_util.atomic_write_text（同目录临时文件 +
+    # flush/fsync + replace + 异常清理的唯一实现）；命名/内容/失败语义不变。
+    atomic_write_text(sidecar, payload)
     return sidecar
 
 
@@ -3260,7 +3256,7 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
     symbol = args.symbol.strip().zfill(6)
 
     if args.save:
-        from etf_data import save_etf_share_snapshot as _save
+        _save = load_invest_a_etf_module().save_etf_share_snapshot
         snap = _save(symbol)
         if snap is None:
             print(f"⚠️ {symbol} 非交易日或数据不可得，跳过保存", file=sys.stderr)
@@ -3273,7 +3269,7 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
             print(msg)
             return 0
 
-    from etf_data import etf_share_flow as _flow
+    _flow = load_invest_a_etf_module().etf_share_flow
     flow = _flow(symbol, days=args.days)
 
     if args.json:

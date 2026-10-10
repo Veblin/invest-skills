@@ -74,12 +74,16 @@ def _sanitize_cpi(value: float) -> float | None:
     return None
 
 
-def _fetch_fred_series(
+def fetch_fred_series(
     series_id: str,
     config: dict,
     lookback_days: int = 90,
 ) -> tuple[float | None, list[tuple[str, float]]]:
-    """从 FRED 抓取单个 series 的日序列。
+    """从 FRED 抓取单个 series 的日序列（公开 API，A04 v0.3.2）。
+
+    跨 skill 消费者（journal market_microstructure ERP 等）经公开名调用；
+    ``_fetch_fred_series`` 为兼容别名（历史私有名，同实现——内部调用与
+    既有测试 monkeypatch 接缝不变）。
 
     Returns:
         (latest_value, [(date, value), ...]) — latest_value 为最近有效值，
@@ -120,6 +124,10 @@ def _fetch_fred_series(
         return None, []
     latest = out[-1][1]
     return latest, out
+
+
+# 兼容别名（历史私有名，同实现——A04 公开名迁移）
+_fetch_fred_series = fetch_fred_series
 
 
 def _fetch_sox_via_yahoo() -> float | None:
@@ -1298,7 +1306,9 @@ def _dgs30_analysis(config: dict) -> dict:
     last_date, current = series[-1]
     high = max(values)  # 全量序列 max（P0 极值铁律）
     high_date = next(d for d, v in reversed(series) if v == high)
-    pct = sum(1 for v in values if v <= current) / n * 100
+    from lib.stats import le_share_pct  # A05-3：≤ 口径分位共享核心
+
+    pct = le_share_pct(values, current)
     distance = (current - high) / high * 100  # 收益率口径（C10）
     return {
         "status": "ok",

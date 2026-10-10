@@ -416,7 +416,7 @@ def _html_valuation(
 ) -> str:
     band_block = f'<div class="card" style="margin-top:var(--space-4)">{band_html}</div>' if band_html else ""
     if not pe_val or pe_val == "--":
-        # B3-R ⑨：估值卡无数据（亏损期/PE 缺失）时不得静默丢弃分位带位——
+        # B3-R ⑨：估值卡无数据（PE 非正/缺失）时不得静默丢弃分位带位——
         # band 与 pe 卡独立构建：真图（历史正数足够）并入；否则给统一
         # 「数据不可得」提示卡（不再重复显示构建侧占位文本）。
         if "data-echart" in band_html:
@@ -425,13 +425,13 @@ def _html_valuation(
             band_out = (
                 '<div class="card" style="margin-top:var(--space-4);padding:'
                 'var(--space-4);text-align:center;color:var(--tx-f);'
-                'font-size:var(--text-xs)">估值分位带图：数据不可得（亏损期/'
-                'PE 缺失或有效正数不足 20 日）</div>')
+                'font-size:var(--text-xs)">估值分位带图：数据不可得（PE 非正或'
+                '缺失，或有效正数不足 20 日）</div>')
         # 全量审查 P1-3：band 存在说明历史序列可用——「无数据/请配置 token」
         # 文案自相矛盾（数据存在且 token 已配置）。区分两种缺失。
         has_band = "data-echart" in band_html
         na_msg = (
-            "当前期估值不可得（亏损期/最新 PE 缺失）——历史分位带见下图；"
+            "当前期估值不可得（最新 PE 非正或缺失）——历史分位带见下图；"
             "若配置 Tushare Token 可获取更完整序列。" if has_band
             else "估值维度无数据，请配置 Tushare Token 获取历史估值序列。")
         return f'''<section id="valuation">
@@ -479,7 +479,7 @@ def _html_valuation(
         <div class="gtrack"><div class="gfill" style="width:{ps_w_s}%;background:var(--wn)"><div class="gmk" style="background:var(--wn)"></div></div></div>
         <div class="gval">{ps_v}</div><div class="gpct" style="color:var(--wn)">{ps_pct_s}%</div>
       </div>
-      <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>PE 亏损期已剔除；行业相对估值 v0.1.2 未覆盖，分位不构成买卖判断。</div>
+      <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>PE 非正与不可得样本已从分位序列剔除（PE≤0 不确证财务亏损）；行业相对估值 v0.1.2 未覆盖，分位不构成买卖判断。</div>
     </div>
     <div class="card">
       <div style="font-size:var(--text-xs);color:var(--tx-f);text-transform:uppercase;letter-spacing:.06em;margin-bottom:var(--space-4)">历史中位数</div>
@@ -854,6 +854,8 @@ def _extract_valuation_data(dims: dict) -> dict:
     from lib.valuation import valuation_summary
 
     vs = sort_kline_asc(val_data)
+    if any(r.get("trade_date") for r in vs):
+        vs = [r for r in vs if r.get("trade_date")]
     pe_seq = [r.get("pe_ttm") for r in vs]
     pb_seq = [r.get("pb") for r in vs]
     ps_seq = [r.get("ps_ttm") or r.get("ps") for r in vs]
@@ -864,7 +866,11 @@ def _extract_valuation_data(dims: dict) -> dict:
         vs[-1].get("trade_date") if vs else None,
     )
 
-    summary = valuation_summary(pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv, window_label=wl)
+    summary = valuation_summary(
+        pe_seq, pb_seq, ps_seq=ps_seq, dv_ratio=dv, window_label=wl,
+        # A05-3：与分位带图同窗；全无日期旧输入保留样本兼容
+        pe_loss_window=[r.get("pe_ttm") for r in vs],
+    )
     result["window_label"] = wl
     result["n_samples"] = summary.get("n_samples", 0)
 
@@ -1415,6 +1421,8 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
     val_data = _get_dim_data(dims, "valuation")
     if isinstance(val_data, list) and val_data:
         vs = sort_kline_asc(val_data)
+        if any(r.get("trade_date") for r in vs):
+            vs = [r for r in vs if r.get("trade_date")]
         dv = next((r.get("dv_ratio") for r in reversed(vs) if r.get("dv_ratio") is not None), None)
         if dv is not None:
             dv_str = f"{dv:.2f}%"
@@ -1527,7 +1535,12 @@ def render_html(collection: dict[str, Any], symbol: str, md_text: str | None = N
                 f"估值分析：PE(TTM) 历史分位带图。最新 PE {_fmt_aria_num(p.get('cur'))}"
                 f"（截至 {p.get('cur_date', '')}），{wl_txt}窗口分位带 "
                 f"P10={_fmt_aria_num(p.get('p10'))} 至 P90={_fmt_aria_num(p.get('p90'))}，"
-                f"中位数 {_fmt_aria_num(p.get('median'))}，亏损期占比 {_fmt_aria_num(p.get('loss_ratio_pct'))}%"
+                f"中位数 {_fmt_aria_num(p.get('median'))}，"
+                # A05-3/A-F03：非正或缺失合计为主数；非正 PE（≤0，不确证财务亏损）
+                # 与 PE 缺失分列
+                f"PE 非正或缺失占比 {_fmt_aria_num(p.get('nonpos_or_missing_ratio_pct'))}%"
+                f"（其中非正 PE≤0 {_fmt_aria_num(p.get('loss_ratio_pct'))}%、"
+                f"PE 缺失 {_fmt_aria_num(p.get('missing_ratio_pct'))}%）"
                 + (f"；{p.get('note')}" if p.get("note") else "")
             )
             band_html = _chart_block(

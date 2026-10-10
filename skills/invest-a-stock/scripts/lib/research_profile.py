@@ -15,13 +15,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 from html import escape as _html_escape
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from .json_util import atomic_write_json
 
 SCHEMA_VERSION = 1
 
@@ -341,17 +341,7 @@ def write_profile_sidecar(
     if generation:
         body["generation"] = generation
     body["profile"] = profile
-    payload = json.dumps(body, ensure_ascii=False, indent=2) + "\n"
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{sidecar.name}.", suffix=".tmp", dir=str(sidecar.parent), text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        Path(temp_name).replace(sidecar)
-    except Exception:
-        Path(temp_name).unlink(missing_ok=True)
-        raise
+    # A05-1 R2：原子写底层委托 lib.json_util.atomic_write_json（三处重复收敛；
+    # schema/空输入/命名/manifest 顺序仍在本模块）。
+    atomic_write_json(sidecar, body)
     return sidecar

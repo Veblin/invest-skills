@@ -58,6 +58,46 @@ def test_dedupe_preserves_order_and_unparsable_rows():
     assert out[0]["roe"] == 1.0
 
 
+# ---- A05-2：insight 侧去重对齐 canonical（同规则、升序输出） ----
+
+def test_insight_dedupe_aligns_with_canonical():
+    """修订披露：insight 侧与 canonical 同取 ann_date 最大者（旧为取首现）。"""
+    from lib.insight_model import _dedupe_financial_rows
+
+    rows = [
+        _fin("20260630", revenue=100.0, ann_date="20260820"),
+        _fin("20260630", revenue=110.0, ann_date="20260830"),
+        _fin("20260331", revenue=50.0, ann_date="20260425"),
+    ]
+    out = _dedupe_financial_rows(rows)
+    assert [r["revenue"] for r in out] == [50.0, 110.0]  # 升序 + 修订后披露
+
+
+def test_insight_dedupe_iso_compact_same_period_merged():
+    """ISO 与 compact 同报告期归一期（旧实现按原始字符串判为两期）。"""
+    from lib.insight_model import _dedupe_financial_rows
+
+    rows = [
+        _fin("2026-06-30", revenue=100.0, ann_date="2026-08-20"),
+        _fin("20260630", revenue=110.0, ann_date="20260830"),
+    ]
+    out = _dedupe_financial_rows(rows)
+    assert len(out) == 1
+    assert out[0]["revenue"] == 110.0
+
+
+def test_insight_dedupe_tie_keeps_first_and_order_ascending():
+    from lib.insight_model import _dedupe_financial_rows
+
+    rows = [
+        _fin("20260630", revenue=100.0, ann_date="20260830"),
+        _fin("20260630", revenue=110.0, ann_date="20260830"),
+        _fin("20250630", revenue=90.0, ann_date="20250830"),
+    ]
+    out = _dedupe_financial_rows(rows)
+    assert [r["revenue"] for r in out] == [90.0, 100.0]
+
+
 # ---- 周期性：反例与正例 ----
 
 def test_cyclicality_no_mixed_period_counterexample_600519():
@@ -173,3 +213,52 @@ def test_html_financials_dedup_and_same_mmdd_class():
     assert roe_data.count(19.0) == 1                     # 保留先出现行
     assert table_html.count("roe-hi") == 1               # 仅 26.0 高于同组均值 1.1×
     assert table_html.count("roe-lo") == 1               # 仅 18.0 低于同组均值 0.9×
+
+
+# ---- A-F01：归一日期排序/最新期（ISO·compact 混排） ----
+
+
+def test_insight_dedupe_ascending_normalized_mixed_formats():
+    """A-F01：升序按归一日期；旧实现 rows[-1] 会取成 20260331（错最新期）。"""
+    from lib.insight_model import _dedupe_financial_rows
+
+    rows = [
+        _fin("20250331", revenue=100.0),
+        _fin("2025-06-30", revenue=200.0),
+        _fin("20260331", revenue=110.0),
+        _fin("2026-06-30", revenue=260.0),
+    ]
+    out = _dedupe_financial_rows(rows)
+    assert [str(r["end_date"]) for r in out] == [
+        "20250331", "2025-06-30", "20260331", "2026-06-30"]
+    assert out[-1]["revenue"] == 260.0  # 最新期正确
+
+
+def test_insight_dedupe_unparseable_date_not_latest():
+    """反例：不可解析日期行不得充当最新期（排序键 "" 恒最前）。"""
+    from lib.insight_model import _dedupe_financial_rows
+
+    rows = [_fin("2026-06-30", revenue=260.0), _fin("Q2-2026", revenue=999.0)]
+    out = _dedupe_financial_rows(rows)
+    assert out[-1]["revenue"] == 260.0
+
+
+def test_same_period_prior_year_iso_compact_equivalent():
+    """A05-3b：sidecar 同期匹配与报告侧 find_yoy_row 同归一（ISO/compact 等价）。"""
+    from lib.financials import find_yoy_row
+    from lib.insight_model import _same_period_prior_year
+
+    rows = [
+        _fin("20250331", revenue=100.0),
+        _fin("2025-06-30", revenue=200.0),
+        _fin("20260331", revenue=110.0),
+        _fin("2026-06-30", revenue=260.0),
+    ]
+    for as_of in ("2026-06-30", "20260630"):
+        hit = _same_period_prior_year(rows, as_of)
+        assert hit is not None and hit["revenue"] == 200.0, as_of
+    # 与报告侧 find_yoy_row 同命中（同归一）
+    latest = {"end_date": "2026-06-30", "revenue": 260.0}
+    assert find_yoy_row(rows, latest)["revenue"] == 200.0
+    # 不可解析当期 → 不产出（宁缺勿错）
+    assert _same_period_prior_year(rows, "Q2-2026") is None

@@ -1068,3 +1068,35 @@ def test_cmd_report_passes_strict_rigor_to_renderer(tmp_path, isolated_store, mo
         "--emit", "md", "--outdir", str(tmp_path / "off")])
     assert invest.cmd_report(off) == 0
     assert captured.get("strict_rigor") is False
+
+
+def test_digest_delegation_byte_equivalent_to_legacy_implementation():
+    """v0.3.2 B05：digest 委托 snapshot_core 后与旧内联实现逐字节等价。
+
+    旧实现（迁移前）：json.dumps(..., ensure_ascii=False, sort_keys=True,
+    separators=(",", ":"), default=json_default) + sha256。此处内联复刻旧算法
+    对照，覆盖 datetime/date/Decimal/set/numpy 与嵌套结构——任何口径漂移
+    （排序、分隔符、序列化器）都会改变历史快照哈希。
+    """
+    import hashlib
+    import json
+
+    from lib.json_util import json_default
+    from lib.report_snapshot import digest
+
+    def _legacy_digest(value):
+        data = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), default=json_default)
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    samples = [
+        {"a": 1, "b": [1.5, "x", None, True]},
+        {"t": datetime(2026, 1, 2, 3, 4, 5), "d": date(2026, 1, 2)},
+        {"x": Decimal("1.23"), "s": {3, 1, 2}},
+        {"nested": {"rows": [{"end_date": "2026-06-30", "v": 3.14159}]}},
+    ]
+    for s in samples:
+        assert digest(s) == _legacy_digest(s)

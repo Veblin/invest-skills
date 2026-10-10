@@ -33,9 +33,7 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -151,37 +149,54 @@ def _fact(fid: str, value: Any, *, as_of: str, unit: str, basis: str,
 
 
 def _percentile(values: list[float], latest: float) -> float | None:
+    """≤ 口径分位（A05-3：计算经共享核心 le_share_pct；样本下限 20 保留）。"""
     if len(values) < 20:
         return None
-    return round(sum(value <= latest for value in values) / len(values) * 100, 1)
+    from lib.stats import le_share_pct
+
+    pct = le_share_pct(values, latest)
+    return round(pct, 1) if pct is not None else None
 
 
 def _dedupe_financial_rows(fin_rows: list[Any]) -> list[dict[str, Any]]:
     """按报告期去重并升序排列。
 
     ``financials`` 维度原始列表既非升序又含重复期——store 快照 300750/#77 实测
-    20 行仅 16 个唯一期（2022Q3–2023Q2 各两份，fcff/fcfe 取值冲突）。同一期取
-    首次出现，避免下游按「相邻行」取数时拿到重复期。
+    20 行仅 16 个唯一期（2022Q3–2023Q2 各两份，fcff/fcfe 取值冲突）。
+
+    A05-2（v0.3.2）：去重规则收敛到 canonical ``financials.dedupe_by_end_date``
+    （同 end_date 取 ann_date 最大者＝修订后披露，平局保首现；键经
+    ``normalize_end_date`` 归一——ISO 与 compact 同报告期合并，离线反例见
+    A基础-财务纯函数反例.py dedupe 组）。
+    A-F01：升序排列改用 canonical ``financials.sort_by_end_date``（归一日期键；
+    旧实现按**原始**字符串键排序，ISO/compact 混排时 ``rows[-1]`` 会取错最新期，
+    不可解析日期也会排到末尾充当最新期——反例见 A市场-财务日期语义反例.py）。
     """
-    by_period: dict[str, dict[str, Any]] = {}
-    for row in fin_rows:
-        if not isinstance(row, dict):
-            continue
-        by_period.setdefault(_as_of(row, ""), row)
-    return [by_period[key] for key in sorted(by_period)]
+    from .financials import dedupe_by_end_date, sort_by_end_date
+
+    rows = [row for row in fin_rows if isinstance(row, dict)]
+    deduped = dedupe_by_end_date(rows)
+    return sort_by_end_date(deduped)
 
 
 def _same_period_prior_year(rows: list[dict[str, Any]], as_of: str) -> dict[str, Any] | None:
     """取上年同期行（``20260630`` → ``20250630``）；找不到返回 None。
 
-    只认 8 位 YYYYMMDD 形态的报告期——其它形态（如非数字 date）不匹配，宁可
-    不产出同比，也不给出一个错误的基准。
+    A05-3b/A-F01：日期比较经 ``financials.normalize_end_date`` 归一后再与
+    ``prior_year_end_date`` 目标比对——ISO（``2026-06-30``）与 compact
+    （``20260630``）等价，与报告侧 ``find_yoy_row`` 同口径（旧实现只认 8 位
+    原样字符串，ISO 输入静默不产出同比 → sidecar 与报告结论不一致，反例见
+    A市场-财务同期匹配反例.py）。不可归一（非日期形态）→ None，宁可不产出
+    同比，也不给出一个错误的基准。
     """
-    if not re.fullmatch(r"\d{8}", str(as_of)):
+    from .financials import normalize_end_date, prior_year_end_date
+
+    norm = normalize_end_date(str(as_of))
+    target = prior_year_end_date(norm)
+    if not target:
         return None
-    target = str(int(as_of[:4]) - 1) + as_of[4:]
     for row in rows:
-        if _as_of(row, "") == target:
+        if normalize_end_date(str(_as_of(row, ""))) == target:
             return row
     return None
 
@@ -470,7 +485,7 @@ def load_snapshot_diff(symbol: str, collection: dict[str, Any]) -> tuple[dict[st
     返回 ``(key_diff | None, reason)``，``reason ∈ {"ok","no_history","store_unavailable"}``。
 
     **本模块唯一的 I/O 点与唯一的 try/except 点。** 读取刻意放在调用方（CLI）而非
-    ``build_report_model`` 内部：``store.connect_db`` 会 ``mkdir`` 并建库，若模型层
+    ``build_report_model`` 内部：``store.open_connection`` 会 ``mkdir`` 并建库，若模型层
     自动读 store，未隔离 store 的测试会读写用户的真实库、断言随库内容漂移。
     """
     try:
@@ -951,17 +966,12 @@ def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[st
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
+    # A05-1 R2：原子写底层委托 lib.json_util.atomic_write_json；
+    # mkdir 仍在本函数（历史行为：侧车目录不存在时先建）。
+    from .json_util import atomic_write_json
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush(); os.fsync(handle.fileno())
-        Path(temporary).replace(path)
-    except Exception:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    atomic_write_json(path, payload)
 
 
 def write_sidecars(report_path: Path, model: dict[str, Any], *, html_path: Path | None = None,
