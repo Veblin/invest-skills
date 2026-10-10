@@ -191,3 +191,39 @@ class TestEventsFile512660:
         for r in rows:
             assert {"date", "event", "source_url", "published_date", "confidence"} <= set(r.keys())
             assert r["confidence"] in ("一手", "二手")
+
+
+class TestAudit20261009QuoteSource:
+    """R07/R08：quote 来源结构化留痕（消费方不得对 _error 做文本匹配）。"""
+
+    def test_spot_row_quote_marks_source(self):
+        from etf_data import _spot_row_to_quote
+
+        q = _spot_row_to_quote("510300", {"最新价": 1.0, "涨跌幅": 0.5,
+                                          "基金折价率": 0.1})
+        assert q["source"] == "fund_etf_spot_em"
+        assert q["status"] == "available"
+
+    def test_tencent_fallback_marks_source(self, monkeypatch):
+        import etf_data
+
+        monkeypatch.setattr(etf_data, "_lookup_etf_spot_row",
+                            lambda symbol: (None, "etf_spot: fetch failed"))
+        monkeypatch.setattr(etf_data, "_q_tencent_etf_quote",
+                            lambda symbol: {"price": 1.152, "change_pct": 0.35,
+                                            "volume": 1.0, "amount": 2.0})
+        q = etf_data.query_etf_quote("512660")
+        assert q["source"] == "tencent" and q["status"] == "available"
+        assert q["spot_row_found"] is False
+
+    def test_both_sources_failed_keeps_each_reason(self, monkeypatch):
+        """两源均失败：not found 与网络失败可区分（旧实现 strip 前缀后丢失）。"""
+        import etf_data
+
+        monkeypatch.setattr(etf_data, "_lookup_etf_spot_row",
+                            lambda symbol: (None, "etf_spot: 999999 not found"))
+        monkeypatch.setattr(etf_data, "_q_tencent_etf_quote", lambda symbol: None)
+        q = etf_data.query_etf_quote("999999")
+        assert q["status"] == "missing" and q["source"] is None
+        assert "999999 not found" in q["spot_error"]
+        assert "not found" in q["_error"] and "腾讯行情回退未取得数据" in q["_error"]

@@ -2,8 +2,8 @@
 
 name: invest-a-etf
 version: "0.3.1"
-description: "A股 ETF 结构化研究 — 指数估值/折溢价/AUM/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
-whenToUse: "ETF/指数基金类问题：指数估值、折溢价、AUM、跟踪质量、对冲覆盖的结构化研究"
+description: "A股 ETF 结构化研究 — 身份/指数估值/折溢价/规模口径（AUM 语义修正）/跟踪质量/对冲覆盖，产出带来源追溯的研究备忘录。研究工具，非决策工具。共用数据层供 invest-a-journal ETF 路径调用。触发词：ETF/指数基金"
+whenToUse: "ETF/指数基金类问题：身份、指数估值、折溢价、规模口径（AUM）、跟踪质量、对冲覆盖的结构化研究"
 argument-hint: "/invest-a-etf 563300 | /invest-a-etf 515790"
 allowed-tools: Bash, Read, Write, WebSearch
 user-invocable: true
@@ -20,7 +20,7 @@ metadata:
 
 你是 ETF 研究助手。用户通过 `/invest-a-etf {代码}` 请求对单只 ETF 做结构化研究。你的职责：
 
-1. **采集**：调用共用数据引擎 `etf_data.py`（指数 PE、折溢价、AUM、净值波动、对冲覆盖）
+1. **采集**：调用共用数据引擎 `etf_data.py`（身份、指数 PE、折溢价、规模口径、净值波动、跟踪质量、对冲覆盖）
 2. **合成**：按 [references/report-template.md](references/report-template.md) 产出 Markdown 研究备忘录
 3. **标注**：每个数字带来源；推测标注「待验证」；遵守 A1 / A2（原 LAW 6 / 6a）
 
@@ -34,7 +34,7 @@ metadata:
 
 ## 硬约束
 
-> **共享规范**：[report-conventions.md](../../../skills/lib/references/report-conventions.md) §2 硬约束 + §3 措辞规范 + §6 多情景参考。
+> **共享规范**：[report-conventions.md](../lib/references/report-conventions.md) §2 硬约束 + §3 措辞规范 + §6 多情景参考。
 
 1. **禁止买卖建议、仓位建议**
 2. **允许多情景估值参考价**（须假设前提 + 概率权重 +「仅供参考，不构成投资建议」）
@@ -56,14 +56,17 @@ metadata:
 Claude: 确认 6 位代码
        ↓
 采集（并行；**适用条件与产出见「条件采集表」**——此处只列命令）:
-  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report SYMBOL --json
+  cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report SYMBOL --json --payload-out reports/{symbol}-{name}/{timestamp}.payload.json [--index-exposure]
+    （`--payload-out`：冻结本次**同代输入**（含 HTML 渲染所需维度）——HTML 只读该文件，**不再重采**；
+     报告 Fit 章节若引用指数样本/权重，必须加 `--index-exposure` 使其进入同代封存）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py industry-pe
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py holdings SYMBOL --json     （行业/主题 ETF）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers SYMBOL --json        （行业 ETF；未映射加 --peers "代码,代码"）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow SYMBOL --json  （行业 ETF）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py futures-basis SYMBOL --json（映射到可用期货时）
        ↓
-Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symbol}-{name}/{timestamp}.md
+Claude: 合成分析（见下方「分析合成」节；前部阅读面=核心发现三段式 / 五问 / 核验状态前置 / 宏观分栏）→ 写入 reports/{symbol}-{name}/{timestamp}.md
+  （payload 文件名 ts 必须与报告 md 的 ts 一致：`{timestamp}.payload.json`）
        ↓
 机器层准出（**先于 HTML**）: cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <刚写的 md> --fail-on error
        ↓
@@ -72,7 +75,16 @@ Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symb
   （② 填写 scenarios / falsifiers —— 情景假设与可证伪条件是合成段产物，只有你能写）
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision SYMBOL --from /tmp/{symbol}.decision.json   # ③ 校验并落盘（fail-loud 退出 2）
        ↓
-默认（复检通过后必做）: etf.py html SYMBOL --md <已过复检的 md> --no-open  → 同目录交互式 HTML（详见「HTML 产物」节）
+默认（复检通过后必做）: etf.py html SYMBOL --md <已过复检的 md> --payload <同 ts 的 payload.json> --no-open
+  → 同目录交互式 HTML（只读 payload 渲染：零网络零 DB 写；缺 payload / 错 symbol / 哈希不符 / ts 不对应 → 退出 2，不回退重采）
+       ↓
+产物哈希绑定与分层签认（**全部产物齐备后必做**）:
+  uv run python skills/lib/report_qc.py <md> --fail-on error --record \
+      --signoff manual_numbers=pass:"逐项对照 payload 复算" --signoff manual_compliance=pass --signoff manual_logic=pass
+  → 落盘 `<ts>.qc.json`：记录 md/html/payload/decision 的**实际 sha256** + 机器结论 + 分层签认；
+    此后改任一产物一行 → 旧记录 stale（旧签认自动失效），须重跑 --record 重验。
+    **数据复核 / 原文核验 / 人工三层分开记录**：没有执行就写 not_executed（默认），
+    机器 PASS 与「URL 存在 / 已读摘要」都不能代替原文核验与人工复检。
 
 **盘后预采集（不在本工作流内，报告只读其产物）**：
   cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow   # 行业资金流快照（同花顺 90 行业×4 窗口，幂等，非交易日跳过）
@@ -97,20 +109,21 @@ Claude: 合成分析（见下方「分析合成」节）→ 写入 reports/{symb
 ```bash
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300        # 单 ETF 数据快照
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 563300 --json --payload-out reports/563300-中证2000ETF/<ts>.payload.json   # 冻结同代输入（HTML 唯一输入）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --history --playbook   # 历史深度 + 情景预案
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py report 588000 --events events/588000.json --history  # 指定事件文件（须同带 --history 才有价格对齐）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py diagnose
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py industry-pe          # 31 行业 PE 排名
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-weekly       # 手动触发行业 PE 采集
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py holdings 159206 --json      # 前十大持仓 + 集中度
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py holdings 159206 --json      # 前十大持仓 + 集中度（披露范围前十大，非完整持仓）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers 159206 --json          # 赛道资金流对比 + RS（自动发现）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py peers 159206 --peers "512660,512760"   # 显式赛道清单
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py sector-flow 159206 --json   # 行业资金流 + 趋势（同花顺）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py collect-sector-flow         # 每日采集（盘后，幂等）
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md <报告md路径> --no-open   # 交互式 HTML 报告（研究流程中固定加 --no-open，不自动开浏览器）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md <报告md路径> --payload <同 ts 的 .payload.json> --no-open   # 同代只读渲染（必填 --payload；研究流程固定 --no-open）
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision 515050 --init          # 复盘原料：输出最小 schema 模板
 cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py decision 515050 --from <填好的.json>   # 校验并落盘 sidecar
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py review 515050                   # 复盘纪要（只对照假设状态）
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py review 515050                   # 复盘纪要（只对照假设状态 + 同代配对核查）
 ```
 
 `report` 输出引擎数据快照（供 Claude 合成）；完整叙事由 Claude 按模板撰写。
@@ -135,10 +148,11 @@ sidecar 把这三样结构化落盘，使复盘可批量、到期可核验：
 
 **交互式 HTML 报告**（`html` 子命令）：引擎数据仪表盘（概览/持仓/估值/跟踪/历史/资金流等 8 节 + Chart.js 交互图表）+ 已过复检的报告 md 分析全文原样嵌入。单文件自包含（图表库内联），file:// 离线可用。
 
-- **默认用法**：报告 md 写入后执行（默认动作），显式传 `--md` 指向刚写的文件——本工作流下你掌握确切路径；不同 harness 下报告目录位置不必假设一致
+- **同代输入（必填）**：`--payload <ts>.payload.json` 必须是本报告冻结的同代 payload（`report --payload-out` 产出、与 md **同目录同 ts**）。HTML 只读该文件渲染：零网络、零 DB 写，并在产物内嵌 `payload_hash` 与同代信息行（`<meta name="invest-generation">` 可机器读取）
+- **fail-loud（退出 2，无重采回退）**：缺 `--payload` / payload 损坏 / symbol 与请求不符 / 封存哈希不符（篡改）/ 与 md 的 ts 不对应——一律拒绝渲染。输入或外部证据变化须**重新冻结新 payload**（新代），不得混用
 
 ```bash
-cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md reports/515050-通信ETF/2026-08-28-22-47-25.md
+cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.py html 515050 --md reports/515050-通信ETF/2026-08-28-22-47-25.md --payload reports/515050-通信ETF/2026-08-28-22-47-25.payload.json
 ```
 
 - `--md` 缺省时引擎自动取 `reports/{symbol}-*/` 中时间戳最新的 md（仅为便捷路径）；显式传参更稳妥
@@ -160,19 +174,28 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 标题与顺序见 [references/report-template.md](references/report-template.md)（下表 § 号即模板 § 号）。
 **数据口径与解读纪律不在本节重复**——采集见「条件采集表」，解读见「分析合成」。
 
+**前部阅读面（§1 之前，全部必须，且必须是分析而非标题）**：
+
+| 块 | 内容要求 |
+|---|---|
+| 核心发现（Top 5） | 每条「**事实 →（学术/ETF 框架）方法 → 限定结论**」三段式；事实带来源+期间；结论不得越出证据边界；禁止「已计价/只能」类无证据市场认知推断 |
+| 五问速览 | 暴露 / 变化 / 实现效率与摩擦 / 集中风险与缺口 / 下一步看什么——每题一句回答（或明确「证据不足」），指向正文章节 |
+| 核验状态与阅读提示 | **读者向**核验状态摘要（哪些已核/未核，未执行层写明）、本代未完善项、**冲突与现价-逻辑背离的候选/竞争解释**、观察日历（何时关注哪些数据/公告）、未知清单——**前置**，不得只放文末。内部工程字段（payload_hash/冻结时点/产物 sha256/QC 记录路径与逐层明细）放文末「复检与签认」附注，不放前部 |
+| 宏观背景（如适用） | **国内/海外分栏**，逐栏指标来源+期间+传导路径；不适用写理由 |
+
 | § | 章节 | 什么条件下必须 |
 |---|---|---|
-| 1 | 产品快照（价格 / 折溢价 / AUM / flags） | 必须 |
+| 1 | 产品快照（身份 / 价格 / 折溢价 / 规模口径 / flags） | 必须 |
 | 2 | 持仓透视 | 行业 / 主题 ETF 必须 |
 | 3 | 指数估值（含 **3.1 估值框架**、**3.2 行业位置**） | §3 必须；§3.1 / §3.2 行业 ETF 必须 |
 | 4 | 跟踪质量（净值波动 / NAV+指数 MA / BOLL / RSI / 跟踪误差） | 必须 |
 | 5 | 历史演变 | `--history` 时必须有（事件-价格对照需拉历史行情：`--history` **或** `--playbook` 均可；仅传 `--events PATH` 时引擎不拉历史行情，对照为空） |
 | 6 | 赛道资金流对比 | 行业 ETF 必须 |
 | 7 | 资金流向与趋势 | 行业 ETF 必须 |
-| 7.5 | 动态基差与持仓 | 映射到可用期货时必须有；无映射时**显式写「该 ETF 无对应期货合约」**，不得省略不表 |
+| 7.5 | 动态基差与持仓 | 映射到可用期货时必须有；无映射时**显式写明「静态映射未收录对应期货品种（未核；不表示不存在/不可上市）」**，不得省略不表——不得无原文断言「无对应期货合约」或「无法上市」 |
 | 8 | 对冲覆盖（hedge-map） | 必须 |
 | 9 | 因子 / 主题逻辑 | 必须（无来源则「待验证」） |
-| 10 | 多情景参考 | 可选（A2／原 LAW 6a） |
+| 10 | 多情景参考 | 可选（A2／原 LAW 6a）；**证据演化情景（非估值）不设概率权重**，无定量模型不得强塞 AI 概率 |
 | 11 | 情景预案 | `--playbook` 时必须有 |
 | 12 | 对抗性假设检验 | 必须（做法见「分析合成」§3） |
 | 13 | 「致命一击」归纳 | 必须（做法见「分析合成」§4） |
@@ -188,6 +211,17 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 ---
 
 ## 数据引擎
+
+### 身份与口径合同（B01/B02/B03/B06，写作前先读）
+
+- **身份三轴**：`profile.identity.axes`（asset_type/channel/strategy + 证据/`verification`）+ `applicability`。`category` 为兼容单轴旧标签。`verification != verified_original`（静态映射/名称推断）须在报告中注明「待核」；`applicability.index_pe=False` 表示**不套股票 PE**（债券/商品/货币/未核身份）。
+- **规模**：`profile.share_price_mv_est`（份额×交易价**估算**，非官方资产净值；含单位/口径/时点）；`profile.est_net_assets`（仅份额日与单位净值**同日**才给估算值）；旧键 `aum` 为兼容别名。`flow_est` 为估算方向标签——**价格涨跌 ≠ 资金净流入**。
+- **跟踪质量**：`profile.tracking`。当前基准只有价格指数 → `status="limited"`、`td_pct/te_pct_annualized=None`，价格基准偏离在 `price_benchmark_deviation`（`research_only=True`）——**不得**把它写成确认的跟踪差异/误差。仅当两腿同收益类型/币种/频率时才有确认指标（`status="available"`）。基准指数代码经 `resolve_tracked_index` 统一解析（显式参数 → `CSINDEX_MAP` → 已核身份 `tracked_index.code`；**同一函数也供指数 PE 取数与 NAV 指数 MA 使用**）。两个概念不得混称：`CSINDEX_MAP` = 指数文件/PE **取数映射**（接线表），身份 `tracked_index` = 产品**跟踪身份**（原文核验）——PE 未映射 ≠ 没有收益基准，反之亦然；报告只陈述接线状态，不得据映射缺失断言产品身份。两腿对齐按**已知日期并集脊只取相邻日对且两端两腿有效**的区间（ISO/compact 归一、排序去重；缺值处两侧相邻区间整段剔除，**不得**把跨交易日收益当日频样本乘 √252），**不得**用不等长样本截短配对；区间表可不连续。**偏离口径（R3）**：TD=**窗口首末有效端点的两腿累计收益差**（缺值区间的价格变动不因剔除而消失；有效区间样本复利**不是**窗口累计偏离）；TE=采样区间日偏离波动（只覆盖 `intervals` 样本，覆盖度见底稿 `sampled_coverage`）——两者口径不得互称。`tracking.input_evidence` 冻结**真正使用的两腿底稿**（`intervals` 区间表 + `window_endpoints`/`window_returns_pct` + `sampled_coverage` + 来源 + 收益类型 + 公式）——正文复算只许按该底稿：TD 用 `window_endpoints`、TE 按 `intervals` 逐对取值；原始序列变化会改变 payload 哈希（新代）。
+- **费用**：`profile.fees`；**`current_rate_verified` 只有一个含义：报告日现行费率已核**——没有截至报告日的更新核查一律 `False`（如 510300=2024 材料=历史披露值；510880 只读到 2026-06-13 版本=版本已读但报告日未核；515050=年报实际计费口径）。版本与读取范围用 `source.version`/`source.as_of`/`source.locator`/`verified_at` 披露（不设 currency/版本布尔）。未核时呈现必须写「<as_of> 版本费率已读；报告日现行费率未核（该版本之后的调整材料未核）」，**不得**写成「现行费率已核」；引用须带 `rate_as_of`。未收录取「未收录」，不得填 0。
+- **持仓与指数分列**：`holdings.holding_scope`＝「基金披露前十大（季度报告期，**非完整持仓**）」；集中度分母=占基金资产净值、仅覆盖披露范围，**缺权重不按 0、不重归一化**。指数样本/权重走 `query_etf_index_exposure`（csindex 公开源；成分与权重文件**同日**才可拼组合，错月只分别陈述）；PCF 未接入（`holdings.pcf.status=not_connected`）——三者不得互相冒充。指数暴露为**按需函数**，默认不在报告主链。
+- **交易口径**：`premium_discount_caliber`（折溢价净值时点未知，不得据隔夜 NAV 确认实时错价）；`bid_ask_spread.status=not_available`（日成交额不得推导价差）。对冲 `hedge_coverage.verification`：静态映射=待核线索；588000 期货上线主张未核验，引用须标「待核」。
+- **数据状态**：`data_status.dimensions[*]` 五态（available/missing/not_applicable/not_executed/unknown）+ `attempted_sources`（**producer 实际调用留痕**，不是静态源表；**未发起**的腿/无 token 跳过在 `skipped_sources` 带原因；`source_trace` 区分 L2 缓存读取/本次网络并保留失败理由——已发起但失败的源留在 attempted + trace，不冒充「未尝试」；桥/getter 不可用时无信封，标「未发起（桥不可用）」，不得用 `env=None` 猜「本次网络」）+ `source_record`。`producer_status` 保留生产者原始状态，五态按**生产者实际出口**分派：`tracking` 的 `limited` 分两种——已算出 `price_benchmark_deviation`（两腿已采集、仅口径受限）记 **available**；基金腿未复权提前返回（基准腿未取、无可比计算）记 **unknown**（已采集但不可验证），不得记 available。行情来源以 `quote.source` 结构化标记为准（tencent/spot；键缺失=旧 payload → 来源未知，不得按 `_error` 文案推断回退）。维度面在股票/非股票间稳定，且实采结果不被资产类型覆盖：`holdings_evidence` 非股票未提交时记 not_applicable（依据：取证对象为持仓个股的公司公告/财报），`same_index_comparison` 无股票前置（同指数/币种/复权净值证据即可比较），未请求记 not_executed、提交即按实况。flags 只是提示标签，不代表对应检查已执行。引用报告里「已尝试的源」必须与本块一致。
+- **同代产物绑定（QC 记录）**：`<ts>.qc.json`（`report_qc.py <md> --record` 产出）记录 md/html/payload/decision 的实际 sha256 + 机器结论 + 数据/原文/人工三层签认状态。**未执行层=未执行（≠通过）**；改任一产物 → 旧记录 stale、旧签认失效。`etf.py review` 的「同代输入配对核查」逐代展示该状态；`paired` 只表示输入配对，不表示整体通过。
 
 ### 条件采集表（条件采集条目的**单一定义处**）
 
@@ -210,7 +244,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 | 函数 | 用途 |
 |------|------|
-| `query_etf_data(symbol)` | 指数 PE、行业 PE、分类、估值指引、折溢价、AUM、对冲、flags |
+| `query_etf_data(symbol)` | 身份、指数 PE、行业 PE、分类、估值指引、折溢价口径、规模代理、对冲（含核验状态）、flags |
 | `query_etf_quote(symbol)` | 现价、涨跌幅、成交 |
 | `query_etf_kline(symbol)` | 净值序列、年化波动、NAV MA20/MA60、指数 MA20/MA60、BOLL、RSI（含 `rsi_period`） |
 | `query_etf_kline_history(symbol, days)` | 历史行情深度（nav 链路优先，失败回退 baostock；`source: nav/baostock`） |
@@ -220,6 +254,19 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | `query_etf_category(symbol)` | ETF 类型标签 |
 | `query_sector_valuation_guide(sw_name)` | 行业特定估值指标指引 |
 | `query_etf_holdings(symbol)` | 前十大持仓（裸 HTTP 天天基金 jjcc 页，季度报告期）+ 集中度 top1/top5/top10（引擎计算）+ 子环节聚类合计 clusters（HOLDINGS_CLUSTER_MAP 聚合，未映射归「未归类」） |
+| `query_etf_identity(symbol)` | 身份三轴 + 原文证据（URL/读取 hash/定位/时间）+ applicability（B01） |
+| `query_etf_fees(symbol)` | 费率原文登记（`rate_as_of`/`current_rate_verified`=报告日现行已核；版本见 `source.version/as_of`；未收录=unverified 不给 0） |
+| `query_etf_index_exposure(symbol)` | 指数样本/权重按需查询 + 同期性裁决（同日才 joinable；错月只分别陈述） |
+| `query_etf_est_net_assets(symbol)` | 份额×单位净值估算资产净值（**同日**匹配才给值；否则 mismatch 不给数） |
+| `compute_etf_tracking(symbol)` | 跟踪质量块：默认 limited（价格基准）+ 研究偏离；同口径两腿才确认 TD/TE |
+| `compute_tracking_metrics(...)` | 纯计算：参数（收益类型/币种/频率）显式校验，不可比即拒绝 |
+| `build_evidence_budget(symbol, target_cov_pct=..., max_names=..., evidence=..., research_question=...)` | 持仓定向取证预算（**必填试验参数**，无默认；披露不足如实缺口）+ 证据表（`HOLDINGS_EVIDENCE_FIELDS` 八列；传 `evidence` 回填本次实读原文行，来源三件套不齐即标未取证）+ `EXTERNAL_MATERIALS_CHECKLIST` 外部材料清单 |
+| `build_data_status(...)` | 维度五态 + 实际尝试源 + 源可读性记录（B06 数据侧） |
+
+> **持仓穿透预算（按需触发，非默认轮询）**：`build_evidence_budget` 的两个参数（覆盖目标/最多只数）
+> 是**待标定试验参数**，由真实研究问题决定取值并随报告披露；只在已披露范围内选择，
+> 披露不足如实写缺口（不得以「已覆盖样本重归一化」或「未取权重」冒充 Fit 完整）。
+> 字段/材料清单同上表；个股业务证据由专项入口按需下钻后回填，不做全成分轮询。
 | `query_etf_peers(symbol, peers)` | 赛道资金流对比（Tushare 份额 20 日窗口）+ RS（基准=同赛道等权均值）；`--peers` 显式或 ETF_TO_SW_INDUSTRY 自动发现 |
 | `etf_peer_rs(closes, bench, dates, window)` | RS 序列（同共享 relative_strength 口径：RS_t=(main/bench)×100×(b0/s0)），输出 rs_latest / rs_window_start / rs_change（三数字自洽）+ 末 20 点序列 |
 | `fetch_sector_flow_snapshot()` | 同花顺行业资金流四窗口信封（即时/3/5/10 日，90 申万细分行业，大单口径亿元；东财断连独立源） |
@@ -240,8 +287,9 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 > ⚠️ 以下阈值为**本工具的筛查阈值**（工程取值，非来自监管标准或学术文献），
 > 用途是提示「值得看一眼」，**不是**对客观风险的断言。报告引用时须注明其筛查性质。
+> flags 不代表对应检查已执行（以 `data_status` 为准）。
 
-- AUM < 2 亿 → ❌ 清盘/流动性风险筛查位
+- 规模代理 < 2 亿 → ⚠️ 清盘/流动性风险**筛查位**（代理口径=份额×交易价估算，须核定期报告；不得据代理断言清盘事实）
 - 溢价 > 2% → ⚠️ 交易价相对 NAV 偏离较大（同一时点买入成本高于净值）
 - 折价 < -2% → ⚠️ 交易价相对 NAV 偏离较大（方向相反）——偏离成因未知，不推断为「结构问题」
 - 对冲 coverage `none` → ⚠️ 无期货/期权对冲
@@ -250,9 +298,16 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 ## 分析合成（必选四步）
 
-> **共享框架**：[report-conventions.md §4](../../../skills/lib/references/report-conventions.md) 分析合成框架（对抗性假设 / 致命一击 / 盲点）。以下为 ETF 视角扩展（增加估值框架展开 + 行业位置解读两步）。
+> **共享框架**：[report-conventions.md §4](../lib/references/report-conventions.md) 分析合成框架（对抗性假设 / 致命一击 / 盲点）。以下为 ETF 视角扩展（增加估值框架展开 + 行业位置解读两步）。
 
 报告按模板撰写完成后，**必须**执行以下六步合成（0/0b/1-4）。这不是 checklist——这是你的核心分析工作。
+
+> **阅读面合成纪律**（与模板「前部阅读面」配合）：
+> - 核心发现=「事实→方法→限定结论」三段式；复合结论必须把前提拆开，每个前提单独带来源与期间；
+> - 现价与逻辑背离时给出**≥2 个候选解释**（各自还缺什么证据）与**竞争解释**（什么证据会支持另一种），
+>   无法区分就写「无法以现有证据区分」；数据冲突并列陈述，不自行裁决；
+> - 观察日历必须具体到「数据/公告 + 时间节点 + 会触发什么复核」；
+> - **禁止**「已计价」「只能」「确定性」「必然」类无证据市场认知推断；未知不编（检索不到 ≠ 不存在）。
 
 ### 0. 持仓透视解读（行业/主题 ETF 必选）
 
@@ -313,7 +368,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 | ... | ... | ... |
 
 **硬约束**：
-- 至少 3 个关键假设，每个必须有可观测的证伪条件
+- 逐一列出实际关键假设（不设固定条数），每个必须有可观测的证伪条件
 - 不可证伪的假设须标注「不可验证，置信度降级」
 - 观测窗口必须是具体时间或事件节点，不能是「待观察」
 
@@ -321,9 +376,9 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 **致命一击**：用一句话回答——**如果这个分析错了，最可能是因为什么？**
 
-> **1 个月持有的最大风险**：[X 条件]。若 [Y 可观测触发]，当前分析框架的 [Z 方向性判断] 失效。
+> **框架最脆弱假设（研究自检，非持有期建议）**：[X 条件]。若 [Y 可观测触发]，当前分析框架的 [Z 方向性判断] 失效（不得自行设定持有期）。
 
-**盲点检查**（≥2 条）：
+**盲点检查**（逐条列出实际发现，不设固定条数）：
 1. 有什么重要变量完全没有被讨论？
 2. 当前共识最可能忽略什么风险？
 3. 如果一个月后回头看，今天最明显的盲点会是什么？
@@ -339,7 +394,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 
 ## Self-Check
 
-> **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + etf 专项）。
+> **共享清单**：[report-conventions.md §7](../lib/references/report-conventions.md) Self-Check（通用 + etf 专项）。
 
 发出备忘录前：
 
@@ -359,18 +414,21 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-etf/scripts/etf.p
 - [ ] **「条件采集表」内条目已按各自适用条件执行**，解读纪律见「分析合成」§0 / §0b / §0c
 - [ ] 集中度与聚类数字引用引擎字段（AI 未心算）；未映射归类标注「AI 归类」；「名义主题 vs 实际暴露」偏差已解读
 - [ ] 盘面结合已对照 pulse `zt_industry_flow`（差异名已注明）；口径声明（大单 / 日间噪声 / 证据非信号）已写入
-- [ ] 对抗性假设检验：≥3 个关键假设有可证伪条件，核心假设被检验
+- [ ] 对抗性假设检验：实际成立的关键假设均有可证伪条件（不设固定条数），核心假设被检验
 - [ ] 致命一击：一句话条件式风险归纳，指向可观测失效条件
-- [ ] 盲点检查：≥2 条盲点发现
+- [ ] 盲点检查：实际盲点逐条列出（不设固定条数，不得为空）
 - [ ] 关键矛盾已识别（如 CAPEX 总量降 vs 算力增），不是数据点的罗列
 - [ ] 文件名包含实际北京时间（非硬编码）
 - [ ] 极值断言（峰值/最大/最低）基于全量序列 Python 聚合，非打印子集（R1）
 - [ ] 无「Python calc 视角/复算一致/自洽校验」类未实跑标注——来源标注仅两种：引擎字段 / `[来源: Python calc: formula]`（共享规范 §2.3 强制行为 5-7）
 - [ ] 检索/新闻口径数字带「检索摘要口径，出处待核实」标注，未归因到未读原文的媒体（R2）
 - [ ] 计数经 Python（`len()`），无目视计数（R3）
+- [ ] **前部阅读面已写分析**（非标题）：核心发现=事实→方法→限定结论三段式（前提带来源/期间）、五问有回答、核验状态前置（含冲突/现价-逻辑背离的候选与竞争解释、观察日历、未知清单）、宏观（如适用）国内/海外分栏
+- [ ] 无「已计价/只能/必然/确定性」类无证据市场认知推断；未知项已列，未编造
 - [ ] **机器层准出（写入后必跑，非可选）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明
+- [ ] **QC 记录已落盘**（产物齐备后）：`report_qc.py <md> --fail-on error --record [--signoff …]` → `<ts>.qc.json` 绑定 md/html/payload/decision sha256；数据/原文/人工三层按实际执行签认，未执行写 not_executed
 - [ ] **复盘原料 sidecar 已落盘**：`decision SYMBOL --init` → 填写 `scenarios`/`falsifiers` → `--from`（退出 0）；**无假设的报告也要落盘**（最小 schema 五键），否则「有/没有 sidecar」不可机器区分
-- [ ] **报告复检流程已执行**（[delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§5 第 0 层机器准出 + 三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果
+- [ ] **报告复检流程已执行**（[delivery-qc.md](../lib/references/delivery-qc.md) §2–§5 第 0 层机器准出 + 三层：数字对照→合规核对→逻辑自洽），并向用户汇报复检结果
 
 ---
 

@@ -68,7 +68,7 @@ def _fixture_payload() -> dict:
             "tracking_error_note": "跟踪误差需 ETF 净值与指数点位序列对比，当前引擎未实现；请勿填写估算数字",
             "hedge_coverage": {"index": "931079", "futures": None, "options": None,
                                "coverage": "none"},
-            "flags": ["⚠️ 该 ETF 无可用的期货/期权对冲工具"],
+            "flags": ["⚠️ 静态表未收录该 ETF 的期货/期权对冲工具（未核；不表示不存在）"],
             "_errors": [],
         },
         "quote": {"symbol": "515050", "price": 1.036, "change_pct": -1.33,

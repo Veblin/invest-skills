@@ -411,7 +411,7 @@ Shell CLI 的 `journal.py add` **已移除**（v0.2.4 清理，无调用方）�
 | 脚本 | 用途 | 何时调用 |
 |------|------|---------|
 | `query_data.py` → `query_for_evaluation(symbol, asset_type)` | PE/波动率/RSI/宏观 + 微观结构快照 | 所有评估（个股/ETF） |
-| `market_microstructure.py` → `snapshot()` | 两融/涨跌比/涨跌停/成交额（亦可单独调） | 所有评估；`query_for_evaluation` 已内嵌 |
+| `market_microstructure.py` → `snapshot()` | 两融/涨跌比/涨跌停/成交额（亦可单独调；A03 起 canonical 在 `skills/lib/market_microstructure.py`，本目录文件为同实例兼容 shim） | 所有评估；`query_for_evaluation` 已内嵌 |
 | `etf_data.py` → `query_etf_data(symbol)` | 指数PE/折溢价/AUM/对冲（shim → invest-a-etf） | ETF 评估 |
 | `db.py` → `search_by_symbol(symbol)` | 历史日志关联 | 卖出评估 |
 
@@ -460,7 +460,7 @@ print(json.dumps(query_etf_data('563300'), ensure_ascii=False, indent=2))
 - AUM < 2 亿 → ❌ 清盘/流动性风险
 - 溢价 > 2% → ⚠️ 买入成本偏高
 - 折价 < -2% → ⚠️ 可能存在结构问题
-- 对冲覆盖 "none" → ⚠️ 无可用的期货/期权对冲工具
+- 对冲覆盖 "none" → ⚠️ 静态表未收录期货/期权对冲工具（未核；不表示不存在——不得写成「无可用的对冲工具」）
 
 ---
 

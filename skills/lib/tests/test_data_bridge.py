@@ -234,7 +234,12 @@ def test_get_etf_attr_missing_returns_none(tmp_path, monkeypatch):
 
 
 def test_get_microstructure_cached(tmp_path, monkeypatch):
-    """microstructure 走 5min TTL 缓存：两次调用只回源一次。"""
+    """microstructure 走 5min TTL 缓存：两次调用只回源一次。
+
+    A04：provider 解析经 `load_journal_module`（显式 loader），seam = patch
+    该 loader 返回伪 canonical 模块（旧 seam 是 sys.modules 种入裸名，
+    已随「不再裸 import」迁移）。
+    """
     monkeypatch.setattr(data_bridge, "_cache", DataCache(cache_dir=tmp_path / "cache"))
     calls = {"n": 0}
 
@@ -245,13 +250,22 @@ def test_get_microstructure_cached(tmp_path, monkeypatch):
     import types
     fake_mod = types.ModuleType("market_microstructure")
     fake_mod.snapshot = fake_snapshot
-    monkeypatch.setitem(sys.modules, "market_microstructure", fake_mod)
+    monkeypatch.setattr(data_bridge, "load_journal_module", lambda: fake_mod)
 
     first = data_bridge.get_microstructure()
     second = data_bridge.get_microstructure()
     assert first["date"] == "20260803"
     assert second["_from_cache"] is True
     assert calls["n"] == 1
+
+
+def test_get_microstructure_loader_missing_degrades(monkeypatch):
+    """journal canonical 缺失 → None + warning（不抛出；旧语义保持一致）。"""
+    def boom():
+        raise ImportError("journal canonical missing")
+
+    monkeypatch.setattr(data_bridge, "load_journal_module", boom)
+    assert data_bridge.get_microstructure() is None
 
 
 def test_invalidate_symbol_covers_etf_dims(fake_etf_bridge):
@@ -411,6 +425,50 @@ def test_get_etf_holdings_clusters_enrich_failure_sets_error(monkeypatch, tmp_pa
     assert env["status"] == "ok"
     assert env["clusters"] is None
     assert env["clusters_error"] == "RuntimeError: boom"
+
+
+def test_get_etf_holdings_clusters_compat_not_persisted_to_cache(monkeypatch, tmp_path):
+    """A04：clusters 只写返回副本、经 ETF **公开** API 计算——缓存文件保持原始信封。
+
+    负例要点：伪 ETF 模块只提供 `build_holdings_clusters`（公开名），若桥仍
+    调私有 `_build_holdings_clusters` 会 AttributeError → clusters_error。
+    缓存文件不得出现 clusters/clusters_error 键（领域计算不进访问层缓存）。
+    """
+    import json as _json
+    import types
+
+    monkeypatch.setattr(data_bridge, "_cache", DataCache(cache_dir=tmp_path / "cache"))
+    rows = [{"code": "300750", "name": "宁德时代", "pct": 4.2}]
+    monkeypatch.setattr(
+        data_bridge, "_import_etf_attr",
+        lambda attr: lambda *a, **k: {
+            "status": "ok",
+            "rows": rows,
+            "report_date": "2026-06-30", "quarter": "2026Q2",
+        },
+    )
+
+    def _public_clusters(r):
+        return [{"cluster": "电池", "sum_pct": 4.2, "members": list(r)}]
+
+    monkeypatch.setattr(
+        data_bridge, "load_invest_a_etf_module",
+        lambda: types.SimpleNamespace(build_holdings_clusters=_public_clusters),
+    )
+
+    env = data_bridge.get_etf_holdings("159206", force=True)
+    assert env["clusters"] == [{"cluster": "电池", "sum_pct": 4.2, "members": rows}]
+    assert "clusters_error" not in env
+
+    entry_path = data_bridge._cache._cache_path("etf_holdings", "159206")
+    cached = _json.loads(entry_path.read_text(encoding="utf-8"))["data"]
+    assert "clusters" not in cached and "clusters_error" not in cached
+    assert cached["rows"] == rows
+
+    # 缓存命中路径同样：返回副本富化、文件保持原始
+    env2 = data_bridge.get_etf_holdings("159206")
+    assert env2["_from_cache"] is True
+    assert env2["clusters"] == [{"cluster": "电池", "sum_pct": 4.2, "members": rows}]
 
 
 def test_collector_legacy_reexports_full_contract() -> None:

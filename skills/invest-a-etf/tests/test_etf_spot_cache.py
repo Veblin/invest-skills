@@ -23,14 +23,11 @@ def _reset_spot_cache():
 
 
 def _clear_spot_caches() -> None:
-    """清空所有 etf_data 实例的 L1 进程内缓存。
+    """清空 etf_data 的 L1 进程内缓存（30s TTL）。
 
-    测试直接 import 的 `etf_data` 与 data_bridge 经
-    invest_path.load_invest_a_etf_module() 按固定名 `invest_a_etf_etf_data`
-    加载的 canonical 实例是同一文件的两个独立模块对象，各持一份
-    _SPOT_CACHE_DF/_SPOT_CACHE_TS（30s TTL）。只清测试侧实例会让
-    canonical 实例的 L1 在文件/全量顺序下保持热（前一测试已回源写入），
-    使 test_spot_served_by_l2_when_l1_cold 首查零网络（v0.2.4 测试隔离修复）。
+    R2/A04 后 `etf_data` 与 `invest_a_etf_etf_data` 是**同一模块对象**
+    （loader 按文件识别复用，见 skills/lib/tests/test_r2_module_identity.py）；
+    仍按两个名字遍历清缓存——防御历史/边缘路径下别名未注册时的残留实例。
     """
     for name in ("etf_data", "invest_a_etf_etf_data"):
         mod = sys.modules.get(name)

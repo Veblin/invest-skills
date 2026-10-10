@@ -573,7 +573,8 @@ def test_dry_run_all_packages_within_200(tmp_path):
 def test_source_files_untouched():
     md = (b.SKILLS_DIR / "invest-a-stock" / "SKILL.md").read_text(encoding="utf-8")
     assert "skills/invest-a-stock/scripts/invest.py" in md
-    assert "../../../skills/lib/references/" in md
+    assert "../lib/references/" in md
+    assert (b.SKILLS_DIR / "invest-a-stock" / "../lib/references/report-conventions.md").is_file()
     assert "Step 0" not in md
     etf_py = (b.SKILLS_DIR / "invest-a-etf" / "scripts" / "etf.py").read_text(encoding="utf-8")
     assert "from etf_data import" in etf_py                     # 源文件裸导入保留

@@ -10,13 +10,17 @@ from __future__ import annotations
 
 from typing import Any
 
+
 from etf_data import (
     ETF_TO_SW_INDUSTRY,
     _bridge_get,
     _lookup_etf_spot_row,
+    query_etf_est_net_assets,
     query_etf_kline,
     query_etf_share_history,
 )
+
+from nums import safe_float  # noqa: E402 — etf_data 已引导共享路径
 
 _PEER_NAV_DAYS = 60       # 每只 NAV 取数窗口（交易日）；RS 20 日变化需 ≥21 个对齐点
 _RS_WINDOW = 20           # RS 变化窗口（交易日）
@@ -252,4 +256,217 @@ def query_etf_peers(symbol: str, peers: list[str] | None = None) -> dict[str, An
         "rs": rs,
         "names": names,
         "notes": notes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# B02：同指数产品的**实现质量有限比较**（不排名）
+# ---------------------------------------------------------------------------
+
+#: 同指数比较的证据字段（每只产品必须有官方材料定位；URL 存在 ≠ 已读）
+SAME_INDEX_EVIDENCE_FIELDS = (
+    "index_code", "index_name", "fund_name", "source_type", "url",
+    "as_of", "read_at", "sha256", "locator",
+)
+
+
+def _same_index_nav_leg(code: str, days: int) -> dict[str, Any]:
+    """同指数比较的净值腿：复权（前复权）净值序列；未复权/不可得 = 不参与比较。
+
+    口径与主报告跟踪块一致：复权净值（≈总收益）才可与同指数产品比收益口径；
+    未复权（分红/拆分断点未消除）不得参与可比窗口（B02 反例：分红拆分跳变）。
+    """
+    kline = query_etf_kline(code, days=days)
+    if kline.get("status") != "available" or not kline.get("nav_history"):
+        return {"status": "missing", "symbol": code,
+                "note": kline.get("_error") or "净值序列不可得"}
+    if not kline.get("adj_applied"):
+        return {"status": "missing", "symbol": code,
+                "note": "基金腿未复权（分红/拆分断点未消除）：不参与同指数收益比较"}
+    return {
+        "status": "ok", "symbol": code,
+        "source": kline.get("source"),
+        # 键用 ISO 日期（同窗披露/复算可读；_aligned_nav_map 的原键为 compact）
+        "values": {_iso_date(d): v
+                   for d, v in _aligned_nav_map(kline["nav_history"]).items()},
+        "attempted_sources": list(kline.get("attempted_sources") or []),
+    }
+
+
+def _iso_date(compact: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD（非 8 位数字原样返回，不猜）。"""
+    d = str(compact)
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 and d.isdigit() else d
+
+
+def _same_index_fee_row(code: str, ev: dict[str, Any] | None) -> dict[str, Any]:
+    """费率行只出自**本次读取的官方材料**（evidence）；未读 = not_collected。
+
+    不查产品注册表、不用渠道页费率、不给估计值；材料版本与定位随行冻结。
+    """
+    if not ev:
+        return {"status": "not_collected", "symbol": code, "items": [], "source": None,
+                "note": "未读该产品官方费率材料（不猜、不用渠道页；URL 存在 ≠ 已读）"}
+    missing = [k for k in ("url", "sha256", "locator") if not ev.get(k)]
+    if missing:
+        return {"status": "invalid_evidence", "symbol": code, "items": [],
+                "source": None,
+                "note": f"证据缺少 {'/'.join(missing)}（须 URL+sha256+原文定位）"}
+    items = ev.get("fee_items")
+    if items is None or items == []:
+        return {"status": "not_collected", "symbol": code, "items": [],
+                "source": None, "note": "材料未回填费率条目（身份材料不等于费用取数）"}
+    if not isinstance(items, list) or any(
+        not isinstance(i, dict) or not isinstance(i.get("name"), str)
+        or not i["name"].strip() or isinstance(i.get("annual_rate_pct"), bool)
+        or safe_float(i.get("annual_rate_pct")) is None
+        or safe_float(i.get("annual_rate_pct")) < 0 for i in items
+    ):
+        return {"status": "invalid_evidence", "symbol": code, "items": [],
+                "source": None, "note": "费率条目须有名称与有限非负 annual_rate_pct"}
+    return {
+        "status": "ok", "symbol": code,
+        "items": [dict(i) for i in items],
+        "source": {k: ev.get(k) for k in
+                   ("source_type", "url", "as_of", "read_at", "sha256", "locator",
+                    "version")},
+        "note": ev.get("note"),
+    }
+
+
+_IDENTITY_EVIDENCE_FIELDS = ("source_type", "url", "as_of", "read_at", "sha256", "locator")
+
+
+def _missing_identity_evidence(ev: dict[str, Any]) -> list[str]:
+    """指数/币种声明须绑定已读取官方材料的来源、版本日期与原文定位。"""
+    return [k for k in _IDENTITY_EVIDENCE_FIELDS
+            if not isinstance(ev.get(k), str) or not ev[k].strip()]
+
+
+def same_index_quality_comparison(
+    symbol: str,
+    peers: list[str],
+    *,
+    index_code: str,
+    index_name: str | None = None,
+    evidence: dict[str, dict[str, Any]] | None = None,
+    window_days: int = 250,
+) -> dict[str, Any]:
+    """同指数产品的实现质量**有限比较**（B02；不排名，不做单一指标裁决）。
+
+    可比性先核验（缺一即降为 limited/缺口，不硬凑比较）：
+
+    - **同指数**：每只产品的指数身份来自本次读取的官方材料（``evidence`` 的
+      ``index_code``，须附 source_type/url/as_of/read_at/sha256/locator），
+      与 ``index_code`` 不一致/证据不完整 → 该行标记不可比；
+    - **币种**：来自官方材料（境内产品 CNY）；未知不推定；
+    - **期间**：所有可比产品取**同一交集日期窗**（同起止），窗内缺值使窗收缩，
+      各行披露实际覆盖；
+    - **收益口径**：统一用复权净值收益（≈总收益）；未复权/不可得 → 该行不参与。
+
+    指标（有则列示，无则明确缺口）：同窗收益、费率（官方材料）、估算资产净值
+    （既有口径，标注非官方）。输出显式 ``ranking: None``——不同产品的差异受
+    费率/跟踪/现金流/申赎摩擦等多因素影响，本比较不裁决优劣、不重复扣费用。
+    """
+    codes = list(dict.fromkeys([symbol, *peers]))
+    evidence = evidence or {}
+    rows: list[dict[str, Any]] = []
+    nav_legs: dict[str, dict[str, Any]] = {}
+    for code in codes:
+        leg = _same_index_nav_leg(code, window_days)
+        nav_legs[code] = leg
+        try:
+            ena = query_etf_est_net_assets(code)  # 既有口径（同日份额×净值，非官方）
+        except Exception as exc:  # pragma: no cover — 单只失败不阻断比较
+            ena = {"status": "error", "note": str(exc)}
+        ena_row = ({"status": ena.get("status"), "value_yi": ena.get("value_yi"),
+                    "as_of": ena.get("as_of"), "caliber": ena.get("caliber")}
+                   if ena.get("status") == "ok"
+                   else {"status": ena.get("status"), "note": ena.get("note")})
+        rows.append({
+            "symbol": code,
+            "name": (evidence.get(code) or {}).get("fund_name") or _peer_name(code),
+            "index": {
+                "code": (evidence.get(code) or {}).get("index_code"),
+                "name": (evidence.get(code) or {}).get("index_name"),
+                "declared_same_index":
+                    bool((evidence.get(code) or {}).get("index_code") == index_code
+                         and not _missing_identity_evidence(evidence.get(code) or {})),
+                "evidence": ({k: (evidence.get(code) or {}).get(k)
+                              for k in ("source_type", "url", "as_of", "read_at",
+                                        "sha256", "locator")}
+                             if evidence.get(code) else None),
+            },
+            "currency": (evidence.get(code) or {}).get("currency"),
+            "return_type": "复权净值收益（≈总收益）",
+            "nav": ({"status": leg["status"], "note": leg.get("note")}
+                    if leg["status"] != "ok" else {"status": "ok"}),
+            "fees": _same_index_fee_row(code, evidence.get(code)),
+            "est_net_assets": ena_row,
+            "window_return_pct": None,
+            "status": "limited",
+        })
+
+    # 同窗（交集）——可比行 = 官方材料声明同指数 + 币种一致 + 净值腿复权可用；
+    # 任一前置不满足 → 该行 not_comparable（明确缺口，不缩小口径凑数）
+    comparable: list[str] = []
+    for row in rows:
+        code = row["symbol"]
+        ev = evidence.get(code) or {}
+        reasons: list[str] = []
+        missing = _missing_identity_evidence(ev)
+        if missing:
+            reasons.append("官方材料证据缺少 " + "/".join(missing))
+        if ev.get("index_code") != index_code:
+            reasons.append("官方材料未声明同指数（或未读材料）")
+        if ev.get("currency") != "CNY":
+            reasons.append("币种未由官方材料确认（不推定）")
+        if nav_legs[code]["status"] != "ok":
+            reasons.append(nav_legs[code].get("note") or "净值腿不可用")
+        row["comparability_reasons"] = reasons
+        if not reasons:
+            comparable.append(code)
+    common_window: dict[str, Any] | None = None
+    window_returns: dict[str, float] = {}
+    if len(comparable) >= 2:
+        common = sorted(set.intersection(*[set(nav_legs[c]["values"]) for c in comparable]))
+        if len(common) >= 2:
+            common_window = {"start": common[0], "end": common[-1], "n_dates": len(common)}
+            for c in comparable:
+                vals = nav_legs[c]["values"]
+                window_returns[c] = round((vals[common[-1]] / vals[common[0]] - 1) * 100, 4)
+    for row in rows:
+        code = row["symbol"]
+        in_window = code in window_returns
+        if in_window:
+            row["window_return_pct"] = window_returns[code]
+        row["status"] = ("comparable" if in_window
+                         else ("limited" if not row["comparability_reasons"]
+                               else "not_comparable"))
+    excluded = [r for r in rows if r["status"] == "not_comparable"]
+    gaps: list[str] = []
+    for r in excluded:
+        gaps.append(f"{r['symbol']} 不可比：" + "；".join(r["comparability_reasons"]))
+    if len(comparable) < 2:
+        gaps.append("可比产品不足 2 只：无法做同指数实现质量比较（明确缺口，不猜源）")
+    if common_window is None and len(comparable) >= 2:
+        gaps.append("同窗交集不足 2 个交易日：同窗收益不可算")
+    return {
+        "status": "ok" if len(comparable) >= 2 and common_window else "limited",
+        "index_code": index_code,
+        "index_name": index_name,
+        "window_days": window_days,
+        "common_window": common_window,
+        "comparability": {
+            "index": "官方材料声明（逐行 evidence；未读不推定）",
+            "currency": "官方材料；未知不推定",
+            "period": "交集日期窗（同起止；缺值使窗收缩并逐行披露）",
+            "return_type": "复权净值收益（≈总收益）；未复权不参与",
+        },
+        "rows": rows,
+        "ranking": None,
+        "no_ranking_note": "不排名、不裁决优劣：差异受费率/跟踪/现金流/申赎摩擦等多因素"
+                           "影响；费率已在净值中体现，不重复扣减",
+        "gaps": gaps,
+        "note": "同指数实现质量有限比较（B02）：无指标即明确缺口，不用不同指数排序替代",
     }

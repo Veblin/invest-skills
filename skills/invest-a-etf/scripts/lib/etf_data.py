@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import threading
 import time
 from datetime import datetime
@@ -153,6 +154,11 @@ CSINDEX_MAP: dict[str, str] = {
     "159949": "399673",   # 创业板50
     "515050": "931079",   # 中证5G通信主题指数（已核实 2026-08-11）
     "516160": "399808",   # 中证新能源指数（已核实 2026-09-07：csindex 市盈率1/2 单窗 20 行可得）
+    # R12：510880 身份登记（verified_original）标的=上证红利指数 000015，但 PE 取数
+    # 映射曾缺此条 → 报告写「尚无 csindex 指数代码映射」而 tracking 腿又用 000015，
+    # 自相矛盾。2026-10-09 实测 csindex PE 文件可得（市盈率1=9.22，单窗 20 行，
+    # 日期 2026-10-09）→ 登记同一代码，PE 腿与跟踪身份腿统一。
+    "510880": "000015",   # 上证红利指数（实测 2026-10-09）
 }
 
 
@@ -162,6 +168,13 @@ CSINDEX_MAP: dict[str, str] = {
 
 # ETF 代码 → 类型标签。已覆盖 HEDGE_MAP 所有条目 + 主流行业/主题 ETF。
 # 未列出的 ETF 通过 fund_etf_category_sina 动态查询或名称关键词推断。
+#
+# v0.3.2 B01-1：本表保留为**兼容单轴标签**（category 字段消费方不变），
+# 新增消费请用 identity.axes（资产/通道/策略三轴）。两处修正均来自官方原文核验：
+# - 510880 原误标 `bond`（"红利ETF归类为bond策略"）→ `factor`（上证红利指数：
+#   股息率前 50 只选样，股票型；原文=华泰柏瑞 2026-06-13 更新招募说明书）；
+# - 515050 原 `sector` → `thematic`（基金全称含「中证 5G 通信主题指数」，
+#   原文=华夏基金 2025 年年度报告，披露 2026-03-31）。
 _ETF_CATEGORY_MAP: dict[str, str] = {
     # 宽基
     "510050": "broad_market", "510300": "broad_market", "510500": "broad_market",
@@ -170,21 +183,520 @@ _ETF_CATEGORY_MAP: dict[str, str] = {
     # 行业
     "515790": "sector", "516970": "sector", "512480": "sector", "512690": "sector",
     "512010": "sector", "512760": "sector", "516160": "sector", "159995": "sector",
-    "512800": "sector", "512200": "sector", "515050": "sector", "515880": "sector",
+    "512800": "sector", "512200": "sector", "515880": "sector",
     "512660": "sector", "512710": "sector",
+    # 主题（原文核验：中证 5G 通信主题指数）
+    "515050": "thematic",
+    # 因子/策略（原文核验：上证红利指数股息率选样，股票型）
+    "510880": "factor",
     # 跨境
     "513100": "cross_border", "513500": "cross_border",
     # 商品
     "518880": "commodity",
-    # 债券/货币
-    "511880": "money_market", "510880": "bond",  # 红利ETF归类为bond策略
+    # 货币
+    "511880": "money_market",
 }
 
 _CATEGORY_LABELS: dict[str, str] = {
     "broad_market": "宽基ETF", "sector": "行业ETF", "thematic": "主题ETF",
     "cross_border": "跨境ETF", "bond": "债券ETF", "commodity": "商品ETF",
-    "money_market": "货币ETF",
+    "money_market": "货币ETF", "factor": "因子/策略ETF",
+    # R03：推断兜底返回 "unknown" 时 label 必须同为中文「未知」——旧表缺此键使
+    # sina/name 推断路径渲染英文 "unknown"，与 source=none 路径的中文「未知」不一致。
+    "unknown": "未知",
 }
+
+
+# ---------------------------------------------------------------------------
+# 产品身份（B01-1，v0.3.2）：三轴 + 原文证据 + 适用性
+# ---------------------------------------------------------------------------
+
+# 身份登记：先核原文再登记（evidence 带 URL/日期/摘录/核验日/sha256）。
+# 未登记代码按 category 推导为 `mapped_unverified`（静态映射待核），
+# 名称关键词推断为 `inferred_unverified`——两者都不得当作已核事实使用。
+#
+# 三轴词表：
+#   asset_type: stock / bond / commodity / money_market / unknown
+#   channel:    domestic / cross_border / unknown
+#   strategy:   broad_market / sector / thematic / factor / unknown
+# （管理方式 management: passive / enhanced / active / unknown 为附轴）
+ETF_IDENTITY: dict[str, dict] = {
+    "510300": {
+        "fund_name": "华泰柏瑞沪深300交易型开放式指数证券投资基金",
+        "asset_type": "stock", "channel": "domestic", "strategy": "broad_market",
+        "management": "passive", "currency": "CNY",
+        "tracked_index": {"name": "沪深300", "code": "000300"},
+        "verification": {"status": "verified_original", "verified_at": "2026-10-08",
+                         "note": "交易所公告 + 管理人产品资料概要（2024-06-20 编制）原文核验"},
+        "evidence": [
+            {"claim": "基金名称/代码/上市地",
+             "source_type": "上交所基金公告（做市服务，2026-06-11）",
+             "url": "https://www.sse.com.cn/disclosure/announcement/general/jjzssgg/c/c_20260611_10821513.shtml",
+             "as_of": "2026-06-11",
+             "quote": "华泰柏瑞沪深300交易型开放式指数证券投资基金（基金代码：510300）提供主做市服务。",
+             "read_at": "2026-10-08", "verified_at": "2026-10-08",
+             "locator": "公告正文（本机 HTTP 200，去除脚本后正文提取）",
+             "sha256": "2be1b8bc1f713ed4381607e00a1c31ae517a4dceb1fc73cd471099000d555dd2"},
+            {"claim": "资产类型/复制方式/基准",
+             "source_type": "基金产品资料概要更新（管理人，编制 2024-06-20）",
+             "url": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2024-06-20/510300_20240620_7SNV.pdf",
+             "as_of": "2024-06-20",
+             "quote": "基金类型 股票型；业绩比较基准 沪深300指数；本基金主要采取完全复制法",
+             "read_at": "2026-10-08", "verified_at": "2026-10-08",
+             "locator": "§一 产品概况 / §二(一) 投资目标与投资策略（pdftotext 前 2 页）",
+             "sha256": "320ddbf8a84c126a13227862445c507d0a9828b015d989972ed19fa248fda9e4",
+             "note": "费率 0.5%/0.1% 为 2024 历史披露值（见 ETF_FEE_SCHEDULE.current_rate_verified=False）"},
+        ],
+    },
+    "515050": {
+        "fund_name": "华夏中证 5G 通信主题交易型开放式指数证券投资基金",
+        "asset_type": "stock", "channel": "domestic", "strategy": "thematic",
+        "management": "passive", "currency": "CNY",
+        "tracked_index": {"name": "中证 5G 通信主题指数", "code": "931079"},
+        "verification": {"status": "verified_original", "verified_at": "2026-10-08",
+                         "note": "管理人 2025 年年度报告原文核验（披露 2026-03-31）"},
+        "evidence": [
+            {"claim": "基金名称/主代码/上市地/生效日",
+             "source_type": "基金 2025 年年度报告（管理人华夏基金，披露 2026-03-31）",
+             "url": "https://www.chinaamc.com/upload/resources/file/2026/03/31/cc00948747a74f66984d8ecff8214cac.pdf",
+             "as_of": "2025-12-31（报告期）", "quote": "基金名称 华夏中证 5G 通信主题交易型开放式指数证券投资基金；基金主代码 515050",
+             "read_at": "2026-10-08", "verified_at": "2026-10-08",
+             "locator": "§2.1 基金基本情况（物理 PDF 第 4 页；文内页码 3）",
+             "sha256": "382123a4277fe99dc7271a05003ce9382eb85aae96a496572d69ee505e7a8545"},
+            {"claim": "资产类型/基准指数",
+             "source_type": "同上（§2.2 基金产品说明）", "url": "同上", "as_of": "2025-12-31（报告期）",
+             "quote": "本基金为股票基金；业绩比较基准 中证 5G 通信主题指数收益率",
+             "read_at": "2026-10-08", "verified_at": "2026-10-08",
+             "locator": "§2.2（物理 PDF 第 4 页；文内页码 3）",
+             "sha256": "382123a4277fe99dc7271a05003ce9382eb85aae96a496572d69ee505e7a8545"},
+        ],
+    },
+    "510880": {
+        "fund_name": "上证红利交易型开放式指数证券投资基金",
+        "asset_type": "stock", "channel": "domestic", "strategy": "factor",
+        "management": "passive", "currency": "CNY",
+        "tracked_index": {"name": "上证红利指数", "code": "000015"},
+        "verification": {"status": "verified_original", "verified_at": "2026-10-08",
+                         "note": "交易所公告 + 管理人 2026 年第 1 号更新招募说明书原文核验"},
+        "evidence": [
+            {"claim": "基金名称/代码/上市地",
+             "source_type": "上交所基金公告（做市服务，2026-05-28）",
+             "url": "https://www.sse.com.cn/disclosure/announcement/general/jjzssgg/c/c_20260528_10820053.shtml",
+             "as_of": "2026-05-28", "quote": "上证红利交易型开放式指数证券投资基金（基金代码：510880）提供主做市服务。",
+             "read_at": "2026-10-08", "verified_at": "2026-10-08",
+             "locator": "公告正文（本机 HTTP 200；标题行含「上证红利交易型开放式指数证券投资基金」）",
+             "sha256": "d77e828d1b27ec3ca6cce96f532d5c54afe153e728d59042379f3de031a47cd1"},
+            {"claim": "资产类型/策略（因子）/标的指数",
+             "source_type": "更新招募说明书（管理人华泰柏瑞，2026 年第 1 号，2026-06-13）",
+             "url": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2026-06-13/510880_20260613_RW6R.pdf",
+             "as_of": "2026-06-13",
+             "quote": "本基金的标的指数为上证红利指数；按照过去三年平均现金股息率由高到低排名，选取排名靠前的 50 只证券作为指数样本",
+             "read_at": "2026-10-08", "verified_at": "2026-10-08",
+             "locator": "重要提示「标的指数」段（PDF 第 2 页）",
+             "sha256": "43d294020119e07333c7f600902cad313ebfbd2668d234003a50648f4627b197",
+             "note": "费率 0.5%/0.1%（contract_disclosure，现行招募说明书面）；资产类型=股票（非债券），策略=股息率选样因子"},
+        ],
+    },
+    # 已收录但未经本轮原文核验的静态映射（mapped_unverified；使用须注明待核）
+    "518880": {"asset_type": "commodity", "channel": "domestic", "strategy": "unknown",
+               "tracked_index": {"name": "黄金9999", "code": None}},
+    "511880": {"asset_type": "money_market", "channel": "domestic", "strategy": "unknown",
+               "tracked_index": {"name": "银华日利", "code": None}},
+    "513100": {"asset_type": "stock", "channel": "cross_border", "strategy": "unknown",
+               "tracked_index": {"name": "纳指100", "code": None}},
+    "513500": {"asset_type": "stock", "channel": "cross_border", "strategy": "unknown",
+               "tracked_index": {"name": "标普500", "code": None}},
+    "159920": {"asset_type": "stock", "channel": "cross_border", "strategy": "unknown",
+               "tracked_index": {"name": "恒生ETF", "code": None}},
+    "513050": {"asset_type": "stock", "channel": "cross_border", "strategy": "unknown",
+               "tracked_index": {"name": "中概互联", "code": None}},
+    "159941": {"asset_type": "stock", "channel": "cross_border", "strategy": "unknown",
+               "tracked_index": {"name": "纳指ETF", "code": None}},
+}
+
+# 费率登记（原文）：逐条带 rate_as_of / evidence_type / current_rate_verified。
+# **`current_rate_verified` 只有一个含义（R3 恢复原义）：报告日现行费率已核**——
+# 材料版本已读 ≠ 报告日现行已核；无「截至报告日的更新核查」一律 False。
+# 版本信息用 source 元信息披露（source.version / as_of / locator / verified_at），
+# 不另设 currency/版本布尔（不做第二套并行现行性合同）。区分三种未核形态
+# （由 evidence_type + source 表达）：历史披露值（2024 材料，非现行证据）、
+# 合同文件版本已读（版本之后调整未核）、年报实际计费口径（非合同费率核验）。
+# 未登记的代码 → query_etf_fees 返回 unverified（不给 0，不猜测）。每份材料
+# 记录实际读取内容的 sha256 / 页或章节定位 / 读取时间（URL 存在 ≠ 已读）。
+ETF_FEE_SCHEDULE: dict[str, dict] = {
+    "510300": {
+        "items": [
+            {"name": "管理费", "annual_rate_pct": 0.5, "basis": "基金资产净值",
+             "rate_as_of": "2024-06-20（产品资料概要）"},
+            {"name": "托管费", "annual_rate_pct": 0.1, "basis": "基金资产净值",
+             "rate_as_of": "2024-06-20（产品资料概要）"},
+        ],
+        "evidence_type": "historical_disclosure_only",
+        "current_rate_verified": False,   # 报告日现行费率未核（材料为 2024 版）
+        "source": {
+            "source_type": "基金产品资料概要更新（管理人，编制 2024-06-20）",
+            "version": "产品资料概要更新（2024-06-20 编制）",
+            "url": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2024-06-20/510300_20240620_7SNV.pdf",
+            "as_of": "2024-06-20",
+            "read_at": "2026-10-08",
+            "sha256": "320ddbf8a84c126a13227862445c507d0a9828b015d989972ed19fa248fda9e4",
+            "locator": "费用表（管理费 0.5% / 托管费 0.1%，物理 PDF 第 3 页）",
+            "note": "2024 年材料：**只作历史披露值**，报告日现行费率未核（须以最新招募说明书复核心）",
+        },
+        "verified_at": "2026-10-08",
+    },
+    "515050": {
+        "items": [
+            {"name": "管理费", "annual_rate_pct": 0.5, "basis": "前一日基金资产净值",
+             "rate_as_of": "2025-12-31（2025 年年度报告计费费率）"},
+            {"name": "托管费", "annual_rate_pct": 0.1, "basis": "前一日基金资产净值",
+             "rate_as_of": "2025-12-31（2025 年年度报告计费费率）"},
+        ],
+        "evidence_type": "annual_report_actual",
+        "current_rate_verified": False,   # 报告日现行合同费率未核（年报为实际计费口径）
+        "source": {
+            "source_type": "基金 2025 年年度报告（报表附注 7.4.10.2）",
+            "version": "2025 年年度报告（披露日 2026-03-31）",
+            "url": "https://www.chinaamc.com/upload/resources/file/2026/03/31/cc00948747a74f66984d8ecff8214cac.pdf",
+            "as_of": "2025-12-31（报告期）",
+            "read_at": "2026-10-08",
+            "sha256": "382123a4277fe99dc7271a05003ce9382eb85aae96a496572d69ee505e7a8545",
+            "locator": "报表附注 7.4.10.2.1 管理费（物理 PDF 第 36 页；文内页码 35）；"
+                       "附注 7.4.10.2.2 托管费（物理 PDF 第 37 页；文内页码 36）；"
+                       "费用附录另见物理第 58 页",
+            "note": "当期实际计费年费率；报告日现行合同费率未核（须以最新招募说明书核验；原文注明销售服务费：无）",
+        },
+        "verified_at": "2026-10-08",
+    },
+    "510880": {
+        "items": [
+            {"name": "管理费", "annual_rate_pct": 0.5, "basis": "前一日基金资产净值",
+             "rate_as_of": "2026-06-13（更新招募说明书 2026 年第 1 号）"},
+            {"name": "托管费", "annual_rate_pct": 0.1, "basis": "前一日基金资产净值",
+             "rate_as_of": "2026-06-13（更新招募说明书 2026 年第 1 号）"},
+        ],
+        "evidence_type": "contract_disclosure",
+        # **报告日现行费率未核**：只读到 2026-06-13 版本（更新招募说明书
+        # 2026 年第 1 号），该版本之后是否有费率调整无核查材料。版本已读由
+        # source.version/as_of/locator 披露；current_rate_verified 不换义
+        # （它只表示「报告日现行已核」，此处为 False）。
+        "current_rate_verified": False,
+        "source": {
+            "source_type": "更新招募说明书 2026 年第 1 号（管理人，合同文件版本）",
+            "version": "更新招募说明书 2026 年第 1 号（2026-06-13）",
+            "url": "https://www.sse.com.cn/disclosure/fund/announcement/c/new/2026-06-13/510880_20260613_RW6R.pdf",
+            "as_of": "2026-06-13",
+            "read_at": "2026-10-08",
+            "sha256": "43d294020119e07333c7f600902cad313ebfbd2668d234003a50648f4627b197",
+            "locator": "基金费用章节（管理费 0.50% / 托管费 0.10% 年费率，物理 PDF 第 58 页；"
+                       "附录同费率见物理第 84 页；原 pdftotext 文本行号 2435/2443 非 PDF 页码）",
+            "note": "2026-06-13 版本（更新招募说明书 2026 年第 1 号）费率已读；"
+                    "该版本之后的调整未核 → 报告日现行费率未核",
+        },
+        "verified_at": "2026-10-08",
+    },
+}
+
+# 源可读性记录：接口/字段/时点/是否原文披露（接口渠道不冒充原披露）。
+SOURCE_PROVENANCE: dict[str, dict] = {
+    "identity_original": {
+        "channel": "交易所公告 / 管理人基金合同类材料（PDF）",
+        "fields": "基金名称/代码/基准/费率",
+        "as_of": "各材料自身日期（逐条记录）",
+        "original_disclosure": True,
+        "note": "原文渠道；搜索摘要不作为已读原文",
+    },
+    "etf_spot": {
+        "channel": "akshare fund_etf_spot_em（东方财富基金行情页）",
+        "fields": "最新价/涨跌幅/成交额/最新份额/基金折价率",
+        "as_of": "查询时点（字段无交易日）",
+        "original_disclosure": False,
+        "note": "接口渠道；折溢价净值时点未知，不得确认实时错价",
+    },
+    "etf_nav": {
+        "channel": "akshare fund_etf_fund_info_em（天天基金净值页）",
+        "fields": "净值日期/单位净值/日增长率",
+        "as_of": "数据末端日期（latest_nav_date）",
+        "original_disclosure": False,
+        "note": "接口渠道；单位净值为基金披露口径",
+    },
+    "etf_adj_factor": {
+        "channel": "Tushare fund_adj",
+        "fields": "trade_date/adj_factor",
+        "as_of": "因子末端日期",
+        "original_disclosure": False,
+        "note": "复权因子渠道",
+    },
+    "etf_index_pe": {
+        "channel": "akshare stock_zh_index_value_csindex（中证指数公司 PE 文件）",
+        "fields": "日期/市盈率1（官方字段：（总股本）P/E1）/市盈率2（官方字段：（计算用股本）P/E2）",
+        "as_of": "文件日期列（取值日期随信封记录）",
+        "original_disclosure": True,
+        "note": "指数公司为指数口径原发布方",
+    },
+    "etf_index_cons": {
+        "channel": "akshare index_stock_cons_csindex（中证指数公司成分文件）",
+        "fields": "日期/指数代码/成分券代码/名称/交易所",
+        "as_of": "文件日期列",
+        "original_disclosure": True,
+        "url_template": "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/file/autofile/cons/{code}cons.xls",
+    },
+    "etf_index_weight": {
+        "channel": "akshare index_stock_cons_weight_csindex（中证指数公司权重文件）",
+        "fields": "日期/成分券代码/权重(%)",
+        "as_of": "文件日期列（权重文件通常为上月月末）",
+        "original_disclosure": True,
+        "url_template": "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/file/autofile/closeweight/{code}closeweight.xls",
+    },
+    "etf_holdings": {
+        "channel": "天天基金 FundArchivesDatas jjcc 页（裸 HTTP）",
+        "fields": "报告期/股票代码/名称/占净值比例/持股数/持仓市值",
+        "as_of": "报告期（季度，report_date）",
+        "original_disclosure": False,
+        "note": "渠道页面；基金定期报告为原披露。仅披露前十大，非当期完整持仓",
+    },
+    "etf_industry_alloc": {
+        "channel": "akshare fund_portfolio_industry_allocation_em",
+        "fields": "截止时间/行业类别/占净值比例",
+        "as_of": "报告期（季度）",
+        "original_disclosure": False,
+    },
+    "etf_index_daily": {
+        "channel": "akshare stock_zh_index_daily（指数日线收盘）",
+        "fields": "date/close",
+        "as_of": "序列末端日期",
+        "original_disclosure": False,
+        "note": "价格指数收盘；无总收益口径",
+    },
+    "etf_share_history": {
+        "channel": "Tushare fund_share + fund_daily",
+        "fields": "trade_date/fd_share；OHLCV",
+        "as_of": "序列末端交易日（份额 T+1）",
+        "original_disclosure": False,
+    },
+    "etf_category_sina": {
+        "channel": "akshare fund_etf_category_sina",
+        "fields": "代码/名称",
+        "as_of": "查询时点",
+        "original_disclosure": False,
+        "note": "分类辅助；不构成身份核验",
+    },
+    "industry_weekly": {
+        "channel": "本地 industry_weekly 表（申万行业 PE/PB 周度快照）",
+        "fields": "pe/pb/date",
+        "as_of": "快照日期",
+        "original_disclosure": False,
+        "note": "行业代理值；非 ETF 精确 PE",
+    },
+}
+
+
+def _identity_by_category(category: str, symbol: str) -> dict:
+    """由兼容单轴 category 推导三轴（未原文核验 → mapped_unverified）。"""
+    axis = {
+        "broad_market": ("stock", "domestic", "broad_market"),
+        "sector": ("stock", "domestic", "sector"),
+        "thematic": ("stock", "domestic", "thematic"),
+        "factor": ("stock", "domestic", "factor"),
+        "cross_border": ("stock", "cross_border", "unknown"),
+        "commodity": ("commodity", "domestic", "unknown"),
+        "bond": ("bond", "domestic", "unknown"),
+        "money_market": ("money_market", "domestic", "unknown"),
+    }.get(category, ("unknown", "unknown", "unknown"))
+    return {"asset_type": axis[0], "channel": axis[1], "strategy": axis[2]}
+
+
+_ASSET_LABELS = {"stock": "股票", "bond": "债券", "commodity": "商品",
+                 "money_market": "货币", "unknown": "未知"}
+_CHANNEL_LABELS = {"domestic": "境内", "cross_border": "跨境", "unknown": "未知"}
+_STRATEGY_LABELS = {"broad_market": "宽基", "sector": "行业", "thematic": "主题",
+                    "factor": "因子/策略", "unknown": "未知"}
+
+
+def _applicability_for(axes: dict, *, asset_unknown: bool) -> dict:
+    """按资产/通道推导适用维度（未知 → 全不适用 + 待核；不套股票 PE）。"""
+    asset = axes.get("asset_type", "unknown")
+    is_stock = asset == "stock"
+    notes: list[str] = []
+    if asset_unknown or asset == "unknown":
+        notes.append("身份未核：适用性未知，不得按名称强填 PE/持仓等必填分析")
+    if axes.get("channel") == "cross_border":
+        notes.append("跨境：估值/净值时点与时区、汇率、额度限制须单独核验")
+    if asset == "bond":
+        notes.append("债券：适用久期/信用/利率敏感性，不套股票 PE")
+    if asset == "commodity":
+        notes.append("商品：适用合约/展期/抵押品口径，不套盈利倍数")
+    if asset == "money_market":
+        notes.append("货币：适用收益披露/流动性口径，不套股票涨跌与 PE")
+    return {
+        "index_pe": is_stock,
+        "stock_pe_drilldown": is_stock,
+        "stock_holdings_penetration": is_stock,
+        "duration_credit": asset == "bond",
+        "futures_roll": asset == "commodity",
+        "pe_method": "index_official_only",
+        "no_stock_pe_weighting": True,
+        "notes": notes,
+    }
+
+
+def query_etf_identity(symbol: str, *, category: str | None = None) -> dict:
+    """产品身份三轴 + 证据 + 适用性（B01-1）。
+
+    优先级：原文核验登记（ETF_IDENTITY，verified_original）> 静态映射
+    （category 推导，mapped_unverified）> 名称/动态推断（inferred_unverified）
+    > unknown。**不以代码/名称猜测替代核验**；未核身份不得触发资产不适用的
+    分析必填项（`applicability` 全 False + 待核）。
+    """
+    entry = ETF_IDENTITY.get(symbol)
+    # R14：category=None 时只查一次分类（旧实现在 legacy 推导与 cat_info 各查一次，
+    # sina 全表/网络重复；两次结果在缓存竞态下还可能不一致，axes 与 cat_info 分叉）
+    if category is None:
+        cat_info = query_etf_category(symbol)
+        legacy = cat_info.get("category", "unknown")
+    else:
+        cat_info = {"category": category,
+                    "label": _CATEGORY_LABELS.get(category, category),
+                    "source": "caller"}
+        legacy = category
+    if entry and entry.get("verification", {}).get("status") == "verified_original":
+        axes = {k: entry[k] for k in ("asset_type", "channel", "strategy")}
+        ver = dict(entry["verification"])
+        evidence = list(entry.get("evidence") or [])
+    elif entry:
+        axes = {k: entry[k] for k in ("asset_type", "channel", "strategy")}
+        ver = {"status": "mapped_unverified", "verified_at": None,
+               "note": "静态映射登记，未做本轮原文核验（使用须注明待核）"}
+        evidence = []
+    else:
+        axes = _identity_by_category(legacy, symbol)
+        status = "mapped_unverified" if legacy != "unknown" else "unknown"
+        ver = {"status": status, "verified_at": None,
+               "note": "由分类映射/名称推断推导，未核验" if status != "unknown"
+               else "无身份证据（分类未知）"}
+        evidence = []
+    return {
+        "symbol": symbol,
+        "axes": axes,
+        "labels": {
+            "asset_type": _ASSET_LABELS.get(axes["asset_type"], axes["asset_type"]),
+            "channel": _CHANNEL_LABELS.get(axes["channel"], axes["channel"]),
+            "strategy": _STRATEGY_LABELS.get(axes["strategy"], axes["strategy"]),
+        },
+        "management": entry.get("management", "unknown") if entry else "unknown",
+        "currency": entry.get("currency") if entry else (
+            "CNY" if axes["channel"] == "domestic" else "unknown"),
+        "tracked_index": entry.get("tracked_index") if entry else None,
+        "fund_name": entry.get("fund_name") if entry else None,
+        "applicability": _applicability_for(axes, asset_unknown=(ver["status"] == "unknown")),
+        "verification": ver,
+        "evidence": evidence,
+        "category": cat_info,          # 兼容单轴标签（旧消费方）
+    }
+
+
+def query_etf_fees(symbol: str) -> dict:
+    """基金费率（原文登记）。未登记者 → unverified，不给 0、不猜测。
+
+    **`current_rate_verified` 只有一个含义（R3 恢复原义）：报告日现行费率已核**。
+    材料版本已读 ≠ 报告日现行已核——没有「截至报告日的更新核查」时必须 False，
+    不得换义成「某版本内已核」（也不另设 currency 类并行现行性布尔；currency
+    在金融通常表示币种）。版本与读取范围用 source 元信息披露：
+    `source.version` / `source.as_of` / `source.locator` / `verified_at`。
+
+    未核的三种形态（由 `evidence_type` + `note` 如实区分，不得互相顶替）：
+    - `historical_disclosure_only`：历史披露值（如 2024 材料），非现行费率证据；
+    - `contract_disclosure`：合同文件版本已读，但版本之后的调整未核；
+    - `annual_report_actual`：年报实际计费口径，非合同费率核验。
+    """
+    entry = ETF_FEE_SCHEDULE.get(symbol)
+    if not entry:
+        return {"symbol": symbol, "status": "unverified", "items": [],
+                "evidence_type": None, "current_rate_verified": False,
+                "source": None, "verified_at": None,
+                "note": "未收录官方费率材料；不得用接口渠道冒充原披露或填写估计值"}
+    verified_at = str(entry.get("verified_at") or "").strip() or None
+    # True 必须绑定实际核查时点（无 verified_at 不允许置 True，防内置常量永远 True）
+    current_verified = bool(entry.get("current_rate_verified")) and bool(verified_at)
+    src = dict(entry["source"])
+    version = src.get("version")
+    as_of = src.get("as_of")
+    etype = entry.get("evidence_type")
+    if current_verified:
+        note = f"报告日现行费率已核（核查时点 {verified_at}）"
+    elif etype == "contract_disclosure":
+        ver_txt = version or "合同文件版本"
+        if as_of and str(as_of) in ver_txt:
+            ver_txt = ver_txt.replace(f"（{as_of}）", "").strip()
+        note = (f"{as_of} 版本（{ver_txt}）费率已读；"
+                "报告日现行费率未核（该版本之后的调整材料未核）；引用须带 rate_as_of")
+    elif etype == "annual_report_actual":
+        per = str(as_of or "").replace("（报告期）", "").strip() or "未标注"
+        note = (f"年报实际计费口径（材料期间 {per}）；非现行合同费率核验——"
+                "报告日现行费率未核；引用须带 rate_as_of")
+    else:
+        note = ("历史披露值（非现行费率核验）：报告日现行费率未核；"
+                "引用须带 rate_as_of，不得称现行费率")
+    return {
+        "symbol": symbol,
+        "status": "ok",
+        "items": [dict(i) for i in entry["items"]],
+        "evidence_type": etype,
+        "current_rate_verified": current_verified,
+        "source": src,
+        "verified_at": verified_at,
+        "note": note + "；报告费率不等于未来总成本",
+    }
+
+
+def resolve_tracked_index(symbol: str, idx_code: str | None = None, *,
+                          identity: dict | None = None) -> dict:
+    """跟踪指数代码**统一解析**（R12）：显式参数 > CSINDEX_MAP > 已核身份 tracked_index。
+
+    两个概念必须分开称呼、不得互相推断：
+
+    - ``CSINDEX_MAP`` = **指数文件/PE 取数映射**（数据接线表，逐条经人工核实）；
+    - ``ETF_IDENTITY[symbol]["tracked_index"]`` = **产品跟踪身份**（原文核验记录）。
+
+    「CSINDEX_MAP 未登记」≠「产品没有跟踪指数」——此前 query_etf_kline 只查
+    CSINDEX_MAP（拿不到指数日线/MA），而 compute_etf_tracking /
+    query_etf_index_exposure 又用身份兜底（拿到 000015），同一符号两套解析、
+    报告与跟踪腿互相矛盾（510880 现场）。
+
+    返回 ``{"code", "source", "pe_mapped", "identity_status"}``；``code=None``
+    表示两条来源都无（未知保持未知）。``identity`` 缺省时用纯登记表
+    （``ETF_IDENTITY``，无网络）；调用方已持 identity 块时应透传，避免重复解析。
+    """
+    if idx_code:
+        return {"code": str(idx_code), "source": "caller",
+                "pe_mapped": CSINDEX_MAP.get(symbol) == str(idx_code),
+                "identity_status": None}
+    mapped = CSINDEX_MAP.get(symbol)
+    ident = identity if identity is not None else (ETF_IDENTITY.get(symbol) or {})
+    ident_status = (ident.get("verification") or {}).get("status")
+    if mapped:
+        return {"code": mapped, "source": "CSINDEX_MAP", "pe_mapped": True,
+                "identity_status": ident_status}
+    tracked = (ident.get("tracked_index") or {}).get("code")
+    if tracked:
+        return {"code": str(tracked),
+                "source": f"identity.tracked_index（{ident_status or 'unknown'}）",
+                "pe_mapped": False, "identity_status": ident_status}
+    return {"code": None, "source": None, "pe_mapped": False,
+            "identity_status": ident_status}
+
+
+def _identity_for_index_resolution(symbol: str) -> dict | None:
+    """统一解析的惰性身份输入：只有「CSINDEX_MAP 未登记且身份登记表有条目」才查。
+
+    两道短路都是必要的：CSINDEX_MAP 命中时身份不参与解析；而不在
+    ``ETF_IDENTITY`` 登记表的标的其 ``tracked_index`` 恒为 None（类别推断补不出
+    指数代码），查一次 `query_etf_identity` 只会白白触发类别查询/网络
+    （etf_peers 对每只 peer 调 query_etf_kline，属热路径）。
+    """
+    if symbol in CSINDEX_MAP or symbol not in ETF_IDENTITY:
+        return None
+    return query_etf_identity(symbol)
 
 
 # ---------------------------------------------------------------------------
@@ -338,20 +850,48 @@ def query_etf_data(
         {index_pe, index_pe_status, premium_discount, aum, tracking_error,
          hedge_coverage, flags, data_quality}
     """
+    category = query_etf_category(symbol)
+    identity = query_etf_identity(symbol, category=category.get("category", "unknown"))
     result: dict[str, Any] = {
         "symbol": symbol,
-        "category": query_etf_category(symbol),
+        "category": category,
+        "identity": identity,
+        "applicability": identity["applicability"],
+        "valuation_applicability": {
+            "pe_applicable": identity["applicability"]["index_pe"],
+            "method": "index_official_only",
+            "no_stock_pe_weighting": True,
+            "reason": (
+                "股票类：使用指数公司口径 PE（如映射可得）；禁止个股 PE 加权冒充指数 PE"
+                if identity["applicability"]["index_pe"]
+                else "非股票类/身份未核：不适用股票 PE 分析"
+            ),
+        },
         "index_pe": None,
-        "index_pe_caliber": None,       # R2/T9-3：取值口径（股本加权/流通加权）
-        "index_pe_circulating": None,   # 另一口径的对照值（双字段显式）
+        "index_pe_caliber": None,       # R2/T9-3：取值口径（总股本口径/计算用股本口径）
+        # 兼容 alias：字段名沿用旧名（消费方按名读取），值为市盈率2（计算用股本口径）；
+        # 不改数值、不重算历史（R3：只修口径显示与说明，不换字段名）
+        "index_pe_circulating": None,
         "index_pe_pct": None,
+        # 分位伴随中位数/样本数（report-conventions §9.2）：同窗口同口径
+        "index_pe_history_median": None,
+        "index_pe_history_n": None,
+        "index_pe_history_column": None,
         "index_pe_status": "unknown_etf",
+        "index_code": None,             # R12：统一解析的跟踪指数代码（PE/指数腿同源）
+        "index_code_source": None,      # R12：CSINDEX_MAP / identity.tracked_index（状态）
         "industry_pe": None,
         "industry_pe_note": None,
+        "industry_pe_status": None,     # R09：available/skipped_index_pe_present/…
         "valuation_guide": None,
         "industry_allocation": None,
         "premium_discount": None,
-        "aum": None,
+        "premium_discount_caliber": None,
+        "share_price_mv_est": None,     # B02：份额×交易价代理市值（亿元）
+        "aum": None,                    # 兼容别名（= share_price_mv_est.value_yi，下版本退出）
+        "aum_deprecated_note": (
+            "旧键 aum=share_price_mv_est；口径为份额×交易价估算，非官方资产净值"
+        ),
         "tracking_error": None,
         "tracking_error_note": (
             "跟踪误差需 ETF 净值与指数点位序列对比，当前引擎未实现；"
@@ -363,8 +903,14 @@ def query_etf_data(
         "data_quality": {},
     }
 
-    idx_code = fund_code or CSINDEX_MAP.get(symbol, "")
-    _set_index_pe_status(result, symbol, idx_code)
+    # R12：指数代码统一解析（显式参数 > CSINDEX_MAP > 已核身份）——PE 取数不再
+    # 只看 CSINDEX_MAP，避免「报告无映射、tracking 腿却用该指数」的自相矛盾
+    idx_res = resolve_tracked_index(symbol, fund_code or None, identity=identity)
+    idx_code = idx_res["code"] or ""
+    result["index_code"] = idx_code or None
+    result["index_code_source"] = idx_res["source"]
+    _set_index_pe_status(result, symbol, idx_code, pe_mapped=idx_res["pe_mapped"],
+                         source=idx_res["source"])
     if idx_code:
         _fetch_csindex_pe(result, idx_code)
 
@@ -507,12 +1053,80 @@ def _lookup_etf_spot_row(symbol: str) -> tuple[Any | None, str | None]:
     return None, f"etf_spot: {symbol} not found"
 
 
+def _read_via(env: Any) -> str:
+    """本次读取路径标签：L2 缓存命中 vs 本次网络（B-F01）。
+
+    data_bridge 经 ``DataCache.get`` 返回的 dict 信封带 ``_from_cache=True``
+    （缓存层实现，只读标记）；据此区分「缓存读取」与「本次网络取数」，
+    不冒充来源、不猜。
+
+    R05：``env=None`` 不得推断为「本次网络」——None 的两种含义（桥不可用 =
+    未发起；桥内失败/无信封 = 已发起但结果不可得）由 :func:`_bridge_availability`
+    与 :func:`_leg_call_state` 分辨，本函数对 None 只报「路径未留痕」。
+    """
+    if isinstance(env, dict) and env.get("_from_cache"):
+        return "L2 缓存读取"
+    if env is None:
+        return "路径未留痕（无信封）"
+    return "本次网络"
+
+
+def _bridge_availability(getter: str) -> dict:
+    """桥可用性探针（R05）：不取数，只回答「调用被判为已发起还是未发起」。
+
+    ``_bridge_get`` 返回 None 时无法从 None 本身区分两种含义：
+
+    - data_bridge 不可导入 / getter 不存在 → **未发起**（未接线，谈不上网络）；
+    - 桥可用但返回 None / 抛异常 → **已发起但失败或路径未留痕**。
+
+    探针只做 import 与属性检查（零取数、零网络），供 ``_read_via`` 的调用方
+    与 ``_leg_call_state`` 使用。
+    """
+    try:
+        import data_bridge  # noqa: PLC0415
+    except ImportError:
+        return {"available": False, "reason": "data_bridge 模块不可导入"}
+    if getattr(data_bridge, getter, None) is None:
+        return {"available": False, "reason": f"data_bridge.{getter} 不存在（未接线）"}
+    return {"available": True, "reason": None}
+
+
+def _leg_call_state(env: Any, *, getter: str) -> dict:
+    """数据腿调用状态（R05/R06/R07 统一留痕，不猜）：
+
+    ``{"attempted": bool, "skip_reason": str|None, "via": str}``
+
+    - ``env is None`` → 探针判桥可用性：桥/getter 不可用 = 未发起（带原因）；
+      桥可用 = 已发起但失败/缺追溯；
+    - 信封带 ``attempted=False``（producer 结构化跳过，如无 token）→ 未发起，
+      原因取信封 note/``skip_reason``；
+    - 其余信封 → 已发起，路径标签沿用 ``_read_via``（L2 缓存/本次网络）。
+    """
+    if env is None:
+        probe = _bridge_availability(getter)
+        if probe["available"]:
+            return {"attempted": True, "skip_reason": None,
+                    "via": "已发起但失败/缺追溯（桥内无信封）"}
+        return {"attempted": False,
+                "skip_reason": f"未发起取数：{probe['reason']}",
+                "via": "未发起（桥不可用）"}
+    if env.get("attempted") is False:
+        return {"attempted": False,
+                "skip_reason": env.get("note") or env.get("skip_reason")
+                or "producer 标记未发起取数",
+                "via": "未发起（producer 留痕）"}
+    return {"attempted": True, "skip_reason": None, "via": _read_via(env)}
+
+
 def _bridge_get(getter: str, *args: Any) -> Any:
     """函数体内惰性调 skills/lib data_bridge；不可用时返回 None（查询侧视为 missing）。
 
     调用本身也包异常：缓存层（_fetch_dimension→collector）抛出的 OSError/
     UnicodeDecodeError 等不应让报告流程崩溃，按查询侧 missing 降级
     （v0.2.3 补丁 #6）。
+
+    返回 None 的语义**不唯一**（未发起 vs 已发起但失败）：需要如实留痕的调用方
+    用 :func:`_leg_call_state` / :func:`_bridge_availability` 分辨，不得用 None 猜。
     """
     try:
         import data_bridge  # noqa: PLC0415
@@ -546,9 +1160,13 @@ def fetch_etf_spot_rows() -> list[dict] | None:
     return df.to_dict("records")
 
 
-# csindex 两个 PE 加权口径的展示名（R2/T9-3：口径须显式，不得混用后仍标 PE(1)）
-_PE_CALIBER_SHARE = "股本加权"        # 对应「市盈率1」
-_PE_CALIBER_CIRCULATING = "流通加权"  # 对应「市盈率2」
+# csindex 两个 PE 口径的展示名（R2/T9-3：口径须显式，不得混用后仍标 PE(1)；
+# R3 按 AKShare 官方接口文档的字段定义命名，不自行改称）：
+# `stock_zh_index_value_csindex` 输出「市盈率1：注意：（总股本）P/E1」、
+# 「市盈率2：注意：（计算用股本）P/E2」（来源见 SOURCE_PROVENANCE.index_pe_csindex）。
+# 「市盈率2」不得直接命名「流通加权」（官方字段未如此定义）。
+_PE_CALIBER_SHARE = "总股本口径（市盈率1）"          # 官方字段：市盈率1（总股本）
+_PE_CALIBER_CIRCULATING = "计算用股本口径（市盈率2）"  # 官方字段：市盈率2（计算用股本）
 
 
 def fetch_etf_index_pe(idx_code: str) -> dict:
@@ -573,7 +1191,7 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
             # 双 PE 列均 NaN 的行同样剔除（csindex 当日 PE 未生成的瞬时缺口，
             # 否则 iloc[-1] 取到 NaN 行 → 假 missing / 分位跳日；对齐 journal
             # market_microstructure.py:800 已剔 PE 列的孪生逻辑）。任一列有效
-            # 即保留（市盈率2=流通加权在部分指数缺列不应连坐）。
+            # 即保留（市盈率2（计算用股本）在部分指数缺列不应连坐）。
             pe_cols = [c for c in ("市盈率1", "市盈率2") if c in df.columns]
             if pe_cols:
                 df = df.dropna(subset=pe_cols, how="all")
@@ -592,9 +1210,10 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
         pe1 = safe_float(latest.get("市盈率1"))
         pe2 = safe_float(latest.get("市盈率2"))
         pe = pe1 if pe1 is not None else pe2
-        # 口径必须**显式**（R2/T9-3）：上方回落是静默的，若消费者按「PE(1) 股本加权」
+        # 口径必须**显式**（R2/T9-3）：上方回落是静默的，若消费者按「PE(1) 总股本」
         # 标注就会误标——累积表 index_pe_history.pe 只存市盈率1，两处由此表现不一致
-        # （实测 58.49 vs 54.92，即为两种加权口径之差）。这里同时暴露两个口径。
+        # （实测 58.49 vs 54.92，即为两种口径之差）。这里同时暴露两个口径（R3 按
+        # AKShare 官方字段说明命名；字段名 index_pe_circulating 保留为兼容 alias）。
         caliber = (_PE_CALIBER_SHARE if pe1 is not None
                    else (_PE_CALIBER_CIRCULATING if pe2 is not None else None))
         return {
@@ -609,7 +1228,9 @@ def fetch_etf_index_pe(idx_code: str) -> dict:
                 # 09-17 值，且输出无任何日期线索）。日期缺失时留「日期不可得」不编造。
                 f"取值日期 {latest.get('日期') or '不可得'}；"
                 f"本次取值口径＝{caliber or '不可得'}"
-                "（市盈率1=股本加权；市盈率2=流通加权；历史分位见 index_pe_pct）"
+                "（口径按 AKShare `stock_zh_index_value_csindex` 官方字段："
+                "市盈率1=（总股本）P/E1；市盈率2=（计算用股本）P/E2；"
+                "历史分位见 index_pe_pct）"
             ),
             "rows": df.to_dict("records"),
             "error": None,
@@ -723,10 +1344,30 @@ def fetch_etf_index_daily(idx_code: str) -> dict:
 
 
 def fetch_etf_adj_factor(symbol: str) -> dict:
-    """原始取数：Tushare fund_adj 复权因子（data_bridge etf_adj_factor 维度）。"""
+    """原始取数：Tushare fund_adj 复权因子（data_bridge etf_adj_factor 维度）。
+
+    B-F01：区分「无 token 跳过（未发起网络）」与「已发起但失败/空」——
+    前者不构成一次源尝试，消费方不得登记为 attempted。
+    R07：跳过/尝试由**结构化字段** ``attempted``/``skip_reason`` 表达，
+    消费方不再对 ``note`` 做子串匹配（文案可变，结构化标记不变）。
+    """
+    from lib.env import get_config
+
+    if not (get_config() or {}).get("TUSHARE_TOKEN"):
+        return {"status": "missing", "adj_map": None,
+                "attempted": False, "skip_reason": "no_token",
+                "note": "无 TUSHARE_TOKEN：未发起网络（跳过）"}
+    if not etf_symbol_to_ts_code(symbol):
+        # F5（独立复检）：代码无效时 ts_code 判空即返回，Tushare client 从未创建
+        # （实测 client_calls=0）——不是一次尝试，不得记 attempted=True
+        return {"status": "missing", "adj_map": None,
+                "attempted": False, "skip_reason": "invalid_symbol",
+                "note": "无效的 ETF 代码：未发起网络（跳过）"}
     adj_map = _fetch_fund_adj_factor(symbol)
     if not adj_map:
-        return {"status": "missing", "adj_map": None}
+        return {"status": "missing", "adj_map": None,
+                "attempted": True, "skip_reason": None,
+                "note": "fund_adj 查询失败/空返回"}
     return {"status": "ok", "adj_map": adj_map}
 
 
@@ -734,6 +1375,8 @@ def fetch_etf_share_history(symbol: str) -> dict:
     """原始取数：Tushare fund_share + fund_daily（data_bridge etf_share_history 维度）。
 
     固定 _SHARE_FETCH_NATURAL_DAYS 自然日窗口；token/ts_code/积分检查失败 → status="missing"。
+    R06/R07：逐分支带结构化 ``attempted``/``skip_reason``（no_token / invalid_symbol
+    未发起；no_data / query_failed 已发起），消费方沿用而不硬编码源名与原因。
     """
     from lib import env
     from lib.tushare_client import TushareClient
@@ -741,11 +1384,13 @@ def fetch_etf_share_history(symbol: str) -> dict:
     config = env.get_config()
     token = config.get("TUSHARE_TOKEN")
     if not token:
-        return {"status": "missing", "fund_share": [], "fund_daily": [], "note": "Tushare 不可用"}
+        return {"status": "missing", "fund_share": [], "fund_daily": [],
+                "attempted": False, "skip_reason": "no_token", "note": "Tushare 不可用"}
 
     ts_code = etf_symbol_to_ts_code(symbol)
     if not ts_code:
-        return {"status": "missing", "fund_share": [], "fund_daily": [], "note": "无效的 ETF 代码"}
+        return {"status": "missing", "fund_share": [], "fund_daily": [],
+                "attempted": False, "skip_reason": "invalid_symbol", "note": "无效的 ETF 代码"}
 
     end_date = shanghai_today()
     start_date = shanghai_days_ago(_SHARE_FETCH_NATURAL_DAYS)
@@ -756,14 +1401,17 @@ def fetch_etf_share_history(symbol: str) -> dict:
                                  start_date=start_date, end_date=end_date)
         if shares_df is None or shares_df.empty:
             return {"status": "missing", "fund_share": [], "fund_daily": [],
+                    "attempted": True, "skip_reason": "no_data",
                     "note": _NOTE_SHARE_NO_DATA}
         daily_df = client.query("fund_daily", ts_code=ts_code,
                                 start_date=start_date, end_date=end_date)
         if daily_df is None or daily_df.empty:
             return {"status": "missing", "fund_share": [], "fund_daily": [],
+                    "attempted": True, "skip_reason": "no_data",
                     "note": _NOTE_DAILY_NO_DATA}
     except Exception as exc:
         return {"status": "missing", "fund_share": [], "fund_daily": [],
+                "attempted": True, "skip_reason": "query_failed",
                 "note": f"Tushare 查询失败: {exc}"}
 
     return {
@@ -796,6 +1444,171 @@ def fetch_etf_industry_alloc(symbol: str) -> dict:
     except Exception as exc:
         logger.debug("fetch_etf_industry_alloc(%s): failed, silent degrade: %s", symbol, exc)
         return {"status": "missing", "allocation": [], "latest_date": None, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# 指数样本 / 权重（B01-2，v0.3.2）：csindex 官方公开文件（公开源，非付费）
+# ---------------------------------------------------------------------------
+# 三列分列铁律：指数样本/权重（指数公司）≠ 基金披露持仓（季报）≠ PCF（申赎篮子）。
+# 成分文件与权重文件**发布节奏不同**（cons 更新至最新月末/季末，closeweight 通常
+# 为上月月末）——只有两份文件日期相同（同日）才允许拼成组合，否则只能分别陈述。
+
+
+def _csindex_date_iso(v: Any) -> str | None:
+    """csindex 文件日期 → ISO（YYYY-MM-DD）；解析不了返回 None（不猜测）。"""
+    if v is None:
+        return None
+    s = str(v)[:10]
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    s8 = str(v).replace("-", "")[:8]
+    if len(s8) == 8 and s8.isdigit():
+        return f"{s8[:4]}-{s8[4:6]}-{s8[6:8]}"
+    return None
+
+
+def fetch_etf_index_cons(idx_code: str) -> dict:
+    """原始取数：csindex 指数成分文件（data_bridge 维度建议 etf_index_cons）。
+
+    来源=中证指数公司公开 cons 文件（经 akshare index_stock_cons_csindex）；
+    失败返回 status="missing"（不缓存语义由调用侧遵守）。
+    """
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.index_stock_cons_csindex(symbol=idx_code)
+        if df is None or df.empty:
+            return {"status": "missing", "index_code": idx_code, "as_of": None,
+                    "rows": [], "error": "csindex cons empty response"}
+        as_of = _csindex_date_iso(df["日期"].iloc[0]) if "日期" in df.columns else None
+        rows = []
+        for _, r in df.iterrows():
+            code = str(r.get("成分券代码", "")).strip()
+            if not code:
+                continue
+            rows.append({"code": code, "name": str(r.get("成分券名称", "")).strip(),
+                         "exchange": str(r.get("交易所", "")).strip()})
+        if not rows:
+            return {"status": "missing", "index_code": idx_code, "as_of": as_of,
+                    "rows": [], "error": "csindex cons 无有效行（列名漂移?）"}
+        return {"status": "ok", "index_code": idx_code, "as_of": as_of,
+                "rows": rows, "row_count": len(rows), "error": None}
+    except Exception as exc:
+        logger.debug("fetch_etf_index_cons(%s): failed, silent degrade: %s", idx_code, exc)
+        return {"status": "missing", "index_code": idx_code, "as_of": None,
+                "rows": [], "error": str(exc)}
+
+
+def fetch_etf_index_weight(idx_code: str) -> dict:
+    """原始取数：csindex 指数权重文件（data_bridge 维度建议 etf_index_weight）。
+
+    来源=中证指数公司公开 closeweight 文件（经 akshare
+    index_stock_cons_weight_csindex）；`weight_sum_pct` 原样披露（不得因
+    不足/超过 100% 而重归一化）。
+    """
+    try:
+        import akshare as ak
+        with akshare_direct_session():
+            df = ak.index_stock_cons_weight_csindex(symbol=idx_code)
+        if df is None or df.empty:
+            return {"status": "missing", "index_code": idx_code, "as_of": None,
+                    "rows": [], "weight_sum_pct": None,
+                    "error": "csindex closeweight empty response"}
+        as_of = _csindex_date_iso(df["日期"].iloc[0]) if "日期" in df.columns else None
+        rows = []
+        for _, r in df.iterrows():
+            code = str(r.get("成分券代码", "")).strip()
+            w = safe_float(r.get("权重"))
+            if not code or w is None:
+                continue
+            rows.append({"code": code, "name": str(r.get("成分券名称", "")).strip(),
+                         "weight_pct": w})
+        if not rows:
+            return {"status": "missing", "index_code": idx_code, "as_of": as_of,
+                    "rows": [], "weight_sum_pct": None,
+                    "error": "csindex closeweight 无有效行（列名漂移?）"}
+        return {"status": "ok", "index_code": idx_code, "as_of": as_of,
+                "rows": rows, "row_count": len(rows),
+                "weight_sum_pct": round(sum(r["weight_pct"] for r in rows), 3),
+                "error": None}
+    except Exception as exc:
+        logger.debug("fetch_etf_index_weight(%s): failed, silent degrade: %s", idx_code, exc)
+        return {"status": "missing", "index_code": idx_code, "as_of": None,
+                "rows": [], "weight_sum_pct": None, "error": str(exc)}
+
+
+def query_etf_index_exposure(symbol: str, idx_code: str | None = None) -> dict:
+    """指数样本/权重按需查询 + 同期性裁决（B01-2；默认不接入报告主链）。
+
+    - `cons`/`weight` 分列，各自带 `as_of`/行数/来源；`weight` 原样带
+      `weight_sum_pct`（缺失权重不得按 0、不得重归一化）；
+    - `period_alignment.joinable=True` **仅当两份文件日期完全相同**；错月
+      → False + note（只可分别陈述，禁止拼「当期组合」）；
+    - PCF 不在本函数（见 holdings.pcf）：篮子 ≠ 权重，且未接入。
+    """
+    idx = idx_code or CSINDEX_MAP.get(symbol, "")
+    if not idx:
+        ident = query_etf_identity(symbol)
+        tracked = (ident.get("tracked_index") or {}).get("code")
+        idx = tracked or ""
+    if not idx:
+        return {"symbol": symbol, "index_code": None, "status": "not_mapped",
+                "cons": None, "weight": None,
+                "period_alignment": None,
+                "scope_note": INDEX_SCOPE_NOTE,
+                "note": "无指数代码映射（CSINDEX_MAP/身份登记均无）；按需人工核实跟踪指数"}
+    # data_bridge 维度接线属 A 市场 owner（本包不动 data_bridge）：
+    # getter 不存在时 _bridge_get 返回 None → 直接回源（见交接「接口请求」）。
+    cons = _bridge_get("get_etf_index_cons", idx)
+    if cons is None:
+        cons = fetch_etf_index_cons(idx)
+    weight = _bridge_get("get_etf_index_weight", idx)
+    if weight is None:
+        weight = fetch_etf_index_weight(idx)
+    cons_ok = cons.get("status") == "ok"
+    weight_ok = weight.get("status") == "ok"
+    if not cons_ok and not weight_ok:
+        status = "missing"
+    elif cons_ok and weight_ok:
+        status = "ok"
+    else:
+        status = "partial"
+    same_period: bool | None = None
+    joinable = False
+    if cons_ok and weight_ok:
+        same_period = bool(cons.get("as_of") and cons["as_of"] == weight["as_of"])
+        joinable = same_period
+    pa = {
+        "same_period": same_period,
+        "joinable": joinable,
+        "cons_as_of": cons.get("as_of") if cons_ok else None,
+        "weight_as_of": weight.get("as_of") if weight_ok else None,
+        "note": (
+            "两份文件日期相同，可在声明来源日期后拼为组合"
+            if joinable else
+            "成分与权重文件日期不同（或有一侧缺失）：只可分别陈述，"
+            "禁止拼成「当期完整组合」"
+        ),
+    }
+    return {"symbol": symbol, "index_code": idx, "status": status,
+            "cons": cons if cons_ok else None,
+            "weight": weight if weight_ok else None,
+            "cons_status": cons.get("status"),
+            "weight_status": weight.get("status"),
+            "period_alignment": pa,
+            "scope_note": INDEX_SCOPE_NOTE,
+            "source_records": {
+                "cons": SOURCE_PROVENANCE["etf_index_cons"],
+                "weight": SOURCE_PROVENANCE["etf_index_weight"],
+            },
+            "note": None if status == "ok" else "指数样本/权重源缺失（见 cons_status/weight_status）"}
+
+
+#: 指数 vs 基金持仓 vs PCF 的职责分列声明（措辞铁律的单一出处）
+INDEX_SCOPE_NOTE = (
+    "指数样本/权重描述规则暴露（指数公司文件）；基金披露持仓描述历史基金资产"
+    "（季报，仅前十大）；PCF 描述指定申赎单位的篮子（未接入）——三者不得互相冒充"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1003,16 +1816,49 @@ def fetch_etf_category_sina() -> dict:
 
 
 def _apply_spot_row_to_profile(result: dict, row: Any, symbol: str) -> None:
-    """将 spot 行写入 profile（折溢价 / AUM）。"""
+    """将 spot 行写入 profile（折溢价口径 / 份额市值代理）。
+
+    B02-1（v0.3.2）：原 `aum = 份额×最新价` 直接命名 AUM 会误导为基金资产
+    净值。现：
+    - 主字段 `share_price_mv_est`：显式单位/口径/时点（spot 行无交易日字段，
+      as_of 只能记 None + 说明）；
+    - 旧键 `aum` 保留为**同值兼容别名**一版（消费呈现不得再按「官方 AUM」用），
+      下版本退出；
+    - 官方资产净值口径（份额×单位净值，同日匹配）见 `query_etf_est_net_assets`，
+      不得在本函数用交易价冒充。
+    """
     result["premium_discount"] = _em_to_premium_discount(row.get("基金折价率"))
+    result["premium_discount_caliber"] = _premium_discount_caliber()
+    result.setdefault("aum_deprecated_note",
+                      "旧键 aum=share_price_mv_est；口径为份额×交易价估算，非官方资产净值")
     shares = safe_float(row.get("最新份额"))
     price = safe_float(row.get("最新价"))
-    if shares is not None and price is not None:
-        result["aum"] = round(shares * price / ONE_PER_YI, 2)
+    if (shares is not None and price is not None
+            and math.isfinite(shares) and math.isfinite(price)):
+        value_yi = round(shares * price / ONE_PER_YI, 2)
+        result["share_price_mv_est"] = {
+            "value_yi": value_yi,
+            "unit": "亿元",
+            "caliber": "最新份额 × 最新价（交易价代理）",
+            "as_of": None,
+            "as_of_note": "spot 行无交易日字段；为查询时点最新披露值（份额披露存在 T+1 延迟）",
+            "is_official_net_asset": False,
+            "source": "fund_etf_spot_em 最新份额×最新价",
+        }
+        result["aum"] = value_yi  # 兼容别名（一版后退出）；消费呈现须标代理语义
+    else:
+        # 份额/价格缺失或非有限值（NaN/Inf）→ 无代理值（不给估计、不崩）
+        result["share_price_mv_est"] = None
+        result["aum"] = None
 
 
 def _spot_row_to_quote(symbol: str, row: Any) -> dict[str, Any]:
-    """将 spot 行转为 quote 结构。"""
+    """将 spot 行转为 quote 结构。
+
+    R07/R08：``source`` 为结构化来源标记（消费方不得对 ``_error`` 做文本匹配）；
+    ``premium_discount`` 为 None 时其原因是「spot 行本身缺该字段」，
+    与「回退腾讯导致不可得」是两回事。
+    """
     return {
         "symbol": symbol,
         "price": safe_float(row.get("最新价")),
@@ -1020,6 +1866,13 @@ def _spot_row_to_quote(symbol: str, row: Any) -> dict[str, Any]:
         "volume": safe_float(row.get("成交量")),
         "amount": safe_float(row.get("成交额")),
         "premium_discount": _em_to_premium_discount(row.get("基金折价率")),
+        "premium_discount_caliber": _premium_discount_caliber(),
+        "source": "fund_etf_spot_em",
+        "bid_ask_spread": {
+            "status": "not_available",
+            "note": "本次未取得/未接入可验证盘口数据（项目未接线，非「无该数据源」）；"
+                    "日成交额不得推导价差/冲击成本",
+        },
         "status": "available",
         "_error": None,
     }
@@ -1029,15 +1882,26 @@ def _spot_row_to_quote(symbol: str, row: Any) -> dict[str, Any]:
 # 子查询
 # ---------------------------------------------------------------------------
 
-def _set_index_pe_status(result: dict, symbol: str, idx_code: str) -> None:
+def _set_index_pe_status(result: dict, symbol: str, idx_code: str, *,
+                         pe_mapped: bool = True, source: str | None = None) -> None:
+    """指数 PE 状态（R12：措辞只陈述「指数代码是否可得」，不推断产品身份）。
+
+    ``pe_mapped=False + 有 code``（代码来自身份登记而非 CSINDEX_MAP）时，PE 已按
+    该代码尝试（csindex 文件可得性由取数结果说话），状态仍为 mapped 但注明来源；
+    无 code 时才是「未接线」——不得写成「无映射」让读者以为产品没有跟踪指数。
+    """
     if idx_code:
         result["index_pe_status"] = "mapped"
+        if not pe_mapped or (source and source != "CSINDEX_MAP"):
+            result["index_pe_note"] = (
+                f"指数代码 {idx_code} 来源={source or '未知'}（CSINDEX_MAP 未登记）："
+                "PE 按该代码取数，可得性以取数结果为准（不按名称猜指数代码）")
         return
     if symbol in ETF_HEDGE_MAP:
         result["index_pe_status"] = "not_mapped"
         result["index_pe_note"] = (
-            "该 ETF 在对冲映射表中，但尚无 csindex 指数代码映射，"
-            "无法自动获取指数 PE（常见于行业/主题 ETF）"
+            "未登记 csindex 指数代码（CSINDEX_MAP 与已核身份 tracked_index 均无）："
+            "指数 PE 未接线——这是数据接线状态，不等于该产品没有跟踪指数"
         )
         return
     result["index_pe_status"] = "unknown_etf"
@@ -1049,9 +1913,17 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
 
     v0.2.3：原始取数迁至 fetch_etf_index_pe，经 data_bridge L2 缓存（1d）。
     v0.2.4：index_pe_history 表累积 ≥20 条时附加历史分位（best-effort）。
+    R13：分位/中位数/样本数由**一次窗口读取**产出（旧实现分位与统计各读一次，
+    两次读取之间序列可变化 → 同一报告里 pct 与 median/n 来自不同数据集）。
     """
     env = _bridge_get("get_etf_index_pe", idx_code)
     if env is None:
+        # R05 同类：记桥调用状态——桥/getter 不可用 = 未发起，data_status 不得
+        # 把它写成「已尝试 csindex 但未取到」
+        state = _leg_call_state(env, getter="get_etf_index_pe")
+        result["index_pe_fetch_status"] = ("attempted" if state["attempted"]
+                                           else "not_initiated")
+        result["index_pe_fetch_skip_reason"] = state["skip_reason"]
         result["_errors"].append("csindex_pe: empty response")
         return
     if env.get("status") != "ok":
@@ -1070,13 +1942,61 @@ def _fetch_csindex_pe(result: dict, idx_code: str) -> None:
     # 最新行日期取 max 而非 rows[-1]（review #4）：修复前的 L2 缓存信封为降序
     # rows，rows[-1] 是最早日期 → 分位防双计剔除错行；max 对任意行序稳健
     current_date = str(max((r.get("日期") for r in rows), key=lambda d: str(d))) if rows else None
-    # 分位必须用**与当前值同口径**的历史列（R0~R2 review）：表内 pe=市盈率1（股本
-    # 加权）、pe_circulating=市盈率2（流通加权）。否则「PE(2) 流通加权口径」的徽章
-    # 旁边会是一个拿股本加权历史排出来的分位。
+    # 分位必须用**与当前值同口径**的历史列（R0~R2 review）：表内 pe=市盈率1（总
+    # 股本）、pe_circulating=市盈率2（计算用股本）。否则「PE(2) 计算用股本口径」的
+    # 徽章旁边会是一个拿总股本历史排出来的分位。
     _pct_col = ("pe_circulating"
                 if result.get("index_pe_caliber") == _PE_CALIBER_CIRCULATING else "pe")
-    result["index_pe_pct"] = _index_pe_percentile_from_db(
-        idx_code, env.get("index_pe"), current_date, column=_pct_col)
+    # R13：一次读取 → pct/median/n 同窗口同口径（report-conventions §9.2：
+    # 分位不得单独使用，必须伴随中位数与样本数）
+    stats = _index_pe_window_stats(idx_code, env.get("index_pe"),
+                                   current_date, column=_pct_col)
+    if stats:
+        result["index_pe_pct"] = stats["pct"]
+        result["index_pe_history_median"] = stats["median"]
+        result["index_pe_history_n"] = stats["n"]
+        result["index_pe_history_column"] = stats["column"]
+
+
+def _index_pe_window_stats(idx_code: str, current_pe: Any,
+                           current_date: str | None = None, *,
+                           column: str = "pe") -> dict | None:
+    """一次读取同一窗口 → ``{pct, median, n, column}``（分位/中位数/样本数同源）。
+
+    窗口/口径/防双计合同：``get_index_pe_history`` 取全窗 → 剔今日
+    （``hist_ex_today``）→ 同 column 算分位与中位数。分位不可算（样本不足/
+    非有限当前值/DB 不可用）返回 None，不阻断报告。
+    """
+    if current_pe is None:
+        return None
+    current = safe_float(current_pe)
+    if current is None:  # NaN/±inf/非数字 → 无分位（防 nan<=v 恒 False 的假 0%）
+        return None
+    try:
+        import statistics
+
+        from index_pe_snapshot import get_index_pe_history, index_pe_percentile
+        rows = get_index_pe_history(idx_code)
+        if current_date is not None:
+            rows = hist_ex_today(rows, current_date)
+        pct = index_pe_percentile(rows, current, column=column)
+        if pct is None:
+            return None
+        seq = [v for v in (safe_float(r.get(column)) for r in rows) if v is not None]
+        if not seq:
+            return None
+        return {"pct": pct, "median": round(statistics.median(seq), 2),
+                "n": len(seq), "column": column}
+    except Exception as exc:  # DB 不可用等：统计缺失不阻断
+        logger.debug("index_pe_window_stats(%s) failed: %s", idx_code, exc)
+        return None
+
+
+def _index_pe_history_stats(idx_code: str, current_pe: Any,
+                            current_date: str | None = None, *,
+                            column: str = "pe") -> dict | None:
+    """历史分位 + 同窗口中位数/有效样本数（兼容接口；内部走单次读取核）。"""
+    return _index_pe_window_stats(idx_code, current_pe, current_date, column=column)
 
 
 def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
@@ -1091,22 +2011,13 @@ def _index_pe_percentile_from_db(idx_code: str, current_pe: Any,
     market_microstructure.hist_ex_today（commit cd5e7a4）同型防双计。
     历史中无该日行（当日尚未入库）时剔除为 no-op，行为与旧路径一致。
 
+    R13：实现委托 :func:`_index_pe_window_stats`（单次读取）；本包装保留为
+    兼容接口（外部复现脚本/测试按此名断言）。
+
     best-effort：任何异常返回 None，不阻断报告流程。
     """
-    if current_pe is None:
-        return None
-    current = safe_float(current_pe)
-    if current is None:  # NaN/±inf/非数字 → 无分位（防 nan<=v 恒 False 的假 0%）
-        return None
-    try:
-        from index_pe_snapshot import get_index_pe_history, index_pe_percentile
-        rows = get_index_pe_history(idx_code)
-        if current_date is not None:
-            rows = hist_ex_today(rows, current_date)
-        return index_pe_percentile(rows, current, column=column)
-    except Exception as exc:  # DB 不可用等：分位缺失不阻断
-        logger.debug("index_pe_percentile(%s) failed: %s", idx_code, exc)
-        return None
+    stats = _index_pe_window_stats(idx_code, current_pe, current_date, column=column)
+    return stats["pct"] if stats else None
 
 
 def _summarize_etf_data_quality(result: dict) -> dict[str, str]:
@@ -1151,13 +2062,24 @@ _DEFAULT_THRESHOLDS: dict[str, float] = {"premium_warn": 2.0, "discount_warn": -
 
 
 def _auto_flags(result: dict, etf_category: str = "") -> None:
-    """基于阈值自动生成 flags。etf_category 为空时使用默认阈值。"""
+    """基于阈值自动生成 flags。etf_category 为空时使用默认阈值。
+
+    B02-1：规模阈值读 `share_price_mv_est`（代理）；文案不得据代理断言清盘
+    事实——「筛查位 + 代理口径 + 须核定期报告」。旧 payload 只有 `aum` 时
+    回退读之（兼容一版）。
+    """
     thresholds = _TYPE_THRESHOLDS.get(etf_category, _DEFAULT_THRESHOLDS)
     flags: list[str] = []
 
-    aum = result.get("aum")
+    est = result.get("share_price_mv_est") or {}
+    aum = est.get("value_yi") if isinstance(est, dict) else None
+    if aum is None:  # 兼容旧 payload / 手工构造的 result
+        aum = result.get("aum")
     if aum is not None and aum < thresholds["aum_min"]:
-        flags.append(f"❌ AUM < {thresholds['aum_min']} 亿，存在清盘/流动性风险")
+        flags.append(
+            f"⚠️ 规模代理 < {thresholds['aum_min']} 亿（{aum:.2f} 亿；份额×交易价估算，"
+            "非官方资产净值）：清盘/流动性风险筛查位，须以定期报告核实"
+        )
 
     pd_val = result.get("premium_discount")
     if pd_val is not None:
@@ -1171,7 +2093,8 @@ def _auto_flags(result: dict, etf_category: str = "") -> None:
     hc = result.get("hedge_coverage", {})
     cov = hc.get("coverage", "unknown")
     if cov == "none":
-        flags.append("⚠️ 该 ETF 无可用的期货/期权对冲工具")
+        # R2：静态表未收录 ≠ 品种不存在（不得无原文断言「无可用工具」）
+        flags.append("⚠️ 静态表未收录该 ETF 的期货/期权对冲工具（未核；不表示不存在）")
     elif cov == "low":
         flags.append("⚠️ 对冲工具覆盖有限")
 
@@ -1182,12 +2105,37 @@ def _auto_flags(result: dict, etf_category: str = "") -> None:
 # 对冲覆盖查询
 # ---------------------------------------------------------------------------
 
+# 对冲静态映射的核验状态（B03）：默认 static_map_only（待核线索）；
+# 带期货/期权具体品种主张的条目逐条登记核验尝试与结果。
+# 588000「科创50期货(2025上线)」：2026-10-08 尝试中金所官网（cffex.com.cn），
+# 本机 HTTP 301→HTTPS 后连接失败（通道异常），未能原文核验 → unverified（待核）。
+ETF_HEDGE_VERIFICATION: dict[str, dict] = {
+    "588000": {
+        "status": "unverified",
+        "attempted_sources": ["cffex.com.cn（中金所官网）"],
+        "checked_at": "2026-10-08",
+        "note": "期货上线主张缺官方原文核验（通道失败）；覆盖度按待核线索使用，不得称已核事实",
+    },
+}
+
+
 def _lookup_hedge(symbol: str) -> dict:
-    """查找 ETF 对冲工具覆盖。未知 ETF 返回 unknown。"""
+    """查找 ETF 对冲工具覆盖。未知 ETF 返回 unknown。
+
+    B03（v0.3.2）：所有条目附 `verification`——静态映射（含期货/期权品种
+    主张）为**待核线索**，不是已核事实；带具体品种主张的条目按
+    ETF_HEDGE_VERIFICATION 登记核验状态（源失败如实降级）。
+    """
     entry = ETF_HEDGE_MAP.get(symbol)
     if entry:
-        return dict(entry)
+        out = dict(entry)
+        ver = ETF_HEDGE_VERIFICATION.get(symbol, {"status": "static_map_only",
+                                                  "note": "静态映射，未逐条原文核验"})
+        out["verification"] = dict(ver)
+        return out
     return {"index": "未知", "futures": None, "options": None, "coverage": "unknown",
+            "verification": {"status": "static_map_only",
+                             "note": "不在映射表；未核验"},
             "note": "未在已知对冲工具映射表中，请手动核实"}
 
 
@@ -1195,8 +2143,12 @@ def _lookup_hedge(symbol: str) -> dict:
 # ETF 行情 + K 线（净值序列）
 # ---------------------------------------------------------------------------
 
-def _build_holdings_clusters(rows: list[dict]) -> list[dict]:
+def build_holdings_clusters(rows: list[dict]) -> list[dict]:
     """按 HOLDINGS_CLUSTER_MAP 聚合持仓为子环节聚类合计（引擎计算，AI 不心算）。
+
+    公开 API（A04，v0.3.2）：领域聚类归 ETF 模块所有——data_bridge 等访问层
+    不再复制聚类实现，经本公开名调用；``_build_holdings_clusters`` 为兼容
+    别名（历史私有名，同实现）。
 
     口径：pct 为 None 的行不计（与 topN 集中度口径一致）；未映射股票归入「未归类」；
     sum_pct 先累加后 round(2)；排序：未归类恒排最后，其余按 sum_pct 降序；
@@ -1221,6 +2173,10 @@ def _build_holdings_clusters(rows: list[dict]) -> list[dict]:
     ]
     out.sort(key=lambda c: (c["cluster"] == "未归类", -c["sum_pct"]))
     return out
+
+
+# 兼容别名（历史私有名，同实现——A04 公开名迁移）
+_build_holdings_clusters = build_holdings_clusters
 
 
 def query_etf_holdings(symbol: str) -> dict[str, Any]:
@@ -1253,6 +2209,9 @@ def query_etf_holdings(symbol: str) -> dict[str, Any]:
             "top5_sum_pct": None,
             "top10_sum_pct": None,
             "clusters": [],
+            "holding_scope": HOLDING_SCOPE_TOP10,
+            "coverage": None,
+            "pcf": _pcf_block(),
             "note": (env or {}).get("error") or "持仓数据不可用",
             "source": "天天基金(东财 FundArchivesDatas jjcc)",
         }
@@ -1260,6 +2219,7 @@ def query_etf_holdings(symbol: str) -> dict[str, Any]:
     pcts = [r["pct"] for r in rows if r.get("pct") is not None]
     # 统一口径：topN 均按占比降序取（不假设页面行序），与 top1 的 max 语义一致
     ranked = sorted(pcts, reverse=True)
+    top10 = round(sum(ranked[:10]), 2) if ranked else None
     return {
         "symbol": symbol,
         "report_date": env.get("report_date"),
@@ -1268,13 +2228,38 @@ def query_etf_holdings(symbol: str) -> dict[str, Any]:
         "rows": rows,
         "top1_pct": round(ranked[0], 2) if ranked else None,
         "top5_sum_pct": round(sum(ranked[:5]), 2) if ranked else None,
-        "top10_sum_pct": round(sum(ranked[:10]), 2) if ranked else None,
-        "clusters": _build_holdings_clusters(rows),
+        "top10_sum_pct": top10,
+        "clusters": build_holdings_clusters(rows),
+        # B01-2：披露范围显式（前十 ≠ 完整持仓）；覆盖分母不得缺权重按 0 或重归一化
+        "holding_scope": HOLDING_SCOPE_TOP10,
+        "coverage": {
+            "disclosed_sum_pct": top10,
+            "denominator": "基金资产净值（占净值比例，仅披露范围内的前十大）",
+            "row_count": len(rows),
+            "pct_missing_rows": sum(1 for r in rows if r.get("pct") is None),
+            "uncovered_note": "披露范围外持仓未知；缺失权重不得按 0 处理、不得把已披露样本"
+                              "重归一化为 100%",
+        },
+        "pcf": _pcf_block(),
         "note": (
-            "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大；"
+            "前十大持仓合计可能 <100%（非前十大未列）；集中度仅覆盖前十大披露范围；"
             "子环节聚类由引擎按 HOLDINGS_CLUSTER_MAP 聚合，未映射股票归入「未归类」"
         ),
         "source": "天天基金(东财 FundArchivesDatas jjcc)",
+    }
+
+
+#: 基金持仓披露范围（措辞铁律：不得称「完整持仓/全部持仓」）
+HOLDING_SCOPE_TOP10 = "基金披露前十大（季度报告期，非完整持仓）"
+
+
+def _pcf_block() -> dict:
+    """PCF 状态：未接入 → 显式 not_connected（不新增强制付费源、不伪造篮子）。"""
+    return {
+        "status": "not_connected",
+        "note": "PCF（申赎篮子/现金替代）未接入：交易所/管理人为原披露渠道，"
+                "Tushare etf_sh_cons/etf_sz_cons 需 8000 积分（本机未验）——"
+                "不新增强制付费源；PCF ≠ 基金净值权重",
     }
 
 
@@ -1312,6 +2297,16 @@ def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
         "volume": None,
         "amount": None,
         "premium_discount": None,
+        "premium_discount_caliber": _premium_discount_caliber(),
+        # R07/R08：结构化来源（spot / tencent / None=两源均未取到），
+        # 消费方（build_data_status）据此判断是否发生腾讯回退，不匹配文案
+        "source": None,
+        "spot_row_found": None,
+        "bid_ask_spread": {
+            "status": "not_available",
+            "note": "本次未取得/未接入可验证盘口数据（项目未接线，非「无该数据源」）；"
+                    "日成交额不得推导价差/冲击成本",
+        },
         "status": "missing",
         "_error": None,
     }
@@ -1321,18 +2316,32 @@ def query_etf_quote(symbol: str, *, spot_row: Any = None) -> dict[str, Any]:
         row, err = _lookup_etf_spot_row(symbol)
         if err or row is None:
             # F1-1: spot 源失败 → 腾讯行情回退（折溢价不可得，不整列缺失）
+            result["spot_row_found"] = False
+            result["spot_error"] = err or "empty response"
             fallback = _q_tencent_etf_quote(symbol)
             if fallback:
                 result.update(fallback)
                 result["status"] = "available"
+                result["source"] = "tencent"
                 result["premium_discount"] = None
+                result["premium_discount_caliber"] = {
+                    **_premium_discount_caliber(),
+                    "note": "spot 源不可用（回退腾讯行情）；折溢价不可得，"
+                            "不得用隔夜 NAV 确认当日错价",
+                }
                 result["_error"] = (
                     f"spot 源不可用（{err or 'empty response'}），"
                     "已回退腾讯行情；折溢价不可得"
                 )
                 return result
-            result["_error"] = (err or "empty response").replace("etf_spot: ", "", 1)
+            # 两源均未取到：保留各源实际结果（not found 与网络失败可区分），
+            # 不再 strip 前缀后丢失「spot 未命中」这一事实
+            result["_error"] = (
+                f"spot 未取到（{result['spot_error']}）；"
+                "腾讯行情回退未取得数据"
+            )
             return result
+        result["spot_row_found"] = True
         return _spot_row_to_quote(symbol, row)
     except Exception as exc:
         logger.warning("etf_quote(%s) failed: %s", symbol, exc)
@@ -1392,19 +2401,49 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         "nav_history": [],
         "status": "missing",
         "_error": None,
+        # B-F01（真实调用留痕）：attempted_sources=本次**实际发起**的取数（按顺序）；
+        # source_trace=逐源 {source, via, outcome, reason}（via 区分 L2 缓存读取
+        # 与本次网络）；skipped_sources=**未发起**的分支及原因（含无 token 跳过）。
+        # 消费方（tracking/data_status）直接沿用，不得由静态表猜源。
+        "attempted_sources": [],
+        "source_trace": [],
+        "skipped_sources": [],
     }
+
+    def _trace(source: str, env: Any, *, outcome: str, reason: str | None = None) -> None:
+        result["source_trace"].append({
+            "source": source, "via": _read_via(env), "outcome": outcome, "reason": reason})
 
     try:
         # v0.2.3：原始取数经 data_bridge L2 缓存（fetch_etf_nav 固定 _NAV_FETCH_NATURAL_DAYS 自然日窗口）
         nav_env = _bridge_get("get_etf_nav", symbol)
+        nav_src = str((nav_env or {}).get("source") or "fund_etf_fund_info_em")
+        nav_name = f"{nav_src}（基金净值）"
+        # R05：None 不得猜「本次网络」——未发起（桥不可用）时不登记 attempted
+        nav_state = _leg_call_state(nav_env, getter="get_etf_nav")
+        if nav_state["attempted"]:
+            result["attempted_sources"].append(nav_name)
+        else:
+            result["skipped_sources"].append(
+                {"source": nav_name, "reason": nav_state["skip_reason"]})
         if nav_env is None or nav_env.get("status") != "ok":
-            result["_error"] = (nav_env or {}).get("error") or "etf_nav: empty response"
+            err = (nav_env or {}).get("error") or nav_state["skip_reason"] \
+                or "etf_nav: empty response"
+            _trace(nav_name, nav_env, outcome="missing", reason=err)
+            result["skipped_sources"].append(
+                {"source": "Tushare fund_adj（复权因子）", "reason": "基金净值不可用，未发起（提前返回）"})
+            result["_error"] = err
             return result
 
         rows = nav_env.get("rows") or []
         if not rows:
-            result["_error"] = nav_env.get("error") or "etf_nav: empty response"
+            err = nav_env.get("error") or "etf_nav: empty response"
+            _trace(nav_name, nav_env, outcome="missing", reason=err)
+            result["skipped_sources"].append(
+                {"source": "Tushare fund_adj（复权因子）", "reason": "基金净值不可用，未发起（提前返回）"})
+            result["_error"] = err
             return result
+        _trace(nav_name, nav_env, outcome="ok")
 
         # 按调用方窗口切片：锚定数据末端日期（缓存跨日/跨节假日时窗口长度稳定）
         calendar_days = int(days * 365 / 250) + 15
@@ -1439,6 +2478,9 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             columns={"date": "净值日期", "nav": "单位净值", "change_pct": "日增长率"}
         )
         source = nav_env.get("source", "fund_etf_fund_info_em")
+        # B-F01：暴露实际净值来源（列格式错位时降级 fund_open_fund_info_em），
+        # 供 tracking/data_status 记录真实尝试源，不由静态表猜测。
+        result["source"] = source
 
         result["nav_rows"] = len(df)
 
@@ -1446,9 +2488,23 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         # 除息日开盘前必过期重拉，防 stale 因子跨断点算收益率）
         adj_env = _bridge_get("get_etf_adj_factor", symbol)
         adj_map = adj_env.get("adj_map") if adj_env and adj_env.get("status") == "ok" else None
+        adj_name = "Tushare fund_adj（复权因子）"
+        # R05/R07：尝试/跳过由结构化留痕判定（旧实现靠 note 子串「未发起网络」，
+        # 文案一变就误判；None 也不再猜「本次网络」）
+        adj_state = _leg_call_state(adj_env, getter="get_etf_adj_factor")
         if adj_map:
+            result["attempted_sources"].append(adj_name)
+            _trace(adj_name, adj_env, outcome="ok")
             result["adj_applied"] = True
             result["adj_note"] = _ADJ_NOTE
+        elif not adj_state["attempted"]:
+            # 无 token 等 producer 结构化跳过：未发起取数，不登记 attempted（B-F01）
+            result["skipped_sources"].append(
+                {"source": adj_name, "reason": adj_state["skip_reason"]})
+        else:
+            result["attempted_sources"].append(adj_name)
+            _trace(adj_name, adj_env, outcome="missing",
+                   reason=(adj_env or {}).get("note") or "fund_adj 不可得（查询失败/空返回）")
 
         navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
         # 裁剪上下文行（date < start）：仅当上下文切片实际生效（非兜底）时执行，
@@ -1476,6 +2532,8 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         if len(returns) < 5:
             result["status"] = "insufficient"
             result["_error"] = f"only {len(returns)} daily returns"
+            result["skipped_sources"].append(
+                {"source": "stock_zh_index_daily（指数日线）", "reason": "净值序列不足，未发起（提前返回）"})
             return result
 
         # 固定 60 日窗口，不同 ETF 间可比；不足 60 日则用全部可用数据
@@ -1484,6 +2542,8 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
         if vol_ann is None:
             result["status"] = "insufficient"
             result["_error"] = f"only {len(returns)} daily returns"
+            result["skipped_sources"].append(
+                {"source": "stock_zh_index_daily（指数日线）", "reason": "净值序列不足，未发起（提前返回）"})
             return result
         result["volatility_annualized"] = vol_ann
         result["volatility_window"] = min(len(returns), 60)
@@ -1496,7 +2556,9 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             result["ma60"] = round(ma60_series[-1], 4)
 
         # D4: 指数价格 MA（底层指数的趋势结构，与 NAV MA 互补）
-        idx_code = CSINDEX_MAP.get(symbol, "")
+        # R12：指数代码经统一解析（CSINDEX_MAP → 已核身份），与 tracking 腿同源
+        idx_code = resolve_tracked_index(
+            symbol, identity=_identity_for_index_resolution(symbol))["code"] or ""
         if idx_code and len(navs) >= 60:
             try:
                 _fetch_index_ma(result, idx_code)
@@ -1538,7 +2600,9 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
                 derived["boll_bandwidth_pct"] = round((boll_upper / boll_lower - 1) * 100, 2)
             vol_ann = result.get("volatility_annualized")
             if vol_ann is not None:
-                derived["daily_volatility_pct"] = round(vol_ann / math.sqrt(252), 2)
+                # R16（D11 同类）：年化系数走模块常量，不另写裸 252
+                derived["daily_volatility_pct"] = round(
+                    vol_ann / math.sqrt(TRADING_DAYS_PER_YEAR), 2)
 
         if derived:
             result["derived"] = derived
@@ -1774,6 +2838,18 @@ def _em_to_premium_discount(em_raw: object) -> float | None:
     return None if em is None else -em
 
 
+def _premium_discount_caliber() -> dict:
+    """折溢价口径/时点（B03）：净值时点不可得时不得确认实时错价。"""
+    return {
+        "formula": "收盘/最新价相对对应每份 NAV 的偏离（EM 基金折价率，已规范化为 +溢价/-折价）",
+        "nav_time_point": "未知（spot 字段无对应净值日期）",
+        "quote_time_point": "查询时点（spot 最新报价）",
+        "quote_snapshot": "单次快照，非连续盘口",
+        "note": "NAV 可能为隔夜/盘中估值口径未知；不得用隔夜 NAV 确认当日错价，"
+                "也不得由日成交额推导盘口价差",
+    }
+
+
 # ---------------------------------------------------------------------------
 # ETF 类型分类（G1）
 # ---------------------------------------------------------------------------
@@ -1815,7 +2891,13 @@ def query_etf_category(symbol: str) -> dict[str, str]:
 
 
 def _infer_category_from_name(name: str) -> str:
-    """从 ETF 名称关键词推断类型。"""
+    """从 ETF 名称关键词推断类型。
+
+    B01-1：关键词命中仍是**推断**（调用方标 inferred_unverified）；兜底由旧
+    `sector` 改 `unknown`——名称不含任何类别的 ETF 不得被猜成行业 ETF，
+    否则「名称猜测触发行业分析必填项」（设计 §3.1 禁止）。资产类关键词
+    （债/黄金/货币/纳指）保留：命中的是资产类型而非策略断言。
+    """
     n = name.lower()
     if any(k in n for k in ["qdii", "纳指", "标普", "恒生", "日经", "德国"]):
         return "cross_border"
@@ -1828,7 +2910,7 @@ def _infer_category_from_name(name: str) -> str:
     if any(k in n for k in ["沪深300", "中证500", "中证1000", "中证2000",
                               "上证50", "科创50", "创业板", "深证"]):
         return "broad_market"
-    return "sector"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -1836,17 +2918,30 @@ def _infer_category_from_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _attach_industry_pe(result: dict, symbol: str) -> None:
-    """对行业/主题 ETF，从 industry_weekly SQLite 表查行业 PE 注入 result。"""
+    """对行业/主题 ETF，从 industry_weekly SQLite 表查行业 PE 注入 result。
+
+    R09：逐条留痕 ``industry_pe_status``（available / skipped_index_pe_present /
+    no_industry_mapping / source_null / query_error）。515050/516160 同时有
+    csindex 指数 PE 与申万行业映射：指数 PE 可得时行业代理 PE **政策上不取**
+    （避免双口径混用），旧实现静默 return，data_status 只能写「无行业映射或
+    未请求」——与事实不符。
+    """
     sw_info = ETF_TO_SW_INDUSTRY.get(symbol)
     if not sw_info:
+        result["industry_pe_status"] = "no_industry_mapping"
         return
     # 仅当无 csindex PE 时才附加行业 PE（行业 ETF 通常 not_mapped 或 unknown_etf）
     if result.get("index_pe") is not None:
+        result["industry_pe_status"] = "skipped_index_pe_present"
+        result["industry_pe_note"] = (
+            f"已有 csindex 指数 PE（{result.get('index_code') or '—'}，"
+            "指数公司口径）；申万行业代理 PE 本次未取（避免两种口径混用）"
+        )
         return
     try:
         import sqlite3
-        from lib.store import _conn, _safe_close
-        c = _conn()
+        from lib.store import close_connection, open_connection
+        c = open_connection()
         try:
             row = c.execute(
                 "SELECT pe, pb, date FROM industry_weekly "
@@ -1854,21 +2949,32 @@ def _attach_industry_pe(result: dict, symbol: str) -> None:
                 (sw_info["sw_code"],),
             ).fetchone()
         except sqlite3.OperationalError:
+            result["industry_pe_status"] = "query_error"
             return
         finally:
-            _safe_close(c)
+            close_connection(c)
         if row:
             pe_val = row["pe"]
             if pe_val is None:
-                return  # pe 字段为 NULL（如行业整体亏损），静默跳过
+                # pe 字段为 NULL（如行业整体亏损）——已查得该行但无值：missing 而非未执行
+                result["industry_pe_status"] = "source_null"
+                result["industry_pe_note"] = (
+                    f"申万{sw_info['sw_name']}({sw_info['sw_code']})行业 PE 为空（源侧 NULL，"
+                    "常为行业整体亏损）")
+                return
             result["industry_pe"] = pe_val
+            result["industry_pe_status"] = "available"
             result["industry_pe_note"] = (
                 f"申万{sw_info['sw_name']}({sw_info['sw_code']})行业 PE={pe_val:.2f}，"
                 f"数据日期 {row['date']}；"
                 f"此为行业层面估值参考，非 ETF 精确 PE"
             )
+        else:
+            result["industry_pe_status"] = "source_null"
+            result["industry_pe_note"] = (
+                f"申万{sw_info['sw_name']}({sw_info['sw_code']})行业快照无数据行")
     except Exception:
-        pass  # 行业 PE 为非关键附加数据，降级不阻塞主流程
+        result["industry_pe_status"] = "query_error"  # 非关键附加数据，降级不阻塞主流程
 
 
 def _attach_industry_allocation(result: dict, symbol: str) -> None:
@@ -1880,6 +2986,11 @@ def _attach_industry_allocation(result: dict, symbol: str) -> None:
     """
     env = _bridge_get("get_etf_industry_alloc", symbol)
     if env is None or env.get("status") != "ok" or not env.get("allocation"):
+        # R05 同类：桥/getter 不可用 = 未发起（data_status 不得静态记已尝试源）
+        state = _leg_call_state(env, getter="get_etf_industry_alloc")
+        result["industry_allocation_fetch_status"] = (
+            "attempted" if state["attempted"] else "not_initiated")
+        result["industry_allocation_skip_reason"] = state["skip_reason"]
         return
     result["industry_allocation"] = env["allocation"]
     result["industry_allocation_date"] = env.get("latest_date")
@@ -1945,7 +3056,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
     """
     import sqlite3
 
-    from lib.store import _conn, _safe_close, init_db
+    from lib.store import close_connection, init_db, open_connection
 
     # v0.2.3：经 _lookup_etf_spot_row（L1 30s → L2 60s）取 spot 行，修直原直连绕过缓存问题
     row, err = _lookup_etf_spot_row(symbol)
@@ -1973,7 +3084,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
     }
 
     init_db()
-    c = _conn()
+    c = open_connection()
     try:
         c.execute(
             "INSERT OR REPLACE INTO etf_share_snapshots (date, symbol, shares, price, aum) "
@@ -1988,7 +3099,7 @@ def save_etf_share_snapshot(symbol: str) -> dict | None:
         c.rollback()
         return None
     finally:
-        _safe_close(c)
+        close_connection(c)
 
 
 def etf_share_flow(symbol: str, days: int = 60) -> dict:
@@ -2015,9 +3126,9 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
     """
     import sqlite3
 
-    from lib.store import _conn, _safe_close
+    from lib.store import close_connection, open_connection
 
-    c = _conn()
+    c = open_connection()
     try:
         rows = c.execute(
             "SELECT date, shares, price, aum FROM etf_share_snapshots "
@@ -2030,7 +3141,7 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
             return {"symbol": symbol, "history_count": 0, "note": "无历史数据（etf_share_snapshots 表不存在）"}
         raise
     finally:
-        _safe_close(c)
+        close_connection(c)
 
     if not rows:
         return {"symbol": symbol, "history_count": 0, "note": "无历史数据"}
@@ -2054,7 +3165,8 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         "symbol": symbol,
         "date": latest["date"],
         "shares_current": latest["shares"],
-        "aum_current": latest["aum"],
+        "aum_current": latest["aum"],                       # 兼容别名（=份额×交易价估算）
+        "share_price_mv_est_current": latest["aum"],        # B02-1 正名：代理口径
         "share_change_5d": _change(5)["share_change"],
         "flow_est_5d": _change(5)["flow_est"],
         "share_change_20d": _change(20)["share_change"],
@@ -2065,6 +3177,11 @@ def etf_share_flow(symbol: str, days: int = 60) -> dict:
         "lag_note": (
             "date 为采集日墙钟日期；shares/price/aum 为采集时 akshare 最新披露值，"
             "份额披露存在 T+1 延迟，实际对应交易日未知"
+        ),
+        "caliber_note": (
+            "aum_current/share_price_mv_est_current=份额×交易价估算市值（非官方资产净值）；"
+            "flow_est=份额变化×均价估算（亿元），为估算方向标签而非官方申赎数据；"
+            "价格涨跌 ≠ 资金净流入"
         ),
     }
 
@@ -2096,8 +3213,20 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     # 经 data_bridge L2 缓存（1d）
     env = _bridge_get("get_etf_share_history", symbol)
     if env is None or env.get("status") != "ok":
-        return {"symbol": symbol, "available": False,
-                "note": (env or {}).get("note") or _NOTE_SHARE_HIST_UNAVAILABLE}
+        # R06 同类（D11 扫描）：无 token/桥不可用时源**未发起**，不得让消费者
+        # 静态登记为 attempted——把结构化留痕透传给 data_status
+        state = _leg_call_state(env, getter="get_etf_share_history")
+        out = {"symbol": symbol, "available": False,
+               "note": (env or {}).get("note") or _NOTE_SHARE_HIST_UNAVAILABLE}
+        if state["attempted"]:
+            out["attempted_sources"] = ["Tushare fund_share", "Tushare fund_daily"]
+            out["skipped_sources"] = []
+        else:
+            out["attempted_sources"] = []
+            out["skipped_sources"] = [
+                {"source": src, "reason": state["skip_reason"]}
+                for src in ("Tushare fund_share", "Tushare fund_daily")]
+        return out
 
     import pandas as pd
 
@@ -2291,12 +3420,1254 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
             f"请求 {days} 日窗口，取数上限（{_SHARE_FETCH_NATURAL_DAYS} 自然日）"
             f"仅覆盖 {len(detail_rows)} 行，已按可用数据返回"
         )
+    # B02-1：估算标签与「价格涨≠净流入」措辞的单一出处
+    result["caliber_note"] = (
+        "flow_est=份额变化×区间均价估算（亿元），为估算方向标签（Tushare fund_share "
+        "T+1 延迟），非官方申赎数据；价格涨跌幅 ≠ 资金净流入"
+    )
     return result
 
 
 # ---------------------------------------------------------------------------
-# ETF 历史行情深度（R11a，v0.2.4）：baostock 双源回退 + 历史统计
+# 估算资产净值（B02-1）：份额×单位净值，仅同日匹配
 # ---------------------------------------------------------------------------
+
+def query_etf_est_net_assets(symbol: str) -> dict:
+    """份额×单位净值的**估算**资产净值（仅同日匹配；非官方披露规模）。
+
+    份额来自 Tushare fund_share（`trade_date` + `fd_share`，万份），净值来自
+    `fetch_etf_nav`（`date` + `nav`）。只有当「最新可用份额日」与「同一日期
+    的净值」同时存在时才给出估算值；份额日无同日净值 → `status="mismatch"`
+    并列出两个日期、**不给数字**（不得用隔日 NAV 冒充同期）。
+
+    R06：attempted/skipped 由**producer 结构化留痕**推导（份额源无 token 时
+    未发起网络 → 不得硬编码登记为 attempted，也不得丢弃真实原因）。
+    """
+    sh_env = _bridge_get("get_etf_share_history", symbol)
+    sh_state = _leg_call_state(sh_env, getter="get_etf_share_history")
+    if sh_env is None or sh_env.get("status") != "ok" or not sh_env.get("fund_share"):
+        share_attempted = ["Tushare fund_share"] if sh_state["attempted"] else []
+        skipped: list[dict] = []
+        if not sh_state["attempted"]:
+            skipped.append({"source": "Tushare fund_share（份额）",
+                            "reason": sh_state["skip_reason"]})
+        elif sh_env is not None:
+            share_attempted_note = (sh_env.get("note")
+                                    or "Tushare fund_share 未取到数据")
+        else:
+            share_attempted_note = "Tushare fund_share 未取到数据（桥内失败/缺溯源）"
+        skipped.append({"source": "fund_etf_fund_info_em（净值）",
+                        "reason": "份额不可用，净值腿未发起取数（提前返回）"})
+        return {"symbol": symbol, "status": "missing", "value_yi": None,
+                "attempted_sources": share_attempted,
+                "skipped_sources": skipped,
+                "note": f"份额序列不可用（{sh_state['skip_reason'] if not sh_state['attempted'] else share_attempted_note}）"}
+    nav_env = _bridge_get("get_etf_nav", symbol)
+    nav_state = _leg_call_state(nav_env, getter="get_etf_nav")
+    if nav_env is None or nav_env.get("status") != "ok" or not nav_env.get("rows"):
+        nav_attempted = ["Tushare fund_share",
+                         "fund_etf_fund_info_em（净值）"] if nav_state["attempted"] else \
+            ["Tushare fund_share"]
+        nav_skipped = (None if nav_state["attempted"] else
+                       [{"source": "fund_etf_fund_info_em（净值）",
+                         "reason": nav_state["skip_reason"]}])
+        note = (f"净值序列不可用（{(nav_env or {}).get('note') or (nav_env or {}).get('error') or '未取到'}）"
+                if nav_state["attempted"] else
+                f"净值腿未发起取数（{nav_state['skip_reason']}）")
+        out = {"symbol": symbol, "status": "missing", "value_yi": None,
+               "attempted_sources": nav_attempted, "note": note}
+        if nav_skipped:
+            out["skipped_sources"] = nav_skipped
+        return out
+    nav_by_date: dict[str, float] = {}
+    for r in nav_env.get("rows") or []:
+        d = str(r.get("date", ""))
+        v = safe_float(r.get("nav"))
+        if d and v is not None:
+            nav_by_date[d] = v
+    shares_by_date: dict[str, float] = {}
+    for r in sh_env.get("fund_share") or []:
+        d = str(r.get("trade_date", ""))
+        # fund_share.trade_date 为 YYYYMMDD；净值源为 YYYY-MM-DD → ISO 归一后匹配
+        iso = (f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 and d.isdigit() else d)
+        v = safe_float(r.get("fd_share"))
+        if iso and v is not None and math.isfinite(v):
+            shares_by_date[iso] = v
+    if not shares_by_date or not nav_by_date:
+        return {"symbol": symbol, "status": "missing", "value_yi": None,
+                "attempted_sources": ["Tushare fund_share", "fund_etf_fund_info_em（净值）"],
+                "note": "份额或净值为空（无有效行）"}
+    shares_date = max(shares_by_date)
+    nav_date = max(nav_by_date)
+    if shares_date not in nav_by_date:
+        return {
+            "symbol": symbol, "status": "mismatch", "value_yi": None,
+            "attempted_sources": ["Tushare fund_share", "fund_etf_fund_info_em（净值）"],
+            "shares_date": shares_date, "shares_wan": shares_by_date[shares_date],
+            "nav_date": nav_date, "nav": nav_by_date[nav_date],
+            "caliber": "份额×单位净值（估算资产净值）",
+            "note": "最新份额日无同日单位净值：不给估算值（不得用隔日 NAV 当同期）",
+        }
+    nav = nav_by_date[shares_date]
+    return {
+        "symbol": symbol, "status": "ok",
+        "value_yi": round(shares_by_date[shares_date] * nav / WAN_PER_YI, 2),
+        "as_of": shares_date, "shares_date": shares_date, "nav_date": shares_date,
+        "shares_wan": shares_by_date[shares_date], "nav": nav,
+        "caliber": "同日份额×单位净值（估算资产净值，非官方披露规模）",
+        "not_official_disclosure": True,
+        "attempted_sources": ["Tushare fund_share", "fund_etf_fund_info_em（净值）"],
+        "note": "估算值；官方规模口径以基金定期报告/公告披露为准",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 跟踪质量（B02-2）：同收益类型才可确认的 TD/TE
+# ---------------------------------------------------------------------------
+# 契约（负责人 2026-10-08 纠偏）：确认性 TD/TE 仅当两腿收益类型/币种/频率
+# 一致时成立。现有基准只有价格指数 → 默认 pipeline 输出 limited +
+# td_pct/te_pct_annualized=None，价格基准偏离只作研究数值（research_only）。
+# 严禁以一句 caliber 免责声明放行类型不一致的「确认指标」。
+# R3 口径分离：TD=窗口首末有效端点累计差（缺值区间不因剔除消失）；TE=采样
+# 区间日偏离波动（覆盖度显式披露）。纯样本收益列表不足以定义窗口 TD——
+# 两个函数的 TD 都必须显式传 window_returns，缺端点即报错。
+
+#: 允许的收益类型词表（确认性比较必须两腿相等）
+RETURN_TYPES = ("total_return", "price_return")
+#: 允许的频率词表
+RETURN_FREQUENCIES = ("daily",)
+#: 日频年化系数（A 股交易日；显式声明，不允许 √365 混用）
+TRADING_DAYS_PER_YEAR = 252
+#: 确认性 TD/TE 的最小共同样本（试验下限，非行业标准）
+TRACKING_MIN_COMMON = 60
+
+
+class TrackingCaliberError(ValueError):
+    """跟踪指标两腿不可比（收益类型/币种/频率不一致或样本不足）——拒绝计算。"""
+
+
+def _skip_once(skips: list[dict], entry: dict) -> None:
+    """同一次跳过只记一条（同 source 去重，保留既有更贴近真实原因的一条）。
+
+    R10：compute_etf_tracking 沿用 kline.skipped_sources 后又追加同一指数腿
+    （原因不同）→ 同一次未发生的事被记两条，消费方计数/呈现重复。
+    """
+    if any(s.get("source") == entry.get("source") for s in skips):
+        return
+    skips.append(entry)
+
+
+def _deviation_core(returns_fund: list[float], returns_bench: list[float], *,
+                    window_returns: tuple[float, float] | None,
+                    annualization_factor: int) -> dict:
+    """TD/TE 公共计算核（确认指标与研究数值两条路径共用同一公式与校验）。
+
+    R16/R17 统一：年化系数由调用方传入（不得各自硬编码 √252）；
+    空样本/不等长/非有限值统一抛 :class:`TrackingCaliberError`（不再
+    ZeroDivisionError 或静默 NaN）。返回 ``{td_pct, te_pct_annualized,
+    sample_n, window_returns}``。
+    """
+    if len(returns_fund) != len(returns_bench):
+        raise TrackingCaliberError(
+            f"两腿样本长度不等（{len(returns_fund)} vs {len(returns_bench)}）——"
+            "拒绝截短配对；须先按相邻有效区间对齐两腿（_align_legs_by_date）")
+    n = len(returns_fund)
+    if n == 0:
+        raise TrackingCaliberError("空样本（0 个收益区间）——无 TD/TE 可算")
+    if n < 2:
+        raise TrackingCaliberError(
+            f"样本不足以估计日偏离波动（n={n}，ddof=1 需 ≥2）——拒绝输出 TE")
+    win_f, win_b = _validate_window_returns(window_returns)
+    diffs: list[float] = []
+    for a, b in zip(returns_fund, returns_bench):
+        if not (math.isfinite(a) and math.isfinite(b)):
+            raise TrackingCaliberError("收益序列含非有限值（NaN/Inf）")
+        diffs.append(a - b)
+    mean = sum(diffs) / n
+    var = sum((x - mean) ** 2 for x in diffs) / (n - 1)
+    te_pct = math.sqrt(var) * math.sqrt(annualization_factor) * 100
+    return {
+        "td_pct": round((win_f - win_b) * 100, 2),
+        "te_pct_annualized": round(te_pct, 2),
+        "sample_n": n,
+        "annualization_factor": annualization_factor,
+        "window_returns": {"fund": win_f, "bench": win_b},
+    }
+
+
+def compute_tracking_metrics(returns_fund: list[float], returns_bench: list[float], *,
+                             fund_return_type: str, bench_return_type: str,
+                             fund_currency: str, bench_currency: str,
+                             window_returns: tuple[float, float] | None = None,
+                             frequency: str = "daily",
+                             annualization_factor: int = TRADING_DAYS_PER_YEAR,
+                             min_common: int = TRACKING_MIN_COMMON) -> dict:
+    """两腿收益序列 + 窗口端点收益 → 确认性 TD/TE（**先校验口径**，不可比即拒绝）。
+
+    **两种口径分开定义（R3，不得混用）**：
+
+    - TD（**窗口起止累计偏离**）=（基金窗口端点收益 − 基准窗口端点收益）×100，
+      端点收益由调用方给出（``window_returns``，= 窗口首末**有效端点**取值比 − 1）。
+      纯样本收益列表不足以定义窗口累计：有效区间不连续时，区间样本复利的
+      ∏(1+r)−1 会漏掉被剔除区间的价格变动，既不是窗口首末累计、也不是任何
+      单一可解释量（R3 负责人反例：端点差 25% vs 样本复利 12.79%）——因此
+      本函数**不接受**由样本复利推导 TD，缺端点即报错，不静默出数。
+    - TE（**日偏离波动**）= std(e_t, ddof=1) × √annualization × 100，
+      e_t = r_fund,t − r_bench,t，只覆盖传入的样本区间（覆盖度由调用方
+      在底稿披露，见 ``compute_etf_tracking.input_evidence.sampled_coverage``）。
+
+    样本 < min_common → 拒绝（由调用方按 insufficient 披露，不返回数字）。
+
+    **两腿必须等长**（B-F03）：按日期配对由调用方完成（``_align_legs_by_date``）；
+    本函数拒绝不等长输入——历史上 ``min(len)`` 静默截尾会把 61/60 个收益
+    强行配对成「同窗口」，属未证同期的错配。
+    """
+    if fund_return_type not in RETURN_TYPES or bench_return_type not in RETURN_TYPES:
+        raise TrackingCaliberError(f"收益类型词表外: {fund_return_type!r}/{bench_return_type!r}")
+    if fund_return_type != bench_return_type:
+        raise TrackingCaliberError(
+            f"两腿收益类型不一致（{fund_return_type} vs {bench_return_type}）——"
+            "不可输出确认性 TD/TE")
+    if fund_currency != bench_currency:
+        raise TrackingCaliberError(
+            f"两腿币种不一致（{fund_currency} vs {bench_currency}）——不可比")
+    if frequency not in RETURN_FREQUENCIES:
+        raise TrackingCaliberError(f"频率词表外: {frequency!r}")
+    n = len(returns_fund)
+    if n < min_common:
+        raise TrackingCaliberError(f"共同样本不足（{n} < {min_common}）——停止确认性计算")
+    core = _deviation_core(returns_fund, returns_bench,
+                           window_returns=window_returns,
+                           annualization_factor=annualization_factor)
+    return {
+        **core,
+        "frequency": frequency,
+        "fund_return_type": fund_return_type,
+        "bench_return_type": bench_return_type,
+        "currency": fund_currency,
+        # 口径留痕（R3）：TD 来自窗口端点、TE 来自样本区间——消费方/复算可据此
+        # 区分，不得把 TE 样本数当 TD 的窗口覆盖。
+        "td_scope": "window_endpoint",
+        "te_scope": "sampled_intervals",
+    }
+
+
+def _validate_window_returns(window_returns: tuple[float, float] | None
+                             ) -> tuple[float, float]:
+    """窗口端点收益校验：两个有限且 > −100%（1+r 须为正）的累计收益。
+
+    缺端点（None）→ TrackingCaliberError（**拒绝**用样本复利代替窗口累计）；
+    保持报错类型为模块统一的 TrackingCaliberError（外部复现脚本按此断言）。
+    """
+    if window_returns is None:
+        raise TrackingCaliberError(
+            "缺窗口端点收益（window_returns）：TD 必须由窗口首末有效端点定义，"
+            "不得用样本区间复利充当窗口累计偏离")
+    try:
+        win_f, win_b = float(window_returns[0]), float(window_returns[1])
+    except (TypeError, IndexError, ValueError) as exc:
+        raise TrackingCaliberError(
+            f"窗口端点收益不可用（{window_returns!r}）——TD 必须由窗口首末有效端点定义，"
+            "不得用样本区间复利代替") from exc
+    for v, leg in ((win_f, "基金"), (win_b, "基准")):
+        if not math.isfinite(v) or v <= -1.0:
+            raise TrackingCaliberError(f"{leg}窗口端点收益非法（{v}）：须为 >−100% 的有限值")
+    return win_f, win_b
+
+
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_COMPACT_DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
+
+
+def _norm_trade_date(value: Any) -> str | None:
+    """交易日归一：ISO（``YYYY-MM-DD``，容忍尾部时间）或 compact（``YYYYMMDD``）
+    → ``YYYY-MM-DD``；不可解析/非法日历日 → None（B-F03 统一日期合同）。"""
+    s = str(value).strip() if value is not None else ""
+    if not s:
+        return None
+    m = _ISO_DATE_RE.match(s[:10])
+    if not m:
+        m = _COMPACT_DATE_RE.match(s)
+    if not m:
+        return None
+    y, mo, d = m.groups()
+    try:
+        datetime(int(y), int(mo), int(d))
+    except ValueError:
+        return None
+    return f"{y}-{mo}-{d}"
+
+
+def _dated_values(rows: list[dict], value_key: str) -> tuple[dict[str, float], dict]:
+    """行序列 → ``{归一日: 值}``（仅有限正数参与；同一日期重复值去重、冲突值弃用）。
+
+    B-F03 去重合同：同一归一日期的**不同值**无法判定哪个正确 → 该日期两腿
+    一起弃用并计入 ``conflicts``；零/负/None/NaN/±Inf/不可解析日期均为无效
+    值（日收益在零值处不可定义）→ 计入 ``dropped_values``。返回
+    ``(values, stats)``，stats 供底稿如实披露丢弃情况，不静默。
+    """
+    out: dict[str, float] = {}
+    conflicts: set[str] = set()
+    dropped_values = 0
+    for r in rows or []:
+        d = _norm_trade_date(r.get("date"))
+        v = safe_float(r.get(value_key))
+        if d is None or v is None or not math.isfinite(v) or v <= 0:
+            dropped_values += 1
+            continue
+        if d in out and out[d] != v:
+            conflicts.add(d)
+            continue
+        out[d] = v
+    for d in conflicts:
+        out.pop(d, None)
+    stats = {"dropped_values": dropped_values,
+             "conflict_dates": sorted(conflicts)}
+    return out, stats
+
+
+def _returns_over_intervals(intervals: list[tuple[str, str]],
+                            values: dict[str, float]) -> list[float]:
+    """按给定**收益区间**计算收益（两腿共用同一区间表 → 长度恒等）。"""
+    return [values[b] / values[a] - 1.0 for a, b in intervals]
+
+
+def _align_legs_by_date(nav_rows: list[dict], bench_rows: list[dict]) -> dict:
+    """两腿按**已知日期并集脊**取相邻有效区间对齐（B-F03 合同；R2 修正）。
+
+    1. 两腿各自归一日期 + 排序 + 去重（冲突值弃该日）；
+    2. 已知日期脊 = 两腿日期**并集**（任一侧的日期都算已知交易日候选——
+       不新增日历数据源，也不把某一腿的缺失当成「非交易日」）；
+    3. 沿脊只取**相邻日对**，且两端日期在两腿均有有效值时才保留为收益
+       区间；任一端缺值 → 该相邻对整对剔除（**不得**把跨两个交易日的
+       收益当作日频样本再乘 √252——R2 负责人反例：09-01→09-03 桥接）；
+    4. 保留区间可以**不连续**；逐区间计算两腿收益 → 长度恒等。
+
+    返回 ``{dates, intervals, fund_values, bench_values, returns_fund,
+    returns_bench, dropped, window, contiguous}``。``dates`` 仅含实际参与
+    区间端点的日期（不参与任何区间的孤立日期不出现）；复算必须用
+    ``intervals`` 逐对取值，不得对 ``dates`` 再做相邻配对。
+    """
+    fund_values, fund_stats = _dated_values(nav_rows, "nav")
+    bench_values, bench_stats = _dated_values(bench_rows, "close")
+    # 无效/冲突值仍有已知交易日期，不能从脊中消失后桥接两侧日收益。
+    spine = sorted({d for rows in (nav_rows, bench_rows) for r in rows or []
+                    if (d := _norm_trade_date(r.get("date"))) is not None})
+    intervals: list[tuple[str, str]] = []
+    skipped_intervals = 0
+    for a, b in zip(spine, spine[1:]):
+        if (a in fund_values and b in fund_values
+                and a in bench_values and b in bench_values):
+            intervals.append((a, b))
+        else:
+            skipped_intervals += 1
+    dates = sorted({d for pair in intervals for d in pair})
+    window = f"{dates[0]} ~ {dates[-1]}" if dates else None
+    # 公共区间（两腿都有值的首末日期）内的相邻日对总数 vs 保留数 = 样本内缺口；
+    # 窗口外（两腿序列覆盖范围不同）的剔除另计，不冒充样本内缺口
+    common = sorted(set(fund_values) & set(bench_values))
+    span = (common[0], common[-1]) if common else None
+    interior_pairs = [(a, b) for a, b in zip(spine, spine[1:])
+                      if span and span[0] <= a and b <= span[1]]
+    interior_gaps = len(interior_pairs) - len(intervals)
+    return {
+        "dates": dates,
+        "intervals": [[a, b] for a, b in intervals],
+        "fund_values": fund_values,
+        "bench_values": bench_values,
+        "returns_fund": _returns_over_intervals(intervals, fund_values),
+        "returns_bench": _returns_over_intervals(intervals, bench_values),
+        "dropped": {
+            "fund": fund_stats,
+            "benchmark": bench_stats,
+            "joint_days_dropped": len(set(fund_values) ^ set(bench_values)),
+            "skipped_intervals": skipped_intervals,
+            "interior_gaps": interior_gaps,
+        },
+        "window": window,
+        "contiguous": interior_gaps == 0 and bool(intervals),
+    }
+
+
+def compute_etf_tracking(symbol: str, *, days: int = 250,
+                         min_common: int = TRACKING_MIN_COMMON) -> dict:
+    """ETF 跟踪质量块（TD/TE 合同见段首注释）。
+
+    基金腿=复权单位净值（`query_etf_kline` nav_history，需 `adj_applied=True`）；
+    基准腿=指数收盘价（`fetch_etf_index_daily`，**价格指数**）。两腿类型不同 →
+    `status="limited"`：`td_pct`/`te_pct_annualized` 为 None，价格基准偏离只入
+    `price_benchmark_deviation`（research_only）；仅当两腿同口径时才 available。
+
+    基准指数代码解析（B-F05）：``CSINDEX_MAP``（指数 PE 映射）→ 已核身份
+    ``identity.tracked_index.code`` 兜底——PE 未映射 ≠ 产品没有收益基准；
+    两者都无 → not_mapped（未知保持未知）。取数走既有指数日线接口，失败
+    透明记 missing。
+
+    对齐（B-F03，R2 修正）：两腿先各自归一日期并排序去重（冲突值弃用），
+    再在**已知日期并集脊**上只取相邻日对且两端两腿均有有效值的区间——
+    缺值处相邻区间整段剔除，**不桥接跨交易日收益充日频样本**（缺值不再让
+    两腿收益跨不同区间；保留区间可不连续）。两腿收益由同一区间表构造 →
+    长度恒等；不等长（含生产异常）由 ``compute_tracking_metrics`` 拒绝。
+
+    偏离口径（R3）：TD=**窗口首末有效端点的两腿累计收益差**（缺值区间的
+    价格变动不会因剔除而消失，端点差才是窗口起止累计偏离；有效区间样本
+    复利只作区间级留痕，不作为窗口 TD 输出）；TE=采样区间的日偏离波动
+    （只覆盖 intervals 样本，覆盖度见底稿 ``sampled_coverage``）。
+    """
+    base = {
+        "status": None, "td_pct": None, "te_pct_annualized": None,
+        "sample_n": 0, "annualization_factor": TRADING_DAYS_PER_YEAR,
+        "window": None,
+        # B-F01：attempted_sources=本次实际发起过的取数（由 producer 分支留痕
+        # 逐条沿用，不由静态源表/状态猜测合成）；source_trace 区分 L2 缓存读取
+        # /本次网络与失败理由；skipped_sources=未发起的腿及原因（含无 token）。
+        "attempted_sources": [],
+        "source_trace": [],
+        "skipped_sources": [],
+        "index_code": None,
+        "index_code_source": None,
+        "caliber": {
+            "fund_return": "复权单位净值（前复权，分红/拆分断点已消除）≈总收益",
+            "benchmark_return": "指数收盘价（价格指数，非总收益）",
+            "currency": "CNY", "frequency": "daily",
+            "fund_return_type": "total_return",
+            "bench_return_type": "price_return",
+            "annualization": f"√{TRADING_DAYS_PER_YEAR}",
+            "source": {
+                "nav": "fund_etf_fund_info_em 单位净值 + Tushare fund_adj 前复权",
+                "benchmark": "stock_zh_index_daily 指数收盘价（价格口径）",
+            },
+        },
+        "not_double_count_fees": "基金净值收益已包含管理费/托管费；不得再单独扣减",
+        "note": None,
+        "price_benchmark_deviation": None,
+        # B05 负责人补充：同代冻结完整性——真正使用的两腿底稿（日期+取值）
+        # 随 payload 冻结，使 seal 对原始序列/输入变化敏感（可独立复算）。
+        "input_evidence": None,
+    }
+    # B-F05/R12：基准指数 = 统一解析（CSINDEX_MAP → 身份登记 tracked_index）；
+    # PE 未映射 ≠ 产品没有收益基准，反之亦然——两处解析必须同源
+    idx_res = resolve_tracked_index(symbol, identity=_identity_for_index_resolution(symbol))
+    idx = idx_res["code"] or ""
+    if idx:
+        base["index_code"] = idx
+        base["index_code_source"] = idx_res["source"]
+    if not idx:
+        base.update(status="not_mapped",
+                    note="无跟踪指数代码（CSINDEX_MAP 与身份登记均无）：无法构建基准腿")
+        base["skipped_sources"] = [
+            {"source": "基金净值", "reason": "无跟踪指数代码，未发起取数（基准腿不可建）"},
+            {"source": "指数日线", "reason": "无跟踪指数代码，未发起取数"},
+        ]
+        return base
+    # 基金腿：query_etf_kline 内部依次尝试 EM ETF 净值（列格式错位时降级
+    # fund_open_fund_info_em）与 Tushare fund_adj 复权因子；逐条沿用其真实
+    # 调用留痕（B-F01），不再在此追加惯例清单。
+    kline = query_etf_kline(symbol, days=days)
+    nav_src = str(kline.get("source") or "fund_etf_fund_info_em")
+    base["attempted_sources"] = [str(s) for s in kline.get("attempted_sources") or []]
+    base["source_trace"] = [dict(s) for s in kline.get("source_trace") or []]
+    base["skipped_sources"] = [dict(s) for s in kline.get("skipped_sources") or []]
+    if kline.get("status") != "available" or not kline.get("nav_history"):
+        _skip_once(base["skipped_sources"],
+                   {"source": "stock_zh_index_daily（指数日线）",
+                    "reason": "基金净值不可用，基准腿未发起取数（提前返回）"})
+        base.update(status="missing_nav",
+                    note=f"基金净值序列不可用（{kline.get('_error') or 'no nav rows'}）")
+        return base
+    if not kline.get("adj_applied"):
+        _skip_once(base["skipped_sources"],
+                   {"source": "stock_zh_index_daily（指数日线）",
+                    "reason": "基金腿未复权，基准腿无意义（提前返回）"})
+        base.update(status="limited",
+                    note="基金腿未复权（分红/拆分断点未消除）：无法证明与基准可比，"
+                         "停止确认性 TD/TE")
+        return base
+    bench_env = _bridge_get("get_etf_index_daily", idx)
+    bench_src = "stock_zh_index_daily（指数日线）"
+    # R05：None 不猜「本次网络」——桥不可用（未发起）记 skipped；已发起但失败
+    # 记 attempted + trace 理由（两类由结构化探针区分）
+    bench_state = _leg_call_state(bench_env, getter="get_etf_index_daily")
+    if bench_state["attempted"]:
+        base["attempted_sources"].append(bench_src)  # 已真实发起（B-F01）
+    else:
+        _skip_once(base["skipped_sources"],
+                   {"source": bench_src, "reason": bench_state["skip_reason"]})
+    if bench_env is None or bench_env.get("status") != "ok" or not bench_env.get("rows"):
+        base["source_trace"].append({
+            "source": bench_src, "via": bench_state["via"], "outcome": "missing",
+            "reason": f"{'已发起取数但不可得' if bench_state['attempted'] else '未发起取数'}"
+                      f"（index={idx}；{bench_state['skip_reason'] or (bench_env or {}).get('error') or '信封 missing/空'}）"})
+        base.update(status="missing_benchmark",
+                    note=f"缺基准序列（指数 {idx} 日线"
+                         f"{'不可得' if bench_state['attempted'] else '未发起取数'}）；"
+                         "停止确认性 TD/TE")
+        return base
+    base["source_trace"].append({
+        "source": bench_src, "via": _read_via(bench_env), "outcome": "ok",
+        "reason": f"index={idx}"})
+    nav_rows = kline.get("nav_history") or []
+    bench_rows = bench_env.get("rows") or []
+    # B-F03（R2）：日期归一/排序/去重 → 已知日期并集脊 → 只取相邻且两端两腿
+    # 有效的区间；缺值处区间整段剔除，不桥接跨交易日收益充日频样本。
+    aligned = _align_legs_by_date(nav_rows, bench_rows)
+    dates = aligned["dates"]
+    intervals = aligned["intervals"]
+    rf, rb = aligned["returns_fund"], aligned["returns_bench"]
+    n = len(rf)  # 由同一区间表构造 → 两腿恒等长（= 保留区间数）
+    window = aligned["window"]
+    base["window"] = window
+    base["sample_n"] = n
+    skipped = int((aligned["dropped"] or {}).get("skipped_intervals") or 0)
+    interior_gaps = int((aligned["dropped"] or {}).get("interior_gaps") or 0)
+    outside_skipped = max(skipped - interior_gaps, 0)
+    # R3：窗口起止累计偏离只取**窗口首末有效端点**（首末区间端点两腿均有效）。
+    # 有效区间样本复利 ≠ 窗口累计偏离：缺值剔除掉的区间价格变动不在样本里，
+    # 复利会漏掉它们（负责人反例：端点差 25% vs 样本复利 12.79%）。
+    if intervals:
+        first_d, last_d = intervals[0][0], intervals[-1][1]
+        window_returns = (
+            aligned["fund_values"][last_d] / aligned["fund_values"][first_d] - 1.0,
+            aligned["bench_values"][last_d] / aligned["bench_values"][first_d] - 1.0)
+    else:
+        window_returns = None  # 无有效区间 → 无窗口端点 → 停止累计（不猜）
+    if interior_gaps:
+        intervals_note = (
+            f"非连续区间（日频存疑）：窗口内 {interior_gaps} 个相邻日对因单腿缺值"
+            "整对剔除——不得桥接跨交易日收益，也不得按日期列表再相邻配对复算；"
+            f"累计偏离只取窗口首末有效端点（{window}），日偏离波动仅覆盖 {n} 个"
+            f"有效区间（{n}/{n + interior_gaps}）")
+    else:
+        intervals_note = "窗口内连续：全部相邻日对两端两腿有效（端点累计=区间复利一致）"
+        if outside_skipped:
+            intervals_note += (f"（窗口外另有 {outside_skipped} 个相邻日对因单腿"
+                               "缺值未计入，系两腿序列覆盖范围不同）")
+    # 同代冻结底稿：真正参与计算的**收益区间**（相邻日对）+ 端点上两腿取值，
+    # 随 payload 封存；序列/来源/输入变化 → payload 哈希变化 → 旧签认失效。
+    base["input_evidence"] = {
+        "legs": {
+            "fund": {
+                "series": ("单位净值（Tushare fund_adj 前复权）"
+                           if kline.get("adj_applied") else "单位净值（未复权）"),
+                "source": nav_src,
+                "return_type": "total_return",
+                "rows": [[d, aligned["fund_values"][d]] for d in dates],
+            },
+            "benchmark": {
+                "series": "指数收盘价（价格指数）",
+                "source": bench_src,
+                "return_type": "price_return",
+                "rows": [[d, aligned["bench_values"][d]] for d in dates],
+            },
+        },
+        "currency": "CNY", "frequency": "daily",
+        "weights": "等权（逐日收益差，无加权）",
+        "alignment": "日期归一（ISO/compact→YYYY-MM-DD）+ 已知日期并集脊上"
+                     "只取相邻日对且两端两腿有效值（缺值处区间整段剔除，"
+                     "不桥接跨交易日收益）；保留区间可不连续，见 intervals",
+        "intervals": intervals,
+        "intervals_note": intervals_note,
+        "dropped": aligned["dropped"],
+        "common_window": window, "sample_n": n,
+        # R3：窗口端点收益与取样覆盖随底稿冻结（TD 与 TE 两种口径分开可复算）
+        "window_endpoints": (
+            {"fund": [[first_d, aligned["fund_values"][first_d]],
+                      [last_d, aligned["fund_values"][last_d]]],
+             "benchmark": [[first_d, aligned["bench_values"][first_d]],
+                           [last_d, aligned["bench_values"][last_d]]]}
+            if intervals else None),
+        "window_returns_pct": (
+            {"fund": round(window_returns[0] * 100, 4),
+             "bench": round(window_returns[1] * 100, 4)} if window_returns else None),
+        "sampled_coverage": {
+            "sampled_intervals": n,
+            "interior_adjacent_pairs": n + interior_gaps,
+            "coverage_pct": (round(n / (n + interior_gaps) * 100, 1)
+                             if (n + interior_gaps) else None),
+            "note": "TE（日偏离波动）只覆盖 sampled_intervals；窗口累计偏离（TD）"
+                    "取窗口首末有效端点，与样本覆盖无关",
+        },
+        "deviation_formula": "TD=(基金窗口端点收益−基准窗口端点收益)×100"
+                             "（窗口首末有效端点，非区间样本复利）；"
+                             "TE=std(rf−rb, ddof=1)×√252（rf/rb 按 intervals 逐区间计算，"
+                             "只覆盖 sampled_intervals）",
+        "note": "报告/QC/HTML 只应使用本底稿复算（TD 用 window_endpoints、"
+                "TE 按 intervals 逐对取值）；原始序列或输入变化须重新冻结（新代）",
+    }
+    if n < min_common:
+        base.update(status="insufficient",
+                    note=f"可用相邻有效区间不足（{n} < {min_common}）；停止确认性 "
+                         f"TD/TE，样本 {n} 个日收益、窗口 {window}"
+                         + (f"（{skipped} 个区间因缺值剔除）" if skipped else ""))
+        return base
+    try:
+        dev = compute_tracking_metrics(
+            rf, rb, fund_return_type="total_return", bench_return_type="price_return",
+            fund_currency="CNY", bench_currency="CNY", window_returns=window_returns,
+            frequency="daily",
+            annualization_factor=TRADING_DAYS_PER_YEAR, min_common=min_common)
+    except TrackingCaliberError as exc:
+        if "长度不等" in str(exc):
+            # 对齐后仍不等长 = 实现缺陷：不得静默截短出数字（B-F03）
+            base.update(status="caliber_error", note=f"两腿样本不等长（{exc}）：停止计算")
+            return base
+        # 类型不一致（当前唯一真实形态）：确认指标置 None，偏离只作研究数值
+        # R17：研究数值同样拒绝空/NaN/不等长（统一校验），拒绝时按 caliber_error
+        # 披露——不得让异常穿透或被静默吞掉
+        try:
+            raw = _tracking_deviation_raw(rf, rb, window_returns=window_returns)
+        except TrackingCaliberError as raw_exc:
+            base.update(status="caliber_error",
+                        note=f"价格基准偏离不可算（{raw_exc}）：停止计算")
+            return base
+        base["price_benchmark_deviation"] = {
+            **raw,
+            "window_endpoints": base["input_evidence"]["window_endpoints"],
+            "sampled_coverage": base["input_evidence"]["sampled_coverage"],
+            "research_only": True,
+            "not_confirmatory": True,
+            "caliber": "基金总收益（复权净值）− 价格指数收益：收益类型不同，"
+                       "仅作价格基准偏离研究数值，不构成跟踪差异/跟踪误差；"
+                       "TD=窗口首末有效端点累计差，TE=采样区间日偏离波动",
+        }
+        base.update(
+            status="limited",
+            note="基准为价格指数（缺总收益基准）：停止确认性 TD/TE；"
+                 "价格基准偏离见 price_benchmark_deviation（research_only）")
+        return base
+    base.update(status="available", **dev,
+                note="两腿同收益类型（total_return）——确认性 TD/TE")
+    return base
+
+
+def _tracking_deviation_raw(returns_fund: list[float], returns_bench: list[float], *,
+                            window_returns: tuple[float, float] | None = None,
+                            annualization_factor: int = TRADING_DAYS_PER_YEAR) -> dict:
+    """类型不一致时的研究数值（不作确认指标；仅内部使用）。
+
+    B-F03：与 ``compute_tracking_metrics`` 同合同——拒绝不等长（不得截短配对）。
+    R3：TD 同样只由**窗口端点收益**定义（缺端点报错，不得用样本区间复利代替）；
+    TE 只覆盖传入样本区间（调用方在底稿披露覆盖度）。
+    R16/R17：公式与校验统一走 :func:`_deviation_core`——年化系数不再硬编码
+    √252（与确认路径同源），空样本/不等长/非有限值统一抛
+    :class:`TrackingCaliberError`（旧实现空样本 ZeroDivisionError、NaN 静默出数）。
+    """
+    core = _deviation_core(returns_fund, returns_bench,
+                           window_returns=window_returns,
+                           annualization_factor=annualization_factor)
+    return {**core, "td_scope": "window_endpoint", "te_scope": "sampled_intervals"}
+
+
+# ---------------------------------------------------------------------------
+# Fit 数据侧（B04）：集中风险 / 取证预算 / 外部材料清单
+# ---------------------------------------------------------------------------
+
+#: 持仓定向取证证据表字段（限定字段；由主流程按真实研究问题触发下钻后回填）
+HOLDINGS_EVIDENCE_FIELDS = (
+    "证券", "权重来源日期", "业务证据", "期间", "事件", "关联命题", "来源", "缺口",
+)
+
+#: 外部材料清单（按需取证的使用条件；不强制全部获取）
+EXTERNAL_MATERIALS_CHECKLIST: list[dict] = [
+    {"material": "基金合同/招募说明书（更新）", "use_for": "身份/费率/申赎规则/基准",
+     "source_type": "管理人/交易所披露原文", "use_when": "费率或身份结论进入报告时"},
+    {"material": "基金定期报告（季报/年报）", "use_for": "披露持仓/实际计费/规模",
+     "source_type": "管理人披露原文", "use_when": "持仓或规模结论进入报告时"},
+    {"material": "指数编制方案（含调样公告）", "use_for": "选样/加权/调样规则",
+     "source_type": "指数公司原文", "use_when": "指数暴露/因子规则结论进入报告时"},
+    {"material": "交易所公告", "use_for": "上市/做市/申赎状态等事实",
+     "source_type": "交易所原文", "use_when": "交易机制结论进入报告时"},
+    {"material": "PCF/申赎清单", "use_for": "篮子与现金替代", "source_type": "交易所/管理人",
+     "use_when": "申赎机制问题必要且源可得时（未接入，不得伪造）"},
+    {"material": "公司公告与财报", "use_for": "持仓个股业务/事件证据",
+     "source_type": "公司/交易所原文", "use_when": "个别持仓为关键假设载体时（按问题定向）"},
+]
+
+
+def build_evidence_budget(symbol: str, *, target_cov_pct: float, max_names: int,
+                          evidence: dict[str, dict] | None = None,
+                          research_question: str | None = None,
+                          holdings: dict | None = None) -> dict:
+    """持仓定向取证预算 + 证据表（B04 数据侧）。
+
+    **两个参数必填、无默认**：50%/最多 10 只只是待标定**试验参数**，不进默认
+    报告轮询、不成为硬阈值；由真实研究问题决定取值。选择仅在**已披露范围**内
+    按权重降序累计；覆盖不足目标 → `shortfall_note` 如实披露，不扩采、不把缺
+    权重当 0、不重归一化。
+
+    ``holdings``（可选）：已封存的持仓块（如 payload.holdings）——重放/冻结路径
+    用它避免二次联网取持仓；缺省才走 ``query_etf_holdings``。
+
+    ``evidence``（可选）：本次**实际读取**的定向证据，按证券代码/名称索引
+    ``{code: {业务证据, 期间, 事件, 关联命题, 来源: {url, sha256, locator,
+    read_at, source_type}, 缺口}}``。给证据的行必须有来源三件套
+    （url+sha256+locator），否则整行标 `invalid_evidence`（URL 存在 ≠ 已读，
+    不得用文件名/摘要冒充原文）。未给证据的行保持 `not_collected`（未执行 ≠
+    完成，不得静默标完成）。证据行只回填预算内选中的证券——预算外不扩采。
+    """
+    if not (0 < target_cov_pct <= 100):
+        raise ValueError("target_cov_pct 须在 (0, 100]")
+    if max_names < 1:
+        raise ValueError("max_names 须 ≥ 1")
+    h = holdings if holdings is not None else query_etf_holdings(symbol)
+    out = {
+        "symbol": symbol,
+        "holding_scope": h.get("holding_scope"),
+        "status": h.get("status"),
+        "research_question": research_question,
+        "budget": {"target_cov_pct": target_cov_pct, "max_names": max_names,
+                   "experimental_parameters": True,
+                   "note": "试验参数（非行业标准/非本版硬阈值）；按真实研究问题调整"},
+        "names": [], "evidence_fields": list(HOLDINGS_EVIDENCE_FIELDS),
+        "evidence_rows": [], "evidence_summary": None,
+        "shortfall_note": None, "gaps": [],
+    }
+    if h.get("status") != "ok":
+        out["gaps"].append(h.get("note") or "持仓数据不可用")
+        return out
+    rows = [r for r in h.get("rows") or [] if r.get("pct") is not None]
+    rows.sort(key=lambda r: r["pct"], reverse=True)
+    selected: list[dict] = []
+    cov = 0.0
+    stop_reason = None
+    for i, r in enumerate(rows):
+        if len(selected) >= max_names:
+            stop_reason = "max_names"
+            break
+        if cov >= target_cov_pct:
+            stop_reason = "target_reached"
+            break
+        selected.append({"rank": i + 1, "code": r.get("code"), "name": r.get("name"),
+                         "pct": r.get("pct")})
+        cov += float(r["pct"])
+    else:
+        stop_reason = "target_reached" if cov >= target_cov_pct else "disclosed_exhausted"
+    out["names"] = selected
+    out["budget"]["selected_n"] = len(selected)
+    out["budget"]["selected_cov_pct"] = round(cov, 2)
+    out["budget"]["stop_reason"] = stop_reason
+    out["budget"]["disclosed_sum_pct"] = h.get("top10_sum_pct")
+    evidence = evidence or {}
+    ev_rows: list[dict] = []
+    row_has_evidence: list[bool] = []  # R18：证据有效性按行索引记录，不靠列表等值匹配
+    for n in selected:
+        code = str(n.get("code") or "")
+        ev = evidence.get(code) or {}
+        row = {**{k: None for k in HOLDINGS_EVIDENCE_FIELDS},
+               "证券": f"{n['name']}（{n['code']}）", "权重来源日期": h.get("report_date")}
+        valid = False
+        if not ev:
+            row["缺口"] = "未取证（预算内待查）"
+        else:
+            for k in ("业务证据", "期间", "事件", "关联命题", "缺口"):
+                if ev.get(k) is not None:
+                    row[k] = ev[k]
+            src = ev.get("来源") or {}
+            missing = [k for k in ("url", "sha256", "locator") if not src.get(k)]
+            if missing:
+                row["来源"] = src or None
+                row["缺口"] = (f"证据来源不完整（缺 {'/'.join(missing)}）："
+                               "URL 存在 ≠ 已读，不按已取证处理")
+            else:
+                row["来源"] = dict(src)
+                valid = True
+        ev_rows.append(row)
+        row_has_evidence.append(valid)
+    out["evidence_rows"] = ev_rows
+    n_with_ev = sum(1 for v in row_has_evidence if v)
+    # 覆盖加权按**同一索引**取选中权重（旧实现逐行做 dict 等值匹配，同权重不同
+    # 证据行的两行会被同事匹配，属 O(n²) 且语义偶然）
+    cov_with_ev = round(sum(float(n["pct"]) for n, ok in zip(selected, row_has_evidence)
+                            if ok), 2)
+    out["evidence_summary"] = {
+        "selected_n": len(selected),
+        "evidence_rows": n_with_ev,
+        "not_collected_rows": len(selected) - n_with_ev,
+        "evidence_weight_cov_pct": cov_with_ev,
+        "note": "覆盖加权 = 已有原文证据的选中证券权重合计（仅已披露范围内）；"
+                "未取证行如实保留 not_collected（未执行 ≠ 完成）",
+    }
+    if cov < target_cov_pct:
+        # R04：缺口原因按**实际停止原因**分派——旧实现只要 top10_sum_pct 非空
+        # 就说「已披露范围不足以覆盖」，max_names 截断（披露 55% > 目标 50%、
+        # 实际只选到 27%）也被这句话误述；max_names 分支因此不可达。
+        disclosed = h.get("top10_sum_pct")
+        if stop_reason == "max_names":
+            why = (f"预算内选择上限（max_names={max_names}）先到："
+                   f"已选 {len(selected)} 只累计 {round(cov, 2)}%"
+                   + (f"；已披露范围合计 {disclosed}%（是否足够覆盖目标需按需扩选，"
+                      "本次不扩采）" if disclosed is not None else ""))
+        elif stop_reason == "disclosed_exhausted" and disclosed is not None:
+            why = (f"已披露范围（前十大合计 {disclosed}%）不足以覆盖目标 "
+                   f"{target_cov_pct}%：实际覆盖 {round(cov, 2)}%，缺口如实披露，"
+                   "不扩大采集")
+        else:
+            why = (f"已披露范围累计不足（{round(cov, 2)}% < 目标 {target_cov_pct}%；"
+                   "权重缺失不按 0、不重归一化）")
+        out["shortfall_note"] = why
+    missing_rows = [r for r in h.get("rows") or [] if r.get("pct") is None]
+    for r in missing_rows:
+        out["gaps"].append(f"{r.get('name') or r.get('code')} 权重缺失（不按 0 计、不重归一化）")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 数据侧状态合同（B06 基础）：五态 + 实际尝试源
+# ---------------------------------------------------------------------------
+
+#: 维度状态词表（未执行/失败/不适用/未知/可得 五态分开）
+DIMENSION_STATES = ("available", "missing", "not_applicable", "not_executed", "unknown")
+
+
+def _dim(status: str, *, sources: list[str] | None = None, as_of: str | None = None,
+         note: str | None = None, source_record: dict | None = None,
+         applicable: bool | None = None, skipped: list[dict] | None = None,
+         producer_status: str | None = None) -> dict:
+    assert status in DIMENSION_STATES, status
+    d = {"status": status, "attempted_sources": list(sources or []),
+         "as_of": as_of, "note": note}
+    if applicable is not None:
+        d["applicable"] = applicable
+    if source_record is not None:
+        d["source_record"] = dict(source_record)
+    if skipped:
+        # 未发起的腿/源及原因（B-F01）：提前返回不得表现为「已尝试」，
+        # 也不得静默——消费方与 QC 可据此区分「试了失败」与「没试」。
+        d["skipped_sources"] = [dict(s) for s in skipped]
+    if producer_status is not None:
+        # 生产者原始状态（如 tracking=limited）：五态之外的口径细节不丢失
+        d["producer_status"] = producer_status
+    return d
+
+
+def _range_end_iso(value: Any) -> str | None:
+    """区间字符串（``A ~ B``）→ 末端日期 ISO（R02）。
+
+    旧实现取 ``[-10:]``：ISO 区间侥幸可用，compact 区间（如 Tushare
+    trade_date "20260904 ~ 20261009"）会得到 "~ 20261009" 脏 as_of。
+    解析不了返回 None（不猜）。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    tail = s.split("~")[-1].strip() if "~" in s else s
+    return _norm_trade_date(tail)
+
+
+def build_data_status(*, identity: dict | None, profile: dict, quote: dict,
+                      kline: dict, share_history: dict,
+                      history_block: dict | None = None,
+                      events_block: dict | None = None,
+                      tracking: dict | None = None,
+                      fees: dict | None = None,
+                      est_net_assets: dict | None = None,
+                      extra_dims: dict | None = None,
+                      index_exposure: dict | None = None) -> dict:
+    """各维度状态（B06 基础）：五态 + **实际尝试源** + 源可读性记录。
+
+    attempted_sources 只从本次实际取数证据推导（信封 source/_error/status，
+    或上游 producer 记录的 attempted_sources——见 B-F01），不得由静态
+    SOURCE_PROVENANCE 合成尝试记录；未执行的维度记
+    `not_executed` 且 attempted_sources=[]。flags 不代表检查执行，
+    `note` 中显式声明。
+
+    ``extra_dims``：payload-out 流程实采的 holdings/peers/sector_flow
+    （实采到就必须按实况记 available/missing，不得固定 not_executed）；
+    ``index_exposure``：显式按需查询的指数样本/权重块。
+    """
+    identity = identity or {}
+    app = identity.get("applicability") or {}
+    ver_status = (identity.get("verification") or {}).get("status")
+    # 身份未核：适用性未知（≠ 确定不适用）——相关维度记 unknown 而非 not_applicable
+    identity_unknown = ver_status in (None, "unknown") or \
+        (identity.get("axes") or {}).get("asset_type") in (None, "unknown")
+    na_state = "unknown" if identity_unknown else "not_applicable"
+    dims: dict[str, dict] = {}
+
+    # identity
+    if ver_status == "verified_original":
+        dims["identity"] = _dim(
+            "available", sources=["交易所/管理人原文（见 evidence URL）"],
+            as_of=(identity.get("verification") or {}).get("verified_at"),
+            note=f"原文核验 {len(identity.get('evidence') or [])} 条")
+    elif ver_status == "mapped_unverified":
+        dims["identity"] = _dim("available", sources=[], as_of=None,
+                                note="静态映射（待核）：使用须注明未核验")
+    else:
+        dims["identity"] = _dim("unknown", sources=[], as_of=None,
+                                note="无身份证据；不适用维度不可按名称强填")
+
+    # index_pe
+    pe_status = profile.get("index_pe_status")
+    if app.get("index_pe") is False:
+        dims["index_pe"] = _dim(
+            na_state, applicable=False,
+            note="身份未核：适用性未知（不套股票 PE）" if identity_unknown
+            else "非股票类：不套股票 PE")
+    elif profile.get("index_pe") is not None:
+        dims["index_pe"] = _dim("available", sources=["csindex 指数 PE 文件"],
+                                as_of=None,
+                                note=f"口径: {profile.get('index_pe_caliber')}；"
+                                     f"{profile.get('index_pe_note') or ''}",
+                                source_record=SOURCE_PROVENANCE["etf_index_pe"])
+    elif pe_status == "mapped":
+        # R05 同类：桥/getter 不可用时 csindex 源未发起 → 不得记「已尝试」
+        if profile.get("index_pe_fetch_status") == "not_initiated":
+            dims["index_pe"] = _dim(
+                "unknown", sources=[], producer_status="not_initiated",
+                note="指数 PE 未发起取数（桥/getter 不可用）",
+                skipped=[{"source": "csindex 指数 PE 文件",
+                          "reason": profile.get("index_pe_fetch_skip_reason")
+                          or "未发起取数"}])
+        else:
+            dims["index_pe"] = _dim("missing", sources=["csindex 指数 PE 文件"],
+                                    note="已映射但源未取到（信封 missing）")
+    else:
+        # R12：措辞只陈述接线状态；profile 侧注记（区分 PE 文件映射与跟踪身份）
+        # 优先，兼容旧 profile 无 index_pe_note 时用通用措辞
+        dims["index_pe"] = _dim("unknown", sources=[],
+                                note=(profile.get("index_pe_note")
+                                      or "无 csindex 映射：指数 PE 未接线（不猜测）"))
+
+    # quote / premium
+    # R07/R08 + F3（独立复检）：来源只认 producer 结构化标记 `quote.source`。
+    # 两种"无来源信息"形态同判未知：①该键缺失（旧 payload，无追溯）；
+    # ②显式 `source=None`（新 payload 两源均失败/未留痕）。二者都 **不** 按
+    # `_error` 文本推断腾讯回退、也不制造已尝试源（"回退"二字可能是别的意思
+    # 或别的源）——note 的措辞按"source 为空或缺失"统一陈述，不假定 payload 新旧。
+    q_err = quote.get("_error") or ""
+    q_source = quote.get("source")
+    q_trace_known = "source" in quote
+    if not q_trace_known:
+        q_source = None
+    if quote.get("status") == "available":
+        if q_source == "tencent":
+            dims["quote"] = _dim("available", sources=["fund_etf_spot_em", "腾讯行情"],
+                                 note=q_err)
+        elif q_source == "fund_etf_spot_em":
+            dims["quote"] = _dim("available", sources=["fund_etf_spot_em"],
+                                 note=q_err or None)
+        else:
+            dims["quote"] = _dim(
+                "available", sources=[],
+                note=(q_err or "") + "；来源未留痕（source 为空或缺失）——"
+                                     "已尝试源未知，不得按文案推断")
+    else:
+        dims["quote"] = _dim("missing", sources=["fund_etf_spot_em", "腾讯行情"],
+                             note=q_err or "spot 与回退源均不可用")
+    if profile.get("premium_discount") is not None:
+        dims["premium_discount"] = _dim(
+            "available", sources=["fund_etf_spot_em 基金折价率"],
+            note="符号已规范化（+溢价/-折价）；净值时点未知（口径见 premium_discount_caliber）")
+    elif quote.get("status") == "available":
+        if q_source == "tencent":
+            dims["premium_discount"] = _dim(
+                "missing", sources=["fund_etf_spot_em"],
+                note="spot 源不可用（回退腾讯行情）：折溢价字段不可得")
+        elif q_source == "fund_etf_spot_em":
+            # R08：spot 正常但折价率字段缺失 ≠ 发生过腾讯回退——旧文案写死回退
+            dims["premium_discount"] = _dim(
+                "missing", sources=["fund_etf_spot_em"],
+                note="spot 行无基金折价率字段（本次未发生腾讯回退）：折溢价不可得")
+        else:
+            dims["premium_discount"] = _dim(
+                "missing", sources=[],
+                note="行情来源未留痕（source 为空或缺失）：折溢价不可得，"
+                     "已尝试源未知，不得断言来自 spot 或腾讯回退")
+    else:
+        dims["premium_discount"] = _dim("missing", sources=["fund_etf_spot_em"],
+                                        note="spot 不可用")
+
+    # nav / history
+    if kline.get("status") == "available":
+        dims["nav"] = _dim("available",
+                           sources=[str(kline.get("source") or "fund_etf_fund_info_em")],
+                           as_of=kline.get("latest_nav_date"),
+                           note="复权" if kline.get("adj_applied") else "未复权",
+                           source_record=SOURCE_PROVENANCE["etf_nav"])
+    else:
+        # R05/R06 同类：未发起取数时 attempted 记空 + skipped 带原因；
+        # 生产者无留痕字段（旧 payload）才回退静态源名
+        k_src = kline.get("attempted_sources")
+        dims["nav"] = _dim(
+            "missing",
+            sources=(list(k_src) if k_src is not None else ["fund_etf_fund_info_em"]),
+            note=kline.get("_error"),
+            skipped=(kline.get("skipped_sources") or None),
+            producer_status=kline.get("status"))
+    h = history_block or {}
+    hist = h.get("history") or {}
+    if hist.get("status") == "available":
+        src = str(hist.get("source") or "nav")
+        h_src = hist.get("attempted_sources")
+        dims["history"] = _dim("available",
+                               sources=(list(h_src) if h_src is not None else
+                                        (["nav:fund_etf_fund_info_em"] if src == "nav"
+                                         else [src])),
+                               as_of=(hist.get("rows") or [{}])[-1].get("date"),
+                               note=hist.get("note"),
+                               skipped=(hist.get("skipped_sources") or None))
+    elif hist:
+        h_src = hist.get("attempted_sources")
+        dims["history"] = _dim(
+            "missing",
+            sources=(list(h_src) if h_src is not None
+                     else ["nav:fund_etf_fund_info_em", "baostock"]),
+            note=hist.get("error"),
+            skipped=(hist.get("skipped_sources") or None),
+            producer_status=hist.get("status"))
+    else:
+        dims["history"] = _dim("not_executed", sources=[],
+                               note="本次未请求历史深度（需 --history/--playbook）")
+
+    # share_history
+    if share_history.get("available"):
+        dims["share_history"] = _dim("available", sources=["Tushare fund_share", "Tushare fund_daily"],
+                                     # R02：date_range 为 compact 日期（"20260904 ~ 20261009"），
+                                     # 旧实现 [-10:] 产出 "~ 20261009" 脏 as_of
+                                     as_of=_range_end_iso(share_history.get("date_range")),
+                                     note=share_history.get("caliber_note"),
+                                     source_record=SOURCE_PROVENANCE["etf_share_history"])
+    else:
+        # R06 同类：producer 已给结构化尝试/跳过时按实况记（无 token = 未发起）
+        sh_src = share_history.get("attempted_sources")
+        dims["share_history"] = _dim(
+            "missing",
+            sources=(list(sh_src) if sh_src is not None
+                     else ["Tushare fund_share", "Tushare fund_daily"]),
+            note=share_history.get("note"),
+            skipped=(share_history.get("skipped_sources") or None))
+
+    # est net assets（份额×NAV 同日匹配）
+    if est_net_assets is not None:
+        # R06：空列表 = producer 明确说「未发起」——不得被 `or 默认源表` 顶替
+        # （falsy 空集合与「字段缺失」必须分开处理）
+        ena_src_raw = est_net_assets.get("attempted_sources")
+        ena_src = (["Tushare fund_share", "fund_etf_fund_info_em（净值）"]
+                   if ena_src_raw is None else list(ena_src_raw))
+        ena_skip = est_net_assets.get("skipped_sources") or None
+        if est_net_assets.get("status") == "ok":
+            dims["est_net_assets"] = _dim("available", sources=ena_src,
+                                          as_of=est_net_assets.get("as_of"),
+                                          note=est_net_assets.get("caliber"))
+        else:
+            dims["est_net_assets"] = _dim("missing", sources=ena_src,
+                                          note=est_net_assets.get("note"),
+                                          skipped=ena_skip)
+
+    # fees（R3：current_rate_verified=报告日现行已核；版本已读用 source 元信息，
+    # 状态注记复用 query_etf_fees 的 note，不再有第二套现行性布尔）
+    if fees and fees.get("status") == "ok":
+        dims["fees"] = _dim(
+            "available",
+            sources=[(fees.get("source") or {}).get("source_type") or "管理人原文"],
+            as_of=(fees.get("source") or {}).get("as_of"),
+            note=fees.get("note"))
+    else:
+        dims["fees"] = _dim("unknown", sources=[],
+                            note=(fees or {}).get("note") or "未收录费率材料")
+
+    # tracking（B-F01：attempted_sources 只取自 producer 实际调用留痕；
+    # source_trace 保留缓存/网络与失败理由，逐条沿革不猜）
+    if tracking is not None:
+        tstatus = tracking.get("status")
+        t_src = list(tracking.get("attempted_sources") or [])
+        t_skip = tracking.get("skipped_sources") or None
+        t_trace = list(tracking.get("source_trace") or [])
+        # R01/F2（独立复检）：五态按 producer **实际出口**分派，不用状态名一刀切。
+        #   - available：两腿同口径，确认性 TD/TE 已算；
+        #   - limited + price_benchmark_deviation：两腿已采集、口径受限，
+        #     研究偏离已算出 → available（已采集，producer_status=limited）；
+        #   - limited 但无偏离（基金腿未复权提前返回，基准没取）→ unknown：
+        #     已采集基金腿但**不可验证**，不得声称 tracking 可得；
+        #   - insufficient/caliber_error：序列已取但样本/口径不可算 → unknown；
+        #   - not_mapped：未知保持未知；missing_nav/missing_benchmark → missing（源失败）。
+        deviation = tracking.get("price_benchmark_deviation")
+        if tstatus == "available" or (tstatus == "limited" and deviation):
+            dims["tracking"] = _dim("available", sources=t_src,
+                                    as_of=_range_end_iso(tracking.get("window")),
+                                    note=tracking.get("note"), skipped=t_skip,
+                                    producer_status=tstatus)
+        elif tstatus in ("limited", "insufficient", "caliber_error"):
+            dims["tracking"] = _dim(
+                "unknown", sources=t_src,
+                note=tracking.get("note"), skipped=t_skip,
+                producer_status=tstatus)
+        elif tstatus == "not_mapped":
+            dims["tracking"] = _dim(
+                "unknown", sources=t_src,
+                note=(f"无跟踪指数代码（{tracking.get('index_code_source') or '映射缺失'}）；"
+                      "无法构建基准腿"), skipped=t_skip)
+        else:
+            dims["tracking"] = _dim("missing", sources=t_src,
+                                    note=tracking.get("note"), skipped=t_skip,
+                                    producer_status=tstatus)
+        if t_trace:
+            dims["tracking"]["source_trace"] = t_trace
+
+    # holdings / pcf / index_exposure（默认不执行；按需命令/实采触发）
+    if app.get("stock_holdings_penetration") is False:
+        na_note = ("身份未核：适用性未知" if identity_unknown
+                   else "非股票类：不适用股票持仓穿透")
+        dims["holdings"] = _dim(na_state, applicable=False, note=na_note)
+        dims["index_exposure"] = _dim(na_state, applicable=False,
+                                      note="身份未核：适用性未知" if identity_unknown
+                                      else "非股票类：指数暴露按该资产口径另核")
+    else:
+        hd = (extra_dims or {}).get("holdings") or {}
+        if hd.get("status") == "ok":
+            # 实采到就按实况记录（不得固定 not_executed 冒充未采）
+            dims["holdings"] = _dim(
+                "available", sources=["天天基金 jjcc 页（渠道页面，非原披露）"],
+                as_of=hd.get("report_date"),
+                note=(hd.get("holding_scope") or "基金披露前十大（非完整持仓）"))
+        elif hd:
+            dims["holdings"] = _dim(
+                "missing", sources=["天天基金 jjcc 页（渠道页面，非原披露）"],
+                note=hd.get("note") or "持仓不可得")
+        else:
+            dims["holdings"] = _dim("not_executed", sources=[],
+                                    note="本次未请求持仓（按需 etf.py holdings / B04 触发）")
+        ie = index_exposure or {}
+        if ie.get("status") == "ok":
+            pa = ie.get("period_alignment") or {}
+            note = (f"cons {pa.get('cons_as_of')} / weight {pa.get('weight_as_of')}；"
+                    + ("同日可拼组合" if pa.get("joinable") else
+                       "错月只可分别陈述，不得拼成「当期完整组合」"))
+            dims["index_exposure"] = _dim(
+                "available",
+                sources=["csindex 官方成分/权重文件（经 akshare）"],
+                as_of=pa.get("weight_as_of") or pa.get("cons_as_of"),
+                note=note)
+        elif ie:
+            dims["index_exposure"] = _dim(
+                "missing", sources=["csindex 官方成分/权重文件（经 akshare）"],
+                note=(ie.get("note")
+                      or f"指数样本/权重不可得（cons={ie.get('cons_status')}，weight={ie.get('weight_status')}）"))
+        else:
+            dims["index_exposure"] = _dim(
+                "not_executed", sources=[],
+                note="指数样本/权重为按需接口（query_etf_index_exposure），默认不接入报告主链")
+    # B04/B02（F4 独立复检）：这两个维度**独立于股票持仓适用性分支**，
+    # 维度面在资产类型间稳定，且实采结果不被非股票前置覆盖：
+    # - same_index_comparison 的生产者（etf_peers.same_index_quality_comparison）
+    #   无股票前置——可比性由「同指数身份证据 + 币种 + 复权净值」决定，商品 ETF
+    #   同样可比较 → 未请求=not_executed，提交即按实况映射（不看 asset_type）；
+    # - holdings_evidence 的取证对象是「持仓个股的公司公告/财报」，非股票资产
+    #   无此口径 → 未提交时 not_applicable（依据见 note），提交了则按实况。
+    he = (extra_dims or {}).get("holdings_evidence") or {}
+    if he.get("evidence_summary"):
+        es = he["evidence_summary"]
+        dims["holdings_evidence"] = _dim(
+            "available" if es.get("evidence_rows") else "missing",
+            sources=[f"公司/交易所原文（{es.get('evidence_rows')} 行已读；"
+                     f"{es.get('not_collected_rows')} 行未取证）"],
+            as_of=(he.get("evidence_rows") or [{}])[0].get("权重来源日期"),
+            note=(he.get("research_question") or
+                  "按研究问题定向取证（B04；预算内、不轮询全成分）"))
+    elif he:
+        dims["holdings_evidence"] = _dim("missing", sources=[],
+                                         note=he.get("note") or "定向证据不可得")
+    elif app.get("stock_holdings_penetration") is False:
+        dims["holdings_evidence"] = _dim(
+            na_state, applicable=False,
+            note=("身份未核：适用性未知" if identity_unknown
+                  else "非股票类：定向取证对象为持仓个股的公司公告/财报（股票业务证据），"
+                       "该资产口径下不适用"))
+    else:
+        dims["holdings_evidence"] = _dim(
+            "not_executed", sources=[],
+            note="本次未执行定向持仓取证（按研究问题触发；未执行 ≠ 完成）")
+    sic = (extra_dims or {}).get("same_index_comparison") or {}
+    if sic:
+        wins = (sic.get("common_window") or {})
+        dims["same_index_comparison"] = _dim(
+            "available" if sic.get("status") == "ok" else "missing",
+            sources=["官方产品材料（同指数身份/费率）+ 复权净值（既有接口）"],
+            as_of=wins.get("end"),
+            note=(f"同指数 {sic.get('index_code')} 有限比较（不排名）；"
+                  f"{(sic.get('gaps') or ['无明确缺口'])[0]}"))
+    else:
+        dims["same_index_comparison"] = _dim(
+            "not_executed", sources=[],
+            note="本次未执行同指数产品比较（按需 --same-index + 官方材料证据；"
+                 "未执行 ≠ 完成）")
+    dims["pcf"] = _dim("not_executed", sources=[],
+                       note="PCF 通道未接入（不新增强制付费源；不得伪造篮子）")
+
+    # industry allocation / industry pe / events / hedge
+    if profile.get("industry_allocation"):
+        dims["industry_allocation"] = _dim(
+            "available", sources=["fund_portfolio_industry_allocation_em"],
+            as_of=profile.get("industry_allocation_date"),
+            source_record=SOURCE_PROVENANCE["etf_industry_alloc"])
+    elif app.get("index_pe") is True or identity.get("axes", {}).get("asset_type") == "stock":
+        if profile.get("industry_allocation_fetch_status") == "not_initiated":
+            # R05 同类：桥/getter 不可用 = 未发起（不得静态记已尝试源）
+            dims["industry_allocation"] = _dim(
+                "unknown", sources=[], producer_status="not_initiated",
+                note="行业配置未发起取数（桥/getter 不可用）",
+                skipped=[{"source": "fund_portfolio_industry_allocation_em",
+                          "reason": profile.get("industry_allocation_skip_reason")
+                          or "未发起取数"}])
+        else:
+            dims["industry_allocation"] = _dim(
+                "missing", sources=["fund_portfolio_industry_allocation_em"],
+                note="行业配置不可得（接口空/失败）")
+    else:
+        dims["industry_allocation"] = _dim(na_state, applicable=False,
+                                           note="身份未核：适用性未知" if identity_unknown
+                                           else "非股票类：行业配置不适用")
+    # R09：行业 PE 状态按 producer 留痕（available/skipped_index_pe_present/
+    # source_null/query_error/no_industry_mapping），不再把「已有指数 PE 而未取」
+    # 写成「无行业映射或未请求」
+    ip_status = profile.get("industry_pe_status")
+    if profile.get("industry_pe") is not None:
+        dims["industry_pe"] = _dim("available", sources=["industry_weekly（申万行业 PE 快照）"],
+                                   note=profile.get("industry_pe_note"),
+                                   source_record=SOURCE_PROVENANCE["industry_weekly"])
+    elif ip_status == "skipped_index_pe_present":
+        dims["industry_pe"] = _dim(
+            "not_executed", sources=[],
+            note=profile.get("industry_pe_note")
+            or "已有 csindex 指数 PE：行业代理 PE 本次未取（避免口径混用）")
+    elif ip_status == "source_null":
+        dims["industry_pe"] = _dim(
+            "missing", sources=["industry_weekly（申万行业 PE 快照）"],
+            note=profile.get("industry_pe_note") or "行业 PE 源侧为空")
+    elif ip_status == "query_error":
+        dims["industry_pe"] = _dim(
+            "missing", sources=["industry_weekly（申万行业 PE 快照）"],
+            note="行业 PE 查询失败（本地 industry_weekly 不可用）")
+    else:
+        dims["industry_pe"] = _dim(
+            "not_applicable" if identity.get("axes", {}).get("strategy") == "broad_market"
+            else "not_executed", sources=[],
+            note="无行业映射或未请求（行业 PE 为代理值，仅按需）")
+    ev = events_block or {}
+    if ev.get("available"):
+        dims["events"] = _dim("available", sources=["events/{symbol}.json（本地事件文件）"],
+                              note="事件-价格对齐依赖历史深度；"
+                                   "本地事件文件当前**无自动写入方**（生产者缺口）——"
+                                   "时效/过期未自动核验，引用前须人工确认")
+    else:
+        dims["events"] = _dim("not_executed", sources=[],
+                              note=(ev.get("note") or "无事件文件（不阻断）")
+                                   + "；事件写入方未接入（生产者缺口），"
+                                     "不得据此称事件时效已核")
+    hc = profile.get("hedge_coverage") or {}
+    cov = hc.get("coverage")
+    dims["hedge"] = _dim(
+        "available" if cov not in (None, "unknown") else "unknown",
+        sources=["ETF_HEDGE_MAP（静态映射）"],
+        note=(hc.get("verification") or {}).get("note", "静态映射待核"))
+
+    return {
+        "dimensions": dims,
+        "states_vocab": list(DIMENSION_STATES),
+        "note": "flags 为提示标签，不代表对应检查已执行；以本块状态为准。"
+                "attempted_sources 记录本次实际尝试的源。",
+    }
 
 # baostock 取数窗口自然日缓冲（节假日/周末），与 query_etf_kline 的
 # int(days * 365 / 250) + 15 口径对齐
@@ -2415,6 +4786,9 @@ def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
             symbol, exc,
         )
     nav_rows = (nav_kline or {}).get("nav_history") or []
+    # R05/R06 同类（D11）：真实尝试/跳过留痕随块透传，data_status 不再静态补源
+    nav_attempted = [str(s) for s in (nav_kline or {}).get("attempted_sources") or []]
+    nav_skipped = [dict(s) for s in (nav_kline or {}).get("skipped_sources") or []]
     if nav_kline is not None and nav_kline.get("status") == "available" and nav_rows:
         return {
             "symbol": symbol,
@@ -2423,6 +4797,8 @@ def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
             "rows": nav_rows,
             "requested_days": days,
             "note": "来源: 基金单位净值（fund_etf_fund_info_em，Tushare 复权）",
+            "attempted_sources": nav_attempted,
+            "skipped_sources": nav_skipped,
         }
 
     env = fetch_etf_kline_baostock(symbol, days=days)
@@ -2434,6 +4810,9 @@ def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
             "rows": env["rows"],
             "requested_days": days,
             "note": "来源: baostock 日线（前复权 adjustflag=2）",
+            # nav 腿已发起但失败 → 留在 attempted；baostock 为本次真实回退
+            "attempted_sources": nav_attempted + ["baostock 日线（前复权）"],
+            "skipped_sources": nav_skipped,
         }
     return {
         "symbol": symbol,
@@ -2443,6 +4822,8 @@ def query_etf_kline_history(symbol: str, days: int = 250) -> dict[str, Any]:
         "requested_days": days,
         "error": (env.get("error") or (nav_kline or {}).get("_error")
                   or "nav 与 baostock 均不可用"),
+        "attempted_sources": nav_attempted + ["baostock 日线（前复权）"],
+        "skipped_sources": nav_skipped,
     }
 
 

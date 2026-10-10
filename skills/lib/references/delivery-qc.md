@@ -58,6 +58,17 @@ uv run python skills/lib/report_qc.py <报告文件> --fail-on error
 
 > **机器 PASS ≠ 可交付**：第 0 层只拦可机械判定的问题，其后三层人工复检不可省。
 
+> **产物哈希绑定与分层签认（`--record`）**：最终产物（md/html/payload/decision）齐备后，运行
+> `uv run python skills/lib/report_qc.py <报告 md> --fail-on error --record --signoff <层>=<状态>[:备注]`
+> 落盘 `<ts>.qc.json`：记录各产物**实际 sha256** + 本次机器结论 + 分层签认
+> （`data_review` / `original_materials` / `manual_numbers` / `manual_compliance` / `manual_logic`）。
+> 语义：**未执行层写 `not_executed`（≠通过）**，机器 PASS 与「URL 存在/摘要已读」都不能代替
+> 原文核验与人工复检；此后修改任一产物一行 → 旧记录 `stale`、旧签认自动失效，须重跑 `--record` 重验。
+> ETF 报告的同代消费（payload/记录/产物哈希）由 `report_qc` 的 `etf-generation` 层机器检查。
+
+> **`--verify-data` 的 `network_used` 语义**：只反映**实际发起**的联网层（stock collector）。
+> 未执行联网时记 `false`——`--verify-data` 标志本身、URL 存在、缓存命中都不等于「已联网/已核原文」。
+
 ---
 
 ## 3. 第 1 层：数字复检（准确性）— 独立重算，非重新目视
@@ -100,7 +111,7 @@ uv run python skills/lib/report_qc.py <报告文件> --fail-on error
 ## 5. 第 3 层：逻辑复检（自洽性）
 
 - 核心判断与数据是否矛盾（如"资金承接"判断 vs 份额数据方向）
-- 对抗性假设 ≥3 且可证伪；致命一击为条件句；盲点 ≥2
+- 实际关键假设逐一检验且可证伪（不设固定条数）；致命一击为条件句；实际盲点逐条列出（不设固定条数，不得为空）
 - 引擎标注「不可得/未知」的字段未被填充数字
 - 事实引用存在不等于支持论述：历史分位、模型增长与历史 CAGR 的差额、多模型情景范围，均不能直接识别市场已计价的盈利预期；模型逆推须固定其他假设并实际求解。核心结论、方法边界、正文与底稿不得互相矛盾。
 

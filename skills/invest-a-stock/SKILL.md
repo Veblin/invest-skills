@@ -73,7 +73,7 @@ metadata:
 
 **D3（原 LAW 16）— 左/右概率并列呈现**，禁止单一「左侧/右侧」结论；概率为主观估计时须标注「研究框架估计值（非统计频率）」（共享规范 §2.3 强制行为 5）。
 
-**D4（原 LAW 17）— 结论先行（金字塔结构）**：简报和报告均采用结论→论据→细节倒金字塔——首屏核心结论+逻辑链、标题传递信息量（完整判断句）、段首加粗主旨句、看摘要等于看全文（完整铁律见 [report-conventions.md §1.1](../../../skills/lib/references/report-conventions.md)）。
+**D4（原 LAW 17）— 结论先行（金字塔结构）**：简报和报告均采用结论→论据→细节倒金字塔——首屏核心结论+逻辑链、标题传递信息量（完整判断句）、段首加粗主旨句、看摘要等于看全文（完整铁律见 [report-conventions.md §1.1](../lib/references/report-conventions.md)）。
 
 > **降级与废止**（legacy 编号逐条列出，便于下游引用解析）：
 > - **降级为模块规格**：LAW 10、LAW 11、LAW 13、LAW 14、LAW 15 —— 条文仍有效，执行位置移到 [references/modules.md](references/modules.md)（模块 0 问题卡 / 模块 2 动态驱动 / 模块 4 静态基本面 / 模块 5 市场分歧）与 [references/deep-sop.md](references/deep-sop.md)。
@@ -82,7 +82,7 @@ metadata:
 
 ### 常见违规模式
 
-> 通用违规模式（左侧/右侧、买卖建议、目标价、往往/通常、PE 分位、极度高估、K 线断言主线等）见 [report-conventions.md §3.2](../../../skills/lib/references/report-conventions.md)。以下为 stock 特有项：
+> 通用违规模式（左侧/右侧、买卖建议、目标价、往往/通常、PE 分位、极度高估、K 线断言主线等）见 [report-conventions.md §3.2](../lib/references/report-conventions.md)。以下为 stock 特有项：
 
 | # | 违规 | 规则 | 正确写法 |
 |---|------|------|---------|
@@ -92,7 +92,7 @@ metadata:
 
 ### 措辞规范
 
-> **Canonical 源**：[skills/lib/references/report-conventions.md](../../../skills/lib/references/report-conventions.md) §2 硬约束 + §3 措辞规范 + §1 输出格式。
+> **Canonical 源**：[skills/lib/references/report-conventions.md](../lib/references/report-conventions.md) §2 硬约束 + §3 措辞规范 + §1 输出格式。
 
 **§2.3 事实边界（最高优先级）**：禁止猜测/推断/幻觉。引擎/数据源没有的字段写「未知/不可得」，不推断；「检索不到」不得断言「数据不存在」（可能被付费墙/权限遮挡），只允许「公开不可独立验证」；数据冲突并列报告不自行裁决；每个数字必须带来源（引擎字段 / `[来源: Python calc: formula]` / 一手源）。
 
@@ -264,20 +264,20 @@ PE / PB / PS
 
 > **机器层准出（写入后必跑，非可选自检）**：`uv run python skills/lib/report_qc.py <报告文件> --fail-on error` → 无 error 级发现（overall ≠ FAIL）方可交付；sourcing warning（F2 派生词缺来源 / F4 §N 引用不存在）须人工复核后消除或说明。**这是「标准交付链」的第 4 步**（见下节 CLI 命令），不是事后补做的收尾动作——`--analysis` 注入与本次 QC 同属链上步骤。
 
-> **共享清单**：[report-conventions.md §7](../../../skills/lib/references/report-conventions.md) Self-Check（通用 + stock 专项）。
+> **共享清单**：[report-conventions.md §7](../lib/references/report-conventions.md) Self-Check（通用 + stock 专项）。
 
-措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、**数字（P0 铁律：全部经 Python——引擎字段直引或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/清单目测/未实跑标注；计数断言 `len()` 聚合，见共享规范 §2.3 强制行为 5-7；[分析] 事实性前提须带来源/「框架性陈述/待验证」标注（强制行为 7））**、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验 ≥3 假设、致命一击条件句、盲点 ≥2 条，详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
+措辞（LAW 6/16/3/17）、结构（简报一屏内、首屏含结论+逻辑链、标题传递信息量、段首主旨句、风险提示首尾、LAW 7）、**数字（P0 铁律：全部经 Python——引擎字段直引或 `[来源: Python calc: formula]`；无 LLM 心算/目视计数/清单目测/未实跑标注；计数断言 `len()` 聚合，见共享规范 §2.3 强制行为 5-7；[分析] 事实性前提须带来源/「框架性陈述/待验证」标注（强制行为 7））**、证据（SOP-EV、分位伴中位数、Bull/Bear 数值化）、**分析合成三步**（对抗性假设检验覆盖实际关键假设（不设固定条数）、致命一击条件句、盲点逐条列出（不设固定条数，不得为空），详见共享规范 §4）。财报专项的 Bull/Bear 撰写与快速否决 8 条见 [financials.md](references/financials.md) F-2 / F-3。
 
 ---
 
 ### 分析合成三步（所有模式强制）
 
-> **Canonical 定义**：[report-conventions.md §4](../../../skills/lib/references/report-conventions.md) 分析合成框架。完整表格/示例/硬约束见共享规范 §4，此处仅列 stock 硬约束行：
+> **Canonical 定义**：[report-conventions.md §4](../lib/references/report-conventions.md) 分析合成框架。完整表格/示例/硬约束见共享规范 §4，此处仅列 stock 硬约束行：
 
 简报和完整报告均须包含以下三步，不可跳过：
-1. **对抗性假设检验**：≥3 个关键假设（攻击最核心判断），每项必须带可观测证伪条件 + 具体观测窗口（时间/事件节点）；不可证伪标注「不可验证，置信度降级」
+1. **对抗性假设检验**：逐一检验实际关键假设（攻击最核心判断，不设固定条数），每项必须带可观测证伪条件 + 具体观测窗口（时间/事件节点）；不可证伪标注「不可验证，置信度降级」
 2. **「致命一击」归纳**：一句话条件句（若 [X 可观测] 发生，则 [Y 判断] 失效），禁止「市场风险」等标签式罗列
-3. **盲点检查**：≥2 条，格式 `🔍 盲点发现: - [盲点] — 当前: [未知/数据不可得/未覆盖]`
+3. **盲点检查**：逐条列出实际盲点（不设固定条数，不得为空），格式 `🔍 盲点发现: - [盲点] — 当前: [未知/数据不可得/未覆盖]`
 
 ### SOP-EV 证据强度
 
@@ -501,7 +501,7 @@ STEP 4 事件链挖掘（公告 + 新闻 + 订单/临床/扩产里程碑）：�
 
 写 `overview` 槽位时按**阅读路径**组织，不增删固定栏目：本次问题与数据截止 → 主判断（最多一条次判断）→ 决定判断的 3–5 项证据（数值 + 期间 + `as_of` + 来源）→ 竞争解释与边界 → 多情景前提与失效条件 → 下一步最值得核验。每段 `title` 写完整判断句（D4 原 LAW 17）且**短**（一句话，不复述段内全部数据）；段数由证据量决定，证据不足就少写、写「尚不能回答」。阅读预算：首屏约 300–500 汉字，主阅读面 1,500–2,500 汉字。
 
-**阅读区写作规则**（v0.3.1 阅读验收）：按「数据 → 事实逻辑 → 可追溯方法框架 → 有边界的分析结论」写，短标题、少量关键事实（完整表放正文现有宿主），核验段用「问题/候选解释（非穷尽）/判别数据/观察节点」，方法框架须可核验、情景前提按引擎实际模型、首屏不写开发返工记录；业务与产业位置须用封存分项数据 + 来源路径，行业映射只作分类层面声明（不验证竞争优势/定价权）。完整条文（含段数按证据量、同一主阅读面去重、迁移段非默认机制）见 [report-conventions.md §5.4](../../../skills/lib/references/report-conventions.md)。
+**阅读区写作规则**（v0.3.1 阅读验收）：按「数据 → 事实逻辑 → 可追溯方法框架 → 有边界的分析结论」写，短标题、少量关键事实（完整表放正文现有宿主），核验段用「问题/候选解释（非穷尽）/判别数据/观察节点」，方法框架须可核验、情景前提按引擎实际模型、首屏不写开发返工记录；业务与产业位置须用封存分项数据 + 来源路径，行业映射只作分类层面声明（不验证竞争优势/定价权）。完整条文（含段数按证据量、同一主阅读面去重、迁移段非默认机制）见 [report-conventions.md §5.4](../lib/references/report-conventions.md)。
 
 - **去重硬约束**：同一结论只说一次——同一读数/判断（如 PE/PB 历史位置）在同一主阅读面只出现一次、由其主段承担。与正文底稿/分析详情的重复不算首屏重复——允许关键事实从底稿引用，正文明细保留不当作首屏重复。唯一例外：`event_classification` 槽位仍有两个宿主（§3a 与 A-5 单元格），属**已知遗留**，见 `host-docs/v0.3.1/默认报告内容取舍清单_20260925.md` §4.2。
 - **折叠对门禁透明**：lint 与 `report_qc` 的结构/完成度层都按行首 `^## ` 工作，折叠不改变其判定；`readability_metrics` 仅跳过 full 报告的「审计底稿」折叠跨度。insight、brief 与 concise 的其他折叠内容仍计入篇幅。
@@ -571,7 +571,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py <步骤3 
 
 `collect --report-ready` 封存市场结构（含 PCR 样本与来源状态）、事件、条件连板项、沪深300 基准序列（DCF beta 用，**渲染链唯一的联网点由此前移**）和默认 `value` 结果，输出 ID/hash；每条依赖另落 available/unavailable/not_triggered 三态（条件项未触发不算缺口）。绑定计划的快照在后续每条只读命令都须附同一 `--plan`；仅传 ID 或匹配维度不够。首次 `report` 用固定 ID 时会打印**事实路径索引**（写 `facts.source_path` 用）、数据时点/样本窗口与写作约束。`evidence` 与首次 `report` 用同一 ID 并行只读；R12a 一手核验可同时开始，分析须等证据与初稿齐备。`value SYMBOL --collection-id <本轮ID> --plan /tmp/plan.json` 读取同代默认估值；若需 `--steady` 等额外参数，须单列现场取证，不能称为同快照结果。候选 `--preflight` 须使用固定 ID，调用同一报告产物路径并仅在临时目录写入；Insight 候选含其 sidecars。最终 HTML 同代 MD 仍须对最终路径执行 `report_qc` 与三层人工复检。旧 `--resume` 保留兼容，会按最近 collect 快照恢复，缺扩展字段时仍可能现场补采（未封存快照会在 stderr 显式提示：补采仅本次、不写回快照），不用于固定输入链。
 
-> 第 4 步之后仍须走共享规范 §7 Self-Check 与 [delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§5 的第 0 层机器准出 + 三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
+> 第 4 步之后仍须走共享规范 §7 Self-Check 与 [delivery-qc.md](../lib/references/delivery-qc.md) §2–§5 的第 0 层机器准出 + 三层人工复检（数字 / 合规 / 逻辑），机器 PASS ≠ 可交付。
 
 ### 常用命令
 
@@ -621,7 +621,7 @@ MA/MACD 仅描述市场状态，不生成交易信号。
 
 ### SOP-M1 宏观情景（`--with-macro`）
 
-> 完整指标清单与输出格式见 [report-conventions.md §9.1](../../../skills/lib/references/report-conventions.md)（宏观情景）。要点：**full Markdown 报告首屏为分组展示块**（短摘要 + 国内/海外指标表：读数/信号/来源/币种口径逐项准确，保留全部原读数；整块多行迁移，不得漏行进底稿；**现有 HTML 产物无该块，属后续事项**）；**brief/concise 与 invest-a-pulse 仍用紧凑两段式标签**（`macro_signal_label` 合同不变：首行「国内：PMI + CPI + LPR + M2 →政策方向 |」，次行「海外：VIX + SOX + 美 10Y/实际利率/期限利差/布油 →海外结论」）。海外段指标集由 `TestLabelE2` 锁定，不得删减；结论均由确定性规则生成，不由 LLM 书写；宏观状态只作背景锚定，不自动推演为公司成本/盈利结论。
+> 完整指标清单与输出格式见 [report-conventions.md §9.1](../lib/references/report-conventions.md)（宏观情景）。要点：**full Markdown 报告首屏为分组展示块**（短摘要 + 国内/海外指标表：读数/信号/来源/币种口径逐项准确，保留全部原读数；整块多行迁移，不得漏行进底稿；**现有 HTML 产物无该块，属后续事项**）；**brief/concise 与 invest-a-pulse 仍用紧凑两段式标签**（`macro_signal_label` 合同不变：首行「国内：PMI + CPI + LPR + M2 →政策方向 |」，次行「海外：VIX + SOX + 美 10Y/实际利率/期限利差/布油 →海外结论」）。海外段指标集由 `TestLabelE2` 锁定，不得删减；结论均由确定性规则生成，不由 LLM 书写；宏观状态只作背景锚定，不自动推演为公司成本/盈利结论。
 
 ---
 
@@ -645,7 +645,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/invest-a-stock/scripts/inv
 >
 > 完整流程（Phase 1 采集 3 Agent / Phase 2 分析 4 Agent / Phase 3 合成模板 / 四视角覆盖内容 / 交叉验证规则）见 [references/deep-sop.md](references/deep-sop.md)。**`report --deep` 时主编 Claude 必须先 Read 该文件**，其余流程不读。
 
-要点：采集 3 Agent（财务 Tushare / 行情+财务交叉 akshare / 股东研报事件）并行 ≈ 30-40s；financials 跨源差异 ≥5% 触发第三方口径核对（**并列呈现，不投票裁决**，见共享规范 §2.3 强制行为 4）；分析 4 Agent 用 [agent-prompts.md](references/agent-prompts.md) 模板；Agent 只调 Bash 不直连 API（防限流）；合成阶段执行分析合成三步（≥5 假设）。
+要点：采集 3 Agent（财务 Tushare / 行情+财务交叉 akshare / 股东研报事件）并行 ≈ 30-40s；financials 跨源差异 ≥5% 触发第三方口径核对（**并列呈现，不投票裁决**，见共享规范 §2.3 强制行为 4）；分析 4 Agent 用 [agent-prompts.md](references/agent-prompts.md) 模板；Agent 只调 Bash 不直连 API（防限流）；合成阶段执行分析合成三步（实际关键假设逐一检验，不设固定条数）。
 
 ### SOP earnings-review（季报/年报后）
 

@@ -16,6 +16,38 @@ from etf_data import (
     HOLDINGS_CLUSTER_MAP,
 )
 
+
+@pytest.mark.parametrize("claim, rejected", [
+    ("缺失权重按 0 处理。", True),
+    ("缺失权重不得按 0 处理，不得重归一化为 100%。", False),
+])
+def test_produced_missing_weights_reach_report_qc(monkeypatch, tmp_path, claim, rejected):
+    import json
+    import etf_data
+    from etf_generation import seal_etf_payload, render_generation_line
+    from report_qc import qc_file
+
+    monkeypatch.setattr(etf_data, "_bridge_get", lambda getter, symbol: {
+        "status": "ok", "report_date": "2026-06-30",
+        "rows": [{"code": "600118", "name": "中国卫星", "pct": None},
+                 {"code": "688002", "name": "睿创微纳", "pct": 9.07}]})
+    holdings = query_etf_holdings("159206")
+    assert holdings["coverage"]["pct_missing_rows"] == 1
+    assert "gaps" not in holdings["coverage"]
+    payload = {"symbol": "159206", "generated_at": "2026-10-08T12:00:00+08:00",
+               "holdings": holdings, "profile": {}}
+    seal_etf_payload(payload)
+    folder = tmp_path / "159206-卫星ETF"
+    folder.mkdir()
+    md = folder / "2026-10-08-12-00-00.md"
+    md.write_text("# ETF 研究备忘录\n" + render_generation_line(payload)
+                  + "\n[事实] " + claim + "\n", encoding="utf-8")
+    md.with_suffix(".payload.json").write_text(json.dumps(payload), encoding="utf-8")
+    result = qc_file(md, fail_on="error")
+    findings = [finding for layer in result.layers for finding in layer.details]
+    assert any(f["id"] == "etf-holdings-zero-weight" and f["severity"] == "error"
+               for f in findings) is rejected
+
 # 实测 2026-06-30 前十大权重（天天基金 jjcc 页）
 _W10 = [
     ("688002", "睿创微纳", "9.07", "1,036.01", "160,260.70"),

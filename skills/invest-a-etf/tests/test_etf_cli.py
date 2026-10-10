@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -394,19 +395,39 @@ class _WebBrowserStub:
         return True
 
 
+def _write_sealed_payload(md: Path, symbol: str = "515050") -> Path:
+    """在 md 同目录写已封存 payload（`<ts>.payload.json`；B05 同代输入）。"""
+    from etf_generation import seal_etf_payload
+
+    payload = {"skill": "invest-a-etf", "generated_at": "2026-08-01T10:00:00+08:00",
+               "symbol": symbol}
+    seal_etf_payload(payload)
+    p = md.parent / f"{md.stem}.payload.json"
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
 def _html_mocks(monkeypatch, tmp_path, content: str = "# 测试\n"):
-    """cmd_html 全 mock 基座：建临时 md + 采集/渲染全桩，返回 (mod, md, wb)。"""
+    """cmd_html mock 基座：临时 md + 冻结 payload + 渲染桩，返回 (mod, md, payload, wb)。
+
+    v0.3.2 B05 纠偏：HTML 只读冻结 payload——不再有 `_collect_report_payload` /
+    `_html_extra_dims` 采集路径（两者置炸弹，被调用即失败）。
+    """
     md = tmp_path / "2026-08-01-10-00-00.md"
     md.write_text(content, encoding="utf-8")
+    payload_path = _write_sealed_payload(md)
     mod = _load_etf_module()
-    monkeypatch.setattr(mod, "_collect_report_payload",
-                        lambda symbol, **kw: {"symbol": symbol})
-    monkeypatch.setattr(mod, "_html_extra_dims", lambda s: {})
+
+    def _boom(*a, **kw):
+        raise AssertionError("HTML 路径不得采集数据（B05：只读冻结 payload）")
+
+    monkeypatch.setattr(mod, "_collect_report_payload", _boom)
+    monkeypatch.setattr(mod, "_html_extra_dims", _boom)
     monkeypatch.setattr("etf_html.render_etf_html",
-                        lambda payload, md_text=None: "HTML_BODY_MARKER")
+                        lambda payload, md_text=None, generation=None: "HTML_BODY_MARKER")
     wb = _WebBrowserStub()
     monkeypatch.setattr(mod, "webbrowser", wb)
-    return mod, md, wb
+    return mod, md, payload_path, wb
 
 
 def test_cli_html_help_exit_0():
@@ -426,35 +447,80 @@ def test_cli_html_invalid_symbol_exit_2():
     assert main(["html", "12345"]) == 2
 
 
-def test_cmd_html_fetches_full_payload(monkeypatch, tmp_path):
-    """cmd_html 强制 with_nav/history/playbook 全开（HTML 需要完整 rows 与统计）。"""
-    mod, md, _ = _html_mocks(monkeypatch, tmp_path)
-    kw_seen: dict = {}
+def test_cmd_html_zero_collection_and_generation_passed(monkeypatch, tmp_path, capsys):
+    """HTML 只读冻结 payload：零采集调用；渲染器收到 generation（同代哈希）。"""
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    seen: dict = {}
 
-    def fake_collect(symbol, **kw):
-        kw_seen.update(kw)
-        return {"symbol": symbol}
+    def fake_render(payload, md_text=None, generation=None):
+        seen["payload"] = payload
+        seen["generation"] = generation
+        return "HTML_BODY_MARKER"
 
-    monkeypatch.setattr(mod, "_collect_report_payload", fake_collect)
-    mod.cmd_html("515050", md_path=str(md), no_open=True)
-    assert kw_seen["with_nav"] is True
-    assert kw_seen["history"] is True
-    assert kw_seen["playbook"] is True
-    assert kw_seen["history_days"] == 250
+    monkeypatch.setattr("etf_html.render_etf_html", fake_render)
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 0
+    assert seen["payload"]["symbol"] == "515050"
+    gen = seen["generation"]
+    assert gen["same_generation"] is True
+    assert gen["payload_hash"] == seen["payload"]["_meta"]["payload_hash"]
+    out = capsys.readouterr().out
+    assert "同代输入" in out
+
+
+def test_cmd_html_requires_payload_fail_loud(monkeypatch, tmp_path, capsys):
+    """B05 纠偏：缺 --payload → rc 2（退出重采路径，不允许非同代渲染）。"""
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    assert mod.cmd_html("515050", md_path=str(md), no_open=True) == 2
+    err = capsys.readouterr().err
+    assert "需要 --payload" in err
+
+
+def test_cmd_html_payload_symbol_mismatch_rc2(monkeypatch, tmp_path, capsys):
+    """已正确封存但标的错（symbol 不一致）→ rc 2。"""
+    from etf_generation import seal_etf_payload
+
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    data = json.loads(payload_path.read_text(encoding="utf-8"))
+    data["symbol"] = "510300"
+    seal_etf_payload(data)  # 重新封存：哈希自洽，专门触发 symbol 校验分支
+    payload_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 2
+    assert "≠ 请求标的" in capsys.readouterr().err
+
+
+def test_cmd_html_payload_corrupt_rc2(monkeypatch, tmp_path, capsys):
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    payload_path.write_text("{broken json", encoding="utf-8")
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 2
+    assert "payload JSON" in capsys.readouterr().err
+
+
+def test_cmd_html_payload_ts_mismatch_rc2(monkeypatch, tmp_path, capsys):
+    """payload 与 md 的 ts 不对应 → rc 2（同代配对铁律）。"""
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    other = tmp_path / "2026-08-02-10-00-00.payload.json"
+    other.write_text(payload_path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(other),
+                        no_open=True) == 2
+    assert "不配对" in capsys.readouterr().err
 
 
 def test_cmd_html_writes_and_opens(monkeypatch, capsys, tmp_path):
     """写文件 + webbrowser.open 一次（file:// URI、new=2）；md 全文传给渲染器。"""
-    mod, md, wb = _html_mocks(monkeypatch, tmp_path)
+    mod, md, payload_path, wb = _html_mocks(monkeypatch, tmp_path)
     seen: dict = {}
 
-    def fake_render(payload, md_text=None):
+    def fake_render(payload, md_text=None, generation=None):
         seen["md_text"] = md_text
         return "HTML_BODY_MARKER"
 
     monkeypatch.setattr("etf_html.render_etf_html", fake_render)
     out = tmp_path / "x.html"
-    assert mod.cmd_html("515050", md_path=str(md), out_path=str(out)) == 0
+    assert mod.cmd_html("515050", md_path=str(md), out_path=str(out),
+                        payload_path=str(payload_path)) == 0
     capsys_out = capsys.readouterr().out
     assert "HTML 报告:" in capsys_out
     assert out.read_text(encoding="utf-8") == "HTML_BODY_MARKER"
@@ -468,17 +534,18 @@ def test_cmd_html_writes_and_opens(monkeypatch, capsys, tmp_path):
 
 def test_cmd_html_default_out_same_dir(monkeypatch, tmp_path):
     """缺省 --out：与 md 同目录同名 .html。"""
-    mod, md, wb = _html_mocks(monkeypatch, tmp_path)
-    assert mod.cmd_html("515050", md_path=str(md), no_open=True) == 0
+    mod, md, payload_path, wb = _html_mocks(monkeypatch, tmp_path)
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 0
     assert (tmp_path / "2026-08-01-10-00-00.html").exists()
     assert wb.calls == []  # --no-open 未触发打开
 
 
 def test_cmd_html_open_false_hints_stderr(monkeypatch, capsys, tmp_path):
     """open 返回 False → stderr 回退提示，rc 仍 0（WB 无浏览器等场景）。"""
-    mod, md, _ = _html_mocks(monkeypatch, tmp_path)
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
     monkeypatch.setattr(mod, "_open_browser", lambda p: False)
-    assert mod.cmd_html("515050", md_path=str(md)) == 0
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path)) == 0
     err = capsys.readouterr().err
     assert "请在浏览器手动打开" in err
 
@@ -560,3 +627,38 @@ def test_html_extra_dims_module_missing_placeholder(monkeypatch):
     assert dims["holdings"]["available"] is True
     assert dims["peers"]["available"] is False
     assert dims["sector_flow"]["available"] is False
+
+
+@pytest.mark.parametrize("kind", ["numpy", "decimal", "datetime"])
+def test_report_sealed_payload_serialization_roundtrip(tmp_path, monkeypatch, capsys, kind):
+    from decimal import Decimal
+    from datetime import datetime, timezone
+    import numpy as np
+    from etf_generation import load_etf_payload
+    mod = _load_etf_module()
+    value = {"numpy": np.int64(7), "decimal": Decimal("1.25"),
+             "datetime": datetime(2026, 10, 8, tzinfo=timezone.utc)}[kind]
+    payload = {"skill": "invest-a-etf", "symbol": "510300",
+               "generated_at": "2026-10-08T12:00:00+08:00", "profile": {"probe": value},
+               "quote": {}, "kline": {}, "share_history": {}, "history": None,
+               "events": {}, "playbook": None}
+    monkeypatch.setattr(mod, "_collect_report_payload", lambda *a, **k: payload)
+    path = tmp_path / "2026-10-08-12-00-00.payload.json"
+    assert mod.main(["report", "510300", "--json", "--payload-out", str(path)]) == 0
+    written, errors = load_etf_payload(path)
+    assert errors == [] and written is not None
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == written
+    from etf_html import _build_data_js
+    from etf_generation import verify_etf_payload
+    embedded = json.loads(_build_data_js(payload).split("const report=", 1)[1]
+                         .split(";\n", 1)[0])
+    assert embedded == written
+    assert verify_etf_payload(embedded) == []
+
+
+def test_review_preserves_directory_error(tmp_path):
+    mod = _load_etf_module()
+    body = mod._render_generation_check(tmp_path / "missing")
+    assert "目录不存在" in body
+    assert "无报告 md" not in body

@@ -18,12 +18,25 @@
     readability      stock+etf  R-A1 可读性指标组（篇幅/长句/术语密度/结论四要素）。
                                §3.4 定义为软建议，状态封顶 warn（不阻断交付）
     conclusion-evidence stock+etf R-A2 结论段证据等级 + R-A6 [事实]→[分析] 对偶。
+    etf-generation   etf        同代 payload 封存 / 产物（md/html/decision/payload）
+                               sha256 与 QC 记录侧车绑定 / 报告断言 × payload 实况
+                               （无基准 TE、隔夜 NAV 错价、缺权重=0、错月拼当期、
+                               身份未核称已核）。离线只读；未执行项 warn（≠PASS）
+
+`--verify-data` 的 network_used 只反映**实际发起**的联网层（stock collector），
+不再等于该标志本身（ETF 数据核验为离线同代消费）。
+
+QC 记录侧车（`--record`）把本代产物的 sha256 与机器结论、分层签认
+（数据/原文/人工数字·合规·逻辑，默认 not_executed）落盘为 `<md ts>.qc.json`；
+任一产物变更 → 旧记录 stale（重验入口 = 重跑 `--record`）。记录不含自身哈希。
 
 用法：
     uv run python skills/lib/report_qc.py <file>
     uv run python skills/lib/report_qc.py --latest
     uv run python skills/lib/report_qc.py --dir reports/
     uv run python skills/lib/report_qc.py <file> --verify-data --json
+    uv run python skills/lib/report_qc.py <etf md> --fail-on error --record \
+        --signoff manual_numbers=pass:"逐项对照 payload 复算"
 """
 
 from __future__ import annotations
@@ -1990,6 +2003,621 @@ def _load_stock_module(module_name: str):
     return importlib.import_module(f"_invest_lib.{module_name}")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# QC 记录侧车（B06）：产物哈希绑定 + 分层签认分离
+#
+# 负责人定点补充（2026-10-08）：旧 verify 只比文件名/payload 哈希/HTML 内嵌
+# 哈希/decision.report_ts，不绑定 MD/HTML/decision **实际内容**——改 MD 一行
+# 仍可沿用旧的 manual PASS，保留 meta 哈希改 HTML 数字仍自称同代。本机制用
+# **最小侧车**（同目录 `<ts>.qc.json`）记录这一代实际产物的 sha256 与本次
+# 机器准出结论，并把「数据/原文/人工三层」签认分别记录（默认 not_executed，
+# 机器 PASS 不得代签）。
+#
+# 边界：不造第二套 ReportIR / 终稿状态机；侧车只存哈希与签认记录，**不含
+# 自身哈希**（无自引用哈希环）；旧记录在产物变更后即判 stale（重验入口 =
+# 重跑 `report_qc.py <md> --record`）。
+# ══════════════════════════════════════════════════════════════════════════
+
+QC_RECORD_SUFFIX = ".qc.json"
+QC_RECORD_VERSION = 1
+QC_RECORD_ARTIFACTS = ("md", "html", "payload", "decision")
+
+#: 签认层词表：数据复核 / 原文核验 / 人工三层（数字·合规·逻辑）各自记录。
+QC_SIGNOFF_LAYERS = ("data_review", "original_materials",
+                     "manual_numbers", "manual_compliance", "manual_logic")
+QC_SIGNOFF_STATES = ("not_executed", "pass", "fail", "partial")
+
+
+def sha256_file(path: str | Path) -> str | None:
+    """文件 sha256（不存在返回 None）。"""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def qc_record_path(report_path: str | Path) -> Path:
+    """QC 记录侧车路径（与报告 md 同目录同 ts）。"""
+    p = Path(report_path)
+    return p.parent / f"{p.stem}{QC_RECORD_SUFFIX}"
+
+
+def generation_artifacts(report_path: str | Path) -> dict[str, dict | None]:
+    """同一代产物（md/html/payload/decision）的 {sha256,bytes}；缺 = None。"""
+    p = Path(report_path)
+    d, ts = p.parent, p.stem
+    out: dict[str, dict | None] = {}
+    for name, path in (
+        ("md", p),
+        ("html", d / f"{ts}.html"),
+        ("payload", d / f"{ts}.payload.json"),
+        ("decision", d / f"{ts}.decision.json"),
+    ):
+        h = sha256_file(path)
+        out[name] = ({"sha256": h, "bytes": Path(path).stat().st_size}
+                     if h is not None else None)
+    return out
+
+
+def _normalize_signoffs(raw: dict | None) -> dict[str, dict]:
+    """规范化签认记录：未知层/非法状态拒绝（fail-loud），默认 not_executed。"""
+    out: dict[str, dict] = {
+        layer: {"status": "not_executed", "note": None, "recorded_at": None}
+        for layer in QC_SIGNOFF_LAYERS
+    }
+    for layer, val in (raw or {}).items():
+        if layer not in QC_SIGNOFF_LAYERS:
+            raise ValueError(f"未知签认层 {layer!r}（可用: {', '.join(QC_SIGNOFF_LAYERS)}）")
+        if isinstance(val, str):
+            val = {"status": val}
+        status = (val or {}).get("status", "not_executed")
+        if status not in QC_SIGNOFF_STATES:
+            raise ValueError(f"签认状态非法 {status!r}（可用: {', '.join(QC_SIGNOFF_STATES)}）")
+        out[layer] = {
+            "status": status,
+            "note": (val or {}).get("note"),
+            "recorded_at": (val or {}).get("recorded_at"),
+        }
+    return out
+
+
+def build_qc_record(report_path: str | Path, result: QCResult, *,
+                    signoffs: dict | None = None,
+                    previous: dict | None = None) -> dict:
+    """构建 QC 记录（不落盘）：产物哈希 + 本次机器结论 + 分层签认。
+
+    ``previous`` = 覆盖前的旧记录核验结果（verify_qc_record）：存在且非 none
+    时写入 ``supersedes``——**旧签认不继承**（新记录 signoffs 只取本次入参），
+    同时留下「本次记录替代了什么状态」的可审计痕迹。
+    """
+    p = Path(report_path)
+    rec = {
+        "schema_version": QC_RECORD_VERSION,
+        "record": p.name,
+        "ts": p.stem,
+        "report": p.name,
+        "recorded_at": datetime.now().astimezone().isoformat(),
+        "artifacts": generation_artifacts(p),
+        "payload_hash": None,
+        "machine_qc": {
+            "overall": result.overall,
+            "report_type": result.report_type,
+            "network_used": bool(result.network_used),
+            "layers": [{"layer": l.layer, "status": l.status} for l in result.layers],
+        },
+        "signoffs": _normalize_signoffs(signoffs),
+        "note": "机器准出与人工/原文/数据签认分别记录；机器 PASS 不代替人工复检。"
+                "本记录不含自身哈希（避免自引用环）；任一产物变更即失效，重验入口："
+                f"report_qc.py <md> --record（本记录 {p.stem}{QC_RECORD_SUFFIX} 可覆盖重写）。",
+    }
+    if previous and previous.get("status") not in (None, "none"):
+        rec["supersedes"] = {
+            "status": previous.get("status"),
+            "recorded_at": previous.get("recorded_at"),
+            "machine_overall": previous.get("machine_overall"),
+            "note": "旧记录签认不继承（沿用旧人工 PASS 的通道不存在）；"
+                    "本次签认见 signoffs（未显式 --signoff 即为未执行）",
+        }
+    payload_path = p.parent / f"{p.stem}.payload.json"
+    if payload_path.is_file():
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+            meta = payload.get("_meta") if isinstance(payload, dict) else None
+            rec["payload_hash"] = meta.get("payload_hash") if isinstance(meta, dict) else None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            rec["payload_hash"] = None
+    return rec
+
+
+def write_qc_record(report_path: str | Path, result: QCResult, *,
+                    signoffs: dict | None = None) -> tuple[Path, dict]:
+    """落盘 QC 记录侧车；返回 (路径, 记录)。
+
+    写前先核验旧记录（覆盖即替代）：旧状态与旧签认写入 ``supersedes``，
+    但**新记录的 signoffs 只取本次入参**——陈旧产物重跑 --record 不会
+    携带旧人工 PASS；机器 FAIL 也照实记录（不作伪 PASS）。
+    """
+    previous = verify_qc_record(report_path)
+    rec = build_qc_record(report_path, result, signoffs=signoffs, previous=previous)
+    path = qc_record_path(report_path)
+    path.write_text(json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+    return path, rec
+
+
+def load_qc_record(report_path: str | Path) -> tuple[dict | None, list[str]]:
+    """读取 QC 记录侧车（不存在/损坏 → (None, [原因])）。"""
+    path = qc_record_path(report_path)
+    if not path.exists():
+        return None, [f"无 QC 记录侧车: {path.name}"]
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, [f"QC 记录读取/解析失败: {exc}"]
+    if not isinstance(rec, dict):
+        return None, ["QC 记录不是 JSON 对象"]
+    if rec.get("ts") != Path(report_path).stem:
+        return None, [f"QC 记录 ts={rec.get('ts')!r} 与报告 ts 不符（张冠李戴）"]
+    errors = _qc_record_structure_errors(rec, Path(report_path))
+    if errors:
+        return None, errors
+    return rec, []
+
+
+def _qc_record_structure_errors(rec: dict, report_path: Path) -> list[str]:
+    """先验证记录合同，禁止缺项伪装 valid 或损坏字段触发消费方异常。"""
+    errors: list[str] = []
+    if type(rec.get("schema_version")) is not int or rec["schema_version"] != QC_RECORD_VERSION:
+        errors.append("QC 记录 schema_version 缺失或不支持")
+    for key in ("report", "record"):
+        if rec.get(key) != report_path.name:
+            errors.append(f"QC 记录 {key} 与报告文件名不符")
+    if not isinstance(rec.get("recorded_at"), str) or not rec["recorded_at"].strip():
+        errors.append("QC 记录缺 recorded_at")
+    artifacts = rec.get("artifacts")
+    if not isinstance(artifacts, dict):
+        errors.append("QC 记录缺 artifacts 对象")
+    else:
+        for name in QC_RECORD_ARTIFACTS:
+            if name not in artifacts:
+                errors.append(f"QC 记录缺 artifacts.{name}")
+                continue
+            item = artifacts[name]
+            if item is None:
+                continue
+            if (not isinstance(item, dict)
+                    or not isinstance(item.get("sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
+                    or type(item.get("bytes")) is not int or item["bytes"] < 0):
+                errors.append(f"QC 记录 artifacts.{name} 非法（须 sha256/bytes）")
+    machine = rec.get("machine_qc")
+    if not isinstance(machine, dict):
+        errors.append("QC 记录缺 machine_qc 对象")
+    else:
+        if machine.get("overall") not in ("PASS", "WARN", "FAIL"):
+            errors.append("QC 记录 machine_qc.overall 非法")
+        if not isinstance(machine.get("report_type"), str) or not machine["report_type"]:
+            errors.append("QC 记录 machine_qc.report_type 非法")
+        if type(machine.get("network_used")) is not bool:
+            errors.append("QC 记录 machine_qc.network_used 非法")
+        layers = machine.get("layers")
+        if not isinstance(layers, list) or any(
+                not isinstance(layer, dict) or not isinstance(layer.get("layer"), str)
+                or layer.get("status") not in ("pass", "warn", "fail", "skip")
+                for layer in layers):
+            errors.append("QC 记录 machine_qc.layers 非法")
+    signoffs = rec.get("signoffs")
+    if not isinstance(signoffs, dict):
+        errors.append("QC 记录缺 signoffs 对象")
+    else:
+        if set(signoffs) != set(QC_SIGNOFF_LAYERS):
+            errors.append("QC 记录 signoffs 层缺失或未知")
+        for name, item in signoffs.items():
+            if not isinstance(item, dict) or item.get("status") not in QC_SIGNOFF_STATES:
+                errors.append(f"QC 记录 signoffs.{name} 状态非法")
+    payload_hash = rec.get("payload_hash")
+    if payload_hash is not None and (not isinstance(payload_hash, str)
+                                    or re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None):
+        errors.append("QC 记录 payload_hash 非法")
+    return errors
+
+
+def verify_qc_record(report_path: str | Path) -> dict:
+    """核验 QC 记录与当前产物的绑定状态。
+
+    返回 ``{"status": "none|valid|stale|invalid", "issues", "changed",
+    "recorded_at", "machine_overall", "signoffs"}``：
+    - ``none``    无记录（未记录 → 未执行，不等于 PASS）；
+    - ``valid``   各产物哈希与记录一致（机器结论与签认见字段，整体通过与否另判）；
+    - ``stale``   任一产物变更/新增/丢失 或 payload_hash 不符 → 旧记录失效，须重验；
+    - ``invalid`` 记录损坏/ts 不符/结构非法。
+    """
+    p = Path(report_path)
+    out: dict = {"status": "none", "issues": [], "changed": [],
+                 "recorded_at": None, "machine_overall": None, "signoffs": {}}
+    rec, errs = load_qc_record(p)
+    if rec is None:
+        if qc_record_path(p).exists():
+            out["status"] = "invalid"
+        out["issues"].extend(errs)
+        return out
+    recorded = rec.get("artifacts")
+    if not isinstance(recorded, dict):
+        out["status"] = "invalid"
+        out["issues"].append("QC 记录缺 artifacts 块")
+        return out
+    current = generation_artifacts(p)
+    changed: list[str] = []
+    for name in QC_RECORD_ARTIFACTS:
+        r, c = recorded.get(name), current.get(name)
+        if r is None and c is None:
+            continue
+        if r is None and c is not None:
+            changed.append(f"{name}:记录后新增（记录未覆盖）")
+        elif r is not None and c is None:
+            changed.append(f"{name}:丢失（记录时存在）")
+        elif r.get("sha256") != (c or {}).get("sha256"):
+            changed.append(f"{name}:内容已变更（sha256 不符）")
+    rec_payload_hash = rec.get("payload_hash")
+    if rec_payload_hash and not any(c.startswith("payload:") for c in changed):
+        payload_path = p.parent / f"{p.stem}.payload.json"
+        cur_hash = None
+        if payload_path.is_file():
+            try:
+                payload = json.loads(payload_path.read_text(encoding="utf-8"))
+                meta = payload.get("_meta") if isinstance(payload, dict) else None
+                cur_hash = meta.get("payload_hash") if isinstance(meta, dict) else None
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                cur_hash = None
+        if cur_hash != rec_payload_hash:
+            changed.append("payload_hash:与记录不符（封存内容变更）")
+    out["recorded_at"] = rec.get("recorded_at")
+    out["machine_overall"] = (rec.get("machine_qc") or {}).get("overall")
+    out["signoffs"] = rec.get("signoffs") or {}
+    out["changed"] = changed
+    if changed:
+        out["status"] = "stale"
+        out["issues"].append(
+            "旧签认失效：产物在记录后变更 → " + "；".join(changed)
+            + "（重验入口：report_qc.py <md> --record）")
+    else:
+        out["status"] = "valid"
+    return out
+
+
+# ── ETF 域 QC 层（B06）：同代 payload/产物哈希 + 报告断言 × payload 对照 ──
+
+#: 确认性跟踪指标断言（TD/TE 数字出现即需 tracking.status=available）
+_ETF_TE_CLAIM_RE = re.compile(
+    r"(?:跟踪误差|跟踪差异|(?<![A-Za-z])(?:TD|TE)(?![A-Za-z]))"
+    r"[^。；;\n]{0,24}?(-?\d+(?:\.\d+)?)\s*%"
+    r"|(-?\d+(?:\.\d+)?)\s*%\s*(?:的)?"
+    r"(?:跟踪误差|跟踪差异|(?<![A-Za-z])(?:TD|TE)(?![A-Za-z]))", re.I)
+#: 断言豁免 = **同命题否证**（R3）：否证措辞必须直接贴附该族断言的**对象/谓词**
+#: （跟踪误差/身份核验/折溢价/缺失权重/拼当期组合），其他维度的缺口或待核不
+#: 构成豁免（负责人反例：「身份已核验且宏观背景待核」「跟踪误差为0.20%而盘口
+#: 有缺口」——「宏观背景/盘口」的待核/缺口不是该命题的否定）。
+#: 贴附距离是有限规则（不冒充自然语言万能核验）：已知硬约束反例必须被拦截、
+#: 真实否定（「跟踪误差不可得」「未做原文核验」「缺权重不得按 0」）必须被保护；
+#: 五族正反例见 tests/test_b06_qc_record.py 与 R3 负责人断言反例。
+_ETF_MISPRICE_CLAIM_RE = re.compile(
+    r"(?:折溢价?|溢价|折价)[^。；;\n]{0,30}?(?:错价|定价错误|被高估|被低估|低估|高估)"
+    r"|(?:错价|被高估|被低估|定价错误)[^。；;\n]{0,30}?(?:折溢价|溢价|折价)")
+_ETF_ZERO_WEIGHT_RE = re.compile(
+    r"缺(?:失|口)?[^。；;\n]{0,12}?(?:按|计为|视为|当作)\s*0"
+    r"|前十大合计[^。；;\n]{0,12}?100(?:\.0+)?\s*%")
+_ETF_STALE_MIX_CLAIM_RE = re.compile(
+    r"(?:当期|当前)[^。；;\n]{0,12}?(?:完整组合|完整持仓|全部成分)"
+    r"|成分(?:与|和)权重[^。；;\n]{0,10}?拼")
+_ETF_IDENTITY_VERIFIED_RE = re.compile(
+    r"身份[^。；;\n]{0,12}?(?:已核|核验通过|verified)"
+    r"|(?:原文核验|已读原文)")
+_HTML_GENERATION_META_RE = re.compile(
+    r'name="invest-generation"\s+content="([0-9a-f]{8,})"')
+
+_ETF_PAYLOAD_VERSION = 1
+
+
+#: 分句边界（句读/换行/表格格）：否证检索限定在断言所在分句内，防跨句保护。
+#: 括号允许出现在否证的**贴附间隙**里（「身份（待核）」），故不作边界；
+#: 转折连词（但/然而）也不作边界——是否豁免由「否证对象是否就是断言对象」
+#: 判定（R3），不再靠连接词枚举。
+_CLAUSE_BOUNDARY_RE = re.compile(r"[。！？!?；;，,、\n|]")
+_TRACKING_BOUNDARY_RE = re.compile(r"[。！？!?；;\n]")
+_TRACKING_RESEARCH_RE = re.compile(
+    r"研究偏离|研究数值|研究口径|research_only\s*=\s*true"
+    r"|not_confirmatory\s*=\s*true|非确认", re.I)
+
+#: 每族断言的**同命题否证**（对象/谓词贴附，间隙上限几字符）：
+#: - ``tracking``：跟踪误差/差异/TD/TE ↔ 不可得/不可算/未核/停算/不构成…；
+#: - ``mispricing``：折溢价 ↔ 不意味/不等同/不构成…低估/高估（双向）；
+#: - ``zero_weight``：缺失/权重 ↔ 不按/不得按/不重归/不视为…；
+#: - ``stale_mix``：拼/当作 ↔ 不可/不得/不能…；
+#: - ``identity``：身份/原文核验 ↔ 待核/未核/未做/未经…
+#: 「缺口/待核」不再是通用豁免词：只有贴附在**本族对象**上才算否证。
+_ETF_SAME_OBJECT_EXEMPT_RE: dict[str, re.Pattern] = {
+    "tracking": re.compile(
+        r"(?:跟踪(?:误差|差异|偏离)|TD|TE)[^。；;\n]{0,8}?"
+        r"(?:不可得|不可算|不可确认|未确认|非确认|未核|未做|未经|停算|停止|不适用"
+        r"|不构成|不等于|不意味|未必|无法计算|无法确认|不能计算|不能确认)"
+        r"|(?:不可得|不可算|不可确认|未确认|非确认|未核|未做|未经|停算|停止|不适用"
+        r"|不构成|不等于|不意味|无法计算|无法确认|不能计算|不能确认)"
+        r"[^。；;\n]{0,6}?(?:跟踪(?:误差|差异|偏离)|TD|TE)", re.I),
+    "mispricing": re.compile(
+        r"(?:折溢价?|折价)[^。；;\n]{0,16}?"
+        r"(?:不意味|不等同|不等于|不构成|不自动|未必|不能|不得|无法|不)"
+        r"[^。；;\n]{0,16}?(?:错价|定价错误|被高估|被低估|低估|高估)"
+        r"|(?:不意味|不等同|不等于|不构成|不自动|未必|不能|不得|无法)"
+        r"[^。；;\n]{0,8}?(?:错价|定价错误|被高估|被低估|低估|高估|折溢价?|折价)"),
+    "zero_weight": re.compile(
+        r"(?:缺(?:失|口)?|权重|前十大)[^。；;\n]{0,10}?"
+        r"(?:不按|不得按|不重归|不视为|不计为|不当(?:作)?|不当作|不可按|不能按"
+        r"|不得|不可|不能)"
+        r"|(?:不得|不可|不能|不)[^。；;\n]{0,4}?按\s*0"),
+    "stale_mix": re.compile(
+        r"(?:不可|不得|不能|勿|禁止|不应|无法)[^。；;\n]{0,8}?"
+        r"(?:拼|当作|视为|等同|混(?:为|作))"),
+    "identity": re.compile(
+        r"(?:身份|原文核验|已读原文)[^。；;\n]{0,6}?"
+        r"(?:待核|未核|未验证|未做|未经|未执行|未确认|不适用|未完成|未核验|未读)"
+        r"|(?:未做|未经|未执行|未完成|尚未|有待|待|未)"
+        r"[^。；;\n]{0,6}?(?:身份|原文核验|已读原文)"),
+}
+
+
+def _claim_exempt_near(line: str, match: re.Match, *, family: str,
+                       window: int | None = None) -> bool:
+    """**同分句 + 同命题否证**豁免（B-F04；R3 改为对象贴附判定）。
+
+    历史口径（行级 ±24 字符邻域 → R1 分句 + 通用否定词表 → R2 分句 + 括号/
+    转折/表格格边界）都是作用域近似。R2 的通用否定词表仍会放过两类漏检
+    （R3 负责人反例）：「身份已核验且宏观背景待核。」「跟踪误差为 0.20% 而
+    盘口有缺口。」——「宏观背景」「盘口」的待核/缺口是**其他维度**的措辞，
+    不是被匹配命题（身份已核 / 跟踪误差数字）的否定。R3 改为：否证必须
+    贴附**本族对象**（表格 ``_ETF_SAME_OBJECT_EXEMPT_RE[family]``），且
+    检索限定在断言所在分句内。真实否定仍通过（「跟踪误差不可得」「未做
+    原文核验」「缺权重不得按 0」「不可拼成「当期完整组合」」）。
+    ``window`` 参数保留仅为旧调用兼容，不再参与判定。
+    """
+    pat = _ETF_SAME_OBJECT_EXEMPT_RE.get(family)
+    if pat is None:  # pragma: no cover — 未知族不允许静默豁免
+        return False
+    # tracking 表格的研究标签和数字可分处不同格；仍以句号/分号隔开命题，
+    # 不允许前句否证或研究标签保护后句确认性断言。
+    boundary = _TRACKING_BOUNDARY_RE if family == "tracking" else _CLAUSE_BOUNDARY_RE
+    lo = 0
+    for m in boundary.finditer(line, 0, match.start()):
+        lo = m.end()
+    right = boundary.search(line, match.end())
+    hi = right.start() if right else len(line)
+    clause = line[lo:hi]
+    # 价格基准研究 TD/TE 与确认性跟踪误差是不同口径；只保护缩写研究数值。
+    research = (family == "tracking" and re.search(r"\b(?:TD|TE)\b", match.group(), re.I)
+                and not re.search(r"跟踪误差|跟踪差异", match.group())
+                and _TRACKING_RESEARCH_RE.search(clause))
+    return bool(pat.search(clause) or research)
+
+
+def _first_unexempt_claim(line: str, pattern: re.Pattern, *, family: str):
+    """逐项核验同一行，首个否证不得掩盖后续断言（五族共用）。"""
+    return next((m for m in pattern.finditer(line)
+                 if not _claim_exempt_near(line, m, family=family)), None)
+
+
+def _claim_scan_lines(md: str) -> list[str]:
+    """断言扫描行：**含表格行与引用行**，仅剔除代码块。
+
+    与 ``_body_lines``（可读性口径：剔表格/引用/标题）不同——断言检查若沿用
+    正文口径会 fail-open：实测报告把「跟踪误差 0.52%」写进表格行时检查器
+    静默漏检（2026-10-08 现场）。此处只排除 ``` 围栏内内容。
+    """
+    out: list[str] = []
+    in_fence = False
+    for ln in md.splitlines():
+        if ln.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if ln.strip():
+            out.append(ln)
+    return out
+
+
+def _load_etf_payload_for_qc(report_path: Path) -> tuple[dict | None, list[str]]:
+    """读取并校验同代 ETF payload（seal 走共享 snapshot_core，不复制第二套）。"""
+    payload_path = report_path.parent / f"{report_path.stem}.payload.json"
+    if not payload_path.is_file():
+        return None, [f"无同代冻结 payload: {payload_path.name}"]
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, [f"payload 读取/解析失败: {exc}"]
+    if not isinstance(payload, dict):
+        return None, ["payload 不是 JSON 对象"]
+    try:
+        import snapshot_core  # noqa: E402 — 与封存侧同一实现（共享核）
+    except ImportError as exc:  # pragma: no cover
+        return None, [f"snapshot_core 不可用: {exc}"]
+    errors = snapshot_core.verify_seal(
+        payload, version_field="payload_version", expected_version=_ETF_PAYLOAD_VERSION)
+    if not errors:
+        meta = payload.get("_meta") or {}
+        if meta.get("symbol") != payload.get("symbol"):
+            errors.append("封存 meta.symbol 与 payload.symbol 不一致")
+        if not payload.get("generated_at"):
+            errors.append("payload 缺 generated_at（无法判定同代时点）")
+        if not meta.get("frozen_at"):
+            errors.append("payload 缺 frozen_at（冻结时点）")
+    return (payload if not errors else None), errors
+
+
+def etf_generation_findings(report_path: Path, *,
+                            record_refresh: bool = False) -> list[dict]:
+    """ETF 同代消费与断言对照（B06，离线）：返回 findings 列表。
+
+    检查面：payload 存在/封存有效/对象一致 → QC 记录侧车绑定（产物 sha256、
+    旧签认失效）→ HTML 内嵌代际哈希 → 报告正文断言 × payload 实况
+    （无基准 TE、隔夜 NAV 错价、缺权重=0、错月拼当期、身份未核称已核）。
+    未执行/不可判定项按 severity=warning 返回（未执行 ≠ PASS）。
+
+    ``record_refresh=True``（调用方本次带 ``--record``，侧车将被覆盖重写）：
+    记录侧车的自身状态（missing/stale/invalid）不再计为内容失败——否则
+    陈旧产物重跑需连续两次（第一次必然被旧记录判 stale 而 FAIL），且第一次
+    落盘的 machine_qc 反映的是旧记录而非当前内容。payload/HTML/正文断言等
+    实质检查在此模式下照常执行（刷新记录不得绕过内容/封存/HTML 错误）。
+    """
+    findings: list[dict] = []
+    text = report_path.read_text(encoding="utf-8")
+    symbol = _extract_symbol(report_path)
+    payload_path = report_path.parent / f"{report_path.stem}.payload.json"
+    payload, pay_errs = _load_etf_payload_for_qc(report_path)
+    if payload is None:
+        if payload_path.is_file():
+            # 文件在但不可用（损坏/封存哈希不符/篡改）→ 机器应失败
+            findings.append({
+                "id": "etf-payload-invalid", "severity": "error",
+                "message": "同代 payload 存在但校验失败（" + "；".join(pay_errs)
+                           + "）：封存哈希不符或结构损坏（篡改/非同代）"})
+        else:
+            findings.append({
+                "id": "etf-payload-missing", "severity": "warning",
+                "message": "无同代冻结 payload（" + "；".join(pay_errs)
+                           + "）：无法核验同代输入绑定（未执行 ≠ PASS；"
+                             "新报告须 report --payload-out 冻结）"})
+    else:
+        if symbol and payload.get("symbol") != symbol:
+            findings.append({
+                "id": "etf-payload-symbol", "severity": "error",
+                "message": f"payload.symbol={payload.get('symbol')!r} ≠ 报告标的 {symbol!r}"
+                           "（对象不一致）"})
+        meta = payload.get("_meta") or {}
+        payload_hash = str(meta.get("payload_hash") or "")
+        html_path = report_path.parent / f"{report_path.stem}.html"
+        if html_path.is_file():
+            html_text = html_path.read_text(encoding="utf-8")
+            m = _HTML_GENERATION_META_RE.search(html_text)
+            if not m:
+                findings.append({
+                    "id": "etf-html-generation-missing", "severity": "error",
+                    "message": "HTML 缺 invest-generation 代际标记（回采渲染或旧产物）"})
+            elif m.group(1) != payload_hash:
+                findings.append({
+                    "id": "etf-html-generation-mismatch", "severity": "error",
+                    "message": f"HTML 内嵌代际哈希 {m.group(1)[:12]}… ≠ payload "
+                               f"{payload_hash[:12]}…（非同代/已被改动）"})
+        # 报告断言 × payload 实况
+        tracking = (payload.get("profile") or {}).get("tracking") or {}
+        if tracking.get("status") != "available":
+            for line in _claim_scan_lines(text):
+                m = _first_unexempt_claim(line, _ETF_TE_CLAIM_RE, family="tracking")
+                if m:
+                    findings.append({
+                        "id": "etf-tracking-claim", "severity": "error",
+                        "message": "正文以数字断言确认性 跟踪误差/差异，但 payload "
+                                   f"tracking.status={tracking.get('status')!r}"
+                                   "（无同口径基准 → 确认指标不可得）："
+                                   f"「{line.strip()[:60]}」"})
+                    break
+        for line in _claim_scan_lines(text):
+            m = _first_unexempt_claim(line, _ETF_MISPRICE_CLAIM_RE, family="mispricing")
+            if m:
+                findings.append({
+                    "id": "etf-mispricing-claim", "severity": "error",
+                    "message": "正文将折溢价断言为错价/高估/低估，但净值时点未知"
+                               "（premium_discount_caliber）："
+                               f"「{line.strip()[:60]}」"})
+                break
+        holdings = (payload.get("holdings") or {})
+        coverage = holdings.get("coverage") or {}
+        if (coverage.get("pct_missing_rows") or coverage.get("gaps")
+                or any(r.get("pct") is None for r in holdings.get("rows") or [])):
+            for line in _claim_scan_lines(text):
+                m = _first_unexempt_claim(line, _ETF_ZERO_WEIGHT_RE, family="zero_weight")
+                if m:
+                    findings.append({
+                        "id": "etf-holdings-zero-weight", "severity": "error",
+                        "message": "payload 存在缺权重披露，正文却把缺失按 0/合计 100% 表述"
+                                   f"（不得按 0、不得重归一化）：「{line.strip()[:60]}」"})
+                    break
+        ie = payload.get("index_exposure") or {}
+        pa = ie.get("period_alignment") or {}
+        if ie and ie.get("status") == "ok" and pa.get("joinable") is False:
+            for line in _claim_scan_lines(text):
+                m = _first_unexempt_claim(line, _ETF_STALE_MIX_CLAIM_RE, family="stale_mix")
+                if m:
+                    findings.append({
+                        "id": "etf-stale-composition-claim", "severity": "error",
+                        "message": "成分/权重文件日期不同（错月），正文却拼作「当期完整组合」："
+                                   f"「{line.strip()[:60]}」"})
+                    break
+        identity = (payload.get("profile") or {}).get("identity") or {}
+        ver = (identity.get("verification") or {}).get("status")
+        if ver != "verified_original":
+            for line in _claim_scan_lines(text):
+                m = _first_unexempt_claim(line, _ETF_IDENTITY_VERIFIED_RE, family="identity")
+                if m:
+                    findings.append({
+                        "id": "etf-identity-claim", "severity": "error",
+                        "message": f"payload 身份核验状态={ver!r}，正文却称身份已核/原文核验："
+                                   f"「{line.strip()[:60]}」"})
+                    break
+    # QC 记录侧车（产物哈希绑定 + 分层签认）
+    rec = verify_qc_record(report_path)
+    if record_refresh:
+        # 本次将覆盖重写侧车：记录现状如实标注为 info（不阻断、不冒充 PASS），
+        # 内容/封存/HTML 检查已在上文独立执行
+        findings.append({
+            "id": "etf-qc-record-refresh", "severity": "info",
+            "message": f"本次 --record 将覆盖重写 QC 记录（现状={rec['status']}；"
+                       "旧签认不继承，新记录绑定本次产物 sha256 与本次机器结论）"})
+    elif rec["status"] == "none":
+        findings.append({
+            "id": "etf-qc-record-missing", "severity": "warning",
+            "message": "无 QC 记录侧车（产物 sha256/分层签认未记录）："
+                       "机器身份/文本 PASS 不能代替人工/原文核验；"
+                       "交付前应 report_qc.py <md> --record 记录本代产物"})
+    elif rec["status"] in ("stale", "invalid"):
+        findings.append({
+            "id": "etf-qc-record-stale", "severity": "error",
+            "message": "QC 记录与产物不一致（" + "；".join(rec["issues"]) + "）"})
+    elif rec["status"] == "valid":
+        unexecuted = [k for k, v in (rec.get("signoffs") or {}).items()
+                      if (v or {}).get("status") == "not_executed"]
+        if unexecuted:
+            findings.append({
+                "id": "etf-signoffs-unexecuted", "severity": "info",
+                "message": "QC 记录有效，但以下签认层未执行（≠通过）："
+                           + "、".join(unexecuted)})
+    return findings
+
+
+def _check_etf_generation(report_path: Path, *,
+                          record_refresh: bool = False) -> LayerResult:
+    """ETF 域层：同代 payload/产物哈希绑定 + 断言对照（B06）。"""
+    layer = LayerResult(layer="etf-generation", status="pass")
+    try:
+        findings = etf_generation_findings(report_path,
+                                           record_refresh=record_refresh)
+    except Exception as exc:  # 不可静默 skip（fail-open 防护）
+        layer.status = "fail"
+        layer.findings_count = 1
+        layer.details.append({"id": "etf-generation-check-error", "severity": "error",
+                              "message": f"ETF 同代检查异常: {exc}"})
+        return layer
+    layer.details = findings
+    layer.findings_count = len([f for f in findings if f["severity"] != "info"])
+    if any(f["severity"] == "error" for f in findings):
+        layer.status = "fail"
+    elif any(f["severity"] in ("warning", "warn") for f in findings):
+        layer.status = "warn"
+    return layer
+
+
 def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]:
     """--verify-data 模式：audit / quality / rigor（仅 stock）。"""
     layers: list[LayerResult] = []
@@ -1997,6 +2625,15 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
 
     # ── audit：抽取数据点 + 偏差判定 ──
     audit = LayerResult(layer="audit", status="skip")
+    if report_type == "etf":
+        # B06：ETF 数据核验走同代 payload/QC 记录（离线只读，另见
+        # etf-generation 层）；stock 式 audit 不适用 → 如实 skip，
+        # 且 **不**因此置 network_used（未发起任何联网）。
+        audit.details.append({
+            "id": "audit-not-applicable", "severity": "info",
+            "message": "ETF 数据核验=同代 payload/QC 记录（etf-generation 层，离线）；"
+                       "未执行联网重采集（network_used=false）",
+        })
     if report_type == "stock":
         try:
             report_audit = _load_stock_module("report_audit")
@@ -2039,6 +2676,9 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
 
             result = collector.collect_all(symbol, ["basic_info", "financials",
                                                     "quote", "valuation", "kline"])
+            # B06：network_used 只反映**实际发起**的联网采集（collector），
+            # 不再等同于 --verify-data 标志本身（旧实现 flag=True 即置 True，
+            # ETF/无采集路径下「未执行」被记成用了网络）。
         except Exception as exc:  # pragma: no cover
             # 采集失败：两层都无法执行 → 两层都 fail
             for layer_name in ("quality", "rigor"):
@@ -2053,6 +2693,7 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
             qc = run_quality_check(result)
             q_overall = (qc.get("summary") or {}).get("overall", "pass")
             quality = LayerResult(layer="quality", status="pass")
+            quality.network_used = True  # collect_all 已实际联网（上一步成功）
             quality.details = [
                 {"id": m.get("id", m.get("name", "")), "severity": "info",
                  "message": f"{m.get('label', m.get('name', ''))}: {m.get('status', '')}"}
@@ -2074,6 +2715,7 @@ def _run_verify_layers(report_path: Path, report_type: str) -> list[LayerResult]
         try:
             reports = run_rigor(result)
             rigor = LayerResult(layer="rigor", status="pass")
+            rigor.network_used = True  # collect_all 已实际联网（上一步成功）
             rigor.details = [
                 {"id": r.command, "severity": "info",
                  "message": f"[{r.command}] {r.field}: {r.detail} (偏差 {r.deviation_pct:.1f}%)"}
@@ -2109,8 +2751,13 @@ def qc_file(
     profile: str = "precommit",
     fail_on: str = "warning",
     verify_data: bool = False,
+    record_refresh: bool = False,
 ) -> QCResult:
-    """单文件 QC。report_path 不存在时返回 FAIL（含原因）。"""
+    """单文件 QC。report_path 不存在时返回 FAIL（含原因）。
+
+    ``record_refresh=True``：调用方本次会 `--record` 覆盖重写侧车 →
+    记录自状态（missing/stale/invalid）不计为内容失败（避免陈旧产物必须
+    连跑两次）；实质检查照常。"""
     path = Path(report_path)
     if not path.exists():
         return QCResult(
@@ -2152,6 +2799,9 @@ def qc_file(
         text, report_type, fact_ids=_load_analysis_fact_ids(path)))
     if report_type == "etf":
         layers.append(_check_etf_derived(text))
+        # B06：ETF 域同代消费层（payload 封存 / 产物哈希绑定 / QC 记录 /
+        # 报告断言 × payload 实况）。离线只读；未执行项以 warn 呈现（未执行≠PASS）。
+        layers.append(_check_etf_generation(path, record_refresh=record_refresh))
     elif report_type == "stock":
         # v0.2.7 E1：stock 报告引用 derived 字段（板块同步性 6 字段等）时同样校验。
         # 未引用时层为 skip → 不挂载（保持既有「stock 无 derived 层」行为，
@@ -2167,7 +2817,10 @@ def qc_file(
         report_type=report_type,
         overall=_compute_overall(layers),
         layers=layers,
-        network_used=verify_data,
+        # B06：network_used 只反映**实际发起**的联网层（各层运行时自报），
+        # 不等于 --verify-data 标志（旧实现 flag 即置 True：ETF 等未采集
+        # 路径会被误记为已联网）。
+        network_used=any(getattr(l, "network_used", False) for l in layers),
     )
 
 
@@ -2177,6 +2830,7 @@ def qc_directory(
     profile: str = "precommit",
     fail_on: str = "warning",
     verify_data: bool = False,
+    record_refresh: bool = False,
 ) -> list[QCResult]:
     """批量检查目录下所有 .md（递归）。"""
     root = Path(directory)
@@ -2187,7 +2841,8 @@ def qc_directory(
         if ".audit_checklist" in path.name:
             continue
         results.append(qc_file(path, profile=profile, fail_on=fail_on,
-                               verify_data=verify_data))
+                               verify_data=verify_data,
+                               record_refresh=record_refresh))
     return results
 
 
@@ -2197,6 +2852,7 @@ def qc_latest(
     profile: str = "precommit",
     fail_on: str = "warning",
     verify_data: bool = False,
+    record_refresh: bool = False,
 ) -> QCResult | None:
     """检查 reports/ 下最新修改的 .md。找不到返回 None。"""
     root = Path(reports_dir)
@@ -2212,7 +2868,8 @@ def qc_latest(
     # mtime 相同（同秒写入/粗粒度文件系统）时按文件名取新，避免 max 平局由
     # rglob 迭代序决定（跨环境不确定，CI 曾取到旧报告）
     latest = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
-    return qc_file(latest, profile=profile, fail_on=fail_on, verify_data=verify_data)
+    return qc_file(latest, profile=profile, fail_on=fail_on, verify_data=verify_data,
+                   record_refresh=record_refresh)
 
 
 # ── 输出格式化 ────────────────────────────────────────────────────────────
@@ -2287,14 +2944,39 @@ def main(argv: list[str] | None = None) -> int:
                         help="lint 违规阈值：达到该级别即 FAIL（默认 warning）")
     parser.add_argument("--verify-data", action="store_true",
                         help="联网重采集，执行 audit + quality + rigor（仅 stock）")
+    parser.add_argument("--record", action="store_true",
+                        help="B06: 落盘 QC 记录侧车 <md ts>.qc.json（本代产物 sha256 "
+                             "+ 本次机器结论 + 分层签认占位）；产物变更后旧记录自动失效")
+    parser.add_argument("--signoff", action="append", default=None, metavar="LAYER=STATUS[:NOTE]",
+                        help="B06: 记录分层签认（可重复）。层: "
+                             + "/".join(QC_SIGNOFF_LAYERS)
+                             + "；状态: " + "/".join(QC_SIGNOFF_STATES)
+                             + "（默认全部 not_executed；机器 PASS 不代签）")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     args = parser.parse_args(argv)
 
+    # B06：解析分层签认（fail-loud：非法层/状态直接退出 2）
+    signoffs: dict = {}
+    for spec in args.signoff or []:
+        layer, _, rest = spec.partition("=")
+        if not layer or not rest:
+            print(f"❌ --signoff 需形如 LAYER=STATUS[:NOTE]，收到 {spec!r}", file=sys.stderr)
+            return 2
+        status, _, note = rest.partition(":")
+        try:
+            parsed = _normalize_signoffs({layer: {"status": status, "note": note or None}})
+        except ValueError as exc:
+            print(f"❌ --signoff 非法: {exc}", file=sys.stderr)
+            return 2
+        signoffs[layer] = parsed[layer]
+
     results: list[QCResult] = []
+    # --record 绑定：本次将覆盖重写侧车 → 记录自状态不计为内容失败（qc_file
+    # 的 record_refresh），使陈旧产物一次重跑即可完成重核验（R2）。
     if args.latest:
         r = qc_latest(profile=args.profile, fail_on=args.fail_on,
-                      verify_data=args.verify_data)
+                      verify_data=args.verify_data, record_refresh=args.record)
         if r:
             results.append(r)
         else:
@@ -2302,26 +2984,56 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     elif args.dir:
         results = qc_directory(args.dir, profile=args.profile, fail_on=args.fail_on,
-                               verify_data=args.verify_data)
+                               verify_data=args.verify_data,
+                               record_refresh=args.record)
         if not results:
             print(f"❌ 目录中未找到 .md 报告: {args.dir}", file=sys.stderr)
             return 2
     elif args.target:
         for t in args.target:
             results.append(qc_file(t, profile=args.profile, fail_on=args.fail_on,
-                                   verify_data=args.verify_data))
+                                   verify_data=args.verify_data,
+                                   record_refresh=args.record))
     else:
         parser.print_help()
         return 2
 
     if args.json:
+        # stdout 只出 JSON；--record 的落盘与提示一律走 stderr（R2：组合 flag
+        # 必须真实写记录——旧实现的 JSON 分支提前 return 会静默忽略 record）
+        if args.record:
+            _record_results(results, signoffs, stream=sys.stderr)
         print(json.dumps([r.to_dict() for r in results], ensure_ascii=False, indent=2))
         worst = max((r.overall for r in results), default="PASS",
                     key=lambda o: {"PASS": 0, "WARN": 1, "FAIL": 2}.get(o, 0))
         _trace_qc(results)
         return {"PASS": 0, "WARN": 1, "FAIL": 2}.get(worst, 0)
     _trace_qc(results)
-    return _print_summary(results, verbose=args.verbose)
+    rc = _print_summary(results, verbose=args.verbose)
+    if args.record:
+        _record_results(results, signoffs, stream=sys.stdout)
+    return rc
+
+
+def _record_results(results: list[QCResult], signoffs: dict,
+                    *, stream) -> list[Path]:
+    """把本次机器结论 + 分层签认落盘为侧车（默认签认=全 not_executed）。
+
+    机器 FAIL 也照实落盘（record 记录真实结论，不得为刷新记录伪造成 PASS）；
+    旧记录存在时在侧车内记录 supersedes（旧签认不继承）。
+    """
+    written: list[Path] = []
+    for r in results:
+        rp = Path(r.report_path)
+        if not rp.is_file():
+            print(f"⚠️ 跳过记录（文件不存在）: {rp}", file=sys.stderr)
+            continue
+        path, rec = write_qc_record(rp, r, signoffs=signoffs)
+        written.append(path)
+        print(f"QC 记录已落盘: {path}"
+              f"（machine={rec['machine_qc']['overall']}；产物 sha256 已绑定；"
+              "人工/原文/数据签认按 --signoff 记录，未记录=未执行）", file=stream)
+    return written
 
 
 def _trace_qc(results: list[QCResult]) -> None:

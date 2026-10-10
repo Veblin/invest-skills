@@ -34,7 +34,7 @@ def collect_industry_weekly() -> dict[str, Any]:
     from dates import shanghai_today
     from lib.nums import coalesce_field as _safe_col
     from lib.proxy import akshare_direct_session
-    from lib.store import _conn, _safe_close, init_db
+    from lib.store import close_connection, init_db, open_connection
 
     today = shanghai_today()
     result: dict[str, Any] = {
@@ -58,7 +58,7 @@ def collect_industry_weekly() -> dict[str, Any]:
         return result
 
     init_db()
-    c = _conn()
+    c = open_connection()
     saved = 0
     src_date: str | None = None
     try:
@@ -99,7 +99,7 @@ def collect_industry_weekly() -> dict[str, Any]:
         result["error"] = f"db write failed: {exc}"
         logger.warning(result["error"])
     finally:
-        _safe_close(c)
+        close_connection(c)
 
     return result
 
@@ -162,9 +162,9 @@ def weekly_unchanged_vs_previous(date: str) -> bool | None:
     import sqlite3
 
     from freshness import maps_equal
-    from lib.store import _conn, _safe_close
+    from lib.store import close_connection, open_connection
 
-    c = _conn()
+    c = open_connection()
     try:
         rows = c.execute(
             "SELECT DISTINCT date FROM industry_weekly ORDER BY date DESC LIMIT 2"
@@ -184,7 +184,7 @@ def weekly_unchanged_vs_previous(date: str) -> bool | None:
     except sqlite3.OperationalError:
         return None
     finally:
-        _safe_close(c)
+        close_connection(c)
     cmap = {r["index_code"]: (r["pe"], r["pb"], r["chg_pct"], r["turnover_pct"]) for r in cur}
     omap = {r["index_code"]: (r["pe"], r["pb"], r["chg_pct"], r["turnover_pct"]) for r in old}
     if not cmap or not omap:
@@ -227,9 +227,9 @@ def list_industry_snapshot() -> list[dict[str, Any]]:
     """返回所有 28 个申万一级行业的最新 PE/PB/涨跌幅快照（按 PE 降序）。"""
     import sqlite3
 
-    from lib.store import _conn, _safe_close
+    from lib.store import close_connection, open_connection
 
-    c = _conn()
+    c = open_connection()
     try:
         rows = c.execute("""
             SELECT i.* FROM industry_weekly i
@@ -242,6 +242,6 @@ def list_industry_snapshot() -> list[dict[str, Any]]:
     except sqlite3.OperationalError:
         return []
     finally:
-        _safe_close(c)
+        close_connection(c)
 
     return [dict(r) for r in rows]

@@ -58,7 +58,7 @@ def isolated_store(tmp_path: Path) -> Iterator[Any]:
 
 
 def _insert_snapshots(store_mod, rows):
-    c = store_mod._conn()
+    c = store_mod.open_connection()
     try:
         c.executemany(
             "INSERT INTO etf_share_snapshots (date, symbol, shares, price, aum) "
@@ -67,7 +67,7 @@ def _insert_snapshots(store_mod, rows):
         )
         c.commit()
     finally:
-        store_mod._safe_close(c)
+        store_mod.close_connection(c)
 
 
 def test_share_flow_returns_lag_note_with_t1_semantics(isolated_store):
@@ -97,6 +97,10 @@ def test_share_flow_returns_lag_note_with_t1_semantics(isolated_store):
         "date 为采集日墙钟日期；shares/price/aum 为采集时 akshare 最新披露值，"
         "份额披露存在 T+1 延迟，实际对应交易日未知"
     )
+    # v0.3.2 B02-1：正名键 + 口径注记（代理语义、价格涨≠净流入）
+    assert out["share_price_mv_est_current"] == out["aum_current"] == 202.95
+    assert "非官方资产净值" in out["caliber_note"]
+    assert "价格涨跌 ≠ 资金净流入" in out["caliber_note"]
 
 
 def test_share_flow_empty_history_keeps_note_only(isolated_store):

@@ -153,7 +153,7 @@ _ROWS_SAME = [
 
 
 def _insert_sf(store_mod, date: str, rows) -> None:
-    with store_mod._connection() as c:
+    with store_mod.connection() as c:
         c.executemany(
             "INSERT OR REPLACE INTO sector_flow_snapshots "
             "(date, industry, window_days, net_flow) VALUES (?, ?, ?, ?)",
@@ -214,7 +214,7 @@ def test_values_equal_nulls_equal_opt_in():
 # ── T7-3：weekly 全同 + 源日期滞后 ───────────────────────────────────────
 
 def _ensure_weekly_table(store_mod) -> None:
-    with store_mod._connection() as c:
+    with store_mod.connection() as c:
         c.execute(
             "CREATE TABLE IF NOT EXISTS industry_weekly ("
             "index_code TEXT, index_name TEXT, date TEXT, pe REAL, "
@@ -229,7 +229,7 @@ def _ensure_weekly_table(store_mod) -> None:
 
 
 def _insert_weekly(store_mod, rows) -> None:
-    with store_mod._connection() as c:
+    with store_mod.connection() as c:
         c.executemany(
             "INSERT OR REPLACE INTO industry_weekly "
             "(index_code, index_name, date, src_date, pe, pb, chg_pct, turnover_pct) "

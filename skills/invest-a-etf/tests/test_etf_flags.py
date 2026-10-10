@@ -17,7 +17,7 @@ from etf_data import (
 
 def _base(**overrides) -> dict:
     r: dict = {
-        "aum": 10.0,
+        "share_price_mv_est": {"value_yi": 10.0},
         "premium_discount": 0.0,
         "hedge_coverage": {"coverage": "high"},
     }
@@ -69,14 +69,27 @@ class TestAutoFlagsPremiumDiscount:
 
 class TestAutoFlagsAumAndHedge:
     def test_aum_below_2(self):
-        r = _base(aum=1.5)
+        """v0.3.2 B02-1：规模阈值读 share_price_mv_est 代理；文案不得据代理
+        断言清盘事实（「筛查位 + 代理口径 + 须核定期报告」）。"""
+        r = _base(share_price_mv_est={"value_yi": 1.5})
         _auto_flags(r)
-        assert any("AUM" in f for f in r["flags"])
+        assert any("规模代理" in f and "1.50 亿" in f for f in r["flags"])
+        assert any("非官方资产净值" in f and "筛查位" in f for f in r["flags"])
+        assert not any("AUM" in f for f in r["flags"])  # 旧误导名不得再出现
+
+    def test_aum_legacy_alias_still_triggers(self):
+        """兼容一版：旧 payload 只有 aum 时仍按代理口径触发（回退读）。"""
+        r = _base(share_price_mv_est=None, aum=1.5)
+        _auto_flags(r)
+        assert any("规模代理" in f for f in r["flags"])
 
     def test_coverage_none(self):
         r = _base(hedge_coverage={"coverage": "none"})
         _auto_flags(r)
-        assert any("无可用" in f for f in r["flags"])
+        # R2：静态表未收录 ≠ 品种不存在（不得写「无可用工具」）
+        assert any("静态表未收录" in f for f in r["flags"])
+        assert any("不表示不存在" in f for f in r["flags"])
+        assert not any("无可用" in f for f in r["flags"])
 
     def test_coverage_low(self):
         r = _base(hedge_coverage={"coverage": "low"})

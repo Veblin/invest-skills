@@ -28,6 +28,7 @@ from _invest_path import (  # noqa: E402
 ensure_invest_a_scripts_on_path()
 ensure_skills_lib_on_path()
 
+from snapshot_core import default_serializer  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from etf_md import MarkdownSubsetError, render_markdown  # noqa: E402
 
@@ -74,6 +75,18 @@ def _pos_var(v, neutral: str = "var(--tx)") -> str:
 
 def _esc(v) -> str:
     return _html_mod.escape("" if v is None else str(v), quote=True)
+
+
+def _scale_value(profile: dict) -> tuple[float | None, str]:
+    """规模字段：`share_price_mv_est.value_yi`（B02 代理口径，正名）优先；
+    仅旧 payload 缺该块时回退 `aum`（兼容一版，来源标注注明代理语义）。"""
+    est = profile.get("share_price_mv_est")
+    if isinstance(est, dict) and est.get("value_yi") is not None:
+        return safe_float(est["value_yi"]), "profile.share_price_mv_est.value_yi"
+    aum = profile.get("aum")
+    if aum is not None:
+        return safe_float(aum), "profile.aum（旧键＝份额×交易价代理）"
+    return None, ""
 
 
 def _badge(text: str | None, cls: str = "b-ok") -> str:
@@ -409,7 +422,7 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
     cat = profile.get("category") or {}
     vg = profile.get("valuation_guide") or {}
 
-    aum = profile.get("aum")
+    aum, aum_src = _scale_value(profile)
     pd = profile.get("premium_discount")
     pe = profile.get("index_pe")
     pe_pct = profile.get("index_pe_pct")
@@ -442,7 +455,8 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
 
     tiles = [
         _kpi_card("最新价", price_str, "quote.price", price_color),
-        _kpi_card("AUM（亿元）", _fmt(aum) if aum is not None else "—", "profile.aum"),
+        _kpi_card("规模代理（亿元）", _fmt(aum) if aum is not None else "—",
+                  aum_src or "份额×交易价估算，非官方资产净值"),
         _kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—",
                   "profile.premium_discount", _pos_var(pd)),
         _kpi_card("指数 PE", (_fmt(pe) if pe is not None else "—") + ("x" if pe is not None else ""), pe_sub),
@@ -543,7 +557,7 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
     chg_str = _fmt_signed(chg) + "%" if chg is not None else "—"
     chg_color = "var(--fall)" if (chg is not None and chg < 0) else ("var(--rise)" if (chg is not None and chg > 0) else "var(--tx-m)")
 
-    aum = profile.get("aum")
+    aum, aum_src = _scale_value(profile)
     pd = profile.get("premium_discount")
     vol_ann = kline.get("volatility_annualized")
     derived = kline.get("derived") or {}
@@ -583,7 +597,8 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
   <div class="sh"><span class="st">产品快照</span><div class="sd"></div><span class="ss">{_esc(profile.get("category", {}).get("label", "") or "")}</span></div>
   <div class="g4">
     {_kpi_card("最新价", price_str, f"较昨收 {chg_str}", price_color)}
-    {_kpi_card("AUM（亿元）", _fmt(aum) if aum is not None else "—", "profile.aum")}
+    {_kpi_card("规模代理（亿元）", _fmt(aum) if aum is not None else "—",
+               aum_src or "份额×交易价估算，非官方资产净值")}
     {_kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—", "profile.premium_discount", _pos_var(pd))}
     {_kpi_card("成交额（元）", _fmt_grouped(quote.get("amount")), "quote.amount")}
   </div>
@@ -673,6 +688,8 @@ def index_pe_note_short(profile: dict) -> str:
 
     此前恒返回「PE(1) 股本加权口径」：当最新行「市盈率1」为 NaN、引擎静默回落到
     「市盈率2」时，徽章与数值口径不符（误标）。口径未知时不再臆断为 PE(1)。
+    R3：口径文案按 AKShare 官方字段定义（市盈率1=（总股本）P/E1；
+    市盈率2=（计算用股本）P/E2），不再写作「流通加权」。
     """
     if profile.get("index_pe") is None:
         return "指数 PE 不可得"
@@ -681,9 +698,9 @@ def index_pe_note_short(profile: dict) -> str:
 
     caliber = profile.get("index_pe_caliber")
     if caliber == _PE_CALIBER_CIRCULATING:
-        return "PE(2) 流通加权口径"
+        return "PE(2) 计算用股本口径"
     if caliber == _PE_CALIBER_SHARE:
-        return "PE(1) 股本加权口径"
+        return "PE(1) 总股本口径"
     return "PE 加权口径未标注"
 
 
@@ -718,8 +735,10 @@ def _section_holdings(holdings: dict) -> str:
         for ms in member_notes if ms
     )
 
+    scope = holdings.get("holding_scope") or "基金披露前十大（季度报告期，非完整持仓）"
     return f'''<section id="holdings">
   <div class="sh"><span class="st">持仓透视</span><div class="sd"></div><span class="ss">{_esc(holdings.get("report_date", ""))}（{_esc(holdings.get("quarter", ""))}）</span></div>
+  {_vnote(f"披露范围：{scope}；集中度分母=占基金资产净值，仅覆盖已披露范围，缺口不按 0、不重归一化。")}
   <div class="g3">
     {_kpi_card("top1", _fmt(top1) + "%" if top1 is not None else "—", "holdings.top1_pct")}
     {_kpi_card("top5 合计", _fmt(top5) + "%" if top5 is not None else "—", "holdings.top5_sum_pct")}
@@ -747,6 +766,24 @@ def _section_quality(kline: dict, profile: dict, history: dict | None = None) ->
     tracking_note = profile.get("tracking_error_note") or kline.get("_error")
     adj = kline.get("adj_applied")
     adj_note = kline.get("adj_note")
+    tr = profile.get("tracking") or {}
+    if tr.get("status") == "available":
+        track_value = (f"TD {_fmt_signed(tr.get('td_pct'))}% / "
+                       f"TE {_fmt(tr.get('te_pct_annualized'))}%")
+        track_note = f"确认性指标（同收益类型）· n={tr.get('sample_n')} · 年化系数 {tr.get('annualization_factor')}"
+    elif tr:
+        dev = tr.get("price_benchmark_deviation") or {}
+        track_value = "不可得（停止确认性 TD/TE）"
+        track_note = str(tr.get("note") or "")
+        if dev:
+            # R3：TD=窗口首末有效端点累计差；TE=抽样区间日偏离波动（覆盖度不同名）
+            track_note += (f"；价格基准偏离（研究数值，非确认指标）: "
+                           f"TD {_fmt_signed(dev.get('td_pct'))}%（窗口端点累计） / "
+                           f"TE {_fmt(dev.get('te_pct_annualized'))}%"
+                           f"（抽样区间 n={dev.get('sample_n')}）")
+    else:
+        track_value = "—"
+        track_note = "引擎未实现；不得填写估算数字"
     # 渲染修正（2026-09-07 review）：navChart 实际绘制 report.history.history.rows
     # （全年），非 kline.nav_rows（指标计算窗口 ~73 日）——标题行数须与绘制
     # 数据同源，否则「近 73 日」误导为数据只有 3.5 个月
@@ -766,7 +803,7 @@ def _section_quality(kline: dict, profile: dict, history: dict | None = None) ->
                  ("已复权" if adj else "未复权") if adj is not None else "—",
                  str(adj_note or ""))}
       {_kpi_card("年化波动（%）", _fmt(kline.get("volatility_annualized")), "kline.volatility_annualized")}
-      {_kpi_card("跟踪误差", "—" if profile.get("tracking_error") is None else _fmt(profile.get("tracking_error"), 2), "引擎未实现；不得填写估算数字")}
+      {_kpi_card("跟踪质量（TD/TE）", track_value, _esc(track_note))}
     </div>
     {_vnote(tracking_note) if tracking_note else ""}
   </div>
@@ -922,7 +959,7 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
   <div class="card" style="margin-top:var(--space-4)">
     <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">份额资金流与收盘价（近 20 日 · Tushare fund_share）</div>
     <div class="cw"><canvas id="shareFlowChart"></canvas></div>
-    {'<div class="vnote">近 20 日份额流 + 收盘价；T+1 延迟，最新 1-2 日字段可能为空。</div>' if shares_avail else ''}
+    {'<div class="vnote">近 20 日份额流 + 收盘价；T+1 延迟，最新 1-2 日字段可能为空。' + _esc(share_history.get('caliber_note') or '') + '</div>' if shares_avail else ''}
   </div>
   {peers_block}
 </section>'''
@@ -1104,7 +1141,7 @@ window.addEventListener('load',renderCharts);
 
 def _build_data_js(payload: dict) -> str:
     """报告 JSON 注入（</ 转义防 script 截断；数据行与逻辑分离）。"""
-    payload_json = (json.dumps(payload, ensure_ascii=False, default=str)
+    payload_json = (json.dumps(payload, ensure_ascii=False, default=default_serializer)
                      .replace("</", "<\\/")
                      .replace("\u2028", "\\u2028")
                      .replace("\u2029", "\\u2029"))  # 全量审查 P2：U+2028/29 截断脚本
@@ -1117,7 +1154,8 @@ def _build_data_js(payload: dict) -> str:
 # ── 主入口 ──
 
 
-def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> str:
+def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None,
+                    generation: dict | None = None) -> str:
     """生成 invest-a-etf HTML 报告（仪表盘 + md 全文原样嵌入）。
 
     Args:
@@ -1125,6 +1163,9 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
             playbook + 可选 holdings/peers/sector_flow 合并键）。
         md_text: 三层复检后的 md 研究备忘全文（原样嵌入；不支持语法 raise
             MarkdownSubsetError——由调用方决定退出码）。
+        generation: 同代输入元信息（B05）：`{same_generation, payload_hash,
+            frozen_at, generated_at}`（CLI 只读冻结 payload 时必有）。缺省时
+            不渲染代际行（渲染器单元测试/离线重放路径）。
     """
     profile = payload.get("profile") or {}
     quote = payload.get("quote") or {}
@@ -1154,6 +1195,17 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
     risk_banner = _html_risk_banner()
     disclaimer = _html_disclaimer()
 
+    gen_hash = str((generation or {}).get("payload_hash") or "")
+    gen_meta_tag = (f'<meta name="invest-generation" content="{_esc(gen_hash)}">'
+                    if gen_hash else "")
+    gen_line = ""
+    if generation:
+        from etf_generation import render_generation_line  # noqa: PLC0415
+
+        gen_line = (f'<div class="card" style="margin-top:var(--space-3)">'
+                    f'<div style="font-size:var(--text-xs);color:var(--tx-m)">'
+                    f'{_esc(render_generation_line(generation))}</div></div>')
+
     sections = [
         _section_overview(profile, quote, kline),
         _section_valuation(profile),
@@ -1176,6 +1228,7 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+{gen_meta_tag}
 <title>{_esc(f"{symbol} {name}")} — invest:a-etf 研究报告</title>
 <style>
 {_HTML_CSS}
@@ -1188,6 +1241,7 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
 <main class="main">
 {risk_banner}
 {hero_html}
+{gen_line}
 {sections[0]}
 {sections[1]}
 {sections[2]}

@@ -122,6 +122,27 @@ class TestPersistIndexPe:
         assert result["ok_envelopes"] == 0  # 空结果显式化（D5）
         assert index_pe_snapshot.get_index_pe_history("000300") == []
 
+    def test_persist_request_count_bound_to_given_codes(self, isolated_store, monkeypatch):
+        """R2：请求计数=给定代码数（单只报告=1 次信封请求；缺源不追加重复调用）。"""
+        import index_pe_snapshot
+
+        calls: list = []
+
+        def fake(code):
+            calls.append(code)
+            return {"status": "ok", "index_pe": 15.0, "rows": _envelope_rows(1)}
+
+        monkeypatch.setattr(index_pe_snapshot, "_bridge_envelope", fake)
+        result = index_pe_snapshot.persist_index_pe_from_cache(["000300"])
+        assert calls == ["000300"] and result["index_codes"] == 1
+        assert result["rows_saved"] == 1
+        # 缺源（missing 信封）同样只请求一次、不重试、不追加其它指数
+        calls.clear()
+        monkeypatch.setattr(index_pe_snapshot, "_bridge_envelope",
+                            lambda code: (calls.append(code) or {"status": "missing"}))
+        result = index_pe_snapshot.persist_index_pe_from_cache(["000300"])
+        assert calls == ["000300"] and result["rows_saved"] == 0
+
     def test_persist_defaults_all_csindex_codes(self, isolated_store, monkeypatch):
         import index_pe_snapshot
 
@@ -249,6 +270,63 @@ class TestEtfDataIntegration:
             index_pe_snapshot.index_pe_percentile(hist, 30.0)
 
 
+class TestReportPersistScope:
+    """R2：单只 report 只回填本报告所需指数；全量回填仅保留在 collect-weekly。
+
+    负责人-单ETF副作用.py 现场：`_collect_report_payload` 调
+    `_persist_index_pe(None)`（=CSINDEX_MAP 全部指数），与已批准设计
+    『单只 report 只请求该报告所需指数』冲突。
+    """
+
+    @staticmethod
+    def _load_etf_module():
+        name = "etf_cli_persist_scope"
+        sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location(name, _ETF_PY)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _stub_payload_providers(self, mod, monkeypatch) -> list:
+        calls: list = []
+
+        def spy(indices):
+            calls.append(indices)
+            return {"error": None}
+
+        monkeypatch.setattr(mod, "prefetch_etf_spot", lambda: True)
+        monkeypatch.setattr(mod, "_persist_index_pe", spy)
+        for name in ("query_etf_data", "query_etf_quote", "query_etf_kline",
+                     "query_etf_share_history", "compute_etf_tracking",
+                     "query_etf_fees", "query_etf_est_net_assets"):
+            monkeypatch.setattr(mod, name, lambda *a, **kw: {})
+        monkeypatch.setattr(mod, "_build_events_block", lambda *a, **kw: {})
+        monkeypatch.setattr(mod, "build_data_status", lambda **kw: {})
+        return calls
+
+    @pytest.mark.parametrize("symbol,expected", [
+        ("510300", ["000300"]),
+        ("515050", ["931079"]),
+        # R12：510880 身份登记标的=上证红利指数 000015（2026-10-09 实测 csindex
+        # PE 文件可得）→ 已登记 PE 映射，只回填自身指数
+        ("510880", ["000015"]),
+    ])
+    def test_single_report_persists_only_own_index(self, monkeypatch, symbol, expected):
+        mod = self._load_etf_module()
+        calls = self._stub_payload_providers(mod, monkeypatch)
+        mod._collect_report_payload(symbol, with_nav=True)
+        assert calls == [expected], f"{symbol} 只应回填 {expected}，实际 {calls}"
+
+    def test_single_report_without_index_mapping_does_not_backfill(self, monkeypatch):
+        """CSINDEX_MAP 无该标的（512660 军工，无指数代码登记）→ 不发起任何
+        指数回填（不猜全量、也不猜指数代码）。"""
+        mod = self._load_etf_module()
+        calls = self._stub_payload_providers(mod, monkeypatch)
+        mod._collect_report_payload("512660", with_nav=True)
+        assert calls == []
+
+
 class TestCollectWeeklyTrigger:
     def test_collect_weekly_invokes_index_pe_persist(self, monkeypatch):
         """cmd_collect_weekly 顺带全量写 index_pe_history。"""
@@ -262,6 +340,7 @@ class TestCollectWeeklyTrigger:
 
         def fake_persist(*a, **k):
             calls["called"] = True
+            calls["args"] = a
             return {"index_codes": 9, "rows_saved": 31, "error": None}
 
         monkeypatch.setattr(industry_snapshot, "collect_industry_weekly", fake_collect)
@@ -270,6 +349,8 @@ class TestCollectWeeklyTrigger:
         mod = _load_etf_module()
         assert mod.cmd_collect_weekly() == 0
         assert calls.get("called") is True
+        # R2：批量维护入口保留全量回填（None = CSINDEX_MAP 全部）
+        assert calls.get("args") == (None,)
 
     def test_collect_weekly_empty_envelope_warns(self, monkeypatch, capsys):
         """review #8：0 行可写（无 ok 信封）→ 警告文案而非成功式打印。"""
