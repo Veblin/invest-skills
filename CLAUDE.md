@@ -54,7 +54,7 @@ notice-body  # 取公告正文（art_code 或详情页 url；原文不改写 + �
 | 分析标记（[事实]/[分析] + SOP-EV 四维） | report-conventions.md §5 |
 | 多情景参考与交易结构分析 | report-conventions.md §6 |
 | 宏观情景（指标清单 + 两段式输出合同） | report-conventions.md §9.1 |
-| 估值分位使用规则（含亏损期判据口径） | report-conventions.md §9.2 |
+| 估值分位使用规则（含非正 PE/缺失判据口径） | report-conventions.md §9.2 |
 | 开发规范 D1–D14（`/code-review` 审查标准） | [development-rules.md](skills/lib/references/development-rules.md) |
 | 开发执行、角色交接与目标验收 | [development-workflow.md](docs/development-workflow.md)（开发流程，非报告运行时规则） |
 | 源策略原则、代理与 stderr 过滤 | [data-interface-map.md §G](skills/lib/references/data-interface-map.md) |

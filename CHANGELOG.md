@@ -1,5 +1,44 @@
 # Changelog — invest skills
 
+## Unreleased 0.3.2（开发中，未发布）
+
+> 本节记录 v0.3.2 已落地的实现与规则；**canonical 版本仍为 0.3.1**（发布准备阶段才 bump）。实现、自检与独立复检分别记录——本节不构成版本验收。
+
+### ETF 研究流程（B 主线：身份 / 实现效率 / 交易摩擦 / 暴露匹配）
+
+- **身份三轴与原文核验**：`identity.axes`（资产/通道/策略）+ `applicability` + 原文证据（URL/sha256/物理页码与文内页码分列/读取时间）；510880 bond→factor、515050 sector→thematic 按原文纠正；未核身份（静态映射/名称推断）不得触发资产不适用项。
+- **规模口径改名**：`share_price_mv_est`（份额×交易价**估算**）替代旧「AUM」语义，`aum` 仅作一版兼容别名；`est_net_assets` 仅份额日与单位净值**同日**才给估算值（否则 `mismatch` 不给数）；份额变化≠净流入。
+- **跟踪质量合同**：确认性 TD/TE 仅两腿同收益类型/币种/频率时成立；默认基准为价格指数 → `status=limited`、`td_pct/te_pct_annualized=None`，价格基准偏离单列 `price_benchmark_deviation`（`research_only/not_confirmatory`）并随 payload 冻结**真正使用的两腿序列底稿**（`tracking.input_evidence`，原始序列变化即改变封存哈希）。两腿按日期合同对齐（ISO/compact 归一、排序去重、冲突值弃用；**已知日期并集脊上只取相邻日且两端两腿有效**的区间——缺值处整段剔除、不桥接跨交易日收益，底稿 `intervals` 冻结实际区间）；**偏离两口径分开（R3）**：TD=**窗口首末有效端点的两腿累计收益差**（缺值区间的价格变动不因剔除消失；有效区间样本复利**不是**窗口累计偏离——缺端点即拒绝计算）、TE=抽样区间日偏离波动（覆盖度随底稿 `sampled_coverage` 披露），复算 TD 用 `window_endpoints`、TE 按 `intervals` 逐对取值；纯函数拒绝不等长截短配对；基准指数在 CSINDEX_MAP（PE 映射）缺失时回退已核身份 `tracked_index.code`，取数失败透明记 missing；`etf-generation` 层的否定豁免按**同分句 + 同命题对象贴附**判定（R3：否证必须贴附本族对象——「身份/跟踪/折溢价/缺失权重/拼当期组合」；其他维度的缺口/待核不构成豁免，如「身份已核验且宏观背景待核」「跟踪误差为0.20%而盘口有缺口」必须拦截；五族正反例见 `skills/lib/tests/test_b06_qc_record.py::TestR3SameObjectNegation`）。
+- **交易摩擦**：`premium_discount_caliber`（净值时点未知，不得据隔夜 NAV 确认错价）；`bid_ask_spread=not_available`（本次未取得/未接入可验证盘口数据——项目未接线≠无该数据源）；对冲覆盖静态映射与核验状态分列（588000 期货上线主张未核）。
+- **暴露与证据预算**：基金披露持仓 / 指数样本权重 / PCF 三者分列；错月成分与权重只分别陈述；`build_evidence_budget` 两参数必填（试验参数，无默认）；`data_status` 五态 + **producer 实际调用留痕**（`attempted_sources` 只记真实发起；`source_trace` 区分 L2 缓存读取/本次网络与失败理由；**未发起**的腿进 `skipped_sources`，无 token 跳过不冒充尝试）——不再由静态源表猜测尝试。
+- **同指数产品实现质量比较（B02，R3）**：新增 `same_index_quality_comparison`（`etf.py peers --same-index … --index-code … --evidence-json …`，既有子命令扩展、非新一级入口）——同指数/币种/期间/收益口径**先核验**（身份与费率只出自本次读取的官方产品材料 URL+sha256+原文定位；未读材料 → 该行 `not_comparable`，不推定），同窗取交集日期、统一复权净值收益口径，输出**不排名**（`ranking=None`）并附「差异受多因素影响、费率已在净值中体现不重复扣减」；不同指数产品不参与同指数结论。
+- **持仓定向证据表（B04，R3 实采路径）**：`build_evidence_budget` 支持传入**本次实读证据**（`evidence`）与已封存持仓（`holdings`，重放不二次联网），回填 `HOLDINGS_EVIDENCE_FIELDS`（八列，含来源三件套 URL/sha256/locator）；来源不齐整行标 `invalid_evidence`、未取证行保持 `not_collected`（未执行 ≠ 完成）；预算参数仍为**必填试验参数**，`stop_reason` 如实记录（目标/上限/披露耗尽）。
+- **同代封存与只读渲染**：`report --json --payload-out` 冻结 payload，`html --payload` 只读渲染（零网络零 DB 写；缺/损坏/错 symbol/哈希不符/ts 不对应一律 rc 2，重采回退路径退出）；新增 `--index-exposure` 使 Fit 引用的指数样本/权重进入同代封存。
+- **QC 记录侧车（产物哈希绑定）**：`report_qc.py <md> --fail-on error --record [--signoff 层=状态[:备注]]` 落盘 `<ts>.qc.json`，绑定 md/html/payload/decision 的**实际 sha256** + 机器结论 + 数据/原文/人工三层签认（默认 `not_executed`）；任一产物变更 → 旧记录 `stale`、旧签认失效（重验入口=重跑 `--record`）；`--record` 与 `--json` 组合也真实落盘（stdout 纯 JSON、记录日志走 stderr）；陈旧产物**一次重跑**即完成重核验（旧签认不继承，`supersedes` 记录被替代状态；刷新记录不绕过内容/封存/HTML 检查）；记录不含自身哈希（避免自引用环）。
+- **ETF 域 QC 层**：新增 `etf-generation` 层（离线）消费同代 payload/产物哈希/QC 记录，并拦截可判定反例——无同口径基准时的「跟踪误差」数字断言、折溢价错价断言、缺权重按 0、错月拼「当期完整组合」、身份未核称已核；断言扫描覆盖表格行（修复正文口径漏检）。`--verify-data` 的 `network_used` 只反映实际发起的联网层。
+- **报告阅读面（模板 + SKILL）**：前部新增「核心发现（事实→方法→限定结论）/ 五问速览 / 核验状态与阅读提示（同代、QC 记录、未完善项、冲突与现价-逻辑背离的候选与竞争解释、观察日历、未知清单）」；宏观背景如适用按国内/海外分栏；正文保留完整底稿；禁用「已计价/只能」类无证据市场认知推断；`review` 的同代核查逐代展示产物哈希与 QC 记录状态（`paired` 只表示输入配对）。
+- **费率原文定位与现行性语义（R3 恢复原义）**：物理 PDF 页码与文内页码分列（510300/515050/510880 逐条更新）；**`current_rate_verified` 只有一个含义=报告日现行费率已核**——无「截至报告日的更新核查」一律 False（历史披露值/合同文件版本已读/年报实际计费口径三种未核形态由 `evidence_type`+`note` 区分），不保留 `currency_verified` 等并行现行性布尔（currency 通常表示币种）；版本与读取范围用 `source.version`/`as_of`/`locator`/`verified_at` 披露，呈现写「<as_of> 版本费率已读；报告日现行费率未核」。
+- **单报告指数回填范围**：report 只回填**本标的**指数（旧行为顺带请求/写入 CSINDEX_MAP 全部指数）；全量回填保留在既有批量入口 `collect-weekly`。
+- ⚠️ **未验证/未完成（如实声明，R3）**：三轮整体复核与结项签认由主脑/用户另行执行（本版不宣布通过）；WorkBuddy / 无 Python MCP 真机、用户阅读验收未执行；全仓测试由主脑执行（实施端只跑受影响定点与包闭包自检）；ETF 跟踪质量在无总收益基准前只有研究数值；**同指数比较仅在 510300 案例实采**（515050 候选产品材料未读=明确缺口、510880 未取得同指数产品材料）；**持仓定向证据仅两案例各 1 行实读原文**（其余行如实 `not_collected`）；S04 未启用、C11 不实现；canonical 版本仍 0.3.1；开发改动分批提交，未推送或发布。
+
+**开发验证补记（2026-10-10）**：Codex 与本机 Claude Code 两轮独立审查、修复与验证完成，最终修复版本经独立复检；本机无凭据全仓 5,155 通过 / 12 跳过。提交完整性检查修正 stock/ETF/pulse 的共享规范源码相对链接；第二批累计隔离检出无凭据全仓 5,153 通过 / 14 跳过（另两项依赖 gitignored 本机材料），8 个分发包实际构建、文件预算与指令引用检查通过，版本仍 0.3.1。以上是开发验证，历史导入与规则边界观察保留；真实联网、跨 harness / 无 Python MCP、用户阅读及版本主目标验收仍未完成，不构成发布签认。
+
+### 公共访问层与方法语义（A 主线）
+
+- **共享 owner 迁移**：`env` / `proxy` / `tushare_client` / `market_microstructure` / `trade_cal` 迁至 `skills/lib` canonical，原位置保留**身份保持 shim**（`import lib.env` 与 `import env` 同一模块对象，monkeypatch/单实例兼容）。
+- **ETF canonical 运行单实例**：`load_invest_a_etf_module` 按文件识别已加载模块并注册兼容名——CLI 裸 `import etf_data`、分包 `lib.etf_data`、journal shim 与 data_bridge 拿到同一模块对象（同一 `_SPOT_CACHE_LOCK`/进程内缓存）；加载失败清理固定名与兼容名；分包生成版 loader 同契约（导入正反顺序、失败清理均有反例测试）。
+- **公共连接接口**：`open_connection/connection/close_connection` 公开名；ETF 侧 17 处私有连接穿透迁移公开名；研究库与测试隔离契约不变。
+- **pulse 公共入口**：采集命令改 `skills/lib` 公共 API（不再进 journal 私有目录）；涨停双窗口一次取数（10+30 旧 40 次请求 → bundle 30 次，同窗口只拉一次）。
+- **财务语义**：日期先归一后选最新期（混排 ISO/紧凑日期不再选错）；同比函数收敛（`safe_float` 统一 NaN/±Inf→None）；PE 非正/缺失占比分列——PE≤0 只称「非正 PE」、不确证财务亏损（输入只有 PE 值，兼容字段名保留），缺失不与非正合并，MD/HTML/统计/测试同函数同窗口未舍入阈值。
+- **指数 PE 分位伴随中位数**：`index_pe_history_median` / `index_pe_history_n` 随分位一起输出（同窗口/同口径/已剔除当日自投），满足「分位不单独使用」。
+- **指数 PE 口径按官方字段命名（R3）**：`stock_zh_index_value_csindex` 官方文档定义市盈率1=（总股本）P/E1、市盈率2=（计算用股本）P/E2——展示与分位口径不再写作「股本加权/流通加权」；`index_pe_circulating` **保留为兼容 alias**（不改数值、不重算历史），只修消费显示与说明。
+
+### 修复与工程
+
+- **`diagnose` 对冲表一致性 CWD 无关**：此前用布局相对路径读 `references/etf-hedge-map.md`，CWD 非布局根时误报「文档缺失」；改绝对解析（`default_reference`），仓内与分发包在任意 CWD 均 rc 0。
+- **分发包预算**：`test_dry_run_all_packages_within_200` 的 ETF 预算按 v0.3.2 实测闭包 130 更新为 <145（分发硬限制仍 ≤200，`>200 必失败`负例保留）。
+- ⚠️ 以上为实施端自检结论；独立复检与版本验收见版本发布记录。
+
 ## v0.3.1 (未发布)
 
 v0.3.1 按「修补 + 接线 + 清理，不叠架构」推进，逐迭代交付。本节记录已落地部分；全部输出仍仅供个人研究与学习参考，不构成投资建议。
