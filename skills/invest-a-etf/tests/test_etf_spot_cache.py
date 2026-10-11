@@ -104,3 +104,49 @@ def test_spot_served_by_l2_when_l1_cold(mock_session, monkeypatch):
     import data_bridge
 
     assert data_bridge._cache.get("etf_spot", "market") is not None
+
+
+@patch("etf_data.akshare_direct_session")
+def test_spot_failure_negative_cache_suppresses_repeat_fetch(mock_session, monkeypatch):
+    """A7：全表源失败后短时间内不重复回源（同进程多次查询只发起 1 次网络）。
+
+    反例场景：EM 断连时一次 report 会为每只标的重复拉全表（6×5s 无谓等待）。
+    正控：失败标记过期/清缓存后允许再试（源恢复不被永久屏蔽）。
+    """
+    mock_session.return_value.__enter__ = MagicMock(return_value=None)
+    mock_session.return_value.__exit__ = MagicMock(return_value=False)
+
+    call_count = {"n": 0}
+
+    def _boom():
+        call_count["n"] += 1
+        raise RuntimeError("RemoteDisconnected")
+
+    ak = MagicMock()
+    ak.fund_etf_spot_em = _boom
+    monkeypatch.setitem(sys.modules, "akshare", ak)
+
+    # 三次独立进入（不同 symbol 查询路径共用同一全表端点）→ 只 1 次网络
+    from etf_data import _lookup_etf_spot_row, _get_etf_spot_df
+
+    assert _get_etf_spot_df() is None
+    assert _lookup_etf_spot_row("515790")[0] is None
+    assert _get_etf_spot_df() is None
+    assert call_count["n"] == 1
+
+    # 清缓存（测试隔离 API）→ 失败标记同步清除，可再次发起
+    clear_etf_spot_cache()
+    assert _get_etf_spot_df() is None
+    assert call_count["n"] == 2
+
+    # 正控：成功后失败标记清零（后续 L1 命中不再回源）
+    def _ok():
+        call_count["n"] += 1
+        return _fake_spot_df()
+
+    ak.fund_etf_spot_em = _ok
+    clear_etf_spot_cache()
+    assert _get_etf_spot_df() is not None
+    assert call_count["n"] == 3
+    assert _get_etf_spot_df() is not None
+    assert call_count["n"] == 3  # L1 命中

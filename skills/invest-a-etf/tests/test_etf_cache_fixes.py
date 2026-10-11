@@ -345,10 +345,12 @@ def test_share_history_trend_span_counts_missing_share_days(monkeypatch):
     assert "近 7 日转净流出" in s["trend"]
 
 
-def test_share_history_total_change_matches_detail_rows(monkeypatch):
-    """份额总变化与 detail_rows/date_range 同口径：r0（无 prev、被 rows[1:]
-    丢弃）不得计入。修复前 latest-earliest 取自 merged 全量（含 r0→r1 首间隔
-    +200000），days=5 时 6 行→5 行 detail，虚增恰为该首间隔。"""
+def test_share_history_total_change_matches_flow_window(monkeypatch):
+    """A3 根治：份额总变化与 flow 合计**共同起止**（含首日变化段 r0→r1）。
+
+    旧实现 detail_shares[-1] - detail_shares[0]（r0 已被 rows[1:] 丢弃）只覆盖
+    d1~d5，而 total_flow_est 覆盖 d0~d5 —— 同一行里两个数字起点不同（peers
+    _flow_row 复算同病）。现两者都取 flow_window = d0~d5。"""
     n_rows = 6
     base = datetime.date(2026, 7, 1)
     dates = [(base + datetime.timedelta(days=i)).strftime("%Y%m%d")
@@ -375,8 +377,21 @@ def test_share_history_total_change_matches_detail_rows(monkeypatch):
     s = out["summary"]
     assert s["row_count"] == 5                      # 6 行 - r0 = 5 行 detail
     assert out["date_range"] == f"{dates[1]} ~ {dates[-1]}"
-    assert s["share_total_change"] == 40_000.0      # 1_240_000 - 1_200_000
-    # 修复前该值 = 1_240_000 - 1_000_000 = 240_000.0（虚含被丢弃的首间隔）
+    fw = s["flow_window"]
+    assert {k: fw[k] for k in ("start", "end", "segments", "trading_days",
+                               "missing_share_days", "confirmable")} == {
+        "start": dates[0], "end": dates[-1], "segments": 5, "trading_days": 6,
+        "missing_share_days": 0, "confirmable": True,
+    }
+    # R5：起始基期行随封存冻结（原始/调整份额与价格，可独立复算）
+    assert fw["base_row"] == {"date": dates[0], "shares": 1_000_000.0,
+                              "shares_split_adj": 1_000_000.0, "close": 4.0,
+                              "close_split_adj": 4.0}
+    assert fw["end_row"] == {"date": dates[-1], "shares": 1_240_000.0,
+                             "shares_split_adj": 1_240_000.0, "close": 4.0,
+                             "close_split_adj": 4.0}
+    assert s["share_total_change"] == 240_000.0     # 1_240_000 - 1_000_000（同窗，含首日）
+    assert s["share_change_pct"] == 24.0            # 240000/1000000
     # 正/负流日计数聚合（引擎字段——报告层禁止对 rows 目视计数）
     assert s["inflow_days"] == 5                   # 份额单调递增 → 全为流入
     assert s["outflow_days"] == 0

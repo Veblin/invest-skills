@@ -81,6 +81,12 @@ build_data_status = _mod.build_data_status
 # —— 常量/表 ——
 ETF_IDENTITY = _mod.ETF_IDENTITY
 ETF_FEE_SCHEDULE = _mod.ETF_FEE_SCHEDULE
+# A5/A6/R4（2026-10-10）新增登记表：官方基准对比、结构披露、份额拆分登记
+ETF_BENCHMARK_PERFORMANCE = _mod.ETF_BENCHMARK_PERFORMANCE
+ETF_DISCLOSED_STRUCTURE = _mod.ETF_DISCLOSED_STRUCTURE
+ETF_SHARE_SPLITS = _mod.ETF_SHARE_SPLITS
+SPLIT_SUSPECT_RATIO = _mod.SPLIT_SUSPECT_RATIO
+query_etf_disclosed_structure = _mod.query_etf_disclosed_structure
 ETF_TO_SW_INDUSTRY = _mod.ETF_TO_SW_INDUSTRY
 SECTOR_VALUATION_MAP = _mod.SECTOR_VALUATION_MAP
 HOLDINGS_CLUSTER_MAP = _mod.HOLDINGS_CLUSTER_MAP
@@ -103,6 +109,9 @@ baostock_code = _mod.baostock_code
 fetch_etf_kline_baostock = _mod.fetch_etf_kline_baostock
 # —— 私有消费者（模块内互调与测试直接从 etf_data 取用；同上必须显式转发）——
 _bridge_get = _mod._bridge_get
+# A2/A5/A7（2026-10-10）新增：playbook 派生值纯函数（测试）、spot 全表取数（缓存测试）
+_nav_derived_metrics = _mod._nav_derived_metrics
+_get_etf_spot_df = _mod._get_etf_spot_df
 _lookup_etf_spot_row = _mod._lookup_etf_spot_row
 _lookup_hedge = _mod._lookup_hedge
 _q_tencent_etf_quote = _mod._q_tencent_etf_quote
@@ -130,6 +139,10 @@ __all__ = [
     "ETF_HEDGE_MAP",
     "ETF_IDENTITY",
     "ETF_FEE_SCHEDULE",
+    "ETF_BENCHMARK_PERFORMANCE",
+    "ETF_DISCLOSED_STRUCTURE",
+    "ETF_SHARE_SPLITS",
+    "SPLIT_SUSPECT_RATIO",
     "ETF_TO_SW_INDUSTRY",
     "SECTOR_VALUATION_MAP",
     "HOLDINGS_CLUSTER_MAP",
@@ -142,6 +155,7 @@ __all__ = [
     "etf_share_flow",
     "prefetch_etf_spot",
     "query_etf_data",
+    "query_etf_disclosed_structure",
     "query_etf_kline",
     "query_etf_kline_history",
     "query_etf_quote",

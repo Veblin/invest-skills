@@ -3282,7 +3282,7 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
             print(f"⚠️ {symbol}: {note}（运行 etf-flow {symbol} --save 积累首条记录）")
             return 1
 
-        print(f"\n📊 {symbol} ETF 份额变化趋势（近 {hc} 个交易日）\n")
+        print(f"\n📊 {symbol} ETF 份额变化趋势（近 {hc} 条采集快照）\n")
         print(f"  最新份额: {flow['shares_current']:.0f} 份")
         print(f"  最新 AUM: {flow['aum_current']} 亿")
         print()
@@ -3291,9 +3291,14 @@ def cmd_etf_flow(args: argparse.Namespace) -> int:
         for w, label in [(5, "5 日"), (20, "20 日"), (60, "60 日")]:
             sc = flow.get(f"share_change_{w}d")
             fe = flow.get(f"flow_est_{w}d")
-            sc_str = f"{sc:+.0f}" if sc is not None else "待积累"
-            fe_str = f"{fe:+.2f} 亿" if fe is not None else "待积累"
+            status = (flow.get("window_status") or {}).get(f"{w}d") or {}
+            blocked = status.get("confirmable") is False and bool(status.get("start"))
+            placeholder = "不可确认" if blocked else "待积累"
+            sc_str = f"{sc:+.0f}" if sc is not None else placeholder
+            fe_str = f"{fe:+.2f} 亿" if fe is not None else placeholder
             print(f"  {label:<8} {sc_str:>14}  {fe_str:>14}")
+            if blocked:
+                print(f"    ⚠️ {status.get('note', '窗口变化及流量不可确认')}")
 
         lag_note = flow.get("lag_note")
         if lag_note:

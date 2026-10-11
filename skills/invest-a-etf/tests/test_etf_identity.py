@@ -279,7 +279,7 @@ class TestAudit20261009IndexResolution:
             res = resolve_tracked_index("999999", identity={"tracked_index": None,
                                                             "verification": {}})
         assert res == {"code": None, "source": None, "pe_mapped": False,
-                       "identity_status": None}
+                       "identity_status": None, "currency": None}
 
     def test_query_etf_data_records_index_code_source(self):
         """反例：PE 未映射且身份无代码 → 状态 not_mapped 且措辞不推断产品身份。"""

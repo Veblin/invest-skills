@@ -555,3 +555,132 @@ class TestAudit20261009UnknownSourceWording:
         assert "旧 payload" not in dims["quote"]["note"]
         assert "source 为空或缺失" in dims["premium_discount"]["note"]
         assert "旧 payload" not in dims["premium_discount"]["note"]
+
+
+class TestR10UnknownIdentityEvidenceKeep:
+    """R10（2026-10-11 复查）：身份未核时 `stock_holdings_penetration=False`
+    只是默认值（非确定非股票）。
+
+    现场：159796 封存 payload 的 holdings 实采成功（status=ok、10 行、
+    来源天天基金 jjcc、报告期 2026-06-30），但 data_status.dimensions.holdings
+    被写成 `{status: unknown, attempted_sources: [], note: 身份未核：适用性未知}`
+    ——报告据此误称「未请求」。修正：实采证据照实登记（availability/attempts/
+    date 保留），适用性仍不确认（applicable 保持 False + note 声明）；
+    未请求仍是 unknown（身份未核）/ not_applicable（已知非股票）；已知非股票
+    的资产闸门不因提交记录放宽。index_exposure 同分支同款处理。
+    """
+
+    @staticmethod
+    def _unknown(**over) -> dict:
+        ident = {
+            "axes": {"asset_type": "unknown", "channel": "unknown",
+                     "strategy": "unknown"},
+            "verification": {"status": "unknown", "verified_at": None},
+            "evidence": [],
+            "applicability": {
+                "index_pe": False, "stock_pe_drilldown": False,
+                "stock_holdings_penetration": False, "duration_credit": False,
+                "futures_roll": False, "pe_method": "index_official_only",
+                "no_stock_pe_weighting": True,
+                "notes": ["身份未核：适用性未知，不得按名称强填 PE/持仓等必填分析"],
+            },
+        }
+        kw = _base_kwargs(identity=ident, **over)
+        kw["profile"] = dict(kw["profile"], index_pe=None, index_pe_status="unknown_etf",
+                             industry_allocation=None, industry_pe=None)
+        return kw
+
+    @staticmethod
+    def _holdings_ok() -> dict:
+        rows = [{"code": f"30{i:04d}", "name": f"成分{i}", "pct": round(10.0 - i, 2),
+                 "shares": 100.0 + i, "amount": 1000.0 + i} for i in range(10)]
+        return {"symbol": "159796", "report_date": "2026-06-30", "quarter": "2026年2季度",
+                "status": "ok", "rows": rows,
+                "holding_scope": "基金披露前十大（季度报告期，非完整持仓）",
+                "source": "天天基金(东财 FundArchivesDatas jjcc)"}
+
+    def test_unknown_identity_successful_holdings_keeps_evidence(self):
+        """正例（159796 型）：实采成功不得被写成「未请求/未采集」。"""
+        dim = build_data_status(
+            **self._unknown(extra_dims={"holdings": self._holdings_ok()})
+        )["dimensions"]["holdings"]
+        assert dim["status"] == "available"
+        assert dim["attempted_sources"]              # 实际来源留痕不得清空
+        assert dim["as_of"] == "2026-06-30"          # 报告期保留
+        assert dim.get("applicable") is not True     # 不得据此确认股票适用性
+        assert dim["status"] != "unknown"
+        assert "前十大" in dim["note"]
+        assert "身份未核" in dim["note"] and "不据此确认" in dim["note"]
+
+    def test_unknown_identity_failed_holdings_keeps_attempts(self):
+        """反例：失败但有实际尝试 → 记 missing，attempts/skipped 保留。"""
+        hd = {"status": "missing", "note": "页面解析失败",
+              "attempted_sources": ["天天基金(东财 FundArchivesDatas jjcc)"],
+              "skipped_sources": [{"source": "备用源", "reason": "首源失败后未发起"}]}
+        dim = build_data_status(
+            **self._unknown(extra_dims={"holdings": hd})
+        )["dimensions"]["holdings"]
+        assert dim["status"] == "missing"
+        assert dim["attempted_sources"] == ["天天基金(东财 FundArchivesDatas jjcc)"]
+        assert dim["skipped_sources"][0]["source"] == "备用源"
+        assert dim.get("applicable") is not True
+        assert "页面解析失败" in dim["note"] and "身份未核" in dim["note"]
+
+    def test_unknown_identity_no_request_stays_unknown(self):
+        """未请求（无提交记录）→ 仍 unknown + 空 attempts（不得伪造请求）。"""
+        dims = build_data_status(**self._unknown())["dimensions"]
+        for name in ("holdings", "index_exposure"):
+            assert dims[name]["status"] == "unknown", name
+            assert dims[name]["attempted_sources"] == [], name
+            assert dims[name]["applicable"] is False, name
+            assert "身份未核" in dims[name]["note"], name
+
+    def test_known_non_stock_no_request_guard_unchanged(self):
+        """已知非股票未请求 → not_applicable（资产闸门保持，不因身份未核分支改动）。"""
+        kw = _base_kwargs(identity=_identity(asset="commodity"))
+        kw["profile"] = dict(kw["profile"], index_pe=None, index_pe_status="not_mapped",
+                             industry_allocation=None, industry_pe=None)
+        dims = build_data_status(**kw)["dimensions"]
+        assert dims["holdings"]["status"] == "not_applicable"
+        assert dims["holdings"]["applicable"] is False
+        assert dims["holdings"]["attempted_sources"] == []
+        assert dims["index_exposure"]["status"] == "not_applicable"
+        assert dims["index_exposure"]["applicable"] is False
+
+    def test_known_non_stock_submitted_holdings_stays_guarded(self):
+        """负例：已知非股票即使提交了 holdings 记录也不放宽股票穿透闸门。"""
+        kw = _base_kwargs(identity=_identity(asset="commodity"),
+                          extra_dims={"holdings": self._holdings_ok()})
+        kw["profile"] = dict(kw["profile"], index_pe=None, index_pe_status="not_mapped",
+                             industry_allocation=None, industry_pe=None)
+        dim = build_data_status(**kw)["dimensions"]["holdings"]
+        assert dim["status"] == "not_applicable"
+        assert dim["attempted_sources"] == []
+
+    def test_known_stock_holdings_availability_unchanged(self):
+        """已知股票路径不受影响（与旧行为一致）。"""
+        dim = build_data_status(
+            **_base_kwargs(extra_dims={"holdings": self._holdings_ok()})
+        )["dimensions"]["holdings"]
+        assert dim["status"] == "available"
+        assert dim["as_of"] == "2026-06-30"
+        assert dim["attempted_sources"]
+        assert "身份未核" not in dim["note"]
+
+    def test_unknown_identity_submitted_index_exposure_keeps_evidence(self):
+        """邻近分支：index_exposure 提交证据（身份未核）同样不得被遮蔽。"""
+        ie = {"status": "ok", "period_alignment": {
+            "same_period": True, "joinable": True,
+            "cons_as_of": "2026-09-30", "weight_as_of": "2026-09-30"}}
+        dim = build_data_status(**self._unknown(index_exposure=ie))["dimensions"]["index_exposure"]
+        assert dim["status"] == "available"
+        assert dim["as_of"] == "2026-09-30"
+        assert dim.get("applicable") is not True
+        assert "身份未核" in dim["note"] and "不据此确认" in dim["note"]
+
+    def test_unknown_identity_failed_index_exposure_keeps_note(self):
+        ie = {"status": "missing", "note": "指数样本/权重源缺失",
+              "cons_status": "missing", "weight_status": "missing"}
+        dim = build_data_status(**self._unknown(index_exposure=ie))["dimensions"]["index_exposure"]
+        assert dim["status"] == "missing"
+        assert "源缺失" in dim["note"] and "身份未核" in dim["note"]
