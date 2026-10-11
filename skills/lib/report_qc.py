@@ -22,6 +22,13 @@
                                sha256 与 QC 记录侧车绑定 / 报告断言 × payload 实况
                                （无基准 TE、隔夜 NAV 错价、缺权重=0、错月拼当期、
                                身份未核称已核）。离线只读；未执行项 warn（≠PASS）
+    structure       全部       必备标签/区块 + 表列错位（表体行列数 ≠ 表头 →
+                               渲染器静默缺列/截断；etf=error，其余=warning）
+    etf-generation 追加 (2026-10-10 A8)：BOLL 带宽按 (upper−lower)/mid 独立复算
+                               （原始值复算为准，不以底稿自述值为真值）；同代派生
+                               数字对拍；同类产品表期间声明与数值对拍；份额窗口
+                               对拍；「排名 N/M」与组内极值重算；已排除估值摘要
+                               却在结论区断言低位。自由文本因果判断不在机器层。
 
 `--verify-data` 的 network_used 只反映**实际发起**的联网层（stock collector），
 不再等于该标志本身（ETF 数据核验为离线同代消费）。
@@ -45,6 +52,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -215,7 +223,12 @@ _STRUCTURE_REQUIREMENTS: dict[str, list[tuple[str, str, str, str]]] = {
 
 
 def _check_structure(text: str, report_type: str) -> LayerResult:
-    """结构层：按报告类型检查必备章节/标签存在性。"""
+    """结构层：按报告类型检查必备章节/标签存在性 + 表列错位（2026-10-10 A8）。
+
+    表列错位在 ETF 为 error（md 渲染器静默缺列/截断 = 数据丢失），其余报告类型为
+    warning（先暴露不阻断；WARN 仍可交付）。stock Insight 报告走独立分支（早退，
+    不含表列检查，行为未变）。
+    """
     layer = LayerResult(layer="structure", status="pass")
     if report_type == "stock" and _is_insight_report(text):
         required = ("可得结论", "核心矛盾", "观察节点与更新规则", "已知未知与补证路径", "不构成任何投资建议")
@@ -232,8 +245,17 @@ def _check_structure(text: str, report_type: str) -> LayerResult:
             continue
         layer.findings_count += 1
         layer.details.append({"id": rule_id, "severity": severity, "message": message})
+    # 表列错位（2026-10-10，A8）：ETF 为 error——md 渲染器（etf_md）对列数不齐的
+    # 表体行静默补列/截断（数据丢失无报错）；其余类型 warning——先暴露不阻断，
+    # 「WARN 仍可交付」的既有可交付面不变（兼容存量报告，不静默升级为失败）。
+    if report_type in ("stock", "etf", "journal", "gap_scan", "pulse", "review"):
+        sev = "error" if report_type == "etf" else "warning"
+        for f in table_alignment_findings(text, severity=sev):
+            layer.findings_count += 1
+            layer.details.append(f)
     if layer.findings_count:
-        layer.status = "warn"
+        layer.status = ("fail" if any(d.get("severity") == "error" for d in layer.details)
+                        else "warn")
     return layer
 
 
@@ -1255,6 +1277,89 @@ def _row_is_data_like(row: str) -> bool:
     """
     cells = [c for c in _table_cells(row) if c]
     return all(_is_data_cell(c) for c in cells)
+
+
+# ── 表列错位（2026-10-10，A8）：与 etf_md 渲染契约同拆格语义 ───────────────
+
+#: 渲染器契约（`skills/invest-a-etf/scripts/lib/etf_md.py`）：表行须**首尾都有 `|`**；
+#: 表体行与表头列数不齐时渲染器静默「缺列留空 / 多列丢弃」——数据丢失无报错通道。
+#: QC 在此拦截；拆格顺序（先剥首尾 `|`、再按非转义 `|` 切、`\|` 还原）必须与
+#: etf_md._split_table_row 一致（等价性由 tests 的对拍用例锁定；跨包不 import：
+#: report_qc 随全部技能包分发，不得依赖仅 ETF 包存在的模块）。
+_MD_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+_MD_TABLE_SEP_RE = re.compile(r"^\|[\s:|-]+\|$")
+
+
+def _md_split_row(row: str) -> list[str]:
+    """表格行拆格（`\\|` 转义安全）：与 etf_md._split_table_row 同语义。"""
+    s = row.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    sentinel = None
+    if "\\|" in s:
+        sentinel = "\x02"
+        s = s.replace("\\|", sentinel)
+    cells = s.split("|")
+    if sentinel is not None:
+        cells = [c.replace(sentinel, "|") for c in cells]
+    return [c.strip() for c in cells]
+
+
+def _md_tables(md: str) -> list[dict]:
+    """识别渲染器契约下的表格块。
+
+    返回 ``[{start: 表头行号(1-based), header: [cells], rows: [(line_no, cells)]}]``。
+    成块条件与 etf_md 一致：表头行匹配 `|…|` 且下一行是 `|:--|--:|` 式分隔行；
+    表体延续到首个不匹配 `|…|` 的行（空行/散落单行 `| a | b |` 不算表——
+    测试夹具大量使用单行管道文本）。
+    """
+    lines = md.splitlines()
+    tables: list[dict] = []
+    i = 0
+    n = len(lines)
+    while i < n - 1:
+        header_line = lines[i].strip()
+        if _MD_TABLE_ROW_RE.match(header_line) and _MD_TABLE_SEP_RE.match(lines[i + 1].strip()):
+            rows: list[tuple[int, list[str]]] = []
+            j = i + 2
+            while j < n and lines[j].strip() and _MD_TABLE_ROW_RE.match(lines[j].strip()):
+                rows.append((j + 1, _md_split_row(lines[j])))
+                j += 1
+            tables.append({"start": i + 1, "header": _md_split_row(header_line), "rows": rows})
+            i = j
+        else:
+            i += 1
+    return tables
+
+
+def table_alignment_findings(md: str, *, severity: str = "warning") -> list[dict]:
+    """表列错位：表头/分隔行、表体行与表头列数不一致 → findings。
+
+    含未转义 `|` 的单元格（如代码式 ``|涨跌|``）会被渲染器切成多格 →
+    多列丢弃；缺列被留空。两者都是静默数字丢失，机器准出须拦截。
+    """
+    out: list[dict] = []
+    for t in _md_tables(md):
+        want = len(t["header"])
+        sep_line_no = t["start"] + 1
+        sep_cells = _md_split_row(md.splitlines()[sep_line_no - 1])
+        if len(sep_cells) != want:
+            out.append({
+                "id": "table-header-misaligned", "severity": severity, "line": t["start"],
+                "message": (f"表头列数（{want}）与分隔行列数（{len(sep_cells)}）不一致"
+                            f"（表头行 {t['start']}）"),
+            })
+        for line_no, cells in t["rows"]:
+            if len(cells) == want:
+                continue
+            out.append({
+                "id": "table-row-misaligned", "severity": severity, "line": line_no,
+                "message": (f"表格行列数（{len(cells)}）与表头（{want}，表头行 {t['start']}）不一致："
+                            "渲染时缺列留空/多列丢弃（数字可能静默丢失）"),
+            })
+    return out
 
 
 def _heading_level(match_text: str) -> int:
@@ -2313,9 +2418,17 @@ _ETF_ZERO_WEIGHT_RE = re.compile(
 _ETF_STALE_MIX_CLAIM_RE = re.compile(
     r"(?:当期|当前)[^。；;\n]{0,12}?(?:完整组合|完整持仓|全部成分)"
     r"|成分(?:与|和)权重[^。；;\n]{0,10}?拼")
+#: 身份核验完成声明（R6，2026-10-11 复查）：只收**完成态**断言。
+#: 旧式 `(?:原文核验|已读原文)` 会把边界/任务名词「原文核验边界」
+#: （159796 缺口表行，仅描述待核范围）误判为完成声明 → FAIL。完成态限定为
+#: 「身份已核/核验通过」「原文核验通过/已完成/已核/完毕」「已完成原文核验」
+#: 「已读原文」；任务式/名称式（完成原文核验、原文核验材料/边界）不检，
+#: 未知留人工。同分句否证（未做/未核验）豁免机制不变。
 _ETF_IDENTITY_VERIFIED_RE = re.compile(
-    r"身份[^。；;\n]{0,12}?(?:已核|核验通过|verified)"
-    r"|(?:原文核验|已读原文)")
+    r"身份[^。；;\n|]{0,12}?(?:已核|核验通过|已验证|verified)"
+    r"|原文核验(?:通过(?!率)|已完成|已通过|已核|完毕|完成(?!度))"
+    r"|已完成原文核验"
+    r"|已读原文")
 _HTML_GENERATION_META_RE = re.compile(
     r'name="invest-generation"\s+content="([0-9a-f]{8,})"')
 
@@ -2366,6 +2479,31 @@ _ETF_SAME_OBJECT_EXEMPT_RE: dict[str, re.Pattern] = {
         r"(?:待核|未核|未验证|未做|未经|未执行|未确认|不适用|未完成|未核验|未读)"
         r"|(?:未做|未经|未执行|未完成|尚未|有待|待|未)"
         r"[^。；;\n]{0,6}?(?:身份|原文核验|已读原文)"),
+    # valuation（2026-10-10）：估值低位断言 ↔ 同分句否证/排除（不采纳/不构成
+    # 结论/口径不一/不作判定）——真实否定（「不判定低位」「口径不一不作结论」）
+    # 不得误伤；其他维度（如盘口/份额）的否定不构成豁免（同 R3 对象贴附纪律）。
+    "valuation": re.compile(
+        r"(?:低位|偏低|极低|低估|便宜|低估值)[^。；;\n|]{0,10}?"
+        r"(?:不构成|不采纳|不作为|不进入|未采纳|不成立|存疑|口径不一|未核|不判定|不可判)"
+        r"|(?:不构成|不采纳|不作为|不进入|未采纳|不判定|不认定|无法判定|不可判)"
+        r"[^。；;\n|]{0,10}?(?:低位|偏低|极低|低估|便宜|低估值|水平判定)"),
+    # extreme_window（2026-10-10，R6 复查）：组内极值断言的**同分句**限制/否定。
+    # 三种合法形态（均在断言所在分句内）：
+    #   ① 对象在前、否定在后：「组内最小不作判断」（R6 原防漏）；
+    #   ② 否定在前、对象在后：「不判断…组内最小」「不作…排名结论」（2026-10-10
+    #      正控误伤修复——root-qc-probes-final unmatched_no_rank_valid）；
+    #   ③ 「不可比/窗口起止不一致/实际覆盖不同」+ 否定或限定。
+    # 分句作用域由 _claim_exempt_near 保证：「不能判断A；本标的组内最小」的另一个
+    # 分句否定不得豁免（；是分句边界）。全篇其他位置（含表头）出现「实际覆盖」
+    # 不构成豁免（旧实现按全文搜索 → 漏检）。
+    "extreme_window": re.compile(
+        r"(?:组内|极值|排名|最大|最小|最高|最低)[^。；;\n|]{0,10}?"
+        r"(?:不|未|无法|不能|不宜|不可|不作)"
+        r"[^。；;\n|]{0,6}?(?:判断|判定|比较|排名|极值|结论|成立|可比)"
+        r"|(?:不|未|无法|不能|不宜|不可|不作|无从|不得|避免)"
+        r"[^。；;\n|]{0,12}?(?:判断|判定|比较|排名|作结|下结论|极值|组内|最大|最小|最高|最低)"
+        r"|(?:不可比|不具可比性|窗口(?:起止)?不一致|实际覆盖不同|共同窗口(?:不一致|缺失|不同))"
+        r"[^。；;\n|]{0,12}?(?:不|未|仅|限|留待|待|故|因此|只)"),
 }
 
 
@@ -2456,13 +2594,708 @@ def _load_etf_payload_for_qc(report_path: Path) -> tuple[dict | None, list[str]]
     return (payload if not errors else None), errors
 
 
+# ── ETF 同代数值一致性与独立复算（2026-10-10，A8） ────────────────────────
+# 设计边界（不宣称机器万能）：只做**可机械判定**的结构性核对——从**同代**
+# payload 的原始值独立复算 / 与正文引用值对拍 / 期间与排名断言核对；
+# 自由文本因果判断、口径选择合理性仍归三层人工复检（delivery-qc §6）。
+# 「同代」由 _load_etf_payload_for_qc 的封存校验保证：不同代 payload 不参与
+# 比对，历史 payload 的 derived 值不被当作真值（BOLL 以原始值复算为准）。
+
+#: 两位小数容差：报告/底稿均按引擎 `round(…, 2)` 输出；允许 0.02 的复算边界
+#: 余量（引擎用未舍入的中间量、QC 用 payload 的 4 位舍入原始值复算，仅可能
+#: 在 .xx5 边界差 0.01；0.02 仍远小于任何真实公式/口径错误的量级差）。
+_BOLL_RECOMPUTE_TOL = 0.02
+
+#: 三值同现的轨道引用（模板形态「上轨 X / 中轨 Y / 下轨 Z」；分隔符任意短串）。
+_BOLL_TRIPLE_RE = re.compile(
+    r"上轨\s*([+-]?\d+(?:\.\d+)?)[^。；\n]{0,16}?中轨\s*([+-]?\d+(?:\.\d+)?)"
+    r"[^。；\n]{0,16}?下轨\s*([+-]?\d+(?:\.\d+)?)")
+
+#: 同代对拍覆盖的 payload 派生字段（kline.derived 8 + history.stats 2）。
+#: boll_bandwidth_pct 由独立复算检查承担（真值 = 原始值复算，而非底稿自述值）。
+_ETF_DERIVED_PAYLOAD_SCOPE: tuple[str, ...] = (
+    "nav_vs_ma20_pct", "nav_vs_ma60_pct", "nav_vs_boll_mid_pct",
+    "boll_position_pct", "nav_to_boll_lower_pct", "nav_to_boll_upper_pct",
+    "daily_volatility_pct", "dist_to_ytd_low_pct", "atr14_pct",
+)
+_ETF_STATS_DERIVED = ("dist_to_ytd_low_pct", "atr14_pct")
+
+_NUM_TOKEN_RE = re.compile(r"[+-]?\d+(?:\.\d+)?")
+
+
+def _q2_equal(a: float, b: float) -> bool:
+    """两位小数口径一致（精确相等，或按 2 位舍入后相等）。"""
+    return abs(a - b) < 1e-6 or round(a, 2) == round(b, 2)
+
+
+def _finite_number(v) -> bool:
+    """有限实数（bool/NaN/±Inf/字符串/None 均 false）。"""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    return math.isfinite(float(v))
+
+
+def _etf_boll_findings(payload: dict, text: str) -> list[dict]:
+    """BOLL 带宽独立复算：`(upper − lower) / mid`（A1）。
+
+    真值来自同代 payload 的**原始值**；payload 的 derived 与正文引用值都只是
+    被核对对象——历史 payload 的旧公式值不得作为真值（A8 反例：7.45 = 除以
+    下轨的旧口径）。缺原始值/零中轨（引擎新口径：mid ≤ 0 或缺值时**不输出**
+    带宽键）是**合法停算**——只有「停算却仍给数」才是 error；无任何数值时
+    整体 skip（R3 反例：零中轨无数值曾被无条件报错）。NaN/±Inf 判为非法数值。
+    """
+    kline = payload.get("kline")
+    if not isinstance(kline, dict):
+        return []
+    up, mid, low = (kline.get("boll_upper"), kline.get("boll_mid"),
+                    kline.get("boll_lower"))
+    derived = kline.get("derived") or {}
+    claimed = derived.get("boll_bandwidth_pct")
+    md_cited = _extract_derived_values(text).get("boll_bandwidth_pct")
+    if claimed is None and md_cited is None and up is None and mid is None and low is None:
+        return []
+    out: list[dict] = []
+    if claimed is not None and not _finite_number(claimed):
+        out.append({
+            "id": "etf-boll-uncomputable", "severity": "error",
+            "message": f"payload derived.boll_bandwidth_pct={claimed!r} 非有限数值"
+                       "（NaN/Inf/非法类型）：不得作为带宽数值"})
+        claimed = None
+    if not (isinstance(up, (int, float)) and isinstance(mid, (int, float))
+            and isinstance(low, (int, float))):
+        if claimed is not None or md_cited is not None:
+            out.append({
+                "id": "etf-boll-uncomputable", "severity": "warning",
+                "message": ("payload 缺 BOLL 原始值（boll_upper/boll_mid/boll_lower），"
+                            "带宽数值不可独立复算：缺值应停算，不得给数值"
+                            "（既有数值无法核验）")})
+        return out
+    if not _finite_number(mid) or not _finite_number(up) or not _finite_number(low):
+        if claimed is not None or md_cited is not None:
+            out.append({
+                "id": "etf-boll-uncomputable", "severity": "error",
+                "message": ("BOLL 原始值含非有限数值（NaN/Inf）：带宽=(upper−lower)/mid "
+                            "不可计算，正文/底稿不得给带宽数值")})
+        return out
+    if mid <= 0:
+        # 引擎新口径（mid ≤ 0 不输出带宽键）= 合法停算；只有仍给出数值才错。
+        if claimed is not None or md_cited is not None:
+            out.append({
+                "id": "etf-boll-zero-mid", "severity": "error",
+                "message": ("payload BOLL 中轨 ≤ 0：带宽=(upper−lower)/mid 未定义/除零，"
+                            "按纪律应停算——正文/底稿仍给出带宽数值即违规")})
+        return out
+    recomputed = round((up - low) / mid * 100, 2)
+    # 同代数字一致：正文引用的原始轨道值须等于 payload。只认**三值同现**的模板
+    # 形态（「上轨 X … 中轨 Y … 下轨 Z」）——单标签正则会把散文句
+    # 「距 BOLL 上轨 6.15% 空间」误判成轨道值（假阳性防护）。
+    for m in _BOLL_TRIPLE_RE.finditer(text):
+        for label, name, pv, val_raw in (("上轨", "boll_upper", up, m.group(1)),
+                                         ("中轨", "boll_mid", mid, m.group(2)),
+                                         ("下轨", "boll_lower", low, m.group(3))):
+            if not _q2_equal(float(val_raw), float(pv)):
+                out.append({
+                    "id": "etf-boll-band-mismatch", "severity": "error",
+                    "message": (f"正文引用 BOLL {label} {val_raw} ≠ 同代 payload "
+                                f"{name}={pv}（同代数字不一致）")})
+    if claimed is not None and abs(float(claimed) - recomputed) > _BOLL_RECOMPUTE_TOL:
+        out.append({
+            "id": "etf-boll-formula-mismatch", "severity": "error",
+            "message": (f"payload derived.boll_bandwidth_pct={claimed} 与按 "
+                        f"(upper−lower)/mid 复算 {recomputed}% 不一致"
+                        f"（原始值 {up}/{mid}/{low}）——不得以底稿自述值为真值，"
+                        "须按 A1 公式重算")})
+    if md_cited is not None:
+        try:
+            md_val = float(md_cited)
+        except ValueError:
+            md_val = None
+        if md_val is not None and not _finite_number(md_val):
+            md_val = None
+        if md_val is not None and abs(md_val - recomputed) > _BOLL_RECOMPUTE_TOL:
+            out.append({
+                "id": "etf-boll-report-mismatch", "severity": "error",
+                "message": (f"报告引用 BOLL 带宽 {md_cited}%，同代 payload 原始值"
+                            f"（{up}/{mid}/{low}）按 (upper−lower)/mid 复算为 "
+                            f"{recomputed}%（独立复算不一致）")})
+    return out
+
+
+def _etf_derived_payload_findings(payload: dict, text: str) -> list[dict]:
+    """同代数字一致：正文引用的派生字段值必须等于同代 payload 值。
+
+    仅覆盖 payload 结构明确拥有的字段（kline.derived + history.stats 两字段）；
+    正文引用而 payload 无该值 → error（数字无同代底稿，fail-closed）。
+    `_extract_derived_values` 每字段取首个命中，重复引用不同值不在本层覆盖
+    （已知边界，人工复检仍须按 delivery-qc 第 1 层逐项核）。
+    """
+    cited = _extract_derived_values(text)
+    if not cited:
+        return []
+    kderived = (payload.get("kline") or {}).get("derived") or {}
+    stats = (payload.get("history") or {}).get("stats") or {}
+    out: list[dict] = []
+    for field in _ETF_DERIVED_PAYLOAD_SCOPE:
+        raw = cited.get(field)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except ValueError:
+            continue
+        if field in _ETF_STATS_DERIVED:
+            pv, source = stats.get(field), "history.stats"
+        else:
+            pv, source = kderived.get(field), "kline.derived"
+        if pv is None:
+            out.append({
+                "id": "etf-derived-not-in-payload", "severity": "error",
+                "message": (f"正文引用 {source}.{field}={raw}，但同代 payload 无该值"
+                            "（数字无同代底稿，不得引用未封存数值）")})
+        elif not _q2_equal(val, float(pv)):
+            out.append({
+                "id": "etf-derived-mismatch", "severity": "error",
+                "message": (f"正文 {field}={raw} ≠ 同代 payload {source}.{field}={pv}"
+                            "（同代数字与底稿不一致）")})
+    return out
+
+
+#: R3（2026-10-11 复查收紧）：不可确认行的全窗口流量数字须有**本行/本单元格**
+#: 明确限定。判定分三层，禁止「整行任一格出现 '部分'」式泛匹配：
+#: ① 数字所在单元格 → 一般限定词即成立（限定与数字同格贴附）；
+#: ② 其他单元格 → 限定词须与本行流量/窗口语境**同格**绑定（窗口/资金流/…/
+#:   合计），或命中自带聚合语义的强短语（部分区间合计/可确认段小计/剔除异常段）；
+#: ③ 任何位置的明确否定（「不是部分合计」「并非不可确认」「无不可确认段」）
+#:    不构成限定。其他指标的「部分」（成交额部分样本）不豁免资金流合计；
+#: 跨行/全篇文字不参与（未知留人工由 _peer_row_explicitly_unconfirmed 前置保证）。
+_ETF_FLOW_PARTIAL_LABEL_RE = re.compile(r"部分|不可确认|未确认|可确认段|小计|剔除")
+_ETF_FLOW_STRONG_QUALIFIER_RE = re.compile(
+    r"部分区间(?:合计|小计)|部分合计|可确认段(?:合计|小计)"
+    r"|窗口不可确认|窗口未确认|全窗(?:口)?不可确认|剔除异常(?:段|区间)")
+_ETF_FLOW_CONTEXT_RE = re.compile(r"窗口|资金流|流量|流入|流出|全窗|合计|申赎")
+_ETF_FLOW_LABEL_NEG_RE = re.compile(r"(?:不是|并非|不属于|非|无|没有|未)\s*$")
+
+
+def _peer_row_explicitly_unconfirmed(row: dict) -> bool:
+    """行是否有**明确** False 的窗口确认状态（缺字段＝旧 payload，留人工不拦）。"""
+    fw = row.get("flow_window")
+    return row.get("confirmable") is False or (
+        isinstance(fw, dict) and fw.get("confirmable") is False)
+
+
+def _peer_flow_cell_has_partial_label(cells: list[str], number_idx: int) -> bool:
+    """本行是否对全窗口资金流数字给出直接限定（R3 复查；见上方词表注释）。
+
+    ``number_idx`` = 资金流数字所在单元格下标（数字格内一般限定词直接成立）。
+    """
+    for i, cell in enumerate(cells):
+        for m in _ETF_FLOW_STRONG_QUALIFIER_RE.finditer(cell):
+            if not _ETF_FLOW_LABEL_NEG_RE.search(cell[:m.start()]):
+                return True
+        for m in _ETF_FLOW_PARTIAL_LABEL_RE.finditer(cell):
+            if _ETF_FLOW_LABEL_NEG_RE.search(cell[:m.start()]):
+                continue  # 明确否定不构成限定
+            if i == number_idx or _ETF_FLOW_CONTEXT_RE.search(cell):
+                return True
+    return False
+
+
+def _etf_peers_table_findings(payload: dict, text: str) -> list[dict]:
+    """同类产品表：期间声明与数值须与同代 payload 冻结行一致（A8 期间一致）。
+
+    期间口径（engine-handoff §1.4，A3/A4）：payload 行以 `window_days` +
+    `flow_total_e`（正名）描述**本代封存的窗口**；`flow_20d_e` 只是 window_days==20
+    时的兼容别名（其余窗口为 None）。因此表头「N 日资金流」列：
+
+    - N 与 payload window_days 一致 → 与 `flow_total_e`（缺省回退 flow_20d_e）对拍；
+    - N 不一致 → error（期间声明与底稿不一致），**不再对该列做数值对拍**——
+      否则 120 日合法表会被误判 fabricated（R2 反例）；
+    - 别名缺失（旧 payload 或未取数）且无正名值 → 不报 fabricated（无法核对即
+      不冒充；只有「同一窗口下该行确为不可得」才拦），但整行无任何窗口字段时
+      该行不参与对拍。
+
+    `share_change_span`（= flow_window.segments）缺失 → warning（期间同起止
+    无法核对，未执行 ≠ PASS）。不校验「flow 合计 ≈ 份额变化×价格」——口径注记
+    明确二者不必相等（价格差异），不构成一致性约束。
+
+    R3（2026-10-11 复查，限定词判定见
+    ``_peer_flow_cell_has_partial_label``）：行的 `confirmable=False`（行级或
+    flow_window 级**明确** False）时，flow 合计只含可确认段（部分合计）——全窗口
+    资金流列的数字必须带本行/本单元格的「部分/不可确认」限定（如「可确认段小计」
+    「窗口不可确认」），否则 error；**其他指标**的「部分」（成交额部分样本）与
+    明确否定（不是部分合计/并非不可确认）不豁免，别处/跨行文字不豁免。旧
+    payload 缺确认字段 → 留人工（不拦）；已确认完整行不拦；本规则只针对全窗口
+    资金流列（近 5 日列与份额列不在内，分子窗口证据不同）。
+    """
+    peers = payload.get("peers")
+    if not isinstance(peers, dict) or not peers.get("available"):
+        return []
+    flow = peers.get("flow") or {}
+    window_days = flow.get("window_days")
+    rows = [r for r in (flow.get("rows") or []) if isinstance(r, dict)]
+    out: list[dict] = []
+    for r in rows:
+        if r.get("share_change_pct") is not None and r.get("share_change_span") is None:
+            out.append({"id": "etf-peer-span-missing", "severity": "warning",
+                        "message": (f"peers 行 {r.get('symbol')} 有份额变化值但未披露"
+                                    "实际覆盖（share_change_span）：与窗口是否同起止"
+                                    "无法核对（未执行 ≠ PASS）")})
+    by_symbol = {r.get("symbol"): r for r in rows if r.get("symbol")}
+    if not by_symbol:
+        return out
+
+    def _flow_value(row: dict) -> tuple[float | None, bool]:
+        """(本代窗口合计值, 该行是否提供正名/别名键)。"""
+        if "flow_total_e" in row:
+            return row.get("flow_total_e"), True
+        if "flow_20d_e" in row:
+            return row.get("flow_20d_e"), True
+        return None, False
+
+    for table in _md_tables(text):
+        header = [h.replace("**", "").strip() for h in table["header"]]
+        has_flow_context = any("资金流" in h for h in header)
+        # idx → ("flow", declared_days|None) / ("flow5", None) / ("share", None)
+        col_map: dict[int, tuple[str, int | None]] = {}
+        for idx, h in enumerate(header):
+            m = re.search(r"(\d+)\s*日", h)
+            declared_days = int(m.group(1)) if m else None
+            # 模板用「N日资金流(亿) | 近5日(亿)」：缩写仅在本表有明确
+            # 资金流列时成立。成交额/平均规模等具名指标不能仅凭「5日+亿」入选。
+            abbreviated_flow = has_flow_context and re.fullmatch(
+                r"(?:近|最近|过去)?\s*5\s*日\s*[（(]\s*亿(?:元)?\s*[）)]", h)
+            if declared_days == 5 and ("资金流" in h or abbreviated_flow):
+                col_map[idx] = ("flow5", None)
+            elif "资金流" in h:
+                col_map[idx] = ("flow", declared_days)
+            elif "份额变化" in h and re.search(r"[%％]|百分比|百分率", h):
+                # share_change_pct 只核验明确的百分比列；绝对份额/无单位
+                # 不可与百分比对拍，当前 peer schema 不提供对应绝对份额字段。
+                col_map[idx] = ("share", None)
+        if not col_map:
+            continue
+        for line_no, cells in table["rows"]:
+            sym = next((c.strip() for c in cells[:2] if c.strip() in by_symbol), None)
+            if not sym:
+                continue
+            row = by_symbol[sym]
+            for idx, (kind, declared) in col_map.items():
+                if idx >= len(cells):
+                    continue
+                cell = cells[idx].strip()
+                m = _NUM_TOKEN_RE.search(cell.replace("，", "").replace(",", ""))
+                if m is None:
+                    continue
+                val = float(m.group(0))
+                if kind == "flow" and declared is not None:
+                    if isinstance(window_days, int) and declared != window_days:
+                        out.append({
+                            "id": "etf-peer-window-mismatch", "severity": "error",
+                            "message": (f"同类产品表头声明「{header[idx]}」"
+                                        f"（{declared} 日），同代 payload 窗口为 "
+                                        f"{window_days} 日（期间声明与底稿不一致）")})
+                        continue  # 不同窗口不做数值对拍（否则合法长窗口被误判）
+                    if window_days is None:
+                        continue  # 旧 payload 无窗口字段：无法核对，不冒充
+                if (kind == "flow" and _peer_row_explicitly_unconfirmed(row)
+                        and not _peer_flow_cell_has_partial_label(cells, idx)):
+                    # R3：不可确认行的全窗口流量数字若无本行/本单元格限定 →
+                    # 无条件全窗数字冒充确认合计（别处泛称不可确认不豁免）。
+                    out.append({
+                        "id": "etf-peer-partial-flow-unlabeled", "severity": "error",
+                        "line": line_no,
+                        "message": (f"同类产品表 {sym} 行全窗口资金流数字「{m.group(0)}」"
+                                    "无「部分/不可确认」限定：该行 confirmable=False，"
+                                    "同代 flow 合计只含可确认段（部分合计）——本行/本"
+                                    "单元格须标「可确认段小计」或说明部分区间/不可确认，"
+                                    "不得以无条件全窗数字呈现")})
+                field = {"flow": "flow_total_e", "flow5": "flow_5d_e",
+                         "share": "share_change_pct"}[kind]
+                if kind == "flow":
+                    pv, has_keys = _flow_value(row)
+                    if not has_keys:
+                        continue  # 旧 schema 无窗口合计键：跳过而非报 fabricated
+                else:
+                    pv, has_keys = row.get(field), (field in row)
+                if pv is None:
+                    if has_keys:
+                        out.append({
+                            "id": "etf-peer-row-fabricated", "severity": "error",
+                            "message": (f"同类产品表 {sym} 行填了数值 {m.group(0)}，但"
+                                        f"同代 payload 该行 {field}=None（不可得/失败行"
+                                        "不得填数）")})
+                elif _finite_number(pv) and not _q2_equal(val, float(pv)):
+                    out.append({
+                        "id": "etf-peer-row-mismatch", "severity": "error",
+                        "message": (f"同类产品表 {sym} 行 {field}={m.group(0)} ≠ 同代 "
+                                    f"payload {pv}（同代数字不一致）")})
+    return out
+
+
+def _etf_share_window_findings(payload: dict, text: str) -> list[dict]:
+    """份额窗口：报告引用的窗口起止/行数须与同代 payload 可对上（engine §1.3）。
+
+    同代 payload 有两个合法窗口：`date_range`（detail_rows 跨度，兼容字段）与
+    `summary.flow_window{start,end}`（flow 合计与份额变化的**共同起止**；两者
+    尾部可差 T+1 延迟即「实际覆盖」披露，故都接受）。行数声明同样接受
+    `row_count`（detail 行数）或 `flow_window.trading_days/segments`。
+    """
+    sh = payload.get("share_history")
+    if not isinstance(sh, dict):
+        return []
+    summary = sh.get("summary") or {}
+    row_count = summary.get("row_count")
+    flow_window = summary.get("flow_window") or {}
+    accepted: list[list[str]] = []
+    dr = sh.get("date_range")
+    if isinstance(dr, str) and "~" in dr:
+        accepted.append([d.strip().replace("-", "") for d in dr.split("~")[:2]])
+    fw_start, fw_end = flow_window.get("start"), flow_window.get("end")
+    if isinstance(fw_start, str) and isinstance(fw_end, str):
+        accepted.append([fw_start.replace("-", ""), fw_end.replace("-", "")])
+    counts = {c for c in (row_count, flow_window.get("trading_days"),
+                          flow_window.get("segments")) if isinstance(c, int)}
+    if not accepted and not counts:
+        return []
+    out: list[dict] = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if "share_history" not in line and "份额窗口" not in line:
+            continue
+        m = re.search(r"(\d{4}-\d{2}-\d{2})\s*[~～]\s*(\d{4}-\d{2}-\d{2})", line)
+        if m and accepted:
+            got = [m.group(1).replace("-", ""), m.group(2).replace("-", "")]
+            if got not in accepted:
+                accepted_txt = "；".join(
+                    f"{a[0][:4]}-{a[0][4:6]}-{a[0][6:]} ~ {a[1][:4]}-{a[1][4:6]}-{a[1][6:]}"
+                    for a in accepted)
+                out.append({
+                    "id": "etf-share-window-mismatch", "severity": "error", "line": line_no,
+                    "message": (f"报告份额窗口 {m.group(1)} ~ {m.group(2)} 与同代 payload "
+                                f"窗口均不符（{accepted_txt}；date_range=明细跨度、"
+                                "flow_window=flow/份额共同起止）")})
+        mr = re.search(r"(\d+)\s*个?数据行", line)
+        if mr and counts and int(mr.group(1)) not in counts:
+            out.append({
+                "id": "etf-share-rowcount-mismatch", "severity": "error",
+                "line": line_no,
+                "message": (f"报告称 {mr.group(1)} 个数据行，同代 payload 行数口径为 "
+                            f"{sorted(counts)}（row_count/flow_window）均不符")})
+    return out
+
+
+#: 组内极值断言：① 指标锚定形态（降幅/涨幅/份额…组内最小）；② 主体锚定形态
+#: （本标的/主标的/该产品…组内最小——另须明确份额变化指标）。匹配自身不得
+#: 跨越 _CLAUSE_BOUNDARY_RE 的边界，否则同分句否证检索会误含前一分句。
+_ETF_GROUP_EXTREME_RE = re.compile(
+    r"(?:降幅|涨幅|份额变化|份额)[^。！？!?；;，,、\n|]{0,16}?组内\s*(最大|最小|最高|最低)"
+    r"|(?:本标的|主标的|该产品)[^。！？!?；;，,、\n|]{0,16}?组内\s*(最大|最小|最高|最低)")
+
+#: share_change_pct 的可判定指标：变化/涨跌幅；裸「份额」或总量不代表变化率。
+#: 显式绝对单位仍优先排除（「份额变化（万份）」不能拿百分比核验）。
+_ETF_SHARE_CHANGE_METRIC_RE = re.compile(
+    r"份额\s*(?:的\s*)?(?:变化|变动|涨幅|降幅|增幅|增长率)")
+_ETF_ABSOLUTE_SHARE_RE = re.compile(
+    r"总份额|份额\s*(?:总量|总额|数量|余额)|绝对份额|[万亿]\s*份"
+    r"|[（(]\s*份\s*[）)]|\d\s*份(?!额)")
+
+#: R2（2026-10-11 复查）：份额极值分支的非份额口径词——出现在**断言分句**内即
+#: 保守跳过留人工（「净值/收益/价格…涨幅组内最高」不得拿份额变化值裁决）。
+_ETF_EXTREME_OTHER_CALIBER_RE = re.compile(
+    r"净值|收益|回报|价格|股价|估值|市盈率|市净率|折溢价|溢价|折价|波动|振幅|成交|换手")
+
+#: 非本代窗口期间限定（无法与份额数据窗口对齐 → 不裁决，留人工）。
+_ETF_EXTREME_OTHER_PERIOD_RE = re.compile(
+    r"年初至今|今年以来|年内|本月|上月|本周|上周|近一?周|近一?月|近一?季")
+_ETF_CLAIM_DAY_RE = re.compile(r"(?<!\d)(\d+)\s*(?:个\s*)?(?:交易\s*)?日")
+
+
+def _claim_clause(line: str, match: re.Match) -> str:
+    """断言所在分句（逗号/分号/表格格/换行为界）——逐声明独立的作用域。"""
+    lo = 0
+    for b in _CLAUSE_BOUNDARY_RE.finditer(line, 0, match.start()):
+        lo = b.end()
+    right = _CLAUSE_BOUNDARY_RE.search(line, match.end())
+    return line[lo:(right.start() if right else len(line))]
+
+
+def _extreme_claim_subject(clause: str, main: str | None,
+                           cohort: set[str]) -> str | None:
+    """断言主体：分句内**唯一**候选（本标的/主标的→主标的；6 位成员代码）。
+
+    多候选（对照句）或无候选 → None：留人工，不猜主标的（R1 复查要求）。
+    """
+    candidates = {c for c in cohort if c and c in clause}
+    if main and re.search(r"本标的|主标的", clause):
+        candidates.add(main)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _extreme_claim_window_ok(clause: str, window_days) -> bool:
+    """断言自带的期间限定须与本代份额窗口对齐；不能确认对齐 → 跳过留人工。"""
+    if _ETF_EXTREME_OTHER_PERIOD_RE.search(clause):
+        return False
+    days = _ETF_CLAIM_DAY_RE.findall(clause)
+    return (not days or (isinstance(window_days, int)
+                         and all(int(d) == window_days for d in days)))
+
+
+def _etf_rank_findings(payload: dict, text: str) -> list[dict]:
+    """极值排名：正文「排名 N/M」与「组内最大/最小」须与同代 payload 重算一致。
+
+    排名只比对明确的主标的 20 日声明与 `rs.rank_20d`，其他主体/期间
+    留给人工核验，不能套用主标的的 20 日值。组内极值：
+    **零是合法极值**（「组内降幅最小」在存在 0.00 成员时并非本标的——R1 反例，
+    不得过滤零）；主体为零也可判。方向语义只对「降幅」倒置（降幅最小=数值最大）,
+    其余（涨幅/份额变化）按字面 max/min——不把泛称一律倒置。真正的混合
+    符号（同时存在正负非零值）下「最大/最小」读法不唯一 → 跳过留人工。
+
+    R1/R2（2026-10-11 复查）：组内极值逐**声明**核验（finditer，句内多条各自
+    判定；首条正确/被否证不得 break 遮蔽后续），分句独立识别主体/指标/限定；
+    豁免只作用本条声明。份额分支只锚定**本分句明确份额变化指标**（排除绝对
+    份额/总量，无净值/收益/价格等其他口径词、期间可对齐）；其他口径留人工，
+    不拿份额值裁决；主体不唯一/未知同样留人工，不猜主标的。
+    """
+    peers = payload.get("peers")
+    if not isinstance(peers, dict) or not peers.get("available"):
+        return []
+    out: list[dict] = []
+    rs = peers.get("rs") or {}
+    rank20 = rs.get("rank_20d") or {}
+    rank, total = rank20.get("rank"), rank20.get("total")
+    if isinstance(rank, int) and isinstance(total, int):
+        for line in _claim_scan_lines(text):
+            # 按断句限定主体/期间，逐条核验；其他产品或第一条正确声明
+            # 不得遮蔽后续错误的主标的声明。
+            for clause in re.split(r"[。；;，,！!？?]", line):
+                codes = set(re.findall(r"(?<!\d)\d{6}(?!\d)", clause))
+                symbol = str(payload.get("symbol") or "")
+                if codes and codes != {symbol}:
+                    continue
+                if not (symbol in codes or re.search(r"主标的|本标的", clause)):
+                    continue
+                periods = re.findall(r"(?<!\d)(\d+)\s*(?:个\s*)?(?:交易\s*)?日", clause)
+                if periods != ["20"] or re.search(r"年度|年收益|年回报", clause):
+                    continue
+                if not re.search(r"收益|RS|相对强弱|相对", clause):
+                    continue
+                for m in re.finditer(r"排名\s*[:：]?\s*(\d+)\s*/\s*(\d+)", clause):
+                    # 期间必须修饰本条收益排名，不能来自句中的波动/规模描述。
+                    if not re.search(
+                            r"(?<!\d)20\s*(?:个\s*)?(?:交易\s*)?日\s*(?:的\s*)?"
+                            r"(?:净值\s*)?(?:累计\s*)?(?:收益|回报|RS|相对强弱|相对)"
+                            r"(?:率)?\s*(?:的\s*)?$", clause[:m.start()]):
+                        continue
+                    if (int(m.group(1)), int(m.group(2))) != (rank, total):
+                        out.append({
+                            "id": "etf-rank-mismatch", "severity": "error",
+                            "message": (f"正文「{m.group(0)}」≠ 同代 payload rank_20d "
+                                        f"{rank}/{total}（主标的 20 日）：「{clause.strip()[:60]}」")})
+    flow = peers.get("flow") or {}
+    raw_rows = flow.get("rows") or []
+    window_days = flow.get("window_days")
+    flow_rows = [r for r in raw_rows
+                 if isinstance(r, dict)]
+    vals = {r.get("symbol"): r.get("share_change_pct") for r in flow_rows
+            if isinstance(r.get("symbol"), str) and r.get("symbol")
+            and _finite_number(r.get("share_change_pct"))}
+    row_symbols = {r["symbol"] for r in flow_rows
+                   if isinstance(r.get("symbol"), str) and r.get("symbol")}
+    cohort = {c for c in (peers.get("peers") or []) if isinstance(c, str) and c}
+    if payload.get("symbol"):
+        cohort.add(payload["symbol"])
+    cohort.update(row_symbols)
+    if len(cohort) >= 2 or len(raw_rows) >= 2:
+        # R6：组内极值/排名必须确有**共同起止/覆盖**——各产品各自同窗 ≠ 产品间
+        # 共同窗口，且全组员数值可得、窗口明确可确认。缺共同窗时拒绝
+        # 机械判定（透明拒绝，不按 values 无条件重排名）；报告已披露限制
+        # （逐项实际覆盖/不可比）则不另报。
+        windows: set[tuple[str, str]] = set()
+        window_missing = False
+        coverage_incomplete = (not cohort.issubset(row_symbols)
+                               or len(flow_rows) != len(raw_rows)
+                               or any(not isinstance(r.get("symbol"), str)
+                                      or not r.get("symbol")
+                                      or not _finite_number(r.get("share_change_pct"))
+                                      for r in flow_rows))
+        unconfirmed = False
+        confirmation_missing = False
+        invalid_window = False
+        for r in flow_rows:
+            fw = r.get("flow_window")
+            if isinstance(fw, dict) and fw.get("start") and fw.get("end"):
+                start, end = str(fw["start"]), str(fw["end"])
+                windows.add((start, end))
+                invalid_window = invalid_window or start > end
+            else:
+                window_missing = True
+            states = [fw.get("confirmable") if isinstance(fw, dict) else None]
+            if "confirmable" in r:
+                states.append(r["confirmable"])
+            unconfirmed = unconfirmed or any(s is False for s in states)
+            confirmation_missing = confirmation_missing or any(s is not True for s in states)
+        common_window = flow.get("common_window")
+        if isinstance(common_window, dict):
+            unconfirmed = unconfirmed or common_window.get("confirmable") is False
+            confirmation_missing = confirmation_missing or common_window.get("confirmable") is not True
+        windows_differ = len(windows) > 1
+        known_invalid = coverage_incomplete or unconfirmed or invalid_window or windows_differ
+        comparable = (bool(windows) and not window_missing and not confirmation_missing
+                      and not known_invalid)
+        has_pos = any(v > 0 for v in vals.values())
+        has_neg = any(v < 0 for v in vals.values())
+        if not comparable or not (has_pos and has_neg):
+            # R1/R2（2026-10-11 复查）：逐**声明**扫描——旧实现每行只 search 首条
+            # 并随即 break：首条正确或被否证即终止全篇，遮蔽同句逗号后与后续行的
+            # 错误声明。现改为 finditer 逐条核验，分句（含逗号/分号）独立识别
+            # 主体/指标/限定；豁免只跳过本条声明，不终止后续扫描。
+            for line in _claim_scan_lines(text):
+                for m in _ETF_GROUP_EXTREME_RE.finditer(line):
+                    head = m.group(0)
+                    clause = _claim_clause(line, m)
+                    # 指标锚定（R2）：份额分支只认本分句明确份额口径——指标短语
+                    # （组1 形态）须自带「份额」；主体短语（组2 形态）须分句含
+                    # 「份额」。其他口径/无份额词 → 留人工，不拿份额值裁决。
+                    anchored = ("份额" in head if m.group(1) is not None
+                                else "份额" in clause)
+                    if not anchored:
+                        continue
+                    if (not _ETF_SHARE_CHANGE_METRIC_RE.search(clause)
+                            or _ETF_ABSOLUTE_SHARE_RE.search(clause)):
+                        continue  # 绝对份额/裸份额缺对应证据，留人工，不套用变化百分比
+                    if _ETF_EXTREME_OTHER_CALIBER_RE.search(clause):
+                        continue
+                    if not _extreme_claim_window_ok(clause, window_days):
+                        continue
+                    subject = _extreme_claim_subject(clause, payload.get("symbol"), cohort)
+                    if not subject:
+                        continue
+                    # 同分句否证/限制豁免（Codex R6 复查：不得用全篇词语豁免——
+                    # 仅当**极值断言所在分句**明确否定/限制该比较时才豁免；
+                    # 表头或别处出现的「实际覆盖」不构成豁免）。仅跳过本条声明。
+                    if _claim_exempt_near(line, m, family="extreme_window"):
+                        continue
+                    if not comparable:
+                        reasons = []
+                        if coverage_incomplete:
+                            reasons.append("组员缺行、缺份额变化值或覆盖不完整")
+                        if unconfirmed:
+                            reasons.append("组员或共同窗口 confirmable=False（流量不可确认）")
+                        if invalid_window:
+                            reasons.append("组员窗口起止无效")
+                        if windows_differ:
+                            reasons.append("各产品 flow_window 起止不一致（"
+                                           + "；".join(f"{s}~{e}" for s, e in sorted(windows)) + "）")
+                        if window_missing or confirmation_missing:
+                            reasons.append("payload 未提供全组员共同覆盖及明确确认状态")
+                        reason = "；".join(reasons)
+                        out.append({
+                            # 已知起止不同且仍无条件断言极值 → error（不可比产品不得判）；
+                            # 窗口未知（旧/缺字段）→ warning（未执行 ≠ PASS）。
+                            "id": "etf-extreme-window-unverified",
+                            "severity": "error" if known_invalid else "warning",
+                            "message": (f"正文「{head}」无共同窗口证据：{reason}——各组员各自"
+                                        "同窗 ≠ 产品间共同窗口，不得按共同窗口无条件写组内"
+                                        "极值；须在**断言同句**写明限制（如「窗口不同，不判断"
+                                        "组内最大/最小」）或逐项披露实际覆盖")})
+                        continue
+                    if has_pos and has_neg:
+                        continue  # 真混合符号：极值语义不唯一，留人工
+                    # 关键词取断言短语内的实际用词（正则交替可能先命中「份额」——
+                    # 「份额降幅…组内最小」的语义是降幅，须按短语内 降幅/涨幅 判）
+                    if "降幅" in head:
+                        keyword = "降幅"
+                    elif "涨幅" in head:
+                        keyword = "涨幅"
+                    else:
+                        keyword = "份额"
+                    want_max = (m.group(1) or m.group(2)) in ("最大", "最高")
+                    if keyword == "降幅":  # 降幅最小/最低 = 数值最大（最接近零）
+                        want_max = not want_max
+                    target = max(vals.values()) if want_max else min(vals.values())
+                    got = vals.get(subject)
+                    if got is not None and abs(got - target) > 1e-9:
+                        out.append({
+                            "id": "etf-extreme-claim-mismatch", "severity": "error",
+                            "message": (f"正文「{head}」与同代 payload 不符：{subject} "
+                                        f"份额变化 {got}%，组内"
+                                        f"{'最大' if want_max else '最小'}为 {target}%"
+                                        "（零参与极值；真混合符号才留人工）"
+                                        f"：「{line.strip()[:60]}」")})
+    return out
+
+
+#: 「估值摘要不构成结论」排除锚点（报告自述已把外部估值摘要排除出结论）。
+_ETF_VALUATION_EXCLUSION_RE = re.compile(
+    r"不构成[^\n。；]{0,14}定量结论|不作为[^\n。；]{0,12}结论|不进入任何结论"
+    r"|不足以支撑定量结论|不采[纳用][^\n。；]{0,10}结论|不能直接采[纳用]"
+    r"|仅作背景[^\n。；]{0,12}(?:不|未)")
+#: 估值水平断言（低位/偏低/低估类；「估值低于同行」等比较句不命中）。
+_ETF_VALUATION_LOW_CLAIM_RE = re.compile(
+    r"(?:估值|市盈率|PE|市净率|PB|分位)[^。；;\n|]{0,12}?"
+    r"(?:偏低|极低|低位|中低位|低估|便宜)"
+    r"|(?:低估值|估值低(?:位|估)|处于低位估值)")
+#: 结论区标题族（含 ETF 三行核心判断与致命一击：前者为精简模板首屏，
+#: 后者为原报告的违规载体——同类「核心结论区」）。
+_ETF_CONCLUSION_REGION_HEAD_RE = re.compile(
+    r"结论|核心(?:发现|判断)|判断|致命一击|最脆弱|五问|多空")
+
+
+def _conclusion_region_line_numbers(md: str) -> list[int]:
+    """结论区行号：h2 标题命中标题族 → 其下至下一个 h2（含更深子标题行）。"""
+    out: list[int] = []
+    in_region = False
+    for i, ln in enumerate(md.splitlines(), 1):
+        m = re.match(r"^(#{1,6})\s+(.*?)\s*$", ln)
+        if m and len(m.group(1)) <= 2:
+            in_region = bool(_ETF_CONCLUSION_REGION_HEAD_RE.search(m.group(2)))
+            continue
+        if in_region:
+            out.append(i)
+    return out
+
+
+def _etf_valuation_excluded_findings(payload: dict, text: str) -> list[dict]:
+    """已排除估值摘要却在结论区称低位（A8 可机械反例）。
+
+    三条件齐备才判：① payload 指数 PE 不可得（本代估值证据缺失）；
+    ② 报告自述把外部估值摘要排除出结论；③ 结论区出现无来源的估值低位断言
+    （同分句否证/「口径不一」等措辞照常豁免——真实否定不得误伤）。
+    带 `[来源:]` 的低位断言不在此拦截（可能为本次已读一手材料，交人工复检）。
+    """
+    profile = payload.get("profile")
+    if not isinstance(profile, dict) or profile.get("index_pe") is not None:
+        return []
+    if not _ETF_VALUATION_EXCLUSION_RE.search(text):
+        return []
+    region_lines = set(_conclusion_region_line_numbers(text))
+    if not region_lines:
+        return []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if line_no not in region_lines:
+            continue
+        m = _first_unexempt_claim(line, _ETF_VALUATION_LOW_CLAIM_RE, family="valuation")
+        if not m:
+            continue
+        if re.search(r"\[来源\s*[:：]", line):
+            continue
+        return [{
+            "id": "etf-valuation-excluded-claim", "severity": "error",
+            "message": ("报告已声明估值摘要不构成结论（排除锚点），且本代 payload "
+                        "index_pe 不可得，但结论区仍以无来源表述断言估值低位："
+                        f"「{line.strip()[:70]}」——自相矛盾的可机械反例")}]
+    return []
+
+
 def etf_generation_findings(report_path: Path, *,
                             record_refresh: bool = False) -> list[dict]:
-    """ETF 同代消费与断言对照（B06，离线）：返回 findings 列表。
+    """ETF 同代消费与断言对照（B06 + 2026-10-10 A8，离线）：返回 findings 列表。
 
     检查面：payload 存在/封存有效/对象一致 → QC 记录侧车绑定（产物 sha256、
     旧签认失效）→ HTML 内嵌代际哈希 → 报告正文断言 × payload 实况
-    （无基准 TE、隔夜 NAV 错价、缺权重=0、错月拼当期、身份未核称已核）。
+    （无基准 TE、隔夜 NAV 错价、缺权重=0、错月拼当期、身份未核称已核）
+    → 同代数值一致性/独立复算（BOLL 带宽按 (u−l)/m 从原始值复算、派生字段与
+    轨道值对拍、同类产品表期间与数值、份额窗口、排名与组内极值、
+    已排除估值证据却在结论区称低位）。
     未执行/不可判定项按 severity=warning 返回（未执行 ≠ PASS）。
 
     ``record_refresh=True``（调用方本次带 ``--record``，侧车将被覆盖重写）：
@@ -2566,6 +3399,15 @@ def etf_generation_findings(report_path: Path, *,
                         "message": f"payload 身份核验状态={ver!r}，正文却称身份已核/原文核验："
                                    f"「{line.strip()[:60]}」"})
                     break
+        # 同代数值一致性 / 独立复算 / 期间与极值排名 / 估值排除断言
+        # （2026-10-10 A8；全部离线只读同代 payload，失败反例见
+        #  tests/test_b06_qc_record.py 的 TestETFValueCrossChecks 各项）
+        findings.extend(_etf_boll_findings(payload, text))
+        findings.extend(_etf_derived_payload_findings(payload, text))
+        findings.extend(_etf_peers_table_findings(payload, text))
+        findings.extend(_etf_share_window_findings(payload, text))
+        findings.extend(_etf_rank_findings(payload, text))
+        findings.extend(_etf_valuation_excluded_findings(payload, text))
     # QC 记录侧车（产物哈希绑定 + 分层签认）
     rec = verify_qc_record(report_path)
     if record_refresh:

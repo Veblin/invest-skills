@@ -1186,3 +1186,86 @@ class TestReadingLengthExcludesFoldedSpans:
     def test_only_named_basement_is_excluded(self):
         ordinary = "<details>\n<summary>展开：分析详情</summary>\n" + "正文" * 11000 + "\n</details>"
         assert readability_metrics(ordinary)["total_chars"] > READABILITY_MAX_CHARS
+
+
+# ── 2026-10-10 A8：表列错位（渲染器静默缺列/截断的机器拦截） ──
+
+_MISALIGNED_TABLE = ("| 代码 | 名称 | 值 |\n|---|---|---|\n"
+                     "| 510300 | 沪深300ETF | -0.44 | 5.5 |\n")
+
+
+class TestTableAlignment:
+    """表体行列数 ≠ 表头列数：ETF 渲染器（etf_md）缺列留空/多列丢弃且不报错
+    （静默数据丢失）→ ETF 类型 error；其余类型 warning（先暴露不阻断）。"""
+
+    def test_etf_misaligned_row_fails_structure_layer(self, tmp_path: Path):
+        p = _write(tmp_path, "510300-沪深300ETF", "2026-10-10-10-00-00.md",
+                   COMPLIANT_ETF + "\n" + _MISALIGNED_TABLE)
+        r = qc_file(p, fail_on="error")
+        structure = next(l for l in r.layers if l.layer == "structure")
+        assert structure.status == "fail"
+        assert any(d["id"] == "table-row-misaligned" and d["severity"] == "error"
+                   for d in structure.details)
+
+    def test_stock_misaligned_row_is_warning_not_fail(self, tmp_path: Path):
+        p = _write(tmp_path, "600176-中国巨石", "2026-10-10-10-00-00.md",
+                   COMPLIANT_STOCK + "\n" + _MISALIGNED_TABLE)
+        r = qc_file(p, fail_on="error")
+        structure = next(l for l in r.layers if l.layer == "structure")
+        assert structure.status == "warn"
+        assert any(d["id"] == "table-row-misaligned" and d["severity"] == "warning"
+                   for d in structure.details)
+
+    def test_escaped_pipe_with_correct_column_count_passes(self, tmp_path: Path):
+        md = (COMPLIANT_ETF
+              + "\n| 指标 | 值 | 说明 |\n|---|---|---|\n"
+              + "| 大幅波动日 | 22 个 \\|涨跌\\|≥5% | 引擎 big_move 口径 |\n")
+        p = _write(tmp_path, "510300-沪深300ETF", "2026-10-10-10-00-00.md", md)
+        structure = next(l for l in qc_file(p, fail_on="error").layers
+                         if l.layer == "structure")
+        assert not any(d["id"] == "table-row-misaligned" for d in structure.details), \
+            "转义 \\| 不得被误判为多列"
+
+    def test_unescaped_pipe_inside_bold_is_intercepted(self, tmp_path: Path):
+        """真实反例（515050 型）：`**22 个 |涨跌|≥5% 交易日**` 未转义 → 多列被丢。"""
+        md = (COMPLIANT_ETF
+              + "\n| 指标 | 值 | 说明 |\n|---|---|---|\n"
+              + "| 大幅波动日 | **22 个 |涨跌|≥5% 交易日** | 引擎口径 |\n")
+        p = _write(tmp_path, "510300-沪深300ETF", "2026-10-10-10-00-00.md", md)
+        structure = next(l for l in qc_file(p, fail_on="error").layers
+                         if l.layer == "structure")
+        assert any(d["id"] == "table-row-misaligned" for d in structure.details)
+
+    def test_header_separator_mismatch_intercepted(self, tmp_path: Path):
+        md = (COMPLIANT_ETF
+              + "\n| a | b | c |\n|---|---|\n| 1 | 2 |\n")
+        p = _write(tmp_path, "510300-沪深300ETF", "2026-10-10-10-00-00.md", md)
+        structure = next(l for l in qc_file(p, fail_on="error").layers
+                         if l.layer == "structure")
+        ids = {d["id"] for d in structure.details}
+        assert "table-header-misaligned" in ids
+
+    def test_missing_cell_row_intercepted(self, tmp_path: Path):
+        md = (COMPLIANT_ETF
+              + "\n| 日期 | 标题 |\n|---|---|\n| 2026-09-08 | 关于增持的公告 |\n"
+              + "| 来源: 涨停扫描 + tushare.daily |\n")
+        p = _write(tmp_path, "510300-沪深300ETF", "2026-10-10-10-00-00.md", md)
+        structure = next(l for l in qc_file(p, fail_on="error").layers
+                         if l.layer == "structure")
+        assert structure.status == "fail"
+        assert any(d["id"] == "table-row-misaligned" for d in structure.details)
+
+    def test_split_row_matches_renderer_contract(self):
+        """拆格语义对拍：与 etf_md._split_table_row 逐例一致（跨包不 import，
+        以显式路径加载探针模块；两处拆格不一致会造成「QC 通过但渲染错列」）。"""
+        import importlib.util
+        probe_path = (Path(__file__).resolve().parents[2]
+                      / "invest-a-etf" / "scripts" / "lib" / "etf_md.py")
+        assert probe_path.is_file(), "对拍目标缺失（布局变化时须同步本用例）"
+        spec = importlib.util.spec_from_file_location("_etf_md_probe", probe_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        from report_qc import _md_split_row
+        for row in ("| a | b |", "| a\\|b | c |", "|  a  |  b  |", "| | |",
+                    "| a | b", "| a \\| b |", "| 22 个 |涨跌|≥5% | c |"):
+            assert _md_split_row(row) == mod._split_table_row(row), row
