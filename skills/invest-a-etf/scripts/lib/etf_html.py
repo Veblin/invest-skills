@@ -407,6 +407,40 @@ def _vnote(text: str) -> str:
             f'<path d="M12 8v4m0 4h.01"/></svg>{_esc(text)}</div>')
 
 
+def _flow_uncertainty(summary: dict) -> str:
+    """保留引擎的不确定性；旧 payload 缺标记时不推断新状态。"""
+    window = summary.get("flow_window") or {}
+    if window.get("confirmable") is False:
+        return "窗口份额流不可确认：" + str(window.get("note") or "窗口证据未确认")
+    return ""
+
+
+#: category.label 的「未知」族取值（Spot 缺失时 category=unknown；不可当名称用）
+_UNKNOWN_CATEGORY_LABELS = {"", "未知", "unknown", "Unknown", "none", "None"}
+
+
+def _identity_display_name(profile: dict) -> str:
+    """名称摘要（R8，2026-10-11 复查）：已封存身份登记优先，未知不冒充名称。
+
+    顺序：category.label（非未知族）→ identity.fund_name（原文核验登记）→
+    「身份待核」（identity 存在但无名称且未核验——如 159796 unknown）→
+    旧代透明回退（label/profile.name 原样，可能为空）。
+    只消费封存字段；不据名称/外部检索反推或改写身份。
+    """
+    cat = profile.get("category") if isinstance(profile.get("category"), dict) else {}
+    label = str((cat or {}).get("label") or "").strip()
+    if label not in _UNKNOWN_CATEGORY_LABELS:
+        return label
+    ident = profile.get("identity") or {}
+    fund_name = str(ident.get("fund_name") or "").strip()
+    if fund_name:
+        return fund_name
+    ver = str((ident.get("verification") or {}).get("status") or "")
+    if ident and ver != "verified_original":
+        return "身份待核"
+    return label or str(profile.get("name") or "").strip()
+
+
 def _html_hero(profile: dict, quote: dict, kline: dict,
                share_history: dict, history: dict) -> str:
     """头部摘要（hero，首屏快览）。全部引擎字段直映，无跨字段计算。
@@ -437,6 +471,13 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
     recent_flow = sh_summary.get("recent_flow_est")
     inflow_days = sh_summary.get("inflow_days")
     outflow_days = sh_summary.get("outflow_days")
+    # A3/A4（Codex 消费链阻塞）：窗口标签必须用实际 window_days 与共同起止，
+    # 不得固定「20 日」（120/60 日报告会标错窗口）；旧 payload 无该键时回退 20。
+    flow_win_days = sh_summary.get("window_days") or 20
+    _fw = sh_summary.get("flow_window") or {}
+    flow_warning = _flow_uncertainty(sh_summary)
+    flow_win_txt = (f"{_fw.get('start')}~{_fw.get('end')}"
+                    if _fw.get("start") and _fw.get("end") else "")
 
     stats = history.get("stats") or {}
     md_stat = stats.get("max_drawdown") or {}
@@ -448,7 +489,9 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
         pe_sub = f"历史位置 {_fmt(pe_pct, 1)}%（引擎累积窗口） · "
     pe_sub += "profile.index_pe_pct"
 
-    flow_sub = f"{_esc(flow_trend)} · " if flow_trend else ""
+    flow_sub = (_esc(flow_warning) + " · " if flow_warning else
+                f"{_esc(flow_trend)} · " if flow_trend else "")
+    flow_sub += (f"共同起止 {flow_win_txt} · " if flow_win_txt else "")
     flow_sub += "share_history.summary.total_flow_est"
 
     rsi_sub = (f"RSI({rsi_period}) · " if rsi_period else "") + "kline.rsi"
@@ -464,19 +507,60 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
         _kpi_card("最大回撤（%）",
                   (_fmt_signed(md_stat.get("drawdown_pct"), 1) if md_stat.get("drawdown_pct") is not None else "—"),
                   "history.stats.max_drawdown.drawdown_pct", _pos_var(md_stat.get("drawdown_pct"))),
-        _kpi_card("20 日份额流（亿）", (_fmt_signed(total_flow, 2) if total_flow is not None else "—"), flow_sub,
-                  _pos_var(total_flow)),
+        _kpi_card(f"{flow_win_days} 日份额流可确认段小计（亿）" if flow_warning else f"{flow_win_days} 日份额流（亿）",
+                  (_fmt_signed(total_flow, 2) if total_flow is not None else "—"),
+                  flow_sub, _pos_var(total_flow)),
         _kpi_card("RSI", _fmt(rsi, 1) if rsi is not None else "—", rsi_sub),
     ]
 
     # ── 4 条状态要点（任一条件字段缺失 → 整句丢弃；无跨字段计算） ──
     points = []
-    if price is not None and stats.get("current_vs_high_pct") is not None and ah.get("date") is not None:
-        points.append((f"价格位置：最新价 {price_str}，距窗口高点 {_fmt_signed(stats.get('current_vs_high_pct'))}%"
-                       f"（{_fmt(ah.get('close'), 3)} @ {_esc(ah.get('date'))}）",
-                       "history.stats.current_vs_high_pct"))
-    if total_flow is not None and flow_trend:
-        seg = f"20 日 {_fmt_signed(total_flow, 2)} 亿"
+    # R7（2026-10-11 复查）：窗口位置断言必须与 current_vs_high_pct **同口径**
+    # ——该值由 history.history.rows 序列**末值** vs 窗口高点计算
+    # （compute_history_stats），旧文案却写「最新价 quote.price」，把交易报价
+    # 与净值/收盘序列的窗口距离混写（159920 现场：报价 1.421 vs 净值序列比
+    # −15.6%，按报价算应为 −16.14%）。现按 history.source 标注口径、引用真正
+    # 使用的历史末值（不用报价/当前 kline 最新净值顶替）；末值或来源缺失/未知
+    # → 省略本句（不猜）。
+    hist_block = history.get("history") or {}
+    hist_rows = hist_block.get("rows") or []
+    hist_last = hist_last_date = None
+    for row in reversed(hist_rows):
+        if isinstance(row, dict):
+            v = safe_float(row.get("nav", row.get("close")))
+            if v is not None:
+                hist_last, hist_last_date = v, str(row.get("date") or "")
+                break
+    hsource = str(hist_block.get("source") or "")
+    # R11（2026-10-11 复查）：复权标注只认 history 块**自身留痕**的 adj_applied。
+    # 旧实现按 source 硬编码（nav→复权净值 / baostock→前复权收盘价）——若该链路
+    # 实际未复权（adj_applied=False）或未留痕（缺失）就是过度断言。分派：
+    # True → 复权/前复权标注；False → 未复权标注；其余（缺失/非布尔）→ 中性
+    # 「净值/历史收盘价（复权状态未知）」，不猜。kline.adj_applied 是另一链路
+    # 的字段，本句不消费（R7 时曾按 source 推断，属同类缺陷）。
+    hadj = hist_block.get("adj_applied")
+    if hadj is True:
+        pos_label = {"nav": "净值位置：复权净值",
+                     "baostock": "历史收盘位置：前复权收盘价"}.get(hsource)
+    elif hadj is False:
+        pos_label = {"nav": "净值位置：未复权净值",
+                     "baostock": "历史收盘位置：未复权收盘价"}.get(hsource)
+    else:
+        pos_label = {"nav": "净值位置：净值（复权状态未知）",
+                     "baostock": "历史收盘位置：历史收盘价（复权状态未知）"}.get(hsource)
+    if (pos_label is not None and hist_last is not None
+            and stats.get("current_vs_high_pct") is not None and ah.get("date") is not None):
+        points.append((f"{pos_label} {_fmt(hist_last, 4)}（{_esc(hist_last_date)}），"
+                       f"距窗口高点 {_fmt_signed(stats.get('current_vs_high_pct'))}%"
+                       f"（{_fmt(ah.get('close'), 4)} @ {_esc(ah.get('date'))}）",
+                       "history.history.rows（末值）· history.stats.current_vs_high_pct"))
+    if flow_warning:
+        points.append((f"份额流：可确认段小计 {_fmt_signed(total_flow, 2)} 亿；"
+                       f"{_esc(flow_warning)}", "share_history.summary.flow_window"))
+    elif total_flow is not None and flow_trend:
+        seg = f"{flow_win_days} 日 {_fmt_signed(total_flow, 2)} 亿"
+        if flow_win_txt:
+            seg += f"（{flow_win_txt}）"
         if recent_days is not None and recent_flow is not None:
             seg += f"；近 {recent_days} 日 {_fmt_signed(recent_flow, 2)} 亿"
         if inflow_days is not None and outflow_days is not None:
@@ -510,8 +594,9 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
 
     # ── 一句话总结（分段可选拼接；空字段不输出空段） ──
     bits = []
-    if cat.get("label"):
-        bits.append(f"{_esc(cat.get('label'))}")
+    display_name = _identity_display_name(profile)
+    if display_name:
+        bits.append(f"{_esc(display_name)}")
     hc_index = hc.get("index")
     if hc_index and str(hc_index) != "未知":
         bits.append(f"跟踪 {_esc(hc_index)}")
@@ -520,8 +605,10 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
         if pe_pct is not None:
             s += f"（历史位置 {_fmt(pe_pct, 1)}%）"
         bits.append(s)
-    if total_flow is not None and flow_trend:
-        bits.append(f"20 日份额 {_esc(flow_trend)} {_fmt_signed(total_flow, 2)} 亿")
+    if flow_warning:
+        bits.append("份额流窗口不可确认（仅显示可确认段小计）")
+    elif total_flow is not None and flow_trend:
+        bits.append(f"{flow_win_days} 日份额 {_esc(flow_trend)} {_fmt_signed(total_flow, 2)} 亿")
     if vg.get("industry"):
         s = f"聚焦 {_esc(vg.get('industry'))}"
         if vg.get("sub_sector") and str(vg.get("sub_sector")) != str(vg.get("industry")):
@@ -594,7 +681,7 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
 
     flags_html = _flags_badges(profile.get("flags"))
     return f'''<section id="overview">
-  <div class="sh"><span class="st">产品快照</span><div class="sd"></div><span class="ss">{_esc(profile.get("category", {}).get("label", "") or "")}</span></div>
+  <div class="sh"><span class="st">产品快照</span><div class="sd"></div><span class="ss">{_esc(_identity_display_name(profile))}</span></div>
   <div class="g4">
     {_kpi_card("最新价", price_str, f"较昨收 {chg_str}", price_color)}
     {_kpi_card("规模代理（亿元）", _fmt(aum) if aum is not None else "—",
@@ -829,15 +916,33 @@ def _section_history(history: dict, events: dict, playbook: dict) -> str:
     if playbook.get("available"):
         rows = "".join(
             f'<tr><td>{(_fmt_signed(safe_float(lv.get("level_pct")), 0) + "%") if safe_float(lv.get("level_pct")) is not None else "—"}</td>'
-            f'<td>{_esc(str(lv.get("sigma_multiple")) + "σ" if lv.get("sigma_multiple") is not None else "N/A")}</td>'
+            f'<td>{_esc(lv.get("state") or "未知")}</td>'
             f'<td style="text-align:left">{_esc(lv.get("verification_depth", ""))}</td></tr>'
             for lv in playbook.get("drawdown_levels") or []
         )
         checklist = "".join(f'<li>{_esc(s)}</li>' for s in playbook.get("checklist") or [])
+        dd = playbook.get("current_drawdown") or {}
+        cv = playbook.get("current_verification") or {}
+        dd_pct = safe_float(dd.get("current_drawdown_pct"))
+        if (dd_pct is None or type(cv.get("reached_levels")) is not int
+                or "deepest_reached_level_pct" not in cv):
+            cv_text = "当前核验深度：未知（缺当前回撤或核验状态）"
+        elif cv.get("deepest_reached_level_pct") is not None:
+            cv_text = (f"当前核验深度 {_esc(cv.get('deepest_reached_depth', ''))}"
+                       f"（已越过 {cv.get('reached_levels')} 档，最深 "
+                       f"{_fmt_signed(cv.get('deepest_reached_level_pct'), 0)}%）")
+        elif cv.get("reached_levels") == 0:
+            cv_text = "当前核验深度：无档位触发（各档均未达）"
+        else:
+            cv_text = "当前核验深度：未知（核验状态不完整）"
+        dd_text = (f"当前回撤（自窗口峰值）{_fmt(dd_pct)}%"
+                   f"（{_esc(dd.get('peak_date') or '')} 峰值 {_fmt(dd.get('peak_close'), 4)}"
+                   f" → {_esc(dd.get('latest_date') or '')} 收 {_fmt(dd.get('latest_close'), 4)}）"
+                   if dd_pct is not None else "当前回撤不可得（旧数据未提供当前回撤证据）")
         playbook_html = f'''<div class="card" style="margin-top:var(--space-4)" id="playbook">
-      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-2)">情景预案（R11c · σ 回撤档位 → 触发核验深度）</div>
-      <div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:var(--space-3)">60 日日均波动 {_fmt(playbook.get("vol_60d_daily_pct"))}%（来源: {_esc(playbook.get("vol_source", ""))}）——核验深度筛选规则，非操作阈值</div>
-      <table class="ft"><thead><tr><th>回撤档位</th><th>σ 倍数</th><th>触发核验深度</th></tr></thead><tbody>{rows}</tbody></table>
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-2)">情景预案（R11c · 回撤档位 → 触发核验深度）</div>
+      <div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:var(--space-3)">{dd_text} · {cv_text} · {_esc(playbook.get("basis") or "")}</div>
+      <table class="ft"><thead><tr><th>回撤档位</th><th>当前状态</th><th>触发核验深度</th></tr></thead><tbody>{rows}</tbody></table>
       <ul style="margin-top:var(--space-3);padding-left:var(--space-6);font-size:var(--text-xs);color:var(--tx-m)">{checklist}</ul>
       {_vnote(playbook.get("disclaimer") or "")}
     </div>'''
@@ -914,12 +1019,22 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
         prow = ""
         for r in peers.get("flow", {}).get("rows") or []:
             code = r.get("symbol", "")
+            # 旧 payload 兼容：无 flow_total_e 键的行回退 flow_20d_e；
+            # **键存在但为 None**（长窗口别名失效/不可得行）不得回退造数。
+            if "flow_total_e" in r:
+                flow_cell = r.get("flow_total_e")
+            else:
+                flow_cell = r.get("flow_20d_e")
+            row_warning = _flow_uncertainty(r)
+            if not row_warning and r.get("confirmable") is False:
+                row_warning = "窗口份额流不可确认：" + str(r.get("note") or "窗口证据未确认")
+            partial_label = "（可确认段小计）" if row_warning else ""
             prow += (f'<tr><td style="text-align:left">{_esc(names.get(code, code))}</td>'
                      f'<td style="text-align:left">{_esc(code)}</td>'
-                     f'<td style="color:{_pos_var(r.get("flow_20d_e"))}">{_fmt_signed(r.get("flow_20d_e"))}</td>'
-                     f'<td style="color:{_pos_var(r.get("flow_5d_e"))}">{_fmt_signed(r.get("flow_5d_e"))}</td>'
+                     f'<td style="color:{_pos_var(flow_cell)}">{_fmt_signed(flow_cell)}{partial_label}</td>'
+                     f'<td style="color:{_pos_var(r.get("flow_5d_e"))}">{_fmt_signed(r.get("flow_5d_e"))}{partial_label}</td>'
                      f'<td>{_fmt_signed(r.get("share_change_pct"))}</td>'
-                     f'<td style="text-align:left">{_esc(r.get("trend", ""))}</td></tr>')
+                     f'<td style="text-align:left">{_esc(row_warning or r.get("trend", ""))}</td></tr>')
         rs = peers.get("rs") or {}
         rank = rs.get("rank_20d") or {}
         peer_note = (
@@ -928,11 +1043,14 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
             "RS 基准=同赛道等权均值，20 日收益排名 "
             f"{_esc(rank.get('rank', '?'))}/{_esc(rank.get('total', '?'))}（20 日窗口）"
         )
+        comparison_note = (peers.get("flow") or {}).get("common_window_note")
+        if comparison_note:
+            peer_note += " · " + _esc(comparison_note)
         peers_block = f'''<div class="card" style="margin-top:var(--space-4)">
       <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">同赛道资金流对比（R13 · Tushare 份额×均价估算 · 亿元）</div>
-      <table class="ft"><thead><tr><th>名称</th><th>代码</th><th>20日流</th><th>5日流</th><th>份额变化%</th><th>趋势</th></tr></thead><tbody>{prow}</tbody></table>
+      <table class="ft"><thead><tr><th>名称</th><th>代码</th><th>窗口流</th><th>5日流</th><th>份额变化%</th><th>趋势</th></tr></thead><tbody>{prow}</tbody></table>
       <div class="g3" style="margin-top:var(--space-3)">
-        {_ipill("RS 最新", _fmt(rs.get("rs_latest"), 1), "101 = 与基准持平", "sig-neutral", _pos_var(rs.get("rs_change")) if rs.get("rs_change") else "")}
+        {_ipill("RS 最新", _fmt(rs.get("rs_latest"), 1), "100 = 与基准持平（首对齐点归一化）", "sig-neutral", _pos_var(rs.get("rs_change")) if rs.get("rs_change") else "")}
         {_ipill("RS 窗口起点", _fmt(rs.get("rs_window_start"), 1), f"n={_esc(rs.get('n', ''))}", "sig-neutral")}
         {_ipill("RS 20日变化", _fmt_signed(rs.get("rs_change"), 1), "相对强弱状态参考，非信号", "sig-neutral", _pos_var(rs.get("rs_change")))}
       </div>
@@ -944,10 +1062,14 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
     sh_row = ""
     if share_history.get("available"):
         s = share_history.get("summary") or {}
+        warning = _flow_uncertainty(s)
+        flow_title = "份额流可确认段小计（亿）" if warning else "份额流合计（亿）"
+        flow_note = _esc(warning) if warning else f"{_esc(s.get('trend', ''))}（引擎趋势标签）"
+        segment_note = "仅可确认区段；近端流量亦为区段小计 · " if warning else ""
         sh_row = (f'<div class="g4" style="margin-top:var(--space-4)">'
-                  f'{_kpi_card("份额流合计（亿）", _fmt_signed(s.get("total_flow_est"), 2), f"{_esc(s.get('trend', ''))}（引擎趋势标签）", _pos_var(s.get("total_flow_est")))}'
-                  f'{_kpi_card("份额变化（万份）", _fmt_grouped(s.get("share_total_change")), "share_history.summary")}'
-                  f'{_kpi_card("流入/流出天数", f"{s.get('inflow_days', '—')} / {s.get('outflow_days', '—')}", f"近端{s.get('recent_flow_days', '—')}日 {_fmt_signed(s.get('recent_flow_est'), 2)} 亿")}'
+                  f'{_kpi_card(flow_title, _fmt_signed(s.get("total_flow_est"), 2), flow_note, _pos_var(s.get("total_flow_est")))}'
+                  f'{_kpi_card("份额变化（万份，含未确认段）" if warning else "份额变化（万份）", _fmt_grouped(s.get("share_total_change")), "share_history.summary")}'
+                  f'{_kpi_card("流入/流出天数", f"{s.get('inflow_days', '—')} / {s.get('outflow_days', '—')}", f"{segment_note}近端{s.get('recent_flow_days', '—')}日 {_fmt_signed(s.get('recent_flow_est'), 2)} 亿")}'
                   f'{_kpi_card("日均成交（亿）", _fmt(s.get("avg_amount_e")), f"峰值 {_fmt(s.get("max_amount_e"))}")}'
                   f'</div>')
     shares_avail = share_history.get("available") and bool(share_history.get("rows"))
@@ -957,9 +1079,9 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
   {sf_block}
   {sh_row if sh_row else ""}
   <div class="card" style="margin-top:var(--space-4)">
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">份额资金流与收盘价（近 20 日 · Tushare fund_share）</div>
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">份额资金流与收盘价（近 {_esc(str((share_history.get('summary') or {}).get('window_days') or 20))} 日 · Tushare fund_share）</div>
     <div class="cw"><canvas id="shareFlowChart"></canvas></div>
-    {'<div class="vnote">近 20 日份额流 + 收盘价；T+1 延迟，最新 1-2 日字段可能为空。' + _esc(share_history.get('caliber_note') or '') + '</div>' if shares_avail else ''}
+    {'<div class="vnote">近 ' + _esc(str((share_history.get('summary') or {}).get('window_days') or 20)) + ' 日份额流 + 收盘价；T+1 延迟，最新 1-2 日字段可能为空；份额变化与资金流合计共同起止（flow_window）。' + _esc(share_history.get('caliber_note') or '') + '</div>' if shares_avail else ''}
   </div>
   {peers_block}
 </section>'''
@@ -1175,7 +1297,9 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None,
     playbook = payload.get("playbook") or {}
 
     symbol = str(payload.get("symbol", ""))
-    name = profile.get("category", {}).get("label", "") if isinstance(profile.get("category"), dict) else ""
+    # R8：名称消费已封存身份登记（category 未知时用 identity.fund_name/待核，
+    # 不再把 Spot 缺失的「未知」当名称）；缺字段旧代透明降级。
+    name = _identity_display_name(profile)
     if not name:
         name = profile.get("name") or ""
 

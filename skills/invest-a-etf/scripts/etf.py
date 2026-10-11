@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from etf_data import (  # noqa: E402
     compute_history_stats,
     prefetch_etf_spot,
     query_etf_data,
+    query_etf_disclosed_structure,
     query_etf_est_net_assets,
     query_etf_fees,
     query_etf_holdings,
@@ -92,36 +94,39 @@ def _build_events_block(symbol: str, events_path: str | None,
             "rows": events, "aligned": aligned}
 
 
-def _build_playbook_block(history_block: dict | None, kline: dict) -> dict:
-    """R11c: 回撤档位 σ 分级 + 三步核查 + LAW 6a 声明（研究流程规则，非买卖指令）。"""
+def _build_playbook_block(history_block: dict | None) -> dict:
+    """R11c/A2: 回撤档位（绝对百分比 → 触发核验深度）+ 当前回撤状态 + 三步核查。
+
+    A2（2026-10-10）：不再输出 σ 倍数/60 日日均波动（无统计概率口径）；
+    改为输出**当前回撤**与各档「已达/未达」——当前回撤与档位同源（历史收盘序列），
+    避免「当前已越过所有档仍按四个未来触发」的呈现。
+    """
     from etf_playbook import (
         LAW6A_DISCLAIMER,
-        daily_vol_pct,
+        LEVELS_BASIS,
+        current_drawdown,
+        current_verification,
         drawdown_levels,
         three_step_checklist,
     )
 
-    closes: list[float] = []
+    rows: list[dict] = []
     if (history_block and history_block.get("stats")
             and history_block["stats"].get("status") == "available"):
-        rows = history_block["history"].get("rows") or []
-        closes = [c for c in (safe_float(r.get("nav", r.get("close"))) for r in rows)
-                  if c is not None]
-    vol = daily_vol_pct(closes)
-    vol_source = "history"
-    if vol is None:
-        derived = kline.get("derived") or {}
-        vol = derived.get("daily_volatility_pct")
-        vol_source = "kline.derived"
+        rows = (history_block.get("history") or {}).get("rows") or []
+    dd = current_drawdown(rows)
+    levels = drawdown_levels(dd["current_drawdown_pct"] if dd else None,
+                             rows_observed=(dd or {}).get("rows_observed") or 0)
     return {
-        "available": vol is not None,
-        "vol_60d_daily_pct": round(vol, 2) if vol is not None else None,
-        "vol_source": vol_source if vol is not None else None,
-        "drawdown_levels": drawdown_levels(closes, vol),
+        "available": dd is not None,
+        "current_drawdown": dd,
+        "drawdown_levels": levels,
+        "current_verification": current_verification(levels),
+        "basis": LEVELS_BASIS,
         "checklist": three_step_checklist(),
         "disclaimer": LAW6A_DISCLAIMER,
-        "note": None if vol is not None
-        else "无足够历史数据计算 60 日日均波动（需 ≥61 个收盘价）",
+        "note": None if dd is not None
+        else "无历史行情收盘序列（当前回撤不可算；需 --playbook 且历史行情可用）",
     }
 
 
@@ -130,22 +135,76 @@ def _share_history_summary(sh: dict) -> dict:
     return {k: v for k, v in sh.items() if k != "rows"}
 
 
+class _StageTimer:
+    """A7：report 入口分阶段耗时记录（仅 stderr + 本机 logs/，**不进 payload**）。
+
+    payload 须逐字节可重放（离线回放/哈希比对），时间戳写入会破坏确定性；
+    因此耗时只作为本机运行观测：stderr 摘要 + 仓库 logs/etf-report-timings.jsonl
+    （分发副本 `repo_logs_dir()` 返回 None 时不落盘）。
+    """
+
+    def __init__(self) -> None:
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+        self.stages: dict[str, float] = {}
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.stages[name] = round(now - self._last, 3)
+        self._last = now
+
+    @property
+    def total(self) -> float:
+        return round(time.perf_counter() - self._t0, 3)
+
+
+def _log_report_timing(symbol: str, timer: _StageTimer, *, generated_at: str) -> None:
+    """A7：耗时记录只写本机——stderr 摘要 + 仓库 logs/ JSONL（无仓库布局则只 stderr）。"""
+    stages = " | ".join(f"{k} {v:.1f}s" for k, v in timer.stages.items())
+    print(f"⏱ report {symbol} 引擎阶段耗时: {stages} | 引擎合计 {timer.total:.1f}s",
+          file=sys.stderr)
+    try:
+        import logutil
+
+        logs_dir = logutil.repo_logs_dir()
+        if logs_dir is None:
+            return
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        with open(logs_dir / "etf-report-timings.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "at": generated_at, "symbol": symbol, "cmd": "report",
+                "stages_sec": timer.stages, "engine_total_sec": timer.total,
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:  # 观测设施失败不阻断报告（仅提示）
+        print(f"⚠️ 耗时日志写入失败（不阻断）: {exc}", file=sys.stderr)
+
+
 def _collect_report_payload(symbol: str, *, with_nav: bool,
                             history: bool = False, history_days: int = 250,
                             events_path: str | None = None, playbook: bool = False,
                             include_extra_dims: bool = False,
-                            index_exposure: bool = False) -> dict:
+                            index_exposure: bool = False,
+                            peers: list[str] | None = None,
+                            share_days: int = 20,
+                            timer: _StageTimer | None = None) -> dict:
     """采集并组装 report 数据快照（cmd_report 用；symbol 已校验）。
 
     ``include_extra_dims=True``（`--payload-out` 冻结 payload 时）时一并采集
     HTML 渲染所需的 holdings/peers/sector_flow 三维（单源失败占位不阻断），
-    使冻结 payload 成为 HTML 的唯一完整输入。
+    使冻结 payload 成为 HTML 的唯一完整输入；**A4**：此路径下 share_history
+    一律携带全量 rows（不再按 --with-nav 摘要化——写作/复检引用的行必须与
+    payload 同代封存），peers 走 ``--peers`` 显式清单（未映射赛道可用）。
     ``index_exposure=True``（`--index-exposure`）时按需查询指数样本/权重
     （csindex 公开文件）并**随 payload 冻结**——Fit 章节使用该数据时必须传，
     否则报告引用的输入不在同代封存内。
+    ``share_days``（A4）：份额序列窗口（交易日间隔，20/60/120 或等价 3–6 个月）。
+    ``timer``（A7）：阶段耗时记录器（缺省丢弃；只影响本机日志，不进 payload）。
     """
+    t = timer or _StageTimer()
     prefetch_etf_spot()
+    t.mark("prefetch_spot")
     profile = query_etf_data(symbol)
+    t.mark("profile")
     # 先查询再入库：index_pe_pct 分位只对「不含今日行」的历史序列计算（避免今日
     # 自投成 100%/5% 假象），与 journal 路径（不 persist-first）语义一致；写库放
     # 查询后，下次报告的分位即含今日（幂等，失败不阻断报告）
@@ -157,9 +216,13 @@ def _collect_report_payload(symbol: str, *, with_nav: bool,
     res = _persist_index_pe([idx]) if idx else {"error": None}
     if res.get("error"):
         print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
+    t.mark("index_pe_persist")
     quote = query_etf_quote(symbol)
+    t.mark("quote")
     kline = query_etf_kline(symbol)
-    share_history = query_etf_share_history(symbol, days=20)
+    t.mark("kline")
+    share_history = query_etf_share_history(symbol, days=share_days)
+    t.mark("share_history")
 
     # R11a: --history/--playbook 时取历史行情深度（nav 链路优先，失败回退 baostock）+ 历史统计
     history_block = None
@@ -170,11 +233,13 @@ def _collect_report_payload(symbol: str, *, with_nav: bool,
             if hist.get("status") == "available" else None
         )
         history_block = {"history": hist, "stats": hist_stats}
+    t.mark("history")
 
     # R11b: 事件文件（缺省自动读 events/{symbol}.json，无文件不阻断）+ 事件-价格对照
     events_block = _build_events_block(symbol, events_path, history_block)
-    # R11c: 情景预案（回撤档位 σ 分级 + 三步核查 + LAW 6a 声明）
-    playbook_block = _build_playbook_block(history_block, kline) if playbook else None
+    # R11c: 情景预案（回撤档位 → 核验深度 + 当前状态 + 三步核查 + LAW 6a 声明）
+    playbook_block = _build_playbook_block(history_block) if playbook else None
+    t.mark("events_playbook")
 
     # B02：跟踪质量块（TD/TE 契约见 etf_data 段首注释）+ 费用 + 同日份额×NAV 估算
     tracking = compute_etf_tracking(symbol)
@@ -183,9 +248,18 @@ def _collect_report_payload(symbol: str, *, with_nav: bool,
     profile["tracking"] = tracking
     profile["fees"] = fees
     profile["est_net_assets"] = est_net_assets
+    # A5：原文披露的结构补充（资产/行业/完整持仓口径/衍生）——只对已登记标的出现；
+    # 随 payload 封存，报告引用该块数字可直接复算（未登记不产生键）
+    structure = query_etf_disclosed_structure(symbol)
+    if structure:
+        profile["disclosed_structure"] = structure
+    t.mark("tracking_fees_ena")
 
     from dates import shanghai_now
 
+    # A4：封存路径（include_extra_dims）必须保留引用行——share_history 全量 rows；
+    # 普通 --json 且未传 --with-nav 时保持旧摘要形状（兼容）
+    keep_share_rows = with_nav or include_extra_dims
     payload = {
         "skill": "invest-a-etf",
         "generated_at": shanghai_now().isoformat(),
@@ -194,18 +268,21 @@ def _collect_report_payload(symbol: str, *, with_nav: bool,
         "profile": profile,
         "quote": quote,
         "kline": kline if with_nav else _kline_summary(kline),
-        "share_history": share_history if with_nav else _share_history_summary(share_history),
+        "share_history": (share_history if keep_share_rows
+                          else _share_history_summary(share_history)),
         "history": history_block if history else None,
         "events": events_block,
         "playbook": playbook_block,
         "disclaimer": "研究数据快照，不构成投资建议。",
     }
     if include_extra_dims:
-        payload.update(_html_extra_dims(symbol))
+        payload.update(_html_extra_dims(symbol, peers=peers, share_days=share_days))
+    t.mark("extra_dims")
     if index_exposure:
         from etf_data import query_etf_index_exposure  # noqa: E402
 
         payload["index_exposure"] = query_etf_index_exposure(symbol)
+        t.mark("index_exposure")
     # B06 数据侧：维度五态 + 实际尝试源（含 extra dims / index_exposure 后的实况）
     payload["data_status"] = build_data_status(
         identity=profile.get("identity"), profile=profile, quote=quote, kline=kline,
@@ -222,20 +299,29 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
                history: bool = False, history_days: int = 250,
                events_path: str | None = None, playbook: bool = False,
                payload_out: str | None = None,
-               index_exposure: bool = False) -> int:
+               index_exposure: bool = False,
+               peers: list[str] | None = None,
+               share_days: int = 20) -> int:
     symbol = symbol.strip()
     if not symbol.isdigit() or len(symbol) != 6:
         print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
         return 2
+    if not (2 <= share_days <= 200):
+        print(f"错误: --share-days 需在 2..200（交易日间隔；取数上限约 170 交易日），"
+              f"收到 {share_days}", file=sys.stderr)
+        return 2
 
+    timer = _StageTimer()
     # compact 打印体始终读完整 share_history rows（HEAD 行为，与 with_nav 无关）；
-    # with_nav 仅塑造 JSON payload 形状（--with-nav 才保留全量）
+    # with_nav 仅塑造 JSON payload 形状（--with-nav 才保留全量；A4 封存路径强制全量）
     payload = _collect_report_payload(
         symbol, with_nav=True if not as_json else with_nav,
         history=history, history_days=history_days,
         events_path=events_path, playbook=playbook,
         include_extra_dims=payload_out is not None,
         index_exposure=index_exposure,
+        peers=peers, share_days=share_days,
+        timer=timer,
     )
     # 展开回局部变量：compact 打印体保持不变（零回归）
     profile = payload["profile"]
@@ -258,8 +344,12 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
             return 2
         out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=default_serializer) + "\n",
                        encoding="utf-8")
+        timer.mark("seal_write")
         print(f"payload 已冻结: {out}（payload_hash={payload['_meta']['payload_hash'][:12]}…）",
               file=sys.stderr)
+
+    # A7：阶段耗时只写本机（stderr + logs/），不进 payload
+    _log_report_timing(symbol, timer, generated_at=payload["generated_at"])
 
     if as_json:
         from snapshot_core import default_serializer
@@ -318,6 +408,11 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         extra = (f"；价格基准偏离（研究数值，非确认 TD/TE）: "
                  f"TD {dev.get('td_pct')}%（窗口端点） / TE {dev.get('te_pct_annualized')}%"
                  f"（抽样区间 n={dev.get('sample_n')}）" if dev else "")
+        oc = tr.get("official_benchmark_comparison") or {}
+        extra += (f"；原文披露对比（官方口径，优先）：{oc.get('as_of')}，"
+                  f"最近六个月 {oc['periods'][1]['fund_pct']}% vs 基准 "
+                  f"{oc['periods'][1]['benchmark_pct']}%（差 {oc['periods'][1]['diff_pct']}pp）"
+                  if oc.get("periods") else "")
         print(f"  tracking:          {tr.get('status')}（{tr.get('note')}）{extra}")
     fees = profile.get("fees") or {}
     if fees.get("status") == "ok":
@@ -347,8 +442,10 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     print(f"  ma20/ma60 (NAV):   {kline.get('ma20')} / {kline.get('ma60')}")
     idx_ma20, idx_ma60 = kline.get('index_ma20'), kline.get('index_ma60')
     # P1-4：指数日 K 获取失败静默降级时，标注「不可得」而非裸 None
+    # A6：跨境币种不一致时为「未取数（跨币种不可直接对照）」，非获取失败
     if idx_ma20 is None and idx_ma60 is None:
-        print(f"  ma20/ma60 (index): 不可得（指数日 K 获取失败，静默降级）")
+        skip = kline.get("index_ma_skipped_reason")
+        print(f"  ma20/ma60 (index): 不可得（{skip or '指数日 K 获取失败，静默降级'}）")
     else:
         print(f"  ma20/ma60 (index): {idx_ma20} / {idx_ma60}")
     print(f"  boll (u/m/l):      {kline.get('boll_upper')} / {kline.get('boll_mid')} / {kline.get('boll_lower')}")
@@ -372,12 +469,21 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         print()
         print("## playbook (情景预案 · R11c · LAW 6a)")
         if playbook_block.get("available"):
-            print(f"  60 日日均波动: {playbook_block['vol_60d_daily_pct']}%  "
-                  f"(来源: {playbook_block['vol_source']})")
-            print("  回撤档位 → σ 倍数 → 触发核验深度（非动作指令）:")
+            dd = playbook_block.get("current_drawdown") or {}
+            print(f"  当前回撤（自窗口峰值）: {dd.get('current_drawdown_pct')}%  "
+                  f"({dd.get('peak_date')} 峰值 {dd.get('peak_close')} → "
+                  f"{dd.get('latest_date')} 收 {dd.get('latest_close')})")
+            cv = playbook_block.get("current_verification") or {}
+            if cv.get("deepest_reached_level_pct") is not None:
+                print(f"  当前核验深度: {cv.get('deepest_reached_depth')}"
+                      f"（已越过 {cv.get('reached_levels')} 档，最深 "
+                      f"{cv.get('deepest_reached_level_pct'):+.0f}%）")
+            else:
+                print("  当前核验深度: 无档位触发（各档均未达）")
+            print("  回撤档位 → 触发核验深度（绝对百分比分档，非统计概率/非动作指令）:")
             for lv in playbook_block["drawdown_levels"]:
-                sigma = f"{lv['sigma_multiple']}σ" if lv["sigma_multiple"] is not None else "N/A"
-                print(f"    {lv['level_pct']:+.0f}%  →  {sigma}  →  {lv['verification_depth']}")
+                state = lv.get("state") or "N/A"
+                print(f"    {lv['level_pct']:+.0f}%  →  {lv['verification_depth']}  [{state}]")
             print("  三步核查:")
             for step in playbook_block["checklist"]:
                 print(f"    {step}")
@@ -405,7 +511,8 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         else:
             print(f"  不可用: {hist.get('error') or '历史行情获取失败'}")
     print()
-    print("## share_history (近20日 份额资金流 + OHLCV | Tushare fund_share+fund_daily)")
+    _sh_win = (share_history.get("summary") or {}).get("window_days") or 20
+    print(f"## share_history (近 {_sh_win} 日 份额资金流 + OHLCV | Tushare fund_share+fund_daily)")
     if share_history.get("available"):
         # 表头
         print(f"  {'日期':<10s} {'开盘':>6s} {'最高':>6s} {'最低':>6s} {'收盘':>6s} {'涨跌%':>7s} "
@@ -447,8 +554,21 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         avg_amt_str = f"{avg_amt:.2f}" if avg_amt is not None else "-"
         share_chg = s.get('share_total_change')
         share_chg_str = f"{share_chg:+.0f}" if share_chg is not None else "-"
-        print(f"  资金趋势: {s.get('trend', '?')} | {s['row_count']}日合计: {total_flow_str} 亿 | "
-              f"日均成交: {avg_amt_str} 亿 | 份额变化: {share_chg_str} 万份")
+        pct = s.get('share_change_pct')
+        pct_str = f"{pct:+.2f}%" if pct is not None else "-"
+        fwin = s.get('flow_window') or {}
+        unconfirmed = fwin.get('confirmable') is False
+        trend_text = "窗口不可确认" if unconfirmed else s.get('trend', '?')
+        total_label = "可确认段小计" if unconfirmed else "窗口合计"
+        print(f"  资金趋势: {trend_text} | {total_label}: {total_flow_str} 亿 | "
+              f"日均成交: {avg_amt_str} 亿 | 份额变化(同窗): {share_chg_str} 万份 {pct_str}")
+        if unconfirmed:
+            print(f"  ⚠️ 窗口份额流不可确认: {fwin.get('note') or '窗口证据未确认'}")
+        if fwin:
+            miss = fwin.get('missing_share_days') or 0
+            print(f"  共同起止: {fwin.get('start')}~{fwin.get('end')}"
+                  f"（{fwin.get('segments')} 段/{fwin.get('trading_days')} 交易日"
+                  + (f"，窗内缺份额 {miss} 日 ⚠" if miss else "") + "）")
     else:
         print(f"  不可用: {share_history.get('note', '未知')}")
     print()
@@ -532,10 +652,14 @@ def cmd_holdings(symbol: str, *, as_json: bool) -> int:
 
 def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None,
               same_index_str: str | None = None, index_code: str | None = None,
-              evidence_path: str | None = None) -> int:
+              evidence_path: str | None = None, share_days: int = 20) -> int:
     """R13: 赛道资金流对比 + 相对强弱；B02: 可选同指数实现质量有限比较。"""
     symbol = _validate_symbol(symbol)
     if symbol is None:
+        return 2
+    if not (2 <= share_days <= 200):
+        print(f"错误: --share-days 需在 2..200（交易日间隔；取数上限约 170 交易日），"
+              f"收到 {share_days}", file=sys.stderr)
         return 2
     peers_list = None
     if peers_str:
@@ -545,7 +669,7 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None,
     except ImportError as exc:
         print(f"etf_peers 模块不可用: {exc}（请检查路径配置或 canonical 模块加载）")
         return 1
-    data = query_etf_peers(symbol, peers_list)
+    data = query_etf_peers(symbol, peers_list, share_days=share_days)
     # B02 同指数实现质量比较：必须显式给指数代码与**官方材料证据文件**
     # （同指数身份/币种/费率来自本次读取的原文；URL 存在 ≠ 已读，不猜）
     same_index = None
@@ -620,22 +744,35 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None,
         print(f"⏳ {data.get('note', '赛道不可用')}")
         return 0
     names = data.get("names") or {}
-    print("## 资金流对比 (Tushare fund_share · 20日窗口 · 亿元)")
-    print(f"  {'代码':<8s} {'名称':<14s} {'20日流':>8s} {'5日流':>7s} "
+    win = (data.get("flow") or {}).get("window_days", 20)
+    print(f"## 资金流对比 (Tushare fund_share · {win} 日窗口 · 亿元)")
+    comparison_note = (data.get("flow") or {}).get("common_window_note")
+    if comparison_note:
+        print(f"⚠ {comparison_note}")
+    print(f"  {'代码':<8s} {'名称':<14s} {'窗口流':>8s} {'5日流':>7s} "
           f"{'份额变化%':>9s} {'趋势'}")
     for row in data["flow"]["rows"]:
         code = row["symbol"]
         name = names.get(code) or "-"
-        f20 = f"{row['flow_20d_e']:+.2f}" if row.get("flow_20d_e") is not None else "⏳"
+        fw_t = row.get("flow_total_e")
         f5 = f"{row['flow_5d_e']:+.2f}" if row.get("flow_5d_e") is not None else "⏳"
         sp = f"{row['share_change_pct']:+.2f}" if row.get("share_change_pct") is not None else "⏳"
         trend = row.get("trend") or "⏳"
         note = row.get("note")
+        fwin = row.get("flow_window") or {}
+        unconfirmed = row.get("confirmable") is False or fwin.get("confirmable") is False
+        if unconfirmed:
+            trend = "窗口不可确认（流量为可确认段小计）"
+            note = fwin.get("note") or note or "窗口证据未确认"
         extra = f" ⚠ {note}" if note else ""
-        print(f"  {code:<8s} {name:<14s} {f20:>8s} {f5:>7s} {sp:>9s} {trend}{extra}")
-        span = row.get("share_change_span")
-        if span is not None and span < 19:
-            print(f"  ⚠ {code} 份额变化% 仅覆盖 {span} 个交易日间隔（份额历史不足 20 日）")
+        fw_v = f"{fw_t:+.2f}" if fw_t is not None else "⏳"
+        print(f"  {code:<8s} {name:<14s} {fw_v:>8s} {f5:>7s} {sp:>9s} {trend}{extra}")
+        if fwin:
+            miss = fwin.get("missing_share_days") or 0
+            seg_txt = (f"{fwin.get('segments')} 段/{fwin.get('trading_days')} 交易日"
+                       + (f"，窗内缺份额 {miss} 日" if miss else ""))
+            print(f"         共同起止 {fwin.get('start')}~{fwin.get('end')}"
+                  f"（{seg_txt}）" + (" ⚠" if miss else ""))
     rs = data.get("rs")
     if rs and "error" not in rs:
         rank = rs.get("rank_20d") or {}
@@ -672,24 +809,36 @@ def cmd_futures_basis(symbol: str, *, as_json: bool) -> int:
     return 0
 
 
-def _html_extra_dims(symbol: str) -> dict:
-    """HTML 追加三维度（R12 holdings / R13 peers / R15 sector_flow）。
+def _html_extra_dims(symbol: str, *, peers: list[str] | None = None,
+                     share_days: int = 20) -> dict:
+    """HTML/封存追加三维度（R12 holdings / R13 peers / R15 sector_flow）。
 
     单源失败 → {"available": False} 占位，不阻断渲染（与报告采集的独立记录约定一致）。
+    A4：``peers`` 显式清单（未映射赛道）与 ``share_days`` 份额窗口随 payload 冻结。
+    A7：三个维度相互独立 → 线程池并行读取（仓库既有 ThreadPoolExecutor 模式；
+    各维度只写自身 L2 缓存文件/只读库，键序固定，输出与串行一致），单维异常
+    仍按维度记录。
     """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _fetch(kind: str) -> dict:
+        if kind == "holdings":
+            return query_etf_holdings(symbol)
+        if kind == "peers":
+            from etf_peers import query_etf_peers
+            return query_etf_peers(symbol, peers, share_days=share_days)
+        from sector_flow import query_sector_flow
+        return query_sector_flow(symbol)
+
+    kinds = ("holdings", "peers", "sector_flow")
     dims: dict[str, dict] = {}
-    for kind in ("holdings", "peers", "sector_flow"):
-        try:
-            if kind == "holdings":
-                dims[kind] = query_etf_holdings(symbol)
-            elif kind == "peers":
-                from etf_peers import query_etf_peers
-                dims[kind] = query_etf_peers(symbol, None)
-            else:
-                from sector_flow import query_sector_flow
-                dims[kind] = query_sector_flow(symbol)
-        except Exception as exc:
-            dims[kind] = {"available": False, "note": f"{kind} 采集失败: {exc}"}
+    with ThreadPoolExecutor(max_workers=len(kinds)) as ex:
+        futures = {kind: ex.submit(_fetch, kind) for kind in kinds}
+        for kind in kinds:            # 固定键序收集，输出结构与串行一致
+            try:
+                dims[kind] = futures[kind].result()
+            except Exception as exc:
+                dims[kind] = {"available": False, "note": f"{kind} 采集失败: {exc}"}
     return dims
 
 
@@ -1270,7 +1419,8 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument(
         "--playbook",
         action="store_true",
-        help="R11c: 输出情景预案（回撤档位 σ 分级 + 三步核查清单 + LAW 6a 声明）",
+        help="R11c: 输出情景预案（回撤档位 → 触发核验深度 + 当前状态 + 三步核查清单 "
+             "+ LAW 6a 声明；档位为绝对百分比分档，非统计概率）",
     )
     p_report.add_argument(
         "--payload-out",
@@ -1285,6 +1435,19 @@ def main(argv: list[str] | None = None) -> int:
         help="按需查询指数样本/权重（csindex 公开文件）并随 payload 冻结；"
              "报告 Fit 章节引用该数据时必须传（否则引用输入不在同代封存内）",
     )
+    p_report.add_argument(
+        "--peers",
+        metavar="CODES",
+        default=None,
+        help="A4: 显式赛道清单（逗号分隔，语义同 peers 子命令）；随 payload 封存 peers 维度"
+             "（未映射赛道必须显式给，如 --peers \"513600,513660\"）",
+    )
+    p_report.add_argument(
+        "--share-days",
+        type=int,
+        default=20,
+        help="A4: 份额序列窗口（交易日间隔，默认 20；可用 20/60/120 或等价 3–6 个月）",
+    )
 
     sub.add_parser("diagnose", help="检查依赖与映射表")
 
@@ -1298,6 +1461,8 @@ def main(argv: list[str] | None = None) -> int:
     p_peers = sub.add_parser("peers", help="R13: 赛道资金流对比 + 相对强弱")
     p_peers.add_argument("symbol", help="6 位 ETF 代码")
     p_peers.add_argument("--json", action="store_true", help="输出完整 JSON")
+    p_peers.add_argument("--share-days", type=int, default=20,
+                         help="份额序列窗口（交易日间隔，默认20；范围2..200，与report一致）")
     p_peers.add_argument(
         "--peers",
         metavar="CODES",
@@ -1357,11 +1522,15 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.cmd == "report":
+        report_peers = None
+        if getattr(args, "peers", None):
+            report_peers = [p.strip() for p in args.peers.split(",") if p.strip()]
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
                           history=args.history, history_days=args.history_days,
                           events_path=args.events, playbook=args.playbook,
                           payload_out=args.payload_out,
-                          index_exposure=args.index_exposure)
+                          index_exposure=args.index_exposure,
+                          peers=report_peers, share_days=args.share_days)
     if args.cmd == "diagnose":
         return cmd_diagnose()
     if args.cmd == "industry-pe":
@@ -1373,7 +1542,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "peers":
         return cmd_peers(args.symbol, as_json=args.json, peers_str=args.peers,
                          same_index_str=args.same_index, index_code=args.index_code,
-                         evidence_path=args.evidence_json)
+                         evidence_path=args.evidence_json, share_days=args.share_days)
     if args.cmd == "sector-flow":
         return cmd_sector_flow(args.symbol, as_json=args.json)
     if args.cmd == "collect-sector-flow":

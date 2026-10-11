@@ -284,7 +284,13 @@ def test_summary_ks_field_sources(html_text):
 
 def test_summary_points_no_direction_words(html_text):
     hero = _hero_slice(html_text)
-    assert "价格位置：" in hero and "份额流：" in hero and "对冲覆盖：" in hero
+    # R7：位置句按 history 序列口径（净值位置），不再写「价格位置：最新价」
+    # （交易报价 ≠ 净值序列距离）。R11：本 fixture 的 history 块无 adj_applied
+    # （kline.adj_applied=True 属另一链路，不在此消费）→ 复权状态未知，不得标复权。
+    assert "净值位置：" in hero and "净值位置：净值（复权状态未知）" in hero
+    assert "复权净值" not in hero and "未复权净值" not in hero
+    assert "份额流：" in hero and "对冲覆盖：" in hero
+    assert "价格位置：" not in hero
     # 状态要点为引擎字段直映，禁用方向性措辞
     for w in ("看涨", "看跌", "抄底", "逃顶", "低估", "高估", "超卖", "超买"):
         assert w not in hero, f"hero 状态要点出现方向词: {w}"
@@ -328,7 +334,7 @@ def test_summary_degrade_all_none():
     hero = _hero_slice(html)
     assert "—" in hero  # 缺失字段降级为 '—'
     # 任一引用字段缺失 → 整句丢弃，无空模板句
-    assert "价格位置：" not in hero
+    assert "净值位置：" not in hero and "历史收盘位置：" not in hero
     assert "份额流：" not in hero
     assert "波动/回撤：" not in hero
     assert "对冲覆盖：" in hero  # hedge_coverage 仍存在
@@ -350,3 +356,334 @@ def test_false_placeholder_sections():
     assert "持仓数据不可得" in html
     assert "同赛道不可用" in html
     assert "行业资金流不可得" in html
+
+
+# ── A3/A4 消费链（Codex 阻塞项）：窗口标签与旧 payload 兼容 ──
+
+def test_flow_labels_use_actual_window_days_120(tmp_path):
+    """120 日报告的首屏/要点/总结不得标「20 日」；标题与共同起止用实际值。"""
+    import copy
+
+    payload = copy.deepcopy(_fixture_payload())
+    summ = payload["share_history"]["summary"]
+    summ["window_days"] = 120
+    summ["flow_window"] = {"start": "20260410", "end": "20261009",
+                           "segments": 120, "trading_days": 121,
+                           "missing_share_days": 0, "confirmable": True}
+    summ["total_flow_est"] = -24.53
+    payload["peers"]["flow"]["window_days"] = 120
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    assert "120 日份额流（亿）" in html
+    # 「20 日份额流」是「120 日份额流」的子串 → 用负向后顾断言独立标签不存在
+    assert re.search(r"(?<!\d)20 日份额流", html) is None
+    assert "共同起止 20260410~20261009" in html
+    assert "份额资金流与收盘价（近 120 日" in html
+    assert "120 日 -24.53 亿" in html          # 首屏要点
+    assert re.search(r"(?<!\d)20 日 -", html) is None  # 不得残留旧窗口金额标签
+
+
+def test_peers_flow_total_e_with_legacy_fallback():
+    """新键优先；旧 payload（无 flow_total_e）回退 flow_20d_e；
+    **键存在但为 None** 不得回退造数（显示占位）。"""
+    import copy
+
+    payload = copy.deepcopy(_fixture_payload())
+    rows = payload["peers"]["flow"]["rows"]
+    rows[0] = {"symbol": "515050", "flow_total_e": -8.88, "flow_20d_e": -7.17,
+               "flow_5d_e": -0.15, "trend": "🔴", "share_change_pct": -3.16}
+    rows.append({"symbol": "515790", "flow_total_e": None, "flow_20d_e": -1.11,
+                 "flow_5d_e": None, "trend": None, "share_change_pct": None})
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    # 只看渲染表格/正文（head），embedded payload 里的原始数值不算渲染结果
+    head = html.split("<script", 1)[0]
+    # 新键优先：-8.88 → 渲染 "-8.9"（若误用旧别名 -7.17 会显示 "-7.2"）
+    assert "-8.9" in head and "-7.2" not in head
+    # flow_total_e 键存在但 None → 不回退显示 -1.11（渲染占位 —）
+    assert "-1.1" not in head
+
+
+def test_peers_window_comparison_limitation_is_visible():
+    payload = _fixture_payload()
+    note = "组内比较受限：产品窗口起止不一致，极值/排名不可直接比较"
+    payload["peers"]["flow"]["common_window_note"] = note
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    assert note in html.split("<script", 1)[0]
+
+
+def test_rs_pill_neutral_is_100():
+    html = render_etf_html(_fixture_payload(), md_text=MD_TEXT)
+    assert "100 = 与基准持平" in html
+    assert "101 = 与基准持平" not in html
+@pytest.mark.parametrize("note", ["未登记份额跳变，已排除相关区段", ""])
+def test_unconfirmable_flow_is_partial_in_every_summary(tmp_path, note):
+    payload = _fixture_payload()
+    s = payload["share_history"]["summary"]
+    s.update(total_flow_est=0, trend="资金面平稳", window_days=3,
+             flow_window={"start": "2026-04-17", "end": "2026-04-22",
+                          "confirmable": False, "note": note})
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    (tmp_path / "partial.html").write_text(html, encoding="utf-8")
+    hero = _hero_slice(html)
+    flows = html.split('<section id="flows">', 1)[1].split('</section>', 1)[0]
+    for section in (hero, flows):
+        assert "不可确认" in section
+        assert "可确认段小计" in section
+        assert "资金面平稳" not in section.split("同赛道资金流对比", 1)[0]
+        if note:
+            assert note in section
+
+
+@pytest.mark.parametrize("verification", [None, {}, {"reached_levels": None},
+                                         {"reached_levels": 0}])
+@pytest.mark.parametrize("has_drawdown", [False, True])
+def test_legacy_playbook_verification_is_unknown(tmp_path, verification, has_drawdown):
+    payload = _fixture_payload()
+    payload["playbook"].pop("current_drawdown", None)
+    if has_drawdown:
+        payload["playbook"]["current_drawdown"] = {"current_drawdown_pct": 0}
+    payload["playbook"]["current_verification"] = verification
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    (tmp_path / "legacy.html").write_text(html, encoding="utf-8")
+    block = html.split('id="playbook"', 1)[1].split('</section>', 1)[0]
+    if not has_drawdown:
+        assert "当前回撤不可得" in block
+    assert "当前核验深度：未知" in block
+    assert "各档均未达" not in block
+
+
+def test_computed_zero_drawdown_verification_is_not_unknown(tmp_path):
+    from etf_playbook import current_drawdown, current_verification, drawdown_levels
+    payload = _fixture_payload()
+    pb = payload["playbook"]
+    pb["current_drawdown"] = current_drawdown([
+        {"date": "2026-04-20", "close": 1.0},
+        {"date": "2026-04-21", "close": 1.1}])
+    pb["drawdown_levels"] = drawdown_levels(pb["current_drawdown"]["current_drawdown_pct"])
+    pb["current_verification"] = current_verification(pb["drawdown_levels"])
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    block = html.split('id="playbook"', 1)[1].split('</section>', 1)[0]
+    assert "各档均未达" in block
+    assert "当前核验深度：未知" not in block
+
+
+# ── R7（2026-10-11 复查）：hero 窗口位置句与 history 序列同口径 ──
+
+
+def _r7_payload(*, source="nav", rows=None, high=None, high_date="2026-01-29",
+                vs_high=-15.6, quote_price=1.421, adj_applied=None) -> dict:
+    """R7/R11 fixture：`adj_applied` 显式为 None 时**不写入**该键（= 无留痕），
+    期望「复权/未复权」标注的用例必须显式传 True/False（R11：不得让测试
+    在字段缺失时仍断言已复权）。"""
+    payload = _fixture_payload()
+    payload["quote"]["price"] = quote_price
+    if rows is None:
+        rows = [{"date": "2025-09-26", "nav": 1.6147, "change_pct": -1.36},
+                {"date": "2026-10-09", "nav": 1.4301, "change_pct": 1.8}]
+    hist = {"symbol": payload["symbol"], "source": source,
+            "status": "available" if rows else "missing", "rows": rows}
+    if adj_applied is not None:
+        hist["adj_applied"] = adj_applied
+    payload["history"] = {
+        "history": hist,
+        "stats": {**payload["history"]["stats"],
+                  "current_vs_high_pct": vs_high,
+                  "annual_high": ({"date": high_date, "close": high}
+                                  if high is not None else None)},
+    }
+    return payload
+
+
+def _hero_position_sentence(html: str) -> str:
+    hero = _hero_slice(html)
+    idx = hero.find("净值位置：")
+    if idx < 0:
+        idx = hero.find("历史收盘位置：")
+    assert idx >= 0, "hero 缺位置句"
+    return hero[idx:hero.find("</li>", idx) if "</li>" in hero[idx:] else idx + 220]
+
+
+def test_hero_position_uses_history_last_value_not_quote_price():
+    """159920 现场：报价 1.421 ≠ 净值序列末值 1.4301——距离%按序列算，
+    位置句必须引用序列末值，不得混写最新价；复权标注按 history 留痕
+    （R11：本用例显式 adj_applied=True，非按 source 推断）。"""
+    payload = _r7_payload(rows=[{"date": "2025-09-26", "nav": 1.6147},
+                                {"date": "2026-10-09", "nav": 1.4301}],
+                          high=1.6944, vs_high=-15.6, adj_applied=True)
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    sentence = _hero_position_sentence(html)
+    assert "净值位置：复权净值" in sentence
+    assert "1.4301" in sentence and "2026-10-09" in sentence
+    assert "1.421" not in sentence and "最新价" not in sentence
+    assert "-15.6" in sentence and "1.6944" in sentence
+
+
+def test_hero_position_baostock_series_labeled_close():
+    """R11：前复权收盘价标注仅当 history 自身留痕 adj_applied=True。"""
+    payload = _r7_payload(
+        source="baostock",
+        rows=[{"date": "2025-09-26", "close": 1.6147},
+              {"date": "2026-10-09", "close": 1.4301}],
+        high=1.6944, vs_high=-15.6, adj_applied=True)
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    sentence = _hero_position_sentence(html)
+    assert "历史收盘位置：前复权收盘价" in sentence
+    assert "1.4301" in sentence and "最新价" not in sentence
+
+
+@pytest.mark.parametrize("source,rows", [
+    ("none", [{"date": "2026-10-09", "nav": 1.4301}]),          # 来源未知
+    ("", [{"date": "2026-10-09", "nav": 1.4301}]),              # 缺来源
+    ("nav", []),                                                # 缺末值
+    ("nav", [{"date": "2026-10-09", "nav": None}]),             # 末值 None
+])
+def test_hero_position_omitted_when_source_or_last_value_unknown(source, rows):
+    """缺末值/来源未知 → 省略该位置断言（不拿报价或 kline 最新净值顶替）。"""
+    payload = _r7_payload(source=source, rows=rows, high=1.6944, vs_high=-15.6)
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    hero = _hero_slice(html)
+    assert "净值位置：" not in hero and "历史收盘位置：" not in hero
+    assert "价格位置：" not in hero
+
+
+# ── R11（2026-10-11 复查）：hero 复权标注只认 history 自身留痕，不按 source 硬编码 ──
+
+
+def _r11_nav_rows():
+    return [{"date": "2025-09-26", "nav": 1.6147},
+            {"date": "2026-10-09", "nav": 1.4301}]
+
+
+def _r11_bst_rows():
+    return [{"date": "2025-09-26", "close": 1.6147},
+            {"date": "2026-10-09", "close": 1.4301}]
+
+
+@pytest.mark.parametrize("source,adj,expected,unexpected", [
+    # 确认 True → 保留复权标注（R7 正确部分）
+    ("nav", True, "净值位置：复权净值", ["未复权净值", "复权状态未知"]),
+    # 显式 False → 未复权标注（旧实现按 source 误标「复权净值」）
+    ("nav", False, "净值位置：未复权净值", ["净值位置：复权净值", "复权状态未知"]),
+    # 缺失（无留痕）→ 中性 + 复权状态未知（不得断言复权或未复权）
+    ("nav", None, "净值位置：净值（复权状态未知）", ["净值位置：复权净值", "未复权净值"]),
+    ("baostock", True, "历史收盘位置：前复权收盘价", ["未复权收盘价", "复权状态未知"]),
+    ("baostock", False, "历史收盘位置：未复权收盘价", ["前复权收盘价", "复权状态未知"]),
+    ("baostock", None, "历史收盘位置：历史收盘价（复权状态未知）",
+     ["前复权收盘价", "未复权收盘价"]),
+])
+def test_hero_adjustment_label_follows_history_adj_applied(
+        source, adj, expected, unexpected):
+    """R11：nav/baostock 三态（True/False/缺失）标注均由 history.adj_applied 决定。"""
+    rows = _r11_bst_rows() if source == "baostock" else _r11_nav_rows()
+    payload = _r7_payload(source=source, rows=rows, high=1.6944, vs_high=-15.6,
+                          adj_applied=adj)
+    if adj is None:
+        assert "adj_applied" not in payload["history"]["history"]  # 缺失而非 False
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    sentence = _hero_position_sentence(html)
+    assert expected in sentence
+    assert "1.4301" in sentence and "2026-10-09" in sentence  # R7 末值/日期保留
+    for bad in unexpected:
+        assert bad not in sentence, (bad, sentence)
+
+
+def test_hero_adjustment_absent_not_inferred_from_kline_adjusted():
+    """负例：kline.adj_applied=True（另一链路）不构成 history 序列的复权证据，
+    历史块无留痕 → 不得标「复权净值」，只能标复权状态未知。"""
+    payload = _r7_payload(source="nav", rows=_r11_nav_rows(),
+                          high=1.6944, vs_high=-15.6)  # 缺省 = 无 adj 留痕
+    assert payload["kline"]["adj_applied"] is True    # 另一链路确为已复权
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    sentence = _hero_position_sentence(html)
+    assert "净值位置：净值（复权状态未知）" in sentence
+    assert "净值位置：复权净值" not in sentence and "未复权净值" not in sentence
+
+
+def test_hero_adjustment_explicit_false_overrides_kline_true():
+    """负例：history 自身留痕 False → 未复权标注（不得采用 kline 的 True）。"""
+    payload = _r7_payload(source="nav", rows=_r11_nav_rows(),
+                          high=1.6944, vs_high=-15.6, adj_applied=False)
+    assert payload["kline"]["adj_applied"] is True
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    sentence = _hero_position_sentence(html)
+    assert "净值位置：未复权净值" in sentence
+    assert "净值位置：复权净值" not in sentence
+
+
+def test_hero_adjustment_explicit_none_is_unknown():
+    """显式 adj_applied=None（新 payload 未留痕形态）→ 未知，不按 falsy 判未复权。"""
+    payload = _r7_payload(source="nav", rows=_r11_nav_rows(),
+                          high=1.6944, vs_high=-15.6)
+    payload["history"]["history"]["adj_applied"] = None
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    sentence = _hero_position_sentence(html)
+    assert "净值位置：净值（复权状态未知）" in sentence
+    assert "未复权净值" not in sentence
+
+
+# ── R8（2026-10-11 复查）：名称/身份摘要消费已封存登记，未知不冒充名称 ──
+
+
+def _r8_html(html: str) -> tuple[str, str, str]:
+    title = re.search(r"<title>([^<]*)</title>", html).group(1)
+    hero = _hero_slice(html)
+    oneliner = re.search(r'<div class="sp-t" style="margin-top[^>]*>([^<]*)</div>', hero)
+    overview = html.split('id="overview"', 1)[1].split("</section>", 1)[0]
+    return title, (oneliner.group(1) if oneliner else ""), overview
+
+
+def test_name_falls_back_to_sealed_identity_when_spot_category_unknown():
+    """159920 现场：Spot 缺失 → category.label=未知，但 identity.fund_name 已核
+    ——标题/顶栏/hero/产品快照须消费登记名称，不再显示「未知」。"""
+    payload = _fixture_payload()
+    payload["profile"]["category"] = {"category": "unknown", "label": "未知",
+                                      "source": "none"}
+    payload["profile"]["identity"] = {
+        "fund_name": "恒生交易型开放式指数证券投资基金",
+        "verification": {"status": "verified_original", "verified_at": "2026-10-10"},
+        "labels": {"asset_type": "股票", "channel": "跨境", "strategy": "宽基"},
+    }
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    title, oneliner, overview = _r8_html(html)
+    assert "恒生交易型开放式指数证券投资基金" in title
+    assert "恒生交易型开放式指数证券投资基金" in oneliner
+    assert "未知" not in title and "未知" not in oneliner
+    assert "未知" not in overview.split("产品快照", 1)[1][:120]
+
+
+def test_name_unknown_identity_shows_pending_not_unknown():
+    """159796 现场：identity 未核且无 fund_name → 明确「身份待核」，
+    不反推名称/不宣称身份（封存登记字段全缺保持未知）。"""
+    payload = _fixture_payload()
+    payload["profile"]["category"] = {"category": "unknown", "label": "未知",
+                                      "source": "none"}
+    payload["profile"]["identity"] = {
+        "labels": {"asset_type": "未知", "channel": "未知", "strategy": "未知"},
+        "verification": {"status": "unknown", "verified_at": None},
+    }
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    title, oneliner, _ = _r8_html(html)
+    assert "身份待核" in title and "身份待核" in oneliner
+    assert "未知" not in title
+
+
+def test_name_known_category_label_still_wins():
+    """已知 category.label（常态短名）优先于已封存 fund_name——不改变既有呈现。"""
+    payload = _fixture_payload()
+    payload["profile"]["identity"] = {
+        "fund_name": "国泰中证全指通信设备ETF",
+        "verification": {"status": "verified_original"},
+    }
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    title, oneliner, _ = _r8_html(html)
+    assert "通信ETF" in title and "通信ETF" in oneliner
+
+
+def test_name_legacy_payload_without_identity_degrades_transparently():
+    """旧代 payload（无 identity）→ 不引入「身份待核」，按原 label/空值降级。"""
+    payload = _fixture_payload()
+    payload["profile"].pop("identity", None)
+    payload["profile"]["category"] = {"category": "unknown", "label": "未知",
+                                      "source": "none"}
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    assert "身份待核" not in html
+    assert "<title>" in html  # 渲染不崩
