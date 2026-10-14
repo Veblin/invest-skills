@@ -233,6 +233,8 @@ def _ensure_render_ready(collection: dict, symbol: str) -> None:
     不打断渲染：原 md 分支靠 `render(..., attach_extras=True)` 内部的 try/except 兜底，
     网络收敛到本函数之后必须自带同等保护，否则一次超时就会打断渲染。
     """
+    if report_snapshot.is_sealed(collection):
+        return
     if not collection.get("market_structure"):
         try:
             collector.attach_market_structure(collection, symbol)
@@ -1335,28 +1337,6 @@ def cmd_report(args: argparse.Namespace) -> int:
                     print(f"  {error}", file=sys.stderr)
                 return 2
         resumed_from_store = True
-        # R3 二轮（2026-10-04 独立复检）：固定快照的风格重装配必须走**渲染派生
-        # 视图**，不得改写封存体本身——`--emit json` 会导出收藏集内容并要求与
-        # `_meta.report_input_hash` 自洽（一轮实现直接改 result → 导出 digest 与
-        # 哈希失配，Codex 两案例实测 hash_consistent=false）。
-        # 语义：显式 --style 优先；未显式时与 profile 侧车同源回落
-        # user_style.json（build_profile 的同一口径）——避免「缺省时 profile 与
-        # 正文自评互斥」；两者皆无（无档案）则保持封存视图（无冲突面）。
-        eff_style = getattr(args, "style", None)
-        if not eff_style:
-            try:
-                from lib.style_match import load_style
-                eff_style = load_style()
-            except Exception:  # 档案不可读 → 保持封存视图
-                eff_style = None
-        if eff_style:
-            try:
-                from lib.style_match import assemble_style_match
-                sm = assemble_style_match(result, args.symbol, style=eff_style)
-                if sm is not None:
-                    render_view = {**result, "style_match": sm}
-            except Exception:  # 装配失败不阻断报告（同 R10 装配点）
-                pass
         # 合成前可见性（§3.3-3/4）：首版渲染或带 --draft 的渲染时给出可引用字段、
         # 数据窗口与写作约束；最终成品渲染不再重复打印。仅走固定快照链（有封存输入）。
         if not analysis_payload or getattr(args, "draft", None):
@@ -1397,20 +1377,43 @@ def cmd_report(args: argparse.Namespace) -> int:
                                        prepare_for_report=True)
     # 补挂的唯一落点：采集期已在 collect_all(prepare_for_report=True) 内完成；
     # 此处只兜 `--resume` 恢复出来的旧快照（可能缺 market_structure），且自带降级、
-    # 数据已在时不重复取数。固定输入链绝不补采（缺字段即 fail-loud）。
-    if resumed_from_store and not fixed_input:
+    # 数据已在时不重复取数。封存输入不论由 ID 还是 resume 选中，均只读。
+    sealed_input = report_snapshot.is_sealed(result)
+    if fixed_input or sealed_input:
+        # 渲染器会登记 _enhancements / 槽位消费状态；风格装配及未来的
+        # 嵌套字段变更也只能作用于派生视图。无风格覆盖时同样需要深副本，
+        # 原封存体留给 JSON、原始存档和持久化，不依赖存档器剥离状态键。
+        render_view = copy.deepcopy(result)
+        # 风格重装配只作用于渲染派生视图，JSON 始终导出与哈希自洽的封存体。
+        # ID 与 resume 使用同一口径：显式 --style 优先，再回落 user_style.json，
+        # 与 build_profile 的默认档案保持一致；无档案则保留封存风格。
+        eff_style = getattr(args, "style", None)
+        if not eff_style:
+            try:
+                from lib.style_match import load_style
+                eff_style = load_style()
+            except Exception:  # 档案不可读 → 保持封存视图
+                eff_style = None
+        if eff_style:
+            try:
+                from lib.style_match import assemble_style_match
+                sm = assemble_style_match(render_view, args.symbol, style=eff_style)
+                if sm is not None:
+                    render_view["style_match"] = sm
+            except Exception:  # 装配失败不阻断报告（同 R10 装配点）
+                pass
+    if resumed_from_store and not fixed_input and not sealed_input:
         # issue #35 E（2026-10-02 用户裁决）：未封存快照保留现场补采兼容路线，
         # 但必须显式提示——补采仅本次有效、不写回快照，重复渲染会重复联网。
-        if not report_snapshot.is_sealed(result):
-            print(
-                "⚠️ --resume: 快照未封存（非固定输入链），渲染期将按需现场补采缺失数据"
-                "（仅本次、不写回快照）；如需可复现/零联网渲染，请先执行 "
-                "`collect <SYMBOL> --report-ready`，再用 `--collection-id <ID>` 渲染。",
-                file=sys.stderr,
-            )
+        print(
+            "⚠️ --resume: 快照未封存（非固定输入链），渲染期将按需现场补采缺失数据"
+            "（仅本次、不写回快照）；如需可复现/零联网渲染，请先执行 "
+            "`collect <SYMBOL> --report-ready`，再用 `--collection-id <ID>` 渲染。",
+            file=sys.stderr,
+        )
         _ensure_render_ready(result, args.symbol)
     # R4: 行业成功关键因素装配（未覆盖行业 → covered=False，披露移入附录「覆盖缺口」）
-    if not fixed_input:
+    if not fixed_input and not sealed_input:
         try:
             from lib.render_utils import _get_dim_data, _index_dims
             from lib.industry.base import get_success_factors
@@ -1427,7 +1430,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         except Exception:  # 装配失败不阻断报告
             result["success_factors"] = {"industry": "", "covered": False, "factors": []}
     # R12g-A: 连板触发 → 龙虎榜/涨停池采集（仅触发时执行，未触发零额外网络调用）
-    if not fixed_input:
+    if not fixed_input and not sealed_input:
         try:
             from lib.lhb import attach_limit_streak_dims
             if attach_limit_streak_dims(result, args.symbol):
@@ -1435,7 +1438,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         except Exception:  # 采集失败不阻断报告
             pass
     # R10/R12g-B: 风格-标的匹配三态（风格档案 + 同标的 journal Q1 代理）
-    if not fixed_input:
+    if not fixed_input and not sealed_input:
         try:
             from lib.style_match import assemble_style_match
             # C2-c：本次 --style 优先于 user_style.json——与 profile 侧车同源
@@ -1451,8 +1454,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     # 在哈希校验之后被改写（`--emit json` 输出的载荷因此与自带哈希不自洽）。
     # 改为随渲染调用显式下传；`_meta.strict_rigor` 仍作为回退读法保留。
     strict_rigor = bool(getattr(args, "strict_rigor", False))
-    # R3 二轮：渲染统一走派生视图（固定输入下含本次风格重装配；其余路径
-    # render_view=None → 即 result 本体）。`--emit json` 例外，见渲染分支。
+    # 封存输入统一走深复制的渲染视图（含本次风格重装配）；未封存路径仍
+    # 使用 result 本体。`--emit json` 导出原封存体，见渲染分支。
     view = render_view if render_view is not None else result
     _warn_degraded_collection(result)
     if getattr(args, "material_gap", False):
@@ -1886,7 +1889,8 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         # analyze 输出不含完整 dimensions 时回退现场采集
         if analysis.get("dimensions"):
             result = _normalize_collection_for_render(analysis)
-            attach_extras = not result.get("market_structure")
+            attach_extras = (not report_snapshot.is_sealed(result)
+                             and not result.get("market_structure"))
         else:
             print(
                 "ⓘ analyze 输出缺少 dimensions，将补充现场采集",

@@ -948,7 +948,8 @@ def cmd_html(symbol: str, *, md_path: str | None = None, out_path: str | None = 
               file=sys.stderr)
         return 2
     expected_name = f"{md.stem}.payload.json"
-    if payload_file.name != expected_name or payload_file.parent != md.parent:
+    if (payload_file.name != expected_name
+            or payload_file.parent.resolve() != md.parent.resolve()):
         print(
             f"错误: payload 与报告 md 不配对：期望 {expected_name}（与 md 同目录），"
             f"实际 {payload_file.name}@{payload_file.parent}",

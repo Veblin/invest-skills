@@ -205,6 +205,11 @@ MANDATED_TOOLS: dict[str, dict[str, list[str]]] = {
         # completion-analysis-sidecar-invalid + exit 2。其静态依赖 md_subset
         # 经 _scan_node 的 AST 闭包自动带入，无需单列。
         "deps": ["lint", "analysis_schema"],
+        # QC may inspect ETF research from any skill package. These validators are
+        # loaded by filename (including the HTML checker inside etf_research), so
+        # their canonical source must be registered before following their imports.
+        "file_deps": ["skills/invest-a-etf/scripts/lib/etf_research.py",
+                      "skills/invest-a-etf/scripts/lib/etf_md.py"],
         "data": ["skills/invest-a-stock/scripts/references/compliance_rules.yaml"],
     },
 }
@@ -467,6 +472,28 @@ class _Closure:
             self._follow(name, key, "etf_data", 0)
         if "assets/" in text:
             self._assets.add(f.parent)
+        self._add_tool_dependencies(name)
+
+    def _add_tool_dependencies(self, name: str) -> None:
+        """Close filename-loaded tool dependencies, even when reached by import."""
+        spec = MANDATED_TOOLS.get(name, {})
+        for rel in spec.get("file_deps", []):
+            target = ROOT / rel
+            if not target.is_file():
+                raise SystemExit(f"{self.skill_name}: 工具动态依赖缺失: {rel}")
+            source = f"tool:{target.parent.relative_to(ROOT)}"
+            if source not in self._by_source:
+                self.sources.append((source, target.parent))
+                maps = self._by_source[source] = _py_module_map(target.parent)
+                for module, path in {**maps[0], **maps[1]}.items():
+                    self.module_map.setdefault(module, (source, path))
+            # File loads bind to this canonical path, rather than a same-name shim.
+            self._enqueue(target.stem, (source, target))
+        for dep in spec.get("deps", []):
+            resolved = self.resolve(dep)
+            if resolved is None:
+                raise SystemExit(f"{self.skill_name}: 工具动态依赖缺失: {name}/{dep}")
+            self._enqueue(dep, resolved)
 
     def _follow(self, own_name: str, own_source: str, target: str, level: int) -> None:
         """解析一条 import 引用并入队。
@@ -560,10 +587,6 @@ class _Closure:
                 continue
             self._enqueue(name, r)
             self.mandated.add(name)
-            for dep in spec.get("deps", []):
-                dr = self.resolve(dep)
-                if dr is not None:
-                    self._enqueue(dep, dr)
 
     # ---- 复制计划 ----
     def plan(self) -> list[tuple[Path, Path, str]]:
@@ -645,13 +668,17 @@ def _rewrite_line(line: str, kind: str, names: set[str]) -> str:
     if m:
         ind, mod, rest = m.groups()
         if mod in names and mod not in ("lib",):
-            return f"{ind}import lib.{mod}{rest}"
+            # ``import lib.X`` binds ``lib``; retain the name the source uses.
+            alias = "" if re.match(r"\s+as\s+", rest) else f" as {mod}"
+            return f"{ind}import lib.{mod}{alias}{rest}"
         return line
     return line
 
 
 def _rewrite_imports(text: str, kind: str, names: set[str]) -> str:
     """包副本导入改写（确定性，仅改写 names 白名单内的裸导入）。
+
+    ``import X`` → ``import lib.X as X``，已有 alias 原样保留。
 
     kind:
       engine   — scripts/*.py: 裸 from X → from lib.X
@@ -666,11 +693,12 @@ def _rewrite_imports(text: str, kind: str, names: set[str]) -> str:
         text = re.sub(r"\bfrom\s+([A-Za-z_][\w.]*)\s+import\b", _sub_from, text)
 
         def _sub_import(m: re.Match) -> str:
-            mod = m.group(1)
+            mod, alias = m.groups()
             if mod in names and mod != "lib":
-                return f"import lib.{mod}"
+                return f"import lib.{mod}{alias or f' as {mod}'}"
             return m.group(0)
-        text = re.sub(r"\bimport\s+([A-Za-z_][\w.]*)\b", _sub_import, text)
+        text = re.sub(r"\bimport\s+([A-Za-z_][\w.]*)\b(\s+as\s+[A-Za-z_]\w*)?",
+                      _sub_import, text)
         return text
     return "\n".join(_rewrite_line(l, kind, names) for l in text.splitlines())
 

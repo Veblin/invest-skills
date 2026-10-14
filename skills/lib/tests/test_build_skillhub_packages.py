@@ -112,6 +112,16 @@ def test_rewrite_engine_bare_imports():
     assert "import akshare as ak" in out            # 三方 → 保留
 
 
+@pytest.mark.parametrize("kind", ["engine", "lib_root", "lib_sub", "pulse_md"])
+def test_rewrite_import_preserves_local_names(kind):
+    text = "import env  # config\nimport sources as src  # leaf data\nimport json\n"
+    out = b._rewrite_imports(text, kind, {"env", "sources"})
+    assert "import lib.env as env  # config" in out
+    assert "import lib.sources as src  # leaf data" in out
+    assert "import json" in out
+    assert b._rewrite_imports(out, kind, {"env", "sources"}) == out
+
+
 def test_rewrite_lib_root_relative():
     names = {"db_util", "cache", "stats"}
     out = b._rewrite_imports(
@@ -136,7 +146,7 @@ def test_rewrite_pulse_md_inline():
         'import _invest_path; from data_bridge import get_microstructure; '
         'from market_microstructure import snapshot; import json',
         "pulse_md", names)
-    assert "import lib._invest_path;" in out
+    assert "import lib._invest_path as _invest_path;" in out
     assert "from lib.data_bridge import get_microstructure" in out
     assert "from lib.market_microstructure import snapshot" in out
     assert "import json" in out                     # stdlib 保留
@@ -489,6 +499,102 @@ def test_discover_package_bundles_dynamic_hk_modules(tmp_path):
     assert "OK" in proc.stdout
 
 
+def test_generated_discover_cli_scans_renders_and_stores_offline(tmp_path):
+    """Exercise module bindings through the generated CLI, beyond argparse help."""
+    b.build_one("invest-a-discover-scan", b.project_version(), tmp_path, dry_run=False)
+    dst = tmp_path / "invest-a-discover-scan"
+    reports = tmp_path / "reports"
+    snapshots = tmp_path / "snapshots"
+    code = f"""
+import runpy, sys
+sys.path.insert(0, {str(dst / 'scripts')!r})
+import lib.sources as sources
+import requests
+def no_network(*args, **kwargs):
+    raise AssertionError('unexpected network request')
+requests.sessions.Session.request = no_network
+sources.has_token = lambda: True
+sources.latest_trade_date = lambda: '20990105'
+sources.fetch_stock_basic = lambda: [
+    {{'ts_code': f'60000{{i}}.SH', 'name': f'BindingFixture{{i}}',
+      'industry': 'Fixture', 'market': '主板'}} for i in range(8)]
+sources.fetch_daily_basic = lambda date: [
+    {{'ts_code': f'60000{{i}}.SH', 'pe_ttm': 5 if i == 0 else 50 + i,
+      'dv_ratio': 1, 'close': 10, 'total_mv': 100000}} for i in range(8)]
+sources.fetch_fina_indicator = lambda code: [
+    {{'end_date': '20981231', 'roe_yearly': 15, 'profit_dedt': 1000000}}]
+sources.fetch_forecast = lambda code: [{{'p_change_max': 20}}]
+sources.rf_10y_pct = lambda: (2, 'offline-binding-fixture')
+sources.market_form_context = lambda: {{'available': False, 'note': 'offline-binding-fixture'}}
+sys.argv = ['discover_scan.py', '--out-dir', {str(reports)!r}]
+runpy.run_path({str(dst / 'scripts/discover_scan.py')!r}, run_name='__main__')
+"""
+    proc = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", code], cwd=tmp_path,
+        env={**os.environ, "TUSHARE_TOKEN": "bogus", "INVEST_DEV": "0",
+             "INVEST_DISCOVERY_DIR": str(snapshots)}, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    report_files = list(reports.glob("*.md"))
+    assert len(report_files) == 1
+    report = report_files[0].read_text(encoding="utf-8")
+    assert "BindingFixture0" in report
+    assert "20990105" in report
+    assert "offline-binding-fixture" in report
+    assert "不构成投资建议" in report
+    records = [json.loads(line) for path in snapshots.glob("*.jsonl")
+               for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert records[0]["trade_date"] == "20990105"
+    assert [h["name"] for h in records[0]["hits"]] == ["BindingFixture0"]
+
+
+def test_generated_env_token_and_trade_calendar_offline(tmp_path):
+    """The generated shared modules must retain env for .env and calendar calls."""
+    b.build_one("invest-a-discover-scan", b.project_version(), tmp_path, dry_run=False)
+    dst = tmp_path / "invest-a-discover-scan"
+    token = "offlineBindingFixture" * 3
+    (dst / ".env").write_text(f"TUSHARE_TOKEN={token}\n", encoding="utf-8")
+    code = f"""
+import os, sys
+sys.path.insert(0, {str(dst / 'scripts')!r})
+os.environ.pop('TUSHARE_TOKEN', None)
+import lib.env as env
+env.GLOBAL_CONFIG_FILE = env.PROJECT_ROOT / 'absent-global.env'
+assert str(env.PROJECT_ENV_FILE) == {str(dst / '.env')!r}
+from lib.tushare_client import TushareClient
+assert TushareClient()._token == {token!r}, '.env token lost in generated client'
+import lib.trade_cal as calendar
+import pandas as pd
+import requests
+def no_network(*args, **kwargs):
+    raise AssertionError('unexpected network request')
+requests.sessions.Session.request = no_network
+calls = []
+def query(self, api_name, **params):
+    assert self._token == {token!r}
+    calls.append(api_name)
+    if api_name == 'stock_basic':
+        return pd.DataFrame([{{'ts_code': '600000.SH'}}])
+    assert api_name == 'trade_cal'
+    return pd.DataFrame([{{'cal_date': '20990105'}}])
+TushareClient.query = query
+assert calendar.fetch_trade_cal('20990101', '20990110') == (['20990105'], False)
+assert calls == ['stock_basic', 'trade_cal'], calls
+calendar._CLIENT = None
+calendar._clear_trade_cal_cache()
+env.get_config = lambda: {{}}
+calls.clear()
+dates, estimated = calendar.fetch_trade_cal('20990101', '20990110')
+assert dates and estimated is True
+assert calls == [], 'missing-token fallback queried remote client'
+print('offline-calendar-and-env-OK')
+"""
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "offline-calendar-and-env-OK" in proc.stdout
+
+
 # ---- (e3) SKILL.md 强制工具（report_qc「机器层准出」）进包 ----
 def _mandating_skills() -> list[str]:
     return sorted(p.parent.name for p in b.SKILLS_DIR.glob("*/SKILL.md")
@@ -509,6 +615,107 @@ def test_mandated_tool_seeded_from_skill_md():
             (b.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8"))
         assert "report_qc" in c.included, f"{skill}: report_qc 未入闭包"
         assert "lint" in c.included, f"{skill}: lint（动态加载目标）未入闭包"
+        for name in ("etf_research", "etf_md"):
+            assert c.included[name][1] == b.SKILLS_DIR / "invest-a-etf" / "scripts/lib" / f"{name}.py"
+
+
+def test_imported_qc_closes_filename_dependencies(tmp_path):
+    entry = tmp_path / "entry.py"
+    entry.write_text("import report_qc\n", encoding="utf-8")
+    c = b._Closure("invest-a-stock")
+    c.compute([entry])
+    assert {"etf_research", "etf_md", "lint", "analysis_schema"} <= c.included.keys()
+
+
+def test_packaged_qc_research_equivalence_and_counterexamples(tmp_path):
+    """Run both generated QC CLIs on the same sealed research MD/payload/HTML."""
+    for skill in ("invest-a-stock", "invest-a-etf"):
+        b.build_one(skill, b.project_version(), tmp_path, dry_run=False)
+    artifact = tmp_path / "588000-离线研究测试"
+    artifact.mkdir()
+    original = "公司原文说明经营情况仍待验证。"
+    (artifact / "original.txt").write_text(original, encoding="utf-8")
+    import hashlib
+    sha = hashlib.sha256(original.encode()).hexdigest()
+    research = {
+        "schema_version": 1, "symbol": "588000", "as_of": "2026-10-12",
+        "holdings_as_of": "2026-06-30", "question": "经营变化如何解释？",
+        "budget": {"max_names": 1, "target_cov_pct": 8},
+        "selection": [{"code": "688008", "reason": "检验经营变化"}],
+        "sources": [{"id": "S1", "url": "https://example.com/original.pdf",
+                     "title": "离线原文", "source_type": "original", "sha256": sha,
+                     "text_sha256": sha, "path": "original.txt", "text_path": "original.txt",
+                     "locator": "第一段", "excerpt": original, "published_date": "2026-08-28",
+                     "read_at": "2026-10-12T10:00:00+08:00"}],
+        "facts": [{"id": "F1", "kind": "company", "code": "688008", "statement": original,
+                   "source_ids": ["S1"], "period_start": "2026-01-01", "period_end": "2026-06-30"}],
+        "insights": [{"id": "I1", "title": "经营解释", "fact_ids": ["F1"],
+                      "codes": ["688008"], "scope": "selected_holdings",
+                      "interpretation": "经营变化尚待验证。", "transmission": "行业传导尚待验证。",
+                      "etf_link": "仅说明所选对象。", "conditional_conclusion": "需观察后续披露。",
+                      "alternative": "可能是期间变化。", "falsifier": "后续披露与解释相反。",
+                      "boundary": "所选对象未代表全组合。"}],
+    }
+    (artifact / "research.json").write_text(json.dumps(research, ensure_ascii=False), encoding="utf-8")
+    md = artifact / "2026-10-12-11-00-00.md"
+    code = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from lib.etf_research import attach_research, load_research_input
+from lib.etf_generation import seal_etf_payload
+from lib.etf_html import render_etf_html
+md = Path(sys.argv[2])
+p = {"symbol": "588000", "generated_at": "2026-10-12T11:00:00+08:00",
+     "profile": {}, "quote": {}, "kline": {}, "share_history": {}, "history": None,
+     "events": {}, "playbook": None,
+     "holdings": {"status": "ok", "report_date": "2026-06-30", "top10_sum_pct": 8,
+                  "holding_scope": "前十大，非全组合",
+                  "rows": [{"code": "688008", "name": "离线测试", "pct": 8}]}}
+r = attach_research(p, load_research_input(md.parent / "research.json", "588000"),
+                    financial_getter=lambda _: {"status": "missing", "note": "离线原文验证"})
+seal_etf_payload(p)
+body = ("# 588000 ETF 研究备忘录\\n\\n> 本备忘录由 AI 辅助生成，不构成投资建议。\\n\\n"
+        + r["narrative_md"] + "\\n\\n" + r["appendix_md"] + "\\n\\n> 不构成投资建议。\\n")
+md.write_text(body, encoding="utf-8")
+md.with_suffix(".payload.json").write_text(json.dumps(p, ensure_ascii=False), encoding="utf-8")
+md.with_suffix(".html").write_text(render_etf_html(p, md_text=body,
+    generation={"payload_hash": p["_meta"]["payload_hash"]}), encoding="utf-8")
+"""
+    prep = subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                           str(tmp_path / "invest-a-etf/scripts"), str(md)],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert prep.returncode == 0, prep.stderr
+
+    def check_both():
+        outputs = []
+        for skill in ("invest-a-stock", "invest-a-etf"):
+            qc = tmp_path / skill / "scripts/lib/report_qc.py"
+            proc = subprocess.run([sys.executable, "-I", "-B", str(qc), str(md),
+                                   "--json", "--profile", "engine", "--fail-on", "error"],
+                                  cwd=tmp_path, capture_output=True, text=True)
+            assert proc.returncode in (0, 1), proc.stderr
+            result = json.loads(proc.stdout)[0]
+            assert not any(f["id"] == "etf-generation-check-error" for f in result["findings"])
+            outputs.append((proc.returncode, result))
+        assert outputs[0] == outputs[1]
+        return outputs[0]
+
+    rc, valid = check_both()
+    assert rc == 0, valid
+    assert not any(f["id"].startswith("etf-operating-research") for f in valid["findings"])
+    body = md.read_text(encoding="utf-8")
+    md.write_text(body.replace("研究问题：经营变化如何解释？", "研究问题：已确认改善。"), encoding="utf-8")
+    rc, invalid = check_both()
+    assert rc == 1
+    assert any(f["id"] == "etf-operating-research" for f in invalid["findings"])
+    md.write_text(body, encoding="utf-8")
+    html = md.with_suffix(".html")
+    html.write_text(html.read_text(encoding="utf-8").replace('data-operating-research="1"', ""),
+                    encoding="utf-8")
+    rc, invalid_html = check_both()
+    assert rc == 1
+    assert any(f["id"] == "etf-operating-research-html" for f in invalid_html["findings"])
 
 
 def test_mandated_qc_tool_packaged_and_runnable(tmp_path):

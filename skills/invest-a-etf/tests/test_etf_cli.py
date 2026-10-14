@@ -809,6 +809,68 @@ def test_cmd_html_payload_ts_mismatch_rc2(monkeypatch, tmp_path, capsys):
     assert "不配对" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("path_form", ["relative_md", "auto_md", "relative_payload",
+                                      "parent_component"])
+def test_html_cli_accepts_equivalent_directory_paths(monkeypatch, tmp_path, path_form):
+    """Equivalent path spellings must reach real rendering with the frozen input."""
+    mod = _load_etf_module()
+    monkeypatch.chdir(tmp_path)
+    report_dir = tmp_path / "reports" / "515050-通信ETF"
+    report_dir.mkdir(parents=True)
+    md = report_dir / "2026-08-01-10-00-00.md"
+    md.write_text("# PATH_PAIR_MARKER\n", encoding="utf-8")
+    payload_path = _write_sealed_payload(md)
+    payload_bytes = payload_path.read_bytes()
+    payload = json.loads(payload_bytes)
+
+    def no_collection(*args, **kwargs):
+        pytest.fail("html must render the frozen payload without collecting data")
+
+    monkeypatch.setattr(mod, "_collect_report_payload", no_collection)
+    monkeypatch.setattr(mod, "_html_extra_dims", no_collection)
+    md_arg = str(md)
+    payload_arg = str(payload_path)
+    if path_form == "relative_md":
+        md_arg = str(md.relative_to(tmp_path))
+    elif path_form == "relative_payload":
+        payload_arg = str(payload_path.relative_to(tmp_path))
+    elif path_form == "parent_component":
+        payload_arg = str(report_dir / ".." / report_dir.name / payload_path.name)
+    args = ["html", "515050", "--payload", payload_arg, "--no-open"]
+    if path_form != "auto_md":
+        args.extend(["--md", md_arg])
+    assert mod.main(args) == 0
+
+    html = md.with_suffix(".html").read_text(encoding="utf-8")
+    assert "PATH_PAIR_MARKER" in html
+    assert f'<meta name="invest-generation" content="{payload["_meta"]["payload_hash"]}">' in html
+    assert payload_path.read_bytes() == payload_bytes
+
+
+@pytest.mark.parametrize("mismatch", ["directory", "filename"])
+def test_html_cli_rejects_distinct_artifact_pairs(monkeypatch, tmp_path, capsys, mismatch):
+    """Normalizing paths must retain the directory and timestamp pairing gates."""
+    mod = _load_etf_module()
+    monkeypatch.chdir(tmp_path)
+    report_dir = tmp_path / "reports" / "515050-通信ETF"
+    report_dir.mkdir(parents=True)
+    md = report_dir / "2026-08-01-10-00-00.md"
+    md.write_text("# 报告\n", encoding="utf-8")
+    payload_path = _write_sealed_payload(md)
+    if mismatch == "directory":
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        other = other_dir / payload_path.name
+    else:
+        other = report_dir / "2026-08-02-10-00-00.payload.json"
+    other.write_bytes(payload_path.read_bytes())
+
+    assert mod.main(["html", "515050", "--md", str(md.relative_to(tmp_path)),
+                     "--payload", str(other), "--no-open"]) == 2
+    assert "不配对" in capsys.readouterr().err
+    assert not md.with_suffix(".html").exists()
+
+
 def test_cmd_html_writes_and_opens(monkeypatch, capsys, tmp_path):
     """写文件 + webbrowser.open 一次（file:// URI、new=2）；md 全文传给渲染器。"""
     mod, md, payload_path, wb = _html_mocks(monkeypatch, tmp_path)

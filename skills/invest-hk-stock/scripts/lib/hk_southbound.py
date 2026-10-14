@@ -8,7 +8,8 @@
   ``当日成交净买额`` 为**亿元**且是**唯一可用净额列**；``当日资金流入`` / ``当日余额``
   两列实测**恒 NaN**，故解析层不产出对应键（填 0 会被读成「当日零流入」这一事实断言）。
 - 降级 tushare ``moneyflow_hsgt``——⚠️ **累计口径**：``ggt_ss``（沪）/ ``ggt_sz``（深）/
-  ``south_money``（合计）均为累计值，**必须差分**才是当日净额。直接引用会把
+  ``south_money``（合计）均为累计值，**必须差分**才是区间净额；仅在区间确认
+  只有一个港股通交易日时才可作为当日净额。直接引用会把
   44 亿的当日净买入说成 550 亿（2026-09-12 同日实测：``32089.12 − 32057.2 = 31.92``
   与 akshare 沪向 31.9191 吻合）。
 - 汇总 ``stock_hsgt_fund_flow_summary_em()`` 的 ``交易状态`` / ``资金净流入`` /
@@ -49,7 +50,8 @@ _TS_DATE_COL = "trade_date"
 _TS_FIELDS = ("ggt_ss", "ggt_sz", "south_money")
 _TS_SOURCE = "tushare.moneyflow_hsgt（累计口径差分）"
 _CALIBER_NOTE = ("⚠️ tushare 为**累计口径**，本表数值为相邻可得行的**差分**"
-                 "（差值 = 当日净买额）；直接引用源值会得到 550 亿级的量级错误。")
+                 "（前值日期之后至本行日期的区间净买额）；未确认区间仅含一个港股通"
+                 "交易日时，不作为当日净额。")
 
 _CROSS_TOL_YI = 0.05   # 同日双源容差（亿元）
 
@@ -130,11 +132,11 @@ def parse_hist_rows(df) -> list[dict]:
 
 
 def diff_cumulative(rows: list[dict], field: str) -> list[dict]:
-    """累计口径序列 → 当日净额（**相邻可得行**相减）。
+    """累计口径序列 → 区间净额（**相邻可得行**相减）。
 
     返回 ``[{"date", "prev_date", "value", "cal_days", "span"}]``。
-    ``cal_days`` 为两行之间的**自然日**数（跨周末/长假 > 1），仅作标注——
-    港股通只在两地同时开市时交易，故相邻行的差值恰为一个交易日的净额。
+    ``cal_days`` 为两行之间的**自然日**数（跨周末/长假 > 1），仅作标注。
+    相邻可得行可能缺少中间交易日；不能据此确认差值为一个交易日的净额。
 
     缺行**不补 0 行**：补 0 会把「区间累计」拆成伪造的逐日数据。
     该 field 某行为 None 时**断开链**（不拿不可用点当基准）。
@@ -169,7 +171,9 @@ def diff_cumulative(rows: list[dict], field: str) -> list[dict]:
 def cross_check(ak_row: dict | None, ts_row: dict | None, tol: float = _CROSS_TOL_YI) -> dict:
     """同日双源对照：akshare 日频 ``total_yi`` ↔ tushare 差分 ``total_yi``。
 
-    只在**同为一日**时可比——跨日/区间累计与单日值不同口径，不可对照（不裁决）。
+    只在**同为一日**时可比：结束日期相同且累计区间恰为一个自然日，
+    由 akshare 当日观测确认该结束日存在净额。多自然日区间缺少港股通日历证据，
+    即使跨周末/假期也不推断仅含一个交易日，不可对照（不裁决）。
     返回 ``{comparable, delta_yi, consistent, note}``；不可比时 ``consistent=None``
     （三态——「不知道」不得写成「不一致」）。
     """
@@ -180,6 +184,13 @@ def cross_check(ak_row: dict | None, ts_row: dict | None, tol: float = _CROSS_TO
     if not a_date or a_date != t_date:
         return {"comparable": False, "delta_yi": None, "consistent": None,
                 "note": f"日期不同（akshare {a_date} / tushare {t_date}）——不可比，不裁决"}
+    prev_date = _norm_date(ts_row.get("prev_date"))
+    # 重新计算区间，不信任源行的 cal_days/span 标注；港股日历与周末近似
+    # 均不能证明港股通完整区间只含一个交易日。
+    if not prev_date or _cal_days(prev_date, t_date) != 1:
+        return {"comparable": False, "delta_yi": None, "consistent": None,
+                "note": f"tushare 累计区间（{prev_date or '前值日期未知'}, {t_date}]"
+                        "未确认仅含一个港股通交易日——不可比，不裁决"}
     a, t = _to_float(ak_row.get("total_yi")), _to_float(ts_row.get("total_yi"))
     if a is None or t is None:
         return {"comparable": False, "delta_yi": None, "consistent": None,

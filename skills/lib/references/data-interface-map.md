@@ -170,7 +170,7 @@
 | `fund_share` / `fund_daily` / `fund_adj` | — | ETF 份额/净值/复权 |
 | `hk_daily` / `hk_basic` | — | 港股行情/基础 |
 | `hk_tradecal` | — | **港股交易日历**（`cal_date`/`is_open`/`pretrade_date`，22 行/月升序）。消费方 invest-hk-stock `hk_calendar.py`（假日变体：A 股开市而港股休市的日子须与 A 股日历区分） |
-| `moneyflow_hsgt` | — | 沪深港通资金流。⚠️ **累计口径**：`ggt_ss`（南向沪）/`ggt_sz`（南向深）/`south_money` 均为**累计值**，**必须差分**才是当日净额——直接引用是 **550 亿 vs 44 亿**的量级错误（2026-09-12 同日实测：`32089.12 − 32057.2 = 31.92` ↔ akshare 港股通沪当日 31.9191；`south_money = ggt_ss + ggt_sz`）。消费方 invest-hk-stock `hk_southbound.py` |
+| `moneyflow_hsgt` | — | 沪深港通资金流。⚠️ **累计口径**：`ggt_ss`（南向沪）/`ggt_sz`（南向深）/`south_money` 均为**累计值**，**必须差分**才是区间净额；仅当差分区间确认只有一个港股通交易日时才可作为当日净额（相邻可得行可能缺少中间交易日）。直接引用是 **550 亿 vs 44 亿**的量级错误（2026-09-12 同日实测：`32089.12 − 32057.2 = 31.92` ↔ akshare 港股通沪当日 31.9191；`south_money = ggt_ss + ggt_sz`）。消费方 invest-hk-stock `hk_southbound.py` |
 | `fut_daily` / `fut_basic` | — | 期货日线/合约（股指 F 系列） |
 | `hsgt_top10` | — | 沪深港通十大成交 |
 

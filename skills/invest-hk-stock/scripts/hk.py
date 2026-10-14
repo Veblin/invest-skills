@@ -397,13 +397,15 @@ def _render_southbound(lines: list[str]) -> dict:
     if sb.get("caliber_note"):
         lines.append(f"> {sb['caliber_note']}")
 
-    # 跨停市日的差值是**区间累计**（tushare 降级链下才会出现）——必须在表内标出，
-    # 否则 4 天的净买入会被读成一天的数（数倍高估）
+    # 多自然日区间可能包含缺失交易日，也可能只跨停市日；未核港股通日历
+    # 不把它裁决为单日净额（tushare 降级链下才会出现）。
     for r in sb["rows"]:
         if (r.get("cal_days") or 1) > 1:
             lines.append(
-                f"> ⚠️ 表中 {r['date']} 为**区间累计**（跨 {r['cal_days']} 自然日，含停市日）"
-                f"——不是单日净额 [来源: Python calc: 相邻可得行差分]")
+                f"> ⚠️ 表中 {r['date']} 为**区间累计**（{r.get('prev_date')} 之后至 "
+                f"{r['date']}，跨 {r['cal_days']} 自然日）"
+                f"——未确认仅含一个港股通交易日，不作为单日净额 "
+                f"[来源: Python calc: 相邻可得行差分]")
 
     latest = sb["rows"][-1]
     if latest.get("buy_yi") is not None and latest.get("sell_yi") is not None:
