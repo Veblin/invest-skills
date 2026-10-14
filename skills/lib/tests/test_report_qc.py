@@ -9,6 +9,37 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.mark.parametrize("regular", [False, True])
+def test_qc_alias_loads_child_for_namespace_and_regular_packages(tmp_path, monkeypatch, regular):
+    """QC must load packaged lint, while preserving a regular initializer's duties."""
+    import report_qc as qc
+    scripts = tmp_path / "scripts"
+    lib_dir = scripts / "lib"
+    lib_dir.mkdir(parents=True)
+    marker = tmp_path / "initializer-ran"
+    if regular:
+        (lib_dir / "__init__.py").write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran')\n"
+        )
+    (lib_dir / "lint.py").write_text("def load_rules():\n    return ['packaged-rule']\n")
+    prior = {name: sys.modules.get(name) for name in ("_invest_lib", "_invest_lib.lint")}
+    monkeypatch.setattr(qc, "_INVEST_LIB_CACHE", None)
+    monkeypatch.setattr(qc, "ensure_invest_a_scripts_on_path", lambda: scripts)
+    for name in prior:
+        sys.modules.pop(name, None)
+    try:
+        lint = qc._load_lint_module()
+        assert lint.load_rules() == ["packaged-rule"]
+        assert Path(lint.__file__).resolve() == (lib_dir / "lint.py").resolve()
+        assert marker.exists() is regular
+        assert list(qc._load_invest_lib().__path__) == [str(lib_dir)]
+    finally:
+        for name, module in prior.items():
+            sys.modules.pop(name, None)
+            if module is not None:
+                sys.modules[name] = module
+
 _SKILLS_LIB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_SKILLS_LIB))  # 无条件插 0：防其他 skill 目录先行入 path 遮蔽同名模块
 

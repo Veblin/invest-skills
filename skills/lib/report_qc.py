@@ -2031,17 +2031,27 @@ def _load_invest_lib():
     scripts = ensure_invest_a_scripts_on_path()
     lib_dir = scripts / "lib"
     init_path = lib_dir / "__init__.py"
-    spec = importlib.util.spec_from_file_location(
-        "_invest_lib", init_path, submodule_search_locations=[str(lib_dir)]
-    )
-    if spec is None or spec.loader is None:  # pragma: no cover
+    has_initializer = init_path.is_file()
+    if not lib_dir.is_dir():
+        raise RuntimeError(f"无法加载 lib 包: {lib_dir}")
+    if has_initializer:
+        spec = importlib.util.spec_from_file_location(
+            "_invest_lib", init_path, submodule_search_locations=[str(lib_dir)]
+        )
+    else:
+        # 独立分发包的 lib 为标准 namespace 包；别名仍仅指向本次解析的目录。
+        spec = importlib.util.spec_from_loader("_invest_lib", loader=None, is_package=True)
+        if spec is not None:
+            spec.submodule_search_locations = [str(lib_dir)]
+    if spec is None or (has_initializer and spec.loader is None):  # pragma: no cover
         raise RuntimeError(f"无法加载 lib 包: {lib_dir}")
     mod = importlib.util.module_from_spec(spec)
     # 必须先把模块注册进 sys.modules，否则模块内 @dataclass / 相对导入
     # 会因查不到模块而失败（AttributeError: 'NoneType'）
     sys.modules[mod.__name__] = mod
     try:
-        spec.loader.exec_module(mod)
+        if has_initializer:
+            spec.loader.exec_module(mod)
     except Exception:
         # v0.3.0 D4（D11 同族清扫）：exec 失败时清掉残破别名包，避免其它按
         # `_invest_lib.X` 取数的路径拿到半初始化模块（本函数自身下次调用会
@@ -3408,6 +3418,20 @@ def etf_generation_findings(report_path: Path, *,
         findings.extend(_etf_share_window_findings(payload, text))
         findings.extend(_etf_rank_findings(payload, text))
         findings.extend(_etf_valuation_excluded_findings(payload, text))
+        if "research" in payload:
+            # ETF 领域合同只在实际研究块出现时加载；兼容旧代与独立包布局。
+            from invest_path import invest_a_etf_lib_dir
+            target = invest_a_etf_lib_dir() / "etf_research.py"
+            spec = importlib.util.spec_from_file_location("_etf_research_qc", target)
+            if spec is None or spec.loader is None:
+                findings.append({"id": "etf-operating-research", "severity": "error",
+                                 "message": "经营证据链合同模块不可用"})
+            else:
+                research_mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(research_mod)
+                findings.extend(research_mod.research_findings(payload, text))
+                if html_path.is_file():
+                    findings.extend(research_mod.research_html_findings(payload, html_text, text))
     # QC 记录侧车（产物哈希绑定 + 分层签认）
     rec = verify_qc_record(report_path)
     if record_refresh:

@@ -15,9 +15,14 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -579,3 +584,143 @@ def test_source_files_untouched():
     etf_py = (b.SKILLS_DIR / "invest-a-etf" / "scripts" / "etf.py").read_text(encoding="utf-8")
     assert "from etf_data import" in etf_py                     # 源文件裸导入保留
     assert "_SCRIPT_PARENT" not in etf_py
+
+
+# ---- (g) 独立包 lib 根 namespace 化：双包同解释器共存 regression ----
+def test_lib_root_init_is_noop_classification(tmp_path):
+    """namespace 降级前置判据：仅 docstring/``__future__``/空（注释）→ noop；含语句 → 否。
+
+    真实共享 `skills/lib/__init__.py`（docstring + future）与 stock `scripts/lib/__init__.py`
+    （仅注释）都必须判为 noop，降级才安全。
+    """
+    def _w(name: str, text: str) -> Path:
+        p = tmp_path / name
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    assert b._lib_root_init_is_noop(b.LIB_DIR / "__init__.py") is True
+    assert b._lib_root_init_is_noop(
+        b.SKILLS_DIR / "invest-a-stock" / "scripts" / "lib" / "__init__.py") is True
+    assert b._lib_root_init_is_noop(
+        _w("doc.py", '"""pkg doc"""\nfrom __future__ import annotations\n')) is True
+    assert b._lib_root_init_is_noop(_w("comment.py", "# bare package marker\n")) is True
+    # 含执行职责（赋值 / 导入职责 / 副作用）→ 不可 namespace 化
+    assert b._lib_root_init_is_noop(_w("assign.py", '"""d"""\nX = 1\n')) is False
+    assert b._lib_root_init_is_noop(_w("imp.py", "from . import _legacy as _m\n")) is False
+    assert b._lib_root_init_is_noop(_w("side.py", "print('boot')\n")) is False
+
+
+def test_exec_duty_lib_root_init_stops_build(monkeypatch, tmp_path):
+    """源 lib 根含可执行职责时，构建必须停交（SystemExit），不得静默降级丢职责。"""
+    monkeypatch.setattr(b, "_lib_root_init_is_noop", lambda _p: False)
+    with pytest.raises(SystemExit) as exc:
+        b.build_one("invest-a-stock", b.project_version(), tmp_path, dry_run=False)
+    assert "可执行职责" in str(exc.value)
+    assert not (tmp_path / "invest-a-stock").exists(), "停交后不得留下半成品目录"
+
+
+def _dual_import_child(sequence, *, probe: bool) -> str:
+    """生成 -I -B 子进程代码：按 sequence 依次插 scripts 并 import lib.<domain>。
+
+    **不吞 ImportError**（无 try/except）——任一导入失败进程即非零退出。probe=True 时
+    追加实际 entry（etf/invest）+ 公共桥（invest_path）+ helper（data_bridge）+
+    子包 collector 导入，并打印 M5JSON 结果行。
+    """
+    lines = ["import sys"]
+    for i, (domain, scripts) in enumerate(sequence):
+        lines.append(f"sys.path.insert(0, {str(scripts)!r})")
+        lines.append(f"import lib.{domain} as m{i}")
+    lines.append("import json")
+    lines.append("out = {'domains': {}}")
+    for i, (domain, _scripts) in enumerate(sequence):
+        lines.append(f"out['domains'][{domain!r}] = m{i}.__file__")
+    if probe:
+        lines += [
+            "import etf as _etf",
+            "import invest as _invest",
+            "out['entries'] = {'etf': _etf.__file__, 'invest': _invest.__file__}",
+            "import lib.invest_path as _bridge",
+            "out['bridge'] = _bridge.__file__",
+            "out['etf_data'] = _bridge.load_invest_a_etf_module().__file__",
+            "import lib.data_bridge as _helper",
+            "out['helper'] = _helper.__file__",
+            "import lib.collector as _col",
+            "pub = [n for n in vars(_col) if not n.startswith('_')]",
+            "assert pub, 'collector __init__ 再导出职责丢失'",
+            "out['collector'] = _col.__file__",
+            "out['collector_pub'] = len(pub)",
+        ]
+    lines.append("print('M5JSON ' + json.dumps(out))")
+    return "\n".join(lines) + "\n"
+
+
+def _run_dual_import(sequence, *, cwd, probe: bool = False):
+    return subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _dual_import_child(sequence, probe=probe)],
+        capture_output=True, text=True, cwd=str(cwd),
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+
+
+def _child_json(proc):
+    for line in proc.stdout.splitlines():
+        if line.startswith("M5JSON "):
+            return json.loads(line[len("M5JSON "):])
+    return None
+
+
+def test_standalone_etf_stock_lib_namespace_merge_both_orders(tmp_path):
+    """ETF + stock 两独立包构建到同根：单解释器共载不得被前包 `lib` 遮蔽。
+
+    M5 §4 反例：两包 lib 根各带普通 `__init__.py` → 首包 `lib` 抢占顶层名，后包私有
+    模块 `lib.etf_html`/`lib.market_microstructure` → ModuleNotFoundError（正逆同构）。
+    本测试证明根降级 namespace 后**正逆两序**均 rc0、各 domain 解析到各自候选包，
+    且 entry/桥/helper/子包 collector 均正常；并在私有副本恢复普通 marker 复现旧反例。
+    """
+    for skill in ("invest-a-stock", "invest-a-etf"):
+        b.build_one(skill, b.project_version(), tmp_path, dry_run=False)
+    stock_pkg = tmp_path / "invest-a-stock"
+    etf_pkg = tmp_path / "invest-a-etf"
+    stock_scripts = stock_pkg / "scripts"
+    etf_scripts = etf_pkg / "scripts"
+    mm_file = stock_scripts / "lib" / "market_microstructure.py"
+    etf_html_file = etf_scripts / "lib" / "etf_html.py"
+    etf_data_file = etf_scripts / "lib" / "etf_data.py"
+
+    forward = [("market_microstructure", stock_scripts), ("etf_html", etf_scripts)]
+    reverse = [("etf_html", etf_scripts), ("market_microstructure", stock_scripts)]
+
+    for label, seq in (("stock->etf", forward), ("etf->stock", reverse)):
+        proc = _run_dual_import(seq, cwd=tmp_path, probe=True)
+        assert proc.returncode == 0, f"{label}: rc={proc.returncode}\n{proc.stderr[-2000:]}"
+        data = _child_json(proc)
+        assert data is not None, (label, proc.stdout)
+        # 各私有 domain 解析到各自候选包（未被前包 namespace 遮蔽）
+        assert Path(data["domains"]["market_microstructure"]).resolve() == mm_file.resolve(), label
+        assert Path(data["domains"]["etf_html"]).resolve() == etf_html_file.resolve(), label
+        # 实际 entry（etf/invest）+ 公共桥/helper 正常
+        assert Path(data["entries"]["etf"]).resolve() == (etf_scripts / "etf.py").resolve(), label
+        assert Path(data["entries"]["invest"]).resolve() == (stock_scripts / "invest.py").resolve(), label
+        assert Path(data["etf_data"]).resolve() == etf_data_file.resolve(), label
+        assert data["helper"].endswith("data_bridge.py"), label
+        # 子包 collector 的 __init__ 执行职责（再导出）在 namespace 化后仍保留
+        assert data["collector_pub"] > 0, label
+
+    # 反例（私有 tmp 副本，不污染生产/构建包）：恢复 lib 根普通包 marker
+    reg = tmp_path / "regular-marker"
+    for skill in ("invest-a-stock", "invest-a-etf"):
+        shutil.copytree(tmp_path / skill, reg / skill)
+        (reg / skill / "scripts" / "lib" / "__init__.py").write_text(
+            "# bare package marker\n", encoding="utf-8")
+    reg_stock = reg / "invest-a-stock" / "scripts"
+    reg_etf = reg / "invest-a-etf" / "scripts"
+    for label, seq, missing in (
+        ("stock->etf", [("market_microstructure", reg_stock), ("etf_html", reg_etf)],
+         "lib.etf_html"),
+        ("etf->stock", [("etf_html", reg_etf), ("market_microstructure", reg_stock)],
+         "lib.market_microstructure"),
+    ):
+        proc = _run_dual_import(seq, cwd=tmp_path)
+        assert proc.returncode != 0, (
+            f"{label}: 恢复普通 marker 后仍成功 → 本回归未覆盖遮蔽缺陷\n{proc.stdout}")
+        assert "ModuleNotFoundError" in proc.stderr, (label, proc.stderr[-800:])
+        assert missing in proc.stderr, (label, proc.stderr[-800:])

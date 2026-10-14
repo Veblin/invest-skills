@@ -351,6 +351,25 @@ def _dot_name(own_name: str, level: int, mod: str) -> str:
     return ".".join(base + [mod]) if mod else ".".join(base)
 
 
+def _lib_root_init_is_noop(path: Path) -> bool:
+    """lib 根 __init__.py 是否仅注释/文档（无可执行职责）。
+
+    判据: AST 剔除模块 docstring 与 ``from __future__ import`` 后无剩余语句。
+    独立包 lib 根降级为 Python 标准 namespace 包（不发 __init__.py）时，仅当
+    源 __init__ 无执行职责才安全；含实质语句 → 不可盲删，由调用方停交 root。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue  # 模块 docstring
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        return False
+    return True
+
+
 class _Closure:
     """一次构建的模块宇宙 + 闭包结果。
 
@@ -405,14 +424,17 @@ class _Closure:
             return (source_key, pi[cand])
         return None
 
-    def _lib_root_init(self) -> tuple[str, Path]:
-        """lib 根 __init__.py：优先共享（pattern 无自身 __init__），否则自身。"""
+    def _lib_root_init(self) -> tuple[str, Path] | None:
+        """lib 根 __init__.py：优先共享（pattern 无自身 __init__），否则自身。
+
+        独立包 lib 根为标准 namespace 包，源无 __init__ 亦合法 → 返回 None。
+        """
         for key, root in self.sources:
             if not root.is_dir():
                 continue
             if (root / "__init__.py").is_file():
                 return key, root / "__init__.py"
-        raise SystemExit(f"{self.skill_name}: 找不到 lib 根 __init__.py")
+        return None
 
     # ---- 闭包 BFS ----
     def _need_invest_path(self) -> None:
@@ -551,9 +573,14 @@ class _Closure:
         """
         plan: list[tuple[Path, Path, str]] = []
         src_by_key = dict(self.sources)
-        # lib 根 __init__（+1 文件）
-        k, f = self._lib_root_init()
-        plan.append((Path("__init__.py"), f, "lib_root"))
+        # 独立包 lib 根为 Python 标准 namespace 包：不发 lib 根 __init__.py，
+        # 子包 __init__（depth ≥1，kind=lib_sub）与其职责原样保留。
+        # 源 lib 根 __init__ 仅注释/文档方可安全降级；含执行职责 → 停交 root。
+        root_init = self._lib_root_init()
+        if root_init is not None and not _lib_root_init_is_noop(root_init[1]):
+            raise SystemExit(
+                f"{self.skill_name}: lib 根 __init__.py 含可执行职责"
+                f"（{root_init[1]}）——namespace 化会丢失该职责，停交 root 决策")
         for name in sorted(self.included):
             key, f = self.included[name]
             rel = f.relative_to(src_by_key[key])

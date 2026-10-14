@@ -273,13 +273,22 @@ def test_summary_hero_present(html_text):
         assert v in hero, f"hero 缺字段值: {v}"
 
 
+def _strip_tags(html: str) -> str:
+    return re.sub(r"<[^>]+>", "", html)
+
+
 def test_summary_ks_field_sources(html_text):
+    # 2026-10-13 读者呈现：引擎字段路径不再作可见副标题，落到 data-source 属性
+    # （可追溯，仍完整保留）；可见正文不得出现裸字段路径。
     hero = _hero_slice(html_text)
-    for k in ("profile.aum", "kline.volatility_annualized",
+    attrs = re.findall(r'data-source="([^"]*)"', hero)
+    for k in ("quote.price", "profile.aum", "kline.volatility_annualized",
               "history.stats.max_drawdown.drawdown_pct",
-              "share_history.summary.total_flow_est"):
-        assert k in hero, f"hero 缺来源标注: {k}"
-    assert "profile.index_pe_pct" in hero
+              "share_history.summary.total_flow_est", "profile.index_pe_pct"):
+        assert any(k in a for a in attrs), f"hero 缺来源绑定: {k}"
+    visible = _strip_tags(hero)
+    for k in ("quote.", "profile.", "kline.", "history.", "share_history."):
+        assert k not in visible, f"可见正文出现内部字段路径: {k}"
 
 
 def test_summary_points_no_direction_words(html_text):
@@ -289,11 +298,58 @@ def test_summary_points_no_direction_words(html_text):
     # （kline.adj_applied=True 属另一链路，不在此消费）→ 复权状态未知，不得标复权。
     assert "净值位置：" in hero and "净值位置：净值（复权状态未知）" in hero
     assert "复权净值" not in hero and "未复权净值" not in hero
-    assert "份额流：" in hero and "对冲覆盖：" in hero
+    assert "份额流：" in hero
+    assert "对冲覆盖：" not in hero  # R16：未核对冲线索不进读者展示
     assert "价格位置：" not in hero
     # 状态要点为引擎字段直映，禁用方向性措辞
     for w in ("看涨", "看跌", "抄底", "逃顶", "低估", "高估", "超卖", "超买"):
         assert w not in hero, f"hero 状态要点出现方向词: {w}"
+
+
+def test_summary_hero_tracked_index_prefers_identity():
+    # 2026-10-13（B03/B06 消费者缺陷）：**已核身份**（verification=verified_original）
+    # 下跟踪名称取 identity.tracked_index，不得被静态 hedge_coverage.index 覆盖——
+    # 两者可不一致（真实 510880 现场：静态「红利指数」vs 身份「上证红利指数」）。
+    payload = _fixture_payload()
+    payload["profile"]["identity"] = {
+        "tracked_index": {"name": "上证红利指数", "code": "000015"},
+        "verification": {"status": "verified_original", "note": "原文核验"}}
+    payload["profile"]["hedge_coverage"] = {
+        "index": "红利指数", "futures": None, "options": None, "coverage": "none",
+        "verification": {"status": "static_map_only", "note": "静态映射，未逐条原文核验"}}
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    hero = _hero_slice(html)
+    assert "跟踪 上证红利指数" in hero
+    assert "跟踪 红利指数" not in hero
+    assert "标的待核" not in hero
+
+
+def test_summary_hero_unverified_identity_name_not_affirmed():
+    # 反例（实际渲染）：identity.tracked_index 有名称，但身份 verification 不是
+    # verified_original（此处完全缺 verification）→ 不得肯定「跟踪 X」，
+    # 名称只能作为待核映射线索。
+    payload = _fixture_payload()
+    payload["profile"]["identity"] = {
+        "tracked_index": {"name": "上证红利指数", "code": "000015"}}
+    payload["profile"]["hedge_coverage"] = {
+        "index": "红利指数", "futures": None, "options": None, "coverage": "none",
+        "verification": {"status": "static_map_only", "note": "静态映射，未逐条原文核验"}}
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    hero = _hero_slice(html)
+    assert "跟踪 上证红利指数" not in hero
+    assert "跟踪 红利指数" not in hero
+    assert "标的待核：上证红利指数" in hero
+
+
+def test_summary_hero_tracked_index_falls_back_to_hedge():
+    # 反例（实际渲染）：identity 缺失，仅剩静态 hedge_coverage.index（static_map_only）
+    # → 不得肯定「跟踪 931079」；输出待核映射线索。
+    payload = _fixture_payload()
+    payload["profile"].pop("identity", None)
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    hero = _hero_slice(html)
+    assert "跟踪 931079" not in hero
+    assert "标的待核：931079" in hero
 
 
 # ── 研究备忘 h2 子目录 ──
@@ -337,7 +393,7 @@ def test_summary_degrade_all_none():
     assert "净值位置：" not in hero and "历史收盘位置：" not in hero
     assert "份额流：" not in hero
     assert "波动/回撤：" not in hero
-    assert "对冲覆盖：" in hero  # hedge_coverage 仍存在
+    assert "对冲覆盖：" not in hero  # R16：未核对冲不假设「有/无」
     assert "RSI(" not in hero or "RSI(14)" not in hero  # rsi_period=None → 不显示周期
 
 
@@ -687,3 +743,315 @@ def test_name_legacy_payload_without_identity_degrades_transparently():
     html = render_etf_html(payload, md_text=MD_TEXT)
     assert "身份待核" not in html
     assert "<title>" in html  # 渲染不崩
+
+
+# ── R13/R16（2026-10-13 复查，B03/B06 + 读者呈现）：未核对冲线索不进读者展示 ──
+
+
+def _hedge_point(html: str) -> str:
+    """抽取 hero 中「对冲覆盖：」状态要点全文（到该要点容器 </div> 为止）。"""
+    hero = _hero_slice(html)
+    idx = hero.find("对冲覆盖：")
+    assert idx >= 0, "hero 缺对冲覆盖句"
+    end = hero.find("</div>", idx)
+    return hero[idx:end if end >= 0 else idx + 260]
+
+
+def _render_hedge(hedge_coverage: dict) -> str:
+    payload = _fixture_payload()
+    payload["profile"]["hedge_coverage"] = hedge_coverage
+    return render_etf_html(payload, md_text=MD_TEXT)
+
+
+@pytest.mark.parametrize("hedge", [
+    # B03/B06 现场（真实 588000）：coverage=full 但 verification=unverified
+    {"index": "588000", "coverage": "full", "futures": "静态期货线索",
+     "verification": {"status": "unverified", "note": "未核原文"}},
+    {"coverage": "full", "futures": "静态期货线索",
+     "verification": {"status": "static_map_only"}},
+    {"coverage": "full", "futures": "静态期货线索"},            # 旧代缺 verification 键
+    {"coverage": "partial", "options": "静态期权线索",
+     "verification": {"status": "unknown"}},
+])
+def test_hedge_unverified_not_shown_no_affirmative_assertion(hedge):
+    """R13/R16：未核/静态映射线索**不进读者展示**（仅保留于原始数据/诊断记录），
+    不产生「对冲覆盖：完整/部分/待核/未知」等已核有/无断言。"""
+    hero = _hero_slice(_render_hedge(hedge))
+    assert "对冲覆盖：" not in hero
+    for claim in ("对冲覆盖：完整", "对冲覆盖：部分",
+                  "对冲覆盖：待核", "对冲覆盖：未知"):
+        assert claim not in hero
+
+
+def test_legacy_hedge_fixture_not_claimed_complete(html_text):
+    """默认 fixture（coverage=none、无 verification）→ 不展示对冲断言（未核不写成无）。"""
+    hero = _hero_slice(html_text)
+    assert "对冲覆盖：" not in hero
+
+
+def test_hedge_verified_original_shows_real_coverage():
+    """原文已核 → 正常显示实际覆盖与具体工具（已核工具可正常显示）。"""
+    html = _render_hedge({"coverage": "full", "futures": "登记期货",
+                          "verification": {"status": "verified_original",
+                                           "verified_at": "2026-10-10"}})
+    pt = _hedge_point(html)
+    assert "对冲覆盖：完整" in pt and "登记期货" in pt
+    assert "待核" not in pt and "映射线索" not in pt
+
+
+def test_hedge_verified_original_none_still_real():
+    html = _render_hedge({"coverage": "none",
+                          "verification": {"status": "verified_original"}})
+    pt = _hedge_point(html)
+    assert "对冲覆盖：无" in pt and "待核" not in pt and "未知" not in pt
+
+
+def test_hedge_unverified_malicious_coverage_not_rendered():
+    """攻击用例保留：未核分支不进入读者展示 → 恶意 coverage/工具原文不落地。"""
+    payload_coverage = "<img src=x onerror=alert(1)>"
+    hero = _hero_slice(_render_hedge({
+        "index": "588000", "coverage": payload_coverage,
+        "futures": "期货<script>",
+        "verification": {"status": "unverified", "note": "未核原文"}}))
+    assert "对冲覆盖：" not in hero
+    assert payload_coverage not in hero
+
+
+def test_hedge_verified_malicious_tool_is_escaped():
+    """已核分支仍走读者展示：工具原文须转义，且不得二次转义。"""
+    pt = _hedge_point(_render_hedge({
+        "coverage": "full", "futures": "期货<script>",
+        "verification": {"status": "verified_original"}}))
+    assert "对冲覆盖：完整" in pt
+    assert "期货&lt;script&gt;" in pt
+    assert "期货<script>" not in pt
+    assert "&amp;lt;" not in pt
+
+
+# ── R16（2026-10-13 读者呈现）：工程信息不进读者展示，但可追溯绑定保留 ──
+
+
+def test_generation_card_not_visible_but_meta_kept():
+    gen = {"same_generation": True, "payload_hash": "abc123def456",
+           "frozen_at": "2026-10-13T11:18:17+08:00",
+           "generated_at": "2026-10-13T11:18:17+08:00"}
+    html = render_etf_html(_fixture_payload(), md_text=MD_TEXT, generation=gen)
+    assert '<meta name="invest-generation" content="abc123def456">' in html
+    assert "冻结于" not in html          # 调试/代际卡不再可见
+    assert "const report=" in html       # 完整数据 JSON 仍在（可追溯不回采）
+
+
+def test_quality_engine_note_not_shown_as_product_copy():
+    payload = _fixture_payload()
+    payload["profile"].pop("tracking", None)
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    quality = html.split('id="quality"', 1)[1].split("</section>", 1)[0]
+    assert "引擎未实现" not in quality
+    assert "跟踪误差需 ETF 净值与指数点位序列对比" not in quality
+    assert "未判定" in quality
+
+
+def test_engineering_flags_filtered_financial_risk_kept():
+    payload = _fixture_payload()
+    payload["profile"]["flags"] = [
+        "⚠️ 静态表未收录该 ETF 的期货/期权对冲工具（未核；不表示不存在）",
+        "⚠️ 折价超 2%，交易价相对净值偏离较大（方向相反）",
+    ]
+    hero = _hero_slice(render_etf_html(payload, md_text=MD_TEXT))
+    assert "静态表未收录" not in hero
+    assert "折价超 2%" in hero  # 金融风险真实提示仍保留
+
+
+def test_refs_uses_actual_sources_not_internal_functions():
+    payload = _fixture_payload()
+    payload["quote"]["source"] = "fund_etf_spot_em"
+    payload["kline"]["source"] = "fund_open_fund_info_em"
+    payload["profile"]["fees"] = {"status": "ok", "source": "https://example.com/fee.pdf"}
+    payload["research"] = {"sources": [
+        {"id": "S1", "title": "某公司2026年半年度报告",
+         "url": "https://example.com/a.pdf"}]}
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    refs = html.split('id="refs"', 1)[1].split("</section>", 1)[0]
+    assert "etf_data.query_etf_data" not in html  # 不再展示内部函数名
+    assert "fund_etf_spot_em" in refs and "fund_open_fund_info_em" in refs
+    assert "某公司2026年半年度报告" in refs        # 实际披露来源
+    assert "天天基金" in refs                       # 采集渠道如实标注
+    assert "https://example.com/fee.pdf" in refs    # 费率材料来源
+
+
+# ── R05/B06（2026-10-13 复核）：数据来源只认能证明成功的来源 ──
+
+def _slice(html: str, sec: str) -> str:
+    return html.split(f'id="{sec}"', 1)[1].split("</section>", 1)[0]
+
+
+def _no_direct_sources(payload: dict) -> dict:
+    payload["quote"]["source"] = None
+    payload["quote"]["status"] = "unavailable"
+    payload["kline"]["source"] = None
+    payload["holdings"]["status"] = "unavailable"
+    payload["holdings"].pop("source", None)
+    payload["research"] = {"sources": []}
+    payload["profile"]["fees"] = {"status": "unverified", "source": None}
+    return payload
+
+
+def test_refs_failed_trace_and_static_channel_not_success_source():
+    """反例：仅有静态 channel / 失败 / 未执行的记录，不得出现「本次实际来源」。"""
+    payload = _no_direct_sources(_fixture_payload())
+    payload["data_status"] = {"dimensions": {
+        "quote": {"available": True,
+                  "source_record": {"channel": "静态登记渠道 A"},
+                  "attempted_sources": ["源A", "源B"],
+                  "source_trace": [{"source": "源A", "outcome": "failed", "reason": "网络"},
+                                   {"source": "源B", "outcome": "skipped", "reason": "未执行"}]},
+        "nav": {"available": False,
+                "source_record": {"channel": "静态登记净值源"},
+                "source_trace": [{"source": "源C", "outcome": "ok"}]},
+    }}
+    refs = _slice(render_etf_html(payload, md_text=MD_TEXT), "refs")
+    for bad in ("静态登记渠道 A", "源A", "源B", "静态登记净值源", "源C"):
+        assert bad not in refs, bad
+    assert "未使用外部数据源" not in refs
+    assert "来源信息未随此数据提供" in refs
+
+
+def test_refs_success_trace_registers_source_and_shows_truthfully():
+    """成功 trace(outcome=ok) 可登记为实际来源；失败来源不得冒充成功。"""
+    payload = _no_direct_sources(_fixture_payload())
+    payload["data_status"] = {"dimensions": {
+        "share_history": {"available": True,
+                          "source_record": {"channel": "静态渠道描述"},
+                          "source_trace": [{"source": "Tushare fund_share", "outcome": "ok"},
+                                           {"source": "Tushare fund_daily", "outcome": "failed"}]},
+    }}
+    refs = _slice(render_etf_html(payload, md_text=MD_TEXT), "refs")
+    assert "Tushare fund_share" in refs
+    assert "Tushare fund_daily" not in refs
+
+
+def test_refs_fee_dict_formatted_not_raw():
+    payload = _fixture_payload()
+    payload["profile"]["fees"] = {"status": "ok", "source": {
+        "source_type": "基金 2025 年年度报告（报表附注 7.4.10.2）",
+        "version": "2025 年年度报告（披露日 2026-03-31）",
+        "url": "https://example.com/fee.pdf",
+        "locator": "报表附注 7.4.10.2.1 管理费"}}
+    refs = _slice(render_etf_html(payload, md_text=MD_TEXT), "refs")
+    assert "https://example.com/fee.pdf" in refs
+    assert "基金 2025 年年度报告" in refs
+    assert "2025 年年度报告（披露日 2026-03-31）" in refs
+    assert "报表附注 7.4.10.2.1 管理费" in refs
+    assert "source_type" not in refs  # 不裸展示 dict 内部对象
+
+
+def test_refs_missing_source_info_no_false_no_external_data_claim():
+    payload = _no_direct_sources(_fixture_payload())
+    refs = _slice(render_etf_html(payload, md_text=MD_TEXT), "refs")
+    assert "未使用外部数据源" not in refs           # 元数据缺失 ≠ 无外部数据
+    assert "来源信息未随此数据提供" in refs
+
+
+def test_quality_chart_adjustment_not_affirmed_from_kline():
+    """反例：kline 指标链路已复权，但曲线(history)复权未知 → 不得肯定图已复权。"""
+    payload = _fixture_payload()
+    payload["kline"]["adj_applied"] = True
+    payload["history"]["history"].pop("adj_applied", None)
+    quality = _slice(render_etf_html(payload, md_text=MD_TEXT), "quality")
+    assert "图示为本次净值历史走势" in quality
+    for bad in ("复权序列", "引擎复权", "渲染层", "净值曲线直接引用"):
+        assert bad not in quality, bad
+
+
+def test_quality_tracking_gap_no_currency_frequency_window_claim():
+    payload = _fixture_payload()
+    payload["profile"]["tracking"] = {
+        "status": "missing_benchmark", "td_pct": None, "te_pct_annualized": None,
+        "attempted_sources": ["a", "b"],
+        "price_benchmark_deviation": {"td_pct": 0.61, "te_pct_annualized": 0.36, "sample_n": 245}}
+    quality = _slice(render_etf_html(payload, md_text=MD_TEXT), "quality")
+    assert "币种/频率/窗口" not in quality
+    assert "分红处理不同" in quality
+    assert "不作为确认性跟踪误差" in quality
+    assert "0.6" in quality and "0.36" in quality     # 研究偏离数金融性质保留
+    assert "missing_benchmark" not in quality        # 不打印内部 enum
+
+
+def test_quality_tracking_unknown_reason_only_no_comparable():
+    payload = _fixture_payload()
+    payload["profile"]["tracking"] = {"status": "missing_benchmark",
+                                      "attempted_sources": ["a"]}
+    quality = _slice(render_etf_html(payload, md_text=MD_TEXT), "quality")
+    assert "暂无可比跟踪结果" in quality
+    assert "币种" not in quality and "分红处理不同" not in quality
+
+
+def test_research_scope_period_end_not_publish_date():
+    payload = _fixture_payload()
+    payload["research"] = {"question": "Q",
+                           "coverage": {"holdings_as_of": "2026-06-30", "weight_pct": 16.02,
+                                        "note": "n"},
+                           "sources": []}
+    html = render_etf_html(payload, md_text=MD_TEXT)
+    assert "持仓期末 2026-06-30" in html
+    assert "2026-06-30 披露" not in html
+
+
+# ── M3c（2026-10-13 定点修正）：按**真实生产者形状**证明成功来源 ──
+
+def _real_identity_payload() -> dict:
+    """真实形状：identity 在 profile.identity，evidence 为 list[dict]（含「同上」）。"""
+    payload = _no_direct_sources(_fixture_payload())
+    payload["profile"]["identity"] = {
+        "verification": {"status": "verified_original", "verified_at": "2026-10-13"},
+        "evidence": [
+            {"claim": "全称/代码", "locator": "§一 产品概况",
+             "url": "https://example.com/pds.pdf", "verified_at": "2026-10-13"},
+            {"claim": "标的指数", "locator": "§二(一) 投资目标",
+             "url": "同上（§二(一)）", "verified_at": "2026-10-13"},
+        ],
+    }
+    payload["data_status"] = {"dimensions": {
+        "nav": {"status": "available",
+                "source_trace": [{"source": "fund_open_fund_info_em", "outcome": "ok"}]},
+        "share_history": {"status": "available",
+                          "source_trace": [{"source": "Tushare fund_share", "outcome": "ok"},
+                                           {"source": "Tushare fund_daily", "outcome": "failed"}]},
+        "index_pe": {"status": "available", "attempted_sources": ["csindex 指数 PE 文件"]},
+    }}
+    return payload
+
+
+def test_refs_identity_evidence_list_shape_and_locators():
+    """真实形状：profile.identity.evidence 为 list[dict] → 逐条登记 URL/定位；
+    url=「同上」承接上一已知 URL（不编造）；不再取顶层 identity。"""
+    payload = _real_identity_payload()
+    refs = _slice(render_etf_html(payload, md_text=MD_TEXT), "refs")
+    assert "https://example.com/pds.pdf" in refs
+    assert "§一 产品概况" in refs and "§二(一) 投资目标" in refs
+    assert "原文已核" in refs
+    assert "同上" not in refs  # 「同上」不落表
+    assert "Tushare fund_share" in refs and "Tushare fund_daily" not in refs
+    assert "fund_open_fund_info_em" in refs
+    assert "csindex" in refs  # index_pe 由 index_pe_note 明示来源登记
+
+
+def test_refs_real_status_shape_failed_not_success():
+    """真实形状反例：status=failed/not_executed + 旧 directsource/attempted
+    不得冒充本次成功；未核身份不得标「原文已核」。"""
+    payload = _no_direct_sources(_fixture_payload())
+    payload["profile"]["identity"] = {
+        "verification": {"status": "unknown"},
+        "evidence": [{"url": "https://example.com/unverified.pdf", "locator": "§一"}]}
+    payload["data_status"] = {"dimensions": {
+        "nav": {"status": "failed", "directsource": "旧直连源",
+                "attempted_sources": ["源X"],
+                "source_trace": [{"source": "源Y", "outcome": "ok"}]},
+        "share_history": {"status": "not_executed", "directsource": "旧直连份额源",
+                          "attempted_sources": ["Tushare fund_share"]},
+    }}
+    refs = _slice(render_etf_html(payload, md_text=MD_TEXT), "refs")
+    for bad in ("旧直连源", "旧直连份额源", "源X", "源Y", "Tushare fund_share",
+                "https://example.com/unverified.pdf", "原文已核"):
+        assert bad not in refs, bad
+    assert "来源信息未随此数据提供" in refs

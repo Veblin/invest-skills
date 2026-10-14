@@ -377,6 +377,36 @@ ETF_IDENTITY: dict[str, dict] = {
              "sha256": "0855b4c1a5a43bf485ef16fda6defc53eb977a4d6561ad75fcc3f82f31d006c3"},
         ],
     },
+
+    # 2026-10-13 原文核验（本模块）：管理人产品资料概要更新（编制 2026-05-28，送出 2026-05-29）。
+    "588000": {
+        "fund_name": "华夏上证科创板50成份交易型开放式指数证券投资基金",
+        "asset_type": "stock", "channel": "domestic", "strategy": "broad_market",
+        "management": "passive", "currency": "CNY",
+        "tracked_index": {"name": "上证科创板50成份指数", "code": "000688"},
+        "verification": {"status": "verified_original", "verified_at": "2026-10-13",
+                         "note": "管理人产品资料概要更新（编制 2026-05-28，送出 2026-05-29）原文核验；"
+                                 "身份=境内宽基被动股票型；跟踪上证科创板50成份指数（000688）。"
+                                 "身份原文核验≠对冲核验≠现行费率核验"},
+        "evidence": [
+            {"claim": "基金全称/简称/代码/基金类型/交易币种",
+             "source_type": "基金产品资料概要更新（管理人华夏基金，编制 2026-05-28）",
+             "url": "https://www.chinaamc.com/upload/resources/file/2026/05/29/9ffa5179b7af4248a2c92b949f2cf617.pdf",
+             "as_of": "2026-05-29",
+             "quote": "基金简称 华夏上证科创板50成份ETF；基金代码 588000；基金类型 股票型；交易币种 人民币",
+             "read_at": "2026-10-13", "verified_at": "2026-10-13",
+             "locator": "§一 产品概况（物理 PDF 第 1 页）",
+             "sha256": "3932364340512b2e503ad4c66e3bb6f328a6910c83758fe177cd7eb93ea02bac"},
+            {"claim": "标的指数/业绩比较基准/被动复制",
+             "source_type": "同上（§二(一) 投资目标与投资策略）",
+             "url": "https://www.chinaamc.com/upload/resources/file/2026/05/29/9ffa5179b7af4248a2c92b949f2cf617.pdf",
+             "as_of": "2026-05-29",
+             "quote": "本基金的标的指数为上证科创板50成份指数。本基金主要投资于标的指数成份股、备选成份股；业绩比较基准 上证科创板50成份指数收益率",
+             "read_at": "2026-10-13", "verified_at": "2026-10-13",
+             "locator": "§二(一) 投资目标与投资策略（物理 PDF 第 1 页）",
+             "sha256": "3932364340512b2e503ad4c66e3bb6f328a6910c83758fe177cd7eb93ea02bac"},
+        ],
+    },
 }
 
 # 费率登记（原文）：逐条带 rate_as_of / evidence_type / current_rate_verified。
@@ -3941,6 +3971,9 @@ def query_etf_share_history(symbol: str, days: int = 20) -> dict:
     result = {
         "symbol": symbol,
         "available": True,
+        # 两条原始序列均成功且合并完成后才登记；不是 attempted_sources。
+        # 带接口/字段定位供 MD、冻结 payload 与 HTML 来源表共同消费。
+        "source": "Tushare fund_share（trade_date/fd_share） + fund_daily（trade_date/OHLCV）",
         "date_range": date_range,
         "rows": detail_rows,
         "summary": {

@@ -289,3 +289,38 @@ class TestAudit20261009IndexResolution:
         assert r["index_pe_status"] == "not_mapped"
         assert r["index_code"] is None
         assert "不等于该产品没有跟踪指数" in r["index_pe_note"]
+
+
+class Test588000IdentityRegistered20261013:
+    """2026-10-13：588000 身份原文登记（产品资料概要更新）+ 对冲仍待核。"""
+
+    def test_588000_identity_axes_and_tracked_index(self):
+        from etf_data import CSINDEX_MAP, resolve_tracked_index
+        ident = query_etf_identity("588000")
+        assert ident["verification"]["status"] == "verified_original"
+        assert ident["axes"] == {"asset_type": "stock", "channel": "domestic",
+                                 "strategy": "broad_market"}
+        assert ident["management"] == "passive"
+        assert ident["currency"] == "CNY"
+        assert ident["tracked_index"] == {"name": "上证科创板50成份指数", "code": "000688"}
+        assert ident["fund_name"] == "华夏上证科创板50成份交易型开放式指数证券投资基金"
+        # 跟踪代码 000688 已有 CSINDEX_MAP，两处登记一致
+        assert CSINDEX_MAP["588000"] == "000688"
+        res = resolve_tracked_index("588000")
+        assert res["code"] == "000688" and res["source"] == "CSINDEX_MAP"
+
+    def test_588000_identity_evidence_traceable(self):
+        ident = query_etf_identity("588000")
+        assert ident["evidence"], "588000 原文证据缺失"
+        ev = ident["evidence"][0]
+        assert ev["url"].startswith("https://www.chinaamc.com/")
+        assert ev["sha256"] == "3932364340512b2e503ad4c66e3bb6f328a6910c83758fe177cd7eb93ea02bac"
+        assert ev["read_at"] == "2026-10-13" and ev["locator"]
+        assert "第 1 页" in ev["locator"] and ev["quote"]
+        assert any("上证科创板50成份指数" in s.get("quote", "") for s in ident["evidence"])
+
+    def test_588000_hedge_still_unverified(self):
+        """身份原文核验 ≠ 对冲核验：对冲覆盖仍为待核（不得标已核）。"""
+        from etf_data import _lookup_hedge
+        ver = _lookup_hedge("588000")["verification"]
+        assert ver["status"] == "unverified"

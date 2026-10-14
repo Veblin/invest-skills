@@ -301,7 +301,8 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
                payload_out: str | None = None,
                index_exposure: bool = False,
                peers: list[str] | None = None,
-               share_days: int = 20) -> int:
+               share_days: int = 20,
+               research_path: str | None = None) -> int:
     symbol = symbol.strip()
     if not symbol.isdigit() or len(symbol) != 6:
         print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
@@ -310,6 +311,18 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         print(f"错误: --share-days 需在 2..200（交易日间隔；取数上限约 170 交易日），"
               f"收到 {share_days}", file=sys.stderr)
         return 2
+
+    research_input = None
+    if research_path is not None:
+        if payload_out is None:
+            print("错误: --research 必须与 --payload-out 同用，研究原料须同代封存", file=sys.stderr)
+            return 2
+        from etf_research import load_research_input
+        try:
+            research_input = load_research_input(research_path, symbol)
+        except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
+            print(f"错误: 研究材料无效: {exc}", file=sys.stderr)
+            return 2
 
     timer = _StageTimer()
     # compact 打印体始终读完整 share_history rows（HEAD 行为，与 with_nav 无关）；
@@ -323,6 +336,14 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         peers=peers, share_days=share_days,
         timer=timer,
     )
+    if research_input is not None:
+        from etf_research import attach_research
+        try:
+            attach_research(payload, research_input)
+        except (ValueError, TypeError) as exc:
+            print(f"错误: 研究与本次数据不一致: {exc}", file=sys.stderr)
+            return 2
+        timer.mark("operating_research")
     # 展开回局部变量：compact 打印体保持不变（零回归）
     profile = payload["profile"]
     quote = payload["quote"]
@@ -1436,6 +1457,11 @@ def main(argv: list[str] | None = None) -> int:
              "报告 Fit 章节引用该数据时必须传（否则引用输入不在同代封存内）",
     )
     p_report.add_argument(
+        "--research", metavar="PATH", default=None,
+        help="按研究问题准备的经营/行业原文与条件分析 JSON；须同用 --payload-out，"
+             "仅所选持仓获取共享财务原料；未指定时无额外请求",
+    )
+    p_report.add_argument(
         "--peers",
         metavar="CODES",
         default=None,
@@ -1530,7 +1556,8 @@ def main(argv: list[str] | None = None) -> int:
                           events_path=args.events, playbook=args.playbook,
                           payload_out=args.payload_out,
                           index_exposure=args.index_exposure,
-                          peers=report_peers, share_days=args.share_days)
+                          peers=report_peers, share_days=args.share_days,
+                          research_path=args.research)
     if args.cmd == "diagnose":
         return cmd_diagnose()
     if args.cmd == "industry-pe":

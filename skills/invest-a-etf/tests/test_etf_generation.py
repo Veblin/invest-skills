@@ -219,7 +219,11 @@ class TestHtmlGenerationMeta:
         html2 = render_etf_html(p, md_text="# 测试\n", generation=dict(gen))
         assert html1 == html2  # 同输入两次渲染逐字节一致
         assert f'<meta name="invest-generation" content="{h}">' in html1
-        assert "同代输入" in html1
+        # R16（2026-10-13 读者呈现）：代际 hash/frozen_at 调试卡不再可见；
+        # 仅保留 meta 绑定、完整数据 JSON 与 QC 绑定以便追溯。
+        assert "同代输入" not in html1
+        assert "冻结于" not in html1
+        assert "const report=" in html1
 
 
 class TestCliSealIntegration:

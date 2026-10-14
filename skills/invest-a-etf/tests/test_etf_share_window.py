@@ -42,6 +42,22 @@ def _install(monkeypatch, env: dict) -> None:
     monkeypatch.setattr("etf_data._bridge_get", _bridge)
 
 
+def test_successful_share_producer_preserves_html_attribution(monkeypatch):
+    from etf_data import build_data_status
+    from etf_html import render_etf_html
+    dates = _dates(4)
+    _install(monkeypatch, _env(dates, [1_000_000, 1_010_000, 1_020_000, 1_030_000]))
+    shares = query_etf_share_history("515050", days=3)
+    assert shares["available"] and shares["summary"]["share_total_change"] == 30_000
+    status = build_data_status(identity={}, profile={}, quote={}, kline={}, share_history=shares)
+    html = render_etf_html({"symbol": "515050", "profile": {}, "quote": {}, "kline": {},
+                           "share_history": shares, "data_status": status})
+    refs = html.split('<section id="refs">', 1)[1].split("</section>", 1)[0]
+    assert "份额与资金流" in refs
+    assert "Tushare fund_share" in refs and "fund_daily" in refs
+    assert "trade_date/fd_share" in refs and "OHLCV" in refs
+
+
 def test_first_day_change_counted_in_flow_and_share_change(monkeypatch):
     """首日变化段（r0→r1）必须同时进入 flow 合计与份额变化窗口。"""
     dates = _dates(4)

@@ -4,7 +4,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+" /></a>
   <a href="https://github.com/Veblin/invest-skills/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/Veblin/invest-skills/validate.yml?label=validate" alt="Validate" /></a>
-  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.3.1" alt="Release" /></a>
+  <a href="https://github.com/Veblin/invest-skills/releases"><img src="https://img.shields.io/github/v/release/Veblin/invest-skills?include_prereleases&label=v0.3.2" alt="Release" /></a>
   <a href="#workbuddy"><img src="https://img.shields.io/badge/WorkBuddy-零终端安装-2b7fff.svg" alt="WorkBuddy 零终端安装" /></a>
 </p>
 
@@ -35,15 +35,15 @@ The engine and research snapshots run locally. What is sent to a model service d
 
 引擎与 SQLite 研究快照在本地运行和保存，项目不收集使用遥测；研究内容是否发送至模型服务，取决于你使用的平台及配置。
 
-## v0.3.1 更新（未发布）
+## v0.3.2 更新（待提交，未发布）
 
-当前分支版本为 **0.3.1**，发布状态以 [GitHub Releases](https://github.com/Veblin/invest-skills/releases) 为准。版本徽章的标签表示仓库版本，不代表该版本已发布。
+当前分支版本为 **0.3.2**，发布状态以 [GitHub Releases](https://github.com/Veblin/invest-skills/releases) 为准。版本徽章的标签表示仓库版本，不代表该版本已发布。
 
-- **阅读区与底稿分开**：完整个股报告优先呈现研究问题、业务证据、关键判断、竞争解释、条件情景与后续核验；完整表格、序列和计算保留在审计底稿。写作规则要求短标题、少量关键事实与同一阅读面去重，实际报告仍须人工复检。
-- **宏观背景分组展示**：full Markdown 使用国内/海外指标表，保留读数、来源和口径；现有 HTML 尚未渲染该宏观块，其他分析内容沿用同源输入。
-- **财务和来源边界补强**：季度利润比较统一日期格式，累计、单季与 TTM 分开；ERP 标注实际利率序列及币种，人民币现值与计算序列的关系按证据说明；历史分位和条件模型读数不直接等同于市场预期。
+- **ETF 经营证据链**：沿用既有报告入口，按研究问题选择披露持仓并核对原文，解释经营事实、行业背景及向 ETF 的传导；明细放附录，判断限定于实际取证范围。
+- **同代封存与不确定性**：MD、HTML 与 QC 使用同代输入；报告保留影响判断的覆盖与因果边界，内部接口和调试问题进入工程记录。拆分、日期、资金窗及表格核验按完整口径处理。
+- **共享数据与分发消费**：公共数据访问和财务方法收敛到共享实现，独立技能包可共同加载；保留来源、降级状态及必要初始化职责。
 
-完整改动见 [CHANGELOG](CHANGELOG.md#v031-未发布)。上述实现与规则不表示所有报告均已通过阅读验收，也不构成真实联网性能、WorkBuddy 真机或无 Python MCP 路径的全面验证。
+完整改动见 [CHANGELOG](CHANGELOG.md#v032-待提交未发布)。用户阅读、完整研究耗时、WorkBuddy 真机及无 Python MCP 验收仍开放；工程测试和版本同步通过不构成整版发布签认。
 
 ## 看一份真实产出
 
@@ -82,7 +82,7 @@ Windows 使用 `git clone` 时，若技能链接被物化为文本文件，运�
 | 技能 | 研究内容 | 调用示例 |
 |:---|:---|:---|
 | invest-a-stock | 个股公司、财务、估值、资金、技术状态、事件与风险 | `/invest-a-stock 600176` |
-| invest-a-etf | 指数估值、折溢价、持仓、跟踪质量与对冲覆盖 | `/invest-a-etf 563300` |
+| invest-a-etf | 指数估值、折溢价、持仓、跟踪质量与对冲覆盖；按研究问题选取披露持仓，解释经营事实与行业背景，明细入附录 | `/invest-a-etf 563300` |
 | invest-hk-stock | 港股快照、财务、南向资金与 A/H 比价 | `/invest-hk-stock 00700` |
 | invest-a-pulse | 市场杠杆、广度、情绪、资金与估值 | `/invest-a-pulse` |
 | invest-a-journal | 既有交易方案的逻辑、盲点与风险收益检查 | `/invest-a-journal` |
@@ -91,6 +91,8 @@ Windows 使用 `git clone` 时，若技能链接被物化为文本文件，运�
 | invest-a-pattern-scan | 双底与三角形底检出及数据窥探防护 | `/invest-a-pattern-scan` |
 
 技术指标与扫描结果用于描述市场状态，不生成交易信号或操作建议。
+
+ETF 研究按所选研究问题组织证据：影响结论的范围与因果不确定性保留在相关判断处；内部接口与调试类问题记入工程记录，不作为读者故障清单；数据来源区分真实读取、失败与未执行，不把尝试写成成功。
 
 **暂停维护**：`invest-a-event-calendar` 自 2026-10-02 起退出公开入口与分发；源码、离线测试保留，共享解禁数据层继续维护。见[历史说明](skills/invest-a-event-calendar/README.md)。
 
