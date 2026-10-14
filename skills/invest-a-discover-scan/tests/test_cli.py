@@ -655,3 +655,28 @@ def test_hk_snapshot_records_measured_call_counts(monkeypatch, tmp_path):
     _, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
     assert rec["pool"]["calls"] == {"hk_basic": 1, "r_hk": 28, "hk_financials": 227}
     assert rec["pool"]["empty_returns"] == 3
+
+
+def test_forecast_fetched_once_per_candidate_when_empty(monkeypatch, tmp_path):
+    """review #13：fina 空 → forecast 档已在闸门前取过（空返回）时，闸门后不得再取。
+
+    旧写法 `if not fc:` 无法区分「未取」与「已取但空」，对后者再打一次接口
+    （每次多付一次 0.6s 退避）。本用例把质量闸门打桩为放行以抵达该分支，
+    统计同一候选的 forecast 调用次数。
+    """
+    from collections import Counter
+
+    cli = load_scan_cli()
+    _stub(monkeypatch, fina={})          # 全部候选 fina 空 → 走 forecast 档
+    calls: list[str] = []
+    monkeypatch.setattr(sources, "fetch_forecast",
+                        lambda code: (calls.append(code), [])[1])
+    monkeypatch.setattr(cli.quality, "pass_quality",
+                        lambda r, fina, fc, tier: {"pass": True})
+    monkeypatch.setattr(cli.snapshot, "snapshot_path",
+                        lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    assert cli.main(_argv(tmp_path, no_out=True)) == 0
+    assert calls, "夹具未触发 forecast 档——检查 L1 候选"
+    dupes = {c: n for c, n in Counter(calls).items() if n > 1}
+    assert not dupes, f"同一候选重复取预告（review #13）：{dupes}"

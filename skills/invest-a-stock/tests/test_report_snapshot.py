@@ -1343,3 +1343,13 @@ def test_digest_delegation_byte_equivalent_to_legacy_implementation():
     ]
     for s in samples:
         assert digest(s) == _legacy_digest(s)
+
+
+def test_json_default_mixed_type_set_does_not_raise():
+    """review #12：混合类型 set 不再抛 TypeError（与 snapshot_core 同式修复）。"""
+    import json
+
+    from lib.json_util import json_default
+
+    text = json.dumps({"s": {1, "a"}}, default=json_default)
+    assert json.loads(text)["s"] == [1, "a"]

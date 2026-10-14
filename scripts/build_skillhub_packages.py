@@ -208,8 +208,11 @@ MANDATED_TOOLS: dict[str, dict[str, list[str]]] = {
         # QC may inspect ETF research from any skill package. These validators are
         # loaded by filename (including the HTML checker inside etf_research), so
         # their canonical source must be registered before following their imports.
+        # etf_generation 同为 QC 按文件名加载（review #14 封存契约单一来源）；
+        # 两者均为全仓唯一名（新增 file_dep 前须确认无同名 shim，见 _add_tool_dependencies）。
         "file_deps": ["skills/invest-a-etf/scripts/lib/etf_research.py",
-                      "skills/invest-a-etf/scripts/lib/etf_md.py"],
+                      "skills/invest-a-etf/scripts/lib/etf_md.py",
+                      "skills/invest-a-etf/scripts/lib/etf_generation.py"],
         "data": ["skills/invest-a-stock/scripts/references/compliance_rules.yaml"],
     },
 }
@@ -488,6 +491,19 @@ class _Closure:
                 for module, path in {**maps[0], **maps[1]}.items():
                     self.module_map.setdefault(module, (source, path))
             # File loads bind to this canonical path, rather than a same-name shim.
+            # 但 _enqueue/module_map 是按名 **first-wins**：同名先到者会静默胜出，
+            # 使上面的承诺失效（review #9）。把「canonical 被别源占用」从静默
+            # 丢弃改为构建期显式失败；同一物理文件（不同 source key，如
+            # cross/self 解析到同一 canonical）不算冲突。
+            # ⚠️ 约束：file_deps 的 stem 必须全仓唯一名——新增条目须先确认无同名
+            # shim（如 journal 的 etf_data 转发 shim），否则会误伤按设计由
+            # 优先级覆盖 shim 的包（pulse/journal 构建即红）。
+            existing = self.included.get(target.stem) or self.module_map.get(target.stem)
+            if existing is not None and Path(existing[1]).resolve() != target.resolve():
+                raise SystemExit(
+                    f"{self.skill_name}: 工具动态依赖 {target.stem} 已被 "
+                    f"{existing[0]} 绑定到 {existing[1]}（canonical 为 {target}）——"
+                    f"同名模块先到者不得静默胜出，请消除同名来源或调整闭包")
             self._enqueue(target.stem, (source, target))
         for dep in spec.get("deps", []):
             resolved = self.resolve(dep)
@@ -687,19 +703,24 @@ def _rewrite_imports(text: str, kind: str, names: set[str]) -> str:
       pulse_md — SKILL.md 内联 python: 裸 from X → from lib.X（非锚定匹配）
     """
     if kind == "pulse_md":
-        def _sub_from(m: re.Match) -> str:
-            nm = _rewrite_mod(m.group(1), "pulse_md", names)
-            return f"from {nm} import" if nm else m.group(0)
-        text = re.sub(r"\bfrom\s+([A-Za-z_][\w.]*)\s+import\b", _sub_from, text)
-
-        def _sub_import(m: re.Match) -> str:
-            mod, alias = m.groups()
+        # 单遍 alternation（review #8）：from 行整体吃掉 `import` 关键字后再向下
+        # 扫描——被导入名不会被随后的裸 import 规则二次改写（旧两遍实现会把
+        # `from etf_md import etf_research` 变成
+        # `from lib.etf_md import lib.etf_research as etf_research`，SyntaxError）。
+        def _sub_pulse_import(m: re.Match) -> str:
+            from_mod = m.group(1)
+            if from_mod:
+                nm = _rewrite_mod(from_mod, "pulse_md", names)
+                return f"from {nm} import" if nm else m.group(0)
+            mod, alias = m.group(2), m.group(3)
             if mod in names and mod != "lib":
                 return f"import lib.{mod}{alias or f' as {mod}'}"
             return m.group(0)
-        text = re.sub(r"\bimport\s+([A-Za-z_][\w.]*)\b(\s+as\s+[A-Za-z_]\w*)?",
-                      _sub_import, text)
-        return text
+
+        return re.sub(
+            r"\bfrom\s+([A-Za-z_][\w.]*)\s+import\b"
+            r"|\bimport\s+([A-Za-z_][\w.]*)\b(\s+as\s+[A-Za-z_]\w*)?",
+            _sub_pulse_import, text)
     return "\n".join(_rewrite_line(l, kind, names) for l in text.splitlines())
 
 

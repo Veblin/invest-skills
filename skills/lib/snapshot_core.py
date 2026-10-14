@@ -52,7 +52,15 @@ def default_serializer(obj: Any) -> Any:
     if isinstance(obj, (bytes, bytearray)):
         return obj.decode("utf-8", errors="replace")
     if isinstance(obj, (set, frozenset)):
-        return sorted(obj) if all(isinstance(x, (str, int, float)) for x in obj) else list(obj)
+        # review #12（2026-10-14）：混合类型（如 {1, "a"}）通过原类型校验后
+        # sorted() 会抛 TypeError → digest/sealed_hash 崩。改按（类型名, 值）全序——
+        # 同类型组内必可比；不可比时保守回落 list(obj)（与旧未知类型分支一致）。
+        if all(isinstance(x, (str, int, float)) for x in obj):
+            try:
+                return sorted(obj, key=lambda x: (type(x).__name__, x))
+            except TypeError:  # 理论不可达：已知类型同组内可比
+                pass
+        return list(obj)
     try:
         import numpy as np
 

@@ -188,7 +188,10 @@ def risk_state(rows: list[dict], *, ma: int = RISK_MA,
         base = [t for t in turns if t is not None][:-1]
         if base:
             turn_pctl = percentile_rank_inclusive(base, turns[-1])
-    high_turn = (turn_pctl is not None and turn_pctl > VOLUME_HIGH_PCTILE)
+    # review #5（2026-10-14）：最新行 turnover 缺失时 turn_pctl=None——不得按
+    # False 输出（那是「已判定非高换手」的事实断言，与 docstring「缺失时标
+    # None（不冒充已判定）」相斥）；整体结论仍以两项主体为准。
+    high_turn = None if turn_pctl is None else (turn_pctl > VOLUME_HIGH_PCTILE)
     return {
         "available": True,
         "is_risk_state": bool(high_volume and below_ma),
@@ -335,19 +338,27 @@ def conditional_reversal_table(rows: list[dict], *, benchmark_returns: dict[str,
                            "原始收益、无条件基线系统性偏移，故**不发布**该统计"
                            "（不得以 0 填充冒充）"),
                 "note": "事后统计、非预测；无单点事件信号"}
-    need = {d for d in dates[1:] if d}
+    # review #2（2026-10-14）：`need` 不得剔除无 trade_date 的行（空串）——
+    # 剔了就是「行无日期 → 覆盖检查空集 → 缺口 0 → 闸门旁路」，而窗口循环里
+    # `bench_clean.get("", 0.0)` 恒 0 → 「超额」静默退化为原始收益且
+    # available=True（实测复现）。空串留在 need 里必判为缺口；且空串**不参与
+    # 比例稀释**（set 里只计一次，少量缺日期行也会被摊薄成小缺口）——凡缺
+    # trade_date 的行与基准无 "" 键即结构性不对齐，直接拒发。
+    need = set(dates[1:])
     missing = sorted(d for d in need if not _is_finite_ret(benchmark_returns.get(d)))
+    undated = "" in missing
     # `need` 为空（序列不足 2 行）→ 缺口记 0，让判定落到下面的「样本不足」，
     # 不得误归因为「基准不可用」（实测：0 事件时曾报缺口 100%）。
     bm_gap_ratio = (len(missing) / len(need)) if need else 0.0
-    if bm_gap_ratio > 0.1:
+    if undated or bm_gap_ratio > 0.1:
+        undated_note = ("；含行情行缺 trade_date（无法按日对齐基准）" if undated else "")
         return {"available": False, "n_events": len(events), "events": events,
                 "benchmark_gap_pct": round(bm_gap_ratio * 100, 2),
                 "benchmark_missing": missing[:10],
                 "reason": (f"基准覆盖缺口 {bm_gap_ratio:.0%}（含无条件基线所需日期；"
-                           f"缺失或**非有限值**均计入缺口）——缺失日按 0% 处理会让"
-                           f"「超额收益」退化为原始收益、基线系统性偏移，故**不发布**"
-                           f"该统计（不得以 0 填充冒充）"),
+                           f"缺失或**非有限值**均计入缺口）{undated_note}——缺失日按 0% "
+                           f"处理会让「超额收益」退化为原始收益、基线系统性偏移，故"
+                           f"**不发布**该统计（不得以 0 填充冒充）"),
                 "note": "事后统计、非预测；无单点事件信号"}
 
     if len(events) < min_events:

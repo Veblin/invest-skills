@@ -1443,7 +1443,10 @@ def _scan_segment_assertions(
                 "line": line_base + i - 1,
                 "message": f"{where}断言缺少证据标签（[来源: / [证据: A–C / [事实: F…]；"
                            "证据强度标签仅元数据、不构成证据）"
-                           "——无 ≥C 级证据的断言不得进入该段（R-A2/R13）",
+                           "——无 ≥C 级证据的断言不得进入该段（R-A2/R13）；"
+                           "若该行属渲染器固定注记（无标签属合法）：登记既有豁免表"
+                           "后重发；若为实质断言：补证据标签。"
+                           "豁免表为 fail-closed 逐字白名单（新变体不自动豁免）",
                 "context": stripped[:80],
             })
     if weak_lines:
@@ -2442,8 +2445,6 @@ _ETF_IDENTITY_VERIFIED_RE = re.compile(
 _HTML_GENERATION_META_RE = re.compile(
     r'name="invest-generation"\s+content="([0-9a-f]{8,})"')
 
-_ETF_PAYLOAD_VERSION = 1
-
 
 #: 分句边界（句读/换行/表格格）：否证检索限定在断言所在分句内，防跨句保护。
 #: 括号允许出现在否证的**贴附间隙**里（「身份（待核）」），故不作边界；
@@ -2576,32 +2577,83 @@ def _claim_scan_lines(md: str) -> list[str]:
     return out
 
 
+def _load_etf_lib_module(stem: str):
+    """按显式路径加载 invest-a-etf lib 模块（etf_research / etf_generation）。
+
+    返回 ``(module, None)`` 或 ``(None, 原因)``——**永不抛**：模块缺失/加载失败
+    必须降级为调用方 finding，而不是冒到 ``_check_etf_generation`` 的兜底
+    （那会退化成通用 etf-generation-check-error 硬阻断；review #4，2026-10-14）。
+
+    ⚠️ 缺失判定**不能用** ``spec.loader is None``：``spec_from_file_location``
+    对不存在的路径同样返回带 SourceFileLoader 的 spec（实测 is_file 是唯一
+    可靠预检），执行时才抛 FileNotFoundError。
+
+    ⚠️ 相对导入（review #14 实测）：**包内副本**的构建器改写给 lib 文件的是
+    相对导入（``from ._invest_path import …``）；裸文件加载时 ``__package__``
+    为空 → ImportError。故以「合成包 + 子模块」方式加载：为该 lib 目录建一个
+    __path__ 指向它的包别名，模块名取 ``<alias>.<stem>``（父子关系自动成立，
+    相对导入解析回本目录；兄弟模块互也可达）。同文件已按任意注册名加载时优先
+    复用同一实例（A04 合同：同 canonical 文件不双实例）。etf lib 目录同时插入
+    sys.path——主仓库副本用**裸绝对导入**（``from _invest_path import …``），
+    需要它。
+    """
+    try:
+        from invest_path import _loaded_module_by_path, invest_a_etf_lib_dir
+
+        lib = invest_a_etf_lib_dir()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"invest-a-etf lib 引导不可用: {type(exc).__name__}"
+    target = lib / f"{stem}.py"
+    if not target.is_file():
+        return None, f"{stem}.py 缺失（{target}）"
+    existing = _loaded_module_by_path(target)
+    if existing is not None:
+        return existing, None
+    s = str(lib)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+    alias = "_etf_qc_lib_" + hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
+    if alias not in sys.modules:
+        import types
+
+        pkg = types.ModuleType(alias)
+        pkg.__path__ = [s]
+        sys.modules[alias] = pkg
+    mod_name = f"{alias}.{stem}"
+    cached = sys.modules.get(mod_name)
+    if cached is not None:
+        return cached, None
+    spec = importlib.util.spec_from_file_location(mod_name, target)
+    if spec is None or spec.loader is None:
+        return None, f"{stem}.py 无法构造加载器（{target}）"
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:  # noqa: BLE001 —— 残破模块不得留在 sys.modules
+        sys.modules.pop(mod_name, None)
+        return None, f"{stem}.py 加载失败: {type(exc).__name__}: {exc}"
+    return mod, None
+
+
 def _load_etf_payload_for_qc(report_path: Path) -> tuple[dict | None, list[str]]:
-    """读取并校验同代 ETF payload（seal 走共享 snapshot_core，不复制第二套）。"""
+    """读取并校验同代 ETF payload——封存契约**单一来源**（etf_generation）。
+
+    review #14（2026-10-14）：原先与 etf_generation.load_etf_payload/
+    verify_etf_payload 重复实现（版本常量与字段检查两处各自维护），版本/字段
+    漂移会让 QC 错杀或漏放；现全量委派。缺文件消息保留 QC 体例（basename；
+    委派返回的错误串做路径归一——stock/ETF 双包输出须字节相等，绝对路径不入
+    findings）。
+    """
     payload_path = report_path.parent / f"{report_path.stem}.payload.json"
     if not payload_path.is_file():
         return None, [f"无同代冻结 payload: {payload_path.name}"]
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return None, [f"payload 读取/解析失败: {exc}"]
-    if not isinstance(payload, dict):
-        return None, ["payload 不是 JSON 对象"]
-    try:
-        import snapshot_core  # noqa: E402 — 与封存侧同一实现（共享核）
-    except ImportError as exc:  # pragma: no cover
-        return None, [f"snapshot_core 不可用: {exc}"]
-    errors = snapshot_core.verify_seal(
-        payload, version_field="payload_version", expected_version=_ETF_PAYLOAD_VERSION)
-    if not errors:
-        meta = payload.get("_meta") or {}
-        if meta.get("symbol") != payload.get("symbol"):
-            errors.append("封存 meta.symbol 与 payload.symbol 不一致")
-        if not payload.get("generated_at"):
-            errors.append("payload 缺 generated_at（无法判定同代时点）")
-        if not meta.get("frozen_at"):
-            errors.append("payload 缺 frozen_at（冻结时点）")
-    return (payload if not errors else None), errors
+    gen_mod, load_reason = _load_etf_lib_module("etf_generation")
+    if gen_mod is None:
+        return None, [f"封存契约模块（etf_generation）不可用: {load_reason}"]
+    payload, errors = gen_mod.load_etf_payload(payload_path)
+    errors = [e.replace(str(payload_path), payload_path.name) for e in errors]
+    return payload, errors
 
 
 # ── ETF 同代数值一致性与独立复算（2026-10-10，A8） ────────────────────────
@@ -2699,6 +2751,10 @@ def _etf_boll_findings(payload: dict, text: str) -> list[dict]:
     # 同代数字一致：正文引用的原始轨道值须等于 payload。只认**三值同现**的模板
     # 形态（「上轨 X … 中轨 Y … 下轨 Z」）——单标签正则会把散文句
     # 「距 BOLL 上轨 6.15% 空间」误判成轨道值（假阳性防护）。
+    # review #7（2026-10-14）：同一错误 triple 在摘要+附录重复引用曾产出 N 条重复
+    # finding；按本层惯例（「每字段取首个命中」，见 _etf_derived_payload_findings）
+    # 至多一条 band-mismatch——跳出匹配循环，其后的复算/正文检查不受影响。
+    mismatch_reported = False
     for m in _BOLL_TRIPLE_RE.finditer(text):
         for label, name, pv, val_raw in (("上轨", "boll_upper", up, m.group(1)),
                                          ("中轨", "boll_mid", mid, m.group(2)),
@@ -2708,6 +2764,10 @@ def _etf_boll_findings(payload: dict, text: str) -> list[dict]:
                     "id": "etf-boll-band-mismatch", "severity": "error",
                     "message": (f"正文引用 BOLL {label} {val_raw} ≠ 同代 payload "
                                 f"{name}={pv}（同代数字不一致）")})
+                mismatch_reported = True
+                break
+        if mismatch_reported:
+            break
     if claimed is not None and abs(float(claimed) - recomputed) > _BOLL_RECOMPUTE_TOL:
         out.append({
             "id": "etf-boll-formula-mismatch", "severity": "error",
@@ -3420,15 +3480,13 @@ def etf_generation_findings(report_path: Path, *,
         findings.extend(_etf_valuation_excluded_findings(payload, text))
         if "research" in payload:
             # ETF 领域合同只在实际研究块出现时加载；兼容旧代与独立包布局。
-            from invest_path import invest_a_etf_lib_dir
-            target = invest_a_etf_lib_dir() / "etf_research.py"
-            spec = importlib.util.spec_from_file_location("_etf_research_qc", target)
-            if spec is None or spec.loader is None:
+            # 模块缺失/加载失败降级为该 finding（review #4：原先的 spec.loader
+            # 判空是死分支，缺失会冒成通用 etf-generation-check-error 硬阻断）。
+            research_mod, load_reason = _load_etf_lib_module("etf_research")
+            if research_mod is None:
                 findings.append({"id": "etf-operating-research", "severity": "error",
-                                 "message": "经营证据链合同模块不可用"})
+                                 "message": f"经营证据链合同模块不可用：{load_reason}"})
             else:
-                research_mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(research_mod)
                 findings.extend(research_mod.research_findings(payload, text))
                 if html_path.is_file():
                     findings.extend(research_mod.research_html_findings(payload, html_text, text))

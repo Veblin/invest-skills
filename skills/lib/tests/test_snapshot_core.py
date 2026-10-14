@@ -35,6 +35,18 @@ class TestDigest:
                     "dec": Decimal("1.23"), "s": {1, 2}, "b": b"xy"})
         assert isinstance(d, str) and len(d) == 64
 
+    def test_mixed_type_set_serializes_deterministically(self):
+        """review #12：{1, "a"} 通过原类型校验后 sorted() 抛 TypeError（digest 崩）；
+        现按（类型名, 值）全序——可序列化且内容相同即哈希一致。"""
+        from snapshot_core import default_serializer
+
+        # 类型名分组按字母序：float < int < str（确定性优先，非数值序）
+        assert default_serializer({1, "a", 2.5}) == [2.5, 1, "a"]
+        d1 = digest({"s": {1, "a"}})
+        d2 = digest({"s": {"a", 1}})
+        assert isinstance(d1, str) and len(d1) == 64
+        assert d1 == d2
+
     def test_custom_default_used(self):
         calls: list = []
 

@@ -83,18 +83,22 @@ def client():
 
 
 def latest_trade_date() -> str:
-    """最近交易日（YYYYMMDD）。不可得 → 估算并 warning（不静默给当日）。"""
+    """最近交易日（YYYYMMDD）。不可得 → 用**沪市当日**估算并 warning。"""
     try:
         from lib.trade_cal import last_trade_dates
 
         days = last_trade_dates(1)
         if days:
             return days[0]
+        _note("交易日历返回空（源停更或字段漂移？）→ 退化为沪市当日估算")
     except Exception as exc:  # noqa: BLE001
-        _note(f"交易日历不可得（{type(exc).__name__}）→ 退化为自然日估算")
-    import datetime as _dt
+        _note(f"交易日历不可得（{type(exc).__name__}）→ 退化为沪市当日估算")
+    # review #6（2026-10-14）：估算须用**沪市**当日（dates.shanghai_today），
+    # 不得用宿主本地时区——该值是 daily_basic 的查询键：宿主在北美时本地日期
+    # 会查错交易日（静默扫上一交易日，或查非交易日空返回 → exit 3）。
+    from dates import shanghai_today
 
-    return _dt.date.today().strftime("%Y%m%d")
+    return shanghai_today()
 
 
 def _cache():
@@ -137,6 +141,8 @@ def fetch_daily_basic(trade_date: str) -> list[dict]:
 
 _RETRY_SLEEP_SEC = 0.6      # 突发限流后的退避（设计 §7：重试 ≤1 次）
 EMPTY_RETRY_COUNT = 0       # 因空返回触发的重试次数（诊断用）
+_FINA_TTL_SEC = 86400       # 财务指标缓存 TTL（review #13；查询窗随日滚动 → 自然日级失效）
+_FORECAST_TTL_SEC = 86400   # 预告缓存 TTL（同上）
 
 
 def _rolling_window(years: int = 3) -> tuple[str, str]:
@@ -166,13 +172,26 @@ def fetch_fina_indicator(ts_code: str, *, start_date: str | None = None,
     global EMPTY_RETRY_COUNT
     if start_date is None or end_date is None:
         start_date, end_date = _rolling_window()
+    # review #13（2026-10-14）：持久缓存——同日二次扫描不再重发数百请求
+    # （80/min 限流下每轮 ≈5 分钟自限流等待）。空结果**不入缓存**（D6：一次
+    # 失败不得污染一整天）；命中不计 CALL_COUNT（调用量是限流诊断口径）。
+    cache_key = f"{ts_code}|{start_date}|{end_date}"
+    cache = _cache()
+    hit = cache.get("discover_fina_indicator", cache_key,
+                    max_age_seconds=_FINA_TTL_SEC)
+    if hit and isinstance(hit.get("rows"), list) and hit["rows"]:
+        return hit["rows"]
     cli = client()
     for attempt in (0, 1):
         CALL_COUNT["fina_indicator"] += 1
         df = cli.query("fina_indicator", ts_code=ts_code,
                        start_date=start_date, end_date=end_date)
         if df is not None and not df.empty:
-            return df.to_dict("records")
+            rows = df.to_dict("records")
+            cache.set("discover_fina_indicator", cache_key, {"rows": rows},
+                      ttl_seconds=_FINA_TTL_SEC,
+                      source="tushare.fina_indicator")
+            return rows
         if attempt == 0:
             EMPTY_RETRY_COUNT += 1
             import time as _t
@@ -183,6 +202,11 @@ def fetch_fina_indicator(ts_code: str, *, start_date: str | None = None,
 
 def fetch_forecast(ts_code: str) -> list[dict]:
     """单标的事业绩预告（按 ts_code；日期区间查询会被 API 拒绝）。"""
+    # review #13：持久缓存（同 fetch_fina_indicator 口径：空结果不入缓存、命中不计调用）。
+    cache = _cache()
+    hit = cache.get("discover_forecast", ts_code, max_age_seconds=_FORECAST_TTL_SEC)
+    if hit and isinstance(hit.get("rows"), list) and hit["rows"]:
+        return hit["rows"]
     CALL_COUNT["forecast"] += 1
     try:
         df = client().query("forecast", ts_code=ts_code)
@@ -191,7 +215,10 @@ def fetch_forecast(ts_code: str) -> list[dict]:
         return []
     if df is None or df.empty:
         return []
-    return df.to_dict("records")
+    rows = df.to_dict("records")
+    cache.set("discover_forecast", ts_code, {"rows": rows},
+              ttl_seconds=_FORECAST_TTL_SEC, source="tushare.forecast")
+    return rows
 
 
 def rf_10y_pct() -> tuple[float | None, str]:

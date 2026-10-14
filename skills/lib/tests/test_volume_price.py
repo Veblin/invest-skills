@@ -134,6 +134,23 @@ def test_risk_state_false_when_normal():
     assert out["is_risk_state"] is False
 
 
+def test_risk_state_missing_latest_turnover_is_none_not_false():
+    """review #5：最新行 turnover 缺失 → high_turnover 标 None（不冒充已判定），
+    与 docstring「缺失时该项标 None」一致（旧实现输出 False = 事实断言）。"""
+    rows = _rows(300)
+    for i, r in enumerate(rows):
+        r["turnover_rate"] = 1.0 + (i % 7) * 0.1
+    rows[-1]["turnover_rate"] = None
+    out = vp.risk_state(rows, ma=60)
+    assert out["available"] is True
+    assert out["components"]["high_turnover"] is None
+    assert out["components"]["turnover_pctile"] is None
+    # 防假绿：有值时仍为布尔判定
+    rows[-1]["turnover_rate"] = 9.9
+    out2 = vp.risk_state(rows, ma=60)
+    assert isinstance(out2["components"]["high_turnover"], bool)
+
+
 # ── R-A03 ④ 退潮特征 ─────────────────────────────────────────────────────
 
 def test_fade_feature_is_labelled_not_a_paper_replication():
@@ -353,3 +370,53 @@ def test_conditional_table_rejects_nonfinite_benchmark_values():
     for h in ("5", "10", "20"):
         row = out2["horizons"][h]
         assert all(v is None or v == v for v in row.values()), f"horizon {h} 含 NaN"
+
+
+# ── review #2：无 trade_date 行不得旁路基准覆盖闸门 ────────────────────────
+
+def _crash_rows(n=500):
+    rows = _rows(n)
+    for i in (400, 410, 420):
+        rows[i]["close"] = rows[i - 1]["close"] * 0.92
+        rows[i]["vol"] = 8_000_000
+    return rows
+
+
+def test_conditional_table_undated_rows_with_dated_benchmark_refused():
+    """行全部无 trade_date 且基准按真实日期提供 → 结构性不对齐，拒发。
+
+    旧实现把空串从 need 里滤掉 → 覆盖检查空集 → 缺口 0 → 闸门旁路，
+    `bench_clean.get("", 0.0)` 恒 0 使「超额」静默退化为原始收益且
+    available=True（review 实测复现）。"""
+    rows = _crash_rows()
+    bench = _bench(rows)                   # 先按真实日期建基准
+    for r in rows:
+        r.pop("trade_date", None)
+    out = vp.conditional_reversal_table(rows, benchmark_returns=bench)
+    assert out["available"] is False
+    assert out["benchmark_gap_pct"] == 100.0
+    assert out["benchmark_missing"] == [""]
+    assert "trade_date" in out["reason"], out["reason"]
+
+
+def test_conditional_table_partial_undated_rows_refused_not_diluted():
+    """空串不参与比例稀释：少量缺日期行 + 全量真实日期基准 → 仍拒发
+    （这些行的前向窗会全部按 0% 填充，与缺口比例无关的表征失灵）。"""
+    rows = _crash_rows()
+    bench = _bench(rows)
+    for r in rows[250:]:                   # 一半行无日期
+        r.pop("trade_date", None)
+    out = vp.conditional_reversal_table(rows, benchmark_returns=bench)
+    assert out["available"] is False
+    assert "" in out["benchmark_missing"]
+    assert "trade_date" in out["reason"]
+
+
+def test_conditional_table_undated_allowed_only_with_empty_keyed_benchmark():
+    """既有合法形态保留：行全无日期且调用方显式以 "" 为键提供基准 → 放行
+    （见上方「按 idx 匹配」用例；两侧窗口同键，非静默填 0）。"""
+    rows = _crash_rows()
+    for r in rows:
+        r.pop("trade_date", None)
+    out = vp.conditional_reversal_table(rows, benchmark_returns={"": 0.0002})
+    assert out["available"] is True

@@ -151,11 +151,29 @@ def clash_rules_yaml() -> str:
     return f"rules:\n{CLASH_DIRECT_RULES}\n  - MATCH,PROXY"
 
 
+def _env_proxy_keys(env) -> list[str]:
+    """含值的代理 env 键；``no_proxy`` 系（排除列表）不是代理（review #3）。
+
+    不排除时，任何设了 ``NO_PROXY=localhost`` 的主机都会误判「检测到代理」：
+    ``akshare_push2_available()`` 不再走零网络快路径，改跑 5-6s push2 探测；
+    探测一过性失败还会跳过 L3 akshare 行情源并误发 Clash 提示。
+    """
+    return [k for k in env
+            if "proxy" in k.lower() and "no_proxy" not in k.lower() and env.get(k)]
+
+
+def _without_no_proxy(proxies) -> dict:
+    """剔除 no_proxy 伪代理键（urllib/requests 把 ``no_proxy`` 映射成 ``"no"``
+    键——实测：``urllib.request.getproxies()``/``requests.utils.get_environ_proxies()``
+    在 no_proxy 不匹配目标 URL 时均返回 ``{'no': …}``）与空值。"""
+    return {k: v for k, v in (proxies or {}).items() if k != "no" and v}
+
+
 def detect_proxy() -> dict[str, Any]:
-    """检测 env 代理、系统代理与 requests 层代理。"""
-    env_keys = [k for k in os.environ if "proxy" in k.lower() and os.environ.get(k)]
-    system = urllib.request.getproxies()
-    req_proxies = ru.get_environ_proxies(PUSH2_EASTMONEY_URL)
+    """检测 env 代理、系统代理与 requests 层代理（no_proxy 不计为代理）。"""
+    env_keys = _env_proxy_keys(os.environ)
+    system = _without_no_proxy(urllib.request.getproxies())
+    req_proxies = _without_no_proxy(ru.get_environ_proxies(PUSH2_EASTMONEY_URL))
     detected = bool(env_keys) or bool(system) or bool(req_proxies)
     return {
         "detected": detected,
@@ -166,8 +184,9 @@ def detect_proxy() -> dict[str, Any]:
 
 
 def requests_use_proxy(url: str = PUSH2_EASTMONEY_URL) -> bool:
-    """诊断用：当前 requests 对给定 URL 是否会走代理。"""
-    return bool(ru.get_environ_proxies(url, no_proxy=os.environ.get("no_proxy")))
+    """诊断用：当前 requests 对给定 URL 是否会走代理（no_proxy 伪键已剔除）。"""
+    return bool(_without_no_proxy(
+        ru.get_environ_proxies(url, no_proxy=os.environ.get("no_proxy"))))
 
 
 def _force_akshare_em() -> bool:

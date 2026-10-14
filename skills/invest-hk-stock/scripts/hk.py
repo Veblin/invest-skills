@@ -319,7 +319,16 @@ def _render_module7(lines: list[str], *, quote: dict, pe_line: str | None,
         # 合计是派生值 —— 带 calc 标签；缺一侧时 total 为 None，不得裸出数字
         total_txt = (f"合计 {_fmt_num(total)} 亿 [来源: Python calc: sh_yi + sz_yi]"
                      if total is not None else "合计不可得（单侧缺失，不拿沪向冒充）")
-        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，{total_txt}）"
+        # 区间累计行（tushare 降级链的链断裂）不得被读成「最新单日」金额：
+        # 模块 3 的区间提示不覆盖本行，限定词必须随行输出（review #1，2026-10-14）。
+        # akshare 正常路径 cal_days 为空 → 输出逐字节不变。
+        interval_txt = ""
+        cal_days = latest.get("cal_days")
+        if cal_days and cal_days > 1:
+            interval_txt = (f"（{latest.get('prev_date')} 之后至 {latest.get('date')} "
+                            f"区间累计，跨 {cal_days} 自然日，"
+                            f"未确认仅含一个港股通交易日——不作为单日净额）")
+        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，{total_txt}）{interval_txt}"
                      f"——资金面观察，非交易信号 [来源: {sb.get('source')}]")
     else:
         lines.append(f"- 南向资金：不可得（{sb.get('reason')}）——不推断资金方向")

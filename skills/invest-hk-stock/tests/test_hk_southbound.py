@@ -530,3 +530,42 @@ def test_cli_report_does_not_render_dead_columns(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     for dead in ("当日资金流入", "当日余额"):
         assert dead not in out, f"{dead} 恒 NaN，不得出现在报告"
+
+
+# ── 模块 7 南向汇总行：区间口径限定（review #1，2026-10-14） ─────────────────
+
+def test_module7_southbound_interval_row_carries_caliber_limit():
+    """tushare 降级链的**区间**净值不得在模块 7 被读成「最新单日」金额。
+
+    模块 3 的区间提示不覆盖模块 7 汇总行（review 实测：跨日差值直接印成
+    「最新 {date}，合计 X 亿」——44 亿 vs 550 亿 的量级错误类别）。
+    """
+    cli = _cli()
+    sb = {
+        "available": True,
+        "source": "tushare.moneyflow_hsgt（累计口径差分）",
+        "caliber_note": "⚠️ tushare 为**累计口径**，本表数值为相邻可得行的**差分**…",
+        "warnings": [], "summary": None, "cross": None,
+        "rows": [{"date": "2026-09-16", "prev_date": "2026-09-14",
+                  "cal_days": 2, "span": "跨 2 自然日",
+                  "sh_yi": None, "sz_yi": None, "total_yi": 999.99}],
+    }
+    lines: list[str] = []
+    cli._render_module7(lines, quote={}, pe_line=None, sb=sb)
+    body = "\n".join(lines)
+    assert "999.99" in body, "mock 标记缺失"
+    assert "区间累计" in body and "不作为单日净额" in body
+    assert "2026-09-14 之后至 2026-09-16" in body, "区间起止必须随行"
+    assert "跨 2 自然日" in body
+
+
+def test_module7_southbound_daily_row_format_unchanged():
+    """akshare 正常路径（无区间行）输出逐字节不变——钉住旧格式防回归。"""
+    cli = _cli()
+    lines: list[str] = []
+    cli._render_module7(lines, quote={}, pe_line=None, sb=dict(_SB_OK))
+    body = "\n".join(lines)
+    assert ("- 南向资金：可得（最新 2099-12-31，合计 44.31 亿 "
+            "[来源: Python calc: sh_yi + sz_yi]）——资金面观察，非交易信号 "
+            "[来源: akshare.stock_hsgt_hist_em（港股通沪/深）]") in body
+    assert "区间累计" not in body

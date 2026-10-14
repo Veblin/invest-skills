@@ -149,9 +149,11 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         # L3 增速子项恒 0（R4 评审实测复现）
         if fina:
             fc = []
+            fc_attempted = False
             q = quality.pass_quality(r, fina, fc, tier="fina")
         else:
             fc = sources.fetch_forecast(r["ts_code"])
+            fc_attempted = True
             q = quality.pass_quality(r, fina, fc, tier="forecast")
         if q.get("warning"):
             quality_warnings.append(q["warning"])
@@ -161,8 +163,10 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         if not q["pass"]:
             continue
         # L3 增速子项需预告增速——**在通过质量闸门之后**才取（候选已收敛到几十只，
-        # 调用量可控）；此前放在循环头部会让 403 只候选各多打一次接口
-        if not fc:
+        # 调用量可控）；此前放在循环头部会让 403 只候选各多打一次接口。
+        # review #13：`fc` 为空 ≠ 未取过——forecast 档已取过（含空返回）时必须
+        # 复用，旧写法对「已取但空」再打一次接口并多付一次 0.6s 退避。
+        if not fc and not fc_attempted:
             fc = sources.fetch_forecast(r["ts_code"])
         # ⚠️ 只用 `p_change_max`（净利**同比增速**上限，百分数）——可加总/可比。
         # **不得**回退到 `net_profit_max`：那是净利润的**绝对金额**，与

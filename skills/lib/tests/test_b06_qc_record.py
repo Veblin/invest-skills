@@ -28,6 +28,7 @@ if str(_ETF_SCRIPTS_LIB) not in sys.path:
     sys.path.append(str(_ETF_SCRIPTS_LIB))
 
 import snapshot_core  # noqa: E402
+import report_qc  # noqa: E402
 from report_qc import (  # noqa: E402
     QC_SIGNOFF_LAYERS,
     etf_generation_findings,
@@ -60,7 +61,7 @@ def _payload(symbol: str = "510300", *, tracking: dict | None = None,
              holdings: dict | None = None, index_exposure: dict | None = None,
              identity: dict | None = None, kline: dict | None = None,
              peers: dict | None = None, share_history: dict | None = None,
-             index_pe: float | None = None) -> dict:
+             index_pe: float | None = None, research: dict | None = None) -> dict:
     profile = {
         "tracking": tracking or {"status": "limited", "note": "缺总收益基准"},
         "identity": identity or {
@@ -87,6 +88,8 @@ def _payload(symbol: str = "510300", *, tracking: dict | None = None,
         payload["peers"] = peers
     if share_history is not None:
         payload["share_history"] = share_history
+    if research is not None:
+        payload["research"] = research
     snapshot_core.seal(
         payload, version_field="payload_version", version=1,
         extra={"payload_version": 1, "symbol": symbol,
@@ -764,10 +767,25 @@ def test_etf_domain_metadata_is_checked_by_qc(tmp_path, damage):
         payload["_meta"].pop("frozen_at")
     snapshot_core.seal(payload)
     p = _write_generation(tmp_path, payload=payload)
-    for loaded, errors in (load_etf_payload(p.with_suffix(".payload.json")),
-                           _load_etf_payload_for_qc(p)):
-        assert loaded is None and errors
+    gen_loaded, gen_errors = load_etf_payload(p.with_suffix(".payload.json"))
+    qc_loaded, qc_errors = _load_etf_payload_for_qc(p)
+    assert gen_loaded is None and gen_errors
+    assert qc_loaded is None and qc_errors
+    # review #14：QC 全量委派封存契约后，两侧报错列表须**逐字一致**（单一口径）
+    assert qc_errors == gen_errors
     assert any(f["id"] == "etf-payload-invalid" for f in etf_generation_findings(p))
+
+
+def test_payload_missing_message_uses_basename_only(tmp_path):
+    """review #14：缺 payload 的 QC 消息保留 basename 体例——包绝对路径不得
+    入 findings（stock/ETF 双包输出字节相等断言不容路径泄漏）。"""
+    from report_qc import _load_etf_payload_for_qc
+
+    md = _write_generation(tmp_path, payload=None)
+    loaded, errors = _load_etf_payload_for_qc(md)
+    assert loaded is None
+    assert errors == [f"无同代冻结 payload: {md.stem}.payload.json"]
+    assert str(tmp_path) not in " ".join(errors)
 
 @pytest.mark.parametrize('claim', [
     '价格基准偏离研究数值 TD 0.20% / TE 年化 0.30%（仅作研究）。',
@@ -852,6 +870,17 @@ class TestETFBollRecompute:
         findings = etf_generation_findings(p)
         assert any(f["id"] == "etf-boll-band-mismatch" and f["severity"] == "error"
                    for f in findings)
+
+    def test_repeated_band_triple_yields_single_finding(self, tmp_path: Path):
+        """review #7：同一错误 triple 重复出现（摘要+附录）→ 恰一条 finding
+        （本层惯例「每字段取首个命中」）。"""
+        triple = "| BOLL（净值） | 上轨 1.9999 / 中轨 1.471 / 下轨 1.4181 | kline.boll_* |\n"
+        md = MD_BODY + "\n" + triple + triple
+        p = _write_generation(tmp_path, md_text=md,
+                              payload=_payload(kline=_kline(bandwidth=None)))
+        hits = [f for f in etf_generation_findings(p)
+                if f["id"] == "etf-boll-band-mismatch"]
+        assert len(hits) == 1, f"重复引用不得产出重复 finding：{len(hits)} 条"
 
     def test_zero_mid_without_number_is_legal_stop(self, tmp_path: Path):
         """R3 正控：零中轨且无处给数 = 合法停算（引擎新口径不输出带宽键）。"""
@@ -1721,3 +1750,41 @@ class TestR6IdentityBoundaryTerms:
         assert any(f["id"] == "etf-identity-claim" and f["severity"] == "error"
                    for f in etf_generation_findings(p)), \
             "另一分句的否定不得豁免本分句的完成声明"
+
+
+class TestResearchModuleDegradation:
+    """review #4（2026-10-14）：etf_research 模块缺失/加载失败必须降级为原定
+    finding（etf-operating-research），不得冒成通用 etf-generation-check-error
+    硬阻断。旧实现用 ``spec.loader is None`` 判缺失是死分支——缺失时
+    exec_module 抛 FileNotFoundError（spec 对不存在路径同样返回带 loader 的
+    spec），被 _check_etf_generation 的兜底吞成通用检查异常。
+    """
+
+    def test_loader_reports_missing_module_instead_of_raising(self, tmp_path, monkeypatch):
+        """helper 本体：etf lib 目录为空 → 返回原因而非抛异常。"""
+        import invest_path
+
+        empty_lib = tmp_path / "empty-etf-lib"
+        empty_lib.mkdir()
+        monkeypatch.setattr(invest_path, "invest_a_etf_lib_dir", lambda: empty_lib)
+        mod, reason = report_qc._load_etf_lib_module("etf_research")
+        assert mod is None
+        assert reason and "etf_research.py 缺失" in reason
+
+    def test_research_block_degrades_without_generic_error(self, tmp_path, monkeypatch):
+        """接线：研究块加载失败 → 原定 finding；不出现 etf-generation-check-error。"""
+        real_loader = report_qc._load_etf_lib_module
+
+        def fake_loader(stem):
+            if stem == "etf_research":
+                return None, "etf_research.py 缺失（/tmp/无此目录/etf_research.py）"
+            return real_loader(stem)   # 其余 stem 不受影响（如 etf_generation）
+
+        monkeypatch.setattr(report_qc, "_load_etf_lib_module", fake_loader)
+        p = _write_generation(
+            tmp_path, payload=_payload(research={"schema_version": 1, "symbol": "510300"}))
+        findings = etf_generation_findings(p)
+        assert any(f["id"] == "etf-operating-research" and f["severity"] == "error"
+                   and "不可用" in f["message"] for f in findings)
+        assert not any(f["id"] == "etf-generation-check-error" for f in findings), \
+            "模块缺失不得退化成通用检查异常（review #4）"

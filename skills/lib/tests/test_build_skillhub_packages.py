@@ -122,6 +122,60 @@ def test_rewrite_import_preserves_local_names(kind):
     assert b._rewrite_imports(out, kind, {"env", "sources"}) == out
 
 
+def test_rewrite_pulse_md_from_imported_name_not_double_rewritten():
+    """review #8：from-import 的**被导入名**不得被裸 import 规则二次改写。
+
+    旧两遍 re.sub 会把 `from etf_md import etf_research` 产出
+    `from lib.etf_md import lib.etf_research as etf_research`（SyntaxError 行）。
+    """
+    names = {"etf_md", "etf_research", "data_bridge", "market_microstructure"}
+    out = b._rewrite_imports("from etf_md import etf_research\n", "pulse_md", names)
+    assert out == "from lib.etf_md import etf_research\n"
+    compile(out, "<pulse-md>", "exec")   # 真 oracle：旧实现此处 SyntaxError
+
+    # pulse SKILL.md 实际形态：`; ` 分隔的多语句单行——from 行之后的独立 import 仍须改写
+    out2 = b._rewrite_imports(
+        "from data_bridge import get_microstructure; import json;"
+        " import market_microstructure\n", "pulse_md", names)
+    assert "from lib.data_bridge import get_microstructure" in out2
+    assert "import json" in out2
+    assert "import lib.market_microstructure as market_microstructure" in out2
+    compile(out2, "<pulse-md2>", "exec")
+
+    # 多名称 import：只改第一段（固化既有行为）
+    out3 = b._rewrite_imports("import _invest_path, json\n", "pulse_md",
+                              names | {"_invest_path"})
+    assert out3 == "import lib._invest_path as _invest_path, json\n"
+
+    # 未登记模块的 from 行：被导入名同样不受影响（旧实现会误改）
+    out4 = b._rewrite_imports("from unknown_mod import etf_research\n", "pulse_md", names)
+    assert out4 == "from unknown_mod import etf_research\n"
+
+    # 幂等
+    assert b._rewrite_imports(out2, "pulse_md", names) == out2
+
+
+def test_tool_file_deps_conflict_fails_loud(tmp_path):
+    """review #9：file_deps 的 canonical 绑定被同名模块先占（不同文件）时，
+    构建必须显式失败，而不是静默丢掉 canonical（_enqueue/module_map first-wins）。"""
+    c = b._Closure("invest-a-stock")
+    fake = tmp_path / "etf_md.py"
+    fake.write_text("X = 1\n", encoding="utf-8")
+    c.module_map["etf_md"] = ("self", fake)
+    with pytest.raises(SystemExit) as exc:
+        c._add_tool_dependencies("report_qc")
+    assert "etf_md" in str(exc.value)
+
+
+def test_tool_file_deps_same_canonical_binding_passes():
+    """同一物理文件经不同 source key 先绑定（cross/self 同 canonical 情形）→ 不算冲突。"""
+    canonical = b.SKILLS_DIR / "invest-a-etf" / "scripts/lib" / "etf_md.py"
+    c = b._Closure("invest-a-stock")
+    c.module_map["etf_md"] = ("cross:invest-a-etf", canonical)
+    c._add_tool_dependencies("report_qc")   # 不抛
+    assert "etf_research" in c.included and "etf_md" in c.included
+
+
 def test_rewrite_lib_root_relative():
     names = {"db_util", "cache", "stats"}
     out = b._rewrite_imports(
@@ -691,31 +745,46 @@ md.with_suffix(".html").write_text(render_etf_html(p, md_text=body,
         outputs = []
         for skill in ("invest-a-stock", "invest-a-etf"):
             qc = tmp_path / skill / "scripts/lib/report_qc.py"
-            proc = subprocess.run([sys.executable, "-I", "-B", str(qc), str(md),
-                                   "--json", "--profile", "engine", "--fail-on", "error"],
+            lib = qc.parent
+            scripts = lib.parent
+            # 隔离壳（review #10）：`-I` 禁 PYTHONPATH/user-site 且不注入脚本目录
+            # （-I ⇒ -E -s -P；直跑 `python -I <qc>` 会因缺 script-dir 起不来），
+            # 显式补 path 后 runpy 执行——「包自足」断言不被仓库/用户环境兜底。
+            argv = [str(qc), str(md), "--json", "--profile", "engine", "--fail-on", "error"]
+            code = (
+                "import sys, runpy\n"
+                f"sys.path.insert(0, {str(scripts)!r})\n"
+                f"sys.path.insert(0, {str(lib)!r})\n"
+                f"sys.argv = {argv!r}\n"
+                f"runpy.run_path({str(qc)!r}, run_name='__main__')\n"
+            )
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", code],
                                   cwd=tmp_path, capture_output=True, text=True)
-            assert proc.returncode in (0, 1), proc.stderr
+            assert proc.returncode in (0, 1, 2), proc.stderr
+            assert proc.stdout, proc.stderr
             result = json.loads(proc.stdout)[0]
-            assert not any(f["id"] == "etf-generation-check-error" for f in result["findings"])
+            findings = [f for layer in result["layers"] for f in layer["details"]]
+            assert not any(f["id"] == "etf-generation-check-error" for f in findings)
             outputs.append((proc.returncode, result))
         assert outputs[0] == outputs[1]
-        return outputs[0]
+        rc, result = outputs[0]
+        return rc, result, [f for layer in result["layers"] for f in layer["details"]]
 
-    rc, valid = check_both()
-    assert rc == 0, valid
-    assert not any(f["id"].startswith("etf-operating-research") for f in valid["findings"])
+    rc, valid, findings = check_both()
+    assert valid["overall"] != "FAIL", valid
+    assert not any(f["id"].startswith("etf-operating-research") for f in findings)
     body = md.read_text(encoding="utf-8")
     md.write_text(body.replace("研究问题：经营变化如何解释？", "研究问题：已确认改善。"), encoding="utf-8")
-    rc, invalid = check_both()
-    assert rc == 1
-    assert any(f["id"] == "etf-operating-research" for f in invalid["findings"])
+    rc, invalid, findings = check_both()
+    assert invalid["overall"] == "FAIL" and rc != 0
+    assert any(f["id"] == "etf-operating-research" for f in findings)
     md.write_text(body, encoding="utf-8")
     html = md.with_suffix(".html")
     html.write_text(html.read_text(encoding="utf-8").replace('data-operating-research="1"', ""),
                     encoding="utf-8")
-    rc, invalid_html = check_both()
-    assert rc == 1
-    assert any(f["id"] == "etf-operating-research-html" for f in invalid_html["findings"])
+    rc, invalid_html, findings = check_both()
+    assert invalid_html["overall"] == "FAIL" and rc != 0
+    assert any(f["id"] == "etf-operating-research-html" for f in findings)
 
 
 def test_mandated_qc_tool_packaged_and_runnable(tmp_path):
@@ -892,6 +961,10 @@ def test_standalone_etf_stock_lib_namespace_merge_both_orders(tmp_path):
     mm_file = stock_scripts / "lib" / "market_microstructure.py"
     etf_html_file = etf_scripts / "lib" / "etf_html.py"
     etf_data_file = etf_scripts / "lib" / "etf_data.py"
+    stock_etf_data_file = stock_scripts / "lib" / "etf_data.py"
+    # Shared QC now bundles research's transitive ETF data dependency in stock.
+    # Either namespace candidate is valid, and both must be the same canonical code.
+    assert stock_etf_data_file.read_bytes() == etf_data_file.read_bytes()
 
     forward = [("market_microstructure", stock_scripts), ("etf_html", etf_scripts)]
     reverse = [("etf_html", etf_scripts), ("market_microstructure", stock_scripts)]
@@ -907,7 +980,8 @@ def test_standalone_etf_stock_lib_namespace_merge_both_orders(tmp_path):
         # 实际 entry（etf/invest）+ 公共桥/helper 正常
         assert Path(data["entries"]["etf"]).resolve() == (etf_scripts / "etf.py").resolve(), label
         assert Path(data["entries"]["invest"]).resolve() == (stock_scripts / "invest.py").resolve(), label
-        assert Path(data["etf_data"]).resolve() == etf_data_file.resolve(), label
+        assert Path(data["etf_data"]).resolve() in {
+            etf_data_file.resolve(), stock_etf_data_file.resolve()}, label
         assert data["helper"].endswith("data_bridge.py"), label
         # 子包 collector 的 __init__ 执行职责（再导出）在 namespace 化后仍保留
         assert data["collector_pub"] > 0, label

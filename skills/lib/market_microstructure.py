@@ -658,19 +658,30 @@ def compute_dispersion(snap: dict, history: list[dict],
             # 对快照日期恒同），又把日内横截面差异整个丢掉——「一条平 + 一条每日 ±1%
             # 摆动」的两条均值同为 0 的序列会被报成**零分化**，而分化度度量的正是
             # 日内横截面差异（同 `lib/sector_sync.py::cross_sectional_dispersion_pct` 口径）。
-            arrays = [v[-_DISPERSION_WINDOW:] for v in rets.values()]
-            n_days = min(len(a) for a in arrays)     # 对齐后的实际天数（覆盖范围）
-            if n_days < 2:
-                out["missing"].append("指数序列过短——横截面离散度不可得")
+            # review #11（2026-10-14）：序列值是**裸收益**（无日期）——**原始**
+            # 长度不等即无法证明窗口端点同日（review 复现：一条滞后一个交易日，
+            # 截窗后两条等长，按位置配对把 stale 第 t 日并到 fresh 第 t+1 日，
+            # ~0.5% 级偏差）。故长度检查必须在**截窗前**做，与同函数滚动相关块
+            # （长度不等即 skip 该对）取同一纪律：长度不等 → 不可得，不做尾部
+            # 按位对齐。等长时按位对齐（「同窗 dense 序列」假设，调用方须保证
+            # 各序列同源同窗）。
+            if len({len(v) for v in rets.values()}) > 1:
+                out["missing"].append(
+                    "指数序列长度不一致——无法确认同日对齐（不做尾部按位对齐）")
             else:
-                day_disp = [_st.pstdev([a[k] for a in arrays])
-                            for k in range(-n_days, 0)]
-                out["index_dispersion"] = {
-                    "value": sum(day_disp) / len(day_disp), "pctile": None,
-                    "available": True,
-                    "window": _DISPERSION_WINDOW, "n_index": len(rets),
-                    "n_days": n_days,
-                }
+                arrays = [v[-_DISPERSION_WINDOW:] for v in rets.values()]
+                n_days = len(arrays[0])
+                if n_days < 2:
+                    out["missing"].append("指数序列过短——横截面离散度不可得")
+                else:
+                    day_disp = [_st.pstdev([a[k] for a in arrays])
+                                for k in range(-n_days, 0)]
+                    out["index_dispersion"] = {
+                        "value": sum(day_disp) / len(day_disp), "pctile": None,
+                        "available": True,
+                        "window": _DISPERSION_WINDOW, "n_index": len(rets),
+                        "n_days": n_days,
+                    }
             # 滚动相关（窗口 60）：两两指数收益的 Pearson r 均值
             win = 60
             pairs = list(rets.values())
