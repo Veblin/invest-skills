@@ -1220,7 +1220,7 @@ def _refs_rows(payload: dict) -> list[tuple[str, str, str]]:
 
     # 行情报价：只认 producer 结构化 quote.source（键缺失/None = 来源未知）
     if str(quote.get("status") or "") == "available" and str(quote.get("source") or "").strip():
-        rows.append(("行情报价", str(quote.get("source")).strip(), "盘中快照"))
+        rows.append(("行情报价", str(quote.get("source")).strip(), "查询时点快照"))
 
     # 净值序列：nav 的 source 仅在 kline 有效（status=available）时采纳
     if str(kline.get("status") or "") == "available":
