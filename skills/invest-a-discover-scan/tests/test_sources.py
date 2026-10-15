@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 import sources
 
 
@@ -49,6 +51,57 @@ def test_calendar_hit_is_used_without_warning(monkeypatch):
     sources.reset_warnings()
     assert sources.latest_trade_date() == "20260929"
     assert sources.warnings == []
+
+
+@pytest.mark.parametrize("available", ["20261015", "20261014", "20261013", None])
+def test_latest_daily_basic_uses_bounded_published_session(monkeypatch, available):
+    import pandas as pd
+
+    days = ["20261015", "20261014", "20261013"]
+    _fake_calendar(monkeypatch, days=days)
+    monkeypatch.setattr(sources, "latest_trade_date", lambda: days[0])
+    calls = []
+
+    def query(api, **params):
+        assert api == "daily_basic"
+        day = params["trade_date"]
+        calls.append(day)
+        return pd.DataFrame([{"ts_code": "600000.SH", "trade_date": day, "pe_ttm": 7.0}]
+                            if day == available else [])
+
+    monkeypatch.setattr(sources, "client", lambda: types.SimpleNamespace(query=query))
+    sources.reset_warnings()
+    if available is None:
+        with pytest.raises(RuntimeError, match="20261013"):
+            sources.fetch_latest_daily_basic()
+        assert calls == days
+    else:
+        day, rows = sources.fetch_latest_daily_basic()
+        assert day == available and rows[0]["trade_date"] == available
+        assert calls == days[:days.index(available) + 1]
+        if available != days[0]:
+            assert any(available in w for w in sources.warnings)
+    assert sources.CALL_COUNT["daily_basic"] == len(calls)
+
+
+def test_daily_basic_wrong_response_date_is_rejected(monkeypatch):
+    _stub_client(monkeypatch, {"daily_basic": [{"ts_code": "600000.SH", "trade_date": "20261014"}]})
+    with pytest.raises(RuntimeError, match="日期"):
+        sources.fetch_daily_basic("20261015")
+
+
+def test_daily_basic_query_error_is_not_hidden_by_backtracking(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sources, "latest_trade_date", lambda: "20261015")
+
+    def query(api, **params):
+        calls.append(params["trade_date"])
+        raise RuntimeError("permission denied")
+
+    monkeypatch.setattr(sources, "client", lambda: types.SimpleNamespace(query=query))
+    with pytest.raises(RuntimeError, match="permission denied"):
+        sources.fetch_latest_daily_basic()
+    assert calls == ["20261015"]
 
 
 # ── 财务/预告取数持久缓存（review #13，2026-10-14） ─────────────────────────

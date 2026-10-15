@@ -464,10 +464,46 @@ def test_intraday_move_finding_answers_why_it_moved() -> None:
     model = _model(collection)
     finding = next((f for f in model["findings"] if f["id"] == "intraday-move-scan"), None)
     assert finding is not None
-    assert "未发现公告级触发" in finding["claim"]
-    assert "外部检索项" in finding["claim"]        # 明确界定系统不知道的部分
+    assert "标题" in finding["claim"] and "原文" in finding["claim"]
+    assert "未发现公告级触发" not in finding["claim"]
     assert finding["profile_relevance"] == "primary"
     assert "当日下跌" in render_insight_markdown(model)
+
+
+@pytest.mark.parametrize("move", [-6.0, 6.0])
+def test_neutral_title_does_not_exclude_price_sensitive_announcements(move):
+    from lib.news_scanner import _infer_direction
+    from lib.render_insight import render_insight_html, render_insight_markdown
+
+    title = "关于主要客户停止采购的公告"
+    assert _infer_direction(title, title) == "neutral"
+    collection = _with_events(collection_v2_minimal())
+    collection["news"]["cards"] = [{"source": "notice", "title": title,
+                                      "direction": _infer_direction(title, title)}]
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "quote":
+            dim["data"]["change_pct"] = move
+    model = _model(collection)
+    finding = next(f for f in model["findings"] if f["id"] == "intraday-move-scan")
+    assert "标题" in finding["claim"] and "原文" in finding["claim"]
+    assert "无法判断" in finding["claim"]
+    assert "未发现公告级触发" not in finding["claim"] and "传闻" not in finding["claim"]
+    for text in (render_insight_markdown(model), render_insight_html(model)):
+        assert "未发现公告级触发" not in text
+        assert "原文" in text
+
+
+@pytest.mark.parametrize("ma,position", [(-6.35, "下方"), (0.0, "持平"), (6.35, "上方")])
+@pytest.mark.parametrize("pct,zone", [(0.0, "偏低"), (20.0, "偏低"), (50.0, "中间"), (80.0, "偏高"), (100.0, "偏高")])
+def test_price_valuation_question_matches_observations(ma, position, pct, zone):
+    from lib.insight_model import build_analysis_chains
+
+    facts = [{"id": "technical.price_vs_ma20.latest", "value": ma},
+             {"id": "valuation.pe_ttm.percentile", "value": pct}]
+    chain = next(c for c in build_analysis_chains(facts) if c["id"] == "chain.price-state-vs-valuation")
+    assert position in chain["question"] and zone in chain["question"]
+    assert position in chain["relation"] and zone in chain["relation"]
+    assert "走弱" not in chain["question"] and "信号" not in chain["question"]
 
 
 def test_no_intraday_finding_below_threshold() -> None:

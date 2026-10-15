@@ -5,7 +5,7 @@
 不构成任何交易建议（LAW 6）。深判走 invest-a-stock 既有流水线（清单每行附下钻命令）。
 
 管线（设计 §4，控制调用量）：
-    stock_basic(缓存 7d) → daily_basic(全市场 1 次) → L1 横截面
+    stock_basic(缓存 7d) → daily_basic(全市场，最多核验 3 个交易日) → L1 横截面
     → fina_indicator(仅候选集，按 ts_code) → 中过滤 → L3 gap → 排序 → 短清单
     → 落盘 md + 私有快照 JSONL（rules_version 必录）
 
@@ -107,12 +107,10 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         # 港股不接受 per_industry（单桶下会静默截断，见 run_scan_hk docstring）
         return run_scan_hk(top=top)
     sources.reset_warnings()
-    trade_date = sources.latest_trade_date()
-
     basic = sources.fetch_stock_basic()
     pool_data = pool_mod.build_pool(basic, with_bj=with_bj)
 
-    daily = sources.fetch_daily_basic(trade_date)
+    trade_date, daily = sources.fetch_latest_daily_basic()
     by_code = {str(r.get("ts_code")): r for r in daily}
     merged: list[dict] = []
     for r in pool_data["rows"]:

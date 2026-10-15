@@ -358,7 +358,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
             if named:
                 facts.append(_fact("events.types", named, as_of=str(latest_date), unit="text",
                                    basis="事件类型分布（近窗口）", source_id=event_sources))
-        # 公告层是否出现方向性条目——「当日大跌但公告全 neutral」是可核验的排除性证据。
+        # 公告标题规则的方向标签仅作检索线索，neutral 不能排除公告级触发。
         # 只取 source == "notice" 的官方公告卡：Tavily/抓取类卡是网页快照，
         # 其 direction 由规则从页面文本推断（实测把雪球行情页标成 bearish），
         # 用作「公告层排查」会引入噪声。
@@ -369,7 +369,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         if directions:
             sid = add_source("news", {"_meta": {"source": "akshare.stock_individual_notice_report"}})
             facts.append(_fact("news.notice_directions", "、".join(sorted(directions)), as_of=str(latest_date),
-                               unit="text", basis="公告层方向标注（引擎规则，仅官方公告卡）", source_id=sid,
+                               unit="text", basis="公告标题关键词方向标注（引擎规则，仅官方公告卡）", source_id=sid,
                                formula=None))
     return facts, sources, gaps
 
@@ -422,12 +422,13 @@ def build_findings(facts: list[dict[str, Any]], profile: dict[str, Any] | None) 
     ma20 = _find(facts, "technical.price_vs_ma20.latest")
     if ma20:
         relation = "上方" if ma20["value"] >= 0 else "下方"
-        findings.append(_finding("technical-state", f"最新收盘价相对 MA20 为 {ma20['value']:+.2f}%，位于 MA20 {relation}；这是市场状态描述，不构成操作信号。",
+        state = "与 MA20 持平" if ma20["value"] == 0 else f"位于 MA20 {relation}"
+        findings.append(_finding("technical-state", f"最新收盘价相对 MA20 为 {ma20['value']:+.2f}%，{state}；这是市场状态描述，不构成操作信号。",
                                  fact_ids=[ma20["id"]], strength="weak", relevance="secondary",
                                  verification={"event": "后续交易日", "test": "观察价格、成交量与基本面证据是否一致"}))
     # 审查意见 #1：读者最常问的是「今天为什么跌」。此前首层全是指标状态，
-    # 没有一条回答异动归因。此处做**可核验的排除**：异动幅度 + 公告层方向，
-    # 给出「是否有公告级触发」的结论，并明确消息面/传闻需外部检索补充。
+    # 没有一条回答异动归因。此处仅列异动幅度与标题规则标签，
+    # 不用关键词方向排除公告触发；影响是否成立须核验公告原文与披露时点。
     change_pct = _find(facts, "quote.change_pct.latest")
     event_count = _find(facts, "events.count")
     directions = _find(facts, "news.notice_directions")
@@ -441,11 +442,12 @@ def build_findings(facts: list[dict[str, Any]], profile: dict[str, Any] | None) 
         if directions:
             fact_ids.append(directions["id"])
             only_neutral = set(str(directions["value"]).split("、")) == {"neutral"}
-            parts.append("公告层方向标注全部为中性，**未发现公告级触发**；"
-                         "跌幅的候选解释需从消息面与传闻层补充，"
-                         "该层数据不在本项目采集范围内，应作为外部检索项。"
+            parts.append("公告标题关键词规则未给出明确方向（中性标签）；"
+                         "尚未核验公告原文，无法判断是否存在公告级触发，"
+                         "应先核对原文与披露时点。"
                          if only_neutral else
-                         "公告层存在非中性方向条目，需逐条核对。")
+                         "公告标题关键词规则给出非中性标签；标签不代表已核影响，"
+                         "应逐条核对公告原文与披露时点。")
         else:
             parts.append("公告层方向标注不可得，无法排除公告级触发。")
         findings.append(_finding(
@@ -680,20 +682,22 @@ def _chain_price_state_vs_valuation(fx: dict[str, dict[str, Any]]) -> dict[str, 
         return None
     value, percentile = ma["value"], pct["value"]
     zone = "偏低" if percentile <= 20 else ("偏高" if percentile >= 80 else "中间")
+    position = "上方" if value > 0 else ("下方" if value < 0 else "持平")
     return {
         "id": "chain.price-state-vs-valuation",
         "fact_ids": [ma["id"], pct["id"]],
-        "question": "价格走弱与估值分位偏低，是同一件事的两种说法，还是两个独立信号？",
+        "question": (f"收盘价相对 MA20 的位置为「{position}」，PE 历史分位处于{zone}区间；"
+                     "应如何结合后续披露核对这两种状态的解释？"),
         "relation": (
-            f"最新收盘价相对 MA20 为 {value:+.2f}%（{'上方' if value >= 0 else '下方'}），"
+            f"最新收盘价相对 MA20 为 {value:+.2f}%（{position}），"
             f"PE 分位为 {percentile:.1f}%（{zone}）。价格状态只用于提出需要区分的解释。"
         ),
         "mechanism": (
-            "可能机制（未证实）：若市场已计入负面预期，价格走弱与低分位会同向；"
-            "若恶化尚未被披露数据反映，两者也会同向——现有证据无法区分这两种解释。"
+            "可能机制（未证实）：价格相对短期均线的位置和 PE 长窗口分位可能受到"
+            "盈利预期、风险偏好或样本结构的不同影响；两项读数不足以识别共同原因。"
         ),
         "alternatives": [
-            "价格状态与估值分位可能分别由风险偏好、流动性等不同因素驱动，同向只是共同暴露于市场因子。",
+            "价格状态与估值分位可能分别受风险偏好、流动性等不同因素影响，不能从并列读数判断它们共享驱动因素。",
             "MA20 是短窗口状态量、分位基于长窗口序列，两者口径不可直接比较。",
         ],
         "association_status": "mechanism_unconfirmed",

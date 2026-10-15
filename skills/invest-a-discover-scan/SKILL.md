@@ -93,7 +93,7 @@ L3 利差口径改 **US 10Y**；无业绩预告 → 增速子项恒 0。每透�
 
 ## 数据源
 
-tushare：`stock_basic`（缓存 7d）/ `daily_basic`（全市场当日）/ `fina_indicator`（按 ts_code，
+tushare：`stock_basic`（缓存 7d）/ `daily_basic`（全市场最近已发布交易日，最多核验 3 个交易日）/ `fina_indicator`（按 ts_code，
 无批量形态）/ `forecast`（按 ts_code，降级档用）；akshare `bond_zh_us_rate`（中国 10Y，
 L3 利差用）。详见 [references/sources.md](references/sources.md) 与
 `skills/lib/references/data-interface-map.md`（登记义务）。

@@ -81,6 +81,47 @@ def test_insight_report_without_analysis_keeps_contract(_invest, tmp_path):
         assert report.with_suffix(suffix).is_file()
 
 
+@pytest.mark.parametrize("ma,position", [(6.35, "上方"), (-6.35, "下方"), (0.0, "持平")])
+def test_insight_cli_titles_and_questions_stay_within_evidence(_invest, monkeypatch, tmp_path, ma, position):
+    from lib.events import _build_summary
+    from lib.news_scanner import _infer_direction
+    from report_qc import qc_file
+
+    collection = collection_v2_minimal()
+    collection["dimensions"] = [d for d in collection["dimensions"] if d["dimension"] != "financials"]
+    latest_close = 1900 * (1 + ma / 100) / (19 - ma / 100)
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "kline":
+            dim["data"] = [{"trade_date": f"202606{i:02d}", "close": 100.0} for i in range(1, 21)]
+            dim["data"][-1]["close"] = latest_close
+        elif dim["dimension"] == "quote":
+            dim["data"]["change_pct"] = -6.0
+    title = "关于主要客户停止采购的公告"
+    collection["events"] = [{"date": "2026-06-10", "title": title, "type": "other",
+                             "source": "akshare stock_individual_notice_report"}]
+    collection["_meta"] = {"events_summary": _build_summary(collection["events"], 30)}
+    collection["news"] = {"cards": [{"source": "notice", "date": "2026-06-10", "title": title,
+                                      "direction": _infer_direction(title, title)}]}
+    monkeypatch.setattr(_invest.collector, "collect_all", lambda *a, **k: collection)
+
+    assert _invest.cmd_report(_args(tmp_path, emit="html")) == 0
+    report = next((tmp_path / "reports").rglob("*.insight.md"))
+    model = json.loads(report.with_suffix(".insight.json").read_text(encoding="utf-8"))
+    chain = next(c for c in model["analysis_chains"] if c["id"] == "chain.price-state-vs-valuation")
+    assert position in chain["question"] and "偏高" in chain["question"]
+    technical = next(f for f in model["findings"] if f["id"] == "technical-state")
+    assert position in technical["claim"]
+    for path in (report, report.with_suffix(".html")):
+        text = path.read_text(encoding="utf-8")
+        assert chain["question"] in text
+        assert "无法判断是否存在公告级触发" in text and "原文" in text
+        assert "未发现公告级触发" not in text and "两个独立信号" not in text
+        if ma == 0:
+            assert "位于 MA20 上方" not in text
+    qc = qc_file(report, fail_on="error")
+    assert next(layer for layer in qc.layers if layer.layer == "insight-contract").status == "pass"
+
+
 @pytest.mark.parametrize("pe", [0.0, -3.0])
 def test_insight_cli_preserves_event_provenance_and_pe_limits(_invest, monkeypatch, tmp_path, pe):
     """真实事件聚合与 report 入口：公告失败、分红回退成功，核对完整成品。"""

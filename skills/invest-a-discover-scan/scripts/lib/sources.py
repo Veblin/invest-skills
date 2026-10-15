@@ -21,6 +21,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 BASIC_TTL_DAYS = 7          # stock_basic 缓存（行业/名称/状态，月更量级）
+MAX_DAILY_SESSIONS = 3     # 当前日尚未发布时，最多核验三个交易日
 
 # 叶子取数调用计数（预算式接口调用计数，设计 §7）
 CALL_COUNT = {"daily_basic": 0, "fina_indicator": 0, "forecast": 0, "stock_basic": 0}
@@ -130,13 +131,48 @@ def fetch_stock_basic() -> list[dict]:
     return rows
 
 
+class DailyBasicEmptyError(RuntimeError):
+    """该日尚无 daily_basic 数据；与权限、网络或日期错配分开处理。"""
+
+
 def fetch_daily_basic(trade_date: str) -> list[dict]:
     """全市场当日 PE/PB/市值/换手（1 次调用）。"""
     CALL_COUNT["daily_basic"] += 1
     df = client().query("daily_basic", trade_date=trade_date)
     if df is None or df.empty:
-        raise RuntimeError(f"daily_basic 空返回（trade_date={trade_date}）——全市场数据不可得")
-    return df.to_dict("records")
+        raise DailyBasicEmptyError(f"daily_basic 空返回（trade_date={trade_date}）")
+    rows = df.to_dict("records")
+    if {str(row.get("trade_date")) for row in rows} != {trade_date}:
+        raise RuntimeError(f"daily_basic 响应日期与请求日期 {trade_date} 不一致")
+    return rows
+
+
+def fetch_latest_daily_basic() -> tuple[str, list[dict]]:
+    """核验最近已发布截面，返回实际数据日与该日行；最多三个交易日。
+
+    日历最近交易日可能仍在盘中。只对空返回向前查，不以旧数据掩盖权限、
+    网络或响应日期错误；所有尝试空日及最终采用日均留下 warning。
+    """
+    latest = latest_trade_date()
+    pending = [latest]
+    attempted: list[str] = []
+    while pending:
+        day = pending.pop(0)
+        attempted.append(day)
+        try:
+            rows = fetch_daily_basic(day)
+        except DailyBasicEmptyError as exc:
+            _note(str(exc))
+            if len(attempted) == 1:
+                from lib.trade_cal import last_trade_dates
+
+                days = last_trade_dates(MAX_DAILY_SESSIONS)
+                pending = sorted({d for d in days if d < latest}, reverse=True)[:MAX_DAILY_SESSIONS - 1]
+            continue
+        if day != latest:
+            _note(f"daily_basic 最近交易日 {latest} 无数据，采用已发布数据日 {day}")
+        return day, rows
+    raise RuntimeError(f"daily_basic 未获取到有效截面；已尝试日期：{', '.join(attempted)}")
 
 
 _RETRY_SLEEP_SEC = 0.6      # 突发限流后的退避（设计 §7：重试 ≤1 次）
