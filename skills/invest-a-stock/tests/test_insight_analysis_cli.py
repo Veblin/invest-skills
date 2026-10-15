@@ -81,6 +81,29 @@ def test_insight_report_without_analysis_keeps_contract(_invest, tmp_path):
         assert report.with_suffix(suffix).is_file()
 
 
+def test_report_without_basic_info_uses_bare_directory_and_still_runs_qc(_invest, monkeypatch, tmp_path):
+    from report_qc import qc_file
+
+    collection = collection_v2_minimal()
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "basic_info":
+            dim["data"] = {}
+            dim["status"] = "unavailable"
+            dim["_meta"] = {"source": "test.fixture", "error": "basic info unavailable"}
+    monkeypatch.setattr(_invest.collector, "collect_all", lambda *a, **k: collection)
+    for mode in ("full", "insight"):
+        outdir = tmp_path / mode
+        assert _invest.cmd_report(_args(tmp_path, mode=mode, outdir=str(outdir))) == 0
+        report = next(outdir.rglob("*.md"))
+        assert report.parent.name == "600176"
+        if mode == "insight":
+            report.with_suffix(".facts.json").write_text("{}", encoding="utf-8")
+        result = qc_file(report, fail_on="error")
+        assert result.report_type == "stock" and result.overall == "FAIL"
+        layer = "completion" if mode == "full" else "insight-contract"
+        assert next(l for l in result.layers if l.layer == layer).status == "fail"
+
+
 @pytest.mark.parametrize("ma,position", [(6.35, "上方"), (-6.35, "下方"), (0.0, "持平")])
 def test_insight_cli_titles_and_questions_stay_within_evidence(_invest, monkeypatch, tmp_path, ma, position):
     from lib.events import _build_summary

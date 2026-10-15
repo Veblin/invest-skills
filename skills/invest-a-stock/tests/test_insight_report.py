@@ -188,6 +188,86 @@ def test_qc_rejects_html_that_is_not_from_same_findings(tmp_path):
     assert any(item["id"] == "insight-html-pair-mismatch" for item in layer.details)
 
 
+@pytest.mark.parametrize("tamper", ["missing", "null", "empty", "remove-referenced", "duplicate-id",
+                                    "finding", "counter-fact", "string-refs", "chain", "tension",
+                                    "status-object", "status-list", "findings-int", "findings-bool"])
+def test_qc_rejects_missing_or_unresolved_insight_evidence(tmp_path, tamper):
+    from lib.insight_model import write_sidecars
+    from lib.render_insight import render_insight_html, render_insight_markdown
+    from report_qc import qc_file
+
+    report = tmp_path / "600176-测试" / "sample.insight.md"
+    report.parent.mkdir()
+    report.write_text(render_insight_markdown(_model()), encoding="utf-8")
+    html = report.with_suffix(".html")
+    html.write_text(render_insight_html(_model()), encoding="utf-8")
+    paths = write_sidecars(report, _model(), html_path=html)
+    facts = json.loads(paths["facts"].read_text(encoding="utf-8"))
+    insight = json.loads(paths["insight"].read_text(encoding="utf-8"))
+    if tamper == "missing":
+        facts.pop("facts")
+    elif tamper == "null":
+        facts["facts"] = None
+    elif tamper == "empty":
+        facts["facts"] = []
+    elif tamper == "remove-referenced":
+        ref = insight["findings"][0]["fact_ids"][0]
+        facts["facts"] = [f for f in facts["facts"] if f["id"] != ref]
+    elif tamper == "duplicate-id":
+        facts["facts"].append(dict(facts["facts"][0]))
+    elif tamper == "finding":
+        insight["findings"][0]["fact_ids"] = ["no-such-fact"]
+    elif tamper == "counter-fact":
+        insight["findings"][0]["counter_fact_ids"] = ["no-such-fact"]
+    elif tamper == "string-refs":
+        insight["findings"][0]["fact_ids"] = "financials.ocf_to_np.latest"
+    elif tamper == "chain":
+        insight["analysis_chains"][0]["fact_ids"] = ["no-such-fact"]
+    elif tamper == "tension":
+        insight["core_tension"]["fact_ids"] = ["no-such-fact"]
+    elif tamper == "status-object":
+        insight["completion"] = {}
+    elif tamper == "status-list":
+        insight["completion"] = []
+    elif tamper == "findings-int":
+        insight["findings"] = 1
+    elif tamper == "findings-bool":
+        insight["findings"] = True
+    paths["facts"].write_text(json.dumps(facts), encoding="utf-8")
+    paths["insight"].write_text(json.dumps(insight), encoding="utf-8")
+    result = qc_file(report, fail_on="error")
+    layer = next(layer for layer in result.layers if layer.layer == "insight-contract")
+    assert layer.status == "fail", layer.details
+    assert result.overall == "FAIL"
+
+
+def test_bare_code_insight_still_requires_evidence_sidecars(tmp_path):
+    from lib.render_insight import render_insight_markdown
+    from report_qc import qc_file
+
+    report = tmp_path / "600176" / "sample.insight.md"
+    report.parent.mkdir()
+    report.write_text(render_insight_markdown(_model()), encoding="utf-8")
+    result = qc_file(report, fail_on="error")
+    assert result.report_type == "stock"
+    assert next(l for l in result.layers if l.layer == "insight-contract").status == "fail"
+    assert result.overall == "FAIL"
+
+
+def test_empty_insufficient_insight_without_fact_references_is_valid(tmp_path):
+    from lib.insight_model import build_report_model, write_sidecars
+    from lib.render_insight import render_insight_markdown
+    from report_qc import qc_file
+
+    model = build_report_model({"dimensions": []}, "600176")
+    assert model["facts"] == [] and model["findings"] == [] and model["completion"] == "insufficient"
+    report = tmp_path / "600176-未知" / "empty.insight.md"
+    report.parent.mkdir()
+    report.write_text(render_insight_markdown(model), encoding="utf-8")
+    write_sidecars(report, model)
+    assert next(l for l in qc_file(report).layers if l.layer == "insight-contract").status == "pass"
+
+
 # ══════════════════════════════════════════════════════════════════
 # 分析合成（analysis.json 注入）：独立分区，不污染确定性引擎块
 #

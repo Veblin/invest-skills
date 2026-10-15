@@ -277,7 +277,7 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
     # （实测：警告「写了但走不到」）。
     trade_date = _hk_trade_date()
     rf_pct, rf_src = sources.rf_10y_usd()      # HK 用 US 10Y（口径见 sources_hk）
-    # 中国 10Y 仅作**对比说明**（解释港股池利差门槛为何更严）——须实时取，
+    # 中国 10Y 仅作**对比说明**（利差门槛关系随两侧实际输入变化）——须实时取，
     # 写死数值会让报告永久陈旧；不可得则不渲染对比句
     cn_rf_pct, cn_rf_src = sources.rf_10y_pct()
     universe = sources_hk.fetch_hk_universe()
@@ -536,11 +536,17 @@ def render_report_hk(scan: dict) -> str:
         cn = scan.get("rf_cn") or {}
         cmp_txt = ""
         if cn.get("pct") is not None:
-            cmp_txt = (f"——⚠️ 该值远高于中国 10Y（{cn['pct']}%"
-                       f" [来源: {cn.get('source')}]），故港股池的利差门槛更严，"
-                       f"**利差子项大概率恒 0**（须如实呈现，不得据此称「无便宜标的」）")
+            comparison = "高于" if rf["pct"] > cn["pct"] else ("低于" if rf["pct"] < cn["pct"] else "等于")
+            threshold = "较高" if rf["pct"] > cn["pct"] else ("较低" if rf["pct"] < cn["pct"] else "相同")
+            cmp_txt = (f"——该值{comparison}中国 10Y（{cn['pct']}%"
+                       f" [来源: {cn.get('source')}]）；采用相同 {lenses.SPREAD_PP:g}pp 利差缓冲时，"
+                       f"US 10Y 口径的利差门槛{threshold}，仅作两种基准口径对照")
         lines.append(f"- L3 利差口径：**{rf.get('caliber')}** = {rf['pct']}%"
                      f" [来源: {rf.get('source')}]{cmp_txt}")
+        satisfied = sum(1 for h in hits if (h.get("gap_flags") or [0])[0] == 1)
+        lines.append(f"- 本次短清单 {len(hits)} 只中，利差子项成立 {satisfied} 只"
+                     " [来源: Python calc: count(hits.gap_flags[0] == 1)]；"
+                     "仅描述已展示短清单，不外推全市场。")
     lines.append("")
     lines.append("## 降级清单 / 警告\n")
     if scan["warnings"]:

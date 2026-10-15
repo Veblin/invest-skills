@@ -141,7 +141,7 @@ def detect_report_type(report_path: Path) -> str:
     """从路径推断报告类型。
 
     优先按目录名匹配（gap-scan / journal / pulse），再按
-    `{6位代码}-{名称}` 目录或扁平文件名匹配代码前缀。
+    `{6位代码}` / `{6位代码}-{名称}` 目录或扁平文件名匹配代码前缀。
     """
     # 复盘纪要（R2/T8-3）：落点在报告同目录，必须先于目录/代码前缀判定
     # （否则会被认成标的研报）
@@ -157,7 +157,7 @@ def detect_report_type(report_path: Path) -> str:
         return "pulse"
 
     parent_dir = report_path.parent.name
-    m = re.match(r"^(\d{6})-", parent_dir)
+    m = re.match(r"^(\d{6})(?:-|$)", parent_dir)
     if m:
         return _classify_by_symbol(m.group(1))
 
@@ -174,7 +174,7 @@ def detect_report_type(report_path: Path) -> str:
 def _extract_symbol(report_path: Path) -> str:
     """从路径提取 6 位标的代码（找不到返回空串）。"""
     parent_dir = report_path.parent.name
-    m = re.match(r"^(\d{6})-", parent_dir)
+    m = re.match(r"^(\d{6})(?:-|$)", parent_dir)
     if m:
         return m.group(1)
     m = re.match(r"^(\d{6})[-_]", report_path.name)
@@ -549,13 +549,50 @@ def _check_insight_contract(report_path: Path, text: str) -> LayerResult:
     facts = payloads.get("facts", {}).get("facts")
     insight = payloads.get("insight", {})
     manifest = payloads.get("manifest", {})
-    if facts is not None and (not isinstance(facts, list) or any(
-            not isinstance(fact, dict) or not fact.get("id") or not fact.get("source_ids")
-            or not fact.get("as_of") for fact in facts)):
+    fact_ids: set[str] = set()
+    traceable = isinstance(facts, list)
+    for fact in facts if isinstance(facts, list) else []:
+        if (not isinstance(fact, dict) or not isinstance(fact.get("id"), str)
+                or not fact["id"].strip() or fact["id"] in fact_ids
+                or not isinstance(fact.get("source_ids"), list) or not fact["source_ids"]
+                or any(not isinstance(s, str) or not s.strip() for s in fact["source_ids"])
+                or not fact.get("as_of")):
+            traceable = False
+            continue
+        fact_ids.add(fact["id"])
+    if not traceable or (facts == [] and insight.get("completion") == "complete"):
         layer.findings_count += 1
         layer.details.append({"id": "insight-facts-untraceable", "severity": "error",
-                              "message": "Insight Facts 必须包含 ID、来源和截至日期"})
-    if insight and (insight.get("mode") != "insight" or insight.get("completion") not in {"complete", "insufficient"}):
+                              "message": "Insight Facts 必须为列表，每项含唯一非空 ID、来源列表和截至日期；complete 不得无事实"})
+
+    def check_refs(record, label: str, *, required: bool = False) -> None:
+        valid = isinstance(record, dict)
+        if valid:
+            primary = record.get("fact_ids", [])
+            counter = record.get("counter_fact_ids", [])
+            valid = (isinstance(primary, list) and isinstance(counter, list)
+                     and (bool(primary) or not required)
+                     and all(isinstance(ref, str) and ref in fact_ids for ref in primary + counter))
+        if not valid:
+            layer.findings_count += 1
+            layer.details.append({"id": "insight-fact-reference-invalid", "severity": "error",
+                                  "message": f"{label} 的事实引用必须为列表并解析到同代 Facts；结论不得缺主事实"})
+
+    findings = insight.get("findings")
+    if not isinstance(findings, list):
+        check_refs(None, "Insight findings")
+    else:
+        for index, finding in enumerate(findings):
+            check_refs(finding, f"Finding[{index}]", required=True)
+    # 事实表还被研究问题及核心矛盾消费，不能仅保护可得结论这一条出口。
+    chains = insight.get("analysis_chains", [])
+    if not isinstance(chains, list):
+        check_refs(None, "Insight analysis_chains")
+    else:
+        for index, chain in enumerate(chains):
+            check_refs(chain, f"Analysis chain[{index}]", required=True)
+    check_refs(insight.get("core_tension", {}), "Insight core_tension")
+    if insight.get("mode") != "insight" or insight.get("completion") not in ("complete", "insufficient"):
         layer.findings_count += 1
         layer.details.append({"id": "insight-status-invalid", "severity": "error",
                               "message": "Insight sidecar 的 mode 或 completion 非法"})
@@ -583,7 +620,7 @@ def _check_insight_contract(report_path: Path, text: str) -> LayerResult:
         layer.findings_count += 1
         layer.details.append({"id": "insight-manifest-analysis-mismatch", "severity": "error",
                               "message": f"Manifest 登记的 analysis_sidecar {registered} 不存在"})
-    if manifest and (manifest.get("mode") != "insight" or manifest.get("report") != report_path.name):
+    if manifest.get("mode") != "insight" or manifest.get("report") != report_path.name:
         layer.findings_count += 1
         layer.details.append({"id": "insight-manifest-mismatch", "severity": "error",
                               "message": "Insight manifest 未绑定当前同代 Markdown"})
@@ -592,7 +629,7 @@ def _check_insight_contract(report_path: Path, text: str) -> LayerResult:
         html_path = report_path.parent / str(html_name)
         try:
             html_text = html_path.read_text(encoding="utf-8")
-            for finding in insight.get("findings") or []:
+            for finding in findings if isinstance(findings, list) else []:
                 finding_id = finding.get("id") if isinstance(finding, dict) else None
                 if finding_id and f"evidence-{finding_id}" not in html_text:
                     raise ValueError(f"HTML 缺少 Finding 锚点 {finding_id}")

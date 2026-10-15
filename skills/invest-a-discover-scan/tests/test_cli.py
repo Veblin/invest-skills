@@ -545,6 +545,20 @@ def _run_hk(cli, monkeypatch, tmp_path, extra=()):
     return body, rec
 
 
+@pytest.mark.parametrize("us,cn,comparison", [(2.0, 3.0, "低于"), (3.0, 2.0, "高于"),
+                                           (2.0, 2.0, "等于"), (50.0, 3.0, "高于"), (0.0, 0.0, "等于")])
+def test_hk_rate_comparison_and_spread_summary_follow_inputs(monkeypatch, tmp_path, us, cn, comparison):
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(sources, "rf_10y_usd", lambda: (us, "test.US10Y"))
+    monkeypatch.setattr(sources, "rf_10y_pct", lambda: (cn, "test.CN10Y"))
+    body, rec = _run_hk(cli, monkeypatch, tmp_path)
+    assert f"{comparison}中国 10Y" in body
+    assert "大概率恒 0" not in body and "远高于" not in body
+    satisfied = sum(hit["gap_flags"][0] == 1 for hit in rec["hits"])
+    assert f"本次短清单 {len(rec['hits'])} 只中，利差子项成立 {satisfied} 只" in body
+    assert "[来源: test.US10Y]" in body and "[来源: test.CN10Y]" in body
+
+
 def test_hk_calendar_degraded_is_annotated(monkeypatch, tmp_path):
     """日历**内部降级**（不抛异常、退回周末近似）必须显式标注。
 

@@ -987,6 +987,20 @@ class TestNamelessSnapshotGate:
     _SNAPSHOT_NO_NAME = _AUTOMATED_STOCK_SNAPSHOT.replace(
         "# 600176 中国巨石 研究快照", "# 600176  研究快照")
 
+    @pytest.mark.parametrize("with_sidecar", [False, True])
+    def test_bare_code_directory_runs_completion(self, tmp_path, with_sidecar):
+        from report_qc import _extract_symbol
+
+        report = _write(tmp_path, "600176", "2026-10-15-09-00-00.draft.md", self._SNAPSHOT_NO_NAME)
+        if with_sidecar:
+            report.with_suffix(".analysis.json").write_text(_VALID_ANALYSIS_SIDECAR, encoding="utf-8")
+        assert detect_report_type(report) == "stock"
+        assert _extract_symbol(report) == "600176"
+        result = qc_file(report, fail_on="error")
+        assert _completion_layer(result).status == ("pass" if with_sidecar else "fail")
+        if not with_sidecar:
+            assert result.overall == "FAIL"
+
     def test_nameless_snapshot_still_requires_sidecar(self, tmp_path: Path):
         report = _write(tmp_path, "600176-未知", "2026-09-14-13-41-24.md",
                         self._SNAPSHOT_NO_NAME)
