@@ -2518,8 +2518,7 @@ _ETF_SAME_OBJECT_EXEMPT_RE: dict[str, re.Pattern] = {
 }
 
 
-def _claim_exempt_near(line: str, match: re.Match, *, family: str,
-                       window: int | None = None) -> bool:
+def _claim_exempt_near(line: str, match: re.Match, *, family: str) -> bool:
     """**同分句 + 同命题否证**豁免（B-F04；R3 改为对象贴附判定）。
 
     历史口径（行级 ±24 字符邻域 → R1 分句 + 通用否定词表 → R2 分句 + 括号/
@@ -2530,7 +2529,6 @@ def _claim_exempt_near(line: str, match: re.Match, *, family: str,
     贴附**本族对象**（表格 ``_ETF_SAME_OBJECT_EXEMPT_RE[family]``），且
     检索限定在断言所在分句内。真实否定仍通过（「跟踪误差不可得」「未做
     原文核验」「缺权重不得按 0」「不可拼成「当期完整组合」」）。
-    ``window`` 参数保留仅为旧调用兼容，不再参与判定。
     """
     pat = _ETF_SAME_OBJECT_EXEMPT_RE.get(family)
     if pat is None:  # pragma: no cover — 未知族不允许静默豁免

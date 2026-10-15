@@ -873,6 +873,7 @@ def _collect_side(code: str) -> dict:
         # 且 NaN 会穿过除法被渲染成字面 "nan"（展示为一个「算出来的」值）
         side["financials"]["latest"] = {
             "report_date": r0.get("report_date"),
+            "currency": r0.get("currency"),
             "revenue_yi": _safe_yi(r0.get("revenue")),
             "net_profit_yi": _safe_yi(r0.get("net_profit")),
             "roe": _safe_num(r0.get("roe")),

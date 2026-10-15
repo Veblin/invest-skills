@@ -81,6 +81,50 @@ def test_insight_report_without_analysis_keeps_contract(_invest, tmp_path):
         assert report.with_suffix(suffix).is_file()
 
 
+@pytest.mark.parametrize("pe", [0.0, -3.0])
+def test_insight_cli_preserves_event_provenance_and_pe_limits(_invest, monkeypatch, tmp_path, pe):
+    """真实事件聚合与 report 入口：公告失败、分红回退成功，核对完整成品。"""
+    from datetime import datetime, timezone
+    from lib import events
+    from report_qc import qc_file
+
+    collection = collection_v2_minimal()
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "valuation":
+            dim["data"][-1]["pe_ttm"] = pe
+        elif dim["dimension"] == "financials":
+            dim["data"][-1]["net_profit"] = None
+        elif dim["dimension"] == "quote":
+            dim["data"]["change_pct"] = -6.0
+    monkeypatch.setattr(events, "_shanghai_now", lambda: datetime(2026, 6, 11, tzinfo=timezone.utc))
+    monkeypatch.setattr(events, "_fetch_notice_events", lambda symbol: None)
+    dividend = {"date": "2026-06-10", "type": "dividend", "title": "测试分红回退标记",
+                "source": "akshare stock_dividend_cninfo"}
+    monkeypatch.setattr(events, "_fetch_dividend_events", lambda symbol: [
+        dict(dividend), dict(dividend),  # 同源重复只算一次
+        {**dividend, "date": "2020-01-01", "source": "expired.source"}])
+    monkeypatch.setattr(events, "_fetch_shareholder_events", lambda symbol: [])
+    events.attach_events(collection, "600176")
+    assert collection["_meta"]["events_legs"]["notice"] == "failed"
+    assert len(collection["events"]) == 1
+    monkeypatch.setattr(_invest.collector, "collect_all", lambda *a, **k: collection)
+
+    assert _invest.cmd_report(_args(tmp_path, emit="html")) == 0
+    report = next((tmp_path / "reports").rglob("*.insight.md"))
+    sidecar = json.loads(report.with_suffix(".facts.json").read_text(encoding="utf-8"))
+    fact = next(f for f in sidecar["facts"] if f["id"] == "events.count")
+    assert fact["value"] == 1
+    assert fact["source_ids"] == ["events.akshare.stock_dividend_cninfo"]
+    assert "expired.source" not in json.dumps(sidecar)
+    for artifact in (report, report.with_suffix(".html")):
+        text = artifact.read_text(encoding="utf-8")
+        assert "近窗口事件 1 条" in text and "近窗口公告" not in text
+        assert "stock_dividend_cninfo" in text and "个股公告" not in text
+        assert "非正值" in text and "为负值（亏损期）" not in text
+    result = qc_file(report, fail_on="error")
+    assert next(layer for layer in result.layers if layer.layer == "insight-contract").status == "pass"
+
+
 def test_insight_report_invalid_analysis_exits_2(_invest, tmp_path):
     bad = tmp_path / "bad.analysis.json"
     bad.write_text(json.dumps([{"module": "x"}], ensure_ascii=False), encoding="utf-8")

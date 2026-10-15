@@ -47,7 +47,11 @@ def _norm_row(row: dict[str, Any]) -> dict[str, Any]:
     # 东财港股指标列实测已是百分数单位（腾讯 FY2025 GROSS_PROFIT_RATIO=56.21；
     # 京东物流 FY2023 NET_PROFIT_RATIO=0.7005 = 0.70% 薄利）——**原值透传**，
     # 不做 abs<=1 放大（review2 HK-2：曾把 0.7005 放大成 70.05%）。YOY 列不信任，报告自算。
-    out["currency"] = str(out.get("currency") or "HKD").strip()
+    # 报表币种不能由港股交易币种推断；缺失保留未知。
+    currency = out.get("currency")
+    # pandas 的缺失值可能为 NaN/NA，不能 stringify 成一个「币种」。
+    currency = currency.strip() if isinstance(currency, str) else ""
+    out["currency"] = currency if currency.lower() not in {"", "nan", "none", "null", "n/a", "-", "--"} else None
     out["report_date"] = str(out.get("report_date") or "")[:10]
     out["period_start"] = str(out.get("period_start") or "")[:10]
     out["report_type"] = str(out.get("report_type") or "").strip()

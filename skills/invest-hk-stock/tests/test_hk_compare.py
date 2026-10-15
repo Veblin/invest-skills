@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 
 import pytest
 from _hk_cli import load_hk_cli
@@ -98,6 +99,23 @@ def test_render_compare_table_is_markdown_with_sources():
         assert banned not in text
 
 
+@pytest.mark.parametrize("currency", ["USD", "HKD", None])
+def test_compare_preserves_each_reporting_currency(currency):
+    left, right = _side("00700", "甲"), _side("09988", "乙")
+    left["financials"]["latest"]["currency"] = "CNY"
+    right["financials"]["latest"]["currency"] = currency
+    cmp = hc.build_compare(left, right)
+    for row in cmp["rows"]:
+        if row["metric"] in {"营收", "归母净利"}:
+            assert row["left_raw"] == row["right_raw"]
+            assert "CNY" in row["left"] and "未核验" in row["left"]
+            assert (currency or "币种未知") in row["right"]
+            assert "未核验" in row["right"]
+    text = "\n".join(hc.render_compare_table(cmp))
+    assert "未作汇率换算" in text
+    assert "CURRENCY" in text and "年报" in text
+
+
 # ── CLI 层 ───────────────────────────────────────────────────────────────
 
 def _args(tmp_path, left="00700", right="09988"):
@@ -185,6 +203,17 @@ def test_compare_writes_to_disk(monkeypatch, tmp_path, capsys):
     assert "标的00700" in body and "标的09988" in body, "mock 标记缺失说明 patch 未生效"
 
 
+def test_compare_cli_keeps_currency_from_financial_source(monkeypatch, tmp_path):
+    hk_mod = _stub_sides(monkeypatch)
+    monkeypatch.setattr(hk_mod.hk_financials, "fetch_financials", lambda code: [
+        {**_FIN_ROW, "currency": "CNY" if code == "00700" else "USD"}])
+    assert hk_mod.cmd_compare(_args(tmp_path)) == 0
+    body = next(tmp_path.rglob("*.md")).read_text(encoding="utf-8")
+    for metric in ("营收", "归母净利"):
+        line = next(line for line in body.splitlines() if f"| {metric}" in line)
+        assert "亿 CNY（未核验）" in line and "亿 USD（未核验）" in line
+
+
 def test_compare_pb_percentile_uses_current_pb(monkeypatch, tmp_path):
     """PB 分位需要**当前 PB** 才能算——不提供当前值会让该行永远显示「—」（实测踩坑）。"""
     hk_mod = _stub_sides(monkeypatch)
@@ -211,7 +240,7 @@ def test_compare_non_numeric_financials_do_not_crash(monkeypatch, tmp_path):
                                            "net_profit": "n/a", "roe": "—"})
     assert hk_mod.cmd_compare(_args(tmp_path)) == 0
     body = list(tmp_path.glob("00700-09988-compare/*.md"))[0].read_text(encoding="utf-8")
-    assert "nan" not in body.lower(), "NaN 不得渲染成字面 nan"
+    assert not re.search(r"\bnan\b", body, re.IGNORECASE), "NaN 不得渲染成字面 nan"
     assert "n/a" not in body
 
 

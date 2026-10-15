@@ -87,9 +87,18 @@ def build_compare(left: dict, right: dict) -> dict:
     rows: list[dict] = []
     for dimension, metric, path, unit, calc in _ROW_SPECS:
         lv, rv = _dig(left, path), _dig(right, path)
+        ltext, rtext = _fmt(lv, unit), _fmt(rv, unit)
+        if dimension == "财务摘要" and unit == "亿":
+            # /1e8 只缩放单位，不做汇率换算。CURRENCY 是未经年报核验的源标签。
+            texts = []
+            for side, value, formatted in ((left, lv, ltext), (right, rv, rtext)):
+                currency = str(_dig(side, ("financials", "latest", "currency")) or "").strip()
+                texts.append(formatted if value is None else
+                             f"{formatted} 亿 {currency or '币种未知'}（未核验）")
+            ltext, rtext = texts
         rows.append({"dimension": dimension, "metric": metric, "unit": unit, "calc": calc,
                      "left_raw": lv, "right_raw": rv,
-                     "left": _fmt(lv, unit), "right": _fmt(rv, unit)})
+                     "left": ltext, "right": rtext})
     # 一个维度的首行只是展示顺序，不是可用性哨兵。例如 PE 分位缺失而 PB 分位
     # 已有值时，若只检查首行会把整块「估值位置」误标为不可得，并让 CLI 错退 1。
     unavailable = [d for d in DIMENSIONS
@@ -113,4 +122,8 @@ def render_compare_table(cmp: dict) -> list[str]:
         # 引擎原值而右列才是派生值——同一指标两列口径不一致（实测踩坑）
         calc = f" [来源: Python calc: {r['calc']}]" if r.get("calc") else ""
         lines.append(f"| {r['dimension']} | {r['metric']}{unit}{calc} | {r['left']} | {r['right']} |")
+    lines.extend(["", "> ⚠️ 财务金额按各自报表币种列示，元/1e8 仅为单位缩放，未作汇率换算，"
+                  "不可直接比较跨币种金额。币种标签来自东财 CURRENCY 字段"
+                  "[来源: akshare.stock_financial_hk_analysis_indicator_em / CURRENCY]，"
+                  "该字段对部分 A+H 公司不可靠；本表未核验，须以公司年报披露币种为准。"])
     return lines

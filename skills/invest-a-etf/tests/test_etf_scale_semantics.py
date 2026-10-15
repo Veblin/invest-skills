@@ -19,7 +19,7 @@ class TestSharePriceMvEst:
         """份额×交易价 = 代理字段（单位/口径/时点显式）；aum 为同值兼容别名。"""
         result: dict = {"_errors": []}
         _apply_spot_row_to_profile(result, {"最新份额": 5_000_000_000.0,
-                                            "最新价": 3.605, "基金折价率": 0.0}, "510300")
+                                            "最新价": 3.605, "基金折价率": 0.0})
         est = result["share_price_mv_est"]
         assert est["value_yi"] == round(5_000_000_000.0 * 3.605 / 1e8, 2)
         assert est["unit"] == "亿元"
@@ -33,14 +33,14 @@ class TestSharePriceMvEst:
     def test_bad_shares_or_price_no_proxy(self, bad):
         result: dict = {"_errors": []}
         _apply_spot_row_to_profile(result, {"最新份额": bad, "最新价": 3.6,
-                                            "基金折价率": 0.0}, "510300")
+                                            "基金折价率": 0.0})
         assert result["share_price_mv_est"] is None
         assert result["aum"] is None
 
     def test_premium_caliber_attached(self):
         result: dict = {"_errors": []}
         _apply_spot_row_to_profile(result, {"最新份额": 1e9, "最新价": 1.0,
-                                            "基金折价率": -0.5}, "510300")
+                                            "基金折价率": -0.5})
         cal = result["premium_discount_caliber"]
         assert cal["nav_time_point"].startswith("未知")
         assert "不得" in cal["note"]

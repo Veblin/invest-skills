@@ -860,7 +860,7 @@ SOURCE_PROVENANCE: dict[str, dict] = {
 }
 
 
-def _identity_by_category(category: str, symbol: str) -> dict:
+def _identity_by_category(category: str) -> dict:
     """由兼容单轴 category 推导三轴（未原文核验 → mapped_unverified）。"""
     axis = {
         "broad_market": ("stock", "domestic", "broad_market"),
@@ -938,7 +938,7 @@ def query_etf_identity(symbol: str, *, category: str | None = None) -> dict:
                "note": "静态映射登记，未做本轮原文核验（使用须注明待核）"}
         evidence = []
     else:
-        axes = _identity_by_category(legacy, symbol)
+        axes = _identity_by_category(legacy)
         status = "mapped_unverified" if legacy != "unknown" else "unknown"
         ver = {"status": status, "verified_at": None,
                "note": "由分类映射/名称推断推导，未核验" if status != "unknown"
@@ -1309,13 +1309,13 @@ def query_etf_data(
     _attach_valuation_guide(result)
 
     if spot_row is not None:
-        _apply_spot_row_to_profile(result, spot_row, symbol)
+        _apply_spot_row_to_profile(result, spot_row)
     else:
         row, err = _lookup_etf_spot_row(symbol)
         if err:
             result["_errors"].append(err)
         elif row is not None:
-            _apply_spot_row_to_profile(result, row, symbol)
+            _apply_spot_row_to_profile(result, row)
 
     _auto_flags(result, result["category"].get("category", ""))
     result["data_quality"] = _summarize_etf_data_quality(result)
@@ -2218,7 +2218,7 @@ def fetch_etf_category_sina() -> dict:
         return {"status": "missing", "rows": [], "error": str(exc)}
 
 
-def _apply_spot_row_to_profile(result: dict, row: Any, symbol: str) -> None:
+def _apply_spot_row_to_profile(result: dict, row: Any) -> None:
     """将 spot 行写入 profile（折溢价口径 / 份额市值代理）。
 
     B02-1（v0.3.2）：原 `aum = 份额×最新价` 直接命名 AUM 会误导为基金资产
@@ -2952,7 +2952,7 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
             _trace(adj_name, adj_env, outcome="missing",
                    reason=(adj_env or {}).get("note") or "fund_adj 不可得（查询失败/空返回）")
 
-        navs, returns, aligned_rows = _aligned_nav_returns(df, source=source, adj_map=adj_map)
+        navs, returns, aligned_rows = _aligned_nav_returns(df, adj_map=adj_map)
         # 裁剪上下文行（date < start）：仅当上下文切片实际生效（非兜底）时执行，
         # 保持 navs/returns/rows 三者对齐。returns 与行的对应关系取决于数据形态：
         # 复权路径首行无收益 → returns[j] 对应 rows[j+1]；未复权路径每行带日增长率
@@ -3065,13 +3065,11 @@ def query_etf_kline(symbol: str, days: int = 60) -> dict[str, Any]:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _aligned_nav_returns(df: Any, *, source: str = "", adj_map: dict[str, float] | None = None) -> tuple[list[float], list[float], list[dict]]:
+def _aligned_nav_returns(df: Any, *, adj_map: dict[str, float] | None = None) -> tuple[list[float], list[float], list[dict]]:
     """从净值表构建对齐的 navs / returns（同一行样本）。
 
     Parameters
     ----------
-    source : str
-        数据源标识（仅用于日志/调试，不改变字段名解析逻辑）。
     adj_map : dict[str, float] | None
         Tushare fund_adj 复权因子映射 {date_str: adj_factor}。
         不为 None 时，对历史 NAV 做前复权（forward-adjust），

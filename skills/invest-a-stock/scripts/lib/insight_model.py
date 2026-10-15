@@ -139,11 +139,11 @@ def _as_of(row: dict[str, Any], fallback: str) -> str:
 
 
 def _fact(fid: str, value: Any, *, as_of: str, unit: str, basis: str,
-          source_id: str, formula: str | None = None,
+          source_id: str | list[str], formula: str | None = None,
           availability: str = "available") -> dict[str, Any]:
     return {
         "id": fid, "value": value, "as_of": as_of, "unit": unit,
-        "basis": basis, "source_ids": [source_id], "formula": formula,
+        "basis": basis, "source_ids": [source_id] if isinstance(source_id, str) else list(source_id), "formula": formula,
         "availability": availability,
     }
 
@@ -260,11 +260,11 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         if latest_pe is not None:
             as_of = _as_of(latest, fetched_at)
             facts.append(_fact("valuation.pe_ttm.latest", latest_pe, as_of=as_of, unit="x", basis="PE(TTM)", source_id=sid))
-            # v0.3.0 B3：分位只在**正** PE 序列上有定义。latest_pe ≤ 0（亏损期）
+            # v0.3.0 B3：分位只在**正** PE 序列上有定义。latest_pe ≤ 0
             # 时不产出 percentile fact——旧实现拿负值去比正值序列，恒得 0.0 分位，
             # 下游据此写出「位于历史样本的偏低位置」（负 PE 被读成便宜）。口径
-            # 对齐 valuation_calc.py「PE 非正 → 标注不可得」；亏损期陈述由
-            # build_findings 的 valuation-pe-nonpositive 分支承担。
+            # 对齐 valuation_calc.py「PE 非正 → 标注不可得」；非正 PE 本身
+            # 不足以判断是否亏损（可能为舍入或供应商编码）。
             if latest_pe > 0:
                 series = [value for row in rows
                           if (value := _number(row.get("pe_ttm"))) is not None and value > 0]
@@ -330,7 +330,17 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
     events = collection.get("events")
     if isinstance(events, list) and events:
         summary = (collection.get("_meta") or {}).get("events_summary") or {}
-        sid = add_source("events", {"_meta": {"source": "akshare.stock_individual_notice_report"}})
+        # 以窗口过滤、去重后实际保留的事件卡归源；不能用尝试过的接口冒充贡献源，
+        # 也不能从 dividend 类型推断来源（它有主源与回退源）。
+        event_sources = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            source = str(event.get("source") or "unknown").strip() or "unknown"
+            source = source.replace("akshare ", "akshare.", 1)
+            event_sid = add_source("events", {"_meta": {"source": source}})
+            if event_sid not in event_sources:
+                event_sources.append(event_sid)
         window = summary.get("window_days")
         count = summary.get("event_count")
         if count is None:
@@ -338,7 +348,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         latest_date = summary.get("latest_date") or _as_of(events[0] if isinstance(events[0], dict) else {}, fetched_at)
         window = window if isinstance(window, int) and window > 0 else 30
         facts.append(_fact("events.count", int(count), as_of=str(latest_date), unit="count",
-                           basis=f"近 {window} 日公告条数", source_id=sid))
+                           basis=f"近 {window} 日事件条数", source_id=event_sources))
         types = summary.get("top_types") or []
         if types:
             named = "、".join(
@@ -347,7 +357,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
             )
             if named:
                 facts.append(_fact("events.types", named, as_of=str(latest_date), unit="text",
-                                   basis="公告类型分布（近窗口）", source_id=sid))
+                                   basis="事件类型分布（近窗口）", source_id=event_sources))
         # 公告层是否出现方向性条目——「当日大跌但公告全 neutral」是可核验的排除性证据。
         # 只取 source == "notice" 的官方公告卡：Tavily/抓取类卡是网页快照，
         # 其 direction 由规则从页面文本推断（实测把雪球行情页标成 bearish），
@@ -357,6 +367,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         directions = {str(c.get("direction")) for c in (cards or [])
                       if isinstance(c, dict) and c.get("source") == "notice" and c.get("direction")}
         if directions:
+            sid = add_source("news", {"_meta": {"source": "akshare.stock_individual_notice_report"}})
             facts.append(_fact("news.notice_directions", "、".join(sorted(directions)), as_of=str(latest_date),
                                unit="text", basis="公告层方向标注（引擎规则，仅官方公告卡）", source_id=sid,
                                formula=None))
@@ -375,7 +386,7 @@ def _finding(fid: str, claim: str, *, fact_ids: list[str], counter_fact_ids: lis
             "status": status, "profile_relevance": relevance, "verification": verification or {}}
 
 
-def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], profile: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def build_findings(facts: list[dict[str, Any]], profile: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build only descriptive conclusions for which the manifest has evidence."""
     findings: list[dict[str, Any]] = []
     pe = _find(facts, "valuation.pe_ttm.latest"); pct = _find(facts, "valuation.pe_ttm.percentile")
@@ -385,17 +396,15 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
                                  fact_ids=[pe["id"], pct["id"]], relevance="primary",
                                  verification={"event": "下一报告期", "test": "核对盈利变化与估值口径是否同步更新"}))
     elif pe and pe["value"] <= 0:
-        # v0.3.0 B3：亏损期（PE 非正）无分位可言 → 不给「位置」结论，改为显式
-        # 披露「分位不适用」，避免读者把负 PE 误读为低估（report-conventions.md §9.2 估值分位
-        # 规则 2：亏损期标的须标注仅作位置参考、不反映估值贵贱）。
+        # PE 非正时仅披露指标状态，不从 PE 的符号推断盈利事实。
         findings.append(_finding(
             "valuation-pe-nonpositive",
-            f"PE(TTM) 为 {pe['value']:.2f}x，为负值（亏损期）；PE 历史分位仅在正 PE "
-            "序列上有定义，本次不计算分位——该标的历史大部分时间微利/亏损时，"
-            "PE 分位数仅作位置参考，不反映估值贵贱。",
+            f"PE(TTM) 为 {pe['value']:.2f}x，为非正值；PE 历史分位仅在正 PE "
+            "序列上有定义，本次不计算分位，不据此判断估值贵贱；"
+            "盈利状态须另行核对同口径利润或 EPS 数据。",
             fact_ids=[pe["id"]], relevance="primary",
             verification={"event": "下一报告期",
-                          "test": "核对盈利是否转正及 PE 口径是否恢复"}))
+                          "test": "核对同口径利润或 EPS 数据及 PE 口径"}))
     revenue_change = _find(facts, "financials.revenue.change")
     ocf_ratio = _find(facts, "financials.ocf_to_np.latest")
     if revenue_change:
@@ -428,7 +437,7 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
         fact_ids = [change_pct["id"]]
         if event_count:
             fact_ids.append(event_count["id"])
-            parts.append(f"近窗口公告 {int(event_count['value'])} 条。")
+            parts.append(f"近窗口事件 {int(event_count['value'])} 条。")
         if directions:
             fact_ids.append(directions["id"])
             only_neutral = set(str(directions["value"]).split("、")) == {"neutral"}
@@ -941,7 +950,7 @@ def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[st
     引擎的确定性结论不因注入了散文而改变。
     """
     facts, sources, gaps = extract_facts(collection)
-    findings, tension = build_findings(facts, gaps, profile)
+    findings, tension = build_findings(facts, profile)
     analysis_chains = build_analysis_chains(facts)
     tension = _derive_tension(analysis_chains, tension)
     # 审查意见 #2：完成度不能只看结论条数。一份报告若连核心矛盾都形不成，

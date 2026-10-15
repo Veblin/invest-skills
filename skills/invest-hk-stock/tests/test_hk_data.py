@@ -44,6 +44,11 @@ def test_financial_rows_sorted_desc_and_cny_flagged():
     assert out[2]["report_date"] == "2024-12-31"
 
 
+@pytest.mark.parametrize("currency", [None, "", "  ", float("nan"), "NaN", "--"])
+def test_missing_financial_currency_is_not_assumed_hkd(currency):
+    assert fin._norm_row({"CURRENCY": currency})["currency"] is None
+
+
 # ---- hk_valuation：分位/中位（复用 skills/lib/stats）----
 
 def _mk_series(vals, start="2021-01-01"):

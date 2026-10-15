@@ -575,11 +575,11 @@ def test_qc_accepts_insight_with_new_blocks(tmp_path: Path) -> None:
     assert "discoveries" in payload and "analysis_chains" in payload
 
 
-# ── v0.3.0 B3：亏损期（PE 非正）不得产出「分位」结论 ────────────────────────
+# ── v0.3.0 B3：PE 非正不得产出「分位」结论，也不能据此推断亏损 ────────────
 
 
 def _set_latest_pe(collection: dict, value: float) -> dict:
-    """改最新一期 pe_ttm（构造亏损期）。"""
+    """改最新一期 pe_ttm（构造非正 PE）。"""
     result = copy.deepcopy(collection)
     for dim in result["dimensions"]:
         if dim["dimension"] == "valuation":
@@ -605,7 +605,8 @@ class TestLossPeriodPeHandling:
         found = [f for f in model["findings"] if f["id"] == "valuation-pe-nonpositive"]
         assert found, [f["id"] for f in model["findings"]]
         claim = found[0]["claim"]
-        assert "亏损" in claim and "不计算分位" in claim
+        assert "非正值" in claim and "不计算分位" in claim
+        assert "亏损" not in claim
         assert "偏低位置" not in claim, "不得把负 PE 说成位置偏低"
         assert not any(f["id"] == "valuation-position" for f in model["findings"])
 
