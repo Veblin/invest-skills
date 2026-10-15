@@ -64,9 +64,97 @@ def find_yoy_row(rows: list[dict], latest: dict) -> dict | None:
     return None
 
 
+def yoy_from_fina_rows(
+    rows: list[dict],
+    field: str,
+    *,
+    rescan_invalid_prior: bool = False,
+) -> float | None:
+    """报告期行集 → 最新期对上年同期的同比 %（A05-2 共享计算基础，v0.3.2）。
+
+    收敛 store._yoy_from_fina_rows 与 collector._revenue_yoy_from_fina_rows
+    的重复计算（数值解析统一 ``safe_float``：NaN/±Inf/字符串 → None，不再把
+    NaN/Inf 作为同比透出——离线反例见 A基础-财务纯函数反例.py yoy 组）。
+
+    各调用方**保留自己的同期行回扫策略**（离线对照已复现差异）：
+    - ``rescan_invalid_prior=False``（collector 旧行为）：首个上年同期行值
+      不可解析即放弃；
+    - ``True``（store 旧行为）：继续扫描同期重复记录中的下一条。
+
+    口径：最新期 = ``end_date`` **归一后**最大行（:func:`sort_by_end_date` /
+    :func:`latest_by_end_date`，A-F01；不可解析日期不得充当最新期）；
+    当前/同期值均须 >0，否则 None；同期比较经 ``normalize_end_date`` 归一
+    （ISO/compact 等价）；找不到同期 → None（不回扫到更早年份）；round(2)。
+    """
+    if not rows:
+        return None
+    sorted_rows = sort_by_end_date([r for r in rows if _end_date_sort_key(r)])
+    if not sorted_rows:
+        return None  # 无任何可解析报告期 → 不产出（不可解析不得当最新期）
+    latest = sorted_rows[-1]
+    cur_f = safe_float(latest.get(field))
+    if cur_f is None or cur_f <= 0:
+        return None
+    norm_ed = normalize_end_date(str(latest.get("end_date", "")))
+    if len(norm_ed) < 8:
+        return None
+    prev_ed = prior_year_end_date(norm_ed)
+    if not prev_ed:
+        return None
+    prev_v: float | None = None
+    for r in reversed(sorted_rows[:-1]):
+        if normalize_end_date(str(r.get("end_date", ""))) != prev_ed:
+            continue
+        v = safe_float(r.get(field))
+        if v is None and rescan_invalid_prior:
+            continue  # store 旧行为：继续扫描同期下一条
+        prev_v = v
+        break
+    if prev_v is None or prev_v <= 0:
+        return None
+    return round((cur_f - prev_v) / prev_v * 100, 2)
+
+
+def _end_date_sort_key(row: dict) -> str:
+    """报告期归一排序键：8 位 YYYYMMDD；不可解析 → ""（恒最小，不参与最新期）。"""
+    ed = normalize_end_date(str(row.get("end_date") or ""))
+    return ed if len(ed) == 8 and parse_end_date(ed) is not None else ""
+
+
+def sort_by_end_date(rows: list[dict]) -> list[dict]:
+    """报告期升序（稳定排序，A-F01 canonical）。
+
+    **必须先归一日期再排序**：旧消费方按原始 end_date 字符串排序时，ISO 与
+    compact 混排会错期——``'-' < '0'`` 使 ``"2026-03-31"`` 排在
+    ``"2026-06-30"`` 之后（负责人定点探针：20250331=100、2025-06-30=200、
+    20260331=110、2026-06-30=260，旧输出 10%，应为 30%）。
+    不可解析日期置最前（键 ""）——``rows[-1]`` 恒为有效最新期（若存在）；
+    同报告期并列保留输入顺序（稳定；修订行去重归 :func:`dedupe_by_end_date`）。
+    """
+    return sorted(rows, key=_end_date_sort_key)
+
+
+def latest_by_end_date(rows: list[dict]) -> dict | None:
+    """最新报告期行：归一后 end_date 最大者（A-F01 canonical）。
+
+    - 不可解析日期行不参与（不得压过有效日期）；全部不可解析 → None；
+    - 同报告期并列取输入序较后者（与 :func:`sort_by_end_date` 稳定排序的
+      ``[-1]`` 同解；修订披露取舍归 :func:`dedupe_by_end_date`）。
+    """
+    best: dict | None = None
+    best_key: tuple[str, int] = ("", -1)
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            continue
+        k = _end_date_sort_key(r)
+        if k and (k, i) > best_key:
+            best_key, best = (k, i), r
+    return best
+
+
 def _ann_sort_key(row: dict) -> str:
     ann = normalize_end_date(str(row.get("ann_date") or ""))
-    return ann if len(ann) == 8 and ann.isdigit() else ""
+    return ann if len(ann) == 8 and parse_end_date(ann) is not None else ""
 
 
 def dedupe_by_end_date(rows: list[dict]) -> list[dict]:
@@ -83,8 +171,8 @@ def dedupe_by_end_date(rows: list[dict]) -> list[dict]:
     for r in rows:
         if not isinstance(r, dict):
             continue
-        key = normalize_end_date(str(r.get("end_date") or ""))
-        if len(key) != 8 or not key.isdigit():
+        key = _end_date_sort_key(r)
+        if not key:
             out.append(r)
             continue
         at = pos.get(key)

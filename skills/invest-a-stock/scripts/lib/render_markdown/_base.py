@@ -478,9 +478,11 @@ def _render_success_factors(collection: dict[str, Any]) -> list[str]:
     fin = _get_dim_data(dims, "financials")
     latest: dict = {}
     if isinstance(fin, list) and fin:
-        rows = [r for r in fin if isinstance(r, dict) and r.get("end_date")]
-        if rows:
-            latest = max(rows, key=lambda r: str(r.get("end_date", "")))
+        # A-F01：最新期按归一后 end_date 选取（旧实现按原始字符串 max，
+        # ISO/compact 混排会错期；不可解析日期不得压过有效期）
+        from lib.financials import latest_by_end_date as _latest_fin
+
+        latest = _latest_fin([r for r in fin if isinstance(r, dict)]) or {}
     lines = [f"**[行业成功关键因素]** {industry}"]
     for i, factor in enumerate(factors, 1):
         if not isinstance(factor, dict):

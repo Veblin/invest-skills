@@ -22,6 +22,12 @@ _ETF_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 if str(_ETF_LIB) not in sys.path:
     sys.path.insert(0, str(_ETF_LIB))
 
+# 单文件运行时 bootstrap：`from lib import store` 需 invest-a-stock scripts 在
+# sys.path（全量跑时由其他用例先 import etf_data 顺带完成，单跑本文件则不会）。
+from _invest_path import ensure_invest_a_scripts_on_path  # noqa: E402
+
+ensure_invest_a_scripts_on_path()
+
 
 def _canonical_etf_data():
     """确保 sys.modules["etf_data"] 是 canonical（invest-a-etf）而非 journal shim。
@@ -58,7 +64,7 @@ def isolated_store(tmp_path: Path) -> Iterator[Any]:
 
 
 def _insert_snapshots(store_mod, rows):
-    c = store_mod._conn()
+    c = store_mod.open_connection()
     try:
         c.executemany(
             "INSERT INTO etf_share_snapshots (date, symbol, shares, price, aum) "
@@ -67,7 +73,7 @@ def _insert_snapshots(store_mod, rows):
         )
         c.commit()
     finally:
-        store_mod._safe_close(c)
+        store_mod.close_connection(c)
 
 
 def test_share_flow_returns_lag_note_with_t1_semantics(isolated_store):
@@ -97,6 +103,10 @@ def test_share_flow_returns_lag_note_with_t1_semantics(isolated_store):
         "date 为采集日墙钟日期；shares/price/aum 为采集时 akshare 最新披露值，"
         "份额披露存在 T+1 延迟，实际对应交易日未知"
     )
+    # v0.3.2 B02-1：正名键 + 口径注记（代理语义、价格涨≠净流入）
+    assert out["share_price_mv_est_current"] == out["aum_current"] == 202.95
+    assert "非官方资产净值" in out["caliber_note"]
+    assert "价格涨跌 ≠ 资金净流入" in out["caliber_note"]
 
 
 def test_share_flow_empty_history_keeps_note_only(isolated_store):
@@ -105,3 +115,103 @@ def test_share_flow_empty_history_keeps_note_only(isolated_store):
     out = etf_data.etf_share_flow("515050", days=60)
     assert out == {"symbol": "515050", "history_count": 0, "note": "无历史数据"}
     assert "lag_note" not in out
+
+
+def test_share_flow_short_history_does_not_claim_split_adjustment(isolated_store):
+    """采集日不能代替份额披露日，即使看起来机械翻倍也不宣称已调整。"""
+    etf_data = _canonical_etf_data()
+    _insert_snapshots(isolated_store, [
+        ("20260417", "513660", 1_426_000_000.0, 2.0, 28.52),
+        ("20260421", "513660", 2_852_000_000.0, 1.0, 28.52),
+    ])
+    out = etf_data.etf_share_flow("513660", days=60)
+    assert "split_adjusted" not in out
+    assert out["split_events"][0]["effective_from"] == "20260420"
+    assert out["split_events"][0]["ratio"] == 2.0
+    assert out["split_events"][0]["source"]["sha256"]
+    # 2 行 < 6 行，5 日窗口不可算。
+    assert out["share_change_5d"] is None
+    assert out["shares_current"] == 2_852_000_000.0
+
+
+@pytest.mark.parametrize("last_date,last_price,last_shares", [
+    ("2026-04-20", 8.0, 1_000_000_000.0),
+    ("2026-04-20", 8.0, 2_100_000_000.0),
+    ("2026-04-21", 4.0, 1_000_000_000.0),
+    ("2026-04-21", 4.0, 2_100_000_000.0),
+])
+def test_share_flow_split_crossing_is_unconfirmable(
+        isolated_store, last_date, last_price, last_shares):
+    """包括登记日仍是拆分前T+1份额的反例，均不可推断实际生效日。"""
+    etf_data = _canonical_etf_data()
+    snapshots = [(f"2026-04-{day}", "513660", 1_000_000_000.0, 8.0, 80.0)
+                 for day in range(13, 18)]
+    snapshots.append((last_date, "513660", last_shares,
+                      last_price, last_shares * last_price / 1e8))
+    _insert_snapshots(isolated_store, snapshots)
+    out = etf_data.etf_share_flow("513660", days=5)
+    assert out["share_change_5d"] is None
+    assert out["flow_est_5d"] is None
+    assert out["window_status"]["5d"]["confirmable"] is False
+    assert "披露日期未知" in out["window_status"]["5d"]["note"]
+    assert "不可确认" in out["note"]
+    assert out["shares_current"] == last_shares
+    assert "split_adjusted" not in out
+
+
+@pytest.mark.parametrize("start", [7, 24])
+def test_share_flow_same_split_basis_retains_zero(isolated_store, start):
+    etf_data = _canonical_etf_data()
+    _insert_snapshots(isolated_store, [
+        (f"2026-04-{d:02d}", "513660", 1_000_000_000.0, 8.0, 80.0)
+        for d in range(start, start + 6)])
+    out = etf_data.etf_share_flow("513660", days=5)
+    assert out["share_change_5d"] == out["flow_est_5d"] == 0.0
+    assert out["window_status"]["5d"]["confirmable"] is True
+
+
+def test_share_flow_only_split_crossing_windows_are_blocked(isolated_store):
+    etf_data = _canonical_etf_data()
+    _insert_snapshots(isolated_store, [
+        (f"2026-04-{d:02d}", "513660", 1_000_000_000.0, 8.0, 80.0)
+        for d in range(9, 30)])
+    out = etf_data.etf_share_flow("513660", days=20)
+    assert out["flow_est_5d"] == 0.0
+    assert out["window_status"]["5d"]["confirmable"] is True
+    assert out["flow_est_20d"] is None
+    assert out["window_status"]["20d"]["confirmable"] is False
+
+
+def test_share_flow_delayed_jump_after_ex_date_is_unconfirmable(isolated_store):
+    etf_data = _canonical_etf_data()
+    _insert_snapshots(isolated_store, [
+        (f"2026-04-{d:02d}", "513660", 1_000_000_000.0, 4.0, 40.0)
+        for d in range(22, 27)] + [("2026-04-27", "513660", 2_000_000_000.0, 4.0, 80.0)])
+    out = etf_data.etf_share_flow("513660", days=5)
+    assert out["flow_est_5d"] is None
+    assert out["window_status"]["5d"]["confirmable"] is False
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_snapshot_stock_cli_discloses_unconfirmable_window(
+        isolated_store, monkeypatch, capsys, as_json):
+    import invest
+    import json
+
+    _insert_snapshots(isolated_store, [
+        (f"2026-04-{d:02d}", "513660", 1_000_000_000.0, 8.0, 80.0)
+        for d in [13, 14, 15, 16, 17, 20]])
+    etf_data = _canonical_etf_data()
+    monkeypatch.setattr(invest, "load_invest_a_etf_module", lambda: etf_data)
+    args = invest.build_parser().parse_args(
+        ["etf-flow", "513660", "--days", "5"] + (["--json"] if as_json else []))
+    assert invest.cmd_etf_flow(args) == 0
+    output = capsys.readouterr().out
+    if as_json:
+        result = json.loads(output)
+        assert result["flow_est_5d"] is None
+        assert result["window_status"]["5d"]["confirmable"] is False
+    else:
+        assert "5 日" in output and "不可确认" in output
+        assert "披露日期未知" in output and "-40" not in output
+        assert "6 条采集快照" in output

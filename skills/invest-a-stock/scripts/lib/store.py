@@ -20,7 +20,13 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 from . import env
-from .db_util import connect_db, load_recent_rows, safe_close, upsert_daily_rows
+from .db_util import (
+    close_connection as _db_close_connection,
+    connection as _db_connection,
+    load_recent_rows,
+    open_connection as _db_open_connection,
+    upsert_daily_rows,
+)
 from .json_util import dumps_json, json_default
 from .nums import safe_float
 from .schema import index_dimensions
@@ -46,21 +52,36 @@ def _get_path() -> Path:  # 兼容既有内部调用点
     return get_db_path()
 
 
-def _conn() -> sqlite3.Connection:
-    return connect_db(_get_path())
+# ---------------------------------------------------------------------------
+# A02 公开连接入口（跨 skill 消费者用；不再穿透私有名）
+#
+# 路径唯一经 get_db_path()（_db_override 隔离不变）；事务归调用方
+# （connection() 不自动 commit/rollback）。底层原语在 skills/lib/db_util。
+# 私有名 _conn/_safe_close/_connection 为**同实现别名**（历史调用点不迁移，
+# 不是第二份实现）。
+# ---------------------------------------------------------------------------
+
+def open_connection() -> sqlite3.Connection:
+    """打开研究库连接（公开入口；路径 = get_db_path()）。"""
+    return _db_open_connection(get_db_path())
 
 
-def _safe_close(c: sqlite3.Connection) -> None:
-    safe_close(c, logger=logger)
+def close_connection(c: sqlite3.Connection) -> None:
+    """关闭连接（公开入口；失败仅记 debug，不上抛）。"""
+    _db_close_connection(c, logger=logger)
 
 
 @contextmanager
-def _connection() -> Iterator[sqlite3.Connection]:
-    c = _conn()
-    try:
+def connection() -> Iterator[sqlite3.Connection]:
+    """连接上下文：退出时关闭；不自动 commit/rollback（事务归调用方）。"""
+    with _db_connection(get_db_path()) as c:
         yield c
-    finally:
-        _safe_close(c)
+
+
+# 兼容别名（历史私有名 → 同一实现）
+_conn = open_connection
+_safe_close = close_connection
+_connection = connection
 
 
 _SCHEMA_DDL = """
@@ -307,21 +328,13 @@ def _parse_fetched_at(raw: Any) -> datetime | None:
     兼容历史变体：'Z' 后缀 / '+HH:MM' 偏移 / naive（按 UTC 假定——存量
     数据全由 _assemble_result 以 UTC 生成，与 shared_dates.fmt_fetched_at
     同一不变式）。SQLite 中 fetched_at 是字符串列，时间比较须在 Python 侧。
+
+    A05-1（R1，v0.3.2）：函数体委托共享 ``dates.parse_utc_iso``（此前为
+    逐字重复实现，七例离线对照一致）；私有签名与返回契约保留。
     """
-    if not isinstance(raw, str):
-        return None
-    s = raw.strip()
-    if not s:
-        return None
-    if s.endswith(("Z", "z")):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    from dates import parse_utc_iso
+
+    return parse_utc_iso(raw)
 
 
 def _is_same_session(ts: Any, now: datetime | None = None) -> bool:
@@ -653,38 +666,14 @@ def _dim_data(raw: dict, name: str) -> Any:
 
 
 def _yoy_from_fina_rows(rows: list[dict], field: str) -> float | None:
-    from lib.financials import normalize_end_date, prior_year_end_date
+    """同比（store 侧口径）——A05-2 起委托共享 financials.yoy_from_fina_rows。
 
-    if not rows:
-        return None
-    sorted_rows = sorted(rows, key=lambda r: str(r.get("end_date", "")))
-    latest = sorted_rows[-1]
-    cur = latest.get(field)
-    if cur is None:
-        return None
-    try:
-        cur_f = float(cur)
-    except (TypeError, ValueError):
-        return None
-    if cur_f <= 0:
-        return None
-    ed = str(latest.get("end_date", ""))
-    norm_ed = normalize_end_date(ed)
-    if len(norm_ed) < 8:
-        return None
-    prev_ed = prior_year_end_date(norm_ed)
-    prev_v = None
-    for r in reversed(sorted_rows[:-1]):
-        if normalize_end_date(str(r.get("end_date", ""))) == prev_ed:
-            try:
-                prev_v = float(r.get(field))
-            except (TypeError, ValueError):
-                logger.debug("unparseable %s=%s for %s, trying next record", field, r.get(field), r.get("end_date", ""))
-                continue
-            break  # Found a valid value
-    if prev_v is None or prev_v <= 0:
-        return None
-    return round((cur_f - prev_v) / prev_v * 100, 2)
+    保留 store 的同期行回扫策略（rescan_invalid_prior=True）；无效值语义统一
+    safe_float（NaN/Inf → None，不再透出 NaN/Inf 同比）。
+    """
+    from lib.financials import yoy_from_fina_rows
+
+    return yoy_from_fina_rows(rows, field, rescan_invalid_prior=True)
 
 
 def _events_count_from_summary(summary: dict) -> int:
@@ -719,6 +708,8 @@ def extract_key_snapshot(raw: dict) -> dict:
         from lib.technical import sort_kline_asc
         from lib.valuation import valuation_summary, valuation_window_label
         vs = sort_kline_asc(val_data)
+        if any(r.get("trade_date") for r in vs):
+            vs = [r for r in vs if r.get("trade_date")]
         summary = valuation_summary(
             [r.get("pe_ttm") for r in vs], [r.get("pb") for r in vs],
             window_label=valuation_window_label(
@@ -726,6 +717,8 @@ def extract_key_snapshot(raw: dict) -> dict:
                 vs[0].get("trade_date") if vs else None,
                 vs[-1].get("trade_date") if vs else None,
             ),
+            # A05-3：亏损/缺失占比按有效日期窗口（与 MD/HTML 消费者同定义）
+            pe_loss_window=[r.get("pe_ttm") for r in vs],
         )
         pe, pb = summary.get("pe", {}), summary.get("pb", {})
         if pe.get("pct") is not None:
@@ -739,9 +732,12 @@ def extract_key_snapshot(raw: dict) -> dict:
 
     fin = _dim_data(body, "financials")
     if isinstance(fin, list) and fin:
-        from lib.financials import dedupe_by_end_date as _dedupe_fin  # C1-a
-        latest = sorted(_dedupe_fin(fin), key=lambda r: str(r.get("end_date", "")))[-1]
-        if latest.get("roe") is not None:
+        from lib.financials import (  # noqa: PLC0415
+            dedupe_by_end_date as _dedupe_fin,  # C1-a
+            latest_by_end_date as _latest_fin,  # A-F01：归一日期选最新期
+        )
+        latest = _latest_fin(_dedupe_fin(fin))
+        if latest is not None and latest.get("roe") is not None:
             snap["financials"]["roe"] = latest["roe"]
         ry = _yoy_from_fina_rows(fin, "revenue")
         if ry is not None:

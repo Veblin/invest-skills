@@ -15,9 +15,14 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -107,6 +112,70 @@ def test_rewrite_engine_bare_imports():
     assert "import akshare as ak" in out            # 三方 → 保留
 
 
+@pytest.mark.parametrize("kind", ["engine", "lib_root", "lib_sub", "pulse_md"])
+def test_rewrite_import_preserves_local_names(kind):
+    text = "import env  # config\nimport sources as src  # leaf data\nimport json\n"
+    out = b._rewrite_imports(text, kind, {"env", "sources"})
+    assert "import lib.env as env  # config" in out
+    assert "import lib.sources as src  # leaf data" in out
+    assert "import json" in out
+    assert b._rewrite_imports(out, kind, {"env", "sources"}) == out
+
+
+def test_rewrite_pulse_md_from_imported_name_not_double_rewritten():
+    """review #8：from-import 的**被导入名**不得被裸 import 规则二次改写。
+
+    旧两遍 re.sub 会把 `from etf_md import etf_research` 产出
+    `from lib.etf_md import lib.etf_research as etf_research`（SyntaxError 行）。
+    """
+    names = {"etf_md", "etf_research", "data_bridge", "market_microstructure"}
+    out = b._rewrite_imports("from etf_md import etf_research\n", "pulse_md", names)
+    assert out == "from lib.etf_md import etf_research\n"
+    compile(out, "<pulse-md>", "exec")   # 真 oracle：旧实现此处 SyntaxError
+
+    # pulse SKILL.md 实际形态：`; ` 分隔的多语句单行——from 行之后的独立 import 仍须改写
+    out2 = b._rewrite_imports(
+        "from data_bridge import get_microstructure; import json;"
+        " import market_microstructure\n", "pulse_md", names)
+    assert "from lib.data_bridge import get_microstructure" in out2
+    assert "import json" in out2
+    assert "import lib.market_microstructure as market_microstructure" in out2
+    compile(out2, "<pulse-md2>", "exec")
+
+    # 多名称 import：只改第一段（固化既有行为）
+    out3 = b._rewrite_imports("import _invest_path, json\n", "pulse_md",
+                              names | {"_invest_path"})
+    assert out3 == "import lib._invest_path as _invest_path, json\n"
+
+    # 未登记模块的 from 行：被导入名同样不受影响（旧实现会误改）
+    out4 = b._rewrite_imports("from unknown_mod import etf_research\n", "pulse_md", names)
+    assert out4 == "from unknown_mod import etf_research\n"
+
+    # 幂等
+    assert b._rewrite_imports(out2, "pulse_md", names) == out2
+
+
+def test_tool_file_deps_conflict_fails_loud(tmp_path):
+    """review #9：file_deps 的 canonical 绑定被同名模块先占（不同文件）时，
+    构建必须显式失败，而不是静默丢掉 canonical（_enqueue/module_map first-wins）。"""
+    c = b._Closure("invest-a-stock")
+    fake = tmp_path / "etf_md.py"
+    fake.write_text("X = 1\n", encoding="utf-8")
+    c.module_map["etf_md"] = ("self", fake)
+    with pytest.raises(SystemExit) as exc:
+        c._add_tool_dependencies("report_qc")
+    assert "etf_md" in str(exc.value)
+
+
+def test_tool_file_deps_same_canonical_binding_passes():
+    """同一物理文件经不同 source key 先绑定（cross/self 同 canonical 情形）→ 不算冲突。"""
+    canonical = b.SKILLS_DIR / "invest-a-etf" / "scripts/lib" / "etf_md.py"
+    c = b._Closure("invest-a-stock")
+    c.module_map["etf_md"] = ("cross:invest-a-etf", canonical)
+    c._add_tool_dependencies("report_qc")   # 不抛
+    assert "etf_research" in c.included and "etf_md" in c.included
+
+
 def test_rewrite_lib_root_relative():
     names = {"db_util", "cache", "stats"}
     out = b._rewrite_imports(
@@ -131,7 +200,7 @@ def test_rewrite_pulse_md_inline():
         'import _invest_path; from data_bridge import get_microstructure; '
         'from market_microstructure import snapshot; import json',
         "pulse_md", names)
-    assert "import lib._invest_path;" in out
+    assert "import lib._invest_path as _invest_path;" in out
     assert "from lib.data_bridge import get_microstructure" in out
     assert "from lib.market_microstructure import snapshot" in out
     assert "import json" in out                     # stdlib 保留
@@ -484,6 +553,102 @@ def test_discover_package_bundles_dynamic_hk_modules(tmp_path):
     assert "OK" in proc.stdout
 
 
+def test_generated_discover_cli_scans_renders_and_stores_offline(tmp_path):
+    """Exercise module bindings through the generated CLI, beyond argparse help."""
+    b.build_one("invest-a-discover-scan", b.project_version(), tmp_path, dry_run=False)
+    dst = tmp_path / "invest-a-discover-scan"
+    reports = tmp_path / "reports"
+    snapshots = tmp_path / "snapshots"
+    code = f"""
+import runpy, sys
+sys.path.insert(0, {str(dst / 'scripts')!r})
+import lib.sources as sources
+import requests
+def no_network(*args, **kwargs):
+    raise AssertionError('unexpected network request')
+requests.sessions.Session.request = no_network
+sources.has_token = lambda: True
+sources.latest_trade_date = lambda: '20990105'
+sources.fetch_stock_basic = lambda: [
+    {{'ts_code': f'60000{{i}}.SH', 'name': f'BindingFixture{{i}}',
+      'industry': 'Fixture', 'market': '主板'}} for i in range(8)]
+sources.fetch_daily_basic = lambda date: [
+    {{'ts_code': f'60000{{i}}.SH', 'pe_ttm': 5 if i == 0 else 50 + i,
+      'dv_ratio': 1, 'close': 10, 'total_mv': 100000}} for i in range(8)]
+sources.fetch_fina_indicator = lambda code: [
+    {{'end_date': '20981231', 'roe_yearly': 15, 'profit_dedt': 1000000}}]
+sources.fetch_forecast = lambda code: [{{'p_change_max': 20}}]
+sources.rf_10y_pct = lambda: (2, 'offline-binding-fixture')
+sources.market_form_context = lambda: {{'available': False, 'note': 'offline-binding-fixture'}}
+sys.argv = ['discover_scan.py', '--out-dir', {str(reports)!r}]
+runpy.run_path({str(dst / 'scripts/discover_scan.py')!r}, run_name='__main__')
+"""
+    proc = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", code], cwd=tmp_path,
+        env={**os.environ, "TUSHARE_TOKEN": "bogus", "INVEST_DEV": "0",
+             "INVEST_DISCOVERY_DIR": str(snapshots)}, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    report_files = list(reports.glob("*.md"))
+    assert len(report_files) == 1
+    report = report_files[0].read_text(encoding="utf-8")
+    assert "BindingFixture0" in report
+    assert "20990105" in report
+    assert "offline-binding-fixture" in report
+    assert "不构成投资建议" in report
+    records = [json.loads(line) for path in snapshots.glob("*.jsonl")
+               for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert records[0]["trade_date"] == "20990105"
+    assert [h["name"] for h in records[0]["hits"]] == ["BindingFixture0"]
+
+
+def test_generated_env_token_and_trade_calendar_offline(tmp_path):
+    """The generated shared modules must retain env for .env and calendar calls."""
+    b.build_one("invest-a-discover-scan", b.project_version(), tmp_path, dry_run=False)
+    dst = tmp_path / "invest-a-discover-scan"
+    token = "offlineBindingFixture" * 3
+    (dst / ".env").write_text(f"TUSHARE_TOKEN={token}\n", encoding="utf-8")
+    code = f"""
+import os, sys
+sys.path.insert(0, {str(dst / 'scripts')!r})
+os.environ.pop('TUSHARE_TOKEN', None)
+import lib.env as env
+env.GLOBAL_CONFIG_FILE = env.PROJECT_ROOT / 'absent-global.env'
+assert str(env.PROJECT_ENV_FILE) == {str(dst / '.env')!r}
+from lib.tushare_client import TushareClient
+assert TushareClient()._token == {token!r}, '.env token lost in generated client'
+import lib.trade_cal as calendar
+import pandas as pd
+import requests
+def no_network(*args, **kwargs):
+    raise AssertionError('unexpected network request')
+requests.sessions.Session.request = no_network
+calls = []
+def query(self, api_name, **params):
+    assert self._token == {token!r}
+    calls.append(api_name)
+    if api_name == 'stock_basic':
+        return pd.DataFrame([{{'ts_code': '600000.SH'}}])
+    assert api_name == 'trade_cal'
+    return pd.DataFrame([{{'cal_date': '20990105'}}])
+TushareClient.query = query
+assert calendar.fetch_trade_cal('20990101', '20990110') == (['20990105'], False)
+assert calls == ['stock_basic', 'trade_cal'], calls
+calendar._CLIENT = None
+calendar._clear_trade_cal_cache()
+env.get_config = lambda: {{}}
+calls.clear()
+dates, estimated = calendar.fetch_trade_cal('20990101', '20990110')
+assert dates and estimated is True
+assert calls == [], 'missing-token fallback queried remote client'
+print('offline-calendar-and-env-OK')
+"""
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert "offline-calendar-and-env-OK" in proc.stdout
+
+
 # ---- (e3) SKILL.md 强制工具（report_qc「机器层准出」）进包 ----
 def _mandating_skills() -> list[str]:
     return sorted(p.parent.name for p in b.SKILLS_DIR.glob("*/SKILL.md")
@@ -504,6 +669,122 @@ def test_mandated_tool_seeded_from_skill_md():
             (b.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8"))
         assert "report_qc" in c.included, f"{skill}: report_qc 未入闭包"
         assert "lint" in c.included, f"{skill}: lint（动态加载目标）未入闭包"
+        for name in ("etf_research", "etf_md"):
+            assert c.included[name][1] == b.SKILLS_DIR / "invest-a-etf" / "scripts/lib" / f"{name}.py"
+
+
+def test_imported_qc_closes_filename_dependencies(tmp_path):
+    entry = tmp_path / "entry.py"
+    entry.write_text("import report_qc\n", encoding="utf-8")
+    c = b._Closure("invest-a-stock")
+    c.compute([entry])
+    assert {"etf_research", "etf_md", "lint", "analysis_schema"} <= c.included.keys()
+
+
+def test_packaged_qc_research_equivalence_and_counterexamples(tmp_path):
+    """Run both generated QC CLIs on the same sealed research MD/payload/HTML."""
+    for skill in ("invest-a-stock", "invest-a-etf"):
+        b.build_one(skill, b.project_version(), tmp_path, dry_run=False)
+    artifact = tmp_path / "588000-离线研究测试"
+    artifact.mkdir()
+    original = "公司原文说明经营情况仍待验证。"
+    (artifact / "original.txt").write_text(original, encoding="utf-8")
+    import hashlib
+    sha = hashlib.sha256(original.encode()).hexdigest()
+    research = {
+        "schema_version": 1, "symbol": "588000", "as_of": "2026-10-12",
+        "holdings_as_of": "2026-06-30", "question": "经营变化如何解释？",
+        "budget": {"max_names": 1, "target_cov_pct": 8},
+        "selection": [{"code": "688008", "reason": "检验经营变化"}],
+        "sources": [{"id": "S1", "url": "https://example.com/original.pdf",
+                     "title": "离线原文", "source_type": "original", "sha256": sha,
+                     "text_sha256": sha, "path": "original.txt", "text_path": "original.txt",
+                     "locator": "第一段", "excerpt": original, "published_date": "2026-08-28",
+                     "read_at": "2026-10-12T10:00:00+08:00"}],
+        "facts": [{"id": "F1", "kind": "company", "code": "688008", "statement": original,
+                   "source_ids": ["S1"], "period_start": "2026-01-01", "period_end": "2026-06-30"}],
+        "insights": [{"id": "I1", "title": "经营解释", "fact_ids": ["F1"],
+                      "codes": ["688008"], "scope": "selected_holdings",
+                      "interpretation": "经营变化尚待验证。", "transmission": "行业传导尚待验证。",
+                      "etf_link": "仅说明所选对象。", "conditional_conclusion": "需观察后续披露。",
+                      "alternative": "可能是期间变化。", "falsifier": "后续披露与解释相反。",
+                      "boundary": "所选对象未代表全组合。"}],
+    }
+    (artifact / "research.json").write_text(json.dumps(research, ensure_ascii=False), encoding="utf-8")
+    md = artifact / "2026-10-12-11-00-00.md"
+    code = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from lib.etf_research import attach_research, load_research_input
+from lib.etf_generation import seal_etf_payload
+from lib.etf_html import render_etf_html
+md = Path(sys.argv[2])
+p = {"symbol": "588000", "generated_at": "2026-10-12T11:00:00+08:00",
+     "profile": {}, "quote": {}, "kline": {}, "share_history": {}, "history": None,
+     "events": {}, "playbook": None,
+     "holdings": {"status": "ok", "report_date": "2026-06-30", "top10_sum_pct": 8,
+                  "holding_scope": "前十大，非全组合",
+                  "rows": [{"code": "688008", "name": "离线测试", "pct": 8}]}}
+r = attach_research(p, load_research_input(md.parent / "research.json", "588000"),
+                    financial_getter=lambda _: {"status": "missing", "note": "离线原文验证"})
+seal_etf_payload(p)
+body = ("# 588000 ETF 研究备忘录\\n\\n> 本备忘录由 AI 辅助生成，不构成投资建议。\\n\\n"
+        + r["narrative_md"] + "\\n\\n" + r["appendix_md"] + "\\n\\n> 不构成投资建议。\\n")
+md.write_text(body, encoding="utf-8")
+md.with_suffix(".payload.json").write_text(json.dumps(p, ensure_ascii=False), encoding="utf-8")
+md.with_suffix(".html").write_text(render_etf_html(p, md_text=body,
+    generation={"payload_hash": p["_meta"]["payload_hash"]}), encoding="utf-8")
+"""
+    prep = subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                           str(tmp_path / "invest-a-etf/scripts"), str(md)],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert prep.returncode == 0, prep.stderr
+
+    def check_both():
+        outputs = []
+        for skill in ("invest-a-stock", "invest-a-etf"):
+            qc = tmp_path / skill / "scripts/lib/report_qc.py"
+            lib = qc.parent
+            scripts = lib.parent
+            # 隔离壳（review #10）：`-I` 禁 PYTHONPATH/user-site 且不注入脚本目录
+            # （-I ⇒ -E -s -P；直跑 `python -I <qc>` 会因缺 script-dir 起不来），
+            # 显式补 path 后 runpy 执行——「包自足」断言不被仓库/用户环境兜底。
+            argv = [str(qc), str(md), "--json", "--profile", "engine", "--fail-on", "error"]
+            code = (
+                "import sys, runpy\n"
+                f"sys.path.insert(0, {str(scripts)!r})\n"
+                f"sys.path.insert(0, {str(lib)!r})\n"
+                f"sys.argv = {argv!r}\n"
+                f"runpy.run_path({str(qc)!r}, run_name='__main__')\n"
+            )
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+                                  cwd=tmp_path, capture_output=True, text=True)
+            assert proc.returncode in (0, 1, 2), proc.stderr
+            assert proc.stdout, proc.stderr
+            result = json.loads(proc.stdout)[0]
+            findings = [f for layer in result["layers"] for f in layer["details"]]
+            assert not any(f["id"] == "etf-generation-check-error" for f in findings)
+            outputs.append((proc.returncode, result))
+        assert outputs[0] == outputs[1]
+        rc, result = outputs[0]
+        return rc, result, [f for layer in result["layers"] for f in layer["details"]]
+
+    rc, valid, findings = check_both()
+    assert valid["overall"] != "FAIL", valid
+    assert not any(f["id"].startswith("etf-operating-research") for f in findings)
+    body = md.read_text(encoding="utf-8")
+    md.write_text(body.replace("研究问题：经营变化如何解释？", "研究问题：已确认改善。"), encoding="utf-8")
+    rc, invalid, findings = check_both()
+    assert invalid["overall"] == "FAIL" and rc != 0
+    assert any(f["id"] == "etf-operating-research" for f in findings)
+    md.write_text(body, encoding="utf-8")
+    html = md.with_suffix(".html")
+    html.write_text(html.read_text(encoding="utf-8").replace('data-operating-research="1"', ""),
+                    encoding="utf-8")
+    rc, invalid_html, findings = check_both()
+    assert invalid_html["overall"] == "FAIL" and rc != 0
+    assert any(f["id"] == "etf-operating-research-html" for f in findings)
 
 
 def test_mandated_qc_tool_packaged_and_runnable(tmp_path):
@@ -549,31 +830,178 @@ def test_within_limit_exits_zero(tmp_path):
 
 
 def test_dry_run_all_packages_within_200(tmp_path):
-    """六包全部 ≤200（闭包裁剪后各包文件数显著低于旧版全量复制）。"""
+    """全部包 ≤200（**分发硬限制**，与历史预算断言分开）。"""
     for skill in b.PUBLISH_SKILLS:
         total = b.build_one(skill, b.project_version(), tmp_path, dry_run=True)
         assert 0 < total <= b.MAX_FILES, f"{skill}: {total} 超限"
-    # etf 闭包裁剪: 远低于 v0.2.7 的 129。
-    # 2026-09-03 实测 102（B3-R 后 render 共享面（html_charts/render_html）
-    # 随闭包并入 etf 包，文件数较 v0.2.7 时代断言 <70 时上升）——上限放宽
-    # 至 120 且仍显著低于旧版全量复制 129。
-    # 2026-09-14 实测 121（P0-5 引入 lib/research_profile.py，被 _concise.py 与
-    # render_html.py 引用，随同一共享面并入 etf 闭包）——上限放宽至 125。
-    # 2026-09-30 实测 125（lib/report_snapshot.py 被共享的 render_dcf.py 引用：
-    # 封存快照链的「渲染期不联网」判据 is_sealed 定义在该模块，DCF beta 与
-    # risk_reward 都据此决定是否现场抓基准）——上限放宽至 130。
+    # ETF 包预算（**实现细节预算**，非分发硬限制）：用于拦"闭包异常膨胀"回归，
+    # 数值按当轮实际闭包 + 少量余量维护；>200 的硬门禁由上面的循环与
+    # test_over_max_fails（monkeypatch MAX_FILES=3）继续保证。
+    #
+    # 历史：v0.2.7 时代全量复制 129 → 闭包裁剪后 102（2026-09-03）→ 121
+    # （2026-09-14 共享 render 面并入）→ 125（2026-09-30 report_snapshot 并入）。
+    # 2026-10-08 v0.3.2 B06 实测 **130**（新增 etf_generation.py 与共享
+    # snapshot_core.py/evidence_tags.py；report_qc 同代消费层随 SKILL.md
+    # 「机器层准出」强制入包）——旧断言 <130 属预算未随闭包更新而失效，
+    # 按实测更新为 <145（不放宽到接近硬限制，保留对异常增长的拦截能力）。
     # 注意闭包扫描是 AST 全程遍历（build_skillhub_packages.py:279-286），
     # 函数内 import 同样计入，改动态 import 只会让运行时 ImportError 而非省文件。
     etf_total = b.build_one("invest-a-etf", b.project_version(), tmp_path, dry_run=True)
-    assert etf_total < 130
+    assert etf_total < 145, f"invest-a-etf 闭包 {etf_total} 超出预算 145（检查是否异常膨胀）"
 
 
 # ---- 主仓库源文件不得被回写 ----
 def test_source_files_untouched():
     md = (b.SKILLS_DIR / "invest-a-stock" / "SKILL.md").read_text(encoding="utf-8")
     assert "skills/invest-a-stock/scripts/invest.py" in md
-    assert "../../../skills/lib/references/" in md
+    assert "../lib/references/" in md
+    assert (b.SKILLS_DIR / "invest-a-stock" / "../lib/references/report-conventions.md").is_file()
     assert "Step 0" not in md
     etf_py = (b.SKILLS_DIR / "invest-a-etf" / "scripts" / "etf.py").read_text(encoding="utf-8")
     assert "from etf_data import" in etf_py                     # 源文件裸导入保留
     assert "_SCRIPT_PARENT" not in etf_py
+
+
+# ---- (g) 独立包 lib 根 namespace 化：双包同解释器共存 regression ----
+def test_lib_root_init_is_noop_classification(tmp_path):
+    """namespace 降级前置判据：仅 docstring/``__future__``/空（注释）→ noop；含语句 → 否。
+
+    真实共享 `skills/lib/__init__.py`（docstring + future）与 stock `scripts/lib/__init__.py`
+    （仅注释）都必须判为 noop，降级才安全。
+    """
+    def _w(name: str, text: str) -> Path:
+        p = tmp_path / name
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    assert b._lib_root_init_is_noop(b.LIB_DIR / "__init__.py") is True
+    assert b._lib_root_init_is_noop(
+        b.SKILLS_DIR / "invest-a-stock" / "scripts" / "lib" / "__init__.py") is True
+    assert b._lib_root_init_is_noop(
+        _w("doc.py", '"""pkg doc"""\nfrom __future__ import annotations\n')) is True
+    assert b._lib_root_init_is_noop(_w("comment.py", "# bare package marker\n")) is True
+    # 含执行职责（赋值 / 导入职责 / 副作用）→ 不可 namespace 化
+    assert b._lib_root_init_is_noop(_w("assign.py", '"""d"""\nX = 1\n')) is False
+    assert b._lib_root_init_is_noop(_w("imp.py", "from . import _legacy as _m\n")) is False
+    assert b._lib_root_init_is_noop(_w("side.py", "print('boot')\n")) is False
+
+
+def test_exec_duty_lib_root_init_stops_build(monkeypatch, tmp_path):
+    """源 lib 根含可执行职责时，构建必须停交（SystemExit），不得静默降级丢职责。"""
+    monkeypatch.setattr(b, "_lib_root_init_is_noop", lambda _p: False)
+    with pytest.raises(SystemExit) as exc:
+        b.build_one("invest-a-stock", b.project_version(), tmp_path, dry_run=False)
+    assert "可执行职责" in str(exc.value)
+    assert not (tmp_path / "invest-a-stock").exists(), "停交后不得留下半成品目录"
+
+
+def _dual_import_child(sequence, *, probe: bool) -> str:
+    """生成 -I -B 子进程代码：按 sequence 依次插 scripts 并 import lib.<domain>。
+
+    **不吞 ImportError**（无 try/except）——任一导入失败进程即非零退出。probe=True 时
+    追加实际 entry（etf/invest）+ 公共桥（invest_path）+ helper（data_bridge）+
+    子包 collector 导入，并打印 M5JSON 结果行。
+    """
+    lines = ["import sys"]
+    for i, (domain, scripts) in enumerate(sequence):
+        lines.append(f"sys.path.insert(0, {str(scripts)!r})")
+        lines.append(f"import lib.{domain} as m{i}")
+    lines.append("import json")
+    lines.append("out = {'domains': {}}")
+    for i, (domain, _scripts) in enumerate(sequence):
+        lines.append(f"out['domains'][{domain!r}] = m{i}.__file__")
+    if probe:
+        lines += [
+            "import etf as _etf",
+            "import invest as _invest",
+            "out['entries'] = {'etf': _etf.__file__, 'invest': _invest.__file__}",
+            "import lib.invest_path as _bridge",
+            "out['bridge'] = _bridge.__file__",
+            "out['etf_data'] = _bridge.load_invest_a_etf_module().__file__",
+            "import lib.data_bridge as _helper",
+            "out['helper'] = _helper.__file__",
+            "import lib.collector as _col",
+            "pub = [n for n in vars(_col) if not n.startswith('_')]",
+            "assert pub, 'collector __init__ 再导出职责丢失'",
+            "out['collector'] = _col.__file__",
+            "out['collector_pub'] = len(pub)",
+        ]
+    lines.append("print('M5JSON ' + json.dumps(out))")
+    return "\n".join(lines) + "\n"
+
+
+def _run_dual_import(sequence, *, cwd, probe: bool = False):
+    return subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _dual_import_child(sequence, probe=probe)],
+        capture_output=True, text=True, cwd=str(cwd),
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+
+
+def _child_json(proc):
+    for line in proc.stdout.splitlines():
+        if line.startswith("M5JSON "):
+            return json.loads(line[len("M5JSON "):])
+    return None
+
+
+def test_standalone_etf_stock_lib_namespace_merge_both_orders(tmp_path):
+    """ETF + stock 两独立包构建到同根：单解释器共载不得被前包 `lib` 遮蔽。
+
+    M5 §4 反例：两包 lib 根各带普通 `__init__.py` → 首包 `lib` 抢占顶层名，后包私有
+    模块 `lib.etf_html`/`lib.market_microstructure` → ModuleNotFoundError（正逆同构）。
+    本测试证明根降级 namespace 后**正逆两序**均 rc0、各 domain 解析到各自候选包，
+    且 entry/桥/helper/子包 collector 均正常；并在私有副本恢复普通 marker 复现旧反例。
+    """
+    for skill in ("invest-a-stock", "invest-a-etf"):
+        b.build_one(skill, b.project_version(), tmp_path, dry_run=False)
+    stock_pkg = tmp_path / "invest-a-stock"
+    etf_pkg = tmp_path / "invest-a-etf"
+    stock_scripts = stock_pkg / "scripts"
+    etf_scripts = etf_pkg / "scripts"
+    mm_file = stock_scripts / "lib" / "market_microstructure.py"
+    etf_html_file = etf_scripts / "lib" / "etf_html.py"
+    etf_data_file = etf_scripts / "lib" / "etf_data.py"
+    stock_etf_data_file = stock_scripts / "lib" / "etf_data.py"
+    # Shared QC now bundles research's transitive ETF data dependency in stock.
+    # Either namespace candidate is valid, and both must be the same canonical code.
+    assert stock_etf_data_file.read_bytes() == etf_data_file.read_bytes()
+
+    forward = [("market_microstructure", stock_scripts), ("etf_html", etf_scripts)]
+    reverse = [("etf_html", etf_scripts), ("market_microstructure", stock_scripts)]
+
+    for label, seq in (("stock->etf", forward), ("etf->stock", reverse)):
+        proc = _run_dual_import(seq, cwd=tmp_path, probe=True)
+        assert proc.returncode == 0, f"{label}: rc={proc.returncode}\n{proc.stderr[-2000:]}"
+        data = _child_json(proc)
+        assert data is not None, (label, proc.stdout)
+        # 各私有 domain 解析到各自候选包（未被前包 namespace 遮蔽）
+        assert Path(data["domains"]["market_microstructure"]).resolve() == mm_file.resolve(), label
+        assert Path(data["domains"]["etf_html"]).resolve() == etf_html_file.resolve(), label
+        # 实际 entry（etf/invest）+ 公共桥/helper 正常
+        assert Path(data["entries"]["etf"]).resolve() == (etf_scripts / "etf.py").resolve(), label
+        assert Path(data["entries"]["invest"]).resolve() == (stock_scripts / "invest.py").resolve(), label
+        assert Path(data["etf_data"]).resolve() in {
+            etf_data_file.resolve(), stock_etf_data_file.resolve()}, label
+        assert data["helper"].endswith("data_bridge.py"), label
+        # 子包 collector 的 __init__ 执行职责（再导出）在 namespace 化后仍保留
+        assert data["collector_pub"] > 0, label
+
+    # 反例（私有 tmp 副本，不污染生产/构建包）：恢复 lib 根普通包 marker
+    reg = tmp_path / "regular-marker"
+    for skill in ("invest-a-stock", "invest-a-etf"):
+        shutil.copytree(tmp_path / skill, reg / skill)
+        (reg / skill / "scripts" / "lib" / "__init__.py").write_text(
+            "# bare package marker\n", encoding="utf-8")
+    reg_stock = reg / "invest-a-stock" / "scripts"
+    reg_etf = reg / "invest-a-etf" / "scripts"
+    for label, seq, missing in (
+        ("stock->etf", [("market_microstructure", reg_stock), ("etf_html", reg_etf)],
+         "lib.etf_html"),
+        ("etf->stock", [("etf_html", reg_etf), ("market_microstructure", reg_stock)],
+         "lib.market_microstructure"),
+    ):
+        proc = _run_dual_import(seq, cwd=tmp_path)
+        assert proc.returncode != 0, (
+            f"{label}: 恢复普通 marker 后仍成功 → 本回归未覆盖遮蔽缺陷\n{proc.stdout}")
+        assert "ModuleNotFoundError" in proc.stderr, (label, proc.stderr[-800:])
+        assert missing in proc.stderr, (label, proc.stderr[-800:])

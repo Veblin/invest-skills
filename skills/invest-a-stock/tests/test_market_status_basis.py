@@ -23,7 +23,7 @@ def stock_db(isolated_store):
 
 
 def _seed(store_mod, date: str, pct, basis_date, cap_text: str | None) -> None:
-    c = store_mod.connect_db(store_mod.get_db_path())
+    c = store_mod.open_connection()
     try:
         env = {"capital_flow": cap_text, "leverage": "中性", "summary": "正常"} if cap_text else None
         c.execute(
@@ -34,7 +34,7 @@ def _seed(store_mod, date: str, pct, basis_date, cap_text: str | None) -> None:
         )
         c.commit()
     finally:
-        store_mod.safe_close(c)
+        store_mod.close_connection(c)
 
 
 def _args(*, json_mode: bool = False) -> Namespace:

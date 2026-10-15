@@ -33,9 +33,7 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -141,47 +139,64 @@ def _as_of(row: dict[str, Any], fallback: str) -> str:
 
 
 def _fact(fid: str, value: Any, *, as_of: str, unit: str, basis: str,
-          source_id: str, formula: str | None = None,
+          source_id: str | list[str], formula: str | None = None,
           availability: str = "available") -> dict[str, Any]:
     return {
         "id": fid, "value": value, "as_of": as_of, "unit": unit,
-        "basis": basis, "source_ids": [source_id], "formula": formula,
+        "basis": basis, "source_ids": [source_id] if isinstance(source_id, str) else list(source_id), "formula": formula,
         "availability": availability,
     }
 
 
 def _percentile(values: list[float], latest: float) -> float | None:
+    """≤ 口径分位（A05-3：计算经共享核心 le_share_pct；样本下限 20 保留）。"""
     if len(values) < 20:
         return None
-    return round(sum(value <= latest for value in values) / len(values) * 100, 1)
+    from lib.stats import le_share_pct
+
+    pct = le_share_pct(values, latest)
+    return round(pct, 1) if pct is not None else None
 
 
 def _dedupe_financial_rows(fin_rows: list[Any]) -> list[dict[str, Any]]:
     """按报告期去重并升序排列。
 
     ``financials`` 维度原始列表既非升序又含重复期——store 快照 300750/#77 实测
-    20 行仅 16 个唯一期（2022Q3–2023Q2 各两份，fcff/fcfe 取值冲突）。同一期取
-    首次出现，避免下游按「相邻行」取数时拿到重复期。
+    20 行仅 16 个唯一期（2022Q3–2023Q2 各两份，fcff/fcfe 取值冲突）。
+
+    A05-2（v0.3.2）：去重规则收敛到 canonical ``financials.dedupe_by_end_date``
+    （同 end_date 取 ann_date 最大者＝修订后披露，平局保首现；键经
+    ``normalize_end_date`` 归一——ISO 与 compact 同报告期合并，离线反例见
+    A基础-财务纯函数反例.py dedupe 组）。
+    A-F01：升序排列改用 canonical ``financials.sort_by_end_date``（归一日期键；
+    旧实现按**原始**字符串键排序，ISO/compact 混排时 ``rows[-1]`` 会取错最新期，
+    不可解析日期也会排到末尾充当最新期——反例见 A市场-财务日期语义反例.py）。
     """
-    by_period: dict[str, dict[str, Any]] = {}
-    for row in fin_rows:
-        if not isinstance(row, dict):
-            continue
-        by_period.setdefault(_as_of(row, ""), row)
-    return [by_period[key] for key in sorted(by_period)]
+    from .financials import dedupe_by_end_date, sort_by_end_date
+
+    rows = [row for row in fin_rows if isinstance(row, dict)]
+    deduped = dedupe_by_end_date(rows)
+    return sort_by_end_date(deduped)
 
 
 def _same_period_prior_year(rows: list[dict[str, Any]], as_of: str) -> dict[str, Any] | None:
     """取上年同期行（``20260630`` → ``20250630``）；找不到返回 None。
 
-    只认 8 位 YYYYMMDD 形态的报告期——其它形态（如非数字 date）不匹配，宁可
-    不产出同比，也不给出一个错误的基准。
+    A05-3b/A-F01：日期比较经 ``financials.normalize_end_date`` 归一后再与
+    ``prior_year_end_date`` 目标比对——ISO（``2026-06-30``）与 compact
+    （``20260630``）等价，与报告侧 ``find_yoy_row`` 同口径（旧实现只认 8 位
+    原样字符串，ISO 输入静默不产出同比 → sidecar 与报告结论不一致，反例见
+    A市场-财务同期匹配反例.py）。不可归一（非日期形态）→ None，宁可不产出
+    同比，也不给出一个错误的基准。
     """
-    if not re.fullmatch(r"\d{8}", str(as_of)):
+    from .financials import normalize_end_date, prior_year_end_date
+
+    norm = normalize_end_date(str(as_of))
+    target = prior_year_end_date(norm)
+    if not target:
         return None
-    target = str(int(as_of[:4]) - 1) + as_of[4:]
     for row in rows:
-        if _as_of(row, "") == target:
+        if normalize_end_date(str(_as_of(row, ""))) == target:
             return row
     return None
 
@@ -245,11 +260,11 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         if latest_pe is not None:
             as_of = _as_of(latest, fetched_at)
             facts.append(_fact("valuation.pe_ttm.latest", latest_pe, as_of=as_of, unit="x", basis="PE(TTM)", source_id=sid))
-            # v0.3.0 B3：分位只在**正** PE 序列上有定义。latest_pe ≤ 0（亏损期）
+            # v0.3.0 B3：分位只在**正** PE 序列上有定义。latest_pe ≤ 0
             # 时不产出 percentile fact——旧实现拿负值去比正值序列，恒得 0.0 分位，
             # 下游据此写出「位于历史样本的偏低位置」（负 PE 被读成便宜）。口径
-            # 对齐 valuation_calc.py「PE 非正 → 标注不可得」；亏损期陈述由
-            # build_findings 的 valuation-pe-nonpositive 分支承担。
+            # 对齐 valuation_calc.py「PE 非正 → 标注不可得」；非正 PE 本身
+            # 不足以判断是否亏损（可能为舍入或供应商编码）。
             if latest_pe > 0:
                 series = [value for row in rows
                           if (value := _number(row.get("pe_ttm"))) is not None and value > 0]
@@ -315,7 +330,17 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
     events = collection.get("events")
     if isinstance(events, list) and events:
         summary = (collection.get("_meta") or {}).get("events_summary") or {}
-        sid = add_source("events", {"_meta": {"source": "akshare.stock_individual_notice_report"}})
+        # 以窗口过滤、去重后实际保留的事件卡归源；不能用尝试过的接口冒充贡献源，
+        # 也不能从 dividend 类型推断来源（它有主源与回退源）。
+        event_sources = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            source = str(event.get("source") or "unknown").strip() or "unknown"
+            source = source.replace("akshare ", "akshare.", 1)
+            event_sid = add_source("events", {"_meta": {"source": source}})
+            if event_sid not in event_sources:
+                event_sources.append(event_sid)
         window = summary.get("window_days")
         count = summary.get("event_count")
         if count is None:
@@ -323,7 +348,7 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         latest_date = summary.get("latest_date") or _as_of(events[0] if isinstance(events[0], dict) else {}, fetched_at)
         window = window if isinstance(window, int) and window > 0 else 30
         facts.append(_fact("events.count", int(count), as_of=str(latest_date), unit="count",
-                           basis=f"近 {window} 日公告条数", source_id=sid))
+                           basis=f"近 {window} 日事件条数", source_id=event_sources))
         types = summary.get("top_types") or []
         if types:
             named = "、".join(
@@ -332,8 +357,8 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
             )
             if named:
                 facts.append(_fact("events.types", named, as_of=str(latest_date), unit="text",
-                                   basis="公告类型分布（近窗口）", source_id=sid))
-        # 公告层是否出现方向性条目——「当日大跌但公告全 neutral」是可核验的排除性证据。
+                                   basis="事件类型分布（近窗口）", source_id=event_sources))
+        # 公告标题规则的方向标签仅作检索线索，neutral 不能排除公告级触发。
         # 只取 source == "notice" 的官方公告卡：Tavily/抓取类卡是网页快照，
         # 其 direction 由规则从页面文本推断（实测把雪球行情页标成 bearish），
         # 用作「公告层排查」会引入噪声。
@@ -342,8 +367,9 @@ def extract_facts(collection: dict[str, Any]) -> tuple[list[dict[str, Any]], dic
         directions = {str(c.get("direction")) for c in (cards or [])
                       if isinstance(c, dict) and c.get("source") == "notice" and c.get("direction")}
         if directions:
+            sid = add_source("news", {"_meta": {"source": "akshare.stock_individual_notice_report"}})
             facts.append(_fact("news.notice_directions", "、".join(sorted(directions)), as_of=str(latest_date),
-                               unit="text", basis="公告层方向标注（引擎规则，仅官方公告卡）", source_id=sid,
+                               unit="text", basis="公告标题关键词方向标注（引擎规则，仅官方公告卡）", source_id=sid,
                                formula=None))
     return facts, sources, gaps
 
@@ -360,7 +386,7 @@ def _finding(fid: str, claim: str, *, fact_ids: list[str], counter_fact_ids: lis
             "status": status, "profile_relevance": relevance, "verification": verification or {}}
 
 
-def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], profile: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def build_findings(facts: list[dict[str, Any]], profile: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build only descriptive conclusions for which the manifest has evidence."""
     findings: list[dict[str, Any]] = []
     pe = _find(facts, "valuation.pe_ttm.latest"); pct = _find(facts, "valuation.pe_ttm.percentile")
@@ -370,17 +396,15 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
                                  fact_ids=[pe["id"], pct["id"]], relevance="primary",
                                  verification={"event": "下一报告期", "test": "核对盈利变化与估值口径是否同步更新"}))
     elif pe and pe["value"] <= 0:
-        # v0.3.0 B3：亏损期（PE 非正）无分位可言 → 不给「位置」结论，改为显式
-        # 披露「分位不适用」，避免读者把负 PE 误读为低估（report-conventions.md §9.2 估值分位
-        # 规则 2：亏损期标的须标注仅作位置参考、不反映估值贵贱）。
+        # PE 非正时仅披露指标状态，不从 PE 的符号推断盈利事实。
         findings.append(_finding(
             "valuation-pe-nonpositive",
-            f"PE(TTM) 为 {pe['value']:.2f}x，为负值（亏损期）；PE 历史分位仅在正 PE "
-            "序列上有定义，本次不计算分位——该标的历史大部分时间微利/亏损时，"
-            "PE 分位数仅作位置参考，不反映估值贵贱。",
+            f"PE(TTM) 为 {pe['value']:.2f}x，为非正值；PE 历史分位仅在正 PE "
+            "序列上有定义，本次不计算分位，不据此判断估值贵贱；"
+            "盈利状态须另行核对同口径利润或 EPS 数据。",
             fact_ids=[pe["id"]], relevance="primary",
             verification={"event": "下一报告期",
-                          "test": "核对盈利是否转正及 PE 口径是否恢复"}))
+                          "test": "核对同口径利润或 EPS 数据及 PE 口径"}))
     revenue_change = _find(facts, "financials.revenue.change")
     ocf_ratio = _find(facts, "financials.ocf_to_np.latest")
     if revenue_change:
@@ -398,12 +422,13 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
     ma20 = _find(facts, "technical.price_vs_ma20.latest")
     if ma20:
         relation = "上方" if ma20["value"] >= 0 else "下方"
-        findings.append(_finding("technical-state", f"最新收盘价相对 MA20 为 {ma20['value']:+.2f}%，位于 MA20 {relation}；这是市场状态描述，不构成操作信号。",
+        state = "与 MA20 持平" if ma20["value"] == 0 else f"位于 MA20 {relation}"
+        findings.append(_finding("technical-state", f"最新收盘价相对 MA20 为 {ma20['value']:+.2f}%，{state}；这是市场状态描述，不构成操作信号。",
                                  fact_ids=[ma20["id"]], strength="weak", relevance="secondary",
                                  verification={"event": "后续交易日", "test": "观察价格、成交量与基本面证据是否一致"}))
     # 审查意见 #1：读者最常问的是「今天为什么跌」。此前首层全是指标状态，
-    # 没有一条回答异动归因。此处做**可核验的排除**：异动幅度 + 公告层方向，
-    # 给出「是否有公告级触发」的结论，并明确消息面/传闻需外部检索补充。
+    # 没有一条回答异动归因。此处仅列异动幅度与标题规则标签，
+    # 不用关键词方向排除公告触发；影响是否成立须核验公告原文与披露时点。
     change_pct = _find(facts, "quote.change_pct.latest")
     event_count = _find(facts, "events.count")
     directions = _find(facts, "news.notice_directions")
@@ -413,15 +438,16 @@ def build_findings(facts: list[dict[str, Any]], gaps: list[dict[str, Any]], prof
         fact_ids = [change_pct["id"]]
         if event_count:
             fact_ids.append(event_count["id"])
-            parts.append(f"近窗口公告 {int(event_count['value'])} 条。")
+            parts.append(f"近窗口事件 {int(event_count['value'])} 条。")
         if directions:
             fact_ids.append(directions["id"])
             only_neutral = set(str(directions["value"]).split("、")) == {"neutral"}
-            parts.append("公告层方向标注全部为中性，**未发现公告级触发**；"
-                         "跌幅的候选解释需从消息面与传闻层补充，"
-                         "该层数据不在本项目采集范围内，应作为外部检索项。"
+            parts.append("公告标题关键词规则未给出明确方向（中性标签）；"
+                         "尚未核验公告原文，无法判断是否存在公告级触发，"
+                         "应先核对原文与披露时点。"
                          if only_neutral else
-                         "公告层存在非中性方向条目，需逐条核对。")
+                         "公告标题关键词规则给出非中性标签；标签不代表已核影响，"
+                         "应逐条核对公告原文与披露时点。")
         else:
             parts.append("公告层方向标注不可得，无法排除公告级触发。")
         findings.append(_finding(
@@ -470,7 +496,7 @@ def load_snapshot_diff(symbol: str, collection: dict[str, Any]) -> tuple[dict[st
     返回 ``(key_diff | None, reason)``，``reason ∈ {"ok","no_history","store_unavailable"}``。
 
     **本模块唯一的 I/O 点与唯一的 try/except 点。** 读取刻意放在调用方（CLI）而非
-    ``build_report_model`` 内部：``store.connect_db`` 会 ``mkdir`` 并建库，若模型层
+    ``build_report_model`` 内部：``store.open_connection`` 会 ``mkdir`` 并建库，若模型层
     自动读 store，未隔离 store 的测试会读写用户的真实库、断言随库内容漂移。
     """
     try:
@@ -656,20 +682,22 @@ def _chain_price_state_vs_valuation(fx: dict[str, dict[str, Any]]) -> dict[str, 
         return None
     value, percentile = ma["value"], pct["value"]
     zone = "偏低" if percentile <= 20 else ("偏高" if percentile >= 80 else "中间")
+    position = "上方" if value > 0 else ("下方" if value < 0 else "持平")
     return {
         "id": "chain.price-state-vs-valuation",
         "fact_ids": [ma["id"], pct["id"]],
-        "question": "价格走弱与估值分位偏低，是同一件事的两种说法，还是两个独立信号？",
+        "question": (f"收盘价相对 MA20 的位置为「{position}」，PE 历史分位处于{zone}区间；"
+                     "应如何结合后续披露核对这两种状态的解释？"),
         "relation": (
-            f"最新收盘价相对 MA20 为 {value:+.2f}%（{'上方' if value >= 0 else '下方'}），"
+            f"最新收盘价相对 MA20 为 {value:+.2f}%（{position}），"
             f"PE 分位为 {percentile:.1f}%（{zone}）。价格状态只用于提出需要区分的解释。"
         ),
         "mechanism": (
-            "可能机制（未证实）：若市场已计入负面预期，价格走弱与低分位会同向；"
-            "若恶化尚未被披露数据反映，两者也会同向——现有证据无法区分这两种解释。"
+            "可能机制（未证实）：价格相对短期均线的位置和 PE 长窗口分位可能受到"
+            "盈利预期、风险偏好或样本结构的不同影响；两项读数不足以识别共同原因。"
         ),
         "alternatives": [
-            "价格状态与估值分位可能分别由风险偏好、流动性等不同因素驱动，同向只是共同暴露于市场因子。",
+            "价格状态与估值分位可能分别受风险偏好、流动性等不同因素影响，不能从并列读数判断它们共享驱动因素。",
             "MA20 是短窗口状态量、分位基于长窗口序列，两者口径不可直接比较。",
         ],
         "association_status": "mechanism_unconfirmed",
@@ -926,7 +954,7 @@ def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[st
     引擎的确定性结论不因注入了散文而改变。
     """
     facts, sources, gaps = extract_facts(collection)
-    findings, tension = build_findings(facts, gaps, profile)
+    findings, tension = build_findings(facts, profile)
     analysis_chains = build_analysis_chains(facts)
     tension = _derive_tension(analysis_chains, tension)
     # 审查意见 #2：完成度不能只看结论条数。一份报告若连核心矛盾都形不成，
@@ -951,17 +979,12 @@ def build_report_model(collection: dict[str, Any], symbol: str, profile: dict[st
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
+    # A05-1 R2：原子写底层委托 lib.json_util.atomic_write_json；
+    # mkdir 仍在本函数（历史行为：侧车目录不存在时先建）。
+    from .json_util import atomic_write_json
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush(); os.fsync(handle.fileno())
-        Path(temporary).replace(path)
-    except Exception:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    atomic_write_json(path, payload)
 
 
 def write_sidecars(report_path: Path, model: dict[str, Any], *, html_path: Path | None = None,

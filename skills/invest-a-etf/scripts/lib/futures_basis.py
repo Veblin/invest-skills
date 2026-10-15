@@ -58,7 +58,9 @@ def query_futures_basis(symbol: str, *, days: int = 1000) -> dict[str, Any]:
 
     fsym = futures_symbol_for_etf(symbol)
     if fsym is None:
-        result["note"] = "该 ETF 无股指期货对冲品种（hedge-map 无 futures 映射）"
+        # R2：静态映射未收录 ≠ 品种不存在（无原文不得断言「无对冲品种」）
+        result["note"] = ("静态映射未收录该 ETF 的股指期货品种"
+                          "（hedge-map 无 futures 映射；未逐条核验，不表示不存在）")
         return result
     if fsym not in ("IF", "IH", "IC", "IM"):
         # F1-4: 品种映射存在但 futures_daily 数据层仅覆盖 IF/IH/IC/IM

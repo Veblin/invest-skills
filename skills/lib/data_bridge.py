@@ -25,9 +25,9 @@ except ImportError:
     from cache import DataCache, default_cache, _is_trading_hour  # noqa: F811
 
 try:
-    from .invest_path import load_invest_a_etf_module  # 同包相对导入（正常路径）
+    from .invest_path import load_invest_a_etf_module, load_journal_module  # 同包相对导入（正常路径）
 except ImportError:
-    from invest_path import load_invest_a_etf_module  # noqa: F811  # sys.path 裸导入
+    from invest_path import load_invest_a_etf_module, load_journal_module  # noqa: F811  # sys.path 裸导入
 
 logger = logging.getLogger(__name__)
 
@@ -271,20 +271,25 @@ def get_market_daily_pctiles(*, force: bool = False) -> dict | None:
 def get_microstructure(*, force: bool = False) -> dict | None:
     """市场微观结构快照（缓存 5min）。
 
-    注意：依赖 invest-a-journal 的 market_microstructure 模块，
-    仅在 journal skill 上下文中可用；其他 skill 调用会返回 None + 日志警告。
+    依赖 invest-a-journal 的 market_microstructure（provider）；A04（v0.3.2）
+    起经 ``invest_path.load_journal_module`` **按文件路径显式加载** canonical，
+    不再裸 ``from market_microstructure import snapshot``（其解析依赖 sys.path
+    顺序，可能命中同名 decoy 或静默 None）；同进程已有同一 canonical 文件的
+    顶层导入时复用该实例（monkeypatch 接缝不分叉）。
+    模块不可用（journal 缺失/包内未并闭包）→ None + 日志警告，语义与旧实现
+    一致（不抛出，调用方防 None）。
     """
     try:
-        from market_microstructure import snapshot  # noqa: E402
-    except ImportError:
+        snapshot_fn = load_journal_module().snapshot
+    except (ImportError, AttributeError, OSError) as exc:
         logger.warning(
-            "get_microstructure() requires invest-a-journal on sys.path; "
-            "call from within journal skill context or ensure path bootstrap. "
-            "Returning None — callers should guard against."
+            "get_microstructure() requires shared canonical "
+            "skills/lib/market_microstructure.py (A03)；returning None — "
+            "callers should guard against. %s", exc,
         )
         return None
     return _fetch_dimension(
-        "microstructure", "market", snapshot,
+        "microstructure", "market", snapshot_fn,
         force=force, ttl_override=300,
     )
 
@@ -368,29 +373,45 @@ def get_etf_industry_alloc(symbol: str, *, force: bool = False) -> dict | None:
     return _fetch_dimension("etf_industry_alloc", symbol, fetch, symbol, force=force)
 
 
+def _attach_holdings_clusters_compat(env: dict | None) -> dict | None:
+    """旧桥消费兼容：在**返回副本**上附加 clusters（A04，v0.3.2）。
+
+    访问/缓存与领域富化分离：
+    - 缓存的信封 = provider 原始数据（不含 clusters；DataCache.set 在
+      ``_fetch_dimension`` 返回前已即时序列化落盘，本函数的附加只作用在
+      返回对象上）；
+    - 聚类计算归 ETF 公开 API ``etf_data.build_holdings_clusters``（访问层
+      不再自持领域实现；经 ``load_invest_a_etf_module`` 同一 canonical 实例）；
+    - 旧消费者（读 bridge 信封 clusters 的路径与测试）不丢功能；富化失败不
+      静默：clusters=None + clusters_error（与「合法未映射 → []」可区分）。
+    """
+    if env is None:
+        return None
+    if not (env.get("status") == "ok" and env.get("rows")):
+        env.setdefault("clusters", [])
+        return env
+    try:
+        etf_data = load_invest_a_etf_module()
+        env["clusters"] = etf_data.build_holdings_clusters(env["rows"])
+    except Exception as exc:
+        logger.warning("get_etf_holdings clusters enrich failed: %s", exc)
+        env["clusters"] = None
+        env["clusters_error"] = f"{type(exc).__name__}: {exc}"
+    return env
+
+
 def get_etf_holdings(symbol: str, *, force: bool = False) -> dict | None:
     """ETF 前十大持仓（缓存 1d，季度报告期数据；裸 HTTP 天天基金 jjcc 页）。
 
-    信封与 canonical query_etf_holdings 对齐：附加 clusters（HOLDINGS_CLUSTER_MAP
-    聚合，etf_data._build_holdings_clusters）——直读本桥的路径（journal ETF 等）
-    不会退化回 AI 手算聚类（P0）。富化失败不静默：clusters=None + clusters_error
-    字段（与「合法未映射 → []」可区分），日志 warning。
+    访问层只管理原始信封与缓存；`clusters`（HOLDINGS_CLUSTER_MAP 聚合）为
+    **旧桥消费兼容附加**——经 ETF 公开 API ``build_holdings_clusters`` 计算、
+    只写返回副本、不进缓存（A04 边界，见 `_attach_holdings_clusters_compat`）。
     """
     fetch = _import_etf_attr("fetch_etf_holdings")
     if fetch is None:
         return None
     env = _fetch_dimension("etf_holdings", symbol, fetch, symbol, force=force)
-    if env and env.get("status") == "ok" and env.get("rows"):
-        try:
-            etf_data = load_invest_a_etf_module()
-            env["clusters"] = etf_data._build_holdings_clusters(env["rows"])
-        except Exception as exc:
-            logger.warning("get_etf_holdings clusters enrich failed: %s", exc)
-            env["clusters"] = None
-            env["clusters_error"] = f"{type(exc).__name__}: {exc}"
-    elif env is not None:
-        env.setdefault("clusters", [])
-    return env
+    return _attach_holdings_clusters_compat(env)
 
 
 def get_etf_category_sina(*, force: bool = False) -> dict | None:

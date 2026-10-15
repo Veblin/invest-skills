@@ -146,6 +146,52 @@ def test_cli_market_failure_exits_3_without_empty_shortlist(monkeypatch, tmp_pat
     assert not list(tmp_path.glob("*.md")), "数据不可得时**不得**产出空清单"
 
 
+@pytest.mark.parametrize("latest,previous,older", [
+    ("20261015", "20261014", "20261013"),  # 盘中
+    ("20261019", "20261016", "20261015"),  # 周一回查跨周末
+    ("20261008", "20260930", "20260929"),  # 日历明确的长假间隔
+])
+@pytest.mark.parametrize("published", [True, False])
+def test_scan_cli_uses_published_session_in_report_and_snapshot(monkeypatch, tmp_path, latest, previous, older, published):
+    import sys
+    import types
+    import pandas as pd
+
+    cli = load_scan_cli()
+    fetch = sources.fetch_daily_basic
+    _stub(monkeypatch)
+    monkeypatch.setattr(sources, "fetch_daily_basic", fetch)
+    monkeypatch.setattr(sources, "latest_trade_date", lambda: latest)
+    calendar = types.ModuleType("lib.trade_cal")
+    calendar.last_trade_dates = lambda n: [latest, previous, older][:n]
+    monkeypatch.setitem(sys.modules, "lib.trade_cal", calendar)
+    calls = []
+
+    def query(api, **params):
+        assert api == "daily_basic"
+        day = params["trade_date"]
+        calls.append(day)
+        return pd.DataFrame([{**row, "trade_date": previous} for row in _DAILY]
+                            if published and day == previous else [])
+
+    monkeypatch.setattr(sources, "client", lambda: types.SimpleNamespace(query=query))
+    snap = tmp_path / "scan.jsonl"
+    monkeypatch.setattr(cli.snapshot, "snapshot_path", lambda year=None: snap)
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    if published:
+        assert cli.main(_argv(tmp_path)) == 0
+        rec = json.loads(snap.read_text(encoding="utf-8").strip())
+        body = next(tmp_path.glob("*.md")).read_text(encoding="utf-8")
+        assert rec["trade_date"] == previous and f"数据日：{previous}" in body
+        assert rec["pool"]["calls"]["daily_basic"] == 2
+        assert any(latest in w and previous in w for w in rec["warnings"])
+        assert calls == [latest, previous]
+    else:
+        assert cli.main(_argv(tmp_path)) == 3
+        assert calls == [latest, previous, older]
+        assert not snap.exists() and not list(tmp_path.glob("*.md"))
+
+
 def test_cli_missing_token_exits_4(monkeypatch, tmp_path):
     cli = load_scan_cli()
     _stub(monkeypatch, token=False)
@@ -499,6 +545,20 @@ def _run_hk(cli, monkeypatch, tmp_path, extra=()):
     return body, rec
 
 
+@pytest.mark.parametrize("us,cn,comparison", [(2.0, 3.0, "低于"), (3.0, 2.0, "高于"),
+                                           (2.0, 2.0, "等于"), (50.0, 3.0, "高于"), (0.0, 0.0, "等于")])
+def test_hk_rate_comparison_and_spread_summary_follow_inputs(monkeypatch, tmp_path, us, cn, comparison):
+    cli = _stub_hk(monkeypatch)
+    monkeypatch.setattr(sources, "rf_10y_usd", lambda: (us, "test.US10Y"))
+    monkeypatch.setattr(sources, "rf_10y_pct", lambda: (cn, "test.CN10Y"))
+    body, rec = _run_hk(cli, monkeypatch, tmp_path)
+    assert f"{comparison}中国 10Y" in body
+    assert "大概率恒 0" not in body and "远高于" not in body
+    satisfied = sum(hit["gap_flags"][0] == 1 for hit in rec["hits"])
+    assert f"本次短清单 {len(rec['hits'])} 只中，利差子项成立 {satisfied} 只" in body
+    assert "[来源: test.US10Y]" in body and "[来源: test.CN10Y]" in body
+
+
 def test_hk_calendar_degraded_is_annotated(monkeypatch, tmp_path):
     """日历**内部降级**（不抛异常、退回周末近似）必须显式标注。
 
@@ -655,3 +715,28 @@ def test_hk_snapshot_records_measured_call_counts(monkeypatch, tmp_path):
     _, rec = _run_hk(cli, monkeypatch, tmp_path, extra=["--top", "15"])
     assert rec["pool"]["calls"] == {"hk_basic": 1, "r_hk": 28, "hk_financials": 227}
     assert rec["pool"]["empty_returns"] == 3
+
+
+def test_forecast_fetched_once_per_candidate_when_empty(monkeypatch, tmp_path):
+    """review #13：fina 空 → forecast 档已在闸门前取过（空返回）时，闸门后不得再取。
+
+    旧写法 `if not fc:` 无法区分「未取」与「已取但空」，对后者再打一次接口
+    （每次多付一次 0.6s 退避）。本用例把质量闸门打桩为放行以抵达该分支，
+    统计同一候选的 forecast 调用次数。
+    """
+    from collections import Counter
+
+    cli = load_scan_cli()
+    _stub(monkeypatch, fina={})          # 全部候选 fina 空 → 走 forecast 档
+    calls: list[str] = []
+    monkeypatch.setattr(sources, "fetch_forecast",
+                        lambda code: (calls.append(code), [])[1])
+    monkeypatch.setattr(cli.quality, "pass_quality",
+                        lambda r, fina, fc, tier: {"pass": True})
+    monkeypatch.setattr(cli.snapshot, "snapshot_path",
+                        lambda year=None: tmp_path / "2026.jsonl")
+    monkeypatch.setattr(cli.snapshot, "discovery_dir", lambda: tmp_path)
+    assert cli.main(_argv(tmp_path, no_out=True)) == 0
+    assert calls, "夹具未触发 forecast 档——检查 L1 候选"
+    dupes = {c: n for c, n in Counter(calls).items() if n > 1}
+    assert not dupes, f"同一候选重复取预告（review #13）：{dupes}"

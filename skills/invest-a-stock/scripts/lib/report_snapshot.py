@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from decimal import Decimal, InvalidOperation
+
+from ._invest_path import ensure_skills_lib_on_path
+
+ensure_skills_lib_on_path()
+
+from snapshot_core import digest as _core_digest  # noqa: E402
+from snapshot_core import sealed_hash as _core_sealed_hash  # noqa: E402
 
 from .json_util import json_default
 
@@ -205,8 +210,12 @@ def dependency_states(collection: dict) -> dict[str, str]:
 
 
 def digest(value: object) -> str:
-    data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=json_default)
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+    """规范化哈希（v0.3.2 B05：委托共享 ``snapshot_core.digest``）。
+
+    原实现内联于本文件；迁移后**逐字节等价**（同一 json.dumps 规范 +
+    同一 ``json_default``，由冻结样例对照测试锁定），历史快照哈希不变。
+    """
+    return _core_digest(value, default=json_default)
 
 
 def plan_digest(plan: dict) -> str:
@@ -233,9 +242,8 @@ def seal(collection: dict, *, plan_hash: str | None = None,
     # 依赖三态在计算内容哈希**之前**落盘，故它本身也被封存、可复核；
     # 读取侧据此判断「合同是否真的执行过」（见 validate）。
     meta["report_dependencies"] = dependency_states(collection)
-    meta["report_input_hash"] = digest({k: v for k, v in collection.items() if k != "_meta"} | {
-        "_meta": {k: v for k, v in meta.items() if k != "report_input_hash"}
-    })
+    meta["report_input_hash"] = _core_sealed_hash(
+        collection, hash_field="report_input_hash", default=json_default)
     return meta["report_input_hash"]
 
 
@@ -274,9 +282,8 @@ def validate(record: dict | None, symbol: str, *, plan_hash: str | None = None) 
         errors.append("快照绑定采集计划，须提供原 --plan")
     elif plan_hash is not None and sealed_plan_hash != plan_hash:
         errors.append("计划哈希不一致")
-    actual_hash = digest({k: v for k, v in data.items() if k != "_meta"} | {
-        "_meta": {k: v for k, v in meta.items() if k != "report_input_hash"}
-    })
+    actual_hash = _core_sealed_hash(data, hash_field="report_input_hash",
+                                    default=json_default)
     if meta.get("report_input_hash") != actual_hash:
         errors.append("快照内容哈希不一致")
     return errors

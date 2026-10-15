@@ -11,11 +11,12 @@ from __future__ import annotations
 def fetch_margin_account_info() -> "pd.DataFrame | None":
     """两融账户余额（akshare stock_margin_account_info）。
 
-    惰性导入 akshare 与 lib.proxy（避免 import 图依赖）；空结果返回 None；
+    惰性导入 akshare 与共享 proxy（避免 import 图依赖；A02 后为顶层
+    canonical，不经 stock lib shim）；空结果返回 None；
     异常上抛由调用方 try/except 处理。
     """
     import akshare as ak
-    from lib.proxy import akshare_direct_session
+    from proxy import akshare_direct_session
 
     with akshare_direct_session():
         df = ak.stock_margin_account_info()

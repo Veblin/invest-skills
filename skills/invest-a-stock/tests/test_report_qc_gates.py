@@ -129,6 +129,20 @@ class TestConclusionEvidenceR12:
               "[证据强度: ✅ 强 🌐多源 🕐近30日 ✓✗] 判断来自同段上游 [来源: engine]\n")
         assert conclusion_evidence_findings(md, fact_ids=frozenset({"F1"})) == []
 
+    def test_reworded_renderer_note_stays_fail_closed(self):
+        """review #15 行为钉住：豁免表是 fail-closed 逐字白名单（设计如此）——
+        改写措辞的合法渲染器注记**不自动豁免**（产 error 直至显式登记）；
+        finding 消息带操作指引（登记豁免表 / 补证据标签），不静默放行。"""
+        legal = ("## 主要结论\n"
+                 "**证据强度：✅ 强** 🌐多源 🕐近30日 ✓✗（估值/盈利序列为封存字段直读）\n")
+        assert conclusion_evidence_findings(legal) == []
+        reworded = ("## 主要结论\n"
+                    "**证据强度：✅ 强** 🌐多源 🕐近30日 ✓✗（估值与盈利序列为封存字段直读）\n")
+        findings = conclusion_evidence_findings(reworded)
+        miss = [f for f in findings if f["id"] == "wording-conclusion-evidence"]
+        assert miss and miss[0]["severity"] == "error", findings
+        assert "登记" in miss[0]["message"] and "证据标签" in miss[0]["message"]
+
     def test_fake_fact_id_not_evidence(self):
         md = "## 主要结论\n公司盈利增长999%[事实: F999999]\n"
         assert any(f["id"] == "wording-conclusion-evidence-level"

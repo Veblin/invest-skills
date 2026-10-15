@@ -5,7 +5,7 @@
 不构成任何交易建议（LAW 6）。深判走 invest-a-stock 既有流水线（清单每行附下钻命令）。
 
 管线（设计 §4，控制调用量）：
-    stock_basic(缓存 7d) → daily_basic(全市场 1 次) → L1 横截面
+    stock_basic(缓存 7d) → daily_basic(全市场，最多核验 3 个交易日) → L1 横截面
     → fina_indicator(仅候选集，按 ts_code) → 中过滤 → L3 gap → 排序 → 短清单
     → 落盘 md + 私有快照 JSONL（rules_version 必录）
 
@@ -107,12 +107,10 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         # 港股不接受 per_industry（单桶下会静默截断，见 run_scan_hk docstring）
         return run_scan_hk(top=top)
     sources.reset_warnings()
-    trade_date = sources.latest_trade_date()
-
     basic = sources.fetch_stock_basic()
     pool_data = pool_mod.build_pool(basic, with_bj=with_bj)
 
-    daily = sources.fetch_daily_basic(trade_date)
+    trade_date, daily = sources.fetch_latest_daily_basic()
     by_code = {str(r.get("ts_code")): r for r in daily}
     merged: list[dict] = []
     for r in pool_data["rows"]:
@@ -149,9 +147,11 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         # L3 增速子项恒 0（R4 评审实测复现）
         if fina:
             fc = []
+            fc_attempted = False
             q = quality.pass_quality(r, fina, fc, tier="fina")
         else:
             fc = sources.fetch_forecast(r["ts_code"])
+            fc_attempted = True
             q = quality.pass_quality(r, fina, fc, tier="forecast")
         if q.get("warning"):
             quality_warnings.append(q["warning"])
@@ -161,8 +161,10 @@ def run_scan(*, top: int = DEFAULT_TOP, with_bj: bool = False,
         if not q["pass"]:
             continue
         # L3 增速子项需预告增速——**在通过质量闸门之后**才取（候选已收敛到几十只，
-        # 调用量可控）；此前放在循环头部会让 403 只候选各多打一次接口
-        if not fc:
+        # 调用量可控）；此前放在循环头部会让 403 只候选各多打一次接口。
+        # review #13：`fc` 为空 ≠ 未取过——forecast 档已取过（含空返回）时必须
+        # 复用，旧写法对「已取但空」再打一次接口并多付一次 0.6s 退避。
+        if not fc and not fc_attempted:
             fc = sources.fetch_forecast(r["ts_code"])
         # ⚠️ 只用 `p_change_max`（净利**同比增速**上限，百分数）——可加总/可比。
         # **不得**回退到 `net_profit_max`：那是净利润的**绝对金额**，与
@@ -275,7 +277,7 @@ def run_scan_hk(*, top: int = DEFAULT_TOP) -> dict:
     # （实测：警告「写了但走不到」）。
     trade_date = _hk_trade_date()
     rf_pct, rf_src = sources.rf_10y_usd()      # HK 用 US 10Y（口径见 sources_hk）
-    # 中国 10Y 仅作**对比说明**（解释港股池利差门槛为何更严）——须实时取，
+    # 中国 10Y 仅作**对比说明**（利差门槛关系随两侧实际输入变化）——须实时取，
     # 写死数值会让报告永久陈旧；不可得则不渲染对比句
     cn_rf_pct, cn_rf_src = sources.rf_10y_pct()
     universe = sources_hk.fetch_hk_universe()
@@ -534,11 +536,17 @@ def render_report_hk(scan: dict) -> str:
         cn = scan.get("rf_cn") or {}
         cmp_txt = ""
         if cn.get("pct") is not None:
-            cmp_txt = (f"——⚠️ 该值远高于中国 10Y（{cn['pct']}%"
-                       f" [来源: {cn.get('source')}]），故港股池的利差门槛更严，"
-                       f"**利差子项大概率恒 0**（须如实呈现，不得据此称「无便宜标的」）")
+            comparison = "高于" if rf["pct"] > cn["pct"] else ("低于" if rf["pct"] < cn["pct"] else "等于")
+            threshold = "较高" if rf["pct"] > cn["pct"] else ("较低" if rf["pct"] < cn["pct"] else "相同")
+            cmp_txt = (f"——该值{comparison}中国 10Y（{cn['pct']}%"
+                       f" [来源: {cn.get('source')}]）；采用相同 {lenses.SPREAD_PP:g}pp 利差缓冲时，"
+                       f"US 10Y 口径的利差门槛{threshold}，仅作两种基准口径对照")
         lines.append(f"- L3 利差口径：**{rf.get('caliber')}** = {rf['pct']}%"
                      f" [来源: {rf.get('source')}]{cmp_txt}")
+        satisfied = sum(1 for h in hits if (h.get("gap_flags") or [0])[0] == 1)
+        lines.append(f"- 本次短清单 {len(hits)} 只中，利差子项成立 {satisfied} 只"
+                     " [来源: Python calc: count(hits.gap_flags[0] == 1)]；"
+                     "仅描述已展示短清单，不外推全市场。")
     lines.append("")
     lines.append("## 降级清单 / 警告\n")
     if scan["warnings"]:

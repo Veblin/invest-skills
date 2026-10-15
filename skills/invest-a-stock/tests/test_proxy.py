@@ -26,6 +26,51 @@ class TestProxyDetection:
         info = detect_proxy()
         assert isinstance(info["detected"], bool)
 
+    def test_no_proxy_alone_is_not_a_detected_proxy(self, monkeypatch):
+        """review #3：NO_PROXY/no_proxy 是排除列表，不是代理——不得触发误判。
+
+        实测（2026-10-14）：urllib.getproxies()/requests.get_environ_proxies()
+        在 no_proxy 不匹配目标 URL 时均返回 {'no': …}，叠加 env 键扫描会把
+        「设了 NO_PROXY=localhost」的主机全部误判为「检测到代理」（破坏
+        akshare_push2_available 的零网络快路径并误发 Clash 提示）。
+        """
+        from lib.proxy import detect_proxy
+
+        for key in list(os.environ):
+            if "proxy" in key.lower():
+                monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+        monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+        info = detect_proxy()
+        assert info["env_keys"] == [], "no_proxy 系不是代理环境变量"
+        assert "no" not in info["system_proxies"]
+        assert "no" not in info["requests_proxies"]
+        assert info["detected"] is False
+
+    def test_no_proxy_does_not_mask_real_proxy(self, monkeypatch):
+        """防假绿：no_proxy 与真代理并存时仍须判定检测到代理。"""
+        from lib.proxy import detect_proxy
+
+        for key in list(os.environ):
+            if "proxy" in key.lower():
+                monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("NO_PROXY", "localhost")
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+        info = detect_proxy()
+        assert info["detected"] is True
+        assert "HTTP_PROXY" in info["env_keys"]
+
+    def test_requests_use_proxy_ignores_no_proxy_pseudo_key(self, monkeypatch):
+        from lib.proxy import requests_use_proxy
+
+        for key in list(os.environ):
+            if "proxy" in key.lower():
+                monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+        assert requests_use_proxy("https://push2.eastmoney.com") is False
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+        assert requests_use_proxy("https://push2.eastmoney.com") is True
+
     def test_clash_rules_yaml_format(self):
         from lib.proxy import clash_rules_yaml
 

@@ -3,6 +3,7 @@
 T6-2/T6-3（v0.3.0 数据可信轮）：warning 语义（人工复核），不破 D1=A（lint 只做 error 级 F3）。
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -10,7 +11,8 @@ from pathlib import Path
 # 污染 pytest 同批其他用例的 lib.* 解析——路径污染型顺序依赖）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from report_qc import _check_sourcing, qc_file  # noqa: E402
+from report_qc import _check_sourcing, qc_file, write_qc_record  # noqa: E402
+import snapshot_core  # noqa: E402
 
 
 def test_f2_derived_claim_with_source_passes():
@@ -113,9 +115,64 @@ _POSITIVE_SAMPLE = """# 样例ETF 研究报告（正例样例）
 """
 
 
-def test_positive_sample_full_pass(tmp_path):
+def test_positive_sample_sourcing_layer_pass_payload_warn_explicit(tmp_path):
+    """sourcing 正例只校验**目标层**通过；缺同代 payload 的 WARN 显式断言。
+
+    v0.3.2 B06 起 ETF 类型挂 etf-generation 层：无 payload 属「未执行 ≠ PASS」
+    的 warning（历史样例库大量无 payload，不能一概强转 PASS，也不能删门禁）；
+    整体 PASS 的真实 generation 正例见下一条。
+    """
     report = tmp_path / "510300-样例ETF" / "2026-09-10-10-00-00.md"
     report.parent.mkdir(parents=True)
     report.write_text(_POSITIVE_SAMPLE, encoding="utf-8")
     r = qc_file(report, fail_on="error")
-    assert r.overall == "PASS", [(l.layer, l.status, l.details) for l in r.layers]
+    layers = {l.layer: l for l in r.layers}
+    assert layers["sourcing"].status == "pass", layers["sourcing"].details
+    # 无 payload → etf-generation 层必须显式 WARN（缺 payload 未执行 ≠ PASS）
+    gen = layers["etf-generation"]
+    assert gen.status == "warn", gen.details
+    assert any(d["id"] == "etf-payload-missing" and d["severity"] == "warning"
+               for d in gen.details)
+    assert r.overall == "WARN"
+
+
+def _sealed_payload(symbol: str) -> dict:
+    payload = {
+        "skill": "invest-a-etf",
+        "symbol": symbol,
+        "generated_at": "2026-09-10T10:00:00+08:00",
+        "profile": {
+            "tracking": {"status": "limited", "note": "缺总收益基准"},
+            "identity": {"axes": {"asset_type": "stock", "channel": "domestic",
+                                  "strategy": "broad_market"},
+                         "verification": {"status": "verified_original"}},
+        },
+        "holdings": {},
+        "data_status": {"dimensions": {}},
+    }
+    snapshot_core.seal(payload, version_field="payload_version", version=1,
+                       extra={"payload_version": 1, "symbol": symbol,
+                              "generated_at": payload["generated_at"],
+                              "frozen_at": payload["generated_at"]})
+    return payload
+
+
+def test_full_generation_with_payload_overall_pass(tmp_path):
+    """完整同代产物（md+payload+html+QC 记录）真实 generation → 整体 PASS。"""
+    d = tmp_path / "510300-样例ETF"
+    d.mkdir(parents=True)
+    ts = "2026-09-10-10-00-00"
+    md = d / f"{ts}.md"
+    md.write_text(_POSITIVE_SAMPLE, encoding="utf-8")
+    payload = _sealed_payload("510300")
+    (d / f"{ts}.payload.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (d / f"{ts}.html").write_text(
+        "<html><head>"
+        f'<meta name="invest-generation" content="{payload["_meta"]["payload_hash"]}">'
+        "</head><body>净值 1.0000</body></html>", encoding="utf-8")
+    r = qc_file(md, fail_on="error")
+    assert r.overall == "WARN"          # 记录未写：etf-qc-record-missing（未执行）
+    write_qc_record(md, r)              # 记录本代 md/html/payload 实际哈希
+    r2 = qc_file(md, fail_on="error")
+    assert r2.overall == "PASS", [(l.layer, l.status, l.details) for l in r2.layers]

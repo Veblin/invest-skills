@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from lib.nums import safe_float  # noqa: E402 — canonical（None/NaN/±inf → None）
+from nums import safe_float  # noqa: E402 — 共享 canonical（None/NaN/±inf → None）
 
 
 # ---- 内部辅助 ----

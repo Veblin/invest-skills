@@ -215,6 +215,70 @@ def test_cross_check_missing_side_is_three_state():
     assert b["comparable"] is False and b["consistent"] is None
 
 
+@pytest.mark.parametrize("prev_date", [None, "bad-date", "2026-09-11", "2026-09-12",
+                                      "2026-09-09", "2026-09-04"])
+def test_cross_check_requires_verified_single_day_interval(prev_date):
+    """相同结束日/伪造 cal_days=1 均不能将未知、多日或逆序区间变成单日。"""
+    ts = {**_ts_row(), "prev_date": prev_date, "cal_days": 1, "span": "1 日"}
+    out = sb.cross_check({"date": "2026-09-11", "total_yi": 44.31}, ts)
+    assert out["comparable"] is False
+    assert out["delta_yi"] is None and out["consistent"] is None
+    assert "未确认仅含一个港股通交易日" in out["note"]
+
+
+def test_cross_check_weekend_interval_is_not_inferred_as_one_connect_session():
+    """没有完整港股通日历时，周五到周一仍不能据周末估算直接裁决。"""
+    ts = {**_ts_row(date="2026-09-14"), "prev_date": "2026-09-11", "cal_days": 3}
+    out = sb.cross_check({"date": "2026-09-14", "total_yi": 44.31}, ts)
+    assert out["comparable"] is False and out["consistent"] is None
+    assert out["delta_yi"] is None
+
+
+def _stub_missing_session_sources(monkeypatch, *, daily_available=True):
+    """完整三个源注入：日频 14/15/16，累计源漏 15；999.99 是独特标记。"""
+    def hist(symbol):
+        if not daily_available:
+            raise RuntimeError("review fixture daily unavailable")
+        return pd.DataFrame([{"日期": f"2026-09-{d}", "当日成交净买额": 5.615}
+                             for d in (14, 15, 16)])
+
+    monkeypatch.setattr(sb, "_fetch_hist_df", hist)
+    monkeypatch.setattr(sb, "_fetch_summary_df", lambda: None)
+    monkeypatch.setattr(sb, "_fetch_tushare_df", lambda days: pd.DataFrame([
+        {"trade_date": "20260914", "ggt_ss": 10000.0, "ggt_sz": 20000.0},
+        {"trade_date": "20260916", "ggt_ss": 10500.0, "ggt_sz": 20499.99},
+    ]))
+
+
+def test_missing_intermediate_session_query_and_report_are_incomparable(monkeypatch):
+    _stub_missing_session_sources(monkeypatch)
+    ts = sb.fetch_tushare_cross()
+    assert ts["rows"][-1]["total_yi"] == pytest.approx(999.99)
+    assert ts["rows"][-1]["prev_date"] == "2026-09-14"
+    out = sb.fetch_southbound()
+    assert out["rows"][-1]["total_yi"] == pytest.approx(11.23)
+    assert out["cross"]["comparable"] is False
+    assert out["cross"]["consistent"] is None and out["cross"]["delta_yi"] is None
+    lines = []
+    rendered = _cli()._render_southbound(lines)
+    assert rendered == out
+    body = "\n".join(lines)
+    assert "2026-09-14, 2026-09-16]" in body and "不可比，不裁决" in body
+    assert "不一致" not in body and "差 -988.760" not in body
+
+
+def test_missing_session_fallback_renders_true_interval(monkeypatch):
+    _stub_missing_session_sources(monkeypatch, daily_available=False)
+    lines = []
+    out = _cli()._render_southbound(lines)
+    assert out["rows"][-1]["total_yi"] == pytest.approx(999.99)
+    body = "\n".join(lines)
+    assert "999.99" in body
+    assert "2026-09-14 之后至 2026-09-16，跨 2 自然日" in body
+    assert "未确认仅含一个港股通交易日，不作为单日净额" in body
+    assert "差值 = 当日净买额" not in body and "含停市日" not in body
+
+
 # ── southbound_daily（沪+深合并）─────────────────────────────────────────
 
 def test_southbound_daily_merges_two_symbols(monkeypatch):
@@ -466,3 +530,42 @@ def test_cli_report_does_not_render_dead_columns(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     for dead in ("当日资金流入", "当日余额"):
         assert dead not in out, f"{dead} 恒 NaN，不得出现在报告"
+
+
+# ── 模块 7 南向汇总行：区间口径限定（review #1，2026-10-14） ─────────────────
+
+def test_module7_southbound_interval_row_carries_caliber_limit():
+    """tushare 降级链的**区间**净值不得在模块 7 被读成「最新单日」金额。
+
+    模块 3 的区间提示不覆盖模块 7 汇总行（review 实测：跨日差值直接印成
+    「最新 {date}，合计 X 亿」——44 亿 vs 550 亿 的量级错误类别）。
+    """
+    cli = _cli()
+    sb = {
+        "available": True,
+        "source": "tushare.moneyflow_hsgt（累计口径差分）",
+        "caliber_note": "⚠️ tushare 为**累计口径**，本表数值为相邻可得行的**差分**…",
+        "warnings": [], "summary": None, "cross": None,
+        "rows": [{"date": "2026-09-16", "prev_date": "2026-09-14",
+                  "cal_days": 2, "span": "跨 2 自然日",
+                  "sh_yi": None, "sz_yi": None, "total_yi": 999.99}],
+    }
+    lines: list[str] = []
+    cli._render_module7(lines, quote={}, pe_line=None, sb=sb)
+    body = "\n".join(lines)
+    assert "999.99" in body, "mock 标记缺失"
+    assert "区间累计" in body and "不作为单日净额" in body
+    assert "2026-09-14 之后至 2026-09-16" in body, "区间起止必须随行"
+    assert "跨 2 自然日" in body
+
+
+def test_module7_southbound_daily_row_format_unchanged():
+    """akshare 正常路径（无区间行）输出逐字节不变——钉住旧格式防回归。"""
+    cli = _cli()
+    lines: list[str] = []
+    cli._render_module7(lines, quote={}, pe_line=None, sb=dict(_SB_OK))
+    body = "\n".join(lines)
+    assert ("- 南向资金：可得（最新 2099-12-31，合计 44.31 亿 "
+            "[来源: Python calc: sh_yi + sz_yi]）——资金面观察，非交易信号 "
+            "[来源: akshare.stock_hsgt_hist_em（港股通沪/深）]") in body
+    assert "区间累计" not in body

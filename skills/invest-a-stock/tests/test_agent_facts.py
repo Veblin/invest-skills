@@ -106,6 +106,22 @@ class TestRegressionLatestPeriodIsUsed:
 
 class TestAggregation:
 
+    @pytest.mark.parametrize("latest,base", [(100, -100), (-50, -100), (-200, -100), (100, 0)])
+    def test_nonpositive_profit_base_emits_amount_change(self, latest, base):
+        coll = _coll(dimensions=[{"dimension": "financials", "data": [
+            {"end_date": "20250630", "net_profit": base},
+            {"end_date": "20260630", "net_profit": latest},
+        ]}])
+        facts = af.build_financial(coll)
+        labels = {it["label"]: it for it in facts.items}
+        assert af.pct(latest, base) is None
+        assert labels["净利润 同报告期同比(%)"]["value"] is None
+        assert "非正" in labels["净利润 同报告期同比(%)"]["source"]
+        change = labels["净利润 同报告期金额变化(元)"]
+        assert change["value"] == latest - base
+        assert "net_profit" in change["source"]
+        assert "20250630" in change["source"] and "20260630" in change["source"]
+
     def test_percentile_and_median_use_full_series(self):
         val = [{"trade_date": f"2025{i:04d}", "pe_ttm": float(i)} for i in range(1, 101)]
         val.append({"trade_date": "20260916", "pe_ttm": 50.0})
@@ -122,6 +138,11 @@ class TestAggregation:
     def test_pct_and_diff_none_safe(self):
         assert af.pct(None, 1) is None and af.pct(1, 0) is None and af.pct(2, 1) == 100.0
         assert af.diff(None, 1) is None and af.diff(3, 1) == 2.0
+
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), True])
+    def test_invalid_numeric_inputs_are_not_financial_values(self, value):
+        assert af.num(value) is None
+        assert af.pct(value, 100) is None and af.pct(100, value) is None
 
     def test_num_treats_zero_as_legit(self):
         """D1：0 是合法值，不得被 falsy 兜底吞掉。"""

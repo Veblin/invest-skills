@@ -159,15 +159,17 @@ DYNAMIC_MODULE_SEEDS: dict[str, list[tuple[str, str]]] = {
         ("invest-hk-stock", "hk_quote"),
         ("invest-hk-stock", "hk_financials"),
         ("invest-hk-stock", "hk_calendar"),
-        ("invest-a-journal", "market_microstructure"),
+        # A03（v0.3.2）：market_microstructure canonical 迁共享层（owner=skills/lib）；
+        # "shared" 为模块宇宙首源（优先级 共享 > cross > self），不再从 journal 取名
+        ("shared", "market_microstructure"),
     ],
 }
 
 # SKILL.md 正文中的跨 skill 路径改写（包内副本）
 CROSS_PATH_REWRITES: dict[str, list[tuple[str, str]]] = {
     "invest-a-pulse": [
-        ("skills/invest-a-journal/scripts/lib/market_microstructure.py",
-         "lib/market_microstructure.py"),
+        # A03：市场微观结构 canonical owner 迁共享层
+        ("skills/lib/market_microstructure.py", "lib/market_microstructure.py"),
     ],
     "invest-a-journal": [
         ("skills/invest-a-journal/scripts/lib", "scripts/lib"),
@@ -203,6 +205,14 @@ MANDATED_TOOLS: dict[str, dict[str, list[str]]] = {
         # completion-analysis-sidecar-invalid + exit 2。其静态依赖 md_subset
         # 经 _scan_node 的 AST 闭包自动带入，无需单列。
         "deps": ["lint", "analysis_schema"],
+        # QC may inspect ETF research from any skill package. These validators are
+        # loaded by filename (including the HTML checker inside etf_research), so
+        # their canonical source must be registered before following their imports.
+        # etf_generation 同为 QC 按文件名加载（review #14 封存契约单一来源）；
+        # 两者均为全仓唯一名（新增 file_dep 前须确认无同名 shim，见 _add_tool_dependencies）。
+        "file_deps": ["skills/invest-a-etf/scripts/lib/etf_research.py",
+                      "skills/invest-a-etf/scripts/lib/etf_md.py",
+                      "skills/invest-a-etf/scripts/lib/etf_generation.py"],
         "data": ["skills/invest-a-stock/scripts/references/compliance_rules.yaml"],
     },
 }
@@ -349,6 +359,25 @@ def _dot_name(own_name: str, level: int, mod: str) -> str:
     return ".".join(base + [mod]) if mod else ".".join(base)
 
 
+def _lib_root_init_is_noop(path: Path) -> bool:
+    """lib 根 __init__.py 是否仅注释/文档（无可执行职责）。
+
+    判据: AST 剔除模块 docstring 与 ``from __future__ import`` 后无剩余语句。
+    独立包 lib 根降级为 Python 标准 namespace 包（不发 __init__.py）时，仅当
+    源 __init__ 无执行职责才安全；含实质语句 → 不可盲删，由调用方停交 root。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue  # 模块 docstring
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        return False
+    return True
+
+
 class _Closure:
     """一次构建的模块宇宙 + 闭包结果。
 
@@ -403,14 +432,17 @@ class _Closure:
             return (source_key, pi[cand])
         return None
 
-    def _lib_root_init(self) -> tuple[str, Path]:
-        """lib 根 __init__.py：优先共享（pattern 无自身 __init__），否则自身。"""
+    def _lib_root_init(self) -> tuple[str, Path] | None:
+        """lib 根 __init__.py：优先共享（pattern 无自身 __init__），否则自身。
+
+        独立包 lib 根为标准 namespace 包，源无 __init__ 亦合法 → 返回 None。
+        """
         for key, root in self.sources:
             if not root.is_dir():
                 continue
             if (root / "__init__.py").is_file():
                 return key, root / "__init__.py"
-        raise SystemExit(f"{self.skill_name}: 找不到 lib 根 __init__.py")
+        return None
 
     # ---- 闭包 BFS ----
     def _need_invest_path(self) -> None:
@@ -443,6 +475,41 @@ class _Closure:
             self._follow(name, key, "etf_data", 0)
         if "assets/" in text:
             self._assets.add(f.parent)
+        self._add_tool_dependencies(name)
+
+    def _add_tool_dependencies(self, name: str) -> None:
+        """Close filename-loaded tool dependencies, even when reached by import."""
+        spec = MANDATED_TOOLS.get(name, {})
+        for rel in spec.get("file_deps", []):
+            target = ROOT / rel
+            if not target.is_file():
+                raise SystemExit(f"{self.skill_name}: 工具动态依赖缺失: {rel}")
+            source = f"tool:{target.parent.relative_to(ROOT)}"
+            if source not in self._by_source:
+                self.sources.append((source, target.parent))
+                maps = self._by_source[source] = _py_module_map(target.parent)
+                for module, path in {**maps[0], **maps[1]}.items():
+                    self.module_map.setdefault(module, (source, path))
+            # File loads bind to this canonical path, rather than a same-name shim.
+            # 但 _enqueue/module_map 是按名 **first-wins**：同名先到者会静默胜出，
+            # 使上面的承诺失效（review #9）。把「canonical 被别源占用」从静默
+            # 丢弃改为构建期显式失败；同一物理文件（不同 source key，如
+            # cross/self 解析到同一 canonical）不算冲突。
+            # ⚠️ 约束：file_deps 的 stem 必须全仓唯一名——新增条目须先确认无同名
+            # shim（如 journal 的 etf_data 转发 shim），否则会误伤按设计由
+            # 优先级覆盖 shim 的包（pulse/journal 构建即红）。
+            existing = self.included.get(target.stem) or self.module_map.get(target.stem)
+            if existing is not None and Path(existing[1]).resolve() != target.resolve():
+                raise SystemExit(
+                    f"{self.skill_name}: 工具动态依赖 {target.stem} 已被 "
+                    f"{existing[0]} 绑定到 {existing[1]}（canonical 为 {target}）——"
+                    f"同名模块先到者不得静默胜出，请消除同名来源或调整闭包")
+            self._enqueue(target.stem, (source, target))
+        for dep in spec.get("deps", []):
+            resolved = self.resolve(dep)
+            if resolved is None:
+                raise SystemExit(f"{self.skill_name}: 工具动态依赖缺失: {name}/{dep}")
+            self._enqueue(dep, resolved)
 
     def _follow(self, own_name: str, own_source: str, target: str, level: int) -> None:
         """解析一条 import 引用并入队。
@@ -509,8 +576,9 @@ class _Closure:
         # Dynamic loaders are intentionally explicit: a string/f-string module name cannot
         # be reliably discovered from the import AST. Resolve from the named source rather
         # than the general universe so a same-named local shim cannot replace canonical HK.
+        # source_key == "shared" 指向共享层（skills/lib）单源，供 A03 起的公共 provider。
         for source_key, target in DYNAMIC_MODULE_SEEDS.get(self.skill_name, []):
-            source = f"cross:{source_key}"
+            source = "shared" if source_key == "shared" else f"cross:{source_key}"
             maps = self._by_source.get(source)
             if maps is None:
                 raise SystemExit(f"{self.skill_name}: 动态依赖源不存在: {source_key}")
@@ -535,10 +603,6 @@ class _Closure:
                 continue
             self._enqueue(name, r)
             self.mandated.add(name)
-            for dep in spec.get("deps", []):
-                dr = self.resolve(dep)
-                if dr is not None:
-                    self._enqueue(dep, dr)
 
     # ---- 复制计划 ----
     def plan(self) -> list[tuple[Path, Path, str]]:
@@ -548,9 +612,14 @@ class _Closure:
         """
         plan: list[tuple[Path, Path, str]] = []
         src_by_key = dict(self.sources)
-        # lib 根 __init__（+1 文件）
-        k, f = self._lib_root_init()
-        plan.append((Path("__init__.py"), f, "lib_root"))
+        # 独立包 lib 根为 Python 标准 namespace 包：不发 lib 根 __init__.py，
+        # 子包 __init__（depth ≥1，kind=lib_sub）与其职责原样保留。
+        # 源 lib 根 __init__ 仅注释/文档方可安全降级；含执行职责 → 停交 root。
+        root_init = self._lib_root_init()
+        if root_init is not None and not _lib_root_init_is_noop(root_init[1]):
+            raise SystemExit(
+                f"{self.skill_name}: lib 根 __init__.py 含可执行职责"
+                f"（{root_init[1]}）——namespace 化会丢失该职责，停交 root 决策")
         for name in sorted(self.included):
             key, f = self.included[name]
             rel = f.relative_to(src_by_key[key])
@@ -615,13 +684,17 @@ def _rewrite_line(line: str, kind: str, names: set[str]) -> str:
     if m:
         ind, mod, rest = m.groups()
         if mod in names and mod not in ("lib",):
-            return f"{ind}import lib.{mod}{rest}"
+            # ``import lib.X`` binds ``lib``; retain the name the source uses.
+            alias = "" if re.match(r"\s+as\s+", rest) else f" as {mod}"
+            return f"{ind}import lib.{mod}{alias}{rest}"
         return line
     return line
 
 
 def _rewrite_imports(text: str, kind: str, names: set[str]) -> str:
     """包副本导入改写（确定性，仅改写 names 白名单内的裸导入）。
+
+    ``import X`` → ``import lib.X as X``，已有 alias 原样保留。
 
     kind:
       engine   — scripts/*.py: 裸 from X → from lib.X
@@ -630,18 +703,24 @@ def _rewrite_imports(text: str, kind: str, names: set[str]) -> str:
       pulse_md — SKILL.md 内联 python: 裸 from X → from lib.X（非锚定匹配）
     """
     if kind == "pulse_md":
-        def _sub_from(m: re.Match) -> str:
-            nm = _rewrite_mod(m.group(1), "pulse_md", names)
-            return f"from {nm} import" if nm else m.group(0)
-        text = re.sub(r"\bfrom\s+([A-Za-z_][\w.]*)\s+import\b", _sub_from, text)
-
-        def _sub_import(m: re.Match) -> str:
-            mod = m.group(1)
+        # 单遍 alternation（review #8）：from 行整体吃掉 `import` 关键字后再向下
+        # 扫描——被导入名不会被随后的裸 import 规则二次改写（旧两遍实现会把
+        # `from etf_md import etf_research` 变成
+        # `from lib.etf_md import lib.etf_research as etf_research`，SyntaxError）。
+        def _sub_pulse_import(m: re.Match) -> str:
+            from_mod = m.group(1)
+            if from_mod:
+                nm = _rewrite_mod(from_mod, "pulse_md", names)
+                return f"from {nm} import" if nm else m.group(0)
+            mod, alias = m.group(2), m.group(3)
             if mod in names and mod != "lib":
-                return f"import lib.{mod}"
+                return f"import lib.{mod}{alias or f' as {mod}'}"
             return m.group(0)
-        text = re.sub(r"\bimport\s+([A-Za-z_][\w.]*)\b", _sub_import, text)
-        return text
+
+        return re.sub(
+            r"\bfrom\s+([A-Za-z_][\w.]*)\s+import\b"
+            r"|\bimport\s+([A-Za-z_][\w.]*)\b(\s+as\s+[A-Za-z_]\w*)?",
+            _sub_pulse_import, text)
     return "\n".join(_rewrite_line(l, kind, names) for l in text.splitlines())
 
 
@@ -774,10 +853,12 @@ from pathlib import Path
 __all__ = [
     "invest_a_scripts_dir",
     "invest_a_etf_lib_dir",
+    "journal_lib_dir",
     "ensure_invest_a_scripts_on_path",
     "ensure_shared_lib_on_path",
     "load_gap_scan_module",
     "load_invest_a_etf_module",
+    "load_journal_module",
 ]
 
 
@@ -793,6 +874,11 @@ def invest_a_etf_lib_dir() -> Path:
 
 def gap_scan_lib_dir() -> Path:
     """包内 lib 目录（gap-scan canonical 模块合并后所在）。"""
+    return Path(__file__).resolve().parent
+
+
+def journal_lib_dir() -> Path:
+    """包内 lib 目录（公共市场服务 canonical 模块合并后所在）。"""
     return Path(__file__).resolve().parent
 
 
@@ -831,13 +917,79 @@ def load_gap_scan_module(module_file: str = "kline_source"):
 _INVEST_A_ETF_MODULE_NAME = "invest_a_etf_etf_data"
 
 
+def _loaded_module_by_path(target):
+    """sys.modules 中 __file__ resolve 等于 target 的已加载模块（任意注册名）。
+
+    与主仓库 skills/lib/invest_path.py 同名助手同语义（A04 R2 同实例合同）：
+    同一 canonical 文件不得出现第二实例（否则 _SPOT_CACHE_LOCK/进程内缓存分叉）。
+    """
+    for mod in list(sys.modules.values()):
+        f = getattr(mod, "__file__", None)
+        if not f:
+            continue
+        try:
+            if Path(f).resolve() == Path(target).resolve():
+                return mod
+        except OSError:
+            continue
+    return None
+
+
 def load_invest_a_etf_module():
     """包内加载 etf_data（import_module("lib.etf_data")，共享同一实例）。"""
+    target = Path(__file__).resolve().parent / "etf_data.py"
+    existing = _loaded_module_by_path(target)
+    if existing is not None:
+        sys.modules.setdefault(_INVEST_A_ETF_MODULE_NAME, existing)
+        sys.modules.setdefault("etf_data", existing)
+        return existing
     mod = sys.modules.get(_INVEST_A_ETF_MODULE_NAME)
     if mod is not None:
+        sys.modules.setdefault("etf_data", mod)
         return mod
     mod = _il.import_module("lib.etf_data")
     sys.modules[_INVEST_A_ETF_MODULE_NAME] = mod
+    sys.modules.setdefault("etf_data", mod)   # 兼容名：包内裸 `import etf_data`
+    return mod
+
+
+_JOURNAL_MODULE_PREFIX = "journal_canonical"
+
+
+def load_journal_module(module_file: str = "market_microstructure"):
+    """包内加载公共市场服务 canonical 模块（import_module("lib.X")，共享同一实例）。
+
+    A03（v0.3.2）：canonical owner 迁共享层，包内单份落 lib 包（相对导入消费方
+    无需路径引导）；与主仓库版同契约——顶层名已导入**同一文件**（``__file__``
+    resolve 相等）→ 复用（monkeypatch 接缝不分叉），否则经包导入取同一实例。
+    journal inline 上下文（cd scripts/lib）未先 import _invest_path 时 ``lib``
+    不可解析 → 先补插 scripts 再试。lib.X 缺失（如 ETF 包未并该闭包）→
+    ImportError，由 data_bridge 降级为 None + warning。
+    """
+    lib = journal_lib_dir()
+    target = (lib / f"{module_file}.py").resolve()
+    existing = sys.modules.get(module_file)
+    if existing is not None:
+        ef = getattr(existing, "__file__", None)
+        if ef:
+            try:
+                if Path(ef).resolve() == target:
+                    return existing
+            except OSError:
+                pass
+    mod_name = f"{_JOURNAL_MODULE_PREFIX}_{module_file}"
+    mod = sys.modules.get(mod_name)
+    if mod is not None:
+        return mod
+    if str(lib) not in sys.path:
+        sys.path.insert(0, str(lib))
+    try:
+        mod = _il.import_module(f"lib.{module_file}")
+    except ImportError:
+        ensure_invest_a_scripts_on_path()  # inline：scripts 入 path 后 lib.X 可解析
+        mod = _il.import_module(f"lib.{module_file}")
+    sys.modules[mod_name] = mod
+    sys.modules.setdefault(module_file, mod)
     return mod
 '''
 
@@ -989,7 +1141,15 @@ def _rewrite_skill_md(text: str, skill_name: str,
 
 
 def _rewrite_pulse_md(text: str, names: set[str]) -> str:
-    """pulse 包专属：inline 采集命令收口到包根（模块单份落 <pkg>/lib/）。"""
+    """pulse 包专属：inline 采集命令收口到包根（模块单份落 <pkg>/lib/）。
+
+    A03 起市场微观结构采集源为共享层 `skills/lib`（仓库布局）→ 包内落 `<pkg>/lib/`，
+    与包根同层，故 cd 一并收口到包根；journal 私有目录字符串保留替换仅为旧文案兜底。
+    """
+    text = text.replace(
+        'cd "${INVEST_SKILLS_ROOT:-.}/skills/lib"',
+        'cd "${INVEST_SKILLS_ROOT:-.}"',
+    )
     text = text.replace(
         'cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib"',
         'cd "${INVEST_SKILLS_ROOT:-.}"',

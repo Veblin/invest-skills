@@ -4362,26 +4362,15 @@ def _prior_year_end_date(end_date: str) -> str:
 
 
 def _revenue_yoy_from_fina_rows(rows: list[dict]) -> float | None:
-    """按 end_date 对齐去年同期营收，计算同比增速（%）。"""
-    if not rows:
-        return None
-    sorted_rows = sorted(rows, key=lambda r: str(r.get("end_date", "")))
-    latest = sorted_rows[-1]
-    rev_cur = safe_float(latest.get("revenue"))
-    if rev_cur is None or rev_cur <= 0:
-        return None
-    prev_ed = _prior_year_end_date(str(latest.get("end_date", "")))
-    if not prev_ed:
-        return None
-    from lib.financials import normalize_end_date
-    rev_prev = None
-    for r in reversed(sorted_rows[:-1]):
-        if normalize_end_date(str(r.get("end_date", ""))) == prev_ed:
-            rev_prev = safe_float(r.get("revenue"))
-            break
-    if rev_prev is None or rev_prev <= 0:
-        return None
-    return round((rev_cur - rev_prev) / rev_prev * 100, 2)
+    """按 end_date 对齐去年同期营收，计算同比增速（%）——委托共享实现。
+
+    A05-2（v0.3.2）：计算基础收敛至 financials.yoy_from_fina_rows；保留本
+    路径的**首条同期命中即停**策略（rescan_invalid_prior=False，离线对照
+    见 A基础-财务纯函数反例.py yoy 组）。
+    """
+    from lib.financials import yoy_from_fina_rows
+
+    return yoy_from_fina_rows(rows, "revenue", rescan_invalid_prior=False)
 
 
 def _gross_margin_trend_from_rows(fin_rows: list[dict]) -> str | None:

@@ -316,3 +316,16 @@ def test_rotation_speed_ignores_negative_index():
            for i in range(30)]
     out2 = mm.compute_dispersion(_snap(limit_up_count=50), saw, index_series=None)
     assert out2["rotation_speed"]["value"] > 0
+
+
+def test_dispersion_unequal_length_series_is_not_positionally_aligned():
+    """review #11：裸收益序列长度不等 → 无法确认同日对齐，不做尾部按位对齐
+    （stale 序列第 t 日会被错配到 fresh 序列第 t+1 日）；index_dispersion 不可得。"""
+    series = _index_series(n=90)
+    series["IDX_B"] = series["IDX_B"][:-1]          # 少一个交易日
+    out = mm.compute_dispersion(_snap(), _history(), index_series=series)
+    assert out["index_dispersion"]["available"] is False
+    assert any("长度不一致" in m for m in out["missing"]), out["missing"]
+    # 等长对照（防假绿）：按位对齐照常可用
+    ok = mm.compute_dispersion(_snap(), _history(), index_series=_index_series())
+    assert ok["index_dispersion"]["available"] is True

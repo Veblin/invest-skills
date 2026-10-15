@@ -1,6 +1,6 @@
 ---
 name: invest-a-discover-scan
-version: "0.3.1"
+version: "0.3.2"
 description: "低估发现扫描 — 多透镜粗筛（L1 横截面便宜 + L3 定价-盈利 gap + 质量中过滤）→ 研究观察短清单（≤15 只，逐只理由 + 下钻命令）→ 私有快照留档供事后回填。研究信号，非决策。触发词：低估/发现/便宜/估值扫描/找机会/筛股"
 whenToUse: "低估/发现/便宜/估值扫描：从全 A（主板+创业+科创）粗筛出低估值候选短清单，再下钻 invest-a-stock 深判"
 argument-hint: "/invest-a-discover-scan [--top 15] [--with-bj] [--no-out]"
@@ -93,7 +93,7 @@ L3 利差口径改 **US 10Y**；无业绩预告 → 增速子项恒 0。每透�
 
 ## 数据源
 
-tushare：`stock_basic`（缓存 7d）/ `daily_basic`（全市场当日）/ `fina_indicator`（按 ts_code，
+tushare：`stock_basic`（缓存 7d）/ `daily_basic`（全市场最近已发布交易日，最多核验 3 个交易日）/ `fina_indicator`（按 ts_code，
 无批量形态）/ `forecast`（按 ts_code，降级档用）；akshare `bond_zh_us_rate`（中国 10Y，
 L3 利差用）。详见 [references/sources.md](references/sources.md) 与
 `skills/lib/references/data-interface-map.md`（登记义务）。

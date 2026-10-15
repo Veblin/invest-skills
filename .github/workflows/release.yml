@@ -19,22 +19,14 @@ jobs:
 
       - name: Create release archive
         run: |
-          mkdir -p dist/pkg
+          rm -rf dist/pkg
+          mkdir -p dist/pkg/skills
           cp -r \
             .claude-plugin \
             .agents \
             hooks \
             docs \
             .workbuddy \
-            skills/lib \
-            skills/invest-a-stock \
-            skills/invest-a-gap-scan \
-            skills/invest-a-journal \
-            skills/invest-a-etf \
-            skills/invest-a-pulse \
-            skills/invest-a-pattern-scan \
-            skills/invest-hk-stock \
-            skills/invest-a-discover-scan \
             skills.yaml \
             gemini-extension.json \
             pyproject.toml \
@@ -48,21 +40,33 @@ jobs:
             .env.example \
             LICENSE \
             dist/pkg/
-          # Clean build artifacts from copy (cp -r skills/X → dist/pkg/X)
-          rm -rf \
-            dist/pkg/lib/__pycache__ \
-            dist/pkg/invest-a-stock/__pycache__ \
-            dist/pkg/invest-a-gap-scan/__pycache__ \
-            dist/pkg/invest-a-journal/__pycache__ \
-            dist/pkg/invest-a-etf/__pycache__ \
-            dist/pkg/invest-a-pulse/__pycache__ \
-            dist/pkg/invest-a-pattern-scan/__pycache__ \
-            dist/pkg/invest-hk-stock/__pycache__ \
-            dist/pkg/invest-a-discover-scan/__pycache__ \
-            dist/pkg/.venv
-          find dist/pkg \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' \) -delete
+          # 公开技能 + 共享 lib **保留 skills/ 源布局**（包内路径=仓库路径）：
+          # .claude-plugin/plugin.json 的 "skills": "./skills"、.agents/ 与
+          # .workbuddy 技能链接（../../skills/<name>）以及 README/docs 的
+          # skills/<name>/scripts/<cli>.py 命令都按该布局解析；旧版把 skills/X
+          # 平铺到包根导致 ./skills 缺失、技能链接悬空。invest-a-event-calendar
+          # 已退出公开分发，不在此清单。
+          cp -r \
+            skills/lib \
+            skills/invest-a-stock \
+            skills/invest-a-gap-scan \
+            skills/invest-a-journal \
+            skills/invest-a-etf \
+            skills/invest-a-pulse \
+            skills/invest-a-pattern-scan \
+            skills/invest-hk-stock \
+            skills/invest-a-discover-scan \
+            dist/pkg/skills/
+          # 运行期产物与测试不得进入发布包：tests/、reports/、缓存与编译产物
+          # 在打包前统一清除（旧版仅清 __pycache__ 且路径按压扁布局写错）。
+          find dist/pkg \( \
+            -name '__pycache__' -o -name 'tests' -o -name 'reports' \
+            -o -name '.pytest_cache' -o -name '*.pyc' -o -name '*.pyo' \
+            -o -name '.DS_Store' \
+            \) -prune -exec rm -rf {} +
+          rm -rf dist/pkg/.venv
           cd dist && tar -czf invest-skills-${{ github.ref_name }}.tar.gz -C pkg .
-          rm -rf dist/pkg
+          rm -rf pkg   # 相对 dist（上一步已 cd）——旧版写 dist/pkg 为 no-op，残包污染重跑
           echo "Archive created: dist/invest-skills-${{ github.ref_name }}.tar.gz"
 
       - name: Build WorkBuddy bundle zip

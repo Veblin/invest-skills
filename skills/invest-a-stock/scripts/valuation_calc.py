@@ -878,8 +878,10 @@ def calc_historical_percentile(
 ) -> dict[str, Any]:
     """PE/PB 历史分位计算。
 
-    Tushare daily_basic 对亏损期返回 None/null PE（非负值），
-    无法直接计为负值天数。通过 daily_rows 总数 vs PE 有效样本数的差值推断。
+    Tushare daily_basic 对亏损期常返回 None/null PE（非负值），
+    无法直接计为负值天数；A05-3 起亏损（确证 PE≤0）与缺失（None/NaN/±Inf）
+    由 canonical ``valuation.pe_loss_missing_stats`` 分列统计，判定用**未舍入**
+    合计占比（>30% 触发分位失真保护）。
 
     核心统计（当前值/分位/中位数）委托 lib.valuation.valuation_summary——
     权威引擎单一公式源（缺陷4：消除脚本路径与 lib 路径双份公式漂移）。
@@ -888,26 +890,37 @@ def calc_historical_percentile(
     窗口标签由样本行数经 lib.valuation.valuation_window_label 推断
     （≥1250 交易日即"近5年"）——不再接受 years 参数（死参数，从未参与计算）。
     """
+    # 有日期的真实序列只使用有效日期窗口；无日期的旧合成输入保留兼容路径。
+    dated_rows = [r for r in daily_rows if r.get("trade_date")]
+    if dated_rows:
+        daily_rows = dated_rows
     pe_seq = []
     pb_seq = []
-    pe_none_count = 0  # PE=None 的行数（通常对应亏损期）
+    pe_loss_window: list[Any] = []  # 有效日期窗口（trade_date 真值行）的 PE 值
+    all_pe_values: list[Any] = []
     for r in daily_rows:
-        pe_v = safe_float(r.get("pe_ttm") or r.get("pe"))
+        raw_pe = r.get("pe_ttm")
+        if raw_pe is None:
+            raw_pe = r.get("pe")
+        all_pe_values.append(raw_pe)
+        pe_v = safe_float(raw_pe)
         pb_v = safe_float(r.get("pb"))
-        if pe_v is None:
-            pe_none_count += 1
-        elif pe_v > 0:
+        if r.get("trade_date"):
+            pe_loss_window.append(raw_pe)
+        if pe_v is not None and pe_v > 0:
             pe_seq.append(pe_v)
-        else:
-            pe_none_count += 1  # PE ≤ 0 也算不可用
         if pb_v is not None and pb_v > 0:
             pb_seq.append(pb_v)
 
     if not pe_seq and not pb_seq:
         return {"error": "PE/PB 历史数据不足"}
+    if not pe_loss_window:
+        # 无日期信息（合成/旧输入）→ 退回全量值序列（与 valuation_summary 缺省窗口一致）
+        pe_loss_window = all_pe_values
 
     total_daily = len(daily_rows)
     from lib.valuation import (
+        pe_loss_missing_stats as _pe_loss_missing_stats,
         valuation_summary as _lib_valuation_summary,
         valuation_window_label,
     )
@@ -915,7 +928,8 @@ def calc_historical_percentile(
     _first_d, _last_d = (min(_dates), max(_dates)) if _dates else (None, None)
     vs = _lib_valuation_summary(
         pe_seq, pb_seq,
-        window_label=valuation_window_label(total_daily, _first_d, _last_d))
+        window_label=valuation_window_label(total_daily, _first_d, _last_d),
+        pe_loss_window=pe_loss_window)
 
     result: dict[str, Any] = {"n_samples": total_daily, "warnings": list(vs.get("warnings") or [])}
 
@@ -925,12 +939,17 @@ def calc_historical_percentile(
         n = len(pe_seq)
         mu = sum(pe_seq) / n
         sigma = math.sqrt(sum((v - mu) ** 2 for v in pe_seq) / n)
-        pe_neg_inferred = pe_none_count
-        pe_neg_pct = pe_neg_inferred / total_daily if total_daily > 0 else 0.0
+        # 亏损/缺失分列（同一 canonical；窗口 = 有效日期行；min_samples=0 保留计数）
+        stats = _pe_loss_missing_stats(pe_loss_window, min_samples=0) or {}
+        pe_neg_inferred = int(stats.get("nonpos_or_missing_days", 0) or 0)
+        pe_neg_pct = float(stats.get("nonpos_or_missing_ratio", 0.0) or 0.0)
         result.update({
             "pe_valid": n,
             "pe_none_or_neg": pe_neg_inferred,
             "pe_neg_pct": round(pe_neg_pct, 4),
+            "pe_loss_confirmed_days": int(stats.get("n_loss", 0) or 0),
+            "pe_missing_days": int(stats.get("n_missing", 0) or 0),
+            "pe_nonpos_or_missing_ratio": pe_neg_pct,  # 未舍入（阈值判定用）
             "pe_current": current_pe,
             "pe_pct": round(pe["pct"], 1) if pe.get("pct") is not None else None,
             "pe_median": pe.get("median"),
@@ -939,9 +958,11 @@ def calc_historical_percentile(
             "pe_plus_1sigma": round(mu + sigma, 2) if sigma else None,
             "pe_minus_1sigma": round(mu - sigma, 2) if sigma else None,
         })
-        if pe_neg_pct > 0.3:
+        if pe_neg_pct > 0.3:  # 未舍入判定
             result["warnings"].append(
-                f"PE 历史序列中约 {pe_neg_pct * 100:.0f}% 交易日 PE 不可得（通常为亏损期），"
+                f"PE 历史序列中约 {pe_neg_pct * 100:.0f}% 交易日 "
+                f"PE 非正或不可得（其中非正 PE≤0 {stats.get('n_loss', 0)} 日、"
+                f"PE 缺失 {stats.get('n_missing', 0)} 日；PE≤0 不确证财务亏损），"
                 f"PE 分位数仅作位置参考，不反映估值贵贱。PB 分位更有参考价值。"
             )
 
@@ -1021,12 +1042,12 @@ def calc_opportunity_cost(pe: float | None, rf_10y: float | None) -> dict:
     （ERP 另有含权益风险溢价的定义口径）。E/P 高于 10Y 越多，估值相对债券
     越便宜；倒挂（利差 < 0）说明市场把大部分收益押注在增长预期上。
 
-    pe<=0（亏损期）或 rf 缺失 → available=False，标注不可得。
+    pe<=0（非正 PE，不确证财务亏损）或 rf 缺失 → available=False，标注不可得。
     """
     if pe is None or pe <= 0 or rf_10y is None:
         reasons: list[str] = []
         if pe is None or pe <= 0:
-            reasons.append("PE 非正（亏损期或无有效 PE）")
+            reasons.append("PE 非正或不可得（无有效正 PE）")
         if rf_10y is None:
             reasons.append("中国 10Y 国债收益率不可得")
         return {
@@ -1101,17 +1122,19 @@ def multi_scenario_valuation(
     """多情景多方法估值综合计算。
 
     估值倍数选择策略：
-      - PE 法：当历史亏损期占比 >30% 时，历史 PE 中位数失真，
+      - PE 法：当历史 PE 非正或缺失占比 >30% 时，历史 PE 中位数失真，
         使用 Gordon 模型反推的合理 PE（基于不同 g 假设）代替。
       - PB 法：始终使用历史 PB 中位数（PB 不受盈亏影响，更稳健）。
       - 盈利收益法：直接使用 Gordon 模型 fair_pe。
 
     Args:
-        pe_negative_pct: PE 序列中亏损期占比（0-1），>0.3 时触发 PE 中位数失真保护
+        pe_negative_pct: 有效日期窗口内 PE **非正或缺失**占比（0-1，未舍入；
+            A05-3 起由 valuation.pe_loss_missing_stats 计算，缺失不单列为亏损），
+            >0.3 时触发 PE 中位数失真保护
     """
     r = rf + erp
 
-    # 判断 PE 中位数是否失真（亏损期占比 > 30%）
+    # 判断 PE 中位数是否失真（非正或缺失占比 > 30%，未舍入判定）
     pe_median_distorted = pe_negative_pct > 0.3
     if pe_median_distorted:
         # 使用 Gordon 模型合理 PE 代替失真的历史 PE 中位数
@@ -1400,7 +1423,10 @@ def run_valuation(
     if price and ttm_eps and bvps and rf:
         pe_median = result.percentile.get("pe_median", 15)
         pb_median = result.percentile.get("pb_median", 2.0)
-        pe_neg_pct = result.percentile.get("pe_neg_pct", 0.0)
+        # 未舍入合计占比优先（A05-3）；旧缓存/旧结果形态回退到 4dp 字段
+        pe_neg_pct = result.percentile.get("pe_nonpos_or_missing_ratio")
+        if pe_neg_pct is None:
+            pe_neg_pct = result.percentile.get("pe_neg_pct", 0.0)
         result.scenarios = multi_scenario_valuation(
             price=price, ttm_eps=ttm_eps, bvps=bvps,
             rf=rf, erp=erp,
@@ -1689,7 +1715,7 @@ def _format_section_scenarios(result: ValuationResult, lines: list[str]) -> None
         lines.append(f"  PB 中位数 (参考) = {sc.get('pb_median_ref', '?'):.1f}x")
         if sc.get("pe_median_distorted"):
             lines.append(f"  ⚠️  PE 中位数 ({sc.get('pe_median_ref', '?'):.1f}x) 已失真"
-                         f"（历史 {sc.get('pe_negative_pct', 0):.0f}% 交易日亏损），")
+                         f"（历史 {sc.get('pe_negative_pct', 0):.0f}% 交易日 PE 非正或缺失），")
             lines.append(f"      改用 Gordon 模型合理 PE 代替（基于 g 假设 + r）")
         else:
             lines.append(f"  PE 中位数 (参考) = {sc.get('pe_median_ref', '?'):.1f}x")

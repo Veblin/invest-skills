@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,34 @@ import pytest
 from etf_data import _spot_row_to_quote
 
 _ETF_PY = Path(__file__).resolve().parent.parent / "scripts" / "etf.py"
+
+
+@pytest.fixture(autouse=True)
+def _offline_bridge_guard(monkeypatch):
+    """防联网断言：本文件全部用例离线（模块契约“no live network”）。
+
+    未替换的取数腿一旦到达 ``etf_data._bridge_get``（data_bridge 缓存 miss
+    即回源外网）→ 立即 AssertionError 阻断外呼；同时记录命中，用例结束仍有
+    命中即断言失败（部分调用方会把异常折成 missing 降级——如
+    ``_persist_index_pe`` 的 except ——故只抛出不保证用例失败，必须叠加
+    teardown 断言）。2026-10-11 现场：普通 report 桩未替换
+    ``_persist_index_pe``，510300 经 CSINDEX_MAP 触发指数 PE 取数，测试挂起
+    5min（诊断见 host-docs/etf-round/r9-spy-proof.log）。需要真实桥行为的
+    用例必须显式 monkeypatch 覆盖本守卫（如
+    test_flow_fixes_reach_sealed_report_html_and_qc 的 bridge 桩）。
+    """
+    import etf_data
+
+    hits: list[str] = []
+
+    def _forbidden(getter, *args, **kwargs):
+        hits.append(f"{getter}{args}")
+        raise AssertionError(
+            f"test_etf_cli 用例不得经 data_bridge 取数（未离线的腿）: {getter}{args}")
+
+    monkeypatch.setattr(etf_data, "_bridge_get", _forbidden)
+    yield
+    assert not hits, f"用例未离线：取数腿到达 data_bridge（会回源联网）: {hits}"
 
 
 def _load_etf_module():
@@ -52,13 +81,236 @@ def test_diagnose_ok():
     assert main(["diagnose"]) == 0
 
 
+def _stub_report_collection(monkeypatch, mod, seen: dict):
+    """report 采集腿全 stub（离线）；记录 share_days 与 extra dims 入参。"""
+    monkeypatch.setattr(mod, "prefetch_etf_spot", lambda: None)
+    monkeypatch.setattr(mod, "query_etf_data", lambda sym: {})
+    monkeypatch.setattr(mod, "query_etf_quote", lambda sym: {})
+    monkeypatch.setattr(mod, "query_etf_kline", lambda sym: {"status": "ok"})
+
+    def fake_index_pe(idx_codes):
+        # R9：报告采集阶段真实入口（510300→["000300"]）；不替换会经
+        # data_bridge 回源取指数 PE。记录入参证明本桩确实截住了该腿。
+        seen.setdefault("index_pe_calls", []).append(idx_codes)
+        return {"error": None}
+
+    monkeypatch.setattr(mod, "_persist_index_pe", fake_index_pe)
+
+    def fake_share(sym, days=20):
+        seen["share_days"] = days
+        return {"available": True,
+                "rows": [{"date": "20260901", "shares": 100.0, "flow_est": None}],
+                "summary": {"row_count": 1, "window_days": days,
+                            "flow_window": None, "share_total_change": None,
+                            "share_change_pct": None, "total_flow_est": None,
+                            "avg_amount_e": None, "trend": "数据不足"}}
+
+    monkeypatch.setattr(mod, "query_etf_share_history", fake_share)
+    monkeypatch.setattr(mod, "compute_etf_tracking", lambda sym: {"status": "missing_nav"})
+    monkeypatch.setattr(mod, "query_etf_fees", lambda sym: {"status": "unverified"})
+    monkeypatch.setattr(mod, "query_etf_est_net_assets", lambda sym: {"status": "missing"})
+    monkeypatch.setattr(mod, "build_data_status", lambda **kw: {})
+
+    def fake_extra(symbol, *, peers=None, share_days=20):
+        seen["peers"] = peers
+        seen["extra_share_days"] = share_days
+        return {"holdings": {"available": True},
+                "peers": {"available": True,
+                          "flow": {"window_days": share_days, "rows": []}},
+                "sector_flow": {"available": False}}
+
+    monkeypatch.setattr(mod, "_html_extra_dims", fake_extra)
+
+
+def test_report_seals_explicit_peers_and_long_share_window(tmp_path, monkeypatch, capsys):
+    """A4：一次封存显式 --peers 与较长份额序列（--share-days 120）；
+    `--json --payload-out` 下 share_history 必须带全量 rows（引用行同代封存）。"""
+    mod = _load_etf_module()
+    seen: dict = {}
+    _stub_report_collection(monkeypatch, mod, seen)
+    path = tmp_path / "2026-10-10-12-00-00.payload.json"
+    rc = mod.main(["report", "513600", "--json", "--payload-out", str(path),
+                   "--peers", "513600,513660,513210", "--share-days", "120"])
+    assert rc == 0
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert seen["share_days"] == 120
+    assert seen["peers"] == ["513600", "513660", "513210"]
+    assert seen["extra_share_days"] == 120
+    # 封存路径：rows 不得被摘要化（旧行为 --json 无 --with-nav → rows 丢失）
+    assert payload["share_history"]["rows"]
+    assert payload["peers"]["flow"]["window_days"] == 120
+
+
+def test_report_default_flags_keep_legacy_shape(monkeypatch, capsys):
+    """A4 兼容：不传新旗标时行为不变——share_days=20；普通 --json 仍摘要（rows 省略）。"""
+    mod = _load_etf_module()
+    seen: dict = {}
+    _stub_report_collection(monkeypatch, mod, seen)
+    assert mod.main(["report", "510300", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert seen["share_days"] == 20
+    assert "rows" not in payload["share_history"]      # 兼容摘要形状
+    # R9：510300 在 CSINDEX_MAP → 采集阶段持久化腿被桩截住（入参=本标的指数，
+    # 离线；未替换时真实入口会经 data_bridge 回源取指数 PE）
+    assert seen["index_pe_calls"] == [["000300"]]
+
+
+def test_report_share_days_out_of_range_exit_2(capsys):
+    mod = _load_etf_module()
+    assert mod.main(["report", "510300", "--share-days", "500"]) == 2
+    assert mod.main(["report", "510300", "--share-days", "1"]) == 2
+    assert "share-days" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("unconfirmed_peer", [False, True])
+def test_flow_fixes_reach_sealed_report_html_and_qc(
+        tmp_path, monkeypatch, capsys, unconfirmed_peer):
+    """真实计算经 report 封存、HTML 只读渲染和 QC：数据源使用离线反例。"""
+    import etf_data
+    import etf_peers
+    from report_qc import etf_generation_findings
+
+    dates = [f"202604{d:02d}" for d in
+             [1, 2, 3, 6, 7, 8, 9, 10, 13, 14, 15, 16, 17, 20, 21, 22]]
+
+    def bridge(getter, code):
+        assert getter == "get_etf_share_history"
+        daily = [{"trade_date": d, "close": 8.0 if d < "20260421" else 4.0}
+                 for d in dates]
+        if code == "513660":
+            shares = [100_000.0] + [115_000.0] * 12 + [240_000.0] * 3
+        elif unconfirmed_peer:
+            shares = [100_000.0] * 14 + [220_000.0] * 2
+        else:
+            shares = [100_000.0] * 15 + [None]
+        return {"status": "ok", "fund_daily": daily,
+                "fund_share": [{"trade_date": d, "fd_share": s}
+                               for d, s in zip(dates, shares) if s is not None]}
+
+    monkeypatch.setattr(etf_data, "_bridge_get", bridge)
+    monkeypatch.setattr(etf_peers, "query_etf_kline", lambda *a, **kw: {})
+    monkeypatch.setattr(etf_peers, "_lookup_etf_spot_row", lambda s: (None, "offline"))
+    monkeypatch.setattr(etf_peers, "_peer_name", lambda s: s)
+    mod = _load_etf_module()
+    _stub_report_collection(monkeypatch, mod, {})
+    monkeypatch.setattr(mod, "_persist_index_pe", lambda *a: {"error": None})
+    monkeypatch.setattr(mod, "query_etf_share_history", etf_data.query_etf_share_history)
+    monkeypatch.setattr(mod, "_html_extra_dims", lambda symbol, peers, share_days: {
+        "peers": etf_peers.query_etf_peers(symbol, peers, share_days=share_days)})
+    stem = "2026-10-10-12-00-00"
+    payload_path = tmp_path / f"{stem}.payload.json"
+    assert mod.main(["report", "513660", "--json", "--payload-out", str(payload_path),
+                     "--peers", "513600", "--share-days", "15"]) == 0
+    capsys.readouterr()
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    flow = payload["peers"]["flow"]
+    main_row = flow["rows"][0]
+    assert main_row["flow_total_e"] == 16.0
+    assert main_row["flow_5d_e"] == 4.0
+    assert flow["common_window"]["confirmable"] is False
+    assert flow["common_window_note"]
+    if unconfirmed_peer:
+        assert flow["common_window"]["all_products_same_window"] is True
+        assert flow["rows"][1]["confirmable"] is False
+    split_row = next(r for r in payload["share_history"]["rows"]
+                     if r["date"] == "20260420")
+    assert split_row["flow_est"] == 4.0
+    assert split_row["close"] == 8.0 and split_row["close_split_adj"] == 4.0
+    md_path = tmp_path / f"{stem}.md"
+    md = ("# 离线回归产物（513660）\n\n> 不构成投资建议。\n\n"
+          "| 代码 | 15日资金流(亿) | 近5日(亿) |\n|---|---:|---:|\n"
+          f"| 513660 | {main_row['flow_total_e']} | {main_row['flow_5d_e']} |\n\n"
+          f"{flow['common_window_note']}\n\n> 不构成投资建议。\n")
+    md_path.write_text(md, encoding="utf-8")
+    assert mod.cmd_html("513660", md_path=str(md_path),
+                        payload_path=str(payload_path), no_open=True) == 0
+    html = md_path.with_suffix(".html").read_text(encoding="utf-8")
+    assert flow["common_window_note"] in html.split("<script", 1)[0]
+    if unconfirmed_peer:
+        assert "窗口份额流不可确认" in html.split("<script", 1)[0]
+        assert "（可确认段小计）" in html.split("<script", 1)[0]
+    assert not any(f["id"].startswith("etf-peer")
+                   for f in etf_generation_findings(md_path))
+    if unconfirmed_peer:
+        md_path.write_text(md + "\n[分析] 本标的份额变化组内最小。\n", encoding="utf-8")
+        assert any(f["id"] == "etf-extreme-window-unverified" and f["severity"] == "error"
+                   for f in etf_generation_findings(md_path))
+    md_path.write_text(md.replace("| 513660 | 16.0", "| 513660 | 4.0"), encoding="utf-8")
+    assert any(f["id"] == "etf-peer-row-mismatch"
+               and "flow_total_e" in f["message"] for f in etf_generation_findings(md_path))
+    md_path.write_text(md, encoding="utf-8")
+
+
+def test_unregistered_jump_report_seal_replay_preserves_uncertainty(
+        tmp_path, monkeypatch, capsys):
+    import etf_data
+
+    dates = ["20260417", "20260420", "20260421", "20260422"]
+    def bridge(getter, symbol):
+        assert getter == "get_etf_share_history" and symbol == "513600"
+        return {"status": "ok",
+                "fund_daily": [{"trade_date": d, "close": 8} for d in dates],
+                "fund_share": [{"trade_date": d, "fd_share": shares}
+                               for d, shares in zip(dates, [10000, 10000, 22000, 22000])]}
+
+    monkeypatch.setattr(etf_data, "_bridge_get", bridge)
+    mod = _load_etf_module()
+    _stub_report_collection(monkeypatch, mod, {})
+    monkeypatch.setattr(mod, "query_etf_share_history", etf_data.query_etf_share_history)
+    monkeypatch.setattr(mod, "_persist_index_pe", lambda *a: {"error": None})
+    stem = "2026-10-11-12-00-00"
+    payload_path = tmp_path / f"{stem}.payload.json"
+    args = ["report", "513600", "--share-days", "3"]
+    assert mod.main(args + ["--json", "--payload-out", str(payload_path)]) == 0
+    capsys.readouterr()
+    frozen = payload_path.read_bytes()
+    summary = json.loads(frozen)["share_history"]["summary"]
+    assert summary["flow_window"]["confirmable"] is False
+    assert summary["total_flow_est"] == 0
+    assert mod.main(args) == 0
+    text = capsys.readouterr().out
+    assert "窗口不可确认" in text and "可确认段小计" in text
+    assert "资金面平稳" not in text
+    md_path = tmp_path / f"{stem}.md"
+    md_path.write_text("# 离线回归（513600）\n\n> 不构成投资建议。\n\n"
+                       "窗口不可确认，流量为可确认段小计。\n\n> 不构成投资建议。\n",
+                       encoding="utf-8")
+    monkeypatch.setattr(mod, "query_etf_share_history",
+                        lambda *a, **kw: pytest.fail("封存回放不得回采"))
+    assert mod.cmd_html("513600", md_path=str(md_path),
+                        payload_path=str(payload_path), no_open=True) == 0
+    html = md_path.with_suffix(".html").read_text(encoding="utf-8")
+    hero = html.split('id="hero-summary"', 1)[1].split('<section', 1)[0]
+    assert "不可确认" in hero and "可确认段小计" in hero
+    assert "资金面平稳" not in hero
+    assert summary["flow_window"]["note"] in hero
+    assert payload_path.read_bytes() == frozen
+
+
+def test_peers_cli_default_window(monkeypatch, capsys):
+    mod = _load_etf_module()
+    seen = []
+
+    def query(symbol, peers, *, share_days):
+        seen.append(share_days)
+        return {"available": True, "flow": {"window_days": share_days, "rows": []}}
+
+    monkeypatch.setattr("etf_peers.query_etf_peers", query)
+    assert mod.main(["peers", "159920", "--json"]) == 0
+    assert seen == [20]
+
+
 def test_cmd_report_none_pct_chg_no_crash(monkeypatch, capsys):
     """停牌 ETF 行 pct_chg=None / summary 字段 None → '-' 占位，不崩溃（缺陷 6）。
 
     修复前 f-string 格式说明符直接格式化 None（{r.get('pct_chg', 0):>+7.2f}
     等）→ TypeError 崩溃；None 须输出占位符 '-'。
+    R9：510300 在 CSINDEX_MAP → 采集阶段 compute_etf_tracking /
+    _persist_index_pe / query_etf_est_net_assets 三条腿均须桩替换（否则经
+    data_bridge 回源联网；autouse 守卫会直接判失败而不是外呼等待）。
     """
     mod = _load_etf_module()
+    seen: dict = {}
     monkeypatch.setattr(mod, "prefetch_etf_spot", lambda: None)
     monkeypatch.setattr(mod, "query_etf_data", lambda sym: {})
     monkeypatch.setattr(
@@ -80,11 +332,20 @@ def test_cmd_report_none_pct_chg_no_crash(monkeypatch, capsys):
                         "avg_amount_e": None, "share_total_change": None},
         },
     )
+    monkeypatch.setattr(mod, "compute_etf_tracking", lambda sym: {"status": "missing_nav"})
+    monkeypatch.setattr(mod, "query_etf_est_net_assets", lambda sym: {"status": "missing"})
+
+    def fake_index_pe(idx_codes):
+        seen.setdefault("index_pe_calls", []).append(idx_codes)
+        return {"error": None}
+
+    monkeypatch.setattr(mod, "_persist_index_pe", fake_index_pe)
     rc = mod.cmd_report("510300", as_json=False, with_nav=False)
     out = capsys.readouterr().out
     assert rc == 0
     assert "      -" in out  # pct_chg None → '-' 占位（列宽对齐 7）
     assert "合计: - 亿" in out  # summary 字段 None → '-'
+    assert seen["index_pe_calls"] == [["000300"]]  # 持久化腿被桩截住（离线）
 
 
 def test_spot_row_to_quote_maps_fields():
@@ -189,7 +450,7 @@ def test_cmd_peers_unmapped_hints_explicit(monkeypatch, capsys):
     mod = _load_etf_module()
     monkeypatch.setattr(
         "etf_peers.query_etf_peers",
-        lambda s, peers: {
+        lambda s, peers, **kw: {
             "symbol": s, "available": False, "peers": [],
             "peer_source": "etf_to_sw_industry",
             "note": "未映射申万行业（ETF_TO_SW_INDUSTRY 无此代码），请用 --peers 显式指定",
@@ -200,24 +461,65 @@ def test_cmd_peers_unmapped_hints_explicit(monkeypatch, capsys):
     assert "--peers" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("days", [20, 60, 120])
+def test_peers_cli_forwards_share_window(monkeypatch, capsys, days):
+    mod = _load_etf_module()
+    seen = {}
+
+    def query(symbol, peers, *, share_days=20):
+        seen.update(symbol=symbol, peers=peers, share_days=share_days)
+        return {"symbol": symbol, "available": True,
+                "flow": {"window_days": share_days, "rows": []}}
+
+    monkeypatch.setattr("etf_peers.query_etf_peers", query)
+    assert mod.main(["peers", "159920", "--json", "--peers", "513660",
+                     "--share-days", str(days)]) == 0
+    assert seen == {"symbol": "159920", "peers": ["513660"], "share_days": days}
+    assert json.loads(capsys.readouterr().out)["peers"]["flow"]["window_days"] == days
+
+
+@pytest.mark.parametrize("days", [1, 201])
+def test_peers_window_validation_precedes_collection(monkeypatch, capsys, days):
+    mod = _load_etf_module()
+
+    def unexpected(*a, **kw):
+        pytest.fail("invalid window must not collect")
+
+    monkeypatch.setattr("etf_peers.query_etf_peers", unexpected)
+    assert mod.cmd_peers("159920", as_json=True, peers_str=None, share_days=days) == 2
+    assert "--share-days" in capsys.readouterr().err
+
+
 def test_cmd_peers_table_and_rs(monkeypatch, capsys):
     mod = _load_etf_module()
     fake = {
         "symbol": "159206", "available": True, "peers": ["512660"],
         "peer_source": "etf_to_sw_industry:801740 国防军工",
-        "flow": {"window_days": 20, "rows": [
-            {"symbol": "159206", "flow_20d_e": -31.45, "flow_5d_e": 0.99,
-             "share_change_pct": -16.93, "trend": "🔴 持续净流出", "note": None},
+        "flow": {"window_days": 20,
+                 "common_window_note": "组内比较受限：产品窗口起止不一致",
+                 "rows": [
+            {"symbol": "159206", "flow_total_e": -31.45, "flow_20d_e": -31.45,
+             "flow_5d_e": 0.99,
+             "share_change_pct": -16.93, "share_change_span": 19,
+             "window_days": 20,
+             "flow_window": {"start": "20260901", "end": "20260930",
+                             "segments": 19, "trading_days": 20,
+                             "missing_share_days": 1},
+             "trend": "🔴 持续净流出", "note": None},
         ]},
         "rs": {"rs_latest": 94.27, "rs_window_start": 100.96,
                "rs_change": -6.69,
                "rank_20d": {"rank": 3, "total": 3}},
         "names": {"159206": "卫星ETF永赢"}, "notes": [],
     }
-    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
+    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers, **kw: fake)
     assert mod.cmd_peers("159206", as_json=False, peers_str=None) == 0
     out = capsys.readouterr().out
-    assert "20日流" in out
+    assert "窗口流" in out
+    assert "20 日窗口" in out
+    assert "组内比较受限：产品窗口起止不一致" in out
+    # A3：共同起止与实际覆盖逐行披露（窗内缺份额日显式标注）
+    assert "共同起止 20260901~20260930（19 段/20 交易日，窗内缺份额 1 日） ⚠" in out
     assert "rs_latest 94.27" in out
     assert "rs_window_start 100.96" in out
     assert "20日收益排名 3/3" in out
@@ -230,7 +532,7 @@ def test_cmd_peers_json_contains_flow(monkeypatch, capsys):
         "peer_source": "explicit", "flow": {"window_days": 20, "rows": []},
         "rs": None, "names": {}, "notes": [],
     }
-    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: fake)
+    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers, **kw: fake)
     assert mod.cmd_peers("159206", as_json=True, peers_str="512660") == 0
     assert '"peer_source": "explicit"' in capsys.readouterr().out
 
@@ -394,19 +696,39 @@ class _WebBrowserStub:
         return True
 
 
+def _write_sealed_payload(md: Path, symbol: str = "515050") -> Path:
+    """在 md 同目录写已封存 payload（`<ts>.payload.json`；B05 同代输入）。"""
+    from etf_generation import seal_etf_payload
+
+    payload = {"skill": "invest-a-etf", "generated_at": "2026-08-01T10:00:00+08:00",
+               "symbol": symbol}
+    seal_etf_payload(payload)
+    p = md.parent / f"{md.stem}.payload.json"
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return p
+
+
 def _html_mocks(monkeypatch, tmp_path, content: str = "# 测试\n"):
-    """cmd_html 全 mock 基座：建临时 md + 采集/渲染全桩，返回 (mod, md, wb)。"""
+    """cmd_html mock 基座：临时 md + 冻结 payload + 渲染桩，返回 (mod, md, payload, wb)。
+
+    v0.3.2 B05 纠偏：HTML 只读冻结 payload——不再有 `_collect_report_payload` /
+    `_html_extra_dims` 采集路径（两者置炸弹，被调用即失败）。
+    """
     md = tmp_path / "2026-08-01-10-00-00.md"
     md.write_text(content, encoding="utf-8")
+    payload_path = _write_sealed_payload(md)
     mod = _load_etf_module()
-    monkeypatch.setattr(mod, "_collect_report_payload",
-                        lambda symbol, **kw: {"symbol": symbol})
-    monkeypatch.setattr(mod, "_html_extra_dims", lambda s: {})
+
+    def _boom(*a, **kw):
+        raise AssertionError("HTML 路径不得采集数据（B05：只读冻结 payload）")
+
+    monkeypatch.setattr(mod, "_collect_report_payload", _boom)
+    monkeypatch.setattr(mod, "_html_extra_dims", _boom)
     monkeypatch.setattr("etf_html.render_etf_html",
-                        lambda payload, md_text=None: "HTML_BODY_MARKER")
+                        lambda payload, md_text=None, generation=None: "HTML_BODY_MARKER")
     wb = _WebBrowserStub()
     monkeypatch.setattr(mod, "webbrowser", wb)
-    return mod, md, wb
+    return mod, md, payload_path, wb
 
 
 def test_cli_html_help_exit_0():
@@ -426,35 +748,142 @@ def test_cli_html_invalid_symbol_exit_2():
     assert main(["html", "12345"]) == 2
 
 
-def test_cmd_html_fetches_full_payload(monkeypatch, tmp_path):
-    """cmd_html 强制 with_nav/history/playbook 全开（HTML 需要完整 rows 与统计）。"""
-    mod, md, _ = _html_mocks(monkeypatch, tmp_path)
-    kw_seen: dict = {}
+def test_cmd_html_zero_collection_and_generation_passed(monkeypatch, tmp_path, capsys):
+    """HTML 只读冻结 payload：零采集调用；渲染器收到 generation（同代哈希）。"""
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    seen: dict = {}
 
-    def fake_collect(symbol, **kw):
-        kw_seen.update(kw)
-        return {"symbol": symbol}
+    def fake_render(payload, md_text=None, generation=None):
+        seen["payload"] = payload
+        seen["generation"] = generation
+        return "HTML_BODY_MARKER"
 
-    monkeypatch.setattr(mod, "_collect_report_payload", fake_collect)
-    mod.cmd_html("515050", md_path=str(md), no_open=True)
-    assert kw_seen["with_nav"] is True
-    assert kw_seen["history"] is True
-    assert kw_seen["playbook"] is True
-    assert kw_seen["history_days"] == 250
+    monkeypatch.setattr("etf_html.render_etf_html", fake_render)
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 0
+    assert seen["payload"]["symbol"] == "515050"
+    gen = seen["generation"]
+    assert gen["same_generation"] is True
+    assert gen["payload_hash"] == seen["payload"]["_meta"]["payload_hash"]
+    out = capsys.readouterr().out
+    assert "同代输入" in out
+
+
+def test_cmd_html_requires_payload_fail_loud(monkeypatch, tmp_path, capsys):
+    """B05 纠偏：缺 --payload → rc 2（退出重采路径，不允许非同代渲染）。"""
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    assert mod.cmd_html("515050", md_path=str(md), no_open=True) == 2
+    err = capsys.readouterr().err
+    assert "需要 --payload" in err
+
+
+def test_cmd_html_payload_symbol_mismatch_rc2(monkeypatch, tmp_path, capsys):
+    """已正确封存但标的错（symbol 不一致）→ rc 2。"""
+    from etf_generation import seal_etf_payload
+
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    data = json.loads(payload_path.read_text(encoding="utf-8"))
+    data["symbol"] = "510300"
+    seal_etf_payload(data)  # 重新封存：哈希自洽，专门触发 symbol 校验分支
+    payload_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 2
+    assert "≠ 请求标的" in capsys.readouterr().err
+
+
+def test_cmd_html_payload_corrupt_rc2(monkeypatch, tmp_path, capsys):
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    payload_path.write_text("{broken json", encoding="utf-8")
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 2
+    assert "payload JSON" in capsys.readouterr().err
+
+
+def test_cmd_html_payload_ts_mismatch_rc2(monkeypatch, tmp_path, capsys):
+    """payload 与 md 的 ts 不对应 → rc 2（同代配对铁律）。"""
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
+    other = tmp_path / "2026-08-02-10-00-00.payload.json"
+    other.write_text(payload_path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(other),
+                        no_open=True) == 2
+    assert "不配对" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("path_form", ["relative_md", "auto_md", "relative_payload",
+                                      "parent_component"])
+def test_html_cli_accepts_equivalent_directory_paths(monkeypatch, tmp_path, path_form):
+    """Equivalent path spellings must reach real rendering with the frozen input."""
+    mod = _load_etf_module()
+    monkeypatch.chdir(tmp_path)
+    report_dir = tmp_path / "reports" / "515050-通信ETF"
+    report_dir.mkdir(parents=True)
+    md = report_dir / "2026-08-01-10-00-00.md"
+    md.write_text("# PATH_PAIR_MARKER\n", encoding="utf-8")
+    payload_path = _write_sealed_payload(md)
+    payload_bytes = payload_path.read_bytes()
+    payload = json.loads(payload_bytes)
+
+    def no_collection(*args, **kwargs):
+        pytest.fail("html must render the frozen payload without collecting data")
+
+    monkeypatch.setattr(mod, "_collect_report_payload", no_collection)
+    monkeypatch.setattr(mod, "_html_extra_dims", no_collection)
+    md_arg = str(md)
+    payload_arg = str(payload_path)
+    if path_form == "relative_md":
+        md_arg = str(md.relative_to(tmp_path))
+    elif path_form == "relative_payload":
+        payload_arg = str(payload_path.relative_to(tmp_path))
+    elif path_form == "parent_component":
+        payload_arg = str(report_dir / ".." / report_dir.name / payload_path.name)
+    args = ["html", "515050", "--payload", payload_arg, "--no-open"]
+    if path_form != "auto_md":
+        args.extend(["--md", md_arg])
+    assert mod.main(args) == 0
+
+    html = md.with_suffix(".html").read_text(encoding="utf-8")
+    assert "PATH_PAIR_MARKER" in html
+    assert f'<meta name="invest-generation" content="{payload["_meta"]["payload_hash"]}">' in html
+    assert payload_path.read_bytes() == payload_bytes
+
+
+@pytest.mark.parametrize("mismatch", ["directory", "filename"])
+def test_html_cli_rejects_distinct_artifact_pairs(monkeypatch, tmp_path, capsys, mismatch):
+    """Normalizing paths must retain the directory and timestamp pairing gates."""
+    mod = _load_etf_module()
+    monkeypatch.chdir(tmp_path)
+    report_dir = tmp_path / "reports" / "515050-通信ETF"
+    report_dir.mkdir(parents=True)
+    md = report_dir / "2026-08-01-10-00-00.md"
+    md.write_text("# 报告\n", encoding="utf-8")
+    payload_path = _write_sealed_payload(md)
+    if mismatch == "directory":
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        other = other_dir / payload_path.name
+    else:
+        other = report_dir / "2026-08-02-10-00-00.payload.json"
+    other.write_bytes(payload_path.read_bytes())
+
+    assert mod.main(["html", "515050", "--md", str(md.relative_to(tmp_path)),
+                     "--payload", str(other), "--no-open"]) == 2
+    assert "不配对" in capsys.readouterr().err
+    assert not md.with_suffix(".html").exists()
 
 
 def test_cmd_html_writes_and_opens(monkeypatch, capsys, tmp_path):
     """写文件 + webbrowser.open 一次（file:// URI、new=2）；md 全文传给渲染器。"""
-    mod, md, wb = _html_mocks(monkeypatch, tmp_path)
+    mod, md, payload_path, wb = _html_mocks(monkeypatch, tmp_path)
     seen: dict = {}
 
-    def fake_render(payload, md_text=None):
+    def fake_render(payload, md_text=None, generation=None):
         seen["md_text"] = md_text
         return "HTML_BODY_MARKER"
 
     monkeypatch.setattr("etf_html.render_etf_html", fake_render)
     out = tmp_path / "x.html"
-    assert mod.cmd_html("515050", md_path=str(md), out_path=str(out)) == 0
+    assert mod.cmd_html("515050", md_path=str(md), out_path=str(out),
+                        payload_path=str(payload_path)) == 0
     capsys_out = capsys.readouterr().out
     assert "HTML 报告:" in capsys_out
     assert out.read_text(encoding="utf-8") == "HTML_BODY_MARKER"
@@ -468,17 +897,18 @@ def test_cmd_html_writes_and_opens(monkeypatch, capsys, tmp_path):
 
 def test_cmd_html_default_out_same_dir(monkeypatch, tmp_path):
     """缺省 --out：与 md 同目录同名 .html。"""
-    mod, md, wb = _html_mocks(monkeypatch, tmp_path)
-    assert mod.cmd_html("515050", md_path=str(md), no_open=True) == 0
+    mod, md, payload_path, wb = _html_mocks(monkeypatch, tmp_path)
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path),
+                        no_open=True) == 0
     assert (tmp_path / "2026-08-01-10-00-00.html").exists()
     assert wb.calls == []  # --no-open 未触发打开
 
 
 def test_cmd_html_open_false_hints_stderr(monkeypatch, capsys, tmp_path):
     """open 返回 False → stderr 回退提示，rc 仍 0（WB 无浏览器等场景）。"""
-    mod, md, _ = _html_mocks(monkeypatch, tmp_path)
+    mod, md, payload_path, _ = _html_mocks(monkeypatch, tmp_path)
     monkeypatch.setattr(mod, "_open_browser", lambda p: False)
-    assert mod.cmd_html("515050", md_path=str(md)) == 0
+    assert mod.cmd_html("515050", md_path=str(md), payload_path=str(payload_path)) == 0
     err = capsys.readouterr().err
     assert "请在浏览器手动打开" in err
 
@@ -541,7 +971,8 @@ def test_html_extra_dims_single_failure_placeholder(monkeypatch):
         raise RuntimeError("eastmoney down")
 
     monkeypatch.setattr(mod, "query_etf_holdings", boom)
-    monkeypatch.setattr("etf_peers.query_etf_peers", lambda s, peers: {"available": True})
+    monkeypatch.setattr("etf_peers.query_etf_peers",
+                        lambda s, peers, **kw: {"available": True})
     monkeypatch.setattr("sector_flow.query_sector_flow", lambda s: {"available": True})
     dims = mod._html_extra_dims("515050")
     assert dims["holdings"]["available"] is False
@@ -560,3 +991,38 @@ def test_html_extra_dims_module_missing_placeholder(monkeypatch):
     assert dims["holdings"]["available"] is True
     assert dims["peers"]["available"] is False
     assert dims["sector_flow"]["available"] is False
+
+
+@pytest.mark.parametrize("kind", ["numpy", "decimal", "datetime"])
+def test_report_sealed_payload_serialization_roundtrip(tmp_path, monkeypatch, capsys, kind):
+    from decimal import Decimal
+    from datetime import datetime, timezone
+    import numpy as np
+    from etf_generation import load_etf_payload
+    mod = _load_etf_module()
+    value = {"numpy": np.int64(7), "decimal": Decimal("1.25"),
+             "datetime": datetime(2026, 10, 8, tzinfo=timezone.utc)}[kind]
+    payload = {"skill": "invest-a-etf", "symbol": "510300",
+               "generated_at": "2026-10-08T12:00:00+08:00", "profile": {"probe": value},
+               "quote": {}, "kline": {}, "share_history": {}, "history": None,
+               "events": {}, "playbook": None}
+    monkeypatch.setattr(mod, "_collect_report_payload", lambda *a, **k: payload)
+    path = tmp_path / "2026-10-08-12-00-00.payload.json"
+    assert mod.main(["report", "510300", "--json", "--payload-out", str(path)]) == 0
+    written, errors = load_etf_payload(path)
+    assert errors == [] and written is not None
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == written
+    from etf_html import _build_data_js
+    from etf_generation import verify_etf_payload
+    embedded = json.loads(_build_data_js(payload).split("const report=", 1)[1]
+                         .split(";\n", 1)[0])
+    assert embedded == written
+    assert verify_etf_payload(embedded) == []
+
+
+def test_review_preserves_directory_error(tmp_path):
+    mod = _load_etf_module()
+    body = mod._render_generation_check(tmp_path / "missing")
+    assert "目录不存在" in body
+    assert "无报告 md" not in body

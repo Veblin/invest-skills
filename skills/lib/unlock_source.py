@@ -95,7 +95,7 @@ def fetch_symbol_unlocks(symbol: str, *, lookahead_days: int = 90,
     """
     today = today or _dt.date.today()
     try:
-        from lib.proxy import akshare_direct_session
+        from proxy import akshare_direct_session
 
         with akshare_direct_session():
             import akshare as ak

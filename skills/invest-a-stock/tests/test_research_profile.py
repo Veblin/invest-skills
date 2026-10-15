@@ -638,4 +638,4 @@ def test_report_resume_sealed_prints_no_notice(
 
     assert invest.cmd_report(_report_args(resume=True, emit="compact", store=False)) == 0
     assert "未封存" not in capsys.readouterr().err
-    assert seen["ensure"] == 1
+    assert seen["ensure"] == 0

@@ -1,7 +1,7 @@
 ---
 
 name: invest-a-pulse
-version: "0.3.1"
+version: "0.3.2"
 description: "市场情绪脉搏 — 杠杆周期/市场广度/极端情绪/资金面/估值温度 + 综合环境标签 + 交叉维度分析。研究工具，非择时工具。触发词：市场情绪/大盘/市场脉搏"
 whenToUse: "市场情绪/大盘/市场脉搏：杠杆周期、市场广度、极端情绪、资金面与估值温度的交叉解读"
 argument-hint: "/invest-a-pulse"
@@ -36,15 +36,15 @@ metadata:
 用户: /invest-a-pulse
        ↓
 采集（Bash 并行调用）:
-  # 1. 当日快照 + 引擎标签（走 data_bridge 缓存：step 6 compute_chip_clearance
+  # 1. 当日快照 + 引擎标签（走 data_bridge 缓存：step 5 compute_chip_clearance
   #    内部复用，避免 8 源双重采集；失败信封自动降级 snapshot()）
-  #    ⚠️ data_bridge 位于共享层 skills/lib，须先 import _invest_path（shim 注入
-  #    sys.path）否则裸 CLI 报 ModuleNotFoundError
-  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
-  uv run python -c "import _invest_path; from data_bridge import get_microstructure; from market_microstructure import snapshot; import json; print(json.dumps(get_microstructure() or snapshot(), ensure_ascii=False))" 2>/dev/null
+  #    ⚠️ A03（v0.3.2）起市场微观结构 canonical 在共享层 skills/lib（公共
+  #    provider，非 journal 私有目录）——命令一律从该目录运行
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/lib" && \
+  uv run python -c "from data_bridge import get_microstructure; from market_microstructure import snapshot; import json; print(json.dumps(get_microstructure() or snapshot(), ensure_ascii=False))" 2>/dev/null
 
   # 2. 表内历史（分位辅助；积累不足时标注）
-  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/lib" && \
   uv run python -c "from market_microstructure import load_history; import json; print(json.dumps(load_history(60), ensure_ascii=False))" 2>/dev/null
 
   # 3. 长序列历史（分析必需 — 估值分位 + 杠杆趋势）
@@ -65,19 +65,16 @@ elif len(mz) < 21: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '| 20d_chg% 不
 else: print('SSE_margin', round(mz.iloc[-1]/1e8,2), '20d_chg%', round((mz.iloc[-1]/mz.iloc[-21]-1)*100,2))
 " 2>/dev/null
 
-  # 4. 涨停行业轮动（东财可用时必做；极端情绪/广度维度的行业视角）
-  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
-  uv run python -c "from market_microstructure import zt_industry_flow; import json; print(json.dumps(zt_industry_flow(10), ensure_ascii=False))" 2>/dev/null
+  # 4. 涨停双窗口（A03 R4：一次拉 30 日计划交易日矩阵 → 短窗轮动 + 长窗跷跷板；
+  #    曾为 zt_industry_flow(10) 与 zt_seesaw(30) 两条独立命令、重复拉取 40 次日）
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/lib" && \
+  uv run python -c "from market_microstructure import zt_rotation_bundle; import json; print(json.dumps(zt_rotation_bundle(10, 30), ensure_ascii=False))" 2>/dev/null
 
-  # 5. 跷跷板检验（东财可用时；板块簇资金对立参考）
-  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
-  uv run python -c "from market_microstructure import zt_seesaw; import json; print(json.dumps(zt_seesaw(30), ensure_ascii=False))" 2>/dev/null
-
-  # 6. 筹码出清度四信号（D3 引擎；状态描述，非择时信号）
-  cd "${INVEST_SKILLS_ROOT:-.}/skills/invest-a-journal/scripts/lib" && \
+  # 5. 筹码出清度四信号（D3 引擎；状态描述，非择时信号）
+  cd "${INVEST_SKILLS_ROOT:-.}/skills/lib" && \
   uv run python -c "from market_microstructure import compute_chip_clearance; import json; print(json.dumps(compute_chip_clearance(), ensure_ascii=False))" 2>/dev/null
 
-  # 7. 跨资产背景（E6 v0.2.7：data_bridge.get_macro + E3 序列消费；宏观不可得时整段标「未获取」）
+  # 6. 跨资产背景（E6 v0.2.7：data_bridge.get_macro + E3 序列消费；宏观不可得时整段标「未获取」）
   #    get_macro 走 data_bridge 缓存（TTL 7d / 交易时段 4h）；best-effort 落库
   #    macro_snapshots 供 E3 序列消费（VIX 20 日变化 / PMI 连续方向 / DGS30 分位 / 主权债复算）
   #    ⚠️ store/macro 在 lib 包内（相对导入），须 ensure_invest_a_scripts_on_path
@@ -105,8 +102,8 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 |------|------|------|
 | `snapshot()` | 当日所有 Tier 1-3 指标 + 标签 | dict（含 `_errors` 列表） |
 | `load_history(60)` | 近 60 交易日历史快照 | list[dict]（按 date ASC） |
-| `zt_industry_flow(days=10)` | 🆕 涨停行业轮动（东财涨停池按行业聚合，近 N 交易日） | dict（Top5 + 全行业 N 日趋势 + 前后半段拆分；`return_daily=True` 返回每日矩阵供二次分析；东财失败 `available: false` 不阻断） |
-| `zt_seesaw(days=30)` | 🆕 涨停热度板块簇跷跷板检验（占比 Pearson 相关 + 前后半段对比） | dict（seesaw_pairs 显著负相关 / sync_pairs 显著正相关 / half_split Δpp；样本 <10 日或东财失败返回 `available: false`） |
+| `zt_rotation_bundle(short_days=10, long_days=30)` | 🆕 **涨停双窗口一次采集**（A03 R4：单次拉 30 日**计划交易日**矩阵，短窗 = 该长窗末 10 个计划交易日的成功日）：`.rotation` = 短窗行业轮动；`.seesaw` = 长窗板块簇跷跷板 | dict（planned_dates / short_window_dates + rotation（Top5 + 全行业趋势 + 前后半段拆分）/ seesaw（seesaw_pairs / sync_pairs / half_split）；东财失败两子结果各自 `available: false` 不阻断） |
+| `zt_industry_flow(days)` / `zt_seesaw(days)` | 单窗口原始函数（契约保留；pulse 不再分别调用——bundle 内部复用同一聚合，避免重复拉取 40→30 日请求） | 各自 dict（字段同 `.rotation` / `.seesaw`） |
 | `compute_chip_clearance()` | 🆕 筹码出清度四信号 + 阶段判定（v0.2.5 D3：去杠杆幅度/换手温度/割肉盘代理/磨底时长+企稳确认；状态描述，非择时信号；不落库） | dict（date / available / stage / signals（deleveraging_pct / turnover_60d_pct / down_volume_days_30d / limit_down_20d_pct / days_since_margin_peak / confirmation / margin_20d_change）/ calc_notes / _errors） |
 
 ### snapshot() 关键字段
@@ -185,7 +182,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 {跨维度核心结论摘要（3-6 条，文档最前，先给结论再展开）：
 - 综合环境标签（summary）+ 当日情绪读数（广度/涨跌停/量能，引用引擎字段）
 - 当日热度 vs 中期结构（杠杆 20 日趋势 / 估值分位）是否共振或背离
-- 主线轮动方向（行业轮入/轮出，引用 zt_industry_flow 引擎字段）
+- 主线轮动方向（行业轮入/轮出，引用 `zt_rotation_bundle.rotation` 引擎字段）
 - 筹码出清阶段定位（compute_chip_clearance.stage + 关键信号）
 - 关键矛盾/风险点（引擎标签与趋势矛盾、数据缺口「无法定论」项）
 每条必须引用引擎字段或 [来源: Python calc: formula]，禁止 AI 心算}
@@ -252,11 +249,11 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 ## ⚠️ 极端情绪
 **[事实]**
 - 涨跌停比 {lu_ld_ratio} | 跌停 20 日分位 {limit_down_20d_pct}%（缺失时标注原因）
-- 涨停行业轮动（zt_industry_flow 可用时）：前 5 行业 + 各自 N 日趋势（前后半段对比），数字引用引擎字段
+- 涨停行业轮动（`zt_rotation_bundle.rotation` 可用时）：前 5 行业 + 各自 N 日趋势（前后半段对比），数字引用引擎字段
 **[分析]**
 **结论：** {一句话核心判断 — 如「情绪偏暖但双侧未验证，无法定论」}
 情绪温度判断；**数据缺失时明确写「无法定论」，不硬编**；可用涨跌比/涨停家数侧面推断但标注局限
-**行业维度（zt_industry_flow 可用时必做）**：输出**分析结论而非行业数据表**——涨停热度集中度（Top5 占比）、轮入/轮出方向（前后半段对比：哪些行业升温、哪些退潮）、与当前市场主线（题材/主题）的对应关系。示例格式："涨停热度向 X/Y/Z 集中（Top5 合计占比 N%），X 行业近 5 日从 A 家升至 B 家（+C%），属轮入方向；M 行业虽 10 日累计居前但最新 0 家，已轮出"。东财不可用（ProxyError）时标注「行业维度数据缺口」，不硬编。
+**行业维度（`zt_rotation_bundle.rotation` 可用时必做）**：输出**分析结论而非行业数据表**——涨停热度集中度（Top5 占比）、轮入/轮出方向（前后半段对比：哪些行业升温、哪些退潮）、与当前市场主线（题材/主题）的对应关系。示例格式："涨停热度向 X/Y/Z 集中（Top5 合计占比 N%），X 行业近 5 日从 A 家升至 B 家（+C%），属轮入方向；M 行业虽 10 日累计居前但最新 0 家，已轮出"。东财不可用（ProxyError）时标注「行业维度数据缺口」，不硬编。
 **逻辑链：** {数据} → {推理} → {判断}
 [证据强度: ...]
 
@@ -283,13 +280,14 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 ## ⚖️ 跷跷板观察（参考，不构成投资决策）
 
-> 基于涨停热度占比的板块簇相关性检验（zt_seesaw），描述**资金在簇间的腾挪结构**，
+> 基于涨停热度占比的板块簇相关性检验（`zt_rotation_bundle.seesaw`），描述**资金在簇间的腾挪结构**，
 > 帮助理解盘面强弱分化的来源。**不构成方向性预测，不构成任何买卖依据。**
 
 **[事实]**
 - 显著跷跷板对（|r| 超样本临界值）：{seesaw_pairs — 如 "资源/周期 ↔ 地产链/建筑 r=-0.74"；标注 n 与临界值}
 - 同步资金池（正相关）：{sync_pairs — 如 "地产链/建筑 ↔ 消费 r=+0.76"}
 - 前后半段占比变化（Δpp）：{half_split 流入/流出 Top 各 2-3 个}
+- 窗口覆盖与失败记录：{seesaw.dates 实际覆盖日数 vs planned_dates 计划日数；`seesaw._errors`/顶层 `_errors` 逐条引用（无失败记 None）— partial 窗口须如实标注}
 **[分析]**
 **结论：** {一句话核心判断 — 如「显著负相关共享同一对手方且无同步池，指向存量腾挪」}
 资金在哪些簇之间对立/同池、与今日题材热点的对应关系。解读限于**描述资金腾挪结构**
@@ -316,7 +314,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 > 声明：本报告为市场环境快照，数据来源于 akshare/Tushare/FRED 等公开数据源。
 > 所有分位/变化率由 Python 引擎计算。环境标签为统计描述，不构成择时建议或买卖方向指引。
-> 数据采集时间：{collected_at} | invest-a-pulse v0.3.1
+> 数据采集时间：{collected_at} | invest-a-pulse v0.3.2
 
 ---
 
@@ -324,7 +322,7 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 
 | 参考类型 | 内容 | 来源 |
 |------|------|------|
-| 趋势参考 | 资金流方向（两融 20 日趋势、北向方向）、杠杆周期位置、板块资金轮动方向 | [来源: 杠杆/资金面/行业维度 — stock_margin_sse / northbound / zt_industry_flow] |
+| 趋势参考 | 资金流方向（两融 20 日趋势、北向方向）、杠杆周期位置、板块资金轮动方向 | [来源: 杠杆/资金面/行业维度 — stock_margin_sse / northbound / zt_rotation_bundle.rotation] |
 | 区间参考 | 估值温度分位（PE/PB 分位 + 中位数）、价格相对位置 | [来源: 估值温度维度 — stock_index_pe_lg / stock_market_pb_lg] |
 | 状态参考 | 筹码出清度阶段（数据不足 / 去杠杆中 / 磨底中 / 企稳确认） | [来源: compute_chip_clearance（D3）] |
 | 核对参考 | 决策理由质量（提问式，journal 卖出评估） | [来源: invest-a-journal 卖出评估] |
@@ -343,17 +341,17 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
    - 量价背离：广度（涨跌比/涨停）必须与量能（成交额）对照
    - 资金分化：北向 vs 两融 vs 量能的方向是否一致
    - 杠杆两分法：当日活跃度（买入/余额）与中期趋势（20 日变化）分开看
-   - 涨停行业轮动：极端情绪必须叠加行业维度（`zt_industry_flow` 可用时）——看热度集中在哪、在向哪轮动，而非只有总数；轮动方向属主线确认的资金流主证据（配合两融趋势与 ETF 份额），价格涨幅仅作辅助确认
+   - 涨停行业轮动：极端情绪必须叠加行业维度（`zt_rotation_bundle.rotation` 可用时）——看热度集中在哪、在向哪轮动，而非只有总数；轮动方向属主线确认的资金流主证据（配合两融趋势与 ETF 份额），价格涨幅仅作辅助确认
 4. **P0 规则**：所有分位/比率/变化率必须由 Python 计算后引用，禁止 AI 心算；
    **计数（N 个/N 家/N 日/N 个行业）与区间/极值断言（峰值/最大/最少/首个/最长）同样禁止目视**——
    引擎输出的清单不是聚合，须对其跑 `len()` / `max` / `min` / 分位聚合后再引用；
    **禁止凭打印出的子集做区间或极值断言**（实例：ERP「2026-08 以来区间 1.83%–2.52%」实为末 5 个非空值的子集，
    全序列 max 为 5.62；行业数「90 余」实为 97 个 key 的目视结果，当日有涨停的行业实为 47）；
    Python calc 结果标注 `[来源: Python calc: ...]`。
-5. **证据标签**：每段分析末尾附四维标注（强度/来源/时效/交叉），同 [report-conventions.md §5](../../../skills/lib/references/report-conventions.md) 规范。
+5. **证据标签**：每段分析末尾附四维标注（强度/来源/时效/交叉），同 [report-conventions.md §5](../lib/references/report-conventions.md) 规范。
 6. **推测标注**：无历史数据支撑的规律性表述（"历史上常出现…"）必须标注「待验证」或附案例。
-7. **跷跷板观察边界**：`zt_seesaw` 是**参考内容**（帮助分析盘面，不构成投资决策）。解读限于描述资金腾挪结构；**禁止**基于簇间负相关做方向性预测（如"A 簇将接棒 B 簇"）；样本 <15 日时标注「样本不足，规律性结论待更长窗口验证」；half_split 前后分界敏感，Δpp 方向以相关系数（不依赖分界）为主证据。
-8. **主线确认：资金流/拥挤度为主证据**（两融趋势：`compute_chip_clearance().signals.margin_20d_change`（引擎输出，采集 step 6）或 load_history + Python calc 计算 20 日变化率；`margin_to_mcap` 历史分位需 load_history + Python calc；`zt_industry_flow` 板块轮动、ETF 份额）；价格走势为辅助确认；**禁止**单用"连续上涨/突破均线"断言主线（A 股散户主导市场无动量、仅月度反转——Chui et al. 2022）
+7. **跷跷板观察边界**：`zt_rotation_bundle.seesaw`（原 `zt_seesaw`）是**参考内容**（帮助分析盘面，不构成投资决策）。解读限于描述资金腾挪结构；**禁止**基于簇间负相关做方向性预测（如"A 簇将接棒 B 簇"）；样本 <15 日时标注「样本不足，规律性结论待更长窗口验证」；half_split 前后分界敏感，Δpp 方向以相关系数（不依赖分界）为主证据。
+8. **主线确认：资金流/拥挤度为主证据**（两融趋势：`compute_chip_clearance().signals.margin_20d_change`（引擎输出，采集 step 5）或 load_history + Python calc 计算 20 日变化率；`margin_to_mcap` 历史分位需 load_history + Python calc；`zt_rotation_bundle.rotation` 板块轮动、ETF 份额）；价格走势为辅助确认；**禁止**单用"连续上涨/突破均线"断言主线（A 股散户主导市场无动量、仅月度反转——Chui et al. 2022）
 
 ---
 
@@ -364,14 +362,15 @@ Claude: 按输出模板合成「分析版」报告（主要结论前置）
 - **涨跌停比无跌停**：`lu_ld_note == "no_limit_down"` 时标注「无跌停（极端亢奋信号）」
 - **非交易日**：成交额/涨跌比缺失 → 提示「可能非交易日，数据为最近交易日快照」
 - **表内历史不足**（`load_history` 条数 <20）：杠杆/趋势/分位字段为 null → 改用 akshare 长序列补分位；仍缺则标注「待积累」
-- **东财接口被代理阻断**：`index_zh_a_hist` / `stock_zh_a_spot_em` 等可能 ProxyError → 换用非东财源（乐咕 PE/PB、交易所两融），标注替代来源；`zt_industry_flow` 返回 `available: false` 时标注「行业维度数据缺口」，不硬编
-- **涨停行业轮动**：`zt_industry_flow(days)` 依赖东财涨停池，单日失败自动跳过并记录 `_errors`；覆盖日数 <5 时结论标注「样本不足」
+- **东财接口被代理阻断**：`index_zh_a_hist` / `stock_zh_a_spot_em` 等可能 ProxyError → 换用非东财源（乐咕 PE/PB、交易所两融），标注替代来源；`zt_rotation_bundle.rotation` 返回 `available: false` 时标注「行业维度数据缺口」，不硬编
+- **涨停行业轮动**：`zt_rotation_bundle` 依赖东财涨停池，单日失败自动跳过并记录 `_errors`（短窗按长窗末 10 个**计划交易日**取，不按「最后 10 个成功日」）；覆盖日数 <5 时结论标注「样本不足」
+- **双窗口失败披露（A-F02）**：长窗任一日失败时，顶层 `_errors` 保留完整逐日失败记录；`seesaw` 成功分支同样携带长窗 `_errors`——分析须按 partial（覆盖日少于计划日）如实标注，不得当整窗可用
 
 ---
 
 ## 复检流程（发报告前必做）
 
-> **完整定义**：[delivery-qc.md](../../../skills/lib/references/delivery-qc.md) §2–§6（第 0 层机器准出 + 三层人工复检）。
+> **完整定义**：[delivery-qc.md](../lib/references/delivery-qc.md) §2–§6（第 0 层机器准出 + 三层人工复检）。
 > **本规范随包分发**（P0 铁律见同文件 §1）——不依赖仓库根指令文件，WorkBuddy 等无根文件的渠道同样可用。
 > 全部通过才可发出；发现问题立即修正并标注修正项/降级项。
 
@@ -394,7 +393,7 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py reports/m
 
 **第 2 层：合规复检** — P0 无 AI 心算（B1）；A1 无买卖/仓位建议、多情景带假设+概率；措辞规范（禁止词替换表：崩盘→剧烈回调、极度高估/低估→数值比较、止损→防呆风控）；事实边界（无推断、冲突并列、三态标注）；[分析] 块带四维证据标签；分位伴随中位数/均值。
 
-**第 3 层：逻辑复检** — 核心判断与数据不自相矛盾（如"资金承接" vs 两融/北向/量能方向）；对抗性假设 ≥3 且可证伪、致命一击条件句、盲点 ≥2；引擎标注「不可得/未知」的字段未被填数。
+**第 3 层：逻辑复检** — 核心判断与数据不自相矛盾（如"资金承接" vs 两融/北向/量能方向）；实际关键假设逐一检验且可证伪（不设固定条数）、致命一击条件句、实际盲点逐条列出（不设固定条数，不得为空）；引擎标注「不可得/未知」的字段未被填数。
 
 三层通过后，再执行下方 `Self-Check` 清单逐项确认。
 
@@ -411,8 +410,8 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py reports/m
 - [ ] 筹码出清度四信号每项有来源标注（compute_chip_clearance 字段路径或降级口径）
 - [ ] 每个数字有来源标注；Python calc 结果标注公式来源
 - [ ] 引擎标签与趋势/分位矛盾时已指出并说明取舍
-- [ ] 涨停行业轮动已尝试（zt_industry_flow 可用时），输出为分析结论（Top5 集中度 + 轮入/轮出方向）而非行业数据表；不可用时标注「行业维度数据缺口」
-- [ ] 跷跷板观察已尝试（zt_seesaw 可用时），输出标注「参考，不构成投资决策」，解读限于资金腾挪结构、无方向性预测；样本不足/东财不可用已标注
+- [ ] 涨停行业轮动已尝试（`zt_rotation_bundle.rotation` 可用时），输出为分析结论（Top5 集中度 + 轮入/轮出方向）而非行业数据表；不可用时标注「行业维度数据缺口」
+- [ ] 跷跷板观察已尝试（`zt_rotation_bundle.seesaw` 可用时），输出标注「参考，不构成投资决策」，解读限于资金腾挪结构、无方向性预测；样本不足/东财不可用已标注；**长窗逐日失败（`_errors`）已按 partial 覆盖如实标注，未当整窗可用**
 - [ ] **第 0 层机器准出已跑**：`report_qc.py <报告> --fail-on error` 退出码非 2（PASS/WARN 可交付），warning 已逐条判定（改报告 or 标注豁免理由）
 - [ ] 报告已落盘 `reports/market-pulse/{YYYY-MM-DD}.md`，对话输出包含报告文件路径
 - [ ] 文档以「📌 主要结论」段开头（跨维度摘要前置，每条引用引擎字段或 Python calc 来源，非维度罗列）
@@ -439,6 +438,6 @@ cd "${INVEST_SKILLS_ROOT:-.}" && uv run python skills/lib/report_qc.py reports/m
 
 ## 参考
 
-- `skills/invest-a-journal/scripts/lib/market_microstructure.py`：数据管道源码
+- `skills/lib/market_microstructure.py`：数据管道源码（A03 起 canonical owner；journal `scripts/lib/market_microstructure.py` 为同实例兼容 shim）
 - `host-docs/v0.2.2/requirements.md`：市场微观结构指标体系定义
 - akshare 长序列接口：`stock_index_pe_lg` / `stock_market_pb_lg` / `stock_margin_sse` / `stock_margin_szse`

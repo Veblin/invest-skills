@@ -27,15 +27,26 @@ logger = logging.getLogger(__name__)
 
 
 def _pe_loss_flag(val_cache: dict | None) -> str:
-    """R12c: PE 亏损期占比 >30% 时标题层强制标注（P0-2 规则）。
+    """R12c/A05-3: PE 非正或缺失占比 >30% 时标题层强制标注（P0-2 规则）。
 
     仅在标题（模块 0/1）附加「PE分位失真·仅作位置参考」，提示分位不反映估值贵贱。
+    判定取 ``nonpos_or_missing_ratio``（未舍入合计比值；缺失与非正 PE（≤0，
+    不确证财务亏损，A-F03）同为分位失真样本），旧 ``loss_ratio`` 字段仅作
+    缺省回退（历史缓存形态）。
     """
     if not val_cache:
         return ""
     summary = val_cache.get("val_summary") or {}
     pe = summary.get("pe") or {}
-    if (pe.get("loss_ratio") or 0) > 0.3:
+    elevated = pe.get("loss_ratio_elevated")
+    if elevated is None:  # 旧缓存形态：按未舍入合计比值自判（4dp 字段仅兜底）
+        ratio = pe.get("nonpos_or_missing_ratio_raw")
+        if ratio is None:
+            ratio = pe.get("nonpos_or_missing_ratio")
+        if ratio is None:
+            ratio = pe.get("loss_ratio") or 0
+        elevated = ratio > 0.3
+    if elevated:
         return "PE分位失真·仅作位置参考"
     return ""
 
@@ -2925,8 +2936,8 @@ class _FundamentalsContext:
 
         # --- 估值派生（原块④，C6 v0.2.7 已收敛到 canonical）---
         # canonical _v3_load_valuation_summary 在 valuation_summary 内滤
-        # None+≤0 并补亏损期警告；边界变化：current_pe 从「最后非 None」变为
-        # 「最后正值」——全亏损窗口股票由渲染负 PE 变为「数据不足」。
+        # None+≤0 并补非正 PE/缺失警告；边界变化：current_pe 从「最后非 None」
+        # 变为「最后正值」——全非正窗口股票由渲染负 PE 变为「数据不足」。
         self.vs = _v3_load_valuation_summary(dims, val_cache)
         val_rows = _get_dim_data(dims, "valuation")
         self.pe_avail = (

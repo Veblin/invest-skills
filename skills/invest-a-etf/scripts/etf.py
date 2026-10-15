@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -24,9 +26,14 @@ if str(_LIB_DIR) not in sys.path:
 from etf_data import (  # noqa: E402
     CSINDEX_MAP,
     ETF_HEDGE_MAP,
+    build_data_status,
+    compute_etf_tracking,
     compute_history_stats,
     prefetch_etf_spot,
     query_etf_data,
+    query_etf_disclosed_structure,
+    query_etf_est_net_assets,
+    query_etf_fees,
     query_etf_holdings,
     query_etf_kline,
     query_etf_kline_history,
@@ -60,8 +67,14 @@ _EVENTS_DIR = Path(__file__).resolve().parent.parent / "events"
 
 def _build_events_block(symbol: str, events_path: str | None,
                         history_block: dict | None) -> dict:
-    """R11b: 事件文件加载 + 事件-价格对照（±1 交易日对齐）。无文件不阻断。"""
-    from etf_timeline import align_events_with_price, detect_big_move_days, load_events_file
+    """R11b: 事件文件加载 + 事件-价格对照（±1 交易日对齐）。无文件不阻断。
+
+    A05-1 R3（v0.3.2）：异动日清单复用已持有的 ``stats.big_move_days``
+    （compute_history_stats 与 detect_big_move_days 同口径，冻结 fixture 测
+    test_detect_big_move_days_frozen_588000 已证），不再对同一 rows 第二次扫描；
+    ``detect_big_move_days`` 的 custom threshold 契约保留不删。
+    """
+    from etf_timeline import align_events_with_price, load_events_file
 
     path = Path(events_path) if events_path else _EVENTS_DIR / f"{symbol}.json"
     if not path.exists():
@@ -75,42 +88,45 @@ def _build_events_block(symbol: str, events_path: str | None,
     aligned = None
     if (history_block and history_block.get("stats")
             and history_block["stats"].get("status") == "available"):
-        move_days = detect_big_move_days(history_block["history"].get("rows") or [])
+        move_days = history_block["stats"].get("big_move_days") or []
         aligned = align_events_with_price(move_days, events)
     return {"available": True, "path": str(path), "note": None,
             "rows": events, "aligned": aligned}
 
 
-def _build_playbook_block(history_block: dict | None, kline: dict) -> dict:
-    """R11c: 回撤档位 σ 分级 + 三步核查 + LAW 6a 声明（研究流程规则，非买卖指令）。"""
+def _build_playbook_block(history_block: dict | None) -> dict:
+    """R11c/A2: 回撤档位（绝对百分比 → 触发核验深度）+ 当前回撤状态 + 三步核查。
+
+    A2（2026-10-10）：不再输出 σ 倍数/60 日日均波动（无统计概率口径）；
+    改为输出**当前回撤**与各档「已达/未达」——当前回撤与档位同源（历史收盘序列），
+    避免「当前已越过所有档仍按四个未来触发」的呈现。
+    """
     from etf_playbook import (
         LAW6A_DISCLAIMER,
-        daily_vol_pct,
+        LEVELS_BASIS,
+        current_drawdown,
+        current_verification,
         drawdown_levels,
         three_step_checklist,
     )
 
-    closes: list[float] = []
+    rows: list[dict] = []
     if (history_block and history_block.get("stats")
             and history_block["stats"].get("status") == "available"):
-        rows = history_block["history"].get("rows") or []
-        closes = [c for c in (safe_float(r.get("nav", r.get("close"))) for r in rows)
-                  if c is not None]
-    vol = daily_vol_pct(closes)
-    vol_source = "history"
-    if vol is None:
-        derived = kline.get("derived") or {}
-        vol = derived.get("daily_volatility_pct")
-        vol_source = "kline.derived"
+        rows = (history_block.get("history") or {}).get("rows") or []
+    dd = current_drawdown(rows)
+    levels = drawdown_levels(dd["current_drawdown_pct"] if dd else None,
+                             rows_observed=(dd or {}).get("rows_observed") or 0)
     return {
-        "available": vol is not None,
-        "vol_60d_daily_pct": round(vol, 2) if vol is not None else None,
-        "vol_source": vol_source if vol is not None else None,
-        "drawdown_levels": drawdown_levels(closes, vol),
+        "available": dd is not None,
+        "current_drawdown": dd,
+        "drawdown_levels": levels,
+        "current_verification": current_verification(levels),
+        "basis": LEVELS_BASIS,
         "checklist": three_step_checklist(),
         "disclaimer": LAW6A_DISCLAIMER,
-        "note": None if vol is not None
-        else "无足够历史数据计算 60 日日均波动（需 ≥61 个收盘价）",
+        "note": None if dd is not None
+        else "无历史行情收盘序列（当前回撤不可算；需 --playbook 且历史行情可用）",
     }
 
 
@@ -119,26 +135,94 @@ def _share_history_summary(sh: dict) -> dict:
     return {k: v for k, v in sh.items() if k != "rows"}
 
 
+class _StageTimer:
+    """A7：report 入口分阶段耗时记录（仅 stderr + 本机 logs/，**不进 payload**）。
+
+    payload 须逐字节可重放（离线回放/哈希比对），时间戳写入会破坏确定性；
+    因此耗时只作为本机运行观测：stderr 摘要 + 仓库 logs/etf-report-timings.jsonl
+    （分发副本 `repo_logs_dir()` 返回 None 时不落盘）。
+    """
+
+    def __init__(self) -> None:
+        self._t0 = time.perf_counter()
+        self._last = self._t0
+        self.stages: dict[str, float] = {}
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.stages[name] = round(now - self._last, 3)
+        self._last = now
+
+    @property
+    def total(self) -> float:
+        return round(time.perf_counter() - self._t0, 3)
+
+
+def _log_report_timing(symbol: str, timer: _StageTimer, *, generated_at: str) -> None:
+    """A7：耗时记录只写本机——stderr 摘要 + 仓库 logs/ JSONL（无仓库布局则只 stderr）。"""
+    stages = " | ".join(f"{k} {v:.1f}s" for k, v in timer.stages.items())
+    print(f"⏱ report {symbol} 引擎阶段耗时: {stages} | 引擎合计 {timer.total:.1f}s",
+          file=sys.stderr)
+    try:
+        import logutil
+
+        logs_dir = logutil.repo_logs_dir()
+        if logs_dir is None:
+            return
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        with open(logs_dir / "etf-report-timings.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "at": generated_at, "symbol": symbol, "cmd": "report",
+                "stages_sec": timer.stages, "engine_total_sec": timer.total,
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:  # 观测设施失败不阻断报告（仅提示）
+        print(f"⚠️ 耗时日志写入失败（不阻断）: {exc}", file=sys.stderr)
+
+
 def _collect_report_payload(symbol: str, *, with_nav: bool,
                             history: bool = False, history_days: int = 250,
-                            events_path: str | None = None, playbook: bool = False) -> dict:
-    """采集并组装 report 数据快照（cmd_report / cmd_html 共用；symbol 已校验）。"""
+                            events_path: str | None = None, playbook: bool = False,
+                            include_extra_dims: bool = False,
+                            index_exposure: bool = False,
+                            peers: list[str] | None = None,
+                            share_days: int = 20,
+                            timer: _StageTimer | None = None) -> dict:
+    """采集并组装 report 数据快照（cmd_report 用；symbol 已校验）。
+
+    ``include_extra_dims=True``（`--payload-out` 冻结 payload 时）时一并采集
+    HTML 渲染所需的 holdings/peers/sector_flow 三维（单源失败占位不阻断），
+    使冻结 payload 成为 HTML 的唯一完整输入；**A4**：此路径下 share_history
+    一律携带全量 rows（不再按 --with-nav 摘要化——写作/复检引用的行必须与
+    payload 同代封存），peers 走 ``--peers`` 显式清单（未映射赛道可用）。
+    ``index_exposure=True``（`--index-exposure`）时按需查询指数样本/权重
+    （csindex 公开文件）并**随 payload 冻结**——Fit 章节使用该数据时必须传，
+    否则报告引用的输入不在同代封存内。
+    ``share_days``（A4）：份额序列窗口（交易日间隔，20/60/120 或等价 3–6 个月）。
+    ``timer``（A7）：阶段耗时记录器（缺省丢弃；只影响本机日志，不进 payload）。
+    """
+    t = timer or _StageTimer()
     prefetch_etf_spot()
+    t.mark("prefetch_spot")
     profile = query_etf_data(symbol)
+    t.mark("profile")
     # 先查询再入库：index_pe_pct 分位只对「不含今日行」的历史序列计算（避免今日
     # 自投成 100%/5% 假象），与 journal 路径（不 persist-first）语义一致；写库放
     # 查询后，下次报告的分位即含今日（幂等，失败不阻断报告）
     idx = CSINDEX_MAP.get(symbol)
-    # F1-6 修复：report 路径幂等回填 CSINDEX_MAP 全部指数（不再只回填本标的），
-    # 自愈「上证50/中证500/中证1000 自 08-06 停更」类停滞——任何一次 ETF
-    # 报告都会刷新全部宽基指数的 20 日滚动窗口。开销 ~6 次 csindex 请求
-    # （data_bridge 1d 缓存内仅首报触发）。
-    res = _persist_index_pe(None) if idx else {"error": None}
+    # R2 修正（ETF 设计 §5）：单只 report 只回填**本报告所需指数**——旧行为
+    # `_persist_index_pe(None)` 会顺带请求/写入 CSINDEX_MAP 全部指数，与
+    # 「单报告只取该报告所需指数」的设计冲突（负责人反例：参数 [None]）。
+    # 全量回填保留在既有批量维护入口 `collect-weekly`（显式、不随报告触发）。
+    res = _persist_index_pe([idx]) if idx else {"error": None}
     if res.get("error"):
         print(f"⚠️ 指数 PE 入库失败: {res['error']}", file=sys.stderr)
+    t.mark("index_pe_persist")
     quote = query_etf_quote(symbol)
+    t.mark("quote")
     kline = query_etf_kline(symbol)
-    share_history = query_etf_share_history(symbol, days=20)
+    t.mark("kline")
+    share_history = query_etf_share_history(symbol, days=share_days)
+    t.mark("share_history")
 
     # R11a: --history/--playbook 时取历史行情深度（nav 链路优先，失败回退 baostock）+ 历史统计
     history_block = None
@@ -149,15 +233,34 @@ def _collect_report_payload(symbol: str, *, with_nav: bool,
             if hist.get("status") == "available" else None
         )
         history_block = {"history": hist, "stats": hist_stats}
+    t.mark("history")
 
     # R11b: 事件文件（缺省自动读 events/{symbol}.json，无文件不阻断）+ 事件-价格对照
     events_block = _build_events_block(symbol, events_path, history_block)
-    # R11c: 情景预案（回撤档位 σ 分级 + 三步核查 + LAW 6a 声明）
-    playbook_block = _build_playbook_block(history_block, kline) if playbook else None
+    # R11c: 情景预案（回撤档位 → 核验深度 + 当前状态 + 三步核查 + LAW 6a 声明）
+    playbook_block = _build_playbook_block(history_block) if playbook else None
+    t.mark("events_playbook")
+
+    # B02：跟踪质量块（TD/TE 契约见 etf_data 段首注释）+ 费用 + 同日份额×NAV 估算
+    tracking = compute_etf_tracking(symbol)
+    fees = query_etf_fees(symbol)
+    est_net_assets = query_etf_est_net_assets(symbol)
+    profile["tracking"] = tracking
+    profile["fees"] = fees
+    profile["est_net_assets"] = est_net_assets
+    # A5：原文披露的结构补充（资产/行业/完整持仓口径/衍生）——只对已登记标的出现；
+    # 随 payload 封存，报告引用该块数字可直接复算（未登记不产生键）
+    structure = query_etf_disclosed_structure(symbol)
+    if structure:
+        profile["disclosed_structure"] = structure
+    t.mark("tracking_fees_ena")
 
     from dates import shanghai_now
 
-    return {
+    # A4：封存路径（include_extra_dims）必须保留引用行——share_history 全量 rows；
+    # 普通 --json 且未传 --with-nav 时保持旧摘要形状（兼容）
+    keep_share_rows = with_nav or include_extra_dims
+    payload = {
         "skill": "invest-a-etf",
         "generated_at": shanghai_now().isoformat(),
         "symbol": symbol,
@@ -165,29 +268,82 @@ def _collect_report_payload(symbol: str, *, with_nav: bool,
         "profile": profile,
         "quote": quote,
         "kline": kline if with_nav else _kline_summary(kline),
-        "share_history": share_history if with_nav else _share_history_summary(share_history),
+        "share_history": (share_history if keep_share_rows
+                          else _share_history_summary(share_history)),
         "history": history_block if history else None,
         "events": events_block,
         "playbook": playbook_block,
         "disclaimer": "研究数据快照，不构成投资建议。",
     }
+    if include_extra_dims:
+        payload.update(_html_extra_dims(symbol, peers=peers, share_days=share_days))
+    t.mark("extra_dims")
+    if index_exposure:
+        from etf_data import query_etf_index_exposure  # noqa: E402
+
+        payload["index_exposure"] = query_etf_index_exposure(symbol)
+        t.mark("index_exposure")
+    # B06 数据侧：维度五态 + 实际尝试源（含 extra dims / index_exposure 后的实况）
+    payload["data_status"] = build_data_status(
+        identity=profile.get("identity"), profile=profile, quote=quote, kline=kline,
+        share_history=share_history, history_block=history_block,
+        events_block=events_block, tracking=tracking, fees=fees,
+        est_net_assets=est_net_assets,
+        extra_dims=payload if include_extra_dims else None,
+        index_exposure=payload.get("index_exposure"),
+    )
+    return payload
 
 
 def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
                history: bool = False, history_days: int = 250,
-               events_path: str | None = None, playbook: bool = False) -> int:
+               events_path: str | None = None, playbook: bool = False,
+               payload_out: str | None = None,
+               index_exposure: bool = False,
+               peers: list[str] | None = None,
+               share_days: int = 20,
+               research_path: str | None = None) -> int:
     symbol = symbol.strip()
     if not symbol.isdigit() or len(symbol) != 6:
         print(f"错误: 需要 6 位数字代码，收到 {symbol!r}", file=sys.stderr)
         return 2
+    if not (2 <= share_days <= 200):
+        print(f"错误: --share-days 需在 2..200（交易日间隔；取数上限约 170 交易日），"
+              f"收到 {share_days}", file=sys.stderr)
+        return 2
 
+    research_input = None
+    if research_path is not None:
+        if payload_out is None:
+            print("错误: --research 必须与 --payload-out 同用，研究原料须同代封存", file=sys.stderr)
+            return 2
+        from etf_research import load_research_input
+        try:
+            research_input = load_research_input(research_path, symbol)
+        except (OSError, UnicodeDecodeError, ValueError, TypeError) as exc:
+            print(f"错误: 研究材料无效: {exc}", file=sys.stderr)
+            return 2
+
+    timer = _StageTimer()
     # compact 打印体始终读完整 share_history rows（HEAD 行为，与 with_nav 无关）；
-    # with_nav 仅塑造 JSON payload 形状（--with-nav 才保留全量）
+    # with_nav 仅塑造 JSON payload 形状（--with-nav 才保留全量；A4 封存路径强制全量）
     payload = _collect_report_payload(
         symbol, with_nav=True if not as_json else with_nav,
         history=history, history_days=history_days,
         events_path=events_path, playbook=playbook,
+        include_extra_dims=payload_out is not None,
+        index_exposure=index_exposure,
+        peers=peers, share_days=share_days,
+        timer=timer,
     )
+    if research_input is not None:
+        from etf_research import attach_research
+        try:
+            attach_research(payload, research_input)
+        except (ValueError, TypeError) as exc:
+            print(f"错误: 研究与本次数据不一致: {exc}", file=sys.stderr)
+            return 2
+        timer.mark("operating_research")
     # 展开回局部变量：compact 打印体保持不变（零回归）
     profile = payload["profile"]
     quote = payload["quote"]
@@ -197,8 +353,29 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     events_block = payload["events"]
     playbook_block = payload["playbook"]
 
+    # B05：冻结 payload（同代输入，HTML 唯一输入）——fail-loud，不静默
+    if payload_out is not None:
+        from etf_generation import seal_etf_payload
+        from snapshot_core import default_serializer
+
+        seal_etf_payload(payload)
+        out = Path(payload_out)
+        if out.parent and not out.parent.is_dir():
+            print(f"错误: --payload-out 父目录不存在: {out.parent}", file=sys.stderr)
+            return 2
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=default_serializer) + "\n",
+                       encoding="utf-8")
+        timer.mark("seal_write")
+        print(f"payload 已冻结: {out}（payload_hash={payload['_meta']['payload_hash'][:12]}…）",
+              file=sys.stderr)
+
+    # A7：阶段耗时只写本机（stderr + logs/），不进 payload
+    _log_report_timing(symbol, timer, generated_at=payload["generated_at"])
+
     if as_json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        from snapshot_core import default_serializer
+
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=default_serializer))
         return 0
 
     # Compact human-readable summary for Claude / terminal
@@ -206,6 +383,20 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     print(f"generated_at: {payload['generated_at']}")
     print()
     hc = profile.get("hedge_coverage") or {}
+    identity = profile.get("identity") or {}
+    axes = identity.get("axes") or {}
+    labels = identity.get("labels") or {}
+    print("## identity")
+    print(f"  axes:              asset={axes.get('asset_type')} channel={axes.get('channel')} "
+          f"strategy={axes.get('strategy')} ({labels.get('asset_type', '')}/"
+          f"{labels.get('channel', '')}/{labels.get('strategy', '')})")
+    ver = (identity.get("verification") or {}).get("status")
+    ti = identity.get("tracked_index") or {}
+    print(f"  verification:      {ver}"
+          + (f"  tracked_index={ti.get('name')}({ti.get('code')})" if ti else ""))
+    app = identity.get("applicability") or {}
+    print(f"  applicability:     index_pe={app.get('index_pe')} "
+          f"stock_pe_drilldown={app.get('stock_pe_drilldown')}")
     print("## profile")
     print(f"  index_pe:          {profile.get('index_pe')}")
     print(f"  index_pe_status:   {profile.get('index_pe_status')}")
@@ -217,8 +408,46 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         top3 = ", ".join(f"{a['industry']} {a['pct']:.1f}%" for a in alloc[:3])
         print(f"  industry_alloc:    {top3}")
     print(f"  premium_discount:  {profile.get('premium_discount')}")
-    print(f"  aum_yi:            {profile.get('aum')}")
-    print(f"  hedge_coverage:    {hc.get('coverage')} ({hc.get('index')})")
+    est = profile.get("share_price_mv_est") or {}
+    if est:
+        print(f"  scale:             {est.get('value_yi')} 亿元（{est.get('caliber')}；"
+              "非官方资产净值）")
+    else:
+        print(f"  scale:             不可得（spot 源未取到份额/价格）")
+    ena = profile.get("est_net_assets") or {}
+    if ena.get("status") == "ok":
+        print(f"  est_net_assets:    {ena.get('value_yi')} 亿元 @ {ena.get('as_of')}"
+              "（同日份额×单位净值估算，非官方披露规模）")
+    else:
+        print(f"  est_net_assets:    {ena.get('status')}（{ena.get('note')}）")
+    tr = profile.get("tracking") or {}
+    if tr.get("status") == "available":
+        print(f"  tracking:          TD {tr.get('td_pct')}% / TE {tr.get('te_pct_annualized')}%"
+              f"（年化，样本区间 n={tr.get('sample_n')}）")
+    else:
+        dev = tr.get("price_benchmark_deviation") or {}
+        extra = (f"；价格基准偏离（研究数值，非确认 TD/TE）: "
+                 f"TD {dev.get('td_pct')}%（窗口端点） / TE {dev.get('te_pct_annualized')}%"
+                 f"（抽样区间 n={dev.get('sample_n')}）" if dev else "")
+        oc = tr.get("official_benchmark_comparison") or {}
+        extra += (f"；原文披露对比（官方口径，优先）：{oc.get('as_of')}，"
+                  f"最近六个月 {oc['periods'][1]['fund_pct']}% vs 基准 "
+                  f"{oc['periods'][1]['benchmark_pct']}%（差 {oc['periods'][1]['diff_pct']}pp）"
+                  if oc.get("periods") else "")
+        print(f"  tracking:          {tr.get('status')}（{tr.get('note')}）{extra}")
+    fees = profile.get("fees") or {}
+    if fees.get("status") == "ok":
+        # R3：current_rate_verified=报告日现行已核（版本已读见 source.version/as_of；
+        # 未核形态区分见 query_etf_fees——不再有 currency_verified 第二套布尔）
+        cur = ("报告日现行费率已核" if fees.get("current_rate_verified")
+               else "报告日现行费率未核")
+        print(f"  fees:              " + " / ".join(
+            f"{i['name']} {i['annual_rate_pct']}%" for i in fees["items"])
+            + f"（{cur}；{fees['source'].get('version') or fees['source'].get('as_of')}）")
+    else:
+        print(f"  fees:              unverified（未收录官方材料）")
+    print(f"  hedge_coverage:    {hc.get('coverage')} ({hc.get('index')})"
+          f"  verification={((hc.get('verification') or {}).get('status'))}")
     print(f"  flags:             {profile.get('flags')}")
     if profile.get("_errors"):
         print(f"  errors:            {profile['_errors']}")
@@ -234,8 +463,10 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
     print(f"  ma20/ma60 (NAV):   {kline.get('ma20')} / {kline.get('ma60')}")
     idx_ma20, idx_ma60 = kline.get('index_ma20'), kline.get('index_ma60')
     # P1-4：指数日 K 获取失败静默降级时，标注「不可得」而非裸 None
+    # A6：跨境币种不一致时为「未取数（跨币种不可直接对照）」，非获取失败
     if idx_ma20 is None and idx_ma60 is None:
-        print(f"  ma20/ma60 (index): 不可得（指数日 K 获取失败，静默降级）")
+        skip = kline.get("index_ma_skipped_reason")
+        print(f"  ma20/ma60 (index): 不可得（{skip or '指数日 K 获取失败，静默降级'}）")
     else:
         print(f"  ma20/ma60 (index): {idx_ma20} / {idx_ma60}")
     print(f"  boll (u/m/l):      {kline.get('boll_upper')} / {kline.get('boll_mid')} / {kline.get('boll_lower')}")
@@ -259,12 +490,21 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         print()
         print("## playbook (情景预案 · R11c · LAW 6a)")
         if playbook_block.get("available"):
-            print(f"  60 日日均波动: {playbook_block['vol_60d_daily_pct']}%  "
-                  f"(来源: {playbook_block['vol_source']})")
-            print("  回撤档位 → σ 倍数 → 触发核验深度（非动作指令）:")
+            dd = playbook_block.get("current_drawdown") or {}
+            print(f"  当前回撤（自窗口峰值）: {dd.get('current_drawdown_pct')}%  "
+                  f"({dd.get('peak_date')} 峰值 {dd.get('peak_close')} → "
+                  f"{dd.get('latest_date')} 收 {dd.get('latest_close')})")
+            cv = playbook_block.get("current_verification") or {}
+            if cv.get("deepest_reached_level_pct") is not None:
+                print(f"  当前核验深度: {cv.get('deepest_reached_depth')}"
+                      f"（已越过 {cv.get('reached_levels')} 档，最深 "
+                      f"{cv.get('deepest_reached_level_pct'):+.0f}%）")
+            else:
+                print("  当前核验深度: 无档位触发（各档均未达）")
+            print("  回撤档位 → 触发核验深度（绝对百分比分档，非统计概率/非动作指令）:")
             for lv in playbook_block["drawdown_levels"]:
-                sigma = f"{lv['sigma_multiple']}σ" if lv["sigma_multiple"] is not None else "N/A"
-                print(f"    {lv['level_pct']:+.0f}%  →  {sigma}  →  {lv['verification_depth']}")
+                state = lv.get("state") or "N/A"
+                print(f"    {lv['level_pct']:+.0f}%  →  {lv['verification_depth']}  [{state}]")
             print("  三步核查:")
             for step in playbook_block["checklist"]:
                 print(f"    {step}")
@@ -292,7 +532,8 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         else:
             print(f"  不可用: {hist.get('error') or '历史行情获取失败'}")
     print()
-    print("## share_history (近20日 份额资金流 + OHLCV | Tushare fund_share+fund_daily)")
+    _sh_win = (share_history.get("summary") or {}).get("window_days") or 20
+    print(f"## share_history (近 {_sh_win} 日 份额资金流 + OHLCV | Tushare fund_share+fund_daily)")
     if share_history.get("available"):
         # 表头
         print(f"  {'日期':<10s} {'开盘':>6s} {'最高':>6s} {'最低':>6s} {'收盘':>6s} {'涨跌%':>7s} "
@@ -334,8 +575,21 @@ def cmd_report(symbol: str, *, as_json: bool, with_nav: bool,
         avg_amt_str = f"{avg_amt:.2f}" if avg_amt is not None else "-"
         share_chg = s.get('share_total_change')
         share_chg_str = f"{share_chg:+.0f}" if share_chg is not None else "-"
-        print(f"  资金趋势: {s.get('trend', '?')} | {s['row_count']}日合计: {total_flow_str} 亿 | "
-              f"日均成交: {avg_amt_str} 亿 | 份额变化: {share_chg_str} 万份")
+        pct = s.get('share_change_pct')
+        pct_str = f"{pct:+.2f}%" if pct is not None else "-"
+        fwin = s.get('flow_window') or {}
+        unconfirmed = fwin.get('confirmable') is False
+        trend_text = "窗口不可确认" if unconfirmed else s.get('trend', '?')
+        total_label = "可确认段小计" if unconfirmed else "窗口合计"
+        print(f"  资金趋势: {trend_text} | {total_label}: {total_flow_str} 亿 | "
+              f"日均成交: {avg_amt_str} 亿 | 份额变化(同窗): {share_chg_str} 万份 {pct_str}")
+        if unconfirmed:
+            print(f"  ⚠️ 窗口份额流不可确认: {fwin.get('note') or '窗口证据未确认'}")
+        if fwin:
+            miss = fwin.get('missing_share_days') or 0
+            print(f"  共同起止: {fwin.get('start')}~{fwin.get('end')}"
+                  f"（{fwin.get('segments')} 段/{fwin.get('trading_days')} 交易日"
+                  + (f"，窗内缺份额 {miss} 日 ⚠" if miss else "") + "）")
     else:
         print(f"  不可用: {share_history.get('note', '未知')}")
     print()
@@ -376,6 +630,7 @@ def cmd_holdings(symbol: str, *, as_json: bool) -> int:
         return 0
 
     print(f"# holdings · {symbol}")
+    print(f"scope: {data.get('holding_scope')}")   # B01-2：前十 ≠ 完整持仓
     if data["status"] != "ok":
         print(f"⏳ 持仓数据不可用: {data['note']}")
         return 0
@@ -395,7 +650,14 @@ def cmd_holdings(symbol: str, *, as_json: bool) -> int:
     t1 = f"{top1:.2f}" if top1 is not None else "-"
     t5 = f"{top5:.2f}" if top5 is not None else "-"
     t10 = f"{top10:.2f}" if top10 is not None else "-"
-    print(f"集中度(引擎): top1 {t1}% | top5 {t5}% | top10 {t10}%")
+    print(f"集中度(引擎): top1 {t1}% | top5 {t5}% | top10 {t10}%"
+          "（分母=占基金资产净值；仅披露范围，缺口不按 0/不重归一化）")
+    cov = data.get("coverage") or {}
+    if cov.get("uncovered_note"):
+        print(f"coverage: {cov['uncovered_note']}")
+    pcf = data.get("pcf") or {}
+    if pcf.get("status"):
+        print(f"pcf: {pcf['status']}（{pcf.get('note')}）")
     clusters = data.get("clusters") or []
     if clusters:
         print("子环节聚类合计(引擎):")
@@ -409,10 +671,16 @@ def cmd_holdings(symbol: str, *, as_json: bool) -> int:
     return 0
 
 
-def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
-    """R13: 赛道资金流对比 + 相对强弱。"""
+def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None,
+              same_index_str: str | None = None, index_code: str | None = None,
+              evidence_path: str | None = None, share_days: int = 20) -> int:
+    """R13: 赛道资金流对比 + 相对强弱；B02: 可选同指数实现质量有限比较。"""
     symbol = _validate_symbol(symbol)
     if symbol is None:
+        return 2
+    if not (2 <= share_days <= 200):
+        print(f"错误: --share-days 需在 2..200（交易日间隔；取数上限约 170 交易日），"
+              f"收到 {share_days}", file=sys.stderr)
         return 2
     peers_list = None
     if peers_str:
@@ -422,7 +690,41 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
     except ImportError as exc:
         print(f"etf_peers 模块不可用: {exc}（请检查路径配置或 canonical 模块加载）")
         return 1
-    data = query_etf_peers(symbol, peers_list)
+    data = query_etf_peers(symbol, peers_list, share_days=share_days)
+    # B02 同指数实现质量比较：必须显式给指数代码与**官方材料证据文件**
+    # （同指数身份/币种/费率来自本次读取的原文；URL 存在 ≠ 已读，不猜）
+    same_index = None
+    if same_index_str:
+        if not index_code:
+            print("错误: --same-index 需要 --index-code（同指数比较的指数代码）", file=sys.stderr)
+            return 2
+        if not evidence_path:
+            print("错误: --same-index 需要 --evidence-json（本次读取的官方材料证据；"
+                  "未读材料不得推定同指数/费率）", file=sys.stderr)
+            return 2
+        si_peers = [p.strip() for p in same_index_str.split(",") if p.strip()]
+        bad = [p for p in si_peers if not (p.isdigit() and len(p) == 6)]
+        if bad:
+            print(f"错误: --same-index 非法代码: {bad}（需 6 位数字）", file=sys.stderr)
+            return 2
+        ev_file = Path(evidence_path)
+        if not ev_file.is_file():
+            print(f"错误: 证据文件不存在: {ev_file}", file=sys.stderr)
+            return 2
+        try:
+            evidence = json.loads(ev_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"错误: 证据文件读取/解析失败: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(evidence, dict):
+            print("错误: 证据文件须为 {symbol: {...}} 对象", file=sys.stderr)
+            return 2
+        from etf_peers import same_index_quality_comparison
+
+        same_index = same_index_quality_comparison(
+            symbol, si_peers, index_code=index_code,
+            index_name=(evidence.get(symbol) or {}).get("index_name"),
+            evidence=evidence)
     if as_json:
         from dates import shanghai_now
 
@@ -432,8 +734,30 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
             "symbol": symbol,
             "peers": data,
         }
+        if same_index is not None:
+            payload["same_index_comparison"] = same_index
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return 0
+    if same_index is not None:
+        print("## 同指数实现质量有限比较 (B02 · 不排名)")
+        print(f"  index: {same_index.get('index_code')} "
+              f"{same_index.get('index_name') or ''} | status={same_index.get('status')}")
+        cw = same_index.get("common_window") or {}
+        print(f"  同窗: {cw.get('start', '—')} ~ {cw.get('end', '—')} "
+              f"({cw.get('n_dates', '—')} 个交易日)")
+        print(f"  {'代码':<8s} {'名称':<16s} {'同窗收益%':>9s} {'费率':>16s} {'状态'}")
+        for row in same_index.get("rows") or []:
+            ret = (f"{row['window_return_pct']:+.2f}"
+                   if row.get("window_return_pct") is not None else "⏳")
+            fees = row.get("fees") or {}
+            fee_txt = (" ".join(f"{i.get('name')}{i.get('annual_rate_pct')}%"
+                                for i in fees.get("items") or [])
+                       if fees.get("status") == "ok" else fees.get("status", "—"))
+            print(f"  {row['symbol']:<8s} {(row.get('name') or '-'):<16s} {ret:>9s} "
+                  f"{fee_txt:>16s} {row.get('status')}")
+        for gap in same_index.get("gaps") or []:
+            print(f"  ⚠ {gap}")
+        print(f"  note: {same_index.get('no_ranking_note')}")
 
     print(f"# peers · {symbol}")
     print(f"peer_source: {data['peer_source']}")
@@ -441,22 +765,35 @@ def cmd_peers(symbol: str, *, as_json: bool, peers_str: str | None) -> int:
         print(f"⏳ {data.get('note', '赛道不可用')}")
         return 0
     names = data.get("names") or {}
-    print("## 资金流对比 (Tushare fund_share · 20日窗口 · 亿元)")
-    print(f"  {'代码':<8s} {'名称':<14s} {'20日流':>8s} {'5日流':>7s} "
+    win = (data.get("flow") or {}).get("window_days", 20)
+    print(f"## 资金流对比 (Tushare fund_share · {win} 日窗口 · 亿元)")
+    comparison_note = (data.get("flow") or {}).get("common_window_note")
+    if comparison_note:
+        print(f"⚠ {comparison_note}")
+    print(f"  {'代码':<8s} {'名称':<14s} {'窗口流':>8s} {'5日流':>7s} "
           f"{'份额变化%':>9s} {'趋势'}")
     for row in data["flow"]["rows"]:
         code = row["symbol"]
         name = names.get(code) or "-"
-        f20 = f"{row['flow_20d_e']:+.2f}" if row.get("flow_20d_e") is not None else "⏳"
+        fw_t = row.get("flow_total_e")
         f5 = f"{row['flow_5d_e']:+.2f}" if row.get("flow_5d_e") is not None else "⏳"
         sp = f"{row['share_change_pct']:+.2f}" if row.get("share_change_pct") is not None else "⏳"
         trend = row.get("trend") or "⏳"
         note = row.get("note")
+        fwin = row.get("flow_window") or {}
+        unconfirmed = row.get("confirmable") is False or fwin.get("confirmable") is False
+        if unconfirmed:
+            trend = "窗口不可确认（流量为可确认段小计）"
+            note = fwin.get("note") or note or "窗口证据未确认"
         extra = f" ⚠ {note}" if note else ""
-        print(f"  {code:<8s} {name:<14s} {f20:>8s} {f5:>7s} {sp:>9s} {trend}{extra}")
-        span = row.get("share_change_span")
-        if span is not None and span < 19:
-            print(f"  ⚠ {code} 份额变化% 仅覆盖 {span} 个交易日间隔（份额历史不足 20 日）")
+        fw_v = f"{fw_t:+.2f}" if fw_t is not None else "⏳"
+        print(f"  {code:<8s} {name:<14s} {fw_v:>8s} {f5:>7s} {sp:>9s} {trend}{extra}")
+        if fwin:
+            miss = fwin.get("missing_share_days") or 0
+            seg_txt = (f"{fwin.get('segments')} 段/{fwin.get('trading_days')} 交易日"
+                       + (f"，窗内缺份额 {miss} 日" if miss else ""))
+            print(f"         共同起止 {fwin.get('start')}~{fwin.get('end')}"
+                  f"（{seg_txt}）" + (" ⚠" if miss else ""))
     rs = data.get("rs")
     if rs and "error" not in rs:
         rank = rs.get("rank_20d") or {}
@@ -493,24 +830,36 @@ def cmd_futures_basis(symbol: str, *, as_json: bool) -> int:
     return 0
 
 
-def _html_extra_dims(symbol: str) -> dict:
-    """HTML 追加三维度（R12 holdings / R13 peers / R15 sector_flow）。
+def _html_extra_dims(symbol: str, *, peers: list[str] | None = None,
+                     share_days: int = 20) -> dict:
+    """HTML/封存追加三维度（R12 holdings / R13 peers / R15 sector_flow）。
 
     单源失败 → {"available": False} 占位，不阻断渲染（与报告采集的独立记录约定一致）。
+    A4：``peers`` 显式清单（未映射赛道）与 ``share_days`` 份额窗口随 payload 冻结。
+    A7：三个维度相互独立 → 线程池并行读取（仓库既有 ThreadPoolExecutor 模式；
+    各维度只写自身 L2 缓存文件/只读库，键序固定，输出与串行一致），单维异常
+    仍按维度记录。
     """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _fetch(kind: str) -> dict:
+        if kind == "holdings":
+            return query_etf_holdings(symbol)
+        if kind == "peers":
+            from etf_peers import query_etf_peers
+            return query_etf_peers(symbol, peers, share_days=share_days)
+        from sector_flow import query_sector_flow
+        return query_sector_flow(symbol)
+
+    kinds = ("holdings", "peers", "sector_flow")
     dims: dict[str, dict] = {}
-    for kind in ("holdings", "peers", "sector_flow"):
-        try:
-            if kind == "holdings":
-                dims[kind] = query_etf_holdings(symbol)
-            elif kind == "peers":
-                from etf_peers import query_etf_peers
-                dims[kind] = query_etf_peers(symbol, None)
-            else:
-                from sector_flow import query_sector_flow
-                dims[kind] = query_sector_flow(symbol)
-        except Exception as exc:
-            dims[kind] = {"available": False, "note": f"{kind} 采集失败: {exc}"}
+    with ThreadPoolExecutor(max_workers=len(kinds)) as ex:
+        futures = {kind: ex.submit(_fetch, kind) for kind in kinds}
+        for kind in kinds:            # 固定键序收集，输出结构与串行一致
+            try:
+                dims[kind] = futures[kind].result()
+            except Exception as exc:
+                dims[kind] = {"available": False, "note": f"{kind} 采集失败: {exc}"}
     return dims
 
 
@@ -561,10 +910,14 @@ def _open_browser(html_path: Path) -> bool:
 
 
 def cmd_html(symbol: str, *, md_path: str | None = None, out_path: str | None = None,
-             no_open: bool = False) -> int:
-    """生成交互式 HTML 报告：引擎数据仪表盘 + md 分析全文原样嵌入。
+             no_open: bool = False, payload_path: str | None = None) -> int:
+    """生成交互式 HTML 报告：冻结 payload（同代输入）+ md 分析全文原样嵌入。
 
-    md 定位与写文件 fail-loud（rc 1）；数据采集单源失败降级为占位。
+    B05（v0.3.2 纠偏）：**HTML 只读冻结 payload 渲染**——零网络、零 DB 写。
+    `--payload` 必填且与 `--md` 同 ts 同目录：缺 payload / JSON 损坏 / symbol
+    不一致 / 哈希不符（篡改）/ 与报告 ts 不对应 → 全部 fail-loud rc 2；
+    不再保留「缺 payload → 重采数据」的回退路径（重采渲染不受原报告数字
+    签认保护，属已退出的旧错误路径）。
     """
     symbol = _validate_symbol(symbol)
     if symbol is None:
@@ -574,21 +927,53 @@ def cmd_html(symbol: str, *, md_path: str | None = None, out_path: str | None = 
         print(f"错误: {err}", file=sys.stderr)
         return 1
 
+    from etf_generation import load_etf_payload  # noqa: E402
+
+    if not payload_path:
+        print(
+            "错误: html 需要 --payload <冻结 payload>（同代输入）。\n"
+            "     先运行: etf.py report SYMBOL --json --payload-out "
+            "reports/{symbol}-*/<ts>.payload.json\n"
+            "     HTML 不再重采数据（重采渲染非同代，已退出该路径）。",
+            file=sys.stderr,
+        )
+        return 2
+    payload_file = Path(payload_path)
+    payload, errs = load_etf_payload(payload_file)
+    if payload is None:
+        print(f"错误: payload 不可用: {'；'.join(errs)}", file=sys.stderr)
+        return 2
+    if payload.get("symbol") != symbol:
+        print(f"错误: payload.symbol={payload.get('symbol')!r} ≠ 请求标的 {symbol!r}",
+              file=sys.stderr)
+        return 2
+    expected_name = f"{md.stem}.payload.json"
+    if (payload_file.name != expected_name
+            or payload_file.parent.resolve() != md.parent.resolve()):
+        print(
+            f"错误: payload 与报告 md 不配对：期望 {expected_name}（与 md 同目录），"
+            f"实际 {payload_file.name}@{payload_file.parent}",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         from etf_html import render_etf_html  # noqa: E402
     except ImportError as exc:
         print(f"错误: etf_html 渲染模块不可用: {exc}", file=sys.stderr)
         return 1
 
-    payload = _collect_report_payload(
-        symbol, with_nav=True, history=True, history_days=250, playbook=True,
-    )
-    # R12/R13/R15 追加维度：与报告采集一致，单源失败 → 占位不阻断
-    payload.update(_html_extra_dims(symbol))
-
     md_text = md.read_text(encoding="utf-8")
+    meta = payload.get("_meta") or {}
+    generation = {
+        "same_generation": True,
+        "payload_hash": meta.get("payload_hash"),
+        "frozen_at": meta.get("frozen_at"),
+        "generated_at": payload.get("generated_at"),
+        "payload_file": str(payload_file),
+    }
     try:
-        html_text = render_etf_html(payload, md_text=md_text)
+        html_text = render_etf_html(payload, md_text=md_text, generation=generation)
     except Exception as exc:
         print(f"错误: HTML 渲染失败（md 语法可能超出渲染器子集）: {exc}", file=sys.stderr)
         return 1
@@ -596,6 +981,8 @@ def cmd_html(symbol: str, *, md_path: str | None = None, out_path: str | None = 
     out = _resolve_out_path(md, out_path)
     out.write_text(html_text, encoding="utf-8")
     print(f"HTML 报告: {out}")
+    print(f"同代输入: payload_hash={str(meta.get('payload_hash'))[:12]}…"
+          f"（frozen_at={meta.get('frozen_at')}）")
 
     if no_open:
         return 0
@@ -745,6 +1132,10 @@ def cmd_industry_pe() -> int:
 def _persist_index_pe(idx_codes: list[str] | None) -> dict:
     """把 etf_index_pe 缓存信封写入 index_pe_history（幂等，失败不阻断报告）。
 
+    调用方约定（R2）：**单只 report 只传本标的指数**（`[CSINDEX_MAP[symbol]]`）；
+    `None`（=CSINDEX_MAP 全部）仅供批量维护入口 `collect-weekly` 使用，
+    报告路径不再触发全量回填。
+
     返回 persist_index_pe_from_cache 的结果 dict（含 error/rows_saved/
     index_codes/ok_envelopes）；调用抛异常时返回 {"error": ...}，由调用方
     决定是否提示。cold-cache 失败日 data_bridge 不缓存 missing 信封，此
@@ -789,10 +1180,72 @@ def cmd_collect_weekly() -> int:
     return 0
 
 
+_COVERAGE_LEVELS = ("high", "partial", "low", "none", "unknown")
+
+
+def _hedge_md_rows(text: str) -> dict[str, str]:
+    """解析 etf-hedge-map.md 的映射表行 → {code: coverage}（只收 6 位代码行）。"""
+    rows: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip().strip("*").strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2 or not re.fullmatch(r"\d{6}", cells[0]):
+            continue
+        cov = next((c for c in cells if c in _COVERAGE_LEVELS), None)
+        if cov:
+            rows[cells[0]] = cov
+    return rows
+
+
+def _check_hedge_map_consistency() -> int:
+    """代码表 ↔ references/etf-hedge-map.md 一致性（B03）。
+
+    双向核对：MD 缺代码 / MD 多代码 / 覆盖度不一致 → 打印差异并 rc 1。
+    （人工副本缺失 = 分发/文档破坏，属确定性错误，fail-loud 不降级。）
+    """
+    from skill_paths import default_reference, skill_relpath  # noqa: E402
+
+    # 读文件用**绝对路径**（skill_relpath 是给用户看的布局相对路径，CWD 非
+    # 布局根时会误判缺失）；报错信息仍打印相对路径便于定位。
+    rel = skill_relpath(__file__, "references/etf-hedge-map.md")
+    path = Path(default_reference(__file__, "references/etf-hedge-map.md"))
+    if not path.is_file():
+        print(f"  ❌ 对冲表文档缺失: {rel}（解析为 {path}）")
+        return 1
+    try:
+        md_rows = _hedge_md_rows(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        print(f"  ❌ 对冲表文档读取失败: {exc}")
+        return 1
+    code_keys = set(ETF_HEDGE_MAP)
+    md_keys = set(md_rows)
+    missing_in_md = sorted(code_keys - md_keys)
+    extra_in_md = sorted(md_keys - code_keys)
+    cov_mismatch = sorted(
+        f"{c}: code={ETF_HEDGE_MAP[c].get('coverage')} md={md_rows[c]}"
+        for c in code_keys & md_keys
+        if ETF_HEDGE_MAP[c].get("coverage") != md_rows[c]
+    )
+    print(f"  代码表↔etf-hedge-map.md: code={len(code_keys)} md={len(md_keys)}")
+    ok = True
+    if missing_in_md:
+        ok = False
+        print(f"  ❌ 代码有文档无（补文档）: {', '.join(missing_in_md)}")
+    if extra_in_md:
+        ok = False
+        print(f"  ❌ 文档有代码无（补代码或删行）: {', '.join(extra_in_md)}")
+    if cov_mismatch:
+        ok = False
+        print(f"  ❌ 覆盖度不一致（先改代码再同步文档）: {'; '.join(cov_mismatch)}")
+    return 0 if ok else 1
+
+
 def cmd_diagnose() -> int:
     print("invest-a-etf diagnose")
     print(f"  ETF_HEDGE_MAP entries: {len(ETF_HEDGE_MAP)}")
     print(f"  CSINDEX_MAP entries:   {len(CSINDEX_MAP)}")
+    rc = _check_hedge_map_consistency()
     try:
         import akshare as ak  # noqa: F401
 
@@ -803,6 +1256,9 @@ def cmd_diagnose() -> int:
     # smoke: known code in map
     sample = "510300"
     print(f"  sample hedge[{sample}]: {ETF_HEDGE_MAP.get(sample)}")
+    if rc != 0:
+        print("diagnose: FAIL（对冲表一致性，见上）")
+        return 1
     print("diagnose: OK")
     return 0
 
@@ -864,6 +1320,53 @@ def cmd_decision(symbol: str, *, from_path: str | None, init: bool,
     return 0
 
 
+def _render_generation_check(report_dir: Path) -> str:
+    """同代输入配对核查小节（B05/B06；只读，不改历史产物）。
+
+    ``paired`` 只表示输入配对，不表示整体通过——逐代展示 QC 记录侧车状态
+    （产物 sha256 绑定与分层签认；改产物后旧记录 stale）。
+    """
+    from etf_generation import verify_report_generation  # noqa: E402
+
+    gen = verify_report_generation(report_dir)
+    lines = ["", "## 同代输入配对核查（引擎）", "",
+             "> 只读核验（md/payload/html/decision 配对、payload 哈希、产物 "
+             "sha256 与 QC 记录绑定）；旧代无冻结 payload 标 legacy，不等于"
+             "新报告允许缺 payload。paired 只表示输入配对，不表示整体通过。", ""]
+    if gen.get("error"):
+        lines.append(f"- ⚠️ 同代核验失败：{gen['error']}")
+        return "\n".join(lines) + "\n"
+    for g in gen["generations"]:
+        mark = {"paired": "✅", "legacy_no_payload": "ℹ️"}.get(g["status"], "⚠️")
+        line = f"- {mark} `{g['ts']}`：{g['status']}"
+        if g.get("payload_hash"):
+            line += f"（payload {g['payload_hash'][:12]}…）"
+        rec = g.get("qc_record") or {}
+        if rec:
+            st = rec.get("status")
+            if st == "valid":
+                signoffs = rec.get("signoffs") or {}
+                unexec = [k for k, v in signoffs.items()
+                          if (v or {}).get("status") == "not_executed"]
+                partial = [k for k, v in signoffs.items()
+                           if (v or {}).get("status") == "partial"]
+                bits = []
+                if unexec:
+                    bits.append(f"未执行签认: {', '.join(unexec)}")
+                if partial:
+                    bits.append(f"部分签认: {', '.join(partial)}")
+                line += (f"；QC 记录 valid（机器 {rec.get('machine_overall')}；"
+                         + ("；".join(bits) if bits else "签认齐") + "）")
+            elif st:
+                line += f"；QC 记录 {st}"
+        if g["issues"]:
+            line += "；" + "；".join(g["issues"])
+        lines.append(line)
+    if not gen["generations"]:
+        lines.append("- （无报告 md）")
+    return "\n".join(lines) + "\n"
+
+
 def cmd_review(symbol: str, *, out: str | None = None, md: str | None = None) -> int:
     """复盘纪要：把该标的的报告序列 + 复盘原料（sidecar）对照成三段式纪要。
 
@@ -883,6 +1386,7 @@ def cmd_review(symbol: str, *, out: str | None = None, md: str | None = None) ->
     sidecars = collect_sidecars(report_dir)
     today = shanghai_now().date()
     body = render_review(symbol, sidecars=sidecars, today=today)
+    body += _render_generation_check(report_dir)
 
     out_path = Path(out) if out else report_dir / f"{today:%Y%m%d}-review.md"
     if out and not out_path.parent.is_dir():
@@ -937,7 +1441,39 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument(
         "--playbook",
         action="store_true",
-        help="R11c: 输出情景预案（回撤档位 σ 分级 + 三步核查清单 + LAW 6a 声明）",
+        help="R11c: 输出情景预案（回撤档位 → 触发核验深度 + 当前状态 + 三步核查清单 "
+             "+ LAW 6a 声明；档位为绝对百分比分档，非统计概率）",
+    )
+    p_report.add_argument(
+        "--payload-out",
+        metavar="PATH",
+        default=None,
+        help="B05: 冻结本次 payload（含 HTML 渲染所需维度）到指定文件"
+             "（约定 reports/{symbol}-*/<md ts>.payload.json）；html 只读该文件渲染",
+    )
+    p_report.add_argument(
+        "--index-exposure",
+        action="store_true",
+        help="按需查询指数样本/权重（csindex 公开文件）并随 payload 冻结；"
+             "报告 Fit 章节引用该数据时必须传（否则引用输入不在同代封存内）",
+    )
+    p_report.add_argument(
+        "--research", metavar="PATH", default=None,
+        help="按研究问题准备的经营/行业原文与条件分析 JSON；须同用 --payload-out，"
+             "仅所选持仓获取共享财务原料；未指定时无额外请求",
+    )
+    p_report.add_argument(
+        "--peers",
+        metavar="CODES",
+        default=None,
+        help="A4: 显式赛道清单（逗号分隔，语义同 peers 子命令）；随 payload 封存 peers 维度"
+             "（未映射赛道必须显式给，如 --peers \"513600,513660\"）",
+    )
+    p_report.add_argument(
+        "--share-days",
+        type=int,
+        default=20,
+        help="A4: 份额序列窗口（交易日间隔，默认 20；可用 20/60/120 或等价 3–6 个月）",
     )
 
     sub.add_parser("diagnose", help="检查依赖与映射表")
@@ -952,12 +1488,26 @@ def main(argv: list[str] | None = None) -> int:
     p_peers = sub.add_parser("peers", help="R13: 赛道资金流对比 + 相对强弱")
     p_peers.add_argument("symbol", help="6 位 ETF 代码")
     p_peers.add_argument("--json", action="store_true", help="输出完整 JSON")
+    p_peers.add_argument("--share-days", type=int, default=20,
+                         help="份额序列窗口（交易日间隔，默认20；范围2..200，与report一致）")
     p_peers.add_argument(
         "--peers",
         metavar="CODES",
         default=None,
         help="显式赛道清单（逗号分隔，如 \"512660,512760\"）；缺省按 ETF_TO_SW_INDUSTRY 自动发现同行业",
     )
+    p_peers.add_argument(
+        "--same-index",
+        metavar="CODES",
+        default=None,
+        help="B02 同指数产品清单（逗号分隔）；需同时给 --index-code 与 "
+             "--evidence-json（官方材料证据），输出实现质量有限比较（不排名）",
+    )
+    p_peers.add_argument("--index-code", metavar="CODE", default=None,
+                         help="同指数比较的指数代码（如 000300）")
+    p_peers.add_argument("--evidence-json", metavar="PATH", default=None,
+                         help="本次读取的官方材料证据（{code: {index_code, url, "
+                              "sha256, locator, ...}}）；URL 存在 ≠ 已读")
 
     p_sf = sub.add_parser("sector-flow", help="R15: 关联行业资金流 + 趋势（同花顺 3/5/10 日）")
     p_sf.add_argument("symbol", help="6 位 ETF 代码")
@@ -989,6 +1539,9 @@ def main(argv: list[str] | None = None) -> int:
     p_html.add_argument("symbol", help="6 位 ETF 代码")
     p_html.add_argument("--md", metavar="PATH", default=None,
                         help="报告 md 路径（缺省自动取 reports/{symbol}-* 最新）")
+    p_html.add_argument("--payload", dest="payload", metavar="PATH", default=None,
+                        help="B05: 冻结 payload 路径（必填；须与 md 同目录同 ts："
+                             "<ts>.payload.json；HTML 只读该输入，零网络零 DB 写）")
     p_html.add_argument("--out", metavar="PATH", default=None,
                         help="HTML 输出路径（缺省与 md 同目录同名 .html）")
     p_html.add_argument("--no-open", action="store_true",
@@ -996,9 +1549,16 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.cmd == "report":
+        report_peers = None
+        if getattr(args, "peers", None):
+            report_peers = [p.strip() for p in args.peers.split(",") if p.strip()]
         return cmd_report(args.symbol, as_json=args.json, with_nav=args.with_nav,
                           history=args.history, history_days=args.history_days,
-                          events_path=args.events, playbook=args.playbook)
+                          events_path=args.events, playbook=args.playbook,
+                          payload_out=args.payload_out,
+                          index_exposure=args.index_exposure,
+                          peers=report_peers, share_days=args.share_days,
+                          research_path=args.research)
     if args.cmd == "diagnose":
         return cmd_diagnose()
     if args.cmd == "industry-pe":
@@ -1008,7 +1568,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "holdings":
         return cmd_holdings(args.symbol, as_json=args.json)
     if args.cmd == "peers":
-        return cmd_peers(args.symbol, as_json=args.json, peers_str=args.peers)
+        return cmd_peers(args.symbol, as_json=args.json, peers_str=args.peers,
+                         same_index_str=args.same_index, index_code=args.index_code,
+                         evidence_path=args.evidence_json, share_days=args.share_days)
     if args.cmd == "sector-flow":
         return cmd_sector_flow(args.symbol, as_json=args.json)
     if args.cmd == "collect-sector-flow":
@@ -1022,7 +1584,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_review(args.symbol, out=args.out, md=args.md)
     if args.cmd == "html":
         return cmd_html(args.symbol, md_path=args.md, out_path=args.out,
-                        no_open=args.no_open)
+                        no_open=args.no_open, payload_path=args.payload)
     return 1
 
 

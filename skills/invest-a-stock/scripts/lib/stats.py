@@ -7,6 +7,7 @@ ensure_skills_lib_on_path()
 
 from stats import (  # noqa: E402, F401
     calc_beta,
+    le_share_pct,
     median,
     percentile_rank,
     percentile_rank_inclusive,

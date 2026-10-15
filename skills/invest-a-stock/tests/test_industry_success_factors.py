@@ -111,6 +111,38 @@ class TestRenderSuccessFactors:
         # 来源标注存在
         assert "[来源:" in joined
 
+    def test_latest_period_normalized_mixed_formats_a_f01(self):
+        """A-F01：行业成功因素 latest 按归一日期取（ISO/compact 混排不错期）。"""
+        from lib.render_markdown._base import _render_success_factors
+
+        coll = self._bank_collection()
+        for dim in coll["dimensions"]:
+            if dim["dimension"] == "financials":
+                dim["data"] = [
+                    {"end_date": "2025-12-31", "net_interest_margin": 1.82,
+                     "npl_ratio": 1.25, "provision_coverage_ratio": 220.5,
+                     "cet1_capital_adequacy_ratio": 11.3},
+                    {"end_date": "20261231", "net_interest_margin": 1.75,
+                     "npl_ratio": 1.20, "provision_coverage_ratio": 225.0,
+                     "cet1_capital_adequacy_ratio": 11.5},
+                ]
+        joined = "\n".join(_render_success_factors(coll))
+        # 旧实现按原始字符串 max 会选中 "20261231"→正确；反向混排（ISO 最新）时旧实现错期
+        assert "net_interest_margin: 1.75" in joined
+        coll2 = self._bank_collection()
+        for dim in coll2["dimensions"]:
+            if dim["dimension"] == "financials":
+                dim["data"] = [
+                    {"end_date": "20251231", "net_interest_margin": 1.82,
+                     "npl_ratio": 1.25, "provision_coverage_ratio": 220.5,
+                     "cet1_capital_adequacy_ratio": 11.3},
+                    {"end_date": "2026-12-31", "net_interest_margin": 1.75,
+                     "npl_ratio": 1.20, "provision_coverage_ratio": 225.0,
+                     "cet1_capital_adequacy_ratio": 11.5},
+                ]
+        joined2 = "\n".join(_render_success_factors(coll2))
+        assert "net_interest_margin: 1.75" in joined2  # ISO 最新期被选中
+
     def test_engine_external_field_flagged_needs_ai(self):
         """客户结构（引擎外字段）→ 「需 AI 补查（引擎外字段）」。"""
         from lib.industry import tech_hardware

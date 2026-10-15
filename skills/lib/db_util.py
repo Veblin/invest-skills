@@ -2,13 +2,20 @@
 
 历史：journal db.py 与 stock store.py 各有一份 _conn/_safe_close（body 近乎逐行相同）。
 统一收敛至此；WAL/synchronous PRAGMA 属各 schema 的 init_db 逻辑，留在各自侧。
+
+v0.3.2 A02：公开连接入口 ``open_connection`` / ``connection`` /
+``close_connection`` 在此定义（路径**显式**传入，无业务默认路径——
+研究库路径绑定归 ``store.get_db_path()``，含 ``_db_override`` 测试隔离）。
+``connect_db``/``safe_close`` 为历史公开名，保留不动。
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 
 def connect_db(path: Path) -> sqlite3.Connection:
@@ -29,6 +36,35 @@ def safe_close(conn: sqlite3.Connection, *, logger: logging.Logger | None = None
     except Exception:
         if logger is not None:
             logger.debug("sqlite close failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# A02 公开连接入口（跨 skill 消费者用；不再 import store/db 私有 _conn）
+# ---------------------------------------------------------------------------
+
+def open_connection(path: Path) -> sqlite3.Connection:
+    """打开连接（= connect_db 语义）。
+
+    实现经模块级 ``connect_db`` 全局查找调用——journal 测试的连接边界守卫
+    （conftest 包装 connect_db）必须继续拦截本入口（issue #33 P2 防回退）。
+    """
+    return connect_db(path)
+
+
+@contextmanager
+def connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """连接上下文：退出时关闭；**不**自动 commit/rollback（事务归调用方）。"""
+    c = open_connection(path)
+    try:
+        yield c
+    finally:
+        safe_close(c)
+
+
+def close_connection(conn: sqlite3.Connection, *,
+                     logger: logging.Logger | None = None) -> None:
+    """关闭连接（= safe_close 语义；logger 传入时才记录 debug 日志）。"""
+    safe_close(conn, logger=logger)
 
 
 def upsert_daily_rows(

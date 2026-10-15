@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 
@@ -107,13 +108,13 @@ def num(v):
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f == f else None  # NaN 过滤
+    return f if math.isfinite(f) else None
 
 
 def pct(a, b):
-    """``(a/b − 1) × 100``；任一缺失或 b == 0 → None。"""
+    """``(a/b − 1) × 100``；常规增长率要求可比基期 b > 0。"""
     a, b = num(a), num(b)
-    if a is None or b is None or b == 0:
+    if a is None or b is None or b <= 0:
         return None
     return (a / b - 1.0) * 100.0
 
@@ -125,12 +126,17 @@ def diff(a, b):
 
 
 def percentile_rank(series, value):
-    """``value`` 在 ``series`` 中的分位（%）= 小于等于它的样本占比。"""
+    """``value`` 在 ``series`` 中的分位（%）＝ 小于等于它的样本占比。
+
+    A05-3：计算收敛到共享核心 ``lib.stats.le_share_pct``；本函数的预处理
+    （num()：bool→None、NaN→None、非数值→None）保留在此（与 safe_float
+    口径不同，属显式保留的定义差异）。
+    """
+    from lib.stats import le_share_pct
+
     xs = [x for x in (num(v) for v in series) if x is not None]
     v = num(value)
-    if not xs or v is None:
-        return None
-    return sum(1 for x in xs if x <= v) / len(xs) * 100.0
+    return le_share_pct(xs, v)
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +256,16 @@ def build_financial(coll: dict) -> Facts:
             f.add("同报告期基准期", date_key(base), field="financials.end_date（上年同期）")
             for label, key in (("营收", "revenue"), ("净利润", "net_profit"),
                                ("毛利率(%)", "grossprofit_margin"), ("ROE(%)", "roe")):
-                f.add(f"{label} 同报告期同比(%)", pct(fin[-1].get(key), base.get(key)),
-                      formula=f"latest.{key} / base.{key} − 1")
+                latest_value, base_value = num(fin[-1].get(key)), num(base.get(key))
+                if base_value is not None and base_value <= 0:
+                    f.unavailable(f"{label} 同报告期同比(%)",
+                                  f"上年同期基期为 {base_value}（非正），不计算常规增长率")
+                    if key in {"revenue", "net_profit"} and latest_value is not None:
+                        f.add(f"{label} 同报告期金额变化(元)", diff(latest_value, base_value),
+                              formula=f"latest.{key}({date_key(fin[-1])}) − base.{key}({date_key(base)})")
+                else:
+                    f.add(f"{label} 同报告期同比(%)", pct(latest_value, base_value),
+                          formula=f"(latest.{key} / base.{key} − 1) × 100")
         else:
             expected = wanted_base_period or "不可识别"
             f.unavailable("同报告期同比", f"未找到最新报告期 {date_key(fin[-1])} 的精确上年同期 {expected}")
@@ -290,7 +304,8 @@ def build_financial(coll: dict) -> Facts:
             # insight_model B3 的同日口径）。旧实现取全序列（含负值）：既让负 PE
             # 参与中位数，又让 latest≤0 时恒得 ≈0% 分位——Agent B 会读成「历史偏低
             # 位置（便宜）」，正是 B3 要拦的失真。「非正样本数」同时是 prompt 要求的
-            # 「PE 分位失真检测（亏损期占比）」的数据载体（否则 Agent 只能违反 P0 自算）。
+            # 「PE 分位失真检测（非正 PE / 缺失占比）」的数据载体（A-F03：PE≤0
+            # 不确证财务亏损，只作非正样本计数；否则 Agent 只能违反 P0 自算）。
             nonnull = [num(r.get(key)) for r in val if num(r.get(key)) is not None]
             series = [x for x in nonnull if x > 0]
             nonpos = len(nonnull) - len(series)

@@ -41,11 +41,11 @@ class TestBandOptions:
         assert build_valuation_band_options(make_daily_basic_series(10)) is None
 
     def test_band_loss_ratio_positive(self):
-        """亏损期（PE<=0/None）先窗口后统计 → annotation 带亏损占比（A4 修正）。"""
+        """PE≤0/None 先窗口后统计 → annotation 分列亏损/缺失 + 合计（A05-3）。"""
         from lib.html_charts import build_valuation_band_options
 
         rows = make_daily_basic_series(60)
-        # 构造 30% 亏损期：每 6 行中 2 行亏损（负值/None 交替）
+        # 构造 30% 非正/缺失：每 6 行中 2 行（负值/None 交替）
         fixed = []
         for i, r in enumerate(rows):
             if i % 6 in (1, 2):
@@ -55,8 +55,18 @@ class TestBandOptions:
         opts = build_valuation_band_options(fixed)
         assert opts is not None
         a = opts["annotation_payload"]
-        assert a["loss_ratio_pct"] == pytest.approx(33.3, abs=0.5)  # 20/60
-        assert a["note"]  # >30% → note 非空
+        # 20/60 行非正或缺失；其中确证 PE≤0（i%6∈{1,2} 且 i 奇数）与缺失各半
+        assert a["nonpos_or_missing_ratio_pct"] == pytest.approx(33.3, abs=0.5)
+        assert a["loss_ratio_pct"] + a["missing_ratio_pct"] == pytest.approx(
+            a["nonpos_or_missing_ratio_pct"], abs=0.2)
+        assert a["loss_days_confirmed"] + a["missing_days"] == 20
+        assert a["n_window"] == 60
+        assert a["percentile_distortion"] is True
+        assert a["note"] and "非正或不可得" in a["note"]  # >30% → note 非空
+        # A-F03：分列为「非正 PE≤0 / PE 缺失」，且不得把 PE≤0 称「亏损期」
+        assert "非正 PE≤0" in a["note"] and "缺失" in a["note"]
+        assert "PE≤0 不确证财务亏损" in a["note"]
+        assert "亏损期" not in a["note"]
         assert a["cur"] == pytest.approx(a["cur"], abs=0.0001)      # 结构自检
 
     def test_band_xaxis_is_category(self):

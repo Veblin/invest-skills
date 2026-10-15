@@ -195,14 +195,21 @@ class TestIndexPeCaliberDisclosure:
         monkeypatch.setattr(etf_data, "akshare_direct_session", lambda: nullcontext())
 
     def test_fallback_to_circulating_is_disclosed(self, monkeypatch):
-        """最新行市盈率1 缺失 → 取值回落市盈率2，须显式标注为流通加权。"""
+        """最新行市盈率1 缺失 → 取值回落市盈率2，须显式标注**实际口径**。
+
+        R3：口径按 AKShare `stock_zh_index_value_csindex` 官方字段说明命名——
+        市盈率1=（总股本）P/E1、市盈率2=（计算用股本）P/E2；不得把市盈率2
+        直接命名「流通加权」（官方字段未如此定义）。字段名 `index_pe_circulating`
+        保留为兼容 alias（不改数值）。"""
         self._patch(monkeypatch, pd.DataFrame([
             {"日期": "2026-09-04", "市盈率1": 58.49, "市盈率2": 54.92},
             {"日期": "2026-09-07", "市盈率1": float("nan"), "市盈率2": 54.92},
         ]))
         r = fetch_etf_index_pe("515050")
         assert r["index_pe"] == pytest.approx(54.92)
-        assert r["index_pe_caliber"] == "流通加权", "回退到市盈率2 却未标注实际口径"
+        assert r["index_pe_caliber"] == etf_data._PE_CALIBER_CIRCULATING, \
+            "回退到市盈率2 却未标注实际口径"
+        assert "流通加权" not in r["index_pe_caliber"], "官方字段未定义「流通加权」"
         assert r["index_pe_circulating"] == pytest.approx(54.92), "双字段须显式暴露"
 
     def test_primary_caliber_is_disclosed(self, monkeypatch):
@@ -211,7 +218,7 @@ class TestIndexPeCaliberDisclosure:
         ]))
         r = fetch_etf_index_pe("515050")
         assert r["index_pe"] == pytest.approx(58.49)
-        assert r["index_pe_caliber"] == "股本加权"
+        assert r["index_pe_caliber"] == etf_data._PE_CALIBER_SHARE
         assert r["index_pe_circulating"] == pytest.approx(54.92)
 
     def test_missing_status_carries_none_caliber(self, monkeypatch):
@@ -226,31 +233,35 @@ class TestIndexPeCaliberDisclosure:
         from etf_html import index_pe_note_short
 
         assert index_pe_note_short(
-            {"index_pe": 54.92, "index_pe_caliber": "流通加权"}) == "PE(2) 流通加权口径"
+            {"index_pe": 54.92,
+             "index_pe_caliber": etf_data._PE_CALIBER_CIRCULATING}) == "PE(2) 计算用股本口径"
         assert index_pe_note_short(
-            {"index_pe": 58.49, "index_pe_caliber": "股本加权"}) == "PE(1) 股本加权口径"
+            {"index_pe": 58.49,
+             "index_pe_caliber": etf_data._PE_CALIBER_SHARE}) == "PE(1) 总股本口径"
         # 口径未知时不得臆断为 PE(1)
         assert "PE(1)" not in index_pe_note_short({"index_pe": 58.49})
         assert index_pe_note_short({"index_pe": None}) == "指数 PE 不可得"
 
     def test_profile_propagates_caliber_from_envelope(self, monkeypatch):
         """口径须随信封一起进 profile——只传 index_pe 会让徽章拿到 None。"""
-        env = {"status": "ok", "index_pe": 54.92, "index_pe_caliber": "流通加权",
+        env = {"status": "ok", "index_pe": 54.92,
+               "index_pe_caliber": etf_data._PE_CALIBER_CIRCULATING,
                "index_pe_note": "n", "rows": [{"日期": "2026-09-07"}]}
         monkeypatch.setattr(etf_data, "_bridge_get", lambda *a, **k: env)
         monkeypatch.setattr(etf_data, "_index_pe_percentile_from_db",
                             lambda *a, **k: None)
         result: dict = {"_errors": []}
         etf_data._fetch_csindex_pe(result, "515050")
-        assert result.get("index_pe_caliber") == "流通加权", "口径未透传（徽章将失据）"
+        assert result.get("index_pe_caliber") == etf_data._PE_CALIBER_CIRCULATING, \
+            "口径未透传（徽章将失据）"
 
 
 class TestIndexPePercentileCaliber:
     """分位必须用**同口径**的历史序列（R0~R2 review：T9-3 只标了值，分位仍混口径）。
 
-    `index_pe_history` 同时存 `pe`（市盈率1/股本加权）与 `pe_circulating`
-    （市盈率2/流通加权），而分位实现写死读 `pe` —— 于是「PE(2) 流通加权口径」
-    的徽章旁边，分位却把该值排进了股本加权历史（本 diff 注释自述约 6.5% 口径差）。
+    `index_pe_history` 同时存 `pe`（市盈率1/总股本）与 `pe_circulating`
+    （市盈率2/计算用股本），而分位实现写死读 `pe` —— 于是「PE(2) 计算用股本口径」
+    的徽章旁边，分位却把该值排进了总股本历史（本 diff 注释自述约 6.5% 口径差）。
     """
 
     @staticmethod
@@ -269,31 +280,95 @@ class TestIndexPePercentileCaliber:
             "515050", 50.0, None, column="pe_circulating") == 100.0
 
     def test_caliber_drives_percentile_column(self, monkeypatch):
-        """回落到流通加权时，分位须请求 `pe_circulating` 列。"""
+        """回落到市盈率2（计算用股本）时，分位须请求 `pe_circulating` 列。"""
         seen: dict = {}
-        env = {"status": "ok", "index_pe": 54.92, "index_pe_caliber": "流通加权",
+        env = {"status": "ok", "index_pe": 54.92,
+               "index_pe_caliber": etf_data._PE_CALIBER_CIRCULATING,
                "index_pe_note": "n", "rows": [{"日期": "2026-09-07"}]}
         monkeypatch.setattr(etf_data, "_bridge_get", lambda *a, **k: env)
 
-        def fake_pct(idx, cur, date, *, column="pe"):
+        def fake_stats(idx, cur, date, *, column="pe"):
             seen["column"] = column
             return None
 
-        monkeypatch.setattr(etf_data, "_index_pe_percentile_from_db", fake_pct)
+        # R13：分位与中位数/样本数由一次窗口读取产出（_index_pe_window_stats），
+        # 不再分别调用两个读同一窗口的函数
+        monkeypatch.setattr(etf_data, "_index_pe_window_stats", fake_stats)
         etf_data._fetch_csindex_pe({"_errors": []}, "515050")
         assert seen.get("column") == "pe_circulating", \
             f"分位口径与徽章口径不一致: {seen}"
 
     def test_primary_caliber_uses_pe_column(self, monkeypatch):
         seen: dict = {}
-        env = {"status": "ok", "index_pe": 58.49, "index_pe_caliber": "股本加权",
+        env = {"status": "ok", "index_pe": 58.49,
+               "index_pe_caliber": etf_data._PE_CALIBER_SHARE,
                "index_pe_note": "n", "rows": [{"日期": "2026-09-07"}]}
         monkeypatch.setattr(etf_data, "_bridge_get", lambda *a, **k: env)
 
-        def fake_pct(idx, cur, date, *, column="pe"):
+        def fake_stats(idx, cur, date, *, column="pe"):
             seen["column"] = column
             return None
 
-        monkeypatch.setattr(etf_data, "_index_pe_percentile_from_db", fake_pct)
+        monkeypatch.setattr(etf_data, "_index_pe_window_stats", fake_stats)
         etf_data._fetch_csindex_pe({"_errors": []}, "515050")
         assert seen.get("column") == "pe"
+
+    def test_single_read_feeds_pct_median_n(self, monkeypatch):
+        """R13：pct 与 median/n 必须来自**同一次**读取（旧实现各读一次窗口）。"""
+        calls: list[str] = []
+        env = {"status": "ok", "index_pe": 58.49,
+               "index_pe_caliber": etf_data._PE_CALIBER_SHARE,
+               "index_pe_note": "n", "rows": [{"日期": "2026-09-07"}]}
+        monkeypatch.setattr(etf_data, "_bridge_get", lambda *a, **k: env)
+        monkeypatch.setattr(etf_data, "_index_pe_window_stats",
+                            lambda *a, **k: calls.append("read") or {
+                                "pct": 42.0, "median": 55.5, "n": 24, "column": "pe"})
+        result = {"_errors": []}
+        etf_data._fetch_csindex_pe(result, "515050")
+        assert len(calls) == 1
+        assert result["index_pe_pct"] == 42.0
+        assert result["index_pe_history_median"] == 55.5
+        assert result["index_pe_history_n"] == 24
+
+
+class TestAudit20261009SingleWindowRead:
+    """R13：分位/中位数/样本数同源同窗；旧接口保留为兼容包装。"""
+
+    def test_legacy_wrappers_delegate_to_single_read(self, monkeypatch):
+        import statistics
+
+        import index_pe_snapshot as snap
+        rows = [{"date": f"2026-08-{d:02d}", "pe": 100.0, "pe_circulating": 50.0}
+                for d in range(1, 25)]
+        monkeypatch.setattr(snap, "get_index_pe_history", lambda code: list(rows))
+        pct = etf_data._index_pe_percentile_from_db("515050", 50.0, None,
+                                                    column="pe_circulating")
+        stats = etf_data._index_pe_history_stats("515050", 50.0, None,
+                                                 column="pe_circulating")
+        assert pct == 100.0
+        assert stats["pct"] == pct
+        assert stats["median"] == round(statistics.median([50.0] * 24), 2)
+        assert stats["n"] == 24 and stats["column"] == "pe_circulating"
+
+    def test_fetch_sets_pct_median_n_from_one_window(self, monkeypatch):
+        calls: list[str] = []
+        import index_pe_snapshot as snap
+        rows = [{"date": f"2026-08-{d:02d}", "pe": 200.0 - d, "pe_circulating": 100.0 - d}
+                for d in range(1, 25)]
+
+        def counting(code):
+            calls.append(code)
+            return rows
+
+        monkeypatch.setattr(snap, "get_index_pe_history", counting)
+        env = {"status": "ok", "index_pe": 78.0,
+               "index_pe_caliber": etf_data._PE_CALIBER_CIRCULATING,
+               "index_pe_note": "n", "rows": [{"日期": "2026-08-24"}]}
+        monkeypatch.setattr(etf_data, "_bridge_get", lambda *a, **k: env)
+        res: dict = {"_errors": []}
+        etf_data._fetch_csindex_pe(res, "515050")
+        assert calls == ["515050"]            # 单次窗口读取
+        assert res["index_pe_pct"] is not None
+        # 当前值所属日 2026-08-24 按防双计剔除 → 窗内 23 行（同一次读取内一致）
+        assert res["index_pe_history_n"] == 23
+        assert res["index_pe_history_column"] == "pe_circulating"

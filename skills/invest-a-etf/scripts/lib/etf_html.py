@@ -28,8 +28,10 @@ from _invest_path import (  # noqa: E402
 ensure_invest_a_scripts_on_path()
 ensure_skills_lib_on_path()
 
+from snapshot_core import default_serializer  # noqa: E402
 from lib.nums import safe_float  # noqa: E402
 from etf_md import MarkdownSubsetError, render_markdown  # noqa: E402
+from etf_research import render_research_section  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +78,39 @@ def _esc(v) -> str:
     return _html_mod.escape("" if v is None else str(v), quote=True)
 
 
+def _scale_value(profile: dict) -> tuple[float | None, str]:
+    """规模字段：`share_price_mv_est.value_yi`（B02 代理口径，正名）优先；
+    仅旧 payload 缺该块时回退 `aum`（兼容一版，来源标注注明代理语义）。"""
+    est = profile.get("share_price_mv_est")
+    if isinstance(est, dict) and est.get("value_yi") is not None:
+        return safe_float(est["value_yi"]), "profile.share_price_mv_est.value_yi"
+    aum = profile.get("aum")
+    if aum is not None:
+        return safe_float(aum), "profile.aum（旧键＝份额×交易价代理）"
+    return None, ""
+
+
 def _badge(text: str | None, cls: str = "b-ok") -> str:
     if not text:
         return ""
     return f'<span class="badge {cls}">{_esc(text)}</span>'
 
 
+#: 工程/接线状态类徽章（静态映射未收录工具、未接线、PCF 未接入等）不属金融风险，
+#: 不进读者展示（仅保留于 payload 原始数据与诊断记录）；金融风险的真实提示仍保留。
+_ENGINEERING_FLAG_RE = re.compile(
+    r"静态表未收录|未收录.{0,10}(?:期货|期权|对冲)|对冲工具|引擎未实现|未接线"
+    r"|PCF|未接入")
+
+
 def _flags_badges(flags) -> str:
-    """profile.flags 列表 → 徽章行（引擎 flag 文案原样）。"""
+    """profile.flags 列表 → 徽章行。过滤工程状态类文案，只保留金融风险真实提示。"""
     if not isinstance(flags, list):
         return ""
     out = []
     for fl in flags:
+        if _ENGINEERING_FLAG_RE.search(str(fl)):
+            continue
         cls = "b-wn" if "⚠" in str(fl) else "b-ok"
         out.append(f'<span class="badge {cls}">{_esc(fl)}</span>')
     return "".join(out)
@@ -365,10 +388,15 @@ def _html_sidebar(md_html: str = "") -> str:
 </nav>'''
 
 
-def _kpi_card(label: str, value: str, sub: str = "", color: str = "") -> str:
+def _kpi_card(label: str, value: str, sub: str = "", color: str = "",
+              src: str = "") -> str:
+    """KPI 卡。`sub` = 读者可见副标题（窗口/单位/估算口径等真实信息）；
+    引擎字段路径用 `src` 落到 `data-source` 属性（可追溯，不进读者可见文本，
+    2026-10-13 读者呈现）。"""
     color_attr = f' style="color:{color}"' if color else ""
-    sub_html = f'<div class="ks">{sub}</div>' if sub else ""
-    return (f'<div class="card card-sm"><div class="kl">{_esc(label)}</div>'
+    src_attr = f' data-source="{_esc(src)}"' if src else ""
+    sub_html = f'<div class="ks">{_esc(sub)}</div>' if sub else ""
+    return (f'<div class="card card-sm"{src_attr}><div class="kl">{_esc(label)}</div>'
             f'<div class="kv"{color_attr}>{value}</div>{sub_html}</div>')
 
 
@@ -394,6 +422,40 @@ def _vnote(text: str) -> str:
             f'<path d="M12 8v4m0 4h.01"/></svg>{_esc(text)}</div>')
 
 
+def _flow_uncertainty(summary: dict) -> str:
+    """保留引擎的不确定性；旧 payload 缺标记时不推断新状态。"""
+    window = summary.get("flow_window") or {}
+    if window.get("confirmable") is False:
+        return "窗口份额流不可确认：" + str(window.get("note") or "窗口证据未确认")
+    return ""
+
+
+#: category.label 的「未知」族取值（Spot 缺失时 category=unknown；不可当名称用）
+_UNKNOWN_CATEGORY_LABELS = {"", "未知", "unknown", "Unknown", "none", "None"}
+
+
+def _identity_display_name(profile: dict) -> str:
+    """名称摘要（R8，2026-10-11 复查）：已封存身份登记优先，未知不冒充名称。
+
+    顺序：category.label（非未知族）→ identity.fund_name（原文核验登记）→
+    「身份待核」（identity 存在但无名称且未核验——如 159796 unknown）→
+    旧代透明回退（label/profile.name 原样，可能为空）。
+    只消费封存字段；不据名称/外部检索反推或改写身份。
+    """
+    cat = profile.get("category") if isinstance(profile.get("category"), dict) else {}
+    label = str((cat or {}).get("label") or "").strip()
+    if label not in _UNKNOWN_CATEGORY_LABELS:
+        return label
+    ident = profile.get("identity") or {}
+    fund_name = str(ident.get("fund_name") or "").strip()
+    if fund_name:
+        return fund_name
+    ver = str((ident.get("verification") or {}).get("status") or "")
+    if ident and ver != "verified_original":
+        return "身份待核"
+    return label or str(profile.get("name") or "").strip()
+
+
 def _html_hero(profile: dict, quote: dict, kline: dict,
                share_history: dict, history: dict) -> str:
     """头部摘要（hero，首屏快览）。全部引擎字段直映，无跨字段计算。
@@ -409,7 +471,7 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
     cat = profile.get("category") or {}
     vg = profile.get("valuation_guide") or {}
 
-    aum = profile.get("aum")
+    aum, aum_src = _scale_value(profile)
     pd = profile.get("premium_discount")
     pe = profile.get("index_pe")
     pe_pct = profile.get("index_pe_pct")
@@ -424,50 +486,106 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
     recent_flow = sh_summary.get("recent_flow_est")
     inflow_days = sh_summary.get("inflow_days")
     outflow_days = sh_summary.get("outflow_days")
+    # A3/A4（Codex 消费链阻塞）：窗口标签必须用实际 window_days 与共同起止，
+    # 不得固定「20 日」（120/60 日报告会标错窗口）；旧 payload 无该键时回退 20。
+    flow_win_days = sh_summary.get("window_days") or 20
+    _fw = sh_summary.get("flow_window") or {}
+    flow_warning = _flow_uncertainty(sh_summary)
+    flow_win_txt = (f"{_fw.get('start')}~{_fw.get('end')}"
+                    if _fw.get("start") and _fw.get("end") else "")
 
     stats = history.get("stats") or {}
     md_stat = stats.get("max_drawdown") or {}
     ah = stats.get("annual_high") or {}
 
-    # ── 8 格 stat（.ks 小字 = 引擎字段路径，复测可溯源） ──
-    pe_sub = ""
-    if pe_pct is not None:
-        pe_sub = f"历史位置 {_fmt(pe_pct, 1)}%（引擎累积窗口） · "
-    pe_sub += "profile.index_pe_pct"
-
-    flow_sub = f"{_esc(flow_trend)} · " if flow_trend else ""
-    flow_sub += "share_history.summary.total_flow_est"
-
-    rsi_sub = (f"RSI({rsi_period}) · " if rsi_period else "") + "kline.rsi"
+    # ── 8 格 stat（引擎字段路径落 data-source 属性；可见副标题只留窗口/单位/估算口径） ──
+    pe_sub = f"历史位置 {_fmt(pe_pct, 1)}%" if pe_pct is not None else ""
+    flow_bits = []
+    if flow_warning:
+        flow_bits.append(str(flow_warning))
+    elif flow_trend:
+        flow_bits.append(str(flow_trend))
+    if flow_win_txt:
+        flow_bits.append(f"共同起止 {flow_win_txt}")
+    flow_sub = " · ".join(flow_bits)
+    rsi_sub = f"RSI({rsi_period})" if rsi_period else ""
 
     tiles = [
-        _kpi_card("最新价", price_str, "quote.price", price_color),
-        _kpi_card("AUM（亿元）", _fmt(aum) if aum is not None else "—", "profile.aum"),
+        _kpi_card("最新价", price_str, "", price_color, src="quote.price"),
+        _kpi_card("规模代理（亿元）", _fmt(aum) if aum is not None else "—",
+                  "份额×交易价估算，非官方资产净值" if aum is not None else "",
+                  src=aum_src),
         _kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—",
-                  "profile.premium_discount", _pos_var(pd)),
-        _kpi_card("指数 PE", (_fmt(pe) if pe is not None else "—") + ("x" if pe is not None else ""), pe_sub),
-        _kpi_card("年化波动（%）", _fmt(vol_ann, 1) if vol_ann is not None else "—", "kline.volatility_annualized"),
+                  "", _pos_var(pd), src="profile.premium_discount"),
+        _kpi_card("指数 PE", (_fmt(pe) if pe is not None else "—") + ("x" if pe is not None else ""),
+                  pe_sub, src="profile.index_pe_pct"),
+        _kpi_card("年化波动（%）", _fmt(vol_ann, 1) if vol_ann is not None else "—",
+                  "", src="kline.volatility_annualized"),
         _kpi_card("最大回撤（%）",
                   (_fmt_signed(md_stat.get("drawdown_pct"), 1) if md_stat.get("drawdown_pct") is not None else "—"),
-                  "history.stats.max_drawdown.drawdown_pct", _pos_var(md_stat.get("drawdown_pct"))),
-        _kpi_card("20 日份额流（亿）", (_fmt_signed(total_flow, 2) if total_flow is not None else "—"), flow_sub,
-                  _pos_var(total_flow)),
-        _kpi_card("RSI", _fmt(rsi, 1) if rsi is not None else "—", rsi_sub),
+                  "", _pos_var(md_stat.get("drawdown_pct")),
+                  src="history.stats.max_drawdown.drawdown_pct"),
+        _kpi_card(f"{flow_win_days} 日份额流可确认段小计（亿）" if flow_warning else f"{flow_win_days} 日份额流（亿）",
+                  (_fmt_signed(total_flow, 2) if total_flow is not None else "—"),
+                  flow_sub, _pos_var(total_flow),
+                  src="share_history.summary.total_flow_est"),
+        _kpi_card("RSI", _fmt(rsi, 1) if rsi is not None else "—", rsi_sub,
+                  src="kline.rsi"),
     ]
 
     # ── 4 条状态要点（任一条件字段缺失 → 整句丢弃；无跨字段计算） ──
     points = []
-    if price is not None and stats.get("current_vs_high_pct") is not None and ah.get("date") is not None:
-        points.append((f"价格位置：最新价 {price_str}，距窗口高点 {_fmt_signed(stats.get('current_vs_high_pct'))}%"
-                       f"（{_fmt(ah.get('close'), 3)} @ {_esc(ah.get('date'))}）",
-                       "history.stats.current_vs_high_pct"))
-    if total_flow is not None and flow_trend:
-        seg = f"20 日 {_fmt_signed(total_flow, 2)} 亿"
+    # R7（2026-10-11 复查）：窗口位置断言必须与 current_vs_high_pct **同口径**
+    # ——该值由 history.history.rows 序列**末值** vs 窗口高点计算
+    # （compute_history_stats），旧文案却写「最新价 quote.price」，把交易报价
+    # 与净值/收盘序列的窗口距离混写（159920 现场：报价 1.421 vs 净值序列比
+    # −15.6%，按报价算应为 −16.14%）。现按 history.source 标注口径、引用真正
+    # 使用的历史末值（不用报价/当前 kline 最新净值顶替）；末值或来源缺失/未知
+    # → 省略本句（不猜）。
+    hist_block = history.get("history") or {}
+    hist_rows = hist_block.get("rows") or []
+    hist_last = hist_last_date = None
+    for row in reversed(hist_rows):
+        if isinstance(row, dict):
+            v = safe_float(row.get("nav", row.get("close")))
+            if v is not None:
+                hist_last, hist_last_date = v, str(row.get("date") or "")
+                break
+    hsource = str(hist_block.get("source") or "")
+    # R11（2026-10-11 复查）：复权标注只认 history 块**自身留痕**的 adj_applied。
+    # 旧实现按 source 硬编码（nav→复权净值 / baostock→前复权收盘价）——若该链路
+    # 实际未复权（adj_applied=False）或未留痕（缺失）就是过度断言。分派：
+    # True → 复权/前复权标注；False → 未复权标注；其余（缺失/非布尔）→ 中性
+    # 「净值/历史收盘价（复权状态未知）」，不猜。kline.adj_applied 是另一链路
+    # 的字段，本句不消费（R7 时曾按 source 推断，属同类缺陷）。
+    hadj = hist_block.get("adj_applied")
+    if hadj is True:
+        pos_label = {"nav": "净值位置：复权净值",
+                     "baostock": "历史收盘位置：前复权收盘价"}.get(hsource)
+    elif hadj is False:
+        pos_label = {"nav": "净值位置：未复权净值",
+                     "baostock": "历史收盘位置：未复权收盘价"}.get(hsource)
+    else:
+        pos_label = {"nav": "净值位置：净值（复权状态未知）",
+                     "baostock": "历史收盘位置：历史收盘价（复权状态未知）"}.get(hsource)
+    if (pos_label is not None and hist_last is not None
+            and stats.get("current_vs_high_pct") is not None and ah.get("date") is not None):
+        points.append((f"{pos_label} {_fmt(hist_last, 4)}（{_esc(hist_last_date)}），"
+                       f"距窗口高点 {_fmt_signed(stats.get('current_vs_high_pct'))}%"
+                       f"（{_fmt(ah.get('close'), 4)} @ {_esc(ah.get('date'))}）",
+                       "history.history.rows（末值）· history.stats.current_vs_high_pct"))
+    if flow_warning:
+        points.append((f"份额流：可确认段小计 {_fmt_signed(total_flow, 2)} 亿；"
+                       f"{_esc(flow_warning)}", "share_history.summary.flow_window"))
+    elif total_flow is not None and flow_trend:
+        seg = f"{flow_win_days} 日 {_fmt_signed(total_flow, 2)} 亿"
+        if flow_win_txt:
+            seg += f"（{flow_win_txt}）"
         if recent_days is not None and recent_flow is not None:
             seg += f"；近 {recent_days} 日 {_fmt_signed(recent_flow, 2)} 亿"
         if inflow_days is not None and outflow_days is not None:
             seg += f"；{inflow_days} 日流入 / {outflow_days} 日流出"
-        points.append((f"份额流：{seg}。引擎趋势标签：{_esc(flow_trend)}",
+        points.append((f"份额流：{seg}。趋势状态：{_esc(flow_trend)}",
                        "share_history.summary.total_flow_est"))
     if vol_ann is not None and md_stat.get("drawdown_pct") is not None \
             and md_stat.get("peak_date") is not None and md_stat.get("trough_date") is not None:
@@ -485,29 +603,68 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
         hedges.append(f"期货 {_esc(hc.get('futures'))}")
     if hc.get("options"):
         hedges.append(f"期权 {_esc(hc.get('options'))}")
-    points.append((f"对冲覆盖：{_esc(cov_map.get(str(coverage), str(coverage)))}"
-                   + (f"（{' / '.join(hedges)}）" if hedges else ""),
-                   "profile.hedge_coverage.coverage"))
+    # R13（2026-10-13 复查，B03/B06 消费者缺陷）：对冲覆盖必须消费 verification 状态。
+    # 旧实现直映 coverage，把 etf_data._lookup_hedge 产出的静态映射（真实 588000 现场
+    # status=unverified、note=未核原文）写成「对冲覆盖：完整」，未核变肯定。
+    # 分派：verified_original → 原文已核，正常显示实际覆盖与具体工具；
+    # unverified / static_map_only → 待核；缺 verification / unknown / 其余未知 → 未知。
+    # 未核态下覆盖度与「具体工具」一律降级为「映射线索」，不按名称或 coverage 猜核验、
+    # 不伪造 verified。（本渲染路径仅此一处消费 hedge_coverage 的 coverage/工具字段，已扫描。）
+    verif = hc.get("verification")
+    vstatus = verif.get("status") if isinstance(verif, dict) else None
+    cov_label = cov_map.get(str(coverage), str(coverage))
+    hedge_tail = f"（{' / '.join(hedges)}）" if hedges else ""
+    # R16（2026-10-13 读者呈现）：只有**原文已核**（verified_original）的对冲信息
+    # 进入读者展示；未核/静态映射线索（含「期货 2025 上线/静态映射/覆盖完整」等）
+    # 不再作为首屏状态要点——仅保留于 payload 原始数据与诊断记录，避免把未核线索
+    # 写成读者断言。未知不改写成「无」：未核即不展示，也不产生已核有/无结论。
+    if vstatus == "verified_original":
+        points.append((f"对冲覆盖：{_esc(cov_label)}{hedge_tail}",
+                       "profile.hedge_coverage.coverage"))
 
     points_html = "".join(
-        f'<div class="sp"><div class="sp-t">{t}</div><span class="sp-s">{s}</span></div>'
+        f'<div class="sp" data-source="{_esc(s)}"><div class="sp-t">{t}</div></div>'
         for t, s in points
     )
 
     # ── 一句话总结（分段可选拼接；空字段不输出空段） ──
     bits = []
-    if cat.get("label"):
-        bits.append(f"{_esc(cat.get('label'))}")
-    hc_index = hc.get("index")
-    if hc_index and str(hc_index) != "未知":
-        bits.append(f"跟踪 {_esc(hc_index)}")
+    display_name = _identity_display_name(profile)
+    if display_name:
+        bits.append(f"{_esc(display_name)}")
+    # R14（2026-10-13 复查，B03/B06 消费者缺陷）：跟踪指数摘要必须优先消费
+    # 已核身份 identity.tracked_index（原文核验记录），静态 hedge 映射的
+    # index 仅作兜底线索。两者可不一致（510880 静态「红利指数」vs 身份
+    # 「上证红利指数」；515050 静态「5G通信」vs「中证 5G 通信主题指数」），
+    # 旧实现直取 hedge.index 会把未核静态映射写成产品跟踪标的。
+    # R15（2026-10-13 复检，B03/B06 消费者缺陷续）：跟踪摘要**只有身份
+    # verification.status=verified_original（原文已核）** 时才肯定显示「跟踪 X」。
+    # 旧实现仅凭 identity.tracked_index 名称（未核身份）即肯定跟踪，或在 identity
+    # 缺失时回退静态 hedge_coverage.index 也肯定跟踪；两者都不构成已核身份。
+    # 其余场景一律不肯定跟踪名称，改为「标的待核 + 映射线索（未核原文）」；
+    # 不凭名称或对冲 coverage 确认身份。名称与 hedge 索引两者可不一致
+    # （真实 510880 静态「红利指数」vs 身份「上证红利指数」），未核态只作线索。
+    _ident = profile.get("identity") or {}
+    _ident_ver = str((_ident.get("verification") or {}).get("status") or "")
+    _ti_name = str((_ident.get("tracked_index") or {}).get("name") or "").strip()
+    _hedge_index = str(hc.get("index") or "").strip()
+    _clue_name = _ti_name if (_ti_name and _ti_name != "未知") else (
+        _hedge_index if (_hedge_index and _hedge_index != "未知") else "")
+    if _ident_ver == "verified_original" and _ti_name and _ti_name != "未知":
+        bits.append(f"跟踪 {_esc(_ti_name)}")
+    elif _clue_name:
+        bits.append(f"标的待核：{_esc(_clue_name)}（映射线索，未核原文）")
+    else:
+        bits.append("标的待核（无已核身份登记）")
     if pe is not None:
         s = f"指数 PE {_fmt(pe)}x"
         if pe_pct is not None:
             s += f"（历史位置 {_fmt(pe_pct, 1)}%）"
         bits.append(s)
-    if total_flow is not None and flow_trend:
-        bits.append(f"20 日份额 {_esc(flow_trend)} {_fmt_signed(total_flow, 2)} 亿")
+    if flow_warning:
+        bits.append("份额流窗口不可确认（仅显示可确认段小计）")
+    elif total_flow is not None and flow_trend:
+        bits.append(f"{flow_win_days} 日份额 {_esc(flow_trend)} {_fmt_signed(total_flow, 2)} 亿")
     if vg.get("industry"):
         s = f"聚焦 {_esc(vg.get('industry'))}"
         if vg.get("sub_sector") and str(vg.get("sub_sector")) != str(vg.get("industry")):
@@ -522,7 +679,7 @@ def _html_hero(profile: dict, quote: dict, kline: dict,
                      f'flex-wrap:wrap">{flags_html}</div>')
 
     return f'''<div id="hero-summary" class="card">
-  <div class="sh"><span class="st">摘要</span><div class="sd"></div><span class="ss">引擎字段直映 · 状态描述，非信号</span></div>
+  <div class="sh"><span class="st">摘要</span><div class="sd"></div><span class="ss">关键数据 · 市场状态</span></div>
   <div class="g4">
     {"".join(tiles[:4])}
   </div>
@@ -543,7 +700,7 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
     chg_str = _fmt_signed(chg) + "%" if chg is not None else "—"
     chg_color = "var(--fall)" if (chg is not None and chg < 0) else ("var(--rise)" if (chg is not None and chg > 0) else "var(--tx-m)")
 
-    aum = profile.get("aum")
+    aum, aum_src = _scale_value(profile)
     pd = profile.get("premium_discount")
     vol_ann = kline.get("volatility_annualized")
     derived = kline.get("derived") or {}
@@ -580,20 +737,21 @@ def _section_overview(profile: dict, quote: dict, kline: dict) -> str:
 
     flags_html = _flags_badges(profile.get("flags"))
     return f'''<section id="overview">
-  <div class="sh"><span class="st">产品快照</span><div class="sd"></div><span class="ss">{_esc(profile.get("category", {}).get("label", "") or "")}</span></div>
+  <div class="sh"><span class="st">产品快照</span><div class="sd"></div><span class="ss">{_esc(_identity_display_name(profile))}</span></div>
   <div class="g4">
-    {_kpi_card("最新价", price_str, f"较昨收 {chg_str}", price_color)}
-    {_kpi_card("AUM（亿元）", _fmt(aum) if aum is not None else "—", "profile.aum")}
-    {_kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—", "profile.premium_discount", _pos_var(pd))}
-    {_kpi_card("成交额（元）", _fmt_grouped(quote.get("amount")), "quote.amount")}
+    {_kpi_card("最新价", price_str, f"较昨收 {chg_str}", price_color, src="quote.price")}
+    {_kpi_card("规模代理（亿元）", _fmt(aum) if aum is not None else "—",
+               "份额×交易价估算，非官方资产净值" if aum is not None else "", src=aum_src)}
+    {_kpi_card("折溢价（%）", _fmt_signed(pd, 2) if pd is not None else "—", "", _pos_var(pd), src="profile.premium_discount")}
+    {_kpi_card("成交额（元）", _fmt_grouped(quote.get("amount")), "", src="quote.amount")}
   </div>
   <div class="g3" style="margin-top:var(--space-4)">
-    {_kpi_card("年化波动（%）", _fmt(vol_ann), "kline.volatility_annualized")}
-    {_kpi_card("日均波动（%）", _fmt(daily_vol), "kline.derived.daily_volatility_pct")}
-    {_kpi_card(rsi_sub, _fmt(rsi, 1) if rsi is not None else "—", "状态描述，非信号", rsi_color)}
+    {_kpi_card("年化波动（%）", _fmt(vol_ann), "", src="kline.volatility_annualized")}
+    {_kpi_card("日均波动（%）", _fmt(daily_vol), "", src="kline.derived.daily_volatility_pct")}
+    {_kpi_card(rsi_sub, _fmt(rsi, 1) if rsi is not None else "—", "状态描述，非信号", rsi_color, src="kline.rsi")}
   </div>
   <div class="card" style="margin-top:var(--space-4)">
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">NAV 相对均线/布林带（引擎 derived）</div>
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">NAV 相对均线/布林带</div>
     <div class="g3">
       {_ipill("NAV vs MA20", _fmt_signed(nav_ma20) + "%" if nav_ma20 is not None else "—", s20, c20, _pos_var(nav_ma20))}
       {_ipill("NAV vs MA60", _fmt_signed(nav_ma60) + "%" if nav_ma60 is not None else "—", s60, c60, _pos_var(nav_ma60))}
@@ -673,6 +831,8 @@ def index_pe_note_short(profile: dict) -> str:
 
     此前恒返回「PE(1) 股本加权口径」：当最新行「市盈率1」为 NaN、引擎静默回落到
     「市盈率2」时，徽章与数值口径不符（误标）。口径未知时不再臆断为 PE(1)。
+    R3：口径文案按 AKShare 官方字段定义（市盈率1=（总股本）P/E1；
+    市盈率2=（计算用股本）P/E2），不再写作「流通加权」。
     """
     if profile.get("index_pe") is None:
         return "指数 PE 不可得"
@@ -681,9 +841,9 @@ def index_pe_note_short(profile: dict) -> str:
 
     caliber = profile.get("index_pe_caliber")
     if caliber == _PE_CALIBER_CIRCULATING:
-        return "PE(2) 流通加权口径"
+        return "PE(2) 计算用股本口径"
     if caliber == _PE_CALIBER_SHARE:
-        return "PE(1) 股本加权口径"
+        return "PE(1) 总股本口径"
     return "PE 加权口径未标注"
 
 
@@ -718,12 +878,14 @@ def _section_holdings(holdings: dict) -> str:
         for ms in member_notes if ms
     )
 
+    scope = holdings.get("holding_scope") or "基金披露前十大（季度报告期，非完整持仓）"
     return f'''<section id="holdings">
   <div class="sh"><span class="st">持仓透视</span><div class="sd"></div><span class="ss">{_esc(holdings.get("report_date", ""))}（{_esc(holdings.get("quarter", ""))}）</span></div>
+  {_vnote(f"披露范围：{scope}；集中度分母=占基金资产净值，仅覆盖已披露范围，缺口不按 0、不重归一化。")}
   <div class="g3">
-    {_kpi_card("top1", _fmt(top1) + "%" if top1 is not None else "—", "holdings.top1_pct")}
-    {_kpi_card("top5 合计", _fmt(top5) + "%" if top5 is not None else "—", "holdings.top5_sum_pct")}
-    {_kpi_card("top10 合计", _fmt(top10) + "%" if top10 is not None else "—", "holdings.top10_sum_pct")}
+    {_kpi_card("top1", _fmt(top1) + "%" if top1 is not None else "—", "", src="holdings.top1_pct")}
+    {_kpi_card("top5 合计", _fmt(top5) + "%" if top5 is not None else "—", "", src="holdings.top5_sum_pct")}
+    {_kpi_card("top10 合计", _fmt(top10) + "%" if top10 is not None else "—", "", src="holdings.top10_sum_pct")}
   </div>
   <div class="g21" style="margin-top:var(--space-4)">
     <div class="card">
@@ -744,29 +906,53 @@ def _section_holdings(holdings: dict) -> str:
 
 
 def _section_quality(kline: dict, profile: dict, history: dict | None = None) -> str:
-    tracking_note = profile.get("tracking_error_note") or kline.get("_error")
+    # R16（2026-10-13 读者呈现）：不再把内部 tr.note / kline._error 原样当产品文案；
+    # 缺同口径基准时用读者语言说明，不展示引擎实现状态的故障描述。
+    tracking_note = ""
     adj = kline.get("adj_applied")
-    adj_note = kline.get("adj_note")
+    tr = profile.get("tracking") or {}
+    if tr.get("status") == "available":
+        track_value = (f"TD {_fmt_signed(tr.get('td_pct'))}% / "
+                       f"TE {_fmt(tr.get('te_pct_annualized'))}%")
+        track_note = f"确认性指标（同收益类型）· n={tr.get('sample_n')} · 年化系数 {tr.get('annualization_factor')}"
+    elif tr:
+        dev = tr.get("price_benchmark_deviation") or {}
+        track_value = "未判定"
+        # 不回填内部 note / status enum；不知道原因时只说明暂无可比结果，不猜。
+        track_note = "暂无可比跟踪结果"
+        if dev:
+            # 有价格偏离：原因是基金与价格指数分红处理不同；偏离值保留（研究数值，
+            # 非确认跟踪误差），但不作为可确认的 TD/TE。
+            track_note += ("；基金与价格指数的分红处理不同，这些偏离值用于研究，"
+                           "不作为确认性跟踪误差（研究偏离："
+                           f"TD {_fmt_signed(dev.get('td_pct'))}%（窗口端点累计） / "
+                           f"TE {_fmt(dev.get('te_pct_annualized'))}%"
+                           f"，抽样区间 n={dev.get('sample_n')}）")
+    else:
+        track_value = "未判定"
+        track_note = "暂无可比跟踪结果"
     # 渲染修正（2026-09-07 review）：navChart 实际绘制 report.history.history.rows
     # （全年），非 kline.nav_rows（指标计算窗口 ~73 日）——标题行数须与绘制
     # 数据同源，否则「近 73 日」误导为数据只有 3.5 个月
     hist_rows = (history or {}).get("history", {}).get("rows") or []
-    nav_caption = (f"近 {_fmt(len(hist_rows), 0)} 交易日 NAV 序列（history 链路）"
-                   if hist_rows else "NAV 序列（history 链路数据不可得）")
+    nav_caption = (f"近 {_fmt(len(hist_rows), 0)} 个交易日的净值历史"
+                   if hist_rows else "净值历史暂不可得")
     return f'''<section id="quality">
   <div class="sh"><span class="st">跟踪质量</span><div class="sd"></div><span class="ss">NAV {_fmt(kline.get("latest_nav"), 3)} @ {_esc(kline.get("latest_nav_date", ""))}</span></div>
   <div class="card">
     <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">{nav_caption}</div>
     <div class="cw"><canvas id="navChart"></canvas></div>
-    <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>NAV 直接引用引擎序列；引擎未输出 MA 序列故不绘制均线（渲染层不重算）。</div>
+    <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>图示为本次净值历史走势。</div>
   </div>
   <div class="card" style="margin-top:var(--space-4)">
     <div class="g3">
       {_kpi_card("复权状态",
                  ("已复权" if adj else "未复权") if adj is not None else "—",
-                 str(adj_note or ""))}
-      {_kpi_card("年化波动（%）", _fmt(kline.get("volatility_annualized")), "kline.volatility_annualized")}
-      {_kpi_card("跟踪误差", "—" if profile.get("tracking_error") is None else _fmt(profile.get("tracking_error"), 2), "引擎未实现；不得填写估算数字")}
+                 "前复权（消除分红/拆分断点）" if adj is True else "",
+                 src="kline.adj_applied")}
+      {_kpi_card("年化波动（%）", _fmt(kline.get("volatility_annualized")), "",
+                 src="kline.volatility_annualized")}
+      {_kpi_card("跟踪质量（TD/TE）", track_value, track_note)}
     </div>
     {_vnote(tracking_note) if tracking_note else ""}
   </div>
@@ -792,15 +978,33 @@ def _section_history(history: dict, events: dict, playbook: dict) -> str:
     if playbook.get("available"):
         rows = "".join(
             f'<tr><td>{(_fmt_signed(safe_float(lv.get("level_pct")), 0) + "%") if safe_float(lv.get("level_pct")) is not None else "—"}</td>'
-            f'<td>{_esc(str(lv.get("sigma_multiple")) + "σ" if lv.get("sigma_multiple") is not None else "N/A")}</td>'
+            f'<td>{_esc(lv.get("state") or "未知")}</td>'
             f'<td style="text-align:left">{_esc(lv.get("verification_depth", ""))}</td></tr>'
             for lv in playbook.get("drawdown_levels") or []
         )
         checklist = "".join(f'<li>{_esc(s)}</li>' for s in playbook.get("checklist") or [])
+        dd = playbook.get("current_drawdown") or {}
+        cv = playbook.get("current_verification") or {}
+        dd_pct = safe_float(dd.get("current_drawdown_pct"))
+        if (dd_pct is None or type(cv.get("reached_levels")) is not int
+                or "deepest_reached_level_pct" not in cv):
+            cv_text = "当前核验深度：未知（缺当前回撤或核验状态）"
+        elif cv.get("deepest_reached_level_pct") is not None:
+            cv_text = (f"当前核验深度 {_esc(cv.get('deepest_reached_depth', ''))}"
+                       f"（已越过 {cv.get('reached_levels')} 档，最深 "
+                       f"{_fmt_signed(cv.get('deepest_reached_level_pct'), 0)}%）")
+        elif cv.get("reached_levels") == 0:
+            cv_text = "当前核验深度：无档位触发（各档均未达）"
+        else:
+            cv_text = "当前核验深度：未知（核验状态不完整）"
+        dd_text = (f"当前回撤（自窗口峰值）{_fmt(dd_pct)}%"
+                   f"（{_esc(dd.get('peak_date') or '')} 峰值 {_fmt(dd.get('peak_close'), 4)}"
+                   f" → {_esc(dd.get('latest_date') or '')} 收 {_fmt(dd.get('latest_close'), 4)}）"
+                   if dd_pct is not None else "当前回撤不可得（旧数据未提供当前回撤证据）")
         playbook_html = f'''<div class="card" style="margin-top:var(--space-4)" id="playbook">
-      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-2)">情景预案（R11c · σ 回撤档位 → 触发核验深度）</div>
-      <div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:var(--space-3)">60 日日均波动 {_fmt(playbook.get("vol_60d_daily_pct"))}%（来源: {_esc(playbook.get("vol_source", ""))}）——核验深度筛选规则，非操作阈值</div>
-      <table class="ft"><thead><tr><th>回撤档位</th><th>σ 倍数</th><th>触发核验深度</th></tr></thead><tbody>{rows}</tbody></table>
+      <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-2)">情景预案（R11c · 回撤档位 → 触发核验深度）</div>
+      <div style="font-size:var(--text-xs);color:var(--tx-f);margin-bottom:var(--space-3)">{dd_text} · {cv_text} · {_esc(playbook.get("basis") or "")}</div>
+      <table class="ft"><thead><tr><th>回撤档位</th><th>当前状态</th><th>触发核验深度</th></tr></thead><tbody>{rows}</tbody></table>
       <ul style="margin-top:var(--space-3);padding-left:var(--space-6);font-size:var(--text-xs);color:var(--tx-m)">{checklist}</ul>
       {_vnote(playbook.get("disclaimer") or "")}
     </div>'''
@@ -830,12 +1034,12 @@ def _section_history(history: dict, events: dict, playbook: dict) -> str:
     {_kpi_card("年度高点", _fmt(ah.get("close"), 4), _esc(ah.get("date", "")))}
     {_kpi_card("年度低点", _fmt(al.get("close"), 4), _esc(al.get("date", "")))}
     {_kpi_card("最大回撤", _fmt(md.get("drawdown_pct")) + "%", f'{_fmt(md.get("peak_close"), 4)} @ {_esc(md.get("peak_date", ""))} → {_fmt(md.get("trough_close"), 4)} @ {_esc(md.get("trough_date", ""))}')}
-    {_kpi_card("当前 vs 高点", _fmt_signed(stats.get("current_vs_high_pct")) + "%", "stats.current_vs_high_pct")}
+    {_kpi_card("当前 vs 高点", _fmt_signed(stats.get("current_vs_high_pct")) + "%", "", src="stats.current_vs_high_pct")}
   </div>
   <div class="g4" style="margin-top:var(--space-4)">
-    {_kpi_card("当前 vs 低点", _fmt_signed(stats.get("current_vs_low_pct")) + "%", "stats.current_vs_low_pct")}
+    {_kpi_card("当前 vs 低点", _fmt_signed(stats.get("current_vs_low_pct")) + "%", "", src="stats.current_vs_low_pct")}
     {_kpi_card("|±5%| 交易日", str(stats.get("big_move_days_count", len(moves))), f"上行 {stats.get('big_move_up_days', 0)} / 下行 {stats.get('big_move_down_days', 0)}")}
-    {_kpi_card("MA20 / MA60 / MA120", f'{_fmt(stats.get("ma20"))} / {_fmt(stats.get("ma60"))} / {_fmt(stats.get("ma120"))}', "stats.ma*")}
+    {_kpi_card("MA20 / MA60 / MA120", f'{_fmt(stats.get("ma20"))} / {_fmt(stats.get("ma60"))} / {_fmt(stats.get("ma120"))}', "", src="stats.ma*")}
     {_kpi_card("ATR14", _fmt(stats.get("atr14"), 4), (f'{_fmt(stats.get("atr14_pct"), 2)}%' if stats.get("atr14_pct") is not None else ""))}
   </div>
   <div class="card" style="margin-top:var(--space-4)">
@@ -866,7 +1070,7 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
       <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">行业资金流趋势（R15 · 同花顺大单口径 · 亿元 · {_esc(sector_flow.get("sw_name", ""))}）</div>
       <table class="ft"><thead><tr><th>行业</th><th>1日</th><th>3日</th><th>5日</th><th>10日</th><th>10日涨跌%</th><th>趋势标签 / 详情</th><th>5日Δ</th></tr></thead><tbody>{rows}</tbody></table>
       <div class="cw" style="margin-top:var(--space-4)"><canvas id="sectorFlowChart"></canvas></div>
-      <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>as_of={_esc(sector_flow.get("as_of", ""))} · history_days={_esc(sector_flow.get("history_days", ""))} · 趋势标签为引擎判定的事实描述（证据非信号），不做方向性预测。</div>
+      <div class="vnote"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>as_of={_esc(sector_flow.get("as_of", ""))} · history_days={_esc(sector_flow.get("history_days", ""))} · 趋势标签为数据所示的状态（证据非信号），不做方向性预测。</div>
     </div>'''
     else:
         sf_block = f'<div class="card"><div style="padding:1.5rem;text-align:center;color:var(--tx-f)">{_esc("；".join(sector_flow.get("notes") or ["行业资金流不可得"]))}</div></div>'
@@ -877,12 +1081,22 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
         prow = ""
         for r in peers.get("flow", {}).get("rows") or []:
             code = r.get("symbol", "")
+            # 旧 payload 兼容：无 flow_total_e 键的行回退 flow_20d_e；
+            # **键存在但为 None**（长窗口别名失效/不可得行）不得回退造数。
+            if "flow_total_e" in r:
+                flow_cell = r.get("flow_total_e")
+            else:
+                flow_cell = r.get("flow_20d_e")
+            row_warning = _flow_uncertainty(r)
+            if not row_warning and r.get("confirmable") is False:
+                row_warning = "窗口份额流不可确认：" + str(r.get("note") or "窗口证据未确认")
+            partial_label = "（可确认段小计）" if row_warning else ""
             prow += (f'<tr><td style="text-align:left">{_esc(names.get(code, code))}</td>'
                      f'<td style="text-align:left">{_esc(code)}</td>'
-                     f'<td style="color:{_pos_var(r.get("flow_20d_e"))}">{_fmt_signed(r.get("flow_20d_e"))}</td>'
-                     f'<td style="color:{_pos_var(r.get("flow_5d_e"))}">{_fmt_signed(r.get("flow_5d_e"))}</td>'
+                     f'<td style="color:{_pos_var(flow_cell)}">{_fmt_signed(flow_cell)}{partial_label}</td>'
+                     f'<td style="color:{_pos_var(r.get("flow_5d_e"))}">{_fmt_signed(r.get("flow_5d_e"))}{partial_label}</td>'
                      f'<td>{_fmt_signed(r.get("share_change_pct"))}</td>'
-                     f'<td style="text-align:left">{_esc(r.get("trend", ""))}</td></tr>')
+                     f'<td style="text-align:left">{_esc(row_warning or r.get("trend", ""))}</td></tr>')
         rs = peers.get("rs") or {}
         rank = rs.get("rank_20d") or {}
         peer_note = (
@@ -891,11 +1105,14 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
             "RS 基准=同赛道等权均值，20 日收益排名 "
             f"{_esc(rank.get('rank', '?'))}/{_esc(rank.get('total', '?'))}（20 日窗口）"
         )
+        comparison_note = (peers.get("flow") or {}).get("common_window_note")
+        if comparison_note:
+            peer_note += " · " + _esc(comparison_note)
         peers_block = f'''<div class="card" style="margin-top:var(--space-4)">
       <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">同赛道资金流对比（R13 · Tushare 份额×均价估算 · 亿元）</div>
-      <table class="ft"><thead><tr><th>名称</th><th>代码</th><th>20日流</th><th>5日流</th><th>份额变化%</th><th>趋势</th></tr></thead><tbody>{prow}</tbody></table>
+      <table class="ft"><thead><tr><th>名称</th><th>代码</th><th>窗口流</th><th>5日流</th><th>份额变化%</th><th>趋势</th></tr></thead><tbody>{prow}</tbody></table>
       <div class="g3" style="margin-top:var(--space-3)">
-        {_ipill("RS 最新", _fmt(rs.get("rs_latest"), 1), "101 = 与基准持平", "sig-neutral", _pos_var(rs.get("rs_change")) if rs.get("rs_change") else "")}
+        {_ipill("RS 最新", _fmt(rs.get("rs_latest"), 1), "100 = 与基准持平（首对齐点归一化）", "sig-neutral", _pos_var(rs.get("rs_change")) if rs.get("rs_change") else "")}
         {_ipill("RS 窗口起点", _fmt(rs.get("rs_window_start"), 1), f"n={_esc(rs.get('n', ''))}", "sig-neutral")}
         {_ipill("RS 20日变化", _fmt_signed(rs.get("rs_change"), 1), "相对强弱状态参考，非信号", "sig-neutral", _pos_var(rs.get("rs_change")))}
       </div>
@@ -907,10 +1124,14 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
     sh_row = ""
     if share_history.get("available"):
         s = share_history.get("summary") or {}
+        warning = _flow_uncertainty(s)
+        flow_title = "份额流可确认段小计（亿）" if warning else "份额流合计（亿）"
+        flow_note = _esc(warning) if warning else f"{_esc(s.get('trend', ''))}"
+        segment_note = "仅可确认区段；近端流量亦为区段小计 · " if warning else ""
         sh_row = (f'<div class="g4" style="margin-top:var(--space-4)">'
-                  f'{_kpi_card("份额流合计（亿）", _fmt_signed(s.get("total_flow_est"), 2), f"{_esc(s.get('trend', ''))}（引擎趋势标签）", _pos_var(s.get("total_flow_est")))}'
-                  f'{_kpi_card("份额变化（万份）", _fmt_grouped(s.get("share_total_change")), "share_history.summary")}'
-                  f'{_kpi_card("流入/流出天数", f"{s.get('inflow_days', '—')} / {s.get('outflow_days', '—')}", f"近端{s.get('recent_flow_days', '—')}日 {_fmt_signed(s.get('recent_flow_est'), 2)} 亿")}'
+                  f'{_kpi_card(flow_title, _fmt_signed(s.get("total_flow_est"), 2), flow_note, _pos_var(s.get("total_flow_est")))}'
+                  f'{_kpi_card("份额变化（万份，含未确认段）" if warning else "份额变化（万份）", _fmt_grouped(s.get("share_total_change")), "", src="share_history.summary")}'
+                  f'{_kpi_card("流入/流出天数", f"{s.get('inflow_days', '—')} / {s.get('outflow_days', '—')}", f"{segment_note}近端{s.get('recent_flow_days', '—')}日 {_fmt_signed(s.get('recent_flow_est'), 2)} 亿")}'
                   f'{_kpi_card("日均成交（亿）", _fmt(s.get("avg_amount_e")), f"峰值 {_fmt(s.get("max_amount_e"))}")}'
                   f'</div>')
     shares_avail = share_history.get("available") and bool(share_history.get("rows"))
@@ -920,67 +1141,187 @@ def _section_flows(sector_flow: dict, peers: dict, share_history: dict, kline: d
   {sf_block}
   {sh_row if sh_row else ""}
   <div class="card" style="margin-top:var(--space-4)">
-    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">份额资金流与收盘价（近 20 日 · Tushare fund_share）</div>
+    <div style="font-size:var(--text-sm);font-weight:600;margin-bottom:var(--space-3)">份额资金流与收盘价（近 {_esc(str((share_history.get('summary') or {}).get('window_days') or 20))} 日 · Tushare fund_share）</div>
     <div class="cw"><canvas id="shareFlowChart"></canvas></div>
-    {'<div class="vnote">近 20 日份额流 + 收盘价；T+1 延迟，最新 1-2 日字段可能为空。</div>' if shares_avail else ''}
+    {'<div class="vnote">近 ' + _esc(str((share_history.get('summary') or {}).get('window_days') or 20)) + ' 日份额流 + 收盘价；T+1 延迟，最新 1-2 日字段可能为空；份额变化与资金流合计共同起止（flow_window）。' + _esc(share_history.get('caliber_note') or '') + '</div>' if shares_avail else ''}
   </div>
   {peers_block}
 </section>'''
 
 
-def _section_research(md_html: str) -> str:
-    return f'''<section id="research">
-  <div class="sh"><span class="st">研究备忘（md 全文原样嵌入）</span><div class="sd"></div><span class="ss">已通过三层复检的合规 artifact</span></div>
-  <div class="card">
-    <article class="md-body">
-      {md_html}
-    </article>
-  </div>
-</section>'''
+def _section_research(md_html: str, research: dict | None = None) -> str:
+    return render_research_section(md_html, research)
+
+
+def _refs_rows(payload: dict) -> list[tuple[str, str, str]]:
+    """从封存数据实际 source / 来源记录生成「数据来源」表行（读者可核对）。
+
+    只登记本次**实际使用**且能证明成功的来源（R05/B06，2026-10-13 读者呈现）：
+    - 实际数据来源字段：有效 kline.source；available 且有 rows 的 share_history；
+      quote.source；holdings(status=ok)+source；
+    - 已核身份 ``profile.identity.evidence``（**list[dict]**）的原文 URL/定位
+      （``url="同上"`` 只承接已知上一 URL 或省略，**不编造**；未核不标原文已核）；
+    - index_pe：仅凭 ``profile.index_pe_note`` 明示来源（如「来源: csindex ...」）
+      + 有效非空 index_pe 登记；
+    - 该维度 ``status="available"`` 且 ``source_trace`` 中 ``outcome=ok``
+      （兼容旧 bool ``available``）的真实成功来源。
+    静态 ``source_record.channel``、``attempted_sources``、失败/未执行 trace
+    **不能独自证明成功**；未知不编造。
+    """
+    profile = payload.get("profile") or {}
+    quote = payload.get("quote") or {}
+    kline = payload.get("kline") or {}
+    holdings = payload.get("holdings") or {}
+    research = payload.get("research") or {}
+    share_history = payload.get("share_history") or {}
+    dims = ((payload.get("data_status") or {}).get("dimensions") or {})
+
+    def fmt_fee_source(src) -> str:
+        """费率来源可能是 dict：格式化 title/version/url/locator，禁止 str(dict)。"""
+        if isinstance(src, dict):
+            title = str(src.get("source_type") or src.get("title") or "").strip()
+            ver = str(src.get("version") or "").strip()
+            loc = str(src.get("locator") or src.get("as_of") or "").strip()
+            url = str(src.get("url") or "").strip()
+            parts = [x for x in (title, ver if ver != title else "") if x]
+            if loc:
+                parts.append(f"定位：{loc}")
+            if url:
+                parts.append(url)
+            return " ｜ ".join(parts)
+        return str(src or "").strip()
+
+    def dim_available(rec) -> bool:
+        """维度成功性：优先实际字段 status=="available"；旧 bool available 兼容。"""
+        if not isinstance(rec, dict):
+            return False
+        st = str(rec.get("status") or "").strip().lower()
+        if st:
+            return st == "available"
+        return bool(rec.get("available"))
+
+    def ok_sources(name: str) -> list[str]:
+        """该维度实际 available 且 source_trace outcome=ok 的真实成功来源。"""
+        rec = dims.get(name) or {}
+        if not dim_available(rec):
+            return []
+        out: list[str] = []
+        for t in (rec.get("source_trace") or []):
+            if not isinstance(t, dict):
+                continue
+            if str(t.get("outcome") or "").lower() != "ok":
+                continue
+            s = str(t.get("source") or "").strip()
+            if s and s not in out:
+                out.append(s)
+        return out
+
+    rows: list[tuple[str, str, str]] = []
+
+    # 行情报价：只认 producer 结构化 quote.source（键缺失/None = 来源未知）
+    if str(quote.get("status") or "") == "available" and str(quote.get("source") or "").strip():
+        rows.append(("行情报价", str(quote.get("source")).strip(), "查询时点快照"))
+
+    # 净值序列：nav 的 source 仅在 kline 有效（status=available）时采纳
+    if str(kline.get("status") or "") == "available":
+        nav_src = str(kline.get("source") or "").strip() or " / ".join(ok_sources("nav"))
+        if nav_src:
+            rows.append(("净值序列", nav_src,
+                         "前复权" if kline.get("adj_applied") else "复权状态未知"))
+
+    # 份额与资金流：share_history 的 source 仅在 available 且有 rows 时采纳
+    if bool(share_history.get("available")) and (share_history.get("rows") or []):
+        sh_src = (str(share_history.get("source") or "").strip()
+                  or " / ".join(ok_sources("share_history")))
+        if sh_src:
+            rows.append(("份额与资金流", sh_src, "份额估算（方向标签，非申赎）"))
+
+    if str(holdings.get("status") or "") == "ok" and str(holdings.get("source") or "").strip():
+        rows.append(("持仓披露", str(holdings.get("source")).strip(),
+                     "采集渠道页面，非原披露"))
+
+    # 指数估值：仅凭 profile.index_pe_note 明示来源 + 有效非空 index_pe 登记
+    pe_src = ""
+    if dim_available(dims.get("index_pe") or {}):
+        idx = str(profile.get("index_pe") or "").strip()
+        note = str(profile.get("index_pe_note") or "")
+        m = re.match(r"\s*来源\s*[:：]\s*([^，,；;（(]+)", note)
+        if idx not in ("", "None", "nan") and m:
+            pe_src = m.group(1).strip()
+    if not pe_src:
+        pe_src = " / ".join(ok_sources("index_pe"))
+    if pe_src:
+        rows.append(("指数估值", pe_src, "指数公司口径"))
+
+    # 身份/标的：优先实际 profile.identity.evidence（list[dict]）的 URL/定位
+    identity = profile.get("identity") or payload.get("identity") or {}
+    if isinstance(identity, dict):
+        ver = identity.get("verification") or {}
+        ev = identity.get("evidence")
+        if str(ver.get("status") or "") == "verified_original" and isinstance(ev, list):
+            last_url = ""
+            seen: set[tuple[str, str]] = set()
+            idx = 0
+            for e in ev:
+                if not isinstance(e, dict):
+                    continue
+                url = str(e.get("url") or "").strip()
+                if url.startswith("同上"):
+                    url = last_url  # 只承接已知上一 URL；无则省略，绝不编造
+                elif url:
+                    last_url = url
+                loc = str(e.get("locator") or "").strip()
+                key = (url, loc)
+                if key in seen or not (url or loc):
+                    continue
+                seen.add(key)
+                parts = [p for p in (url, f"定位：{loc}" if loc else "") if p]
+                idx += 1
+                dim_name = "身份/标的" if idx == 1 else f"身份/标的（证据 {idx}）"
+                rows.append((dim_name, " ｜ ".join(parts), "原文已核"))
+
+    # 费率材料：只在 producer status=ok 时登记；给材料日期/版本，不冒称现行
+    fee = profile.get("fees") or {}
+    fee_src = fmt_fee_source(fee.get("source"))
+    if str(fee.get("status") or "") == "ok" and fee_src:
+        rows.append(("费率材料", fee_src, "版本费率（材料日期/版本；非现行声明）"))
+
+    for s in (research.get("sources") or []):
+        if not isinstance(s, dict):
+            continue
+        sid = str(s.get("id") or "").strip()
+        title = str(s.get("title") or "").strip()
+        url = str(s.get("url") or "").strip()
+        rows.append((f"经营原文 {sid}".strip(), f"{title} {url}".strip(), "已读原文"))
+    return rows
 
 
 def _section_refs(payload: dict, events: dict, playbook: dict) -> str:
-    report = payload
-    kline = report.get("kline") or {}
-    share_history = report.get("share_history") or {}
-    history = report.get("history") or {}
-    holdings = payload.get("holdings") or {}
-    peers = payload.get("peers") or {}
-    sector_flow = payload.get("sector_flow") or {}
-
-    rows = [
-        ("产品数据", "etf_data.query_etf_data", bool(report.get("profile"))),
-        ("行情报价", "etf_data.query_etf_quote", quote_ok(report.get("quote"))),
-        ("净值/技术", "etf_data.query_etf_kline", bool(kline.get("latest_nav"))),
-        ("份额资金流", "etf_data.query_etf_share_history", bool(share_history.get("available"))),
-        ("历史深度", "etf_data.query_etf_kline_history", bool((history.get("history") or {}).get("status") == "available")),
-        ("持仓透视", "etf_data.query_etf_holdings", bool(holdings.get("status") == "ok")),
-        ("赛道对比", "etf_peers.query_etf_peers", bool(peers.get("available"))),
-        ("行业资金流", "sector_flow.query_sector_flow", bool(sector_flow.get("available"))),
-        ("事件文件", "etf_timeline.load_events_file", bool(events.get("available"))),
-        ("情景预案", "etf_playbook.drawdown_levels", bool(playbook.get("available"))),
-    ]
-    tr_html = "".join(
-        f'<tr><td>{_esc(d)}</td><td><code>{_esc(api)}</code></td>'
-        f'<td><span class="{"ref-ok" if ok else "ref-err"}">{"✓ 有数据" if ok else "✗ 不可得"}</span></td></tr>'
-        for d, api, ok in rows
-    )
+    rows = _refs_rows(payload)
+    if rows:
+        tr_html = "".join(
+            f'<tr><td>{_esc(d)}</td><td>{_esc(src)}</td><td>{_esc(note)}</td></tr>'
+            for d, src, note in rows
+        )
+        body = f'''<table>
+        <thead><tr>
+          <td style="font-size:var(--text-xs);font-weight:600;color:var(--tx-f);text-transform:uppercase;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi)">维度</td>
+          <td style="font-size:var(--text-xs);font-weight:600;color:var(--tx-f);text-transform:uppercase;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi)">实际来源（接口 / 披露）</td>
+          <td style="font-size:var(--text-xs);font-weight:600;color:var(--tx-f);text-transform:uppercase;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi)">说明</td>
+        </tr></thead>
+        <tbody>{tr_html}</tbody>
+      </table>'''
+    else:
+        body = '<div class="vnote">来源信息未随此数据提供。</div>'
     return f'''<section id="refs">
-  <div class="sh"><span class="st">数据来源</span><div class="sd"></div><span class="ss">引擎调用路径 · 可追溯</span></div>
+  <div class="sh"><span class="st">数据来源</span><div class="sd"></div><span class="ss">本次实际使用的来源 · 可追溯</span></div>
   <div class="rtog" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.ra').textContent=this.nextElementSibling.classList.contains('open')?'▴':'▾'">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-    展开数据追溯表<span class="ra" style="margin-left:auto">▾</span>
+    展开数据来源表<span class="ra" style="margin-left:auto">▾</span>
   </div>
   <div class="rbody">
     <div class="card" style="margin-top:var(--space-3)">
-      <table>
-        <thead><tr>
-          <td style="font-size:var(--text-xs);font-weight:600;color:var(--tx-f);text-transform:uppercase;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi)">维度</td>
-          <td style="font-size:var(--text-xs);font-weight:600;color:var(--tx-f);text-transform:uppercase;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi)">接口</td>
-          <td style="font-size:var(--text-xs);font-weight:600;color:var(--tx-f);text-transform:uppercase;padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--bdr-hi)">状态</td>
-        </tr></thead>
-        <tbody>{tr_html}</tbody>
-      </table>
+      {body}
     </div>
   </div>
 </section>'''
@@ -1104,7 +1445,7 @@ window.addEventListener('load',renderCharts);
 
 def _build_data_js(payload: dict) -> str:
     """报告 JSON 注入（</ 转义防 script 截断；数据行与逻辑分离）。"""
-    payload_json = (json.dumps(payload, ensure_ascii=False, default=str)
+    payload_json = (json.dumps(payload, ensure_ascii=False, default=default_serializer)
                      .replace("</", "<\\/")
                      .replace("\u2028", "\\u2028")
                      .replace("\u2029", "\\u2029"))  # 全量审查 P2：U+2028/29 截断脚本
@@ -1117,7 +1458,8 @@ def _build_data_js(payload: dict) -> str:
 # ── 主入口 ──
 
 
-def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> str:
+def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None,
+                    generation: dict | None = None) -> str:
     """生成 invest-a-etf HTML 报告（仪表盘 + md 全文原样嵌入）。
 
     Args:
@@ -1125,6 +1467,9 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
             playbook + 可选 holdings/peers/sector_flow 合并键）。
         md_text: 三层复检后的 md 研究备忘全文（原样嵌入；不支持语法 raise
             MarkdownSubsetError——由调用方决定退出码）。
+        generation: 同代输入元信息（B05）：`{same_generation, payload_hash,
+            frozen_at, generated_at}`（CLI 只读冻结 payload 时必有）。缺省时
+            不渲染代际行（渲染器单元测试/离线重放路径）。
     """
     profile = payload.get("profile") or {}
     quote = payload.get("quote") or {}
@@ -1134,7 +1479,9 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
     playbook = payload.get("playbook") or {}
 
     symbol = str(payload.get("symbol", ""))
-    name = profile.get("category", {}).get("label", "") if isinstance(profile.get("category"), dict) else ""
+    # R8：名称消费已封存身份登记（category 未知时用 identity.fund_name/待核，
+    # 不再把 Spot 缺失的「未知」当名称）；缺字段旧代透明降级。
+    name = _identity_display_name(profile)
     if not name:
         name = profile.get("name") or ""
 
@@ -1154,6 +1501,12 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
     risk_banner = _html_risk_banner()
     disclaimer = _html_disclaimer()
 
+    gen_hash = str((generation or {}).get("payload_hash") or "")
+    gen_meta_tag = (f'<meta name="invest-generation" content="{_esc(gen_hash)}">'
+                    if gen_hash else "")
+    # R16（2026-10-13 读者呈现）：代际 hash/frozen_at 属工程调试信息，不再渲染为
+    # 可见卡片；保留 <meta name="invest-generation">、完整数据 JSON 与 QC 绑定以便追溯。
+
     sections = [
         _section_overview(profile, quote, kline),
         _section_valuation(profile),
@@ -1164,7 +1517,7 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
                        payload.get("peers") or {"available": False, "notes": []},
                        payload.get("share_history") or {},
                        kline),
-        _section_research(md_html),
+        _section_research(md_html, payload.get("research")),
         _section_refs(payload, events, playbook),
     ]
 
@@ -1176,6 +1529,7 @@ def render_etf_html(payload: dict[str, Any], *, md_text: str | None = None) -> s
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+{gen_meta_tag}
 <title>{_esc(f"{symbol} {name}")} — invest:a-etf 研究报告</title>
 <style>
 {_HTML_CSS}

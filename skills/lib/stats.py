@@ -13,6 +13,23 @@ def median(seq: list[float]) -> float | None:
     return statistics.median(seq)
 
 
+def le_share_pct(
+    values: list[float], current: float | None,
+) -> float | None:
+    """≤ 口径分位**核心**：count(v <= current) / len(values) × 100。
+
+    A05-3（v0.3.2）唯一公式源：收敛四处同定义实现（本模块
+    :func:`percentile_rank_inclusive`、agent_facts.percentile_rank、
+    insight_model._percentile、macro DGS30 分位）。本函数**不做**任何清洗、
+    样本守卫或舍入——各调用方的预处理（None/NaN/bool 过滤、>0 过滤）、
+    样本下限（如 ≥20 点）与舍入位数保留在调用方（定义差异显式保留）。
+    ``values`` 为空或 ``current`` 为 None 时返回 None。
+    """
+    if not values or current is None:
+        return None
+    return sum(1 for v in values if v <= current) / len(values) * 100
+
+
 def percentile_rank_inclusive(
     seq: list[float], current: float | None, *, round_to: int | None = None,
 ) -> float | None:
@@ -21,11 +38,12 @@ def percentile_rank_inclusive(
     与 :func:`percentile_rank`（严格 <、>0 过滤）互补：此处不剔除非正值，
     仅剔除 None（调用方按需预过滤）；``round_to`` 指定四舍五入位数。
     ``seq`` 为空或 ``current`` 为 None 时返回 None。
+    计算经 :func:`le_share_pct`（A05-3 共享核心）。
     """
     valid = [v for v in seq if v is not None]
-    if current is None or not valid:
+    pct = le_share_pct(valid, current)
+    if pct is None:
         return None
-    pct = sum(1 for v in valid if v <= current) / len(valid) * 100
     return round(pct, round_to) if round_to is not None else pct
 
 
@@ -45,7 +63,7 @@ def percentile_rank(seq: list[float], current: float) -> float | None:
     Returns:
         百分位 [0, 100]，数据不足时返回 None
     """
-    # 仅保留正数 PE（亏损期 PE 无估值意义，已剔除）
+    # 仅保留正数 PE（非正=亏损期、缺失/NaN 均无估值意义，从分位样本剔除）
     # 若亏损占比 >30%，调用方应标注"仅作位置参考"
     valid = [v for v in seq if v is not None and v > 0]
     if not valid:

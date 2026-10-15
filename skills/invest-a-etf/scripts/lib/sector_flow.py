@@ -171,9 +171,9 @@ def fetch_sector_flow_snapshot() -> dict[str, Any]:
 
 def _ensure_table() -> None:
     """自包含建表 + 读侧索引 + meta 表。仅写入路径调用；读路径按 OperationalError 降级。"""
-    from lib.store import _connection
+    from lib.store import connection
 
-    with _connection() as c:
+    with connection() as c:
         c.execute(_TABLE_DDL)
         c.execute(_IDX_DDL)
         c.execute(_META_DDL)
@@ -197,9 +197,9 @@ def _read_log(exc: Exception) -> None:
 
 def _latest_saved_date() -> str | None:
     """表内最大 date（YYYYMMDD 字典序）；表不存在/无行 → None。"""
-    from lib.store import _connection
+    from lib.store import connection
 
-    with _connection() as c:
+    with connection() as c:
         try:
             row = c.execute(
                 "SELECT MAX(date) AS d FROM sector_flow_snapshots"
@@ -212,9 +212,9 @@ def _latest_saved_date() -> str | None:
 
 def _rows_for_date(date: str) -> dict[int, dict[str, float | None]]:
     """date 日全部 (industry, window_days) 行 → {wd: {industry: net_flow}}（一次查询）。"""
-    from lib.store import _connection
+    from lib.store import connection
 
-    with _connection() as c:
+    with connection() as c:
         try:
             rows = c.execute(
                 "SELECT industry, window_days, net_flow "
@@ -302,7 +302,7 @@ def save_sector_flow_snapshot(
     → 判定不等 → 正常写入）。
     """
     from lib.db_util import upsert_daily_rows
-    from lib.store import _connection, init_db
+    from lib.store import connection, init_db
 
     if snapshot is None:
         snapshot = fetch_sector_flow_snapshot()
@@ -375,7 +375,7 @@ def save_sector_flow_snapshot(
     # R16 merge 陈旧值标记：净额解析失败（None）且同日已存行有非 None 净额
     # → 该行将由 COALESCE 填充旧值，net_merged=1（趋势侧剔除，防陈旧值当
     # 有效快照）。后写入真实值 → 探测不到填充 → 标记归零，净额与标记同源。
-    with _connection() as c:
+    with connection() as c:
         try:
             existing = {
                 (r["date"], r["industry"], r["window_days"]): r["net_flow"]
@@ -394,7 +394,7 @@ def save_sector_flow_snapshot(
             1 if row["net_flow"] is None and pk in existing and existing[pk] is not None
             else 0
         )
-    with _connection() as c:
+    with connection() as c:
         try:
             saved = upsert_daily_rows(
                 c, "sector_flow_snapshots", rows,
@@ -419,9 +419,9 @@ def load_sector_flow_history(
 ) -> list[dict[str, Any]]:
     """积累序列（date ASC）。表不存在/无行 → []（读侧不建表，降级同 etf_share_flow）。"""
     from lib.db_util import load_recent_rows
-    from lib.store import _connection
+    from lib.store import connection
 
-    with _connection() as c:
+    with connection() as c:
         try:
             rows = load_recent_rows(
                 c, "sector_flow_snapshots", limit=days, order_col="date",
@@ -558,9 +558,9 @@ def _sequence_trend(industry: str, window_days: int = 3) -> dict[str, Any]:
 
 def _history_days() -> int:
     """表内积累交易日数（COUNT(DISTINCT date)）；表不存在 → 0。"""
-    from lib.store import _connection
+    from lib.store import connection
 
-    with _connection() as c:
+    with connection() as c:
         try:
             row = c.execute(
                 "SELECT COUNT(DISTINCT date) AS n FROM sector_flow_snapshots"
@@ -623,9 +623,9 @@ def query_sector_flow(symbol: str) -> dict[str, Any]:
     as_of = _latest_saved_date()
     latest_by_ind: dict[str, dict[int, dict[str, Any]]] = {}
     if as_of:
-        from lib.store import _connection
+        from lib.store import connection
 
-        with _connection() as c:
+        with connection() as c:
             try:
                 rows = c.execute(
                     "SELECT industry, window_days, net_flow, chg_pct "
@@ -743,9 +743,9 @@ _DRIFT_BASELINE_KEY = "sector_flow_drift_baseline"
 
 def load_drift_baseline() -> set[str] | None:
     """漂移基线（已确认的未映射行业集）；无基线/读取失败 → None（调用方重新建立）。"""
-    from lib.store import _connection
+    from lib.store import connection
 
-    with _connection() as c:
+    with connection() as c:
         try:
             row = c.execute(
                 "SELECT value FROM sector_flow_meta WHERE key = ?",
@@ -761,13 +761,13 @@ def load_drift_baseline() -> set[str] | None:
 
 def save_drift_baseline(snapshot: dict[str, Any]) -> int | None:
     """建立/更新漂移基线 = 当前快照未映射行业全集；返回基线行业数，失败 → None。"""
-    from lib.store import _connection, init_db
+    from lib.store import connection, init_db
 
     baseline = sorted(_unmapped_industries(snapshot))
     try:
         init_db()
         _ensure_table()
-        with _connection() as c:
+        with connection() as c:
             c.execute(
                 "INSERT INTO sector_flow_meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",

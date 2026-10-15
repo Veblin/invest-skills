@@ -405,28 +405,39 @@ class TestCalcHistoricalPercentile:
 
 
 class TestLossRatioStructured:
-    """R12c: PE 亏损期占比结构化暴露（P0-2 标题标注的数据基础）。"""
+    """R12c / A05-3: PE 亏损与缺失**分列**统计（P0-2 标题标注的数据基础）。
 
-    def test_loss_ratio_computed(self):
+    A05-3 差异（差异对照表同款）：旧 `loss_days`/`loss_ratio` 把 None/NaN 与
+    PE≤0 合并计数（措辞统称「亏损期」）；新定义 `loss_days`=非正 PE≤0（A-F03：
+    只称非正、不确证财务亏损）、
+    `missing_days`=PE 不可得，合计 `nonpos_or_missing_*` 供阈值判定（未舍入）。
+    """
+
+    def test_confirmed_loss_and_missing_split(self):
         from lib.valuation import valuation_summary
 
-        # 30 个交易日：12 个亏损日（Tushare daily_basic 对亏损期返回 pe=None），18 个正值
+        # 30 个交易日：12 个 pe=None（不可得，不必然亏损），18 个正值
         pe_seq = [None] * 12 + [20.0 + i for i in range(18)]
         result = valuation_summary(pe_seq, [2.0] * 30)
         pe = result["pe"]
-        assert pe["loss_days"] == 12
-        assert pe["loss_ratio"] == round(12 / 30, 4)
-        assert pe["loss_ratio"] > 0.3  # 触发标题失真标注阈值
+        assert pe["loss_days"] == 0            # 无非正 PE≤0
+        assert pe["missing_days"] == 12        # 不可得单列，不称亏损
+        assert pe["nonpos_or_missing_days"] == 12
+        assert pe["nonpos_or_missing_ratio"] == round(12 / 30, 4)
+        assert pe["loss_ratio_elevated"] is True  # 合计 40% > 30% → 标题失真阈值
 
-    def test_loss_ratio_counts_none_and_nonpositive(self):
+    def test_loss_ratio_counts_confirmed_nonpositive_only(self):
         from lib.valuation import valuation_summary
 
-        # 20 个交易日：8 个 pe=None + 2 个 pe<=0（同 calc_historical_percentile 计数），10 个正值
+        # 20 个交易日：8 个 pe=None + 2 个 pe<=0（非正 PE，不确证亏损）+ 10 个正值
         pe_seq = [None] * 8 + [0.0, -3.5] + [20.0 + i for i in range(10)]
         result = valuation_summary(pe_seq, [2.0] * 20)
         pe = result["pe"]
-        assert pe["loss_days"] == 10
-        assert pe["loss_ratio"] == round(10 / 20, 4)
+        assert pe["loss_days"] == 2
+        assert pe["loss_ratio"] == round(2 / 20, 4)
+        assert pe["missing_days"] == 8
+        assert pe["nonpos_or_missing_days"] == 10
+        assert pe["nonpos_or_missing_ratio"] == round(10 / 20, 4)
 
     def test_no_loss_ratio_zero(self):
         from lib.valuation import valuation_summary
@@ -435,6 +446,43 @@ class TestLossRatioStructured:
         result = valuation_summary(pe_seq, [2.0] * 30)
         assert result["pe"]["loss_days"] == 0
         assert result["pe"]["loss_ratio"] == 0.0
+        assert result["pe"]["missing_days"] == 0
+        assert result["pe"]["loss_ratio_elevated"] is False
+
+    def test_loss_window_overrides_value_sequence(self):
+        """pe_loss_window（有效日期窗口）优先于值序列统计（A05-3 同窗口契约）。"""
+        from lib.valuation import valuation_summary
+
+        pe_seq = [20.0 + i for i in range(11)] + [None]  # 值序列 12 行
+        # 日期窗口只有 10 行（无日期行不进分母）；30.04% 边界用未舍入判定
+        window = [20.0] * 7 + [None, None] + [-1.0]
+        result = valuation_summary(pe_seq, [2.0] * 12, pe_loss_window=window)
+        pe = result["pe"]
+        assert pe["pe_loss_window_n"] == 10
+        assert pe["loss_days"] == 1 and pe["missing_days"] == 2
+        assert pe["nonpos_or_missing_ratio"] == round(0.3, 4)
+
+    def test_threshold_uses_unrounded_ratio(self):
+        """原始阈值：3004/10000 = 30.04% → 未舍入 >30% 判真（显示层才舍入）。"""
+        from lib.valuation import pe_loss_missing_stats
+
+        stats = pe_loss_missing_stats([None] * 3004 + [20.0] * 6996)
+        assert stats is not None
+        assert abs(stats["nonpos_or_missing_ratio"] - 0.3004) < 1e-12
+        assert stats["nonpos_or_missing_ratio_4dp"] == 0.3004
+        assert stats["nonpos_or_missing_ratio_pct"] == 30.0   # 显示舍入
+        assert stats["elevated"] is True                       # 判定未舍入
+        # 临界另一侧：30/10000 = 0.30 → 不触发
+        stats2 = pe_loss_missing_stats([None] * 3000 + [20.0] * 7000)
+        assert stats2["elevated"] is False
+
+    def test_min_samples_floor_returns_none(self):
+        """样本下限：窗口 <20 → None（不产出占比）；=0 窗口同样 None。"""
+        from lib.valuation import pe_loss_missing_stats
+
+        assert pe_loss_missing_stats([None] * 19) is None
+        assert pe_loss_missing_stats([]) is None
+        assert pe_loss_missing_stats([None] * 19, min_samples=0) is not None
 
 
 class TestSanitizeCpi:
@@ -1219,7 +1267,9 @@ class TestFormatEvEbitdaBlock:
     def test_loss_ratio_counts_nan_rows(self):
         """全量审查 #3：真实 daily_basic 缺失行 pe_ttm 是 float('nan') 而非
         None——旧实现 `v is None or v <= 0` 对 NaN 双 false 漏计，md loss 0.0
-        vs HTML band 56.0 同快照分歧（300981 实证 677/1210）。"""
+        vs HTML band 56.0 同快照分歧（300981 实证 677/1210）。
+        A05-3：NaN 归 **PE 缺失**（safe_float 归一），与非正 PE≤0 分列，
+        但两者同计入分位失真合计（阈值判定）。"""
         import math
 
         from lib.valuation import valuation_summary
@@ -1227,8 +1277,11 @@ class TestFormatEvEbitdaBlock:
         pe_seq = [20.0 + i for i in range(6)] + [float("nan")] * 14
         result = valuation_summary(pe_seq, [2.0] * 20)
         pe = result["pe"]
-        assert pe["loss_days"] == 14          # NaN 计入亏损/缺失组
-        assert pe["loss_ratio"] == round(14 / 20, 4)
+        assert pe["missing_days"] == 14
+        assert pe["loss_days"] == 0
+        assert pe["nonpos_or_missing_days"] == 14
+        assert pe["nonpos_or_missing_ratio"] == round(14 / 20, 4)
+        assert pe["loss_ratio_elevated"] is True
         assert pe["n_valid"] == 6             # 正数序列不受影响
 
 

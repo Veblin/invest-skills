@@ -6,6 +6,8 @@ import json
 
 import sys
 
+import pytest
+
 from test_default_store import _fake_result
 
 
@@ -853,6 +855,98 @@ def test_fixed_render_does_not_mutate_sealed_payload(isolated_store, monkeypatch
     assert validate(isolated_store.get_collection(cid), "600176") == []
 
 
+@pytest.mark.parametrize("selection", ["collection-id", "resume"])
+@pytest.mark.parametrize("emit,mode", [
+    ("md", "brief"), ("html", "brief"), ("compact", "brief"),
+    ("md", "insight"), ("html", "insight"), ("compact", "insight"),
+])
+def test_sealed_render_raw_archive_matches_original(
+        isolated_store, monkeypatch, tmp_path, selection, emit, mode):
+    """Actual render/CLI/archive chain must retain a valid seal without a style override."""
+    import invest
+    from lib import archiver, style_match
+    from lib.report_snapshot import seal, validate
+
+    collection = _sealed()
+    seal(collection, options={"dims": ["basic_info", "quote"]})
+    cid = isolated_store.save_collection(collection)
+    isolated_store.save_pipeline_step("600176", "collect", {"dims": ["basic_info", "quote"]})
+    original = isolated_store.get_collection(cid)["raw_json"]
+    monkeypatch.setattr(style_match, "load_style", lambda: None)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("sealed render must not collect")
+
+    monkeypatch.setattr(invest.collector, "collect_all", unexpected)
+    monkeypatch.setattr(invest, "_ensure_render_ready", unexpected)
+    archived = []
+    archive_original = archiver.archive_collection
+
+    def archive(symbol, payload):
+        path = archive_original(symbol, payload, raw_dir=str(tmp_path / "raw"))
+        assert path is not None
+        archived.append(json.loads(invest.Path(path).read_text(encoding="utf-8")))
+        return path
+
+    monkeypatch.setattr(archiver, "archive_collection", archive)
+    argv = ["invest.py", "report", "600176", "--emit", emit, "--mode", mode,
+            "--dims", "basic_info,quote", "--save-raw", "--outdir", str(tmp_path / "reports")]
+    argv += (["--collection-id", str(cid)] if selection == "collection-id" else ["--resume"])
+    monkeypatch.setattr(sys, "argv", argv)
+    assert invest.main() == 0
+    assert archived == [original]
+    assert validate({**isolated_store.get_collection(cid), "raw_json": archived[0]}, "600176") == []
+    assert isolated_store.get_collection(cid)["raw_json"] == original
+    assert len(isolated_store.list_collections()) == 1
+    if emit in {"md", "html"}:
+        paths = list((tmp_path / "reports").rglob("*.md"))
+        assert len(paths) == 1 and paths[0].stat().st_size > 0
+        if emit == "html":
+            assert len(list((tmp_path / "reports").rglob("*.html"))) == 1
+
+
+@pytest.mark.parametrize("style_source", ["none", "explicit", "default"])
+def test_sealed_render_deeply_detaches_style_and_nested_state(
+        isolated_store, monkeypatch, tmp_path, style_source):
+    """Neither the style assembler nor the renderer may mutate sealed nested data."""
+    import invest
+    from lib import style_match
+
+    collection = _sealed()
+    original = json.loads(json.dumps(collection))
+    monkeypatch.setattr(invest, "_load_fixed_collection", lambda _args: collection)
+    monkeypatch.setattr(style_match, "load_style", lambda: "价值" if style_source == "default" else None)
+    styles = []
+
+    def assemble(payload, _symbol, *, style):
+        styles.append(style)
+        payload["market_structure"]["availability"]["style_marker"] = "detached"
+        return {"style": style}
+
+    def render(payload, *_args, **_kwargs):
+        assert payload is not collection
+        payload["dimensions"][0]["data"]["render_marker"] = "detached"
+        payload["_meta"]["render_marker"] = "detached"
+        if style_source != "none":
+            assert payload["style_match"]["style"] == "价值"
+            assert payload["market_structure"]["availability"]["style_marker"] == "detached"
+        return "rendered"
+
+    saved = []
+    monkeypatch.setattr(style_match, "assemble_style_match", assemble)
+    monkeypatch.setattr(invest.render, "render", render)
+    monkeypatch.setattr(invest, "_maybe_save_raw", lambda _args, payload: saved.append(payload))
+    monkeypatch.setattr(invest, "_maybe_store_report_snapshot", lambda _args, payload, **_kwargs: saved.append(payload))
+    argv = ["report", "600176", "--collection-id", "1", "--emit", "md",
+            "--mode", "brief", "--outdir", str(tmp_path)]
+    if style_source == "explicit":
+        argv += ["--style", "价值"]
+    assert invest.cmd_report(invest.build_parser().parse_args(argv)) == 0
+    assert styles == ([] if style_source == "none" else ["价值"])
+    assert all(payload is collection for payload in saved) and len(saved) == 2
+    assert collection == original
+
+
 def test_rate_limit_stats_survive_client_release(monkeypatch):
     """统计须与客户端生命周期解耦：worker/函数内局部客户端被回收后仍要计入。"""
     import gc
@@ -896,6 +990,155 @@ def test_fixed_json_emit_stays_self_consistent(isolated_store, capsys):
         "_meta": {k: v for k, v in meta.items() if k != "report_input_hash"}})
     assert recomputed == meta["report_input_hash"]
     assert "benchmark_hs300" not in (payload.get("market_structure") or {})
+
+
+@pytest.mark.parametrize("sealed", [True, False])
+def test_resume_json_preserves_sealed_input_and_only_backfills_unsealed(
+        isolated_store, monkeypatch, capsys, sealed):
+    """Real resume/store/JSON chain: failed peers/events retry only before sealing."""
+    import invest
+    from lib import events, lhb, style_match
+    from lib.report_snapshot import seal, validate
+
+    collection = _sealed()
+    collection["_meta"]["events_legs"] = {
+        "notice": "failed", "dividend": "empty", "holder_change": "empty"}
+    if sealed:
+        seal(collection, options={"dims": ["basic_info", "quote"]})
+    else:
+        collection.pop("_meta")
+    cid = isolated_store.save_collection(collection)
+    isolated_store.save_pipeline_step("600176", "collect", {"dims": ["basic_info", "quote"]})
+    original = isolated_store.get_collection(cid)["raw_json"]
+    calls = []
+
+    def peers(payload, _symbol):
+        calls.append("peers")
+        payload["industry_peers"] = {"peers": [], "error": "offline-retry-marker"}
+
+    def attach_events(payload, _symbol, **_kwargs):
+        calls.append("events")
+        payload["events"] = [{"title": "offline-event-marker"}]
+
+    def limit_streak(payload, _symbol):
+        calls.append("limit_streak")
+        payload["limit_streak"] = {"offline_marker": True}
+        return False
+
+    def assemble_style(*_args, **_kwargs):
+        calls.append("style")
+        return {"offline_marker": True}
+
+    def no_collect(*_args, **_kwargs):
+        pytest.fail("compatible resume must not collect again")
+
+    monkeypatch.setattr(invest.collector, "collect_all", no_collect)
+    monkeypatch.setattr(invest.collector._orchestrate, "attach_industry_peers", peers)
+    monkeypatch.setattr(invest.collector._orchestrate, "attach_pe_band", lambda *_a: None)
+    monkeypatch.setattr(events, "attach_events", attach_events)
+    monkeypatch.setattr(lhb, "attach_limit_streak_dims", limit_streak)
+    monkeypatch.setattr(style_match, "assemble_style_match", assemble_style)
+    monkeypatch.setattr(style_match, "load_style", lambda: None)
+    monkeypatch.setattr(sys, "argv", [
+        "invest.py", "report", "600176", "--resume", "--emit", "json",
+        "--dims", "basic_info,quote", "--no-store"])
+    assert invest.main() == 0
+    captured = capsys.readouterr()
+    exported = json.loads(captured.out)
+    if sealed:
+        assert calls == []
+        assert exported == original
+        assert validate({**isolated_store.get_collection(cid), "raw_json": exported}, "600176") == []
+        assert "未封存" not in captured.err
+    else:
+        assert calls == ["peers", "events", "limit_streak", "style"]
+        assert exported["industry_peers"]["error"] == "offline-retry-marker"
+        assert exported["events"] == [{"title": "offline-event-marker"}]
+        assert "未封存" in captured.err
+    assert isolated_store.get_collection(cid)["raw_json"] == original
+
+
+@pytest.mark.parametrize("emit", ["compact", "json"])
+def test_sealed_resume_style_uses_render_view_and_preserves_export(
+        isolated_store, monkeypatch, capsys, emit):
+    import invest
+    from lib import style_match
+    from lib.report_snapshot import seal, validate
+
+    collection = _sealed()
+    collection["style_match"] = {"style": "成长"}
+    seal(collection, options={"dims": ["basic_info", "quote"]})
+    cid = isolated_store.save_collection(collection)
+    isolated_store.save_pipeline_step("600176", "collect", {"dims": ["basic_info", "quote"]})
+    original = isolated_store.get_collection(cid)["raw_json"]
+    monkeypatch.setattr(style_match, "_journal_driver", lambda _s: None)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("sealed resume must not collect")
+
+    monkeypatch.setattr(invest.collector, "collect_all", unexpected)
+    monkeypatch.setattr(invest.collector, "attach_phase2_extras", unexpected)
+    monkeypatch.setattr(invest.collector, "attach_events_for_report", unexpected)
+    render_original = invest.render.render
+    captured = []
+
+    def capture(payload, *args, **kwargs):
+        captured.append(payload)
+        return render_original(payload, *args, **kwargs)
+
+    monkeypatch.setattr(invest.render, "render", capture)
+    monkeypatch.setattr(sys, "argv", [
+        "invest.py", "report", "600176", "--resume", "--emit", emit,
+        "--dims", "basic_info,quote", "--style", "价值", "--no-store"])
+    assert invest.main() == 0
+    output = capsys.readouterr()
+    if emit == "compact":
+        assert captured[0]["style_match"]["style"] == "价值"
+    else:
+        assert json.loads(output.out) == original
+        assert captured[0]["style_match"]["style"] == "成长"
+        assert validate({**isolated_store.get_collection(cid), "raw_json": captured[0]}, "600176") == []
+    assert isolated_store.get_collection(cid)["raw_json"] == original
+
+
+def test_render_ready_leaves_sealed_input_untouched(monkeypatch):
+    """Other consumers (including analyze --input) must also respect the seal."""
+    import invest
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("sealed input must not backfill")
+
+    collection = _sealed()
+    original = json.loads(json.dumps(collection))
+    monkeypatch.setattr(invest.collector, "attach_market_structure", unexpected)
+    monkeypatch.setattr(invest.collector, "attach_phase2_extras", unexpected)
+    monkeypatch.setattr(invest.collector, "attach_events_for_report", unexpected)
+    invest._ensure_render_ready(collection, "600176")
+    assert collection == original
+
+
+def test_synthesize_sealed_input_does_not_backfill_missing_market_structure(
+        tmp_path, monkeypatch):
+    """A sealed input file must stay offline even when a report field is absent."""
+    import invest
+    from lib.report_snapshot import seal
+
+    collection = _sealed()
+    collection.pop("market_structure")
+    seal(collection)
+    path = tmp_path / "sealed.json"
+    path.write_text(json.dumps(collection), encoding="utf-8")
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("sealed input must not backfill")
+
+    monkeypatch.setattr(invest.collector, "attach_market_structure", unexpected)
+    monkeypatch.setattr(invest.collector, "attach_phase2_extras", unexpected)
+    monkeypatch.setattr(invest.collector, "attach_events_for_report", unexpected)
+    args = invest.build_parser().parse_args([
+        "synthesize", "600176", "--input", str(path), "--emit", "md", "--mode", "brief"])
+    assert invest.cmd_synthesize(args) == 0
+    assert json.loads(path.read_text(encoding="utf-8")) == collection
 
 
 # ── 审查回归（2026-09-30 第三批）：三态不得被「全失败但形状正常」骗过 ──────
@@ -1068,3 +1311,45 @@ def test_cmd_report_passes_strict_rigor_to_renderer(tmp_path, isolated_store, mo
         "--emit", "md", "--outdir", str(tmp_path / "off")])
     assert invest.cmd_report(off) == 0
     assert captured.get("strict_rigor") is False
+
+
+def test_digest_delegation_byte_equivalent_to_legacy_implementation():
+    """v0.3.2 B05：digest 委托 snapshot_core 后与旧内联实现逐字节等价。
+
+    旧实现（迁移前）：json.dumps(..., ensure_ascii=False, sort_keys=True,
+    separators=(",", ":"), default=json_default) + sha256。此处内联复刻旧算法
+    对照，覆盖 datetime/date/Decimal/set/numpy 与嵌套结构——任何口径漂移
+    （排序、分隔符、序列化器）都会改变历史快照哈希。
+    """
+    import hashlib
+    import json
+
+    from lib.json_util import json_default
+    from lib.report_snapshot import digest
+
+    def _legacy_digest(value):
+        data = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), default=json_default)
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    samples = [
+        {"a": 1, "b": [1.5, "x", None, True]},
+        {"t": datetime(2026, 1, 2, 3, 4, 5), "d": date(2026, 1, 2)},
+        {"x": Decimal("1.23"), "s": {3, 1, 2}},
+        {"nested": {"rows": [{"end_date": "2026-06-30", "v": 3.14159}]}},
+    ]
+    for s in samples:
+        assert digest(s) == _legacy_digest(s)
+
+
+def test_json_default_mixed_type_set_does_not_raise():
+    """review #12：混合类型 set 不再抛 TypeError（与 snapshot_core 同式修复）。"""
+    import json
+
+    from lib.json_util import json_default
+
+    text = json.dumps({"s": {1, "a"}}, default=json_default)
+    assert json.loads(text)["s"] == [1, "a"]

@@ -104,7 +104,7 @@ def persist_index_pe_from_cache(idx_codes: list[str] | None = None) -> dict[str,
         return result
 
     from lib.db_util import upsert_daily_rows
-    from lib.store import _conn, _safe_close, init_db
+    from lib.store import close_connection, init_db, open_connection
 
     rows_to_write: list[dict[str, Any]] = []
     for idx_code in idx_codes:
@@ -148,7 +148,7 @@ def persist_index_pe_from_cache(idx_codes: list[str] | None = None) -> dict[str,
         return result
 
     init_db()
-    c = _conn()
+    c = open_connection()
     try:
         upsert_daily_rows(
             c, "index_pe_history", rows_to_write,
@@ -162,7 +162,7 @@ def persist_index_pe_from_cache(idx_codes: list[str] | None = None) -> dict[str,
         result["error"] = f"db write failed: {exc}"
         logger.warning(result["error"])
     finally:
-        _safe_close(c)
+        close_connection(c)
     return result
 
 
@@ -178,9 +178,9 @@ def get_index_pe_history(index_code: str, days: int = 250) -> list[dict]:
     import sqlite3
 
     from lib.db_util import load_recent_rows
-    from lib.store import _conn, _safe_close
+    from lib.store import close_connection, open_connection
 
-    c = _conn()
+    c = open_connection()
     try:
         return load_recent_rows(
             c, "index_pe_history", limit=int(days),
@@ -189,7 +189,7 @@ def get_index_pe_history(index_code: str, days: int = 250) -> list[dict]:
     except sqlite3.OperationalError:
         return []
     finally:
-        _safe_close(c)
+        close_connection(c)
 
 
 def index_pe_percentile(rows: list[dict], current_pe: float | None, *,
@@ -200,9 +200,10 @@ def index_pe_percentile(rows: list[dict], current_pe: float | None, *,
     首次入库即有分位可算；更少时视为数据不足）。守卫计「有效值」而非原始
     行数——亏损期/无 PE 的 NULL 行不占名额（review #5）。
 
-    ``column`` **必须与当前值同口径**：表内 `pe`=市盈率1（股本加权）、
-    `pe_circulating`=市盈率2（流通加权）。用股本加权历史去排一个流通加权的当前值，
-    分位与徽章口径自相矛盾（R0~R2 review 修复）。
+    ``column`` **必须与当前值同口径**：表内 `pe`=市盈率1（官方字段：（总股本）P/E1）、
+    `pe_circulating`=市盈率2（官方字段：（计算用股本）P/E2；字段名为兼容 alias，
+    R3 只修口径显示与说明、不改数值/不重算历史）。用总股本历史去排一个计算用股本
+    口径的当前值，分位与徽章口径自相矛盾（R0~R2 review 修复）。
     """
     if current_pe is None:
         return None

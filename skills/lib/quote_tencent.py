@@ -214,8 +214,8 @@ def fetch_tencent_quote(
     """网络获取 + 解析；北交所/HTTP 非 200/无效载荷 → None。
 
     - ``session`` 可注入（测试 mock 用；消费方各自持有自己的 mock 缝）：
-      缺省时惰性导入 ``lib.proxy.no_proxy_session``（强制直连，防 Clash/
-      VPN 拦截国内金融域名；与 etf/_sources 旧行为一致）。
+      缺省时惰性导入共享 ``proxy.no_proxy_session``（A02 后为顶层 canonical，
+      强制直连，防 Clash/VPN 拦截国内金融域名；与 etf/_sources 旧行为一致）。
     - 传输层异常（requests 连接失败等）**上抛**，由调用方按其失败契约处理
       （etf→None、valuation→error dict、_sources 沿旧行为由 collector 捕获）。
     """
@@ -223,7 +223,7 @@ def fetch_tencent_quote(
     if url is None:
         return None
     if session is None:
-        from lib.proxy import no_proxy_session
+        from proxy import no_proxy_session
 
         with no_proxy_session() as sess:
             r = sess.get(url, timeout=timeout)

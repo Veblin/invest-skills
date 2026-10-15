@@ -118,9 +118,9 @@ class TestSaveMacroSnapshot:
 
     def test_load_history_asc(self, isolated_store):
         from lib import store
-        from lib.store import _conn, _safe_close
+        from lib.store import close_connection, open_connection
 
-        c = _conn()
+        c = open_connection()
         try:
             for d, v in [("20260801", 50.0), ("20260802", 51.0), ("20260803", 52.0)]:
                 c.execute(
@@ -129,7 +129,7 @@ class TestSaveMacroSnapshot:
                 )
             c.commit()
         finally:
-            _safe_close(c)
+            close_connection(c)
         hist = store.load_macro_history(7)
         dates = [r["date"] for r in hist]
         assert dates == ["20260801", "20260802", "20260803"]

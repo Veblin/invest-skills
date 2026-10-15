@@ -73,7 +73,10 @@ class TestQuery:
         monkeypatch.setattr(store_mod, "load_futures_daily", lambda symbol=None, limit=1000: [])
         r = query_futures_basis("563300")
         assert r["available"] is False
-        assert "无股指期货" in r["note"]
+        # R2：静态映射未收录 ≠ 不存在（不得断言「无对冲品种」）
+        assert "静态映射未收录" in r["note"]
+        assert "不表示不存在" in r["note"]
+        assert "无股指期货对冲品种" not in r["note"]
 
     def test_insufficient_history(self, monkeypatch):
         import lib.store as store_mod  # noqa: E402

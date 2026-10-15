@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from fixtures.collections import collection_v2_minimal
 
 
@@ -19,6 +21,74 @@ def test_facts_are_sourced_and_derived_facts_explain_formula():
     assert all(fact["source_ids"] and fact["as_of"] for fact in model["facts"])
     derived = next(fact for fact in model["facts"] if fact["id"] == "financials.ocf_to_np.latest")
     assert derived["formula"] == "n_cashflow_act/net_profit"
+
+
+@pytest.mark.parametrize("pe", [0.0, -12.34])
+@pytest.mark.parametrize("profit", [None, 0, 1e8, -1e8])
+def test_nonpositive_pe_does_not_establish_losses(pe, profit):
+    from lib.insight_model import build_report_model
+    from lib.render_insight import render_insight_html, render_insight_markdown
+
+    collection = collection_v2_minimal()
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "valuation":
+            dim["data"][-1]["pe_ttm"] = pe
+        if dim["dimension"] == "financials":
+            dim["data"][-1]["net_profit"] = profit
+    model = build_report_model(collection, "600176")
+    finding = next(f for f in model["findings"] if f["id"] == "valuation-pe-nonpositive")
+    assert "非正值" in finding["claim"] and "不计算分位" in finding["claim"]
+    assert "亏损" not in finding["claim"] and "为负值" not in finding["claim"]
+    assert not any(f["id"] == "valuation.pe_ttm.percentile" for f in model["facts"])
+    for text in (render_insight_markdown(model), render_insight_html(model)):
+        assert "非正值" in text
+        assert "为负值（亏损期）" not in text
+
+
+@pytest.mark.parametrize("sources", [
+    ["akshare stock_history_dividend_detail"],
+    ["akshare stock_dividend_cninfo", "akshare stock_shareholder_change_ths"],
+    ["akshare stock_individual_notice_report", "akshare stock_history_dividend_detail"],
+    [None],
+])
+def test_event_facts_keep_only_contributing_sources(sources):
+    from lib.events import _build_summary
+    from lib.insight_model import build_report_model
+    from lib.render_insight import render_insight_html, render_insight_markdown
+
+    collection = collection_v2_minimal()
+    collection["events"] = [
+        {"date": "2026-06-10", "type": "dividend", "source": source}
+        for source in sources]
+    collection["_meta"] = {
+        "events_legs": {"notice": "failed", "dividend": "ok", "holder_change": "ok"},
+        "events_summary": _build_summary(collection["events"], 30),
+    }
+    for dim in collection["dimensions"]:
+        if dim["dimension"] == "quote":
+            dim["data"]["change_pct"] = -6.0
+    model = build_report_model(collection, "600176")
+    expected = {"events." + (s.replace("akshare ", "akshare.") if s else "unknown") for s in sources}
+    for fact in model["facts"]:
+        if fact["id"] in {"events.count", "events.types"}:
+            assert set(fact["source_ids"]) == expected
+            assert "事件" in fact["basis"] and "公告" not in fact["basis"]
+    assert expected.issubset({s["id"] for s in model["sources"]})
+    for text in (render_insight_markdown(model), render_insight_html(model)):
+        assert "近窗口事件" in text and "近窗口公告" not in text
+        if not any(s and "notice_report" in s for s in sources):
+            assert "东财·个股公告" not in text
+
+
+def test_notice_direction_provenance_is_separate_from_event_aggregate():
+    from lib.insight_model import build_report_model
+
+    collection = collection_v2_minimal()
+    collection["events"] = [{"date": "2026-06-10", "source": "akshare stock_dividend_cninfo"}]
+    collection["news"] = {"cards": [{"source": "notice", "direction": "neutral"}]}
+    model = build_report_model(collection, "600176")
+    fact = next(f for f in model["facts"] if f["id"] == "news.notice_directions")
+    assert fact["source_ids"] == ["news.akshare.stock_individual_notice_report"]
 
 
 def test_findings_reference_facts_and_carry_association_boundary():
@@ -116,6 +186,86 @@ def test_qc_rejects_html_that_is_not_from_same_findings(tmp_path):
     layer = next(layer for layer in result.layers if layer.layer == "insight-contract")
     assert layer.status == "fail"
     assert any(item["id"] == "insight-html-pair-mismatch" for item in layer.details)
+
+
+@pytest.mark.parametrize("tamper", ["missing", "null", "empty", "remove-referenced", "duplicate-id",
+                                    "finding", "counter-fact", "string-refs", "chain", "tension",
+                                    "status-object", "status-list", "findings-int", "findings-bool"])
+def test_qc_rejects_missing_or_unresolved_insight_evidence(tmp_path, tamper):
+    from lib.insight_model import write_sidecars
+    from lib.render_insight import render_insight_html, render_insight_markdown
+    from report_qc import qc_file
+
+    report = tmp_path / "600176-测试" / "sample.insight.md"
+    report.parent.mkdir()
+    report.write_text(render_insight_markdown(_model()), encoding="utf-8")
+    html = report.with_suffix(".html")
+    html.write_text(render_insight_html(_model()), encoding="utf-8")
+    paths = write_sidecars(report, _model(), html_path=html)
+    facts = json.loads(paths["facts"].read_text(encoding="utf-8"))
+    insight = json.loads(paths["insight"].read_text(encoding="utf-8"))
+    if tamper == "missing":
+        facts.pop("facts")
+    elif tamper == "null":
+        facts["facts"] = None
+    elif tamper == "empty":
+        facts["facts"] = []
+    elif tamper == "remove-referenced":
+        ref = insight["findings"][0]["fact_ids"][0]
+        facts["facts"] = [f for f in facts["facts"] if f["id"] != ref]
+    elif tamper == "duplicate-id":
+        facts["facts"].append(dict(facts["facts"][0]))
+    elif tamper == "finding":
+        insight["findings"][0]["fact_ids"] = ["no-such-fact"]
+    elif tamper == "counter-fact":
+        insight["findings"][0]["counter_fact_ids"] = ["no-such-fact"]
+    elif tamper == "string-refs":
+        insight["findings"][0]["fact_ids"] = "financials.ocf_to_np.latest"
+    elif tamper == "chain":
+        insight["analysis_chains"][0]["fact_ids"] = ["no-such-fact"]
+    elif tamper == "tension":
+        insight["core_tension"]["fact_ids"] = ["no-such-fact"]
+    elif tamper == "status-object":
+        insight["completion"] = {}
+    elif tamper == "status-list":
+        insight["completion"] = []
+    elif tamper == "findings-int":
+        insight["findings"] = 1
+    elif tamper == "findings-bool":
+        insight["findings"] = True
+    paths["facts"].write_text(json.dumps(facts), encoding="utf-8")
+    paths["insight"].write_text(json.dumps(insight), encoding="utf-8")
+    result = qc_file(report, fail_on="error")
+    layer = next(layer for layer in result.layers if layer.layer == "insight-contract")
+    assert layer.status == "fail", layer.details
+    assert result.overall == "FAIL"
+
+
+def test_bare_code_insight_still_requires_evidence_sidecars(tmp_path):
+    from lib.render_insight import render_insight_markdown
+    from report_qc import qc_file
+
+    report = tmp_path / "600176" / "sample.insight.md"
+    report.parent.mkdir()
+    report.write_text(render_insight_markdown(_model()), encoding="utf-8")
+    result = qc_file(report, fail_on="error")
+    assert result.report_type == "stock"
+    assert next(l for l in result.layers if l.layer == "insight-contract").status == "fail"
+    assert result.overall == "FAIL"
+
+
+def test_empty_insufficient_insight_without_fact_references_is_valid(tmp_path):
+    from lib.insight_model import build_report_model, write_sidecars
+    from lib.render_insight import render_insight_markdown
+    from report_qc import qc_file
+
+    model = build_report_model({"dimensions": []}, "600176")
+    assert model["facts"] == [] and model["findings"] == [] and model["completion"] == "insufficient"
+    report = tmp_path / "600176-未知" / "empty.insight.md"
+    report.parent.mkdir()
+    report.write_text(render_insight_markdown(model), encoding="utf-8")
+    write_sidecars(report, model)
+    assert next(l for l in qc_file(report).layers if l.layer == "insight-contract").status == "pass"
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -179,9 +179,10 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
                 print(f"- PE 交叉：yfinance {y_pe:.2f} vs 腾讯 {q_pe:.2f}"
                       f"（差 {diff:+.1f}%——口径差异，不裁决）")
             else:
-                # review #8b：亏损期负 PE 相除得误导性符号差——只并列不裁决
+                # review #8b：非正 PE 相除得误导性符号差——只并列不裁决
+                # （A-F03：PE≤0 只称非正，不确证财务亏损）
                 print(f"- PE 交叉：yfinance {y_pe:.2f} vs 腾讯 {q_pe:.2f}"
-                      f"（含非正 PE（亏损期），口径差异，不裁决）")
+                      f"（含非正 PE≤0，口径差异，不裁决）")
         elif y.get("pe_ttm") is not None:
             print(f"- PE 交叉：yfinance {y['pe_ttm']:.2f}（腾讯不可得）")
     return 0
@@ -318,7 +319,16 @@ def _render_module7(lines: list[str], *, quote: dict, pe_line: str | None,
         # 合计是派生值 —— 带 calc 标签；缺一侧时 total 为 None，不得裸出数字
         total_txt = (f"合计 {_fmt_num(total)} 亿 [来源: Python calc: sh_yi + sz_yi]"
                      if total is not None else "合计不可得（单侧缺失，不拿沪向冒充）")
-        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，{total_txt}）"
+        # 区间累计行（tushare 降级链的链断裂）不得被读成「最新单日」金额：
+        # 模块 3 的区间提示不覆盖本行，限定词必须随行输出（review #1，2026-10-14）。
+        # akshare 正常路径 cal_days 为空 → 输出逐字节不变。
+        interval_txt = ""
+        cal_days = latest.get("cal_days")
+        if cal_days and cal_days > 1:
+            interval_txt = (f"（{latest.get('prev_date')} 之后至 {latest.get('date')} "
+                            f"区间累计，跨 {cal_days} 自然日，"
+                            f"未确认仅含一个港股通交易日——不作为单日净额）")
+        lines.append(f"- 南向资金：可得（最新 {latest.get('date')}，{total_txt}）{interval_txt}"
                      f"——资金面观察，非交易信号 [来源: {sb.get('source')}]")
     else:
         lines.append(f"- 南向资金：不可得（{sb.get('reason')}）——不推断资金方向")
@@ -396,13 +406,15 @@ def _render_southbound(lines: list[str]) -> dict:
     if sb.get("caliber_note"):
         lines.append(f"> {sb['caliber_note']}")
 
-    # 跨停市日的差值是**区间累计**（tushare 降级链下才会出现）——必须在表内标出，
-    # 否则 4 天的净买入会被读成一天的数（数倍高估）
+    # 多自然日区间可能包含缺失交易日，也可能只跨停市日；未核港股通日历
+    # 不把它裁决为单日净额（tushare 降级链下才会出现）。
     for r in sb["rows"]:
         if (r.get("cal_days") or 1) > 1:
             lines.append(
-                f"> ⚠️ 表中 {r['date']} 为**区间累计**（跨 {r['cal_days']} 自然日，含停市日）"
-                f"——不是单日净额 [来源: Python calc: 相邻可得行差分]")
+                f"> ⚠️ 表中 {r['date']} 为**区间累计**（{r.get('prev_date')} 之后至 "
+                f"{r['date']}，跨 {r['cal_days']} 自然日）"
+                f"——未确认仅含一个港股通交易日，不作为单日净额 "
+                f"[来源: Python calc: 相邻可得行差分]")
 
     latest = sb["rows"][-1]
     if latest.get("buy_yi") is not None and latest.get("sell_yi") is not None:
@@ -861,6 +873,7 @@ def _collect_side(code: str) -> dict:
         # 且 NaN 会穿过除法被渲染成字面 "nan"（展示为一个「算出来的」值）
         side["financials"]["latest"] = {
             "report_date": r0.get("report_date"),
+            "currency": r0.get("currency"),
             "revenue_yi": _safe_yi(r0.get("revenue")),
             "net_profit_yi": _safe_yi(r0.get("net_profit")),
             "roe": _safe_num(r0.get("roe")),

@@ -192,14 +192,16 @@ def _sw_tables() -> dict:
         return {"first": [], "second": [], "map": {}}
 
 
-def _dim_valuation(industry: str) -> dict:
+def _dim_valuation(industry: str, tables: dict | None = None) -> dict:
     """估值分位：行业 TTM PE 在其所属申万层级（一级/二级）全体行业分布内的分位。
 
     2026-08-06 探测确认：swsindex 官方源代理可达；EM push2 系不可达 → 不用 cninfo 表。
+    ``tables``：同次评估内由 build_industry_climate 传入的单次取数结果
+    （A03 R5：两表各 1 次请求）；None 时自行取（私有函数独立调用兼容）。
     """
     name = "估值分位"
     try:
-        tables = _sw_tables()
+        tables = tables or _sw_tables()
         entry = tables["map"].get(industry)
         if not entry:
             return {"name": name, "value": None, "source": "申万行业 PE", "valid": False}
@@ -230,15 +232,16 @@ def _dim_valuation(industry: str) -> dict:
         return {"name": name, "value": None, "source": "申万行业 PE", "valid": False}
 
 
-def _dim_earnings(industry: str) -> dict:
+def _dim_earnings(industry: str, tables: dict | None = None) -> dict:
     """盈利趋势：申万行业指数月线方向（index_hist_sw，官方源）。
 
     2026-08-06 探测确认：index_hist_sw 支持 day/week/month（无 quarter），
     月收益方向即盈利趋势代理；东财 stock_board_industry_hist_em 的 period 不支持"季度"且当前不可达。
+    ``tables`` 语义同 _dim_valuation（A03 R5 单次取表复用）。
     """
     name = "盈利趋势"
     try:
-        entry = _sw_tables()["map"].get(industry)
+        entry = (tables or _sw_tables())["map"].get(industry)
         if not entry:
             return {"name": name, "value": None, "source": "申万行业指数月线", "valid": False}
         code, _ = entry
@@ -259,15 +262,16 @@ def _dim_earnings(industry: str) -> dict:
         return {"name": name, "value": None, "source": "申万行业指数月线", "valid": False}
 
 
-def _dim_rs(industry: str) -> dict:
+def _dim_rs(industry: str, tables: dict | None = None) -> dict:
     """相对强度：申万行业指数（日线）vs 沪深300（新浪 sh000300）的 RS。
 
     仅取近 RS_WINDOW 个交易日计算方向——全历史（2005 起）累计涨跌会掩盖近期
     走弱信号（长端涨 300%、近 12 月下跌的板块仍会恒投 up 票）。
+    ``tables`` 语义同 _dim_valuation（A03 R5 单次取表复用）。
     """
     name = "相对强度"
     try:
-        entry = _sw_tables()["map"].get(industry)
+        entry = (tables or _sw_tables())["map"].get(industry)
         if not entry:
             return {"name": name, "value": None, "source": "申万行业指数/沪深300", "valid": False}
         code, _ = entry
@@ -332,11 +336,18 @@ def _dim_policy() -> dict:
 
 
 def build_industry_climate(industry: str) -> dict:
-    """五维采集 + 规则判定。任一维失败 → 无效维度（U4 降级），不阻塞。"""
+    """五维采集 + 规则判定。任一维失败 → 无效维度（U4 降级），不阻塞。
+
+    A03 R5：申万两表（sw_index_first_info / sw_index_second_info）在**一次
+    评估内只取一次**（旧实现三维各取一次 = 6 次请求 → 2 次），三维复用同一份
+    表；失败维度仍各自 valid=False（表空 → 依赖映射的三维同判无效，不静默变 0）。
+    不做长期失效缓存（单次评估内复用）。
+    """
+    tables = _sw_tables()  # 单次取表（两表各 1 次请求）
     dims = [
-        _dim_valuation(industry),
-        _dim_earnings(industry),
-        _dim_rs(industry),
+        _dim_valuation(industry, tables),
+        _dim_earnings(industry, tables),
+        _dim_rs(industry, tables),
         _dim_flow(industry),
         _dim_policy(),
     ]

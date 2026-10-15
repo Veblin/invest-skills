@@ -114,9 +114,11 @@ def build_valuation_band_options(
     """估值历史分位带图：PE(TTM) 曲线 + 历史分位带（P10-P90）+ 中/现值线。
 
     rows：valuation 维度数据（list[dict]，行含 trade_date/pe_ttm）。
-    先窗口（后 filter）：亏损期占比按窗口内全量（含 None/<=0）统计，
-    分位带按窗口内正数序列计算（D3/A4 修正）。
-    窗口内有效正数 < 20 → None（渲染侧占位）。
+    窗口 = **日期真值行**（无 trade_date 行不进入分母，A05-3 起与正文
+    `valuation_summary(pe_loss_window=…)` 同一有效日期窗口）。
+    非正 PE/缺失占比按窗口内全量（含 None/NaN/<=0）经 canonical
+    ``valuation.pe_loss_missing_stats`` 统计（与其他 MD/HTML 消费者同一函数）；
+    分位带按窗口内正数序列计算（D3/A4 修正）；窗口内有效正数 < 20 → None。
 
     窗口不变式（B3-R A-5/A-6，单源）：窗口 = 全量升序序列——内部先
     sort_kline_asc（Tushare daily_basic 最新在前），与正文估值卡
@@ -133,14 +135,13 @@ def build_valuation_band_options(
     pe = [x for x in pe if x[0]]
     if len(pe) < 20:
         return None
-    w_raw = pe
-    if len(w_raw) < 20:
+    # A05-3/A-F03：非正 PE（≤0，不确证财务亏损）与缺失（不可得）分列，同一 canonical 定义
+    from .valuation import pe_loss_missing_stats
+
+    loss_stats = pe_loss_missing_stats([v for _, v in pe])
+    if loss_stats is None:  # 低于样本下限（<20）→ 不产出占比
         return None
-    loss_days = sum(
-        1 for _, v in w_raw
-        if (f := safe_float(v)) is None or f <= 0)  # NaN/Inf 并入缺失组（D-4）
-    loss_ratio_pct = round(loss_days / len(w_raw) * 100.0, 1)
-    cx = [(d, f) for d, v in w_raw
+    cx = [(d, f) for d, v in pe
           if (f := safe_float(v)) is not None and f > 0]
     if len(cx) < 20:
         return None
@@ -158,9 +159,12 @@ def build_valuation_band_options(
     p90 = srt[int(len(srt) * 0.90)]
     cur, cur_date = ys[-1], xs[-1]
     note = ""
-    if loss_ratio_pct > 30.0:
+    if loss_stats["elevated"]:  # 未舍入合计占比 >30%
         note = (
-            f"该标的历史约 {loss_ratio_pct:.1f}% 时间处于亏损期（PE<=0），"
+            f"该标的历史约 {loss_stats['nonpos_or_missing_ratio_pct']:.1f}% 交易日 "
+            f"PE 非正或不可得（非正 PE≤0 约 "
+            f"{loss_stats['loss_ratio_pct']:.1f}%、PE 缺失约 "
+            f"{loss_stats['missing_ratio_pct']:.1f}%；PE≤0 不确证财务亏损），"
             "PE 分位数仅作位置参考，不反映估值贵贱"
         )
     opts: dict[str, Any] = {
@@ -225,10 +229,17 @@ def build_valuation_band_options(
             "median": plain_num(median),
             "p10": plain_num(p10),
             "p90": plain_num(p90),
-            "loss_ratio_pct": loss_ratio_pct,
+            # A05-3：亏损（确证 PE≤0）与缺失分列 + 合计（判定用）；*_pct 为 1 位小数显示值
+            "loss_ratio_pct": loss_stats["loss_ratio_pct"],
+            "missing_ratio_pct": loss_stats["missing_ratio_pct"],
+            "nonpos_or_missing_ratio_pct": loss_stats["nonpos_or_missing_ratio_pct"],
+            "loss_days_confirmed": loss_stats["n_loss"],
+            "missing_days": loss_stats["n_missing"],
+            "n_window": loss_stats["n_window"],
+            "percentile_distortion": loss_stats["elevated"],
             "window_label": window_label(
-                len(w_raw), w_raw[0][0] if w_raw else None,
-                w_raw[-1][0] if w_raw else None,
+                len(pe), pe[0][0] if pe else None,
+                pe[-1][0] if pe else None,
             ),
             "note": note,
         },
